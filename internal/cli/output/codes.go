@@ -26,25 +26,27 @@ const (
 	CodePrecondition          = "precondition_failed"
 	CodeLockdownFailed        = "lockdown_failed"
 	CodeSecrets               = "secrets_error"
+	CodeReleaseVerification   = "release_verification_failed"
 	CodeError                 = "error"
 )
 
 const (
-	ExitOK           = 0
-	ExitUsage        = 1
-	ExitContext      = 2
-	ExitMissingTool  = 3
-	ExitUnsafe       = 4
-	ExitStep         = 5
-	ExitExternal     = 6
-	ExitConfig       = 7
-	ExitInput        = 8
-	ExitTransport    = 9
-	ExitVersion      = 10
-	ExitPrecondition = 11
-	ExitLockdown     = 12
-	ExitSecrets      = 13
-	ExitGeneric      = 70
+	ExitOK                  = 0
+	ExitUsage               = 1
+	ExitContext             = 2
+	ExitMissingTool         = 3
+	ExitUnsafe              = 4
+	ExitStep                = 5
+	ExitExternal            = 6
+	ExitConfig              = 7
+	ExitInput               = 8
+	ExitTransport           = 9
+	ExitVersion             = 10
+	ExitPrecondition        = 11
+	ExitLockdown            = 12
+	ExitSecrets             = 13
+	ExitReleaseVerification = 14
+	ExitGeneric             = 70
 )
 
 var exitByCode = map[string]int{
@@ -69,6 +71,7 @@ var exitByCode = map[string]int{
 	CodePrecondition:          ExitPrecondition,
 	CodeLockdownFailed:        ExitLockdown,
 	CodeSecrets:               ExitSecrets,
+	CodeReleaseVerification:   ExitReleaseVerification,
 	CodeError:                 ExitGeneric,
 }
 

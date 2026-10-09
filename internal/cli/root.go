@@ -39,10 +39,13 @@ func NewRoot() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{
 			DisableDefaultCmd: true,
 		},
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := output.ParseOptions(cmd)
-			return err
-		},
+		PersistentPreRunE: chainPersistentPreRun(
+			func(cmd *cobra.Command, _ []string) error {
+				_, err := output.ParseOptions(cmd)
+				return err
+			},
+			platformPreRun,
+		),
 	}
 	flags := root.PersistentFlags()
 	flags.StringP("context", "c", "", "Cluster context name")

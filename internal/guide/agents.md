@@ -53,6 +53,7 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 | `precondition_failed` | 11 |
 | `lockdown_failed` | 12 |
 | `secrets_error` | 13 |
+| `release_verification_failed` | 14 |
 | `error` | 70 |
 
 ## Workflows

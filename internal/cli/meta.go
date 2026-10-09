@@ -33,6 +33,9 @@ type CommandMeta struct {
 	ConfirmToken     string   `json:"confirm_token,omitempty"`
 	NeedsRestart     string   `json:"needs_restart"`
 	ErrorCodes       []string `json:"error_codes,omitempty"`
+	LinuxOnly        bool     `json:"-"`
+	LinuxOnlyFlags   []string `json:"-"`
+	Platforms        []string `json:"platforms,omitempty"`
 }
 
 type commandMetaCheckReport struct {
@@ -55,6 +58,11 @@ func init() {
 func registerMeta(cmd *cobra.Command, meta CommandMeta) {
 	if cmd == nil {
 		return
+	}
+	if meta.LinuxOnly {
+		meta.Platforms = []string{"linux"}
+	} else {
+		meta.Platforms = nil
 	}
 	commandMetaByCmd[cmd] = meta
 }
@@ -209,6 +217,14 @@ func checkOneCommand(cmd *cobra.Command) []string {
 		if !meta.Mutating && !containsFlag(meta.MutatingFlags, name) {
 			failures = append(failures, path+": destructive flag "+name+" must also be mutating")
 		}
+	}
+	for _, name := range meta.LinuxOnlyFlags {
+		if !flagDefined(cmd, name) {
+			failures = append(failures, path+": linux-only flag "+name+" is not defined")
+		}
+	}
+	if meta.Audience == "node" && !meta.LinuxOnly {
+		failures = append(failures, path+": node audience requires linuxOnly")
 	}
 	if meta.ConfirmToken != "" && cmd.Flags().Lookup("confirm") == nil {
 		failures = append(failures, path+": confirm_token set without --confirm flag")

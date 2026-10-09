@@ -27,7 +27,7 @@ func TestVersionJSON(t *testing.T) {
 	if data["version"] == "" || data["commit"] == "" || data["channel"] == "" {
 		t.Fatalf("version data %#v", data)
 	}
-	if data["release_base_url"] != "https://get.eru.sh" {
+	if data["release_base_url"] != "https://eru.mbvlabs.com" {
 		t.Fatalf("release base %q", data["release_base_url"])
 	}
 }
@@ -272,6 +272,7 @@ func TestGuideAgents(t *testing.T) {
 		"precondition_failed",
 		"lockdown_failed",
 		"secrets_error",
+		"release_verification_failed",
 		"--sudo",
 		"--install-missing",
 		"db drop",

@@ -11,4 +11,4 @@ var (
 
 // ReleaseBaseURL is the channel root for manifests and artifacts.
 // Choice recorded in docs/DEVIATIONS.md.
-const ReleaseBaseURL = "https://get.eru.sh"
+const ReleaseBaseURL = "https://eru.mbvlabs.com"

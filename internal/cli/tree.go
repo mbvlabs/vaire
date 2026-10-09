@@ -406,6 +406,7 @@ func phase1Commands() []cmdSpec {
 					SupportsDryRun:   true,
 					Prompts:          true,
 					InteractiveFlags: []string{"--out", "--install"},
+					LinuxOnlyFlags:   []string{"--install"},
 				},
 			}},
 		},
@@ -594,9 +595,10 @@ func clusterCommands() cmdSpec {
 					"--passphrase-out",
 					"--confirm-secrets-stored",
 				},
-				Remote:       true,
-				ConfirmToken: "{cluster}",
-				Next:         []string{"eru doctor", "eru backup list"},
+				Remote:         true,
+				ConfirmToken:   "{cluster}",
+				LinuxOnlyFlags: []string{"--local"},
+				Next:           []string{"eru doctor", "eru backup list"},
 			},
 		}},
 	}
@@ -1228,6 +1230,7 @@ func nodeCommands() cmdSpec {
 			Summary:   "Node-side operations, hidden from top-level help",
 			WhenToUse: []string{"Run the server half of eru. Operator commands call these over SSH."},
 			Examples:  []string{"eru node version", "sudo eru node rpc"},
+			LinuxOnly: true,
 		},
 		children: []cmdSpec{
 			{
@@ -1258,6 +1261,7 @@ func nodeCommands() cmdSpec {
 					WhenToUse:     []string{"The operator entry point. Timers and people use the other node commands."},
 					Prerequisites: []string{"root, or sudo via /etc/sudoers.d/eru"},
 					Examples:      []string{"sudo eru node rpc"},
+					LinuxOnly:     true,
 				},
 			},
 			{
@@ -1267,6 +1271,7 @@ func nodeCommands() cmdSpec {
 					Summary:   "Print the node binary version",
 					WhenToUse: []string{"The operator handshake compares this with its own version."},
 					Examples:  []string{"eru node version --output json"},
+					LinuxOnly: true,
 				},
 			},
 			{
@@ -1276,6 +1281,7 @@ func nodeCommands() cmdSpec {
 					Summary:   "Check that the node binary can read its config and tools",
 					WhenToUse: []string{"Run after a node upgrade, before apply."},
 					Examples:  []string{"sudo eru node selfcheck"},
+					LinuxOnly: true,
 				},
 			},
 			{
@@ -1288,6 +1294,7 @@ func nodeCommands() cmdSpec {
 					Examples:       []string{"sudo eru node run backup-full", "sudo eru node run metrics-refresh --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
+					LinuxOnly:      true,
 				},
 			},
 			{
@@ -1303,6 +1310,7 @@ func nodeCommands() cmdSpec {
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "ssh-revert is invoked by systemd and must restore the snapshot",
+					LinuxOnly:        true,
 				},
 			},
 			{
@@ -1317,6 +1325,7 @@ func nodeCommands() cmdSpec {
 					Examples:       []string{"sudo eru node unlock-ssh --minutes 30"},
 					Mutating:       true,
 					SupportsDryRun: true,
+					LinuxOnly:      true,
 				},
 			},
 		},
