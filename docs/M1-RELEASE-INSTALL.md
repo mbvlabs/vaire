@@ -364,12 +364,12 @@ release-local VERSION CHANNEL BASE_URL   # scripts/build-release.sh, unsigned; f
 
 M1's spec exit is manual, but the swap/verify logic is exactly what silently breaks later. E25 runs it in CI without GitHub OIDC.
 
-**Decided:** test-only trust under the existing `e2etest` build tag. `internal/release` gets an `e2etest`-only file that trusts a cosign **key pair** generated per run (`cosign generate-key-pair`, `sign-blob --key --bundle`). Production builds can't contain it, and it runs both locally and in CI.
+**Decided:** test-only trust under the existing `e2etest` build tag. `internal/release` gets an `e2etest`-only file that trusts a cosign **key pair** generated per run (`cosign generate-key-pair`, `sign-blob --use-signing-config=false --tlog-upload=false --key --bundle`, so signing runs offline and never writes to the public Rekor log). Production builds can't contain it, and it runs both locally and in CI.
 
 - **Harness:** `harness.ReleaseServer(t)` starts a Caddy (or `python3 -m http.server` behind Pebble-issued TLS) container serving `dist/release-<ch>` on the CI host. The VM trusts Pebble's root (already wired for the `tls` step). `ERU_TEST_RELEASE_BASE_URL` overrides `ReleaseBaseURL` **only** in `e2etest` builds.
 - **Builds:** `just release-local edge-000000000001 edge <url>` and `…-000000000002`, signed with the per-run key.
 - **Steps (in a Debian 13 VM):**
-  1. `curl <url>/edge/install.sh | bash` as root, with an `install.sh` rendered to use `cosign verify-blob --key` (e2etest variant). → `/usr/local/bin/eru version` = `…01`.
+  1. `curl <url>/edge/install.sh | bash` as root, with an `install.sh` rendered to use `cosign verify-blob --key --insecure-ignore-tlog=true` (e2etest variant; the key-signed bundles have no tlog entries). → `/usr/local/bin/eru version` = `…01`.
   2. As a non-root user: same → `~/.local/bin/eru`, plus the PATH hint printed.
   3. Publish `…02` as the channel manifest. `eru upgrade --json` (root) → `changed: true`, `to.version = …02`, `eru.prev` exists and reports `…01`.
   4. `eru upgrade --json` again → `changed: false`, exit 0.

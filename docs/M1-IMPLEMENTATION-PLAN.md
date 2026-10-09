@@ -71,7 +71,7 @@ The small, cross-cutting edits other tasks depend on.
 4. Lint pin check in `justfile`: compare `scripts/install.sh` cosign version and checksums against `go run ./internal/versions/cmd/print`.
 5. For E25: the e2etest render substitutes the `cosign verify-blob` identity flags with `--key "$ERU_TEST_RELEASE_PUBKEY_URL"`. Implement it as a third placeholder `@@COSIGN_TRUST_ARGS@@` that `build-release.sh` fills with the production identity args by default and with `--key …` when `ERU_RELEASE_TEST_KEY` is set. The guard keeps a production render from ever shipping the key form (it rejects `--key` when the base URL is `buildinfo.ReleaseBaseURL`).
 
-**Check:** `just lint` (shellcheck + pin check). Serve a locally built, key-signed `dist/release-edge` (`cosign sign-blob --key`) over HTTPS with a local CA, run the rendered installer as root and non-root on Linux, and on a Mac: correct paths, correct version, PATH hint shown. Then flip one artifact byte → the installer fails, and the old binary is untouched.
+**Check:** `just lint` (shellcheck + pin check). Serve a locally built, key-signed `dist/release-edge` (`cosign sign-blob --use-signing-config=false --tlog-upload=false --key`) over HTTPS with a local CA, run the rendered installer as root and non-root on Linux, and on a Mac: correct paths, correct version, PATH hint shown. Then flip one artifact byte → the installer fails, and the old binary is untouched.
 
 ---
 
@@ -111,7 +111,7 @@ The small, cross-cutting edits other tasks depend on.
 ## T9. E25 (`e2e/release_test.go`)
 
 1. Harness `harness.ReleaseServer(t)`: a Caddy container on the CI host serving a temp dir over HTTPS with a Pebble-issued certificate (reuse M0's Pebble setup), returning its URL. The VM trusts Pebble's root (existing wiring).
-2. Harness `harness.BuildRelease(t, version, url, keyDir)`: run `cosign generate-key-pair` once per test (empty password via `COSIGN_PASSWORD=`), run `scripts/build-release.sh` with `ERU_RELEASE_TEST_KEY` and `go build -tags e2etest`, and sign with `cosign sign-blob --key --bundle`.
+2. Harness `harness.BuildRelease(t, version, url, keyDir)`: run `cosign generate-key-pair` once per test (empty password via `COSIGN_PASSWORD=`), run `scripts/build-release.sh` with `ERU_RELEASE_TEST_KEY` and `go build -tags e2etest`, and sign with `cosign sign-blob --use-signing-config=false --tlog-upload=false --key --bundle` so signing works offline and never uploads to public Rekor. The e2etest installer render adds `--insecure-ignore-tlog=true` to its `verify-blob --key` args, since those bundles have no tlog entries.
 3. Test steps 1–9 exactly as listed in S§8, each asserting envelope code, exit code and on-disk state (sha256 before/after, `.prev`, cache dir contents).
 4. Make sure the e2e workflow has cosign (it already uses `mise-action`, which installs it from `mise.toml`).
 
