@@ -93,28 +93,30 @@ func SQL(t *testing.T, contextName, query string) string {
 
 // Exec runs a command inside the VM.
 func (vm *VM) Exec(args ...string) (string, error) {
-	out, code := vm.ExecCode(args...)
+	out, code, err := vm.ExecCode(args...)
+	if err != nil {
+		return out, err
+	}
 	if code != 0 {
 		return out, fmt.Errorf("incus exec %s: exit %d\n%s", strings.Join(args, " "), code, out)
 	}
 	return out, nil
 }
 
-// ExecCode runs a command inside the VM and returns combined output and exit status.
-func (vm *VM) ExecCode(args ...string) (string, int) {
-	vm.t.Helper()
+// ExecCode runs a command inside the VM and returns combined output and exit
+// status. The error is set only when incus itself could not run the command.
+func (vm *VM) ExecCode(args ...string) (string, int, error) {
 	cmdArgs := append([]string{"exec", vm.Name, "--"}, args...)
 	cmd := exec.Command("incus", cmdArgs...) //nolint:gosec // G204: incus exec on this test VM.
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		return string(out), 0
+		return string(out), 0, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return string(out), exitErr.ExitCode()
+		return string(out), exitErr.ExitCode(), nil
 	}
-	vm.t.Fatalf("incus exec %s: %v\n%s", strings.Join(args, " "), err, out)
-	return string(out), -1
+	return string(out), -1, fmt.Errorf("incus exec %s: %w\n%s", strings.Join(args, " "), err, out)
 }
 
 // Push copies a local file into the VM.

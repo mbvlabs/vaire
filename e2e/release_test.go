@@ -32,7 +32,10 @@ func TestE25Release(t *testing.T) {
 	env := releaseEnv(baseURL)
 
 	t.Run("1 root install", func(t *testing.T) {
-		out, code := vm.ExecCode(append(env, "bash", "-lc", `curl -fsSL "$ERU_TEST_RELEASE_BASE_URL/edge/install.sh" | bash`)...)
+		out, code, err := vm.ExecCode(append(env, "bash", "-lc", `curl -fsSL "$ERU_TEST_RELEASE_BASE_URL/edge/install.sh" | bash`)...)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if code != 0 {
 			t.Fatalf("root install exit %d\n%s", code, out)
 		}
@@ -46,8 +49,11 @@ func TestE25Release(t *testing.T) {
 	})
 
 	t.Run("2 non-root install", func(t *testing.T) {
-		out, code := vm.ExecCode(append([]string{"runuser", "-u", "eruop", "--"},
+		out, code, err := vm.ExecCode(append([]string{"runuser", "-u", "eruop", "--"},
 			append(env, "bash", "-lc", `curl -fsSL "$ERU_TEST_RELEASE_BASE_URL/edge/install.sh" | bash`)...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if code != 0 {
 			t.Fatalf("user install exit %d\n%s", code, out)
 		}
@@ -278,7 +284,10 @@ func eruJSON(t *testing.T, vm *harness.VM, prefix []string, bin, baseURL string,
 	cmd = append(cmd, bin)
 	cmd = append(cmd, args...)
 	cmd = append(cmd, "--output", "json")
-	out, code := vm.ExecCode(cmd...)
+	out, code, err := vm.ExecCode(cmd...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	env := harness.ParseEnvelope(t, out)
 	env.Stdout = out
 	env.Exit = code
