@@ -116,9 +116,9 @@ mkdir -p "${channel_dir}"
 cp "${out}/releases/${version}/manifest.json" "${channel_dir}/manifest.json"
 
 if [ "${channel}" = stable ]; then
-  trust_args='--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp ^https://github\.com/mbvlabs/eru/\.github/workflows/publish-stable\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/eru/\\.github/workflows/publish-stable\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$'"
 else
-  trust_args='--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp ^https://github\.com/mbvlabs/eru/\.github/workflows/publish-edge\.yml@refs/heads/master$'
+  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/eru/\\.github/workflows/publish-edge\\.yml@refs/heads/master$'"
 fi
 if [ -n "${ERU_RELEASE_TEST_KEY:-}" ]; then
   # Intentionally unexpanded: the installer reads ERU_TEST_RELEASE_PUBKEY_URL at runtime.
