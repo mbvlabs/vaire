@@ -12,10 +12,10 @@ const (
 )
 
 type fl struct {
-	kind  fKind
-	name  string
-	usage string
-	str   string
+	kind   fKind
+	name   string
+	usage  string
+	str    string
 	n      int
 	on     bool
 	hidden bool

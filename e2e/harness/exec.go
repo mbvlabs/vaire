@@ -17,16 +17,23 @@ import (
 
 // Envelope is the JSON body of an eru invocation, plus the process result.
 type Envelope struct {
-	Schema  string          `json:"schema"`
-	OK      bool            `json:"ok"`
-	Command string          `json:"command"`
-	Message string          `json:"message,omitempty"`
-	Data    json.RawMessage `json:"data,omitempty"`
-	Next    []string        `json:"next,omitempty"`
-	Error   *ErrorBody      `json:"error,omitempty"`
-	Stdout  string          `json:"-"`
-	Stderr  string          `json:"-"`
-	Exit    int             `json:"-"`
+	Schema   string          `json:"schema"`
+	OK       bool            `json:"ok"`
+	Command  string          `json:"command"`
+	Message  string          `json:"message,omitempty"`
+	Data     json.RawMessage `json:"data,omitempty"`
+	Next     []string        `json:"next,omitempty"`
+	Warnings []Warning       `json:"warnings,omitempty"`
+	Error    *ErrorBody      `json:"error,omitempty"`
+	Stdout   string          `json:"-"`
+	Stderr   string          `json:"-"`
+	Exit     int             `json:"-"`
+}
+
+// Warning is a non-fatal notice on a success envelope.
+type Warning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // ErrorBody is the failure object inside an envelope.

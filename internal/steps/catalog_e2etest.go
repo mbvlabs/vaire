@@ -62,8 +62,10 @@ func (incomplete) Check(context.Context, config.Cluster, engine.Runtime) (engine
 // stubFile writes [e2e] value to a file.
 type stubFile struct{}
 
-func (stubFile) ID() string                     { return "stub-file-v1" }
-func (stubFile) Describe(config.Cluster) string { return "Write the [e2e] value to " + stubStateDir + "/file" }
+func (stubFile) ID() string { return "stub-file-v1" }
+func (stubFile) Describe(config.Cluster) string {
+	return "Write the [e2e] value to " + stubStateDir + "/file"
+}
 func (stubFile) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
 	return []byte(cfg.E2E.Value), nil
 }
@@ -185,8 +187,10 @@ func (stubFail) Apply(ctx context.Context, _ config.Cluster, rt engine.Runtime, 
 // stubRestart asks for a restart while /etc/eru-e2e/restart exists.
 type stubRestart struct{ incomplete }
 
-func (stubRestart) ID() string                     { return "stub-restart-v1" }
-func (stubRestart) Describe(config.Cluster) string { return "Request a restart while /etc/eru-e2e/restart exists" }
+func (stubRestart) ID() string { return "stub-restart-v1" }
+func (stubRestart) Describe(config.Cluster) string {
+	return "Request a restart while /etc/eru-e2e/restart exists"
+}
 func (stubRestart) Inputs(config.Cluster, engine.Runtime) ([]byte, error) {
 	return presence("restart"), nil
 }
