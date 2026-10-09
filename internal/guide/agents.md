@@ -70,7 +70,7 @@ Add an extension: `eru ext add <name> --db <name> --output agent`. When the resu
 
 Maintenance report: `eru maint report bloat --db <name> --output agent`.
 
-Upgrade: `eru upgrade --output agent`. Rolling a node back with `eru node upgrade --rollback` needs the human's confirm token.
+Upgrade: `eru upgrade --output agent` updates only the local binary until M10 (`eru node upgrade`). `release_verification_failed` must never be retried; report it to a human. Rolling a node back with `eru node upgrade --rollback` needs the human's confirm token.
 
 ## Refusals
 

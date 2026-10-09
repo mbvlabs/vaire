@@ -273,6 +273,7 @@ func TestGuideAgents(t *testing.T) {
 		"lockdown_failed",
 		"secrets_error",
 		"release_verification_failed",
+		"must never be retried",
 		"--sudo",
 		"--install-missing",
 		"db drop",
