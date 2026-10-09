@@ -16,6 +16,7 @@ jobs:
       - name: Install Incus
         run: |
           sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
           sudo apt-get install -y incus
           sudo incus admin init --auto
           sudo usermod -aG incus-admin "$USER"
@@ -44,6 +45,7 @@ jobs:
       - name: Install Incus
         run: |
           sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
           sudo apt-get install -y incus
           sudo incus admin init --auto
           sudo usermod -aG incus-admin "$USER"
@@ -64,6 +66,7 @@ jobs:
       - name: Install Incus
         run: |
           sudo apt-get update
+          sudo apt-get install -y qemu-system-arm qemu-efi-aarch64
           sudo apt-get install -y incus
           sudo incus admin init --auto
           sudo usermod -aG incus-admin "$USER"
