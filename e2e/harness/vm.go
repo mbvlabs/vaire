@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -92,13 +93,28 @@ func SQL(t *testing.T, contextName, query string) string {
 
 // Exec runs a command inside the VM.
 func (vm *VM) Exec(args ...string) (string, error) {
+	out, code := vm.ExecCode(args...)
+	if code != 0 {
+		return out, fmt.Errorf("incus exec %s: exit %d\n%s", strings.Join(args, " "), code, out)
+	}
+	return out, nil
+}
+
+// ExecCode runs a command inside the VM and returns combined output and exit status.
+func (vm *VM) ExecCode(args ...string) (string, int) {
+	vm.t.Helper()
 	cmdArgs := append([]string{"exec", vm.Name, "--"}, args...)
 	cmd := exec.Command("incus", cmdArgs...) //nolint:gosec // G204: incus exec on this test VM.
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("incus exec %s: %w\n%s", strings.Join(args, " "), err, out)
+	if err == nil {
+		return string(out), 0
 	}
-	return string(out), nil
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return string(out), exitErr.ExitCode()
+	}
+	vm.t.Fatalf("incus exec %s: %v\n%s", strings.Join(args, " "), err, out)
+	return string(out), -1
 }
 
 // Push copies a local file into the VM.

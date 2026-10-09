@@ -19,6 +19,7 @@ const (
 	minioName      = "eru-e2e-minio"
 	pebbleName     = "eru-e2e-pebble"
 	challName      = "eru-e2e-challtestsrv"
+	releaseCaddy   = "eru-e2e-caddy"
 	minioPort      = "19000"
 	pebblePort     = "14000"
 	pebbleMgmtPort = "15000"
@@ -110,7 +111,7 @@ func StartServices(t *testing.T) Env {
 
 // StopServices removes the e2e containers and network.
 func StopServices() {
-	_ = docker("rm", "-f", minioName, pebbleName, challName)
+	_ = docker("rm", "-f", minioName, pebbleName, challName, releaseCaddy)
 	_ = docker("network", "rm", networkName)
 }
 
