@@ -193,12 +193,20 @@ func signReleaseTree(t *testing.T, root, keyDir string) {
 func signBlob(t *testing.T, key, pub, file string) {
 	t.Helper()
 	bundle := file + ".sigstore.json"
-	sign := exec.Command("cosign", "sign-blob", "--yes", "--key", key, "--bundle", bundle, file) //nolint:gosec // G204: e2e signs the local release tree.
+	sign := exec.Command( //nolint:gosec // G204: e2e signs the local release tree.
+		"cosign", "sign-blob", "--yes",
+		// Sign offline: no signing config and no public Rekor upload.
+		"--use-signing-config=false", "--tlog-upload=false",
+		"--key", key, "--bundle", bundle, file,
+	)
 	sign.Env = append(os.Environ(), "COSIGN_PASSWORD=")
 	if out, err := sign.CombinedOutput(); err != nil {
 		t.Fatalf("cosign sign-blob %s: %v\n%s", file, err, out)
 	}
-	verify := exec.Command("cosign", "verify-blob", "--key", pub, "--bundle", bundle, file) //nolint:gosec // G204: e2e verifies the local release tree.
+	verify := exec.Command( //nolint:gosec // G204: e2e verifies the local release tree.
+		"cosign", "verify-blob", "--insecure-ignore-tlog=true",
+		"--key", pub, "--bundle", bundle, file,
+	)
 	verify.Env = append(os.Environ(), "COSIGN_PASSWORD=")
 	if out, err := verify.CombinedOutput(); err != nil {
 		t.Fatalf("cosign verify-blob %s: %v\n%s", file, err, out)
