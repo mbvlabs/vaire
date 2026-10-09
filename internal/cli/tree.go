@@ -412,7 +412,7 @@ func phase1Commands() []cmdSpec {
 		},
 		{
 			use: "upgrade",
-			run: notImplemented,
+			run: runUpgrade,
 			flags: []fl{
 				flagString("version", "", "Release version to install"),
 				flagString("channel", "", "Release channel, stable or edge"),
@@ -425,9 +425,16 @@ func phase1Commands() []cmdSpec {
 				Mutating:         true,
 				SupportsDryRun:   true,
 				Prompts:          true,
-				InteractiveFlags: []string{"--version", "--channel"},
+				InteractiveFlags: []string{"--version", "--channel", "--yes"},
 				Remote:           true,
-				Next:             []string{"eru node upgrade", "eru doctor"},
+				ErrorCodes: []string{
+					"remote_unreachable",
+					"release_verification_failed",
+					"validation_failed",
+					"precondition_failed",
+					"input_required",
+				},
+				Next: []string{"eru version"},
 			},
 		},
 		{
