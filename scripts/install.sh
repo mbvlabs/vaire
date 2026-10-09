@@ -70,9 +70,11 @@ curl -fsSL --proto '=https' --tlsv1.2 \
 
 # Trust args are filled by scripts/build-release.sh (identity regexp or --key).
 # shellcheck disable=SC2086
-"${work_dir}/cosign" verify-blob "${work_dir}/manifest.json" \
+if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/manifest.json" \
   --bundle "${work_dir}/manifest.json.sigstore.json" \
-  @@COSIGN_TRUST_ARGS@@ >/dev/null || fail "release manifest signature verification failed"
+  @@COSIGN_TRUST_ARGS@@ 2>&1)"; then
+  fail "release manifest signature verification failed: ${verify_out}"
+fi
 
 manifest_channel="$(json_string channel "${work_dir}/manifest.json")"
 [ "${manifest_channel}" = "${release_channel}" ] || fail "release manifest channel is invalid"
@@ -98,9 +100,11 @@ curl -fsSL --proto '=https' --tlsv1.2 "${artifact_url}" -o "${work_dir}/eru"
 curl -fsSL --proto '=https' --tlsv1.2 \
   "${artifact_url}.sigstore.json" -o "${work_dir}/eru.sigstore.json"
 # shellcheck disable=SC2086
-"${work_dir}/cosign" verify-blob "${work_dir}/eru" \
+if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/eru" \
   --bundle "${work_dir}/eru.sigstore.json" \
-  @@COSIGN_TRUST_ARGS@@ >/dev/null || fail "eru signature verification failed"
+  @@COSIGN_TRUST_ARGS@@ 2>&1)"; then
+  fail "eru signature verification failed: ${verify_out}"
+fi
 got="$(sha256_hex "${work_dir}/eru")"
 [ "${got}" = "${manifest_sha256}" ] || fail "checksum verification failed"
 chmod 0755 "${work_dir}/eru"
