@@ -71,6 +71,13 @@ func runCommands(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
 	}
+	checkSteps, err := cmd.Flags().GetBool("check-steps")
+	if err != nil {
+		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
+	}
+	if checkSteps {
+		return runCheckSteps(cmd)
+	}
 	path, err := cmd.Flags().GetString("path")
 	if err != nil {
 		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")

@@ -89,6 +89,7 @@ func phase1Commands() []cmdSpec {
 			flags: []fl{
 				flagBool("check-meta", "Fail if any command is missing metadata"),
 				flagString("path", "", "Show one command, such as \"backup list\""),
+				flagHiddenBool("check-steps", "Validate the step catalogue and print its size"),
 			},
 			meta: CommandMeta{
 				Summary:   "Show the command catalog and its safety metadata",

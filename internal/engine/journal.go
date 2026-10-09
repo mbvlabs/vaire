@@ -94,3 +94,12 @@ func (j *Journal) Save(path string) error {
 	}
 	return writeFileAtomic(path, append(raw, '\n'), 0o600)
 }
+
+func (j *Journal) addPending(id string) {
+	for _, existing := range j.RestartPending {
+		if existing == id {
+			return
+		}
+	}
+	j.RestartPending = append(j.RestartPending, id)
+}

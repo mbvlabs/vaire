@@ -16,8 +16,9 @@ type fl struct {
 	name  string
 	usage string
 	str   string
-	n     int
-	on    bool
+	n      int
+	on     bool
+	hidden bool
 }
 
 func flagString(name, def, usage string) fl {
@@ -30,6 +31,11 @@ func flagBool(name, usage string) fl {
 
 func flagBoolDefault(name string, def bool, usage string) fl {
 	return fl{kind: fBool, name: name, on: def, usage: usage}
+}
+
+// flagHiddenBool is a bool flag left out of help, for build and lint checks.
+func flagHiddenBool(name, usage string) fl {
+	return fl{kind: fBool, name: name, usage: usage, hidden: true}
 }
 
 func flagInt(name string, def int, usage string) fl {
@@ -53,6 +59,11 @@ func applyFlags(cmd *cobra.Command, flags []fl) {
 			cmd.Flags().StringSlice(flag.name, nil, flag.usage)
 		default:
 			panic("unknown flag kind for " + flag.name)
+		}
+		if flag.hidden {
+			if err := cmd.Flags().MarkHidden(flag.name); err != nil {
+				panic(err)
+			}
 		}
 	}
 }
