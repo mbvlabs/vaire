@@ -123,7 +123,7 @@ fi
 if [ -n "${ERU_RELEASE_TEST_KEY:-}" ]; then
   # Intentionally unexpanded: the installer reads ERU_TEST_RELEASE_PUBKEY_URL at runtime.
   # shellcheck disable=SC2016
-  trust_args='--key "$ERU_TEST_RELEASE_PUBKEY_URL"'
+  trust_args='--key "$ERU_TEST_RELEASE_PUBKEY_URL" --insecure-ignore-tlog=true'
 fi
 prod_base="$(sed -n 's/^const ReleaseBaseURL = "\(.*\)"/\1/p' internal/buildinfo/buildinfo.go)"
 if [ "${base_url}" = "${prod_base}" ] && [[ "${trust_args}" == *"--key"* ]]; then
