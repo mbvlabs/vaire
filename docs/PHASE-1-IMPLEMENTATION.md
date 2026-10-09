@@ -1261,7 +1261,7 @@ WantedBy=timers.target
 
 ### 19.1 Releases and verification
 
-- Copy the deploycrate release model: a manifest at `<ReleaseBaseURL>/manifest.json` with a sigstore bundle `manifest.json.sigstore.json`, signed keyless by GitHub Actions OIDC (`publish-stable.yml` on tags `vX.Y.Z`, `publish-edge.yml` on `main`).
+- Copy the deploycrate release model: a manifest at `<ReleaseBaseURL>/manifest.json` with a sigstore bundle `manifest.json.sigstore.json`, signed keyless by GitHub Actions OIDC (`publish-stable.yml` on tags `vX.Y.Z`, `publish-edge.yml` on `main`). Channel layout, the default branch, and the live domain are recorded in [`docs/DEVIATIONS.md`](./DEVIATIONS.md).
 - Manifest schema:
 
   ```json
@@ -1270,7 +1270,7 @@ WantedBy=timers.target
   ```
 
 - In-process verification uses `sigstore-go` against the Sigstore public-good trust root. The certificate identity regexp and OIDC issuer are exactly as in deploycrate `install.sh`, with the repository `mbvlabs/eru`.
-- `ReleaseBaseURL` is a build-time constant. Choose the domain and record it. Placeholder: `https://get.eru.sh`.
+- `ReleaseBaseURL` is a build-time constant. The production value is `https://eru.mbvlabs.com` (see [`docs/DEVIATIONS.md`](./DEVIATIONS.md)).
 
 ### 19.2 Commands
 
@@ -1437,8 +1437,8 @@ Based on deploycrate's `install.sh`:
 - Supports Linux and macOS: `uname -s` → `linux|darwin`.
 - Downloads and verifies cosign (pinned checksums per OS/arch), the manifest and its signature, then the artifact, its signature and its sha256.
 - Installs to `/usr/local/bin/eru` when root, else `~/.local/bin/eru` (with a PATH hint).
-- When root on a supported Linux server with a TTY, asks "Initialise a cluster on this server now (`eru cluster init --local`)? [y/N]".
-- `ERU_INSTALL_ONLY=1` skips the question.
+- When root on a supported Linux server with a TTY, asks "Initialise a cluster on this server now (`eru cluster init --local`)? [y/N]". Deferred to M3; see [`docs/DEVIATIONS.md`](./DEVIATIONS.md).
+- `ERU_INSTALL_ONLY=1` skips the next-step text (and will skip the M3 question).
 
 ### 23.3 Pinned versions (`internal/versions`)
 
@@ -1451,7 +1451,7 @@ const (
     PostgresExporterVersion = "…"         // latest stable at implementation
     PgbouncerExporterVersion = "…"
     PgbackrestExporterVersion = "…"
-    CosignVersion = "3.0.6"               // install.sh
+    CosignVersion = "3.1.3"               // install.sh; floor in this spec was 3.0.6, see DEVIATIONS.md
 )
 var Checksums = map[string]map[string]string{ /* artifact -> arch -> sha256 */ }
 ```
@@ -1467,7 +1467,7 @@ Each milestone is done when its listed scenarios pass on Debian 13 amd64, plus `
 | # | Milestone | Deliverables | Scenarios |
 | --- | --- | --- | --- |
 | M0 | Skeleton & contracts | Module, cobra root, `output` port, error/exit codes, CommandMeta + `--check-meta`, `version`, `commands`, `guide agents` (stub), `skill install`, justfile, lint, `e2e` harness bootstrapping a VM + MinIO + Pebble | Harness smoke (VM up, `eru version` in VM) |
-| M1 | Release & install | build/sign/upload scripts, `install.sh`, sigstore-go verification, `eru upgrade` (local only), edge workflow | Manual edge release installs on Linux + macOS |
+| M1 | Release & install | **Done (code, 2026-10-09).** build/sign/upload scripts, `install.sh`, sigstore-go verification, `eru upgrade` (local only), edge workflow, E25. Maintainer first publish and M1-A/B/C remain (below). | E25; manual M1-A/B/C after the first edge publish |
 | M2 | Engine & node runtime | Step engine, journal, locks, redaction, run logs, `node rpc` dispatcher, `node version/selfcheck`, binary push, version handshake | E18 (stubbed steps) |
 | M3 | Transport, bootstrap, secrets | First contact (TOFU), userspace WireGuard, steps 1–6, commit-confirm, secrets document, contexts, `login`, `context *`, local preflight + sudo escalation, `--local`, `--resume` | E01 (host part only), E03, E04, E05, E24 |
 | M4 | PostgreSQL core | Steps 7–11, tuning calculator, `tune *`, `config *`, `plan`/`apply`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` | E01 (DB part), E02, E06, E07, E19, E21 |
@@ -1479,6 +1479,15 @@ Each milestone is done when its listed scenarios pass on Debian 13 amd64, plus `
 | M10 | Upgrades | `node upgrade`, rollback, `pg update` | E17, E23 |
 | M11 | Agent polish & matrix | Full `eru guide agents` text, JSON schema file, `docs/CLI.md` generated from meta, full OS/arch matrix green | E20 + all scenarios on all images |
 | M12 | (stretch) Tailscale transport | `transport.kind = "tailscale"` using `tsnet` in operator mode and `tailscale up --authkey` on the node; ufw allows 22 on `tailscale0` | E01 variant with Tailscale (manual/nightly; needs an auth key secret) |
+
+M1 remaining (maintainer, not code):
+
+1. Create the R2 bucket and the `eru.mbvlabs.com` custom domain (or change `internal/buildinfo.ReleaseBaseURL` and [`docs/DEVIATIONS.md`](./DEVIATIONS.md) together if the name differs).
+2. Create GitHub environments `edge` and `stable` with vars `RELEASE_BUCKET`, `RELEASE_BASE_URL` and secrets `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
+3. Merge to `master` for the first edge publish. Check the bucket against the M1 layout and `curl -I` cache headers.
+4. Run **M1-A** (Debian 13 VPS, root + user) and **M1-B** (macOS: install, `version`, `eru node version` → exit 11 `node_mode_requires_linux`).
+5. Push a second commit → **M1-C**: `eru upgrade` on both machines, then a no-op re-run.
+6. Record date, versions, and machines in the PR description.
 
 ---
 

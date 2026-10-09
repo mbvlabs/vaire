@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://get.eru.sh/schema/eru-v1.json",
+  "title": "eru command envelope",
+  "$defs": {
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "usage_error",
+        "invalid_output_mode",
+        "context_not_found",
+        "cluster_not_initialized",
+        "missing_tool",
+        "unsafe_action_requires_confirmation",
+        "step_failed",
+        "partial_failure",
+        "external_command_failed",
+        "config_error",
+        "validation_failed",
+        "ambiguous_input",
+        "input_required",
+        "remote_unreachable",
+        "transport_failed",
+        "host_key_mismatch",
+        "node_version_mismatch",
+        "update_required",
+        "precondition_failed",
+        "lockdown_failed",
+        "secrets_error",
+        "release_verification_failed",
+        "error"
+      ]
+    },
+    "commandMeta": {
+      "type": "object",
+      "required": ["summary", "audience", "needs_restart"],
+      "properties": {
+        "group": { "type": "string" },
+        "summary": { "type": "string" },
+        "args": { "type": "string" },
+        "when_to_use": { "type": "array", "items": { "type": "string" } },
+        "when_not_to_use": { "type": "array", "items": { "type": "string" } },
+        "prerequisites": { "type": "array", "items": { "type": "string" } },
+        "next": { "type": "array", "items": { "type": "string" } },
+        "examples": { "type": "array", "items": { "type": "string" } },
+        "mutating": { "type": "boolean" },
+        "destructive": { "type": "boolean" },
+        "mutating_flags": { "type": "array", "items": { "type": "string" } },
+        "destructive_flags": { "type": "array", "items": { "type": "string" } },
+        "supports_dry_run": { "type": "boolean" },
+        "skip_dry_run_check": { "type": "boolean" },
+        "skip_dry_run_reason": { "type": "string" },
+        "prompts": { "type": "boolean" },
+        "interactive_flags": { "type": "array", "items": { "type": "string" } },
+        "audience": { "type": "string", "enum": ["operator", "node"] },
+        "remote": { "type": "boolean" },
+        "confirm_token": { "type": "string" },
+        "needs_restart": { "type": "string", "enum": ["never", "maybe", "always"] },
+        "error_codes": { "type": "array", "items": { "$ref": "#/$defs/errorCode" } },
+        "platforms": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["linux", "darwin"] }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["schema", "ok", "command"],
+      "properties": {
+        "schema": { "const": "eru/v1" },
+        "ok": { "const": true },
+        "command": { "type": "string" },
+        "context": { "type": "string" },
+        "data": {},
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        },
+        "next": { "type": "array", "items": { "type": "string" } },
+        "message": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["schema", "ok", "error"],
+      "properties": {
+        "schema": { "const": "eru/v1" },
+        "ok": { "const": false },
+        "command": { "type": "string" },
+        "context": { "type": "string" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "$ref": "#/$defs/errorCode" },
+            "message": { "type": "string" },
+            "hint": { "type": "string" },
+            "details": {}
+          }
+        }
+      }
+    }
+  ]
+}

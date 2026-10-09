@@ -1,0 +1,79 @@
+name: e2e
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+jobs:
+  e2e:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+      - name: Install Incus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
+          sudo apt-get install -y incus
+          sudo incus admin init --auto
+          sudo usermod -aG incus-admin "$USER"
+          # Docker sets the FORWARD policy to DROP, which blocks VM egress.
+          sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+          sudo iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+      - name: Debian 13 smoke
+        run: sg incus-admin -c "just e2e"
+        env:
+          ERU_E2E_IMAGE: images:debian/13
+
+  e2e-nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - images:debian/12
+          - images:debian/13
+          - images:ubuntu/24.04
+          - images:ubuntu/26.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+      - name: Install Incus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
+          sudo apt-get install -y incus
+          sudo incus admin init --auto
+          sudo usermod -aG incus-admin "$USER"
+          # Docker sets the FORWARD policy to DROP, which blocks VM egress.
+          sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+          sudo iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+      - name: Run suite
+        run: sg incus-admin -c "just e2e"
+        env:
+          ERU_E2E_IMAGE: ${{ matrix.image }}
+
+  e2e-nightly-arm:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+      - name: Install Incus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm qemu-efi-aarch64
+          sudo apt-get install -y incus
+          sudo incus admin init --auto
+          sudo usermod -aG incus-admin "$USER"
+          # Docker sets the FORWARD policy to DROP, which blocks VM egress.
+          sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+          sudo iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+      - name: Run suite
+        run: sg incus-admin -c "just e2e"
+        env:
+          ERU_E2E_IMAGE: images:debian/13

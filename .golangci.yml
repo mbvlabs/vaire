@@ -1,0 +1,18 @@
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - e2e
+
+linters:
+  enable:
+    - errorlint
+    - gosec
+  exclusions:
+    rules:
+      # ConfirmToken values are public templates such as "{cluster}/restart", not secrets.
+      - path: internal/cli/tree\.go
+        linters:
+          - gosec
+        text: G101
