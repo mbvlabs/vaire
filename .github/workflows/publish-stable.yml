@@ -1,0 +1,78 @@
+name: Publish stable
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-stable
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - name: Validate release configuration
+        env:
+          RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+          RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          test -n "${RELEASE_BUCKET}" || { echo "RELEASE_BUCKET is not configured" >&2; exit 1; }
+          test -n "${RELEASE_BASE_URL}" || { echo "RELEASE_BASE_URL is not configured" >&2; exit 1; }
+          test -n "${R2_ENDPOINT}" || { echo "R2_ENDPOINT is not configured" >&2; exit 1; }
+          test -n "${R2_ACCESS_KEY_ID}" || { echo "R2_ACCESS_KEY_ID is not configured" >&2; exit 1; }
+          test -n "${R2_SECRET_ACCESS_KEY}" || { echo "R2_SECRET_ACCESS_KEY is not configured" >&2; exit 1; }
+          grep -Fq "const ReleaseBaseURL = \"${RELEASE_BASE_URL}\"" internal/buildinfo/buildinfo.go || {
+            echo "RELEASE_BASE_URL must equal buildinfo.ReleaseBaseURL" >&2
+            exit 1
+          }
+      - name: Verify tagged source
+        run: |
+          git fetch origin master
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/master
+          mapfile -t go_files < <(git ls-files '*.go')
+          test -z "$(gofmt -l "${go_files[@]}")"
+          go vet ./...
+          just lint
+      - name: Build stable release
+        env:
+          RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
+        run: scripts/build-release.sh "${GITHUB_REF_NAME#v}" stable "${RELEASE_BASE_URL}"
+      - name: Sign and verify stable release
+        run: scripts/sign-release.sh dist/release-stable
+      - name: Refuse to overwrite an existing release
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          existing="$(aws s3api list-objects-v2 \
+            --bucket "${RELEASE_BUCKET}" --prefix "releases/${version}/" --max-keys 1 \
+            --query KeyCount --output text --endpoint-url "${R2_ENDPOINT}")"
+          test "${existing}" = 0 || {
+            echo "Release ${version} already exists and will not be overwritten" >&2
+            exit 1
+          }
+      - name: Upload immutable artifacts and channel files
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: scripts/upload-release.sh dist/release-stable stable "${RELEASE_BUCKET}" "${R2_ENDPOINT}"

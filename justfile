@@ -17,6 +17,7 @@ lint:
     just build
     bin/eru commands --check-meta
     bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); if ((${#files[@]})); then shellcheck -x "${files[@]}"; fi'
+    actionlint
     bash -eu -o pipefail -c 'while IFS="=" read -r key value; do grep -Fq "$value" scripts/install.sh || { echo "scripts/install.sh is missing $key=$value" >&2; exit 1; }; done < <(go run ./internal/versions/cmd/print)'
 
 # Build an unsigned channel tree under dist/release-<channel>.
