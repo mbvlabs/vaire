@@ -40,6 +40,13 @@ func methods() map[string]method {
 			name:    "selfcheck",
 			handler: handleSelfcheck,
 		},
+		{
+			name:          "upgrade.install",
+			lock:          fixedLock(engine.LockExclusive),
+			runLog:        always,
+			versionExempt: true,
+			handler:       handleUpgradeInstall,
+		},
 	}
 	table := make(map[string]method, len(list))
 	for _, m := range list {
