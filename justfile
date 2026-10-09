@@ -18,6 +18,10 @@ lint:
     bin/eru commands --check-meta
     bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); if ((${#files[@]})); then shellcheck -x "${files[@]}"; fi'
 
+# Build an unsigned channel tree under dist/release-<channel>.
+release-local VERSION CHANNEL BASE_URL:
+    scripts/build-release.sh "{{VERSION}}" "{{CHANNEL}}" "{{BASE_URL}}"
+
 # Run the end-to-end suite. Requires incus and docker.
 e2e: build
     ERU_E2E_BINARY={{justfile_directory()}}/bin/eru go test -tags e2e -count=1 -timeout 90m ./e2e/...
