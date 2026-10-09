@@ -10,8 +10,13 @@ import (
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/spf13/cobra"
 )
+
+func init() {
+	localenv.SetPrompter(sudoPrompter{})
+}
 
 // MustNotPrompt reports whether this invocation has to receive values from flags.
 func MustNotPrompt(cmd *cobra.Command) bool {
@@ -115,4 +120,30 @@ func stdinIsTTY() bool {
 		return false
 	}
 	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// PromptYes asks a [y/N] question. It never prompts in structured mode.
+func PromptYes(cmd *cobra.Command, question string) (bool, error) {
+	if MustNotPrompt(cmd) {
+		return false, nil
+	}
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N] ", question); err != nil {
+		return false, err
+	}
+	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, output.WrapError(output.CodeError, err, output.ExitGeneric, "")
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+type sudoPrompter struct{}
+
+func (sudoPrompter) YesNo(cmd *cobra.Command, question string) (bool, error) {
+	return PromptYes(cmd, question)
 }

@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/spf13/cobra"
 )
 
@@ -15,6 +17,10 @@ func Main() int {
 	cmd, err := root.ExecuteC()
 	if err == nil {
 		return 0
+	}
+	var silent *localenv.SilentExit
+	if errors.As(err, &silent) && silent != nil {
+		return silent.Code
 	}
 	if cmd == nil {
 		cmd = root
