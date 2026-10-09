@@ -21,6 +21,8 @@ const (
 	challName      = "eru-e2e-challtestsrv"
 	releaseCaddy   = "eru-e2e-caddy"
 	minioPort      = "19000"
+	minioImage     = "cgr.dev/chainguard/minio:latest"
+	mcImage        = "cgr.dev/chainguard/minio-client:latest"
 	pebblePort     = "14000"
 	pebbleMgmtPort = "15000"
 	challMgmtPort  = "8055"
@@ -60,12 +62,16 @@ func StartServices(t *testing.T) Env {
 	if err := docker("network", "create", networkName); err != nil {
 		t.Fatal(err)
 	}
+	// MinIO no longer publishes minio/minio or minio/mc to Docker Hub or Quay;
+	// Chainguard's builds are the maintained free images. They run as a
+	// non-root user that can't create /data, so the test containers run as root.
 	if err := docker(
 		"run", "-d", "--name", minioName, "--network", networkName, "--network-alias", "minio",
+		"--user", "0:0",
 		"-p", minioPort+":9000",
 		"-e", "MINIO_ROOT_USER="+env.MinIOAccessKey,
 		"-e", "MINIO_ROOT_PASSWORD="+env.MinIOSecretKey,
-		"minio/minio:latest", "server", "/data", "--console-address", ":9001",
+		minioImage, "server", "/data", "--console-address", ":9001",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +80,9 @@ func StartServices(t *testing.T) Env {
 		t.Fatalf("minio: %v\n%s", err, logs)
 	}
 	if err := docker(
-		"run", "--rm", "--network", networkName, "--entrypoint", "/bin/sh", "minio/mc:latest", "-c",
-		"mc alias set local http://minio:9000 "+env.MinIOAccessKey+" "+env.MinIOSecretKey+" && mc mb -p local/"+env.MinIOBucket,
+		"run", "--rm", "--network", networkName, "--user", "0:0",
+		"-e", "MC_HOST_local=http://"+env.MinIOAccessKey+":"+env.MinIOSecretKey+"@minio:9000",
+		mcImage, "mb", "-p", "local/"+env.MinIOBucket,
 	); err != nil {
 		t.Fatal(err)
 	}

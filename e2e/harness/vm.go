@@ -53,9 +53,14 @@ func NewVM(t *testing.T, image string) *VM {
 	return vm
 }
 
-// Snapshot stores the VM as the baseline snapshot.
+// Snapshot stores the VM as the baseline snapshot. A stateless snapshot only
+// captures the disk, so the guest page cache is flushed first; otherwise files
+// pushed just before (such as the eru binary) are missing after Restore.
 func Snapshot(vm *VM) {
 	vm.t.Helper()
+	if _, err := vm.Exec("sync"); err != nil {
+		vm.t.Fatal(err)
+	}
 	vm.run("snapshot", "create", vm.Name, "baseline")
 }
 

@@ -233,6 +233,9 @@ func pebbleCertificate(t *testing.T, name string) (certPEM, keyPEM []byte) {
 	if err != nil {
 		t.Fatalf("pebble authorize: %v", err)
 	}
+	// Only the new-order response carries a Location header; orders fetched
+	// later come back with an empty URI, so keep the URL from here.
+	orderURL := order.URI
 	for _, authzURL := range order.AuthzURLs {
 		authz, err := client.GetAuthorization(ctx, authzURL)
 		if err != nil {
@@ -258,7 +261,7 @@ func pebbleCertificate(t *testing.T, name string) (certPEM, keyPEM []byte) {
 			t.Fatalf("pebble wait authorization: %v", err)
 		}
 	}
-	order, err = client.WaitOrder(ctx, order.URI)
+	order, err = client.WaitOrder(ctx, orderURL)
 	if err != nil {
 		t.Fatalf("pebble wait order: %v", err)
 	}
@@ -275,7 +278,17 @@ func pebbleCertificate(t *testing.T, name string) (certPEM, keyPEM []byte) {
 	}
 	ders, _, err := client.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
 	if err != nil {
-		t.Fatalf("pebble create cert: %v", err)
+		// Pebble finalizes asynchronously and its "processing" finalize response
+		// has no Location header, so x/crypto/acme polls an empty URL. Poll the
+		// order URL from AuthorizeOrder instead.
+		done, waitErr := client.WaitOrder(ctx, orderURL)
+		if waitErr != nil {
+			t.Fatalf("pebble create cert: %v (wait order: %v)", err, waitErr)
+		}
+		ders, err = client.FetchCert(ctx, done.CertURL, true)
+		if err != nil {
+			t.Fatalf("pebble fetch cert: %v", err)
+		}
 	}
 	var certBuf bytes.Buffer
 	for _, der := range ders {

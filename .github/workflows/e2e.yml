@@ -19,6 +19,9 @@ jobs:
           sudo apt-get install -y incus
           sudo incus admin init --auto
           sudo usermod -aG incus-admin "$USER"
+          # Docker sets the FORWARD policy to DROP, which blocks VM egress.
+          sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+          sudo iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
       - name: Debian 13 smoke
         run: sg incus-admin -c "just e2e"
         env:
@@ -44,6 +47,9 @@ jobs:
           sudo apt-get install -y incus
           sudo incus admin init --auto
           sudo usermod -aG incus-admin "$USER"
+          # Docker sets the FORWARD policy to DROP, which blocks VM egress.
+          sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+          sudo iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
       - name: Run suite
         run: sg incus-admin -c "just e2e"
         env:
@@ -61,6 +67,9 @@ jobs:
           sudo apt-get install -y incus
           sudo incus admin init --auto
           sudo usermod -aG incus-admin "$USER"
+          # Docker sets the FORWARD policy to DROP, which blocks VM egress.
+          sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+          sudo iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
       - name: Run suite
         run: sg incus-admin -c "just e2e"
         env:
