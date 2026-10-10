@@ -56,6 +56,13 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 | `release_verification_failed` | 14 |
 | `error` | 70 |
 
+## Node errors
+
+- `precondition_failed` with `details.reason = "lock_held"`: another eru operation holds the node lock. `details.holder` names its PID, method, request ID and start time, or is `null` when that process is gone. Wait and retry; don't kill the holder.
+- `restart_pending` warning: the change is applied, but a step needs a PostgreSQL restart that hasn't happened. `data.restart_pending` lists the steps. Ask the human for the `{cluster}/restart` token before re-running with it.
+- `node_version_mismatch` (exit 10): the operator and node builds differ. `details.client` and `details.node` show both. From M3 on, the operator handles this with `eru upgrade` or `--auto-upgrade-nodes`.
+- `precondition_failed` with `details.reason = "journal_corrupt"`: the node's step journal is unreadable. eru never resets it. Report it to a human.
+
 ## Workflows
 
 Status: `eru status --output agent`. Follow with `eru doctor --output agent` when a check needs detail.

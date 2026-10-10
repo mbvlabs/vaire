@@ -89,6 +89,7 @@ func phase1Commands() []cmdSpec {
 			flags: []fl{
 				flagBool("check-meta", "Fail if any command is missing metadata"),
 				flagString("path", "", "Show one command, such as \"backup list\""),
+				flagHiddenBool("check-steps", "Validate the step catalogue and print its size"),
 			},
 			meta: CommandMeta{
 				Summary:   "Show the command catalog and its safety metadata",
@@ -1262,13 +1263,34 @@ func nodeCommands() cmdSpec {
 			},
 			{
 				use: "rpc",
-				run: notImplemented,
+				run: runNodeRPC,
 				meta: CommandMeta{
-					Summary:       "Read one RPC request on stdin and write NDJSON events",
-					WhenToUse:     []string{"The operator entry point. Timers and people use the other node commands."},
-					Prerequisites: []string{"root, or sudo via /etc/sudoers.d/eru"},
-					Examples:      []string{"sudo eru node rpc"},
-					LinuxOnly:     true,
+					Summary:   "Read one RPC request on stdin and write NDJSON events",
+					WhenToUse: []string{"The operator entry point. Timers and people use the other node commands."},
+					WhenNotToUse: []string{
+						"Do not call it by hand to change a node. Use the operator commands, which run plan first.",
+					},
+					Prerequisites: []string{
+						"root, or sudo via /etc/sudoers.d/eru",
+						"the request's client_version, client_channel and, for dev builds, client_commit match eru node version",
+						"/etc/eru/cluster.toml for plan and apply",
+					},
+					Examples:         []string{"sudo eru node rpc < request.json"},
+					Mutating:         true,
+					SkipDryRunCheck:  true,
+					SkipDryRunReason: "dry-run is the request's dry_run field, not a flag",
+					ErrorCodes: []string{
+						"usage_error",
+						"cluster_not_initialized",
+						"unsafe_action_requires_confirmation",
+						"step_failed",
+						"config_error",
+						"validation_failed",
+						"node_version_mismatch",
+						"precondition_failed",
+						"release_verification_failed",
+					},
+					LinuxOnly: true,
 				},
 			},
 			{
@@ -1283,12 +1305,14 @@ func nodeCommands() cmdSpec {
 			},
 			{
 				use: "selfcheck",
-				run: notImplemented,
+				run: runNodeSelfcheck,
 				meta: CommandMeta{
-					Summary:   "Check that the node binary can read its config and tools",
-					WhenToUse: []string{"Run after a node upgrade, before apply."},
-					Examples:  []string{"sudo eru node selfcheck"},
-					LinuxOnly: true,
+					Summary:       "Check that the node binary can read its config and tools",
+					WhenToUse:     []string{"Run after a node upgrade, before apply."},
+					Prerequisites: []string{"root"},
+					Examples:      []string{"sudo eru node selfcheck", "sudo eru node selfcheck --output json"},
+					ErrorCodes:    []string{"precondition_failed"},
+					LinuxOnly:     true,
 				},
 			},
 			{

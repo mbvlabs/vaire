@@ -461,6 +461,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
    "secrets":{},"dry_run":false,"confirm":"","operator":"op-1","client_version":"1.0.0"}
   ```
 
+- M2 adds `client_commit`, `client_channel` and `lock_timeout_s` (default 30, timers pass 0). Dev builds must match on commit as well as version and channel. See [`M2-ENGINE-NODE-RUNTIME.md`](./M2-ENGINE-NODE-RUNTIME.md) §4 and [`DEVIATIONS.md`](./DEVIATIONS.md).
 - **stdout**: NDJSON events (§5.2). The final line is `result`. Exit status equals the envelope's exit code.
 - **stderr**: free-form diagnostics. The operator surfaces it only with `--verbose`.
 - **Methods** mirror operator commands, named `<group>.<verb>`: `cluster.bootstrap`, `apply`, `plan`, `config.get|set|validate`, `status`, `doctor`, `db.*`, `ext.*`, `tune.*`, `backup.*`, `restore.*`, `vps.*`, `maint.*`, `ssh.lockdown`, `ssh.confirm`, `certs.sync`, `logs`, `upgrade.install`, `upgrade.rollback`, `pg.update`, `sql`, `queries`, `top.sample`.
@@ -1412,13 +1413,14 @@ Each scenario is a Go test asserting envelopes, exit codes and host state.
 | E15 | Extensions: `ext add vector --db app` (no restart); `ext add pg_cron` without confirm → `restart_required`, then with confirm | `CREATE EXTENSION` visible; preload set |
 | E16 | Maintenance: create bloat, `maint report bloat`, `maint repack --db app --table t --confirm app` (after adding pg_repack), `maint reindex --concurrently` | Size drops; no invalid indexes |
 | E17 | Node upgrade: build version N+1 (dev), `node upgrade`, then `--rollback --confirm prod/rollback` | Versions switch; `eru.prev` present; `apply` re-ran only changed steps |
-| E18 | Version skew: old operator against a new node | `node_version_mismatch`, exit 10 |
+| E18 | Version skew: old operator against a new node (M3) | `node_version_mismatch`, exit 10 |
 | E19 | Destructive guard: `db drop app` with `--yes` only | Exit 4, `unsafe_action_requires_confirmation` |
 | E20 | Agent contract: run E01 + E08 + E09 using only `eru commands --json`, `--output agent`, and the `next` hints (scripted, no hardcoded flags beyond meta) | Completes; every envelope validates against the JSON schema in `e2e/schema/eru-v1.json` |
 | E21 | Security: from the CI host, `psql` as `postgres` over TCP → rejected; `trust` absent; `ALTER SYSTEM` → error | All pass |
 | E22 | Metrics: `curl -u metrics:… https://domain/metrics/postgres` (Pebble CA) → 200 with `pg_up 1`; without auth → 401 | Pass |
 | E23 | `pg update` on a VM with an older pinned minor available (use the PGDG archive pin) | Version increased after `--now --confirm` |
 | E24 | Local preflight: `eru psql` without psql installed, `--no-input` | `missing_tool` with `install_command` |
+| E26 | Node runtime (M2): `eru node rpc` over `incus exec` with the `e2etest` stub catalogue: selfcheck, plan, apply, journal skips, inputs changes, failure and resume, lock contention, restart pending/confirm, dry run, refusals, `upgrade.install` | Every response is valid NDJSON with one final `result`; secrets absent from stdout, run log and journal; exit codes 1/4/5/10/11/14 as in [`M2-ENGINE-NODE-RUNTIME.md`](./M2-ENGINE-NODE-RUNTIME.md) §9 |
 
 ---
 
@@ -1468,8 +1470,8 @@ Each milestone is done when its listed scenarios pass on Debian 13 amd64, plus `
 | --- | --- | --- | --- |
 | M0 | Skeleton & contracts | Module, cobra root, `output` port, error/exit codes, CommandMeta + `--check-meta`, `version`, `commands`, `guide agents` (stub), `skill install`, justfile, lint, `e2e` harness bootstrapping a VM + MinIO + Pebble | Harness smoke (VM up, `eru version` in VM) |
 | M1 | Release & install | **Done (code, 2026-10-09).** build/sign/upload scripts, `install.sh`, sigstore-go verification, `eru upgrade` (local only), edge workflow, E25. Maintainer first publish and M1-A/B/C remain (below). | E25; manual M1-A/B/C after the first edge publish |
-| M2 | Engine & node runtime | Step engine, journal, locks, redaction, run logs, `node rpc` dispatcher, `node version/selfcheck`, binary push, version handshake | E18 (stubbed steps) |
-| M3 | Transport, bootstrap, secrets | First contact (TOFU), userspace WireGuard, steps 1–6, commit-confirm, secrets document, contexts, `login`, `context *`, local preflight + sudo escalation, `--local`, `--resume` | E01 (host part only), E03, E04, E05, E24 |
+| M2 | Engine & node runtime | **Done (code, 2026-10-09; E26 written, not yet run).** Step engine, journal, locks, redaction, run logs, `node rpc` dispatcher (node-side version check), `node version/selfcheck`, `upgrade.install` primitive, `e2etest` stub catalogue. See [`M2-ENGINE-NODE-RUNTIME.md`](./M2-ENGINE-NODE-RUNTIME.md) | E26 |
+| M3 | Transport, bootstrap, secrets | First contact (TOFU), userspace WireGuard, steps 1–6, commit-confirm, secrets document, contexts, `login`, `context *`, local preflight + sudo escalation, `--local`, `--resume`, version handshake, RPC client, binary push and `--auto-upgrade-nodes` (moved from M2) | E01 (host part only), E03, E04, E05, E18, E24, E27 |
 | M4 | PostgreSQL core | Steps 7–11, tuning calculator, `tune *`, `config *`, `plan`/`apply`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` | E01 (DB part), E02, E06, E07, E19, E21 |
 | M5 | TLS & pooling | Steps 12–13, certs-sync | E01 (verify-full via PgBouncer), E22 (TLS part) |
 | M6 | DB backups & restore | Step 14, `backup *`, `restore *`, drill, `--db` restore, `dump`, textfile metrics | E08–E12 |
