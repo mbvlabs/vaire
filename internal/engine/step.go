@@ -49,10 +49,10 @@ type Runtime struct {
 	Shell   Shell
 	Secrets *secrets.Registry
 	Log     *RunLog
-	// Host hostinfo.Info arrives in M3, PG *pg.Local in M4.
+	// Host hostinfo.Info arrives in Phase 1, PG *pg.Local in Phase 2.
 }
 
-// Restarter performs the aggregated restart at the end of an apply. M4
+// Restarter performs the aggregated restart at the end of an apply. Phase 2
 // provides the PostgreSQL restarter.
 type Restarter interface {
 	Restart(ctx context.Context) error

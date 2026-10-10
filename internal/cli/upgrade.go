@@ -161,7 +161,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 func nodesWarning() output.Warning {
 	return output.Warning{
 		Code:    "nodes_not_upgraded",
-		Message: "node upgrades arrive with eru node upgrade (M10)",
+		Message: "node upgrades arrive with eru node upgrade",
 	}
 }
 

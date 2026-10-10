@@ -60,7 +60,7 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 
 - `precondition_failed` with `details.reason = "lock_held"`: another eru operation holds the node lock. `details.holder` names its PID, method, request ID and start time, or is `null` when that process is gone. Wait and retry; don't kill the holder.
 - `restart_pending` warning: the change is applied, but a step needs a PostgreSQL restart that hasn't happened. `data.restart_pending` lists the steps. Ask the human for the `{cluster}/restart` token before re-running with it.
-- `node_version_mismatch` (exit 10): the operator and node builds differ. `details.client` and `details.node` show both. From M3 on, the operator handles this with `eru upgrade` or `--auto-upgrade-nodes`.
+- `node_version_mismatch` (exit 10): the operator and node builds differ. `details.client` and `details.node` show both. Once the operator connects to nodes, it handles this with `eru upgrade` or `--auto-upgrade-nodes`.
 - `precondition_failed` with `details.reason = "journal_corrupt"`: the node's step journal is unreadable. eru never resets it. Report it to a human.
 
 ## Workflows
@@ -77,7 +77,7 @@ Add an extension: `eru ext add <name> --db <name> --output agent`. When the resu
 
 Maintenance report: `eru maint report bloat --db <name> --output agent`.
 
-Upgrade: `eru upgrade --output agent` updates only the local binary until M10 (`eru node upgrade`). `release_verification_failed` must never be retried; report it to a human. Rolling a node back with `eru node upgrade --rollback` needs the human's confirm token.
+Upgrade: `eru upgrade --output agent` updates only the local binary for now; node upgrades come with `eru node upgrade`. `release_verification_failed` must never be retried; report it to a human. Rolling a node back with `eru node upgrade --rollback` needs the human's confirm token.
 
 ## Refusals
 

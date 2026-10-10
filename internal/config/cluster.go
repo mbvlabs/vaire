@@ -13,11 +13,10 @@ import (
 // ClusterPath is the desired state on the central command.
 const ClusterPath = "/etc/eru/cluster.toml"
 
-// Cluster is the part of cluster.toml M2 reads. Unknown keys are allowed until
-// M4 adds the full schema and switches to a strict decode.
+// Cluster is the part of cluster.toml read so far. Unknown keys are allowed
+// until Phase 2 adds the full schema and switches to a strict decode.
 type Cluster struct {
 	Cluster ClusterTable `toml:"cluster"`
-	ClusterExtra
 }
 
 // ClusterTable is the [cluster] table.

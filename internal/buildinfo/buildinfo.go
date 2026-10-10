@@ -10,5 +10,5 @@ var (
 )
 
 // ReleaseBaseURL is the channel root for manifests and artifacts.
-// Choice recorded in docs/DEVIATIONS.md.
+// Recorded in the decisions table in docs/MASTER.md.
 const ReleaseBaseURL = "https://eru.mbvlabs.com"
