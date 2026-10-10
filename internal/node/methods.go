@@ -13,7 +13,7 @@ import (
 	"github.com/mbvlabs/eru/internal/steps"
 )
 
-// methods is the node's method table. M3+ add entries here.
+// methods is the node's method table. Later phases add entries here.
 func methods() map[string]method {
 	list := []method{
 		{

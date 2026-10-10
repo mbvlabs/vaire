@@ -59,9 +59,6 @@ pkg="github.com/mbvlabs/eru/internal/buildinfo"
 commit="$(git rev-parse --short=12 HEAD)"
 ldflags="-s -w -X ${pkg}.Version=${version} -X ${pkg}.Commit=${commit} -X ${pkg}.Channel=${channel}"
 build_args=(go build -trimpath -ldflags "${ldflags}")
-if [ -n "${ERU_RELEASE_TEST_KEY:-}" ]; then
-  build_args+=(-tags e2etest)
-fi
 
 linux_amd64_sha=""
 linux_arm64_sha=""
@@ -119,16 +116,6 @@ if [ "${channel}" = stable ]; then
   trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/eru/\\.github/workflows/publish-stable\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$'"
 else
   trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/eru/\\.github/workflows/publish-edge\\.yml@refs/heads/master$'"
-fi
-if [ -n "${ERU_RELEASE_TEST_KEY:-}" ]; then
-  # Intentionally unexpanded: the installer reads ERU_TEST_RELEASE_PUBKEY_URL at runtime.
-  # shellcheck disable=SC2016
-  trust_args='--key "$ERU_TEST_RELEASE_PUBKEY_URL" --insecure-ignore-tlog=true'
-fi
-prod_base="$(sed -n 's/^const ReleaseBaseURL = "\(.*\)"/\1/p' internal/buildinfo/buildinfo.go)"
-if [ "${base_url}" = "${prod_base}" ] && [[ "${trust_args}" == *"--key"* ]]; then
-  echo "refusing to render a key-based installer for ${prod_base}" >&2
-  exit 1
 fi
 
 sed \

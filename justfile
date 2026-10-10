@@ -16,8 +16,7 @@ lint:
     golangci-lint run ./...
     just build
     bin/eru commands --check-meta
-    test "$(bin/eru commands --check-steps --jq .data.count)" = 0 || { echo "production step catalogue must be empty in M2" >&2; exit 1; }
-    bash -eu -o pipefail -c 'n=$(grep -ac -e ERU_TEST -e "stub-[a-z]*-v[0-9]" bin/eru || true); test "$n" = 0 || { echo "bin/eru contains $n e2etest strings" >&2; exit 1; }'
+    bin/eru commands --check-steps
     bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); if ((${#files[@]})); then shellcheck -x "${files[@]}"; fi'
     actionlint
     bash -eu -o pipefail -c 'while IFS="=" read -r key value; do grep -Fq "$value" scripts/install.sh || { echo "scripts/install.sh is missing $key=$value" >&2; exit 1; }; done < <(go run ./internal/versions/cmd/print)'
@@ -25,7 +24,3 @@ lint:
 # Build an unsigned channel tree under dist/release-<channel>.
 release-local VERSION CHANNEL BASE_URL:
     scripts/build-release.sh "{{VERSION}}" "{{CHANNEL}}" "{{BASE_URL}}"
-
-# Run the end-to-end suite. Requires incus and docker.
-e2e: build
-    ERU_E2E_BINARY={{justfile_directory()}}/bin/eru go test -tags e2e -count=1 -timeout 90m ./e2e/...

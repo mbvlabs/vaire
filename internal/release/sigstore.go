@@ -1,5 +1,3 @@
-//go:build !e2etest
-
 package release
 
 import (

@@ -68,7 +68,7 @@ curl -fsSL --proto '=https' --tlsv1.2 \
 curl -fsSL --proto '=https' --tlsv1.2 \
   "${channel_root}/manifest.json.sigstore.json" -o "${work_dir}/manifest.json.sigstore.json"
 
-# Trust args are filled by scripts/build-release.sh (identity regexp or --key).
+# Trust args are filled by scripts/build-release.sh (the channel's identity regexp).
 # shellcheck disable=SC2086
 if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/manifest.json" \
   --bundle "${work_dir}/manifest.json.sigstore.json" \

@@ -32,7 +32,7 @@ type Options struct {
 	JournalPath string
 	// Confirmed is true when the request carried the correct restart token.
 	Confirmed bool
-	// Restarter performs the aggregated restart. Nil in production M2.
+	// Restarter performs the aggregated restart. Nil in production until Phase 2.
 	Restarter Restarter
 	// Report receives step and log events.
 	Report Reporter

@@ -16,7 +16,7 @@ import (
 // NodePath marks a host as an eru node.
 const NodePath = "/etc/eru/node.toml"
 
-// Node is /etc/eru/node.toml (§6.2). M3 writes it during bootstrap.
+// Node is /etc/eru/node.toml (§6.2). Bootstrap (Phase 1) writes it.
 type Node struct {
 	Cluster     string    `toml:"cluster"`
 	NodeName    string    `toml:"node_name"`
