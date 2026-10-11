@@ -1,3 +1,3 @@
-// Package steps is the step catalogue the engine runs. The catalogue is empty
-// until Phase 1 adds the host steps.
+// Package steps is the step catalogue the engine runs, with the embedded
+// bash scripts the steps call. Phase 1 has the host steps 1-6 (§11).
 package steps

@@ -225,7 +225,8 @@ internal/versions/           pinned external versions and checksums
 internal/buildinfo/          version, commit, channel, release base URL
 internal/guide/              embedded agent guide
 internal/remote/             push binary, run `eru node …`, stream NDJSON events
-internal/secretsdoc/         age bundle, contexts (~/.config/eru)
+internal/secretsdoc/         age bundle, passphrase, break-glass text, document → context
+internal/contexts/           ~/.config/eru: contexts, current context, pending init state
 internal/engine/             step engine: Check/Apply, plan, journal, versioned IDs, commit-confirm
 internal/steps/              step definitions
 internal/steps/scripts/*.sh  embedded host scripts (go:embed)
@@ -432,16 +433,16 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 ### 7.1 Current state (2026-10-10)
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
-- **Phase 1 (Bootstrap) is next.**
+- **Phase 1 (Bootstrap) is code complete but not done.** Every module below is built and passes `just lint` and the four cross-builds, and the local paths (login, contexts, first-contact host-key pinning and SSH auth errors, input checks) were exercised on a dev machine. Nothing has run against a real VPS yet, so the exit check has not passed. That manual run is the next task.
 - One open item from Phase 0: install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
-- About 8 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `node rpc`, `node version` and `node selfcheck`. The rest return `not implemented yet` until their phase lands.
+- About 18 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `cluster init` (host part, remote and `--local`, `--resume`), `plan`, `apply` (steps 1–6 only), `node rpc`, `node version`, `node selfcheck`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
 
 ### 7.2 Overview
 
 | # | Phase | What you can do at the end | Status |
 | --- | --- | --- | --- |
 | 0 | Foundations | Install and self-upgrade the `eru` CLI; a node can run steps | ✅ |
-| 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | ⬜ next |
+| 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | 🟡 code complete; VPS exit check pending |
 | 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | ⬜ |
 | 3 | Database backups & restore | Back up to S3/R2, PITR restore, drills, per-database backup policies | ⬜ |
 | 4 | VPS backups & disaster recovery | Rebuild a dead server on a fresh VPS from the secrets document | ⬜ |
@@ -467,18 +468,22 @@ The CLI contract, releases and the node-side engine. No server work.
 | `internal/engine` | Steps, plan/apply runner, journal, locks, run logs, shell, redaction | ✅ |
 | `internal/node`, `internal/rpc` | `eru node rpc` dispatcher with version check, `selfcheck`, `upgrade.install` | ✅ |
 
-### 7.4 Phase 1 — Bootstrap ⬜
+### 7.4 Phase 1 — Bootstrap 🟡
 
 From a laptop, take a fresh Debian/Ubuntu VPS to "hardened, SSH only over WireGuard, secrets document in hand".
 
+🟡 below means code complete and linted, but not yet run on a VPS. Each module turns ✅ when the exit check passes.
+
 | Module | What it does | Status |
 | --- | --- | --- |
-| `internal/transport` | SSH client with TOFU host-key pinning; embedded userspace WireGuard | ⬜ |
-| `internal/remote` | Binary push, RPC client, version handshake, `--auto-upgrade-nodes` | ⬜ |
-| `internal/secretsdoc` | age secrets document, contexts, `eru login`, `eru context *` | ⬜ |
-| `internal/localenv` (preflight) | `missing_tool` checks and install offers | ⬜ |
-| Steps 1–6 | Base packages, admin user, WireGuard, sshd hardening + **commit-confirm** move to wg0, ufw/fail2ban, journald/swap/unattended-upgrades | ⬜ |
-| `cluster init` (host part) | Remote and `--local`, `--resume`, `node unlock-ssh`, the `install.sh` init prompt | ⬜ |
+| `internal/transport` | SSH client with TOFU host-key pinning; embedded userspace WireGuard | 🟡 SSH and pinning tried against a local sshd; WireGuard untested |
+| `internal/remote` | Binary push, RPC client, version handshake, `--auto-upgrade-nodes` | 🟡 in-process RPC path tried; SSH path untested |
+| `internal/secretsdoc`, `internal/contexts` | age secrets document, contexts, `eru login`, `eru context *` | 🟡 encrypt, decrypt, login and contexts tried locally |
+| `internal/localenv` (preflight) | `missing_tool` checks and install offers | 🟡 built; no Phase 1 command needs an optional tool yet, so first used by `psql` (Phase 2) |
+| Steps 1–6 | Base packages, admin user, WireGuard, sshd hardening + **commit-confirm** move to wg0, ufw/fail2ban, journald/swap/unattended-upgrades | 🟡 scripts pass shellcheck; firewall logic tried against a stub `ufw` only |
+| `cluster init` (host part) | Remote and `--local`, `--resume`, `node unlock-ssh`, the `install.sh` init prompt | 🟡 input checks and first contact up to auth tried locally |
+
+Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 subset of `cluster.toml` with validation (`internal/config`), OS and RAM detection (`internal/hostinfo`), and `eru plan` / `eru apply` over the tunnel (they run steps 1–6 and are how an operator first reaches a `--local` node).
 
 **Exit:** `eru cluster init --host root@<vps>` ends with public 22 closed, SSH working over WireGuard, and a secrets document that `eru login` accepts on a second machine. A broken tunnel during lockdown reverts by itself.
 
@@ -488,13 +493,13 @@ From a laptop, take a fresh Debian/Ubuntu VPS to "hardened, SSH only over WireGu
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| `internal/config` | Strict `cluster.toml` schema, defaults and validation | ⬜ (lenient loader exists) |
-| `internal/hostinfo` | CPU, RAM, disk, kernel and OS detection | ⬜ |
+| `internal/config` | Strict `cluster.toml` schema, defaults and validation | ⬜ (Phase 1 subset with validation exists; decode is still lenient) |
+| `internal/hostinfo` | CPU, RAM, disk, kernel and OS detection | ⬜ (OS and RAM exist) |
 | `internal/tune` | Tuning calculator, `eru tune explain/apply` | ⬜ |
 | `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, Caddyfile | ⬜ |
 | `internal/pg`, `internal/state` | pgx admin client; desired-state store on the node | ⬜ |
 | Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, Caddy + ACME certificates, PgBouncer | ⬜ |
-| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` | ⬜ |
+| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` | ⬜ (`plan` and `apply` work for steps 1–6) |
 
 **Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused.
 

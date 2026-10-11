@@ -3,14 +3,19 @@ module github.com/mbvlabs/eru
 go 1.27.1
 
 require (
+	filippo.io/age v1.3.2
 	github.com/itchyny/gojq v0.12.19
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/sigstore/sigstore-go v1.3.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
+	golang.org/x/crypto v0.58.0
+	golang.org/x/term v0.47.0
+	golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -44,6 +49,7 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.27.3 // indirect
 	github.com/go-openapi/validate v0.26.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
+	github.com/google/btree v1.1.3 // indirect
 	github.com/google/certificate-transparency-go v1.3.3 // indirect
 	github.com/google/go-containerregistry v0.21.7 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -71,16 +77,17 @@ require (
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/mod v0.38.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260523011958-0a33c5d7ca68 // indirect
 	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
+	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )

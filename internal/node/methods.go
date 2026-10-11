@@ -41,6 +41,38 @@ func methods() map[string]method {
 			handler: handleSelfcheck,
 		},
 		{
+			name:    "cluster.bootstrap",
+			lock:    fixedLock(engine.LockExclusive),
+			confirm: bootstrapToken,
+			runLog:  always,
+			handler: handleClusterBootstrap,
+		},
+		{
+			name:    "cluster.confirm-secrets",
+			lock:    fixedLock(engine.LockExclusive),
+			cluster: true,
+			runLog:  always,
+			handler: handleConfirmSecrets,
+		},
+		{
+			name:    "ssh.lockdown",
+			lock:    fixedLock(engine.LockExclusive),
+			cluster: true,
+			runLog:  always,
+			handler: handleSSHLockdown,
+		},
+		{
+			name:    "ssh.confirm",
+			lock:    fixedLock(engine.LockExclusive),
+			cluster: true,
+			runLog:  always,
+			handler: handleSSHConfirm,
+		},
+		{
+			name:    "ssh.status",
+			handler: handleSSHStatus,
+		},
+		{
 			name:          "upgrade.install",
 			lock:          fixedLock(engine.LockExclusive),
 			runLog:        always,
@@ -80,10 +112,11 @@ func decodeParams(raw json.RawMessage, v any) error {
 
 func runtimeFor(env *Env, dryRun bool) engine.Runtime {
 	return engine.Runtime{
-		DryRun:  dryRun,
-		Shell:   engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},
-		Secrets: secrets.Default,
-		Log:     env.Log,
+		DryRun:       dryRun,
+		Shell:        engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},
+		Secrets:      secrets.Default,
+		SecretValues: env.Req.Secrets,
+		Log:          env.Log,
 	}
 }
 

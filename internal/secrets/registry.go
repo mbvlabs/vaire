@@ -1,5 +1,6 @@
-// Package secrets holds the process-wide redaction registry. Every output path
-// in node mode passes through Redact before it reaches a reader.
+// Package secrets generates secrets and holds the process-wide redaction
+// registry. Every output path passes through Redact before it reaches a
+// reader.
 package secrets
 
 import (

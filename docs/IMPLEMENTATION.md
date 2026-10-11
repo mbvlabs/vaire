@@ -61,6 +61,9 @@
 | Signature verification | `github.com/sigstore/sigstore-go` (verify cosign bundles in-process) |
 | JQ filter | `github.com/itchyny/gojq` |
 | Bcrypt (Caddy basic auth hash) | `golang.org/x/crypto/bcrypt` |
+| Passphrase prompts without echo | `golang.org/x/term` |
+
+`tun/netstack` pulls in `gvisor.dev/gvisor` at the version the WireGuard module pins; don't upgrade it on its own.
 
 Add any other runtime dependency to this table first.
 
@@ -128,7 +131,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 
 ### 4.1 Global flags (persistent)
 
-`--context, -c <name>`, `--output human|json|agent|markdown`, `--json` (= `--output json`), `--jq <expr>`, `--quiet`, `--verbose`, `--stream` (NDJSON events), `--no-input` (never prompt; implied when stdin isn't a TTY), `--sudo` (pre-approve local escalation), `--install-missing` (pre-approve local package installs), `--timeout <dur>`.
+`--context, -c <name>`, `--output human|json|agent|markdown`, `--json` (= `--output json`), `--jq <expr>`, `--quiet`, `--verbose`, `--stream` (NDJSON events), `--no-input` (never prompt; implied when stdin isn't a TTY), `--sudo` (pre-approve local escalation), `--install-missing` (pre-approve local package installs), `--auto-upgrade-nodes` (install this CLI's build on a mismatched node instead of failing, §7.3), `--timeout <dur>`.
 
 ### 4.2 Operator commands
 
@@ -406,10 +409,12 @@ path_prefix = "/metrics"
 | `/usr/local/bin/eru`, `/usr/local/bin/eru.prev` | root:root 0755 | Binary and rollback copy |
 | `/etc/eru/node.toml` | root 0640 | `cluster`, `node_name`, `role`, `installed_at`. Marks a host as an eru node |
 | `/etc/eru/cluster.toml` | root 0640 | Desired state |
+| `/etc/eru/operators.toml` | root 0640 | Operator registry: `name`, `wg_address`, `wg_public_key`, `ssh_public_key` per operator. Steps 2 and 3 render `authorized_keys` and the wg0 peers from it |
 | `/etc/eru/runtime/` | root 0700 | `backup.env` (S3 keys), `restic.env`, `pgbouncer_auth.pass`, `metrics.htpasswd` (bcrypt) |
 | `/etc/eru/tls/` | root 0755 | `server.crt` (0644), `server.key` (root:ssl-cert 0640; `postgres` and `pgbouncer` are in `ssl-cert`) |
 | `/var/lib/eru/journal.json` | root 0600 | §9.3 |
-| `/var/lib/eru/state.json` | root 0600 | `secrets_confirmed_at`, `last_apply`, `restore` (in-progress restore record), `drills[]` (last 12) |
+| `/var/lib/eru/state.json` | root 0600 | `secrets_confirmed_at`, `lockdown_pending`, `locked_down_at`, `last_apply`, `restore` (in-progress restore record), `drills[]` (last 12) |
+| `/var/lib/eru/ssh-snapshot/` | root 0700 | Commit-confirm snapshot (`snapshot.json`, `sshd-dropin.conf`, `ufw-rules.txt`) and `reverted.json` (§8.3) |
 | `/var/lib/eru/drill/` | postgres 0700 | Scratch restores |
 | `/var/lib/node_exporter/textfile/eru.prom` | root 0644 | §15.3 |
 | `/var/log/eru/` | root 0750 | One log per RPC/job: `<UTC ts>-<method>-<request_id>.log`, rotated by logrotate (30 days) |
@@ -419,13 +424,14 @@ path_prefix = "/metrics"
 
 ```
 config.toml                         current_context = "prod"
-contexts/<name>/context.toml        cluster name, domain, nodes [{name, public_address, wg_address, wg_public_key, listen_port}],
-                                    operator {name, wg_address, ssh_user}, created_at, eru_version
+contexts/<name>/context.toml        cluster name, domain, nodes [{name, role, public_address, wg_address, wg_public_key, listen_port}],
+                                    operator {name, wg_address, ssh_user}, auto_upgrade_nodes, lockdown_confirmed_at,
+                                    created_at, eru_version
 contexts/<name>/wg.key              operator WireGuard private key (0600)
 contexts/<name>/id_ed25519          operator SSH private key (0600)
 contexts/<name>/known_hosts         pinned server host keys (wg address entries)
 contexts/<name>/credentials.json    DB + metrics credentials from the secrets document (0600)
-pending/<name>/                     in-progress init: answers.toml, generated secrets (0600), progress.json
+pending/<name>/                     in-progress init: answers.toml, secrets.json (0600), progress.json, known_hosts
 cache/releases/<version>/           downloaded artifacts + manifest + sigstore bundle
 ```
 
@@ -472,7 +478,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 - **Confirm token for `apply`:** a non-empty `confirm` that isn't `{cluster}/restart` is refused (exit 4) before any step runs, because whether a restart is needed is only known afterwards. An empty `confirm` never fails; it leaves the restart pending.
 - **stdout**: NDJSON events (§5.2). The final line is `result`. Exit status equals the envelope's exit code.
 - **stderr**: free-form diagnostics. The operator surfaces it only with `--verbose`.
-- **Methods** mirror operator commands, named `<group>.<verb>`: `cluster.bootstrap`, `apply`, `plan`, `config.get|set|validate`, `status`, `doctor`, `db.*`, `ext.*`, `tune.*`, `backup.*`, `restore.*`, `vps.*`, `maint.*`, `ssh.lockdown`, `ssh.confirm`, `certs.sync`, `logs`, `upgrade.install`, `upgrade.rollback`, `pg.update`, `sql`, `queries`, `top.sample`.
+- **Methods** mirror operator commands, named `<group>.<verb>` (each word may contain inner hyphens, as in `cluster.confirm-secrets`): `cluster.bootstrap`, `cluster.confirm-secrets`, `apply`, `plan`, `config.get|set|validate`, `status`, `doctor`, `db.*`, `ext.*`, `tune.*`, `backup.*`, `restore.*`, `vps.*`, `maint.*`, `ssh.lockdown`, `ssh.confirm`, `ssh.status`, `certs.sync`, `logs`, `upgrade.install`, `upgrade.rollback`, `pg.update`, `sql`, `queries`, `top.sample`.
 - **Confirmation is re-checked node-side.** The node recomputes the token and rejects mismatches, so a buggy operator can't skip it.
 - **Read-only SQL** (`eru sql`, `top.sample`, `queries`, reports) runs over pgx through the tunnel, not via RPC, except where node-local access is needed (`postgres` peer for superuser-only views). RPC methods for these exist for `--local` mode.
 - **Sudoers**: `/etc/sudoers.d/eru` contains `eru ALL=(root) NOPASSWD: /usr/local/bin/eru node *`. Validate it with `visudo -cf`.
@@ -497,7 +503,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 Each numbered phase emits `step` events and records progress in `pending/<name>/progress.json`. `--resume` continues from the last completed phase.
 
 1. **Local preflight** (§20).
-2. **Collect answers** from flags, the answers file, and prompts. Prompt only in a TTY, using `huh` forms grouped as in MASTER §6.1. Validate (§6.1).
+2. **Collect answers** from flags, the answers file, and prompts. Prompt only in a TTY. Validate (§6.1). The Phase 1 build asks only what the host phase needs (`--host`, `--name`) with plain line prompts; the `huh` form interview grouped as in MASTER §6.1 comes with the full question set in Phase 2. Flags for later phases are accepted and reported with a `flag_not_used_yet` warning. Non-interactive runs check `--confirm <cluster>`, `--confirm-secrets-stored` and `--passphrase-out` before anything changes.
 3. **Generate secrets** on the operator (§10.2), stored in `pending/<name>/secrets.json` (0600). Generate the operator WireGuard keypair and SSH ed25519 key.
 4. **Backup credentials check**: from the operator, do a signed `PUT`/`GET`/`DELETE` of `<prefix>/.eru-probe` using the S3 client in `internal/backup/s3probe.go` (minimal SigV4 over `net/http`; no SDK). This fails early on bad keys or a bad bucket. For a non-empty `<prefix>/pgbackrest` without `--restore`, return `precondition_failed` ("prefix already contains a backup repository").
 5. **First contact** over public SSH. Detect arch and OS (`/etc/os-release`). Push the binary (§7.5, bootstrap case).
@@ -508,26 +514,27 @@ Each numbered phase emits `step` events and records progress in `pending/<name>/
 7. **Switch transport**: start userspace WireGuard to `public_address:51820` and SSH to `10.42.0.1:22` as `admin_user`. Pin the host key (same host keys, new address entry). Run the handshake.
 8. **Commit-confirm lockdown** (§8.3).
 9. **RPC `cluster.bootstrap` phase=database** over WireGuard: steps 7–18 (§11). Runtime secrets are passed in `secrets`.
-10. **Secrets document** (§10): write to `--secrets-out` (default `./eru-<name>.secrets.age`, 0600) and display the passphrase once. In a TTY, require typing `stored`; otherwise require `--confirm-secrets-stored` together with `--passphrase-out`. Then RPC `cluster.confirm-secrets` sets `secrets_confirmed_at`.
-11. **Create the local context** from the pending data and delete `pending/<name>`.
+10. **Secrets document** (§10): write to `--secrets-out` (default `./eru-<name>.secrets.age`, 0600) and display the passphrase once. In a TTY, require typing `stored`; otherwise require `--confirm-secrets-stored` together with `--passphrase-out`. `--passphrase-out <path>` writes a 0600 file; `--passphrase-out -` prints it in a TTY and puts it in `data.passphrase` in structured output (an explicit request). A resumed init that stopped before the confirmation writes a fresh document with a new passphrase over its own file. Then RPC `cluster.confirm-secrets` sets `secrets_confirmed_at`.
+11. **Create the local context** from the pending data (with `lockdown_confirmed_at` set), make it current, and delete `pending/<name>`.
 12. Print the summary: connection strings, doctor result, first DB and VPS backup labels.
 
 ### 8.3 Commit-confirm SSH lockdown
 
-The node implements RPC `ssh.lockdown {timeout_s: 120}`:
+The node implements RPC `ssh.lockdown {timeout_s: 120, keep_public: false}`:
 
-1. Snapshot the current state to `/var/lib/eru/ssh-snapshot/`: `/etc/ssh/sshd_config.d/99-eru.conf` and `ufw status numbered` output (parsed to rule specs).
+1. Snapshot the current state to `/var/lib/eru/ssh-snapshot/`: `/etc/ssh/sshd_config.d/00-eru.conf` and the `ufw show added` rule specs. A re-armed lockdown keeps the first snapshot. Set `state.json.lockdown_pending`.
 2. Arm the revert: `systemd-run --unit=eru-ssh-revert --on-active=<timeout> /usr/local/bin/eru node ssh-revert`.
 3. Apply:
    - write the final sshd drop-in (§11 step 4) and run `sshd -t`, then `systemctl reload ssh`;
    - `ufw allow in on wg0 to any port 22 proto tcp`;
-   - `ufw delete allow 22/tcp` (public).
-4. Return `armed: true`.
+   - `ufw delete allow 22/tcp` (public), unless `keep_public` (used by `--local`, §8.5).
+4. Return `armed: true`. A node already locked down returns `already_locked: true` and changes nothing.
 
-The operator then **opens a new** SSH connection over WireGuard and calls `ssh.confirm`, which runs `systemctl stop eru-ssh-revert.timer` and deletes the snapshot.
+The operator then **opens a new** SSH connection over WireGuard and calls `ssh.confirm`, which runs `systemctl stop eru-ssh-revert.timer`, deletes public 22/tcp if it is still there, deletes the snapshot, clears `lockdown_pending` and sets `locked_down_at`. `ssh.confirm {auto: true}` also locks down a node that has no pending lockdown and was never locked (the caller is on WireGuard, which proves the tunnel). `ssh.status` reports the state, the timers and `reverted.json` for diagnostics.
 
 - If the new connection fails within 60 s, the operator waits for `timeout + 15 s`, reconnects over public SSH, reads `ssh-revert`'s result from `/var/lib/eru/ssh-snapshot/reverted.json`, and returns `lockdown_failed` with diagnostics.
-- `ssh-revert` restores the drop-in and ufw rules from the snapshot and reloads ssh.
+- `ssh-revert` takes the exclusive lock (waiting up to 60 s), does nothing when no lockdown is pending (a confirm won the race), otherwise restores the ufw rules and then the drop-in from the snapshot, reloads ssh, clears `lockdown_pending` and writes `reverted.json`.
+- The bootstrap preflight requires sshd to serve port 22 (`sshd -T`), because the lockdown moves SSH to `<wg_address>:22` and a revert reopens public 22/tcp. After a failed lockdown the operator reconnects on public port 22 as the admin user with the operator key.
 
 The SSH restriction is enforced with **ufw** (22/tcp allowed only `in on wg0`), not `ListenAddress`. That avoids boot-ordering lockouts when wg0 comes up after sshd. This is the documented implementation of MASTER's "sshd listens only on wg0".
 
@@ -537,8 +544,10 @@ The SSH restriction is enforced with **ufw** (22/tcp allowed only `in on wg0`), 
 
 `eru node unlock-ssh --minutes 30`, run from the provider console as root:
 
-1. `ufw allow 22/tcp` and enable `PasswordAuthentication yes` for `admin_user` only (`Match User`).
-2. Arm `systemd-run --on-active=30m eru node ssh-revert --lockdown-only`.
+1. `ufw allow 22/tcp` and enable `PasswordAuthentication yes` for `admin_user` only: `/etc/ssh/sshd_config.d/01-eru-break-glass.conf` holds `Match User <admin_user>` / `PasswordAuthentication yes` / `Match all`, validated with `sshd -t`.
+2. Arm `systemd-run --unit=eru-ssh-unlock --on-active=30m eru node ssh-revert --lockdown-only`.
+
+`ssh-revert --lockdown-only` removes the break-glass drop-in and, when the node was locked down, deletes public 22/tcp again.
 
 The secrets document's `break_glass` text describes this flow.
 
@@ -548,15 +557,17 @@ The secrets document's `break_glass` text describes this flow.
 
 `eru cluster init --local`:
 
-- requires root, or escalates via §20.3;
+- requires root, or escalates via §20.3, and must run as `/usr/local/bin/eru` (the revert timer calls that path);
+- takes the node's public address from the answers file, then `--host <public-ip>`, then the default-route source address (with a warning when it is private);
 - skips first contact and binary push and uses the in-process dispatcher;
 - generates secrets on the server and runs all steps;
 - writes the secrets document to `/root/eru-<name>.secrets.age` (0600) and prints the passphrase once, plus a one-line `eru login` instruction: "copy the file to your machine, run `eru login eru-<name>.secrets.age`".
 
 For lockdown in `--local`, the commit-confirm verification needs an operator over WireGuard. So `--local` arms the revert timer with `timeout = 30 min` and prints "run `eru login …` then any `eru status` from your machine within 30 minutes to confirm".
 
-- The first successful remote RPC from an operator calls `ssh.confirm` automatically when a lockdown is pending. This is recorded in `state.json.lockdown_pending`.
-- `--keep-public-ssh-until-confirm` is the default and only behaviour in `--local`.
+- The lockdown is `ssh.lockdown {timeout_s: 1800, keep_public: true}`: public SSH stays open until confirmed, which is the only behaviour in `--local`.
+- The first time a context reaches the node over WireGuard (its `lockdown_confirmed_at` is empty), the operator calls `ssh.confirm {auto: true}` and records the time. That confirms a pending lockdown, or locks down a node whose 30-minute timer reverted.
+- No context is created on the server; the pending state is removed after the document is confirmed.
 
 ---
 
@@ -691,12 +702,12 @@ Order is fixed. IDs end in `-v1`; bump the suffix whenever behaviour changes in 
 
 | # | ID | Does | Check |
 | --- | --- | --- | --- |
-| 1 | `base-packages-v1` | Wait for `cloud-init status --wait`. apt update and install: `curl ca-certificates gnupg apt-transport-https sudo ufw fail2ban wireguard-tools chrony logrotate unattended-upgrades jq lsb-release` | All installed (dpkg-query) |
+| 1 | `base-packages-v1` | Wait for `cloud-init status --wait`. apt update and install: `curl ca-certificates gnupg sudo ufw fail2ban python3-systemd wireguard-tools chrony logrotate unattended-upgrades jq lsb-release`, plus `apt-transport-https` when the release still has it (it is transitional). `python3-systemd` lets the fail2ban sshd jail read the journal | All installed (dpkg-query) |
 | 2 | `admin-user-v1` | Create `admin_user` (shell bash, groups `sudo`), set the password hash, install the operator SSH pubkey to `authorized_keys`, write `/etc/sudoers.d/eru` (§7.4) and validate it | User exists, key present, sudoers matches |
-| 3 | `wireguard-v1` | Adapt deploycrate `wireguard.sh` (no ip_forward: not a gateway). Address `10.42.0.1/16`; operator peers rendered from `cluster.toml` + operator registry (`/etc/eru/operators.toml`: name, wg pubkey, address). `ufw allow 51820/udp` | `wg show wg0` lists all peers |
-| 4 | `sshd-hardening-v1` | Write `/etc/ssh/sshd_config.d/99-eru.conf` (below). Handle `ssh.socket` (§8.3). `sshd -t`, reload. Public 22 stays open until lockdown | Drop-in matches render |
-| 5 | `firewall-v1` | ufw: `default deny incoming`, `default allow outgoing`, allow 51820/udp, 80/tcp, 443/tcp, `in on wg0` 22/tcp, 6432/tcp from wg0 + allowlist (if `expose_pgbouncer`), 5432/tcp from wg0 + allowlist (if `expose_postgres`). Keep public 22 only if `lockdown_pending` or not yet locked. `ufw --force enable` | Parsed `ufw status` matches the expected rule set |
-| 6 | `host-baseline-v1` | journald drop-in (copy deploycrate `host.sh`), swapfile (`swap_mb`), timezone, chrony enabled, unattended-upgrades security-only with `Package-Blacklist` `postgresql-`, `libpq`, `pgbouncer`, `pgbackrest`, `caddy` and `Automatic-Reboot "false"`, fail2ban sshd jail, logrotate for `/var/log/eru` | Files match render, services active |
+| 3 | `wireguard-v1` | Adapt deploycrate `wireguard.sh` (no ip_forward: not a gateway). Address `10.42.0.1/16`; operator peers rendered from `cluster.toml` + operator registry (`/etc/eru/operators.toml`: name, wg pubkey, address). `ufw allow 51820/udp`. The node key lives in `/etc/wireguard/eru.key` (`eru.pub`); a running wg0 is updated with `wg syncconf` | `wg show wg0` lists all peers |
+| 4 | `sshd-hardening-v1` | Write `/etc/ssh/sshd_config.d/00-eru.conf` (below). It sorts first because sshd keeps the first value it reads, so provider drop-ins such as `50-cloud-init.conf` cannot re-enable passwords. Handle `ssh.socket` (§8.3). `sshd -t` and check that `sshd -T` shows `permitrootlogin no` and `passwordauthentication no` (roll back otherwise), reload. Public 22 stays open until lockdown | Drop-in matches render |
+| 5 | `firewall-v1` | ufw: `default deny incoming`, `default allow outgoing`, allow 51820/udp, 80/tcp, 443/tcp, `in on wg0` 22/tcp, 6432/tcp from wg0 + allowlist (if `expose_pgbouncer`), 5432/tcp from wg0 + allowlist (if `expose_postgres`). Keep public 22 only if `lockdown_pending` or not yet locked. Rules not in the set are deleted (expected rules are added before and after, so SSH always has an allow rule). `ufw --force enable` | `ufw status` active and `ufw show added` equals the expected rule set |
+| 6 | `host-baseline-v1` | journald drop-in (copy deploycrate `host.sh`), swapfile (`swap_mb`), timezone, chrony enabled, unattended-upgrades security-only with `Package-Blacklist` `postgresql-`, `libpq`, `pgbouncer`, `pgbackrest`, `caddy` and `Automatic-Reboot "false"` (via `#clear` of the distribution's origins), fail2ban sshd jail (`backend = systemd`, iptables ban actions so bans stay out of the ufw rule set), logrotate for `/var/log/eru` | Files match render, services active |
 | 7 | `kernel-tuning-v1` | `/etc/sysctl.d/90-eru.conf` and the `eru-thp.service` oneshot (below). `vm.nr_hugepages` from §12.3 | sysctl values equal render |
 | 8 | `postgres-packages-v1` | Write `/etc/postgresql-common/createcluster.d/00-eru.conf` with `create_main_cluster = false` **before** installing. Install `postgresql-common`, run `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, install `postgresql-18 postgresql-client-18 postgresql-contrib pgbouncer pgbackrest`, then `apt-mark hold postgresql-18 postgresql-client-18` | Packages installed and held |
 | 9 | `postgres-cluster-v1` | If no cluster exists: `pg_createcluster 18 main --datadir=<data_directory> --locale-provider=<provider> --locale=<locale> --start-conf=auto -- --auth-local=peer --auth-host=scram-sha-256` (checksums are default-on in 18; assert `data_checksums = on` after start). systemd drop-in for `postgresql@18-main.service`: `LimitNOFILE=65536`, `OOMScoreAdjust=-900`, `Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj PG_OOM_ADJUST_VALUE=0` | `pg_lsclusters` shows 18/main online |
@@ -714,7 +725,7 @@ Order is fixed. IDs end in `-v1`; bump the suffix whenever behaviour changes in 
 
 ### 11.1 Fixed file contents
 
-`/etc/ssh/sshd_config.d/99-eru.conf`:
+`/etc/ssh/sshd_config.d/00-eru.conf` (plus a `# managed by eru` header):
 
 ```
 PermitRootLogin no
@@ -1408,8 +1419,8 @@ Based on deploycrate's `install.sh`:
 - Supports Linux and macOS: `uname -s` → `linux|darwin`.
 - Downloads and verifies cosign (pinned checksums per OS/arch), the manifest and its signature, then the artifact, its signature and its sha256.
 - Installs to `/usr/local/bin/eru` when root, else `~/.local/bin/eru` (with a PATH hint).
-- When root on a supported Linux server with a TTY, asks "Initialise a cluster on this server now (`eru cluster init --local`)? [y/N]". Not built yet; comes with Phase 1.
-- `ERU_INSTALL_ONLY=1` skips the next-step text (and will skip the Phase 1 question).
+- When root on a supported Linux server with a TTY, asks "Initialise a cluster on this server now (`eru cluster init --local`)? [y/N]" on `/dev/tty` (stdin is the piped script) and on yes execs `eru cluster init --local` with the terminal as stdin.
+- `ERU_INSTALL_ONLY=1` skips the next-step text and the init question.
 
 ### 23.3 Pinned versions (`internal/versions`)
 

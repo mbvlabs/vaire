@@ -51,7 +51,7 @@ func notImplemented(cmd *cobra.Command, _ []string) error {
 		output.CodeError,
 		cmd.CommandPath()+" is not implemented yet",
 		output.ExitGeneric,
-		"This command lands in a later Phase 1 milestone.",
+		"This command lands in a later phase of the roadmap (docs/MASTER.md §7).",
 	)
 }
 

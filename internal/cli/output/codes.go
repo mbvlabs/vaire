@@ -80,3 +80,12 @@ func IsKnownCode(code string) bool {
 	_, ok := exitByCode[code]
 	return ok
 }
+
+// ExitFor returns the exit status for a stable error code, or ExitGeneric for
+// an unknown one. The operator uses it for errors relayed from a node.
+func ExitFor(code string) int {
+	if exit, ok := exitByCode[code]; ok {
+		return exit
+	}
+	return ExitGeneric
+}

@@ -140,4 +140,30 @@ esac
 if [ "${ERU_INSTALL_ONLY:-0}" = 1 ]; then
   exit 0
 fi
+
+# A supported server release, where eru cluster init --local can run.
+supported_server() {
+  [ "${os}" = linux ] && [ -r /etc/os-release ] || return 1
+  # shellcheck disable=SC1091
+  case "$(. /etc/os-release && printf '%s-%s' "${ID:-}" "${VERSION_ID:-}")" in
+    debian-12 | debian-13 | ubuntu-24.04 | ubuntu-26.04) return 0 ;;
+  esac
+  return 1
+}
+
+# curl | sudo bash feeds this script on stdin, so the question goes to the
+# terminal directly.
+if [ "$(id -u)" -eq 0 ] && supported_server && { : </dev/tty; } 2>/dev/null; then
+  printf '\nInitialise a cluster on this server now (eru cluster init --local)? [y/N] ' >/dev/tty
+  answer=""
+  read -r answer </dev/tty || answer=""
+  case "${answer}" in
+    y | Y | yes | YES)
+      rm -rf "${work_dir}"
+      exec "${dest}" cluster init --local </dev/tty
+      ;;
+  esac
+  printf '\nNext: eru cluster init --local, or eru --help\n'
+  exit 0
+fi
 printf '\nNext: eru --help\n'

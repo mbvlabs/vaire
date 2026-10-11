@@ -1,3 +1,3 @@
-// Package config loads the node's config files. For now it reads only what the engine
-// needs: node.toml and the [cluster] table of cluster.toml.
+// Package config loads and writes the node's config files: cluster.toml (the
+// Phase 1 subset of §6.1), node.toml and the operator registry.
 package config
