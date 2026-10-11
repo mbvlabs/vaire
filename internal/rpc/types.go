@@ -80,7 +80,9 @@ func (r Request) Loggable() map[string]any {
 
 var requestIDPattern = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{26}$`)
 
-var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`)
+// methodPattern is <group>.<verb>; words may contain inner hyphens, as in
+// cluster.confirm-secrets.
+var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*(\.[a-z][a-z0-9]*(-[a-z0-9]+)*)*$`)
 
 // DecodeRequest reads exactly one JSON object from r, then EOF, within
 // MaxRequestBytes. A request without request_id gets a new one.

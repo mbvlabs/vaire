@@ -92,7 +92,7 @@ func (j *Journal) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(raw, '\n'), 0o600)
+	return WriteFileAtomic(path, append(raw, '\n'), 0o600)
 }
 
 func (j *Journal) addPending(id string) {

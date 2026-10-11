@@ -48,8 +48,12 @@ type Runtime struct {
 	DryRun  bool
 	Shell   Shell
 	Secrets *secrets.Registry
-	Log     *RunLog
-	// Host hostinfo.Info arrives in Phase 1, PG *pg.Local in Phase 2.
+	// SecretValues are the request's secrets by name, for steps that need a
+	// raw value (for example the admin sudo password). Every value is also
+	// registered with Secrets.
+	SecretValues map[string]string
+	Log          *RunLog
+	// Host hostinfo.Info and PG *pg.Local arrive in Phase 2.
 }
 
 // Restarter performs the aggregated restart at the end of an apply. Phase 2

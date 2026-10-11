@@ -86,7 +86,7 @@ func Acquire(ctx context.Context, mode LockMode, method, requestID string, timeo
 		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if raw, err := json.Marshal(info); err == nil {
-		_ = writeFileAtomic(LockInfoPath, append(raw, '\n'), 0o644)
+		_ = WriteFileAtomic(LockInfoPath, append(raw, '\n'), 0o644)
 	}
 	return func() {
 		if mode == LockExclusive {

@@ -59,6 +59,7 @@ func NewRoot() *cobra.Command {
 	flags.Bool("no-input", false, "Never prompt. Implied when stdin is not a terminal")
 	flags.Bool("sudo", false, "Pre-approve local sudo escalation")
 	flags.Bool("install-missing", false, "Pre-approve local package installs")
+	flags.Bool("auto-upgrade-nodes", false, "Install this CLI's build on a node that runs a different one")
 	flags.Duration("timeout", 30*time.Second, "How long to wait for a lock or connection")
 	flags.Bool("yes", false, "Accept non-destructive prompts. Never satisfies --confirm")
 	flags.Bool("escalated", false, "Internal marker for a sudo re-exec")

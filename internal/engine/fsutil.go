@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 )
 
-// writeFileAtomic writes data to path through a temp file in the same
+// WriteFileAtomic writes data to path through a temp file in the same
 // directory: write, fsync, chmod, rename, then fsync the directory.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 	dir := filepath.Dir(path)
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {

@@ -147,7 +147,7 @@ func phase1Commands() []cmdSpec {
 		{
 			use:  "login <secrets.age>",
 			args: cobra.ExactArgs(1),
-			run:  notImplemented,
+			run:  runLogin,
 			flags: []fl{
 				flagString("name", "", "Context name (default: the cluster name in the document)"),
 				flagBool("passphrase-stdin", "Read the passphrase from stdin"),
@@ -162,25 +162,30 @@ func phase1Commands() []cmdSpec {
 				SkipDryRunReason: "login writes a local context from a secrets document and has no host change to preview",
 				Prompts:          true,
 				InteractiveFlags: []string{"--passphrase-stdin", "--passphrase-file"},
-				Next:             []string{"eru status", "eru doctor"},
+				ErrorCodes:       []string{"secrets_error", "precondition_failed", "input_required", "validation_failed"},
+				Next:             []string{"eru plan", "eru context show"},
 			},
 		},
 		contextCommands(),
 		clusterCommands(),
 		{
 			use: "plan",
-			run: notImplemented,
+			run: runPlan,
 			meta: CommandMeta{
 				Summary:   "Show the steps and file diffs an apply would run",
 				WhenToUse: []string{"Review pending step changes before eru apply."},
 				Examples:  []string{"eru plan", "eru plan --output json"},
 				Remote:    true,
-				Next:      []string{"eru apply"},
+				ErrorCodes: []string{
+					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+					"node_version_mismatch", "precondition_failed",
+				},
+				Next: []string{"eru apply"},
 			},
 		},
 		{
 			use: "apply",
-			run: notImplemented,
+			run: runApply,
 			flags: []fl{
 				flagStrings("step", "Run only these step ids"),
 			},
@@ -195,7 +200,11 @@ func phase1Commands() []cmdSpec {
 				Remote:           true,
 				ConfirmToken:     "{cluster}/restart",
 				NeedsRestart:     "maybe",
-				Next:             []string{"eru status", "eru doctor"},
+				ErrorCodes: []string{
+					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+					"node_version_mismatch", "precondition_failed", "step_failed", "unsafe_action_requires_confirmation",
+				},
+				Next: []string{"eru plan"},
 			},
 		},
 		configCommands(),
@@ -480,7 +489,7 @@ func contextCommands() cmdSpec {
 		children: []cmdSpec{
 			{
 				use: "list",
-				run: notImplemented,
+				run: runContextList,
 				meta: CommandMeta{
 					Summary:   "List local contexts",
 					WhenToUse: []string{"See which clusters this machine can operate."},
@@ -490,7 +499,7 @@ func contextCommands() cmdSpec {
 			{
 				use:  "show [name]",
 				args: cobra.MaximumNArgs(1),
-				run:  notImplemented,
+				run:  runContextShow,
 				meta: CommandMeta{
 					Summary:   "Show one context, or the current context",
 					WhenToUse: []string{"Read addresses, keys' public parts, and the operator name for a context."},
@@ -500,7 +509,7 @@ func contextCommands() cmdSpec {
 			{
 				use:  "use <name>",
 				args: cobra.ExactArgs(1),
-				run:  notImplemented,
+				run:  runContextUse,
 				meta: CommandMeta{
 					Summary:          "Select the current context",
 					WhenToUse:        []string{"Point later commands at a different cluster."},
@@ -513,7 +522,7 @@ func contextCommands() cmdSpec {
 			{
 				use:  "remove <name>",
 				args: cobra.ExactArgs(1),
-				run:  confirmArgThen,
+				run:  runContextRemove,
 				meta: CommandMeta{
 					Summary:          "Delete a local context",
 					WhenToUse:        []string{"Remove operator credentials for a cluster from this machine."},
@@ -541,7 +550,7 @@ func clusterCommands() cmdSpec {
 		},
 		children: []cmdSpec{{
 			use: "init",
-			run: notImplemented,
+			run: runClusterInit,
 			flags: []fl{
 				flagString("host", "", "First-contact SSH target, user@host[:port]"),
 				flagString("identity", "", "SSH private key for first contact"),
@@ -606,7 +615,12 @@ func clusterCommands() cmdSpec {
 				Remote:         true,
 				ConfirmToken:   "{cluster}",
 				LinuxOnlyFlags: []string{"--local"},
-				Next:           []string{"eru doctor", "eru backup list"},
+				ErrorCodes: []string{
+					"input_required", "unsafe_action_requires_confirmation", "validation_failed", "remote_unreachable",
+					"transport_failed", "host_key_mismatch", "node_version_mismatch", "precondition_failed", "step_failed",
+					"lockdown_failed", "release_verification_failed",
+				},
+				Next: []string{"eru plan"},
 			},
 		}},
 	}
@@ -1330,7 +1344,7 @@ func nodeCommands() cmdSpec {
 			},
 			{
 				use: "ssh-revert",
-				run: notImplemented,
+				run: runNodeSSHRevert,
 				flags: []fl{
 					flagBool("lockdown-only", "Restore the locked-down SSH rules instead of the pre-lockdown snapshot"),
 				},
@@ -1346,7 +1360,7 @@ func nodeCommands() cmdSpec {
 			},
 			{
 				use: "unlock-ssh",
-				run: notImplemented,
+				run: runNodeUnlockSSH,
 				flags: []fl{
 					flagInt("minutes", 30, "How long public SSH stays open"),
 				},
