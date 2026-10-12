@@ -73,7 +73,12 @@ func runDBList(cmd *cobra.Command, _ []string) error {
 func runDBCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	if !config.DatabasePattern.MatchString(name) {
-		return output.NewError(output.CodeValidation, "database name "+name+" must match "+config.DatabasePattern.String(), output.ExitConfig, "")
+		hint := "Use lowercase letters, digits and underscores; the name is also the prefix of its roles."
+		if fixed := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(strings.ToLower(name)); config.DatabasePattern.MatchString(fixed) {
+			hint = "Try " + fixed + ". Hyphens aren't allowed because the name is also the prefix of its roles."
+		}
+		return output.NewError(output.CodeValidation, "database name "+name+" must match "+config.DatabasePattern.String(), output.ExitConfig, hint).
+			WithDetails(map[string]any{"name": name})
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)

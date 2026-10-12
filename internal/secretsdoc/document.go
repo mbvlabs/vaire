@@ -47,8 +47,9 @@ type Document struct {
 const ConnectionNotes = "The app URL goes through PgBouncer on port 6432 in transaction mode; use it for application traffic. " +
 	"The migrate URL connects straight to PostgreSQL on port 5432 for session features that migrations need. " +
 	"Port 5432 is reachable only over WireGuard (eru tunnel --target postgres) or when network.expose_postgres = true. " +
-	"The app_direct_tls URL is the app role through port 443: PostgreSQL 17+ clients that negotiate TLS directly (sslnegotiation=direct) " +
-	"reach the same PgBouncer, which helps on networks that only allow 443. It follows the same client allowlist as 6432. " +
+	"The app_direct_tls URL is the same PgBouncer through port 443; it does not bypass PgBouncer. It is for networks that only allow 443, " +
+	"and the client must negotiate TLS directly (sslnegotiation=direct, PostgreSQL 17+ libpq or pgx 5.7+); other clients get \"server refused TLS\" and should use 6432. " +
+	"It follows the same client allowlist as 6432. " +
 	"pgbouncer_auth and eru_monitor under services are eru's own service roles; applications never use them."
 
 // Cluster is the cluster identity.

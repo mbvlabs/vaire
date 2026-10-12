@@ -35,7 +35,7 @@ func HostStepIDs() []string {
 }
 
 // DatabaseStepIDs are the steps cluster.bootstrap phase=database runs (steps
-// 7-13, D1). tls-v2 runs before postgres-config-v1: the security settings turn
+// 7-13, D1). tls-v1 runs before postgres-config-v1: the security settings turn
 // ssl on and point at /etc/eru/tls, so the certificate and the ssl-cert group
 // membership have to exist before PostgreSQL restarts.
 func DatabaseStepIDs() []string {

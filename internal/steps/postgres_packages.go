@@ -14,8 +14,7 @@ const postgresPackagesID = "postgres-packages-v1"
 // pgdgScript installs the PGDG apt repository; postgresql-common provides it.
 const pgdgScript = "/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh"
 
-// pgPackages are step 8's packages. Phase 3 adds pgbackrest with a
-// postgres-packages-v2 bump (D2).
+// pgPackages are step 8's packages. Phase 3 adds pgbackrest (D2).
 var pgPackages = []string{"postgresql-18", "postgresql-client-18", "postgresql-contrib", "pgbouncer"}
 
 // pgHold are the packages pinned to the major version.

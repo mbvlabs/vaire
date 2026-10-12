@@ -2,11 +2,12 @@
 local   all             postgres                                peer
 local   all             eru_monitor                             peer map=eru
 local   all             eru_admin                               peer map=eru
+local   postgres        pgbouncer_auth                          peer map=eru
 local   all             all                                     scram-sha-256
 hostssl all             postgres        0.0.0.0/0               reject
 hostssl all             postgres        ::/0                    reject
 hostssl all             all             127.0.0.1/32            scram-sha-256
-hostssl all             all             {{ .WGSubnet }}         scram-sha-256
-{{ range .Allowlist }}hostssl all             all             {{ . }}  scram-sha-256
+hostssl all             all             {{ printf "%-23s" .WGSubnet }} scram-sha-256
+{{ range .Allowlist }}hostssl all             all             {{ printf "%-23s" . }} scram-sha-256
 {{ end }}host    all             all             0.0.0.0/0               reject
 host    all             all             ::/0                    reject

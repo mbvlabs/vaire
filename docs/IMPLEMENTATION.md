@@ -156,6 +156,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru logs [unit]` | `--since`, `--follow`, `--lines` | | | | | |
 | `eru sql <query>` | `--db`, `--file`, `--write`, `--role ro\|app\|admin` | `--write` | | | | |
 | `eru psql` | `--db`, `--role` | | | | | |
+| `eru console [db]` | `--db`, `--role` | | | | | |
 | `eru tunnel` | `--local-port`, `--target pgbouncer\|postgres` | | | | | |
 | `eru ssh` | `--command` | | | | | |
 | `eru db list` / `create <name>` / `drop <name>` / `credentials <name>` | `create`: `--statement-timeout`, `--extensions`; `credentials`: `--rotate`, `--role` | create/drop/rotate | drop, rotate | ✓ | | `<db>` |
@@ -475,6 +476,8 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 - Expose a `transport.Dialer` interface with `DialContext(ctx, network, addr)`. The WireGuard implementation uses `netstack.Net.DialContext`. The local (`--local`) implementation uses `net.Dialer`.
 - Bring up lazily per command. Tear down on exit. No persistent daemon.
 - `eru tunnel` / `eru psql`: listen on `127.0.0.1:<port>` (default 6543 for pgbouncer and 6544 for postgres, or the first free port) and proxy accepted conns through the netstack dialer to `10.42.0.1:6432|5432`. `eru psql` execs the system `psql` with `PGHOST=127.0.0.1 PGPORT=<port> PGSSLMODE=verify-full PGSSLROOTCERT=system PGSSLSNI=1`. Set `PGHOSTADDR` to 127.0.0.1 and `PGHOST` to the domain so verify-full matches the cert. `PGPASSWORD` comes from `credentials.json` through the environment, never argv.
+- `eru console [db]` (`--role ro|app|migrate|admin`, default `ro`): opens usql instead of psql, so the operator needs no PostgreSQL client. usql can't verify a certificate against a loopback address, so eru terminates TLS itself: `pg.ServeTLSProxy` listens on `127.0.0.1:<port>` (from 6544), answers the client's `SSLRequest`/`GSSENCRequest` with `N`, then sends its own `SSLRequest` upstream over the tunnel and does the handshake with `pg.TLSConfig` (verify-full against system roots with `ServerName = domain`; `require` in `self-signed` mode, with a warning) before forwarding the startup message. usql connects with `postgres://<user>@127.0.0.1:<port>/<db>?sslmode=disable&application_name=eru-console`, with the password in `PGPASSWORD`, never argv. eru ignores SIGINT while usql runs, so Ctrl-C cancels the query, not the console. Refused (`usage`) when eru must not prompt; agents use `eru sql`.
+- usql comes from PATH, else from `$XDG_CACHE_HOME/eru/tools/usql/<version>/usql`. When neither exists eru offers to download the pinned release (`localenv.UsqlVersion`, v0.21.4) from `github.com/xo/usql/releases`, or does so with `--install-missing`. The archive is checked against a SHA-256 pinned per platform (linux and darwin, amd64 and arm64) before the binary is extracted. Without approval it fails `missing_tool` with `details.download_url`.
 
 ### 7.3 SSH and version handshake
 
@@ -742,7 +745,7 @@ Use `crypto/rand` only.
 
 ## 11. Step catalogue
 
-Order is fixed. IDs end in `-v1`; bump the suffix whenever behaviour changes in a way the input hash can't capture (for example, script logic changes). Columns: what it does, and how Check decides completeness.
+Order is fixed. IDs end in `-v1`. Every step stays `-v1` until the first release; after that, bump the suffix whenever behaviour changes in a way the input hash can't capture (for example, script logic changes). Columns: what it does, and how Check decides completeness.
 
 | # | ID | Does | Check |
 | --- | --- | --- | --- |
@@ -753,9 +756,9 @@ Order is fixed. IDs end in `-v1`; bump the suffix whenever behaviour changes in 
 | 5 | `firewall-v1` | ufw: `default deny incoming`, `default allow outgoing`, allow 51820/udp, 80/tcp, 443/tcp, `in on wg0` 22/tcp, 6432/tcp and 5432/tcp; the allowlist rules for 6432 (if `expose_pgbouncer`) and 5432 (if `expose_postgres`). WireGuard peers always reach both ports; the expose flags gate only the allowlist. Keep public 22 only if `lockdown_pending` or not yet locked. Rules not in the set are deleted (expected rules are added before and after, so SSH always has an allow rule). `ufw --force enable` | `ufw status` active and `ufw show added` equals the expected rule set |
 | 6 | `host-baseline-v1` | journald drop-in (copy deploycrate `host.sh`), swapfile (`swap_mb`), timezone, chrony enabled, unattended-upgrades security-only with `Package-Blacklist` `postgresql-`, `libpq`, `pgbouncer`, `pgbackrest`, `nginx`, `libnginx-mod-` and `Automatic-Reboot "false"` (via `#clear` of the distribution's origins), fail2ban sshd jail (`backend = systemd`, iptables ban actions so bans stay out of the ufw rule set), logrotate for `/var/log/eru` | Files match render, services active |
 | 7 | `kernel-tuning-v1` | `/etc/sysctl.d/90-eru.conf` and the `eru-thp.service` oneshot (below), `sysctl --system`, `daemon-reload`, `enable --now eru-thp.service`. `vm.nr_hugepages` from §12.3 (0 when `huge_pages = off`) | `sysctl -n` values equal render, THP `enabled` = `[never]` |
-| 8 | `postgres-packages-v1` | Write `/etc/postgresql-common/createcluster.d/00-eru.conf` with `create_main_cluster = false` **before** installing. Install `postgresql-common`, run `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, install `postgresql-18 postgresql-client-18 postgresql-contrib pgbouncer`, then `apt-mark hold postgresql-18 postgresql-client-18`. Debian's pgbouncer auto-starts with its own config, so `systemctl stop pgbouncer` right after install until step 13 renders it. `pgbackrest` arrives with Phase 3 as `postgres-packages-v2` | Packages installed and held |
+| 8 | `postgres-packages-v1` | Write `/etc/postgresql-common/createcluster.d/00-eru.conf` with `create_main_cluster = false` **before** installing. Install `postgresql-common`, run `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, install `postgresql-18 postgresql-client-18 postgresql-contrib pgbouncer`, then `apt-mark hold postgresql-18 postgresql-client-18`. Debian's pgbouncer auto-starts with its own config, so `systemctl stop pgbouncer` right after install until step 13 renders it. `pgbackrest` arrives with Phase 3 in the same step | Packages installed and held |
 | 9 | `postgres-cluster-v1` | If no cluster exists: `pg_createcluster 18 main --datadir=<data_directory> --locale-provider=<provider> --locale=<locale> --start-conf=auto -- --auth-local=peer --auth-host=scram-sha-256` (checksums are default-on in 18; assert `data_checksums = on` after start and fail the step otherwise). A non-default `data_directory` gets its parent created `postgres:postgres 0700`. An existing 18/main with a **different** data directory is `precondition_failed`; eru never re-creates a cluster. systemd drop-in for `postgresql@18-main.service`: `LimitNOFILE=65536`, `OOMScoreAdjust=-900`, `Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj PG_OOM_ADJUST_VALUE=0` | `pg_lsclusters` shows 18/main online |
-| 10 | `tls-v2` | Refuse a server that has `caddy` installed (an older eru used Caddy; there is no migration, rebuild the server). Install `nginx` and `libnginx-mod-stream` from the distribution (at least `NginxMinVersion`), `apt-mark hold` them, remove the default site. Add `postgres` and `pgbouncer` to `ssl-cert`. If no certificate exists, write a self-signed P-256 placeholder (30 days, `CN`/SAN = domain) into `/etc/eru/tls` so PG, PgBouncer and nginx can start; TLS never blocks on ACME. This step runs before `postgres-config-v1`, because that step turns `ssl` on and PostgreSQL refuses to start without a readable certificate. Render `/etc/nginx/nginx.conf` (§15.2), `nginx -t`, `systemctl reload-or-restart nginx`. Install `eru-certs.service` and `eru-certs.timer` (hourly), enable the timer and `systemctl start --no-block eru-certs.service` so issuance starts at once (§15.3) | nginx active, `/etc/eru/tls/server.crt` exists |
+| 10 | `tls-v1` | Refuse a server that has `caddy` installed (an older eru used Caddy; there is no migration, rebuild the server). Install `nginx` and `libnginx-mod-stream` from the distribution (at least `NginxMinVersion`), `apt-mark hold` them, remove the default site. Add `postgres` and `pgbouncer` to `ssl-cert`. If no certificate exists, write a self-signed P-256 placeholder (30 days, `CN`/SAN = domain) into `/etc/eru/tls` so PG, PgBouncer and nginx can start; TLS never blocks on ACME. This step runs before `postgres-config-v1`, because that step turns `ssl` on and PostgreSQL refuses to start without a readable certificate. Render `/etc/nginx/nginx.conf` (§15.2), `nginx -t`, `systemctl reload-or-restart nginx`. Install `eru-certs.service` and `eru-certs.timer` (hourly), enable the timer and `systemctl start --no-block eru-certs.service` so issuance starts at once (§15.3) | nginx active, `/etc/eru/tls/server.crt` exists |
 | 11 | `postgres-config-v1` | Render `conf.d/10-eru-tuning.conf` (§12), `20-eru-security.conf`, `30-eru-extensions.conf` (§17), `50-eru-settings.conf` (`[postgres.settings]`, values single-quoted with `''` escaping), and create `90-overrides.conf` (empty, comment header) if missing (`40-eru-backup.conf` arrives in Phase 3; `wal_level = replica` and `max_wal_senders = 10` are already in the tuning file, so only `archive_mode` will need a restart then). Render `pg_hba.conf` and `pg_ident.conf`. Every file is written owned by `postgres:postgres` with `0640` for `pg_hba.conf` and `pg_ident.conf` and `0644` for `conf.d`, so the server can read them before the reload. Ensure `include_dir = 'conf.d'` is in `postgresql.conf`. Before reload, `pg_file_settings` and `pg_hba_file_rules` must have no errors; otherwise the previous files are restored and the step fails with the errors. Classify changes via `pg_settings.context` (`postmaster` means restart, listed in the notes). The **first run** (no completed journal entry for this step) restarts unconditionally and without confirmation, because there is no traffic yet. When huge pages change, `shared_memory_size_in_huge_pages` is computed while PG is stopped during that restart, and `vm.nr_hugepages` is re-applied through step 7's helper | Rendered = on disk, with owner and mode |
 | 12 | `postgres-roles-v1` | §14 SQL through `pg.Local` (psql as the `postgres` OS user, SQL on stdin); per-db roles, databases, default privileges, extensions, `eru.pgbouncer_get_auth`. Passwords follow §10.2 (set once, verifiers only). Writes `/etc/eru/runtime/{pgbouncer_auth,monitor}.pass` from the request secrets when missing. Inputs are names, timeouts and extensions, never passwords. Databases removed from `cluster.toml` are not dropped (only `db drop` drops); they are reported as `orphaned_database` warnings | All roles, dbs, grants, extensions and the auth function exist |
 | 13 | `pgbouncer-v1` | Render `/etc/pgbouncer/pgbouncer.ini` (§14.3) and `userlist.txt` (verifiers read back from `pg_authid` for `pgbouncer_auth` and `eru_monitor`), `postgres:postgres 0640`, overwriting Debian's files. Enable and restart | Rendered = on disk (owner and mode included), and `SHOW VERSION` as `eru_monitor` on 6432 works (via a 0600 `PGPASSFILE`) |
@@ -1059,6 +1062,7 @@ Network exposure is controlled by ufw (§11 step 5) and pg_hba.
 local   all             postgres                                peer
 local   all             eru_monitor                             peer map=eru
 local   all             eru_admin                               peer map=eru
+local   postgres        pgbouncer_auth                          peer map=eru
 local   all             all                                     scram-sha-256
 hostssl all             postgres        0.0.0.0/0               reject
 hostssl all             postgres        ::/0                    reject
@@ -1069,7 +1073,7 @@ hostssl all             all             {{ .WGSubnet }}         scram-sha-256
 host    all             all             ::/0                    reject
 ```
 
-`pg_ident.conf` (map `eru`): `<admin_user> → eru_admin`, `root → eru_admin`, `postgres_exporter → eru_monitor`, `postgres → eru_monitor` (pgbackrest_exporter runs as `postgres`).
+`pg_ident.conf` (map `eru`): `<admin_user> → eru_admin`, `root → eru_admin`, `postgres_exporter → eru_monitor`, `postgres → eru_monitor` (pgbackrest_exporter runs as `postgres`), `postgres → pgbouncer_auth`. PgBouncer runs as `postgres` and logs in as `pgbouncer_auth` over the socket to run `auth_query`. That login can't use SCRAM: PgBouncer only reuses SCRAM keys a client handed it, and the auth query runs before any client has, so a SCRAM verifier in `userlist.txt` fails with `wrong password type`. Peer auth needs no password on disk.
 
 pg_hba stops at the first line whose type, database and user match. If the peer check then fails, the connection is rejected; it doesn't fall through to the next line. That's why peer lines name specific users and the final `local all all scram-sha-256` line serves every other role (PgBouncer connecting app roles over the socket).
 
@@ -1127,7 +1131,7 @@ CREATE EXTENSION IF NOT EXISTS ... ;                         -- per [databases.e
 
 Role names are validated by regex and also quoted with `pgx.Identifier{}.Sanitize()` (`pg.Quote`). The `:'pw'` placeholders above are SCRAM verifiers computed in Go (§10.2), never plaintext. psql `-v` variables carry only validated identifiers and non-secret literals.
 
-**Operator SQL** (`eru sql`, `eru psql`) connects to Postgres on 5432 over the tunnel (pgx with `transport.Tunnel.DialContext`, `ServerName = domain`, `verify-full` against system roots; `self-signed` mode uses `require` and warns `tls_unverified`). `--db` is required, and there is no default database; a missing `--db` is `input_required`. The default role is `ro`. `--write` is needed for `app`, `migrate` or `admin` and is a usage error with `ro`. Each call runs in one transaction, `READ ONLY` unless `--write`. `migrate` acts as `<db>_owner`.
+**Operator SQL** (`eru sql`, `eru psql`, `eru console`) connects to Postgres on 5432 over the tunnel (pgx with `transport.Tunnel.DialContext`, `ServerName = domain`, `verify-full` against system roots; `self-signed` mode uses `require` and warns `tls_unverified`). `--db` is required, and there is no default database; a missing `--db` is `input_required`. The default role is `ro`. `--write` is needed for `app`, `migrate` or `admin` and is a usage error with `ro`. Each call runs in one transaction, `READ ONLY` unless `--write`. `migrate` acts as `<db>_owner`.
 
 ### 14.3 `pgbouncer.ini`
 
@@ -1196,7 +1200,7 @@ eru renders the whole `/etc/nginx/nginx.conf` (`internal/render/templates/nginx.
 
 eru issues and renews the certificate itself with `golang.org/x/crypto/acme`. Nothing else on the server speaks ACME.
 
-- `eru-certs.timer` runs `eru node run certs-renew` hourly (randomized 10 min); `tls-v2` also starts it once right away. The job waits up to 20 minutes for the shared lock, so the run `tls-v2` starts during `cluster.bootstrap` goes ahead once the bootstrap releases the lock; if the lock is still busy it exits 0 with a skipped result.
+- `eru-certs.timer` runs `eru node run certs-renew` hourly (randomized 10 min); `tls-v1` also starts it once right away. The job waits up to 20 minutes for the shared lock, so the run `tls-v1` starts during `cluster.bootstrap` goes ahead once the bootstrap releases the lock; if the lock is still busy it exits 0 with a skipped result.
 - It does nothing unless `/etc/eru/tls/server.crt` is missing, isn't for `domain`, is the self-signed placeholder in `acme` mode (or not self-signed in `self-signed` mode), or expires within 30 days.
 - **acme mode:** first a self-check: write a random token into the webroot and fetch `http://<domain>/.well-known/acme-challenge/<token>`. If another host answers, the job stops with `changed: false, pending: …` (exit 0) so a wrong record doesn't use up Let's Encrypt's failed-validation limit. A connection error is inconclusive and the job carries on. Then: account key `/etc/eru/acme/account.key` (P-256, 0600, created once; `acme_email`, when set, is the account contact), order, HTTP-01 through the webroot, a fresh P-256 leaf key and CSR, and the full chain. `tls.acme_ca` overrides the directory URL (for example Let's Encrypt staging). ACME errors fail the unit with `external_command_failed`; a rate limit says when to retry.
 - **self-signed mode:** a self-signed P-256 leaf for `domain`, valid 397 days. Clients use `sslmode=require` (the document's URLs switch accordingly, and doctor warns).
@@ -1326,7 +1330,7 @@ WantedBy=timers.target
 | certs-renew | hourly | 10m |
 | metrics-refresh | every 5 min | 0 |
 
-`certs-renew` is the only timer in Phase 2. `tls-v2` installs `eru-certs.{service,timer}` itself; `timers-v1` (Phase 6) takes ownership of the `.timer`. Until then every other `node run` job returns `not implemented yet`.
+`certs-renew` is the only timer in Phase 2. `tls-v1` installs `eru-certs.{service,timer}` itself; `timers-v1` (Phase 6) takes ownership of the `.timer`. Until then every other `node run` job returns `not implemented yet`.
 
 `node run <job>` takes the right lock with `--timeout 0`. If the lock is busy it logs, exits 0 and writes a `skipped` metric. Busy isn't a failure, but repeated skips show up in doctor.
 
@@ -1381,6 +1385,7 @@ WantedBy=timers.target
 | Any remote command | Context exists, key files are 0600, UDP egress (no check, just a hint on `transport_failed`) |
 | `cluster init` (remote) | Target reachable on 22/tcp. An SSH credential: `--identity`, agent keys, or `--password-stdin` |
 | `psql` | `psql` binary ≥ 16 on PATH |
+| `console` | `usql` on PATH, or eru's pinned download (checksum-verified) |
 | `wg export --install` | `wireguard-tools` (`wg`, `wg-quick`) and root |
 | `cluster init --local` | Root (or escalation), a supported OS, no existing `/etc/eru/node.toml` |
 

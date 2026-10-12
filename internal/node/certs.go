@@ -50,7 +50,7 @@ const (
 )
 
 // RunJob runs one timer job. certs-renew waits up to jobLockWait for the
-// shared lock, so the run tls-v2 starts during a bootstrap goes ahead once the
+// shared lock, so the run tls-v1 starts during a bootstrap goes ahead once the
 // bootstrap releases the lock; a lock still busy after that exits 0 with a
 // skipped result.
 func RunJob(ctx context.Context, job string, report engine.Reporter) (any, error) {

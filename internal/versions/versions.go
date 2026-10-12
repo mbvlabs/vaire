@@ -4,7 +4,7 @@ package versions
 const (
 	PostgresMajor = 18
 	CosignVersion = "3.1.3"
-	// NginxMinVersion is the oldest distribution nginx tls-v2 accepts: it
+	// NginxMinVersion is the oldest distribution nginx tls-v1 accepts: it
 	// needs the stream module with ssl_preread and ssl_alpn (§23.3).
 	NginxMinVersion = "1.26"
 )

@@ -30,7 +30,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 - **One binary, two roles.** The same `eru` binary runs on the operator's machine (**operator mode**) and on each server (**node mode**). Operator mode drives node mode over SSH. Host mutations are small, idempotent bash scripts embedded with `go:embed`, the same pattern as `deploycrate-ce/internal/setup`.
 - **SSH through WireGuard is the only control channel.** There is no daemon, no HTTP control API and no open control port. After bootstrap, sshd listens only on the WireGuard address.
 - **Desired state in, convergence out.** The cluster's desired state is one TOML file on the central command. `eru apply` converges every node to it, and running it again is always safe. `eru plan` shows what would change.
-- **Versioned, journaled steps.** Each step has a `Check`/`Apply` pair and a versioned ID (for example `postgres-18-tls-v2`). A journal on each node records what ran, so upgrading eru re-runs only the steps that changed.
+- **Versioned, journaled steps.** Each step has a `Check`/`Apply` pair and a versioned ID (for example `tls-v1`). A journal on each node records what ran, so upgrading eru re-runs only the steps that changed.
 - **eru owns the config it writes.** Managed config goes into dedicated files, user overrides go into one documented override file, and `ALTER SYSTEM` is disabled (`allow_alter_system = off`), so nothing drifts silently.
 - **Secrets are generated, never asked for, and shown exactly once.** They're printed in the secrets handoff at the end of setup and never written to disk by eru unless asked.
 - **Restores are the product.** A backup that has never been restored doesn't count. Restore drills run on a schedule and are reported.
@@ -88,7 +88,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Pooling | **PgBouncer** (transaction mode, `max_prepared_statements`, `auth_query`, TLS on both sides) | Clients connect to PgBouncer, which reaches Postgres over the unix socket |
 | TLS & metrics edge | **nginx** (distribution package): HTTP-01 challenges on 80; on 443 `stream` + `ssl_preread` routes ALPN `postgresql` to PgBouncer and everything else to HTTPS (authenticated `/metrics` later). Certificates come from eru's own ACME client (`x/crypto/acme`) | Only direct-TLS clients on 443 go through nginx; 6432 and 5432 are direct |
 | Metrics | `node_exporter`, `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter`; `pg_stat_statements` on by default | Localhost-bound, federated through nginx |
-| DB access from CLI | `pgx` over the WireGuard tunnel | `eru sql`, `eru psql`, `eru tunnel` |
+| DB access from CLI | `pgx` over the WireGuard tunnel | `eru sql`, `eru psql`, `eru console` (usql), `eru tunnel` |
 | HA (Phase 10) | Patroni + etcd (3 voters), HAProxy health-routing on the Patroni REST API | |
 | Scheduling | systemd timers on each node calling `eru node …` subcommands | No long-running eru process anywhere |
 
@@ -414,7 +414,7 @@ All maintenance sets `lock_timeout` and refuses to run during a backup or a rest
 - `eru apply` / `eru plan`: converge nodes to `cluster.toml`.
 - `eru config edit`: pull `cluster.toml`, open `$EDITOR`, validate, plan, push.
 - `eru doctor`: drift, security, backups, disk, certificates, versions.
-- `eru sql`, `eru psql` (system psql through a local forward), `eru tunnel` (forward `localhost:5432` to the cluster for GUI tools).
+- `eru sql`, `eru psql` (system psql through a local forward), `eru console` (usql; eru downloads a pinned, checksum-verified copy if needed and does the verify-full TLS itself), `eru tunnel` (forward `localhost:5432` to the cluster for GUI tools).
 - `eru ssh [node]`: interactive shell over WireGuard.
 - `eru upgrade` / `eru node upgrade [--rollback]`: upgrade the CLI and nodes from the operator machine (§5.1).
 - `eru pg update`: controlled minor upgrade (apt unhold → upgrade → restart in window → re-hold), with a pre-upgrade backup.
@@ -432,21 +432,21 @@ This section is the only place that tracks progress. Update it whenever a module
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
-### 7.1 Current state (2026-10-11)
+### 7.1 Current state (2026-10-12)
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
-- **Phase 1 (Bootstrap) is code complete but not done.** Every module below is built and passes `just lint` and the four cross-builds, and the local paths (login, contexts, first-contact host-key pinning and SSH auth errors, input checks) were exercised on a dev machine. Nothing has run against a real VPS yet, so the exit check has not passed. That manual run is the next task.
-- **Phase 2 (First cluster) is code complete but not done.** `internal/hostinfo`, `internal/tune`, `internal/catalog`, `internal/render`, `internal/pg`, `internal/state`, steps 7–13, the database phase of `cluster.bootstrap`, the `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` and `tune *` commands, and the database section of the secrets document are built. `just lint` and the four cross-builds pass. The VPS manual test in §7.5 has not run yet.
+- **Phase 1 (Bootstrap) works on a real VPS.** Several manual runs (2026-10-12, Hetzner, Ubuntu 26.04) went from a fresh server to public 22 closed and SSH over WireGuard, and the secrets handoff was accepted by `eru login`. It turns ✅ together with Phase 2 once the exit checks are recorded.
+- **Phase 2 (First cluster) works end to end on a real VPS; the exit check is being finished.** `cluster init` completes, the ACME certificate is issued, `eru sql` connects with verify-full, and `eru apply --auto-upgrade-nodes` upgrades the node. Fixes from each manual run are in [`PHASE2-FINDINGS.md`](./PHASE2-FINDINGS.md). Still to record: a no-op `eru apply`, an app connection to 6432 with `sslmode=verify-full`, `db drop` refused with only `--yes`, and the date, version and VPS of the passing run. `eru console` (usql through an eru-side TLS proxy) was added after the runs and hasn't been tried on the VPS yet.
 - One open item from Phase 0: install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
-- About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
+- About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
 
 ### 7.2 Overview
 
 | # | Phase | What you can do at the end | Status |
 | --- | --- | --- | --- |
 | 0 | Foundations | Install and self-upgrade the `eru` CLI; a node can run steps | ✅ |
-| 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | 🟡 code complete; VPS exit check pending |
-| 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | 🟡 code complete; VPS exit check pending |
+| 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | 🟡 works on a VPS; exit check being recorded |
+| 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | 🟡 works on a VPS; exit check being recorded |
 | 3 | Database backups & restore | Back up to S3/R2, PITR restore, drills, per-database backup policies | ⬜ |
 | 4 | VPS backups & disaster recovery | Rebuild a dead server on a fresh VPS from the secrets document | ⬜ |
 | 5 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
@@ -482,7 +482,7 @@ From a laptop, take a fresh Debian/Ubuntu VPS to "hardened, SSH only over WireGu
 | `internal/transport` | SSH client with TOFU host-key pinning; embedded userspace WireGuard | 🟡 SSH and pinning tried against a local sshd; WireGuard untested |
 | `internal/remote` | Binary push, RPC client, version handshake, `--auto-upgrade-nodes` | 🟡 in-process RPC path tried; SSH path untested |
 | `internal/secretsdoc`, `internal/contexts` | age secrets document, contexts, `eru login`, `eru context *` | 🟡 encrypt, decrypt, login and contexts tried locally |
-| `internal/localenv` (preflight) | `missing_tool` checks and install offers | 🟡 built; no Phase 1 command needs an optional tool yet, so first used by `psql` (Phase 2) |
+| `internal/localenv` (preflight) | `missing_tool` checks and install offers; the pinned, checksum-verified usql download for `eru console` | 🟡 built; first used by `psql` and `console` (Phase 2) |
 | Steps 1–6 | Base packages, admin user, WireGuard, sshd hardening + **commit-confirm** move to wg0, ufw/fail2ban, journald/swap/unattended-upgrades | 🟡 scripts pass shellcheck; firewall logic tried against a stub `ufw` only |
 | `cluster init` (host part) | Remote and `--local`, `--resume`, `node unlock-ssh`, the `install.sh` init prompt | 🟡 input checks and first contact up to auth tried locally |
 
@@ -492,7 +492,7 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 
 ### 7.5 Phase 2 — First cluster 🟡
 
-`cluster init` now finishes with a usable database. Code complete; the VPS exit check below is pending.
+`cluster init` now finishes with a usable database. It runs end to end on a VPS; the exit check below is being recorded.
 
 | Module | What it does | Status |
 | --- | --- | --- |
@@ -502,7 +502,7 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 | `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, pgbouncer_hba.conf, nginx.conf, eru-certs units, unified `Diff` | 🟡 |
 | `internal/pg`, `internal/state` | pgx admin client (local psql + remote pgx), desired-state store | 🟡 |
 | Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, nginx + ACME certificates, PgBouncer | 🟡 |
-| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs`, `tune *` | 🟡 |
+| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune *` | 🟡 |
 
 **Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused.
 

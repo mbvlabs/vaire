@@ -11,7 +11,7 @@ import (
 	"github.com/mbvlabs/eru/internal/versions"
 )
 
-const tlsID = "tls-v2"
+const tlsID = "tls-v1"
 
 // CertsUnitNames are the units step 10 installs (D11).
 var CertsUnitNames = []string{"eru-certs.service", "eru-certs.timer"}

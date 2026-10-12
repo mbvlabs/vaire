@@ -85,6 +85,8 @@ Point-in-time restore: `eru restore --time <timestamp> --confirm <token>`. The c
 
 Add a database: `eru db create <name> --output agent`.
 
+Query a database: `eru sql --db <name> "<sql>" --output agent`. It is read-only unless `--write` with `--role app|migrate|admin`; schema changes need `--role migrate`. `eru psql` and `eru console` are interactive and for humans only; `eru console` refuses to run without a terminal.
+
 Add an extension: `eru ext add <name> --db <name> --output agent`. When the result says a restart is required, ask the human for the confirm token before continuing.
 
 Maintenance report: `eru maint report bloat --db <name> --output agent`.

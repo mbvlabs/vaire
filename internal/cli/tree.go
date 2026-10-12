@@ -317,6 +317,22 @@ func phase1Commands() []cmdSpec {
 			},
 		},
 		{
+			use:  "console [db]",
+			args: cobra.MaximumNArgs(1),
+			run:  runConsole,
+			flags: []fl{
+				flagString("db", "", "Database name (or pass it as the argument)"),
+				flagString("role", "ro", "Connect as ro, app, migrate, or admin"),
+			},
+			meta: CommandMeta{
+				Summary:       "Open a usql console on a database through the WireGuard tunnel",
+				WhenToUse:     []string{"Explore a database interactively without installing psql. eru verifies the server certificate itself."},
+				WhenNotToUse:  []string{"Agents and scripts; use eru sql."},
+				Prerequisites: []string{"usql on PATH, or let eru download its pinned copy"},
+				Examples:      []string{"eru console app", "eru console app --role migrate"},
+			},
+		},
+		{
 			use: "tunnel",
 			run: runTunnel,
 			flags: []fl{
