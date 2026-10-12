@@ -400,14 +400,18 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if !NamePattern.MatchString(c.ClusterName) {
 		add("name %q must match %s", c.ClusterName, NamePattern)
 	}
-	if c.Domain != "" && !fqdnPattern.MatchString(c.Domain) {
-		add("domain %q is not a fully qualified domain name", c.Domain)
+	if c.Domain != "" {
+		if err := CheckDomain(c.Domain); err != nil {
+			add("domain %q %v", c.Domain, err)
+		}
 	}
-	if c.ACMEEmail != "" && !strings.Contains(c.ACMEEmail, "@") {
-		add("acme_email %q is not an email address", c.ACMEEmail)
+	if c.ACMEEmail != "" {
+		if err := CheckACMEEmail(c.ACMEEmail); err != nil {
+			add("acme_email %q %v", c.ACMEEmail, err)
+		}
 	}
-	if !timezonePattern.MatchString(c.Timezone) {
-		add("timezone %q is not a timezone name", c.Timezone)
+	if err := CheckTimezone(c.Timezone); err != nil {
+		add("timezone %q %v", c.Timezone, err)
 	}
 	if c.Transport.Kind != "wireguard" {
 		add("transport.kind must be wireguard until Phase 10")
@@ -419,18 +423,18 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if c.Transport.ListenPort < 1 || c.Transport.ListenPort > 65535 {
 		add("transport.listen_port must be 1-65535")
 	}
-	if !userPattern.MatchString(c.Server.AdminUser) || c.Server.AdminUser == "root" {
-		add("server.admin_user %q must be a lower-case user name other than root", c.Server.AdminUser)
+	if err := CheckAdminUser(c.Server.AdminUser); err != nil {
+		add("server.admin_user %q %v", c.Server.AdminUser, err)
 	}
 	if c.Server.SwapMB < 0 || c.Server.SwapMB > 65536 {
 		add("server.swap_mb must be 0-65536")
 	}
-	if !strings.HasPrefix(c.Server.DataDirectory, "/") {
-		add("server.data_directory must be absolute")
+	if err := CheckDataDirectory(c.Server.DataDirectory); err != nil {
+		add("server.data_directory %v", err)
 	}
 	for _, cidr := range c.Network.ClientAllowlist {
-		if _, err := netip.ParsePrefix(cidr); err != nil {
-			add("network.client_allowlist entry %q is not a CIDR", cidr)
+		if err := CheckAllowlistEntry(cidr); err != nil {
+			add("network.client_allowlist entry %q %v", cidr, err)
 		}
 	}
 	primaries := 0
@@ -490,8 +494,8 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	default:
 		add("postgres.profile %q must be oltp, mixed or analytics", c.Postgres.Profile)
 	}
-	if c.Postgres.ClientConnections < 10 || c.Postgres.ClientConnections > 100000 {
-		add("postgres.client_connections must be 10-100000")
+	if err := CheckClientConnections(c.Postgres.ClientConnections); err != nil {
+		add("postgres.client_connections %v", err)
 	}
 	switch c.Postgres.LocaleProvider {
 	case "builtin", "icu", "libc":
@@ -511,22 +515,13 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	}
 	seen := map[string]bool{}
 	for i, db := range c.Databases {
-		if !DatabasePattern.MatchString(db.Name) {
-			add("databases[%d].name %q must match %s", i, db.Name, DatabasePattern)
-		}
-		switch db.Name {
-		case "postgres", "template0", "template1":
-			add("databases[%d].name %q is reserved", i, db.Name)
+		if err := CheckDatabaseName(db.Name); err != nil {
+			add("databases[%d].name %q %v", i, db.Name, err)
 		}
 		if seen[db.Name] {
 			add("databases[%d].name %q is a duplicate", i, db.Name)
 		}
 		seen[db.Name] = true
-		for _, suffix := range []string{"_owner", "_migrate", "_app", "_ro"} {
-			if len(db.Name)+len(suffix) > 63 {
-				add("databases[%d].name %q is too long: %s would exceed 63 characters", i, db.Name, db.Name+suffix)
-			}
-		}
 		if !durationPattern.MatchString(db.StatementTimeout) {
 			add("databases[%d].statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", i, db.StatementTimeout)
 		}

@@ -89,12 +89,6 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 			SudoPassword:  creds.SudoPassword,
 		},
 		Database: creds.Database,
-		ConnectionNotes: func() string {
-			if creds.Database == nil {
-				return ""
-			}
-			return secretsdoc.ConnectionNotes
-		}(),
 	}
 	var primary string
 	for _, n := range c.Nodes {

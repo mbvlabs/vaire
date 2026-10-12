@@ -229,6 +229,10 @@ func (r *initRun) collect() error {
 		if cfg, err = config.ParseAnswers(raw); err != nil {
 			return output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
 		}
+		if len(cfg.Databases) > 0 {
+			return output.NewError(output.CodeValidation, path+" declares [[databases]]: cluster init creates no databases", output.ExitConfig,
+				"Remove [[databases]] from the answers file and add each database after init with eru db create <name>.")
+		}
 		_, r.boot, err = decodeBootstrap(raw)
 		if err != nil {
 			return output.NewError(output.CodeConfig, path+" [bootstrap] does not parse: "+err.Error(), output.ExitConfig, "")
@@ -266,16 +270,6 @@ func (r *initRun) collect() error {
 	}
 	if v := stringFlag(cmd, "tls-mode"); v != "" {
 		cfg.TLS.Mode = v
-	}
-	if flagChanged(cmd, "database") {
-		names, _ := cmd.Flags().GetStringSlice("database")
-		cfg.Databases = databasesFromNames(names, cfg.Databases)
-	}
-	if flagChanged(cmd, "extensions") {
-		exts, _ := cmd.Flags().GetStringSlice("extensions")
-		for i := range cfg.Databases {
-			cfg.Databases[i].Extensions = exts
-		}
 	}
 	// An answers file's [bootstrap] user and port count as explicit.
 	userGiven, portGiven := r.boot.User != "", r.boot.Port != 0
@@ -363,9 +357,6 @@ func (r *initRun) collect() error {
 		cfg.Nodes[0].Role = config.RolePrimary
 	}
 	supplied := suppliedAnswers(cmd, cfg, stringFlag(cmd, "answers") != "")
-	if len(cfg.Databases) == 0 {
-		cfg.Databases = databasesFromNames([]string{"app"}, nil)
-	}
 	// The huh interview asks the Phase 2 question set in a TTY (D13).
 	if !MustNotPrompt(cmd) {
 		if err := runInterview(cmd, &cfg, supplied); err != nil {
@@ -616,14 +607,15 @@ func (r *initRun) generateSecrets() error {
 	return r.mark(phaseSecrets)
 }
 
-// ensureDatabaseSecrets fills the operator's database credentials for the
-// configured databases and service roles, and records the RPC secret map (D7).
+// ensureDatabaseSecrets fills the operator's eru_admin and service role
+// credentials and records the RPC secret map (D7). Init creates no
+// application databases.
 func (r *initRun) ensureDatabaseSecrets() error {
 	creds := contexts.DatabaseCreds{}
 	if r.sec.Database != nil {
 		creds = *r.sec.Database
 	}
-	rpc, generated, err := ensureSecrets(r.cfg, &creds, r.cfg.Databases)
+	rpc, generated, err := ensureClusterSecrets(&creds)
 	if err != nil {
 		return err
 	}
@@ -834,7 +826,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	message := strings.Join([]string{
 		fmt.Sprintf("Cluster %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.Domain),
 		"TLS: " + r.tlsSummary(),
-		r.urlSummary(),
+		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
 		"Context " + r.name + " is the current context on this machine. On another machine run eru login and paste the transfer bundle.",
 	}, "\n")
 	return r.finish(res, message, res.Next, fmt.Sprintf("Cluster %s is ready", r.name), nil)
@@ -854,15 +846,7 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 		{"Direct TLS", r.cfg.Domain + ":443  (sslnegotiation=direct)"},
 		{"TLS", r.tlsSummary()},
 		{"Secrets", "in your password manager (transfer bundle: eru login on another machine)"},
-		{"", ""},
-	}
-	for _, db := range r.cfg.Databases {
-		for _, role := range []string{steps.RoleApp, steps.RoleMigrate} {
-			urls := secretsdoc.DatabaseURLs(r.cfg.Domain, r.cfg.TLS.Mode, db.Name, map[string]contexts.Role{
-				role: {User: db.Name + "_" + role, Password: "«secret»"},
-			})
-			rows = append(rows, [2]string{db.Name + " " + role, urls[role]})
-		}
+		{"Databases", "none yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents)"},
 	}
 	var footer []string
 	for _, w := range r.warnings {
@@ -886,29 +870,7 @@ func (r *initRun) fillResult(res *initResult) {
 		res.TLSNotAfter = r.tlsState.NotAfter
 	}
 	res.RestartPerformed = r.dbRestart
-	first := "app"
-	if len(r.cfg.Databases) > 0 {
-		first = r.cfg.Databases[0].Name
-	}
-	res.Next = []string{
-		"eru sql --db " + first + " \"select 1\"",
-		"eru psql --db " + first,
-	}
-}
-
-// urlSummary lists each database's connection URLs with the passwords left in
-// the secrets document.
-func (r *initRun) urlSummary() string {
-	lines := []string{"Connection URLs (passwords are in the secrets document):"}
-	for _, db := range r.cfg.Databases {
-		for _, role := range []string{steps.RoleApp, steps.RoleMigrate} {
-			urls := secretsdoc.DatabaseURLs(r.cfg.Domain, r.cfg.TLS.Mode, db.Name, map[string]contexts.Role{
-				role: {User: db.Name + "_" + role, Password: "«in secrets document»"},
-			})
-			lines = append(lines, fmt.Sprintf("  %s %s: %s", db.Name, role, urls[role]))
-		}
-	}
-	return strings.Join(lines, "\n")
+	res.Next = []string{"eru db create <name>", "eru guide agents"}
 }
 
 func (r *initRun) tlsSummary() string {
@@ -1255,24 +1217,9 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 			SSHPrivateKey: r.sec.SSHPrivateKey,
 			SudoPassword:  r.sec.SudoPassword,
 		},
-		Database:        r.documentDatabase(),
-		ConnectionNotes: secretsdoc.ConnectionNotes,
-		BreakGlass:      secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
+		Database:   r.sec.Database,
+		BreakGlass: secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
 	}, nil
-}
-
-// documentDatabase builds the document's database section, filling URLs.
-func (r *initRun) documentDatabase() *secretsdoc.Database {
-	if r.sec.Database == nil {
-		return nil
-	}
-	creds := *r.sec.Database
-	for i := range creds.Databases {
-		if len(creds.Databases[i].URLs) == 0 {
-			creds.Databases[i].URLs = secretsdoc.DatabaseURLs(r.cfg.Domain, r.cfg.TLS.Mode, creds.Databases[i].Name, creds.Databases[i].Roles)
-		}
-	}
-	return &creds
 }
 
 // writeDocument shows the secrets handoff (§10.1) and gates on "stored"
@@ -1441,7 +1388,7 @@ func runInitLocal(cmd *cobra.Command) error {
 	message := strings.Join([]string{
 		fmt.Sprintf("Cluster %s is bootstrapped on this server (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
 		"TLS: " + r.tlsSummary(),
-		r.urlSummary(),
+		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
 		"On your machine run eru login and paste the transfer bundle from the handoff.",
 		"Then run any remote command, such as eru plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
 		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",

@@ -59,19 +59,7 @@ func (d Document) Groups() []Group {
 		Field{"SSH private key", d.Operator.SSHPrivateKey},
 	)})
 	if db := d.Database; db != nil {
-		groups = append(groups, Group{Title: "Database admin", Fields: roleFields("", db.Admin)})
-		for _, s := range db.Databases {
-			var fields []Field
-			for _, name := range []string{"migrate", "app", "ro"} {
-				if r, ok := s.Roles[name]; ok {
-					fields = append(fields, roleFields(name+" ", r)...)
-				}
-			}
-			for _, name := range sortedKeys(s.URLs) {
-				fields = append(fields, Field{name + " URL", s.URLs[name]})
-			}
-			groups = append(groups, Group{Title: "Database " + s.Name, Fields: fields})
-		}
+		groups = append(groups, Group{Title: "Cluster admin (all databases)", Fields: roleFields("", db.Admin)})
 		if len(db.Services) > 0 {
 			var fields []Field
 			for _, name := range sortedKeys(db.Services) {
@@ -100,11 +88,8 @@ func (d Document) Groups() []Group {
 			Field{"Password", m.Password},
 		)})
 	}
-	if d.ConnectionNotes != "" || d.BreakGlass != "" {
-		groups = append(groups, Group{Title: "Notes", Fields: nonEmpty(
-			Field{"Connections", d.ConnectionNotes},
-			Field{"Break-glass", d.BreakGlass},
-		)})
+	if d.BreakGlass != "" {
+		groups = append(groups, Group{Title: "Notes", Fields: []Field{{"Break-glass", d.BreakGlass}}})
 	}
 	return groups
 }

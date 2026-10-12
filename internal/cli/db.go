@@ -2,14 +2,12 @@ package cli
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/steps"
 	"github.com/spf13/cobra"
 )
@@ -90,13 +88,6 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	creds, err := contexts.LoadCredentials(s.ctx.Name)
-	if err != nil {
-		return err
-	}
-	if creds.Database == nil {
-		creds.Database = &contexts.DatabaseCreds{}
-	}
 	timeout := stringFlag(cmd, "statement-timeout")
 	if timeout == "" {
 		timeout = "60s"
@@ -106,12 +97,12 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	if len(extensions) == 0 {
 		db.Extensions = []string{"pg_stat_statements"}
 	}
-	rpc, generated, err := ensureSecrets(cfg, creds.Database, []config.Database{db})
+	if dryRun(cmd) {
+		return output.Success(cmd, output.Result{Data: map[string]any{"database": db}, Message: "dry run: would create database " + name, Warnings: s.warnings})
+	}
+	secret, rpc, err := newDatabaseSecret(cfg, name, steps.DatabaseRoles)
 	if err != nil {
 		return err
-	}
-	if dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: map[string]any{"database": db}, Message: "dry run: would create database " + name, Warnings: append(s.warnings, staleWarning(generated)...)})
 	}
 	reply, err := s.node.Call(commandContext(cmd), "db.create", map[string]any{
 		"name":              name,
@@ -121,20 +112,16 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := contexts.SaveCredentials(s.ctx.Name, creds); err != nil {
-		return err
-	}
-	entry, _ := creds.Database.Database(name)
-	message := fmt.Sprintf("created database %s and its roles", name)
-	if urls := renderURLs(entry); urls != "" {
-		message += "\n" + urls
-	}
+	message := fmt.Sprintf("created database %s and its roles\n%s\n%s", name, secret, shownOnceNote)
 	return output.Success(cmd, output.Result{
-		Data:     map[string]any{"database": entry},
+		Data:     map[string]any{"database": secret},
 		Message:  message,
-		Warnings: append(append(s.warnings, reply.Warnings...), staleWarning(generated)...),
+		Warnings: append(s.warnings, reply.Warnings...),
 	})
 }
+
+// shownOnceNote follows every printed database password.
+const shownOnceNote = "Store these now: eru does not keep database passwords. If they are lost, run eru db credentials <db> --rotate --role <role>."
 
 func runDBDrop(cmd *cobra.Command, args []string) error {
 	name := args[0]
@@ -156,16 +143,6 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	creds, err := contexts.LoadCredentials(s.ctx.Name)
-	if err != nil {
-		return err
-	}
-	if creds.Database != nil {
-		creds.Database.Databases = removeDatabase(creds.Database.Databases, name)
-		if err := contexts.SaveCredentials(s.ctx.Name, creds); err != nil {
-			return err
-		}
-	}
 	return output.Success(cmd, output.Result{
 		Data:     map[string]string{"dropped": name},
 		Message:  "dropped database " + name,
@@ -173,46 +150,25 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	})
 }
 
+// runDBCredentials rotates one role password. eru keeps no database
+// passwords, so there is nothing to print without --rotate.
 func runDBCredentials(cmd *cobra.Command, args []string) error {
 	name := args[0]
-	rotate := flagTrue(cmd, "rotate")
 	role := stringFlag(cmd, "role")
 	if role == "" {
 		role = steps.RoleApp
 	}
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
-	if err != nil {
-		return err
+	if !flagTrue(cmd, "rotate") {
+		return output.NewError(output.CodeUsage, "eru does not keep database passwords, so there is nothing to print", output.ExitUsage,
+			"Rotate the role to get a new password: eru db credentials "+name+" --rotate --role "+role+" --confirm "+name+". Applications using the old password stop connecting.")
 	}
-	creds, err := contexts.LoadCredentials(c.Name)
-	if err != nil {
-		return err
+	if !slices.Contains(steps.DatabaseRoles, role) {
+		return output.NewError(output.CodeValidation, "role must be migrate, app or ro", output.ExitConfig, "")
 	}
-	if creds.Database == nil {
-		return output.NewError(output.CodePrecondition, "this context has no database credentials", output.ExitPrecondition,
-			"Re-run eru login with a newer secrets document.")
-	}
-	if !rotate {
-		user, password, ok := creds.Database.DBRole(name, role)
-		if !ok {
-			return output.NewError(output.CodeValidation, "no credentials for "+name+" role "+role, output.ExitConfig,
-				"Run eru db credentials "+name+" --role migrate, or rotate with --rotate.")
-		}
-		entry, _ := creds.Database.Database(name)
-		return output.Success(cmd, output.Result{
-			Data:    map[string]string{"user": user, "password": password, "urls": strings.Join(urlLines(entry), "\n")},
-			Message: renderURLs(entry),
-		})
-	}
-	// Rotate.
 	if !dryRun(cmd) {
 		if err := Confirm(cmd, name); err != nil {
 			return err
 		}
-	}
-	password, err := secrets.Base62(32)
-	if err != nil {
-		return err
 	}
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]string{"database": name, "role": role}, Message: "dry run: would rotate " + name + " role " + role})
@@ -223,67 +179,22 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	secretKey := steps.SecretDatabaseRole(name, role)
-	if _, err := s.node.Call(commandContext(cmd), "db.credentials", map[string]any{
-		"name": name, "role": role, "rotate": true,
-	}, remote.CallOptions{Secrets: map[string]string{secretKey: password}, Confirm: name, OnEvent: p.event}); err != nil {
+	cfg, _, err := remoteConfig(cmd, s, p)
+	if err != nil {
 		return err
 	}
-	setRolePassword(creds.Database, name, role, password)
-	if err := contexts.SaveCredentials(c.Name, creds); err != nil {
+	secret, rpc, err := newDatabaseSecret(cfg, name, []string{role})
+	if err != nil {
+		return err
+	}
+	if _, err := s.node.Call(commandContext(cmd), "db.credentials", map[string]any{
+		"name": name, "role": role, "rotate": true,
+	}, remote.CallOptions{Secrets: rpc, Confirm: name, OnEvent: p.event}); err != nil {
 		return err
 	}
 	return output.Success(cmd, output.Result{
-		Data:     map[string]string{"database": name, "role": role, "password": password},
-		Message:  fmt.Sprintf("rotated %s role %s; the secrets document is stale, run eru secrets export", name, role),
-		Warnings: []output.Warning{{Code: "secrets_document_stale", Message: "run eru secrets export to refresh the secrets document"}},
+		Data:     map[string]any{"database": secret},
+		Message:  fmt.Sprintf("rotated %s role %s\n%s\n%s", name, role, secret, shownOnceNote),
+		Warnings: s.warnings,
 	})
-}
-
-func renderURLs(entry contexts.DBSecret) string {
-	lines := urlLines(entry)
-	if len(lines) == 0 {
-		return ""
-	}
-	return strings.Join(lines, "\n")
-}
-
-func urlLines(entry contexts.DBSecret) []string {
-	keys := make([]string, 0, len(entry.URLs))
-	for k := range entry.URLs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	lines := make([]string, 0, len(keys))
-	for _, k := range keys {
-		lines = append(lines, "  "+k+": "+entry.URLs[k])
-	}
-	return lines
-}
-
-func removeDatabase(dbs []contexts.DBSecret, name string) []contexts.DBSecret {
-	out := dbs[:0]
-	for _, db := range dbs {
-		if db.Name != name {
-			out = append(out, db)
-		}
-	}
-	return out
-}
-
-func setRolePassword(creds *contexts.DatabaseCreds, db, role, password string) {
-	for i := range creds.Databases {
-		if creds.Databases[i].Name != db {
-			continue
-		}
-		if creds.Databases[i].Roles == nil {
-			creds.Databases[i].Roles = map[string]contexts.Role{}
-		}
-		r := creds.Databases[i].Roles[role]
-		if r.User == "" {
-			r.User = db + "_" + role
-		}
-		r.Password = password
-		creds.Databases[i].Roles[role] = r
-	}
 }

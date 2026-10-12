@@ -16,10 +16,6 @@ import (
 
 func runPsql(cmd *cobra.Command, _ []string) error {
 	db := stringFlag(cmd, "db")
-	role := stringFlag(cmd, "role")
-	if role == "" {
-		role = "ro"
-	}
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "eru psql needs --db", output.ExitInput,
 			"Pass --db with one of the cluster's databases.").WithDetails(map[string]any{"flag": "--db"})
@@ -33,7 +29,7 @@ func runPsql(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	user, password, err := dbCredentials(s.ctx, db, role)
+	user, password, err := adminCredentials(s.ctx)
 	if err != nil {
 		return err
 	}
@@ -66,6 +62,7 @@ func runPsql(cmd *cobra.Command, _ []string) error {
 		env[6] = "PGSSLMODE=require"
 		env = env[:7]
 	}
+	env = append(env, "PGOPTIONS="+sessionOptions(db, flagTrue(cmd, "write")))
 	child := exec.CommandContext(ctx, psqlPath) //nolint:gosec // G204: fixed psql path.
 	child.Env = append(os.Environ(), env...)
 	child.Stdin = cmd.InOrStdin()

@@ -25,10 +25,6 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	if db == "" && len(args) > 0 {
 		db = args[0]
 	}
-	role := stringFlag(cmd, "role")
-	if role == "" {
-		role = "ro"
-	}
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "eru console needs a database", output.ExitInput,
 			"Pass the database name, for example eru console app.").WithDetails(map[string]any{"flag": "--db"})
@@ -47,7 +43,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	user, password, err := dbCredentials(s.ctx, db, role)
+	user, password, err := adminCredentials(s.ctx)
 	if err != nil {
 		return err
 	}
@@ -64,12 +60,17 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	if s.ctx.TLSMode == "self-signed" {
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning: the cluster uses a self-signed certificate; the connection is encrypted but not verified")
 	}
+	query := url.Values{
+		"sslmode":          {"disable"},
+		"application_name": {"eru-console"},
+		"options":          {sessionOptions(db, flagTrue(cmd, "write"))},
+	}
 	dsn := url.URL{
 		Scheme:   "postgres",
 		User:     url.User(user),
 		Host:     net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 		Path:     "/" + db,
-		RawQuery: "sslmode=disable&application_name=eru-console",
+		RawQuery: query.Encode(),
 	}
 	// Ctrl-C belongs to usql (it cancels the running query), not to eru.
 	signal.Ignore(syscall.SIGINT)

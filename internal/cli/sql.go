@@ -23,30 +23,29 @@ func nodeWGAddr(s *session) string {
 	return ""
 }
 
-// dbCredentials returns the user and password for a database role. admin maps
-// to the eru_admin role.
-func dbCredentials(c *contexts.Context, db, role string) (user, password string, err error) {
+// adminCredentials returns the eru_admin user and password. eru keeps no
+// application database passwords, so eru sql, psql and console connect as
+// eru_admin, read-only unless --write.
+func adminCredentials(c *contexts.Context) (user, password string, err error) {
 	creds, err := contexts.LoadCredentials(c.Name)
 	if err != nil {
 		return "", "", err
 	}
-	if creds.Database == nil {
-		return "", "", output.NewError(output.CodePrecondition, "this context has no database credentials", output.ExitPrecondition,
+	if creds.Database == nil || creds.Database.Admin.Password == "" {
+		return "", "", output.NewError(output.CodePrecondition, "this context has no eru_admin password", output.ExitPrecondition,
 			"Re-run eru login with a newer secrets document.")
 	}
-	if role == "admin" {
-		if creds.Database.Admin.Password == "" {
-			return "", "", output.NewError(output.CodePrecondition, "this context has no eru_admin password", output.ExitPrecondition,
-				"Re-run eru login with a newer secrets document.")
-		}
-		return creds.Database.Admin.User, creds.Database.Admin.Password, nil
+	return creds.Database.Admin.User, creds.Database.Admin.Password, nil
+}
+
+// sessionOptions is the libpq options value for an eru_admin session on db:
+// read-only, or with write acting as the database's owner role so new objects
+// get the owner and its default privileges, like a migration.
+func sessionOptions(db string, write bool) string {
+	if write {
+		return "-c role=" + db + "_owner"
 	}
-	user, password, ok := creds.Database.DBRole(db, role)
-	if !ok {
-		return "", "", output.NewError(output.CodePrecondition, "no credentials for "+db+" role "+role, output.ExitPrecondition,
-			"Run eru db credentials "+db+" --role "+role+".")
-	}
-	return user, password, nil
+	return "-c default_transaction_read_only=on"
 }
 
 // sqlQuery resolves the query from the argument, --file, or stdin.
@@ -73,15 +72,7 @@ func sqlQuery(cmd *cobra.Command, args []string) (string, error) {
 
 func runSQL(cmd *cobra.Command, args []string) error {
 	db := stringFlag(cmd, "db")
-	role := stringFlag(cmd, "role")
-	if role == "" {
-		role = "ro"
-	}
 	write := flagTrue(cmd, "write")
-	if write && role == "ro" {
-		return output.NewError(output.CodeUsage, "--write needs a write-capable role", output.ExitUsage,
-			"Pass --role app, migrate or admin.")
-	}
 	query, err := sqlQuery(cmd, args)
 	if err != nil {
 		return err
@@ -99,7 +90,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return output.NewError(output.CodeInputRequired, "eru sql needs --db", output.ExitInput,
 			"Pass --db with one of the cluster's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
-	user, password, err := dbCredentials(s.ctx, db, role)
+	user, password, err := adminCredentials(s.ctx)
 	if err != nil {
 		return err
 	}
@@ -117,13 +108,16 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	if s.ctx.TLSMode == "self-signed" {
 		warnings = append(warnings, output.Warning{Code: "tls_unverified", Message: "the cluster uses a self-signed certificate; the connection is encrypted but not verified"})
 	}
-	// One transaction per call; read-only unless --write.
-	begin := "BEGIN READ WRITE"
-	if !write {
-		if _, err := conn.Exec(ctx, "SET default_transaction_read_only = on"); err != nil {
-			return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
-		}
-		begin = "BEGIN READ ONLY"
+	// One transaction per call; read-only unless --write, which acts as the
+	// database's owner role (see sessionOptions).
+	begin := "BEGIN READ ONLY"
+	setup := "SET default_transaction_read_only = on"
+	if write {
+		begin = "BEGIN READ WRITE"
+		setup = "SET ROLE " + pg.Quote(db+"_owner")
+	}
+	if _, err := conn.Exec(ctx, setup); err != nil {
+		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
 	if _, err := conn.Exec(ctx, begin); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")

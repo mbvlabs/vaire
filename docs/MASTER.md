@@ -63,7 +63,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Risky flags | A command can mark a single flag as changing or destroying something (for example `queries --reset`), so agents don't treat the plain read as dangerous |
 | `eru top` | Reads Postgres directly over the WireGuard tunnel rather than through the node |
 | Database ports on WireGuard | WireGuard peers can always reach 6432 and 5432. `expose_pgbouncer` / `expose_postgres` only control the public allowlist rules |
-| Generated secrets | Every secret eru generates goes into the secrets document, including the `pgbouncer_auth` and `eru_monitor` service passwords. The operator generates all database passwords; the node keeps only SCRAM verifiers, plus the two service passwords that PgBouncer and the exporters need at runtime |
+| Generated secrets | The secrets document holds cluster access only: every cluster secret eru generates, including `eru_admin` and the `pgbouncer_auth` and `eru_monitor` service passwords. Application database passwords are shown once by `eru db create` and never stored. The operator generates all database passwords; the node keeps only SCRAM verifiers, plus the two service passwords that PgBouncer and the exporters need at runtime |
 | DNS and certificates | In `acme` mode, `cluster init` shows the DNS records to create, waits for the operator to confirm them, and checks them against public resolvers. TLS never blocks on ACME: a placeholder certificate lets PostgreSQL and PgBouncer start, and a certificate that's still pending after 120 s is a warning, not a failure |
 
 **Still to decide** (when the phase that needs it starts):
@@ -148,11 +148,12 @@ Before any command that needs them, eru checks the machine it runs on and report
 At the end of setup eru prints the **secrets handoff** in the terminal and writes no file unless `--secrets-out` asks for one. It has two parts: every secret in plain text, grouped for a password manager, and a **transfer bundle**, an ASCII-armored `age` passphrase-encrypted block holding the same content. eru generates the passphrase and shows it once, and it's never stored by eru. The content is:
 
 - Cluster identity: name, node list, WireGuard endpoints and public keys, server SSH host keys (pinned)
-- Operator credentials: WireGuard private key and address, SSH private key, admin DB role password
-- Database credentials: owner and app roles, connection strings (`data.example.com:6432`, `verify-full`)
+- Operator credentials: WireGuard private key and address, SSH private key, `eru_admin` DB role password, service role passwords
 - Backup **recovery kit**: bucket endpoint and keys, pgBackRest stanza and repo cipher passphrase, restic repository password
 - Metrics endpoint credentials
 - Break-glass instructions
+
+Application database passwords are not cluster access and are not in it: `eru db create` prints them once and eru keeps no copy.
 
 ```
 eru login                               # paste the transfer bundle → create local context "prod"

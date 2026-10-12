@@ -154,12 +154,12 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru top` | | | | | | |
 | `eru queries` | `--limit`, `--order total\|mean\|calls`, `--reset` (D) | reset | reset | | | `<cluster>/stats` |
 | `eru logs [unit]` | `--since`, `--follow`, `--lines` | | | | | |
-| `eru sql <query>` | `--db`, `--file`, `--write`, `--role ro\|app\|admin` | `--write` | | | | |
-| `eru psql` | `--db`, `--role` | | | | | |
-| `eru console [db]` | `--db`, `--role` | | | | | |
+| `eru sql <query>` | `--db`, `--file`, `--write` | `--write` | | | | |
+| `eru psql` | `--db`, `--write` | | | | | |
+| `eru console [db]` | `--db`, `--write` | | | | | |
 | `eru tunnel` | `--local-port`, `--target pgbouncer\|postgres` | | | | | |
 | `eru ssh` | `--command` | | | | | |
-| `eru db list` / `create <name>` / `drop <name>` / `credentials <name>` | `create`: `--statement-timeout`, `--extensions`; `credentials`: `--rotate`, `--role` | create/drop/rotate | drop, rotate | ✓ | | `<db>` |
+| `eru db list` / `create <name>` / `drop <name>` / `credentials <name>` | `create`: `--statement-timeout`; `credentials`: `--rotate`, `--role` | create/drop/rotate | drop, rotate | ✓ | | `<db>` |
 | `eru ext list` / `add <name>` / `remove <name>` | `--db` | add/remove | remove | ✓ | | `<cluster>/restart` if restart; `<db>` for remove |
 | `eru tune show\|explain\|apply` | | apply | | ✓ | | `<cluster>/restart` if restart |
 | `eru backup now` | `--type full\|diff\|incr` | ✓ | | ✓ | | |
@@ -417,7 +417,7 @@ path_prefix = "/metrics"
 - `[postgres.settings]` keys match `^[a-z_][a-z0-9_.]*$` and may not name a setting eru owns: `allow_alter_system`, `ssl*`, `listen_addresses`, `port`, `password_encryption`, `shared_preload_libraries`, `archive_*`, `data_directory`, `hba_file`, `ident_file`, `include*`.
 - Database names are unique, and `<name>_migrate` etc. fit in 63 characters. `statement_timeout` is `0` or matches `^\d+(ms|s|min|h)$`. Extensions must be catalog entries (§17); until Phase 4 only the contrib entries exist, and any other name gets `validation_failed` with the hint "arrives with eru ext in Phase 4".
 - `ValidateFor(scope)` has scopes `host` and `full`. `cluster.bootstrap phase=host` uses `host`, which allows a missing `domain`. Everything else uses `full`, where a missing domain is `validation_failed` with hint `eru config set domain <fqdn>`. This is how a Phase 1 cluster gets its database: `eru config set domain …`, `eru apply` (optionally `eru config set acme_email …` first).
-- `DefaultCluster()` has no databases. Init adds `app` (`statement_timeout = "60s"`, `extensions = ["pg_stat_statements"]`) when the interview and flags name none.
+- `DefaultCluster()` has no databases, and init never creates one: it has no `--database` flag, the interview does not ask, and an answers file with `[[databases]]` is rejected. Application databases are added after init with `eru db create`.
 
 `config set` uses dotted keys (`backup.vps.schedule`, `postgres.settings.work_mem`, `databases.app.statement_timeout`). Array-of-table entries are addressed by `name`. Values parse by the target field's type (bool, int, float, string, `[]string` as a comma list or TOML array literal). `schema`, `name`, `nodes.*.wg_address` and `transport.*` are immutable after init: `config set` refuses them, and so does a whole-file `config.set` (`config edit`), with `precondition_failed`, reason `immutable_key`.
 
@@ -453,8 +453,9 @@ contexts/<name>/context.toml        cluster name, domain, nodes [{name, role, pu
 contexts/<name>/wg.key              operator WireGuard private key (0600)
 contexts/<name>/id_ed25519          operator SSH private key (0600)
 contexts/<name>/known_hosts         pinned server host keys (wg address entries)
-contexts/<name>/credentials.json    sudo password, database credentials (admin, per-db roles + URLs, services
-                                    pgbouncer_auth / eru_monitor) and later metrics credentials (0600)
+contexts/<name>/credentials.json    sudo password, cluster-wide database credentials (eru_admin, services
+                                    pgbouncer_auth / eru_monitor) and later metrics credentials (0600);
+                                    never application database passwords
 pending/<name>/                     in-progress init: answers.toml, secrets.json (0600), progress.json, known_hosts
 cache/releases/<version>/           downloaded artifacts + manifest + sigstore bundle
 ```
@@ -475,8 +476,8 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 - Use `tun/netstack.CreateNetTUN([]netip.Addr{operatorAddr}, nil, 1420)` and `device.NewDevice(tun, conn.NewDefaultBind(), logger)`, configured via IPC (`private_key`, `public_key`, `endpoint`, `allowed_ip=10.42.0.0/24`, `persistent_keepalive_interval=25`).
 - Expose a `transport.Dialer` interface with `DialContext(ctx, network, addr)`. The WireGuard implementation uses `netstack.Net.DialContext`. The local (`--local`) implementation uses `net.Dialer`.
 - Bring up lazily per command. Tear down on exit. No persistent daemon.
-- `eru tunnel` / `eru psql`: listen on `127.0.0.1:<port>` (default 6543 for pgbouncer and 6544 for postgres, or the first free port) and proxy accepted conns through the netstack dialer to `10.42.0.1:6432|5432`. `eru psql` execs the system `psql` with `PGHOST=127.0.0.1 PGPORT=<port> PGSSLMODE=verify-full PGSSLROOTCERT=system PGSSLSNI=1`. Set `PGHOSTADDR` to 127.0.0.1 and `PGHOST` to the domain so verify-full matches the cert. `PGPASSWORD` comes from `credentials.json` through the environment, never argv.
-- `eru console [db]` (`--role ro|app|migrate|admin`, default `ro`): opens usql instead of psql, so the operator needs no PostgreSQL client. usql can't verify a certificate against a loopback address, so eru terminates TLS itself: `pg.ServeTLSProxy` listens on `127.0.0.1:<port>` (from 6544), answers the client's `SSLRequest`/`GSSENCRequest` with `N`, then sends its own `SSLRequest` upstream over the tunnel and does the handshake with `pg.TLSConfig` (verify-full against system roots with `ServerName = domain`; `require` in `self-signed` mode, with a warning) before forwarding the startup message. usql connects with `postgres://<user>@127.0.0.1:<port>/<db>?sslmode=disable&application_name=eru-console`, with the password in `PGPASSWORD`, never argv. eru ignores SIGINT while usql runs, so Ctrl-C cancels the query, not the console. Refused (`usage`) when eru must not prompt; agents use `eru sql`.
+- `eru tunnel` / `eru psql`: listen on `127.0.0.1:<port>` (default 6543 for pgbouncer and 6544 for postgres, or the first free port) and proxy accepted conns through the netstack dialer to `10.42.0.1:6432|5432`. `eru psql` execs the system `psql` with `PGHOST=127.0.0.1 PGPORT=<port> PGSSLMODE=verify-full PGSSLROOTCERT=system PGSSLSNI=1`. Set `PGHOSTADDR` to 127.0.0.1 and `PGHOST` to the domain so verify-full matches the cert. It connects as `eru_admin` (`PGPASSWORD` from `credentials.json` through the environment, never argv) with `PGOPTIONS=-c default_transaction_read_only=on`, or `-c role=<db>_owner` with `--write` so new objects belong to the database owner and get its default privileges. `eru sql` does the same per call (`SET default_transaction_read_only = on` or `SET ROLE <db>_owner`). eru keeps no application database passwords, so there is no `--role`.
+- `eru console [db]` (`--write`, same session options as `eru psql`): opens usql instead of psql, so the operator needs no PostgreSQL client. usql can't verify a certificate against a loopback address, so eru terminates TLS itself: `pg.ServeTLSProxy` listens on `127.0.0.1:<port>` (from 6544), answers the client's `SSLRequest`/`GSSENCRequest` with `N`, then sends its own `SSLRequest` upstream over the tunnel and does the handshake with `pg.TLSConfig` (verify-full against system roots with `ServerName = domain`; `require` in `self-signed` mode, with a warning) before forwarding the startup message. usql connects with `postgres://eru_admin@127.0.0.1:<port>/<db>?sslmode=disable&application_name=eru-console&options=…`, with the password in `PGPASSWORD`, never argv. eru ignores SIGINT while usql runs, so Ctrl-C cancels the query, not the console. Refused (`usage`) when eru must not prompt; agents use `eru sql`.
 - usql comes from PATH, else from `$XDG_CACHE_HOME/eru/tools/usql/<version>/usql`. When neither exists eru offers to download the pinned release (`localenv.UsqlVersion`, v0.21.4) from `github.com/xo/usql/releases`, or does so with `--install-missing`. The archive is checked against a SHA-256 pinned per platform (linux and darwin, amd64 and arm64) before the binary is extracted. Without approval it fails `missing_tool` with `details.download_url`.
 
 ### 7.3 SSH and version handshake
@@ -506,7 +507,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 - **stderr**: free-form diagnostics. The operator surfaces it only with `--verbose`.
 - **Methods** mirror operator commands, named `<group>.<verb>` (each word may contain inner hyphens, as in `cluster.confirm-secrets`): `cluster.bootstrap`, `cluster.confirm-secrets`, `apply`, `plan`, `config.get|set|validate`, `status`, `doctor`, `db.*`, `ext.*`, `tune.*`, `backup.*`, `restore.*`, `vps.*`, `maint.*`, `ssh.lockdown`, `ssh.confirm`, `ssh.status`, `tls.status`, `logs`, `upgrade.install`, `upgrade.rollback`, `pg.update`, `sql`, `queries`, `top.sample`.
 - **Confirmation is re-checked node-side.** The node recomputes the token and rejects mismatches, so a buggy operator can't skip it. Destructive methods (`db.drop`, `db.credentials` with `rotate`) also refuse an *empty* token with `unsafe_action_requires_confirmation`; for `apply` and `tune.apply` an empty token only leaves the restart pending.
-- **Phase 2 methods:** `cluster.bootstrap phase=database`; `config.get` (raw TOML + revision), `config.set`, `config.validate`; `db.list`, `db.create` (needs `db.<name>.*` secrets, adds `[[databases]]`, runs `postgres-roles-v1` only, puts `cluster.toml` back if the database was never created), `db.drop`, `db.credentials` (rotate only; reading credentials is operator-side); `tune.show`, `tune.apply`; `tls.status` (served certificate state, polled by init); `logs` (unit allowlist `postgres`, `pgbouncer`, `nginx`, `eru-certs`, `eru`; `follow` streams until the client disconnects); `sql` (for `--local` only: one transaction as `postgres` with `SET LOCAL ROLE`, `READ ONLY` unless `write`).
+- **Phase 2 methods:** `cluster.bootstrap phase=database`; `config.get` (raw TOML + revision), `config.set`, `config.validate`; `db.list`, `db.create` (needs `db.<name>.*` secrets, adds `[[databases]]`, runs `postgres-roles-v1` only, puts `cluster.toml` back if the database was never created), `db.drop`, `db.credentials` (rotate only; eru keeps no database passwords to read); `tune.show`, `tune.apply`; `tls.status` (served certificate state, polled by init); `logs` (unit allowlist `postgres`, `pgbouncer`, `nginx`, `eru-certs`, `eru`; `follow` streams until the client disconnects); `sql` (for `--local` only: one transaction as `postgres` with `SET LOCAL ROLE`, `READ ONLY` unless `write`).
 - **Read-only SQL** (`eru sql`, `top.sample`, `queries`, reports) runs over pgx through the tunnel, not via RPC, except where node-local access is needed (`postgres` peer for superuser-only views). RPC methods for these exist for `--local` mode.
 - **Sudoers**: `/etc/sudoers.d/eru` contains `eru ALL=(root) NOPASSWD: /usr/local/bin/eru node *`. Validate it with `visudo -cf`.
 
@@ -523,7 +524,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 
 ### 8.1 `eru cluster init` flags
 
-`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--database <name>` (repeatable), `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--extensions`, `--tls-mode`, `--local`, `--restore <bundle-file|->` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--reveal-passphrase`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check` (deprecated, no effect), `--resume`, `--discard`. Until their phase lands, the backup and VPS flags are accepted with a `flag_not_used_yet` warning.
+`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--tls-mode`, `--local`, `--restore <bundle-file|->` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--reveal-passphrase`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check` (deprecated, no effect), `--resume`, `--discard`. Until their phase lands, the backup and VPS flags are accepted with a `flag_not_used_yet` warning.
 
 - `--host` also takes a `Host` alias from `~/.ssh/config`. First contact reads the matching block for `HostName`, `User`, `Port` and `IdentityFile`; explicit `user@`/`:port` and `--identity` win. `--identity` (or the resolved `IdentityFile`) is checked to be a readable private key while the answers are collected, before anything is prompted or generated.
 - Without `--identity`, first contact offers ssh-agent keys and `~/.ssh/id_{ed25519,ecdsa,rsa}` as one `publickey` method. An encrypted default key that the agent doesn't hold gets a passphrase prompt in a TTY; otherwise it is skipped and named in `details.skipped_keys`.
@@ -535,7 +536,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 Each numbered phase emits `step` events and records progress in `pending/<name>/progress.json`. `--resume` continues from the last completed phase.
 
 1. **Local preflight** (§20).
-2. **Collect answers** from flags, the answers file, and prompts. Prompt only in a TTY. Validate (§6.1). The `huh` interview has groups *Server* (name, admin user, timezone, data directory), *Endpoint* (domain, TLS mode, client allowlist, then ACME email in `acme` mode), *Workload* (profile, client connections) and *Databases* (names, default `app`). Each question has a flag; a question already answered by a flag or the answers file is skipped. Backup, VPS and extension questions arrive with their phases. Non-interactive runs check `--confirm <cluster>`, `--confirm-secrets-stored`, `--secrets-out` and `--reveal-passphrase` before anything changes. In `acme` mode, init then shows the `A <domain> → <public IPv4>` record so the operator can create it while the host phase runs.
+2. **Collect answers** from flags, the answers file, and prompts. Prompt only in a TTY. Validate (§6.1). The `huh` interview has groups *Server* (name, admin user, timezone, data directory), *Endpoint* (domain, TLS mode, client allowlist, then ACME email in `acme` mode), and *Workload* (profile, client connections). It does not ask for databases: they are created after init with `eru db create`. Each question has a flag; a question already answered by a flag or the answers file is skipped. Backup, VPS and extension questions arrive with their phases. Non-interactive runs check `--confirm <cluster>`, `--confirm-secrets-stored`, `--secrets-out` and `--reveal-passphrase` before anything changes. In `acme` mode, init then shows the `A <domain> → <public IPv4>` record so the operator can create it while the host phase runs.
 3. **Generate secrets** on the operator (§10.2), stored in `pending/<name>/secrets.json` (0600): the operator WireGuard keypair, SSH ed25519 key, sudo password, and every database and service password, so `--resume` reuses them.
 4. **Backup credentials check**: from the operator, do a signed `PUT`/`GET`/`DELETE` of `<prefix>/.eru-probe` using the S3 client in `internal/backup/s3probe.go` (minimal SigV4 over `net/http`; no SDK). This fails early on bad keys or a bad bucket. For a non-empty `<prefix>/pgbackrest` without `--restore`, return `precondition_failed` ("prefix already contains a backup repository").
 5. **First contact** over public SSH. Detect arch and OS (`/etc/os-release`). Push the binary (§7.5, bootstrap case).
@@ -685,7 +686,7 @@ Maintenance additionally refuses while a pgBackRest backup is running. Check `pg
 
 eru never writes the secrets document to disk by default. At the end of init (and on `eru secrets export`) it shows the **secrets handoff**, the cluster's master record. The terminal shows only a two-line note on what the record is and the bundle passphrase, then a menu:
 
-1. **Copy everything to the clipboard** (always offered): sends the plain-text record to the terminal clipboard with OSC 52, which also works from a server console over SSH. The record has every value grouped like password-manager entries (cluster, each node, the operator with its SSH and WireGuard private keys, the database admin, each database's roles and URLs, the service roles, then backups and metrics from their phases, then the connection notes and break-glass text; groups with nothing yet are left out), then the **transfer bundle**: its passphrase and the document below as an ASCII-armored `age` block (`-----BEGIN AGE ENCRYPTED FILE-----`).
+1. **Copy everything to the clipboard** (always offered): sends the plain-text record to the terminal clipboard with OSC 52, which also works from a server console over SSH. The record has every value grouped like password-manager entries (cluster, each node, the operator with its SSH and WireGuard private keys, the cluster admin `eru_admin`, the service roles, then backups and metrics from their phases, then the break-glass text; groups with nothing yet are left out). It holds cluster access only: application database passwords are never in it (§10.2), then the **transfer bundle**: its passphrase and the document below as an ASCII-armored `age` block (`-----BEGIN AGE ENCRYPTED FILE-----`).
 2. **Save everything to a file** (only on the operator's machine, so not in `cluster init --local`): asks for a path relative to the current directory, which the prompt names (default `./<cluster>-secrets.txt`; absolute and `~/` paths work too), refuses an existing file, and writes the whole record, the same text the copy action sends (every value, the passphrase and the armored bundle), with mode 0600. It is offered whether or not `--secrets-out`/`--out` wrote the bundle.
 3. **Show everything on screen** (always offered): prints the same record in the terminal, for terminals that block OSC 52 (such as tmux without `set-clipboard on`).
 4. **Done**: leaves the menu for the `stored` confirmation.
@@ -705,10 +706,7 @@ The bundle is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work
                 "ssh_user": "eru", "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----…", "sudo_password": "…" },
   "database": {
     "admin": { "user": "eru_admin", "password": "…" },
-    "databases": [ { "name": "app",
-      "roles": { "migrate": {"user":"app_migrate","password":"…"}, "app": {"user":"app_app","password":"…"}, "ro": {"user":"app_ro","password":"…"} },
-      "urls": { "app": "postgres://app_app:…@data.example.com:6432/app?sslmode=verify-full&sslrootcert=system",
-                "migrate": "postgres://app_migrate:…@data.example.com:5432/app?sslmode=verify-full&sslrootcert=system" } } ]
+    "services": { "pgbouncer_auth": {"user":"pgbouncer_auth","password":"…"}, "eru_monitor": {"user":"eru_monitor","password":"…"} }
   },
   "backup": { "provider": "r2", "endpoint": "…", "region": "auto", "bucket": "…", "prefix": "prod", "uri_style": "path",
               "access_key_id": "…", "secret_access_key": "…",
@@ -727,7 +725,8 @@ The bundle is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work
 | Secret | Generator | Where it lives after init |
 | --- | --- | --- |
 | Admin user sudo password | 24 chars base62 | Doc; node has `/etc/shadow` hash only |
-| `eru_admin`, per-db `migrate`/`app`/`ro` passwords | 32 chars base62 | Doc; node has PG SCRAM verifiers only |
+| `eru_admin` password | 32 chars base62 | Doc; node has PG SCRAM verifier only |
+| Per-db `migrate`/`app`/`ro` passwords | 32 chars base62 | Shown once by `eru db create` / `db credentials --rotate`; eru keeps none; node has PG SCRAM verifiers only |
 | `pgbouncer_auth` password | 32 chars base62 | Doc (`database.services`) + node `/etc/eru/runtime/pgbouncer_auth.pass` (0600) and its SCRAM verifier in `userlist.txt` |
 | pgBackRest `cipher_pass` | 64 chars base62 | Doc + node `pgbackrest.conf` |
 | restic password | 64 chars base62 | Doc + node `restic.env` |
@@ -737,13 +736,13 @@ The bundle is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work
 
 Use `crypto/rand` only.
 
-**Every secret eru generates goes into the secrets document**, which works as the cluster's vault. The **operator** generates all database passwords: `eru_admin`, each database's `migrate`/`app`/`ro`, and the service roles `pgbouncer_auth` and `eru_monitor`. The node never generates one. It keeps SCRAM verifiers only, except the two service passwords that PgBouncer and the exporters need at runtime.
+**The secrets document holds cluster access credentials only**: every secret needed to reach, run and rebuild the cluster. Application database passwords are not cluster access and are never stored by eru: `eru db create` generates them, sends them to the node, and prints them once (with the connection URLs and notes) for the human or the app's secret store; a lost one is replaced with `eru db credentials <db> --rotate`. eru's own access to a database goes through `eru_admin`. The **operator** generates all database passwords: `eru_admin`, the service roles `pgbouncer_auth` and `eru_monitor`, and each database's `migrate`/`app`/`ro`. The node never generates one. It keeps SCRAM verifiers only, except the two service passwords that PgBouncer and the exporters need at runtime.
 
 - **RPC secret names:** `db.admin`, `db.<db>.migrate`, `db.<db>.app`, `db.<db>.ro`, `svc.pgbouncer_auth`, `svc.eru_monitor` (constants/helpers in `internal/steps/secrets.go`). The node registers every received secret for redaction before anything logs.
 - **Verifiers, not plaintext:** `pg.SCRAMVerifier` (SCRAM-SHA-256, 4096 iterations, random 16-byte salt) is computed in Go and sent as `ALTER ROLE … PASSWORD '<verifier>'` on psql's stdin, so the plaintext never reaches psql, server logs or `pg_stat_statements`. Verifiers are redacted too.
 - **Set once:** a password is set only when its role is created, or by `db credentials --rotate`. `postgres-roles-v1` never re-sets an existing role's password, and passwords are not part of its inputs. A login role that must be created without a supplied secret fails with `input_required` naming the role. The same goes for a missing `/etc/eru/runtime/*.pass`.
-- **Operator top-up:** before `apply` and init's database phase, the operator compares `[[databases]]` and the service roles with `credentials.json`, generates anything missing, saves it to `credentials.json`, sends it, and warns `secrets_document_stale` ("run `eru secrets export`"). It saves before sending: a role created with a password the operator then lost would be unrecoverable.
-- The document's `database` section holds `admin`, `databases[]` (roles + URLs), `services` (`pgbouncer_auth`, `eru_monitor`), and `connection_notes`, which says that 5432 is reachable only over WireGuard or with `expose_postgres = true`. URLs use `sslmode=verify-full&sslrootcert=system` in `acme` mode and `sslmode=require` in `self-signed` mode. The `app` URL is on 6432 (PgBouncer, transaction mode); the `migrate` URL is on 5432 (session features for migrations).
+- **Operator top-up:** before `apply` and init's database phase, the operator compares `eru_admin` and the service roles with `credentials.json` (never `[[databases]]`), generates anything missing, saves it to `credentials.json`, sends it, and warns `secrets_document_stale` ("run `eru secrets export`"). It saves before sending: a role created with a password the operator then lost would be unrecoverable.
+- The document's `database` section holds `admin` and `services` (`pgbouncer_auth`, `eru_monitor`). The per-database URLs and connection notes (5432 is reachable only over WireGuard or with `expose_postgres = true`) are printed by `eru db create` and `db credentials --rotate`. URLs use `sslmode=verify-full&sslrootcert=system` in `acme` mode and `sslmode=require` in `self-signed` mode. The `app` URL is on 6432 (PgBouncer, transaction mode); the `migrate` URL is on 5432 (session features for migrations).
 
 ---
 
@@ -1131,7 +1130,7 @@ CREATE EXTENSION IF NOT EXISTS ... ;                         -- per [databases.e
 ```
 
 - **`eru db drop <d>`**: `DROP DATABASE <d> WITH (FORCE)`, then `REASSIGN OWNED BY … TO postgres; DROP OWNED BY …` in `postgres` and drop the four roles, then remove the entry from `cluster.toml`. The confirm token is `<d>`; `--yes` is never enough, and the system databases are refused. Take a `backup --type=incr` first. Phase 2 has no pgBackRest yet, so it drops without one and warns `no_backup_before_drop`.
-- **`eru db credentials <d> --rotate --role app`**: generate a password, `ALTER ROLE … PASSWORD`, print once, and update `contexts/<name>/credentials.json`. Warn that the secrets document is stale and suggest `eru secrets export`.
+- **`eru db credentials <d> --rotate --role app`**: generate a password, `ALTER ROLE … PASSWORD`, and print it once with the URLs. Nothing is stored and the secrets document is unaffected. Without `--rotate` the command fails with `usage`: eru keeps no database passwords to print.
 
 Role names are validated by regex and also quoted with `pgx.Identifier{}.Sanitize()` (`pg.Quote`). The `:'pw'` placeholders above are SCRAM verifiers computed in Go (§10.2), never plaintext. psql `-v` variables carry only validated identifiers and non-secret literals.
 

@@ -1,6 +1,7 @@
 // Package secretsdoc is the age-encrypted secrets document (§10.1): its
 // schema, encryption with a generated EFF-wordlist passphrase, the
-// break-glass text, and turning a document into a local context.
+// break-glass text, and turning a document into a local context. The document holds cluster access
+// credentials only; application database passwords are never in it.
 package secretsdoc
 
 import (
@@ -38,19 +39,17 @@ type Document struct {
 	Database   *Database `json:"database,omitempty"`
 	Backup     *Backup   `json:"backup,omitempty"`
 	Metrics    *Metrics  `json:"metrics,omitempty"`
-	// ConnectionNotes explains the database URLs when Database is set.
-	ConnectionNotes string `json:"connection_notes,omitempty"`
-	BreakGlass      string `json:"break_glass"`
+	BreakGlass string    `json:"break_glass"`
 }
 
-// ConnectionNotes is the text stored next to the database URLs (§10.1).
+// ConnectionNotes explains the URLs eru db create and eru db credentials
+// --rotate show (§10.1).
 const ConnectionNotes = "The app URL goes through PgBouncer on port 6432 in transaction mode; use it for application traffic. " +
 	"The migrate URL connects straight to PostgreSQL on port 5432 for session features that migrations need. " +
 	"Port 5432 is reachable only over WireGuard (eru tunnel --target postgres) or when network.expose_postgres = true. " +
 	"The app_direct_tls URL is the same PgBouncer through port 443; it does not bypass PgBouncer. It is for networks that only allow 443, " +
 	"and the client must negotiate TLS directly (sslnegotiation=direct, PostgreSQL 17+ libpq or pgx 5.7+); other clients get \"server refused TLS\" and should use 6432. " +
-	"It follows the same client allowlist as 6432. " +
-	"pgbouncer_auth and eru_monitor under services are eru's own service roles; applications never use them."
+	"It follows the same client allowlist as 6432."
 
 // Cluster is the cluster identity.
 type Cluster struct {
@@ -81,15 +80,12 @@ type Operator struct {
 	SudoPassword  string `json:"sudo_password"`
 }
 
-// Database holds database credentials (D4). It is the same shape the operator
-// context stores.
+// Database holds the cluster-wide database credentials (D4): eru_admin and the
+// service roles. It is the same shape the operator context stores.
 type Database = contexts.DatabaseCreds
 
 // Role is a user and password.
 type Role = contexts.Role
-
-// DBSecret is one database's roles and URLs.
-type DBSecret = contexts.DBSecret
 
 // DatabaseURLs builds the connection strings for one database (§10.1). The app
 // role uses PgBouncer on 6432, and also on 443 with direct TLS through nginx;

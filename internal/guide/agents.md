@@ -83,9 +83,9 @@ Backup: `eru backup now --type full --output agent`, then `eru backup verify --o
 
 Point-in-time restore: `eru restore --time <timestamp> --confirm <token>`. The cluster stays paused and PgBouncer stays stopped. Inspect with `eru sql`, then `eru restore promote` or `eru restore abort`.
 
-Add a database: `eru db create <name> --output agent`.
+Add a database: `eru db create <name> --output agent`. The result carries the role passwords and connection URLs once; eru does not keep them, so hand them to the human or the app's secret store right away. A lost password is replaced with `eru db credentials <name> --rotate --role <role> --confirm <name>`, which breaks clients still using the old one: ask the human first.
 
-Query a database: `eru sql --db <name> "<sql>" --output agent`. It is read-only unless `--write` with `--role app|migrate|admin`; schema changes need `--role migrate`. `eru psql` and `eru console` are interactive and for humans only; `eru console` refuses to run without a terminal.
+Query a database: `eru sql --db <name> "<sql>" --output agent`. It connects as `eru_admin` and is read-only unless `--write`, which acts as the database's owner role so new tables get the app's default grants. `eru psql` and `eru console` are interactive and for humans only; `eru console` refuses to run without a terminal.
 
 Add an extension: `eru ext add <name> --db <name> --output agent`. When the result says a restart is required, ask the human for the confirm token before continuing.
 

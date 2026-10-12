@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -21,7 +24,6 @@ type interviewAnswers struct {
 	ACMEEmail         string
 	ClientConnections string
 	Profile           string
-	Databases         string
 	Allowlist         string
 }
 
@@ -37,7 +39,6 @@ const (
 	qAllowlist         = "allowlist"
 	qProfile           = "profile"
 	qClientConnections = "client_connections"
-	qDatabases         = "databases"
 )
 
 // suppliedAnswers reports which questions a flag or the answers file already
@@ -58,13 +59,13 @@ func suppliedAnswers(cmd *cobra.Command, cfg config.Cluster, fromFile bool) map[
 		qAllowlist:         given("allow", len(cfg.Network.ClientAllowlist) > 0),
 		qProfile:           given("profile", cfg.Postgres.Profile != def.Postgres.Profile),
 		qClientConnections: given("client-connections", cfg.Postgres.ClientConnections != def.Postgres.ClientConnections),
-		qDatabases:         given("database", len(cfg.Databases) > 0),
 	}
 }
 
 // runInterview asks the Phase 2 questions with huh (D13). It runs only in a
 // TTY, pre-fills each field with its default, and skips the questions a flag
-// or the answers file already answered.
+// or the answers file already answered. Each field is checked as it is
+// answered, so the form cannot be submitted with a value Validate rejects.
 func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]bool) error {
 	a := interviewAnswers{
 		Name:              cfg.ClusterName,
@@ -76,7 +77,6 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		ACMEEmail:         cfg.ACMEEmail,
 		ClientConnections: strconv.Itoa(cfg.Postgres.ClientConnections),
 		Profile:           cfg.Postgres.Profile,
-		Databases:         strings.Join(databaseNames(*cfg), ", "),
 		Allowlist:         strings.Join(cfg.Network.ClientAllowlist, ", "),
 	}
 	ask := func(key string, field huh.Field, fields *[]huh.Field) {
@@ -84,29 +84,28 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 			*fields = append(*fields, field)
 		}
 	}
-	var server, endpoint, workload, databases []huh.Field
-	ask(qName, huh.NewInput().Title("Cluster name").Value(&a.Name), &server)
-	ask(qAdminUser, huh.NewInput().Title("Admin user").Value(&a.AdminUser), &server)
-	ask(qTimezone, huh.NewInput().Title("Timezone").Value(&a.Timezone), &server)
-	ask(qDataDirectory, huh.NewInput().Title("Data directory").Value(&a.DataDirectory), &server)
-	ask(qDomain, huh.NewInput().Title("Client-facing domain").Value(&a.Domain), &endpoint)
+	var server, endpoint, workload []huh.Field
+	ask(qName, huh.NewInput().Title("Cluster name").Validate(validateName).Value(&a.Name), &server)
+	ask(qAdminUser, huh.NewInput().Title("Admin user").Validate(optional(config.CheckAdminUser)).Value(&a.AdminUser), &server)
+	ask(qTimezone, huh.NewInput().Title("Timezone").Validate(optional(config.CheckTimezone)).Value(&a.Timezone), &server)
+	ask(qDataDirectory, huh.NewInput().Title("Data directory").Validate(optional(config.CheckDataDirectory)).Value(&a.DataDirectory), &server)
+	ask(qDomain, huh.NewInput().Title("Client-facing domain").Validate(validateDomain).Value(&a.Domain), &endpoint)
 	ask(qTLSMode, huh.NewSelect[string]().
 		Title("TLS mode").
 		Options(huh.NewOption("ACME (Let's Encrypt)", "acme"), huh.NewOption("Self-signed", "self-signed")).
 		Value(&a.TLSMode), &endpoint)
-	ask(qAllowlist, huh.NewInput().Title("Client allowlist (CIDRs, comma separated, empty for none)").Value(&a.Allowlist), &endpoint)
+	ask(qAllowlist, huh.NewInput().
+		Title("Client allowlist (IPs or CIDRs, comma separated, empty for none)").
+		Validate(validateAllowlist).
+		Value(&a.Allowlist), &endpoint)
 	ask(qProfile, huh.NewSelect[string]().
 		Title("Workload profile").
 		Options(huh.NewOption("OLTP (web)", "oltp"), huh.NewOption("Mixed", "mixed"), huh.NewOption("Analytics", "analytics")).
 		Value(&a.Profile), &workload)
-	ask(qClientConnections, huh.NewInput().Title("Expected client connections").Value(&a.ClientConnections), &workload)
-	ask(qDatabases, huh.NewInput().
-		Title("Databases (comma separated, default app)").
-		Placeholder("app").
-		Value(&a.Databases), &databases)
+	ask(qClientConnections, huh.NewInput().Title("Expected client connections").Validate(validateClientConnections).Value(&a.ClientConnections), &workload)
 
 	var groups []*huh.Group
-	for _, fields := range [][]huh.Field{server, endpoint, workload, databases} {
+	for _, fields := range [][]huh.Field{server, endpoint, workload} {
 		if len(fields) > 0 {
 			groups = append(groups, huh.NewGroup(fields...))
 		}
@@ -117,6 +116,7 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 			huh.NewInput().
 				Title("ACME contact email (optional)").
 				Description("Only the account contact for Let's Encrypt. Certificates renew automatically; leave it empty if you like.").
+				Validate(optional(config.CheckACMEEmail)).
 				Value(&a.ACMEEmail),
 		).WithHideFunc(func() bool { return a.TLSMode != "acme" }))
 	}
@@ -147,41 +147,63 @@ func applyInterview(cfg *config.Cluster, a interviewAnswers) error {
 	if n, err := strconv.Atoi(strings.TrimSpace(a.ClientConnections)); err == nil && n > 0 {
 		cfg.Postgres.ClientConnections = n
 	}
-	cfg.Network.ClientAllowlist = splitList(a.Allowlist)
-	if names := splitList(a.Databases); len(names) > 0 {
-		cfg.Databases = databasesFromNames(names, cfg.Databases)
+	cfg.Network.ClientAllowlist = allowlistPrefixes(splitList(a.Allowlist))
+	return nil
+}
+
+// optional wraps a config check for a field where empty keeps the default.
+func optional(check func(string) error) func(string) error {
+	return func(v string) error {
+		if v = strings.TrimSpace(v); v == "" {
+			return nil
+		}
+		return check(v)
+	}
+}
+
+func validateName(v string) error {
+	if !config.NamePattern.MatchString(strings.TrimSpace(v)) {
+		return errors.New("must match " + config.NamePattern.String())
 	}
 	return nil
 }
 
-// databaseNames returns the configured database names, defaulting to app.
-func databaseNames(cfg config.Cluster) []string {
-	if len(cfg.Databases) == 0 {
-		return []string{"app"}
+func validateDomain(v string) error {
+	if strings.TrimSpace(v) == "" {
+		return errors.New("a domain is required")
 	}
-	out := make([]string, 0, len(cfg.Databases))
-	for _, db := range cfg.Databases {
-		out = append(out, db.Name)
-	}
-	return out
+	return config.CheckDomain(strings.TrimSpace(v))
 }
 
-// databasesFromNames builds [[databases]] entries, keeping an existing entry's
-// statement timeout and extensions when the name is unchanged.
-func databasesFromNames(names []string, existing []config.Database) []config.Database {
-	byName := map[string]config.Database{}
-	for _, db := range existing {
-		byName[db.Name] = db
-	}
-	out := make([]config.Database, 0, len(names))
-	for _, name := range names {
-		if db, ok := byName[name]; ok {
-			out = append(out, db)
-			continue
+func validateAllowlist(v string) error {
+	for _, entry := range allowlistPrefixes(splitList(v)) {
+		if err := config.CheckAllowlistEntry(entry); err != nil {
+			return fmt.Errorf("%s is not an IP address or CIDR", entry)
 		}
-		out = append(out, config.Database{Name: name, StatementTimeout: "60s", Extensions: []string{"pg_stat_statements"}})
 	}
-	return out
+	return nil
+}
+
+func validateClientConnections(v string) error {
+	if v = strings.TrimSpace(v); v == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return errors.New("must be a number")
+	}
+	return config.CheckClientConnections(n)
+}
+
+// allowlistPrefixes turns a bare IP address into its single-host prefix
+// (/32 or /128); anything else is kept for validation to report.
+func allowlistPrefixes(entries []string) []string {
+	for i, e := range entries {
+		if ip, err := netip.ParseAddr(e); err == nil {
+			entries[i] = netip.PrefixFrom(ip, ip.BitLen()).String()
+		}
+	}
+	return entries
 }
 
 // splitList splits a comma-separated list, dropping empties.

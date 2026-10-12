@@ -257,7 +257,7 @@ func roleVerifier(rt engine.Runtime, secretKey, role, db string) (string, error)
 	if password == "" {
 		hint := "Re-run init with --resume so the operator can supply the password."
 		if db != "" {
-			hint = "Run eru db create " + db + ", or re-run init with --resume."
+			hint = "Databases are created with eru db create " + db + ", which supplies the passwords; remove " + db + " from cluster.toml (eru config edit) and create it that way."
 		}
 		return "", output.NewError(
 			output.CodeInputRequired,

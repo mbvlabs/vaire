@@ -262,11 +262,8 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	dry := dryRun(cmd)
-	// D7: top up any missing database secrets before apply.
-	cfg, _, err := remoteConfig(cmd, s, p)
-	if err != nil {
-		return err
-	}
+	// D7: top up any missing eru_admin and service secrets before apply.
+	// Application database passwords are never generated here.
 	creds, err := contexts.LoadCredentials(s.ctx.Name)
 	if err != nil {
 		return err
@@ -274,7 +271,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if creds.Database == nil {
 		creds.Database = &contexts.DatabaseCreds{}
 	}
-	secretValues, generated, err := ensureSecrets(cfg, creds.Database, cfg.Databases)
+	secretValues, generated, err := ensureClusterSecrets(creds.Database)
 	if err != nil {
 		return err
 	}
