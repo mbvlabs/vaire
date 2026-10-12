@@ -292,9 +292,9 @@ schema/eru-v1.json           agent JSON contract
 | 7 | Kernel/sysctl for databases: `vm.swappiness=1`, `vm.overcommit_memory=2` + ratio, dirty bytes, THP off, huge pages sized to `shared_buffers`, limits | new |
 | 8 | PGDG repo + signing key, `postgresql-18`, `postgresql-contrib`, `pgbouncer`, apt hold on major (`pgbackrest` arrives with step 14) | new |
 | 9 | Cluster create (`pg_createcluster 18 main`, data dir, locale `C.UTF-8`, ICU, checksums) | new |
-| 10 | Render managed conf.d, pg_hba and pg_ident; restart or reload depending on the diff | new |
-| 11 | Roles and databases (§6.3) | new |
-| 12 | nginx install, placeholder certificate, and the hourly `eru-certs` timer that issues and renews the ACME certificate (eru's own client) and reloads Postgres, PgBouncer and nginx | new |
+| 10 | nginx install, placeholder certificate, and the hourly `eru-certs` timer that issues and renews the ACME certificate (eru's own client) and reloads Postgres, PgBouncer and nginx | new |
+| 11 | Render managed conf.d, pg_hba and pg_ident; restart or reload depending on the diff | new |
+| 12 | Roles and databases (§6.3) | new |
 | 13 | PgBouncer config, `auth_query` function, TLS | new |
 | 14 | pgBackRest: stanza create, `archive_mode`, check, first full backup | `backup.sh` (pattern) |
 | 15 | restic: VPS backup repo, include/exclude sets, first snapshot | `backup.sh` |

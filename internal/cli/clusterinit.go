@@ -664,6 +664,7 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 		"cluster_toml": string(raw),
 		"node_name":    r.primary().Name,
 		"operator":     op,
+		"local":        r.local,
 	}, remote.CallOptions{
 		Secrets: map[string]string{steps.SecretSudoPassword: r.sec.SudoPassword},
 		Confirm: r.name,

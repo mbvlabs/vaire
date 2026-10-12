@@ -96,7 +96,7 @@ func parseSysctl(content string) []sysctlKV {
 }
 
 // hugePagesFromKernel reads shared_memory_size_in_huge_pages by starting a
-// stopped cluster's postgres with -C. It is used by step 10 during a restart.
+// stopped cluster's postgres with -C. It is used by step 11 during a restart.
 func hugePagesFromKernel(ctx context.Context, dataDir string) (int, error) {
 	out, err := Probe(ctx, "runuser", "-u", "postgres", "--",
 		"/usr/lib/postgresql/"+strconv.Itoa(PGVersion)+"/bin/postgres",

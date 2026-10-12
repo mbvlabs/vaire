@@ -3,13 +3,29 @@ package engine
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 )
 
 // WriteFileAtomic writes data to path through a temp file in the same
-// directory: write, fsync, chmod, rename, then fsync the directory.
-func WriteFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
+// directory: write, fsync, chmod, rename, then fsync the directory. The file
+// keeps the owner of the process that writes it.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return WriteFileAtomicOwned(path, data, perm, "", "")
+}
+
+// WriteFileAtomicOwned is WriteFileAtomic with an owner and group. The temp
+// file is chowned before the rename, so a service that has to read the file
+// never sees it with the wrong owner. An empty owner or group leaves that
+// field as the writing process has it.
+func WriteFileAtomicOwned(path string, data []byte, perm os.FileMode, owner, group string) (err error) {
+	uid, gid, err := ResolveIDs(owner, group)
+	if err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {
@@ -29,6 +45,12 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 		_ = f.Close()
 		return err
 	}
+	if uid != -1 || gid != -1 {
+		if err = f.Chown(uid, gid); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
 	if err = f.Chmod(perm); err != nil {
 		_ = f.Close()
 		return err
@@ -44,6 +66,31 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 		return err
 	}
 	return syncDir(dir)
+}
+
+// ResolveIDs turns an owner and group name into the numeric ids os.Chown
+// wants, leaving a name that is empty at -1 so it is not changed.
+func ResolveIDs(owner, group string) (uid, gid int, err error) {
+	uid, gid = -1, -1
+	if owner != "" {
+		u, err := user.Lookup(owner)
+		if err != nil {
+			return 0, 0, fmt.Errorf("look up user %q: %w", owner, err)
+		}
+		if uid, err = strconv.Atoi(u.Uid); err != nil {
+			return 0, 0, fmt.Errorf("user %q has a non-numeric uid %q", owner, u.Uid)
+		}
+	}
+	if group != "" {
+		g, err := user.LookupGroup(group)
+		if err != nil {
+			return 0, 0, fmt.Errorf("look up group %q: %w", group, err)
+		}
+		if gid, err = strconv.Atoi(g.Gid); err != nil {
+			return 0, 0, fmt.Errorf("group %q has a non-numeric gid %q", group, g.Gid)
+		}
+	}
+	return uid, gid, nil
 }
 
 func syncDir(dir string) error {

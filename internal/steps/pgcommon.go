@@ -26,6 +26,10 @@ const (
 	TLSCertPath = TLSDir + "/server.crt"
 	// TLSKeyPath is the served private key.
 	TLSKeyPath = TLSDir + "/server.key"
+	// TLSKeyOwner and TLSKeyGroup own the served private key. PostgreSQL and
+	// PgBouncer are in the ssl-cert group.
+	TLSKeyOwner = "root"
+	TLSKeyGroup = "ssl-cert"
 	// RuntimeDir holds the secrets services need at runtime.
 	RuntimeDir = "/etc/eru/runtime"
 	// PgbouncerDir holds the PgBouncer configuration.
@@ -62,6 +66,14 @@ const (
 	PgbouncerService = "pgbouncer"
 	// NginxService is the nginx systemd unit.
 	NginxService = "nginx"
+)
+
+// PostgreSQL and PgBouncer both run as the postgres user, so every
+// configuration file they read is owned by postgres:postgres and written with
+// that owner from the start.
+const (
+	pgFileOwner = "postgres"
+	pgFileGroup = "postgres"
 )
 
 // tuningFor computes the tuning result for cfg on host.

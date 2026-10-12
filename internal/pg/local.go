@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -82,9 +83,9 @@ func run(ctx context.Context, db, sql string, vars map[string]string, csvOut boo
 	if err := cmd.Run(); err != nil {
 		msg := secrets.Redact(strings.TrimSpace(stderr.String()))
 		if msg == "" {
-			msg = err.Error()
+			return nil, fmt.Errorf("psql: %w", err)
 		}
-		return nil, fmt.Errorf("psql: %s", msg)
+		return nil, errors.New(msg)
 	}
 	return stdout.Bytes(), nil
 }

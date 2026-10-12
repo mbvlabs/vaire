@@ -62,7 +62,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 		Only:        steps.DatabaseStepIDs(),
 		Report:      env.Report,
 		Restarter:   steps.Restarter(),
-		FailureHint: initFailureHint(cfg.ClusterName),
+		FailureHint: initFailureHint(cfg.ClusterName, p.Local),
 	})
 	if err != nil {
 		return Result{}, err

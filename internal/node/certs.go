@@ -116,7 +116,7 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := installCert(ctx, chainPEM, keyPEM); err != nil {
+	if err := installCert(chainPEM, keyPEM); err != nil {
 		return nil, err
 	}
 	logLine(report, "certs-renew", "installed the certificate for "+cfg.Domain)
@@ -143,13 +143,12 @@ func renewReason(cert *x509.Certificate, domain string, selfSigned bool) string 
 	return ""
 }
 
-// installCert writes the chain (0644) and key (root:ssl-cert 0640).
-func installCert(ctx context.Context, chainPEM, keyPEM []byte) error {
-	if err := engine.WriteFileAtomic(steps.TLSKeyPath, keyPEM, 0o640); err != nil {
+// installCert writes the chain (0644) and key (root:ssl-cert 0640). The key is
+// chowned before the rename, so PostgreSQL, PgBouncer and nginx never see it
+// with the wrong owner.
+func installCert(chainPEM, keyPEM []byte) error {
+	if err := engine.WriteFileAtomicOwned(steps.TLSKeyPath, keyPEM, 0o640, steps.TLSKeyOwner, steps.TLSKeyGroup); err != nil {
 		return err
-	}
-	if err := runQuiet(ctx, "chown", "root:ssl-cert", steps.TLSKeyPath); err != nil {
-		return fmt.Errorf("chown %s: %w", steps.TLSKeyPath, err)
 	}
 	return engine.WriteFileAtomic(steps.TLSCertPath, chainPEM, 0o644)
 }

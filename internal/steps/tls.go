@@ -13,7 +13,7 @@ import (
 
 const tlsID = "tls-v2"
 
-// CertsUnitNames are the units step 12 installs (D11).
+// CertsUnitNames are the units step 10 installs (D11).
 var CertsUnitNames = []string{"eru-certs.service", "eru-certs.timer"}
 
 type tlsStep struct{}
