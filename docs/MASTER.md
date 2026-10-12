@@ -435,7 +435,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 ### 7.1 Current state (2026-10-12)
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
-- **Phases 1 and 2 are done (2026-10-12, Hetzner, Ubuntu 26.04).** `cluster init` goes from a fresh server to public 22 closed, SSH over WireGuard and a working PostgreSQL 18 cluster. The ACME certificate is issued, the secrets handoff is accepted by `eru login`, `eru sql` connects with verify-full, `eru apply --auto-upgrade-nodes` upgrades the node, and an app connects to 6432 through PgBouncer with `sslmode=verify-full`. The checks not yet run on a VPS (lockdown self-revert, `--local`, a no-op `apply`, `db drop` refusal, `eru console`, direct TLS on 443) are in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) and don't block Phase 3.
+- **Phases 1 and 2 are done (2026-10-12, Hetzner, Ubuntu 26.04 and Debian 13).** `cluster init` goes from a fresh server to public 22 closed, SSH over WireGuard and a working PostgreSQL 18 cluster. The ACME certificate is issued, the secrets handoff is accepted by `eru login`, `eru sql` connects with verify-full, `eru apply --auto-upgrade-nodes` upgrades the node, and an app connects to 6432 through PgBouncer with `sslmode=verify-full`. The checks not yet run on a VPS (lockdown self-revert, `--local`, a no-op `apply`, `db drop` refusal, `eru console`, direct TLS on 443) are in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) and don't block Phase 3.
 - **Phase 3 (Database backups & restore) is next.**
 - One open item from Phase 0, also in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md): install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
 - About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
@@ -505,7 +505,7 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 | Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, nginx + ACME certificates, PgBouncer | ✅ |
 | Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune *` | ✅ |
 
-**Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused. Passed 2026-10-12 (Hetzner, Ubuntu 26.04) apart from the checks listed in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
+**Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused. Passed 2026-10-12 (Hetzner, Ubuntu 26.04 and Debian 13) apart from the checks listed in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 
 ### 7.6 Phase 3 — Database backups & restore ⬜
 
