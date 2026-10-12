@@ -5,8 +5,9 @@ set -euo pipefail
 
 : "${PGBOUNCER_DIR:?PGBOUNCER_DIR is required}"
 
-chown postgres:postgres "${PGBOUNCER_DIR}/pgbouncer.ini" "${PGBOUNCER_DIR}/userlist.txt"
-chmod 0640 "${PGBOUNCER_DIR}/pgbouncer.ini" "${PGBOUNCER_DIR}/userlist.txt"
+files=("${PGBOUNCER_DIR}/pgbouncer.ini" "${PGBOUNCER_DIR}/pgbouncer_hba.conf" "${PGBOUNCER_DIR}/userlist.txt")
+chown postgres:postgres "${files[@]}"
+chmod 0640 "${files[@]}"
 
 systemctl daemon-reload
 systemctl enable pgbouncer

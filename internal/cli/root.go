@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/spf13/cobra"
 )
@@ -15,6 +16,7 @@ import (
 func Main() int {
 	root := NewRoot()
 	cmd, err := root.ExecuteC()
+	ui.Finish(err != nil)
 	if err == nil {
 		return 0
 	}
@@ -24,6 +26,9 @@ func Main() int {
 	}
 	if cmd == nil {
 		cmd = root
+	}
+	if richOutput(cmd) {
+		output.RichError = renderRichError
 	}
 	if rerr := output.RenderError(cmd, err); rerr != nil {
 		if _, werr := fmt.Fprintln(os.Stderr, err.Error()); werr != nil {

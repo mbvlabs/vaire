@@ -34,14 +34,18 @@ const (
 	PgbouncerIniPath = PgbouncerDir + "/pgbouncer.ini"
 	// PgbouncerUserlistPath is the rendered PgBouncer userlist.
 	PgbouncerUserlistPath = PgbouncerDir + "/userlist.txt"
-	// CaddyDir holds the Caddy configuration and data.
-	CaddyDir = "/etc/caddy"
-	// CaddyfilePath is the rendered Caddyfile.
-	CaddyfilePath = CaddyDir + "/Caddyfile"
-	// CaddyDataDir is Caddy's data directory (certificates, ACME account).
-	CaddyDataDir = "/var/lib/caddy"
-	// CaddyCertRoot is where Caddy stores issued certificates.
-	CaddyCertRoot = CaddyDataDir + "/.local/share/caddy/certificates"
+	// PgbouncerHBAPath is PgBouncer's own hba file.
+	PgbouncerHBAPath = PgbouncerDir + "/pgbouncer_hba.conf"
+	// NginxConfPath is the rendered nginx configuration.
+	NginxConfPath = "/etc/nginx/nginx.conf"
+	// ACMEDir holds the ACME account key.
+	ACMEDir = "/etc/eru/acme"
+	// ACMEAccountKeyPath is the ACME account's private key.
+	ACMEAccountKeyPath = ACMEDir + "/account.key"
+	// ACMEWebroot is served by nginx for HTTP-01 challenges.
+	ACMEWebroot = "/var/lib/eru/acme"
+	// ACMEChallengeDir is where challenge tokens are written.
+	ACMEChallengeDir = ACMEWebroot + "/.well-known/acme-challenge"
 	// SysctlPath is the sysctl drop-in.
 	SysctlPath = "/etc/sysctl.d/90-eru.conf"
 	// THPUnitPath is the transparent-huge-pages oneshot unit.
@@ -52,12 +56,12 @@ const (
 	PGServiceDropInDir = "/etc/systemd/system/postgresql@18-main.service.d"
 	// PGServiceDropIn is the cluster service drop-in file.
 	PGServiceDropIn = PGServiceDropInDir + "/10-eru.conf"
-	// SystemdSystemDir holds the eru-certs-sync units.
+	// SystemdSystemDir holds the eru-certs units.
 	SystemdSystemDir = "/etc/systemd/system"
 	// PgbouncerService is the PgBouncer systemd unit.
 	PgbouncerService = "pgbouncer"
-	// CaddyService is the Caddy systemd unit.
-	CaddyService = "caddy"
+	// NginxService is the nginx systemd unit.
+	NginxService = "nginx"
 )
 
 // tuningFor computes the tuning result for cfg on host.

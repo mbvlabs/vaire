@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/huh/v2"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -99,7 +100,10 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		Options(huh.NewOption("OLTP (web)", "oltp"), huh.NewOption("Mixed", "mixed"), huh.NewOption("Analytics", "analytics")).
 		Value(&a.Profile), &workload)
 	ask(qClientConnections, huh.NewInput().Title("Expected client connections").Value(&a.ClientConnections), &workload)
-	ask(qDatabases, huh.NewInput().Title("Databases (comma separated)").Value(&a.Databases), &databases)
+	ask(qDatabases, huh.NewInput().
+		Title("Databases (comma separated, default app)").
+		Placeholder("app").
+		Value(&a.Databases), &databases)
 
 	var groups []*huh.Group
 	for _, fields := range [][]huh.Field{server, endpoint, workload, databases} {
@@ -110,14 +114,17 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 	// The ACME email is asked after the TLS mode is known, and only for acme.
 	if !supplied[qACMEEmail] {
 		groups = append(groups, huh.NewGroup(
-			huh.NewInput().Title("ACME email (certificate expiry notices)").Value(&a.ACMEEmail),
+			huh.NewInput().
+				Title("ACME contact email (optional)").
+				Description("Only the account contact for Let's Encrypt. Certificates renew automatically; leave it empty if you like.").
+				Value(&a.ACMEEmail),
 		).WithHideFunc(func() bool { return a.TLSMode != "acme" }))
 	}
 	if len(groups) == 0 {
 		return nil
 	}
-	if err := huh.NewForm(groups...).Run(); err != nil {
-		return err
+	if err := ui.RunForm(groups...); err != nil {
+		return promptErr(err)
 	}
 	return applyInterview(cfg, a)
 }

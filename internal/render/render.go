@@ -6,6 +6,7 @@ package render
 import (
 	"bytes"
 	"embed"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -193,28 +194,41 @@ func PgbouncerUserlist(verifiers map[string]string) []byte {
 	return execute("userlist.txt.tmpl", map[string]any{"Entries": entries})
 }
 
-// Caddyfile renders /etc/caddy/Caddyfile (§15.2) without the metrics handles.
-func Caddyfile(cfg config.Cluster) []byte {
-	return execute("Caddyfile.tmpl", map[string]any{
-		"ACMEEmail": cfg.ACMEEmail,
-		"ACMECA":    cfg.TLS.ACMECA,
-		"TLSMode":   cfg.TLS.Mode,
-		"Domain":    cfg.Domain,
+// NginxConf renders /etc/nginx/nginx.conf (§15.2): ACME challenges on 80,
+// and on 443 HTTPS plus direct-TLS PostgreSQL routed to PgBouncer by ALPN.
+func NginxConf(cfg config.Cluster, acmeWebroot string) []byte {
+	var allow []string
+	if cfg.Network.ExposePgbouncer {
+		for _, cidr := range cfg.Network.ClientAllowlist {
+			if p, err := netip.ParsePrefix(cidr); err == nil {
+				allow = append(allow, p.Masked().String())
+			}
+		}
+	}
+	return execute("nginx.conf.tmpl", map[string]any{
+		"Domain":      cfg.Domain,
+		"WGSubnet":    cfg.Transport.Subnet,
+		"Allowlist":   allow,
+		"ACMEWebroot": acmeWebroot,
 	})
 }
+
+// PgbouncerHBA renders /etc/pgbouncer/pgbouncer_hba.conf: TLS everywhere
+// except the loopback hop from nginx.
+func PgbouncerHBA() []byte { return execute("pgbouncer_hba.conf.tmpl", nil) }
 
 // PGServiceDropin renders the postgresql@18-main.service drop-in.
 func PGServiceDropin() []byte { return execute("postgresql-service.conf.tmpl", nil) }
 
-// CertsSyncUnits renders the three eru-certs-sync units (D11).
+// CertsUnits renders the eru-certs service and timer, which run
+// eru node run certs-renew (D11).
 //
 // timers-v1 (Phase 6) later takes ownership of the .timer; this step installs
-// it so certificate sync works before then.
-func CertsSyncUnits() map[string][]byte {
+// it so certificates renew before then.
+func CertsUnits() map[string][]byte {
 	return map[string][]byte{
-		"eru-certs-sync.service": execute("eru-certs-sync.service.tmpl", nil),
-		"eru-certs-sync.path":    execute("eru-certs-sync.path.tmpl", nil),
-		"eru-certs-sync.timer":   execute("eru-certs-sync.timer.tmpl", nil),
+		"eru-certs.service": execute("eru-certs.service.tmpl", nil),
+		"eru-certs.timer":   execute("eru-certs.timer.tmpl", nil),
 	}
 }
 

@@ -28,20 +28,21 @@ func FirewallRules(cfg config.Cluster, st engine.State) []string {
 		"allow 443/tcp",
 		RuleWGSSH,
 	}
-	dbPort := func(port int) {
+	// WireGuard peers always reach both database ports; the expose flags gate
+	// only the public allowlist (§11 step 5).
+	dbPort := func(port int, exposed bool) {
 		rules = append(rules, fmt.Sprintf("allow in on wg0 to any port %d proto tcp", port))
+		if !exposed {
+			return
+		}
 		for _, cidr := range cfg.Network.ClientAllowlist {
 			if p, err := netip.ParsePrefix(cidr); err == nil {
 				rules = append(rules, fmt.Sprintf("allow from %s to any port %d proto tcp", p.Masked(), port))
 			}
 		}
 	}
-	if cfg.Network.ExposePgbouncer {
-		dbPort(6432)
-	}
-	if cfg.Network.ExposePostgres {
-		dbPort(5432)
-	}
+	dbPort(6432, cfg.Network.ExposePgbouncer)
+	dbPort(5432, cfg.Network.ExposePostgres)
 	if st.PublicSSHOpen() {
 		rules = append(rules, RulePublicSSH)
 	}

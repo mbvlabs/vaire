@@ -148,6 +148,9 @@ type Node struct {
 	// Stderr receives the node's free-form diagnostics for --verbose. Nil
 	// keeps only the tail for error details.
 	Stderr io.Writer
+	// OnUpload, when set, is told how many bytes of a binary upload were
+	// sent, for a progress bar.
+	OnUpload func(sent, total int64)
 }
 
 func (n *Node) asRoot(command string) string {

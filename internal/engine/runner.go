@@ -37,6 +37,9 @@ type Options struct {
 	Restarter Restarter
 	// Report receives step and log events.
 	Report Reporter
+	// FailureHint replaces the step_failed hint, for callers that resume
+	// differently from apply (cluster init uses --resume).
+	FailureHint string
 }
 
 func (o Options) journalPath() string {
@@ -160,7 +163,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		index := i + 1
 		d, err := decide(ctx, step, cfg, rt, j)
 		if err != nil {
-			return data, nil, failStep(j, path, report, id, index, total, decision{}, err)
+			return data, nil, failStep(j, path, opts, id, index, total, decision{}, err)
 		}
 		if !d.apply {
 			if d.reason == ReasonCheck {
@@ -192,7 +195,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			if ctx.Err() != nil {
 				err = ErrInterrupted
 			}
-			return data, nil, failStep(j, path, report, id, index, total, d, err)
+			return data, nil, failStep(j, path, opts, id, index, total, d, err)
 		}
 		restart := res.Restart
 		if restart == "" {
@@ -294,7 +297,7 @@ func InputsHash(id string, inputs []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func failStep(j *Journal, path string, report Reporter, id string, index, total int, d decision, cause error) error {
+func failStep(j *Journal, path string, opts Options, id string, index, total int, d decision, cause error) error {
 	msg := secrets.Redact(cause.Error())
 	entry := j.Steps[id]
 	entry.Status = StatusFailed
@@ -304,8 +307,11 @@ func failStep(j *Journal, path string, report Reporter, id string, index, total 
 	entry.Error = msg
 	j.Steps[id] = entry
 	saveErr := j.Save(path)
-	report.emit(output.Event{Type: "step", Step: id, State: "failed", Index: intPtr(index), Total: intPtr(total), Detail: msg})
+	opts.Report.emit(output.Event{Type: "step", Step: id, State: "failed", Index: intPtr(index), Total: intPtr(total), Detail: msg})
 	err := stepFailed(id, index, cause)
+	if opts.FailureHint != "" {
+		err.Hint = opts.FailureHint
+	}
 	if saveErr != nil {
 		err.Cause = errors.Join(cause, saveErr)
 	}
@@ -314,12 +320,17 @@ func failStep(j *Journal, path string, report Reporter, id string, index, total 
 
 func stepFailed(id string, index int, cause error) *output.CLIError {
 	msg := secrets.Redact(cause.Error())
+	details := map[string]any{"step": id, "error": msg, "index": index}
+	var scriptErr *ScriptError
+	if errors.As(cause, &scriptErr) && len(scriptErr.Tail) > 0 {
+		details["output_tail"] = scriptErr.Tail
+	}
 	return &output.CLIError{
 		Code:     output.CodeStepFailed,
 		Message:  fmt.Sprintf("step %s failed: %s", id, msg),
 		Hint:     "Fix the cause and re-run apply. It resumes at this step.",
 		ExitCode: output.ExitStep,
-		Details:  map[string]any{"step": id, "error": msg, "index": index},
+		Details:  details,
 		Cause:    cause,
 	}
 }

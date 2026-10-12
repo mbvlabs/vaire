@@ -30,6 +30,21 @@ var envKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 // caller's environment.
 const scriptPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+// tailLines is how many output lines a failed script keeps for its error.
+const tailLines = 20
+
+// ScriptError is a script that exited non-zero. Tail holds its last output
+// lines, redacted, so a failed step shows why without --verbose.
+type ScriptError struct {
+	Step   string
+	Status int
+	Tail   []string
+}
+
+func (e *ScriptError) Error() string {
+	return fmt.Sprintf("script for %s exited with status %d", e.Step, e.Status)
+}
+
 // killGrace is how long a cancelled script has between SIGTERM and SIGKILL.
 const killGrace = 10 * time.Second
 
@@ -91,7 +106,7 @@ func (s Shell) Run(ctx context.Context, stepID, script string, env map[string]st
 		}
 	}()
 
-	s.stream(pr, stepID, report)
+	tail := s.stream(pr, stepID, report)
 	_ = pr.Close()
 	waitErr := cmd.Wait()
 	close(done)
@@ -103,20 +118,27 @@ func (s Shell) Run(ctx context.Context, stepID, script string, env map[string]st
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
-			return fmt.Errorf("script for %s exited with status %d", stepID, exitErr.ExitCode())
+			return &ScriptError{Step: stepID, Status: exitErr.ExitCode(), Tail: tail}
 		}
 		return fmt.Errorf("script for %s: %w", stepID, waitErr)
 	}
 	return nil
 }
 
-func (s Shell) stream(r io.Reader, stepID string, report Reporter) {
+// stream turns each output line into a log event and returns the last
+// tailLines lines.
+func (s Shell) stream(r io.Reader, stepID string, report Reporter) []string {
 	reader := bufio.NewReaderSize(r, 64*1024)
+	var tail []string
 	for {
 		line, err := reader.ReadString('\n')
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
 			line = s.Secrets.Redact(secrets.Redact(line))
+			tail = append(tail, line)
+			if len(tail) > tailLines {
+				tail = tail[1:]
+			}
 			if report != nil {
 				report(output.Event{Type: "log", Step: stepID, Line: line})
 			} else {
@@ -124,7 +146,7 @@ func (s Shell) stream(r io.Reader, stepID string, report Reporter) {
 			}
 		}
 		if err != nil {
-			return
+			return tail
 		}
 	}
 }

@@ -1,54 +1,58 @@
 #!/usr/bin/env bash
-# Step 12 (tls-v1): install pinned Caddy, place a placeholder certificate so
-# PostgreSQL and PgBouncer can start, validate the Caddyfile and start Caddy,
-# then enable the certs-sync units.
+# Step 12 (tls-v2). PHASE=install: refuse a Caddy box, install nginx with the
+# stream module, give postgres and pgbouncer the ssl-cert group, and place a
+# placeholder certificate so PostgreSQL, PgBouncer and nginx can start.
+# PHASE=start (after eru wrote nginx.conf and the eru-certs units): validate
+# and (re)start nginx, enable the hourly timer and start issuance in the
+# background. TLS never blocks on ACME.
 set -euo pipefail
 
-: "${CADDY_VERSION:?CADDY_VERSION is required}"
-: "${CADDY_SHA256:?CADDY_SHA256 is required}"
+: "${NGINX_MIN_VERSION:?NGINX_MIN_VERSION is required}"
 : "${DOMAIN:?DOMAIN is required}"
+: "${ACME_WEBROOT:?ACME_WEBROOT is required}"
+: "${PHASE:?PHASE is required}"
 
-architecture="$(dpkg --print-architecture)"
+if [ "${PHASE}" = "install" ]; then
+  if dpkg-query -W -f='${Status}' caddy 2>/dev/null | grep -q 'install ok installed'; then
+    printf 'caddy is installed: this server was set up by an older eru that used Caddy.\n' >&2
+    printf 'eru now serves TLS with nginx and does not migrate. Rebuild the server and run cluster init again.\n' >&2
+    exit 1
+  fi
 
-installed_version=""
-if command -v caddy >/dev/null 2>&1; then
-  installed_version="$(caddy version | awk '{print $1}')"
+  DEBIAN_FRONTEND=noninteractive apt-get -o dpkg::lock::timeout=300 install -y --no-install-recommends \
+    nginx libnginx-mod-stream ssl-cert
+  version="$(dpkg-query -W -f='${Version}' nginx)"
+  if ! dpkg --compare-versions "${version}" ge "${NGINX_MIN_VERSION}"; then
+    printf 'nginx %s is older than %s\n' "${version}" "${NGINX_MIN_VERSION}" >&2
+    exit 1
+  fi
+  apt-mark hold nginx libnginx-mod-stream >/dev/null
+  # eru's nginx.conf defines every server; the distribution's default site
+  # would also listen on 80.
+  rm -f /etc/nginx/sites-enabled/default
+
+  id -u postgres >/dev/null 2>&1 && usermod -aG ssl-cert postgres
+  id -u pgbouncer >/dev/null 2>&1 && usermod -aG ssl-cert pgbouncer
+
+  install -d -m 0755 /etc/eru/tls
+  install -d -m 0700 /etc/eru/acme
+  install -d -m 0755 "${ACME_WEBROOT}" "${ACME_WEBROOT}/.well-known" "${ACME_WEBROOT}/.well-known/acme-challenge"
+  if [ ! -f /etc/eru/tls/server.crt ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
+      -keyout /etc/eru/tls/server.key -out /etc/eru/tls/server.crt \
+      -subj "/CN=${DOMAIN}" -addext "subjectAltName=DNS:${DOMAIN}"
+  fi
+  chown root:ssl-cert /etc/eru/tls/server.key
+  chmod 0640 /etc/eru/tls/server.key
+  chmod 0644 /etc/eru/tls/server.crt
+  printf 'nginx %s installed\n' "${version}"
+  exit 0
 fi
 
-if [ "${installed_version}" != "v${CADDY_VERSION}" ]; then
-  package="caddy_${CADDY_VERSION}_linux_${architecture}.deb"
-  url="https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/${package}"
-  tmpdir="$(mktemp -d)"
-  trap 'rm -rf "${tmpdir}"' EXIT
-  curl --fail --silent --show-error --location --retry 3 --output "${tmpdir}/${package}" "${url}"
-  printf '%s  %s\n' "${CADDY_SHA256}" "${tmpdir}/${package}" | sha256sum --check --status
-  DEBIAN_FRONTEND=noninteractive apt-get -o dpkg::lock::timeout=300 install -y --allow-downgrades --allow-change-held-packages "${tmpdir}/${package}"
-fi
-apt-mark hold caddy >/dev/null
-
-# The ssl-cert group lets postgres and pgbouncer read the private key.
-if ! getent group ssl-cert >/dev/null; then
-  DEBIAN_FRONTEND=noninteractive apt-get -o dpkg::lock::timeout=300 install -y ssl-cert
-fi
-id -u postgres >/dev/null 2>&1 && usermod -aG ssl-cert postgres
-id -u pgbouncer >/dev/null 2>&1 && usermod -aG ssl-cert pgbouncer
-
-install -d -m 0755 /etc/eru/tls
-if [ ! -f /etc/eru/tls/server.crt ]; then
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
-    -keyout /etc/eru/tls/server.key -out /etc/eru/tls/server.crt \
-    -subj "/CN=${DOMAIN}" -addext "subjectAltName=DNS:${DOMAIN}"
-fi
-chown root:ssl-cert /etc/eru/tls/server.key
-chmod 0640 /etc/eru/tls/server.key
-chmod 0644 /etc/eru/tls/server.crt
-
-caddy validate --config /etc/caddy/Caddyfile
-
+nginx -t
 systemctl daemon-reload
-systemctl enable --now caddy
-systemctl reload-or-restart caddy
-
-systemctl enable --now eru-certs-sync.path eru-certs-sync.timer
-
-printf 'caddy installed and started\n'
+systemctl enable nginx
+systemctl reload-or-restart nginx
+systemctl enable --now eru-certs.timer
+systemctl start --no-block eru-certs.service
+printf 'nginx started; certificate issuance runs in the background\n'

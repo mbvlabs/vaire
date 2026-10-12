@@ -44,7 +44,8 @@ Unattended-Upgrade::Package-Blacklist {
 	"libpq";
 	"pgbouncer";
 	"pgbackrest";
-	"caddy";
+	"nginx";
+	"libnginx-mod-";
 };
 Unattended-Upgrade::Automatic-Reboot "false";
 `,

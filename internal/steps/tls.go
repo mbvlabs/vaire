@@ -11,53 +11,58 @@ import (
 	"github.com/mbvlabs/eru/internal/versions"
 )
 
-const tlsID = "tls-v1"
+const tlsID = "tls-v2"
 
-// CertSyncUnitNames are the three units step 12 installs (D11).
-var CertSyncUnitNames = []string{"eru-certs-sync.service", "eru-certs-sync.path", "eru-certs-sync.timer"}
+// CertsUnitNames are the units step 12 installs (D11).
+var CertsUnitNames = []string{"eru-certs.service", "eru-certs.timer"}
 
 type tlsStep struct{}
 
 func (tlsStep) ID() string { return tlsID }
 
 func (tlsStep) Describe(config.Cluster) string {
-	return "install Caddy, place a placeholder certificate and install certs-sync"
+	return "install nginx, place a placeholder certificate and start certificate issuance"
 }
 
+func nginxConf(cfg config.Cluster) []byte { return render.NginxConf(cfg, ACMEWebroot) }
+
 func (tlsStep) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []engine.RenderedFile {
-	out := []engine.RenderedFile{{Path: CaddyfilePath, Content: render.Caddyfile(cfg)}}
-	units := render.CertsSyncUnits()
+	out := []engine.RenderedFile{{Path: NginxConfPath, Content: nginxConf(cfg)}}
+	units := render.CertsUnits()
 	names := make([]string, 0, len(units))
 	for name := range units {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		out = append(out, engine.RenderedFile{Path: SystemdSystemDir + "/" + name, Content: []byte(units[name])})
+		out = append(out, engine.RenderedFile{Path: SystemdSystemDir + "/" + name, Content: units[name]})
 	}
 	return out
 }
 
 func (tlsStep) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
-	units := render.CertsSyncUnits()
+	units := render.CertsUnits()
 	return canonical(map[string]any{
-		"caddy_version": versions.CaddyVersion,
-		"caddyfile":     string(render.Caddyfile(cfg)),
-		"units":         units,
+		"nginx_min_version": versions.NginxMinVersion,
+		"nginx_conf":        string(nginxConf(cfg)),
+		"units":             units,
+		"tls_mode":          cfg.TLS.Mode,
+		"acme_ca":           cfg.TLS.ACMECA,
+		"acme_email":        cfg.ACMEEmail,
 	})
 }
 
 func (tlsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {
-	if !fileIs(CaddyfilePath, string(render.Caddyfile(cfg)), 0o644) {
-		return incomplete(CaddyfilePath + " differs"), nil
+	if !fileIs(NginxConfPath, string(nginxConf(cfg)), 0o644) {
+		return incomplete(NginxConfPath + " differs"), nil
 	}
-	for name, content := range render.CertsSyncUnits() {
+	for name, content := range render.CertsUnits() {
 		if !fileIs(SystemdSystemDir+"/"+name, string(content), 0o644) {
 			return incomplete(name + " differs"), nil
 		}
 	}
-	if !serviceActive(ctx, CaddyService) {
-		return incomplete("caddy is not active"), nil
+	if !serviceActive(ctx, NginxService) {
+		return incomplete("nginx is not active"), nil
 	}
 	if _, err := os.Stat(TLSCertPath); err != nil {
 		return incomplete(TLSCertPath + " is missing"), nil
@@ -66,18 +71,26 @@ func (tlsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) 
 }
 
 func (s tlsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
-	if err := writeFile(CaddyfilePath, string(render.Caddyfile(cfg)), 0o644); err != nil {
+	// nginx and its distribution config are installed first, so eru's
+	// nginx.conf is written over the package's default afterwards.
+	env := map[string]string{
+		"NGINX_MIN_VERSION": versions.NginxMinVersion,
+		"DOMAIN":            cfg.Domain,
+		"ACME_WEBROOT":      ACMEWebroot,
+		"PHASE":             "install",
+	}
+	if err := rt.Shell.Run(ctx, s.ID(), Script("tls"), env, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	for name, content := range render.CertsSyncUnits() {
+	if err := writeFile(NginxConfPath, string(nginxConf(cfg)), 0o644); err != nil {
+		return engine.ApplyResult{}, err
+	}
+	for name, content := range render.CertsUnits() {
 		if err := writeFile(SystemdSystemDir+"/"+name, string(content), 0o644); err != nil {
 			return engine.ApplyResult{}, err
 		}
 	}
-	err := rt.Shell.Run(ctx, s.ID(), Script("tls"), map[string]string{
-		"CADDY_VERSION": versions.CaddyVersion,
-		"CADDY_SHA256":  versions.CaddySHA256[rt.Host.Arch],
-		"DOMAIN":        cfg.Domain,
-	}, report)
+	env["PHASE"] = "start"
+	err := rt.Shell.Run(ctx, s.ID(), Script("tls"), env, report)
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
