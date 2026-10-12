@@ -225,5 +225,4 @@ just lint    # golangci-lint, metadata and step checks, shellcheck, actionlint
 
 - [docs/MASTER.md](docs/MASTER.md): goal, decisions, architecture, roadmap and current status.
 - [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md): the detailed spec for each phase.
-- [docs/SECRETS-HANDOFF-SPEC.md](docs/SECRETS-HANDOFF-SPEC.md): the secrets handoff and transfer bundle.
-- [docs/PHASE2-FINDINGS.md](docs/PHASE2-FINDINGS.md): findings from the manual VPS tests.
+- [docs/MANUAL-TESTING.md](docs/MANUAL-TESTING.md): manual VPS checks still to run.

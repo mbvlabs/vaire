@@ -1,6 +1,6 @@
 // Package catalog is the curated PostgreSQL extension list (§17). Phase 2
 // carries the contrib-only entries; extensions that need a package install
-// arrive with eru ext in Phase 8.
+// arrive with eru ext in Phase 4.
 package catalog
 
 // Repos a catalog entry may come from.

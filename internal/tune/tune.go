@@ -125,7 +125,7 @@ func (c *calc) add() {
 	}
 
 	// WAL and checkpoints.
-	c.set("wal_level", "replica", "", "required for archiving and replication (Phase 3)", "postmaster")
+	c.set("wal_level", "logical", "", "archiving, replication and logical-replication followers (Phases 3 and 6)", "postmaster")
 	c.set("wal_compression", "zstd", "", "cheap CPU for less WAL traffic", "user")
 	c.set("wal_buffers", "-1", "", "let PostgreSQL size WAL buffers from shared_buffers", "postmaster")
 	c.set("max_wal_senders", "10", "", "headroom for replication and pgBackRest (Phase 3)", "postmaster")

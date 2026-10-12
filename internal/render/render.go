@@ -223,7 +223,7 @@ func PGServiceDropin() []byte { return execute("postgresql-service.conf.tmpl", n
 // CertsUnits renders the eru-certs service and timer, which run
 // eru node run certs-renew (D11).
 //
-// timers-v1 (Phase 6) later takes ownership of the .timer; this step installs
+// timers-v1 (Phase 5) later takes ownership of the .timer; this step installs
 // it so certificates renew before then.
 func CertsUnits() map[string][]byte {
 	return map[string][]byte{

@@ -83,7 +83,7 @@ http {
         }
     }
 
-    # HTTPS on 443 after ssl_preread. Phase 6 adds the /metrics routes here.
+    # HTTPS on 443 after ssl_preread. Phase 5 adds the /metrics routes here.
     server {
         listen 127.0.0.1:8443 ssl default_server;
         server_name {{ .Domain }};

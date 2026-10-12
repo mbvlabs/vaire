@@ -124,7 +124,7 @@ func runClusterInit(cmd *cobra.Command, args []string) error {
 			output.CodeError,
 			"eru cluster init --restore is not implemented yet",
 			output.ExitGeneric,
-			"Disaster recovery from a secrets document arrives in Phase 4.",
+			"Disaster recovery from a secrets document arrives in Phase 7.",
 		)
 	}
 	if flagTrue(cmd, "discard") {

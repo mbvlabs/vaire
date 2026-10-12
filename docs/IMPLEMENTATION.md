@@ -30,9 +30,9 @@
 
 ## 1. Scope
 
-**In scope** (MASTER roadmap Phases 0–6, plus the extension catalog from Phase 8 and the agent guide from Phase 7): single-node central command, operator CLI, WireGuard transport, secrets document, hardening, PostgreSQL 18, tuning, security, nginx TLS (eru-issued ACME certificates), PgBouncer, pgBackRest DB backups and restores, restic VPS backups, DR rebuild, metrics exporters, maintenance, extensions v1, status/doctor/top, upgrade/rollback, `--local` install, agent guide and skill.
+**In scope** (MASTER roadmap Phases 0–5, 7 and 8, plus the agent guide from Phase 9): single-node central command, operator CLI, WireGuard transport, secrets document, hardening, PostgreSQL 18, tuning, security, nginx TLS (eru-issued ACME certificates), PgBouncer, pgBackRest DB backups and restores, restic VPS backups, DR rebuild, metrics exporters, maintenance, extensions v1, status/doctor/top, upgrade/rollback, `--local` install, agent guide and skill.
 
-**Out of scope:** multiple nodes, replicas and the Tailscale transport (Phase 9), HA (Phase 10), operator add/revoke and scoped operators, provider snapshots and alerting (Phase 7), `eru mcp` and major PG upgrades (backlog).
+**Out of scope:** multiple nodes, replicas and the Tailscale transport (Phase 10), HA (Phase 11), operator add/revoke and scoped operators, provider snapshots and alerting (Phase 9), `eru mcp` and major PG upgrades (backlog).
 
 ---
 
@@ -331,7 +331,7 @@ mode = "acme"                       # acme | self-signed
 acme_ca = ""                        # override directory URL (e.g. Let's Encrypt staging)
 
 [transport]
-kind = "wireguard"                  # wireguard; tailscale (Phase 9)
+kind = "wireguard"                  # wireguard; tailscale (Phase 10)
 subnet = "10.42.0.0/16"
 listen_port = 51820
 
@@ -409,19 +409,19 @@ path_prefix = "/metrics"
 - `retention_full ≥ 1`, `keep_weekly ≥ 1`.
 - A database named `postgres`, `template0` or `template1` is rejected.
 - Extensions exist in the catalog (§17).
-- Until Phase 9, exactly one node with `role = "primary"` is allowed. More are rejected with `precondition_failed` and the hint "multi-node arrives in Phase 9".
+- Until Phase 10, exactly one node with `role = "primary"` is allowed. More are rejected with `precondition_failed` and the hint "multi-node arrives in Phase 10".
 
 - **Strict decode.** `ParseCluster` refuses unknown keys with `config_error` naming them. Every table above exists from Phase 2 on with the defaults shown, so a file from an earlier phase still decodes and later phases don't change the decoder. `schema` stays `1`.
 - A table's fields are validated only when its feature is in use: `[backup]` only when `provider != ""` (empty means not configured).
 - `tls.mode ∈ {acme, self-signed}`; `acme_ca` empty or an `https://` URL; `postgres.version == 18`; `profile ∈ {oltp, mixed, analytics}`; `client_connections` 10–100000; `locale_provider ∈ {builtin, icu, libc}`; `locale` matches `^[A-Za-z0-9_.@-]+$`.
 - `[postgres.settings]` keys match `^[a-z_][a-z0-9_.]*$` and may not name a setting eru owns: `allow_alter_system`, `ssl*`, `listen_addresses`, `port`, `password_encryption`, `shared_preload_libraries`, `archive_*`, `data_directory`, `hba_file`, `ident_file`, `include*`.
-- Database names are unique, and `<name>_migrate` etc. fit in 63 characters. `statement_timeout` is `0` or matches `^\d+(ms|s|min|h)$`. Extensions must be catalog entries (§17); until Phase 8 only the contrib entries exist, and any other name gets `validation_failed` with the hint "arrives with eru ext in Phase 8".
+- Database names are unique, and `<name>_migrate` etc. fit in 63 characters. `statement_timeout` is `0` or matches `^\d+(ms|s|min|h)$`. Extensions must be catalog entries (§17); until Phase 4 only the contrib entries exist, and any other name gets `validation_failed` with the hint "arrives with eru ext in Phase 4".
 - `ValidateFor(scope)` has scopes `host` and `full`. `cluster.bootstrap phase=host` uses `host`, which allows a missing `domain`. Everything else uses `full`, where a missing domain is `validation_failed` with hint `eru config set domain <fqdn>`. This is how a Phase 1 cluster gets its database: `eru config set domain …`, `eru apply` (optionally `eru config set acme_email …` first).
 - `DefaultCluster()` has no databases. Init adds `app` (`statement_timeout = "60s"`, `extensions = ["pg_stat_statements"]`) when the interview and flags name none.
 
 `config set` uses dotted keys (`backup.vps.schedule`, `postgres.settings.work_mem`, `databases.app.statement_timeout`). Array-of-table entries are addressed by `name`. Values parse by the target field's type (bool, int, float, string, `[]string` as a comma list or TOML array literal). `schema`, `name`, `nodes.*.wg_address` and `transport.*` are immutable after init: `config set` refuses them, and so does a whole-file `config.set` (`config edit`), with `precondition_failed`, reason `immutable_key`.
 
-**Desired-state store** (`internal/state`): a `Store` interface (`Load`, `Save(raw)` that validates with `full` and writes atomically, `Revision()` = sha256 of the file). Phase 2 has `FileStore` at `/etc/eru/cluster.toml`; the bucket copy arrives with Phases 3 and 4. `config.set`, `db.create`, `db.drop` and `cluster.bootstrap` write through it. `config.set` takes `base_revision` and refuses a stale one (`precondition_failed`, reason `config_changed`); with `dry_run` it returns the plan for the new file without saving.
+**Desired-state store** (`internal/state`): a `Store` interface (`Load`, `Save(raw)` that validates with `full` and writes atomically, `Revision()` = sha256 of the file). Phase 2 has `FileStore` at `/etc/eru/cluster.toml`; the bucket copy arrives with Phases 3 and 7. `config.set`, `db.create`, `db.drop` and `cluster.bootstrap` write through it. `config.set` takes `base_revision` and refuses a stale one (`precondition_failed`, reason `config_changed`); with `dry_run` it returns the plan for the new file without saving.
 
 **Answers file** (`--answers answers.toml`): the same schema as `cluster.toml`, plus a `[bootstrap]` table (`host`, `user`, `identity`, `host_key_fingerprint`) and a `[backup.credentials]` table (`access_key_id`, `secret_access_key`). The CLI strips credentials before persisting `cluster.toml` (they go to runtime secrets, §6.3).
 
@@ -759,7 +759,7 @@ Order is fixed. IDs end in `-v1`. Every step stays `-v1` until the first release
 | 8 | `postgres-packages-v1` | Write `/etc/postgresql-common/createcluster.d/00-eru.conf` with `create_main_cluster = false` **before** installing. Install `postgresql-common`, run `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, install `postgresql-18 postgresql-client-18 postgresql-contrib pgbouncer`, then `apt-mark hold postgresql-18 postgresql-client-18`. Debian's pgbouncer auto-starts with its own config, so `systemctl stop pgbouncer` right after install until step 13 renders it. `pgbackrest` arrives with Phase 3 in the same step | Packages installed and held |
 | 9 | `postgres-cluster-v1` | If no cluster exists: `pg_createcluster 18 main --datadir=<data_directory> --locale-provider=<provider> --locale=<locale> --start-conf=auto -- --auth-local=peer --auth-host=scram-sha-256` (checksums are default-on in 18; assert `data_checksums = on` after start and fail the step otherwise). A non-default `data_directory` gets its parent created `postgres:postgres 0700`. An existing 18/main with a **different** data directory is `precondition_failed`; eru never re-creates a cluster. systemd drop-in for `postgresql@18-main.service`: `LimitNOFILE=65536`, `OOMScoreAdjust=-900`, `Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj PG_OOM_ADJUST_VALUE=0` | `pg_lsclusters` shows 18/main online |
 | 10 | `tls-v1` | Refuse a server that has `caddy` installed (an older eru used Caddy; there is no migration, rebuild the server). Install `nginx` and `libnginx-mod-stream` from the distribution (at least `NginxMinVersion`), `apt-mark hold` them, remove the default site. Add `postgres` and `pgbouncer` to `ssl-cert`. If no certificate exists, write a self-signed P-256 placeholder (30 days, `CN`/SAN = domain) into `/etc/eru/tls` so PG, PgBouncer and nginx can start; TLS never blocks on ACME. This step runs before `postgres-config-v1`, because that step turns `ssl` on and PostgreSQL refuses to start without a readable certificate. Render `/etc/nginx/nginx.conf` (§15.2), `nginx -t`, `systemctl reload-or-restart nginx`. Install `eru-certs.service` and `eru-certs.timer` (hourly), enable the timer and `systemctl start --no-block eru-certs.service` so issuance starts at once (§15.3) | nginx active, `/etc/eru/tls/server.crt` exists |
-| 11 | `postgres-config-v1` | Render `conf.d/10-eru-tuning.conf` (§12), `20-eru-security.conf`, `30-eru-extensions.conf` (§17), `50-eru-settings.conf` (`[postgres.settings]`, values single-quoted with `''` escaping), and create `90-overrides.conf` (empty, comment header) if missing (`40-eru-backup.conf` arrives in Phase 3; `wal_level = replica` and `max_wal_senders = 10` are already in the tuning file, so only `archive_mode` will need a restart then). Render `pg_hba.conf` and `pg_ident.conf`. Every file is written owned by `postgres:postgres` with `0640` for `pg_hba.conf` and `pg_ident.conf` and `0644` for `conf.d`, so the server can read them before the reload. Ensure `include_dir = 'conf.d'` is in `postgresql.conf`. Before reload, `pg_file_settings` and `pg_hba_file_rules` must have no errors; otherwise the previous files are restored and the step fails with the errors. Classify changes via `pg_settings.context` (`postmaster` means restart, listed in the notes). The **first run** (no completed journal entry for this step) restarts unconditionally and without confirmation, because there is no traffic yet. When huge pages change, `shared_memory_size_in_huge_pages` is computed while PG is stopped during that restart, and `vm.nr_hugepages` is re-applied through step 7's helper | Rendered = on disk, with owner and mode |
+| 11 | `postgres-config-v1` | Render `conf.d/10-eru-tuning.conf` (§12), `20-eru-security.conf`, `30-eru-extensions.conf` (§17), `50-eru-settings.conf` (`[postgres.settings]`, values single-quoted with `''` escaping), and create `90-overrides.conf` (empty, comment header) if missing (`40-eru-backup.conf` arrives in Phase 3; `wal_level = logical` and `max_wal_senders = 10` are already in the tuning file, so only `archive_mode` will need a restart then). Render `pg_hba.conf` and `pg_ident.conf`. Every file is written owned by `postgres:postgres` with `0640` for `pg_hba.conf` and `pg_ident.conf` and `0644` for `conf.d`, so the server can read them before the reload. Ensure `include_dir = 'conf.d'` is in `postgresql.conf`. Before reload, `pg_file_settings` and `pg_hba_file_rules` must have no errors; otherwise the previous files are restored and the step fails with the errors. Classify changes via `pg_settings.context` (`postmaster` means restart, listed in the notes). The **first run** (no completed journal entry for this step) restarts unconditionally and without confirmation, because there is no traffic yet. When huge pages change, `shared_memory_size_in_huge_pages` is computed while PG is stopped during that restart, and `vm.nr_hugepages` is re-applied through step 7's helper | Rendered = on disk, with owner and mode |
 | 12 | `postgres-roles-v1` | §14 SQL through `pg.Local` (psql as the `postgres` OS user, SQL on stdin); per-db roles, databases, default privileges, extensions, `eru.pgbouncer_get_auth`. Passwords follow §10.2 (set once, verifiers only). Writes `/etc/eru/runtime/{pgbouncer_auth,monitor}.pass` from the request secrets when missing. Inputs are names, timeouts and extensions, never passwords. Databases removed from `cluster.toml` are not dropped (only `db drop` drops); they are reported as `orphaned_database` warnings | All roles, dbs, grants, extensions and the auth function exist |
 | 13 | `pgbouncer-v1` | Render `/etc/pgbouncer/pgbouncer.ini` (§14.3) and `userlist.txt` (verifiers read back from `pg_authid` for `pgbouncer_auth` and `eru_monitor`), `postgres:postgres 0640`, overwriting Debian's files. Enable and restart | Rendered = on disk (owner and mode included), and `SHOW VERSION` as `eru_monitor` on 6432 works (via a 0600 `PGPASSFILE`) |
 | 14 | `pgbackrest-v1` | Render `/etc/pgbackrest/pgbackrest.conf` (§13.1). `pgbackrest --stanza=<s> stanza-create`, then `check`. If the journal has no `first-full`, run `backup --type=full` (streams progress) | `check` passes, first full exists |
@@ -768,7 +768,7 @@ Order is fixed. IDs end in `-v1`. Every step stays `-v1` until the first release
 | 17 | `timers-v1` | Render systemd `.service`/`.timer` pairs for every schedule in `cluster.toml` (§18). `systemctl daemon-reload`, enable timers, disable removed ones (`eru-*.timer` not in the render) | Timer set matches |
 | 18 | `finalize-v1` | Run doctor (§21). Fail the step if any check is `fail`. Write metrics textfile. Upload `cluster.toml` as a restic snapshot tagged `eru-config` | Never complete (always runs; cheap) |
 
-`cluster.bootstrap phase=host` runs steps 1–6 (`steps.HostStepIDs()`). `phase=database` runs the database steps (`steps.DatabaseStepIDs()`), and `apply` runs everything. Each phase appends its own steps: Phase 2 has 1–13, and steps 14–18 arrive with Phases 3, 4 and 6.
+`cluster.bootstrap phase=host` runs steps 1–6 (`steps.HostStepIDs()`). `phase=database` runs the database steps (`steps.DatabaseStepIDs()`), and `apply` runs everything. Each phase appends its own steps: Phase 2 has 1–13, and step 14 arrives with Phase 3, steps 16–18 with Phase 5 and step 15 with Phase 7 (step numbers are run order, not phase order).
 
 **Restarter** (`steps.Restarter()`): `systemctl stop pgbouncer` → `pg_ctlcluster 18 main restart -m fast` → wait for `pg_isready` (60 s) → `systemctl start pgbouncer`, reporting `restart_downtime_ms`. A restart needs `--confirm {cluster}/restart` except on step 11's first run.
 
@@ -839,7 +839,7 @@ Let `R = RAMMiB`, `C = VCPU`, and `P ∈ {oltp, mixed, analytics}`.
 | `maintenance_work_mem` | `clamp(R/16, 64, 2048)` MiB |
 | `autovacuum_work_mem` | `min(maintenance_work_mem, 1024)` MiB |
 | `huge_pages` | `try` if `R ≥ 8192`, else `off` |
-| `wal_level` | `replica` |
+| `wal_level` | `logical` (followers in Phase 6 need it; it adds a little WAL over `replica`) |
 | `wal_compression` | `zstd` |
 | `wal_buffers` | `-1` |
 | `min_wal_size` | `clamp(DataDiskGiB*0.02, 1, 8)` GiB |
@@ -1193,7 +1193,7 @@ eru renders the whole `/etc/nginx/nginx.conf` (`internal/render/templates/nginx.
 - **Port 443** (`stream`, `ssl_preread on`): routes by ALPN without terminating TLS on 443 itself.
     - ALPN `postgresql` (PostgreSQL 17+ clients with `sslnegotiation=direct`) from an allowed address goes to `127.0.0.1:6433`, a `stream` server that terminates TLS with `/etc/eru/tls/server.{crt,key}` (`ssl_alpn postgresql`) and forwards the plain protocol to PgBouncer on `127.0.0.1:6432`.
     - Allowed addresses come from a `geo` block: the WireGuard subnet always, plus `client_allowlist` when `expose_pgbouncer = true`, so 443 follows the same rule as 6432. Other PostgreSQL clients go to `127.0.0.1:6434`, which closes the connection.
-    - Everything else (HTTP/1.1, h2, no ALPN) goes to the `http` server on `127.0.0.1:8443`, which terminates TLS and answers 404. Phase 6 adds the authenticated `/metrics` locations there (`auth_basic` with a bcrypt `auth_basic_user_file`; each location proxies to the exporter's `/metrics`).
+    - Everything else (HTTP/1.1, h2, no ALPN) goes to the `http` server on `127.0.0.1:8443`, which terminates TLS and answers 404. Phase 5 adds the authenticated `/metrics` locations there (`auth_basic` with a bcrypt `auth_basic_user_file`; each location proxies to the exporter's `/metrics`).
 - PgBouncer uses `auth_type = hba` with `/etc/pgbouncer/pgbouncer_hba.conf`: `local` and `hostssl` from anywhere use `scram-sha-256`; `hostnossl` is allowed only from `127.0.0.1/32` (the nginx hop); any other non-TLS connection is rejected. `client_tls_sslmode = prefer`, so the hba file, not the TLS mode, enforces TLS. SCRAM channel binding isn't available through 443, because PgBouncer sees a plain connection there; `channel_binding=require` clients must use 6432.
 
 ### 15.3 Certificates (`eru node run certs-renew`)
@@ -1330,7 +1330,7 @@ WantedBy=timers.target
 | certs-renew | hourly | 10m |
 | metrics-refresh | every 5 min | 0 |
 
-`certs-renew` is the only timer in Phase 2. `tls-v1` installs `eru-certs.{service,timer}` itself; `timers-v1` (Phase 6) takes ownership of the `.timer`. Until then every other `node run` job returns `not implemented yet`.
+`certs-renew` is the only timer in Phase 2. `tls-v1` installs `eru-certs.{service,timer}` itself; `timers-v1` (Phase 5) takes ownership of the `.timer`. Until then every other `node run` job returns `not implemented yet`.
 
 `node run <job>` takes the right lock with `--timeout 0`. If the lock is busy it logs, exits 0 and writes a `skipped` metric. Busy isn't a failure, but repeated skips show up in doctor.
 

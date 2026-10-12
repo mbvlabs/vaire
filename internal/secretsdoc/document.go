@@ -111,7 +111,7 @@ func DatabaseURLs(domain, tlsMode, db string, roles map[string]contexts.Role) ma
 	return out
 }
 
-// Backup is the recovery kit (Phases 3 and 4).
+// Backup is the recovery kit (Phases 3 and 7).
 type Backup struct {
 	Provider        string `json:"provider"`
 	Endpoint        string `json:"endpoint"`
@@ -130,7 +130,7 @@ type Backup struct {
 	} `json:"restic"`
 }
 
-// Metrics is the metrics endpoint credential (Phase 6).
+// Metrics is the metrics endpoint credential (Phase 5).
 type Metrics struct {
 	BaseURL  string `json:"base_url"`
 	Username string `json:"username"`

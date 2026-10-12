@@ -410,7 +410,7 @@ func (c Cluster) ValidateFor(scope Scope) error {
 		add("timezone %q is not a timezone name", c.Timezone)
 	}
 	if c.Transport.Kind != "wireguard" {
-		add("transport.kind must be wireguard until Phase 9")
+		add("transport.kind must be wireguard until Phase 10")
 	}
 	subnet, err := netip.ParsePrefix(c.Transport.Subnet)
 	if err != nil || !subnet.Addr().Is4() {
@@ -446,7 +446,7 @@ func (c Cluster) ValidateFor(scope Scope) error {
 		if n.Role == RolePrimary {
 			primaries++
 		} else {
-			add("nodes[%d].role %q: only primary exists until Phase 9", i, n.Role)
+			add("nodes[%d].role %q: only primary exists until Phase 10", i, n.Role)
 		}
 		if _, err := netip.ParseAddr(n.PublicAddress); err != nil {
 			add("nodes[%d].public_address %q is not an IP address", i, n.PublicAddress)
@@ -457,7 +457,7 @@ func (c Cluster) ValidateFor(scope Scope) error {
 		}
 	}
 	if primaries != 1 {
-		add("exactly one node with role primary is required (multi-node arrives in Phase 9)")
+		add("exactly one node with role primary is required (multi-node arrives in Phase 10)")
 	}
 	c.validatePhase2(add, scope)
 	if len(problems) == 0 {
@@ -532,7 +532,7 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 		}
 		for _, ext := range db.Extensions {
 			if _, ok := catalog.Lookup(ext); !ok {
-				add("databases[%d].extensions %q is not in the catalog (it arrives with eru ext in Phase 8)", i, ext)
+				add("databases[%d].extensions %q is not in the catalog (it arrives with eru ext in Phase 4)", i, ext)
 			}
 		}
 	}

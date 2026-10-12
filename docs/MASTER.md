@@ -44,8 +44,8 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Interface | One Glorious CLI, terminal and agent first. No web UI, so the andurel web framework is out of scope (its CLI conventions are reused) |
 | Control channel | SSH (in-process, `x/crypto/ssh`) over WireGuard. Tailscale is supported as an alternative transport |
 | Backup engine | pgBackRest, with WAL-G as fallback behind a `backup.Driver` interface |
-| VPS backup | restic file-level backups, weekly by default and scheduled separately from the database. Provider snapshots later (Phase 7, §6.6) |
-| HA (Phase 10, last) | Patroni + etcd. Until then eru runs plain `postgresql-common`, with a designed and tested adoption step into Patroni |
+| VPS backup | restic file-level backups, weekly by default and scheduled separately from the database. Provider snapshots later (Phase 9, §6.6) |
+| HA (Phase 11, last) | Patroni + etcd. Until then eru runs plain `postgresql-common`, with a designed and tested adoption step into Patroni |
 | Client access | eru issues and renews the ACME certificate for `data.example.com` itself; clients connect to `:6432` (PgBouncer) or `:5432` with `sslmode=verify-full`, or to PgBouncer through `:443` with direct TLS (`sslnegotiation=direct`, PG17+ clients). The record must be DNS only, not proxied |
 | Metrics | Exporters only, exposed via an authenticated nginx endpoint for external scraping (Grafana Cloud, own Prometheus). No metrics storage on the box |
 | Config format | TOML |
@@ -68,9 +68,9 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 
 **Still to decide** (when the phase that needs it starts):
 
-- Which exporter versions to pin, and whether eru's own metrics replace `pgbackrest_exporter` (Phase 6).
-- Where the table-bloat query comes from (Phase 6).
-- Which catalog extensions to drop because they have no PostgreSQL 18 package (Phase 8).
+- Which exporter versions to pin, and whether eru's own metrics replace `pgbackrest_exporter` (Phase 5).
+- Where the table-bloat query comes from (Phase 5).
+- Which catalog extensions to drop because they have no PostgreSQL 18 package (Phase 4).
 
 ## 4. Technology choices
 
@@ -89,7 +89,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | TLS & metrics edge | **nginx** (distribution package): HTTP-01 challenges on 80; on 443 `stream` + `ssl_preread` routes ALPN `postgresql` to PgBouncer and everything else to HTTPS (authenticated `/metrics` later). Certificates come from eru's own ACME client (`x/crypto/acme`) | Only direct-TLS clients on 443 go through nginx; 6432 and 5432 are direct |
 | Metrics | `node_exporter`, `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter`; `pg_stat_statements` on by default | Localhost-bound, federated through nginx |
 | DB access from CLI | `pgx` over the WireGuard tunnel | `eru sql`, `eru psql`, `eru console` (usql), `eru tunnel` |
-| HA (Phase 10) | Patroni + etcd (3 voters), HAProxy health-routing on the Patroni REST API | |
+| HA (Phase 11) | Patroni + etcd (3 voters), HAProxy health-routing on the Patroni REST API | |
 | Scheduling | systemd timers on each node calling `eru node …` subcommands | No long-running eru process anywhere |
 
 ## 5. Architecture
@@ -119,7 +119,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
   - `eru upgrade` self-updates the local CLI (signed), then upgrades every node.
   - `eru node upgrade [--node <name>|--all] [--version <v>]` upgrades nodes only, for example to roll back or to pin a version.
   - Each node upgrade downloads the matching linux build, verifies its cosign signature and sha256 against the manifest, and swaps `/usr/local/bin/eru` atomically, keeping the previous binary. It runs `eru node selfcheck`, then `eru apply` re-runs only the steps whose versioned IDs changed.
-  - Upgrades wait for running timers (backups, maintenance) to finish. In HA (Phase 10) they roll one node at a time, replicas first.
+  - Upgrades wait for running timers (backups, maintenance) to finish. In HA (Phase 11) they roll one node at a time, replicas first.
   - `eru node upgrade --rollback` restores the previous binary.
 - **State.** The desired state (`/etc/eru/cluster.toml`) and journal live on the central command, and a copy is pushed to the bucket after every `apply`. The operator machine holds only credentials, in its contexts. Any machine with the transfer bundle and its passphrase can take over operation.
 
@@ -164,7 +164,7 @@ eru operator revoke <name>
 
 Losing the document doesn't mean losing the cluster as long as console access exists, but losing the **recovery kit** means the backups can't be read. eru won't finish `init` until the user confirms the document is stored, and `eru doctor` keeps reminding them.
 
-Per-operator identities let an agent get its own scoped document, for example a **read-only operator** whose SSH certificate and DB role only allow read commands (Phase 7).
+Per-operator identities let an agent get its own scoped document, for example a **read-only operator** whose SSH certificate and DB role only allow read commands (Phase 9).
 
 ### 5.4 Agent-first CLI contract
 
@@ -187,7 +187,7 @@ On top of that:
 - **Read helpers** for agents: `eru sql --json "select …"` (read-only role by default; `--write` needs a write-capable context), `eru status --json`, `eru maint report … --json`.
 - An MCP server mode (`eru mcp`) is planned for a later phase, built on the same command tree.
 
-### 5.5 Phases 9–10: read replicas and HA
+### 5.5 Phases 10–11: read replicas and HA
 
 ```
                          clients
@@ -209,7 +209,7 @@ On top of that:
 - **Adding a node** is `eru node add --host root@… --role standby|replica|witness [--region ams]`. It uses the same bootstrap as §5.2, joins the mesh, and gets the cluster config pushed to it. No join tokens or agents are needed, because the operator CLI orchestrates every node over SSH.
 - **Central command is a role, not the primary.** Once failover exists, the primary moves. The desired state and journal are replicated to every node and the bucket, and any node can serve as the state holder. The `state.Store` interface exists from Phase 2.
 - HA needs **3 voters**. Two nodes plus a tiny etcd witness is the minimum safe topology, and eru refuses a 2-voter HA setup.
-- **rw/ro endpoint routing** has options: DNS A records over all nodes plus local HAProxy routing to `/primary` or `/replica`; libpq multi-host strings with `target_session_attrs`; or a Patroni callback that updates DNS. This is decided in the Phase 10 design.
+- **rw/ro endpoint routing** has options: DNS A records over all nodes plus local HAProxy routing to `/primary` or `/replica`; libpq multi-host strings with `target_session_attrs`; or a Patroni callback that updates DNS. This is decided in the Phase 11 design.
 - With **Tailscale** as the transport, nodes and operators use the tailnet instead of eru's mesh (embedded via `tsnet` in operator mode). Everything else is the same.
 
 ### 5.6 Code layout
@@ -251,7 +251,7 @@ schema/eru-v1.json           agent JSON contract
 | Path | Owner / mode | Purpose |
 | --- | --- | --- |
 | `/usr/local/bin/eru` (+ `eru.prev`) | root 0755 | Node binary, version-locked to the operator; previous version kept for rollback |
-| `/etc/eru/cluster.toml` | root 0640 | Desired state, no secrets (central command; replicated in Phase 10) |
+| `/etc/eru/cluster.toml` | root 0640 | Desired state, no secrets (central command; replicated in Phase 11) |
 | `/etc/eru/runtime/` | root 0700 | Only the secrets services need at runtime (bucket keys, cipher pass, pgbouncer auth) |
 | `/var/lib/eru/journal.json` | root 0600 | Applied step IDs, versions, timestamps |
 | `/etc/postgresql/18/main/conf.d/10-eru-tuning.conf` | managed | Tuning |
@@ -260,7 +260,7 @@ schema/eru-v1.json           agent JSON contract
 | `/etc/postgresql/18/main/conf.d/90-overrides.conf` | user | The only hand-edited file; `eru doctor` lists what it overrides |
 | `/var/log/eru/` | | Per-run logs for apply, backup, maintenance and restore drills |
 
-## 6. The single-node central command in detail (Phases 1–6)
+## 6. The single-node central command in detail (Phases 1–8)
 
 ### 6.1 `eru cluster init`
 
@@ -319,7 +319,7 @@ schema/eru-v1.json           agent JSON contract
 - TLS everywhere: `ssl = on`, `ssl_min_protocol_version = TLSv1.2` (1.3 optional), `hostssl` only in pg_hba for non-local, clients told to use `sslmode=verify-full`. PG18 `sslnegotiation=direct` is supported.
 - Auth: `password_encryption = scram-sha-256`, no md5 or trust over TCP, `peer` for local admin via pg_ident, and a terminal `reject` rule.
 - Network: public 5432/6432 is closed unless the allowlist opens it. Operators and agents reach the DB over WireGuard.
-- Roles: `postgres` superuser is local-socket only. A separate admin role (CREATEDB/CREATEROLE, not superuser) for operators. Per-database owner and app roles, a read-only role (the default for `eru sql`), `eru_monitor` (`pg_monitor`), `eru_backup`, `replicator` (Phase 9). `pgbouncer_auth` gets only the `auth_query` SECURITY DEFINER function.
+- Roles: `postgres` superuser is local-socket only. A separate admin role (CREATEDB/CREATEROLE, not superuser) for operators. Per-database owner and app roles, a read-only role (the default for `eru sql`), `eru_monitor` (`pg_monitor`), `eru_backup`, `replicator` (Phase 10). `pgbouncer_auth` gets only the `auth_query` SECURITY DEFINER function.
 - Guardrails: `idle_in_transaction_session_timeout`, per-role `statement_timeout` defaults, `allow_alter_system = off`, `REVOKE` on `public` schema / database `CONNECT` from `PUBLIC`.
 - Logging: PG18 `log_connections` aspects, `log_disconnections`, `log_lock_waits`, `log_temp_files`, `log_checkpoints`, `log_autovacuum_min_duration`, `log_min_duration_statement` per profile. Optional `pgaudit`.
 - Host: SSH only on wg0, fail2ban jail on Postgres auth failures, systemd sandboxing overrides where safe.
@@ -328,7 +328,7 @@ schema/eru-v1.json           agent JSON contract
 ### 6.4 nginx, certificates and `data.example.com`
 
 - **Certificates:** eru gets and renews the certificate for `data.example.com` itself (`eru node run certs-renew`, hourly), over HTTP-01 on port 80 served by nginx. It installs the certificate for Postgres, PgBouncer and nginx and reloads them, so clients connect to `data.example.com:6432` with `sslmode=verify-full`.
-- **Port 443:** nginx's `stream` module reads the TLS ClientHello (`ssl_preread`). PostgreSQL 17+ clients with `sslnegotiation=direct` send ALPN `postgresql`; nginx terminates their TLS and passes them to PgBouncer over loopback, under the same allowlist as 6432. This helps on networks that only allow 443. Everything else on 443 is HTTPS, where Phase 6 serves the authenticated `/metrics` endpoint.
+- **Port 443:** nginx's `stream` module reads the TLS ClientHello (`ssl_preread`). PostgreSQL 17+ clients with `sslnegotiation=direct` send ALPN `postgresql`; nginx terminates their TLS and passes them to PgBouncer over loopback, under the same allowlist as 6432. This helps on networks that only allow 443. Everything else on 443 is HTTPS, where Phase 5 serves the authenticated `/metrics` endpoint.
 - **DNS:** the record must point straight at the server ("DNS only" in Cloudflare). A proxied record ends the connection at the proxy, which only passes HTTP.
 
 ### 6.5 Database backups and restores
@@ -369,7 +369,7 @@ The database is covered by pgBackRest. The VPS backup covers everything else on 
 - **How:** restic to the same bucket under a separate prefix with its own repository password, which is stored in the recovery kit.
 - **Schedule:** independent of the database schedule. The default is **weekly** (Sunday, staggered away from the full DB backup), with `forget --prune` retention of 8 weekly and 6 monthly, and a monthly `restic check`. The schedule is configurable in `cluster.toml` (`[vps_backup] schedule = "weekly"`), and `eru vps backup now` runs one on demand, for example before risky changes. `eru upgrade` and `eru pg update` take one automatically.
 - **Restore:** `eru vps backup list`, `eru vps restore --snapshot <id> [--path …] [--to <dir>]`. During DR, `cluster init --restore` restores the VPS snapshot first (identity, certificates, extra files), then re-applies the steps from `cluster.toml`, then restores the database with pgBackRest.
-- **Provider snapshots** (Hetzner, DigitalOcean, Vultr APIs) as an extra layer are planned for Phase 7.
+- **Provider snapshots** (Hetzner, DigitalOcean, Vultr APIs) as an extra layer are planned for Phase 9.
 
 ### 6.7 Metrics
 
@@ -435,9 +435,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 ### 7.1 Current state (2026-10-12)
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
-- **Phase 1 (Bootstrap) works on a real VPS.** Several manual runs (2026-10-12, Hetzner, Ubuntu 26.04) went from a fresh server to public 22 closed and SSH over WireGuard, and the secrets handoff was accepted by `eru login`. It turns ✅ together with Phase 2 once the exit checks are recorded.
-- **Phase 2 (First cluster) works end to end on a real VPS; the exit check is being finished.** `cluster init` completes, the ACME certificate is issued, `eru sql` connects with verify-full, and `eru apply --auto-upgrade-nodes` upgrades the node. Fixes from each manual run are in [`PHASE2-FINDINGS.md`](./PHASE2-FINDINGS.md). Still to record: a no-op `eru apply`, an app connection to 6432 with `sslmode=verify-full`, `db drop` refused with only `--yes`, and the date, version and VPS of the passing run. `eru console` (usql through an eru-side TLS proxy) was added after the runs and hasn't been tried on the VPS yet.
-- One open item from Phase 0: install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
+- **Phases 1 and 2 are done (2026-10-12, Hetzner, Ubuntu 26.04).** `cluster init` goes from a fresh server to public 22 closed, SSH over WireGuard and a working PostgreSQL 18 cluster. The ACME certificate is issued, the secrets handoff is accepted by `eru login`, `eru sql` connects with verify-full, `eru apply --auto-upgrade-nodes` upgrades the node, and an app connects to 6432 through PgBouncer with `sslmode=verify-full`. The checks not yet run on a VPS (lockdown self-revert, `--local`, a no-op `apply`, `db drop` refusal, `eru console`, direct TLS on 443) are in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) and don't block Phase 3.
+- **Phase 3 (Database backups & restore) is next.**
+- One open item from Phase 0, also in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md): install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
 - About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
 
 ### 7.2 Overview
@@ -445,18 +445,21 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | # | Phase | What you can do at the end | Status |
 | --- | --- | --- | --- |
 | 0 | Foundations | Install and self-upgrade the `eru` CLI; a node can run steps | ✅ |
-| 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | 🟡 works on a VPS; exit check being recorded |
-| 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | 🟡 works on a VPS; exit check being recorded |
-| 3 | Database backups & restore | Back up to S3/R2, PITR restore, drills, per-database backup policies | ⬜ |
-| 4 | VPS backups & disaster recovery | Rebuild a dead server on a fresh VPS from the secrets document | ⬜ |
-| 5 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
-| 6 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ⬜ |
-| 7 | Operators & agents | Teammate and agent identities, read-only agents, full agent guide, alerting | ⬜ |
-| 8 | Extensions | Extension catalog and `eru ext` | ⬜ |
-| 9 | Multi-node & read replicas | Add nodes over a WireGuard mesh; regional read replicas | ⬜ |
-| 10 | High availability | Patroni + etcd, automatic failover | ⬜ last |
+| 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | ✅ |
+| 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | ✅ |
+| 3 | Database backups & restore | Back up to S3/R2, PITR restore, drills, per-database backup policies, `db fork` (a copy of one database at a point in time) | ⬜ |
+| 4 | Extensions | Extension catalog and `eru ext` | ⬜ |
+| 5 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ⬜ |
+| 6 | Followers | Per-database followers kept current by logical replication; unfollow one to rehearse a risky migration on current data | ⬜ |
+| 7 | VPS backups & disaster recovery | Rebuild a dead server on a fresh VPS from the secrets document | ⬜ |
+| 8 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
+| 9 | Operators & agents | Teammate and agent identities, read-only agents, full agent guide, alerting | ⬜ |
+| 10 | Multi-node & read replicas | Add nodes over a WireGuard mesh; regional read replicas | ⬜ |
+| 11 | High availability | Patroni + etcd, automatic failover | ⬜ last |
 
-[`IMPLEMENTATION.md`](./IMPLEMENTATION.md) specifies Phases 0–6 in detail, plus the extension catalog (Phase 8) and the agent guide (Phase 7). Phases 7–10 get their own design before they start.
+**v1 is Phases 0–6.** VPS backups and DR, upgrades, operators and agents, multi-node and HA come after the first release.
+
+[`IMPLEMENTATION.md`](./IMPLEMENTATION.md) specifies Phases 0–5, 7 and 8 in detail, plus the agent guide (Phase 9). Phases 6 and 9–11 get their own design before they start.
 
 ### 7.3 Phase 0 — Foundations ✅
 
@@ -471,40 +474,38 @@ The CLI contract, releases and the node-side engine. No server work.
 | `internal/engine` | Steps, plan/apply runner, journal, locks, run logs, shell, redaction | ✅ |
 | `internal/node`, `internal/rpc` | `eru node rpc` dispatcher with version check, `selfcheck`, `upgrade.install` | ✅ |
 
-### 7.4 Phase 1 — Bootstrap 🟡
+### 7.4 Phase 1 — Bootstrap ✅
 
 From a laptop, take a fresh Debian/Ubuntu VPS to "hardened, SSH only over WireGuard, secrets document in hand".
 
-🟡 below means code complete and linted, but not yet run on a VPS. Each module turns ✅ when the exit check passes.
-
 | Module | What it does | Status |
 | --- | --- | --- |
-| `internal/transport` | SSH client with TOFU host-key pinning; embedded userspace WireGuard | 🟡 SSH and pinning tried against a local sshd; WireGuard untested |
-| `internal/remote` | Binary push, RPC client, version handshake, `--auto-upgrade-nodes` | 🟡 in-process RPC path tried; SSH path untested |
-| `internal/secretsdoc`, `internal/contexts` | age secrets document, contexts, `eru login`, `eru context *` | 🟡 encrypt, decrypt, login and contexts tried locally |
-| `internal/localenv` (preflight) | `missing_tool` checks and install offers; the pinned, checksum-verified usql download for `eru console` | 🟡 built; first used by `psql` and `console` (Phase 2) |
-| Steps 1–6 | Base packages, admin user, WireGuard, sshd hardening + **commit-confirm** move to wg0, ufw/fail2ban, journald/swap/unattended-upgrades | 🟡 scripts pass shellcheck; firewall logic tried against a stub `ufw` only |
-| `cluster init` (host part) | Remote and `--local`, `--resume`, `node unlock-ssh`, the `install.sh` init prompt | 🟡 input checks and first contact up to auth tried locally |
+| `internal/transport` | SSH client with TOFU host-key pinning; embedded userspace WireGuard | ✅ |
+| `internal/remote` | Binary push, RPC client, version handshake, `--auto-upgrade-nodes` | ✅ |
+| `internal/secretsdoc`, `internal/contexts` | age secrets document, contexts, `eru login`, `eru context *` | ✅ |
+| `internal/localenv` (preflight) | `missing_tool` checks and install offers; the pinned, checksum-verified usql download for `eru console` | ✅ |
+| Steps 1–6 | Base packages, admin user, WireGuard, sshd hardening + **commit-confirm** move to wg0, ufw/fail2ban, journald/swap/unattended-upgrades | ✅ |
+| `cluster init` (host part) | Remote and `--local`, `--resume`, `node unlock-ssh`, the `install.sh` init prompt | ✅ |
 
 Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 subset of `cluster.toml` with validation (`internal/config`), OS and RAM detection (`internal/hostinfo`), and `eru plan` / `eru apply` over the tunnel (they run steps 1–6 and are how an operator first reaches a `--local` node).
 
-**Exit:** `eru cluster init --host root@<vps>` ends with public 22 closed, SSH working over WireGuard, and a secrets document that `eru login` accepts on a second machine. A broken tunnel during lockdown reverts by itself.
+**Exit:** `eru cluster init --host root@<vps>` ends with public 22 closed, SSH working over WireGuard, and a secrets document that `eru login` accepts on a second machine. A broken tunnel during lockdown reverts by itself (not yet forced on a VPS; see [`MANUAL-TESTING.md`](./MANUAL-TESTING.md)).
 
-### 7.5 Phase 2 — First cluster 🟡
+### 7.5 Phase 2 — First cluster ✅
 
-`cluster init` now finishes with a usable database. It runs end to end on a VPS; the exit check below is being recorded.
+`cluster init` now finishes with a usable database.
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| `internal/config` | Strict `cluster.toml` schema, defaults and validation; dotted-key `get`/`set` | 🟡 |
-| `internal/hostinfo` | CPU, RAM, disk, kernel and OS detection, public IPv4/IPv6 | 🟡 |
-| `internal/tune` | Tuning calculator; `eru tune explain/apply` | 🟡 |
-| `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, pgbouncer_hba.conf, nginx.conf, eru-certs units, unified `Diff` | 🟡 |
-| `internal/pg`, `internal/state` | pgx admin client (local psql + remote pgx), desired-state store | 🟡 |
-| Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, nginx + ACME certificates, PgBouncer | 🟡 |
-| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune *` | 🟡 |
+| `internal/config` | Strict `cluster.toml` schema, defaults and validation; dotted-key `get`/`set` | ✅ |
+| `internal/hostinfo` | CPU, RAM, disk, kernel and OS detection, public IPv4/IPv6 | ✅ |
+| `internal/tune` | Tuning calculator; `eru tune explain/apply` | ✅ |
+| `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, pgbouncer_hba.conf, nginx.conf, eru-certs units, unified `Diff` | ✅ |
+| `internal/pg`, `internal/state` | pgx admin client (local psql + remote pgx), desired-state store | ✅ |
+| Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, nginx + ACME certificates, PgBouncer | ✅ |
+| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune *` | ✅ |
 
-**Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused.
+**Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused. Passed 2026-10-12 (Hetzner, Ubuntu 26.04) apart from the checks listed in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 
 ### 7.6 Phase 3 — Database backups & restore ⬜
 
@@ -514,10 +515,41 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 | Per-database backup policies | Each database can have its own schedule and retention in `cluster.toml` | ⬜ |
 | Step 14 + backup timers | Schedules for backups, verify and restore drills | ⬜ |
 | Commands | `backup now/list/verify`, `restore` (time/latest/set; paused, then promote/abort/cleanup), `restore drill`, `restore --db`, `dump` | ⬜ |
+| `db fork <db> [--at <time>]` | A copy of one database under a new name at a point in time, built on `restore --db`. The cheap way to rehearse a migration on yesterday's data | ⬜ |
 
-**Manual test:** take a backup, write rows, restore to a time before them, then promote. Run a drill. Restore a single database under a new name.
+**Manual test:** take a backup, write rows, restore to a time before them, then promote. Run a drill. Restore a single database under a new name, and fork one with `db fork`.
 
-### 7.7 Phase 4 — VPS backups & disaster recovery ⬜
+### 7.7 Phase 4 — Extensions ⬜
+
+`internal/catalog` and `ext list/add/remove`, including extensions that need a restart. `pg_stat_statements` and `auto_explain` are already on by default from Phase 2.
+
+**Manual test:** add a catalog extension that needs a restart to a database, apply, and check it in `pg_extension`. Remove it again.
+
+### 7.8 Phase 5 — Observability & maintenance ⬜
+
+| Module | What it does | Status |
+| --- | --- | --- |
+| Step 16 | Exporters and the authenticated `/metrics` endpoint behind nginx | ⬜ |
+| Status views | `status`, `top`, `queries`, `doctor` (all checks, including `--security`) | ⬜ |
+| `internal/maint` | `maint vacuum/analyze/reindex/repack/report/kill` and the maintenance timers | ⬜ |
+| Steps 17–18 | Remaining timers; `doctor` as the final gate of `init`. The restic upload of `cluster.toml` in `finalize-v1` arrives with Phase 7 | ⬜ |
+
+**Manual test:** scrape `/metrics` with and without credentials. `doctor` is clean on a fresh cluster. Run a bloat report, then a repack.
+
+### 7.9 Phase 6 — Followers ⬜
+
+Heroku-style followers for rehearsing risky migrations on production data. A follower is a database on the same cluster that a logical-replication subscription keeps in step with its source; it needs `wal_level = logical`, which is set from Phase 2 so turning followers on never needs a restart.
+
+| Module | What it does | Status |
+| --- | --- | --- |
+| Followers | `db follow <db> [--name]` creates `<db>_follower` with its own roles, copies the schema, then creates a publication on the source and a subscription on the follower. `db unfollow <follower>` drops the subscription and slot and copies the sequence values across, leaving a standalone up-to-date copy to run the migration against | ⬜ |
+| Checks | `follow` refuses tables without a primary key or replica identity. A follower stalled by a schema change on the source (DDL isn't replicated) shows up in `status` and `doctor`, with the fix: apply the same migration to the follower | ⬜ |
+| Slot safety | Replication lag and retained WAL per follower in metrics; `doctor` fails on a stalled slot and `max_slot_wal_keep_size` caps how much WAL one can hold | ⬜ |
+| Commands | `db follow`, `db unfollow`, `db followers`; `db fork` lands in Phase 3 | ⬜ |
+
+**Manual test:** follow a database under write load and watch the lag reach zero. Unfollow it, check row counts and sequence values against the source, run a migration on the copy, then drop it. A DDL change on the source stalls a second follower, and `doctor` reports it.
+
+### 7.10 Phase 7 — VPS backups & disaster recovery ⬜
 
 | Module | What it does | Status |
 | --- | --- | --- |
@@ -527,7 +559,7 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 
 **Manual test:** load data, destroy the VPS, create a new one and run `cluster init --restore`. The data, WireGuard identity and host keys match, and the old context keeps working.
 
-### 7.8 Phase 5 — Upgrades ⬜
+### 7.11 Phase 8 — Upgrades ⬜
 
 | Module | What it does | Status |
 | --- | --- | --- |
@@ -536,38 +568,23 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 
 **Manual test:** publish version N+1 and run `eru upgrade`. Only the changed steps re-run. `node upgrade --rollback` brings back version N.
 
-### 7.9 Phase 6 — Observability & maintenance ⬜
-
-| Module | What it does | Status |
-| --- | --- | --- |
-| Step 16 | Exporters and the authenticated `/metrics` endpoint behind nginx | ⬜ |
-| Status views | `status`, `top`, `queries`, `doctor` (all checks, including `--security`) | ⬜ |
-| `internal/maint` | `maint vacuum/analyze/reindex/repack/report/kill` and the maintenance timers | ⬜ |
-| Steps 17–18 | Remaining timers; `doctor` as the final gate of `init` | ⬜ |
-
-**Manual test:** scrape `/metrics` with and without credentials. `doctor` is clean on a fresh cluster. Run a bloat report, then a repack.
-
-### 7.10 Phase 7 — Operators & agents ⬜
+### 7.12 Phase 9 — Operators & agents ⬜
 
 `operator add/revoke`, scoped read-only operators, the full `eru guide agents` text, a generated `docs/CLI.md`, alerting (webhook, ntfy, email) on backup age, archive lag, disk, wraparound, certificate expiry and failed drills, config drift detection, provider snapshots, and Ubuntu support checks.
 
 **Manual test:** a read-only agent operator can't change anything; each alert fires once when its condition is forced.
 
-### 7.11 Phase 8 — Extensions ⬜
-
-`internal/catalog` and `ext list/add/remove`, including extensions that need a restart. `pg_stat_statements` and `auto_explain` are already on by default from Phase 2.
-
-### 7.12 Phase 9 — Multi-node & read replicas ⬜
+### 7.13 Phase 10 — Multi-node & read replicas ⬜
 
 `node add --role replica`, the WireGuard mesh across nodes, bootstrapping from the bucket, cascading replication, the ro endpoint and lag in `status`. Tailscale becomes available as a transport option here.
 
-### 7.13 Phase 10 — High availability ⬜ (last)
+### 7.14 Phase 11 — High availability ⬜ (last)
 
 Patroni + etcd (3 voters), adopting the existing node into Patroni, sync standby, switchover/failover commands, HAProxy + PgBouncer on each node, the rw endpoint strategy (§5.5) and replicated desired state.
 
 **Exit:** kill the primary under load. Writes resume in under 30 s with no lost committed transactions in sync mode, and the CLI keeps working against the new primary.
 
-### 7.14 Backlog (unscheduled)
+### 7.15 Backlog (unscheduled)
 
 More PostgreSQL versions, major upgrades (`pg_upgrade --link` or logical blue/green), logical replication tooling, PgDog / read-write split, `eru mcp`.
 
@@ -576,7 +593,7 @@ More PostgreSQL versions, major upgrades (`pg_upgrade --link` or logical blue/gr
 There's no automated test suite. The incus VM suite was dropped on 2026-10-10 because it was too flaky to trust.
 
 - **CI** runs `just lint` (golangci-lint, shellcheck, actionlint, `--check-meta`, `--check-steps` and the cosign pin check) and builds for all four OS/arch targets. Both are fast and deterministic.
-- **Manual testing** starts at the end of Phase 2, once eru can set up a new server with a cluster. Each phase from then on ends with the manual test listed for it in §7. Run it on a real VPS, and record the date, eru version and VPS (provider, OS, size) next to the phase when it passes.
+- **Manual testing** starts at the end of Phase 2, once eru can set up a new server with a cluster. Each phase from then on ends with the manual test listed for it in §7. Run it on a real VPS, and record the date, eru version and VPS (provider, OS, size) next to the phase when it passes. Checks that couldn't be run before a phase was closed go in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 - **No unit tests.** The behaviour that matters is what happens on a real host.
 - **The agent JSON contract** is described in `schema/eru-v1.json`. Bump `"schema"` when envelopes change incompatibly.
 
@@ -585,6 +602,6 @@ There's no automated test suite. The incus VM suite was dropped on 2026-10-10 be
 - **Lock-out during bootstrap.** Moving SSH onto WireGuard can lock the operator out. Mitigated by commit-confirm with automatic revert, `eru node unlock-ssh` via the provider console, and tests that force the failure.
 - **The secrets document is a single high-value file.** It's age-encrypted, operators are per-person and revocable, and the recovery kit can be exported separately for cold storage.
 - **pgBackRest project health.** Crunchy Data, its main sponsor, was acquired by Snowflake in 2025. Check maintenance status before committing. The `backup.Driver` interface keeps WAL-G as a drop-in fallback.
-- **Agents with write access.** Destructive operations need named confirmation tokens, and read-only operator scopes arrive in Phase 7. The agent guide explains both.
-- **Single-node blast radius.** One VPS is a single point of failure until HA (Phase 10). PITR and VPS backups bound data loss to seconds, but downtime is "time to rebuild". Document an RPO/RTO for that.
+- **Agents with write access.** Destructive operations need named confirmation tokens, and read-only operator scopes arrive in Phase 9. The agent guide explains both.
+- **Single-node blast radius.** One VPS is a single point of failure until HA (Phase 11). PITR and VPS backups bound data loss to seconds, but downtime is "time to rebuild". Document an RPO/RTO for that.
 - **OOM on small VPSes.** Sensible overcommit settings plus conservative tuning for < 2 GB RAM.
