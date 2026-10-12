@@ -45,7 +45,7 @@ func Detect(dataDirectory string) (Info, error) {
 	info.Kernel = kernelRelease()
 	info.VCPU = vcpuCount()
 	info.PublicIPv4 = publicIPv4()
-	info.PublicIPv6 = publicIPv6()
+	info.PublicIPv6 = PublicIPv6()
 	info.DataDisk = detectDisk(dataDirectory)
 	return info, nil
 }
@@ -142,8 +142,8 @@ func publicIPv4() string {
 	return addr.Unmap().String()
 }
 
-// publicIPv6 is the source address the IPv6 default route would use, or "".
-func publicIPv6() string {
+// PublicIPv6 is the source address the IPv6 default route would use, or "".
+func PublicIPv6() string {
 	conn, err := net.Dial("udp6", "[2606:4700:4700::1111]:9")
 	if err != nil {
 		return ""
@@ -154,13 +154,35 @@ func publicIPv6() string {
 		return ""
 	}
 	addr, ok := netip.AddrFromSlice(udp.IP)
-	if !ok || !addr.Is6() || addr.Is4In6() {
-		return ""
-	}
-	if addr.IsLinkLocalUnicast() || addr.IsLoopback() {
+	if !ok || !usableIPv6(addr) {
 		return ""
 	}
 	return addr.String()
+}
+
+// IPv6RouteCommand prints the IPv6 default route's source address; init runs
+// it over SSH at first contact, before eru is on the server.
+const IPv6RouteCommand = "ip -6 route get 2606:4700:4700::1111"
+
+// ParseIPv6Route returns the source address in the output of
+// IPv6RouteCommand, or "" when there is none fit for an AAAA record.
+func ParseIPv6Route(out []byte) string {
+	fields := strings.Fields(string(out))
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] != "src" {
+			continue
+		}
+		addr, err := netip.ParseAddr(fields[i+1])
+		if err != nil || !usableIPv6(addr) {
+			return ""
+		}
+		return addr.String()
+	}
+	return ""
+}
+
+func usableIPv6(addr netip.Addr) bool {
+	return addr.Is6() && !addr.Is4In6() && !addr.IsLinkLocalUnicast() && !addr.IsLoopback()
 }
 
 // detectDisk resolves the block device backing path and its size/rotation.

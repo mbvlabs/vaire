@@ -83,9 +83,11 @@ type initRun struct {
 	tlsState *node.TLSState
 	// dbRestart reports whether the database phase restarted Postgres.
 	dbRestart bool
-	// dnsNoted reports whether this run already showed the A record early,
-	// so the DNS step shows only what is new.
-	dnsNoted bool
+	// dnsShown reports whether this run already showed the DNS records
+	// (with dnsIPv6 as the AAAA address) after first contact, so the DNS
+	// step doesn't show or ask again.
+	dnsShown bool
+	dnsIPv6  string
 }
 
 type initPlanData struct {
@@ -711,7 +713,6 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
-	r.noteDNSEarly()
 	known, err := transport.LoadKnownHosts(contexts.PendingKnownHosts(r.name))
 	if err != nil {
 		return err
@@ -961,10 +962,14 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 		return err
 	}
 	r.prog.OS, r.prog.Arch = osInfo.Pretty, arch
+	r.prog.PublicIPv6 = n.PublicIPv6(ctx)
 	if err := r.mark(phaseFirstHost); err != nil {
 		return err
 	}
 	r.p.phase("init.first-contact", "completed", osInfo.Pretty+", "+arch)
+	if err := r.confirmDNSEarly(); err != nil {
+		return err
+	}
 
 	r.p.phase("init.binary", "started", "install eru "+buildinfo.Version+" on the node")
 	got, installed, err := n.Version(ctx)
@@ -1311,18 +1316,10 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 		res.Passphrase = h.passphrase
 		return doc, res, nil
 	}
-	// On the server itself the bundle belongs on the operator's machine, so
-	// only the copy action is offered.
+	// On the server itself the record belongs on the operator's machine, so
+	// the save action is not offered.
 	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored"), !r.local); err != nil {
 		return doc, res, err
-	}
-	if h.path != res.SecretsDocument {
-		// Saved from the handoff: a resume rewrites the same file.
-		r.prog.SecretsOut = h.path
-		res.SecretsDocument = h.path
-		if err := contexts.SaveProgress(r.name, r.prog); err != nil {
-			return doc, res, err
-		}
 	}
 	return doc, res, nil
 }
@@ -1365,9 +1362,12 @@ func runInitLocal(cmd *cobra.Command) error {
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
-	r.noteDNSEarly()
 	caller := remote.Local{Operator: firstOperatorName}
 	if !r.prog.Done(phaseHost) {
+		r.prog.PublicIPv6 = hostinfo.PublicIPv6()
+		if err := r.confirmDNSEarly(); err != nil {
+			return err
+		}
 		hostRes, err := r.bootstrapHost(ctx, caller)
 		if err != nil {
 			return err

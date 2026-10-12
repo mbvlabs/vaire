@@ -105,6 +105,17 @@ func (n *Node) Arch(ctx context.Context) (string, error) {
 	return arch, nil
 }
 
+// PublicIPv6 returns the source address of the node's IPv6 default route,
+// or "" when it has none.
+func (n *Node) PublicIPv6(ctx context.Context) string {
+	stdout, _, err := n.SSH.Output(ctx, hostinfo.IPv6RouteCommand, nil)
+	if err != nil {
+		// No IPv6 route makes ip exit non-zero.
+		return ""
+	}
+	return hostinfo.ParseIPv6Route(stdout)
+}
+
 // OS returns the node's /etc/os-release.
 func (n *Node) OS(ctx context.Context) (hostinfo.OS, error) {
 	stdout, _, err := n.SSH.Output(ctx, "cat "+hostinfo.OSReleasePath, nil)

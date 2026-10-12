@@ -30,6 +30,9 @@ type handoff struct {
 	passphrase string
 	// path is where the bundle was written; empty when it is only printed.
 	path string
+	// saved is where the save action wrote the whole record; empty until it
+	// runs.
+	saved string
 }
 
 // newHandoff encrypts doc into an armored bundle with a new passphrase and
@@ -82,9 +85,9 @@ func requireStructuredHandoff(cmd *cobra.Command, outFlag, action string, confir
 
 // show prints a short handoff: what the record is and the bundle
 // passphrase. The operator then copies the whole record to the clipboard,
-// prints it when the terminal blocks the copy, or, with canSave, saves the
-// bundle to a file, and confirms with 'stored'. It
-// does nothing when eru must not prompt.
+// prints it when the terminal blocks the copy, or, with canSave, saves it
+// to a file, and confirms with 'stored'. It does nothing when eru must not
+// prompt.
 func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	if MustNotPrompt(cmd) {
 		return nil
@@ -120,8 +123,8 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 
 	for {
 		options := [][2]string{{"Copy everything to the clipboard", "copy"}}
-		if canSave && h.path == "" {
-			options = append(options, [2]string{"Save the transfer bundle to a file", "save"})
+		if canSave && h.saved == "" {
+			options = append(options, [2]string{"Save everything to a file", "save"})
 		}
 		options = append(options, [2]string{"Show everything on screen", "print"}, [2]string{"Done", "done"})
 		choice, err := chooseOption(cmd, "Secrets handoff", options)
@@ -146,7 +149,7 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 				note(err.Error())
 				continue
 			}
-			note("Saved the transfer bundle to " + h.path + ". Keep the passphrase apart from it.")
+			note("Saved everything to " + h.saved + " (plain text, readable only by you): every value, the transfer bundle and its passphrase.")
 		}
 	}
 
@@ -164,23 +167,33 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	return nil
 }
 
-// save asks for a path and writes the armored bundle there (0600). It never
-// overwrites an existing file.
+// save asks for a path, relative to the current directory, and writes the
+// whole record there (0600): the same text the copy action puts on the
+// clipboard. It never overwrites an existing file.
 func (h *handoff) save(cmd *cobra.Command) error {
-	path, err := promptLine(cmd, "Save the transfer bundle to", h.doc.Cluster.Name+".secrets.age")
+	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
+	path, err := promptLine(cmd, "Save everything to (relative to "+cwd+")", "./"+h.doc.Cluster.Name+"-secrets.txt")
+	if err != nil {
+		return err
+	}
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, rest)
+		}
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
 	}
 	if _, err := os.Stat(path); err == nil {
 		return errors.New(path + " already exists; pick another path")
 	}
-	if err := transport.WriteSecretFile(path, h.bundle); err != nil {
+	if err := transport.WriteSecretFile(path, []byte(h.record())); err != nil {
 		return err
 	}
-	h.path = path
+	h.saved = path
 	return nil
 }
 

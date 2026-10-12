@@ -48,23 +48,10 @@ func (r *initRun) dnsStep(ctx context.Context) error {
 		return nil
 	}
 	cmd := r.cmd
-	prompt := "Type 'confirmed' once the records exist"
-	switch {
-	case !r.dnsNoted:
-		body := recordLines(records)
-		if ipv6 == "" {
-			body = append(body, "", "No AAAA record: the server has no public IPv6 address.")
-		}
-		r.p.panel("Create these DNS records", append(body, "", dnsHelp))
-	case ipv6 != "":
-		// The A record and the help were shown before the host phase.
-		r.p.panel("Add the AAAA record too", recordLines(dnsRecords(r.cfg.Domain, "", ipv6)))
-		prompt = "Type 'confirmed' once the A and AAAA records exist"
-	default:
-		prompt = "Type 'confirmed' once the A record exists"
-	}
-	if !MustNotPrompt(cmd) && !flagTrue(cmd, "dns-ready") {
-		if err := typeWord(cmd, prompt, "", "confirmed"); err != nil {
+	// The records were shown and confirmed after first contact unless this
+	// is a resume or host bootstrap reported another IPv6 address.
+	if !r.dnsShown || r.dnsIPv6 != ipv6 {
+		if err := r.askDNS(ipv4, ipv6, false); err != nil {
 			return err
 		}
 	}
@@ -181,20 +168,44 @@ func (r *initRun) tlsStatus(ctx context.Context, caller remote.Caller) (*node.TL
 	return &state, nil
 }
 
-// noteDNSEarly shows the A record as soon as the answers are known, so the
-// operator can create it while the host phase runs (D10). The AAAA record, if
-// any, is known only after host bootstrap and is shown at the DNS step.
-func (r *initRun) noteDNSEarly() {
-	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) || r.prog.Done(phaseHost) {
-		return
+// confirmDNSEarly shows the DNS records as soon as first contact knows the
+// server's addresses and asks the operator to confirm them, so the records
+// propagate while the host phase runs (D10).
+func (r *initRun) confirmDNSEarly() error {
+	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) {
+		return nil
 	}
-	records := dnsRecords(r.cfg.Domain, r.primary().PublicAddress, "")
+	return r.askDNS(r.primary().PublicAddress, r.prog.PublicIPv6, true)
+}
+
+// askDNS shows the records in one panel and waits for 'confirmed', unless
+// eru must not prompt or --dns-ready says they exist.
+func (r *initRun) askDNS(ipv4, ipv6 string, early bool) error {
+	records := dnsRecords(r.cfg.Domain, ipv4, ipv6)
 	if len(records) == 0 {
-		return
+		return nil
 	}
-	r.dnsNoted = true
-	r.p.panel("Create this DNS record now", append(recordLines(records), "",
-		"If the server has a public IPv6 address, eru shows its AAAA record once the host is up.",
-		"", dnsHelp,
-		"eru keeps working while you create the record, then pauses for you to confirm the records exist before it sets up the database."))
+	title := "Create this DNS record"
+	if len(records) > 1 {
+		title = "Create these DNS records"
+	}
+	body := recordLines(records)
+	if ipv6 == "" {
+		body = append(body, "", "No AAAA record: the server has no public IPv6 address.")
+	}
+	body = append(body, "", dnsHelp)
+	if early {
+		body = append(body, "eru checks that they resolve after it sets up the host, before the database.")
+	}
+	r.p.panel(title, body)
+	r.dnsShown, r.dnsIPv6 = true, ipv6
+	cmd := r.cmd
+	if MustNotPrompt(cmd) || flagTrue(cmd, "dns-ready") {
+		return nil
+	}
+	prompt := "Type 'confirmed' once the A record exists"
+	if ipv6 != "" {
+		prompt = "Type 'confirmed' once the A and AAAA records exist"
+	}
+	return typeWord(cmd, prompt, "", "confirmed")
 }
