@@ -67,6 +67,8 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `no_backup_before_drop`: `eru db drop` removed a database without a backup (pgBackRest arrives in Phase 3).
 - `orphaned_database`: a database exists on the node but is no longer in `cluster.toml`. Drop it with `eru db drop`.
 - `restart_pending`: a step needs a PostgreSQL restart. `data.restart_pending` lists the steps.
+- `context_tls_updated`: `cluster.toml` on the node has a different `domain` or `tls.mode` than the local context, and the context now follows it. After a domain change, eru's connections fail with a hostname mismatch until the node has a certificate for the new name: `eru-certs.timer` issues it within the hour, or the human runs `eru ssh --command 'sudo eru node run certs-renew'`.
+- `context_sync_failed`: the command succeeded, but the local context could not be updated from `cluster.toml`. `eru apply` retries it.
 
 ## Node errors
 

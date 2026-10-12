@@ -447,9 +447,9 @@ path_prefix = "/metrics"
 
 ```
 config.toml                         current_context = "prod"
-contexts/<name>/context.toml        cluster name, domain, nodes [{name, role, public_address, wg_address, wg_public_key, listen_port}],
-                                    operator {name, wg_address, ssh_user}, auto_upgrade_nodes, lockdown_confirmed_at,
-                                    created_at, eru_version
+contexts/<name>/context.toml        cluster name, domain, tls_mode, nodes [{name, role, public_address, wg_address, wg_public_key,
+                                    listen_port}], operator {name, wg_address, ssh_user}, auto_upgrade_nodes,
+                                    lockdown_confirmed_at, created_at, eru_version
 contexts/<name>/wg.key              operator WireGuard private key (0600)
 contexts/<name>/id_ed25519          operator SSH private key (0600)
 contexts/<name>/known_hosts         pinned server host keys (wg address entries)
@@ -459,6 +459,8 @@ contexts/<name>/credentials.json    sudo password, cluster-wide database credent
 pending/<name>/                     in-progress init: answers.toml, secrets.json (0600), progress.json, known_hosts
 cache/releases/<version>/           downloaded artifacts + manifest + sigstore bundle
 ```
+
+`domain` and `tls_mode` are what `eru sql`, `psql`, `console`, `tunnel` and `secrets export` verify the server certificate against. They come from the secrets document at init and `eru login`. After `config set`, `config edit` and a successful `apply`, the operator copies both from the node's `cluster.toml` into the context and warns `context_tls_updated` when either changed, so a domain change (or one made by another operator) doesn't leave connections failing with a hostname mismatch. A failure to update the context is the warning `context_sync_failed`; the command itself still succeeds.
 
 OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any file in `contexts/` with a looser mode triggers a warning and a `chmod` fix.
 
@@ -1207,8 +1209,8 @@ eru renders the whole `/etc/nginx/nginx.conf` (`internal/render/templates/nginx.
 
 eru issues and renews the certificate itself with `golang.org/x/crypto/acme`. Nothing else on the server speaks ACME.
 
-- `eru-certs.timer` runs `eru node run certs-renew` hourly (randomized 10 min); `tls-v1` also starts it once right away. The job waits up to 20 minutes for the shared lock, so the run `tls-v1` starts during `cluster.bootstrap` goes ahead once the bootstrap releases the lock; if the lock is still busy it exits 0 with a skipped result.
-- It does nothing unless `/etc/eru/tls/server.crt` is missing, isn't for `domain`, is the self-signed placeholder in `acme` mode (or not self-signed in `self-signed` mode), or expires within 30 days.
+- `eru-certs.timer` runs `eru node run certs-renew` hourly (randomized 10 min); `tls-v1` also starts it once right away. The job waits up to 20 minutes for the shared lock, so the run `tls-v1` starts during `cluster.bootstrap` goes ahead once the bootstrap releases the lock; if the lock is still busy it exits 0 with a skipped result. Any other lock failure is an error. `eru node run` refuses with `precondition_failed` (`reason: not_a_node`) when `/etc/eru/cluster.toml` is missing, which is the case on an operator machine (run it there as `eru ssh --command 'sudo eru node run certs-renew'`), and with `root_required` when not root.
+- It does nothing unless `/etc/eru/tls/server.crt` is missing, isn't for `domain`, is the self-signed placeholder in `acme` mode (or not self-signed in `self-signed` mode), or expires within 30 days. When it does nothing it logs that the certificate for `domain` is current until `not_after`; the result always carries `domain`.
 - **acme mode:** first a self-check: write a random token into the webroot and fetch `http://<domain>/.well-known/acme-challenge/<token>`. If another host answers, the job stops with `changed: false, pending: …` (exit 0) so a wrong record doesn't use up Let's Encrypt's failed-validation limit. A connection error is inconclusive and the job carries on. Then: account key `/etc/eru/acme/account.key` (P-256, 0600, created once; `acme_email`, when set, is the account contact), order, HTTP-01 through the webroot, a fresh P-256 leaf key and CSR, and the full chain. `tls.acme_ca` overrides the directory URL (for example Let's Encrypt staging). ACME errors fail the unit with `external_command_failed`; a rate limit says when to retry.
 - **self-signed mode:** a self-signed P-256 leaf for `domain`, valid 397 days. Clients use `sslmode=require` (the document's URLs switch accordingly, and doctor warns).
 - A new certificate is written as `server.crt` (full chain, 0644) and `server.key` (`root:ssl-cert` 0640), then PostgreSQL (`pg_ctlcluster 18 main reload`), PgBouncer (`systemctl reload pgbouncer`) and nginx (`systemctl reload nginx`) are reloaded.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/render"
@@ -115,10 +116,10 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	if err := reply.Decode(&res); err != nil {
 		return err
 	}
-	warnings := append(s.warnings, reply.Warnings...)
 	if flagTrue(cmd, "apply") {
 		return runApply(cmd, nil)
 	}
+	warnings := append(append(s.warnings, reply.Warnings...), syncContextFromNode(cmd, s, p)...)
 	return output.Success(cmd, output.Result{
 		Data:     res,
 		Message:  fmt.Sprintf("set %s = %s; %d of %d steps would apply on the next eru apply", key, value, res.Plan.WouldApply, res.Plan.Total),
@@ -239,9 +240,16 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&res); err != nil {
 		return err
 	}
-	warnings := append(s.warnings, reply.Warnings...)
 	if flagTrue(cmd, "apply") {
 		return runApply(cmd, nil)
+	}
+	warnings := append(s.warnings, reply.Warnings...)
+	if cfg, err := config.ParseCluster(edited); err == nil {
+		synced, err := syncContextTLS(s, cfg)
+		if err != nil {
+			synced = contextSyncFailed(s, err)
+		}
+		warnings = append(warnings, synced...)
 	}
 	return output.Success(cmd, output.Result{
 		Data:     res,
@@ -307,4 +315,50 @@ func runEditor(cmd *cobra.Command, path string) error {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "Set $EDITOR to a working editor.")
 	}
 	return nil
+}
+
+// syncContextTLS copies the domain and TLS mode of cfg into the local
+// context. eru sql, psql, console, tunnel and secrets export verify the
+// server certificate against the context's domain, so it has to follow a
+// domain change made with config set, config edit, or by another operator.
+func syncContextTLS(s *session, cfg config.Cluster) ([]output.Warning, error) {
+	if s.ctx.Domain == cfg.Domain && s.ctx.TLSMode == cfg.TLS.Mode {
+		return nil, nil
+	}
+	previous := s.ctx.Domain
+	s.ctx.Domain, s.ctx.TLSMode = cfg.Domain, cfg.TLS.Mode
+	if err := contexts.Save(s.ctx); err != nil {
+		return nil, err
+	}
+	message := fmt.Sprintf("context %s now verifies the server as %s (tls.mode %s)", s.ctx.Name, cfg.Domain, cfg.TLS.Mode)
+	if previous != cfg.Domain {
+		message += "; until the node holds a certificate for " + cfg.Domain +
+			", connections from eru fail with a hostname mismatch. eru-certs.timer issues it within the hour, or now with: eru ssh --command 'sudo eru node run certs-renew'"
+	}
+	return []output.Warning{{Code: "context_tls_updated", Message: message}}, nil
+}
+
+// syncContextFromNode fetches cluster.toml and runs syncContextTLS on it.
+// The command it follows already succeeded, so a failure here is a warning.
+func syncContextFromNode(cmd *cobra.Command, s *session, p *progress) []output.Warning {
+	data, err := fetchConfig(cmd, s, p)
+	if err != nil {
+		return contextSyncFailed(s, err)
+	}
+	cfg, err := config.ParseCluster([]byte(data.TOML))
+	if err != nil {
+		return contextSyncFailed(s, err)
+	}
+	warnings, err := syncContextTLS(s, cfg)
+	if err != nil {
+		return contextSyncFailed(s, err)
+	}
+	return warnings
+}
+
+func contextSyncFailed(s *session, err error) []output.Warning {
+	return []output.Warning{{
+		Code:    "context_sync_failed",
+		Message: "could not update the domain and TLS mode of context " + s.ctx.Name + ": " + err.Error() + ". Run eru apply to retry.",
+	}}
 }

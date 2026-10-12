@@ -62,10 +62,24 @@ func RunJob(ctx context.Context, job string, report engine.Reporter) (any, error
 		return nil, output.NewError(output.CodeError, "job "+job+" is not implemented yet", output.ExitGeneric,
 			"This job arrives in a later phase of the roadmap.")
 	}
+	if _, err := os.Stat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
+		return nil, output.NewError(
+			output.CodePrecondition,
+			"this machine is not an eru node: "+config.ClusterPath+" does not exist",
+			output.ExitPrecondition,
+			"eru node run runs on the server. From your machine: eru ssh --command 'sudo eru node run "+job+"'",
+		).WithDetails(map[string]any{"reason": "not_a_node"})
+	}
+	if os.Geteuid() != 0 {
+		return nil, rootRequired("eru node run")
+	}
 	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), jobLockWait)
-	if err != nil {
+	if engine.IsLockHeld(err) {
 		logLine(report, job, "the node lock is busy; skipping "+job)
 		return map[string]any{"job": job, "skipped": "lock_busy"}, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	defer release()
 	return certsRenew(ctx, report)
@@ -95,12 +109,15 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 		return nil, err
 	}
 	if cfg.Domain == "" {
+		logLine(report, "certs-renew", "no domain is configured; nothing to renew")
 		return map[string]any{"changed": false, "reason": "no domain configured"}, nil
 	}
 	selfSigned := cfg.TLS.Mode == "self-signed"
 	reason := renewReason(readCert(steps.TLSCertPath), cfg.Domain, selfSigned)
 	if reason == "" {
-		return map[string]any{"changed": false, "not_after": certNotAfter(steps.TLSCertPath)}, nil
+		notAfter := certNotAfter(steps.TLSCertPath)
+		logLine(report, "certs-renew", "the certificate for "+cfg.Domain+" is current until "+notAfter+"; nothing to renew")
+		return map[string]any{"changed": false, "domain": cfg.Domain, "not_after": notAfter}, nil
 	}
 	logLine(report, "certs-renew", "renewing the certificate for "+cfg.Domain+": "+reason)
 
@@ -117,7 +134,7 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 		// DNS doesn't point here yet: that's the normal state right after
 		// init, not a failed unit. The timer tries again in an hour.
 		logLine(report, "certs-renew", cliErr.Error())
-		return map[string]any{"changed": false, "pending": cliErr.Error()}, nil
+		return map[string]any{"changed": false, "domain": cfg.Domain, "pending": cliErr.Error()}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -129,7 +146,7 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	_ = runQuiet(ctx, "pg_ctlcluster", "18", steps.PGCluster, "reload")
 	_ = runQuiet(ctx, "systemctl", "reload", steps.PgbouncerService)
 	_ = runQuiet(ctx, "systemctl", "reload", steps.NginxService)
-	return map[string]any{"changed": true, "not_after": certNotAfter(steps.TLSCertPath)}, nil
+	return map[string]any{"changed": true, "domain": cfg.Domain, "not_after": certNotAfter(steps.TLSCertPath)}, nil
 }
 
 // renewReason says why cert needs replacing, or "" when it is current.

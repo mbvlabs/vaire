@@ -309,6 +309,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+	warnings = append(warnings, syncContextFromNode(cmd, s, p)...)
 	message := fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total)
 	if data.Restarted {
 		message += fmt.Sprintf("; PostgreSQL restarted (%d ms unavailable)", data.RestartDowntimeMS)

@@ -120,3 +120,14 @@ func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
+
+// IsLockHeld reports whether err is Acquire's lock_held timeout, as opposed
+// to a failure to open or lock LockPath at all.
+func IsLockHeld(err error) bool {
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		return false
+	}
+	details, ok := cliErr.Details.(map[string]any)
+	return ok && details["reason"] == "lock_held"
+}

@@ -20,6 +20,10 @@ Checks that haven't been run on a real VPS yet. Phases 1 and 2 were marked done 
     - `eru console <db>` downloads usql when it's missing (checksum verified), opens a session over the tunnel, and `select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()` shows the read-only role and `ssl = t`. Ctrl-C cancels a running query without leaving the console.
 - [ ] **The migrate role is refused by PgBouncer**
     - After `eru apply`, connect as `<db>_migrate` to 6432 from an allowlisted address. Expected: an authentication error. The same URL on 5432 through `eru tunnel --target postgres` connects, and `select current_user` shows `<db>_owner`. `<db>_app` on 6432 still connects. `eru console <db> --write` opens and `show role` is `<db>_owner`.
+- [ ] **Changing the domain follows through to the certificate and the context**
+    - Add a DNS record for a new name (DNS only), then `eru config set domain <new>`. Expected: a `context_tls_updated` warning, and `grep domain ~/.config/eru/contexts/<name>/context.toml` shows the new name. `eru apply` re-runs `tls-v1`. Within the hour (or after `eru ssh --command 'sudo eru node run certs-renew'`, which logs `installed the certificate for <new>`) `eru psql --db <db>` connects without a hostname mismatch. A second `sudo eru node run certs-renew` logs that the certificate is current until its expiry.
+- [ ] **`eru node run` off a node is refused**
+    - On the operator machine, `eru node run certs-renew`. Expected: `precondition_failed` saying this machine is not an eru node, with the `eru ssh` command as the hint, and no "ran certs-renew".
 - [ ] **Direct TLS on 443**
     - From an allowlisted address, connect with `sslnegotiation=direct` (PostgreSQL 17+ libpq or pgx 5.7+) to port 443. Expected: it reaches PgBouncer. Without `sslnegotiation=direct` it fails with "server refused TLS connection", and from a non-allowlisted address it's refused.
 
