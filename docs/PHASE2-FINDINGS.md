@@ -159,3 +159,5 @@ Fresh Ubuntu 26.04 rebuild, edge build from `58104a8`. The host phase and databa
 - [x] **nginx answers HTTP 403 for ACME challenges** (blocker for `acme`)
     - Seen after starting `eru-certs.service` by hand: "database.mbvlabs.com does not reach this server over HTTP yet (another host answered with HTTP 403)". The answering host was this server's own nginx: the webroot was `/var/lib/eru/acme`, and `/var/lib/eru` is `root 0700` (journal and state), so nginx's workers couldn't enter it.
     - Fixed: the webroot moved to `/var/lib/eru-acme`. On an existing server, `eru apply` re-runs `tls-v2` (the nginx config changed), which creates the directory and starts `eru-certs.service`.
+- [x] **`eru apply` (and `config get`/`plan`) always fails: "this node has no cluster.toml"** (blocker)
+    - Seen on the first `eru apply` after init. `handleConfigGet` in `internal/node/config.go` read `state.FileStore{}.Path`, which is empty unless set (the default only comes from the unexported `path()`), so it read `""`. Fixed: it reads `state.Path`.

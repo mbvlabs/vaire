@@ -24,7 +24,7 @@ type configValidateParams struct {
 
 func handleConfigGet(context.Context, *Env) (Result, error) {
 	store := state.FileStore{}
-	raw, err := os.ReadFile(store.Path)
+	raw, err := os.ReadFile(state.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run eru cluster init first.")
