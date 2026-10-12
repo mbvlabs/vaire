@@ -64,8 +64,11 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 		res["passphrase"] = h.passphrase
 		return output.Success(cmd, output.Result{Data: res, Message: "wrote the transfer bundle to " + h.path})
 	}
-	if err := h.show(cmd, false); err != nil {
+	if err := h.show(cmd, false, true); err != nil {
 		return err
+	}
+	if h.path != "" {
+		res["out"] = h.path
 	}
 	return output.Success(cmd, output.Result{Data: res, Message: "New secrets handoff shown. The previous bundle still opens with its own passphrase."})
 }

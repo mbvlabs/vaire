@@ -90,7 +90,7 @@ func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 		}
 		restore := ui.Suspend()
 		defer restore()
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste the transfer bundle (from "+secretsdoc.ArmorHeader+" to "+secretsdoc.ArmorFooter+"):")
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste the transfer bundle (from "+secretsdoc.ArmorHeader+" to "+secretsdoc.ArmorFooter+"), or the whole copied handoff:")
 		raw, err := readBundle(cmd.InOrStdin())
 		if err != nil {
 			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")

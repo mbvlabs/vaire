@@ -83,6 +83,9 @@ type initRun struct {
 	tlsState *node.TLSState
 	// dbRestart reports whether the database phase restarted Postgres.
 	dbRestart bool
+	// dnsNoted reports whether this run already showed the A record early,
+	// so the DNS step shows only what is new.
+	dnsNoted bool
 }
 
 type initPlanData struct {
@@ -1308,8 +1311,18 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 		res.Passphrase = h.passphrase
 		return doc, res, nil
 	}
-	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored")); err != nil {
+	// On the server itself the bundle belongs on the operator's machine, so
+	// only the copy action is offered.
+	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored"), !r.local); err != nil {
 		return doc, res, err
+	}
+	if h.path != res.SecretsDocument {
+		// Saved from the handoff: a resume rewrites the same file.
+		r.prog.SecretsOut = h.path
+		res.SecretsDocument = h.path
+		if err := contexts.SaveProgress(r.name, r.prog); err != nil {
+			return doc, res, err
+		}
 	}
 	return doc, res, nil
 }

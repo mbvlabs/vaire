@@ -47,14 +47,24 @@ func (r *initRun) dnsStep(ctx context.Context) error {
 	if len(records) == 0 {
 		return nil
 	}
-	body := recordLines(records)
-	if ipv6 == "" {
-		body = append(body, "", "No AAAA record: the server has no public IPv6 address.")
-	}
 	cmd := r.cmd
-	r.p.panel("Create these DNS records", append(body, "", dnsHelp))
+	prompt := "Type 'confirmed' once the records exist"
+	switch {
+	case !r.dnsNoted:
+		body := recordLines(records)
+		if ipv6 == "" {
+			body = append(body, "", "No AAAA record: the server has no public IPv6 address.")
+		}
+		r.p.panel("Create these DNS records", append(body, "", dnsHelp))
+	case ipv6 != "":
+		// The A record and the help were shown before the host phase.
+		r.p.panel("Add the AAAA record too", recordLines(dnsRecords(r.cfg.Domain, "", ipv6)))
+		prompt = "Type 'confirmed' once the A and AAAA records exist"
+	default:
+		prompt = "Type 'confirmed' once the A record exists"
+	}
 	if !MustNotPrompt(cmd) && !flagTrue(cmd, "dns-ready") {
-		if err := typeWord(cmd, "Type 'confirmed' once the records exist", "", "confirmed"); err != nil {
+		if err := typeWord(cmd, prompt, "", "confirmed"); err != nil {
 			return err
 		}
 	}
@@ -182,8 +192,9 @@ func (r *initRun) noteDNSEarly() {
 	if len(records) == 0 {
 		return
 	}
+	r.dnsNoted = true
 	r.p.panel("Create this DNS record now", append(recordLines(records), "",
-		"If the server has a public IPv6 address, its AAAA record appears here once the host is up.",
+		"If the server has a public IPv6 address, eru shows its AAAA record once the host is up.",
 		"", dnsHelp,
 		"eru keeps working while you create the record, then pauses for you to confirm the records exist before it sets up the database."))
 }

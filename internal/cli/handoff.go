@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bufio"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -77,10 +80,12 @@ func requireStructuredHandoff(cmd *cobra.Command, outFlag, action string, confir
 	return nil
 }
 
-// show prints the handoff on the terminal: every secret, then the bundle and
-// its passphrase. Then it waits for 'stored' and offers to clear the screen.
-// It does nothing when eru must not prompt.
-func (h handoff) show(cmd *cobra.Command, skipStored bool) error {
+// show prints a short handoff: what the record is and the bundle
+// passphrase. The operator then copies the whole record to the clipboard,
+// prints it when the terminal blocks the copy, or, with canSave, saves the
+// bundle to a file, and confirms with 'stored'. It
+// does nothing when eru must not prompt.
+func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	if MustNotPrompt(cmd) {
 		return nil
 	}
@@ -88,46 +93,67 @@ func (h handoff) show(cmd *cobra.Command, skipStored bool) error {
 	resume := ui.Suspend()
 	defer resume()
 	w := cmd.ErrOrStderr()
-	header := func(title string) {
+	note := func(s string) {
 		if rich {
-			_, _ = fmt.Fprintln(w, "\n"+ui.Header(title, 72))
-			return
-		}
-		_, _ = fmt.Fprintln(w, "\n== "+title+" ==")
-	}
-	label := func(s string) {
-		if rich {
-			s = ui.Dim(s)
+			s = ui.Note(s)
 		}
 		_, _ = fmt.Fprintln(w, s)
 	}
 
-	header("Secrets handoff")
-	_, _ = fmt.Fprintln(w, "This is the cluster's master record. Copy every value into your password manager:")
-	_, _ = fmt.Fprintln(w, "eru does not keep it, and this is the only time the plain secrets are shown.")
-	for _, g := range h.doc.Groups() {
-		header(g.Title)
-		for _, f := range g.Fields {
-			label(f.Label + ":")
-			_, _ = fmt.Fprintln(w, strings.TrimRight(f.Value, "\n"))
+	if rich {
+		_, _ = fmt.Fprintln(w, "\n"+ui.Header("Secrets handoff", 72))
+	} else {
+		_, _ = fmt.Fprintln(w, "\n== Secrets handoff ==")
+	}
+	_, _ = fmt.Fprintln(w, "The cluster's master record: the operator's keys, the sudo password and the database passwords.")
+	_, _ = fmt.Fprintln(w, "eru keeps no copy and doesn't show it again. Store it in your password manager.")
+	_, _ = fmt.Fprintln(w)
+	label := "Bundle passphrase"
+	if rich {
+		label = ui.Dim(label)
+	}
+	_, _ = fmt.Fprintln(w, label+"  "+h.passphrase)
+	if h.path != "" {
+		note("The transfer bundle was saved to " + h.path + ". Keep the passphrase apart from it.")
+	}
+	_, _ = fmt.Fprintln(w)
+
+	for {
+		options := [][2]string{{"Copy everything to the clipboard", "copy"}}
+		if canSave && h.path == "" {
+			options = append(options, [2]string{"Save the transfer bundle to a file", "save"})
+		}
+		options = append(options, [2]string{"Show everything on screen", "print"}, [2]string{"Done", "done"})
+		choice, err := chooseOption(cmd, "Secrets handoff", options)
+		if err != nil {
+			return err
+		}
+		if choice == "done" {
+			break
+		}
+		switch choice {
+		case "copy":
+			_, _ = fmt.Fprint(w, osc52(h.record()))
+			note("Copied to your clipboard: every value, the transfer bundle and its passphrase. Paste it into your password manager. Nothing pasted? Pick Show everything on screen.")
+		case "print":
+			// For terminals that block OSC 52, such as tmux without
+			// set-clipboard on.
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprint(w, h.record())
+			_, _ = fmt.Fprintln(w)
+		case "save":
+			if err := h.save(cmd); err != nil {
+				note(err.Error())
+				continue
+			}
+			note("Saved the transfer bundle to " + h.path + ". Keep the passphrase apart from it.")
 		}
 	}
-
-	header("Transfer bundle")
-	if h.path != "" {
-		_, _ = fmt.Fprintln(w, "The bundle was written to "+h.path+". Store it with its passphrase.")
-	} else {
-		_, _ = fmt.Fprintln(w, "Store this block and its passphrase too. On another machine run eru login and paste the block.")
-		_, _ = fmt.Fprint(w, string(h.bundle))
-	}
-	label("Bundle passphrase:")
-	_, _ = fmt.Fprintln(w, h.passphrase)
-	_, _ = fmt.Fprintln(w)
 
 	if skipStored {
 		return nil
 	}
-	if err := typeWord(cmd, "Type 'stored' once you've saved both parts in your password manager", "", "stored"); err != nil {
+	if err := typeWord(cmd, "Type 'stored' once the record is in your password manager", "", "stored"); err != nil {
 		return output.NewError(output.CodeInputRequired, "the secrets handoff was not confirmed as stored", output.ExitInput,
 			"Re-run and type stored; the handoff is shown again with a new bundle passphrase.").
 			WithDetails(map[string]any{"flag": "--confirm-secrets-stored"})
@@ -136,6 +162,83 @@ func (h handoff) show(cmd *cobra.Command, skipStored bool) error {
 		_, _ = fmt.Fprint(w, clearScreen)
 	}
 	return nil
+}
+
+// save asks for a path and writes the armored bundle there (0600). It never
+// overwrites an existing file.
+func (h *handoff) save(cmd *cobra.Command) error {
+	path, err := promptLine(cmd, "Save the transfer bundle to", h.doc.Cluster.Name+".secrets.age")
+	if err != nil {
+		return err
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if _, err := os.Stat(path); err == nil {
+		return errors.New(path + " already exists; pick another path")
+	}
+	if err := transport.WriteSecretFile(path, h.bundle); err != nil {
+		return err
+	}
+	h.path = path
+	return nil
+}
+
+// record is the plain-text handoff the copy action puts on the clipboard:
+// every value grouped like password-manager entries, then the bundle and its
+// passphrase.
+func (h handoff) record() string {
+	var b strings.Builder
+	b.WriteString("eru secrets handoff for cluster " + h.doc.Cluster.Name + "\n")
+	for _, g := range h.doc.Groups() {
+		b.WriteString("\n## " + g.Title + "\n")
+		for _, f := range g.Fields {
+			v := strings.TrimRight(f.Value, "\n")
+			if strings.Contains(v, "\n") {
+				b.WriteString(f.Label + ":\n" + v + "\n")
+				continue
+			}
+			b.WriteString(f.Label + ": " + v + "\n")
+		}
+	}
+	b.WriteString("\n## Transfer bundle\n")
+	b.WriteString("On another machine run eru login and paste this block.\n")
+	b.WriteString("Passphrase: " + h.passphrase + "\n")
+	b.Write(h.bundle)
+	return b.String()
+}
+
+// osc52 wraps s in the OSC 52 sequence that asks the terminal to put it on the
+// system clipboard. It works over SSH, so it also reaches the operator's
+// clipboard from a server console.
+func osc52(s string) string {
+	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(s)) + "\a"
+}
+
+// chooseOption asks the operator to pick one of options (label, value
+// pairs): a select in a rich terminal, a numbered list otherwise.
+func chooseOption(cmd *cobra.Command, title string, options [][2]string) (string, error) {
+	if richOutput(cmd) {
+		v, err := ui.Choose(title, "", options)
+		return v, promptErr(err)
+	}
+	w := cmd.ErrOrStderr()
+	for i, o := range options {
+		_, _ = fmt.Fprintf(w, "  %d) %s\n", i+1, o[0])
+	}
+	reader := bufio.NewReader(cmd.InOrStdin())
+	for {
+		if _, err := fmt.Fprint(w, title+" [1-"+strconv.Itoa(len(options))+"]: "); err != nil {
+			return "", err
+		}
+		line, err := reader.ReadString('\n')
+		if n, convErr := strconv.Atoi(strings.TrimSpace(line)); convErr == nil && n >= 1 && n <= len(options) {
+			return options[n-1][1], nil
+		}
+		if err != nil {
+			return "", output.NewError(output.CodeInputRequired, "no option was picked", output.ExitInput, "")
+		}
+	}
 }
 
 // yesNoDefaultYes asks a [Y/n] question in a terminal.
@@ -162,14 +265,16 @@ func yesNoDefaultYes(cmd *cobra.Command, question string) (bool, error) {
 	}
 }
 
-// readBundle reads a pasted armored bundle from r up to its footer line.
+// readBundle reads a pasted armored bundle from r, from its header line up
+// to its footer line.
 func readBundle(r io.Reader) ([]byte, error) {
 	var b strings.Builder
 	sc := bufio.NewScanner(io.LimitReader(r, 4<<20))
 	sc.Buffer(make([]byte, 64*1024), 64*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if line == "" && b.Len() == 0 {
+		if b.Len() == 0 && line != secretsdoc.ArmorHeader {
+			// Skip whatever precedes the block, such as the copied record.
 			continue
 		}
 		b.WriteString(line + "\n")
