@@ -46,8 +46,9 @@ const (
 	ACMEDir = "/etc/eru/acme"
 	// ACMEAccountKeyPath is the ACME account's private key.
 	ACMEAccountKeyPath = ACMEDir + "/account.key"
-	// ACMEWebroot is served by nginx for HTTP-01 challenges.
-	ACMEWebroot = "/var/lib/eru/acme"
+	// ACMEWebroot is served by nginx for HTTP-01 challenges. It sits outside
+	// /var/lib/eru, which is root 0700 and that nginx's workers can't enter.
+	ACMEWebroot = "/var/lib/eru-acme"
 	// ACMEChallengeDir is where challenge tokens are written.
 	ACMEChallengeDir = ACMEWebroot + "/.well-known/acme-challenge"
 	// SysctlPath is the sysctl drop-in.

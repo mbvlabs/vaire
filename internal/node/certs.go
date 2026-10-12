@@ -49,8 +49,10 @@ const (
 	acmeTimeout = 5 * time.Minute
 )
 
-// RunJob runs one timer job. certs-renew takes the shared lock with a zero
-// timeout; a busy lock exits 0 with a skipped result.
+// RunJob runs one timer job. certs-renew waits up to jobLockWait for the
+// shared lock, so the run tls-v2 starts during a bootstrap goes ahead once the
+// bootstrap releases the lock; a lock still busy after that exits 0 with a
+// skipped result.
 func RunJob(ctx context.Context, job string, report engine.Reporter) (any, error) {
 	if !knownJob(job) {
 		return nil, output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
@@ -60,7 +62,7 @@ func RunJob(ctx context.Context, job string, report engine.Reporter) (any, error
 		return nil, output.NewError(output.CodeError, "job "+job+" is not implemented yet", output.ExitGeneric,
 			"This job arrives in a later phase of the roadmap.")
 	}
-	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), 0)
+	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), jobLockWait)
 	if err != nil {
 		logLine(report, job, "the node lock is busy; skipping "+job)
 		return map[string]any{"job": job, "skipped": "lock_busy"}, nil
@@ -68,6 +70,10 @@ func RunJob(ctx context.Context, job string, report engine.Reporter) (any, error
 	defer release()
 	return certsRenew(ctx, report)
 }
+
+// jobLockWait is how long a timer job waits for the node lock. It covers a
+// full database phase of cluster.bootstrap.
+const jobLockWait = 20 * time.Minute
 
 func knownJob(job string) bool {
 	return slices.Contains(jobNames, job)

@@ -1185,7 +1185,7 @@ Each exporter is a downloaded pinned binary with a sha256 per arch, following th
 
 eru renders the whole `/etc/nginx/nginx.conf` (`internal/render/templates/nginx.conf.tmpl`). nginx comes from the distribution with `libnginx-mod-stream`.
 
-- **Port 80** (`http`): serves `/.well-known/acme-challenge/` from `/var/lib/eru/acme` for HTTP-01, and 404 for everything else.
+- **Port 80** (`http`): serves `/.well-known/acme-challenge/` from `/var/lib/eru-acme` for HTTP-01 (outside `/var/lib/eru`, which is root 0700 and closed to nginx's workers), and 404 for everything else.
 - **Port 443** (`stream`, `ssl_preread on`): routes by ALPN without terminating TLS on 443 itself.
     - ALPN `postgresql` (PostgreSQL 17+ clients with `sslnegotiation=direct`) from an allowed address goes to `127.0.0.1:6433`, a `stream` server that terminates TLS with `/etc/eru/tls/server.{crt,key}` (`ssl_alpn postgresql`) and forwards the plain protocol to PgBouncer on `127.0.0.1:6432`.
     - Allowed addresses come from a `geo` block: the WireGuard subnet always, plus `client_allowlist` when `expose_pgbouncer = true`, so 443 follows the same rule as 6432. Other PostgreSQL clients go to `127.0.0.1:6434`, which closes the connection.
@@ -1196,7 +1196,7 @@ eru renders the whole `/etc/nginx/nginx.conf` (`internal/render/templates/nginx.
 
 eru issues and renews the certificate itself with `golang.org/x/crypto/acme`. Nothing else on the server speaks ACME.
 
-- `eru-certs.timer` runs `eru node run certs-renew` hourly (randomized 10 min); `tls-v2` also starts it once right away. The job takes the shared lock with timeout 0 and exits 0 when the lock is busy.
+- `eru-certs.timer` runs `eru node run certs-renew` hourly (randomized 10 min); `tls-v2` also starts it once right away. The job waits up to 20 minutes for the shared lock, so the run `tls-v2` starts during `cluster.bootstrap` goes ahead once the bootstrap releases the lock; if the lock is still busy it exits 0 with a skipped result.
 - It does nothing unless `/etc/eru/tls/server.crt` is missing, isn't for `domain`, is the self-signed placeholder in `acme` mode (or not self-signed in `self-signed` mode), or expires within 30 days.
 - **acme mode:** first a self-check: write a random token into the webroot and fetch `http://<domain>/.well-known/acme-challenge/<token>`. If another host answers, the job stops with `changed: false, pending: …` (exit 0) so a wrong record doesn't use up Let's Encrypt's failed-validation limit. A connection error is inconclusive and the job carries on. Then: account key `/etc/eru/acme/account.key` (P-256, 0600, created once; `acme_email`, when set, is the account contact), order, HTTP-01 through the webroot, a fresh P-256 leaf key and CSR, and the full chain. `tls.acme_ca` overrides the directory URL (for example Let's Encrypt staging). ACME errors fail the unit with `external_command_failed`; a rate limit says when to retry.
 - **self-signed mode:** a self-signed P-256 leaf for `domain`, valid 397 days. Clients use `sslmode=require` (the document's URLs switch accordingly, and doctor warns).

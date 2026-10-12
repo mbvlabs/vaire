@@ -150,3 +150,12 @@ Fresh Ubuntu 26.04 rebuild, edge build from `58104a8`. The host phase and databa
     - Fixed per `docs/SECRETS-HANDOFF-SPEC.md`: init and `secrets export` print a secrets handoff (every secret, grouped for a password manager, plus an armored transfer bundle and its passphrase) and write nothing unless `--secrets-out`/`--out` is given. `eru login` takes the bundle as a paste, from stdin (`-`) or as a file. `--passphrase-out` is gone; runs without a terminal need `--secrets-out`, `--reveal-passphrase` and `--confirm-secrets-stored`.
 - [x] **`eru ssh --command "sudo …"` fails: "a terminal is required to authenticate"**
     - `--command` ran without a PTY, so sudo could not prompt for the admin password. Fixed: from a terminal, `--command` requests a PTY like `ssh -t`; piped or `--no-input` runs keep the plain session.
+- [x] **Node upgrade through `--auto-upgrade-nodes` works** (verified)
+    - Pushed a local `dev` build over the WireGuard tunnel to a node running `edge-df180a607886`; the handshake installed it and the command went on. The old binary was kept as `eru.prev`.
+    - Note: two `dev` builds always count as a mismatch, so every `--auto-upgrade-nodes` call with a dev CLI re-pushes the binary ("node runs dev (dev); installing dev (dev)"). Fine for testing, but worth comparing commits for dev builds later.
+- [x] **The certificate is never issued during init: the first `certs-renew` is skipped** (blocker for `acme`)
+    - Seen: `eru sql` failed with `x509: certificate signed by unknown authority` because the placeholder was still served. The journal showed `the node lock is busy; skipping certs-renew` at init time. `tls-v2` starts `eru-certs.service` while `cluster.bootstrap` holds the node lock, and the job took the lock with timeout 0, so the next try was the hourly timer.
+    - Fixed: timer jobs wait up to 20 minutes for the shared lock, so that run goes ahead as soon as the bootstrap releases it.
+- [x] **nginx answers HTTP 403 for ACME challenges** (blocker for `acme`)
+    - Seen after starting `eru-certs.service` by hand: "database.mbvlabs.com does not reach this server over HTTP yet (another host answered with HTTP 403)". The answering host was this server's own nginx: the webroot was `/var/lib/eru/acme`, and `/var/lib/eru` is `root 0700` (journal and state), so nginx's workers couldn't enter it.
+    - Fixed: the webroot moved to `/var/lib/eru-acme`. On an existing server, `eru apply` re-runs `tls-v2` (the nginx config changed), which creates the directory and starts `eru-certs.service`.
