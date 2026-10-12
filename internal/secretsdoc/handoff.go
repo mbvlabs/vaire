@@ -77,7 +77,11 @@ func (d Document) Groups() []Group {
 			Field{"Prefix", b.Prefix},
 			Field{"Access key ID", b.AccessKeyID},
 			Field{"Secret access key", b.SecretAccessKey},
+			Field{"URI style", b.URIStyle},
+			Field{"pgBackRest stanza", b.PgBackRest.Stanza},
 			Field{"pgBackRest cipher pass", b.PgBackRest.CipherPass},
+			Field{"Dump age identity", b.Dumps.AgeIdentity},
+			Field{"Dump age recipient", b.Dumps.AgeRecipient},
 			Field{"restic password", b.Restic.Password},
 		)})
 	}

@@ -1,0 +1,301 @@
+package backup
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/pg"
+)
+
+// ConfPath is pgBackRest's configuration (postgres:postgres 0600).
+const ConfPath = "/etc/pgbackrest/pgbackrest.conf"
+
+// PgBackRest is the Driver over the pgbackrest binary. Every command runs as
+// the postgres OS user through the engine shell, so its output is redacted
+// and lands in the run log; no argument carries a secret, because the keys
+// and cipher pass live in ConfPath.
+type PgBackRest struct {
+	Stanza string
+	Shell  engine.Shell
+	// StepID labels the log events, for example the job name.
+	StepID string
+	Report engine.Reporter
+	// PG reads pg_stat_archiver on the live cluster.
+	PG pg.Local
+}
+
+var _ Driver = PgBackRest{}
+
+func (p PgBackRest) run(ctx context.Context, stdout *bytes.Buffer, onLine func(string), args ...string) error {
+	full := append([]string{"-u", "postgres", "--", "pgbackrest", "--stanza=" + p.Stanza}, args...)
+	c := engine.Command{Name: "runuser", Args: full, OnLine: onLine}
+	if stdout != nil {
+		c.Stdout = stdout
+	}
+	return p.Shell.Exec(ctx, p.StepID, c, p.Report)
+}
+
+// StanzaCreate runs stanza-create, which also checks an existing stanza
+// against this cluster's system identifier.
+func (p PgBackRest) StanzaCreate(ctx context.Context) error {
+	return wrapTool("pgbackrest stanza-create", p.run(ctx, nil, nil, "stanza-create"))
+}
+
+// Check runs pgbackrest check: it forces a WAL switch and waits for the
+// segment to reach the repository.
+func (p PgBackRest) Check(ctx context.Context) error {
+	return wrapTool("pgbackrest check", p.run(ctx, nil, nil, "check"))
+}
+
+var newLabel = regexp.MustCompile(`new backup label = (\S+)`)
+
+// Backup takes one backup, streaming progress events.
+func (p PgBackRest) Backup(ctx context.Context, kind string) (Set, error) {
+	switch kind {
+	case TypeFull, TypeDiff, TypeIncr:
+	default:
+		return Set{}, fmt.Errorf("backup type %q must be full, diff or incr", kind)
+	}
+	prog := newProgress("backup", p.Report)
+	label := ""
+	onLine := func(line string) {
+		prog.line(line)
+		if m := newLabel.FindStringSubmatch(line); m != nil {
+			label = m[1]
+		}
+	}
+	if err := p.run(ctx, nil, onLine, "--type="+kind, "--log-level-console=detail", "backup"); err != nil {
+		return Set{}, wrapTool("pgbackrest backup", err)
+	}
+	info, err := p.Info(ctx, "")
+	if err != nil {
+		return Set{}, err
+	}
+	if label != "" {
+		if set, ok := info.Find(label); ok {
+			return set, nil
+		}
+	}
+	latest, ok := info.Latest()
+	if !ok {
+		return Set{}, errors.New("pgbackrest reported success but the repository lists no backup")
+	}
+	return latest, nil
+}
+
+// infoJSON is the part of pgbackrest info --output=json eru reads.
+type infoJSON struct {
+	Name   string `json:"name"`
+	Status struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Lock    struct {
+			Backup struct {
+				Held bool `json:"held"`
+			} `json:"backup"`
+		} `json:"lock"`
+	} `json:"status"`
+	Archive []struct {
+		Min string `json:"min"`
+		Max string `json:"max"`
+	} `json:"archive"`
+	Backup []struct {
+		Label   string  `json:"label"`
+		Type    string  `json:"type"`
+		Prior   *string `json:"prior"`
+		Error   bool    `json:"error"`
+		Archive struct {
+			Start string `json:"start"`
+			Stop  string `json:"stop"`
+		} `json:"archive"`
+		Info struct {
+			Size       int64 `json:"size"`
+			Delta      int64 `json:"delta"`
+			Repository struct {
+				Size  int64 `json:"size"`
+				Delta int64 `json:"delta"`
+			} `json:"repository"`
+		} `json:"info"`
+		Timestamp struct {
+			Start int64 `json:"start"`
+			Stop  int64 `json:"stop"`
+		} `json:"timestamp"`
+		DatabaseRef []struct {
+			Name string `json:"name"`
+		} `json:"database-ref"`
+	} `json:"backup"`
+}
+
+// Info runs pgbackrest info --output=json.
+func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
+	var stdout bytes.Buffer
+	args := []string{"--output=json"}
+	if label != "" {
+		args = append(args, "--set="+label)
+	}
+	args = append(args, "info")
+	quiet := p
+	quiet.Report = nil
+	if err := quiet.run(ctx, &stdout, nil, args...); err != nil {
+		return Info{}, wrapTool("pgbackrest info", err)
+	}
+	var stanzas []infoJSON
+	if err := json.Unmarshal(stdout.Bytes(), &stanzas); err != nil {
+		return Info{}, fmt.Errorf("pgbackrest info output does not parse: %w", err)
+	}
+	out := Info{Stanza: p.Stanza}
+	for _, st := range stanzas {
+		if st.Name != p.Stanza {
+			continue
+		}
+		out.StatusCode, out.Status = st.Status.Code, st.Status.Message
+		out.BackupLockHeld = st.Status.Lock.Backup.Held
+		for _, a := range st.Archive {
+			if out.ArchiveMin == "" || a.Min < out.ArchiveMin {
+				out.ArchiveMin = a.Min
+			}
+			if a.Max > out.ArchiveMax {
+				out.ArchiveMax = a.Max
+			}
+		}
+		for _, b := range st.Backup {
+			set := Set{
+				Label:     b.Label,
+				Type:      b.Type,
+				Start:     unixTime(b.Timestamp.Start),
+				Stop:      unixTime(b.Timestamp.Stop),
+				Size:      b.Info.Size,
+				Delta:     b.Info.Delta,
+				RepoSize:  b.Info.Repository.Size,
+				RepoDelta: b.Info.Repository.Delta,
+				WALStart:  b.Archive.Start,
+				WALStop:   b.Archive.Stop,
+				Error:     b.Error,
+			}
+			if b.Prior != nil {
+				set.Prior = *b.Prior
+			}
+			for _, d := range b.DatabaseRef {
+				set.Databases = append(set.Databases, d.Name)
+			}
+			out.Sets = append(out.Sets, set)
+		}
+	}
+	return out, nil
+}
+
+// Verify runs pgbackrest verify over the whole repository.
+func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
+	res := VerifyResult{StartedAt: now()}
+	var lines []string
+	err := p.run(ctx, nil, func(line string) {
+		lines = append(lines, line)
+		if len(lines) > 40 {
+			lines = lines[1:]
+		}
+	}, "verify")
+	res.FinishedAt = now()
+	res.Output = lines
+	var scriptErr *engine.ScriptError
+	switch {
+	case err == nil:
+		res.OK = true
+	case errors.As(err, &scriptErr):
+		// verify exits non-zero when it finds a problem: a result, not an
+		// error of eru's.
+		res.OK = false
+	default:
+		return res, err
+	}
+	return res, nil
+}
+
+// RestoreScratch restores into opts.Path with archive_mode off, so the
+// restored instance never pushes WAL to the repository.
+func (p PgBackRest) RestoreScratch(ctx context.Context, opts RestoreOptions) error {
+	args := []string{"--pg1-path=" + opts.Path, "--archive-mode=off", "--log-level-console=detail"}
+	if opts.Database != "" {
+		args = append(args, "--db-include="+opts.Database)
+	}
+	switch opts.Kind {
+	case TargetLatest, "":
+		args = append(args, "--type=default")
+	case TargetTime:
+		args = append(args, "--type=time", "--target="+PgTime(opts.Time), "--target-action=promote")
+	case TargetSet:
+		args = append(args, "--set="+opts.Set, "--type=immediate", "--target-action=promote")
+	default:
+		return fmt.Errorf("restore target %q is unknown", opts.Kind)
+	}
+	prog := newProgress("restore", p.Report)
+	return wrapTool("pgbackrest restore", p.run(ctx, nil, prog.line, append(args, "restore")...))
+}
+
+// ArchiveStatus reads pg_stat_archiver.
+func (p PgBackRest) ArchiveStatus(ctx context.Context) (ArchiveStatus, error) {
+	rows, err := p.PG.Query(ctx, "postgres", `SELECT archived_count, coalesce(last_archived_wal, '') AS last_archived_wal,
+  coalesce(to_char(last_archived_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS last_archived_time,
+  failed_count, coalesce(last_failed_wal, '') AS last_failed_wal,
+  coalesce(to_char(last_failed_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS last_failed_time
+FROM pg_stat_archiver`, nil)
+	if err != nil {
+		return ArchiveStatus{}, err
+	}
+	if len(rows) == 0 {
+		return ArchiveStatus{}, nil
+	}
+	row := rows[0]
+	st := ArchiveStatus{
+		LastArchivedWAL:  row["last_archived_wal"],
+		LastArchivedTime: row["last_archived_time"],
+		LastFailedWAL:    row["last_failed_wal"],
+		LastFailedTime:   row["last_failed_time"],
+	}
+	st.ArchivedCount, _ = strconv.ParseInt(row["archived_count"], 10, 64)
+	st.FailedCount, _ = strconv.ParseInt(row["failed_count"], 10, 64)
+	if t, err := time.Parse(time.RFC3339, st.LastArchivedTime); err == nil {
+		st.LagSeconds = int64(time.Since(t).Seconds())
+	}
+	return st, nil
+}
+
+// PgTime formats t as pgBackRest's recovery target.
+func PgTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05.000000") + "+00"
+}
+
+func unixTime(sec int64) string {
+	if sec == 0 {
+		return ""
+	}
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
+}
+
+func now() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// wrapTool turns a failed backup tool into external_command_failed with its
+// last output lines.
+func wrapTool(what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, engine.ErrInterrupted) {
+		return err
+	}
+	details := map[string]any{"command": what}
+	var scriptErr *engine.ScriptError
+	if errors.As(err, &scriptErr) {
+		details["exit_status"] = scriptErr.Status
+		details["output_tail"] = scriptErr.Tail
+	}
+	return output.WrapError(output.CodeExternalCommand, fmt.Errorf("%s failed: %w", what, err), output.ExitExternal,
+		"Read details.output_tail, or the run log under /var/log/eru and /var/log/pgbackrest.").WithDetails(details)
+}

@@ -22,3 +22,37 @@ func (c DatabaseCreds) SecretValues() []string {
 	}
 	return out
 }
+
+// BackupCreds is the recovery kit (Phases 3 and 7): where the bucket is, its
+// keys, the pgBackRest repository cipher and the age identity that opens the
+// long-retention dumps. The operator generates the cipher and the identity
+// and stores them here before anything reaches the node. The node never sees
+// the age identity except for the length of a restore from a dump.
+type BackupCreds struct {
+	Provider        string `json:"provider"`
+	Endpoint        string `json:"endpoint"`
+	Region          string `json:"region"`
+	Bucket          string `json:"bucket"`
+	Prefix          string `json:"prefix"`
+	URIStyle        string `json:"uri_style"`
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	PgBackRest      struct {
+		Stanza     string `json:"stanza"`
+		CipherPass string `json:"cipher_pass"`
+	} `json:"pgbackrest"`
+	Restic struct {
+		Password string `json:"password"`
+	} `json:"restic"`
+	// Dumps holds the age X25519 identity the long-retention dumps are
+	// encrypted to.
+	Dumps struct {
+		AgeIdentity  string `json:"age_identity,omitempty"`
+		AgeRecipient string `json:"age_recipient,omitempty"`
+	} `json:"dumps"`
+}
+
+// SecretValues returns every secret in the recovery kit.
+func (b BackupCreds) SecretValues() []string {
+	return []string{b.SecretAccessKey, b.PgBackRest.CipherPass, b.Restic.Password, b.Dumps.AgeIdentity}
+}

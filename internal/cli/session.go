@@ -280,6 +280,19 @@ func runApply(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
+	// The recovery kit rides along so a node that lost its copy gets it
+	// back; the node writes it only when missing (D7). Backups that are on
+	// without a kit here is input_required: eru never makes a new cipher for
+	// an existing repository.
+	if creds.Backup != nil {
+		for k, v := range backupSecrets(creds.Backup) {
+			secretValues[k] = v
+		}
+	} else if cfg, _, err := remoteConfig(cmd, s, p); err == nil && cfg.BackupConfigured() {
+		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's context has no recovery kit", output.ExitInput,
+			"Log in from a current transfer bundle (eru login), which carries the recovery kit, then retry.").
+			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
+	}
 	var params any
 	if len(stepIDs) > 0 {
 		params = map[string][]string{"steps": stepIDs}

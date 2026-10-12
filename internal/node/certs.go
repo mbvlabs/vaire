@@ -18,26 +18,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/rpc"
 	"github.com/mbvlabs/eru/internal/steps"
 	"golang.org/x/crypto/acme"
 )
-
-// phase2Jobs are the timer jobs Phase 2 implements. The rest arrive later.
-var phase2Jobs = map[string]bool{"certs-renew": true}
-
-// jobNames lists every job eru node run accepts.
-var jobNames = []string{
-	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill",
-	"vps-backup", "maint-daily", "maint-weekly", "certs-renew", "metrics-refresh",
-}
 
 // Certificate lifetimes (D11).
 const (
@@ -49,49 +38,10 @@ const (
 	acmeTimeout = 5 * time.Minute
 )
 
-// RunJob runs one timer job. certs-renew waits up to jobLockWait for the
-// shared lock, so the run tls-v1 starts during a bootstrap goes ahead once the
-// bootstrap releases the lock; a lock still busy after that exits 0 with a
-// skipped result.
-func RunJob(ctx context.Context, job string, report engine.Reporter) (any, error) {
-	if !knownJob(job) {
-		return nil, output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
-			WithDetails(map[string]any{"jobs": jobNames})
-	}
-	if !phase2Jobs[job] {
-		return nil, output.NewError(output.CodeError, "job "+job+" is not implemented yet", output.ExitGeneric,
-			"This job arrives in a later phase of the roadmap.")
-	}
-	if _, err := os.Stat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
-		return nil, output.NewError(
-			output.CodePrecondition,
-			"this machine is not an eru node: "+config.ClusterPath+" does not exist",
-			output.ExitPrecondition,
-			"eru node run runs on the server. From your machine: eru ssh --command 'sudo eru node run "+job+"'",
-		).WithDetails(map[string]any{"reason": "not_a_node"})
-	}
-	if os.Geteuid() != 0 {
-		return nil, rootRequired("eru node run")
-	}
-	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), jobLockWait)
-	if engine.IsLockHeld(err) {
-		logLine(report, job, "the node lock is busy; skipping "+job)
-		return map[string]any{"job": job, "skipped": "lock_busy"}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	return certsRenew(ctx, report)
-}
-
-// jobLockWait is how long a timer job waits for the node lock. It covers a
-// full database phase of cluster.bootstrap.
-const jobLockWait = 20 * time.Minute
-
-func knownJob(job string) bool {
-	return slices.Contains(jobNames, job)
-}
+// certsLockWait is how long certs-renew waits for the node lock. It covers a
+// full database phase of cluster.bootstrap, so the run tls-v1 starts during a
+// bootstrap goes ahead once the bootstrap releases the lock.
+const certsLockWait = 20 * time.Minute
 
 func logLine(report engine.Reporter, step, line string) {
 	if report != nil {

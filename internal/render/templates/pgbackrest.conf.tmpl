@@ -1,0 +1,31 @@
+# managed by eru - do not edit; use cluster.toml and eru backup setup
+[global]
+repo1-type=s3
+repo1-s3-endpoint={{ .EndpointHost }}
+{{ if .EndpointPort }}repo1-s3-port={{ .EndpointPort }}
+{{ end }}repo1-s3-bucket={{ .Bucket }}
+repo1-s3-region={{ .Region }}
+repo1-s3-uri-style={{ .URIStyle }}
+repo1-s3-key={{ .KeyID }}
+repo1-s3-key-secret={{ .Secret }}
+repo1-path=/{{ .Prefix }}/pgbackrest
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass={{ .CipherPass }}
+repo1-retention-full={{ .RetentionFull }}
+repo1-bundle=y
+repo1-block=y
+{{ if .LocalRepo }}repo2-path=/var/lib/pgbackrest
+repo2-retention-full=1
+{{ end }}compress-type=zst
+process-max={{ .ProcessMax }}
+start-fast=y
+archive-async=y
+spool-path=/var/spool/pgbackrest
+archive-push-queue-max=4GiB
+log-level-console=info
+log-level-file=detail
+delta=y
+
+[{{ .Stanza }}]
+pg1-path={{ .DataDirectory }}
+pg1-socket-path=/var/run/postgresql

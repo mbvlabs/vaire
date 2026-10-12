@@ -327,15 +327,11 @@ func sshHostKeys() ([]string, error) {
 }
 
 func handleConfirmSecrets(context.Context, *Env) (Result, error) {
-	st, err := engine.LoadState(engine.StatePath)
-	if err != nil {
+	confirmedAt := time.Now().UTC().Format(time.RFC3339)
+	if err := engine.UpdateState(func(s *engine.State) error { s.SecretsConfirmedAt = confirmedAt; return nil }); err != nil {
 		return Result{}, err
 	}
-	st.SecretsConfirmedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := st.Save(engine.StatePath); err != nil {
-		return Result{}, err
-	}
-	return Result{Data: map[string]string{"secrets_confirmed_at": st.SecretsConfirmedAt}}, nil
+	return Result{Data: map[string]string{"secrets_confirmed_at": confirmedAt}}, nil
 }
 
 // initFailureHint is the step_failed hint during cluster init, where there is

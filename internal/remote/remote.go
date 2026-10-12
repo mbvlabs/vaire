@@ -241,3 +241,19 @@ func (t *tail) Write(p []byte) (int, error) {
 }
 
 func (t *tail) String() string { return t.buf.String() }
+
+// Stream runs eru node <args> as root and copies its standard output to w,
+// for commands that produce raw bytes instead of NDJSON (eru node dump). The
+// operator has already done the version handshake on this connection.
+func (n *Node) Stream(ctx context.Context, args string, w io.Writer) error {
+	stderr := &tail{max: 8 * 1024}
+	err := n.SSH.Run(ctx, n.asRoot(node.BinaryPath+" node "+args), nil, w, stderr)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return output.NewError(output.CodeExternalCommand, "eru node "+args+" failed on "+n.SSH.Target.String(), output.ExitExternal,
+		"Read details.stderr.").WithDetails(map[string]any{"stderr": strings.TrimSpace(secrets.Redact(stderr.String())), "error": errString(err)})
+}

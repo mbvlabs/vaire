@@ -23,6 +23,9 @@ const (
 	ReasonPreviousFailure = "previous_failure"
 	ReasonJournal         = "journal"
 	ReasonCheck           = "check"
+	// ReasonRestartPending is a RestartBarrier step left for a later apply
+	// because the restart it waits for was not confirmed.
+	ReasonRestartPending = "restart_pending"
 )
 
 // Options steer one Plan or Apply.
@@ -182,6 +185,26 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			data.Skipped++
 			continue
 		}
+		if b, ok := step.(RestartBarrier); ok && b.NeedsRestartFirst() {
+			if pending := pendingIn(j, steps); len(pending) > 0 {
+				if !opts.Confirmed || opts.Restarter == nil {
+					report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(index), Total: intPtr(total), Detail: ReasonRestartPending})
+					data.Steps = append(data.Steps, ApplyStep{ID: id, Index: index, State: "skipped", Reason: ReasonRestartPending})
+					data.Skipped++
+					warnings = append(warnings, output.Warning{
+						Code:    "step_waits_for_restart",
+						Message: id + " runs after the pending restart; re-run apply with the restart confirm token",
+					})
+					continue
+				}
+				downtime, err := restartNow(ctx, j, path, opts, pending)
+				if err != nil {
+					return data, nil, err
+				}
+				data.Restarted = true
+				data.RestartDowntimeMS += downtime.Milliseconds()
+			}
+		}
 		report.emit(output.Event{Type: "step", Step: id, State: "started", Index: intPtr(index), Total: intPtr(total), Detail: step.Describe(cfg)})
 		j.Steps[id] = JournalEntry{Status: StatusRunning, InputsHash: d.hash, StartedAt: now()}
 		if err := j.Save(path); err != nil {
@@ -239,19 +262,25 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		})
 		return data, warnings, nil
 	}
+	downtime, err := restartNow(ctx, j, path, opts, pending)
+	if err != nil {
+		return data, nil, err
+	}
+	data.Restarted = true
+	data.RestartDowntimeMS += downtime.Milliseconds()
+	return data, warnings, nil
+}
+
+// restartNow performs the aggregated restart and clears the pending list.
+func restartNow(ctx context.Context, j *Journal, path string, opts Options, pending []string) (time.Duration, error) {
 	downtime, err := opts.Restarter.Restart(ctx)
 	if err != nil {
-		return data, nil, output.WrapError(output.CodeStepFailed, fmt.Errorf("restart failed: %s", secrets.Redact(err.Error())), output.ExitStep,
+		return downtime, output.WrapError(output.CodeStepFailed, fmt.Errorf("restart failed: %s", secrets.Redact(err.Error())), output.ExitStep,
 			"Inspect the run log, then re-run apply with the confirm token.").
 			WithDetails(map[string]any{"step": "restart", "error": secrets.Redact(err.Error()), "restart_pending": pending})
 	}
 	j.RestartPending = nil
-	if err := j.Save(path); err != nil {
-		return data, nil, err
-	}
-	data.Restarted = true
-	data.RestartDowntimeMS = downtime.Milliseconds()
-	return data, warnings, nil
+	return downtime, j.Save(path)
 }
 
 func decide(ctx context.Context, step Step, cfg config.Cluster, rt Runtime, j *Journal) (decision, error) {
@@ -261,6 +290,16 @@ func decide(ctx context.Context, step Step, cfg config.Cluster, rt Runtime, j *J
 		return decision{}, fmt.Errorf("inputs: %w", err)
 	}
 	hash := InputsHash(id, inputs)
+	if sk, ok := step.(Skipper); ok {
+		if reason := sk.SkipReason(cfg); reason != "" {
+			return decision{reason: reason, hash: hash}, nil
+		}
+	}
+	if f, ok := step.(Forcer); ok {
+		if reason := f.Force(cfg, rt); reason != "" {
+			return decision{apply: true, reason: reason, hash: hash}, nil
+		}
+	}
 	entry, ok := j.Steps[id]
 	if ok && entry.Status == StatusCompleted && entry.InputsHash == hash {
 		return decision{reason: ReasonJournal, hash: hash}, nil
@@ -325,7 +364,7 @@ func stepFailed(id string, index int, cause error) *output.CLIError {
 	if errors.As(cause, &scriptErr) && len(scriptErr.Tail) > 0 {
 		details["output_tail"] = scriptErr.Tail
 	}
-	return &output.CLIError{
+	out := &output.CLIError{
 		Code:     output.CodeStepFailed,
 		Message:  fmt.Sprintf("step %s failed: %s", id, msg),
 		Hint:     "Fix the cause and re-run apply. It resumes at this step.",
@@ -333,6 +372,23 @@ func stepFailed(id string, index int, cause error) *output.CLIError {
 		Details:  details,
 		Cause:    cause,
 	}
+	// A step that refuses for a reason the operator has to act on keeps its
+	// code, hint and reason, so agents can tell it from a failed script.
+	var cliErr *output.CLIError
+	if errors.As(cause, &cliErr) && (cliErr.Code == output.CodePrecondition || cliErr.Code == output.CodeInputRequired) {
+		out.Code, out.ExitCode = cliErr.Code, cliErr.ExitCode
+		if cliErr.Hint != "" {
+			out.Hint = cliErr.Hint
+		}
+		if extra, ok := cliErr.Details.(map[string]any); ok {
+			for k, v := range extra {
+				if _, taken := details[k]; !taken {
+					details[k] = v
+				}
+			}
+		}
+	}
+	return out
 }
 
 func selectSteps(steps []Step, only []string) ([]Step, error) {

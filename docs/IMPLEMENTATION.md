@@ -57,7 +57,8 @@
 | SSH | `golang.org/x/crypto/ssh`, `golang.org/x/crypto/ssh/agent`, `golang.org/x/crypto/ssh/knownhosts` |
 | WireGuard (userspace) | `golang.zx2c4.com/wireguard` (`device`, `conn`, `tun/netstack`) |
 | Postgres | `github.com/jackc/pgx/v5` |
-| Secrets document | `filippo.io/age` (scrypt recipient) |
+| Secrets document, long-retention dumps | `filippo.io/age` (scrypt recipient for the bundle; X25519 for dumps), v1.3.2 |
+| S3 (bucket probe, dumps) | `github.com/minio/minio-go/v7`, v7.3.0 |
 | Signature verification | `github.com/sigstore/sigstore-go` (verify cosign bundles in-process) |
 | JQ filter | `github.com/itchyny/gojq` |
 | Bcrypt (nginx basic auth hash) | `golang.org/x/crypto/bcrypt` |
@@ -159,15 +160,20 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru console [db]` | `--db`, `--write` | | | | | |
 | `eru tunnel` | `--local-port`, `--target pgbouncer\|postgres` | | | | | |
 | `eru ssh` | `--command` | | | | | |
-| `eru db list` / `create <name>` / `drop <name>` / `credentials <name>` | `create`: `--statement-timeout`; `credentials`: `--rotate`, `--role` | create/drop/rotate | drop, rotate | ✓ | | `<db>` |
+| `eru db list` / `create <name>` / `drop <name>` / `credentials <name>` | `create`: `--statement-timeout`; `drop`: `--no-final-dump`; `credentials`: `--rotate`, `--role` | create/drop/rotate | drop, rotate | ✓ | | `<db>` |
 | `eru ext list` / `add <name>` / `remove <name>` | `--db` | add/remove | remove | ✓ | | `<cluster>/restart` if restart; `<db>` for remove |
 | `eru tune show\|explain\|apply` | | apply | | ✓ | | `<cluster>/restart` if restart |
-| `eru backup now` | `--type full\|diff\|incr` | ✓ | | ✓ | | |
-| `eru backup list` / `verify` | | verify | | | | |
-| `eru restore` | `--latest`, `--time`, `--set`, `--promote`, `--delta`, `--db <name>` | ✓ | ✓ | ✓ | ✓ | `<cluster>/restore` |
-| `eru restore status\|promote\|abort\|cleanup` | | promote/abort/cleanup | abort, cleanup | ✓ | | `<cluster>/restore` |
-| `eru restore drill` | `--time` | ✓ | | ✓ | | |
-| `eru dump <db>` | `--to bucket\|local`, `--out <file>` | ✓ | | | | |
+| `eru backup setup` | `--provider`, `--endpoint`, `--region`, `--bucket`, `--prefix`, `--uri-style`, `--key-id`, `--secret-stdin\|--secret-file`, `--full-schedule`, `--diff-schedule`, `--incr-schedule`, `--retention-full` | ✓ | | ✓ | ✓ | `<cluster>/restart` on the first enable |
+| `eru backup now` | `--type full\|diff\|incr` (job) | ✓ | | ✓ | | |
+| `eru backup list` / `verify` | `list`: `--db` | verify | | | | |
+| `eru job list` / `follow <id>` | | | | | | |
+| `eru restore <db>` | `--time`, `--latest`, `--set`, `--dump`, `--promote` (job) | ✓ | ✓ | ✓ | ✓ | `<db>/restore` |
+| `eru restore status [db]\|promote <db>\|undo <db>\|abort <db>` | | promote/undo/abort | promote, undo | ✓ | | `<db>/restore` (promote, undo) |
+| `eru restore cleanup [db]` | | ✓ | ✓ | ✓ | ✓ | `<db>/cleanup` |
+| `eru restore drill` | `--time` (job) | ✓ | | ✓ | | |
+| `eru db fork <db>` | `--name`, `--at` (job) | ✓ | | ✓ | | |
+| `eru dump <db>` | `--to bucket\|local`, `--out` | ✓ | | | | |
+| `eru dump list [db]` / `get <db> <id>` | `get`: `--out` | get (local file) | | | `get` | |
 | `eru vps backup now\|list` | | now | | ✓ | | |
 | `eru vps restore` | `--snapshot`, `--path…`, `--to <dir>` | ✓ | ✓ (in-place) | ✓ | | `<cluster>/vps-restore` |
 | `eru maint vacuum\|analyze\|reindex\|repack` | §16 | ✓ | | ✓ | | repack: `<db>` |
@@ -189,7 +195,8 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru node rpc` | Reads one JSON request on stdin, writes NDJSON events to stdout (§7.4). The only entry point the operator uses besides `version` |
 | `eru node version` | Prints version JSON. Runs without sudo |
 | `eru node selfcheck` | Binary can read config, the journal is readable, required tools are present. Creates missing `/var/lib/eru` (0700), `/var/log/eru` (0750) and `/run/lock` (1777), and fails if the owner lacks `rwx` on them, since root can write to a mode-000 directory |
-| `eru node run <job>` | Timer entry points: `backup-full`, `backup-diff`, `backup-incr`, `backup-verify`, `restore-drill`, `vps-backup`, `maint-daily`, `maint-weekly`, `certs-renew`, `metrics-refresh` |
+| `eru node run <job>` | Timer and job entry points: `backup-full`, `backup-diff`, `backup-incr`, `backup-verify`, `restore-drill`, `db-dump` (`--db`), `restore` and `db-fork` (only with `--job-id`, from their RPC), `vps-backup`, `maint-daily`, `maint-weekly`, `certs-renew`, `metrics-refresh`. `--job-id <id>` runs the detachable job an RPC prepared (§13.4) |
+| `eru node dump <db>` | Writes `pg_dump -Fc` of one database to stdout; `eru dump --to local` runs it over SSH. Besides `rpc` and `version`, the only node command the operator calls |
 | `eru node ssh-revert` | Commit-confirm revert (§8.3), invoked by a transient systemd timer |
 | `eru node unlock-ssh` | Break-glass: open public 22/tcp for `--minutes` (default 30) via a transient timer that re-closes it |
 
@@ -261,7 +268,7 @@ The last line is always `type: result`. `type` ∈ `step|log|progress|warning|pr
 | `external_command_failed` | 6 |
 | `config_error`, `validation_failed` | 7 |
 | `ambiguous_input`, `input_required` | 8 |
-| `remote_unreachable`, `transport_failed`, `host_key_mismatch` | 9 |
+| `remote_unreachable`, `transport_failed`, `host_key_mismatch`, `endpoint_unreachable`, `bucket_not_found`, `backup_auth_failed` | 9 |
 | `node_version_mismatch`, `update_required` | 10 |
 | `precondition_failed` (e.g. lock held, backup running, outside PITR window, insufficient disk) | 11 |
 | `lockdown_failed` (commit-confirm reverted) | 12 |
@@ -364,6 +371,9 @@ expose_postgres = false
 name = "app"                        # [a-z_][a-z0-9_]{0,62}
 statement_timeout = "60s"
 extensions = ["pg_stat_statements"]
+[databases.backup]                  # optional long-retention dumps (§13.8); left out while empty
+dump_schedule = "*-*-* 03:00:00"
+dump_retention = 90
 
 [backup]
 provider = "r2"                     # r2 | s3 | b2 | hetzner | minio | custom
@@ -412,7 +422,8 @@ path_prefix = "/metrics"
 - Until Phase 10, exactly one node with `role = "primary"` is allowed. More are rejected with `precondition_failed` and the hint "multi-node arrives in Phase 10".
 
 - **Strict decode.** `ParseCluster` refuses unknown keys with `config_error` naming them. Every table above exists from Phase 2 on with the defaults shown, so a file from an earlier phase still decodes and later phases don't change the decoder. `schema` stays `1`.
-- A table's fields are validated only when its feature is in use: `[backup]` only when `provider != ""` (empty means not configured).
+- A table's fields are validated only when its feature is in use: `[backup]` only when `provider != ""` (empty means not configured). Then `provider` is a preset, `endpoint` an `https://` URL with only a host (pgBackRest talks to S3 over TLS only), `bucket` an S3 bucket name, `prefix` non-empty without leading or trailing slash, `region` set, `uri_style ∈ {path, host}`, `full_schedule` set, and every schedule passes a coarse character filter; `config.set` (and so `config edit` and `backup setup`) then runs `systemd-analyze calendar` on each on the node, which has the final say. `[databases.backup].dump_schedule` needs `[backup]` and `dump_retention ≥ 1`.
+- Database names ending in `__restoring` or containing `__pre_restore_` are reserved for `eru restore` (§13.5).
 - `tls.mode ∈ {acme, self-signed}`; `acme_ca` empty or an `https://` URL; `postgres.version == 18`; `profile ∈ {oltp, mixed, analytics}`; `client_connections` 10–100000; `locale_provider ∈ {builtin, icu, libc}`; `locale` matches `^[A-Za-z0-9_.@-]+$`.
 - `[postgres.settings]` keys match `^[a-z_][a-z0-9_.]*$` and may not name a setting eru owns: `allow_alter_system`, `ssl*`, `listen_addresses`, `port`, `password_encryption`, `shared_preload_libraries`, `archive_*`, `data_directory`, `hba_file`, `ident_file`, `include*`.
 - Database names are unique, and `<name>_migrate` etc. fit in 63 characters. `statement_timeout` is `0` or matches `^\d+(ms|s|min|h)$`. Extensions must be catalog entries (§17); until Phase 4 only the contrib entries exist, and any other name gets `validation_failed` with the hint "arrives with eru ext in Phase 4".
@@ -421,7 +432,7 @@ path_prefix = "/metrics"
 
 `config set` uses dotted keys (`backup.vps.schedule`, `postgres.settings.work_mem`, `databases.app.statement_timeout`). Array-of-table entries are addressed by `name`. Values parse by the target field's type (bool, int, float, string, `[]string` as a comma list or TOML array literal). `schema`, `name`, `nodes.*.wg_address` and `transport.*` are immutable after init: `config set` refuses them, and so does a whole-file `config.set` (`config edit`), with `precondition_failed`, reason `immutable_key`.
 
-**Desired-state store** (`internal/state`): a `Store` interface (`Load`, `Save(raw)` that validates with `full` and writes atomically, `Revision()` = sha256 of the file). Phase 2 has `FileStore` at `/etc/eru/cluster.toml`; the bucket copy arrives with Phases 3 and 7. `config.set`, `db.create`, `db.drop` and `cluster.bootstrap` write through it. `config.set` takes `base_revision` and refuses a stale one (`precondition_failed`, reason `config_changed`); with `dry_run` it returns the plan for the new file without saving.
+**Desired-state store** (`internal/state`): a `Store` interface (`Load`, `Save(raw)` that validates with `full` and writes atomically, `Revision()` = sha256 of the file). Phase 2 has `FileStore` at `/etc/eru/cluster.toml`; the bucket copy arrives with Phase 7 (the `eru-config` restic snapshot); Phase 3 does not copy it. `config.set`, `db.create`, `db.fork`, `db.drop` and `cluster.bootstrap` write through it. `config.set` takes `base_revision` and refuses a stale one (`precondition_failed`, reason `config_changed`); with `dry_run` it returns the plan for the new file without saving.
 
 **Answers file** (`--answers answers.toml`): the same schema as `cluster.toml`, plus a `[bootstrap]` table (`host`, `user`, `identity`, `host_key_fingerprint`) and a `[backup.credentials]` table (`access_key_id`, `secret_access_key`). The CLI strips credentials before persisting `cluster.toml` (they go to runtime secrets, §6.3).
 
@@ -433,12 +444,14 @@ path_prefix = "/metrics"
 | `/etc/eru/node.toml` | root 0640 | `cluster`, `node_name`, `role`, `installed_at`. Marks a host as an eru node |
 | `/etc/eru/cluster.toml` | root 0640 | Desired state |
 | `/etc/eru/operators.toml` | root 0640 | Operator registry: `name`, `wg_address`, `wg_public_key`, `ssh_public_key` per operator. Steps 2 and 3 render `authorized_keys` and the wg0 peers from it |
-| `/etc/eru/runtime/` | root 0700 | `pgbouncer_auth.pass` and `monitor.pass` (0600, written only from operator-supplied secrets), `backup.env` (S3 keys), `restic.env`, `metrics.htpasswd` (bcrypt) |
+| `/etc/eru/runtime/` | root 0700 | `pgbouncer_auth.pass` and `monitor.pass` (0600, written only from operator-supplied secrets), `backup.env` (0600: S3 keys and the dump age recipient, §13.3), `restic.env`, `metrics.htpasswd` (bcrypt) |
+| `/etc/pgbackrest/pgbackrest.conf` | postgres 0600 | §13.1; holds the S3 keys and the repository cipher |
+| `/var/lib/eru/jobs/` | root 0700 | Detachable job specs (0600), deleted when the job starts (§13.4) |
 | `/etc/eru/tls/` | root 0755 | `server.crt` (0644), `server.key` (root:ssl-cert 0640; `postgres` and `pgbouncer` are in `ssl-cert`) |
 | `/var/lib/eru/journal.json` | root 0600 | §9.3 |
-| `/var/lib/eru/state.json` | root 0600 | `secrets_confirmed_at`, `lockdown_pending`, `locked_down_at`, `last_apply`, `restore` (in-progress restore record), `drills[]` (last 12) |
+| `/var/lib/eru/state.json` | root 0600 | `secrets_confirmed_at`, `lockdown_pending`, `locked_down_at`, `jobs[]` (last 50), `backup` (§13.9: restores per database, leftovers, `drills[]` (last 12), last backup, verify and dump). Updated under an flock on `state.json.lock` |
 | `/var/lib/eru/ssh-snapshot/` | root 0700 | Commit-confirm snapshot (`snapshot.json`, `sshd-dropin.conf`, `ufw-rules.txt`) and `reverted.json` (§8.3) |
-| `/var/lib/eru/drill/` | postgres 0700 | Scratch restores |
+| `<parent of data_directory>/eru-scratch/<id>/` | postgres 0700 | Scratch restores for restores, forks and drills (§13.5); removed when the job ends |
 | `/var/lib/node_exporter/textfile/eru.prom` | root 0644 | §15.4 |
 | `/var/log/eru/` | root 0750 | One log per RPC/job: `<UTC ts>-<method>-<request_id>.log`, rotated by logrotate (30 days) |
 | `/run/lock/eru.lock` | | Global lock (§9.5) |
@@ -454,8 +467,9 @@ contexts/<name>/wg.key              operator WireGuard private key (0600)
 contexts/<name>/id_ed25519          operator SSH private key (0600)
 contexts/<name>/known_hosts         pinned server host keys (wg address entries)
 contexts/<name>/credentials.json    sudo password, cluster-wide database credentials (eru_admin, services
-                                    pgbouncer_auth / eru_monitor) and later metrics credentials (0600);
-                                    never application database passwords
+                                    pgbouncer_auth / eru_monitor), the backup recovery kit (bucket, keys,
+                                    pgBackRest cipher pass, dump age identity) and later metrics credentials
+                                    (0600); never application database passwords
 pending/<name>/                     in-progress init: answers.toml, secrets.json (0600), progress.json, known_hosts
 cache/releases/<version>/           downloaded artifacts + manifest + sigstore bundle
 ```
@@ -510,6 +524,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 - **Methods** mirror operator commands, named `<group>.<verb>` (each word may contain inner hyphens, as in `cluster.confirm-secrets`): `cluster.bootstrap`, `cluster.confirm-secrets`, `apply`, `plan`, `config.get|set|validate`, `status`, `doctor`, `db.*`, `ext.*`, `tune.*`, `backup.*`, `restore.*`, `vps.*`, `maint.*`, `ssh.lockdown`, `ssh.confirm`, `ssh.status`, `tls.status`, `logs`, `upgrade.install`, `upgrade.rollback`, `pg.update`, `sql`, `queries`, `top.sample`.
 - **Confirmation is re-checked node-side.** The node recomputes the token and rejects mismatches, so a buggy operator can't skip it. Destructive methods (`db.drop`, `db.credentials` with `rotate`) also refuse an *empty* token with `unsafe_action_requires_confirmation`; for `apply` and `tune.apply` an empty token only leaves the restart pending.
 - **Phase 2 methods:** `cluster.bootstrap phase=database`; `config.get` (raw TOML + revision), `config.set`, `config.validate`; `db.list`, `db.create` (needs `db.<name>.*` secrets, adds `[[databases]]`, runs `postgres-roles-v1` only, puts `cluster.toml` back if the database was never created), `db.drop`, `db.credentials` (rotate only; eru keeps no database passwords to read); `tune.show`, `tune.apply`; `tls.status` (served certificate state, polled by init); `logs` (unit allowlist `postgres`, `pgbouncer`, `nginx`, `eru-certs`, `eru`; `follow` streams until the client disconnects); `sql` (for `--local` only: one transaction as `postgres` with `SET LOCAL ROLE`, `READ ONLY` unless `write`).
+- **Phase 3 methods:** `backup.now`, `backup.list`, `backup.verify`; `restore.start` (confirm `<db>/restore`), `restore.status`, `restore.promote` and `restore.undo` (confirm `<db>/restore`), `restore.abort`, `restore.cleanup` (confirm `<db>/cleanup` when it drops), `restore.drill`; `db.fork` (needs `db.<new>.*`); `dump.create`; `job.list`, `job.follow`. `backup.now`, `restore.start`, `restore.drill`, `db.fork` and `dump.create` run their work as detachable jobs and take no dispatcher lock (§13.4). `apply` takes `rotate_backup_secrets`; `db.drop` takes `no_final_dump`; `config.set` checks schedules with `systemd-analyze calendar` and refuses moving an existing repository (`repo_in_use`).
 - **Read-only SQL** (`eru sql`, `top.sample`, `queries`, reports) runs over pgx through the tunnel, not via RPC, except where node-local access is needed (`postgres` peer for superuser-only views). RPC methods for these exist for `--local` mode.
 - **Sudoers**: `/etc/sudoers.d/eru` contains `eru ALL=(root) NOPASSWD: /usr/local/bin/eru node *`. Validate it with `visudo -cf`.
 
@@ -526,7 +541,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 
 ### 8.1 `eru cluster init` flags
 
-`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--tls-mode`, `--local`, `--restore <bundle-file|->` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--reveal-passphrase`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check` (deprecated, no effect), `--resume`, `--discard`. Until their phase lands, the backup and VPS flags are accepted with a `flag_not_used_yet` warning.
+`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--tls-mode`, `--local`, `--restore <bundle-file|->` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--reveal-passphrase`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check` (deprecated, no effect), `--resume`, `--discard`. The database backup flags (`--backup-*`, `--db-full-schedule`, `--db-diff-schedule`) work from Phase 3 on (§13.3); `--vps-backup-schedule` is accepted with a `flag_not_used_yet` warning until Phase 7.
 
 - `--host` also takes a `Host` alias from `~/.ssh/config`. First contact reads the matching block for `HostName`, `User`, `Port` and `IdentityFile`; explicit `user@`/`:port` and `--identity` win. `--identity` (or the resolved `IdentityFile`) is checked to be a readable private key while the answers are collected, before anything is prompted or generated.
 - Without `--identity`, first contact offers ssh-agent keys and `~/.ssh/id_{ed25519,ecdsa,rsa}` as one `publickey` method. An encrypted default key that the agent doesn't hold gets a passphrase prompt in a TTY; otherwise it is skipped and named in `details.skipped_keys`.
@@ -540,7 +555,7 @@ Each numbered phase emits `step` events and records progress in `pending/<name>/
 1. **Local preflight** (§20).
 2. **Collect answers** from flags, the answers file, and prompts. Prompt only in a TTY. Validate (§6.1). The `huh` interview has groups *Server* (name, admin user, timezone, data directory), *Endpoint* (domain, TLS mode, client allowlist, then ACME email in `acme` mode), and *Workload* (profile, client connections). It does not ask for databases: they are created after init with `eru db create`. Each question has a flag; a question already answered by a flag or the answers file is skipped. Backup, VPS and extension questions arrive with their phases. Non-interactive runs check `--confirm <cluster>`, `--confirm-secrets-stored`, `--secrets-out` and `--reveal-passphrase` before anything changes. In `acme` mode, init then shows the `A <domain> → <public IPv4>` record so the operator can create it while the host phase runs.
 3. **Generate secrets** on the operator (§10.2), stored in `pending/<name>/secrets.json` (0600): the operator WireGuard keypair, SSH ed25519 key, sudo password, and every database and service password, so `--resume` reuses them.
-4. **Backup credentials check**: from the operator, do a signed `PUT`/`GET`/`DELETE` of `<prefix>/.eru-probe` using the S3 client in `internal/backup/s3probe.go` (minimal SigV4 over `net/http`; no SDK). This fails early on bad keys or a bad bucket. For a non-empty `<prefix>/pgbackrest` without `--restore`, return `precondition_failed` ("prefix already contains a backup repository").
+4. **Backup credentials check** (when backups are configured): from the operator, `backup.Probe` (`minio-go`): read the bucket, put/get/delete `<prefix>/.eru-probe`, and refuse a prefix holding another cluster's stanza (§13.3). This fails early on bad keys or a bad bucket, before first contact. The recovery kit (cipher pass, dump age identity) is generated here and saved in `pending/<name>/secrets.json`.
 5. **First contact** over public SSH. Detect arch and OS (`/etc/os-release`). Push the binary (§7.5, bootstrap case).
 6. **RPC `cluster.bootstrap` phase=host** over public SSH. The node writes `cluster.toml` and `node.toml`, then runs hardening steps 1–6 (§11), which:
    - create the admin user with the operator SSH key and sudo password hash;
@@ -551,6 +566,7 @@ Each numbered phase emits `step` events and records progress in `pending/<name>/
 9. **DNS** (`dns_confirmed`, `acme` mode only). Show the records in one panel (`A`, plus `AAAA → <public IPv6>` when the server has one; when it has none, the panel says there is no AAAA record), with the note that they must be DNS only (not proxied). The panel appears right after first contact, which reads the IPv6 address over SSH (the source of `ip -6 route get 2606:4700:4700::1111`; `--local` reads it directly), so the records propagate while the host phase runs. In a TTY the operator types `confirmed` once, right there (`Type 'confirmed' once the A and AAAA records exist`, or `… the A record exists`); `--dns-ready` skips that pause, and non-interactive runs don't pause. Host bootstrap also reports the IPv6 address, kept in `progress.json`; only when it differs from what first contact read, or on a resume that skipped first contact, does this step show the panel and ask again. eru then queries 1.1.1.1 and 8.8.8.8 once, directly (a Go `net.Resolver` dialing them, so local caches can't lie), and continues whatever they answer. A mismatch is a `dns_mismatch` warning listing each resolver's answers against the expected addresses. Answers inside Cloudflare's published ranges are a `dns_proxied` warning ("proxied by Cloudflare: database clients can't connect through it; set the record to DNS only"). DNS never blocks init: the certificate wait (step 11) shows whether the certificate was issued. `--skip-dns-check` is accepted with a `flag_deprecated` warning. `self-signed` mode skips this phase.
 10. **RPC `cluster.bootstrap` phase=database** (`database_bootstrapped`) over WireGuard: it requires `node.toml` of the same cluster and a completed host phase, writes the new `cluster_toml` through `state.Store`, and runs the database steps (7–13 in Phase 2; later phases append theirs). All database and service passwords travel in `secrets`. Result: `{phase, steps, tls: {state, not_after}, restart_performed}`.
 11. **Certificate wait** (`tls_checked`): poll `tls.status` for up to 120 s until the placeholder is replaced. `tls.state` is `acme`, `pending` or `self-signed`; `pending` is a `tls_pending` warning, never a failure. The warning carries the resolver answers (or the Cloudflare hint) from a fresh DNS check, and says that `eru-certs.timer` retries every hour.
+11a. **Backups** (`backups_configured`, only when configured): `config.set` with `[backup]` and `apply --step postgres-config-v1 --step pgbackrest-v1 --step timers-v1` with `<cluster>/restart`, the same code as `eru backup setup` (§13.3). It runs here, between the certificate wait and the handoff, so the handoff carries the recovery kit and follows the first full backup.
 12. **Secrets handoff** (`secrets_written`, §10): show the handoff (§10.1) in the terminal and write nothing, unless `--secrets-out <path>` asks for the armored transfer bundle to be written, or the handoff's save action asks for the whole record to be written (both 0600). In a TTY, require typing `stored` (the prompt reads `Type 'stored' once the record is in your password manager`), then offer to clear the screen (default yes). Without a TTY, require `--secrets-out`, `--reveal-passphrase` and `--confirm-secrets-stored`; the passphrase is in `data.passphrase` and the plain secrets are never in structured output. A resumed init that stopped before the confirmation shows a new handoff with a new passphrase. Then RPC `cluster.confirm-secrets` sets `secrets_confirmed_at`.
 13. **Create the local context** from the pending data (with `lockdown_confirmed_at` set), make it current, and delete `pending/<name>`.
 14. Print the summary: connection URLs with the passwords left out (`postgres://app_app:«in secrets document»@…`), TLS state, `restart_performed`, and `next: ["eru sql --db <first db> \"select 1\"", "eru psql --db <first db>"]`. Doctor and backup results join with their phases.
@@ -633,6 +649,8 @@ type Runtime struct {
 }
 ```
 
+Optional interfaces (Phase 3): `engine.FileRenderer` (plan diffs); `engine.Skipper` (`SkipReason(cfg)`: skip without a journal entry, e.g. `pgbackrest-v1` without `[backup]`, reason `backups_not_configured`); `engine.Forcer` (`Force(cfg, rt)`: run although the journal and hash say current, with the returned reason, e.g. `backup_credentials_rotated` when `Runtime.RotateSecrets` brings new bucket keys that are never in the inputs); `engine.RestartBarrier` (`NeedsRestartFirst()`: the runner performs a pending restart **before** the step when the restart is confirmed, otherwise skips the step with reason `restart_pending` and a `step_waits_for_restart` warning, leaving it for a later apply; `pgbackrest-v1` needs `archive_mode` on). `engine.Shell.Exec` runs a fixed program (no bash) with the same environment, process-group and redaction rules as scripts, for tools whose output eru reads (pgbackrest, pg_dump, pg_restore, pg_ctl).
+
 ### 9.2 Runner semantics
 
 For each step in order:
@@ -643,6 +661,8 @@ For each step in order:
 4. Otherwise `Apply`, then journal `{status, inputs_hash, completed_at, restart}`.
 
 Restart needs are aggregated. The runner performs at most **one** Postgres restart at the end, and only if `--confirm <cluster>/restart` was supplied (remote-validated). Otherwise it reloads and reports `restart_pending: [settings…]`. Reloads happen immediately per step.
+
+A step that fails with `precondition_failed` or `input_required` keeps that code, its hint and its reason in the `step_failed`-shaped error (with `details.step`), so agents can tell a refusal from a failed script.
 
 Pending restarts are saved in the journal, so a later confirmed `apply` still performs the restart even though the steps themselves now skip. That apply restarts once and clears the list; `plan` reports it too. If a step needs a restart and the build has no restarter, `apply` fails with `error` rather than promising a restart that can't happen.
 
@@ -670,7 +690,8 @@ Rendered files are written by Go (`render` package) with an atomic write and own
 `/run/lock/eru.lock` uses `flock`:
 
 - **exclusive**: `apply`, `restore.*` (except status), `upgrade.*`, `pg.update`, `ext.add/remove`, `tune.apply`, `vps.restore`, `restore-drill`;
-- **shared**: `backup.*`, `vps.backup`, `maint.*`, `db.*`.
+- **shared**: `backup.*`, `vps.backup`, `maint.*`, `db.*`, and the backup, verify, drill, dump, restore and fork jobs (§13.9).
+- Exclusive also covers `restore.promote|undo|abort|cleanup` and the create part of `db.fork`; `restore-drill` is shared, not exclusive, because a drill never touches the live cluster and can take hours.
 
 If a lock can't be acquired within `--timeout` (default 30 s; timers use 0), return `precondition_failed` with the holder (PID, method, start time, written to `/run/lock/eru.lock.info`). Exclusive holders remove the info file on release; shared holders leave it, and it names only the most recent shared holder. A holder whose PID is gone is reported as `null`.
 
@@ -730,19 +751,21 @@ The bundle is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work
 | `eru_admin` password | 32 chars base62 | Doc; node has PG SCRAM verifier only |
 | Per-db `migrate`/`app`/`ro` passwords | 32 chars base62 | Shown once by `eru db create` / `db credentials --rotate`; eru keeps none; node has PG SCRAM verifiers only |
 | `pgbouncer_auth` password | 32 chars base62 | Doc (`database.services`) + node `/etc/eru/runtime/pgbouncer_auth.pass` (0600) and its SCRAM verifier in `userlist.txt` |
-| pgBackRest `cipher_pass` | 64 chars base62 | Doc + node `pgbackrest.conf` |
+| pgBackRest `cipher_pass` | 64 chars base62, on the operator | Doc (recovery kit) + `credentials.json` + node `pgbackrest.conf` |
+| Dump age identity | `age.GenerateX25519Identity`, on the operator | Doc (recovery kit) + `credentials.json` only; the node gets the recipient (`backup.env`), and the identity only for the length of a `restore --dump` job |
 | restic password | 64 chars base62 | Doc + node `restic.env` |
 | Metrics password | 32 chars base62 | Doc + node bcrypt hash in an nginx `auth_basic_user_file` |
 | `eru_monitor` password | 32 chars base62 | Doc (`database.services`) + node `/etc/eru/runtime/monitor.pass` (0600) and its SCRAM verifier in `userlist.txt` |
-| Bucket keys | user-provided | Doc + node `backup.env`, `pgbackrest.conf`, `restic.env` |
+| Bucket keys | user-provided | Doc (recovery kit) + `credentials.json` + node `backup.env`, `pgbackrest.conf`, `restic.env` |
 
 Use `crypto/rand` only.
 
 **The secrets document holds cluster access credentials only**: every secret needed to reach, run and rebuild the cluster. Application database passwords are not cluster access and are never stored by eru: `eru db create` generates them, sends them to the node, and prints them once (with the connection URLs and notes) for the human or the app's secret store; a lost one is replaced with `eru db credentials <db> --rotate`. eru's own access to a database goes through `eru_admin`. The **operator** generates all database passwords: `eru_admin`, the service roles `pgbouncer_auth` and `eru_monitor`, and each database's `migrate`/`app`/`ro`. The node never generates one. It keeps SCRAM verifiers only, except the two service passwords that PgBouncer and the exporters need at runtime.
 
-- **RPC secret names:** `db.admin`, `db.<db>.migrate`, `db.<db>.app`, `db.<db>.ro`, `svc.pgbouncer_auth`, `svc.eru_monitor` (constants/helpers in `internal/steps/secrets.go`). The node registers every received secret for redaction before anything logs.
+- **RPC secret names:** `db.admin`, `db.<db>.migrate`, `db.<db>.app`, `db.<db>.ro`, `svc.pgbouncer_auth`, `svc.eru_monitor`, `backup.s3_key_secret`, `backup.cipher_pass`, `backup.age_identity` (restore from a dump only), plus the non-secret `backup.s3_key_id` and `backup.age_recipient` in the same map (constants/helpers in `internal/steps/secrets.go`). The node registers every received secret for redaction before anything logs.
 - **Verifiers, not plaintext:** `pg.SCRAMVerifier` (SCRAM-SHA-256, 4096 iterations, random 16-byte salt) is computed in Go and sent as `ALTER ROLE … PASSWORD '<verifier>'` on psql's stdin, so the plaintext never reaches psql, server logs or `pg_stat_statements`. Verifiers are redacted too.
 - **Set once:** a password is set only when its role is created, or by `db credentials --rotate`. `postgres-roles-v1` never re-sets an existing role's password, and passwords are not part of its inputs. A login role that must be created without a supplied secret fails with `input_required` naming the role. The same goes for a missing `/etc/eru/runtime/*.pass`.
+- **Operator top-up of the recovery kit:** `apply` also sends the kit from `credentials.json`; the node writes it only where missing (§13.3). Backups on and no kit is `input_required`.
 - **Operator top-up:** before `apply` and init's database phase, the operator compares `eru_admin` and the service roles with `credentials.json` (never `[[databases]]`), generates anything missing, saves it to `credentials.json`, sends it, and warns `secrets_document_stale` ("run `eru secrets export`"). It saves before sending: a role created with a password the operator then lost would be unrecoverable.
 - The document's `database` section holds `admin` and `services` (`pgbouncer_auth`, `eru_monitor`). The per-database URLs and connection notes (5432 is reachable only over WireGuard or with `expose_postgres = true`) are printed by `eru db create` and `db credentials --rotate`. URLs use `sslmode=verify-full&sslrootcert=system` in `acme` mode and `sslmode=require` in `self-signed` mode. The `app` URL is on 6432 (PgBouncer, transaction mode); the `migrate` URL is on 5432 (session features for migrations). `<d>_migrate` is a member of `eru_direct_only`, so PgBouncer refuses it on 6432 and 443.
 
@@ -761,19 +784,19 @@ Order is fixed. IDs end in `-v1`. Every step stays `-v1` until the first release
 | 5 | `firewall-v1` | ufw: `default deny incoming`, `default allow outgoing`, allow 51820/udp, 80/tcp, 443/tcp, `in on wg0` 22/tcp, 6432/tcp and 5432/tcp; the allowlist rules for 6432 (if `expose_pgbouncer`) and 5432 (if `expose_postgres`). WireGuard peers always reach both ports; the expose flags gate only the allowlist. Keep public 22 only if `lockdown_pending` or not yet locked. Rules not in the set are deleted (expected rules are added before and after, so SSH always has an allow rule). `ufw --force enable` | `ufw status` active and `ufw show added` equals the expected rule set |
 | 6 | `host-baseline-v1` | journald drop-in (copy deploycrate `host.sh`), swapfile (`swap_mb`), timezone, chrony enabled, unattended-upgrades security-only with `Package-Blacklist` `postgresql-`, `libpq`, `pgbouncer`, `pgbackrest`, `nginx`, `libnginx-mod-` and `Automatic-Reboot "false"` (via `#clear` of the distribution's origins), fail2ban sshd jail (`backend = systemd`, iptables ban actions so bans stay out of the ufw rule set), logrotate for `/var/log/eru` | Files match render, services active |
 | 7 | `kernel-tuning-v1` | `/etc/sysctl.d/90-eru.conf` and the `eru-thp.service` oneshot (below), `sysctl --system`, `daemon-reload`, `enable --now eru-thp.service`. `vm.nr_hugepages` from §12.3 (0 when `huge_pages = off`) | `sysctl -n` values equal render, THP `enabled` = `[never]` |
-| 8 | `postgres-packages-v1` | Write `/etc/postgresql-common/createcluster.d/00-eru.conf` with `create_main_cluster = false` **before** installing. Install `postgresql-common`, run `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, install `postgresql-18 postgresql-client-18 postgresql-contrib pgbouncer`, then `apt-mark hold postgresql-18 postgresql-client-18`. Debian's pgbouncer auto-starts with its own config, so `systemctl stop pgbouncer` right after install until step 13 renders it. `pgbackrest` arrives with Phase 3 in the same step | Packages installed and held |
+| 8 | `postgres-packages-v1` | Write `/etc/postgresql-common/createcluster.d/00-eru.conf` with `create_main_cluster = false` **before** installing. Install `postgresql-common`, run `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, install `postgresql-18 postgresql-client-18 postgresql-contrib pgbouncer pgbackrest`, then `apt-mark hold postgresql-18 postgresql-client-18 pgbackrest`. pgBackRest older than `versions.PgBackRestMinVersion` (2.59.3) is refused before it is installed: the step fails with `precondition_failed`, `reason: pgbackrest_too_old`. Debian's pgbouncer auto-starts with its own config, so `systemctl stop pgbouncer` right after install until step 13 renders it. | Packages installed and held |
 | 9 | `postgres-cluster-v1` | If no cluster exists: `pg_createcluster 18 main --datadir=<data_directory> --locale-provider=<provider> --locale=<locale> --start-conf=auto -- --auth-local=peer --auth-host=scram-sha-256` (checksums are default-on in 18; assert `data_checksums = on` after start and fail the step otherwise). A non-default `data_directory` gets its parent created `postgres:postgres 0700`. An existing 18/main with a **different** data directory is `precondition_failed`; eru never re-creates a cluster. systemd drop-in for `postgresql@18-main.service`: `LimitNOFILE=65536`, `OOMScoreAdjust=-900`, `Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj PG_OOM_ADJUST_VALUE=0` | `pg_lsclusters` shows 18/main online |
-| 10 | `tls-v1` | Refuse a server that has `caddy` installed (an older eru used Caddy; there is no migration, rebuild the server). Install `nginx` and `libnginx-mod-stream` from the distribution (at least `NginxMinVersion`), `apt-mark hold` them, remove the default site. Add `postgres` and `pgbouncer` to `ssl-cert`. If no certificate exists, write a self-signed P-256 placeholder (30 days, `CN`/SAN = domain) into `/etc/eru/tls` so PG, PgBouncer and nginx can start; TLS never blocks on ACME. This step runs before `postgres-config-v1`, because that step turns `ssl` on and PostgreSQL refuses to start without a readable certificate. Render `/etc/nginx/nginx.conf` (§15.2), `nginx -t`, `systemctl reload-or-restart nginx`. Install `eru-certs.service` and `eru-certs.timer` (hourly), enable the timer and `systemctl start --no-block eru-certs.service` so issuance starts at once (§15.3) | nginx active, `/etc/eru/tls/server.crt` exists |
-| 11 | `postgres-config-v1` | Render `conf.d/10-eru-tuning.conf` (§12), `20-eru-security.conf`, `30-eru-extensions.conf` (§17), `50-eru-settings.conf` (`[postgres.settings]`, values single-quoted with `''` escaping), and create `90-overrides.conf` (empty, comment header) if missing (`40-eru-backup.conf` arrives in Phase 3; `wal_level = logical` and `max_wal_senders = 10` are already in the tuning file, so only `archive_mode` will need a restart then). Render `pg_hba.conf` and `pg_ident.conf`. Every file is written owned by `postgres:postgres` with `0640` for `pg_hba.conf` and `pg_ident.conf` and `0644` for `conf.d`, so the server can read them before the reload. Ensure `include_dir = 'conf.d'` is in `postgresql.conf`. Before reload, `pg_file_settings` and `pg_hba_file_rules` must have no errors; otherwise the previous files are restored and the step fails with the errors. Classify changes via `pg_settings.context` (`postmaster` means restart, listed in the notes). The **first run** (no completed journal entry for this step) restarts unconditionally and without confirmation, because there is no traffic yet. When huge pages change, `shared_memory_size_in_huge_pages` is computed while PG is stopped during that restart, and `vm.nr_hugepages` is re-applied through step 7's helper | Rendered = on disk, with owner and mode |
+| 10 | `tls-v1` | Refuse a server that has `caddy` installed (an older eru used Caddy; there is no migration, rebuild the server). Install `nginx` and `libnginx-mod-stream` from the distribution (at least `NginxMinVersion`), `apt-mark hold` them, remove the default site. Add `postgres` and `pgbouncer` to `ssl-cert`. If no certificate exists, write a self-signed P-256 placeholder (30 days, `CN`/SAN = domain) into `/etc/eru/tls` so PG, PgBouncer and nginx can start; TLS never blocks on ACME. This step runs before `postgres-config-v1`, because that step turns `ssl` on and PostgreSQL refuses to start without a readable certificate. Render `/etc/nginx/nginx.conf` (§15.2), `nginx -t`, `systemctl reload-or-restart nginx`. Install `eru-certs.service` and `systemctl start --no-block eru-certs.service` so issuance starts at once (§15.3); `timers-v1` owns the hourly `eru-certs.timer` | nginx active, `/etc/eru/tls/server.crt` exists |
+| 11 | `postgres-config-v1` | Render `conf.d/10-eru-tuning.conf` (§12), `20-eru-security.conf`, `30-eru-extensions.conf` (§17), `50-eru-settings.conf` (`[postgres.settings]`, values single-quoted with `''` escaping), and create `90-overrides.conf` (empty, comment header) if missing. `40-eru-backup.conf` (§13.1) is rendered while `[backup]` names a bucket and removed otherwise; `wal_level = logical` and `max_wal_senders = 10` are already in the tuning file, so only `archive_mode` needs a restart, through the usual classification. Render `pg_hba.conf` and `pg_ident.conf`. Every file is written owned by `postgres:postgres` with `0640` for `pg_hba.conf` and `pg_ident.conf` and `0644` for `conf.d`, so the server can read them before the reload. Ensure `include_dir = 'conf.d'` is in `postgresql.conf`. Before reload, `pg_file_settings` and `pg_hba_file_rules` must have no errors; otherwise the previous files are restored and the step fails with the errors. Classify changes via `pg_settings.context` (`postmaster` means restart, listed in the notes). The **first run** (no completed journal entry for this step) restarts unconditionally and without confirmation, because there is no traffic yet. When huge pages change, `shared_memory_size_in_huge_pages` is computed while PG is stopped during that restart, and `vm.nr_hugepages` is re-applied through step 7's helper | Rendered = on disk, with owner and mode |
 | 12 | `postgres-roles-v1` | §14 SQL through `pg.Local` (psql as the `postgres` OS user, SQL on stdin); per-db roles, databases, default privileges, extensions, `eru_direct_only` with every `<d>_migrate` in it, `eru.pgbouncer_get_auth`. Passwords follow §10.2 (set once, verifiers only). Writes `/etc/eru/runtime/{pgbouncer_auth,monitor}.pass` from the request secrets when missing. Inputs are names, timeouts and extensions, never passwords. Databases removed from `cluster.toml` are not dropped (only `db drop` drops); they are reported as `orphaned_database` warnings | All roles, dbs, grants, extensions and the auth function exist; the function refuses `eru_direct_only`, and every `<d>_migrate` is a member |
 | 13 | `pgbouncer-v1` | Render `/etc/pgbouncer/pgbouncer.ini` (§14.3) and `userlist.txt` (verifiers read back from `pg_authid` for `pgbouncer_auth` and `eru_monitor`), `postgres:postgres 0640`, overwriting Debian's files. Enable and restart | Rendered = on disk (owner and mode included), and `SHOW VERSION` as `eru_monitor` on 6432 works (via a 0600 `PGPASSFILE`) |
-| 14 | `pgbackrest-v1` | Render `/etc/pgbackrest/pgbackrest.conf` (§13.1). `pgbackrest --stanza=<s> stanza-create`, then `check`. If the journal has no `first-full`, run `backup --type=full` (streams progress) | `check` passes, first full exists |
-| 15 | `restic-v1` | Install the pinned restic (copy deploycrate `backup.sh` checksum pattern). Render `restic.env`. `restic init` if needed (`restic cat config` decides). First snapshot (§13.6) | Repo reachable, ≥ 1 snapshot |
+| 14 | `pgbackrest-v1` | Skipped (`backups_not_configured`, no journal entry) without `[backup]`. Otherwise a restart barrier (§9.1): `install -d` `/etc/pgbackrest`, `/var/spool/pgbackrest`, `/var/log/pgbackrest` (and `/var/lib/pgbackrest` with `local_repo`), write `backup.env` and `/etc/pgbackrest/pgbackrest.conf` (§13.1, §13.3), `stanza-create`, `check`, then a full backup when `pgbackrest info` shows none (streams progress; the repository, not the journal, is the source of truth for the first full) | Conf on disk equals the render, `backup.env` exists, `info` lists a full backup |
+| 15 | `restic-v1` | Install the pinned restic (copy deploycrate `backup.sh` checksum pattern). Render `restic.env`. `restic init` if needed (`restic cat config` decides). First snapshot (§13.10) | Repo reachable, ≥ 1 snapshot |
 | 16 | `metrics-v1` | Install pinned `node_exporter` (copy deploycrate script; textfile collector dir `/var/lib/node_exporter/textfile`), `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter` as systemd services bound to 127.0.0.1 (§15.1). It adds the `/metrics` locations to the 127.0.0.1:8443 server in `nginx.conf` | All exporters return 200 locally |
-| 17 | `timers-v1` | Render systemd `.service`/`.timer` pairs for every schedule in `cluster.toml` (§18). `systemctl daemon-reload`, enable timers, disable removed ones (`eru-*.timer` not in the render) | Timer set matches |
+| 17 | `timers-v1` | Pulled forward from Phase 5. Render `eru-certs.timer` and the §18 `.service`/`.timer` pairs for every backup schedule in `cluster.toml`, plus `eru-db-dump@.service` and one `eru-db-dump@<db>.timer` per dump schedule. Disable and remove `eru-*.timer` (and the backup services it owns) not in the render, `daemon-reload`, `enable --now` the timers | Files match, every timer enabled, no stale units |
 | 18 | `finalize-v1` | Run doctor (§21). Fail the step if any check is `fail`. Write metrics textfile. Upload `cluster.toml` as a restic snapshot tagged `eru-config` | Never complete (always runs; cheap) |
 
-`cluster.bootstrap phase=host` runs steps 1–6 (`steps.HostStepIDs()`). `phase=database` runs the database steps (`steps.DatabaseStepIDs()`), and `apply` runs everything. Each phase appends its own steps: Phase 2 has 1–13, and step 14 arrives with Phase 3, steps 16–18 with Phase 5 and step 15 with Phase 7 (step numbers are run order, not phase order).
+`cluster.bootstrap phase=host` runs steps 1–6 (`steps.HostStepIDs()`). `phase=database` runs the database steps (`steps.DatabaseStepIDs()`), and `apply` runs everything. Each phase appends its own steps: Phase 2 has 1–13, Phase 3 adds 14 and 17 (both in `DatabaseStepIDs()`, after `pgbouncer-v1`), Phase 5 adds 16 and 18, and Phase 7 adds 15 (step numbers are run order, not phase order). `eru backup setup` runs `steps.BackupStepIDs()`: `postgres-config-v1`, `pgbackrest-v1`, `timers-v1`. It doesn't install packages. A cluster set up before Phase 3 gets `pgbackrest` the usual way: `postgres-packages-v1`'s inputs changed, so the next `eru apply` (with `--auto-upgrade-nodes` for the new node binary) re-runs it. Before writing `[backup]`, setup plans `postgres-packages-v1` and refuses with `precondition_failed` (`reason: node_outdated`, hint `eru apply`) if it would still run.
 
 **Restarter** (`steps.Restarter()`): `systemctl stop pgbouncer` → `pg_ctlcluster 18 main restart -m fast` → wait for `pg_isready` (60 s) → `systemctl start pgbouncer`, reporting `restart_downtime_ms`. A restart needs `--confirm {cluster}/restart` except on step 11's first run.
 
@@ -926,8 +949,9 @@ pg1-socket-path=/var/run/postgresql
 archive_mode = on
 archive_command = 'pgbackrest --stanza={{ .Stanza }} archive-push %p'
 archive_timeout = 60s
-max_wal_senders = 10
 ```
+
+`max_wal_senders` is already in the tuning file. `repo1-s3-endpoint` is the endpoint's host; a port in the endpoint URL becomes `repo1-s3-port`. `process-max` is `max(1, vCPU/2)`.
 
 `archive_timeout = 60s` bounds RPO on idle systems.
 
@@ -942,67 +966,99 @@ max_wal_senders = 10
 | minio | path | `us-east-1` | asked |
 | custom | asked | asked | asked |
 
-### 13.2 Backup commands
+### 13.2 The per-database model
 
-| RPC | Implementation |
+The user-facing model is **per database**. pgBackRest and WAL archiving run cluster-wide underneath, because PostgreSQL has one WAL stream for all databases and point-in-time recovery needs it, but nobody restores "the cluster": every restore, fork and listing names a database, and a restore rewinds one database while the others keep serving. The **restore window** (from the end of the oldest backup set to the last archived WAL segment) is the same for every database and is set by `retention_full`. A database that must be kept longer gets scheduled long-retention dumps (§13.8). There is no in-place whole-cluster restore: rebuilding a whole cluster is `cluster init --restore` (§13.11), and the monthly drill (§13.7) exercises that full physical restore path.
+
+Code lives in `internal/backup`: `driver.go` (the `Driver` interface: `StanzaCreate`, `Check`, `Backup`, `Info`, `Verify`, `RestoreScratch`, `ArchiveStatus`), `pgbackrest.go` (the implementation; every command runs as `postgres` through `engine.Shell.Exec`, so its output is redacted and no argument carries a secret), `progress.go` (detail log lines → `progress` events, one per whole percent), `scratch.go` (scratch instances and the dump/restore pipe), `swap.go` (the per-database swap), `dumps.go` (age-encrypted dumps), `s3.go` (the `minio-go` client, presets and the bucket probe), `state.go`, `metrics.go` and `space.go`. WAL-G would be a second `Driver`; it is not built.
+
+### 13.3 Turning backups on: `eru backup setup` and init
+
+Every Phase 2 cluster has `backup.provider = ""`, so backups can be added to an existing cluster as well as at init.
+
+`eru backup setup` (flags `--provider --endpoint --region --bucket --prefix --uri-style --key-id --secret-stdin|--secret-file --full-schedule --diff-schedule --incr-schedule --retention-full`; in a terminal a `huh` form asks the same, with the retention phrased as a restore window "about N weeks"):
+
+1. Reads `cluster.toml` and the recovery kit in `credentials.json`. Moving backups to another endpoint, bucket or prefix once they are on is refused (`precondition_failed`, `reason: repo_in_use`); the node refuses it again in `config.set` when the repository holds a stanza.
+2. Probes the bucket **from the operator** with `minio-go`: `BucketExists`, then put, get and delete `<prefix>/.eru-probe`, then lists `<prefix>/pgbackrest/backup/` and refuses a prefix holding another cluster's stanza (`repo_in_use`; `stanza-create` catches a system-ID mismatch again). Errors name the cause: `backup_auth_failed`, `bucket_not_found`, `endpoint_unreachable` (all exit 9).
+3. The first enable flips `archive_mode = on`, which needs a restart: the prompt says "Turning on WAL archiving restarts PostgreSQL once (a few seconds of downtime)" and requires `--confirm <cluster>/restart`.
+4. Generates `cipher_pass` (64 chars base62) and an age X25519 identity for the dumps when this bucket/prefix has none in the kit, and **saves the kit to `credentials.json` before sending anything**. A cluster whose backups are already on and whose context has no kit for that bucket is `input_required` (`reason: recovery_kit_missing`): eru never makes a new cipher for an existing repository; log in from a current bundle.
+5. `config.set` with the dotted `backup.*` keys and `base_revision`, then `apply --step postgres-config-v1 --step pgbackrest-v1 --step timers-v1` with the restart token and `rotate_backup_secrets: true`.
+6. Calls `backup.list` to print the first full backup and the restore window, warns `secrets_document_stale` with the hint `eru secrets export`, and in a terminal offers the secrets handoff right away.
+
+Re-running setup with the same bucket rotates the access keys (the cipher pass and age identity are kept).
+
+**`cluster init`** accepts the `--backup-*`, `--db-full-schedule` and `--db-diff-schedule` flags and the answers file's `[backup]` and `[backup.credentials]`. In a terminal the interview gets a *Backups* page ("Configure an S3-compatible bucket now" or "Skip for now"). When configured, init probes the bucket and generates the kit (saved in `pending/<name>/secrets.json`) before first contact, so bad keys fail before the server is touched. The host and database phases send `cluster.toml` **without** `[backup]`; a separate phase `backups_configured` runs after the certificate wait and before the handoff, through the same code as `backup setup` (it passes `<cluster>/restart` itself: no traffic yet). The handoff therefore carries the recovery kit and follows the first full backup. Skipped, the summary's *Backups* row and `next` say `eru backup setup`.
+
+**Secrets on the node.** The RPC secret names are `backup.s3_key_secret` and `backup.cipher_pass`; `backup.s3_key_id` and `backup.age_recipient` travel in the same map (the only per-request channel a step has) but are not secret. None of them enters an input hash. `pgbackrest-v1` writes `/etc/pgbackrest/pgbackrest.conf` (postgres 0600) and `/etc/eru/runtime/backup.env` (root 0600: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `ERU_DUMP_AGE_RECIPIENT`) from the request when a value is missing on disk, or when the request sets `rotate_backup_secrets` (only `backup setup` does), and otherwise reuses what is on disk, so an operator with stale credentials never overwrites newer keys. A different cipher pass under `rotate_backup_secrets` is refused (`cipher_mismatch`). A value missing on disk and in the request is `input_required`. Plan diffs of `pgbackrest.conf` show the keys and cipher as `«redacted»`. The operator's top-up before `apply` sends the kit when it has one; with `[backup]` configured and no kit in `credentials.json` it is `input_required` with the hint to `eru login` from a current bundle.
+
+### 13.4 Backup commands and detachable jobs
+
+| Command / RPC | Implementation |
 | --- | --- |
-| `backup.now` | `pgbackrest --stanza=s --type=<t> backup`. Parse progress from `--log-level-console=detail` lines into `progress` events. Afterwards, write textfile metrics |
-| `backup.list` | `pgbackrest --stanza=s info --output=json` → `data.backups[] {label, type, start, stop, size, repo_size, wal_start, wal_stop, database_count}` and `data.pitr_window {from, to}` (`to` = last archived WAL time from `pg_stat_archiver.last_archived_time`) |
-| `backup.verify` | `pgbackrest --stanza=s verify --output=json` (with `--set` latest for the weekly timer). Record the result in `state.json` + metrics |
+| `backup now [--type]` / `backup.now` | Job `backup-<type>`. Default `incr`, or `full` when the repository has none. Physically it always covers every database. The job skips (records `skipped`) when pgBackRest's own backup lock is held, and upgrades a diff/incr to full when no full exists. `pgbackrest --type=<t> --log-level-console=detail backup`; progress events from the detail lines; the set goes to `state.json` and `eru.prom` |
+| `backup list [--db]` / `backup.list` | `pgbackrest info --output=json` → sets `{label, type, start, stop, size, delta, repo_size, wal_start, wal_stop}`; `restore_window {from, to, archive_lag_seconds}` (`from` = stop of the oldest set, `to` = `pg_stat_archiver.last_archived_time`); last verify, last drill, open restores, dump policies and the long-retention dumps (listed by the node with `backup.env`). With `--db`, only the sets containing that database (`info --set=<label>` per set, from the manifest's `database-ref`) and only its dumps |
+| `backup verify` / `backup.verify` | `pgbackrest verify` over the whole repository, synchronous under the shared lock. The result goes to `state.json` (`last_verify`) and `eru.prom`; a failed verify is recorded, then returned as `external_command_failed` with the output tail. The weekly timer runs the same code |
 
-### 13.3 In-place restore (`restore`)
+**Detachable jobs.** `backup.now`, `restore.start`, `restore.drill`, `db.fork` and `dump.create` start their work as `systemd-run --unit=eru-job-<request_id> --collect … eru node run <job> --job-id <request_id>`. The RPC first writes `/var/lib/eru/jobs/<id>.json` (0600, root 0700 directory) with the job's params and secrets; the job reads it and deletes it before doing anything else. The node lock is taken inside the unit (shared, timeout 0; busy records `skipped`). The RPC follows the unit's journal (`journalctl -u eru-job-<id>.service -o cat -f`): the job writes its events as NDJSON to stdout, which the RPC re-emits; it ends when the job's record in `state.json` is final and returns the job's result. Ctrl-C or a dropped tunnel only ends the RPC: the operator prints the job ID and `eru job follow <id>` re-attaches (a finished job replays its log and result). `eru job list` shows the last 50 records (`state.json.jobs`). Timer runs are recorded the same way with systemd's `INVOCATION_ID`, which `job follow` uses to read their journal. A unit that ends without recording a result is marked failed by the follower.
 
-**Preconditions:**
+### 13.5 `eru restore <db>`: rewind one database
 
-- the exclusive lock is held;
-- no restore is already in progress (`state.json.restore`);
-- the target lies within the PITR window (for `--time`), or the set exists (for `--set`);
-- free space on the data filesystem ≥ (latest backup `size` × 1.2), unless `--delta`.
+```
+eru restore <db> --time <ts> | --latest | --set <label> | --dump <id> [--promote] --confirm <db>/restore
+eru restore status [<db>]
+eru restore promote <db> --confirm <db>/restore
+eru restore undo <db> --confirm <db>/restore
+eru restore abort <db>
+eru restore cleanup [<db>] [--confirm <db>/cleanup]
+```
 
-**Algorithm:**
+1. **Preflight** (`restore.start`, under the shared lock): backups configured; `<db>` is in `cluster.toml` and not one of restore's own names; `<db>` is at most 36 characters, so `<db>__pre_restore_<yyyymmddThhmm>` fits PostgreSQL's 63-byte identifiers (longer names get `name_too_long` and the hint to `db fork` instead); no open restore of `<db>`; no `<db>__restoring` left over; the target lies in the restore window (`outside_window` names it), the set exists, or the dump exists; and free space for a scratch copy of the database (its live size plus 1 GiB) on the scratch filesystem plus the restored copy on the data filesystem, keeping 2 GiB free (`insufficient_space`). `--time` takes RFC 3339 or relative (`-15m`); the operator echoes it in UTC and the cluster timezone before the confirm.
+2. **Scratch restore** (job `restore`): `pgbackrest restore --pg1-path=<scratch>/data --archive-mode=off --db-include=<db>` with `--type=time --target=<ts> --target-action=promote`, `--type=default` for `--latest`, or `--set=<label> --type=immediate --target-action=promote`. Other databases come back as zeroed sparse files, so scratch costs about one database. The scratch root is `<parent of data_directory>/eru-scratch/<id>` (postgres 0700; same filesystem as the data, and outside `/var/lib/eru`, which is root 0700). eru writes a `postgresql.conf` into the restored directory: port 5499, `listen_addresses = ''`, its own socket directory, its own `pg_hba.conf` (`local all postgres peer`) and `pg_ident.conf`, `archive_mode = off`, `hot_standby = off` (recovery then doesn't need the live connection limits), `shared_buffers = 128MB`, `max_connections = 20`, `huge_pages = off`, `ssl = off`. `pg_ctl start -W`, then `pg_isready` on the scratch socket until recovery has promoted (up to 24 h); an instance that stops during recovery fails with its log tail.
+3. **Load beside the live database:** `CREATE DATABASE <db>__restoring OWNER <db>_owner`, the connect grants and, inside it, `postgres-roles-v1`'s schema, default-privilege and extension SQL; then `pg_dump -Fc` from the scratch socket piped into `pg_restore --no-owner --no-privileges --role=<db>_owner -d <db>__restoring`; then the grants again and `ANALYZE`. pg_restore's own errors don't stop the load: they come back as `restore_load_errors` warnings, and the paused phase is where the operator inspects. Scratch is torn down. The live `<db>` is untouched and still serving.
+4. **Ready:** `state.json.backup.restores[<db>] = {id, target, phase: ready, …}`. `eru sql --db <db>__restoring`, `psql` and `console` reach the copy. `restore status` shows the target, a per-table comparison of `pg_class.reltuples` in both databases, and what promote will do.
+5. **Promote** (`restore.promote`, exclusive lock): `ALTER DATABASE … ALLOW_CONNECTIONS false` on both databases and `pg_terminate_backend` for their sessions (direct 5432 sessions and PgBouncer's server connections alike); `ALTER DATABASE <db> RENAME TO <db>__pre_restore_<UTC yyyymmddThhmm>` and `<db>__restoring` to `<db>` (retrying while PostgreSQL still sees a session); connections allowed again on `<db>`. Any failure puts the names back. PgBouncer is **not** paused: a `PAUSE` waits for running transactions (one long one would stall every client of the database or fail the swap) and needs `eru_admin`'s password on the node. Instead only this database's clients get connection errors for the few seconds of the swap; PgBouncer opens its next server connection by name, so it lands on the restored copy. Roles and passwords are unchanged, so apps reconnect with the same credentials. The old copy is recorded in `restore_leftovers` and stays closed to connections.
+6. `--promote` on the first command does 1–5 in one job.
 
-1. Record `state.json.restore = {id, target, started_at, phase}`. Update `phase` after each step below.
-2. Don't take a pre-restore backup. The current state is preserved by moving the data dir aside (step 4), which is faster and also covers a broken current state.
-3. `systemctl stop pgbouncer`, then `pg_ctlcluster 18 main stop -m fast`.
-4. Unless `--delta`, run `mv <datadir> <datadir>.pre-restore-<UTC ts>` and `install -d -o postgres -g postgres -m 0700 <datadir>`.
-5. Run `pgbackrest --stanza=s restore` with `--type=time --target=<ts> --target-action=pause --target-timeline=current` (or `--type=default` for `--latest`, or `--set=<label> --type=immediate` for `--set`), plus `--delta` when requested. Stream progress.
-6. `pg_ctlcluster 18 main start`. Poll `pg_is_in_recovery()` and `pg_get_wal_replay_pause_state()` until `paused`, or until recovery ends for `--latest`.
-7. Report `{state: paused|promoted, replayed_to: pg_last_xact_replay_timestamp()}`. PgBouncer stays **stopped** while paused, so applications don't write to an inspection copy.
-8. If `--promote` (or later `eru restore promote`): `SELECT pg_wal_replay_resume()` then `pg_promote(wait => true)`, start PgBouncer, run `backup --type=full` immediately (new timeline), and clear `state.json.restore` (keeping the `.pre-restore-*` path recorded under `restore_leftovers`).
+- `abort <db>` drops `<db>__restoring` (refused while its job is still loading); the live database was never touched. It also cleans up after a failed restore.
+- `cleanup [<db>]` lists the leftovers with their sizes; with a database and `--confirm <db>/cleanup` it drops them. Until then the leftover is a one-command undo: `restore undo <db>` swaps it back the same way (the replaced copy becomes a new leftover).
+- While a restore of `<db>` is open, `db drop <db>`, `db fork <db>` and `db credentials <db> --rotate` refuse with `reason: restore_in_progress`. Other databases, `apply` and backups carry on: the restore job holds only the shared lock.
+- Names ending in `__restoring` or containing `__pre_restore_` are reserved: `config.CheckDatabaseName` (and so `db create`, `db fork` and `cluster.toml` validation) refuses them, `db drop`/`credentials` refuse them with the hint to use `restore abort`/`cleanup`, and `postgres-roles-v1`'s `orphaned_database` ignores them.
 
-`restore abort`:
+### 13.6 `eru db fork <src> [--name <new>] [--at <time>]`
 
-- stop PG;
-- move the restored datadir to `<datadir>.aborted-<ts>`;
-- move `.pre-restore-*` back;
-- start PG and PgBouncer.
+Shares the restore pipeline's steps 1–3, with a new database instead of a swap. `--name` defaults to `<src>_fork_<yyyymmddhhmm>` and must pass `CheckDatabaseName` (63-character role rule). The operator generates the four role passwords and prints them once with the URLs, like `db create`. On the node, `db.fork` checks the source, the name, the window (with `--at`) and space, then, under the exclusive lock, runs the `db create` path (`[[databases]]` entry copying `statement_timeout` and `extensions`, `postgres-roles-v1`), releases the lock and starts job `db-fork`: without `--at` it pipes `pg_dump -Fc` of the live source into the new database, with `--at` it restores the source to scratch at that time first. `pg_restore --no-owner --no-privileges --role=<new>_owner`, then the grants and `ANALYZE`. Not destructive, no confirm token. A copy that fails leaves the new, empty database for `db drop`.
 
-This is only valid before `--delta` and only while a pre-restore dir exists.
+### 13.7 Restore drill
 
-`restore cleanup` (destructive) deletes `restore_leftovers` paths after confirmation.
+`eru restore drill [--time]` and the monthly timer (job `restore-drill`, shared lock): a **full** physical restore into scratch (the path `cluster init --restore` relies on), `--type=default` or the given time. Free space is checked against the sum of the live database sizes; when short the drill records `skipped` with `insufficient_space`. Every connectable database in the scratch instance is opened (`SELECT 1`) and checked with `pg_amcheck --install-missing` (30 min each; amcheck is installed in the throwaway copy only); the restored list is compared with the configured databases (a configured database missing from a latest-drill fails it; other differences are reported). The result `{started_at, finished_at, backup_label, target, recovered_to, checks[], result: pass|fail|skipped}` goes to `state.json.backup.drills` (keep 12), `eru.prom` and `backup list`. A failed drill also fails the job. Doctor integration arrives in Phase 5. `archive_mode = off` in the scratch configuration is what guarantees a drill never pushes WAL.
 
-### 13.4 Restore drill
+### 13.8 Per-database policies: long-retention dumps
 
-1. `pgbackrest --stanza=s restore --pg1-path=/var/lib/eru/drill/<ts> --type=default --target-action=promote --archive-mode=off`. Check free space first; if it's insufficient, return `skipped` with reason `insufficient_space` (a `warn` in doctor).
-2. Start a throwaway instance: `pg_ctl -D <dir> -o "-p 5499 -c listen_addresses='' -c unix_socket_directories='/var/lib/eru/drill/sock' -c archive_mode=off -c shared_buffers=128MB -c max_connections=20 -c huge_pages=off" -w start`. Run it as `postgres` with `PGDATA` config. Since Debian keeps config outside the datadir, pass `-c config_file=/dev/null -c hba_file=<generated minimal hba: local all postgres peer>`.
-3. Checks:
-   - `SELECT count(*) FROM pg_database`;
-   - for each non-template database, `SELECT 1` and `pg_amcheck --database=<db> --heapallindexed=false --install-missing=false` (timeout 30 min; skip amcheck if the extension isn't installed);
-   - compare the database list with live.
-4. Stop and `rm -rf` the drill directory.
-5. Write the result `{started_at, finished_at, backup_label, recovered_to, checks[], result: pass|fail|skipped}` to `state.json.drills` (keep 12) and metrics.
+The restore window is the same for every database. A database that must be kept longer gets scheduled dumps on top:
 
-`archive_mode = off` is essential: a drill MUST never push WAL to the repo.
+```toml
+[[databases]]
+name = "app"
+[databases.backup]
+dump_schedule = "*-*-* 03:00:00"   # empty = no dumps (default; the table is left out of the file)
+dump_retention = 90                  # dumps kept
+```
 
-### 13.5 Single-database restore (`restore --db <name>`)
+- Strict decode still holds and older files decode unchanged. `config set databases.app.backup.dump_schedule …` works through the dotted-key path. A schedule needs `[backup]` and a `dump_retention ≥ 1`.
+- `timers-v1` renders the template `eru-db-dump@.service` (`eru node run db-dump --db %i`) and one `eru-db-dump@<db>.timer` per database with a schedule (jitter 10 min).
+- Job `db-dump` streams `pg_dump -Fc` through `age` (X25519, to the recipient in `backup.env`) into `<prefix>/dumps/<db>/<UTC yyyymmddThhmmssZ>.dump.age` with `minio-go` (64 MiB parts; nothing touches the node's disk), then deletes the oldest scheduled dumps beyond `dump_retention`. The identity lives only in `credentials.json` and the recovery kit, so a compromised node can't read old dumps.
+- `eru dump <db> --to bucket` takes one on demand (job `db-dump`); `--to local` (the default) streams `eru node dump <db>` (raw `pg_dump -Fc` on stdout) over SSH into `--out` (default `./<db>-<time>.dump`, 0600).
+- `eru dump list [<db>]` and `eru dump get <db> <id> --out <file>` run on the operator only, with the recovery kit: list the bucket, download and decrypt.
+- `eru restore <db> --dump <id>` restores from a dump through the same `__restoring` + swap path, for points older than the restore window. The operator sends the age identity as the job's secret `backup.age_identity`; the node keeps it in memory for that job only (the job spec holding it is deleted when the job starts).
+- `db drop` takes a final dump (`<ts>-final`, never pruned) first when backups are configured, and refuses to drop when it fails (`final_dump_failed`); `--no-final-dump` skips it with a `no_backup_before_drop` warning, which is also the warning without backups.
 
-1. Run a drill-style restore to scratch with `--type=time` and the target. Keep the instance running.
-2. `pg_dump -Fc -h <drill sock> -p 5499 <name>`, then `createdb <name>_restored_<yyyymmddhhmm> -O <name>_owner` on live, then `pg_restore --no-owner --role=<name>_owner -d <new>`.
-3. Tear down scratch. Report the new database name.
+### 13.9 Backup state and locks
 
-This isn't destructive, so no `--confirm` is needed. It's exclusive-locked.
+`state.json` gains `jobs` (§13.4) and a `backup` section owned by `internal/backup` and kept byte for byte by every other writer: `restores` (per database), `restore_leftovers`, `drills` (12), `last_backup` (per type), `last_verify` and `last_dump` (per database). Every read-modify-write of `state.json` goes through `engine.UpdateState`, which holds an flock on `state.json.lock`.
 
-### 13.6 VPS backups (restic)
+Locks: backup, verify, drill, dump, restore and fork jobs take the **shared** lock, so a long restore or drill never blocks backups or `apply`; `restore.promote|undo|abort|cleanup` and the create part of `db.fork` take the exclusive lock briefly. pgBackRest's own lock keeps two backups apart (the job records `skipped`).
+
+### 13.10 VPS backups (restic)
 
 - `restic.env`:
 
@@ -1024,7 +1080,7 @@ This isn't destructive, so no `--confirm` is needed. It's exclusive-locked.
 - Config snapshots: `restic backup --tag eru-config --stdin --stdin-filename cluster.toml` after each successful `apply`.
 - `eru upgrade` and `eru pg update` take a `vps-backup` first.
 
-### 13.7 DR: `eru cluster init --restore <bundle-file|-> --host root@<new-ip>`
+### 13.11 DR: `eru cluster init --restore <bundle-file|-> --host root@<new-ip>`
 
 1. Decrypt the transfer bundle (same input rules as `eru login`). Probe the bucket. Find the latest `eru-config` snapshot and load `cluster.toml` from it. Override `nodes[0].public_address` with the new host IP.
 2. First contact and binary push (§8.2 steps 5–6), with these differences:
@@ -1228,7 +1284,10 @@ eru_vps_backup_last_success_timestamp_seconds
 eru_tls_cert_expiry_timestamp_seconds
 eru_doctor_check{check,status} 1
 eru_restore_in_progress 0|1
+eru_job_last_skipped_timestamp_seconds{job}
 ```
+
+From Phase 3, `internal/backup/metrics.go` rewrites the file from `state.json` after every backup, verify, drill, dump and restore change (node_exporter scrapes it from Phase 5). The VPS, TLS and doctor lines arrive with their phases.
 
 ---
 
@@ -1334,14 +1393,15 @@ WantedBy=timers.target
 | restore-drill | `backup.database.drill_schedule` | 30m |
 | vps-backup | `backup.vps.schedule` (omit if `enabled = false`) | 10m |
 | vps-check | `backup.vps.check_schedule` | 30m |
+| db-dump (`eru-db-dump@<db>`) | `databases.<db>.backup.dump_schedule` (omit if empty) | 10m |
 | maint-daily | daily at window start | 10m |
 | maint-weekly | Saturday at window start | 10m |
 | certs-renew | hourly | 10m |
 | metrics-refresh | every 5 min | 0 |
 
-`certs-renew` is the only timer in Phase 2. `tls-v1` installs `eru-certs.{service,timer}` itself; `timers-v1` (Phase 5) takes ownership of the `.timer`. Until then every other `node run` job returns `not implemented yet`.
+`timers-v1` arrives in Phase 3 and renders `eru-certs.timer` (owned by `tls-v1` until then; `tls-v1` keeps only `eru-certs.service`) and the database backup, verify, drill and dump timers. Phase 5 adds only `maint-*` and `metrics-refresh`; Phase 7 adds `vps-*`. Until their phase the remaining `node run` jobs return `not implemented yet`. The dump timer is a template instance: `eru-db-dump@.service` runs `eru node run db-dump --db %i`.
 
-`node run <job>` takes the right lock with `--timeout 0`. If the lock is busy it logs, exits 0 and writes a `skipped` metric. Busy isn't a failure, but repeated skips show up in doctor.
+`node run <job>` takes the shared lock with timeout 0 (`certs-renew` waits up to 20 minutes). If the lock is busy it logs, exits 0, records the job as `skipped` in `state.json.jobs` and in `eru_job_last_skipped_timestamp_seconds`. Busy isn't a failure, but repeated skips show up in doctor. Every run is recorded as a job (§13.4).
 
 ---
 
@@ -1493,6 +1553,7 @@ Based on deploycrate's `install.sh`:
 const (
     PostgresMajor = 18
     NginxMinVersion = "1.26"              // distribution nginx with stream ssl_preread + ssl_alpn
+    PgBackRestMinVersion = "2.59.3"       // fixes an unchecked error in encrypted repos; PGDG, held
     ResticVersion = "0.18.1"              // floor; update
     NodeExporterVersion = "1.11.1"        // floor; update
     PostgresExporterVersion = "…"         // latest stable at implementation
@@ -1503,7 +1564,7 @@ const (
 var Checksums = map[string]map[string]string{ /* artifact -> arch -> sha256 */ }
 ```
 
-PGDG packages (postgresql-18, pgbouncer, pgbackrest, extensions) aren't version-pinned. They're held (`apt-mark hold`) and updated only via `eru pg update`.
+PGDG packages (postgresql-18, pgbouncer, pgbackrest, extensions) aren't version-pinned (pgBackRest has the floor above). They're held (`apt-mark hold`) and updated only via `eru pg update`.
 
 ---
 

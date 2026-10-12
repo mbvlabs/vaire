@@ -6,10 +6,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/state"
 	"github.com/mbvlabs/eru/internal/steps"
 )
@@ -32,6 +34,9 @@ type dbCreateParams struct {
 
 type dbDropParams struct {
 	Name string `json:"name"`
+	// NoFinalDump skips the final long-retention dump db drop takes when
+	// backups are configured.
+	NoFinalDump bool `json:"no_final_dump"`
 }
 
 type dbCredentialsParams struct {
@@ -126,17 +131,6 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	if err := checkDatabaseName(p.Name); err != nil {
 		return Result{}, err
 	}
-	store := state.FileStore{}
-	cfg, previous, err := store.Load()
-	if err != nil {
-		return Result{}, err
-	}
-	if _, ok := cfg.DatabaseByName(p.Name); ok {
-		return Result{}, existingDatabase(p.Name)
-	}
-	if exists, err := databaseExists(ctx, env, p.Name); err == nil && exists {
-		return Result{}, existingDatabase(p.Name)
-	}
 	timeout := p.StatementTimeout
 	if timeout == "" {
 		timeout = "60s"
@@ -145,23 +139,45 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	if len(extensions) == 0 {
 		extensions = []string{"pg_stat_statements"}
 	}
-	for _, role := range steps.DatabaseRoles {
-		key := steps.SecretDatabaseRole(p.Name, role)
-		if env.Req.Secrets[key] == "" {
-			return Result{}, output.NewError(output.CodeInputRequired, "the password for "+p.Name+"_"+role+" was not supplied", output.ExitInput,
-				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
-		}
-	}
-	cfg.Databases = append(cfg.Databases, config.Database{Name: p.Name, StatementTimeout: timeout, Extensions: extensions})
-	if err := cfg.Validate(); err != nil {
-		return Result{}, config.ValidationError(err)
-	}
-	raw, err := cfg.Encode()
+	db, err := createDatabase(ctx, env, config.Database{Name: p.Name, StatementTimeout: timeout, Extensions: extensions})
 	if err != nil {
 		return Result{}, err
 	}
+	return Result{Data: map[string]any{"database": db}}, nil
+}
+
+// createDatabase adds db to cluster.toml and runs postgres-roles-v1 for it,
+// with the role passwords from the request's secrets. db create and db fork
+// share it.
+func createDatabase(ctx context.Context, env *Env, db config.Database) (config.Database, error) {
+	store := state.FileStore{}
+	cfg, previous, err := store.Load()
+	if err != nil {
+		return db, err
+	}
+	if _, ok := cfg.DatabaseByName(db.Name); ok {
+		return db, existingDatabase(db.Name)
+	}
+	if exists, err := databaseExists(ctx, env, db.Name); err == nil && exists {
+		return db, existingDatabase(db.Name)
+	}
+	for _, role := range steps.DatabaseRoles {
+		key := steps.SecretDatabaseRole(db.Name, role)
+		if env.Req.Secrets[key] == "" {
+			return db, output.NewError(output.CodeInputRequired, "the password for "+db.Name+"_"+role+" was not supplied", output.ExitInput,
+				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
+		}
+	}
+	cfg.Databases = append(cfg.Databases, db)
+	if err := cfg.Validate(); err != nil {
+		return db, config.ValidationError(err)
+	}
+	raw, err := cfg.Encode()
+	if err != nil {
+		return db, err
+	}
 	if err := store.Save(raw); err != nil {
-		return Result{}, err
+		return db, err
 	}
 	env.Cluster = cfg
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
@@ -170,13 +186,13 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	}); err != nil {
 		// Keep cluster.toml in step with the server: an entry whose database
 		// was never created would make the retry refuse the name.
-		if exists, existsErr := databaseExists(ctx, env, p.Name); existsErr == nil && !exists {
+		if exists, existsErr := databaseExists(ctx, env, db.Name); existsErr == nil && !exists {
 			_ = store.Save(previous)
 		}
-		return Result{}, err
+		return db, err
 	}
-	db, _ := cfg.DatabaseByName(p.Name)
-	return Result{Data: map[string]any{"database": db}}, nil
+	created, _ := cfg.DatabaseByName(db.Name)
+	return created, nil
 }
 
 func existingDatabase(name string) error {
@@ -218,6 +234,28 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": p.Name})
 	}
 
+	if err := restoreInProgress(p.Name, "db drop"); err != nil {
+		return Result{}, err
+	}
+	var warnings []output.Warning
+	var final *backup.Dump
+	switch {
+	case !exists:
+	case !cfg.BackupConfigured():
+		warnings = append(warnings, output.Warning{Code: "no_backup_before_drop",
+			Message: "backups are not configured, so no final dump of " + p.Name + " was taken"})
+	case p.NoFinalDump:
+		warnings = append(warnings, output.Warning{Code: "no_backup_before_drop",
+			Message: "--no-final-dump: no final dump of " + p.Name + " was taken"})
+	default:
+		dump, err := dumpToBucket(ctx, cfg, engine.Shell{Secrets: secrets.Default, Log: env.Log}, "db.drop", env.Report, p.Name, true)
+		if err != nil {
+			return Result{}, output.WrapError(output.CodePrecondition, fmt.Errorf("the final dump of %s failed, so it was not dropped: %w", p.Name, err),
+				output.ExitPrecondition, "Fix the bucket, or drop without it with --no-final-dump.").WithDetails(map[string]any{"reason": "final_dump_failed"})
+		}
+		final = &dump
+	}
+
 	rt := runtimeFor(env, false)
 	if err := rt.PG.Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(p.Name)), nil); err != nil {
 		return Result{}, err
@@ -257,13 +295,11 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := store.Save(raw); err != nil {
 		return Result{}, err
 	}
-	return Result{
-		Data: map[string]any{"dropped": p.Name, "roles_dropped": roles},
-		Warnings: []output.Warning{{
-			Code:    "no_backup_before_drop",
-			Message: "no backup was taken before dropping " + p.Name + "; pgBackRest arrives in Phase 3",
-		}},
-	}, nil
+	data := map[string]any{"dropped": p.Name, "roles_dropped": roles}
+	if final != nil {
+		data["final_dump"] = final
+	}
+	return Result{Data: data, Warnings: warnings}, nil
 }
 
 // checkDatabaseName refuses names outside the pattern and the system databases.
@@ -275,7 +311,7 @@ func checkDatabaseName(name string) error {
 	case "postgres", "template0", "template1":
 		return output.NewError(output.CodeValidation, "database "+name+" is a system database eru does not manage", output.ExitConfig, "")
 	}
-	return nil
+	return restoreNameRefusal(name)
 }
 
 // confirmRequired refuses a destructive request that carries no confirm token.
@@ -335,6 +371,9 @@ func handleDBCredentials(ctx context.Context, env *Env) (Result, error) {
 	}
 	if env.Req.Confirm == "" {
 		return Result{}, confirmRequired("rotating a password disconnects clients that use the old one", p.Name)
+	}
+	if err := restoreInProgress(p.Name, "rotating a password"); err != nil {
+		return Result{}, err
 	}
 	role := p.Role
 	if role == "" {

@@ -38,6 +38,8 @@ type PendingSecrets struct {
 	SSHPrivateKey string         `json:"ssh_private_key"`
 	SudoPassword  string         `json:"sudo_password"`
 	Database      *DatabaseCreds `json:"database,omitempty"`
+	// Backup is the recovery kit when init configures backups.
+	Backup *BackupCreds `json:"backup,omitempty"`
 }
 
 // Progress records the completed init phases and what was learned on the way.

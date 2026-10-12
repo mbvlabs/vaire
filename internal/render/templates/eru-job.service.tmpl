@@ -1,0 +1,11 @@
+# managed by eru - do not edit; use cluster.toml
+[Unit]
+Description=eru {{ .Job }}
+After=postgresql.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eru node run {{ .Job }}{{ if .Arg }} {{ .Arg }}{{ end }}
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

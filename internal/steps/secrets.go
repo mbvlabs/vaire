@@ -11,6 +11,20 @@ const (
 	SecretMonitor = "svc.eru_monitor" //nolint:gosec // G101: a key name, not a value.
 )
 
+// Backup values on the RPC wire (Phase 3). The S3 secret key and the
+// pgBackRest cipher pass are secrets. The key ID and the age recipient are not
+// secret; they ride in the same map because it is the only per-request
+// channel a step gets, and like the secrets they never enter an input hash.
+const (
+	SecretBackupKeySecret    = "backup.s3_key_secret" //nolint:gosec // G101: a key name, not a value.
+	SecretBackupCipherPass   = "backup.cipher_pass"   //nolint:gosec // G101: a key name, not a value.
+	SecretBackupKeyID        = "backup.s3_key_id"     //nolint:gosec // G101: a key name, not a value.
+	SecretBackupAgeRecipient = "backup.age_recipient" //nolint:gosec // G101: a key name, not a value.
+	// SecretBackupAgeIdentity opens long-retention dumps. Only a restore from
+	// a dump sends it, and the node keeps it in memory for that job.
+	SecretBackupAgeIdentity = "backup.age_identity" //nolint:gosec // G101: a key name, not a value.
+)
+
 // Database roles with a login and a password.
 const (
 	RoleMigrate = "migrate"

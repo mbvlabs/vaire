@@ -197,6 +197,8 @@ func phaseTitle(step string) (title, header string) {
 		return "Set up PostgreSQL and PgBouncer", "Database"
 	case "init.tls":
 		return "Certificate", "TLS"
+	case "init.backups":
+		return "Turn on backups", "Backups"
 	case "init.secrets-document":
 		return "Secrets handoff", "Secrets"
 	}

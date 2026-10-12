@@ -127,8 +127,7 @@ func handleSSHLockdown(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	armedAt := time.Now().UTC().Format(time.RFC3339)
-	st.LockdownPending = true
-	if err := st.Save(engine.StatePath); err != nil {
+	if err := engine.UpdateState(func(s *engine.State) error { s.LockdownPending = true; return nil }); err != nil {
 		return Result{}, err
 	}
 
@@ -226,12 +225,15 @@ func handleSSHConfirm(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	_ = os.RemoveAll(SSHSnapshotDir)
-	st.LockdownPending = false
-	st.LockedDownAt = time.Now().UTC().Format(time.RFC3339)
-	if err := st.Save(engine.StatePath); err != nil {
+	lockedAt := time.Now().UTC().Format(time.RFC3339)
+	if err := engine.UpdateState(func(s *engine.State) error {
+		s.LockdownPending = false
+		s.LockedDownAt = lockedAt
+		return nil
+	}); err != nil {
 		return Result{}, err
 	}
-	return Result{Data: ConfirmResult{Confirmed: true, LockedDownAt: st.LockedDownAt}}, nil
+	return Result{Data: ConfirmResult{Confirmed: true, LockedDownAt: lockedAt}}, nil
 }
 
 // SSHStatus is the ssh.status result, used for lockdown diagnostics.
@@ -316,8 +318,7 @@ func RevertSSH(ctx context.Context, lockdownOnly bool, report engine.Reporter) (
 	if revertErr != nil {
 		res.Error = secrets.Redact(revertErr.Error())
 	}
-	st.LockdownPending = false
-	if err := st.Save(engine.StatePath); err != nil && revertErr == nil {
+	if err := engine.UpdateState(func(s *engine.State) error { s.LockdownPending = false; return nil }); err != nil && revertErr == nil {
 		revertErr = err
 	}
 	if err := writeReverted(res); err != nil && revertErr == nil {

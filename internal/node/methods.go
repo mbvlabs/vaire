@@ -156,6 +156,20 @@ func methods() map[string]method {
 			cluster: true,
 			handler: handleTLSStatus,
 		},
+		{name: "backup.now", cluster: true, runLog: always, handler: handleBackupNow},
+		{name: "backup.list", lock: fixedLock(engine.LockShared), cluster: true, handler: handleBackupList},
+		{name: "backup.verify", lock: fixedLock(engine.LockShared), cluster: true, runLog: always, handler: handleBackupVerify},
+		{name: "job.list", handler: handleJobList},
+		{name: "job.follow", handler: handleJobFollow},
+		{name: "restore.start", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreStart},
+		{name: "restore.status", cluster: true, handler: handleRestoreStatus},
+		{name: "restore.promote", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: restoreToken, runLog: always, handler: handleRestorePromote},
+		{name: "restore.undo", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreUndo},
+		{name: "restore.abort", lock: fixedLock(engine.LockExclusive), cluster: true, runLog: always, handler: handleRestoreAbort},
+		{name: "restore.cleanup", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: cleanupToken, runLog: always, handler: handleRestoreCleanup},
+		{name: "restore.drill", cluster: true, runLog: always, handler: handleRestoreDrill},
+		{name: "db.fork", cluster: true, runLog: always, handler: handleDBFork},
+		{name: "dump.create", cluster: true, runLog: always, handler: handleDumpCreate},
 		{
 			name:    "sql",
 			lock:    fixedLock(engine.LockShared),
@@ -206,6 +220,9 @@ func rotateRequested(params json.RawMessage) bool {
 
 type stepParams struct {
 	Steps []string `json:"steps"`
+	// RotateBackupSecrets lets pgbackrest-v1 replace the bucket keys on
+	// disk with the request's; only eru backup setup sets it.
+	RotateBackupSecrets bool `json:"rotate_backup_secrets,omitempty"`
 }
 
 // decodeParams decodes params strictly. Methods that cross versions decode
@@ -258,7 +275,9 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		}
 		return Result{Data: data}, nil
 	}
-	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, false), engine.Options{
+	rt := runtimeFor(env, false)
+	rt.RotateSecrets = p.RotateBackupSecrets
+	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
 		Only: p.Steps,
 		// A non-empty confirm was already checked against restartToken.
 		Confirmed: env.Req.Confirm != "",

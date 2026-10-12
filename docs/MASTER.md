@@ -64,6 +64,11 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | `eru top` | Reads Postgres directly over the WireGuard tunnel rather than through the node |
 | Database ports on WireGuard | WireGuard peers can always reach 6432 and 5432. `expose_pgbouncer` / `expose_postgres` only control the public allowlist rules |
 | Generated secrets | The secrets document holds cluster access only: every cluster secret eru generates, including `eru_admin` and the `pgbouncer_auth` and `eru_monitor` service passwords. Application database passwords are shown once by `eru db create` and never stored. The operator generates all database passwords; the node keeps only SCRAM verifiers, plus the two service passwords that PgBouncer and the exporters need at runtime |
+| Database backups model | Per database for the user, cluster-wide underneath: pgBackRest and WAL archiving cover the whole cluster (one WAL stream), but every restore, fork and listing names a database, and a restore rewinds one database while the others keep serving (load into `<db>__restoring`, then a few-second swap). No in-place whole-cluster restore; rebuilding a server is `cluster init --restore` (Phase 7) |
+| Turning backups on | Optional at `cluster init` ("Skip for now"), and `eru backup setup` adds them to any cluster later. The operator probes the bucket, generates the pgBackRest cipher and the dump age identity, and saves them before anything reaches the node |
+| Long-running work | Backups, restores, drills, forks and dumps run as detachable jobs (transient systemd units); Ctrl-C detaches and `eru job follow` re-attaches |
+| Longer retention | Per-database scheduled `pg_dump` archives, age-encrypted to a recipient whose identity only the operator holds, for points older than the restore window |
+| pgBackRest floor | 2.59.3 from PGDG, held; WAL-G stays a fallback behind `backup.Driver` (not built) |
 | DNS and certificates | In `acme` mode, `cluster init` shows the DNS records to create, waits for the operator to confirm them, and checks them against public resolvers. TLS never blocks on ACME: a placeholder certificate lets PostgreSQL and PgBouncer start, and a certificate that's still pending after 120 s is a warning, not a failure |
 
 **Still to decide** (when the phase that needs it starts):
@@ -291,13 +296,13 @@ schema/eru-v1.json           agent JSON contract
 | 5 | ufw (WG UDP, 443, 6432/5432 to the allowlist and WireGuard), fail2ban (sshd plus a postgres auth-failure jail) | `ssh.sh`, `host.sh` |
 | 6 | journald limits, swap (small), unattended-upgrades for security updates only, with Postgres packages excluded | `host.sh` |
 | 7 | Kernel/sysctl for databases: `vm.swappiness=1`, `vm.overcommit_memory=2` + ratio, dirty bytes, THP off, huge pages sized to `shared_buffers`, limits | new |
-| 8 | PGDG repo + signing key, `postgresql-18`, `postgresql-contrib`, `pgbouncer`, apt hold on major (`pgbackrest` arrives with step 14) | new |
+| 8 | PGDG repo + signing key, `postgresql-18`, `postgresql-contrib`, `pgbouncer`, `pgbackrest` (floor 2.59.3), apt hold | new |
 | 9 | Cluster create (`pg_createcluster 18 main`, data dir, locale `C.UTF-8`, ICU, checksums) | new |
 | 10 | nginx install, placeholder certificate, and the hourly `eru-certs` timer that issues and renews the ACME certificate (eru's own client) and reloads Postgres, PgBouncer and nginx | new |
 | 11 | Render managed conf.d, pg_hba and pg_ident; restart or reload depending on the diff | new |
 | 12 | Roles and databases (§6.3) | new |
 | 13 | PgBouncer config, `auth_query` function, TLS | new |
-| 14 | pgBackRest: stanza create, `archive_mode`, check, first full backup | `backup.sh` (pattern) |
+| 14 | pgBackRest: stanza create, check, first full backup (`archive_mode` comes from step 11) | `backup.sh` (pattern) |
 | 15 | restic: VPS backup repo, include/exclude sets, first snapshot | `backup.sh` |
 | 16 | Exporters and the authenticated `/metrics` behind nginx | `node-exporter.sh` |
 | 17 | systemd timers: DB backups, VPS backups, verify, restore drill, maintenance, reports | `host.sh` (timer pattern) |
@@ -334,32 +339,34 @@ schema/eru-v1.json           agent JSON contract
 
 ### 6.5 Database backups and restores
 
-**Model (pgBackRest):**
+**Model:** pgBackRest with continuous WAL archiving (`archive-async`) to `repo1` = S3/R2, `repo1-cipher-type=aes-256-cbc`, block incremental, optional `repo2` on local disk. Default schedule: weekly full, daily diff, optional incr; `retention_full = 4` gives a **restore window** of about four weeks. Provider presets set the right options (path-style URIs and region `auto` for R2).
 
-- Continuous WAL archiving (`archive-async`) to `repo1` = S3/R2, with `repo1-cipher-type=aes-256-cbc`. Optional `repo2` = local disk for fast restores.
-- Default schedule: weekly full, daily diff, optional hourly incr. Block incremental is enabled. Retention defaults to 4 full backups, giving about 4 weeks of PITR.
-- Provider presets set the right options, for example path-style URIs and region `auto` for R2.
-- **Per-database backup policies:** a database can have its own schedule and retention in `cluster.toml`, overriding the cluster default.
+**Per database for the user.** WAL is one stream for the whole cluster, so backups and archiving are cluster-wide, but nobody restores "the cluster": every restore, fork and listing names a database. `eru restore <db>` restores that database alone to a scratch instance, loads it into `<db>__restoring` beside the live one, which keeps serving, and stops there for inspection; `promote` swaps the names in a few seconds (only that database's clients see a few seconds of connection errors, nothing is paused, the credentials don't change) and keeps the old copy for `restore undo` until `restore cleanup`. `eru db fork` uses the same pipeline to make a copy under a new name, now or at a point in time. A database that must be kept longer than the window gets scheduled long-retention dumps, age-encrypted to a key only the operator holds.
 
-**Commands** (operator mode; each runs remotely):
+**Commands** (operator mode; each runs remotely; long ones run as detachable jobs):
 
 ```
+eru backup setup                          # bucket, cipher, archiving (one restart), first full
 eru backup now [--type full|diff|incr]
-eru backup list                           # sets, sizes, WAL range, PITR window
-eru backup verify                         # pgbackrest verify + checksum report
-eru restore --latest | --time "2026-10-09 12:00:00+00" | --set <label> [--db <name>] --confirm <cluster>/restore
-eru restore drill                         # restore to scratch dir on alt port, sanity-check, tear down
-eru cluster init --restore bundle.txt --host root@<new-vps>   # full DR on a fresh VPS
-eru dump <db> [--to bucket|local]         # logical export, streamed to the laptop if local
+eru backup list [--db <name>]             # restore window, sets, verify, drill, dumps
+eru backup verify
+eru restore <db> --time <ts>|--latest|--set <label>|--dump <id> [--promote]
+eru restore status|promote|undo|abort|cleanup [<db>]
+eru restore drill                         # full restore to scratch, amcheck, tear down
+eru db fork <db> [--name <new>] [--at <time>]
+eru dump <db> [--to bucket|local] · eru dump list|get
+eru job list · eru job follow <id>
+eru cluster init --restore bundle.txt --host root@<new-vps>   # full DR on a fresh VPS (Phase 7)
 ```
 
 **Safety rules:**
 
-- An in-place restore never deletes the current data directory. It's moved aside with a timestamp and kept until the user runs `eru restore cleanup`.
-- Every restore reports the exact recovery target and ends paused at it (`recovery_target_action = pause`) so the user can inspect before promoting. `--promote` skips the pause.
-- Single-database restore: restore the cluster to a scratch instance on an alternate port, `pg_dump` the database, and load it into the live cluster under a new name. No overwrite without a flag.
+- A restore never touches the live database until promote, and promote keeps the replaced copy until `restore cleanup`.
+- Every restore reports its target and stops at "ready" so the user can inspect before promoting; `--promote` skips the stop.
+- While a restore of a database is open, `db drop`, `db fork` and password rotation of that database refuse.
+- `db drop` takes a final dump to the bucket first when backups are configured.
 
-**Verification:** weekly `verify`, a monthly automated **restore drill** whose result goes into metrics and `doctor`, and metrics for last-backup age and WAL archive lag.
+**Verification:** weekly `verify`, a monthly automated **restore drill** whose result goes into `state.json`, `eru.prom` and `backup list` (doctor from Phase 5), and metrics for last-backup age and archive lag.
 
 ### 6.6 VPS backups
 
@@ -437,9 +444,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
 - **Phases 1 and 2 are done (2026-10-12, Hetzner, Ubuntu 26.04 and Debian 13).** `cluster init` goes from a fresh server to public 22 closed, SSH over WireGuard and a working PostgreSQL 18 cluster. The ACME certificate is issued, the secrets handoff is accepted by `eru login`, `eru sql` connects with verify-full, `eru apply --auto-upgrade-nodes` upgrades the node, and an app connects to 6432 through PgBouncer with `sslmode=verify-full`. The checks not yet run on a VPS (lockdown self-revert, `--local`, a no-op `apply`, `db drop` refusal, `eru console`, direct TLS on 443) are in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) and don't block Phase 3.
-- **Phase 3 (Database backups & restore) is next.**
+- **Phase 3 (Database backups & restore) is built and waiting for its manual VPS test** ([`MANUAL-TESTING.md`](./MANUAL-TESTING.md)). It stays 🟡 until that passes.
 - One open item from Phase 0, also in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md): install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
-- About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
+- About 30 of the ~65 commands (before Phase 3) do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. Phase 3 adds `backup setup|now|list|verify`, `restore <db>|status|promote|undo|abort|cleanup|drill`, `db fork`, `dump`, `dump list|get`, `job list|follow`, the backup `node run` jobs and `node dump` (built, manual test pending). The rest return `not implemented yet` until their phase lands.
 
 ### 7.2 Overview
 
@@ -448,7 +455,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | 0 | Foundations | Install and self-upgrade the `eru` CLI; a node can run steps | ✅ |
 | 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | ✅ |
 | 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | ✅ |
-| 3 | Database backups & restore | Back up to S3/R2, PITR restore, drills, per-database backup policies, `db fork` (a copy of one database at a point in time) | ⬜ |
+| 3 | Database backups & restore | Back up to S3/R2, PITR restore, drills, per-database backup policies, `db fork` (a copy of one database at a point in time) | 🟡 |
 | 4 | Extensions | Extension catalog and `eru ext` | ⬜ |
 | 5 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ⬜ |
 | 6 | Followers | Per-database followers kept current by logical replication; unfollow one to rehearse a risky migration on current data | ⬜ |
@@ -508,17 +515,20 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 
 **Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused. Passed 2026-10-12 (Hetzner, Ubuntu 26.04 and Debian 13) apart from the checks listed in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 
-### 7.6 Phase 3 — Database backups & restore ⬜
+### 7.6 Phase 3 — Database backups & restore 🟡
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| `internal/backup` (pgBackRest driver) | Stanza, WAL archiving, full/diff/incr, verify. Check pgBackRest's maintenance status before starting (§9) | ⬜ |
-| Per-database backup policies | Each database can have its own schedule and retention in `cluster.toml` | ⬜ |
-| Step 14 + backup timers | Schedules for backups, verify and restore drills | ⬜ |
-| Commands | `backup now/list/verify`, `restore` (time/latest/set; paused, then promote/abort/cleanup), `restore drill`, `restore --db`, `dump` | ⬜ |
-| `db fork <db> [--at <time>]` | A copy of one database under a new name at a point in time, built on `restore --db`. The cheap way to rehearse a migration on yesterday's data | ⬜ |
+| `internal/backup` (pgBackRest driver) | `Driver` seam and pgBackRest implementation: stanza, check, full/diff/incr with progress, info, verify, scratch restores, archive status. pgBackRest health checked (§9): floor 2.59.3 | ✅ |
+| Step 8 + step 11 + step 14 | `pgbackrest` installed and held with the floor check; `40-eru-backup.conf` (WAL archiving); `pgbackrest-v1` (config from operator secrets, stanza, check, first full) | ✅ |
+| `eru backup setup` + init wiring | Operator-side bucket probe (`minio-go`), operator-generated cipher and age identity saved before sending, `config.set` + apply with one confirmed restart, recovery kit in the handoff; init's Backups page with "Skip for now" | ✅ |
+| `timers-v1` + jobs | Step 17 pulled forward: backup, verify, drill, dump and certificate timers; detachable jobs (`systemd-run`), `eru job list/follow`, `eru node run` backup jobs, `eru.prom` backup lines | ✅ |
+| Commands | `backup now/list/verify`, `restore <db>` (time/latest/set/dump; ready, then promote/undo/abort/cleanup; status with row estimates), guards and reserved names | ✅ |
+| `db fork <db> [--at <time>]` | A copy of one database under a new name, now or at a point in time, with its own roles; shares the restore pipeline | ✅ |
+| Restore drill | Full restore to scratch, every database opened and `pg_amcheck`ed, compared with live; monthly timer; result in `backup list` | ✅ |
+| Per-database policies | `[databases.backup]` long-retention dumps: age-encrypted `pg_dump` to the bucket on a schedule, `dump list/get`, `restore --dump`, final dump on `db drop` | ✅ |
 
-**Manual test:** take a backup, write rows, restore to a time before them, then promote. Run a drill. Restore a single database under a new name, and fork one with `db fork`.
+**Manual test:** take a backup, write rows to `app`, restore `app` to a time before them while a second database keeps serving, then promote. Run a drill. Fork a database at a point in time with `db fork`. The full checklist is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Not run yet.
 
 ### 7.7 Phase 4 — Extensions ⬜
 
@@ -602,7 +612,7 @@ There's no automated test suite. The incus VM suite was dropped on 2026-10-10 be
 
 - **Lock-out during bootstrap.** Moving SSH onto WireGuard can lock the operator out. Mitigated by commit-confirm with automatic revert, `eru node unlock-ssh` via the provider console, and tests that force the failure.
 - **The secrets document is a single high-value file.** It's age-encrypted, operators are per-person and revocable, and the recovery kit can be exported separately for cold storage.
-- **pgBackRest project health.** Crunchy Data, its main sponsor, was acquired by Snowflake in 2025. Check maintenance status before committing. The `backup.Driver` interface keeps WAL-G as a drop-in fallback.
+- **pgBackRest project health.** Crunchy Data, its main sponsor, was acquired by Snowflake in 2025. On 2026-04-27 the maintainer archived the project after losing sponsorship and announced 2.58.0 as the last release; on 2026-05-18 a sponsor group (AWS, TigerData, Supabase, Percona, pgEdge) funded it again, and 2.59.x has shipped since (2.59.0 adds PostgreSQL 19). 2.59.3 fixes an unchecked error when generating random data for repository encryption; eru always encrypts, so **2.59.3 is the floor** (`versions.PgBackRestMinVersion`, checked by step 8). Re-check before each phase that depends on it. The `backup.Driver` interface keeps WAL-G as a fallback (not built).
 - **Agents with write access.** Destructive operations need named confirmation tokens, and read-only operator scopes arrive in Phase 9. The agent guide explains both.
 - **Single-node blast radius.** One VPS is a single point of failure until HA (Phase 11). PITR and VPS backups bound data loss to seconds, but downtime is "time to rebuild". Document an RPO/RTO for that.
 - **OOM on small VPSes.** Sensible overcommit settings plus conservative tuning for < 2 GB RAM.

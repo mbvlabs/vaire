@@ -56,11 +56,9 @@ const (
 )
 
 // laterPhaseFlags are init flags whose settings arrive with a later phase.
-var laterPhaseFlags = []string{
-	"backup-provider", "backup-endpoint", "backup-region",
-	"backup-bucket", "backup-prefix", "backup-key-id", "backup-secret-stdin", "backup-secret-file",
-	"vps-backup-schedule", "db-full-schedule", "db-diff-schedule",
-}
+// The database backup flags work from Phase 3 on; VPS backups arrive in
+// Phase 7.
+var laterPhaseFlags = []string{"vps-backup-schedule"}
 
 // tlsWaitTimeout bounds the wait for a real certificate (D10).
 const tlsWaitTimeout = 120 * time.Second
@@ -88,6 +86,11 @@ type initRun struct {
 	// step doesn't show or ask again.
 	dnsShown bool
 	dnsIPv6  string
+	// backup holds the bucket answers of this run; nil when skipped or on
+	// --resume, where they come from the pending state.
+	backup *backupSettings
+	// backupsDone reports whether this run configured backups.
+	backupsDone bool
 }
 
 type initPlanData struct {
@@ -178,7 +181,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 		if flagChanged(cmd, name) {
 			r.warnings = append(r.warnings, output.Warning{
 				Code:    "flag_not_used_yet",
-				Message: "--" + name + " is not used yet: backups and VPS snapshots arrive in later phases",
+				Message: "--" + name + " is not used yet: VPS backups arrive in Phase 7",
 			})
 		}
 	}
@@ -221,8 +224,10 @@ func (r *initRun) confirm() error {
 func (r *initRun) collect() error {
 	cmd := r.cmd
 	cfg := config.DefaultCluster()
+	var answersRaw []byte
 	if path := stringFlag(cmd, "answers"); path != "" {
 		raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this answers file.
+		answersRaw = raw
 		if err != nil {
 			return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
@@ -362,6 +367,9 @@ func (r *initRun) collect() error {
 		if err := runInterview(cmd, &cfg, supplied); err != nil {
 			return err
 		}
+	}
+	if err := r.collectBackups(&cfg, answersRaw); err != nil {
+		return err
 	}
 	r.cfg = cfg
 	r.prog = &contexts.Progress{Local: r.local, Phases: map[string]string{}}
@@ -518,6 +526,11 @@ func registerPending(sec contexts.PendingSecrets) {
 			secrets.Add(value)
 		}
 	}
+	if sec.Backup != nil {
+		for _, value := range sec.Backup.SecretValues() {
+			secrets.Add(value)
+		}
+	}
 }
 
 func (r *initRun) primary() config.NodeSpec {
@@ -528,7 +541,7 @@ func (r *initRun) primary() config.NodeSpec {
 func (r *initRun) planData() initPlanData {
 	n := r.primary()
 	done := make([]string, 0, len(r.prog.Phases))
-	for _, phase := range []string{phaseSecrets, phaseFirstHost, phaseBinary, phaseHost, phaseTransport, phaseLockdown, phaseDNS, phaseDatabase, phaseTLS, phaseDocument, phaseSecretsDone} {
+	for _, phase := range []string{phaseSecrets, phaseFirstHost, phaseBinary, phaseHost, phaseTransport, phaseLockdown, phaseDNS, phaseDatabase, phaseTLS, phaseBackups, phaseDocument, phaseSecretsDone} {
 		if r.prog.Done(phase) {
 			done = append(done, phase)
 		}
@@ -645,7 +658,7 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
-	raw, err := r.cfg.Encode()
+	raw, err := r.nodeConfig().Encode()
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
@@ -703,6 +716,9 @@ func runInitRemote(cmd *cobra.Command) error {
 		return err
 	}
 	if err := r.ensureDatabaseSecrets(); err != nil {
+		return err
+	}
+	if err := r.ensureBackupKit(commandContext(cmd)); err != nil {
 		return err
 	}
 	known, err := transport.LoadKnownHosts(contexts.PendingKnownHosts(r.name))
@@ -793,6 +809,10 @@ func runInitRemote(cmd *cobra.Command) error {
 			return err
 		}
 	}
+	// Backups, between the database and the handoff.
+	if err := r.configureInitBackups(ctx, wgNode); err != nil {
+		return err
+	}
 
 	// 12. Secrets handoff, then the node records the confirmation.
 	doc, res, err := r.writeDocument()
@@ -847,6 +867,7 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 		{"TLS", r.tlsSummary()},
 		{"Secrets", "in your password manager (transfer bundle: eru login on another machine)"},
 		{"Databases", "none yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents)"},
+		{"Backups", r.backupSummary()},
 	}
 	var footer []string
 	for _, w := range r.warnings {
@@ -871,6 +892,9 @@ func (r *initRun) fillResult(res *initResult) {
 	}
 	res.RestartPerformed = r.dbRestart
 	res.Next = []string{"eru db create <name>", "eru guide agents"}
+	if !r.cfg.BackupConfigured() {
+		res.Next = append(res.Next, "eru backup setup")
+	}
 }
 
 func (r *initRun) tlsSummary() string {
@@ -1218,6 +1242,7 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 			SudoPassword:  r.sec.SudoPassword,
 		},
 		Database:   r.sec.Database,
+		Backup:     r.sec.Backup,
 		BreakGlass: secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
 	}, nil
 }
@@ -1309,6 +1334,9 @@ func runInitLocal(cmd *cobra.Command) error {
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
+	if err := r.ensureBackupKit(commandContext(cmd)); err != nil {
+		return err
+	}
 	caller := remote.Local{Operator: firstOperatorName}
 	if !r.prog.Done(phaseHost) {
 		r.prog.PublicIPv6 = hostinfo.PublicIPv6()
@@ -1370,6 +1398,9 @@ func runInitLocal(cmd *cobra.Command) error {
 		if err := r.mark(phaseTLS); err != nil {
 			return err
 		}
+	}
+	if err := r.configureInitBackups(ctx, caller); err != nil {
+		return err
 	}
 	_, res, err := r.writeDocument()
 	if err != nil {

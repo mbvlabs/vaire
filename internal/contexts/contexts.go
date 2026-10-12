@@ -74,6 +74,7 @@ type Operator struct {
 type Credentials struct {
 	SudoPassword string         `json:"sudo_password,omitempty"`
 	Database     *DatabaseCreds `json:"database,omitempty"`
+	Backup       *BackupCreds   `json:"backup,omitempty"`
 }
 
 // Primary returns the primary node.

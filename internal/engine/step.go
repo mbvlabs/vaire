@@ -36,6 +36,30 @@ type FileRenderer interface {
 	RenderedFiles(cfg config.Cluster, rt Runtime) []RenderedFile
 }
 
+// Forcer is implemented by steps that must run even when the journal and the
+// input hash say they are current, for example to write rotated secrets that
+// are never part of the inputs. Force returns the reason, or "" when the
+// step can skip as usual.
+type Forcer interface {
+	Force(cfg config.Cluster, rt Runtime) string
+}
+
+// Skipper is implemented by steps that only apply to some configurations,
+// such as pgbackrest-v1 without [backup]. A non-empty SkipReason skips the
+// step without a journal entry, so it runs as soon as the configuration
+// needs it.
+type Skipper interface {
+	SkipReason(cfg config.Cluster) string
+}
+
+// RestartBarrier is implemented by steps that need a pending PostgreSQL
+// restart done before they run, such as pgbackrest-v1, which needs
+// archive_mode on. The runner restarts first when the restart is confirmed;
+// otherwise it leaves the step for a later apply.
+type RestartBarrier interface {
+	NeedsRestartFirst() bool
+}
+
 // CheckResult says whether the host already matches the step.
 type CheckResult struct {
 	Complete bool
@@ -75,6 +99,11 @@ type Runtime struct {
 	Host hostinfo.Info
 	// PG talks to the local PostgreSQL as the postgres OS user.
 	PG pg.Local
+	// RotateSecrets asks steps to replace runtime secrets already on disk with
+	// the ones in the request. Without it a step writes a runtime secret only
+	// when the file is missing, so an operator with stale credentials can't
+	// overwrite newer ones. eru backup setup sets it.
+	RotateSecrets bool
 }
 
 // Restarter performs the aggregated restart at the end of an apply and reports

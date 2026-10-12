@@ -108,24 +108,9 @@ func DatabaseURLs(domain, tlsMode, db string, roles map[string]contexts.Role) ma
 	return out
 }
 
-// Backup is the recovery kit (Phases 3 and 7).
-type Backup struct {
-	Provider        string `json:"provider"`
-	Endpoint        string `json:"endpoint"`
-	Region          string `json:"region"`
-	Bucket          string `json:"bucket"`
-	Prefix          string `json:"prefix"`
-	URIStyle        string `json:"uri_style"`
-	AccessKeyID     string `json:"access_key_id"`
-	SecretAccessKey string `json:"secret_access_key"`
-	PgBackRest      struct {
-		Stanza     string `json:"stanza"`
-		CipherPass string `json:"cipher_pass"`
-	} `json:"pgbackrest"`
-	Restic struct {
-		Password string `json:"password"`
-	} `json:"restic"`
-}
+// Backup is the recovery kit (Phases 3 and 7). It is the same shape the
+// operator context stores.
+type Backup = contexts.BackupCreds
 
 // Metrics is the metrics endpoint credential (Phase 5).
 type Metrics struct {
@@ -142,7 +127,7 @@ func (d Document) SecretValues() []string {
 		out = append(out, d.Database.SecretValues()...)
 	}
 	if d.Backup != nil {
-		out = append(out, d.Backup.SecretAccessKey, d.Backup.PgBackRest.CipherPass, d.Backup.Restic.Password)
+		out = append(out, d.Backup.SecretValues()...)
 	}
 	if d.Metrics != nil {
 		out = append(out, d.Metrics.Password)

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Step 10 (tls-v2). PHASE=install: refuse a Caddy box, install nginx with the
+# Step 10 (tls-v1). PHASE=install: refuse a Caddy box, install nginx with the
 # stream module, give postgres and pgbouncer the ssl-cert group, and place a
 # placeholder certificate so PostgreSQL, PgBouncer and nginx can start.
-# PHASE=start (after eru wrote nginx.conf and the eru-certs units): validate
-# and (re)start nginx, enable the hourly timer and start issuance in the
-# background. TLS never blocks on ACME.
+# PHASE=start (after eru wrote nginx.conf and eru-certs.service): validate and
+# (re)start nginx and start issuance in the background. TLS never blocks on
+# ACME.
 set -euo pipefail
 
 : "${NGINX_MIN_VERSION:?NGINX_MIN_VERSION is required}"
@@ -53,6 +53,7 @@ nginx -t
 systemctl daemon-reload
 systemctl enable nginx
 systemctl reload-or-restart nginx
-systemctl enable --now eru-certs.timer
+# timers-v1 installs and enables the hourly eru-certs.timer; issuance starts
+# here so the certificate doesn't wait for it.
 systemctl start --no-block eru-certs.service
 printf 'nginx started; certificate issuance runs in the background\n'

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 )
@@ -11,8 +12,16 @@ import (
 // StatePath is the node's run state beside the journal (§6.2).
 const StatePath = "/var/lib/eru/state.json"
 
-// State is /var/lib/eru/state.json. Later phases add last_apply, restore and
-// drills.
+// stateLockPath serializes read-modify-write cycles of state.json between
+// processes, because backup jobs and RPCs update it concurrently.
+const stateLockPath = StatePath + ".lock"
+
+// maxJobs is how many job records state.json keeps.
+const maxJobs = 50
+
+// State is /var/lib/eru/state.json. Phase 3 adds the job records and the
+// backup section (restores, drills, last results), which internal/backup owns
+// and every other writer keeps byte for byte.
 type State struct {
 	SecretsConfirmedAt string `json:"secrets_confirmed_at,omitempty"`
 	// LockdownPending is true between ssh.lockdown and ssh.confirm or
@@ -21,6 +30,92 @@ type State struct {
 	// LockedDownAt is when public SSH was closed for good. Empty means public
 	// 22/tcp is still part of the firewall rule set.
 	LockedDownAt string `json:"locked_down_at,omitempty"`
+	// Jobs are the detachable jobs and timer runs, newest last.
+	Jobs []JobRecord `json:"jobs,omitempty"`
+	// Backup is internal/backup's state: restores per database, restore
+	// leftovers, drills and the last backup and verify results.
+	Backup json.RawMessage `json:"backup,omitempty"`
+}
+
+// JobRecord is one run of eru node run: a detachable job started by an RPC
+// (unit eru-job-<id>) or a timer run.
+type JobRecord struct {
+	ID           string            `json:"id"`
+	Job          string            `json:"job"`
+	Unit         string            `json:"unit,omitempty"`
+	InvocationID string            `json:"invocation_id,omitempty"`
+	State        string            `json:"state"`
+	Detail       string            `json:"detail,omitempty"`
+	CreatedAt    string            `json:"created_at"`
+	StartedAt    string            `json:"started_at,omitempty"`
+	FinishedAt   string            `json:"finished_at,omitempty"`
+	Result       json.RawMessage   `json:"result,omitempty"`
+	Error        *output.ErrorBody `json:"error,omitempty"`
+}
+
+// Job states. Queued is written by the RPC before the unit starts.
+const (
+	JobQueued    = "queued"
+	JobRunning   = "running"
+	JobSucceeded = "succeeded"
+	JobFailed    = "failed"
+	JobSkipped   = "skipped"
+)
+
+// Final reports whether the job has ended.
+func (r JobRecord) Final() bool {
+	return r.State == JobSucceeded || r.State == JobFailed || r.State == JobSkipped
+}
+
+// Job returns the record with id.
+func (s State) Job(id string) (JobRecord, bool) {
+	for _, r := range s.Jobs {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return JobRecord{}, false
+}
+
+// PutJob adds or replaces a job record, keeping the newest maxJobs.
+func (s *State) PutJob(rec JobRecord) {
+	for i, r := range s.Jobs {
+		if r.ID == rec.ID {
+			s.Jobs[i] = rec
+			return
+		}
+	}
+	s.Jobs = append(s.Jobs, rec)
+	if over := len(s.Jobs) - maxJobs; over > 0 {
+		s.Jobs = append([]JobRecord(nil), s.Jobs[over:]...)
+	}
+}
+
+// UpdateState loads state.json, applies fn and saves the result, holding an
+// flock on state.json.lock so concurrent writers don't lose each other's
+// changes. fn returning an error leaves the file unchanged.
+func UpdateState(fn func(*State) error) error {
+	if err := os.MkdirAll(filepath.Dir(StatePath), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(stateLockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Flock(fd, syscall.LOCK_UN) }()
+	st, err := LoadState(StatePath)
+	if err != nil {
+		return err
+	}
+	if err := fn(&st); err != nil {
+		return err
+	}
+	return st.Save(StatePath)
 }
 
 // PublicSSHOpen reports whether the firewall rule set keeps public 22/tcp.

@@ -21,6 +21,9 @@ const (
 	CodeRemoteUnreachable     = "remote_unreachable"
 	CodeTransportFailed       = "transport_failed"
 	CodeHostKeyMismatch       = "host_key_mismatch"
+	CodeEndpointUnreachable   = "endpoint_unreachable"
+	CodeBucketNotFound        = "bucket_not_found"
+	CodeBackupAuthFailed      = "backup_auth_failed"
 	CodeNodeVersionMismatch   = "node_version_mismatch"
 	CodeUpdateRequired        = "update_required"
 	CodePrecondition          = "precondition_failed"
@@ -66,6 +69,9 @@ var exitByCode = map[string]int{
 	CodeRemoteUnreachable:     ExitTransport,
 	CodeTransportFailed:       ExitTransport,
 	CodeHostKeyMismatch:       ExitTransport,
+	CodeEndpointUnreachable:   ExitTransport,
+	CodeBucketNotFound:        ExitTransport,
+	CodeBackupAuthFailed:      ExitTransport,
 	CodeNodeVersionMismatch:   ExitVersion,
 	CodeUpdateRequired:        ExitVersion,
 	CodePrecondition:          ExitPrecondition,

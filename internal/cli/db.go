@@ -139,13 +139,20 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]string{"database": name}, Message: "dry run: would drop " + name, Warnings: s.warnings})
 	}
-	reply, err := s.node.Call(commandContext(cmd), "db.drop", map[string]string{"name": name}, remote.CallOptions{Confirm: name, OnEvent: p.event})
+	reply, err := s.node.Call(commandContext(cmd), "db.drop", map[string]any{"name": name, "no_final_dump": flagTrue(cmd, "no-final-dump")},
+		remote.CallOptions{Confirm: name, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+	var dropped map[string]any
+	_ = reply.Decode(&dropped)
+	message := "dropped database " + name
+	if final, ok := dropped["final_dump"].(map[string]any); ok {
+		message += fmt.Sprintf("; its final dump %v is in the bucket (eru dump get %s %v --out <file>)", final["id"], name, final["id"])
+	}
 	return output.Success(cmd, output.Result{
-		Data:     map[string]string{"dropped": name},
-		Message:  "dropped database " + name,
+		Data:     dropped,
+		Message:  message,
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
 }

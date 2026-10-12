@@ -15,7 +15,7 @@ Checks that haven't been run on a real VPS yet. Phases 1 and 2 were marked done 
 - [ ] **A second `eru apply` changes nothing**
     - Run `eru apply` (the `wal_level = logical` change restarts PostgreSQL once), then `eru apply` again. Expected: every step skips with `journal`, and there's no restart or reload.
 - [ ] **`db drop` with only `--yes` is refused**
-    - `eru db create scratch`, then `eru db drop scratch --yes`. Expected: refused, asking for the confirm token. `eru db drop scratch --confirm scratch` then drops it and warns `no_backup_before_drop`.
+    - `eru db create scratch`, then `eru db drop scratch --yes`. Expected: refused, asking for the confirm token. `eru db drop scratch --confirm scratch` then drops it and warns `no_backup_before_drop` (without backups configured; from Phase 3 it takes a final dump instead).
 - [ ] **`eru console`**
     - `eru console <db>` downloads usql when it's missing (checksum verified), opens a session over the tunnel, and `select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()` shows the read-only role and `ssl = t`. Ctrl-C cancels a running query without leaving the console.
 - [ ] **The migrate role is refused by PgBouncer**
@@ -35,3 +35,29 @@ Checks that haven't been run on a real VPS yet. Phases 1 and 2 were marked done 
 ## Passed
 
 - 2026-10-12, Hetzner, Ubuntu 26.04: `cluster init` from a laptop to public 22 closed and SSH over WireGuard; the secrets handoff accepted by `eru login`; ACME certificate issued; `eru sql` with verify-full; `eru apply --auto-upgrade-nodes`; an app (`andurel db seed`) connecting to 6432 with `sslmode=verify-full` through PgBouncer.
+
+## Phase 3: Database backups & restore
+
+Run on a real VPS against Cloudflare R2. Phase 3 stays 🟡 in [`MASTER.md`](./MASTER.md) until all of these pass.
+
+- [ ] **Backup setup on an existing cluster**
+    - On a Phase 2 cluster with databases `app` and `other`, run `eru backup setup` first. Expected: refused with `node_outdated`. Run `eru apply --auto-upgrade-nodes` (it re-runs `postgres-packages-v1` and installs pgBackRest), then `eru backup setup` against R2. Expected: one PostgreSQL restart (the prompt says so and asks for `<cluster>/restart`), a first full backup, and `eru backup list --db app` shows a restore window.
+    - `eru secrets export` carries the recovery kit (bucket, keys, cipher pass, dump age identity), and `eru login` on a second machine accepts it.
+- [ ] **Rewind one database while another keeps serving**
+    - Under a write loop on `other`, write rows to `app`, note the time, write more, then `eru restore app --time <t> --confirm app/restore`. Expected: it ends ready; `eru sql --db app__restoring "select count(*) from …"` shows only the early rows; `eru restore status app` compares row estimates.
+    - `eru restore promote app --confirm app/restore` leaves only the early rows in `app`, the app reconnects with the same credentials, and the write loop on `other` never stopped.
+- [ ] **Undo and cleanup**
+    - `eru restore undo app --confirm app/restore` brings the newer rows back; `eru restore cleanup app --confirm app/cleanup` removes the leftover.
+- [ ] **Abort**
+    - `eru restore app --time <t> --confirm app/restore`, then `eru restore abort app`. Expected: `app` unchanged, `app__restoring` gone.
+- [ ] **Detach and re-attach**
+    - Close the laptop lid during `eru backup now --type full`; later `eru job follow <id>` (or `eru job list`) shows it finished.
+- [ ] **Drill**
+    - `eru restore drill` passes and shows in `eru backup list`.
+- [ ] **Fork**
+    - `eru db fork app --at <t>` creates a new database with its own credentials and the rows as of `t`; `eru db fork app` without `--at` copies the live database.
+- [ ] **Long-retention dumps**
+    - `eru config set databases.app.backup.dump_schedule "*-*-* *:0/15:00"`, `eru config set databases.app.backup.dump_retention 3`, `eru apply`: a scheduled dump of `app` lands in the bucket; `eru dump get app <id> --out app.dump` decrypts it and `pg_restore --list app.dump` reads it.
+    - `eru db drop <scratch db> --confirm <db>` leaves a `-final` dump (`eru dump list`).
+- [ ] **Idempotence**
+    - A second `eru apply` changes nothing.
