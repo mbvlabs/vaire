@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 12 (tls-v2). PHASE=install: refuse a Caddy box, install nginx with the
+# Step 10 (tls-v2). PHASE=install: refuse a Caddy box, install nginx with the
 # stream module, give postgres and pgbouncer the ssl-cert group, and place a
 # placeholder certificate so PostgreSQL, PgBouncer and nginx can start.
 # PHASE=start (after eru wrote nginx.conf and the eru-certs units): validate

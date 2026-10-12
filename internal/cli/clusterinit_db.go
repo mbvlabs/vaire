@@ -20,6 +20,7 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 		"phase":        node.PhaseDatabase,
 		"cluster_toml": string(raw),
 		"node_name":    r.primary().Name,
+		"local":        r.local,
 	}, remote.CallOptions{Secrets: r.dbSecrets, Confirm: r.name, OnEvent: r.p.event})
 	if err != nil {
 		return node.BootstrapResult{}, err
@@ -46,8 +47,12 @@ func (r *initRun) dnsStep(ctx context.Context) error {
 	if len(records) == 0 {
 		return nil
 	}
+	body := recordLines(records)
+	if ipv6 == "" {
+		body = append(body, "", "No AAAA record: the server has no public IPv6 address.")
+	}
 	cmd := r.cmd
-	r.p.panel("Create these DNS records", append(recordLines(records), "", dnsHelp))
+	r.p.panel("Create these DNS records", append(body, "", dnsHelp))
 	if !MustNotPrompt(cmd) && !flagTrue(cmd, "dns-ready") {
 		if err := typeWord(cmd, "Type 'confirmed' once the records exist", "", "confirmed"); err != nil {
 			return err
@@ -177,6 +182,8 @@ func (r *initRun) noteDNSEarly() {
 	if len(records) == 0 {
 		return
 	}
-	r.p.panel("Create this DNS record now", append(recordLines(records), "", dnsHelp,
-		"Setup continues meanwhile; you'll be asked to confirm before the database is set up."))
+	r.p.panel("Create this DNS record now", append(recordLines(records), "",
+		"If the server has a public IPv6 address, its AAAA record appears here once the host is up.",
+		"", dnsHelp,
+		"eru keeps working while you create the record, then pauses for you to confirm the records exist before it sets up the database."))
 }

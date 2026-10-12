@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/engine"
@@ -71,9 +72,25 @@ func canonical(v any) ([]byte, error) {
 
 // fileIs reports whether path holds exactly content with mode perm.
 func fileIs(path, content string, perm os.FileMode) bool {
+	return fileIsOwned(path, content, perm, "", "")
+}
+
+// fileIsOwned is fileIs that also checks the owner and group, so a file a
+// service cannot read counts as drift. An empty owner or group is not checked.
+func fileIsOwned(path, content string, perm os.FileMode, owner, group string) bool {
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != perm {
 		return false
+	}
+	if owner != "" || group != "" {
+		uid, gid, err := engine.ResolveIDs(owner, group)
+		if err != nil {
+			return false
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || (uid != -1 && int(st.Uid) != uid) || (gid != -1 && int(st.Gid) != gid) {
+			return false
+		}
 	}
 	raw, err := os.ReadFile(path) //nolint:gosec // G304: managed file paths from the step catalogue.
 	return err == nil && string(raw) == content
@@ -81,10 +98,18 @@ func fileIs(path, content string, perm os.FileMode) bool {
 
 // writeFile writes a managed file atomically, creating its directory.
 func writeFile(path, content string, perm os.FileMode) error {
+	return writeFileOwned(path, content, perm, "", "")
+}
+
+// writeFileOwned writes a managed file atomically with an owner and group,
+// creating its directory. The owner is set on the temp file before the rename,
+// so a service that reads the file never sees it with the wrong owner. Use it
+// for every file a service user has to read.
+func writeFileOwned(path, content string, perm os.FileMode, owner, group string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: system config directories are 0755.
 		return err
 	}
-	return engine.WriteFileAtomic(path, []byte(content), perm)
+	return engine.WriteFileAtomicOwned(path, []byte(content), perm, owner, group)
 }
 
 // serviceActive reports whether a systemd unit is active.

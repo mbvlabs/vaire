@@ -301,9 +301,16 @@ func finalLine(state, title, detail string, took time.Duration) string {
 	}
 	line := sym + " " + title
 	if detail != "" {
-		line += "  " + styleDim.Render(sanitize(detail))
+		// A failed step's detail is its error, not a secondary hint.
+		detailStyle := styleDim
+		if state == EndFail {
+			detailStyle = styleFail
+		}
+		line += "  " + detailStyle.Render(sanitize(detail))
 	}
-	if took >= time.Second {
+	// took is zero only for a line that never ran as a task, whose duration
+	// is unknown.
+	if took > 0 {
 		line += "  " + styleDim.Render(formatDuration(took))
 	}
 	return line
@@ -404,6 +411,8 @@ func sanitize(s string) string {
 
 func formatDuration(d time.Duration) string {
 	switch {
+	case d < time.Second:
+		return "<1s"
 	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d.Seconds()))
 	default:

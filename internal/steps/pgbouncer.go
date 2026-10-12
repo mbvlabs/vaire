@@ -41,17 +41,17 @@ func (pgbouncer) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, error) {
 }
 
 func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
-	if !fileIs(PgbouncerIniPath, pgbouncerIni(cfg, rt), 0o640) {
+	if !fileIsOwned(PgbouncerIniPath, pgbouncerIni(cfg, rt), 0o640, pgFileOwner, pgFileGroup) {
 		return incomplete(PgbouncerIniPath + " differs"), nil
 	}
-	if !fileIs(PgbouncerHBAPath, string(render.PgbouncerHBA()), 0o640) {
+	if !fileIsOwned(PgbouncerHBAPath, string(render.PgbouncerHBA()), 0o640, pgFileOwner, pgFileGroup) {
 		return incomplete(PgbouncerHBAPath + " differs"), nil
 	}
 	verifiers, err := roleVerifiers(ctx, rt)
 	if err != nil || len(verifiers) < len(ServiceRoles) {
 		return incomplete("cannot read the service role verifiers"), nil
 	}
-	if !fileIs(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640) {
+	if !fileIsOwned(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640, pgFileOwner, pgFileGroup) {
 		return incomplete(PgbouncerUserlistPath + " differs"), nil
 	}
 	if !serviceActive(ctx, PgbouncerService) {
@@ -71,13 +71,13 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 	if len(verifiers) < len(ServiceRoles) {
 		return engine.ApplyResult{}, fmt.Errorf("the service role verifiers are missing; run postgres-roles-v1 first")
 	}
-	if err := writeFile(PgbouncerIniPath, pgbouncerIni(cfg, rt), 0o640); err != nil {
+	if err := writeFileOwned(PgbouncerIniPath, pgbouncerIni(cfg, rt), 0o640, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	if err := writeFile(PgbouncerHBAPath, string(render.PgbouncerHBA()), 0o640); err != nil {
+	if err := writeFileOwned(PgbouncerHBAPath, string(render.PgbouncerHBA()), 0o640, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	if err := writeFile(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640); err != nil {
+	if err := writeFileOwned(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
 	err = rt.Shell.Run(ctx, s.ID(), Script("pgbouncer"), map[string]string{"PGBOUNCER_DIR": PgbouncerDir}, report)

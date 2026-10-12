@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -20,6 +21,8 @@ type managedFile struct {
 	Path    string
 	Content string
 	Mode    os.FileMode
+	Owner   string
+	Group   string
 }
 
 // confFiles returns the conf.d files in load order. 90-overrides.conf is
@@ -27,12 +30,12 @@ type managedFile struct {
 func confFiles(cfg config.Cluster, rt engine.Runtime) []managedFile {
 	res := tuningFor(cfg, rt.Host)
 	return []managedFile{
-		{Path: PGConfD + "/10-eru-tuning.conf", Content: string(render.TuningConf(res)), Mode: 0o644},
-		{Path: PGConfD + "/20-eru-security.conf", Content: string(render.SecurityConf()), Mode: 0o644},
-		{Path: PGConfD + "/30-eru-extensions.conf", Content: string(render.ExtensionsConf(cfg, res)), Mode: 0o644},
-		{Path: PGConfD + "/50-eru-settings.conf", Content: string(render.SettingsConf(cfg)), Mode: 0o644},
-		{Path: PGConfDir + "/pg_hba.conf", Content: string(render.HBA(cfg)), Mode: 0o640},
-		{Path: PGConfDir + "/pg_ident.conf", Content: string(render.Ident(cfg)), Mode: 0o640},
+		{Path: PGConfD + "/10-eru-tuning.conf", Content: string(render.TuningConf(res)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
+		{Path: PGConfD + "/20-eru-security.conf", Content: string(render.SecurityConf()), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
+		{Path: PGConfD + "/30-eru-extensions.conf", Content: string(render.ExtensionsConf(cfg, res)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
+		{Path: PGConfD + "/50-eru-settings.conf", Content: string(render.SettingsConf(cfg)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
+		{Path: PGConfDir + "/pg_hba.conf", Content: string(render.HBA(cfg)), Mode: 0o640, Owner: pgFileOwner, Group: pgFileGroup},
+		{Path: PGConfDir + "/pg_ident.conf", Content: string(render.Ident(cfg)), Mode: 0o640, Owner: pgFileOwner, Group: pgFileGroup},
 	}
 }
 
@@ -64,7 +67,7 @@ func (postgresConfig) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, err
 
 func (postgresConfig) Check(_ context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
 	for _, f := range confFiles(cfg, rt) {
-		if !fileIs(f.Path, f.Content, f.Mode) {
+		if !fileIsOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group) {
 			return incomplete(f.Path + " differs"), nil
 		}
 	}
@@ -85,17 +88,17 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		}
 	}
 	for _, f := range files {
-		if err := writeFile(f.Path, f.Content, f.Mode); err != nil {
-			return engine.ApplyResult{}, err
+		if err := writeFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
+			return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
 		}
 	}
 	if _, err := os.Stat(PGConfD + "/90-overrides.conf"); err != nil {
-		if err := writeFile(PGConfD+"/90-overrides.conf", string(render.OverridesHeader()), 0o644); err != nil {
-			return engine.ApplyResult{}, err
+		if err := writeFileOwned(PGConfD+"/90-overrides.conf", string(render.OverridesHeader()), 0o644, pgFileOwner, pgFileGroup); err != nil {
+			return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
 		}
 	}
 	if err := ensureIncludeDir(); err != nil {
-		return engine.ApplyResult{}, err
+		return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
 	}
 	if err := validateConfig(ctx, rt); err != nil {
 		restoreFiles(files, backups)
@@ -139,18 +142,18 @@ func ensureIncludeDir() error {
 		content += "\n"
 	}
 	content += "\n# managed by eru\ninclude_dir = 'conf.d'\n"
-	return writeFile(path, content, 0o644)
+	return writeFileOwned(path, content, 0o644, pgFileOwner, pgFileGroup)
 }
 
 // validateConfig fails when PostgreSQL reports an error in the new files.
 func validateConfig(ctx context.Context, rt engine.Runtime) error {
 	settings, err := rt.PG.Query(ctx, "postgres", "SELECT sourcefile, name, error FROM pg_file_settings WHERE error IS NOT NULL", nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("validating the rendered configuration: %w", err)
 	}
 	hba, err := rt.PG.Query(ctx, "postgres", "SELECT line_number, error FROM pg_hba_file_rules WHERE error IS NOT NULL", nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("validating the rendered configuration: %w", err)
 	}
 	if len(settings) == 0 && len(hba) == 0 {
 		return nil
@@ -220,7 +223,9 @@ func hugePagesEnabled(res tune.Result) bool {
 	return false
 }
 
-// restoreFiles puts the previous contents back after a validation failure.
+// restoreFiles puts the previous contents back after a validation failure. It
+// writes with the file's own owner, so a failed run never leaves a file the
+// server cannot read.
 func restoreFiles(files []managedFile, backups map[string]string) {
 	for _, f := range files {
 		previous, ok := backups[f.Path]
@@ -228,6 +233,6 @@ func restoreFiles(files []managedFile, backups map[string]string) {
 			_ = os.Remove(f.Path)
 			continue
 		}
-		_ = writeFile(f.Path, previous, f.Mode)
+		_ = writeFileOwned(f.Path, previous, f.Mode, f.Owner, f.Group)
 	}
 }

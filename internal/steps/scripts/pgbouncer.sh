@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# Step 13 (pgbouncer-v1): fix ownership and modes, then enable and restart
-# PgBouncer with the rendered configuration.
+# Step 13 (pgbouncer-v1): enable and restart PgBouncer with the rendered
+# configuration. The Go step writes the files owned by postgres:postgres with
+# the right modes, so there is nothing to fix up here.
 set -euo pipefail
 
 : "${PGBOUNCER_DIR:?PGBOUNCER_DIR is required}"
-
-files=("${PGBOUNCER_DIR}/pgbouncer.ini" "${PGBOUNCER_DIR}/pgbouncer_hba.conf" "${PGBOUNCER_DIR}/userlist.txt")
-chown postgres:postgres "${files[@]}"
-chmod 0640 "${files[@]}"
 
 systemctl daemon-reload
 systemctl enable pgbouncer

@@ -12,9 +12,10 @@ import (
 )
 
 // The palette uses the 16 ANSI colors, so it follows the terminal's own
-// light or dark theme.
+// light or dark theme. Primary text keeps the terminal's default foreground
+// and the accent only marks and borders, so it stays readable on both.
 var (
-	colorAccent = lipgloss.Color("5") // magenta
+	colorAccent = lipgloss.Color("6") // cyan
 	colorOK     = lipgloss.Color("2")
 	colorFail   = lipgloss.Color("1")
 	colorWarn   = lipgloss.Color("3")
@@ -23,7 +24,8 @@ var (
 )
 
 var (
-	styleHeader  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	styleHeader  = lipgloss.NewStyle().Bold(true)
+	styleAccent  = lipgloss.NewStyle().Foreground(colorAccent)
 	styleRule    = lipgloss.NewStyle().Foreground(colorDim)
 	styleTitle   = lipgloss.NewStyle().Bold(true)
 	styleDim     = lipgloss.NewStyle().Foreground(colorDim)
@@ -32,7 +34,7 @@ var (
 	styleWarn    = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
 	styleWarnMsg = lipgloss.NewStyle().Foreground(colorWarn)
 	styleInfo    = lipgloss.NewStyle().Foreground(colorInfo)
-	styleSpinner = lipgloss.NewStyle().Foreground(colorAccent)
+	styleSpinner = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	styleCode    = lipgloss.NewStyle().Foreground(colorInfo).Bold(true)
 
 	stylePanel = lipgloss.NewStyle().
@@ -57,23 +59,37 @@ const (
 	SymSkip = "–"
 )
 
-// Theme is the huh theme for every eru prompt.
+// Theme is the huh theme for every eru prompt. It is built on ThemeBase16, so
+// it follows the terminal's 16 colors, with the accent, the selected option
+// and the focused button picked per background for contrast.
 var Theme = huh.ThemeFunc(func(isDark bool) *huh.Styles {
 	s := huh.ThemeBase16(isDark)
-	s.Focused.Title = s.Focused.Title.Foreground(colorAccent).Bold(true)
-	s.Focused.NoteTitle = s.Focused.NoteTitle.Foreground(colorAccent).Bold(true)
-	s.Focused.Base = s.Focused.Base.BorderForeground(colorAccent)
-	s.Focused.SelectSelector = s.Focused.SelectSelector.Foreground(colorAccent)
-	s.Focused.SelectedOption = s.Focused.SelectedOption.Foreground(colorOK)
-	s.Focused.TextInput.Prompt = s.Focused.TextInput.Prompt.Foreground(colorAccent)
-	s.Focused.FocusedButton = s.Focused.FocusedButton.Background(colorAccent)
+	lightDark := lipgloss.LightDark(isDark)
+	// Magenta reads better on a light background, bright magenta on a dark
+	// one. The focused button uses a foreground that contrasts with the
+	// accent, so the label is never light on light.
+	accent := lightDark(lipgloss.Color("5"), lipgloss.Color("13"))
+	onAccent := lightDark(lipgloss.Color("15"), lipgloss.Color("0"))
+	selected := lightDark(lipgloss.Color("2"), lipgloss.Color("10"))
+	s.Focused.Title = s.Focused.Title.Foreground(accent).Bold(true)
+	s.Focused.NoteTitle = s.Focused.NoteTitle.Foreground(accent).Bold(true)
+	s.Focused.Base = s.Focused.Base.BorderForeground(accent)
+	s.Focused.SelectSelector = s.Focused.SelectSelector.Foreground(accent)
+	s.Focused.NextIndicator = s.Focused.NextIndicator.Foreground(accent)
+	s.Focused.PrevIndicator = s.Focused.PrevIndicator.Foreground(accent)
+	s.Focused.SelectedOption = s.Focused.SelectedOption.Foreground(selected)
+	s.Focused.SelectedPrefix = s.Focused.SelectedPrefix.Foreground(selected)
+	s.Focused.TextInput.Prompt = s.Focused.TextInput.Prompt.Foreground(accent)
+	s.Focused.FocusedButton = s.Focused.FocusedButton.Foreground(onAccent).Background(accent).Bold(true)
+	s.Focused.Next = s.Focused.FocusedButton
 	return s
 })
 
-// Header renders a section header with a rule under it.
+// Header renders a section header with a rule under it. The title keeps the
+// terminal's default foreground; the accent only marks it.
 func Header(title string, width int) string {
 	rule := strings.Repeat("─", max(min(width, 72)-len(title)-3, 4))
-	return styleHeader.Render("▌ "+title) + " " + styleRule.Render(rule)
+	return styleAccent.Render("▌") + " " + styleHeader.Render(title) + " " + styleRule.Render(rule)
 }
 
 // Panel renders body in a rounded box with a title line.
@@ -111,11 +127,12 @@ type ErrorBlock struct {
 }
 
 // Render draws the error box: the message, the failed step, its last output
-// lines and the hint.
+// lines and the hint. The step is only shown when the message does not already
+// name it.
 func (e ErrorBlock) Render(width int) string {
 	var b strings.Builder
 	b.WriteString(styleFail.Render(SymFail+" "+e.Message) + "  " + styleDim.Render("["+e.Code+"]"))
-	if e.Step != "" {
+	if e.Step != "" && !strings.Contains(e.Message, e.Step) {
 		b.WriteString("\n" + styleDim.Render("step ") + styleTitle.Render(e.Step))
 	}
 	if len(e.Tail) > 0 {

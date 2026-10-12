@@ -1,10 +1,14 @@
 # Phase 2 findings to fix
 
+This file has two rounds of findings. **Round 1** (the sections down to the process notes) came from the first manual test, and PR #7 (`71f8896`) fixed it. **Round 2** is at the end and came from the second manual test, run against the build with those fixes.
+
+## Round 1
+
 Found while merging PR #6 (Phase 2, first cluster, `8a5c562`) and preparing the first manual test from a laptop against the edge build `edge-8a5c56209c23`. The VPS manual test hasn't run yet, so add whatever it turns up here.
 
 First manual test run (2026-10-12): Hetzner VPS `46.224.129.96` on Ubuntu 26.04, cluster `testing-setup`, domain `database.mbvlabs.com`, `acme` mode, run from a laptop with `eru cluster init --host`. It got through the host phase, the lockdown and the first two database steps, then stopped at `postgres-cluster-v1`. Two fixes were made locally and aren't committed; they're marked "fixed locally" below. Everything else gets fixed in one go.
 
-## Bugs
+### Bugs
 
 - [x] **Bare `email` line in the Caddyfile in `self-signed` mode**
     - Where: `internal/render/templates/Caddyfile.tmpl` writes `email {{ .ACMEEmail }}` with no condition.
@@ -25,7 +29,7 @@ First manual test run (2026-10-12): Hetzner VPS `46.224.129.96` on Ubuntu 26.04,
 - [x] **The `step_failed` hint during init says "re-run apply"**
     - During `cluster init` there's no context yet, so `eru apply` can't work. The hint should say `eru cluster init --resume`.
 
-## CLI and UX improvements
+### CLI and UX improvements
 
 - [x] **Build a proper, good-looking CLI with the Charm packages: more feedback and loading indicators everywhere** (high priority)
     - Seen in the first manual test: `cluster init` looks like raw log output, and long waits show nothing. That covers the DNS check (up to 5 min of silence), package installs, the WireGuard switch, the lockdown and the certificate wait. It's hard to tell whether eru is working, waiting for you, or stuck.
@@ -74,7 +78,7 @@ First manual test run (2026-10-12): Hetzner VPS `46.224.129.96` on Ubuntu 26.04,
     - Where: `internal/cli/interview.go:144`.
     - Fix: show `app` as the visible default in the prompt, e.g. "Databases (comma separated, default app)", so clearing the field doesn't look like "no database".
 
-## Design changes
+### Design changes
 
 - [x] **Replace Caddy with nginx and serve Postgres on 443 through `stream`**
     - Why: nginx has layer 4 proxying built in (`stream` + `ssl_preread`), so it can route Postgres connections that use TLS (PG17+ `sslnegotiation=direct`, ALPN `postgresql`) on 443 to PgBouncer by SNI/ALPN. Caddy needs the third-party `caddy-l4` plugin and a custom build.
@@ -86,7 +90,7 @@ First manual test run (2026-10-12): Hetzner VPS `46.224.129.96` on Ubuntu 26.04,
     - Warn, without blocking, when the record resolves to Cloudflare's ranges: "proxied: database clients can't connect through Cloudflare; set it to DNS only".
     - Spec: the DNS step in the remote init sequence.
 
-## Process notes
+### Process notes
 
 - [ ] **Run the Phase 2 manual test and record it**
     - The test is in the Phase 2 entry of `docs/MASTER.md`: `cluster init`, then a `sslmode=verify-full` app connection to port 6432, `eru sql --db app "select 1"`, `eru apply` changing nothing, and `db drop` with only `--yes` being refused.
@@ -98,3 +102,34 @@ First manual test run (2026-10-12): Hetzner VPS `46.224.129.96` on Ubuntu 26.04,
     - PR #6 conflicted in 21 files because it was branched from the unmerged Phase 1 commit, which master then got as a squash commit.
     - Next time, once the parent PR merges, run `git rebase --onto origin/master <old parent commit>` before opening or updating the child PR.
     - Also make sure the squash title is right. Master now has "feat: pahse 2 first cluser (#6)", which can't be fixed without rewriting master.
+
+## Round 2: second manual test (2026-10-12)
+
+Same VPS, rebuilt with Ubuntu 26.04, edge build from `71f8896` (after the fixes in PR #7). Same cluster name, domain and `acme` mode.
+
+- [x] **Some text in the new CLI is hard to read**
+    - Seen in the second run: the Charm output looks much better, but some colours have too little contrast. In the host key confirm, the selected `Yes` button is light text on a light purple background and is barely readable. The bold purple prompt text on the dark background is also hard to read.
+    - Fix: pick a theme with more contrast (e.g. `huh.ThemeBase16` or a tuned `ThemeCharm`), check it on both dark and light terminals, and use bright foregrounds for selected buttons. Use dim text only for secondary hints.
+    - Fixed: the huh theme picks the accent and the focused button per background, so the selected button is never light on light; headers keep the terminal's default foreground and use the accent only as a marker; a failed step's error is no longer dim.
+- [x] **The DNS panel only lists an A record**
+    - Seen in the second run: only `A database.mbvlabs.com 46.224.129.96` was shown, although the server has IPv6 (`2a01:4f8:c013:a1f1::1`). Either show the AAAA record too, or say that IPv6 is left out on purpose.
+    - Fixed: the DNS panel adds the AAAA record when the server has a public IPv6 address, says so when it does not, and the early A-record panel says the AAAA record appears once the host is up.
+- [x] **`postgres-config-v1` always fails: PostgreSQL can't read the `pg_hba.conf` that eru just wrote** (blocker)
+    - Seen in the second run: step 4/7 failed with `ERROR: could not open file "/etc/postgresql/18/main/pg_hba.conf": Permission denied`.
+    - Cause: `Apply` in `internal/steps/postgres_config.go` writes the files with `writeFile` → `engine.WriteFileAtomic`. That creates a new file owned by root, so `pg_hba.conf` and `pg_ident.conf` end up `root:root 0640`. Next, `validateConfig` asks the server for `pg_hba_file_rules`, which makes the postgres backend read `pg_hba.conf`, and that fails. The `chown postgres:postgres` that would fix it is in `postgres-config.sh`, which only runs after the validation.
+    - Side effect: a failed `validateConfig` runs `restoreFiles`, which writes the backups the same way, so the server is left with root-owned `pg_hba.conf`/`pg_ident.conf`. The running cluster still has the old rules loaded, but a restart would fail. `--resume` hits the same error, so this run can't continue until there's a new build.
+    - Fix: give `WriteFileAtomic` (or a `writeFileOwned` beside it) an owner and group, and chown the temp file before the rename. Use it for every file the postgres or pgbouncer user has to read, and for `restoreFiles`. Then the chowns in `postgres-config.sh` aren't needed. Check the other steps that write files for postgres or pgbouncer to read (pgbouncer config and userlist, certs-sync) for the same bug.
+    - Fixed: `engine.WriteFileAtomicOwned` chowns the temp file before the rename. Every file postgres or pgbouncer reads (conf.d, `pg_hba.conf`, `pg_ident.conf`, `pgbouncer.ini`, `pgbouncer_hba.conf`, `userlist.txt`, the TLS key) and `restoreFiles` use it, and the chowns left `postgres-config.sh` and `pgbouncer.sh`. `tls.sh`'s placeholder key is generated and chowned before anything reads it, so it needed no change. The drift checks for `postgres-config-v1` and `pgbouncer-v1` now compare the owner as well as content and mode, so a file left with the wrong owner (as this run left `pg_hba.conf`) is rewritten instead of counted as done.
+- [x] **The error block for a failed Go step has no useful detail**
+    - Seen in the second run: the message starts `psql: psql:<stdin>:1: ERROR:` (the prefix appears twice), the block repeats `step postgres-config-v1` on its own line, and there's no output tail because the failure came from Go code, not a script.
+    - Fix: remove the duplicate `psql:` prefix in `internal/pg/local.go` and leave out the step line when it only repeats the header. For failures in Go code, say which action failed (e.g. "validating the rendered configuration").
+    - Fixed: `pg.Local` returns psql's own message, the error box drops the step line when the message already names it, and the Go failure paths say "validating the rendered configuration" or "writing the rendered configuration".
+- [x] **The resume hint mentions `--local` during a remote init**
+    - Seen in the second run: "run eru cluster init --resume --name testing-locally (add --local for a local init)". The run used `--host`, so the `--local` part only confuses. Build the hint from the actual mode.
+    - Fixed: the hint is built from the init's mode, so a remote init is only told `eru cluster init --resume --name <n>` and a local one adds `--local`.
+- [x] **The first database step shows no duration**
+    - Seen in the second run: `✓ [1/7] kernel-tuning-v1` has no time, unlike the others. Either always show it (`0s`/`<1s`) or never show it for steps that were already done.
+    - Fixed: every finished step shows a duration, with `<1s` for a step under a second; skipped steps, and steps eru never saw start (so their time is unknown), show none.
+- [x] **PostgreSQL is told to use TLS before the certificate exists** (found while reviewing the database steps)
+    - Cause: the database phase runs `postgres-config-v1` before `tls-v2`. `postgres-config-v1` turns `ssl` on, points it at `/etc/eru/tls/server.{crt,key}` and restarts PostgreSQL on its first run, but `tls-v2` is what writes the placeholder certificate and puts `postgres` in `ssl-cert`. With `ssl = on` and no readable certificate, PostgreSQL refuses to start, so the step fails at its restart as soon as the ownership blocker above is fixed. Even with a certificate in place, PostgreSQL cannot read the key until it is restarted after joining `ssl-cert`, and nothing restarts it after `tls-v2`.
+    - Fix: run `tls-v2` before `postgres-config-v1`, so the certificate exists and `postgres` is in `ssl-cert` before PostgreSQL restarts. Fixed: `steps.Catalog`/`DatabaseStepIDs`, the step tables in IMPLEMENTATION.md and MASTER.md, and the step numbers in code comments and script headers now use the new order (`tls-v2` is step 10, `postgres-config-v1` step 11, `postgres-roles-v1` step 12). The first-run restart of `postgres-config-v1` is what picks up the `ssl-cert` membership, so no extra restart is needed.

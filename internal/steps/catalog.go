@@ -15,9 +15,9 @@ func Catalog() []engine.Step {
 		kernelTuning{},
 		postgresPackages{},
 		postgresCluster{},
+		tlsStep{},
 		postgresConfig{},
 		postgresRoles{},
-		tlsStep{},
 		pgbouncer{},
 	}
 }
@@ -35,15 +35,17 @@ func HostStepIDs() []string {
 }
 
 // DatabaseStepIDs are the steps cluster.bootstrap phase=database runs (steps
-// 7-13, D1).
+// 7-13, D1). tls-v2 runs before postgres-config-v1: the security settings turn
+// ssl on and point at /etc/eru/tls, so the certificate and the ssl-cert group
+// membership have to exist before PostgreSQL restarts.
 func DatabaseStepIDs() []string {
 	return []string{
 		kernelTuningID,
 		postgresPackagesID,
 		postgresClusterID,
+		tlsID,
 		postgresConfigID,
 		postgresRolesID,
-		tlsID,
 		pgbouncerID,
 	}
 }
