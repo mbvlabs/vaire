@@ -435,7 +435,13 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	warnings = append(append(s.warnings, warnings...), staleWarning(generated)...)
+	warnings = append(s.warnings, warnings...)
+	if generated {
+		warnings = append(warnings, output.Warning{
+			Code:    "recovery_kit_changed",
+			Message: "the recovery kit changed; run eru secrets export and store the new handoff",
+		})
+	}
 	message := []string{fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total)}
 	if data.Restarted {
 		message = append(message, fmt.Sprintf("PostgreSQL restarted once for WAL archiving (%d ms unavailable)", data.RestartDowntimeMS))
@@ -448,9 +454,6 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 			}
 			message = append(message, "restore window: "+bl.Window.describe())
 		}
-	}
-	if generated {
-		message = append(message, "The recovery kit changed: run eru secrets export and store the new handoff.")
 	}
 	res := output.Result{
 		Data:     map[string]any{"apply": data, "bucket": settings.Bucket, "prefix": settings.Prefix},
@@ -597,15 +600,23 @@ func runBackupVerify(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, err := s.node.Call(commandContext(cmd), "backup.verify", nil, remote.CallOptions{OnEvent: p.event})
+	reply, jobID, detached, err := callJob(cmd, s, p, "backup.verify", nil, remote.CallOptions{})
 	if err != nil {
 		return err
 	}
+	if detached {
+		return detachedResult(cmd, s, jobID, "the verify")
+	}
 	var data backup.VerifyResult
-	if err := reply.Decode(&data); err != nil {
+	jr, err := decodeJob(reply, &data)
+	if err != nil {
 		return err
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: "pgbackrest verify passed at " + data.FinishedAt, Warnings: s.warnings})
+	return output.Success(cmd, output.Result{
+		Data:     map[string]any{"job_id": jr.JobID, "verify": data},
+		Message:  "pgbackrest verify passed at " + data.FinishedAt,
+		Warnings: append(s.warnings, reply.Warnings...),
+	})
 }
 
 // humanBytes renders a size for humans.

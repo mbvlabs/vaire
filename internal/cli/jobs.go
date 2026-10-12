@@ -109,6 +109,8 @@ func runJobList(cmd *cobra.Command, _ []string) error {
 func runJobFollow(cmd *cobra.Command, args []string) error {
 	id := strings.ToUpper(args[0])
 	p := newProgress(cmd)
+	// Following a job is for reading its log: show the log lines.
+	p.opts.Verbose = true
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err

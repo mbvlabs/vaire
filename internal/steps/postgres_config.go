@@ -118,6 +118,10 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 			backups[f.Path] = string(raw)
 		}
 	}
+	// None of the managed files exist yet: this is the first configuration.
+	// The journal cannot tell, because the runner marks the step running
+	// before Apply.
+	first := len(backups) == 0
 	if staleBackupConf(cfg) {
 		raw, err := os.ReadFile(BackupConfPath)
 		if err != nil {
@@ -154,7 +158,7 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		return engine.ApplyResult{}, err
 	}
 
-	if !stepCompleted(s.ID()) {
+	if first {
 		if err := restartPostgres(ctx, cfg, rt, s.ID(), report); err != nil {
 			return engine.ApplyResult{}, err
 		}
@@ -246,16 +250,6 @@ func pendingRestartSettings(ctx context.Context, rt engine.Runtime) ([]string, e
 	}
 	sort.Strings(names)
 	return names, nil
-}
-
-// stepCompleted reports whether the journal has a completed entry for id.
-func stepCompleted(id string) bool {
-	j, err := engine.LoadJournal(engine.JournalPath)
-	if err != nil {
-		return false
-	}
-	entry, ok := j.Steps[id]
-	return ok && entry.Status == engine.StatusCompleted
 }
 
 // restartPostgres stops PostgreSQL, sizes huge pages while it is stopped, and

@@ -167,6 +167,12 @@ func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
 			}
 		}
 		for _, b := range st.Backup {
+			// pgBackRest leaves repository.size out of bundled backups; what
+			// the set stored (its delta) is then the best figure.
+			repoSize := b.Info.Repository.Size
+			if repoSize == 0 {
+				repoSize = b.Info.Repository.Delta
+			}
 			set := Set{
 				Label:     b.Label,
 				Type:      b.Type,
@@ -174,7 +180,7 @@ func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
 				Stop:      unixTime(b.Timestamp.Stop),
 				Size:      b.Info.Size,
 				Delta:     b.Info.Delta,
-				RepoSize:  b.Info.Repository.Size,
+				RepoSize:  repoSize,
 				RepoDelta: b.Info.Repository.Delta,
 				WALStart:  b.Archive.Start,
 				WALStop:   b.Archive.Stop,
@@ -192,6 +198,11 @@ func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
 	return out, nil
 }
 
+// networkProcessMax is process-max for verify and restore. Both mostly wait
+// on the bucket, so they gain from more processes than the vCPU-based
+// default in pgbackrest.conf.
+const networkProcessMax = "--process-max=4"
+
 // Verify runs pgbackrest verify over the whole repository.
 func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 	res := VerifyResult{StartedAt: now()}
@@ -201,7 +212,7 @@ func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 		if len(lines) > 40 {
 			lines = lines[1:]
 		}
-	}, "verify")
+	}, networkProcessMax, "verify")
 	res.FinishedAt = now()
 	res.Output = lines
 	var scriptErr *engine.ScriptError
@@ -219,9 +230,10 @@ func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 }
 
 // RestoreScratch restores into opts.Path with archive_mode off, so the
-// restored instance never pushes WAL to the repository.
+// restored instance never pushes WAL to the repository. The path is always
+// empty, so the delta=y meant for the live cluster is turned off.
 func (p PgBackRest) RestoreScratch(ctx context.Context, opts RestoreOptions) error {
-	args := []string{"--pg1-path=" + opts.Path, "--archive-mode=off", "--log-level-console=detail"}
+	args := []string{"--pg1-path=" + opts.Path, "--archive-mode=off", "--log-level-console=detail", "--no-delta", networkProcessMax}
 	if opts.Database != "" {
 		args = append(args, "--db-include="+opts.Database)
 	}

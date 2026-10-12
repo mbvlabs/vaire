@@ -61,3 +61,18 @@ Run on a real VPS against Cloudflare R2. Phase 3 stays 🟡 in [`MASTER.md`](./M
     - `eru db drop <scratch db> --confirm <db>` leaves a `-final` dump (`eru dump list`).
 - [ ] **Idempotence**
     - A second `eru apply` changes nothing.
+- [ ] **No unconfirmed restarts**
+    - `eru config set` on a reload-only setting (for example `postgres.work_mem`), then `eru apply`. Expected: a reload, and `pg_postmaster_start_time()` unchanged. A restart-only setting reports a pending restart and waits for `<cluster>/restart`.
+
+Found while testing (2026-10-12):
+
+- Fixed: `postgres-config-v1` restarted PostgreSQL on every change without the confirm token and recorded `restart: none`.
+- Fixed: `backup list` showed `IN REPO 0 B`, because pgBackRest 2.59 omits `repository.size`.
+- Fixed: `backup setup` showed the cluster-password warning for a new recovery kit.
+- Fixed: `< /dev/null` did not count as a non-terminal stdin.
+- Fixed: count-based retention. With `retention_full = 1`, a manual `backup now --type full` expired the previous full and its WAL, which shrank the restore window. Retention is now time-based (`repo1-retention-full-type=time`, weeks × 7 days).
+- Open: `restore` and `db fork` report `must be owner of extension pg_stat_statements` from `pg_restore` (harmless, but it marks every restore with a warning).
+- Fixed: a failed restore blocked the next one until `eru restore abort`; a new restore now clears a failed one itself.
+- Open: `eru job follow` on a finished job prints only its state, not its log, and drops the error details (`details.output_tail` is null).
+- Fixed: the restore window started at the oldest backup's stop second, which pgBackRest refuses (`[075] unable to find backup set with stop time less than …`); it now starts one second later.
+- Open: `eru ssh --command "sudo …" | jq` mixes sudo's password prompt and the PTY's `\r` into stdout. Workaround: write to a file with sudo, then read it back with `eru ssh --no-input`.

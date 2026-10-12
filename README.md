@@ -4,7 +4,7 @@ One CLI that turns a fresh VPS into a hardened, tuned PostgreSQL 18 server, and 
 
 From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu 26.04 server, locks it down, installs and tunes PostgreSQL 18 with PgBouncer and nginx, issues its TLS certificate, and connects you to it over WireGuard. Every later operation goes through the same binary, over SSH, inside WireGuard. There is no daemon, no web UI and no open control port.
 
-> **Status:** early and under active development. Bootstrap and the first cluster (Phases 1 and 2) work end to end on a real VPS. Backups, restores, upgrades, observability and multi-node are still to come. See [the roadmap](docs/MASTER.md#7-roadmap-and-status).
+> **Status:** early and under active development. Bootstrap and the first cluster (Phases 1 and 2) work end to end on a real VPS. Database backups and per-database restores (Phase 3) are implemented and being tested on a VPS. Upgrades, observability and multi-node are still to come. See [the roadmap](docs/MASTER.md#7-roadmap-and-status).
 
 ## What works today
 
@@ -16,6 +16,9 @@ From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu
 | Databases | `eru db list\|create\|drop\|credentials` |
 | SQL | `eru sql` (one statement, JSON-friendly), `eru psql`, `eru console` (usql) |
 | Tuning | `eru tune show\|explain\|apply` |
+| Backups | `eru backup setup\|now\|list\|verify`, `eru dump`, `eru dump list\|get` |
+| Restores | `eru restore <db>` (`--time`, `--latest`, `--set`, `--dump`), `eru restore status\|promote\|undo\|abort\|cleanup\|drill`, `eru db fork` |
+| Jobs | `eru job list\|follow` |
 | Operations | `eru logs`, `eru secrets export`, `eru upgrade` |
 | Agents | `eru commands --json`, `eru guide agents`, `eru skill install` |
 
@@ -161,6 +164,79 @@ Run migrations as `migrate` and the application as `app`. PgBouncer refuses the 
 
 `eru sql`, `eru psql` and `eru console` all connect over the tunnel to 5432 and verify the certificate (`verify-full`). They log in as `eru_admin`, never as an application role, and are read-only unless `--write` is passed; with `--write` they act as `<db>_owner`, so new objects get the same owner and default grants as a migration. `eru tunnel --target postgres` forwards a local port to 5432, which is how a migration tool on your machine reaches the database as `<db>_migrate` without opening 5432 to the internet. `eru console` uses usql from PATH, or downloads a pinned release and checks its SHA-256.
 
+## Backups and restores
+
+```
+ VPS                                                   S3-compatible bucket (R2, S3, B2, …)
+┌────────────────────────────────────────┐           ┌──────────────────────────────────────┐
+│ PostgreSQL ──WAL, continuously (≤60 s)─┼──────────▶│ <prefix>/pgbackrest/                 │
+│      │                                 │           │   full · diff · incr backup sets     │
+│      └─ eru-job timers ─ pgBackRest ───┼──────────▶│   archived WAL                       │
+│           Sun full, Mon–Sat diff       │           │   (aes-256-cbc, zstd)                │
+│           Wed verify, monthly drill    │           │                                      │
+│      └─ scheduled per-database dumps ──┼──────────▶│ <prefix>/dumps/<db>/  (age-encrypted)│
+└────────────────────────────────────────┘           └──────────────────────────────────────┘
+```
+
+- **pgBackRest underneath, databases on top.** PostgreSQL has one WAL stream for the whole cluster, so backups and point-in-time recovery are cluster-wide. Everything you do with them names one database: `backup list --db`, `restore <db>`, `db fork <db>`.
+- **Restore window.** Any database can be rewound to any second between just after the oldest backup and the last archived WAL, which is at most about a minute old. The nightly backup sets only make restores faster; the WAL fills the gaps between them. `retention_full` is the window in weeks (default 4), and retention is time-based, so extra full backups never shorten it.
+- **`eru backup setup`** probes the bucket from your machine, generates the repository cipher and an age key for dumps, turns on WAL archiving (one confirmed PostgreSQL restart), and takes the first full backup. The bucket keys, cipher and age identity form the **recovery kit**, which goes into the secrets handoff: run `eru secrets export` afterwards. Backups are optional during `cluster init`.
+- **Restoring one database doesn't touch the others.** A restore never overwrites the live database: it builds a copy beside it, you check the copy, and only `promote` swaps it in.
+
+```
+ before           after eru restore app …          after eru restore promote app
+ app (live)       app (live, still serving)        app                      the restored data
+                  app__restoring (the copy)        app__pre_restore_<ts>    the old live data, kept for undo
+```
+
+- **`eru db fork <db> [--at <time>]`** makes a copy under a new name, with its own roles, from now or from a point in time.
+- **Long-retention dumps.** A database that must be kept longer than the window gets scheduled `pg_dump` archives (`databases.<db>.backup.dump_schedule` and `dump_retention`), encrypted with age and streamed to the bucket. `eru dump get` decrypts one, `eru restore <db> --dump <id>` loads it, and `eru db drop` takes a final dump first.
+- **Long work runs as detachable jobs.** Backups, verify, restores, drills and forks run as systemd units on the node. Ctrl-C detaches, and `eru job list` / `eru job follow <id>` re-attach.
+- **Checked, not assumed.** `eru backup verify` checks every file in the repository against its checksum, weekly by default. The monthly `eru restore drill` restores into a scratch instance and runs `pg_amcheck`. Both results show in `eru backup list`.
+
+### Restoring a database, step by step
+
+The example rewinds `app` to just before a bad `DELETE` at 14:03 UTC. Every confirm token is `<db>/restore`, except cleanup's, which is `<db>/cleanup`.
+
+1. **Pick the target.** All times are UTC. `eru backup list --db app` shows the restore window: any second between its start and the last archived WAL can be restored. Use `--time` for a point in time (RFC 3339, or relative like `-15m`), `--latest` for the newest WAL, `--set <label>` for one backup set, or `--dump <id>` (from `eru dump list`) for a point older than the window.
+
+   ```sh
+   eru backup list --db app
+   ```
+
+2. **Restore into a copy.** This runs as a job on the node. Ctrl-C only detaches, and `eru job follow <id>` re-attaches. Add `--dry-run` first to see the plan. The live `app` keeps serving throughout.
+
+   ```sh
+   eru restore app --time 2026-10-12T14:02:00Z --confirm app/restore
+   ```
+
+   pgBackRest restores only `app` into a scratch instance, replays WAL up to the target, and loads the result into `app__restoring`. Only one restore per database can be open at a time; if a previous one failed, the new one clears it. A `must be owner of extension pg_stat_statements` warning from `pg_restore` is expected and harmless.
+
+3. **Check the copy before you promote.** `restore status` compares row estimates with the live database. Query the copy directly to confirm it holds what you expect:
+
+   ```sh
+   eru restore status app
+   eru sql --db app__restoring "select count(*) from users"
+   ```
+
+   If it's the wrong point in time, `eru restore abort app` drops `app__restoring` (the live database was never touched), and you can restore again.
+
+4. **Promote.** PgBouncer pauses, the two databases swap names, and PgBouncer resumes, so clients see a pause of a few seconds. The roles and passwords don't change, so the application reconnects without any change. The old live database is kept as `app__pre_restore_<timestamp>`.
+
+   ```sh
+   eru restore promote app --confirm app/restore
+   eru sql --db app "select count(*) from users"
+   ```
+
+5. **Undo or clean up.** If the promoted data is wrong, `undo` swaps the previous database back in, as long as the leftover still exists. Once you're happy, `cleanup` drops the leftover and frees its space. Run `eru restore cleanup` without a database to list leftovers.
+
+   ```sh
+   eru restore undo app --confirm app/restore       # go back to what was live before the promote
+   eru restore cleanup app --confirm app/cleanup    # or: keep the restore, drop the old copy
+   ```
+
+`eru restore app --time … --promote --confirm app/restore` does steps 2 and 4 in one go, skipping the check. Use it only when you're sure of the target.
+
 ## Tools used and installed
 
 ### On the server
@@ -181,9 +257,10 @@ Installed from the distribution's apt repositories unless noted. Steps install o
 | `postgresql-18`, `postgresql-client-18`, `postgresql-contrib` | PostgreSQL packages (PGDG) | PostgreSQL 18; the major version is held with `apt-mark hold` |
 | `pgbouncer` | PostgreSQL packages (PGDG) | Connection pooling on 6432 |
 | `nginx`, `libnginx-mod-stream`, `ssl-cert` | TLS step | ACME HTTP-01 on 80 and ALPN routing on 443; held with `apt-mark hold` |
+| `pgbackrest` (≥ 2.59.3) | PostgreSQL packages (PGDG) | Database backups, WAL archiving and restores; held with `apt-mark hold`. 2.59.3 is the floor because earlier releases have an encryption bug |
 | `eru` | `cluster init` / `--auto-upgrade-nodes` | The node binary at `/usr/local/bin/eru`, pushed from the operator and signature-checked |
 
-No ACME client (certbot and the like) is installed: eru issues certificates itself. Later phases add pgBackRest (database backups), restic (VPS backups) and the Prometheus exporters, each pinned.
+No ACME client (certbot and the like) is installed: eru issues certificates itself. Later phases add restic (VPS backups) and the Prometheus exporters, each pinned.
 
 ### On your machine
 
@@ -205,7 +282,8 @@ No ACME client (certbot and the like) is installed: eru issues certificates itse
 | `golang.zx2c4.com/wireguard` (wireguard-go + netstack) | The userspace WireGuard tunnel |
 | `golang.org/x/crypto/acme` | Issuing and renewing certificates on the node |
 | `jackc/pgx` | SQL over the tunnel (`eru sql`, `db`, `tune`) |
-| `filippo.io/age` | The encrypted transfer bundle |
+| `filippo.io/age` | The encrypted transfer bundle and long-retention dumps |
+| `minio/minio-go` | Bucket probe on `backup setup`, and streaming dumps to and from the bucket |
 | `sigstore/sigstore-go` | Verifying signed releases on upgrade |
 | `pelletier/go-toml` | `cluster.toml` |
 | `itchyny/gojq` | `--jq` output filtering |

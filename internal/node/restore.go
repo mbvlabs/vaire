@@ -69,6 +69,36 @@ func restoreInProgress(db, action string) error {
 		WithDetails(map[string]any{"reason": "restore_in_progress", "database": db, "restore_id": r.ID})
 }
 
+// clearFailedRestore drops what a failed restore of db left behind, so the
+// next restore can start without an abort first. Only a failed restore whose
+// job has finished is cleared; a ready one holds the operator's copy.
+func clearFailedRestore(ctx context.Context, db string) error {
+	bs, err := backup.LoadState()
+	if err != nil {
+		return err
+	}
+	r, ok := bs.OpenRestore(db)
+	if !ok || r.Phase != backup.PhaseFailed {
+		return nil
+	}
+	st, err := engine.LoadState(engine.StatePath)
+	if err != nil {
+		return err
+	}
+	if job, ok := st.Job(r.ID); ok && !job.Final() {
+		return nil
+	}
+	if err := (pg.Local{}).Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(backup.RestoringName(db))), nil); err != nil {
+		return err
+	}
+	return backup.Update(func(s *backup.State) error {
+		if cur, ok := s.Restores[db]; ok && cur.ID == r.ID {
+			delete(s.Restores, db)
+		}
+		return nil
+	})
+}
+
 // checkRestorable checks db can be restored: configured, a normal name, and
 // short enough for the names beside it.
 func checkRestorable(cfg config.Cluster, db string) error {
@@ -108,6 +138,9 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	target, err := checkRestoreTarget(ctx, cfg, p, env.Req.Secrets)
+	if err == nil && !env.Req.DryRun {
+		err = clearFailedRestore(ctx, p.Database)
+	}
 	if err == nil {
 		err = restoreInProgress(p.Database, "a new restore")
 	}

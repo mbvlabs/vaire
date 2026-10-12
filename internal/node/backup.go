@@ -100,11 +100,7 @@ func handleBackupVerify(ctx context.Context, env *Env) (Result, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
-	res, err := verify(ctx, env.Cluster, "backup.verify", env.Report)
-	if err != nil {
-		return Result{}, err
-	}
-	return Result{Data: res}, nil
+	return runJobRPC(ctx, env, "backup-verify", nil, nil)
 }
 
 func jobVerify(ctx context.Context, env *jobEnv) (any, error) {
@@ -235,12 +231,18 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: out, Warnings: warnings}, nil
 }
 
-// restoreWindow is from the end of the oldest backup to the last archived
-// WAL segment.
+// restoreWindow is from just after the end of the oldest backup to the last
+// archived WAL segment.
 func restoreWindow(info backup.Info, archive backup.ArchiveStatus) Window {
 	w := Window{LagSeconds: archive.LagSeconds}
 	if oldest, ok := info.Oldest(); ok {
+		// pgBackRest picks a set whose stop time is strictly before the
+		// target, and stores it in whole seconds: the first restorable
+		// second is the one after.
 		w.From = oldest.Stop
+		if stop, err := time.Parse(time.RFC3339, oldest.Stop); err == nil {
+			w.From = stop.Add(time.Second).UTC().Format(time.RFC3339)
+		}
 	}
 	w.To = archive.LastArchivedTime
 	if w.To == "" {

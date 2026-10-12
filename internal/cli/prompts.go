@@ -13,6 +13,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 func init() {
@@ -127,11 +128,8 @@ func dryRun(cmd *cobra.Command) bool {
 }
 
 func stdinIsTTY() bool {
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	// A character-device check is not enough: /dev/null is one too.
+	return term.IsTerminal(int(os.Stdin.Fd())) //nolint:gosec // G115: file descriptors fit in int.
 }
 
 // PromptYes asks a [y/N] question. It never prompts in structured mode.

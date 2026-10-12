@@ -244,16 +244,18 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 		hostPart, port = h, p
 	}
 	return execute("pgbackrest.conf.tmpl", map[string]any{
-		"EndpointHost":  hostPart,
-		"EndpointPort":  port,
-		"Bucket":        cfg.Backup.Bucket,
-		"Region":        cfg.Backup.Region,
-		"URIStyle":      cfg.Backup.URIStyle,
-		"KeyID":         sec.KeyID,
-		"Secret":        sec.Secret,
-		"Prefix":        cfg.Backup.Prefix,
-		"CipherPass":    sec.CipherPass,
-		"RetentionFull": cfg.Backup.Database.RetentionFull,
+		"EndpointHost": hostPart,
+		"EndpointPort": port,
+		"Bucket":       cfg.Backup.Bucket,
+		"Region":       cfg.Backup.Region,
+		"URIStyle":     cfg.Backup.URIStyle,
+		"KeyID":        sec.KeyID,
+		"Secret":       sec.Secret,
+		"Prefix":       cfg.Backup.Prefix,
+		"CipherPass":   sec.CipherPass,
+		// retention_full is the restore window in weeks. Time-based
+		// retention keeps it, however many full backups are taken in it.
+		"RetentionDays": cfg.Backup.Database.RetentionFull * 7,
 		"LocalRepo":     cfg.Backup.Database.LocalRepo,
 		"ProcessMax":    maxInt(1, host.VCPU/2),
 		"Stanza":        cfg.Name(),

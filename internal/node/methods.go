@@ -158,7 +158,7 @@ func methods() map[string]method {
 		},
 		{name: "backup.now", cluster: true, runLog: always, handler: handleBackupNow},
 		{name: "backup.list", lock: fixedLock(engine.LockShared), cluster: true, handler: handleBackupList},
-		{name: "backup.verify", lock: fixedLock(engine.LockShared), cluster: true, runLog: always, handler: handleBackupVerify},
+		{name: "backup.verify", cluster: true, runLog: always, handler: handleBackupVerify},
 		{name: "job.list", handler: handleJobList},
 		{name: "job.follow", handler: handleJobFollow},
 		{name: "restore.start", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreStart},

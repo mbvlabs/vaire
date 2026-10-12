@@ -371,7 +371,11 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 		}
 	}
 	cancel()
-	<-done
+	// The job is over: never let the journal reader hold the reply.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
 	return jobOutcome(rec)
 }
 
@@ -402,6 +406,7 @@ func jobOutcome(rec engine.JobRecord) (Result, error) {
 // are eru events pass through, other lines become log events.
 func streamJournal(ctx context.Context, args []string, report engine.Reporter) {
 	cmd := exec.CommandContext(ctx, "journalctl", args...) //nolint:gosec // G204: fixed journalctl with a validated unit or invocation id.
+	cmd.WaitDelay = time.Second
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return
