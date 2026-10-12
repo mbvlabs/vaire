@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -100,7 +101,7 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err := ensureIncludeDir(); err != nil {
 		return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
 	}
-	if err := validateConfig(ctx, rt); err != nil {
+	if err := validateConfig(ctx, cfg, rt); err != nil {
 		restoreFiles(files, backups)
 		return engine.ApplyResult{}, err
 	}
@@ -146,24 +147,45 @@ func ensureIncludeDir() error {
 }
 
 // validateConfig fails when PostgreSQL reports an error in the new files.
-func validateConfig(ctx context.Context, rt engine.Runtime) error {
-	settings, err := rt.PG.Query(ctx, "postgres", "SELECT sourcefile, name, error FROM pg_file_settings WHERE error IS NOT NULL", nil)
+// pg_file_settings reports every changed postmaster setting as "setting could
+// not be applied" because it needs a restart; those rows are skipped, and
+// postgres -C parses the files as a starting server would to catch an invalid
+// value among them.
+func validateConfig(ctx context.Context, cfg config.Cluster, rt engine.Runtime) error {
+	settings, err := rt.PG.Query(ctx, "postgres", `SELECT f.sourcefile, f.sourceline, f.name, f.error
+FROM pg_file_settings f LEFT JOIN pg_settings s ON s.name = f.name
+WHERE f.error IS NOT NULL AND NOT (f.error = 'setting could not be applied' AND s.context = 'postmaster')
+ORDER BY f.seqno`, nil)
 	if err != nil {
 		return fmt.Errorf("validating the rendered configuration: %w", err)
 	}
-	hba, err := rt.PG.Query(ctx, "postgres", "SELECT line_number, error FROM pg_hba_file_rules WHERE error IS NOT NULL", nil)
+	hba, err := rt.PG.Query(ctx, "postgres", "SELECT file_name, line_number, error FROM pg_hba_file_rules WHERE error IS NOT NULL ORDER BY rule_number", nil)
 	if err != nil {
 		return fmt.Errorf("validating the rendered configuration: %w", err)
 	}
-	if len(settings) == 0 && len(hba) == 0 {
+	var problems []string
+	for _, row := range settings {
+		problems = append(problems, fmt.Sprintf("%s:%s %s: %s", row["sourcefile"], row["sourceline"], row["name"], row["error"]))
+	}
+	for _, row := range hba {
+		problems = append(problems, fmt.Sprintf("%s:%s: %s", row["file_name"], row["line_number"], row["error"]))
+	}
+	if len(problems) == 0 {
+		if _, err := Probe(ctx, "runuser", "-u", "postgres", "--",
+			"/usr/lib/postgresql/"+strconv.Itoa(PGVersion)+"/bin/postgres",
+			"-D", cfg.Server.DataDirectory, "-c", "config_file="+PGConfDir+"/postgresql.conf", "-C", "max_connections"); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if len(problems) == 0 {
 		return nil
 	}
-	details := map[string]any{"file_settings": settings, "hba_rules": hba}
+	details := map[string]any{"file_settings": settings, "hba_rules": hba, "problems": problems}
 	return output.NewError(
 		output.CodeStepFailed,
-		"PostgreSQL rejected the rendered configuration",
+		"PostgreSQL rejected the rendered configuration: "+strings.Join(problems, "; "),
 		output.ExitStep,
-		"The previous files were restored. Fix the settings in details.",
+		"The previous files were restored. Fix the settings named in the message.",
 	).WithDetails(details)
 }
 

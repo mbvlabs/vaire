@@ -133,3 +133,13 @@ Same VPS, rebuilt with Ubuntu 26.04, edge build from `71f8896` (after the fixes 
 - [x] **PostgreSQL is told to use TLS before the certificate exists** (found while reviewing the database steps)
     - Cause: the database phase runs `postgres-config-v1` before `tls-v2`. `postgres-config-v1` turns `ssl` on, points it at `/etc/eru/tls/server.{crt,key}` and restarts PostgreSQL on its first run, but `tls-v2` is what writes the placeholder certificate and puts `postgres` in `ssl-cert`. With `ssl = on` and no readable certificate, PostgreSQL refuses to start, so the step fails at its restart as soon as the ownership blocker above is fixed. Even with a certificate in place, PostgreSQL cannot read the key until it is restarted after joining `ssl-cert`, and nothing restarts it after `tls-v2`.
     - Fix: run `tls-v2` before `postgres-config-v1`, so the certificate exists and `postgres` is in `ssl-cert` before PostgreSQL restarts. Fixed: `steps.Catalog`/`DatabaseStepIDs`, the step tables in IMPLEMENTATION.md and MASTER.md, and the step numbers in code comments and script headers now use the new order (`tls-v2` is step 10, `postgres-config-v1` step 11, `postgres-roles-v1` step 12). The first-run restart of `postgres-config-v1` is what picks up the `ssl-cert` membership, so no extra restart is needed.
+
+## Round 3: third manual test (2026-10-12)
+
+Fresh Ubuntu 26.04 rebuild, edge build from `58104a8`. The host phase and database steps 1–4 passed.
+
+- [x] **`postgres-config-v1` always fails on its first run: "PostgreSQL rejected the rendered configuration"** (blocker)
+    - Cause: `validateConfig` failed on any row in `pg_file_settings` with an error. When a postmaster-context setting changes (`shared_buffers`, `max_connections`, `wal_level`, …), PostgreSQL lists it there as `setting could not be applied` because it needs a restart. The first run always changes these, so the step could never pass.
+    - Fixed: rows with `setting could not be applied` for a `postmaster` setting are skipped. Then `postgres -C max_connections` parses the files the way a starting server would, so an invalid value for a restart-only setting is still caught.
+- [x] **The rejection error didn't say what was rejected**
+    - The errors were only in `details`, and the error box doesn't print them. Fixed: the message lists each problem as `file:line name: error`.
