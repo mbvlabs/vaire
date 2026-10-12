@@ -145,3 +145,8 @@ Fresh Ubuntu 26.04 rebuild, edge build from `58104a8`. The host phase and databa
     - The errors were only in `details`, and the error box doesn't print them. Fixed: the message lists each problem as `file:line name: error`.
 - [x] **`postgres-roles-v1` always fails: `syntax error at or near "#"`** (blocker)
     - Seen once the config fix let the run reach step 6. The cluster SQL in `internal/steps/postgres_roles.go` started with a `# managed by eru …` header, and `#` is not a SQL comment. Fixed: the header is `-- managed by eru …`.
+- [x] **The secrets document shouldn't be a file on the machine**
+    - Seen after the first complete run: init left `eru-<name>.secrets.age` next to wherever it ran (and in `/root` for `--local`), and the operator still had to move it and the passphrase into a password manager by hand.
+    - Fixed per `docs/SECRETS-HANDOFF-SPEC.md`: init and `secrets export` print a secrets handoff (every secret, grouped for a password manager, plus an armored transfer bundle and its passphrase) and write nothing unless `--secrets-out`/`--out` is given. `eru login` takes the bundle as a paste, from stdin (`-`) or as a file. `--passphrase-out` is gone; runs without a terminal need `--secrets-out`, `--reveal-passphrase` and `--confirm-secrets-stored`.
+- [x] **`eru ssh --command "sudo …"` fails: "a terminal is required to authenticate"**
+    - `--command` ran without a PTY, so sudo could not prompt for the admin password. Fixed: from a terminal, `--command` requests a PTY like `ssh -t`; piped or `--no-input` runs keep the plain session.

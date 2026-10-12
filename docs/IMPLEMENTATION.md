@@ -143,7 +143,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru commands` | `--path <cmd path>` | | | | | |
 | `eru guide agents` | | | | | | |
 | `eru skill install` | `--harness <name>…`, `--dir` | ✓ | | ✓ | ✓ | |
-| `eru login <secrets.age>` | `--name`, `--passphrase-stdin`, `--passphrase-file` | ✓ | | | ✓ | |
+| `eru login [bundle-file\|-]` | `--name`, `--passphrase-stdin`, `--passphrase-file` | ✓ | | | ✓ | |
 | `eru context list\|show\|use <n>\|remove <n>` | | (use/remove ✓) | remove | | | `<name>` |
 | `eru cluster init` | §8.1 | ✓ | | ✓ | ✓ | `<cluster>` when `--no-input` |
 | `eru plan` | | | | | | |
@@ -172,7 +172,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru maint vacuum\|analyze\|reindex\|repack` | §16 | ✓ | | ✓ | | repack: `<db>` |
 | `eru maint report <kind>` | §16 | | | | | |
 | `eru maint kill` | `--idle-in-tx`, `--pid`, `--older-than` | ✓ | ✓ | ✓ | | `<cluster>/kill` |
-| `eru secrets export` | `--out`, `--passphrase-out` | ✓ | | | ✓ | |
+| `eru secrets export` | `--out`, `--reveal-passphrase` | ✓ | | | ✓ | |
 | `eru wg export` | `--out`, `--install` | `--install` | | ✓ | ✓ | |
 | `eru upgrade` | `--version`, `--channel`, `--skip-nodes` | ✓ | | ✓ | ✓ | |
 | `eru node upgrade` | `--version`, `--rollback` | ✓ | rollback | ✓ | | `<cluster>/rollback` |
@@ -520,7 +520,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 
 ### 8.1 `eru cluster init` flags
 
-`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--database <name>` (repeatable), `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--extensions`, `--tls-mode`, `--local`, `--restore <secrets.age>` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--passphrase-out <path|->`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check` (deprecated, no effect), `--resume`, `--discard`. Until their phase lands, the backup and VPS flags are accepted with a `flag_not_used_yet` warning.
+`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--database <name>` (repeatable), `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--extensions`, `--tls-mode`, `--local`, `--restore <bundle-file|->` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--reveal-passphrase`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check` (deprecated, no effect), `--resume`, `--discard`. Until their phase lands, the backup and VPS flags are accepted with a `flag_not_used_yet` warning.
 
 - `--host` also takes a `Host` alias from `~/.ssh/config`. First contact reads the matching block for `HostName`, `User`, `Port` and `IdentityFile`; explicit `user@`/`:port` and `--identity` win. `--identity` (or the resolved `IdentityFile`) is checked to be a readable private key while the answers are collected, before anything is prompted or generated.
 - Without `--identity`, first contact offers ssh-agent keys and `~/.ssh/id_{ed25519,ecdsa,rsa}` as one `publickey` method. An encrypted default key that the agent doesn't hold gets a passphrase prompt in a TTY; otherwise it is skipped and named in `details.skipped_keys`.
@@ -532,7 +532,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 Each numbered phase emits `step` events and records progress in `pending/<name>/progress.json`. `--resume` continues from the last completed phase.
 
 1. **Local preflight** (§20).
-2. **Collect answers** from flags, the answers file, and prompts. Prompt only in a TTY. Validate (§6.1). The `huh` interview has groups *Server* (name, admin user, timezone, data directory), *Endpoint* (domain, TLS mode, client allowlist, then ACME email in `acme` mode), *Workload* (profile, client connections) and *Databases* (names, default `app`). Each question has a flag; a question already answered by a flag or the answers file is skipped. Backup, VPS and extension questions arrive with their phases. Non-interactive runs check `--confirm <cluster>`, `--confirm-secrets-stored` and `--passphrase-out` before anything changes. In `acme` mode, init then shows the `A <domain> → <public IPv4>` record so the operator can create it while the host phase runs.
+2. **Collect answers** from flags, the answers file, and prompts. Prompt only in a TTY. Validate (§6.1). The `huh` interview has groups *Server* (name, admin user, timezone, data directory), *Endpoint* (domain, TLS mode, client allowlist, then ACME email in `acme` mode), *Workload* (profile, client connections) and *Databases* (names, default `app`). Each question has a flag; a question already answered by a flag or the answers file is skipped. Backup, VPS and extension questions arrive with their phases. Non-interactive runs check `--confirm <cluster>`, `--confirm-secrets-stored`, `--secrets-out` and `--reveal-passphrase` before anything changes. In `acme` mode, init then shows the `A <domain> → <public IPv4>` record so the operator can create it while the host phase runs.
 3. **Generate secrets** on the operator (§10.2), stored in `pending/<name>/secrets.json` (0600): the operator WireGuard keypair, SSH ed25519 key, sudo password, and every database and service password, so `--resume` reuses them.
 4. **Backup credentials check**: from the operator, do a signed `PUT`/`GET`/`DELETE` of `<prefix>/.eru-probe` using the S3 client in `internal/backup/s3probe.go` (minimal SigV4 over `net/http`; no SDK). This fails early on bad keys or a bad bucket. For a non-empty `<prefix>/pgbackrest` without `--restore`, return `precondition_failed` ("prefix already contains a backup repository").
 5. **First contact** over public SSH. Detect arch and OS (`/etc/os-release`). Push the binary (§7.5, bootstrap case).
@@ -545,7 +545,7 @@ Each numbered phase emits `step` events and records progress in `pending/<name>/
 9. **DNS** (`dns_confirmed`, `acme` mode only). Show the records (`A`, plus `AAAA → <public IPv6>` when host bootstrap reported one; it is kept in `progress.json`; when none was reported, the panel says there is no AAAA record), with the note that they must be DNS only (not proxied). The A record is also shown early, while the host phase runs, with a note that the AAAA record appears once the host is up and that eru continues and then pauses for the operator to confirm the records before the database phase. In a TTY the operator types `confirmed` once the records exist; `--dns-ready` skips that pause, and non-interactive runs don't pause. eru then queries 1.1.1.1 and 8.8.8.8 once, directly (a Go `net.Resolver` dialing them, so local caches can't lie), and continues whatever they answer. A mismatch is a `dns_mismatch` warning listing each resolver's answers against the expected addresses. Answers inside Cloudflare's published ranges are a `dns_proxied` warning ("proxied by Cloudflare: database clients can't connect through it; set the record to DNS only"). DNS never blocks init: the certificate wait (step 11) shows whether the certificate was issued. `--skip-dns-check` is accepted with a `flag_deprecated` warning. `self-signed` mode skips this phase.
 10. **RPC `cluster.bootstrap` phase=database** (`database_bootstrapped`) over WireGuard: it requires `node.toml` of the same cluster and a completed host phase, writes the new `cluster_toml` through `state.Store`, and runs the database steps (7–13 in Phase 2; later phases append theirs). All database and service passwords travel in `secrets`. Result: `{phase, steps, tls: {state, not_after}, restart_performed}`.
 11. **Certificate wait** (`tls_checked`): poll `tls.status` for up to 120 s until the placeholder is replaced. `tls.state` is `acme`, `pending` or `self-signed`; `pending` is a `tls_pending` warning, never a failure. The warning carries the resolver answers (or the Cloudflare hint) from a fresh DNS check, and says that `eru-certs.timer` retries every hour.
-12. **Secrets document** (`secrets_written`, §10): write to `--secrets-out` (default `./eru-<name>.secrets.age`, 0600) and display the passphrase once. In a TTY, require typing `stored` (the prompt reads `Type 'stored' once both are stored safely`); otherwise require `--confirm-secrets-stored` together with `--passphrase-out`. `--passphrase-out <path>` writes a 0600 file; `--passphrase-out -` prints it in a TTY and puts it in `data.passphrase` in structured output (an explicit request). A resumed init that stopped before the confirmation writes a fresh document with a new passphrase over its own file. Then RPC `cluster.confirm-secrets` sets `secrets_confirmed_at`.
+12. **Secrets handoff** (`secrets_written`, §10): print the handoff (§10.1) in the terminal and write nothing, unless `--secrets-out <path>` asks for the armored transfer bundle to be written there (0600). In a TTY, require typing `stored` (the prompt reads `Type 'stored' once you've saved both parts in your password manager`), then offer to clear the screen (default yes). Without a TTY, require `--secrets-out`, `--reveal-passphrase` and `--confirm-secrets-stored`; the passphrase is in `data.passphrase` and the plain secrets are never in structured output. A resumed init that stopped before the confirmation shows a new handoff with a new passphrase. Then RPC `cluster.confirm-secrets` sets `secrets_confirmed_at`.
 13. **Create the local context** from the pending data (with `lockdown_confirmed_at` set), make it current, and delete `pending/<name>`.
 14. Print the summary: connection URLs with the passwords left out (`postgres://app_app:«in secrets document»@…`), TLS state, `restart_performed`, and `next: ["eru sql --db <first db> \"select 1\"", "eru psql --db <first db>"]`. Doctor and backup results join with their phases.
 
@@ -592,7 +592,7 @@ The secrets document's `break_glass` text describes this flow.
 - takes the node's public address from the answers file, then `--host <public-ip>`, then the default-route source address (with a warning when it is private);
 - skips first contact and binary push and uses the in-process dispatcher;
 - generates secrets on the server and runs the same phases as a remote init: host steps, lockdown arming, the DNS step (`acme` mode), the database phase and the certificate wait;
-- writes the secrets document to `/root/eru-<name>.secrets.age` (0600) and prints the passphrase once, plus a one-line `eru login` instruction: "copy the file to your machine, run `eru login eru-<name>.secrets.age`".
+- prints the secrets handoff (§10.1) on the server console and writes nothing to `/root`, plus a one-line instruction: "On your machine run `eru login` and paste the transfer bundle".
 
 For lockdown in `--local`, the commit-confirm verification needs an operator over WireGuard. So `--local` arms the revert timer with `timeout = 30 min` and prints "run `eru login …` then any `eru status` from your machine within 30 minutes to confirm".
 
@@ -678,9 +678,14 @@ Maintenance additionally refuses while a pgBackRest backup is running. Check `pg
 
 ## 10. Secrets
 
-### 10.1 Secrets document
+### 10.1 Secrets handoff and transfer bundle
 
-The file is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work factor 18). The plaintext is JSON:
+eru never writes the secrets document to disk by default. At the end of init (and on `eru secrets export`) it prints the **secrets handoff**, the cluster's master record, in the terminal:
+
+1. **Explicit secrets**: every value in plain text, grouped like password-manager entries (cluster, each node, the operator with its SSH and WireGuard private keys, the database admin, each database's roles and URLs, the service roles, then backups and metrics from their phases, then the connection notes and break-glass text). Each label is on its own line and each value on the next, flush left, so a triple-click copies one value. Groups with nothing yet are left out.
+2. **Transfer bundle**: the document below as an ASCII-armored `age` block (`-----BEGIN AGE ENCRYPTED FILE-----`), plus its passphrase. `eru login` and `cluster init --restore` take it from a paste, stdin or a file.
+
+The bundle is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work factor 18). The plaintext is JSON:
 
 ```json
 {
@@ -706,9 +711,9 @@ The file is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work f
 }
 ```
 
-- **Passphrase**: 8 words from the EFF large wordlist (embedded, about 103 bits), joined with `-`. It's displayed once and never stored by eru.
-- **`eru login`**: decrypt (passphrase from TTY, `--passphrase-stdin` or `--passphrase-file`) and create `contexts/<name>/…`. Bad passphrase returns `secrets_error`.
-- **`eru secrets export`**: rebuilds the document from the context. Credentials rotated since login require a re-login or the `credentials` command. It generates a new passphrase.
+- **Passphrase**: 8 words from the EFF large wordlist (embedded, about 103 bits), joined with `-`. It's displayed once in the handoff and never stored by eru.
+- **`eru login [bundle-file|-]`**: with no argument in a TTY, prompt to paste the bundle and read up to its END line; `-` reads it from stdin (not together with `--passphrase-stdin`); a path reads a file. Armored and binary `age` both work, so old `.secrets.age` files still open. Decrypt (passphrase from TTY, `--passphrase-stdin` or `--passphrase-file`) and create `contexts/<name>/…`. Bad passphrase returns `secrets_error`.
+- **`eru secrets export`**: rebuilds the document from the context and shows a new handoff with a new passphrase, with the same `stored` confirmation. `--out <path>` also writes the armored bundle. Without a TTY it needs `--out` and `--reveal-passphrase`, like init. Credentials rotated since login require a re-login or the `credentials` command. The previous bundle still opens with its own passphrase.
 
 ### 10.2 Generated secrets
 
@@ -1011,15 +1016,15 @@ This isn't destructive, so no `--confirm` is needed. It's exclusive-locked.
 - Config snapshots: `restic backup --tag eru-config --stdin --stdin-filename cluster.toml` after each successful `apply`.
 - `eru upgrade` and `eru pg update` take a `vps-backup` first.
 
-### 13.7 DR: `eru cluster init --restore <secrets.age> --host root@<new-ip>`
+### 13.7 DR: `eru cluster init --restore <bundle-file|-> --host root@<new-ip>`
 
-1. Decrypt the document. Probe the bucket. Find the latest `eru-config` snapshot and load `cluster.toml` from it. Override `nodes[0].public_address` with the new host IP.
+1. Decrypt the transfer bundle (same input rules as `eru login`). Probe the bucket. Find the latest `eru-config` snapshot and load `cluster.toml` from it. Override `nodes[0].public_address` with the new host IP.
 2. First contact and binary push (§8.2 steps 5–6), with these differences:
    - The operator keys come from the document, not newly generated.
    - Before step 3 (`wireguard-v1`), restore the allowlist paths from the latest `eru-vps` snapshot to their live locations: `/etc/wireguard`, `/etc/ssh/ssh_host_*`, `/etc/eru`, `/root`, `/home`, `extra_paths`. Use `restic restore --include` into a temp dir and copy with ownership. The server keeps its WireGuard identity and host keys, so existing contexts keep working once the public address is updated.
 3. Lockdown (§8.3), then steps 7–13 with **`postgres-cluster-v1` in restore mode**. Create the cluster, stop it, empty the datadir, run `pgbackrest restore` (`--type=default`, or `--type=time --target=<--restore-time>` with `--target-action=promote`), and start it.
 4. Steps 14–18 (stanza exists; `check`, then an immediate full backup on the new timeline).
-5. Update the local context's `public_address`. Re-export the secrets document with the new address and a new passphrase. Print a DNS reminder if the A record of `domain` doesn't resolve to the new IP.
+5. Update the local context's `public_address`. Show a new secrets handoff with the new address and a new passphrase. Print a DNS reminder if the A record of `domain` doesn't resolve to the new IP.
 
 ---
 

@@ -198,7 +198,7 @@ func phaseTitle(step string) (title, header string) {
 	case "init.tls":
 		return "Certificate", "TLS"
 	case "init.secrets-document":
-		return "Secrets document", "Secrets"
+		return "Secrets handoff", "Secrets"
 	}
 	return step, ""
 }

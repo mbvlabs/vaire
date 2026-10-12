@@ -63,7 +63,12 @@ func Secret(title string) (string, error) {
 
 // YesNo asks a yes/no question, defaulting to no.
 func YesNo(title, description string) (bool, error) {
-	var ok bool
+	return YesNoDefault(title, description, false)
+}
+
+// YesNoDefault asks a yes/no question with def preselected.
+func YesNoDefault(title, description string, def bool) (bool, error) {
+	ok := def
 	c := huh.NewConfirm().Title(title).Affirmative("Yes").Negative("No").Value(&ok)
 	if description != "" {
 		c = c.Description(description)

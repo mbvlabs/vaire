@@ -36,7 +36,9 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = sess.Close() }()
 
-	if command != "" {
+	// A command run from a terminal gets a PTY too (like ssh -t), so sudo can
+	// ask for the admin password.
+	if command != "" && (!stdinIsTTY() || MustNotPrompt(cmd)) {
 		sess.Stdin = cmd.InOrStdin()
 		sess.Stdout = cmd.OutOrStdout()
 		sess.Stderr = cmd.ErrOrStderr()
@@ -61,6 +63,9 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	sess.Stdout = os.Stdout
 	sess.Stderr = os.Stderr
 	go forwardWindowSize(fd, sess)
+	if command != "" {
+		return sshExit(sess.Run(command))
+	}
 	// Shell only starts the remote shell; Wait blocks until it exits.
 	if err := sess.Shell(); err != nil {
 		return sshExit(err)

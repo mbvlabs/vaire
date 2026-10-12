@@ -2,7 +2,6 @@ package cli
 
 import (
 	"net"
-	"path/filepath"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/buildinfo"
@@ -15,8 +14,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// runSecretsExport rebuilds the secrets document from the local context
-// (§10.1). It generates a fresh passphrase and never touches the node.
+// runSecretsExport rebuilds the secrets handoff from the local context
+// (§10.1). It generates a fresh bundle passphrase and never touches the node.
 func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	c, err := contexts.Resolve(stringFlag(cmd, "context"))
 	if err != nil {
@@ -45,50 +44,30 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	secrets.Add(string(wgKey))
 	secrets.Add(string(sshKey))
 	secrets.Add(creds.SudoPassword)
-	for _, v := range doc.SecretValues() {
-		secrets.Add(v)
+	if err := requireStructuredHandoff(cmd, "out", "secrets export", ""); err != nil {
+		return err
 	}
-
 	out := stringFlag(cmd, "out")
-	if out == "" {
-		out = "eru-" + c.Cluster + ".secrets.age"
-	}
-	if abs, err := filepath.Abs(out); err == nil {
-		out = abs
-	}
-	passphrase, err := secretsdoc.NewPassphrase()
-	if err != nil {
-		return err
-	}
-	secrets.Add(passphrase)
-	encrypted, err := secretsdoc.Encrypt(doc, passphrase)
-	if err != nil {
-		return err
-	}
 	if dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: map[string]string{"out": out}, Message: "dry run: would write " + out})
+		return output.Success(cmd, output.Result{Data: map[string]string{"out": out}, Message: "dry run: would build a new secrets handoff"})
 	}
-	if err := transport.WriteSecretFile(out, encrypted); err != nil {
+	h, err := newHandoff(doc, out)
+	if err != nil {
 		return err
 	}
-	res := map[string]string{"out": out}
-	message := "wrote " + out
-	if ppOut := stringFlag(cmd, "passphrase-out"); ppOut == "-" {
-		res["passphrase"] = passphrase
-		message += "\npassphrase: " + passphrase
-	} else if ppOut != "" {
-		if abs, err := filepath.Abs(ppOut); err == nil {
-			ppOut = abs
-		}
-		if err := transport.WriteSecretFile(ppOut, []byte(passphrase+"\n")); err != nil {
-			return err
-		}
-		res["passphrase_out"] = ppOut
-		message += "\npassphrase written to " + ppOut
-	} else {
-		message += "\npassphrase (shown once): " + passphrase
+	res := map[string]string{}
+	if h.path != "" {
+		res["out"] = h.path
 	}
-	return output.Success(cmd, output.Result{Data: res, Message: message})
+	if MustNotPrompt(cmd) {
+		// Explicitly requested with --reveal-passphrase.
+		res["passphrase"] = h.passphrase
+		return output.Success(cmd, output.Result{Data: res, Message: "wrote the transfer bundle to " + h.path})
+	}
+	if err := h.show(cmd, false); err != nil {
+		return err
+	}
+	return output.Success(cmd, output.Result{Data: res, Message: "New secrets handoff shown. The previous bundle still opens with its own passphrase."})
 }
 
 // rebuildDocument builds a document from the context and credentials.

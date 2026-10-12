@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"filippo.io/age"
+	"filippo.io/age/armor"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/contexts"
 )
@@ -176,14 +177,18 @@ func Encrypt(doc Document, passphrase string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Decrypt opens an age file with passphrase. A wrong passphrase or a damaged
-// file returns secrets_error.
+// Decrypt opens an age file, binary or ASCII-armored, with passphrase. A
+// wrong passphrase or a damaged file returns secrets_error.
 func Decrypt(raw []byte, passphrase string) (Document, error) {
 	identity, err := age.NewScryptIdentity(strings.TrimSpace(passphrase))
 	if err != nil {
 		return Document{}, secretsError("the passphrase is empty", err)
 	}
-	r, err := age.Decrypt(bytes.NewReader(raw), identity)
+	var src io.Reader = bytes.NewReader(raw)
+	if IsArmored(raw) {
+		src = armor.NewReader(bytes.NewReader(bytes.TrimSpace(raw)))
+	}
+	r, err := age.Decrypt(src, identity)
 	if err != nil {
 		var noMatch *age.NoIdentityMatchError
 		if errors.As(err, &noMatch) {
@@ -203,7 +208,7 @@ func Decrypt(raw []byte, passphrase string) (Document, error) {
 }
 
 func secretsError(message string, cause error) *output.CLIError {
-	e := output.NewError(output.CodeSecrets, message, output.ExitSecrets, "Check the passphrase and the file, then retry.")
+	e := output.NewError(output.CodeSecrets, message, output.ExitSecrets, "Check the passphrase and the bundle, then retry.")
 	e.Cause = cause
 	return e
 }

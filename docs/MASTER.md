@@ -7,7 +7,7 @@
 
 **One Glorious CLI**: a single signed Go binary, `eru`, that sets up, secures, runs, backs up, restores and maintains a PostgreSQL cluster, and is the only interface to it.
 
-From a laptop (or from an agent), `eru` takes a fresh Debian or Ubuntu VPS, hardens it, installs a tuned and secured PostgreSQL 18 cluster, and connects the operator to it over WireGuard. Once setup is done, the operator gets a **secrets document** that authenticates any `eru` installation to the cluster. Every later operation goes through the same CLI, over SSH, through WireGuard. That includes backups, restores, maintenance, extensions, adding nodes and running queries.
+From a laptop (or from an agent), `eru` takes a fresh Debian or Ubuntu VPS, hardens it, installs a tuned and secured PostgreSQL 18 cluster, and connects the operator to it over WireGuard. Once setup is done, eru prints a **secrets handoff**: every secret in plain text for the operator's password manager, plus an encrypted transfer bundle that authenticates any `eru` installation to the cluster. Every later operation goes through the same CLI, over SSH, through WireGuard. That includes backups, restores, maintenance, extensions, adding nodes and running queries.
 
 The CLI is **agent-first**. Every command is non-interactive when asked, emits structured JSON, has documented exit codes and dry-run support, and protects destructive operations. Pointing an agent at `eru` is a supported way to operate a cluster.
 
@@ -32,7 +32,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 - **Desired state in, convergence out.** The cluster's desired state is one TOML file on the central command. `eru apply` converges every node to it, and running it again is always safe. `eru plan` shows what would change.
 - **Versioned, journaled steps.** Each step has a `Check`/`Apply` pair and a versioned ID (for example `postgres-18-tls-v2`). A journal on each node records what ran, so upgrading eru re-runs only the steps that changed.
 - **eru owns the config it writes.** Managed config goes into dedicated files, user overrides go into one documented override file, and `ALTER SYSTEM` is disabled (`allow_alter_system = off`), so nothing drifts silently.
-- **Secrets are generated, never asked for, and leave the server exactly once.** They're collected into the encrypted secrets document at the end of setup.
+- **Secrets are generated, never asked for, and shown exactly once.** They're printed in the secrets handoff at the end of setup and never written to disk by eru unless asked.
 - **Restores are the product.** A backup that has never been restored doesn't count. Restore drills run on a schedule and are reported.
 - **Agent-first, human-friendly.** The output is readable in a terminal and exact as JSON, and the interactive prompts are a thin layer over flags.
 
@@ -53,7 +53,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Operator WireGuard | Embedded userspace by default; `eru wg export` produces a system config when wanted |
 | Public SSH | Closed after bootstrap: SSH only on WireGuard, commit-confirm switchover, break-glass via the provider console |
 | Install paths | Both: the operator CLI bootstraps servers remotely (primary), or `eru cluster init --local` runs directly on a server installed with `curl \| sudo bash` and hands off with a secrets document |
-| Secrets document | age with a passphrase that eru generates and shows once |
+| Secrets handoff | Printed once in the terminal: plain secrets for a password manager, plus an armored age transfer bundle with a passphrase eru generates. No file unless `--secrets-out` |
 | Agent integration | First: CLI + `--json` + `eru guide agents` / `eru skill install`. `eru mcp` comes later |
 | CLI conventions | Modelled on the andurel CLI's agent support (§5.4) |
 | Testing | Manual testing on real VPSes from Phase 2 on; CI runs lint and builds only. No unit tests (§8) |
@@ -79,7 +79,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Binary / CLI | Go, `cobra` for commands, Charm `huh` for interactive prompts, `bubbletea` + `lipgloss` for TUIs (`eru top`, progress) | Same Charm stack as deploycrate |
 | Transport | `golang.org/x/crypto/ssh` in-process; embedded userspace WireGuard (`wireguard-go` + netstack) in operator mode | Operator needs no root, no `wg` interface and no system SSH config |
 | Distribution | `install.sh` + cosign-signed manifest + sha256 for linux/darwin × amd64/arm64 | Copy of `deploycrate-ce/scripts/install.sh` and `build-release.sh`. Operator mode pushes the matching verified linux binary to nodes |
-| Secrets document | `age` passphrase-encrypted bundle (`filippo.io/age`, scrypt) | §5.3 |
+| Transfer bundle | ASCII-armored `age` passphrase-encrypted bundle (`filippo.io/age`, scrypt) | §5.3 |
 | Server OS | The latest Debian and Ubuntu LTS only: Debian 13, Ubuntu 26.04 | Preflight refuses anything else, including older releases. PGDG ships `postgresql-18` for both on amd64 and arm64 (checked 2026-10-11) |
 | PostgreSQL | PGDG apt repo (`apt.postgresql.org`), `postgresql-18`, managed via `postgresql-common` (`pg_createcluster`) | Data checksums are on by default in 18. Major version pinned with an apt hold |
 | DB backups | **pgBackRest** (S3 repo, PITR, full/diff/incr + block incremental, AES-256 repo encryption, async WAL archive, `verify`) | WAL-G fallback behind the interface |
@@ -121,7 +121,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
   - Each node upgrade downloads the matching linux build, verifies its cosign signature and sha256 against the manifest, and swaps `/usr/local/bin/eru` atomically, keeping the previous binary. It runs `eru node selfcheck`, then `eru apply` re-runs only the steps whose versioned IDs changed.
   - Upgrades wait for running timers (backups, maintenance) to finish. In HA (Phase 10) they roll one node at a time, replicas first.
   - `eru node upgrade --rollback` restores the previous binary.
-- **State.** The desired state (`/etc/eru/cluster.toml`) and journal live on the central command, and a copy is pushed to the bucket after every `apply`. The operator machine holds only credentials, in its contexts. Any machine with the secrets document can take over operation.
+- **State.** The desired state (`/etc/eru/cluster.toml`) and journal live on the central command, and a copy is pushed to the bucket after every `apply`. The operator machine holds only credentials, in its contexts. Any machine with the transfer bundle and its passphrase can take over operation.
 
 ### 5.2 Bootstrap: from a fresh VPS to WireGuard-only SSH
 
@@ -130,7 +130,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 2. eru pushes the node binary, runs preflight, and applies the hardening and WireGuard steps. The server becomes `10.42.0.1` and the operator gets a peer identity.
 3. **Commit-confirm switchover.** eru verifies that SSH works over WireGuard, then moves sshd to the wg0 address and closes public 22. A server-side timer reverts the firewall and sshd change unless eru confirms within 2 minutes, so a broken tunnel can't lock the operator out.
 4. The rest of the setup (Postgres, backups and so on) runs over WireGuard.
-5. eru generates the **secrets document**, makes the operator confirm it's stored safely, and wipes the plaintext copies it held server-side, except for what services need at runtime.
+5. eru prints the **secrets handoff**, makes the operator confirm it's stored safely, and wipes the plaintext copies it held server-side, except for what services need at runtime.
 
 Break-glass is the provider console plus `eru node unlock-ssh`, which re-opens public SSH for a fixed window. This is documented in the secrets document itself.
 
@@ -141,11 +141,11 @@ Before any command that needs them, eru checks the machine it runs on and report
 - **Operator machine:** reachability of the target, an SSH key to use for first contact (or a password), and optional tools by feature: `wireguard-tools` when a system WireGuard interface is wanted (`eru wg export --install`), `psql` for `eru psql`, and `tailscale` when that transport is chosen. The embedded userspace WireGuard needs nothing installed.
 - **Install offer:** eru shows the exact package command for the platform (`apt`, `dnf`, `brew`) and asks whether it may run it. Without a TTY it never installs; it fails with the command to run, or installs only when `--install-missing` is passed.
 - **Sudo escalation:** when a step needs root locally (system WireGuard interface, `eru cluster init --local`), eru asks *"eru needs root to <reason>. Escalate with sudo? [y/N]"*, then re-executes the specific subcommand through `sudo`. It doesn't keep a root shell, and only that step runs privileged. `--sudo` pre-approves this for agents and scripts, and `sudo -n` is tried first so passwordless sudo works without a prompt.
-- **`eru cluster init --local`** (on a server installed via `curl | sudo bash`): checks it's root or can escalate, checks the OS, runs the same steps locally, then switches SSH to WireGuard. The resulting secrets document is printed as a path plus a one-time `eru login` command for the operator's machine. From that point on, operation is identical to a remote bootstrap.
+- **`eru cluster init --local`** (on a server installed via `curl | sudo bash`): checks it's root or can escalate, checks the OS, runs the same steps locally, then switches SSH to WireGuard. The secrets handoff is printed on the server console (nothing is written to `/root`), and the operator pastes its transfer bundle into `eru login` on their machine. From that point on, operation is identical to a remote bootstrap.
 
-### 5.3 Secrets document and contexts
+### 5.3 Secrets handoff and contexts
 
-One `age` passphrase-encrypted file, `eru-<cluster>.secrets.age`, containing the following. eru generates the passphrase and shows it once, and it's never stored by eru.
+At the end of setup eru prints the **secrets handoff** in the terminal and writes no file unless `--secrets-out` asks for one. It has two parts: every secret in plain text, grouped for a password manager, and a **transfer bundle**, an ASCII-armored `age` passphrase-encrypted block holding the same content. eru generates the passphrase and shows it once, and it's never stored by eru. The content is:
 
 - Cluster identity: name, node list, WireGuard endpoints and public keys, server SSH host keys (pinned)
 - Operator credentials: WireGuard private key and address, SSH private key, admin DB role password
@@ -155,9 +155,9 @@ One `age` passphrase-encrypted file, `eru-<cluster>.secrets.age`, containing the
 - Break-glass instructions
 
 ```
-eru login eru-prod.secrets.age          # decrypt → create local context "prod"
+eru login                               # paste the transfer bundle → create local context "prod"
 eru context list | use <name> | remove <name>
-eru secrets export [--rotate-operator]  # regenerate the document, optionally with a new operator identity
+eru secrets export [--rotate-operator]  # show a new handoff, optionally with a new operator identity
 eru operator add <name>                 # new WireGuard peer + SSH key → separate document for a teammate/agent
 eru operator revoke <name>
 ```
@@ -348,7 +348,7 @@ eru backup list                           # sets, sizes, WAL range, PITR window
 eru backup verify                         # pgbackrest verify + checksum report
 eru restore --latest | --time "2026-10-09 12:00:00+00" | --set <label> [--db <name>] --confirm <cluster>/restore
 eru restore drill                         # restore to scratch dir on alt port, sanity-check, tear down
-eru cluster init --restore eru-prod.secrets.age --host root@<new-vps>   # full DR on a fresh VPS
+eru cluster init --restore bundle.txt --host root@<new-vps>   # full DR on a fresh VPS
 eru dump <db> [--to bucket|local]         # logical export, streamed to the laptop if local
 ```
 

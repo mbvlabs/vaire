@@ -2,11 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/secretsdoc"
@@ -22,11 +24,13 @@ type loginData struct {
 	Document secretsdoc.Summary `json:"document"`
 }
 
-// runLogin decrypts a secrets document and creates a local context (§10.1).
+// runLogin decrypts a transfer bundle (armored or binary age) and creates a
+// local context (§10.1). The bundle comes from a file, from stdin with -, or
+// is pasted at a prompt when no argument is given.
 func runLogin(cmd *cobra.Command, args []string) error {
-	raw, err := os.ReadFile(args[0])
+	raw, err := loginBundle(cmd, args)
 	if err != nil {
-		return output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass the path of an eru-<cluster>.secrets.age file.")
+		return err
 	}
 	passphrase, err := loginPassphrase(cmd)
 	if err != nil {
@@ -61,6 +65,48 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		Message: message,
 		Next:    []string{"eru plan"},
 	})
+}
+
+// loginBundle reads the bundle from the argument, stdin (-), or a paste.
+func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
+	src := ""
+	if len(args) == 1 {
+		src = args[0]
+	}
+	switch src {
+	case "-":
+		if flagTrue(cmd, "passphrase-stdin") {
+			return nil, output.NewError(output.CodeUsage, "the bundle and the passphrase can't both come from stdin", output.ExitUsage,
+				"Pass the passphrase with --passphrase-file, or the bundle as a file.")
+		}
+		raw, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 4<<20))
+		if err != nil {
+			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
+		}
+		return raw, nil
+	case "":
+		if err := RequireFlag(cmd, false, "<bundle-file>", "login"); err != nil {
+			return nil, err
+		}
+		restore := ui.Suspend()
+		defer restore()
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste the transfer bundle (from "+secretsdoc.ArmorHeader+" to "+secretsdoc.ArmorFooter+"):")
+		raw, err := readBundle(cmd.InOrStdin())
+		if err != nil {
+			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
+		}
+		if !secretsdoc.IsArmored(raw) {
+			return nil, output.NewError(output.CodeUsage, "that is not a transfer bundle", output.ExitUsage,
+				"Paste the whole block, including the BEGIN and END lines.")
+		}
+		return raw, nil
+	default:
+		raw, err := os.ReadFile(src) //nolint:gosec // G304: the operator chose this bundle file.
+		if err != nil {
+			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass the path of a transfer bundle, - for stdin, or nothing to paste it.")
+		}
+		return raw, nil
+	}
 }
 
 func loginPassphrase(cmd *cobra.Command) (string, error) {
@@ -111,7 +157,7 @@ func runContextList(cmd *cobra.Command, _ []string) error {
 	}
 	message := strings.Join(lines, "\n")
 	if len(rows) == 0 {
-		message = "No contexts. Create one with eru login <secrets.age>."
+		message = "No contexts. Create one with eru login and the transfer bundle."
 	}
 	return output.Success(cmd, output.Result{Data: rows, Message: message})
 }
@@ -188,5 +234,5 @@ func runContextRemove(cmd *cobra.Command, args []string) error {
 	if err := contexts.Remove(name); err != nil {
 		return err
 	}
-	return output.OK(cmd, map[string]any{"removed": name}, "Removed context "+name+". Its secrets document still opens the cluster.")
+	return output.OK(cmd, map[string]any{"removed": name}, "Removed context "+name+". Its transfer bundle still opens the cluster.")
 }

@@ -106,8 +106,7 @@ type initResult struct {
 	WGAddress        string   `json:"wg_address"`
 	AdminUser        string   `json:"admin_user"`
 	Context          string   `json:"context,omitempty"`
-	SecretsDocument  string   `json:"secrets_document"`
-	PassphraseOut    string   `json:"passphrase_out,omitempty"`
+	SecretsDocument  string   `json:"secrets_document,omitempty"`
 	Passphrase       string   `json:"passphrase,omitempty"`
 	PublicSSHClosed  bool     `json:"public_ssh_closed"`
 	LockdownPending  bool     `json:"lockdown_pending"`
@@ -181,13 +180,8 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 	if dryRun(cmd) {
 		return r, nil
 	}
-	if MustNotPrompt(cmd) {
-		if err := RequireFlag(cmd, flagTrue(cmd, "confirm-secrets-stored"), "--confirm-secrets-stored", "cluster init"); err != nil {
-			return nil, err
-		}
-		if err := RequireFlag(cmd, stringFlag(cmd, "passphrase-out") != "", "--passphrase-out", "cluster init"); err != nil {
-			return nil, err
-		}
+	if err := requireStructuredHandoff(cmd, "secrets-out", "cluster init", "confirm-secrets-stored"); err != nil {
+		return nil, err
 	}
 	if err := r.confirm(); err != nil {
 		return nil, err
@@ -563,7 +557,7 @@ func (r *initRun) planData() initPlanData {
 
 func (r *initRun) dryRunResult() error {
 	data := r.planData()
-	message := fmt.Sprintf("Would bootstrap %s as node %s of cluster %s: steps %s, then move SSH to WireGuard %s and write the secrets document.",
+	message := fmt.Sprintf("Would bootstrap %s as node %s of cluster %s: steps %s, then move SSH to WireGuard %s and show the secrets handoff.",
 		map[bool]string{true: "this server", false: data.Host}[r.local], data.Node, data.Cluster, strings.Join(data.Steps, ", "), data.WGAddress)
 	return output.Success(r.cmd, output.Result{Data: data, Message: message, Warnings: r.warnings})
 }
@@ -804,8 +798,8 @@ func runInitRemote(cmd *cobra.Command) error {
 		}
 	}
 
-	// 12. Secrets document, then the node records the confirmation.
-	doc, res, err := r.writeDocument(defaultSecretsOut(r.name, false))
+	// 12. Secrets handoff, then the node records the confirmation.
+	doc, res, err := r.writeDocument()
 	if err != nil {
 		return err
 	}
@@ -819,7 +813,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	// 13. Local context, then drop the pending state.
 	if contexts.Exists(r.name) {
 		return output.NewError(output.CodePrecondition, "a context named "+r.name+" appeared during init", output.ExitPrecondition,
-			"Remove it, then run eru login "+res.SecretsDocument+".")
+			"Remove it, then run eru login and paste the transfer bundle.")
 	}
 	if _, err := secretsdoc.Install(doc, r.name, lockedAt); err != nil {
 		return err
@@ -837,8 +831,7 @@ func runInitRemote(cmd *cobra.Command) error {
 		fmt.Sprintf("Cluster %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.Domain),
 		"TLS: " + r.tlsSummary(),
 		r.urlSummary(),
-		"Secrets document: " + res.SecretsDocument,
-		"Context " + r.name + " is the current context on this machine. On another machine run: eru login " + filepath.Base(res.SecretsDocument),
+		"Context " + r.name + " is the current context on this machine. On another machine run eru login and paste the transfer bundle.",
 	}, "\n")
 	return r.finish(res, message, res.Next, fmt.Sprintf("Cluster %s is ready", r.name), nil)
 }
@@ -856,7 +849,7 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 		{"PgBouncer", r.cfg.Domain + ":6432"},
 		{"Direct TLS", r.cfg.Domain + ":443  (sslnegotiation=direct)"},
 		{"TLS", r.tlsSummary()},
-		{"Secrets", res.SecretsDocument},
+		{"Secrets", "in your password manager (transfer bundle: eru login on another machine)"},
 		{"", ""},
 	}
 	for _, db := range r.cfg.Databases {
@@ -1226,17 +1219,6 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 		WithDetails(details)
 }
 
-func defaultSecretsOut(name string, local bool) string {
-	file := "eru-" + name + ".secrets.age"
-	if local {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, file)
-		}
-		return filepath.Join("/root", file)
-	}
-	return file
-}
-
 // document builds the secrets document from the pending state (§10.1).
 func (r *initRun) document() (secretsdoc.Document, error) {
 	n := r.primary()
@@ -1285,44 +1267,11 @@ func (r *initRun) documentDatabase() *secretsdoc.Database {
 	return &creds
 }
 
-// showPassphrase shows the document path and the passphrase once, then waits
-// for the operator to type 'stored' unless --confirm-secrets-stored was given.
-func (r *initRun) showPassphrase(out, ppOut, passphrase string) error {
-	cmd := r.cmd
-	lines := []string{"Document:   " + out}
-	if ppOut != "" && ppOut != "-" {
-		lines = append(lines, "Passphrase: written to "+ppOut)
-	} else {
-		lines = append(lines, "Passphrase: "+passphrase, "", "The passphrase is shown once; eru does not keep it.")
-	}
-	lines = append(lines,
-		"Store the document and the passphrase separately, for example in a password manager.",
-		"Without them nobody can operate this cluster or read its backups.")
-	if r.p.live != nil {
-		r.p.panel("Secrets document", lines)
-	} else {
-		w := cmd.OutOrStdout()
-		_, _ = fmt.Fprintln(w)
-		for _, line := range lines {
-			_, _ = fmt.Fprintln(w, line)
-		}
-		_, _ = fmt.Fprintln(w)
-	}
-	if flagTrue(cmd, "confirm-secrets-stored") {
-		return nil
-	}
-	if err := typeWord(cmd, "Type 'stored' once both are stored safely", "", "stored"); err != nil {
-		return output.NewError(output.CodeInputRequired, "the secrets document was not confirmed as stored", output.ExitInput,
-			"Re-run with --resume and type stored, or pass --confirm-secrets-stored with --passphrase-out.").
-			WithDetails(map[string]any{"flag": "--confirm-secrets-stored"})
-	}
-	return nil
-}
-
-// writeDocument writes the age document, shows the passphrase once, and
-// gates on "stored" (§8.2 step 10). A resumed init that has not been
-// confirmed writes a fresh document with a new passphrase over its own file.
-func (r *initRun) writeDocument(defaultOut string) (secretsdoc.Document, initResult, error) {
+// writeDocument shows the secrets handoff (§10.1) and gates on "stored"
+// (§8.2 step 12). Nothing is written unless --secrets-out names a file for the
+// transfer bundle. A resumed init that has not been confirmed shows a new
+// handoff with a new passphrase.
+func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 	cmd := r.cmd
 	n := r.primary()
 	res := initResult{Cluster: r.name, Node: n.Name, PublicAddress: n.PublicAddress, WGAddress: n.WGAddress, AdminUser: r.cfg.Server.AdminUser}
@@ -1334,59 +1283,34 @@ func (r *initRun) writeDocument(defaultOut string) (secretsdoc.Document, initRes
 	if out == "" {
 		out = r.prog.SecretsOut
 	}
-	if out == "" {
-		out = defaultOut
-	}
-	if abs, err := filepath.Abs(out); err == nil {
-		out = abs
-	}
-	if _, err := os.Stat(out); err == nil && r.prog.SecretsOut != out {
-		return doc, res, output.NewError(output.CodePrecondition, out+" already exists", output.ExitPrecondition,
-			"Move it away, or pass --secrets-out with another path, then re-run with --resume.").WithDetails(map[string]any{"reason": "secrets_out_exists", "path": out})
-	}
-	passphrase, err := secretsdoc.NewPassphrase()
-	if err != nil {
-		return doc, res, err
-	}
-	secrets.Add(passphrase)
-	encrypted, err := secretsdoc.Encrypt(doc, passphrase)
-	if err != nil {
-		return doc, res, err
+	if out != "" {
+		if abs, err := filepath.Abs(out); err == nil {
+			out = abs
+		}
+		if _, err := os.Stat(out); err == nil && r.prog.SecretsOut != out {
+			return doc, res, output.NewError(output.CodePrecondition, out+" already exists", output.ExitPrecondition,
+				"Move it away, or pass --secrets-out with another path, then re-run with --resume.").WithDetails(map[string]any{"reason": "secrets_out_exists", "path": out})
+		}
 	}
 	r.p.phase("init.secrets-document", "started", out)
-	if err := transport.WriteSecretFile(out, encrypted); err != nil {
+	h, err := newHandoff(doc, out)
+	if err != nil {
 		return doc, res, err
 	}
-	r.prog.SecretsOut = out
+	r.prog.SecretsOut = h.path
 	if err := r.mark(phaseDocument); err != nil {
 		return doc, res, err
 	}
-	res.SecretsDocument = out
-
-	ppOut := stringFlag(cmd, "passphrase-out")
-	switch {
-	case ppOut == "-":
-		if MustNotPrompt(cmd) {
-			// Explicitly requested on stdout: it travels in the envelope.
-			res.Passphrase = passphrase
-		}
-	case ppOut != "":
-		if abs, err := filepath.Abs(ppOut); err == nil {
-			ppOut = abs
-		}
-		if err := transport.WriteSecretFile(ppOut, []byte(passphrase+"\n")); err != nil {
-			return doc, res, err
-		}
-		res.PassphraseOut = ppOut
-	}
-	if !MustNotPrompt(cmd) {
-		r.p.phase("init.secrets-document", "completed", out)
-		if err := r.showPassphrase(out, ppOut, passphrase); err != nil {
-			return doc, res, err
-		}
+	res.SecretsDocument = h.path
+	r.p.phase("init.secrets-document", "completed", h.path)
+	if MustNotPrompt(cmd) {
+		// Explicitly requested with --reveal-passphrase: it travels in the envelope.
+		res.Passphrase = h.passphrase
 		return doc, res, nil
 	}
-	r.p.phase("init.secrets-document", "completed", "")
+	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored")); err != nil {
+		return doc, res, err
+	}
 	return doc, res, nil
 }
 
@@ -1487,7 +1411,7 @@ func runInitLocal(cmd *cobra.Command) error {
 			return err
 		}
 	}
-	_, res, err := r.writeDocument(defaultSecretsOut(r.name, true))
+	_, res, err := r.writeDocument()
 	if err != nil {
 		return err
 	}
@@ -1499,19 +1423,18 @@ func runInitLocal(cmd *cobra.Command) error {
 	}
 	res.LockdownPending = true
 	res.LockdownDeadline = deadline
-	res.LoginCommand = "eru login " + filepath.Base(res.SecretsDocument)
+	res.LoginCommand = "eru login"
 	r.fillResult(&res)
 	message := strings.Join([]string{
 		fmt.Sprintf("Cluster %s is bootstrapped on this server (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
 		"TLS: " + r.tlsSummary(),
 		r.urlSummary(),
-		"Secrets document: " + res.SecretsDocument,
-		"Copy it to your machine and run: " + res.LoginCommand,
+		"On your machine run eru login and paste the transfer bundle from the handoff.",
 		"Then run any remote command, such as eru plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
 		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",
 	}, "\n")
 	return r.finish(res, message, append([]string{res.LoginCommand}, res.Next...), fmt.Sprintf("Cluster %s is bootstrapped on this server", r.name), []string{
-		"Copy the secrets document to your machine and run the login command there,",
+		"On your machine run eru login and paste the transfer bundle,",
 		"then any remote command within 30 minutes. That closes public SSH; otherwise the SSH change reverts.",
 	})
 }

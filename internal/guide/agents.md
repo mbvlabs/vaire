@@ -1,6 +1,6 @@
 # eru for agents
 
-eru is a single CLI that installs, secures, backs up, restores, and maintains a PostgreSQL 18 cluster. The same binary runs on the operator machine and on the server. After bootstrap, remote actions go over SSH through WireGuard. The secrets document is the credential an operator needs.
+eru is a single CLI that installs, secures, backs up, restores, and maintains a PostgreSQL 18 cluster. The same binary runs on the operator machine and on the server. After bootstrap, remote actions go over SSH through WireGuard. The secrets handoff (shown once at the end of init, with a transfer bundle for `eru login`) is the credential an operator needs.
 
 ## Output
 
@@ -60,7 +60,7 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 
 A success envelope may carry `warnings[]`, each with a stable `code` and a `message`. Act on them; they never fail the command.
 
-- `secrets_document_stale`: new database passwords were generated on the operator. Run `eru secrets export` to refresh the secrets document.
+- `secrets_document_stale`: new database passwords were generated on the operator. Ask the human to run `eru secrets export` in a terminal to refresh the stored secrets.
 - `tls_pending`: the ACME certificate is not issued yet. `eru-certs.timer` retries every hour; once DNS points at the server (DNS only, not proxied) it is issued without any action.
 - `dns_mismatch` / `dns_proxied`: the domain doesn't resolve to the server yet, or is proxied by Cloudflare. Ask the human to fix the record (DNS only); init continues either way.
 - `tls_unverified`: a connection used `sslmode=require` (self-signed mode) or DNS was not verified before continuing.
@@ -93,6 +93,6 @@ Upgrade: `eru upgrade --output agent` updates only the local binary for now; nod
 
 ## Refusals
 
-- Printing the secrets document or its passphrase.
+- Printing the secrets handoff, the transfer bundle or its passphrase. Without a terminal, init and `secrets export` need `--secrets-out`/`--out` (the bundle is written there) and `--reveal-passphrase`; only pass `--reveal-passphrase` when the human asked for it.
 - `eru restore cleanup` or `eru db drop` without explicit human approval of that action.
 - `--sudo` or `--install-missing` without human approval of that escalation.
