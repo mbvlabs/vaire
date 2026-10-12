@@ -1,13 +1,17 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/mbvlabs/eru/internal/node"
+	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/spf13/cobra"
 )
 
@@ -68,11 +72,44 @@ func runNodeRun(cmd *cobra.Command, args []string) error {
 	if dryRun(cmd) {
 		return output.OK(cmd, map[string]any{"job": job, "dry_run": true}, "would run "+job)
 	}
-	data, err := node.RunJob(commandContext(cmd), job, nodeReporter(cmd))
+	opts := node.JobOptions{ID: strings.ToUpper(stringFlag(cmd, "job-id")), DB: stringFlag(cmd, "db")}
+	report := nodeReporter(cmd)
+	if opts.ID != "" || os.Getenv("INVOCATION_ID") != "" {
+		// Under systemd the events go to the journal as NDJSON, which
+		// eru job follow replays.
+		report = jobReporter(cmd)
+	}
+	data, err := node.RunJob(commandContext(cmd), job, opts, report)
 	if err != nil {
 		return err
 	}
 	return output.OK(cmd, data, "ran "+job)
+}
+
+// jobReporter writes each event as one redacted NDJSON line on stdout.
+func jobReporter(cmd *cobra.Command) engine.Reporter {
+	w := cmd.OutOrStdout()
+	return func(ev output.Event) {
+		ev.Schema = output.EventSchema
+		if ev.TS == "" {
+			ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if raw, err := json.Marshal(secrets.RedactValue(ev)); err == nil {
+			_, _ = fmt.Fprintln(w, string(raw))
+		}
+	}
+}
+
+// runNodeDump writes pg_dump -Fc of one database to stdout, for
+// eru dump --to local.
+func runNodeDump(cmd *cobra.Command, args []string) error {
+	if dryRun(cmd) {
+		return output.OK(cmd, map[string]any{"database": args[0], "dry_run": true}, "would dump "+args[0])
+	}
+	if err := node.DumpStream(commandContext(cmd), args[0], cmd.OutOrStdout()); err != nil {
+		return err
+	}
+	return nil
 }
 
 func runNodeUnlockSSH(cmd *cobra.Command, _ []string) error {

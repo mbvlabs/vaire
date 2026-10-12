@@ -113,6 +113,19 @@ type Database struct {
 	Name             string   `toml:"name"`
 	StatementTimeout string   `toml:"statement_timeout"`
 	Extensions       []string `toml:"extensions"`
+	// Backup is the per-database long-retention policy (Phase 3). Left out
+	// of the file while empty, so files from earlier phases are unchanged.
+	Backup DatabaseBackup `toml:"backup,omitempty"`
+}
+
+// DatabaseBackup is [databases.backup]: scheduled pg_dump archives kept
+// longer than the restore window, age-encrypted in the bucket.
+type DatabaseBackup struct {
+	// DumpSchedule is a systemd OnCalendar expression; empty means no
+	// scheduled dumps.
+	DumpSchedule string `toml:"dump_schedule,omitempty"`
+	// DumpRetention is how many dumps are kept.
+	DumpRetention int `toml:"dump_retention,omitempty"`
 }
 
 // Backup is [backup].
@@ -360,6 +373,9 @@ var (
 	// SettingKeyPattern is the [postgres.settings] key format.
 	SettingKeyPattern = regexp.MustCompile(`^[a-z_][a-z0-9_.]*$`)
 	durationPattern   = regexp.MustCompile(`^(\d+(ms|s|min|h)|0)$`)
+	// schedulePattern is a coarse operator-side filter for OnCalendar
+	// expressions: printable, no quotes or shell metacharacters.
+	schedulePattern = regexp.MustCompile(`^[A-Za-z0-9 *:,./~+-]{1,120}$`)
 )
 
 // reservedSettings are the settings eru owns; a user override is rejected.
@@ -530,8 +546,47 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 				add("databases[%d].extensions %q is not in the catalog (it arrives with eru ext in Phase 4)", i, ext)
 			}
 		}
+		if db.Backup.DumpSchedule != "" {
+			if c.Backup.Provider == "" {
+				add("databases[%d].backup.dump_schedule needs a bucket: run eru backup setup first", i)
+			}
+			if db.Backup.DumpRetention < 1 {
+				add("databases[%d].backup.dump_retention must be at least 1 when dump_schedule is set", i)
+			}
+		}
+		if db.Backup.DumpRetention < 0 {
+			add("databases[%d].backup.dump_retention must not be negative", i)
+		}
 	}
 	if c.Backup.Provider != "" {
+		if err := CheckProvider(c.Backup.Provider); err != nil {
+			add("backup.provider %q %v", c.Backup.Provider, err)
+		}
+		if err := CheckEndpoint(c.Backup.Endpoint); err != nil {
+			add("backup.endpoint %q %v", c.Backup.Endpoint, err)
+		}
+		if err := CheckBucket(c.Backup.Bucket); err != nil {
+			add("backup.bucket %q %v", c.Backup.Bucket, err)
+		}
+		if err := CheckPrefix(c.Backup.Prefix); err != nil {
+			add("backup.prefix %q %v", c.Backup.Prefix, err)
+		}
+		if c.Backup.Region == "" {
+			add("backup.region is required")
+		}
+		switch c.Backup.URIStyle {
+		case "path", "host":
+		default:
+			add("backup.uri_style %q must be path or host", c.Backup.URIStyle)
+		}
+		if c.Backup.Database.FullSchedule == "" {
+			add("backup.database.full_schedule is required")
+		}
+		for key, value := range c.ScheduleValues() {
+			if !schedulePattern.MatchString(value) {
+				add("%s %q is not a systemd OnCalendar expression", key, value)
+			}
+		}
 		if c.Backup.Database.RetentionFull < 1 {
 			add("backup.database.retention_full must be at least 1")
 		}
@@ -540,6 +595,30 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 		}
 	}
 }
+
+// ScheduleValues returns every non-empty database backup schedule by its
+// dotted key, for validation. The node checks each with systemd-analyze
+// calendar, which has the final say.
+func (c Cluster) ScheduleValues() map[string]string {
+	out := map[string]string{}
+	add := func(key, value string) {
+		if value != "" {
+			out[key] = value
+		}
+	}
+	add("backup.database.full_schedule", c.Backup.Database.FullSchedule)
+	add("backup.database.diff_schedule", c.Backup.Database.DiffSchedule)
+	add("backup.database.incr_schedule", c.Backup.Database.IncrSchedule)
+	add("backup.database.verify_schedule", c.Backup.Database.VerifySchedule)
+	add("backup.database.drill_schedule", c.Backup.Database.DrillSchedule)
+	for _, db := range c.Databases {
+		add("databases."+db.Name+".backup.dump_schedule", db.Backup.DumpSchedule)
+	}
+	return out
+}
+
+// BackupConfigured reports whether [backup] names a bucket.
+func (c Cluster) BackupConfigured() bool { return c.Backup.Provider != "" }
 
 // ValidationError wraps a Validate failure as validation_failed.
 func ValidationError(err error) *output.CLIError {

@@ -1,0 +1,6 @@
+# managed by eru - do not edit; use cluster.toml
+# WAL archiving to the pgBackRest repository. archive_timeout bounds the
+# recovery point on an idle cluster.
+archive_mode = on
+archive_command = 'pgbackrest --stanza={{ .Stanza }} archive-push %p'
+archive_timeout = 60s

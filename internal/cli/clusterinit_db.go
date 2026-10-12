@@ -12,7 +12,7 @@ import (
 
 // callDatabasePhase runs cluster.bootstrap phase=database over WireGuard.
 func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (node.BootstrapResult, error) {
-	raw, err := r.cfg.Encode()
+	raw, err := r.nodeConfig().Encode()
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}

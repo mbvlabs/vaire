@@ -1,5 +1,5 @@
 // Package state is the desired-state store (§5.1, D15). Phase 2 has the file
-// store at /etc/eru/cluster.toml; the bucket copy arrives in Phases 3 and 7.
+// store at /etc/eru/cluster.toml; the bucket copy arrives in Phase 7.
 package state
 
 import (

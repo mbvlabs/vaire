@@ -21,29 +21,10 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	wgKey, err := contexts.ReadFile(c.Name, contexts.WGKeyFile)
-	if err != nil {
-		return contextFileError(c.Name, contexts.WGKeyFile, err)
-	}
-	sshKey, err := contexts.ReadFile(c.Name, contexts.SSHKeyFile)
-	if err != nil {
-		return contextFileError(c.Name, contexts.SSHKeyFile, err)
-	}
-	creds, err := contexts.LoadCredentials(c.Name)
+	doc, err := contextDocument(c)
 	if err != nil {
 		return err
 	}
-	known, err := transport.LoadKnownHosts(contexts.Path(c.Name, contexts.KnownHostsFile))
-	if err != nil {
-		return err
-	}
-	doc, err := rebuildDocument(c, string(wgKey), string(sshKey), creds, known)
-	if err != nil {
-		return err
-	}
-	secrets.Add(string(wgKey))
-	secrets.Add(string(sshKey))
-	secrets.Add(creds.SudoPassword)
 	if err := requireStructuredHandoff(cmd, "out", "secrets export", ""); err != nil {
 		return err
 	}
@@ -73,6 +54,53 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	return output.Success(cmd, output.Result{Data: res, Message: "New secrets handoff shown. The previous bundle still opens with its own passphrase."})
 }
 
+// showContextHandoff shows a new handoff for c in a terminal, for commands
+// that change the recovery kit (eru backup setup).
+func showContextHandoff(cmd *cobra.Command, c *contexts.Context) (string, error) {
+	doc, err := contextDocument(c)
+	if err != nil {
+		return "", err
+	}
+	h, err := newHandoff(doc, "")
+	if err != nil {
+		return "", err
+	}
+	return h.saved, h.show(cmd, false, true)
+}
+
+// contextDocument rebuilds the secrets document from a context.
+func contextDocument(c *contexts.Context) (secretsdoc.Document, error) {
+	wgKey, err := contexts.ReadFile(c.Name, contexts.WGKeyFile)
+	if err != nil {
+		return secretsdoc.Document{}, contextFileError(c.Name, contexts.WGKeyFile, err)
+	}
+	sshKey, err := contexts.ReadFile(c.Name, contexts.SSHKeyFile)
+	if err != nil {
+		return secretsdoc.Document{}, contextFileError(c.Name, contexts.SSHKeyFile, err)
+	}
+	creds, err := contexts.LoadCredentials(c.Name)
+	if err != nil {
+		return secretsdoc.Document{}, err
+	}
+	known, err := transport.LoadKnownHosts(contexts.Path(c.Name, contexts.KnownHostsFile))
+	if err != nil {
+		return secretsdoc.Document{}, err
+	}
+	doc, err := rebuildDocument(c, string(wgKey), string(sshKey), creds, known)
+	if err != nil {
+		return doc, err
+	}
+	secrets.Add(string(wgKey))
+	secrets.Add(string(sshKey))
+	secrets.Add(creds.SudoPassword)
+	if creds.Backup != nil {
+		for _, v := range creds.Backup.SecretValues() {
+			secrets.Add(v)
+		}
+	}
+	return doc, nil
+}
+
 // rebuildDocument builds a document from the context and credentials.
 func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.Credentials, known *transport.KnownHosts) (secretsdoc.Document, error) {
 	doc := secretsdoc.Document{
@@ -89,6 +117,7 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 			SudoPassword:  creds.SudoPassword,
 		},
 		Database: creds.Database,
+		Backup:   creds.Backup,
 	}
 	var primary string
 	for _, n := range c.Nodes {

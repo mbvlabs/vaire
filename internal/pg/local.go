@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,8 +17,15 @@ import (
 )
 
 // Local runs SQL on the node through the postgres OS user, because pg_hba
-// allows postgres only by peer and the node process runs as root (§9.1).
-type Local struct{}
+// allows postgres only by peer and the node process runs as root (§9.1). The
+// zero value is the live cluster on its default socket; Host and Port point
+// it at another instance, such as a scratch restore on the drill socket.
+type Local struct {
+	// Host is a socket directory; empty uses psql's default.
+	Host string
+	// Port is the instance's port; 0 uses psql's default.
+	Port int
+}
 
 // localTimeout bounds one psql invocation.
 const localTimeout = 5 * time.Minute
@@ -27,15 +35,15 @@ var varNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // Exec runs sql against db and discards the output. vars become psql -v
 // parameters; they must be non-secret literals with identifier names.
-func (Local) Exec(ctx context.Context, db, sql string, vars map[string]string) error {
-	_, err := run(ctx, db, sql, vars, false)
+func (l Local) Exec(ctx context.Context, db, sql string, vars map[string]string) error {
+	_, err := l.run(ctx, db, sql, vars, false)
 	return err
 }
 
 // Query runs sql against db and returns rows as column-name -> value maps. It
 // uses psql's CSV output.
-func (Local) Query(ctx context.Context, db, sql string, vars map[string]string) ([]map[string]string, error) {
-	out, err := run(ctx, db, sql, vars, true)
+func (l Local) Query(ctx context.Context, db, sql string, vars map[string]string) ([]map[string]string, error) {
+	out, err := l.run(ctx, db, sql, vars, true)
 	if err != nil {
 		return nil, err
 	}
@@ -44,8 +52,8 @@ func (Local) Query(ctx context.Context, db, sql string, vars map[string]string) 
 
 // QueryRows runs sql against db and returns the column order and rows, with
 // nil for SQL NULL.
-func (Local) QueryRows(ctx context.Context, db, sql string, vars map[string]string) ([]string, [][]*string, error) {
-	out, err := run(ctx, db, sql, vars, true)
+func (l Local) QueryRows(ctx context.Context, db, sql string, vars map[string]string) ([]string, [][]*string, error) {
+	out, err := l.run(ctx, db, sql, vars, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -53,10 +61,16 @@ func (Local) QueryRows(ctx context.Context, db, sql string, vars map[string]stri
 }
 
 // run feeds sql to psql on stdin as the postgres OS user.
-func run(ctx context.Context, db, sql string, vars map[string]string, csvOut bool) ([]byte, error) {
+func (l Local) run(ctx context.Context, db, sql string, vars map[string]string, csvOut bool) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, localTimeout)
 	defer cancel()
 	args := []string{"-u", "postgres", "--", "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1"}
+	if l.Host != "" {
+		args = append(args, "-h", l.Host)
+	}
+	if l.Port != 0 {
+		args = append(args, "-p", strconv.Itoa(l.Port))
+	}
 	names := make([]string, 0, len(vars))
 	for name := range vars {
 		if !varNamePattern.MatchString(name) {

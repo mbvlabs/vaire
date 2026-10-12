@@ -16,3 +16,13 @@ func statfsGiB(path string) (int, bool) {
 	}
 	return int(total / (1 << 30)), true //nolint:gosec // G115: a filesystem smaller than 8 EiB fits in int.
 }
+
+// FreeBytes returns the bytes available to unprivileged users on the
+// filesystem holding path, or ok=false.
+func FreeBytes(path string) (uint64, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, false
+	}
+	return st.Bavail * uint64(st.Bsize), true //nolint:gosec // G115: Bsize is a positive filesystem block size.
+}

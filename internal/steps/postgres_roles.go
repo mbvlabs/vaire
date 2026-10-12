@@ -227,12 +227,26 @@ func databaseSQL(ctx context.Context, rt engine.Runtime, db config.Database, rol
 	if !dbSet[db.Name] {
 		fmt.Fprintf(&b, "CREATE DATABASE %s OWNER %s;\n", pg.Quote(db.Name), pg.Quote(owner))
 	}
-	fmt.Fprintf(&b, "REVOKE ALL ON DATABASE %s FROM PUBLIC;\n", pg.Quote(db.Name))
-	fmt.Fprintf(&b, "GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s, %s, %s, eru_admin, eru_monitor;\n",
-		pg.Quote(db.Name), pg.Quote(db.Name+"_migrate"), pg.Quote(db.Name+"_app"), pg.Quote(db.Name+"_ro"))
+	b.WriteString(DatabaseConnectSQL(db.Name, db.Name))
 	fmt.Fprintf(&b, "GRANT %s TO eru_admin WITH ADMIN OPTION;\n", pg.Quote(owner))
 	return b.String(), nil
 }
+
+// DatabaseConnectSQL is the database-level access SQL for database target,
+// granted to the roles of roleDB, run in postgres. eru restore uses it for
+// <db>__restoring with the roles of <db>.
+func DatabaseConnectSQL(target, roleDB string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "REVOKE ALL ON DATABASE %s FROM PUBLIC;\n", pg.Quote(target))
+	fmt.Fprintf(&b, "GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s, %s, %s, eru_admin, eru_monitor;\n",
+		pg.Quote(target), pg.Quote(roleDB+"_migrate"), pg.Quote(roleDB+"_app"), pg.Quote(roleDB+"_ro"))
+	return b.String()
+}
+
+// DatabaseGrantsSQL is postgres-roles-v1's schema, default-privilege and
+// extension SQL for db, run inside the database it is for. eru restore and
+// eru db fork run it in the databases they load.
+func DatabaseGrantsSQL(db config.Database) string { return databaseGrantsSQL(db) }
 
 // databaseGrantsSQL is the schema and default-privilege SQL run inside db.
 func databaseGrantsSQL(db config.Database) string {
@@ -331,7 +345,9 @@ func orphanedWarnings(cfg config.Cluster, dbs []string, roleSet map[string]bool)
 	}
 	var warnings []output.Warning
 	for _, name := range dbs {
-		if systemDatabases[name] || configured[name] {
+		// eru restore's __restoring and __pre_restore_* copies are not
+		// orphans: restore promote, abort and cleanup own them.
+		if systemDatabases[name] || configured[name] || config.IsRestoreName(name) {
 			continue
 		}
 		if roleSet[name+"_owner"] {

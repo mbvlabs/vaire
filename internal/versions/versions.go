@@ -7,6 +7,11 @@ const (
 	// NginxMinVersion is the oldest distribution nginx tls-v1 accepts: it
 	// needs the stream module with ssl_preread and ssl_alpn (§23.3).
 	NginxMinVersion = "1.26"
+	// PgBackRestMinVersion is the oldest pgBackRest step 8 installs. 2.59.3
+	// fixes an unchecked error when generating random data for repository
+	// encryption, and eru always encrypts the repository. pgBackRest comes from
+	// PGDG and is held like PostgreSQL.
+	PgBackRestMinVersion = "2.59.3"
 )
 
 // CosignSHA256 is keyed "<os>-<arch>" for the GitHub release binaries.

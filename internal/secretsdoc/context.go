@@ -104,7 +104,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 	if err := known.Save(); err != nil {
 		return nil, err
 	}
-	if err := contexts.SaveCredentials(name, contexts.Credentials{SudoPassword: doc.Operator.SudoPassword, Database: doc.Database}); err != nil {
+	if err := contexts.SaveCredentials(name, contexts.Credentials{SudoPassword: doc.Operator.SudoPassword, Database: doc.Database, Backup: doc.Backup}); err != nil {
 		return nil, err
 	}
 	if err := contexts.Save(ctx); err != nil {

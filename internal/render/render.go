@@ -220,16 +220,61 @@ func PgbouncerHBA() []byte { return execute("pgbouncer_hba.conf.tmpl", nil) }
 // PGServiceDropin renders the postgresql@18-main.service drop-in.
 func PGServiceDropin() []byte { return execute("postgresql-service.conf.tmpl", nil) }
 
-// CertsUnits renders the eru-certs service and timer, which run
-// eru node run certs-renew (D11).
-//
-// timers-v1 (Phase 5) later takes ownership of the .timer; this step installs
-// it so certificates renew before then.
-func CertsUnits() map[string][]byte {
-	return map[string][]byte{
-		"eru-certs.service": execute("eru-certs.service.tmpl", nil),
-		"eru-certs.timer":   execute("eru-certs.timer.tmpl", nil),
+// CertsService renders eru-certs.service, which runs eru node run
+// certs-renew (D11). tls-v1 installs it and starts it once.
+func CertsService() []byte { return execute("eru-certs.service.tmpl", nil) }
+
+// CertsTimer renders eru-certs.timer, the hourly certificate check. timers-v1
+// owns it from Phase 3 on.
+func CertsTimer() []byte { return execute("eru-certs.timer.tmpl", nil) }
+
+// BackupSecrets are the values pgbackrest.conf carries that never enter a
+// step's inputs.
+type BackupSecrets struct {
+	KeyID      string
+	Secret     string
+	CipherPass string
+}
+
+// PgBackRestConf renders /etc/pgbackrest/pgbackrest.conf (§13.1).
+func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) []byte {
+	endpoint := strings.TrimSuffix(strings.TrimPrefix(cfg.Backup.Endpoint, "https://"), "/")
+	hostPart, port := endpoint, ""
+	if h, p, ok := strings.Cut(endpoint, ":"); ok {
+		hostPart, port = h, p
 	}
+	return execute("pgbackrest.conf.tmpl", map[string]any{
+		"EndpointHost":  hostPart,
+		"EndpointPort":  port,
+		"Bucket":        cfg.Backup.Bucket,
+		"Region":        cfg.Backup.Region,
+		"URIStyle":      cfg.Backup.URIStyle,
+		"KeyID":         sec.KeyID,
+		"Secret":        sec.Secret,
+		"Prefix":        cfg.Backup.Prefix,
+		"CipherPass":    sec.CipherPass,
+		"RetentionFull": cfg.Backup.Database.RetentionFull,
+		"LocalRepo":     cfg.Backup.Database.LocalRepo,
+		"ProcessMax":    maxInt(1, host.VCPU/2),
+		"Stanza":        cfg.Name(),
+		"DataDirectory": cfg.Server.DataDirectory,
+	})
+}
+
+// BackupConf renders conf.d/40-eru-backup.conf: WAL archiving to pgBackRest.
+func BackupConf(cfg config.Cluster) []byte {
+	return execute("40-eru-backup.conf.tmpl", map[string]any{"Stanza": cfg.Name()})
+}
+
+// JobService renders the eru-<job>.service a timer starts (§18). arg is
+// appended to eru node run <job>, for example --db %i for the dump template.
+func JobService(job, arg string) []byte {
+	return execute("eru-job.service.tmpl", map[string]any{"Job": job, "Arg": arg})
+}
+
+// JobTimer renders an eru-<job>.timer (§18).
+func JobTimer(description, schedule, jitter string) []byte {
+	return execute("eru-job.timer.tmpl", map[string]any{"Description": description, "Schedule": schedule, "Jitter": jitter})
 }
 
 func clamp(v, lo, hi int) int { return minInt(maxInt(v, lo), hi) }

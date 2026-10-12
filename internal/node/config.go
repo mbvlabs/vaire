@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -66,6 +68,14 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	}
 	if err := cfg.Validate(); err != nil {
 		return Result{}, config.ValidationError(err)
+	}
+	if err := checkSchedules(ctx, cfg); err != nil {
+		return Result{}, err
+	}
+	if old, _, err := store.Load(); err == nil {
+		if err := checkRepoMove(ctx, old, cfg); err != nil {
+			return Result{}, err
+		}
 	}
 	// A dry run previews the plan for the new file without saving it.
 	revision := current
@@ -150,4 +160,42 @@ func validateProblems(raw []byte) []string {
 		return []string{err.Error()}
 	}
 	return nil
+}
+
+// checkSchedules runs systemd-analyze calendar on every backup schedule, so
+// a timer never fails to load: the node has the final say on OnCalendar.
+func checkSchedules(ctx context.Context, cfg config.Cluster) error {
+	var problems []string
+	for key, value := range cfg.ScheduleValues() {
+		if _, err := steps.Probe(ctx, "systemd-analyze", "calendar", value); err != nil {
+			problems = append(problems, key+" "+strconv.Quote(value)+" is not a valid OnCalendar expression")
+		}
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	sort.Strings(problems)
+	return output.NewError(output.CodeValidation, strings.Join(problems, "; "), output.ExitConfig,
+		"Use systemd OnCalendar syntax, for example \"Sun *-*-* 01:00:00\" or \"daily\".").WithDetails(map[string]any{"problems": problems})
+}
+
+// checkRepoMove refuses to move backups to another endpoint, bucket or
+// prefix once the stanza exists there: the restore window would be lost.
+func checkRepoMove(ctx context.Context, old, updated config.Cluster) error {
+	if !old.BackupConfigured() || !updated.BackupConfigured() {
+		return nil
+	}
+	ob, nb := old.Backup, updated.Backup
+	if ob.Endpoint == nb.Endpoint && ob.Bucket == nb.Bucket && ob.Prefix == nb.Prefix {
+		return nil
+	}
+	info, err := driver(old, "config.set", nil).Info(ctx, "")
+	if err != nil || (info.StatusCode != 0 && len(info.Sets) == 0) {
+		return nil
+	}
+	return output.NewError(output.CodePrecondition,
+		"backups already live in "+ob.Bucket+"/"+ob.Prefix+"; moving them would lose the restore window",
+		output.ExitPrecondition,
+		"Keep the endpoint, bucket and prefix. Re-running eru backup setup with the same bucket rotates the keys.").
+		WithDetails(map[string]any{"reason": "repo_in_use", "bucket": ob.Bucket, "prefix": ob.Prefix})
 }

@@ -24,20 +24,43 @@ type managedFile struct {
 	Mode    os.FileMode
 	Owner   string
 	Group   string
+	// removed marks a file Apply deleted, kept only so a failed validation
+	// puts it back.
+	removed bool
 }
 
+// BackupConfPath is conf.d/40-eru-backup.conf, which exists only while
+// [backup] names a bucket.
+const BackupConfPath = PGConfD + "/40-eru-backup.conf"
+
 // confFiles returns the conf.d files in load order. 90-overrides.conf is
-// written only when missing.
+// written only when missing. 40-eru-backup.conf is in the list only while
+// backups are configured; otherwise Apply removes it.
 func confFiles(cfg config.Cluster, rt engine.Runtime) []managedFile {
 	res := tuningFor(cfg, rt.Host)
-	return []managedFile{
+	files := []managedFile{
 		{Path: PGConfD + "/10-eru-tuning.conf", Content: string(render.TuningConf(res)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
 		{Path: PGConfD + "/20-eru-security.conf", Content: string(render.SecurityConf()), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
 		{Path: PGConfD + "/30-eru-extensions.conf", Content: string(render.ExtensionsConf(cfg, res)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
-		{Path: PGConfD + "/50-eru-settings.conf", Content: string(render.SettingsConf(cfg)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
-		{Path: PGConfDir + "/pg_hba.conf", Content: string(render.HBA(cfg)), Mode: 0o640, Owner: pgFileOwner, Group: pgFileGroup},
-		{Path: PGConfDir + "/pg_ident.conf", Content: string(render.Ident(cfg)), Mode: 0o640, Owner: pgFileOwner, Group: pgFileGroup},
 	}
+	if cfg.BackupConfigured() {
+		files = append(files, managedFile{Path: BackupConfPath, Content: string(render.BackupConf(cfg)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup})
+	}
+	return append(files,
+		managedFile{Path: PGConfD + "/50-eru-settings.conf", Content: string(render.SettingsConf(cfg)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup},
+		managedFile{Path: PGConfDir + "/pg_hba.conf", Content: string(render.HBA(cfg)), Mode: 0o640, Owner: pgFileOwner, Group: pgFileGroup},
+		managedFile{Path: PGConfDir + "/pg_ident.conf", Content: string(render.Ident(cfg)), Mode: 0o640, Owner: pgFileOwner, Group: pgFileGroup},
+	)
+}
+
+// staleBackupConf reports whether 40-eru-backup.conf is on disk although
+// backups are not configured.
+func staleBackupConf(cfg config.Cluster) bool {
+	if cfg.BackupConfigured() {
+		return false
+	}
+	_, err := os.Stat(BackupConfPath)
+	return err == nil
 }
 
 type postgresConfig struct{}
@@ -50,9 +73,13 @@ func (postgresConfig) Describe(config.Cluster) string {
 
 func (postgresConfig) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []engine.RenderedFile {
 	files := confFiles(cfg, rt)
-	out := make([]engine.RenderedFile, 0, len(files))
+	out := make([]engine.RenderedFile, 0, len(files)+1)
 	for _, f := range files {
 		out = append(out, engine.RenderedFile{Path: f.Path, Content: []byte(f.Content)})
+	}
+	if staleBackupConf(cfg) {
+		// Shown as a diff that removes every line.
+		out = append(out, engine.RenderedFile{Path: BackupConfPath})
 	}
 	return out
 }
@@ -75,6 +102,9 @@ func (postgresConfig) Check(_ context.Context, cfg config.Cluster, rt engine.Run
 	if _, err := os.Stat(PGConfD + "/90-overrides.conf"); err != nil {
 		return incomplete("90-overrides.conf is missing"), nil
 	}
+	if staleBackupConf(cfg) {
+		return incomplete(BackupConfPath + " is left from a removed [backup]"), nil
+	}
 	return complete(), nil
 }
 
@@ -88,7 +118,22 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 			backups[f.Path] = string(raw)
 		}
 	}
+	if staleBackupConf(cfg) {
+		raw, err := os.ReadFile(BackupConfPath)
+		if err != nil {
+			return engine.ApplyResult{}, fmt.Errorf("reading %s: %w", BackupConfPath, err)
+		}
+		if err := os.Remove(BackupConfPath); err != nil {
+			return engine.ApplyResult{}, fmt.Errorf("removing %s: %w", BackupConfPath, err)
+		}
+		// Restored with the others if PostgreSQL rejects the new files.
+		files = append(files, managedFile{Path: BackupConfPath, Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup, removed: true})
+		backups[BackupConfPath] = string(raw)
+	}
 	for _, f := range files {
+		if f.removed {
+			continue
+		}
 		if err := writeFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
 			return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
 		}

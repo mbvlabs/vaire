@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"net/netip"
+	"regexp"
 	"strings"
 )
 
@@ -76,6 +77,9 @@ func CheckDatabaseName(v string) error {
 	case "postgres", "template0", "template1":
 		return errors.New("is reserved")
 	}
+	if strings.HasSuffix(v, RestoringSuffix) || strings.Contains(v, PreRestoreMarker) {
+		return errors.New("is reserved: names ending in " + RestoringSuffix + " or containing " + PreRestoreMarker + " belong to eru restore")
+	}
 	for _, suffix := range []string{"_owner", "_migrate", "_app", "_ro"} {
 		if len(v)+len(suffix) > 63 {
 			return errors.New("is too long: " + v + suffix + " would exceed 63 characters")
@@ -83,3 +87,61 @@ func CheckDatabaseName(v string) error {
 	}
 	return nil
 }
+
+// Names eru restore gives the databases beside a live one: <db>__restoring
+// holds the restored copy until promote, and <db>__pre_restore_<ts> keeps the
+// replaced copy until cleanup.
+const (
+	RestoringSuffix  = "__restoring"
+	PreRestoreMarker = "__pre_restore_"
+)
+
+// IsRestoreName reports whether name is one of eru restore's databases.
+func IsRestoreName(name string) bool {
+	return strings.HasSuffix(name, RestoringSuffix) || strings.Contains(name, PreRestoreMarker)
+}
+
+// Providers are the backup provider presets.
+var Providers = []string{"r2", "s3", "b2", "hetzner", "minio", "custom"}
+
+// CheckProvider checks backup.provider.
+func CheckProvider(v string) error {
+	for _, p := range Providers {
+		if v == p {
+			return nil
+		}
+	}
+	return errors.New("must be one of " + strings.Join(Providers, ", "))
+}
+
+// CheckEndpoint checks backup.endpoint: an https:// URL with a host (and
+// port) and nothing after it. pgBackRest talks to S3 over TLS only.
+func CheckEndpoint(v string) error {
+	rest, ok := strings.CutPrefix(v, "https://")
+	rest = strings.TrimSuffix(rest, "/")
+	if !ok || rest == "" || strings.ContainsAny(rest, "/?# ") {
+		return errors.New("must be an https:// URL with only a host (and port)")
+	}
+	return nil
+}
+
+// CheckBucket checks backup.bucket.
+func CheckBucket(v string) error {
+	if !bucketPattern.MatchString(v) {
+		return errors.New("is not an S3 bucket name")
+	}
+	return nil
+}
+
+// CheckPrefix checks backup.prefix: no leading or trailing slash.
+func CheckPrefix(v string) error {
+	if v == "" || !prefixPattern.MatchString(v) || strings.HasPrefix(v, "/") || strings.HasSuffix(v, "/") || strings.Contains(v, "//") {
+		return errors.New("must be a non-empty key prefix without leading or trailing slash")
+	}
+	return nil
+}
+
+var (
+	bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	prefixPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+)

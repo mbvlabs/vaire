@@ -48,7 +48,7 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 | `external_command_failed` | 6 |
 | `config_error`, `validation_failed` | 7 |
 | `ambiguous_input`, `input_required` | 8 |
-| `remote_unreachable`, `transport_failed`, `host_key_mismatch` | 9 |
+| `remote_unreachable`, `transport_failed`, `host_key_mismatch`, `endpoint_unreachable`, `bucket_not_found`, `backup_auth_failed` | 9 |
 | `node_version_mismatch`, `update_required` | 10 |
 | `precondition_failed` | 11 |
 | `lockdown_failed` | 12 |
