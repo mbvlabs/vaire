@@ -46,6 +46,8 @@ type Document struct {
 const ConnectionNotes = "The app URL goes through PgBouncer on port 6432 in transaction mode; use it for application traffic. " +
 	"The migrate URL connects straight to PostgreSQL on port 5432 for session features that migrations need. " +
 	"Port 5432 is reachable only over WireGuard (eru tunnel --target postgres) or when network.expose_postgres = true. " +
+	"The app_direct_tls URL is the app role through port 443: PostgreSQL 17+ clients that negotiate TLS directly (sslnegotiation=direct) " +
+	"reach the same PgBouncer, which helps on networks that only allow 443. It follows the same client allowlist as 6432. " +
 	"pgbouncer_auth and eru_monitor under services are eru's own service roles; applications never use them."
 
 // Cluster is the cluster identity.
@@ -88,8 +90,9 @@ type Role = contexts.Role
 type DBSecret = contexts.DBSecret
 
 // DatabaseURLs builds the connection strings for one database (§10.1). The app
-// role uses PgBouncer on 6432; the migrate role connects straight to Postgres
-// on 5432, reachable only over WireGuard or when expose_postgres is set.
+// role uses PgBouncer on 6432, and also on 443 with direct TLS through nginx;
+// the migrate role connects straight to Postgres on 5432, reachable only over
+// WireGuard or when expose_postgres is set.
 func DatabaseURLs(domain, tlsMode, db string, roles map[string]contexts.Role) map[string]string {
 	query := "sslmode=verify-full&sslrootcert=system"
 	if tlsMode == "self-signed" {
@@ -98,6 +101,7 @@ func DatabaseURLs(domain, tlsMode, db string, roles map[string]contexts.Role) ma
 	out := map[string]string{}
 	if r, ok := roles["app"]; ok {
 		out["app"] = fmt.Sprintf("postgres://%s:%s@%s:6432/%s?%s", r.User, r.Password, domain, db, query)
+		out["app_direct_tls"] = fmt.Sprintf("postgres://%s:%s@%s:443/%s?%s&sslnegotiation=direct", r.User, r.Password, domain, db, query)
 	}
 	if r, ok := roles["migrate"]; ok {
 		out["migrate"] = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?%s", r.User, r.Password, domain, db, query)

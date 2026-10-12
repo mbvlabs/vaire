@@ -4,15 +4,10 @@ package versions
 const (
 	PostgresMajor = 18
 	CosignVersion = "3.1.3"
-	// CaddyVersion is the pinned Caddy release (§23.3).
-	CaddyVersion = "2.11.4"
+	// NginxMinVersion is the oldest distribution nginx tls-v2 accepts: it
+	// needs the stream module with ssl_preread and ssl_alpn (§23.3).
+	NginxMinVersion = "1.26"
 )
-
-// CaddySHA256 is keyed by dpkg architecture for the pinned .deb package.
-var CaddySHA256 = map[string]string{
-	"amd64": "c41708ffb4af9bc6d19f7d22a7a034804352a21ecc62e1d3dfe3d58e30b38a3e",
-	"arm64": "aeab2e38bf77a0162611a1703a5e16c09475b000d41f7edaa9337734d16642fd",
-}
 
 // CosignSHA256 is keyed "<os>-<arch>" for the GitHub release binaries.
 var CosignSHA256 = map[string]string{

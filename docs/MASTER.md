@@ -46,8 +46,8 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Backup engine | pgBackRest, with WAL-G as fallback behind a `backup.Driver` interface |
 | VPS backup | restic file-level backups, weekly by default and scheduled separately from the database. Provider snapshots later (Phase 7, §6.6) |
 | HA (Phase 10, last) | Patroni + etcd. Until then eru runs plain `postgresql-common`, with a designed and tested adoption step into Patroni |
-| Client access | Caddy manages ACME certificates for `data.example.com`; clients connect directly to `:6432` (PgBouncer) or `:5432` with `sslmode=verify-full` |
-| Metrics | Exporters only, exposed via an authenticated Caddy endpoint for external scraping (Grafana Cloud, own Prometheus). No metrics storage on the box |
+| Client access | eru issues and renews the ACME certificate for `data.example.com` itself; clients connect to `:6432` (PgBouncer) or `:5432` with `sslmode=verify-full`, or to PgBouncer through `:443` with direct TLS (`sslnegotiation=direct`, PG17+ clients). The record must be DNS only, not proxied |
+| Metrics | Exporters only, exposed via an authenticated nginx endpoint for external scraping (Grafana Cloud, own Prometheus). No metrics storage on the box |
 | Config format | TOML |
 | Node networking | WireGuard mesh managed by eru by default; Tailscale as an option |
 | Operator WireGuard | Embedded userspace by default; `eru wg export` produces a system config when wanted |
@@ -86,8 +86,8 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | VPS backups | **restic** to the same bucket (separate prefix, own encryption key) | Same tool deploycrate pins |
 | Logical exports | `pg_dump -Fc` to the bucket or locally, per database | For portability and single-database restores, not DR |
 | Pooling | **PgBouncer** (transaction mode, `max_prepared_statements`, `auth_query`, TLS on both sides) | Clients connect to PgBouncer, which reaches Postgres over the unix socket |
-| TLS & metrics edge | **Caddy**: ACME certificates for `data.example.com`, authenticated HTTPS `/metrics` | Postgres traffic doesn't go through Caddy |
-| Metrics | `node_exporter`, `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter`; `pg_stat_statements` on by default | Localhost-bound, federated through Caddy |
+| TLS & metrics edge | **nginx** (distribution package): HTTP-01 challenges on 80; on 443 `stream` + `ssl_preread` routes ALPN `postgresql` to PgBouncer and everything else to HTTPS (authenticated `/metrics` later). Certificates come from eru's own ACME client (`x/crypto/acme`) | Only direct-TLS clients on 443 go through nginx; 6432 and 5432 are direct |
+| Metrics | `node_exporter`, `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter`; `pg_stat_statements` on by default | Localhost-bound, federated through nginx |
 | DB access from CLI | `pgx` over the WireGuard tunnel | `eru sql`, `eru psql`, `eru tunnel` |
 | HA (Phase 10) | Patroni + etcd (3 voters), HAProxy health-routing on the Patroni REST API | |
 | Scheduling | systemd timers on each node calling `eru node …` subcommands | No long-running eru process anywhere |
@@ -107,7 +107,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 │  └ pgx over the tunnel    ───┼────────────────────▶│  ├ journal, /etc/eru/cluster.toml    │
 └──────────────────────────────┘   (5432 via wg0)    │  └ systemd timers → eru node …       │
                                                      │                                      │
-                                                     │ PostgreSQL 18 · PgBouncer · Caddy    │
+                                                     │ PostgreSQL 18 · PgBouncer · nginx    │
                                                      │ pgBackRest · restic · exporters      │
                                                      └──────────────────────────────────────┘
 ```
@@ -236,7 +236,7 @@ internal/steps/scripts/*.sh  embedded host scripts (go:embed)
 internal/config/             cluster.toml schema, validation, defaults, migrations
 internal/hostinfo/           CPU/RAM/disk/kernel/OS detection
 internal/tune/               pure tuning calculator
-internal/render/             conf.d, pg_hba, pg_ident, pgbouncer.ini, pgbackrest.conf, restic, Caddyfile
+internal/render/             conf.d, pg_hba, pg_ident, pgbouncer.ini, pgbackrest.conf, restic, nginx.conf
 internal/backup/             Driver interface, pgbackrest impl, restic host backups
 internal/maint/              maintenance tasks + reports
 internal/catalog/            extension catalog
@@ -294,11 +294,11 @@ schema/eru-v1.json           agent JSON contract
 | 9 | Cluster create (`pg_createcluster 18 main`, data dir, locale `C.UTF-8`, ICU, checksums) | new |
 | 10 | Render managed conf.d, pg_hba and pg_ident; restart or reload depending on the diff | new |
 | 11 | Roles and databases (§6.3) | new |
-| 12 | Caddy install, placeholder certificate, ACME certificate, and the `eru-certs-sync` path unit and timer that copy the certificate to Postgres and PgBouncer and reload them | new |
+| 12 | nginx install, placeholder certificate, and the hourly `eru-certs` timer that issues and renews the ACME certificate (eru's own client) and reloads Postgres, PgBouncer and nginx | new |
 | 13 | PgBouncer config, `auth_query` function, TLS | new |
 | 14 | pgBackRest: stanza create, `archive_mode`, check, first full backup | `backup.sh` (pattern) |
 | 15 | restic: VPS backup repo, include/exclude sets, first snapshot | `backup.sh` |
-| 16 | Exporters and the authenticated `/metrics` behind Caddy | `node-exporter.sh` |
+| 16 | Exporters and the authenticated `/metrics` behind nginx | `node-exporter.sh` |
 | 17 | systemd timers: DB backups, VPS backups, verify, restore drill, maintenance, reports | `host.sh` (timer pattern) |
 | 18 | `eru doctor` as the final gate, then generate the secrets document | new |
 
@@ -325,12 +325,11 @@ schema/eru-v1.json           agent JSON contract
 - Host: SSH only on wg0, fail2ban jail on Postgres auth failures, systemd sandboxing overrides where safe.
 - `eru doctor --security` runs a CIS-style audit with pass/fail and fixes.
 
-### 6.4 Caddy and `data.example.com`
+### 6.4 nginx, certificates and `data.example.com`
 
-Postgres speaks its own wire protocol, not HTTP, so Caddy doesn't proxy it. Caddy:
-
-1. Gets and renews the certificate for `data.example.com`. A deploy hook installs it for Postgres and PgBouncer and reloads them, so clients connect to `data.example.com:6432` with `sslmode=verify-full`.
-2. Serves the authenticated `/metrics` federation endpoint over HTTPS.
+- **Certificates:** eru gets and renews the certificate for `data.example.com` itself (`eru node run certs-renew`, hourly), over HTTP-01 on port 80 served by nginx. It installs the certificate for Postgres, PgBouncer and nginx and reloads them, so clients connect to `data.example.com:6432` with `sslmode=verify-full`.
+- **Port 443:** nginx's `stream` module reads the TLS ClientHello (`ssl_preread`). PostgreSQL 17+ clients with `sslnegotiation=direct` send ALPN `postgresql`; nginx terminates their TLS and passes them to PgBouncer over loopback, under the same allowlist as 6432. This helps on networks that only allow 443. Everything else on 443 is HTTPS, where Phase 6 serves the authenticated `/metrics` endpoint.
+- **DNS:** the record must point straight at the server ("DNS only" in Cloudflare). A proxied record ends the connection at the proxy, which only passes HTTP.
 
 ### 6.5 Database backups and restores
 
@@ -365,7 +364,7 @@ eru dump <db> [--to bucket|local]         # logical export, streamed to the lapt
 
 The database is covered by pgBackRest. The VPS backup covers everything else on the host that matters for a rebuild or that eru doesn't generate from `cluster.toml`:
 
-- **What:** `/etc` (including eru, WireGuard, sshd, Caddy and PgBouncer config), `/var/lib/eru`, Caddy's data directory (certificates and ACME account), `/home` and `/root`, and user-declared extra paths in `cluster.toml`.
+- **What:** `/etc` (including eru with its certificates and ACME account, WireGuard, sshd, nginx and PgBouncer config), `/var/lib/eru`, `/home` and `/root`, and user-declared extra paths in `cluster.toml`.
 - **Excluded:** the PGDATA directory, WAL, pgBackRest local repo, caches, and `/var/log`. Logs are optional.
 - **How:** restic to the same bucket under a separate prefix with its own repository password, which is stored in the recovery kit.
 - **Schedule:** independent of the database schedule. The default is **weekly** (Sunday, staggered away from the full DB backup), with `forget --prune` retention of 8 weekly and 6 monthly, and a monthly `restic check`. The schedule is configurable in `cluster.toml` (`[vps_backup] schedule = "weekly"`), and `eru vps backup now` runs one on demand, for example before risky changes. `eru upgrade` and `eru pg update` take one automatically.
@@ -374,7 +373,7 @@ The database is covered by pgBackRest. The VPS backup covers everything else on 
 
 ### 6.7 Metrics
 
-- Exporters bind to localhost only. Caddy exposes one authenticated `/metrics` endpoint (federated) for external scrapers. The credentials are in the secrets document.
+- Exporters bind to localhost only. nginx exposes one authenticated `/metrics` endpoint (federated) for external scrapers. The credentials are in the secrets document.
 - `pg_stat_statements` and `auto_explain` (sampled, threshold-based) are on by default.
 - CLI views: `eru status` (role, uptime, connections, cache hit, replication, last DB and VPS backup, PITR window, disk, certificate expiry), `eru top` (live TUI of activity, locks and slow queries), `eru queries` (top statements). All support `--json`.
 
@@ -439,7 +438,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 - **Phase 1 (Bootstrap) is code complete but not done.** Every module below is built and passes `just lint` and the four cross-builds, and the local paths (login, contexts, first-contact host-key pinning and SSH auth errors, input checks) were exercised on a dev machine. Nothing has run against a real VPS yet, so the exit check has not passed. That manual run is the next task.
 - **Phase 2 (First cluster) is code complete but not done.** `internal/hostinfo`, `internal/tune`, `internal/catalog`, `internal/render`, `internal/pg`, `internal/state`, steps 7–13, the database phase of `cluster.bootstrap`, the `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` and `tune *` commands, and the database section of the secrets document are built. `just lint` and the four cross-builds pass. The VPS manual test in §7.5 has not run yet.
 - One open item from Phase 0: install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
-- About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-sync`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
+- About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
 
 ### 7.2 Overview
 
@@ -500,9 +499,9 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 | `internal/config` | Strict `cluster.toml` schema, defaults and validation; dotted-key `get`/`set` | 🟡 |
 | `internal/hostinfo` | CPU, RAM, disk, kernel and OS detection, public IPv4/IPv6 | 🟡 |
 | `internal/tune` | Tuning calculator; `eru tune explain/apply` | 🟡 |
-| `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, Caddyfile, certs-sync units, unified `Diff` | 🟡 |
+| `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, pgbouncer_hba.conf, nginx.conf, eru-certs units, unified `Diff` | 🟡 |
 | `internal/pg`, `internal/state` | pgx admin client (local psql + remote pgx), desired-state store | 🟡 |
-| Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, Caddy + ACME certificates, PgBouncer | 🟡 |
+| Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, nginx + ACME certificates, PgBouncer | 🟡 |
 | Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs`, `tune *` | 🟡 |
 
 **Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused.
@@ -541,7 +540,7 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| Step 16 | Exporters and the authenticated `/metrics` endpoint behind Caddy | ⬜ |
+| Step 16 | Exporters and the authenticated `/metrics` endpoint behind nginx | ⬜ |
 | Status views | `status`, `top`, `queries`, `doctor` (all checks, including `--security`) | ⬜ |
 | `internal/maint` | `maint vacuum/analyze/reindex/repack/report/kill` and the maintenance timers | ⬜ |
 | Steps 17–18 | Remaining timers; `doctor` as the final gate of `init` | ⬜ |

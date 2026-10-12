@@ -186,11 +186,17 @@ func tunnelHint(err error, publicAddr string, port int) error {
 	return err
 }
 
-// dialRetry dials SSH until it works or the deadline passes. Host key and
-// authentication failures stop at once.
-func dialRetry(ctx context.Context, d transport.Dialer, target transport.SSHTarget, opts transport.SSHOptions, within time.Duration) (*transport.SSHClient, error) {
+// dialRetryReport dials SSH until it works or the deadline passes. Host key
+// and authentication failures stop at once. onAttempt, when set, hears about
+// each attempt and the deadline, for a live status line.
+func dialRetryReport(ctx context.Context, d transport.Dialer, target transport.SSHTarget, opts transport.SSHOptions, within time.Duration,
+	onAttempt func(attempt int, deadline time.Time),
+) (*transport.SSHClient, error) {
 	deadline := time.Now().Add(within)
-	for {
+	for n := 1; ; n++ {
+		if onAttempt != nil {
+			onAttempt(n, deadline)
+		}
 		attempt := opts
 		if left := time.Until(deadline); left < attempt.Timeout || attempt.Timeout == 0 {
 			attempt.Timeout = left

@@ -61,7 +61,8 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 A success envelope may carry `warnings[]`, each with a stable `code` and a `message`. Act on them; they never fail the command.
 
 - `secrets_document_stale`: new database passwords were generated on the operator. Run `eru secrets export` to refresh the secrets document.
-- `tls_pending`: the ACME certificate is not issued yet. Caddy retries once DNS is correct; no action is needed.
+- `tls_pending`: the ACME certificate is not issued yet. `eru-certs.timer` retries every hour; once DNS points at the server (DNS only, not proxied) it is issued without any action.
+- `dns_mismatch` / `dns_proxied`: the domain doesn't resolve to the server yet, or is proxied by Cloudflare. Ask the human to fix the record (DNS only); init continues either way.
 - `tls_unverified`: a connection used `sslmode=require` (self-signed mode) or DNS was not verified before continuing.
 - `no_backup_before_drop`: `eru db drop` removed a database without a backup (pgBackRest arrives in Phase 3).
 - `orphaned_database`: a database exists on the node but is no longer in `cluster.toml`. Drop it with `eru db drop`.

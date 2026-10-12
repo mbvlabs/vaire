@@ -30,7 +30,7 @@
 
 ## 1. Scope
 
-**In scope** (MASTER roadmap Phases 0–6, plus the extension catalog from Phase 8 and the agent guide from Phase 7): single-node central command, operator CLI, WireGuard transport, secrets document, hardening, PostgreSQL 18, tuning, security, Caddy TLS, PgBouncer, pgBackRest DB backups and restores, restic VPS backups, DR rebuild, metrics exporters, maintenance, extensions v1, status/doctor/top, upgrade/rollback, `--local` install, agent guide and skill.
+**In scope** (MASTER roadmap Phases 0–6, plus the extension catalog from Phase 8 and the agent guide from Phase 7): single-node central command, operator CLI, WireGuard transport, secrets document, hardening, PostgreSQL 18, tuning, security, nginx TLS (eru-issued ACME certificates), PgBouncer, pgBackRest DB backups and restores, restic VPS backups, DR rebuild, metrics exporters, maintenance, extensions v1, status/doctor/top, upgrade/rollback, `--local` install, agent guide and skill.
 
 **Out of scope:** multiple nodes, replicas and the Tailscale transport (Phase 9), HA (Phase 10), operator add/revoke and scoped operators, provider snapshots and alerting (Phase 7), `eru mcp` and major PG upgrades (backlog).
 
@@ -60,7 +60,9 @@
 | Secrets document | `filippo.io/age` (scrypt recipient) |
 | Signature verification | `github.com/sigstore/sigstore-go` (verify cosign bundles in-process) |
 | JQ filter | `github.com/itchyny/gojq` |
-| Bcrypt (Caddy basic auth hash) | `golang.org/x/crypto/bcrypt` |
+| Bcrypt (nginx basic auth hash) | `golang.org/x/crypto/bcrypt` |
+| ACME client (certificates) | `golang.org/x/crypto/acme` |
+| `~/.ssh/config` parsing | `github.com/kevinburke/ssh_config` |
 | Passphrase prompts without echo | `golang.org/x/term` |
 
 `tun/netstack` pulls in `gvisor.dev/gvisor` at the version the WireGuard module pins; don't upgrade it on its own.
@@ -186,7 +188,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru node rpc` | Reads one JSON request on stdin, writes NDJSON events to stdout (§7.4). The only entry point the operator uses besides `version` |
 | `eru node version` | Prints version JSON. Runs without sudo |
 | `eru node selfcheck` | Binary can read config, the journal is readable, required tools are present. Creates missing `/var/lib/eru` (0700), `/var/log/eru` (0750) and `/run/lock` (1777), and fails if the owner lacks `rwx` on them, since root can write to a mode-000 directory |
-| `eru node run <job>` | Timer entry points: `backup-full`, `backup-diff`, `backup-incr`, `backup-verify`, `restore-drill`, `vps-backup`, `maint-daily`, `maint-weekly`, `certs-sync`, `metrics-refresh` |
+| `eru node run <job>` | Timer entry points: `backup-full`, `backup-diff`, `backup-incr`, `backup-verify`, `restore-drill`, `vps-backup`, `maint-daily`, `maint-weekly`, `certs-renew`, `metrics-refresh` |
 | `eru node ssh-revert` | Commit-confirm revert (§8.3), invoked by a transient systemd timer |
 | `eru node unlock-ssh` | Break-glass: open public 22/tcp for `--minutes` (default 30) via a transient timer that re-closes it |
 
@@ -299,6 +301,16 @@ Port `requireFlagInStructuredMode` and `confirmDestructiveAction` from `andurel/
 
 - If stdin isn't a TTY, `--no-input` is set, or the output mode is structured, a missing value returns `input_required`, naming the flag.
 - Destructive commands require `--confirm <exact token>`. In a TTY without `--confirm`, prompt the user to type the token. `--yes` exists but **never** satisfies a destructive confirmation.
+- A word the operator must type is always quoted in the prompt: `Type 'prod' to confirm`, `Type 'confirmed' once the records exist`, `Type 'stored' once both are stored safely`.
+
+### 5.6 Terminal UI
+
+`internal/cli/ui` draws human output on a terminal. It is used when the output mode is human, stderr is a terminal, `TERM` isn't `dumb`, and none of `--no-input`, `--quiet`, `--jq`, `--stream` or a structured `--output` is set. Everything else keeps the plain lines (and `NO_COLOR` strips colors from the terminal UI).
+
+- **Live area:** every running local phase and node step shows a `bubbles` spinner with its title, elapsed time and, for waits, the time left. The latest script output line is shown dim under it, so long installs visibly move. Node steps show a progress bar (`step 3 of 7`), and the binary upload shows bytes sent. A finished task prints one `✓`/`✗`/`!`/`–` line. `--verbose` still prints every log line.
+- **Layout:** `lipgloss` section headers (Prepare → Host → Lockdown → DNS → Database → TLS → Secrets), boxed panels for the DNS records (plain `TYPE NAME VALUE` lines inside so they copy cleanly), the DNS answers and the secrets passphrase, warnings in their own style, and a summary card with connection URLs, warnings and next steps at the end of init.
+- **Errors:** a boxed error with the code, the failed step, `details.output_tail` and the hint.
+- **Prompts:** every prompt (the interview, typed words, yes/no, host-key trust, passphrases) is a `huh` field with eru's theme. The live area is suspended while a prompt is open. The renderer never reads stdin, so Ctrl+C keeps its default behaviour.
 
 ---
 
@@ -390,7 +402,7 @@ path_prefix = "/metrics"
 **Validation** (`eru config validate`, run before every write and apply):
 
 - Names and identifiers follow the regexes shown.
-- `domain` is an FQDN. `acme_email` is valid when `tls.mode = "acme"`.
+- `domain` is an FQDN. `acme_email` is optional; when set it must be an email address. It is only the ACME account contact, used in `acme` mode.
 - Schedules parse with `systemd-analyze calendar`. Run it on the node. On the operator, use a Go parser for the subset and let the node have the final say.
 - CIDRs parse. `0.0.0.0/0` in `client_allowlist` is allowed but produces a doctor `warn`.
 - `retention_full ≥ 1`, `keep_weekly ≥ 1`.
@@ -403,7 +415,7 @@ path_prefix = "/metrics"
 - `tls.mode ∈ {acme, self-signed}`; `acme_ca` empty or an `https://` URL; `postgres.version == 18`; `profile ∈ {oltp, mixed, analytics}`; `client_connections` 10–100000; `locale_provider ∈ {builtin, icu, libc}`; `locale` matches `^[A-Za-z0-9_.@-]+$`.
 - `[postgres.settings]` keys match `^[a-z_][a-z0-9_.]*$` and may not name a setting eru owns: `allow_alter_system`, `ssl*`, `listen_addresses`, `port`, `password_encryption`, `shared_preload_libraries`, `archive_*`, `data_directory`, `hba_file`, `ident_file`, `include*`.
 - Database names are unique, and `<name>_migrate` etc. fit in 63 characters. `statement_timeout` is `0` or matches `^\d+(ms|s|min|h)$`. Extensions must be catalog entries (§17); until Phase 8 only the contrib entries exist, and any other name gets `validation_failed` with the hint "arrives with eru ext in Phase 8".
-- `ValidateFor(scope)` has scopes `host` and `full`. `cluster.bootstrap phase=host` uses `host`, which allows a missing `domain`/`acme_email`. Everything else uses `full`, where a missing domain is `validation_failed` with hint `eru config set domain <fqdn>`. This is how a Phase 1 cluster gets its database: `eru config set domain …`, `eru config set acme_email …`, `eru apply`.
+- `ValidateFor(scope)` has scopes `host` and `full`. `cluster.bootstrap phase=host` uses `host`, which allows a missing `domain`. Everything else uses `full`, where a missing domain is `validation_failed` with hint `eru config set domain <fqdn>`. This is how a Phase 1 cluster gets its database: `eru config set domain …`, `eru apply` (optionally `eru config set acme_email …` first).
 - `DefaultCluster()` has no databases. Init adds `app` (`statement_timeout = "60s"`, `extensions = ["pg_stat_statements"]`) when the interview and flags name none.
 
 `config set` uses dotted keys (`backup.vps.schedule`, `postgres.settings.work_mem`, `databases.app.statement_timeout`). Array-of-table entries are addressed by `name`. Values parse by the target field's type (bool, int, float, string, `[]string` as a comma list or TOML array literal). `schema`, `name`, `nodes.*.wg_address` and `transport.*` are immutable after init: `config set` refuses them, and so does a whole-file `config.set` (`config edit`), with `precondition_failed`, reason `immutable_key`.
@@ -426,7 +438,7 @@ path_prefix = "/metrics"
 | `/var/lib/eru/state.json` | root 0600 | `secrets_confirmed_at`, `lockdown_pending`, `locked_down_at`, `last_apply`, `restore` (in-progress restore record), `drills[]` (last 12) |
 | `/var/lib/eru/ssh-snapshot/` | root 0700 | Commit-confirm snapshot (`snapshot.json`, `sshd-dropin.conf`, `ufw-rules.txt`) and `reverted.json` (§8.3) |
 | `/var/lib/eru/drill/` | postgres 0700 | Scratch restores |
-| `/var/lib/node_exporter/textfile/eru.prom` | root 0644 | §15.3 |
+| `/var/lib/node_exporter/textfile/eru.prom` | root 0644 | §15.4 |
 | `/var/log/eru/` | root 0750 | One log per RPC/job: `<UTC ts>-<method>-<request_id>.log`, rotated by logrotate (30 days) |
 | `/run/lock/eru.lock` | | Global lock (§9.5) |
 
@@ -491,7 +503,7 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 - **stderr**: free-form diagnostics. The operator surfaces it only with `--verbose`.
 - **Methods** mirror operator commands, named `<group>.<verb>` (each word may contain inner hyphens, as in `cluster.confirm-secrets`): `cluster.bootstrap`, `cluster.confirm-secrets`, `apply`, `plan`, `config.get|set|validate`, `status`, `doctor`, `db.*`, `ext.*`, `tune.*`, `backup.*`, `restore.*`, `vps.*`, `maint.*`, `ssh.lockdown`, `ssh.confirm`, `ssh.status`, `tls.status`, `logs`, `upgrade.install`, `upgrade.rollback`, `pg.update`, `sql`, `queries`, `top.sample`.
 - **Confirmation is re-checked node-side.** The node recomputes the token and rejects mismatches, so a buggy operator can't skip it. Destructive methods (`db.drop`, `db.credentials` with `rotate`) also refuse an *empty* token with `unsafe_action_requires_confirmation`; for `apply` and `tune.apply` an empty token only leaves the restart pending.
-- **Phase 2 methods:** `cluster.bootstrap phase=database`; `config.get` (raw TOML + revision), `config.set`, `config.validate`; `db.list`, `db.create` (needs `db.<name>.*` secrets, adds `[[databases]]`, runs `postgres-roles-v1` only, puts `cluster.toml` back if the database was never created), `db.drop`, `db.credentials` (rotate only; reading credentials is operator-side); `tune.show`, `tune.apply`; `tls.status` (served certificate state, polled by init); `logs` (unit allowlist `postgres`, `pgbouncer`, `caddy`, `eru-certs-sync`, `eru`; `follow` streams until the client disconnects); `sql` (for `--local` only: one transaction as `postgres` with `SET LOCAL ROLE`, `READ ONLY` unless `write`).
+- **Phase 2 methods:** `cluster.bootstrap phase=database`; `config.get` (raw TOML + revision), `config.set`, `config.validate`; `db.list`, `db.create` (needs `db.<name>.*` secrets, adds `[[databases]]`, runs `postgres-roles-v1` only, puts `cluster.toml` back if the database was never created), `db.drop`, `db.credentials` (rotate only; reading credentials is operator-side); `tune.show`, `tune.apply`; `tls.status` (served certificate state, polled by init); `logs` (unit allowlist `postgres`, `pgbouncer`, `nginx`, `eru-certs`, `eru`; `follow` streams until the client disconnects); `sql` (for `--local` only: one transaction as `postgres` with `SET LOCAL ROLE`, `READ ONLY` unless `write`).
 - **Read-only SQL** (`eru sql`, `top.sample`, `queries`, reports) runs over pgx through the tunnel, not via RPC, except where node-local access is needed (`postgres` peer for superuser-only views). RPC methods for these exist for `--local` mode.
 - **Sudoers**: `/etc/sudoers.d/eru` contains `eru ALL=(root) NOPASSWD: /usr/local/bin/eru node *`. Validate it with `visudo -cf`.
 
@@ -508,7 +520,12 @@ OS keychain storage is a later improvement. Files are 0600 like `~/.ssh`. Any fi
 
 ### 8.1 `eru cluster init` flags
 
-`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--database <name>` (repeatable), `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--extensions`, `--tls-mode`, `--local`, `--restore <secrets.age>` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--passphrase-out <path|->`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check`, `--resume`. Until their phase lands, the backup and VPS flags are accepted with a `flag_not_used_yet` warning.
+`--host <user@ip[:port]>`, `--identity <path>`, `--password-stdin`, `--host-key-fingerprint`, `--accept-new-host-key`, `--answers <file>`, `--name`, `--domain`, `--admin-user`, `--timezone`, `--data-directory`, `--acme-email`, `--profile`, `--client-connections`, `--database <name>` (repeatable), `--allow <cidr>` (repeatable), `--backup-provider`, `--backup-endpoint`, `--backup-region`, `--backup-bucket`, `--backup-prefix`, `--backup-key-id`, `--backup-secret-stdin` / `--backup-secret-file`, `--vps-backup-schedule`, `--db-full-schedule`, `--db-diff-schedule`, `--extensions`, `--tls-mode`, `--local`, `--restore <secrets.age>` (§13), `--restore-time <ts>`, `--secrets-out <path>`, `--passphrase-out <path|->`, `--confirm-secrets-stored`, `--dns-ready`, `--skip-dns-check` (deprecated, no effect), `--resume`, `--discard`. Until their phase lands, the backup and VPS flags are accepted with a `flag_not_used_yet` warning.
+
+- `--host` also takes a `Host` alias from `~/.ssh/config`. First contact reads the matching block for `HostName`, `User`, `Port` and `IdentityFile`; explicit `user@`/`:port` and `--identity` win. `--identity` (or the resolved `IdentityFile`) is checked to be a readable private key while the answers are collected, before anything is prompted or generated.
+- Without `--identity`, first contact offers ssh-agent keys and `~/.ssh/id_{ed25519,ecdsa,rsa}` as one `publickey` method. An encrypted default key that the agent doesn't hold gets a passphrase prompt in a TTY; otherwise it is skipped and named in `details.skipped_keys`.
+- `--discard --name <n>` deletes `pending/<n>` after a typed `discard` (or `--confirm discard`). When the host phase already ran it warns `host_already_bootstrapped`: the discarded pending state holds the only credentials for that server. The `init_pending` error names both `--resume` and `--discard` and carries `details.pending_path`.
+- During init, a `step_failed` hint says `eru cluster init --resume --name <n>` instead of `eru apply`, and every `step_failed` carries `details.output_tail`: the last 20 redacted output lines of the failed script.
 
 ### 8.2 Remote init sequence
 
@@ -525,10 +542,10 @@ Each numbered phase emits `step` events and records progress in `pending/<name>/
    - configure ufw with **public 22 still open**.
 7. **Switch transport**: start userspace WireGuard to `public_address:51820` and SSH to `10.42.0.1:22` as `admin_user`. Pin the host key (same host keys, new address entry). Run the handshake.
 8. **Commit-confirm lockdown** (§8.3).
-9. **DNS** (`dns_confirmed`, `acme` mode only). Show the records (`A`, plus `AAAA → <public IPv6>` when host bootstrap reported one; it is kept in `progress.json`). In a TTY the operator types `added`; non-interactive runs need `--dns-ready` or stop with `input_required` listing `details.dns_records`. eru then queries 1.1.1.1 and 8.8.8.8 directly (a Go `net.Resolver` dialing them, so local caches can't lie) every 10 s for up to 5 min. On timeout a TTY offers wait / continue / stop; a non-interactive run fails with `precondition_failed` (reason `dns_mismatch`, records and answers in `details`) unless `--skip-dns-check` is set. `self-signed` mode skips this phase.
+9. **DNS** (`dns_confirmed`, `acme` mode only). Show the records (`A`, plus `AAAA → <public IPv6>` when host bootstrap reported one; it is kept in `progress.json`), with the note that they must be DNS only (not proxied). In a TTY the operator types `confirmed` once the records exist; `--dns-ready` skips that pause, and non-interactive runs don't pause. eru then queries 1.1.1.1 and 8.8.8.8 once, directly (a Go `net.Resolver` dialing them, so local caches can't lie), and continues whatever they answer. A mismatch is a `dns_mismatch` warning listing each resolver's answers against the expected addresses. Answers inside Cloudflare's published ranges are a `dns_proxied` warning ("proxied by Cloudflare: database clients can't connect through it; set the record to DNS only"). DNS never blocks init: the certificate wait (step 11) shows whether the certificate was issued. `--skip-dns-check` is accepted with a `flag_deprecated` warning. `self-signed` mode skips this phase.
 10. **RPC `cluster.bootstrap` phase=database** (`database_bootstrapped`) over WireGuard: it requires `node.toml` of the same cluster and a completed host phase, writes the new `cluster_toml` through `state.Store`, and runs the database steps (7–13 in Phase 2; later phases append theirs). All database and service passwords travel in `secrets`. Result: `{phase, steps, tls: {state, not_after}, restart_performed}`.
-11. **Certificate wait** (`tls_checked`): poll `tls.status` for up to 120 s until the placeholder is replaced. `tls.state` is `acme`, `pending` or `self-signed`; `pending` is a `tls_pending` warning, never a failure.
-12. **Secrets document** (`secrets_written`, §10): write to `--secrets-out` (default `./eru-<name>.secrets.age`, 0600) and display the passphrase once. In a TTY, require typing `stored`; otherwise require `--confirm-secrets-stored` together with `--passphrase-out`. `--passphrase-out <path>` writes a 0600 file; `--passphrase-out -` prints it in a TTY and puts it in `data.passphrase` in structured output (an explicit request). A resumed init that stopped before the confirmation writes a fresh document with a new passphrase over its own file. Then RPC `cluster.confirm-secrets` sets `secrets_confirmed_at`.
+11. **Certificate wait** (`tls_checked`): poll `tls.status` for up to 120 s until the placeholder is replaced. `tls.state` is `acme`, `pending` or `self-signed`; `pending` is a `tls_pending` warning, never a failure. The warning carries the resolver answers (or the Cloudflare hint) from a fresh DNS check, and says that `eru-certs.timer` retries every hour.
+12. **Secrets document** (`secrets_written`, §10): write to `--secrets-out` (default `./eru-<name>.secrets.age`, 0600) and display the passphrase once. In a TTY, require typing `stored` (the prompt reads `Type 'stored' once both are stored safely`); otherwise require `--confirm-secrets-stored` together with `--passphrase-out`. `--passphrase-out <path>` writes a 0600 file; `--passphrase-out -` prints it in a TTY and puts it in `data.passphrase` in structured output (an explicit request). A resumed init that stopped before the confirmation writes a fresh document with a new passphrase over its own file. Then RPC `cluster.confirm-secrets` sets `secrets_confirmed_at`.
 13. **Create the local context** from the pending data (with `lockdown_confirmed_at` set), make it current, and delete `pending/<name>`.
 14. Print the summary: connection URLs with the passwords left out (`postgres://app_app:«in secrets document»@…`), TLS state, `restart_performed`, and `next: ["eru sql --db <first db> \"select 1\"", "eru psql --db <first db>"]`. Doctor and backup results join with their phases.
 
@@ -702,7 +719,7 @@ The file is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work f
 | `pgbouncer_auth` password | 32 chars base62 | Doc (`database.services`) + node `/etc/eru/runtime/pgbouncer_auth.pass` (0600) and its SCRAM verifier in `userlist.txt` |
 | pgBackRest `cipher_pass` | 64 chars base62 | Doc + node `pgbackrest.conf` |
 | restic password | 64 chars base62 | Doc + node `restic.env` |
-| Metrics password | 32 chars base62 | Doc + node bcrypt hash in Caddyfile |
+| Metrics password | 32 chars base62 | Doc + node bcrypt hash in an nginx `auth_basic_user_file` |
 | `eru_monitor` password | 32 chars base62 | Doc (`database.services`) + node `/etc/eru/runtime/monitor.pass` (0600) and its SCRAM verifier in `userlist.txt` |
 | Bucket keys | user-provided | Doc + node `backup.env`, `pgbackrest.conf`, `restic.env` |
 
@@ -729,17 +746,17 @@ Order is fixed. IDs end in `-v1`; bump the suffix whenever behaviour changes in 
 | 3 | `wireguard-v1` | Adapt deploycrate `wireguard.sh` (no ip_forward: not a gateway). Address `10.42.0.1/16`; operator peers rendered from `cluster.toml` + operator registry (`/etc/eru/operators.toml`: name, wg pubkey, address). `ufw allow 51820/udp`. The node key lives in `/etc/wireguard/eru.key` (`eru.pub`); a running wg0 is updated with `wg syncconf` | `wg show wg0` lists all peers |
 | 4 | `sshd-hardening-v1` | Write `/etc/ssh/sshd_config.d/00-eru.conf` (below). It sorts first because sshd keeps the first value it reads, so provider drop-ins such as `50-cloud-init.conf` cannot re-enable passwords. Handle `ssh.socket` (§8.3). `sshd -t` and check that `sshd -T` shows `permitrootlogin no` and `passwordauthentication no` (roll back otherwise), reload. Public 22 stays open until lockdown | Drop-in matches render |
 | 5 | `firewall-v1` | ufw: `default deny incoming`, `default allow outgoing`, allow 51820/udp, 80/tcp, 443/tcp, `in on wg0` 22/tcp, 6432/tcp and 5432/tcp; the allowlist rules for 6432 (if `expose_pgbouncer`) and 5432 (if `expose_postgres`). WireGuard peers always reach both ports; the expose flags gate only the allowlist. Keep public 22 only if `lockdown_pending` or not yet locked. Rules not in the set are deleted (expected rules are added before and after, so SSH always has an allow rule). `ufw --force enable` | `ufw status` active and `ufw show added` equals the expected rule set |
-| 6 | `host-baseline-v1` | journald drop-in (copy deploycrate `host.sh`), swapfile (`swap_mb`), timezone, chrony enabled, unattended-upgrades security-only with `Package-Blacklist` `postgresql-`, `libpq`, `pgbouncer`, `pgbackrest`, `caddy` and `Automatic-Reboot "false"` (via `#clear` of the distribution's origins), fail2ban sshd jail (`backend = systemd`, iptables ban actions so bans stay out of the ufw rule set), logrotate for `/var/log/eru` | Files match render, services active |
+| 6 | `host-baseline-v1` | journald drop-in (copy deploycrate `host.sh`), swapfile (`swap_mb`), timezone, chrony enabled, unattended-upgrades security-only with `Package-Blacklist` `postgresql-`, `libpq`, `pgbouncer`, `pgbackrest`, `nginx`, `libnginx-mod-` and `Automatic-Reboot "false"` (via `#clear` of the distribution's origins), fail2ban sshd jail (`backend = systemd`, iptables ban actions so bans stay out of the ufw rule set), logrotate for `/var/log/eru` | Files match render, services active |
 | 7 | `kernel-tuning-v1` | `/etc/sysctl.d/90-eru.conf` and the `eru-thp.service` oneshot (below), `sysctl --system`, `daemon-reload`, `enable --now eru-thp.service`. `vm.nr_hugepages` from §12.3 (0 when `huge_pages = off`) | `sysctl -n` values equal render, THP `enabled` = `[never]` |
 | 8 | `postgres-packages-v1` | Write `/etc/postgresql-common/createcluster.d/00-eru.conf` with `create_main_cluster = false` **before** installing. Install `postgresql-common`, run `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, install `postgresql-18 postgresql-client-18 postgresql-contrib pgbouncer`, then `apt-mark hold postgresql-18 postgresql-client-18`. Debian's pgbouncer auto-starts with its own config, so `systemctl stop pgbouncer` right after install until step 13 renders it. `pgbackrest` arrives with Phase 3 as `postgres-packages-v2` | Packages installed and held |
 | 9 | `postgres-cluster-v1` | If no cluster exists: `pg_createcluster 18 main --datadir=<data_directory> --locale-provider=<provider> --locale=<locale> --start-conf=auto -- --auth-local=peer --auth-host=scram-sha-256` (checksums are default-on in 18; assert `data_checksums = on` after start and fail the step otherwise). A non-default `data_directory` gets its parent created `postgres:postgres 0700`. An existing 18/main with a **different** data directory is `precondition_failed`; eru never re-creates a cluster. systemd drop-in for `postgresql@18-main.service`: `LimitNOFILE=65536`, `OOMScoreAdjust=-900`, `Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj PG_OOM_ADJUST_VALUE=0` | `pg_lsclusters` shows 18/main online |
 | 10 | `postgres-config-v1` | Render `conf.d/10-eru-tuning.conf` (§12), `20-eru-security.conf`, `30-eru-extensions.conf` (§17), `50-eru-settings.conf` (`[postgres.settings]`, values single-quoted with `''` escaping), and create `90-overrides.conf` (empty, comment header) if missing (`40-eru-backup.conf` arrives in Phase 3; `wal_level = replica` and `max_wal_senders = 10` are already in the tuning file, so only `archive_mode` will need a restart then). Render `pg_hba.conf` and `pg_ident.conf` (0640). Ensure `include_dir = 'conf.d'` is in `postgresql.conf`. Before reload, `pg_file_settings` and `pg_hba_file_rules` must have no errors; otherwise the previous files are restored and the step fails with the errors. Classify changes via `pg_settings.context` (`postmaster` means restart, listed in the notes). The **first run** (no completed journal entry for this step) restarts unconditionally and without confirmation, because there is no traffic yet. When huge pages change, `shared_memory_size_in_huge_pages` is computed while PG is stopped during that restart, and `vm.nr_hugepages` is re-applied through step 7's helper | Rendered = on disk |
 | 11 | `postgres-roles-v1` | §14 SQL through `pg.Local` (psql as the `postgres` OS user, SQL on stdin); per-db roles, databases, default privileges, extensions, `eru.pgbouncer_get_auth`. Passwords follow §10.2 (set once, verifiers only). Writes `/etc/eru/runtime/{pgbouncer_auth,monitor}.pass` from the request secrets when missing. Inputs are names, timeouts and extensions, never passwords. Databases removed from `cluster.toml` are not dropped (only `db drop` drops); they are reported as `orphaned_database` warnings | All roles, dbs, grants, extensions and the auth function exist |
-| 12 | `tls-v1` | Install Caddy (deploycrate's approach: pinned binary with a per-arch sha256 in `internal/versions`, systemd unit, `caddy` user, data in `/var/lib/caddy`). Add `postgres` and `pgbouncer` to `ssl-cert`. If no certificate exists, write a self-signed P-256 placeholder (30 days, `CN`/SAN = domain) into `/etc/eru/tls` so PG/PgBouncer can start; TLS never blocks on ACME. Render the Caddyfile (§15.2), `caddy validate`, `systemctl reload-or-restart caddy`. Install `eru-certs-sync.path` (watches Caddy's cert dir) and `eru-certs-sync.timer` (daily); both run `eru node run certs-sync`, which copies the cert and key into `/etc/eru/tls`, sets modes, and reloads PG (`pg_ctlcluster 18 main reload`) and PgBouncer (`systemctl reload pgbouncer`) when they changed | Caddy active, `/etc/eru/tls/server.crt` exists |
+| 12 | `tls-v2` | Refuse a server that has `caddy` installed (an older eru used Caddy; there is no migration, rebuild the server). Install `nginx` and `libnginx-mod-stream` from the distribution (at least `NginxMinVersion`), `apt-mark hold` them, remove the default site. Add `postgres` and `pgbouncer` to `ssl-cert`. If no certificate exists, write a self-signed P-256 placeholder (30 days, `CN`/SAN = domain) into `/etc/eru/tls` so PG, PgBouncer and nginx can start; TLS never blocks on ACME. Render `/etc/nginx/nginx.conf` (§15.2), `nginx -t`, `systemctl reload-or-restart nginx`. Install `eru-certs.service` and `eru-certs.timer` (hourly), enable the timer and `systemctl start --no-block eru-certs.service` so issuance starts at once (§15.3) | nginx active, `/etc/eru/tls/server.crt` exists |
 | 13 | `pgbouncer-v1` | Render `/etc/pgbouncer/pgbouncer.ini` (§14.3) and `userlist.txt` (verifiers read back from `pg_authid` for `pgbouncer_auth` and `eru_monitor`), `postgres:postgres 0640`, overwriting Debian's files. Enable and restart | Rendered = on disk, and `SHOW VERSION` as `eru_monitor` on 6432 works (via a 0600 `PGPASSFILE`) |
 | 14 | `pgbackrest-v1` | Render `/etc/pgbackrest/pgbackrest.conf` (§13.1). `pgbackrest --stanza=<s> stanza-create`, then `check`. If the journal has no `first-full`, run `backup --type=full` (streams progress) | `check` passes, first full exists |
 | 15 | `restic-v1` | Install the pinned restic (copy deploycrate `backup.sh` checksum pattern). Render `restic.env`. `restic init` if needed (`restic cat config` decides). First snapshot (§13.6) | Repo reachable, ≥ 1 snapshot |
-| 16 | `metrics-v1` | Install pinned `node_exporter` (copy deploycrate script; textfile collector dir `/var/lib/node_exporter/textfile`), `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter` as systemd services bound to 127.0.0.1 (§15.1). The Caddy routes are already in the Caddyfile | All exporters return 200 locally |
+| 16 | `metrics-v1` | Install pinned `node_exporter` (copy deploycrate script; textfile collector dir `/var/lib/node_exporter/textfile`), `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter` as systemd services bound to 127.0.0.1 (§15.1). It adds the `/metrics` locations to the 127.0.0.1:8443 server in `nginx.conf` | All exporters return 200 locally |
 | 17 | `timers-v1` | Render systemd `.service`/`.timer` pairs for every schedule in `cluster.toml` (§18). `systemctl daemon-reload`, enable timers, disable removed ones (`eru-*.timer` not in the render) | Timer set matches |
 | 18 | `finalize-v1` | Run doctor (§21). Fail the step if any check is `fail`. Write metrics textfile. Upload `cluster.toml` as a restic snapshot tagged `eru-config` | Never complete (always runs; cheap) |
 
@@ -985,7 +1002,7 @@ This isn't destructive, so no `--confirm` is needed. It's exclusive-locked.
   ```
 
   Add `RESTIC_COMPRESSION=auto`, and use `-o s3.bucket-lookup=dns|path` derived from `uri_style`.
-- Include list: `/etc`, `/var/lib/eru`, `/var/lib/caddy`, `/root`, `/home`, `/usr/local/bin/eru`, plus `extra_paths`.
+- Include list: `/etc` (with the ACME account in `/etc/eru/acme`), `/var/lib/eru`, `/root`, `/home`, `/usr/local/bin/eru`, plus `extra_paths`.
 - Exclude list: `<data_directory>`, `/var/lib/postgresql`, `/var/lib/pgbackrest`, `/var/spool/pgbackrest`, `/var/lib/eru/drill`, `/var/cache`, `/var/log`, `/swapfile`, `/proc`, `/sys`, `/dev`, `/run`, `/tmp`.
 - Job `vps-backup`: `restic backup --tag eru-vps --host <node> --files-from … --exclude-file …`, then `restic forget --tag eru-vps --keep-weekly N --keep-monthly M --prune`.
 - Job `vps-check` (monthly): `restic check --read-data-subset=5%`.
@@ -999,7 +1016,7 @@ This isn't destructive, so no `--confirm` is needed. It's exclusive-locked.
 1. Decrypt the document. Probe the bucket. Find the latest `eru-config` snapshot and load `cluster.toml` from it. Override `nodes[0].public_address` with the new host IP.
 2. First contact and binary push (§8.2 steps 5–6), with these differences:
    - The operator keys come from the document, not newly generated.
-   - Before step 3 (`wireguard-v1`), restore the allowlist paths from the latest `eru-vps` snapshot to their live locations: `/etc/wireguard`, `/etc/ssh/ssh_host_*`, `/etc/eru`, `/var/lib/caddy`, `/root`, `/home`, `extra_paths`. Use `restic restore --include` into a temp dir and copy with ownership. The server keeps its WireGuard identity and host keys, so existing contexts keep working once the public address is updated.
+   - Before step 3 (`wireguard-v1`), restore the allowlist paths from the latest `eru-vps` snapshot to their live locations: `/etc/wireguard`, `/etc/ssh/ssh_host_*`, `/etc/eru`, `/root`, `/home`, `extra_paths`. Use `restic restore --include` into a temp dir and copy with ownership. The server keeps its WireGuard identity and host keys, so existing contexts keep working once the public address is updated.
 3. Lockdown (§8.3), then steps 7–13 with **`postgres-cluster-v1` in restore mode**. Create the cluster, stop it, empty the datadir, run `pgbackrest restore` (`--type=default`, or `--type=time --target=<--restore-time>` with `--target-action=promote`), and start it.
 4. Steps 14–18 (stanza exists; `check`, then an immediate full backup on the new timeline).
 5. Update the local context's `public_address`. Re-export the secrets document with the new address and a new passphrase. Print a DNS reminder if the A record of `domain` doesn't resolve to the new IP.
@@ -1146,7 +1163,7 @@ log_disconnections = 1
 
 ---
 
-## 15. TLS, metrics and Caddy
+## 15. TLS, metrics and nginx
 
 ### 15.1 Exporters
 
@@ -1159,32 +1176,29 @@ log_disconnections = 1
 
 Each exporter is a downloaded pinned binary with a sha256 per arch, following the `node-exporter.sh` pattern. Unit hardening: `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `ReadOnlyPaths=/`.
 
-### 15.2 Caddyfile
+### 15.2 nginx
 
-```
-{
-    email {{ .ACMEEmail }}
-    {{ if .ACMECA }}acme_ca {{ .ACMECA }}{{ end }}
-    admin localhost:2019
-}
+eru renders the whole `/etc/nginx/nginx.conf` (`internal/render/templates/nginx.conf.tmpl`). nginx comes from the distribution with `libnginx-mod-stream`.
 
-{{ .Domain }} {
-    {{ if eq .TLSMode "self-signed" }}tls internal{{ end }}
-    handle_path {{ .MetricsPrefix }}/node*       { basic_auth { metrics {{ .MetricsHash }} } reverse_proxy 127.0.0.1:9100 }
-    handle_path {{ .MetricsPrefix }}/postgres*   { basic_auth { metrics {{ .MetricsHash }} } reverse_proxy 127.0.0.1:9187 }
-    handle_path {{ .MetricsPrefix }}/pgbouncer*  { basic_auth { metrics {{ .MetricsHash }} } reverse_proxy 127.0.0.1:9127 }
-    handle_path {{ .MetricsPrefix }}/pgbackrest* { basic_auth { metrics {{ .MetricsHash }} } reverse_proxy 127.0.0.1:9854 }
-    handle { respond 404 }
-}
-```
+- **Port 80** (`http`): serves `/.well-known/acme-challenge/` from `/var/lib/eru/acme` for HTTP-01, and 404 for everything else.
+- **Port 443** (`stream`, `ssl_preread on`): routes by ALPN without terminating TLS on 443 itself.
+    - ALPN `postgresql` (PostgreSQL 17+ clients with `sslnegotiation=direct`) from an allowed address goes to `127.0.0.1:6433`, a `stream` server that terminates TLS with `/etc/eru/tls/server.{crt,key}` (`ssl_alpn postgresql`) and forwards the plain protocol to PgBouncer on `127.0.0.1:6432`.
+    - Allowed addresses come from a `geo` block: the WireGuard subnet always, plus `client_allowlist` when `expose_pgbouncer = true`, so 443 follows the same rule as 6432. Other PostgreSQL clients go to `127.0.0.1:6434`, which closes the connection.
+    - Everything else (HTTP/1.1, h2, no ALPN) goes to the `http` server on `127.0.0.1:8443`, which terminates TLS and answers 404. Phase 6 adds the authenticated `/metrics` locations there (`auth_basic` with a bcrypt `auth_basic_user_file`; each location proxies to the exporter's `/metrics`).
+- PgBouncer uses `auth_type = hba` with `/etc/pgbouncer/pgbouncer_hba.conf`: `local` and `hostssl` from anywhere use `scram-sha-256`; `hostnossl` is allowed only from `127.0.0.1/32` (the nginx hop); any other non-TLS connection is rejected. `client_tls_sslmode = prefer`, so the hba file, not the TLS mode, enforces TLS. SCRAM channel binding isn't available through 443, because PgBouncer sees a plain connection there; `channel_binding=require` clients must use 6432.
 
-- Phase 2 renders this without the metrics handles (`{{ .Domain }} { [tls internal] respond 404 }`); Phase 6 adds them along with the metrics password.
-- Each path proxies to the exporter's `/metrics`. Use `rewrite * /metrics` inside each handle.
-- The `certs-sync` source is Caddy's storage path for the domain, discovered via `find /var/lib/caddy/.local/share/caddy/certificates -path "*/<domain>/<domain>.crt"`.
-- `certs-sync` compares sha256 with `/etc/eru/tls/server.{crt,key}`, copies when they differ (crt 0644, key `root:ssl-cert` 0640), then reloads PG and PgBouncer. It takes the shared lock with timeout 0 and exits 0 when the lock is busy. In `acme` mode it uses only a certificate from a public issuer, never a leftover internal-CA leaf, so a placeholder is never mistaken for an ACME certificate.
-- With `tls internal`, `certs-sync` copies Caddy's internal-CA leaf (`certificates/local/<domain>/`) instead. Clients then need `sslmode=require` (the doc's URLs switch accordingly, and doctor warns).
+### 15.3 Certificates (`eru node run certs-renew`)
 
-### 15.3 eru textfile metrics (`eru.prom`)
+eru issues and renews the certificate itself with `golang.org/x/crypto/acme`. Nothing else on the server speaks ACME.
+
+- `eru-certs.timer` runs `eru node run certs-renew` hourly (randomized 10 min); `tls-v2` also starts it once right away. The job takes the shared lock with timeout 0 and exits 0 when the lock is busy.
+- It does nothing unless `/etc/eru/tls/server.crt` is missing, isn't for `domain`, is the self-signed placeholder in `acme` mode (or not self-signed in `self-signed` mode), or expires within 30 days.
+- **acme mode:** first a self-check: write a random token into the webroot and fetch `http://<domain>/.well-known/acme-challenge/<token>`. If another host answers, the job stops with `changed: false, pending: …` (exit 0) so a wrong record doesn't use up Let's Encrypt's failed-validation limit. A connection error is inconclusive and the job carries on. Then: account key `/etc/eru/acme/account.key` (P-256, 0600, created once; `acme_email`, when set, is the account contact), order, HTTP-01 through the webroot, a fresh P-256 leaf key and CSR, and the full chain. `tls.acme_ca` overrides the directory URL (for example Let's Encrypt staging). ACME errors fail the unit with `external_command_failed`; a rate limit says when to retry.
+- **self-signed mode:** a self-signed P-256 leaf for `domain`, valid 397 days. Clients use `sslmode=require` (the document's URLs switch accordingly, and doctor warns).
+- A new certificate is written as `server.crt` (full chain, 0644) and `server.key` (`root:ssl-cert` 0640), then PostgreSQL (`pg_ctlcluster 18 main reload`), PgBouncer (`systemctl reload pgbouncer`) and nginx (`systemctl reload nginx`) are reloaded.
+- `tls.status` reports `pending` while the placeholder is served, `acme` with `not_after` once the issued certificate is in place, and `self-signed` in that mode.
+
+### 15.4 eru textfile metrics (`eru.prom`)
 
 ```
 eru_info{version,cluster,node} 1
@@ -1304,10 +1318,10 @@ WantedBy=timers.target
 | vps-check | `backup.vps.check_schedule` | 30m |
 | maint-daily | daily at window start | 10m |
 | maint-weekly | Saturday at window start | 10m |
-| certs-sync | daily 03:00 (+ the `.path` unit) | 30m |
-
-`certs-sync` is the only timer in Phase 2. `tls-v1` installs `eru-certs-sync.{service,path,timer}` itself; `timers-v1` (Phase 6) takes ownership of the `.timer` and the `.path` stays with `tls-v1`. Until then every other `node run` job returns `not implemented yet`.
+| certs-renew | hourly | 10m |
 | metrics-refresh | every 5 min | 0 |
+
+`certs-renew` is the only timer in Phase 2. `tls-v2` installs `eru-certs.{service,timer}` itself; `timers-v1` (Phase 6) takes ownership of the `.timer`. Until then every other `node run` job returns `not implemented yet`.
 
 `node run <job>` takes the right lock with `--timeout 0`. If the lock is busy it logs, exits 0 and writes a `skipped` metric. Busy isn't a failure, but repeated skips show up in doctor.
 
@@ -1459,7 +1473,7 @@ Based on deploycrate's `install.sh`:
 ```go
 const (
     PostgresMajor = 18
-    CaddyVersion = "2.11.4"               // floor; update
+    NginxMinVersion = "1.26"              // distribution nginx with stream ssl_preread + ssl_alpn
     ResticVersion = "0.18.1"              // floor; update
     NodeExporterVersion = "1.11.1"        // floor; update
     PostgresExporterVersion = "…"         // latest stable at implementation

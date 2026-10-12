@@ -14,6 +14,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/buildinfo"
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/hostinfo"
@@ -127,6 +128,9 @@ func runClusterInit(cmd *cobra.Command, args []string) error {
 			"Disaster recovery from a secrets document arrives in Phase 4.",
 		)
 	}
+	if flagTrue(cmd, "discard") {
+		return runInitDiscard(cmd)
+	}
 	if flagTrue(cmd, "local") {
 		return runInitLocal(cmd)
 	}
@@ -162,8 +166,8 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 				output.CodePrecondition,
 				"an unfinished init for "+r.name+" exists",
 				output.ExitPrecondition,
-				"Continue it with eru cluster init --resume --name "+r.name+".",
-			).WithDetails(map[string]any{"reason": "init_pending", "cluster": r.name})
+				"Continue it with eru cluster init --resume --name "+r.name+", or drop it with eru cluster init --discard --name "+r.name+".",
+			).WithDetails(map[string]any{"reason": "init_pending", "cluster": r.name, "pending_path": contexts.PendingDir(r.name)})
 		}
 	}
 	for _, name := range laterPhaseFlags {
@@ -274,12 +278,15 @@ func (r *initRun) collect() error {
 			cfg.Databases[i].Extensions = exts
 		}
 	}
+	// An answers file's [bootstrap] user and port count as explicit.
+	userGiven, portGiven := r.boot.User != "", r.boot.Port != 0
 	if v := stringFlag(cmd, "host"); v != "" {
 		user, host, port, err := parseHostFlag(v)
 		if err != nil {
 			return err
 		}
 		r.boot.User, r.boot.Host, r.boot.Port = user, host, port
+		userGiven, portGiven = hostFlagExplicit(v)
 	}
 	if v := stringFlag(cmd, "identity"); v != "" {
 		r.boot.Identity = v
@@ -287,18 +294,15 @@ func (r *initRun) collect() error {
 	if v := stringFlag(cmd, "host-key-fingerprint"); v != "" {
 		r.boot.HostKeyFingerprint = v
 	}
-	if r.boot.User == "" {
-		r.boot.User = "root"
-	}
-	if r.boot.Port == 0 {
-		r.boot.Port = 22
+	if err := checkIdentity(r.boot.Identity); err != nil {
+		return err
 	}
 
 	if !r.local && r.boot.Host == "" {
 		if err := RequireFlag(cmd, false, "--host", "cluster init"); err != nil {
 			return err
 		}
-		v, err := promptLine(cmd, "Server to bootstrap (user@host)", "")
+		v, err := promptLine(cmd, "Server to bootstrap (user@host, or a Host from ~/.ssh/config)", "")
 		if err != nil {
 			return err
 		}
@@ -307,6 +311,18 @@ func (r *initRun) collect() error {
 			return err
 		}
 		r.boot.User, r.boot.Host, r.boot.Port = user, host, port
+		userGiven, portGiven = hostFlagExplicit(v)
+	}
+	if !r.local {
+		if src := applySSHConfig(&r.boot, userGiven, portGiven, r.boot.Identity != ""); src != "" {
+			r.p.note("Using " + src + " for first contact.")
+		}
+	}
+	if r.boot.User == "" {
+		r.boot.User = "root"
+	}
+	if r.boot.Port == 0 {
+		r.boot.Port = 22
 	}
 	if cfg.ClusterName == "" {
 		if err := RequireFlag(cmd, false, "--name", "cluster init"); err != nil {
@@ -468,7 +484,7 @@ func (r *initRun) loadPending() error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.ParseCluster(raw)
+	cfg, err := config.ParseAnswers(raw)
 	if err != nil {
 		return output.NewError(output.CodeConfig, "the pending answers do not parse: "+err.Error(), output.ExitConfig, "")
 	}
@@ -485,6 +501,11 @@ func (r *initRun) loadPending() error {
 	}
 	if v := stringFlag(r.cmd, "host-key-fingerprint"); v != "" {
 		boot.HostKeyFingerprint = v
+	}
+	if !prog.Done(phaseHost) {
+		if err := checkIdentity(boot.Identity); err != nil {
+			return err
+		}
 	}
 	r.name, r.cfg, r.boot, r.prog = name, cfg, boot, prog
 	if prog.Done(phaseSecrets) {
@@ -718,7 +739,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	defer tun.Close()
 	adminTarget := transport.SSHTarget{User: r.cfg.Server.AdminUser, Addr: net.JoinHostPort(n.WGAddress, "22")}
 	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{opAuth}, HostKeys: known, Timeout: 15 * time.Second}
-	wgClient, err := dialRetry(ctx, tun, adminTarget, sshOpts, confirmWithin)
+	wgClient, err := dialRetryReport(ctx, tun, adminTarget, sshOpts, confirmWithin, r.attemptReporter("init.transport", "SSH over WireGuard to "+adminTarget.Addr))
 	if err != nil {
 		return tunnelHint(err, n.PublicAddress, r.cfg.Transport.ListenPort)
 	}
@@ -818,7 +839,46 @@ func runInitRemote(cmd *cobra.Command) error {
 		"Secrets document: " + res.SecretsDocument,
 		"Context " + r.name + " is the current context on this machine. On another machine run: eru login " + filepath.Base(res.SecretsDocument),
 	}, "\n")
-	return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: res.Next})
+	return r.finish(res, message, res.Next, fmt.Sprintf("Cluster %s is ready", r.name), nil)
+}
+
+// finish renders the init result. On a terminal it draws the summary card;
+// every other mode gets the plain message and the envelope.
+func (r *initRun) finish(res initResult, message string, next []string, title string, notes []string) error {
+	cmd := r.cmd
+	if r.p.live == nil {
+		return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: next})
+	}
+	n := r.primary()
+	rows := [][2]string{
+		{"Node", fmt.Sprintf("%s  %s  (WireGuard %s)", n.Name, n.PublicAddress, n.WGAddress)},
+		{"PgBouncer", r.cfg.Domain + ":6432"},
+		{"Direct TLS", r.cfg.Domain + ":443  (sslnegotiation=direct)"},
+		{"TLS", r.tlsSummary()},
+		{"Secrets", res.SecretsDocument},
+		{"", ""},
+	}
+	for _, db := range r.cfg.Databases {
+		for _, role := range []string{steps.RoleApp, steps.RoleMigrate} {
+			urls := secretsdoc.DatabaseURLs(r.cfg.Domain, r.cfg.TLS.Mode, db.Name, map[string]contexts.Role{
+				role: {User: db.Name + "_" + role, Password: "«secret»"},
+			})
+			rows = append(rows, [2]string{db.Name + " " + role, urls[role]})
+		}
+	}
+	var footer []string
+	for _, w := range r.warnings {
+		footer = append(footer, ui.Warn(w.Message))
+	}
+	footer = append(footer, notes...)
+	if len(next) > 0 {
+		footer = append(footer, ui.Dim("Next:"))
+		for _, step := range next {
+			footer = append(footer, "  "+ui.Code(step))
+		}
+	}
+	_, err := fmt.Fprintln(ui.Writer(cmd.OutOrStdout()), "\n"+ui.Card(title, rows, footer))
+	return err
 }
 
 // fillResult adds the TLS state, restart flag and next steps to the result.
@@ -914,6 +974,11 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 	if err != nil {
 		return err
 	}
+	if t := r.p.task("init.binary"); t != nil {
+		n.OnUpload = func(sent, total int64) {
+			t.Progress(float64(sent)/float64(max(total, 1)), fmt.Sprintf("%.1f / %.1f MB", float64(sent)/1e6, float64(total)/1e6))
+		}
+	}
 	if !installed || !remote.SameBuild(got, remote.LocalBuild()) {
 		art, err := remote.NodeArtifact(ctx, arch)
 		if err != nil {
@@ -996,7 +1061,10 @@ func (r *initRun) trustHostKey(key ssh.PublicKey) error {
 
 // firstContactAuth picks the first-contact credential (§7.3): the
 // --password-stdin password, --identity, then ssh-agent keys and the default
-// ~/.ssh keys.
+// ~/.ssh keys. The agent and default keys go into one publickey method,
+// because x/crypto/ssh tries only the first method of each kind. An encrypted
+// default key that the agent doesn't hold is unlocked with a passphrase prompt
+// in a terminal, and named in the error otherwise.
 func firstContactAuth(cmd *cobra.Command, boot contexts.Bootstrap) ([]ssh.AuthMethod, func(), error) {
 	noop := func() {}
 	if flagTrue(cmd, "password-stdin") {
@@ -1007,39 +1075,67 @@ func firstContactAuth(cmd *cobra.Command, boot contexts.Bootstrap) ([]ssh.AuthMe
 		secrets.Add(pw)
 		return transport.PasswordAuth(pw), noop, nil
 	}
-	ask := func() ([]byte, error) {
-		if MustNotPrompt(cmd) {
-			return nil, errors.New("the identity is encrypted; load it into ssh-agent")
-		}
-		pw, err := readSecretTTY(cmd, "Passphrase for "+boot.Identity)
-		return []byte(pw), err
-	}
 	if boot.Identity != "" {
-		auth, err := transport.KeyFileAuth(expandHome(boot.Identity), ask)
+		path := expandHome(boot.Identity)
+		ask := func() ([]byte, error) {
+			if MustNotPrompt(cmd) {
+				return nil, errors.New("the identity is encrypted; load it into ssh-agent")
+			}
+			pw, err := readSecretTTY(cmd, "Passphrase for "+path)
+			return []byte(pw), err
+		}
+		auth, err := transport.KeyFileAuth(path, ask)
 		if err != nil {
 			return nil, noop, output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass a readable private key with --identity.")
 		}
 		return []ssh.AuthMethod{auth}, noop, nil
 	}
-	var methods []ssh.AuthMethod
+	var signers []ssh.Signer
 	closeAgent := noop
-	if auth, closer, ok := transport.AgentAuth(); ok {
-		methods = append(methods, auth)
+	agentSigners, closer, ok := transport.AgentSigners()
+	if ok {
+		signers = append(signers, agentSigners...)
 		closeAgent = closer
 	}
+	var skipped []string
 	if home, err := os.UserHomeDir(); err == nil {
 		for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
-			if auth, err := transport.KeyFileAuth(filepath.Join(home, ".ssh", name), nil); err == nil {
-				methods = append(methods, auth)
+			path := filepath.Join(home, ".ssh", name)
+			signer, encrypted, err := transport.KeyFileSigner(path, nil)
+			switch {
+			case err == nil:
+				signers = append(signers, signer)
+			case encrypted && transport.AgentHolds(agentSigners, path+".pub"):
+				// The agent already offers this key.
+			case encrypted && !MustNotPrompt(cmd):
+				signer, _, err = transport.KeyFileSigner(path, func() ([]byte, error) {
+					pw, err := readSecretTTY(cmd, "Passphrase for "+path+" (empty to skip)")
+					if err == nil && pw == "" {
+						err = errors.New("skipped")
+					}
+					return []byte(pw), err
+				})
+				if err != nil {
+					skipped = append(skipped, path)
+					continue
+				}
+				signers = append(signers, signer)
+			case encrypted:
+				skipped = append(skipped, path)
 			}
 		}
 	}
-	if len(methods) == 0 {
-		return nil, closeAgent, output.NewError(output.CodeInputRequired, "first contact needs an SSH credential", output.ExitInput,
-			"Pass --identity <key>, load a key into ssh-agent, or pipe the password with --password-stdin.").
-			WithDetails(map[string]any{"flag": "--identity"})
+	if len(signers) == 0 {
+		hint := "Pass --identity <key>, load a key into ssh-agent, or pipe the password with --password-stdin."
+		details := map[string]any{"flag": "--identity"}
+		if len(skipped) > 0 {
+			hint = "These keys have a passphrase and were skipped: " + strings.Join(skipped, ", ") + ". Load one with ssh-add, or pass it with --identity in a terminal."
+			details["skipped_keys"] = skipped
+		}
+		return nil, closeAgent, output.NewError(output.CodeInputRequired, "first contact needs an SSH credential", output.ExitInput, hint).
+			WithDetails(details)
 	}
-	return methods, closeAgent, nil
+	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, closeAgent, nil
 }
 
 func expandHome(path string) string {
@@ -1049,6 +1145,16 @@ func expandHome(path string) string {
 		}
 	}
 	return path
+}
+
+// attemptReporter shows "attempt n" and the time left on a running phase.
+func (r *initRun) attemptReporter(phase, what string) func(int, time.Time) {
+	return func(attempt int, deadline time.Time) {
+		if t := r.p.task(phase); t != nil {
+			t.Deadline(deadline)
+			t.Detail(fmt.Sprintf("%s, attempt %d", what, attempt))
+		}
+	}
 }
 
 // lockdown runs the commit-confirm switchover (§8.3): arm and apply on the
@@ -1069,7 +1175,7 @@ func (r *initRun) lockdown(ctx context.Context, wgNode *remote.Node, tun *transp
 		r.p.phase("init.lockdown", "completed", "already locked down")
 		return time.Now().UTC().Format(time.RFC3339), nil
 	}
-	confirmClient, err := dialRetry(ctx, tun, target, opts, confirmWithin)
+	confirmClient, err := dialRetryReport(ctx, tun, target, opts, confirmWithin, r.attemptReporter("init.lockdown", "new SSH connection over WireGuard"))
 	if err == nil {
 		defer confirmClient.Close()
 		confirmNode := &remote.Node{SSH: confirmClient, Operator: r.sec.OperatorName}
@@ -1178,6 +1284,40 @@ func (r *initRun) documentDatabase() *secretsdoc.Database {
 	return &creds
 }
 
+// showPassphrase shows the document path and the passphrase once, then waits
+// for the operator to type 'stored' unless --confirm-secrets-stored was given.
+func (r *initRun) showPassphrase(out, ppOut, passphrase string) error {
+	cmd := r.cmd
+	lines := []string{"Document:   " + out}
+	if ppOut != "" && ppOut != "-" {
+		lines = append(lines, "Passphrase: written to "+ppOut)
+	} else {
+		lines = append(lines, "Passphrase: "+passphrase, "", "The passphrase is shown once; eru does not keep it.")
+	}
+	lines = append(lines,
+		"Store the document and the passphrase separately, for example in a password manager.",
+		"Without them nobody can operate this cluster or read its backups.")
+	if r.p.live != nil {
+		r.p.panel("Secrets document", lines)
+	} else {
+		w := cmd.OutOrStdout()
+		_, _ = fmt.Fprintln(w)
+		for _, line := range lines {
+			_, _ = fmt.Fprintln(w, line)
+		}
+		_, _ = fmt.Fprintln(w)
+	}
+	if flagTrue(cmd, "confirm-secrets-stored") {
+		return nil
+	}
+	if err := typeWord(cmd, "Type 'stored' once both are stored safely", "", "stored"); err != nil {
+		return output.NewError(output.CodeInputRequired, "the secrets document was not confirmed as stored", output.ExitInput,
+			"Re-run with --resume and type stored, or pass --confirm-secrets-stored with --passphrase-out.").
+			WithDetails(map[string]any{"flag": "--confirm-secrets-stored"})
+	}
+	return nil
+}
+
 // writeDocument writes the age document, shows the passphrase once, and
 // gates on "stored" (§8.2 step 10). A resumed init that has not been
 // confirmed writes a fresh document with a new passphrase over its own file.
@@ -1239,31 +1379,11 @@ func (r *initRun) writeDocument(defaultOut string) (secretsdoc.Document, initRes
 		res.PassphraseOut = ppOut
 	}
 	if !MustNotPrompt(cmd) {
-		w := cmd.OutOrStdout()
-		_, _ = fmt.Fprintf(w, "\nSecrets document: %s\n", out)
-		if ppOut != "" && ppOut != "-" {
-			_, _ = fmt.Fprintf(w, "Passphrase written to %s\n", ppOut)
-		} else {
-			_, _ = fmt.Fprintf(w, "Passphrase (shown once, eru does not keep it):\n\n    %s\n\n", passphrase)
+		r.p.phase("init.secrets-document", "completed", out)
+		if err := r.showPassphrase(out, ppOut, passphrase); err != nil {
+			return doc, res, err
 		}
-		_, _ = fmt.Fprintln(w, "Store the document and the passphrase separately, for example in a password manager.")
-		_, _ = fmt.Fprintln(w, "Without them nobody can operate this cluster or read its backups.")
-		if !flagTrue(cmd, "confirm-secrets-stored") {
-			for {
-				line, err := promptLine(cmd, "Type stored once both are stored safely", "")
-				if err != nil {
-					return doc, res, err
-				}
-				if line == "stored" {
-					break
-				}
-				if line == "" && !stdinIsTTY() {
-					return doc, res, output.NewError(output.CodeInputRequired, "the secrets document was not confirmed as stored", output.ExitInput,
-						"Re-run with --resume and type stored, or pass --confirm-secrets-stored with --passphrase-out.").
-						WithDetails(map[string]any{"flag": "--confirm-secrets-stored"})
-				}
-			}
-		}
+		return doc, res, nil
 	}
 	r.p.phase("init.secrets-document", "completed", "")
 	return doc, res, nil
@@ -1389,5 +1509,8 @@ func runInitLocal(cmd *cobra.Command) error {
 		"Then run any remote command, such as eru plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
 		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",
 	}, "\n")
-	return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: append([]string{res.LoginCommand}, res.Next...)})
+	return r.finish(res, message, append([]string{res.LoginCommand}, res.Next...), fmt.Sprintf("Cluster %s is bootstrapped on this server", r.name), []string{
+		"Copy the secrets document to your machine and run the login command there,",
+		"then any remote command within 30 minutes. That closes public SSH; otherwise the SSH change reverts.",
+	})
 }

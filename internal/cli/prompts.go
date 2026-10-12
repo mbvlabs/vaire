@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/spf13/cobra"
 )
@@ -84,7 +85,18 @@ func Confirm(cmd *cobra.Command, token string) error {
 			"re-run with --confirm "+token,
 		).WithDetails(details)
 	}
-	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Type %s to confirm: ", token); err != nil {
+	if richOutput(cmd) {
+		if err := ui.TypeWord("Type '"+token+"' to confirm", "", token); err != nil {
+			return output.NewError(
+				output.CodeUnsafeAction,
+				"confirmation was not accepted",
+				output.ExitUnsafe,
+				"re-run with --confirm "+token,
+			).WithDetails(details)
+		}
+		return nil
+	}
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Type '%s' to confirm: ", token); err != nil {
 		return err
 	}
 	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
@@ -126,6 +138,13 @@ func stdinIsTTY() bool {
 func PromptYes(cmd *cobra.Command, question string) (bool, error) {
 	if MustNotPrompt(cmd) {
 		return false, nil
+	}
+	if richOutput(cmd) {
+		ok, err := ui.YesNo(question, "")
+		if errors.Is(err, ui.ErrAborted) {
+			return false, nil
+		}
+		return ok, err
 	}
 	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N] ", question); err != nil {
 		return false, err

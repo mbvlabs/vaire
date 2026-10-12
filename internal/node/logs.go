@@ -28,11 +28,11 @@ type logsParams struct {
 
 // logUnits are the units eru reads, mapped to their source.
 var logUnits = map[string]string{
-	"postgres":       "file:" + postgresLogPath,
-	"pgbouncer":      "journal:pgbouncer.service",
-	"caddy":          "journal:caddy.service",
-	"eru-certs-sync": "journal:eru-certs-sync.service",
-	"eru":            "runlog:",
+	"postgres":  "file:" + postgresLogPath,
+	"pgbouncer": "journal:pgbouncer.service",
+	"nginx":     "journal:nginx.service",
+	"eru-certs": "journal:eru-certs.service",
+	"eru":       "runlog:",
 }
 
 func handleLogs(ctx context.Context, env *Env) (Result, error) {

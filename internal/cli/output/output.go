@@ -387,16 +387,21 @@ func renderSuccess(cmd *cobra.Command, opts Options, env Envelope, message strin
 	case ModeMarkdown:
 		return writeMarkdown(out, opts, message, env.Data, env.Next)
 	default:
-		return writeHuman(out, opts, message, env.Next)
+		return writeHuman(out, opts, message, env.Warnings, env.Next)
 	}
 }
 
-func writeHuman(w io.Writer, opts Options, message string, next []string) error {
+func writeHuman(w io.Writer, opts Options, message string, warnings []Warning, next []string) error {
 	if opts.Quiet {
 		return nil
 	}
 	if message != "" {
 		if _, err := fmt.Fprintln(w, message); err != nil {
+			return err
+		}
+	}
+	for _, warning := range warnings {
+		if _, err := fmt.Fprintf(w, "warning: %s\n", warning.Message); err != nil {
 			return err
 		}
 	}
@@ -419,7 +424,14 @@ func writeHuman(w io.Writer, opts Options, message string, next []string) error 
 	return nil
 }
 
+// RichError draws a human failure on a terminal. It returns false to fall
+// back to the plain lines. The CLI sets it when stderr is a terminal.
+var RichError func(w io.Writer, failure Failure) bool
+
 func writeHumanError(w io.Writer, failure Failure) error {
+	if RichError != nil && RichError(w, failure) {
+		return nil
+	}
 	if _, err := fmt.Fprintf(w, "Error: %s [%s]\n", failure.Error.Message, failure.Error.Code); err != nil {
 		return err
 	}

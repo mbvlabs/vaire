@@ -2,20 +2,37 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
+	"strings"
 	"time"
-)
-
-// dnsPollInterval and dnsTimeout bound the DNS verification (D10).
-const (
-	dnsPollInterval = 10 * time.Second
-	dnsTimeout      = 5 * time.Minute
 )
 
 // publicResolvers are queried directly so a local cache cannot lie.
 var publicResolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
+
+// cloudflareRanges are Cloudflare's published proxy ranges
+// (https://www.cloudflare.com/ips/). An answer inside them means the record
+// is proxied (orange cloud), which database clients can't connect through.
+var cloudflareRanges = mustPrefixes(
+	"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+	"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+	"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+)
+
+func mustPrefixes(values ...string) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(values))
+	for _, v := range values {
+		out = append(out, netip.MustParsePrefix(v))
+	}
+	return out
+}
 
 // dnsRecord is one record the operator must create.
 type dnsRecord struct {
@@ -37,54 +54,132 @@ func dnsRecords(domain, ipv4, ipv6 string) []dnsRecord {
 	return records
 }
 
-// verifyDNS polls the public resolvers until domain resolves to ipv4 (and, when
-// given, ipv6), or until ctx is done. It returns the answers seen.
-func verifyDNS(ctx context.Context, domain, ipv4, ipv6 string) (bool, map[string][]string) {
-	deadline := time.Now().Add(dnsTimeout)
-	for {
-		got := resolveDomain(ctx, domain)
-		if dnsMatches(got, ipv4, ipv6) {
-			return true, got
-		}
-		if time.Now().After(deadline) {
-			return false, got
-		}
-		select {
-		case <-ctx.Done():
-			return false, got
-		case <-time.After(dnsPollInterval):
-		}
-	}
+// dnsAnswers are one resolver's A and AAAA answers.
+type dnsAnswers struct {
+	Resolver string   `json:"resolver"`
+	A        []string `json:"a,omitempty"`
+	AAAA     []string `json:"aaaa,omitempty"`
+	Error    string   `json:"error,omitempty"`
 }
 
-// resolveDomain queries each public resolver for A and AAAA records.
-func resolveDomain(ctx context.Context, domain string) map[string][]string {
-	out := map[string][]string{}
+// dnsCheck is the result of one check against the public resolvers.
+type dnsCheck struct {
+	Matches   bool         `json:"matches"`
+	Proxied   bool         `json:"proxied"`
+	Resolvers []dnsAnswers `json:"resolvers"`
+}
+
+// checkDNS queries each public resolver once and compares the answers with
+// the node's addresses.
+func checkDNS(ctx context.Context, domain, ipv4, ipv6 string) dnsCheck {
+	check := dnsCheck{Matches: ipv4 != "" || ipv6 != ""}
 	for _, server := range publicResolvers {
-		resolver := &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "udp", server)
-			},
+		got := resolveWith(ctx, server, domain)
+		check.Resolvers = append(check.Resolvers, got)
+		merged := map[string][]string{"A": got.A, "AAAA": got.AAAA}
+		if !dnsMatches(merged, ipv4, ipv6) {
+			check.Matches = false
 		}
-		if ips, err := resolver.LookupNetIP(ctx, "ip4", domain); err == nil {
-			for _, ip := range ips {
-				out["A"] = appendUnique(out["A"], ip.Unmap().String())
-			}
-		}
-		if ips, err := resolver.LookupNetIP(ctx, "ip6", domain); err == nil {
-			for _, ip := range ips {
-				if ip.Is4In6() {
-					continue
-				}
-				out["AAAA"] = appendUnique(out["AAAA"], ip.String())
+		for _, ip := range append(append([]string(nil), got.A...), got.AAAA...) {
+			if inCloudflare(ip) {
+				check.Proxied = true
 			}
 		}
 	}
-	for _, values := range out {
-		sort.Strings(values)
+	return check
+}
+
+// resolveWith asks one resolver for the A and AAAA records of domain.
+func resolveWith(ctx context.Context, server, domain string) dnsAnswers {
+	out := dnsAnswers{Resolver: strings.TrimSuffix(server, ":53")}
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "udp", server)
+		},
 	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	ips, err := resolver.LookupNetIP(ctx, "ip4", domain)
+	if err == nil {
+		for _, ip := range ips {
+			out.A = appendUnique(out.A, ip.Unmap().String())
+		}
+	} else {
+		out.Error = lookupError(err)
+	}
+	if ips, err := resolver.LookupNetIP(ctx, "ip6", domain); err == nil {
+		for _, ip := range ips {
+			if !ip.Is4In6() {
+				out.AAAA = appendUnique(out.AAAA, ip.String())
+			}
+		}
+	}
+	sort.Strings(out.A)
+	sort.Strings(out.AAAA)
 	return out
+}
+
+func lookupError(err error) string {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		switch {
+		case dnsErr.IsNotFound:
+			return "no record"
+		case dnsErr.IsTimeout:
+			return "timeout"
+		}
+	}
+	return err.Error()
+}
+
+func inCloudflare(ip string) bool {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, p := range cloudflareRanges {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// describe renders one resolver's answers against what is expected, such as
+// "1.1.1.1: A 104.21.27.128 (want 46.224.129.96)".
+func (a dnsAnswers) describe(ipv4, ipv6 string) (string, bool) {
+	ok := true
+	var parts []string
+	if ipv4 != "" {
+		got := strings.Join(a.A, ", ")
+		if got == "" {
+			got = "none"
+			if a.Error != "" {
+				got = a.Error
+			}
+		}
+		part := "A " + got
+		if !contains(a.A, ipv4) {
+			ok = false
+			part += " (want " + ipv4 + ")"
+		}
+		parts = append(parts, part)
+	}
+	if ipv6 != "" {
+		got := strings.Join(a.AAAA, ", ")
+		if got == "" {
+			got = "none"
+		}
+		part := "AAAA " + got
+		if !contains(a.AAAA, ipv6) {
+			ok = false
+			part += " (want " + ipv6 + ")"
+		}
+		parts = append(parts, part)
+	}
+	return a.Resolver + ": " + strings.Join(parts, "; "), ok
 }
 
 // dnsMatches reports whether the resolved answers contain the expected
@@ -117,11 +212,16 @@ func appendUnique(values []string, v string) []string {
 	return append(values, v)
 }
 
-// formatRecords renders the records as indented lines for humans.
-func formatRecords(records []dnsRecord) string {
-	out := ""
+// recordLines renders the records as aligned TYPE NAME VALUE lines that copy
+// cleanly into a DNS provider's form.
+func recordLines(records []dnsRecord) []string {
+	nameWidth := 0
 	for _, r := range records {
-		out += fmt.Sprintf("  %s %s -> %s\n", r.Type, r.Name, r.Value)
+		nameWidth = max(nameWidth, len(r.Name))
+	}
+	out := make([]string, 0, len(records))
+	for _, r := range records {
+		out = append(out, fmt.Sprintf("%-4s  %-*s  %s", r.Type, nameWidth, r.Name, r.Value))
 	}
 	return out
 }

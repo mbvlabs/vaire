@@ -130,11 +130,32 @@ func (n *Node) Upload(ctx context.Context, art Artifact) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
+	var body io.Reader = f
+	if n.OnUpload != nil {
+		if info, err := f.Stat(); err == nil {
+			body = &countingReader{r: f, total: info.Size(), report: n.OnUpload}
+		}
+	}
 	var stderr bytes.Buffer
-	if err := n.SSH.Run(ctx, "umask 077 && cat > "+remote, f, io.Discard, &stderr); err != nil {
+	if err := n.SSH.Run(ctx, "umask 077 && cat > "+remote, body, io.Discard, &stderr); err != nil {
 		return "", output.WrapError(output.CodeTransportFailed, fmt.Errorf("upload the node binary: %w: %s", err, strings.TrimSpace(stderr.String())), output.ExitTransport, "")
 	}
 	return remote, nil
+}
+
+// countingReader reports how much of an upload has been read.
+type countingReader struct {
+	r      io.Reader
+	sent   int64
+	total  int64
+	report func(sent, total int64)
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.sent += int64(n)
+	c.report(c.sent, c.total)
+	return n, err
 }
 
 // bootstrapInstall installs the first node binary as root (§7.5 step 4): it

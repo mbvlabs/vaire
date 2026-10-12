@@ -119,8 +119,9 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	env.Cluster = cfg
 
 	data, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
-		Only:   steps.HostStepIDs(),
-		Report: env.Report,
+		Only:        steps.HostStepIDs(),
+		Report:      env.Report,
+		FailureHint: initFailureHint(cfg.ClusterName),
 	})
 	if err != nil {
 		return Result{}, err
@@ -332,4 +333,10 @@ func handleConfirmSecrets(context.Context, *Env) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Data: map[string]string{"secrets_confirmed_at": st.SecretsConfirmedAt}}, nil
+}
+
+// initFailureHint is the step_failed hint during cluster init, where there is
+// no context yet for eru apply.
+func initFailureHint(cluster string) string {
+	return "Fix the cause, then run eru cluster init --resume --name " + cluster + " (add --local for a local init). It resumes at this step."
 }

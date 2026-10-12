@@ -59,9 +59,10 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	env.Cluster = cfg
 
 	data, warnings, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
-		Only:      steps.DatabaseStepIDs(),
-		Report:    env.Report,
-		Restarter: steps.Restarter(),
+		Only:        steps.DatabaseStepIDs(),
+		Report:      env.Report,
+		Restarter:   steps.Restarter(),
+		FailureHint: initFailureHint(cfg.ClusterName),
 	})
 	if err != nil {
 		return Result{}, err
@@ -117,6 +118,10 @@ func isSelfSigned(path string) bool {
 	if cert == nil {
 		return true
 	}
+	return isSelfSignedCert(cert)
+}
+
+func isSelfSignedCert(cert *x509.Certificate) bool {
 	return cert.Issuer.String() == cert.Subject.String()
 }
 

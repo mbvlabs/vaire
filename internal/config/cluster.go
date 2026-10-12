@@ -482,9 +482,6 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	if c.TLS.ACMECA != "" && !strings.HasPrefix(c.TLS.ACMECA, "https://") {
 		add("tls.acme_ca %q must be an https:// URL", c.TLS.ACMECA)
 	}
-	if c.TLS.Mode == "acme" && c.ACMEEmail == "" {
-		add("acme_email is required when tls.mode is acme")
-	}
 	if c.Postgres.Version != 18 {
 		add("postgres.version must be 18")
 	}

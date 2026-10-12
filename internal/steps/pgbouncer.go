@@ -19,7 +19,7 @@ type pgbouncer struct{}
 func (pgbouncer) ID() string { return pgbouncerID }
 
 func (pgbouncer) Describe(config.Cluster) string {
-	return "render pgbouncer.ini and userlist.txt, then restart PgBouncer"
+	return "render pgbouncer.ini, pgbouncer_hba.conf and userlist.txt, then restart PgBouncer"
 }
 
 // pgbouncerIni is the rendered ini, which never contains a secret.
@@ -28,18 +28,24 @@ func pgbouncerIni(cfg config.Cluster, rt engine.Runtime) string {
 }
 
 func (pgbouncer) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []engine.RenderedFile {
-	return []engine.RenderedFile{{Path: PgbouncerIniPath, Content: []byte(pgbouncerIni(cfg, rt))}}
+	return []engine.RenderedFile{
+		{Path: PgbouncerIniPath, Content: []byte(pgbouncerIni(cfg, rt))},
+		{Path: PgbouncerHBAPath, Content: render.PgbouncerHBA()},
+	}
 }
 
 func (pgbouncer) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, error) {
 	// The verifiers change on rotation without changing the desired state, so
 	// they are not part of the inputs; Check re-renders them each time.
-	return canonical(map[string]any{"ini": pgbouncerIni(cfg, rt), "users": ServiceRoles})
+	return canonical(map[string]any{"ini": pgbouncerIni(cfg, rt), "hba": string(render.PgbouncerHBA()), "users": ServiceRoles})
 }
 
 func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
 	if !fileIs(PgbouncerIniPath, pgbouncerIni(cfg, rt), 0o640) {
 		return incomplete(PgbouncerIniPath + " differs"), nil
+	}
+	if !fileIs(PgbouncerHBAPath, string(render.PgbouncerHBA()), 0o640) {
+		return incomplete(PgbouncerHBAPath + " differs"), nil
 	}
 	verifiers, err := roleVerifiers(ctx, rt)
 	if err != nil || len(verifiers) < len(ServiceRoles) {
@@ -66,6 +72,9 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 		return engine.ApplyResult{}, fmt.Errorf("the service role verifiers are missing; run postgres-roles-v1 first")
 	}
 	if err := writeFile(PgbouncerIniPath, pgbouncerIni(cfg, rt), 0o640); err != nil {
+		return engine.ApplyResult{}, err
+	}
+	if err := writeFile(PgbouncerHBAPath, string(render.PgbouncerHBA()), 0o640); err != nil {
 		return engine.ApplyResult{}, err
 	}
 	if err := writeFile(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640); err != nil {

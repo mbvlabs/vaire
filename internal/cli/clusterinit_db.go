@@ -32,85 +32,81 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 	return res, nil
 }
 
-// dnsStep guides the operator through creating the DNS records and verifies
-// them against public resolvers (D10).
+// dnsHelp is shown with the records: the record must point straight at the
+// server.
+const dnsHelp = "Set the records to DNS only (not proxied). Database clients can't connect through a proxy such as Cloudflare's orange cloud."
+
+// dnsStep shows the DNS records, gives the operator a pause to create them,
+// then checks the public resolvers once. A mismatch is a warning, never a
+// stop: the certificate wait after the database phase shows whether the
+// certificate was issued (D10).
 func (r *initRun) dnsStep(ctx context.Context) error {
-	records := dnsRecords(r.cfg.Domain, r.primary().PublicAddress, r.prog.PublicIPv6)
+	ipv4, ipv6 := r.primary().PublicAddress, r.prog.PublicIPv6
+	records := dnsRecords(r.cfg.Domain, ipv4, ipv6)
 	if len(records) == 0 {
 		return nil
 	}
-	r.p.phase("init.dns", "started", "confirm the DNS records for "+r.cfg.Domain)
-	r.p.note("Create these DNS records:\n" + formatRecords(records))
-
 	cmd := r.cmd
-	if MustNotPrompt(cmd) {
-		if !flagTrue(cmd, "dns-ready") {
-			return output.NewError(
-				output.CodeInputRequired,
-				"the DNS records must exist before the database is set up",
-				output.ExitInput,
-				"Create the records, then re-run with --dns-ready.",
-			).WithDetails(map[string]any{"flag": "--dns-ready", "dns_records": records})
-		}
-	} else {
-		for {
-			line, err := promptLine(cmd, "Type added once the records exist", "")
-			if err != nil {
-				return err
-			}
-			if line == "added" {
-				break
-			}
-		}
-	}
-
-	for {
-		ok, got := verifyDNS(ctx, r.cfg.Domain, r.primary().PublicAddress, r.prog.PublicIPv6)
-		if ok {
-			r.p.phase("init.dns", "completed", "DNS records resolve to the node")
-			return nil
-		}
-		if flagTrue(cmd, "skip-dns-check") {
-			r.warnings = append(r.warnings, output.Warning{Code: "tls_unverified", Message: "--skip-dns-check: continuing without a verified DNS record"})
-			return nil
-		}
-		if MustNotPrompt(cmd) {
-			return output.NewError(
-				output.CodePrecondition,
-				"the DNS records do not resolve to the node",
-				output.ExitPrecondition,
-				"Fix the records, or re-run with --skip-dns-check.",
-			).WithDetails(map[string]any{"reason": "dns_mismatch", "dns_records": records, "resolved": got})
-		}
-		line, err := promptLine(cmd, "DNS does not match yet: type wait, continue, or stop", "")
-		if err != nil {
+	r.p.panel("Create these DNS records", append(recordLines(records), "", dnsHelp))
+	if !MustNotPrompt(cmd) && !flagTrue(cmd, "dns-ready") {
+		if err := typeWord(cmd, "Type 'confirmed' once the records exist", "", "confirmed"); err != nil {
 			return err
 		}
-		switch strings.ToLower(line) {
-		case "continue":
-			r.warnings = append(r.warnings, output.Warning{Code: "tls_unverified", Message: "continuing before DNS resolves; the certificate will be issued once it does"})
-			return nil
-		case "stop":
-			return output.NewError(
-				output.CodePrecondition,
-				"stopped at the DNS step",
-				output.ExitPrecondition,
-				"Create the records, then run eru cluster init --resume.",
-			).WithDetails(map[string]any{"dns_records": records, "resolved": got})
-		default:
-			// wait, or an empty answer: verifyDNS polls for another 5 minutes.
-		}
 	}
+	if flagChanged(cmd, "skip-dns-check") {
+		r.warnings = append(r.warnings, output.Warning{Code: "flag_deprecated", Message: "--skip-dns-check is no longer needed: a DNS mismatch is only a warning"})
+	}
+
+	r.p.phase("init.dns", "started", "ask "+strings.Join(resolverNames(), " and ")+" for "+r.cfg.Domain)
+	check := checkDNS(ctx, r.cfg.Domain, ipv4, ipv6)
+	lines := make([]string, 0, len(check.Resolvers))
+	for _, a := range check.Resolvers {
+		line, ok := a.describe(ipv4, ipv6)
+		mark := "ok"
+		if !ok {
+			mark = "mismatch"
+		}
+		lines = append(lines, line+"  ["+mark+"]")
+	}
+	switch {
+	case check.Matches:
+		r.p.phase("init.dns", "completed", "the records resolve to the server")
+		return nil
+	case check.Proxied:
+		r.warnings = append(r.warnings, output.Warning{Code: "dns_proxied",
+			Message: r.cfg.Domain + " is proxied by Cloudflare: database clients can't connect through it. Set the record to DNS only (grey cloud)."})
+	default:
+		r.warnings = append(r.warnings, output.Warning{Code: "dns_mismatch",
+			Message: r.cfg.Domain + " does not resolve to the server yet; the certificate is issued once it does"})
+	}
+	r.p.phase("init.dns", "completed", "not resolving to the server yet; continuing")
+	r.p.panel("DNS answers", lines)
+	if check.Proxied {
+		r.p.warn("the record is proxied by Cloudflare; set it to DNS only (grey cloud)")
+	}
+	return nil
+}
+
+func resolverNames() []string {
+	out := make([]string, 0, len(publicResolvers))
+	for _, s := range publicResolvers {
+		out = append(out, strings.TrimSuffix(s, ":53"))
+	}
+	return out
 }
 
 // waitForTLS polls tls.status until the served certificate is no longer the
-// placeholder, or until the 120 s window passes (D10).
+// placeholder, or until the 120 s window passes (D10). Pending is a warning
+// that carries the DNS answers, never a failure.
 func (r *initRun) waitForTLS(ctx context.Context, caller remote.Caller) error {
 	if r.cfg.TLS.Mode == "self-signed" {
 		return nil
 	}
 	r.p.phase("init.tls", "started", "wait for the certificate for "+r.cfg.Domain)
 	deadline := time.Now().Add(tlsWaitTimeout)
+	if t := r.p.task("init.tls"); t != nil {
+		t.Deadline(deadline)
+	}
 	for {
 		state, err := r.tlsStatus(ctx, caller)
 		if err != nil {
@@ -118,14 +114,25 @@ func (r *initRun) waitForTLS(ctx context.Context, caller remote.Caller) error {
 		}
 		r.tlsState = state
 		if state.State != "pending" {
-			r.p.phase("init.tls", "completed", "certificate issued")
+			detail := "issued"
+			if state.NotAfter != "" {
+				detail += ", valid until " + state.NotAfter
+			}
+			r.p.phase("init.tls", "completed", detail)
 			return nil
 		}
+		if t := r.p.task("init.tls"); t != nil {
+			t.Detail("still the placeholder certificate; Let's Encrypt validates " + r.cfg.Domain + " over HTTP on port 80")
+		}
 		if time.Now().After(deadline) {
-			r.warnings = append(r.warnings, output.Warning{
-				Code:    "tls_pending",
-				Message: "the certificate is still pending; Caddy will issue it once DNS is correct",
-			})
+			check := checkDNS(ctx, r.cfg.Domain, r.primary().PublicAddress, r.prog.PublicIPv6)
+			msg := "the certificate is still pending; eru retries every hour, so it is issued within the hour after DNS points at the server"
+			if check.Proxied {
+				msg += ". " + r.cfg.Domain + " is proxied by Cloudflare: set it to DNS only (grey cloud)"
+			} else if !check.Matches {
+				msg += ". DNS answers: " + dnsSummary(check, r.primary().PublicAddress, r.prog.PublicIPv6)
+			}
+			r.warnings = append(r.warnings, output.Warning{Code: "tls_pending", Message: msg})
 			r.p.phase("init.tls", "completed", "still pending")
 			return nil
 		}
@@ -135,6 +142,15 @@ func (r *initRun) waitForTLS(ctx context.Context, caller remote.Caller) error {
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+func dnsSummary(check dnsCheck, ipv4, ipv6 string) string {
+	parts := make([]string, 0, len(check.Resolvers))
+	for _, a := range check.Resolvers {
+		line, _ := a.describe(ipv4, ipv6)
+		parts = append(parts, line)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // tlsStatus asks the node for the served certificate's state.
@@ -161,6 +177,6 @@ func (r *initRun) noteDNSEarly() {
 	if len(records) == 0 {
 		return
 	}
-	r.p.note("Create these DNS records now:\n" + formatRecords(records) +
-		"Setup continues meanwhile; you'll be asked to confirm before the database is set up.")
+	r.p.panel("Create this DNS record now", append(recordLines(records), "", dnsHelp,
+		"Setup continues meanwhile; you'll be asked to confirm before the database is set up."))
 }

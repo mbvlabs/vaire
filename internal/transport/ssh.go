@@ -295,31 +295,42 @@ func KeyAuth(privatePEM []byte) (ssh.AuthMethod, error) {
 // KeyFileAuth authenticates with the key file at path. passphrase is asked
 // for when the key is encrypted; nil means encrypted keys fail.
 func KeyFileAuth(path string, passphrase func() ([]byte, error)) (ssh.AuthMethod, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this identity file.
+	signer, _, err := KeyFileSigner(path, passphrase)
 	if err != nil {
 		return nil, err
-	}
-	signer, err := ssh.ParsePrivateKey(raw)
-	var missing *ssh.PassphraseMissingError
-	if errors.As(err, &missing) {
-		if passphrase == nil {
-			return nil, fmt.Errorf("%s is encrypted; load it into ssh-agent instead", path)
-		}
-		pw, perr := passphrase()
-		if perr != nil {
-			return nil, perr
-		}
-		signer, err = ssh.ParsePrivateKeyWithPassphrase(raw, pw)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return ssh.PublicKeys(signer), nil
 }
 
-// AgentAuth returns the ssh-agent's keys when SSH_AUTH_SOCK is set. The
-// returned close function releases the agent connection.
-func AgentAuth() (ssh.AuthMethod, func(), bool) {
+// KeyFileSigner parses the key file at path. encrypted reports whether the
+// key needs a passphrase; with a nil passphrase func an encrypted key fails.
+func KeyFileSigner(path string, passphrase func() ([]byte, error)) (signer ssh.Signer, encrypted bool, err error) {
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this identity file.
+	if err != nil {
+		return nil, false, err
+	}
+	signer, err = ssh.ParsePrivateKey(raw)
+	var missing *ssh.PassphraseMissingError
+	if errors.As(err, &missing) {
+		if passphrase == nil {
+			return nil, true, fmt.Errorf("%s is encrypted; load it into ssh-agent instead", path)
+		}
+		pw, perr := passphrase()
+		if perr != nil {
+			return nil, true, perr
+		}
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(raw, pw)
+		encrypted = true
+	}
+	if err != nil {
+		return nil, encrypted, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return signer, encrypted, nil
+}
+
+// AgentSigners returns the ssh-agent's signers when SSH_AUTH_SOCK is set and
+// the agent holds at least one key.
+func AgentSigners() ([]ssh.Signer, func(), bool) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
 		return nil, func() {}, false
@@ -328,13 +339,33 @@ func AgentAuth() (ssh.AuthMethod, func(), bool) {
 	if err != nil {
 		return nil, func() {}, false
 	}
-	client := agent.NewClient(conn)
-	signers, err := client.Signers()
+	signers, err := agent.NewClient(conn).Signers()
 	if err != nil || len(signers) == 0 {
 		_ = conn.Close()
 		return nil, func() {}, false
 	}
-	return ssh.PublicKeysCallback(client.Signers), func() { _ = conn.Close() }, true
+	return signers, func() { _ = conn.Close() }, true
+}
+
+// AgentHolds reports whether one of signers has the public key in pubPath.
+func AgentHolds(signers []ssh.Signer, pubPath string) bool {
+	raw, err := os.ReadFile(pubPath) //nolint:gosec // G304: the .pub next to a default key.
+	if err != nil {
+		return false
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(raw)
+	if err != nil {
+		return false
+	}
+	return ContainsKey(publicKeys(signers), pub)
+}
+
+func publicKeys(signers []ssh.Signer) []ssh.PublicKey {
+	out := make([]ssh.PublicKey, 0, len(signers))
+	for _, s := range signers {
+		out = append(out, s.PublicKey())
+	}
+	return out
 }
 
 // PasswordAuth answers password and keyboard-interactive prompts with pw.
