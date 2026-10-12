@@ -38,6 +38,9 @@ const (
 	phaseHost        = "host_bootstrapped"
 	phaseTransport   = "transport_switched"
 	phaseLockdown    = "locked_down"
+	phaseDNS         = "dns_confirmed"
+	phaseDatabase    = "database_bootstrapped"
+	phaseTLS         = "tls_checked"
 	phaseDocument    = "secrets_written"
 	phaseSecretsDone = "secrets_confirmed"
 )
@@ -53,10 +56,13 @@ const (
 
 // laterPhaseFlags are init flags whose settings arrive with a later phase.
 var laterPhaseFlags = []string{
-	"profile", "client-connections", "database", "backup-provider", "backup-endpoint", "backup-region",
+	"backup-provider", "backup-endpoint", "backup-region",
 	"backup-bucket", "backup-prefix", "backup-key-id", "backup-secret-stdin", "backup-secret-file",
-	"vps-backup-schedule", "db-full-schedule", "db-diff-schedule", "extensions", "tls-mode",
+	"vps-backup-schedule", "db-full-schedule", "db-diff-schedule",
 }
+
+// tlsWaitTimeout bounds the wait for a real certificate (D10).
+const tlsWaitTimeout = 120 * time.Second
 
 // initRun is one cluster init: the answers, the pending state, and the
 // generated secrets.
@@ -70,6 +76,12 @@ type initRun struct {
 	prog     *contexts.Progress
 	sec      contexts.PendingSecrets
 	warnings []output.Warning
+	// dbSecrets is the RPC secret map for the database phase (D7).
+	dbSecrets map[string]string
+	// tlsState is the certificate state after the database phase (D10).
+	tlsState *node.TLSState
+	// dbRestart reports whether the database phase restarted Postgres.
+	dbRestart bool
 }
 
 type initPlanData struct {
@@ -87,19 +99,23 @@ type initPlanData struct {
 }
 
 type initResult struct {
-	Cluster          string `json:"cluster"`
-	Node             string `json:"node"`
-	PublicAddress    string `json:"public_address"`
-	WGAddress        string `json:"wg_address"`
-	AdminUser        string `json:"admin_user"`
-	Context          string `json:"context,omitempty"`
-	SecretsDocument  string `json:"secrets_document"`
-	PassphraseOut    string `json:"passphrase_out,omitempty"`
-	Passphrase       string `json:"passphrase,omitempty"`
-	PublicSSHClosed  bool   `json:"public_ssh_closed"`
-	LockdownPending  bool   `json:"lockdown_pending"`
-	LockdownDeadline string `json:"lockdown_confirm_by,omitempty"`
-	LoginCommand     string `json:"login_command,omitempty"`
+	Cluster          string   `json:"cluster"`
+	Node             string   `json:"node"`
+	PublicAddress    string   `json:"public_address"`
+	WGAddress        string   `json:"wg_address"`
+	AdminUser        string   `json:"admin_user"`
+	Context          string   `json:"context,omitempty"`
+	SecretsDocument  string   `json:"secrets_document"`
+	PassphraseOut    string   `json:"passphrase_out,omitempty"`
+	Passphrase       string   `json:"passphrase,omitempty"`
+	PublicSSHClosed  bool     `json:"public_ssh_closed"`
+	LockdownPending  bool     `json:"lockdown_pending"`
+	LockdownDeadline string   `json:"lockdown_confirm_by,omitempty"`
+	LoginCommand     string   `json:"login_command,omitempty"`
+	TLS              string   `json:"tls,omitempty"`
+	TLSNotAfter      string   `json:"tls_not_after,omitempty"`
+	RestartPerformed bool     `json:"restart_performed,omitempty"`
+	Next             []string `json:"next,omitempty"`
 }
 
 func runClusterInit(cmd *cobra.Command, args []string) error {
@@ -154,7 +170,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 		if flagChanged(cmd, name) {
 			r.warnings = append(r.warnings, output.Warning{
 				Code:    "flag_not_used_yet",
-				Message: "--" + name + " is not used yet: this build sets up the host only (Phase 1); databases, backups and TLS arrive in later phases",
+				Message: "--" + name + " is not used yet: backups and VPS snapshots arrive in later phases",
 			})
 		}
 	}
@@ -207,7 +223,7 @@ func (r *initRun) collect() error {
 		if err != nil {
 			return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
-		if cfg, err = config.ParseCluster(raw); err != nil {
+		if cfg, err = config.ParseAnswers(raw); err != nil {
 			return output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
 		}
 		_, r.boot, err = decodeBootstrap(raw)
@@ -221,12 +237,42 @@ func (r *initRun) collect() error {
 	if v := stringFlag(cmd, "domain"); v != "" {
 		cfg.Domain = v
 	}
+	if v := stringFlag(cmd, "admin-user"); v != "" {
+		cfg.Server.AdminUser = v
+	}
+	if v := stringFlag(cmd, "timezone"); v != "" {
+		cfg.Timezone = v
+	}
+	if v := stringFlag(cmd, "data-directory"); v != "" {
+		cfg.Server.DataDirectory = v
+	}
 	if v := stringFlag(cmd, "acme-email"); v != "" {
 		cfg.ACMEEmail = v
 	}
 	if flagChanged(cmd, "allow") {
 		allow, _ := cmd.Flags().GetStringSlice("allow")
 		cfg.Network.ClientAllowlist = allow
+	}
+	if v := stringFlag(cmd, "profile"); v != "" {
+		cfg.Postgres.Profile = v
+	}
+	if flagChanged(cmd, "client-connections") {
+		if n, err := cmd.Flags().GetInt("client-connections"); err == nil {
+			cfg.Postgres.ClientConnections = n
+		}
+	}
+	if v := stringFlag(cmd, "tls-mode"); v != "" {
+		cfg.TLS.Mode = v
+	}
+	if flagChanged(cmd, "database") {
+		names, _ := cmd.Flags().GetStringSlice("database")
+		cfg.Databases = databasesFromNames(names, cfg.Databases)
+	}
+	if flagChanged(cmd, "extensions") {
+		exts, _ := cmd.Flags().GetStringSlice("extensions")
+		for i := range cfg.Databases {
+			cfg.Databases[i].Extensions = exts
+		}
 	}
 	if v := stringFlag(cmd, "host"); v != "" {
 		user, host, port, err := parseHostFlag(v)
@@ -300,6 +346,16 @@ func (r *initRun) collect() error {
 	}
 	if cfg.Nodes[0].Role == "" {
 		cfg.Nodes[0].Role = config.RolePrimary
+	}
+	supplied := suppliedAnswers(cmd, cfg, stringFlag(cmd, "answers") != "")
+	if len(cfg.Databases) == 0 {
+		cfg.Databases = databasesFromNames([]string{"app"}, nil)
+	}
+	// The huh interview asks the Phase 2 question set in a TTY (D13).
+	if !MustNotPrompt(cmd) {
+		if err := runInterview(cmd, &cfg, supplied); err != nil {
+			return err
+		}
 	}
 	r.cfg = cfg
 	r.prog = &contexts.Progress{Local: r.local, Phases: map[string]string{}}
@@ -446,6 +502,11 @@ func registerPending(sec contexts.PendingSecrets) {
 	secrets.Add(sec.WGPrivateKey)
 	secrets.Add(sec.SSHPrivateKey)
 	secrets.Add(sec.SudoPassword)
+	if sec.Database != nil {
+		for _, value := range sec.Database.SecretValues() {
+			secrets.Add(value)
+		}
+	}
 }
 
 func (r *initRun) primary() config.NodeSpec {
@@ -456,7 +517,7 @@ func (r *initRun) primary() config.NodeSpec {
 func (r *initRun) planData() initPlanData {
 	n := r.primary()
 	done := make([]string, 0, len(r.prog.Phases))
-	for _, phase := range []string{phaseSecrets, phaseFirstHost, phaseBinary, phaseHost, phaseTransport, phaseLockdown, phaseDocument, phaseSecretsDone} {
+	for _, phase := range []string{phaseSecrets, phaseFirstHost, phaseBinary, phaseHost, phaseTransport, phaseLockdown, phaseDNS, phaseDatabase, phaseTLS, phaseDocument, phaseSecretsDone} {
 		if r.prog.Done(phase) {
 			done = append(done, phase)
 		}
@@ -535,6 +596,24 @@ func (r *initRun) generateSecrets() error {
 	return r.mark(phaseSecrets)
 }
 
+// ensureDatabaseSecrets fills the operator's database credentials for the
+// configured databases and service roles, and records the RPC secret map (D7).
+func (r *initRun) ensureDatabaseSecrets() error {
+	creds := contexts.DatabaseCreds{}
+	if r.sec.Database != nil {
+		creds = *r.sec.Database
+	}
+	rpc, generated, err := ensureSecrets(r.cfg, &creds, r.cfg.Databases)
+	if err != nil {
+		return err
+	}
+	r.sec.Database = &creds
+	r.dbSecrets = rpc
+	r.warnings = append(r.warnings, staleWarning(generated)...)
+	registerPending(r.sec)
+	return contexts.SaveSecrets(r.name, r.sec)
+}
+
 func (r *initRun) operator() (config.Operator, error) {
 	pub, err := transport.WGPublicKey(r.sec.WGPrivateKey)
 	if err != nil {
@@ -610,6 +689,10 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.generateSecrets(); err != nil {
 		return err
 	}
+	if err := r.ensureDatabaseSecrets(); err != nil {
+		return err
+	}
+	r.noteDNSEarly()
 	known, err := transport.LoadKnownHosts(contexts.PendingKnownHosts(r.name))
 	if err != nil {
 		return err
@@ -666,7 +749,40 @@ func runInitRemote(cmd *cobra.Command) error {
 		lockedAt = r.prog.Phases[phaseLockdown]
 	}
 
-	// 10. Secrets document, then the node records the confirmation.
+	// 9. DNS (acme mode only).
+	if r.cfg.TLS.Mode == "acme" && !r.prog.Done(phaseDNS) {
+		if err := r.dnsStep(ctx); err != nil {
+			return err
+		}
+		if err := r.mark(phaseDNS); err != nil {
+			return err
+		}
+	}
+
+	// 10. Database phase: steps 7-13.
+	if !r.prog.Done(phaseDatabase) {
+		r.p.phase("init.database", "started", "run database steps 7-13 on the node")
+		res, err := r.callDatabasePhase(ctx, wgNode)
+		if err != nil {
+			return err
+		}
+		r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
+		r.p.phase("init.database", "completed", "")
+		if err := r.mark(phaseDatabase); err != nil {
+			return err
+		}
+	}
+	// 11. Wait for the certificate.
+	if !r.prog.Done(phaseTLS) {
+		if err := r.waitForTLS(ctx, wgNode); err != nil {
+			return err
+		}
+		if err := r.mark(phaseTLS); err != nil {
+			return err
+		}
+	}
+
+	// 12. Secrets document, then the node records the confirmation.
 	doc, res, err := r.writeDocument(defaultSecretsOut(r.name, false))
 	if err != nil {
 		return err
@@ -678,7 +794,7 @@ func runInitRemote(cmd *cobra.Command) error {
 		return err
 	}
 
-	// 11. Local context, then drop the pending state.
+	// 13. Local context, then drop the pending state.
 	if contexts.Exists(r.name) {
 		return output.NewError(output.CodePrecondition, "a context named "+r.name+" appeared during init", output.ExitPrecondition,
 			"Remove it, then run eru login "+res.SecretsDocument+".")
@@ -694,12 +810,54 @@ func runInitRemote(cmd *cobra.Command) error {
 	}
 	res.Context = r.name
 	res.PublicSSHClosed = true
+	r.fillResult(&res)
 	message := strings.Join([]string{
-		fmt.Sprintf("Cluster %s is bootstrapped. Node %s (%s) is hardened, and SSH now runs only over WireGuard (%s).", r.name, n.Name, n.PublicAddress, n.WGAddress),
+		fmt.Sprintf("Cluster %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.Domain),
+		"TLS: " + r.tlsSummary(),
+		r.urlSummary(),
 		"Secrets document: " + res.SecretsDocument,
 		"Context " + r.name + " is the current context on this machine. On another machine run: eru login " + filepath.Base(res.SecretsDocument),
 	}, "\n")
-	return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: []string{"eru plan"}})
+	return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: res.Next})
+}
+
+// fillResult adds the TLS state, restart flag and next steps to the result.
+func (r *initRun) fillResult(res *initResult) {
+	if r.tlsState != nil {
+		res.TLS = r.tlsState.State
+		res.TLSNotAfter = r.tlsState.NotAfter
+	}
+	res.RestartPerformed = r.dbRestart
+	first := "app"
+	if len(r.cfg.Databases) > 0 {
+		first = r.cfg.Databases[0].Name
+	}
+	res.Next = []string{
+		"eru sql --db " + first + " \"select 1\"",
+		"eru psql --db " + first,
+	}
+}
+
+// urlSummary lists each database's connection URLs with the passwords left in
+// the secrets document.
+func (r *initRun) urlSummary() string {
+	lines := []string{"Connection URLs (passwords are in the secrets document):"}
+	for _, db := range r.cfg.Databases {
+		for _, role := range []string{steps.RoleApp, steps.RoleMigrate} {
+			urls := secretsdoc.DatabaseURLs(r.cfg.Domain, r.cfg.TLS.Mode, db.Name, map[string]contexts.Role{
+				role: {User: db.Name + "_" + role, Password: "«in secrets document»"},
+			})
+			lines = append(lines, fmt.Sprintf("  %s %s: %s", db.Name, role, urls[role]))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (r *initRun) tlsSummary() string {
+	if r.tlsState == nil {
+		return r.cfg.TLS.Mode
+	}
+	return r.tlsState.State
 }
 
 // firstContact pins the host key, pushes the binary and runs the host phase
@@ -781,6 +939,7 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 	if err != nil {
 		return err
 	}
+	r.prog.PublicIPv6 = res.PublicIPv6
 	hostKeys, err := transport.ParseHostKeys(res.SSHHostKeys)
 	if err != nil {
 		return err
@@ -981,7 +1140,7 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		Schema:     secretsdoc.Schema,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		EruVersion: buildinfo.Version,
-		Cluster:    secretsdoc.Cluster{Name: r.name, Domain: r.cfg.Domain, Stanza: r.name},
+		Cluster:    secretsdoc.Cluster{Name: r.name, Domain: r.cfg.Domain, Stanza: r.name, TLSMode: r.cfg.TLS.Mode},
 		Nodes: []secretsdoc.Node{{
 			Name:          n.Name,
 			Role:          n.Role,
@@ -999,8 +1158,24 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 			SSHPrivateKey: r.sec.SSHPrivateKey,
 			SudoPassword:  r.sec.SudoPassword,
 		},
-		BreakGlass: secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
+		Database:        r.documentDatabase(),
+		ConnectionNotes: secretsdoc.ConnectionNotes,
+		BreakGlass:      secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
 	}, nil
+}
+
+// documentDatabase builds the document's database section, filling URLs.
+func (r *initRun) documentDatabase() *secretsdoc.Database {
+	if r.sec.Database == nil {
+		return nil
+	}
+	creds := *r.sec.Database
+	for i := range creds.Databases {
+		if len(creds.Databases[i].URLs) == 0 {
+			creds.Databases[i].URLs = secretsdoc.DatabaseURLs(r.cfg.Domain, r.cfg.TLS.Mode, creds.Databases[i].Name, creds.Databases[i].Roles)
+		}
+	}
+	return &creds
 }
 
 // writeDocument writes the age document, shows the passphrase once, and
@@ -1129,11 +1304,17 @@ func runInitLocal(cmd *cobra.Command) error {
 	if err := r.generateSecrets(); err != nil {
 		return err
 	}
+	if err := r.ensureDatabaseSecrets(); err != nil {
+		return err
+	}
+	r.noteDNSEarly()
 	caller := remote.Local{Operator: firstOperatorName}
 	if !r.prog.Done(phaseHost) {
-		if _, err := r.bootstrapHost(ctx, caller); err != nil {
+		hostRes, err := r.bootstrapHost(ctx, caller)
+		if err != nil {
 			return err
 		}
+		r.prog.PublicIPv6 = hostRes.PublicIPv6
 		if err := r.mark(phaseHost); err != nil {
 			return err
 		}
@@ -1155,6 +1336,36 @@ func runInitLocal(cmd *cobra.Command) error {
 			return err
 		}
 	}
+	// DNS (acme mode only).
+	if r.cfg.TLS.Mode == "acme" && !r.prog.Done(phaseDNS) {
+		if err := r.dnsStep(ctx); err != nil {
+			return err
+		}
+		if err := r.mark(phaseDNS); err != nil {
+			return err
+		}
+	}
+	// Database phase: steps 7-13 on this server.
+	if !r.prog.Done(phaseDatabase) {
+		r.p.phase("init.database", "started", "run database steps 7-13 on this server")
+		res, err := r.callDatabasePhase(ctx, caller)
+		if err != nil {
+			return err
+		}
+		r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
+		r.p.phase("init.database", "completed", "")
+		if err := r.mark(phaseDatabase); err != nil {
+			return err
+		}
+	}
+	if !r.prog.Done(phaseTLS) {
+		if err := r.waitForTLS(ctx, caller); err != nil {
+			return err
+		}
+		if err := r.mark(phaseTLS); err != nil {
+			return err
+		}
+	}
 	_, res, err := r.writeDocument(defaultSecretsOut(r.name, true))
 	if err != nil {
 		return err
@@ -1168,12 +1379,15 @@ func runInitLocal(cmd *cobra.Command) error {
 	res.LockdownPending = true
 	res.LockdownDeadline = deadline
 	res.LoginCommand = "eru login " + filepath.Base(res.SecretsDocument)
+	r.fillResult(&res)
 	message := strings.Join([]string{
 		fmt.Sprintf("Cluster %s is bootstrapped on this server (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
+		"TLS: " + r.tlsSummary(),
+		r.urlSummary(),
 		"Secrets document: " + res.SecretsDocument,
 		"Copy it to your machine and run: " + res.LoginCommand,
 		"Then run any remote command, such as eru plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
 		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",
 	}, "\n")
-	return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: []string{res.LoginCommand, "eru plan"}})
+	return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: append([]string{res.LoginCommand}, res.Next...)})
 }

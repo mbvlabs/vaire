@@ -41,10 +41,16 @@ const probeLimit = 30 * time.Second
 // Probe runs a read-only command for Check and returns its trimmed stdout.
 // Probes never mutate the host, so they also run in dry runs.
 func Probe(ctx context.Context, name string, args ...string) (string, error) {
+	return ProbeWithEnv(ctx, nil, name, args...)
+}
+
+// ProbeWithEnv is Probe with extra environment variables appended to the fixed
+// probe environment.
+func ProbeWithEnv(ctx context.Context, extraEnv []string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeLimit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed probe commands from the step catalogue.
-	cmd.Env = probeEnv
+	cmd.Env = append(append([]string(nil), probeEnv...), extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

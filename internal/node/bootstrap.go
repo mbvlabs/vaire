@@ -20,9 +20,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// PhaseHost is cluster.bootstrap's host phase (steps 1-6). The database phase
-// arrives in Phase 2.
-const PhaseHost = "host"
+// Bootstrap phases. PhaseHost runs steps 1-6; PhaseDatabase runs steps 7-13
+// (D1).
+const (
+	PhaseHost     = "host"
+	PhaseDatabase = "database"
+)
 
 // minRAMMiB is the preflight RAM floor. A "1 GB" VPS reports a little under
 // 1024 MiB of MemTotal, so the floor sits just below it.
@@ -43,7 +46,18 @@ type BootstrapResult struct {
 	OS          hostinfo.OS      `json:"os"`
 	WGPublicKey string           `json:"wg_public_key"`
 	SSHHostKeys []string         `json:"ssh_host_keys"`
+	PublicIPv6  string           `json:"public_ipv6,omitempty"`
 	Steps       engine.ApplyData `json:"steps"`
+	// TLS is set by the database phase (D10).
+	TLS *TLSState `json:"tls,omitempty"`
+	// RestartPerformed reports whether the database phase restarted Postgres.
+	RestartPerformed bool `json:"restart_performed,omitempty"`
+}
+
+// TLSState is the certificate state after the database phase (D10).
+type TLSState struct {
+	State    string `json:"state"` // acme | pending | self-signed
+	NotAfter string `json:"not_after,omitempty"`
 }
 
 // bootstrapToken is {cluster}, read from the params because cluster.toml does
@@ -65,19 +79,27 @@ func handleClusterBootstrap(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	if p.Phase != PhaseHost {
+	switch p.Phase {
+	case PhaseHost:
+		return bootstrapHost(ctx, env, p)
+	case PhaseDatabase:
+		return bootstrapDatabase(ctx, env, p)
+	default:
 		return Result{}, output.NewError(
 			output.CodeUsage,
 			"cluster.bootstrap phase "+p.Phase+" is not available",
 			output.ExitUsage,
-			"Phase 1 runs phase host. The database phase arrives in Phase 2.",
+			"Use phase host or phase database.",
 		).WithDetails(map[string]any{"phase": p.Phase})
 	}
+}
+
+func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, error) {
 	cfg, err := config.ParseCluster([]byte(p.ClusterTOML))
 	if err != nil {
 		return Result{}, output.NewError(output.CodeConfig, "cluster_toml does not parse: "+err.Error(), output.ExitConfig, "")
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateFor(config.ScopeHost); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
 	spec, ok := cfg.Node(p.NodeName)
@@ -111,12 +133,14 @@ func handleClusterBootstrap(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	host, _ := hostinfo.Detect(cfg.Server.DataDirectory)
 	return Result{Data: BootstrapResult{
 		Phase:       p.Phase,
 		Node:        spec.Name,
 		OS:          osInfo,
 		WGPublicKey: pub,
 		SSHHostKeys: hostKeys,
+		PublicIPv6:  host.PublicIPv6,
 		Steps:       data,
 	}}, nil
 }

@@ -11,7 +11,7 @@ import (
 const basePackagesID = "base-packages-v1"
 
 // basePackageList is step 1's package set (§11). python3-systemd lets the
-// fail2ban sshd jail read the journal on Debian 12, which has no auth.log.
+// fail2ban sshd jail read the journal, since Debian ships no auth.log.
 var basePackageList = []string{
 	"curl", "ca-certificates", "gnupg", "sudo", "ufw", "fail2ban", "python3-systemd",
 	"wireguard-tools", "chrony", "logrotate", "unattended-upgrades", "jq", "lsb-release",

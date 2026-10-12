@@ -2,8 +2,8 @@ package steps
 
 import "github.com/mbvlabs/eru/internal/engine"
 
-// Catalog returns the steps in run order (§11). Phase 1 has the host steps
-// 1-6; Phase 2 appends 7 onwards.
+// Catalog returns the steps in run order (§11, D1). Phase 2 has steps 1-13;
+// later phases append theirs.
 func Catalog() []engine.Step {
 	return []engine.Step{
 		basePackages{},
@@ -12,6 +12,13 @@ func Catalog() []engine.Step {
 		sshdHardening{},
 		firewall{},
 		hostBaseline{},
+		kernelTuning{},
+		postgresPackages{},
+		postgresCluster{},
+		postgresConfig{},
+		postgresRoles{},
+		tlsStep{},
+		pgbouncer{},
 	}
 }
 
@@ -27,5 +34,25 @@ func HostStepIDs() []string {
 	}
 }
 
-// Restarter returns the restarter for aggregated restarts. Nil until Phase 2.
-func Restarter() engine.Restarter { return nil }
+// DatabaseStepIDs are the steps cluster.bootstrap phase=database runs (steps
+// 7-13, D1).
+func DatabaseStepIDs() []string {
+	return []string{
+		kernelTuningID,
+		postgresPackagesID,
+		postgresClusterID,
+		postgresConfigID,
+		postgresRolesID,
+		tlsID,
+		pgbouncerID,
+	}
+}
+
+// Restarter returns the PostgreSQL restarter for aggregated restarts.
+func Restarter() engine.Restarter { return restarter }
+
+// RolesStepIDs is the step db.create runs on its own.
+func RolesStepIDs() []string { return []string{postgresRolesID} }
+
+// TuneStepIDs are the steps tune.apply runs.
+func TuneStepIDs() []string { return []string{kernelTuningID, postgresConfigID} }

@@ -30,12 +30,14 @@ type Bootstrap struct {
 	HostKeyFingerprint string `toml:"host_key_fingerprint,omitempty" json:"host_key_fingerprint,omitempty"`
 }
 
-// PendingSecrets are generated on the operator before first contact.
+// PendingSecrets are generated on the operator before first contact. The
+// database and service passwords are added once the answers are known (D7).
 type PendingSecrets struct {
-	OperatorName  string `json:"operator_name"`
-	WGPrivateKey  string `json:"wg_private_key"`
-	SSHPrivateKey string `json:"ssh_private_key"`
-	SudoPassword  string `json:"sudo_password"`
+	OperatorName  string         `json:"operator_name"`
+	WGPrivateKey  string         `json:"wg_private_key"`
+	SSHPrivateKey string         `json:"ssh_private_key"`
+	SudoPassword  string         `json:"sudo_password"`
+	Database      *DatabaseCreds `json:"database,omitempty"`
 }
 
 // Progress records the completed init phases and what was learned on the way.
@@ -47,6 +49,7 @@ type Progress struct {
 	WGPublicKey string            `json:"wg_public_key,omitempty"`
 	SSHHostKeys []string          `json:"ssh_host_keys,omitempty"`
 	SecretsOut  string            `json:"secrets_out,omitempty"`
+	PublicIPv6  string            `json:"public_ipv6,omitempty"`
 }
 
 // Done reports whether phase completed.
