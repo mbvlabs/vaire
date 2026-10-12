@@ -62,6 +62,9 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Self-upgrade | `eru upgrade` keeps the previous binary next to it as `eru.prev`, and refuses to replace a binary installed by Homebrew or Nix |
 | Risky flags | A command can mark a single flag as changing or destroying something (for example `queries --reset`), so agents don't treat the plain read as dangerous |
 | `eru top` | Reads Postgres directly over the WireGuard tunnel rather than through the node |
+| Database ports on WireGuard | WireGuard peers can always reach 6432 and 5432. `expose_pgbouncer` / `expose_postgres` only control the public allowlist rules |
+| Generated secrets | Every secret eru generates goes into the secrets document, including the `pgbouncer_auth` and `eru_monitor` service passwords. The operator generates all database passwords; the node keeps only SCRAM verifiers, plus the two service passwords that PgBouncer and the exporters need at runtime |
+| DNS and certificates | In `acme` mode, `cluster init` shows the DNS records to create, waits for the operator to confirm them, and checks them against public resolvers. TLS never blocks on ACME: a placeholder certificate lets PostgreSQL and PgBouncer start, and a certificate that's still pending after 120 s is a warning, not a failure |
 
 **Still to decide** (when the phase that needs it starts):
 
@@ -77,7 +80,7 @@ The first goal is the **central command** node: one VPS that hosts the primary a
 | Transport | `golang.org/x/crypto/ssh` in-process; embedded userspace WireGuard (`wireguard-go` + netstack) in operator mode | Operator needs no root, no `wg` interface and no system SSH config |
 | Distribution | `install.sh` + cosign-signed manifest + sha256 for linux/darwin × amd64/arm64 | Copy of `deploycrate-ce/scripts/install.sh` and `build-release.sh`. Operator mode pushes the matching verified linux binary to nodes |
 | Secrets document | `age` passphrase-encrypted bundle (`filippo.io/age`, scrypt) | §5.3 |
-| Server OS | Debian 12 / 13, Ubuntu 24.04 / 26.04 LTS | Preflight refuses anything else |
+| Server OS | The latest Debian and Ubuntu LTS only: Debian 13, Ubuntu 26.04 | Preflight refuses anything else, including older releases. PGDG ships `postgresql-18` for both on amd64 and arm64 (checked 2026-10-11) |
 | PostgreSQL | PGDG apt repo (`apt.postgresql.org`), `postgresql-18`, managed via `postgresql-common` (`pg_createcluster`) | Data checksums are on by default in 18. Major version pinned with an apt hold |
 | DB backups | **pgBackRest** (S3 repo, PITR, full/diff/incr + block incremental, AES-256 repo encryption, async WAL archive, `verify`) | WAL-G fallback behind the interface |
 | VPS backups | **restic** to the same bucket (separate prefix, own encryption key) | Same tool deploycrate pins |
@@ -287,11 +290,11 @@ schema/eru-v1.json           agent JSON contract
 | 5 | ufw (WG UDP, 443, 6432/5432 to the allowlist and WireGuard), fail2ban (sshd plus a postgres auth-failure jail) | `ssh.sh`, `host.sh` |
 | 6 | journald limits, swap (small), unattended-upgrades for security updates only, with Postgres packages excluded | `host.sh` |
 | 7 | Kernel/sysctl for databases: `vm.swappiness=1`, `vm.overcommit_memory=2` + ratio, dirty bytes, THP off, huge pages sized to `shared_buffers`, limits | new |
-| 8 | PGDG repo + signing key, `postgresql-18`, `postgresql-contrib`, apt hold on major | new |
+| 8 | PGDG repo + signing key, `postgresql-18`, `postgresql-contrib`, `pgbouncer`, apt hold on major (`pgbackrest` arrives with step 14) | new |
 | 9 | Cluster create (`pg_createcluster 18 main`, data dir, locale `C.UTF-8`, ICU, checksums) | new |
 | 10 | Render managed conf.d, pg_hba and pg_ident; restart or reload depending on the diff | new |
 | 11 | Roles and databases (§6.3) | new |
-| 12 | Caddy install, ACME certificate, deploy hook copying certs to Postgres and PgBouncer and reloading them | new |
+| 12 | Caddy install, placeholder certificate, ACME certificate, and the `eru-certs-sync` path unit and timer that copy the certificate to Postgres and PgBouncer and reload them | new |
 | 13 | PgBouncer config, `auth_query` function, TLS | new |
 | 14 | pgBackRest: stanza create, `archive_mode`, check, first full backup | `backup.sh` (pattern) |
 | 15 | restic: VPS backup repo, include/exclude sets, first snapshot | `backup.sh` |
@@ -430,12 +433,13 @@ This section is the only place that tracks progress. Update it whenever a module
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
-### 7.1 Current state (2026-10-10)
+### 7.1 Current state (2026-10-11)
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
 - **Phase 1 (Bootstrap) is code complete but not done.** Every module below is built and passes `just lint` and the four cross-builds, and the local paths (login, contexts, first-contact host-key pinning and SSH auth errors, input checks) were exercised on a dev machine. Nothing has run against a real VPS yet, so the exit check has not passed. That manual run is the next task.
+- **Phase 2 (First cluster) is code complete but not done.** `internal/hostinfo`, `internal/tune`, `internal/catalog`, `internal/render`, `internal/pg`, `internal/state`, steps 7–13, the database phase of `cluster.bootstrap`, the `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` and `tune *` commands, and the database section of the secrets document are built. `just lint` and the four cross-builds pass. The VPS manual test in §7.5 has not run yet.
 - One open item from Phase 0: install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
-- About 18 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `cluster init` (host part, remote and `--local`, `--resume`), `plan`, `apply` (steps 1–6 only), `node rpc`, `node version`, `node selfcheck`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
+- About 30 of the ~65 commands do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `cluster init` (remote and `--local`, `--resume`), `plan`, `apply` (steps 1–13), `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-sync`, `node ssh-revert` and `node unlock-ssh`. The rest return `not implemented yet` until their phase lands.
 
 ### 7.2 Overview
 
@@ -443,7 +447,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | --- | --- | --- | --- |
 | 0 | Foundations | Install and self-upgrade the `eru` CLI; a node can run steps | ✅ |
 | 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | 🟡 code complete; VPS exit check pending |
-| 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | ⬜ |
+| 2 | First cluster | Set up a new server with a working PostgreSQL 18 cluster. **Manual testing starts here** | 🟡 code complete; VPS exit check pending |
 | 3 | Database backups & restore | Back up to S3/R2, PITR restore, drills, per-database backup policies | ⬜ |
 | 4 | VPS backups & disaster recovery | Rebuild a dead server on a fresh VPS from the secrets document | ⬜ |
 | 5 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
@@ -487,21 +491,21 @@ Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 su
 
 **Exit:** `eru cluster init --host root@<vps>` ends with public 22 closed, SSH working over WireGuard, and a secrets document that `eru login` accepts on a second machine. A broken tunnel during lockdown reverts by itself.
 
-### 7.5 Phase 2 — First cluster ⬜
+### 7.5 Phase 2 — First cluster 🟡
 
-`cluster init` now finishes with a usable database.
+`cluster init` now finishes with a usable database. Code complete; the VPS exit check below is pending.
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| `internal/config` | Strict `cluster.toml` schema, defaults and validation | ⬜ (Phase 1 subset with validation exists; decode is still lenient) |
-| `internal/hostinfo` | CPU, RAM, disk, kernel and OS detection | ⬜ (OS and RAM exist) |
-| `internal/tune` | Tuning calculator, `eru tune explain/apply` | ⬜ |
-| `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, Caddyfile | ⬜ |
-| `internal/pg`, `internal/state` | pgx admin client; desired-state store on the node | ⬜ |
-| Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, Caddy + ACME certificates, PgBouncer | ⬜ |
-| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs` | ⬜ (`plan` and `apply` work for steps 1–6) |
+| `internal/config` | Strict `cluster.toml` schema, defaults and validation; dotted-key `get`/`set` | 🟡 |
+| `internal/hostinfo` | CPU, RAM, disk, kernel and OS detection, public IPv4/IPv6 | 🟡 |
+| `internal/tune` | Tuning calculator; `eru tune explain/apply` | 🟡 |
+| `internal/render` | conf.d, pg_hba, pg_ident, pgbouncer.ini, Caddyfile, certs-sync units, unified `Diff` | 🟡 |
+| `internal/pg`, `internal/state` | pgx admin client (local psql + remote pgx), desired-state store | 🟡 |
+| Steps 7–13 | Kernel/sysctl, PGDG + PG18, cluster create, managed config, roles and databases, Caddy + ACME certificates, PgBouncer | 🟡 |
+| Commands | `plan`, `apply`, `config *`, `db *`, `sql`, `psql`, `tunnel`, `ssh`, `logs`, `tune *` | 🟡 |
 
-**Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused.
+**Manual test:** on a fresh VPS, run `cluster init`, then connect an app to `data.example.com:6432` with `sslmode=verify-full`. `eru sql --db app "select 1"` works. Re-running `eru apply` changes nothing, and `db drop` with only `--yes` is refused.
 
 ### 7.6 Phase 3 — Database backups & restore ⬜
 

@@ -1,0 +1,16 @@
+# managed by eru - do not edit; use cluster.toml
+listen_addresses = '*'
+port = 5432
+ssl = on
+ssl_cert_file = '/etc/eru/tls/server.crt'
+ssl_key_file = '/etc/eru/tls/server.key'
+ssl_min_protocol_version = 'TLSv1.2'
+password_encryption = 'scram-sha-256'
+allow_alter_system = off
+log_line_prefix = '%m [%p] %q%u@%d %h '
+log_connections = 'receipt,authentication,authorization'
+log_disconnections = on
+log_lock_waits = on
+log_temp_files = '10MB'
+log_checkpoints = on
+log_autovacuum_min_duration = '10s'

@@ -63,6 +63,18 @@ func runNodeSSHRevert(cmd *cobra.Command, _ []string) error {
 	return output.OK(cmd, res, message)
 }
 
+func runNodeRun(cmd *cobra.Command, args []string) error {
+	job := args[0]
+	if dryRun(cmd) {
+		return output.OK(cmd, map[string]any{"job": job, "dry_run": true}, "would run "+job)
+	}
+	data, err := node.RunJob(commandContext(cmd), job, nodeReporter(cmd))
+	if err != nil {
+		return err
+	}
+	return output.OK(cmd, data, "ran "+job)
+}
+
 func runNodeUnlockSSH(cmd *cobra.Command, _ []string) error {
 	minutes, err := cmd.Flags().GetInt("minutes")
 	if err != nil {

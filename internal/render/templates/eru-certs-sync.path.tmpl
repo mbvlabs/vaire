@@ -1,0 +1,7 @@
+# managed by eru - do not edit; use cluster.toml
+[Unit]
+Description=Watch Caddy's certificate store for eru
+[Path]
+PathChanged=/var/lib/caddy/.local/share/caddy/certificates
+[Install]
+WantedBy=paths.target

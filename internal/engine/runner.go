@@ -11,6 +11,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/eru/internal/render"
 	"github.com/mbvlabs/eru/internal/secrets"
 )
 
@@ -52,6 +53,14 @@ type PlanStep struct {
 	Action string `json:"action"`
 	Reason string `json:"reason"`
 	Detail string `json:"detail,omitempty"`
+	// Diffs are unified diffs of the managed files the step would rewrite.
+	Diffs []FileDiff `json:"diffs,omitempty"`
+}
+
+// FileDiff is one managed file's change, with secrets redacted.
+type FileDiff struct {
+	Path string `json:"path"`
+	Diff string `json:"diff"`
 }
 
 // PlanData is the plan result, also returned by apply with dry_run.
@@ -79,6 +88,9 @@ type ApplyData struct {
 	Total          int         `json:"total"`
 	RestartPending []string    `json:"restart_pending,omitempty"`
 	Restarted      bool        `json:"restarted"`
+	// RestartDowntimeMS is how long the database was unavailable during the
+	// aggregated restart.
+	RestartDowntimeMS int64 `json:"restart_downtime_ms,omitempty"`
 }
 
 type decision struct {
@@ -109,7 +121,15 @@ func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opt
 			action = "apply"
 			data.WouldApply++
 		}
-		data.Steps = append(data.Steps, PlanStep{ID: step.ID(), Index: i + 1, Action: action, Reason: d.reason, Detail: d.detail})
+		ps := PlanStep{ID: step.ID(), Index: i + 1, Action: action, Reason: d.reason, Detail: d.detail}
+		if r, ok := step.(FileRenderer); ok && d.apply {
+			for _, f := range r.RenderedFiles(cfg, rt) {
+				if diff := render.Diff(f.Path, f.Content); diff != "" {
+					ps.Diffs = append(ps.Diffs, FileDiff{Path: f.Path, Diff: secrets.Redact(diff)})
+				}
+			}
+		}
+		data.Steps = append(data.Steps, ps)
 	}
 	data.RestartPending = pendingIn(j, steps)
 	return data, nil
@@ -134,6 +154,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	report := opts.Report
 	total := len(selected)
 	data := ApplyData{Steps: make([]ApplyStep, 0, total), Total: total}
+	var warnings []output.Warning
 	for i, step := range selected {
 		id := step.ID()
 		index := i + 1
@@ -190,11 +211,11 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			return data, nil, err
 		}
 		report.emit(output.Event{Type: "step", Step: id, State: "completed", Index: intPtr(index), Total: intPtr(total), Detail: strings.Join(res.Notes, "; ")})
+		warnings = append(warnings, res.Warnings...)
 		data.Steps = append(data.Steps, ApplyStep{ID: id, Index: index, State: "completed", Restart: string(restart)})
 		data.Applied++
 	}
 
-	var warnings []output.Warning
 	pending := pendingIn(j, steps)
 	if len(pending) == 0 {
 		return data, nil, nil
@@ -215,7 +236,8 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		})
 		return data, warnings, nil
 	}
-	if err := opts.Restarter.Restart(ctx); err != nil {
+	downtime, err := opts.Restarter.Restart(ctx)
+	if err != nil {
 		return data, nil, output.WrapError(output.CodeStepFailed, fmt.Errorf("restart failed: %s", secrets.Redact(err.Error())), output.ExitStep,
 			"Inspect the run log, then re-run apply with the confirm token.").
 			WithDetails(map[string]any{"step": "restart", "error": secrets.Redact(err.Error()), "restart_pending": pending})
@@ -225,6 +247,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		return data, nil, err
 	}
 	data.Restarted = true
+	data.RestartDowntimeMS = downtime.Milliseconds()
 	return data, warnings, nil
 }
 

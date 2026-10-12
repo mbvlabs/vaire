@@ -1,0 +1,5 @@
+# managed by eru - do not edit; use cluster.toml
+[Service]
+LimitNOFILE=65536
+OOMScoreAdjust=-900
+Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj PG_OOM_ADJUST_VALUE=0

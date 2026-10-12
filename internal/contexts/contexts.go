@@ -38,6 +38,7 @@ type Context struct {
 	Name     string   `toml:"-" json:"name"`
 	Cluster  string   `toml:"cluster" json:"cluster"`
 	Domain   string   `toml:"domain,omitempty" json:"domain,omitempty"`
+	TLSMode  string   `toml:"tls_mode,omitempty" json:"tls_mode,omitempty"`
 	Nodes    []Node   `toml:"nodes" json:"nodes"`
 	Operator Operator `toml:"operator" json:"operator"`
 	// AutoUpgradeNodes installs the operator's build on a node that runs a
@@ -69,9 +70,10 @@ type Operator struct {
 }
 
 // Credentials is contexts/<name>/credentials.json: the secrets document's
-// values that are not key files. Phase 2 adds database and metrics roles.
+// values that are not key files.
 type Credentials struct {
-	SudoPassword string `json:"sudo_password,omitempty"`
+	SudoPassword string         `json:"sudo_password,omitempty"`
+	Database     *DatabaseCreds `json:"database,omitempty"`
 }
 
 // Primary returns the primary node.

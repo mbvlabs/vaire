@@ -1,0 +1,7 @@
+# managed by eru - do not edit; use cluster.toml
+[Unit]
+Description=eru certificate sync
+After=caddy.service postgresql.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eru node run certs-sync

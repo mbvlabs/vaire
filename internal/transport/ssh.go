@@ -142,6 +142,14 @@ func hostKeyMismatch(target SSHTarget, e *HostKeyError) *output.CLIError {
 	).WithDetails(map[string]any{"target": target.String(), "got": e.Got, "want": e.Want})
 }
 
+// SSH returns the underlying ssh.Client, for interactive sessions.
+func (c *SSHClient) SSH() *ssh.Client {
+	if c == nil {
+		return nil
+	}
+	return c.client
+}
+
 // Close closes the connection.
 func (c *SSHClient) Close() {
 	if c != nil && c.client != nil {

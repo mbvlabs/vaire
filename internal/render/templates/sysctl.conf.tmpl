@@ -1,0 +1,10 @@
+# managed by eru - do not edit; use cluster.toml
+vm.swappiness = 1
+vm.overcommit_memory = {{ if ge .RAMMiB 4096 }}2{{ else }}0{{ end }}
+{{ if ge .RAMMiB 4096 }}vm.overcommit_ratio = 90
+{{ end }}vm.dirty_background_bytes = 67108864
+vm.dirty_bytes = 536870912
+vm.nr_hugepages = {{ .HugePages }}
+kernel.sched_autogroup_enabled = 0
+net.core.somaxconn = 1024
+net.ipv4.tcp_keepalive_time = 300

@@ -269,7 +269,7 @@ func phase1Commands() []cmdSpec {
 		{
 			use:  "logs [unit]",
 			args: cobra.MaximumNArgs(1),
-			run:  notImplemented,
+			run:  runLogs,
 			flags: []fl{
 				flagString("since", "", "Journal window, such as 1h or a timestamp"),
 				flagBool("follow", "Stream new lines"),
@@ -285,7 +285,7 @@ func phase1Commands() []cmdSpec {
 		{
 			use:  "sql [query]",
 			args: cobra.MaximumNArgs(1),
-			run:  notImplemented,
+			run:  runSQL,
 			flags: []fl{
 				flagString("db", "", "Database name"),
 				flagString("file", "", "Read the query from a file"),
@@ -304,7 +304,7 @@ func phase1Commands() []cmdSpec {
 		},
 		{
 			use: "psql",
-			run: notImplemented,
+			run: runPsql,
 			flags: []fl{
 				flagString("db", "", "Database name"),
 				flagString("role", "ro", "Connect as ro, app, or admin"),
@@ -318,7 +318,7 @@ func phase1Commands() []cmdSpec {
 		},
 		{
 			use: "tunnel",
-			run: notImplemented,
+			run: runTunnel,
 			flags: []fl{
 				flagInt("local-port", 0, "Local listen port. 0 picks the default for the target"),
 				flagString("target", "pgbouncer", "Forward to pgbouncer or postgres"),
@@ -331,7 +331,7 @@ func phase1Commands() []cmdSpec {
 		},
 		{
 			use: "ssh",
-			run: notImplemented,
+			run: runSSH,
 			flags: []fl{
 				flagString("command", "", "Run one remote command instead of a shell"),
 			},
@@ -376,7 +376,7 @@ func phase1Commands() []cmdSpec {
 			},
 			children: []cmdSpec{{
 				use: "export",
-				run: notImplemented,
+				run: runSecretsExport,
 				flags: []fl{
 					flagString("out", "", "Output path for the age file"),
 					flagString("passphrase-out", "", "Write the new passphrase here, or - for stdout"),
@@ -560,6 +560,9 @@ func clusterCommands() cmdSpec {
 				flagString("answers", "", "Answers file in cluster.toml shape plus bootstrap credentials"),
 				flagString("name", "", "Cluster name"),
 				flagString("domain", "", "Client-facing FQDN"),
+				flagString("admin-user", "", "Admin login user created on the server (default eru)"),
+				flagString("timezone", "", "Server timezone (default UTC)"),
+				flagString("data-directory", "", "PostgreSQL data directory (default /var/lib/postgresql/18/main)"),
 				flagString("acme-email", "", "ACME account email"),
 				flagString("profile", "", "Workload profile: oltp, mixed, or analytics"),
 				flagInt("client-connections", 1000, "PgBouncer max client connections"),
@@ -584,6 +587,8 @@ func clusterCommands() cmdSpec {
 				flagString("secrets-out", "", "Where to write the age secrets document"),
 				flagString("passphrase-out", "", "Where to write the generated passphrase, or - for stdout"),
 				flagBool("confirm-secrets-stored", "Confirm the secrets document and passphrase were stored"),
+				flagBool("dns-ready", "Assert the DNS records already exist"),
+				flagBool("skip-dns-check", "Continue even if the DNS records do not resolve yet"),
 				flagBool("resume", "Continue an unfinished init"),
 			},
 			meta: CommandMeta{
@@ -602,7 +607,13 @@ func clusterCommands() cmdSpec {
 					"--name",
 					"--domain",
 					"--acme-email",
+					"--tls-mode",
+					"--admin-user",
+					"--timezone",
+					"--data-directory",
+					"--allow",
 					"--profile",
+					"--client-connections",
 					"--database",
 					"--backup-provider",
 					"--backup-bucket",
@@ -639,7 +650,7 @@ func configCommands() cmdSpec {
 		children: []cmdSpec{
 			{
 				use: "show",
-				run: notImplemented,
+				run: runConfigShow,
 				meta: CommandMeta{
 					Summary:   "Print cluster.toml",
 					WhenToUse: []string{"Read the desired state stored on the node."},
@@ -650,7 +661,7 @@ func configCommands() cmdSpec {
 			{
 				use:  "get <key>",
 				args: cobra.ExactArgs(1),
-				run:  notImplemented,
+				run:  runConfigGet,
 				meta: CommandMeta{
 					Summary:   "Print one cluster.toml value",
 					WhenToUse: []string{"Read a dotted key such as backup.vps.schedule."},
@@ -661,7 +672,7 @@ func configCommands() cmdSpec {
 			{
 				use:  "set <key> <value>",
 				args: cobra.ExactArgs(2),
-				run:  notImplemented,
+				run:  runConfigSet,
 				flags: []fl{
 					flagBool("apply", "Apply the change after writing it"),
 				},
@@ -678,7 +689,7 @@ func configCommands() cmdSpec {
 			},
 			{
 				use: "edit",
-				run: notImplemented,
+				run: runConfigEdit,
 				flags: []fl{
 					flagBool("apply", "Apply the configuration after the editor saves"),
 				},
@@ -696,7 +707,7 @@ func configCommands() cmdSpec {
 			},
 			{
 				use: "validate",
-				run: notImplemented,
+				run: runConfigValidate,
 				meta: CommandMeta{
 					Summary:   "Validate cluster.toml",
 					WhenToUse: []string{"Check names, schedules, CIDRs, and the extension catalog before apply."},
@@ -721,7 +732,7 @@ func dbCommands() cmdSpec {
 		children: []cmdSpec{
 			{
 				use: "list",
-				run: notImplemented,
+				run: runDBList,
 				meta: CommandMeta{
 					Summary:   "List application databases",
 					WhenToUse: []string{"See databases eru manages and their extensions."},
@@ -732,7 +743,7 @@ func dbCommands() cmdSpec {
 			{
 				use:  "create <name>",
 				args: cobra.ExactArgs(1),
-				run:  notImplemented,
+				run:  runDBCreate,
 				flags: []fl{
 					flagString("statement-timeout", "", "statement_timeout for the app role"),
 					flagStrings("extensions", "Extensions to create in the database"),
@@ -749,7 +760,7 @@ func dbCommands() cmdSpec {
 			{
 				use:  "drop <name>",
 				args: cobra.ExactArgs(1),
-				run:  confirmArgThen,
+				run:  runDBDrop,
 				meta: CommandMeta{
 					Summary:        "Drop a database and its roles after an incremental backup",
 					WhenToUse:      []string{"Remove an application database the human has approved dropping."},
@@ -864,7 +875,7 @@ func tuneCommands() cmdSpec {
 		children: []cmdSpec{
 			{
 				use: "show",
-				run: notImplemented,
+				run: runTuneShow,
 				meta: CommandMeta{
 					Summary:   "Print the calculated settings",
 					WhenToUse: []string{"See the values eru would write for this host."},
@@ -874,7 +885,7 @@ func tuneCommands() cmdSpec {
 			},
 			{
 				use: "explain",
-				run: notImplemented,
+				run: runTuneExplain,
 				meta: CommandMeta{
 					Summary:   "Print tuning inputs and the reason for each setting",
 					WhenToUse: []string{"Understand why a memory or WAL setting has its value."},
@@ -884,7 +895,7 @@ func tuneCommands() cmdSpec {
 			},
 			{
 				use: "apply",
-				run: notImplemented,
+				run: runTuneApply,
 				meta: CommandMeta{
 					Summary:        "Write calculated settings and restart when required",
 					WhenToUse:      []string{"Install tuning after a resize. A restart needs --confirm <cluster>/restart."},
@@ -1332,11 +1343,11 @@ func nodeCommands() cmdSpec {
 			{
 				use:  "run <job>",
 				args: cobra.ExactArgs(1),
-				run:  notImplemented,
+				run:  runNodeRun,
 				meta: CommandMeta{
 					Summary:        "Run one timer job",
-					WhenToUse:      []string{"systemd timers call this. Jobs include backup-full, restore-drill, and maint-daily."},
-					Examples:       []string{"sudo eru node run backup-full", "sudo eru node run metrics-refresh --dry-run"},
+					WhenToUse:      []string{"systemd timers call this. Phase 2 implements certs-sync; other jobs arrive later."},
+					Examples:       []string{"sudo eru node run certs-sync", "sudo eru node run metrics-refresh --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					LinuxOnly:      true,

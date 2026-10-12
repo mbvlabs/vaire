@@ -146,7 +146,7 @@ supported_server() {
   [ "${os}" = linux ] && [ -r /etc/os-release ] || return 1
   # shellcheck disable=SC1091
   case "$(. /etc/os-release && printf '%s-%s' "${ID:-}" "${VERSION_ID:-}")" in
-    debian-12 | debian-13 | ubuntu-24.04 | ubuntu-26.04) return 0 ;;
+    debian-13 | ubuntu-26.04) return 0 ;;
   esac
   return 1
 }

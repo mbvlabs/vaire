@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"time"
 
+	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/eru/internal/hostinfo"
+	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/mbvlabs/eru/internal/secrets"
 )
 
@@ -18,6 +22,18 @@ type Step interface {
 	Inputs(cfg config.Cluster, rt Runtime) ([]byte, error)
 	Check(ctx context.Context, cfg config.Cluster, rt Runtime) (CheckResult, error)
 	Apply(ctx context.Context, cfg config.Cluster, rt Runtime, report Reporter) (ApplyResult, error)
+}
+
+// RenderedFile is one file a step writes, for plan diffs.
+type RenderedFile struct {
+	Path    string
+	Content []byte
+}
+
+// FileRenderer is implemented by steps that write managed files, so plan can
+// show what would change on disk. Files holding secrets are left out.
+type FileRenderer interface {
+	RenderedFiles(cfg config.Cluster, rt Runtime) []RenderedFile
 }
 
 // CheckResult says whether the host already matches the step.
@@ -41,6 +57,8 @@ const (
 type ApplyResult struct {
 	Restart RestartNeed
 	Notes   []string
+	// Warnings are non-fatal notices a step surfaces to the caller.
+	Warnings []output.Warning
 }
 
 // Runtime is what a step may use while it runs.
@@ -53,13 +71,16 @@ type Runtime struct {
 	// registered with Secrets.
 	SecretValues map[string]string
 	Log          *RunLog
-	// Host hostinfo.Info and PG *pg.Local arrive in Phase 2.
+	// Host is the node's hardware description, filled once per request.
+	Host hostinfo.Info
+	// PG talks to the local PostgreSQL as the postgres OS user.
+	PG pg.Local
 }
 
-// Restarter performs the aggregated restart at the end of an apply. Phase 2
-// provides the PostgreSQL restarter.
+// Restarter performs the aggregated restart at the end of an apply and reports
+// how long the database was unavailable.
 type Restarter interface {
-	Restart(ctx context.Context) error
+	Restart(ctx context.Context) (time.Duration, error)
 }
 
 // IDPattern is the versioned step ID format, for example postgres-config-v1.

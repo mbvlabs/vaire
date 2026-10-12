@@ -22,12 +22,12 @@ type OS struct {
 
 // supported lists the server releases eru supports (§0.1).
 var supported = map[string][]string{
-	"debian": {"12", "13"},
-	"ubuntu": {"24.04", "26.04"},
+	"debian": {"13"},
+	"ubuntu": {"26.04"},
 }
 
 // SupportedList is the human-readable list of supported server releases.
-const SupportedList = "Debian 12, Debian 13, Ubuntu 24.04, Ubuntu 26.04"
+const SupportedList = "Debian 13, Ubuntu 26.04"
 
 // Supported reports whether o is a supported server release.
 func (o OS) Supported() bool {

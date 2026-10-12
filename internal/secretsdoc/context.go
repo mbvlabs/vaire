@@ -54,6 +54,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 		Name:    name,
 		Cluster: doc.Cluster.Name,
 		Domain:  doc.Cluster.Domain,
+		TLSMode: doc.Cluster.TLSMode,
 		Operator: contexts.Operator{
 			Name:      doc.Operator.Name,
 			WGAddress: doc.Operator.WGAddress,
@@ -103,7 +104,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 	if err := known.Save(); err != nil {
 		return nil, err
 	}
-	if err := contexts.SaveCredentials(name, contexts.Credentials{SudoPassword: doc.Operator.SudoPassword}); err != nil {
+	if err := contexts.SaveCredentials(name, contexts.Credentials{SudoPassword: doc.Operator.SudoPassword, Database: doc.Database}); err != nil {
 		return nil, err
 	}
 	if err := contexts.Save(ctx); err != nil {

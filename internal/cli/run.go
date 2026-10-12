@@ -55,28 +55,6 @@ func notImplemented(cmd *cobra.Command, _ []string) error {
 	)
 }
 
-func confirmArgThen(cmd *cobra.Command, args []string) error {
-	if !dryRun(cmd) {
-		if err := Confirm(cmd, args[0]); err != nil {
-			return err
-		}
-	}
-	return notImplemented(cmd, args)
-}
-
-func runDBCredentials(cmd *cobra.Command, args []string) error {
-	rotate := false
-	if flag := cmd.Flags().Lookup("rotate"); flag != nil && flag.Value.String() == "true" {
-		rotate = true
-	}
-	if rotate && !dryRun(cmd) {
-		if err := Confirm(cmd, args[0]); err != nil {
-			return err
-		}
-	}
-	return notImplemented(cmd, args)
-}
-
 func runVersion(cmd *cobra.Command, _ []string) error {
 	info := map[string]string{
 		"version":          buildinfo.Version,

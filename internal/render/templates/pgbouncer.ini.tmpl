@@ -1,0 +1,31 @@
+; managed by eru - do not edit; use cluster.toml
+[databases]
+* = host=/var/run/postgresql port=5432
+
+[pgbouncer]
+listen_addr = *
+listen_port = 6432
+unix_socket_dir = /var/run/postgresql
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+auth_user = pgbouncer_auth
+auth_dbname = postgres
+auth_query = SELECT usename, passwd FROM eru.pgbouncer_get_auth($1)
+pool_mode = transaction
+max_prepared_statements = 200
+max_client_conn = {{ .ClientConnections }}
+default_pool_size = {{ .DefaultPoolSize }}
+min_pool_size = 0
+reserve_pool_size = 5
+max_db_connections = {{ .MaxDBConnections }}
+server_reset_query =
+ignore_startup_parameters = extra_float_digits,search_path,options
+client_tls_sslmode = require
+client_tls_cert_file = /etc/eru/tls/server.crt
+client_tls_key_file = /etc/eru/tls/server.key
+client_tls_protocols = tlsv1.2,tlsv1.3
+server_tls_sslmode = disable
+admin_users = eru_admin
+stats_users = eru_monitor
+log_connections = 1
+log_disconnections = 1

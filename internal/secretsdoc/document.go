@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
 	"filippo.io/age"
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/contexts"
 )
 
 // Schema is the plaintext document schema.
@@ -35,14 +37,23 @@ type Document struct {
 	Database   *Database `json:"database,omitempty"`
 	Backup     *Backup   `json:"backup,omitempty"`
 	Metrics    *Metrics  `json:"metrics,omitempty"`
-	BreakGlass string    `json:"break_glass"`
+	// ConnectionNotes explains the database URLs when Database is set.
+	ConnectionNotes string `json:"connection_notes,omitempty"`
+	BreakGlass      string `json:"break_glass"`
 }
+
+// ConnectionNotes is the text stored next to the database URLs (§10.1).
+const ConnectionNotes = "The app URL goes through PgBouncer on port 6432 in transaction mode; use it for application traffic. " +
+	"The migrate URL connects straight to PostgreSQL on port 5432 for session features that migrations need. " +
+	"Port 5432 is reachable only over WireGuard (eru tunnel --target postgres) or when network.expose_postgres = true. " +
+	"pgbouncer_auth and eru_monitor under services are eru's own service roles; applications never use them."
 
 // Cluster is the cluster identity.
 type Cluster struct {
-	Name   string `json:"name"`
-	Domain string `json:"domain,omitempty"`
-	Stanza string `json:"stanza"`
+	Name    string `json:"name"`
+	Domain  string `json:"domain,omitempty"`
+	Stanza  string `json:"stanza"`
+	TLSMode string `json:"tls_mode,omitempty"`
 }
 
 // Node is one node and its pinned identity.
@@ -66,23 +77,32 @@ type Operator struct {
 	SudoPassword  string `json:"sudo_password"`
 }
 
-// Database holds database credentials (Phase 2).
-type Database struct {
-	Admin     Role       `json:"admin"`
-	Databases []DBSecret `json:"databases"`
-}
+// Database holds database credentials (D4). It is the same shape the operator
+// context stores.
+type Database = contexts.DatabaseCreds
 
 // Role is a user and password.
-type Role struct {
-	User     string `json:"user"`
-	Password string `json:"password"`
-}
+type Role = contexts.Role
 
-// DBSecret is one database's roles and URLs (Phase 2).
-type DBSecret struct {
-	Name  string            `json:"name"`
-	Roles map[string]Role   `json:"roles"`
-	URLs  map[string]string `json:"urls"`
+// DBSecret is one database's roles and URLs.
+type DBSecret = contexts.DBSecret
+
+// DatabaseURLs builds the connection strings for one database (§10.1). The app
+// role uses PgBouncer on 6432; the migrate role connects straight to Postgres
+// on 5432, reachable only over WireGuard or when expose_postgres is set.
+func DatabaseURLs(domain, tlsMode, db string, roles map[string]contexts.Role) map[string]string {
+	query := "sslmode=verify-full&sslrootcert=system"
+	if tlsMode == "self-signed" {
+		query = "sslmode=require"
+	}
+	out := map[string]string{}
+	if r, ok := roles["app"]; ok {
+		out["app"] = fmt.Sprintf("postgres://%s:%s@%s:6432/%s?%s", r.User, r.Password, domain, db, query)
+	}
+	if r, ok := roles["migrate"]; ok {
+		out["migrate"] = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?%s", r.User, r.Password, domain, db, query)
+	}
+	return out
 }
 
 // Backup is the recovery kit (Phases 3 and 4).
@@ -116,15 +136,7 @@ type Metrics struct {
 func (d Document) SecretValues() []string {
 	out := []string{d.Operator.WGPrivateKey, d.Operator.SSHPrivateKey, d.Operator.SudoPassword}
 	if d.Database != nil {
-		out = append(out, d.Database.Admin.Password)
-		for _, db := range d.Database.Databases {
-			for _, r := range db.Roles {
-				out = append(out, r.Password)
-			}
-			for _, u := range db.URLs {
-				out = append(out, u)
-			}
-		}
+		out = append(out, d.Database.SecretValues()...)
 	}
 	if d.Backup != nil {
 		out = append(out, d.Backup.SecretAccessKey, d.Backup.PgBackRest.CipherPass, d.Backup.Restic.Password)

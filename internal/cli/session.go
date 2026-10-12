@@ -237,13 +237,9 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	lines := []string{fmt.Sprintf("%d of %d steps would apply on %s", data.WouldApply, data.Total, s.ctx.Name)}
-	for _, step := range data.Steps {
-		lines = append(lines, fmt.Sprintf("  %-5s %s (%s)", step.Action, step.ID, step.Reason))
-	}
 	return output.Success(cmd, output.Result{
 		Data:     data,
-		Message:  strings.Join(lines, "\n"),
+		Message:  planMessage(fmt.Sprintf("%d of %d steps would apply on %s", data.WouldApply, data.Total, s.ctx.Name), data, s.ctx.Name),
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
 }
@@ -260,11 +256,33 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	dry := dryRun(cmd)
+	// D7: top up any missing database secrets before apply.
+	cfg, _, err := remoteConfig(cmd, s, p)
+	if err != nil {
+		return err
+	}
+	creds, err := contexts.LoadCredentials(s.ctx.Name)
+	if err != nil {
+		return err
+	}
+	if creds.Database == nil {
+		creds.Database = &contexts.DatabaseCreds{}
+	}
+	secretValues, generated, err := ensureSecrets(cfg, creds.Database, cfg.Databases)
+	if err != nil {
+		return err
+	}
+	if generated {
+		if err := contexts.SaveCredentials(s.ctx.Name, creds); err != nil {
+			return err
+		}
+	}
 	var params any
 	if len(stepIDs) > 0 {
 		params = map[string][]string{"steps": stepIDs}
 	}
 	reply, err := s.node.Call(commandContext(cmd), "apply", params, remote.CallOptions{
+		Secrets: secretValues,
 		DryRun:  dry,
 		Confirm: stringFlag(cmd, "confirm"),
 		OnEvent: p.event,
@@ -272,7 +290,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	warnings := append(s.warnings, reply.Warnings...)
+	warnings := append(append(s.warnings, reply.Warnings...), staleWarning(generated)...)
 	if dry {
 		var data engine.PlanData
 		if err := reply.Decode(&data); err != nil {
@@ -280,7 +298,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		}
 		return output.Success(cmd, output.Result{
 			Data:     data,
-			Message:  fmt.Sprintf("dry run: %d of %d steps would apply", data.WouldApply, data.Total),
+			Message:  planMessage(fmt.Sprintf("dry run: %d of %d steps would apply", data.WouldApply, data.Total), data, s.ctx.Name),
 			Warnings: warnings,
 		})
 	}
@@ -288,9 +306,38 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+	message := fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total)
+	if data.Restarted {
+		message += fmt.Sprintf("; PostgreSQL restarted (%d ms unavailable)", data.RestartDowntimeMS)
+	}
+	var next []string
+	if len(data.RestartPending) > 0 {
+		message += "\nrestart pending for: " + strings.Join(data.RestartPending, ", ")
+		next = []string{"eru apply --confirm " + s.ctx.Name + "/restart"}
+	}
 	return output.Success(cmd, output.Result{
 		Data:     data,
-		Message:  fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total),
+		Message:  message,
 		Warnings: warnings,
+		Next:     next,
 	})
+}
+
+// planMessage renders a plan for humans: one line per step, the file diffs of
+// the steps that would apply, and any pending restart.
+func planMessage(header string, data engine.PlanData, cluster string) string {
+	lines := []string{header}
+	for _, step := range data.Steps {
+		lines = append(lines, fmt.Sprintf("  %-5s %s (%s)", step.Action, step.ID, step.Reason))
+	}
+	for _, step := range data.Steps {
+		for _, d := range step.Diffs {
+			lines = append(lines, "", strings.TrimRight(d.Diff, "\n"))
+		}
+	}
+	if len(data.RestartPending) > 0 {
+		lines = append(lines, "", "restart pending for: "+strings.Join(data.RestartPending, ", "),
+			"run eru apply --confirm "+cluster+"/restart to restart PostgreSQL")
+	}
+	return strings.Join(lines, "\n")
 }
