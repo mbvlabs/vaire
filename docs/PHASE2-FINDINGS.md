@@ -143,3 +143,5 @@ Fresh Ubuntu 26.04 rebuild, edge build from `58104a8`. The host phase and databa
     - Fixed: rows with `setting could not be applied` for a `postmaster` setting are skipped. Then `postgres -C max_connections` parses the files the way a starting server would, so an invalid value for a restart-only setting is still caught.
 - [x] **The rejection error didn't say what was rejected**
     - The errors were only in `details`, and the error box doesn't print them. Fixed: the message lists each problem as `file:line name: error`.
+- [x] **`postgres-roles-v1` always fails: `syntax error at or near "#"`** (blocker)
+    - Seen once the config fix let the run reach step 6. The cluster SQL in `internal/steps/postgres_roles.go` started with a `# managed by eru …` header, and `#` is not a SQL comment. Fixed: the header is `-- managed by eru …`.

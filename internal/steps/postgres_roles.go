@@ -125,7 +125,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	dbSet := stringSet(dbs)
 
 	var cluster strings.Builder
-	cluster.WriteString("# managed by eru - do not edit; use cluster.toml\n")
+	cluster.WriteString("-- managed by eru - do not edit; use cluster.toml\n")
 	if !roleSet["eru_admin"] {
 		v, err := roleVerifier(rt, SecretAdminPassword, "eru_admin", "")
 		if err != nil {
