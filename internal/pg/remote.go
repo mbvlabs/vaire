@@ -79,7 +79,9 @@ func (r *Remote) Close(ctx context.Context) {
 // Query runs sql and returns its rows. Non-row statements return an empty row
 // set with the command tag set.
 func (r *Remote) Query(ctx context.Context, sql string, args ...any) (*Result, error) {
-	rows, err := r.conn.Query(ctx, sql, args...)
+	// Text results for every column: RawValues would otherwise hold pgx's
+	// binary encoding (int4 1 is "\x00\x00\x00\x01").
+	rows, err := r.conn.Query(ctx, sql, append([]any{pgx.QueryResultFormats{pgx.TextFormatCode}}, args...)...)
 	if err != nil {
 		return nil, err
 	}

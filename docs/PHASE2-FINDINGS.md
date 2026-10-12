@@ -161,3 +161,6 @@ Fresh Ubuntu 26.04 rebuild, edge build from `58104a8`. The host phase and databa
     - Fixed: the webroot moved to `/var/lib/eru-acme`. On an existing server, `eru apply` re-runs `tls-v2` (the nginx config changed), which creates the directory and starts `eru-certs.service`.
 - [x] **`eru apply` (and `config get`/`plan`) always fails: "this node has no cluster.toml"** (blocker)
     - Seen on the first `eru apply` after init. `handleConfigGet` in `internal/node/config.go` read `state.FileStore{}.Path`, which is empty unless set (the default only comes from the unexported `path()`), so it read `""`. Fixed: it reads `state.Path`.
+- [x] **The ACME certificate is issued** (verified after the two certificate fixes): `eru sql --db app "select 1"` connects with `verify-full` against `database.mbvlabs.com`.
+- [x] **`eru sql` prints empty values for non-text columns**
+    - Seen: `select 1` printed the `?column?` header and an empty row. `pg.Remote.Query` used pgx's raw values, which are binary for types such as `int4`, so `1` arrived as `\x00\x00\x00\x01`. Fixed: the query asks for text results for every column.
