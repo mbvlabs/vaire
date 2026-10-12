@@ -35,7 +35,7 @@ eru cluster init --host root@203.0.113.10
 
 eru sql --db app "select now()"
 eru console app                # interactive usql session
-eru console app --role migrate # run DDL as the database owner
+eru console app --write        # run DDL as the database owner
 ```
 
 On another machine, `eru login` and paste the transfer bundle from the handoff.
@@ -124,16 +124,16 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
  <db>_owner   NOLOGIN, owns the database and every object in it
     ▲
     │ member, SET role = <db>_owner on login
- <db>_migrate   DDL: migrations              → :5432 (direct)
+ <db>_migrate   DDL: migrations              → :5432 (direct only; PgBouncer refuses it)
  <db>_app       SELECT/INSERT/UPDATE/DELETE  → :6432 (PgBouncer), statement_timeout
- <db>_ro        SELECT, read-only by default → eru sql, eru console default
+ <db>_ro        SELECT, read-only by default → :6432 (PgBouncer), reporting and read-only clients
 
  eru_admin        CREATEDB/CREATEROLE, not superuser (operator)
  pgbouncer_auth   may only call the auth_query function
  eru_monitor      pg_monitor
 ```
 
-Run migrations as `migrate` and the application as `app`. A compromised app can change data but can't drop or change the schema. Default privileges give `app` and `ro` access to every new table without extra grants.
+Run migrations as `migrate` and the application as `app`. PgBouncer refuses the `migrate` role: in transaction mode, advisory locks, session `SET` and temporary tables can land on a different connection, so migrations connect to PostgreSQL on 5432. From outside WireGuard, use `eru tunnel --target postgres` or set `expose_postgres = true`. A compromised app can change data but can't drop or change the schema. Default privileges give `app` and `ro` access to every new table without extra grants.
 
 ### Secrets
 
@@ -159,7 +159,7 @@ Run migrations as `migrate` and the application as `app`. A compromised app can 
    └──────────── userspace WireGuard ──▶ 10.42.0.1:5432
 ```
 
-`eru sql`, `eru psql` and `eru console` all connect over the tunnel and verify the certificate (`verify-full`). `eru sql` defaults to the read-only role and to a `READ ONLY` transaction unless `--write` is passed. `eru console` uses usql from PATH, or downloads a pinned release and checks its SHA-256.
+`eru sql`, `eru psql` and `eru console` all connect over the tunnel to 5432 and verify the certificate (`verify-full`). They log in as `eru_admin`, never as an application role, and are read-only unless `--write` is passed; with `--write` they act as `<db>_owner`, so new objects get the same owner and default grants as a migration. `eru tunnel --target postgres` forwards a local port to 5432, which is how a migration tool on your machine reaches the database as `<db>_migrate` without opening 5432 to the internet. `eru console` uses usql from PATH, or downloads a pinned release and checks its SHA-256.
 
 ## Tools used and installed
 

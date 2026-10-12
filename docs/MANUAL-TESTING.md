@@ -18,6 +18,8 @@ Checks that haven't been run on a real VPS yet. Phases 1 and 2 were marked done 
     - `eru db create scratch`, then `eru db drop scratch --yes`. Expected: refused, asking for the confirm token. `eru db drop scratch --confirm scratch` then drops it and warns `no_backup_before_drop`.
 - [ ] **`eru console`**
     - `eru console <db>` downloads usql when it's missing (checksum verified), opens a session over the tunnel, and `select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()` shows the read-only role and `ssl = t`. Ctrl-C cancels a running query without leaving the console.
+- [ ] **The migrate role is refused by PgBouncer**
+    - After `eru apply`, connect as `<db>_migrate` to 6432 from an allowlisted address. Expected: an authentication error. The same URL on 5432 through `eru tunnel --target postgres` connects, and `select current_user` shows `<db>_owner`. `<db>_app` on 6432 still connects. `eru console <db> --write` opens and `show role` is `<db>_owner`.
 - [ ] **Direct TLS on 443**
     - From an allowlisted address, connect with `sslnegotiation=direct` (PostgreSQL 17+ libpq or pgx 5.7+) to port 443. Expected: it reaches PgBouncer. Without `sslnegotiation=direct` it fails with "server refused TLS connection", and from a non-allowlisted address it's refused.
 

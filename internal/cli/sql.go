@@ -40,12 +40,14 @@ func adminCredentials(c *contexts.Context) (user, password string, err error) {
 
 // sessionOptions is the libpq options value for an eru_admin session on db:
 // read-only, or with write acting as the database's owner role so new objects
-// get the owner and its default privileges, like a migration.
+// get the owner and its default privileges, like a migration. It uses the
+// --name=value form: usql rewrites the URL into a key=value conninfo without
+// quoting, so a "-c name=value" value would be cut at the space.
 func sessionOptions(db string, write bool) string {
 	if write {
-		return "-c role=" + db + "_owner"
+		return "--role=" + db + "_owner"
 	}
-	return "-c default_transaction_read_only=on"
+	return "--default_transaction_read_only=on"
 }
 
 // sqlQuery resolves the query from the argument, --file, or stdin.

@@ -84,9 +84,25 @@ func (postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.Ru
 			return incomplete("database " + db.Name + " is missing"), nil
 		}
 	}
-	fn, err := queryColumn(ctx, rt, "postgres", "SELECT proname FROM pg_proc WHERE proname = 'pgbouncer_get_auth'")
+	if !roleSet[RoleDirectOnly] {
+		return incomplete("role " + RoleDirectOnly + " is missing"), nil
+	}
+	fn, err := queryColumn(ctx, rt, "postgres", "SELECT prosrc FROM pg_proc WHERE proname = 'pgbouncer_get_auth'")
 	if err != nil || len(fn) == 0 {
 		return incomplete("eru.pgbouncer_get_auth is missing"), nil
+	}
+	if !strings.Contains(fn[0], RoleDirectOnly) {
+		return incomplete("eru.pgbouncer_get_auth does not refuse " + RoleDirectOnly), nil
+	}
+	direct, err := queryColumn(ctx, rt, "postgres", directOnlyMembersSQL)
+	if err != nil {
+		return incomplete("cannot read " + RoleDirectOnly + " members"), nil
+	}
+	directSet := stringSet(direct)
+	for _, db := range cfg.Databases {
+		if !directSet[db.Name+"_"+RoleMigrate] {
+			return incomplete("role " + db.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly), nil
+		}
 	}
 	for _, db := range cfg.Databases {
 		installed, err := queryColumn(ctx, rt, db.Name, "SELECT extname FROM pg_extension")
@@ -149,6 +165,9 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 		}
 		fmt.Fprintf(&cluster, "CREATE ROLE %s LOGIN PASSWORD '%s';\n", pg.Quote("pgbouncer_auth"), v)
 	}
+	if !roleSet[RoleDirectOnly] {
+		fmt.Fprintf(&cluster, "CREATE ROLE %s NOLOGIN;\n", RoleDirectOnly)
+	}
 	cluster.WriteString(pgbouncerAuthSQL)
 
 	for _, db := range cfg.Databases {
@@ -202,6 +221,7 @@ func databaseSQL(ctx context.Context, rt engine.Runtime, db config.Database, rol
 		}
 	}
 	fmt.Fprintf(&b, "ALTER ROLE %s SET role = '%s';\n", pg.Quote(db.Name+"_migrate"), owner)
+	fmt.Fprintf(&b, "GRANT %s TO %s;\n", RoleDirectOnly, pg.Quote(db.Name+"_migrate"))
 	fmt.Fprintf(&b, "ALTER ROLE %s SET statement_timeout = '%s';\n", pg.Quote(db.Name+"_app"), db.StatementTimeout)
 	fmt.Fprintf(&b, "ALTER ROLE %s SET default_transaction_read_only = on;\n", pg.Quote(db.Name+"_ro"))
 	if !dbSet[db.Name] {
@@ -235,6 +255,17 @@ func databaseGrantsSQL(db config.Database) string {
 	return b.String()
 }
 
+// RoleDirectOnly marks login roles that must connect to PostgreSQL directly:
+// PgBouncer's auth query returns nothing for its members, so they are refused
+// on 6432 and 443. Each <db>_migrate is a member, because migrations need
+// session features that transaction pooling breaks.
+const RoleDirectOnly = "eru_direct_only"
+
+// directOnlyMembersSQL lists the direct members of RoleDirectOnly.
+const directOnlyMembersSQL = `SELECT m.rolname FROM pg_auth_members a
+  JOIN pg_roles m ON m.oid = a.member JOIN pg_roles g ON g.oid = a.roleid
+  WHERE g.rolname = '` + RoleDirectOnly + `'`
+
 // pgbouncerAuthSQL is the SECURITY DEFINER function and its grants (§14.2).
 const pgbouncerAuthSQL = `CREATE SCHEMA IF NOT EXISTS eru AUTHORIZATION postgres;
 CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
@@ -242,6 +273,7 @@ CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
   SELECT usename, passwd FROM pg_shadow
   WHERE usename = p_usename AND NOT usesuper
     AND usename NOT IN ('postgres','pgbouncer_auth','eru_monitor')
+    AND NOT pg_has_role(usename, '` + RoleDirectOnly + `', 'MEMBER')
 $eru$;
 REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth(text) FROM PUBLIC;
 GRANT USAGE ON SCHEMA eru TO pgbouncer_auth;

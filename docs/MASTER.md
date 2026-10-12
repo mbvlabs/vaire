@@ -320,7 +320,7 @@ schema/eru-v1.json           agent JSON contract
 - TLS everywhere: `ssl = on`, `ssl_min_protocol_version = TLSv1.2` (1.3 optional), `hostssl` only in pg_hba for non-local, clients told to use `sslmode=verify-full`. PG18 `sslnegotiation=direct` is supported.
 - Auth: `password_encryption = scram-sha-256`, no md5 or trust over TCP, `peer` for local admin via pg_ident, and a terminal `reject` rule.
 - Network: public 5432/6432 is closed unless the allowlist opens it. Operators and agents reach the DB over WireGuard.
-- Roles: `postgres` superuser is local-socket only. A separate admin role (CREATEDB/CREATEROLE, not superuser) for operators. Per-database owner and app roles, a read-only role (the default for `eru sql`), `eru_monitor` (`pg_monitor`), `eru_backup`, `replicator` (Phase 10). `pgbouncer_auth` gets only the `auth_query` SECURITY DEFINER function.
+- Roles: `postgres` superuser is local-socket only. A separate admin role (CREATEDB/CREATEROLE, not superuser) for operators. Per-database owner, migrate and app roles (migrate connects to 5432 only; PgBouncer refuses it), a read-only role, `eru_monitor` (`pg_monitor`), `eru_backup`, `replicator` (Phase 10). `pgbouncer_auth` gets only the `auth_query` SECURITY DEFINER function.
 - Guardrails: `idle_in_transaction_session_timeout`, per-role `statement_timeout` defaults, `allow_alter_system = off`, `REVOKE` on `public` schema / database `CONNECT` from `PUBLIC`.
 - Logging: PG18 `log_connections` aspects, `log_disconnections`, `log_lock_waits`, `log_temp_files`, `log_checkpoints`, `log_autovacuum_min_duration`, `log_min_duration_statement` per profile. Optional `pgaudit`.
 - Host: SSH only on wg0, fail2ban jail on Postgres auth failures, systemd sandboxing overrides where safe.

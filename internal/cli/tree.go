@@ -328,7 +328,7 @@ func phase1Commands() []cmdSpec {
 				WhenToUse:     []string{"Explore a database interactively without installing psql. eru verifies the server certificate itself."},
 				WhenNotToUse:  []string{"Agents and scripts; use eru sql."},
 				Prerequisites: []string{"usql on PATH, or let eru download its pinned copy"},
-				Examples:      []string{"eru console app", "eru console app --role migrate"},
+				Examples:      []string{"eru console app", "eru console app --write"},
 			},
 		},
 		{
@@ -339,9 +339,12 @@ func phase1Commands() []cmdSpec {
 				flagString("target", "pgbouncer", "Forward to pgbouncer or postgres"),
 			},
 			meta: CommandMeta{
-				Summary:   "Forward a local port to PgBouncer or Postgres",
-				WhenToUse: []string{"Point a GUI or library at 127.0.0.1 through the tunnel."},
-				Examples:  []string{"eru tunnel", "eru tunnel --target postgres --local-port 6544"},
+				Summary: "Forward a local port to PgBouncer or Postgres",
+				WhenToUse: []string{
+					"Point a GUI or library at 127.0.0.1 through the tunnel.",
+					"Run migrations as <db>_migrate with --target postgres: PgBouncer refuses the migrate role, and 5432 is closed to the internet unless network.expose_postgres is set.",
+				},
+				Examples: []string{"eru tunnel", "eru tunnel --target postgres --local-port 6544"},
 			},
 		},
 		{
@@ -764,7 +767,7 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Create a database and its migrate, app, and read-only roles",
-					WhenToUse:      []string{"Add an application database and persist it in cluster.toml."},
+					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. The app and ro URLs use PgBouncer on 6432; the migrate URL uses PostgreSQL on 5432, and PgBouncer refuses the migrate role."},
 					Examples:       []string{"eru db create app --statement-timeout 60s", "eru db create app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
