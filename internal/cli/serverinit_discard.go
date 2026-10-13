@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// discardResult is the result of eru cluster init --discard.
+// discardResult is the result of eru server init --discard.
 type discardResult struct {
 	Cluster          string `json:"cluster"`
 	PendingPath      string `json:"pending_path"`

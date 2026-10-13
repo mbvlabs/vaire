@@ -1,6 +1,6 @@
 // Package contexts manages the operator's files under $XDG_CONFIG_HOME/eru
 // (§6.3): the current context, one directory of credentials per cluster, and
-// the pending state of an unfinished cluster init.
+// the pending state of an unfinished server init.
 package contexts
 
 import (

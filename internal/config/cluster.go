@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 
@@ -29,7 +30,7 @@ const (
 	DefaultAdminUser       = "eru"
 	DefaultSwapMB          = 1024
 	DefaultTimezone        = "UTC"
-	DefaultDataDirectory   = "/var/lib/postgresql/18/main"
+	DefaultDataRoot        = "/var/lib/postgresql/18"
 	RolePrimary            = "primary"
 )
 
@@ -84,11 +85,17 @@ type NodeSpec struct {
 	WGAddress     string `toml:"wg_address"`
 }
 
-// Server is [server].
+// Server is [server]. DataRoot holds one directory per PostgreSQL cluster.
 type Server struct {
-	AdminUser     string `toml:"admin_user"`
-	SwapMB        int    `toml:"swap_mb"`
-	DataDirectory string `toml:"data_directory"`
+	AdminUser string `toml:"admin_user"`
+	SwapMB    int    `toml:"swap_mb"`
+	DataRoot  string `toml:"data_root"`
+}
+
+// DataDirectory is the data directory of the one cluster, main, under
+// data_root. It goes when each database gets its own cluster.
+func (s Server) DataDirectory() string {
+	return path.Join(s.DataRoot, "main")
 }
 
 // Postgres is [postgres] with the [postgres.settings] override table.
@@ -185,7 +192,7 @@ func DefaultCluster() Cluster {
 		Timezone:  DefaultTimezone,
 		TLS:       TLS{Mode: "acme"},
 		Transport: Transport{Kind: "wireguard", Subnet: DefaultSubnet, ListenPort: DefaultListenPort},
-		Server:    Server{AdminUser: DefaultAdminUser, SwapMB: DefaultSwapMB, DataDirectory: DefaultDataDirectory},
+		Server:    Server{AdminUser: DefaultAdminUser, SwapMB: DefaultSwapMB, DataRoot: DefaultDataRoot},
 		Postgres: Postgres{
 			Version:           18,
 			Profile:           "oltp",
@@ -268,7 +275,7 @@ func LoadCluster(path string) (Cluster, error) {
 				output.CodeClusterNotInitialized,
 				"this node has no cluster.toml",
 				output.ExitContext,
-				"Initialise the cluster first with eru cluster init.",
+				"Initialise the cluster first with eru server init.",
 			).WithDetails(map[string]any{"path": path})
 		}
 		return Cluster{}, configError(path, err)
@@ -445,8 +452,8 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if c.Server.SwapMB < 0 || c.Server.SwapMB > 65536 {
 		add("server.swap_mb must be 0-65536")
 	}
-	if err := CheckDataDirectory(c.Server.DataDirectory); err != nil {
-		add("server.data_directory %v", err)
+	if err := CheckDataRoot(c.Server.DataRoot); err != nil {
+		add("server.data_root %v", err)
 	}
 	for _, cidr := range c.Network.ClientAllowlist {
 		if err := CheckAllowlistEntry(cidr); err != nil {

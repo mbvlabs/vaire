@@ -63,7 +63,7 @@ var laterPhaseFlags = []string{"vps-backup-schedule"}
 // tlsWaitTimeout bounds the wait for a real certificate (D10).
 const tlsWaitTimeout = 120 * time.Second
 
-// initRun is one cluster init: the answers, the pending state, and the
+// initRun is one server init: the answers, the pending state, and the
 // generated secrets.
 type initRun struct {
 	cmd      *cobra.Command
@@ -126,11 +126,11 @@ type initResult struct {
 	Next             []string `json:"next,omitempty"`
 }
 
-func runClusterInit(cmd *cobra.Command, args []string) error {
+func runServerInit(cmd *cobra.Command, args []string) error {
 	if flagChanged(cmd, "restore") || flagChanged(cmd, "restore-time") {
 		return output.NewError(
 			output.CodeError,
-			"eru cluster init --restore is not implemented yet",
+			"eru server init --restore is not implemented yet",
 			output.ExitGeneric,
 			"Disaster recovery from a secrets document arrives in Phase 7.",
 		)
@@ -173,7 +173,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 				output.CodePrecondition,
 				"an unfinished init for "+r.name+" exists",
 				output.ExitPrecondition,
-				"Continue it with eru cluster init --resume --name "+r.name+", or drop it with eru cluster init --discard --name "+r.name+".",
+				"Continue it with eru server init --resume --name "+r.name+", or drop it with eru server init --discard --name "+r.name+".",
 			).WithDetails(map[string]any{"reason": "init_pending", "cluster": r.name, "pending_path": contexts.PendingDir(r.name)})
 		}
 	}
@@ -188,7 +188,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 	if dryRun(cmd) {
 		return r, nil
 	}
-	if err := requireStructuredHandoff(cmd, "secrets-out", "cluster init", "confirm-secrets-stored"); err != nil {
+	if err := requireStructuredHandoff(cmd, "secrets-out", "server init", "confirm-secrets-stored"); err != nil {
 		return nil, err
 	}
 	if err := r.confirm(); err != nil {
@@ -214,7 +214,7 @@ func (r *initRun) confirm() error {
 		return err
 	}
 	if !ok {
-		return output.NewError(output.CodeUnsafeAction, "cluster init was not confirmed", output.ExitUnsafe, "Re-run with --confirm "+r.name+".").
+		return output.NewError(output.CodeUnsafeAction, "server init was not confirmed", output.ExitUnsafe, "Re-run with --confirm "+r.name+".").
 			WithDetails(map[string]any{"confirm_token": r.name})
 	}
 	return nil
@@ -235,7 +235,7 @@ func (r *initRun) collect() error {
 			return output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
 		}
 		if len(cfg.Databases) > 0 {
-			return output.NewError(output.CodeValidation, path+" declares [[databases]]: cluster init creates no databases", output.ExitConfig,
+			return output.NewError(output.CodeValidation, path+" declares [[databases]]: server init creates no databases", output.ExitConfig,
 				"Remove [[databases]] from the answers file and add each database after init with eru db create <name>.")
 		}
 		_, r.boot, err = decodeBootstrap(raw)
@@ -255,8 +255,8 @@ func (r *initRun) collect() error {
 	if v := stringFlag(cmd, "timezone"); v != "" {
 		cfg.Timezone = v
 	}
-	if v := stringFlag(cmd, "data-directory"); v != "" {
-		cfg.Server.DataDirectory = v
+	if v := stringFlag(cmd, "data-root"); v != "" {
+		cfg.Server.DataRoot = v
 	}
 	if v := stringFlag(cmd, "acme-email"); v != "" {
 		cfg.ACMEEmail = v
@@ -297,7 +297,7 @@ func (r *initRun) collect() error {
 	}
 
 	if !r.local && r.boot.Host == "" {
-		if err := RequireFlag(cmd, false, "--host", "cluster init"); err != nil {
+		if err := RequireFlag(cmd, false, "--host", "server init"); err != nil {
 			return err
 		}
 		v, err := promptLine(cmd, "Server to bootstrap (user@host, or a Host from ~/.ssh/config)", "")
@@ -323,7 +323,7 @@ func (r *initRun) collect() error {
 		r.boot.Port = 22
 	}
 	if cfg.ClusterName == "" {
-		if err := RequireFlag(cmd, false, "--name", "cluster init"); err != nil {
+		if err := RequireFlag(cmd, false, "--name", "server init"); err != nil {
 			return err
 		}
 		v, err := promptLine(cmd, "Cluster name", "prod")
@@ -333,7 +333,7 @@ func (r *initRun) collect() error {
 		cfg.ClusterName = v
 	}
 	if !config.NamePattern.MatchString(cfg.ClusterName) {
-		return output.NewError(output.CodeValidation, "cluster name "+cfg.ClusterName+" must match "+config.NamePattern.String(), output.ExitConfig, "")
+		return output.NewError(output.CodeValidation, "server name "+cfg.ClusterName+" must match "+config.NamePattern.String(), output.ExitConfig, "")
 	}
 	r.name = cfg.ClusterName
 
@@ -466,7 +466,7 @@ func (r *initRun) loadPending() error {
 		switch len(pending) {
 		case 0:
 			return output.NewError(output.CodePrecondition, "there is no unfinished init to resume", output.ExitPrecondition,
-				"Start one with eru cluster init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
+				"Start one with eru server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 		case 1:
 			name = pending[0]
 		default:
@@ -476,7 +476,7 @@ func (r *initRun) loadPending() error {
 	}
 	if !contexts.PendingExists(name) {
 		return output.NewError(output.CodePrecondition, "there is no unfinished init for "+name, output.ExitPrecondition,
-			"Start one with eru cluster init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
+			"Start one with eru server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 	}
 	raw, boot, err := contexts.LoadAnswers(name)
 	if err != nil {
@@ -1195,7 +1195,7 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 		details["public_ssh"] = secrets.Redact(err.Error())
 		return output.NewError(output.CodeLockdownFailed,
 			"SSH over WireGuard did not work, and the node is not reachable over public SSH either", output.ExitLockdown,
-			"Use the provider console: run eru node ssh-revert as root, check ufw and wg0, then eru cluster init --resume.").WithDetails(details)
+			"Use the provider console: run eru node ssh-revert as root, check ufw and wg0, then eru server init --resume.").WithDetails(details)
 	}
 	defer client.Close()
 	n := &remote.Node{SSH: client, Operator: r.sec.OperatorName}
@@ -1209,7 +1209,7 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 	}
 	return output.NewError(output.CodeLockdownFailed,
 		"SSH over WireGuard did not work, so the node reverted to public SSH", output.ExitLockdown,
-		"Check that UDP "+strconv.Itoa(r.cfg.Transport.ListenPort)+" reaches the server (provider firewall, local network), then run eru cluster init --resume.").
+		"Check that UDP "+strconv.Itoa(r.cfg.Transport.ListenPort)+" reaches the server (provider firewall, local network), then run eru server init --resume.").
 		WithDetails(details)
 }
 
@@ -1297,7 +1297,7 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 }
 
 func runInitLocal(cmd *cobra.Command) error {
-	if handled, err := localenv.Escalate(cmd, "initialise a cluster on this server"); handled || err != nil {
+	if handled, err := localenv.Escalate(cmd, "initialise this server"); handled || err != nil {
 		return err
 	}
 	osInfo, err := hostinfo.ReadOS()
@@ -1307,8 +1307,8 @@ func runInitLocal(cmd *cobra.Command) error {
 	}
 	if self, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(self); err == nil && resolved != node.BinaryPath {
-			return output.NewError(output.CodePrecondition, "cluster init --local must run as "+node.BinaryPath, output.ExitPrecondition,
-				"Install eru with the install script as root (curl -fsSL <base>/install.sh | sudo bash), then run "+node.BinaryPath+" cluster init --local.").
+			return output.NewError(output.CodePrecondition, "server init --local must run as "+node.BinaryPath, output.ExitPrecondition,
+				"Install eru with the install script as root (curl -fsSL <base>/install.sh | sudo bash), then run "+node.BinaryPath+" server init --local.").
 				WithDetails(map[string]any{"reason": "binary_not_installed", "running": resolved})
 		}
 	}

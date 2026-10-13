@@ -252,9 +252,9 @@ func restoreSpace(ctx context.Context, cfg config.Cluster, db string, scratch bo
 	size := databaseSize(ctx, db)
 	var needs []backup.SpaceNeed
 	if scratch {
-		needs = append(needs, backup.SpaceNeed{Path: backup.ScratchRoot(cfg.Server.DataDirectory), Need: backup.ScratchNeed(size), Purpose: "the scratch restore of " + db})
+		needs = append(needs, backup.SpaceNeed{Path: backup.ScratchRoot(cfg.Server.DataDirectory()), Need: backup.ScratchNeed(size), Purpose: "the scratch restore of " + db})
 	}
-	needs = append(needs, backup.SpaceNeed{Path: cfg.Server.DataDirectory, Need: backup.ScratchNeed(size), Purpose: "the restored copy of " + db})
+	needs = append(needs, backup.SpaceNeed{Path: cfg.Server.DataDirectory(), Need: backup.ScratchNeed(size), Purpose: "the restored copy of " + db})
 	return backup.CheckSpace(needs)
 }
 
@@ -360,7 +360,7 @@ func finishLoad(ctx context.Context, target string, db config.Database) error {
 // loadFromScratch restores db at opts into a scratch instance and copies it
 // into target as owner. The scratch instance is removed afterwards.
 func loadFromScratch(ctx context.Context, env *jobEnv, opts backup.RestoreOptions, db, target, owner string) ([]string, error) {
-	scratch, err := backup.NewScratch(env.Cluster.Server.DataDirectory, env.ID, env.shell(), env.Job, env.Report)
+	scratch, err := backup.NewScratch(env.Cluster.Server.DataDirectory(), env.ID, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}

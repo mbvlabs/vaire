@@ -36,7 +36,7 @@ type bootstrapParams struct {
 	ClusterTOML string          `json:"cluster_toml"`
 	NodeName    string          `json:"node_name"`
 	Operator    config.Operator `json:"operator"`
-	// Local reports a `cluster init --local` run, so the failure hint can name
+	// Local reports a `server init --local` run, so the failure hint can name
 	// the matching resume command.
 	Local bool `json:"local,omitempty"`
 }
@@ -137,7 +137,7 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	host, _ := hostinfo.Detect(cfg.Server.DataDirectory)
+	host, _ := hostinfo.Detect(cfg.Server.DataDirectory())
 	return Result{Data: BootstrapResult{
 		Phase:       p.Phase,
 		Node:        spec.Name,
@@ -334,11 +334,11 @@ func handleConfirmSecrets(context.Context, *Env) (Result, error) {
 	return Result{Data: map[string]string{"secrets_confirmed_at": confirmedAt}}, nil
 }
 
-// initFailureHint is the step_failed hint during cluster init, where there is
+// initFailureHint is the step_failed hint during server init, where there is
 // no context yet for eru apply. local names the resume command for the mode
 // that started the init, so a remote init is not told to add --local.
 func initFailureHint(cluster string, local bool) string {
-	command := "eru cluster init --resume --name " + cluster
+	command := "eru server init --resume --name " + cluster
 	if local {
 		command += " --local"
 	}

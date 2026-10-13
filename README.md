@@ -10,7 +10,7 @@ From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu
 
 | Area | Commands |
 | --- | --- |
-| Setup | `eru cluster init` (remote over SSH, or `--local` on the server), `--resume` |
+| Setup | `eru server init` (remote over SSH, or `--local` on the server), `--resume` |
 | Access | `eru login`, `eru context list\|show\|use\|remove`, `eru ssh`, `eru tunnel` |
 | Desired state | `eru plan`, `eru apply`, `eru config show\|get\|set\|edit\|validate` |
 | Databases | `eru db list\|create\|drop\|credentials` |
@@ -31,7 +31,7 @@ Commands from later phases are already in the tree and return `not implemented y
 curl -fsSL https://eru.mbvlabs.com/install.sh | bash
 
 # Bootstrap a fresh server (provider root key or password for first contact)
-eru cluster init --host root@203.0.113.10
+eru server init --host root@203.0.113.10
 
 # eru asks a few questions, shows the DNS records to create, hardens the box,
 # closes public SSH, installs PostgreSQL, and ends with the secrets handoff.
@@ -142,7 +142,7 @@ Run migrations as `migrate` and the application as `app`. PgBouncer refuses the 
 
 - eru generates every password. You never type one in.
 - The server keeps only SCRAM verifiers, plus the two service passwords PgBouncer and the exporters need at runtime.
-- At the end of `cluster init`, eru prints the **secrets handoff** once:
+- At the end of `server init`, eru prints the **secrets handoff** once:
   - every secret in plain text, grouped for a password manager;
   - an ASCII-armored `age` transfer bundle (scrypt), with a generated passphrase.
 - You type `stored` to confirm you've saved it, and eru offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
@@ -180,7 +180,7 @@ Run migrations as `migrate` and the application as `app`. PgBouncer refuses the 
 
 - **pgBackRest underneath, databases on top.** PostgreSQL has one WAL stream for the whole cluster, so backups and point-in-time recovery are cluster-wide. Everything you do with them names one database: `backup list --db`, `restore <db>`, `db fork <db>`.
 - **Restore window.** Any database can be rewound to any second between just after the oldest backup and the last archived WAL, which is at most about a minute old. The nightly backup sets only make restores faster; the WAL fills the gaps between them. `retention_full` is the window in weeks (default 4), and retention is time-based, so extra full backups never shorten it.
-- **`eru backup setup`** probes the bucket from your machine, generates the repository cipher and an age key for dumps, turns on WAL archiving (one confirmed PostgreSQL restart), and takes the first full backup. The bucket keys, cipher and age identity form the **recovery kit**, which goes into the secrets handoff: run `eru secrets export` afterwards. Backups are optional during `cluster init`.
+- **`eru backup setup`** probes the bucket from your machine, generates the repository cipher and an age key for dumps, turns on WAL archiving (one confirmed PostgreSQL restart), and takes the first full backup. The bucket keys, cipher and age identity form the **recovery kit**, which goes into the secrets handoff: run `eru secrets export` afterwards. Backups are optional during `server init`.
 - **Restoring one database doesn't touch the others.** A restore never overwrites the live database: it builds a copy beside it, you check the copy, and only `promote` swaps it in.
 
 ```
@@ -258,7 +258,7 @@ Installed from the distribution's apt repositories unless noted. Steps install o
 | `pgbouncer` | PostgreSQL packages (PGDG) | Connection pooling on 6432 |
 | `nginx`, `libnginx-mod-stream`, `ssl-cert` | TLS step | ACME HTTP-01 on 80 and ALPN routing on 443; held with `apt-mark hold` |
 | `pgbackrest` (≥ 2.59.3) | PostgreSQL packages (PGDG) | Database backups, WAL archiving and restores; held with `apt-mark hold`. 2.59.3 is the floor because earlier releases have an encryption bug |
-| `eru` | `cluster init` / `--auto-upgrade-nodes` | The node binary at `/usr/local/bin/eru`, pushed from the operator and signature-checked |
+| `eru` | `server init` / `--auto-upgrade-nodes` | The node binary at `/usr/local/bin/eru`, pushed from the operator and signature-checked |
 
 No ACME client (certbot and the like) is installed: eru issues certificates itself. Later phases add restic (VPS backups) and the Prometheus exporters, each pinned.
 

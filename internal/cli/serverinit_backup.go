@@ -66,7 +66,7 @@ func (r *initRun) collectBackups(cfg *config.Cluster, answersRaw []byte) error {
 		return nil
 	}
 	fillPreset(&s)
-	if err := requireBackupSettings(cmd, initBackupFlags, s, "cluster init"); err != nil {
+	if err := requireBackupSettings(cmd, initBackupFlags, s, "server init"); err != nil {
 		return err
 	}
 	for key, value := range s.configKeys() {
@@ -100,7 +100,7 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 	}
 	s := r.backupSettings()
 	if s.Secret == "" {
-		return output.NewError(output.CodeInputRequired, "cluster init needs the bucket's secret key", output.ExitInput,
+		return output.NewError(output.CodeInputRequired, "server init needs the bucket's secret key", output.ExitInput,
 			"Pass --backup-secret-stdin or --backup-secret-file.").WithDetails(map[string]any{"flag": "--backup-secret-file"})
 	}
 	r.p.note("checking the bucket " + s.Bucket + " at " + s.Endpoint)

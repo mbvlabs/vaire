@@ -240,7 +240,7 @@ func decodeParams(raw json.RawMessage, v any) error {
 }
 
 func runtimeFor(env *Env, dryRun bool) engine.Runtime {
-	host, _ := hostinfo.Detect(env.Cluster.Server.DataDirectory)
+	host, _ := hostinfo.Detect(env.Cluster.Server.DataDirectory())
 	return engine.Runtime{
 		DryRun:       dryRun,
 		Shell:        engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},

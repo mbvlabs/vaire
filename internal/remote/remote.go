@@ -204,7 +204,7 @@ func errString(err error) string {
 }
 
 // Local runs methods in-process through the node dispatcher, for
-// cluster init --local. The process must be root.
+// server init --local. The process must be root.
 type Local struct {
 	Operator string
 }

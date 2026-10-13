@@ -167,7 +167,7 @@ func phase1Commands() []cmdSpec {
 			},
 		},
 		contextCommands(),
-		clusterCommands(),
+		serverCommands(),
 		{
 			use: "plan",
 			run: runPlan,
@@ -540,19 +540,19 @@ func contextCommands() cmdSpec {
 	}
 }
 
-func clusterCommands() cmdSpec {
+func serverCommands() cmdSpec {
 	return cmdSpec{
-		use: "cluster",
+		use: "server",
 		run: parentRun,
 		meta: CommandMeta{
-			Summary:   "Create a cluster",
-			WhenToUse: []string{"Bootstrap a new node or rebuild one from a transfer bundle."},
-			Examples:  []string{"eru cluster init --host root@203.0.113.10"},
+			Summary:   "Set up a server",
+			WhenToUse: []string{"Bootstrap a new server or rebuild one from a transfer bundle."},
+			Examples:  []string{"eru server init --host root@203.0.113.10"},
 			Remote:    true,
 		},
 		children: []cmdSpec{{
 			use: "init",
-			run: runClusterInit,
+			run: runServerInit,
 			flags: []fl{
 				flagString("host", "", "First-contact SSH target, user@host[:port] or a Host from ~/.ssh/config"),
 				flagString("identity", "", "SSH private key for first contact (default: ~/.ssh/config IdentityFile, ssh-agent, ~/.ssh/id_*)"),
@@ -560,11 +560,11 @@ func clusterCommands() cmdSpec {
 				flagString("host-key-fingerprint", "", "Expected SHA256 host key fingerprint"),
 				flagBool("accept-new-host-key", "Trust the server host key on first contact"),
 				flagString("answers", "", "Answers file in cluster.toml shape plus bootstrap credentials"),
-				flagString("name", "", "Cluster name"),
+				flagString("name", "", "Server name"),
 				flagString("domain", "", "Client-facing FQDN"),
 				flagString("admin-user", "", "Admin login user created on the server (default eru)"),
 				flagString("timezone", "", "Server timezone (default UTC)"),
-				flagString("data-directory", "", "PostgreSQL data directory (default /var/lib/postgresql/18/main)"),
+				flagString("data-root", "", "Directory holding the PostgreSQL data directories (default /var/lib/postgresql/18)"),
 				flagString("acme-email", "", "ACME account contact email (optional)"),
 				flagString("profile", "", "Workload profile: oltp, mixed, or analytics"),
 				flagInt("client-connections", 1000, "PgBouncer max client connections"),
@@ -581,8 +581,8 @@ func clusterCommands() cmdSpec {
 				flagString("db-full-schedule", "", "systemd OnCalendar for full database backups"),
 				flagString("db-diff-schedule", "", "systemd OnCalendar for differential database backups"),
 				flagString("tls-mode", "", "acme or self-signed"),
-				flagBool("local", "Initialise the cluster on this machine"),
-				flagString("restore", "", "Transfer bundle to rebuild a cluster from (a file, or - for stdin)"),
+				flagBool("local", "Initialise this machine as the server"),
+				flagString("restore", "", "Transfer bundle to rebuild a server from (a file, or - for stdin)"),
 				flagString("restore-time", "", "Point-in-time target for a disaster-recovery restore"),
 				flagString("secrets-out", "", "Also write the armored transfer bundle here (required without a terminal)"),
 				flagBool("reveal-passphrase", "Put the bundle passphrase in structured output (required without a terminal)"),
@@ -593,12 +593,12 @@ func clusterCommands() cmdSpec {
 				flagBool("discard", "Delete an unfinished init's local state (with --name)"),
 			},
 			meta: CommandMeta{
-				Summary:   "Bootstrap a cluster on a new server, locally, or from a backup",
+				Summary:   "Bootstrap a new server, this machine, or a rebuild from a backup",
 				WhenToUse: []string{"Turn a fresh Debian or Ubuntu server into the central command, or rebuild one from a transfer bundle."},
 				Examples: []string{
-					"eru cluster init --host root@203.0.113.10 --answers answers.toml --no-input --confirm prod",
-					"eru cluster init --local",
-					"eru cluster init --discard --name prod",
+					"eru server init --host root@203.0.113.10 --answers answers.toml --no-input --confirm prod",
+					"eru server init --local",
+					"eru server init --discard --name prod",
 				},
 				Mutating:       true,
 				SupportsDryRun: true,
@@ -612,7 +612,7 @@ func clusterCommands() cmdSpec {
 					"--tls-mode",
 					"--admin-user",
 					"--timezone",
-					"--data-directory",
+					"--data-root",
 					"--allow",
 					"--profile",
 					"--client-connections",
@@ -1090,7 +1090,7 @@ func restoreCommands() cmdSpec {
 			WhenToUse: []string{
 				"Restore one database to a time, the latest WAL, a backup set or a dump. It loads into <db>__restoring beside the live database, which keeps serving; inspect it, then promote (a few-second swap) or abort.",
 			},
-			WhenNotToUse: []string{"Do not use it to copy a database under a new name: use eru db fork. Rebuilding a whole server is cluster init --restore."},
+			WhenNotToUse: []string{"Do not use it to copy a database under a new name: use eru db fork. Rebuilding a whole server is server init --restore."},
 			Examples: []string{
 				"eru restore app --time 2026-10-09T12:00:00Z --confirm app/restore",
 				"eru restore app --time -15m --promote --confirm app/restore",

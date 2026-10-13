@@ -41,7 +41,7 @@ type Options struct {
 	// Report receives step and log events.
 	Report Reporter
 	// FailureHint replaces the step_failed hint, for callers that resume
-	// differently from apply (cluster init uses --resume).
+	// differently from apply (server init uses --resume).
 	FailureHint string
 }
 

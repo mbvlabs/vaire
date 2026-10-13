@@ -360,7 +360,7 @@ func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 }
 
 // jobDrill restores the whole cluster into a scratch directory (the path
-// cluster init --restore relies on), opens every database, runs pg_amcheck,
+// server init --restore relies on), opens every database, runs pg_amcheck,
 // compares the database list with the live cluster and tears it down. A
 // drill never pushes WAL: the scratch instance runs with archive_mode off.
 func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
@@ -412,13 +412,13 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	for _, db := range live {
 		size += databaseSize(ctx, db)
 	}
-	if _, err := backup.CheckSpace([]backup.SpaceNeed{{Path: backup.ScratchRoot(cfg.Server.DataDirectory), Need: backup.ScratchNeed(size), Purpose: "the drill's scratch restore"}}); err != nil {
+	if _, err := backup.CheckSpace([]backup.SpaceNeed{{Path: backup.ScratchRoot(cfg.Server.DataDirectory()), Need: backup.ScratchNeed(size), Purpose: "the drill's scratch restore"}}); err != nil {
 		drill.Result, drill.Reason = backup.DrillSkipped, "insufficient_space"
 		record()
 		logLine(env.Report, env.Job, err.Error())
 		return drill, fmt.Errorf("%w: %s", errSkipped, err.Error())
 	}
-	scratch, err := backup.NewScratch(cfg.Server.DataDirectory, "drill-"+env.ID, env.shell(), env.Job, env.Report)
+	scratch, err := backup.NewScratch(cfg.Server.DataDirectory(), "drill-"+env.ID, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}

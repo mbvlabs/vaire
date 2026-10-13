@@ -15,7 +15,7 @@ set -euo pipefail
 if [ "${PHASE}" = "install" ]; then
   if dpkg-query -W -f='${Status}' caddy 2>/dev/null | grep -q 'install ok installed'; then
     printf 'caddy is installed: this server was set up by an older eru that used Caddy.\n' >&2
-    printf 'eru now serves TLS with nginx and does not migrate. Rebuild the server and run cluster init again.\n' >&2
+    printf 'eru now serves TLS with nginx and does not migrate. Rebuild the server and run server init again.\n' >&2
     exit 1
   fi
 

@@ -222,7 +222,7 @@ ORDER BY f.seqno`, nil)
 	if len(problems) == 0 {
 		if _, err := Probe(ctx, "runuser", "-u", "postgres", "--",
 			"/usr/lib/postgresql/"+strconv.Itoa(PGVersion)+"/bin/postgres",
-			"-D", cfg.Server.DataDirectory, "-c", "config_file="+PGConfDir+"/postgresql.conf", "-C", "max_connections"); err != nil {
+			"-D", cfg.Server.DataDirectory(), "-c", "config_file="+PGConfDir+"/postgresql.conf", "-C", "max_connections"); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
@@ -260,7 +260,7 @@ func restartPostgres(ctx context.Context, cfg config.Cluster, rt engine.Runtime,
 	}
 	res := tuningFor(cfg, rt.Host)
 	if hugePagesEnabled(res) {
-		hp, err := hugePagesFromKernel(ctx, cfg.Server.DataDirectory)
+		hp, err := hugePagesFromKernel(ctx, cfg.Server.DataDirectory())
 		if err == nil && hp > 0 {
 			hp = hp + hp/20
 			if err := writeFile(SysctlPath, string(render.SysctlConf(rt.Host, hp)), 0o644); err != nil {

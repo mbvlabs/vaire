@@ -29,7 +29,7 @@ func handleConfigGet(context.Context, *Env) (Result, error) {
 	raw, err := os.ReadFile(state.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run eru cluster init first.")
+			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run eru server init first.")
 		}
 		return Result{}, err
 	}
@@ -142,7 +142,7 @@ func handleConfigValidate(_ context.Context, env *Env) (Result, error) {
 	if p.TOML == "" {
 		file, err := os.ReadFile(state.Path)
 		if err != nil {
-			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run eru cluster init first.")
+			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run eru server init first.")
 		}
 		raw = file
 	}

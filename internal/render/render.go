@@ -259,7 +259,7 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 		"LocalRepo":     cfg.Backup.Database.LocalRepo,
 		"ProcessMax":    maxInt(1, host.VCPU/2),
 		"Stanza":        cfg.Name(),
-		"DataDirectory": cfg.Server.DataDirectory,
+		"DataDirectory": cfg.Server.DataDirectory(),
 	})
 }
 

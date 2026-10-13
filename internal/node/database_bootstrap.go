@@ -29,7 +29,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 			output.CodePrecondition,
 			"this server is not an eru node yet",
 			output.ExitPrecondition,
-			"Run the host phase first with eru cluster init.",
+			"Run the host phase first with eru server init.",
 		).WithDetails(map[string]any{"reason": "not_a_node"})
 	}
 	if nodeCfg.Cluster != cfg.Name() {
@@ -45,7 +45,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 			output.CodePrecondition,
 			"the host phase has not finished on this node",
 			output.ExitPrecondition,
-			"Re-run eru cluster init --resume.",
+			"Re-run eru server init --resume.",
 		).WithDetails(map[string]any{"reason": "host_phase_incomplete"})
 	}
 

@@ -18,7 +18,7 @@ type interviewAnswers struct {
 	Name              string
 	AdminUser         string
 	Timezone          string
-	DataDirectory     string
+	DataRoot          string
 	Domain            string
 	TLSMode           string
 	ACMEEmail         string
@@ -32,7 +32,7 @@ const (
 	qName              = "name"
 	qAdminUser         = "admin_user"
 	qTimezone          = "timezone"
-	qDataDirectory     = "data_directory"
+	qDataRoot          = "data_root"
 	qDomain            = "domain"
 	qTLSMode           = "tls_mode"
 	qACMEEmail         = "acme_email"
@@ -52,7 +52,7 @@ func suppliedAnswers(cmd *cobra.Command, cfg config.Cluster, fromFile bool) map[
 		qName:              cfg.ClusterName != "",
 		qAdminUser:         given("admin-user", cfg.Server.AdminUser != def.Server.AdminUser),
 		qTimezone:          given("timezone", cfg.Timezone != def.Timezone),
-		qDataDirectory:     given("data-directory", cfg.Server.DataDirectory != def.Server.DataDirectory),
+		qDataRoot:          given("data-root", cfg.Server.DataRoot != def.Server.DataRoot),
 		qDomain:            given("domain", cfg.Domain != ""),
 		qTLSMode:           given("tls-mode", cfg.TLS.Mode != def.TLS.Mode),
 		qACMEEmail:         given("acme-email", cfg.ACMEEmail != "") || cfg.TLS.Mode == "self-signed",
@@ -71,7 +71,7 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		Name:              cfg.ClusterName,
 		AdminUser:         cfg.Server.AdminUser,
 		Timezone:          cfg.Timezone,
-		DataDirectory:     cfg.Server.DataDirectory,
+		DataRoot:          cfg.Server.DataRoot,
 		Domain:            cfg.Domain,
 		TLSMode:           cfg.TLS.Mode,
 		ACMEEmail:         cfg.ACMEEmail,
@@ -85,10 +85,10 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		}
 	}
 	var server, endpoint, workload []huh.Field
-	ask(qName, huh.NewInput().Title("Cluster name").Validate(validateName).Value(&a.Name), &server)
+	ask(qName, huh.NewInput().Title("Server name").Validate(validateName).Value(&a.Name), &server)
 	ask(qAdminUser, huh.NewInput().Title("Admin user").Validate(optional(config.CheckAdminUser)).Value(&a.AdminUser), &server)
 	ask(qTimezone, huh.NewInput().Title("Timezone").Validate(optional(config.CheckTimezone)).Value(&a.Timezone), &server)
-	ask(qDataDirectory, huh.NewInput().Title("Data directory").Validate(optional(config.CheckDataDirectory)).Value(&a.DataDirectory), &server)
+	ask(qDataRoot, huh.NewInput().Title("Data root").Validate(optional(config.CheckDataRoot)).Value(&a.DataRoot), &server)
 	ask(qDomain, huh.NewInput().Title("Client-facing domain").Validate(validateDomain).Value(&a.Domain), &endpoint)
 	ask(qTLSMode, huh.NewSelect[string]().
 		Title("TLS mode").
@@ -139,7 +139,7 @@ func applyInterview(cfg *config.Cluster, a interviewAnswers) error {
 	setIf(&cfg.ClusterName, a.Name)
 	setIf(&cfg.Server.AdminUser, a.AdminUser)
 	setIf(&cfg.Timezone, a.Timezone)
-	setIf(&cfg.Server.DataDirectory, a.DataDirectory)
+	setIf(&cfg.Server.DataRoot, a.DataRoot)
 	setIf(&cfg.Domain, a.Domain)
 	setIf(&cfg.TLS.Mode, a.TLSMode)
 	setIf(&cfg.ACMEEmail, a.ACMEEmail)

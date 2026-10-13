@@ -28,8 +28,8 @@ func CheckTimezone(v string) error {
 	return nil
 }
 
-// CheckDataDirectory checks server.data_directory.
-func CheckDataDirectory(v string) error {
+// CheckDataRoot checks server.data_root.
+func CheckDataRoot(v string) error {
 	if !strings.HasPrefix(v, "/") {
 		return errors.New("must be absolute")
 	}

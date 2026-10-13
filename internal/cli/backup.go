@@ -39,7 +39,7 @@ type backupSettings struct {
 }
 
 // backupFlagNames maps the settings to flag names: eru backup setup uses
-// --provider, cluster init --backup-provider and its --db-*-schedule flags.
+// --provider, server init --backup-provider and its --db-*-schedule flags.
 type backupFlagNames struct {
 	Provider, Endpoint, Region, Bucket, Prefix, URIStyle, KeyID, SecretStdin, SecretFile string
 	FullSchedule, DiffSchedule, IncrSchedule, RetentionFull                              string

@@ -27,7 +27,7 @@ func BreakGlass(cluster, adminUser, publicAddress string) string {
 		"4. Fix WireGuard (`sudo systemctl status wg-quick@wg0`, `sudo wg show`, `sudo ufw status`), then check from your machine with `eru plan`.",
 		"5. Close public SSH early with `sudo eru node ssh-revert --lockdown-only`, or let the timer close it.",
 		"",
-		"Without console access, rebuild the server from backups with `eru cluster init --restore`.",
+		"Without console access, rebuild the server from backups with `eru server init --restore`.",
 		"",
 	}, "\n")
 }

@@ -142,7 +142,7 @@ func RequireTool(cmd *cobra.Command, tool Tool) error {
 	).WithDetails(map[string]any{"tool": tool.Name, "missing": missing, "install_command": line})
 }
 
-// CheckReachable dials addr over TCP once (§20.1, cluster init remote).
+// CheckReachable dials addr over TCP once (§20.1, server init remote).
 func CheckReachable(ctx context.Context, addr string, timeout time.Duration) error {
 	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", addr)
 	if err != nil {

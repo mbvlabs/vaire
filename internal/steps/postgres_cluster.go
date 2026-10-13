@@ -26,7 +26,7 @@ func (postgresCluster) RenderedFiles(config.Cluster, engine.Runtime) []engine.Re
 
 func (postgresCluster) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
 	return canonical(map[string]any{
-		"data_directory":  cfg.Server.DataDirectory,
+		"data_directory":  cfg.Server.DataDirectory(),
 		"locale_provider": cfg.Postgres.LocaleProvider,
 		"locale":          cfg.Postgres.Locale,
 		"dropin":          string(render.PGServiceDropin()),
@@ -54,8 +54,8 @@ func (postgresCluster) Check(ctx context.Context, cfg config.Cluster, _ engine.R
 	if !exists {
 		return incomplete("cluster 18/main does not exist"), nil
 	}
-	if datadir != cfg.Server.DataDirectory {
-		return incomplete("cluster 18/main uses " + datadir + ", not " + cfg.Server.DataDirectory), nil
+	if datadir != cfg.Server.DataDirectory() {
+		return incomplete("cluster 18/main uses " + datadir + ", not " + cfg.Server.DataDirectory()), nil
 	}
 	if status != "online" {
 		return incomplete("cluster 18/main is " + status), nil
@@ -65,19 +65,19 @@ func (postgresCluster) Check(ctx context.Context, cfg config.Cluster, _ engine.R
 
 func (s postgresCluster) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	_, datadir, exists := clusterRow(ctx)
-	if exists && datadir != cfg.Server.DataDirectory {
+	if exists && datadir != cfg.Server.DataDirectory() {
 		return engine.ApplyResult{}, output.NewError(
 			output.CodePrecondition,
 			"cluster 18/main already exists with data directory "+datadir,
 			output.ExitPrecondition,
-			"eru never re-creates an existing cluster. Move the data or pick the matching data_directory.",
-		).WithDetails(map[string]any{"reason": "cluster_datadir_mismatch", "existing": datadir, "wanted": cfg.Server.DataDirectory})
+			"eru never re-creates an existing cluster. Move the data or pick the matching data_root.",
+		).WithDetails(map[string]any{"reason": "cluster_datadir_mismatch", "existing": datadir, "wanted": cfg.Server.DataDirectory()})
 	}
 	if err := writeFile(PGServiceDropIn, string(render.PGServiceDropin()), 0o644); err != nil {
 		return engine.ApplyResult{}, err
 	}
 	err := rt.Shell.Run(ctx, s.ID(), Script("postgres-cluster"), map[string]string{
-		"DATA_DIR":        cfg.Server.DataDirectory,
+		"DATA_DIR":        cfg.Server.DataDirectory(),
 		"LOCALE_PROVIDER": cfg.Postgres.LocaleProvider,
 		"LOCALE":          cfg.Postgres.Locale,
 	}, report)
