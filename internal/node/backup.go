@@ -663,11 +663,11 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	return drill, nil
 }
 
-// diffList returns the entries of a not in b, skipping eru restore names.
+// diffList returns the entries of a not in b.
 func diffList(a, b []string) []string {
 	var out []string
 	for _, v := range a {
-		if !containsString(b, v) && !config.IsRestoreName(v) {
+		if !containsString(b, v) {
 			out = append(out, v)
 		}
 	}

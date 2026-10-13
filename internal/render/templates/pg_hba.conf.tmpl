@@ -1,7 +1,9 @@
 # managed by eru - do not edit; use cluster.toml
 # The cluster listens on its Unix socket only: clients arrive through the
-# poolers, and eru's own work runs on the node.
+# poolers, and eru's own work runs on the node. pg_basebackup copies a live
+# cluster into a temporary one over the replication line.
 local   all             postgres                                peer
+local   replication     postgres                                peer
 local   all             eru_monitor                             peer map=eru
 local   all             eru_admin                               peer map=eru
 local   postgres        pgbouncer_auth                          peer map=eru

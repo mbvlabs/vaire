@@ -35,6 +35,9 @@ type Driver interface {
 	// RestoreScratch restores into an empty directory that is not the live
 	// data directory, with WAL archiving off.
 	RestoreScratch(ctx context.Context, opts RestoreOptions) error
+	// Materialise restores into the empty data directory of a temporary
+	// cluster, pausing at the target or promoting there (RFC 10).
+	Materialise(ctx context.Context, opts RestoreOptions) error
 	// ArchiveStatus reads pg_stat_archiver on the live cluster.
 	ArchiveStatus(ctx context.Context) (ArchiveStatus, error)
 }
@@ -151,13 +154,16 @@ const (
 type RestoreOptions struct {
 	// Path is the empty data directory to restore into.
 	Path string
-	// Database limits the restore to one database; the others come back as
-	// zeroed sparse files. Empty restores everything (a drill).
-	Database string
 	// Kind is TargetLatest, TargetTime or TargetSet.
 	Kind string
 	// Time is the recovery target for TargetTime.
 	Time time.Time
 	// Set is the backup label for TargetSet.
 	Set string
+	// Pause keeps a materialised cluster paused in recovery at the target
+	// (a standby for TargetLatest) instead of promoting it.
+	Pause bool
+	// Timeline is the recovery target timeline; empty is pgBackRest's
+	// default, latest.
+	Timeline string
 }

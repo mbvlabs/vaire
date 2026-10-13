@@ -107,10 +107,13 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("dry run: would restore %s to %v beside the live database", db, data["target"]), Warnings: s.warnings})
 	}
 	var res struct {
-		Phase     string   `json:"phase"`
-		Restoring string   `json:"restoring"`
-		Warnings  []string `json:"warnings"`
-		Promoted  any      `json:"promoted"`
+		Phase         string   `json:"phase"`
+		Restoring     string   `json:"restoring"`
+		Warnings      []string `json:"warnings"`
+		PoolerWarning string   `json:"pooler_warning"`
+		Promoted      struct {
+			Warning *output.Warning `json:"warning"`
+		} `json:"promoted"`
 	}
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
@@ -118,12 +121,18 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	for _, w := range res.Warnings {
-		warnings = append(warnings, output.Warning{Code: "restore_load_errors", Message: w})
+		warnings = append(warnings, output.Warning{Code: "restore_dump_errors", Message: w})
+	}
+	if res.PoolerWarning != "" {
+		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: res.PoolerWarning})
+	}
+	if res.Promoted.Warning != nil {
+		warnings = append(warnings, *res.Promoted.Warning)
 	}
 	if res.Phase == "promoted" {
 		return output.Success(cmd, output.Result{
 			Data:     map[string]any{"job_id": jr.JobID, "result": res},
-			Message:  db + " is restored and promoted. The replaced copy is kept until eru restore cleanup " + db + "; eru restore undo " + db + " swaps it back.",
+			Message:  db + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until eru restore cleanup " + db + "; eru restore undo " + db + " swaps it back.",
 			Warnings: warnings,
 			Next:     []string{"eru restore undo " + db, "eru restore cleanup " + db},
 		})
@@ -131,7 +140,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"job_id": jr.JobID, "result": res},
 		Message: strings.Join([]string{
-			res.Restoring + " is ready beside the live " + db + ", which kept serving.",
+			"the temporary cluster " + res.Restoring + " is ready, paused at the target, beside the live " + db + ", which kept serving.",
 			"Inspect it with eru sql --db " + res.Restoring + " \"select ...\", then promote or abort.",
 		}, "\n"),
 		Warnings: warnings,
@@ -236,17 +245,17 @@ func restoreAction(cmd *cobra.Command, db, method, token, done string) error {
 func runRestorePromote(cmd *cobra.Command, args []string) error {
 	db := args[0]
 	return restoreAction(cmd, db, "restore.promote", db+"/restore",
-		db+" now holds the restored data. The previous copy is kept: eru restore undo "+db+" swaps it back, eru restore cleanup "+db+" drops it.")
+		db+" now holds the restored data, on a new timeline; a full backup is running. The previous data is kept as a stopped cluster: eru restore undo "+db+" swaps it back, eru restore cleanup "+db+" drops it.")
 }
 
 func runRestoreUndo(cmd *cobra.Command, args []string) error {
 	db := args[0]
-	return restoreAction(cmd, db, "restore.undo", db+"/restore", db+" is back to its copy from before the restore.")
+	return restoreAction(cmd, db, "restore.undo", db+"/restore", db+" is back to its data from before the restore, on its old timeline; a full backup is running.")
 }
 
 func runRestoreAbort(cmd *cobra.Command, args []string) error {
 	db := args[0]
-	return restoreAction(cmd, db, "restore.abort", "", "dropped "+db+"__restoring; the live "+db+" was never touched")
+	return restoreAction(cmd, db, "restore.abort", "", "dropped the temporary cluster "+db+"__restoring; the live "+db+" was never touched")
 }
 
 func runRestoreCleanup(cmd *cobra.Command, args []string) error {
@@ -296,7 +305,7 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	}
 	var res map[string]any
 	_ = reply.Decode(&res)
-	return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dropped %d leftover database(s) of %s", len(lines), db), Warnings: s.warnings})
+	return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dropped %d leftover cluster(s) of %s", len(lines), db), Warnings: s.warnings})
 }
 
 func runRestoreDrill(cmd *cobra.Command, _ []string) error {

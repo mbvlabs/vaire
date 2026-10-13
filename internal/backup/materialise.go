@@ -1,0 +1,545 @@
+package backup
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/pg"
+)
+
+// Layout of the clusters postgresql-common manages, as the materialised
+// cluster needs it. steps keeps the same paths for the live clusters.
+const (
+	pgConfRoot  = "/etc/postgresql/18"
+	pgSocketDir = "/var/run/postgresql"
+)
+
+// MaterialiseOverrides is the conf.d file that turns a copy of the source's
+// configuration into a temporary cluster's. It loads after eru's own files.
+const MaterialiseOverrides = "99-materialise.conf"
+
+// Materialised is a temporary cluster, 18/<name>, built from a live
+// cluster's stanza at a point in time or from the live cluster itself (RFC
+// 10): registered with postgresql-common under <data_root>/<name>, on a
+// port of the temporary range, with archiving off and hot_standby on. Its
+// configuration is a copy of the source's, so the hot-standby floors
+// (max_connections, max_worker_processes, max_wal_senders,
+// max_prepared_transactions, max_locks_per_transaction) are the source's,
+// and only the memory settings are made small.
+type Materialised struct {
+	// Name is the temporary cluster's name, for example app__restoring.
+	Name string
+	// Source is the live cluster it copies.
+	Source string
+	// SourcePort is the live cluster's socket port.
+	SourcePort int
+	// Port is the temporary cluster's port (RFC 8.2).
+	Port   int
+	Data   string
+	Shell  engine.Shell
+	StepID string
+	Report engine.Reporter
+}
+
+// NewMaterialised reserves a temporary port for cluster name under
+// dataRoot. Nothing is created until Restore or BaseBackup.
+func NewMaterialised(dataRoot, name, source string, sourcePort int, sh engine.Shell, stepID string, report engine.Reporter) (*Materialised, error) {
+	m := &Materialised{
+		Name: name, Source: source, SourcePort: sourcePort,
+		Data:  filepath.Join(dataRoot, name),
+		Shell: sh, StepID: stepID, Report: report,
+	}
+	if _, err := os.Stat(m.ConfDir()); err == nil {
+		return nil, output.NewError(output.CodePrecondition, "cluster 18/"+name+" already exists", output.ExitPrecondition,
+			"Drop what is left of it first.").WithDetails(map[string]any{"reason": "cluster_exists", "cluster": name})
+	}
+	if _, err := os.Stat(m.Data); err == nil {
+		return nil, output.NewError(output.CodePrecondition, m.Data+" already exists", output.ExitPrecondition,
+			"Remove what is left of an earlier cluster "+name+" first.").WithDetails(map[string]any{"reason": "cluster_exists", "cluster": name})
+	}
+	port, err := reserveTemporaryPort(name)
+	if err != nil {
+		return nil, err
+	}
+	m.Port = port
+	return m, nil
+}
+
+// ConfDir is the temporary cluster's configuration directory.
+func (m *Materialised) ConfDir() string { return filepath.Join(pgConfRoot, m.Name) }
+
+// PG is a SQL runner for the temporary cluster.
+func (m *Materialised) PG() pg.Local { return pg.Local{Host: pgSocketDir, Port: m.Port} }
+
+// Restore restores the source's stanza at opts into the data directory,
+// registers the cluster and starts it, then waits until recovery has paused
+// at the target (opts.Pause), or has promoted there.
+func (m *Materialised) Restore(ctx context.Context, d Driver, opts RestoreOptions) error {
+	if err := m.makeData(); err != nil {
+		return err
+	}
+	opts.Path = m.Data
+	m.log("restoring " + m.Source + "'s stanza into " + m.Data)
+	if err := d.Materialise(ctx, opts); err != nil {
+		return err
+	}
+	if err := m.register(); err != nil {
+		return err
+	}
+	switch {
+	case !opts.Pause:
+		return m.start(ctx, UntilPromoted)
+	case opts.Kind == TargetLatest || opts.Kind == "":
+		return m.start(ctx, UntilOpen)
+	default:
+		return m.start(ctx, UntilPaused)
+	}
+}
+
+// BaseBackup copies the live source with pg_basebackup over its socket,
+// registers the cluster and starts it. The copy is consistent and writable:
+// it starts as a primary of its own, with archiving off.
+func (m *Materialised) BaseBackup(ctx context.Context) error {
+	if err := m.makeData(); err != nil {
+		return err
+	}
+	m.log("copying the live " + m.Source + " into " + m.Data)
+	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: []string{
+		"-u", "postgres", "--", pgBin + "/pg_basebackup", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "-U", "postgres",
+		"-D", m.Data, "-X", "stream", "-c", "fast", "--no-password",
+	}}, m.Report); err != nil {
+		return wrapTool("pg_basebackup of "+m.Source, err)
+	}
+	if err := m.register(); err != nil {
+		return err
+	}
+	return m.start(ctx, UntilOpen)
+}
+
+// makeData creates the empty data directory, owned by postgres.
+func (m *Materialised) makeData() error {
+	uid, gid, err := engine.ResolveIDs("postgres", "postgres")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(m.Data, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chown(m.Data, uid, gid); err != nil {
+		return err
+	}
+	return os.Chmod(m.Data, 0o700) //nolint:gosec // G302: a data directory; postgres needs to enter it.
+}
+
+// register writes /etc/postgresql/18/<name>: a postgresql.conf that points
+// at the data directory and the temporary port, the source's pg_hba,
+// pg_ident and conf.d, and the overrides that make it a temporary cluster.
+// start.conf is manual, so it never starts on its own at boot.
+func (m *Materialised) register() error {
+	src := filepath.Join(pgConfRoot, m.Source)
+	dir := m.ConfDir()
+	files := map[string]string{
+		"postgresql.conf": strings.Join([]string{
+			"# eru temporary cluster " + m.Name + ", materialised from " + m.Source + "; dropped when eru is done with it",
+			"data_directory = '" + m.Data + "'",
+			"hba_file = '" + filepath.Join(dir, "pg_hba.conf") + "'",
+			"ident_file = '" + filepath.Join(dir, "pg_ident.conf") + "'",
+			"external_pid_file = '" + pgSocketDir + "/18-" + m.Name + ".pid'",
+			"port = " + strconv.Itoa(m.Port),
+			"unix_socket_directories = '" + pgSocketDir + "'",
+			"cluster_name = '18/" + m.Name + "'",
+			"include_dir = 'conf.d'",
+			"",
+		}, "\n"),
+		"start.conf": "manual\n",
+	}
+	for _, name := range []string{"pg_hba.conf", "pg_ident.conf", "pg_ctl.conf", "environment"} {
+		raw, err := os.ReadFile(filepath.Join(src, name)) //nolint:gosec // G304: the source cluster's own configuration.
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		files[name] = string(raw)
+	}
+	confD, err := os.ReadDir(filepath.Join(src, "conf.d"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, e := range confD {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") || e.Name() == MaterialiseOverrides {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(src, "conf.d", e.Name())) //nolint:gosec // G304: the source cluster's own configuration.
+		if err != nil {
+			return err
+		}
+		files[filepath.Join("conf.d", e.Name())] = string(raw)
+	}
+	files[filepath.Join("conf.d", MaterialiseOverrides)] = strings.Join([]string{
+		"# eru temporary cluster: no archiving, read-only recovery, small memory",
+		"port = " + strconv.Itoa(m.Port),
+		"listen_addresses = ''",
+		"archive_mode = off",
+		"hot_standby = on",
+		"shared_buffers = 128MB",
+		"effective_cache_size = 256MB",
+		"maintenance_work_mem = 64MB",
+		"huge_pages = off",
+		"",
+	}, "\n")
+	for _, d := range []string{dir, filepath.Join(dir, "conf.d")} {
+		if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // G301: postgresql-common's configuration directories are world-readable.
+			return err
+		}
+		uid, gid, err := engine.ResolveIDs("postgres", "postgres")
+		if err != nil {
+			return err
+		}
+		if err := os.Chown(d, uid, gid); err != nil {
+			return err
+		}
+	}
+	for name, content := range files {
+		if err := engine.WriteFileAtomicOwned(filepath.Join(dir, name), []byte(content), 0o640, "postgres", "postgres"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Wait conditions for start.
+const (
+	UntilOpen     = "open"
+	UntilPaused   = "paused"
+	UntilPromoted = "promoted"
+)
+
+// start starts the cluster and waits until it accepts connections and, for
+// UntilPaused, recovery has paused at the target, or for UntilPromoted, it
+// has left recovery.
+func (m *Materialised) start(ctx context.Context, until string) error {
+	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "pg_ctlcluster", Args: []string{"18", m.Name, "start"}}, m.Report); err != nil {
+		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("start the temporary cluster %s: %w", m.Name, err), output.ExitExternal,
+			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": m.LogTail(20)})
+	}
+	return waitCluster(ctx, m.Name, m.Data, m.Port, until, m.log)
+}
+
+// waitCluster waits until cluster name, with its data directory at data,
+// accepts connections on port and is where until says. A postmaster that
+// stops first returns its log tail: a time outside the restore window ends
+// recovery before its target.
+func waitCluster(ctx context.Context, name, data string, port int, until string, log func(string)) error {
+	deadline := time.Now().Add(scratchReadyWait)
+	lastNote := time.Now()
+	for {
+		if reached(ctx, port, until) {
+			return nil
+		}
+		if !dataRunning(ctx, data) {
+			return output.NewError(output.CodeExternalCommand, "the cluster "+name+" stopped during recovery", output.ExitExternal,
+				"Read details.log_tail. A time outside the restore window ends recovery before its target.").
+				WithDetails(map[string]any{"log_tail": clusterLogTail(name, 20)})
+		}
+		if time.Now().After(deadline) {
+			return errors.New("the cluster " + name + " did not reach its target within 24 hours")
+		}
+		if time.Since(lastNote) > time.Minute {
+			lastNote = time.Now()
+			log("recovery is still replaying WAL")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// reached reports whether the cluster on port is where waitCluster waits
+// for it.
+func reached(ctx context.Context, port int, until string) bool {
+	if runQuiet(ctx, "pg_isready", "-q", "-h", pgSocketDir, "-p", strconv.Itoa(port)) != nil {
+		return false
+	}
+	if until == UntilOpen {
+		return true
+	}
+	rows, err := (pg.Local{Host: pgSocketDir, Port: port}).Query(ctx, "postgres",
+		`SELECT pg_is_in_recovery()::text AS r, CASE WHEN pg_is_in_recovery() THEN pg_get_wal_replay_pause_state() ELSE '' END AS p`, nil)
+	if err != nil || len(rows) == 0 {
+		return false
+	}
+	if until == UntilPromoted {
+		return rows[0]["r"] == "false"
+	}
+	// A target recovery passed already promotes; that is reached too.
+	return rows[0]["p"] == "paused" || rows[0]["r"] == "false"
+}
+
+// Running reports whether the temporary cluster's postmaster is alive.
+func (m *Materialised) Running(ctx context.Context) bool { return dataRunning(ctx, m.Data) }
+
+// dataRunning reports whether a postmaster runs on the data directory.
+func dataRunning(ctx context.Context, data string) bool {
+	return runQuiet(ctx, "runuser", "-u", "postgres", "--", pgBin+"/pg_ctl", "-D", data, "status") == nil
+}
+
+func (m *Materialised) log(line string) {
+	if m.Report != nil {
+		m.Report(output.Event{Type: "log", Step: m.StepID, Line: line})
+	}
+}
+
+// LogTail returns the last n lines of the temporary cluster's log.
+func (m *Materialised) LogTail(n int) []string { return clusterLogTail(m.Name, n) }
+
+// clusterLogTail returns the last n lines of cluster name's
+// postgresql-common log.
+func clusterLogTail(name string, n int) []string {
+	raw, err := os.ReadFile("/var/log/postgresql/postgresql-18-" + name + ".log") //nolint:gosec // G304: a cluster eru named.
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
+// RecoveredTo is the commit time recovery replayed up to.
+func (m *Materialised) RecoveredTo(ctx context.Context) string {
+	rows, err := m.PG().Query(ctx, "postgres",
+		`SELECT coalesce(to_char(pg_last_xact_replay_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS t`, nil)
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	return rows[0]["t"]
+}
+
+// Stop stops the temporary cluster if it runs.
+func (m *Materialised) Stop(ctx context.Context) error {
+	if !m.Running(ctx) {
+		return nil
+	}
+	return wrapTool("stop the temporary cluster "+m.Name, m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "pg_ctlcluster", Args: []string{
+		"18", m.Name, "stop", "-m", "fast",
+	}}, m.Report))
+}
+
+// Drop tears the temporary cluster down. It runs with a context of its own,
+// so a cancelled job still cleans up.
+func (m *Materialised) Drop() error {
+	return DropTemporaryCluster(m.Shell, m.StepID, m.Report, m.Name, m.Data)
+}
+
+// DropTemporaryCluster stops and removes cluster name with pg_dropcluster,
+// or, when postgresql-common doesn't know it (a materialise that failed
+// before it was registered), removes its data and configuration
+// directories. Then it frees its port reservation. It runs with a context
+// of its own, so a cancelled job still cleans up.
+func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	var err error
+	if _, statErr := os.Stat(filepath.Join(pgConfRoot, name, "postgresql.conf")); statErr == nil {
+		err = wrapTool("pg_dropcluster "+name, sh.Exec(ctx, stepID, engine.Command{Name: "pg_dropcluster", Args: []string{"18", name, "--stop"}}, report))
+	}
+	if err == nil {
+		err = errors.Join(os.RemoveAll(data), os.RemoveAll(filepath.Join(pgConfRoot, name)))
+	}
+	_ = os.Remove(filepath.Join(TemporaryPortDir, name))
+	return err
+}
+
+// RestoringName is the temporary cluster a restore of db materialises into
+// (RFC 10.1).
+func RestoringName(db string) string { return db + "__restoring" }
+
+// PreRestoreName is the cluster a promote or undo leaves the replaced data
+// in: <db>__pre_restore_<UTC yyyymmddThhmmss>. Cluster names have no
+// 63-byte limit, so any database name fits.
+func PreRestoreName(db string, at time.Time) string {
+	return db + "__pre_restore_" + at.UTC().Format("20060102T150405")
+}
+
+// Initdb creates an empty cluster in the data directory, with the live
+// clusters' initdb options (data checksums, peer and SCRAM authentication,
+// the locale and its provider), registers it and starts it: the target of
+// a restore from a dump.
+func (m *Materialised) Initdb(ctx context.Context, provider, locale string) error {
+	if err := m.makeData(); err != nil {
+		return err
+	}
+	args := []string{"-u", "postgres", "--", pgBin + "/initdb", "-D", m.Data, "--data-checksums",
+		"--auth-local=peer", "--auth-host=scram-sha-256", "--locale=" + locale, "--locale-provider=" + provider}
+	switch provider {
+	case "builtin":
+		args = append(args, "--builtin-locale="+locale)
+	case "icu":
+		args = append(args, "--icu-locale="+locale)
+	}
+	m.log("creating an empty cluster in " + m.Data)
+	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: args}, m.Report); err != nil {
+		return wrapTool("initdb of "+m.Name, err)
+	}
+	// The registration in /etc/postgresql holds the configuration, as
+	// pg_createcluster leaves it.
+	for _, name := range []string{"postgresql.conf", "pg_hba.conf", "pg_ident.conf"} {
+		if err := os.Remove(filepath.Join(m.Data, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if err := m.register(); err != nil {
+		return err
+	}
+	return m.start(ctx, UntilOpen)
+}
+
+// CopyRoles copies every role of the live source into the temporary
+// cluster with pg_dumpall --roles-only: password verifiers, memberships and
+// per-role settings included, so credentials don't change. The output never
+// reaches the log: it carries the verifiers.
+func (m *Materialised) CopyRoles(ctx context.Context) error {
+	var buf bytes.Buffer
+	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: []string{
+		"-u", "postgres", "--", pgBin + "/pg_dumpall", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "--roles-only", "--no-password",
+	}, Stdout: &buf}, m.Report); err != nil {
+		return wrapTool("pg_dumpall --roles-only of "+m.Source, err)
+	}
+	// postgres exists already in a fresh cluster; its ALTER ROLE stays.
+	var sql strings.Builder
+	for _, line := range strings.SplitAfter(buf.String(), "\n") {
+		if strings.TrimSpace(line) != "CREATE ROLE postgres;" {
+			sql.WriteString(line)
+		}
+	}
+	m.log("copying the roles of " + m.Source)
+	return m.PG().Exec(ctx, "postgres", sql.String(), nil)
+}
+
+// Swap puts the data directory of cluster from (a stopped or running
+// temporary cluster, or a leftover) in the place of live cluster live's, in
+// a few seconds, and keeps live's old data directory as cluster aside on
+// port, stopped. Both clusters are stopped first; the caller starts live
+// again with StartCluster. Both directories are under dataRoot, one
+// filesystem, so the renames are atomic. The configuration in
+// /etc/postgresql/18/<live> (port, memory, archive_command, cgroup) stays
+// live's: only the data moves.
+func Swap(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, dataRoot, live, from, aside string, port int) error {
+	liveData, fromData, asideData := filepath.Join(dataRoot, live), filepath.Join(dataRoot, from), filepath.Join(dataRoot, aside)
+	if _, err := os.Stat(asideData); err == nil {
+		return output.NewError(output.CodePrecondition, asideData+" already exists", output.ExitPrecondition,
+			"Retry in a second; the name carries the time.").WithDetails(map[string]any{"reason": "cluster_exists", "cluster": aside})
+	}
+	if err := sh.Exec(ctx, stepID, engine.Command{Name: "systemctl", Args: []string{"stop", "postgresql@18-" + live}}, report); err != nil {
+		return wrapTool("stop "+live, err)
+	}
+	if dataRunning(ctx, fromData) {
+		if err := sh.Exec(ctx, stepID, engine.Command{Name: "pg_ctlcluster", Args: []string{"18", from, "stop", "-m", "fast"}}, report); err != nil {
+			return wrapTool("stop "+from, err)
+		}
+	}
+	if err := os.Rename(liveData, asideData); err != nil {
+		return err
+	}
+	if err := os.Rename(fromData, liveData); err != nil {
+		return errors.Join(err, os.Rename(asideData, liveData))
+	}
+	if err := repointAutoConf(liveData, fromData); err != nil {
+		return err
+	}
+	leftover := &Materialised{Name: aside, Source: live, Data: asideData, Port: port}
+	if err := leftover.register(); err != nil {
+		return err
+	}
+	_ = os.Rename(filepath.Join(TemporaryPortDir, from), filepath.Join(TemporaryPortDir, aside))
+	return os.RemoveAll(filepath.Join(pgConfRoot, from))
+}
+
+// repointAutoConf rewrites the old data directory's path in the moved data
+// directory's postgresql.auto.conf to the new one: pgBackRest's
+// restore_command carries --pg1-path, and archive-get reads pg_control
+// there.
+func repointAutoConf(data, oldData string) error {
+	path := filepath.Join(data, "postgresql.auto.conf")
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: a data directory eru moved.
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !bytes.Contains(raw, []byte(oldData)) {
+		return nil
+	}
+	return engine.WriteFileAtomicOwned(path, bytes.ReplaceAll(raw, []byte(oldData), []byte(data)), 0o600, "postgres", "postgres")
+}
+
+// StartCluster starts live cluster name through its systemd unit, so it
+// runs in its cgroup, and waits until it accepts connections on port and is
+// where until says (paused at a restore's target, or open).
+func StartCluster(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, name, data string, port int, until string) error {
+	if err := sh.Exec(ctx, stepID, engine.Command{Name: "systemctl", Args: []string{"start", "postgresql@18-" + name}}, report); err != nil {
+		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("start %s: %w", name, err), output.ExitExternal,
+			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": clusterLogTail(name, 20)})
+	}
+	return waitCluster(ctx, name, data, port, until, func(line string) {
+		if report != nil {
+			report(output.Event{Type: "log", Step: stepID, Line: line})
+		}
+	})
+}
+
+// recoverySettings are what pgBackRest writes into postgresql.auto.conf for
+// a restore. Promote removes them, so they don't travel with the data
+// directory into a later undo.
+var recoverySettings = []string{"restore_command", "recovery_target", "recovery_target_time", "recovery_target_action", "recovery_target_timeline"}
+
+// Promote ends recovery on the cluster at local with pg_promote(), which
+// opens it on a new timeline, then removes pgBackRest's recovery settings
+// and reloads. A cluster already out of recovery is only cleaned up.
+func Promote(ctx context.Context, local pg.Local) error {
+	if err := local.Exec(ctx, "postgres", "SELECT pg_promote() WHERE pg_is_in_recovery();\n", nil); err != nil {
+		return err
+	}
+	rows, err := local.Query(ctx, "postgres", "SELECT pg_is_in_recovery()::text AS r", nil)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 || rows[0]["r"] != "false" {
+		return errors.New("pg_promote() did not end recovery within 60 seconds")
+	}
+	var sql strings.Builder
+	for _, s := range recoverySettings {
+		sql.WriteString("ALTER SYSTEM RESET " + s + ";\n")
+	}
+	sql.WriteString("SELECT pg_reload_conf();\n")
+	return local.Exec(ctx, "postgres", sql.String(), nil)
+}
+
+// Timeline is the timeline the open cluster at local writes WAL on, read
+// from its current WAL file name, in decimal as --target-timeline takes it.
+func Timeline(ctx context.Context, local pg.Local) (string, error) {
+	rows, err := local.Query(ctx, "postgres", "SELECT substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8) AS t", nil)
+	if err != nil {
+		return "", err
+	}
+	if len(rows) == 0 {
+		return "", errors.New("the cluster returned no WAL position")
+	}
+	n, err := strconv.ParseInt(rows[0]["t"], 16, 64)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(n, 10), nil
+}

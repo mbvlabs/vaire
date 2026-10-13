@@ -98,10 +98,15 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 
 // listDatabases reads each [[clusters]] entry's database from its own
 // cluster. A cluster that is not up lists as not existing; a cluster
-// pg_lsclusters knows that cluster.toml doesn't is orphaned.
+// pg_lsclusters knows that cluster.toml doesn't is orphaned, unless a
+// restore owns it (<db>__restoring, or a <db>__pre_restore_<ts> leftover).
 func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	cfg := env.Cluster
 	live := steps.ClusterNames(ctx)
+	records, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]databaseInfo, 0, len(cfg.Clusters))
 	for _, spec := range cfg.Clusters {
 		info := databaseInfo{Name: spec.Name, InConfig: true, Node: spec.Node, Host: cfg.DatabaseHostname(spec.Name),
@@ -141,7 +146,7 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 		out = append(out, info)
 	}
 	for name := range live {
-		if config.DatabasePattern.MatchString(name) {
+		if config.DatabasePattern.MatchString(name) && !records.IsTemporary(name) {
 			out = append(out, databaseInfo{Name: name, Exists: true, State: stateOrphaned})
 		}
 	}
@@ -273,8 +278,6 @@ func stepDownSize(cfg config.Cluster, db *config.ClusterSpec, host hostinfo.Info
 	return &output.Warning{Code: "size_stepped_down", Message: message}
 }
 
-
-
 // reloadPoolers runs pgbouncer-v1, which renders an entry per database and
 // reloads the poolers (RFC 8.1). It skips itself once no database is left.
 func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
@@ -311,14 +314,6 @@ func existingDatabase(name string) error {
 		"Pick another name, or drop it first with eru db drop "+name+".").WithDetails(map[string]any{"reason": "database_exists", "database": name})
 }
 
-// databaseExists reports whether database name exists in db's cluster.
-func databaseExists(ctx context.Context, cfg config.Cluster, db, name string) (bool, error) {
-	local, err := clusterPG(cfg, db)
-	if err != nil {
-		return false, err
-	}
-	return databaseIn(ctx, local, name)
-}
 
 // databaseIn reports whether database name exists in the cluster at local.
 func databaseIn(ctx context.Context, local pg.Local, name string) (bool, error) {
@@ -388,6 +383,9 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 		if err := dropCluster(ctx, env, p.Name); err != nil {
 			return Result{}, err
 		}
+	}
+	if err := dropLeftovers(env, p.Name); err != nil {
+		return Result{}, err
 	}
 
 	kept := make([]config.ClusterSpec, 0, len(cfg.Clusters))
@@ -583,7 +581,7 @@ func checkDatabaseName(name string) error {
 	case "postgres", "template0", "template1":
 		return output.NewError(output.CodeValidation, "database "+name+" is a system database eru does not manage", output.ExitConfig, "")
 	}
-	return restoreNameRefusal(name)
+	return nil
 }
 
 // confirmRequired refuses a destructive request that carries no confirm token.

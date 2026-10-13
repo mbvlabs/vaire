@@ -243,8 +243,8 @@ func databaseSQL(ctx context.Context, rt engine.Runtime, db config.ClusterSpec, 
 }
 
 // DatabaseConnectSQL is the database-level access SQL for database target,
-// granted to the roles of roleDB, run in postgres. eru restore uses it for
-// <db>__restoring with the roles of <db>.
+// granted to the roles of roleDB, run in postgres. A restore from a dump
+// uses it for the database it loads into a new cluster.
 func DatabaseConnectSQL(target, roleDB string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "REVOKE ALL ON DATABASE %s FROM PUBLIC;\n", pg.Quote(target))
@@ -254,8 +254,8 @@ func DatabaseConnectSQL(target, roleDB string) string {
 }
 
 // DatabaseGrantsSQL is postgres-roles-v1's schema, default-privilege and
-// extension SQL for db, run inside the database it is for. eru restore and
-// eru db fork run it in the databases they load.
+// extension SQL for db, run inside the database it is for. A restore from a
+// dump and eru db fork run it in the databases they load.
 func DatabaseGrantsSQL(db config.ClusterSpec) string { return databaseGrantsSQL(db) }
 
 // databaseGrantsSQL is the schema and default-privilege SQL run inside db.
@@ -364,9 +364,7 @@ func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 func orphanedWarnings(spec config.ClusterSpec, dbs []string, roleSet map[string]bool) []output.Warning {
 	var warnings []output.Warning
 	for _, name := range dbs {
-		// eru restore's __restoring and __pre_restore_* copies are not
-		// orphans: restore promote, abort and cleanup own them.
-		if systemDatabases[name] || name == spec.Name || config.IsRestoreName(name) {
+		if systemDatabases[name] || name == spec.Name {
 			continue
 		}
 		if roleSet[name+"_owner"] {
@@ -411,3 +409,7 @@ func prefixed(name string, roles []string) []string {
 	}
 	return out
 }
+
+// AuthFunctionsSQL is the pooler auth functions and their grants, run in
+// postgres. A restore from a dump creates them in its new cluster.
+func AuthFunctionsSQL() string { return pgbouncerAuthSQL }

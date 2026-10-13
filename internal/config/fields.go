@@ -77,28 +77,12 @@ func CheckDatabaseName(v string) error {
 	case "postgres", "template0", "template1":
 		return errors.New("is reserved")
 	}
-	if strings.HasSuffix(v, RestoringSuffix) || strings.Contains(v, PreRestoreMarker) {
-		return errors.New("is reserved: names ending in " + RestoringSuffix + " or containing " + PreRestoreMarker + " belong to eru restore")
-	}
 	for _, suffix := range []string{"_owner", "_migrate", "_app", "_ro"} {
 		if len(v)+len(suffix) > 63 {
 			return errors.New("is too long: " + v + suffix + " would exceed 63 characters")
 		}
 	}
 	return nil
-}
-
-// Names eru restore gives the databases beside a live one: <db>__restoring
-// holds the restored copy until promote, and <db>__pre_restore_<ts> keeps the
-// replaced copy until cleanup.
-const (
-	RestoringSuffix  = "__restoring"
-	PreRestoreMarker = "__pre_restore_"
-)
-
-// IsRestoreName reports whether name is one of eru restore's databases.
-func IsRestoreName(name string) bool {
-	return strings.HasSuffix(name, RestoringSuffix) || strings.Contains(name, PreRestoreMarker)
 }
 
 // Providers are the backup provider presets.

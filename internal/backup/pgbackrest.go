@@ -296,9 +296,6 @@ func (p PgBackRest) StanzaDelete(ctx context.Context, pgPath string) error {
 // empty, so the delta=y meant for the live cluster is turned off.
 func (p PgBackRest) RestoreScratch(ctx context.Context, opts RestoreOptions) error {
 	args := []string{"--pg1-path=" + opts.Path, "--archive-mode=off", "--log-level-console=detail", "--no-delta", networkProcessMax}
-	if opts.Database != "" {
-		args = append(args, "--db-include="+opts.Database)
-	}
 	switch opts.Kind {
 	case TargetLatest, "":
 		args = append(args, "--type=default")
@@ -308,6 +305,40 @@ func (p PgBackRest) RestoreScratch(ctx context.Context, opts RestoreOptions) err
 		args = append(args, "--set="+opts.Set, "--type=immediate", "--target-action=promote")
 	default:
 		return fmt.Errorf("restore target %q is unknown", opts.Kind)
+	}
+	prog := newProgress("restore", p.Report)
+	return wrapTool("pgbackrest restore", p.run(ctx, nil, prog.line, append(args, "restore")...))
+}
+
+// Materialise restores the stanza into opts.Path for a temporary cluster
+// (RFC 10). It leaves archive_mode to the temporary cluster's own
+// configuration: pgBackRest's --archive-mode=off would write archive_mode
+// into postgresql.auto.conf, which moves with the data directory when a
+// restore is promoted and would stop archiving on the live cluster. With
+// opts.Pause recovery pauses at the target, or keeps following the archive
+// as a standby for the latest point; otherwise it promotes there.
+func (p PgBackRest) Materialise(ctx context.Context, opts RestoreOptions) error {
+	args := []string{"--pg1-path=" + opts.Path, "--log-level-console=detail", "--no-delta", networkProcessMax}
+	action := "--target-action=promote"
+	if opts.Pause {
+		action = "--target-action=pause"
+	}
+	switch opts.Kind {
+	case TargetLatest, "":
+		if opts.Pause {
+			args = append(args, "--type=standby")
+		} else {
+			args = append(args, "--type=default")
+		}
+	case TargetTime:
+		args = append(args, "--type=time", "--target="+PgTime(opts.Time), action)
+	case TargetSet:
+		args = append(args, "--set="+opts.Set, "--type=immediate", action)
+	default:
+		return fmt.Errorf("restore target %q is unknown", opts.Kind)
+	}
+	if opts.Timeline != "" {
+		args = append(args, "--target-timeline="+opts.Timeline)
 	}
 	prog := newProgress("restore", p.Report)
 	return wrapTool("pgbackrest restore", p.run(ctx, nil, prog.line, append(args, "restore")...))

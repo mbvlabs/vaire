@@ -170,6 +170,9 @@ func Ident(cfg config.Cluster) []byte {
 type PoolerDatabase struct {
 	Name string
 	Port int
+	// DBName is the database the entry opens when it differs from Name: a
+	// restore's <db>__restoring entry opens <db> in the temporary cluster.
+	DBName string
 	// MaxConnections is the entry's max_db_connections: the cluster's pool
 	// for this pooler.
 	MaxConnections int
@@ -250,11 +253,13 @@ func poolerEntries(dbs []PoolerDatabase) []PoolerDatabase {
 // (its eru_admin login has no entry of its own). The service passwords are
 // the same in every cluster (RFC 12), so the first database's alias serves.
 func adminAuthDB(dbs []PoolerDatabase) string {
-	entries := poolerEntries(dbs)
-	if len(entries) == 0 {
-		return ""
+	for _, db := range poolerEntries(dbs) {
+		// A restore's temporary entry goes away with the restore.
+		if db.DBName == "" {
+			return AuthAlias(db.Name)
+		}
 	}
-	return AuthAlias(entries[0].Name)
+	return ""
 }
 
 // PgbouncerUserlist renders /etc/pgbouncer/userlist.txt from SCRAM verifiers.

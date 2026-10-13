@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/render"
@@ -54,8 +55,34 @@ func poolerDatabases(cfg config.Cluster, session bool) []render.PoolerDatabase {
 		}
 		out = append(out, db)
 	}
+	if session {
+		out = append(out, restoreEntries(cfg)...)
+	}
 	return out
 }
+
+// restoreEntries route each ready restore's <db>__restoring to its
+// temporary cluster, where the database is still called <db>, so eru sql
+// --db <db>__restoring reaches the paused copy (RFC 10.1). Only the session
+// pooler has them; promote and abort reload it without them.
+func restoreEntries(cfg config.Cluster) []render.PoolerDatabase {
+	bs, err := backup.LoadRecords()
+	if err != nil {
+		return nil
+	}
+	var out []render.PoolerDatabase
+	for db, r := range bs.Restores {
+		if _, ok := cfg.ClusterByName(db); !ok || r.Phase != backup.PhaseReady || r.Port == 0 {
+			continue
+		}
+		out = append(out, render.PoolerDatabase{Name: backup.RestoringName(db), DBName: db, Port: r.Port, MaxConnections: restoreEntryPool})
+	}
+	return out
+}
+
+// restoreEntryPool caps the session pooler's connections to a restore's copy:
+// enough to inspect it.
+const restoreEntryPool = 5
 
 // pgbouncerFile is one file the step owns, apart from the userlist.
 type pgbouncerFile struct {

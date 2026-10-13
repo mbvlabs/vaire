@@ -1143,12 +1143,12 @@ func restoreCommands() cmdSpec {
 			flagBool("latest", "Restore to the newest archived WAL"),
 			flagString("set", "", "pgBackRest backup label"),
 			flagString("dump", "", "Long-retention dump id, for points older than the restore window"),
-			flagBool("promote", "Swap the restored copy in as soon as it is loaded"),
+			flagBool("promote", "Cut over to the restored copy as soon as it is ready"),
 		},
 		meta: CommandMeta{
 			Summary: "Rewind one database while the others keep serving",
 			WhenToUse: []string{
-				"Restore one database to a time, the latest WAL, a backup set or a dump. It loads into <db>__restoring beside the live database, which keeps serving; inspect it, then promote (a few-second swap) or abort.",
+				"Restore one database to a time, the latest WAL, a backup set or a dump. A physical restore of its stanza becomes the temporary cluster <db>__restoring, paused at the target, beside the live database, which keeps serving; inspect it with eru sql --db <db>__restoring, then promote (a cut-over in place, a few seconds plus the replay to the target) or abort. It needs free space for one copy of the database. A dump (for points older than the window) loads into a new cluster instead, which gets a new stanza on promote.",
 			},
 			WhenNotToUse: []string{"Do not use it to copy a database under a new name: use eru db fork. Rebuilding a whole server is server init --restore."},
 			Examples: []string{
@@ -1183,8 +1183,8 @@ func restoreCommands() cmdSpec {
 				args: cobra.ExactArgs(1),
 				run:  runRestorePromote,
 				meta: CommandMeta{
-					Summary:        "Swap the restored copy in for the live database",
-					WhenToUse:      []string{"After inspecting <db>__restoring: PgBouncer pauses, the databases swap names, PgBouncer resumes. Credentials don't change; the old copy is kept for undo."},
+					Summary:        "Cut the live database over to its restored copy",
+					WhenToUse:      []string{"After inspecting <db>__restoring: PgBouncer pauses the database, its cluster stops, the restored data directory takes the live one's place, and the cluster starts, reaches the target and opens on a new timeline, archiving to the same stanza; then a full backup starts. The URL and credentials don't change; the old data is kept as the stopped cluster <db>__pre_restore_<time> for undo."},
 					Examples:       []string{"eru restore promote app --confirm app/restore"},
 					Mutating:       true,
 					Destructive:    true,
@@ -1199,8 +1199,8 @@ func restoreCommands() cmdSpec {
 				args: cobra.ExactArgs(1),
 				run:  runRestoreUndo,
 				meta: CommandMeta{
-					Summary:        "Swap the copy from before the last promote back in",
-					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists."},
+					Summary:        "Swap the data from before the last promote back in",
+					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists. The old cluster resumes on its old timeline, eru records it so later restores follow it, and a full backup starts. After a restore from a dump it also takes the old stanza back."},
 					Examples:       []string{"eru restore undo app --confirm app/restore"},
 					Mutating:       true,
 					Destructive:    true,
@@ -1214,7 +1214,7 @@ func restoreCommands() cmdSpec {
 				args: cobra.ExactArgs(1),
 				run:  runRestoreAbort,
 				meta: CommandMeta{
-					Summary:        "Drop <db>__restoring; the live database was never touched",
+					Summary:        "Drop the temporary cluster <db>__restoring; the live database was never touched",
 					WhenToUse:      []string{"Throw away a restored copy you don't want, or clean up after a failed restore."},
 					Examples:       []string{"eru restore abort app"},
 					Mutating:       true,
@@ -1228,7 +1228,7 @@ func restoreCommands() cmdSpec {
 				run:  runRestoreCleanup,
 				meta: CommandMeta{
 					Summary:          "List restore leftovers, or drop those of one database",
-					WhenToUse:        []string{"Free the space of <db>__pre_restore_* copies once the restore is good. Without a database it only lists."},
+					WhenToUse:        []string{"Free the space of the stopped <db>__pre_restore_* clusters once the restore is good. Without a database it only lists."},
 					Examples:         []string{"eru restore cleanup", "eru restore cleanup app --confirm app/cleanup"},
 					Mutating:         true,
 					Destructive:      true,

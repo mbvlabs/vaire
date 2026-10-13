@@ -1,7 +1,7 @@
 ; managed by eru - do not edit; use cluster.toml
 [databases]
 {{- range .Databases }}
-{{ .Name }} = host=/var/run/postgresql port={{ .Port }} auth_dbname={{ .Name }}__auth max_db_connections={{ .MaxConnections }}
+{{ .Name }} = host=/var/run/postgresql port={{ .Port }}{{ if .DBName }} dbname={{ .DBName }}{{ end }} auth_dbname={{ .Name }}__auth max_db_connections={{ .MaxConnections }}
 {{ .Name }}__auth = host=/var/run/postgresql port={{ .Port }} dbname=postgres pool_size=2
 {{- end }}
 

@@ -72,28 +72,31 @@ func NewScratch(dataDirectory, id string, sh engine.Shell, stepID string, report
 			return nil, err
 		}
 	}
-	if s.Port, err = reserveTemporaryPort(root, s.Base); err != nil {
+	if s.Port, err = reserveTemporaryPort("scratch-" + id); err != nil {
 		_ = os.RemoveAll(s.Base)
 		return nil, err
 	}
 	return s, nil
 }
 
-// portFile records a scratch instance's port in its directory, so the next
-// allocation skips it before the instance has started. Remove frees it.
-const portFile = "port"
+// TemporaryPortDir holds one file per temporary cluster or scratch
+// instance, named after it, with the port it reserved: the next allocation
+// skips it before the cluster is registered or the instance has started.
+// It is on /run, so a reboot frees reservations whose cluster pg_lsclusters
+// lists anyway.
+const TemporaryPortDir = "/run/eru-ports"
 
 // reserveTemporaryPort picks the first free port of the temporary range and
-// records it in base. A port is taken when a cluster uses it, a socket lock
-// for it exists in the shared socket directory, or another scratch instance
-// recorded it. The allocation runs under a lock in root.
-func reserveTemporaryPort(root, base string) (int, error) {
+// records it for owner. A port is taken when a cluster uses it, a socket
+// lock for it exists in the shared socket directory, or another owner
+// reserved it. The allocation runs under a lock in TemporaryPortDir.
+func reserveTemporaryPort(owner string) (int, error) {
 	var port int
-	err := engine.WithFileLock(filepath.Join(root, "ports.lock"), func() error {
+	err := engine.WithFileLock(filepath.Join(TemporaryPortDir, "ports.lock"), func() error {
 		taken := clusterPorts()
-		dirs, _ := os.ReadDir(root)
-		for _, d := range dirs {
-			raw, err := os.ReadFile(filepath.Join(root, d.Name(), portFile)) //nolint:gosec // G304: eru's own scratch directories.
+		files, _ := os.ReadDir(TemporaryPortDir)
+		for _, f := range files {
+			raw, err := os.ReadFile(filepath.Join(TemporaryPortDir, f.Name())) //nolint:gosec // G304: eru's own reservations.
 			if err != nil {
 				continue
 			}
@@ -105,11 +108,11 @@ func reserveTemporaryPort(root, base string) (int, error) {
 			if taken[n] {
 				continue
 			}
-			if _, err := os.Stat(fmt.Sprintf("/var/run/postgresql/.s.PGSQL.%d.lock", n)); err == nil {
+			if _, err := os.Stat(fmt.Sprintf("%s/.s.PGSQL.%d.lock", pgSocketDir, n)); err == nil {
 				continue
 			}
 			port = n
-			return os.WriteFile(filepath.Join(base, portFile), []byte(strconv.Itoa(n)+"\n"), 0o600)
+			return os.WriteFile(filepath.Join(TemporaryPortDir, owner), []byte(strconv.Itoa(n)+"\n"), 0o600)
 		}
 		return output.NewError(output.CodePrecondition,
 			fmt.Sprintf("every temporary port (%d-%d) is in use", config.TemporaryPortMin, config.TemporaryPortMax), output.ExitPrecondition,
@@ -261,6 +264,7 @@ func (s *Scratch) Remove() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	stopErr := s.Stop(ctx)
+	_ = os.Remove(filepath.Join(TemporaryPortDir, "scratch-"+s.ID))
 	if err := os.RemoveAll(s.Base); err != nil {
 		return err
 	}

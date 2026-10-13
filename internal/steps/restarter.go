@@ -73,3 +73,11 @@ func runCmd(ctx context.Context, name string, args ...string) error {
 // Restarter returns the cluster restarter the runner calls for each cluster
 // with a confirmed pending restart.
 func Restarter(cfg config.Cluster) engine.Restarter { return postgresRestarter{cfg: cfg} }
+
+// PauseDatabase pauses db on the transaction pooler, so its clients wait
+// through a restore's cut-over instead of failing, and returns the RESUME.
+// A PAUSE that fails or times out doesn't stop the caller.
+func PauseDatabase(ctx context.Context, db string) (resume func()) {
+	_ = poolerAdmin(ctx, PgbouncerPort, "PAUSE "+db)
+	return func() { _ = poolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+db) }
+}

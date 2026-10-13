@@ -22,8 +22,7 @@ const maxDrills = 12
 
 // Records is /var/lib/eru/records.json: open restores per database, restore
 // leftovers, drills, the dropped stanzas and the last backup, verify and dump
-// results per database. Timeline switches join them with per-cluster
-// restores.
+// results per database, and the timelines restore undo went back to.
 type Records struct {
 	// Restores are the open restores, by database: one per database at a
 	// time. A record stays until promote or abort.
@@ -43,6 +42,29 @@ type Records struct {
 	// records it here; the stanza-expiry job deletes the stanza and the
 	// record once ExpiresAt has passed.
 	DroppedStanzas []DroppedStanza `json:"dropped_stanzas,omitempty"`
+	// Timelines are the timelines restore undo went back to, by database:
+	// the restored branch it left is newer, so pgBackRest's latest would
+	// follow it, and later restores of the stanza pass this timeline
+	// instead. A promote clears the database's entry.
+	Timelines map[string]TimelineSwitch `json:"timelines,omitempty"`
+}
+
+// TimelineSwitch is the timeline a database is on after restore undo.
+type TimelineSwitch struct {
+	Stanza     string `json:"stanza"`
+	Timeline   string `json:"timeline"`
+	SwitchedAt string `json:"switched_at"`
+	// Abandoned is the timeline of the restored branch undo left.
+	Abandoned string `json:"abandoned,omitempty"`
+}
+
+// TargetTimeline is the timeline a restore of db from stanza follows: the
+// one recorded by restore undo, or empty for pgBackRest's latest.
+func (s Records) TargetTimeline(db, stanza string) string {
+	if t, ok := s.Timelines[db]; ok && t.Stanza == stanza {
+		return t.Timeline
+	}
+	return ""
 }
 
 // DroppedStanza is one dropped database's kept stanza.
@@ -79,16 +101,44 @@ type Restore struct {
 	Warnings  []string `json:"warnings,omitempty"`
 	// Promote is set when the restore was started with --promote.
 	Promote bool `json:"promote,omitempty"`
+	// Port is the temporary cluster's port once it is materialised; the
+	// session pooler routes <db>__restoring to it.
+	Port int `json:"port,omitempty"`
+	// Timeline is the --target-timeline the restore passed, if any.
+	Timeline string `json:"timeline,omitempty"`
 }
 
-// Leftover is a database a promote put aside: the one-command undo, until
-// cleanup drops it.
+// Leftover is a cluster a promote or undo put aside, stopped: the
+// one-command undo, until cleanup drops it.
 type Leftover struct {
 	Database string `json:"database"`
-	// Name is the <db>__pre_restore_<ts> database.
+	// Name is the <db>__pre_restore_<ts> cluster.
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
 	RestoreID string `json:"restore_id"`
+	// Port is the leftover cluster's registered port, from the temporary
+	// range.
+	Port int `json:"port,omitempty"`
+	// Stanza is the stanza the leftover's data belongs to. It differs from
+	// the database's own after a restore from a dump, which starts a new
+	// stanza; undo then takes this one back.
+	Stanza string `json:"stanza,omitempty"`
+}
+
+// IsTemporary reports whether cluster is one restore owns: an open
+// restore's <db>__restoring or a leftover.
+func (s Records) IsTemporary(cluster string) bool {
+	for db := range s.Restores {
+		if RestoringName(db) == cluster {
+			return true
+		}
+	}
+	for _, l := range s.Leftovers {
+		if l.Name == cluster {
+			return true
+		}
+	}
+	return false
 }
 
 // Drill is one restore drill.
@@ -162,6 +212,9 @@ func decode(raw []byte) (Records, error) {
 	}
 	if s.LastDump == nil {
 		s.LastDump = map[string]Dump{}
+	}
+	if s.Timelines == nil {
+		s.Timelines = map[string]TimelineSwitch{}
 	}
 	return s, nil
 }
