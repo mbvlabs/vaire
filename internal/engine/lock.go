@@ -23,6 +23,12 @@ const LockInfoPath = LockPath + ".info"
 // clusters in name order.
 func ClusterLockPath(cluster string) string { return "/run/lock/eru-" + cluster + ".lock" }
 
+// HeavyIOLockPath is the server's heavy-I/O lock (RFC 9.3): the backup jobs
+// of every cluster take it exclusive after the global lock and before their
+// cluster's, so at most one full, diff, verify, drill or dump reads the disk
+// at a time. Database names have no hyphen, so no cluster lock shares it.
+const HeavyIOLockPath = "/run/lock/eru-heavy-io.lock"
+
 // LockMode is shared or exclusive.
 type LockMode string
 
@@ -52,16 +58,22 @@ type Release func()
 // A timeout of 0 tries once. On timeout it returns precondition_failed with
 // reason lock_held and the holder, or a null holder when its PID is gone.
 func Acquire(ctx context.Context, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
-	return acquire(ctx, LockPath, "", mode, method, requestID, timeout)
+	return acquire(ctx, LockPath, "", "", mode, method, requestID, timeout)
 }
 
 // AcquireCluster takes cluster's lock in mode, as Acquire does the global
 // one. The caller holds the global lock already.
 func AcquireCluster(ctx context.Context, cluster string, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
-	return acquire(ctx, ClusterLockPath(cluster), cluster, mode, method, requestID, timeout)
+	return acquire(ctx, ClusterLockPath(cluster), cluster, "", mode, method, requestID, timeout)
 }
 
-func acquire(ctx context.Context, path, cluster string, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
+// AcquireHeavyIO takes the heavy-I/O lock exclusive, once: a busy lock is
+// lock_held with details.lock heavy_io. The caller holds the global lock.
+func AcquireHeavyIO(ctx context.Context, method, requestID string) (Release, error) {
+	return acquire(ctx, HeavyIOLockPath, "", "heavy_io", LockExclusive, method, requestID, 0)
+}
+
+func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
 	if mode == LockNone {
 		return func() {}, nil
 	}
@@ -87,7 +99,7 @@ func acquire(ctx context.Context, path, cluster string, mode LockMode, method, r
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			_ = f.Close()
-			return nil, lockHeld(infoPath, cluster)
+			return nil, lockHeld(infoPath, cluster, lock)
 		}
 		select {
 		case <-ctx.Done():
@@ -116,7 +128,7 @@ func acquire(ctx context.Context, path, cluster string, mode LockMode, method, r
 	}, nil
 }
 
-func lockHeld(infoPath, cluster string) *output.CLIError {
+func lockHeld(infoPath, cluster, lock string) *output.CLIError {
 	var holder *Holder
 	if raw, err := os.ReadFile(infoPath); err == nil { //nolint:gosec // G304: the lock's own info file.
 		var h Holder
@@ -129,6 +141,10 @@ func lockHeld(infoPath, cluster string) *output.CLIError {
 	if cluster != "" {
 		message = "another eru operation holds the lock of " + cluster
 		details["cluster"] = cluster
+	}
+	if lock == "heavy_io" {
+		message = "another backup job holds the heavy-I/O lock"
+		details["lock"] = lock
 	}
 	return output.NewError(
 		output.CodePrecondition,

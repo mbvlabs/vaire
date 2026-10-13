@@ -23,9 +23,6 @@ const (
 	ReasonPreviousFailure = "previous_failure"
 	ReasonJournal         = "journal"
 	ReasonCheck           = "check"
-	// ReasonRestartPending is a RestartBarrier step left for a later apply
-	// because the restart it waits for was not confirmed.
-	ReasonRestartPending = "restart_pending"
 )
 
 // Options steer one Plan or Apply.
@@ -245,28 +242,6 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: d.reason})
 			data.Skipped++
 			continue
-		}
-		if b, ok := step.(RestartBarrier); ok && b.NeedsRestartFirst() {
-			if pending := pendingIn(j, all, opts.DB); len(pending) > 0 {
-				if opts.Restarter != nil {
-					restarts, err := restartConfirmed(ctx, j, path, opts, cfg, pending)
-					data.Restarts = append(data.Restarts, restarts...)
-					if err != nil {
-						return data, nil, err
-					}
-				}
-				if left := pendingIn(j, all, opts.DB); len(left) > 0 {
-					report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(index), Total: intPtr(total), Detail: ReasonRestartPending})
-					data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: ReasonRestartPending})
-					data.Skipped++
-					warnings = append(warnings, output.Warning{
-						Code: "step_waits_for_restart",
-						Message: id + " runs after the pending restarts; re-run apply with --confirm " +
-							strings.Join(RestartTokens(cfg.Name(), left), " --confirm "),
-					})
-					continue
-				}
-			}
 		}
 		report.emit(output.Event{Type: "step", Step: id, State: "started", Index: intPtr(index), Total: intPtr(total), Detail: step.Describe(cfg)})
 		if err := j.setEntry(path, id, JournalEntry{Status: StatusRunning, InputsHash: d.hash, StartedAt: now()}); err != nil {

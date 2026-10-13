@@ -86,13 +86,17 @@ func runJobList(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	lines := []string{fmt.Sprintf("  %-26s  %-14s  %-9s  %s", "ID", "JOB", "STATE", "STARTED")}
+	lines := []string{fmt.Sprintf("  %-26s  %-14s  %-12s  %-9s  %s", "ID", "JOB", "DB", "STATE", "STARTED")}
 	for _, j := range data.Jobs {
 		started := j.StartedAt
 		if started == "" {
 			started = j.CreatedAt
 		}
-		line := fmt.Sprintf("  %-26s  %-14s  %-9s  %s", j.ID, j.Job, j.State, started)
+		db := j.DB
+		if db == "" {
+			db = "-"
+		}
+		line := fmt.Sprintf("  %-26s  %-14s  %-12s  %-9s  %s", j.ID, j.Job, db, j.State, started)
 		if j.Error != nil {
 			line += "  " + j.Error.Message
 		} else if j.Detail != "" {

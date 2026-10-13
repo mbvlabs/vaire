@@ -221,11 +221,11 @@ func checkProfile(v string) error {
 	return errors.New("must be oltp, mixed or analytics")
 }
 
-// BackupCluster is the cluster pgbackrest.conf's one stanza covers: the
-// first. It goes when the file gets a section per cluster.
-func (c Cluster) BackupCluster() (ClusterSpec, bool) {
-	if len(c.Clusters) == 0 {
-		return ClusterSpec{}, false
+// RetentionFull is a cluster's restore window in weeks: its own
+// backup.retention_full, or [backup.database]'s.
+func (c Cluster) RetentionFull(spec ClusterSpec) int {
+	if spec.Backup.RetentionFull > 0 {
+		return spec.Backup.RetentionFull
 	}
-	return c.Clusters[0], true
+	return c.Backup.Database.RetentionFull
 }

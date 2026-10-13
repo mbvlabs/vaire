@@ -137,23 +137,19 @@ func (r *initRun) nodeConfig() config.Cluster {
 	return cfg
 }
 
-// configureInitBackups runs the backups phase. Init has no traffic yet, so
-// the restart WAL archiving needs is confirmed with the cluster's token.
+// configureInitBackups runs the backups phase. Switching WAL archiving on is
+// a reload, so nothing restarts.
 func (r *initRun) configureInitBackups(ctx context.Context, caller remote.Caller) error {
 	if !r.cfg.BackupConfigured() || r.prog.Done(phaseBackups) {
 		return nil
 	}
 	r.p.phase("init.backups", "started", "turn on WAL archiving and take the first full backup to "+r.backupSettings().Bucket)
-	data, warnings, err := configureBackups(ctx, caller, r.p, r.backupSettings(), r.sec.Backup, r.name+"/restart")
+	_, warnings, err := configureBackups(ctx, caller, r.p, r.backupSettings(), r.sec.Backup)
 	if err != nil {
 		return err
 	}
 	r.warnings = append(r.warnings, warnings...)
-	detail := "WAL archiving on"
-	if data.Restarted() {
-		detail += ", PostgreSQL restarted once"
-	}
-	r.p.phase("init.backups", "completed", detail)
+	r.p.phase("init.backups", "completed", "WAL archiving on, first full backup taken")
 	r.backupsDone = true
 	return r.mark(phaseBackups)
 }

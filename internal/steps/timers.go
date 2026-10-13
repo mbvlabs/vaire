@@ -2,11 +2,15 @@ package steps
 
 import (
 	"context"
+	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
@@ -18,19 +22,23 @@ const timersID = "timers-v1"
 // CertsTimerName is the hourly certificate timer timers-v1 owns.
 const CertsTimerName = "eru-certs.timer"
 
-// DumpServiceTemplate runs one database's long-retention dump; each
-// eru-db-dump@<db>.timer starts its instance.
-const DumpServiceTemplate = "eru-db-dump@.service"
-
-// ownedService matches the service units timers-v1 writes, so a removed
+// ownedService matches the template services timers-v1 writes, so a removed
 // schedule takes its service with it. eru-certs.service and eru-thp.service
 // belong to other steps.
-var ownedService = regexp.MustCompile(`^eru-(backup-(full|diff|incr|verify)|restore-drill|db-dump@)\.service$`)
+var ownedService = regexp.MustCompile(`^eru-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry)\.service$`)
+
+// StanzaExpiryTimerName is the daily timer that deletes the stanzas of
+// dropped databases once their window has passed (RFC 9.1).
+const StanzaExpiryTimerName = "eru-stanza-expiry.timer"
+
+// stanzaExpirySchedule runs after the default maintenance window, when the
+// night's backups are done.
+const stanzaExpirySchedule = "*-*-* 06:00:00"
 
 // unitNamePattern guards the unit names handed to the script.
 var unitNamePattern = regexp.MustCompile(`^eru-[a-z0-9@_.-]+\.(timer|service)$`)
 
-// timerJob is one scheduled job (§18).
+// timerJob is one scheduled job of one cluster (RFC 9.2).
 type timerJob struct {
 	Job         string
 	Description string
@@ -38,18 +46,24 @@ type timerJob struct {
 	Jitter      string
 }
 
-// scheduledJobs are the backup jobs with a schedule in cfg.
-func scheduledJobs(cfg config.Cluster) []timerJob {
-	if !cfg.BackupConfigured() {
-		return nil
+// scheduledJobs are spec's jobs with a schedule: its own, else
+// [backup.database]'s for the backups, verify and drill. Dumps have no
+// server default.
+func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
+	db, own := cfg.Backup.Database, spec.Backup
+	pick := func(own, def string) string {
+		if own != "" {
+			return own
+		}
+		return def
 	}
-	db := cfg.Backup.Database
 	all := []timerJob{
-		{"backup-full", "eru full database backup", db.FullSchedule, "5m"},
-		{"backup-diff", "eru differential database backup", db.DiffSchedule, "5m"},
-		{"backup-incr", "eru incremental database backup", db.IncrSchedule, "2m"},
-		{"backup-verify", "eru backup verify", db.VerifySchedule, "10m"},
-		{"restore-drill", "eru restore drill", db.DrillSchedule, "30m"},
+		{"backup-full", "eru full backup of " + spec.Name, pick(own.FullSchedule, db.FullSchedule), "5m"},
+		{"backup-diff", "eru differential backup of " + spec.Name, pick(own.DiffSchedule, db.DiffSchedule), "5m"},
+		{"backup-incr", "eru incremental backup of " + spec.Name, pick(own.IncrSchedule, db.IncrSchedule), "2m"},
+		{"backup-verify", "eru backup verify of " + spec.Name, pick(own.VerifySchedule, db.VerifySchedule), "10m"},
+		{"restore-drill", "eru restore drill of " + spec.Name, pick(own.DrillSchedule, db.DrillSchedule), "30m"},
+		{"db-dump", "eru long-retention dump of " + spec.Name, own.DumpSchedule, "10m"},
 	}
 	var out []timerJob
 	for _, j := range all {
@@ -60,23 +74,100 @@ func scheduledJobs(cfg config.Cluster) []timerJob {
 	return out
 }
 
-// timerFiles returns every unit file timers-v1 owns, by file name.
+// timerFiles returns every unit file timers-v1 owns, by file name: the
+// certificate timer, and with backups on the stanza-expiry timer, a template
+// service per job (eru-<job>@.service runs eru node run <job> --db %i) and a
+// timer per cluster and job (eru-<job>@<cluster>.timer), staggered by the
+// cluster's stanza (RFC 9.3).
 func timerFiles(cfg config.Cluster) map[string][]byte {
 	files := map[string][]byte{CertsTimerName: render.CertsTimer()}
-	for _, j := range scheduledJobs(cfg) {
-		files["eru-"+j.Job+".service"] = render.JobService(j.Job, "")
-		files["eru-"+j.Job+".timer"] = render.JobTimer(j.Description, j.Schedule, j.Jitter)
+	if !cfg.BackupConfigured() {
+		return files
 	}
-	if cfg.BackupConfigured() {
-		for _, db := range cfg.Clusters {
-			if db.Backup.DumpSchedule == "" {
-				continue
-			}
-			files[DumpServiceTemplate] = render.JobService("db-dump", "--db %i")
-			files["eru-db-dump@"+db.Name+".timer"] = render.JobTimer("eru long-retention dump of "+db.Name, db.Backup.DumpSchedule, "10m")
+	files["eru-stanza-expiry.service"] = render.JobService("stanza-expiry", "")
+	files[StanzaExpiryTimerName] = render.JobTimer("eru expiry of dropped databases' stanzas", stanzaExpirySchedule, "30m")
+	spread := StaggerSpread(cfg)
+	for _, spec := range cfg.Clusters {
+		offset := StaggerOffset(spec.Stanza, spread)
+		for _, j := range scheduledJobs(cfg, spec) {
+			files["eru-"+j.Job+"@.service"] = render.JobService(j.Job, "--db %i")
+			files["eru-"+j.Job+"@"+spec.Name+".timer"] = render.JobTimer(j.Description, Stagger(j.Schedule, offset), j.Jitter)
 		}
 	}
 	return files
+}
+
+// defaultStaggerSpread is the spread when [maintenance] window doesn't parse.
+const defaultStaggerSpread = 3 * time.Hour
+
+// StaggerSpread is how far apart the clusters' backups are spread: the length
+// of [maintenance] window (02:00-05:00 is three hours).
+func StaggerSpread(cfg config.Cluster) time.Duration {
+	from, to, ok := strings.Cut(cfg.Maintenance.Window, "-")
+	if !ok {
+		return defaultStaggerSpread
+	}
+	start, err1 := time.Parse("15:04", strings.TrimSpace(from))
+	end, err2 := time.Parse("15:04", strings.TrimSpace(to))
+	if err1 != nil || err2 != nil || start.Equal(end) {
+		return defaultStaggerSpread
+	}
+	if end.Before(start) {
+		end = end.Add(24 * time.Hour)
+	}
+	return end.Sub(start)
+}
+
+// StaggerOffset is a cluster's fixed offset in whole minutes within spread,
+// derived from its stanza id. The stanza never changes while the cluster
+// exists, so neither does the offset.
+func StaggerOffset(stanza string, spread time.Duration) time.Duration {
+	minutes := uint32(spread / time.Minute) //nolint:gosec // G115: the spread is at most a day.
+	if minutes == 0 || stanza == "" {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(stanza))
+	return time.Duration(h.Sum32()%minutes) * time.Minute
+}
+
+// calendarTime is the time part of an OnCalendar expression with a fixed
+// minute: HH:MM[:SS] or *:MM[:SS].
+var calendarTime = regexp.MustCompile(`^(\*|[0-9]{1,2}):([0-9]{2})(:[0-9]{2})?$`)
+
+// Stagger moves schedule's time of day later by offset. systemd has no
+// offset for OnCalendar, so the time is rewritten, and never past the end of
+// its day (HH:MM) or hour (*:MM), where the day or hour fields would have to
+// move too: the offset wraps within what is left. A schedule without a
+// fixed minute ("daily", "*:0/15") is returned as it is, and the heavy-I/O
+// lock keeps its jobs apart.
+func Stagger(schedule string, offset time.Duration) string {
+	fields := strings.Fields(schedule)
+	if len(fields) == 0 || offset <= 0 {
+		return schedule
+	}
+	m := calendarTime.FindStringSubmatch(fields[len(fields)-1])
+	if m == nil {
+		return schedule
+	}
+	minute, _ := strconv.Atoi(m[2])
+	shift := int(offset / time.Minute)
+	if m[1] == "*" {
+		if minute >= 60 {
+			return schedule
+		}
+		minute += shift % (60 - minute)
+		fields[len(fields)-1] = fmt.Sprintf("*:%02d%s", minute, m[3])
+		return strings.Join(fields, " ")
+	}
+	hour, _ := strconv.Atoi(m[1])
+	start := hour*60 + minute
+	if hour >= 24 || minute >= 60 {
+		return schedule
+	}
+	start += shift % (24*60 - start)
+	fields[len(fields)-1] = fmt.Sprintf("%02d:%02d%s", start/60, start%60, m[3])
+	return strings.Join(fields, " ")
 }
 
 // staleUnits are eru timers and owned services on disk that are not rendered.
@@ -111,7 +202,7 @@ type timersStep struct{}
 func (timersStep) ID() string { return timersID }
 
 func (timersStep) Describe(config.Cluster) string {
-	return "install the systemd timers for certificates, backups, verify, drills and dumps"
+	return "install the systemd timers for certificates and each database's backups, verify, drill and dumps"
 }
 
 func (timersStep) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []engine.RenderedFile {

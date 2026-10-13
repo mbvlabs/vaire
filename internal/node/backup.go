@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,11 +21,25 @@ import (
 	"github.com/mbvlabs/eru/internal/steps"
 )
 
-// driver is the pgBackRest driver for the one stanza pgbackrest.conf holds,
-// the first cluster's, until it gets a section per cluster.
-func driver(cfg config.Cluster, stepID string, report engine.Reporter) backup.PgBackRest {
-	first, _ := cfg.BackupCluster()
-	return backup.PgBackRest{Stanza: first.Stanza, Shell: engine.Shell{Secrets: secrets.Default}, StepID: stepID, Report: report, PG: steps.ClusterPG(first)}
+// driver is the pgBackRest driver for spec's stanza.
+func driver(spec config.ClusterSpec, stepID string, report engine.Reporter) backup.PgBackRest {
+	return steps.BackupDriver(spec, engine.Shell{Secrets: secrets.Default}, stepID, report)
+}
+
+// repoDriver is a driver bound to no stanza, for the commands that read or
+// change the repository as a whole (pgbackrest info over every stanza) or a
+// stanza with no cluster.
+func repoDriver(stepID string, report engine.Reporter) backup.PgBackRest {
+	return driver(config.ClusterSpec{}, stepID, report)
+}
+
+// firstCluster is the cluster the drill's RPC still covers without a
+// database: the first. The drill becomes per database in unit 32.
+func firstCluster(cfg config.Cluster) config.ClusterSpec {
+	if len(cfg.Clusters) == 0 {
+		return config.ClusterSpec{}
+	}
+	return cfg.Clusters[0]
 }
 
 // requireBackups refuses a backup method on a cluster without a bucket.
@@ -36,10 +51,28 @@ func requireBackups(cfg config.Cluster) error {
 		"Run eru backup setup first.").WithDetails(map[string]any{"reason": "backup_not_configured"})
 }
 
-type backupNowParams struct {
-	Type string `json:"type"`
+// oneDatabase is the usage error of a backup method that runs one job: the
+// CLI calls it once per database, one after another, because every job takes
+// the heavy-I/O lock.
+func oneDatabase(method string) error {
+	return output.NewError(output.CodeUsage, method+" runs for one database: name it in params.database", output.ExitUsage,
+		"eru backup now and eru backup verify without --db call it once per database.")
 }
 
+type backupNowParams struct {
+	Type     string `json:"type"`
+	Database string `json:"database"`
+}
+
+// backupPlan is one database's backup in backup.now's dry run.
+type backupPlan struct {
+	Database string `json:"database"`
+	Type     string `json:"type"`
+}
+
+// handleBackupNow takes one backup of params.database. A dry run without a
+// database plans one per cluster. Without a type, a stanza with a full gets
+// an incremental and one without gets a full.
 func handleBackupNow(ctx context.Context, env *Env) (Result, error) {
 	var p backupNowParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -48,35 +81,58 @@ func handleBackupNow(ctx context.Context, env *Env) (Result, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
-	kind := p.Type
-	if kind == "" {
-		kind = backup.TypeIncr
-		info, err := driver(env.Cluster, "backup.now", nil).Info(ctx, "")
-		if err != nil {
-			return Result{}, err
-		}
-		if !info.HasFull() {
-			kind = backup.TypeFull
-		}
-	}
-	switch kind {
-	case backup.TypeFull, backup.TypeDiff, backup.TypeIncr:
+	switch p.Type {
+	case "", backup.TypeFull, backup.TypeDiff, backup.TypeIncr:
 	default:
 		return Result{}, output.NewError(output.CodeUsage, "type must be full, diff or incr", output.ExitUsage, "")
 	}
-	if env.Req.DryRun {
-		return Result{Data: map[string]any{"type": kind, "dry_run": true}}, nil
+	specs := env.Cluster.Clusters
+	if p.Database != "" {
+		spec, ok := env.Cluster.ClusterByName(p.Database)
+		if !ok {
+			return Result{}, databaseNotFound(p.Database)
+		}
+		specs = []config.ClusterSpec{spec}
+	} else if !env.Req.DryRun {
+		return Result{}, oneDatabase("backup.now")
 	}
-	return runJobRPC(ctx, env, "backup-"+kind, nil, nil)
+	var infos map[string]backup.Info
+	if p.Type == "" && len(specs) > 0 {
+		var err error
+		if infos, err = repoDriver("backup.now", nil).InfoAll(ctx); err != nil {
+			return Result{}, err
+		}
+	}
+	plan := make([]backupPlan, 0, len(specs))
+	for _, spec := range specs {
+		kind := p.Type
+		if kind == "" {
+			kind = backup.TypeIncr
+			if !infos[spec.Stanza].HasFull() {
+				kind = backup.TypeFull
+			}
+		}
+		plan = append(plan, backupPlan{Database: spec.Name, Type: kind})
+	}
+	if env.Req.DryRun {
+		return Result{Data: map[string]any{"backups": plan, "dry_run": true}}, nil
+	}
+	return runJobRPC(ctx, env, "backup-"+plan[0].Type, map[string]string{"database": plan[0].Database}, nil)
 }
 
-// jobBackup takes one backup. A backup another process holds pgBackRest's
-// lock for is skipped, not failed.
+// spec is the cluster of a template-unit job; RunJob has checked it.
+func (j *jobEnv) spec() config.ClusterSpec {
+	spec, _ := j.Cluster.ClusterByName(j.DB)
+	return spec
+}
+
+// jobBackup takes one backup of the job's database. A backup another process
+// holds pgBackRest's lock for is skipped, not failed.
 func jobBackup(ctx context.Context, env *jobEnv, kind string) (any, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return nil, err
 	}
-	d := driver(env.Cluster, env.Job, env.Report)
+	d := driver(env.spec(), env.Job, env.Report)
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return nil, err
@@ -93,41 +149,57 @@ func jobBackup(ctx context.Context, env *jobEnv, kind string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	steps.RecordBackup(env.Cluster, set)
-	logLine(env.Report, env.Job, fmt.Sprintf("backup %s (%s) finished: %s", set.Label, set.Type, humanSize(set.Size)))
-	return map[string]any{"set": set}, nil
+	steps.RecordBackup(env.Cluster, env.DB, set)
+	logLine(env.Report, env.Job, fmt.Sprintf("backup %s (%s) of %s finished: %s", set.Label, set.Type, env.DB, humanSize(set.Size)))
+	return map[string]any{"db": env.DB, "set": set}, nil
 }
 
+type backupVerifyParams struct {
+	Database string `json:"database"`
+}
+
+// handleBackupVerify verifies params.database's stanza.
 func handleBackupVerify(ctx context.Context, env *Env) (Result, error) {
+	var p backupVerifyParams
+	if err := decodeParams(env.Req.Params, &p); err != nil {
+		return Result{}, err
+	}
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
-	return runJobRPC(ctx, env, "backup-verify", nil, nil)
+	if p.Database == "" {
+		return Result{}, oneDatabase("backup.verify")
+	}
+	if _, ok := env.Cluster.ClusterByName(p.Database); !ok {
+		return Result{}, databaseNotFound(p.Database)
+	}
+	return runJobRPC(ctx, env, "backup-verify", p, nil)
 }
 
 func jobVerify(ctx context.Context, env *jobEnv) (any, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return nil, err
 	}
-	return verify(ctx, env.Cluster, env.Job, env.Report)
+	return verify(ctx, env.Cluster, env.spec(), env.Job, env.Report)
 }
 
-// verify runs pgbackrest verify and records the result. A verify that finds
-// problems is recorded and then returned as external_command_failed.
-func verify(ctx context.Context, cfg config.Cluster, stepID string, report engine.Reporter) (backup.VerifyResult, error) {
-	res, err := driver(cfg, stepID, report).Verify(ctx)
+// verify runs pgbackrest verify on spec's stanza and records the result. A
+// verify that finds problems is recorded and then returned as
+// external_command_failed.
+func verify(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, stepID string, report engine.Reporter) (backup.VerifyResult, error) {
+	res, err := driver(spec, stepID, report).Verify(ctx)
 	if err != nil {
 		return res, err
 	}
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
-		s.LastVerify = &res
+		s.LastVerify[spec.Name] = res
 		return nil
 	})
 	steps.WriteMetrics(cfg)
 	if !res.OK {
-		return res, output.NewError(output.CodeExternalCommand, "pgbackrest verify found problems in the repository", output.ExitExternal,
-			"Read details.output, then take a new full backup with eru backup now --type full.").
-			WithDetails(map[string]any{"output": res.Output})
+		return res, output.NewError(output.CodeExternalCommand, "pgbackrest verify found problems in the stanza of "+spec.Name, output.ExitExternal,
+			"Read details.output, then take a new full backup with eru backup now --db "+spec.Name+" --type full.").
+			WithDetails(map[string]any{"output": res.Output, "db": spec.Name})
 	}
 	return res, nil
 }
@@ -137,26 +209,44 @@ type backupListParams struct {
 }
 
 // Window is the restore window: any time between From and To can be
-// restored, for every database.
+// restored.
 type Window struct {
 	From       string `json:"from,omitempty"`
 	To         string `json:"to,omitempty"`
 	LagSeconds int64  `json:"archive_lag_seconds"`
 }
 
-// backupList is backup.list's result.
+// backupList is backup.list's result for one database (--db).
 type backupList struct {
 	Stanza   string                    `json:"stanza"`
 	Status   string                    `json:"status"`
 	Window   Window                    `json:"restore_window"`
 	Archive  backup.ArchiveStatus      `json:"archive"`
 	Sets     []backup.Set              `json:"sets"`
-	Database string                    `json:"database,omitempty"`
+	Database string                    `json:"database"`
+	Dropped  *backup.DroppedStanza     `json:"dropped,omitempty"`
 	Verify   *backup.VerifyResult      `json:"last_verify,omitempty"`
 	Drill    *backup.Drill             `json:"last_drill,omitempty"`
 	Dumps    []backup.Dump             `json:"dumps"`
 	Policies map[string]dumpPolicy     `json:"dump_policies,omitempty"`
 	Restores map[string]backup.Restore `json:"restores,omitempty"`
+}
+
+// backupRow is one database's row of backup.list without a database: every
+// cluster, then every dropped stanza still in its window.
+type backupRow struct {
+	Database string               `json:"database"`
+	Stanza   string               `json:"stanza"`
+	Status   string               `json:"status"`
+	Window   Window               `json:"restore_window"`
+	Sets     int                  `json:"sets"`
+	Latest   *backup.Set          `json:"latest,omitempty"`
+	Verify   *backup.VerifyResult `json:"last_verify,omitempty"`
+	Drill    *backup.Drill        `json:"last_drill,omitempty"`
+	Dump     *backup.Dump         `json:"last_dump,omitempty"`
+	// DroppedAt and ExpiresAt are set on a dropped database's row.
+	DroppedAt string `json:"dropped_at,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 type dumpPolicy struct {
@@ -169,58 +259,126 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	cfg := env.Cluster
-	if err := requireBackups(cfg); err != nil {
+	if err := requireBackups(env.Cluster); err != nil {
+		return Result{}, err
+	}
+	rs, err := backup.LoadRecords()
+	if err != nil {
 		return Result{}, err
 	}
 	if p.Database != "" {
-		if _, ok := cfg.ClusterByName(p.Database); !ok {
-			return Result{}, databaseNotFound(p.Database)
+		return backupListOne(ctx, env.Cluster, rs, p.Database)
+	}
+	return backupListAll(ctx, env.Cluster, rs)
+}
+
+// backupListAll is one row per database, from one pgbackrest info over every
+// stanza and each live cluster's pg_stat_archiver.
+func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (Result, error) {
+	infos, err := repoDriver("backup.list", nil).InfoAll(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	var warnings []output.Warning
+	rows := make([]backupRow, 0, len(cfg.Clusters)+len(rs.DroppedStanzas))
+	empty := 0
+	for _, spec := range cfg.Clusters {
+		info := infos[spec.Stanza]
+		archive, err := driver(spec, "backup.list", nil).ArchiveStatus(ctx)
+		if err != nil {
+			warnings = append(warnings, output.Warning{Code: "archive_status_unavailable",
+				Message: "could not read pg_stat_archiver of " + spec.Name + ": " + err.Error()})
+		}
+		row := listRow(spec.Name, spec.Stanza, info, archive, rs)
+		if row.Sets == 0 {
+			empty++
+		}
+		rows = append(rows, row)
+	}
+	for _, d := range rs.DroppedStanzas {
+		row := listRow(d.Database, d.Stanza, infos[d.Stanza], backup.ArchiveStatus{}, rs)
+		row.Verify, row.Drill, row.Dump = nil, nil, nil
+		row.DroppedAt, row.ExpiresAt = d.DroppedAt, d.ExpiresAt
+		rows = append(rows, row)
+	}
+	if empty > 0 {
+		warnings = append(warnings, output.Warning{Code: "no_backups",
+			Message: fmt.Sprintf("%d database(s) have no backup yet; run eru backup now --type full", empty)})
+	}
+	return Result{Data: map[string]any{"databases": rows, "restores": rs.Restores}, Warnings: warnings}, nil
+}
+
+// listRow sums up one stanza for backup.list without a database. A dropped
+// stanza has no live cluster, so its window ends at its newest set.
+func listRow(db, stanza string, info backup.Info, archive backup.ArchiveStatus, rs backup.Records) backupRow {
+	row := backupRow{Database: db, Stanza: stanza, Status: info.Status, Window: restoreWindow(info, archive)}
+	if row.Status == "" {
+		row.Status = "not in the repository"
+	}
+	for _, set := range info.Sets {
+		if !set.Error {
+			row.Sets++
 		}
 	}
-	d := driver(cfg, "backup.list", nil)
+	if latest, ok := info.Latest(); ok {
+		row.Latest = &latest
+	}
+	if v, ok := rs.LastVerify[db]; ok {
+		row.Verify = &v
+	}
+	if d, ok := rs.LastDrill(db); ok {
+		row.Drill = &d
+	}
+	if d, ok := rs.LastDump[db]; ok {
+		row.Dump = &d
+	}
+	return row
+}
+
+// backupListOne describes one database: its sets, window, last verify and
+// drill, dumps and dump policy. A dropped database still in its window is
+// listed from its kept stanza.
+func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, db string) (Result, error) {
+	spec, live := cfg.ClusterByName(db)
+	out := backupList{Database: db}
+	if !live {
+		dropped, ok := rs.Dropped(db)
+		if !ok {
+			return Result{}, databaseNotFound(db)
+		}
+		out.Dropped = &dropped
+		spec = config.ClusterSpec{Name: db, Stanza: dropped.Stanza}
+	}
+	d := driver(spec, "backup.list", nil)
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return Result{}, err
 	}
-	archive, err := d.ArchiveStatus(ctx)
-	if err != nil {
-		return Result{}, err
-	}
-	out := backupList{Stanza: info.Stanza, Status: info.Status, Archive: archive, Database: p.Database, Window: restoreWindow(info, archive)}
-	var warnings []output.Warning
-	for _, set := range info.Sets {
-		if p.Database != "" {
-			detail, err := d.Info(ctx, set.Label)
-			if err == nil {
-				if full, ok := detail.Find(set.Label); ok {
-					set.Databases = full.Databases
-				}
-			}
-			if !containsString(set.Databases, p.Database) {
-				continue
-			}
+	if live {
+		if out.Archive, err = d.ArchiveStatus(ctx); err != nil {
+			return Result{}, err
 		}
-		out.Sets = append(out.Sets, set)
 	}
-	bs, err := backup.LoadRecords()
-	if err != nil {
-		return Result{}, err
-	}
-	out.Verify = bs.LastVerify
-	if drill, ok := bs.LastDrill(); ok {
-		out.Drill = &drill
-	}
-	out.Restores = bs.Restores
-	out.Policies = map[string]dumpPolicy{}
-	for _, db := range cfg.Clusters {
-		if db.Backup.DumpSchedule != "" && (p.Database == "" || p.Database == db.Name) {
-			out.Policies[db.Name] = dumpPolicy{Schedule: db.Backup.DumpSchedule, Retention: db.Backup.DumpRetention}
+	out.Stanza, out.Status, out.Sets = info.Stanza, info.Status, info.Sets
+	out.Window = restoreWindow(info, out.Archive)
+	var warnings []output.Warning
+	if live {
+		if v, ok := rs.LastVerify[db]; ok {
+			out.Verify = &v
+		}
+		if drill, ok := rs.LastDrill(db); ok {
+			out.Drill = &drill
+		}
+		if r, ok := rs.Restores[db]; ok {
+			out.Restores = map[string]backup.Restore{db: r}
+		}
+		if spec.Backup.DumpSchedule != "" {
+			out.Policies = map[string]dumpPolicy{db: {Schedule: spec.Backup.DumpSchedule, Retention: spec.Backup.DumpRetention}}
 		}
 	}
 	out.Dumps = []backup.Dump{}
 	if target, _, err := steps.BackupTarget(cfg); err == nil {
-		dumps, err := backup.ListDumps(ctx, target, p.Database)
+		dumps, err := backup.ListDumps(ctx, target, db)
 		if err != nil {
 			warnings = append(warnings, output.Warning{Code: "dumps_unavailable", Message: "could not list the dumps: " + err.Error()})
 		} else {
@@ -228,7 +386,7 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 		}
 	}
 	if len(out.Sets) == 0 {
-		warnings = append(warnings, output.Warning{Code: "no_backups", Message: "the repository holds no backup yet; run eru backup now --type full"})
+		warnings = append(warnings, output.Warning{Code: "no_backups", Message: "the stanza of " + db + " holds no backup yet; run eru backup now --db " + db + " --type full"})
 	}
 	return Result{Data: out, Warnings: warnings}, nil
 }
@@ -326,7 +484,8 @@ func liveDatabases(ctx context.Context, local pg.Local) ([]string, error) {
 // --- restore drill ---
 
 type drillParams struct {
-	Time string `json:"time"`
+	Time     string `json:"time"`
+	Database string `json:"database,omitempty"`
 }
 
 func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
@@ -337,12 +496,19 @@ func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
+	spec := firstCluster(env.Cluster)
+	if p.Database != "" {
+		var ok bool
+		if spec, ok = env.Cluster.ClusterByName(p.Database); !ok {
+			return Result{}, databaseNotFound(p.Database)
+		}
+	}
 	if p.Time != "" {
 		t, err := time.Parse(time.RFC3339, p.Time)
 		if err != nil {
 			return Result{}, output.NewError(output.CodeUsage, "time must be RFC 3339", output.ExitUsage, "")
 		}
-		d := driver(env.Cluster, "restore.drill", nil)
+		d := driver(spec, "restore.drill", nil)
 		info, err := d.Info(ctx, "")
 		if err != nil {
 			return Result{}, err
@@ -358,10 +524,11 @@ func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"time": p.Time, "dry_run": true}}, nil
 	}
+	p.Database = spec.Name
 	return runJobRPC(ctx, env, "restore-drill", p, nil)
 }
 
-// jobDrill restores the whole cluster into a scratch directory (the path
+// jobDrill restores the job's cluster into a scratch directory (the path
 // server init --restore relies on), opens every database, runs pg_amcheck,
 // compares the database list with the live cluster and tears it down. A
 // drill never pushes WAL: the scratch instance runs with archive_mode off.
@@ -376,7 +543,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	if err := requireBackups(cfg); err != nil {
 		return nil, err
 	}
-	drill := backup.Drill{ID: env.ID, StartedAt: stamp(), Target: backup.TargetLatest}
+	drill := backup.Drill{ID: env.ID, Database: env.DB, StartedAt: stamp(), Target: backup.TargetLatest}
 	opts := backup.RestoreOptions{Kind: backup.TargetLatest}
 	if p.Time != "" {
 		t, err := time.Parse(time.RFC3339, p.Time)
@@ -394,7 +561,8 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		})
 		steps.WriteMetrics(cfg)
 	}
-	d := driver(cfg, env.Job, env.Report)
+	first := env.spec()
+	d := driver(first, env.Job, env.Report)
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return nil, err
@@ -406,9 +574,6 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		return drill, fmt.Errorf("%w: the repository has no backup", errSkipped)
 	}
 	drill.BackupLabel = latest.Label
-	// The repository holds the first cluster's stanza until each cluster
-	// has its own.
-	first, _ := cfg.BackupCluster()
 	firstPG := steps.ClusterPG(first)
 	dataDir := cfg.Server.DataDirectory(first.Name)
 	live, err := liveDatabases(ctx, firstPG)
@@ -508,6 +673,65 @@ func diffList(a, b []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// --- dropped-stanza expiry ---
+
+// jobStanzaExpiry deletes the stanzas of dropped databases whose restore
+// window has passed (RFC 9.1): pgbackrest stanza-delete --force, then the
+// record. A stanza the repository doesn't hold only loses its record; one
+// whose database has an open restore waits for the next run. A failed delete
+// keeps its record, so the next run tries again.
+func jobStanzaExpiry(ctx context.Context, env *jobEnv) (any, error) {
+	cfg := env.Cluster
+	if err := requireBackups(cfg); err != nil {
+		return nil, err
+	}
+	rs, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
+	due := rs.Expired(time.Now())
+	expired := []backup.DroppedStanza{}
+	if len(due) == 0 {
+		logLine(env.Report, env.Job, "no dropped stanza has passed its window")
+		return map[string]any{"expired": expired}, nil
+	}
+	infos, err := repoDriver(env.Job, env.Report).InfoAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var failed []string
+	for _, d := range due {
+		if _, open := rs.Restores[d.Database]; open {
+			logLine(env.Report, env.Job, "keeping "+d.Stanza+": a restore of "+d.Database+" is open")
+			continue
+		}
+		if _, ok := infos[d.Stanza]; ok {
+			drv := repoDriver(env.Job, env.Report)
+			drv.Stanza = d.Stanza
+			if err := drv.StanzaDelete(ctx, cfg.Server.DataDirectory(d.Database)); err != nil {
+				logLine(env.Report, env.Job, "deleting "+d.Stanza+" failed: "+err.Error())
+				failed = append(failed, d.Stanza)
+				continue
+			}
+			logLine(env.Report, env.Job, "deleted "+d.Stanza+" of dropped database "+d.Database+" (expired "+d.ExpiresAt+")")
+		}
+		if err := backup.UpdateRecords(func(r *backup.Records) error {
+			r.DroppedStanzas = slices.DeleteFunc(r.DroppedStanzas, func(x backup.DroppedStanza) bool { return x.Stanza == d.Stanza })
+			return nil
+		}); err != nil {
+			return map[string]any{"expired": expired}, err
+		}
+		expired = append(expired, d)
+	}
+	res := map[string]any{"expired": expired}
+	if len(failed) > 0 {
+		return res, output.NewError(output.CodeExternalCommand, "deleting the stanzas "+strings.Join(failed, ", ")+" failed", output.ExitExternal,
+			"Read the job log; the records stay, so the next eru-stanza-expiry run tries again.").
+			WithDetails(map[string]any{"failed": failed, "expired": expired})
+	}
+	return res, nil
 }
 
 // --- long-retention dumps ---

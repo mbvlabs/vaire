@@ -184,7 +184,7 @@ func checkSchedules(ctx context.Context, cfg config.Cluster) error {
 }
 
 // checkRepoMove refuses to move backups to another endpoint, bucket or
-// prefix once the stanza exists there: the restore window would be lost.
+// prefix once a stanza has backups there: the restore windows would be lost.
 func checkRepoMove(ctx context.Context, old, updated config.Cluster) error {
 	if !old.BackupConfigured() || !updated.BackupConfigured() {
 		return nil
@@ -193,8 +193,15 @@ func checkRepoMove(ctx context.Context, old, updated config.Cluster) error {
 	if ob.Endpoint == nb.Endpoint && ob.Bucket == nb.Bucket && ob.Prefix == nb.Prefix {
 		return nil
 	}
-	info, err := driver(old, "config.set", nil).Info(ctx, "")
-	if err != nil || (info.StatusCode != 0 && len(info.Sets) == 0) {
+	all, err := driver(config.ClusterSpec{}, "config.set", nil).InfoAll(ctx)
+	if err != nil {
+		return nil
+	}
+	inUse := false
+	for _, info := range all {
+		inUse = inUse || len(info.Sets) > 0
+	}
+	if !inUse {
 		return nil
 	}
 	return output.NewError(output.CodePrecondition,

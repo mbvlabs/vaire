@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
@@ -20,9 +21,9 @@ const recordsLockPath = RecordsPath + ".lock"
 const maxDrills = 12
 
 // Records is /var/lib/eru/records.json: open restores per database, restore
-// leftovers, drills and the last backup, verify and dump results. Timeline
-// switches and dropped stanzas join them with per-cluster restores and
-// drops.
+// leftovers, drills, the dropped stanzas and the last backup, verify and dump
+// results per database. Timeline switches join them with per-cluster
+// restores.
 type Records struct {
 	// Restores are the open restores, by database: one per database at a
 	// time. A record stays until promote or abort.
@@ -31,15 +32,16 @@ type Records struct {
 	Leftovers []Leftover `json:"restore_leftovers,omitempty"`
 	// Drills are the last restore drills, newest last.
 	Drills []Drill `json:"drills,omitempty"`
-	// LastBackup is the last successful backup per type.
-	LastBackup map[string]BackupResult `json:"last_backup,omitempty"`
-	// LastVerify is the last verify run.
-	LastVerify *VerifyResult `json:"last_verify,omitempty"`
+	// LastBackup is the last successful backup per database, then per type.
+	LastBackup map[string]map[string]BackupResult `json:"last_backups,omitempty"`
+	// LastVerify is the last verify run of each database's stanza.
+	LastVerify map[string]VerifyResult `json:"last_verifies,omitempty"`
 	// LastDump is the last dump per database.
 	LastDump map[string]Dump `json:"last_dump,omitempty"`
 	// DroppedStanzas are the stanzas of dropped databases. db drop keeps a
 	// database's stanza, so its backups and WAL can still be restored, and
-	// records it here; dropped-stanza expiry (unit 25) removes it.
+	// records it here; the stanza-expiry job deletes the stanza and the
+	// record once ExpiresAt has passed.
 	DroppedStanzas []DroppedStanza `json:"dropped_stanzas,omitempty"`
 }
 
@@ -48,6 +50,9 @@ type DroppedStanza struct {
 	Database  string `json:"database"`
 	Stanza    string `json:"stanza"`
 	DroppedAt string `json:"dropped_at"`
+	// ExpiresAt is DroppedAt plus the database's restore window
+	// (retention_full) at the drop.
+	ExpiresAt string `json:"expires_at"`
 	// FinalDump is the id of the final dump db drop took, if any.
 	FinalDump string `json:"final_dump,omitempty"`
 }
@@ -89,6 +94,7 @@ type Leftover struct {
 // Drill is one restore drill.
 type Drill struct {
 	ID          string       `json:"id"`
+	Database    string       `json:"database,omitempty"`
 	StartedAt   string       `json:"started_at"`
 	FinishedAt  string       `json:"finished_at"`
 	BackupLabel string       `json:"backup_label,omitempty"`
@@ -149,7 +155,10 @@ func decode(raw []byte) (Records, error) {
 		s.Restores = map[string]Restore{}
 	}
 	if s.LastBackup == nil {
-		s.LastBackup = map[string]BackupResult{}
+		s.LastBackup = map[string]map[string]BackupResult{}
+	}
+	if s.LastVerify == nil {
+		s.LastVerify = map[string]VerifyResult{}
 	}
 	if s.LastDump == nil {
 		s.LastDump = map[string]Dump{}
@@ -197,10 +206,43 @@ func (s Records) LeftoversOf(db string) []Leftover {
 	return out
 }
 
-// LastDrill returns the newest drill.
-func (s Records) LastDrill() (Drill, bool) {
-	if len(s.Drills) == 0 {
-		return Drill{}, false
+// LastDrill returns the newest drill of db.
+func (s Records) LastDrill(db string) (Drill, bool) {
+	for i := len(s.Drills) - 1; i >= 0; i-- {
+		if s.Drills[i].Database == db {
+			return s.Drills[i], true
+		}
 	}
-	return s.Drills[len(s.Drills)-1], true
+	return Drill{}, false
+}
+
+// RecordBackup stores set as db's last backup of its type.
+func (s *Records) RecordBackup(db string, set Set, finishedAt string) {
+	if s.LastBackup[db] == nil {
+		s.LastBackup[db] = map[string]BackupResult{}
+	}
+	s.LastBackup[db][set.Type] = BackupResult{Label: set.Label, FinishedAt: finishedAt, Size: set.Size}
+}
+
+// Dropped returns the dropped stanza of db, if any. A name dropped twice has
+// two; the newest wins.
+func (s Records) Dropped(db string) (DroppedStanza, bool) {
+	for i := len(s.DroppedStanzas) - 1; i >= 0; i-- {
+		if s.DroppedStanzas[i].Database == db {
+			return s.DroppedStanzas[i], true
+		}
+	}
+	return DroppedStanza{}, false
+}
+
+// Expired returns the dropped stanzas whose window has passed at now. A
+// record without a parseable ExpiresAt never expires on its own.
+func (s Records) Expired(now time.Time) []DroppedStanza {
+	var out []DroppedStanza
+	for _, d := range s.DroppedStanzas {
+		if t, err := time.Parse(time.RFC3339, d.ExpiresAt); err == nil && !now.Before(t) {
+			out = append(out, d)
+		}
+	}
+	return out
 }

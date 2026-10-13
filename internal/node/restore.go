@@ -193,7 +193,11 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 
 // checkRestoreTarget validates the target and describes it.
 func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams, sec map[string]string) (string, error) {
-	d := driver(cfg, "restore", nil)
+	spec, err := clusterOf(cfg, p.Database)
+	if err != nil {
+		return "", err
+	}
+	d := driver(spec, "restore", nil)
 	switch p.Kind {
 	case backup.TargetLatest:
 		info, err := d.Info(ctx, "")
@@ -376,13 +380,17 @@ func finishLoad(ctx context.Context, local pg.Local, target string, db config.Cl
 // into target on the cluster at dst, as owner. The scratch instance is
 // removed afterwards.
 func loadFromScratch(ctx context.Context, env *jobEnv, opts backup.RestoreOptions, db string, dst pg.Local, target, owner string) ([]string, error) {
+	spec, err := clusterOf(env.Cluster, db)
+	if err != nil {
+		return nil, err
+	}
 	scratch, err := backup.NewScratch(env.Cluster.Server.DataDirectory(db), env.ID, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = scratch.Remove() }()
 	logLine(env.Report, env.Job, "restoring "+db+" into a scratch instance")
-	if err := scratch.Restore(ctx, driver(env.Cluster, env.Job, env.Report), opts); err != nil {
+	if err := scratch.Restore(ctx, driver(spec, env.Job, env.Report), opts); err != nil {
 		return nil, err
 	}
 	if err := scratch.Start(ctx); err != nil {

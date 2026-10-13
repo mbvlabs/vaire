@@ -52,14 +52,6 @@ type Skipper interface {
 	SkipReason(cfg config.Cluster) string
 }
 
-// RestartBarrier is implemented by steps that need every pending PostgreSQL
-// restart done before they run, such as pgbackrest-v1, which needs
-// archive_mode on. The runner restarts the clusters first when their restarts
-// are confirmed; otherwise it leaves the step for a later apply.
-type RestartBarrier interface {
-	NeedsRestartFirst() bool
-}
-
 // CheckResult says whether the host already matches the step.
 type CheckResult struct {
 	Complete bool

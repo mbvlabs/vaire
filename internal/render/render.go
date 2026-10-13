@@ -326,15 +326,25 @@ type BackupSecrets struct {
 	CipherPass string
 }
 
-// PgBackRestConf renders /etc/pgbackrest/pgbackrest.conf (§13.1).
+// PgBackRestConf renders /etc/pgbackrest/pgbackrest.conf (RFC 9.1): one
+// [global] repository and cipher, and a section per cluster's stanza.
 func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) []byte {
-	// One stanza, the first cluster's, until the file gets a section per
-	// cluster.
-	first, _ := cfg.BackupCluster()
 	endpoint := strings.TrimSuffix(strings.TrimPrefix(cfg.Backup.Endpoint, "https://"), "/")
 	hostPart, port := endpoint, ""
 	if h, p, ok := strings.Cut(endpoint, ":"); ok {
 		hostPart, port = h, p
+	}
+	stanzas := make([]map[string]any, 0, len(cfg.Clusters))
+	for _, c := range cfg.Clusters {
+		stanzas = append(stanzas, map[string]any{
+			"Name":          c.Stanza,
+			"DataDirectory": cfg.Server.DataDirectory(c.Name),
+			"Port":          c.Port,
+			// retention_full is the restore window in weeks. Time-based
+			// retention keeps it, however many full backups are taken in it.
+			"RetentionDays": cfg.RetentionFull(c) * 7,
+			"QueueMaxMiB":   ArchiveQueueMaxMiB(len(cfg.Clusters)),
+		})
 	}
 	return execute("pgbackrest.conf.tmpl", map[string]any{
 		"EndpointHost": hostPart,
@@ -346,15 +356,16 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 		"Secret":       sec.Secret,
 		"Prefix":       cfg.Backup.Prefix,
 		"CipherPass":   sec.CipherPass,
-		// retention_full is the restore window in weeks. Time-based
-		// retention keeps it, however many full backups are taken in it.
-		"RetentionDays": cfg.Backup.Database.RetentionFull * 7,
-		"LocalRepo":     cfg.Backup.Database.LocalRepo,
-		"ProcessMax":    maxInt(1, host.VCPU/2),
-		"Stanza":        first.Stanza,
-		"Port":          first.Port,
-		"DataDirectory": cfg.Server.DataDirectory(first.Name),
+		"LocalRepo":    cfg.Backup.Database.LocalRepo,
+		"ProcessMax":   maxInt(1, host.VCPU/2),
+		"Stanzas":      stanzas,
 	})
+}
+
+// ArchiveQueueMaxMiB is each stanza's archive-push-queue-max: the archive
+// spool split over the clusters, at least 512 MiB each (RFC 7.7).
+func ArchiveQueueMaxMiB(clusters int) int {
+	return maxInt(512, tune.ArchiveSpoolGiB*1024/maxInt(1, clusters))
 }
 
 // BackupConf renders a cluster's conf.d/40-eru-backup.conf: archive_mode on

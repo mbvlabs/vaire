@@ -55,10 +55,15 @@ func DatabaseStepIDs() []string {
 }
 
 // BackupStepIDs are the steps eru backup setup runs after writing [backup]:
-// the archive settings, the repository and the timers.
+// every cluster's archive_command (a reload), the repository with a stanza
+// per cluster, and the timers.
 func BackupStepIDs() []string {
 	return []string{postgresConfigID, pgbackrestID, timersID}
 }
+
+// PgBackRestStepIDs is the repository step db create runs once the new
+// cluster is up, for its stanza and first full backup.
+func PgBackRestStepIDs() []string { return []string{pgbackrestID} }
 
 // PackagesStepIDs is the step that installs pgBackRest. eru backup setup
 // plans it to refuse a node that eru apply hasn't brought up to date.

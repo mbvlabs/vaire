@@ -24,7 +24,10 @@ const ConfPath = "/etc/pgbackrest/pgbackrest.conf"
 // and cipher pass live in ConfPath.
 type PgBackRest struct {
 	Stanza string
-	Shell  engine.Shell
+	// Port is the cluster's pg1-port, passed to the commands that connect
+	// to it. pgbackrest.conf's stanza section names it too.
+	Port  int
+	Shell engine.Shell
 	// StepID labels the log events, for example the job name.
 	StepID string
 	Report engine.Reporter
@@ -35,7 +38,11 @@ type PgBackRest struct {
 var _ Driver = PgBackRest{}
 
 func (p PgBackRest) run(ctx context.Context, stdout *bytes.Buffer, onLine func(string), args ...string) error {
-	full := append([]string{"-u", "postgres", "--", "pgbackrest", "--stanza=" + p.Stanza}, args...)
+	full := []string{"-u", "postgres", "--", "pgbackrest"}
+	if p.Stanza != "" {
+		full = append(full, "--stanza="+p.Stanza)
+	}
+	full = append(full, args...)
 	c := engine.Command{Name: "runuser", Args: full, OnLine: onLine}
 	if stdout != nil {
 		c.Stdout = stdout
@@ -46,13 +53,21 @@ func (p PgBackRest) run(ctx context.Context, stdout *bytes.Buffer, onLine func(s
 // StanzaCreate runs stanza-create, which also checks an existing stanza
 // against this cluster's system identifier.
 func (p PgBackRest) StanzaCreate(ctx context.Context) error {
-	return wrapTool("pgbackrest stanza-create", p.run(ctx, nil, nil, "stanza-create"))
+	return wrapTool("pgbackrest stanza-create", p.run(ctx, nil, nil, p.withPort("stanza-create")...))
+}
+
+// withPort puts --pg1-port before the commands that connect to the cluster.
+func (p PgBackRest) withPort(args ...string) []string {
+	if p.Port == 0 {
+		return args
+	}
+	return append([]string{"--pg1-port=" + strconv.Itoa(p.Port)}, args...)
 }
 
 // Check runs pgbackrest check: it forces a WAL switch and waits for the
 // segment to reach the repository.
 func (p PgBackRest) Check(ctx context.Context) error {
-	return wrapTool("pgbackrest check", p.run(ctx, nil, nil, "check"))
+	return wrapTool("pgbackrest check", p.run(ctx, nil, nil, p.withPort("check")...))
 }
 
 var newLabel = regexp.MustCompile(`new backup label = (\S+)`)
@@ -72,7 +87,7 @@ func (p PgBackRest) Backup(ctx context.Context, kind string) (Set, error) {
 			label = m[1]
 		}
 	}
-	if err := p.run(ctx, nil, onLine, "--type="+kind, "--log-level-console=detail", "backup"); err != nil {
+	if err := p.run(ctx, nil, onLine, p.withPort("--type="+kind, "--log-level-console=detail", "backup")...); err != nil {
 		return Set{}, wrapTool("pgbackrest backup", err)
 	}
 	info, err := p.Info(ctx, "")
@@ -134,68 +149,96 @@ type infoJSON struct {
 	} `json:"backup"`
 }
 
-// Info runs pgbackrest info --output=json.
+// Info runs pgbackrest info --output=json for the driver's stanza.
 func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
-	var stdout bytes.Buffer
 	args := []string{"--output=json"}
 	if label != "" {
 		args = append(args, "--set="+label)
 	}
-	args = append(args, "info")
+	stanzas, err := p.info(ctx, args...)
+	if err != nil {
+		return Info{}, err
+	}
+	for _, st := range stanzas {
+		if st.Name == p.Stanza {
+			return parseInfo(st), nil
+		}
+	}
+	return Info{Stanza: p.Stanza}, nil
+}
+
+// InfoAll runs pgbackrest info --output=json once for every stanza in the
+// repository, keyed by stanza. The driver's own stanza is ignored.
+func (p PgBackRest) InfoAll(ctx context.Context) (map[string]Info, error) {
+	all := p
+	all.Stanza = ""
+	stanzas, err := all.info(ctx, "--output=json")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Info, len(stanzas))
+	for _, st := range stanzas {
+		out[st.Name] = parseInfo(st)
+	}
+	return out, nil
+}
+
+func (p PgBackRest) info(ctx context.Context, args ...string) ([]infoJSON, error) {
+	var stdout bytes.Buffer
 	quiet := p
 	quiet.Report = nil
-	if err := quiet.run(ctx, &stdout, nil, args...); err != nil {
-		return Info{}, wrapTool("pgbackrest info", err)
+	if err := quiet.run(ctx, &stdout, nil, append(args, "info")...); err != nil {
+		return nil, wrapTool("pgbackrest info", err)
 	}
 	var stanzas []infoJSON
 	if err := json.Unmarshal(stdout.Bytes(), &stanzas); err != nil {
-		return Info{}, fmt.Errorf("pgbackrest info output does not parse: %w", err)
+		return nil, fmt.Errorf("pgbackrest info output does not parse: %w", err)
 	}
-	out := Info{Stanza: p.Stanza}
-	for _, st := range stanzas {
-		if st.Name != p.Stanza {
-			continue
+	return stanzas, nil
+}
+
+// parseInfo turns one stanza of pgbackrest info into an Info.
+func parseInfo(st infoJSON) Info {
+	out := Info{Stanza: st.Name}
+	out.StatusCode, out.Status = st.Status.Code, st.Status.Message
+	out.BackupLockHeld = st.Status.Lock.Backup.Held
+	for _, a := range st.Archive {
+		if out.ArchiveMin == "" || a.Min < out.ArchiveMin {
+			out.ArchiveMin = a.Min
 		}
-		out.StatusCode, out.Status = st.Status.Code, st.Status.Message
-		out.BackupLockHeld = st.Status.Lock.Backup.Held
-		for _, a := range st.Archive {
-			if out.ArchiveMin == "" || a.Min < out.ArchiveMin {
-				out.ArchiveMin = a.Min
-			}
-			if a.Max > out.ArchiveMax {
-				out.ArchiveMax = a.Max
-			}
-		}
-		for _, b := range st.Backup {
-			// pgBackRest leaves repository.size out of bundled backups; what
-			// the set stored (its delta) is then the best figure.
-			repoSize := b.Info.Repository.Size
-			if repoSize == 0 {
-				repoSize = b.Info.Repository.Delta
-			}
-			set := Set{
-				Label:     b.Label,
-				Type:      b.Type,
-				Start:     unixTime(b.Timestamp.Start),
-				Stop:      unixTime(b.Timestamp.Stop),
-				Size:      b.Info.Size,
-				Delta:     b.Info.Delta,
-				RepoSize:  repoSize,
-				RepoDelta: b.Info.Repository.Delta,
-				WALStart:  b.Archive.Start,
-				WALStop:   b.Archive.Stop,
-				Error:     b.Error,
-			}
-			if b.Prior != nil {
-				set.Prior = *b.Prior
-			}
-			for _, d := range b.DatabaseRef {
-				set.Databases = append(set.Databases, d.Name)
-			}
-			out.Sets = append(out.Sets, set)
+		if a.Max > out.ArchiveMax {
+			out.ArchiveMax = a.Max
 		}
 	}
-	return out, nil
+	for _, b := range st.Backup {
+		// pgBackRest leaves repository.size out of bundled backups; what
+		// the set stored (its delta) is then the best figure.
+		repoSize := b.Info.Repository.Size
+		if repoSize == 0 {
+			repoSize = b.Info.Repository.Delta
+		}
+		set := Set{
+			Label:     b.Label,
+			Type:      b.Type,
+			Start:     unixTime(b.Timestamp.Start),
+			Stop:      unixTime(b.Timestamp.Stop),
+			Size:      b.Info.Size,
+			Delta:     b.Info.Delta,
+			RepoSize:  repoSize,
+			RepoDelta: b.Info.Repository.Delta,
+			WALStart:  b.Archive.Start,
+			WALStop:   b.Archive.Stop,
+			Error:     b.Error,
+		}
+		if b.Prior != nil {
+			set.Prior = *b.Prior
+		}
+		for _, d := range b.DatabaseRef {
+			set.Databases = append(set.Databases, d.Name)
+		}
+		out.Sets = append(out.Sets, set)
+	}
+	return out
 }
 
 // networkProcessMax is process-max for verify and restore. Both mostly wait
@@ -203,7 +246,8 @@ func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
 // default in pgbackrest.conf.
 const networkProcessMax = "--process-max=4"
 
-// Verify runs pgbackrest verify over the whole repository.
+// Verify runs pgbackrest verify on the driver's stanza (RFC 9.4), so a big
+// repository is checked one stanza at a time.
 func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 	res := VerifyResult{StartedAt: now()}
 	var lines []string
@@ -227,6 +271,24 @@ func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 		return res, err
 	}
 	return res, nil
+}
+
+// StanzaDelete runs stop, then stanza-delete --force, then start, which
+// removes the stop file again. --force is needed because pgBackRest otherwise
+// checks that PostgreSQL is down, and the dropped cluster is gone. The
+// options come from the command line: a dropped stanza has no section in
+// pgbackrest.conf once pgbackrest-v1 re-renders it.
+func (p PgBackRest) StanzaDelete(ctx context.Context, pgPath string) error {
+	if p.Stanza == "" {
+		return errors.New("stanza-delete needs a stanza")
+	}
+	if err := wrapTool("pgbackrest stop", p.run(ctx, nil, nil, "stop")); err != nil {
+		return err
+	}
+	if err := wrapTool("pgbackrest stanza-delete", p.run(ctx, nil, nil, "--pg1-path="+pgPath, "--force", "stanza-delete")); err != nil {
+		return err
+	}
+	return wrapTool("pgbackrest start", p.run(ctx, nil, nil, "start"))
 }
 
 // RestoreScratch restores into opts.Path with archive_mode off, so the

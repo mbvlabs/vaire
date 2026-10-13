@@ -66,13 +66,16 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `tls_unverified`: a connection used `sslmode=require` (self-signed mode) or DNS was not verified before continuing.
 - `no_backup_before_drop`: `eru db drop` removed a database without a final dump. Its stanza is still kept (`data.stanza_kept`), so earlier pgBackRest backups stay restorable until they expire.
 - `records_not_updated`: `eru db drop` kept the dropped database's stanza but couldn't record it in `records.json`. Report it to a human.
+- `no_backups`: `eru backup list` found a database (or, with `--db`, that database) whose stanza holds no backup yet. Take one with `eru backup now --db <name> --type full`.
+- `archive_status_unavailable`: `eru backup list` couldn't read a database's `pg_stat_archiver` (its cluster is likely stopped), so that row's window ends at its newest backup.
 - `orphaned_database`: `eru db list` found a PostgreSQL cluster on the node that `cluster.toml` doesn't list. Ask the human before dropping it with `eru db drop`.
 - `restart_pending`: a step needs a PostgreSQL restart. `data.restart_pending` lists the steps, as `<step>@<db>` for a database's cluster, and `data.confirm_tokens` the tokens that restart them.
 - `context_tls_updated`: `cluster.toml` on the node has a different `domain` or `tls.mode` than the local context, and the context now follows it. After a domain change, eru's connections fail with a hostname mismatch until the node has a certificate for the new name: `eru-certs.timer` issues it within the hour, or the human runs `eru ssh --command 'sudo eru node run certs-renew'`.
-- `no_offsite_backup`: the server has no bucket, so no backup leaves it. `server init` ends with it and every `eru apply` repeats it. Ask the human to run `eru backup setup`; the age recovery identity already exists, so setup reuses it.
+- `no_offsite_backup`: the server has no bucket, so no backup leaves it. `server init` ends with it and every `eru apply` repeats it. Ask the human to run `eru backup setup`; the age recovery identity already exists, so setup reuses it. Setup restarts nothing: every database switches its WAL archiving to the bucket with a reload, gets its own pgBackRest stanza and takes a first full backup.
 - `memory_overcommitted`: the databases' sizes add up to more than the server's cluster budget (RAM less the reserve). Nothing is refused; under load the databases are throttled and the page cache shrinks. `eru db create`, `eru db resize`, `plan`, `apply`, `config set` and `tune show` carry it. Tell the human the numbers in the message and the options: shrink one with `eru db resize`, move one to its own node, or a bigger server.
 - `cpu_crowded`: more than two databases per vCPU, or `cpu_quota` values that add up to more than the server's CPU. Informational: CPU weights are relative.
 - `disk_crowded`: the data disk's used space plus every database's `max_wal_size` and the archive spool is over 80% of the disk.
+- `first_backup_failed`: `eru db create` (or `db fork`) made the database, but its pgBackRest stanza, first full backup or backup timers failed, so it isn't backed up yet. The database works. Run `eru apply --output agent` to retry; if it fails again, read the step's error.
 - `size_stepped_down`: `eru db create` got no `--size` and `[postgres] default_size` didn't fit in the free budget, so it created the largest size that did. The message says which and by how much the default would have overcommitted. `eru db resize` changes it later.
 - `shrink_below_use`: `eru db resize` set a database's memory below what its cluster uses right now. It goes ahead; expect throttling until the cluster settles.
 - `context_sync_failed`: the command succeeded, but the local context could not be updated from `cluster.toml`. `eru apply` retries it.
@@ -81,7 +84,7 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 
 - `precondition_failed` with `details.reason = "would_not_start"`: the database's PostgreSQL couldn't start, because its shared memory doesn't fit in what is left of the kernel's `CommitLimit`, or it requires huge pages the pool can't supply. `eru db create`, `db fork` and `db resize` refuse it before changing anything. `details.smallest_size`, when present, is the smallest size that would start; offer it to the human.
 
-- `precondition_failed` with `details.reason = "lock_held"`: another eru operation holds the node lock. `details.holder` names its PID, method, request ID and start time, or is `null` when that process is gone. Wait and retry; don't kill the holder.
+- `precondition_failed` with `details.reason = "lock_held"`: another eru operation holds the node lock. `details.holder` names its PID, method, request ID and start time, or is `null` when that process is gone. Wait and retry; don't kill the holder. A backup job skipped with `details.result.lock = "heavy_io"` met another database's full, diff, verify, drill or dump: each database's timers run at their own offset in the maintenance window, and only one of those jobs runs at a time.
 - `restart_pending` warning: the change is applied, but a step needs a PostgreSQL restart that hasn't happened. `data.restart_pending` lists the steps. Each database is its own PostgreSQL cluster and restarts on its own: ask the human for the tokens in `data.confirm_tokens` (`<db>/restart`, or `{server}/restart` for every database, one at a time) before re-running with one `--confirm` per token. `eru apply --db <db>` limits a run to one database's steps.
 - `node_version_mismatch` (exit 10): the operator and node builds differ. `details.client` and `details.node` show both. Once the operator connects to nodes, it handles this with `eru upgrade` or `--auto-upgrade-nodes`.
 - `precondition_failed` with `details.reason = "journal_corrupt"`: the node's step journal is unreadable. eru never resets it. Report it to a human.
@@ -90,7 +93,7 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 
 Status: `eru status --output agent`. Follow with `eru doctor --output agent` when a check needs detail.
 
-Backup: `eru backup now --type full --output agent`, then `eru backup verify --output agent`. `eru backup list` shows the PITR window.
+Backup: `eru backup now --type full --output agent`, then `eru backup verify --output agent`. Each database has its own stanza; without `--db` both run once per database, one after another, and fail at the end if any database failed (`details.failed`). `eru backup list` shows one row per database with its PITR window, then the dropped databases whose stanzas are kept until they expire; `--db <name>` shows that database's sets. A dropped database's stanza is deleted by the daily `eru-stanza-expiry` timer once its restore window (`retention_full` at the drop) has passed.
 
 Point-in-time restore: `eru restore --time <timestamp> --confirm <token>`. The cluster stays paused and PgBouncer stays stopped. Inspect with `eru sql`, then `eru restore promote` or `eru restore abort`.
 

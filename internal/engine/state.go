@@ -39,6 +39,7 @@ type State struct {
 type JobRecord struct {
 	ID           string            `json:"id"`
 	Job          string            `json:"job"`
+	DB           string            `json:"db,omitempty"`
 	Unit         string            `json:"unit,omitempty"`
 	InvocationID string            `json:"invocation_id,omitempty"`
 	State        string            `json:"state"`

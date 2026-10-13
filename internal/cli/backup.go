@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -347,10 +349,10 @@ func requirePackagesCurrent(ctx context.Context, caller remote.Caller, p *progre
 }
 
 // configureBackups writes [backup] through config.set and runs the backup
-// steps: archive settings, the repository with its first full backup, and
-// the timers. kit must already be saved on the operator. confirm is the
-// restart token, or empty to leave the restart pending.
-func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s backupSettings, kit *contexts.BackupCreds, confirm string) (engine.ApplyData, []output.Warning, error) {
+// steps: every cluster's archive_command (a reload), the repository with a
+// stanza and first full backup per cluster, and the timers. kit must already
+// be saved on the operator.
+func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s backupSettings, kit *contexts.BackupCreds) (engine.ApplyData, []output.Warning, error) {
 	if err := requirePackagesCurrent(ctx, caller, p); err != nil {
 		return engine.ApplyData{}, nil, err
 	}
@@ -369,7 +371,6 @@ func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s 
 	}
 	applyReply, err := caller.Call(ctx, "apply", map[string]any{"steps": steps.BackupStepIDs(), "rotate_backup_secrets": true}, remote.CallOptions{
 		Secrets: backupSecrets(kit),
-		Confirm: confirm,
 		OnEvent: p.event,
 	})
 	if err != nil {
@@ -420,7 +421,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	}
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{
-			Data:     map[string]any{"config": settings.configKeys(), "steps": steps.BackupStepIDs(), "restart": !wasConfigured, "dry_run": true},
+			Data:     map[string]any{"config": settings.configKeys(), "steps": steps.BackupStepIDs(), "dry_run": true},
 			Message:  "dry run: would probe " + settings.Bucket + ", write [backup] and run " + strings.Join(steps.BackupStepIDs(), ", "),
 			Warnings: s.warnings,
 		})
@@ -428,17 +429,6 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	p.note("checking the bucket " + settings.Bucket + " at " + settings.Endpoint)
 	if err := backup.Probe(ctx, settings.target(), cfg.Name()); err != nil {
 		return err
-	}
-	confirm := ""
-	if !wasConfigured {
-		token := cfg.Name() + "/restart"
-		if !MustNotPrompt(cmd) && stringFlag(cmd, "confirm") == "" {
-			p.warn("Turning on WAL archiving restarts PostgreSQL once (a few seconds of downtime; clients reconnect).")
-		}
-		if err := Confirm(cmd, token); err != nil {
-			return err
-		}
-		confirm = token
 	}
 	kit, generated, err := prepareKit(creds.Backup, settings, wasConfigured)
 	if err != nil {
@@ -450,7 +440,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	if err := contexts.SaveCredentials(s.ctx.Name, creds); err != nil {
 		return err
 	}
-	data, warnings, err := configureBackups(ctx, s.node, p, settings, kit, confirm)
+	data, warnings, err := configureBackups(ctx, s.node, p, settings, kit)
 	if err != nil {
 		return err
 	}
@@ -462,16 +452,19 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		})
 	}
 	message := []string{fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total)}
-	if data.Restarted() {
-		message = append(message, "restarted for WAL archiving: "+restartSummary(data.Restarts))
-	}
 	if list, err := s.node.Call(ctx, "backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
-		var bl backupListData
+		var bl backupRowsData
 		if list.Decode(&bl) == nil {
-			if latest := bl.latest(); latest != nil {
-				message = append(message, "first full backup: "+latest.Label+" ("+humanBytes(latest.Size)+")")
+			for _, r := range bl.Databases {
+				if r.DroppedAt != "" {
+					continue
+				}
+				line := r.Database + ": restore window " + r.Window.describe()
+				if r.Latest != nil {
+					line = r.Database + ": latest backup " + r.Latest.Label + " (" + humanBytes(r.Latest.Size) + "), restore window " + r.Window.describe()
+				}
+				message = append(message, line)
 			}
-			message = append(message, "restore window: "+bl.Window.describe())
 		}
 	}
 	res := output.Result{
@@ -490,19 +483,42 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	return output.Success(cmd, res)
 }
 
-// backupListData is backup.list's result as the operator reads it.
+// backupListData is backup.list's result for one database (--db) as the
+// operator reads it.
 type backupListData struct {
 	Stanza   string                    `json:"stanza"`
 	Status   string                    `json:"status"`
 	Window   windowData                `json:"restore_window"`
 	Archive  backup.ArchiveStatus      `json:"archive"`
 	Sets     []backup.Set              `json:"sets"`
-	Database string                    `json:"database,omitempty"`
+	Database string                    `json:"database"`
+	Dropped  *backup.DroppedStanza     `json:"dropped,omitempty"`
 	Verify   *backup.VerifyResult      `json:"last_verify,omitempty"`
 	Drill    *backup.Drill             `json:"last_drill,omitempty"`
 	Dumps    []backup.Dump             `json:"dumps"`
 	Policies map[string]any            `json:"dump_policies,omitempty"`
 	Restores map[string]backup.Restore `json:"restores,omitempty"`
+}
+
+// backupRowData is one database's row of backup.list without --db.
+type backupRowData struct {
+	Database  string               `json:"database"`
+	Stanza    string               `json:"stanza"`
+	Status    string               `json:"status"`
+	Window    windowData           `json:"restore_window"`
+	Sets      int                  `json:"sets"`
+	Latest    *backup.Set          `json:"latest,omitempty"`
+	Verify    *backup.VerifyResult `json:"last_verify,omitempty"`
+	Drill     *backup.Drill        `json:"last_drill,omitempty"`
+	Dump      *backup.Dump         `json:"last_dump,omitempty"`
+	DroppedAt string               `json:"dropped_at,omitempty"`
+	ExpiresAt string               `json:"expires_at,omitempty"`
+}
+
+// backupRowsData is backup.list's result without --db.
+type backupRowsData struct {
+	Databases []backupRowData           `json:"databases"`
+	Restores  map[string]backup.Restore `json:"restores,omitempty"`
 }
 
 type windowData struct {
@@ -518,13 +534,102 @@ func (w windowData) describe() string {
 	return fmt.Sprintf("%s to %s (archive lag %ds)", w.From, w.To, w.LagSeconds)
 }
 
-func (b backupListData) latest() *backup.Set {
-	for i := len(b.Sets) - 1; i >= 0; i-- {
-		if !b.Sets[i].Error {
-			return &b.Sets[i]
+// backupDatabases are the databases a backup command runs for: --db, else
+// every database in cluster.toml, by name.
+func backupDatabases(cmd *cobra.Command, s *session, p *progress) ([]string, error) {
+	if db := stringFlag(cmd, "db"); db != "" {
+		return []string{db}, nil
+	}
+	reply, err := s.node.Call(commandContext(cmd), "db.list", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Databases []databaseInfo `json:"databases"`
+	}
+	if err := reply.Decode(&data); err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, db := range data.Databases {
+		if db.InConfig {
+			names = append(names, db.Name)
 		}
 	}
-	return nil
+	if len(names) == 0 {
+		return nil, output.NewError(output.CodePrecondition, "there is no database to back up", output.ExitPrecondition,
+			"Create one with eru db create <name>.").WithDetails(map[string]any{"reason": "no_databases"})
+	}
+	return names, nil
+}
+
+// dbJobOutcome is one database's job of backup now or verify without --db.
+type dbJobOutcome struct {
+	Database string            `json:"database"`
+	JobID    string            `json:"job_id,omitempty"`
+	Result   any               `json:"result,omitempty"`
+	Error    *output.ErrorBody `json:"error,omitempty"`
+}
+
+// eachDatabase runs method once per database, one after another: each job
+// takes the server's heavy-I/O lock, so they can't run side by side. A
+// failed or skipped database doesn't stop the others. Ctrl-C detaches from
+// the running job and starts no more; detached is then that job's id.
+// result decodes one job's result; line describes it.
+func eachDatabase(cmd *cobra.Command, s *session, p *progress, dbs []string, method string, params func(db string) any,
+	result func(raw []byte) (any, string, error)) (outcomes []dbJobOutcome, lines []string, warnings []output.Warning, detached *string) {
+	for _, db := range dbs {
+		if len(dbs) > 1 {
+			p.note(db + ":")
+		}
+		reply, jobID, wasDetached, callErr := callJob(cmd, s, p, method, params(db), remote.CallOptions{})
+		if wasDetached {
+			return outcomes, lines, warnings, &jobID
+		}
+		o := dbJobOutcome{Database: db, JobID: jobID}
+		if callErr == nil {
+			var jr jobReply
+			if callErr = reply.Decode(&jr); callErr == nil {
+				var line string
+				o.JobID = jr.JobID
+				if o.Result, line, callErr = result(jr.Result); callErr == nil {
+					lines = append(lines, line)
+					warnings = append(warnings, reply.Warnings...)
+				}
+			}
+		}
+		if callErr != nil {
+			body := output.ErrorBody{Code: output.CodeError, Message: callErr.Error()}
+			var ce *output.CLIError
+			if errors.As(callErr, &ce) {
+				body = output.ErrorBody{Code: ce.Code, Message: ce.Error(), Hint: ce.Hint, Details: ce.Details}
+			}
+			o.Error = &body
+			lines = append(lines, db+": "+body.Message)
+		}
+		outcomes = append(outcomes, o)
+	}
+	return outcomes, lines, warnings, nil
+}
+
+// failedOutcomes is the error of a per-database run in which some failed:
+// the first failure's code, every outcome in details.
+func failedOutcomes(what, key string, outcomes []dbJobOutcome) error {
+	var failed []string
+	var first *output.ErrorBody
+	for _, o := range outcomes {
+		if o.Error != nil {
+			failed = append(failed, o.Database)
+			if first == nil {
+				first = o.Error
+			}
+		}
+	}
+	if first == nil {
+		return nil
+	}
+	return output.NewError(first.Code, fmt.Sprintf("%s failed for %s: %s", what, strings.Join(failed, ", "), first.Message), output.ExitFor(first.Code),
+		first.Hint).WithDetails(map[string]any{key: outcomes, "failed": failed})
 }
 
 func runBackupNow(cmd *cobra.Command, _ []string) error {
@@ -540,30 +645,62 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, jobID, detached, err := callJob(cmd, s, p, "backup.now", map[string]string{"type": kind}, remote.CallOptions{DryRun: dryRun(cmd)})
+	if dryRun(cmd) {
+		reply, err := s.node.Call(commandContext(cmd), "backup.now", map[string]string{"type": kind, "database": stringFlag(cmd, "db")},
+			remote.CallOptions{DryRun: true, OnEvent: p.event})
+		if err != nil {
+			return err
+		}
+		var data struct {
+			Backups []struct {
+				Database string `json:"database"`
+				Type     string `json:"type"`
+			} `json:"backups"`
+		}
+		_ = reply.Decode(&data)
+		lines := make([]string, 0, len(data.Backups))
+		for _, b := range data.Backups {
+			lines = append(lines, fmt.Sprintf("dry run: would take a %s backup of %s", b.Type, b.Database))
+		}
+		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
+	}
+	dbs, err := backupDatabases(cmd, s, p)
 	if err != nil {
 		return err
 	}
-	if detached {
-		return detachedResult(cmd, s, jobID, "the backup")
+	outcomes, lines, warnings, detached := eachDatabase(cmd, s, p, dbs, "backup.now",
+		func(db string) any { return map[string]string{"type": kind, "database": db} },
+		func(raw []byte) (any, string, error) {
+			var res struct {
+				DB  string     `json:"db"`
+				Set backup.Set `json:"set"`
+			}
+			if err := json.Unmarshal(raw, &res); err != nil {
+				return nil, "", err
+			}
+			return res.Set, fmt.Sprintf("%s: backup %s (%s) finished: %s", res.DB, res.Set.Label, res.Set.Type, humanBytes(res.Set.Size)), nil
+		})
+	if detached != nil {
+		return detachedResult(cmd, s, *detached, "the backup"+notStarted(dbs, outcomes))
 	}
-	if dryRun(cmd) {
-		var data map[string]any
-		_ = reply.Decode(&data)
-		return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("dry run: would take a %v backup", data["type"]), Warnings: s.warnings})
-	}
-	var res struct {
-		Set backup.Set `json:"set"`
-	}
-	jr, err := decodeJob(reply, &res)
-	if err != nil {
+	if err := failedOutcomes("the backup", "backups", outcomes); err != nil {
 		return err
 	}
 	return output.Success(cmd, output.Result{
-		Data:     map[string]any{"job_id": jr.JobID, "set": res.Set},
-		Message:  fmt.Sprintf("backup %s (%s) finished: %s", res.Set.Label, res.Set.Type, humanBytes(res.Set.Size)),
-		Warnings: append(s.warnings, reply.Warnings...),
+		Data:     map[string]any{"backups": outcomes},
+		Message:  strings.Join(lines, "\n"),
+		Warnings: append(s.warnings, warnings...),
+		Next:     []string{"eru backup list"},
 	})
+}
+
+// notStarted names the databases a detached per-database run never reached.
+func notStarted(dbs []string, outcomes []dbJobOutcome) string {
+	rest := dbs[min(len(outcomes)+1, len(dbs)):]
+	if len(rest) == 0 {
+		return ""
+	}
+	return " (not started for " + strings.Join(rest, ", ") + ")"
 }
 
 func runBackupList(cmd *cobra.Command, _ []string) error {
@@ -578,24 +715,28 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	warnings := append(s.warnings, reply.Warnings...)
+	if db == "" {
+		var data backupRowsData
+		if err := reply.Decode(&data); err != nil {
+			return err
+		}
+		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(backupRowLines(data), "\n"), Warnings: warnings})
+	}
 	var data backupListData
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	lines := []string{"Restore window: " + data.Window.describe()}
-	if db != "" {
-		lines[0] = "Restore window for " + db + ": " + data.Window.describe()
+	lines := []string{"Restore window for " + db + ": " + data.Window.describe()}
+	if data.Dropped != nil {
+		lines = append(lines, "Dropped at "+data.Dropped.DroppedAt+"; stanza "+data.Stanza+" is kept until "+data.Dropped.ExpiresAt)
 	}
 	lines = append(lines, "", fmt.Sprintf("  %-24s %-5s %-21s %10s %10s", "SET", "TYPE", "FINISHED", "SIZE", "IN REPO"))
 	for _, set := range data.Sets {
 		lines = append(lines, fmt.Sprintf("  %-24s %-5s %-21s %10s %10s", set.Label, set.Type, set.Stop, humanBytes(set.Size), humanBytes(set.RepoSize)))
 	}
 	if data.Verify != nil {
-		state := "passed"
-		if !data.Verify.OK {
-			state = "FAILED"
-		}
-		lines = append(lines, "", "Last verify: "+state+" at "+data.Verify.FinishedAt)
+		lines = append(lines, "", "Last verify: "+verifyState(data.Verify)+" at "+data.Verify.FinishedAt)
 	}
 	if data.Drill != nil {
 		lines = append(lines, "Last drill: "+data.Drill.Result+" at "+data.Drill.FinishedAt+" (backup "+data.Drill.BackupLabel+")")
@@ -609,7 +750,47 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 	for name, r := range data.Restores {
 		lines = append(lines, "", "Open restore of "+name+": "+r.Phase+" (target "+r.Target+")")
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
+	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: warnings})
+}
+
+// backupRowLines renders backup list without --db: a row per database, then
+// the dropped databases' kept stanzas.
+func backupRowLines(data backupRowsData) []string {
+	lines := []string{fmt.Sprintf("  %-20s %-20s %4s %-21s %-8s %-8s %s", "DATABASE", "STANZA", "SETS", "LATEST", "VERIFY", "DRILL", "RESTORE WINDOW")}
+	var dropped []string
+	for _, r := range data.Databases {
+		if r.DroppedAt != "" {
+			dropped = append(dropped, fmt.Sprintf("  %-20s %-20s %4d dropped %s, kept until %s; window %s", r.Database, r.Stanza, r.Sets, r.DroppedAt, r.ExpiresAt, r.Window.describe()))
+			continue
+		}
+		latest, drill := "-", "-"
+		if r.Latest != nil {
+			latest = r.Latest.Stop
+		}
+		if r.Drill != nil {
+			drill = r.Drill.Result
+		}
+		lines = append(lines, fmt.Sprintf("  %-20s %-20s %4d %-21s %-8s %-8s %s", r.Database, r.Stanza, r.Sets, latest, verifyState(r.Verify), drill, r.Window.describe()))
+	}
+	if len(dropped) > 0 {
+		lines = append(lines, "", "Dropped databases (restorable until their stanza expires):")
+		lines = append(lines, dropped...)
+	}
+	for name, r := range data.Restores {
+		lines = append(lines, "", "Open restore of "+name+": "+r.Phase+" (target "+r.Target+")")
+	}
+	return lines
+}
+
+// verifyState is a verify result in one word.
+func verifyState(v *backup.VerifyResult) string {
+	switch {
+	case v == nil:
+		return "-"
+	case v.OK:
+		return "passed"
+	}
+	return "FAILED"
 }
 
 func runBackupVerify(cmd *cobra.Command, _ []string) error {
@@ -619,22 +800,32 @@ func runBackupVerify(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, jobID, detached, err := callJob(cmd, s, p, "backup.verify", nil, remote.CallOptions{})
+	dbs, err := backupDatabases(cmd, s, p)
 	if err != nil {
 		return err
 	}
-	if detached {
-		return detachedResult(cmd, s, jobID, "the verify")
+	outcomes, lines, warnings, detached := eachDatabase(cmd, s, p, dbs, "backup.verify",
+		func(db string) any { return map[string]string{"database": db} },
+		func(raw []byte) (any, string, error) {
+			var res backup.VerifyResult
+			if err := json.Unmarshal(raw, &res); err != nil {
+				return nil, "", err
+			}
+			return res, "pgbackrest verify passed at " + res.FinishedAt, nil
+		})
+	if detached != nil {
+		return detachedResult(cmd, s, *detached, "the verify"+notStarted(dbs, outcomes))
 	}
-	var data backup.VerifyResult
-	jr, err := decodeJob(reply, &data)
-	if err != nil {
+	if err := failedOutcomes("pgbackrest verify", "verifies", outcomes); err != nil {
 		return err
+	}
+	for i := range lines {
+		lines[i] = outcomes[i].Database + ": " + lines[i]
 	}
 	return output.Success(cmd, output.Result{
-		Data:     map[string]any{"job_id": jr.JobID, "verify": data},
-		Message:  "pgbackrest verify passed at " + data.FinishedAt,
-		Warnings: append(s.warnings, reply.Warnings...),
+		Data:     map[string]any{"verifies": outcomes},
+		Message:  strings.Join(lines, "\n"),
+		Warnings: append(s.warnings, warnings...),
 	})
 }
 

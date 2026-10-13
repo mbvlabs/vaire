@@ -37,19 +37,18 @@ type pgbackrestStep struct{}
 func (pgbackrestStep) ID() string { return pgbackrestID }
 
 func (pgbackrestStep) Describe(config.Cluster) string {
-	return "render pgbackrest.conf, create the stanza, check WAL archiving and take the first full backup"
+	return "render pgbackrest.conf with a stanza per database, then create each stanza, check its WAL archiving and take its first full backup"
 }
 
-// NeedsRestartFirst: stanza-create and check need archive_mode on, which
-// postgres-config-v1 turns on with a pending restart.
-func (pgbackrestStep) NeedsRestartFirst() bool { return true }
-
-// SkipReason skips the step while no bucket is configured.
+// SkipReason skips the step while no bucket is configured or there is no
+// database to back up. archive_mode is on from creation, so the step never
+// waits for a restart: postgres-config-v1@<db> switches archive_command with
+// a reload.
 func (pgbackrestStep) SkipReason(cfg config.Cluster) string {
 	if !cfg.BackupConfigured() {
 		return "backups_not_configured"
 	}
-	if _, ok := cfg.BackupCluster(); !ok {
+	if len(cfg.Clusters) == 0 {
 		return "no_databases"
 	}
 	return ""
@@ -237,15 +236,14 @@ func (pgbackrestStep) Check(ctx context.Context, cfg config.Cluster, rt engine.R
 	if _, err := os.Stat(BackupEnvPath); err != nil {
 		return incomplete(BackupEnvPath + " is missing"), nil
 	}
-	info, err := driverFor(cfg, rt, nil).Info(ctx, "")
+	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
 	if err != nil {
 		return incomplete("pgbackrest info failed: " + err.Error()), nil
 	}
-	if info.StatusCode != 0 && !info.HasFull() {
-		return incomplete("the stanza reports " + info.Status), nil
-	}
-	if !info.HasFull() {
-		return incomplete("the repository has no full backup"), nil
+	for _, c := range cfg.Clusters {
+		if !all[c.Stanza].HasFull() {
+			return incomplete("stanza " + c.Stanza + " (" + c.Name + ") has no full backup"), nil
+		}
 	}
 	return complete(), nil
 }
@@ -276,44 +274,65 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err := writeFileOwned(backup.ConfPath, string(render.PgBackRestConf(cfg, rt.Host, v.BackupSecrets)), 0o600, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	d := driverFor(cfg, rt, report)
-	if err := d.StanzaCreate(ctx); err != nil {
-		return engine.ApplyResult{}, err
-	}
-	if err := d.Check(ctx); err != nil {
-		return engine.ApplyResult{}, err
-	}
-	info, err := d.Info(ctx, "")
+	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
-	notes := []string{"stanza " + d.Stanza + " checked"}
-	if !info.HasFull() {
-		set, err := d.Backup(ctx, backup.TypeFull)
+	var notes []string
+	for _, c := range cfg.Clusters {
+		// A stanza with a full backup is done; rotated keys check every
+		// stanza again, so a key that cannot push WAL shows up now.
+		if all[c.Stanza].HasFull() && !rt.RotateSecrets {
+			continue
+		}
+		note, err := setupStanza(ctx, cfg, c, BackupDriver(c, rt.Shell, pgbackrestID, report))
 		if err != nil {
 			return engine.ApplyResult{}, err
 		}
-		RecordBackup(cfg, set)
-		notes = append(notes, "first full backup "+set.Label)
+		notes = append(notes, note)
 	}
 	return engine.ApplyResult{Restart: engine.RestartNone, Notes: notes}, nil
 }
 
-// driverFor is the pgBackRest driver for cfg.
-func driverFor(cfg config.Cluster, rt engine.Runtime, report engine.Reporter) backup.PgBackRest {
-	first, _ := cfg.BackupCluster()
-	return backup.PgBackRest{Stanza: first.Stanza, Shell: rt.Shell, StepID: pgbackrestID, Report: report, PG: ClusterPG(first)}
+// setupStanza creates one cluster's stanza, checks its WAL archiving and
+// takes its first full backup when the stanza has none.
+func setupStanza(ctx context.Context, cfg config.Cluster, c config.ClusterSpec, d backup.PgBackRest) (string, error) {
+	if err := d.StanzaCreate(ctx); err != nil {
+		return "", err
+	}
+	if err := d.Check(ctx); err != nil {
+		return "", err
+	}
+	info, err := d.Info(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	if info.HasFull() {
+		return "stanza " + d.Stanza + " (" + c.Name + ") checked", nil
+	}
+	set, err := d.Backup(ctx, backup.TypeFull)
+	if err != nil {
+		return "", err
+	}
+	RecordBackup(cfg, c.Name, set)
+	return "stanza " + d.Stanza + " (" + c.Name + ") checked, first full backup " + set.Label, nil
 }
 
-// RecordBackup stores a successful backup in records.json and refreshes the
-// eru.prom backup lines. Neither failing fails the backup.
-func RecordBackup(cfg config.Cluster, set backup.Set) {
+// BackupDriver is the pgBackRest driver for spec's stanza, connecting to its
+// socket and port. A zero spec lists every stanza (InfoAll).
+func BackupDriver(spec config.ClusterSpec, shell engine.Shell, stepID string, report engine.Reporter) backup.PgBackRest {
+	return backup.PgBackRest{Stanza: spec.Stanza, Port: spec.Port, Shell: shell, StepID: stepID, Report: report, PG: ClusterPG(spec)}
+}
+
+// RecordBackup stores a successful backup of db in records.json and refreshes
+// the eru.prom backup lines. Neither failing fails the backup.
+func RecordBackup(cfg config.Cluster, db string, set backup.Set) {
 	finished := set.Stop
 	if finished == "" {
 		finished = time.Now().UTC().Format(time.RFC3339)
 	}
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
-		s.LastBackup[set.Type] = backup.BackupResult{Label: set.Label, FinishedAt: finished, Size: set.Size}
+		s.RecordBackup(db, set, finished)
 		return nil
 	})
 	WriteMetrics(cfg)

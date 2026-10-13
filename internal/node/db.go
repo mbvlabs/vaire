@@ -244,6 +244,9 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDo
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with eru apply.")
 	}
+	if w := firstBackup(ctx, env, cfg, db.Name); w != nil {
+		warnings = append(warnings, *w)
+	}
 	created, _ := cfg.ClusterByName(db.Name)
 	return created, append(warnings, oversubscriptionWarnings(cfg, rt.Host)...), nil
 }
@@ -280,6 +283,27 @@ func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
 		Report: env.Report,
 	})
 	return err
+}
+
+// firstBackup runs pgbackrest-v1 and timers-v1 when backups are on: the new
+// cluster's stanza, its archive check and first full backup, then its backup
+// timers. The database already works, so a failure is the warning
+// first_backup_failed, not an error.
+func firstBackup(ctx context.Context, env *Env, cfg config.Cluster, db string) *output.Warning {
+	if !cfg.BackupConfigured() {
+		return nil
+	}
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
+		Only:   append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...),
+		Report: env.Report,
+	})
+	if err == nil {
+		return nil
+	}
+	return &output.Warning{
+		Code:    "first_backup_failed",
+		Message: db + " was created, but its stanza, first full backup or backup timers failed: " + err.Error() + "; run eru apply to retry",
+	}
 }
 
 func existingDatabase(name string) error {
@@ -382,7 +406,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	}
 	env.Cluster = cfg
 	if inConfig && spec.Stanza != "" {
-		if err := recordDroppedStanza(spec, final); err != nil {
+		if err := recordDroppedStanza(cfg, spec, final); err != nil {
 			warnings = append(warnings, output.Warning{Code: "records_not_updated",
 				Message: "the stanza " + spec.Stanza + " of " + p.Name + " is kept, but recording it failed: " + err.Error()})
 		}
@@ -401,16 +425,28 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 }
 
 // recordDroppedStanza notes spec's stanza in records.json as dropped: db
-// drop keeps it, so its backups and WAL stay restorable until it expires.
-func recordDroppedStanza(spec config.ClusterSpec, final *backup.Dump) error {
-	entry := backup.DroppedStanza{Database: spec.Name, Stanza: spec.Stanza, DroppedAt: time.Now().UTC().Format(time.RFC3339)}
+// drop keeps it, so its backups and WAL stay restorable for the database's
+// restore window, after which the stanza-expiry job deletes it. The
+// database's last backup and verify results go, so its metrics stop.
+func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, final *backup.Dump) error {
+	now := time.Now().UTC()
+	entry := backup.DroppedStanza{
+		Database:  spec.Name,
+		Stanza:    spec.Stanza,
+		DroppedAt: now.Format(time.RFC3339),
+		ExpiresAt: now.AddDate(0, 0, 7*cfg.RetentionFull(spec)).Format(time.RFC3339),
+	}
 	if final != nil {
 		entry.FinalDump = final.ID
 	}
-	return backup.UpdateRecords(func(r *backup.Records) error {
+	err := backup.UpdateRecords(func(r *backup.Records) error {
 		r.DroppedStanzas = append(r.DroppedStanzas, entry)
+		delete(r.LastBackup, spec.Name)
+		delete(r.LastVerify, spec.Name)
 		return nil
 	})
+	steps.WriteMetrics(cfg)
+	return err
 }
 
 // dropRouting takes a dropped database out of the poolers and the timers.

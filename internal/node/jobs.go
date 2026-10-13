@@ -29,7 +29,7 @@ const JobDir = "/var/lib/eru/jobs"
 // dump-create run only as detachable jobs an RPC starts (--job-id).
 var jobNames = []string{
 	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump",
-	"restore", "db-fork",
+	"stanza-expiry", "restore", "db-fork",
 	"vps-backup", "maint-daily", "maint-weekly", "certs-renew", "metrics-refresh",
 }
 
@@ -39,11 +39,24 @@ var laterJobs = map[string]bool{"vps-backup": true, "maint-daily": true, "maint-
 // rpcOnlyJobs need a spec written by the RPC that starts them.
 var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true}
 
+// databaseJobs are the template-unit jobs: each runs for one database, named
+// by --db on a timer run (eru-<job>@<db>) or by the RPC's params.
+var databaseJobs = map[string]bool{
+	"backup-full": true, "backup-diff": true, "backup-incr": true, "backup-verify": true, "restore-drill": true, "db-dump": true,
+}
+
+// heavyIOJobs take the server's heavy-I/O lock (RFC 9.3), so at most one of
+// them reads the disk and pushes to the bucket at a time. Incrementals are
+// small and frequent; they only take their cluster's lock.
+var heavyIOJobs = map[string]bool{
+	"backup-full": true, "backup-diff": true, "backup-verify": true, "restore-drill": true, "db-dump": true,
+}
+
 // JobOptions are eru node run's flags.
 type JobOptions struct {
 	// ID names a detachable job whose spec an RPC wrote.
 	ID string
-	// DB is the database of a db-dump timer run.
+	// DB is the database of a template-unit timer run (eru-<job>@<db>).
 	DB string
 }
 
@@ -74,7 +87,8 @@ func knownJob(job string) bool { return slices.Contains(jobNames, job) }
 // RunJob runs one job of eru node run: a timer run or a detachable job an RPC
 // started. It records the job in state.json, takes the node lock (shared,
 // timeout 0: a busy lock records skipped and exits 0; certs-renew waits up to
-// 20 minutes), runs it and records the outcome.
+// 20 minutes), the heavy-I/O lock for heavy backup jobs and the clusters'
+// locks (both timeout 0, skipped when busy), runs it and records the outcome.
 func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter) (any, error) {
 	if !knownJob(job) {
 		return nil, output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
@@ -130,8 +144,18 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		return nil, err
 	}
 	env.Cluster = cfg
+	if databaseJobs[job] {
+		env.DB = jobDatabase(env)
+		if env.DB == "" {
+			return nil, output.NewError(output.CodeUsage, "job "+job+" runs for one database", output.ExitUsage,
+				"Pass --db <database>, as the eru-"+job+"@<database> timer does.")
+		}
+		if _, ok := cfg.ClusterByName(env.DB); !ok {
+			return nil, databaseNotFound(env.DB)
+		}
+	}
 
-	rec := engine.JobRecord{ID: env.ID, Job: job, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID")}
+	rec := engine.JobRecord{ID: env.ID, Job: job, DB: env.DB, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID")}
 	_ = engine.UpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(env.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
@@ -158,6 +182,20 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		return nil, err
 	}
 	defer release()
+	if heavyIOJobs[job] {
+		release, err := engine.AcquireHeavyIO(ctx, job, env.ID)
+		if engine.IsLockHeld(err) {
+			logLine(report, job, "another backup job holds the heavy-I/O lock; skipping "+job)
+			res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy", "lock": "heavy_io", "db": env.DB}
+			finishJob(rec, engine.JobSkipped, "the heavy-I/O lock was busy", res, nil)
+			return res, nil
+		}
+		if err != nil {
+			finishJob(rec, engine.JobFailed, "", nil, err)
+			return nil, err
+		}
+		defer release()
+	}
 	for _, cluster := range jobClusters(env) {
 		release, err := engine.AcquireCluster(ctx, cluster, engine.LockShared, job, env.ID, 0)
 		if engine.IsLockHeld(err) {
@@ -203,6 +241,8 @@ func runJobFunc(ctx context.Context, env *jobEnv) (any, error) {
 		return jobDrill(ctx, env)
 	case "db-dump":
 		return jobDump(ctx, env)
+	case "stanza-expiry":
+		return jobStanzaExpiry(ctx, env)
 	case "restore":
 		return jobRestore(ctx, env)
 	case "db-fork":
@@ -489,9 +529,23 @@ func runJobRPC(ctx context.Context, env *Env, job string, params any, jobSecrets
 	return followJob(ctx, env, id)
 }
 
+// jobDatabase is the database a template-unit job runs for: --db, else the
+// RPC's params.database.
+func jobDatabase(env *jobEnv) string {
+	if env.DB != "" {
+		return env.DB
+	}
+	var p struct {
+		Database string `json:"database"`
+	}
+	if len(env.Params) > 0 {
+		_ = json.Unmarshal(env.Params, &p)
+	}
+	return p.Database
+}
+
 // jobClusters are the clusters a per-database job works in, in name order,
-// which is the order their locks are taken. Backup jobs cover the one
-// stanza and take none until they run per database.
+// which is the order their locks are taken.
 func jobClusters(env *jobEnv) []string {
 	var p struct {
 		Database string `json:"database"`
@@ -502,12 +556,12 @@ func jobClusters(env *jobEnv) []string {
 		_ = json.Unmarshal(env.Params, &p)
 	}
 	var names []string
-	switch env.Job {
-	case "db-dump":
-		names = []string{env.DB, p.Database}
-	case "restore":
+	switch {
+	case databaseJobs[env.Job]:
+		names = []string{env.DB}
+	case env.Job == "restore":
 		names = []string{p.Database}
-	case "db-fork":
+	case env.Job == "db-fork":
 		names = []string{p.Source, p.Name}
 	}
 	var out []string

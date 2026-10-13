@@ -3,9 +3,9 @@
 // age-encrypted long-retention dumps, the durable records in records.json, the
 // eru.prom backup lines and the free-space checks.
 //
-// The user-facing model is per database. pgBackRest and WAL archiving run
-// cluster-wide underneath because PostgreSQL has one WAL stream for all
-// databases, and point-in-time recovery needs it.
+// Each database is its own PostgreSQL cluster with its own WAL stream, so
+// pgBackRest keeps one stanza per database in one repository: a driver is
+// bound to one stanza and its cluster's port.
 package backup
 
 import (
@@ -26,8 +26,12 @@ type Driver interface {
 	// Info lists the backup sets. With label it describes that set only,
 	// including the databases it contains.
 	Info(ctx context.Context, label string) (Info, error)
-	// Verify checks every file in the repository against its checksum.
+	// Verify checks every file of the stanza against its checksum.
 	Verify(ctx context.Context) (VerifyResult, error)
+	// StanzaDelete removes the stanza and everything in it from the
+	// repository. pgPath is the dropped cluster's data directory, which
+	// pgBackRest wants named even though it no longer exists.
+	StanzaDelete(ctx context.Context, pgPath string) error
 	// RestoreScratch restores into an empty directory that is not the live
 	// data directory, with WAL archiving off.
 	RestoreScratch(ctx context.Context, opts RestoreOptions) error
