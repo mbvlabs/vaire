@@ -94,11 +94,13 @@ func sheetLines(name string, sv tuneServer) []string {
 type tuneShowData struct {
 	// Server is the budget sheet: RAM, the reserve, what clusters get.
 	Server         tuneServer        `json:"server"`
+	// The rest is one database's cluster; empty when no database was picked
+	// (none, or several and no --db).
 	Database       string            `json:"database,omitempty"`
-	Inputs         map[string]any    `json:"inputs"`
-	Settings       []tuneSetting     `json:"settings"`
-	Current        map[string]string `json:"current"`
-	PendingRestart []string          `json:"pending_restart"`
+	Inputs         map[string]any    `json:"inputs,omitempty"`
+	Settings       []tuneSetting     `json:"settings,omitempty"`
+	Current        map[string]string `json:"current,omitempty"`
+	PendingRestart []string          `json:"pending_restart,omitempty"`
 }
 
 // fetchTune reads tune.show; the node's oversubscription warnings join the
@@ -134,6 +136,8 @@ func runTuneShow(cmd *cobra.Command, _ []string) error {
 	lines := sheetLines(s.ctx.Name, data.Server)
 	if data.Database != "" {
 		lines = append(lines, "", fmt.Sprintf("%d settings for %s (eru tune explain --db %s shows them)", len(data.Settings), data.Database, data.Database))
+	} else if len(data.Server.Clusters) > 1 {
+		lines = append(lines, "", "eru tune show --db <name> for a database's settings")
 	}
 	message := strings.Join(lines, "\n")
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings})
@@ -149,6 +153,14 @@ func runTuneExplain(cmd *cobra.Command, _ []string) error {
 	data, err := fetchTune(cmd, s, p)
 	if err != nil {
 		return err
+	}
+	if data.Database == "" && len(data.Server.Clusters) > 1 {
+		names := make([]string, 0, len(data.Server.Clusters))
+		for _, c := range data.Server.Clusters {
+			names = append(names, c.Name)
+		}
+		return output.NewError(output.CodeInputRequired, "this server has several databases; name one with --db", output.ExitInput,
+			"Pick a database from details.databases.").WithDetails(map[string]any{"flag": "--db", "databases": names})
 	}
 	lines := sheetLines(s.ctx.Name, data.Server)
 	if data.Database == "" {

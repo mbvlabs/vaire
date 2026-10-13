@@ -947,7 +947,7 @@ func tuneCommands() cmdSpec {
 				use: "show",
 				run: runTuneShow,
 				flags: []fl{
-					flagString("db", "", "The database whose cluster to show; needed when there are several"),
+					flagString("db", "", "The database whose settings to add to the sheet; the only one is picked when there is one"),
 				},
 				meta: CommandMeta{
 					Summary:   "Print the server's budget sheet and the calculated settings",

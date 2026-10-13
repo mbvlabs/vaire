@@ -11,7 +11,8 @@ import (
 )
 
 type tuneShowParams struct {
-	// DB picks the cluster; empty means the only one.
+	// DB picks the cluster; empty means the only one, or the server sheet
+	// alone when there are none or several.
 	DB string `json:"db,omitempty"`
 }
 
@@ -23,7 +24,7 @@ func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
 	rt := runtimeFor(env, true)
 	data := map[string]any{"server": serverBudget(env.Cluster, rt.Host)}
 	warnings := oversubscriptionWarnings(env.Cluster, rt.Host)
-	if len(env.Cluster.Clusters) == 0 && p.DB == "" {
+	if p.DB == "" && len(env.Cluster.Clusters) != 1 {
 		return Result{Data: data, Warnings: warnings}, nil
 	}
 	spec, err := onlyCluster(env.Cluster, p.DB)
