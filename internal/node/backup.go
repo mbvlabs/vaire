@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,15 +33,6 @@ func repoDriver(stepID string, report engine.Reporter) backup.PgBackRest {
 	return driver(config.ClusterSpec{}, stepID, report)
 }
 
-// firstCluster is the cluster the drill's RPC still covers without a
-// database: the first. The drill becomes per database in unit 32.
-func firstCluster(cfg config.Cluster) config.ClusterSpec {
-	if len(cfg.Clusters) == 0 {
-		return config.ClusterSpec{}
-	}
-	return cfg.Clusters[0]
-}
-
 // requireBackups refuses a backup method on a cluster without a bucket.
 func requireBackups(cfg config.Cluster) error {
 	if cfg.BackupConfigured() {
@@ -56,7 +47,7 @@ func requireBackups(cfg config.Cluster) error {
 // the heavy-I/O lock.
 func oneDatabase(method string) error {
 	return output.NewError(output.CodeUsage, method+" runs for one database: name it in params.database", output.ExitUsage,
-		"eru backup now and eru backup verify without --db call it once per database.")
+		"eru backup now, eru backup verify and eru restore drill without --db call it once per database.")
 }
 
 type backupNowParams struct {
@@ -468,19 +459,6 @@ func databaseSize(ctx context.Context, local pg.Local, db string) int64 {
 	return n
 }
 
-// liveDatabases lists the connectable non-template databases.
-func liveDatabases(ctx context.Context, local pg.Local) ([]string, error) {
-	rows, err := local.Query(ctx, "postgres", "SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname", nil)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, r["datname"])
-	}
-	return out, nil
-}
-
 // --- restore drill ---
 
 type drillParams struct {
@@ -488,6 +466,15 @@ type drillParams struct {
 	Database string `json:"database,omitempty"`
 }
 
+// drillPlan is one database's drill in restore.drill's dry run.
+type drillPlan struct {
+	Database string `json:"database"`
+	Target   string `json:"target"`
+	Timeline string `json:"timeline,omitempty"`
+}
+
+// handleRestoreDrill starts the drill of params.database. A dry run without
+// a database plans one per cluster; the CLI runs them one after another.
 func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 	var p drillParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -496,42 +483,58 @@ func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
-	spec := firstCluster(env.Cluster)
+	specs := env.Cluster.Clusters
 	if p.Database != "" {
-		var ok bool
-		if spec, ok = env.Cluster.ClusterByName(p.Database); !ok {
+		spec, ok := env.Cluster.ClusterByName(p.Database)
+		if !ok {
 			return Result{}, databaseNotFound(p.Database)
 		}
+		specs = []config.ClusterSpec{spec}
+	} else if !env.Req.DryRun {
+		return Result{}, oneDatabase("restore.drill")
 	}
+	var at time.Time
 	if p.Time != "" {
-		t, err := time.Parse(time.RFC3339, p.Time)
-		if err != nil {
+		var err error
+		if at, err = time.Parse(time.RFC3339, p.Time); err != nil {
 			return Result{}, output.NewError(output.CodeUsage, "time must be RFC 3339", output.ExitUsage, "")
 		}
-		d := driver(spec, "restore.drill", nil)
-		info, err := d.Info(ctx, "")
-		if err != nil {
-			return Result{}, err
+	}
+	rs, err := backup.LoadRecords()
+	if err != nil {
+		return Result{}, err
+	}
+	plan := make([]drillPlan, 0, len(specs))
+	for _, spec := range specs {
+		target := backup.TargetLatest
+		if p.Time != "" {
+			d := driver(spec, "restore.drill", nil)
+			info, err := d.Info(ctx, "")
+			if err != nil {
+				return Result{}, err
+			}
+			archive, err := d.ArchiveStatus(ctx)
+			if err != nil {
+				return Result{}, err
+			}
+			if err := inWindow(restoreWindow(info, archive), at); err != nil {
+				return Result{}, err
+			}
+			target = at.UTC().Format(time.RFC3339)
 		}
-		archive, err := d.ArchiveStatus(ctx)
-		if err != nil {
-			return Result{}, err
-		}
-		if err := inWindow(restoreWindow(info, archive), t); err != nil {
-			return Result{}, err
-		}
+		plan = append(plan, drillPlan{Database: spec.Name, Target: target, Timeline: rs.TargetTimeline(spec.Name, spec.Stanza)})
 	}
 	if env.Req.DryRun {
-		return Result{Data: map[string]any{"time": p.Time, "dry_run": true}}, nil
+		return Result{Data: map[string]any{"drills": plan, "dry_run": true}}, nil
 	}
-	p.Database = spec.Name
 	return runJobRPC(ctx, env, "restore-drill", p, nil)
 }
 
-// jobDrill restores the job's cluster into a scratch directory (the path
-// server init --restore relies on), opens every database, runs pg_amcheck,
-// compares the database list with the live cluster and tears it down. A
-// drill never pushes WAL: the scratch instance runs with archive_mode off.
+// jobDrill materialises the job's database at the latest point, or at
+// params.time, into the temporary cluster <db>__drill (RFC 9.4): restored
+// from its stanza on the timeline restore undo recorded, promoted there, and
+// never archiving. It opens the database, runs pg_amcheck on it, compares
+// its tables with the live cluster's and drops the copy.
 func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	var p drillParams
 	if len(env.Params) > 0 {
@@ -543,14 +546,20 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	if err := requireBackups(cfg); err != nil {
 		return nil, err
 	}
-	drill := backup.Drill{ID: env.ID, Database: env.DB, StartedAt: stamp(), Target: backup.TargetLatest}
-	opts := backup.RestoreOptions{Kind: backup.TargetLatest}
+	spec := env.spec()
+	db := spec.Name
+	rs, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
+	drill := backup.Drill{ID: env.ID, Database: db, StartedAt: stamp(), Target: backup.TargetLatest}
+	opts := backup.RestoreOptions{Kind: backup.TargetLatest, Timeline: rs.TargetTimeline(db, spec.Stanza)}
 	if p.Time != "" {
 		t, err := time.Parse(time.RFC3339, p.Time)
 		if err != nil {
 			return nil, err
 		}
-		opts = backup.RestoreOptions{Kind: backup.TargetTime, Time: t}
+		opts.Kind, opts.Time = backup.TargetTime, t
 		drill.Target = t.UTC().Format(time.RFC3339)
 	}
 	record := func() {
@@ -561,8 +570,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		})
 		steps.WriteMetrics(cfg)
 	}
-	first := env.spec()
-	d := driver(first, env.Job, env.Report)
+	d := driver(spec, env.Job, env.Report)
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return nil, err
@@ -571,107 +579,136 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	if !ok {
 		drill.Result, drill.Reason = backup.DrillSkipped, "no_backups"
 		record()
-		return drill, fmt.Errorf("%w: the repository has no backup", errSkipped)
+		return drill, fmt.Errorf("%w: the stanza has no backup", errSkipped)
 	}
 	drill.BackupLabel = latest.Label
-	firstPG := steps.ClusterPG(first)
-	dataDir := cfg.Server.DataDirectory(first.Name)
-	live, err := liveDatabases(ctx, firstPG)
-	if err != nil {
-		return nil, err
-	}
-	var size int64
-	for _, db := range live {
-		size += databaseSize(ctx, firstPG, db)
-	}
-	if _, err := backup.CheckSpace([]backup.SpaceNeed{{Path: backup.ScratchRoot(dataDir), Need: backup.ScratchNeed(size), Purpose: "the drill's scratch restore"}}); err != nil {
+	live := steps.ClusterPG(spec)
+	if _, err := backup.CheckSpace([]backup.SpaceNeed{{Path: cfg.Server.DataDirectory(db), Need: backup.CopyNeed(databaseSize(ctx, live, db)),
+		Purpose: "the drill's copy of " + db}}); err != nil {
 		drill.Result, drill.Reason = backup.DrillSkipped, "insufficient_space"
 		record()
 		logLine(env.Report, env.Job, err.Error())
 		return drill, fmt.Errorf("%w: %s", errSkipped, err.Error())
 	}
-	scratch, err := backup.NewScratch(dataDir, "drill-"+env.ID, env.shell(), env.Job, env.Report)
+	name := backup.DrillName(db)
+	if err := dropKilledDrill(env, rs, db); err != nil {
+		return nil, err
+	}
+	m, err := backup.NewMaterialised(cfg.Server.DataRoot, name, db, spec.Port, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = scratch.Remove() }()
-	fail := func(name string, err error) (any, error) {
-		drill.Checks = append(drill.Checks, backup.DrillCheck{Name: name, OK: false, Detail: secrets.Redact(err.Error())})
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		s.Drilling[db] = name
+		return nil
+	}); err != nil {
+		_ = m.Drop()
+		return nil, err
+	}
+	defer func() {
+		if err := m.Drop(); err != nil {
+			logLine(env.Report, env.Job, "dropping "+name+" failed, the next drill of "+db+" drops it: "+err.Error())
+			return
+		}
+		_ = backup.UpdateRecords(func(s *backup.Records) error {
+			delete(s.Drilling, db)
+			return nil
+		})
+	}()
+	fail := func(check string, err error) (any, error) {
+		drill.Checks = append(drill.Checks, backup.DrillCheck{Name: check, OK: false, Detail: secrets.Redact(err.Error())})
 		drill.Result = backup.DrillFail
 		record()
-		return drill, output.WrapError(output.CodeExternalCommand, fmt.Errorf("the restore drill failed at %s: %w", name, err), output.ExitExternal,
+		return drill, output.WrapError(output.CodeExternalCommand, fmt.Errorf("the restore drill of %s failed at %s: %w", db, check, err), output.ExitExternal,
 			"Read the job log with eru job follow "+env.ID+".")
 	}
-	if err := scratch.Restore(ctx, d, opts); err != nil {
+	if err := m.Restore(ctx, d, opts); err != nil {
+		// pg_dropcluster removes the copy's log with it.
+		for _, line := range m.LogTail(20) {
+			logLine(env.Report, env.Job, name+": "+line)
+		}
 		return fail("restore", err)
 	}
-	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "restore", OK: true})
-	if err := scratch.Start(ctx); err != nil {
-		return fail("start", err)
+	drill.RecoveredTo = m.RecoveredTo(ctx)
+	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "restore", OK: true, Detail: "recovered to " + drill.RecoveredTo})
+	copyPG := m.PG()
+	if _, err := copyPG.Query(ctx, db, "SELECT 1", nil); err != nil {
+		return fail("open "+db, err)
 	}
-	drill.RecoveredTo = scratch.RecoveredTo(ctx)
-	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "start", OK: true, Detail: "recovered to " + drill.RecoveredTo})
-	restored, err := liveDatabases(ctx, scratch.PG())
+	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "open " + db, OK: true})
+	amctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	err = env.shell().Exec(amctx, env.Job, engine.Command{Name: "runuser", Args: []string{
+		"-u", "postgres", "--", "/usr/lib/postgresql/18/bin/pg_amcheck", "-h", copyPG.Host, "-p", strconv.Itoa(copyPG.Port),
+		"--install-missing", "--database=" + db,
+	}}, env.Report)
+	cancel()
+	ok = err == nil
+	check := backup.DrillCheck{Name: "amcheck " + db, OK: ok}
 	if err != nil {
-		return fail("list databases", err)
+		check.Detail = secrets.Redact(err.Error())
 	}
-	ok = true
-	for _, db := range restored {
-		if _, err := scratch.PG().Query(ctx, db, "SELECT 1", nil); err != nil {
-			drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "open " + db, OK: false, Detail: secrets.Redact(err.Error())})
-			ok = false
-			continue
-		}
-		amctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-		err := env.shell().Exec(amctx, env.Job, engine.Command{Name: "runuser", Args: []string{
-			"-u", "postgres", "--", "/usr/lib/postgresql/18/bin/pg_amcheck", "-h", scratch.Socket, "-p", strconv.Itoa(scratch.Port),
-			"--install-missing", "--database=" + db,
-		}}, env.Report)
-		cancel()
-		check := backup.DrillCheck{Name: "amcheck " + db, OK: err == nil}
-		if err != nil {
-			check.Detail = secrets.Redact(err.Error())
-			ok = false
-		}
-		drill.Checks = append(drill.Checks, check)
-	}
-	var missing []string
-	if p.Time == "" && !containsString(restored, first.Name) {
-		missing = append(missing, first.Name)
-	}
-	listCheck := backup.DrillCheck{Name: "database list", OK: len(missing) == 0}
-	if len(missing) > 0 {
-		listCheck.Detail = "missing from the restore: " + strings.Join(missing, ", ")
-		ok = false
-	} else {
-		extra := diffList(restored, live)
-		gone := diffList(live, restored)
-		if len(extra)+len(gone) > 0 {
-			listCheck.Detail = fmt.Sprintf("only in the restore: %v; only live: %v", extra, gone)
-		}
-	}
-	drill.Checks = append(drill.Checks, listCheck)
+	drill.Checks = append(drill.Checks, check)
+	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "tables", OK: true, Detail: tableDiff(compareRows(ctx, live, copyPG, db))})
 	drill.Result = backup.DrillPass
 	if !ok {
 		drill.Result = backup.DrillFail
 	}
 	record()
 	if !ok {
-		return drill, output.NewError(output.CodeExternalCommand, "the restore drill failed its checks", output.ExitExternal,
+		return drill, output.NewError(output.CodeExternalCommand, "the restore drill of "+db+" failed its checks", output.ExitExternal,
 			"Read the checks in the job result with eru job follow "+env.ID+".").WithDetails(map[string]any{"drill": drill})
 	}
 	return drill, nil
 }
 
-// diffList returns the entries of a not in b.
-func diffList(a, b []string) []string {
-	var out []string
-	for _, v := range a {
-		if !containsString(b, v) {
-			out = append(out, v)
+// dropKilledDrill drops the <db>__drill cluster a killed drill left behind:
+// records.json still names it as db's running drill, and the heavy-I/O lock
+// this job holds means no other drill runs. A <db>__drill the records don't
+// name is not the drill's, and NewMaterialised refuses it.
+func dropKilledDrill(env *jobEnv, rs backup.Records, db string) error {
+	name, ok := rs.Drilling[db]
+	if !ok {
+		return nil
+	}
+	logLine(env.Report, env.Job, "dropping "+name+", left by a drill that did not finish")
+	if err := backup.DropTemporaryCluster(env.shell(), env.Job, env.Report, name, filepath.Join(env.Cluster.Server.DataRoot, name)); err != nil {
+		return err
+	}
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		delete(s.Drilling, db)
+		return nil
+	})
+}
+
+// maxTableNames bounds the table names a drill's tables check lists.
+const maxTableNames = 10
+
+// tableDiff describes the tables of a drill's comparison with live: how
+// many, and the ones only one side has. A table created or dropped since the
+// target is expected, so it is a detail, not a failure.
+func tableDiff(rows []tableRows) string {
+	var onlyCopy, onlyLive []string
+	for _, r := range rows {
+		switch {
+		case r.Live == nil:
+			onlyCopy = append(onlyCopy, r.Table)
+		case r.Restoring == nil:
+			onlyLive = append(onlyLive, r.Table)
 		}
 	}
-	sort.Strings(out)
+	names := func(list []string) string {
+		if len(list) > maxTableNames {
+			return strings.Join(list[:maxTableNames], ", ") + fmt.Sprintf(" and %d more", len(list)-maxTableNames)
+		}
+		return strings.Join(list, ", ")
+	}
+	out := fmt.Sprintf("%d tables", len(rows))
+	if len(onlyCopy) > 0 {
+		out += "; only in the copy: " + names(onlyCopy)
+	}
+	if len(onlyLive) > 0 {
+		out += "; only live: " + names(onlyLive)
+	}
 	return out
 }
 

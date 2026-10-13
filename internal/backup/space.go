@@ -8,12 +8,12 @@ import (
 	"github.com/mbvlabs/eru/internal/hostinfo"
 )
 
-// Space headroom: what a scratch restore needs beyond the database itself
+// Space headroom: what a copy of a database needs beyond the database itself
 // (system catalogs, WAL replayed from the archive) and what the filesystem
 // must keep free afterwards.
 const (
-	scratchOverhead = 1 << 30
-	keepFree        = 2 << 30
+	copyOverhead = 1 << 30
+	keepFree     = 2 << 30
 )
 
 // SpaceNeed is a free-space requirement on one filesystem.
@@ -59,12 +59,13 @@ func CheckSpace(needs []SpaceNeed) ([]SpaceNeed, error) {
 	return out, nil
 }
 
-// ScratchNeed is the space a scratch restore of size bytes needs.
-func ScratchNeed(size int64) uint64 {
+// CopyNeed is the space a temporary cluster copying a database of size
+// bytes needs: a restore, a fork or a drill.
+func CopyNeed(size int64) uint64 {
 	if size < 0 {
 		size = 0
 	}
-	return uint64(size) + scratchOverhead
+	return uint64(size) + copyOverhead
 }
 
 // existingParent walks up to the nearest path that exists.

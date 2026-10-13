@@ -99,7 +99,8 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 // listDatabases reads each [[clusters]] entry's database from its own
 // cluster. A cluster that is not up lists as not existing; a cluster
 // pg_lsclusters knows that cluster.toml doesn't is orphaned, unless a
-// restore owns it (<db>__restoring, or a <db>__pre_restore_<ts> leftover).
+// restore owns it (<db>__restoring, or a <db>__pre_restore_<ts> leftover)
+// or a drill does (<db>__drill).
 func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	cfg := env.Cluster
 	live := steps.ClusterNames(ctx)
@@ -183,52 +184,15 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 // passwords from the request's secrets, then both poolers. With stepDown,
 // db has no size of its own and the default steps down to what fits (RFC
 // 7.4). A cluster that could not start is refused first (would_not_start).
-// db create and db fork share it; the warnings are the step-down and the
-// server's oversubscription.
+// The warnings are the step-down and the server's oversubscription.
 func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDown bool) (config.ClusterSpec, []output.Warning, error) {
 	store := state.FileStore{}
-	cfg, previous, err := store.Load()
+	cfg, previous, db, warnings, err := addDatabase(ctx, env, db, stepDown)
 	if err != nil {
-		return db, nil, err
-	}
-	if _, ok := cfg.ClusterByName(db.Name); ok {
-		return db, nil, existingDatabase(db.Name)
-	}
-	if steps.ClusterExists(ctx, db.Name) {
-		return db, nil, existingDatabase(db.Name)
-	}
-	for _, role := range steps.DatabaseRoles {
-		key := steps.SecretDatabaseRole(db.Name, role)
-		if env.Req.Secrets[key] == "" {
-			return db, nil, output.NewError(output.CodeInputRequired, "the password for "+db.Name+"_"+role+" was not supplied", output.ExitInput,
-				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
-		}
-	}
-	if err := placeCluster(cfg, &db); err != nil {
-		return db, nil, err
-	}
-	rt := runtimeFor(env, false)
-	var warnings []output.Warning
-	if stepDown {
-		if w := stepDownSize(cfg, &db, rt.Host); w != nil {
-			warnings = append(warnings, *w)
-		}
-	}
-	cfg.Clusters = append(cfg.Clusters, db)
-	if err := cfg.Validate(); err != nil {
-		return db, nil, config.ValidationError(err)
-	}
-	if err := checkStarts(cfg, db, rt.Host, 0); err != nil {
-		return db, nil, err
-	}
-	raw, err := cfg.Encode()
-	if err != nil {
-		return db, nil, err
-	}
-	if err := store.Save(raw); err != nil {
 		return db, nil, err
 	}
 	env.Cluster = cfg
+	rt := runtimeFor(env, false)
 	// The kernel's huge-page pool grows first when the new cluster uses
 	// huge pages, then the cluster's own step instances: create it,
 	// configure it, then its roles and database (RFC 11.2).
@@ -249,11 +213,84 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDo
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with eru apply.")
 	}
-	if w := firstBackup(ctx, env, cfg, db.Name); w != nil {
+	if w := firstBackup(ctx, cfg, rt, env.Report, db.Name); w != nil {
 		warnings = append(warnings, *w)
 	}
 	created, _ := cfg.ClusterByName(db.Name)
 	return created, append(warnings, oversubscriptionWarnings(cfg, rt.Host)...), nil
+}
+
+// addDatabase checks db's name and role passwords, places it (node, port,
+// stanza, size; stepped down with stepDown), refuses a cluster that could
+// not start, and saves it in cluster.toml without creating anything. It
+// returns the saved configuration, the previous file for a rollback and the
+// step-down warning. db create and db fork share it.
+func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDown bool) (config.Cluster, []byte, config.ClusterSpec, []output.Warning, error) {
+	store := state.FileStore{}
+	cfg, previous, err := store.Load()
+	if err != nil {
+		return cfg, nil, db, nil, err
+	}
+	if _, ok := cfg.ClusterByName(db.Name); ok {
+		return cfg, nil, db, nil, existingDatabase(db.Name)
+	}
+	if steps.ClusterExists(ctx, db.Name) {
+		return cfg, nil, db, nil, existingDatabase(db.Name)
+	}
+	for _, role := range steps.DatabaseRoles {
+		key := steps.SecretDatabaseRole(db.Name, role)
+		if env.Req.Secrets[key] == "" {
+			return cfg, nil, db, nil, output.NewError(output.CodeInputRequired, "the password for "+db.Name+"_"+role+" was not supplied", output.ExitInput,
+				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
+		}
+	}
+	if err := placeCluster(cfg, &db); err != nil {
+		return cfg, nil, db, nil, err
+	}
+	host := runtimeFor(env, false).Host
+	var warnings []output.Warning
+	if stepDown {
+		if w := stepDownSize(cfg, &db, host); w != nil {
+			warnings = append(warnings, *w)
+		}
+	}
+	cfg.Clusters = append(cfg.Clusters, db)
+	if err := cfg.Validate(); err != nil {
+		return cfg, nil, db, nil, config.ValidationError(err)
+	}
+	if err := checkStarts(cfg, db, host, 0); err != nil {
+		return cfg, nil, db, nil, err
+	}
+	raw, err := cfg.Encode()
+	if err != nil {
+		return cfg, nil, db, nil, err
+	}
+	if err := store.Save(raw); err != nil {
+		return cfg, nil, db, nil, err
+	}
+	return cfg, previous, db, warnings, nil
+}
+
+// forgetDatabase removes name's entry from cluster.toml: db fork's rollback
+// when its cluster was never made.
+func forgetDatabase(name string) error {
+	store := state.FileStore{}
+	cfg, _, err := store.Load()
+	if err != nil {
+		return err
+	}
+	kept := cfg.Clusters[:0]
+	for _, c := range cfg.Clusters {
+		if c.Name != name {
+			kept = append(kept, c)
+		}
+	}
+	cfg.Clusters = kept
+	raw, err := cfg.Encode()
+	if err != nil {
+		return err
+	}
+	return store.Save(raw)
 }
 
 // stepDownSize gives db the largest size up to [postgres] default_size that
@@ -292,13 +329,13 @@ func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
 // cluster's stanza, its archive check and first full backup, then its backup
 // timers. The database already works, so a failure is the warning
 // first_backup_failed, not an error.
-func firstBackup(ctx context.Context, env *Env, cfg config.Cluster, db string) *output.Warning {
+func firstBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter, db string) *output.Warning {
 	if !cfg.BackupConfigured() {
 		return nil
 	}
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		Only:   append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...),
-		Report: env.Report,
+		Report: report,
 	})
 	if err == nil {
 		return nil
@@ -313,7 +350,6 @@ func existingDatabase(name string) error {
 	return output.NewError(output.CodePrecondition, "database "+name+" already exists", output.ExitPrecondition,
 		"Pick another name, or drop it first with eru db drop "+name+".").WithDetails(map[string]any{"reason": "database_exists", "database": name})
 }
-
 
 // databaseIn reports whether database name exists in the cluster at local.
 func databaseIn(ctx context.Context, local pg.Local, name string) (bool, error) {

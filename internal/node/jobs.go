@@ -172,9 +172,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		logLine(report, job, "the node lock is busy; skipping "+job)
 		res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy"}
 		finishJob(rec, engine.JobSkipped, "the node lock was busy", res, nil)
-		if job == "restore" {
-			failRestore(env, errors.New("the node lock was busy"))
-		}
+		notRun(env, errors.New("the node lock was busy"))
 		return res, nil
 	}
 	if err != nil {
@@ -202,9 +200,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 			logLine(report, job, "the lock of "+cluster+" is busy; skipping "+job)
 			res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy", "cluster": cluster}
 			finishJob(rec, engine.JobSkipped, "the lock of "+cluster+" was busy", res, nil)
-			if job == "restore" {
-				failRestore(env, errors.New("the lock of "+cluster+" was busy"))
-			}
+			notRun(env, errors.New("the lock of "+cluster+" was busy"))
 			return res, nil
 		}
 		if err != nil {
@@ -225,6 +221,21 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	}
 	finishJob(rec, engine.JobSucceeded, "", res, nil)
 	return res, nil
+}
+
+// notRun undoes what the RPC of a skipped job prepared: a restore is
+// recorded failed, so abort can clean it up, and a fork's cluster.toml entry
+// is removed, as its cluster was never made.
+func notRun(env *jobEnv, cause error) {
+	switch env.Job {
+	case "restore":
+		failRestore(env, cause)
+	case "db-fork":
+		var p dbForkParams
+		if json.Unmarshal(env.Params, &p) == nil && p.Name != "" {
+			_ = forgetDatabase(p.Name)
+		}
+	}
 }
 
 // errSkipped marks a job that decided not to run, such as a backup while

@@ -1,7 +1,8 @@
 // Package backup is eru's database backup layer (Phase 3): the Driver seam
-// with its pgBackRest implementation, scratch restores, the per-database swap,
-// age-encrypted long-retention dumps, the durable records in records.json, the
-// eru.prom backup lines and the free-space checks.
+// with its pgBackRest implementation, temporary clusters (restores, forks,
+// drills) and the data-directory swap, age-encrypted long-retention dumps,
+// the durable records in records.json, the eru.prom backup lines and the
+// free-space checks.
 //
 // Each database is its own PostgreSQL cluster with its own WAL stream, so
 // pgBackRest keeps one stanza per database in one repository: a driver is
@@ -32,9 +33,6 @@ type Driver interface {
 	// repository. pgPath is the dropped cluster's data directory, which
 	// pgBackRest wants named even though it no longer exists.
 	StanzaDelete(ctx context.Context, pgPath string) error
-	// RestoreScratch restores into an empty directory that is not the live
-	// data directory, with WAL archiving off.
-	RestoreScratch(ctx context.Context, opts RestoreOptions) error
 	// Materialise restores into the empty data directory of a temporary
 	// cluster, pausing at the target or promoting there (RFC 10).
 	Materialise(ctx context.Context, opts RestoreOptions) error
@@ -150,7 +148,7 @@ const (
 	TargetSet    = "set"
 )
 
-// RestoreOptions describe one scratch restore.
+// RestoreOptions describe one restore into a temporary cluster.
 type RestoreOptions struct {
 	// Path is the empty data directory to restore into.
 	Path string

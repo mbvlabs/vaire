@@ -215,6 +215,87 @@ func (m *Materialised) register() error {
 	return nil
 }
 
+// UserOverrides is the conf.d file an operator edits by hand.
+// postgres-config-v1 writes it only when missing, so it is its own source
+// of truth.
+const UserOverrides = "90-overrides.conf"
+
+// Adopt makes the temporary cluster a database's own, 18/<name> on port (a
+// fork, RFC 10.2). It stops it and rewrites its registration as
+// postgres-cluster-v1 leaves a live cluster's: the source's postgresql.conf
+// with this cluster's paths, name and port, start.conf auto, and a conf.d
+// with only the source's 90-overrides.conf (copied by register), so the
+// source's eru files and the temporary cluster's overrides don't stay but
+// the operator's do. The caller then runs the cluster's steps:
+// postgres-cluster-v1@<name> starts it in its cgroup, and
+// postgres-config-v1@<name> renders the rest of its configuration as a new
+// cluster's, keeps 90-overrides.conf and restarts it. The port reservation
+// is freed.
+func (m *Materialised) Adopt(ctx context.Context, port int) error {
+	if err := m.Stop(ctx); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(filepath.Join(pgConfRoot, m.Source, "postgresql.conf")) //nolint:gosec // G304: the source cluster's own configuration.
+	if err != nil {
+		return err
+	}
+	dir := m.ConfDir()
+	conf := setConf(string(raw), [][2]string{
+		{"data_directory", "'" + m.Data + "'"},
+		{"hba_file", "'" + filepath.Join(dir, "pg_hba.conf") + "'"},
+		{"ident_file", "'" + filepath.Join(dir, "pg_ident.conf") + "'"},
+		{"external_pid_file", "'" + pgSocketDir + "/18-" + m.Name + ".pid'"},
+		{"port", strconv.Itoa(port)},
+		{"cluster_name", "'18/" + m.Name + "'"},
+	})
+	if err := engine.WriteFileAtomicOwned(filepath.Join(dir, "postgresql.conf"), []byte(conf), 0o644, "postgres", "postgres"); err != nil {
+		return err
+	}
+	if err := engine.WriteFileAtomicOwned(filepath.Join(dir, "start.conf"), []byte("auto\n"), 0o644, "postgres", "postgres"); err != nil {
+		return err
+	}
+	confD := filepath.Join(dir, "conf.d")
+	entries, err := os.ReadDir(confD)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == UserOverrides {
+			// register writes 0640; postgres-config-v1 writes it 0644.
+			if err := os.Chmod(filepath.Join(confD, e.Name()), 0o644); err != nil { //nolint:gosec // G302: conf.d files are world-readable, as postgres-config-v1 writes them.
+				return err
+			}
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(confD, e.Name())); err != nil {
+			return err
+		}
+	}
+	m.Port = port
+	_ = os.Remove(filepath.Join(TemporaryPortDir, m.Name))
+	return nil
+}
+
+// setConf sets each key of a postgresql.conf to its value, in place of its
+// uncommented line, or at the end when it has none.
+func setConf(raw string, values [][2]string) string {
+	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
+	for _, kv := range values {
+		found := false
+		for i, line := range lines {
+			key, _, ok := strings.Cut(line, "=")
+			if ok && strings.TrimSpace(key) == kv[0] {
+				lines[i] = kv[0] + " = " + kv[1]
+				found = true
+			}
+		}
+		if !found {
+			lines = append(lines, kv[0]+" = "+kv[1])
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // Wait conditions for start.
 const (
 	UntilOpen     = "open"
@@ -238,7 +319,7 @@ func (m *Materialised) start(ctx context.Context, until string) error {
 // stops first returns its log tail: a time outside the restore window ends
 // recovery before its target.
 func waitCluster(ctx context.Context, name, data string, port int, until string, log func(string)) error {
-	deadline := time.Now().Add(scratchReadyWait)
+	deadline := time.Now().Add(recoveryWait)
 	lastNote := time.Now()
 	for {
 		if reached(ctx, port, until) {
@@ -360,6 +441,10 @@ func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter
 	_ = os.Remove(filepath.Join(TemporaryPortDir, name))
 	return err
 }
+
+// DrillName is the temporary cluster a restore drill of db materialises
+// into (RFC 9.4).
+func DrillName(db string) string { return db + "__drill" }
 
 // RestoringName is the temporary cluster a restore of db materialises into
 // (RFC 10.1).

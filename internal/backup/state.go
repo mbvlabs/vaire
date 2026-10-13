@@ -17,7 +17,7 @@ const RecordsPath = "/var/lib/eru/records.json"
 // recordsLockPath serializes read-modify-write cycles of records.json.
 const recordsLockPath = RecordsPath + ".lock"
 
-// maxDrills is how many drill results records.json keeps.
+// maxDrills is how many drill results records.json keeps per database.
 const maxDrills = 12
 
 // Records is /var/lib/eru/records.json: open restores per database, restore
@@ -31,6 +31,10 @@ type Records struct {
 	Leftovers []Leftover `json:"restore_leftovers,omitempty"`
 	// Drills are the last restore drills, newest last.
 	Drills []Drill `json:"drills,omitempty"`
+	// Drilling are the running drills' temporary clusters, by database. A
+	// drill that was killed leaves its entry, so the next drill of the
+	// database knows the <db>__drill cluster is its own and drops it.
+	Drilling map[string]string `json:"drilling,omitempty"`
 	// LastBackup is the last successful backup per database, then per type.
 	LastBackup map[string]map[string]BackupResult `json:"last_backups,omitempty"`
 	// LastVerify is the last verify run of each database's stanza.
@@ -125,9 +129,14 @@ type Leftover struct {
 	Stanza string `json:"stanza,omitempty"`
 }
 
-// IsTemporary reports whether cluster is one restore owns: an open
-// restore's <db>__restoring or a leftover.
+// IsTemporary reports whether cluster is one restore or drill owns: an
+// open restore's <db>__restoring, a leftover or a drill's <db>__drill.
 func (s Records) IsTemporary(cluster string) bool {
+	for _, name := range s.Drilling {
+		if name == cluster {
+			return true
+		}
+	}
 	for db := range s.Restores {
 		if RestoringName(db) == cluster {
 			return true
@@ -216,6 +225,9 @@ func decode(raw []byte) (Records, error) {
 	if s.Timelines == nil {
 		s.Timelines = map[string]TimelineSwitch{}
 	}
+	if s.Drilling == nil {
+		s.Drilling = map[string]string{}
+	}
 	return s, nil
 }
 
@@ -230,9 +242,7 @@ func UpdateRecords(fn func(*Records) error) error {
 		if err := fn(&s); err != nil {
 			return err
 		}
-		if len(s.Drills) > maxDrills {
-			s.Drills = append([]Drill(nil), s.Drills[len(s.Drills)-maxDrills:]...)
-		}
+		s.Drills = trimDrills(s.Drills)
 		raw, err := json.MarshalIndent(s, "", "  ")
 		if err != nil {
 			return err
@@ -256,6 +266,23 @@ func (s Records) LeftoversOf(db string) []Leftover {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// trimDrills keeps the newest maxDrills drills of each database, in order.
+func trimDrills(drills []Drill) []Drill {
+	count := map[string]int{}
+	keep := make([]bool, len(drills))
+	for i := len(drills) - 1; i >= 0; i-- {
+		count[drills[i].Database]++
+		keep[i] = count[drills[i].Database] <= maxDrills
+	}
+	out := make([]Drill, 0, len(drills))
+	for i, d := range drills {
+		if keep[i] {
+			out = append(out, d)
+		}
+	}
 	return out
 }
 

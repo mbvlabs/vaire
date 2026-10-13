@@ -19,7 +19,7 @@ import (
 // Local runs SQL on the node through the postgres OS user, because pg_hba
 // allows postgres only by peer and the node process runs as root (§9.1). The
 // zero value is the live cluster on its default socket; Host and Port point
-// it at another instance, such as a scratch restore on the drill socket.
+// it at another instance, such as a temporary cluster on its own port.
 type Local struct {
 	// Host is a socket directory; empty uses psql's default.
 	Host string

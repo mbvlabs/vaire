@@ -78,7 +78,8 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 // certificate timer, and with backups on the stanza-expiry timer, a template
 // service per job (eru-<job>@.service runs eru node run <job> --db %i) and a
 // timer per cluster and job (eru-<job>@<cluster>.timer), staggered by the
-// cluster's stanza (RFC 9.3).
+// cluster's stanza (RFC 9.3): within the day, and the monthly drills over
+// the month too (RFC 9.4).
 func timerFiles(cfg config.Cluster) map[string][]byte {
 	files := map[string][]byte{CertsTimerName: render.CertsTimer()}
 	if !cfg.BackupConfigured() {
@@ -90,8 +91,12 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 	for _, spec := range cfg.Clusters {
 		offset := StaggerOffset(spec.Stanza, spread)
 		for _, j := range scheduledJobs(cfg, spec) {
+			schedule := Stagger(j.Schedule, offset)
+			if j.Job == "restore-drill" {
+				schedule = StaggerDay(schedule, spec.Stanza)
+			}
 			files["eru-"+j.Job+"@.service"] = render.JobService(j.Job, "--db %i")
-			files["eru-"+j.Job+"@"+spec.Name+".timer"] = render.JobTimer(j.Description, Stagger(j.Schedule, offset), j.Jitter)
+			files["eru-"+j.Job+"@"+spec.Name+".timer"] = render.JobTimer(j.Description, schedule, j.Jitter)
 		}
 	}
 	return files
@@ -168,6 +173,41 @@ func Stagger(schedule string, offset time.Duration) string {
 	start += shift % (24*60 - start)
 	fields[len(fields)-1] = fmt.Sprintf("%02d:%02d%s", start/60, start%60, m[3])
 	return strings.Join(fields, " ")
+}
+
+// staggerDays is how many days of the month StaggerDay spreads over: every
+// month has them.
+const staggerDays = 28
+
+// calendarDate is the date part of an OnCalendar expression with a fixed
+// day of the month: [YYYY|*]-[MM|*]-DD.
+var calendarDate = regexp.MustCompile(`^(\*|[0-9]{4})-(\*|[0-9]{1,2})-([0-9]{1,2})$`)
+
+// StaggerDay moves a monthly schedule's day of the month later by a number
+// of days derived from stanza, wrapping within the first 28 days, so each
+// cluster's drill falls on a day of its own. A schedule without a fixed day
+// up to the 28th is returned as it is.
+func StaggerDay(schedule, stanza string) string {
+	fields := strings.Fields(schedule)
+	if stanza == "" {
+		return schedule
+	}
+	for i, f := range fields {
+		m := calendarDate.FindStringSubmatch(f)
+		if m == nil {
+			continue
+		}
+		day, _ := strconv.Atoi(m[3])
+		if day < 1 || day > staggerDays {
+			return schedule
+		}
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(stanza))
+		day = (day-1+int(h.Sum32()%staggerDays))%staggerDays + 1
+		fields[i] = fmt.Sprintf("%s-%s-%02d", m[1], m[2], day)
+		return strings.Join(fields, " ")
+	}
+	return schedule
 }
 
 // staleUnits are eru timers and owned services on disk that are not rendered.

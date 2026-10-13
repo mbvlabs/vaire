@@ -291,25 +291,6 @@ func (p PgBackRest) StanzaDelete(ctx context.Context, pgPath string) error {
 	return wrapTool("pgbackrest start", p.run(ctx, nil, nil, "start"))
 }
 
-// RestoreScratch restores into opts.Path with archive_mode off, so the
-// restored instance never pushes WAL to the repository. The path is always
-// empty, so the delta=y meant for the live cluster is turned off.
-func (p PgBackRest) RestoreScratch(ctx context.Context, opts RestoreOptions) error {
-	args := []string{"--pg1-path=" + opts.Path, "--archive-mode=off", "--log-level-console=detail", "--no-delta", networkProcessMax}
-	switch opts.Kind {
-	case TargetLatest, "":
-		args = append(args, "--type=default")
-	case TargetTime:
-		args = append(args, "--type=time", "--target="+PgTime(opts.Time), "--target-action=promote")
-	case TargetSet:
-		args = append(args, "--set="+opts.Set, "--type=immediate", "--target-action=promote")
-	default:
-		return fmt.Errorf("restore target %q is unknown", opts.Kind)
-	}
-	prog := newProgress("restore", p.Report)
-	return wrapTool("pgbackrest restore", p.run(ctx, nil, prog.line, append(args, "restore")...))
-}
-
 // Materialise restores the stanza into opts.Path for a temporary cluster
 // (RFC 10). It leaves archive_mode to the temporary cluster's own
 // configuration: pgBackRest's --archive-mode=off would write archive_mode

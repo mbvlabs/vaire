@@ -3,12 +3,16 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/backup"
@@ -170,7 +174,7 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 	}
 	var space []backup.SpaceNeed
 	if err == nil {
-		space, err = restoreSpace(ctx, cfg, p.Database, false)
+		space, err = restoreSpace(ctx, cfg, p.Database)
 	}
 	timeline := ""
 	if err == nil {
@@ -308,21 +312,15 @@ func olderStanzaHint(err error, db, stanza string) error {
 }
 
 // restoreSpace checks room beside the live data directory for one copy of
-// db: the temporary cluster of a restore or a fork. scratch adds the old
-// fork's scratch instance until db fork moves onto the materialised cluster.
-func restoreSpace(ctx context.Context, cfg config.Cluster, db string, scratch bool) ([]backup.SpaceNeed, error) {
+// db: the temporary cluster of a restore or a fork.
+func restoreSpace(ctx context.Context, cfg config.Cluster, db string) ([]backup.SpaceNeed, error) {
 	local, err := clusterPG(cfg, db)
 	if err != nil {
 		return nil, err
 	}
 	size := databaseSize(ctx, local, db)
 	dataDir := cfg.Server.DataDirectory(db)
-	var needs []backup.SpaceNeed
-	if scratch {
-		needs = append(needs, backup.SpaceNeed{Path: backup.ScratchRoot(dataDir), Need: backup.ScratchNeed(size), Purpose: "the scratch restore of " + db})
-	}
-	needs = append(needs, backup.SpaceNeed{Path: dataDir, Need: backup.ScratchNeed(size), Purpose: "the restored copy of " + db})
-	return backup.CheckSpace(needs)
+	return backup.CheckSpace([]backup.SpaceNeed{{Path: dataDir, Need: backup.CopyNeed(size), Purpose: "the copy of " + db}})
 }
 
 // jobRestore materialises the target into the temporary cluster
@@ -465,16 +463,12 @@ func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, spec config
 	if err != nil {
 		return warnings, err
 	}
-	return warnings, finishLoad(ctx, local, spec.Name, spec)
-}
-
-// finishLoad re-runs the grants after a load and analyzes, so restore
-// status can compare row estimates.
-func finishLoad(ctx context.Context, local pg.Local, target string, db config.ClusterSpec) error {
-	if err := local.Exec(ctx, target, steps.DatabaseGrantsSQL(db), nil); err != nil {
-		return err
+	// The grants again for what the dump created, and ANALYZE, so restore
+	// status can compare row estimates.
+	if err := local.Exec(ctx, spec.Name, steps.DatabaseGrantsSQL(spec), nil); err != nil {
+		return warnings, err
 	}
-	return local.Exec(ctx, target, "ANALYZE;\n", nil)
+	return warnings, local.Exec(ctx, spec.Name, "ANALYZE;\n", nil)
 }
 
 type restoreDBParams struct {
@@ -984,34 +978,6 @@ func sortTables(rows []tableRows) {
 	}
 }
 
-// loadFromScratch restores db at opts into a scratch instance and copies it
-// into target on the cluster at dst, as owner, for db fork --at until it
-// moves onto the materialised cluster (unit 31). The scratch instance is
-// removed afterwards.
-func loadFromScratch(ctx context.Context, env *jobEnv, opts backup.RestoreOptions, db string, dst pg.Local, target, owner string) ([]string, error) {
-	spec, err := clusterOf(env.Cluster, db)
-	if err != nil {
-		return nil, err
-	}
-	scratch, err := backup.NewScratch(env.Cluster.Server.DataDirectory(db), env.ID, env.shell(), env.Job, env.Report)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = scratch.Remove() }()
-	logLine(env.Report, env.Job, "restoring "+db+" into a scratch instance")
-	if err := scratch.Restore(ctx, driver(spec, env.Job, env.Report), opts); err != nil {
-		return nil, err
-	}
-	if err := scratch.Start(ctx); err != nil {
-		return nil, err
-	}
-	if t := scratch.RecoveredTo(ctx); t != "" {
-		logLine(env.Report, env.Job, "recovered to "+t)
-	}
-	logLine(env.Report, env.Job, "copying "+db+" into "+target)
-	return backup.CopyDatabase(ctx, env.shell(), env.Job, env.Report, scratch.PG(), db, dst, target, owner)
-}
-
 // --- db fork ---
 
 type dbForkParams struct {
@@ -1020,10 +986,14 @@ type dbForkParams struct {
 	At     string `json:"at,omitempty"`
 }
 
-// handleDBFork creates the new database through the db create path (its
-// [[clusters]] entry and four roles, with operator-generated passwords),
-// then copies the source into it as a detachable job: from the live database
-// without --at, from a scratch restore at that time with it.
+// handleDBFork checks the source, the name, the window (with --at) and room
+// for one copy, then, under the exclusive lock, adds the new database to
+// cluster.toml as db create with an explicit size does (a port and a stanza
+// of its own; the source's size, limits, pools, profile, statement timeout,
+// extensions and settings, refused only when it could not start, with the
+// oversubscription warnings otherwise) without creating its cluster. The detachable job
+// db-fork makes the cluster from the source (RFC 10.2) with the role
+// passwords from the request.
 func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	var p dbForkParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -1048,7 +1018,7 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 			return Result{}, err
 		}
 	}
-	if _, err := restoreSpace(ctx, cfg, p.Source, p.At != ""); err != nil {
+	if _, err := restoreSpace(ctx, cfg, p.Source); err != nil {
 		return Result{}, err
 	}
 	if env.Req.DryRun {
@@ -1058,14 +1028,24 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	created, warnings, err := createDatabase(ctx, env, config.ClusterSpec{Name: p.Name, Size: src.Size, Memory: src.Memory, Profile: src.Profile,
-		StatementTimeout: src.StatementTimeout, Extensions: src.Extensions}, false)
+	saved, _, created, warnings, err := addDatabase(ctx, env, forkSpec(src, p.Name), false)
 	release()
 	if err != nil {
 		return Result{}, err
 	}
-	env.Cluster, _, _ = state.FileStore{}.Load()
-	res, err := runJobRPC(ctx, env, "db-fork", p, nil)
+	env.Cluster = saved
+	jobSecrets := map[string]string{}
+	for _, role := range steps.DatabaseRoles {
+		key := steps.SecretDatabaseRole(p.Name, role)
+		jobSecrets[key] = env.Req.Secrets[key]
+	}
+	id, err := startJob(ctx, env, "db-fork", p, jobSecrets)
+	if err != nil {
+		// The job removes the entry when it fails; one that never started
+		// can't.
+		return Result{}, errors.Join(err, forgetDatabase(p.Name))
+	}
+	res, err := followJob(ctx, env, id)
 	if err != nil {
 		return res, err
 	}
@@ -1073,55 +1053,182 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 		m["database"] = created
 	}
 	res.Warnings = append(res.Warnings, warnings...)
+	res.Warnings = append(res.Warnings, oversubscriptionWarnings(saved, runtimeFor(env, false).Host)...)
 	return res, nil
 }
 
+// forkSpec is the fork's cluster.toml entry before placeCluster gives it a
+// node, port and stanza: the source's size and limits, pools, profile,
+// statement timeout, extensions and [clusters.settings], so it runs as the
+// source does. Its backup schedules are the defaults, as a new database's.
+func forkSpec(src config.ClusterSpec, name string) config.ClusterSpec {
+	return config.ClusterSpec{
+		Name:             name,
+		Size:             src.Size,
+		Memory:           src.Memory,
+		MemoryMax:        src.MemoryMax,
+		CPUWeight:        src.CPUWeight,
+		CPUQuota:         src.CPUQuota,
+		IOWeight:         src.IOWeight,
+		Profile:          src.Profile,
+		StatementTimeout: src.StatementTimeout,
+		Extensions:       slices.Clone(src.Extensions),
+		PoolSize:         src.PoolSize,
+		SessionPoolSize:  src.SessionPoolSize,
+		Settings:         maps.Clone(src.Settings),
+	}
+}
+
+// jobFork makes the new database's cluster from the source (RFC 10.2):
+// materialised into <data_root>/<new> from the source's stanza and promoted
+// at --at, or copied with pg_basebackup of the live source without it
+// (which needs no backups). The source's database and roles are renamed to
+// the new name's, with the operator's new passwords, then the copy becomes
+// 18/<new> with its own configuration, cgroup and port, the poolers route
+// to it, and with backups on it gets its own stanza and first full. A
+// failure before the copy is 18/<new> drops it and the cluster.toml entry.
 func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	var p dbForkParams
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
-	db, ok := env.Cluster.ClusterByName(p.Name)
+	cfg := env.Cluster
+	spec, ok := cfg.ClusterByName(p.Name)
 	if !ok {
 		return nil, databaseNotFound(p.Name)
 	}
-	src, err := clusterPG(env.Cluster, p.Source)
-	if err != nil {
-		return nil, err
-	}
-	dst := steps.ClusterPG(db)
-	owner := p.Name + "_owner"
-	var warnings []string
-	if p.At == "" {
-		logLine(env.Report, env.Job, "copying the live "+p.Source+" into "+p.Name)
-		warnings, err = backup.CopyDatabase(ctx, env.shell(), env.Job, env.Report, src, p.Source, dst, p.Name, owner)
-	} else {
-		t, perr := time.Parse(time.RFC3339, p.At)
-		if perr != nil {
-			return nil, perr
+	if err := materialiseFork(ctx, env, p, spec); err != nil {
+		if ferr := forgetDatabase(p.Name); ferr != nil {
+			err = errors.Join(err, ferr)
 		}
-		warnings, err = loadFromScratch(ctx, env, backup.RestoreOptions{Kind: backup.TargetTime, Time: t}, p.Source, dst, p.Name, owner)
+		return nil, err
+	}
+	rt := jobRuntime(env)
+	logLine(env.Report, env.Job, "starting "+p.Name+" with its own configuration")
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Report: env.Report})
+	if err == nil {
+		_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: p.Name, Report: env.Report})
 	}
 	if err != nil {
-		return nil, err
+		return nil, withHint(err, "Finish it with eru apply --db "+p.Name+".")
 	}
-	if err := finishLoad(ctx, dst, p.Name, db); err != nil {
-		return nil, err
+	var warnings []output.Warning
+	if err := applyPoolers(ctx, cfg, rt, env.Report); err != nil {
+		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
+			Message: "the poolers were not reloaded, so " + p.Name + " is not reachable through them until eru apply: " + err.Error()})
 	}
-	return map[string]any{"source": p.Source, "name": p.Name, "at": p.At, "warnings": warnings}, nil
+	if w := firstBackup(ctx, cfg, rt, env.Report, p.Name); w != nil {
+		warnings = append(warnings, *w)
+	}
+	steps.WriteMetrics(cfg)
+	return map[string]any{"source": p.Source, "name": p.Name, "at": p.At, "port": spec.Port, "stanza": spec.Stanza, "warnings": warnings}, nil
+}
+
+// materialiseFork builds the fork's data in the temporary cluster <new>,
+// promotes it, renames it, and adopts it as 18/<new> on spec's port. A
+// failure drops what was built.
+func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec config.ClusterSpec) error {
+	cfg := env.Cluster
+	src, err := clusterOf(cfg, p.Source)
+	if err != nil {
+		return err
+	}
+	m, err := backup.NewMaterialised(cfg.Server.DataRoot, p.Name, p.Source, src.Port, env.shell(), env.Job, env.Report)
+	if err != nil {
+		return err
+	}
+	if p.At == "" {
+		err = m.BaseBackup(ctx)
+	} else {
+		err = restoreFork(ctx, env, p, src, m)
+	}
+	if err == nil {
+		err = backup.Promote(ctx, m.PG())
+	}
+	if err == nil {
+		logLine(env.Report, env.Job, "renaming "+p.Source+" and its roles to "+p.Name)
+		err = renameFork(ctx, m.PG(), p.Source, p.Name, env.Secrets)
+	}
+	if err == nil {
+		err = m.Adopt(ctx, spec.Port)
+	}
+	if err != nil {
+		_ = m.Drop()
+		return err
+	}
+	return nil
+}
+
+// restoreFork restores the source's stanza into m and promotes it at --at,
+// on the timeline restore undo recorded for the stanza, if any.
+func restoreFork(ctx context.Context, env *jobEnv, p dbForkParams, src config.ClusterSpec, m *backup.Materialised) error {
+	t, err := time.Parse(time.RFC3339, p.At)
+	if err != nil {
+		return err
+	}
+	bs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+	opts := backup.RestoreOptions{Kind: backup.TargetTime, Time: t, Timeline: bs.TargetTimeline(p.Source, src.Stanza)}
+	if err := m.Restore(ctx, driver(src, env.Job, env.Report), opts); err != nil {
+		return err
+	}
+	if at := m.RecoveredTo(ctx); at != "" {
+		logLine(env.Report, env.Job, "recovered to "+at)
+	}
+	return nil
+}
+
+// renameFork renames the source's database and roles to the fork's in the
+// cluster at local (RFC 10.2). Ownership, grants, memberships, default
+// privileges and per-role settings follow the role OIDs; only
+// <name>_migrate's SET role names the owner, so it is rewritten. The login
+// roles get the passwords the operator generated for the fork, as SCRAM
+// verifiers: the source's no longer work.
+func renameFork(ctx context.Context, local pg.Local, source, name string, passwords map[string]string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ALTER DATABASE %s RENAME TO %s;\n", pg.Quote(source), pg.Quote(name))
+	for _, role := range append([]string{"owner"}, steps.DatabaseRoles...) {
+		fmt.Fprintf(&b, "ALTER ROLE %s RENAME TO %s;\n", pg.Quote(source+"_"+role), pg.Quote(name+"_"+role))
+	}
+	fmt.Fprintf(&b, "ALTER ROLE %s SET role = '%s';\n", pg.Quote(name+"_"+steps.RoleMigrate), name+"_owner")
+	for _, role := range steps.DatabaseRoles {
+		key := steps.SecretDatabaseRole(name, role)
+		password := passwords[key]
+		if password == "" {
+			return output.NewError(output.CodeInputRequired, "the password for "+name+"_"+role+" was not supplied", output.ExitInput,
+				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
+		}
+		secrets.Add(password)
+		verifier, err := pg.SCRAMVerifier(password)
+		if err != nil {
+			return err
+		}
+		secrets.Add(verifier)
+		fmt.Fprintf(&b, "ALTER ROLE %s PASSWORD '%s';\n", pg.Quote(name+"_"+role), verifier)
+	}
+	return local.Exec(ctx, "postgres", b.String(), nil)
 }
 
 // dropLeftovers drops db's restore leftover clusters and their records: db
 // drop takes them with the database, as they were its data before a
-// promote or undo.
+// promote or undo. A <db>__drill a killed drill left goes too.
 func dropLeftovers(env *Env, db string) error {
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(bs.Leftovers)+1)
 	for _, l := range bs.LeftoversOf(db) {
-		if err := backup.DropTemporaryCluster(runtimeFor(env, false).Shell, "db.drop", env.Report, l.Name,
-			filepath.Join(env.Cluster.Server.DataRoot, l.Name)); err != nil {
+		names = append(names, l.Name)
+	}
+	if name, ok := bs.Drilling[db]; ok {
+		names = append(names, name)
+	}
+	for _, name := range names {
+		if err := backup.DropTemporaryCluster(runtimeFor(env, false).Shell, "db.drop", env.Report, name,
+			filepath.Join(env.Cluster.Server.DataRoot, name)); err != nil {
 			return err
 		}
 	}
@@ -1134,6 +1241,7 @@ func dropLeftovers(env *Env, db string) error {
 		}
 		s.Leftovers = kept
 		delete(s.Timelines, db)
+		delete(s.Drilling, db)
 		return nil
 	})
 }

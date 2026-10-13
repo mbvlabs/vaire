@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -309,13 +310,13 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 }
 
 func runRestoreDrill(cmd *cobra.Command, _ []string) error {
-	params := map[string]string{}
+	at := ""
 	if v := stringFlag(cmd, "time"); v != "" {
 		t, err := parseTarget(v, time.Now())
 		if err != nil {
 			return err
 		}
-		params["time"] = t.Format(time.RFC3339)
+		at = t.Format(time.RFC3339)
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -323,34 +324,66 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, jobID, detached, err := callJob(cmd, s, p, "restore.drill", params, remote.CallOptions{DryRun: dryRun(cmd)})
-	if err != nil {
-		return err
-	}
-	if detached {
-		return detachedResult(cmd, s, jobID, "the drill")
-	}
+	params := func(db string) any { return map[string]string{"time": at, "database": db} }
 	if dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: params, Message: "dry run: would restore the latest backup to scratch and check it", Warnings: s.warnings})
+		reply, err := s.node.Call(commandContext(cmd), "restore.drill", params(stringFlag(cmd, "db")), remote.CallOptions{DryRun: true, OnEvent: p.event})
+		if err != nil {
+			return err
+		}
+		var data struct {
+			Drills []struct {
+				Database string `json:"database"`
+				Target   string `json:"target"`
+				Timeline string `json:"timeline,omitempty"`
+			} `json:"drills"`
+		}
+		_ = reply.Decode(&data)
+		lines := make([]string, 0, len(data.Drills))
+		for _, d := range data.Drills {
+			line := fmt.Sprintf("dry run: would restore %s at %s into %s, check it and drop it", d.Database, d.Target, backup.DrillName(d.Database))
+			if d.Timeline != "" {
+				line += " (timeline " + d.Timeline + ")"
+			}
+			lines = append(lines, line)
+		}
+		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
 	}
-	var drill backup.Drill
-	jr, err := decodeJob(reply, &drill)
+	dbs, err := backupDatabases(cmd, s, p)
 	if err != nil {
 		return err
 	}
-	lines := []string{fmt.Sprintf("restore drill %s: backup %s recovered to %s", drill.Result, drill.BackupLabel, drill.RecoveredTo)}
-	for _, c := range drill.Checks {
-		mark := "ok"
-		if !c.OK {
-			mark = "FAILED"
-		}
-		line := "  " + mark + "  " + c.Name
-		if c.Detail != "" {
-			line += ": " + c.Detail
-		}
-		lines = append(lines, line)
+	outcomes, lines, warnings, detached := eachDatabase(cmd, s, p, dbs, "restore.drill", params,
+		func(raw []byte) (any, string, error) {
+			var drill backup.Drill
+			if err := json.Unmarshal(raw, &drill); err != nil {
+				return nil, "", err
+			}
+			out := []string{fmt.Sprintf("%s: restore drill %s: backup %s recovered to %s", drill.Database, drill.Result, drill.BackupLabel, drill.RecoveredTo)}
+			for _, c := range drill.Checks {
+				mark := "ok"
+				if !c.OK {
+					mark = "FAILED"
+				}
+				line := "  " + mark + "  " + c.Name
+				if c.Detail != "" {
+					line += ": " + c.Detail
+				}
+				out = append(out, line)
+			}
+			return drill, strings.Join(out, "\n"), nil
+		})
+	if detached != nil {
+		return detachedResult(cmd, s, *detached, "the drill"+notStarted(dbs, outcomes))
 	}
-	return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jr.JobID, "drill": drill}, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
+	if err := failedOutcomes("the restore drill", "drills", outcomes); err != nil {
+		return err
+	}
+	return output.Success(cmd, output.Result{
+		Data:     map[string]any{"drills": outcomes},
+		Message:  strings.Join(lines, "\n"),
+		Warnings: append(s.warnings, warnings...),
+		Next:     []string{"eru backup list"},
+	})
 }
 
 func runDBFork(cmd *cobra.Command, args []string) error {
@@ -405,22 +438,20 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		return output.Success(cmd, output.Result{Data: params, Message: "dry run: would fork " + src + " into " + name, Warnings: s.warnings})
 	}
 	if detached {
-		// The roles exist already; their passwords are only shown here.
-		p.warn("detached: the copy keeps running. These credentials are shown only now:")
+		// The passwords are set in the copy before the job ends; they are
+		// only shown here.
+		p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
 		return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
 			Message: secret.String() + "\n" + shownOnceNote, Next: []string{"eru job follow " + jobID}})
 	}
 	var res struct {
-		Warnings []string `json:"warnings"`
+		Warnings []output.Warning `json:"warnings"`
 	}
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
-	warnings := append(s.warnings, reply.Warnings...)
-	for _, w := range res.Warnings {
-		warnings = append(warnings, output.Warning{Code: "fork_load_errors", Message: w})
-	}
+	warnings := append(append(s.warnings, reply.Warnings...), res.Warnings...)
 	from := "the live " + src
 	if !at.IsZero() {
 		from = src + " as of " + at.Format(time.RFC3339)
