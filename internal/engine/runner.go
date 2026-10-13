@@ -30,13 +30,17 @@ const (
 
 // Options steer one Plan or Apply.
 type Options struct {
-	// Only limits the run to these step IDs, kept in catalogue order.
+	// Only limits the run to these step IDs, kept in catalogue order. A
+	// template's ID selects every instance; <id>@<cluster> selects one.
 	Only []string
+	// DB limits the run to one cluster's instances; server-level steps are
+	// left out, and only that cluster's pending restarts are considered.
+	DB string
 	// JournalPath defaults to JournalPath.
 	JournalPath string
-	// Confirmed is true when the request carried the correct restart token.
-	Confirmed bool
-	// Restarter performs the aggregated restart. Nil in production until Phase 2.
+	// Confirm is what the request's restart tokens allow.
+	Confirm Confirmation
+	// Restarter restarts one cluster for its pending restarts.
 	Restarter Restarter
 	// Report receives step and log events.
 	Report Reporter
@@ -52,13 +56,55 @@ func (o Options) journalPath() string {
 	return o.JournalPath
 }
 
-// PlanStep is one step in a plan.
+// Confirmation is what the restart confirm tokens of a request allow:
+// <server>/restart restarts every cluster with a pending restart, one at a
+// time, and <cluster>/restart that cluster only.
+type Confirmation struct {
+	Server   bool
+	Clusters []string
+}
+
+// Covers reports whether cluster's restart is confirmed.
+func (c Confirmation) Covers(cluster string) bool {
+	if c.Server {
+		return true
+	}
+	for _, name := range c.Clusters {
+		if name == cluster {
+			return true
+		}
+	}
+	return false
+}
+
+// RestartTokens are the confirm tokens that clear pending, in order: one
+// <cluster>/restart per cluster, and <server>/restart for a server-level
+// step's restart.
+func RestartTokens(server string, pending []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, id := range pending {
+		_, cluster := SplitID(id)
+		token := server + "/restart"
+		if cluster != "" {
+			token = cluster + "/restart"
+		}
+		if !seen[token] {
+			seen[token] = true
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+// PlanStep is one step in a plan. Cluster names the cluster of an instance.
 type PlanStep struct {
-	ID     string `json:"id"`
-	Index  int    `json:"index"`
-	Action string `json:"action"`
-	Reason string `json:"reason"`
-	Detail string `json:"detail,omitempty"`
+	ID      string `json:"id"`
+	Cluster string `json:"cluster,omitempty"`
+	Index   int    `json:"index"`
+	Action  string `json:"action"`
+	Reason  string `json:"reason"`
+	Detail  string `json:"detail,omitempty"`
 	// Diffs are unified diffs of the managed files the step would rewrite.
 	Diffs []FileDiff `json:"diffs,omitempty"`
 }
@@ -75,15 +121,25 @@ type PlanData struct {
 	WouldApply     int        `json:"would_apply"`
 	Total          int        `json:"total"`
 	RestartPending []string   `json:"restart_pending,omitempty"`
+	// ConfirmTokens are the tokens that perform the pending restarts.
+	ConfirmTokens []string `json:"confirm_tokens,omitempty"`
 }
 
 // ApplyStep is one step's outcome in an apply.
 type ApplyStep struct {
 	ID      string `json:"id"`
+	Cluster string `json:"cluster,omitempty"`
 	Index   int    `json:"index"`
 	State   string `json:"state"`
 	Reason  string `json:"reason,omitempty"`
 	Restart string `json:"restart,omitempty"`
+}
+
+// ClusterRestart is one cluster restarted by an apply, with how long it was
+// unavailable.
+type ClusterRestart struct {
+	Cluster    string `json:"cluster"`
+	DowntimeMS int64  `json:"downtime_ms"`
 }
 
 // ApplyData is the apply result.
@@ -93,11 +149,14 @@ type ApplyData struct {
 	Skipped        int         `json:"skipped"`
 	Total          int         `json:"total"`
 	RestartPending []string    `json:"restart_pending,omitempty"`
-	Restarted      bool        `json:"restarted"`
-	// RestartDowntimeMS is how long the database was unavailable during the
-	// aggregated restart.
-	RestartDowntimeMS int64 `json:"restart_downtime_ms,omitempty"`
+	// ConfirmTokens are the tokens that perform the restarts still pending.
+	ConfirmTokens []string `json:"confirm_tokens,omitempty"`
+	// Restarts are the clusters restarted, in order.
+	Restarts []ClusterRestart `json:"restarts,omitempty"`
 }
+
+// Restarted reports whether the apply restarted any cluster.
+func (d ApplyData) Restarted() bool { return len(d.Restarts) > 0 }
 
 type decision struct {
 	apply  bool
@@ -108,7 +167,7 @@ type decision struct {
 
 // Plan runs the runner's decision for every selected step and writes nothing.
 func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opts Options) (PlanData, error) {
-	selected, err := selectSteps(steps, opts.Only)
+	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return PlanData{}, err
 	}
@@ -127,7 +186,8 @@ func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opt
 			action = "apply"
 			data.WouldApply++
 		}
-		ps := PlanStep{ID: step.ID(), Index: i + 1, Action: action, Reason: d.reason, Detail: d.detail}
+		_, cluster := SplitID(step.ID())
+		ps := PlanStep{ID: step.ID(), Cluster: cluster, Index: i + 1, Action: action, Reason: d.reason, Detail: d.detail}
 		if r, ok := step.(FileRenderer); ok && d.apply {
 			for _, f := range r.RenderedFiles(cfg, rt) {
 				if diff := render.Diff(f.Path, f.Content); diff != "" {
@@ -137,7 +197,8 @@ func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opt
 		}
 		data.Steps = append(data.Steps, ps)
 	}
-	data.RestartPending = pendingIn(j, steps)
+	data.RestartPending = pendingIn(j, all, opts.DB)
+	data.ConfirmTokens = RestartTokens(cfg.Name(), data.RestartPending)
 	return data, nil
 }
 
@@ -148,7 +209,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	if rt.DryRun {
 		return ApplyData{}, nil, errors.New("engine.Apply called with DryRun; use Plan")
 	}
-	selected, err := selectSteps(steps, opts.Only)
+	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return ApplyData{}, nil, err
 	}
@@ -163,6 +224,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	var warnings []output.Warning
 	for i, step := range selected {
 		id := step.ID()
+		_, cluster := SplitID(id)
 		index := i + 1
 		d, err := decide(ctx, step, cfg, rt, j)
 		if err != nil {
@@ -175,39 +237,39 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 				entry.InputsHash = d.hash
 				entry.CompletedAt = now()
 				entry.Error = ""
-				j.Steps[id] = entry
-				if err := j.Save(path); err != nil {
+				if err := j.setEntry(path, id, entry); err != nil {
 					return data, nil, err
 				}
 			}
 			report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(index), Total: intPtr(total), Detail: d.reason})
-			data.Steps = append(data.Steps, ApplyStep{ID: id, Index: index, State: "skipped", Reason: d.reason})
+			data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: d.reason})
 			data.Skipped++
 			continue
 		}
 		if b, ok := step.(RestartBarrier); ok && b.NeedsRestartFirst() {
-			if pending := pendingIn(j, steps); len(pending) > 0 {
-				if !opts.Confirmed || opts.Restarter == nil {
+			if pending := pendingIn(j, all, opts.DB); len(pending) > 0 {
+				if opts.Restarter != nil {
+					restarts, err := restartConfirmed(ctx, j, path, opts, cfg, pending)
+					data.Restarts = append(data.Restarts, restarts...)
+					if err != nil {
+						return data, nil, err
+					}
+				}
+				if left := pendingIn(j, all, opts.DB); len(left) > 0 {
 					report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(index), Total: intPtr(total), Detail: ReasonRestartPending})
-					data.Steps = append(data.Steps, ApplyStep{ID: id, Index: index, State: "skipped", Reason: ReasonRestartPending})
+					data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: ReasonRestartPending})
 					data.Skipped++
 					warnings = append(warnings, output.Warning{
-						Code:    "step_waits_for_restart",
-						Message: id + " runs after the pending restart; re-run apply with the restart confirm token",
+						Code: "step_waits_for_restart",
+						Message: id + " runs after the pending restarts; re-run apply with --confirm " +
+							strings.Join(RestartTokens(cfg.Name(), left), " --confirm "),
 					})
 					continue
 				}
-				downtime, err := restartNow(ctx, j, path, opts, pending)
-				if err != nil {
-					return data, nil, err
-				}
-				data.Restarted = true
-				data.RestartDowntimeMS += downtime.Milliseconds()
 			}
 		}
 		report.emit(output.Event{Type: "step", Step: id, State: "started", Index: intPtr(index), Total: intPtr(total), Detail: step.Describe(cfg)})
-		j.Steps[id] = JournalEntry{Status: StatusRunning, InputsHash: d.hash, StartedAt: now()}
-		if err := j.Save(path); err != nil {
+		if err := j.setEntry(path, id, JournalEntry{Status: StatusRunning, InputsHash: d.hash, StartedAt: now()}); err != nil {
 			return data, nil, err
 		}
 		res, err := step.Apply(ctx, cfg, rt, report)
@@ -229,22 +291,23 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		entry.CompletedAt = now()
 		entry.Restart = string(restart)
 		entry.Error = ""
-		j.Steps[id] = entry
-		if restart == RestartRestart {
-			j.addPending(id)
-		}
-		if err := j.Save(path); err != nil {
+		if err := j.update(path, func(j *Journal) {
+			j.Steps[id] = entry
+			if restart == RestartRestart {
+				j.addPending(id)
+			}
+		}); err != nil {
 			return data, nil, err
 		}
 		report.emit(output.Event{Type: "step", Step: id, State: "completed", Index: intPtr(index), Total: intPtr(total), Detail: strings.Join(res.Notes, "; ")})
 		warnings = append(warnings, res.Warnings...)
-		data.Steps = append(data.Steps, ApplyStep{ID: id, Index: index, State: "completed", Restart: string(restart)})
+		data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "completed", Restart: string(restart)})
 		data.Applied++
 	}
 
-	pending := pendingIn(j, steps)
+	pending := pendingIn(j, all, opts.DB)
 	if len(pending) == 0 {
-		return data, nil, nil
+		return data, warnings, nil
 	}
 	if opts.Restarter == nil {
 		return data, nil, output.NewError(
@@ -254,33 +317,66 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			"This is an eru bug. Report it with the run log.",
 		).WithDetails(map[string]any{"restart_pending": pending})
 	}
-	if !opts.Confirmed {
-		data.RestartPending = pending
-		warnings = append(warnings, output.Warning{
-			Code:    "restart_pending",
-			Message: "a restart is pending for " + strings.Join(pending, ", ") + "; re-run apply with the restart confirm token",
-		})
-		return data, warnings, nil
-	}
-	downtime, err := restartNow(ctx, j, path, opts, pending)
+	restarts, err := restartConfirmed(ctx, j, path, opts, cfg, pending)
+	data.Restarts = append(data.Restarts, restarts...)
 	if err != nil {
 		return data, nil, err
 	}
-	data.Restarted = true
-	data.RestartDowntimeMS += downtime.Milliseconds()
+	if left := pendingIn(j, all, opts.DB); len(left) > 0 {
+		data.RestartPending = left
+		data.ConfirmTokens = RestartTokens(cfg.Name(), left)
+		warnings = append(warnings, output.Warning{
+			Code: "restart_pending",
+			Message: "a restart is pending for " + strings.Join(left, ", ") + "; re-run apply with --confirm " +
+				strings.Join(data.ConfirmTokens, " --confirm "),
+		})
+	}
 	return data, warnings, nil
 }
 
-// restartNow performs the aggregated restart and clears the pending list.
-func restartNow(ctx context.Context, j *Journal, path string, opts Options, pending []string) (time.Duration, error) {
-	downtime, err := opts.Restarter.Restart(ctx)
-	if err != nil {
-		return downtime, output.WrapError(output.CodeStepFailed, fmt.Errorf("restart failed: %s", secrets.Redact(err.Error())), output.ExitStep,
-			"Inspect the run log, then re-run apply with the confirm token.").
-			WithDetails(map[string]any{"step": "restart", "error": secrets.Redact(err.Error()), "restart_pending": pending})
+// restartConfirmed restarts, one at a time and in [[clusters]] order, every
+// cluster with a pending restart that opts.Confirm covers, and clears what
+// each restart settled. A server-level step's restart needs <server>/restart
+// and restarts every cluster. The first failure stops, leaving the rest
+// pending.
+func restartConfirmed(ctx context.Context, j *Journal, path string, opts Options, cfg config.Cluster, pending []string) ([]ClusterRestart, error) {
+	byCluster := map[string][]string{}
+	var serverIDs []string
+	for _, id := range pending {
+		if _, cluster := SplitID(id); cluster != "" {
+			byCluster[cluster] = append(byCluster[cluster], id)
+		} else {
+			serverIDs = append(serverIDs, id)
+		}
 	}
-	j.RestartPending = nil
-	return downtime, j.Save(path)
+	all := len(serverIDs) > 0 && opts.Confirm.Server
+	var out []ClusterRestart
+	for _, c := range cfg.Clusters {
+		ids, needed := byCluster[c.Name]
+		if (!needed || !opts.Confirm.Covers(c.Name)) && !all {
+			continue
+		}
+		if opts.DB != "" && c.Name != opts.DB {
+			continue
+		}
+		downtime, err := opts.Restarter.Restart(ctx, c.Name)
+		if err != nil {
+			msg := secrets.Redact(err.Error())
+			return out, output.WrapError(output.CodeStepFailed, fmt.Errorf("restart of %s failed: %s", c.Name, msg), output.ExitStep,
+				"Inspect the run log, then re-run apply with the confirm token.").
+				WithDetails(map[string]any{"step": "restart", "cluster": c.Name, "error": msg, "restart_pending": pending})
+		}
+		out = append(out, ClusterRestart{Cluster: c.Name, DowntimeMS: downtime.Milliseconds()})
+		if err := j.clearPending(path, ids); err != nil {
+			return out, err
+		}
+	}
+	if all {
+		if err := j.clearPending(path, serverIDs); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 func decide(ctx context.Context, step Step, cfg config.Cluster, rt Runtime, j *Journal) (decision, error) {
@@ -344,8 +440,7 @@ func failStep(j *Journal, path string, opts Options, id string, index, total int
 		entry.InputsHash = d.hash
 	}
 	entry.Error = msg
-	j.Steps[id] = entry
-	saveErr := j.Save(path)
+	saveErr := j.setEntry(path, id, entry)
 	opts.Report.emit(output.Event{Type: "step", Step: id, State: "failed", Index: intPtr(index), Total: intPtr(total), Detail: msg})
 	err := stepFailed(id, index, cause)
 	if opts.FailureHint != "" {
@@ -391,16 +486,58 @@ func stepFailed(id string, index int, cause error) *output.CLIError {
 	return out
 }
 
-func selectSteps(steps []Step, only []string) ([]Step, error) {
+// prepare validates the catalogue, expands its templates for cfg and picks
+// the steps opts selects. all is the expanded catalogue.
+func prepare(steps []Step, cfg config.Cluster, opts Options) (all, selected []Step, err error) {
 	if err := ValidateIDs(steps); err != nil {
-		return nil, output.WrapError(output.CodeError, err, output.ExitGeneric, "This is an eru bug in the step catalogue.")
+		return nil, nil, output.WrapError(output.CodeError, err, output.ExitGeneric, "This is an eru bug in the step catalogue.")
 	}
+	all = Expand(steps, cfg)
+	if opts.DB != "" {
+		if _, ok := cfg.ClusterByName(opts.DB); !ok {
+			names := make([]string, 0, len(cfg.Clusters))
+			for _, c := range cfg.Clusters {
+				names = append(names, c.Name)
+			}
+			return nil, nil, output.NewError(
+				output.CodeValidation,
+				"database "+opts.DB+" is not in cluster.toml",
+				output.ExitConfig,
+				"Pick a database from details.databases.",
+			).WithDetails(map[string]any{"database": opts.DB, "databases": names})
+		}
+	}
+	selected, err = selectSteps(steps, all, opts.Only)
+	if err != nil {
+		return nil, nil, err
+	}
+	if opts.DB != "" {
+		kept := selected[:0:0]
+		for _, step := range selected {
+			if _, cluster := SplitID(step.ID()); cluster == opts.DB {
+				kept = append(kept, step)
+			}
+		}
+		selected = kept
+	}
+	return all, selected, nil
+}
+
+// selectSteps picks the steps of all that only names. A template's ID
+// selects every instance.
+func selectSteps(catalog, all []Step, only []string) ([]Step, error) {
 	if len(only) == 0 {
-		return steps, nil
+		return all, nil
 	}
-	valid := make([]string, 0, len(steps))
+	var valid []string
 	known := map[string]bool{}
-	for _, step := range steps {
+	for _, step := range catalog {
+		if _, ok := step.(Template); ok {
+			valid = append(valid, step.ID())
+			known[step.ID()] = true
+		}
+	}
+	for _, step := range all {
 		valid = append(valid, step.ID())
 		known[step.ID()] = true
 	}
@@ -420,9 +557,10 @@ func selectSteps(steps []Step, only []string) ([]Step, error) {
 			"Pick step IDs from details.valid.",
 		).WithDetails(map[string]any{"unknown": unknown, "valid": valid})
 	}
-	out := make([]Step, 0, len(want))
-	for _, step := range steps {
-		if want[step.ID()] {
+	out := make([]Step, 0, len(all))
+	for _, step := range all {
+		template, _ := SplitID(step.ID())
+		if want[step.ID()] || want[template] {
 			out = append(out, step)
 		}
 	}
@@ -430,17 +568,21 @@ func selectSteps(steps []Step, only []string) ([]Step, error) {
 }
 
 // pendingIn returns the journal's pending restarts that still belong to the
-// catalogue.
-func pendingIn(j *Journal, steps []Step) []string {
+// expanded catalogue, limited to db's instances when db is set.
+func pendingIn(j *Journal, steps []Step, db string) []string {
 	known := map[string]bool{}
 	for _, step := range steps {
 		known[step.ID()] = true
 	}
 	var out []string
 	for _, id := range j.RestartPending {
-		if known[id] {
-			out = append(out, id)
+		if !known[id] {
+			continue
 		}
+		if _, cluster := SplitID(id); db != "" && cluster != db {
+			continue
+		}
+		out = append(out, id)
 	}
 	return out
 }

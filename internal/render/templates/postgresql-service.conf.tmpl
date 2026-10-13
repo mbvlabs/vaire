@@ -3,3 +3,8 @@
 LimitNOFILE=65536
 OOMScoreAdjust=-900
 Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj PG_OOM_ADJUST_VALUE=0
+MemoryHigh={{ .MemoryHigh }}M
+{{ if .MemoryMax }}MemoryMax={{ .MemoryMax }}M
+{{ end }}CPUWeight={{ .CPUWeight }}
+{{ if .CPUQuota }}CPUQuota={{ .CPUQuota }}
+{{ end }}IOWeight={{ .IOWeight }}

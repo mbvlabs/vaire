@@ -5,42 +5,44 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"time"
 
+	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
 )
 
 // pgReadyTimeout bounds the wait for PostgreSQL to accept connections.
 const pgReadyTimeout = 60 * time.Second
 
-// postgresRestarter performs the aggregated restart: stop PgBouncer so clients
-// do not hit a restarting server, restart PostgreSQL, wait for readiness, then
-// start PgBouncer again.
-type postgresRestarter struct{}
+// postgresRestarter restarts one cluster and waits until it accepts
+// connections on its socket. The poolers keep running: every other database
+// keeps serving while this one restarts (RFC 7.1).
+type postgresRestarter struct {
+	cfg config.Cluster
+}
 
-func (postgresRestarter) Restart(ctx context.Context) (time.Duration, error) {
+func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Duration, error) {
+	spec, ok := r.cfg.ClusterByName(cluster)
+	if !ok {
+		return 0, fmt.Errorf("cluster %s is not in cluster.toml", cluster)
+	}
 	start := time.Now()
-	// PgBouncer first, so no client connects to a server mid-restart.
-	_ = runCmd(ctx, "systemctl", "stop", PgbouncerService)
-	if err := runCmd(ctx, "pg_ctlcluster", "18", PGCluster, "restart", "-m", "fast"); err != nil {
-		_ = runCmd(ctx, "systemctl", "start", PgbouncerService)
-		return time.Since(start), fmt.Errorf("restart postgresql: %w", err)
+	if err := runCmd(ctx, "pg_ctlcluster", strconv.Itoa(PGVersion), cluster, "restart", "-m", "fast"); err != nil {
+		return time.Since(start), fmt.Errorf("restart %s: %w", PGServiceName(cluster), err)
 	}
-	if err := waitReady(ctx); err != nil {
-		_ = runCmd(ctx, "systemctl", "start", PgbouncerService)
+	if err := waitReady(ctx, spec.Port); err != nil {
 		return time.Since(start), err
-	}
-	if err := runCmd(ctx, "systemctl", "start", PgbouncerService); err != nil {
-		return time.Since(start), fmt.Errorf("start pgbouncer: %w", err)
 	}
 	return time.Since(start), nil
 }
 
-// waitReady polls pg_isready until the cluster answers or the timeout passes.
-func waitReady(ctx context.Context) error {
+// waitReady polls pg_isready on the cluster's socket until it answers or the
+// timeout passes.
+func waitReady(ctx context.Context, port int) error {
 	deadline := time.Now().Add(pgReadyTimeout)
 	for {
-		if err := runCmd(ctx, "pg_isready", "-q", "-h", "/var/run/postgresql"); err == nil {
+		if err := runCmd(ctx, "pg_isready", "-q", "-h", PGSocketDir, "-p", strconv.Itoa(port)); err == nil {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -60,5 +62,6 @@ func runCmd(ctx context.Context, name string, args ...string) error {
 	return cmd.Run()
 }
 
-// restarter is the engine.Restarter the catalogue hands the runner.
-var restarter engine.Restarter = postgresRestarter{}
+// Restarter returns the cluster restarter the runner calls for each cluster
+// with a confirmed pending restart.
+func Restarter(cfg config.Cluster) engine.Restarter { return postgresRestarter{cfg: cfg} }

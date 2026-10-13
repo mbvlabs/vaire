@@ -98,10 +98,9 @@ type Server struct {
 	MemoryReserve string `toml:"memory_reserve"`
 }
 
-// DataDirectory is the data directory of the one cluster, main, under
-// data_root. It goes when each database gets its own cluster.
-func (s Server) DataDirectory() string {
-	return path.Join(s.DataRoot, "main")
+// DataDirectory is cluster's data directory, <data_root>/<cluster>.
+func (s Server) DataDirectory(cluster string) string {
+	return path.Join(s.DataRoot, cluster)
 }
 
 // Postgres is [postgres]: the setup-wide defaults for every cluster, with

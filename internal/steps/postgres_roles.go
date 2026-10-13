@@ -20,20 +20,28 @@ const postgresRolesID = "postgres-roles-v1"
 // systemDatabases are never reported as orphaned.
 var systemDatabases = map[string]bool{"postgres": true, "template0": true, "template1": true}
 
-type postgresRoles struct{}
+// postgresRoles creates, in one cluster, the service roles, eru_direct_only,
+// the eru schema with both pooler auth functions, and that cluster's
+// database with its four roles, grants and extensions (RFC 12).
+type postgresRoles struct{ clusterStep }
 
-func (postgresRoles) ID() string { return postgresRolesID }
+func (s postgresRoles) ID() string { return s.id(postgresRolesID) }
 
-func (postgresRoles) Describe(config.Cluster) string {
-	return "create roles, databases, grants and extensions"
+func (postgresRoles) Instance(cluster string) engine.Step {
+	return postgresRoles{clusterStep{cluster: cluster}}
+}
+
+func (s postgresRoles) Describe(config.Cluster) string {
+	return "create the service roles, the auth functions and " + s.cluster + "'s roles, database, grants and extensions"
 }
 
 // roleInputs is everything Apply depends on except passwords (D5).
 type roleInputs struct {
-	Admin   bool             `json:"admin"`
-	Monitor bool             `json:"monitor"`
-	Auth    bool             `json:"auth"`
-	DBs     []databaseInputs `json:"databases"`
+	Admin   bool           `json:"admin"`
+	Monitor bool           `json:"monitor"`
+	Auth    bool           `json:"auth"`
+	AuthSQL string         `json:"auth_sql"`
+	DB      databaseInputs `json:"database"`
 }
 
 type databaseInputs struct {
@@ -42,82 +50,71 @@ type databaseInputs struct {
 	Extensions       []string `json:"extensions"`
 }
 
-func buildRoleInputs(cfg config.Cluster) roleInputs {
-	in := roleInputs{Admin: true, Monitor: true, Auth: true}
-	for _, db := range cfg.Clusters {
-		in.DBs = append(in.DBs, databaseInputs{
-			Name:             db.Name,
-			StatementTimeout: db.StatementTimeout,
-			Extensions:       db.Extensions,
-		})
+func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
+	spec, err := s.spec(cfg)
+	if err != nil {
+		return nil, err
 	}
-	return in
+	return canonical(roleInputs{
+		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL,
+		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions},
+	})
 }
 
-func (postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
-	return canonical(buildRoleInputs(cfg))
-}
-
-func (postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
-	roles, err := queryColumn(ctx, rt, "postgres", "SELECT rolname FROM pg_roles")
+func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
+	spec, err := s.spec(cfg)
+	if err != nil {
+		return engine.CheckResult{}, err
+	}
+	local := ClusterPG(spec)
+	roles, err := queryColumn(ctx, local, "postgres", "SELECT rolname FROM pg_roles")
 	if err != nil {
 		return incomplete("cannot read pg_roles"), nil
 	}
 	roleSet := stringSet(roles)
-	for _, role := range []string{"eru_admin", "eru_monitor", "pgbouncer_auth"} {
+	for _, role := range append([]string{"eru_admin", "eru_monitor", "pgbouncer_auth", RoleDirectOnly, spec.Name + "_owner"}, prefixed(spec.Name, DatabaseRoles)...) {
 		if !roleSet[role] {
 			return incomplete("role " + role + " is missing"), nil
 		}
 	}
-	dbs, err := queryColumn(ctx, rt, "postgres", "SELECT datname FROM pg_database")
+	dbs, err := queryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
 	if err != nil {
 		return incomplete("cannot read pg_database"), nil
 	}
-	dbSet := stringSet(dbs)
-	for _, db := range cfg.Clusters {
-		for _, role := range append([]string{db.Name + "_owner"}, prefixed(db.Name, DatabaseRoles)...) {
-			if !roleSet[role] {
-				return incomplete("role " + role + " is missing"), nil
-			}
+	if !stringSet(dbs)[spec.Name] {
+		return incomplete("database " + spec.Name + " is missing"), nil
+	}
+	for _, fn := range []struct{ name, needs string }{
+		{"pgbouncer_get_auth", RoleDirectOnly},
+		{"pgbouncer_get_auth_session", "eru_admin"},
+	} {
+		src, err := queryColumn(ctx, local, "postgres", "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
+		if err != nil || len(src) == 0 {
+			return incomplete("eru." + fn.name + " is missing"), nil
 		}
-		if !dbSet[db.Name] {
-			return incomplete("database " + db.Name + " is missing"), nil
+		if !strings.Contains(src[0], fn.needs) {
+			return incomplete("eru." + fn.name + " is out of date"), nil
 		}
 	}
-	if !roleSet[RoleDirectOnly] {
-		return incomplete("role " + RoleDirectOnly + " is missing"), nil
-	}
-	fn, err := queryColumn(ctx, rt, "postgres", "SELECT prosrc FROM pg_proc WHERE proname = 'pgbouncer_get_auth'")
-	if err != nil || len(fn) == 0 {
-		return incomplete("eru.pgbouncer_get_auth is missing"), nil
-	}
-	if !strings.Contains(fn[0], RoleDirectOnly) {
-		return incomplete("eru.pgbouncer_get_auth does not refuse " + RoleDirectOnly), nil
-	}
-	direct, err := queryColumn(ctx, rt, "postgres", directOnlyMembersSQL)
+	direct, err := queryColumn(ctx, local, "postgres", directOnlyMembersSQL)
 	if err != nil {
 		return incomplete("cannot read " + RoleDirectOnly + " members"), nil
 	}
-	directSet := stringSet(direct)
-	for _, db := range cfg.Clusters {
-		if !directSet[db.Name+"_"+RoleMigrate] {
-			return incomplete("role " + db.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly), nil
-		}
+	if !stringSet(direct)[spec.Name+"_"+RoleMigrate] {
+		return incomplete("role " + spec.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly), nil
 	}
-	for _, db := range cfg.Clusters {
-		installed, err := queryColumn(ctx, rt, db.Name, "SELECT extname FROM pg_extension")
-		if err != nil {
-			return incomplete("cannot read extensions in " + db.Name), nil
+	installed, err := queryColumn(ctx, local, spec.Name, "SELECT extname FROM pg_extension")
+	if err != nil {
+		return incomplete("cannot read extensions in " + spec.Name), nil
+	}
+	have := stringSet(installed)
+	for _, ext := range spec.Extensions {
+		entry, ok := catalog.Lookup(ext)
+		if !ok || entry.ExtName == "" {
+			continue
 		}
-		have := stringSet(installed)
-		for _, ext := range db.Extensions {
-			entry, ok := catalog.Lookup(ext)
-			if !ok || entry.ExtName == "" {
-				continue
-			}
-			if !have[entry.ExtName] {
-				return incomplete("extension " + entry.ExtName + " is missing in " + db.Name), nil
-			}
+		if !have[entry.ExtName] {
+			return incomplete("extension " + entry.ExtName + " is missing in " + spec.Name), nil
 		}
 	}
 	for _, name := range []string{"pgbouncer_auth", "monitor"} {
@@ -128,13 +125,18 @@ func (postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.Ru
 	return complete(), nil
 }
 
-func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
-	roles, err := queryColumn(ctx, rt, "postgres", "SELECT rolname FROM pg_roles")
+func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, _ engine.Reporter) (engine.ApplyResult, error) {
+	spec, err := s.spec(cfg)
+	if err != nil {
+		return engine.ApplyResult{}, err
+	}
+	local := ClusterPG(spec)
+	roles, err := queryColumn(ctx, local, "postgres", "SELECT rolname FROM pg_roles")
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
 	roleSet := stringSet(roles)
-	dbs, err := queryColumn(ctx, rt, "postgres", "SELECT datname FROM pg_database")
+	dbs, err := queryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
@@ -142,49 +144,40 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 
 	var cluster strings.Builder
 	cluster.WriteString("-- managed by eru - do not edit; use cluster.toml\n")
-	if !roleSet["eru_admin"] {
-		v, err := roleVerifier(rt, SecretAdminPassword, "eru_admin", "")
-		if err != nil {
-			return engine.ApplyResult{}, err
-		}
-		fmt.Fprintf(&cluster, "CREATE ROLE %s LOGIN CREATEDB CREATEROLE PASSWORD '%s';\n", pg.Quote("eru_admin"), v)
+	service := []struct {
+		role, secret, attrs, grants string
+	}{
+		{"eru_admin", SecretAdminPassword, "LOGIN CREATEDB CREATEROLE", "pg_monitor, pg_signal_backend, pg_maintain, pg_use_reserved_connections"},
+		{"eru_monitor", SecretMonitor, "LOGIN", "pg_monitor"},
+		{"pgbouncer_auth", SecretPgbouncerAuth, "LOGIN", ""},
 	}
-	cluster.WriteString("GRANT pg_monitor, pg_signal_backend, pg_maintain, pg_use_reserved_connections TO eru_admin;\n")
-	if !roleSet["eru_monitor"] {
-		v, err := roleVerifier(rt, SecretMonitor, "eru_monitor", "")
-		if err != nil {
-			return engine.ApplyResult{}, err
+	for _, r := range service {
+		if !roleSet[r.role] {
+			v, err := serviceVerifier(ctx, cfg, spec, rt, r.role, r.secret)
+			if err != nil {
+				return engine.ApplyResult{}, err
+			}
+			fmt.Fprintf(&cluster, "CREATE ROLE %s %s PASSWORD '%s';\n", pg.Quote(r.role), r.attrs, v)
 		}
-		fmt.Fprintf(&cluster, "CREATE ROLE %s LOGIN PASSWORD '%s';\n", pg.Quote("eru_monitor"), v)
-	}
-	cluster.WriteString("GRANT pg_monitor TO eru_monitor;\n")
-	if !roleSet["pgbouncer_auth"] {
-		v, err := roleVerifier(rt, SecretPgbouncerAuth, "pgbouncer_auth", "")
-		if err != nil {
-			return engine.ApplyResult{}, err
+		if r.grants != "" {
+			fmt.Fprintf(&cluster, "GRANT %s TO %s;\n", r.grants, pg.Quote(r.role))
 		}
-		fmt.Fprintf(&cluster, "CREATE ROLE %s LOGIN PASSWORD '%s';\n", pg.Quote("pgbouncer_auth"), v)
 	}
 	if !roleSet[RoleDirectOnly] {
 		fmt.Fprintf(&cluster, "CREATE ROLE %s NOLOGIN;\n", RoleDirectOnly)
 	}
 	cluster.WriteString(pgbouncerAuthSQL)
 
-	for _, db := range cfg.Clusters {
-		sql, err := databaseSQL(ctx, rt, db, roleSet, dbSet)
-		if err != nil {
-			return engine.ApplyResult{}, err
-		}
-		cluster.WriteString(sql)
-	}
-	if err := rt.PG.Exec(ctx, "postgres", cluster.String(), nil); err != nil {
+	sql, err := databaseSQL(ctx, rt, spec, roleSet, dbSet)
+	if err != nil {
 		return engine.ApplyResult{}, err
 	}
-
-	for _, db := range cfg.Clusters {
-		if err := rt.PG.Exec(ctx, db.Name, databaseGrantsSQL(db), nil); err != nil {
-			return engine.ApplyResult{}, err
-		}
+	cluster.WriteString(sql)
+	if err := local.Exec(ctx, "postgres", cluster.String(), nil); err != nil {
+		return engine.ApplyResult{}, err
+	}
+	if err := local.Exec(ctx, spec.Name, databaseGrantsSQL(spec), nil); err != nil {
+		return engine.ApplyResult{}, err
 	}
 
 	if err := writeRuntimePass(rt, "pgbouncer_auth", SecretPgbouncerAuth); err != nil {
@@ -194,8 +187,25 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 		return engine.ApplyResult{}, err
 	}
 
-	warnings := orphanedWarnings(cfg, dbs, roleSet)
-	return engine.ApplyResult{Restart: engine.RestartNone, Warnings: warnings}, nil
+	return engine.ApplyResult{Restart: engine.RestartNone, Warnings: orphanedWarnings(spec, dbs, roleSet)}, nil
+}
+
+// serviceVerifier is the SCRAM verifier for a service role in spec's
+// cluster. Service passwords are setup-wide (RFC 12): another cluster's
+// verifier is copied, so every cluster holds the same one, and only the
+// first cluster computes it from the request's secret.
+func serviceVerifier(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime, role, secretKey string) (string, error) {
+	for _, other := range cfg.Clusters {
+		if other.Name == spec.Name {
+			continue
+		}
+		rows, err := queryColumn(ctx, ClusterPG(other), "postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"+role+"'")
+		if err == nil && len(rows) == 1 && strings.HasPrefix(rows[0], "SCRAM-SHA-256$") {
+			secrets.Add(rows[0])
+			return rows[0], nil
+		}
+	}
+	return roleVerifier(rt, secretKey, role, "")
 }
 
 // databaseSQL creates the roles and the database, cluster-wide, in postgres.
@@ -280,7 +290,10 @@ const directOnlyMembersSQL = `SELECT m.rolname FROM pg_auth_members a
   JOIN pg_roles m ON m.oid = a.member JOIN pg_roles g ON g.oid = a.roleid
   WHERE g.rolname = '` + RoleDirectOnly + `'`
 
-// pgbouncerAuthSQL is the SECURITY DEFINER function and its grants (§14.2).
+// pgbouncerAuthSQL is the SECURITY DEFINER auth functions and their grants
+// (§14.2, RFC 8.1): pgbouncer_get_auth for the transaction pooler refuses
+// members of eru_direct_only; pgbouncer_get_auth_session for the session
+// pooler refuses only postgres and the service roles.
 const pgbouncerAuthSQL = `CREATE SCHEMA IF NOT EXISTS eru AUTHORIZATION postgres;
 CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
   RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $eru$
@@ -289,9 +302,17 @@ CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
     AND usename NOT IN ('postgres','pgbouncer_auth','eru_monitor')
     AND NOT pg_has_role(usename, '` + RoleDirectOnly + `', 'MEMBER')
 $eru$;
+CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth_session(p_usename text)
+  RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $eru$
+  SELECT usename, passwd FROM pg_shadow
+  WHERE usename = p_usename AND NOT usesuper
+    AND usename NOT IN ('postgres','pgbouncer_auth','eru_admin','eru_monitor')
+$eru$;
 REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth_session(text) FROM PUBLIC;
 GRANT USAGE ON SCHEMA eru TO pgbouncer_auth;
 GRANT EXECUTE ON FUNCTION eru.pgbouncer_get_auth(text) TO pgbouncer_auth;
+GRANT EXECUTE ON FUNCTION eru.pgbouncer_get_auth_session(text) TO pgbouncer_auth;
 REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
 GRANT CONNECT ON DATABASE postgres TO pgbouncer_auth, eru_admin, eru_monitor;
 `
@@ -336,24 +357,20 @@ func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 	return writeFile(path, password+"\n", 0o600)
 }
 
-// orphanedWarnings reports databases that exist but are no longer in
-// cluster.toml and look like eru databases.
-func orphanedWarnings(cfg config.Cluster, dbs []string, roleSet map[string]bool) []output.Warning {
-	configured := map[string]bool{}
-	for _, db := range cfg.Clusters {
-		configured[db.Name] = true
-	}
+// orphanedWarnings reports databases in spec's cluster other than its own
+// that look like eru databases.
+func orphanedWarnings(spec config.ClusterSpec, dbs []string, roleSet map[string]bool) []output.Warning {
 	var warnings []output.Warning
 	for _, name := range dbs {
 		// eru restore's __restoring and __pre_restore_* copies are not
 		// orphans: restore promote, abort and cleanup own them.
-		if systemDatabases[name] || configured[name] || config.IsRestoreName(name) {
+		if systemDatabases[name] || name == spec.Name || config.IsRestoreName(name) {
 			continue
 		}
 		if roleSet[name+"_owner"] {
 			warnings = append(warnings, output.Warning{
 				Code:    "orphaned_database",
-				Message: "database " + name + " is no longer in cluster.toml; drop it with eru db drop " + name,
+				Message: "database " + name + " in cluster " + spec.Name + " is not in cluster.toml",
 			})
 		}
 	}
@@ -361,8 +378,8 @@ func orphanedWarnings(cfg config.Cluster, dbs []string, roleSet map[string]bool)
 	return warnings
 }
 
-func queryColumn(ctx context.Context, rt engine.Runtime, db, sql string) ([]string, error) {
-	rows, err := rt.PG.Query(ctx, db, sql, nil)
+func queryColumn(ctx context.Context, local pg.Local, db, sql string) ([]string, error) {
+	rows, err := local.Query(ctx, db, sql, nil)
 	if err != nil {
 		return nil, err
 	}

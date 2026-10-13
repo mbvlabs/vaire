@@ -104,6 +104,14 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	service, _, generated, err := serviceSecrets(s.ctx.Name)
+	if err != nil {
+		return err
+	}
+	for k, v := range service {
+		rpc[k] = v
+	}
+	s.warnings = append(s.warnings, staleWarning(generated)...)
 	reply, err := s.node.Call(commandContext(cmd), "db.create", map[string]any{
 		"name":              name,
 		"statement_timeout": timeout,

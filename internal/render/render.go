@@ -60,14 +60,19 @@ func TuningConf(res tune.Result) []byte {
 	return execute("10-eru-tuning.conf.tmpl", map[string]any{"Settings": items})
 }
 
-// SecurityConf renders conf.d/20-eru-security.conf (§14.1).
-func SecurityConf() []byte { return execute("20-eru-security.conf.tmpl", nil) }
+// SecurityConf renders a cluster's conf.d/20-eru-security.conf (§14.1): no
+// TCP listener, and port only names the socket (RFC 8.2).
+func SecurityConf(port int) []byte {
+	return execute("20-eru-security.conf.tmpl", map[string]any{"Port": port})
+}
 
-// ExtensionsConf renders conf.d/30-eru-extensions.conf: shared_preload_libraries
-// and the catalog settings. auto_explain.log_min_duration is twice the tuned
+// ExtensionsConf renders a cluster's conf.d/30-eru-extensions.conf:
+// shared_preload_libraries and the catalog settings of its database's
+// extensions. auto_explain.log_min_duration is twice the tuned
 // log_min_duration_statement.
-func ExtensionsConf(cfg config.Cluster, res tune.Result) []byte {
-	enabled := enabledExtensions(cfg)
+func ExtensionsConf(spec config.ClusterSpec, res tune.Result) []byte {
+	enabled := append([]string(nil), spec.Extensions...)
+	sort.Strings(enabled)
 	items := make([]setting, 0)
 	if preloads := catalog.Preloads(enabled); len(preloads) > 0 {
 		items = append(items, setting{Name: "shared_preload_libraries", Value: "'" + strings.Join(preloads, ",") + "'"})
@@ -97,22 +102,6 @@ func ExtensionsConf(cfg config.Cluster, res tune.Result) []byte {
 	return execute("30-eru-extensions.conf.tmpl", map[string]any{"Settings": items})
 }
 
-// enabledExtensions is the union of the per-database extension lists, sorted.
-func enabledExtensions(cfg config.Cluster) []string {
-	seen := map[string]bool{}
-	for _, db := range cfg.Clusters {
-		for _, name := range db.Extensions {
-			seen[name] = true
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for name := range seen {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // baseLogDuration is the tuned log_min_duration_statement, defaulting to 1s.
 func baseLogDuration(res tune.Result) string {
 	for _, s := range res.Settings {
@@ -135,16 +124,25 @@ func doubleDuration(value string) string {
 	return value
 }
 
-// SettingsConf renders conf.d/50-eru-settings.conf from [postgres.settings].
-func SettingsConf(cfg config.Cluster) []byte {
-	keys := make([]string, 0, len(cfg.Postgres.Settings))
-	for k := range cfg.Postgres.Settings {
+// SettingsConf renders a cluster's conf.d/50-eru-settings.conf: the
+// setup-wide [postgres.settings], with the cluster's [clusters.settings]
+// winning.
+func SettingsConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
+	merged := map[string]string{}
+	for k, v := range cfg.Postgres.Settings {
+		merged[k] = v
+	}
+	for k, v := range spec.Settings {
+		merged[k] = v
+	}
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	items := make([]setting, 0, len(keys))
 	for _, k := range keys {
-		items = append(items, setting{Name: k, Value: quote(cfg.Postgres.Settings[k])})
+		items = append(items, setting{Name: k, Value: quote(merged[k])})
 	}
 	return execute("50-eru-settings.conf.tmpl", map[string]any{"Settings": items})
 }
@@ -157,13 +155,9 @@ func quote(value string) string {
 // OverridesHeader renders conf.d/90-overrides.conf.
 func OverridesHeader() []byte { return execute("90-overrides.conf.tmpl", nil) }
 
-// HBA renders pg_hba.conf (§14.1).
-func HBA(cfg config.Cluster) []byte {
-	return execute("pg_hba.conf.tmpl", map[string]any{
-		"WGSubnet":  cfg.Transport.Subnet,
-		"Allowlist": cfg.Network.ClientAllowlist,
-	})
-}
+// HBA renders a cluster's pg_hba.conf (§14.1). It is the same for every
+// cluster and allows the socket only (RFC 12).
+func HBA() []byte { return execute("pg_hba.conf.tmpl", nil) }
 
 // Ident renders pg_ident.conf (§14.1).
 func Ident(cfg config.Cluster) []byte {
@@ -176,7 +170,7 @@ func PgbouncerIni(cfg config.Cluster, host hostinfo.Info, maxConnections int) []
 	return execute("pgbouncer.ini.tmpl", map[string]any{
 		"ClientConnections": cfg.Postgres.ClientConnections,
 		"DefaultPoolSize":   poolSize,
-		"MaxDBConnections":  maxInt(maxConnections-20, 1),
+		"MaxDBConnections":  maxInt(maxConnections, 1),
 	})
 }
 
@@ -217,8 +211,21 @@ func NginxConf(cfg config.Cluster, acmeWebroot string) []byte {
 // except the loopback hop from nginx.
 func PgbouncerHBA() []byte { return execute("pgbouncer_hba.conf.tmpl", nil) }
 
-// PGServiceDropin renders the postgresql@18-main.service drop-in.
-func PGServiceDropin() []byte { return execute("postgresql-service.conf.tmpl", nil) }
+// PGServiceDropin renders a cluster's postgresql@18-<cluster>.service
+// drop-in: its cgroup limits (RFC 7.2). MemoryHigh is the cluster's memory
+// plus a 25% allowance for backends; MemoryMax and CPUQuota only when set.
+func PGServiceDropin(r config.Resources) []byte {
+	return execute("postgresql-service.conf.tmpl", map[string]any{
+		"MemoryHigh": MemoryHighMiB(r),
+		"MemoryMax":  r.MemoryMaxMiB,
+		"CPUWeight":  r.CPUWeight,
+		"CPUQuota":   r.CPUQuota,
+		"IOWeight":   r.IOWeight,
+	})
+}
+
+// MemoryHighMiB is a cluster's MemoryHigh: its memory plus 25%.
+func MemoryHighMiB(r config.Resources) int { return r.MemoryMiB + r.MemoryMiB/4 }
 
 // CertsService renders eru-certs.service, which runs eru node run
 // certs-renew (D11). tls-v1 installs it and starts it once.
@@ -238,6 +245,9 @@ type BackupSecrets struct {
 
 // PgBackRestConf renders /etc/pgbackrest/pgbackrest.conf (§13.1).
 func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) []byte {
+	// One stanza, the first cluster's, until the file gets a section per
+	// cluster.
+	first, _ := cfg.BackupCluster()
 	endpoint := strings.TrimSuffix(strings.TrimPrefix(cfg.Backup.Endpoint, "https://"), "/")
 	hostPart, port := endpoint, ""
 	if h, p, ok := strings.Cut(endpoint, ":"); ok {
@@ -258,14 +268,21 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 		"RetentionDays": cfg.Backup.Database.RetentionFull * 7,
 		"LocalRepo":     cfg.Backup.Database.LocalRepo,
 		"ProcessMax":    maxInt(1, host.VCPU/2),
-		"Stanza":        cfg.Name(),
-		"DataDirectory": cfg.Server.DataDirectory(),
+		"Stanza":        first.Stanza,
+		"Port":          first.Port,
+		"DataDirectory": cfg.Server.DataDirectory(first.Name),
 	})
 }
 
-// BackupConf renders conf.d/40-eru-backup.conf: WAL archiving to pgBackRest.
-func BackupConf(cfg config.Cluster) []byte {
-	return execute("40-eru-backup.conf.tmpl", map[string]any{"Stanza": cfg.Name()})
+// BackupConf renders a cluster's conf.d/40-eru-backup.conf: archive_mode on
+// from creation, with archive-push to the cluster's stanza once [backup]
+// names a bucket and /bin/true before (RFC 9.1).
+func BackupConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
+	stanza := ""
+	if cfg.BackupConfigured() {
+		stanza = spec.Stanza
+	}
+	return execute("40-eru-backup.conf.tmpl", map[string]any{"Stanza": stanza})
 }
 
 // JobService renders the eru-<job>.service a timer starts (§18). arg is

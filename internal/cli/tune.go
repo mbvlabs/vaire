@@ -19,6 +19,9 @@ type tuneSetting struct {
 }
 
 type tuneShowData struct {
+	// Server is the memory budget: RAM, the reserve, what clusters get.
+	Server         map[string]any    `json:"server"`
+	Database       string            `json:"database,omitempty"`
 	Inputs         map[string]any    `json:"inputs"`
 	Settings       []tuneSetting     `json:"settings"`
 	Current        map[string]string `json:"current"`
@@ -26,7 +29,11 @@ type tuneShowData struct {
 }
 
 func fetchTune(cmd *cobra.Command, s *session, p *progress) (tuneShowData, error) {
-	reply, err := s.node.Call(commandContext(cmd), "tune.show", nil, remote.CallOptions{OnEvent: p.event})
+	var params any
+	if db := stringFlag(cmd, "db"); db != "" {
+		params = map[string]string{"db": db}
+	}
+	reply, err := s.node.Call(commandContext(cmd), "tune.show", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return tuneShowData{}, err
 	}
@@ -48,7 +55,11 @@ func runTuneShow(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("%d settings", len(data.Settings)), Warnings: s.warnings})
+	message := fmt.Sprintf("%d settings", len(data.Settings))
+	if data.Database != "" {
+		message += " for " + data.Database
+	}
+	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings})
 }
 
 func runTuneExplain(cmd *cobra.Command, _ []string) error {
@@ -62,7 +73,14 @@ func runTuneExplain(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	lines := []string{"inputs:"}
+	lines := []string{"server:"}
+	for _, key := range sortedKeys(data.Server) {
+		lines = append(lines, fmt.Sprintf("  %s = %v", key, data.Server[key]))
+	}
+	if data.Database == "" {
+		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(append(lines, "", "no databases yet"), "\n"), Warnings: s.warnings})
+	}
+	lines = append(lines, "", "inputs for "+data.Database+":")
 	for _, key := range sortedKeys(data.Inputs) {
 		lines = append(lines, fmt.Sprintf("  %s = %v", key, data.Inputs[key]))
 	}
@@ -83,10 +101,12 @@ func runTuneApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
+	confirm, confirms := confirmOptions(cmd)
 	reply, err := s.node.Call(commandContext(cmd), "tune.apply", nil, remote.CallOptions{
-		DryRun:  dryRun(cmd),
-		Confirm: stringFlag(cmd, "confirm"),
-		OnEvent: p.event,
+		DryRun:   dryRun(cmd),
+		Confirm:  confirm,
+		Confirms: confirms,
+		OnEvent:  p.event,
 	})
 	if err != nil {
 		return err
@@ -104,10 +124,15 @@ func runTuneApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	message := fmt.Sprintf("applied %d, skipped %d of %d tuning steps", data.Applied, data.Skipped, data.Total)
+	if data.Restarted() {
+		message += "; restarted " + restartSummary(data.Restarts)
+	}
+	var next []string
 	if len(data.RestartPending) > 0 {
 		message += "; restart pending: " + strings.Join(data.RestartPending, ", ")
+		next = []string{"eru tune apply " + confirmFlags(data.ConfirmTokens)}
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings})
+	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
 }
 
 func sortedKeys(m map[string]any) []string {

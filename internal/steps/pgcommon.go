@@ -1,10 +1,9 @@
 package steps
 
 import (
-	"strconv"
-
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/hostinfo"
+	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/mbvlabs/eru/internal/tune"
 )
 
@@ -12,14 +11,9 @@ import (
 const (
 	// PGVersion is the pinned PostgreSQL major.
 	PGVersion = 18
-	// PGCluster is the postgresql-common cluster name.
-	PGCluster = "main"
-	// PGConfDir is the cluster's configuration directory.
-	PGConfDir = "/etc/postgresql/18/main"
-	// PGConfD is the conf.d directory eru manages.
-	PGConfD = PGConfDir + "/conf.d"
-	// PGServiceName is the systemd unit for the cluster.
-	PGServiceName = "postgresql@18-main"
+	// PGSocketDir holds every cluster's Unix socket; a cluster's port names
+	// its socket file.
+	PGSocketDir = "/var/run/postgresql"
 	// TLSDir holds the certificate PostgreSQL and PgBouncer serve.
 	TLSDir = "/etc/eru/tls"
 	// TLSCertPath is the served certificate.
@@ -57,10 +51,6 @@ const (
 	THPUnitPath = "/etc/systemd/system/eru-thp.service"
 	// CreateClusterConfPath disables Debian's automatic cluster creation.
 	CreateClusterConfPath = "/etc/postgresql-common/createcluster.d/00-eru.conf"
-	// PGServiceDropInDir is the cluster service drop-in directory.
-	PGServiceDropInDir = "/etc/systemd/system/postgresql@18-main.service.d"
-	// PGServiceDropIn is the cluster service drop-in file.
-	PGServiceDropIn = PGServiceDropInDir + "/10-eru.conf"
 	// SystemdSystemDir holds the eru-certs units.
 	SystemdSystemDir = "/etc/systemd/system"
 	// PgbouncerService is the PgBouncer systemd unit.
@@ -68,6 +58,35 @@ const (
 	// NginxService is the nginx systemd unit.
 	NginxService = "nginx"
 )
+
+// Each database is its own PostgreSQL cluster, 18/<name> in
+// postgresql-common's terms (RFC 5), so its paths and units are functions of
+// the cluster's name.
+
+// PGConfDir is the cluster's configuration directory.
+func PGConfDir(cluster string) string { return "/etc/postgresql/18/" + cluster }
+
+// PGConfD is the cluster's conf.d directory, which eru manages.
+func PGConfD(cluster string) string { return PGConfDir(cluster) + "/conf.d" }
+
+// PGServiceName is the cluster's systemd unit.
+func PGServiceName(cluster string) string { return "postgresql@18-" + cluster }
+
+// PGServiceDropInDir is the cluster unit's drop-in directory.
+func PGServiceDropInDir(cluster string) string {
+	return SystemdSystemDir + "/" + PGServiceName(cluster) + ".service.d"
+}
+
+// PGServiceDropIn is the cluster unit's eru drop-in: its cgroup limits.
+func PGServiceDropIn(cluster string) string { return PGServiceDropInDir(cluster) + "/10-eru.conf" }
+
+// PGLogPath is the cluster's log file.
+func PGLogPath(cluster string) string { return "/var/log/postgresql/postgresql-18-" + cluster + ".log" }
+
+// ClusterPG talks to spec's cluster on its socket.
+func ClusterPG(spec config.ClusterSpec) pg.Local {
+	return pg.Local{Host: PGSocketDir, Port: spec.Port}
+}
 
 // PostgreSQL and PgBouncer both run as the postgres user, so every
 // configuration file they read is owned by postgres:postgres and written with
@@ -77,29 +96,60 @@ const (
 	pgFileGroup = "postgres"
 )
 
-// tuningFor computes the tuning result for cfg on host.
-func tuningFor(cfg config.Cluster, host hostinfo.Info) tune.Result {
+// tuningFor computes spec's tuning on host (RFC 7.3): the cluster's memory
+// stands in for RAM, its share of the CPU caps the worker settings, its size
+// sets max_connections, and its share of the data disk, in proportion to its
+// memory, sizes WAL (RFC 7.7).
+func tuningFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) tune.Result {
+	res, _ := cfg.Resources(spec)
+	profile := spec.Profile
+	if profile == "" {
+		profile = cfg.Postgres.Profile
+	}
 	return tune.Calculate(tune.Input{
-		RAMMiB:            host.RAMMiB,
+		RAMMiB:            res.MemoryMiB,
 		VCPU:              host.VCPU,
+		Clusters:          len(cfg.Clusters),
 		DiskRotational:    host.DataDisk.Rotational,
-		DataDiskGiB:       host.DataDisk.SizeGiB,
-		Profile:           cfg.Postgres.Profile,
+		DataDiskGiB:       diskShareGiB(cfg, res.MemoryMiB, host.DataDisk.SizeGiB),
+		Profile:           profile,
+		MaxConnections:    res.MaxConnections,
 		ClientConnections: cfg.Postgres.ClientConnections,
 		PGMajor:           cfg.Postgres.Version,
 	})
 }
 
-// maxConnectionsFor returns the tuned max_connections, or the 100 default when
-// the host facts are missing (a dry run on an operator machine).
-func maxConnectionsFor(cfg config.Cluster, host hostinfo.Info) int {
-	res := tuningFor(cfg, host)
-	for _, s := range res.Settings {
-		if s.Name == "max_connections" {
-			if n, err := strconv.Atoi(s.Value); err == nil && n > 0 {
-				return n
-			}
+// diskShareGiB is a cluster's share of the data disk: diskGiB in proportion
+// of memoryMiB to the memory of every cluster.
+func diskShareGiB(cfg config.Cluster, memoryMiB, diskGiB int) int {
+	total := 0
+	for _, c := range cfg.Clusters {
+		if r, err := cfg.Resources(c); err == nil {
+			total += r.MemoryMiB
 		}
 	}
-	return 100
+	if total <= 0 || memoryMiB >= total {
+		return diskGiB
+	}
+	return diskGiB * memoryMiB / total
+}
+
+// hugePagesFor is the huge pages the server reserves (RFC 7.3): the sum of
+// the estimates of every cluster whose tuning has huge_pages = try.
+func hugePagesFor(cfg config.Cluster, host hostinfo.Info) int {
+	total := 0
+	for _, c := range cfg.Clusters {
+		total += tuningFor(cfg, c, host).HugePages
+	}
+	return total
+}
+
+// TuningFor is spec's tuning, for tune show.
+func TuningFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) tune.Result {
+	return tuningFor(cfg, spec, host)
+}
+
+// HugePagesFor is the server's huge-page pool, for tune show.
+func HugePagesFor(cfg config.Cluster, host hostinfo.Info) int {
+	return hugePagesFor(cfg, host)
 }

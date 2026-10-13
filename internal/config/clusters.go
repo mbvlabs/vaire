@@ -220,3 +220,12 @@ func checkProfile(v string) error {
 	}
 	return errors.New("must be oltp, mixed or analytics")
 }
+
+// BackupCluster is the cluster pgbackrest.conf's one stanza covers: the
+// first. It goes when the file gets a section per cluster.
+func (c Cluster) BackupCluster() (ClusterSpec, bool) {
+	if len(c.Clusters) == 0 {
+		return ClusterSpec{}, false
+	}
+	return c.Clusters[0], true
+}

@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
-# Step 9 (postgres-cluster-v1): create the 18/main cluster if it is missing,
-# apply the systemd drop-in, start it and assert data checksums are on.
+# postgres-cluster-v1@<cluster>: create the cluster 18/<cluster> on its socket
+# port if it is missing and start it. The Go step has written the systemd
+# drop-in with the cgroup limits; a running cluster takes changed limits
+# live through set-property, never a restart. Then assert data checksums.
 set -euo pipefail
 
+: "${CLUSTER:?CLUSTER is required}"
+: "${PORT:?PORT is required}"
 : "${DATA_DIR:?DATA_DIR is required}"
 : "${LOCALE_PROVIDER:?LOCALE_PROVIDER is required}"
 : "${LOCALE:?LOCALE is required}"
+: "${MEMORY_HIGH:?MEMORY_HIGH is required}"
+: "${MEMORY_MAX:?MEMORY_MAX is required}"
+: "${CPU_WEIGHT:?CPU_WEIGHT is required}"
+: "${IO_WEIGHT:?IO_WEIGHT is required}"
+CPU_QUOTA="${CPU_QUOTA:-}"
+
+unit="postgresql@18-${CLUSTER}.service"
 
 cluster_exists() {
-  pg_lsclusters -h | awk '$1 == "18" && $2 == "main" { found = 1 } END { exit !found }'
+  pg_lsclusters -h | awk -v c="${CLUSTER}" '$1 == "18" && $2 == c { found = 1 } END { exit !found }'
 }
 
 if ! cluster_exists; then
@@ -23,7 +34,8 @@ if ! cluster_exists; then
     builtin) provider_args+=(--builtin-locale="${LOCALE}") ;;
     icu) provider_args+=(--icu-locale="${LOCALE}") ;;
   esac
-  pg_createcluster 18 main \
+  pg_createcluster 18 "${CLUSTER}" \
+    --port="${PORT}" \
     --datadir="${DATA_DIR}" \
     --locale="${LOCALE}" \
     --start-conf=auto \
@@ -31,12 +43,20 @@ if ! cluster_exists; then
 fi
 
 systemctl daemon-reload
-systemctl restart postgresql@18-main.service 2>/dev/null || pg_ctlcluster 18 main restart
+if systemctl is-active --quiet "${unit}"; then
+  # The drop-in holds the limits across reboots; --runtime applies them to
+  # the running cgroup without writing a second copy.
+  systemctl set-property --runtime "${unit}" \
+    "MemoryHigh=${MEMORY_HIGH}" "MemoryMax=${MEMORY_MAX}" \
+    "CPUWeight=${CPU_WEIGHT}" "CPUQuota=${CPU_QUOTA}" "IOWeight=${IO_WEIGHT}"
+else
+  systemctl start "${unit}"
+fi
 
-checksums="$(runuser -u postgres -- psql -X -q -tAc 'SHOW data_checksums')"
+checksums="$(runuser -u postgres -- psql -X -q -h /var/run/postgresql -p "${PORT}" -tAc 'SHOW data_checksums')"
 if [ "${checksums}" != "on" ]; then
   printf 'data_checksums is %s, want on\n' "${checksums}" >&2
   exit 1
 fi
 
-printf 'cluster 18/main is online\n'
+printf 'cluster 18/%s is online\n' "${CLUSTER}"

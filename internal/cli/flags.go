@@ -9,6 +9,7 @@ const (
 	fBool
 	fInt
 	fStrings
+	fStringArray
 )
 
 type fl struct {
@@ -46,6 +47,12 @@ func flagStrings(name, usage string) fl {
 	return fl{kind: fStrings, name: name, usage: usage}
 }
 
+// flagStringArray is a repeatable flag; unlike flagStrings, a value is
+// never split on commas.
+func flagStringArray(name, usage string) fl {
+	return fl{kind: fStringArray, name: name, usage: usage}
+}
+
 func applyFlags(cmd *cobra.Command, flags []fl) {
 	for _, flag := range flags {
 		switch flag.kind {
@@ -57,6 +64,8 @@ func applyFlags(cmd *cobra.Command, flags []fl) {
 			cmd.Flags().Int(flag.name, flag.n, flag.usage)
 		case fStrings:
 			cmd.Flags().StringSlice(flag.name, nil, flag.usage)
+		case fStringArray:
+			cmd.Flags().StringArray(flag.name, nil, flag.usage)
 		default:
 			panic("unknown flag kind for " + flag.name)
 		}

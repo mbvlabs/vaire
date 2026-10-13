@@ -28,9 +28,9 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, output.NewError(output.CodeInputRequired, "eru sql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
-	if _, ok := env.Cluster.ClusterByName(p.DB); !ok {
-		return Result{}, output.NewError(output.CodeValidation, "database "+p.DB+" is not in cluster.toml", output.ExitConfig,
-			"Run eru db list to see the databases.")
+	local, err := clusterPG(env.Cluster, p.DB)
+	if err != nil {
+		return Result{}, err
 	}
 	role := p.Role
 	if role == "" {
@@ -40,7 +40,6 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	rt := runtimeFor(env, false)
 	if role == "migrate" {
 		user = p.DB + "_owner"
 	}
@@ -50,12 +49,12 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	}
 	statement := fmt.Sprintf("BEGIN %s;\nSET LOCAL ROLE %s;\n%s\n;\nCOMMIT;\n", mode, pg.Quote(user), p.Query)
 	if p.Write {
-		if err := rt.PG.Exec(ctx, p.DB, statement, nil); err != nil {
+		if err := local.Exec(ctx, p.DB, statement, nil); err != nil {
 			return Result{}, err
 		}
 		return Result{Data: map[string]any{"command_tag": "OK", "row_count": 0}}, nil
 	}
-	columns, rows, err := rt.PG.QueryRows(ctx, p.DB, statement, nil)
+	columns, rows, err := local.QueryRows(ctx, p.DB, statement, nil)
 	if err != nil {
 		return Result{}, err
 	}

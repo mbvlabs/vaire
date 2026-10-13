@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
@@ -26,16 +27,24 @@ func methods() map[string]method {
 		},
 		{
 			name: "apply",
+			// apply --db changes one cluster: the global lock shared and that
+			// cluster's exclusive, so applies to other clusters run beside it.
 			lock: func(req rpc.Request) engine.LockMode {
-				if req.DryRun {
+				if req.DryRun || paramDB(req.Params) != "" {
 					return engine.LockShared
 				}
 				return engine.LockExclusive
 			},
-			cluster: true,
-			confirm: restartToken,
-			runLog:  func(req rpc.Request) bool { return !req.DryRun },
-			handler: handleApply,
+			clusterLock: func(req rpc.Request) (string, engine.LockMode) {
+				if req.DryRun {
+					return "", engine.LockNone
+				}
+				return paramDB(req.Params), engine.LockExclusive
+			},
+			cluster:    true,
+			confirmAny: restartTokens,
+			runLog:     func(req rpc.Request) bool { return !req.DryRun },
+			handler:    handleApply,
 		},
 		{
 			name:    "selfcheck",
@@ -122,11 +131,12 @@ func methods() map[string]method {
 		},
 		{
 			name: "db.credentials",
-			lock: func(req rpc.Request) engine.LockMode {
-				if rotateRequested(req.Params) {
-					return engine.LockExclusive
+			lock: fixedLock(engine.LockShared),
+			clusterLock: func(req rpc.Request) (string, engine.LockMode) {
+				if !rotateRequested(req.Params) {
+					return "", engine.LockNone
 				}
-				return engine.LockShared
+				return paramName(req.Params), engine.LockExclusive
 			},
 			cluster: true,
 			confirm: dbCredentialsToken,
@@ -139,12 +149,12 @@ func methods() map[string]method {
 			handler: handleTuneShow,
 		},
 		{
-			name:    "tune.apply",
-			lock:    fixedLock(engine.LockExclusive),
-			cluster: true,
-			confirm: restartToken,
-			runLog:  always,
-			handler: handleTuneApply,
+			name:       "tune.apply",
+			lock:       fixedLock(engine.LockExclusive),
+			cluster:    true,
+			confirmAny: restartTokens,
+			runLog:     always,
+			handler:    handleTuneApply,
 		},
 		{
 			name:    "logs",
@@ -163,10 +173,10 @@ func methods() map[string]method {
 		{name: "job.follow", handler: handleJobFollow},
 		{name: "restore.start", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreStart},
 		{name: "restore.status", cluster: true, handler: handleRestoreStatus},
-		{name: "restore.promote", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: restoreToken, runLog: always, handler: handleRestorePromote},
-		{name: "restore.undo", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreUndo},
-		{name: "restore.abort", lock: fixedLock(engine.LockExclusive), cluster: true, runLog: always, handler: handleRestoreAbort},
-		{name: "restore.cleanup", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: cleanupToken, runLog: always, handler: handleRestoreCleanup},
+		{name: "restore.promote", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: restoreToken, runLog: always, handler: handleRestorePromote},
+		{name: "restore.undo", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreUndo},
+		{name: "restore.abort", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, runLog: always, handler: handleRestoreAbort},
+		{name: "restore.cleanup", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: cleanupToken, runLog: always, handler: handleRestoreCleanup},
 		{name: "restore.drill", cluster: true, runLog: always, handler: handleRestoreDrill},
 		{name: "db.fork", cluster: true, runLog: always, handler: handleDBFork},
 		{name: "dump.create", cluster: true, runLog: always, handler: handleDumpCreate},
@@ -184,9 +194,60 @@ func methods() map[string]method {
 	return table
 }
 
-// restartToken is {server}/restart.
-func restartToken(cfg config.Cluster, _ json.RawMessage) string {
-	return cfg.Name() + "/restart"
+// paramDB is params.db, or "".
+func paramDB(params json.RawMessage) string {
+	var p struct {
+		DB string `json:"db"`
+	}
+	_ = json.Unmarshal(params, &p)
+	return p.DB
+}
+
+// paramName is params.name, or "".
+func paramName(params json.RawMessage) string {
+	var p struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(params, &p)
+	return p.Name
+}
+
+// dbClusterLock takes params.database's cluster lock exclusive: the restore
+// methods change one database and leave the others alone. A dry run and a
+// request without a database take none.
+func dbClusterLock(req rpc.Request) (string, engine.LockMode) {
+	var p struct {
+		Database string `json:"database"`
+	}
+	if req.DryRun || json.Unmarshal(req.Params, &p) != nil {
+		return "", engine.LockNone
+	}
+	return p.Database, engine.LockExclusive
+}
+
+// restartTokens are {server}/restart, which restarts every cluster one at a
+// time, and <cluster>/restart for each cluster (RFC 11.2).
+func restartTokens(cfg config.Cluster, _ json.RawMessage) []string {
+	out := []string{cfg.Name() + "/restart"}
+	for _, c := range cfg.Clusters {
+		out = append(out, c.Name+"/restart")
+	}
+	return out
+}
+
+// restartConfirmation turns the request's checked restart tokens into what
+// they allow.
+func restartConfirmation(cfg config.Cluster, req rpc.Request) engine.Confirmation {
+	var c engine.Confirmation
+	for _, token := range req.ConfirmTokens() {
+		name, _ := strings.CutSuffix(token, "/restart")
+		if token == cfg.Name()+"/restart" {
+			c.Server = true
+			continue
+		}
+		c.Clusters = append(c.Clusters, name)
+	}
+	return c
 }
 
 // dbToken is the confirm token for db.drop and db.credentials: <db>.
@@ -220,6 +281,8 @@ func rotateRequested(params json.RawMessage) bool {
 
 type stepParams struct {
 	Steps []string `json:"steps"`
+	// DB limits plan and apply to one cluster's step instances.
+	DB string `json:"db,omitempty"`
 	// RotateBackupSecrets lets pgbackrest-v1 replace the bucket keys on
 	// disk with the request's; only eru backup setup sets it.
 	RotateBackupSecrets bool `json:"rotate_backup_secrets,omitempty"`
@@ -240,7 +303,7 @@ func decodeParams(raw json.RawMessage, v any) error {
 }
 
 func runtimeFor(env *Env, dryRun bool) engine.Runtime {
-	host, _ := hostinfo.Detect(env.Cluster.Server.DataDirectory())
+	host, _ := hostinfo.Detect(env.Cluster.Server.DataRoot)
 	return engine.Runtime{
 		DryRun:       dryRun,
 		Shell:        engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},
@@ -256,7 +319,7 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, true), engine.Options{Only: p.Steps})
+	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, true), engine.Options{Only: p.Steps, DB: p.DB})
 	if err != nil {
 		return Result{}, err
 	}
@@ -269,7 +332,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if env.Req.DryRun {
-		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, true), engine.Options{Only: p.Steps})
+		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, true), engine.Options{Only: p.Steps, DB: p.DB})
 		if err != nil {
 			return Result{}, err
 		}
@@ -279,9 +342,10 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	rt.RotateSecrets = p.RotateBackupSecrets
 	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
 		Only: p.Steps,
-		// A non-empty confirm was already checked against restartToken.
-		Confirmed: env.Req.Confirm != "",
-		Restarter: steps.Restarter(),
+		DB:   p.DB,
+		// The tokens were already checked against restartTokens.
+		Confirm:   restartConfirmation(env.Cluster, env.Req),
+		Restarter: steps.Restarter(env.Cluster),
 		Report:    env.Report,
 	})
 	if err != nil {

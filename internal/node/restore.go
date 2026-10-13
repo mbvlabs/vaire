@@ -72,7 +72,7 @@ func restoreInProgress(db, action string) error {
 // clearFailedRestore drops what a failed restore of db left behind, so the
 // next restore can start without an abort first. Only a failed restore whose
 // job has finished is cleared; a ready one holds the operator's copy.
-func clearFailedRestore(ctx context.Context, db string) error {
+func clearFailedRestore(ctx context.Context, cfg config.Cluster, db string) error {
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return err
@@ -88,7 +88,11 @@ func clearFailedRestore(ctx context.Context, db string) error {
 	if job, ok := st.Job(r.ID); ok && !job.Final() {
 		return nil
 	}
-	if err := (pg.Local{}).Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(backup.RestoringName(db))), nil); err != nil {
+	local, err := clusterPG(cfg, db)
+	if err != nil {
+		return err
+	}
+	if err := local.Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(backup.RestoringName(db))), nil); err != nil {
 		return err
 	}
 	return backup.UpdateRecords(func(s *backup.Records) error {
@@ -137,15 +141,20 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	releaseCluster, err := engine.AcquireCluster(ctx, p.Database, engine.LockShared, "restore.start", env.Req.RequestID, env.Req.LockTimeout())
+	if err != nil {
+		release()
+		return Result{}, err
+	}
 	target, err := checkRestoreTarget(ctx, cfg, p, env.Req.Secrets)
 	if err == nil && !env.Req.DryRun {
-		err = clearFailedRestore(ctx, p.Database)
+		err = clearFailedRestore(ctx, cfg, p.Database)
 	}
 	if err == nil {
 		err = restoreInProgress(p.Database, "a new restore")
 	}
 	if err == nil {
-		if exists, existsErr := databaseExists(ctx, env, backup.RestoringName(p.Database)); existsErr == nil && exists {
+		if exists, existsErr := databaseExists(ctx, cfg, p.Database, backup.RestoringName(p.Database)); existsErr == nil && exists {
 			err = output.NewError(output.CodePrecondition, backup.RestoringName(p.Database)+" already exists", output.ExitPrecondition,
 				"Drop it with eru restore abort "+p.Database+".").WithDetails(map[string]any{"reason": "restoring_exists"})
 		}
@@ -154,6 +163,7 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 	if err == nil {
 		space, err = restoreSpace(ctx, cfg, p.Database, p.Kind != targetDump)
 	}
+	releaseCluster()
 	release()
 	if err != nil {
 		return Result{}, err
@@ -249,12 +259,17 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 // restoreSpace checks room for a scratch copy of db plus the restored copy
 // beside the live one.
 func restoreSpace(ctx context.Context, cfg config.Cluster, db string, scratch bool) ([]backup.SpaceNeed, error) {
-	size := databaseSize(ctx, db)
+	local, err := clusterPG(cfg, db)
+	if err != nil {
+		return nil, err
+	}
+	size := databaseSize(ctx, local, db)
+	dataDir := cfg.Server.DataDirectory(db)
 	var needs []backup.SpaceNeed
 	if scratch {
-		needs = append(needs, backup.SpaceNeed{Path: backup.ScratchRoot(cfg.Server.DataDirectory()), Need: backup.ScratchNeed(size), Purpose: "the scratch restore of " + db})
+		needs = append(needs, backup.SpaceNeed{Path: backup.ScratchRoot(dataDir), Need: backup.ScratchNeed(size), Purpose: "the scratch restore of " + db})
 	}
-	needs = append(needs, backup.SpaceNeed{Path: cfg.Server.DataDirectory(), Need: backup.ScratchNeed(size), Purpose: "the restored copy of " + db})
+	needs = append(needs, backup.SpaceNeed{Path: dataDir, Need: backup.ScratchNeed(size), Purpose: "the restored copy of " + db})
 	return backup.CheckSpace(needs)
 }
 
@@ -314,31 +329,32 @@ func loadRestore(ctx context.Context, env *jobEnv, p restoreParams) ([]string, e
 	if !ok {
 		return nil, databaseNotFound(p.Database)
 	}
+	local := steps.ClusterPG(db)
 	target := backup.RestoringName(p.Database)
-	if err := createLoadTarget(ctx, target, db); err != nil {
+	if err := createLoadTarget(ctx, local, target, db); err != nil {
 		return nil, err
 	}
 	var warnings []string
 	var err error
 	if p.Kind == targetDump {
-		warnings, err = loadFromDump(ctx, env, p, target)
+		warnings, err = loadFromDump(ctx, env, p, local, target)
 	} else {
 		opts := backup.RestoreOptions{Database: p.Database, Kind: p.Kind, Set: p.Set}
 		if p.Kind == backup.TargetTime {
 			opts.Time, _ = time.Parse(time.RFC3339, p.Time)
 		}
-		warnings, err = loadFromScratch(ctx, env, opts, p.Database, target, p.Database+"_owner")
+		warnings, err = loadFromScratch(ctx, env, opts, p.Database, local, target, p.Database+"_owner")
 	}
 	if err != nil {
 		return warnings, err
 	}
-	return warnings, finishLoad(ctx, target, db)
+	return warnings, finishLoad(ctx, local, target, db)
 }
 
-// createLoadTarget creates database target owned by db's owner, with db's
-// grants and default privileges in place before anything is loaded.
-func createLoadTarget(ctx context.Context, target string, db config.ClusterSpec) error {
-	local := pg.Local{}
+// createLoadTarget creates database target in the cluster at local, owned
+// by db's owner, with db's grants and default privileges in place before
+// anything is loaded.
+func createLoadTarget(ctx context.Context, local pg.Local, target string, db config.ClusterSpec) error {
 	sql := fmt.Sprintf("CREATE DATABASE %s OWNER %s;\n", pg.Quote(target), pg.Quote(db.Name+"_owner")) +
 		steps.DatabaseConnectSQL(target, db.Name)
 	if err := local.Exec(ctx, "postgres", sql, nil); err != nil {
@@ -349,8 +365,7 @@ func createLoadTarget(ctx context.Context, target string, db config.ClusterSpec)
 
 // finishLoad re-runs the grants after the load and analyzes, so restore
 // status can compare row estimates.
-func finishLoad(ctx context.Context, target string, db config.ClusterSpec) error {
-	local := pg.Local{}
+func finishLoad(ctx context.Context, local pg.Local, target string, db config.ClusterSpec) error {
 	if err := local.Exec(ctx, target, steps.DatabaseGrantsSQL(db), nil); err != nil {
 		return err
 	}
@@ -358,9 +373,10 @@ func finishLoad(ctx context.Context, target string, db config.ClusterSpec) error
 }
 
 // loadFromScratch restores db at opts into a scratch instance and copies it
-// into target as owner. The scratch instance is removed afterwards.
-func loadFromScratch(ctx context.Context, env *jobEnv, opts backup.RestoreOptions, db, target, owner string) ([]string, error) {
-	scratch, err := backup.NewScratch(env.Cluster.Server.DataDirectory(), env.ID, env.shell(), env.Job, env.Report)
+// into target on the cluster at dst, as owner. The scratch instance is
+// removed afterwards.
+func loadFromScratch(ctx context.Context, env *jobEnv, opts backup.RestoreOptions, db string, dst pg.Local, target, owner string) ([]string, error) {
+	scratch, err := backup.NewScratch(env.Cluster.Server.DataDirectory(db), env.ID, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}
@@ -376,12 +392,12 @@ func loadFromScratch(ctx context.Context, env *jobEnv, opts backup.RestoreOption
 		logLine(env.Report, env.Job, "recovered to "+t)
 	}
 	logLine(env.Report, env.Job, "copying "+db+" into "+target)
-	return backup.CopyDatabase(ctx, env.shell(), env.Job, env.Report, scratch.PG(), db, target, owner)
+	return backup.CopyDatabase(ctx, env.shell(), env.Job, env.Report, scratch.PG(), db, dst, target, owner)
 }
 
 // loadFromDump downloads and decrypts a dump with the age identity the
 // operator sent for this job, and loads it into target.
-func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, target string) ([]string, error) {
+func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, dst pg.Local, target string) ([]string, error) {
 	t, _, err := steps.BackupTarget(env.Cluster)
 	if err != nil {
 		return nil, err
@@ -392,7 +408,7 @@ func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, target stri
 	}
 	defer func() { _ = r.Close() }()
 	logLine(env.Report, env.Job, "loading dump "+p.Dump+" into "+target)
-	return backup.LoadDump(ctx, env.shell(), env.Job, env.Report, io.Reader(r), target, p.Database+"_owner")
+	return backup.LoadDump(ctx, env.shell(), env.Job, env.Report, io.Reader(r), dst, target, p.Database+"_owner")
 }
 
 type restoreDBParams struct {
@@ -434,10 +450,14 @@ func promote(ctx context.Context, cfg config.Cluster, db string, report engine.R
 		return nil, err
 	}
 	r := bs.Restores[db]
+	local, err := clusterPG(cfg, db)
+	if err != nil {
+		return nil, err
+	}
 	aside := backup.PreRestoreName(db, time.Now())
 	logLine(report, "restore.promote", "swapping "+backup.RestoringName(db)+" in for "+db+"; the old copy becomes "+aside)
 	start := time.Now()
-	if err := backup.Swap(ctx, pg.Local{}, db, backup.RestoringName(db), aside); err != nil {
+	if err := backup.Swap(ctx, local, db, backup.RestoringName(db), aside); err != nil {
 		return nil, err
 	}
 	took := time.Since(start)
@@ -463,6 +483,10 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	if err := restoreInProgress(p.Database, "undo"); err != nil {
 		return Result{}, err
 	}
+	local, err := clusterPG(env.Cluster, p.Database)
+	if err != nil {
+		return Result{}, err
+	}
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
@@ -480,7 +504,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	if aside == back.Name {
 		aside += "b"
 	}
-	if err := backup.Swap(ctx, pg.Local{}, p.Database, back.Name, aside); err != nil {
+	if err := backup.Swap(ctx, local, p.Database, back.Name, aside); err != nil {
 		return Result{}, err
 	}
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
@@ -525,7 +549,11 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "drop": backup.RestoringName(p.Database), "dry_run": true}}, nil
 	}
-	if err := (pg.Local{}).Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(backup.RestoringName(p.Database))), nil); err != nil {
+	local, err := clusterPG(env.Cluster, p.Database)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := local.Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(backup.RestoringName(p.Database))), nil); err != nil {
 		return Result{}, err
 	}
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
@@ -560,10 +588,12 @@ func handleRestoreCleanup(ctx context.Context, env *Env) (Result, error) {
 	}
 	items := []leftoverInfo{}
 	for _, l := range bs.LeftoversOf(p.Database) {
-		exists, _ := databaseExists(ctx, env, l.Name)
-		info := leftoverInfo{Leftover: l, Exists: exists}
-		if exists {
-			info.SizeBytes = databaseSize(ctx, l.Name)
+		info := leftoverInfo{Leftover: l}
+		if local, err := clusterPG(env.Cluster, l.Database); err == nil {
+			info.Exists, _ = databaseIn(ctx, local, l.Name)
+			if info.Exists {
+				info.SizeBytes = databaseSize(ctx, local, l.Name)
+			}
 		}
 		items = append(items, info)
 	}
@@ -579,7 +609,11 @@ func handleRestoreCleanup(ctx context.Context, env *Env) (Result, error) {
 	var dropped []string
 	for _, l := range items {
 		if l.Exists {
-			if err := (pg.Local{}).Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(l.Name)), nil); err != nil {
+			local, err := clusterPG(env.Cluster, l.Database)
+			if err != nil {
+				return Result{}, err
+			}
+			if err := local.Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(l.Name)), nil); err != nil {
 				return Result{}, err
 			}
 		}
@@ -631,7 +665,9 @@ func handleRestoreStatus(ctx context.Context, env *Env) (Result, error) {
 			OnPromote: "PgBouncer pauses " + db + ", its connections end, " + db + " becomes " + db + "__pre_restore_<time> and " +
 				backup.RestoringName(db) + " becomes " + db + "; then PgBouncer resumes. Credentials don't change."}
 		if r.Phase == backup.PhaseReady {
-			st.Tables = compareRows(ctx, db, backup.RestoringName(db))
+			if local, err := clusterPG(env.Cluster, db); err == nil {
+				st.Tables = compareRows(ctx, local, db, backup.RestoringName(db))
+			}
 		}
 		out = append(out, st)
 	}
@@ -643,10 +679,11 @@ FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'`
 
 // compareRows lists the row estimates (pg_class.reltuples) of every table in
-// both databases. Cheap, approximate, and enough to see that a rewind took.
-func compareRows(ctx context.Context, live, restoring string) []tableRows {
+// both databases of the cluster at local. Cheap, approximate, and enough to
+// see that a rewind took.
+func compareRows(ctx context.Context, local pg.Local, live, restoring string) []tableRows {
 	read := func(db string) map[string]int64 {
-		rows, err := (pg.Local{}).Query(ctx, db, rowEstimateSQL, nil)
+		rows, err := local.Query(ctx, db, rowEstimateSQL, nil)
 		out := map[string]int64{}
 		if err != nil {
 			return out
@@ -761,23 +798,27 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	if !ok {
 		return nil, databaseNotFound(p.Name)
 	}
+	src, err := clusterPG(env.Cluster, p.Source)
+	if err != nil {
+		return nil, err
+	}
+	dst := steps.ClusterPG(db)
 	owner := p.Name + "_owner"
 	var warnings []string
-	var err error
 	if p.At == "" {
 		logLine(env.Report, env.Job, "copying the live "+p.Source+" into "+p.Name)
-		warnings, err = backup.CopyDatabase(ctx, env.shell(), env.Job, env.Report, pg.Local{}, p.Source, p.Name, owner)
+		warnings, err = backup.CopyDatabase(ctx, env.shell(), env.Job, env.Report, src, p.Source, dst, p.Name, owner)
 	} else {
 		t, perr := time.Parse(time.RFC3339, p.At)
 		if perr != nil {
 			return nil, perr
 		}
-		warnings, err = loadFromScratch(ctx, env, backup.RestoreOptions{Database: p.Source, Kind: backup.TargetTime, Time: t}, p.Source, p.Name, owner)
+		warnings, err = loadFromScratch(ctx, env, backup.RestoreOptions{Database: p.Source, Kind: backup.TargetTime, Time: t}, p.Source, dst, p.Name, owner)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := finishLoad(ctx, p.Name, db); err != nil {
+	if err := finishLoad(ctx, dst, p.Name, db); err != nil {
 		return nil, err
 	}
 	return map[string]any{"source": p.Source, "name": p.Name, "at": p.At, "warnings": warnings}, nil

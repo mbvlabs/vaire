@@ -14,6 +14,7 @@ import (
 	"filippo.io/age"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -65,7 +66,7 @@ func NewDumpID(final bool) string {
 
 // DumpToBucket streams pg_dump -Fc of db, encrypted to recipient, into the
 // bucket. Nothing is written to the node's disk.
-func DumpToBucket(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, t Target, db, recipient string, final bool) (Dump, error) {
+func DumpToBucket(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, t Target, src pg.Local, db, recipient string, final bool) (Dump, error) {
 	rcpt, err := age.ParseX25519Recipient(recipient)
 	if err != nil {
 		return Dump{}, fmt.Errorf("the dump age recipient is invalid: %w", err)
@@ -83,7 +84,7 @@ func DumpToBucket(ctx context.Context, sh engine.Shell, stepID string, report en
 	}
 	dumpErr := make(chan error, 1)
 	go func() {
-		err := PgDump(ctx, sh, stepID, report, "", 0, db, enc)
+		err := PgDump(ctx, sh, stepID, report, src, db, enc)
 		if err == nil {
 			err = enc.Close()
 		}
@@ -107,16 +108,9 @@ func DumpToBucket(ctx context.Context, sh engine.Shell, stepID string, report en
 	return Dump{Database: db, ID: id, Key: key, Size: info.Size, Created: time.Now().UTC().Format(time.RFC3339), Final: final}, nil
 }
 
-// PgDump writes pg_dump -Fc of db to w. host and port pick the instance:
-// empty and 0 are the live cluster.
-func PgDump(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, host string, port int, db string, w io.Writer) error {
-	args := []string{"-u", "postgres", "--", "pg_dump", "-Fc", "--no-password"}
-	if host != "" {
-		args = append(args, "-h", host)
-	}
-	if port != 0 {
-		args = append(args, "-p", fmt.Sprint(port))
-	}
+// PgDump writes pg_dump -Fc of db on the instance at src to w.
+func PgDump(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, src pg.Local, db string, w io.Writer) error {
+	args := append([]string{"-u", "postgres", "--", "pg_dump", "-Fc", "--no-password"}, connArgs(src)...)
 	args = append(args, "-d", db)
 	return wrapTool("pg_dump "+db, sh.Exec(ctx, stepID, engine.Command{Name: "runuser", Args: args, Stdout: w}, report))
 }
@@ -254,4 +248,16 @@ func DownloadDump(ctx context.Context, t Target, db, id, identity, out string) (
 // DumpFileName is the default local file name for a dump.
 func DumpFileName(db, id string) string {
 	return path.Base(db + "-" + id + ".dump")
+}
+
+// connArgs are the -h and -p arguments that point a client tool at l.
+func connArgs(l pg.Local) []string {
+	var args []string
+	if l.Host != "" {
+		args = append(args, "-h", l.Host)
+	}
+	if l.Port != 0 {
+		args = append(args, "-p", fmt.Sprint(l.Port))
+	}
+	return args
 }

@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -53,73 +54,36 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: map[string]any{"databases": databases}}, nil
 }
 
-// listDatabases merges cluster.toml with the live databases.
+// listDatabases reads each [[clusters]] entry's database from its own
+// cluster. A cluster that is not up lists as not existing.
 func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
-	rows, err := runtimeFor(env, true).PG.Query(ctx, "postgres",
-		"SELECT datname, pg_database_size(datname) FROM pg_database WHERE NOT datistemplate ORDER BY datname", nil)
-	if err != nil {
-		return nil, err
-	}
-	live := map[string]int64{}
-	for _, row := range rows {
-		var size int64
-		if _, err := fmt.Sscan(row["pg_database_size"], &size); err != nil {
-			size = 0
-		}
-		live[row["datname"]] = size
-	}
-	roleRows, err := runtimeFor(env, true).PG.Query(ctx, "postgres", "SELECT rolname FROM pg_roles", nil)
-	if err != nil {
-		return nil, err
-	}
-	roleSet := map[string]bool{}
-	for _, row := range roleRows {
-		roleSet[row["rolname"]] = true
-	}
-
-	names := map[string]bool{}
-	configured := map[string]config.ClusterSpec{}
-	for _, db := range env.Cluster.Clusters {
-		names[db.Name] = true
-		configured[db.Name] = db
-	}
-	for name := range live {
-		if name == "postgres" {
+	out := make([]databaseInfo, 0, len(env.Cluster.Clusters))
+	for _, spec := range env.Cluster.Clusters {
+		info := databaseInfo{Name: spec.Name, InConfig: true}
+		local := steps.ClusterPG(spec)
+		rows, err := local.Query(ctx, "postgres",
+			"SELECT pg_database_size(datname) AS size FROM pg_database WHERE datname = "+quoteLiteral(spec.Name), nil)
+		if err != nil || len(rows) == 0 {
+			out = append(out, info)
 			continue
 		}
-		names[name] = true
-	}
-	sorted := make([]string, 0, len(names))
-	for name := range names {
-		sorted = append(sorted, name)
-	}
-	sort.Strings(sorted)
-
-	out := make([]databaseInfo, 0, len(sorted))
-	for _, name := range sorted {
-		info := databaseInfo{Name: name, InConfig: false, Exists: false}
-		if _, ok := configured[name]; ok {
-			info.InConfig = true
+		info.Exists = true
+		if _, err := fmt.Sscan(rows[0]["size"], &info.SizeBytes); err != nil {
+			info.SizeBytes = 0
 		}
-		if size, ok := live[name]; ok {
-			info.Exists = true
-			info.SizeBytes = size
+		roles, err := existingRolesIn(ctx, local, spec.Name)
+		if err == nil {
+			info.Roles = roles
 		}
-		for _, role := range append([]string{"owner"}, steps.DatabaseRoles...) {
-			if roleSet[name+"_"+role] {
-				info.Roles = append(info.Roles, name+"_"+role)
-			}
-		}
-		if info.Exists {
-			exts, err := runtimeFor(env, true).PG.Query(ctx, name, "SELECT extname FROM pg_extension ORDER BY extname", nil)
-			if err == nil {
-				for _, row := range exts {
-					info.Extensions = append(info.Extensions, row["extname"])
-				}
+		exts, err := local.Query(ctx, spec.Name, "SELECT extname FROM pg_extension ORDER BY extname", nil)
+		if err == nil {
+			for _, row := range exts {
+				info.Extensions = append(info.Extensions, row["extname"])
 			}
 		}
 		out = append(out, info)
 	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Name < out[b].Name })
 	return out, nil
 }
 
@@ -158,7 +122,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec) (confi
 	if _, ok := cfg.ClusterByName(db.Name); ok {
 		return db, existingDatabase(db.Name)
 	}
-	if exists, err := databaseExists(ctx, env, db.Name); err == nil && exists {
+	if steps.ClusterExists(ctx, db.Name) {
 		return db, existingDatabase(db.Name)
 	}
 	for _, role := range steps.DatabaseRoles {
@@ -183,16 +147,20 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec) (confi
 		return db, err
 	}
 	env.Cluster = cfg
+	// The new cluster's own step instances: create it, configure it, then
+	// its roles and database (RFC 11.2).
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
-		Only:   steps.RolesStepIDs(),
+		DB:     db.Name,
 		Report: env.Report,
 	}); err != nil {
-		// Keep cluster.toml in step with the server: an entry whose database
-		// was never created would make the retry refuse the name.
-		if exists, existsErr := databaseExists(ctx, env, db.Name); existsErr == nil && !exists {
+		// Keep cluster.toml in step with the server: an entry whose cluster
+		// was never created would make the retry refuse the name. Once the
+		// cluster exists, eru apply --db finishes it.
+		if !steps.ClusterExists(ctx, db.Name) {
 			_ = store.Save(previous)
+			return db, err
 		}
-		return db, err
+		return db, withHint(err, "Finish it with eru apply --db "+db.Name+".")
 	}
 	created, _ := cfg.ClusterByName(db.Name)
 	return created, nil
@@ -203,8 +171,18 @@ func existingDatabase(name string) error {
 		"Pick another name, or drop it first with eru db drop "+name+".").WithDetails(map[string]any{"reason": "database_exists", "database": name})
 }
 
-func databaseExists(ctx context.Context, env *Env, name string) (bool, error) {
-	rows, err := runtimeFor(env, true).PG.Query(ctx, "postgres", "SELECT datname FROM pg_database WHERE datname = "+quoteLiteral(name), nil)
+// databaseExists reports whether database name exists in db's cluster.
+func databaseExists(ctx context.Context, cfg config.Cluster, db, name string) (bool, error) {
+	local, err := clusterPG(cfg, db)
+	if err != nil {
+		return false, err
+	}
+	return databaseIn(ctx, local, name)
+}
+
+// databaseIn reports whether database name exists in the cluster at local.
+func databaseIn(ctx context.Context, local pg.Local, name string) (bool, error) {
+	rows, err := local.Query(ctx, "postgres", "SELECT datname FROM pg_database WHERE datname = "+quoteLiteral(name), nil)
 	if err != nil {
 		return false, err
 	}
@@ -227,18 +205,20 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	_, inConfig := cfg.ClusterByName(p.Name)
-	exists, err := databaseExists(ctx, env, p.Name)
-	if err != nil {
-		return Result{}, err
-	}
-	if !inConfig && !exists {
+	spec, inConfig := cfg.ClusterByName(p.Name)
+	clusterExists := steps.ClusterExists(ctx, p.Name)
+	if !inConfig && !clusterExists {
 		return Result{}, output.NewError(output.CodePrecondition, "database "+p.Name+" does not exist", output.ExitPrecondition,
 			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": p.Name})
 	}
 
 	if err := restoreInProgress(p.Name, "db drop"); err != nil {
 		return Result{}, err
+	}
+	local := steps.ClusterPG(spec)
+	exists := false
+	if inConfig && clusterExists {
+		exists, _ = databaseIn(ctx, local, p.Name)
 	}
 	var warnings []output.Warning
 	var final *backup.Dump
@@ -259,27 +239,13 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 		final = &dump
 	}
 
-	rt := runtimeFor(env, false)
-	if err := rt.PG.Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(p.Name)), nil); err != nil {
-		return Result{}, err
+	// The database's roles live in its cluster, so they go with it.
+	var roles []string
+	if exists {
+		roles, _ = existingRolesIn(ctx, local, p.Name)
 	}
-	// Objects and grants the roles hold elsewhere (the postgres database, shared
-	// objects) would block DROP ROLE; hand them to postgres and drop the rest.
-	roles, err := existingRoles(ctx, env, p.Name)
-	if err != nil {
-		return Result{}, err
-	}
-	if len(roles) > 0 {
-		quoted := make([]string, len(roles))
-		for i, role := range roles {
-			quoted[i] = pg.Quote(role)
-		}
-		list := strings.Join(quoted, ", ")
-		drop := fmt.Sprintf("REASSIGN OWNED BY %s TO postgres;\nDROP OWNED BY %s;\n", list, list)
-		for _, role := range quoted {
-			drop += fmt.Sprintf("DROP ROLE IF EXISTS %s;\n", role)
-		}
-		if err := rt.PG.Exec(ctx, "postgres", drop, nil); err != nil {
+	if clusterExists {
+		if err := dropCluster(ctx, env, p.Name); err != nil {
 			return Result{}, err
 		}
 	}
@@ -325,14 +291,28 @@ func confirmRequired(message, token string) error {
 		WithDetails(map[string]any{"confirm_token": token})
 }
 
-// existingRoles returns the eru roles of database name that exist.
-func existingRoles(ctx context.Context, env *Env, name string) ([]string, error) {
+// dropCluster stops and deletes 18/<name>, its data directory and its
+// cgroup drop-in. Its pooler entries, timers and stanza are unit 21's.
+func dropCluster(ctx context.Context, env *Env, name string) error {
+	sh := engine.Shell{Secrets: secrets.Default, Log: env.Log}
+	if err := sh.Exec(ctx, "db.drop", engine.Command{Name: "pg_dropcluster", Args: []string{"18", name, "--stop"}}, env.Report); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(steps.PGServiceDropInDir(name)); err != nil {
+		return err
+	}
+	return sh.Exec(ctx, "db.drop", engine.Command{Name: "systemctl", Args: []string{"daemon-reload"}}, env.Report)
+}
+
+// existingRolesIn returns the eru roles of database name that exist in the
+// cluster at local.
+func existingRolesIn(ctx context.Context, local pg.Local, name string) ([]string, error) {
 	wanted := append([]string{name + "_owner"}, prefixedRoles(name)...)
 	quoted := make([]string, len(wanted))
 	for i, role := range wanted {
 		quoted[i] = quoteLiteral(role)
 	}
-	rows, err := runtimeFor(env, true).PG.Query(ctx, "postgres",
+	rows, err := local.Query(ctx, "postgres",
 		"SELECT rolname FROM pg_roles WHERE rolname IN ("+strings.Join(quoted, ", ")+") ORDER BY rolname", nil)
 	if err != nil {
 		return nil, err
@@ -368,9 +348,9 @@ func handleDBCredentials(ctx context.Context, env *Env) (Result, error) {
 	if err := checkDatabaseName(p.Name); err != nil {
 		return Result{}, err
 	}
-	if _, ok := env.Cluster.ClusterByName(p.Name); !ok {
-		return Result{}, output.NewError(output.CodePrecondition, "database "+p.Name+" is not in cluster.toml", output.ExitPrecondition,
-			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": p.Name})
+	local, err := clusterPG(env.Cluster, p.Name)
+	if err != nil {
+		return Result{}, err
 	}
 	if env.Req.Confirm == "" {
 		return Result{}, confirmRequired("rotating a password disconnects clients that use the old one", p.Name)
@@ -398,7 +378,7 @@ func handleDBCredentials(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	sql := fmt.Sprintf("ALTER ROLE %s PASSWORD '%s';\n", pg.Quote(p.Name+"_"+role), verifier)
-	if err := runtimeFor(env, false).PG.Exec(ctx, "postgres", sql, nil); err != nil {
+	if err := local.Exec(ctx, "postgres", sql, nil); err != nil {
 		return Result{}, err
 	}
 	return Result{Data: map[string]any{"rotated": true, "role": role, "user": p.Name + "_" + role}}, nil

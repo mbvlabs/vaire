@@ -158,6 +158,23 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		return nil, err
 	}
 	defer release()
+	for _, cluster := range jobClusters(env) {
+		release, err := engine.AcquireCluster(ctx, cluster, engine.LockShared, job, env.ID, 0)
+		if engine.IsLockHeld(err) {
+			logLine(report, job, "the lock of "+cluster+" is busy; skipping "+job)
+			res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy", "cluster": cluster}
+			finishJob(rec, engine.JobSkipped, "the lock of "+cluster+" was busy", res, nil)
+			if job == "restore" {
+				failRestore(env, errors.New("the lock of "+cluster+" was busy"))
+			}
+			return res, nil
+		}
+		if err != nil {
+			finishJob(rec, engine.JobFailed, "", nil, err)
+			return nil, err
+		}
+		defer release()
+	}
 
 	res, err := runJobFunc(ctx, env)
 	if err != nil {
@@ -470,4 +487,35 @@ func runJobRPC(ctx context.Context, env *Env, job string, params any, jobSecrets
 		return Result{}, err
 	}
 	return followJob(ctx, env, id)
+}
+
+// jobClusters are the clusters a per-database job works in, in name order,
+// which is the order their locks are taken. Backup jobs cover the one
+// stanza and take none until they run per database.
+func jobClusters(env *jobEnv) []string {
+	var p struct {
+		Database string `json:"database"`
+		Source   string `json:"source"`
+		Name     string `json:"name"`
+	}
+	if len(env.Params) > 0 {
+		_ = json.Unmarshal(env.Params, &p)
+	}
+	var names []string
+	switch env.Job {
+	case "db-dump":
+		names = []string{env.DB, p.Database}
+	case "restore":
+		names = []string{p.Database}
+	case "db-fork":
+		names = []string{p.Source, p.Name}
+	}
+	var out []string
+	for _, name := range names {
+		if _, ok := env.Cluster.ClusterByName(name); ok && !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

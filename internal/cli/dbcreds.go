@@ -117,3 +117,27 @@ func staleWarning(generated bool) []output.Warning {
 		Message: "new cluster passwords were generated; run eru secrets export to refresh the secrets document",
 	}}
 }
+
+// serviceSecrets tops up the context's eru_admin and service passwords (D7)
+// and returns them as the RPC secret map, with the loaded credentials and
+// whether anything was generated. Every command that may create a cluster
+// sends them: the first cluster computes its service verifiers from them.
+func serviceSecrets(contextName string) (map[string]string, contexts.Credentials, bool, error) {
+	creds, err := contexts.LoadCredentials(contextName)
+	if err != nil {
+		return nil, creds, false, err
+	}
+	if creds.Database == nil {
+		creds.Database = &contexts.DatabaseCreds{}
+	}
+	values, generated, err := ensureClusterSecrets(creds.Database)
+	if err != nil {
+		return nil, creds, false, err
+	}
+	if generated {
+		if err := contexts.SaveCredentials(contextName, creds); err != nil {
+			return nil, creds, false, err
+		}
+	}
+	return values, creds, generated, nil
+}

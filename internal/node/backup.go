@@ -20,9 +20,11 @@ import (
 	"github.com/mbvlabs/eru/internal/steps"
 )
 
-// driver is the pgBackRest driver for the node's cluster.
+// driver is the pgBackRest driver for the one stanza pgbackrest.conf holds,
+// the first cluster's, until it gets a section per cluster.
 func driver(cfg config.Cluster, stepID string, report engine.Reporter) backup.PgBackRest {
-	return backup.PgBackRest{Stanza: cfg.Name(), Shell: engine.Shell{Secrets: secrets.Default}, StepID: stepID, Report: report}
+	first, _ := cfg.BackupCluster()
+	return backup.PgBackRest{Stanza: first.Stanza, Shell: engine.Shell{Secrets: secrets.Default}, StepID: stepID, Report: report, PG: steps.ClusterPG(first)}
 }
 
 // requireBackups refuses a backup method on a cluster without a bucket.
@@ -298,9 +300,9 @@ func databaseNotFound(name string) error {
 		"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": name})
 }
 
-// databaseSize returns pg_database_size of db on the live cluster.
-func databaseSize(ctx context.Context, db string) int64 {
-	rows, err := (pg.Local{}).Query(ctx, "postgres", "SELECT pg_database_size("+quoteLiteral(db)+") AS s", nil)
+// databaseSize returns pg_database_size of db on the cluster at local.
+func databaseSize(ctx context.Context, local pg.Local, db string) int64 {
+	rows, err := local.Query(ctx, "postgres", "SELECT pg_database_size("+quoteLiteral(db)+") AS s", nil)
 	if err != nil || len(rows) == 0 {
 		return 0
 	}
@@ -404,21 +406,26 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		return drill, fmt.Errorf("%w: the repository has no backup", errSkipped)
 	}
 	drill.BackupLabel = latest.Label
-	live, err := liveDatabases(ctx, pg.Local{})
+	// The repository holds the first cluster's stanza until each cluster
+	// has its own.
+	first, _ := cfg.BackupCluster()
+	firstPG := steps.ClusterPG(first)
+	dataDir := cfg.Server.DataDirectory(first.Name)
+	live, err := liveDatabases(ctx, firstPG)
 	if err != nil {
 		return nil, err
 	}
 	var size int64
 	for _, db := range live {
-		size += databaseSize(ctx, db)
+		size += databaseSize(ctx, firstPG, db)
 	}
-	if _, err := backup.CheckSpace([]backup.SpaceNeed{{Path: backup.ScratchRoot(cfg.Server.DataDirectory()), Need: backup.ScratchNeed(size), Purpose: "the drill's scratch restore"}}); err != nil {
+	if _, err := backup.CheckSpace([]backup.SpaceNeed{{Path: backup.ScratchRoot(dataDir), Need: backup.ScratchNeed(size), Purpose: "the drill's scratch restore"}}); err != nil {
 		drill.Result, drill.Reason = backup.DrillSkipped, "insufficient_space"
 		record()
 		logLine(env.Report, env.Job, err.Error())
 		return drill, fmt.Errorf("%w: %s", errSkipped, err.Error())
 	}
-	scratch, err := backup.NewScratch(cfg.Server.DataDirectory(), "drill-"+env.ID, env.shell(), env.Job, env.Report)
+	scratch, err := backup.NewScratch(dataDir, "drill-"+env.ID, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +459,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		}
 		amctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		err := env.shell().Exec(amctx, env.Job, engine.Command{Name: "runuser", Args: []string{
-			"-u", "postgres", "--", "/usr/lib/postgresql/18/bin/pg_amcheck", "-h", scratch.Socket, "-p", strconv.Itoa(backup.ScratchPort),
+			"-u", "postgres", "--", "/usr/lib/postgresql/18/bin/pg_amcheck", "-h", scratch.Socket, "-p", strconv.Itoa(scratch.Port),
 			"--install-missing", "--database=" + db,
 		}}, env.Report)
 		cancel()
@@ -464,10 +471,8 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		drill.Checks = append(drill.Checks, check)
 	}
 	var missing []string
-	for _, db := range cfg.Clusters {
-		if p.Time == "" && !containsString(restored, db.Name) {
-			missing = append(missing, db.Name)
-		}
+	if p.Time == "" && !containsString(restored, first.Name) {
+		missing = append(missing, first.Name)
 	}
 	listCheck := backup.DrillCheck{Name: "database list", OK: len(missing) == 0}
 	if len(missing) > 0 {
@@ -576,8 +581,12 @@ func dumpToBucket(ctx context.Context, cfg config.Cluster, sh engine.Shell, step
 		return backup.Dump{}, output.NewError(output.CodePrecondition, "the node has no age recipient for dumps", output.ExitPrecondition,
 			"Run eru backup setup again; it sends the recipient.").WithDetails(map[string]any{"reason": "no_dump_recipient"})
 	}
+	local, err := clusterPG(cfg, db)
+	if err != nil {
+		return backup.Dump{}, err
+	}
 	logLine(report, stepID, "dumping "+db+" to the bucket")
-	dump, err := backup.DumpToBucket(ctx, sh, stepID, report, target, db, recipient, final)
+	dump, err := backup.DumpToBucket(ctx, sh, stepID, report, target, local, db, recipient, final)
 	if err != nil {
 		return dump, err
 	}
@@ -599,10 +608,11 @@ func DumpStream(ctx context.Context, db string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := cfg.ClusterByName(db); !ok {
-		return databaseNotFound(db)
+	local, err := clusterPG(cfg, db)
+	if err != nil {
+		return err
 	}
-	return backup.PgDump(ctx, engine.Shell{Secrets: secrets.Default}, "dump", nil, "", 0, db, w)
+	return backup.PgDump(ctx, engine.Shell{Secrets: secrets.Default}, "dump", nil, local, db, w)
 }
 
 // NoOffsiteWarning is the no_offsite_backup warning for a server without a

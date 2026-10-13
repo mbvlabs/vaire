@@ -1,6 +1,7 @@
-// Package tune is the pure tuning calculator (§12): a function of hardware,
-// workload profile and connection target that returns PostgreSQL settings with
-// a reason for each. It does no I/O.
+// Package tune is the pure tuning calculator (§12): a function of one
+// cluster's memory, its share of the hardware, its workload profile and
+// connection limit that returns PostgreSQL settings with a reason for each,
+// and the server's memory budget (RFC 7.3). It does no I/O.
 package tune
 
 import "fmt"
@@ -12,16 +13,56 @@ const (
 	ProfileAnalytics = "analytics"
 )
 
-// Input is the calculator's inputs.
+// Input is the calculator's inputs for one cluster. RAMMiB is the cluster's
+// memory, not the server's (RFC 7.3), and DataDiskGiB its share of the data
+// disk (RFC 7.7). VCPU is the server's; Clusters caps the CPU-driven
+// settings at the cluster's share of it. MaxConnections comes from the
+// cluster's size; zero falls back to 4 x vCPU.
 type Input struct {
 	RAMMiB            int
 	VCPU              int
+	Clusters          int
 	DiskRotational    bool
 	DataDiskGiB       int
 	Profile           string
+	MaxConnections    int
 	ClientConnections int
 	PGMajor           int
 	Extensions        []string
+}
+
+// HugePagesMinMiB is the cluster memory from which huge_pages is try. A
+// smaller cluster uses off, so a fragmented pool can't leave its start-up at
+// the mercy of another cluster's (RFC 7.3).
+const HugePagesMinMiB = 2048
+
+// Server reserve (RFC 7.3): what the OS, both poolers, nginx, eru's jobs and
+// the page cache keep before the clusters get the rest.
+const (
+	ReserveMinMiB  = 512
+	ReservePercent = 25
+)
+
+// ServerReserve is max(512 MiB, 25% of RAM), or overrideMiB when it is set.
+func ServerReserve(ramMiB, overrideMiB int) int {
+	if overrideMiB > 0 {
+		return overrideMiB
+	}
+	return maxInt(ReserveMinMiB, ramMiB*ReservePercent/100)
+}
+
+// ClusterBudget is the memory left for clusters after the server reserve.
+func ClusterBudget(ramMiB, reserveMiB int) int {
+	return maxInt(0, ramMiB-reserveMiB)
+}
+
+// CPUShare is the vCPU a cluster plans for: vCPU / clusters, at least 2, and
+// never more than the server has.
+func CPUShare(vcpu, clusters int) int {
+	if clusters < 1 {
+		clusters = 1
+	}
+	return minInt(vcpu, maxInt(2, vcpu/clusters))
 }
 
 // Setting is one PostgreSQL setting with its reason and restart context.
@@ -61,7 +102,11 @@ func (c *calc) set(name, value, unit, reason, context string) {
 func (c *calc) add() {
 	in := c.in
 	ram := in.RAMMiB
-	cpu := in.VCPU
+	cpu := CPUShare(in.VCPU, in.Clusters)
+	cpuReason := fmt.Sprintf("%d vCPU", cpu)
+	if cpu != in.VCPU {
+		cpuReason = fmt.Sprintf("%d vCPU share of %d over %d clusters", cpu, in.VCPU, in.Clusters)
+	}
 	analytics := in.Profile == ProfileAnalytics
 	ssd := !in.DiskRotational
 
@@ -74,7 +119,7 @@ func (c *calc) add() {
 	}
 	c.res.SharedBuffersMiB = sharedBuffers
 	c.set("shared_buffers", fmt.Sprintf("%dMB", sharedBuffers), "MB",
-		fmt.Sprintf("%s of %d MiB RAM", percentReason(ram, sharedBuffers), ram), "postmaster")
+		fmt.Sprintf("%s of the cluster's %d MiB", percentReason(ram, sharedBuffers), ram), "postmaster")
 
 	// effective_cache_size.
 	ratio := 0.70
@@ -82,11 +127,16 @@ func (c *calc) add() {
 		ratio = 0.75
 	}
 	c.set("effective_cache_size", fmt.Sprintf("%dMB", int(float64(ram)*ratio)), "MB",
-		fmt.Sprintf("%.0f%% of %d MiB RAM", ratio*100, ram), "user")
+		fmt.Sprintf("%.0f%% of the cluster's %d MiB", ratio*100, ram), "user")
 
 	// Connections.
 	maxConn := clampInt(4*cpu, 50, 400)
-	c.set("max_connections", itoa(maxConn), "", fmt.Sprintf("4 x %d vCPU, PgBouncer fans in", cpu), "postmaster")
+	connReason := fmt.Sprintf("4 x %d vCPU, PgBouncer fans in", cpu)
+	if in.MaxConnections > 0 {
+		maxConn = in.MaxConnections
+		connReason = "from the cluster's size; both poolers fan in"
+	}
+	c.set("max_connections", itoa(maxConn), "", connReason, "postmaster")
 	c.set("superuser_reserved_connections", "3", "", "room for eru_admin maintenance sessions", "postmaster")
 	c.set("reserved_connections", "3", "", "reserved slots; eru_admin gets pg_use_reserved_connections", "postmaster")
 
@@ -111,12 +161,12 @@ func (c *calc) add() {
 	c.set("hash_mem_multiplier", "2.0", "", "allow hash operations to use more than work_mem", "user")
 
 	maint := clampInt(ram/16, 64, 2048)
-	c.set("maintenance_work_mem", fmt.Sprintf("%dMB", maint), "MB", fmt.Sprintf("%d MiB RAM / 16", ram), "user")
+	c.set("maintenance_work_mem", fmt.Sprintf("%dMB", maint), "MB", fmt.Sprintf("the cluster's %d MiB / 16", ram), "user")
 	c.set("autovacuum_work_mem", fmt.Sprintf("%dMB", minInt(maint, 1024)), "MB", "capped at 1 GiB", "sighup")
 
 	// Huge pages.
 	hugePages := "off"
-	if ram >= 8192 {
+	if ram >= HugePagesMinMiB {
 		hugePages = "try"
 	}
 	c.set("huge_pages", hugePages, "", hugePagesReason(ram), "postmaster")
@@ -130,9 +180,9 @@ func (c *calc) add() {
 	c.set("wal_buffers", "-1", "", "let PostgreSQL size WAL buffers from shared_buffers", "postmaster")
 	c.set("max_wal_senders", "10", "", "headroom for replication and pgBackRest (Phase 3)", "postmaster")
 	c.set("min_wal_size", gib(clampFloat(float64(in.DataDiskGiB)*0.02, 1, 8)), "GiB",
-		fmt.Sprintf("2%% of the %d GiB data disk", in.DataDiskGiB), "sighup")
+		fmt.Sprintf("2%% of the cluster's %d GiB share of the data disk", in.DataDiskGiB), "sighup")
 	c.set("max_wal_size", gib(clampFloat(float64(in.DataDiskGiB)*0.10, 2, 64)), "GiB",
-		fmt.Sprintf("10%% of the %d GiB data disk", in.DataDiskGiB), "sighup")
+		fmt.Sprintf("10%% of the cluster's %d GiB share of the data disk", in.DataDiskGiB), "sighup")
 	c.set("checkpoint_timeout", "15min", "", "spread checkpoints over a quarter hour", "sighup")
 	c.set("checkpoint_completion_target", "0.9", "", "smooth checkpoint I/O", "sighup")
 
@@ -150,8 +200,8 @@ func (c *calc) add() {
 	c.set("io_workers", itoa(maxInt(3, cpu/4)), "", "one I/O worker per 4 vCPU, at least 3", "postmaster")
 
 	// Parallelism.
-	c.set("max_worker_processes", itoa(maxInt(cpu+8, 8)), "", "vCPU + 8 background workers", "postmaster")
-	c.set("max_parallel_workers", itoa(cpu), "", "one parallel worker per vCPU", "postmaster")
+	c.set("max_worker_processes", itoa(maxInt(cpu+8, 8)), "", cpuReason+" + 8 background workers", "postmaster")
+	c.set("max_parallel_workers", itoa(cpu), "", "one parallel worker per vCPU: "+cpuReason, "postmaster")
 	c.set("max_parallel_workers_per_gather", itoa(parallelGather(in.Profile, cpu)), "", profileReason(in.Profile, "parallelism"), "user")
 	c.set("max_parallel_maintenance_workers", itoa(minInt(4, maxInt(1, cpu/2))), "", "parallel maintenance workers", "user")
 	jit := "off"
@@ -217,10 +267,10 @@ func profileDuration(profile string) string {
 }
 
 func hugePagesReason(ram int) string {
-	if ram >= 8192 {
-		return "try: RAM is large enough to reserve huge pages"
+	if ram >= HugePagesMinMiB {
+		return "try: the cluster's memory is large enough to reserve huge pages"
 	}
-	return "off: under 8192 MiB RAM"
+	return fmt.Sprintf("off: the cluster has under %d MiB", HugePagesMinMiB)
 }
 
 func jitReason(analytics bool) string {

@@ -67,9 +67,6 @@ func PackagesStepIDs() []string { return []string{postgresPackagesID} }
 // TimersStepIDs is the step a per-database dump schedule change needs.
 func TimersStepIDs() []string { return []string{timersID} }
 
-// Restarter returns the PostgreSQL restarter for aggregated restarts.
-func Restarter() engine.Restarter { return restarter }
-
 // RolesStepIDs is the step db.create runs on its own.
 func RolesStepIDs() []string { return []string{postgresRolesID} }
 

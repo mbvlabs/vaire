@@ -23,9 +23,11 @@ import (
 
 // CallOptions are the per-request fields beyond method and params.
 type CallOptions struct {
-	Secrets     map[string]string
-	DryRun      bool
-	Confirm     string
+	Secrets map[string]string
+	DryRun  bool
+	Confirm string
+	// Confirms are further tokens, for methods that take several.
+	Confirms    []string
 	LockTimeout *int
 	// OnEvent receives every event before the result: step, log, progress,
 	// warning.
@@ -71,6 +73,7 @@ func newRequest(method string, params any, operator string, opts CallOptions) ([
 		Secrets:       opts.Secrets,
 		DryRun:        opts.DryRun,
 		Confirm:       opts.Confirm,
+		Confirms:      opts.Confirms,
 		Operator:      operator,
 		ClientVersion: buildinfo.Version,
 		ClientCommit:  buildinfo.Commit,

@@ -62,9 +62,9 @@ func Confirm(cmd *cobra.Command, token string) error {
 			"Refusing to confirm an empty token.",
 		)
 	}
-	got, err := cmd.Flags().GetString("confirm")
-	if err != nil {
-		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
+	got := ""
+	if tokens := confirmTokens(cmd); len(tokens) > 0 {
+		got = tokens[0]
 	}
 	details := map[string]any{"confirm_token": token}
 	if got == token {
@@ -163,4 +163,46 @@ type sudoPrompter struct{}
 
 func (sudoPrompter) YesNo(cmd *cobra.Command, question string) (bool, error) {
 	return PromptYes(cmd, question)
+}
+
+// confirmTokens are the --confirm values: every one of a repeatable flag,
+// or the one of a plain flag.
+func confirmTokens(cmd *cobra.Command) []string {
+	flag := cmd.Flags().Lookup("confirm")
+	if flag == nil {
+		return nil
+	}
+	if flag.Value.Type() == "stringArray" {
+		values, _ := cmd.Flags().GetStringArray("confirm")
+		var out []string
+		for _, v := range values {
+			if v = strings.TrimSpace(v); v != "" {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	if v := stringFlag(cmd, "confirm"); v != "" {
+		return []string{v}
+	}
+	return nil
+}
+
+// confirmOptions splits the --confirm values into the RPC's first token and
+// the rest.
+func confirmOptions(cmd *cobra.Command) (string, []string) {
+	tokens := confirmTokens(cmd)
+	if len(tokens) == 0 {
+		return "", nil
+	}
+	return tokens[0], tokens[1:]
+}
+
+// confirmFlags renders tokens as --confirm arguments.
+func confirmFlags(tokens []string) string {
+	parts := make([]string, len(tokens))
+	for i, t := range tokens {
+		parts[i] = "--confirm " + t
+	}
+	return strings.Join(parts, " ")
 }

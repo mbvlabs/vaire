@@ -24,7 +24,8 @@ const (
 	StatusFailed    = "failed"
 )
 
-// Journal records what ran on this node.
+// Journal records what ran on this node. Steps is keyed by step ID, and a
+// cluster's instance by <id>@<cluster>.
 type Journal struct {
 	Schema     int                     `json:"schema"`
 	EruVersion string                  `json:"eru_version"`
@@ -33,6 +34,44 @@ type Journal struct {
 	// RestartPending lists steps whose restart has not been performed yet. It
 	// survives runs, so a later apply with the confirm token performs it.
 	RestartPending []string `json:"restart_pending,omitempty"`
+}
+
+// update applies fn to j and to the journal on disk, under the journal's own
+// file lock. Applies limited to different clusters run side by side under
+// the shared node lock, so each change is merged into the latest file
+// instead of overwriting it with this run's copy.
+func (j *Journal) update(path string, fn func(*Journal)) error {
+	fn(j)
+	return WithFileLock(path+".lock", func() error {
+		disk, err := LoadJournal(path)
+		if err != nil {
+			return err
+		}
+		fn(disk)
+		return disk.Save(path)
+	})
+}
+
+// setEntry records one step's entry.
+func (j *Journal) setEntry(path, id string, entry JournalEntry) error {
+	return j.update(path, func(j *Journal) { j.Steps[id] = entry })
+}
+
+// clearPending drops ids from the pending restarts.
+func (j *Journal) clearPending(path string, ids []string) error {
+	drop := map[string]bool{}
+	for _, id := range ids {
+		drop[id] = true
+	}
+	return j.update(path, func(j *Journal) {
+		kept := j.RestartPending[:0:0]
+		for _, id := range j.RestartPending {
+			if !drop[id] {
+				kept = append(kept, id)
+			}
+		}
+		j.RestartPending = kept
+	})
 }
 
 // JournalEntry is one step's last run.

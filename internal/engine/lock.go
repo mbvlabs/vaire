@@ -17,6 +17,12 @@ const LockPath = "/run/lock/eru.lock"
 // LockInfoPath names the most recent holder.
 const LockInfoPath = LockPath + ".info"
 
+// ClusterLockPath is one cluster's lock (RFC 11.2): its step instances and
+// per-database jobs take it after the global lock, so work on different
+// clusters runs side by side. Locks are always taken global first, then
+// clusters in name order.
+func ClusterLockPath(cluster string) string { return "/run/lock/eru-" + cluster + ".lock" }
+
 // LockMode is shared or exclusive.
 type LockMode string
 
@@ -29,9 +35,10 @@ const (
 
 const lockPoll = 200 * time.Millisecond
 
-// Holder is the content of eru.lock.info.
+// Holder is the content of eru.lock.info and eru-<cluster>.lock.info.
 type Holder struct {
 	PID       int    `json:"pid"`
+	Cluster   string `json:"cluster,omitempty"`
 	Method    string `json:"method"`
 	RequestID string `json:"request_id"`
 	Mode      string `json:"mode"`
@@ -45,6 +52,16 @@ type Release func()
 // A timeout of 0 tries once. On timeout it returns precondition_failed with
 // reason lock_held and the holder, or a null holder when its PID is gone.
 func Acquire(ctx context.Context, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
+	return acquire(ctx, LockPath, "", mode, method, requestID, timeout)
+}
+
+// AcquireCluster takes cluster's lock in mode, as Acquire does the global
+// one. The caller holds the global lock already.
+func AcquireCluster(ctx context.Context, cluster string, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
+	return acquire(ctx, ClusterLockPath(cluster), cluster, mode, method, requestID, timeout)
+}
+
+func acquire(ctx context.Context, path, cluster string, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
 	if mode == LockNone {
 		return func() {}, nil
 	}
@@ -52,7 +69,8 @@ func Acquire(ctx context.Context, mode LockMode, method, requestID string, timeo
 	if mode == LockShared {
 		how = syscall.LOCK_SH
 	}
-	f, err := os.OpenFile(LockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	infoPath := path + ".info"
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: the fixed global lock or a cluster's, named from config.
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +87,7 @@ func Acquire(ctx context.Context, mode LockMode, method, requestID string, timeo
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			_ = f.Close()
-			return nil, lockHeld()
+			return nil, lockHeld(infoPath, cluster)
 		}
 		select {
 		case <-ctx.Done():
@@ -80,37 +98,44 @@ func Acquire(ctx context.Context, mode LockMode, method, requestID string, timeo
 	}
 	info := Holder{
 		PID:       os.Getpid(),
+		Cluster:   cluster,
 		Method:    method,
 		RequestID: requestID,
 		Mode:      string(mode),
 		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if raw, err := json.Marshal(info); err == nil {
-		_ = WriteFileAtomic(LockInfoPath, append(raw, '\n'), 0o644)
+		_ = WriteFileAtomic(infoPath, append(raw, '\n'), 0o644)
 	}
 	return func() {
 		if mode == LockExclusive {
-			_ = os.Remove(LockInfoPath)
+			_ = os.Remove(infoPath)
 		}
 		_ = syscall.Flock(fd, syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
 }
 
-func lockHeld() *output.CLIError {
+func lockHeld(infoPath, cluster string) *output.CLIError {
 	var holder *Holder
-	if raw, err := os.ReadFile(LockInfoPath); err == nil {
+	if raw, err := os.ReadFile(infoPath); err == nil { //nolint:gosec // G304: the lock's own info file.
 		var h Holder
 		if json.Unmarshal(raw, &h) == nil && processAlive(h.PID) {
 			holder = &h
 		}
 	}
+	message := "another eru operation holds the node lock"
+	details := map[string]any{"reason": "lock_held", "holder": holder}
+	if cluster != "" {
+		message = "another eru operation holds the lock of " + cluster
+		details["cluster"] = cluster
+	}
 	return output.NewError(
 		output.CodePrecondition,
-		"another eru operation holds the node lock",
+		message,
 		output.ExitPrecondition,
 		"Wait for it to finish, or retry with a longer lock timeout.",
-	).WithDetails(map[string]any{"reason": "lock_held", "holder": holder})
+	).WithDetails(details)
 }
 
 func processAlive(pid int) bool {

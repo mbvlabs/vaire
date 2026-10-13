@@ -49,6 +49,9 @@ func (pgbackrestStep) SkipReason(cfg config.Cluster) string {
 	if !cfg.BackupConfigured() {
 		return "backups_not_configured"
 	}
+	if _, ok := cfg.BackupCluster(); !ok {
+		return "no_databases"
+	}
 	return ""
 }
 
@@ -284,7 +287,7 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
-	notes := []string{"stanza " + cfg.Name() + " checked"}
+	notes := []string{"stanza " + d.Stanza + " checked"}
 	if !info.HasFull() {
 		set, err := d.Backup(ctx, backup.TypeFull)
 		if err != nil {
@@ -298,7 +301,8 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 
 // driverFor is the pgBackRest driver for cfg.
 func driverFor(cfg config.Cluster, rt engine.Runtime, report engine.Reporter) backup.PgBackRest {
-	return backup.PgBackRest{Stanza: cfg.Name(), Shell: rt.Shell, StepID: pgbackrestID, Report: report, PG: rt.PG}
+	first, _ := cfg.BackupCluster()
+	return backup.PgBackRest{Stanza: first.Stanza, Shell: rt.Shell, StepID: pgbackrestID, Report: report, PG: ClusterPG(first)}
 }
 
 // RecordBackup stores a successful backup in records.json and refreshes the

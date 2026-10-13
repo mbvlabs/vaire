@@ -22,9 +22,30 @@ func (pgbouncer) Describe(config.Cluster) string {
 	return "render pgbouncer.ini, pgbouncer_hba.conf and userlist.txt, then restart PgBouncer"
 }
 
+// SkipReason skips the step while there is no database: the service roles
+// whose verifiers fill userlist.txt live in each database's cluster.
+func (pgbouncer) SkipReason(cfg config.Cluster) string {
+	if len(cfg.Clusters) == 0 {
+		return "no_databases"
+	}
+	return ""
+}
+
 // pgbouncerIni is the rendered ini, which never contains a secret.
 func pgbouncerIni(cfg config.Cluster, rt engine.Runtime) string {
-	return string(render.PgbouncerIni(cfg, rt.Host, maxConnectionsFor(cfg, rt.Host)))
+	return string(render.PgbouncerIni(cfg, rt.Host, poolerConnections(cfg)))
+}
+
+// poolerConnections is max_db_connections while one wildcard entry serves
+// every database: the smallest cluster's transaction pool.
+func poolerConnections(cfg config.Cluster) int {
+	out := 0
+	for _, c := range cfg.Clusters {
+		if r, err := cfg.Resources(c); err == nil && (out == 0 || r.PoolSize < out) {
+			out = r.PoolSize
+		}
+	}
+	return out
 }
 
 func (pgbouncer) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []engine.RenderedFile {
@@ -47,7 +68,7 @@ func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 	if !fileIsOwned(PgbouncerHBAPath, string(render.PgbouncerHBA()), 0o640, pgFileOwner, pgFileGroup) {
 		return incomplete(PgbouncerHBAPath + " differs"), nil
 	}
-	verifiers, err := roleVerifiers(ctx, rt)
+	verifiers, err := roleVerifiers(ctx, cfg)
 	if err != nil || len(verifiers) < len(ServiceRoles) {
 		return incomplete("cannot read the service role verifiers"), nil
 	}
@@ -64,7 +85,7 @@ func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 }
 
 func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
-	verifiers, err := roleVerifiers(ctx, rt)
+	verifiers, err := roleVerifiers(ctx, cfg)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
@@ -84,9 +105,13 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
 
-// roleVerifiers reads the SCRAM verifiers of the service roles.
-func roleVerifiers(ctx context.Context, rt engine.Runtime) (map[string]string, error) {
-	rows, err := rt.PG.Query(ctx, "postgres",
+// roleVerifiers reads the SCRAM verifiers of the service roles from the
+// first cluster. They are the same in every cluster (RFC 12).
+func roleVerifiers(ctx context.Context, cfg config.Cluster) (map[string]string, error) {
+	if len(cfg.Clusters) == 0 {
+		return nil, fmt.Errorf("there is no cluster to read the service roles from")
+	}
+	rows, err := ClusterPG(cfg.Clusters[0]).Query(ctx, "postgres",
 		"SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('pgbouncer_auth','eru_monitor')", nil)
 	if err != nil {
 		return nil, err

@@ -93,7 +93,9 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 		return nil, err
 	}
 	logLine(report, "certs-renew", "installed the certificate for "+cfg.MasterHostname())
-	_ = runQuiet(ctx, "pg_ctlcluster", "18", steps.PGCluster, "reload")
+	for _, c := range cfg.Clusters {
+		_ = runQuiet(ctx, "pg_ctlcluster", "18", c.Name, "reload")
+	}
 	_ = runQuiet(ctx, "systemctl", "reload", steps.PgbouncerService)
 	_ = runQuiet(ctx, "systemctl", "reload", steps.NginxService)
 	return map[string]any{"changed": true, "hostname": cfg.MasterHostname(), "not_after": certNotAfter(steps.TLSCertPath)}, nil

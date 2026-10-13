@@ -37,9 +37,11 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		}
 		p.event(ev)
 	}
-	reply, err := s.node.Call(ctx, "logs", map[string]any{
-		"unit": unit, "since": since, "lines": lines, "follow": follow,
-	}, remote.CallOptions{OnEvent: onEvent})
+	params := map[string]any{"unit": unit, "since": since, "lines": lines, "follow": follow}
+	if db := stringFlag(cmd, "db"); db != "" {
+		params["db"] = db
+	}
+	reply, err := s.node.Call(ctx, "logs", params, remote.CallOptions{OnEvent: onEvent})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil

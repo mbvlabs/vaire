@@ -150,7 +150,7 @@ func (r *initRun) configureInitBackups(ctx context.Context, caller remote.Caller
 	}
 	r.warnings = append(r.warnings, warnings...)
 	detail := "WAL archiving on"
-	if data.Restarted {
+	if data.Restarted() {
 		detail += ", PostgreSQL restarted once"
 	}
 	r.p.phase("init.backups", "completed", detail)

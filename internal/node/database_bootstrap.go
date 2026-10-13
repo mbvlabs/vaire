@@ -64,7 +64,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	data, warnings, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
 		Only:        steps.DatabaseStepIDs(),
 		Report:      env.Report,
-		Restarter:   steps.Restarter(),
+		Restarter:   steps.Restarter(env.Cluster),
 		FailureHint: initFailureHint(cfg.ClusterName, p.Local),
 	})
 	if err != nil {
@@ -76,7 +76,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 			Node:             nodeCfg.NodeName,
 			Steps:            data,
 			TLS:              inspectTLS(cfg),
-			RestartPerformed: data.Restarted,
+			RestartPerformed: data.Restarted(),
 		},
 		Warnings: warnings,
 	}, nil

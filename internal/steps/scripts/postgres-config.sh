@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Step 11 (postgres-config-v1): reload PostgreSQL with the rendered files. The
-# Go step writes them owned by postgres:postgres with the right modes before
-# this runs, so there is nothing to fix up here.
+# postgres-config-v1@<cluster>: reload the cluster with the rendered files.
+# The Go step writes them owned by postgres:postgres with the right modes
+# before this runs, so there is nothing to fix up here.
 set -euo pipefail
 
-: "${PG_CONF_DIR:?PG_CONF_DIR is required}"
+: "${CLUSTER:?CLUSTER is required}"
 
-pg_ctlcluster 18 main reload
-printf 'configuration reloaded\n'
+pg_ctlcluster 18 "${CLUSTER}" reload
+printf 'configuration of %s reloaded\n' "${CLUSTER}"

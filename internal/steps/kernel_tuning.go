@@ -19,10 +19,11 @@ type kernelTuningInputs struct {
 	THPUnit string `json:"thp_unit"`
 }
 
+// renderKernelTuning reserves the sum of every cluster's huge-page estimate
+// (RFC 7.3).
 func renderKernelTuning(cfg config.Cluster, host hostinfo.Info) kernelTuningInputs {
-	res := tuningFor(cfg, host)
 	return kernelTuningInputs{
-		Sysctl:  string(render.SysctlConf(host, res.HugePages)),
+		Sysctl:  string(render.SysctlConf(host, hugePagesFor(cfg, host))),
 		THPUnit: string(render.THPUnit()),
 	}
 }
@@ -32,7 +33,7 @@ type kernelTuning struct{}
 func (kernelTuning) ID() string { return kernelTuningID }
 
 func (kernelTuning) Describe(config.Cluster) string {
-	return "write sysctl settings and disable transparent huge pages"
+	return "write sysctl settings, with huge pages for every cluster, and disable transparent huge pages"
 }
 
 func (kernelTuning) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []engine.RenderedFile {
@@ -95,12 +96,13 @@ func parseSysctl(content string) []sysctlKV {
 	return out
 }
 
-// hugePagesFromKernel reads shared_memory_size_in_huge_pages by starting a
-// stopped cluster's postgres with -C. It is used by step 11 during a restart.
-func hugePagesFromKernel(ctx context.Context, dataDir string) (int, error) {
+// hugePagesFromKernel reads a stopped cluster's
+// shared_memory_size_in_huge_pages by starting its postgres with -C. It is
+// used by postgres-config-v1 during a restart.
+func hugePagesFromKernel(ctx context.Context, cluster, dataDir string) (int, error) {
 	out, err := Probe(ctx, "runuser", "-u", "postgres", "--",
 		"/usr/lib/postgresql/"+strconv.Itoa(PGVersion)+"/bin/postgres",
-		"-D", dataDir, "-c", "config_file="+PGConfDir+"/postgresql.conf", "-C", "shared_memory_size_in_huge_pages")
+		"-D", dataDir, "-c", "config_file="+PGConfDir(cluster)+"/postgresql.conf", "-C", "shared_memory_size_in_huge_pages")
 	if err != nil {
 		return 0, err
 	}

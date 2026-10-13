@@ -14,21 +14,23 @@ import (
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/steps"
 )
 
-// postgresLogPath is the cluster's log file.
-const postgresLogPath = "/var/log/postgresql/postgresql-18-main.log"
-
 type logsParams struct {
-	Unit   string `json:"unit"`
+	Unit string `json:"unit"`
+	// DB picks the cluster whose log the postgres unit reads; empty means
+	// the only one.
+	DB     string `json:"db,omitempty"`
 	Since  string `json:"since"`
 	Lines  int    `json:"lines"`
 	Follow bool   `json:"follow"`
 }
 
-// logUnits are the units eru reads, mapped to their source.
+// logUnits are the units eru reads, mapped to their source. postgres is
+// the log file of one database's cluster, postgresql@18-<db>.
 var logUnits = map[string]string{
-	"postgres":  "file:" + postgresLogPath,
+	"postgres":  "file:",
 	"pgbouncer": "journal:pgbouncer.service",
 	"nginx":     "journal:nginx.service",
 	"eru-certs": "journal:eru-certs.service",
@@ -48,6 +50,13 @@ func handleLogs(ctx context.Context, env *Env) (Result, error) {
 	if !ok {
 		return Result{}, output.NewError(output.CodeUsage, "unknown unit "+unit, output.ExitUsage, "Use one of details.units.").
 			WithDetails(map[string]any{"units": sortedUnits()})
+	}
+	if unit == "postgres" {
+		spec, err := onlyCluster(env.Cluster, p.DB)
+		if err != nil {
+			return Result{}, err
+		}
+		source = "file:" + steps.PGLogPath(spec.Name)
 	}
 	lines := p.Lines
 	if lines <= 0 {

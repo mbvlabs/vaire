@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/mbvlabs/eru/internal/secrets"
 )
 
@@ -52,10 +52,10 @@ type Skipper interface {
 	SkipReason(cfg config.Cluster) string
 }
 
-// RestartBarrier is implemented by steps that need a pending PostgreSQL
+// RestartBarrier is implemented by steps that need every pending PostgreSQL
 // restart done before they run, such as pgbackrest-v1, which needs
-// archive_mode on. The runner restarts first when the restart is confirmed;
-// otherwise it leaves the step for a later apply.
+// archive_mode on. The runner restarts the clusters first when their restarts
+// are confirmed; otherwise it leaves the step for a later apply.
 type RestartBarrier interface {
 	NeedsRestartFirst() bool
 }
@@ -69,8 +69,10 @@ type CheckResult struct {
 // RestartNeed is what a step needs after Apply.
 type RestartNeed string
 
-// Restart needs. A reload is the step's own job; a restart is aggregated and
-// performed at most once per run.
+// Restart needs. A reload is the step's own job; a restart is aggregated per
+// cluster and performed at most once per cluster and run. A restart from a
+// cluster's instance restarts that cluster; one from a server-level step
+// restarts every cluster, one at a time.
 const (
 	RestartNone    RestartNeed = "none"
 	RestartReload  RestartNeed = "reload"
@@ -97,8 +99,6 @@ type Runtime struct {
 	Log          *RunLog
 	// Host is the node's hardware description, filled once per request.
 	Host hostinfo.Info
-	// PG talks to the local PostgreSQL as the postgres OS user.
-	PG pg.Local
 	// RotateSecrets asks steps to replace runtime secrets already on disk with
 	// the ones in the request. Without it a step writes a runtime secret only
 	// when the file is missing, so an operator with stale credentials can't
@@ -106,16 +106,59 @@ type Runtime struct {
 	RotateSecrets bool
 }
 
-// Restarter performs the aggregated restart at the end of an apply and reports
-// how long the database was unavailable.
+// Restarter restarts one PostgreSQL cluster and reports how long it was
+// unavailable. The runner calls it once per cluster with a pending restart,
+// one cluster at a time.
 type Restarter interface {
-	Restart(ctx context.Context) (time.Duration, error)
+	Restart(ctx context.Context, cluster string) (time.Duration, error)
+}
+
+// Template is implemented by a step that runs once per cluster (RFC 11.2).
+// The catalogue holds the template; Plan and Apply expand it into one
+// instance per [[clusters]] entry, journaled as <id>@<cluster> with its own
+// input hash, so a change to one cluster re-runs nothing for another.
+type Template interface {
+	Step
+	// Instance returns the step for one cluster. Its ID is
+	// InstanceID(template ID, cluster).
+	Instance(cluster string) Step
 }
 
 // IDPattern is the versioned step ID format, for example postgres-config-v1.
 var IDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*-v[0-9]+$`)
 
-// ValidateIDs checks every ID against IDPattern and refuses duplicates.
+// instanceSep separates a template's ID from the cluster in an instance ID.
+const instanceSep = "@"
+
+// InstanceID is the ID of template id's instance for cluster.
+func InstanceID(id, cluster string) string { return id + instanceSep + cluster }
+
+// SplitID splits an instance ID into the template ID and the cluster. A
+// server-level step has no cluster.
+func SplitID(id string) (template, cluster string) {
+	template, cluster, _ = strings.Cut(id, instanceSep)
+	return template, cluster
+}
+
+// Expand replaces every Template in steps with one instance per cluster in
+// cfg, in [[clusters]] order, keeping catalogue order between steps.
+func Expand(steps []Step, cfg config.Cluster) []Step {
+	out := make([]Step, 0, len(steps))
+	for _, step := range steps {
+		t, ok := step.(Template)
+		if !ok {
+			out = append(out, step)
+			continue
+		}
+		for _, c := range cfg.Clusters {
+			out = append(out, t.Instance(c.Name))
+		}
+	}
+	return out
+}
+
+// ValidateIDs checks every ID against IDPattern and refuses duplicates. It
+// takes the catalogue, before Expand.
 func ValidateIDs(steps []Step) error {
 	seen := map[string]bool{}
 	for _, step := range steps {

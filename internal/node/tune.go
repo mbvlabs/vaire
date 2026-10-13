@@ -10,14 +10,32 @@ import (
 	"github.com/mbvlabs/eru/internal/tune"
 )
 
+type tuneShowParams struct {
+	// DB picks the cluster; empty means the only one.
+	DB string `json:"db,omitempty"`
+}
+
 func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
+	var p tuneShowParams
+	if err := decodeParams(env.Req.Params, &p); err != nil {
+		return Result{}, err
+	}
 	rt := runtimeFor(env, true)
-	res := tune.Calculate(tuneInput(env.Cluster, rt.Host))
+	data := map[string]any{"server": serverBudget(env.Cluster, rt.Host)}
+	if len(env.Cluster.Clusters) == 0 && p.DB == "" {
+		return Result{Data: data}, nil
+	}
+	spec, err := onlyCluster(env.Cluster, p.DB)
+	if err != nil {
+		return Result{}, err
+	}
+	res := steps.TuningFor(env.Cluster, spec, rt.Host)
 	current := map[string]string{}
 	for _, s := range res.Settings {
 		current[s.Name] = ""
 	}
-	rows, err := rt.PG.Query(ctx, "postgres", "SELECT name, current_setting(name) AS setting FROM pg_settings", nil)
+	local := steps.ClusterPG(spec)
+	rows, err := local.Query(ctx, "postgres", "SELECT name, current_setting(name) AS setting FROM pg_settings", nil)
 	if err == nil {
 		for _, row := range rows {
 			if _, ok := current[row["name"]]; ok {
@@ -25,19 +43,19 @@ func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
 			}
 		}
 	}
-	pending, err := rt.PG.Query(ctx, "postgres", "SELECT name FROM pg_settings WHERE pending_restart ORDER BY name", nil)
+	pending, err := local.Query(ctx, "postgres", "SELECT name FROM pg_settings WHERE pending_restart ORDER BY name", nil)
 	var pendingNames []string
 	if err == nil {
 		for _, row := range pending {
 			pendingNames = append(pendingNames, row["name"])
 		}
 	}
-	return Result{Data: map[string]any{
-		"inputs":          tuneInputs(env.Cluster, rt.Host),
-		"settings":        res.Settings,
-		"current":         current,
-		"pending_restart": pendingNames,
-	}}, nil
+	data["database"] = spec.Name
+	data["inputs"] = tuneInputs(env.Cluster, spec, rt.Host)
+	data["settings"] = res.Settings
+	data["current"] = current
+	data["pending_restart"] = pendingNames
+	return Result{Data: data}, nil
 }
 
 func handleTuneApply(ctx context.Context, env *Env) (Result, error) {
@@ -50,8 +68,8 @@ func handleTuneApply(ctx context.Context, env *Env) (Result, error) {
 	}
 	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, false), engine.Options{
 		Only:      steps.TuneStepIDs(),
-		Confirmed: env.Req.Confirm != "",
-		Restarter: steps.Restarter(),
+		Confirm:   restartConfirmation(env.Cluster, env.Req),
+		Restarter: steps.Restarter(env.Cluster),
 		Report:    env.Report,
 	})
 	if err != nil {
@@ -60,26 +78,47 @@ func handleTuneApply(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
-// tuneInputs is the human-readable tuning input set.
-func tuneInputs(cfg config.Cluster, host hostinfo.Info) map[string]any {
+// serverBudget is the server's memory sheet (RFC 7.3): RAM, the reserve
+// and what is left for clusters, and what the clusters ask for.
+func serverBudget(cfg config.Cluster, host hostinfo.Info) map[string]any {
+	override := 0
+	if cfg.Server.MemoryReserve != "" {
+		override, _ = config.ParseMemoryMiB(cfg.Server.MemoryReserve)
+	}
+	reserve := tune.ServerReserve(host.RAMMiB, override)
+	assigned := 0
+	for _, c := range cfg.Clusters {
+		if r, err := cfg.Resources(c); err == nil {
+			assigned += r.MemoryMiB
+		}
+	}
 	return map[string]any{
-		"ram_mib":            host.RAMMiB,
-		"vcpu":               host.VCPU,
-		"disk_gib":           host.DataDisk.SizeGiB,
-		"disk_rotational":    host.DataDisk.Rotational,
-		"profile":            cfg.Postgres.Profile,
-		"client_connections": cfg.Postgres.ClientConnections,
+		"ram_mib":                host.RAMMiB,
+		"vcpu":                   host.VCPU,
+		"reserve_mib":            reserve,
+		"cluster_budget_mib":     tune.ClusterBudget(host.RAMMiB, reserve),
+		"cluster_memory_mib":     assigned,
+		"clusters":               len(cfg.Clusters),
+		"cpu_share":              tune.CPUShare(host.VCPU, len(cfg.Clusters)),
+		"huge_pages":             steps.HugePagesFor(cfg, host),
+		"memory_reserve_setting": cfg.Server.MemoryReserve,
 	}
 }
 
-func tuneInput(cfg config.Cluster, host hostinfo.Info) tune.Input {
-	return tune.Input{
-		RAMMiB:            host.RAMMiB,
-		VCPU:              host.VCPU,
-		DiskRotational:    host.DataDisk.Rotational,
-		DataDiskGiB:       host.DataDisk.SizeGiB,
-		Profile:           cfg.Postgres.Profile,
-		ClientConnections: cfg.Postgres.ClientConnections,
-		PGMajor:           cfg.Postgres.Version,
+// tuneInputs is the human-readable tuning input set for spec's cluster.
+func tuneInputs(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) map[string]any {
+	res, _ := cfg.Resources(spec)
+	profile := spec.Profile
+	if profile == "" {
+		profile = cfg.Postgres.Profile
+	}
+	return map[string]any{
+		"memory_mib":         res.MemoryMiB,
+		"vcpu_share":         tune.CPUShare(host.VCPU, len(cfg.Clusters)),
+		"max_connections":    res.MaxConnections,
+		"disk_gib":           host.DataDisk.SizeGiB,
+		"disk_rotational":    host.DataDisk.Rotational,
+		"profile":            profile,
+		"client_connections": cfg.Postgres.ClientConnections,
 	}
 }

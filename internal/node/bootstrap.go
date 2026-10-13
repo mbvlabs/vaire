@@ -137,7 +137,7 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	host, _ := hostinfo.Detect(cfg.Server.DataDirectory())
+	host, _ := hostinfo.Detect(cfg.Server.DataRoot)
 	return Result{Data: BootstrapResult{
 		Phase:       p.Phase,
 		Node:        spec.Name,

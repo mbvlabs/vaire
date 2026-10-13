@@ -27,18 +27,35 @@ const DefaultLockTimeout = 30 * time.Second
 
 // Request is one node RPC call.
 type Request struct {
-	Schema        string            `json:"schema"`
-	RequestID     string            `json:"request_id"`
-	Method        string            `json:"method"`
-	Params        json.RawMessage   `json:"params,omitempty"`
-	Secrets       map[string]string `json:"secrets,omitempty"`
-	DryRun        bool              `json:"dry_run"`
-	Confirm       string            `json:"confirm"`
-	Operator      string            `json:"operator"`
-	ClientVersion string            `json:"client_version"`
-	ClientCommit  string            `json:"client_commit"`
-	ClientChannel string            `json:"client_channel"`
-	LockTimeoutS  *int              `json:"lock_timeout_s,omitempty"`
+	Schema    string            `json:"schema"`
+	RequestID string            `json:"request_id"`
+	Method    string            `json:"method"`
+	Params    json.RawMessage   `json:"params,omitempty"`
+	Secrets   map[string]string `json:"secrets,omitempty"`
+	DryRun    bool              `json:"dry_run"`
+	Confirm   string            `json:"confirm"`
+	// Confirms are further confirm tokens, for methods that take several
+	// (apply: one <cluster>/restart per cluster).
+	Confirms      []string `json:"confirms,omitempty"`
+	Operator      string   `json:"operator"`
+	ClientVersion string   `json:"client_version"`
+	ClientCommit  string   `json:"client_commit"`
+	ClientChannel string   `json:"client_channel"`
+	LockTimeoutS  *int     `json:"lock_timeout_s,omitempty"`
+}
+
+// ConfirmTokens returns every confirm token the request carries.
+func (r Request) ConfirmTokens() []string {
+	var out []string
+	if r.Confirm != "" {
+		out = append(out, r.Confirm)
+	}
+	for _, token := range r.Confirms {
+		if token != "" {
+			out = append(out, token)
+		}
+	}
+	return out
 }
 
 // LockTimeout returns the lock wait for this request. Zero tries once.
@@ -65,6 +82,7 @@ func (r Request) Loggable() map[string]any {
 		"method":         r.Method,
 		"dry_run":        r.DryRun,
 		"confirm":        r.Confirm,
+		"confirms":       r.Confirms,
 		"operator":       r.Operator,
 		"client_version": r.ClientVersion,
 		"client_commit":  r.ClientCommit,

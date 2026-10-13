@@ -6,19 +6,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/pg"
 )
-
-// ScratchPort is the drill socket's port. Scratch instances listen on a unix
-// socket only, never TCP, so several can share the number.
-const ScratchPort = 5499
 
 // pgBin is the PostgreSQL 18 server binaries.
 const pgBin = "/usr/lib/postgresql/18/bin"
@@ -36,8 +34,10 @@ func ScratchRoot(dataDirectory string) string {
 // Scratch is one throwaway instance restored from the repository: a data
 // directory, its own socket directory and a log, under ScratchRoot/<id>.
 type Scratch struct {
-	ID     string
-	Base   string
+	ID   string
+	Base string
+	// Port is the instance's port from the temporary range (RFC 8.2).
+	Port   int
 	Data   string
 	Socket string
 	Shell  engine.Shell
@@ -72,11 +72,73 @@ func NewScratch(dataDirectory, id string, sh engine.Shell, stepID string, report
 			return nil, err
 		}
 	}
+	if s.Port, err = reserveTemporaryPort(root, s.Base); err != nil {
+		_ = os.RemoveAll(s.Base)
+		return nil, err
+	}
 	return s, nil
 }
 
+// portFile records a scratch instance's port in its directory, so the next
+// allocation skips it before the instance has started. Remove frees it.
+const portFile = "port"
+
+// reserveTemporaryPort picks the first free port of the temporary range and
+// records it in base. A port is taken when a cluster uses it, a socket lock
+// for it exists in the shared socket directory, or another scratch instance
+// recorded it. The allocation runs under a lock in root.
+func reserveTemporaryPort(root, base string) (int, error) {
+	var port int
+	err := engine.WithFileLock(filepath.Join(root, "ports.lock"), func() error {
+		taken := clusterPorts()
+		dirs, _ := os.ReadDir(root)
+		for _, d := range dirs {
+			raw, err := os.ReadFile(filepath.Join(root, d.Name(), portFile)) //nolint:gosec // G304: eru's own scratch directories.
+			if err != nil {
+				continue
+			}
+			if n, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+				taken[n] = true
+			}
+		}
+		for n := config.TemporaryPortMin; n <= config.TemporaryPortMax; n++ {
+			if taken[n] {
+				continue
+			}
+			if _, err := os.Stat(fmt.Sprintf("/var/run/postgresql/.s.PGSQL.%d.lock", n)); err == nil {
+				continue
+			}
+			port = n
+			return os.WriteFile(filepath.Join(base, portFile), []byte(strconv.Itoa(n)+"\n"), 0o600)
+		}
+		return output.NewError(output.CodePrecondition,
+			fmt.Sprintf("every temporary port (%d-%d) is in use", config.TemporaryPortMin, config.TemporaryPortMax), output.ExitPrecondition,
+			"Wait for running restores, forks or drills to finish, then retry.").WithDetails(map[string]any{"reason": "no_temporary_port"})
+	})
+	return port, err
+}
+
+// clusterPorts are the ports pg_lsclusters lists.
+func clusterPorts() map[int]bool {
+	out, err := exec.Command("pg_lsclusters", "--no-header").Output()
+	ports := map[int]bool{}
+	if err != nil {
+		return ports
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		if n, err := strconv.Atoi(fields[2]); err == nil {
+			ports[n] = true
+		}
+	}
+	return ports
+}
+
 // PG is a SQL runner for the scratch instance.
-func (s *Scratch) PG() pg.Local { return pg.Local{Host: s.Socket, Port: ScratchPort} }
+func (s *Scratch) PG() pg.Local { return pg.Local{Host: s.Socket, Port: s.Port} }
 
 // Restore runs the driver's scratch restore into the data directory.
 func (s *Scratch) Restore(ctx context.Context, d Driver, opts RestoreOptions) error {
@@ -92,7 +154,7 @@ func (s *Scratch) Restore(ctx context.Context, d Driver, opts RestoreOptions) er
 func (s *Scratch) Start(ctx context.Context) error {
 	conf := strings.Join([]string{
 		"# eru scratch instance " + s.ID + "; removed when eru is done with it",
-		"port = " + strconv.Itoa(ScratchPort),
+		"port = " + strconv.Itoa(s.Port),
 		"listen_addresses = ''",
 		"unix_socket_directories = '" + s.Socket + "'",
 		"hba_file = '" + filepath.Join(s.Base, "pg_hba.conf") + "'",
@@ -124,7 +186,7 @@ func (s *Scratch) Start(ctx context.Context) error {
 	deadline := time.Now().Add(scratchReadyWait)
 	lastNote := time.Now()
 	for {
-		if err := runQuiet(ctx, "pg_isready", "-q", "-h", s.Socket, "-p", strconv.Itoa(ScratchPort)); err == nil {
+		if err := runQuiet(ctx, "pg_isready", "-q", "-h", s.Socket, "-p", strconv.Itoa(s.Port)); err == nil {
 			return nil
 		}
 		if !s.running(ctx) {
@@ -206,24 +268,22 @@ func (s *Scratch) Remove() error {
 }
 
 // CopyDatabase pipes pg_dump -Fc of srcDB on the instance at src into
-// pg_restore of target on the live cluster, as owner. pg_restore's own
+// pg_restore of target on the cluster at dst, as owner. pg_restore's own
 // errors (an object the owner may not create, for example) don't stop the
 // copy: they come back as warnings, and the caller asks the operator to
 // inspect the copy before using it.
-func CopyDatabase(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, src pg.Local, srcDB, target, owner string) ([]string, error) {
+func CopyDatabase(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, src pg.Local, srcDB string, dst pg.Local, target, owner string) ([]string, error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
 	dumpErr := make(chan error, 1)
 	go func() {
-		err := PgDump(ctx, sh, stepID, report, src.Host, src.Port, srcDB, pw)
+		err := PgDump(ctx, sh, stepID, report, src, srcDB, pw)
 		_ = pw.Close()
 		dumpErr <- err
 	}()
-	restoreErr := sh.Exec(ctx, stepID, engine.Command{Name: "runuser", Args: []string{
-		"-u", "postgres", "--", "pg_restore", "--no-owner", "--no-privileges", "--role=" + owner, "-d", target,
-	}, Stdin: pr}, report)
+	restoreErr := sh.Exec(ctx, stepID, engine.Command{Name: "runuser", Args: restoreArgs(dst, target, owner), Stdin: pr}, report)
 	_ = pr.Close()
 	if err := <-dumpErr; err != nil {
 		return nil, err
@@ -240,12 +300,10 @@ func CopyDatabase(ctx context.Context, sh engine.Shell, stepID string, report en
 	}
 }
 
-// LoadDump pipes a pg_dump archive from r into pg_restore of target, as
-// owner, with CopyDatabase's error handling.
-func LoadDump(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, r io.Reader, target, owner string) ([]string, error) {
-	err := sh.Exec(ctx, stepID, engine.Command{Name: "runuser", Args: []string{
-		"-u", "postgres", "--", "pg_restore", "--no-owner", "--no-privileges", "--role=" + owner, "-d", target,
-	}, Stdin: r}, report)
+// LoadDump pipes a pg_dump archive from r into pg_restore of target on the
+// cluster at dst, as owner, with CopyDatabase's error handling.
+func LoadDump(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, r io.Reader, dst pg.Local, target, owner string) ([]string, error) {
+	err := sh.Exec(ctx, stepID, engine.Command{Name: "runuser", Args: restoreArgs(dst, target, owner), Stdin: r}, report)
 	var scriptErr *engine.ScriptError
 	switch {
 	case err == nil:
@@ -263,4 +321,10 @@ func runQuiet(ctx context.Context, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	return engine.RunQuiet(ctx, name, args...)
+}
+
+// restoreArgs runs pg_restore into target on the cluster at dst, as owner.
+func restoreArgs(dst pg.Local, target, owner string) []string {
+	args := append([]string{"-u", "postgres", "--", "pg_restore", "--no-owner", "--no-privileges", "--role=" + owner}, connArgs(dst)...)
+	return append(args, "-d", target)
 }

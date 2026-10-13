@@ -42,10 +42,16 @@ type method struct {
 	name string
 	// lock returns the lock mode for the request. Nil means no lock.
 	lock func(req rpc.Request) engine.LockMode
+	// clusterLock names the cluster whose lock the request takes after the
+	// global one, and the mode. An empty name takes none.
+	clusterLock func(req rpc.Request) (string, engine.LockMode)
 	// cluster loads cluster.toml before the confirm check.
 	cluster bool
 	// confirm returns the token the request must carry. Nil means none.
 	confirm func(cfg config.Cluster, params json.RawMessage) string
+	// confirmAny returns the tokens a method that takes several accepts;
+	// every token the request carries must be one of them.
+	confirmAny func(cfg config.Cluster, params json.RawMessage) []string
 	// runLog reports whether the request writes a run log.
 	runLog func(req rpc.Request) bool
 	// versionExempt skips the client/node build check.
@@ -128,18 +134,10 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		env.Cluster = cfg
 	}
 
-	// 6. Confirm token, recomputed on the node. A wrong token is refused
+	// 6. Confirm tokens, recomputed on the node. A wrong token is refused
 	// before any step runs.
-	if m.confirm != nil && req.Confirm != "" {
-		want := m.confirm(env.Cluster, req.Params)
-		if req.Confirm != want {
-			return out.fail(command, output.NewError(
-				output.CodeUnsafeAction,
-				"the confirm token does not match",
-				output.ExitUnsafe,
-				"Re-run with the token in details.confirm_token after a human approves it.",
-			).WithDetails(map[string]any{"confirm_token": want}))
-		}
+	if err := checkConfirm(m, env.Cluster, req); err != nil {
+		return out.fail(command, err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -152,6 +150,18 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 			return out.fail(command, err)
 		}
 		defer release()
+	}
+	if m.clusterLock != nil {
+		if cluster, mode := m.clusterLock(req); cluster != "" {
+			if _, ok := env.Cluster.ClusterByName(cluster); !ok {
+				return out.fail(command, databaseNotFound(cluster))
+			}
+			release, err := engine.AcquireCluster(ctx, cluster, mode, req.Method, req.RequestID, req.LockTimeout())
+			if err != nil {
+				return out.fail(command, err)
+			}
+			defer release()
+		}
 	}
 
 	// 8. Run log, handler, result.
@@ -170,6 +180,49 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		return out.fail(command, err)
 	}
 	return out.ok(command, res)
+}
+
+// checkConfirm refuses a request whose confirm tokens the method does not
+// accept. A method without tokens ignores them.
+func checkConfirm(m method, cfg config.Cluster, req rpc.Request) error {
+	tokens := req.ConfirmTokens()
+	if len(tokens) == 0 {
+		return nil
+	}
+	var accepted []string
+	switch {
+	case m.confirmAny != nil:
+		accepted = m.confirmAny(cfg, req.Params)
+	case m.confirm != nil:
+		if len(tokens) > 1 {
+			return output.NewError(output.CodeUnsafeAction, req.Method+" takes one confirm token", output.ExitUnsafe,
+				"Re-run with the token in details.confirm_token after a human approves it.").
+				WithDetails(map[string]any{"confirm_token": m.confirm(cfg, req.Params)})
+		}
+		accepted = []string{m.confirm(cfg, req.Params)}
+	default:
+		return nil
+	}
+	ok := map[string]bool{}
+	for _, token := range accepted {
+		ok[token] = true
+	}
+	for _, token := range tokens {
+		if ok[token] {
+			continue
+		}
+		details := map[string]any{"confirm_token": accepted[0]}
+		if len(accepted) > 1 {
+			details["confirm_tokens"] = accepted
+		}
+		return output.NewError(
+			output.CodeUnsafeAction,
+			"the confirm token "+token+" does not match",
+			output.ExitUnsafe,
+			"Re-run with a token from details after a human approves it.",
+		).WithDetails(details)
+	}
+	return nil
 }
 
 func runHandler(ctx context.Context, m method, env *Env, out *eventWriter) (res Result, err error) {

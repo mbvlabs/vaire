@@ -380,6 +380,14 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	service, _, generated, err := serviceSecrets(s.ctx.Name)
+	if err != nil {
+		return err
+	}
+	for k, v := range service {
+		rpc[k] = v
+	}
+	s.warnings = append(s.warnings, staleWarning(generated)...)
 	reply, jobID, detached, err := callJob(cmd, s, p, "db.fork", params, remote.CallOptions{Secrets: rpc, DryRun: dryRun(cmd)})
 	if err != nil {
 		return err

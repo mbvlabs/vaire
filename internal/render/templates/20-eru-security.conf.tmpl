@@ -1,6 +1,8 @@
 # managed by eru - do not edit; use cluster.toml
-listen_addresses = '*'
-port = 5432
+# Socket only: the port names the socket. ssl stays on for the replication
+# listener of later phases.
+listen_addresses = ''
+port = {{ .Port }}
 ssl = on
 ssl_cert_file = '/etc/eru/tls/server.crt'
 ssl_key_file = '/etc/eru/tls/server.key'

@@ -462,8 +462,8 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		})
 	}
 	message := []string{fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total)}
-	if data.Restarted {
-		message = append(message, fmt.Sprintf("PostgreSQL restarted once for WAL archiving (%d ms unavailable)", data.RestartDowntimeMS))
+	if data.Restarted() {
+		message = append(message, "restarted for WAL archiving: "+restartSummary(data.Restarts))
 	}
 	if list, err := s.node.Call(ctx, "backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
 		var bl backupListData

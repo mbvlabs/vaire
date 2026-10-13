@@ -51,7 +51,9 @@ func addSpec(parent *cobra.Command, spec cmdSpec) {
 	if spec.meta.SupportsDryRun {
 		cmd.Flags().Bool("dry-run", false, "Report what would change and do not apply it")
 	}
-	if spec.meta.Destructive || spec.meta.ConfirmToken != "" {
+	// A command that takes several tokens declares its own repeatable
+	// --confirm.
+	if (spec.meta.Destructive || spec.meta.ConfirmToken != "") && cmd.Flags().Lookup("confirm") == nil {
 		cmd.Flags().String("confirm", "", "Confirmation token. --yes never satisfies this check")
 	}
 	registerMeta(cmd, spec.meta)
@@ -171,10 +173,13 @@ func phase1Commands() []cmdSpec {
 		{
 			use: "plan",
 			run: runPlan,
+			flags: []fl{
+				flagString("db", "", "Only this database's cluster steps"),
+			},
 			meta: CommandMeta{
 				Summary:   "Show the steps and file diffs an apply would run",
-				WhenToUse: []string{"Review pending step changes before eru apply."},
-				Examples:  []string{"eru plan", "eru plan --output json"},
+				WhenToUse: []string{"Review pending step changes before eru apply. Per-database steps show as <step>@<db>."},
+				Examples:  []string{"eru plan", "eru plan --db app", "eru plan --output json"},
 				Remote:    true,
 				ErrorCodes: []string{
 					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
@@ -187,22 +192,31 @@ func phase1Commands() []cmdSpec {
 			use: "apply",
 			run: runApply,
 			flags: []fl{
-				flagStrings("step", "Run only these step ids"),
+				flagStrings("step", "Run only these step ids: <step> for every database, <step>@<db> for one"),
+				flagString("db", "", "Only this database's cluster steps"),
+				flagStringArray("confirm", "Confirm restarts: <db>/restart for one database, {server}/restart for every one; repeatable. --yes never satisfies this check"),
 			},
 			meta: CommandMeta{
-				Summary:          "Converge the node to cluster.toml",
-				WhenToUse:        []string{"Apply pending steps after plan, a config change, or an upgrade."},
-				Examples:         []string{"eru apply", "eru apply --dry-run", "eru apply --step postgres-config-v1"},
+				Summary: "Converge the node to cluster.toml",
+				WhenToUse: []string{
+					"Apply pending steps after plan, a config change, or an upgrade.",
+					"A restart a step needs waits for --confirm <db>/restart, or --confirm {server}/restart, which restarts every database one at a time.",
+				},
+				Examples: []string{
+					"eru apply", "eru apply --dry-run", "eru apply --db app",
+					"eru apply --step postgres-config-v1@app", "eru apply --confirm app/restart --confirm web/restart",
+				},
 				Mutating:         true,
 				SupportsDryRun:   true,
 				Prompts:          true,
 				InteractiveFlags: []string{"--confirm", "--step"},
 				Remote:           true,
-				ConfirmToken:     "{server}/restart",
+				ConfirmToken:     "{db}/restart",
 				NeedsRestart:     "maybe",
 				ErrorCodes: []string{
 					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 					"node_version_mismatch", "precondition_failed", "step_failed", "unsafe_action_requires_confirmation",
+					"validation_failed",
 				},
 				Next: []string{"eru plan"},
 			},
@@ -274,11 +288,12 @@ func phase1Commands() []cmdSpec {
 				flagString("since", "", "Journal window, such as 1h or a timestamp"),
 				flagBool("follow", "Stream new lines"),
 				flagInt("lines", 100, "How many lines to show"),
+				flagString("db", "", "The database whose PostgreSQL log to read; needed when there are several"),
 			},
 			meta: CommandMeta{
 				Summary:   "Read systemd journal lines for an eru-managed unit",
-				WhenToUse: []string{"Inspect Postgres, PgBouncer, nginx, certificate renewal, or backup job logs."},
-				Examples:  []string{"eru logs postgresql@18-main", "eru logs --since 1h"},
+				WhenToUse: []string{"Inspect Postgres (one database's cluster, postgresql@18-<db>), PgBouncer, nginx, certificate renewal, or eru run logs."},
+				Examples:  []string{"eru logs postgres --db app", "eru logs pgbouncer --since 1h"},
 				Remote:    true,
 			},
 		},
@@ -906,34 +921,43 @@ func tuneCommands() cmdSpec {
 			{
 				use: "show",
 				run: runTuneShow,
+				flags: []fl{
+					flagString("db", "", "The database whose cluster to show; needed when there are several"),
+				},
 				meta: CommandMeta{
 					Summary:   "Print the calculated settings",
-					WhenToUse: []string{"See the values eru would write for this host."},
-					Examples:  []string{"eru tune show"},
+					WhenToUse: []string{"See the values eru would write for a database's cluster, and the server's memory budget."},
+					Examples:  []string{"eru tune show", "eru tune show --db app"},
 					Remote:    true,
 				},
 			},
 			{
 				use: "explain",
 				run: runTuneExplain,
+				flags: []fl{
+					flagString("db", "", "The database whose cluster to explain; needed when there are several"),
+				},
 				meta: CommandMeta{
 					Summary:   "Print tuning inputs and the reason for each setting",
 					WhenToUse: []string{"Understand why a memory or WAL setting has its value."},
-					Examples:  []string{"eru tune explain"},
+					Examples:  []string{"eru tune explain", "eru tune explain --db app"},
 					Remote:    true,
 				},
 			},
 			{
 				use: "apply",
 				run: runTuneApply,
+				flags: []fl{
+					flagStringArray("confirm", "Confirm restarts: <db>/restart for one database, {server}/restart for every one; repeatable. --yes never satisfies this check"),
+				},
 				meta: CommandMeta{
 					Summary:        "Write calculated settings and restart when required",
-					WhenToUse:      []string{"Install tuning after a resize. A restart needs --confirm <cluster>/restart."},
-					Examples:       []string{"eru tune apply --dry-run", "eru tune apply --confirm prod/restart"},
+					WhenToUse:      []string{"Install tuning after a resize. A restart needs --confirm <db>/restart, or {server}/restart for every database."},
+					Examples:       []string{"eru tune apply --dry-run", "eru tune apply --confirm app/restart"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
-					ConfirmToken:   "{server}/restart",
+					ConfirmToken:   "{db}/restart",
 					NeedsRestart:   "maybe",
 				},
 			},

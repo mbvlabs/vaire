@@ -235,7 +235,11 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, err := s.node.Call(commandContext(cmd), "plan", nil, remote.CallOptions{OnEvent: p.event})
+	var params any
+	if db := stringFlag(cmd, "db"); db != "" {
+		params = map[string]string{"db": db}
+	}
+	reply, err := s.node.Call(commandContext(cmd), "plan", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -245,7 +249,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	}
 	return output.Success(cmd, output.Result{
 		Data:     data,
-		Message:  planMessage(fmt.Sprintf("%d of %d steps would apply on %s", data.WouldApply, data.Total, s.ctx.Name), data, s.ctx.Name),
+		Message:  planMessage(fmt.Sprintf("%d of %d steps would apply on %s", data.WouldApply, data.Total, s.ctx.Name), data),
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
 }
@@ -262,23 +266,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	dry := dryRun(cmd)
-	// D7: top up any missing eru_admin and service secrets before apply.
-	// Application database passwords are never generated here.
-	creds, err := contexts.LoadCredentials(s.ctx.Name)
+	secretValues, creds, generated, err := serviceSecrets(s.ctx.Name)
 	if err != nil {
 		return err
-	}
-	if creds.Database == nil {
-		creds.Database = &contexts.DatabaseCreds{}
-	}
-	secretValues, generated, err := ensureClusterSecrets(creds.Database)
-	if err != nil {
-		return err
-	}
-	if generated {
-		if err := contexts.SaveCredentials(s.ctx.Name, creds); err != nil {
-			return err
-		}
 	}
 	// The recovery kit rides along so a node that lost its copy gets it
 	// back; the node writes it only when missing (D7). Backups that are on
@@ -293,15 +283,20 @@ func runApply(cmd *cobra.Command, _ []string) error {
 			"Log in from a current transfer bundle (eru login), which carries the recovery kit, then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
-	var params any
+	params := map[string]any{}
 	if len(stepIDs) > 0 {
-		params = map[string][]string{"steps": stepIDs}
+		params["steps"] = stepIDs
 	}
+	if db := stringFlag(cmd, "db"); db != "" {
+		params["db"] = db
+	}
+	confirm, confirms := confirmOptions(cmd)
 	reply, err := s.node.Call(commandContext(cmd), "apply", params, remote.CallOptions{
-		Secrets: secretValues,
-		DryRun:  dry,
-		Confirm: stringFlag(cmd, "confirm"),
-		OnEvent: p.event,
+		Secrets:  secretValues,
+		DryRun:   dry,
+		Confirm:  confirm,
+		Confirms: confirms,
+		OnEvent:  p.event,
 	})
 	if err != nil {
 		return err
@@ -314,7 +309,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		}
 		return output.Success(cmd, output.Result{
 			Data:     data,
-			Message:  planMessage(fmt.Sprintf("dry run: %d of %d steps would apply", data.WouldApply, data.Total), data, s.ctx.Name),
+			Message:  planMessage(fmt.Sprintf("dry run: %d of %d steps would apply", data.WouldApply, data.Total), data),
 			Warnings: warnings,
 		})
 	}
@@ -324,13 +319,13 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	warnings = append(warnings, syncContextFromNode(cmd, s, p)...)
 	message := fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total)
-	if data.Restarted {
-		message += fmt.Sprintf("; PostgreSQL restarted (%d ms unavailable)", data.RestartDowntimeMS)
+	if data.Restarted() {
+		message += "; restarted " + restartSummary(data.Restarts)
 	}
 	var next []string
 	if len(data.RestartPending) > 0 {
 		message += "\nrestart pending for: " + strings.Join(data.RestartPending, ", ")
-		next = []string{"eru apply --confirm " + s.ctx.Name + "/restart"}
+		next = []string{"eru apply " + confirmFlags(data.ConfirmTokens)}
 	}
 	return output.Success(cmd, output.Result{
 		Data:     data,
@@ -342,7 +337,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 
 // planMessage renders a plan for humans: one line per step, the file diffs of
 // the steps that would apply, and any pending restart.
-func planMessage(header string, data engine.PlanData, cluster string) string {
+func planMessage(header string, data engine.PlanData) string {
 	lines := []string{header}
 	for _, step := range data.Steps {
 		lines = append(lines, fmt.Sprintf("  %-5s %s (%s)", step.Action, step.ID, step.Reason))
@@ -354,7 +349,17 @@ func planMessage(header string, data engine.PlanData, cluster string) string {
 	}
 	if len(data.RestartPending) > 0 {
 		lines = append(lines, "", "restart pending for: "+strings.Join(data.RestartPending, ", "),
-			"run eru apply --confirm "+cluster+"/restart to restart PostgreSQL")
+			"run eru apply "+confirmFlags(data.ConfirmTokens)+" to restart those clusters")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// restartSummary lists the restarted clusters with how long each was
+// unavailable.
+func restartSummary(restarts []engine.ClusterRestart) string {
+	parts := make([]string, len(restarts))
+	for i, r := range restarts {
+		parts[i] = fmt.Sprintf("%s (%d ms unavailable)", r.Cluster, r.DowntimeMS)
+	}
+	return strings.Join(parts, ", ")
 }
