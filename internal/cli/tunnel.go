@@ -20,7 +20,8 @@ import (
 const (
 	defaultPgbouncerPort = 6543
 	defaultPostgresPort  = 6544
-	pgbouncerPort        = 6432
+	// pgbouncerPort is the transaction pooler on the node.
+	pgbouncerPort = 6432
 )
 
 // listenLocal binds 127.0.0.1 on the first free port at or above start.
@@ -89,18 +90,26 @@ func runTunnel(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = ln.Close() }()
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	remote := net.JoinHostPort(nodeWGAddr(s), strconv.Itoa(remotePort))
+	// --db picks the node the database runs on (RFC 6.3); without it, the
+	// master. Both poolers route by the database name in the DSN.
+	db := stringFlag(cmd, "db")
+	at := databaseEndpoint(cmd, s, p, db)
+	remote := at.addr(remotePort)
 	go proxy(ctx, ln, s.tunnel, remote)
 
-	dsn := fmt.Sprintf("postgres://<user>:<password>@127.0.0.1:%d/<db>", port)
-	hint := "clients must set sslmode=require, or keep the hostname " + s.ctx.MasterHostname() + " so verify-full matches"
+	dbPath := "<db>"
+	if db != "" {
+		dbPath = db
+	}
+	dsn := fmt.Sprintf("postgres://<user>:<password>@127.0.0.1:%d/%s", port, dbPath)
+	hint := "clients must set sslmode=require, or keep the hostname " + at.Hostname + " so verify-full matches"
 	opts, _ := output.ParseOptions(cmd)
 	if opts.Stream || opts.Mode != output.ModeHuman {
 		ready := output.Event{Schema: output.EventSchema, Type: "ready", Detail: fmt.Sprintf("127.0.0.1:%d -> %s", port, remote)}
 		raw, _ := json.Marshal(ready)
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(raw))
 	} else if !opts.Quiet {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "tunnel ready: 127.0.0.1:%d -> %s:%d (%s)\nDSN: %s\n%s\nPress Ctrl-C to stop.\n", port, nodeWGAddr(s), remotePort, target, dsn, hint)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "tunnel ready: 127.0.0.1:%d -> %s:%d (%s)\nDSN: %s\n%s\nPress Ctrl-C to stop.\n", port, at.WGAddress, remotePort, target, dsn, hint)
 	}
 	<-ctx.Done()
 	_ = os.Stdout.Sync()

@@ -164,14 +164,97 @@ func Ident(cfg config.Cluster) []byte {
 	return execute("pg_ident.conf.tmpl", map[string]any{"AdminUser": cfg.Server.AdminUser})
 }
 
-// PgbouncerIni renders /etc/pgbouncer/pgbouncer.ini (§14.3).
-func PgbouncerIni(cfg config.Cluster, host hostinfo.Info, maxConnections int) []byte {
-	poolSize := clamp(2*host.VCPU, 10, 50)
+// PoolerDatabase is one database in a pooler's [databases] section: the
+// entry clients connect to, routed by name to the cluster's socket, and its
+// <db>__auth alias, which the entry's auth_query runs on (RFC 8.1).
+type PoolerDatabase struct {
+	Name string
+	Port int
+	// MaxConnections is the entry's max_db_connections: the cluster's pool
+	// for this pooler.
+	MaxConnections int
+}
+
+// AuthAlias is the [databases] alias a database's auth_query runs on: the
+// postgres database of the same cluster.
+func AuthAlias(db string) string { return db + "__auth" }
+
+// PgbouncerIni renders /etc/pgbouncer/pgbouncer.ini, the transaction pooler
+// (§14.3, RFC 8.1). There is no wildcard entry: a database without an entry
+// is refused by PgBouncer.
+func PgbouncerIni(cfg config.Cluster, host hostinfo.Info, dbs []PoolerDatabase) []byte {
 	return execute("pgbouncer.ini.tmpl", map[string]any{
+		"Databases":         poolerEntries(dbs),
+		"AdminAuthDB":       adminAuthDB(dbs),
+		"Port":              6432,
+		"SocketDir":         "/var/run/postgresql",
+		"PidFile":           "",
+		"HBAPath":           "/etc/pgbouncer/pgbouncer_hba.conf",
+		"AuthFunction":      "pgbouncer_get_auth",
+		"Mode":              "transaction",
 		"ClientConnections": cfg.Postgres.ClientConnections,
-		"DefaultPoolSize":   poolSize,
-		"MaxDBConnections":  maxInt(maxConnections, 1),
+		"DefaultPoolSize":   clamp(2*host.VCPU, 10, 50),
+		"ClientTLS":         "prefer",
 	})
+}
+
+// SessionIni renders /etc/pgbouncer/session.ini, the session pooler on 5432
+// (RFC 8.1). It has the same [databases] shape as the transaction pooler,
+// sized from session_pool_size, admits every database role but the service
+// roles, terminates TLS itself and requires it. It doesn't ignore the options
+// startup parameter: eru psql and console send read-only or the owner role
+// in it, which it applies as tracked parameters, and anything else in it is
+// refused rather than silently dropped. Its socket directory, which
+// carries its admin console, and its pidfile are its own.
+func SessionIni(cfg config.Cluster, dbs []PoolerDatabase, socketDir string) []byte {
+	entries := poolerEntries(dbs)
+	pool := 1
+	for _, db := range entries {
+		pool = maxInt(pool, db.MaxConnections)
+	}
+	return execute("pgbouncer.ini.tmpl", map[string]any{
+		"Databases":         entries,
+		"AdminAuthDB":       adminAuthDB(dbs),
+		"Port":              5432,
+		"SocketDir":         socketDir,
+		"PidFile":           socketDir + "/pgbouncer.pid",
+		"HBAPath":           "/etc/pgbouncer/session_hba.conf",
+		"AuthFunction":      "pgbouncer_get_auth_session",
+		"Mode":              "session",
+		"ClientConnections": cfg.Postgres.SessionClientConnections,
+		"DefaultPoolSize":   pool,
+		"ClientTLS":         "require",
+	})
+}
+
+// SessionHBA renders /etc/pgbouncer/session_hba.conf: TLS for every TCP
+// client; there is no loopback hop to exempt.
+func SessionHBA() []byte { return execute("session_hba.conf.tmpl", nil) }
+
+// SessionUnit renders the session pooler's systemd unit,
+// eru-pgbouncer-session.service. It runs PGDG's pgbouncer binary as postgres
+// beside Debian's pgbouncer.service.
+func SessionUnit() []byte { return execute("eru-pgbouncer-session.service.tmpl", nil) }
+
+// poolerEntries sorts the databases by name and floors each pool at one.
+func poolerEntries(dbs []PoolerDatabase) []PoolerDatabase {
+	out := append([]PoolerDatabase(nil), dbs...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	for i := range out {
+		out[i].MaxConnections = maxInt(out[i].MaxConnections, 1)
+	}
+	return out
+}
+
+// adminAuthDB is the global auth_dbname, which only the admin console uses
+// (its eru_admin login has no entry of its own). The service passwords are
+// the same in every cluster (RFC 12), so the first database's alias serves.
+func adminAuthDB(dbs []PoolerDatabase) string {
+	entries := poolerEntries(dbs)
+	if len(entries) == 0 {
+		return ""
+	}
+	return AuthAlias(entries[0].Name)
 }
 
 // PgbouncerUserlist renders /etc/pgbouncer/userlist.txt from SCRAM verifiers.
@@ -190,7 +273,7 @@ func PgbouncerUserlist(verifiers map[string]string) []byte {
 
 // NginxConf renders /etc/nginx/nginx.conf (§15.2): ACME challenges on 80,
 // and on 443 HTTPS plus direct-TLS PostgreSQL routed to PgBouncer by ALPN.
-func NginxConf(cfg config.Cluster, acmeWebroot string) []byte {
+func NginxConf(cfg config.Cluster, hostname, acmeWebroot string) []byte {
 	var allow []string
 	if cfg.Network.ExposePgbouncer {
 		for _, cidr := range cfg.Network.ClientAllowlist {
@@ -200,7 +283,7 @@ func NginxConf(cfg config.Cluster, acmeWebroot string) []byte {
 		}
 	}
 	return execute("nginx.conf.tmpl", map[string]any{
-		"Hostname":    cfg.MasterHostname(),
+		"Hostname":    hostname,
 		"WGSubnet":    cfg.Transport.Subnet,
 		"Allowlist":   allow,
 		"ACMEWebroot": acmeWebroot,

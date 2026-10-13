@@ -28,13 +28,15 @@ type logsParams struct {
 }
 
 // logUnits are the units eru reads, mapped to their source. postgres is
-// the log file of one database's cluster, postgresql@18-<db>.
+// the log file of one database's cluster, postgresql@18-<db>. pgbouncer is
+// the transaction pooler, pgbouncer-session the session pooler on 5432.
 var logUnits = map[string]string{
-	"postgres":  "file:",
-	"pgbouncer": "journal:pgbouncer.service",
-	"nginx":     "journal:nginx.service",
-	"eru-certs": "journal:eru-certs.service",
-	"eru":       "runlog:",
+	"postgres":          "file:",
+	"pgbouncer":         "journal:pgbouncer.service",
+	"pgbouncer-session": "journal:eru-pgbouncer-session.service",
+	"nginx":             "journal:nginx.service",
+	"eru-certs":         "journal:eru-certs.service",
+	"eru":               "runlog:",
 }
 
 func handleLogs(ctx context.Context, env *Env) (Result, error) {

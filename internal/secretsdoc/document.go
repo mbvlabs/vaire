@@ -44,11 +44,12 @@ type Document struct {
 
 // ConnectionNotes explains the URLs eru db create and eru db credentials
 // --rotate show (§10.1).
-const ConnectionNotes = "The app URL goes through PgBouncer on port 6432 in transaction mode; use it for application traffic. " +
-	"The migrate URL connects straight to PostgreSQL on port 5432 for session features that migrations need (advisory locks, session SET, temporary tables). " +
-	"PgBouncer refuses the migrate role on 6432 and 443 on purpose; there it fails as an authentication error. " +
-	"Port 5432 is reachable only over WireGuard (eru tunnel --target postgres) or when network.expose_postgres = true. " +
-	"The app_direct_tls URL is the same PgBouncer through port 443; it does not bypass PgBouncer. It is for networks that only allow 443, " +
+const ConnectionNotes = "The app URL goes through the transaction pooler (PgBouncer) on port 6432; use it for application traffic. " +
+	"The migrate URL goes through the session pooler on port 5432, which keeps one PostgreSQL connection per client for session features that migrations need (advisory locks, session SET, temporary tables). " +
+	"The transaction pooler refuses the migrate role on 6432 and 443 on purpose; there it fails as an authentication error. " +
+	"Port 5432 is reachable only over WireGuard (eru tunnel --target postgres) or when network.expose_postgres = true, and requires TLS. " +
+	"Both poolers route by the database name in the URL's path. " +
+	"The app_direct_tls URL is the same transaction pooler through port 443; it does not bypass PgBouncer. It is for networks that only allow 443, " +
 	"and the client must negotiate TLS directly (sslnegotiation=direct, PostgreSQL 17+ libpq or pgx 5.7+); other clients get \"server refused TLS\" and should use 6432. " +
 	"It follows the same client allowlist as 6432."
 
@@ -90,9 +91,10 @@ type Database = contexts.DatabaseCreds
 type Role = contexts.Role
 
 // DatabaseURLs builds the connection strings for one database (§10.1). The app
-// role uses PgBouncer on 6432, and also on 443 with direct TLS through nginx;
-// the migrate role connects straight to Postgres on 5432, reachable only over
-// WireGuard or when expose_postgres is set.
+// role uses the transaction pooler on 6432, and also on 443 with direct TLS
+// through nginx; the migrate role uses the session pooler on 5432, reachable
+// only over WireGuard or when expose_postgres is set. Both route by the
+// database name (RFC 8.1).
 func DatabaseURLs(host, tlsMode, db string, roles map[string]contexts.Role) map[string]string {
 	query := "sslmode=verify-full&sslrootcert=system"
 	if tlsMode == "self-signed" {

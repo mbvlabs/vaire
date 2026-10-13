@@ -256,6 +256,16 @@ func (c Cluster) MasterHostname() string {
 	return c.Hostname(n.Name)
 }
 
+// DatabaseHostname is the hostname clients use for database db: that of the
+// node its cluster runs on (RFC 8.4). A database not in the config yet gets
+// the master's, where db create places it.
+func (c Cluster) DatabaseHostname(db string) string {
+	if spec, ok := c.ClusterByName(db); ok && spec.Node != "" {
+		return c.Hostname(spec.Node)
+	}
+	return c.MasterHostname()
+}
+
 // Node returns the node called name.
 func (c Cluster) Node(name string) (NodeSpec, bool) {
 	for _, n := range c.Nodes {

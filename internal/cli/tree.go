@@ -292,7 +292,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:   "Read systemd journal lines for an eru-managed unit",
-				WhenToUse: []string{"Inspect Postgres (one database's cluster, postgresql@18-<db>), PgBouncer, nginx, certificate renewal, or eru run logs."},
+				WhenToUse: []string{"Inspect Postgres (one database's cluster, postgresql@18-<db>), the transaction pooler (pgbouncer), the session pooler on 5432 (pgbouncer-session), nginx, certificate renewal, or eru run logs."},
 				Examples:  []string{"eru logs postgres --db app", "eru logs pgbouncer --since 1h"},
 				Remote:    true,
 			},
@@ -308,7 +308,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:          "Run SQL as eru_admin. Read-only unless --write is set",
-				WhenToUse:        []string{"Inspect data or, with --write, change it. eru keeps no application database passwords, so it connects as eru_admin."},
+				WhenToUse:        []string{"Inspect data or, with --write, change it. eru keeps no application database passwords, so it connects as eru_admin through the session pooler on 5432 of the node the database runs on, which routes by --db."},
 				WhenNotToUse:     []string{"Interactive exploration; use eru psql."},
 				Examples:         []string{"eru sql --db app \"select 1\"", "eru sql --db app --write \"alter role app_app set statement_timeout = '30s'\""},
 				Mutating:         true,
@@ -325,7 +325,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:       "Open psql as eru_admin through the WireGuard tunnel, read-only unless --write",
-				WhenToUse:     []string{"Use an interactive SQL session with verify-full TLS."},
+				WhenToUse:     []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db."},
 				Prerequisites: []string{"psql 16 or newer on PATH"},
 				Examples:      []string{"eru psql --db app", "eru psql --db app --write"},
 			},
@@ -351,15 +351,16 @@ func phase1Commands() []cmdSpec {
 			run: runTunnel,
 			flags: []fl{
 				flagInt("local-port", 0, "Local listen port. 0 picks the default for the target"),
-				flagString("target", "pgbouncer", "Forward to pgbouncer or postgres"),
+				flagString("target", "pgbouncer", "Forward to pgbouncer (the transaction pooler, 6432) or postgres (the session pooler, 5432)"),
+				flagString("db", "", "Forward to the node this database runs on and put it in the DSN; default the master"),
 			},
 			meta: CommandMeta{
-				Summary: "Forward a local port to PgBouncer or Postgres",
+				Summary: "Forward a local port to the transaction or session pooler",
 				WhenToUse: []string{
-					"Point a GUI or library at 127.0.0.1 through the tunnel.",
-					"Run migrations as <db>_migrate with --target postgres: PgBouncer refuses the migrate role, and 5432 is closed to the internet unless network.expose_postgres is set.",
+					"Point a GUI or library at 127.0.0.1 through the tunnel. Both poolers route by the database name in the DSN.",
+					"Run migrations as <db>_migrate with --target postgres, the session pooler on 5432: the transaction pooler refuses the migrate role, and 5432 is closed to the internet unless network.expose_postgres is set.",
 				},
-				Examples: []string{"eru tunnel", "eru tunnel --target postgres --local-port 6544"},
+				Examples: []string{"eru tunnel", "eru tunnel --db app --target postgres --local-port 6544"},
 			},
 		},
 		{
@@ -775,7 +776,7 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Create a database and its migrate, app, and read-only roles",
-					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. The app and ro URLs use PgBouncer on 6432; the migrate URL uses PostgreSQL on 5432, and PgBouncer refuses the migrate role."},
+					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name."},
 					Examples:       []string{"eru db create app --statement-timeout 60s", "eru db create app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,

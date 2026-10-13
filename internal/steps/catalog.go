@@ -70,5 +70,9 @@ func TimersStepIDs() []string { return []string{timersID} }
 // RolesStepIDs is the step db.create runs on its own.
 func RolesStepIDs() []string { return []string{postgresRolesID} }
 
+// PoolerStepIDs is the step db create and db drop run after the cluster
+// changes, so the poolers pick up the database's entries with a reload.
+func PoolerStepIDs() []string { return []string{pgbouncerID} }
+
 // TuneStepIDs are the steps tune.apply runs.
 func TuneStepIDs() []string { return []string{kernelTuningID, postgresConfigID} }

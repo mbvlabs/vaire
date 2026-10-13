@@ -3,7 +3,9 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -12,15 +14,34 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// pgPort is where operator commands connect to PostgreSQL (D12).
+// pgPort is where operator commands connect: the session pooler, which
+// routes by the database name (RFC 6.3, 8.1).
 const pgPort = 5432
 
-// nodeWGAddr returns the master node's WireGuard address.
-func nodeWGAddr(s *session) string {
-	if n, ok := s.ctx.Master(); ok {
-		return n.WGAddress
+// dbEndpoint is where operator connections to one database go: its node's
+// WireGuard address, and the hostname that node's certificate carries.
+type dbEndpoint struct {
+	WGAddress string
+	Hostname  string
+}
+
+// databaseEndpoint looks database db up in the context's placement cache
+// (RFC 6.3). A database the cache doesn't know refreshes the cache from the
+// master once; one still unknown (a restore copy, a typo) goes to the master,
+// whose session pooler refuses a database it has no entry for. With db
+// empty, it is the master.
+func databaseEndpoint(cmd *cobra.Command, s *session, p *progress, db string) dbEndpoint {
+	n, ok := s.ctx.DatabaseNode(db)
+	if !ok && db != "" {
+		s.warnings = append(s.warnings, syncContextFromNode(cmd, s, p)...)
+		n, _ = s.ctx.DatabaseNode(db)
 	}
-	return ""
+	return dbEndpoint{WGAddress: n.WGAddress, Hostname: n.Hostname}
+}
+
+// addr is the endpoint's address on port.
+func (e dbEndpoint) addr(port int) string {
+	return net.JoinHostPort(e.WGAddress, strconv.Itoa(port))
 }
 
 // adminCredentials returns the eru_admin user and password. eru keeps no
@@ -97,13 +118,14 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	ctx := commandContext(cmd)
+	at := databaseEndpoint(cmd, s, p, db)
 	conn, err := pg.Connect(ctx, s.tunnel, pg.Params{
-		Host: nodeWGAddr(s), Port: pgPort, ServerName: s.ctx.MasterHostname(), TLSMode: s.ctx.TLSMode,
+		Host: at.WGAddress, Port: pgPort, ServerName: at.Hostname, TLSMode: s.ctx.TLSMode,
 		User: user, Password: password, Database: db,
 	})
 	if err != nil {
 		return output.WrapError(output.CodeRemoteUnreachable, fmt.Errorf("connect to PostgreSQL: %w", err), output.ExitTransport,
-			"Check that PostgreSQL is running and the credentials are current.")
+			"Check that the database exists (eru db list), that the session pooler runs (eru logs pgbouncer-session), and that the credentials are current.")
 	}
 	defer conn.Close(ctx)
 	warnings := s.warnings

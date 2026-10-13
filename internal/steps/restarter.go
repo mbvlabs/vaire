@@ -17,7 +17,10 @@ const pgReadyTimeout = 60 * time.Second
 
 // postgresRestarter restarts one cluster and waits until it accepts
 // connections on its socket. The poolers keep running: every other database
-// keeps serving while this one restarts (RFC 7.1).
+// keeps serving while this one restarts (RFC 7.1). The transaction pooler
+// pauses the database around the restart, so its clients wait instead of
+// failing. The session pooler isn't paused: in session mode PAUSE waits for
+// every client to disconnect.
 type postgresRestarter struct {
 	cfg config.Cluster
 }
@@ -28,6 +31,11 @@ func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Du
 		return 0, fmt.Errorf("cluster %s is not in cluster.toml", cluster)
 	}
 	start := time.Now()
+	// A PAUSE that fails or times out (PgBouncer down, a long transaction)
+	// doesn't stop the restart: -m fast ends the transaction anyway, and
+	// RESUME below clears a pause still in progress.
+	_ = poolerAdmin(ctx, PgbouncerPort, "PAUSE "+cluster)
+	defer func() { _ = poolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+cluster) }()
 	if err := runCmd(ctx, "pg_ctlcluster", strconv.Itoa(PGVersion), cluster, "restart", "-m", "fast"); err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: %w", PGServiceName(cluster), err)
 	}

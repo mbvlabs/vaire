@@ -24,7 +24,7 @@ func (tlsStep) Describe(config.Cluster) string {
 	return "install nginx, place a placeholder certificate and start certificate issuance"
 }
 
-func nginxConf(cfg config.Cluster) []byte { return render.NginxConf(cfg, ACMEWebroot) }
+func nginxConf(cfg config.Cluster) []byte { return render.NginxConf(cfg, NodeHostname(cfg), ACMEWebroot) }
 
 func (tlsStep) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []engine.RenderedFile {
 	return []engine.RenderedFile{
@@ -65,7 +65,7 @@ func (s tlsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 	// nginx.conf is written over the package's default afterwards.
 	env := map[string]string{
 		"NGINX_MIN_VERSION": versions.NginxMinVersion,
-		"TLS_HOSTNAME":      cfg.MasterHostname(),
+		"TLS_HOSTNAME":      NodeHostname(cfg),
 		"ACME_WEBROOT":      ACMEWebroot,
 		"PHASE":             "install",
 	}

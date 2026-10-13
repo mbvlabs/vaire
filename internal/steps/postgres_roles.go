@@ -86,7 +86,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 	}
 	for _, fn := range []struct{ name, needs string }{
 		{"pgbouncer_get_auth", RoleDirectOnly},
-		{"pgbouncer_get_auth_session", "eru_admin"},
+		{"pgbouncer_get_auth_session", "operator connections"},
 	} {
 		src, err := queryColumn(ctx, local, "postgres", "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
 		if err != nil || len(src) == 0 {
@@ -293,7 +293,8 @@ const directOnlyMembersSQL = `SELECT m.rolname FROM pg_auth_members a
 // pgbouncerAuthSQL is the SECURITY DEFINER auth functions and their grants
 // (§14.2, RFC 8.1): pgbouncer_get_auth for the transaction pooler refuses
 // members of eru_direct_only; pgbouncer_get_auth_session for the session
-// pooler refuses only postgres and the service roles.
+// pooler refuses only postgres and the pooler's own service roles, and lets
+// eru_admin in for eru sql, psql, console and tunnel (RFC 6.3).
 const pgbouncerAuthSQL = `CREATE SCHEMA IF NOT EXISTS eru AUTHORIZATION postgres;
 CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
   RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $eru$
@@ -304,9 +305,10 @@ CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
 $eru$;
 CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth_session(p_usename text)
   RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $eru$
+  -- eru_admin may log in: operator connections come through here (RFC 6.3).
   SELECT usename, passwd FROM pg_shadow
   WHERE usename = p_usename AND NOT usesuper
-    AND usename NOT IN ('postgres','pgbouncer_auth','eru_admin','eru_monitor')
+    AND usename NOT IN ('postgres','pgbouncer_auth','eru_monitor')
 $eru$;
 REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth_session(text) FROM PUBLIC;

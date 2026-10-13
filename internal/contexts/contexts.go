@@ -100,6 +100,20 @@ func (c *Context) Master() (Node, bool) {
 	return Node{}, false
 }
 
+// DatabaseNode returns the node the placement cache puts database db on, and
+// whether the cache knows db at all. An unknown database gets the master.
+func (c *Context) DatabaseNode(db string) (Node, bool) {
+	if name, ok := c.Databases[db]; ok {
+		for _, n := range c.Nodes {
+			if n.Name == name {
+				return n, true
+			}
+		}
+	}
+	n, _ := c.Master()
+	return n, false
+}
+
 // MasterHostname is the master's hostname, which its certificate carries.
 func (c *Context) MasterHostname() string {
 	n, _ := c.Master()

@@ -28,8 +28,9 @@ func FirewallRules(cfg config.Cluster, st engine.State) []string {
 		"allow 443/tcp",
 		RuleWGSSH,
 	}
-	// WireGuard peers always reach both database ports; the expose flags gate
-	// only the public allowlist (§11 step 5).
+	// WireGuard peers always reach both poolers; the expose flags gate only
+	// the public allowlist (§11 step 5). 5432 is the session pooler, and no
+	// cluster has a TCP port to open: they listen on sockets only (RFC 8.2).
 	dbPort := func(port int, exposed bool) {
 		rules = append(rules, fmt.Sprintf("allow in on wg0 to any port %d proto tcp", port))
 		if !exposed {
@@ -41,8 +42,8 @@ func FirewallRules(cfg config.Cluster, st engine.State) []string {
 			}
 		}
 	}
-	dbPort(6432, cfg.Network.ExposePgbouncer)
-	dbPort(5432, cfg.Network.ExposePostgres)
+	dbPort(PgbouncerPort, cfg.Network.ExposePgbouncer)
+	dbPort(SessionPoolerPort, cfg.Network.ExposePostgres)
 	if st.PublicSSHOpen() {
 		rules = append(rules, RulePublicSSH)
 	}

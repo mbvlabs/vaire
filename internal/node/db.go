@@ -162,8 +162,21 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec) (confi
 		}
 		return db, withHint(err, "Finish it with eru apply --db "+db.Name+".")
 	}
+	if err := reloadPoolers(ctx, env, cfg); err != nil {
+		return db, withHint(err, "Finish it with eru apply.")
+	}
 	created, _ := cfg.ClusterByName(db.Name)
 	return created, nil
+}
+
+// reloadPoolers runs pgbouncer-v1, which renders an entry per database and
+// reloads the poolers (RFC 8.1). It skips itself once no database is left.
+func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
+		Only:   steps.PoolerStepIDs(),
+		Report: env.Report,
+	})
+	return err
 }
 
 func existingDatabase(name string) error {
@@ -264,6 +277,10 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := store.Save(raw); err != nil {
 		return Result{}, err
 	}
+	env.Cluster = cfg
+	if err := reloadPoolers(ctx, env, cfg); err != nil {
+		return Result{}, withHint(err, p.Name+" is dropped, but the poolers still route to it. Fix it with eru apply.")
+	}
 	data := map[string]any{"dropped": p.Name, "roles_dropped": roles}
 	if final != nil {
 		data["final_dump"] = final
@@ -292,7 +309,8 @@ func confirmRequired(message, token string) error {
 }
 
 // dropCluster stops and deletes 18/<name>, its data directory and its
-// cgroup drop-in. Its pooler entries, timers and stanza are unit 21's.
+// cgroup drop-in. db drop then removes its pooler entries; its timers and
+// stanza are unit 21's.
 func dropCluster(ctx context.Context, env *Env, name string) error {
 	sh := engine.Shell{Secrets: secrets.Default, Log: env.Log}
 	if err := sh.Exec(ctx, "db.drop", engine.Command{Name: "pg_dropcluster", Args: []string{"18", name, "--stop"}}, env.Report); err != nil {

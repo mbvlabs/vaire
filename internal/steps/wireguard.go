@@ -55,6 +55,17 @@ func thisNode(cfg config.Cluster) (config.NodeSpec, error) {
 	return config.NodeSpec{}, ErrNoConfig
 }
 
+// NodeHostname is this node's one hostname, <node>.<domain> (RFC 8.4): the
+// certificate's only name, nginx's server_name and what clients dial. It is
+// empty without a domain.
+func NodeHostname(cfg config.Cluster) string {
+	node, err := thisNode(cfg)
+	if err != nil {
+		return ""
+	}
+	return cfg.Hostname(node.Name)
+}
+
 func renderWG(cfg config.Cluster) (wgRender, error) {
 	node, err := thisNode(cfg)
 	if err != nil {

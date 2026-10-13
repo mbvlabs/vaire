@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,7 +39,8 @@ func runPsql(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = ln.Close() }()
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go proxy(ctx, ln, s.tunnel, net.JoinHostPort(nodeWGAddr(s), strconv.Itoa(pgPort)))
+	at := databaseEndpoint(cmd, s, p, db)
+	go proxy(ctx, ln, s.tunnel, at.addr(pgPort))
 
 	psqlPath, err := exec.LookPath("psql")
 	if err != nil {
@@ -48,7 +48,7 @@ func runPsql(cmd *cobra.Command, _ []string) error {
 	}
 	sslMode := "verify-full"
 	env := []string{
-		"PGHOST=" + s.ctx.MasterHostname(),
+		"PGHOST=" + at.Hostname,
 		"PGHOSTADDR=127.0.0.1",
 		"PGPORT=" + strconv.Itoa(port),
 		"PGUSER=" + user,

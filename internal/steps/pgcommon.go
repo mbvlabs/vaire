@@ -34,6 +34,15 @@ const (
 	PgbouncerUserlistPath = PgbouncerDir + "/userlist.txt"
 	// PgbouncerHBAPath is PgBouncer's own hba file.
 	PgbouncerHBAPath = PgbouncerDir + "/pgbouncer_hba.conf"
+	// SessionIniPath is the session pooler's configuration (RFC 8.1).
+	SessionIniPath = PgbouncerDir + "/session.ini"
+	// SessionHBAPath is the session pooler's hba file.
+	SessionHBAPath = PgbouncerDir + "/session_hba.conf"
+	// SessionUnitPath is the session pooler's systemd unit.
+	SessionUnitPath = SystemdSystemDir + "/" + SessionPoolerService + ".service"
+	// SessionSocketDir is the session pooler's runtime directory: its socket,
+	// which carries its admin console, and its pidfile.
+	SessionSocketDir = "/run/" + SessionPoolerService
 	// NginxConfPath is the rendered nginx configuration.
 	NginxConfPath = "/etc/nginx/nginx.conf"
 	// ACMEDir holds the ACME account key.
@@ -55,6 +64,13 @@ const (
 	SystemdSystemDir = "/etc/systemd/system"
 	// PgbouncerService is the PgBouncer systemd unit.
 	PgbouncerService = "pgbouncer"
+	// PgbouncerPort is the transaction pooler's port, behind nginx on 443.
+	PgbouncerPort = 6432
+	// SessionPoolerService is the session pooler's systemd unit.
+	SessionPoolerService = "eru-pgbouncer-session"
+	// SessionPoolerPort is the session pooler's port: where operators,
+	// migrations and tools that need a session connect (RFC 8.1).
+	SessionPoolerPort = 5432
 	// NginxService is the nginx systemd unit.
 	NginxService = "nginx"
 )
