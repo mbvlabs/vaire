@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"maps"
@@ -28,7 +29,9 @@ type loginData struct {
 
 // runLogin decrypts a transfer bundle (armored or binary age) and creates a
 // local context (§10.1). The bundle comes from a file, from stdin with -, or
-// is pasted at a prompt when no argument is given.
+// is pasted at a prompt when no argument is given. A file, stdin or paste may
+// hold the whole copied handoff; only its armored block is used. The bundle is
+// read and checked before the passphrase is asked for.
 func runLogin(cmd *cobra.Command, args []string) error {
 	raw, err := loginBundle(cmd, args)
 	if err != nil {
@@ -85,7 +88,7 @@ func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 		if err != nil {
 			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
-		return raw, nil
+		return extractBundle(raw, "on stdin")
 	case "":
 		if err := RequireFlag(cmd, false, "<bundle-file>", "login"); err != nil {
 			return nil, err
@@ -107,8 +110,30 @@ func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 		if err != nil {
 			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass the path of a transfer bundle, - for stdin, or nothing to paste it.")
 		}
+		return extractBundle(raw, "in "+src)
+	}
+}
+
+// ageBinaryPrefix starts a binary (unarmored) age file.
+const ageBinaryPrefix = "age-encryption.org/"
+
+// extractBundle returns raw unchanged when it is a binary age file, and
+// otherwise the armored block inside it, so a file or stdin may hold the
+// bundle alone or the whole copied handoff. where names the source for the
+// error, such as "in bundle.txt" or "on stdin".
+func extractBundle(raw []byte, where string) ([]byte, error) {
+	if bytes.HasPrefix(raw, []byte(ageBinaryPrefix)) {
 		return raw, nil
 	}
+	block, err := readBundle(bytes.NewReader(raw))
+	if err != nil {
+		return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
+	}
+	if !secretsdoc.IsArmored(block) {
+		return nil, output.NewError(output.CodeUsage, "no transfer bundle found "+where, output.ExitUsage,
+			"Pass the bundle file eru printed, or the whole copied handoff with its "+secretsdoc.ArmorHeader+" block. Or run eru login with no argument and paste it.")
+	}
+	return block, nil
 }
 
 func loginPassphrase(cmd *cobra.Command) (string, error) {

@@ -1,6 +1,7 @@
 package output
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/itchyny/gojq"
@@ -387,7 +389,7 @@ func renderSuccess(cmd *cobra.Command, opts Options, env Envelope, message strin
 	case ModeMarkdown:
 		return writeMarkdown(out, opts, message, env.Data, env.Next)
 	default:
-		return writeHuman(out, opts, message, env.Warnings, env.Next)
+		return writeHuman(out, opts, message, unshownWarnings(cmd, env.Warnings), env.Next)
 	}
 }
 
@@ -422,6 +424,64 @@ func writeHuman(w io.Writer, opts Options, message string, warnings []Warning, n
 		}
 	}
 	return nil
+}
+
+type shownKey struct{}
+
+// shownWarnings records the warning messages already printed while the
+// command ran.
+type shownWarnings struct {
+	mu   sync.Mutex
+	msgs map[string]bool
+}
+
+// TrackShownWarnings gives cmd a fresh record of warnings shown while it
+// runs. The progress renderer calls it once per command.
+func TrackShownWarnings(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd.SetContext(context.WithValue(ctx, shownKey{}, &shownWarnings{msgs: map[string]bool{}}))
+}
+
+// MarkWarningShown records that msg was already printed to a human while
+// cmd ran, so the human result does not print it a second time. JSON, agent
+// and stream envelopes still carry every warning.
+func MarkWarningShown(cmd *cobra.Command, msg string) {
+	if set := shownSet(cmd); set != nil {
+		set.mu.Lock()
+		set.msgs[msg] = true
+		set.mu.Unlock()
+	}
+}
+
+func shownSet(cmd *cobra.Command) *shownWarnings {
+	if cmd == nil || cmd.Context() == nil {
+		return nil
+	}
+	set, _ := cmd.Context().Value(shownKey{}).(*shownWarnings)
+	return set
+}
+
+// unshownWarnings drops the warnings already printed while cmd ran.
+func unshownWarnings(cmd *cobra.Command, warnings []Warning) []Warning {
+	set := shownSet(cmd)
+	if set == nil || len(warnings) == 0 {
+		return warnings
+	}
+	set.mu.Lock()
+	defer set.mu.Unlock()
+	out := make([]Warning, 0, len(warnings))
+	for _, w := range warnings {
+		if !set.msgs[w.Message] {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // RichError draws a human failure on a terminal. It returns false to fall

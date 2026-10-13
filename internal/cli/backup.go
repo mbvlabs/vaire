@@ -445,11 +445,28 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	warnings = append(s.warnings, warnings...)
-	if generated {
+	// A changed kit is shown in a new handoff right here when there is a
+	// terminal; the warning and the export step remain only when the
+	// operator didn't store it during this command.
+	stored := false
+	if generated && !MustNotPrompt(cmd) {
+		if ok, _ := PromptYes(cmd, "Show the secrets handoff with the recovery kit now?"); ok {
+			// show returns nil only once the operator typed 'stored'.
+			if _, err := showContextHandoff(cmd, s.ctx); err != nil {
+				return err
+			}
+			stored = true
+		}
+	}
+	next := []string{"eru backup list"}
+	if generated && !stored {
 		warnings = append(warnings, output.Warning{
 			Code:    "recovery_kit_changed",
 			Message: "the recovery kit changed; run eru secrets export and store the new handoff",
 		})
+	}
+	if !stored {
+		next = append([]string{"eru secrets export"}, next...)
 	}
 	message := []string{fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total)}
 	if list, err := s.node.Call(ctx, "backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
@@ -471,14 +488,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		Data:     map[string]any{"apply": data, "bucket": settings.Bucket, "prefix": settings.Prefix},
 		Message:  strings.Join(message, "\n"),
 		Warnings: warnings,
-		Next:     []string{"eru secrets export", "eru backup list"},
-	}
-	if generated && !MustNotPrompt(cmd) {
-		if ok, _ := PromptYes(cmd, "Show the secrets handoff with the recovery kit now?"); ok {
-			if _, err := showContextHandoff(cmd, s.ctx); err != nil {
-				return err
-			}
-		}
+		Next:     next,
 	}
 	return output.Success(cmd, res)
 }

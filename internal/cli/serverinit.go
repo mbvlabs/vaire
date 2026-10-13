@@ -634,13 +634,13 @@ func (r *initRun) ensureDatabaseSecrets() error {
 	if r.sec.Database != nil {
 		creds = *r.sec.Database
 	}
-	rpc, generated, err := ensureClusterSecrets(&creds)
+	// The handoff later in init carries these, so nothing goes stale.
+	rpc, _, err := ensureClusterSecrets(&creds)
 	if err != nil {
 		return err
 	}
 	r.sec.Database = &creds
 	r.dbSecrets = rpc
-	r.warnings = append(r.warnings, staleWarning(generated)...)
 	registerPending(r.sec)
 	return contexts.SaveSecrets(r.name, r.sec)
 }

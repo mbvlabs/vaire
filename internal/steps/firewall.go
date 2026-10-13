@@ -22,6 +22,16 @@ const (
 // FirewallRules is the rule set step 5 converges to. Public 22/tcp stays until
 // the commit-confirm lockdown is confirmed (§8.3).
 func FirewallRules(cfg config.Cluster, st engine.State) []string {
+	rules := configuredRules(cfg)
+	if st.PublicSSHOpen() {
+		rules = append(rules, RulePublicSSH)
+	}
+	return rules
+}
+
+// configuredRules is the rule set the cluster config alone decides: every
+// rule except public 22/tcp, which follows the lockdown flags.
+func configuredRules(cfg config.Cluster) []string {
 	rules := []string{
 		fmt.Sprintf("allow %d/udp", cfg.Transport.ListenPort),
 		"allow 80/tcp",
@@ -44,9 +54,6 @@ func FirewallRules(cfg config.Cluster, st engine.State) []string {
 	}
 	dbPort(PgbouncerPort, cfg.Network.ExposePgbouncer)
 	dbPort(SessionPoolerPort, cfg.Network.ExposePostgres)
-	if st.PublicSSHOpen() {
-		rules = append(rules, RulePublicSSH)
-	}
 	return rules
 }
 
@@ -81,12 +88,14 @@ func firewallInputs(cfg config.Cluster) ([]string, error) {
 	return FirewallRules(cfg, st), nil
 }
 
+// Inputs hashes the rule set without public 22/tcp. That rule follows the
+// lockdown flags in state.json, and the ssh.lockdown, ssh.confirm, ssh-revert
+// and unlock-ssh handlers add or delete it in ufw themselves when they change
+// those flags. Hashing it would make the journal entry init records before
+// lockdown stale the moment lockdown is confirmed, so the first apply after
+// init would re-run this step for a firewall that is already converged.
 func (firewall) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
-	rules, err := firewallInputs(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return canonical(rules)
+	return canonical(configuredRules(cfg))
 }
 
 func (firewall) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {

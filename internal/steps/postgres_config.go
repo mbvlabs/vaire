@@ -111,17 +111,21 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	local := ClusterPG(spec)
 	files := confFiles(cfg, spec, rt)
 	// Keep the previous contents so a validation failure can be rolled back.
+	// None of the conf.d files exist yet: this is the cluster's first
+	// configuration. pg_hba.conf and pg_ident.conf don't count, because
+	// pg_createcluster writes its own. The journal cannot tell, because the
+	// runner marks the step running before Apply.
 	backups := make(map[string]string, len(files))
+	first := true
 	for _, f := range files {
 		raw, err := os.ReadFile(f.Path) //nolint:gosec // G304: managed file paths from the catalogue.
 		if err == nil {
 			backups[f.Path] = string(raw)
+			if strings.HasPrefix(f.Path, PGConfD(spec.Name)+"/") {
+				first = false
+			}
 		}
 	}
-	// None of the managed files exist yet: this is the cluster's first
-	// configuration. The journal cannot tell, because the runner marks the
-	// step running before Apply.
-	first := len(backups) == 0
 	for _, f := range files {
 		if err := writeFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
 			return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)

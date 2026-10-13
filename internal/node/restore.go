@@ -370,7 +370,7 @@ func jobRuntime(env *jobEnv) engine.Runtime {
 // applyPoolers runs pgbouncer-v1, which renders both poolers' entries,
 // including the session pooler's for ready restores, and reloads them.
 func applyPoolers(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) error {
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.PoolerStepIDs(), Report: report})
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.PoolerStepIDs(), Restarter: steps.Restarter(cfg), Report: report})
 	return err
 }
 
@@ -646,10 +646,10 @@ func switchStanza(cfg config.Cluster, db, to string) (config.Cluster, string, er
 // reload), then runs pgbackrest-v1 (the stanza's section, stanza-create,
 // check and a first full when it has none) and timers-v1.
 func applyStanza(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter) error {
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: db, Report: report}); err != nil {
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: db, Restarter: steps.Restarter(cfg), Report: report}); err != nil {
 		return err
 	}
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...), Report: report})
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...), Restarter: steps.Restarter(cfg), Report: report})
 	return err
 }
 
@@ -1105,12 +1105,12 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	rt := jobRuntime(env)
 	logLine(env.Report, env.Job, "starting "+p.Name+" with its own configuration")
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Report: env.Report})
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: p.Name, Report: env.Report})
+		err = applyNewCluster(ctx, cfg, rt, p.Name, env.Report)
 	}
 	if err != nil {
-		return nil, withHint(err, "Finish it with eru apply --db "+p.Name+".")
+		return nil, withHint(err, finishNewCluster(p.Name))
 	}
 	var warnings []output.Warning
 	if err := applyPoolers(ctx, cfg, rt, env.Report); err != nil {

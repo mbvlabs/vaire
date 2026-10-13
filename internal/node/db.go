@@ -196,9 +196,9 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDo
 	// The kernel's huge-page pool grows first when the new cluster uses
 	// huge pages, then the cluster's own step instances: create it,
 	// configure it, then its roles and database (RFC 11.2).
-	_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Report: env.Report})
+	_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: db.Name, Report: env.Report})
+		err = applyNewCluster(ctx, cfg, rt, db.Name, env.Report)
 	}
 	if err != nil {
 		// Keep cluster.toml in step with the server: an entry whose cluster
@@ -208,7 +208,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDo
 			_ = store.Save(previous)
 			return db, nil, err
 		}
-		return db, nil, withHint(err, "Finish it with eru apply --db "+db.Name+".")
+		return db, nil, withHint(err, finishNewCluster(db.Name))
 	}
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with eru apply.")
@@ -315,12 +315,35 @@ func stepDownSize(cfg config.Cluster, db *config.ClusterSpec, host hostinfo.Info
 	return &output.Warning{Code: "size_stepped_down", Message: message}
 }
 
+// applyNewCluster runs a new cluster's own step instances (create,
+// configure, roles) and restarts it without a confirm token when a setting
+// still needs one: nothing connects to it yet, so the restart costs no
+// client anything. It runs before the poolers route to it and before its
+// stanza, whose archive check needs archive_mode on.
+func applyNewCluster(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name string, report engine.Reporter) error {
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
+		DB:        name,
+		Confirm:   engine.Confirmation{Clusters: []string{name}},
+		Restarter: steps.Restarter(cfg),
+		Report:    report,
+	})
+	return err
+}
+
+// finishNewCluster is the hint for a new cluster whose steps failed after it
+// was created: its own steps with the restart it may still need, then the
+// poolers, its stanza and first full, and its timers.
+func finishNewCluster(name string) string {
+	return "Finish it with eru apply --db " + name + " --confirm " + name + "/restart, then eru apply."
+}
+
 // reloadPoolers runs pgbouncer-v1, which renders an entry per database and
 // reloads the poolers (RFC 8.1). It skips itself once no database is left.
 func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
-		Only:   steps.PoolerStepIDs(),
-		Report: env.Report,
+		Only:      steps.PoolerStepIDs(),
+		Restarter: steps.Restarter(cfg),
+		Report:    env.Report,
 	})
 	return err
 }
@@ -334,8 +357,9 @@ func firstBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime, rep
 		return nil
 	}
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
-		Only:   append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...),
-		Report: report,
+		Only:      append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...),
+		Restarter: steps.Restarter(cfg),
+		Report:    report,
 	})
 	if err == nil {
 		return nil
@@ -501,8 +525,9 @@ func dropRouting(ctx context.Context, env *Env, cfg config.Cluster) error {
 		return err
 	}
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
-		Only:   steps.TimersStepIDs(),
-		Report: env.Report,
+		Only:      steps.TimersStepIDs(),
+		Restarter: steps.Restarter(cfg),
+		Report:    env.Report,
 	})
 	return err
 }
@@ -588,7 +613,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	// The huge-page pool follows the new sum before the cluster restarts.
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Report: env.Report}); err != nil {
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
 		return Result{}, withHint(err, "The new size is saved. Finish it with eru apply --db "+p.Name+".")
 	}
 	confirm := restartConfirmation(cfg, env.Req)

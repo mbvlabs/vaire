@@ -157,8 +157,8 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:          "Create a local context from a transfer bundle",
-				WhenToUse:        []string{"Open a server on a machine that has the transfer bundle and its passphrase from the secrets handoff."},
-				Examples:         []string{"eru login", "eru login bundle.txt --passphrase-file pass.txt", "eru login - --passphrase-file pass.txt < bundle.txt"},
+				WhenToUse:        []string{"Open a server on a machine that has the transfer bundle and its passphrase from the secrets handoff.", "The file or stdin may hold the bundle alone or the whole copied handoff; eru uses the armored block inside it. The passphrase is never read from the file."},
+				Examples:         []string{"eru login", "eru login bundle.txt --passphrase-file pass.txt", "eru login handoff.md --passphrase-file pass.txt", "eru login - --passphrase-file pass.txt < bundle.txt"},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
 				SkipDryRunReason: "login writes a local context from a secrets document and has no host change to preview",

@@ -24,6 +24,7 @@ import (
 // print nothing until the result.
 type progress struct {
 	opts   output.Options
+	cmd    *cobra.Command
 	stdout io.Writer
 	stderr io.Writer
 	// live is the terminal UI, nil for plain output.
@@ -32,7 +33,8 @@ type progress struct {
 
 func newProgress(cmd *cobra.Command) *progress {
 	opts, _ := output.ParseOptions(cmd)
-	p := &progress{opts: opts, stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr()}
+	p := &progress{opts: opts, cmd: cmd, stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr()}
+	output.TrackShownWarnings(cmd)
 	if p.human() && richOutput(cmd) {
 		p.live = ui.Start(os.Stderr)
 	}
@@ -97,6 +99,7 @@ func (p *progress) event(ev output.Event) {
 			_, _ = fmt.Fprintln(p.stderr, "      "+secrets.Redact(ev.Line))
 		}
 	case "warning":
+		p.shown(ev.Message)
 		_, _ = fmt.Fprintln(p.stderr, "warning: "+secrets.Redact(ev.Message))
 	case "progress":
 		_, _ = fmt.Fprintf(p.stderr, "  %s %s\n", ev.Phase, ev.Detail)
@@ -118,6 +121,7 @@ func (p *progress) liveEvent(ev output.Event) {
 			t.Detail(line)
 		}
 	case "warning":
+		p.shown(ev.Message)
 		l.Println(ui.Warn(secrets.Redact(ev.Message)))
 	case "progress":
 		if t := l.Task(ev.Step); t != nil {
@@ -241,10 +245,19 @@ func (p *progress) warn(msg string) {
 	case p.opts.Stream:
 		p.event(output.Event{Type: "warning", Message: msg})
 	case p.live != nil:
+		p.shown(msg)
 		p.live.Println(ui.Warn(secrets.Redact(msg)))
 	case p.human():
+		p.shown(msg)
 		_, _ = fmt.Fprintln(p.stderr, "warning: "+secrets.Redact(msg))
 	}
+}
+
+// shown records a warning printed while the command ran: the node sends each
+// result warning as an event before the result, and the human result then
+// leaves it out instead of printing it again.
+func (p *progress) shown(msg string) {
+	output.MarkWarningShown(p.cmd, msg)
 }
 
 // panel prints a titled block, boxed on a terminal. Lines inside stay plain
