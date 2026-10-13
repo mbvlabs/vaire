@@ -7,6 +7,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/eru/internal/tune"
 	"github.com/spf13/cobra"
 )
 
@@ -18,9 +19,81 @@ type tuneSetting struct {
 	Context string `json:"context"`
 }
 
+// tuneServer is the server's budget sheet (RFC 7.5).
+type tuneServer struct {
+	RAMMiB               int                 `json:"ram_mib"`
+	VCPU                 int                 `json:"vcpu"`
+	ReserveMiB           int                 `json:"reserve_mib"`
+	ClusterBudgetMiB     int                 `json:"cluster_budget_mib"`
+	ClusterMemoryMiB     int                 `json:"cluster_memory_mib"`
+	FreeMiB              int                 `json:"free_mib"`
+	Clusters             []tuneServerCluster `json:"clusters"`
+	CPUShare             int                 `json:"cpu_share"`
+	HugePages            int                 `json:"huge_pages"`
+	MemoryReserveSetting string              `json:"memory_reserve_setting"`
+	IOWeightEnforced     bool                `json:"io_weight_enforced"`
+	IOWeight             string              `json:"io_weight"`
+	DiskGiB              int                 `json:"disk_gib"`
+	DiskUsedGiB          int                 `json:"disk_used_gib"`
+	CommitLimitMiB       int                 `json:"commit_limit_mib,omitempty"`
+	CommittedMiB         int                 `json:"committed_mib,omitempty"`
+	HugePagesFree        int                 `json:"huge_pages_free,omitempty"`
+}
+
+// tuneServerCluster is one cluster's row on the sheet.
+type tuneServerCluster struct {
+	Name             string `json:"name"`
+	Size             string `json:"size"`
+	MemoryMiB        int    `json:"memory_mib"`
+	MemoryHighMiB    int    `json:"memory_high_mib"`
+	MemoryMaxMiB     int    `json:"memory_max_mib,omitempty"`
+	MemoryCurrentMiB *int   `json:"memory_current_mib,omitempty"`
+	CPUWeight        int    `json:"cpu_weight"`
+	CPUQuota         string `json:"cpu_quota,omitempty"`
+	IOWeight         int    `json:"io_weight"`
+	MaxConnections   int    `json:"max_connections"`
+	SharedMemoryMiB  int    `json:"shared_memory_mib"`
+	HugePages        int    `json:"huge_pages"`
+	Running          bool   `json:"running"`
+}
+
+// sheetLines prints the budget sheet the way RFC 7.5 shows it.
+func sheetLines(name string, sv tuneServer) []string {
+	lines := []string{fmt.Sprintf("server %s   %s RAM · %d vCPU · reserve %s · budget %s",
+		name, tune.FormatMiB(sv.RAMMiB), sv.VCPU, tune.FormatMiB(sv.ReserveMiB), tune.FormatMiB(sv.ClusterBudgetMiB))}
+	for _, c := range sv.Clusters {
+		state := "stopped"
+		if c.Running {
+			state = "running"
+		}
+		limits := fmt.Sprintf("cpu %3d  io %3d  conns %3d", c.CPUWeight, c.IOWeight, c.MaxConnections)
+		if c.CPUQuota != "" {
+			limits += "  quota " + c.CPUQuota
+		}
+		if c.MemoryMaxMiB > 0 {
+			limits += "  max " + tune.FormatMiB(c.MemoryMaxMiB)
+		}
+		if c.MemoryCurrentMiB != nil {
+			limits += "  using " + tune.FormatMiB(*c.MemoryCurrentMiB)
+		}
+		lines = append(lines, fmt.Sprintf("  %-16s %-7s %9s   %s   %s", c.Name, c.Size, tune.FormatMiB(c.MemoryMiB), limits, state))
+	}
+	free := "free " + tune.FormatMiB(sv.FreeMiB)
+	if sv.FreeMiB < 0 {
+		free = "overcommitted by " + tune.FormatMiB(-sv.FreeMiB)
+	}
+	lines = append(lines, fmt.Sprintf("  allocated %s of %s · %s", tune.FormatMiB(sv.ClusterMemoryMiB), tune.FormatMiB(sv.ClusterBudgetMiB), free))
+	if sv.CommitLimitMiB > 0 {
+		lines = append(lines, fmt.Sprintf("  commit limit %s · committed %s · huge pages %d reserved, %d free",
+			tune.FormatMiB(sv.CommitLimitMiB), tune.FormatMiB(sv.CommittedMiB), sv.HugePages, sv.HugePagesFree))
+	}
+	lines = append(lines, "  io weight: "+sv.IOWeight)
+	return lines
+}
+
 type tuneShowData struct {
-	// Server is the memory budget: RAM, the reserve, what clusters get.
-	Server         map[string]any    `json:"server"`
+	// Server is the budget sheet: RAM, the reserve, what clusters get.
+	Server         tuneServer        `json:"server"`
 	Database       string            `json:"database,omitempty"`
 	Inputs         map[string]any    `json:"inputs"`
 	Settings       []tuneSetting     `json:"settings"`
@@ -28,6 +101,8 @@ type tuneShowData struct {
 	PendingRestart []string          `json:"pending_restart"`
 }
 
+// fetchTune reads tune.show; the node's oversubscription warnings join the
+// session's.
 func fetchTune(cmd *cobra.Command, s *session, p *progress) (tuneShowData, error) {
 	var params any
 	if db := stringFlag(cmd, "db"); db != "" {
@@ -41,6 +116,7 @@ func fetchTune(cmd *cobra.Command, s *session, p *progress) (tuneShowData, error
 	if err := reply.Decode(&data); err != nil {
 		return tuneShowData{}, err
 	}
+	s.warnings = append(s.warnings, reply.Warnings...)
 	return data, nil
 }
 
@@ -55,10 +131,11 @@ func runTuneShow(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	message := fmt.Sprintf("%d settings", len(data.Settings))
+	lines := sheetLines(s.ctx.Name, data.Server)
 	if data.Database != "" {
-		message += " for " + data.Database
+		lines = append(lines, "", fmt.Sprintf("%d settings for %s (eru tune explain --db %s shows them)", len(data.Settings), data.Database, data.Database))
 	}
+	message := strings.Join(lines, "\n")
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings})
 }
 
@@ -73,10 +150,7 @@ func runTuneExplain(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	lines := []string{"server:"}
-	for _, key := range sortedKeys(data.Server) {
-		lines = append(lines, fmt.Sprintf("  %s = %v", key, data.Server[key]))
-	}
+	lines := sheetLines(s.ctx.Name, data.Server)
 	if data.Database == "" {
 		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(append(lines, "", "no databases yet"), "\n"), Warnings: s.warnings})
 	}

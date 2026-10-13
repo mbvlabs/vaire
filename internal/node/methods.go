@@ -130,6 +130,27 @@ func methods() map[string]method {
 			handler: handleDBDrop,
 		},
 		{
+			// db resize changes cluster.toml and the kernel's huge pages, so it
+			// holds the global lock; the restart is that cluster's alone.
+			name: "db.resize",
+			lock: func(req rpc.Request) engine.LockMode {
+				if req.DryRun {
+					return engine.LockShared
+				}
+				return engine.LockExclusive
+			},
+			clusterLock: func(req rpc.Request) (string, engine.LockMode) {
+				if req.DryRun {
+					return "", engine.LockNone
+				}
+				return paramName(req.Params), engine.LockExclusive
+			},
+			cluster:    true,
+			confirmAny: restartTokens,
+			runLog:     func(req rpc.Request) bool { return !req.DryRun },
+			handler:    handleDBResize,
+		},
+		{
 			name: "db.credentials",
 			lock: fixedLock(engine.LockShared),
 			clusterLock: func(req rpc.Request) (string, engine.LockMode) {
@@ -319,11 +340,12 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, true), engine.Options{Only: p.Steps, DB: p.DB})
+	rt := runtimeFor(env, true)
+	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: p.Steps, DB: p.DB})
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Data: data}, nil
+	return Result{Data: data, Warnings: oversubscriptionWarnings(env.Cluster, rt.Host)}, nil
 }
 
 func handleApply(ctx context.Context, env *Env) (Result, error) {
@@ -332,11 +354,12 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if env.Req.DryRun {
-		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, true), engine.Options{Only: p.Steps, DB: p.DB})
+		rt := runtimeFor(env, true)
+		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: p.Steps, DB: p.DB})
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Data: data, Warnings: NoOffsiteWarning(env.Cluster)}, nil
+		return Result{Data: data, Warnings: append(NoOffsiteWarning(env.Cluster), oversubscriptionWarnings(env.Cluster, rt.Host)...)}, nil
 	}
 	rt := runtimeFor(env, false)
 	rt.RotateSecrets = p.RotateBackupSecrets
@@ -351,7 +374,8 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Data: data, Warnings: append(warnings, NoOffsiteWarning(env.Cluster)...)}, nil
+	warnings = append(warnings, NoOffsiteWarning(env.Cluster)...)
+	return Result{Data: data, Warnings: append(warnings, oversubscriptionWarnings(env.Cluster, rt.Host)...)}, nil
 }
 
 func handleSelfcheck(context.Context, *Env) (Result, error) {

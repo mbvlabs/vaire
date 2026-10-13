@@ -74,5 +74,9 @@ func RolesStepIDs() []string { return []string{postgresRolesID} }
 // changes, so the poolers pick up the database's entries with a reload.
 func PoolerStepIDs() []string { return []string{pgbouncerID} }
 
+// KernelStepIDs is the kernel tuning step, which sizes the huge-page pool
+// for every cluster; db create runs it before a new cluster starts.
+func KernelStepIDs() []string { return []string{kernelTuningID} }
+
 // TuneStepIDs are the steps tune.apply runs.
 func TuneStepIDs() []string { return []string{kernelTuningID, postgresConfigID} }

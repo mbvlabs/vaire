@@ -22,8 +22,9 @@ func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
 	}
 	rt := runtimeFor(env, true)
 	data := map[string]any{"server": serverBudget(env.Cluster, rt.Host)}
+	warnings := oversubscriptionWarnings(env.Cluster, rt.Host)
 	if len(env.Cluster.Clusters) == 0 && p.DB == "" {
-		return Result{Data: data}, nil
+		return Result{Data: data, Warnings: warnings}, nil
 	}
 	spec, err := onlyCluster(env.Cluster, p.DB)
 	if err != nil {
@@ -55,18 +56,20 @@ func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
 	data["settings"] = res.Settings
 	data["current"] = current
 	data["pending_restart"] = pendingNames
-	return Result{Data: data}, nil
+	return Result{Data: data, Warnings: warnings}, nil
 }
 
 func handleTuneApply(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
-		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, true), engine.Options{Only: steps.TuneStepIDs()})
+		rt := runtimeFor(env, true)
+		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: steps.TuneStepIDs()})
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Data: data}, nil
+		return Result{Data: data, Warnings: oversubscriptionWarnings(env.Cluster, rt.Host)}, nil
 	}
-	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, runtimeFor(env, false), engine.Options{
+	rt := runtimeFor(env, false)
+	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
 		Only:      steps.TuneStepIDs(),
 		Confirm:   restartConfirmation(env.Cluster, env.Req),
 		Restarter: steps.Restarter(env.Cluster),
@@ -75,34 +78,64 @@ func handleTuneApply(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Data: data, Warnings: warnings}, nil
+	return Result{Data: data, Warnings: append(warnings, oversubscriptionWarnings(env.Cluster, rt.Host)...)}, nil
 }
 
-// serverBudget is the server's memory sheet (RFC 7.3): RAM, the reserve
-// and what is left for clusters, and what the clusters ask for.
+// serverBudget is the server's budget sheet (RFC 7.5): RAM, the reserve
+// and what is left for clusters, each cluster's size and limits, what is
+// allocated and free, what CommitLimit leaves, and whether IOWeight= has any
+// effect on the data disk.
 func serverBudget(cfg config.Cluster, host hostinfo.Info) map[string]any {
-	override := 0
-	if cfg.Server.MemoryReserve != "" {
-		override, _ = config.ParseMemoryMiB(cfg.Server.MemoryReserve)
-	}
-	reserve := tune.ServerReserve(host.RAMMiB, override)
-	assigned := 0
-	for _, c := range cfg.Clusters {
-		if r, err := cfg.Resources(c); err == nil {
-			assigned += r.MemoryMiB
+	h, sheet := budgetSheet(cfg, host)
+	clusters := make([]map[string]any, 0, len(sheet.Clusters))
+	for i, d := range sheet.Clusters {
+		res, _ := cfg.Resources(cfg.Clusters[i])
+		row := map[string]any{
+			"name":              d.Name,
+			"size":              d.Size,
+			"memory_mib":        d.MemoryMiB,
+			"memory_high_mib":   res.MemoryMiB + res.MemoryMiB/4,
+			"cpu_weight":        d.CPUWeight,
+			"io_weight":         res.IOWeight,
+			"max_connections":   res.MaxConnections,
+			"shared_memory_mib": d.SharedMemoryMiB,
+			"huge_pages":        d.HugePages,
+			"running":           d.Running,
 		}
+		if res.MemoryMaxMiB > 0 {
+			row["memory_max_mib"] = res.MemoryMaxMiB
+		}
+		if res.CPUQuota != "" {
+			row["cpu_quota"] = res.CPUQuota
+		}
+		if mib, ok := clusterMemoryCurrentMiB(d.Name); ok {
+			row["memory_current_mib"] = mib
+		}
+		clusters = append(clusters, row)
 	}
-	return map[string]any{
+	ioEnforced, ioReason := hostinfo.IOWeight(host.DataDisk.Device)
+	out := map[string]any{
 		"ram_mib":                host.RAMMiB,
 		"vcpu":                   host.VCPU,
-		"reserve_mib":            reserve,
-		"cluster_budget_mib":     tune.ClusterBudget(host.RAMMiB, reserve),
-		"cluster_memory_mib":     assigned,
-		"clusters":               len(cfg.Clusters),
+		"reserve_mib":            sheet.ReserveMiB,
+		"cluster_budget_mib":     sheet.BudgetMiB,
+		"cluster_memory_mib":     sheet.AllocatedMiB,
+		"free_mib":               sheet.FreeMiB,
+		"clusters":               clusters,
 		"cpu_share":              tune.CPUShare(host.VCPU, len(cfg.Clusters)),
 		"huge_pages":             steps.HugePagesFor(cfg, host),
 		"memory_reserve_setting": cfg.Server.MemoryReserve,
+		"io_weight_enforced":     ioEnforced,
+		"io_weight":              ioReason,
+		"disk_gib":               h.DiskGiB,
+		"disk_used_gib":          h.DiskUsedGiB,
 	}
+	if h.MemoryKnown {
+		out["commit_limit_mib"] = h.CommitLimitMiB
+		out["committed_mib"] = h.CommittedMiB
+		out["huge_pages_free"] = h.HugePagesFree
+	}
+	return out
 }
 
 // tuneInputs is the human-readable tuning input set for spec's cluster.

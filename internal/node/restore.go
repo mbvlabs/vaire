@@ -773,7 +773,8 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	created, err := createDatabase(ctx, env, config.ClusterSpec{Name: p.Name, Size: src.Size, StatementTimeout: src.StatementTimeout, Extensions: src.Extensions})
+	created, warnings, err := createDatabase(ctx, env, config.ClusterSpec{Name: p.Name, Size: src.Size, Memory: src.Memory, Profile: src.Profile,
+		StatementTimeout: src.StatementTimeout, Extensions: src.Extensions}, false)
 	release()
 	if err != nil {
 		return Result{}, err
@@ -786,6 +787,7 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	if m, ok := res.Data.(map[string]any); ok {
 		m["database"] = created
 	}
+	res.Warnings = append(res.Warnings, warnings...)
 	return res, nil
 }
 

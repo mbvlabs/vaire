@@ -91,9 +91,10 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		}
 	}
 	env.Cluster = cfg
-	plan, planErr := engine.Plan(ctx, steps.Catalog(), cfg, runtimeFor(env, true), engine.Options{})
+	rt := runtimeFor(env, true)
+	plan, planErr := engine.Plan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
 	data := map[string]any{"revision": revision, "plan": plan, "saved": !env.Req.DryRun}
-	var warnings []output.Warning
+	warnings := oversubscriptionWarnings(cfg, rt.Host)
 	if planErr != nil {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}

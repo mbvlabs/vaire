@@ -90,6 +90,23 @@ func lsCluster(ctx context.Context, name string) (clusterRow, bool) {
 	return clusterRow{}, false
 }
 
+// ClusterNames lists the 18/<name> clusters pg_lsclusters knows, with
+// their status (online, down). db list finds orphans in it.
+func ClusterNames(ctx context.Context) map[string]string {
+	out, err := Probe(ctx, "pg_lsclusters", "-h")
+	if err != nil {
+		return nil
+	}
+	names := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 6 && fields[0] == strconv.Itoa(PGVersion) {
+			names[fields[1]] = fields[3]
+		}
+	}
+	return names
+}
+
 // ClusterExists reports whether 18/<name> exists, running or not.
 func ClusterExists(ctx context.Context, name string) bool {
 	_, ok := lsCluster(ctx, name)

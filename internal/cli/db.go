@@ -7,8 +7,10 @@ import (
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/eru/internal/tune"
 	"github.com/spf13/cobra"
 )
 
@@ -26,12 +28,40 @@ func remoteConfig(cmd *cobra.Command, s *session, p *progress) (config.Cluster, 
 }
 
 type databaseInfo struct {
-	Name       string   `json:"name"`
-	InConfig   bool     `json:"in_config"`
-	Exists     bool     `json:"exists"`
-	SizeBytes  int64    `json:"size_bytes"`
-	Extensions []string `json:"extensions"`
-	Roles      []string `json:"roles"`
+	Name           string   `json:"name"`
+	InConfig       bool     `json:"in_config"`
+	Exists         bool     `json:"exists"`
+	SizeBytes      int64    `json:"size_bytes"`
+	Extensions     []string `json:"extensions"`
+	Roles          []string `json:"roles"`
+	Node           string   `json:"node,omitempty"`
+	Host           string   `json:"host,omitempty"`
+	Port           int      `json:"port,omitempty"`
+	Stanza         string   `json:"stanza,omitempty"`
+	Size           string   `json:"size,omitempty"`
+	MemoryMiB      int      `json:"memory_mib,omitempty"`
+	MemoryMaxMiB   int      `json:"memory_max_mib,omitempty"`
+	CPUWeight      int      `json:"cpu_weight,omitempty"`
+	CPUQuota       string   `json:"cpu_quota,omitempty"`
+	IOWeight       int      `json:"io_weight,omitempty"`
+	MaxConnections int      `json:"max_connections,omitempty"`
+	State          string   `json:"state"`
+}
+
+// limits is the database's limits in one column: cpu and io weights,
+// connections, and the opt-in hard caps.
+func (db databaseInfo) limits() string {
+	if !db.InConfig {
+		return "-"
+	}
+	out := fmt.Sprintf("cpu %d io %d conns %d", db.CPUWeight, db.IOWeight, db.MaxConnections)
+	if db.CPUQuota != "" {
+		out += " quota " + db.CPUQuota
+	}
+	if db.MemoryMaxMiB > 0 {
+		out += " max " + tune.FormatMiB(db.MemoryMaxMiB)
+	}
+	return out
 }
 
 func runDBList(cmd *cobra.Command, _ []string) error {
@@ -51,15 +81,16 @@ func runDBList(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	lines := make([]string, 0, len(data.Databases))
+	lines := make([]string, 0, len(data.Databases)+1)
+	if len(data.Databases) > 0 {
+		lines = append(lines, fmt.Sprintf("  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %s", "NAME", "NODE", "HOST", "SIZE", "MEMORY", "LIMITS", "STANZA", "STATE"))
+	}
 	for _, db := range data.Databases {
-		state := "configured"
-		if !db.InConfig {
-			state = "orphaned"
-		} else if !db.Exists {
-			state = "pending"
+		memory, size, node, host, stanza := "-", "-", "-", "-", "-"
+		if db.InConfig {
+			memory, size, node, host, stanza = tune.FormatMiB(db.MemoryMiB), db.Size, db.Node, db.Host, db.Stanza
 		}
-		lines = append(lines, fmt.Sprintf("  %-24s %-10s %s", db.Name, state, strings.Join(db.Extensions, ",")))
+		lines = append(lines, fmt.Sprintf("  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %s", db.Name, node, host, size, memory, db.limits(), stanza, db.State))
 	}
 	return output.Success(cmd, output.Result{
 		Data:     data,
@@ -93,7 +124,11 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		timeout = "60s"
 	}
 	extensions, _ := cmd.Flags().GetStringSlice("extensions")
-	db := config.ClusterSpec{Name: name, StatementTimeout: timeout, Extensions: extensions}
+	db := config.ClusterSpec{Name: name, StatementTimeout: timeout, Extensions: extensions,
+		Size: stringFlag(cmd, "size"), Memory: stringFlag(cmd, "memory"), Profile: stringFlag(cmd, "profile")}
+	if err := checkSizeFlags(cfg, db); err != nil {
+		return err
+	}
 	if len(extensions) == 0 {
 		db.Extensions = []string{"pg_stat_statements"}
 	}
@@ -116,16 +151,112 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		"name":              name,
 		"statement_timeout": timeout,
 		"extensions":        db.Extensions,
+		"size":              db.Size,
+		"memory":            db.Memory,
+		"profile":           db.Profile,
 	}, remote.CallOptions{Secrets: rpc, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
-	message := fmt.Sprintf("created database %s and its roles\n%s\n%s", name, secret, shownOnceNote)
+	var created struct {
+		Database config.ClusterSpec `json:"database"`
+	}
+	_ = reply.Decode(&created)
+	message := fmt.Sprintf("created database %s (%s) and its roles\n%s\n%s", name, sizeSummary(cfg, created.Database), secret, shownOnceNote)
 	return output.Success(cmd, output.Result{
-		Data:     map[string]any{"database": secret},
+		Data:     map[string]any{"database": secret, "cluster": created.Database},
 		Message:  message,
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
+}
+
+// checkSizeFlags refuses a --size, --memory or --profile the node would
+// refuse anyway, before any password is generated.
+func checkSizeFlags(cfg config.Cluster, db config.ClusterSpec) error {
+	if _, err := cfg.Resources(db); err != nil {
+		return output.NewError(output.CodeValidation, err.Error(), output.ExitConfig,
+			"Sizes are "+strings.Join(config.SizeNames(), ", ")+"; --memory takes an amount such as 768MiB or 2GiB, and custom needs it.")
+	}
+	if db.Profile != "" && !slices.Contains([]string{tune.ProfileOLTP, tune.ProfileMixed, tune.ProfileAnalytics}, db.Profile) {
+		return output.NewError(output.CodeValidation, "profile must be oltp, mixed or analytics", output.ExitConfig, "")
+	}
+	return nil
+}
+
+// sizeSummary is "medium, 1 GiB" for spec.
+func sizeSummary(cfg config.Cluster, spec config.ClusterSpec) string {
+	res, err := cfg.Resources(spec)
+	if err != nil {
+		return spec.Size
+	}
+	return res.Size + ", " + tune.FormatMiB(res.MemoryMiB)
+}
+
+func runDBResize(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	size, memory := stringFlag(cmd, "size"), stringFlag(cmd, "memory")
+	if size == "" && memory == "" {
+		return output.NewError(output.CodeUsage, "db resize needs --size or --memory", output.ExitUsage,
+			"Sizes are "+strings.Join(config.SizeNames(), ", ")+"; --memory takes an amount such as 768MiB or 2GiB.")
+	}
+	p := newProgress(cmd)
+	s, err := openSession(cmd, p)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	cfg, _, err := remoteConfig(cmd, s, p)
+	if err != nil {
+		return err
+	}
+	spec, ok := cfg.ClusterByName(name)
+	if !ok {
+		return output.NewError(output.CodePrecondition, "database "+name+" does not exist", output.ExitPrecondition,
+			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": name})
+	}
+	if size != "" {
+		spec.Size, spec.Memory = size, ""
+	}
+	if memory != "" {
+		spec.Memory = memory
+	}
+	if err := checkSizeFlags(cfg, spec); err != nil {
+		return err
+	}
+	deferRestart := flagTrue(cmd, "defer-restart")
+	confirm, confirms := confirmOptions(cmd)
+	reply, err := s.node.Call(commandContext(cmd), "db.resize", map[string]any{
+		"name": name, "size": size, "memory": memory, "defer_restart": deferRestart,
+	}, remote.CallOptions{DryRun: dryRun(cmd), Confirm: confirm, Confirms: confirms, OnEvent: p.event})
+	if err != nil {
+		return err
+	}
+	warnings := append(s.warnings, reply.Warnings...)
+	var data struct {
+		Database config.ClusterSpec `json:"database"`
+		Plan     *engine.PlanData   `json:"plan,omitempty"`
+		Apply    *engine.ApplyData  `json:"apply,omitempty"`
+	}
+	if err := reply.Decode(&data); err != nil {
+		return err
+	}
+	summary := sizeSummary(cfg, data.Database)
+	if data.Plan != nil {
+		return output.Success(cmd, output.Result{Data: data, Warnings: warnings,
+			Message: fmt.Sprintf("dry run: would resize %s to %s; %d of %d steps would apply", name, summary, data.Plan.WouldApply, data.Plan.Total)})
+	}
+	message := fmt.Sprintf("resized %s to %s", name, summary)
+	var next []string
+	if a := data.Apply; a != nil {
+		if a.Restarted() {
+			message += "; restarted " + restartSummary(a.Restarts)
+		}
+		if len(a.RestartPending) > 0 {
+			message += "; restart pending: " + strings.Join(a.RestartPending, ", ")
+			next = []string{"eru apply --db " + name + " " + confirmFlags(a.ConfirmTokens)}
+		}
+	}
+	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
 }
 
 // shownOnceNote follows every printed database password.
@@ -155,6 +286,9 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	var dropped map[string]any
 	_ = reply.Decode(&dropped)
 	message := "dropped database " + name
+	if stanza, ok := dropped["stanza_kept"].(string); ok {
+		message += "; its stanza " + stanza + " is kept, so its backups stay restorable until they expire"
+	}
 	if final, ok := dropped["final_dump"].(map[string]any); ok {
 		message += fmt.Sprintf("; its final dump %v is in the bucket (eru dump get %s %v --out <file>)", final["id"], name, final["id"])
 	}

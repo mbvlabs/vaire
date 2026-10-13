@@ -37,6 +37,19 @@ type Records struct {
 	LastVerify *VerifyResult `json:"last_verify,omitempty"`
 	// LastDump is the last dump per database.
 	LastDump map[string]Dump `json:"last_dump,omitempty"`
+	// DroppedStanzas are the stanzas of dropped databases. db drop keeps a
+	// database's stanza, so its backups and WAL can still be restored, and
+	// records it here; dropped-stanza expiry (unit 25) removes it.
+	DroppedStanzas []DroppedStanza `json:"dropped_stanzas,omitempty"`
+}
+
+// DroppedStanza is one dropped database's kept stanza.
+type DroppedStanza struct {
+	Database  string `json:"database"`
+	Stanza    string `json:"stanza"`
+	DroppedAt string `json:"dropped_at"`
+	// FinalDump is the id of the final dump db drop took, if any.
+	FinalDump string `json:"final_dump,omitempty"`
 }
 
 // Restore phases.
