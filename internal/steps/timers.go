@@ -68,7 +68,7 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 		files["eru-"+j.Job+".timer"] = render.JobTimer(j.Description, j.Schedule, j.Jitter)
 	}
 	if cfg.BackupConfigured() {
-		for _, db := range cfg.Databases {
+		for _, db := range cfg.Clusters {
 			if db.Backup.DumpSchedule == "" {
 				continue
 			}

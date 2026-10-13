@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"strings"
@@ -245,7 +246,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	if cfg, err := config.ParseCluster(edited); err == nil {
-		synced, err := syncContextTLS(s, cfg)
+		synced, err := syncContext(s, cfg)
 		if err != nil {
 			synced = contextSyncFailed(s, err)
 		}
@@ -317,28 +318,53 @@ func runEditor(cmd *cobra.Command, path string) error {
 	return nil
 }
 
-// syncContextTLS copies the domain and TLS mode of cfg into the local
-// context. eru sql, psql, console, tunnel and secrets export verify the
-// server certificate against the context's domain, so it has to follow a
-// domain change made with config set, config edit, or by another operator.
-func syncContextTLS(s *session, cfg config.Cluster) ([]output.Warning, error) {
-	if s.ctx.Domain == cfg.Domain && s.ctx.TLSMode == cfg.TLS.Mode {
+// syncContext refreshes the local context from cfg: the domain and TLS mode,
+// each cached node's hostname, and the database placement map. eru sql,
+// psql, console, tunnel and secrets export verify the server certificate
+// against the master's hostname, so it has to follow a domain change made
+// with config set, config edit, or by another operator.
+func syncContext(s *session, cfg config.Cluster) ([]output.Warning, error) {
+	previous, previousMode := s.ctx.MasterHostname(), s.ctx.TLSMode
+	changed := s.ctx.Domain != cfg.Domain || s.ctx.TLSMode != cfg.TLS.Mode
+	s.ctx.Domain, s.ctx.TLSMode = cfg.Domain, cfg.TLS.Mode
+	for i, n := range s.ctx.Nodes {
+		if h := cfg.Hostname(n.Name); h != n.Hostname {
+			s.ctx.Nodes[i].Hostname = h
+			changed = true
+		}
+	}
+	if placement := placementOf(cfg); !maps.Equal(placement, s.ctx.Databases) {
+		s.ctx.Databases = placement
+		changed = true
+	}
+	if !changed {
 		return nil, nil
 	}
-	previous := s.ctx.Domain
-	s.ctx.Domain, s.ctx.TLSMode = cfg.Domain, cfg.TLS.Mode
 	if err := contexts.Save(s.ctx); err != nil {
 		return nil, err
 	}
-	message := fmt.Sprintf("context %s now verifies the server as %s (tls.mode %s)", s.ctx.Name, cfg.Domain, cfg.TLS.Mode)
-	if previous != cfg.Domain {
-		message += "; until the node holds a certificate for " + cfg.Domain +
+	hostname := s.ctx.MasterHostname()
+	if hostname == previous && cfg.TLS.Mode == previousMode {
+		return nil, nil
+	}
+	message := fmt.Sprintf("context %s now verifies the server as %s (tls.mode %s)", s.ctx.Name, hostname, cfg.TLS.Mode)
+	if previous != hostname {
+		message += "; until the node holds a certificate for " + hostname +
 			", connections from eru fail with a hostname mismatch. eru-certs.timer issues it within the hour, or now with: eru ssh --command 'sudo eru node run certs-renew'"
 	}
 	return []output.Warning{{Code: "context_tls_updated", Message: message}}, nil
 }
 
-// syncContextFromNode fetches cluster.toml and runs syncContextTLS on it.
+// placementOf is the database placement map of cfg: database name to node.
+func placementOf(cfg config.Cluster) map[string]string {
+	out := map[string]string{}
+	for _, cl := range cfg.Clusters {
+		out[cl.Name] = cl.Node
+	}
+	return out
+}
+
+// syncContextFromNode fetches cluster.toml and runs syncContext on it.
 // The command it follows already succeeded, so a failure here is a warning.
 func syncContextFromNode(cmd *cobra.Command, s *session, p *progress) []output.Warning {
 	data, err := fetchConfig(cmd, s, p)
@@ -349,7 +375,7 @@ func syncContextFromNode(cmd *cobra.Command, s *session, p *progress) []output.W
 	if err != nil {
 		return contextSyncFailed(s, err)
 	}
-	warnings, err := syncContextTLS(s, cfg)
+	warnings, err := syncContext(s, cfg)
 	if err != nil {
 		return contextSyncFailed(s, err)
 	}

@@ -93,7 +93,7 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		timeout = "60s"
 	}
 	extensions, _ := cmd.Flags().GetStringSlice("extensions")
-	db := config.Database{Name: name, StatementTimeout: timeout, Extensions: extensions}
+	db := config.ClusterSpec{Name: name, StatementTimeout: timeout, Extensions: extensions}
 	if len(extensions) == 0 {
 		db.Extensions = []string{"pg_stat_statements"}
 	}

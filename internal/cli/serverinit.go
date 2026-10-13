@@ -94,7 +94,7 @@ type initRun struct {
 }
 
 type initPlanData struct {
-	Cluster       string   `json:"cluster"`
+	Server        string   `json:"server"`
 	Node          string   `json:"node"`
 	Host          string   `json:"host,omitempty"`
 	PublicAddress string   `json:"public_address"`
@@ -108,7 +108,7 @@ type initPlanData struct {
 }
 
 type initResult struct {
-	Cluster          string   `json:"cluster"`
+	Server           string   `json:"server"`
 	Node             string   `json:"node"`
 	PublicAddress    string   `json:"public_address"`
 	WGAddress        string   `json:"wg_address"`
@@ -174,7 +174,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 				"an unfinished init for "+r.name+" exists",
 				output.ExitPrecondition,
 				"Continue it with eru server init --resume --name "+r.name+", or drop it with eru server init --discard --name "+r.name+".",
-			).WithDetails(map[string]any{"reason": "init_pending", "cluster": r.name, "pending_path": contexts.PendingDir(r.name)})
+			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": contexts.PendingDir(r.name)})
 		}
 	}
 	for _, name := range laterPhaseFlags {
@@ -209,7 +209,7 @@ func (r *initRun) confirm() error {
 	if !r.local {
 		target = r.boot.User + "@" + r.boot.Host
 	}
-	ok, err := PromptYes(cmd, fmt.Sprintf("Bootstrap %s as cluster %s? This hardens the host and closes public SSH.", target, r.name))
+	ok, err := PromptYes(cmd, fmt.Sprintf("Bootstrap %s as server %s? This hardens the host and closes public SSH.", target, r.name))
 	if err != nil {
 		return err
 	}
@@ -234,9 +234,9 @@ func (r *initRun) collect() error {
 		if cfg, err = config.ParseAnswers(raw); err != nil {
 			return output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
 		}
-		if len(cfg.Databases) > 0 {
-			return output.NewError(output.CodeValidation, path+" declares [[databases]]: server init creates no databases", output.ExitConfig,
-				"Remove [[databases]] from the answers file and add each database after init with eru db create <name>.")
+		if len(cfg.Clusters) > 0 {
+			return output.NewError(output.CodeValidation, path+" declares [[clusters]]: server init creates no databases", output.ExitConfig,
+				"Remove [[clusters]] from the answers file and add each database after init with eru db create <name>.")
 		}
 		_, r.boot, err = decodeBootstrap(raw)
 		if err != nil {
@@ -267,6 +267,9 @@ func (r *initRun) collect() error {
 	}
 	if v := stringFlag(cmd, "profile"); v != "" {
 		cfg.Postgres.Profile = v
+	}
+	if v := stringFlag(cmd, "default-size"); v != "" {
+		cfg.Postgres.DefaultSize = v
 	}
 	if flagChanged(cmd, "client-connections") {
 		if n, err := cmd.Flags().GetInt("client-connections"); err == nil {
@@ -326,7 +329,7 @@ func (r *initRun) collect() error {
 		if err := RequireFlag(cmd, false, "--name", "server init"); err != nil {
 			return err
 		}
-		v, err := promptLine(cmd, "Cluster name", "prod")
+		v, err := promptLine(cmd, "Server name", "prod")
 		if err != nil {
 			return err
 		}
@@ -349,17 +352,20 @@ func (r *initRun) collect() error {
 		public = addr
 	}
 	if len(cfg.Nodes) == 0 {
-		cfg.Nodes = []config.NodeSpec{{Name: r.name + "-1", Role: config.RolePrimary, WGAddress: config.DefaultCentralWG}}
+		cfg.Nodes = []config.NodeSpec{{Role: config.RoleMaster, WGAddress: config.DefaultCentralWG}}
 	}
 	cfg.Nodes[0].PublicAddress = public
+	if v := stringFlag(cmd, "node-name"); v != "" {
+		cfg.Nodes[0].Name = v
+	}
 	if cfg.Nodes[0].Name == "" {
-		cfg.Nodes[0].Name = r.name + "-1"
+		cfg.Nodes[0].Name = config.DefaultNodeName
 	}
 	if cfg.Nodes[0].WGAddress == "" {
 		cfg.Nodes[0].WGAddress = config.DefaultCentralWG
 	}
 	if cfg.Nodes[0].Role == "" {
-		cfg.Nodes[0].Role = config.RolePrimary
+		cfg.Nodes[0].Role = config.RoleMaster
 	}
 	supplied := suppliedAnswers(cmd, cfg, stringFlag(cmd, "answers") != "")
 	// The huh interview asks the Phase 2 question set in a TTY (D13).
@@ -533,13 +539,13 @@ func registerPending(sec contexts.PendingSecrets) {
 	}
 }
 
-func (r *initRun) primary() config.NodeSpec {
-	n, _ := r.cfg.Primary()
+func (r *initRun) master() config.NodeSpec {
+	n, _ := r.cfg.Master()
 	return n
 }
 
 func (r *initRun) planData() initPlanData {
-	n := r.primary()
+	n := r.master()
 	done := make([]string, 0, len(r.prog.Phases))
 	for _, phase := range []string{phaseSecrets, phaseFirstHost, phaseBinary, phaseHost, phaseTransport, phaseLockdown, phaseDNS, phaseDatabase, phaseTLS, phaseBackups, phaseDocument, phaseSecretsDone} {
 		if r.prog.Done(phase) {
@@ -547,7 +553,7 @@ func (r *initRun) planData() initPlanData {
 		}
 	}
 	data := initPlanData{
-		Cluster:       r.name,
+		Server:        r.name,
 		Node:          n.Name,
 		PublicAddress: n.PublicAddress,
 		WGAddress:     n.WGAddress,
@@ -566,8 +572,8 @@ func (r *initRun) planData() initPlanData {
 
 func (r *initRun) dryRunResult() error {
 	data := r.planData()
-	message := fmt.Sprintf("Would bootstrap %s as node %s of cluster %s: steps %s, then move SSH to WireGuard %s and show the secrets handoff.",
-		map[bool]string{true: "this server", false: data.Host}[r.local], data.Node, data.Cluster, strings.Join(data.Steps, ", "), data.WGAddress)
+	message := fmt.Sprintf("Would bootstrap %s as node %s, the master of server %s: steps %s, then move SSH to WireGuard %s and show the secrets handoff.",
+		map[bool]string{true: "this machine", false: data.Host}[r.local], data.Node, data.Server, strings.Join(data.Steps, ", "), data.WGAddress)
 	return output.Success(r.cmd, output.Result{Data: data, Message: message, Warnings: r.warnings})
 }
 
@@ -666,7 +672,7 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 	reply, err := caller.Call(ctx, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseHost,
 		"cluster_toml": string(raw),
-		"node_name":    r.primary().Name,
+		"node_name":    r.master().Name,
 		"operator":     op,
 		"local":        r.local,
 	}, remote.CallOptions{
@@ -699,7 +705,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	}
 	ctx := commandContext(cmd)
 	timeout := timeoutFlag(cmd)
-	n := r.primary()
+	n := r.master()
 	publicSSH := net.JoinHostPort(n.PublicAddress, strconv.Itoa(r.boot.Port))
 	if err := r.savePending(); err != nil {
 		return err
@@ -844,12 +850,13 @@ func runInitRemote(cmd *cobra.Command) error {
 	res.PublicSSHClosed = true
 	r.fillResult(&res)
 	message := strings.Join([]string{
-		fmt.Sprintf("Cluster %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.Domain),
+		fmt.Sprintf("Server %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.MasterHostname()),
 		"TLS: " + r.tlsSummary(),
 		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
 		"Context " + r.name + " is the current context on this machine. On another machine run eru login and paste the transfer bundle.",
 	}, "\n")
-	return r.finish(res, message, res.Next, fmt.Sprintf("Cluster %s is ready", r.name), nil)
+	r.warnings = append(r.warnings, node.NoOffsiteWarning(r.cfg)...)
+	return r.finish(res, message, res.Next, fmt.Sprintf("Server %s is ready", r.name), nil)
 }
 
 // finish renders the init result. On a terminal it draws the summary card;
@@ -859,11 +866,11 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 	if r.p.live == nil {
 		return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: next})
 	}
-	n := r.primary()
+	n := r.master()
 	rows := [][2]string{
 		{"Node", fmt.Sprintf("%s  %s  (WireGuard %s)", n.Name, n.PublicAddress, n.WGAddress)},
-		{"PgBouncer", r.cfg.Domain + ":6432"},
-		{"Direct TLS", r.cfg.Domain + ":443  (sslnegotiation=direct)"},
+		{"PgBouncer", r.cfg.MasterHostname() + ":6432"},
+		{"Direct TLS", r.cfg.MasterHostname() + ":443  (sslnegotiation=direct)"},
 		{"TLS", r.tlsSummary()},
 		{"Secrets", "in your password manager (transfer bundle: eru login on another machine)"},
 		{"Databases", "none yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents)"},
@@ -1005,8 +1012,8 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 		}
 	}
 	known.Pin(publicSSH, hostKeys...)
-	known.Pin(net.JoinHostPort(r.primary().PublicAddress, "22"), hostKeys...)
-	known.Pin(net.JoinHostPort(r.primary().WGAddress, "22"), hostKeys...)
+	known.Pin(net.JoinHostPort(r.master().PublicAddress, "22"), hostKeys...)
+	known.Pin(net.JoinHostPort(r.master().WGAddress, "22"), hostKeys...)
 	if err := known.Save(); err != nil {
 		return err
 	}
@@ -1215,7 +1222,7 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 
 // document builds the secrets document from the pending state (§10.1).
 func (r *initRun) document() (secretsdoc.Document, error) {
-	n := r.primary()
+	n := r.master()
 	if r.prog.WGPublicKey == "" || len(r.prog.SSHHostKeys) == 0 {
 		return secretsdoc.Document{}, errors.New("the node identity is missing from the pending init; re-run with --resume")
 	}
@@ -1223,10 +1230,11 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		Schema:     secretsdoc.Schema,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		EruVersion: buildinfo.Version,
-		Cluster:    secretsdoc.Cluster{Name: r.name, Domain: r.cfg.Domain, Stanza: r.name, TLSMode: r.cfg.TLS.Mode},
+		Server:     secretsdoc.Server{Name: r.name, Domain: r.cfg.Domain, TLSMode: r.cfg.TLS.Mode},
 		Nodes: []secretsdoc.Node{{
 			Name:          n.Name,
 			Role:          n.Role,
+			Hostname:      r.cfg.Hostname(n.Name),
 			PublicAddress: n.PublicAddress,
 			ListenPort:    r.cfg.Transport.ListenPort,
 			WGAddress:     n.WGAddress,
@@ -1253,8 +1261,8 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 // handoff with a new passphrase.
 func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 	cmd := r.cmd
-	n := r.primary()
-	res := initResult{Cluster: r.name, Node: n.Name, PublicAddress: n.PublicAddress, WGAddress: n.WGAddress, AdminUser: r.cfg.Server.AdminUser}
+	n := r.master()
+	res := initResult{Server: r.name, Node: n.Name, PublicAddress: n.PublicAddress, WGAddress: n.WGAddress, AdminUser: r.cfg.Server.AdminUser}
 	doc, err := r.document()
 	if err != nil {
 		return doc, res, err
@@ -1417,14 +1425,14 @@ func runInitLocal(cmd *cobra.Command) error {
 	res.LoginCommand = "eru login"
 	r.fillResult(&res)
 	message := strings.Join([]string{
-		fmt.Sprintf("Cluster %s is bootstrapped on this server (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
+		fmt.Sprintf("Server %s is bootstrapped on this machine (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
 		"TLS: " + r.tlsSummary(),
 		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
 		"On your machine run eru login and paste the transfer bundle from the handoff.",
 		"Then run any remote command, such as eru plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
 		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",
 	}, "\n")
-	return r.finish(res, message, append([]string{res.LoginCommand}, res.Next...), fmt.Sprintf("Cluster %s is bootstrapped on this server", r.name), []string{
+	return r.finish(res, message, append([]string{res.LoginCommand}, res.Next...), fmt.Sprintf("Server %s is bootstrapped on this machine", r.name), []string{
 		"On your machine run eru login and paste the transfer bundle,",
 		"then any remote command within 30 minutes. That closes public SSH; otherwise the SSH change reverts.",
 	})

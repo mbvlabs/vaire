@@ -41,15 +41,15 @@ type dnsRecord struct {
 	Value string `json:"value"`
 }
 
-// dnsRecords returns the records for domain: an A record for ipv4 and, when
-// the node has one, an AAAA record for ipv6.
-func dnsRecords(domain, ipv4, ipv6 string) []dnsRecord {
+// dnsRecords returns the records for a node's hostname: an A record for
+// ipv4 and, when the node has one, an AAAA record for ipv6.
+func dnsRecords(hostname, ipv4, ipv6 string) []dnsRecord {
 	records := []dnsRecord{}
 	if ipv4 != "" {
-		records = append(records, dnsRecord{Type: "A", Name: domain, Value: ipv4})
+		records = append(records, dnsRecord{Type: "A", Name: hostname, Value: ipv4})
 	}
 	if ipv6 != "" {
-		records = append(records, dnsRecord{Type: "AAAA", Name: domain, Value: ipv6})
+		records = append(records, dnsRecord{Type: "AAAA", Name: hostname, Value: ipv6})
 	}
 	return records
 }
@@ -71,10 +71,10 @@ type dnsCheck struct {
 
 // checkDNS queries each public resolver once and compares the answers with
 // the node's addresses.
-func checkDNS(ctx context.Context, domain, ipv4, ipv6 string) dnsCheck {
+func checkDNS(ctx context.Context, hostname, ipv4, ipv6 string) dnsCheck {
 	check := dnsCheck{Matches: ipv4 != "" || ipv6 != ""}
 	for _, server := range publicResolvers {
-		got := resolveWith(ctx, server, domain)
+		got := resolveWith(ctx, server, hostname)
 		check.Resolvers = append(check.Resolvers, got)
 		merged := map[string][]string{"A": got.A, "AAAA": got.AAAA}
 		if !dnsMatches(merged, ipv4, ipv6) {
@@ -89,8 +89,8 @@ func checkDNS(ctx context.Context, domain, ipv4, ipv6 string) dnsCheck {
 	return check
 }
 
-// resolveWith asks one resolver for the A and AAAA records of domain.
-func resolveWith(ctx context.Context, server, domain string) dnsAnswers {
+// resolveWith asks one resolver for the A and AAAA records of hostname.
+func resolveWith(ctx context.Context, server, hostname string) dnsAnswers {
 	out := dnsAnswers{Resolver: strings.TrimSuffix(server, ":53")}
 	resolver := &net.Resolver{
 		PreferGo: true,
@@ -100,7 +100,7 @@ func resolveWith(ctx context.Context, server, domain string) dnsAnswers {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	ips, err := resolver.LookupNetIP(ctx, "ip4", domain)
+	ips, err := resolver.LookupNetIP(ctx, "ip4", hostname)
 	if err == nil {
 		for _, ip := range ips {
 			out.A = appendUnique(out.A, ip.Unmap().String())
@@ -108,7 +108,7 @@ func resolveWith(ctx context.Context, server, domain string) dnsAnswers {
 	} else {
 		out.Error = lookupError(err)
 	}
-	if ips, err := resolver.LookupNetIP(ctx, "ip6", domain); err == nil {
+	if ips, err := resolver.LookupNetIP(ctx, "ip6", hostname); err == nil {
 		for _, ip := range ips {
 			if !ip.Is4In6() {
 				out.AAAA = appendUnique(out.AAAA, ip.String())

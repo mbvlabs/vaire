@@ -16,10 +16,12 @@ import (
 // NodePath marks a host as an eru node.
 const NodePath = "/etc/eru/node.toml"
 
-// Node is /etc/eru/node.toml (§6.2). Bootstrap (Phase 1) writes it.
+// Node is /etc/eru/node.toml (§6.2). Bootstrap writes it: the server
+// (setup) this node belongs to, the node's name and hostname, and its role.
 type Node struct {
-	Cluster     string    `toml:"cluster"`
+	Server      string    `toml:"server"`
 	NodeName    string    `toml:"node_name"`
+	Hostname    string    `toml:"hostname"`
 	Role        string    `toml:"role"`
 	InstalledAt time.Time `toml:"installed_at"`
 }
@@ -36,8 +38,8 @@ func LoadNode(path string) (Node, error) {
 		return Node{}, configError(path, err)
 	}
 	var missing []string
-	if strings.TrimSpace(node.Cluster) == "" {
-		missing = append(missing, "cluster")
+	if strings.TrimSpace(node.Server) == "" {
+		missing = append(missing, "server")
 	}
 	if strings.TrimSpace(node.NodeName) == "" {
 		missing = append(missing, "node_name")

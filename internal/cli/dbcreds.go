@@ -79,7 +79,7 @@ func newDatabaseSecret(cfg config.Cluster, name string, roles []string) (databas
 		out.Roles[role] = contexts.Role{User: name + "_" + role, Password: pw}
 		rpc[steps.SecretDatabaseRole(name, role)] = pw
 	}
-	out.URLs = secretsdoc.DatabaseURLs(cfg.Domain, cfg.TLS.Mode, name, out.Roles)
+	out.URLs = secretsdoc.DatabaseURLs(cfg.MasterHostname(), cfg.TLS.Mode, name, out.Roles)
 	return out, rpc, nil
 }
 

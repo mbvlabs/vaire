@@ -247,11 +247,31 @@ func (s backupSettings) configKeys() map[string]string {
 	return keys
 }
 
+// ensureRecoveryIdentity returns kit with the age recovery identity, creating
+// the kit or the identity when missing. server init calls it whether or not a
+// bucket is configured; backup setup keeps the identity it finds.
+func ensureRecoveryIdentity(kit *contexts.BackupCreds) (*contexts.BackupCreds, bool, error) {
+	out := &contexts.BackupCreds{}
+	if kit != nil {
+		*out = *kit
+	}
+	if out.Dumps.AgeIdentity != "" {
+		return out, false, nil
+	}
+	identity, recipient, err := backup.NewIdentity()
+	if err != nil {
+		return nil, false, err
+	}
+	out.Dumps.AgeIdentity, out.Dumps.AgeRecipient = identity, recipient
+	secrets.Add(identity)
+	return out, true, nil
+}
+
 // prepareKit fills the recovery kit for s, generating the pgBackRest cipher
-// pass and the dump age identity when this bucket has none yet. A cluster
-// whose backups are already on (wasConfigured) never gets a new cipher: that
-// would orphan the repository.
-func prepareKit(kit *contexts.BackupCreds, s backupSettings, stanza string, wasConfigured bool) (*contexts.BackupCreds, bool, error) {
+// pass when this bucket has none yet and the recovery identity when the kit
+// has none. A cluster whose backups are already on (wasConfigured) never gets
+// a new cipher: that would orphan the repository.
+func prepareKit(kit *contexts.BackupCreds, s backupSettings, wasConfigured bool) (*contexts.BackupCreds, bool, error) {
 	sameRepo := kit != nil && kit.Bucket == s.Bucket && kit.Prefix == s.Prefix && kit.PgBackRest.CipherPass != ""
 	if wasConfigured && !sameRepo {
 		return nil, false, output.NewError(output.CodeInputRequired,
@@ -270,22 +290,21 @@ func prepareKit(kit *contexts.BackupCreds, s backupSettings, stanza string, wasC
 			return nil, false, err
 		}
 		out.PgBackRest.CipherPass = pass
-		generated = true
-	}
-	if out.Dumps.AgeIdentity == "" {
-		identity, recipient, err := backup.NewIdentity()
-		if err != nil {
-			return nil, false, err
+		if kit != nil {
+			out.Dumps = kit.Dumps
 		}
-		out.Dumps.AgeIdentity, out.Dumps.AgeRecipient = identity, recipient
 		generated = true
 	}
+	out, created, err := ensureRecoveryIdentity(out)
+	if err != nil {
+		return nil, false, err
+	}
+	generated = generated || created
 	if out.AccessKeyID != s.KeyID || out.SecretAccessKey != s.Secret {
 		generated = true
 	}
 	out.Provider, out.Endpoint, out.Region, out.Bucket, out.Prefix, out.URIStyle = s.Provider, strings.TrimSuffix(s.Endpoint, "/"), s.Region, s.Bucket, s.Prefix, s.URIStyle
 	out.AccessKeyID, out.SecretAccessKey = s.KeyID, s.Secret
-	out.PgBackRest.Stanza = stanza
 	for _, v := range out.SecretValues() {
 		secrets.Add(v)
 	}
@@ -421,7 +440,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		}
 		confirm = token
 	}
-	kit, generated, err := prepareKit(creds.Backup, settings, cfg.Name(), wasConfigured)
+	kit, generated, err := prepareKit(creds.Backup, settings, wasConfigured)
 	if err != nil {
 		return err
 	}

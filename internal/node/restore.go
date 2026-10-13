@@ -54,7 +54,7 @@ func cleanupToken(_ config.Cluster, params json.RawMessage) string {
 
 // restoreInProgress refuses an operation on a database with an open restore.
 func restoreInProgress(db, action string) error {
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
@@ -73,7 +73,7 @@ func restoreInProgress(db, action string) error {
 // next restore can start without an abort first. Only a failed restore whose
 // job has finished is cleared; a ready one holds the operator's copy.
 func clearFailedRestore(ctx context.Context, db string) error {
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func clearFailedRestore(ctx context.Context, db string) error {
 	if err := (pg.Local{}).Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(backup.RestoringName(db))), nil); err != nil {
 		return err
 	}
-	return backup.Update(func(s *backup.State) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
 		if cur, ok := s.Restores[db]; ok && cur.ID == r.ID {
 			delete(s.Restores, db)
 		}
@@ -106,7 +106,7 @@ func checkRestorable(cfg config.Cluster, db string) error {
 		return output.NewError(output.CodeValidation, db+" is one of eru restore's own databases", output.ExitConfig,
 			"Restore the database it belongs to.")
 	}
-	if _, ok := cfg.DatabaseByName(db); !ok {
+	if _, ok := cfg.ClusterByName(db); !ok {
 		return databaseNotFound(db)
 	}
 	if len(db) > backup.MaxRestorableName {
@@ -161,7 +161,7 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "target": target, "space": space, "dry_run": true}}, nil
 	}
-	if err := backup.Update(func(s *backup.State) error {
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		if _, open := s.Restores[p.Database]; open {
 			return restoreInProgress(p.Database, "a new restore")
 		}
@@ -272,7 +272,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 		return nil, err
 	}
 	readyAt := stamp()
-	_ = backup.Update(func(s *backup.State) error {
+	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		r := s.Restores[p.Database]
 		r.Phase, r.ReadyAt, r.Warnings, r.Error = backup.PhaseReady, readyAt, warnings, ""
 		s.Restores[p.Database] = r
@@ -297,7 +297,7 @@ func failRestore(env *jobEnv, cause error) {
 	if json.Unmarshal(env.Params, &p) != nil || p.Database == "" {
 		return
 	}
-	_ = backup.Update(func(s *backup.State) error {
+	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		if r, ok := s.Restores[p.Database]; ok {
 			r.Phase, r.Error = backup.PhaseFailed, cause.Error()
 			s.Restores[p.Database] = r
@@ -310,7 +310,7 @@ func failRestore(env *jobEnv, cause error) {
 // a dump.
 func loadRestore(ctx context.Context, env *jobEnv, p restoreParams) ([]string, error) {
 	cfg := env.Cluster
-	db, ok := cfg.DatabaseByName(p.Database)
+	db, ok := cfg.ClusterByName(p.Database)
 	if !ok {
 		return nil, databaseNotFound(p.Database)
 	}
@@ -337,7 +337,7 @@ func loadRestore(ctx context.Context, env *jobEnv, p restoreParams) ([]string, e
 
 // createLoadTarget creates database target owned by db's owner, with db's
 // grants and default privileges in place before anything is loaded.
-func createLoadTarget(ctx context.Context, target string, db config.Database) error {
+func createLoadTarget(ctx context.Context, target string, db config.ClusterSpec) error {
 	local := pg.Local{}
 	sql := fmt.Sprintf("CREATE DATABASE %s OWNER %s;\n", pg.Quote(target), pg.Quote(db.Name+"_owner")) +
 		steps.DatabaseConnectSQL(target, db.Name)
@@ -349,7 +349,7 @@ func createLoadTarget(ctx context.Context, target string, db config.Database) er
 
 // finishLoad re-runs the grants after the load and analyzes, so restore
 // status can compare row estimates.
-func finishLoad(ctx context.Context, target string, db config.Database) error {
+func finishLoad(ctx context.Context, target string, db config.ClusterSpec) error {
 	local := pg.Local{}
 	if err := local.Exec(ctx, target, steps.DatabaseGrantsSQL(db), nil); err != nil {
 		return err
@@ -407,7 +407,7 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.Confirm == "" && !env.Req.DryRun {
 		return Result{}, confirmRequired("promote replaces "+p.Database+" with its restored copy", p.Database+"/restore")
 	}
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
@@ -429,7 +429,7 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 // promote swaps <db>__restoring in for db, keeps the old one as a leftover
 // and closes the restore.
 func promote(ctx context.Context, cfg config.Cluster, db string, report engine.Reporter) (map[string]any, error) {
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +441,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, report engine.R
 		return nil, err
 	}
 	took := time.Since(start)
-	if err := backup.Update(func(s *backup.State) error {
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		delete(s.Restores, db)
 		s.Leftovers = append(s.Leftovers, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: r.ID})
 		return nil
@@ -463,7 +463,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	if err := restoreInProgress(p.Database, "undo"); err != nil {
 		return Result{}, err
 	}
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
@@ -483,7 +483,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	if err := backup.Swap(ctx, pg.Local{}, p.Database, back.Name, aside); err != nil {
 		return Result{}, err
 	}
-	if err := backup.Update(func(s *backup.State) error {
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		kept := s.Leftovers[:0]
 		for _, l := range s.Leftovers {
 			if l.Name != back.Name {
@@ -503,7 +503,7 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
@@ -528,7 +528,7 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	if err := (pg.Local{}).Exec(ctx, "postgres", fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);\n", pg.Quote(backup.RestoringName(p.Database))), nil); err != nil {
 		return Result{}, err
 	}
-	if err := backup.Update(func(s *backup.State) error {
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		delete(s.Restores, p.Database)
 		return nil
 	}); err != nil {
@@ -554,7 +554,7 @@ func handleRestoreCleanup(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
@@ -585,7 +585,7 @@ func handleRestoreCleanup(ctx context.Context, env *Env) (Result, error) {
 		}
 		dropped = append(dropped, l.Name)
 	}
-	if err := backup.Update(func(s *backup.State) error {
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		kept := s.Leftovers[:0]
 		for _, l := range s.Leftovers {
 			if !containsString(dropped, l.Name) {
@@ -618,7 +618,7 @@ func handleRestoreStatus(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
@@ -699,7 +699,7 @@ type dbForkParams struct {
 }
 
 // handleDBFork creates the new database through the db create path (its
-// [[databases]] entry and four roles, with operator-generated passwords),
+// [[clusters]] entry and four roles, with operator-generated passwords),
 // then copies the source into it as a detachable job: from the live database
 // without --at, from a scratch restore at that time with it.
 func handleDBFork(ctx context.Context, env *Env) (Result, error) {
@@ -708,7 +708,7 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	cfg := env.Cluster
-	src, ok := cfg.DatabaseByName(p.Source)
+	src, ok := cfg.ClusterByName(p.Source)
 	if !ok {
 		return Result{}, databaseNotFound(p.Source)
 	}
@@ -736,7 +736,7 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	created, err := createDatabase(ctx, env, config.Database{Name: p.Name, StatementTimeout: src.StatementTimeout, Extensions: src.Extensions})
+	created, err := createDatabase(ctx, env, config.ClusterSpec{Name: p.Name, Size: src.Size, StatementTimeout: src.StatementTimeout, Extensions: src.Extensions})
 	release()
 	if err != nil {
 		return Result{}, err
@@ -757,7 +757,7 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
-	db, ok := env.Cluster.DatabaseByName(p.Name)
+	db, ok := env.Cluster.ClusterByName(p.Name)
 	if !ok {
 		return nil, databaseNotFound(p.Name)
 	}

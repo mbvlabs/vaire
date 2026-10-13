@@ -301,14 +301,14 @@ func driverFor(cfg config.Cluster, rt engine.Runtime, report engine.Reporter) ba
 	return backup.PgBackRest{Stanza: cfg.Name(), Shell: rt.Shell, StepID: pgbackrestID, Report: report, PG: rt.PG}
 }
 
-// RecordBackup stores a successful backup in state.json and refreshes the
+// RecordBackup stores a successful backup in records.json and refreshes the
 // eru.prom backup lines. Neither failing fails the backup.
 func RecordBackup(cfg config.Cluster, set backup.Set) {
 	finished := set.Stop
 	if finished == "" {
 		finished = time.Now().UTC().Format(time.RFC3339)
 	}
-	_ = backup.Update(func(s *backup.State) error {
+	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.LastBackup[set.Type] = backup.BackupResult{Label: set.Label, FinishedAt: finished, Size: set.Size}
 		return nil
 	})
@@ -318,7 +318,7 @@ func RecordBackup(cfg config.Cluster, set backup.Set) {
 // WriteMetrics refreshes eru.prom; a failure is ignored.
 func WriteMetrics(cfg config.Cluster) {
 	node := ""
-	if n, ok := cfg.Primary(); ok {
+	if n, ok := cfg.Master(); ok {
 		node = n.Name
 	}
 	_ = backup.WriteMetrics(cfg.Name(), node)

@@ -86,7 +86,7 @@ http {
     # HTTPS on 443 after ssl_preread. Phase 5 adds the /metrics routes here.
     server {
         listen 127.0.0.1:8443 ssl default_server;
-        server_name {{ .Domain }};
+        server_name {{ .Hostname }};
         ssl_certificate /etc/eru/tls/server.crt;
         ssl_certificate_key /etc/eru/tls/server.key;
         ssl_protocols TLSv1.2 TLSv1.3;

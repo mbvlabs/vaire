@@ -2,16 +2,28 @@ package backup
 
 import (
 	"encoding/json"
+	"os"
 	"sort"
 
+	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
 )
 
-// maxDrills is how many drill results state.json keeps.
+// RecordsPath holds the node's durable records, beside state.json (which
+// keeps only jobs and the lockdown flags). The master backup carries it.
+const RecordsPath = "/var/lib/eru/records.json"
+
+// recordsLockPath serializes read-modify-write cycles of records.json.
+const recordsLockPath = RecordsPath + ".lock"
+
+// maxDrills is how many drill results records.json keeps.
 const maxDrills = 12
 
-// State is the backup section of /var/lib/eru/state.json.
-type State struct {
+// Records is /var/lib/eru/records.json: open restores per database, restore
+// leftovers, drills and the last backup, verify and dump results. Timeline
+// switches and dropped stanzas join them with per-cluster restores and
+// drops.
+type Records struct {
 	// Restores are the open restores, by database: one per database at a
 	// time. A record stays until promote or abort.
 	Restores map[string]Restore `json:"restores,omitempty"`
@@ -95,20 +107,29 @@ type BackupResult struct {
 	Size       int64  `json:"size"`
 }
 
-// LoadState reads the backup section of state.json.
-func LoadState() (State, error) {
-	st, err := engine.LoadState(engine.StatePath)
+// LoadRecords reads records.json. A missing file is empty records; a file
+// that does not decode returns precondition_failed and is never reset.
+func LoadRecords() (Records, error) {
+	raw, err := os.ReadFile(RecordsPath)
 	if err != nil {
-		return State{}, err
+		if os.IsNotExist(err) {
+			return decode(nil)
+		}
+		return Records{}, err
 	}
-	return decode(st.Backup)
+	return decode(raw)
 }
 
-func decode(raw json.RawMessage) (State, error) {
-	var s State
+func decode(raw []byte) (Records, error) {
+	var s Records
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &s); err != nil {
-			return State{}, err
+			return Records{}, output.NewError(
+				output.CodePrecondition,
+				"the node records file is corrupt",
+				output.ExitPrecondition,
+				"Inspect "+RecordsPath+" and fix or remove it. eru never resets it on its own.",
+			).WithDetails(map[string]any{"reason": "records_corrupt", "path": RecordsPath})
 		}
 	}
 	if s.Restores == nil {
@@ -123,11 +144,11 @@ func decode(raw json.RawMessage) (State, error) {
 	return s, nil
 }
 
-// Update applies fn to the backup section under the state lock. The rest of
-// state.json is kept as it is.
-func Update(fn func(*State) error) error {
-	return engine.UpdateState(func(st *engine.State) error {
-		s, err := decode(st.Backup)
+// UpdateRecords applies fn to records.json under its lock. fn returning an
+// error leaves the file unchanged.
+func UpdateRecords(fn func(*Records) error) error {
+	return engine.WithFileLock(recordsLockPath, func() error {
+		s, err := LoadRecords()
 		if err != nil {
 			return err
 		}
@@ -137,23 +158,22 @@ func Update(fn func(*State) error) error {
 		if len(s.Drills) > maxDrills {
 			s.Drills = append([]Drill(nil), s.Drills[len(s.Drills)-maxDrills:]...)
 		}
-		raw, err := json.Marshal(s)
+		raw, err := json.MarshalIndent(s, "", "  ")
 		if err != nil {
 			return err
 		}
-		st.Backup = raw
-		return nil
+		return engine.WriteFileAtomic(RecordsPath, append(raw, '\n'), 0o600)
 	})
 }
 
 // OpenRestore returns the open restore of db, if any.
-func (s State) OpenRestore(db string) (Restore, bool) {
+func (s Records) OpenRestore(db string) (Restore, bool) {
 	r, ok := s.Restores[db]
 	return r, ok
 }
 
 // LeftoversOf returns the leftovers of db, or all of them when db is empty.
-func (s State) LeftoversOf(db string) []Leftover {
+func (s Records) LeftoversOf(db string) []Leftover {
 	var out []Leftover
 	for _, l := range s.Leftovers {
 		if db == "" || l.Database == db {
@@ -165,7 +185,7 @@ func (s State) LeftoversOf(db string) []Leftover {
 }
 
 // LastDrill returns the newest drill.
-func (s State) LastDrill() (Drill, bool) {
+func (s Records) LastDrill() (Drill, bool) {
 	if len(s.Drills) == 0 {
 		return Drill{}, false
 	}

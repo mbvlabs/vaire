@@ -15,9 +15,9 @@ import (
 // pgPort is where operator commands connect to PostgreSQL (D12).
 const pgPort = 5432
 
-// nodeWGAddr returns the primary node's WireGuard address.
+// nodeWGAddr returns the master node's WireGuard address.
 func nodeWGAddr(s *session) string {
-	if n, ok := s.ctx.Primary(); ok {
+	if n, ok := s.ctx.Master(); ok {
 		return n.WGAddress
 	}
 	return ""
@@ -90,7 +90,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	defer s.Close()
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "eru sql needs --db", output.ExitInput,
-			"Pass --db with one of the cluster's databases.").WithDetails(map[string]any{"flag": "--db"})
+			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 	user, password, err := adminCredentials(s.ctx)
 	if err != nil {
@@ -98,7 +98,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	}
 	ctx := commandContext(cmd)
 	conn, err := pg.Connect(ctx, s.tunnel, pg.Params{
-		Host: nodeWGAddr(s), Port: pgPort, ServerName: s.ctx.Domain, TLSMode: s.ctx.TLSMode,
+		Host: nodeWGAddr(s), Port: pgPort, ServerName: s.ctx.MasterHostname(), TLSMode: s.ctx.TLSMode,
 		User: user, Password: password, Database: db,
 	})
 	if err != nil {

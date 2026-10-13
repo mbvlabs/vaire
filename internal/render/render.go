@@ -100,7 +100,7 @@ func ExtensionsConf(cfg config.Cluster, res tune.Result) []byte {
 // enabledExtensions is the union of the per-database extension lists, sorted.
 func enabledExtensions(cfg config.Cluster) []string {
 	seen := map[string]bool{}
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		for _, name := range db.Extensions {
 			seen[name] = true
 		}
@@ -206,7 +206,7 @@ func NginxConf(cfg config.Cluster, acmeWebroot string) []byte {
 		}
 	}
 	return execute("nginx.conf.tmpl", map[string]any{
-		"Domain":      cfg.Domain,
+		"Hostname":    cfg.MasterHostname(),
 		"WGSubnet":    cfg.Transport.Subnet,
 		"Allowlist":   allow,
 		"ACMEWebroot": acmeWebroot,

@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/catalog"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -31,7 +30,8 @@ const (
 	DefaultSwapMB          = 1024
 	DefaultTimezone        = "UTC"
 	DefaultDataRoot        = "/var/lib/postgresql/18"
-	RolePrimary            = "primary"
+	DefaultNodeName        = "db1"
+	RoleMaster             = "master"
 )
 
 // Scope selects how much of cluster.toml ValidateFor checks. A Phase 1 host
@@ -47,21 +47,24 @@ const (
 // Cluster is cluster.toml (§6.1), the full schema. Every table has defaults so
 // a Phase 1 file still decodes; unknown keys are rejected (D8).
 type Cluster struct {
-	Schema      int         `toml:"schema"`
-	ClusterName string      `toml:"name"`
-	Domain      string      `toml:"domain,omitempty"`
-	ACMEEmail   string      `toml:"acme_email,omitempty"`
-	Timezone    string      `toml:"timezone"`
-	TLS         TLS         `toml:"tls"`
-	Transport   Transport   `toml:"transport"`
-	Nodes       []NodeSpec  `toml:"nodes"`
-	Server      Server      `toml:"server"`
-	Postgres    Postgres    `toml:"postgres"`
-	Network     Network     `toml:"network"`
-	Databases   []Database  `toml:"databases"`
-	Backup      Backup      `toml:"backup"`
-	Maintenance Maintenance `toml:"maintenance"`
-	Metrics     Metrics     `toml:"metrics"`
+	Schema      int           `toml:"schema"`
+	ClusterName string        `toml:"name"`
+	Domain      string        `toml:"domain,omitempty"`
+	ACMEEmail   string        `toml:"acme_email,omitempty"`
+	Timezone    string        `toml:"timezone"`
+	TLS         TLS           `toml:"tls"`
+	Transport   Transport     `toml:"transport"`
+	Nodes       []NodeSpec    `toml:"nodes"`
+	Server      Server        `toml:"server"`
+	Postgres    Postgres      `toml:"postgres"`
+	Network     Network       `toml:"network"`
+	Clusters    []ClusterSpec `toml:"clusters"`
+	Backup      Backup        `toml:"backup"`
+	// MasterBackup is decoded and validated now; the master backup that
+	// uses it arrives in Phase 7.
+	MasterBackup MasterBackup `toml:"master_backup"`
+	Maintenance  Maintenance  `toml:"maintenance"`
+	Metrics      Metrics      `toml:"metrics"`
 }
 
 // TLS is [tls].
@@ -86,10 +89,13 @@ type NodeSpec struct {
 }
 
 // Server is [server]. DataRoot holds one directory per PostgreSQL cluster.
+// MemoryReserve is what the OS, the poolers, nginx and eru keep; empty means
+// max(512MiB, 25% of RAM).
 type Server struct {
-	AdminUser string `toml:"admin_user"`
-	SwapMB    int    `toml:"swap_mb"`
-	DataRoot  string `toml:"data_root"`
+	AdminUser     string `toml:"admin_user"`
+	SwapMB        int    `toml:"swap_mb"`
+	DataRoot      string `toml:"data_root"`
+	MemoryReserve string `toml:"memory_reserve"`
 }
 
 // DataDirectory is the data directory of the one cluster, main, under
@@ -98,14 +104,19 @@ func (s Server) DataDirectory() string {
 	return path.Join(s.DataRoot, "main")
 }
 
-// Postgres is [postgres] with the [postgres.settings] override table.
+// Postgres is [postgres]: the setup-wide defaults for every cluster, with
+// the [postgres.settings] override table. ClientConnections is the
+// transaction pooler's max_client_conn, SessionClientConnections the
+// session pooler's.
 type Postgres struct {
-	Version           int               `toml:"version"`
-	Profile           string            `toml:"profile"`
-	ClientConnections int               `toml:"client_connections"`
-	LocaleProvider    string            `toml:"locale_provider"`
-	Locale            string            `toml:"locale"`
-	Settings          map[string]string `toml:"settings,omitempty"`
+	Version                  int               `toml:"version"`
+	Profile                  string            `toml:"profile"`
+	ClientConnections        int               `toml:"client_connections"`
+	SessionClientConnections int               `toml:"session_client_connections"`
+	LocaleProvider           string            `toml:"locale_provider"`
+	Locale                   string            `toml:"locale"`
+	DefaultSize              string            `toml:"default_size"`
+	Settings                 map[string]string `toml:"settings,omitempty"`
 }
 
 // Network is [network].
@@ -115,24 +126,12 @@ type Network struct {
 	ExposePostgres  bool     `toml:"expose_postgres"`
 }
 
-// Database is one [[databases]] entry.
-type Database struct {
-	Name             string   `toml:"name"`
-	StatementTimeout string   `toml:"statement_timeout"`
-	Extensions       []string `toml:"extensions"`
-	// Backup is the per-database long-retention policy (Phase 3). Left out
-	// of the file while empty, so files from earlier phases are unchanged.
-	Backup DatabaseBackup `toml:"backup,omitempty"`
-}
-
-// DatabaseBackup is [databases.backup]: scheduled pg_dump archives kept
-// longer than the restore window, age-encrypted in the bucket.
-type DatabaseBackup struct {
-	// DumpSchedule is a systemd OnCalendar expression; empty means no
-	// scheduled dumps.
-	DumpSchedule string `toml:"dump_schedule,omitempty"`
-	// DumpRetention is how many dumps are kept.
-	DumpRetention int `toml:"dump_retention,omitempty"`
+// MasterBackup is [master_backup] (RFC 6.5): the retention of the master's
+// state bundles. The bucket and prefix come from [backup].
+type MasterBackup struct {
+	RetentionDays  int `toml:"retention_days"`
+	RetentionWeeks int `toml:"retention_weeks"`
+	LocalKeep      int `toml:"local_keep"`
 }
 
 // Backup is [backup].
@@ -194,12 +193,14 @@ func DefaultCluster() Cluster {
 		Transport: Transport{Kind: "wireguard", Subnet: DefaultSubnet, ListenPort: DefaultListenPort},
 		Server:    Server{AdminUser: DefaultAdminUser, SwapMB: DefaultSwapMB, DataRoot: DefaultDataRoot},
 		Postgres: Postgres{
-			Version:           18,
-			Profile:           "oltp",
-			ClientConnections: 1000,
-			LocaleProvider:    "builtin",
-			Locale:            "C.UTF-8",
-			Settings:          map[string]string{},
+			Version:                  18,
+			Profile:                  "oltp",
+			ClientConnections:        1000,
+			SessionClientConnections: 100,
+			LocaleProvider:           "builtin",
+			Locale:                   "C.UTF-8",
+			DefaultSize:              DefaultSize,
+			Settings:                 map[string]string{},
 		},
 		Network: Network{ClientAllowlist: []string{}, ExposePgbouncer: true},
 		Backup: Backup{
@@ -220,19 +221,40 @@ func DefaultCluster() Cluster {
 				ExtraPaths:    []string{},
 			},
 		},
-		Maintenance: Maintenance{Window: "02:00-05:00", RepackBloatThreshold: 0.40},
-		Metrics:     Metrics{Enabled: true, PathPrefix: "/metrics"},
+		MasterBackup: MasterBackup{RetentionDays: 30, RetentionWeeks: 52, LocalKeep: 10},
+		Maintenance:  Maintenance{Window: "02:00-05:00", RepackBloatThreshold: 0.40},
+		Metrics:      Metrics{Enabled: true, PathPrefix: "/metrics"},
 	}
 }
 
-// Primary returns the node with role primary.
-func (c Cluster) Primary() (NodeSpec, bool) {
+// Master returns the node with role master: the first server, which holds
+// the desired state.
+func (c Cluster) Master() (NodeSpec, bool) {
 	for _, n := range c.Nodes {
-		if n.Role == RolePrimary {
+		if n.Role == RoleMaster {
 			return n, true
 		}
 	}
 	return NodeSpec{}, false
+}
+
+// Hostname is a node's one hostname, <node>.<domain>. It is empty until the
+// domain is set.
+func (c Cluster) Hostname(node string) string {
+	if c.Domain == "" {
+		return ""
+	}
+	return node + "." + c.Domain
+}
+
+// MasterHostname is the master's hostname: what clients, the certificate
+// and the operator's context name.
+func (c Cluster) MasterHostname() string {
+	n, ok := c.Master()
+	if !ok {
+		return ""
+	}
+	return c.Hostname(n.Name)
 }
 
 // Node returns the node called name.
@@ -243,16 +265,6 @@ func (c Cluster) Node(name string) (NodeSpec, bool) {
 		}
 	}
 	return NodeSpec{}, false
-}
-
-// DatabaseByName returns the [[databases]] entry called name.
-func (c Cluster) DatabaseByName(name string) (Database, bool) {
-	for _, d := range c.Databases {
-		if d.Name == name {
-			return d, true
-		}
-	}
-	return Database{}, false
 }
 
 // WGPrefixLen is the prefix length of [transport] subnet, used for the wg0
@@ -370,7 +382,7 @@ func (c Cluster) Encode() ([]byte, error) {
 var (
 	// NamePattern is the cluster name format; it is also the pgBackRest stanza.
 	NamePattern     = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
-	nodeNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
+	NodeNamePattern = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,38}[a-z0-9])?$`)
 	userPattern     = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	timezonePattern = regexp.MustCompile(`^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$`)
 	fqdnPattern     = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -460,20 +472,20 @@ func (c Cluster) ValidateFor(scope Scope) error {
 			add("network.client_allowlist entry %q %v", cidr, err)
 		}
 	}
-	primaries := 0
+	masters := 0
 	names := map[string]bool{}
 	for i, n := range c.Nodes {
-		if !nodeNamePattern.MatchString(n.Name) {
-			add("nodes[%d].name %q must match %s", i, n.Name, nodeNamePattern)
+		if !NodeNamePattern.MatchString(n.Name) {
+			add("nodes[%d].name %q must match %s", i, n.Name, NodeNamePattern)
 		}
 		if names[n.Name] {
 			add("nodes[%d].name %q is a duplicate", i, n.Name)
 		}
 		names[n.Name] = true
-		if n.Role == RolePrimary {
-			primaries++
+		if n.Role == RoleMaster {
+			masters++
 		} else {
-			add("nodes[%d].role %q: only primary exists until Phase 10", i, n.Role)
+			add("nodes[%d].role %q: only master exists until Phase 10", i, n.Role)
 		}
 		if _, err := netip.ParseAddr(n.PublicAddress); err != nil {
 			add("nodes[%d].public_address %q is not an IP address", i, n.PublicAddress)
@@ -483,8 +495,8 @@ func (c Cluster) ValidateFor(scope Scope) error {
 			add("nodes[%d].wg_address %q is not inside %s", i, n.WGAddress, c.Transport.Subnet)
 		}
 	}
-	if primaries != 1 {
-		add("exactly one node with role primary is required (multi-node arrives in Phase 10)")
+	if masters != 1 {
+		add("exactly one node with role master is required (workers arrive in Phase 10)")
 	}
 	c.validatePhase2(add, scope)
 	if len(problems) == 0 {
@@ -512,13 +524,25 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	if c.Postgres.Version != 18 {
 		add("postgres.version must be 18")
 	}
-	switch c.Postgres.Profile {
-	case "oltp", "mixed", "analytics":
-	default:
-		add("postgres.profile %q must be oltp, mixed or analytics", c.Postgres.Profile)
+	if err := checkProfile(c.Postgres.Profile); err != nil {
+		add("postgres.profile %q %v", c.Postgres.Profile, err)
 	}
 	if err := CheckClientConnections(c.Postgres.ClientConnections); err != nil {
 		add("postgres.client_connections %v", err)
+	}
+	if err := CheckClientConnections(c.Postgres.SessionClientConnections); err != nil {
+		add("postgres.session_client_connections %v", err)
+	}
+	if _, ok := LookupSize(c.Postgres.DefaultSize); !ok {
+		add("postgres.default_size %q must be one of nano, small, medium, large, xlarge", c.Postgres.DefaultSize)
+	}
+	if c.Server.MemoryReserve != "" {
+		if _, err := ParseMemoryMiB(c.Server.MemoryReserve); err != nil {
+			add("server.memory_reserve %q %v", c.Server.MemoryReserve, err)
+		}
+	}
+	if c.MasterBackup.RetentionDays < 1 || c.MasterBackup.RetentionWeeks < 0 || c.MasterBackup.LocalKeep < 1 {
+		add("master_backup needs retention_days and local_keep of at least 1, and retention_weeks of at least 0")
 	}
 	switch c.Postgres.LocaleProvider {
 	case "builtin", "icu", "libc":
@@ -536,35 +560,7 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 			add("postgres.settings key %q is managed by eru and cannot be overridden", key)
 		}
 	}
-	seen := map[string]bool{}
-	for i, db := range c.Databases {
-		if err := CheckDatabaseName(db.Name); err != nil {
-			add("databases[%d].name %q %v", i, db.Name, err)
-		}
-		if seen[db.Name] {
-			add("databases[%d].name %q is a duplicate", i, db.Name)
-		}
-		seen[db.Name] = true
-		if !durationPattern.MatchString(db.StatementTimeout) {
-			add("databases[%d].statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", i, db.StatementTimeout)
-		}
-		for _, ext := range db.Extensions {
-			if _, ok := catalog.Lookup(ext); !ok {
-				add("databases[%d].extensions %q is not in the catalog (it arrives with eru ext in Phase 4)", i, ext)
-			}
-		}
-		if db.Backup.DumpSchedule != "" {
-			if c.Backup.Provider == "" {
-				add("databases[%d].backup.dump_schedule needs a bucket: run eru backup setup first", i)
-			}
-			if db.Backup.DumpRetention < 1 {
-				add("databases[%d].backup.dump_retention must be at least 1 when dump_schedule is set", i)
-			}
-		}
-		if db.Backup.DumpRetention < 0 {
-			add("databases[%d].backup.dump_retention must not be negative", i)
-		}
-	}
+	c.validateClusters(add)
 	if c.Backup.Provider != "" {
 		if err := CheckProvider(c.Backup.Provider); err != nil {
 			add("backup.provider %q %v", c.Backup.Provider, err)
@@ -618,8 +614,14 @@ func (c Cluster) ScheduleValues() map[string]string {
 	add("backup.database.incr_schedule", c.Backup.Database.IncrSchedule)
 	add("backup.database.verify_schedule", c.Backup.Database.VerifySchedule)
 	add("backup.database.drill_schedule", c.Backup.Database.DrillSchedule)
-	for _, db := range c.Databases {
-		add("databases."+db.Name+".backup.dump_schedule", db.Backup.DumpSchedule)
+	for _, cl := range c.Clusters {
+		at := "clusters." + cl.Name + ".backup."
+		add(at+"full_schedule", cl.Backup.FullSchedule)
+		add(at+"diff_schedule", cl.Backup.DiffSchedule)
+		add(at+"incr_schedule", cl.Backup.IncrSchedule)
+		add(at+"verify_schedule", cl.Backup.VerifySchedule)
+		add(at+"drill_schedule", cl.Backup.DrillSchedule)
+		add(at+"dump_schedule", cl.Backup.DumpSchedule)
 	}
 	return out
 }

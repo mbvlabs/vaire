@@ -93,7 +93,7 @@ func runTunnel(cmd *cobra.Command, _ []string) error {
 	go proxy(ctx, ln, s.tunnel, remote)
 
 	dsn := fmt.Sprintf("postgres://<user>:<password>@127.0.0.1:%d/<db>", port)
-	hint := "clients must set sslmode=require, or keep the hostname " + s.ctx.Domain + " so verify-full matches"
+	hint := "clients must set sslmode=require, or keep the hostname " + s.ctx.MasterHostname() + " so verify-full matches"
 	opts, _ := output.ParseOptions(cmd)
 	if opts.Stream || opts.Mode != output.ModeHuman {
 		ready := output.Event{Schema: output.EventSchema, Type: "ready", Detail: fmt.Sprintf("127.0.0.1:%d -> %s", port, remote)}

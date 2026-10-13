@@ -1,6 +1,6 @@
 // Package backup is eru's database backup layer (Phase 3): the Driver seam
 // with its pgBackRest implementation, scratch restores, the per-database swap,
-// age-encrypted long-retention dumps, the backup section of state.json, the
+// age-encrypted long-retention dumps, the durable records in records.json, the
 // eru.prom backup lines and the free-space checks.
 //
 // The user-facing model is per database. pgBackRest and WAL archiving run

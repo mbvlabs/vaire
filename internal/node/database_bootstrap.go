@@ -32,13 +32,13 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 			"Run the host phase first with eru server init.",
 		).WithDetails(map[string]any{"reason": "not_a_node"})
 	}
-	if nodeCfg.Cluster != cfg.Name() {
+	if nodeCfg.Server != cfg.Name() {
 		return Result{}, output.NewError(
 			output.CodePrecondition,
-			"this node belongs to cluster "+nodeCfg.Cluster,
+			"this node belongs to server "+nodeCfg.Server,
 			output.ExitPrecondition,
-			"Use the cluster's own secrets document.",
-		).WithDetails(map[string]any{"reason": "node_belongs_to_other_cluster", "cluster": nodeCfg.Cluster})
+			"Use that server's own secrets document.",
+		).WithDetails(map[string]any{"reason": "node_belongs_to_other_server", "server": nodeCfg.Server})
 	}
 	if !hostPhaseComplete() {
 		return Result{}, output.NewError(
@@ -54,6 +54,9 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 		return Result{}, err
 	}
 	if err := (state.FileStore{}).Save(raw); err != nil {
+		return Result{}, err
+	}
+	if err := syncNodeHostname(cfg); err != nil {
 		return Result{}, err
 	}
 	env.Cluster = cfg

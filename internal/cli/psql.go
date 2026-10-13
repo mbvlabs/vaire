@@ -18,7 +18,7 @@ func runPsql(cmd *cobra.Command, _ []string) error {
 	db := stringFlag(cmd, "db")
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "eru psql needs --db", output.ExitInput,
-			"Pass --db with one of the cluster's databases.").WithDetails(map[string]any{"flag": "--db"})
+			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 	if err := localenv.RequireTool(cmd, localenv.ToolPsql); err != nil {
 		return err
@@ -48,7 +48,7 @@ func runPsql(cmd *cobra.Command, _ []string) error {
 	}
 	sslMode := "verify-full"
 	env := []string{
-		"PGHOST=" + s.ctx.Domain,
+		"PGHOST=" + s.ctx.MasterHostname(),
 		"PGHOSTADDR=127.0.0.1",
 		"PGPORT=" + strconv.Itoa(port),
 		"PGUSER=" + user,

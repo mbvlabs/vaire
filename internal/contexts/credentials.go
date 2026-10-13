@@ -6,7 +6,7 @@ type Role struct {
 	Password string `json:"password"`
 }
 
-// DatabaseCreds holds the cluster-wide database credentials: the admin role
+// DatabaseCreds holds the setup-wide database credentials: the admin role
 // and the service roles (D4). Application database passwords are never kept:
 // eru db create shows them once.
 type DatabaseCreds struct {
@@ -38,7 +38,6 @@ type BackupCreds struct {
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
 	PgBackRest      struct {
-		Stanza     string `json:"stanza"`
 		CipherPass string `json:"cipher_pass"`
 	} `json:"pgbackrest"`
 	Restic struct {
@@ -50,6 +49,12 @@ type BackupCreds struct {
 		AgeIdentity  string `json:"age_identity,omitempty"`
 		AgeRecipient string `json:"age_recipient,omitempty"`
 	} `json:"dumps"`
+}
+
+// HasBucket reports whether the kit holds a bucket's keys and cipher, not
+// only the recovery identity server init creates.
+func (b BackupCreds) HasBucket() bool {
+	return b.AccessKeyID != "" || b.PgBackRest.CipherPass != ""
 }
 
 // SecretValues returns every secret in the recovery kit.

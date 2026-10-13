@@ -3,8 +3,10 @@ package cli
 import (
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -46,7 +48,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 	name := stringFlag(cmd, "name")
 	if name == "" {
-		name = doc.Cluster.Name
+		name = doc.Server.Name
 	}
 	ctx, err := secretsdoc.Install(doc, name, "")
 	if err != nil {
@@ -130,7 +132,7 @@ func loginPassphrase(cmd *cobra.Command) (string, error) {
 
 type contextRow struct {
 	Name    string `json:"name"`
-	Cluster string `json:"cluster"`
+	Server  string `json:"server"`
 	Current bool   `json:"current"`
 	Nodes   int    `json:"nodes"`
 }
@@ -148,12 +150,12 @@ func runContextList(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return err
 		}
-		rows = append(rows, contextRow{Name: name, Cluster: c.Cluster, Current: name == current, Nodes: len(c.Nodes)})
+		rows = append(rows, contextRow{Name: name, Server: c.Server, Current: name == current, Nodes: len(c.Nodes)})
 		mark := "  "
 		if name == current {
 			mark = "* "
 		}
-		lines = append(lines, mark+name+" (cluster "+c.Cluster+")")
+		lines = append(lines, mark+name+" (server "+c.Server+")")
 	}
 	message := strings.Join(lines, "\n")
 	if len(rows) == 0 {
@@ -200,11 +202,14 @@ func runContextShow(cmd *cobra.Command, args []string) error {
 	}
 	lines := []string{
 		"context   " + c.Name,
-		"cluster   " + c.Cluster,
+		"server    " + c.Server,
 		"operator  " + c.Operator.Name + " (" + c.Operator.WGAddress + ", ssh user " + c.Operator.SSHUser + ")",
 	}
 	for _, n := range c.Nodes {
-		lines = append(lines, fmt.Sprintf("node      %s %s: public %s:%d, wireguard %s", n.Name, n.Role, n.PublicAddress, n.ListenPort, n.WGAddress))
+		lines = append(lines, fmt.Sprintf("node      %s %s %s: public %s:%d, wireguard %s", n.Name, n.Role, n.Hostname, n.PublicAddress, n.ListenPort, n.WGAddress))
+	}
+	for _, db := range slices.Sorted(maps.Keys(c.Databases)) {
+		lines = append(lines, "database  "+db+" on "+c.Databases[db])
 	}
 	return output.Success(cmd, output.Result{Data: show, Message: strings.Join(lines, "\n"), Warnings: warnings})
 }
@@ -234,5 +239,5 @@ func runContextRemove(cmd *cobra.Command, args []string) error {
 	if err := contexts.Remove(name); err != nil {
 		return err
 	}
-	return output.OK(cmd, map[string]any{"removed": name}, "Removed context "+name+". Its transfer bundle still opens the cluster.")
+	return output.OK(cmd, map[string]any{"removed": name}, "Removed context "+name+". Its transfer bundle still opens the server.")
 }

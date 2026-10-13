@@ -58,22 +58,22 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Domain == "" {
+	if cfg.MasterHostname() == "" {
 		logLine(report, "certs-renew", "no domain is configured; nothing to renew")
 		return map[string]any{"changed": false, "reason": "no domain configured"}, nil
 	}
 	selfSigned := cfg.TLS.Mode == "self-signed"
-	reason := renewReason(readCert(steps.TLSCertPath), cfg.Domain, selfSigned)
+	reason := renewReason(readCert(steps.TLSCertPath), cfg.MasterHostname(), selfSigned)
 	if reason == "" {
 		notAfter := certNotAfter(steps.TLSCertPath)
-		logLine(report, "certs-renew", "the certificate for "+cfg.Domain+" is current until "+notAfter+"; nothing to renew")
-		return map[string]any{"changed": false, "domain": cfg.Domain, "not_after": notAfter}, nil
+		logLine(report, "certs-renew", "the certificate for "+cfg.MasterHostname()+" is current until "+notAfter+"; nothing to renew")
+		return map[string]any{"changed": false, "hostname": cfg.MasterHostname(), "not_after": notAfter}, nil
 	}
-	logLine(report, "certs-renew", "renewing the certificate for "+cfg.Domain+": "+reason)
+	logLine(report, "certs-renew", "renewing the certificate for "+cfg.MasterHostname()+": "+reason)
 
 	var chainPEM, keyPEM []byte
 	if selfSigned {
-		chainPEM, keyPEM, err = selfSignedCert(cfg.Domain)
+		chainPEM, keyPEM, err = selfSignedCert(cfg.MasterHostname())
 	} else {
 		ctx, cancel := context.WithTimeout(ctx, acmeTimeout)
 		defer cancel()
@@ -84,7 +84,7 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 		// DNS doesn't point here yet: that's the normal state right after
 		// init, not a failed unit. The timer tries again in an hour.
 		logLine(report, "certs-renew", cliErr.Error())
-		return map[string]any{"changed": false, "domain": cfg.Domain, "pending": cliErr.Error()}, nil
+		return map[string]any{"changed": false, "hostname": cfg.MasterHostname(), "pending": cliErr.Error()}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -92,11 +92,11 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	if err := installCert(chainPEM, keyPEM); err != nil {
 		return nil, err
 	}
-	logLine(report, "certs-renew", "installed the certificate for "+cfg.Domain)
+	logLine(report, "certs-renew", "installed the certificate for "+cfg.MasterHostname())
 	_ = runQuiet(ctx, "pg_ctlcluster", "18", steps.PGCluster, "reload")
 	_ = runQuiet(ctx, "systemctl", "reload", steps.PgbouncerService)
 	_ = runQuiet(ctx, "systemctl", "reload", steps.NginxService)
-	return map[string]any{"changed": true, "domain": cfg.Domain, "not_after": certNotAfter(steps.TLSCertPath)}, nil
+	return map[string]any{"changed": true, "hostname": cfg.MasterHostname(), "not_after": certNotAfter(steps.TLSCertPath)}, nil
 }
 
 // renewReason says why cert needs replacing, or "" when it is current.
@@ -129,11 +129,11 @@ func installCert(chainPEM, keyPEM []byte) error {
 // issueACME gets a certificate for the domain over HTTP-01. nginx serves the
 // challenge files from the ACME webroot on port 80.
 func issueACME(ctx context.Context, cfg config.Cluster, report engine.Reporter) (chainPEM, keyPEM []byte, err error) {
-	reached, err := probeHTTP(ctx, cfg.Domain)
+	reached, err := probeHTTP(ctx, cfg.MasterHostname())
 	switch {
 	case err != nil && reached:
 		return nil, nil, output.NewError(output.CodePrecondition, err.Error(), output.ExitPrecondition,
-			"Point "+cfg.Domain+" at this server (DNS only, not proxied); eru-certs.timer retries every hour.").
+			"Point "+cfg.MasterHostname()+" at this server (DNS only, not proxied); eru-certs.timer retries every hour.").
 			WithDetails(map[string]any{"reason": "tls_pending"})
 	case err != nil:
 		// Some networks can't reach their own public address; let the ACME
@@ -155,7 +155,7 @@ func issueACME(ctx context.Context, cfg config.Cluster, report engine.Reporter) 
 	if _, err := client.Register(ctx, account, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
 		return nil, nil, acmeError("register the ACME account", err)
 	}
-	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(cfg.Domain))
+	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(cfg.MasterHostname()))
 	if err != nil {
 		return nil, nil, acmeError("create the order", err)
 	}
@@ -172,8 +172,8 @@ func issueACME(ctx context.Context, cfg config.Cluster, report engine.Reporter) 
 		return nil, nil, err
 	}
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject:  pkix.Name{CommonName: cfg.Domain},
-		DNSNames: []string{cfg.Domain},
+		Subject:  pkix.Name{CommonName: cfg.MasterHostname()},
+		DNSNames: []string{cfg.MasterHostname()},
 	}, leafKey)
 	if err != nil {
 		return nil, nil, err

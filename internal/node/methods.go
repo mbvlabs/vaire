@@ -184,7 +184,7 @@ func methods() map[string]method {
 	return table
 }
 
-// restartToken is {cluster}/restart.
+// restartToken is {server}/restart.
 func restartToken(cfg config.Cluster, _ json.RawMessage) string {
 	return cfg.Name() + "/restart"
 }
@@ -273,7 +273,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Data: data}, nil
+		return Result{Data: data, Warnings: NoOffsiteWarning(env.Cluster)}, nil
 	}
 	rt := runtimeFor(env, false)
 	rt.RotateSecrets = p.RotateBackupSecrets
@@ -287,7 +287,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Data: data, Warnings: warnings}, nil
+	return Result{Data: data, Warnings: append(warnings, NoOffsiteWarning(env.Cluster)...)}, nil
 }
 
 func handleSelfcheck(context.Context, *Env) (Result, error) {

@@ -8,7 +8,7 @@ import (
 
 // discardResult is the result of eru server init --discard.
 type discardResult struct {
-	Cluster          string `json:"cluster"`
+	Server           string `json:"server"`
 	PendingPath      string `json:"pending_path"`
 	HostBootstrapped bool   `json:"host_bootstrapped"`
 	Host             string `json:"host,omitempty"`
@@ -22,7 +22,7 @@ func runInitDiscard(cmd *cobra.Command) error {
 		pending := contexts.PendingNames()
 		if len(pending) != 1 {
 			return output.NewError(output.CodeInputRequired, "--discard needs --name", output.ExitInput,
-				"Pass --name with the cluster whose unfinished init to discard.").
+				"Pass --name with the server whose unfinished init to discard.").
 				WithDetails(map[string]any{"flag": "--name", "pending": pending})
 		}
 		name = pending[0]
@@ -31,7 +31,7 @@ func runInitDiscard(cmd *cobra.Command) error {
 		return output.NewError(output.CodePrecondition, "there is no unfinished init for "+name, output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": "nothing_to_discard", "pending": contexts.PendingNames()})
 	}
-	res := discardResult{Cluster: name, PendingPath: contexts.PendingDir(name)}
+	res := discardResult{Server: name, PendingPath: contexts.PendingDir(name)}
 	prog, err := contexts.LoadProgress(name)
 	if err != nil {
 		return err

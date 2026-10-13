@@ -117,7 +117,7 @@ func verify(ctx context.Context, cfg config.Cluster, stepID string, report engin
 	if err != nil {
 		return res, err
 	}
-	_ = backup.Update(func(s *backup.State) error {
+	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.LastVerify = &res
 		return nil
 	})
@@ -172,7 +172,7 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if p.Database != "" {
-		if _, ok := cfg.DatabaseByName(p.Database); !ok {
+		if _, ok := cfg.ClusterByName(p.Database); !ok {
 			return Result{}, databaseNotFound(p.Database)
 		}
 	}
@@ -201,7 +201,7 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 		}
 		out.Sets = append(out.Sets, set)
 	}
-	bs, err := backup.LoadState()
+	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
@@ -211,7 +211,7 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 	}
 	out.Restores = bs.Restores
 	out.Policies = map[string]dumpPolicy{}
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		if db.Backup.DumpSchedule != "" && (p.Database == "" || p.Database == db.Name) {
 			out.Policies[db.Name] = dumpPolicy{Schedule: db.Backup.DumpSchedule, Retention: db.Backup.DumpRetention}
 		}
@@ -386,7 +386,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	record := func() {
 		drill.FinishedAt = stamp()
-		_ = backup.Update(func(s *backup.State) error {
+		_ = backup.UpdateRecords(func(s *backup.Records) error {
 			s.Drills = append(s.Drills, drill)
 			return nil
 		})
@@ -464,7 +464,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		drill.Checks = append(drill.Checks, check)
 	}
 	var missing []string
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		if p.Time == "" && !containsString(restored, db.Name) {
 			missing = append(missing, db.Name)
 		}
@@ -519,7 +519,7 @@ func handleDumpCreate(ctx context.Context, env *Env) (Result, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
-	if _, ok := env.Cluster.DatabaseByName(p.Database); !ok {
+	if _, ok := env.Cluster.ClusterByName(p.Database); !ok {
 		return Result{}, databaseNotFound(p.Database)
 	}
 	if env.Req.DryRun {
@@ -543,7 +543,7 @@ func jobDump(ctx context.Context, env *jobEnv) (any, error) {
 	if err := requireBackups(cfg); err != nil {
 		return nil, err
 	}
-	entry, ok := cfg.DatabaseByName(db)
+	entry, ok := cfg.ClusterByName(db)
 	if !ok {
 		return nil, databaseNotFound(db)
 	}
@@ -581,7 +581,7 @@ func dumpToBucket(ctx context.Context, cfg config.Cluster, sh engine.Shell, step
 	if err != nil {
 		return dump, err
 	}
-	_ = backup.Update(func(s *backup.State) error {
+	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.LastDump[db] = dump
 		return nil
 	})
@@ -599,8 +599,21 @@ func DumpStream(ctx context.Context, db string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := cfg.DatabaseByName(db); !ok {
+	if _, ok := cfg.ClusterByName(db); !ok {
 		return databaseNotFound(db)
 	}
 	return backup.PgDump(ctx, engine.Shell{Secrets: secrets.Default}, "dump", nil, "", 0, db, w)
+}
+
+// NoOffsiteWarning is the no_offsite_backup warning for a server without a
+// bucket: server init ends with it, and every apply carries it until eru
+// backup setup runs.
+func NoOffsiteWarning(cfg config.Cluster) []output.Warning {
+	if cfg.BackupConfigured() {
+		return nil
+	}
+	return []output.Warning{{
+		Code:    "no_offsite_backup",
+		Message: "no backups leave this server: a lost disk loses every database. Run eru backup setup to send them to an S3-compatible bucket.",
+	}}
 }

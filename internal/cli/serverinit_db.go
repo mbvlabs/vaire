@@ -19,7 +19,7 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 	reply, err := caller.Call(ctx, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseDatabase,
 		"cluster_toml": string(raw),
-		"node_name":    r.primary().Name,
+		"node_name":    r.master().Name,
 		"local":        r.local,
 	}, remote.CallOptions{Secrets: r.dbSecrets, Confirm: r.name, OnEvent: r.p.event})
 	if err != nil {
@@ -42,8 +42,8 @@ const dnsHelp = "Set the records to DNS only (not proxied). Database clients can
 // stop: the certificate wait after the database phase shows whether the
 // certificate was issued (D10).
 func (r *initRun) dnsStep(ctx context.Context) error {
-	ipv4, ipv6 := r.primary().PublicAddress, r.prog.PublicIPv6
-	records := dnsRecords(r.cfg.Domain, ipv4, ipv6)
+	ipv4, ipv6 := r.master().PublicAddress, r.prog.PublicIPv6
+	records := dnsRecords(r.cfg.MasterHostname(), ipv4, ipv6)
 	if len(records) == 0 {
 		return nil
 	}
@@ -59,8 +59,8 @@ func (r *initRun) dnsStep(ctx context.Context) error {
 		r.warnings = append(r.warnings, output.Warning{Code: "flag_deprecated", Message: "--skip-dns-check is no longer needed: a DNS mismatch is only a warning"})
 	}
 
-	r.p.phase("init.dns", "started", "ask "+strings.Join(resolverNames(), " and ")+" for "+r.cfg.Domain)
-	check := checkDNS(ctx, r.cfg.Domain, ipv4, ipv6)
+	r.p.phase("init.dns", "started", "ask "+strings.Join(resolverNames(), " and ")+" for "+r.cfg.MasterHostname())
+	check := checkDNS(ctx, r.cfg.MasterHostname(), ipv4, ipv6)
 	lines := make([]string, 0, len(check.Resolvers))
 	for _, a := range check.Resolvers {
 		line, ok := a.describe(ipv4, ipv6)
@@ -76,10 +76,10 @@ func (r *initRun) dnsStep(ctx context.Context) error {
 		return nil
 	case check.Proxied:
 		r.warnings = append(r.warnings, output.Warning{Code: "dns_proxied",
-			Message: r.cfg.Domain + " is proxied by Cloudflare: database clients can't connect through it. Set the record to DNS only (grey cloud)."})
+			Message: r.cfg.MasterHostname() + " is proxied by Cloudflare: database clients can't connect through it. Set the record to DNS only (grey cloud)."})
 	default:
 		r.warnings = append(r.warnings, output.Warning{Code: "dns_mismatch",
-			Message: r.cfg.Domain + " does not resolve to the server yet; the certificate is issued once it does"})
+			Message: r.cfg.MasterHostname() + " does not resolve to the server yet; the certificate is issued once it does"})
 	}
 	r.p.phase("init.dns", "completed", "not resolving to the server yet; continuing")
 	r.p.panel("DNS answers", lines)
@@ -104,7 +104,7 @@ func (r *initRun) waitForTLS(ctx context.Context, caller remote.Caller) error {
 	if r.cfg.TLS.Mode == "self-signed" {
 		return nil
 	}
-	r.p.phase("init.tls", "started", "wait for the certificate for "+r.cfg.Domain)
+	r.p.phase("init.tls", "started", "wait for the certificate for "+r.cfg.MasterHostname())
 	deadline := time.Now().Add(tlsWaitTimeout)
 	if t := r.p.task("init.tls"); t != nil {
 		t.Deadline(deadline)
@@ -124,15 +124,15 @@ func (r *initRun) waitForTLS(ctx context.Context, caller remote.Caller) error {
 			return nil
 		}
 		if t := r.p.task("init.tls"); t != nil {
-			t.Detail("still the placeholder certificate; Let's Encrypt validates " + r.cfg.Domain + " over HTTP on port 80")
+			t.Detail("still the placeholder certificate; Let's Encrypt validates " + r.cfg.MasterHostname() + " over HTTP on port 80")
 		}
 		if time.Now().After(deadline) {
-			check := checkDNS(ctx, r.cfg.Domain, r.primary().PublicAddress, r.prog.PublicIPv6)
+			check := checkDNS(ctx, r.cfg.MasterHostname(), r.master().PublicAddress, r.prog.PublicIPv6)
 			msg := "the certificate is still pending; eru retries every hour, so it is issued within the hour after DNS points at the server"
 			if check.Proxied {
-				msg += ". " + r.cfg.Domain + " is proxied by Cloudflare: set it to DNS only (grey cloud)"
+				msg += ". " + r.cfg.MasterHostname() + " is proxied by Cloudflare: set it to DNS only (grey cloud)"
 			} else if !check.Matches {
-				msg += ". DNS answers: " + dnsSummary(check, r.primary().PublicAddress, r.prog.PublicIPv6)
+				msg += ". DNS answers: " + dnsSummary(check, r.master().PublicAddress, r.prog.PublicIPv6)
 			}
 			r.warnings = append(r.warnings, output.Warning{Code: "tls_pending", Message: msg})
 			r.p.phase("init.tls", "completed", "still pending")
@@ -175,13 +175,13 @@ func (r *initRun) confirmDNSEarly() error {
 	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) {
 		return nil
 	}
-	return r.askDNS(r.primary().PublicAddress, r.prog.PublicIPv6, true)
+	return r.askDNS(r.master().PublicAddress, r.prog.PublicIPv6, true)
 }
 
 // askDNS shows the records in one panel and waits for 'confirmed', unless
 // eru must not prompt or --dns-ready says they exist.
 func (r *initRun) askDNS(ipv4, ipv6 string, early bool) error {
-	records := dnsRecords(r.cfg.Domain, ipv4, ipv6)
+	records := dnsRecords(r.cfg.MasterHostname(), ipv4, ipv6)
 	if len(records) == 0 {
 		return nil
 	}

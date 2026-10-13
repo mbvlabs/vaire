@@ -19,9 +19,9 @@ const stateLockPath = StatePath + ".lock"
 // maxJobs is how many job records state.json keeps.
 const maxJobs = 50
 
-// State is /var/lib/eru/state.json. Phase 3 adds the job records and the
-// backup section (restores, drills, last results), which internal/backup owns
-// and every other writer keeps byte for byte.
+// State is /var/lib/eru/state.json: the job records and the lockdown flags.
+// Durable records (restores, drills, last results) live in records.json,
+// which internal/backup owns.
 type State struct {
 	SecretsConfirmedAt string `json:"secrets_confirmed_at,omitempty"`
 	// LockdownPending is true between ssh.lockdown and ssh.confirm or
@@ -32,9 +32,6 @@ type State struct {
 	LockedDownAt string `json:"locked_down_at,omitempty"`
 	// Jobs are the detachable jobs and timer runs, newest last.
 	Jobs []JobRecord `json:"jobs,omitempty"`
-	// Backup is internal/backup's state: restores per database, restore
-	// leftovers, drills and the last backup and verify results.
-	Backup json.RawMessage `json:"backup,omitempty"`
 }
 
 // JobRecord is one run of eru node run: a detachable job started by an RPC
@@ -95,10 +92,26 @@ func (s *State) PutJob(rec JobRecord) {
 // flock on state.json.lock so concurrent writers don't lose each other's
 // changes. fn returning an error leaves the file unchanged.
 func UpdateState(fn func(*State) error) error {
-	if err := os.MkdirAll(filepath.Dir(StatePath), 0o700); err != nil {
+	return WithFileLock(stateLockPath, func() error {
+		st, err := LoadState(StatePath)
+		if err != nil {
+			return err
+		}
+		if err := fn(&st); err != nil {
+			return err
+		}
+		return st.Save(StatePath)
+	})
+}
+
+// WithFileLock runs fn holding an exclusive flock on lockPath, so
+// read-modify-write cycles of a node file don't lose each other's changes
+// across processes.
+func WithFileLock(lockPath string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(stateLockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: fixed node lock paths.
 	if err != nil {
 		return err
 	}
@@ -108,14 +121,7 @@ func UpdateState(fn func(*State) error) error {
 		return err
 	}
 	defer func() { _ = syscall.Flock(fd, syscall.LOCK_UN) }()
-	st, err := LoadState(StatePath)
-	if err != nil {
-		return err
-	}
-	if err := fn(&st); err != nil {
-		return err
-	}
-	return st.Save(StatePath)
+	return fn()
 }
 
 // PublicSSHOpen reports whether the firewall rule set keeps public 22/tcp.

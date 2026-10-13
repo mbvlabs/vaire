@@ -91,10 +91,22 @@ func (r *initRun) backupSettings() backupSettings {
 	return s
 }
 
-// ensureBackupKit probes the bucket before anything reaches the server and
-// generates the recovery kit (cipher pass, dump age identity), saving it in
-// the pending secrets before it is ever sent.
+// ensureBackupKit creates the age recovery identity, which every server gets
+// with or without a bucket, then probes the bucket before anything reaches
+// the server and generates its cipher pass. Both are saved in the pending
+// secrets before they are ever sent.
 func (r *initRun) ensureBackupKit(ctx context.Context) error {
+	kit, created, err := ensureRecoveryIdentity(r.sec.Backup)
+	if err != nil {
+		return err
+	}
+	if created {
+		r.sec.Backup = kit
+		registerPending(r.sec)
+		if err := contexts.SaveSecrets(r.name, r.sec); err != nil {
+			return err
+		}
+	}
 	if !r.cfg.BackupConfigured() || r.prog.Done(phaseBackups) {
 		return nil
 	}
@@ -107,7 +119,7 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 	if err := backup.Probe(ctx, s.target(), r.name); err != nil {
 		return err
 	}
-	kit, _, err := prepareKit(r.sec.Backup, s, r.name, false)
+	kit, _, err = prepareKit(r.sec.Backup, s, false)
 	if err != nil {
 		return err
 	}
@@ -149,7 +161,7 @@ func (r *initRun) configureInitBackups(ctx context.Context, caller remote.Caller
 // backupSummary is the Backups row of init's summary.
 func (r *initRun) backupSummary() string {
 	if !r.cfg.BackupConfigured() {
-		return "not configured: run eru backup setup"
+		return "none off the server: run eru backup setup"
 	}
 	s := r.backupSettings()
 	return strings.Join([]string{s.Provider, s.Bucket + "/" + s.Prefix, "first full backup taken"}, "  ")

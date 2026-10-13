@@ -8,7 +8,7 @@
 set -euo pipefail
 
 : "${NGINX_MIN_VERSION:?NGINX_MIN_VERSION is required}"
-: "${DOMAIN:?DOMAIN is required}"
+: "${TLS_HOSTNAME:?TLS_HOSTNAME is required}"
 : "${ACME_WEBROOT:?ACME_WEBROOT is required}"
 : "${PHASE:?PHASE is required}"
 
@@ -40,7 +40,7 @@ if [ "${PHASE}" = "install" ]; then
   if [ ! -f /etc/eru/tls/server.crt ]; then
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
       -keyout /etc/eru/tls/server.key -out /etc/eru/tls/server.crt \
-      -subj "/CN=${DOMAIN}" -addext "subjectAltName=DNS:${DOMAIN}"
+      -subj "/CN=${TLS_HOSTNAME}" -addext "subjectAltName=DNS:${TLS_HOSTNAME}"
   fi
   chown root:ssl-cert /etc/eru/tls/server.key
   chmod 0640 /etc/eru/tls/server.key

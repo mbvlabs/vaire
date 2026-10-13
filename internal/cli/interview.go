@@ -16,6 +16,7 @@ import (
 // interviewAnswers is the Phase 2 question set (D13).
 type interviewAnswers struct {
 	Name              string
+	NodeName          string
 	AdminUser         string
 	Timezone          string
 	DataRoot          string
@@ -24,12 +25,14 @@ type interviewAnswers struct {
 	ACMEEmail         string
 	ClientConnections string
 	Profile           string
+	DefaultSize       string
 	Allowlist         string
 }
 
 // Interview question keys, used to skip what flags or --answers supplied.
 const (
 	qName              = "name"
+	qNodeName          = "node_name"
 	qAdminUser         = "admin_user"
 	qTimezone          = "timezone"
 	qDataRoot          = "data_root"
@@ -38,6 +41,7 @@ const (
 	qACMEEmail         = "acme_email"
 	qAllowlist         = "allowlist"
 	qProfile           = "profile"
+	qDefaultSize       = "default_size"
 	qClientConnections = "client_connections"
 )
 
@@ -50,6 +54,7 @@ func suppliedAnswers(cmd *cobra.Command, cfg config.Cluster, fromFile bool) map[
 	}
 	return map[string]bool{
 		qName:              cfg.ClusterName != "",
+		qNodeName:          given("node-name", len(cfg.Nodes) > 0 && cfg.Nodes[0].Name != config.DefaultNodeName),
 		qAdminUser:         given("admin-user", cfg.Server.AdminUser != def.Server.AdminUser),
 		qTimezone:          given("timezone", cfg.Timezone != def.Timezone),
 		qDataRoot:          given("data-root", cfg.Server.DataRoot != def.Server.DataRoot),
@@ -58,6 +63,7 @@ func suppliedAnswers(cmd *cobra.Command, cfg config.Cluster, fromFile bool) map[
 		qACMEEmail:         given("acme-email", cfg.ACMEEmail != "") || cfg.TLS.Mode == "self-signed",
 		qAllowlist:         given("allow", len(cfg.Network.ClientAllowlist) > 0),
 		qProfile:           given("profile", cfg.Postgres.Profile != def.Postgres.Profile),
+		qDefaultSize:       given("default-size", cfg.Postgres.DefaultSize != def.Postgres.DefaultSize),
 		qClientConnections: given("client-connections", cfg.Postgres.ClientConnections != def.Postgres.ClientConnections),
 	}
 }
@@ -69,6 +75,7 @@ func suppliedAnswers(cmd *cobra.Command, cfg config.Cluster, fromFile bool) map[
 func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]bool) error {
 	a := interviewAnswers{
 		Name:              cfg.ClusterName,
+		NodeName:          masterName(cfg),
 		AdminUser:         cfg.Server.AdminUser,
 		Timezone:          cfg.Timezone,
 		DataRoot:          cfg.Server.DataRoot,
@@ -77,6 +84,7 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		ACMEEmail:         cfg.ACMEEmail,
 		ClientConnections: strconv.Itoa(cfg.Postgres.ClientConnections),
 		Profile:           cfg.Postgres.Profile,
+		DefaultSize:       cfg.Postgres.DefaultSize,
 		Allowlist:         strings.Join(cfg.Network.ClientAllowlist, ", "),
 	}
 	ask := func(key string, field huh.Field, fields *[]huh.Field) {
@@ -86,10 +94,19 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 	}
 	var server, endpoint, workload []huh.Field
 	ask(qName, huh.NewInput().Title("Server name").Validate(validateName).Value(&a.Name), &server)
+	ask(qNodeName, huh.NewInput().
+		Title("Node name").
+		Description("The master's hostname is <node name>.<domain>.").
+		Validate(optional(validateNodeName)).
+		Value(&a.NodeName), &server)
 	ask(qAdminUser, huh.NewInput().Title("Admin user").Validate(optional(config.CheckAdminUser)).Value(&a.AdminUser), &server)
 	ask(qTimezone, huh.NewInput().Title("Timezone").Validate(optional(config.CheckTimezone)).Value(&a.Timezone), &server)
 	ask(qDataRoot, huh.NewInput().Title("Data root").Validate(optional(config.CheckDataRoot)).Value(&a.DataRoot), &server)
-	ask(qDomain, huh.NewInput().Title("Client-facing domain").Validate(validateDomain).Value(&a.Domain), &endpoint)
+	ask(qDomain, huh.NewInput().
+		Title("Base domain").
+		Description("Each node is <node name>.<domain>: create one DNS record per node.").
+		Validate(validateDomain).
+		Value(&a.Domain), &endpoint)
 	ask(qTLSMode, huh.NewSelect[string]().
 		Title("TLS mode").
 		Options(huh.NewOption("ACME (Let's Encrypt)", "acme"), huh.NewOption("Self-signed", "self-signed")).
@@ -102,6 +119,15 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		Title("Workload profile").
 		Options(huh.NewOption("OLTP (web)", "oltp"), huh.NewOption("Mixed", "mixed"), huh.NewOption("Analytics", "analytics")).
 		Value(&a.Profile), &workload)
+	sizes := make([]huh.Option[string], 0, len(config.Sizes))
+	for _, size := range config.Sizes {
+		sizes = append(sizes, huh.NewOption(fmt.Sprintf("%s (%d MiB, %d connections)", size.Name, size.MemoryMiB, size.MaxConnections), size.Name))
+	}
+	ask(qDefaultSize, huh.NewSelect[string]().
+		Title("Default database size").
+		Description("eru db create uses it without --size, and steps down when it doesn't fit.").
+		Options(sizes...).
+		Value(&a.DefaultSize), &workload)
 	ask(qClientConnections, huh.NewInput().Title("Expected client connections").Validate(validateClientConnections).Value(&a.ClientConnections), &workload)
 
 	var groups []*huh.Group
@@ -137,6 +163,9 @@ func applyInterview(cfg *config.Cluster, a interviewAnswers) error {
 		}
 	}
 	setIf(&cfg.ClusterName, a.Name)
+	if len(cfg.Nodes) > 0 {
+		setIf(&cfg.Nodes[0].Name, a.NodeName)
+	}
 	setIf(&cfg.Server.AdminUser, a.AdminUser)
 	setIf(&cfg.Timezone, a.Timezone)
 	setIf(&cfg.Server.DataRoot, a.DataRoot)
@@ -144,10 +173,28 @@ func applyInterview(cfg *config.Cluster, a interviewAnswers) error {
 	setIf(&cfg.TLS.Mode, a.TLSMode)
 	setIf(&cfg.ACMEEmail, a.ACMEEmail)
 	setIf(&cfg.Postgres.Profile, a.Profile)
+	setIf(&cfg.Postgres.DefaultSize, a.DefaultSize)
 	if n, err := strconv.Atoi(strings.TrimSpace(a.ClientConnections)); err == nil && n > 0 {
 		cfg.Postgres.ClientConnections = n
 	}
 	cfg.Network.ClientAllowlist = allowlistPrefixes(splitList(a.Allowlist))
+	return nil
+}
+
+// masterName is the first node's name, the master, or the default.
+func masterName(cfg *config.Cluster) string {
+	if len(cfg.Nodes) > 0 && cfg.Nodes[0].Name != "" {
+		return cfg.Nodes[0].Name
+	}
+	return config.DefaultNodeName
+}
+
+// validateNodeName checks a node name: a DNS label, since the node's
+// hostname is <node>.<domain>.
+func validateNodeName(v string) error {
+	if !config.NodeNamePattern.MatchString(v) {
+		return fmt.Errorf("use a DNS label: lower-case letters, digits and '-', starting with a letter")
+	}
 	return nil
 }
 

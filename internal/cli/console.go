@@ -54,7 +54,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	defer func() { _ = ln.Close() }()
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGTERM)
 	defer stop()
-	tlsCfg := pg.TLSConfig(pg.Params{ServerName: s.ctx.Domain, TLSMode: s.ctx.TLSMode})
+	tlsCfg := pg.TLSConfig(pg.Params{ServerName: s.ctx.MasterHostname(), TLSMode: s.ctx.TLSMode})
 	go pg.ServeTLSProxy(ctx, ln, s.tunnel, net.JoinHostPort(nodeWGAddr(s), strconv.Itoa(pgPort)), tlsCfg)
 
 	if s.ctx.TLSMode == "self-signed" {

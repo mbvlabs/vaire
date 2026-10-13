@@ -63,7 +63,7 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 		return nil, err
 	}
 	s := &session{ctx: c, warnings: contexts.FixModes(c.Name)}
-	nodeSpec, ok := c.Primary()
+	nodeSpec, ok := c.Master()
 	if !ok {
 		return nil, output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with eru login.")
 	}
@@ -284,7 +284,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	// back; the node writes it only when missing (D7). Backups that are on
 	// without a kit here is input_required: eru never makes a new cipher for
 	// an existing repository.
-	if creds.Backup != nil {
+	if creds.Backup != nil && creds.Backup.HasBucket() {
 		for k, v := range backupSecrets(creds.Backup) {
 			secretValues[k] = v
 		}

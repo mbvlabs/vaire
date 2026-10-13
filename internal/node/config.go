@@ -83,6 +83,9 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		if err := store.Save(raw); err != nil {
 			return Result{}, err
 		}
+		if err := syncNodeHostname(cfg); err != nil {
+			return Result{}, err
+		}
 		if revision, err = store.Revision(); err != nil {
 			return Result{}, err
 		}
@@ -117,7 +120,7 @@ func newConfigBytes(store state.FileStore, p configSetParams) ([]byte, error) {
 				output.CodePrecondition,
 				"the new cluster.toml changes keys that are immutable after init: "+strings.Join(changed, ", "),
 				output.ExitPrecondition,
-				"schema, name, nodes.*.wg_address and transport.* cannot be changed once a cluster exists.",
+				config.ImmutableHint(),
 			).WithDetails(map[string]any{"reason": "immutable_key", "keys": changed})
 		}
 		return []byte(p.TOML), nil
@@ -198,4 +201,26 @@ func checkRepoMove(ctx context.Context, old, updated config.Cluster) error {
 		output.ExitPrecondition,
 		"Keep the endpoint, bucket and prefix. Re-running eru backup setup with the same bucket rotates the keys.").
 		WithDetails(map[string]any{"reason": "repo_in_use", "bucket": ob.Bucket, "prefix": ob.Prefix})
+}
+
+// syncNodeHostname keeps node.toml's hostname in step with cluster.toml: it
+// is <node>.<domain>, so it moves when the domain does.
+func syncNodeHostname(cfg config.Cluster) error {
+	n, err := config.LoadNode(config.NodePath)
+	if err != nil {
+		if config.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	hostname := cfg.Hostname(n.NodeName)
+	if n.Hostname == hostname {
+		return nil
+	}
+	n.Hostname = hostname
+	raw, err := config.EncodeNode(n)
+	if err != nil {
+		return err
+	}
+	return engine.WriteFileAtomic(config.NodePath, raw, 0o640)
 }

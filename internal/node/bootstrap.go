@@ -63,7 +63,7 @@ type TLSState struct {
 	NotAfter string `json:"not_after,omitempty"`
 }
 
-// bootstrapToken is {cluster}, read from the params because cluster.toml does
+// bootstrapToken is {server}, read from the params because cluster.toml does
 // not exist yet.
 func bootstrapToken(_ config.Cluster, raw json.RawMessage) string {
 	var p bootstrapParams
@@ -199,13 +199,13 @@ func bootstrapPreflight(cfg config.Cluster) (hostinfo.OS, error) {
 	}
 	existing, err := config.LoadNode(config.NodePath)
 	switch {
-	case err == nil && existing.Cluster != cfg.Name():
+	case err == nil && existing.Server != cfg.Name():
 		return osInfo, output.NewError(
 			output.CodePrecondition,
-			"this server already belongs to cluster "+existing.Cluster,
+			"this machine already belongs to server "+existing.Server,
 			output.ExitPrecondition,
-			"Bootstrap a fresh server, or use the cluster's own secrets document.",
-		).WithDetails(map[string]any{"reason": "node_belongs_to_other_cluster", "cluster": existing.Cluster})
+			"Bootstrap a fresh machine, or use that server's own secrets document.",
+		).WithDetails(map[string]any{"reason": "node_belongs_to_other_server", "server": existing.Server})
 	case err == nil:
 		return osInfo, nil
 	case !config.IsNotExist(err):
@@ -270,7 +270,7 @@ func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Ope
 	if err != nil {
 		return err
 	}
-	node := config.Node{Cluster: cfg.Name(), NodeName: spec.Name, Role: spec.Role}
+	node := config.Node{Server: cfg.Name(), NodeName: spec.Name, Hostname: cfg.Hostname(spec.Name), Role: spec.Role}
 	if existing, err := config.LoadNode(config.NodePath); err == nil {
 		node.InstalledAt = existing.InstalledAt
 	} else {

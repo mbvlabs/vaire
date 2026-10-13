@@ -68,12 +68,13 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `orphaned_database`: a database exists on the node but is no longer in `cluster.toml`. Drop it with `eru db drop`.
 - `restart_pending`: a step needs a PostgreSQL restart. `data.restart_pending` lists the steps.
 - `context_tls_updated`: `cluster.toml` on the node has a different `domain` or `tls.mode` than the local context, and the context now follows it. After a domain change, eru's connections fail with a hostname mismatch until the node has a certificate for the new name: `eru-certs.timer` issues it within the hour, or the human runs `eru ssh --command 'sudo eru node run certs-renew'`.
+- `no_offsite_backup`: the server has no bucket, so no backup leaves it. `server init` ends with it and every `eru apply` repeats it. Ask the human to run `eru backup setup`; the age recovery identity already exists, so setup reuses it.
 - `context_sync_failed`: the command succeeded, but the local context could not be updated from `cluster.toml`. `eru apply` retries it.
 
 ## Node errors
 
 - `precondition_failed` with `details.reason = "lock_held"`: another eru operation holds the node lock. `details.holder` names its PID, method, request ID and start time, or is `null` when that process is gone. Wait and retry; don't kill the holder.
-- `restart_pending` warning: the change is applied, but a step needs a PostgreSQL restart that hasn't happened. `data.restart_pending` lists the steps. Ask the human for the `{cluster}/restart` token before re-running with it.
+- `restart_pending` warning: the change is applied, but a step needs a PostgreSQL restart that hasn't happened. `data.restart_pending` lists the steps. Ask the human for the `{server}/restart` token before re-running with it.
 - `node_version_mismatch` (exit 10): the operator and node builds differ. `details.client` and `details.node` show both. Once the operator connects to nodes, it handles this with `eru upgrade` or `--auto-upgrade-nodes`.
 - `precondition_failed` with `details.reason = "journal_corrupt"`: the node's step journal is unreadable. eru never resets it. Report it to a human.
 

@@ -11,8 +11,9 @@ import (
 )
 
 // Get returns the value at a dotted key such as backup.vps.schedule,
-// postgres.settings.work_mem or databases.app.statement_timeout. Arrays of
-// tables are addressed by their name field.
+// postgres.settings.work_mem, clusters.app.size or
+// clusters.app.settings.work_mem. Arrays of tables are addressed by their
+// name field.
 func (c Cluster) Get(key string) (any, error) {
 	if strings.TrimSpace(key) == "" {
 		return nil, unknownKeyError(key)
@@ -25,7 +26,7 @@ func (c Cluster) Get(key string) (any, error) {
 }
 
 // Set assigns value to a dotted key. Values parse by the target field's type.
-// Immutable keys (schema, name, nodes.*.wg_address, transport.*) are refused.
+// Immutable keys (immutableHint) are refused.
 func (c *Cluster) Set(key, value string) error {
 	segs := strings.Split(key, ".")
 	if immutableKey(segs) {
@@ -33,7 +34,7 @@ func (c *Cluster) Set(key, value string) error {
 			output.CodePrecondition,
 			"key "+key+" is immutable after init",
 			output.ExitPrecondition,
-			"schema, name, nodes.*.wg_address and transport.* cannot be changed once a cluster exists.",
+			immutableHint,
 		).WithDetails(map[string]any{"reason": "immutable_key", "key": key})
 	}
 	if err := setIn(reflect.ValueOf(c).Elem(), segs, value); err != nil {
@@ -42,6 +43,14 @@ func (c *Cluster) Set(key, value string) error {
 	return nil
 }
 
+// immutableHint names the keys eru refuses to change.
+const immutableHint = "schema, name, nodes.*.wg_address, transport.* and clusters.*.name, .port, .stanza and .follows " +
+	"cannot be changed once they exist. A cluster's port and stanza are assigned by eru db create."
+
+// immutableClusterKeys are the [[clusters]] keys fixed at create. follows
+// arrives with followers in Phase 6.
+var immutableClusterKeys = map[string]bool{"name": true, "port": true, "stanza": true, "follows": true}
+
 // immutableKey reports whether a dotted key names a value eru refuses to change.
 func immutableKey(segs []string) bool {
 	switch segs[0] {
@@ -49,9 +58,14 @@ func immutableKey(segs []string) bool {
 		return true
 	case "nodes":
 		return len(segs) == 3 && segs[2] == "wg_address"
+	case "clusters":
+		return len(segs) == 3 && immutableClusterKeys[segs[2]]
 	}
 	return false
 }
+
+// ImmutableHint is the hint for a refused immutable change.
+func ImmutableHint() string { return immutableHint }
 
 // ImmutableChanges lists the immutable keys whose value differs between old
 // and updated, for whole-file replacements such as config edit.
@@ -69,6 +83,18 @@ func ImmutableChanges(old, updated Cluster) []string {
 	for _, n := range old.Nodes {
 		if u, ok := updated.Node(n.Name); ok && u.WGAddress != n.WGAddress {
 			changed = append(changed, "nodes."+n.Name+".wg_address")
+		}
+	}
+	for _, cl := range old.Clusters {
+		u, ok := updated.ClusterByName(cl.Name)
+		if !ok {
+			continue
+		}
+		if u.Port != cl.Port {
+			changed = append(changed, "clusters."+cl.Name+".port")
+		}
+		if u.Stanza != cl.Stanza {
+			changed = append(changed, "clusters."+cl.Name+".stanza")
 		}
 	}
 	return changed

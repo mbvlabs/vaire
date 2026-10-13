@@ -26,17 +26,17 @@ type Group struct {
 // Groups returns every value of doc, grouped the way a password manager
 // entry is laid out. Sections the document doesn't have yet are left out.
 func (d Document) Groups() []Group {
-	groups := []Group{{Title: "Cluster " + d.Cluster.Name, Fields: nonEmpty(
-		Field{"Name", d.Cluster.Name},
-		Field{"Domain", d.Cluster.Domain},
-		Field{"Stanza", d.Cluster.Stanza},
-		Field{"TLS mode", d.Cluster.TLSMode},
+	groups := []Group{{Title: "Server " + d.Server.Name, Fields: nonEmpty(
+		Field{"Name", d.Server.Name},
+		Field{"Domain", d.Server.Domain},
+		Field{"TLS mode", d.Server.TLSMode},
 		Field{"eru version", d.EruVersion},
 		Field{"Created at", d.CreatedAt},
 	)}}
 	for _, n := range d.Nodes {
 		fields := nonEmpty(
 			Field{"Role", n.Role},
+			Field{"Hostname", n.Hostname},
 			Field{"Public address", n.PublicAddress},
 			Field{"WireGuard port", strconv.Itoa(n.ListenPort)},
 			Field{"WireGuard address", n.WGAddress},
@@ -59,7 +59,7 @@ func (d Document) Groups() []Group {
 		Field{"SSH private key", d.Operator.SSHPrivateKey},
 	)})
 	if db := d.Database; db != nil {
-		groups = append(groups, Group{Title: "Cluster admin (all databases)", Fields: roleFields("", db.Admin)})
+		groups = append(groups, Group{Title: "Admin (all databases)", Fields: roleFields("", db.Admin)})
 		if len(db.Services) > 0 {
 			var fields []Field
 			for _, name := range sortedKeys(db.Services) {
@@ -78,7 +78,6 @@ func (d Document) Groups() []Group {
 			Field{"Access key ID", b.AccessKeyID},
 			Field{"Secret access key", b.SecretAccessKey},
 			Field{"URI style", b.URIStyle},
-			Field{"pgBackRest stanza", b.PgBackRest.Stanza},
 			Field{"pgBackRest cipher pass", b.PgBackRest.CipherPass},
 			Field{"Dump age identity", b.Dumps.AgeIdentity},
 			Field{"Dump age recipient", b.Dumps.AgeRecipient},

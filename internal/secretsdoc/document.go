@@ -1,6 +1,6 @@
 // Package secretsdoc is the age-encrypted secrets document (§10.1): its
 // schema, encryption with a generated EFF-wordlist passphrase, the
-// break-glass text, and turning a document into a local context. The document holds cluster access
+// break-glass text, and turning a document into a local context. The document holds server access
 // credentials only; application database passwords are never in it.
 package secretsdoc
 
@@ -33,7 +33,7 @@ type Document struct {
 	Schema     string    `json:"schema"`
 	CreatedAt  string    `json:"created_at"`
 	EruVersion string    `json:"eru_version"`
-	Cluster    Cluster   `json:"cluster"`
+	Server     Server    `json:"server"`
 	Nodes      []Node    `json:"nodes"`
 	Operator   Operator  `json:"operator"`
 	Database   *Database `json:"database,omitempty"`
@@ -52,11 +52,11 @@ const ConnectionNotes = "The app URL goes through PgBouncer on port 6432 in tran
 	"and the client must negotiate TLS directly (sslnegotiation=direct, PostgreSQL 17+ libpq or pgx 5.7+); other clients get \"server refused TLS\" and should use 6432. " +
 	"It follows the same client allowlist as 6432."
 
-// Cluster is the cluster identity.
-type Cluster struct {
+// Server is the setup's identity: its name, the base domain its nodes are
+// named under, and the TLS mode.
+type Server struct {
 	Name    string `json:"name"`
 	Domain  string `json:"domain,omitempty"`
-	Stanza  string `json:"stanza"`
 	TLSMode string `json:"tls_mode,omitempty"`
 }
 
@@ -64,6 +64,7 @@ type Cluster struct {
 type Node struct {
 	Name          string   `json:"name"`
 	Role          string   `json:"role"`
+	Hostname      string   `json:"hostname,omitempty"`
 	PublicAddress string   `json:"public_address"`
 	ListenPort    int      `json:"listen_port"`
 	WGAddress     string   `json:"wg_address"`
@@ -92,18 +93,18 @@ type Role = contexts.Role
 // role uses PgBouncer on 6432, and also on 443 with direct TLS through nginx;
 // the migrate role connects straight to Postgres on 5432, reachable only over
 // WireGuard or when expose_postgres is set.
-func DatabaseURLs(domain, tlsMode, db string, roles map[string]contexts.Role) map[string]string {
+func DatabaseURLs(host, tlsMode, db string, roles map[string]contexts.Role) map[string]string {
 	query := "sslmode=verify-full&sslrootcert=system"
 	if tlsMode == "self-signed" {
 		query = "sslmode=require"
 	}
 	out := map[string]string{}
 	if r, ok := roles["app"]; ok {
-		out["app"] = fmt.Sprintf("postgres://%s:%s@%s:6432/%s?%s", r.User, r.Password, domain, db, query)
-		out["app_direct_tls"] = fmt.Sprintf("postgres://%s:%s@%s:443/%s?%s&sslnegotiation=direct", r.User, r.Password, domain, db, query)
+		out["app"] = fmt.Sprintf("postgres://%s:%s@%s:6432/%s?%s", r.User, r.Password, host, db, query)
+		out["app_direct_tls"] = fmt.Sprintf("postgres://%s:%s@%s:443/%s?%s&sslnegotiation=direct", r.User, r.Password, host, db, query)
 	}
 	if r, ok := roles["migrate"]; ok {
-		out["migrate"] = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?%s", r.User, r.Password, domain, db, query)
+		out["migrate"] = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?%s", r.User, r.Password, host, db, query)
 	}
 	return out
 }

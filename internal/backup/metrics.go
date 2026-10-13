@@ -16,15 +16,15 @@ import (
 // arrives in Phase 5 and scrapes it from then on; eru writes it from Phase 3.
 const TextfilePath = "/var/lib/node_exporter/textfile/eru.prom"
 
-// WriteMetrics renders the eru.prom backup lines from state.json. It is
-// called after every backup, verify, drill, dump and restore change, and a
-// failure to write is never fatal for the job.
+// WriteMetrics renders the eru.prom backup lines from records.json and the
+// job records in state.json. It is called after every backup, verify, drill,
+// dump and restore change, and a failure to write is never fatal for the job.
 func WriteMetrics(cluster, node string) error {
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return err
 	}
-	bs, err := decode(st.Backup)
+	bs, err := LoadRecords()
 	if err != nil {
 		return err
 	}

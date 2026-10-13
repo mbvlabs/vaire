@@ -65,7 +65,7 @@ func (s tlsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 	// nginx.conf is written over the package's default afterwards.
 	env := map[string]string{
 		"NGINX_MIN_VERSION": versions.NginxMinVersion,
-		"DOMAIN":            cfg.Domain,
+		"TLS_HOSTNAME":      cfg.MasterHostname(),
 		"ACME_WEBROOT":      ACMEWebroot,
 		"PHASE":             "install",
 	}

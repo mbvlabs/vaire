@@ -78,8 +78,8 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	}
 
 	names := map[string]bool{}
-	configured := map[string]config.Database{}
-	for _, db := range env.Cluster.Databases {
+	configured := map[string]config.ClusterSpec{}
+	for _, db := range env.Cluster.Clusters {
 		names[db.Name] = true
 		configured[db.Name] = db
 	}
@@ -139,7 +139,7 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	if len(extensions) == 0 {
 		extensions = []string{"pg_stat_statements"}
 	}
-	db, err := createDatabase(ctx, env, config.Database{Name: p.Name, StatementTimeout: timeout, Extensions: extensions})
+	db, err := createDatabase(ctx, env, config.ClusterSpec{Name: p.Name, StatementTimeout: timeout, Extensions: extensions})
 	if err != nil {
 		return Result{}, err
 	}
@@ -149,13 +149,13 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 // createDatabase adds db to cluster.toml and runs postgres-roles-v1 for it,
 // with the role passwords from the request's secrets. db create and db fork
 // share it.
-func createDatabase(ctx context.Context, env *Env, db config.Database) (config.Database, error) {
+func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec) (config.ClusterSpec, error) {
 	store := state.FileStore{}
 	cfg, previous, err := store.Load()
 	if err != nil {
 		return db, err
 	}
-	if _, ok := cfg.DatabaseByName(db.Name); ok {
+	if _, ok := cfg.ClusterByName(db.Name); ok {
 		return db, existingDatabase(db.Name)
 	}
 	if exists, err := databaseExists(ctx, env, db.Name); err == nil && exists {
@@ -168,7 +168,10 @@ func createDatabase(ctx context.Context, env *Env, db config.Database) (config.D
 				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
 		}
 	}
-	cfg.Databases = append(cfg.Databases, db)
+	if err := placeCluster(cfg, &db); err != nil {
+		return db, err
+	}
+	cfg.Clusters = append(cfg.Clusters, db)
 	if err := cfg.Validate(); err != nil {
 		return db, config.ValidationError(err)
 	}
@@ -191,7 +194,7 @@ func createDatabase(ctx context.Context, env *Env, db config.Database) (config.D
 		}
 		return db, err
 	}
-	created, _ := cfg.DatabaseByName(db.Name)
+	created, _ := cfg.ClusterByName(db.Name)
 	return created, nil
 }
 
@@ -224,7 +227,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	_, inConfig := cfg.DatabaseByName(p.Name)
+	_, inConfig := cfg.ClusterByName(p.Name)
 	exists, err := databaseExists(ctx, env, p.Name)
 	if err != nil {
 		return Result{}, err
@@ -281,13 +284,13 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 		}
 	}
 
-	kept := make([]config.Database, 0, len(cfg.Databases))
-	for _, db := range cfg.Databases {
+	kept := make([]config.ClusterSpec, 0, len(cfg.Clusters))
+	for _, db := range cfg.Clusters {
 		if db.Name != p.Name {
 			kept = append(kept, db)
 		}
 	}
-	cfg.Databases = kept
+	cfg.Clusters = kept
 	raw, err := cfg.Encode()
 	if err != nil {
 		return Result{}, err
@@ -365,7 +368,7 @@ func handleDBCredentials(ctx context.Context, env *Env) (Result, error) {
 	if err := checkDatabaseName(p.Name); err != nil {
 		return Result{}, err
 	}
-	if _, ok := env.Cluster.DatabaseByName(p.Name); !ok {
+	if _, ok := env.Cluster.ClusterByName(p.Name); !ok {
 		return Result{}, output.NewError(output.CodePrecondition, "database "+p.Name+" is not in cluster.toml", output.ExitPrecondition,
 			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": p.Name})
 	}
@@ -404,4 +407,28 @@ func handleDBCredentials(ctx context.Context, env *Env) (Result, error) {
 // quoteLiteral single-quotes a validated identifier used as a string literal.
 func quoteLiteral(value string) string {
 	return "'" + value + "'"
+}
+
+// placeCluster fills what db create assigns: the node (the master), a free
+// port, a new stanza and the default size.
+func placeCluster(cfg config.Cluster, db *config.ClusterSpec) error {
+	master, ok := cfg.Master()
+	if !ok {
+		return output.NewError(output.CodeConfig, "cluster.toml has no master node", output.ExitConfig, "")
+	}
+	db.Node = master.Name
+	port, err := cfg.FreeClusterPort()
+	if err != nil {
+		return output.NewError(output.CodePrecondition, err.Error(), output.ExitPrecondition,
+			"Drop a database you no longer need, or put the next one on its own node (Phase 10).").
+			WithDetails(map[string]any{"reason": "no_cluster_port"})
+	}
+	db.Port = port
+	if db.Stanza, err = config.NewStanza(db.Name); err != nil {
+		return err
+	}
+	if db.Size == "" {
+		db.Size = cfg.Postgres.DefaultSize
+	}
+	return nil
 }

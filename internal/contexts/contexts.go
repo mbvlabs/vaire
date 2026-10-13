@@ -1,5 +1,5 @@
 // Package contexts manages the operator's files under $XDG_CONFIG_HOME/eru
-// (§6.3): the current context, one directory of credentials per cluster, and
+// (§6.3): the current context, one directory of credentials per server, and
 // the pending state of an unfinished server init.
 package contexts
 
@@ -30,17 +30,21 @@ const (
 // EnvContext overrides the current context.
 const EnvContext = "ERU_CONTEXT"
 
-// NamePattern is a context name. Cluster names always match it.
+// NamePattern is a context name. Server names always match it.
 var NamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
-// Context is contexts/<name>/context.toml.
+// Context is contexts/<name>/context.toml. It points at the master by its
+// hostname. Nodes and Databases are a cache of the master's view, refreshed
+// from it.
 type Context struct {
-	Name     string   `toml:"-" json:"name"`
-	Cluster  string   `toml:"cluster" json:"cluster"`
-	Domain   string   `toml:"domain,omitempty" json:"domain,omitempty"`
-	TLSMode  string   `toml:"tls_mode,omitempty" json:"tls_mode,omitempty"`
-	Nodes    []Node   `toml:"nodes" json:"nodes"`
-	Operator Operator `toml:"operator" json:"operator"`
+	Name    string `toml:"-" json:"name"`
+	Server  string `toml:"server" json:"server"`
+	Domain  string `toml:"domain,omitempty" json:"domain,omitempty"`
+	TLSMode string `toml:"tls_mode,omitempty" json:"tls_mode,omitempty"`
+	Nodes   []Node `toml:"nodes" json:"nodes"`
+	// Databases is the placement map: database name to node name.
+	Databases map[string]string `toml:"databases" json:"databases"`
+	Operator  Operator          `toml:"operator" json:"operator"`
 	// AutoUpgradeNodes installs the operator's build on a node that runs a
 	// different one instead of failing with node_version_mismatch.
 	AutoUpgradeNodes bool `toml:"auto_upgrade_nodes" json:"auto_upgrade_nodes"`
@@ -52,17 +56,20 @@ type Context struct {
 	EruVersion          string `toml:"eru_version" json:"eru_version"`
 }
 
-// Node is one node the context can reach.
+// Node is one node the context can reach: its name, hostname and WireGuard
+// address. The WireGuard endpoint (public address, port and key) is what the
+// tunnel to the master needs.
 type Node struct {
 	Name          string `toml:"name" json:"name"`
 	Role          string `toml:"role" json:"role"`
+	Hostname      string `toml:"hostname" json:"hostname"`
 	PublicAddress string `toml:"public_address" json:"public_address"`
 	WGAddress     string `toml:"wg_address" json:"wg_address"`
 	WGPublicKey   string `toml:"wg_public_key" json:"wg_public_key"`
 	ListenPort    int    `toml:"listen_port" json:"listen_port"`
 }
 
-// Operator is this machine's identity in the cluster.
+// Operator is this machine's identity on the server.
 type Operator struct {
 	Name      string `toml:"name" json:"name"`
 	WGAddress string `toml:"wg_address" json:"wg_address"`
@@ -77,10 +84,13 @@ type Credentials struct {
 	Backup       *BackupCreds   `json:"backup,omitempty"`
 }
 
-// Primary returns the primary node.
-func (c *Context) Primary() (Node, bool) {
+// RoleMaster is the master node's role.
+const RoleMaster = "master"
+
+// Master returns the master node.
+func (c *Context) Master() (Node, bool) {
 	for _, n := range c.Nodes {
-		if n.Role == "primary" {
+		if n.Role == RoleMaster {
 			return n, true
 		}
 	}
@@ -88,6 +98,12 @@ func (c *Context) Primary() (Node, bool) {
 		return c.Nodes[0], true
 	}
 	return Node{}, false
+}
+
+// MasterHostname is the master's hostname, which its certificate carries.
+func (c *Context) MasterHostname() string {
+	n, _ := c.Master()
+	return n.Hostname
 }
 
 // Root is $XDG_CONFIG_HOME/eru, default ~/.config/eru.

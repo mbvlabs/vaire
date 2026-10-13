@@ -15,9 +15,9 @@ import (
 )
 
 // BreakGlass is the break-glass text stored in the document (§8.4).
-func BreakGlass(cluster, adminUser, publicAddress string) string {
+func BreakGlass(server, adminUser, publicAddress string) string {
 	return strings.Join([]string{
-		"# Break-glass access for cluster " + cluster,
+		"# Break-glass access for server " + server,
 		"",
 		"Use this when WireGuard is unreachable and eru cannot reach the server from your machine.",
 		"",
@@ -51,10 +51,11 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 		return nil, secretsError("the secrets document lists no node", nil)
 	}
 	ctx := &contexts.Context{
-		Name:    name,
-		Cluster: doc.Cluster.Name,
-		Domain:  doc.Cluster.Domain,
-		TLSMode: doc.Cluster.TLSMode,
+		Name:      name,
+		Server:    doc.Server.Name,
+		Domain:    doc.Server.Domain,
+		TLSMode:   doc.Server.TLSMode,
+		Databases: map[string]string{},
 		Operator: contexts.Operator{
 			Name:      doc.Operator.Name,
 			WGAddress: doc.Operator.WGAddress,
@@ -83,6 +84,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 		ctx.Nodes = append(ctx.Nodes, contexts.Node{
 			Name:          n.Name,
 			Role:          n.Role,
+			Hostname:      n.Hostname,
 			PublicAddress: n.PublicAddress,
 			WGAddress:     n.WGAddress,
 			WGPublicKey:   n.WGPublicKey,
@@ -121,7 +123,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 
 // Summary is the public part of a document, safe to print.
 type Summary struct {
-	Cluster  string        `json:"cluster"`
+	Server   string        `json:"server"`
 	Domain   string        `json:"domain,omitempty"`
 	Operator string        `json:"operator"`
 	SSHUser  string        `json:"ssh_user"`
@@ -134,6 +136,7 @@ type Summary struct {
 type NodeSummary struct {
 	Name          string `json:"name"`
 	Role          string `json:"role"`
+	Hostname      string `json:"hostname,omitempty"`
 	PublicAddress string `json:"public_address"`
 	Endpoint      string `json:"wireguard_endpoint"`
 	WGAddress     string `json:"wg_address"`
@@ -142,8 +145,8 @@ type NodeSummary struct {
 // Summarize returns doc without secrets.
 func Summarize(doc Document) Summary {
 	s := Summary{
-		Cluster:  doc.Cluster.Name,
-		Domain:   doc.Cluster.Domain,
+		Server:   doc.Server.Name,
+		Domain:   doc.Server.Domain,
 		Operator: doc.Operator.Name,
 		SSHUser:  doc.Operator.SSHUser,
 		Created:  doc.CreatedAt,
@@ -153,6 +156,7 @@ func Summarize(doc Document) Summary {
 		s.Nodes = append(s.Nodes, NodeSummary{
 			Name:          n.Name,
 			Role:          n.Role,
+			Hostname:      n.Hostname,
 			PublicAddress: n.PublicAddress,
 			Endpoint:      net.JoinHostPort(n.PublicAddress, strconv.Itoa(n.ListenPort)),
 			WGAddress:     n.WGAddress,
@@ -163,5 +167,5 @@ func Summarize(doc Document) Summary {
 
 // String is a one-line description.
 func (s Summary) String() string {
-	return fmt.Sprintf("cluster %s, operator %s, %d node(s)", s.Cluster, s.Operator, len(s.Nodes))
+	return fmt.Sprintf("server %s, operator %s, %d node(s)", s.Server, s.Operator, len(s.Nodes))
 }

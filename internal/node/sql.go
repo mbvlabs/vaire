@@ -26,9 +26,9 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	}
 	if p.DB == "" {
 		return Result{}, output.NewError(output.CodeInputRequired, "eru sql needs --db", output.ExitInput,
-			"Pass --db with one of the cluster's databases.").WithDetails(map[string]any{"flag": "--db"})
+			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
-	if _, ok := env.Cluster.DatabaseByName(p.DB); !ok {
+	if _, ok := env.Cluster.ClusterByName(p.DB); !ok {
 		return Result{}, output.NewError(output.CodeValidation, "database "+p.DB+" is not in cluster.toml", output.ExitConfig,
 			"Run eru db list to see the databases.")
 	}

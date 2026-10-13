@@ -175,7 +175,7 @@ func (h *handoff) save(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	path, err := promptLine(cmd, "Save everything to (relative to "+cwd+")", "./"+h.doc.Cluster.Name+"-secrets.txt")
+	path, err := promptLine(cmd, "Save everything to (relative to "+cwd+")", "./"+h.doc.Server.Name+"-secrets.txt")
 	if err != nil {
 		return err
 	}
@@ -202,7 +202,7 @@ func (h *handoff) save(cmd *cobra.Command) error {
 // passphrase.
 func (h handoff) record() string {
 	var b strings.Builder
-	b.WriteString("eru secrets handoff for cluster " + h.doc.Cluster.Name + "\n")
+	b.WriteString("eru secrets handoff for server " + h.doc.Server.Name + "\n")
 	for _, g := range h.doc.Groups() {
 		b.WriteString("\n## " + g.Title + "\n")
 		for _, f := range g.Fields {

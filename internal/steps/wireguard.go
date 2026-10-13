@@ -49,7 +49,7 @@ func thisNode(cfg config.Cluster) (config.NodeSpec, error) {
 			return spec, nil
 		}
 	}
-	if spec, ok := cfg.Primary(); ok {
+	if spec, ok := cfg.Master(); ok {
 		return spec, nil
 	}
 	return config.NodeSpec{}, ErrNoConfig

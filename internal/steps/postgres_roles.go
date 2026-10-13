@@ -44,7 +44,7 @@ type databaseInputs struct {
 
 func buildRoleInputs(cfg config.Cluster) roleInputs {
 	in := roleInputs{Admin: true, Monitor: true, Auth: true}
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		in.DBs = append(in.DBs, databaseInputs{
 			Name:             db.Name,
 			StatementTimeout: db.StatementTimeout,
@@ -74,7 +74,7 @@ func (postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.Ru
 		return incomplete("cannot read pg_database"), nil
 	}
 	dbSet := stringSet(dbs)
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		for _, role := range append([]string{db.Name + "_owner"}, prefixed(db.Name, DatabaseRoles)...) {
 			if !roleSet[role] {
 				return incomplete("role " + role + " is missing"), nil
@@ -99,12 +99,12 @@ func (postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.Ru
 		return incomplete("cannot read " + RoleDirectOnly + " members"), nil
 	}
 	directSet := stringSet(direct)
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		if !directSet[db.Name+"_"+RoleMigrate] {
 			return incomplete("role " + db.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly), nil
 		}
 	}
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		installed, err := queryColumn(ctx, rt, db.Name, "SELECT extname FROM pg_extension")
 		if err != nil {
 			return incomplete("cannot read extensions in " + db.Name), nil
@@ -170,7 +170,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	}
 	cluster.WriteString(pgbouncerAuthSQL)
 
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		sql, err := databaseSQL(ctx, rt, db, roleSet, dbSet)
 		if err != nil {
 			return engine.ApplyResult{}, err
@@ -181,7 +181,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 		return engine.ApplyResult{}, err
 	}
 
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		if err := rt.PG.Exec(ctx, db.Name, databaseGrantsSQL(db), nil); err != nil {
 			return engine.ApplyResult{}, err
 		}
@@ -199,7 +199,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 }
 
 // databaseSQL creates the roles and the database, cluster-wide, in postgres.
-func databaseSQL(ctx context.Context, rt engine.Runtime, db config.Database, roleSet, dbSet map[string]bool) (string, error) {
+func databaseSQL(ctx context.Context, rt engine.Runtime, db config.ClusterSpec, roleSet, dbSet map[string]bool) (string, error) {
 	var b strings.Builder
 	owner := db.Name + "_owner"
 	if !roleSet[owner] {
@@ -246,10 +246,10 @@ func DatabaseConnectSQL(target, roleDB string) string {
 // DatabaseGrantsSQL is postgres-roles-v1's schema, default-privilege and
 // extension SQL for db, run inside the database it is for. eru restore and
 // eru db fork run it in the databases they load.
-func DatabaseGrantsSQL(db config.Database) string { return databaseGrantsSQL(db) }
+func DatabaseGrantsSQL(db config.ClusterSpec) string { return databaseGrantsSQL(db) }
 
 // databaseGrantsSQL is the schema and default-privilege SQL run inside db.
-func databaseGrantsSQL(db config.Database) string {
+func databaseGrantsSQL(db config.ClusterSpec) string {
 	owner := pg.Quote(db.Name + "_owner")
 	app := pg.Quote(db.Name + "_app")
 	ro := pg.Quote(db.Name + "_ro")
@@ -340,7 +340,7 @@ func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 // cluster.toml and look like eru databases.
 func orphanedWarnings(cfg config.Cluster, dbs []string, roleSet map[string]bool) []output.Warning {
 	configured := map[string]bool{}
-	for _, db := range cfg.Databases {
+	for _, db := range cfg.Clusters {
 		configured[db.Name] = true
 	}
 	var warnings []output.Warning

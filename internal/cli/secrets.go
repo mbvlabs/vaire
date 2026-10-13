@@ -107,7 +107,7 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 		Schema:     secretsdoc.Schema,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		EruVersion: buildinfo.Version,
-		Cluster:    secretsdoc.Cluster{Name: c.Cluster, Domain: c.Domain, Stanza: c.Cluster, TLSMode: c.TLSMode},
+		Server:     secretsdoc.Server{Name: c.Server, Domain: c.Domain, TLSMode: c.TLSMode},
 		Operator: secretsdoc.Operator{
 			Name:          c.Operator.Name,
 			WGAddress:     c.Operator.WGAddress,
@@ -119,7 +119,7 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 		Database: creds.Database,
 		Backup:   creds.Backup,
 	}
-	var primary string
+	var master string
 	for _, n := range c.Nodes {
 		hostKeys, err := hostKeyLines(known, n.WGAddress)
 		if err != nil {
@@ -128,17 +128,18 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 		doc.Nodes = append(doc.Nodes, secretsdoc.Node{
 			Name:          n.Name,
 			Role:          n.Role,
+			Hostname:      n.Hostname,
 			PublicAddress: n.PublicAddress,
 			ListenPort:    n.ListenPort,
 			WGAddress:     n.WGAddress,
 			WGPublicKey:   n.WGPublicKey,
 			SSHHostKeys:   hostKeys,
 		})
-		if n.Role == "primary" || primary == "" {
-			primary = n.PublicAddress
+		if n.Role == contexts.RoleMaster || master == "" {
+			master = n.PublicAddress
 		}
 	}
-	doc.BreakGlass = secretsdoc.BreakGlass(c.Cluster, c.Operator.SSHUser, primary)
+	doc.BreakGlass = secretsdoc.BreakGlass(c.Server, c.Operator.SSHUser, master)
 	return doc, nil
 }
 
