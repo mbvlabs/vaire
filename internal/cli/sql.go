@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/pg"
@@ -66,10 +67,14 @@ func adminCredentials(c *contexts.Context) (user, password string, err error) {
 // quoting, so a "-c name=value" value would be cut at the space.
 func sessionOptions(db string, write bool) string {
 	if write {
-		return "--role=" + db + "_owner"
+		return "--role=" + ownerRole(db)
 	}
 	return "--default_transaction_read_only=on"
 }
+
+// ownerRole is db's owner role. A restore's or drill's copy
+// (<db>__restoring) holds the live database's roles, so it is <db>_owner.
+func ownerRole(db string) string { return backup.LiveDatabase(db) + "_owner" }
 
 // sqlQuery resolves the query from the argument, --file, or stdin.
 func sqlQuery(cmd *cobra.Command, args []string) (string, error) {
@@ -138,7 +143,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	setup := "SET default_transaction_read_only = on"
 	if write {
 		begin = "BEGIN READ WRITE"
-		setup = "SET ROLE " + pg.Quote(db+"_owner")
+		setup = "SET ROLE " + pg.Quote(ownerRole(db))
 	}
 	if _, err := conn.Exec(ctx, setup); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
@@ -149,7 +154,11 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	res, err := conn.Query(ctx, query)
 	if err != nil {
 		_, _ = conn.Exec(ctx, "ROLLBACK")
-		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "Fix the statement and retry.")
+		hint := "Fix the statement and retry."
+		if write && backup.LiveDatabase(db) != db {
+			hint += " " + db + " is a copy: one restored from a backup is read-only (in recovery) until eru restore promote " + backup.LiveDatabase(db) + "; one restored from a dump takes writes."
+		}
+		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, hint)
 	}
 	if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "The transaction did not commit.")

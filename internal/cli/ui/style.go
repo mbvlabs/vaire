@@ -101,6 +101,36 @@ func Panel(title, body string) string {
 	return stylePanel.Render(content)
 }
 
+// PanelFit is Panel within width columns: content too wide for the frame
+// wraps inside it, and below minPanelWidth the frame is left out, so a
+// narrow terminal never breaks the border.
+func PanelFit(title, body string, width int) string {
+	framed := Panel(title, body)
+	if width <= 0 || lipgloss.Width(framed) <= width {
+		return framed
+	}
+	if width >= minPanelWidth {
+		content := body
+		if title != "" {
+			content = styleTitle.Render(title) + "\n" + body
+		}
+		// Whether Width counts the border differs between lipgloss
+		// versions; take the first that fits.
+		for _, w := range []int{width, width - 2} {
+			if out := stylePanel.Width(w).Render(content); lipgloss.Width(out) <= width {
+				return out
+			}
+		}
+	}
+	if title == "" {
+		return body
+	}
+	return styleTitle.Render(title) + "\n" + body
+}
+
+// minPanelWidth is the narrowest terminal PanelFit draws a frame in.
+const minPanelWidth = 30
+
 // Warn renders one warning line.
 func Warn(msg string) string {
 	return styleWarn.Render(SymWarn+" warning") + " " + styleWarnMsg.Render(msg)

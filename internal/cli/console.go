@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -76,7 +77,9 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	// Ctrl-C belongs to usql (it cancels the running query), not to eru.
 	signal.Ignore(syscall.SIGINT)
 	defer signal.Reset(syscall.SIGINT)
-	child := exec.CommandContext(ctx, usql, dsn.String()) //nolint:gosec // G204: usql from PATH or eru's pinned copy.
+	// usql's default prompt shows the host up to its first dot, which for the
+	// loopback listener is "127"; name the node instead.
+	child := exec.CommandContext(ctx, usql, "--set", consolePrompt(at.Hostname, s.ctx.Name), dsn.String()) //nolint:gosec // G204: usql from PATH or eru's pinned copy.
 	child.Env = append(os.Environ(), "PGPASSWORD="+password)
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
@@ -89,4 +92,18 @@ func runConsole(cmd *cobra.Command, args []string) error {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
 	return nil
+}
+
+// consolePrompt is usql's PROMPT1 variable: its default (%S%N%m%/%R%# ) with
+// the literal node name in place of %m, so pg:user@<node>/<db>=>, with the node's
+// hostname cut at its first dot (db1.example.com is db1), or the context name
+// when the hostname is unknown. % is usql's escape, so it is dropped from the
+// literal.
+func consolePrompt(hostname, contextName string) string {
+	node, _, _ := strings.Cut(hostname, ".")
+	if node == "" {
+		node = contextName
+	}
+	node = strings.ReplaceAll(node, "%", "")
+	return "PROMPT1=%S%N" + node + "/%/%R%# "
 }

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -17,7 +19,12 @@ import (
 
 // runNodeRPC serves one request. The dispatcher writes the result event
 // itself, so the exit status propagates without a second envelope.
+//
+// SIGPIPE is ignored so a closed SSH channel makes stdout writes fail with
+// EPIPE instead of killing the process mid-step; the handler then finishes
+// and the run log keeps the result.
 func runNodeRPC(cmd *cobra.Command, _ []string) error {
+	signal.Ignore(syscall.SIGPIPE)
 	code := node.Serve(os.Stdin, cmd.OutOrStdout())
 	if code != output.ExitOK {
 		return &localenv.SilentExit{Code: code}
@@ -38,16 +45,27 @@ func runNodeSelfcheck(cmd *cobra.Command, _ []string) error {
 }
 
 // nodeReporter prints script output for node commands run by hand or by
-// systemd, whose output lands in the journal.
+// systemd, whose output lands in the journal, and progress every tenth of
+// the way (pgBackRest's per-file detail lines become progress events and
+// are not printed).
 func nodeReporter(cmd *cobra.Command) engine.Reporter {
 	opts, _ := output.ParseOptions(cmd)
 	if output.UsesStructuredOutput(opts) || opts.Quiet {
 		return func(output.Event) {}
 	}
 	w := cmd.ErrOrStderr()
+	shown := map[string]int{}
 	return func(ev output.Event) {
-		if ev.Type == "log" {
+		switch {
+		case ev.Type == "log":
 			_, _ = fmt.Fprintln(w, ev.Line)
+		case ev.Type == "progress" && ev.Pct != nil:
+			last, seen := shown[ev.Phase]
+			if seen && *ev.Pct/10 <= last/10 {
+				return
+			}
+			shown[ev.Phase] = *ev.Pct
+			_, _ = fmt.Fprintf(w, "%s: %d%%\n", ev.Phase, *ev.Pct)
 		}
 	}
 }
@@ -79,9 +97,12 @@ func runNodeRun(cmd *cobra.Command, args []string) error {
 		// eru job follow replays.
 		report = jobReporter(cmd)
 	}
-	data, err := node.RunJob(commandContext(cmd), job, opts, report)
+	data, skipped, err := node.RunJob(commandContext(cmd), job, opts, report)
 	if err != nil {
 		return err
+	}
+	if skipped != "" {
+		return output.OK(cmd, data, "skipped "+job+": "+skipped)
 	}
 	return output.OK(cmd, data, "ran "+job)
 }

@@ -5,12 +5,14 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/render"
 	"github.com/spf13/cobra"
@@ -90,10 +92,22 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	var lifted []string
+	if old, err := config.ParseCluster([]byte(data.TOML)); err == nil {
+		updated := old
+		updated.Clusters = slices.Clone(old.Clusters)
+		if updated.Set(key, value) == nil {
+			lifted = node.Unprotected(old, updated)
+		}
+	}
+	confirm, confirms, err := confirmUnprotect(cmd, lifted)
+	if err != nil {
+		return err
+	}
 	reply, err := s.node.Call(commandContext(cmd), "config.set", map[string]any{
 		"set":           map[string]string{key: value},
 		"base_revision": data.Revision,
-	}, remote.CallOptions{DryRun: dryRun(cmd), OnEvent: p.event})
+	}, remote.CallOptions{DryRun: dryRun(cmd), Confirm: confirm, Confirms: confirms, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -227,10 +241,20 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if !ok {
 		return output.NewError(output.CodeUnsafeAction, "the edit was discarded", output.ExitUnsafe, "")
 	}
+	var lifted []string
+	if old, oerr := config.ParseCluster([]byte(data.TOML)); oerr == nil {
+		if updated, uerr := config.ParseCluster(edited); uerr == nil {
+			lifted = node.Unprotected(old, updated)
+		}
+	}
+	confirm, confirms, err := confirmUnprotect(cmd, lifted)
+	if err != nil {
+		return err
+	}
 	reply, err := s.node.Call(commandContext(cmd), "config.set", map[string]any{
 		"toml":          string(edited),
 		"base_revision": data.Revision,
-	}, remote.CallOptions{OnEvent: p.event})
+	}, remote.CallOptions{Confirm: confirm, Confirms: confirms, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -258,6 +282,35 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		Warnings: warnings,
 		Next:     []string{"eru apply"},
 	})
+}
+
+// confirmUnprotect has a human type <db>/unprotect for each database whose
+// protection the change lifts, and returns the tokens for the request. It
+// refuses without an interactive terminal, with --yes and in structured
+// output: an agent or a script must not be able to lift a protection it is
+// meant to be stopped by. A dry run lifts nothing, so it asks nothing.
+func confirmUnprotect(cmd *cobra.Command, lifted []string) (string, []string, error) {
+	if len(lifted) == 0 || dryRun(cmd) {
+		return "", nil, nil
+	}
+	tokens := make([]string, 0, len(lifted))
+	for _, name := range lifted {
+		tokens = append(tokens, node.UnprotectToken(name))
+	}
+	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
+		return "", nil, output.NewError(output.CodeDatabaseProtected,
+			"lifting the protection of "+strings.Join(lifted, ", ")+" needs a human at a terminal", output.ExitUnsafe,
+			"A person runs this command in an interactive terminal, without --yes or structured output, and types "+strings.Join(tokens, ", ")+". Agents and scripts cannot lift it.").
+			WithDetails(map[string]any{"reason": "unprotect_requires_human", "databases": lifted, "confirm_tokens": tokens})
+	}
+	for i, name := range lifted {
+		if err := typeWord(cmd, "Type '"+tokens[i]+"' to lift the protection of "+name,
+			name+" is protected: db drop, a shrinking resize, credential rotation and restore promote/undo are refused while it is set.", tokens[i]); err != nil {
+			return "", nil, output.NewError(output.CodeDatabaseProtected, "the protection of "+name+" was kept", output.ExitUnsafe, "").
+				WithDetails(map[string]any{"reason": "unprotect_not_confirmed", "database": name})
+		}
+	}
+	return tokens[0], tokens[1:], nil
 }
 
 // editUntilValid opens path in the editor until the result parses and

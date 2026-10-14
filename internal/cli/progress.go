@@ -29,6 +29,18 @@ type progress struct {
 	stderr io.Writer
 	// live is the terminal UI, nil for plain output.
 	live *ui.Live
+	// hidden holds warning codes the human output leaves out because the
+	// command's result already says the same.
+	hidden map[string]bool
+}
+
+// hideWarning leaves warnings with code out of the human output. JSON and
+// --stream output keep them.
+func (p *progress) hideWarning(code string) {
+	if p.hidden == nil {
+		p.hidden = map[string]bool{}
+	}
+	p.hidden[code] = true
 }
 
 func newProgress(cmd *cobra.Command) *progress {
@@ -75,6 +87,10 @@ func (p *progress) event(ev output.Event) {
 		return
 	}
 	if !p.human() {
+		return
+	}
+	if ev.Type == "warning" && ev.Code != "" && p.hidden[ev.Code] {
+		p.shown(ev.Message)
 		return
 	}
 	if p.live != nil {
@@ -267,7 +283,7 @@ func (p *progress) panel(title string, lines []string) {
 	case p.opts.Stream:
 		p.event(output.Event{Type: "log", Step: "eru", Line: title + ": " + strings.Join(lines, "; ")})
 	case p.live != nil:
-		p.live.Println(ui.Panel(title, strings.Join(lines, "\n")))
+		p.live.Println(ui.PanelFit(title, strings.Join(lines, "\n"), p.live.Width()))
 	case p.human():
 		_, _ = fmt.Fprintln(p.stderr, title)
 		for _, l := range lines {

@@ -303,6 +303,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		params["db"] = db
 	}
 	confirm, confirms := confirmOptions(cmd)
+	// The summary names the pending restarts and next steps carry the
+	// command, so the human output leaves out the node's restart_pending
+	// warning (JSON keeps it).
+	p.hideWarning("restart_pending")
 	reply, err := s.node.Call(commandContext(cmd), "apply", params, remote.CallOptions{
 		Secrets:  secretValues,
 		DryRun:   dry,
@@ -336,8 +340,13 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	var next []string
 	if len(data.RestartPending) > 0 {
-		message += "\nrestart pending for: " + strings.Join(data.RestartPending, ", ")
+		message += "; restart pending for " + strings.Join(data.RestartPending, ", ")
 		next = []string{"eru apply " + confirmFlags(data.ConfirmTokens)}
+		for _, w := range warnings {
+			if w.Code == "restart_pending" {
+				p.shown(w.Message)
+			}
+		}
 	}
 	return output.Success(cmd, output.Result{
 		Data:     data,

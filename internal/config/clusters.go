@@ -43,6 +43,10 @@ type ClusterSpec struct {
 	SessionPoolSize  int               `toml:"session_pool_size"`
 	Settings         map[string]string `toml:"settings,omitempty"`
 	Backup           ClusterBackup     `toml:"backup,omitempty"`
+	// Protected refuses db drop, a shrinking db resize, credential
+	// rotation and restore promote/undo, even with a confirm token. Lifting
+	// it takes <db>/unprotect, typed by a human at a terminal.
+	Protected bool `toml:"protected,omitempty"`
 }
 
 // ClusterBackup is [clusters.backup]: the cluster's restore window and

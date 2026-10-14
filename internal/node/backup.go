@@ -182,6 +182,7 @@ func verify(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, st
 	if err != nil {
 		return res, err
 	}
+	res.Stanza = spec.Stanza
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.LastVerify[spec.Name] = res
 		return nil
@@ -287,7 +288,7 @@ func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (
 		rows = append(rows, row)
 	}
 	for _, d := range rs.DroppedStanzas {
-		row := listRow(d.Database, d.Stanza, infos[d.Stanza], backup.ArchiveStatus{}, rs)
+		row := listRow(d.Database, d.Stanza, infos[d.Stanza], droppedArchive(d), rs)
 		row.Verify, row.Drill, row.Dump = nil, nil, nil
 		row.DroppedAt, row.ExpiresAt = d.DroppedAt, d.ExpiresAt
 		rows = append(rows, row)
@@ -299,8 +300,15 @@ func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (
 	return Result{Data: map[string]any{"databases": rows, "restores": rs.Restores}, Warnings: warnings}, nil
 }
 
+// droppedArchive stands in for the pg_stat_archiver of a dropped stanza's
+// cluster: the time it last archived WAL, recorded at the drop.
+func droppedArchive(d backup.DroppedStanza) backup.ArchiveStatus {
+	return backup.ArchiveStatus{LastArchivedTime: d.LastArchivedAt}
+}
+
 // listRow sums up one stanza for backup.list without a database. A dropped
-// stanza has no live cluster, so its window ends at its newest set.
+// stanza has no live cluster, so its window ends at the WAL archived before
+// the drop, or its newest set when that wasn't recorded.
 func listRow(db, stanza string, info backup.Info, archive backup.ArchiveStatus, rs backup.Records) backupRow {
 	row := backupRow{Database: db, Stanza: stanza, Status: info.Status, Window: restoreWindow(info, archive)}
 	if row.Status == "" {
@@ -314,10 +322,10 @@ func listRow(db, stanza string, info backup.Info, archive backup.ArchiveStatus, 
 	if latest, ok := info.Latest(); ok {
 		row.Latest = &latest
 	}
-	if v, ok := rs.LastVerify[db]; ok {
+	if v, ok := rs.VerifyOf(db, stanza); ok {
 		row.Verify = &v
 	}
-	if d, ok := rs.LastDrill(db); ok {
+	if d, ok := rs.DrillOf(db, stanza); ok {
 		row.Drill = &d
 	}
 	if d, ok := rs.LastDump[db]; ok {
@@ -332,9 +340,10 @@ func listRow(db, stanza string, info backup.Info, archive backup.ArchiveStatus, 
 func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, db string) (Result, error) {
 	spec, live := cfg.ClusterByName(db)
 	out := backupList{Database: db}
+	var dropped backup.DroppedStanza
 	if !live {
-		dropped, ok := rs.Dropped(db)
-		if !ok {
+		var ok bool
+		if dropped, ok = rs.Dropped(db); !ok {
 			return Result{}, databaseNotFound(db)
 		}
 		out.Dropped = &dropped
@@ -345,19 +354,21 @@ func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, d
 	if err != nil {
 		return Result{}, err
 	}
+	archive := droppedArchive(dropped)
 	if live {
 		if out.Archive, err = d.ArchiveStatus(ctx); err != nil {
 			return Result{}, err
 		}
+		archive = out.Archive
 	}
 	out.Stanza, out.Status, out.Sets = info.Stanza, info.Status, info.Sets
-	out.Window = restoreWindow(info, out.Archive)
+	out.Window = restoreWindow(info, archive)
 	var warnings []output.Warning
 	if live {
-		if v, ok := rs.LastVerify[db]; ok {
+		if v, ok := rs.VerifyOf(db, spec.Stanza); ok {
 			out.Verify = &v
 		}
-		if drill, ok := rs.LastDrill(db); ok {
+		if drill, ok := rs.DrillOf(db, spec.Stanza); ok {
 			out.Drill = &drill
 		}
 		if r, ok := rs.Restores[db]; ok {
@@ -383,7 +394,8 @@ func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, d
 }
 
 // restoreWindow is from just after the end of the oldest backup to the last
-// archived WAL segment.
+// archived WAL segment, or the newest backup's end when the archive time is
+// unknown or older. It never ends before it starts.
 func restoreWindow(info backup.Info, archive backup.ArchiveStatus) Window {
 	w := Window{LagSeconds: archive.LagSeconds}
 	if oldest, ok := info.Oldest(); ok {
@@ -396,12 +408,24 @@ func restoreWindow(info backup.Info, archive backup.ArchiveStatus) Window {
 		}
 	}
 	w.To = archive.LastArchivedTime
-	if w.To == "" {
-		if latest, ok := info.Latest(); ok {
-			w.To = latest.Stop
-		}
+	if latest, ok := info.Latest(); ok && laterThan(latest.Stop, w.To) {
+		w.To = latest.Stop
+	}
+	if laterThan(w.From, w.To) {
+		w.To = w.From
 	}
 	return w
+}
+
+// laterThan reports whether RFC 3339 time a is after b, or b is empty or
+// unparseable while a parses.
+func laterThan(a, b string) bool {
+	ta, err := time.Parse(time.RFC3339, a)
+	if err != nil {
+		return false
+	}
+	tb, err := time.Parse(time.RFC3339, b)
+	return err != nil || ta.After(tb)
 }
 
 // inWindow checks a point-in-time target against the window.
@@ -552,7 +576,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	drill := backup.Drill{ID: env.ID, Database: db, StartedAt: stamp(), Target: backup.TargetLatest}
+	drill := backup.Drill{ID: env.ID, Database: db, Stanza: spec.Stanza, StartedAt: stamp(), Target: backup.TargetLatest}
 	opts := backup.RestoreOptions{Kind: backup.TargetLatest, Timeline: rs.TargetTimeline(db, spec.Stanza)}
 	if p.Time != "" {
 		t, err := time.Parse(time.RFC3339, p.Time)
@@ -630,7 +654,12 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		return fail("restore", err)
 	}
 	drill.RecoveredTo = m.RecoveredTo(ctx)
-	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "restore", OK: true, Detail: "recovered to " + drill.RecoveredTo})
+	if drill.RecoveredTo == "" {
+		// No transaction committed after the backup, so there is no replay
+		// timestamp: the copy is consistent at the backup's end.
+		drill.RecoveredTo, drill.NoWALReplayed = latest.Stop, true
+	}
+	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "restore", OK: true, Detail: "recovered to " + drill.DescribeRecoveredTo()})
 	copyPG := m.PG()
 	if _, err := copyPG.Query(ctx, db, "SELECT 1", nil); err != nil {
 		return fail("open "+db, err)

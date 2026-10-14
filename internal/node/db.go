@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -45,6 +44,8 @@ type databaseInfo struct {
 	CPUQuota       string `json:"cpu_quota,omitempty"`
 	IOWeight       int    `json:"io_weight,omitempty"`
 	MaxConnections int    `json:"max_connections,omitempty"`
+	// Protected is clusters.<db>.protected.
+	Protected bool `json:"protected,omitempty"`
 	// State is running, stopped (the cluster exists but is down), pending
 	// (in cluster.toml, no cluster yet) or orphaned (a cluster cluster.toml
 	// doesn't list).
@@ -68,6 +69,8 @@ type dbCreateParams struct {
 	Size    string `json:"size,omitempty"`
 	Memory  string `json:"memory,omitempty"`
 	Profile string `json:"profile,omitempty"`
+	// Protected marks the new database protected (clusters.<db>.protected).
+	Protected bool `json:"protected,omitempty"`
 }
 
 type dbDropParams struct {
@@ -113,7 +116,7 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	out := make([]databaseInfo, 0, len(cfg.Clusters))
 	for _, spec := range cfg.Clusters {
 		info := databaseInfo{Name: spec.Name, InConfig: true, Node: spec.Node, Host: cfg.DatabaseHostname(spec.Name),
-			Port: spec.Port, Stanza: spec.Stanza, State: statePending}
+			Port: spec.Port, Stanza: spec.Stanza, Protected: spec.Protected, State: statePending}
 		if res, err := cfg.Resources(spec); err == nil {
 			info.Size, info.MemoryMiB, info.MemoryMaxMiB = res.Size, res.MemoryMiB, res.MemoryMaxMiB
 			info.CPUWeight, info.CPUQuota, info.IOWeight, info.MaxConnections = res.CPUWeight, res.CPUQuota, res.IOWeight, res.MaxConnections
@@ -173,7 +176,7 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	if len(extensions) == 0 {
 		extensions = []string{"pg_stat_statements"}
 	}
-	spec := config.ClusterSpec{Name: p.Name, Size: p.Size, Memory: p.Memory, Profile: p.Profile, StatementTimeout: timeout, Extensions: extensions}
+	spec := config.ClusterSpec{Name: p.Name, Size: p.Size, Memory: p.Memory, Profile: p.Profile, StatementTimeout: timeout, Extensions: extensions, Protected: p.Protected}
 	db, warnings, err := createDatabase(ctx, env, spec, p.Size == "" && p.Memory == "")
 	if err != nil {
 		return Result{}, err
@@ -459,6 +462,11 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if exists {
 		roles, _ = existingRolesIn(ctx, local, p.Name)
 	}
+	// The kept stanza's window ends at the last WAL the cluster archived.
+	lastArchived := ""
+	if inConfig && clusterExists && spec.Stanza != "" && cfg.BackupConfigured() {
+		lastArchived = lastArchivedTime(ctx, spec)
+	}
 	if clusterExists {
 		if err := dropCluster(ctx, env, p.Name); err != nil {
 			return Result{}, err
@@ -490,7 +498,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	}
 	env.Cluster = cfg
 	if inConfig && spec.Stanza != "" {
-		if err := recordDroppedStanza(cfg, spec, final); err != nil {
+		if err := recordDroppedStanza(cfg, spec, final, lastArchived); err != nil {
 			warnings = append(warnings, output.Warning{Code: "records_not_updated",
 				Message: "the stanza " + spec.Stanza + " of " + p.Name + " is kept, but recording it failed: " + err.Error()})
 		}
@@ -512,14 +520,8 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 // drop keeps it, so its backups and WAL stay restorable for the database's
 // restore window, after which the stanza-expiry job deletes it. The
 // database's last backup and verify results go, so its metrics stop.
-func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, final *backup.Dump) error {
-	now := time.Now().UTC()
-	entry := backup.DroppedStanza{
-		Database:  spec.Name,
-		Stanza:    spec.Stanza,
-		DroppedAt: now.Format(time.RFC3339),
-		ExpiresAt: now.AddDate(0, 0, 7*cfg.RetentionFull(spec)).Format(time.RFC3339),
-	}
+func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, final *backup.Dump, lastArchived string) error {
+	entry := droppedStanza(cfg, spec, lastArchived)
 	if final != nil {
 		entry.FinalDump = final.ID
 	}
@@ -604,6 +606,9 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	}
 	if p.Memory != "" {
 		resized.Memory = p.Memory
+	}
+	if old.Protected && ResizeShrinks(cfg, old, resized) {
+		return Result{}, protectedError(p.Name, "shrinking it")
 	}
 	for i := range cfg.Clusters {
 		if cfg.Clusters[i].Name == p.Name {

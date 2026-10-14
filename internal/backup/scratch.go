@@ -88,18 +88,110 @@ func clusterPorts() map[int]bool {
 // cluster at dst, as owner. pg_restore's own errors (an object the owner may
 // not create, for example) don't stop the load: they come back as warnings,
 // and the caller asks the operator to inspect the result before using it.
+// The one error every dump of an eru database has, that the owner may not
+// COMMENT ON EXTENSION (the extensions belong to the superuser, and
+// eru created them before the load, with their comments), is harmless
+// and filtered out.
 func LoadDump(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, r io.Reader, dst pg.Local, target, owner string) ([]string, error) {
-	err := sh.Exec(ctx, stepID, engine.Command{Name: "runuser", Args: restoreArgs(dst, target, owner), Stdin: r}, report)
+	f := &restoreFilter{out: func(line string) {
+		if report != nil {
+			report(output.Event{Type: "log", Step: stepID, Line: line})
+			return
+		}
+		sh.Log.Line("log "+stepID, line)
+	}}
+	err := sh.Exec(ctx, stepID, engine.Command{Name: "runuser", Args: restoreArgs(dst, target, owner), Stdin: r}, f.report)
+	f.flush()
 	var scriptErr *engine.ScriptError
 	switch {
 	case err == nil:
 		return nil, nil
 	case errors.As(err, &scriptErr):
+		if f.errors > 0 && f.errors == f.harmless {
+			return nil, nil
+		}
 		warnings := []string{fmt.Sprintf("pg_restore into %s reported errors (exit status %d); inspect it before relying on it", target, scriptErr.Status)}
-		return append(warnings, scriptErr.Tail...), nil
+		return append(warnings, f.kept(scriptErr.Tail)...), nil
 	default:
 		return nil, wrapTool("pg_restore into "+target, err)
 	}
+}
+
+// restoreFilter passes pg_restore's output on, holding back each failed
+// statement's lines (the TOC entry, the error and "Command was:") until it
+// knows the statement, and drops the harmless COMMENT ON EXTENSION errors
+// with a line that says why.
+type restoreFilter struct {
+	out      func(string)
+	held     []string
+	dropped  map[string]bool
+	errors   int
+	harmless int
+}
+
+func (f *restoreFilter) report(ev output.Event) {
+	if ev.Type != "log" {
+		f.out(ev.Line)
+		return
+	}
+	line := ev.Line
+	switch {
+	case strings.HasPrefix(line, "pg_restore: while PROCESSING TOC:"), strings.HasPrefix(line, "pg_restore: from TOC entry "):
+		f.held = append(f.held, line)
+	case strings.HasPrefix(line, "pg_restore: error: "):
+		f.errors++
+		f.held = append(f.held, line)
+	case strings.HasPrefix(line, "Command was: ") && len(f.held) > 0:
+		f.held = append(f.held, line)
+		if harmlessRestoreError(f.held) {
+			f.harmless++
+			if f.dropped == nil {
+				f.dropped = map[string]bool{}
+			}
+			for _, l := range f.held {
+				f.dropped[l] = true
+			}
+			f.out("pg_restore: skipped a comment on an extension: the extension belongs to the superuser and already has its comment (harmless)")
+			f.held = nil
+			return
+		}
+		f.flush()
+	case strings.HasPrefix(line, "pg_restore: warning: errors ignored on restore: ") && f.errors > 0 && f.errors == f.harmless:
+		f.dropped[line] = true
+	default:
+		f.flush()
+		f.out(line)
+	}
+}
+
+// flush passes on the held lines.
+func (f *restoreFilter) flush() {
+	for _, l := range f.held {
+		f.out(l)
+	}
+	f.held = nil
+}
+
+// kept is tail without the dropped lines.
+func (f *restoreFilter) kept(tail []string) []string {
+	out := make([]string, 0, len(tail))
+	for _, l := range tail {
+		if !f.dropped[l] {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// harmlessRestoreError reports whether a failed statement's lines are the
+// owner's COMMENT ON EXTENSION refused for want of owning the extension.
+func harmlessRestoreError(lines []string) bool {
+	owner, comment := false, false
+	for _, l := range lines {
+		owner = owner || (strings.HasPrefix(l, "pg_restore: error: ") && strings.Contains(l, "must be owner of extension "))
+		comment = comment || strings.HasPrefix(l, "Command was: COMMENT ON EXTENSION ")
+	}
+	return owner && comment
 }
 
 // runQuiet runs a probe command and reports only whether it succeeded.

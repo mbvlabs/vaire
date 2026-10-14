@@ -691,7 +691,12 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 			return res.Set, fmt.Sprintf("%s: backup %s (%s) finished: %s", res.DB, res.Set.Label, res.Set.Type, humanBytes(res.Set.Size)), nil
 		})
 	if detached != nil {
-		return detachedResult(cmd, s, *detached, "the backup"+notStarted(dbs, outcomes))
+		return detachedEach(cmd, s, *detached, "the backup", notStarted(dbs, outcomes), func(db string) string {
+			if kind != "" {
+				return "eru backup now --db " + db + " --type " + kind
+			}
+			return "eru backup now --db " + db
+		})
 	}
 	if err := failedOutcomes("the backup", "backups", outcomes); err != nil {
 		return err
@@ -704,13 +709,35 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 	})
 }
 
-// notStarted names the databases a detached per-database run never reached.
-func notStarted(dbs []string, outcomes []dbJobOutcome) string {
-	rest := dbs[min(len(outcomes)+1, len(dbs)):]
+// notStarted is the databases a detached per-database run never reached:
+// the ones after the detached job.
+func notStarted(dbs []string, outcomes []dbJobOutcome) []string {
+	return dbs[min(len(outcomes)+1, len(dbs)):]
+}
+
+// detachedEach is the result of Ctrl-C on a per-database run: the running
+// job keeps going on the node, and the databases after it weren't started.
+// The node skips a job while another holds the heavy-I/O lock, so the
+// message (and next steps) give the command for each of them to run once
+// the job is done.
+func detachedEach(cmd *cobra.Command, s *session, jobID, what string, rest []string, command func(db string) string) error {
 	if len(rest) == 0 {
-		return ""
+		return detachedResult(cmd, s, jobID, what)
 	}
-	return " (not started for " + strings.Join(rest, ", ") + ")"
+	commands := make([]string, len(rest))
+	for i, db := range rest {
+		commands[i] = command(db)
+	}
+	message := "Detached; " + what + " keeps running on the node."
+	next := []string{"eru job list"}
+	if jobID != "" {
+		message += " Re-attach with eru job follow " + jobID + "."
+		next = []string{"eru job follow " + jobID}
+	}
+	message += "\nNot started for " + strings.Join(rest, ", ") + ": each job takes the heavy-I/O lock, so once this one is done, start the rest with " +
+		strings.Join(commands, ", then ") + "."
+	data := map[string]any{"job_id": jobID, "detached": true, "not_started": rest, "commands": commands}
+	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings, Next: append(next, commands...)})
 }
 
 func runBackupList(cmd *cobra.Command, _ []string) error {
@@ -731,7 +758,7 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 		if err := reply.Decode(&data); err != nil {
 			return err
 		}
-		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(backupRowLines(data), "\n"), Warnings: warnings})
+		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(backupRowLines(data, time.Now()), "\n"), Warnings: warnings})
 	}
 	var data backupListData
 	if err := reply.Decode(&data); err != nil {
@@ -764,24 +791,32 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 }
 
 // backupRowLines renders backup list without --db: a row per database, then
-// the dropped databases' kept stanzas.
-func backupRowLines(data backupRowsData) []string {
-	lines := []string{fmt.Sprintf("  %-20s %-20s %4s %-21s %-8s %-8s %s", "DATABASE", "STANZA", "SETS", "LATEST", "VERIFY", "DRILL", "RESTORE WINDOW")}
+// the dropped databases' kept stanzas. Times are ages, to keep a row within
+// about 120 columns; backup list --db has the full times.
+func backupRowLines(data backupRowsData, now time.Time) []string {
+	rows := [][]string{{"DATABASE", "STANZA", "STATUS", "SETS", "LATEST", "VERIFY", "DRILL", "DUMP", "RESTORE WINDOW"}}
 	var dropped []string
 	for _, r := range data.Databases {
 		if r.DroppedAt != "" {
-			dropped = append(dropped, fmt.Sprintf("  %-20s %-20s %4d dropped %s, kept until %s; window %s", r.Database, r.Stanza, r.Sets, r.DroppedAt, r.ExpiresAt, r.Window.describe()))
+			dropped = append(dropped, fmt.Sprintf("  %s (%s, %d sets): dropped %s, kept until %s; window %s", r.Database, r.Stanza, r.Sets, r.DroppedAt, r.ExpiresAt, r.Window.describe()))
 			continue
 		}
-		latest, drill := "-", "-"
+		latest, verify, drill, dump := "-", "-", "-", "-"
 		if r.Latest != nil {
-			latest = r.Latest.Stop
+			latest = r.Latest.Type + " " + ago(r.Latest.Stop, now)
+		}
+		if r.Verify != nil {
+			verify = verifyState(r.Verify) + " " + ago(r.Verify.FinishedAt, now)
 		}
 		if r.Drill != nil {
-			drill = r.Drill.Result
+			drill = drillState(r.Drill) + " " + ago(r.Drill.FinishedAt, now)
 		}
-		lines = append(lines, fmt.Sprintf("  %-20s %-20s %4d %-21s %-8s %-8s %s", r.Database, r.Stanza, r.Sets, latest, verifyState(r.Verify), drill, r.Window.describe()))
+		if r.Dump != nil {
+			dump = ago(r.Dump.Created, now)
+		}
+		rows = append(rows, []string{r.Database, r.Stanza, r.Status, strconv.Itoa(r.Sets), latest, verify, drill, dump, r.Window.short()})
 	}
+	lines := alignColumns(rows)
 	if len(dropped) > 0 {
 		lines = append(lines, "", "Dropped databases (restorable until their stanza expires):")
 		lines = append(lines, dropped...)
@@ -790,6 +825,86 @@ func backupRowLines(data backupRowsData) []string {
 		lines = append(lines, "", "Open restore of "+name+": "+r.Phase+" (target "+r.Target+")")
 	}
 	return lines
+}
+
+// short is the restore window in a table cell: where it starts and the
+// archive lag, which says how far behind now it ends.
+func (w windowData) short() string {
+	if w.From == "" {
+		return "none yet"
+	}
+	from := w.From
+	if t, err := time.Parse(time.RFC3339, w.From); err == nil {
+		from = t.UTC().Format("2006-01-02 15:04Z")
+	}
+	return fmt.Sprintf("from %s, lag %s", from, compactDuration(time.Duration(w.LagSeconds)*time.Second))
+}
+
+// compactDuration is d in its largest whole unit: 45s, 12m, 3h, 2d.
+func compactDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+}
+
+// alignColumns pads each column of rows to its widest cell, two spaces
+// apart and indented by two; the last column isn't padded.
+func alignColumns(rows [][]string) []string {
+	var widths []int
+	for _, row := range rows {
+		for i, cell := range row {
+			if i >= len(widths) {
+				widths = append(widths, 0)
+			}
+			widths[i] = max(widths[i], len(cell))
+		}
+	}
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		var b strings.Builder
+		b.WriteString(" ")
+		for i, cell := range row {
+			b.WriteString(" ")
+			if i == len(row)-1 {
+				b.WriteString(cell)
+				break
+			}
+			fmt.Fprintf(&b, "%-*s ", widths[i], cell)
+		}
+		lines = append(lines, b.String())
+	}
+	return lines
+}
+
+// ago is an RFC 3339 time as a compact age: "just now", "5m ago", "2h ago",
+// "3d ago". A time that doesn't parse is shown as it is.
+func ago(ts string, now time.Time) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	d := now.Sub(t)
+	if d < time.Minute {
+		return "just now"
+	}
+	return compactDuration(d) + " ago"
+}
+
+// drillState is a drill result in one word, like verifyState.
+func drillState(d *backup.Drill) string {
+	switch d.Result {
+	case backup.DrillPass:
+		return "passed"
+	case backup.DrillFail:
+		return "FAILED"
+	}
+	return d.Result
 }
 
 // verifyState is a verify result in one word.
@@ -824,7 +939,9 @@ func runBackupVerify(cmd *cobra.Command, _ []string) error {
 			return res, "pgbackrest verify passed at " + res.FinishedAt, nil
 		})
 	if detached != nil {
-		return detachedResult(cmd, s, *detached, "the verify"+notStarted(dbs, outcomes))
+		return detachedEach(cmd, s, *detached, "the verify", notStarted(dbs, outcomes), func(db string) string {
+			return "eru backup verify --db " + db
+		})
 	}
 	if err := failedOutcomes("pgbackrest verify", "verifies", outcomes); err != nil {
 		return err

@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -30,18 +32,33 @@ type SSHTarget struct {
 
 func (t SSHTarget) String() string { return t.User + "@" + t.Addr }
 
+// Keepalive defaults: a keepalive@openssh.com request every interval, and
+// the connection is closed after KeepaliveMax unanswered in a row.
+const (
+	DefaultKeepaliveInterval = 15 * time.Second
+	DefaultKeepaliveMax      = 3
+)
+
 // SSHOptions configure one connection.
 type SSHOptions struct {
 	Auth      []ssh.AuthMethod
 	HostKeys  *KnownHosts
 	Timeout   time.Duration
 	ClientVer string
+	// KeepaliveInterval and KeepaliveMax default to DefaultKeepaliveInterval
+	// and DefaultKeepaliveMax.
+	KeepaliveInterval time.Duration
+	KeepaliveMax      int
 }
 
 // SSHClient is one authenticated SSH connection. Each Run opens a session.
 type SSHClient struct {
 	client *ssh.Client
 	Target SSHTarget
+
+	stop      chan struct{}
+	closeOnce sync.Once
+	lost      atomic.Bool
 }
 
 // DialSSH connects and authenticates through d. The host key must be pinned
@@ -90,7 +107,76 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 		return nil, output.WrapError(output.CodeTransportFailed, fmt.Errorf("SSH handshake with %s failed: %w", target, err), output.ExitTransport,
 			"Check that sshd is running and reachable.").WithDetails(map[string]any{"target": target.String()})
 	}
-	return &SSHClient{client: ssh.NewClient(conn, chans, reqs), Target: target}, nil
+	c := &SSHClient{client: ssh.NewClient(conn, chans, reqs), Target: target, stop: make(chan struct{})}
+	interval, maxMissed := opts.KeepaliveInterval, opts.KeepaliveMax
+	if interval <= 0 {
+		interval = DefaultKeepaliveInterval
+	}
+	if maxMissed <= 0 {
+		maxMissed = DefaultKeepaliveMax
+	}
+	go c.keepalive(interval, maxMissed)
+	return c, nil
+}
+
+// keepalive sends keepalive@openssh.com every interval and closes the
+// connection after maxMissed requests in a row get no reply within interval.
+// Without it a stalled stream (a lost WireGuard peer, a dead NAT mapping)
+// blocks readers forever. The real traffic also prompts WireGuard to
+// rehandshake. Any reply counts, including OpenSSH's failure reply.
+func (c *SSHClient) keepalive(interval time.Duration, maxMissed int) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	missed := 0
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-ticker.C:
+		}
+		reply := make(chan error, 1)
+		go func() {
+			_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
+			reply <- err
+		}()
+		timer := time.NewTimer(interval)
+		select {
+		case <-c.stop:
+			timer.Stop()
+			return
+		case err := <-reply:
+			timer.Stop()
+			if err != nil {
+				// The connection is already gone; readers see that themselves.
+				return
+			}
+			missed = 0
+		case <-timer.C:
+			missed++
+		}
+		if missed >= maxMissed {
+			c.lost.Store(true)
+			_ = c.client.Close()
+			return
+		}
+	}
+}
+
+// Lost reports whether keepalive closed the connection because the node
+// stopped answering.
+func (c *SSHClient) Lost() bool {
+	return c != nil && c.lost.Load()
+}
+
+// StreamLost reports whether err from Run means the connection went away
+// before the remote command reported an exit status, as opposed to the
+// command exiting or the session being refused.
+func (c *SSHClient) StreamLost(err error) bool {
+	if c.Lost() {
+		return true
+	}
+	var missing *ssh.ExitMissingError
+	return errors.As(err, &missing)
 }
 
 func handshake(ctx context.Context, nc net.Conn, addr string, cfg *ssh.ClientConfig, timeout time.Duration) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
@@ -150,9 +236,17 @@ func (c *SSHClient) SSH() *ssh.Client {
 	return c.client
 }
 
-// Close closes the connection.
+// Close stops the keepalive and closes the connection.
 func (c *SSHClient) Close() {
-	if c != nil && c.client != nil {
+	if c == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		if c.stop != nil {
+			close(c.stop)
+		}
+	})
+	if c.client != nil {
 		_ = c.client.Close()
 	}
 }

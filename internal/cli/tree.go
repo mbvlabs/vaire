@@ -317,17 +317,18 @@ func phase1Commands() []cmdSpec {
 			},
 		},
 		{
-			use: "psql",
-			run: runPsql,
+			use:  "psql [-- psql-args...]",
+			args: psqlArgs,
+			run:  runPsql,
 			flags: []fl{
 				flagString("db", "", "Database name"),
 				flagBool("write", "Allow statements that modify data"),
 			},
 			meta: CommandMeta{
 				Summary:       "Open psql as eru_admin through the WireGuard tunnel, read-only unless --write",
-				WhenToUse:     []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db."},
+				WhenToUse:     []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; -c before -- is eru's --context."},
 				Prerequisites: []string{"psql 16 or newer on PATH"},
-				Examples:      []string{"eru psql --db app", "eru psql --db app --write"},
+				Examples:      []string{"eru psql --db app", "eru psql --db app --write", `eru psql --db app -- -c "select 1"`},
 			},
 		},
 		{
@@ -371,7 +372,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:   "Open an SSH session to the node over WireGuard",
-				WhenToUse: []string{"Reach the admin user when a task has no eru command yet."},
+				WhenToUse: []string{"Reach the admin user when a task has no eru command yet.", "With stdout piped or redirected, --command runs without a PTY so the output stays clean; sudo then cannot ask for a password."},
 				Examples:  []string{"eru ssh", "eru ssh --command uptime"},
 			},
 		},
@@ -699,12 +700,13 @@ func configCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:   "Set one cluster.toml key",
-					WhenToUse: []string{"Change a single setting without opening an editor."},
+					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database. Setting it false needs a human at an interactive terminal who types <db>/unprotect; with --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it."},
 					Examples: []string{
 						"eru config set postgres.settings.work_mem 64MB",
 						"eru config set clusters.app.size large",
 						"eru config set clusters.app.settings.work_mem 32MB --apply --dry-run",
 						"eru config set clusters.app.backup.retention_full 1",
+						"eru config set clusters.app.protected true",
 					},
 					Mutating:       true,
 					SupportsDryRun: true,
@@ -776,11 +778,12 @@ func dbCommands() cmdSpec {
 					flagString("size", "", "Size of the database's cluster: nano, small, medium, large, xlarge or custom (default [postgres] default_size, stepped down to what fits)"),
 					flagString("memory", "", "Memory for the cluster, such as 768MiB or 2GiB; overrides the size's (custom needs it)"),
 					flagString("profile", "", "Workload profile for its tuning: oltp, mixed or analytics (default [postgres] profile)"),
+					flagBool("protected", "Protect it (clusters.<db>.protected): db drop, a shrinking resize, credential rotation and restore promote/undo are refused even with --confirm"),
 				},
 				meta: CommandMeta{
 					Summary:        "Create a database in its own PostgreSQL cluster, with its migrate, app, and read-only roles",
-					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory, the default size steps down to the largest that fits the server's free budget (warning size_stepped_down); a server already full gets memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; eru apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name."},
-					Examples:       []string{"eru db create app --size small", "eru db create app --memory 768MiB --profile oltp", "eru db create app --dry-run"},
+					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory, the default size steps down to the largest that fits the server's free budget (warning size_stepped_down); a server already full gets memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; eru apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and eru apply finishes it. --protected marks it protected (see eru config set clusters.<db>.protected)."},
+					Examples:       []string{"eru db create app --size small", "eru db create app --protected", "eru db create app --memory 768MiB --profile oltp", "eru db create app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -795,13 +798,14 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Drop a database and its roles after a final dump to the bucket",
-					WhenToUse:      []string{"Remove an application database the human has approved dropping. With backups on, a final age-encrypted dump goes to the bucket first. Its cluster is stopped and deleted with its data, roles, pooler entries and timers; its pgBackRest stanza is kept (data.stanza_kept) and recorded as dropped, so its backups stay restorable until they expire. Dropping the last database stops both poolers."},
+					WhenToUse:      []string{"Remove an application database the human has approved dropping. With backups on, a final age-encrypted dump goes to the bucket first. Its cluster is stopped and deleted with its data, roles, pooler entries and timers; its pgBackRest stanza is kept (data.stanza_kept) and recorded as dropped, so its backups stay restorable until they expire. Dropping the last database stops both poolers. A protected database (clusters.<db>.protected) is refused with database_protected, even with --confirm."},
 					Examples:       []string{"eru db drop app --confirm app", "eru db drop app --dry-run"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ConfirmToken:   "{db}",
+					ErrorCodes:     []string{"unsafe_action_requires_confirmation", "database_protected", "precondition_failed"},
 				},
 			},
 			{
@@ -816,7 +820,7 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Change a database's size or memory",
-					WhenToUse:      []string{"Give a database more or less memory, CPU weight and connections. The cgroup limits and reload-only settings change live; shared_buffers, max_connections and huge_pages need a restart of that database only, confirmed with --confirm <db>/restart, or left pending with --defer-restart (finish later with eru apply --db <db> --confirm <db>/restart). A size that couldn't start is refused (would_not_start); shrinking below current use warns (shrink_below_use); an overcommitted server warns (memory_overcommitted). eru config set clusters.<db>.size does the same change without applying it."},
+					WhenToUse:      []string{"Give a database more or less memory, CPU weight and connections. The cgroup limits and reload-only settings change live; shared_buffers, max_connections and huge_pages need a restart of that database only, confirmed with --confirm <db>/restart, or left pending with --defer-restart (finish later with eru apply --db <db> --confirm <db>/restart). A size that couldn't start is refused (would_not_start); shrinking below current use warns (shrink_below_use); an overcommitted server warns (memory_overcommitted). eru config set clusters.<db>.size does the same change without applying it. Shrinking a protected database is refused (database_protected)."},
 					Examples:       []string{"eru db resize app --size large --confirm app/restart", "eru db resize app --memory 768MiB --defer-restart", "eru db resize app --size small --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
@@ -853,7 +857,7 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:          "Rotate one role password and print the new credentials",
-					WhenToUse:        []string{"A database password was lost or leaked: rotate it with --rotate --confirm <db>. eru does not keep database passwords."},
+					WhenToUse:        []string{"A database password was lost or leaked: rotate it with --rotate --confirm <db>. eru does not keep database passwords. Refused for a protected database (database_protected)."},
 					Examples:         []string{"eru db credentials app --rotate --role app --confirm app"},
 					MutatingFlags:    []string{"--rotate"},
 					DestructiveFlags: []string{"--rotate"},
@@ -1603,7 +1607,7 @@ func nodeCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Run one timer job or detachable job",
-					WhenToUse:      []string{"systemd timers and transient eru-job-<id> units call this: certs-renew, stanza-expiry (daily: deletes the stanzas of dropped databases once their window has passed), and per database (--db, from eru-<job>@<db>.timer) backup-full|diff|incr, backup-verify, restore-drill and db-dump; restore and db-fork run only with --job-id. Full, diff, verify, drill and dump take the server's heavy-I/O lock, so one runs at a time; a busy lock records the job as skipped."},
+					WhenToUse:      []string{"systemd timers and transient eru-job-<id> units call this: certs-renew, stanza-expiry (daily: deletes the stanzas of dropped databases once their window has passed), and per database (--db, from eru-<job>@<db>.timer) backup-full|diff|incr, backup-verify, restore-drill and db-dump; restore and db-fork run only with --job-id. Full, diff, verify, drill and dump take the server's heavy-I/O lock, so one runs at a time. A busy lock records the job as skipped: a timer run first waits up to 15 minutes for its locks, a run by hand or by an operator command skips at once."},
 					Examples:       []string{"sudo eru node run certs-renew", "sudo eru node run backup-incr --db app", "sudo eru node run db-dump --db app", "sudo eru node run stanza-expiry"},
 					Mutating:       true,
 					SupportsDryRun: true,

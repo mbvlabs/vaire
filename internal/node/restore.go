@@ -554,19 +554,41 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		return nil, err
 	}
 	const step = "restore.promote"
-	aside := swappedAside(cfg, db, bs, r)
-	swapped := aside != ""
-	if swapped {
-		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
-	} else {
+	aside := r.Aside
+	if aside == "" {
+		// A promote from before the aside was recorded.
+		aside = swappedAside(cfg, db, bs, r)
+	}
+	oldArchived := r.AsideArchivedAt
+	switch {
+	case aside == "":
 		aside = backup.PreRestoreName(db, time.Now())
+		if r.Kind == targetDump {
+			// The old stanza is dropped below; its window ends at its last WAL.
+			oldArchived = lastArchivedTime(ctx, spec)
+		}
+		// Recorded before any rename, so a promote that fails part way
+		// resumes with the same aside, and abort knows the copy is in.
+		if err := backup.UpdateRecords(func(s *backup.Records) error {
+			cur, ok := s.Restores[db]
+			if !ok || cur.ID != r.ID {
+				return fmt.Errorf("the restore of %s changed while promoting it", db)
+			}
+			cur.Aside, cur.AsideArchivedAt = aside, oldArchived
+			s.Restores[db] = cur
+			return nil
+		}); err != nil {
+			return nil, err
+		}
 		logLine(report, step, "cutting "+db+" over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
+	case backup.SwapState(cfg.Server.DataRoot, db, backup.RestoringName(db), aside) == backup.SwapNotStarted:
+		logLine(report, step, "resuming the promote of "+db+": cutting it over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
+	default:
+		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
 	}
 	start := time.Now()
 	resume := steps.PauseDatabase(ctx, db)
-	if !swapped {
-		err = backup.Swap(ctx, rt.Shell, step, report, cfg.Server.DataRoot, db, backup.RestoringName(db), aside, r.Port)
-	}
+	err = backup.Swap(ctx, rt.Shell, step, report, cfg.Server.DataRoot, db, backup.RestoringName(db), aside, r.Port)
 	if err == nil {
 		until := backup.UntilPaused
 		if r.Kind == backup.TargetLatest || r.Kind == targetDump {
@@ -593,7 +615,9 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		delete(s.Timelines, db)
 		s.Leftovers = append(s.Leftovers, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: r.ID, Port: r.Port, Stanza: spec.Stanza})
 		if newStanza != "" {
-			s.DroppedStanzas = append(s.DroppedStanzas, droppedStanza(cfg, spec))
+			s.DroppedStanzas = append(s.DroppedStanzas, droppedStanza(cfg, spec, oldArchived))
+			// The last verify was of the old stanza.
+			delete(s.LastVerify, db)
 		}
 		return nil
 	}); err != nil {
@@ -648,10 +672,24 @@ func swappedAside(cfg config.Cluster, db string, bs backup.Records, r backup.Res
 }
 
 // droppedStanza records spec's stanza as dropped now, kept for its window.
-func droppedStanza(cfg config.Cluster, spec config.ClusterSpec) backup.DroppedStanza {
+// lastArchived is when its cluster last archived a WAL segment, the end of
+// the stanza's window.
+func droppedStanza(cfg config.Cluster, spec config.ClusterSpec, lastArchived string) backup.DroppedStanza {
 	now := time.Now().UTC()
 	return backup.DroppedStanza{Database: spec.Name, Stanza: spec.Stanza, DroppedAt: now.Format(time.RFC3339),
-		ExpiresAt: now.AddDate(0, 0, 7*cfg.RetentionFull(spec)).Format(time.RFC3339)}
+		ExpiresAt: now.AddDate(0, 0, 7*cfg.RetentionFull(spec)).Format(time.RFC3339), LastArchivedAt: lastArchived}
+}
+
+// lastArchivedTime is when spec's running cluster last archived a WAL
+// segment (pg_stat_archiver), or "" when it can't be read. pgbackrest info
+// names a stanza's newest segment but not its time, so a stanza about to be
+// dropped records it while its cluster still runs.
+func lastArchivedTime(ctx context.Context, spec config.ClusterSpec) string {
+	st, err := driver(spec, "backup.archive", nil).ArchiveStatus(ctx)
+	if err != nil {
+		return ""
+	}
+	return st.LastArchivedTime
 }
 
 // switchStanza gives db the stanza to (a new one when empty) in
@@ -725,14 +763,18 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	u, resuming := bs.Undoing[p.Database]
 	leftovers := bs.LeftoversOf(p.Database)
-	if len(leftovers) == 0 {
+	if !resuming && len(leftovers) == 0 {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no pre-restore copy of "+p.Database+" to go back to", output.ExitPrecondition,
 			"restore cleanup may already have dropped it.").WithDetails(map[string]any{"reason": "no_leftover"})
 	}
-	back := leftovers[len(leftovers)-1]
+	if !resuming {
+		u.From = leftovers[len(leftovers)-1]
+	}
+	back := u.From
 	if env.Req.DryRun {
-		return Result{Data: map[string]any{"database": p.Database, "restore_from": back.Name, "dry_run": true}}, nil
+		return Result{Data: map[string]any{"database": p.Database, "restore_from": back.Name, "resume": resuming, "dry_run": true}}, nil
 	}
 	release, err := lockForCutover(ctx, env, p.Database, "restore.undo")
 	if err != nil {
@@ -742,12 +784,36 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	const step = "restore.undo"
 	rt := runtimeFor(env, false)
 	local := steps.ClusterPG(spec)
-	abandoned, _ := backup.Timeline(ctx, local)
-	aside := backup.PreRestoreName(p.Database, time.Now())
-	if aside == back.Name {
-		aside += "b"
+	if resuming {
+		logLine(env.Report, step, "resuming the undo of "+p.Database+": swapping it back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
+	} else {
+		u.Abandoned, _ = backup.Timeline(ctx, local)
+		u.Aside = backup.PreRestoreName(p.Database, time.Now())
+		if u.Aside == back.Name {
+			u.Aside += "b"
+		}
+		if back.Stanza != "" && back.Stanza != spec.Stanza {
+			// The restored data's stanza is dropped below; its window ends
+			// at its last WAL.
+			u.LastArchivedAt = lastArchivedTime(ctx, spec)
+		}
+		u.Stanza, u.StartedAt = spec.Stanza, stamp()
+		// Recorded before any rename, so an undo that fails part way
+		// resumes with the same names, and the aside is never lost.
+		if err := backup.UpdateRecords(func(s *backup.Records) error {
+			s.Undoing[p.Database] = u
+			return nil
+		}); err != nil {
+			return Result{}, err
+		}
+		logLine(env.Report, step, "swapping "+p.Database+" back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
 	}
-	logLine(env.Report, step, "swapping "+p.Database+" back to "+back.Name+"; the restored data becomes the cluster "+aside)
+	aside, abandoned, oldArchived := u.Aside, u.Abandoned, u.LastArchivedAt
+	if u.Stanza != "" {
+		// A resumed undo may have switched cluster.toml's stanza already;
+		// the restored data's stanza is the one recorded at the start.
+		spec.Stanza = u.Stanza
+	}
 	resume := steps.PauseDatabase(ctx, p.Database)
 	err = backup.Swap(ctx, rt.Shell, step, env.Report, cfg.Server.DataRoot, p.Database, back.Name, aside, back.Port)
 	if err == nil {
@@ -755,7 +821,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	}
 	resume()
 	if err != nil {
-		return Result{}, withHint(err, "Read eru logs postgres --db "+p.Database+"; the restored data is in the cluster "+aside+".")
+		return Result{}, withHint(err, "Read eru logs postgres --db "+p.Database+", then run eru restore undo "+p.Database+" again: it resumes; the restored data is in the cluster "+aside+".")
 	}
 	timeline, err := backup.Timeline(ctx, local)
 	if err != nil {
@@ -784,9 +850,11 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 					dropped = append(dropped, d)
 				}
 			}
-			s.DroppedStanzas = append(dropped, droppedStanza(cfg, spec))
+			s.DroppedStanzas = append(dropped, droppedStanza(cfg, spec, oldArchived))
+			delete(s.LastVerify, p.Database)
 		}
 		s.Timelines[p.Database] = backup.TimelineSwitch{Stanza: stanza, Timeline: timeline, SwitchedAt: stamp(), Abandoned: abandoned}
+		delete(s.Undoing, p.Database)
 		return nil
 	}); err != nil {
 		return Result{}, err
@@ -833,11 +901,30 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 				"Wait for it (eru job follow "+r.ID+"), then abort.").WithDetails(map[string]any{"reason": "restore_running", "job_id": r.ID})
 		}
 	}
+	aside := r.Aside
+	if aside == "" {
+		aside = swappedAside(env.Cluster, p.Database, bs, r)
+	}
+	if aside != "" && backup.SwapState(env.Cluster.Server.DataRoot, p.Database, backup.RestoringName(p.Database), aside) != backup.SwapNotStarted {
+		// A promote that failed after its first rename: the copy is (being)
+		// swapped in, and the old data is aside. Dropping the record would
+		// lose both.
+		return Result{}, output.NewError(output.CodePrecondition, "the restored copy of "+p.Database+" is already swapped in by a promote that stopped part way; the old data is the cluster "+aside,
+			output.ExitPrecondition, "Finish it with eru restore promote "+p.Database+" --confirm "+p.Database+"/restore (it resumes), then eru restore undo "+p.Database+" to go back.").
+			WithDetails(map[string]any{"reason": "restore_swapped_in", "aside": aside})
+	}
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "drop": backup.RestoringName(p.Database), "dry_run": true}}, nil
 	}
 	if err := dropRestoring(env.Cluster, p.Database, env.Report); err != nil {
 		return Result{}, err
+	}
+	if r.Aside != "" {
+		// A promote that stopped before its renames may have registered
+		// the aside already.
+		if err := backup.UnregisterAside(env.Cluster.Server.DataRoot, r.Aside); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		delete(s.Restores, p.Database)
@@ -1257,7 +1344,8 @@ func renameFork(ctx context.Context, local pg.Local, source, name string, passwo
 
 // dropLeftovers drops db's restore leftover clusters and their records: db
 // drop takes them with the database, as they were its data before a
-// promote or undo. A <db>__drill a killed drill left goes too.
+// promote or undo, with the aside of an undo that stopped part way. A
+// <db>__drill a killed drill left goes too.
 func dropLeftovers(env *Env, db string) error {
 	bs, err := backup.LoadRecords()
 	if err != nil {
@@ -1269,6 +1357,9 @@ func dropLeftovers(env *Env, db string) error {
 	}
 	if name, ok := bs.Drilling[db]; ok {
 		names = append(names, name)
+	}
+	if u, ok := bs.Undoing[db]; ok && !slices.Contains(names, u.Aside) {
+		names = append(names, u.Aside)
 	}
 	for _, name := range names {
 		if err := backup.DropTemporaryCluster(runtimeFor(env, false).Shell, "db.drop", env.Report, name,
@@ -1286,6 +1377,7 @@ func dropLeftovers(env *Env, db string) error {
 		s.Leftovers = kept
 		delete(s.Timelines, db)
 		delete(s.Drilling, db)
+		delete(s.Undoing, db)
 		return nil
 	})
 }

@@ -13,7 +13,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func runPsql(cmd *cobra.Command, _ []string) error {
+// psqlArgs accepts positional arguments only after --; they go to psql.
+func psqlArgs(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {
+		return output.NewError(output.CodeUsage, "eru psql takes psql's arguments only after --", output.ExitUsage,
+			`Put them after --: eru psql --db <db> -- -c "select 1".`)
+	}
+	return nil
+}
+
+func runPsql(cmd *cobra.Command, args []string) error {
 	db := stringFlag(cmd, "db")
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "eru psql needs --db", output.ExitInput,
@@ -63,7 +72,9 @@ func runPsql(cmd *cobra.Command, _ []string) error {
 		env = env[:7]
 	}
 	env = append(env, "PGOPTIONS="+sessionOptions(db, flagTrue(cmd, "write")))
-	child := exec.CommandContext(ctx, psqlPath) //nolint:gosec // G204: fixed psql path.
+	// Arguments after -- go to psql as they are; the connection comes from
+	// the PG* environment.
+	child := exec.CommandContext(ctx, psqlPath, args...) //nolint:gosec // G204: fixed psql path; args are the operator's own.
 	child.Env = append(os.Environ(), env...)
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()

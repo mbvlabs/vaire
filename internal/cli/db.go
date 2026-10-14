@@ -8,6 +8,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/steps"
 	"github.com/mbvlabs/eru/internal/tune"
@@ -45,6 +46,7 @@ type databaseInfo struct {
 	CPUQuota       string   `json:"cpu_quota,omitempty"`
 	IOWeight       int      `json:"io_weight,omitempty"`
 	MaxConnections int      `json:"max_connections,omitempty"`
+	Protected      bool     `json:"protected,omitempty"`
 	State          string   `json:"state"`
 }
 
@@ -86,11 +88,15 @@ func runDBList(cmd *cobra.Command, _ []string) error {
 		lines = append(lines, fmt.Sprintf("  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %s", "NAME", "NODE", "HOST", "SIZE", "MEMORY", "LIMITS", "STANZA", "STATE"))
 	}
 	for _, db := range data.Databases {
-		memory, size, node, host, stanza := "-", "-", "-", "-", "-"
+		memory, size, nodeName, host, stanza := "-", "-", "-", "-", "-"
 		if db.InConfig {
-			memory, size, node, host, stanza = tune.FormatMiB(db.MemoryMiB), db.Size, db.Node, db.Host, db.Stanza
+			memory, size, nodeName, host, stanza = tune.FormatMiB(db.MemoryMiB), db.Size, db.Node, db.Host, db.Stanza
 		}
-		lines = append(lines, fmt.Sprintf("  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %s", db.Name, node, host, size, memory, db.limits(), stanza, db.State))
+		state := db.State
+		if db.Protected {
+			state += ", protected"
+		}
+		lines = append(lines, fmt.Sprintf("  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %s", db.Name, nodeName, host, size, memory, db.limits(), stanza, state))
 	}
 	return output.Success(cmd, output.Result{
 		Data:     data,
@@ -125,7 +131,7 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	}
 	extensions, _ := cmd.Flags().GetStringSlice("extensions")
 	db := config.ClusterSpec{Name: name, StatementTimeout: timeout, Extensions: extensions,
-		Size: stringFlag(cmd, "size"), Memory: stringFlag(cmd, "memory"), Profile: stringFlag(cmd, "profile")}
+		Size: stringFlag(cmd, "size"), Memory: stringFlag(cmd, "memory"), Profile: stringFlag(cmd, "profile"), Protected: flagTrue(cmd, "protected")}
 	if err := checkSizeFlags(cfg, db); err != nil {
 		return err
 	}
@@ -147,25 +153,38 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		rpc[k] = v
 	}
 	s.warnings = append(s.warnings, staleWarning(generated)...)
-	reply, err := s.node.Call(commandContext(cmd), "db.create", map[string]any{
+	params := map[string]any{
 		"name":              name,
 		"statement_timeout": timeout,
 		"extensions":        db.Extensions,
 		"size":              db.Size,
 		"memory":            db.Memory,
 		"profile":           db.Profile,
-	}, remote.CallOptions{Secrets: rpc, OnEvent: p.event})
+	}
+	// Sent only when set, so a node without protection still takes the
+	// request (it decodes params strictly).
+	if db.Protected {
+		params["protected"] = true
+	}
+	reply, err := s.node.Call(commandContext(cmd), "db.create", params, remote.CallOptions{Secrets: rpc, OnEvent: p.event})
 	if err != nil {
-		return err
+		return createInterrupted(cmd, err, name, name+" ("+sizeSummary(cfg, db)+")", secret)
 	}
 	var created struct {
 		Database config.ClusterSpec `json:"database"`
 	}
 	_ = reply.Decode(&created)
-	message := fmt.Sprintf("created database %s (%s) and its roles\n%s\n%s", name, sizeSummary(cfg, created.Database), secret, shownOnceNote)
+	summary := sizeSummary(cfg, created.Database)
+	rich := "created database " + name + " and its roles"
+	if created.Database.Protected {
+		summary += ", protected"
+		rich = "created protected database " + name + " and its roles"
+	}
+	message, human := credentialsMessage(cmd, fmt.Sprintf("created database %s (%s) and its roles", name, summary), rich, name+" ("+summary+")", secret)
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"database": secret, "cluster": created.Database},
 		Message:  message,
+		Human:    human,
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
 }
@@ -223,6 +242,9 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	if err := checkSizeFlags(cfg, spec); err != nil {
 		return err
 	}
+	if old, _ := cfg.ClusterByName(name); old.Protected && node.ResizeShrinks(cfg, old, spec) {
+		return node.CheckNotProtected(cfg, name, "shrinking it")
+	}
 	deferRestart := flagTrue(cmd, "defer-restart")
 	confirm, confirms := confirmOptions(cmd)
 	reply, err := s.node.Call(commandContext(cmd), "db.resize", map[string]any{
@@ -270,6 +292,13 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
+	// Refuse a protected database before asking for the token; the node
+	// refuses it too.
+	if cfg, _, err := remoteConfig(cmd, s, p); err == nil {
+		if err := node.CheckNotProtected(cfg, name, "db drop"); err != nil {
+			return err
+		}
+	}
 	if !dryRun(cmd) {
 		if err := Confirm(cmd, name); err != nil {
 			return err
@@ -314,14 +343,6 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 	if !slices.Contains(steps.DatabaseRoles, role) {
 		return output.NewError(output.CodeValidation, "role must be migrate, app or ro", output.ExitConfig, "")
 	}
-	if !dryRun(cmd) {
-		if err := Confirm(cmd, name); err != nil {
-			return err
-		}
-	}
-	if dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: map[string]string{"database": name, "role": role}, Message: "dry run: would rotate " + name + " role " + role})
-	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
 	if err != nil {
@@ -332,6 +353,17 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := node.CheckNotProtected(cfg, name, "rotating its credentials"); err != nil {
+		return err
+	}
+	if !dryRun(cmd) {
+		if err := Confirm(cmd, name); err != nil {
+			return err
+		}
+	}
+	if dryRun(cmd) {
+		return output.Success(cmd, output.Result{Data: map[string]string{"database": name, "role": role}, Message: "dry run: would rotate " + name + " role " + role})
+	}
 	secret, rpc, err := newDatabaseSecret(cfg, name, []string{role})
 	if err != nil {
 		return err
@@ -341,9 +373,11 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 	}, remote.CallOptions{Secrets: rpc, Confirm: name, OnEvent: p.event}); err != nil {
 		return err
 	}
+	message, human := credentialsMessage(cmd, "rotated "+name+" role "+role, "rotated "+name+" role "+role, name, secret)
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"database": secret},
-		Message:  fmt.Sprintf("rotated %s role %s\n%s\n%s", name, role, secret, shownOnceNote),
+		Message:  message,
+		Human:    human,
 		Warnings: s.warnings,
 	})
 }

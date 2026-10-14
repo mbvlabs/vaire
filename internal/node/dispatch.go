@@ -267,13 +267,40 @@ func checkVersion(req rpc.Request) error {
 	})
 }
 
+// streamQueueMax is how many lines may wait for stdout before log events are
+// dropped from the stream. The run log still gets every line.
+const streamQueueMax = 4096
+
+// streamDrainTimeout is how long ok and fail wait for queued lines to reach
+// stdout before Serve returns.
+var streamDrainTimeout = 5 * time.Second
+
 // eventWriter writes redacted NDJSON events, flushing after each line, and
 // copies them to the run log. It writes the result at most once.
+//
+// Each line goes to the run log first, under mu, and is then queued for a
+// writer goroutine that owns stdout. A stalled SSH channel therefore never
+// blocks a handler's Report, and a broken one never loses the run log or
+// stops the handler: after the first write error stdout is abandoned.
 type eventWriter struct {
 	mu   sync.Mutex
 	w    io.Writer
 	log  *engine.RunLog
 	done bool
+	// deadLogged records that the run log noted the stream loss.
+	deadLogged bool
+
+	start   sync.Once
+	drained chan struct{}
+
+	// qmu guards the queue fields; the writer goroutine waits on cond.
+	qmu     sync.Mutex
+	cond    *sync.Cond
+	pending [][]byte
+	closed  bool
+	dropped int
+	dead    bool
+	deadErr error
 }
 
 func (e *eventWriter) setLog(log *engine.RunLog) {
@@ -300,14 +327,119 @@ func (e *eventWriter) writeLocked(ev output.Event) {
 	if err != nil {
 		line, _ = marshalLine(map[string]string{"schema": output.EventSchema, "type": "warning", "code": "event_encode_failed", "ts": ev.TS})
 	}
-	_, _ = e.w.Write(line)
-	if f, ok := e.w.(interface{ Flush() error }); ok {
-		_ = f.Flush()
+	e.log.Line("event", string(line[:len(line)-1]))
+	e.enqueueLocked(ev.Type, line)
+}
+
+// enqueueLocked hands line to the stdout writer without blocking. When the
+// queue is full, log and progress lines are dropped; once a slot frees, or at
+// the latest before the result, one events_dropped warning reports how many.
+func (e *eventWriter) enqueueLocked(kind string, line []byte) {
+	e.start.Do(e.startWriter)
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	if e.dead {
+		if !e.deadLogged {
+			e.deadLogged = true
+			e.log.Line("stream", "stdout failed, events continue in this log only: "+errString(e.deadErr))
+		}
+		return
 	}
+	if len(e.pending) >= streamQueueMax && (kind == "log" || kind == "progress") {
+		e.dropped++
+		return
+	}
+	if e.dropped > 0 && (len(e.pending) < streamQueueMax || kind == "result") {
+		warning, _ := marshalLine(secrets.RedactValue(output.Event{
+			Schema:  output.EventSchema,
+			Type:    "warning",
+			Code:    "events_dropped",
+			Message: fmt.Sprintf("dropped %d log events from the stream because the client was not reading; the run log has them", e.dropped),
+			TS:      time.Now().UTC().Format(time.RFC3339Nano),
+		}))
+		e.log.Line("event", string(warning[:len(warning)-1]))
+		e.pending = append(e.pending, warning)
+		e.dropped = 0
+	}
+	e.pending = append(e.pending, line)
+	e.cond.Signal()
+}
+
+func (e *eventWriter) startWriter() {
+	e.cond = sync.NewCond(&e.qmu)
+	e.drained = make(chan struct{})
+	go e.writeStdout()
+}
+
+// writeStdout copies queued lines to stdout until the queue is closed and
+// empty. After the first write error it discards lines.
+func (e *eventWriter) writeStdout() {
+	defer close(e.drained)
+	for {
+		e.qmu.Lock()
+		for len(e.pending) == 0 && !e.closed {
+			e.cond.Wait()
+		}
+		batch := e.pending
+		e.pending = nil
+		dead := e.dead
+		e.qmu.Unlock()
+		if len(batch) == 0 {
+			return
+		}
+		if dead {
+			continue
+		}
+		for _, line := range batch {
+			if err := e.writeLine(line); err != nil {
+				e.qmu.Lock()
+				e.dead, e.deadErr = true, err
+				e.pending = nil
+				e.qmu.Unlock()
+				break
+			}
+		}
+	}
+}
+
+func (e *eventWriter) writeLine(line []byte) error {
+	if _, err := e.w.Write(line); err != nil {
+		return err
+	}
+	if f, ok := e.w.(interface{ Flush() error }); ok {
+		if err := f.Flush(); err != nil {
+			return err
+		}
+	}
+	// Sync fails on pipes and sockets; only a real file cares.
 	if f, ok := e.w.(interface{ Sync() error }); ok {
 		_ = f.Sync()
 	}
-	e.log.Line("event", string(line[:len(line)-1]))
+	return nil
+}
+
+// drainLocked closes the queue and waits up to streamDrainTimeout for the
+// writer to finish. The result is already in the run log either way.
+func (e *eventWriter) drainLocked() {
+	e.start.Do(e.startWriter)
+	e.qmu.Lock()
+	e.closed = true
+	e.cond.Signal()
+	e.qmu.Unlock()
+	timer := time.NewTimer(streamDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-e.drained:
+	case <-timer.C:
+		e.log.Line("stream", "stdout did not drain in "+streamDrainTimeout.String()+"; the result is in this log")
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func marshalLine(v any) ([]byte, error) {
@@ -335,6 +467,7 @@ func (e *eventWriter) ok(command string, res Result) int {
 		Warnings: res.Warnings,
 	}})
 	e.done = true
+	e.drainLocked()
 	return output.ExitOK
 }
 
@@ -348,6 +481,7 @@ func (e *eventWriter) fail(command string, err error) int {
 	failure.Command = command
 	e.writeLocked(output.Event{Type: "result", Envelope: failure})
 	e.done = true
+	e.drainLocked()
 	code := output.ExitCode(err)
 	if code == output.ExitOK {
 		code = output.ExitGeneric

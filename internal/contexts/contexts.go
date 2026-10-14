@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/transport"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -151,11 +152,17 @@ func ValidateName(name string) error {
 	if NamePattern.MatchString(name) {
 		return nil
 	}
+	hint := "Use lower-case letters, digits, '.', '_' and '-'."
+	if strings.ContainsAny(name, " \t") {
+		// Most likely psql's -c landing on eru's global -c (--context).
+		hint = "-c is eru's --context. To pass arguments to psql, put them after --: " +
+			"eru psql --db <db> -- -c \"select 1\"."
+	}
 	return output.NewError(
 		output.CodeValidation,
 		"context name "+name+" is invalid",
 		output.ExitConfig,
-		"Use lower-case letters, digits, '.', '_' and '-'.",
+		hint,
 	).WithDetails(map[string]any{"name": name})
 }
 
@@ -210,8 +217,21 @@ func notFound(name string) *output.CLIError {
 		output.CodeContextNotFound,
 		"context "+name+" does not exist",
 		output.ExitContext,
-		"List contexts with eru context list, or create one with eru login <secrets.age>.",
+		contextHint("List contexts with eru context list, or create one with eru login <secrets.age>."),
 	).WithDetails(map[string]any{"context": name})
+}
+
+// nodeMarker is the file whose presence makes this machine an eru node.
+var nodeMarker = config.ClusterPath
+
+// contextHint returns hint, or on an eru node (which holds no contexts) a
+// hint to run the command from the operator machine instead.
+func contextHint(hint string) string {
+	if _, err := os.Stat(nodeMarker); err == nil {
+		return "This machine is an eru node (" + nodeMarker + " exists) and holds no contexts. " +
+			"Run this command from your own machine; on the node, use sudo eru node run or sudo eru node selfcheck."
+	}
+	return hint
 }
 
 // Save writes context.toml.
@@ -339,7 +359,7 @@ func Resolve(flag string) (*Context, error) {
 			output.CodeContextNotFound,
 			"no context is selected",
 			output.ExitContext,
-			"Run eru login <secrets.age>, or pick one with eru context use <name>.",
+			contextHint("Run eru login <secrets.age>, or pick one with eru context use <name>."),
 		)
 	}
 	return Load(name)

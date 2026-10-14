@@ -15,6 +15,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/buildinfo"
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/rpc"
 	"github.com/mbvlabs/eru/internal/secrets"
@@ -53,12 +54,13 @@ type Caller interface {
 	Call(ctx context.Context, method string, params any, opts CallOptions) (Reply, error)
 }
 
-func newRequest(method string, params any, operator string, opts CallOptions) ([]byte, error) {
+// newRequest encodes one request line and returns it with its request id.
+func newRequest(method string, params any, operator string, opts CallOptions) ([]byte, string, error) {
 	var rawParams json.RawMessage
 	if params != nil {
 		encoded, err := json.Marshal(params)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		rawParams = encoded
 	}
@@ -82,9 +84,9 @@ func newRequest(method string, params any, operator string, opts CallOptions) ([
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return append(raw, '\n'), nil
+	return append(raw, '\n'), req.RequestID, nil
 }
 
 // readEvents reads NDJSON events until the result and returns it.
@@ -165,7 +167,7 @@ func (n *Node) asRoot(command string) string {
 
 // Call runs one RPC method and streams its events to opts.OnEvent.
 func (n *Node) Call(ctx context.Context, method string, params any, opts CallOptions) (Reply, error) {
-	payload, err := newRequest(method, params, n.Operator, opts)
+	payload, requestID, err := newRequest(method, params, n.Operator, opts)
 	if err != nil {
 		return Reply{}, err
 	}
@@ -189,6 +191,9 @@ func (n *Node) Call(ctx context.Context, method string, params any, opts CallOpt
 	if ctx.Err() != nil {
 		return Reply{}, ctx.Err()
 	}
+	if n.SSH.StreamLost(err) {
+		return Reply{}, streamLost(method, requestID, n.SSH, err)
+	}
 	detail := strings.TrimSpace(secrets.Redact(stderr.String()))
 	status, _ := transport.ExitStatus(err)
 	return Reply{}, output.NewError(
@@ -197,6 +202,23 @@ func (n *Node) Call(ctx context.Context, method string, params any, opts CallOpt
 		output.ExitTransport,
 		"Re-run with --verbose to see the node's stderr. sudo may be refusing eru node rpc.",
 	).WithDetails(map[string]any{"exit_status": status, "stderr": detail, "error": errString(err)})
+}
+
+// streamLost is the error for a connection that died before the result. The
+// node does not notice a dropped stream: it finishes the request and writes
+// the result to its run log, which is named after the request id.
+func streamLost(method, requestID string, c *transport.SSHClient, err error) *output.CLIError {
+	runLog := fmt.Sprintf("%s/*-%s-%s.log", engine.LogDir, method, requestID)
+	why := "the connection closed"
+	if c.Lost() {
+		why = "the node stopped answering SSH keepalives"
+	}
+	return output.NewError(
+		output.CodeTransportFailed,
+		fmt.Sprintf("lost the connection to %s during %s (%s); the node keeps running it", c.Target, method, why),
+		output.ExitTransport,
+		"Its outcome will be in the node's run log "+runLog+" (eru ssh, then sudo cat it). Check it, or eru plan, before re-running.",
+	).WithDetails(map[string]any{"reason": "stream_lost", "request_id": requestID, "run_log": runLog, "error": errString(err)})
 }
 
 func errString(err error) string {
@@ -214,7 +236,7 @@ type Local struct {
 
 // Call runs one RPC method in-process.
 func (l Local) Call(_ context.Context, method string, params any, opts CallOptions) (Reply, error) {
-	payload, err := newRequest(method, params, l.Operator, opts)
+	payload, _, err := newRequest(method, params, l.Operator, opts)
 	if err != nil {
 		return Reply{}, err
 	}

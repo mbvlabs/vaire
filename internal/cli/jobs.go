@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/remote"
@@ -129,11 +130,91 @@ func runJobFollow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	message := fmt.Sprintf("job %s (%s) %s", jr.JobID, jr.Job, jr.State)
+	if line := jobResultMessage(jr.Job, jr.Result); line != "" {
+		message += "\n" + line
+	}
 	return output.Success(cmd, output.Result{
 		Data:     jr,
-		Message:  fmt.Sprintf("job %s (%s) %s", jr.JobID, jr.Job, jr.State),
+		Message:  message,
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
+}
+
+// jobResultMessage is the result line the command that started a job prints
+// for its result (eru backup now, backup verify, restore drill, dump, restore,
+// db fork), so eru job follow on a finished job says the same. It is empty
+// for a result it can't read.
+func jobResultMessage(job string, raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	switch job {
+	case "backup-full", "backup-diff", "backup-incr":
+		var res struct {
+			DB  string     `json:"db"`
+			Set backup.Set `json:"set"`
+		}
+		if json.Unmarshal(raw, &res) != nil || res.Set.Label == "" {
+			return ""
+		}
+		return fmt.Sprintf("%s: backup %s (%s) finished: %s", res.DB, res.Set.Label, res.Set.Type, humanBytes(res.Set.Size))
+	case "backup-verify":
+		var res backup.VerifyResult
+		if json.Unmarshal(raw, &res) != nil || res.FinishedAt == "" {
+			return ""
+		}
+		return "pgbackrest verify " + verifyState(&res) + " at " + res.FinishedAt
+	case "restore-drill":
+		var drill backup.Drill
+		if json.Unmarshal(raw, &drill) != nil || drill.Result == "" {
+			return ""
+		}
+		out := []string{fmt.Sprintf("%s: restore drill %s: backup %s recovered to %s", drill.Database, drill.Result, drill.BackupLabel, drill.RecoveredTo)}
+		for _, c := range drill.Checks {
+			mark := "ok"
+			if !c.OK {
+				mark = "FAILED"
+			}
+			line := "  " + mark + "  " + c.Name
+			if c.Detail != "" {
+				line += ": " + c.Detail
+			}
+			out = append(out, line)
+		}
+		return strings.Join(out, "\n")
+	case "db-dump":
+		var res struct {
+			Dump backup.Dump `json:"dump"`
+		}
+		if json.Unmarshal(raw, &res) != nil || res.Dump.ID == "" {
+			return ""
+		}
+		return fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, res.Dump.Database, humanBytes(res.Dump.Size))
+	case "restore":
+		var res struct {
+			Database  string `json:"database"`
+			Restoring string `json:"restoring"`
+			Phase     string `json:"phase"`
+		}
+		if json.Unmarshal(raw, &res) != nil || res.Database == "" {
+			return ""
+		}
+		if res.Phase == "promoted" {
+			return res.Database + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until eru restore cleanup " + res.Database + "; eru restore undo " + res.Database + " swaps it back."
+		}
+		return "the temporary cluster " + res.Restoring + " is ready beside the live " + res.Database + "; inspect it with eru sql --db " + res.Restoring + ", then eru restore promote " + res.Database + " or eru restore abort " + res.Database + "."
+	case "db-fork":
+		var res struct {
+			Source string `json:"source"`
+			Name   string `json:"name"`
+		}
+		if json.Unmarshal(raw, &res) != nil || res.Name == "" {
+			return ""
+		}
+		return "forked " + res.Source + " into " + res.Name + " with its own roles (the credentials were shown only by eru db fork)"
+	}
+	return ""
 }
 
 // jobListDB is a job's DB column: its database, else what its result names

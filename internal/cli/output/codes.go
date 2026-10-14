@@ -30,6 +30,7 @@ const (
 	CodeLockdownFailed        = "lockdown_failed"
 	CodeSecrets               = "secrets_error"
 	CodeReleaseVerification   = "release_verification_failed"
+	CodeDatabaseProtected     = "database_protected"
 	CodeError                 = "error"
 )
 
@@ -78,6 +79,7 @@ var exitByCode = map[string]int{
 	CodeLockdownFailed:        ExitLockdown,
 	CodeSecrets:               ExitSecrets,
 	CodeReleaseVerification:   ExitReleaseVerification,
+	CodeDatabaseProtected:     ExitUnsafe,
 	CodeError:                 ExitGeneric,
 }
 

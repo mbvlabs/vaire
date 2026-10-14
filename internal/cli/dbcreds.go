@@ -1,16 +1,21 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/secretsdoc"
 	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // ensureClusterSecrets fills the operator's cluster-wide database
@@ -140,4 +145,85 @@ func serviceSecrets(contextName string) (map[string]string, contexts.Credentials
 		}
 	}
 	return values, creds, generated, nil
+}
+
+// credentialsMessage renders one-time credentials as the plain result
+// (headline, the indented lines and the shown-once note) and, on a terminal
+// that takes color, the styled block for human output; human is empty
+// otherwise. richHeadline is the line above the block, whose frame is titled
+// title.
+func credentialsMessage(cmd *cobra.Command, headline, richHeadline, title string, secret databaseSecret) (plain, human string) {
+	plain = headline + "\n" + secret.String() + "\n" + shownOnceNote
+	width, ok := styledStdout(cmd)
+	if !ok {
+		return plain, ""
+	}
+	return plain, secret.styled(richHeadline, title, shownOnceNote, width)
+}
+
+// styled renders the credentials block for a terminal width columns wide.
+func (d databaseSecret) styled(headline, title, note string, width int) string {
+	var rows []ui.CredentialRow
+	for _, role := range steps.DatabaseRoles {
+		if r, ok := d.Roles[role]; ok {
+			rows = append(rows, ui.CredentialRow{Role: role, User: r.User, Password: r.Password})
+		}
+	}
+	var urls []ui.URLRow
+	for _, k := range sortedStrings(d.URLs) {
+		urls = append(urls, ui.URLRow{Label: k + " URL", URL: d.URLs[k]})
+	}
+	return ui.Credentials(headline, title, rows, urls, note, width)
+}
+
+// styledStdout reports whether the human result may be styled, with the
+// terminal's width: the terminal UI is on, stdout is that terminal and
+// NO_COLOR is unset. Anything else keeps the plain lines.
+func styledStdout(cmd *cobra.Command) (int, bool) {
+	if os.Getenv("NO_COLOR") != "" || !richOutput(cmd) || cmd.OutOrStdout() != os.Stdout || !ui.Enabled(os.Stdout) {
+		return 0, false
+	}
+	width := 80
+	if cols, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && cols > 0 { //nolint:gosec // G115: file descriptors fit in int.
+		width = cols
+	}
+	return width, true
+}
+
+// createInterrupted handles a db create whose call failed after the request
+// went out with its generated passwords: a lost stream or a node that ended
+// without a result (transport_failed). The node keeps creating the database
+// with those passwords, and nothing else can show them again, so they are
+// printed (human and markdown output) and carried in the error's details
+// (json and agent output). A node that answered with a refusal or a failure
+// is passed through unchanged.
+func createInterrupted(cmd *cobra.Command, err error, name, title string, secret databaseSecret) error {
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != output.CodeTransportFailed {
+		return err
+	}
+	note := "The connection was lost after the request was sent, so the node may still be creating " + name +
+		" with these credentials. Check with eru db list: eru apply finishes a database it left half made; if " + name + " is not listed, nothing was created and these are unused."
+	out := *cliErr
+	details := map[string]any{}
+	if m, ok := cliErr.Details.(map[string]any); ok {
+		for k, v := range m {
+			details[k] = v
+		}
+	}
+	details["database"] = secret
+	details["credentials_note"] = note + " " + shownOnceNote
+	out.Details = details
+	out.Hint = strings.TrimSpace(out.Hint + " The credentials were printed above (details.database); eru apply finishes " + name + ".")
+	opts, _ := output.ParseOptions(cmd)
+	if !output.UsesStructuredOutput(opts) {
+		text := note + "\n" + secret.String() + "\n" + shownOnceNote
+		if width, ok := styledStdout(cmd); ok {
+			text = ui.Warn(note) + "\n" + secret.styled("", title, shownOnceNote, width)
+		}
+		resume := ui.Suspend()
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), text)
+		resume()
+	}
+	return &out
 }

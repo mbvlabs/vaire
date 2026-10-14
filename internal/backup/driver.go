@@ -123,7 +123,11 @@ func (i Info) Find(label string) (Set, bool) {
 
 // VerifyResult is one pgbackrest verify run.
 type VerifyResult struct {
-	OK         bool     `json:"ok"`
+	OK bool `json:"ok"`
+	// Stanza is the stanza verified. A database's stanza changes on a
+	// restore from a dump (and its undo), and the result only counts for
+	// the stanza it ran on.
+	Stanza     string   `json:"stanza,omitempty"`
 	StartedAt  string   `json:"started_at"`
 	FinishedAt string   `json:"finished_at"`
 	Output     []string `json:"output,omitempty"`

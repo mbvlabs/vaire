@@ -73,6 +73,11 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if old, _, err := store.Load(); err == nil {
+		if !env.Req.DryRun {
+			if err := checkUnprotect(old, cfg, env.Req.ConfirmTokens()); err != nil {
+				return Result{}, err
+			}
+		}
 		if err := checkRepoMove(ctx, old, cfg); err != nil {
 			return Result{}, err
 		}

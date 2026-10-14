@@ -127,7 +127,7 @@ func methods() map[string]method {
 			cluster: true,
 			confirm: dbToken,
 			runLog:  always,
-			handler: handleDBDrop,
+			handler: refuseProtected("db drop", "name", nil, handleDBDrop),
 		},
 		{
 			// db resize changes cluster.toml and the kernel's huge pages, so it
@@ -162,7 +162,7 @@ func methods() map[string]method {
 			cluster: true,
 			confirm: dbCredentialsToken,
 			runLog:  always,
-			handler: handleDBCredentials,
+			handler: refuseProtected("rotating its credentials", "name", rotateRequested, handleDBCredentials),
 		},
 		{
 			name:    "tune.show",
@@ -192,10 +192,10 @@ func methods() map[string]method {
 		{name: "backup.verify", cluster: true, runLog: always, handler: handleBackupVerify},
 		{name: "job.list", handler: handleJobList},
 		{name: "job.follow", handler: handleJobFollow},
-		{name: "restore.start", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreStart},
+		{name: "restore.start", cluster: true, confirm: restoreToken, runLog: always, handler: refuseProtected("restore --promote", "database", restorePromotes, handleRestoreStart)},
 		{name: "restore.status", cluster: true, handler: handleRestoreStatus},
-		{name: "restore.promote", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestorePromote},
-		{name: "restore.undo", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreUndo},
+		{name: "restore.promote", cluster: true, confirm: restoreToken, runLog: always, handler: refuseProtected("restore promote", "database", nil, handleRestorePromote)},
+		{name: "restore.undo", cluster: true, confirm: restoreToken, runLog: always, handler: refuseProtected("restore undo", "database", nil, handleRestoreUndo)},
 		{name: "restore.abort", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, runLog: always, handler: handleRestoreAbort},
 		{name: "restore.cleanup", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: cleanupToken, runLog: always, handler: handleRestoreCleanup},
 		{name: "restore.drill", cluster: true, runLog: always, handler: handleRestoreDrill},

@@ -18,8 +18,10 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-// TunnelMTU is the netstack interface MTU (§7.2).
-const TunnelMTU = 1420
+// TunnelMTU is the netstack interface MTU (§7.2). WireGuard over IPv6 adds
+// 80 bytes, so 1380 fits a 1492-byte PPPoE path. Netstack derives the TCP MSS
+// it advertises from this, so the node's replies fit without touching wg0.
+const TunnelMTU = 1380
 
 // KeepaliveSeconds keeps NAT mappings open while a command runs.
 const KeepaliveSeconds = 25

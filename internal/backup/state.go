@@ -51,6 +51,26 @@ type Records struct {
 	// follow it, and later restores of the stanza pass this timeline
 	// instead. A promote clears the database's entry.
 	Timelines map[string]TimelineSwitch `json:"timelines,omitempty"`
+	// Undoing are the restore undos under way, by database, recorded before
+	// the data directories are renamed: an undo that fails after its swap
+	// resumes from the same names, and its aside cluster is never lost.
+	Undoing map[string]Undo `json:"undoing,omitempty"`
+}
+
+// Undo is one restore undo under way.
+type Undo struct {
+	// From is the leftover the undo swaps back in.
+	From Leftover `json:"from"`
+	// Aside is the <db>__pre_restore_<ts> cluster the restored data becomes.
+	Aside string `json:"aside"`
+	// Stanza is the restored data's stanza, cluster.toml's at the start.
+	Stanza string `json:"stanza,omitempty"`
+	// Abandoned is the restored data's timeline, read before the swap.
+	Abandoned string `json:"abandoned,omitempty"`
+	// LastArchivedAt is when the restored data last archived WAL, read
+	// before the swap, for an undo that drops the dump's stanza.
+	LastArchivedAt string `json:"last_archived_at,omitempty"`
+	StartedAt      string `json:"started_at"`
 }
 
 // TimelineSwitch is the timeline a database is on after restore undo.
@@ -81,6 +101,10 @@ type DroppedStanza struct {
 	ExpiresAt string `json:"expires_at"`
 	// FinalDump is the id of the final dump db drop took, if any.
 	FinalDump string `json:"final_dump,omitempty"`
+	// LastArchivedAt is when the cluster last archived a WAL segment to
+	// the stanza before the drop: the end of its restore window. pgbackrest
+	// info names the newest segment, not its time.
+	LastArchivedAt string `json:"last_archived_at,omitempty"`
 }
 
 // Restore phases.
@@ -110,6 +134,14 @@ type Restore struct {
 	Port int `json:"port,omitempty"`
 	// Timeline is the --target-timeline the restore passed, if any.
 	Timeline string `json:"timeline,omitempty"`
+	// Aside is the <db>__pre_restore_<ts> cluster promote puts the live
+	// data in, recorded before it renames a data directory: a promote that
+	// fails after the swap resumes with it, and abort refuses once the copy
+	// is swapped in.
+	Aside string `json:"aside,omitempty"`
+	// AsideArchivedAt is when the live data last archived WAL, read before
+	// the swap of a restore from a dump, whose old stanza is dropped.
+	AsideArchivedAt string `json:"aside_archived_at,omitempty"`
 }
 
 // Leftover is a cluster a promote or undo put aside, stopped: the
@@ -130,15 +162,21 @@ type Leftover struct {
 }
 
 // IsTemporary reports whether cluster is one restore or drill owns: an
-// open restore's <db>__restoring, a leftover or a drill's <db>__drill.
+// open restore's <db>__restoring, the aside of a promote or undo under way,
+// a leftover or a drill's <db>__drill.
 func (s Records) IsTemporary(cluster string) bool {
 	for _, name := range s.Drilling {
 		if name == cluster {
 			return true
 		}
 	}
-	for db := range s.Restores {
-		if RestoringName(db) == cluster {
+	for db, r := range s.Restores {
+		if RestoringName(db) == cluster || (r.Aside != "" && r.Aside == cluster) {
+			return true
+		}
+	}
+	for _, u := range s.Undoing {
+		if u.Aside == cluster {
 			return true
 		}
 	}
@@ -152,16 +190,30 @@ func (s Records) IsTemporary(cluster string) bool {
 
 // Drill is one restore drill.
 type Drill struct {
-	ID          string       `json:"id"`
-	Database    string       `json:"database,omitempty"`
-	StartedAt   string       `json:"started_at"`
-	FinishedAt  string       `json:"finished_at"`
-	BackupLabel string       `json:"backup_label,omitempty"`
-	Target      string       `json:"target"`
-	RecoveredTo string       `json:"recovered_to,omitempty"`
-	Checks      []DrillCheck `json:"checks"`
-	Result      string       `json:"result"`
-	Reason      string       `json:"reason,omitempty"`
+	ID       string `json:"id"`
+	Database string `json:"database,omitempty"`
+	// Stanza is the stanza the drill restored from; see VerifyResult.Stanza.
+	Stanza      string `json:"stanza,omitempty"`
+	StartedAt   string `json:"started_at"`
+	FinishedAt  string `json:"finished_at"`
+	BackupLabel string `json:"backup_label,omitempty"`
+	Target      string `json:"target"`
+	RecoveredTo string `json:"recovered_to,omitempty"`
+	// NoWALReplayed is set when recovery replayed no transaction after the
+	// backup: RecoveredTo is then the backup set's stop time.
+	NoWALReplayed bool         `json:"no_wal_replayed,omitempty"`
+	Checks        []DrillCheck `json:"checks"`
+	Result        string       `json:"result"`
+	Reason        string       `json:"reason,omitempty"`
+}
+
+// DescribeRecoveredTo is RecoveredTo for people: the replayed commit time,
+// or the backup's end when no transaction was replayed after it.
+func (d Drill) DescribeRecoveredTo() string {
+	if d.NoWALReplayed {
+		return d.RecoveredTo + " (the backup's end; no transaction replayed after it)"
+	}
+	return d.RecoveredTo
 }
 
 // DrillCheck is one check of a drill.
@@ -228,6 +280,9 @@ func decode(raw []byte) (Records, error) {
 	if s.Drilling == nil {
 		s.Drilling = map[string]string{}
 	}
+	if s.Undoing == nil {
+		s.Undoing = map[string]Undo{}
+	}
 	return s, nil
 }
 
@@ -286,14 +341,27 @@ func trimDrills(drills []Drill) []Drill {
 	return out
 }
 
-// LastDrill returns the newest drill of db.
-func (s Records) LastDrill(db string) (Drill, bool) {
+// DrillOf returns the newest drill of db that ran on stanza: like VerifyOf,
+// a new stanza has no drill yet, and a drill recorded before drills named
+// their stanza counts for none.
+func (s Records) DrillOf(db, stanza string) (Drill, bool) {
 	for i := len(s.Drills) - 1; i >= 0; i-- {
-		if s.Drills[i].Database == db {
+		if s.Drills[i].Database == db && s.Drills[i].Stanza != "" && s.Drills[i].Stanza == stanza {
 			return s.Drills[i], true
 		}
 	}
 	return Drill{}, false
+}
+
+// VerifyOf is db's last verify when it ran on stanza: a new stanza (after a
+// restore from a dump, or a database created again) has no verify yet. A
+// result recorded before verifies named their stanza counts for none.
+func (s Records) VerifyOf(db, stanza string) (VerifyResult, bool) {
+	v, ok := s.LastVerify[db]
+	if !ok || v.Stanza == "" || v.Stanza != stanza {
+		return VerifyResult{}, false
+	}
+	return v, true
 }
 
 // RecordBackup stores set as db's last backup of its type.

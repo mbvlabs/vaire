@@ -12,6 +12,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/steps"
 	"github.com/spf13/cobra"
@@ -89,6 +90,12 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if flagTrue(cmd, "promote") {
+		// The node refuses it too; this saves asking for the token first.
+		if err := node.CheckNotProtected(cfg, db, "restore promote"); err != nil {
+			return err
+		}
+	}
 	if !target.IsZero() {
 		p.note("restore target: " + echoTime(target, cfg.Timezone))
 	}
@@ -133,6 +140,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		PoolerWarning string   `json:"pooler_warning"`
 		Promoted      struct {
 			Warning *output.Warning `json:"warning"`
+			Stanza  string          `json:"stanza"`
 		} `json:"promoted"`
 	}
 	jr, err := decodeJob(reply, &res)
@@ -152,7 +160,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if res.Phase == "promoted" {
 		return output.Success(cmd, output.Result{
 			Data:     map[string]any{"job_id": jr.JobID, "result": res},
-			Message:  db + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until eru restore cleanup " + db + "; eru restore undo " + db + " swaps it back.",
+			Message:  db + " is restored and promoted, " + promotedWhere(res.Promoted.Stanza) + " The replaced data is kept as a stopped cluster until eru restore cleanup " + db + "; eru restore undo " + db + " swaps it back.",
 			Warnings: warnings,
 			Next:     []string{"eru restore undo " + db, "eru restore cleanup " + db},
 		})
@@ -240,14 +248,35 @@ func rowCount(n *int64) string {
 	return fmt.Sprint(*n)
 }
 
-// restoreAction runs promote, undo or abort for one database.
-func restoreAction(cmd *cobra.Command, db, method, token, done string) error {
+// promotedWhere says where a promoted database archives now: a restore from
+// a backup continues its stanza on a new timeline, a restore from a dump is
+// a new cluster with a stanza of its own.
+func promotedWhere(stanza string) string {
+	if stanza != "" {
+		return "as a new cluster archiving to a new stanza, " + stanza + ", which has its first full backup."
+	}
+	return "on a new timeline; a full backup is running."
+}
+
+// restoreAction runs promote, undo or abort for one database. done gives
+// the message from the node's reply. A protected database refuses action
+// (when set) before the token is asked for; the node refuses it too.
+func restoreAction(cmd *cobra.Command, db, method, token, action string, done func(data map[string]any) string) error {
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	if action != "" {
+		cfg, _, err := remoteConfig(cmd, s, p)
+		if err != nil {
+			return err
+		}
+		if err := node.CheckNotProtected(cfg, db, action); err != nil {
+			return err
+		}
+	}
 	if token != "" && !dryRun(cmd) {
 		if err := Confirm(cmd, token); err != nil {
 			return err
@@ -262,26 +291,33 @@ func restoreAction(cmd *cobra.Command, db, method, token, done string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+	msg := done(data)
 	if dryRun(cmd) {
-		done = "dry run: " + method + " " + db + " would run"
+		msg = "dry run: " + method + " " + db + " would run"
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: done, Warnings: append(s.warnings, reply.Warnings...)})
+	return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
 }
 
 func runRestorePromote(cmd *cobra.Command, args []string) error {
 	db := args[0]
-	return restoreAction(cmd, db, "restore.promote", db+"/restore",
-		db+" now holds the restored data, on a new timeline; a full backup is running. The previous data is kept as a stopped cluster: eru restore undo "+db+" swaps it back, eru restore cleanup "+db+" drops it.")
+	return restoreAction(cmd, db, "restore.promote", db+"/restore", "restore promote", func(data map[string]any) string {
+		stanza, _ := data["stanza"].(string)
+		return db + " now holds the restored data, " + promotedWhere(stanza) + " The previous data is kept as a stopped cluster: eru restore undo " + db + " swaps it back, eru restore cleanup " + db + " drops it."
+	})
 }
 
 func runRestoreUndo(cmd *cobra.Command, args []string) error {
 	db := args[0]
-	return restoreAction(cmd, db, "restore.undo", db+"/restore", db+" is back to its data from before the restore, on its old timeline; a full backup is running.")
+	return restoreAction(cmd, db, "restore.undo", db+"/restore", "restore undo", func(map[string]any) string {
+		return db + " is back to its data from before the restore, on its old timeline; a full backup is running."
+	})
 }
 
 func runRestoreAbort(cmd *cobra.Command, args []string) error {
 	db := args[0]
-	return restoreAction(cmd, db, "restore.abort", "", "dropped the temporary cluster "+db+"__restoring; the live "+db+" was never touched")
+	return restoreAction(cmd, db, "restore.abort", "", "", func(map[string]any) string {
+		return "dropped the temporary cluster " + db + "__restoring; the live " + db + " was never touched"
+	})
 }
 
 func runRestoreCleanup(cmd *cobra.Command, args []string) error {
@@ -309,10 +345,11 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	lines := make([]string, 0, len(data.Leftovers))
+	rows := make([][]string, 0, len(data.Leftovers))
 	for _, l := range data.Leftovers {
-		lines = append(lines, fmt.Sprintf("  %-50s %10s  %s", l.Name, humanBytes(l.SizeBytes), l.CreatedAt))
+		rows = append(rows, []string{l.Name, humanBytes(l.SizeBytes), l.CreatedAt})
 	}
+	lines := alignColumns(rows)
 	if len(lines) == 0 {
 		return output.Success(cmd, output.Result{Data: data, Message: "no restore leftovers", Warnings: s.warnings})
 	}
@@ -383,7 +420,7 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 			if err := json.Unmarshal(raw, &drill); err != nil {
 				return nil, "", err
 			}
-			out := []string{fmt.Sprintf("%s: restore drill %s: backup %s recovered to %s", drill.Database, drill.Result, drill.BackupLabel, drill.RecoveredTo)}
+			out := []string{fmt.Sprintf("%s: restore drill %s: backup %s recovered to %s", drill.Database, drill.Result, drill.BackupLabel, drill.DescribeRecoveredTo())}
 			for _, c := range drill.Checks {
 				mark := "ok"
 				if !c.OK {
@@ -398,7 +435,12 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 			return drill, strings.Join(out, "\n"), nil
 		})
 	if detached != nil {
-		return detachedResult(cmd, s, *detached, "the drill"+notStarted(dbs, outcomes))
+		return detachedEach(cmd, s, *detached, "the drill", notStarted(dbs, outcomes), func(db string) string {
+			if at != "" {
+				return "eru restore drill --db " + db + " --time " + at
+			}
+			return "eru restore drill --db " + db
+		})
 	}
 	if err := failedOutcomes("the restore drill", "drills", outcomes); err != nil {
 		return err
@@ -466,8 +508,9 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		// The passwords are set in the copy before the job ends; they are
 		// only shown here.
 		p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
+		message, human := credentialsMessage(cmd, "fork detached; credentials shown only now", "fork detached; credentials shown only now", name, secret)
 		return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
-			Message: secret.String() + "\n" + shownOnceNote, Next: []string{"eru job follow " + jobID}})
+			Message: message, Human: human, Next: []string{"eru job follow " + jobID}})
 	}
 	var res struct {
 		Warnings []output.Warning `json:"warnings"`
@@ -481,9 +524,11 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 	if !at.IsZero() {
 		from = src + " as of " + at.Format(time.RFC3339)
 	}
+	message, human := credentialsMessage(cmd, fmt.Sprintf("forked %s into %s with its own roles", from, name), "forked "+from+" into "+name+" with its own roles", name, secret)
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"job_id": jr.JobID, "database": secret},
-		Message:  fmt.Sprintf("forked %s into %s with its own roles\n%s\n%s", from, name, secret, shownOnceNote),
+		Message:  message,
+		Human:    human,
 		Warnings: warnings,
 	})
 }

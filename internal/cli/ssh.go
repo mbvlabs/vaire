@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -37,12 +39,24 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = sess.Close() }()
 
 	// A command run from a terminal gets a PTY too (like ssh -t), so sudo can
-	// ask for the admin password.
-	if command != "" && (!stdinIsTTY() || MustNotPrompt(cmd)) {
+	// ask for the admin password. With stdout piped or redirected it runs
+	// without one: a PTY merges the remote stderr (sudo's prompt) into stdout
+	// and turns every newline into \r\n, which breaks eru ssh --command … | jq.
+	if command != "" && (!stdinIsTTY() || !stdoutIsTTY() || MustNotPrompt(cmd)) {
+		stderr := &sudoPasswordWatch{w: cmd.ErrOrStderr()}
 		sess.Stdin = cmd.InOrStdin()
 		sess.Stdout = cmd.OutOrStdout()
-		sess.Stderr = cmd.ErrOrStderr()
-		return sshExit(sess.Run(command))
+		sess.Stderr = stderr
+		err := sess.Run(command)
+		var exitErr *ssh.ExitError
+		if errors.As(err, &exitErr) && stderr.seen {
+			return output.NewError(output.CodeInputRequired,
+				"sudo on the node needs a password, and without a terminal there is none to ask for", output.ExitInput,
+				"Run the command from a terminal with stdout not piped so sudo can prompt, "+
+					"or have sudo write the output to a file and read it back with eru ssh --no-input --command 'cat <file>'.").
+				WithDetails(map[string]any{"exit_status": exitErr.ExitStatus()})
+		}
+		return sshExit(err)
 	}
 
 	fd := int(os.Stdin.Fd()) //nolint:gosec // G115: file descriptors fit in int.
@@ -92,4 +106,37 @@ func forwardWindowSize(fd int, sess *ssh.Session) {
 			_ = sess.WindowChange(height, width)
 		}
 	}
+}
+
+// stdoutIsTTY reports whether stdout is a terminal.
+func stdoutIsTTY() bool {
+	return term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // G115: file descriptors fit in int.
+}
+
+// sudoPasswordWatch passes the remote stderr through and notes whether sudo
+// refused for want of a terminal to read the password from.
+type sudoPasswordWatch struct {
+	w    io.Writer
+	tail []byte
+	seen bool
+}
+
+// sudoNoTTY are the lines sudo prints when it needs a password but has no
+// terminal.
+var sudoNoTTY = [][]byte{[]byte("sudo: a terminal is required"), []byte("sudo: a password is required")}
+
+func (s *sudoPasswordWatch) Write(b []byte) (int, error) {
+	if !s.seen {
+		// Keep a short tail so a message split across writes still matches.
+		s.tail = append(s.tail, b...)
+		for _, m := range sudoNoTTY {
+			if bytes.Contains(s.tail, m) {
+				s.seen = true
+			}
+		}
+		if keep := 64; len(s.tail) > keep {
+			s.tail = append(s.tail[:0], s.tail[len(s.tail)-keep:]...)
+		}
+	}
+	return s.w.Write(b)
 }

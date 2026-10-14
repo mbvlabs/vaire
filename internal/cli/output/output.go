@@ -92,8 +92,11 @@ type Event struct {
 
 // Result is a successful command payload before it is rendered.
 type Result struct {
-	Data     any
-	Message  string
+	Data    any
+	Message string
+	// Human, when set, replaces Message in human output: a styled rendering
+	// the caller made only for a terminal. Every other mode uses Message.
+	Human    string
 	Next     []string
 	Warnings []Warning
 }
@@ -292,7 +295,11 @@ func Success(cmd *cobra.Command, result Result) error {
 		}
 		env.Message = result.Message
 	}
-	return renderSuccess(cmd, opts, env, result.Message)
+	message := result.Message
+	if result.Human != "" && opts.Mode == ModeHuman {
+		message = result.Human
+	}
+	return renderSuccess(cmd, opts, env, message)
 }
 
 // Fail converts err into a failure envelope.

@@ -35,13 +35,15 @@ type State struct {
 }
 
 // JobRecord is one run of eru node run: a detachable job started by an RPC
-// (unit eru-job-<id>) or a timer run.
+// (unit eru-job-<id>) or a timer run. PID is the eru node run process, so a
+// record still running whose process was killed can be told from a live job.
 type JobRecord struct {
 	ID           string            `json:"id"`
 	Job          string            `json:"job"`
 	DB           string            `json:"db,omitempty"`
 	Unit         string            `json:"unit,omitempty"`
 	InvocationID string            `json:"invocation_id,omitempty"`
+	PID          int               `json:"pid,omitempty"`
 	State        string            `json:"state"`
 	Detail       string            `json:"detail,omitempty"`
 	CreatedAt    string            `json:"created_at"`

@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -85,21 +87,23 @@ func (j *jobEnv) shell() engine.Shell {
 func knownJob(job string) bool { return slices.Contains(jobNames, job) }
 
 // RunJob runs one job of eru node run: a timer run or a detachable job an RPC
-// started. It records the job in state.json, takes the node lock (shared,
-// timeout 0: a busy lock records skipped and exits 0; certs-renew waits up to
-// 20 minutes), the heavy-I/O lock for heavy backup jobs and the clusters'
-// locks (both timeout 0, skipped when busy), runs it and records the outcome.
-func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter) (any, error) {
+// started. It records the job in state.json, takes the node lock (shared),
+// the heavy-I/O lock for heavy backup jobs and the clusters' locks, runs it
+// and records the outcome. A busy lock records skipped and exits 0: at once
+// for a job an RPC started or a run by hand, after up to jobLockWait for a
+// timer run (certs-renew waits up to 20 minutes for the node lock). skipped
+// is why a skipped job didn't run, empty when it ran.
+func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter) (res any, skipped string, err error) {
 	if !knownJob(job) {
-		return nil, output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
+		return nil, "", output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
 			WithDetails(map[string]any{"jobs": jobNames})
 	}
 	if laterJobs[job] {
-		return nil, output.NewError(output.CodeError, "job "+job+" is not implemented yet", output.ExitGeneric,
+		return nil, "", output.NewError(output.CodeError, "job "+job+" is not implemented yet", output.ExitGeneric,
 			"This job arrives in a later phase of the roadmap.")
 	}
 	if _, err := os.Stat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
-		return nil, output.NewError(
+		return nil, "", output.NewError(
 			output.CodePrecondition,
 			"this machine is not an eru node: "+config.ClusterPath+" does not exist",
 			output.ExitPrecondition,
@@ -107,22 +111,23 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		).WithDetails(map[string]any{"reason": "not_a_node"})
 	}
 	if os.Geteuid() != 0 {
-		return nil, rootRequired("eru node run")
+		return nil, "", rootRequired("eru node run")
 	}
 	if job == "certs-renew" {
 		release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), certsLockWait)
 		if engine.IsLockHeld(err) {
 			logLine(report, job, "the node lock is busy; skipping "+job)
-			return map[string]any{"job": job, "skipped": "lock_busy"}, nil
+			return map[string]any{"job": job, "skipped": "lock_busy"}, "the node lock was busy", nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		defer release()
-		return certsRenew(ctx, report)
+		res, err := certsRenew(ctx, report)
+		return res, "", err
 	}
 	if rpcOnlyJobs[job] && opts.ID == "" {
-		return nil, output.NewError(output.CodeUsage, "job "+job+" is started by its operator command, not by hand", output.ExitUsage,
+		return nil, "", output.NewError(output.CodeUsage, "job "+job+" is started by its operator command, not by hand", output.ExitUsage,
 			"Use eru restore or eru db fork from your machine.")
 	}
 
@@ -132,30 +137,30 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	} else {
 		spec, err := readJobSpec(env.ID)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if spec.Job != job {
-			return nil, output.NewError(output.CodeUsage, "job "+env.ID+" is a "+spec.Job+" job, not "+job, output.ExitUsage, "")
+			return nil, "", output.NewError(output.CodeUsage, "job "+env.ID+" is a "+spec.Job+" job, not "+job, output.ExitUsage, "")
 		}
 		env.Params, env.Secrets = spec.Params, spec.Secrets
 	}
 	cfg, err := config.LoadCluster(config.ClusterPath)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	env.Cluster = cfg
 	if databaseJobs[job] {
 		env.DB = jobDatabase(env)
 		if env.DB == "" {
-			return nil, output.NewError(output.CodeUsage, "job "+job+" runs for one database", output.ExitUsage,
+			return nil, "", output.NewError(output.CodeUsage, "job "+job+" runs for one database", output.ExitUsage,
 				"Pass --db <database>, as the eru-"+job+"@<database> timer does.")
 		}
 		if _, ok := cfg.ClusterByName(env.DB); !ok {
-			return nil, databaseNotFound(env.DB)
+			return nil, "", databaseNotFound(env.DB)
 		}
 	}
 
-	rec := engine.JobRecord{ID: env.ID, Job: job, DB: env.DB, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID")}
+	rec := engine.JobRecord{ID: env.ID, Job: job, DB: env.DB, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID"), PID: os.Getpid()}
 	if rec.DB == "" {
 		rec.DB = rpcJobDatabase(job, env.Params)
 	}
@@ -170,60 +175,168 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		return nil
 	})
 
-	release, err := engine.Acquire(ctx, engine.LockShared, job, env.ID, 0)
-	if engine.IsLockHeld(err) {
-		logLine(report, job, "the node lock is busy; skipping "+job)
+	release, busy, err := acquireJobLocks(ctx, env, &rec, timerRun(opts))
+	if busy != nil {
 		res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy"}
-		finishJob(rec, engine.JobSkipped, "the node lock was busy", res, nil)
-		notRun(env, errors.New("the node lock was busy"))
-		return res, nil
+		for k, v := range busy.fields {
+			res[k] = v
+		}
+		detail := busy.what + " was busy"
+		if err != nil {
+			// systemctl stop while the run waited for the lock.
+			detail = "stopped while waiting for " + busy.what
+			res["skipped"] = "stopped"
+		} else {
+			logLine(report, job, busy.log+"; skipping "+job)
+		}
+		finishJob(rec, engine.JobSkipped, detail, res, nil)
+		notRun(env, errors.New(detail))
+		return res, detail, nil
 	}
 	if err != nil {
 		finishJob(rec, engine.JobFailed, "", nil, err)
-		return nil, err
+		return nil, "", err
 	}
 	defer release()
-	if heavyIOJobs[job] {
-		release, err := engine.AcquireHeavyIO(ctx, job, env.ID)
-		if engine.IsLockHeld(err) {
-			logLine(report, job, "another backup job holds the heavy-I/O lock; skipping "+job)
-			res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy", "lock": "heavy_io", "db": env.DB}
-			finishJob(rec, engine.JobSkipped, "the heavy-I/O lock was busy", res, nil)
-			return res, nil
-		}
-		if err != nil {
-			finishJob(rec, engine.JobFailed, "", nil, err)
-			return nil, err
-		}
-		defer release()
-	}
-	for _, cluster := range jobClusters(env) {
-		release, err := engine.AcquireCluster(ctx, cluster, engine.LockShared, job, env.ID, 0)
-		if engine.IsLockHeld(err) {
-			logLine(report, job, "the lock of "+cluster+" is busy; skipping "+job)
-			res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy", "cluster": cluster}
-			finishJob(rec, engine.JobSkipped, "the lock of "+cluster+" was busy", res, nil)
-			notRun(env, errors.New("the lock of "+cluster+" was busy"))
-			return res, nil
-		}
-		if err != nil {
-			finishJob(rec, engine.JobFailed, "", nil, err)
-			return nil, err
-		}
-		defer release()
-	}
 
-	res, err := runJobFunc(ctx, env)
+	res, err = runJobFunc(ctx, env)
 	if err != nil {
 		if errors.Is(err, errSkipped) {
 			finishJob(rec, engine.JobSkipped, err.Error(), res, nil)
-			return res, nil
+			return res, strings.TrimPrefix(err.Error(), errSkipped.Error()+": "), nil
 		}
 		finishJob(rec, engine.JobFailed, "", nil, err)
-		return nil, err
+		return nil, "", err
 	}
 	finishJob(rec, engine.JobSucceeded, "", res, nil)
-	return res, nil
+	return res, "", nil
+}
+
+// jobLockWait is how long a timer run waits for its locks before it is
+// recorded as skipped: an apply, a db create or another backup job holding
+// them would otherwise cost the run until the next timer, a day for a daily
+// dump or full.
+const jobLockWait = 15 * time.Minute
+
+// jobLockPoll is how often a waiting timer run tries its locks again.
+const jobLockPoll = 2 * time.Second
+
+// timerRun reports whether this run was started by a systemd timer: a run
+// with no job id (not an RPC's job) inside a unit (not by hand).
+func timerRun(opts JobOptions) bool {
+	return opts.ID == "" && os.Getenv("INVOCATION_ID") != ""
+}
+
+// jobLockBusy is the lock a job found busy.
+type jobLockBusy struct {
+	// what names the lock, as in "the node lock was busy".
+	what string
+	// log is the line logged when the job skips.
+	log string
+	// fields go into the skipped job's result.
+	fields map[string]any
+}
+
+// tryJobLocks takes a job's locks once each, in order: the node lock
+// (shared), the heavy-I/O lock for heavy jobs, then its clusters' locks. On a
+// busy lock it releases what it took and returns which one was busy.
+func tryJobLocks(ctx context.Context, env *jobEnv) (engine.Release, *jobLockBusy, error) {
+	var held []engine.Release
+	releaseAll := func() {
+		for i := len(held) - 1; i >= 0; i-- {
+			held[i]()
+		}
+	}
+	release, err := engine.Acquire(ctx, engine.LockShared, env.Job, env.ID, 0)
+	if engine.IsLockHeld(err) {
+		return nil, &jobLockBusy{what: "the node lock", log: "the node lock is busy"}, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	held = append(held, release)
+	if heavyIOJobs[env.Job] {
+		release, err := engine.AcquireHeavyIO(ctx, env.Job, env.ID)
+		if engine.IsLockHeld(err) {
+			releaseAll()
+			return nil, &jobLockBusy{what: "the heavy-I/O lock", log: "another backup job holds the heavy-I/O lock",
+				fields: map[string]any{"lock": "heavy_io", "db": env.DB}}, nil
+		}
+		if err != nil {
+			releaseAll()
+			return nil, nil, err
+		}
+		held = append(held, release)
+	}
+	for _, cluster := range jobClusters(env) {
+		release, err := engine.AcquireCluster(ctx, cluster, engine.LockShared, env.Job, env.ID, 0)
+		if engine.IsLockHeld(err) {
+			releaseAll()
+			return nil, &jobLockBusy{what: "the lock of " + cluster, log: "the lock of " + cluster + " is busy",
+				fields: map[string]any{"cluster": cluster}}, nil
+		}
+		if err != nil {
+			releaseAll()
+			return nil, nil, err
+		}
+		held = append(held, release)
+	}
+	return releaseAll, nil, nil
+}
+
+// acquireJobLocks takes a job's locks. Without wait a busy lock is returned
+// at once. A timer run (wait) tries again every jobLockPoll for up to
+// jobLockWait, logging and recording in rec what it waits for, and holds no
+// lock between tries, so it never keeps an apply waiting for the node lock
+// while it waits for the heavy-I/O lock. SIGTERM (systemctl stop) or SIGINT
+// ends the wait: the busy lock comes back with the context's error.
+func acquireJobLocks(ctx context.Context, env *jobEnv, rec *engine.JobRecord, wait bool) (engine.Release, *jobLockBusy, error) {
+	release, busy, err := tryJobLocks(ctx, env)
+	if busy == nil || err != nil || !wait {
+		return release, busy, err
+	}
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	deadline := time.Now().Add(jobLockWait)
+	waitingFor := ""
+	for {
+		if busy.what != waitingFor {
+			waitingFor = busy.what
+			logLine(env.Report, env.Job, busy.log+"; waiting up to "+jobLockWait.String()+" for it before skipping "+env.Job)
+			rec.Detail = "waiting for " + busy.what
+			putJob(*rec)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, busy, ctx.Err()
+		case <-time.After(jobLockPoll):
+		}
+		release, next, err := tryJobLocks(ctx, env)
+		if err != nil {
+			return nil, nil, err
+		}
+		if next == nil {
+			logLine(env.Report, env.Job, "got the locks; starting "+env.Job)
+			rec.Detail = ""
+			putJob(*rec)
+			return release, nil, nil
+		}
+		busy = next
+		if !time.Now().Before(deadline) {
+			return nil, busy, nil
+		}
+	}
+}
+
+// putJob writes rec to state.json, keeping what the RPC recorded.
+func putJob(rec engine.JobRecord) {
+	_ = engine.UpdateState(func(st *engine.State) error {
+		if old, ok := st.Job(rec.ID); ok {
+			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
+		}
+		st.PutJob(rec)
+		return nil
+	})
 }
 
 // notRun undoes what the RPC of a skipped job prepared: a restore is
@@ -420,7 +533,18 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 		if r, ok := st.Job(id); ok {
 			rec = r
 		}
-		if rec.Final() || rec.Unit == "" {
+		if rec.Final() {
+			continue
+		}
+		if rec.Unit == "" {
+			// A timer run or a run by hand: its PID or invocation tells.
+			if reapJobs(ctx, id) == nil {
+				if st, err := engine.LoadState(engine.StatePath); err == nil {
+					if r, ok := st.Job(id); ok {
+						rec = r
+					}
+				}
+			}
 			continue
 		}
 		// A unit that ended without recording a result crashed.
@@ -435,10 +559,18 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 			}
 		}
 	}
-	if args != nil && slices.Contains(args, "-f") {
+	// Let journalctl catch up: with -f it never ends, so give it a moment;
+	// without -f (the job had finished already) it ends once it has
+	// replayed the log, so give it longer before cutting it off.
+	catchUp := 30 * time.Second
+	if slices.Contains(args, "-f") {
+		catchUp = 2 * time.Second
+	}
+	if args != nil {
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+		case <-time.After(catchUp):
 		}
 	}
 	cancel()
@@ -469,8 +601,26 @@ func jobOutcome(rec engine.JobRecord) (Result, error) {
 		Message:  body.Message,
 		Hint:     body.Hint,
 		ExitCode: output.ExitFor(body.Code),
-		Details:  map[string]any{"job_id": rec.ID, "job": rec.Job, "error_details": body.Details},
+		Details:  jobErrorDetails(rec, body.Details),
 	}
+}
+
+// jobErrorDetails are a failed job's error details with its id and name, at
+// the top level as the job's own command shows them (details.output_tail,
+// details.step); details that aren't an object stay under error_details.
+func jobErrorDetails(rec engine.JobRecord, details any) map[string]any {
+	out := map[string]any{}
+	switch d := details.(type) {
+	case map[string]any:
+		for k, v := range d {
+			out[k] = v
+		}
+	case nil:
+	default:
+		out["error_details"] = d
+	}
+	out["job_id"], out["job"] = rec.ID, rec.Job
+	return out
 }
 
 // streamJournal runs journalctl and re-emits the job's events: lines that
@@ -502,9 +652,20 @@ func streamJournal(ctx context.Context, args []string, report engine.Reporter) {
 			// The job's final envelope; the record carries the result.
 			continue
 		}
+		if journalNoise(line) {
+			continue
+		}
 		report(output.Event{Type: "log", Step: "job", Line: line})
 	}
 	_ = cmd.Wait()
+}
+
+// journalNoise reports whether a journal line is not the job's own: the
+// pam_unix session lines runuser writes each time a job runs a command as
+// postgres.
+func journalNoise(line string) bool {
+	return strings.Contains(line, "pam_unix(runuser:session): session opened") ||
+		strings.Contains(line, "pam_unix(runuser:session): session closed")
 }
 
 type jobFollowParams struct {
@@ -522,7 +683,8 @@ func handleJobFollow(ctx context.Context, env *Env) (Result, error) {
 	return followJob(ctx, env, strings.ToUpper(p.ID))
 }
 
-func handleJobList(context.Context, *Env) (Result, error) {
+func handleJobList(ctx context.Context, _ *Env) (Result, error) {
+	_ = reapJobs(ctx, "")
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return Result{}, err
@@ -532,6 +694,110 @@ func handleJobList(context.Context, *Env) (Result, error) {
 		jobs = append(jobs, st.Jobs[i])
 	}
 	return Result{Data: map[string]any{"jobs": jobs}}, nil
+}
+
+// queuedGrace is how long a queued job's unit may be missing: the RPC
+// records the job before systemd-run starts its unit.
+const queuedGrace = time.Minute
+
+// reapJobs records as failed each unfinished job (only id, when given) whose
+// process or unit is gone, such as one stopped with systemctl stop: it would
+// otherwise show as running forever. The check runs under the state lock, and
+// a job records its outcome before its process exits, so a job that is
+// finishing is never reaped.
+func reapJobs(ctx context.Context, id string) error {
+	return engine.UpdateState(func(st *engine.State) error {
+		for i, rec := range st.Jobs {
+			if rec.Final() || id != "" && rec.ID != id || !jobGone(ctx, rec) {
+				continue
+			}
+			rec.State, rec.Detail, rec.FinishedAt = engine.JobFailed, "ended without a result", stamp()
+			rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result", Hint: jobLogHint(rec)}
+			st.Jobs[i] = rec
+		}
+		return nil
+	})
+}
+
+// jobGone reports whether an unfinished job's process or unit has ended: its
+// recorded PID no longer runs eru node run <job>, or its unit (the RPC's
+// transient unit, or the timer's service for this invocation) isn't active.
+func jobGone(ctx context.Context, rec engine.JobRecord) bool {
+	if rec.PID > 0 {
+		return !jobProcessAlive(rec.PID, rec.Job)
+	}
+	unit, invocation := rec.Unit, ""
+	if unit == "" && rec.InvocationID != "" {
+		unit, invocation = timerUnit(rec), rec.InvocationID
+	}
+	if unit == "" {
+		return false
+	}
+	if rec.State == engine.JobQueued {
+		created, err := time.Parse(time.RFC3339, rec.CreatedAt)
+		if err != nil || time.Since(created) < queuedGrace {
+			return false
+		}
+	}
+	active, current, ok := unitState(ctx, unit)
+	if !ok {
+		return false
+	}
+	return !active || invocation != "" && current != invocation
+}
+
+// jobProcessAlive reports whether pid runs eru node run job. Where /proc
+// can't be read it trusts the PID alone.
+func jobProcessAlive(pid int, job string) bool {
+	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+		return false
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return strings.Contains(string(cmdline), "\x00node\x00run\x00"+job+"\x00") || strings.HasSuffix(string(cmdline), "\x00node\x00run\x00"+job)
+}
+
+// timerUnit is the service a timer run of rec's job runs in.
+func timerUnit(rec engine.JobRecord) string {
+	switch {
+	case databaseJobs[rec.Job] && rec.DB != "":
+		return "eru-" + rec.Job + "@" + rec.DB + ".service"
+	case rec.Job == "stanza-expiry":
+		return "eru-stanza-expiry.service"
+	}
+	return ""
+}
+
+// unitState is whether unit is active (or activating) and its current
+// invocation id. ok is false when systemctl can't be asked.
+func unitState(ctx context.Context, unit string) (active bool, invocation string, ok bool) {
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveState,InvocationID", unit).Output() //nolint:gosec // G204: an eru unit name built from a validated id or a configured database.
+	if err != nil {
+		return false, "", false
+	}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
+		switch key {
+		case "ActiveState":
+			active = value == "active" || value == "activating" || value == "reloading"
+		case "InvocationID":
+			invocation = value
+		}
+	}
+	return active, invocation, true
+}
+
+// jobLogHint says where an unfinished job's log is.
+func jobLogHint(rec engine.JobRecord) string {
+	switch {
+	case rec.Unit != "":
+		return "Read journalctl -u " + rec.Unit + " on the node."
+	case rec.InvocationID != "":
+		return "Read journalctl _SYSTEMD_INVOCATION_ID=" + rec.InvocationID + " on the node."
+	}
+	return ""
 }
 
 // runJobRPC starts job as a detachable unit and follows it.

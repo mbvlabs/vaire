@@ -50,6 +50,28 @@ func (p PgBackRest) run(ctx context.Context, stdout *bytes.Buffer, onLine func(s
 	return p.Shell.Exec(ctx, p.StepID, c, p.Report)
 }
 
+// detailLine matches a line pgBackRest logs at detail level, such as
+// "P01 DETAIL: backup file ...": one per file copied, thousands for a full.
+var detailLine = regexp.MustCompile(`\bDETAIL: `)
+
+// runDetail runs a command with --log-level-console=detail, whose detail
+// lines onLine parses into progress: they are not reported or written to
+// the run log, only the info-level lines and the progress events are.
+func (p PgBackRest) runDetail(ctx context.Context, onLine func(string), args ...string) error {
+	report, log, step := p.Report, p.Shell.Log, p.StepID
+	p.Report = func(ev output.Event) {
+		if ev.Type == "log" && detailLine.MatchString(ev.Line) {
+			return
+		}
+		if report != nil {
+			report(ev)
+			return
+		}
+		log.Line("log "+step, ev.Line)
+	}
+	return p.run(ctx, nil, onLine, append([]string{"--log-level-console=detail"}, args...)...)
+}
+
 // StanzaCreate runs stanza-create, which also checks an existing stanza
 // against this cluster's system identifier.
 func (p PgBackRest) StanzaCreate(ctx context.Context) error {
@@ -87,7 +109,7 @@ func (p PgBackRest) Backup(ctx context.Context, kind string) (Set, error) {
 			label = m[1]
 		}
 	}
-	if err := p.run(ctx, nil, onLine, p.withPort("--type="+kind, "--log-level-console=detail", "backup")...); err != nil {
+	if err := p.runDetail(ctx, onLine, p.withPort("--type="+kind, "backup")...); err != nil {
 		return Set{}, wrapTool("pgbackrest backup", err)
 	}
 	info, err := p.Info(ctx, "")
@@ -299,7 +321,7 @@ func (p PgBackRest) StanzaDelete(ctx context.Context, pgPath string) error {
 // opts.Pause recovery pauses at the target, or keeps following the archive
 // as a standby for the latest point; otherwise it promotes there.
 func (p PgBackRest) Materialise(ctx context.Context, opts RestoreOptions) error {
-	args := []string{"--pg1-path=" + opts.Path, "--log-level-console=detail", "--no-delta", networkProcessMax}
+	args := []string{"--pg1-path=" + opts.Path, "--no-delta", networkProcessMax}
 	action := "--target-action=promote"
 	if opts.Pause {
 		action = "--target-action=pause"
@@ -322,7 +344,7 @@ func (p PgBackRest) Materialise(ctx context.Context, opts RestoreOptions) error 
 		args = append(args, "--target-timeline="+opts.Timeline)
 	}
 	prog := newProgress("restore", p.Report)
-	return wrapTool("pgbackrest restore", p.run(ctx, nil, prog.line, append(args, "restore")...))
+	return wrapTool("pgbackrest restore", p.runDetail(ctx, prog.line, append(args, "restore")...))
 }
 
 // ArchiveStatus reads pg_stat_archiver.

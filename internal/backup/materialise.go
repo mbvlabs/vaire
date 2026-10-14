@@ -209,11 +209,23 @@ func (m *Materialised) register() error {
 		}
 	}
 	for name, content := range files {
-		if err := engine.WriteFileAtomicOwned(filepath.Join(dir, name), []byte(content), 0o640, "postgres", "postgres"); err != nil {
+		if err := engine.WriteFileAtomicOwned(filepath.Join(dir, name), []byte(content), confMode(name), "postgres", "postgres"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// confMode is the mode pg_createcluster and postgres-config-v1 give a live
+// cluster's configuration file: pg_hba.conf and pg_ident.conf are 0640, the
+// rest world-readable, so pg_lsclusters reads a temporary or leftover
+// cluster's postgresql.conf without root as it does a live one's.
+func confMode(name string) os.FileMode {
+	switch filepath.Base(name) {
+	case "pg_hba.conf", "pg_ident.conf":
+		return 0o640
+	}
+	return 0o644
 }
 
 // UserOverrides is the conf.d file an operator edits by hand.
@@ -426,14 +438,17 @@ func (m *Materialised) Drop() error {
 
 // DropTemporaryCluster stops and removes cluster name with pg_dropcluster,
 // or, when postgresql-common doesn't know it (a materialise that failed
-// before it was registered), removes its data and configuration
+// before it was registered) or it has no data directory (an aside
+// registered before a swap's renames), removes its data and configuration
 // directories. Then it frees its port reservation. It runs with a context
 // of its own, so a cancelled job still cleans up.
 func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	var err error
-	if _, statErr := os.Stat(filepath.Join(pgConfRoot, name, "postgresql.conf")); statErr == nil {
+	_, confErr := os.Stat(filepath.Join(pgConfRoot, name, "postgresql.conf"))
+	_, dataErr := os.Stat(data)
+	if confErr == nil && dataErr == nil {
 		err = wrapTool("pg_dropcluster "+name, sh.Exec(ctx, stepID, engine.Command{Name: "pg_dropcluster", Args: []string{"18", name, "--stop"}}, report))
 	}
 	if err == nil {
@@ -456,6 +471,22 @@ func RestoringName(db string) string { return db + "__restoring" }
 // 63-byte limit, so any database name fits.
 func PreRestoreName(db string, at time.Time) string {
 	return db + "__pre_restore_" + at.UTC().Format("20060102T150405")
+}
+
+// LiveDatabase is the database a temporary or leftover cluster name
+// (<db>__restoring, <db>__drill, <db>__pre_restore_<ts>) is a copy of, or
+// name itself. The copy holds the original's roles, so its owner role is
+// the live database's.
+func LiveDatabase(name string) string {
+	for _, suffix := range []string{"__restoring", "__drill"} {
+		if db, ok := strings.CutSuffix(name, suffix); ok && db != "" {
+			return db
+		}
+	}
+	if i := strings.LastIndex(name, "__pre_restore_"); i > 0 {
+		return name[:i]
+	}
+	return name
 }
 
 // Initdb creates an empty cluster in the data directory, with the live
@@ -521,9 +552,23 @@ func (m *Materialised) CopyRoles(ctx context.Context) error {
 // filesystem, so the renames are atomic. The configuration in
 // /etc/postgresql/18/<live> (port, memory, archive_command, cgroup) stays
 // live's: only the data moves.
+//
+// aside is registered before the renames, so a failure after them never
+// leaves its data unregistered. Swap resumes a swap that stopped part way
+// (the caller records aside first and passes the same names again): after
+// the first rename it does the second, after both it finishes the rest.
 func Swap(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, dataRoot, live, from, aside string, port int) error {
 	liveData, fromData, asideData := filepath.Join(dataRoot, live), filepath.Join(dataRoot, from), filepath.Join(dataRoot, aside)
-	if _, err := os.Stat(asideData); err == nil {
+	leftover := &Materialised{Name: aside, Source: live, Data: asideData, Port: port}
+	switch SwapState(dataRoot, live, from, aside) {
+	case SwapDone:
+		return finishSwap(leftover, liveData, fromData, from)
+	case SwapHalfway:
+		if err := os.Rename(fromData, liveData); err != nil {
+			return err
+		}
+		return finishSwap(leftover, liveData, fromData, from)
+	case SwapConflict:
 		return output.NewError(output.CodePrecondition, asideData+" already exists", output.ExitPrecondition,
 			"Retry in a second; the name carries the time.").WithDetails(map[string]any{"reason": "cluster_exists", "cluster": aside})
 	}
@@ -535,21 +580,77 @@ func Swap(ctx context.Context, sh engine.Shell, stepID string, report engine.Rep
 			return wrapTool("stop "+from, err)
 		}
 	}
+	if err := leftover.register(); err != nil {
+		return errors.Join(err, os.RemoveAll(leftover.ConfDir()))
+	}
 	if err := os.Rename(liveData, asideData); err != nil {
-		return err
+		return errors.Join(err, os.RemoveAll(leftover.ConfDir()))
 	}
 	if err := os.Rename(fromData, liveData); err != nil {
-		return errors.Join(err, os.Rename(asideData, liveData))
+		if back := os.Rename(asideData, liveData); back != nil {
+			return errors.Join(err, back)
+		}
+		return errors.Join(err, os.RemoveAll(leftover.ConfDir()))
 	}
+	return finishSwap(leftover, liveData, fromData, from)
+}
+
+// finishSwap is what follows the renames, each part safe to run again:
+// the moved data's postgresql.auto.conf points at its new path, the aside
+// is registered (again), from's port reservation becomes aside's and from's
+// registration goes.
+func finishSwap(leftover *Materialised, liveData, fromData, from string) error {
 	if err := repointAutoConf(liveData, fromData); err != nil {
 		return err
 	}
-	leftover := &Materialised{Name: aside, Source: live, Data: asideData, Port: port}
 	if err := leftover.register(); err != nil {
 		return err
 	}
-	_ = os.Rename(filepath.Join(TemporaryPortDir, from), filepath.Join(TemporaryPortDir, aside))
+	_ = os.Rename(filepath.Join(TemporaryPortDir, from), filepath.Join(TemporaryPortDir, leftover.Name))
 	return os.RemoveAll(filepath.Join(pgConfRoot, from))
+}
+
+// UnregisterAside removes the registration Swap wrote for aside before a
+// rename that never happened: only when aside has no data directory.
+func UnregisterAside(dataRoot, aside string) error {
+	if _, err := os.Stat(filepath.Join(dataRoot, aside)); err == nil || !os.IsNotExist(err) {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(pgConfRoot, aside))
+}
+
+// Where a swap of live, from and aside stands, from their data directories.
+const (
+	// SwapNotStarted: no data directory was renamed yet.
+	SwapNotStarted = "not_started"
+	// SwapHalfway: live's data is aside, from's isn't moved yet.
+	SwapHalfway = "halfway"
+	// SwapDone: from's data is live's, live's old data is aside.
+	SwapDone = "done"
+	// SwapConflict: all three exist, so aside is some other cluster's.
+	SwapConflict = "conflict"
+)
+
+// SwapState tells where a swap stands (see the Swap constants).
+func SwapState(dataRoot, live, from, aside string) string {
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(dataRoot, name))
+		return err == nil
+	}
+	liveOK, fromOK, asideOK := exists(live), exists(from), exists(aside)
+	switch {
+	case !asideOK:
+		return SwapNotStarted
+	case liveOK && !fromOK:
+		return SwapDone
+	case !liveOK && fromOK:
+		return SwapHalfway
+	case liveOK && fromOK:
+		return SwapConflict
+	}
+	// Neither live nor from: nothing to swap, and the caller's own checks
+	// report it.
+	return SwapConflict
 }
 
 // repointAutoConf rewrites the old data directory's path in the moved data
