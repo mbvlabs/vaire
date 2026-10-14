@@ -333,9 +333,13 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 }
 
 func runApply(cmd *cobra.Command, _ []string) error {
-	stepIDs, err := cmd.Flags().GetStringSlice("step")
-	if err != nil {
-		return err
+	// config set/edit --apply run this too, without a --step flag.
+	var stepIDs []string
+	if cmd.Flags().Lookup("step") != nil {
+		var err error
+		if stepIDs, err = cmd.Flags().GetStringSlice("step"); err != nil {
+			return err
+		}
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)

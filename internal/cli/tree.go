@@ -734,8 +734,8 @@ func configCommands() cmdSpec {
 				run:  runConfigGet,
 				meta: CommandMeta{
 					Summary:   "Print one cluster.toml value",
-					WhenToUse: []string{"Read a dotted key such as backup.vps.schedule."},
-					Examples:  []string{"eru config get backup.vps.schedule", "eru config get clusters.app.memory"},
+					WhenToUse: []string{"Read a dotted key such as clusters.app.memory."},
+					Examples:  []string{"eru config get clusters.app.memory"},
 					Remote:    true,
 				},
 			},
