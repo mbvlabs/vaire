@@ -23,9 +23,13 @@ stream {
 {{- end }}
     }
 
-    map "$eru_pg_allowed:$ssl_preread_alpn_protocols" $eru_upstream {
-        "~^1:(.*,)?postgresql(,.*)?$" eru_pgbouncer_tls;
-        "~^0:(.*,)?postgresql(,.*)?$" eru_denied;
+    # $ssl_preread_protocol is empty when the first bytes aren't a TLS
+    # ClientHello, which is what a PostgreSQL SSLRequest (sslnegotiation=postgres,
+    # the libpq default) looks like.
+    map "$eru_pg_allowed:$ssl_preread_protocol:$ssl_preread_alpn_protocols" $eru_upstream {
+        "~^1:[^:]+:(.*,)?postgresql(,.*)?$" eru_pgbouncer_tls;
+        "~^0:[^:]+:(.*,)?postgresql(,.*)?$" eru_denied;
+        "~^[01]::" eru_not_tls;
         default eru_https;
     }
 
@@ -37,6 +41,9 @@ stream {
     }
     upstream eru_denied {
         server 127.0.0.1:6434;
+    }
+    upstream eru_not_tls {
+        server 127.0.0.1:6435;
     }
 
     server {
@@ -58,10 +65,22 @@ stream {
         proxy_pass 127.0.0.1:6432;
     }
 
-    # PostgreSQL clients outside the allowlist: close the connection.
+    # PostgreSQL clients outside the allowlist: reject the TLS handshake with a
+    # fatal "unrecognized_name" alert, so the client reports a TLS error with a
+    # reason instead of a bare EOF. No certificate is needed to reject.
     server {
-        listen 127.0.0.1:6434;
+        listen 127.0.0.1:6434 ssl;
+        ssl_reject_handshake on;
         return "";
+    }
+
+    # Plain-TCP clients, in practice a PostgreSQL SSLRequest without
+    # sslnegotiation=direct: answer "N" (TLS not offered) and close, so libpq
+    # says "server does not support SSL, but SSL was required" and pgx says
+    # "server refused TLS connection" rather than parsing an HTTP 400.
+    server {
+        listen 127.0.0.1:6435;
+        return "N";
     }
 }
 
