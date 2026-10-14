@@ -533,7 +533,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | 10 | Multi-node & replicas | Worker nodes driven from the master, a node for one database, `db move`, followers and replicas on other nodes | ⬜ |
 | 11 | High availability | Patroni per cluster + etcd, automatic failover; the master stops being a single point | ⬜ last |
 
-**v1 is Phases 0–7.** Upgrades, operators and agents, multi-node and HA come after the first release.
+**v1 is Phases 0–6**, with observability and the master backup (disaster recovery) as release requirements. Extensions (Phase 7), upgrades, operators and agents, multi-node and HA come after the first release.
 
 [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) specifies Phases 0–5, 7 and 8 in detail, plus the agent guide (Phase 9). Phases 6 and 9–11 get their own design before they start.
 
