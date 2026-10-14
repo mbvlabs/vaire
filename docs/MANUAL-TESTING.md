@@ -32,9 +32,10 @@ These were written for the shared `18/main` cluster and now run against the Phas
 - [x] **`eru node run` off a node is refused**
     - On the operator machine, `eru node run certs-renew`. Expected: `precondition_failed` saying this machine is not an eru node, with the `eru ssh` command as the hint, and no "ran certs-renew".
     - Passed (2026-10-14, build ffb8d35, on `app2`): "this machine is not an eru node: /etc/eru/cluster.toml does not exist [precondition_failed]" with the hint "eru node run runs on the server. From your machine: eru ssh --command 'sudo eru node run certs-renew'"; no "ran certs-renew".
-- [ ] **Direct TLS on 443**
+- [x] **Direct TLS on 443**
     - From an allowlisted address, connect with `sslnegotiation=direct` (PostgreSQL 17+ libpq or pgx 5.7+) to `db1.<domain>:443/<db>`. Expected: it reaches the transaction pooler and the database. Without `sslnegotiation=direct` it's refused (psql: "server does not support SSL, but SSL was required"; pgx: "server refused TLS connection"), and from a non-allowlisted address the handshake is rejected (psql: "SSL error: tlsv1 unrecognized name"; pgx: "remote error: tls: unrecognized name").
     - Passed (2026-10-14, build ffb8d35) except the non-allowlisted case, not tested here (no second host; Part 3 covered it earlier). With `sslnegotiation=direct`, `app2_app` reaches the database (Parts 8 and 9). Without it, psql fails with "received invalid response to SSL negotiation: H", not "server refused TLS connection"; refused, but the message is confusing (see the open UX item on 443).
+    - Non-allowlisted case passed (2026-10-14, edge-0e919ce, empty `client_allowlist`): psql with `sslnegotiation=direct` got "SSL error: tlsv1 unrecognized name" at once; 6432 hung (ufw DROP, by design).
 
 ## Phase 0: Foundations
 
