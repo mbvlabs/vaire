@@ -91,7 +91,7 @@ Every database is its own PostgreSQL cluster: `eru db create app` makes the clus
 - **Sizes.** A database has a size, like a provider's plan: `nano` (256 MiB, 20 connections), `small` (512 MiB, 30), `medium` (1 GiB, 50, the default), `large` (2 GiB, 100), `xlarge` (4 GiB, 200). The size drives its tuning, its CPU weight and its connection limit. `--memory` overrides the memory, and `eru db resize app --size large` changes it later: limits and reload-only settings change live, and a restart, when one is needed, restarts only that database.
 - **A memory budget.** The server keeps a reserve (`max(512 MiB, 25% of RAM)`) for the OS, the poolers, nginx and eru; the databases share the rest. `eru tune show` prints the sheet: each database's size, limits and current use, and what's allocated or free.
 - **Warnings, not refusals.** When the sizes add up to more than the budget, eru warns (`memory_overcommitted`, with the numbers) and goes ahead; under load the databases are throttled rather than killed. `db create` without `--size` steps down to the largest size that fits and says so. eru refuses only a database PostgreSQL couldn't start at all (`would_not_start`).
-- **Rough density** (until the manual test measures the real overhead of about 50–100 MiB per idle cluster): a 2 GiB VPS takes 2 `small` and 1 `nano`; a 4 GiB VPS takes 1 `medium` and 3 `small`; an 8 GiB VPS takes 1 `large`, 2 `medium` and 2 `small`.
+- **Rough density.** An idle cluster's own processes cost about 19 MiB (measured on PostgreSQL 18 with a `small` database: the cgroup's `anon` plus `kernel` memory). `shared_buffers` is charged as it fills, not up front, and the page cache is reclaimable. A 2 GiB VPS takes 2 `small` and 1 `nano`; a 4 GiB VPS takes 1 `medium` and 3 `small`; an 8 GiB VPS takes 1 `large`, 2 `medium` and 2 `small`.
 
 ### URLs by node
 
@@ -110,7 +110,7 @@ Creating, forking, restoring, resizing or dropping a database never touches DNS 
 - **Isolation is cgroups, not a VM.** Each cluster's `MemoryHigh` (its memory plus 25%), CPU weight and I/O weight are set by systemd; a hard `memory_max` or `cpu_quota` is opt-in. `MemoryHigh` throttles, it doesn't partition. A managed provider's VM is a harder boundary.
 - **I/O weights depend on the disk scheduler.** They only work with BFQ or the kernel's `io.cost` model; on a typical virtio disk they do nothing, and `eru tune show` says "not enforced".
 - **Disk space and the page cache are shared.** A database that fills the disk affects its neighbours.
-- **Density costs.** Each cluster carries its own processes and buffers; a 1 GiB VPS isn't a sensible home for several databases.
+- **Density costs.** Each cluster carries its own processes (about 19 MiB idle) and buffers; a 1 GiB VPS isn't a sensible home for several databases.
 - **One server is a single point of failure** until HA (Phase 11).
 - **Recovering a lost server.** Until Phase 7 brings the master backup and `server init --restore`, a lost server is recovered by creating a new one with `eru server init` and restoring each database's pgBackRest stanza by hand with the recovery kit from your secrets handoff. The stanzas are in the bucket under `<prefix>/pgbackrest/`.
 
@@ -154,13 +154,15 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
  ── :443  ─────────────────────▶│ nginx stream, ssl_preread │  (by database name)  │
    (sslnegotiation=direct,      │   ALPN "postgresql" + allowed source             │
     PG17+ clients)              │      → terminate TLS → transaction pooler        │
-                                │   other PostgreSQL clients → closed              │
+                                │   same ALPN, other source → handshake rejected   │
+                                │   SSLRequest (no direct) → "no TLS" (N)          │
                                 │   anything else → HTTPS 404 (later /metrics)     │
                                 │                                                  │
  ── :80   ─────────────────────▶│ nginx: /.well-known/acme-challenge/ only         │
                                 └──────────────────────────────────────────────────┘
 ```
 
+- **443 needs `sslnegotiation=direct`.** nginx routes 443 by peeking at the TLS ClientHello, so it can't answer the PostgreSQL SSLRequest that clients send by default. Without `sslnegotiation=direct`, nginx answers "no TLS here" and closes: libpq (with `sslmode=require` or stricter) says `server does not support SSL, but SSL was required`, pgx says `server refused TLS connection`. Add `sslnegotiation=direct` (PostgreSQL 17+ libpq, pgx 5.7+), or use port 6432, which speaks the normal negotiation. A direct-TLS client from an address that isn't allowed gets its handshake rejected: libpq says `SSL error: tlsv1 unrecognized name`, pgx `remote error: tls: unrecognized name`.
 - **eru is its own ACME client.** An hourly `eru-certs` timer issues and renews the certificate for the node's hostname (`db1.<domain>`) over HTTP-01, installs it for both PgBouncers, nginx and every cluster, and reloads them. Until the first certificate arrives, a placeholder certificate lets everything start.
 - The DNS record must point straight at the server (DNS only, not proxied).
 - A `self-signed` mode exists for servers without a domain. Connections are encrypted but not verified, and eru warns about that.
@@ -200,6 +202,10 @@ Run migrations as `migrate` and the application as `app`. The transaction pooler
 - `eru login` on any machine takes the bundle and passphrase and sets up a **context**: credentials under `~/.config/eru/contexts/<server>/`, files 0600.
 - Releases are signed with cosign. `eru upgrade` and node upgrades verify the signature and the sha256 before swapping binaries.
 
+### Protected databases
+
+`eru db create app --protected` (or `eru config set clusters.app.protected true`) makes `db drop`, a shrinking resize, credential rotation and restore promote/undo refuse, even with `--confirm`. Lifting the protection asks for a current 6-digit code from an authenticator app, typed at a terminal and checked on the node, so an agent with a shell can't lift it by typing a word. Set it up once with `eru protect init`: the node makes the secret and keeps it root-only, and eru shows it as a QR code. Protecting a database is refused until you have. A code works once, and 5 wrong codes lock codes out for 15 minutes. Root on the server can still edit the files directly; this guards against agents and slips, not against someone who owns the box.
+
 ### Operator connections
 
 ```
@@ -213,7 +219,7 @@ Run migrations as `migrate` and the application as `app`. The transaction pooler
    └──────────── userspace WireGuard ──▶ 10.42.0.1:5432  session pooler → app
 ```
 
-`eru sql`, `eru psql` and `eru console` all connect over the tunnel to the session pooler on 5432 of the node that holds the database, which routes by `--db`, and verify the certificate (`verify-full`). They log in as `eru_admin`, never as an application role, and are read-only unless `--write` is passed; with `--write` they act as `<db>_owner`, so new objects get the same owner and default grants as a migration. `eru tunnel --db app --target postgres` forwards a local port to that pooler, which is how a migration tool on your machine reaches the database as `<db>_migrate` without opening 5432 to the internet. `eru console` uses usql from PATH, or downloads a pinned release and checks its SHA-256.
+`eru sql`, `eru psql` and `eru console` all connect over the tunnel to the session pooler on 5432 of the node that holds the database, which routes by `--db`, and verify the certificate (`verify-full`). They log in as `eru_admin`, never as an application role, and are read-only unless `--write` is passed; with `--write` they act as `<db>_owner`, so new objects get the same owner and default grants as a migration. `eru tunnel --db app --target postgres` forwards a local port to that pooler, which is how a migration tool on your machine reaches the database as `<db>_migrate` without opening 5432 to the internet. `eru console` uses usql from PATH, or downloads a pinned release and checks its SHA-256. Arguments after `--` go to `psql` as they are (`eru psql --db app -- -c "select 1"`); a `-c` before `--` is eru's `--context`.
 
 ## Backups and restores
 
@@ -335,6 +341,7 @@ No ACME client (certbot and the like) is installed: eru issues certificates itse
 | `sigstore/sigstore-go` | Verifying signed releases on upgrade |
 | `pelletier/go-toml` | `cluster.toml` |
 | `itchyny/gojq` | `--jq` output filtering |
+| `rsc.io/qr` | The QR code `eru protect init` shows for the authenticator app |
 
 ## Agent-first
 
