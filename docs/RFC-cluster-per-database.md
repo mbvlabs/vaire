@@ -1,7 +1,7 @@
 # RFC: one PostgreSQL cluster per database
 
 > Status: **approved, revision 4** · 2026-10-13 · touches MASTER's decisions table, the Phase 3 scope and every later phase.
-> The questions from revisions 1 and 3 are answered and recorded as **Decided** lines. Revision 2 added the comparison with managed providers (section 3), resource limits per cluster, restore as a fork plus a cut-over, and the session-mode PgBouncer. Revision 3 added the master node, sizes per database, oversubscription warnings and dedicated nodes. **Revision 4:** one hostname per server instead of one per database, with routing by database name and a database move that changes the URL's host (8.4, 7.6); several databases in one cluster considered and declined (5.1); how `sql`, `psql`, `console` and `tunnel` reach a database on a worker (6.3); followers and their commands (10.4, 11.3); what HA does for a compromised master (14.1); no bucket required at `server init`, with warnings and an exported bundle instead (6.5); and the master backup back in Phase 7. Every question is answered; the URL during a move is deferred to Phase 10.
+> The questions from revisions 1 and 3 are answered and recorded as **Decided** lines. Revision 2 added the comparison with managed providers (section 3), resource limits per cluster, restore as a fork plus a cut-over, and the session-mode PgBouncer. Revision 3 added the master node, sizes per database, oversubscription warnings and dedicated nodes. **Revision 4:** one hostname per server instead of one per database, with routing by database name and a database move that changes the URL's host (8.4, 7.6); several databases in one cluster considered and declined (5.1); how `sql`, `psql`, `console` and `tunnel` reach a database on a worker (6.3); followers and their commands (10.4, 11.3); what HA does for a compromised master (14.1); no bucket required at `server init`, with warnings and an exported bundle instead (6.5); and the master backup back in Phase 7 (Phase 5 since 2026-10-14). Every question is answered; the URL during a move is deferred to Phase 10.
 
 ## 1. Summary
 
@@ -211,7 +211,7 @@ Losing both the bucket and the recovery kit means the master can only be re-crea
 6. **Databases, separately:** `eru db recover <db>` or `--all` materialises each cluster from its stanza (section 10) and opens it. This is the database recovery that the master backup deliberately leaves out.
 7. **Addresses:** if the IP changed, the master's DNS record (`db1.<domain>`) has to move. Contexts store the master's hostname, not its IP, so for the operator the DNS change is all there is. Workers learn the new endpoint from the master on the next `apply`. A worker that can't reach the master keeps serving.
 
-**Targets for a single server:** state RPO is about zero (bundles follow every change), and database RPO is `archive_timeout` (60 s). RTO is a new VPS, about ten minutes of steps, plus each database's restore time. The Phase 7 manual test measures it and writes it into MASTER's risks.
+**Targets for a single server:** state RPO is about zero (bundles follow every change), and database RPO is `archive_timeout` (60 s). RTO is a new VPS, about ten minutes of steps, plus each database's restore time. The Phase 5 manual test measures it and writes it into MASTER's risks.
 
 ### 6.7 The single point of failure
 
@@ -226,7 +226,7 @@ Losing both the bucket and the recovery kit means the master can only be re-crea
 
 The way out, in steps:
 
-1. **Phase 7:** fast rebuild (6.6) with bundles that are never more than seconds old.
+1. **Phase 5:** fast rebuild (6.6) with bundles that are never more than seconds old.
 2. **Phase 10, `eru server takeover --node <worker>`:** turn an existing worker into the master from the latest bundle. Bump the epoch, move the hub address, keep the fleet key, and point the operator's context at the new master's hostname (the command runs on the operator's machine). That cuts the RTO to minutes for the control plane and leaves only the old master's databases to recover. It's cheap because the bundle already is the full control state.
 3. **Phase 11 (HA):** the desired state and records move to a replicated store (the etcd Patroni already needs), or a standby master follows the bundles continuously. Either way the master stops being a single point. Each master gets its own keys (14.1).
 
@@ -264,7 +264,7 @@ Each `postgresql@18-<cluster>.service` gets a systemd drop-in, written by `postg
 | `IOWeight=` | 100, `io_weight` to override | Only effective when the block device uses BFQ or the kernel's `io.cost` model. On a VPS virtio disk with `none` or `mq-deadline` it does nothing. **To verify** on Debian 13 and Ubuntu 26.04. eru reports it as "not enforced" in `tune show` when that's the case, rather than pretending |
 | `OOMScoreAdjust=` | -900 for the postmaster (as today), per cluster | The global OOM killer still prefers eru jobs and backends over postmasters |
 
-The PgBouncers, nginx and eru's own jobs run in `system.slice` as today. The server reserve (7.3) is what keeps them alive. `eru tune show` prints each cluster's limits and its current `memory.current`, and doctor (Phase 5) warns when a cluster stays above `MemoryHigh`.
+The PgBouncers, nginx and eru's own jobs run in `system.slice` as today. The server reserve (7.3) is what keeps them alive. `eru tune show` prints each cluster's limits and its current `memory.current`, and doctor (Phase 4) warns when a cluster stays above `MemoryHigh`.
 
 ### 7.3 A memory budget instead of "25% of RAM"
 
@@ -599,13 +599,13 @@ Constants that become functions of the cluster name: `PGCluster`, `PGConfDir`, `
 | `version`, `commands`, `guide agents`, `skill install` | Guide text only (the model, the tokens, fork before restore for partial recovery, URLs by node) |
 | `login`, `context list\|show\|use\|remove` | Contexts point at the master by hostname; `show` lists nodes and databases |
 | `server init` (was `cluster init`) | Sets up the master (`db1.<domain>` by default) with no databases, and creates the recovery identity. `--data-directory` becomes `--data-root`. The profile and connection questions become setup defaults, plus `default_size`. The bucket stays optional; without one, it ends with the `no_offsite_backup` warning |
-| `server init --restore [--bundle <ts> \| --bundle-file <f>]` (Phase 7) | Rebuilds the master from a bundle (6.6); clusters come back `awaiting_recovery` |
-| `server backup now\|list\|verify\|export` (Phase 7) | New: the master backup (6.5). `verify` decrypts on the operator's machine; `export` saves the latest bundle there |
+| `server init --restore [--bundle <ts> \| --bundle-file <f>]` (Phase 5) | Rebuilds the master from a bundle (6.6); clusters come back `awaiting_recovery` |
+| `server backup now\|list\|verify\|export` (Phase 5) | New: the master backup (6.5). `verify` decrypts on the operator's machine; `export` saves the latest bundle there |
 | `server takeover --node` (Phase 10) | New: a worker becomes the master from the latest bundle (6.7) |
 | `node add\|list\|remove` (Phase 10) | New: workers, driven from the master, each with one hostname; `--dedicated <db>` (7.6) |
 | `plan`, `apply` | Per-cluster step instances in the plan; repeatable `--confirm <cluster>/restart`; `--db` to limit to one cluster; the `no_offsite_backup` warning |
 | `config show\|get\|set\|edit\|validate` | `clusters.<name>.*` keys; immutable `port`, `stanza`, `name`, `follows` |
-| `status`, `doctor`, `top`, `queries` (Phase 5) | Per database (`--db`), with a server summary; doctor reads cgroup pressure, follower lag and offsite-backup state |
+| `status`, `doctor`, `top`, `queries` (Phase 4) | Per database (`--db`), with a server summary; doctor reads cgroup pressure, offsite-backup state and (from Phase 6) follower lag |
 | `logs` | `postgresql@18-<cluster>` units, `--db`; the session pooler's unit |
 | `sql`, `psql`, `console` | 5432 is now the session pooler, and `--db` routes. For a database on a worker, the CLI looks up its node and connects to that node's WireGuard address through the master (6.3). `--db <db>__restoring` reaches a restore copy |
 | `tunnel` | `--db` picks the node (6.3); `--target postgres` is that node's session pooler |
@@ -614,14 +614,14 @@ Constants that become functions of the cluster name: `PGCluster`, `PGConfDir`, `
 | `db list` | Adds node, URL host, size, limits, stanza, follower source and lag, and state (running, restoring, following, awaiting_recovery) |
 | `db create` | Creates the cluster: port, size, limits, `pg_createcluster`, config, roles, pooler entries, stanza and first full (with backups), timers. `--size`, `--memory`, `--profile`, `--node` (Phase 10). Steps down to a size that fits, and prints oversubscription warnings (7.5). URLs are `<node>.<domain>/<db>` |
 | `db resize` | New: change size or explicit limits; live where possible, `<cluster>/restart` or `--defer-restart` for the rest (7.4) |
-| `db recover` (Phase 7) | New: materialise an `awaiting_recovery` cluster from its stanza after a rebuild (6.6) |
+| `db recover` (Phase 5) | New: materialise an `awaiting_recovery` cluster from its stanza after a rebuild (6.6) |
 | `db move` (Phase 10) | New: move a database's cluster to another node; prints the new URLs (7.6); what happens to the old URL is decided in Phase 10 |
 | `db follow` (Phase 6) | New: a read-only follower streaming from a source, on this node or another (10.4) |
 | `db unfollow` (Phase 6) | New: promote a follower into an independent database with its own stanza (10.4) |
 | `db drop` | Final dump, stop, `pg_dropcluster`, remove the pooler entries and the timers; keep the stanza for its window. Refused while followers exist |
 | `db credentials` | URLs with the node's hostname |
 | `db fork` | Materialise, promote, rename, own stanza (10.2) |
-| `ext list\|add\|remove` (Phase 4) | Per database; a preload extension restarts only its cluster |
+| `ext list\|add\|remove` (Phase 7) | Per database; a preload extension restarts only its cluster |
 | `tune show\|explain\|apply` | Per cluster (`--db`), plus the server sheet: budget, sizes, allocation, warnings (7.5) |
 | `backup setup` | Bucket, cipher and keys as today, using the identity `server init` made; then a stanza and first full per existing cluster, with a **reload** instead of a restart, and the first master bundle upload |
 | `backup now\|verify` | `--db` (default: every cluster, one at a time) |
@@ -630,8 +630,8 @@ Constants that become functions of the cluster name: `PGCluster`, `PGConfDir`, `
 | `restore drill` | `--db`; per-cluster drills on the timer |
 | `dump`, `dump list\|get` | Unchanged for the user; `node dump` uses the cluster's socket |
 | `job list\|follow` | Jobs carry `db` |
-| `vps backup\|restore` (Phase 7) | **Removed.** The master backup replaces the restic VPS backup, and `restic` goes from the dependencies |
-| `maint *` (Phase 5) | Per cluster |
+| `vps backup\|restore` (Phase 5) | **Removed.** The master backup replaces the restic VPS backup, and `restic` goes from the dependencies |
+| `maint *` (Phase 4) | Per cluster |
 | `pg update` (Phase 8) | One package update, then a rolling restart per cluster |
 | `node run <job>` | Template-unit jobs take `--db` |
 | `node dump <db>` | Connects to the cluster's socket |
@@ -733,7 +733,7 @@ The design is one database per cluster by default, sized and limited, one hostna
 5. **Backups per stanza:** multi-stanza `pgbackrest.conf`, `archive_mode = on` from creation, reload-only `backup setup`, template timers, staggering, the heavy-I/O lock, per-stanza verify, dropped-stanza expiry.
 6. **Materialise and native restore:** the temporary cluster, status, promote with the data-directory swap, undo with timeline recording, abort, cleanup, `--dump`.
 7. **Native fork and per-cluster drill.**
-8. **Docs:** MASTER (decisions table, architecture, files on a node, the backups section, roadmap, risks, a short "how this compares to managed providers"), IMPLEMENTATION (config, steps, tuning, the backups and restores chapter, roles and PgBouncer, timers), README (density and isolation limits, URLs by node, and that until Phase 7 a lost server is recovered by re-creating it and restoring each stanza by hand), MANUAL-TESTING. `PHASE-3-PLAN.md` is superseded.
+8. **Docs:** MASTER (decisions table, architecture, files on a node, the backups section, roadmap, risks, a short "how this compares to managed providers"), IMPLEMENTATION (config, steps, tuning, the backups and restores chapter, roles and PgBouncer, timers), README (density and isolation limits, URLs by node, and that until Phase 5 a lost server is recovered by re-creating it and restoring each stanza by hand), MANUAL-TESTING. `PHASE-3-PLAN.md` is superseded.
 
 Each branch ends with `just lint` and a build for all targets, as before.
 
@@ -743,16 +743,16 @@ Each branch ends with `just lint` and a build for all targets, as before.
 
 | Phase | Effect |
 | --- | --- |
-| 4 Extensions | Per database; preload and restart affect one cluster. The package install stays server-wide |
-| 5 Observability & maintenance | `postgres_exporter` with one target per cluster (multi-target), `pgbackrest_exporter` over every stanza, cgroup pressure (PSI) per cluster, `status/top/queries/doctor` per database, doctor checks for the memory budget, `CommitLimit` and offsite backups, `maint` per cluster |
+| 4 Observability & maintenance | `postgres_exporter` with one target per cluster (multi-target), `pgbackrest_exporter` over every stanza, cgroup pressure (PSI) per cluster, `status/top/queries/doctor` per database, doctor checks for the memory budget, `CommitLimit` and offsite backups, `maint` per cluster |
+| 5 Master backup & DR | **Decided: as planned, re-scoped from restic to the bundle**, and moved ahead of followers and extensions on 2026-10-14. The bundle and its triggers, retention and local copies (6.5), `server backup now\|list\|verify\|export`, `server init --restore` with the epoch fence (6.6), `db recover`. restic and `vps backup\|restore` are dropped |
 | 6 Followers | **Decided:** physical standby followers; `wal_level` drops from `logical` to `replica`. `db follow` and `db unfollow` (10.4), the `wg0` replication listener, slots with `max_slot_wal_keep_size`, lag in `status` and `doctor`. Logical replication stays possible later as an opt-in |
-| 7 Master backup & DR | **Decided: Phase 7 as planned, re-scoped from restic to the bundle.** The bundle and its triggers, retention and local copies (6.5), `server backup now\|list\|verify\|export`, `server init --restore` with the epoch fence (6.6), `db recover`. restic and `vps backup\|restore` are dropped |
+| 7 Extensions | Per database; preload and restart affect one cluster. The package install stays server-wide |
 | 8 Upgrades | `pg update` restarts the clusters one at a time. Major upgrades (backlog) become feasible per database |
 | 9 Operators & agents | Scopes can be per database (an agent that can read `app` only) |
 | 10 Multi-node & replicas | Workers driven from the master, each with one hostname; hub routing, forwarding for `sql`/`psql`/`console`/`tunnel` and the fleet key (6.2, 6.3); `node` placement, dedicated nodes and `db move` and what happens to the old URL (7.6); `server takeover` (6.7); followers on other nodes |
 | 11 HA | The master stops being a single point: desired state and records in a replicated store, or a standby master following the bundles; separate keys per master behind a load balancer or a shared name, and operator-signed revisions (14.1). Patroni per cluster and a shared etcd. With one hostname per node, failover would move a database's host, so clients use libpq multi-host URLs (`postgres://db1.<domain>,db2.<domain>/app?target_session_attrs=read-write`), or every node in the HA group routes `app` to the current primary through its poolers. That's decided when the phase starts. HA might be offered only for clusters on dedicated nodes |
 
-**Phase 7 exit test (manual):** rebuild `mbvlabs` from scratch, make changes, destroy the VPS, run `server init --restore` on a new one, then `db recover --all`. The operator's context works without edits, records (timeline switches, dropped stanzas) are intact, the old master's jobs stop on the epoch, and the measured RTO goes into MASTER. Then the same without a bucket: `server backup export`, destroy, `server init --restore --bundle-file`.
+**Phase 5 exit test (manual):** rebuild `mbvlabs` from scratch, make changes, destroy the VPS, run `server init --restore` on a new one, then `db recover --all`. The operator's context works without edits, records (timeline switches, dropped stanzas) are intact, the old master's jobs stop on the epoch, and the measured RTO goes into MASTER. Then the same without a bucket: `server backup export`, destroy, `server init --restore --bundle-file`.
 
 ## 16. Risks and things to verify on a VPS
 

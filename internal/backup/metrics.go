@@ -13,7 +13,7 @@ import (
 )
 
 // TextfilePath is eru's node_exporter textfile (§15.4). node_exporter
-// arrives in Phase 5 and scrapes it from then on; eru writes it from Phase 3.
+// arrives in Phase 4 and scrapes it from then on; eru writes it from Phase 3.
 const TextfilePath = "/var/lib/node_exporter/textfile/eru.prom"
 
 // WriteMetrics renders the eru.prom backup lines from records.json and the

@@ -152,7 +152,7 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 		}
 		for _, ext := range s.Extensions {
 			if _, ok := catalog.Lookup(ext); !ok {
-				add("%s.extensions %q is not in the catalog (it arrives with eru ext in Phase 4)", at, ext)
+				add("%s.extensions %q is not in the catalog (it arrives with eru ext in Phase 7)", at, ext)
 			}
 		}
 		for key := range s.Settings {

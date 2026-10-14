@@ -23,7 +23,7 @@ func (c DatabaseCreds) SecretValues() []string {
 	return out
 }
 
-// BackupCreds is the recovery kit (Phases 3 and 7): where the bucket is, its
+// BackupCreds is the recovery kit (Phases 3 and 5): where the bucket is, its
 // keys, the pgBackRest repository cipher and the age identity that opens the
 // long-retention dumps. The operator generates the cipher and the identity
 // and stores them here before anything reaches the node. The node never sees

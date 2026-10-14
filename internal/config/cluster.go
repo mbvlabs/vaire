@@ -61,7 +61,7 @@ type Cluster struct {
 	Clusters    []ClusterSpec `toml:"clusters"`
 	Backup      Backup        `toml:"backup"`
 	// MasterBackup is decoded and validated now; the master backup that
-	// uses it arrives in Phase 7.
+	// uses it arrives in Phase 5.
 	MasterBackup MasterBackup `toml:"master_backup"`
 	Maintenance  Maintenance  `toml:"maintenance"`
 	Metrics      Metrics      `toml:"metrics"`

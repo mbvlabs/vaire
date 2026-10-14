@@ -57,7 +57,7 @@ const (
 
 // laterPhaseFlags are init flags whose settings arrive with a later phase.
 // The database backup flags work from Phase 3 on; VPS backups arrive in
-// Phase 7.
+// Phase 5.
 var laterPhaseFlags = []string{"vps-backup-schedule"}
 
 // tlsWaitTimeout bounds the wait for a real certificate (D10).
@@ -132,7 +132,7 @@ func runServerInit(cmd *cobra.Command, args []string) error {
 			output.CodeError,
 			"eru server init --restore is not implemented yet",
 			output.ExitGeneric,
-			"Disaster recovery from a secrets document arrives in Phase 7.",
+			"Disaster recovery from a secrets document arrives in Phase 5.",
 		)
 	}
 	if flagTrue(cmd, "discard") {
@@ -181,7 +181,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 		if flagChanged(cmd, name) {
 			r.warnings = append(r.warnings, output.Warning{
 				Code:    "flag_not_used_yet",
-				Message: "--" + name + " is not used yet: VPS backups arrive in Phase 7",
+				Message: "--" + name + " is not used yet: VPS backups arrive in Phase 5",
 			})
 		}
 	}

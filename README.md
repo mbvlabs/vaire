@@ -112,7 +112,7 @@ Creating, forking, restoring, resizing or dropping a database never touches DNS 
 - **Disk space and the page cache are shared.** A database that fills the disk affects its neighbours.
 - **Density costs.** Each cluster carries its own processes (about 19 MiB idle) and buffers; a 1 GiB VPS isn't a sensible home for several databases.
 - **One server is a single point of failure** until HA (Phase 11).
-- **Recovering a lost server.** Until Phase 7 brings the master backup and `server init --restore`, a lost server is recovered by creating a new one with `eru server init` and restoring each database's pgBackRest stanza by hand with the recovery kit from your secrets handoff. The stanzas are in the bucket under `<prefix>/pgbackrest/`.
+- **Recovering a lost server.** Until Phase 5 brings the master backup and `server init --restore`, a lost server is recovered by creating a new one with `eru server init` and restoring each database's pgBackRest stanza by hand with the recovery kit from your secrets handoff. The stanzas are in the bucket under `<prefix>/pgbackrest/`.
 
 ## Security design
 

@@ -15,7 +15,7 @@ The first goal is the **master node**: one VPS that hosts every database and own
 
 ### What has to be right first
 
-1. **Backups and restores** to S3-compatible storage (Cloudflare R2, AWS S3, Backblaze B2, MinIO, Hetzner Object Storage), with point-in-time recovery, encryption, verification and a tested path to rebuild on a brand-new server. This covers each **database** (its own stanza, configurable schedule, continuous WAL) and the **master's own state** (a small encrypted bundle after every change, Phase 7).
+1. **Backups and restores** to S3-compatible storage (Cloudflare R2, AWS S3, Backblaze B2, MinIO, Hetzner Object Storage), with point-in-time recovery, encryption, verification and a tested path to rebuild on a brand-new server. This covers each **database** (its own stanza, configurable schedule, continuous WAL) and the **master's own state** (a small encrypted bundle after every change, Phase 5).
 2. **Settings tuning and security settings**, derived from the hardware and workload and kept under eru's control.
 
 ### Non-goals (for now)
@@ -67,22 +67,22 @@ The first goal is the **master node**: one VPS that hosts every database and own
 | `eru top` | Reads Postgres directly over the WireGuard tunnel rather than through the node |
 | Database ports on WireGuard | WireGuard peers can always reach 6432 and 5432 (both poolers). `expose_pgbouncer` / `expose_postgres` only control the public allowlist rules |
 | Generated secrets | The secrets document holds server access only: every server secret eru generates, including `eru_admin` and the `pgbouncer_auth` and `eru_monitor` service passwords, which are the same in every cluster so adding a database never makes the document stale. Application database passwords are shown once by `eru db create` (and `db fork`) and never stored. The operator generates all database passwords; the node keeps only SCRAM verifiers, plus the two service passwords that PgBouncer and the exporters need at runtime |
-| Database backups model | **A stanza per database** (`<db>-<6 hex>`, immutable) in one repository with one cipher, so backups, PITR, retention, verify and drills are all per database. Restore is the provider's primitive: build a new cluster at a point in time (**materialise**), inspect it, then cut over in place (`restore promote`, same URL and credentials) or keep it as a new database (`db fork --at`). A dropped database's stanza is kept for its window. No in-place restore of a whole server; rebuilding the master is `server init --restore` (Phase 7) |
+| Database backups model | **A stanza per database** (`<db>-<6 hex>`, immutable) in one repository with one cipher, so backups, PITR, retention, verify and drills are all per database. Restore is the provider's primitive: build a new cluster at a point in time (**materialise**), inspect it, then cut over in place (`restore promote`, same URL and credentials) or keep it as a new database (`db fork --at`). A dropped database's stanza is kept for its window. No in-place restore of a whole server; rebuilding the master is `server init --restore` (Phase 5) |
 | Turning backups on | Optional at `server init` ("Skip for now", which ends with the `no_offsite_backup` warning), and `eru backup setup` adds them later. `server init` creates the recovery identity either way. Every cluster has `archive_mode = on` from creation, so turning backups on is a reload, never a restart. The operator probes the bucket, generates the pgBackRest cipher, and saves the kit before anything reaches the node |
 | Backup schedules | Template timers per database (`eru-backup-full@<db>` …), defaulting to `[backup.database]`, each database offset inside the maintenance window by a hash of its stanza. A server-wide heavy-I/O lock lets only one full, diff, verify, drill or dump run at a time |
 | Long-running work | Backups, restores, drills, forks and dumps run as detachable jobs (transient systemd units); Ctrl-C detaches and `eru job follow` re-attaches |
 | Longer retention | Per-database scheduled `pg_dump` archives, age-encrypted to a recipient whose identity only the operator holds, for points older than the restore window |
 | pgBackRest floor | 2.59.3 from PGDG, held; WAL-G stays a fallback behind `backup.Driver` (not built) |
 | DNS and certificates | One certificate per node, for its one hostname. In `acme` mode, `server init` shows the DNS record to create, waits for the operator to confirm it, and checks it against public resolvers. TLS never blocks on ACME: a placeholder certificate lets the poolers and nginx start, and a certificate that's still pending after 120 s is a warning, not a failure |
-| Master backup (Phase 7) | Replaces the restic VPS backup: a small age-encrypted bundle of what's born on the master (desired state, registries, `records.json`, WireGuard and host keys, the certificate and ACME account), uploaded after every change. Databases come back from their stanzas. Until Phase 7, a lost server is re-created and each stanza restored by hand |
+| Master backup (Phase 5) | Replaces the restic VPS backup: a small age-encrypted bundle of what's born on the master (desired state, registries, `records.json`, WireGuard and host keys, the certificate and ACME account), uploaded after every change. Databases come back from their stanzas. Until Phase 5, a lost server is re-created and each stanza restored by hand |
 | Followers (Phase 6) | Physical standbys of one database's cluster, with `wal_level = replica`; `db unfollow` promotes one into an independent database |
 | HA (Phase 11, last) | Patroni per cluster with one shared etcd. Until then eru runs plain `postgresql-common`, with a designed and tested adoption step into Patroni |
 
 **Still to decide** (when the phase that needs it starts):
 
-- Which exporter versions to pin, and whether eru's own metrics replace `pgbackrest_exporter` (Phase 5).
-- Where the table-bloat query comes from (Phase 5).
-- Which catalog extensions to drop because they have no PostgreSQL 18 package (Phase 4).
+- Which exporter versions to pin, and whether eru's own metrics replace `pgbackrest_exporter` (Phase 4).
+- Where the table-bloat query comes from (Phase 4).
+- Which catalog extensions to drop because they have no PostgreSQL 18 package (Phase 7).
 
 ## 4. Technology choices
 
@@ -95,7 +95,7 @@ The first goal is the **master node**: one VPS that hosts every database and own
 | Server OS | The latest Debian and Ubuntu LTS only: Debian 13, Ubuntu 26.04 | Preflight refuses anything else, including older releases. PGDG ships `postgresql-18` for both on amd64 and arm64 (checked 2026-10-11) |
 | PostgreSQL | PGDG apt repo (`apt.postgresql.org`), `postgresql-18`, managed via `postgresql-common`: one `pg_createcluster 18 <db>` per database, run as `postgresql@18-<db>` | Data checksums are on by default in 18. Major version pinned with an apt hold |
 | DB backups | **pgBackRest** (S3 repo, PITR, full/diff/incr + block incremental, AES-256 repo encryption, async WAL archive, `verify`), one stanza per database in one repository | WAL-G fallback behind the interface |
-| Master backup (Phase 7) | An age-encrypted tar of the master's own state, uploaded in-process with `minio-go` | Replaces the restic VPS backup; restic is not a dependency |
+| Master backup (Phase 5) | An age-encrypted tar of the master's own state, uploaded in-process with `minio-go` | Replaces the restic VPS backup; restic is not a dependency |
 | Logical exports | `pg_dump -Fc` to the bucket or locally, per database | Long retention and portability, not DR |
 | Pooling | **PgBouncer**, two instances from one template: transaction mode on 6432 (`max_prepared_statements`) and session mode on 5432 (eru's own `eru-pgbouncer-session.service`). Both route by database name with a `[databases]` entry per database and `auth_query` against that database's cluster | Clients connect to a pooler, which reaches the database's cluster over its unix socket |
 | TLS & metrics edge | **nginx** (distribution package): HTTP-01 challenges on 80; on 443 `stream` + `ssl_preread` routes ALPN `postgresql` to the transaction pooler and everything else to HTTPS (authenticated `/metrics` later). Certificates come from eru's own ACME client (`x/crypto/acme`) | Only direct-TLS clients on 443 go through nginx; 6432 and 5432 are the poolers' own TLS |
@@ -135,7 +135,7 @@ The first goal is the **master node**: one VPS that hosts every database and own
   - Each node upgrade downloads the matching linux build, verifies its cosign signature and sha256 against the manifest, and swaps `/usr/local/bin/eru` atomically, keeping the previous binary. It runs `eru node selfcheck`, then `eru apply` re-runs only the steps whose versioned IDs changed.
   - Upgrades wait for running timers (backups, maintenance) to finish. In HA (Phase 11) they roll one node at a time, replicas first.
   - `eru node upgrade --rollback` restores the previous binary.
-- **State.** The desired state (`/etc/eru/cluster.toml`), the durable records (`/var/lib/eru/records.json`: restores, leftovers, timeline switches, dropped stanzas, drills and last results per database) and the journal live on the master. From Phase 7 the master backs its own state up to the bucket after every change. The operator machine holds only credentials, in its contexts, plus a cache of the nodes and of which node holds each database. Any machine with the transfer bundle and its passphrase can take over operation.
+- **State.** The desired state (`/etc/eru/cluster.toml`), the durable records (`/var/lib/eru/records.json`: restores, leftovers, timeline switches, dropped stanzas, drills and last results per database) and the journal live on the master. From Phase 5 the master backs its own state up to the bucket after every change. The operator machine holds only credentials, in its contexts, plus a cache of the nodes and of which node holds each database. Any machine with the transfer bundle and its passphrase can take over operation.
 
 ### 5.2 Bootstrap: from a fresh VPS to WireGuard-only SSH
 
@@ -163,7 +163,7 @@ At the end of setup eru prints the **secrets handoff** in the terminal and write
 
 - Server identity: name, domain and TLS mode, node list with hostnames, WireGuard endpoints and public keys, server SSH host keys (pinned)
 - Operator credentials: WireGuard private key and address, SSH private key, `eru_admin` DB role password, service role passwords (the same in every cluster)
-- Backup **recovery kit**: the age recovery identity (created at `server init`, used for dumps and, from Phase 7, the master bundles), and once a bucket is set up its endpoint and keys and the repository cipher passphrase. The stanzas aren't listed: they follow from the desired state, or from listing `<prefix>/pgbackrest/backup/`
+- Backup **recovery kit**: the age recovery identity (created at `server init`, used for dumps and, from Phase 5, the master bundles), and once a bucket is set up its endpoint and keys and the repository cipher passphrase. The stanzas aren't listed: they follow from the desired state, or from listing `<prefix>/pgbackrest/backup/`
 - Metrics endpoint credentials
 - Break-glass instructions
 
@@ -322,14 +322,14 @@ eru takes the same unit to the user's own VPS. The VPS plays the provider's host
 ### 6.1 `eru server init`
 
 1. **Preflight** (remote): OS/version, arch, RAM ≥ 1 GB, disk, no existing Postgres, cloud-init finished, clock in sync.
-2. **Mode**: *New server*, or (Phase 7) *Rebuild the master* from its latest bundle with `server init --restore`.
+2. **Mode**: *New server*, or (Phase 5) *Rebuild the master* from its latest bundle with `server init --restore`.
 3. **Questions**, with every answer defaulted and each also available as a flag or `--answers answers.toml`:
    - Server: server name, node name (default `db1`), admin user, timezone (default UTC), data root (root disk or attached volume; each database is a directory under it), transport (WireGuard / Tailscale)
    - Endpoint: base domain (the master becomes `db1.<domain>`), TLS mode, client CIDR allowlist for 6432/5432 (default: deny all public; WireGuard peers allowed), ACME email
    - Workload: profile (web/OLTP, mixed, analytics), default database size, expected client connections. These are setup-wide defaults; each database can override them
    - Backups: provider preset (R2/S3/B2/Hetzner/MinIO/custom), endpoint, region, bucket, prefix, keys, or "Skip for now"
    - DB backup schedule and retention (presets plus a custom cron-style schedule)
-   - Extensions from the catalog (Phase 4)
+   - Extensions from the catalog (Phase 7)
 4. **Plan**, then confirm with `--confirm <server>` when non-interactive.
 5. **Apply** the steps (§6.2) with live progress. Each step is logged and resumable. The server starts with **no databases**; `eru db create` adds them afterwards, each as its own cluster. `server init` creates the age recovery identity either way, and without a bucket it ends with the `no_offsite_backup` warning and the fix, `eru backup setup`.
 6. **Handoff**: show the secrets handoff, gate on "stored safely", then print connection info and the next steps (`eru db create`).
@@ -352,7 +352,7 @@ eru takes the same unit to the user's own VPS. The VPS plays the provider's host
 | 12 | Per database: the service roles, both pooler auth functions, and that database with its four roles | new |
 | 13 | Both PgBouncers: a `[databases]` entry per database, `auth_query` against that database's cluster, TLS; reload | new |
 | 14 | pgBackRest: one config with a section per stanza; stanza create, check, first full backup per database | `backup.sh` (pattern) |
-| 15 | Phase 7: the master backup bundle (replaces the restic VPS backup) | new |
+| 15 | Phase 5: the master backup bundle (replaces the restic VPS backup) | new |
 | 16 | Exporters and the authenticated `/metrics` behind nginx | `node-exporter.sh` |
 | 17 | systemd timers: template units per database for backups, verify, drills and dumps, stanza expiry, maintenance, reports | `host.sh` (timer pattern) |
 | 18 | `eru doctor` as the final gate, then generate the secrets document | new |
@@ -385,7 +385,7 @@ eru takes the same unit to the user's own VPS. The VPS plays the provider's host
 
 - **One hostname per node:** `domain` in `cluster.toml` is the setup's base, and each node is `<node>.<domain>`; the master is `db1.<domain>` by default. One DNS record and one certificate per node, made once; creating, forking or dropping a database never touches DNS or the certificate. The database name in the URL's path routes: `postgres://app_app:…@db1.example.com:6432/app`.
 - **Certificates:** eru gets and renews the certificate for the node's hostname itself (`eru node run certs-renew`, hourly), over HTTP-01 on port 80 served by nginx. It installs the certificate for both PgBouncers, nginx and every cluster and reloads them, so clients connect to `db1.example.com:6432/<db>` with `sslmode=verify-full`.
-- **Port 443:** nginx's `stream` module reads the TLS ClientHello (`ssl_preread`). PostgreSQL 17+ clients with `sslnegotiation=direct` send ALPN `postgresql`; nginx terminates their TLS and passes them to the transaction pooler over loopback, under the same allowlist as 6432. This helps on networks that only allow 443. Everything else on 443 is HTTPS, where Phase 5 serves the authenticated `/metrics` endpoint.
+- **Port 443:** nginx's `stream` module reads the TLS ClientHello (`ssl_preread`). PostgreSQL 17+ clients with `sslnegotiation=direct` send ALPN `postgresql`; nginx terminates their TLS and passes them to the transaction pooler over loopback, under the same allowlist as 6432. This helps on networks that only allow 443. Everything else on 443 is HTTPS, where Phase 4 serves the authenticated `/metrics` endpoint.
 - **DNS:** the record must point straight at the server ("DNS only" in Cloudflare). A proxied record ends the connection at the proxy, which only passes HTTP.
 
 ### 6.5 Database backups and restores
@@ -420,7 +420,7 @@ eru restore drill [--db <name>]           # materialise, amcheck, compare, drop
 eru db fork <db> [--name <new>] [--at <time>]
 eru dump <db> [--to bucket|local] · eru dump list|get
 eru job list · eru job follow <id>
-eru server init --restore --host root@<new-vps>   # rebuild the master from its bundle (Phase 7)
+eru server init --restore --host root@<new-vps>   # rebuild the master from its bundle (Phase 5)
 ```
 
 **Safety rules:**
@@ -431,22 +431,22 @@ eru server init --restore --host root@<new-vps>   # rebuild the master from its 
 - `db drop` takes a final dump to the bucket first when backups are configured.
 - **Protected databases.** `clusters.<db>.protected = true` (set with `eru db create <db> --protected` or `eru config set clusters.<db>.protected true`) refuses `db drop`, a `db resize` that shrinks, `db credentials --rotate` and `restore promote`/`undo` (and `restore --promote`) with `database_protected`, even with `--confirm`. The node enforces it too. Lifting it (`eru config set clusters.<db>.protected false`, or removing the entry in `config edit`) needs a current 6-digit TOTP code from the authenticator app set up with `eru protect init`: the CLI reads it without echo at an interactive terminal and sends it as a request secret (redacted, never logged), and the node checks it (RFC 6238: HMAC-SHA1, 6 digits, 30-second step, one step of skew either side). A code works once (the node remembers the last accepted step), and 5 wrong codes in a row lock codes out for 15 minutes (`protect_code_rejected`; the lockout is on disk, so it survives a restart). A typed word would prove nothing, since an agent with a terminal can type it too; a TOTP code proves a human with the authenticator approved it. With `--yes`, without a terminal or with structured output lifting is refused outright. Protecting a database is refused until `eru protect init` has run (`precondition_failed`, reason `protect_not_initialized`), so a database is never protected without a way to lift it; a database protected before TOTP existed can only be lifted after `eru protect init`. The secret lives on the node in `/etc/eru/protect.json` (root 0600), never in `cluster.toml`. The honest limit: root on the node can edit `cluster.toml` or that file directly, so this stops agents and slips that go through eru, not someone who owns the server. `db list` shows protected databases and `eru protect status` shows the setup and any lockout.
 
-**Verification:** weekly `verify` per stanza, a monthly automated **restore drill** per database whose result goes into `records.json`, `eru.prom` and `backup list` (doctor from Phase 5), and metrics for last-backup age per database.
+**Verification:** weekly `verify` per stanza, a monthly automated **restore drill** per database whose result goes into `records.json`, `eru.prom` and `backup list` (doctor from Phase 4), and metrics for last-backup age per database.
 
-### 6.6 The master backup (Phase 7)
+### 6.6 The master backup (Phase 5)
 
 The databases are covered by pgBackRest. What a rebuild also needs is the master's own state that can't be regenerated, and only that: `cluster.toml`, the registries, `node.toml`, `records.json` (timeline switches and dropped stanzas exist nowhere else), the WireGuard private key, the SSH host keys, the fleet key, the certificate and the ACME account. Everything else is rendered by steps, re-sent from the operator's secrets, or is data.
 
 - **Bundle:** a tar of those files with a manifest, age-encrypted to the recovery kit's recipient, uploaded in-process to `<prefix>/master/` after every change (`apply`, `config set`, `db create/drop/fork/resize`, `restore promote/undo`, certificate renewal), with a daily safety-net timer. Retention: every bundle for 30 days, then one a week for a year (`[master_backup]`). Without a bucket the last ten stay on the master, and `server backup export` copies one to the operator's machine.
 - **Rebuild:** `eru server init --restore --host root@<new-ip>` fetches and decrypts the bundle on the operator's machine, fences the old master with an epoch in the bucket, places the files before any step runs, and runs every server-level step. The keys match, so the operator's context keeps working. Every database comes back as `awaiting_recovery`, and `eru db recover <db>|--all` materialises each from its stanza.
-- **Until Phase 7** a lost server is recovered by re-creating it with `server init` and restoring each database's stanza by hand with the recovery kit.
+- **Until Phase 5** a lost server is recovered by re-creating it with `server init` and restoring each database's stanza by hand with the recovery kit.
 - restic and `vps backup|restore` are dropped from the plan.
 
 ### 6.7 Metrics
 
 - Exporters bind to localhost only. nginx exposes one authenticated `/metrics` endpoint (federated) for external scrapers. The credentials are in the secrets document.
 - `pg_stat_statements` and `auto_explain` (sampled, threshold-based) are on by default.
-- Per database: `postgres_exporter` with one target per cluster, `pgbackrest_exporter` over every stanza, and cgroup pressure (PSI) per cluster (Phase 5). eru's own `eru.prom` lines carry a `db` label.
+- Per database: `postgres_exporter` with one target per cluster, `pgbackrest_exporter` over every stanza, and cgroup pressure (PSI) per cluster (Phase 4). eru's own `eru.prom` lines carry a `db` label.
 - CLI views: `eru status` (a server summary with the memory budget and warnings, then per database: uptime, connections, cache hit, last backup, PITR window, size and limits), `eru top` (live TUI of activity, locks and slow queries), `eru queries` (top statements). `--db` narrows each to one database. All support `--json`.
 
 ### 6.8 Extensions
@@ -507,11 +507,12 @@ This section is the only place that tracks progress. Update it whenever a module
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
-### 7.1 Current state (2026-10-13)
+### 7.1 Current state (2026-10-14)
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
 - **Phases 1 and 2 are done (2026-10-12, Hetzner, Ubuntu 26.04 and Debian 13).** `server init` (then `cluster init`) goes from a fresh server to public 22 closed, SSH over WireGuard and a working PostgreSQL 18 cluster. The ACME certificate is issued, the secrets handoff is accepted by `eru login`, `eru sql` connects with verify-full, `eru apply --auto-upgrade-nodes` upgrades the node, and an app connects to 6432 through PgBouncer with `sslmode=verify-full`. The checks not yet run on a VPS (lockdown self-revert, `--local`, a no-op `apply`, `db drop` refusal, `eru console`, direct TLS on 443) are in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) and don't block Phase 3.
 - **Phase 3 was re-scoped on 2026-10-13** by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) to **Databases as clusters, backups and native restore**, before its first manual test had passed. It was rebuilt in the units of [`PHASE-3-WORK-UNITS.md`](./PHASE-3-WORK-UNITS.md) (which replaces `PHASE-3-PLAN.md`) and is waiting for the RFC's exit test on a VPS ([`MANUAL-TESTING.md`](./MANUAL-TESTING.md)). The `mbvlabs` test server is torn down and rebuilt for it; nothing is converted. It stays 🟡 until that passes.
+- **The order after Phase 3 was changed on 2026-10-14** to observability, master backup and disaster recovery, followers, extensions (Phases 4–7), so that eru can run in production sooner.
 - One open item from Phase 0, also in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md): install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
 - About 30 of the ~65 commands (before Phase 3) do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `server init` (remote and `--local`, `--resume`), `plan`, `apply`, `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. Phase 3 adds `db resize`, `db fork`, `backup setup|now|list|verify`, `restore <db>|status|promote|undo|abort|cleanup|drill`, `dump`, `dump list|get`, `job list|follow`, the backup `node run` jobs and `node dump`, and turns the existing commands per database (built, manual test pending). The rest return `not implemented yet` until their phase lands.
 
@@ -523,16 +524,16 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | ✅ |
 | 2 | First server | Set up a new server with a working PostgreSQL 18 database. **Manual testing starts here** | ✅ |
 | 3 | Databases as clusters, backups & native restore | Each database its own cluster with a size and limits, two poolers, one hostname per node; a stanza per database, native PITR restore with an in-place cut-over, native `db fork`, drills per database | 🟡 |
-| 4 | Extensions | Extension catalog and `eru ext` | ⬜ |
-| 5 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ⬜ |
+| 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ⬜ |
+| 5 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | ⬜ |
 | 6 | Followers | Per-database physical standby followers; unfollow one to rehearse a risky migration on current data | ⬜ |
-| 7 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | ⬜ |
+| 7 | Extensions | Extension catalog and `eru ext` | ⬜ |
 | 8 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
 | 9 | Operators & agents | Teammate and agent identities, read-only agents, full agent guide, alerting | ⬜ |
 | 10 | Multi-node & replicas | Worker nodes driven from the master, a node for one database, `db move`, followers and replicas on other nodes | ⬜ |
 | 11 | High availability | Patroni per cluster + etcd, automatic failover; the master stops being a single point | ⬜ last |
 
-**v1 is Phases 0–6.** The master backup and DR, upgrades, operators and agents, multi-node and HA come after the first release.
+**v1 is Phases 0–7.** Upgrades, operators and agents, multi-node and HA come after the first release.
 
 [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) specifies Phases 0–5, 7 and 8 in detail, plus the agent guide (Phase 9). Phases 6 and 9–11 get their own design before they start.
 
@@ -598,15 +599,9 @@ Re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) and 
 | Restore drill | Per database: materialise `<db>__drill`, `pg_amcheck`, compare with live, drop; `restore drill --db`; the drill timer staggered over the month | ✅ |
 | Per-database policies | `[clusters.backup]` window, schedules and long-retention dumps: age-encrypted `pg_dump` to the bucket on a schedule, `dump list/get`, `restore --dump`, final dump on `db drop` | ✅ |
 
-**Manual test (the RFC's exit test, on a real VPS with R2):** rebuild `mbvlabs`. Create `app` and `other` (two clusters), check the memory split and the cgroup limits, and that `other` keeps serving while `app` restarts. Run a memory-heavy query in `app` and see it throttled while `other` stays responsive. Connect a migration tool through `db1.<domain>:5432/app` and an application through `db1.<domain>:443/app`. Back up, write rows to `app`, `restore app --time` and inspect the paused copy, then promote while `other` keeps writing. Undo and cleanup. Fork `app` at a time and without one. A drill per cluster. Drop a database and see its stanza stay listed. Change a restart-only setting of one cluster and check that only it restarts (a preload extension waits for Phase 4). Create a third database that overcommits the server and see the warning, then resize one down. A second `apply` changes nothing. The checklist, with what to verify at each step, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Not run yet.
+**Manual test (the RFC's exit test, on a real VPS with R2):** rebuild `mbvlabs`. Create `app` and `other` (two clusters), check the memory split and the cgroup limits, and that `other` keeps serving while `app` restarts. Run a memory-heavy query in `app` and see it throttled while `other` stays responsive. Connect a migration tool through `db1.<domain>:5432/app` and an application through `db1.<domain>:443/app`. Back up, write rows to `app`, `restore app --time` and inspect the paused copy, then promote while `other` keeps writing. Undo and cleanup. Fork `app` at a time and without one. A drill per cluster. Drop a database and see its stanza stay listed. Change a restart-only setting of one cluster and check that only it restarts (a preload extension waits for Phase 7). Create a third database that overcommits the server and see the warning, then resize one down. A second `apply` changes nothing. The checklist, with what to verify at each step, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Not run yet.
 
-### 7.7 Phase 4 — Extensions ⬜
-
-`internal/catalog` and `ext list/add/remove` per database, including extensions that need a restart: the package install is server-wide, the preload and the restart affect only that database's cluster. `pg_stat_statements` and `auto_explain` are already on by default from Phase 2.
-
-**Manual test:** add a catalog extension that needs a preload to one database, apply, and check it in `pg_extension`; only that database restarts. Remove it again.
-
-### 7.8 Phase 5 — Observability & maintenance ⬜
+### 7.7 Phase 4 — Observability & maintenance ⬜
 
 | Module | What it does | Status |
 | --- | --- | --- |
@@ -615,7 +610,21 @@ Re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) and 
 | `internal/maint` | `maint vacuum/analyze/reindex/repack/report/kill` per database and the maintenance timers; `--defer-restart` restarts wait for the maintenance window | ⬜ |
 | Steps 17–18 | Remaining timers; `doctor` as the final gate of `init` | ⬜ |
 
-**Manual test:** scrape `/metrics` with and without credentials. `doctor` is clean on a fresh server with two databases. Run a bloat report, then a repack.
+`maint repack` and auto-repack need `pg_repack`, which `eru ext add` brings in Phase 7. Until then `maint repack` fails with `precondition_failed`, and the repack is tested in Phase 7.
+
+**Manual test:** scrape `/metrics` with and without credentials. `doctor` is clean on a fresh server with two databases. Run a bloat report.
+
+### 7.8 Phase 5 — Master backup & disaster recovery ⬜
+
+This phase is what eru needs to run in production. It comes before followers and extensions, so the bundle and `db recover` cover databases as Phase 3 left them; Phases 6 and 7 extend them to followers and extensions.
+
+| Module | What it does | Status |
+| --- | --- | --- |
+| Master bundle | The age-encrypted bundle of the master's own state, its triggers (every change, plus a daily safety net), retention and local copies | ⬜ |
+| Commands | `server backup now|list|verify|export`, `server init --restore [--bundle <ts> \| --bundle-file <file>]` with the epoch fence, `db recover <db>|--all` | ⬜ |
+| Dropped | restic and `vps backup|restore` | ⬜ |
+
+**Manual test:** rebuild `mbvlabs` from scratch, make changes, destroy the VPS, run `server init --restore` on a new one, then `db recover --all`. The operator's context works without edits, records (timeline switches, dropped stanzas) are intact, the old master's jobs stop on the epoch, and the measured RTO goes into the risks below. Then the same without a bucket: `server backup export`, destroy, `server init --restore --bundle-file`.
 
 ### 7.9 Phase 6 — Followers ⬜
 
@@ -626,18 +635,17 @@ Heroku-style followers for rehearsing risky migrations on production data. **Dec
 | Followers | `db follow <db> --name <new> [--size]` materialises from the source's stanza (or `pg_basebackup` without backups), sets `primary_conninfo` and keeps streaming with `hot_standby = on`, through a physical slot capped by `max_slot_wal_keep_size`. A pooler alias (`<new> = … dbname=<db>`) makes it `db1.<domain>/<new>`, read-only with the source's credentials. `db unfollow <follower>` promotes it into an independent database: the fork's renames, a new stanza and a first full | ⬜ |
 | Checks | `db list`, `status` and `doctor` show the source, the lag in bytes and seconds, and a slot holding WAL; dropping a source with followers is refused | ⬜ |
 | Commands | `db follow`, `db unfollow` | ⬜ |
+| Recovery | `server init --restore` and `db recover` bring a follower back as a follower of its source (the master backup came first, in Phase 5) | ⬜ |
 
 **Manual test:** follow a database under write load and watch the lag reach zero. Unfollow it, check row counts and sequence values against the source, run a migration on the copy, then drop it.
 
-### 7.10 Phase 7 — Master backup & disaster recovery ⬜
+### 7.10 Phase 7 — Extensions ⬜
 
-| Module | What it does | Status |
-| --- | --- | --- |
-| Master bundle | The age-encrypted bundle of the master's own state, its triggers (every change, plus a daily safety net), retention and local copies | ⬜ |
-| Commands | `server backup now|list|verify|export`, `server init --restore [--bundle <ts> \| --bundle-file <file>]` with the epoch fence, `db recover <db>|--all` | ⬜ |
-| Dropped | restic and `vps backup|restore` | ⬜ |
+`internal/catalog` and `ext list/add/remove` per database, including extensions that need a restart: the package install is server-wide, the preload and the restart affect only that database's cluster. `pg_stat_statements` and `auto_explain` are already on by default from Phase 2.
 
-**Manual test:** rebuild `mbvlabs` from scratch, make changes, destroy the VPS, run `server init --restore` on a new one, then `db recover --all`. The operator's context works without edits, records (timeline switches, dropped stanzas) are intact, the old master's jobs stop on the epoch, and the measured RTO goes into the risks below. Then the same without a bucket: `server backup export`, destroy, `server init --restore --bundle-file`.
+It also brings what Phase 4 left waiting for `pg_repack`: `maint repack` and auto-repack. A master rebuild (Phase 5) reinstalls each database's extension packages from the desired state.
+
+**Manual test:** add a catalog extension that needs a preload to one database, apply, and check it in `pg_extension`; only that database restarts. Remove it again. Add `pg_repack` to a database and run `maint repack`.
 
 ### 7.11 Phase 8 — Upgrades ⬜
 
@@ -683,8 +691,8 @@ There's no automated test suite. The incus VM suite was dropped on 2026-10-10 be
 - **The secrets document is a single high-value file.** It's age-encrypted, operators are per-person and revocable, and the recovery kit can be exported separately for cold storage.
 - **pgBackRest project health.** Crunchy Data, its main sponsor, was acquired by Snowflake in 2025. On 2026-04-27 the maintainer archived the project after losing sponsorship and announced 2.58.0 as the last release; on 2026-05-18 a sponsor group (AWS, TigerData, Supabase, Percona, pgEdge) funded it again, and 2.59.x has shipped since (2.59.0 adds PostgreSQL 19). 2.59.3 fixes an unchecked error when generating random data for repository encryption; eru always encrypts, so **2.59.3 is the floor** (`versions.PgBackRestMinVersion`, checked by step 8). Re-check before each phase that depends on it. The `backup.Driver` interface keeps WAL-G as a fallback (not built).
 - **Agents with write access.** Destructive operations need named confirmation tokens, and read-only operator scopes arrive in Phase 9. The agent guide explains both.
-- **The master is a single point of failure.** In Phase 3 it's the only server, so losing it loses everything until the rebuild; from Phase 10, losing it freezes every change and the operator's normal access to workers, while workers keep serving. Database RPO is `archive_timeout` (60 s). Until Phase 7, recovery is a new server and a hand restore of each stanza; Phase 7's bundle brings state RPO to about zero, and its manual test measures the RTO, which goes here.
-- **Split brain on a rebuild** (Phase 7): an old master that comes back still runs `archive-push`, which the epoch doesn't fence. The rebuild says "power it off first", and `db recover` should check the stanza's latest WAL against the records before opening a cluster.
+- **The master is a single point of failure.** In Phase 3 it's the only server, so losing it loses everything until the rebuild; from Phase 10, losing it freezes every change and the operator's normal access to workers, while workers keep serving. Database RPO is `archive_timeout` (60 s). Until Phase 5, recovery is a new server and a hand restore of each stanza; Phase 5's bundle brings state RPO to about zero, and its manual test measures the RTO, which goes here.
+- **Split brain on a rebuild** (Phase 5): an old master that comes back still runs `archive-push`, which the epoch doesn't fence. The rebuild says "power it off first", and `db recover` should check the stanza's latest WAL against the records before opening a cluster.
 - **Compromising the master compromises the fleet** (Phase 10): it holds the fleet key and every node's desired state. HA brings separate keys per master and operator-signed revisions.
 - **Isolation is soft.** `MemoryHigh` throttles a cluster, it doesn't partition the server; disk space and the page cache are shared, and `IOWeight` only works with BFQ or `io.cost` (to verify on Debian 13 and Ubuntu 26.04; `tune show` reports "not enforced"). A database that fills the disk affects its neighbours. The README says so.
 - **Density and oversubscription.** About 50–100 MiB fixed per idle cluster plus its buffers, to be measured in the Phase 3 manual test; the size table and the README's density guidance are guesses until then. Warnings never block, so a user who overcommits a small VPS gets a slow server.
