@@ -326,6 +326,22 @@ func backupSecrets(kit *contexts.BackupCreds) map[string]string {
 	}
 }
 
+// addRecoveryKit adds the recovery kit's bucket keys, cipher pass and age
+// recipient to a request's secrets when the kit holds a bucket. Every request
+// that may run pgbackrest-v1 outside a job (apply, db create) carries them, so a
+// node that lacks its copy gets it back; the node writes a value only when
+// its own is missing, so a stale kit never overwrites newer keys.
+func addRecoveryKit(secretValues map[string]string, kit *contexts.BackupCreds) {
+	if kit == nil || !kit.HasBucket() {
+		return
+	}
+	for k, v := range backupSecrets(kit) {
+		if v != "" {
+			secretValues[k] = v
+		}
+	}
+}
+
 // requirePackagesCurrent refuses a node whose package step would still run,
 // such as one set up before pgBackRest was part of it. eru apply is the
 // update path; backup setup doesn't install packages itself.

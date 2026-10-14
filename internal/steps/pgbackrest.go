@@ -40,19 +40,22 @@ func (pgbackrestStep) Describe(config.Cluster) string {
 	return "render pgbackrest.conf with a stanza per database, then create each stanza, check its WAL archiving and take its first full backup"
 }
 
-// SkipReason skips the step while no bucket is configured or there is no
-// database to back up. archive_mode is on from creation, so the step never
+// SkipReason skips the step while no bucket is configured. With no database
+// yet it still runs: it stores the bucket keys and the cipher pass on the
+// node (backup.env and a pgbackrest.conf without stanzas), because server
+// init and backup setup on an empty server are the requests that carry them
+// and the first db create needs them. archive_mode is on from creation, so the step never
 // waits for a restart: postgres-config-v1@<db> switches archive_command with
 // a reload.
 func (pgbackrestStep) SkipReason(cfg config.Cluster) string {
 	if !cfg.BackupConfigured() {
 		return "backups_not_configured"
 	}
-	if len(cfg.Clusters) == 0 {
-		return "no_databases"
-	}
 	return ""
 }
+
+// noDatabasesNote is the apply note of a run with no stanza to set up.
+const noDatabasesNote = "bucket keys and cipher pass stored; no database to back up yet"
 
 // backupValues are the effective bucket keys, cipher pass and age recipient.
 type backupValues struct {
@@ -236,6 +239,9 @@ func (pgbackrestStep) Check(ctx context.Context, cfg config.Cluster, rt engine.R
 	if _, err := os.Stat(BackupEnvPath); err != nil {
 		return incomplete(BackupEnvPath + " is missing"), nil
 	}
+	if len(cfg.Clusters) == 0 {
+		return complete(), nil
+	}
 	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
 	if err != nil {
 		return incomplete("pgbackrest info failed: " + err.Error()), nil
@@ -273,6 +279,9 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	}
 	if err := writeFileOwned(backup.ConfPath, string(render.PgBackRestConf(cfg, rt.Host, v.BackupSecrets)), 0o600, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
+	}
+	if len(cfg.Clusters) == 0 {
+		return engine.ApplyResult{Restart: engine.RestartNone, Notes: []string{noDatabasesNote}}, nil
 	}
 	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
 	if err != nil {

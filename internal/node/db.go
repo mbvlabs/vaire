@@ -474,10 +474,23 @@ func firstBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime, rep
 	if err == nil {
 		return nil
 	}
-	return &output.Warning{
-		Code:    "first_backup_failed",
-		Message: db + " was created, but its stanza, first full backup or backup timers failed: " + err.Error() + "; run eru apply to retry",
+	w := firstBackupWarning(db, err)
+	return &w
+}
+
+// firstBackupWarning is first_backup_failed for err. A step that refused for
+// a reason the operator has to act on (input_required, such as bucket keys
+// that are neither on the node nor in the operator's recovery kit, or
+// precondition_failed) carries its own hint: a bare eru apply would refuse
+// the same way. Any other failure is retried by eru apply, which re-runs the
+// unfinished steps with the recovery kit.
+func firstBackupWarning(db string, err error) output.Warning {
+	msg := db + " was created, but its stanza, first full backup or backup timers failed: " + err.Error()
+	var cliErr *output.CLIError
+	if errors.As(err, &cliErr) && (cliErr.Code == output.CodeInputRequired || cliErr.Code == output.CodePrecondition) && cliErr.Hint != "" {
+		return output.Warning{Code: "first_backup_failed", Message: msg + ". " + cliErr.Hint}
 	}
+	return output.Warning{Code: "first_backup_failed", Message: msg + "; run eru apply to retry"}
 }
 
 func existingDatabase(name string) error {

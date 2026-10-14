@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/backup"
+	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/eru/internal/steps"
 )
 
 func TestAgo(t *testing.T) {
@@ -140,5 +143,52 @@ func TestNotStarted(t *testing.T) {
 	}
 	if got := notStarted(dbs, make([]dbJobOutcome, 2)); len(got) != 0 {
 		t.Errorf("detached on the last: %v", got)
+	}
+}
+
+func TestAddRecoveryKit(t *testing.T) {
+	values := map[string]string{"svc.eru_monitor": "pw"}
+	addRecoveryKit(values, nil)
+	if len(values) != 1 {
+		t.Errorf("no kit: secrets = %v", values)
+	}
+	// server init creates the recovery identity without a bucket: no keys to send.
+	identityOnly := &contexts.BackupCreds{}
+	identityOnly.Dumps.AgeIdentity, identityOnly.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
+	addRecoveryKit(values, identityOnly)
+	if len(values) != 1 {
+		t.Errorf("identity only: secrets = %v", values)
+	}
+	kit := &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "eru-backups-test", Prefix: "mbvlabs"}
+	kit.PgBackRest.CipherPass = "cipher"
+	kit.Dumps.AgeIdentity, kit.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
+	addRecoveryKit(values, kit)
+	want := map[string]string{
+		"svc.eru_monitor":              "pw",
+		steps.SecretBackupKeyID:        "AKID",
+		steps.SecretBackupKeySecret:    "s3cret",
+		steps.SecretBackupCipherPass:   "cipher",
+		steps.SecretBackupAgeRecipient: "age1xyz",
+	}
+	if !maps.Equal(values, want) {
+		t.Errorf("bucket kit: secrets = %v, want %v", values, want)
+	}
+	if _, ok := values[steps.SecretBackupAgeIdentity]; ok {
+		t.Error("the age identity never leaves the operator outside a dump restore")
+	}
+}
+
+func TestInitBackupPhaseText(t *testing.T) {
+	started, completed := initBackupPhaseText("eru-backups-test", 0)
+	for _, line := range []string{started, completed} {
+		if strings.Contains(line, "first full backup taken") || strings.Contains(line, "take the first full") {
+			t.Errorf("no databases: %q promises a backup init doesn't take", line)
+		}
+	}
+	if !strings.Contains(started, "eru-backups-test") {
+		t.Errorf("started = %q, want the bucket", started)
+	}
+	if _, completed := initBackupPhaseText("b", 1); completed != "WAL archiving on, first full backup taken" {
+		t.Errorf("one database: completed = %q", completed)
 	}
 }

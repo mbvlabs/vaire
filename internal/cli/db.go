@@ -145,13 +145,16 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	service, _, generated, err := serviceSecrets(s.ctx.Name)
+	service, creds, generated, err := serviceSecrets(s.ctx.Name)
 	if err != nil {
 		return err
 	}
 	for k, v := range service {
 		rpc[k] = v
 	}
+	// With backups on, the new database's stanza needs the bucket keys and
+	// cipher pass on the node; the kit rides along for a node without them.
+	addRecoveryKit(rpc, creds.Backup)
 	s.warnings = append(s.warnings, staleWarning(generated)...)
 	params := map[string]any{
 		"name":              name,

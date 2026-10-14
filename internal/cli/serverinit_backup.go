@@ -14,7 +14,8 @@ import (
 
 // phaseBackups is recorded once init has configured backups (Phase 3). It
 // runs after the certificate wait and before the handoff, so the handoff
-// carries the recovery kit and follows the first full backup.
+// carries the recovery kit, and the node holds the bucket keys and cipher
+// pass before the first db create.
 const phaseBackups = "backups_configured"
 
 // answersBackupCreds reads the answers file's [backup.credentials].
@@ -143,13 +144,14 @@ func (r *initRun) configureInitBackups(ctx context.Context, caller remote.Caller
 	if !r.cfg.BackupConfigured() || r.prog.Done(phaseBackups) {
 		return nil
 	}
-	r.p.phase("init.backups", "started", "turn on WAL archiving and take the first full backup to "+r.backupSettings().Bucket)
+	started, completed := initBackupPhaseText(r.backupSettings().Bucket, len(r.cfg.Clusters))
+	r.p.phase("init.backups", "started", started)
 	_, warnings, err := configureBackups(ctx, caller, r.p, r.backupSettings(), r.sec.Backup)
 	if err != nil {
 		return err
 	}
 	r.warnings = append(r.warnings, warnings...)
-	r.p.phase("init.backups", "completed", "WAL archiving on, first full backup taken")
+	r.p.phase("init.backups", "completed", completed)
 	r.backupsDone = true
 	return r.mark(phaseBackups)
 }
@@ -160,5 +162,21 @@ func (r *initRun) backupSummary() string {
 		return "none off the server: run eru backup setup"
 	}
 	s := r.backupSettings()
-	return strings.Join([]string{s.Provider, s.Bucket + "/" + s.Prefix, "first full backup taken"}, "  ")
+	state := "first full backup taken"
+	if len(r.cfg.Clusters) == 0 {
+		state = "each database's first full backup runs at db create"
+	}
+	return strings.Join([]string{s.Provider, s.Bucket + "/" + s.Prefix, state}, "  ")
+}
+
+// initBackupPhaseText is the backups phase's started and completed lines.
+// The server starts with no databases, so the phase then only stores the
+// bucket keys and cipher pass on the node; each db create takes its own
+// first full backup.
+func initBackupPhaseText(bucket string, databases int) (started, completed string) {
+	if databases == 0 {
+		return "store the bucket keys and cipher pass for " + bucket + " on the server",
+			"backups configured; each database's first full backup runs at db create"
+	}
+	return "turn on WAL archiving and take the first full backup to " + bucket, "WAL archiving on, first full backup taken"
 }
