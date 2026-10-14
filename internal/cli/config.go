@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/engine"
@@ -138,9 +139,9 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	warnings := append(append(s.warnings, reply.Warnings...), syncContextFromNode(cmd, s, p)...)
 	return output.Success(cmd, output.Result{
 		Data:     res,
-		Message:  fmt.Sprintf("set %s = %s; %d of %d steps would apply on the next eru apply", key, value, res.Plan.WouldApply, res.Plan.Total),
+		Message:  fmt.Sprintf("set %s = %s; ", key, value) + pendingSteps(res.Plan),
 		Warnings: warnings,
-		Next:     []string{"eru apply"},
+		Next:     applyNext(res.Plan),
 	})
 }
 
@@ -279,9 +280,9 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	}
 	return output.Success(cmd, output.Result{
 		Data:     res,
-		Message:  fmt.Sprintf("saved %d of %d steps would apply on the next eru apply", res.Plan.WouldApply, res.Plan.Total),
+		Message:  "saved; " + pendingSteps(res.Plan),
 		Warnings: warnings,
-		Next:     []string{"eru apply"},
+		Next:     applyNext(res.Plan),
 	})
 }
 
@@ -319,8 +320,8 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 			"Wait until the lockout ends, then try again with a fresh code.").
 			WithDetails(map[string]any{"reason": "locked", "locked_until": status.LockedUntil})
 	}
-	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), names+" is protected: db drop, a shrinking resize, credential rotation and restore promote/undo are refused while it is set.")
-	code, err := readSecretTTY(cmd, "Current code from the authenticator app to lift the protection of "+names)
+	p.note(liftNotice(names))
+	code, err := readSecretTTY(cmd, "Current code from the authenticator app")
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +386,11 @@ func runEditor(cmd *cobra.Command, path string) error {
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
-	if err := child.Run(); err != nil {
+	// The editor owns the terminal: nothing of eru's live area may draw.
+	resume := ui.Suspend()
+	err := child.Run()
+	resume()
+	if err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "Set $EDITOR to a working editor.")
 	}
 	return nil
@@ -460,4 +465,26 @@ func contextSyncFailed(s *session, err error) []output.Warning {
 		Code:    "context_sync_failed",
 		Message: "could not update the domain and TLS mode of context " + s.ctx.Name + ": " + err.Error() + ". Run eru apply to retry.",
 	}}
+}
+
+// liftNotice is printed before the code prompt of a change that lifts a
+// protection.
+func liftNotice(names string) string {
+	return "Lifting the protection of " + names + " needs a code from the authenticator app set up with eru protect init."
+}
+
+// pendingSteps says what the next eru apply would do after a config change.
+func pendingSteps(plan engine.PlanData) string {
+	if plan.WouldApply == 0 {
+		return "nothing to apply"
+	}
+	return fmt.Sprintf("%d of %d steps would apply on the next eru apply", plan.WouldApply, plan.Total)
+}
+
+// applyNext suggests eru apply only when a step would apply.
+func applyNext(plan engine.PlanData) []string {
+	if plan.WouldApply == 0 {
+		return nil
+	}
+	return []string{"eru apply"}
 }

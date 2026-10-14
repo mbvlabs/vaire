@@ -37,7 +37,7 @@ type handoff struct {
 
 // newHandoff encrypts doc into an armored bundle with a new passphrase and
 // writes it to out when out is set. Nothing else touches the disk.
-func newHandoff(doc secretsdoc.Document, out string) (handoff, error) {
+func newHandoff(cmd *cobra.Command, doc secretsdoc.Document, out string) (handoff, error) {
 	h := handoff{doc: doc}
 	for _, v := range doc.SecretValues() {
 		secrets.Add(v)
@@ -48,7 +48,10 @@ func newHandoff(doc secretsdoc.Document, out string) (handoff, error) {
 	}
 	secrets.Add(passphrase)
 	h.passphrase = passphrase
+	// age's scrypt work factor makes this take about a second.
+	stop := waitOn(cmd, "encrypting the transfer bundle")
 	h.bundle, err = secretsdoc.EncryptArmored(doc, passphrase)
+	stop()
 	if err != nil {
 		return h, err
 	}

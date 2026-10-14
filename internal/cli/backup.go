@@ -427,7 +427,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		})
 	}
 	p.note("checking the bucket " + settings.Bucket + " at " + settings.Endpoint)
-	if err := backup.Probe(ctx, settings.target(), cfg.Name()); err != nil {
+	if err := p.during("checking the bucket "+settings.Bucket, func() error { return backup.Probe(ctx, settings.target(), cfg.Name()) }); err != nil {
 		return err
 	}
 	kit, generated, err := prepareKit(creds.Backup, settings, wasConfigured)

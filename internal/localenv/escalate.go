@@ -31,6 +31,23 @@ type Prompter interface {
 
 var prompter Prompter
 
+// waiter shows a waiting status line; see SetWaiter.
+var waiter func(cmd *cobra.Command, label string) func()
+
+// SetWaiter installs the waiting status line shown while a tool downloads,
+// without importing the cli package.
+func SetWaiter(w func(cmd *cobra.Command, label string) func()) {
+	waiter = w
+}
+
+// waitOn shows label as the waiting line until the returned func is called.
+func waitOn(cmd *cobra.Command, label string) func() {
+	if waiter == nil || cmd == nil {
+		return func() {}
+	}
+	return waiter(cmd, label)
+}
+
 // SetPrompter installs the TTY prompt used for interactive sudo.
 func SetPrompter(p Prompter) {
 	prompter = p

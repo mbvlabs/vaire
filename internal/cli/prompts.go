@@ -18,6 +18,7 @@ import (
 
 func init() {
 	localenv.SetPrompter(sudoPrompter{})
+	localenv.SetWaiter(waitOn)
 }
 
 // MustNotPrompt reports whether this invocation has to receive values from flags.

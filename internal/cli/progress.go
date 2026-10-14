@@ -139,8 +139,15 @@ const heartbeatEvery = 30 * time.Second
 // current phase and its elapsed time once nothing was printed for 300ms;
 // plain human output prints a "… still <phase> (2m10s)" line after
 // heartbeatEvery of silence. Structured, --stream and quiet modes show
-// nothing. A wait inside a wait keeps the outer one.
+// nothing. A wait inside a wait keeps the outer one. The returned func may
+// be called more than once.
 func (p *progress) wait(label string) func() {
+	var once sync.Once
+	stop := p.startWait(label)
+	return func() { once.Do(stop) }
+}
+
+func (p *progress) startWait(label string) func() {
 	switch {
 	case p.live != nil:
 		if p.status != nil {
@@ -165,6 +172,26 @@ func (p *progress) wait(label string) func() {
 		}
 	}
 	return func() {}
+}
+
+// during runs fn with the waiting line showing label.
+func (p *progress) during(label string, fn func() error) error {
+	defer p.wait(label)()
+	return fn()
+}
+
+// waitOn is wait for code that has no progress of its own, such as tool
+// downloads and eru upgrade. It shares the process's live area.
+func waitOn(cmd *cobra.Command, label string) func() {
+	if cmd == nil {
+		return func() {}
+	}
+	opts, _ := output.ParseOptions(cmd)
+	p := &progress{opts: opts, cmd: cmd, stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr()}
+	if p.human() && richOutput(cmd) {
+		p.live = ui.Start(os.Stderr)
+	}
+	return p.wait(label)
 }
 
 // call runs one node RPC with the waiting line up, and the progress's event

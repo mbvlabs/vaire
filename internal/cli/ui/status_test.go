@@ -66,3 +66,12 @@ func TestWaitDrawsAfterIdle(t *testing.T) {
 		t.Errorf("stop left status=%v running=%v drawn=%d", l.status, l.running, l.drawn)
 	}
 }
+
+func TestAnsweredLine(t *testing.T) {
+	if got := ansi.Strip(answeredLine("Current code from the authenticator app", secretMask)); got != "? Current code from the authenticator app ••••••" {
+		t.Errorf("answeredLine = %q", got)
+	}
+	if got := ansi.Strip(answeredLine("Push?", "")); got != "? Push?" {
+		t.Errorf("answeredLine without an answer = %q", got)
+	}
+}

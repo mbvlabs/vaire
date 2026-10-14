@@ -76,6 +76,9 @@ func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
 		if !told {
 			told = true
 			tunnelWaitNote(p, name, path)
+			if p != nil {
+				p.setPhase("waiting for the tunnel to " + name)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -83,6 +86,9 @@ func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
 			return nil, ctx.Err()
 		case <-time.After(tunnelLockPoll):
 		}
+	}
+	if told && p != nil {
+		p.setPhase("")
 	}
 	command := "eru"
 	if p != nil && p.cmd != nil {

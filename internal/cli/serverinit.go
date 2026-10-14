@@ -413,7 +413,9 @@ func (r *initRun) publicAddress() (string, error) {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return ip.Unmap().String(), nil
 	}
+	stop := r.p.wait("resolving " + host)
 	ips, err := net.DefaultResolver.LookupNetIP(commandContext(r.cmd), "ip", host)
+	stop()
 	if err != nil || len(ips) == 0 {
 		return "", output.NewError(output.CodeRemoteUnreachable, "cannot resolve "+host, output.ExitTransport, "Pass the server's IP address in --host.")
 	}
@@ -713,7 +715,7 @@ func runInitRemote(cmd *cobra.Command) error {
 
 	// 1. Local preflight: the target answers on SSH (§20.1).
 	if !r.prog.Done(phaseHost) {
-		if err := localenv.CheckReachable(ctx, publicSSH, timeout); err != nil {
+		if err := r.p.during("checking that "+publicSSH+" answers", func() error { return localenv.CheckReachable(ctx, publicSSH, timeout) }); err != nil {
 			return err
 		}
 	}
@@ -1281,7 +1283,7 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 		}
 	}
 	r.p.phase("init.secrets-document", "started", out)
-	h, err := newHandoff(doc, out)
+	h, err := newHandoff(r.cmd, doc, out)
 	if err != nil {
 		return doc, res, err
 	}

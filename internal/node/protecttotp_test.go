@@ -274,3 +274,20 @@ func TestCheckProtect(t *testing.T) {
 		t.Fatalf("after setup: %v", err)
 	}
 }
+
+func TestLockoutWarning(t *testing.T) {
+	for _, c := range []struct {
+		left    int
+		lockout time.Duration
+		want    string
+	}{
+		{1, 15 * time.Minute, "1 more wrong code locks codes out for 15 minutes."},
+		{3, 15 * time.Minute, "3 more wrong codes lock codes out for 15 minutes."},
+		{2, time.Minute, "2 more wrong codes lock codes out for 1 minute."},
+		{2, 2 * time.Hour, "2 more wrong codes lock codes out for 2 hours."},
+	} {
+		if got := lockoutWarning(c.left, c.lockout); got != c.want {
+			t.Errorf("lockoutWarning(%d, %v) = %q, want %q", c.left, c.lockout, got, c.want)
+		}
+	}
+}

@@ -732,6 +732,9 @@ func tableDiff(rows []tableRows) string {
 		return strings.Join(list, ", ")
 	}
 	out := fmt.Sprintf("%d tables", len(rows))
+	if len(rows) == 1 {
+		out = "1 table"
+	}
 	if len(onlyCopy) > 0 {
 		out += "; only in the copy: " + names(onlyCopy)
 	}

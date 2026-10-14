@@ -102,6 +102,9 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The tunnel, SSH dial and version handshake are silent; the waiting
+	// line covers them until the first RPC.
+	defer p.wait("connecting to " + nodeLabel(c, nodeSpec))()
 	tun, err := upTunnel(commandContext(cmd), c.Name, string(wgKey), c.Operator.WGAddress, nodeSpec.WGPublicKey, nodeSpec.PublicAddress, nodeSpec.ListenPort, nodeSpec.WGAddress, p)
 	if err != nil {
 		return nil, err
@@ -123,7 +126,11 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 		s.node.Stderr = os.Stderr
 	}
 	auto := flagTrue(cmd, "auto-upgrade-nodes") || c.AutoUpgradeNodes
-	if err := s.node.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: auto, Progress: p.note}); err != nil {
+	upgrading := func(line string) {
+		p.note(line)
+		p.setPhase("upgrading eru on " + nodeLabel(c, nodeSpec))
+	}
+	if err := s.node.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: auto, Progress: upgrading}); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -134,6 +141,17 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 		}
 	}
 	return s, nil
+}
+
+// nodeLabel names a node for the waiting line: its name, else its hostname,
+// else the context's name.
+func nodeLabel(c *contexts.Context, n contexts.Node) string {
+	for _, name := range []string{n.Name, n.Hostname} {
+		if name != "" {
+			return name
+		}
+	}
+	return c.Name
 }
 
 func contextFileError(name, file string, err error) error {

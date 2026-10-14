@@ -129,7 +129,7 @@ func (g protectGuard) verify(code string, pending bool) (protectState, error) {
 			reason = "code_reused"
 		}
 		return st, protectCodeError(verr.Error(), reason,
-			fmt.Sprintf("Wait for the next code in the authenticator app and try again. %d more wrong codes lock codes out for %s.", left, protectLockout),
+			"Wait for the next code in the authenticator app and try again. "+lockoutWarning(left, protectLockout),
 			map[string]any{"attempts_left": left})
 	}
 	st.Failures, st.LockedUntil = 0, time.Time{}
@@ -138,6 +138,31 @@ func (g protectGuard) verify(code string, pending bool) (protectState, error) {
 	}
 	st.LastStep = step
 	return st, g.save(st)
+}
+
+// lockoutWarning says how many more wrong codes start a lockout, and for
+// how long: "1 more wrong code locks codes out for 15 minutes."
+func lockoutWarning(left int, lockout time.Duration) string {
+	if left == 1 {
+		return "1 more wrong code locks codes out for " + humanMinutes(lockout) + "."
+	}
+	return fmt.Sprintf("%d more wrong codes lock codes out for %s.", left, humanMinutes(lockout))
+}
+
+// humanMinutes writes a whole-minute duration in words: "15 minutes",
+// "1 minute", "2 hours". Other durations keep Go's form.
+func humanMinutes(d time.Duration) string {
+	unit, n := "minute", int(d/time.Minute)
+	if d%time.Hour == 0 {
+		unit, n = "hour", int(d/time.Hour)
+	}
+	if d <= 0 || d%time.Minute != 0 {
+		return d.String()
+	}
+	if n != 1 {
+		unit += "s"
+	}
+	return fmt.Sprintf("%d %s", n, unit)
 }
 
 func protectCodeError(message, reason, hint string, extra map[string]any) error {

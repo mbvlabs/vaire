@@ -66,7 +66,10 @@ func UsqlPath(cmd *cobra.Command) (string, error) {
 			output.ExitMissingTool, "Re-run with --install-missing to download usql "+UsqlVersion+", or install it yourself.").
 			WithDetails(map[string]any{"tool": "usql", "missing": []string{"usql"}, "download_url": url})
 	}
-	if err := downloadUsql(cmd.Context(), url, want, cached); err != nil {
+	stop := waitOn(cmd, "downloading usql "+UsqlVersion)
+	err := downloadUsql(cmd.Context(), url, want, cached)
+	stop()
+	if err != nil {
 		return "", output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Install usql from https://github.com/xo/usql and retry.").
 			WithDetails(map[string]any{"tool": "usql", "download_url": url})

@@ -126,6 +126,10 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	}
 	ctx := commandContext(cmd)
 	at := databaseEndpoint(cmd, s, p, db)
+	// Connecting through the tunnel and running the statement send no
+	// events; the waiting line shows them. It ends before the result prints.
+	stopWait := p.wait("connecting to " + db)
+	defer stopWait()
 	conn, err := pg.Connect(ctx, s.tunnel, pg.Params{
 		Host: at.WGAddress, Port: pgPort, ServerName: at.Hostname, TLSMode: s.ctx.TLSMode,
 		User: user, Password: password, Database: db,
@@ -135,6 +139,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 			"Check that the database exists (eru db list), that the session pooler runs (eru logs pgbouncer-session), and that the credentials are current.")
 	}
 	defer conn.Close(ctx)
+	p.setPhase("running the query on " + db)
 	warnings := s.warnings
 	if s.ctx.TLSMode == "self-signed" {
 		warnings = append(warnings, output.Warning{Code: "tls_unverified", Message: "the cluster uses a self-signed certificate; the connection is encrypted but not verified"})
@@ -171,6 +176,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "The transaction did not commit.")
 	}
+	stopWait()
 	return output.Success(cmd, output.Result{Data: res, Message: renderTable(res), Warnings: warnings})
 }
 

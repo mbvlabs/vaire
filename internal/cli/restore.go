@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,6 +171,11 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		// --latest has no target to pause at: the copy keeps replaying the
 		// archived WAL until it is promoted or aborted.
 		ready = "the temporary cluster " + res.Restoring + " is ready, still replaying the latest archived WAL, beside the live " + db + ", which kept serving."
+	}
+	if params["kind"] == "dump" {
+		// A dump is loaded as it is: there is no WAL to replay and no target
+		// to pause at.
+		ready = "the temporary cluster " + res.Restoring + " is ready and holds the data of dump " + stringFlag(cmd, "dump") + " (a dump has no WAL to replay), beside the live " + db + ", which kept serving."
 	}
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"job_id": jr.JobID, "result": res},
@@ -424,19 +430,7 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 			if err := json.Unmarshal(raw, &drill); err != nil {
 				return nil, "", err
 			}
-			out := []string{fmt.Sprintf("%s: restore drill %s: backup %s recovered to %s", drill.Database, drill.Result, drill.BackupLabel, drill.DescribeRecoveredTo())}
-			for _, c := range drill.Checks {
-				mark := "ok"
-				if !c.OK {
-					mark = "FAILED"
-				}
-				line := "  " + mark + "  " + c.Name
-				if c.Detail != "" {
-					line += ": " + c.Detail
-				}
-				out = append(out, line)
-			}
-			return drill, strings.Join(out, "\n"), nil
+			return drill, drillLines(drill), nil
 		})
 	if detached != nil {
 		return detachedEach(cmd, s, *detached, "the drill", notStarted(dbs, outcomes), func(db string) string {
@@ -583,7 +577,9 @@ func runDump(cmd *cobra.Command, args []string) error {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Pick a path that does not exist yet with --out.")
 	}
 	p.note("streaming pg_dump -Fc of " + db + " to " + out)
-	streamErr := s.node.Stream(commandContext(cmd), "dump "+db, f)
+	stopWait := p.wait("streaming the dump of " + db)
+	streamErr := s.node.Stream(commandContext(cmd), "dump "+db, &countingWriter{w: f, report: func(n int64) { p.setDetail(humanBytes(n) + " written") }})
+	stopWait()
 	if cerr := f.Close(); streamErr == nil {
 		streamErr = cerr
 	}
@@ -613,18 +609,26 @@ func runDumpList(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		db = args[0]
 	}
+	stop := waitOn(cmd, "listing the dumps in "+kit.Bucket)
 	dumps, err := backup.ListDumps(commandContext(cmd), kitTarget(kit), db)
+	stop()
 	if err != nil {
 		return err
 	}
-	lines := make([]string, 0, len(dumps))
+	return output.Success(cmd, output.Result{Data: map[string]any{"dumps": dumps}, Message: dumpListMessage(dumps)})
+}
+
+// dumpListMessage is the dump list for humans: a header row, then one row
+// per dump.
+func dumpListMessage(dumps []backup.Dump) string {
+	if len(dumps) == 0 {
+		return "no dumps in the bucket"
+	}
+	rows := [][]string{{"DATABASE", "ID", "SIZE", "CREATED"}}
 	for _, d := range dumps {
-		lines = append(lines, fmt.Sprintf("  %-20s %-24s %10s  %s", d.Database, d.ID, humanBytes(d.Size), d.Created))
+		rows = append(rows, []string{d.Database, d.ID, humanBytes(d.Size), d.Created})
 	}
-	if len(lines) == 0 {
-		lines = []string{"no dumps in the bucket"}
-	}
-	return output.Success(cmd, output.Result{Data: map[string]any{"dumps": dumps}, Message: strings.Join(lines, "\n")})
+	return strings.Join(alignColumns(rows), "\n")
 }
 
 func runDumpGet(cmd *cobra.Command, args []string) error {
@@ -648,10 +652,55 @@ func runDumpGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	stop := waitOn(cmd, "downloading and decrypting dump "+id+" of "+db)
 	n, err := backup.DownloadDump(commandContext(cmd), kitTarget(kit), db, id, ident, out)
+	stop()
 	if err != nil {
 		return err
 	}
 	return output.Success(cmd, output.Result{Data: map[string]any{"database": db, "id": id, "out": out, "size": n},
 		Message: fmt.Sprintf("decrypted dump %s of %s to %s (%s); read it with pg_restore --list", id, db, out, humanBytes(n))})
+}
+
+// drillLines renders a drill result: a header, then one line per check.
+// The restore check says where the copy recovered to, so the header names
+// it only when no check does.
+func drillLines(drill backup.Drill) string {
+	header := fmt.Sprintf("%s: restore drill %s: backup %s", drill.Database, drill.Result, drill.BackupLabel)
+	restoreChecked := false
+	for _, c := range drill.Checks {
+		if c.Name == "restore" && c.Detail != "" {
+			restoreChecked = true
+		}
+	}
+	if !restoreChecked && drill.RecoveredTo != "" {
+		header += " recovered to " + drill.DescribeRecoveredTo()
+	}
+	out := []string{header}
+	for _, c := range drill.Checks {
+		mark := "ok"
+		if !c.OK {
+			mark = "FAILED"
+		}
+		line := "  " + mark + "  " + c.Name
+		if c.Detail != "" {
+			line += ": " + c.Detail
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// countingWriter passes writes through to w and reports the running total.
+type countingWriter struct {
+	w      io.Writer
+	n      int64
+	report func(n int64)
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	n, err := c.w.Write(b)
+	c.n += int64(n)
+	c.report(c.n)
+	return n, err
 }

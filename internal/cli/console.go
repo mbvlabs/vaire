@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/spf13/cobra"
@@ -84,6 +85,8 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
 	child.Stderr = cmd.ErrOrStderr()
+	// usql owns the terminal from here: nothing of eru's live area may draw.
+	defer ui.Suspend()()
 	if err := child.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

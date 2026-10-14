@@ -42,7 +42,10 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	secrets.Add(passphrase)
+	// age's scrypt work factor makes this take about a second.
+	stop := waitOn(cmd, "decrypting the transfer bundle")
 	doc, err := secretsdoc.Decrypt(raw, passphrase)
+	stop()
 	if err != nil {
 		return err
 	}

@@ -32,7 +32,7 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]string{"out": out}, Message: "dry run: would build a new secrets handoff"})
 	}
-	h, err := newHandoff(doc, out)
+	h, err := newHandoff(cmd, doc, out)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func showContextHandoff(cmd *cobra.Command, c *contexts.Context) (string, error)
 	if err != nil {
 		return "", err
 	}
-	h, err := newHandoff(doc, "")
+	h, err := newHandoff(cmd, doc, "")
 	if err != nil {
 		return "", err
 	}

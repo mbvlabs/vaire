@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/cli/ui"
 	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -68,6 +69,8 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	if err := sess.RequestPty("xterm-256color", height, width, modes); err != nil {
 		return output.WrapError(output.CodeTransportFailed, err, output.ExitTransport, "The node refused a PTY.")
 	}
+	// The remote shell owns the terminal: nothing of eru's live area may draw.
+	defer ui.Suspend()()
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Run eru ssh from a terminal.")

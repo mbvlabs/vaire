@@ -244,19 +244,7 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 		if json.Unmarshal(raw, &drill) != nil || drill.Result == "" {
 			return ""
 		}
-		out := []string{fmt.Sprintf("%s: restore drill %s: backup %s recovered to %s", drill.Database, drill.Result, drill.BackupLabel, drill.RecoveredTo)}
-		for _, c := range drill.Checks {
-			mark := "ok"
-			if !c.OK {
-				mark = "FAILED"
-			}
-			line := "  " + mark + "  " + c.Name
-			if c.Detail != "" {
-				line += ": " + c.Detail
-			}
-			out = append(out, line)
-		}
-		return strings.Join(out, "\n")
+		return drillLines(drill)
 	case "db-dump":
 		var res struct {
 			Dump backup.Dump `json:"dump"`

@@ -57,7 +57,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	stop := waitOn(cmd, "checking for an eru release on "+channel)
 	manifest, err := client.Resolve(ctx, channel, version)
+	stop()
 	if err != nil {
 		return err
 	}
@@ -123,14 +125,21 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	stop = waitOn(cmd, "downloading eru "+manifest.Version)
 	cached, err := client.Fetch(ctx, manifest, runtime.GOOS, runtime.GOARCH)
+	stop()
 	if err != nil {
 		return err
 	}
-	if err := upgrade.Preflight(ctx, cached, manifest); err != nil {
+	stop = waitOn(cmd, "verifying eru "+manifest.Version)
+	err = upgrade.Preflight(ctx, cached, manifest)
+	stop()
+	if err != nil {
 		return err
 	}
+	stop = waitOn(cmd, "replacing "+target)
 	previous, swapWarnings, err := upgrade.Swap(target, cached)
+	stop()
 	if err != nil {
 		return err
 	}

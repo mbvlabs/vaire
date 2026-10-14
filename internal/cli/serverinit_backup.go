@@ -116,7 +116,7 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 			"Pass --backup-secret-stdin or --backup-secret-file.").WithDetails(map[string]any{"flag": "--backup-secret-file"})
 	}
 	r.p.note("checking the bucket " + s.Bucket + " at " + s.Endpoint)
-	if err := backup.Probe(ctx, s.target(), r.name); err != nil {
+	if err := r.p.during("checking the bucket "+s.Bucket, func() error { return backup.Probe(ctx, s.target(), r.name) }); err != nil {
 		return err
 	}
 	kit, _, err = prepareKit(r.sec.Backup, s, false)
