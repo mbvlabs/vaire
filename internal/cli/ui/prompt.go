@@ -164,3 +164,45 @@ func Choose(title, description string, options [][2]string) (string, error) {
 	}
 	return value, nil
 }
+
+// MultiSelect asks the operator to pick any of options, with the ones in
+// selected ticked to start with. It returns the picked options in their
+// order in options; picking none is an answer too.
+func MultiSelect(title, description string, options, selected []string) ([]string, error) {
+	value := make([]string, 0, len(selected))
+	opts := make([]huh.Option[string], 0, len(options))
+	for _, o := range options {
+		on := false
+		for _, s := range selected {
+			if s == o {
+				on = true
+				value = append(value, o)
+				break
+			}
+		}
+		opts = append(opts, huh.NewOption(o, o).Selected(on))
+	}
+	ms := huh.NewMultiSelect[string]().Title(title).Options(opts...).Value(&value).Filterable(false)
+	if description != "" {
+		ms = ms.Description(description)
+	}
+	answer := func() string {
+		if len(value) == 0 {
+			return "none"
+		}
+		return strings.Join(value, ", ")
+	}
+	if err := run(title, answer, ms); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(value))
+	for _, o := range options {
+		for _, v := range value {
+			if v == o {
+				out = append(out, o)
+				break
+			}
+		}
+	}
+	return out, nil
+}

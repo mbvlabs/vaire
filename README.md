@@ -13,7 +13,8 @@ From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu
 | Setup | `eru server init` (remote over SSH, or `--local` on the server), `--resume` |
 | Access | `eru login`, `eru context list\|show\|use\|remove`, `eru ssh`, `eru tunnel` |
 | Desired state | `eru plan`, `eru apply`, `eru config show\|get\|set\|edit\|validate` |
-| Databases | `eru db list\|create\|resize\|drop\|credentials\|fork` |
+| Databases | `eru db list\|create\|resize\|drop\|credentials\|fork\|protect\|unprotect` |
+| Protection | `eru protect init\|status` (two-factor code), `eru db protect\|unprotect` |
 | SQL | `eru sql` (one statement, JSON-friendly), `eru psql`, `eru console` (usql) |
 | Tuning | `eru tune show\|explain\|apply` |
 | Backups | `eru backup setup\|now\|list\|verify`, `eru dump`, `eru dump list\|get` |
@@ -204,7 +205,18 @@ Run migrations as `migrate` and the application as `app`. The transaction pooler
 
 ### Protected databases
 
-`eru db create app --protected` (or `eru config set clusters.app.protected true`) makes `db drop`, a shrinking resize, credential rotation and restore promote/undo refuse, even with `--confirm`. Lifting the protection asks for a current 6-digit code from an authenticator app, typed at a terminal and checked on the node, so an agent with a shell can't lift it by typing a word. Set it up once with `eru protect init`: the node makes the secret and keeps it root-only, and eru shows it as a QR code. Protecting a database is refused until you have. A code works once, and 5 wrong codes lock codes out for 15 minutes. Root on the server can still edit the files directly; this guards against agents and slips, not against someone who owns the box.
+A protected database refuses `db drop`, a shrinking resize, credential rotation and restore promote/undo, even with `--confirm`. Lifting the protection asks for a current 6-digit code from an authenticator app, typed at a terminal and checked on the node, so an agent with a shell can't lift it by typing a word.
+
+Set it up once with `eru protect init`: the node makes the secret and keeps it root-only, and eru shows it as a QR code. Once the code is confirmed, it asks which of your databases to protect (all of them picked to start with) and protects them in the same run; `--all` or `--db app` (repeatable) choose without asking. After that:
+
+```sh
+eru db protect app billing     # or --all; in effect at once, no apply
+eru db create scratch --protected
+eru db unprotect app           # asks for a code from the authenticator app
+eru protect status             # every database, protected yes or no
+```
+
+Protecting a database is refused until `eru protect init` has run. A code works once, and 5 wrong codes lock codes out for 15 minutes. `eru config set clusters.app.protected true` still works too. Root on the server can still edit the files directly; this guards against agents and slips, not against someone who owns the box.
 
 ### Operator connections
 

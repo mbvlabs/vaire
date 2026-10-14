@@ -46,7 +46,7 @@ type databaseInfo struct {
 	CPUQuota       string   `json:"cpu_quota,omitempty"`
 	IOWeight       int      `json:"io_weight,omitempty"`
 	MaxConnections int      `json:"max_connections,omitempty"`
-	Protected      bool     `json:"protected,omitempty"`
+	Protected      bool     `json:"protected"`
 	State          string   `json:"state"`
 }
 
@@ -83,26 +83,29 @@ func runDBList(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	lines := make([]string, 0, len(data.Databases)+1)
-	if len(data.Databases) > 0 {
-		lines = append(lines, fmt.Sprintf("  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %s", "NAME", "NODE", "HOST", "SIZE", "MEMORY", "LIMITS", "STANZA", "STATE"))
-	}
-	for _, db := range data.Databases {
-		memory, size, nodeName, host, stanza := "-", "-", "-", "-", "-"
-		if db.InConfig {
-			memory, size, nodeName, host, stanza = tune.FormatMiB(db.MemoryMiB), db.Size, db.Node, db.Host, db.Stanza
-		}
-		state := db.State
-		if db.Protected {
-			state += ", protected"
-		}
-		lines = append(lines, fmt.Sprintf("  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %s", db.Name, nodeName, host, size, memory, db.limits(), stanza, state))
-	}
+	lines := dbListLines(data.Databases)
 	return output.Success(cmd, output.Result{
 		Data:     data,
 		Message:  strings.Join(lines, "\n"),
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
+}
+
+// dbListLines is the db list table: a header, then a row per database.
+func dbListLines(dbs []databaseInfo) []string {
+	const row = "  %-20s %-6s %-24s %-7s %-9s %-34s %-20s %-9s %s"
+	lines := make([]string, 0, len(dbs)+1)
+	if len(dbs) > 0 {
+		lines = append(lines, fmt.Sprintf(row, "NAME", "NODE", "HOST", "SIZE", "MEMORY", "LIMITS", "STANZA", "PROTECTED", "STATE"))
+	}
+	for _, db := range dbs {
+		memory, size, nodeName, host, stanza, protected := "-", "-", "-", "-", "-", "-"
+		if db.InConfig {
+			memory, size, nodeName, host, stanza, protected = tune.FormatMiB(db.MemoryMiB), db.Size, db.Node, db.Host, db.Stanza, yesNo(db.Protected)
+		}
+		lines = append(lines, fmt.Sprintf(row, db.Name, nodeName, host, size, memory, db.limits(), stanza, protected, db.State))
+	}
+	return lines
 }
 
 func runDBCreate(cmd *cobra.Command, args []string) error {

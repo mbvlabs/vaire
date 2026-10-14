@@ -748,7 +748,7 @@ func configCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:   "Set one cluster.toml key",
-					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database; it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized). Setting it false, or removing a protected entry, asks for the current 6-digit code from the authenticator app, typed without echo at an interactive terminal; the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it."},
+					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database; it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized). Setting it false, or removing a protected entry, asks for the current 6-digit code from the authenticator app, typed without echo at an interactive terminal; the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it. eru db protect and eru db unprotect make the same change for one or more databases."},
 					Examples: []string{
 						"eru config set postgres.settings.work_mem 64MB",
 						"eru config set clusters.app.size large",
@@ -800,9 +800,9 @@ func protectCommands() cmdSpec {
 		use: "protect",
 		run: parentRun,
 		meta: CommandMeta{
-			Summary:   "Set up the two-factor code that lifts a database's protection",
-			WhenToUse: []string{"Protected databases (clusters.<db>.protected) refuse db drop, a shrinking resize, credential rotation and restore promote/undo. Lifting the protection asks for a TOTP code from an authenticator app; eru protect init sets that up."},
-			Examples:  []string{"eru protect init", "eru protect status"},
+			Summary:   "Set up the two-factor code that lifts a database's protection, and protect databases",
+			WhenToUse: []string{"Protected databases (clusters.<db>.protected) refuse db drop, a shrinking resize, credential rotation and restore promote/undo. Lifting the protection asks for a TOTP code from an authenticator app; eru protect init sets that up and protects the databases in the same run. eru db protect and eru db unprotect change it later."},
+			Examples:  []string{"eru protect init", "eru protect init --all", "eru protect status"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -811,14 +811,17 @@ func protectCommands() cmdSpec {
 				run: runProtectInit,
 				flags: []fl{
 					flagBool("rotate", "Replace the existing secret; asks for a current code from it first"),
+					flagStringArray("db", "Protect this database once the code is confirmed, without asking; repeatable"),
+					flagBool("all", "Protect every database once the code is confirmed, without asking"),
 				},
 				meta: CommandMeta{
-					Summary: "Set up the TOTP secret that lifting a database's protection asks a code from",
+					Summary: "Set up the TOTP secret that lifting a database's protection asks a code from, and protect databases",
 					WhenToUse: []string{
 						"Once per cluster, by a human, before the first database is protected: the node makes a 160-bit secret and keeps it root-only, this shows it once as a QR code (and as base32), and a code from the authenticator app confirms it before the node uses it. Interactive only: without a terminal, with --yes or with structured output it is refused (input_required).",
+						"Once the code is confirmed it protects databases in the same run: the ones --db names (repeatable) or every one with --all, or else it asks which of the unprotected databases to protect, all of them picked to start with. An unknown --db name is refused before the QR code is shown. The result names the protected databases (data.protected_databases, data.newly_protected) and gives eru db protect with the names of any left unprotected. With no databases yet, create them protected with eru db create --protected.",
 						"With a secret already set up it is refused (precondition_failed, reason protect_already_initialized) unless --rotate, which asks for a current code from the old secret first; the old one keeps working until the new one is confirmed.",
 					},
-					Examples:         []string{"eru protect init", "eru protect init --rotate"},
+					Examples:         []string{"eru protect init", "eru protect init --all", "eru protect init --db app --db billing", "eru protect init --rotate"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "init is interactive and only writes the node's TOTP secret, which has nothing to preview",
@@ -830,8 +833,8 @@ func protectCommands() cmdSpec {
 				use: "status",
 				run: runProtectStatus,
 				meta: CommandMeta{
-					Summary:   "Show whether two-factor protection is set up, any lockout, and the protected databases",
-					WhenToUse: []string{"Check before protecting a database or lifting a protection. Five wrong codes in a row lock codes out for 15 minutes; status shows until when."},
+					Summary:   "Show whether two-factor protection is set up, any lockout, and each database's protection",
+					WhenToUse: []string{"Check before protecting a database or lifting a protection: it lists every database with protected yes or no (data.databases). Five wrong codes in a row lock codes out for 15 minutes; status shows until when."},
 					Examples:  []string{"eru protect status"},
 					Remote:    true,
 				},
@@ -845,7 +848,7 @@ func dbCommands() cmdSpec {
 		use: "db",
 		run: parentRun,
 		meta: CommandMeta{
-			Summary:   "Create, list, resize, fork, drop, and rotate application databases",
+			Summary:   "Create, list, resize, fork, drop, protect, and rotate application databases",
 			WhenToUse: []string{"Manage databases declared for the cluster."},
 			Examples:  []string{"eru db list", "eru db create app"},
 			Remote:    true,
@@ -855,8 +858,8 @@ func dbCommands() cmdSpec {
 				use: "list",
 				run: runDBList,
 				meta: CommandMeta{
-					Summary:   "List application databases with their node, host, size, limits, stanza and state",
-					WhenToUse: []string{"See the databases eru manages: where each runs, its URL host, its size and limits, its pgBackRest stanza, and whether its cluster is running, stopped, pending or orphaned (a cluster on the server that cluster.toml doesn't list)."},
+					Summary:   "List application databases with their node, host, size, limits, stanza, protection and state",
+					WhenToUse: []string{"See the databases eru manages: where each runs, its URL host, its size and limits, its pgBackRest stanza, whether it is protected (PROTECTED, data.databases[].protected), and whether its cluster is running, stopped, pending or orphaned (a cluster on the server that cluster.toml doesn't list)."},
 					Examples:  []string{"eru db list"},
 					Remote:    true,
 				},
@@ -876,7 +879,7 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Create a database in its own PostgreSQL cluster, with its migrate, app, and read-only roles",
-					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory it gets [postgres] default_size. A size that pushes the databases' sizes past the server's memory budget (RAM less the reserve) is refused, with or without --size (precondition_failed, reason memory_overcommitted): the error gives the numbers and the largest size that still fits with the complete command (details.largest_size, details.suggested_command), or says no size fits and to resize another database down or use a bigger server. Nothing steps down by itself. --allow-overcommit creates it anyway with the warning memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). Creating a database changes the other databases' share of the server, so their changed postgres-config is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending with the confirm token). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; eru apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and eru apply finishes it. --protected marks it protected (see eru config set clusters.<db>.protected); it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized)."},
+					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory it gets [postgres] default_size. A size that pushes the databases' sizes past the server's memory budget (RAM less the reserve) is refused, with or without --size (precondition_failed, reason memory_overcommitted): the error gives the numbers and the largest size that still fits with the complete command (details.largest_size, details.suggested_command), or says no size fits and to resize another database down or use a bigger server. Nothing steps down by itself. --allow-overcommit creates it anyway with the warning memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). Creating a database changes the other databases' share of the server, so their changed postgres-config is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending with the confirm token). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; eru apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and eru apply finishes it. --protected marks it protected (see eru db protect); it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized)."},
 					Examples:       []string{"eru db create app --size small", "eru db create app --protected", "eru db create app --memory 768MiB --profile oltp", "eru db create big --size xlarge --allow-overcommit", "eru db create app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
@@ -942,6 +945,38 @@ func dbCommands() cmdSpec {
 					SupportsDryRun: true,
 					Remote:         true,
 					ErrorCodes:     backupErrorCodes,
+				},
+			},
+			{
+				use:  "protect [<db>...]",
+				args: cobra.ArbitraryArgs,
+				run:  runDBProtect,
+				flags: []fl{
+					flagBool("all", "Protect every database"),
+				},
+				meta: CommandMeta{
+					Summary:        "Protect databases so drop, a shrinking resize, credential rotation and restore promote/undo are refused",
+					WhenToUse:      []string{"Guard production databases against a drop or a destructive restore, by an agent or a slip. Takes one or more database names, or --all. It sets clusters.<db>.protected true in cluster.toml, as eru config set clusters.<db>.protected true does; the node checks it live, so nothing needs applying. Databases already protected are reported and left alone. It is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized), since a protection must be liftable. An unknown name is refused before anything changes (precondition_failed, reason database_not_found). Lifting it is eru db unprotect, for a human with the authenticator app."},
+					Examples:       []string{"eru db protect app", "eru db protect app billing", "eru db protect --all", "eru db protect app --dry-run"},
+					Mutating:       true,
+					SupportsDryRun: true,
+					Remote:         true,
+					ErrorCodes:     []string{"precondition_failed", "usage_error"},
+				},
+			},
+			{
+				use:  "unprotect <db>...",
+				args: cobra.MinimumNArgs(1),
+				run:  runDBUnprotect,
+				meta: CommandMeta{
+					Summary:        "Lift the protection of databases, with a code from the authenticator app",
+					WhenToUse:      []string{"A human lifts a protection before dropping, shrinking, rotating or restoring a protected database. It asks once, without echo, for the current 6-digit code from the authenticator app set up with eru protect init, for every database named, and the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected, reason unprotect_requires_human), so an agent cannot lift it. It sets clusters.<db>.protected false, as eru config set clusters.<db>.protected false does. Databases that are not protected are reported and left alone."},
+					WhenNotToUse:   []string{"Agents: never. Ask the human to run it at their terminal."},
+					Examples:       []string{"eru db unprotect app", "eru db unprotect app billing"},
+					Mutating:       true,
+					SupportsDryRun: true,
+					Remote:         true,
+					ErrorCodes:     []string{"database_protected", "protect_code_rejected", "precondition_failed"},
 				},
 			},
 			{

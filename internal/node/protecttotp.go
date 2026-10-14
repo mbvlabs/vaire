@@ -324,6 +324,14 @@ type protectStatus struct {
 	Failures    int      `json:"failures"`
 	LockedUntil string   `json:"locked_until,omitempty"`
 	Protected   []string `json:"protected_databases"`
+	// Databases is every database in cluster.toml with its protection.
+	Databases []ProtectedDatabase `json:"databases"`
+}
+
+// ProtectedDatabase is one database in the protect.status result.
+type ProtectedDatabase struct {
+	Name      string `json:"name"`
+	Protected bool   `json:"protected"`
 }
 
 func handleProtectStatus(_ context.Context, _ *Env) (Result, error) {
@@ -335,7 +343,8 @@ func (g protectGuard) status(clusterPath string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	out := protectStatus{Configured: st.Secret != "", Pending: st.Pending != "", Failures: st.Failures, Protected: []string{}}
+	out := protectStatus{Configured: st.Secret != "", Pending: st.Pending != "", Failures: st.Failures,
+		Protected: []string{}, Databases: []ProtectedDatabase{}}
 	if !st.ConfirmedAt.IsZero() {
 		out.ConfirmedAt = st.ConfirmedAt.UTC().Format(time.RFC3339)
 	}
@@ -343,11 +352,20 @@ func (g protectGuard) status(clusterPath string) (Result, error) {
 		out.LockedUntil = st.LockedUntil.UTC().Format(time.RFC3339)
 	}
 	if cfg, err := config.LoadCluster(clusterPath); err == nil {
-		for _, c := range cfg.Clusters {
-			if c.Protected {
-				out.Protected = append(out.Protected, c.Name)
-			}
-		}
+		out.Protected, out.Databases = protectionOf(cfg)
 	}
 	return Result{Data: out}, nil
+}
+
+// protectionOf lists the protected databases of cfg, and every database
+// with its protection, in cluster.toml order.
+func protectionOf(cfg config.Cluster) ([]string, []ProtectedDatabase) {
+	protected, all := []string{}, make([]ProtectedDatabase, 0, len(cfg.Clusters))
+	for _, c := range cfg.Clusters {
+		all = append(all, ProtectedDatabase{Name: c.Name, Protected: c.Protected})
+		if c.Protected {
+			protected = append(protected, c.Name)
+		}
+	}
+	return protected, all
 }

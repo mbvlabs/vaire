@@ -69,3 +69,18 @@ func TestResizeShrinks(t *testing.T) {
 		t.Fatal("growing or keeping the size should not shrink")
 	}
 }
+
+func TestProtectionOf(t *testing.T) {
+	protected, all := protectionOf(protectedCluster())
+	if len(protected) != 1 || protected[0] != "app" {
+		t.Fatalf("protected = %v", protected)
+	}
+	want := []ProtectedDatabase{{Name: "app", Protected: true}, {Name: "other"}}
+	if len(all) != len(want) || all[0] != want[0] || all[1] != want[1] {
+		t.Fatalf("databases = %+v, want %+v", all, want)
+	}
+	protected, all = protectionOf(config.Cluster{})
+	if protected == nil || all == nil || len(protected)+len(all) != 0 {
+		t.Fatalf("empty cluster: %v %v, want empty, non-nil lists", protected, all)
+	}
+}
