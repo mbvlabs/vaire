@@ -74,6 +74,58 @@ func (j *Journal) clearPending(path string, ids []string) error {
 	})
 }
 
+// ForgetCluster removes cluster's step instances (<id>@<cluster>) and their
+// pending restarts from the journal at path, so a cluster created again
+// under the same name runs every instance fresh instead of skipping it on a
+// hash its predecessor left. db drop and a failed db create call it.
+func ForgetCluster(path, cluster string) error {
+	return forget(path, func(id string) bool {
+		_, c := SplitID(id)
+		return c == cluster
+	})
+}
+
+// ForgetSteps removes the entries and pending restarts of the steps ids from
+// the journal at path, so the next run applies them again.
+func ForgetSteps(path string, ids ...string) error {
+	drop := map[string]bool{}
+	for _, id := range ids {
+		drop[id] = true
+	}
+	return forget(path, func(id string) bool { return drop[id] })
+}
+
+// forget removes every entry and pending restart whose ID matches, under the
+// journal's file lock. An unchanged journal is not rewritten.
+func forget(path string, match func(id string) bool) error {
+	return WithFileLock(path+".lock", func() error {
+		j, err := LoadJournal(path)
+		if err != nil {
+			return err
+		}
+		changed := false
+		for id := range j.Steps {
+			if match(id) {
+				delete(j.Steps, id)
+				changed = true
+			}
+		}
+		kept := j.RestartPending[:0:0]
+		for _, id := range j.RestartPending {
+			if match(id) {
+				changed = true
+				continue
+			}
+			kept = append(kept, id)
+		}
+		if !changed {
+			return nil
+		}
+		j.RestartPending = kept
+		return j.Save(path)
+	})
+}
+
 // JournalEntry is one step's last run.
 type JournalEntry struct {
 	Status      string `json:"status"`

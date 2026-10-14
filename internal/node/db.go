@@ -2,7 +2,9 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -206,7 +208,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDo
 		// cluster exists, eru apply --db finishes it.
 		if !steps.ClusterExists(ctx, db.Name) {
 			_ = store.Save(previous)
-			return db, nil, err
+			return db, nil, errors.Join(err, forgetNewCluster(cfg, db.Name))
 		}
 		return db, nil, withHint(err, finishNewCluster(db.Name))
 	}
@@ -271,9 +273,27 @@ func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDown 
 	return cfg, previous, db, warnings, nil
 }
 
-// forgetDatabase removes name's entry from cluster.toml: db fork's rollback
-// when its cluster was never made.
+// forgetNewCluster undoes what a failed db create left of a cluster that
+// was never created: its configuration directory, which a configure step
+// may have half written and which makes pg_createcluster refuse the retry,
+// and its journal entries, so the retry runs every instance fresh. A data
+// directory means something of a cluster is there, so it keeps the
+// configuration then.
+func forgetNewCluster(cfg config.Cluster, name string) error {
+	if _, err := os.Stat(cfg.Server.DataDirectory(name)); errors.Is(err, fs.ErrNotExist) {
+		if err := os.RemoveAll(steps.PGConfDir(name)); err != nil {
+			return err
+		}
+	}
+	return engine.ForgetCluster(engine.JournalPath, name)
+}
+
+// forgetDatabase removes name's entry from cluster.toml and its journal
+// entries: db fork's rollback when its cluster was never made.
 func forgetDatabase(name string) error {
+	if err := engine.ForgetCluster(engine.JournalPath, name); err != nil {
+		return err
+	}
 	store := state.FileStore{}
 	cfg, _, err := store.Load()
 	if err != nil {
@@ -447,6 +467,12 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := dropLeftovers(env, p.Name); err != nil {
 		return Result{}, err
 	}
+	// A database created again under this name and size would otherwise
+	// skip its step instances on the old journal entries and never get a
+	// cluster. It is still in cluster.toml, so a retry finishes the drop.
+	if err := engine.ForgetCluster(engine.JournalPath, p.Name); err != nil {
+		return Result{}, err
+	}
 
 	kept := make([]config.ClusterSpec, 0, len(cfg.Clusters))
 	for _, db := range cfg.Clusters {
@@ -510,15 +536,20 @@ func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, final *bac
 // dropRouting takes a dropped database out of the poolers and the timers.
 // pgbouncer-v1 renders an entry per database, but skips itself with none
 // left, so dropping the last database stops and disables both poolers
-// instead; the next db create starts them again.
+// instead; the next db create starts them again. Its journal entry goes
+// too: a database created with the same pooler inputs would skip it on the
+// journal and leave both poolers stopped.
 func dropRouting(ctx context.Context, env *Env, cfg config.Cluster) error {
 	if len(cfg.Clusters) == 0 {
 		if _, err := os.Stat(steps.SessionUnitPath); err != nil {
-			return nil
+			return engine.ForgetSteps(engine.JournalPath, steps.PoolerStepIDs()...)
 		}
 		sh := engine.Shell{Secrets: secrets.Default, Log: env.Log}
 		if err := sh.Exec(ctx, "db.drop", engine.Command{Name: "systemctl",
 			Args: []string{"disable", "--now", "pgbouncer", steps.SessionPoolerService}}, env.Report); err != nil {
+			return err
+		}
+		if err := engine.ForgetSteps(engine.JournalPath, steps.PoolerStepIDs()...); err != nil {
 			return err
 		}
 	} else if err := reloadPoolers(ctx, env, cfg); err != nil {
