@@ -21,20 +21,26 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// session is one operator command's connection to the primary: the
-// userspace WireGuard tunnel, SSH over it, and a checked node version (§3).
+// session is one operator command's connection to the primary: a dialer
+// into the WireGuard tunnel (the context's shared tunnel daemon, or an
+// in-process tunnel with ERU_TUNNEL=inprocess), SSH over it, and a checked
+// node version (§3).
 type session struct {
-	ctx      *contexts.Context
-	tunnel   *transport.Tunnel
-	node     *remote.Node
-	warnings []output.Warning
+	ctx *contexts.Context
+	// dialer reaches addresses inside the tunnel; closeDialer releases it
+	// (the daemon lease, or the in-process tunnel).
+	dialer      transport.Dialer
+	closeDialer func()
+	node        *remote.Node
+	warnings    []output.Warning
 	// dial connects SSH again over the tunnel, for reconnect.
 	dial func(context.Context) (*transport.SSHClient, error)
 }
 
-// reconnect replaces the session's SSH connection with a new one over the
-// same tunnel, after the old one was lost. The node version was already
-// checked on this session, so it skips the handshake.
+// reconnect replaces the session's SSH connection with a new one, after the
+// old one was lost. With the shared tunnel a dead daemon is respawned on the
+// way. The node version was already checked on this session, so it skips
+// the handshake.
 func (s *session) reconnect(ctx context.Context) error {
 	if s == nil || s.node == nil || s.dial == nil {
 		return errors.New("this session can't reconnect")
@@ -48,6 +54,8 @@ func (s *session) reconnect(ctx context.Context) error {
 	return nil
 }
 
+// Close closes SSH and releases the tunnel. With the shared tunnel that
+// only drops this process's lease; the daemon stays up for others.
 func (s *session) Close() {
 	if s == nil {
 		return
@@ -55,7 +63,9 @@ func (s *session) Close() {
 	if s.node != nil {
 		s.node.SSH.Close()
 	}
-	s.tunnel.Close()
+	if s.closeDialer != nil {
+		s.closeDialer()
+	}
 }
 
 func commandContext(cmd *cobra.Command) context.Context {
@@ -85,15 +95,14 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	if !ok {
 		return nil, output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with eru login.")
 	}
-	wgKey, err := contexts.ReadFile(c.Name, contexts.WGKeyFile)
+	wgCfg, err := contextTunnelConfig(c, nodeSpec)
 	if err != nil {
-		return nil, contextFileError(c.Name, contexts.WGKeyFile, err)
+		return nil, err
 	}
 	sshKey, err := contexts.ReadFile(c.Name, contexts.SSHKeyFile)
 	if err != nil {
 		return nil, contextFileError(c.Name, contexts.SSHKeyFile, err)
 	}
-	secrets.Add(strings.TrimSpace(string(wgKey)))
 	auth, err := transport.KeyAuth(sshKey)
 	if err != nil {
 		return nil, contextFileError(c.Name, contexts.SSHKeyFile, err)
@@ -105,16 +114,14 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	// The tunnel, SSH dial and version handshake are silent; the waiting
 	// line covers them until the first RPC.
 	defer p.wait("connecting to " + nodeLabel(c, nodeSpec))()
-	tun, err := upTunnel(commandContext(cmd), c.Name, string(wgKey), c.Operator.WGAddress, nodeSpec.WGPublicKey, nodeSpec.PublicAddress, nodeSpec.ListenPort, nodeSpec.WGAddress, p)
-	if err != nil {
+	ctx := commandContext(cmd)
+	if err := s.openDialer(ctx, cmd, wgCfg, p); err != nil {
 		return nil, err
 	}
-	s.tunnel = tun
-	ctx := commandContext(cmd)
 	target := transport.SSHTarget{User: c.Operator.SSHUser, Addr: net.JoinHostPort(nodeSpec.WGAddress, "22")}
 	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{auth}, HostKeys: known, Timeout: timeoutFlag(cmd)}
 	s.dial = func(ctx context.Context) (*transport.SSHClient, error) {
-		return transport.DialSSH(ctx, tun, target, sshOpts)
+		return transport.DialSSH(ctx, s.dialer, target, sshOpts)
 	}
 	client, err := s.dial(ctx)
 	if err != nil {
@@ -182,43 +189,62 @@ func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
 	return contexts.Save(s.ctx)
 }
 
-// upTunnel starts the userspace tunnel to a node. Only the node /24 routes
-// through it. It first takes the context's tunnel lock (see tunnellock.go),
-// waiting while another eru process uses the tunnel, and holds it until the
-// tunnel closes.
-func upTunnel(ctx context.Context, contextName, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
+// tunnelConfig is the userspace tunnel to a node. Only the node /24 routes
+// through it.
+func tunnelConfig(privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string) (transport.WireGuardConfig, error) {
 	opAddr, err := netip.ParseAddr(operatorAddr)
 	if err != nil {
-		return nil, output.NewError(output.CodeConfig, "operator wg_address "+operatorAddr+" is invalid", output.ExitConfig, "")
+		return transport.WireGuardConfig{}, output.NewError(output.CodeConfig, "operator wg_address "+operatorAddr+" is invalid", output.ExitConfig, "")
 	}
 	pub, err := netip.ParseAddr(publicAddr)
 	if err != nil {
-		return nil, output.NewError(output.CodeConfig, "node public_address "+publicAddr+" is invalid", output.ExitConfig, "")
+		return transport.WireGuardConfig{}, output.NewError(output.CodeConfig, "node public_address "+publicAddr+" is invalid", output.ExitConfig, "")
 	}
 	wg, err := netip.ParseAddr(nodeWG)
 	if err != nil {
-		return nil, output.NewError(output.CodeConfig, "node wg_address "+nodeWG+" is invalid", output.ExitConfig, "")
+		return transport.WireGuardConfig{}, output.NewError(output.CodeConfig, "node wg_address "+nodeWG+" is invalid", output.ExitConfig, "")
 	}
 	if port == 0 {
 		port = 51820
 	}
-	nodes := netip.PrefixFrom(wg, 24).Masked()
-	var logf func(string, ...any)
+	return transport.WireGuardConfig{
+		PrivateKey:    strings.TrimSpace(privateKey),
+		Address:       opAddr,
+		PeerPublicKey: nodePub,
+		Endpoint:      netip.AddrPortFrom(pub, uint16(port)), //nolint:gosec // G115: listen_port is validated as 1-65535.
+		AllowedIPs:    []netip.Prefix{netip.PrefixFrom(wg, 24).Masked()},
+	}, nil
+}
+
+// contextTunnelConfig is the tunnel to a context's node, with the operator
+// key read from the context directory.
+func contextTunnelConfig(c *contexts.Context, n contexts.Node) (transport.WireGuardConfig, error) {
+	wgKey, err := contexts.ReadFile(c.Name, contexts.WGKeyFile)
+	if err != nil {
+		return transport.WireGuardConfig{}, contextFileError(c.Name, contexts.WGKeyFile, err)
+	}
+	secrets.Add(strings.TrimSpace(string(wgKey)))
+	return tunnelConfig(string(wgKey), c.Operator.WGAddress, n.WGPublicKey, n.PublicAddress, n.ListenPort, n.WGAddress)
+}
+
+// upTunnel starts an in-process userspace tunnel to a node, for eru server
+// init and ERU_TUNNEL=inprocess. It first takes the context's tunnel lock
+// (see tunnellock.go), waiting while another eru process or the context's
+// tunnel daemon holds it, and holds it until the tunnel closes: two devices
+// with one operator key would steal the node's peer from each other.
+func upTunnel(ctx context.Context, contextName, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
+	cfg, err := tunnelConfig(privateKey, operatorAddr, nodePub, publicAddr, port, nodeWG)
+	if err != nil {
+		return nil, err
+	}
 	if p != nil && p.opts.Verbose {
-		logf = func(format string, args ...any) { p.note("wireguard: " + fmt.Sprintf(format, args...)) }
+		cfg.Logf = func(format string, args ...any) { p.note("wireguard: " + fmt.Sprintf(format, args...)) }
 	}
 	release, err := lockTunnel(ctx, contextName, p)
 	if err != nil {
 		return nil, err
 	}
-	tun, err := transport.UpWireGuard(transport.WireGuardConfig{
-		PrivateKey:    strings.TrimSpace(privateKey),
-		Address:       opAddr,
-		PeerPublicKey: nodePub,
-		Endpoint:      netip.AddrPortFrom(pub, uint16(port)), //nolint:gosec // G115: listen_port is validated as 1-65535.
-		AllowedIPs:    []netip.Prefix{nodes},
-		Logf:          logf,
-	})
+	tun, err := transport.UpWireGuard(cfg)
 	if err != nil {
 		release()
 		return nil, err

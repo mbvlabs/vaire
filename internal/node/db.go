@@ -13,7 +13,6 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/hostinfo"
 	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/state"
@@ -65,12 +64,15 @@ type dbCreateParams struct {
 	StatementTimeout string   `json:"statement_timeout"`
 	Extensions       []string `json:"extensions"`
 	// Size, Memory and Profile are the cluster's; with neither size nor
-	// memory, [postgres] default_size steps down to what fits.
+	// memory, it gets [postgres] default_size.
 	Size    string `json:"size,omitempty"`
 	Memory  string `json:"memory,omitempty"`
 	Profile string `json:"profile,omitempty"`
 	// Protected marks the new database protected (clusters.<db>.protected).
 	Protected bool `json:"protected,omitempty"`
+	// AllowOvercommit creates it even when its size pushes the databases'
+	// sizes past the budget, with the memory_overcommitted warning.
+	AllowOvercommit bool `json:"allow_overcommit,omitempty"`
 }
 
 type dbDropParams struct {
@@ -182,27 +184,53 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 		extensions = []string{"pg_stat_statements"}
 	}
 	spec := config.ClusterSpec{Name: p.Name, Size: p.Size, Memory: p.Memory, Profile: p.Profile, StatementTimeout: timeout, Extensions: extensions, Protected: p.Protected}
-	db, warnings, err := createDatabase(ctx, env, spec, p.Size == "" && p.Memory == "")
+	db, warnings, err := createDatabase(ctx, env, spec, p.AllowOvercommit, createCommand(p))
 	if err != nil {
 		return Result{}, err
 	}
 	return Result{Data: map[string]any{"database": db}, Warnings: warnings}, nil
 }
 
+// createCommand is the db create command of p at another size: what the
+// memory_overcommitted refusal suggests.
+func createCommand(p dbCreateParams) func(size string) string {
+	return func(size string) string {
+		cmd := "eru db create " + p.Name + " --size " + size
+		if p.Profile != "" {
+			cmd += " --profile " + p.Profile
+		}
+		if p.StatementTimeout != "" && p.StatementTimeout != "60s" {
+			cmd += " --statement-timeout " + p.StatementTimeout
+		}
+		if len(p.Extensions) > 1 || (len(p.Extensions) == 1 && p.Extensions[0] != "pg_stat_statements") {
+			cmd += " --extensions " + strings.Join(p.Extensions, ",")
+		}
+		if p.Protected {
+			cmd += " --protected"
+		}
+		return cmd
+	}
+}
+
 // createDatabase adds db to cluster.toml and creates its cluster: the
 // kernel's huge pages, the cluster's own step instances with the role
-// passwords from the request's secrets, then both poolers. With stepDown,
-// db has no size of its own and the default steps down to what fits (RFC
-// 7.4). A cluster that could not start is refused first (would_not_start).
-// The warnings are the step-down and the server's oversubscription.
-func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDown bool) (config.ClusterSpec, []output.Warning, error) {
+// passwords from the request's secrets, both poolers, and the other
+// databases' configuration whose share of the server changed. A cluster
+// that could not start (would_not_start) or whose size overcommits the
+// server (memory_overcommitted, unless allowOvercommit) is refused first.
+// The warnings are the server's oversubscription and any restart the other
+// databases' configuration left pending.
+func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string) (config.ClusterSpec, []output.Warning, error) {
 	store := state.FileStore{}
-	cfg, previous, db, warnings, err := addDatabase(ctx, env, db, stepDown)
+	cfg, previous, db, err := addDatabase(ctx, env, db, allowOvercommit, suggest)
 	if err != nil {
 		return db, nil, err
 	}
+	var warnings []output.Warning
 	env.Cluster = cfg
 	rt := runtimeFor(env, false)
+	others := otherConfigs(ctx, steps.Catalog(), cfg, rt, db.Name, "")
+	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, createRuns(cfg, db.Name, others)...))
 	// The kernel's huge-page pool grows first when the new cluster uses
 	// huge pages, then the cluster's own step instances: create it,
 	// configure it, then its roles and database (RFC 11.2).
@@ -223,6 +251,8 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDo
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with eru apply.")
 	}
+	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
+		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	if w := firstBackup(ctx, cfg, rt, env.Report, db.Name); w != nil {
 		warnings = append(warnings, *w)
 	}
@@ -231,54 +261,52 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDo
 }
 
 // addDatabase checks db's name and role passwords, places it (node, port,
-// stanza, size; stepped down with stepDown), refuses a cluster that could
-// not start, and saves it in cluster.toml without creating anything. It
-// returns the saved configuration, the previous file for a rollback and the
-// step-down warning. db create and db fork share it.
-func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, stepDown bool) (config.Cluster, []byte, config.ClusterSpec, []output.Warning, error) {
+// stanza, the default size), refuses a cluster that could not start or
+// whose size overcommits the server (unless allowOvercommit; suggest is the
+// command at a size that fits), and saves it in cluster.toml without
+// creating anything. It returns the saved configuration and the previous
+// file for a rollback. db create and db fork share it.
+func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string) (config.Cluster, []byte, config.ClusterSpec, error) {
 	store := state.FileStore{}
 	cfg, previous, err := store.Load()
 	if err != nil {
-		return cfg, nil, db, nil, err
+		return cfg, nil, db, err
 	}
 	if _, ok := cfg.ClusterByName(db.Name); ok {
-		return cfg, nil, db, nil, existingDatabase(db.Name)
+		return cfg, nil, db, existingDatabase(db.Name)
 	}
 	if steps.ClusterExists(ctx, db.Name) {
-		return cfg, nil, db, nil, existingDatabase(db.Name)
+		return cfg, nil, db, existingDatabase(db.Name)
 	}
 	for _, role := range steps.DatabaseRoles {
 		key := steps.SecretDatabaseRole(db.Name, role)
 		if env.Req.Secrets[key] == "" {
-			return cfg, nil, db, nil, output.NewError(output.CodeInputRequired, "the password for "+db.Name+"_"+role+" was not supplied", output.ExitInput,
+			return cfg, nil, db, output.NewError(output.CodeInputRequired, "the password for "+db.Name+"_"+role+" was not supplied", output.ExitInput,
 				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
 		}
 	}
 	if err := placeCluster(cfg, &db); err != nil {
-		return cfg, nil, db, nil, err
+		return cfg, nil, db, err
 	}
 	host := runtimeFor(env, false).Host
-	var warnings []output.Warning
-	if stepDown {
-		if w := stepDownSize(cfg, &db, host); w != nil {
-			warnings = append(warnings, *w)
-		}
-	}
 	cfg.Clusters = append(cfg.Clusters, db)
 	if err := cfg.Validate(); err != nil {
-		return cfg, nil, db, nil, config.ValidationError(err)
+		return cfg, nil, db, config.ValidationError(err)
 	}
 	if err := checkStarts(cfg, db, host, 0); err != nil {
-		return cfg, nil, db, nil, err
+		return cfg, nil, db, err
+	}
+	if err := checkBudget(cfg, db.Name, 0, host, allowOvercommit, suggest); err != nil {
+		return cfg, nil, db, err
 	}
 	raw, err := cfg.Encode()
 	if err != nil {
-		return cfg, nil, db, nil, err
+		return cfg, nil, db, err
 	}
 	if err := store.Save(raw); err != nil {
-		return cfg, nil, db, nil, err
+		return cfg, nil, db, err
 	}
-	return cfg, previous, db, warnings, nil
+	return cfg, previous, db, nil
 }
 
 // forgetNewCluster undoes what a failed db create left of a cluster that
@@ -321,26 +349,80 @@ func forgetDatabase(name string) error {
 	return store.Save(raw)
 }
 
-// stepDownSize gives db the largest size up to [postgres] default_size that
-// fits in the server's free budget, and says so when that isn't the
-// default. When even the smallest doesn't fit, db keeps the default and the
-// memory_overcommitted warning tells the rest.
-func stepDownSize(cfg config.Cluster, db *config.ClusterSpec, host hostinfo.Info) *output.Warning {
-	_, sheet := budgetSheet(cfg, host)
-	candidates := sizeCandidates(cfg, *db, host)
-	picked, ok := tune.StepDown(candidates, db.Size, sheet.FreeMiB)
-	if !ok || picked.Size == db.Size {
-		return nil
+// createRuns are the applies db create and db fork run for the new
+// database name, in order, for the request's step numbering: the kernel's
+// huge pages, its own steps, the poolers, the other databases' changed
+// configuration (others) and, with backups on, its stanza and timers.
+func createRuns(cfg config.Cluster, name string, others []string) []engine.Options {
+	runs := []engine.Options{{Only: steps.KernelStepIDs()}, {DB: name}, {Only: steps.PoolerStepIDs()}}
+	if len(others) > 0 {
+		runs = append(runs, engine.Options{Only: others})
 	}
-	over := 0
-	for _, c := range candidates {
-		if c.Size == db.Size {
-			over = c.MemoryMiB - sheet.FreeMiB
+	if cfg.BackupConfigured() {
+		runs = append(runs, engine.Options{Only: append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...)})
+	}
+	return runs
+}
+
+// otherConfigs are the postgres-config-v1 instances of cfg's databases
+// other than except whose rendered configuration changed since it was last
+// applied (reason inputs_changed). Each cluster's tuning depends on the
+// others: its share of the data disk sizes min_wal_size and max_wal_size,
+// and the number of clusters its CPU share. So adding, forking or dropping
+// a database changes them, and db create, db fork and db drop apply them in
+// the same run instead of leaving them to the next eru apply. A database
+// never configured (a cluster still pending) is left to eru apply.
+// journal is the journal path, "" for the node's.
+func otherConfigs(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, except, journal string) []string {
+	var ids []string
+	for _, c := range cfg.Clusters {
+		if c.Name != except {
+			ids = append(ids, steps.ConfigStepID(c.Name))
 		}
 	}
-	message := fmt.Sprintf("created as %s; %s would overcommit this server by %s", picked.Size, db.Size, tune.FormatMiB(over))
-	db.Size = picked.Size
-	return &output.Warning{Code: "size_stepped_down", Message: message}
+	if len(ids) == 0 {
+		return nil
+	}
+	plan, err := engine.Plan(ctx, catalog, cfg, rt, engine.Options{Only: ids, JournalPath: journal})
+	if err != nil {
+		return nil
+	}
+	var changed []string
+	for _, s := range plan.Steps {
+		if s.Action == "apply" && s.Reason == engine.ReasonInputsChanged {
+			changed = append(changed, s.ID)
+		}
+	}
+	return changed
+}
+
+// applyOtherConfigs applies ids, the other databases' changed
+// configuration, as a reload: opts carries no confirm token, so a change
+// that needs a restart restarts nothing and stays pending, with the
+// restart_pending warning naming the token. The database being created or
+// dropped is done by then, so a failure is the warning
+// other_config_failed, which eru apply retries.
+func applyOtherConfigs(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, ids []string, opts engine.Options) []output.Warning {
+	if len(ids) == 0 {
+		return nil
+	}
+	opts.Only, opts.DB, opts.Confirm = ids, "", engine.Confirmation{}
+	_, warnings, err := engine.Apply(ctx, catalog, cfg, rt, opts)
+	if err != nil {
+		return []output.Warning{{Code: "other_config_failed",
+			Message: "the configuration of " + strings.Join(clustersOf(ids), ", ") + " was not updated for the new split of the server: " + err.Error() + "; run eru apply"}}
+	}
+	return warnings
+}
+
+// clustersOf is the cluster of each instance ID.
+func clustersOf(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		_, cluster := engine.SplitID(id)
+		out = append(out, cluster)
+	}
+	return out
 }
 
 // applyNewCluster runs a new cluster's own step instances (create,
@@ -508,9 +590,14 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 				Message: "the stanza " + spec.Stanza + " of " + p.Name + " is kept, but recording it failed: " + err.Error()})
 		}
 	}
+	rt := runtimeFor(env, false)
+	others := otherConfigs(ctx, steps.Catalog(), cfg, rt, "", "")
+	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, dropRuns(cfg, others)...))
 	if err := dropRouting(ctx, env, cfg); err != nil {
 		return Result{}, withHint(err, p.Name+" is dropped, but the poolers or timers still refer to it. Fix it with eru apply.")
 	}
+	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
+		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	data := map[string]any{"dropped": p.Name, "roles_dropped": roles}
 	if inConfig && spec.Stanza != "" {
 		data["stanza_kept"] = spec.Stanza
@@ -538,6 +625,22 @@ func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, final *bac
 	})
 	steps.WriteMetrics(cfg)
 	return err
+}
+
+// dropRuns are the applies db drop runs after the cluster is gone, in
+// order, for the request's step numbering: the poolers (unless it was the
+// last database), the timers, and the other databases' changed
+// configuration (others).
+func dropRuns(cfg config.Cluster, others []string) []engine.Options {
+	var runs []engine.Options
+	if len(cfg.Clusters) > 0 {
+		runs = append(runs, engine.Options{Only: steps.PoolerStepIDs()})
+	}
+	runs = append(runs, engine.Options{Only: steps.TimersStepIDs()})
+	if len(others) > 0 {
+		runs = append(runs, engine.Options{Only: others})
+	}
+	return runs
 }
 
 // dropRouting takes a dropped database out of the poolers and the timers.
@@ -577,12 +680,16 @@ type dbResizeParams struct {
 	// DeferRestart applies what is live (cgroup limits, reload-only
 	// settings) and leaves the restart pending.
 	DeferRestart bool `json:"defer_restart,omitempty"`
+	// AllowOvercommit grows it even past the budget, with the
+	// memory_overcommitted warning.
+	AllowOvercommit bool `json:"allow_overcommit,omitempty"`
 }
 
 // handleDBResize changes a database's size or memory (RFC 7.4). The cgroup
 // limits and reload-only settings change live; shared_buffers,
 // max_connections and huge_pages wait for <db>/restart, or stay pending
-// with defer_restart. A size that could not start is refused; shrinking
+// with defer_restart. A size that could not start is refused, and so is a
+// larger size that overcommits the server unless allow_overcommit; shrinking
 // below what the cluster uses now is a warning.
 func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	var p dbResizeParams
@@ -631,6 +738,10 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err := checkStarts(cfg, resized, rt.Host, freed); err != nil {
 		return Result{}, err
 	}
+	before, _ := env.Cluster.Resources(old)
+	if err := checkBudget(cfg, p.Name, before.MemoryMiB, rt.Host, p.AllowOvercommit, resizeCommand(p, restartConfirmation(cfg, env.Req).Covers(p.Name))); err != nil {
+		return Result{}, err
+	}
 	var warnings []output.Warning
 	res, _ := cfg.Resources(resized)
 	if used, ok := clusterMemoryCurrentMiB(p.Name); ok && used > res.MemoryMiB {
@@ -672,6 +783,21 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	}
 	warnings = append(append(warnings, applyWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
 	return Result{Data: map[string]any{"database": resized, "apply": data}, Warnings: warnings}, nil
+}
+
+// resizeCommand is the db resize command of p at another size, with the
+// request's restart choice: what the memory_overcommitted refusal suggests.
+func resizeCommand(p dbResizeParams, confirmed bool) func(size string) string {
+	return func(size string) string {
+		cmd := "eru db resize " + p.Name + " --size " + size
+		switch {
+		case p.DeferRestart:
+			cmd += " --defer-restart"
+		case confirmed:
+			cmd += " --confirm " + p.Name + "/restart"
+		}
+		return cmd
+	}
 }
 
 // checkDatabaseName refuses names outside the pattern and the system databases.

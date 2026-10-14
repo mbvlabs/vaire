@@ -523,6 +523,9 @@ type backupRowData struct {
 	Dump      *backup.Dump         `json:"last_dump,omitempty"`
 	DroppedAt string               `json:"dropped_at,omitempty"`
 	ExpiresAt string               `json:"expires_at,omitempty"`
+	// Reason is backup.DroppedReasonReplaced when a restore replaced the
+	// stanza; empty means its database was dropped.
+	Reason string `json:"reason,omitempty"`
 }
 
 // backupRowsData is backup.list's result without --db.
@@ -535,13 +538,49 @@ type windowData struct {
 	From       string `json:"from,omitempty"`
 	To         string `json:"to,omitempty"`
 	LagSeconds int64  `json:"archive_lag_seconds"`
+	// UpToDate is set when nothing is waiting to be archived: LagSeconds
+	// is then how long the cluster has been idle, not lag.
+	UpToDate   bool   `json:"up_to_date"`
+	PendingWAL *int64 `json:"pending_wal,omitempty"`
 }
 
+// describe is a live database's restore window in a sentence: its span and
+// whether the WAL archive is up to date or how far behind it is.
 func (w windowData) describe() string {
 	if w.From == "" {
 		return "none yet"
 	}
-	return fmt.Sprintf("%s to %s (archive lag %ds)", w.From, w.To, w.LagSeconds)
+	return w.span() + " (" + w.archiveState() + ")"
+}
+
+// span is the window's start and end, with no archive state: what a
+// dropped or replaced stanza, which archives nothing more, shows.
+func (w windowData) span() string {
+	if w.From == "" {
+		return "none yet"
+	}
+	return w.From + " to " + w.To
+}
+
+// archiveState is "archive up to date" when nothing waits to be archived,
+// else the archive lag with the count of waiting segments when known.
+func (w windowData) archiveState() string {
+	if w.UpToDate {
+		return "archive up to date"
+	}
+	state := "archive lag " + compactDuration(time.Duration(w.LagSeconds)*time.Second)
+	if w.PendingWAL != nil && *w.PendingWAL > 0 {
+		state += fmt.Sprintf(", %d WAL %s waiting", *w.PendingWAL, plural(int(*w.PendingWAL), "segment", "segments"))
+	}
+	return state
+}
+
+// plural is one when n is 1, else many.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // backupDatabases are the databases a backup command runs for: --db, else
@@ -766,7 +805,12 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 	}
 	lines := []string{"Restore window for " + db + ": " + data.Window.describe()}
 	if data.Dropped != nil {
-		lines = append(lines, "Dropped at "+data.Dropped.DroppedAt+"; stanza "+data.Stanza+" is kept until "+data.Dropped.ExpiresAt)
+		ended := "Dropped"
+		if data.Dropped.Replaced() {
+			ended = "Replaced by a restore"
+		}
+		lines = []string{"Restore window for " + db + ": " + data.Window.span(),
+			ended + " at " + data.Dropped.DroppedAt + "; stanza " + data.Stanza + " is kept until " + data.Dropped.ExpiresAt}
 	}
 	lines = append(lines, "", fmt.Sprintf("  %-24s %-5s %-21s %10s %10s", "SET", "TYPE", "FINISHED", "SIZE", "IN REPO"))
 	for _, set := range data.Sets {
@@ -791,14 +835,19 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 }
 
 // backupRowLines renders backup list without --db: a row per database, then
-// the dropped databases' kept stanzas. Times are ages, to keep a row within
-// about 120 columns; backup list --db has the full times.
+// a table of the stanzas kept after their database was dropped or a restore
+// replaced them. Times are ages or minutes, to keep a row within about 120
+// columns; backup list --db has the full times.
 func backupRowLines(data backupRowsData, now time.Time) []string {
 	rows := [][]string{{"DATABASE", "STANZA", "STATUS", "SETS", "LATEST", "VERIFY", "DRILL", "DUMP", "RESTORE WINDOW"}}
-	var dropped []string
+	dropped := [][]string{{"DATABASE", "STANZA", "SETS", "ENDED", "KEPT UNTIL", "WINDOW"}}
 	for _, r := range data.Databases {
 		if r.DroppedAt != "" {
-			dropped = append(dropped, fmt.Sprintf("  %s (%s, %d sets): dropped %s, kept until %s; window %s", r.Database, r.Stanza, r.Sets, r.DroppedAt, r.ExpiresAt, r.Window.describe()))
+			ended := "dropped "
+			if r.Reason == backup.DroppedReasonReplaced {
+				ended = "replaced by restore "
+			}
+			dropped = append(dropped, []string{r.Database, r.Stanza, strconv.Itoa(r.Sets), ended + shortTime(r.DroppedAt), shortTime(r.ExpiresAt), r.Window.shortSpan()})
 			continue
 		}
 		latest, verify, drill, dump := "-", "-", "-", "-"
@@ -817,9 +866,9 @@ func backupRowLines(data backupRowsData, now time.Time) []string {
 		rows = append(rows, []string{r.Database, r.Stanza, r.Status, strconv.Itoa(r.Sets), latest, verify, drill, dump, r.Window.short()})
 	}
 	lines := alignColumns(rows)
-	if len(dropped) > 0 {
-		lines = append(lines, "", "Dropped databases (restorable until their stanza expires):")
-		lines = append(lines, dropped...)
+	if len(dropped) > 1 {
+		lines = append(lines, "", "Kept stanzas of dropped or restore-replaced databases (restorable until KEPT UNTIL):")
+		lines = append(lines, alignColumns(dropped)...)
 	}
 	for name, r := range data.Restores {
 		lines = append(lines, "", "Open restore of "+name+": "+r.Phase+" (target "+r.Target+")")
@@ -827,17 +876,36 @@ func backupRowLines(data backupRowsData, now time.Time) []string {
 	return lines
 }
 
-// short is the restore window in a table cell: where it starts and the
+// short is a live database's restore window in a table cell: where it
+// starts, then "up to date" when nothing waits to be archived, else the
 // archive lag, which says how far behind now it ends.
 func (w windowData) short() string {
 	if w.From == "" {
 		return "none yet"
 	}
-	from := w.From
-	if t, err := time.Parse(time.RFC3339, w.From); err == nil {
-		from = t.UTC().Format("2006-01-02 15:04Z")
+	if w.UpToDate {
+		return "from " + shortTime(w.From) + ", up to date"
 	}
-	return fmt.Sprintf("from %s, lag %s", from, compactDuration(time.Duration(w.LagSeconds)*time.Second))
+	return "from " + shortTime(w.From) + ", lag " + compactDuration(time.Duration(w.LagSeconds)*time.Second)
+}
+
+// shortSpan is a kept stanza's window in a table cell: start and end to the
+// minute.
+func (w windowData) shortSpan() string {
+	if w.From == "" {
+		return "none"
+	}
+	return shortTime(w.From) + " to " + shortTime(w.To)
+}
+
+// shortTime is an RFC 3339 time to the minute in UTC, or as it is when it
+// doesn't parse.
+func shortTime(ts string) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	return t.UTC().Format("2006-01-02 15:04Z")
 }
 
 // compactDuration is d in its largest whole unit: 45s, 12m, 3h, 2d.

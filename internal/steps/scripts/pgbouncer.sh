@@ -13,7 +13,7 @@ set -euo pipefail
 
 systemctl daemon-reload
 for unit in pgbouncer "${SESSION_SERVICE}"; do
-  systemctl enable "${unit}"
+  systemctl --quiet enable "${unit}"
   if systemctl is-active --quiet "${unit}"; then
     systemctl reload "${unit}"
     printf '%s reloaded\n' "${unit}"

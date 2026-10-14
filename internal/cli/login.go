@@ -264,6 +264,8 @@ func runContextRemove(cmd *cobra.Command, args []string) error {
 	if err := Confirm(cmd, name); err != nil {
 		return err
 	}
+	// The tunnel daemon would keep the removed context's tunnel up.
+	stopTunnelDaemonQuietly(name, true)
 	if err := contexts.Remove(name); err != nil {
 		return err
 	}

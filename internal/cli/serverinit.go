@@ -747,6 +747,9 @@ func runInitRemote(cmd *cobra.Command) error {
 
 	// 7. Switch transport to WireGuard as the admin user.
 	r.p.phase("init.transport", "started", "connect over WireGuard to "+n.WGAddress)
+	// Init runs its own tunnel; a daemon left from an earlier context of
+	// this name would hold the tunnel lock and the node's peer.
+	stopTunnelDaemonQuietly(r.name, true)
 	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, config.DefaultFirstOperatorWG, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
 	if err != nil {
 		return err

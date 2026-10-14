@@ -460,7 +460,7 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 	if err := config.CheckDatabaseName(name); err != nil {
 		return output.NewError(output.CodeValidation, "database name "+name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
 	}
-	params := map[string]string{"source": src, "name": name}
+	params := map[string]any{"source": src, "name": name}
 	var at time.Time
 	if v := stringFlag(cmd, "at"); v != "" {
 		t, err := parseTarget(v, time.Now())
@@ -469,6 +469,14 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		}
 		at = t
 		params["at"] = t.Format(time.RFC3339)
+	}
+	// Sent only when set, so an older node still takes the request.
+	size := stringFlag(cmd, "size")
+	if size != "" {
+		params["size"] = size
+	}
+	if flagTrue(cmd, "allow-overcommit") {
+		params["allow_overcommit"] = true
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -479,6 +487,14 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 	cfg, _, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
+	}
+	if size != "" {
+		if spec, ok := cfg.ClusterByName(src); ok {
+			spec.Size, spec.Memory = size, ""
+			if err := checkSizeFlags(cfg, spec); err != nil {
+				return err
+			}
+		}
 	}
 	if !at.IsZero() {
 		p.note("fork point: " + echoTime(at, cfg.Timezone))

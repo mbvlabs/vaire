@@ -615,7 +615,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		delete(s.Timelines, db)
 		s.Leftovers = append(s.Leftovers, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: r.ID, Port: r.Port, Stanza: spec.Stanza})
 		if newStanza != "" {
-			s.DroppedStanzas = append(s.DroppedStanzas, droppedStanza(cfg, spec, oldArchived))
+			s.DroppedStanzas = append(s.DroppedStanzas, replacedStanza(cfg, spec, oldArchived))
 			// The last verify was of the old stanza.
 			delete(s.LastVerify, db)
 		}
@@ -625,6 +625,11 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	}
 	data := map[string]any{"database": db, "pre_restore": aside, "target": r.Target, "swap_ms": took.Milliseconds()}
 	var warn error
+	runs := []engine.Options{{Only: steps.PoolerStepIDs()}}
+	if newStanza != "" {
+		runs = append(runs, stanzaRuns(db)...)
+	}
+	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, runs...))
 	if err := applyPoolers(ctx, cfg, rt, report); err != nil {
 		warn = err
 	}
@@ -680,6 +685,15 @@ func droppedStanza(cfg config.Cluster, spec config.ClusterSpec, lastArchived str
 		ExpiresAt: now.AddDate(0, 0, 7*cfg.RetentionFull(spec)).Format(time.RFC3339), LastArchivedAt: lastArchived}
 }
 
+// replacedStanza records spec's stanza as replaced now by a restore that
+// switched the database to a new stanza, kept for its window like a dropped
+// one.
+func replacedStanza(cfg config.Cluster, spec config.ClusterSpec, lastArchived string) backup.DroppedStanza {
+	d := droppedStanza(cfg, spec, lastArchived)
+	d.Reason = backup.DroppedReasonReplaced
+	return d
+}
+
 // lastArchivedTime is when spec's running cluster last archived a WAL
 // segment (pg_stat_archiver), or "" when it can't be read. pgbackrest info
 // names a stanza's newest segment but not its time, so a stanza about to be
@@ -720,6 +734,12 @@ func switchStanza(cfg config.Cluster, db, to string) (config.Cluster, string, er
 		return cfg, "", err
 	}
 	return cur, to, nil
+}
+
+// stanzaRuns are the applies applyStanza runs, for the request's step
+// numbering.
+func stanzaRuns(db string) []engine.Options {
+	return []engine.Options{{DB: db}, {Only: append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...)}}
 }
 
 // applyStanza points db's archive_command at its stanza (its own steps, a
@@ -845,7 +865,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 					dropped = append(dropped, d)
 				}
 			}
-			s.DroppedStanzas = append(dropped, droppedStanza(cfg, spec, oldArchived))
+			s.DroppedStanzas = append(dropped, replacedStanza(cfg, spec, oldArchived))
 			delete(s.LastVerify, p.Database)
 		}
 		s.Timelines[p.Database] = backup.TimelineSwitch{Stanza: stanza, Timeline: timeline, SwitchedAt: stamp(), Abandoned: abandoned}
@@ -857,6 +877,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	data := map[string]any{"database": p.Database, "restored_from": back.Name, "pre_undo": aside, "timeline": timeline, "stanza": stanza}
 	var warnings []output.Warning
 	if stanza != spec.Stanza {
+		ctx := engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, stanzaRuns(p.Database)...))
 		err = applyStanza(ctx, cfg, p.Database, rt, env.Report)
 	}
 	if err == nil {
@@ -1162,6 +1183,12 @@ type dbForkParams struct {
 	Source string `json:"source"`
 	Name   string `json:"name"`
 	At     string `json:"at,omitempty"`
+	// Size replaces the source's size (and its memory override) for the
+	// fork; empty keeps the source's.
+	Size string `json:"size,omitempty"`
+	// AllowOvercommit forks even when the fork's size pushes the databases'
+	// sizes past the budget, with the memory_overcommitted warning.
+	AllowOvercommit bool `json:"allow_overcommit,omitempty"`
 }
 
 // handleDBFork checks the source, the name, the window (with --at) and room
@@ -1206,7 +1233,11 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	saved, _, created, warnings, err := addDatabase(ctx, env, forkSpec(src, p.Name), false)
+	spec := forkSpec(src, p.Name)
+	if p.Size != "" {
+		spec.Size, spec.Memory = p.Size, ""
+	}
+	saved, _, created, err := addDatabase(ctx, env, spec, p.AllowOvercommit, forkCommand(p))
 	release()
 	if err != nil {
 		return Result{}, err
@@ -1230,9 +1261,20 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	if m, ok := res.Data.(map[string]any); ok {
 		m["database"] = created
 	}
-	res.Warnings = append(res.Warnings, warnings...)
 	res.Warnings = append(res.Warnings, oversubscriptionWarnings(saved, runtimeFor(env, false).Host)...)
 	return res, nil
+}
+
+// forkCommand is the db fork command of p at another size: what the
+// memory_overcommitted refusal suggests.
+func forkCommand(p dbForkParams) func(size string) string {
+	return func(size string) string {
+		cmd := "eru db fork " + p.Source + " --name " + p.Name
+		if p.At != "" {
+			cmd += " --at " + p.At
+		}
+		return cmd + " --size " + size
+	}
 }
 
 // forkSpec is the fork's cluster.toml entry before placeCluster gives it a
@@ -1282,6 +1324,8 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 		return nil, err
 	}
 	rt := jobRuntime(env)
+	others := otherConfigs(ctx, steps.Catalog(), cfg, rt, p.Name, "")
+	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, createRuns(cfg, p.Name, others)...))
 	logLine(env.Report, env.Job, "starting "+p.Name+" with its own configuration")
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
@@ -1295,6 +1339,8 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the poolers were not reloaded, so " + p.Name + " is not reachable through them until eru apply: " + err.Error()})
 	}
+	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
+		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	if w := firstBackup(ctx, cfg, rt, env.Report, p.Name); w != nil {
 		warnings = append(warnings, *w)
 	}

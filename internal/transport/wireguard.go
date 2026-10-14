@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"golang.org/x/crypto/curve25519"
@@ -43,8 +45,9 @@ type WireGuardConfig struct {
 }
 
 // Tunnel is an embedded userspace WireGuard device with a netstack. It needs
-// no root, no kernel interface and no system configuration. It lives for one
-// command and is closed on exit.
+// no root, no kernel interface and no system configuration. The context's
+// tunnel daemon (eru tunnel serve) owns one for all eru processes; eru server
+// init and ERU_TUNNEL=inprocess run one for a single command.
 type Tunnel struct {
 	dev     *device.Device
 	net     *netstack.Net
@@ -96,6 +99,26 @@ func UpWireGuard(cfg WireGuardConfig) (*Tunnel, error) {
 // DialContext dials addr inside the tunnel.
 func (t *Tunnel) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	return t.net.DialContext(ctx, network, addr)
+}
+
+// LastHandshake is when the tunnel last completed a WireGuard handshake,
+// zero before the first one.
+func (t *Tunnel) LastHandshake() time.Time {
+	if t == nil || t.dev == nil {
+		return time.Time{}
+	}
+	state, err := t.dev.IpcGet()
+	if err != nil {
+		return time.Time{}
+	}
+	for _, line := range strings.Split(state, "\n") {
+		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok {
+			if sec, err := strconv.ParseInt(v, 10, 64); err == nil && sec > 0 {
+				return time.Unix(sec, 0)
+			}
+		}
+	}
+	return time.Time{}
 }
 
 // OnClose runs fn once the tunnel is torn down, for example to release a

@@ -95,7 +95,7 @@ func runTunnel(cmd *cobra.Command, _ []string) error {
 	db := stringFlag(cmd, "db")
 	at := databaseEndpoint(cmd, s, p, db)
 	remote := at.addr(remotePort)
-	go proxy(ctx, ln, s.tunnel, remote)
+	go proxy(ctx, ln, s.dialer, remote)
 
 	dbPath := "<db>"
 	if db != "" {

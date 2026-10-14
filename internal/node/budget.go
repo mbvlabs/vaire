@@ -94,8 +94,8 @@ func budgetSheet(cfg config.Cluster, host hostinfo.Info) (tune.Host, tune.Sheet)
 }
 
 // sizeCandidates is spec as each named size, smallest first, with its own
-// memory key dropped: what db create steps down through and what the
-// would_not_start hint picks from.
+// memory key dropped: what the would_not_start and memory_overcommitted
+// hints pick from.
 func sizeCandidates(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) []tune.Demand {
 	out := make([]tune.Demand, 0, len(config.Sizes))
 	for _, size := range config.Sizes {
@@ -142,6 +142,74 @@ func checkStarts(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info
 		hint = "Size " + smallest + " would start: pass --size " + smallest + "."
 	}
 	return output.NewError(output.CodePrecondition, reason+", so PostgreSQL would not start", output.ExitPrecondition, hint).WithDetails(details)
+}
+
+// checkBudget refuses a db create, db fork or upward db resize whose size
+// pushes the databases' sizes past the server's cluster budget
+// (memory_overcommitted), unless allow (--allow-overcommit) says to go
+// ahead with the warning. cfg holds the change; beforeMiB is db's memory
+// before it, 0 for a new database. suggest is the complete command that
+// takes a given size instead.
+func checkBudget(cfg config.Cluster, db string, beforeMiB int, host hostinfo.Info, allow bool, suggest func(size string) string) error {
+	if allow {
+		return nil
+	}
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return nil
+	}
+	_, sheet := budgetSheet(cfg, host)
+	return overcommitRefusal(sheet, demandFor(cfg, spec, host), beforeMiB, sizeCandidates(cfg, spec, host), suggest)
+}
+
+// overcommitRefusal is checkBudget's arithmetic: nil when the sheet fits
+// its budget, when the budget is unknown, or when the change doesn't add
+// memory (a shrink, or the same size). Otherwise the error states the
+// numbers and the largest size that still fits, with the command for it;
+// when none fits, it says so and names the largest other database to
+// resize down. A resize (beforeMiB > 0) only counts sizes above its
+// current memory.
+func overcommitRefusal(sheet tune.Sheet, now tune.Demand, beforeMiB int, candidates []tune.Demand, suggest func(size string) string) error {
+	if sheet.BudgetMiB <= 0 || sheet.FreeMiB >= 0 || now.MemoryMiB <= beforeMiB {
+		return nil
+	}
+	leftMiB := sheet.BudgetMiB - (sheet.AllocatedMiB - now.MemoryMiB)
+	message := fmt.Sprintf("%s at %s (%s) would put %s of database sizes on a %s budget (%s RAM less a %s reserve); %s is left for it",
+		now.Name, now.Size, tune.FormatMiB(now.MemoryMiB), tune.FormatMiB(sheet.AllocatedMiB), tune.FormatMiB(sheet.BudgetMiB),
+		tune.FormatMiB(sheet.RAMMiB), tune.FormatMiB(sheet.ReserveMiB), tune.FormatMiB(max(0, leftMiB)))
+	details := map[string]any{"reason": tune.ReasonMemoryOvercommitted, "database": now.Name, "size": now.Size,
+		"memory_mib": now.MemoryMiB, "allocated_mib": sheet.AllocatedMiB, "budget_mib": sheet.BudgetMiB,
+		"ram_mib": sheet.RAMMiB, "reserve_mib": sheet.ReserveMiB, "left_mib": max(0, leftMiB)}
+	anyway := "To keep " + now.Size + " anyway, add --allow-overcommit: under load the databases are throttled and the page cache shrinks."
+	var hint string
+	if fits := tune.LargestThatFits(candidates, leftMiB, beforeMiB); fits != "" {
+		details["largest_size"] = fits
+		details["suggested_command"] = suggest(fits)
+		hint = "Size " + fits + " fits: " + suggest(fits) + ". " + anyway
+	} else {
+		none := "No size fits in what is left"
+		if beforeMiB > 0 {
+			none = "No size larger than " + tune.FormatMiB(beforeMiB) + " fits in what is left"
+		}
+		hint = none + ": resize another database down with eru db resize"
+		if largest, ok := largestOther(sheet, now.Name); ok {
+			hint += " (the largest is " + largest.Name + " at " + largest.Size + ", " + tune.FormatMiB(largest.MemoryMiB) + ")"
+		}
+		hint += ", or move to a bigger server. " + anyway
+	}
+	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).WithDetails(details)
+}
+
+// largestOther is the sheet's largest database other than name.
+func largestOther(sheet tune.Sheet, name string) (tune.Demand, bool) {
+	var out tune.Demand
+	found := false
+	for _, c := range sheet.Clusters {
+		if c.Name != name && (!found || c.MemoryMiB > out.MemoryMiB) {
+			out, found = c, true
+		}
+	}
+	return out, found
 }
 
 // clusterRunning reports whether spec's postmaster holds its socket.

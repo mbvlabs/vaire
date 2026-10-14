@@ -50,7 +50,7 @@ func runPsql(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	at := databaseEndpoint(cmd, s, p, db)
-	go proxy(ctx, ln, s.tunnel, at.addr(pgPort))
+	go proxy(ctx, ln, s.dialer, at.addr(pgPort))
 
 	psqlPath, err := exec.LookPath("psql")
 	if err != nil {

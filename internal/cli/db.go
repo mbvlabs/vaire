@@ -166,6 +166,9 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	if db.Protected {
 		params["protected"] = true
 	}
+	if flagTrue(cmd, "allow-overcommit") {
+		params["allow_overcommit"] = true
+	}
 	reply, err := p.call(commandContext(cmd), s.node, "db.create", params, remote.CallOptions{Secrets: rpc, OnEvent: p.event})
 	if err != nil {
 		return createInterrupted(cmd, err, name, name+" ("+sizeSummary(cfg, db)+")", secret)
@@ -247,9 +250,12 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	}
 	deferRestart := flagTrue(cmd, "defer-restart")
 	confirm, confirms := confirmOptions(cmd)
-	reply, err := p.call(commandContext(cmd), s.node, "db.resize", map[string]any{
-		"name": name, "size": size, "memory": memory, "defer_restart": deferRestart,
-	}, remote.CallOptions{DryRun: dryRun(cmd), Confirm: confirm, Confirms: confirms, OnEvent: p.event})
+	params := map[string]any{"name": name, "size": size, "memory": memory, "defer_restart": deferRestart}
+	// Sent only when set, so an older node still takes the request.
+	if flagTrue(cmd, "allow-overcommit") {
+		params["allow_overcommit"] = true
+	}
+	reply, err := p.call(commandContext(cmd), s.node, "db.resize", params, remote.CallOptions{DryRun: dryRun(cmd), Confirm: confirm, Confirms: confirms, OnEvent: p.event})
 	if err != nil {
 		return err
 	}

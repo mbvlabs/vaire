@@ -372,6 +372,13 @@ FROM pg_stat_archiver`, nil)
 	if t, err := time.Parse(time.RFC3339, st.LastArchivedTime); err == nil {
 		st.LagSeconds = int64(time.Since(t).Seconds())
 	}
+	// Finished segments the archiver hasn't taken yet. Unknown (nil) when
+	// the directory can't be listed; callers then fall back to the lag.
+	if ready, err := p.PG.Query(ctx, "postgres", `SELECT count(*) AS ready FROM pg_ls_archive_statusdir() WHERE name LIKE '%.ready'`, nil); err == nil && len(ready) > 0 {
+		if n, err := strconv.ParseInt(ready[0]["ready"], 10, 64); err == nil {
+			st.PendingWAL = &n
+		}
+	}
 	return st, nil
 }
 

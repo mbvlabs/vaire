@@ -58,7 +58,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	defer stop()
 	at := databaseEndpoint(cmd, s, p, db)
 	tlsCfg := pg.TLSConfig(pg.Params{ServerName: at.Hostname, TLSMode: s.ctx.TLSMode})
-	go pg.ServeTLSProxy(ctx, ln, s.tunnel, at.addr(pgPort), tlsCfg)
+	go pg.ServeTLSProxy(ctx, ln, s.dialer, at.addr(pgPort), tlsCfg)
 
 	if s.ctx.TLSMode == "self-signed" {
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning: the cluster uses a self-signed certificate; the connection is encrypted but not verified")

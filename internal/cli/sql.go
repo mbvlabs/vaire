@@ -130,7 +130,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	// events; the waiting line shows them. It ends before the result prints.
 	stopWait := p.wait("connecting to " + db)
 	defer stopWait()
-	conn, err := pg.Connect(ctx, s.tunnel, pg.Params{
+	conn, err := pg.Connect(ctx, s.dialer, pg.Params{
 		Host: at.WGAddress, Port: pgPort, ServerName: at.Hostname, TLSMode: s.ctx.TLSMode,
 		User: user, Password: password, Database: db,
 	})

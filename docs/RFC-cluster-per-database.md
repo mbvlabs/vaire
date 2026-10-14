@@ -291,23 +291,23 @@ Every cluster has a **size**, the way a provider's instance has a plan. A size s
 | `xlarge` | 4 GiB | 400 | 200 | A busy database, usually on its own node (7.6) |
 
 - **Explicit values win.** `size = "small"` plus `memory = "768MiB"` is a small with more memory. `size = "custom"` means only the explicit keys count. `cpu_quota`, `memory_max` and `io_weight` (7.2) stay separate opt-ins.
-- **A decent default.** `[postgres] default_size` (default `medium`) applies when `db create` gets no `--size`. If the default doesn't fit in the free budget, eru **steps down** to the largest size that fits and says so ("created as `small`; `medium` would overcommit this server by 300 MiB"). If even `nano` doesn't fit, it creates the default size and warns (7.5).
-- **Resizing up or down:** `eru db resize <db> --size large` (or `config set clusters.app.size large`). The cgroup limits and reload-only settings change live. `shared_buffers`, `max_connections` and `huge_pages` need a restart, so the plan shows "restart needed" and asks for `<cluster>/restart`. With `--defer-restart`, the rest applies now and the restart waits for the next maintenance window. Shrinking below what the cluster uses right now is a warning, not a refusal.
+- **A decent default.** `[postgres] default_size` (default `medium`) applies when `db create` gets no `--size`. If it doesn't fit in the free budget, `db create` is refused like any other size that doesn't fit, and the error names the largest size that does, with the command (7.5). eru never picks a smaller size by itself.
+- **Resizing up or down:** `eru db resize <db> --size large` (or `config set clusters.app.size large`). The cgroup limits and reload-only settings change live. `shared_buffers`, `max_connections` and `huge_pages` need a restart, so the plan shows "restart needed" and asks for `<cluster>/restart`. With `--defer-restart`, the rest applies now and the restart waits for the next maintenance window. Growing past the budget is refused unless `--allow-overcommit` (7.5). Shrinking below what the cluster uses right now is a warning, not a refusal.
 - **Per-node defaults later:** a worker added as a dedicated node (7.6) gives its one database the whole node's budget by default.
 
-### 7.5 Oversubscription: warnings, not refusals
+### 7.5 Oversubscription: refused unless allowed
 
-The user decides how full a server gets. eru's job is to make the consequences visible, and to refuse only what can't work.
+The user decides how full a server gets, but overcommitting is an explicit choice. eru refuses a new or larger size that would overcommit the server unless the user passes `--allow-overcommit`, makes the consequences visible, and always refuses what can't work.
 
 | Situation | What eru does |
 | --- | --- |
 | **Fits:** the sum of sizes ≤ the cluster budget | Nothing |
-| **Overcommitted:** the sum > budget, but every cluster's shared memory still fits within `CommitLimit` and the huge-page pool | **Warning** `memory_overcommitted` in `db create`, `db resize`, `plan`, `status` and `doctor`, with the numbers ("4.5 GiB of sizes on a 3 GiB budget") and the options: shrink these, move one to a node, or a bigger VPS. It goes ahead. Under load, the result is throttling (`MemoryHigh`) and a smaller page cache, not crashes |
+| **Overcommitted:** the sum > budget, but every cluster's shared memory still fits within `CommitLimit` and the huge-page pool | **Refused** in `db create` (with or without `--size`), `db fork` and a growing `db resize` when the new or larger size takes the sum past the budget: `precondition_failed`, reason `memory_overcommitted`, with the numbers ("big2 at medium (1 GiB) would put 6 GiB of database sizes on a 5.7 GiB budget") and the largest size that still fits as a complete command (`eru db create big2 --size small`), or, when none fits, that none does and to resize another database down or use a bigger server. Nothing steps down by itself. With `--allow-overcommit` it goes ahead with the **warning** `memory_overcommitted`, which `plan`, `status` and `doctor` repeat with the options: shrink these, move one to a node, or a bigger VPS. Under load, the result is throttling (`MemoryHigh`) and a smaller page cache, not crashes. Shrinking is never refused |
 | **Crowded CPU:** clusters > 2 × vCPU, or the sum of `cpu_quota` > 100% × vCPU | Warning `cpu_crowded`. Weights are relative, so CPU is never "over" by itself |
 | **Disk:** data sizes plus each `max_wal_size` plus the archive spool > 80% of the disk | Warning `disk_crowded`, and a doctor failure at 90% |
 | **Can't start:** the cluster's shared memory doesn't fit in what's left of `CommitLimit`, or huge pages are required and the pool can't grow | **Refused**, `would_not_start`, with the arithmetic. PostgreSQL would fail at start-up anyway, so this isn't policy. The hint is the smallest size that would start |
 
-There's no `--force` for warnings because they never block. Every warning has a stable code for agents, and `eru tune show` always prints the server's sheet:
+The only override is `--allow-overcommit`, for the memory budget; the other warnings never block. Every warning has a stable code for agents, and `eru tune show` always prints the server's sheet:
 
 ```
 server db1   8 GiB RAM · 4 vCPU · reserve 2 GiB · budget 6 GiB
@@ -678,7 +678,7 @@ The design is one database per cluster by default, sized and limited, one hostna
 - **Recovery needs the bucket and the recovery kit.** Lose both and the master can only be re-created, not rebuilt. That's what explicit storage is for, and why `doctor` warns until a bucket exists (6.5).
 - **Split brain is possible during a rebuild** if the old master comes back. The epoch fences eru's own writes, not pgBackRest's `archive-push`, so "power off the old VPS first" is a rule the user has to follow.
 - **Sizes are soft.** `MemoryHigh` throttles, it doesn't partition. Disk space and the page cache stay shared, and I/O weights depend on the disk scheduler. A provider's VM is a harder boundary.
-- **Warnings can be ignored.** A user who overcommits a 2 GiB VPS will get a slow server, and support questions that start "eru is slow".
+- **Overcommitting is one flag away.** A user who passes `--allow-overcommit` on a 2 GiB VPS will get a slow server, and support questions that start "eru is slow".
 - **More moving parts per server:** N clusters, N stanzas, two poolers, per-cluster timers, cgroups, plus the bundle job.
 - **Moving a database changes its URL's host.** That's the price of one DNS record per server. How to soften it is decided with Phase 10's load-balancing choices (7.6).
 - **Teams are deferred.** Concurrent operators, scoped access, auditing and access control aren't designed here, and a proper team setup isn't worth building now. The hub and the single desired-state file should extend to them (base revisions already reject stale writes), but that's an assumption, not a design.

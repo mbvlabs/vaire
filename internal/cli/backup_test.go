@@ -52,6 +52,87 @@ func TestBackupRowLines(t *testing.T) {
 	}
 }
 
+func TestBackupRowLinesIdleVsLagging(t *testing.T) {
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	zero, three := int64(0), int64(3)
+	data := backupRowsData{Databases: []backupRowData{
+		{Database: "idle", Stanza: "idle-1", Status: "ok", Sets: 1,
+			Window: windowData{From: "2026-10-14T09:00:01Z", To: "2026-10-14T10:00:00Z", LagSeconds: 7200, UpToDate: true, PendingWAL: &zero}},
+		{Database: "busy", Stanza: "busy-1", Status: "ok", Sets: 2,
+			Window: windowData{From: "2026-10-14T09:00:01Z", To: "2026-10-14T11:51:00Z", LagSeconds: 540, PendingWAL: &three}},
+	}}
+	lines := backupRowLines(data, now)
+	if !strings.Contains(lines[1], "from 2026-10-14 09:00Z, up to date") || strings.Contains(lines[1], "lag") {
+		t.Errorf("idle row: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "from 2026-10-14 09:00Z, lag 9m") {
+		t.Errorf("lagging row: %q", lines[2])
+	}
+	idle := data.Databases[0].Window.describe()
+	if idle != "2026-10-14T09:00:01Z to 2026-10-14T10:00:00Z (archive up to date)" {
+		t.Errorf("idle describe = %q", idle)
+	}
+	busy := data.Databases[1].Window.describe()
+	if busy != "2026-10-14T09:00:01Z to 2026-10-14T11:51:00Z (archive lag 9m, 3 WAL segments waiting)" {
+		t.Errorf("lagging describe = %q", busy)
+	}
+	one := int64(1)
+	w := windowData{From: "x", To: "y", LagSeconds: 30, PendingWAL: &one}
+	if got := w.archiveState(); got != "archive lag 30s, 1 WAL segment waiting" {
+		t.Errorf("one waiting = %q", got)
+	}
+}
+
+func TestPlural(t *testing.T) {
+	for n, want := range map[int]string{0: "sets", 1: "set", 2: "sets"} {
+		if got := plural(n, "set", "sets"); got != want {
+			t.Errorf("plural(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestBackupRowLinesKeptStanzas(t *testing.T) {
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	window := windowData{From: "2026-10-14T10:21:21Z", To: "2026-10-14T10:21:21Z"}
+	data := backupRowsData{Databases: []backupRowData{
+		{Database: "app2", Stanza: "app2-506c21", Status: "ok", Sets: 1,
+			Window: windowData{From: "2026-10-14T09:00:01Z", To: "2026-10-14T10:00:00Z", UpToDate: true}},
+		{Database: "app", Stanza: "app-c273db", Status: "ok", Sets: 1, Window: window,
+			DroppedAt: "2026-10-14T10:23:22Z", ExpiresAt: "2026-10-21T10:23:22Z"},
+		{Database: "app2", Stanza: "app2-111111", Status: "ok", Sets: 2, Window: window,
+			DroppedAt: "2026-10-14T11:00:00Z", ExpiresAt: "2026-10-21T11:00:00Z", Reason: backup.DroppedReasonReplaced},
+	}}
+	lines := backupRowLines(data, now)
+	text := strings.Join(lines, "\n")
+	if strings.Contains(text, "archive lag") || strings.Contains(text, "lag 0s") {
+		t.Errorf("kept stanzas show a lag:\n%s", text)
+	}
+	var header, dropped, replaced string
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, "KEPT UNTIL"):
+			header = l
+		case strings.Contains(l, "app-c273db"):
+			dropped = l
+		case strings.Contains(l, "app2-111111"):
+			replaced = l
+		}
+	}
+	for _, col := range []string{"DATABASE", "STANZA", "SETS", "ENDED", "KEPT UNTIL", "WINDOW"} {
+		if !strings.Contains(header, col) {
+			t.Errorf("kept header lacks %s: %q", col, header)
+		}
+	}
+	for _, want := range []string{"dropped 2026-10-14 10:23Z", "2026-10-21 10:23Z", "2026-10-14 10:21Z to 2026-10-14 10:21Z"} {
+		if !strings.Contains(dropped, want) {
+			t.Errorf("dropped row lacks %q: %q", want, dropped)
+		}
+	}
+	if !strings.Contains(replaced, "replaced by restore 2026-10-14 11:00Z") || strings.Contains(replaced, "dropped") {
+		t.Errorf("replaced row: %q", replaced)
+	}
+}
+
 func TestNotStarted(t *testing.T) {
 	dbs := []string{"app", "other", "third"}
 	if got := notStarted(dbs, nil); !slices.Equal(got, []string{"other", "third"}) {

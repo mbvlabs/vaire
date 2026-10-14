@@ -141,8 +141,28 @@ type ArchiveStatus struct {
 	FailedCount      int64  `json:"failed_count"`
 	LastFailedWAL    string `json:"last_failed_wal,omitempty"`
 	LastFailedTime   string `json:"last_failed_time,omitempty"`
-	// LagSeconds is how long ago the last segment was archived.
+	// LagSeconds is how long ago the last segment was archived. On an idle
+	// cluster that is not lag: see UpToDate.
 	LagSeconds int64 `json:"lag_seconds"`
+	// PendingWAL is the count of finished segments waiting to be archived
+	// (.ready files in pg_wal/archive_status), nil when it can't be read.
+	PendingWAL *int64 `json:"pending_wal,omitempty"`
+}
+
+// UpToDate reports whether the archiver has caught up: it has archived a
+// segment, no finished segment is waiting, and it hasn't failed since its
+// last success. WAL in the current, unfinished segment is not archived yet
+// either way; on an idle cluster there is none worth the name.
+func (a ArchiveStatus) UpToDate() bool {
+	if a.LastArchivedWAL == "" || a.PendingWAL == nil || *a.PendingWAL > 0 {
+		return false
+	}
+	if a.FailedCount == 0 || a.LastFailedTime == "" {
+		return true
+	}
+	failed, errF := time.Parse(time.RFC3339, a.LastFailedTime)
+	archived, errA := time.Parse(time.RFC3339, a.LastArchivedTime)
+	return errF == nil && errA == nil && !failed.After(archived)
 }
 
 // Restore target types.

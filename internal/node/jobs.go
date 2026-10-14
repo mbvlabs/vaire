@@ -637,35 +637,72 @@ func streamJournal(ctx context.Context, args []string, report engine.Reporter) {
 	}
 	sc := bufio.NewScanner(out)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	var f journalFilter
 	for sc.Scan() {
-		line := sc.Text()
-		var ev output.Event
-		if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &ev) == nil && ev.Schema == output.EventSchema {
-			if ev.Type == "result" || ev.Type == "" {
-				continue
-			}
-			ev.TS = ""
+		if ev, ok := f.event(sc.Text()); ok {
 			report(ev)
-			continue
 		}
-		if strings.HasPrefix(line, "{") && strings.Contains(line, `"schema":"eru/v1"`) {
-			// The job's final envelope; the record carries the result.
-			continue
-		}
-		if journalNoise(line) {
-			continue
-		}
-		report(output.Event{Type: "log", Step: "job", Line: line})
 	}
 	_ = cmd.Wait()
 }
 
+// journalFilter turns a job's journal lines into the events a follower
+// sees. eru node run --output json writes one event per line and, at the
+// end, its result envelope indented over many lines: the envelope is
+// dropped (the job record carries the result, and the follower prints its
+// result line from that), as are result events and journalNoise.
+type journalFilter struct {
+	inEnvelope bool
+}
+
+// event is the event for one journal line, or false when the line is
+// dropped.
+func (f *journalFilter) event(line string) (output.Event, bool) {
+	if f.inEnvelope {
+		// The envelope's closing brace is the only unindented line in it.
+		if line == "}" {
+			f.inEnvelope = false
+		}
+		return output.Event{}, false
+	}
+	if line == "{" {
+		f.inEnvelope = true
+		return output.Event{}, false
+	}
+	var ev output.Event
+	if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &ev) == nil && ev.Schema == output.EventSchema {
+		if ev.Type == "result" || ev.Type == "" {
+			return output.Event{}, false
+		}
+		ev.TS = ""
+		return ev, true
+	}
+	if strings.HasPrefix(line, "{") && strings.Contains(line, `"schema":"eru/v1"`) {
+		// A compact final envelope.
+		return output.Event{}, false
+	}
+	if journalNoise(line) {
+		return output.Event{}, false
+	}
+	return output.Event{Type: "log", Step: "job", Line: line}, true
+}
+
 // journalNoise reports whether a journal line is not the job's own: the
 // pam_unix session lines runuser writes each time a job runs a command as
-// postgres.
+// postgres, and the SysV sync lines systemctl enable writes for a unit
+// with an init script (pgbouncer, nginx) when run without --quiet.
 func journalNoise(line string) bool {
 	return strings.Contains(line, "pam_unix(runuser:session): session opened") ||
-		strings.Contains(line, "pam_unix(runuser:session): session closed")
+		strings.Contains(line, "pam_unix(runuser:session): session closed") ||
+		systemdSysvNoise(line)
+}
+
+// systemdSysvNoise reports whether line is one of systemctl enable's SysV
+// compatibility messages.
+func systemdSysvNoise(line string) bool {
+	return strings.Contains(line, "with SysV service script with") ||
+		strings.Contains(line, "Executing: /usr/lib/systemd/systemd-sysv-install") ||
+		strings.Contains(line, "Executing: /lib/systemd/systemd-sysv-install")
 }
 
 type jobFollowParams struct {

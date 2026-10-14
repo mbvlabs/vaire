@@ -218,14 +218,21 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	report := opts.Report
 	total := len(selected)
 	data := ApplyData{Steps: make([]ApplyStep, 0, total), Total: total}
+	// The events carry the request's numbering when it runs several applies
+	// (see Numbering); the result keeps this run's own.
+	offset, shown := 0, total
+	if n := numberingFrom(ctx); n != nil {
+		offset, shown = n.span(total)
+	}
 	var warnings []output.Warning
 	for i, step := range selected {
 		id := step.ID()
 		_, cluster := SplitID(id)
 		index := i + 1
+		at := offset + index
 		d, err := decide(ctx, step, cfg, rt, j)
 		if err != nil {
-			return data, nil, failStep(j, path, opts, id, index, total, decision{}, err)
+			return data, nil, failStep(j, path, opts, id, index, at, shown, decision{}, err)
 		}
 		if !d.apply {
 			if d.reason == ReasonCheck {
@@ -238,12 +245,12 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 					return data, nil, err
 				}
 			}
-			report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(index), Total: intPtr(total), Detail: d.reason})
+			report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(at), Total: intPtr(shown), Detail: d.reason})
 			data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: d.reason})
 			data.Skipped++
 			continue
 		}
-		report.emit(output.Event{Type: "step", Step: id, State: "started", Index: intPtr(index), Total: intPtr(total), Detail: step.Describe(cfg)})
+		report.emit(output.Event{Type: "step", Step: id, State: "started", Index: intPtr(at), Total: intPtr(shown), Detail: step.Describe(cfg)})
 		if err := j.setEntry(path, id, JournalEntry{Status: StatusRunning, InputsHash: d.hash, StartedAt: now()}); err != nil {
 			return data, nil, err
 		}
@@ -255,7 +262,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			if ctx.Err() != nil {
 				err = ErrInterrupted
 			}
-			return data, nil, failStep(j, path, opts, id, index, total, d, err)
+			return data, nil, failStep(j, path, opts, id, index, at, shown, d, err)
 		}
 		restart := res.Restart
 		if restart == "" {
@@ -274,7 +281,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		}); err != nil {
 			return data, nil, err
 		}
-		report.emit(output.Event{Type: "step", Step: id, State: "completed", Index: intPtr(index), Total: intPtr(total), Detail: strings.Join(res.Notes, "; ")})
+		report.emit(output.Event{Type: "step", Step: id, State: "completed", Index: intPtr(at), Total: intPtr(shown), Detail: strings.Join(res.Notes, "; ")})
 		warnings = append(warnings, res.Warnings...)
 		data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "completed", Restart: string(restart)})
 		data.Applied++
@@ -407,7 +414,9 @@ func InputsHash(id string, inputs []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func failStep(j *Journal, path string, opts Options, id string, index, total int, d decision, cause error) error {
+// failStep records id failed. index is its place in this run (the error's
+// details); at and shown are the numbers its event prints.
+func failStep(j *Journal, path string, opts Options, id string, index, at, shown int, d decision, cause error) error {
 	msg := secrets.Redact(cause.Error())
 	entry := j.Steps[id]
 	entry.Status = StatusFailed
@@ -416,7 +425,7 @@ func failStep(j *Journal, path string, opts Options, id string, index, total int
 	}
 	entry.Error = msg
 	saveErr := j.setEntry(path, id, entry)
-	opts.Report.emit(output.Event{Type: "step", Step: id, State: "failed", Index: intPtr(index), Total: intPtr(total), Detail: msg})
+	opts.Report.emit(output.Event{Type: "step", Step: id, State: "failed", Index: intPtr(at), Total: intPtr(shown), Detail: msg})
 	err := stepFailed(id, index, cause)
 	if opts.FailureHint != "" {
 		err.Hint = opts.FailureHint

@@ -105,7 +105,20 @@ type DroppedStanza struct {
 	// the stanza before the drop: the end of its restore window. pgbackrest
 	// info names the newest segment, not its time.
 	LastArchivedAt string `json:"last_archived_at,omitempty"`
+	// Reason is why the stanza stopped being the database's: empty for db
+	// drop (records from before the field mean that too), or
+	// DroppedReasonReplaced when a restore from a dump, or its undo, gave
+	// the live database a new stanza.
+	Reason string `json:"reason,omitempty"`
 }
+
+// DroppedReasonReplaced marks a stanza kept after restore promote (or undo)
+// switched its database to another stanza.
+const DroppedReasonReplaced = "replaced"
+
+// Replaced reports whether a restore replaced the stanza, rather than db
+// drop dropping its database.
+func (d DroppedStanza) Replaced() bool { return d.Reason == DroppedReasonReplaced }
 
 // Restore phases.
 const (

@@ -51,7 +51,7 @@ fi
 
 nginx -t
 systemctl daemon-reload
-systemctl enable nginx
+systemctl --quiet enable nginx
 systemctl reload-or-restart nginx
 # timers-v1 installs and enables the hourly eru-certs.timer; issuance starts
 # here so the certificate doesn't wait for it.

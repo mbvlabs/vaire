@@ -85,3 +85,8 @@ func KernelStepIDs() []string { return []string{kernelTuningID} }
 
 // TuneStepIDs are the steps tune.apply runs.
 func TuneStepIDs() []string { return []string{kernelTuningID, postgresConfigID} }
+
+// ConfigStepID is cluster's postgres-config-v1 instance. db create, db fork
+// and db drop run it for the other databases whose share of the server
+// changed.
+func ConfigStepID(cluster string) string { return engine.InstanceID(postgresConfigID, cluster) }

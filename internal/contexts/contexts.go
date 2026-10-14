@@ -53,8 +53,12 @@ type Context struct {
 	// lockdown over WireGuard (§8.5). Until then the first remote command
 	// calls ssh.confirm.
 	LockdownConfirmedAt string `toml:"lockdown_confirmed_at,omitempty" json:"lockdown_confirmed_at,omitempty"`
-	CreatedAt           string `toml:"created_at" json:"created_at"`
-	EruVersion          string `toml:"eru_version" json:"eru_version"`
+	// TunnelPersist is how long the context's tunnel daemon stays up with
+	// no eru command using it, as a Go duration ("10m", "0" exits with the
+	// last command). ERU_TUNNEL_PERSIST overrides it.
+	TunnelPersist string `toml:"tunnel_persist,omitempty" json:"tunnel_persist,omitempty"`
+	CreatedAt     string `toml:"created_at" json:"created_at"`
+	EruVersion    string `toml:"eru_version" json:"eru_version"`
 }
 
 // Node is one node the context can reach: its name, hostname and WireGuard

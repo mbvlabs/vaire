@@ -206,6 +206,13 @@ type Window struct {
 	From       string `json:"from,omitempty"`
 	To         string `json:"to,omitempty"`
 	LagSeconds int64  `json:"archive_lag_seconds"`
+	// UpToDate is set when the archiver has caught up (nothing waiting, no
+	// failure since the last success): LagSeconds is then only how long
+	// the cluster has been idle, not lag.
+	UpToDate bool `json:"up_to_date"`
+	// PendingWAL is the count of finished segments waiting to be archived,
+	// when it could be read.
+	PendingWAL *int64 `json:"pending_wal,omitempty"`
 }
 
 // backupList is backup.list's result for one database (--db).
@@ -236,9 +243,12 @@ type backupRow struct {
 	Verify   *backup.VerifyResult `json:"last_verify,omitempty"`
 	Drill    *backup.Drill        `json:"last_drill,omitempty"`
 	Dump     *backup.Dump         `json:"last_dump,omitempty"`
-	// DroppedAt and ExpiresAt are set on a dropped database's row.
+	// DroppedAt and ExpiresAt are set on a dropped database's row, and
+	// Reason when its stanza was replaced rather than dropped
+	// (backup.DroppedReasonReplaced).
 	DroppedAt string `json:"dropped_at,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 type dumpPolicy struct {
@@ -290,7 +300,7 @@ func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (
 	for _, d := range rs.DroppedStanzas {
 		row := listRow(d.Database, d.Stanza, infos[d.Stanza], droppedArchive(d), rs)
 		row.Verify, row.Drill, row.Dump = nil, nil, nil
-		row.DroppedAt, row.ExpiresAt = d.DroppedAt, d.ExpiresAt
+		row.DroppedAt, row.ExpiresAt, row.Reason = d.DroppedAt, d.ExpiresAt, d.Reason
 		rows = append(rows, row)
 	}
 	if empty > 0 {
@@ -397,7 +407,7 @@ func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, d
 // archived WAL segment, or the newest backup's end when the archive time is
 // unknown or older. It never ends before it starts.
 func restoreWindow(info backup.Info, archive backup.ArchiveStatus) Window {
-	w := Window{LagSeconds: archive.LagSeconds}
+	w := Window{LagSeconds: archive.LagSeconds, UpToDate: archive.UpToDate(), PendingWAL: archive.PendingWAL}
 	if oldest, ok := info.Oldest(); ok {
 		// pgBackRest picks a set whose stop time is strictly before the
 		// target, and stores it in whole seconds: the first restorable

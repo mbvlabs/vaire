@@ -4,19 +4,50 @@ import (
 	"os"
 	"testing"
 
+	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
 )
 
 func TestJournalNoise(t *testing.T) {
 	for line, want := range map[string]bool{
-		"pam_unix(runuser:session): session opened for user postgres(uid=106) by (uid=0)": true,
-		"pam_unix(runuser:session): session closed for user postgres":                     true,
-		"backup 20261014-101010F finished":                                                false,
-		"pam_unix(sshd:session): session opened for user root":                            false,
+		"pam_unix(runuser:session): session opened for user postgres(uid=106) by (uid=0)":                               true,
+		"pam_unix(runuser:session): session closed for user postgres":                                                   true,
+		"backup 20261014-101010F finished":                                                                              false,
+		"pam_unix(sshd:session): session opened for user root":                                                          false,
+		"Synchronizing state of pgbouncer.service with SysV service script with /usr/lib/systemd/systemd-sysv-install.": true,
+		"Executing: /usr/lib/systemd/systemd-sysv-install enable pgbouncer":                                             true,
+		"pgbouncer started": false,
 	} {
 		if got := journalNoise(line); got != want {
 			t.Errorf("journalNoise(%q) = %v, want %v", line, got, want)
 		}
+	}
+}
+
+func TestJournalFilterDropsEnvelope(t *testing.T) {
+	lines := []string{
+		`{"schema":"eru-event/v1","type":"step","step":"backup","ts":"2026-10-14T12:00:00Z"}`,
+		"backup 20261014-101010F finished",
+		"Executing: /usr/lib/systemd/systemd-sysv-install enable pgbouncer",
+		`{"schema":"eru-event/v1","type":"result"}`,
+		"{",
+		`  "schema": "eru/v1",`,
+		`  "ok": true,`,
+		`  "data": {`,
+		`    "label": "20261014-101010F"`,
+		`  }`,
+		"}",
+		"after",
+	}
+	var f journalFilter
+	var got []output.Event
+	for _, l := range lines {
+		if ev, ok := f.event(l); ok {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 3 || got[0].Type != "step" || got[0].TS != "" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after" {
+		t.Fatalf("events = %+v", got)
 	}
 }
 

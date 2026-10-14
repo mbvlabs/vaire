@@ -5,9 +5,10 @@ import (
 	"strings"
 )
 
-// Oversubscription (RFC 7.5): the user decides how full a server gets. These
-// functions turn the server's facts and each cluster's claim into the
-// budget sheet, the warnings, and the one refusal, would_not_start.
+// Oversubscription (RFC 7.5): these functions turn the server's facts and
+// each cluster's claim into the budget sheet, the warnings, and the
+// refusals: memory_overcommitted (a new or larger size past the budget,
+// unless the user allows it) and would_not_start.
 
 // Warning codes. They are stable for agents.
 const (
@@ -15,6 +16,9 @@ const (
 	WarnCPUCrowded          = "cpu_crowded"
 	WarnDiskCrowded         = "disk_crowded"
 	ReasonWouldNotStart     = "would_not_start"
+	// ReasonMemoryOvercommitted is the refusal's reason: the same code as
+	// the warning --allow-overcommit turns it into.
+	ReasonMemoryOvercommitted = WarnMemoryOvercommitted
 )
 
 // Thresholds from RFC 7.5 and 7.7.
@@ -96,7 +100,9 @@ func NewSheet(h Host, clusters []Demand) Sheet {
 }
 
 // Warnings are the sheet's memory_overcommitted, cpu_crowded and
-// disk_crowded warnings. None of them blocks anything.
+// disk_crowded warnings. db create, db resize and db fork refuse a change
+// that overcommits (see the node's checkBudget) unless it is allowed; the
+// warnings then describe the server as it is.
 func (s Sheet) Warnings(h Host) []Warning {
 	var out []Warning
 	if s.FreeMiB < 0 {
@@ -174,22 +180,18 @@ func SmallestThatStarts(h Host, candidates []Demand, freedMiB int) string {
 	return ""
 }
 
-// StepDown picks the size db create uses when it gets no --size (RFC 7.4):
-// the default when it fits in freeMiB, else the largest smaller candidate
-// that does. ok is false when even the smallest doesn't fit; the caller
-// then keeps the default and warns.
-func StepDown(candidates []Demand, defaultSize string, freeMiB int) (Demand, bool) {
-	var picked Demand
-	found := false
+// LargestThatFits is the largest of candidates (smallest first) whose
+// memory fits in freeMiB and is above aboveMiB, or "" when none does. db
+// create and db fork pass 0; db resize passes the database's current memory,
+// so only a larger size counts.
+func LargestThatFits(candidates []Demand, freeMiB, aboveMiB int) string {
+	picked := ""
 	for _, c := range candidates {
-		if c.MemoryMiB <= freeMiB {
-			picked, found = c, true
-		}
-		if c.Size == defaultSize {
-			break
+		if c.MemoryMiB <= freeMiB && c.MemoryMiB > aboveMiB {
+			picked = c.Size
 		}
 	}
-	return picked, found
+	return picked
 }
 
 // FormatMiB prints mib in the largest binary unit that keeps it readable:

@@ -1,5 +1,21 @@
 # Plan: one shared WireGuard tunnel per context (ControlMaster-style), plus stream hardening
 
+## Status (2026-10-14)
+
+- **Implemented, not yet tested live:** the shared-tunnel daemon (Phases 4–6, all at once). It is the default; `ERU_TUNNEL=inprocess` keeps the old in-process tunnel under the tunnel lock.
+  - `internal/transport/shared.go` (client, protocol, fingerprint), `internal/transport/sharedserver.go` (server), `internal/transport/peercred_{linux,darwin}.go`, tests in `internal/transport/shared_test.go`.
+  - `internal/cli/tunneld.go`: spawn, hidden `eru tunnel serve`, `eru tunnel status`, `eru tunnel stop [--force]`, socket path with the short-path fallback, persist window.
+  - `internal/cli/session.go`: `session.dialer`/`closeDialer`; `tunnelConfig` split out of `upTunnel`.
+  - Stop hooks: `eru context remove` (forced), `eru server init` before its in-process tunnel (forced), `eru upgrade` (idle daemons only).
+- **Implemented earlier:** node stdout decoupling and SIGPIPE (Phase 1), SSH keepalive and MTU 1380 (Phase 2), re-dial and re-attach in `callJob` (Phase 3; it replays `job.follow` and skips the events already shown instead of a journal cursor), the stopgap tunnel lock (Phase 0).
+- **Dropped:** compatibility with older CLIs and nodes (version skew). Every machine runs matching builds.
+- **Differences from the design below:**
+  - No `tunnel.addr` file: the fallback socket path is derived from a hash of the context directory, so every client computes the same path.
+  - `eru login` gets no stop hook: it refuses an existing context name, and `eru context remove` already stops the daemon.
+  - The daemon compares builds as well as the fingerprint. A client of another build (version, commit, and the executable's size and modification time) replaces an idle daemon; a busy daemon with the same fingerprint keeps serving it.
+  - A non-forced stop refuses new clients (`precondition_failed`, `reason: tunnel_stopping`) until it exits.
+  - A new daemon waits up to 30s for its first client before the idle rule applies, so `ERU_TUNNEL_PERSIST=0` can't exit before the spawner attaches.
+
 ## 0. Where things stand (grounded in the code)
 
 - **Tunnel bring-up.** `openSession` (`internal/cli/session.go`) calls `upTunnel` → `transport.UpWireGuard` (`internal/transport/wireguard.go`) for every command. That builds a fresh `device.NewDevice(..., conn.NewDefaultBind(), ...)`, which binds a random UDP port, with the same `private_key` and the same operator address (`c.Operator.WGAddress`, 10.42.255.1). The node has one `[Peer]`, so whichever process handshook last owns the session keys and endpoint.
@@ -12,7 +28,7 @@
   - Directly, as a `transport.Dialer`: `psql.go:43` (`proxy`), `console.go:59` (`pg.ServeTLSProxy`), `sql.go:122` (`pg.Connect`), `tunnel.go:98` (`proxy`), and SSH in `openSession`.
   - `server init` calls `upTunnel` itself (`serverinit.go:748`), before a context exists.
   - Every consumer only needs a `Dialer`. That is the seam the design uses.
-- **Stopgap in flight.** The working tree already has `Tunnel.OnClose` (uncommitted diff in `wireguard.go`) to release a per-context flock when the tunnel closes. The other agent will acquire it around `upTunnel`.
+- **Stopgap (done).** `Tunnel.OnClose` releases a per-context flock (`contexts/<name>/tunnel.lock`) when the tunnel closes; `upTunnel` takes it.
 - **Supported OSes.** `scripts/build-release.sh` and `scripts/sign-release.sh` build only `linux/{amd64,arm64}` and `darwin/{amd64,arm64}`. `internal/cli/ssh.go` uses `syscall.SIGWINCH`, so the CLI doesn't build for Windows today. **Windows is out of scope.** Everything new is `//go:build unix`, with Linux and macOS as first-class targets.
 - **A gap this design does not close.** `eru login` on a second machine reuses the same operator key and address. Two laptops will still steal the peer from each other. The real fix is a per-machine peer (`eru operator add`, a later-phase command). Phase 2's keepalives make the loser recover instead of hang.
 
@@ -75,10 +91,10 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
   - `eru login` over an existing context sends a non-forced `stop`.
   - `eru upgrade` (self-upgrade) sends a non-forced `stop` to idle daemons.
   - SIGTERM or SIGINT to the daemon shuts it down cleanly: close the listener, `Tunnel.Close`, release the lock.
-- **Config or build mismatch on `hello`** (fingerprint differs, or the daemon's proto is lower than the client's):
+- **Config or build mismatch on `hello`** (the fingerprint or the build differs):
   - if `attached == 0`, send `stop{force:true}` and respawn;
   - otherwise fail with `transport_failed`, `reason: tunnel_config_changed`, and the hint "another eru command (pid X, `restore`) is using the old tunnel; wait for it or run eru tunnel stop --force".
-  - A build difference with the same proto is accepted: the dial protocol is build-agnostic.
+  - A busy daemon of another build with the same fingerprint is used as it is: the dial protocol doesn't depend on the build.
 
 ### 1.6 What clients look like
 - `session.tunnel *transport.Tunnel` becomes `session.dialer transport.Dialer` plus `closeDialer func()`.
@@ -119,10 +135,8 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 ### 1.9 How it replaces the stopgap lock
 - **Today (stopgap).** An exclusive per-context flock is held for the tunnel's lifetime (`Tunnel.OnClose` releases it), so eru processes run one at a time.
 - **With the daemon.** The **same lock file** becomes the daemon's singleton lock: the daemon holds it, clients never do.
-- **Mixed builds stay correct.**
-  - An old-build stopgap process waits on (or refuses) the lock while a daemon is up.
-  - A new-build client whose daemon spawn fails with `already_running` but gets no `hello` reply (the holder is an in-process old build) gets the stopgap behaviour: wait up to `--timeout`, then fail with `precondition_failed`, `reason: tunnel_busy`, plus the holder.
-- **Ask the other agent** to write a holder info file next to the lock (pid, command, start time), the way the node's `<lock>.info` works (MASTER §9.5), so both messages can name the holder.
+- **An in-process holder.** A client whose spawn fails with `already_running` but gets no `hello` reply (`eru server init` holds the lock in-process, or a daemon is exiting) retries for about 10s, then fails with `precondition_failed`, `reason: tunnel_busy`.
+- **Holder info.** The holder writes its pid, command and start time into the lock file, so the in-process wait message names it.
 - After Phase 6, the in-process path (`ERU_TUNNEL=inprocess`, `server init`) still takes the lock exclusively. That rules out two devices on one machine.
 
 ---
@@ -141,9 +155,11 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 6. Tests: `internal/node` has none today. Add `dispatch_test.go` with an `eventWriter` over a writer that blocks forever or returns `EPIPE`. Assert that `emit` returns, the run log gets every line, and `ok` returns within the drain timeout.
 
 ### 2.2 Client: SSH keepalive (`internal/transport/ssh.go`)
-- Add `SSHOptions.KeepaliveInterval` (default 15s) and `KeepaliveMax` (default 3).
-- After `ssh.NewClient` in `DialSSH`, start a goroutine that sends `client.SendRequest("keepalive@openssh.com", true, nil)` every interval, each guarded by a timer. After `KeepaliveMax` consecutive misses, `client.Close()`. Stop it in `SSHClient.Close`.
-- Effect: a stalled stream becomes a transport error within about 45–60s instead of hanging. In the shared-tunnel world that triggers re-dial or resume. In the in-process or second-machine world, the keepalive's real data also triggers a WireGuard rehandshake, so the peer can win back.
+- `SSHOptions.KeepaliveInterval` (default 15s) and `KeepaliveTimeout` (default 3m).
+- After `ssh.NewClient` in `DialSSH`, a goroutine sends `keepalive@openssh.com` with `wantReply` every interval, with **at most one probe in flight**: x/crypto/ssh serialises global requests for the whole round trip, so a second probe would only queue behind the first.
+- **Any inbound byte counts as life.** The connection is wrapped in a read tracker; a keepalive reply, channel data or a late reply all reset the clock. A busy node whose replies are slow is alive, not lost.
+- The client closes the connection only when a probe is in flight and **nothing at all has arrived for 3 minutes**. `SSHClient.Lost` then reports it, and `SSHClient.Close` stops the goroutine.
+- Effect: a stalled stream becomes a transport error within about 3 minutes instead of hanging. In the shared-tunnel world that triggers re-dial or resume. In the in-process or second-machine world, the keepalive's real data also triggers a WireGuard rehandshake, so the peer can win back.
 - Applies to every `DialSSH` caller: `openSession`, `dialRetryReport`, serverinit.
 
 ### 2.3 Re-dial with `job.follow` resume
@@ -151,7 +167,6 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
   - switch journalctl to `-o json` and take `MESSAGE` as the line;
   - carry `__CURSOR` on each re-emitted event in a new optional `output.Event.Cursor` field (`json:"cursor,omitempty"`); update `schema/eru-v1.json`;
   - `jobFollowParams` gains `AfterCursor string`, passed as `--after-cursor=` instead of `-n all`.
-  - Version skew is a non-issue: `checkVersion` already forces matching builds.
 - **Client side** (`callJob`):
   - track the last cursor and the `jobID` (already captured from the `progress/job` event);
   - on an error that is a transport loss (not `ctx` cancel, not a node error envelope) with a known `jobID`:
@@ -171,19 +186,19 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 
 ## 3. Phases (each one ships on its own)
 
-**Phase 0: stopgap per-context flock (other agent, in flight).** Coordinate on:
+**Phase 0: stopgap per-context flock (done).** It settled on:
 - the lock file name (suggest `contexts/<name>/tunnel.lock`);
 - a holder `.info` file;
 - the lock being exclusive and taken only around `upTunnel` in `openSession` and `serverinit`;
 - `Tunnel.OnClose` releasing it.
 
-**Phase 1: node stdout decoupling and SIGPIPE** (§2.1). The node binary goes out through the existing auto-upgrade handshake. This alone stops the "node process gone, credentials lost" failures (`db create big`).
+**Phase 1: node stdout decoupling and SIGPIPE** (§2.1; done). The node binary goes out through the existing auto-upgrade handshake. This alone stops the "node process gone, credentials lost" failures (`db create big`).
 
-**Phase 2: SSH keepalive and MTU 1380** (§2.2, §2.4). Client only. Hangs become errors.
+**Phase 2: SSH keepalive and MTU 1380** (§2.2, §2.4; done). Client only. Hangs become errors.
 
-**Phase 3: `job.follow` cursor resume and re-dial in `callJob`** (§2.3). Needs a matching node build, which the handshake enforces. Restore and backup commands then survive a dropped stream even with only the stopgap.
+**Phase 3: `job.follow` resume and re-dial in `callJob`** (§2.3; done, with event skipping instead of a cursor). Needs a matching node build, which the handshake enforces. Restore and backup commands then survive a dropped stream even with only the stopgap.
 
-**Phase 4: shared-tunnel daemon behind opt-in `ERU_TUNNEL=shared`.**
+**Phase 4: shared-tunnel daemon** (implemented together with Phases 5 and 6, so there is no opt-in `ERU_TUNNEL=shared` stage).
 - `internal/transport/sharedserver.go`: listener, peer-cred check, protocol, dial policy, stream and lease accounting, idle timer, fingerprint, `hello`/`attach`/`dial`/`stop`.
 - `internal/transport/shared.go`: `SharedDialer` (implements `Dialer`; `ensure`, respawn on `ECONNREFUSED`, lease).
 - `peercred_{linux,darwin}.go`; `//go:build unix` throughout.
@@ -199,7 +214,7 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
   - concurrent `ensure()` from N goroutines spawning exactly one daemon (spawn func injected);
   - fingerprint mismatch handling.
 
-**Phase 5: control surface and lifecycle hooks.**
+**Phase 5: control surface and lifecycle hooks** (implemented; the MASTER doc edit is still open).
 - `eru tunnel status|stop [--force]` and the hidden `tunnel serve` in `tree.go`, with `CommandMeta` (error codes `transport_failed`, `context_not_found`; stop counts as `Mutating`, with a `SkipDryRunReason`).
 - Stop hooks in `runContextRemove`, `eru login` and `eru upgrade`.
 - `--verbose` prints the daemon pid and the `tunnel.log` path.
@@ -208,7 +223,7 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
   - MANUAL-TESTING: a new part "concurrent commands", and remove "Practical rule until the tunnel fix: run one eru process at a time";
   - `eru guide agents` text: agents may run commands in parallel.
 
-**Phase 6: default on.** Shared becomes the default. `ERU_TUNNEL=inprocess` is the escape hatch. The stopgap lock is now the daemon singleton plus the in-process guard (§1.9), with no serialisation of clients.
+**Phase 6: default on** (implemented). Shared becomes the default. `ERU_TUNNEL=inprocess` is the escape hatch. The stopgap lock is now the daemon singleton plus the in-process guard (§1.9), with no serialisation of clients.
 
 Manual test before flipping the default:
 1. A `restore` running while `eru ssh` is open completes.
@@ -222,7 +237,7 @@ Manual test before flipping the default:
 ---
 
 ## 4. Risks and open points
-- **Daemon on an old binary after `eru upgrade`.** Handled by proto and fingerprint in `hello`, plus the stop on upgrade. The binary path can change under a running daemon; that's harmless because the daemon never re-execs.
+- **Daemon on an old binary after `eru upgrade` or a rebuild.** `eru upgrade` stops idle daemons, and a client of another build replaces an idle daemon on `hello`. A busy one keeps serving until it goes idle. The binary path can change under a running daemon; that's harmless because the daemon never re-execs.
 - **Non-job RPCs can't resume** (`apply`, `db create`). Phase 1 makes them finish on the node. Showing the outcome later needs a small `run.status` RPC; it's worth adding next because `db create` loses one-time credentials when its stream dies (an open MANUAL-TESTING item).
 - **Second machine with the same key.** Unchanged (§0); needs per-machine operators.
 - **Windows.** Not supported by the CLI today (`SIGWINCH`, no release target). The unix build tags keep it that way explicitly.

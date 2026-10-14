@@ -144,6 +144,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	warnings = append(warnings, swapWarnings...)
+	// Idle tunnel daemons still run the old binary; busy ones are replaced
+	// by the next command once they go idle.
+	stopIdleTunnelDaemons()
 	data.PreviousPath = previous
 	data.Changed = true
 	if !skipNodes {
