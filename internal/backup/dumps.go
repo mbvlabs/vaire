@@ -78,15 +78,16 @@ func DumpToBucket(ctx context.Context, sh engine.Shell, stepID string, report en
 	id := NewDumpID(final)
 	key := t.DumpKey(db, id)
 	pr, pw := io.Pipe()
-	enc, err := age.Encrypt(pw, rcpt)
-	if err != nil {
-		return Dump{}, err
-	}
 	dumpErr := make(chan error, 1)
 	go func() {
-		err := PgDump(ctx, sh, stepID, report, src, db, enc)
+		// age writes its header on Encrypt, so it has to run here, once
+		// PutObject below is reading the pipe.
+		enc, err := age.Encrypt(pw, rcpt)
 		if err == nil {
-			err = enc.Close()
+			err = PgDump(ctx, sh, stepID, report, src, db, enc)
+			if err == nil {
+				err = enc.Close()
+			}
 		}
 		_ = pw.CloseWithError(err)
 		dumpErr <- err
