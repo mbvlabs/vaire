@@ -194,8 +194,8 @@ func methods() map[string]method {
 		{name: "job.follow", handler: handleJobFollow},
 		{name: "restore.start", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreStart},
 		{name: "restore.status", cluster: true, handler: handleRestoreStatus},
-		{name: "restore.promote", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: restoreToken, runLog: always, handler: handleRestorePromote},
-		{name: "restore.undo", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreUndo},
+		{name: "restore.promote", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestorePromote},
+		{name: "restore.undo", cluster: true, confirm: restoreToken, runLog: always, handler: handleRestoreUndo},
 		{name: "restore.abort", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, runLog: always, handler: handleRestoreAbort},
 		{name: "restore.cleanup", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: cleanupToken, runLog: always, handler: handleRestoreCleanup},
 		{name: "restore.drill", cluster: true, runLog: always, handler: handleRestoreDrill},
@@ -233,9 +233,11 @@ func paramName(params json.RawMessage) string {
 	return p.Name
 }
 
-// dbClusterLock takes params.database's cluster lock exclusive: the restore
-// methods change one database and leave the others alone. A dry run and a
-// request without a database take none.
+// dbClusterLock takes params.database's cluster lock exclusive: restore
+// abort and cleanup change one database and leave the others alone. Promote
+// and undo lock in their handlers (lockForCutover) instead, so they can let
+// the lock go before the full backup starts. A dry run and a request without
+// a database take none.
 func dbClusterLock(req rpc.Request) (string, engine.LockMode) {
 	var p struct {
 		Database string `json:"database"`

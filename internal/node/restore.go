@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/backup"
@@ -347,7 +348,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 	rt := jobRuntime(env)
 	res := map[string]any{"database": p.Database, "restoring": backup.RestoringName(p.Database), "port": port, "phase": backup.PhaseReady, "warnings": warnings}
 	if p.Promote {
-		promoted, err := promote(ctx, env.Cluster, p.Database, rt, env.Report)
+		promoted, err := promote(ctx, env.Cluster, p.Database, rt, env.Report, func() {})
 		if err != nil {
 			return res, err
 		}
@@ -476,7 +477,11 @@ type restoreDBParams struct {
 }
 
 // lockForCutover takes the node lock shared and db's cluster lock
-// exclusive: a promote or undo stops the live cluster.
+// exclusive: a promote or undo stops the live cluster. The dispatcher takes
+// no lock for these methods, so a dry run takes none. The release is safe to
+// call more than once: the handlers release before starting the full backup,
+// whose job takes the cluster lock shared without waiting, and again on
+// return.
 func lockForCutover(ctx context.Context, env *Env, db, method string) (func(), error) {
 	release, err := engine.Acquire(ctx, engine.LockShared, method, env.Req.RequestID, env.Req.LockTimeout())
 	if err != nil {
@@ -487,7 +492,7 @@ func lockForCutover(ctx context.Context, env *Env, db, method string) (func(), e
 		release()
 		return nil, err
 	}
-	return func() { releaseCluster(); release() }, nil
+	return sync.OnceFunc(func() { releaseCluster(); release() }), nil
 }
 
 func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
@@ -515,7 +520,7 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	defer release()
-	data, err := promote(ctx, env.Cluster, p.Database, runtimeFor(env, false), env.Report)
+	data, err := promote(ctx, env.Cluster, p.Database, runtimeFor(env, false), env.Report, release)
 	if err != nil {
 		return Result{}, err
 	}
@@ -536,8 +541,9 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 // restore from a dump has a new system identifier, so db gets a new stanza
 // and the old one is kept as a dropped stanza. Then a full backup starts.
 // A failed backup start is data["warning"], not an error: the cut-over is
-// done.
-func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter) (map[string]any, error) {
+// done. unlock runs before the backup starts, so its job can take db's
+// cluster lock.
+func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter, unlock func()) (map[string]any, error) {
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return nil, err
@@ -595,8 +601,11 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		if err := applyStanza(ctx, cfg, db, rt, report); err != nil {
 			warn = err
 		}
-	} else if err := startFullBackup(ctx, cfg, rt, db, step, report); err != nil {
-		warn = err
+	} else {
+		unlock()
+		if err := startFullBackup(ctx, cfg, rt, db, step, report); err != nil {
+			warn = err
+		}
 	}
 	if warn != nil {
 		data["warning"] = output.Warning{Code: "after_cutover_failed", Message: db + " is restored, but " + warn.Error() + "; run eru apply, then eru backup now --db " + db + " --type full"}
@@ -755,6 +764,8 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 		err = applyStanza(ctx, cfg, p.Database, rt, env.Report)
 	}
 	if err == nil {
+		// The full backup's job takes the cluster lock, so let it go.
+		release()
 		err = startFullBackup(ctx, cfg, rt, p.Database, step, env.Report)
 	}
 	if err != nil {
