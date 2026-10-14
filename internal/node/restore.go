@@ -554,11 +554,19 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		return nil, err
 	}
 	const step = "restore.promote"
-	aside := backup.PreRestoreName(db, time.Now())
-	logLine(report, step, "cutting "+db+" over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
+	aside := swappedAside(cfg, db, bs, r)
+	swapped := aside != ""
+	if swapped {
+		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
+	} else {
+		aside = backup.PreRestoreName(db, time.Now())
+		logLine(report, step, "cutting "+db+" over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
+	}
 	start := time.Now()
 	resume := steps.PauseDatabase(ctx, db)
-	err = backup.Swap(ctx, rt.Shell, step, report, cfg.Server.DataRoot, db, backup.RestoringName(db), aside, r.Port)
+	if !swapped {
+		err = backup.Swap(ctx, rt.Shell, step, report, cfg.Server.DataRoot, db, backup.RestoringName(db), aside, r.Port)
+	}
 	if err == nil {
 		until := backup.UntilPaused
 		if r.Kind == backup.TargetLatest || r.Kind == targetDump {
@@ -567,7 +575,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		err = backup.StartCluster(ctx, rt.Shell, step, report, db, cfg.Server.DataDirectory(db), spec.Port, until)
 	}
 	if err == nil {
-		err = backup.Promote(ctx, steps.ClusterPG(spec))
+		err = backup.Promote(ctx, steps.ClusterPG(spec), cfg.Server.DataDirectory(db))
 	}
 	resume()
 	if err != nil {
@@ -612,6 +620,31 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	}
 	steps.WriteMetrics(cfg)
 	return data, nil
+}
+
+// swappedAside returns the cluster an earlier promote of restore r left the
+// old data in when it failed after the swap, or "": the copy's data
+// directory is gone, and a <db>__pre_restore_<ts> data directory named
+// after r started is in no leftover record. Promote then resumes from the
+// start of the live cluster.
+func swappedAside(cfg config.Cluster, db string, bs backup.Records, r backup.Restore) string {
+	if _, err := os.Stat(filepath.Join(cfg.Server.DataRoot, backup.RestoringName(db))); err == nil {
+		return ""
+	}
+	started, err := time.Parse(time.RFC3339, r.StartedAt)
+	if err != nil {
+		return ""
+	}
+	dirs, _ := filepath.Glob(filepath.Join(cfg.Server.DataRoot, db+"__pre_restore_*"))
+	aside := ""
+	for _, dir := range dirs {
+		name := filepath.Base(dir)
+		if name < backup.PreRestoreName(db, started) || slices.ContainsFunc(bs.Leftovers, func(l backup.Leftover) bool { return l.Name == name }) {
+			continue
+		}
+		aside = name
+	}
+	return aside
 }
 
 // droppedStanza records spec's stanza as dropped now, kept for its window.
@@ -1154,7 +1187,7 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 		err = restoreFork(ctx, env, p, src, m)
 	}
 	if err == nil {
-		err = backup.Promote(ctx, m.PG())
+		err = backup.Promote(ctx, m.PG(), m.Data)
 	}
 	if err == nil {
 		logLine(env.Report, env.Job, "renaming "+p.Source+" and its roles to "+p.Name)

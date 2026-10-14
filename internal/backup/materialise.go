@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -590,10 +591,12 @@ func StartCluster(ctx context.Context, sh engine.Shell, stepID string, report en
 // directory into a later undo.
 var recoverySettings = []string{"restore_command", "recovery_target", "recovery_target_time", "recovery_target_action", "recovery_target_timeline"}
 
-// Promote ends recovery on the cluster at local with pg_promote(), which
-// opens it on a new timeline, then removes pgBackRest's recovery settings
-// and reloads. A cluster already out of recovery is only cleaned up.
-func Promote(ctx context.Context, local pg.Local) error {
+// Promote ends recovery on the cluster at local, whose data directory is
+// data, with pg_promote(), which opens it on a new timeline, then removes
+// pgBackRest's recovery settings from its postgresql.auto.conf and reloads.
+// ALTER SYSTEM is off on eru's clusters (allow_alter_system), so the file is
+// rewritten directly. A cluster already out of recovery is only cleaned up.
+func Promote(ctx context.Context, local pg.Local, data string) error {
 	if err := local.Exec(ctx, "postgres", "SELECT pg_promote() WHERE pg_is_in_recovery();\n", nil); err != nil {
 		return err
 	}
@@ -604,12 +607,37 @@ func Promote(ctx context.Context, local pg.Local) error {
 	if len(rows) == 0 || rows[0]["r"] != "false" {
 		return errors.New("pg_promote() did not end recovery within 60 seconds")
 	}
-	var sql strings.Builder
-	for _, s := range recoverySettings {
-		sql.WriteString("ALTER SYSTEM RESET " + s + ";\n")
+	if err := dropRecoverySettings(data); err != nil {
+		return err
 	}
-	sql.WriteString("SELECT pg_reload_conf();\n")
-	return local.Exec(ctx, "postgres", sql.String(), nil)
+	return local.Exec(ctx, "postgres", "SELECT pg_reload_conf();\n", nil)
+}
+
+// dropRecoverySettings removes the recoverySettings lines from the data
+// directory's postgresql.auto.conf.
+func dropRecoverySettings(data string) error {
+	path := filepath.Join(data, "postgresql.auto.conf")
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: a data directory eru manages.
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var kept []string
+	changed := false
+	for _, line := range strings.SplitAfter(string(raw), "\n") {
+		key, _, _ := strings.Cut(line, "=")
+		if slices.Contains(recoverySettings, strings.TrimSpace(key)) {
+			changed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !changed {
+		return nil
+	}
+	return engine.WriteFileAtomicOwned(path, []byte(strings.Join(kept, "")), 0o600, "postgres", "postgres")
 }
 
 // Timeline is the timeline the open cluster at local writes WAL on, read
