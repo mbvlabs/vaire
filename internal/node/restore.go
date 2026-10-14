@@ -275,7 +275,7 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 	case targetDump:
 		if sec[steps.SecretBackupAgeIdentity] == "" {
 			return "", output.NewError(output.CodeInputRequired, "a restore from a dump needs the age identity from the recovery kit", output.ExitInput,
-				"Pass "+steps.SecretBackupAgeIdentity+".").WithDetails(map[string]any{"secret": steps.SecretBackupAgeIdentity})
+				"Run the restore with an eru that has the recovery kit (eru login from a transfer bundle made with eru secrets export); it sends the identity with the request.").WithDetails(map[string]any{"secret": steps.SecretBackupAgeIdentity})
 		}
 		target, _, err := steps.BackupTarget(cfg)
 		if err != nil {

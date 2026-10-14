@@ -31,6 +31,17 @@ func recoveryKit(name string) (*contexts.BackupCreds, error) {
 	return creds.Backup, nil
 }
 
+// dumpIdentity returns the kit's age identity for opening dumps, or an
+// operator-side error when this machine's kit doesn't carry one.
+func dumpIdentity(k *contexts.BackupCreds) (string, error) {
+	if k.Dumps.AgeIdentity == "" {
+		return "", output.NewError(output.CodeInputRequired, "this context's recovery kit has no dump age identity", output.ExitInput,
+			"Dumps open with the age identity from the recovery kit. Run eru secrets export on the machine that ran eru backup setup, then eru login with that bundle here.").
+			WithDetails(map[string]any{"reason": "recovery_kit_missing", "secret": steps.SecretBackupAgeIdentity})
+	}
+	return k.Dumps.AgeIdentity, nil
+}
+
 func kitTarget(k *contexts.BackupCreds) backup.Target {
 	return backup.Target{Endpoint: k.Endpoint, Region: k.Region, Bucket: k.Bucket, Prefix: k.Prefix, URIStyle: k.URIStyle, KeyID: k.AccessKeyID, Secret: k.SecretAccessKey}
 }
@@ -87,7 +98,11 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		sec[steps.SecretBackupAgeIdentity] = kit.Dumps.AgeIdentity
+		ident, err := dumpIdentity(kit)
+		if err != nil {
+			return err
+		}
+		sec[steps.SecretBackupAgeIdentity] = ident
 	}
 	token := db + "/restore"
 	if !dryRun(cmd) {
@@ -95,7 +110,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	reply, jobID, detached, err := callJob(cmd, s, p, "restore.start", params, remote.CallOptions{Confirm: token, DryRun: dryRun(cmd)})
+	reply, jobID, detached, err := callJob(cmd, s, p, "restore.start", params, remote.CallOptions{Secrets: sec, Confirm: token, DryRun: dryRun(cmd)})
 	if err != nil {
 		return err
 	}
@@ -570,7 +585,11 @@ func runDumpGet(cmd *cobra.Command, args []string) error {
 	if out == "" {
 		out = backup.DumpFileName(db, id)
 	}
-	n, err := backup.DownloadDump(commandContext(cmd), kitTarget(kit), db, id, kit.Dumps.AgeIdentity, out)
+	ident, err := dumpIdentity(kit)
+	if err != nil {
+		return err
+	}
+	n, err := backup.DownloadDump(commandContext(cmd), kitTarget(kit), db, id, ident, out)
 	if err != nil {
 		return err
 	}
