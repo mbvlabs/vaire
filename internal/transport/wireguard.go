@@ -44,8 +44,9 @@ type WireGuardConfig struct {
 // no root, no kernel interface and no system configuration. It lives for one
 // command and is closed on exit.
 type Tunnel struct {
-	dev *device.Device
-	net *netstack.Net
+	dev     *device.Device
+	net     *netstack.Net
+	onClose []func()
 }
 
 // UpWireGuard brings up a tunnel. WireGuard handshakes lazily on the first
@@ -95,11 +96,21 @@ func (t *Tunnel) DialContext(ctx context.Context, network, addr string) (net.Con
 	return t.net.DialContext(ctx, network, addr)
 }
 
+// OnClose runs fn once the tunnel is torn down, for example to release a
+// lock held for the tunnel's lifetime.
+func (t *Tunnel) OnClose(fn func()) {
+	t.onClose = append(t.onClose, fn)
+}
+
 // Close tears the tunnel down.
 func (t *Tunnel) Close() {
 	if t != nil && t.dev != nil {
 		t.dev.Close()
 		t.dev = nil
+		for _, fn := range t.onClose {
+			fn()
+		}
+		t.onClose = nil
 	}
 }
 

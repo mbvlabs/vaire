@@ -84,7 +84,7 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	tun, err := upTunnel(string(wgKey), c.Operator.WGAddress, nodeSpec.WGPublicKey, nodeSpec.PublicAddress, nodeSpec.ListenPort, nodeSpec.WGAddress, p)
+	tun, err := upTunnel(commandContext(cmd), c.Name, string(wgKey), c.Operator.WGAddress, nodeSpec.WGPublicKey, nodeSpec.PublicAddress, nodeSpec.ListenPort, nodeSpec.WGAddress, p)
 	if err != nil {
 		return nil, err
 	}
@@ -143,8 +143,10 @@ func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
 }
 
 // upTunnel starts the userspace tunnel to a node. Only the node /24 routes
-// through it.
-func upTunnel(privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
+// through it. It first takes the context's tunnel lock (see tunnellock.go),
+// waiting while another eru process uses the tunnel, and holds it until the
+// tunnel closes.
+func upTunnel(ctx context.Context, contextName, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
 	opAddr, err := netip.ParseAddr(operatorAddr)
 	if err != nil {
 		return nil, output.NewError(output.CodeConfig, "operator wg_address "+operatorAddr+" is invalid", output.ExitConfig, "")
@@ -165,7 +167,11 @@ func upTunnel(privateKey, operatorAddr, nodePub, publicAddr string, port int, no
 	if p != nil && p.opts.Verbose {
 		logf = func(format string, args ...any) { p.note("wireguard: " + fmt.Sprintf(format, args...)) }
 	}
-	return transport.UpWireGuard(transport.WireGuardConfig{
+	release, err := lockTunnel(ctx, contextName, p)
+	if err != nil {
+		return nil, err
+	}
+	tun, err := transport.UpWireGuard(transport.WireGuardConfig{
 		PrivateKey:    strings.TrimSpace(privateKey),
 		Address:       opAddr,
 		PeerPublicKey: nodePub,
@@ -173,6 +179,12 @@ func upTunnel(privateKey, operatorAddr, nodePub, publicAddr string, port int, no
 		AllowedIPs:    []netip.Prefix{nodes},
 		Logf:          logf,
 	})
+	if err != nil {
+		release()
+		return nil, err
+	}
+	tun.OnClose(release)
+	return tun, nil
 }
 
 // tunnelHint replaces a bare dial failure inside the tunnel with what to check.
