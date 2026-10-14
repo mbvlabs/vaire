@@ -120,7 +120,11 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if dryRun(cmd) {
 		var data map[string]any
 		_ = reply.Decode(&data)
-		return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("dry run: would restore %s to %v beside the live database", db, data["target"]), Warnings: s.warnings})
+		msg := fmt.Sprintf("dry run: would restore %s to %v beside the live database", db, data["target"])
+		if tl, _ := data["timeline"].(string); tl != "" {
+			msg += ", with --target-timeline=" + tl
+		}
+		return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: s.warnings})
 	}
 	var res struct {
 		Phase         string   `json:"phase"`
@@ -153,10 +157,16 @@ func runRestore(cmd *cobra.Command, args []string) error {
 			Next:     []string{"eru restore undo " + db, "eru restore cleanup " + db},
 		})
 	}
+	ready := "the temporary cluster " + res.Restoring + " is ready, paused at the target, beside the live " + db + ", which kept serving."
+	if params["kind"] == backup.TargetLatest {
+		// --latest has no target to pause at: the copy keeps replaying the
+		// archived WAL until it is promoted or aborted.
+		ready = "the temporary cluster " + res.Restoring + " is ready, still replaying the latest archived WAL, beside the live " + db + ", which kept serving."
+	}
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"job_id": jr.JobID, "result": res},
 		Message: strings.Join([]string{
-			"the temporary cluster " + res.Restoring + " is ready, paused at the target, beside the live " + db + ", which kept serving.",
+			ready,
 			"Inspect it with eru sql --db " + res.Restoring + " \"select ...\", then promote or abort.",
 		}, "\n"),
 		Warnings: warnings,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -92,10 +93,7 @@ func runJobList(cmd *cobra.Command, _ []string) error {
 		if started == "" {
 			started = j.CreatedAt
 		}
-		db := j.DB
-		if db == "" {
-			db = "-"
-		}
+		db := jobListDB(j)
 		line := fmt.Sprintf("  %-26s  %-14s  %-12s  %-9s  %s", j.ID, j.Job, db, j.State, started)
 		if j.Error != nil {
 			line += "  " + j.Error.Message
@@ -136,4 +134,40 @@ func runJobFollow(cmd *cobra.Command, args []string) error {
 		Message:  fmt.Sprintf("job %s (%s) %s", jr.JobID, jr.Job, jr.State),
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
+}
+
+// jobListDB is a job's DB column: its database, else what its result names
+// (a restore's database, a fork's new database, the dropped databases a
+// stanza-expiry run expired), or -. Records from before the node recorded
+// the database of restores and forks only have it in the result.
+func jobListDB(j engine.JobRecord) string {
+	if j.DB != "" {
+		return j.DB
+	}
+	if len(j.Result) > 0 {
+		var res struct {
+			Database string `json:"database"`
+			Name     string `json:"name"`
+			Expired  []struct {
+				Database string `json:"database"`
+			} `json:"expired"`
+		}
+		_ = json.Unmarshal(j.Result, &res)
+		switch {
+		case j.Job == "restore" && res.Database != "":
+			return res.Database
+		case j.Job == "db-fork" && res.Name != "":
+			return res.Name
+		}
+		var dbs []string
+		for _, e := range res.Expired {
+			if e.Database != "" && !slices.Contains(dbs, e.Database) {
+				dbs = append(dbs, e.Database)
+			}
+		}
+		if len(dbs) > 0 {
+			return strings.Join(dbs, ",")
+		}
+	}
+	return "-"
 }

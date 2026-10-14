@@ -158,7 +158,7 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 				add("%s.settings key %q is managed by eru and cannot be overridden", at, key)
 			}
 		}
-		c.validateClusterBackup(add, at, s.Backup)
+		c.validateClusterBackup(add, at, s.Name, s.Backup)
 	}
 }
 
@@ -195,7 +195,7 @@ func (c Cluster) validateClusterResources(add func(string, ...any), at string, s
 }
 
 // validateClusterBackup checks [clusters.backup].
-func (c Cluster) validateClusterBackup(add func(string, ...any), at string, b ClusterBackup) {
+func (c Cluster) validateClusterBackup(add func(string, ...any), at, name string, b ClusterBackup) {
 	if b.RetentionFull < 0 {
 		add("%s.backup.retention_full must not be negative", at)
 	}
@@ -204,7 +204,7 @@ func (c Cluster) validateClusterBackup(add func(string, ...any), at string, b Cl
 			add("%s.backup.dump_schedule needs a bucket: run eru backup setup first", at)
 		}
 		if b.DumpRetention < 1 {
-			add("%s.backup.dump_retention must be at least 1 when dump_schedule is set", at)
+			add("%s.backup.dump_retention must be at least 1 when dump_schedule is set: set it first with eru config set clusters.%s.backup.dump_retention <n>", at, name)
 		}
 	}
 	if b.DumpRetention < 0 {

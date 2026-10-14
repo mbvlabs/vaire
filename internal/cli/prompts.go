@@ -52,7 +52,8 @@ func RequireFlag(cmd *cobra.Command, provided bool, flag, action string) error {
 }
 
 // Confirm requires the operator to pass or type token.
-// --yes never satisfies this check.
+// --yes never satisfies this check, and with --yes it refuses instead of
+// prompting, as --yes means the operator expects no prompt.
 func Confirm(cmd *cobra.Command, token string) error {
 	if strings.TrimSpace(token) == "" {
 		return output.NewError(
@@ -78,7 +79,7 @@ func Confirm(cmd *cobra.Command, token string) error {
 			"re-run with --confirm "+token,
 		).WithDetails(details)
 	}
-	if MustNotPrompt(cmd) {
+	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return output.NewError(
 			output.CodeUnsafeAction,
 			"this action requires confirmation",

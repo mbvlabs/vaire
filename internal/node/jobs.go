@@ -156,6 +156,9 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	}
 
 	rec := engine.JobRecord{ID: env.ID, Job: job, DB: env.DB, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID")}
+	if rec.DB == "" {
+		rec.DB = rpcJobDatabase(job, env.Params)
+	}
 	_ = engine.UpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(env.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
@@ -349,7 +352,7 @@ func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets 
 	}
 	unit := jobUnit(id)
 	if err := engine.UpdateState(func(st *engine.State) error {
-		st.PutJob(engine.JobRecord{ID: id, Job: job, Unit: unit, State: engine.JobQueued, CreatedAt: stamp()})
+		st.PutJob(engine.JobRecord{ID: id, Job: job, DB: rpcJobDatabase(job, spec.Params), Unit: unit, State: engine.JobQueued, CreatedAt: stamp()})
 		return nil
 	}); err != nil {
 		return "", err
@@ -553,6 +556,26 @@ func jobDatabase(env *jobEnv) string {
 		_ = json.Unmarshal(env.Params, &p)
 	}
 	return p.Database
+}
+
+// rpcJobDatabase is the database job list shows for an RPC-only job: a
+// restore's database, or the new database of a fork (its source is in the
+// params).
+func rpcJobDatabase(job string, params json.RawMessage) string {
+	var p struct {
+		Database string `json:"database"`
+		Name     string `json:"name"`
+	}
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p)
+	}
+	switch job {
+	case "restore":
+		return p.Database
+	case "db-fork":
+		return p.Name
+	}
+	return ""
 }
 
 // jobClusters are the clusters a per-database job works in, in name order,
