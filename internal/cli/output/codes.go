@@ -31,6 +31,7 @@ const (
 	CodeSecrets               = "secrets_error"
 	CodeReleaseVerification   = "release_verification_failed"
 	CodeDatabaseProtected     = "database_protected"
+	CodeProtectCodeRejected   = "protect_code_rejected"
 	CodeError                 = "error"
 )
 
@@ -80,6 +81,7 @@ var exitByCode = map[string]int{
 	CodeSecrets:               ExitSecrets,
 	CodeReleaseVerification:   ExitReleaseVerification,
 	CodeDatabaseProtected:     ExitUnsafe,
+	CodeProtectCodeRejected:   ExitUnsafe,
 	CodeError:                 ExitGeneric,
 }
 

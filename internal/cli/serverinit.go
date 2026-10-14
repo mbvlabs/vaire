@@ -669,7 +669,7 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 		return node.BootstrapResult{}, err
 	}
 	r.p.phase("init.bootstrap", "started", "run host steps 1-6 on the node")
-	reply, err := caller.Call(ctx, "cluster.bootstrap", map[string]any{
+	reply, err := r.p.call(ctx, caller, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseHost,
 		"cluster_toml": string(raw),
 		"node_name":    r.master().Name,
@@ -825,7 +825,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if _, err := wgNode.Call(ctx, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
+	if _, err := r.p.call(ctx, wgNode, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
 		return err
 	}
 	if err := r.mark(phaseSecretsDone); err != nil {
@@ -1157,7 +1157,7 @@ func (r *initRun) attemptReporter(phase, what string) func(int, time.Time) {
 // failure waits for the node's revert and reports what it did.
 func (r *initRun) lockdown(ctx context.Context, wgNode *remote.Node, tun *transport.Tunnel, target transport.SSHTarget, opts transport.SSHOptions, publicSSH string) (string, error) {
 	r.p.phase("init.lockdown", "started", "close public SSH; the node reverts unless confirmed within 2 minutes")
-	reply, err := wgNode.Call(ctx, "ssh.lockdown", map[string]any{"timeout_s": int(lockdownTimeout.Seconds())}, remote.CallOptions{OnEvent: r.p.event})
+	reply, err := r.p.call(ctx, wgNode, "ssh.lockdown", map[string]any{"timeout_s": int(lockdownTimeout.Seconds())}, remote.CallOptions{OnEvent: r.p.event})
 	if err != nil {
 		return "", err
 	}
@@ -1175,7 +1175,7 @@ func (r *initRun) lockdown(ctx context.Context, wgNode *remote.Node, tun *transp
 		defer confirmClient.Close()
 		confirmNode := &remote.Node{SSH: confirmClient, Operator: r.sec.OperatorName}
 		var reply remote.Reply
-		reply, err = confirmNode.Call(ctx, "ssh.confirm", nil, remote.CallOptions{OnEvent: r.p.event})
+		reply, err = r.p.call(ctx, confirmNode, "ssh.confirm", nil, remote.CallOptions{OnEvent: r.p.event})
 		if err == nil {
 			var confirmed node.ConfirmResult
 			if err := reply.Decode(&confirmed); err != nil {
@@ -1206,7 +1206,7 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 	}
 	defer client.Close()
 	n := &remote.Node{SSH: client, Operator: r.sec.OperatorName}
-	if reply, err := n.Call(ctx, "ssh.status", nil, remote.CallOptions{}); err == nil {
+	if reply, err := r.p.call(ctx, n, "ssh.status", nil, remote.CallOptions{}); err == nil {
 		var status node.SSHStatus
 		if reply.Decode(&status) == nil {
 			details["ssh_status"] = status
@@ -1365,7 +1365,7 @@ func runInitLocal(cmd *cobra.Command) error {
 	deadline := ""
 	if !r.prog.Done(phaseLockdown) {
 		r.p.phase("init.lockdown", "started", "arm the lockdown; public SSH stays open until an operator confirms over WireGuard")
-		if _, err := caller.Call(ctx, "ssh.lockdown", map[string]any{
+		if _, err := r.p.call(ctx, caller, "ssh.lockdown", map[string]any{
 			"timeout_s":   int(localLockdownTimeout.Seconds()),
 			"keep_public": true,
 		}, remote.CallOptions{OnEvent: r.p.event}); err != nil {
@@ -1414,7 +1414,7 @@ func runInitLocal(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if _, err := caller.Call(ctx, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
+	if _, err := r.p.call(ctx, caller, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
 		return err
 	}
 	if err := contexts.RemovePending(r.name); err != nil {

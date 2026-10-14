@@ -28,6 +28,24 @@ type session struct {
 	tunnel   *transport.Tunnel
 	node     *remote.Node
 	warnings []output.Warning
+	// dial connects SSH again over the tunnel, for reconnect.
+	dial func(context.Context) (*transport.SSHClient, error)
+}
+
+// reconnect replaces the session's SSH connection with a new one over the
+// same tunnel, after the old one was lost. The node version was already
+// checked on this session, so it skips the handshake.
+func (s *session) reconnect(ctx context.Context) error {
+	if s == nil || s.node == nil || s.dial == nil {
+		return errors.New("this session can't reconnect")
+	}
+	s.node.SSH.Close()
+	client, err := s.dial(ctx)
+	if err != nil {
+		return err
+	}
+	s.node.SSH = client
+	return nil
 }
 
 func (s *session) Close() {
@@ -91,7 +109,11 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	s.tunnel = tun
 	ctx := commandContext(cmd)
 	target := transport.SSHTarget{User: c.Operator.SSHUser, Addr: net.JoinHostPort(nodeSpec.WGAddress, "22")}
-	client, err := transport.DialSSH(ctx, tun, target, transport.SSHOptions{Auth: []ssh.AuthMethod{auth}, HostKeys: known, Timeout: timeoutFlag(cmd)})
+	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{auth}, HostKeys: known, Timeout: timeoutFlag(cmd)}
+	s.dial = func(ctx context.Context) (*transport.SSHClient, error) {
+		return transport.DialSSH(ctx, tun, target, sshOpts)
+	}
+	client, err := s.dial(ctx)
 	if err != nil {
 		s.Close()
 		return nil, tunnelHint(err, nodeSpec.PublicAddress, nodeSpec.ListenPort)
@@ -120,7 +142,7 @@ func contextFileError(name, file string, err error) error {
 }
 
 func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
-	reply, err := s.node.Call(ctx, "ssh.confirm", map[string]bool{"auto": true}, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(ctx, s.node, "ssh.confirm", map[string]bool{"auto": true}, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -251,7 +273,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	if db := stringFlag(cmd, "db"); db != "" {
 		params = map[string]string{"db": db}
 	}
-	reply, err := s.node.Call(commandContext(cmd), "plan", params, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "plan", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -307,7 +329,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	// command, so the human output leaves out the node's restart_pending
 	// warning (JSON keeps it).
 	p.hideWarning("restart_pending")
-	reply, err := s.node.Call(commandContext(cmd), "apply", params, remote.CallOptions{
+	reply, err := p.call(commandContext(cmd), s.node, "apply", params, remote.CallOptions{
 		Secrets:  secretValues,
 		DryRun:   dry,
 		Confirm:  confirm,

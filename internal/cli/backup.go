@@ -330,7 +330,7 @@ func backupSecrets(kit *contexts.BackupCreds) map[string]string {
 // such as one set up before pgBackRest was part of it. eru apply is the
 // update path; backup setup doesn't install packages itself.
 func requirePackagesCurrent(ctx context.Context, caller remote.Caller, p *progress) error {
-	reply, err := caller.Call(ctx, "plan", map[string]any{"steps": steps.PackagesStepIDs()}, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(ctx, caller, "plan", map[string]any{"steps": steps.PackagesStepIDs()}, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -356,7 +356,7 @@ func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s 
 	if err := requirePackagesCurrent(ctx, caller, p); err != nil {
 		return engine.ApplyData{}, nil, err
 	}
-	reply, err := caller.Call(ctx, "config.get", nil, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(ctx, caller, "config.get", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return engine.ApplyData{}, nil, err
 	}
@@ -364,12 +364,12 @@ func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s 
 	if err := reply.Decode(&current); err != nil {
 		return engine.ApplyData{}, nil, err
 	}
-	setReply, err := caller.Call(ctx, "config.set", map[string]any{"set": s.configKeys(), "base_revision": current.Revision},
+	setReply, err := p.call(ctx, caller, "config.set", map[string]any{"set": s.configKeys(), "base_revision": current.Revision},
 		remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return engine.ApplyData{}, nil, err
 	}
-	applyReply, err := caller.Call(ctx, "apply", map[string]any{"steps": steps.BackupStepIDs(), "rotate_backup_secrets": true}, remote.CallOptions{
+	applyReply, err := p.call(ctx, caller, "apply", map[string]any{"steps": steps.BackupStepIDs(), "rotate_backup_secrets": true}, remote.CallOptions{
 		Secrets: backupSecrets(kit),
 		OnEvent: p.event,
 	})
@@ -469,7 +469,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		next = append([]string{"eru secrets export"}, next...)
 	}
 	message := []string{fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total)}
-	if list, err := s.node.Call(ctx, "backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
+	if list, err := p.call(ctx, s.node, "backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
 		var bl backupRowsData
 		if list.Decode(&bl) == nil {
 			for _, r := range bl.Databases {
@@ -550,7 +550,7 @@ func backupDatabases(cmd *cobra.Command, s *session, p *progress) ([]string, err
 	if db := stringFlag(cmd, "db"); db != "" {
 		return []string{db}, nil
 	}
-	reply, err := s.node.Call(commandContext(cmd), "db.list", nil, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "db.list", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +656,7 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	if dryRun(cmd) {
-		reply, err := s.node.Call(commandContext(cmd), "backup.now", map[string]string{"type": kind, "database": stringFlag(cmd, "db")},
+		reply, err := p.call(commandContext(cmd), s.node, "backup.now", map[string]string{"type": kind, "database": stringFlag(cmd, "db")},
 			remote.CallOptions{DryRun: true, OnEvent: p.event})
 		if err != nil {
 			return err
@@ -748,7 +748,7 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	db := stringFlag(cmd, "db")
-	reply, err := s.node.Call(commandContext(cmd), "backup.list", map[string]string{"database": db}, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "backup.list", map[string]string{"database": db}, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}

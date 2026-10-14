@@ -73,8 +73,11 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if old, _, err := store.Load(); err == nil {
+		if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
+			return Result{}, err
+		}
 		if !env.Req.DryRun {
-			if err := checkUnprotect(old, cfg, env.Req.ConfirmTokens()); err != nil {
+			if err := defaultProtectGuard.checkUnprotect(old, cfg, env.Req.Secrets[ProtectCodeSecret]); err != nil {
 				return Result{}, err
 			}
 		}

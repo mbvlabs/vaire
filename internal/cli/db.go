@@ -73,7 +73,7 @@ func runDBList(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, err := s.node.Call(commandContext(cmd), "db.list", nil, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "db.list", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	if db.Protected {
 		params["protected"] = true
 	}
-	reply, err := s.node.Call(commandContext(cmd), "db.create", params, remote.CallOptions{Secrets: rpc, OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "db.create", params, remote.CallOptions{Secrets: rpc, OnEvent: p.event})
 	if err != nil {
 		return createInterrupted(cmd, err, name, name+" ("+sizeSummary(cfg, db)+")", secret)
 	}
@@ -247,7 +247,7 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	}
 	deferRestart := flagTrue(cmd, "defer-restart")
 	confirm, confirms := confirmOptions(cmd)
-	reply, err := s.node.Call(commandContext(cmd), "db.resize", map[string]any{
+	reply, err := p.call(commandContext(cmd), s.node, "db.resize", map[string]any{
 		"name": name, "size": size, "memory": memory, "defer_restart": deferRestart,
 	}, remote.CallOptions{DryRun: dryRun(cmd), Confirm: confirm, Confirms: confirms, OnEvent: p.event})
 	if err != nil {
@@ -307,7 +307,7 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]string{"database": name}, Message: "dry run: would drop " + name, Warnings: s.warnings})
 	}
-	reply, err := s.node.Call(commandContext(cmd), "db.drop", map[string]any{"name": name, "no_final_dump": flagTrue(cmd, "no-final-dump")},
+	reply, err := p.call(commandContext(cmd), s.node, "db.drop", map[string]any{"name": name, "no_final_dump": flagTrue(cmd, "no-final-dump")},
 		remote.CallOptions{Confirm: name, OnEvent: p.event})
 	if err != nil {
 		return err
@@ -368,7 +368,7 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.node.Call(commandContext(cmd), "db.credentials", map[string]any{
+	if _, err := p.call(commandContext(cmd), s.node, "db.credentials", map[string]any{
 		"name": name, "role": role, "rotate": true,
 	}, remote.CallOptions{Secrets: rpc, Confirm: name, OnEvent: p.event}); err != nil {
 		return err

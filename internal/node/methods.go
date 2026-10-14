@@ -109,6 +109,22 @@ func methods() map[string]method {
 			handler: handleConfigValidate,
 		},
 		{
+			// No run log: the result carries the new TOTP secret.
+			name:    "protect.init",
+			lock:    fixedLock(engine.LockExclusive),
+			handler: handleProtectInit,
+		},
+		{
+			name:    "protect.confirm",
+			lock:    fixedLock(engine.LockExclusive),
+			runLog:  always,
+			handler: handleProtectConfirm,
+		},
+		{
+			name:    "protect.status",
+			handler: handleProtectStatus,
+		},
+		{
 			name:    "db.list",
 			lock:    fixedLock(engine.LockShared),
 			cluster: true,

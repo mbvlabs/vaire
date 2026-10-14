@@ -32,11 +32,12 @@ type SSHTarget struct {
 
 func (t SSHTarget) String() string { return t.User + "@" + t.Addr }
 
-// Keepalive defaults: a keepalive@openssh.com request every interval, and
-// the connection is closed after KeepaliveMax unanswered in a row.
+// Keepalive defaults: a keepalive@openssh.com request every interval while
+// none is in flight, and the connection is closed only after
+// DefaultKeepaliveTimeout in which nothing at all arrived from the node.
 const (
 	DefaultKeepaliveInterval = 15 * time.Second
-	DefaultKeepaliveMax      = 3
+	DefaultKeepaliveTimeout  = 3 * time.Minute
 )
 
 // SSHOptions configure one connection.
@@ -45,10 +46,10 @@ type SSHOptions struct {
 	HostKeys  *KnownHosts
 	Timeout   time.Duration
 	ClientVer string
-	// KeepaliveInterval and KeepaliveMax default to DefaultKeepaliveInterval
-	// and DefaultKeepaliveMax.
+	// KeepaliveInterval and KeepaliveTimeout default to
+	// DefaultKeepaliveInterval and DefaultKeepaliveTimeout.
 	KeepaliveInterval time.Duration
-	KeepaliveMax      int
+	KeepaliveTimeout  time.Duration
 }
 
 // SSHClient is one authenticated SSH connection. Each Run opens a session.
@@ -59,7 +60,31 @@ type SSHClient struct {
 	stop      chan struct{}
 	closeOnce sync.Once
 	lost      atomic.Bool
+	silence   time.Duration
 }
+
+// readTracker records when bytes last arrived on the connection. Any
+// inbound byte, a keepalive reply or channel data, shows the node is alive.
+type readTracker struct {
+	net.Conn
+	last atomic.Int64
+}
+
+func newReadTracker(nc net.Conn) *readTracker {
+	t := &readTracker{Conn: nc}
+	t.last.Store(time.Now().UnixNano())
+	return t
+}
+
+func (t *readTracker) Read(p []byte) (int, error) {
+	n, err := t.Conn.Read(p)
+	if n > 0 {
+		t.last.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (t *readTracker) lastRead() time.Time { return time.Unix(0, t.last.Load()) }
 
 // DialSSH connects and authenticates through d. The host key must be pinned
 // in opts.HostKeys for target.Addr.
@@ -70,10 +95,11 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	nc, err := d.DialContext(dialCtx, "tcp", target.Addr)
+	raw, err := d.DialContext(dialCtx, "tcp", target.Addr)
 	if err != nil {
 		return nil, unreachable(target, err)
 	}
+	nc := newReadTracker(raw)
 	var hostErr *HostKeyError
 	callback := opts.HostKeys.Callback(target.Addr)
 	cfg := &ssh.ClientConfig{
@@ -107,65 +133,79 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 		return nil, output.WrapError(output.CodeTransportFailed, fmt.Errorf("SSH handshake with %s failed: %w", target, err), output.ExitTransport,
 			"Check that sshd is running and reachable.").WithDetails(map[string]any{"target": target.String()})
 	}
-	c := &SSHClient{client: ssh.NewClient(conn, chans, reqs), Target: target, stop: make(chan struct{})}
-	interval, maxMissed := opts.KeepaliveInterval, opts.KeepaliveMax
+	interval, silence := opts.KeepaliveInterval, opts.KeepaliveTimeout
 	if interval <= 0 {
 		interval = DefaultKeepaliveInterval
 	}
-	if maxMissed <= 0 {
-		maxMissed = DefaultKeepaliveMax
+	if silence <= 0 {
+		silence = DefaultKeepaliveTimeout
 	}
-	go c.keepalive(interval, maxMissed)
+	c := &SSHClient{client: ssh.NewClient(conn, chans, reqs), Target: target, stop: make(chan struct{}), silence: silence}
+	go func() {
+		probe := func() error {
+			_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
+			return err
+		}
+		if keepalive(c.stop, interval, silence, probe, nc.lastRead) {
+			c.lost.Store(true)
+			_ = c.client.Close()
+		}
+	}()
 	return c, nil
 }
 
-// keepalive sends keepalive@openssh.com every interval and closes the
-// connection after maxMissed requests in a row get no reply within interval.
-// Without it a stalled stream (a lost WireGuard peer, a dead NAT mapping)
-// blocks readers forever. The real traffic also prompts WireGuard to
-// rehandshake. Any reply counts, including OpenSSH's failure reply.
-func (c *SSHClient) keepalive(interval time.Duration, maxMissed int) {
+// keepalive probes the connection with probe every interval and reports true
+// once a probe is in flight and nothing at all has arrived (lastRead) for
+// silence. Without it a stalled stream (a lost WireGuard peer, a dead NAT
+// mapping) blocks readers forever; the probe's traffic also prompts
+// WireGuard to rehandshake. It returns false when stop closes or a probe
+// fails because the connection is already gone (readers see that
+// themselves).
+//
+// At most one probe is in flight: x/crypto/ssh serialises global requests
+// with wantReply on one mutex for the whole round trip, so a second probe
+// would only queue behind the first. A late reply still counts, as does any
+// channel data: a busy node whose replies are slow (TCP retransmits over the
+// tunnel, a starved sshd) is alive, not lost.
+func keepalive(stop <-chan struct{}, interval, silence time.Duration, probe func() error, lastRead func() time.Time) bool {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	missed := 0
+	var inFlight chan error
 	for {
 		select {
-		case <-c.stop:
-			return
-		case <-ticker.C:
-		}
-		reply := make(chan error, 1)
-		go func() {
-			_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
-			reply <- err
-		}()
-		timer := time.NewTimer(interval)
-		select {
-		case <-c.stop:
-			timer.Stop()
-			return
-		case err := <-reply:
-			timer.Stop()
+		case <-stop:
+			return false
+		case err := <-inFlight:
+			inFlight = nil
 			if err != nil {
-				// The connection is already gone; readers see that themselves.
-				return
+				return false
 			}
-			missed = 0
-		case <-timer.C:
-			missed++
-		}
-		if missed >= maxMissed {
-			c.lost.Store(true)
-			_ = c.client.Close()
-			return
+		case <-ticker.C:
+			if inFlight == nil {
+				inFlight = make(chan error, 1)
+				go func(reply chan<- error) { reply <- probe() }(inFlight)
+				continue
+			}
+			if time.Since(lastRead()) >= silence {
+				return true
+			}
 		}
 	}
 }
 
-// Lost reports whether keepalive closed the connection because the node
-// stopped answering.
+// Lost reports whether keepalive closed the connection because nothing
+// arrived from the node for Silence.
 func (c *SSHClient) Lost() bool {
 	return c != nil && c.lost.Load()
+}
+
+// Silence is how long the connection may stay silent, with a keepalive
+// unanswered, before keepalive closes it.
+func (c *SSHClient) Silence() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.silence
 }
 
 // StreamLost reports whether err from Run means the connection went away

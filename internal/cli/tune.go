@@ -93,7 +93,7 @@ func sheetLines(name string, sv tuneServer) []string {
 
 type tuneShowData struct {
 	// Server is the budget sheet: RAM, the reserve, what clusters get.
-	Server         tuneServer        `json:"server"`
+	Server tuneServer `json:"server"`
 	// The rest is one database's cluster; empty when no database was picked
 	// (none, or several and no --db).
 	Database       string            `json:"database,omitempty"`
@@ -110,7 +110,7 @@ func fetchTune(cmd *cobra.Command, s *session, p *progress) (tuneShowData, error
 	if db := stringFlag(cmd, "db"); db != "" {
 		params = map[string]string{"db": db}
 	}
-	reply, err := s.node.Call(commandContext(cmd), "tune.show", params, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "tune.show", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return tuneShowData{}, err
 	}
@@ -188,7 +188,7 @@ func runTuneApply(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	confirm, confirms := confirmOptions(cmd)
-	reply, err := s.node.Call(commandContext(cmd), "tune.apply", nil, remote.CallOptions{
+	reply, err := p.call(commandContext(cmd), s.node, "tune.apply", nil, remote.CallOptions{
 		DryRun:   dryRun(cmd),
 		Confirm:  confirm,
 		Confirms: confirms,

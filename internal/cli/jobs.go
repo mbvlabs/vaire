@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/signal"
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
@@ -24,25 +27,96 @@ type jobReply struct {
 }
 
 // callJob calls a method that starts a detachable job and follows it.
-// Ctrl-C or a dropped tunnel detaches: the job keeps running on the node and
-// eru job follow <id> re-attaches. detached reports that case, with the job
-// ID when the node had already announced it.
+// Ctrl-C detaches: the job keeps running on the node and eru job follow <id>
+// re-attaches. A lost connection after the node announced the job
+// reconnects and re-attaches by itself a few times before giving up.
+// detached reports the Ctrl-C case, with the job ID when the node had
+// already announced it.
 func callJob(cmd *cobra.Command, s *session, p *progress, method string, params any, opts remote.CallOptions) (reply remote.Reply, jobID string, detached bool, err error) {
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	defer p.wait(waitLabel(method, params))()
+	if m, ok := params.(map[string]string); ok && method == "job.follow" {
+		jobID = m["id"]
+	}
+	// seen counts the job's journal events shown so far: everything after
+	// the node announced the job (all of them for job.follow). job.follow
+	// replays the journal from the start, so a re-attach skips that many.
+	seen := 0
 	opts.OnEvent = func(ev output.Event) {
 		if ev.Type == "progress" && ev.Phase == "job" {
 			jobID = ev.Detail
 			p.note("job " + jobID + " started; Ctrl-C detaches and it keeps running (eru job follow " + jobID + ")")
 			return
 		}
+		if jobID != "" {
+			seen++
+		}
 		p.event(ev)
 	}
 	reply, err = s.node.Call(ctx, method, params, opts)
+	if err != nil && jobID != "" && isStreamLost(err) {
+		follow := func(ctx context.Context, onEvent func(output.Event)) (remote.Reply, error) {
+			return s.node.Call(ctx, "job.follow", map[string]string{"id": jobID}, remote.CallOptions{OnEvent: onEvent})
+		}
+		reply, err = reattachJob(ctx, jobID, err, &seen, s.reconnect, follow, p.event, p.note, jobReattachBackoff)
+	}
 	if err != nil && ctx.Err() != nil && commandContext(cmd).Err() == nil {
 		return reply, jobID, true, nil
 	}
 	return reply, jobID, false, err
+}
+
+// jobReattachBackoff is the wait before each re-attach attempt after a lost
+// connection; its length is the number of attempts.
+var jobReattachBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
+
+// reattachJob reconnects and follows job id after lost, the stream_lost
+// error of the call that started or followed it. seen is how many of the
+// job's journal events were already shown; the replay skips them and adds
+// the new ones. It returns the job's outcome, or lost when every attempt
+// failed the same way, so its hint (the request's run log) stands.
+func reattachJob(ctx context.Context, id string, lost error, seen *int, reconnect func(context.Context) error,
+	follow func(context.Context, func(output.Event)) (remote.Reply, error), emit func(output.Event), note func(string), backoff []time.Duration,
+) (remote.Reply, error) {
+	for n, wait := range backoff {
+		note(fmt.Sprintf("lost the connection to the node; job %s keeps running there; re-attaching (attempt %d of %d)", id, n+1, len(backoff)))
+		select {
+		case <-ctx.Done():
+			return remote.Reply{}, ctx.Err()
+		case <-time.After(wait):
+		}
+		if err := reconnect(ctx); err != nil {
+			if ctx.Err() != nil {
+				return remote.Reply{}, ctx.Err()
+			}
+			continue
+		}
+		skip := *seen
+		reply, err := follow(ctx, func(ev output.Event) {
+			if skip > 0 {
+				skip--
+				return
+			}
+			*seen++
+			emit(ev)
+		})
+		if err == nil || !isStreamLost(err) {
+			return reply, err
+		}
+	}
+	return remote.Reply{}, lost
+}
+
+// isStreamLost reports whether err is a node call whose connection died
+// before the result.
+func isStreamLost(err error) bool {
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		return false
+	}
+	details, ok := cliErr.Details.(map[string]any)
+	return ok && details["reason"] == "stream_lost"
 }
 
 // detachedResult is the output after Ctrl-C detached from a job.
@@ -78,7 +152,7 @@ func runJobList(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, err := s.node.Call(commandContext(cmd), "job.list", nil, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "job.list", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}

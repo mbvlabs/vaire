@@ -45,7 +45,8 @@ type ClusterSpec struct {
 	Backup           ClusterBackup     `toml:"backup,omitempty"`
 	// Protected refuses db drop, a shrinking db resize, credential
 	// rotation and restore promote/undo, even with a confirm token. Lifting
-	// it takes <db>/unprotect, typed by a human at a terminal.
+	// it takes a current code from the TOTP authenticator that eru protect
+	// init set up.
 	Protected bool `toml:"protected,omitempty"`
 }
 

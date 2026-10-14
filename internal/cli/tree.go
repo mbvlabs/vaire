@@ -377,6 +377,7 @@ func phase1Commands() []cmdSpec {
 			},
 		},
 		dbCommands(),
+		protectCommands(),
 		extCommands(),
 		tuneCommands(),
 		backupCommands(),
@@ -700,7 +701,7 @@ func configCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:   "Set one cluster.toml key",
-					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database. Setting it false needs a human at an interactive terminal who types <db>/unprotect; with --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it."},
+					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database; it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized). Setting it false, or removing a protected entry, asks for the current 6-digit code from the authenticator app, typed without echo at an interactive terminal; the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it."},
 					Examples: []string{
 						"eru config set postgres.settings.work_mem 64MB",
 						"eru config set clusters.app.size large",
@@ -747,6 +748,51 @@ func configCommands() cmdSpec {
 	}
 }
 
+func protectCommands() cmdSpec {
+	return cmdSpec{
+		use: "protect",
+		run: parentRun,
+		meta: CommandMeta{
+			Summary:   "Set up the two-factor code that lifts a database's protection",
+			WhenToUse: []string{"Protected databases (clusters.<db>.protected) refuse db drop, a shrinking resize, credential rotation and restore promote/undo. Lifting the protection asks for a TOTP code from an authenticator app; eru protect init sets that up."},
+			Examples:  []string{"eru protect init", "eru protect status"},
+			Remote:    true,
+		},
+		children: []cmdSpec{
+			{
+				use: "init",
+				run: runProtectInit,
+				flags: []fl{
+					flagBool("rotate", "Replace the existing secret; asks for a current code from it first"),
+				},
+				meta: CommandMeta{
+					Summary: "Set up the TOTP secret that lifting a database's protection asks a code from",
+					WhenToUse: []string{
+						"Once per cluster, by a human, before the first database is protected: the node makes a 160-bit secret and keeps it root-only, this shows it once as a QR code (and as base32), and a code from the authenticator app confirms it before the node uses it. Interactive only: without a terminal, with --yes or with structured output it is refused (input_required).",
+						"With a secret already set up it is refused (precondition_failed, reason protect_already_initialized) unless --rotate, which asks for a current code from the old secret first; the old one keeps working until the new one is confirmed.",
+					},
+					Examples:         []string{"eru protect init", "eru protect init --rotate"},
+					Mutating:         true,
+					SkipDryRunCheck:  true,
+					SkipDryRunReason: "init is interactive and only writes the node's TOTP secret, which has nothing to preview",
+					Remote:           true,
+					ErrorCodes:       []string{"input_required", "precondition_failed", "protect_code_rejected"},
+				},
+			},
+			{
+				use: "status",
+				run: runProtectStatus,
+				meta: CommandMeta{
+					Summary:   "Show whether two-factor protection is set up, any lockout, and the protected databases",
+					WhenToUse: []string{"Check before protecting a database or lifting a protection. Five wrong codes in a row lock codes out for 15 minutes; status shows until when."},
+					Examples:  []string{"eru protect status"},
+					Remote:    true,
+				},
+			},
+		},
+	}
+}
+
 func dbCommands() cmdSpec {
 	return cmdSpec{
 		use: "db",
@@ -778,11 +824,11 @@ func dbCommands() cmdSpec {
 					flagString("size", "", "Size of the database's cluster: nano, small, medium, large, xlarge or custom (default [postgres] default_size, stepped down to what fits)"),
 					flagString("memory", "", "Memory for the cluster, such as 768MiB or 2GiB; overrides the size's (custom needs it)"),
 					flagString("profile", "", "Workload profile for its tuning: oltp, mixed or analytics (default [postgres] profile)"),
-					flagBool("protected", "Protect it (clusters.<db>.protected): db drop, a shrinking resize, credential rotation and restore promote/undo are refused even with --confirm"),
+					flagBool("protected", "Protect it (clusters.<db>.protected): db drop, a shrinking resize, credential rotation and restore promote/undo are refused even with --confirm. Needs eru protect init first"),
 				},
 				meta: CommandMeta{
 					Summary:        "Create a database in its own PostgreSQL cluster, with its migrate, app, and read-only roles",
-					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory, the default size steps down to the largest that fits the server's free budget (warning size_stepped_down); a server already full gets memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; eru apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and eru apply finishes it. --protected marks it protected (see eru config set clusters.<db>.protected)."},
+					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory, the default size steps down to the largest that fits the server's free budget (warning size_stepped_down); a server already full gets memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; eru apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and eru apply finishes it. --protected marks it protected (see eru config set clusters.<db>.protected); it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized)."},
 					Examples:       []string{"eru db create app --size small", "eru db create app --protected", "eru db create app --memory 768MiB --profile oltp", "eru db create app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,

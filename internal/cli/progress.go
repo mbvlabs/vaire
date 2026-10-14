@@ -2,16 +2,19 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/cli/ui"
+	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -32,6 +35,10 @@ type progress struct {
 	// hidden holds warning codes the human output leaves out because the
 	// command's result already says the same.
 	hidden map[string]bool
+	// status is the terminal UI's waiting line while wait runs.
+	status *ui.Status
+	// beat is the plain output's heartbeat while wait runs.
+	beat *heartbeat
 }
 
 // hideWarning leaves warnings with code out of the human output. JSON and
@@ -89,6 +96,7 @@ func (p *progress) event(ev output.Event) {
 	if !p.human() {
 		return
 	}
+	p.track(ev)
 	if ev.Type == "warning" && ev.Code != "" && p.hidden[ev.Code] {
 		p.shown(ev.Message)
 		return
@@ -120,6 +128,249 @@ func (p *progress) event(ev output.Event) {
 	case "progress":
 		_, _ = fmt.Fprintf(p.stderr, "  %s %s\n", ev.Phase, ev.Detail)
 	}
+}
+
+// heartbeatEvery is how long plain output may stay silent while waiting
+// before a "still ..." line says the command is alive.
+const heartbeatEvery = 30 * time.Second
+
+// wait shows that the command is waiting for the node until the returned
+// func is called. The terminal UI draws a status line with a spinner, the
+// current phase and its elapsed time once nothing was printed for 300ms;
+// plain human output prints a "… still <phase> (2m10s)" line after
+// heartbeatEvery of silence. Structured, --stream and quiet modes show
+// nothing. A wait inside a wait keeps the outer one.
+func (p *progress) wait(label string) func() {
+	switch {
+	case p.live != nil:
+		if p.status != nil {
+			return func() {}
+		}
+		st, stop := p.live.Wait(label)
+		p.status = st
+		return func() {
+			stop()
+			p.status = nil
+		}
+	case p.human():
+		if p.beat != nil {
+			return func() {}
+		}
+		h := &heartbeat{w: p.stderr, label: label, every: heartbeatEvery}
+		p.beat, p.stderr = h, h
+		stop := h.start()
+		return func() {
+			stop()
+			p.beat, p.stderr = nil, h.w
+		}
+	}
+	return func() {}
+}
+
+// call runs one node RPC with the waiting line up, and the progress's event
+// renderer when opts has none.
+func (p *progress) call(ctx context.Context, c remote.Caller, method string, params any, opts remote.CallOptions) (remote.Reply, error) {
+	defer p.wait(waitLabel(method, params))()
+	if opts.OnEvent == nil {
+		opts.OnEvent = p.event
+	}
+	return c.Call(ctx, method, params, opts)
+}
+
+// track feeds an event to the waiting line: a started step becomes the
+// phase until it ends, log and progress lines its detail.
+func (p *progress) track(ev output.Event) {
+	if p.status == nil && p.beat == nil {
+		return
+	}
+	switch ev.Type {
+	case "step":
+		phase := ""
+		if ev.State == "started" {
+			phase, _ = phaseTitle(ev.Step)
+		}
+		p.setPhase(phase)
+	case "log":
+		p.setDetail(secrets.Redact(ev.Line))
+	case "progress":
+		if ev.Phase != "job" {
+			p.setDetail(secrets.Redact(strings.TrimSpace(ev.Phase + " " + ev.Detail)))
+		}
+	}
+}
+
+func (p *progress) setPhase(phase string) {
+	if p.status != nil {
+		p.status.Phase(phase)
+	}
+	if p.beat != nil {
+		p.beat.phaseTo(phase)
+	}
+}
+
+func (p *progress) setDetail(detail string) {
+	if p.status != nil {
+		p.status.Detail(detail)
+	}
+}
+
+// heartbeat is the plain output's sign of life while waiting: it wraps
+// stderr to see when the command last printed, and after every of silence
+// prints what it still waits for.
+type heartbeat struct {
+	mu           sync.Mutex
+	w            io.Writer
+	every        time.Duration
+	label, phase string
+	started      time.Time
+	phaseStarted time.Time
+	last         time.Time
+}
+
+func (h *heartbeat) Write(b []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.last = time.Now()
+	return h.w.Write(b)
+}
+
+func (h *heartbeat) phaseTo(phase string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if phase != h.phase {
+		h.phase, h.phaseStarted = phase, time.Now()
+	}
+}
+
+// start begins the heartbeat; the returned func stops it.
+func (h *heartbeat) start() func() {
+	now := time.Now()
+	h.started, h.phaseStarted, h.last = now, now, now
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-t.C:
+				h.mu.Lock()
+				if now.Sub(h.last) >= h.every {
+					_, _ = fmt.Fprintln(h.w, h.line(now))
+					h.last = now
+				}
+				h.mu.Unlock()
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
+}
+
+// line is the heartbeat text. The caller holds h.mu.
+func (h *heartbeat) line(now time.Time) string {
+	what, took := h.label, now.Sub(h.started).Round(time.Second).String()
+	if h.phase != "" {
+		what = h.phase
+	}
+	if h.phaseStarted.After(h.started) {
+		took = now.Sub(h.phaseStarted).Round(time.Second).String() + ", " + took + " total"
+	}
+	return "… still " + what + " (" + took + ")"
+}
+
+// waitLabel is what the waiting line says for an RPC method: "restoring
+// app2", "backing up app2", or "waiting for <method>".
+func waitLabel(method string, params any) string {
+	var named struct {
+		Database string `json:"database"`
+		Name     string `json:"name"`
+		Source   string `json:"source"`
+		ID       string `json:"id"`
+	}
+	if raw, err := json.Marshal(params); err == nil {
+		_ = json.Unmarshal(raw, &named)
+	}
+	db := named.Database
+	if db == "" {
+		db = named.Name
+	}
+	with := func(verb, obj string) string {
+		if obj == "" {
+			return verb
+		}
+		return verb + " " + obj
+	}
+	switch method {
+	case "apply":
+		return "applying"
+	case "plan":
+		return "planning"
+	case "db.list":
+		return "listing the databases"
+	case "db.credentials":
+		return with("rotating the credentials of", db)
+	case "backup.list":
+		return "listing the backups"
+	case "job.list":
+		return "listing the jobs"
+	case "tune.show":
+		return "reading the tuning"
+	case "restore.status":
+		return "reading the restore status"
+	case "restore.cleanup":
+		return with("cleaning up the restore of", db)
+	case "cluster.bootstrap":
+		return "running the setup steps"
+	case "cluster.confirm-secrets":
+		return "confirming the secrets handoff"
+	case "ssh.lockdown":
+		return "closing public SSH"
+	case "ssh.confirm":
+		return "confirming the SSH lockdown"
+	case "ssh.status":
+		return "reading the SSH state"
+	case "tls.status":
+		return "checking the certificate"
+	case "config.get":
+		return "reading the config"
+	case "config.set":
+		return "updating the config"
+	case "tune.apply":
+		return "applying the tuning"
+	case "db.create":
+		return with("creating", db)
+	case "db.resize":
+		return with("resizing", db)
+	case "db.drop":
+		return with("dropping", db)
+	case "db.fork":
+		return with("forking", named.Source)
+	case "dump.create":
+		return with("dumping", db)
+	case "restore.start":
+		return with("restoring", db)
+	case "restore.promote":
+		return with("promoting the restore of", db)
+	case "restore.abort":
+		return with("aborting the restore of", db)
+	case "restore.undo":
+		return with("undoing the restore of", db)
+	case "restore.drill":
+		return with("running a restore drill of", db)
+	case "backup.now":
+		return with("backing up", db)
+	case "backup.verify":
+		return with("verifying the backups of", db)
+	case "job.follow":
+		return with("following job", named.ID)
+	}
+	return "waiting for " + method
 }
 
 // liveEvent draws one event in the terminal UI.

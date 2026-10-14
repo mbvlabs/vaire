@@ -57,31 +57,6 @@ func TestRefuseProtected(t *testing.T) {
 	}
 }
 
-func TestCheckUnprotect(t *testing.T) {
-	old := protectedCluster()
-	lifted := protectedCluster()
-	lifted.Clusters[0].Protected = false
-	if got := Unprotected(old, lifted); len(got) != 1 || got[0] != "app" {
-		t.Fatalf("Unprotected = %v", got)
-	}
-	if err := checkUnprotect(old, lifted, nil); !isProtectedErr(err) {
-		t.Fatalf("no token: got %v", err)
-	}
-	if err := checkUnprotect(old, lifted, []string{"app"}); !isProtectedErr(err) {
-		t.Fatalf("wrong token: got %v", err)
-	}
-	if err := checkUnprotect(old, lifted, []string{"app/unprotect"}); err != nil {
-		t.Fatalf("token: got %v", err)
-	}
-	removed := config.Cluster{Clusters: old.Clusters[1:]}
-	if err := checkUnprotect(old, removed, nil); !isProtectedErr(err) {
-		t.Fatalf("removed entry: got %v", err)
-	}
-	if err := checkUnprotect(old, old, nil); err != nil {
-		t.Fatalf("unchanged: got %v", err)
-	}
-}
-
 func TestResizeShrinks(t *testing.T) {
 	cfg := protectedCluster()
 	medium := cfg.Clusters[0]

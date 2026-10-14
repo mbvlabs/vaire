@@ -211,7 +211,7 @@ func streamLost(method, requestID string, c *transport.SSHClient, err error) *ou
 	runLog := fmt.Sprintf("%s/*-%s-%s.log", engine.LogDir, method, requestID)
 	why := "the connection closed"
 	if c.Lost() {
-		why = "the node stopped answering SSH keepalives"
+		why = "nothing came back from the node, not even an SSH keepalive reply, for " + c.Silence().String()
 	}
 	return output.NewError(
 		output.CodeTransportFailed,

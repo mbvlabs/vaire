@@ -20,6 +20,7 @@ require (
 	golang.org/x/crypto v0.58.0
 	golang.org/x/term v0.47.0
 	golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
+	rsc.io/qr v0.2.0
 )
 
 require (

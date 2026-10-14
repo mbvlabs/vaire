@@ -193,7 +193,7 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, err := s.node.Call(commandContext(cmd), "restore.status", params, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "restore.status", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -282,7 +282,7 @@ func restoreAction(cmd *cobra.Command, db, method, token, action string, done fu
 			return err
 		}
 	}
-	reply, err := s.node.Call(commandContext(cmd), method, map[string]string{"database": db},
+	reply, err := p.call(commandContext(cmd), s.node, method, map[string]string{"database": db},
 		remote.CallOptions{Confirm: token, DryRun: dryRun(cmd), OnEvent: p.event})
 	if err != nil {
 		return err
@@ -308,8 +308,12 @@ func runRestorePromote(cmd *cobra.Command, args []string) error {
 
 func runRestoreUndo(cmd *cobra.Command, args []string) error {
 	db := args[0]
-	return restoreAction(cmd, db, "restore.undo", db+"/restore", "restore undo", func(map[string]any) string {
-		return db + " is back to its data from before the restore, on its old timeline; a full backup is running."
+	return restoreAction(cmd, db, "restore.undo", db+"/restore", "restore undo", func(data map[string]any) string {
+		msg := db + " is back to its data from before the restore, on its old timeline; a full backup is running."
+		if aside, _ := data["pre_undo"].(string); aside != "" {
+			msg += " The restored data is kept as the stopped cluster " + aside + " until eru restore cleanup " + db + "; undo can't swap it back in."
+		}
+		return msg
 	})
 }
 
@@ -332,7 +336,7 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 	ctx := commandContext(cmd)
-	reply, err := s.node.Call(ctx, "restore.cleanup", map[string]any{"database": db}, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(ctx, s.node, "restore.cleanup", map[string]any{"database": db}, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -362,7 +366,7 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	if err := Confirm(cmd, token); err != nil {
 		return err
 	}
-	reply, err = s.node.Call(ctx, "restore.cleanup", map[string]any{"database": db, "drop": true}, remote.CallOptions{Confirm: token, OnEvent: p.event})
+	reply, err = p.call(ctx, s.node, "restore.cleanup", map[string]any{"database": db, "drop": true}, remote.CallOptions{Confirm: token, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -388,7 +392,7 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 	defer s.Close()
 	params := func(db string) any { return map[string]string{"time": at, "database": db} }
 	if dryRun(cmd) {
-		reply, err := s.node.Call(commandContext(cmd), "restore.drill", params(stringFlag(cmd, "db")), remote.CallOptions{DryRun: true, OnEvent: p.event})
+		reply, err := p.call(commandContext(cmd), s.node, "restore.drill", params(stringFlag(cmd, "db")), remote.CallOptions{DryRun: true, OnEvent: p.event})
 		if err != nil {
 			return err
 		}

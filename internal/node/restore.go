@@ -763,14 +763,9 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	u, resuming := bs.Undoing[p.Database]
-	leftovers := bs.LeftoversOf(p.Database)
-	if !resuming && len(leftovers) == 0 {
-		return Result{}, output.NewError(output.CodePrecondition, "there is no pre-restore copy of "+p.Database+" to go back to", output.ExitPrecondition,
-			"restore cleanup may already have dropped it.").WithDetails(map[string]any{"reason": "no_leftover"})
-	}
-	if !resuming {
-		u.From = leftovers[len(leftovers)-1]
+	u, resuming, err := planUndo(bs, p.Database)
+	if err != nil {
+		return Result{}, err
 	}
 	back := u.From
 	if env.Req.DryRun {
@@ -842,7 +837,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 				kept = append(kept, l)
 			}
 		}
-		s.Leftovers = append(kept, backup.Leftover{Database: p.Database, Name: aside, CreatedAt: stamp(), RestoreID: "undo-" + back.RestoreID, Port: back.Port, Stanza: spec.Stanza})
+		s.Leftovers = append(kept, backup.Leftover{Database: p.Database, Name: aside, CreatedAt: stamp(), RestoreID: undoRestoreID(back.RestoreID), Port: back.Port, Stanza: spec.Stanza})
 		if stanza != spec.Stanza {
 			dropped := s.DroppedStanzas[:0]
 			for _, d := range s.DroppedStanzas {
@@ -877,6 +872,59 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
+// undoPrefix marks the RestoreID of the leftover a completed undo leaves:
+// the restored data it swapped out. cleanup drops it like any leftover, but
+// undo never swaps it back in, so a second undo can't redo the restore.
+const undoPrefix = "undo-"
+
+func undoRestoreID(restoreID string) string { return undoPrefix + restoreID }
+
+// fromUndo reports whether l is the restored data a completed undo set aside.
+func fromUndo(l backup.Leftover) bool { return strings.HasPrefix(l.RestoreID, undoPrefix) }
+
+// planUndo decides what an undo of db does. An undo recorded in Undoing
+// stopped part way and resumes with its recorded names. Otherwise it swaps
+// back the newest leftover, the data the last promote replaced. When the
+// newest leftover is the aside of a completed undo, the last restore was
+// undone already and there is nothing to undo.
+func planUndo(bs backup.Records, db string) (backup.Undo, bool, error) {
+	if u, ok := bs.Undoing[db]; ok {
+		return u, true, nil
+	}
+	leftovers := bs.LeftoversOf(db)
+	if len(leftovers) == 0 {
+		return backup.Undo{}, false, output.NewError(output.CodePrecondition, "there is no pre-restore copy of "+db+" to go back to", output.ExitPrecondition,
+			"restore cleanup may already have dropped it.").WithDetails(map[string]any{"reason": "no_leftover"})
+	}
+	last := leftovers[len(leftovers)-1]
+	if fromUndo(last) {
+		return backup.Undo{}, false, output.NewError(output.CodePrecondition, db+" was already undone; nothing to undo", output.ExitPrecondition,
+			"The restored data it left is kept as the stopped cluster "+last.Name+"; eru restore cleanup "+db+" drops it.").
+			WithDetails(map[string]any{"reason": "already_undone", "aside": last.Name})
+	}
+	return backup.Undo{From: last}, false, nil
+}
+
+// noOpenRestore is abort's refusal when db has no open restore. It says
+// what happened to the last one: an undo under way, promoted or undone.
+func noOpenRestore(bs backup.Records, db string) error {
+	reason, msg, hint := "no_open_restore", "there is no open restore of "+db, ""
+	if _, ok := bs.Undoing[db]; ok {
+		reason, msg = "undo_in_progress", "there is no open restore of "+db+"; an undo of its last restore stopped part way"
+		hint = "Finish it with eru restore undo " + db + " --confirm " + db + "/restore (it resumes)."
+	} else if leftovers := bs.LeftoversOf(db); len(leftovers) > 0 {
+		last := leftovers[len(leftovers)-1]
+		if fromUndo(last) {
+			reason, msg = "restore_undone", "there is no open restore of "+db+"; its last restore was promoted and then undone"
+			hint = "The restored data is kept as the stopped cluster " + last.Name + "; eru restore cleanup " + db + " drops it."
+		} else {
+			reason, msg = "restore_promoted", "there is no open restore of "+db+"; its last restore was promoted already"
+			hint = "eru restore undo " + db + " swaps the old data (the cluster " + last.Name + ") back in; eru restore cleanup " + db + " drops it."
+		}
+	}
+	return output.NewError(output.CodePrecondition, msg, output.ExitPrecondition, hint).WithDetails(map[string]any{"reason": reason})
+}
+
 func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	var p restoreDBParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -888,8 +936,7 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	}
 	r, ok := bs.OpenRestore(p.Database)
 	if !ok {
-		return Result{}, output.NewError(output.CodePrecondition, "there is no open restore of "+p.Database, output.ExitPrecondition, "").
-			WithDetails(map[string]any{"reason": "no_open_restore"})
+		return Result{}, noOpenRestore(bs, p.Database)
 	}
 	if r.Phase == backup.PhaseRestoring {
 		st, err := engine.LoadState(engine.StatePath)

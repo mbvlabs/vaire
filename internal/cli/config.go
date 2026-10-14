@@ -15,6 +15,7 @@ import (
 	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/render"
+	"github.com/mbvlabs/eru/internal/totp"
 	"github.com/spf13/cobra"
 )
 
@@ -25,7 +26,7 @@ type configData struct {
 }
 
 func fetchConfig(cmd *cobra.Command, s *session, p *progress) (configData, error) {
-	reply, err := s.node.Call(commandContext(cmd), "config.get", nil, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "config.get", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return configData{}, err
 	}
@@ -100,14 +101,14 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 			lifted = node.Unprotected(old, updated)
 		}
 	}
-	confirm, confirms, err := confirmUnprotect(cmd, lifted)
+	code, err := unprotectCode(cmd, s, p, lifted)
 	if err != nil {
 		return err
 	}
-	reply, err := s.node.Call(commandContext(cmd), "config.set", map[string]any{
+	reply, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
 		"set":           map[string]string{key: value},
 		"base_revision": data.Revision,
-	}, remote.CallOptions{DryRun: dryRun(cmd), Confirm: confirm, Confirms: confirms, OnEvent: p.event})
+	}, remote.CallOptions{DryRun: dryRun(cmd), Secrets: code, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -164,7 +165,7 @@ func runConfigValidate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, err := s.node.Call(commandContext(cmd), "config.validate", nil, remote.CallOptions{OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "config.validate", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -219,7 +220,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if string(edited) == data.TOML {
 		return output.Success(cmd, output.Result{Data: map[string]any{"changed": false}, Message: "no changes", Warnings: s.warnings})
 	}
-	preview, err := s.node.Call(commandContext(cmd), "config.set", map[string]any{
+	preview, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
 		"toml":          string(edited),
 		"base_revision": data.Revision,
 	}, remote.CallOptions{DryRun: true, OnEvent: p.event})
@@ -247,14 +248,14 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 			lifted = node.Unprotected(old, updated)
 		}
 	}
-	confirm, confirms, err := confirmUnprotect(cmd, lifted)
+	code, err := unprotectCode(cmd, s, p, lifted)
 	if err != nil {
 		return err
 	}
-	reply, err := s.node.Call(commandContext(cmd), "config.set", map[string]any{
+	reply, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
 		"toml":          string(edited),
 		"base_revision": data.Revision,
-	}, remote.CallOptions{Confirm: confirm, Confirms: confirms, OnEvent: p.event})
+	}, remote.CallOptions{Secrets: code, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -284,33 +285,52 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	})
 }
 
-// confirmUnprotect has a human type <db>/unprotect for each database whose
-// protection the change lifts, and returns the tokens for the request. It
-// refuses without an interactive terminal, with --yes and in structured
-// output: an agent or a script must not be able to lift a protection it is
-// meant to be stopped by. A dry run lifts nothing, so it asks nothing.
-func confirmUnprotect(cmd *cobra.Command, lifted []string) (string, []string, error) {
+// unprotectCode asks for a current code from the authenticator app that
+// eru protect init set up when the change lifts a database's protection, and
+// returns it as the request's protect_code secret: secrets are redacted and
+// never logged. The node checks the code; a typed word would prove nothing,
+// since an agent at a terminal can type it too. It refuses without an
+// interactive terminal, with --yes and in structured output. A dry run lifts
+// nothing, so it asks nothing.
+func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string) (map[string]string, error) {
 	if len(lifted) == 0 || dryRun(cmd) {
-		return "", nil, nil
+		return nil, nil
 	}
-	tokens := make([]string, 0, len(lifted))
-	for _, name := range lifted {
-		tokens = append(tokens, node.UnprotectToken(name))
-	}
+	names := strings.Join(lifted, ", ")
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
-		return "", nil, output.NewError(output.CodeDatabaseProtected,
-			"lifting the protection of "+strings.Join(lifted, ", ")+" needs a human at a terminal", output.ExitUnsafe,
-			"A person runs this command in an interactive terminal, without --yes or structured output, and types "+strings.Join(tokens, ", ")+". Agents and scripts cannot lift it.").
-			WithDetails(map[string]any{"reason": "unprotect_requires_human", "databases": lifted, "confirm_tokens": tokens})
+		return nil, output.NewError(output.CodeDatabaseProtected,
+			"lifting the protection of "+names+" needs a code from the authenticator app, typed at a terminal", output.ExitUnsafe,
+			"A person runs this command in an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with eru protect init.").
+			WithDetails(map[string]any{"reason": "unprotect_requires_human", "databases": lifted})
 	}
-	for i, name := range lifted {
-		if err := typeWord(cmd, "Type '"+tokens[i]+"' to lift the protection of "+name,
-			name+" is protected: db drop, a shrinking resize, credential rotation and restore promote/undo are refused while it is set.", tokens[i]); err != nil {
-			return "", nil, output.NewError(output.CodeDatabaseProtected, "the protection of "+name+" was kept", output.ExitUnsafe, "").
-				WithDetails(map[string]any{"reason": "unprotect_not_confirmed", "database": name})
-		}
+	// Ask the node first, so nobody types a code that cannot work.
+	status, err := fetchProtectStatus(cmd, s, p)
+	if err != nil {
+		return nil, err
 	}
-	return tokens[0], tokens[1:], nil
+	if !status.Configured {
+		return nil, output.NewError(output.CodeDatabaseProtected,
+			"lifting the protection of "+names+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe,
+			"A human runs eru protect init first, at a terminal, and scans the QR code with an authenticator app. Lifting a protection then needs a current code from it.").
+			WithDetails(map[string]any{"reason": "protect_not_initialized", "databases": lifted})
+	}
+	if status.LockedUntil != "" {
+		return nil, output.NewError(output.CodeProtectCodeRejected, "too many wrong codes; codes are locked out until "+status.LockedUntil, output.ExitUnsafe,
+			"Wait until the lockout ends, then try again with a fresh code.").
+			WithDetails(map[string]any{"reason": "locked", "locked_until": status.LockedUntil})
+	}
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), names+" is protected: db drop, a shrinking resize, credential rotation and restore promote/undo are refused while it is set.")
+	code, err := readSecretTTY(cmd, "Current code from the authenticator app to lift the protection of "+names)
+	if err != nil {
+		return nil, err
+	}
+	code = totp.NormalizeCode(code)
+	if !totp.WellFormed(code) {
+		return nil, output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits; the protection of "+names+" was kept", output.ExitUnsafe,
+			"Type the 6-digit code the authenticator app shows for eru.").
+			WithDetails(map[string]any{"reason": "code_invalid", "databases": lifted})
+	}
+	return map[string]string{node.ProtectCodeSecret: code}, nil
 }
 
 // editUntilValid opens path in the editor until the result parses and

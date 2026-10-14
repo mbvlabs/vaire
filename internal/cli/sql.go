@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/contexts"
@@ -149,11 +151,17 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
 	if _, err := conn.Exec(ctx, begin); err != nil {
+		if rerr := readOnlyCopyError(db, err); rerr != nil {
+			return rerr
+		}
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
 	res, err := conn.Query(ctx, query)
 	if err != nil {
 		_, _ = conn.Exec(ctx, "ROLLBACK")
+		if rerr := readOnlyCopyError(db, err); rerr != nil {
+			return rerr
+		}
 		hint := "Fix the statement and retry."
 		if write && backup.LiveDatabase(db) != db {
 			hint += " " + db + " is a copy: one restored from a backup is read-only (in recovery) until eru restore promote " + backup.LiveDatabase(db) + "; one restored from a dump takes writes."
@@ -164,6 +172,30 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "The transaction did not commit.")
 	}
 	return output.Success(cmd, output.Result{Data: res, Message: renderTable(res), Warnings: warnings})
+}
+
+// sqlstateRecovery is feature_not_supported, which PostgreSQL returns for
+// a read-write transaction on a cluster in recovery.
+const sqlstateRecovery = "0A000"
+
+// readOnlyCopyError is err as a precondition error when db is a restore's
+// copy (<db>__restoring) that refused a write because it is still in
+// recovery: a copy restored from a backup is read-only until promoted. It is
+// nil for any other error or database.
+func readOnlyCopyError(db string, err error) error {
+	live := backup.LiveDatabase(db)
+	if live == db || backup.RestoringName(live) != db {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != sqlstateRecovery {
+		if !strings.Contains(err.Error(), "during recovery") {
+			return nil
+		}
+	}
+	return output.WrapError(output.CodePrecondition, fmt.Errorf("%s is read-only: it was restored from a backup and stays in recovery until promoted: %w", db, err),
+		output.ExitPrecondition, "Inspect it read-only (eru sql --db "+db+" without --write), or promote it with eru restore promote "+live+" --confirm "+live+"/restore and write to "+live+".").
+		WithDetails(map[string]any{"reason": "restore_copy_read_only", "sqlstate": sqlstateRecovery})
 }
 
 // renderTable renders a result as a simple text table.

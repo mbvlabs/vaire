@@ -33,6 +33,10 @@ type Live struct {
 	spinner  spinner.Spinner
 	bar      progress.Model
 	lastHead string
+	// status is the line shown while the command waits and no task runs.
+	status *Status
+	// lastOut is when the live area last printed a line above itself.
+	lastOut time.Time
 }
 
 // Task is one running phase or step.
@@ -139,6 +143,7 @@ func Close() {
 	}
 	l.mu.Lock()
 	l.tasks = nil
+	l.status = nil
 	l.clear()
 	l.stopTicker()
 	l.mu.Unlock()
@@ -158,6 +163,7 @@ func (l *Live) Println(s string) {
 	defer l.mu.Unlock()
 	l.clear()
 	_, _ = fmt.Fprintln(l.out, s)
+	l.lastOut = time.Now()
 	l.draw()
 }
 
@@ -274,7 +280,8 @@ func (t *Task) End(state, detail string) {
 	}
 	l.clear()
 	_, _ = fmt.Fprintln(l.out, l.truncate(finalLine(state, t.title, detail, time.Since(t.started))))
-	if len(l.tasks) == 0 {
+	l.lastOut = time.Now()
+	if len(l.tasks) == 0 && l.status == nil {
 		l.stopTicker()
 	}
 	l.draw()
@@ -361,11 +368,18 @@ func (l *Live) clear() {
 // draw redraws the live area. The caller holds l.mu.
 func (l *Live) draw() {
 	l.clear()
-	if l.paused > 0 || len(l.tasks) == 0 {
+	if l.paused > 0 {
 		return
 	}
 	frames := l.spinner.Frames
 	frame := frames[int(time.Now().UnixMilli()/int64(l.spinner.FPS/time.Millisecond))%len(frames)]
+	if len(l.tasks) == 0 {
+		if l.status != nil && time.Since(l.lastOut) >= idleAfter {
+			_, _ = io.WriteString(l.out, l.truncate(l.status.line(styleSpinner.Render(frame), time.Now())))
+			l.drawn = 1
+		}
+		return
+	}
 	var lines []string
 	for _, t := range l.tasks {
 		elapsed := formatDuration(time.Since(t.started))

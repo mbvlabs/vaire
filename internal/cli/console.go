@@ -105,5 +105,5 @@ func consolePrompt(hostname, contextName string) string {
 		node = contextName
 	}
 	node = strings.ReplaceAll(node, "%", "")
-	return "PROMPT1=%S%N" + node + "/%/%R%# "
+	return "PROMPT1=%S%N" + node + "%/%R%# "
 }

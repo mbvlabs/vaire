@@ -168,6 +168,11 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	if err := checkDatabaseName(p.Name); err != nil {
 		return Result{}, err
 	}
+	if p.Protected {
+		if err := defaultProtectGuard.checkProtect([]string{p.Name}); err != nil {
+			return Result{}, err
+		}
+	}
 	timeout := p.StatementTimeout
 	if timeout == "" {
 		timeout = "60s"

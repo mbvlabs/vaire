@@ -16,7 +16,7 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
-	reply, err := caller.Call(ctx, "cluster.bootstrap", map[string]any{
+	reply, err := r.p.call(ctx, caller, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseDatabase,
 		"cluster_toml": string(raw),
 		"node_name":    r.master().Name,
@@ -157,7 +157,7 @@ func dnsSummary(check dnsCheck, ipv4, ipv6 string) string {
 
 // tlsStatus asks the node for the served certificate's state.
 func (r *initRun) tlsStatus(ctx context.Context, caller remote.Caller) (*node.TLSState, error) {
-	reply, err := caller.Call(ctx, "tls.status", nil, remote.CallOptions{OnEvent: r.p.event})
+	reply, err := r.p.call(ctx, caller, "tls.status", nil, remote.CallOptions{OnEvent: r.p.event})
 	if err != nil {
 		return nil, err
 	}
