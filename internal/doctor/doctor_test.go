@@ -240,6 +240,58 @@ Normalized form: Sun *-*-* 01:00:00
 	}
 }
 
+// systemd 259's output (Ubuntu 26.04) for a staggered full and diff
+// schedule as timers-v1 renders them: on a UTC server, or with TZ=UTC as the
+// node runs it, there is no "(in UTC)" line, and the lines say "Iteration".
+// Before, only "(in UTC)" lines were read, so backup.full_age warned "the
+// schedule has fewer than two elapses" on every UTC server.
+func TestCalendarSystemd259(t *testing.T) {
+	cases := []struct {
+		name, out string
+		want      time.Duration
+	}{
+		{"weekly full, UTC", `Normalized form: Sun *-*-* 02:41:00
+    Next elapse: Sun 2026-10-18 02:41:00 UTC
+       From now: 2 days left
+   Iteration #2: Sun 2026-10-25 02:41:00 UTC
+       From now: 1 week 2 days left
+   Iteration #3: Sun 2026-11-01 02:41:00 UTC
+       From now: 2 weeks 2 days left
+`, 7 * 24 * time.Hour},
+		{"daily diff, UTC", `Normalized form: Mon..Sat *-*-* 02:41:00
+    Next elapse: Fri 2026-10-16 02:41:00 UTC
+       From now: 19h left
+   Iteration #2: Sat 2026-10-17 02:41:00 UTC
+       From now: 1 day 19h left
+   Iteration #3: Mon 2026-10-19 02:41:00 UTC
+       From now: 3 days left
+`, 48 * time.Hour},
+		// A local zone adds "(in UTC)" lines, which win; the DST change
+		// makes this week an hour longer in UTC.
+		{"weekly full, Europe/Copenhagen", `Normalized form: Sun *-*-* 02:41:00
+    Next elapse: Sun 2026-10-18 02:41:00 CEST
+       (in UTC): Sun 2026-10-18 00:41:00 UTC
+       From now: 2 days left
+   Iteration #2: Sun 2026-10-25 02:41:00 CEST
+       (in UTC): Sun 2026-10-25 00:41:00 UTC
+       From now: 1 week 2 days left
+   Iteration #3: Sun 2026-11-01 02:41:00 CET
+       (in UTC): Sun 2026-11-01 01:41:00 UTC
+       From now: 2 weeks 2 days left
+`, 7*24*time.Hour + time.Hour},
+	}
+	for _, c := range cases {
+		times := ParseCalendarIterations(c.out)
+		if len(times) != 3 {
+			t.Errorf("%s: %d elapses %v", c.name, len(times), times)
+			continue
+		}
+		if d, err := ScheduleInterval(times); err != nil || d != c.want {
+			t.Errorf("%s: interval %v %v, want %v", c.name, d, err, c.want)
+		}
+	}
+}
+
 func TestValidOnly(t *testing.T) {
 	if !ValidOnly("") || !ValidOnly("security") || ValidOnly("nope") {
 		t.Error("ValidOnly")

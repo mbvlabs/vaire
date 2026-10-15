@@ -76,3 +76,12 @@ func TestSnippets(t *testing.T) {
 		t.Errorf("%s", a)
 	}
 }
+
+func TestDoctorFailedMessage(t *testing.T) {
+	if got := doctorFailedMessage([]string{"fw.rules"}); got != "1 doctor check fails: fw.rules" {
+		t.Errorf("one: %q", got)
+	}
+	if got := doctorFailedMessage([]string{"fw.rules", "pg.ssl@app"}); got != "2 doctor checks fail: fw.rules, pg.ssl@app" {
+		t.Errorf("two: %q", got)
+	}
+}

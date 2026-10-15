@@ -31,9 +31,20 @@ func ExportersSlice() []byte { return execute("eru-exporters.slice.tmpl", nil) }
 // cluster (Phase 4 D4): its socket and port, the application database (so
 // stat_user_tables and stat_statements see the application's tables) as
 // eru_monitor with peer auth. The role's statement_timeout bounds a probe.
+//
+// It is a URL with the socket directory in the query, never a key=value
+// string: postgres_exporter 0.20.1 turns a key=value target into a URL with
+// host and port as its authority, and a socket path there comes out as
+// "%2Fvar%2Frun%2Fpostgresql:5433", which lib/pq's url.Parse refuses
+// (invalid URL escape), so every probe failed before reaching PostgreSQL.
 func ProbeTarget(socketDir string, spec config.ClusterSpec) string {
-	return "host=" + socketDir + " port=" + strconv.Itoa(spec.Port) + " dbname=" + spec.Name +
-		" user=eru_monitor sslmode=disable connect_timeout=5"
+	q := url.Values{}
+	q.Set("host", socketDir)
+	q.Set("port", strconv.Itoa(spec.Port))
+	q.Set("sslmode", "disable")
+	q.Set("connect_timeout", "5")
+	u := url.URL{Scheme: "postgresql", User: url.User("eru_monitor"), Path: "/" + spec.Name, RawQuery: q.Encode()}
+	return u.String()
 }
 
 // MetricsLocation is one exact location of the /metrics endpoint.

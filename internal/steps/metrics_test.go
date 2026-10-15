@@ -40,7 +40,7 @@ func TestMetricsLocations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.Get("target") != "host=/var/run/postgresql port=5433 dbname=app user=eru_monitor sslmode=disable connect_timeout=5" {
+	if q.Get("target") != "postgresql://eru_monitor@/app?connect_timeout=5&host=%2Fvar%2Frun%2Fpostgresql&port=5433&sslmode=disable" {
 		t.Errorf("target %q", q.Get("target"))
 	}
 	if app.Upstream != "http://127.0.0.1:9187/probe" || app.Labels["db"] != "app" || app.Labels["eru_component"] != "postgres" {

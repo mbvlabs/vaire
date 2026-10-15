@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
@@ -102,7 +103,7 @@ func streamLog(ctx context.Context, source, since string, lines int, follow bool
 		name = "journalctl"
 		args = []string{"-u", target, "-o", "cat", "-n", strconv.Itoa(lines)}
 		if since != "" {
-			args = append(args, "--since", since)
+			args = append(args, "--since", journalSince(since))
 		}
 		if follow {
 			args = append(args, "-f")
@@ -138,6 +139,23 @@ func streamLog(ctx context.Context, source, since string, lines int, follow bool
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(stderr.String())), output.ExitExternal, "")
 	}
 	return nil
+}
+
+// journalSince turns a window like 30m, 1h, 2h30m or 2d into journalctl's
+// relative form ("-1800s"): journalctl reads "30m" as a timestamp and fails.
+// Anything else, such as "2026-10-15 06:40" or "yesterday", is passed on
+// unchanged.
+func journalSince(since string) string {
+	since = strings.TrimSpace(since)
+	if days, ok := strings.CutSuffix(since, "d"); ok {
+		if n, err := strconv.Atoi(days); err == nil && n > 0 {
+			return "-" + strconv.Itoa(n*24*3600) + "s"
+		}
+	}
+	if d, err := time.ParseDuration(since); err == nil && d > 0 {
+		return "-" + strconv.FormatInt(int64(d.Round(time.Second)/time.Second), 10) + "s"
+	}
+	return since
 }
 
 func cutSource(source string) (kind, target string, ok bool) {

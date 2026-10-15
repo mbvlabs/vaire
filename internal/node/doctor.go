@@ -86,6 +86,7 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	if f.MetricsEnabled {
 		f.Exporters = exporterHealth(ctx, len(cfg.Clusters) > 0)
 		f.EndpointStatus, f.EndpointError = endpointStatus(ctx, f.Hostname, cfg.Metrics.PathPrefix)
+		f.PGProbes, f.PGExporterLog = postgresProbes(ctx, cfg)
 	}
 	f.NginxActive = steps.ServiceActive(ctx, steps.NginxService)
 	f.HasDatabases = len(cfg.Clusters) > 0
@@ -325,7 +326,8 @@ func fullInterval(ctx context.Context, cfg config.Cluster, spec config.ClusterSp
 	if schedule == "" {
 		schedule = cfg.Backup.Database.FullSchedule
 	}
-	out, err := steps.Probe(ctx, "systemd-analyze", "calendar", "--iterations=3", schedule)
+	// TZ=UTC: every elapse prints in UTC, whatever the server's zone.
+	out, err := steps.ProbeWithEnv(ctx, []string{"TZ=UTC"}, "systemd-analyze", "calendar", "--iterations=3", schedule)
 	if err != nil {
 		return 0, err.Error()
 	}
@@ -428,7 +430,7 @@ func doctorGate(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init
 			names = append(names, resultName(r))
 		}
 		return data, nil, output.NewError(output.CodeDoctorFailed, "doctor checks fail after the database phase: "+strings.Join(names, ", "), output.ExitStep,
-			"Fix each check (details.checks[].fix), then eru server init --resume.").WithDetails(map[string]any{"checks": failed, "summary": data.Summary})
+			"Run the fix of each failing check (eru doctor shows them), then eru server init --resume.").WithDetails(map[string]any{"checks": failed, "summary": data.Summary})
 	}
 	var warnings []output.Warning
 	for _, r := range failed {

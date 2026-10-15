@@ -200,7 +200,7 @@ func (c *calc) add() {
 		c.set("maintenance_io_concurrency", "10", "", "HDD maintenance parallelism", "user")
 	}
 	c.set("io_method", "worker", "", "PostgreSQL 18 default; io_uring is an explicit opt-in", "postmaster")
-	c.set("io_workers", itoa(maxInt(3, cpu/4)), "", "one I/O worker per 4 vCPU, at least 3", "postmaster")
+	c.set("io_workers", itoa(maxInt(3, cpu/4)), "", "one I/O worker per 4 vCPU, at least 3", "sighup")
 
 	// Parallelism.
 	c.set("max_worker_processes", itoa(maxInt(cpu+8, 8)), "", cpuReason+" + 8 background workers", "postmaster")

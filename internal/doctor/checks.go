@@ -29,6 +29,7 @@ func NodeChecks() []Check {
 		{ID: "tls.mode", Category: CatTLS, Security: true, AtInit: true, Run: tlsMode},
 		{ID: "secrets.confirmed", Category: CatHost, Security: true, Run: secretsConfirmed},
 		{ID: "metrics.endpoint", Category: CatMetrics, Security: true, AtInit: true, Run: metricsEndpoint},
+		{ID: "metrics.pg_up", Category: CatMetrics, AtInit: true, Run: metricsPGUp},
 		{ID: "nginx.running", Category: CatHost, AtInit: true, Run: nginxRunning},
 		{ID: "pooler.running", Category: CatPostgres, AtInit: true, Run: poolerRunning},
 		{ID: "pg.running", Category: CatPostgres, AtInit: true, Run: pgRunning},

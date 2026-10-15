@@ -109,6 +109,10 @@ type Facts struct {
 	// credential (401 expected), 0 when unreachable.
 	EndpointStatus int
 	EndpointError  string
+	// PGProbes is each database's postgres_exporter probe, by name, and
+	// PGExporterLog postgres_exporter's last errors when one failed.
+	PGProbes      map[string]PGProbe
+	PGExporterLog []string
 
 	NginxActive   bool
 	PoolersActive map[string]bool

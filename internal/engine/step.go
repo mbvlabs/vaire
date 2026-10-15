@@ -44,6 +44,15 @@ type Forcer interface {
 	Force(cfg config.Cluster, rt Runtime) string
 }
 
+// Rechecker is implemented by steps whose result can drift on the host with
+// no input changing, such as a ufw rule added or deleted by hand. The runner
+// runs Check even when the journal says the step is current, and applies the
+// step when the host no longer matches, so "eru apply" repairs what doctor
+// reports. Check must be cheap and read-only: it also runs in every plan.
+type Rechecker interface {
+	Recheck() bool
+}
+
 // Skipper is implemented by steps that only apply to some configurations,
 // such as pgbackrest-v1 without [backup]. A non-empty SkipReason skips the
 // step without a journal entry, so it runs as soon as the configuration
@@ -103,6 +112,15 @@ type Runtime struct {
 // one cluster at a time.
 type Restarter interface {
 	Restart(ctx context.Context, cluster string) (time.Duration, error)
+}
+
+// RestartChecker is implemented by restarters that can ask a running cluster
+// whether it still waits for a restart. Before restarting, the runner clears
+// a pending restart the cluster no longer needs (a restart that worked but
+// reported a failure, or a cluster restarted by hand), without restarting.
+// An error keeps the restart pending.
+type RestartChecker interface {
+	NeedsRestart(ctx context.Context, cluster string) (bool, error)
 }
 
 // Template is implemented by a step that runs once per cluster (RFC 11.2).

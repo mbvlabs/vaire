@@ -65,11 +65,20 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		if opts, err := output.ParseOptions(cmd); err == nil && !output.UsesStructuredOutput(opts) && !opts.Quiet {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), message)
 		}
-		return output.NewError(output.CodeDoctorFailed, fmt.Sprintf("%d doctor checks fail: %s", len(failed), strings.Join(ids, ", ")), output.ExitStep,
-			"Run each check's fix (details.checks[].fix), then eru doctor again.").
+		return output.NewError(output.CodeDoctorFailed, doctorFailedMessage(ids), output.ExitStep,
+			"Run the fix shown under each failing check, then eru doctor again.").
 			WithDetails(map[string]any{"checks": data.Results, "summary": data.Summary, "report": message})
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings})
+}
+
+// doctorFailedMessage is "1 doctor check fails: x" or "2 doctor checks
+// fail: x, y".
+func doctorFailedMessage(ids []string) string {
+	if len(ids) == 1 {
+		return "1 doctor check fails: " + ids[0]
+	}
+	return fmt.Sprintf("%d doctor checks fail: %s", len(ids), strings.Join(ids, ", "))
 }
 
 func checkName(r doctor.Result) string {

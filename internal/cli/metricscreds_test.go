@@ -49,3 +49,37 @@ func TestMetricsDocument(t *testing.T) {
 		t.Errorf("base url %s", got)
 	}
 }
+
+// An upgrade that only tops up the /metrics credential says so, and the next
+// apply generates nothing: the credential is saved in the context.
+func TestServiceSecretsNameWhatWasGenerated(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	creds := contexts.Credentials{Database: &contexts.DatabaseCreds{
+		Admin:    contexts.Role{User: "eru_admin", Password: "admin-pw"},
+		Services: map[string]contexts.Role{},
+	}}
+	for _, role := range steps.ServiceRoles {
+		creds.Database.Services[role] = contexts.Role{User: role, Password: role + "-pw"}
+	}
+	if err := contexts.SaveCredentials("phase3", creds); err != nil {
+		t.Fatal(err)
+	}
+	_, _, generated, err := serviceSecrets("phase3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := staleWarning(generated)
+	if len(w) != 1 || w[0].Message != "a /metrics credential was generated; run eru secrets export to refresh the secrets document" {
+		t.Errorf("warning %+v", w)
+	}
+	_, _, generated, err = serviceSecrets("phase3")
+	if err != nil || len(generated) != 0 {
+		t.Errorf("second run generated %v, %v", generated, err)
+	}
+	if staleWarning(nil) != nil {
+		t.Error("nothing generated, still a warning")
+	}
+	if got := staleWarning([]string{"the eru_admin password", "a /metrics credential"})[0].Message; got != "the eru_admin password and a /metrics credential were generated; run eru secrets export to refresh the secrets document" {
+		t.Errorf("two items: %q", got)
+	}
+}

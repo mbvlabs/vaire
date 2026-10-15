@@ -409,6 +409,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if data.Restarted() {
 		message += "; restarted " + restartSummary(data.Restarts)
 	}
+	if len(data.RestartsSettled) > 0 {
+		message += "; no restart needed for " + strings.Join(data.RestartsSettled, ", ") + " (already running the new settings)"
+	}
 	if data.Doctor != nil {
 		message += "\n" + healthLine(data.Doctor.Summary)
 	}

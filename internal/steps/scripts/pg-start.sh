@@ -4,5 +4,5 @@ set -euo pipefail
 
 : "${CLUSTER:?CLUSTER is required}"
 
-systemctl start "postgresql@18-${CLUSTER}.service" 2>/dev/null || pg_ctlcluster 18 "${CLUSTER}" start
+systemctl start "postgresql@18-${CLUSTER}.service" || pg_ctlcluster 18 "${CLUSTER}" start
 printf 'cluster %s started\n' "${CLUSTER}"

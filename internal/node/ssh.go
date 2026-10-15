@@ -25,7 +25,7 @@ const (
 	snapshotMeta      = "snapshot.json"
 	revertedFile      = "reverted.json"
 	revertUnit        = "eru-ssh-revert"
-	unlockUnit        = "eru-ssh-unlock"
+	unlockUnit        = steps.SSHUnlockUnit
 	defaultLockdownS  = 120
 	maxLockdownS      = 2 * 60 * 60
 	revertLockTimeout = 60 * time.Second

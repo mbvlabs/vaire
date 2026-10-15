@@ -20,23 +20,24 @@ import (
 
 // ensureClusterSecrets fills the operator's cluster-wide database
 // credentials, the admin and service roles, generating any password it does
-// not have (D7). It returns the RPC secret map and whether anything was
-// generated. Application database passwords are never generated here: only
-// eru db create and eru db credentials --rotate make them.
-func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, bool, error) {
+// not have (D7). It returns the RPC secret map and what it generated, for
+// the secrets_document_stale warning. Application database passwords are
+// never generated here: only eru db create and eru db credentials --rotate
+// make them.
+func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, []string, error) {
 	if creds.Admin.User == "" {
 		creds.Admin.User = "eru_admin"
 	}
-	generated := false
+	var generated []string
 	rpc := map[string]string{}
 
 	if creds.Admin.Password == "" {
 		pw, err := secrets.Base62(32)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, err
 		}
 		creds.Admin.Password = pw
-		generated = true
+		generated = append(generated, "the "+creds.Admin.User+" password")
 	}
 	rpc[steps.SecretAdminPassword] = creds.Admin.Password
 
@@ -51,10 +52,10 @@ func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, boo
 		if r.Password == "" {
 			pw, err := secrets.Base62(32)
 			if err != nil {
-				return nil, false, err
+				return nil, nil, err
 			}
 			r.Password = pw
-			generated = true
+			generated = append(generated, "the "+role+" password")
 		}
 		creds.Services[role] = r
 		rpc[steps.ServiceRoleSecret(role)] = r.Password
@@ -111,44 +112,60 @@ func sortedStrings(m map[string]string) []string {
 	return keys
 }
 
-// staleWarning is the warning emitted when the operator generated new
-// passwords that are not yet in the secrets document (D7).
-func staleWarning(generated bool) []output.Warning {
-	if !generated {
+// staleWarning is the warning emitted when the operator generated secrets
+// that are not yet in the secrets document (D7). generated names them, for
+// example "a /metrics credential".
+func staleWarning(generated []string) []output.Warning {
+	if len(generated) == 0 {
 		return nil
+	}
+	verb := "was"
+	if len(generated) > 1 {
+		verb = "were"
 	}
 	return []output.Warning{{
 		Code:    "secrets_document_stale",
-		Message: "new cluster passwords were generated; run eru secrets export to refresh the secrets document",
+		Message: joinAnd(generated) + " " + verb + " generated; run eru secrets export to refresh the secrets document",
 	}}
+}
+
+// joinAnd joins items as "a", "a and b" or "a, b and c".
+func joinAnd(items []string) string {
+	if len(items) <= 1 {
+		return strings.Join(items, "")
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
 // serviceSecrets tops up the context's eru_admin and service passwords (D7)
 // and returns them as the RPC secret map, with the loaded credentials and
 // whether anything was generated. Every command that may create a cluster
 // sends them: the first cluster computes its service verifiers from them.
-func serviceSecrets(contextName string) (map[string]string, contexts.Credentials, bool, error) {
+func serviceSecrets(contextName string) (map[string]string, contexts.Credentials, []string, error) {
 	creds, err := contexts.LoadCredentials(contextName)
 	if err != nil {
-		return nil, creds, false, err
+		return nil, creds, nil, err
 	}
 	if creds.Database == nil {
 		creds.Database = &contexts.DatabaseCreds{}
 	}
 	values, generated, err := ensureClusterSecrets(creds.Database)
 	if err != nil {
-		return nil, creds, false, err
+		return nil, creds, nil, err
 	}
 	// The /metrics credential tops up the same way (Phase 4): metrics-v1
-	// writes its hash only where the node has none.
+	// writes its hash only where the node has none. It is saved below, so it
+	// is generated once.
 	metricsGenerated, err := addMetricsSecret(&creds.Metrics, values)
 	if err != nil {
-		return nil, creds, false, err
+		return nil, creds, nil, err
 	}
-	generated = generated || metricsGenerated
-	if generated {
+	if metricsGenerated {
+		generated = append(generated, "a /metrics credential")
+	}
+	if len(generated) > 0 {
 		if err := contexts.SaveCredentials(contextName, creds); err != nil {
-			return nil, creds, false, err
+			return nil, creds, nil, err
 		}
 	}
 	return values, creds, generated, nil

@@ -150,6 +150,9 @@ type ApplyData struct {
 	ConfirmTokens []string `json:"confirm_tokens,omitempty"`
 	// Restarts are the clusters restarted, in order.
 	Restarts []ClusterRestart `json:"restarts,omitempty"`
+	// RestartsSettled are the clusters whose pending restart was cleared
+	// without a restart: PostgreSQL already ran every setting.
+	RestartsSettled []string `json:"restarts_settled,omitempty"`
 }
 
 // Restarted reports whether the apply restarted any cluster.
@@ -291,6 +294,14 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	if len(pending) == 0 {
 		return data, warnings, nil
 	}
+	settled, err := settlePending(ctx, j, path, opts, pending)
+	data.RestartsSettled = settled
+	if err != nil {
+		return data, nil, err
+	}
+	if pending = pendingIn(j, all, opts.DB); len(pending) == 0 {
+		return data, warnings, nil
+	}
 	if opts.Restarter == nil {
 		return data, nil, output.NewError(
 			output.CodeError,
@@ -314,6 +325,44 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		})
 	}
 	return data, warnings, nil
+}
+
+// settlePending clears the pending restarts of every cluster that no longer
+// needs one: PostgreSQL runs with every setting the restart was for. It asks
+// only when the restarter can tell (RestartChecker), and leaves a cluster it
+// can't ask pending. Server-level pending restarts are left as they are. It
+// returns the clusters it settled.
+func settlePending(ctx context.Context, j *Journal, path string, opts Options, pending []string) ([]string, error) {
+	checker, ok := opts.Restarter.(RestartChecker)
+	if !ok {
+		return nil, nil
+	}
+	byCluster := map[string][]string{}
+	var order []string
+	for _, id := range pending {
+		if _, cluster := SplitID(id); cluster != "" {
+			if _, seen := byCluster[cluster]; !seen {
+				order = append(order, cluster)
+			}
+			byCluster[cluster] = append(byCluster[cluster], id)
+		}
+	}
+	report := opts.Report
+	var settled []string
+	for _, cluster := range order {
+		needed, err := checker.NeedsRestart(ctx, cluster)
+		if err != nil || needed {
+			continue
+		}
+		if err := j.clearPending(path, byCluster[cluster]); err != nil {
+			return settled, err
+		}
+		settled = append(settled, cluster)
+		if report != nil {
+			report(output.Event{Type: "log", Step: "restart", Line: cluster + " no longer needs its pending restart: PostgreSQL already runs every setting; cleared without restarting"})
+		}
+	}
+	return settled, nil
 }
 
 // restartConfirmed restarts, one at a time and in [[clusters]] order, every
@@ -380,7 +429,18 @@ func decide(ctx context.Context, step Step, cfg config.Cluster, rt Runtime, j *J
 	}
 	entry, ok := j.Steps[id]
 	if ok && entry.Status == StatusCompleted && entry.InputsHash == hash {
-		return decision{reason: ReasonJournal, hash: hash}, nil
+		rc, recheck := step.(Rechecker)
+		if !recheck || !rc.Recheck() {
+			return decision{reason: ReasonJournal, hash: hash}, nil
+		}
+		check, err := step.Check(ctx, cfg, rt)
+		if err != nil {
+			return decision{}, fmt.Errorf("check: %w", err)
+		}
+		if check.Complete {
+			return decision{reason: ReasonJournal, hash: hash}, nil
+		}
+		return decision{apply: true, reason: ReasonCheckIncomplete, hash: hash, detail: check.Detail}, nil
 	}
 	if ok && entry.InputsHash == hash {
 		check, err := step.Check(ctx, cfg, rt)

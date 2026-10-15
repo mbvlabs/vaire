@@ -1645,6 +1645,7 @@ When the current process isn't root and an operation needs root:
 | `secrets.confirmed` | fail: `secrets_confirmed_at` empty |
 | `eru.version_skew` | warn: operator ≠ node (operator side) |
 | `metrics.endpoint` | warn: any exporter not responding |
+| `metrics.pg_up` | warn: a running database's postgres_exporter probe gives `pg_up 0` (the detail carries the exporter's last journal errors) |
 
 ---
 

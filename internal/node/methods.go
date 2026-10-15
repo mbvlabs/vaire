@@ -410,6 +410,9 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	for _, r := range data.Restarts {
 		clearDeferred(r.Cluster)
 	}
+	if len(data.RestartsSettled) > 0 {
+		clearDeferred(data.RestartsSettled...)
+	}
 	warnings = append(warnings, NoOffsiteWarning(env.Cluster)...)
 	warnings = append(warnings, oversubscriptionWarnings(env.Cluster, rt.Host)...)
 	out := applyResult{ApplyData: data}

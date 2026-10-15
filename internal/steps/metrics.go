@@ -27,7 +27,11 @@ const (
 	MetricsHtpasswdPath = "/etc/nginx/eru-metrics.htpasswd" //nolint:gosec // G101: a path, not a credential.
 	MetricsTargetsPath  = "/etc/nginx/eru-metrics-targets.json"
 	MetricsJailPath     = "/etc/fail2ban/jail.d/eru-metrics.conf"
-	ExportersSlice      = "eru-exporters.slice"
+	// PostgresExporterConfPath is postgres_exporter's --config.file. eru
+	// logs in by peer auth, so it has no auth modules; the file exists so
+	// the exporter doesn't warn "Error loading config" at every start.
+	PostgresExporterConfPath = "/etc/postgres_exporter/postgres_exporter.yml"
+	ExportersSlice           = "eru-exporters.slice"
 
 	NodeExporterService     = "node_exporter.service"
 	PostgresExporterService = "postgres_exporter.service"
@@ -56,6 +60,13 @@ backend = auto
 maxretry = 10
 findtime = 10m
 bantime = 1h
+`
+
+// postgresExporterConf has no auth modules: every probe logs in as
+// eru_monitor by peer auth. It can't be empty: the exporter's YAML decoder
+// fails on an empty document.
+const postgresExporterConf = `# managed by eru
+auth_modules: {}
 `
 
 type metricsStep struct{}
@@ -100,7 +111,7 @@ func exporterUnits(cfg config.Cluster) map[string][]byte {
 			Binary:      exporters.BinaryPath(versions.PostgresExporter),
 			Args: []string{
 				"--web.listen-address=" + PostgresExporterAddr,
-				"--config.file=",
+				"--config.file=" + PostgresExporterConfPath,
 				"--collector.stat_statements",
 				"--collector.stat_statements.limit=50",
 				"--collector.stat_checkpointer",
@@ -195,6 +206,7 @@ func metricsFiles(cfg config.Cluster) []metricsFile {
 		{path: MetricsConfPath, content: string(render.MetricsConf(locations, MetricsHtpasswdPath, cfg.Metrics.Allowlist)), mode: 0o644},
 		{path: MetricsTargetsPath, content: string(render.TargetsJSON(NodeHostname(cfg), locations)), owner: "root", group: "www-data", mode: 0o640},
 		{path: MetricsJailPath, content: metricsJail, mode: 0o644},
+		{path: PostgresExporterConfPath, content: postgresExporterConf, mode: 0o644},
 	}
 	units := exporterUnits(cfg)
 	for _, name := range allExporterUnits {
@@ -277,7 +289,7 @@ func (metricsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runti
 
 func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	if !cfg.Metrics.Enabled {
-		for _, path := range []string{MetricsConfPath, MetricsTargetsPath} {
+		for _, path := range []string{MetricsConfPath, MetricsTargetsPath, PostgresExporterConfPath} {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return engine.ApplyResult{}, err
 			}
