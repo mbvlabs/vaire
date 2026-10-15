@@ -44,7 +44,7 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 | `context_not_found`, `cluster_not_initialized` | 2 |
 | `missing_tool` | 3 |
 | `unsafe_action_requires_confirmation` | 4 |
-| `step_failed`, `partial_failure` | 5 |
+| `step_failed`, `partial_failure`, `doctor_failed` | 5 |
 | `external_command_failed` | 6 |
 | `config_error`, `validation_failed` | 7 |
 | `ambiguous_input`, `input_required` | 8 |
@@ -82,6 +82,12 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `other_config_failed`: `eru db create`, `db fork` or `db drop` finished, but applying the other databases' changed configuration (their new share of the server's disk and CPU) failed. Those databases keep serving with their old settings. Run `eru apply --output agent` to retry.
 - `shrink_below_use`: `eru db resize` set a database's memory below what its cluster uses right now. It goes ahead; expect throttling until the cluster settles.
 - `context_sync_failed`: the command succeeded, but the local context could not be updated from `cluster.toml`. `eru apply` retries it.
+- `doctor_check_failed`: a full `eru apply` converged, then a doctor check failed. The message names the check and its fix; run `eru doctor --output agent` for the whole report.
+- `metrics_reload_failed`: `eru db create`, `db fork` or `db drop` finished, but the `/metrics` endpoint and its `targets.json` weren't updated for that database. Run `eru apply --output agent`.
+- `reindex_left_invalid`: a concurrent reindex failed part-way and left invalid `_ccnew` indexes. Re-run `eru maint reindex --db <db> --cleanup-invalid` to drop them.
+- `extension_missing`: `eru queries` found a database without `pg_stat_statements`; its statements are left out.
+- `database_stopped`, `database_unreachable`, `restore_in_progress`: `eru status` saw a database whose cluster isn't running, doesn't answer, or has an open restore. Follow with `eru doctor --db <db>`.
+- `metrics_disabled`: `[metrics] enabled` is false; the exporters are stopped and `/metrics` answers 404.
 
 ## Node errors
 
@@ -92,10 +98,15 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `restart_pending` warning: the change is applied, but a step needs a PostgreSQL restart that hasn't happened. `data.restart_pending` lists the steps. Each database is its own PostgreSQL cluster and restarts on its own: ask the human for the tokens in `data.confirm_tokens` (`<db>/restart`, or `{server}/restart` for every database, one at a time) before re-running with one `--confirm` per token. `eru apply --db <db>` limits a run to one database's steps.
 - `node_version_mismatch` (exit 10): the operator and node builds differ. `details.client` and `details.node` show both. Once the operator connects to nodes, it handles this with `eru upgrade` or `--auto-upgrade-nodes`.
 - `precondition_failed` with `details.reason = "journal_corrupt"`: the node's step journal is unreadable. eru never resets it. Report it to a human.
+- `doctor_failed` (exit 5): `eru doctor` found failing checks, or `server init` stopped after its database phase on one. `details.checks` lists every result with its `fix`; run the fixes (ask the human for anything destructive), then `eru doctor` again or `eru server init --resume`.
+- `precondition_failed` with `details.reason = "extension_missing"`: `eru maint repack` needs `pg_repack` (Phase 7), or `eru queries --db` needs `pg_stat_statements` in that database.
+- `precondition_failed` with `details.reason = "protected_backend"`: `eru maint kill --pid` named a superuser's backend, which eru never terminates.
 
 ## Workflows
 
-Status: `eru status --output agent`. Follow with `eru doctor --output agent` when a check needs detail.
+Status: `eru status --output agent` (one row per database: state, memory against its limit, connections, cache hit, TPS, last backup, restore window). Follow with `eru doctor --output agent` when a check needs detail; `eru doctor --only security` is the security audit. `eru queries --db <db>` lists the most expensive statements; `eru top --json` prints one snapshot of sessions, blocking chains and pools. Resetting statistics (`eru queries --reset`) needs the human's token `<db>/stats`.
+
+Metrics: `eru metrics show --output agent` gives the `/metrics` paths, the `targets.json` service-discovery URL and Prometheus and Alloy snippets. Never pass `--reveal` or print the password; the human copies it from the secrets handoff. `eru metrics rotate` breaks every scraper until it gets the new password: ask the human.
 
 Backup: `eru backup now --type full --output agent`, then `eru backup verify --output agent`. Each database has its own stanza; without `--db` both run once per database, one after another, and fail at the end if any database failed (`details.failed`). `eru backup list` shows one row per database with its PITR window, then the dropped databases whose stanzas are kept until they expire; `--db <name>` shows that database's sets. A dropped database's stanza is deleted by the daily `eru-stanza-expiry` timer once its restore window (`retention_full` at the drop) has passed.
 
@@ -109,7 +120,7 @@ Query a database: `eru sql --db <name> "<sql>" --output agent`. It connects as `
 
 Add an extension: `eru ext add <name> --db <name> --output agent`. When the result says a restart is required, ask the human for the confirm token before continuing.
 
-Maintenance report: `eru maint report bloat --db <name> --output agent`.
+Maintenance report: `eru maint report bloat --db <name> --output agent` (an estimate from statistics), or `wraparound`, `unused-indexes`, `missing-indexes`, `long-queries`, `locks`. `eru maint vacuum|analyze|reindex [--db] [--table]` run as detachable jobs on the node as `eru_admin`; a whole-database vacuum and every reindex take the heavy-I/O lock and are refused with `lock_held` while a full backup or a drill runs. `eru maint kill --db <db> --idle-in-tx --confirm <db>/kill` terminates sessions: ask the human first. `eru maint repack` waits for Phase 7. `eru db resize --defer-restart` leaves the restart for the start of the maintenance window, when `maint-daily` performs it.
 
 Upgrade: `eru upgrade --output agent` updates only the local binary for now; node upgrades come with `eru node upgrade`. `release_verification_failed` must never be retried; report it to a human. Rolling a node back with `eru node upgrade --rollback` needs the human's confirm token.
 

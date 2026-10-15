@@ -81,6 +81,9 @@ type initRun struct {
 	tlsState *node.TLSState
 	// dbRestart reports whether the database phase restarted Postgres.
 	dbRestart bool
+	// health is the doctor gate's one-line summary after the database
+	// phase (Phase 4), empty on a resume past it.
+	health string
 	// dnsShown reports whether this run already showed the DNS records
 	// (with dnsIPv6 as the AAAA address) after first contact, so the DNS
 	// step doesn't show or ask again.
@@ -539,6 +542,9 @@ func registerPending(sec contexts.PendingSecrets) {
 			secrets.Add(value)
 		}
 	}
+	if sec.Metrics != nil {
+		secrets.Add(sec.Metrics.Password)
+	}
 }
 
 func (r *initRun) master() config.NodeSpec {
@@ -639,6 +645,9 @@ func (r *initRun) ensureDatabaseSecrets() error {
 	// The handoff later in init carries these, so nothing goes stale.
 	rpc, _, err := ensureClusterSecrets(&creds)
 	if err != nil {
+		return err
+	}
+	if _, err := addMetricsSecret(&r.sec.Metrics, rpc); err != nil {
 		return err
 	}
 	r.sec.Database = &creds
@@ -856,7 +865,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	r.fillResult(&res)
 	message := strings.Join([]string{
 		fmt.Sprintf("Server %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.MasterHostname()),
-		"TLS: " + r.tlsSummary(),
+		"TLS: " + r.tlsSummary() + r.healthSuffix(),
 		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
 		"Context " + r.name + " is the current context on this machine. On another machine run eru login and paste the transfer bundle.",
 	}, "\n")
@@ -880,6 +889,9 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 		{"Secrets", "in your password manager (transfer bundle: eru login on another machine)"},
 		{"Databases", "none yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents)"},
 		{"Backups", r.backupSummary()},
+	}
+	if r.health != "" {
+		rows = append(rows, [2]string{"Health", strings.TrimPrefix(r.health, "health: ")})
 	}
 	var footer []string
 	for _, w := range r.warnings {
@@ -1256,6 +1268,7 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		},
 		Database:   r.sec.Database,
 		Backup:     r.sec.Backup,
+		Metrics:    metricsDocument(r.sec.Metrics, r.cfg.Hostname(n.Name), r.cfg.Metrics.PathPrefix),
 		BreakGlass: secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
 	}, nil
 }
@@ -1431,7 +1444,7 @@ func runInitLocal(cmd *cobra.Command) error {
 	r.fillResult(&res)
 	message := strings.Join([]string{
 		fmt.Sprintf("Server %s is bootstrapped on this machine (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
-		"TLS: " + r.tlsSummary(),
+		"TLS: " + r.tlsSummary() + r.healthSuffix(),
 		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
 		"On your machine run eru login and paste the transfer bundle from the handoff.",
 		"Then run any remote command, such as eru plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",

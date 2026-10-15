@@ -223,6 +223,19 @@ func methods() map[string]method {
 			cluster: true,
 			handler: handleSQL,
 		},
+		// Phase 4: observability and maintenance.
+		{name: "metrics.show", cluster: true, handler: handleMetricsShow},
+		// status takes no lock: it must answer while an apply holds the
+		// global one.
+		{name: "status", cluster: true, handler: handleStatus},
+		{name: "doctor.run", cluster: true, handler: handleDoctorRun},
+		{name: "queries.top", cluster: true, handler: handleQueriesTop},
+		{name: "maint.report", cluster: true, handler: handleMaintReport},
+		// maint.run starts a job, which takes its own locks.
+		{name: "maint.run", cluster: true, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintRun},
+		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintKill},
+		{name: "queries.reset", cluster: true, confirm: statsToken, runLog: always, handler: handleQueriesReset},
+		{name: "metrics.rotate", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: metricsToken, runLog: always, handler: handleMetricsRotate},
 	}
 	table := make(map[string]method, len(list))
 	for _, m := range list {
@@ -325,6 +338,8 @@ type stepParams struct {
 	// RotateBackupSecrets lets pgbackrest-v1 replace the bucket keys on
 	// disk with the request's; only eru backup setup sets it.
 	RotateBackupSecrets bool `json:"rotate_backup_secrets,omitempty"`
+	// SkipDoctor skips the doctor checks after a full apply (Phase 4).
+	SkipDoctor bool `json:"skip_doctor,omitempty"`
 }
 
 // decodeParams decodes params strictly. Methods that cross versions decode
@@ -392,8 +407,27 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	for _, r := range data.Restarts {
+		clearDeferred(r.Cluster)
+	}
 	warnings = append(warnings, NoOffsiteWarning(env.Cluster)...)
-	return Result{Data: data, Warnings: append(warnings, oversubscriptionWarnings(env.Cluster, rt.Host)...)}, nil
+	warnings = append(warnings, oversubscriptionWarnings(env.Cluster, rt.Host)...)
+	out := applyResult{ApplyData: data}
+	// Step 18 (Phase 4 D10): a full apply ends with the doctor checks; a
+	// failing one is a warning, since blocking apply would block its fix.
+	if len(p.Steps) == 0 && !p.SkipDoctor {
+		gate, doctorWarnings, _ := doctorGate(ctx, env.Cluster, runtimeFor(env, true), false)
+		out.Doctor = gate
+		warnings = append(warnings, doctorWarnings...)
+	}
+	return Result{Data: out, Warnings: warnings}, nil
+}
+
+// applyResult is apply's result: the steps and, after a full apply, the
+// doctor gate.
+type applyResult struct {
+	engine.ApplyData
+	Doctor *doctorData `json:"doctor,omitempty"`
 }
 
 func handleSelfcheck(context.Context, *Env) (Result, error) {

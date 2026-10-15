@@ -7,3 +7,6 @@ func statfsGiB(string) (int, bool) { return 0, false }
 
 // FreeBytes is unavailable off Linux; only nodes check free space.
 func FreeBytes(string) (uint64, bool) { return 0, false }
+
+// DiskUsage is unavailable off Linux; only nodes report disk use.
+func DiskUsage(string) (total, free uint64, ok bool) { return 0, 0, false }

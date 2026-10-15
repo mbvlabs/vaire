@@ -20,6 +20,9 @@ From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu
 | Backups | `eru backup setup\|now\|list\|verify`, `eru dump`, `eru dump list\|get` |
 | Restores | `eru restore <db>` (`--time`, `--latest`, `--set`, `--dump`), `eru restore status\|promote\|undo\|abort\|cleanup\|drill` |
 | Jobs | `eru job list\|follow` |
+| Health | `eru status [--watch]`, `eru doctor [--only security]`, `eru top`, `eru queries` (Phase 4, manual test pending) |
+| Metrics | `eru metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
+| Maintenance | `eru maint vacuum\|analyze\|reindex\|report\|kill` (`repack` waits for Phase 7), nightly and weekly maintenance timers |
 | Operations | `eru logs`, `eru secrets export`, `eru upgrade` |
 | Agents | `eru commands --json`, `eru guide agents`, `eru skill install` |
 
@@ -157,7 +160,7 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
     PG17+ clients)              │      → terminate TLS → transaction pooler        │
                                 │   same ALPN, other source → handshake rejected   │
                                 │   SSLRequest (no direct) → "no TLS" (N)          │
-                                │   anything else → HTTPS 404 (later /metrics)     │
+                                │   anything else → HTTPS: /metrics, else 404      │
                                 │                                                  │
  ── :80   ─────────────────────▶│ nginx: /.well-known/acme-challenge/ only         │
                                 └──────────────────────────────────────────────────┘
@@ -326,7 +329,9 @@ Installed from the distribution's apt repositories unless noted. Steps install o
 | `pgbackrest` (≥ 2.59.3) | PostgreSQL packages (PGDG) | Database backups, WAL archiving and restores; held with `apt-mark hold`. 2.59.3 is the floor because earlier releases have an encryption bug |
 | `eru` | `server init` / `--auto-upgrade-nodes` | The node binary at `/usr/local/bin/eru`, pushed from the operator and signature-checked |
 
-No ACME client (certbot and the like) is installed: eru issues certificates itself. Later phases add the Prometheus exporters, each pinned.
+| `node_exporter` 1.12.1, `postgres_exporter` 0.20.1, `pgbouncer_exporter` 0.12.1 | metrics step (upstream release binaries, sha256 pinned in eru) | Metrics on loopback, served through nginx's authenticated `/metrics`; the same versions on Debian and Ubuntu |
+
+No ACME client (certbot and the like) is installed: eru issues certificates itself. eru's bloat report embeds the estimate queries of [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation) (BSD-2-Clause; `eru version --licenses` prints the notice).
 
 ### On your machine
 

@@ -22,6 +22,11 @@ type Params struct {
 	User       string
 	Password   string
 	Database   string
+	// SimpleProtocol uses the simple query protocol, which PgBouncer's
+	// admin console needs (eru top).
+	SimpleProtocol bool
+	// ApplicationName names the session in pg_stat_activity.
+	ApplicationName string
 }
 
 // Remote is a pgx connection to PostgreSQL over a transport.Dialer.
@@ -55,6 +60,12 @@ func Connect(ctx context.Context, dialer transport.Dialer, p Params) (*Remote, e
 		return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", p.Host, p.Port))
 	}
 	cfg.TLSConfig = tlsConfig(p)
+	if p.SimpleProtocol {
+		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	}
+	if p.ApplicationName != "" {
+		cfg.RuntimeParams["application_name"] = p.ApplicationName
+	}
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -108,6 +119,24 @@ func (r *Remote) Query(ctx context.Context, sql string, args ...any) (*Result, e
 	res.CommandTag = rows.CommandTag().String()
 	res.RowCount = len(res.Rows)
 	return res, nil
+}
+
+// Maps returns the rows as column-name -> value maps; NULL is "".
+func (r *Result) Maps() []map[string]string {
+	if r == nil {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(r.Rows))
+	for _, row := range r.Rows {
+		m := make(map[string]string, len(r.Columns))
+		for i, c := range r.Columns {
+			if i < len(row) && row[i] != nil {
+				m[c] = *row[i]
+			}
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // Exec runs sql and returns its command tag.

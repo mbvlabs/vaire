@@ -40,6 +40,8 @@ type PendingSecrets struct {
 	Database      *DatabaseCreds `json:"database,omitempty"`
 	// Backup is the recovery kit when init configures backups.
 	Backup *BackupCreds `json:"backup,omitempty"`
+	// Metrics is the /metrics endpoint credential (Phase 4).
+	Metrics *MetricsCreds `json:"metrics,omitempty"`
 }
 
 // Progress records the completed init phases and what was learned on the way.

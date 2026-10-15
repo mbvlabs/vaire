@@ -31,15 +31,21 @@ const JobDir = "/var/lib/eru/jobs"
 // dump-create run only as detachable jobs an RPC starts (--job-id).
 var jobNames = []string{
 	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump",
-	"stanza-expiry", "restore", "db-fork",
-	"vps-backup", "maint-daily", "maint-weekly", "certs-renew", "metrics-refresh",
+	"stanza-expiry", "restore", "db-fork", "maint",
+	"vps-backup", "maint-daily", "maint-weekly", "certs-renew", "metrics-refresh", "doctor",
 }
 
 // laterJobs are the jobs of later phases.
-var laterJobs = map[string]bool{"vps-backup": true, "maint-daily": true, "maint-weekly": true, "metrics-refresh": true}
+var laterJobs = map[string]bool{"vps-backup": true}
 
 // rpcOnlyJobs need a spec written by the RPC that starts them.
-var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true}
+var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true, "maint": true}
+
+// quietJobs run often and are not recorded in state.json's job list, which
+// keeps only the last 50 runs: metrics-refresh runs every minute and would
+// push the backups out of it within the hour. They take the node lock
+// shared and skip at once when it is busy (Phase 4).
+var quietJobs = map[string]bool{"metrics-refresh": true, "doctor": true}
 
 // databaseJobs are the template-unit jobs: each runs for one database, named
 // by --db on a timer run (eru-<job>@<db>) or by the RPC's params.
@@ -124,6 +130,23 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		}
 		defer release()
 		res, err := certsRenew(ctx, report)
+		return res, "", err
+	}
+	if quietJobs[job] {
+		release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), 0)
+		if engine.IsLockHeld(err) {
+			logLine(report, job, "the node lock is busy; skipping "+job)
+			return map[string]any{"job": job, "skipped": "lock_busy"}, "the node lock was busy", nil
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		defer release()
+		cfg, err := config.LoadCluster(config.ClusterPath)
+		if err != nil {
+			return nil, "", err
+		}
+		res, err := runQuietJob(ctx, job, cfg, report)
 		return res, "", err
 	}
 	if rpcOnlyJobs[job] && opts.ID == "" {
@@ -255,7 +278,7 @@ func tryJobLocks(ctx context.Context, env *jobEnv) (engine.Release, *jobLockBusy
 		return nil, nil, err
 	}
 	held = append(held, release)
-	if heavyIOJobs[env.Job] {
+	if heavyIOJobs[env.Job] || maintHeavy(env) {
 		release, err := engine.AcquireHeavyIO(ctx, env.Job, env.ID)
 		if engine.IsLockHeld(err) {
 			releaseAll()
@@ -374,8 +397,28 @@ func runJobFunc(ctx context.Context, env *jobEnv) (any, error) {
 		return jobRestore(ctx, env)
 	case "db-fork":
 		return jobFork(ctx, env)
+	case "maint":
+		return jobMaint(ctx, env)
+	case "maint-daily":
+		return jobMaintDaily(ctx, env)
+	case "maint-weekly":
+		return jobMaintWeekly(ctx, env)
 	}
 	return nil, fmt.Errorf("job %s has no implementation", env.Job)
+}
+
+// runQuietJob runs a quiet job under the node lock.
+func runQuietJob(ctx context.Context, job string, cfg config.Cluster, report engine.Reporter) (any, error) {
+	switch job {
+	case "metrics-refresh":
+		if err := refreshMetrics(ctx, cfg); err != nil {
+			return nil, err
+		}
+		return map[string]any{"job": job, "refreshed": true}, nil
+	case "doctor":
+		return runDoctorJob(ctx, cfg, report)
+	}
+	return nil, fmt.Errorf("job %s has no implementation", job)
 }
 
 // finishJob records a job's outcome.
@@ -868,6 +911,7 @@ func rpcJobDatabase(job string, params json.RawMessage) string {
 	var p struct {
 		Database string `json:"database"`
 		Name     string `json:"name"`
+		DB       string `json:"db"`
 	}
 	if len(params) > 0 {
 		_ = json.Unmarshal(params, &p)
@@ -877,6 +921,8 @@ func rpcJobDatabase(job string, params json.RawMessage) string {
 		return p.Database
 	case "db-fork":
 		return p.Name
+	case "maint":
+		return p.DB
 	}
 	return ""
 }
@@ -888,6 +934,7 @@ func jobClusters(env *jobEnv) []string {
 		Database string `json:"database"`
 		Source   string `json:"source"`
 		Name     string `json:"name"`
+		DB       string `json:"db"`
 	}
 	if len(env.Params) > 0 {
 		_ = json.Unmarshal(env.Params, &p)
@@ -896,6 +943,8 @@ func jobClusters(env *jobEnv) []string {
 	switch {
 	case databaseJobs[env.Job]:
 		names = []string{env.DB}
+	case env.Job == "maint":
+		names = []string{p.DB}
 	case env.Job == "restore":
 		names = []string{p.Database}
 	case env.Job == "db-fork":

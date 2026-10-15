@@ -138,9 +138,13 @@ func jobBackup(ctx context.Context, env *jobEnv, kind string) (any, error) {
 	}
 	set, err := d.Backup(ctx, kind)
 	if err != nil {
+		steps.RecordBackupFailure(env.Cluster, env.DB, kind)
 		return nil, err
 	}
 	steps.RecordBackup(env.Cluster, env.DB, set)
+	// pgBackRest expires old sets at the end of the backup, so the window
+	// and the stanza's size are read once now (Phase 4).
+	steps.RecordRepo(ctx, env.Cluster, d, env.DB)
 	logLine(env.Report, env.Job, fmt.Sprintf("backup %s (%s) of %s finished: %s", set.Label, set.Type, env.DB, humanSize(set.Size)))
 	return map[string]any{"db": env.DB, "set": set}, nil
 }
@@ -178,10 +182,12 @@ func jobVerify(ctx context.Context, env *jobEnv) (any, error) {
 // verify that finds problems is recorded and then returned as
 // external_command_failed.
 func verify(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, stepID string, report engine.Reporter) (backup.VerifyResult, error) {
-	res, err := driver(spec, stepID, report).Verify(ctx)
+	d := driver(spec, stepID, report)
+	res, err := d.Verify(ctx)
 	if err != nil {
 		return res, err
 	}
+	steps.RecordRepo(ctx, cfg, d, spec.Name)
 	res.Stanza = spec.Stanza
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.LastVerify[spec.Name] = res

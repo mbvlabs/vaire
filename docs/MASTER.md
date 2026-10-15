@@ -80,8 +80,8 @@ The first goal is the **master node**: one VPS that hosts every database and own
 
 **Still to decide** (when the phase that needs it starts):
 
-- Which exporter versions to pin, and whether eru's own metrics replace `pgbackrest_exporter` (Phase 4).
-- Where the table-bloat query comes from (Phase 4).
+- ~~Which exporter versions to pin, and whether eru's own metrics replace `pgbackrest_exporter` (Phase 4).~~ Decided in [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md): pinned upstream binaries (node_exporter 1.12.1, postgres_exporter 0.20.1, pgbouncer_exporter 0.12.1) with sha256 in `internal/versions`; no `pgbackrest_exporter`, `eru.prom` carries the backup facts.
+- ~~Where the table-bloat query comes from (Phase 4).~~ Decided: the ioguix estimate queries, vendored under BSD-2-Clause (`eru version --licenses`); exact numbers with pgstattuple wait for Phase 7.
 - Which catalog extensions to drop because they have no PostgreSQL 18 package (Phase 7).
 
 ## 4. Technology choices
@@ -100,7 +100,7 @@ The first goal is the **master node**: one VPS that hosts every database and own
 | Pooling | **PgBouncer**, two instances from one template: transaction mode on 6432 (`max_prepared_statements`) and session mode on 5432 (eru's own `eru-pgbouncer-session.service`). Both route by database name with a `[databases]` entry per database and `auth_query` against that database's cluster | Clients connect to a pooler, which reaches the database's cluster over its unix socket |
 | TLS & metrics edge | **nginx** (distribution package): HTTP-01 challenges on 80; on 443 `stream` + `ssl_preread` routes ALPN `postgresql` to the transaction pooler and everything else to HTTPS (authenticated `/metrics` later). Certificates come from eru's own ACME client (`x/crypto/acme`) | Only direct-TLS clients on 443 go through nginx; 6432 and 5432 are the poolers' own TLS |
 | Resource limits | systemd cgroup v2 drop-ins on each `postgresql@18-<db>.service` | `MemoryHigh`, `CPUWeight`, `IOWeight`; `MemoryMax`, `CPUQuota` opt-in |
-| Metrics | `node_exporter`, `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter`; `pg_stat_statements` on by default | Localhost-bound, federated through nginx |
+| Metrics | `node_exporter`, `postgres_exporter` (one `/probe` target per cluster), two `pgbouncer_exporter`s, eru's own textfiles (`eru*.prom`); `pg_stat_statements` on by default | Pinned upstream binaries on loopback, behind nginx's authenticated `/metrics` with an `http_sd` target list (Phase 4) |
 | DB access from CLI | `pgx` over the WireGuard tunnel | `eru sql`, `eru psql`, `eru console` (usql), `eru tunnel` |
 | HA (Phase 11) | Patroni per cluster + one etcd (3 voters) | Routing decided when the phase starts (libpq multi-host URLs, or every node's poolers routing to the current primary) |
 | Scheduling | systemd timers on each node calling `eru node …` subcommands | No long-running eru process anywhere |
@@ -446,7 +446,7 @@ The databases are covered by pgBackRest. What a rebuild also needs is the master
 
 - Exporters bind to localhost only. nginx exposes one authenticated `/metrics` endpoint (federated) for external scrapers. The credentials are in the secrets document.
 - `pg_stat_statements` and `auto_explain` (sampled, threshold-based) are on by default.
-- Per database: `postgres_exporter` with one target per cluster, `pgbackrest_exporter` over every stanza, and cgroup pressure (PSI) per cluster (Phase 4). eru's own `eru.prom` lines carry a `db` label.
+- Per database: `postgres_exporter` with one `/probe` target per cluster (fixed by nginx, `/metrics/postgres/<db>`), and eru's textfiles: cgroup memory and pressure (PSI) per cluster, backup facts (last success, size, duration, window) in place of `pgbackrest_exporter`, doctor results and maintenance numbers, each with a `db` label (Phase 4).
 - CLI views: `eru status` (a server summary with the memory budget and warnings, then per database: uptime, connections, cache hit, last backup, PITR window, size and limits), `eru top` (live TUI of activity, locks and slow queries), `eru queries` (top statements). `--db` narrows each to one database. All support `--json`.
 
 ### 6.8 Extensions
@@ -513,6 +513,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 - **Phases 1 and 2 are done (2026-10-12, Hetzner, Ubuntu 26.04 and Debian 13).** `server init` (then `cluster init`) goes from a fresh server to public 22 closed, SSH over WireGuard and a working PostgreSQL 18 cluster. The ACME certificate is issued, the secrets handoff is accepted by `eru login`, `eru sql` connects with verify-full, `eru apply --auto-upgrade-nodes` upgrades the node, and an app connects to 6432 through PgBouncer with `sslmode=verify-full`. The checks not yet run on a VPS (lockdown self-revert, `--local`, a no-op `apply`, `db drop` refusal, `eru console`, direct TLS on 443) are in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) and don't block Phase 3.
 - **Phase 3 was re-scoped on 2026-10-13** by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) to **Databases as clusters, backups and native restore**, before its first manual test had passed. It was rebuilt in the units of [`PHASE-3-WORK-UNITS.md`](./PHASE-3-WORK-UNITS.md) (which replaces `PHASE-3-PLAN.md`) and **passed the RFC's exit test on 2026-10-14** on a rebuilt Hetzner VPS (Ubuntu 26.04, R2), see [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Deferred to a later rebuild: the Phase 1 lockdown revert and `server init --local`, and the macOS edge install.
 - **The order after Phase 3 was changed on 2026-10-14** to observability, master backup and disaster recovery, followers, extensions (Phases 4–7), so that eru can run in production sooner.
+- **Phase 4 is built (2026-10-14)** in the units of [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md): the exporters and the authenticated `/metrics` endpoint, `status`, `doctor` (also the gate after `apply` and in `server init`), `queries`, `top`, `maint` and the maintenance timers. Its manual test in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) has not run yet.
 - One open item from Phase 0, also in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md): install from the edge channel once on Linux and once on macOS, then run `eru upgrade` against a second edge release.
 - About 30 of the ~65 commands (before Phase 3) do real work today: `version`, `commands`, `guide agents`, `skill install`, `upgrade`, `login`, `context list|show|use|remove`, `secrets export`, `server init` (remote and `--local`, `--resume`), `plan`, `apply`, `config show|get|set|edit|validate`, `db list|create|drop|credentials`, `sql`, `psql`, `console`, `tunnel`, `ssh`, `logs`, `tune show|explain|apply`, `node rpc`, `node version`, `node selfcheck`, `node run certs-renew`, `node ssh-revert` and `node unlock-ssh`. Phase 3 adds `db resize`, `db fork`, `backup setup|now|list|verify`, `restore <db>|status|promote|undo|abort|cleanup|drill`, `dump`, `dump list|get`, `job list|follow`, the backup `node run` jobs and `node dump`, and turns the existing commands per database (built, manual test pending). The rest return `not implemented yet` until their phase lands.
 
@@ -524,7 +525,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | ✅ |
 | 2 | First server | Set up a new server with a working PostgreSQL 18 database. **Manual testing starts here** | ✅ |
 | 3 | Databases as clusters, backups & native restore | Each database its own cluster with a size and limits, two poolers, one hostname per node; a stanza per database, native PITR restore with an in-place cut-over, native `db fork`, drills per database | ✅ |
-| 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ⬜ |
+| 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | 🟡 |
 | 5 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | ⬜ |
 | 6 | Followers | Per-database physical standby followers; unfollow one to rehearse a risky migration on current data | ⬜ |
 | 7 | Extensions | Extension catalog and `eru ext` | ⬜ |
@@ -601,18 +602,20 @@ Re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) and 
 
 **Manual test (the RFC's exit test, on a real VPS with R2):** rebuild `mbvlabs`. Create `app` and `other` (two clusters), check the memory split and the cgroup limits, and that `other` keeps serving while `app` restarts. Run a memory-heavy query in `app` and see it throttled while `other` stays responsive. Connect a migration tool through `db1.<domain>:5432/app` and an application through `db1.<domain>:443/app`. Back up, write rows to `app`, `restore app --time` and inspect the paused copy, then promote while `other` keeps writing. Undo and cleanup. Fork `app` at a time and without one. A drill per cluster. Drop a database and see its stanza stay listed. Change a restart-only setting of one cluster and check that only it restarts (a preload extension waits for Phase 7). Create a third database that would overcommit the server and see it refused with the size that fits, then resize one down. A second `apply` changes nothing. The checklist, with what to verify at each step, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Passed on 2026-10-14.
 
-### 7.7 Phase 4 — Observability & maintenance ⬜
+### 7.7 Phase 4 — Observability & maintenance 🟡
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| Step 16 | Exporters and the authenticated `/metrics` endpoint behind nginx: `postgres_exporter` with one target per cluster, `pgbackrest_exporter` over every stanza | ⬜ |
-| Status views | `status`, `top`, `queries`, `doctor` (all checks, including `--security`), per database with a server summary; doctor reads cgroup pressure, the memory budget, `CommitLimit`, disk use (fails at 90%) and the offsite-backup state | ⬜ |
-| `internal/maint` | `maint vacuum/analyze/reindex/repack/report/kill` per database and the maintenance timers; `--defer-restart` restarts wait for the maintenance window | ⬜ |
-| Steps 17–18 | Remaining timers; `doctor` as the final gate of `init` | ⬜ |
+| Step 16 | `metrics-v1`: pinned node_exporter, postgres_exporter (a `/probe` per cluster) and two pgbouncer_exporters on loopback in `eru-exporters.slice`; the authenticated `/metrics` endpoint on nginx (bcrypt basic auth, PROXY protocol on the internal hops, optional allowlist, fail2ban) with `targets.json` for `http_sd`; `eru metrics show|rotate`; eru's textfiles in place of `pgbackrest_exporter` | ✅ built, manual test pending |
+| Status views | `status`, `top`, `queries`, `doctor` (every check, `--only security`, operator-side checks), per database with a server summary; doctor reads cgroup pressure, the memory budget, `CommitLimit`, disk use (fails at 90%) and the offsite-backup state | ✅ built, manual test pending |
+| `internal/maint` | `maint vacuum/analyze/reindex/report/kill` per database (jobs as `eru_admin`, heavy-I/O lock), the ioguix bloat estimate, `maint repack` refusing until Phase 7; `maint-daily` and `maint-weekly`; `--defer-restart` restarts at the window's start | ✅ built, manual test pending |
+| Step 18 and timers | `doctor` as the gate after `apply` (warnings) and `server init`'s database phase (fails); `eru-maint-daily`, `eru-maint-weekly`, `eru-metrics-refresh` (every minute), `eru-doctor` (hourly) | ✅ built, manual test pending |
 
 `maint repack` and auto-repack need `pg_repack`, which `eru ext add` brings in Phase 7. Until then `maint repack` fails with `precondition_failed`, and the repack is tested in Phase 7.
 
-**Manual test:** scrape `/metrics` with and without credentials. `doctor` is clean on a fresh server with two databases. Run a bloat report.
+Built in the units of [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md) (2026-10-14); it stays 🟡 until the manual test passes.
+
+**Manual test:** scrape `/metrics` with and without credentials. `doctor` is clean on a fresh server with two databases. Run a bloat report. The checklist is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Not run yet.
 
 ### 7.8 Phase 5 — Master backup & disaster recovery ⬜
 

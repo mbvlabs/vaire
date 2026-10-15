@@ -29,7 +29,11 @@ const (
 	DefaultCPUWeight       = 100
 	DefaultSessionPoolSize = 10
 	// ReservedConnections are the slots kept free beyond both pools:
-	// superuser_reserved_connections and eru's own maintenance.
+	// reserved_connections (3) plus superuser_reserved_connections (0), as
+	// tune sets them. Ordinary roles (the pools) get max_connections minus
+	// both, so both pools full still leave the three to eru_admin and
+	// eru_monitor (pg_use_reserved_connections; eru_monitor capped at two,
+	// one postgres_exporter probe) and to postgres.
 	ReservedConnections = 3
 )
 

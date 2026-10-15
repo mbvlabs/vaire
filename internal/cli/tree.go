@@ -77,6 +77,9 @@ func phase1Commands() []cmdSpec {
 		{
 			use: "version",
 			run: runVersion,
+			flags: []fl{
+				flagHiddenBool("licenses", "Print the third-party notices eru embeds"),
+			},
 			meta: CommandMeta{
 				Summary:   "Print the eru version",
 				WhenToUse: []string{"Check which eru binary is running before an upgrade or a bug report."},
@@ -194,6 +197,7 @@ func phase1Commands() []cmdSpec {
 			flags: []fl{
 				flagStrings("step", "Run only these step ids: <step> for every database, <step>@<db> for one"),
 				flagString("db", "", "Only this database's cluster steps"),
+				flagBool("skip-doctor", "Skip the doctor checks after a full apply"),
 				flagStringArray("confirm", "Confirm restarts: <db>/restart for one database, {server}/restart for every one; repeatable. --yes never satisfies this check"),
 			},
 			meta: CommandMeta{
@@ -224,59 +228,73 @@ func phase1Commands() []cmdSpec {
 		configCommands(),
 		{
 			use: "status",
-			run: notImplemented,
+			run: runStatus,
 			flags: []fl{
-				flagBool("watch", "Refresh until interrupted"),
+				flagBool("watch", "Refresh every 5 seconds until interrupted (terminal only)"),
+				flagString("db", "", "Show one database"),
 			},
 			meta: CommandMeta{
-				Summary:   "Show cluster health, backups, and capacity",
-				WhenToUse: []string{"Check whether the cluster is serving traffic and backups are current."},
-				Examples:  []string{"eru status", "eru status --output agent"},
-				Remote:    true,
-				Next:      []string{"eru doctor", "eru backup list"},
+				Summary: "Show the server summary and each database's health, backups and capacity",
+				WhenToUse: []string{"Check whether the databases are serving, how much memory and how many connections each uses, " +
+					"and when each was last backed up. It answers while an apply runs."},
+				Examples:   []string{"eru status", "eru status --db app --output agent", "eru status --watch"},
+				Remote:     true,
+				ErrorCodes: []string{"precondition_failed"},
+				Next:       []string{"eru doctor", "eru backup list"},
 			},
 		},
 		{
 			use: "doctor",
-			run: notImplemented,
+			run: runDoctor,
 			flags: []fl{
-				flagString("only", "", "Limit checks to security, backups, host, postgres, or tls"),
+				flagString("only", "", "Limit checks to security, backups, host, postgres, tls or metrics"),
+				flagString("db", "", "Limit the database checks to one database"),
 			},
 			meta: CommandMeta{
-				Summary:   "Run health checks and print a fix command when one exists",
-				WhenToUse: []string{"Explain a failing or warning condition from status."},
-				Examples:  []string{"eru doctor", "eru doctor --only backups"},
-				Remote:    true,
-				Next:      []string{"eru status"},
+				Summary: "Run health checks and print a fix command when one exists",
+				WhenToUse: []string{"Explain a failing or warning condition from status, or audit the server " +
+					"(--only security is the CIS-style subset). Any failing check exits 5 with doctor_failed."},
+				Examples:   []string{"eru doctor", "eru doctor --only backups", "eru doctor --only security --json"},
+				Remote:     true,
+				ErrorCodes: []string{"doctor_failed", "precondition_failed"},
+				Next:       []string{"eru status"},
 			},
 		},
 		{
 			use: "top",
-			run: notImplemented,
+			run: runTop,
+			flags: []fl{
+				flagString("db", "", "Start filtered to one database"),
+				flagBool("once", "Print one snapshot and exit"),
+			},
 			meta: CommandMeta{
-				Summary:   "Show live Postgres and PgBouncer activity",
-				WhenToUse: []string{"Watch sessions, waits, and cache hit ratio on a live cluster."},
-				Examples:  []string{"eru top"},
-				Next:      []string{"eru queries", "eru maint report long-queries"},
+				Summary: "Show live PostgreSQL and PgBouncer activity",
+				WhenToUse: []string{"Watch sessions, waits, blocking chains and the busiest statements. It reads each database over the tunnel " +
+					"through the session pooler as eru_admin, read-only; --json or no terminal prints one snapshot."},
+				Examples: []string{"eru top", "eru top --db app", "eru top --json"},
+				Next:     []string{"eru queries", "eru maint report long-queries"},
 			},
 		},
 		{
 			use: "queries",
-			run: notImplemented,
+			run: runQueries,
 			flags: []fl{
+				flagString("db", "", "Database; every database when omitted"),
 				flagInt("limit", 20, "How many statements to return"),
 				flagString("order", "total", "Sort by total, mean, or calls"),
 				flagBool("reset", "Reset pg_stat_statements. Requires --confirm"),
 			},
 			meta: CommandMeta{
 				Summary:          "Show statement statistics, or reset them",
-				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements."},
-				Examples:         []string{"eru queries --limit 20", "eru queries --reset --confirm prod/stats"},
+				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements: --confirm <db>/stats with --db, <server>/stats for every database."},
+				Examples:         []string{"eru queries --db app --limit 20", "eru queries --order mean", "eru queries --db app --reset --confirm app/stats"},
+				Remote:           true,
 				MutatingFlags:    []string{"--reset"},
 				DestructiveFlags: []string{"--reset"},
 				SkipDryRunCheck:  true,
 				SkipDryRunReason: "--reset is the only mutation and requires a confirm token",
-				ConfirmToken:     "{server}/stats",
+				ConfirmToken:     "{db}/stats",
+				ErrorCodes:       []string{"precondition_failed", "unsafe_action_requires_confirmation"},
 				Next:             []string{"eru maint report missing-indexes"},
 			},
 		},
@@ -433,6 +451,7 @@ func phase1Commands() []cmdSpec {
 		jobCommands(),
 		vpsCommands(),
 		maintCommands(),
+		metricsCommands(),
 		{
 			use: "secrets",
 			run: parentRun,
@@ -656,6 +675,7 @@ func serverCommands() cmdSpec {
 				flagBool("confirm-secrets-stored", "Confirm the secrets handoff was stored"),
 				flagBool("dns-ready", "Skip the pause for creating the DNS records"),
 				flagBool("skip-dns-check", "Deprecated: a DNS mismatch is only a warning now"),
+				flagBool("skip-doctor", "Skip the doctor checks that gate init after the database phase"),
 				flagBool("resume", "Continue an unfinished init"),
 				flagBool("discard", "Delete an unfinished init's local state (with --name)"),
 			},
@@ -1515,128 +1535,6 @@ func vpsCommands() cmdSpec {
 					SupportsDryRun: true,
 					Remote:         true,
 					ConfirmToken:   "{server}/vps-restore",
-				},
-			},
-		},
-	}
-}
-
-func maintCommands() cmdSpec {
-	return cmdSpec{
-		use: "maint",
-		run: parentRun,
-		meta: CommandMeta{
-			Summary:   "Run maintenance and capacity reports",
-			WhenToUse: []string{"Vacuum, reindex, repack, or report on bloat and wraparound."},
-			Examples:  []string{"eru maint report bloat --db app"},
-			Remote:    true,
-		},
-		children: []cmdSpec{
-			{
-				use: "vacuum",
-				run: notImplemented,
-				flags: []fl{
-					flagString("db", "", "Database, or all databases when omitted"),
-					flagString("table", "", "Vacuum one table"),
-					flagBool("analyze", "Run ANALYZE with the vacuum"),
-					flagBool("freeze", "Freeze tuples"),
-					flagInt("parallel", 0, "Parallel workers. 0 lets eru choose"),
-				},
-				meta: CommandMeta{
-					Summary:        "Vacuum a table or every database",
-					WhenToUse:      []string{"Reclaim space or freeze tuples outside the daily maintenance job."},
-					Examples:       []string{"eru maint vacuum --db app --analyze", "eru maint vacuum --dry-run"},
-					Mutating:       true,
-					SupportsDryRun: true,
-					Remote:         true,
-				},
-			},
-			{
-				use: "analyze",
-				run: notImplemented,
-				flags: []fl{
-					flagString("db", "", "Database, or all databases when omitted"),
-					flagString("table", "", "Analyze one table"),
-				},
-				meta: CommandMeta{
-					Summary:        "Refresh planner statistics",
-					WhenToUse:      []string{"Update statistics after a large load."},
-					Examples:       []string{"eru maint analyze --db app"},
-					Mutating:       true,
-					SupportsDryRun: true,
-					Remote:         true,
-				},
-			},
-			{
-				use: "reindex",
-				run: notImplemented,
-				flags: []fl{
-					flagString("db", "", "Database name"),
-					flagString("table", "", "Reindex one table"),
-					flagString("index", "", "Reindex one index"),
-					flagBoolDefault("concurrently", true, "Rebuild indexes without a long lock"),
-					flagBool("cleanup-invalid", "Drop leftover invalid _ccnew indexes"),
-				},
-				meta: CommandMeta{
-					Summary:        "Rebuild indexes concurrently",
-					WhenToUse:      []string{"Repair or compact indexes without blocking writes."},
-					Examples:       []string{"eru maint reindex --db app --table events --concurrently"},
-					Mutating:       true,
-					SupportsDryRun: true,
-					Remote:         true,
-				},
-			},
-			{
-				use: "repack",
-				run: notImplemented,
-				flags: []fl{
-					flagString("db", "", "Database name"),
-					flagString("table", "", "Table to repack"),
-					flagBool("now", "Run outside the maintenance window"),
-				},
-				meta: CommandMeta{
-					Summary:        "Repack a bloated table with pg_repack",
-					WhenToUse:      []string{"Rewrite a table online after the pg_repack extension is installed."},
-					Examples:       []string{"eru maint repack --db app --table events --confirm app"},
-					Mutating:       true,
-					SupportsDryRun: true,
-					Remote:         true,
-					ConfirmToken:   "{db}",
-				},
-			},
-			{
-				use:  "report <kind>",
-				args: cobra.ExactArgs(1),
-				run:  notImplemented,
-				flags: []fl{
-					flagString("db", "", "Database name"),
-					flagInt("min-bytes", 0, "Minimum estimated bloat to include"),
-					flagString("older-than", "5m", "Age threshold for long-query reports"),
-				},
-				meta: CommandMeta{
-					Summary:   "Report bloat, wraparound, indexes, long queries, or locks",
-					WhenToUse: []string{"Read a maintenance report. kind is bloat, wraparound, unused-indexes, missing-indexes, long-queries, or locks."},
-					Examples:  []string{"eru maint report bloat --db app", "eru maint report wraparound"},
-					Remote:    true,
-				},
-			},
-			{
-				use: "kill",
-				run: notImplemented,
-				flags: []fl{
-					flagBool("idle-in-tx", "Terminate idle-in-transaction sessions"),
-					flagInt("pid", 0, "Terminate this backend pid"),
-					flagString("older-than", "", "Only sessions older than this duration"),
-				},
-				meta: CommandMeta{
-					Summary:        "Terminate backends that match the filter",
-					WhenToUse:      []string{"Stop a stuck session after the human approves the confirm token."},
-					Examples:       []string{"eru maint kill --idle-in-tx --older-than 10m --confirm prod/kill"},
-					Mutating:       true,
-					Destructive:    true,
-					SupportsDryRun: true,
-					Remote:         true,
-					ConfirmToken:   "{server}/kill",
 				},
 			},
 		},

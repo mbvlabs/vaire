@@ -39,6 +39,8 @@ type bootstrapParams struct {
 	// Local reports a `server init --local` run, so the failure hint can name
 	// the matching resume command.
 	Local bool `json:"local,omitempty"`
+	// SkipDoctor skips the doctor gate after the database phase.
+	SkipDoctor bool `json:"skip_doctor,omitempty"`
 }
 
 // BootstrapResult is the cluster.bootstrap result: the node identity the
@@ -55,6 +57,8 @@ type BootstrapResult struct {
 	TLS *TLSState `json:"tls,omitempty"`
 	// RestartPerformed reports whether the database phase restarted Postgres.
 	RestartPerformed bool `json:"restart_performed,omitempty"`
+	// Doctor is the gate's result after the database phase (Phase 4).
+	Doctor *doctorData `json:"doctor,omitempty"`
 }
 
 // TLSState is the certificate state after the database phase (D10).

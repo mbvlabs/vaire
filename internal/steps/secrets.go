@@ -9,6 +9,9 @@ const (
 	SecretPgbouncerAuth = "svc.pgbouncer_auth" //nolint:gosec // G101: a key name, not a value.
 	// SecretMonitor is the eru_monitor service password key name.
 	SecretMonitor = "svc.eru_monitor" //nolint:gosec // G101: a key name, not a value.
+	// SecretMetricsHash is the bcrypt hash of the /metrics credential
+	// (Phase 4). The operator computes it; the node never sees the password.
+	SecretMetricsHash = "metrics.htpasswd" //nolint:gosec // G101: a key name, not a value.
 )
 
 // Backup values on the RPC wire (Phase 3). The S3 secret key and the

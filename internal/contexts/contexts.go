@@ -87,6 +87,9 @@ type Credentials struct {
 	SudoPassword string         `json:"sudo_password,omitempty"`
 	Database     *DatabaseCreds `json:"database,omitempty"`
 	Backup       *BackupCreds   `json:"backup,omitempty"`
+	// Metrics is the /metrics endpoint credential (Phase 4). The node keeps
+	// only its bcrypt hash.
+	Metrics *MetricsCreds `json:"metrics,omitempty"`
 }
 
 // RoleMaster is the master node's role.

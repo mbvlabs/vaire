@@ -23,6 +23,16 @@ func (c DatabaseCreds) SecretValues() []string {
 	return out
 }
 
+// MetricsUser is the user of the /metrics endpoint's basic auth.
+const MetricsUser = "metrics"
+
+// MetricsCreds is the /metrics endpoint's basic-auth credential (Phase 4).
+// The operator generates it; the node gets only its bcrypt hash.
+type MetricsCreds struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 // BackupCreds is the recovery kit (Phases 3 and 5): where the bucket is, its
 // keys, the pgBackRest repository cipher and the age identity that opens the
 // long-retention dumps. The operator generates the cipher and the identity

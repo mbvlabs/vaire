@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	charm.land/bubbles/v2 v2.0.0
+	charm.land/bubbletea/v2 v2.0.2
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.0.3
 	filippo.io/age v1.3.2
@@ -25,7 +26,6 @@ require (
 )
 
 require (
-	charm.land/bubbletea/v2 v2.0.2 // indirect
 	filippo.io/hpke v0.4.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect

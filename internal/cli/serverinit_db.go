@@ -21,6 +21,7 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 		"cluster_toml": string(raw),
 		"node_name":    r.master().Name,
 		"local":        r.local,
+		"skip_doctor":  flagTrue(r.cmd, "skip-doctor"),
 	}, remote.CallOptions{Secrets: r.dbSecrets, Confirm: r.name, OnEvent: r.p.event})
 	if err != nil {
 		return node.BootstrapResult{}, err
@@ -29,8 +30,19 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 	if err := reply.Decode(&res); err != nil {
 		return res, err
 	}
+	if res.Doctor != nil {
+		r.health = healthLine(res.Doctor.Summary)
+	}
 	r.warnings = append(r.warnings, reply.Warnings...)
 	return res, nil
+}
+
+// healthSuffix appends the doctor gate's summary to the init message.
+func (r *initRun) healthSuffix() string {
+	if r.health == "" {
+		return ""
+	}
+	return "\n" + strings.ToUpper(r.health[:1]) + r.health[1:]
 }
 
 // dnsHelp is shown with the records: the record must point straight at the

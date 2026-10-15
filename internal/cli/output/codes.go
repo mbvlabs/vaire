@@ -13,6 +13,7 @@ const (
 	CodeUnsafeAction          = "unsafe_action_requires_confirmation"
 	CodeStepFailed            = "step_failed"
 	CodePartialFailure        = "partial_failure"
+	CodeDoctorFailed          = "doctor_failed"
 	CodeExternalCommand       = "external_command_failed"
 	CodeConfig                = "config_error"
 	CodeValidation            = "validation_failed"
@@ -63,6 +64,7 @@ var exitByCode = map[string]int{
 	CodeUnsafeAction:          ExitUnsafe,
 	CodeStepFailed:            ExitStep,
 	CodePartialFailure:        ExitStep,
+	CodeDoctorFailed:          ExitStep,
 	CodeExternalCommand:       ExitExternal,
 	CodeConfig:                ExitConfig,
 	CodeValidation:            ExitConfig,

@@ -104,6 +104,20 @@ func ClusterPG(spec config.ClusterSpec) pg.Local {
 	return pg.Local{Host: PGSocketDir, Port: spec.Port}
 }
 
+// AdminPG talks to spec's cluster as eru_admin over its socket, as root
+// (pg_ident maps root to eru_admin only): maintenance and reports run with
+// eru_admin's pg_maintain, pg_monitor and pg_signal_backend, not as the
+// superuser (Phase 4).
+func AdminPG(spec config.ClusterSpec) pg.Local {
+	return pg.Local{Host: PGSocketDir, Port: spec.Port, User: "eru_admin", AsRoot: true}
+}
+
+// PoolerAdminPG talks to a pooler's admin console as the pgbouncer user,
+// which PgBouncer lets in over its socket from the postgres OS user.
+func PoolerAdminPG(socketDir string, port int) pg.Local {
+	return pg.Local{Host: socketDir, Port: port, User: "pgbouncer"}
+}
+
 // PostgreSQL and PgBouncer both run as the postgres user, so every
 // configuration file they read is owned by postgres:postgres and written with
 // that owner from the start.

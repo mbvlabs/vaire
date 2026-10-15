@@ -109,13 +109,13 @@ func TestOtherConfigsCreateAndDrop(t *testing.T) {
 func TestCreateRunsNumbering(t *testing.T) {
 	cfg := budgetCluster(config.ClusterSpec{Name: "app2"}, config.ClusterSpec{Name: "big"})
 	runs := createRuns(cfg, "big", []string{"postgres-config-v1@app2"})
-	if len(runs) != 4 {
-		t.Fatalf("runs = %d, want kernel, big, poolers and app2's config (no backups)", len(runs))
+	if len(runs) != 5 {
+		t.Fatalf("runs = %d, want kernel, big, poolers, metrics and app2's config (no backups)", len(runs))
 	}
-	if !slices.Equal(runs[3].Only, []string{"postgres-config-v1@app2"}) || runs[1].DB != "big" {
+	if !slices.Equal(runs[3].Only, []string{"metrics-v1"}) || !slices.Equal(runs[4].Only, []string{"postgres-config-v1@app2"}) || runs[1].DB != "big" {
 		t.Errorf("runs = %+v", runs)
 	}
-	if got := dropRuns(budgetCluster(), nil); len(got) != 1 {
-		t.Errorf("dropping the last database: %d runs, want the timers only", len(got))
+	if got := dropRuns(budgetCluster(), nil); len(got) != 2 {
+		t.Errorf("dropping the last database: %d runs, want the timers and metrics", len(got))
 	}
 }

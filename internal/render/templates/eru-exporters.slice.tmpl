@@ -1,0 +1,9 @@
+# managed by eru - do not edit; use cluster.toml
+# The Prometheus exporters live in the server reserve, not in any database's
+# budget: this slice caps them together and lets the clusters win the CPU.
+[Unit]
+Description=eru Prometheus exporters
+Before=slices.target
+[Slice]
+CPUWeight=20
+MemoryMax=256M

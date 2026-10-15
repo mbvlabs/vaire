@@ -220,7 +220,7 @@ func clusterRunning(spec config.ClusterSpec) bool {
 
 // clusterMemoryCurrentMiB is memory.current of name's service cgroup.
 func clusterMemoryCurrentMiB(name string) (int, bool) {
-	raw, err := os.ReadFile(filepath.Join("/sys/fs/cgroup/system.slice/system-postgresql.slice", steps.PGServiceName(name)+".service", "memory.current"))
+	raw, err := os.ReadFile(filepath.Join(hostinfo.ServiceCgroup(steps.PGServiceName(name)), "memory.current"))
 	if err != nil {
 		return 0, false
 	}

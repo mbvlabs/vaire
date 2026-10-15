@@ -1,0 +1,32 @@
+# managed by eru - do not edit; use cluster.toml
+# The authenticated /metrics endpoint (Phase 4), included in nginx's HTTPS
+# server on 127.0.0.1:8443. Every path needs the basic-auth credential from
+# the secrets handoff; the exporters themselves listen on loopback only.
+{{- range .Locations }}
+location = {{ .Path }} {
+    auth_basic "eru metrics";
+    auth_basic_user_file {{ $.Htpasswd }};
+    limit_req zone=eru_metrics burst=40 nodelay;
+{{- range $.Allow }}
+    allow {{ . }};
+{{- end }}
+{{- if $.Allow }}
+    deny all;
+{{- end }}
+{{- if .Alias }}
+    default_type application/json;
+    alias {{ .Alias }};
+{{- else }}
+{{- if .Args }}
+    # The probe target is fixed here; the client's query string is dropped,
+    # so a scraper can't point the exporter at another DSN.
+    set $args "{{ .Args }}";
+{{- end }}
+    proxy_pass {{ .Upstream }};
+    proxy_set_header Host 127.0.0.1;
+    # The scraper's credential stays at nginx.
+    proxy_set_header Authorization "";
+    proxy_read_timeout 30s;
+{{- end }}
+}
+{{- end }}

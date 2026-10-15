@@ -137,8 +137,11 @@ func (c *calc) add() {
 		connReason = "from the cluster's size; both poolers fan in"
 	}
 	c.set("max_connections", itoa(maxConn), "", connReason, "postmaster")
-	c.set("superuser_reserved_connections", "3", "", "room for eru_admin maintenance sessions", "postmaster")
-	c.set("reserved_connections", "3", "", "reserved slots; eru_admin gets pg_use_reserved_connections", "postmaster")
+	// The two sum to config.ReservedConnections, the slots both pools leave free.
+	// Superusers may take reserved_connections' slots too, so no separate
+	// superuser set is kept.
+	c.set("superuser_reserved_connections", "0", "", "postgres shares reserved_connections", "postmaster")
+	c.set("reserved_connections", "3", "", "shared by eru_admin, eru_monitor (pg_use_reserved_connections) and postgres", "postmaster")
 
 	// work_mem.
 	factor := map[string]int{ProfileOLTP: 3, ProfileMixed: 2, ProfileAnalytics: 1}[in.Profile]

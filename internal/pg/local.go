@@ -25,6 +25,15 @@ type Local struct {
 	Host string
 	// Port is the instance's port; 0 uses psql's default.
 	Port int
+	// User is the role psql logs in as (-U); empty is the OS user's name.
+	User string
+	// AsRoot runs psql as root instead of the postgres OS user, so peer
+	// auth maps it through pg_ident (root may log in as eru_admin only).
+	// Maintenance runs as eru_admin this way (Phase 4).
+	AsRoot bool
+	// Timeout bounds one psql run; 0 is five minutes. A vacuum or a
+	// concurrent reindex needs longer.
+	Timeout time.Duration
 }
 
 // localTimeout bounds one psql invocation.
@@ -62,34 +71,17 @@ func (l Local) QueryRows(ctx context.Context, db, sql string, vars map[string]st
 
 // run feeds sql to psql on stdin as the postgres OS user.
 func (l Local) run(ctx context.Context, db, sql string, vars map[string]string, csvOut bool) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, localTimeout)
+	timeout := localTimeout
+	if l.Timeout > 0 {
+		timeout = l.Timeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	args := []string{"-u", "postgres", "--", "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1"}
-	if l.Host != "" {
-		args = append(args, "-h", l.Host)
+	name, args, err := l.command(db, vars, csvOut)
+	if err != nil {
+		return nil, err
 	}
-	if l.Port != 0 {
-		args = append(args, "-p", strconv.Itoa(l.Port))
-	}
-	names := make([]string, 0, len(vars))
-	for name := range vars {
-		if !varNamePattern.MatchString(name) {
-			return nil, fmt.Errorf("psql variable name %q is invalid", name)
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if strings.ContainsAny(vars[name], "\n\r") {
-			return nil, fmt.Errorf("psql variable %s contains a newline", name)
-		}
-		args = append(args, "-v", name+"="+vars[name])
-	}
-	if csvOut {
-		args = append(args, "--csv")
-	}
-	args = append(args, "-d", db, "-f", "-")
-	cmd := exec.CommandContext(ctx, "runuser", args...) //nolint:gosec // G204: fixed runuser/psql invocation; db is validated by the caller.
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed runuser/psql invocation; db is validated by the caller.
 	cmd.Stdin = strings.NewReader(sql)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -102,6 +94,43 @@ func (l Local) run(ctx context.Context, db, sql string, vars map[string]string, 
 		return nil, errors.New(msg)
 	}
 	return stdout.Bytes(), nil
+}
+
+// command is the psql invocation: through runuser as the postgres OS user,
+// or psql directly as root with AsRoot.
+func (l Local) command(db string, vars map[string]string, csvOut bool) (string, []string, error) {
+	args := []string{"-u", "postgres", "--", "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1"}
+	if l.Host != "" {
+		args = append(args, "-h", l.Host)
+	}
+	if l.Port != 0 {
+		args = append(args, "-p", strconv.Itoa(l.Port))
+	}
+	if l.User != "" {
+		args = append(args, "-U", l.User)
+	}
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		if !varNamePattern.MatchString(name) {
+			return "", nil, fmt.Errorf("psql variable name %q is invalid", name)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.ContainsAny(vars[name], "\n\r") {
+			return "", nil, fmt.Errorf("psql variable %s contains a newline", name)
+		}
+		args = append(args, "-v", name+"="+vars[name])
+	}
+	if csvOut {
+		args = append(args, "--csv")
+	}
+	args = append(args, "-d", db, "-f", "-")
+	if l.AsRoot {
+		return "psql", args[4:], nil
+	}
+	return "runuser", args, nil
 }
 
 // parseCSV turns psql --csv output into column-name -> value maps.

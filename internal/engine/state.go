@@ -32,6 +32,10 @@ type State struct {
 	LockedDownAt string `json:"locked_down_at,omitempty"`
 	// Jobs are the detachable jobs and timer runs, newest last.
 	Jobs []JobRecord `json:"jobs,omitempty"`
+	// DeferredRestarts are the clusters db resize --defer-restart left for
+	// the maintenance window, with when it was asked (Phase 4). maint-daily
+	// restarts them at the window's start and removes them.
+	DeferredRestarts map[string]string `json:"deferred_restarts,omitempty"`
 }
 
 // JobRecord is one run of eru node run: a detachable job started by an RPC

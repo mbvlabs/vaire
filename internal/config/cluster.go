@@ -173,10 +173,13 @@ type Maintenance struct {
 	RepackBloatThreshold float64 `toml:"repack_bloat_threshold"`
 }
 
-// Metrics is [metrics].
+// Metrics is [metrics] (Phase 4): the authenticated /metrics endpoint on
+// nginx. Allowlist limits it to these CIDRs; empty allows any address with
+// the credential.
 type Metrics struct {
-	Enabled    bool   `toml:"enabled"`
-	PathPrefix string `toml:"path_prefix"`
+	Enabled    bool     `toml:"enabled"`
+	PathPrefix string   `toml:"path_prefix"`
+	Allowlist  []string `toml:"allowlist"`
 }
 
 // Name returns the cluster name.
@@ -222,7 +225,7 @@ func DefaultCluster() Cluster {
 		},
 		MasterBackup: MasterBackup{RetentionDays: 30, RetentionWeeks: 52, LocalKeep: 10},
 		Maintenance:  Maintenance{Window: "02:00-05:00", RepackBloatThreshold: 0.40},
-		Metrics:      Metrics{Enabled: true, PathPrefix: "/metrics"},
+		Metrics:      Metrics{Enabled: true, PathPrefix: "/metrics", Allowlist: []string{}},
 	}
 }
 
@@ -326,6 +329,9 @@ func ParseCluster(raw []byte) (Cluster, error) {
 	}
 	if cfg.Network.ClientAllowlist == nil {
 		cfg.Network.ClientAllowlist = []string{}
+	}
+	if cfg.Metrics.Allowlist == nil {
+		cfg.Metrics.Allowlist = []string{}
 	}
 	if cfg.Postgres.Settings == nil {
 		cfg.Postgres.Settings = map[string]string{}
@@ -480,6 +486,17 @@ func (c Cluster) ValidateFor(scope Scope) error {
 		if err := CheckAllowlistEntry(cidr); err != nil {
 			add("network.client_allowlist entry %q %v", cidr, err)
 		}
+	}
+	for _, cidr := range c.Metrics.Allowlist {
+		if err := CheckAllowlistEntry(cidr); err != nil {
+			add("metrics.allowlist entry %q %v", cidr, err)
+		}
+	}
+	if !MetricsPathPattern.MatchString(c.Metrics.PathPrefix) {
+		add("metrics.path_prefix %q must match %s", c.Metrics.PathPrefix, MetricsPathPattern)
+	}
+	if _, _, err := ParseWindow(c.Maintenance.Window); err != nil {
+		add("maintenance.window %q %v", c.Maintenance.Window, err)
 	}
 	masters := 0
 	names := map[string]bool{}

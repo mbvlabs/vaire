@@ -1,122 +1,135 @@
 package backup
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/buildinfo"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/promfile"
 )
 
-// TextfilePath is eru's node_exporter textfile (§15.4). node_exporter
-// arrives in Phase 4 and scrapes it from then on; eru writes it from Phase 3.
-const TextfilePath = "/var/lib/node_exporter/textfile/eru.prom"
+// TextfilePath is eru's backup textfile (§15.4), which node_exporter's
+// textfile collector serves from Phase 4 on.
+const TextfilePath = promfile.Dir + "/" + promfile.Backup
 
-// WriteMetrics renders the eru.prom backup lines from records.json and the
-// job records in state.json. It is called after every backup, verify, drill,
-// dump and restore change, and a failure to write is never fatal for the job.
-func WriteMetrics(cluster, node string) error {
+// WriteMetrics renders eru.prom from records.json and the job records in
+// state.json. It is called after every backup, verify, drill, dump and
+// restore change, and by metrics-refresh; a failure to write is never fatal
+// for the job.
+func WriteMetrics(server, node string) error {
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return err
 	}
-	bs, err := LoadRecords()
+	rs, err := LoadRecords()
 	if err != nil {
 		return err
 	}
-	var b strings.Builder
-	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
-	line("# HELP eru_info eru build on this node.")
-	line("# TYPE eru_info gauge")
-	line(`eru_info{version=%q,cluster=%q,node=%q} 1`, buildinfo.Version, cluster, node)
-	dbs := make([]string, 0, len(bs.LastBackup))
-	for db := range bs.LastBackup {
-		dbs = append(dbs, db)
-	}
-	sort.Strings(dbs)
-	line("# HELP eru_backup_last_success_timestamp_seconds Last successful pgBackRest backup per database and type.")
-	line("# TYPE eru_backup_last_success_timestamp_seconds gauge")
-	for _, db := range dbs {
+	return promfile.Write(promfile.Backup, BackupFamilies(server, node, buildinfo.Version, rs, st.Jobs))
+}
+
+// BackupFamilies are eru.prom's metric families: the build, and per
+// database the last backups, verifies and drills, the stanza facts, open
+// restores and skipped timer jobs.
+func BackupFamilies(server, node, version string, rs Records, jobs []engine.JobRecord) []*promfile.Family {
+	info := promfile.Gauge("eru_info", "eru build on this node.")
+	info.Add(1, promfile.L("version", version, "server", server, "node", node)...)
+
+	last := promfile.Gauge("eru_backup_last_success_timestamp_seconds", "Last successful pgBackRest backup per database and type.")
+	size := promfile.Gauge("eru_backup_last_size_bytes", "Database size of the last successful backup per database and type.")
+	repoSize := promfile.Gauge("eru_backup_last_repo_size_bytes", "Repository size of the last successful backup per database and type.")
+	duration := promfile.Gauge("eru_backup_last_duration_seconds", "Duration of the last successful backup per database and type.")
+	for _, db := range promfile.SortedKeys(rs.LastBackup) {
 		for _, kind := range []string{TypeFull, TypeDiff, TypeIncr} {
-			if r, ok := bs.LastBackup[db][kind]; ok {
-				line(`eru_backup_last_success_timestamp_seconds{db=%q,type=%q} %d`, db, kind, unix(r.FinishedAt))
+			r, ok := rs.LastBackup[db][kind]
+			if !ok {
+				continue
+			}
+			labels := promfile.L("db", db, "type", kind)
+			last.Add(float64(unix(r.FinishedAt)), labels...)
+			size.Add(float64(r.Size), labels...)
+			if r.RepoSize > 0 {
+				repoSize.Add(float64(r.RepoSize), labels...)
+			}
+			if r.DurationSeconds > 0 {
+				duration.Add(float64(r.DurationSeconds), labels...)
 			}
 		}
 	}
-	verified := make([]string, 0, len(bs.LastVerify))
-	for db, v := range bs.LastVerify {
-		if v.OK {
-			verified = append(verified, db)
+
+	failed := promfile.Gauge("eru_backup_last_failure_timestamp_seconds", "Last failed backup per database and type, until a success of that type.")
+	for _, db := range promfile.SortedKeys(rs.LastFailure) {
+		for _, kind := range promfile.SortedKeys(rs.LastFailure[db]) {
+			failed.Add(float64(unix(rs.LastFailure[db][kind])), promfile.L("db", db, "type", kind)...)
 		}
 	}
-	sort.Strings(verified)
-	if len(verified) > 0 {
-		line("# HELP eru_backup_verify_last_success_timestamp_seconds Last pgbackrest verify of a database's stanza that passed.")
-		line("# TYPE eru_backup_verify_last_success_timestamp_seconds gauge")
-		for _, db := range verified {
-			line(`eru_backup_verify_last_success_timestamp_seconds{db=%q} %d`, db, unix(bs.LastVerify[db].FinishedAt))
+
+	windowStart := promfile.Gauge("eru_backup_window_start_timestamp_seconds", "Start of the oldest complete backup in each database's stanza: the earliest restorable point.")
+	sets := promfile.Gauge("eru_backup_sets", "Complete backup sets in each database's stanza.")
+	stanzaSize := promfile.Gauge("eru_backup_repo_size_bytes", "Repository size of every backup set in each database's stanza.")
+	for _, db := range promfile.SortedKeys(rs.Repo) {
+		f := rs.Repo[db]
+		if f.WindowStart != "" {
+			windowStart.Add(float64(unix(f.WindowStart)), promfile.L("db", db)...)
+		}
+		sets.Add(float64(f.Sets), promfile.L("db", db)...)
+		stanzaSize.Add(float64(f.RepoSize), promfile.L("db", db)...)
+	}
+
+	verified := promfile.Gauge("eru_backup_verify_last_success_timestamp_seconds", "Last pgbackrest verify of a database's stanza that passed.")
+	for _, db := range promfile.SortedKeys(rs.LastVerify) {
+		if v := rs.LastVerify[db]; v.OK {
+			verified.Add(float64(unix(v.FinishedAt)), promfile.L("db", db)...)
 		}
 	}
+
 	drills := map[string]Drill{}
-	for _, d := range bs.Drills {
+	for _, d := range rs.Drills {
 		drills[d.Database] = d
 	}
-	if len(drills) > 0 {
-		drilled := make([]string, 0, len(drills))
-		for db := range drills {
-			drilled = append(drilled, db)
-		}
-		sort.Strings(drilled)
-		line("# HELP eru_restore_drill_last_run_timestamp_seconds Last restore drill per database.")
-		line("# TYPE eru_restore_drill_last_run_timestamp_seconds gauge")
-		for _, db := range drilled {
-			line(`eru_restore_drill_last_run_timestamp_seconds{db=%q} %d`, db, unix(drills[db].FinishedAt))
-		}
-		line("# HELP eru_restore_drill_last_result Result of the last restore drill per database.")
-		line("# TYPE eru_restore_drill_last_result gauge")
-		for _, db := range drilled {
-			line(`eru_restore_drill_last_result{db=%q,result=%q} 1`, db, drills[db].Result)
-		}
+	drillRun := promfile.Gauge("eru_restore_drill_last_run_timestamp_seconds", "Last restore drill per database.")
+	drillResult := promfile.Gauge("eru_restore_drill_last_result", "Result of the last restore drill per database.")
+	for _, db := range promfile.SortedKeys(drills) {
+		drillRun.Add(float64(unix(drills[db].FinishedAt)), promfile.L("db", db)...)
+		drillResult.Add(1, promfile.L("db", db, "result", drills[db].Result)...)
 	}
-	inProgress := 0
-	if len(bs.Restores) > 0 {
-		inProgress = 1
+
+	inProgress := promfile.Gauge("eru_restore_in_progress", "Whether a restore of any database is open.")
+	open := 0.0
+	if len(rs.Restores) > 0 {
+		open = 1
 	}
-	line("# HELP eru_restore_in_progress Whether a restore of any database is open.")
-	line("# TYPE eru_restore_in_progress gauge")
-	line("eru_restore_in_progress %d", inProgress)
-	type jobKey struct{ job, db string }
-	skipped := map[jobKey]int64{}
-	for _, j := range st.Jobs {
+	inProgress.Add(open)
+
+	return []*promfile.Family{info, last, size, repoSize, duration, failed, windowStart, sets, stanzaSize,
+		verified, drillRun, drillResult, inProgress, skippedJobs(jobs)}
+}
+
+// skippedJobs is the last time each timer job was skipped on a busy lock.
+func skippedJobs(jobs []engine.JobRecord) *promfile.Family {
+	type key struct{ job, db string }
+	skipped := map[key]int64{}
+	for _, j := range jobs {
 		if j.State == engine.JobSkipped {
-			skipped[jobKey{j.Job, j.DB}] = unix(j.FinishedAt)
+			skipped[key{j.Job, j.DB}] = unix(j.FinishedAt)
 		}
 	}
-	if len(skipped) > 0 {
-		keys := make([]jobKey, 0, len(skipped))
-		for k := range skipped {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			if keys[i].job != keys[j].job {
-				return keys[i].job < keys[j].job
-			}
-			return keys[i].db < keys[j].db
-		})
-		line("# HELP eru_job_last_skipped_timestamp_seconds Last time a timer job was skipped because a lock was busy.")
-		line("# TYPE eru_job_last_skipped_timestamp_seconds gauge")
-		for _, k := range keys {
-			line(`eru_job_last_skipped_timestamp_seconds{job=%q,db=%q} %d`, k.job, k.db, skipped[k])
-		}
+	keys := make([]key, 0, len(skipped))
+	for k := range skipped {
+		keys = append(keys, k)
 	}
-	if err := os.MkdirAll(filepath.Dir(TextfilePath), 0o755); err != nil { //nolint:gosec // G301: node_exporter reads this directory.
-		return err
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].job != keys[j].job {
+			return keys[i].job < keys[j].job
+		}
+		return keys[i].db < keys[j].db
+	})
+	f := promfile.Gauge("eru_job_last_skipped_timestamp_seconds", "Last time a timer job was skipped because a lock was busy.")
+	for _, k := range keys {
+		f.Add(float64(skipped[k]), promfile.L("job", k.job, "db", k.db)...)
 	}
-	return engine.WriteFileAtomic(TextfilePath, []byte(b.String()), 0o644)
+	return f
 }
 
 func unix(ts string) int64 {

@@ -370,6 +370,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if db := stringFlag(cmd, "db"); db != "" {
 		params["db"] = db
 	}
+	if flagTrue(cmd, "skip-doctor") {
+		params["skip_doctor"] = true
+	}
 	confirm, confirms := confirmOptions(cmd)
 	// The summary names the pending restarts and next steps carry the
 	// command, so the human output leaves out the node's restart_pending
@@ -397,7 +400,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 			Warnings: warnings,
 		})
 	}
-	var data engine.ApplyData
+	var data applyReplyData
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
@@ -405,6 +408,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	message := fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total)
 	if data.Restarted() {
 		message += "; restarted " + restartSummary(data.Restarts)
+	}
+	if data.Doctor != nil {
+		message += "\n" + healthLine(data.Doctor.Summary)
 	}
 	var next []string
 	if len(data.RestartPending) > 0 {

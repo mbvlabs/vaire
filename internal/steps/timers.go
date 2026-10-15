@@ -25,7 +25,28 @@ const CertsTimerName = "eru-certs.timer"
 // ownedService matches the template services timers-v1 writes, so a removed
 // schedule takes its service with it. eru-certs.service and eru-thp.service
 // belong to other steps.
-var ownedService = regexp.MustCompile(`^eru-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry)\.service$`)
+var ownedService = regexp.MustCompile(`^eru-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry|maint-daily|maint-weekly|metrics-refresh|doctor)\.service$`)
+
+// serverTimers are the server-wide timers of Phase 4 (D13), which run with or
+// without backups: maintenance at the start of the window, the textfile
+// metrics every minute, doctor every hour.
+func serverTimers(cfg config.Cluster) map[string][]byte {
+	start := "02:00"
+	if s, _, err := config.ParseWindow(cfg.Maintenance.Window); err == nil {
+		start = fmt.Sprintf("%02d:%02d", int(s.Hours()), int(s.Minutes())%60)
+	}
+	files := map[string][]byte{}
+	for _, t := range []struct{ job, description, schedule, jitter string }{
+		{"maint-daily", "eru daily maintenance (wraparound, ANALYZE of stale tables, deferred restarts)", "*-*-* " + start + ":00", "10m"},
+		{"maint-weekly", "eru weekly maintenance (bloat estimate)", "Sat *-*-* " + start + ":00", "10m"},
+		{"metrics-refresh", "eru textfile metrics refresh", "minutely", "0"},
+		{"doctor", "eru doctor checks for the metrics", "hourly", "10m"},
+	} {
+		files["eru-"+t.job+".service"] = render.JobService(t.job, "")
+		files["eru-"+t.job+".timer"] = render.JobTimer(t.description, t.schedule, t.jitter)
+	}
+	return files
+}
 
 // StanzaExpiryTimerName is the daily timer that deletes the stanzas of
 // dropped databases once their window has passed (RFC 9.1).
@@ -81,7 +102,8 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 // cluster's stanza (RFC 9.3): within the day, and the monthly drills over
 // the month too (RFC 9.4).
 func timerFiles(cfg config.Cluster) map[string][]byte {
-	files := map[string][]byte{CertsTimerName: render.CertsTimer()}
+	files := serverTimers(cfg)
+	files[CertsTimerName] = render.CertsTimer()
 	if !cfg.BackupConfigured() {
 		return files
 	}

@@ -139,6 +139,13 @@ func serviceSecrets(contextName string) (map[string]string, contexts.Credentials
 	if err != nil {
 		return nil, creds, false, err
 	}
+	// The /metrics credential tops up the same way (Phase 4): metrics-v1
+	// writes its hash only where the node has none.
+	metricsGenerated, err := addMetricsSecret(&creds.Metrics, values)
+	if err != nil {
+		return nil, creds, false, err
+	}
+	generated = generated || metricsGenerated
 	if generated {
 		if err := contexts.SaveCredentials(contextName, creds); err != nil {
 			return nil, creds, false, err

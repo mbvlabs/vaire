@@ -324,6 +324,7 @@ func setupStanza(ctx context.Context, cfg config.Cluster, c config.ClusterSpec, 
 		return "", err
 	}
 	RecordBackup(cfg, c.Name, set)
+	RecordRepo(ctx, cfg, d, c.Name)
 	return "stanza " + d.Stanza + " (" + c.Name + ") checked, first full backup " + set.Label, nil
 }
 
@@ -342,6 +343,31 @@ func RecordBackup(cfg config.Cluster, db string, set backup.Set) {
 	}
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.RecordBackup(db, set, finished)
+		return nil
+	})
+	WriteMetrics(cfg)
+}
+
+// RecordBackupFailure stores a failed backup of db in records.json and
+// refreshes eru.prom.
+func RecordBackupFailure(cfg config.Cluster, db, kind string) {
+	_ = backup.UpdateRecords(func(s *backup.Records) error {
+		s.RecordBackupFailure(db, kind, time.Now().UTC().Format(time.RFC3339))
+		return nil
+	})
+	WriteMetrics(cfg)
+}
+
+// RecordRepo reads db's stanza once with pgbackrest info and stores its
+// facts (window start, sets, repository size) for eru.prom, in place of a
+// pgbackrest_exporter polling the bucket. A failure leaves the old facts.
+func RecordRepo(ctx context.Context, cfg config.Cluster, d backup.PgBackRest, db string) {
+	info, err := d.Info(ctx, "")
+	if err != nil {
+		return
+	}
+	_ = backup.UpdateRecords(func(s *backup.Records) error {
+		s.RecordRepo(db, backup.FactsFrom(info, time.Now().UTC().Format(time.RFC3339)))
 		return nil
 	})
 	WriteMetrics(cfg)

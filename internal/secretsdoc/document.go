@@ -122,6 +122,18 @@ type Metrics struct {
 	Password string `json:"password"`
 }
 
+// creds is the context credential the section carries, nil without one.
+func (m *Metrics) creds() *contexts.MetricsCreds {
+	if m == nil || m.Password == "" {
+		return nil
+	}
+	user := m.Username
+	if user == "" {
+		user = contexts.MetricsUser
+	}
+	return &contexts.MetricsCreds{Username: user, Password: m.Password}
+}
+
 // SecretValues returns every secret in the document, for the redaction
 // registry.
 func (d Document) SecretValues() []string {

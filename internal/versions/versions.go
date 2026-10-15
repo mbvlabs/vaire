@@ -1,6 +1,8 @@
 // Package versions pins artifact versions and checksums used by install.sh and lint.
 package versions
 
+import "fmt"
+
 const (
 	PostgresMajor = 18
 	CosignVersion = "3.1.3"
@@ -28,4 +30,70 @@ var CosignTargets = []string{
 	"linux-arm64",
 	"darwin-amd64",
 	"darwin-arm64",
+}
+
+// Exporter pins (Phase 4). The upstream release binaries are the same on
+// Debian 13 and Ubuntu 26.04, unlike the distribution packages, and their
+// sha256 lives here, inside the signed eru binary. Re-check them before each
+// phase, as for pgBackRest.
+const (
+	NodeExporterVersion      = "1.12.1"
+	PostgresExporterVersion  = "0.20.1"
+	PgbouncerExporterVersion = "0.12.1"
+)
+
+// Exporter names, as the upstream projects call their binaries.
+const (
+	NodeExporter      = "node_exporter"
+	PostgresExporter  = "postgres_exporter"
+	PgbouncerExporter = "pgbouncer_exporter"
+)
+
+// Exporters lists the pinned exporters in install order.
+var Exporters = []string{NodeExporter, PostgresExporter, PgbouncerExporter}
+
+// ExporterArches are the server architectures eru installs exporters for.
+var ExporterArches = []string{"amd64", "arm64"}
+
+// ExporterVersion is the pinned version of an exporter, "" for an unknown
+// name.
+func ExporterVersion(name string) string {
+	switch name {
+	case NodeExporter:
+		return NodeExporterVersion
+	case PostgresExporter:
+		return PostgresExporterVersion
+	case PgbouncerExporter:
+		return PgbouncerExporterVersion
+	}
+	return ""
+}
+
+// ExporterSHA256 is keyed "<name>-<arch>": the sha256 of the release
+// tarball, from each release's sha256sums.txt.
+var ExporterSHA256 = map[string]string{
+	"node_exporter-amd64":      "b51d8a76aa2a9156a55d501aca6276fae09e262259a5e4e831d2c2222f084e63",
+	"node_exporter-arm64":      "ad35b605f9954b9f1ffddf5ba054bdc5a98d790b9eae5291e1eeb83f1ecbd0e7",
+	"postgres_exporter-amd64":  "89d4f7e7920cad48fdc3133f789556ef5253c330a9f5fdace3bdb6344c0a8b5a",
+	"postgres_exporter-arm64":  "d5d86fb98bb1f26b088d1a6fda07fd6b6f035cb5d40492f75ec3bfebb5ddfe9d",
+	"pgbouncer_exporter-amd64": "fa391b513d3a3f03843a6e0d64e711fda1f057dc43133db5c1b130ba38767857",
+	"pgbouncer_exporter-arm64": "0abb808ae8e251126c854ebdce382993876df629b34c0401816d3818db92c700",
+}
+
+// CheckExporterPins reports a pinned exporter without a version or without a
+// sha256 for one of ExporterArches. just lint runs it through eru commands
+// --check-steps.
+func CheckExporterPins() error {
+	for _, name := range Exporters {
+		if ExporterVersion(name) == "" {
+			return fmt.Errorf("exporter %s has no pinned version", name)
+		}
+		for _, arch := range ExporterArches {
+			sum := ExporterSHA256[name+"-"+arch]
+			if len(sum) != 64 {
+				return fmt.Errorf("exporter %s has no sha256 for %s", name, arch)
+			}
+		}
+	}
+	return nil
 }

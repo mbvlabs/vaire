@@ -1,9 +1,15 @@
 package steps
 
-import "github.com/mbvlabs/eru/internal/engine"
+import (
+	"context"
+
+	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/eru/internal/engine"
+)
 
 // Catalog returns the steps in run order (§11, D1). Phase 2 has steps 1-13,
-// Phase 3 adds 14 (pgbackrest-v1) and 17 (timers-v1); later phases add theirs.
+// Phase 3 adds 14 (pgbackrest-v1) and 17 (timers-v1), Phase 4 adds 16
+// (metrics-v1); step 18, doctor, is a gate after apply, not a step.
 func Catalog() []engine.Step {
 	return []engine.Step{
 		basePackages{},
@@ -20,6 +26,7 @@ func Catalog() []engine.Step {
 		postgresRoles{},
 		pgbouncer{},
 		pgbackrestStep{},
+		metricsStep{},
 		timersStep{},
 	}
 }
@@ -50,6 +57,7 @@ func DatabaseStepIDs() []string {
 		postgresRolesID,
 		pgbouncerID,
 		pgbackrestID,
+		metricsID,
 		timersID,
 	}
 }
@@ -85,6 +93,38 @@ func KernelStepIDs() []string { return []string{kernelTuningID} }
 
 // TuneStepIDs are the steps tune.apply runs.
 func TuneStepIDs() []string { return []string{kernelTuningID, postgresConfigID} }
+
+// Doctor's drift checks run these steps' Check (Phase 4).
+const (
+	SSHDStepID     = sshdHardeningID
+	FirewallStepID = firewallID
+)
+
+// CheckStep runs the Check of the catalogue step (or instance) id without
+// applying anything, for doctor's drift checks. detail is empty when the
+// host matches.
+func CheckStep(ctx context.Context, cfg config.Cluster, rt engine.Runtime, id string) (string, error) {
+	for _, step := range engine.Expand(Catalog(), cfg) {
+		if step.ID() != id {
+			continue
+		}
+		res, err := step.Check(ctx, cfg, rt)
+		if err != nil {
+			return "", err
+		}
+		if res.Complete {
+			return "", nil
+		}
+		if res.Detail == "" {
+			return "it differs", nil
+		}
+		return res.Detail, nil
+	}
+	return "", nil
+}
+
+// ServiceActive reports whether a systemd unit is active.
+func ServiceActive(ctx context.Context, unit string) bool { return serviceActive(ctx, unit) }
 
 // ConfigStepID is cluster's postgres-config-v1 instance. db create, db fork
 // and db drop run it for the other databases whose share of the server

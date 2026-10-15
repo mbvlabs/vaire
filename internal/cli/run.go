@@ -7,6 +7,7 @@ import (
 	"github.com/mbvlabs/eru/internal/buildinfo"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/guide"
+	"github.com/mbvlabs/eru/internal/maint"
 	"github.com/spf13/cobra"
 )
 
@@ -56,6 +57,11 @@ func notImplemented(cmd *cobra.Command, _ []string) error {
 }
 
 func runVersion(cmd *cobra.Command, _ []string) error {
+	if f := cmd.Flags().Lookup("licenses"); f != nil && f.Value.String() == "true" {
+		notice := "eru embeds the table and btree bloat estimation queries of\n" +
+			"https://github.com/ioguix/pgsql-bloat-estimation under this licence:\n\n" + maint.License()
+		return output.OK(cmd, map[string]string{"ioguix/pgsql-bloat-estimation": maint.License()}, notice)
+	}
 	info := map[string]string{
 		"version":          buildinfo.Version,
 		"commit":           buildinfo.Commit,

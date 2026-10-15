@@ -98,6 +98,9 @@ func contextDocument(c *contexts.Context) (secretsdoc.Document, error) {
 			secrets.Add(v)
 		}
 	}
+	if creds.Metrics != nil {
+		secrets.Add(creds.Metrics.Password)
+	}
 	return doc, nil
 }
 
@@ -140,6 +143,9 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 		}
 	}
 	doc.BreakGlass = secretsdoc.BreakGlass(c.Server, c.Operator.SSHUser, master)
+	if n, ok := c.Master(); ok {
+		doc.Metrics = metricsDocument(creds.Metrics, n.Hostname, "")
+	}
 	return doc, nil
 }
 

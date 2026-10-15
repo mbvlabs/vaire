@@ -1,0 +1,26 @@
+# managed by eru - do not edit; use cluster.toml
+[Unit]
+Description={{ .Description }}
+After=network-online.target{{ range .After }} {{ . }}{{ end }}
+Wants=network-online.target
+[Service]
+User={{ .User }}
+Group={{ .User }}
+Slice={{ .Slice }}
+{{- if .EnvironmentFile }}
+EnvironmentFile={{ .EnvironmentFile }}
+{{- end }}
+ExecStart={{ .Binary }}{{ range .Args }} {{ . }}{{ end }}
+Restart=on-failure
+RestartSec=5s
+MemoryMax={{ .MemoryMax }}
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+[Install]
+WantedBy=multi-user.target

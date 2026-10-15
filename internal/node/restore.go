@@ -1339,6 +1339,9 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the poolers were not reloaded, so " + p.Name + " is not reachable through them until eru apply: " + err.Error()})
 	}
+	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name); w != nil {
+		warnings = append(warnings, *w)
+	}
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	if w := firstBackup(ctx, cfg, rt, env.Report, p.Name); w != nil {

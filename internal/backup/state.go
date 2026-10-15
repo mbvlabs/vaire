@@ -39,6 +39,12 @@ type Records struct {
 	LastBackup map[string]map[string]BackupResult `json:"last_backups,omitempty"`
 	// LastVerify is the last verify run of each database's stanza.
 	LastVerify map[string]VerifyResult `json:"last_verifies,omitempty"`
+	// LastFailure is when each database's last backup of a type failed,
+	// cleared by the next success of that type (Phase 4).
+	LastFailure map[string]map[string]string `json:"last_backup_failures,omitempty"`
+	// Repo is each database's stanza facts from its last backup, verify or
+	// expiry (Phase 4).
+	Repo map[string]RepoFacts `json:"repo,omitempty"`
 	// LastDump is the last dump per database.
 	LastDump map[string]Dump `json:"last_dump,omitempty"`
 	// DroppedStanzas are the stanzas of dropped databases. db drop keeps a
@@ -248,6 +254,53 @@ type BackupResult struct {
 	Label      string `json:"label"`
 	FinishedAt string `json:"finished_at"`
 	Size       int64  `json:"size"`
+	// RepoSize is what the set takes in the repository (its delta for
+	// bundled sets), Delta what changed since its prior, and
+	// DurationSeconds the time from its start to its stop (Phase 4).
+	RepoSize        int64 `json:"repo_size,omitempty"`
+	Delta           int64 `json:"delta,omitempty"`
+	DurationSeconds int64 `json:"duration_seconds,omitempty"`
+}
+
+// RepoFacts is what pgbackrest info said about a database's stanza after
+// its last backup, verify or expiry (Phase 4): the facts
+// pgbackrest_exporter would otherwise poll the bucket for.
+type RepoFacts struct {
+	Stanza string `json:"stanza"`
+	// WindowStart is the start of the oldest complete set: the earliest
+	// point a restore can reach.
+	WindowStart string `json:"window_start,omitempty"`
+	Sets        int    `json:"sets"`
+	// RepoSize is the sum of every set's repository size.
+	RepoSize int64  `json:"repo_size"`
+	At       string `json:"at"`
+}
+
+// FactsFrom summarises info as RepoFacts at time at.
+func FactsFrom(info Info, at string) RepoFacts {
+	out := RepoFacts{Stanza: info.Stanza, At: at}
+	for _, s := range info.Sets {
+		if s.Error {
+			continue
+		}
+		out.Sets++
+		out.RepoSize += s.RepoSize
+		if s.Type == TypeFull && s.Start != "" && (out.WindowStart == "" || s.Start < out.WindowStart) {
+			out.WindowStart = s.Start
+		}
+	}
+	return out
+}
+
+// setDuration is the seconds between a set's start and stop, 0 when either
+// doesn't parse.
+func setDuration(set Set) int64 {
+	start, err1 := time.Parse(time.RFC3339, set.Start)
+	stop, err2 := time.Parse(time.RFC3339, set.Stop)
+	if err1 != nil || err2 != nil || stop.Before(start) {
+		return 0
+	}
+	return int64(stop.Sub(start).Seconds())
 }
 
 // LoadRecords reads records.json. A missing file is empty records; a file
@@ -382,7 +435,43 @@ func (s *Records) RecordBackup(db string, set Set, finishedAt string) {
 	if s.LastBackup[db] == nil {
 		s.LastBackup[db] = map[string]BackupResult{}
 	}
-	s.LastBackup[db][set.Type] = BackupResult{Label: set.Label, FinishedAt: finishedAt, Size: set.Size}
+	s.LastBackup[db][set.Type] = BackupResult{
+		Label: set.Label, FinishedAt: finishedAt, Size: set.Size,
+		RepoSize: set.RepoSize, Delta: set.Delta, DurationSeconds: setDuration(set),
+	}
+	if f := s.LastFailure[db]; f != nil {
+		delete(f, set.Type)
+	}
+}
+
+// LastDrill is db's newest drill result.
+func (s Records) LastDrill(db string) (Drill, bool) {
+	for i := len(s.Drills) - 1; i >= 0; i-- {
+		if s.Drills[i].Database == db {
+			return s.Drills[i], true
+		}
+	}
+	return Drill{}, false
+}
+
+// RecordBackupFailure stores when db's last backup of kind failed. A later
+// success of that type clears it.
+func (s *Records) RecordBackupFailure(db, kind, at string) {
+	if s.LastFailure == nil {
+		s.LastFailure = map[string]map[string]string{}
+	}
+	if s.LastFailure[db] == nil {
+		s.LastFailure[db] = map[string]string{}
+	}
+	s.LastFailure[db][kind] = at
+}
+
+// RecordRepo stores db's stanza facts.
+func (s *Records) RecordRepo(db string, facts RepoFacts) {
+	if s.Repo == nil {
+		s.Repo = map[string]RepoFacts{}
+	}
+	s.Repo[db] = facts
 }
 
 // Dropped returns the dropped stanza of db, if any. A name dropped twice has

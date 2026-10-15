@@ -149,12 +149,13 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru context list\|show\|use <n>\|remove <n>` | | (use/remove ✓) | remove | | | `<name>` |
 | `eru server init` | §8.1 | ✓ | | ✓ | ✓ | `<server>` when `--no-input` |
 | `eru plan` | `--db` | | | | | |
-| `eru apply` | `--step <id>…` (`<step>` or `<step>@<db>`), `--db`, `--confirm` (repeatable) | ✓ | | ✓ | ✓ | `<db>/restart` per database that needs a restart; `<server>/restart` for all of them, one at a time |
+| `eru apply` | `--step <id>…` (`<step>` or `<step>@<db>`), `--db`, `--confirm` (repeatable), `--skip-doctor` | ✓ | | ✓ | ✓ | `<db>/restart` per database that needs a restart; `<server>/restart` for all of them, one at a time |
 | `eru config show\|get <key>\|set <key> <value>\|edit\|validate` | `set`, `edit`: `--apply` | set/edit ✓ | | ✓ | edit | |
-| `eru status` | `--watch` | | | | | |
-| `eru doctor` | `--only security\|backups\|host\|postgres\|tls` | | | | | |
-| `eru top` | | | | | | |
-| `eru queries` | `--limit`, `--order total\|mean\|calls`, `--reset` (D) | reset | reset | | | `<server>/stats` |
+| `eru status` | `--watch`, `--db` | | | | | |
+| `eru doctor` | `--only security\|backups\|host\|postgres\|tls\|metrics`, `--db` | | | | | |
+| `eru top` | `--db`, `--once` | | | | | |
+| `eru queries` | `--db`, `--limit`, `--order total\|mean\|calls`, `--reset` (D) | reset | reset | | | `<db>/stats`, `<server>/stats` without `--db` |
+| `eru metrics show\|rotate` | `show`: `--reveal` | rotate | rotate | ✓ | | `<server>/metrics` |
 | `eru logs [unit]` | `--db`, `--since`, `--follow`, `--lines` | | | | | |
 | `eru sql <query>` | `--db`, `--file`, `--write` | `--write` | | | | |
 | `eru psql` | `--db`, `--write`, `-- <psql args>` | | | | | |
@@ -181,7 +182,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru vps restore` (removed in Phase 5) | `--snapshot`, `--path…`, `--to <dir>`, `--in-place` | ✓ | ✓ (in-place) | ✓ | | `<server>/vps-restore` |
 | `eru maint vacuum\|analyze\|reindex\|repack` | §16 | ✓ | | ✓ | | repack: `<db>` |
 | `eru maint report <kind>` | §16 | | | | | |
-| `eru maint kill` | `--idle-in-tx`, `--pid`, `--older-than` | ✓ | ✓ | ✓ | | `<server>/kill` |
+| `eru maint kill` | `--db` (required), `--idle-in-tx`, `--pid`, `--older-than` | ✓ | ✓ | ✓ | | `<db>/kill` |
 | `eru secrets export` | `--out`, `--reveal-passphrase` | ✓ | | | ✓ | |
 | `eru wg export` | `--out`, `--install` | `--install` | | ✓ | ✓ | |
 | `eru upgrade` | `--version`, `--channel`, `--skip-nodes` | ✓ | | ✓ | ✓ | |
@@ -269,7 +270,7 @@ The last line is always `type: result`. `type` ∈ `step|log|progress|warning|pr
 | `context_not_found`, `cluster_not_initialized` | 2 |
 | `missing_tool` | 3 |
 | `unsafe_action_requires_confirmation` | 4 |
-| `step_failed`, `partial_failure` | 5 |
+| `step_failed`, `partial_failure`, `doctor_failed` | 5 |
 | `external_command_failed` | 6 |
 | `config_error`, `validation_failed` | 7 |
 | `ambiguous_input`, `input_required` | 8 |
@@ -489,7 +490,9 @@ Explicit values win: `size = "small"` with `memory = "768MiB"` is a small with m
 | `/etc/eru/node.toml` | root 0640 | `server`, `node_name`, `hostname` (`<node>.<domain>`, rewritten whenever `cluster.toml` is saved), `role = "master"`, `installed_at`. Marks a host as an eru node |
 | `/etc/eru/cluster.toml` | root 0640 | Desired state |
 | `/etc/eru/operators.toml` | root 0640 | Operator registry: `name`, `wg_address`, `wg_public_key`, `ssh_public_key` per operator. Steps 2 and 3 render `authorized_keys` and the wg0 peers from it |
-| `/etc/eru/runtime/` | root 0700 | `pgbouncer_auth.pass` and `monitor.pass` (0600, written only from operator-supplied secrets), `backup.env` (0600: S3 keys and the dump age recipient, §13.3), `metrics.htpasswd` (bcrypt) |
+| `/etc/eru/runtime/` | root 0700 | `pgbouncer_auth.pass` and `monitor.pass` (0600, written only from operator-supplied secrets), `backup.env` (0600: S3 keys and the dump age recipient, §13.3), `pgbouncer_exporter{,-session}.env` (0600). The `/metrics` bcrypt hash is `/etc/nginx/eru-metrics.htpasswd` (`root:www-data 0640`), since nginx's workers read it |
+| `/var/lib/eru/doctor.json`, `/var/lib/eru/maint.json` | root 0600 | The last doctor results and maintenance numbers (Phase 4); regenerable, not in the master backup |
+| `/usr/local/lib/eru/exporters/` | root 0755 | Pinned exporter binaries, one directory per version (Phase 4) |
 | `/etc/pgbackrest/pgbackrest.conf` | postgres 0600 | §13.1; one repository, a section per stanza; holds the S3 keys and the repository cipher |
 | `/etc/postgresql/18/<db>/` | postgres | The database's cluster configuration (`postgresql.conf` from `pg_createcluster`, `conf.d/`, `pg_hba.conf`, `pg_ident.conf`, `start.conf`) |
 | `<data_root>/<db>/` | postgres 0700 | The database's data directory; also `<db>__restoring`, `<db>__pre_restore_<ts>` and `<db>__drill` for temporary clusters and restore leftovers |
@@ -855,9 +858,9 @@ Order is fixed. IDs end in `-v1`. Every step stays `-v1` until the first release
 | 13 | `pgbouncer-v1` | Skipped (`no_databases`) without `[[clusters]]`. Render both poolers (§14.3) from one template: `/etc/pgbouncer/pgbouncer.ini` + `pgbouncer_hba.conf` (transaction, 6432) and `/etc/pgbouncer/session.ini` + `session_hba.conf` (session, 5432), the `eru-pgbouncer-session.service` unit, and the shared `userlist.txt` (verifiers read back from `pg_authid` for `pgbouncer_auth` and `eru_monitor`), `postgres:postgres 0640`, overwriting Debian's files. `pgbouncer.sh` enables both and reloads a running one or starts it: adding or removing a database is a reload | Rendered = on disk (owner and mode included), and `SHOW VERSION` as `eru_monitor` works on both admin consoles (via a 0600 `PGPASSFILE`) |
 | 14 | `pgbackrest-v1` | Skipped (`backups_not_configured`, no journal entry) without `[backup]`. Otherwise `install -d` `/etc/pgbackrest`, `/var/spool/pgbackrest`, `/var/log/pgbackrest` (and `/var/lib/pgbackrest` with `local_repo`), write `backup.env` and `/etc/pgbackrest/pgbackrest.conf` (§13.1, §13.3: a section per stanza). With no clusters yet it stops there, so `server init` and `backup setup` on an empty server leave the bucket keys and cipher pass on the node for the first `db create`. Then, for each cluster without a full backup (one `pgbackrest info` over every stanza decides): `stanza-create`, `check` and a full backup (`--stanza`, `--pg1-port`; streams progress). Clusters that already have a full are skipped unless the request rotates the keys, so `db create` only touches the new stanza. The repository, not the journal, is the source of truth for the first full | Conf on disk equals the render, `backup.env` exists, `info` lists a full backup in every stanza (no `info` without clusters) |
 | 15 | (Phase 5) the master bundle | Replaces the restic VPS backup step; designed in the RFC. Not a step: a `eru-master-backup.service` job started after every change and by a daily timer | — |
-| 16 | `metrics-v1` | Install pinned `node_exporter` (copy deploycrate script; textfile collector dir `/var/lib/node_exporter/textfile`), `postgres_exporter`, `pgbouncer_exporter`, `pgbackrest_exporter` as systemd services bound to 127.0.0.1 (§15.1). It adds the `/metrics` locations to the 127.0.0.1:8443 server in `nginx.conf` | All exporters return 200 locally |
+| 16 | `metrics-v1` | Phase 4. Create the exporters' system users, fetch the pinned binaries (sha256-checked), write the units, `eru-exporters.slice`, the htpasswd (only when missing), `/etc/nginx/eru-metrics.conf`, `targets.json` and the fail2ban jail, `nginx -t` (the previous include comes back on failure), then start the exporters and reload nginx and fail2ban (§15.1, §15.2). The pgbouncer_exporters run only while there are databases. With `[metrics] enabled = false` it stops the exporters and removes the include. `db create`, `db fork` and `db drop` run it (`metrics_reload_failed` on failure) | Binaries at the pinned version, files on disk, units active, node_exporter answers 200 |
 | 17 | `timers-v1` | Pulled forward from Phase 4. Render `eru-certs.timer`; with backups on, the template services and a timer per database and job (§18), and `eru-stanza-expiry.service`/`.timer`. Disable and remove `eru-*.timer` (and the services it owns) not in the render, `daemon-reload`, `enable --now` the timers. A dropped database's timers go as stale units | Files match, every timer enabled, no stale units |
-| 18 | `finalize-v1` | Run doctor (§21). Fail the step if any check is `fail`. Write metrics textfile | Never complete (always runs; cheap) |
+| 18 | (doctor gate) | Not a catalogue step, so a second `apply` still skips everything: a full `apply` runs doctor (§21) after the steps and returns `data.doctor` (failing checks are `doctor_check_failed` warnings); `server init`'s database phase fails with `doctor_failed`. `--skip-doctor` skips it | — |
 
 `cluster.bootstrap phase=host` runs steps 1–6 (`steps.HostStepIDs()`). `phase=database` runs the database steps (`steps.DatabaseStepIDs()`), and `apply` runs everything, with each template expanded into one instance per `[[clusters]]` entry. Each phase appends its own steps: Phase 2 has 1–13, Phase 3 adds 14 and 17 (both in `DatabaseStepIDs()`, after `pgbouncer-v1`), and Phase 4 adds 16 and 18 (step numbers are run order, not phase order). `eru backup setup` runs `steps.BackupStepIDs()`: `postgres-config-v1` (every instance: `archive_command` changes with a reload), `pgbackrest-v1`, `timers-v1`. It doesn't install packages; before writing `[backup]` it plans `postgres-packages-v1` and refuses with `precondition_failed` (`reason: node_outdated`, hint `eru apply`) if it would still run. The database commands run subsets: `db create` runs `kernel-tuning-v1`, the new database's instances, `pgbouncer-v1`, and with backups `pgbackrest-v1` and `timers-v1`; `db drop` runs `pgbouncer-v1` and `timers-v1` after the cluster is gone; `db resize` runs `kernel-tuning-v1` and the database's instances.
 
@@ -924,7 +927,7 @@ Let `R` = the cluster's memory in MiB, `C = CPUShare(VCPU, Clusters)` = `min(VCP
 | `shared_buffers` | `R < 2048 ? max(128, R*0.20) : min(R*0.25, 65536)` MiB |
 | `effective_cache_size` | `R * (P==analytics ? 0.75 : 0.70)` MiB |
 | `max_connections` | From the size (20 / 30 / 50 / 100 / 200); `clamp(4*C, 50, 400)` only without one. Both pools plus 3 must fit (§6.1) |
-| `superuser_reserved_connections` / `reserved_connections` | 3 / 3 (`eru_admin` gets `pg_use_reserved_connections`) |
+| `superuser_reserved_connections` / `reserved_connections` | 0 / 3, the 3 slots both pools leave free (`eru_admin` and, from Phase 4, `eru_monitor` get `pg_use_reserved_connections`; superusers may use them too) |
 | `work_mem` | `(R - shared_buffers) / (max_connections * f)` with `f = {oltp:3, mixed:2, analytics:1}`, clamped to `[4, P==analytics ? 1024 : 256]` MiB |
 | `hash_mem_multiplier` | 2.0 |
 | `maintenance_work_mem` | `clamp(R/16, 64, 2048)` MiB |
@@ -1345,7 +1348,7 @@ log_disconnections = 1
 - The `*` wildcard is gone: a database that doesn't exist is refused by the pooler. Each `<db>__auth` alias points `auth_query` at that database's cluster (`auth_dbname`). The global `auth_dbname` names the first database's alias only for the admin console's `eru_admin`, which has no entry of its own; service passwords are the same in every cluster, so any alias works. **To verify on the VPS:** per-entry `auth_dbname` pointing at another alias; the fallback is the `eru` schema and functions in each application database.
 - A ready restore adds `<db>__restoring` (with `dbname=<db>`) and its alias to the session pooler only (§13.5).
 - Adding or removing a database reloads both (`pgbouncer.sh`), never restarts them. Dropping the last database disables both (§13.8).
-- `pool_size + session_pool_size + 3 ≤ max_connections` per cluster (`pool_size = 0` means the rest). Tuning also sets `superuser_reserved_connections = 3` and `reserved_connections = 3`, so ordinary roles get `max_connections − 6`: with both pools full, the last three connections hit "remaining connection slots are reserved". Open: raise the reserve to 6 or drop `reserved_connections`.
+- `pool_size + session_pool_size + 3 ≤ max_connections` per cluster (`pool_size = 0` means the rest; a `nano` transaction pool is 7). The 3 (`config.ReservedConnections`) are tuning's `reserved_connections = 3` (`superuser_reserved_connections = 0`), so both pools full leave exactly those, shared by `eru_admin`, `eru_monitor` (the exporter, `CONNECTION LIMIT 2`: postgres_exporter's `/probe` holds two connections at once) and superusers.
 - `userlist.txt` holds only `pgbouncer_auth` and `eru_monitor`, each with its SCRAM verifier read back from `pg_authid`; both poolers share it.
 - nginx on 443 is unchanged: ALPN `postgresql` → TLS terminated → transaction pooler → by database name.
 - What the session pooler costs: one more process, one more hop for migrations, and `pg_stat_activity.client_addr` shows the pooler (`application_name_add_host` puts the client back in `application_name`). Session pooling is transparent for advisory locks, `SET`, temp tables, `LISTEN` and prepared statements.
@@ -1356,12 +1359,12 @@ log_disconnections = 1
 
 | Exporter | Listen | Runs as | DB access |
 | --- | --- | --- | --- |
-| node_exporter | 127.0.0.1:9100 | `node_exporter` | `--collector.textfile.directory=/var/lib/node_exporter/textfile` |
-| postgres_exporter | 127.0.0.1:9187 | `postgres_exporter` (system user) | Multi-target: one target per cluster, `postgresql:///postgres?host=/var/run/postgresql&port=<cluster port>&user=eru_monitor` (peer via ident map) |
-| pgbouncer_exporter | 127.0.0.1:9127 | `pgbouncer_exporter` | `postgres://eru_monitor:<pw>@/pgbouncer?host=/var/run/postgresql&port=6432` (and the session pooler's console in `/run/eru-pgbouncer-session` on 5432). `eru_monitor` is in PgBouncer `stats_users` and authenticates against `userlist.txt` (it's excluded from `auth_query`). Its password lives in `/etc/eru/runtime/monitor.pass` and is passed via an `EnvironmentFile` |
-| pgbackrest_exporter | 127.0.0.1:9854 | `postgres` (needs repo config) | `--backrest.config=/etc/pgbackrest/pgbackrest.conf`, every stanza, collection interval 600 s |
+| node_exporter | 127.0.0.1:9100 | `node_exporter` | `--collector.textfile.directory=/var/lib/node_exporter/textfile`, `--collector.systemd` for the postgresql@, pgbouncer, eru-*, nginx and wg-quick units |
+| postgres_exporter | 127.0.0.1:9187 | `postgres_exporter` (system user) | Multi-target, no `DATA_SOURCE_NAME`, no config file: nginx probes one target per cluster, `host=/var/run/postgresql port=<port> dbname=<db> user=eru_monitor sslmode=disable connect_timeout=5` (peer via the ident map, so it holds no password). Collectors on top of the defaults: `stat_statements` (limit 50, no query text), `stat_checkpointer`, `database_wraparound`, `long_running_transactions` |
+| pgbouncer_exporter | 127.0.0.1:9127 | `pgbouncer_exporter` | `PGBOUNCER_EXPORTER_CONNECTION_STRING=postgres://eru_monitor:<pw>@/pgbouncer?host=/var/run/postgresql&port=6432` from `/etc/eru/runtime/pgbouncer_exporter.env` (root 0600; systemd reads it). `eru_monitor` is in PgBouncer `stats_users` and authenticates against `userlist.txt` |
+| pgbouncer_exporter-session | 127.0.0.1:9128 | `pgbouncer_exporter` | The session pooler's console in `/run/eru-pgbouncer-session` on 5432, from `pgbouncer_exporter-session.env` |
 
-Each exporter is a downloaded pinned binary with a sha256 per arch, following the `node-exporter.sh` pattern. Unit hardening: `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `ReadOnlyPaths=/`.
+No `pgbackrest_exporter`: it would hold the S3 keys and the cipher in a long-running process and poll the bucket; `eru.prom` carries the backup facts instead (§15.4). Each exporter is a pinned upstream release binary (`internal/versions`), downloaded by `metrics-v1` and checked against its sha256 before extraction (`release_verification_failed` on a mismatch), at `/usr/local/lib/eru/exporters/<name>-<version>/<name>`. The units run in `eru-exporters.slice` (`CPUWeight=20`, `MemoryMax=256M`; per unit 64M, 128M and 32M) with `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes` and more. `postgres-roles-v1` gives `eru_monitor` `pg_use_reserved_connections` (shared with `eru_admin`), `CONNECTION LIMIT 2` (a `/probe` holds two connections: the legacy exporter's and the probe collectors'), `statement_timeout = 10s` and `lock_timeout = 1s`, so a probe still connects with both pools full (see the pooler section for the arithmetic).
 
 ### 15.2 nginx
 
@@ -1372,7 +1375,9 @@ eru renders the whole `/etc/nginx/nginx.conf` (`internal/render/templates/nginx.
     - ALPN `postgresql` (PostgreSQL 17+ clients with `sslnegotiation=direct`) from an allowed address goes to `127.0.0.1:6433`, a `stream` server that terminates TLS with `/etc/eru/tls/server.{crt,key}` (`ssl_alpn postgresql`) and forwards the plain protocol to the transaction pooler on `127.0.0.1:6432`, which routes by database name.
     - Allowed addresses come from a `geo` block: the WireGuard subnet always, plus `client_allowlist` when `expose_pgbouncer = true`, so 443 follows the same rule as 6432. Other PostgreSQL clients go to `127.0.0.1:6434`, a `stream` server with `ssl_reject_handshake on` (nginx 1.25.5+), which fails the handshake with a fatal `unrecognized_name` alert: libpq reports `SSL error: tlsv1 unrecognized name`, pgx `remote error: tls: unrecognized name`.
     - A connection whose first bytes aren't a TLS ClientHello (`$ssl_preread_protocol` empty), in practice a PostgreSQL SSLRequest from a client without `sslnegotiation=direct`, goes to `127.0.0.1:6435`, which answers `N` ("no TLS here") and closes. With `sslmode=require` or stricter libpq reports `server does not support SSL, but SSL was required`, pgx `server refused TLS connection`. nginx `stream` can't complete the SSLRequest exchange and then terminate TLS, so these clients need `sslnegotiation=direct` or port 6432.
-    - Everything else (HTTP/1.1, h2, no ALPN) goes to the `http` server on `127.0.0.1:8443`, which terminates TLS and answers 404. Phase 4 adds the authenticated `/metrics` locations there (`auth_basic` with a bcrypt `auth_basic_user_file`; each location proxies to the exporter's `/metrics`).
+    - Everything else (HTTP/1.1, h2, no ALPN) goes to the `http` server on `127.0.0.1:8443`, which terminates TLS, serves the authenticated `/metrics` endpoint and answers 404 otherwise.
+    - The 443 server sends the PROXY protocol header to every internal upstream (8443, 6433, 6434, 6435 all `listen … proxy_protocol`), and 8443 takes the client's address from it (`set_real_ip_from 127.0.0.1; real_ip_header proxy_protocol`), so the metrics allowlist, `limit_req` and fail2ban see the real client. PgBouncer still sees 127.0.0.1 from 6433.
+- **`/metrics`** (Phase 4, `metrics-v1` owns `/etc/nginx/eru-metrics.conf`, included in 8443 by the glob `eru-metrics*.conf`): an exact location per path under `[metrics] path_prefix`: `/node`, `/postgres/<db>` (proxied to postgres_exporter's `/probe` with the target set by `set $args`, so the client's query string can't choose a DSN), `/pgbouncer`, `/pgbouncer-session` and `/targets.json` (the `http_sd` list, `/etc/nginx/eru-metrics-targets.json`, with `__metrics_path__`, `__scheme__` and `eru_server`, `eru_node`, `eru_component`, `db`/`pooler` labels). Each has `auth_basic` with `/etc/nginx/eru-metrics.htpasswd` (`root:www-data 0640`; nginx's workers read it per request, so it can't live in `/etc/eru/runtime`), `limit_req` (10 r/s, burst 40) and the optional `[metrics] allowlist` (a set allowlist also admits 127.0.0.1 and ::1, so doctor's unauthenticated probe through 443 gets its 401; only the node itself can arrive as loopback, since the 443 hop writes the PROXY header from the real peer). fail2ban's `nginx-http-auth` jail (`/etc/fail2ban/jail.d/eru-metrics.conf`) bans repeated bad passwords. The operator generates the password and sends only its bcrypt hash (cost 8) as the request secret `metrics.htpasswd`; the node writes it when the file is missing, and `eru metrics rotate --confirm <server>/metrics` replaces it.
 - The transaction pooler uses `auth_type = hba` with `/etc/pgbouncer/pgbouncer_hba.conf`: `local` and `hostssl` from anywhere use `scram-sha-256`; `hostnossl` is allowed only from `127.0.0.1/32` (the nginx hop); any other non-TLS connection is rejected. `client_tls_sslmode = prefer`, so the hba file, not the TLS mode, enforces TLS. SCRAM channel binding isn't available through 443, because PgBouncer sees a plain connection there; `channel_binding=require` clients must use 6432. `server_name` is the node's hostname.
 
 ### 15.3 Certificates (`eru node run certs-renew`)
@@ -1389,24 +1394,24 @@ eru issues and renews the certificate itself with `golang.org/x/crypto/acme`. No
 ### 15.4 eru textfile metrics (`eru.prom`)
 
 ```
-eru_info{version,cluster,node} 1
+eru_info{version,server,node} 1
 eru_backup_last_success_timestamp_seconds{db,type="full|diff|incr"}
 eru_backup_verify_last_success_timestamp_seconds{db}
 eru_restore_drill_last_run_timestamp_seconds{db}
 eru_restore_drill_last_result{db,result="pass|fail|skipped"} 1
 eru_tls_cert_expiry_timestamp_seconds
-eru_doctor_check{check,status} 1
+eru_doctor_check{check,db,status} 1
 eru_restore_in_progress 0|1
 eru_job_last_skipped_timestamp_seconds{job,db}
 ```
 
-From Phase 3, `internal/backup/metrics.go` rewrites the file from `records.json` after every backup, verify, drill, dump and restore change (node_exporter scrapes it from Phase 4). `db drop` removes the database's last backup and verify results, so its lines stop. The TLS and doctor lines arrive with their phases; the VPS backup line is gone with restic.
+From Phase 4 the textfiles are split by owner (`internal/promfile`, `/var/lib/node_exporter/textfile`), so no writer needs another's data: `eru.prom` (above; `eru_info` labels `server`, not `cluster`; plus `eru_backup_last_size_bytes`, `eru_backup_last_repo_size_bytes`, `eru_backup_last_duration_seconds`, `eru_backup_last_failure_timestamp_seconds{db,type}`, `eru_backup_window_start_timestamp_seconds{db}`, `eru_backup_sets{db}`, `eru_backup_repo_size_bytes{db}`, from one `pgbackrest info --stanza` at the end of each backup and verify, in place of `pgbackrest_exporter`), `eru-host.prom` (`metrics-refresh`, every minute: per database `eru_cluster_memory_current_bytes`, `eru_cluster_memory_high_bytes`, `eru_cluster_memory_max_bytes`, `eru_cluster_memory_events_total{event}`, `eru_cluster_pressure_seconds_total{resource,kind}`, `eru_cluster_cpu_seconds_total`, `eru_cluster_io_bytes_total{direction}`, `eru_cluster_running`, `eru_cluster_restart_pending`; `eru_memory_budget_bytes`, `eru_memory_allocated_bytes`, `eru_memory_reserve_bytes`, `eru_commit_limit_bytes`, `eru_committed_bytes`, `eru_tls_cert_expiry_timestamp_seconds`, `eru_deferred_restart_requested_timestamp_seconds{db}`), `eru-doctor.prom` (`eru_doctor_check{check,db,status}`, `eru_doctor_last_run_timestamp_seconds`, `eru_doctor_failing_checks`) and `eru-maint.prom` (`eru_wraparound_age{db}`, `eru_mxid_age{db}`, `eru_bloat_estimated_bytes{db,kind}`, `eru_maint_analyzed_tables{db}`, `eru_maint_last_run_timestamp_seconds{job}`). `records.json` gains `last_backup_failures` and `repo`; `db drop` removes the database's results, so its lines stop.
 
 ---
 
 ## 16. Maintenance (`internal/maint`)
 
-Every maintenance session sets `SET lock_timeout = '5s'; SET statement_timeout = 0;` (vacuum and reindex can be long). Commands run per database's cluster as `eru_admin` (`pg_maintain`) through the session pooler, or via the cluster's socket in timers.
+Every maintenance session sets `SET lock_timeout = '5s'; SET statement_timeout = 0;` (vacuum and reindex can be long); reports run read-only with `statement_timeout = '60s'`. Everything runs on the node over the database's socket as `eru_admin` (psql as root, which `pg_ident` maps to `eru_admin` only): `pg_maintain` covers vacuum, analyze and reindex, `pg_monitor` the reports, `pg_signal_backend` kill (never a superuser's backend). RPCs: `maint.report`, `maint.run` (vacuum, analyze, reindex as the detachable job `maint`; a whole-database vacuum and every reindex take the heavy-I/O lock; repack refuses until Phase 7), `maint.kill` (token `<db>/kill`). Without `--db` the CLI runs one job per database, one after another. The bloat queries are vendored from ioguix/pgsql-bloat-estimation at 8fde3c9 (BSD-2-Clause, `internal/maint/sql`, notice in `eru version --licenses`).
 
 | Command | Flags | Implementation |
 | --- | --- | --- |
@@ -1510,9 +1515,10 @@ WantedBy=timers.target
 | maint-daily | `eru-maint-daily` | daily at window start | 10m |
 | maint-weekly | `eru-maint-weekly` | Saturday at window start | 10m |
 | certs-renew | `eru-certs` | hourly | 10m |
-| metrics-refresh | `eru-metrics-refresh` | every 5 min | 0 |
+| metrics-refresh | `eru-metrics-refresh` | every minute (`minutely`); not recorded in `jobs`, skips at once on a busy lock | 0 |
+| doctor | `eru-doctor` | hourly; not recorded in `jobs` | 10m |
 
-`timers-v1` arrives in Phase 3 and renders `eru-certs.timer` (owned by `tls-v1` until then; `tls-v1` keeps only `eru-certs.service`), the database timers (§13.4 for staggering) and the stanza expiry. Phase 4 adds only `maint-*` and `metrics-refresh`. Until their phase the remaining `node run` jobs return `not implemented yet`. A dropped database's timers are stale units and go with the next `timers-v1` run; `db create` runs it, so a new database gets its timers.
+`timers-v1` arrives in Phase 3 and renders `eru-certs.timer` (owned by `tls-v1` until then; `tls-v1` keeps only `eru-certs.service`), the database timers (§13.4 for staggering) and the stanza expiry. Phase 4 adds `maint-daily` and `maint-weekly` (at the start of `[maintenance] window`), `metrics-refresh` and `doctor`, server-wide and with or without backups. `maint-daily` reads each database's wraparound age, analyzes tables with stale statistics until the window ends, then performs the restarts `db resize --defer-restart` left in `state.json`'s `deferred_restarts` (each under its cluster's lock exclusive, through `apply --db <db>` with `<db>/restart`; a busy cluster waits for the next night). `maint-weekly` estimates bloat. Both write `/var/lib/eru/maint.json` and `eru-maint.prom`. Until its phase `vps-backup` returns `not implemented yet`. A dropped database's timers are stale units and go with the next `timers-v1` run; `db create` runs it, so a new database gets its timers.
 
 `node run <job>` takes the global lock shared with timeout 0 (`certs-renew` waits up to 20 minutes), then for database jobs the heavy-I/O lock (all but incrementals) and the database's cluster lock (§9.5). If a lock is busy it logs, exits 0, records the job as `skipped` in `state.json.jobs` and in `eru_job_last_skipped_timestamp_seconds{job,db}`. Busy isn't a failure, but repeated skips show up in doctor. Every run is recorded as a job (§13.4) with its `db`.
 
@@ -1599,7 +1605,7 @@ When the current process isn't root and an operation needs root:
 - `disk {data_free_pct}`, `tls {not_after}`;
 - per database (`--db` narrows to one): `state`, `uptime`, `size`, `memory.current` and limits, `connections {used, max, by_state}`, `cache_hit_ratio`, `tps` (delta over 1 s), `db_size`, `wal_bytes`, `backup {last_full, last_diff, last_incr, pitr_window, archive_failed_count, last_archived_age_s}`, `drill {last_result, at}`, `restart_pending`, `restore_in_progress`.
 
-**Doctor checks** (`pg.*` and `backup.*` run per database; each returns `{id, status: pass|warn|fail, detail, fix}`; `fix` is an eru command when one exists):
+**Doctor checks** (Phase 4, `internal/doctor`: the node gathers facts, every check is a pure function of them; `pg.*` and `backup.*` run per database; each returns `{id, db, status: pass|warn|fail|skip, detail, fix, category, security}`; `fix` is an eru command when one exists; `skip` is a check that does not apply). `eru doctor [--only security|backups|host|postgres|tls|metrics] [--db]` exits 5 with `doctor_failed` on any `fail`. The node writes `/var/lib/eru/doctor.json` and `eru-doctor.prom` on every full run (hourly `eru-doctor.timer`). Step 18 is not a catalogue step: a full `apply` ends with the checks (each `fail` is the warning `doctor_check_failed`) and `server init`'s database phase fails with `doctor_failed` (checks that cannot pass yet, `secrets.confirmed`, `backup.*` and `jobs.*`, are left out). `--skip-doctor` skips either.
 
 | ID | Fail / warn when |
 | --- | --- |
@@ -1628,7 +1634,14 @@ When the current process isn't root and an operation needs root:
 | `backup.verify` | warn: last verify failed or older than 14 days |
 | `backup.drill` | warn: no pass in 40 days; fail: last result fail |
 | `backup.offsite` | warn: no bucket (`no_offsite_backup`) |
-| `pg.memory_budget` | warn: `memory_overcommitted`, a cluster above `MemoryHigh` for long (PSI) |
+| `pg.memory_budget` | warn: `memory_overcommitted`, `cpu_crowded`, `disk_crowded` |
+| `pg.memory_pressure` | warn: `memory.pressure` some avg300 above 10%, or `memory.events high` rising since the last run |
+| `pg.would_not_start` | fail: a stopped cluster that `would_not_start` refuses |
+| `pg.listen_socket_only` | fail: `listen_addresses` not empty |
+| `pooler.running`, `nginx.running` | fail: a pooler or nginx inactive |
+| `jobs.skipped` / `jobs.failed` | warn: a timer job skipped three runs in a row / its last run failed |
+| `net.allowlist_open` | warn: `0.0.0.0/0` or `::/0` in an allowlist |
+| `ctx.file_modes`, `metrics.auth` (operator) | warn: a context file readable by others; fail: the node refuses the context's `/metrics` credential |
 | `secrets.confirmed` | fail: `secrets_confirmed_at` empty |
 | `eru.version_skew` | warn: operator ≠ node (operator side) |
 | `metrics.endpoint` | warn: any exporter not responding |
@@ -1666,10 +1679,10 @@ const (
     PostgresMajor = 18
     NginxMinVersion = "1.26"              // distribution nginx with stream ssl_preread + ssl_alpn
     PgBackRestMinVersion = "2.59.3"       // fixes an unchecked error in encrypted repos; PGDG, held
-    NodeExporterVersion = "1.11.1"        // floor; update
-    PostgresExporterVersion = "…"         // latest stable at implementation
-    PgbouncerExporterVersion = "…"
-    PgbackrestExporterVersion = "…"
+    NodeExporterVersion = "1.12.1"        // Phase 4: upstream release binaries, sha256 per arch in ExporterSHA256
+    PostgresExporterVersion = "0.20.1"    // 0.20 moved stat_activity, stat_archiver, settings into /probe's collectors
+    PgbouncerExporterVersion = "0.12.1"
+    // no pgbackrest_exporter: eru.prom carries the backup facts (PHASE-4-WORK-UNITS D2)
     CosignVersion = "3.1.3"               // install.sh and mise.toml
 )
 var Checksums = map[string]map[string]string{ /* artifact -> arch -> sha256 */ }

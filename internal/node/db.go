@@ -251,6 +251,9 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with eru apply.")
 	}
+	if w := applyMetrics(ctx, cfg, rt, env.Report, db.Name); w != nil {
+		warnings = append(warnings, *w)
+	}
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	if w := firstBackup(ctx, cfg, rt, env.Report, db.Name); w != nil {
@@ -354,7 +357,7 @@ func forgetDatabase(name string) error {
 // huge pages, its own steps, the poolers, the other databases' changed
 // configuration (others) and, with backups on, its stanza and timers.
 func createRuns(cfg config.Cluster, name string, others []string) []engine.Options {
-	runs := []engine.Options{{Only: steps.KernelStepIDs()}, {DB: name}, {Only: steps.PoolerStepIDs()}}
+	runs := []engine.Options{{Only: steps.KernelStepIDs()}, {DB: name}, {Only: steps.PoolerStepIDs()}, {Only: steps.MetricsStepIDs()}}
 	if len(others) > 0 {
 		runs = append(runs, engine.Options{Only: others})
 	}
@@ -456,6 +459,24 @@ func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
 		Report:    env.Report,
 	})
 	return err
+}
+
+// applyMetrics runs metrics-v1 after a database is created, forked or
+// dropped, so its /metrics path and targets.json entry follow (Phase 4). The
+// database already works, so a failure is the warning metrics_reload_failed.
+func applyMetrics(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter, db string) *output.Warning {
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
+		Only:      steps.MetricsStepIDs(),
+		Restarter: steps.Restarter(cfg),
+		Report:    report,
+	})
+	if err == nil {
+		return nil
+	}
+	return &output.Warning{
+		Code:    "metrics_reload_failed",
+		Message: "the /metrics endpoint was not updated for " + db + ": " + err.Error() + "; run eru apply to retry",
+	}
 }
 
 // firstBackup runs pgbackrest-v1 and timers-v1 when backups are on: the new
@@ -609,6 +630,10 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := dropRouting(ctx, env, cfg); err != nil {
 		return Result{}, withHint(err, p.Name+" is dropped, but the poolers or timers still refer to it. Fix it with eru apply.")
 	}
+	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name); w != nil {
+		warnings = append(warnings, *w)
+	}
+	clearDeferred(p.Name)
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	data := map[string]any{"dropped": p.Name, "roles_dropped": roles}
@@ -634,6 +659,8 @@ func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, final *bac
 		r.DroppedStanzas = append(r.DroppedStanzas, entry)
 		delete(r.LastBackup, spec.Name)
 		delete(r.LastVerify, spec.Name)
+		delete(r.LastFailure, spec.Name)
+		delete(r.Repo, spec.Name)
 		return nil
 	})
 	steps.WriteMetrics(cfg)
@@ -649,7 +676,7 @@ func dropRuns(cfg config.Cluster, others []string) []engine.Options {
 	if len(cfg.Clusters) > 0 {
 		runs = append(runs, engine.Options{Only: steps.PoolerStepIDs()})
 	}
-	runs = append(runs, engine.Options{Only: steps.TimersStepIDs()})
+	runs = append(runs, engine.Options{Only: steps.TimersStepIDs()}, engine.Options{Only: steps.MetricsStepIDs()})
 	if len(others) > 0 {
 		runs = append(runs, engine.Options{Only: others})
 	}
@@ -795,7 +822,17 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, withHint(err, "The new size is saved. Finish it with eru apply --db "+p.Name+".")
 	}
 	warnings = append(append(warnings, applyWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
-	return Result{Data: map[string]any{"database": resized, "apply": data}, Warnings: warnings}, nil
+	// A deferred restart runs at the start of the maintenance window
+	// (maint-daily, Phase 4 D11); one done now clears an older deferral.
+	out := map[string]any{"database": resized, "apply": data}
+	switch {
+	case p.DeferRestart && len(data.RestartPending) > 0:
+		recordDeferred(p.Name)
+		out["deferred_to_window"] = env.Cluster.Maintenance.Window
+	case len(data.Restarts) > 0:
+		clearDeferred(p.Name)
+	}
+	return Result{Data: out, Warnings: warnings}, nil
 }
 
 // resizeCommand is the db resize command of p at another size, with the

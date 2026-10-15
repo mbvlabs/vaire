@@ -70,16 +70,22 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{
-		Data: BootstrapResult{
-			Phase:            PhaseDatabase,
-			Node:             nodeCfg.NodeName,
-			Steps:            data,
-			TLS:              inspectTLS(cfg),
-			RestartPerformed: data.Restarted(),
-		},
-		Warnings: warnings,
-	}, nil
+	res := BootstrapResult{
+		Phase:            PhaseDatabase,
+		Node:             nodeCfg.NodeName,
+		Steps:            data,
+		TLS:              inspectTLS(cfg),
+		RestartPerformed: data.Restarted(),
+	}
+	// Step 18: doctor gates init (Phase 4 D10).
+	if !p.SkipDoctor {
+		gate, _, err := doctorGate(ctx, cfg, runtimeFor(env, true), true)
+		if err != nil {
+			return Result{}, err
+		}
+		res.Doctor = gate
+	}
+	return Result{Data: res, Warnings: warnings}, nil
 }
 
 // handleTLSStatus reports the served certificate's state, so init can wait for

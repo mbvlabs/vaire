@@ -37,6 +37,12 @@ var logUnits = map[string]string{
 	"nginx":             "journal:nginx.service",
 	"eru-certs":         "journal:eru-certs.service",
 	"eru":               "runlog:",
+	// The exporters (Phase 4).
+	"node_exporter":              "journal:node_exporter.service",
+	"postgres_exporter":          "journal:postgres_exporter.service",
+	"pgbouncer_exporter":         "journal:pgbouncer_exporter.service",
+	"pgbouncer_exporter-session": "journal:pgbouncer_exporter-session.service",
+	"eru-maint":                  "journal:eru-maint-daily.service",
 }
 
 func handleLogs(ctx context.Context, env *Env) (Result, error) {

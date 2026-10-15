@@ -37,11 +37,14 @@ func (s postgresRoles) Describe(config.Cluster) string {
 
 // roleInputs is everything Apply depends on except passwords (D5).
 type roleInputs struct {
-	Admin   bool           `json:"admin"`
-	Monitor bool           `json:"monitor"`
-	Auth    bool           `json:"auth"`
-	AuthSQL string         `json:"auth_sql"`
-	DB      databaseInputs `json:"database"`
+	Admin   bool   `json:"admin"`
+	Monitor bool   `json:"monitor"`
+	Auth    bool   `json:"auth"`
+	AuthSQL string `json:"auth_sql"`
+	// MonitorSQL joins the inputs so every cluster re-runs it once when it
+	// changes (Phase 4).
+	MonitorSQL string         `json:"monitor_sql"`
+	DB         databaseInputs `json:"database"`
 }
 
 type databaseInputs struct {
@@ -56,7 +59,7 @@ func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, err
 		return nil, err
 	}
 	return canonical(roleInputs{
-		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL,
+		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL, MonitorSQL: monitorSQL,
 		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions},
 	})
 }
@@ -166,6 +169,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	if !roleSet[RoleDirectOnly] {
 		fmt.Fprintf(&cluster, "CREATE ROLE %s NOLOGIN;\n", RoleDirectOnly)
 	}
+	cluster.WriteString(monitorSQL)
 	cluster.WriteString(pgbouncerAuthSQL)
 
 	sql, err := databaseSQL(ctx, rt, spec, roleSet, dbSet)
@@ -189,6 +193,20 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 
 	return engine.ApplyResult{Restart: engine.RestartNone, Warnings: orphanedWarnings(spec, dbs, roleSet)}, nil
 }
+
+// monitorSQL sets eru_monitor up for the exporters (Phase 4 D4): a
+// postgres_exporter probe needs a connection slot exactly when the pools
+// are full, so the role shares the three reserved slots with eru_admin.
+// CONNECTION LIMIT 2 is one probe: postgres_exporter 0.20.1's /probe opens
+// two connections at once (the legacy exporter's, for pg_up and the default
+// metrics, and the probe collectors'), so a limit of 1 would fail one of
+// them on every scrape; it leaves at least one reserved slot to eru_admin.
+// The timeouts keep a probe from holding a backend or waiting on a lock.
+const monitorSQL = `GRANT pg_use_reserved_connections TO eru_monitor;
+ALTER ROLE eru_monitor CONNECTION LIMIT 2;
+ALTER ROLE eru_monitor SET statement_timeout = '10s';
+ALTER ROLE eru_monitor SET lock_timeout = '1s';
+`
 
 // serviceVerifier is the SCRAM verifier for a service role in spec's
 // cluster. Service passwords are setup-wide (RFC 12): another cluster's
