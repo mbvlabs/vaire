@@ -1607,16 +1607,17 @@ func nodeCommands() cmdSpec {
 			},
 			{
 				use:    "archive-push <wal-path>",
-				args:   cobra.ExactArgs(1),
+				args:   cobra.ArbitraryArgs,
 				run:    runNodeArchivePush,
 				hidden: true,
 				flags: []fl{
 					flagString("stanza", "", "The database's pgBackRest stanza"),
+					flagString("pgbackrest", "", "The pgBackRest binary to exec, /usr/bin/pgbackrest when empty (pgBackRest requires its name in archive_command)"),
 				},
 				meta: CommandMeta{
 					Summary:          "Archive one WAL segment unless a newer master fenced this node",
 					WhenToUse:        []string{"Every cluster's archive_command; PostgreSQL runs it as postgres. It refuses on a fenced node, then runs pgbackrest archive-push."},
-					Examples:         []string{"/usr/local/bin/eru node archive-push --stanza=app-3f9a1c %p"},
+					Examples:         []string{"/usr/local/bin/eru node archive-push --pgbackrest=/usr/bin/pgbackrest --stanza=app-3f9a1c %p"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "archive-push is PostgreSQL's archive_command and must archive or fail",

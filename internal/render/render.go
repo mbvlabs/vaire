@@ -373,15 +373,22 @@ func ArchiveQueueMaxMiB(clusters int) int {
 	return maxInt(512, tune.ArchiveSpoolGiB*1024/maxInt(1, clusters))
 }
 
+// PgBackRestBin is where the Debian and Ubuntu pgbackrest package installs
+// pgBackRest.
+const PgBackRestBin = "/usr/bin/pgbackrest"
+
 // BackupConf renders a cluster's conf.d/40-eru-backup.conf: archive_mode on
 // from creation, with archive-push to the cluster's stanza once [backup]
-// names a bucket and /bin/true before (RFC 9.1).
+// names a bucket and /bin/true before (RFC 9.1). The archive_command passes
+// --pgbackrest=/usr/bin/pgbackrest: pgBackRest's check and backup refuse an
+// archive_command that doesn't contain "pgbackrest" (error 068,
+// archive-command-invalid), and eru's wrapper alone doesn't.
 func BackupConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
 	stanza := ""
 	if cfg.BackupConfigured() {
 		stanza = spec.Stanza
 	}
-	return execute("40-eru-backup.conf.tmpl", map[string]any{"Stanza": stanza})
+	return execute("40-eru-backup.conf.tmpl", map[string]any{"Stanza": stanza, "PgBackRest": PgBackRestBin})
 }
 
 // JobService renders the eru-<job>.service a timer starts (§18). arg is

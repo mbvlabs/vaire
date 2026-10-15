@@ -136,7 +136,13 @@ func runNodeDump(cmd *cobra.Command, args []string) error {
 // runNodeArchivePush is the archive_command wrapper (Phase 5). It replaces
 // the process with pgBackRest, so nothing after it runs on success.
 func runNodeArchivePush(cmd *cobra.Command, args []string) error {
-	return node.ArchivePush(stringFlag(cmd, "stanza"), args[0])
+	wal := ""
+	if len(args) == 1 {
+		wal = args[0]
+	}
+	// Argument errors are the wrapper's own refusals, so they reach the
+	// PostgreSQL log with a reason.
+	return node.ArchivePush(stringFlag(cmd, "pgbackrest"), stringFlag(cmd, "stanza"), wal)
 }
 
 // runNodeUnfence lifts the fence on this node (Phase 5), on the node itself:
