@@ -44,6 +44,9 @@ type Options struct {
 	// FailureHint replaces the step_failed hint, for callers that resume
 	// differently from apply (server init uses --resume).
 	FailureHint string
+	// Recovering is a database ClusterView keeps although it awaits
+	// recovery: db recover builds its cluster (Phase 5).
+	Recovering string
 }
 
 func (o Options) journalPath() string {
@@ -165,8 +168,22 @@ type decision struct {
 	detail string
 }
 
+// ClusterView, when set, narrows the configuration every Plan and Apply
+// sees. The node sets it (Phase 5): a database awaiting recovery after a
+// rebuild has no cluster, so no step may create an empty one, render its
+// pooler entry or start its timers. What's saved is never narrowed.
+var ClusterView func(cfg config.Cluster, keep string) config.Cluster
+
+func view(cfg config.Cluster, keep string) config.Cluster {
+	if ClusterView == nil {
+		return cfg
+	}
+	return ClusterView(cfg, keep)
+}
+
 // Plan runs the runner's decision for every selected step and writes nothing.
 func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opts Options) (PlanData, error) {
+	cfg = view(cfg, opts.Recovering)
 	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return PlanData{}, err
@@ -209,6 +226,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	if rt.DryRun {
 		return ApplyData{}, nil, errors.New("engine.Apply called with DryRun; use Plan")
 	}
+	cfg = view(cfg, opts.Recovering)
 	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return ApplyData{}, nil, err

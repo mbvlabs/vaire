@@ -28,6 +28,11 @@ const (
 	SecretBackupAgeIdentity = "backup.age_identity" //nolint:gosec // G101: a key name, not a value.
 )
 
+// SecretMasterBundle is the decrypted master bundle (a tar, base64) that
+// server init --restore places on a new server (Phase 5). The operator
+// decrypts it; the node never sees the recovery identity.
+const SecretMasterBundle = "master.bundle" //nolint:gosec // G101: a key name, not a value.
+
 // Database roles with a login and a password.
 const (
 	RoleMigrate = "migrate"

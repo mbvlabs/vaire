@@ -152,11 +152,12 @@ func TestAddRecoveryKit(t *testing.T) {
 	if len(values) != 1 {
 		t.Errorf("no kit: secrets = %v", values)
 	}
-	// server init creates the recovery identity without a bucket: no keys to send.
+	// server init creates the recovery identity without a bucket: no keys to
+	// send, but the recipient, which the master bundles are encrypted to.
 	identityOnly := &contexts.BackupCreds{}
 	identityOnly.Dumps.AgeIdentity, identityOnly.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, identityOnly)
-	if len(values) != 1 {
+	if len(values) != 2 || values[steps.SecretBackupAgeRecipient] != "age1xyz" {
 		t.Errorf("identity only: secrets = %v", values)
 	}
 	kit := &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "eru-backups-test", Prefix: "mbvlabs"}

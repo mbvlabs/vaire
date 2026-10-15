@@ -92,6 +92,13 @@ func (k *KnownHosts) Pin(addr string, keys ...ssh.PublicKey) {
 	}
 }
 
+// Replace pins exactly keys for addr, dropping what was pinned before: a
+// rebuild puts the old server's host keys on a new VPS (Phase 5).
+func (k *KnownHosts) Replace(addr string, keys ...ssh.PublicKey) {
+	delete(k.hosts, HostID(addr))
+	k.Pin(addr, keys...)
+}
+
 // Save writes the file with mode 0600.
 func (k *KnownHosts) Save() error {
 	hosts := make([]string, 0, len(k.hosts))

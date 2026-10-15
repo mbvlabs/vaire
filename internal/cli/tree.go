@@ -449,7 +449,7 @@ func phase1Commands() []cmdSpec {
 		restoreCommands(),
 		dumpCommands(),
 		jobCommands(),
-		vpsCommands(),
+
 		maintCommands(),
 		metricsCommands(),
 		{
@@ -620,6 +620,22 @@ func contextCommands() cmdSpec {
 					SkipDryRunReason: "remove deletes a local context and is guarded by the confirm token",
 				},
 			},
+			{
+				use:  "set-address <ip[:port]>",
+				args: cobra.ExactArgs(1),
+				run:  runContextSetAddress,
+				flags: []fl{
+					flagString("name", "", "The context (default: the current one)"),
+				},
+				meta: CommandMeta{
+					Summary:        "Point a context at the server's new public address",
+					WhenToUse:      []string{"After the server was rebuilt on a new IP (server init --restore on another machine). In acme mode eru finds the new address in DNS by itself."},
+					Examples:       []string{"eru context set-address 198.51.100.7", "eru context set-address '[2001:db8::7]:51820' --name prod"},
+					Mutating:       true,
+					SupportsDryRun: true,
+					Next:           []string{"eru status"},
+				},
+			},
 		},
 	}
 }
@@ -663,13 +679,14 @@ func serverCommands() cmdSpec {
 				flagString("backup-key-id", "", "Bucket access key id"),
 				flagBool("backup-secret-stdin", "Read the bucket secret from stdin"),
 				flagString("backup-secret-file", "", "Read the bucket secret from a file"),
-				flagString("vps-backup-schedule", "", "systemd OnCalendar for VPS backups"),
 				flagString("db-full-schedule", "", "systemd OnCalendar for full database backups"),
 				flagString("db-diff-schedule", "", "systemd OnCalendar for differential database backups"),
 				flagString("tls-mode", "", "acme or self-signed"),
 				flagBool("local", "Initialise this machine as the server"),
-				flagString("restore", "", "Transfer bundle to rebuild a server from (a file, or - for stdin)"),
-				flagString("restore-time", "", "Point-in-time target for a disaster-recovery restore"),
+				flagBool("restore", "Rebuild this context's server on a new VPS from its master bundle (Phase 5)"),
+				flagString("bundle", "", "With --restore: a bundle name or a time (default: the newest in the bucket)"),
+				flagString("bundle-file", "", "With --restore: rebuild from an exported bundle file (- for stdin) instead of the bucket"),
+				flagBool("old-master-unreachable", "With --restore: skip the check that the old master no longer answers"),
 				flagString("secrets-out", "", "Also write the armored transfer bundle here (required without a terminal)"),
 				flagBool("reveal-passphrase", "Put the bundle passphrase in structured output (required without a terminal)"),
 				flagBool("confirm-secrets-stored", "Confirm the secrets handoff was stored"),
@@ -686,6 +703,7 @@ func serverCommands() cmdSpec {
 					"eru server init --host root@203.0.113.10 --answers answers.toml --no-input --confirm prod",
 					"eru server init --local",
 					"eru server init --discard --name prod",
+					"eru server init --restore --host root@198.51.100.7 --confirm prod/replace",
 				},
 				Mutating:       true,
 				SupportsDryRun: true,
@@ -719,11 +737,11 @@ func serverCommands() cmdSpec {
 				ErrorCodes: []string{
 					"input_required", "unsafe_action_requires_confirmation", "validation_failed", "remote_unreachable",
 					"transport_failed", "host_key_mismatch", "node_version_mismatch", "precondition_failed", "step_failed",
-					"lockdown_failed", "release_verification_failed",
+					"lockdown_failed", "release_verification_failed", "bundle_corrupt", "bundle_not_found",
 				},
-				Next: []string{"eru plan"},
+				Next: []string{"eru plan", "eru db recover --all"},
 			},
-		}},
+		}, serverBackupCommands()},
 	}
 }
 
@@ -874,6 +892,7 @@ func dbCommands() cmdSpec {
 			Remote:    true,
 		},
 		children: []cmdSpec{
+			dbRecoverCommand(),
 			{
 				use: "list",
 				run: runDBList,
@@ -1471,76 +1490,6 @@ func dumpCommands() cmdSpec {
 	}
 }
 
-func vpsCommands() cmdSpec {
-	return cmdSpec{
-		use: "vps",
-		run: parentRun,
-		meta: CommandMeta{
-			Summary:   "Back up and restore the server filesystem with restic",
-			WhenToUse: []string{"Operate the weekly VPS backup, which is separate from the database backups."},
-			Examples:  []string{"eru vps backup list"},
-			Remote:    true,
-		},
-		children: []cmdSpec{
-			{
-				use: "backup",
-				run: parentRun,
-				meta: CommandMeta{
-					Summary:   "Take or list VPS backups",
-					WhenToUse: []string{"Run the restic backup of the server outside the timer."},
-					Examples:  []string{"eru vps backup now"},
-					Remote:    true,
-				},
-				children: []cmdSpec{
-					{
-						use: "now",
-						run: notImplemented,
-						meta: CommandMeta{
-							Summary:        "Take a restic snapshot of the server",
-							WhenToUse:      []string{"Capture /etc, the ACME account, and operator homes before a risky change."},
-							Examples:       []string{"eru vps backup now", "eru vps backup now --dry-run"},
-							Mutating:       true,
-							SupportsDryRun: true,
-							Remote:         true,
-							Next:           []string{"eru vps backup list"},
-						},
-					},
-					{
-						use: "list",
-						run: notImplemented,
-						meta: CommandMeta{
-							Summary:   "List VPS snapshots",
-							WhenToUse: []string{"Choose a snapshot to restore."},
-							Examples:  []string{"eru vps backup list"},
-							Remote:    true,
-						},
-					},
-				},
-			},
-			{
-				use: "restore",
-				run: notImplemented,
-				flags: []fl{
-					flagString("snapshot", "", "Restic snapshot id"),
-					flagStrings("path", "Path to restore (repeatable)"),
-					flagString("to", "", "Restore into this directory instead of the live path"),
-					flagBool("in-place", "Restore over the live paths. Requires --confirm"),
-				},
-				meta: CommandMeta{
-					Summary:        "Restore paths from a VPS snapshot",
-					WhenToUse:      []string{"Copy files out of a snapshot, or restore them in place with a confirm token."},
-					Examples:       []string{"eru vps restore --snapshot latest --path /etc/eru --to /tmp/eru-restore"},
-					Mutating:       true,
-					Destructive:    true,
-					SupportsDryRun: true,
-					Remote:         true,
-					ConfirmToken:   "{server}/vps-restore",
-				},
-			},
-		},
-	}
-}
-
 func nodeCommands() cmdSpec {
 	return cmdSpec{
 		use:    "node",
@@ -1654,6 +1603,43 @@ func nodeCommands() cmdSpec {
 					Examples:       []string{"sudo eru node dump app > app.dump"},
 					SupportsDryRun: true,
 					LinuxOnly:      true,
+				},
+			},
+			{
+				use:    "archive-push <wal-path>",
+				args:   cobra.ExactArgs(1),
+				run:    runNodeArchivePush,
+				hidden: true,
+				flags: []fl{
+					flagString("stanza", "", "The database's pgBackRest stanza"),
+				},
+				meta: CommandMeta{
+					Summary:          "Archive one WAL segment unless a newer master fenced this node",
+					WhenToUse:        []string{"Every cluster's archive_command; PostgreSQL runs it as postgres. It refuses on a fenced node, then runs pgbackrest archive-push."},
+					Examples:         []string{"/usr/local/bin/eru node archive-push --stanza=app-3f9a1c %p"},
+					Mutating:         true,
+					SkipDryRunCheck:  true,
+					SkipDryRunReason: "archive-push is PostgreSQL's archive_command and must archive or fail",
+					LinuxOnly:        true,
+				},
+			},
+			{
+				use: "unfence",
+				run: runNodeUnfence,
+				flags: []fl{
+					flagBool("reclaim", "Also write a newer epoch naming this node, fencing the instance that took over (an abandoned rebuild only)"),
+				},
+				meta: CommandMeta{
+					Summary:        "Lift the epoch fence on this node",
+					WhenToUse:      []string{"Only when the server init --restore that fenced this server was a mistake or was abandoned. Run on the node over break-glass SSH, then eru apply from your machine. A server that was really replaced is destroyed instead."},
+					Examples:       []string{"sudo eru node unfence --confirm prod/unfence --dry-run", "sudo eru node unfence --confirm prod/unfence --reclaim"},
+					Mutating:       true,
+					Destructive:    true,
+					SupportsDryRun: true,
+					ConfirmToken:   "{server}/unfence",
+					LinuxOnly:      true,
+					ErrorCodes:     []string{"unsafe_action_requires_confirmation", "precondition_failed"},
+					Next:           []string{"eru apply"},
 				},
 			},
 			{

@@ -12,6 +12,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/mbvlabs/eru/internal/totp"
 )
 
@@ -76,7 +77,13 @@ func (g protectGuard) save(st protectState) error {
 	if err != nil {
 		return err
 	}
-	return engine.WriteFileAtomic(g.path, append(raw, '\n'), 0o600)
+	if err := engine.WriteFileAtomic(g.path, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	if g.path == ProtectStatePath {
+		masterbackup.MarkDirty("protect.json")
+	}
+	return nil
 }
 
 // configured reports whether a confirmed TOTP secret exists.

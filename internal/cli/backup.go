@@ -331,8 +331,18 @@ func backupSecrets(kit *contexts.BackupCreds) map[string]string {
 // that may run pgbackrest-v1 outside a job (apply, db create) carries them, so a
 // node that lacks its copy gets it back; the node writes a value only when
 // its own is missing, so a stale kit never overwrites newer keys.
+//
+// The age recipient travels whenever the kit has the recovery identity, with
+// or without a bucket: master-backup-v1 encrypts the master bundles to it
+// (Phase 5).
 func addRecoveryKit(secretValues map[string]string, kit *contexts.BackupCreds) {
-	if kit == nil || !kit.HasBucket() {
+	if kit == nil {
+		return
+	}
+	if kit.Dumps.AgeRecipient != "" {
+		secretValues[steps.SecretBackupAgeRecipient] = kit.Dumps.AgeRecipient
+	}
+	if !kit.HasBucket() {
 		return
 	}
 	for k, v := range backupSecrets(kit) {
@@ -399,6 +409,22 @@ func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s 
 	return data, append(setReply.Warnings, applyReply.Warnings...), nil
 }
 
+// setupPrefixOwner is the server as backup setup's bucket probe sees it: its
+// name, its node's instance id (master-backup.list) and its stanzas. A
+// re-run on the configured prefix is the server's own by definition.
+func setupPrefixOwner(ctx context.Context, p *progress, node remote.Caller, cfg config.Cluster, configured bool) backup.PrefixOwner {
+	owner := backup.PrefixOwner{Server: cfg.Name(), Stanzas: cfg.Stanzas(), Resumed: configured}
+	if reply, err := p.call(ctx, node, "master-backup.list", nil, remote.CallOptions{}); err == nil {
+		var st struct {
+			InstanceID string `json:"instance_id"`
+		}
+		if reply.Decode(&st) == nil {
+			owner.Instance = st.InstanceID
+		}
+	}
+	return owner
+}
+
 func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -442,8 +468,9 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 			Warnings: s.warnings,
 		})
 	}
+	owner := setupPrefixOwner(ctx, p, s.node, cfg, wasConfigured)
 	p.note("checking the bucket " + settings.Bucket + " at " + settings.Endpoint)
-	if err := p.during("checking the bucket "+settings.Bucket, func() error { return backup.Probe(ctx, settings.target(), cfg.Name()) }); err != nil {
+	if err := p.during("checking the bucket "+settings.Bucket, func() error { return backup.Probe(ctx, settings.target(), owner) }); err != nil {
 		return err
 	}
 	kit, generated, err := prepareKit(creds.Backup, settings, wasConfigured)
@@ -615,18 +642,29 @@ func backupDatabases(cmd *cobra.Command, s *session, p *progress) ([]string, err
 	if err := reply.Decode(&data); err != nil {
 		return nil, err
 	}
-	var names []string
+	var names, awaiting []string
 	for _, db := range data.Databases {
-		if db.InConfig {
+		switch {
+		case db.State == stateAwaitingRecovery:
+			awaiting = append(awaiting, db.Name)
+		case db.InConfig:
 			names = append(names, db.Name)
 		}
 	}
+	if len(awaiting) > 0 {
+		s.warnings = append(s.warnings, output.Warning{Code: "awaiting_recovery",
+			Message: "skipped, awaiting recovery after the rebuild: " + strings.Join(awaiting, ", ") + " (eru db recover --all)"})
+	}
 	if len(names) == 0 {
 		return nil, output.NewError(output.CodePrecondition, "there is no database to back up", output.ExitPrecondition,
-			"Create one with eru db create <name>.").WithDetails(map[string]any{"reason": "no_databases"})
+			"Create one with eru db create <name>, or recover the databases with eru db recover --all.").WithDetails(map[string]any{"reason": "no_databases"})
 	}
 	return names, nil
 }
+
+// stateAwaitingRecovery is db.list's state of a database a rebuilt master
+// hasn't recovered yet (Phase 5).
+const stateAwaitingRecovery = "awaiting_recovery"
 
 // dbJobOutcome is one database's job of backup now or verify without --db.
 type dbJobOutcome struct {

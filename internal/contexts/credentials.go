@@ -50,9 +50,7 @@ type BackupCreds struct {
 	PgBackRest      struct {
 		CipherPass string `json:"cipher_pass"`
 	} `json:"pgbackrest"`
-	Restic struct {
-		Password string `json:"password"`
-	} `json:"restic"`
+
 	// Dumps holds the age X25519 identity the long-retention dumps are
 	// encrypted to.
 	Dumps struct {
@@ -69,5 +67,5 @@ func (b BackupCreds) HasBucket() bool {
 
 // SecretValues returns every secret in the recovery kit.
 func (b BackupCreds) SecretValues() []string {
-	return []string{b.SecretAccessKey, b.PgBackRest.CipherPass, b.Restic.Password, b.Dumps.AgeIdentity}
+	return []string{b.SecretAccessKey, b.PgBackRest.CipherPass, b.Dumps.AgeIdentity}
 }

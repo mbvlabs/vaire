@@ -1,5 +1,6 @@
-// Package state is the desired-state store (§5.1, D15). Phase 2 has the file
-// store at /etc/eru/cluster.toml; the bucket copy arrives in Phase 5.
+// Package state is the desired-state store (§5.1, D15): the file at
+// /etc/eru/cluster.toml. Every save marks the master backup dirty, so the
+// bundle in the bucket follows within seconds (Phase 5).
 package state
 
 import (
@@ -10,6 +11,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 )
 
 // Path is the default desired-state file.
@@ -63,7 +65,13 @@ func (s FileStore) Save(raw []byte) error {
 	if err := cfg.Validate(); err != nil {
 		return config.ValidationError(err)
 	}
-	return engine.WriteFileAtomic(s.path(), raw, 0o640)
+	if err := engine.WriteFileAtomic(s.path(), raw, 0o640); err != nil {
+		return err
+	}
+	if s.path() == Path {
+		masterbackup.MarkDirty("cluster.toml")
+	}
+	return nil
 }
 
 // Revision returns the sha256 of the file.

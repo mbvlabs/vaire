@@ -638,7 +638,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		if err := applyStanza(ctx, cfg, db, rt, report); err != nil {
 			warn = err
 		}
-	} else {
+	} else if !r.NoFull {
 		unlock()
 		if err := startFullBackup(ctx, cfg, rt, db, step, report); err != nil {
 			warn = err

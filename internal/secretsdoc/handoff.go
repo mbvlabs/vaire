@@ -81,7 +81,6 @@ func (d Document) Groups() []Group {
 			Field{"pgBackRest cipher pass", b.PgBackRest.CipherPass},
 			Field{"Dump age identity", b.Dumps.AgeIdentity},
 			Field{"Dump age recipient", b.Dumps.AgeRecipient},
-			Field{"restic password", b.Restic.Password},
 		)})
 	}
 	if m := d.Metrics; m != nil {

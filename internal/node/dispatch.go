@@ -19,6 +19,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/mbvlabs/eru/internal/rpc"
 	"github.com/mbvlabs/eru/internal/secrets"
 )
@@ -60,6 +61,23 @@ type method struct {
 }
 
 func always(rpc.Request) bool { return true }
+
+// fencedReads are methods with a run log that still answer on a fenced
+// node: they change nothing a newer master owns.
+var fencedReads = map[string]bool{"ssh.confirm": true, "upgrade.install": true}
+
+// fencedRefuses reports whether a fenced node refuses req: every method
+// that takes the node lock exclusive or writes a run log, apart from
+// fencedReads.
+func fencedRefuses(m method, req rpc.Request) bool {
+	if !masterbackup.IsFenced() || fencedReads[m.name] {
+		return false
+	}
+	if m.lock != nil && m.lock(req) == engine.LockExclusive {
+		return true
+	}
+	return m.runLog != nil && m.runLog(req)
+}
 
 func fixedLock(mode engine.LockMode) func(rpc.Request) engine.LockMode {
 	return func(rpc.Request) engine.LockMode { return mode }
@@ -125,6 +143,15 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		).WithDetails(map[string]any{"methods": names}))
 	}
 
+	// A fenced node (a newer master took over its bucket) refuses every
+	// method that changes something; reads still answer (Phase 5, D5).
+	if fencedRefuses(m, req) {
+		return out.fail(command, fencedError())
+	}
+	if err := refuseAwaiting(req); err != nil {
+		return out.fail(command, err)
+	}
+
 	env := &Env{Req: req, Report: out.emit}
 	if m.cluster {
 		cfg, err := config.LoadCluster(config.ClusterPath)
@@ -132,6 +159,10 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 			return out.fail(command, err)
 		}
 		env.Cluster = cfg
+		if raw, err := os.ReadFile(config.ClusterPath); err == nil && config.HasLegacyVPS(raw) {
+			out.emit(output.Event{Type: "warning", Code: "legacy_config_ignored",
+				Message: "cluster.toml still has [backup.vps] from before Phase 5 (restic is gone); it is ignored, and the next config change drops it"})
+		}
 	}
 
 	// 6. Confirm tokens, recomputed on the node. A wrong token is refused

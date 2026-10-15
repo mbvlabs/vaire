@@ -82,6 +82,16 @@ type statusData struct {
 	} `json:"tls,omitempty"`
 	Backups   bool       `json:"backups_configured"`
 	Databases []statusDB `json:"databases"`
+	Master    *struct {
+		Last       string `json:"last"`
+		CreatedAt  string `json:"created_at"`
+		Uploaded   bool   `json:"uploaded"`
+		Bucket     bool   `json:"bucket"`
+		Epoch      int64  `json:"epoch"`
+		Pending    bool   `json:"pending"`
+		Fenced     bool   `json:"fenced"`
+		LastFailed string `json:"last_failure"`
+	} `json:"master_backup,omitempty"`
 }
 
 // statusWatchInterval is how often eru status --watch refreshes.
@@ -180,6 +190,32 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 	}
 	if !d.Backups {
 		lines = append(lines, "  backups none off the server (eru backup setup)")
+	}
+	if m := d.Master; m != nil {
+		line := "  master  "
+		switch {
+		case m.Fenced:
+			line += "FENCED: a newer master took over this server's bucket"
+		case m.Last == "":
+			line += "no bundle yet"
+		default:
+			line += "last bundle " + m.CreatedAt
+			switch {
+			case m.Uploaded:
+				line += fmt.Sprintf(", in the bucket (epoch %d)", m.Epoch)
+			case m.Bucket:
+				line += ", not uploaded yet"
+			default:
+				line += ", on the server only (eru server backup export)"
+			}
+			if m.Pending {
+				line += "; a change is being bundled"
+			}
+			if m.LastFailed != "" {
+				line += "; last failure: " + m.LastFailed
+			}
+		}
+		lines = append(lines, line)
 	}
 	if len(d.Databases) == 0 {
 		lines = append(lines, "", "no databases yet (eru db create <name>)")

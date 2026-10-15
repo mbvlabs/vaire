@@ -14,6 +14,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/mbvlabs/eru/internal/render"
 )
 
@@ -25,7 +26,38 @@ const CertsTimerName = "eru-certs.timer"
 // ownedService matches the template services timers-v1 writes, so a removed
 // schedule takes its service with it. eru-certs.service and eru-thp.service
 // belong to other steps.
-var ownedService = regexp.MustCompile(`^eru-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry|maint-daily|maint-weekly|metrics-refresh|doctor)\.service$`)
+var ownedService = regexp.MustCompile(`^eru-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry|maint-daily|maint-weekly|metrics-refresh|doctor|master-backup|fence)\.service$`)
+
+// Master backup units (Phase 5): the job, the path unit that starts it after
+// a change, its daily safety-net timer, and with a bucket the epoch fence
+// check at boot and every five minutes.
+const (
+	MasterBackupService = "eru-master-backup.service"
+	MasterBackupPath    = "eru-master-backup.path"
+	MasterBackupTimer   = "eru-master-backup.timer"
+	FenceService        = "eru-fence.service"
+	FenceTimer          = "eru-fence.timer"
+)
+
+// masterBackupUnits are the master backup's units.
+func masterBackupUnits(cfg config.Cluster, start string) map[string][]byte {
+	files := map[string][]byte{
+		MasterBackupService: render.JobService("master-backup", ""),
+		MasterBackupPath:    render.MasterBackupPath(masterbackup.DirtyPath),
+		MasterBackupTimer:   render.JobTimer("eru master backup safety net (daily)", "*-*-* "+start+":00", "30m"),
+	}
+	if cfg.BackupConfigured() {
+		files[FenceService] = render.FenceService()
+		files[FenceTimer] = render.JobTimer("eru epoch fence check", "*:0/5", "30s")
+	}
+	return files
+}
+
+// enabledUnit reports whether timers-v1 enables name: every timer and path
+// unit, and the fence check, which runs at boot.
+func enabledUnit(name string) bool {
+	return strings.HasSuffix(name, ".timer") || strings.HasSuffix(name, ".path") || name == FenceService
+}
 
 // serverTimers are the server-wide timers of Phase 4 (D13), which run with or
 // without backups: maintenance at the start of the window, the textfile
@@ -45,6 +77,9 @@ func serverTimers(cfg config.Cluster) map[string][]byte {
 		files["eru-"+t.job+".service"] = render.JobService(t.job, "")
 		files["eru-"+t.job+".timer"] = render.JobTimer(t.description, t.schedule, t.jitter)
 	}
+	for name, content := range masterBackupUnits(cfg, start) {
+		files[name] = content
+	}
 	return files
 }
 
@@ -57,7 +92,7 @@ const StanzaExpiryTimerName = "eru-stanza-expiry.timer"
 const stanzaExpirySchedule = "*-*-* 06:00:00"
 
 // unitNamePattern guards the unit names handed to the script.
-var unitNamePattern = regexp.MustCompile(`^eru-[a-z0-9@_.-]+\.(timer|service)$`)
+var unitNamePattern = regexp.MustCompile(`^eru-[a-z0-9@_.-]+\.(timer|service|path)$`)
 
 // timerJob is one scheduled job of one cluster (RFC 9.2).
 type timerJob struct {
@@ -236,13 +271,14 @@ func StaggerDay(schedule, stanza string) string {
 func staleUnits(want map[string][]byte) []string {
 	var out []string
 	timers, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "eru-*.timer"))
+	paths, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "eru-*.path"))
 	services, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "eru-*.service"))
-	for _, path := range append(timers, services...) {
+	for _, path := range append(append(timers, paths...), services...) {
 		name := filepath.Base(path)
 		if _, ok := want[name]; ok {
 			continue
 		}
-		if strings.HasSuffix(name, ".timer") || ownedService.MatchString(name) {
+		if strings.HasSuffix(name, ".timer") || strings.HasSuffix(name, ".path") || ownedService.MatchString(name) {
 			out = append(out, name)
 		}
 	}
@@ -264,7 +300,7 @@ type timersStep struct{}
 func (timersStep) ID() string { return timersID }
 
 func (timersStep) Describe(config.Cluster) string {
-	return "install the systemd timers for certificates and each database's backups, verify, drill and dumps"
+	return "install the systemd timers for certificates, maintenance, the master backup and each database's backups, verify, drill and dumps"
 }
 
 func (timersStep) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []engine.RenderedFile {
@@ -291,7 +327,7 @@ func (timersStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtim
 		if !fileIs(SystemdSystemDir+"/"+name, string(files[name]), 0o644) {
 			return incomplete(name + " differs"), nil
 		}
-		if strings.HasSuffix(name, ".timer") {
+		if enabledUnit(name) {
 			if out, _ := Probe(ctx, "systemctl", "is-enabled", name); out != "enabled" {
 				return incomplete(name + " is not enabled"), nil
 			}
@@ -310,7 +346,7 @@ func (s timersStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Run
 		if err := writeFile(SystemdSystemDir+"/"+name, string(files[name]), 0o644); err != nil {
 			return engine.ApplyResult{}, err
 		}
-		if strings.HasSuffix(name, ".timer") {
+		if enabledUnit(name) {
 			enable = append(enable, name)
 		}
 	}

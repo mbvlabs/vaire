@@ -55,11 +55,6 @@ const (
 	firstOperatorName    = "op-1"
 )
 
-// laterPhaseFlags are init flags whose settings arrive with a later phase.
-// The database backup flags work from Phase 3 on; VPS backups arrive in
-// Phase 5.
-var laterPhaseFlags = []string{"vps-backup-schedule"}
-
 // tlsWaitTimeout bounds the wait for a real certificate (D10).
 const tlsWaitTimeout = 120 * time.Second
 
@@ -94,6 +89,8 @@ type initRun struct {
 	backup *backupSettings
 	// backupsDone reports whether this run configured backups.
 	backupsDone bool
+	// restore is set for server init --restore (Phase 5).
+	restore *restoreRun
 }
 
 type initPlanData struct {
@@ -130,13 +127,13 @@ type initResult struct {
 }
 
 func runServerInit(cmd *cobra.Command, args []string) error {
-	if flagChanged(cmd, "restore") || flagChanged(cmd, "restore-time") {
-		return output.NewError(
-			output.CodeError,
-			"eru server init --restore is not implemented yet",
-			output.ExitGeneric,
-			"Disaster recovery from a secrets document arrives in Phase 5.",
-		)
+	if flagTrue(cmd, "restore") {
+		return runInitRestore(cmd)
+	}
+	for _, name := range []string{"bundle", "bundle-file", "old-master-unreachable"} {
+		if flagChanged(cmd, name) {
+			return output.NewError(output.CodeUsage, "--"+name+" needs --restore", output.ExitUsage, "")
+		}
 	}
 	if flagTrue(cmd, "discard") {
 		return runInitDiscard(cmd)
@@ -178,14 +175,6 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 				output.ExitPrecondition,
 				"Continue it with eru server init --resume --name "+r.name+", or drop it with eru server init --discard --name "+r.name+".",
 			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": contexts.PendingDir(r.name)})
-		}
-	}
-	for _, name := range laterPhaseFlags {
-		if flagChanged(cmd, name) {
-			r.warnings = append(r.warnings, output.Warning{
-				Code:    "flag_not_used_yet",
-				Message: "--" + name + " is not used yet: VPS backups arrive in Phase 5",
-			})
 		}
 	}
 	if dryRun(cmd) {
@@ -665,7 +654,11 @@ func (r *initRun) operator() (config.Operator, error) {
 	if err != nil {
 		return config.Operator{}, err
 	}
-	return config.Operator{Name: r.sec.OperatorName, WGAddress: config.DefaultFirstOperatorWG, WGPublicKey: pub, SSHPublicKey: sshPub}, nil
+	addr := config.DefaultFirstOperatorWG
+	if r.restore != nil {
+		addr = r.restore.ctx.Operator.WGAddress
+	}
+	return config.Operator{Name: r.sec.OperatorName, WGAddress: addr, WGPublicKey: pub, SSHPublicKey: sshPub}, nil
 }
 
 // bootstrapHost runs cluster.bootstrap phase=host (§8.2 step 6) and records
@@ -1010,6 +1003,19 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 	r.p.phase("init.binary", "completed", "")
 	if err := r.mark(phaseBinary); err != nil {
 		return err
+	}
+
+	// A rebuild places the master bundle before any step runs (Phase 5):
+	// from here on the server presents the old server's host keys.
+	if r.restore != nil {
+		keys, err := r.restore.place(ctx, r, n)
+		if err != nil {
+			return err
+		}
+		known.Replace(publicSSH, keys...)
+		if err := known.Save(); err != nil {
+			return err
+		}
 	}
 
 	res, err := r.bootstrapHost(ctx, n)

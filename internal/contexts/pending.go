@@ -54,6 +54,35 @@ type Progress struct {
 	SSHHostKeys []string          `json:"ssh_host_keys,omitempty"`
 	SecretsOut  string            `json:"secrets_out,omitempty"`
 	PublicIPv6  string            `json:"public_ipv6,omitempty"`
+	// Restore is set for server init --restore (Phase 5).
+	Restore *RestoreProgress `json:"restore,omitempty"`
+}
+
+// RestoreProgress is what a rebuild has decided so far, so --resume picks
+// up the same bundle, instance id and epoch.
+type RestoreProgress struct {
+	Bundle         string `json:"bundle,omitempty"`
+	From           string `json:"from,omitempty"`
+	OldAddress     string `json:"old_address,omitempty"`
+	NewAddress     string `json:"new_address,omitempty"`
+	InstanceID     string `json:"instance_id,omitempty"`
+	Epoch          int64  `json:"epoch,omitempty"`
+	EpochWrittenAt string `json:"epoch_written_at,omitempty"`
+	// Timings are each phase's seconds, for the RTO.
+	Timings map[string]float64 `json:"timings,omitempty"`
+}
+
+// BundleFile holds a rebuild's master bundle, still encrypted.
+const BundleFile = "bundle.tar.age"
+
+// SavePendingBundle keeps the encrypted bundle for --resume.
+func SavePendingBundle(name string, cipher []byte) error {
+	return writePending(name, BundleFile, cipher)
+}
+
+// LoadPendingBundle reads it back.
+func LoadPendingBundle(name string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(PendingDir(name), BundleFile))
 }
 
 // Done reports whether phase completed.

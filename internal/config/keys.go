@@ -10,7 +10,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-// Get returns the value at a dotted key such as backup.vps.schedule,
+// Get returns the value at a dotted key such as backup.database.full_schedule,
 // postgres.settings.work_mem, clusters.app.size or
 // clusters.app.settings.work_mem. Arrays of tables are addressed by their
 // name field.

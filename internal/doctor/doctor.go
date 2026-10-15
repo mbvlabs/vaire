@@ -123,6 +123,8 @@ type Facts struct {
 	Records          backup.Records
 	Jobs             []engine.JobRecord
 	Clusters         []ClusterFacts
+	// Master is the master backup (Phase 5).
+	Master MasterFacts
 }
 
 // Warning is an oversubscription warning (memory_overcommitted, cpu_crowded,

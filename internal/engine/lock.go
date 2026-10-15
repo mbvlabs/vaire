@@ -73,6 +73,13 @@ func AcquireHeavyIO(ctx context.Context, method, requestID string) (Release, err
 	return acquire(ctx, HeavyIOLockPath, "", "heavy_io", LockExclusive, method, requestID, 0)
 }
 
+// AcquireHeavyIOWait takes the heavy-I/O lock exclusive, waiting up to
+// timeout for it: db recover waits for a backup that holds it instead of
+// failing (Phase 5).
+func AcquireHeavyIOWait(ctx context.Context, method, requestID string, timeout time.Duration) (Release, error) {
+	return acquire(ctx, HeavyIOLockPath, "", "heavy_io", LockExclusive, method, requestID, timeout)
+}
+
 func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
 	if mode == LockNone {
 		return func() {}, nil

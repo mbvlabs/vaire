@@ -117,7 +117,7 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 			"Pass --backup-secret-stdin or --backup-secret-file.").WithDetails(map[string]any{"flag": "--backup-secret-file"})
 	}
 	r.p.note("checking the bucket " + s.Bucket + " at " + s.Endpoint)
-	if err := r.p.during("checking the bucket "+s.Bucket, func() error { return backup.Probe(ctx, s.target(), r.name) }); err != nil {
+	if err := r.p.during("checking the bucket "+s.Bucket, func() error { return backup.Probe(ctx, s.target(), r.initPrefixOwner()) }); err != nil {
 		return err
 	}
 	kit, _, err = prepareKit(r.sec.Backup, s, false)
@@ -129,10 +129,22 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 	return contexts.SaveSecrets(r.name, r.sec)
 }
 
+// initPrefixOwner is a fresh server as the bucket probe sees it: no node and
+// no stanzas yet. The probe runs before the host phase, so once that phase is
+// done an earlier run of this init already probed the prefix, and an epoch
+// in it is this node's own first one.
+func (r *initRun) initPrefixOwner() backup.PrefixOwner {
+	return backup.PrefixOwner{Server: r.name, Resumed: r.prog.Done(phaseHost)}
+}
+
 // nodeConfig is cluster.toml as the host and database phases send it:
 // without [backup], which the backups phase writes through config.set so
 // eru backup setup and init share one path.
 func (r *initRun) nodeConfig() config.Cluster {
+	if r.restore != nil {
+		// A rebuild's cluster.toml already has [backup].
+		return r.cfg
+	}
 	cfg := r.cfg
 	cfg.Backup = config.DefaultCluster().Backup
 	return cfg

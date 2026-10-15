@@ -16,6 +16,7 @@ import (
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/hostinfo"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/mbvlabs/eru/internal/steps"
 	"golang.org/x/crypto/ssh"
 )
@@ -41,6 +42,10 @@ type bootstrapParams struct {
 	Local bool `json:"local,omitempty"`
 	// SkipDoctor skips the doctor gate after the database phase.
 	SkipDoctor bool `json:"skip_doctor,omitempty"`
+	// InstanceID and Epoch are what server init --restore wrote to the
+	// bucket; the restore phase places them (Phase 5).
+	InstanceID string              `json:"instance_id,omitempty"`
+	Epoch      *masterbackup.Epoch `json:"epoch,omitempty"`
 }
 
 // BootstrapResult is the cluster.bootstrap result: the node identity the
@@ -78,6 +83,10 @@ func bootstrapToken(_ config.Cluster, raw json.RawMessage) string {
 	if err != nil {
 		return ""
 	}
+	if p.Phase == PhaseRestore {
+		// Placing a bundle takes over the server's identity (Phase 5).
+		return cfg.Name() + "/replace"
+	}
 	return cfg.Name()
 }
 
@@ -91,12 +100,14 @@ func handleClusterBootstrap(ctx context.Context, env *Env) (Result, error) {
 		return bootstrapHost(ctx, env, p)
 	case PhaseDatabase:
 		return bootstrapDatabase(ctx, env, p)
+	case PhaseRestore:
+		return bootstrapRestore(ctx, env, p)
 	default:
 		return Result{}, output.NewError(
 			output.CodeUsage,
 			"cluster.bootstrap phase "+p.Phase+" is not available",
 			output.ExitUsage,
-			"Use phase host or phase database.",
+			"Use phase host, database or restore.",
 		).WithDetails(map[string]any{"phase": p.Phase})
 	}
 }
@@ -302,6 +313,7 @@ func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Ope
 			return err
 		}
 	}
+	masterbackup.MarkDirty("bootstrap")
 	return nil
 }
 

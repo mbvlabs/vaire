@@ -133,6 +133,35 @@ func runNodeDump(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runNodeArchivePush is the archive_command wrapper (Phase 5). It replaces
+// the process with pgBackRest, so nothing after it runs on success.
+func runNodeArchivePush(cmd *cobra.Command, args []string) error {
+	return node.ArchivePush(stringFlag(cmd, "stanza"), args[0])
+}
+
+// runNodeUnfence lifts the fence on this node (Phase 5), on the node itself:
+// a fenced node refuses mutating RPCs.
+func runNodeUnfence(cmd *cobra.Command, _ []string) error {
+	res, err := node.Unfence(commandContext(cmd), stringFlag(cmd, "confirm"), flagTrue(cmd, "reclaim"), dryRun(cmd))
+	if err != nil {
+		return err
+	}
+	var message string
+	switch {
+	case !res.WasFenced:
+		message = "this node is not fenced"
+	case res.DryRun && res.Reclaimed:
+		message = fmt.Sprintf("dry run: would write epoch %d naming this node and lift the fence", res.Epoch)
+	case res.DryRun:
+		message = "dry run: would lift the fence"
+	case res.Reclaimed:
+		message = fmt.Sprintf("wrote epoch %d naming this node and lifted the fence; run eru apply to bring back the timers and poolers", res.Epoch)
+	default:
+		message = "lifted the fence; run eru apply to bring back the timers and poolers"
+	}
+	return output.Success(cmd, output.Result{Data: res, Message: message, Next: []string{"eru apply"}})
+}
+
 func runNodeUnlockSSH(cmd *cobra.Command, _ []string) error {
 	minutes, err := cmd.Flags().GetInt("minutes")
 	if err != nil {

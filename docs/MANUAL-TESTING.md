@@ -310,3 +310,80 @@ Run on a real VPS with two databases (`app`, `other`) and backups on R2, in orde
     - Passed: `[metrics] allowlist` set to 192.0.2.0/24 gives 403 with the right password, set to thelab gives 200, cleared gives 200.
     - Not done yet: a scraper on `targets.json` (needs a Prometheus or Alloy), fail2ban (unbanning needs sudo), the credential through `eru secrets export` / `eru login`, doctor clean (blocked by the fixes above), the init gate (needs a rebuild).
 - Re-test on edge-9b75e22 (2026-10-15): passed. The upgrade apply re-ran `firewall-v1` and `metrics-v1` once and printed "no restart needed for other (already running the new settings)"; `eru plan` then 0 of 19. `pg_up 1` and `last_scrape_error 0` for `app` and `other`, with the collectors reporting; a `?target=` pointing at `app` on `other`'s path still returns `other`. `eru doctor`: 56 pass, 1 warn (reboot required), 0 fail. `eru logs postgres_exporter --since 30m` works.
+
+## Phase 5: Master backup and disaster recovery
+
+The exit test of Phase 5 (master backup and disaster recovery), from [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md). Phase 5 stays 🟡 in [`MASTER.md`](./MASTER.md) until it passes. Run on real VPSes against Cloudflare R2, after the Phase 4 test, in order. Keep a stopwatch: the RTO table at the end is part of the result. Useful on the node: `ls -l /var/lib/eru/master-backup/`, `cat /var/lib/eru/master-backup/last.json`, `systemctl list-units 'eru-master-backup*' 'eru-fence*'`, `cat /var/lib/eru/records.json`; from the laptop: `eru server backup list`.
+
+**Part A: with a bucket**
+
+- [ ] **Upgrade the Phase 4 server first**
+    - Before anything else, on the server the Phase 4 test left: `eru upgrade`, then `eru apply --auto-upgrade-nodes`. Expected: config parsing doesn't fail on its `[backup.vps]` table (a `legacy_config_ignored` warning instead, gone after the next `eru config set`); `master-backup-v1` applies; `postgres-config-v1@<db>` **reloads** every cluster (no restart: `pg_postmaster_start_time()` unchanged); `SHOW archive_command` names `/usr/local/bin/eru node archive-push --stanza=<stanza> %p`.
+    - No segment lost or doubled across the reload: under a write loop, `pg_stat_archiver.last_archived_wal` keeps advancing with `failed_count` unchanged, `pgbackrest --stanza=<stanza> check` passes, and `pgbackrest info` shows no gap in the archive (`pgbackrest --stanza=<stanza> verify` reports no missing WAL).
+    - `<prefix>/master/epoch.json` appears with epoch 1 and the node's instance id; `eru backup setup` run again with the same bucket and prefix (key rotation) is not refused.
+    - As `postgres`: `sudo -u postgres /usr/local/bin/eru node archive-push --stanza=bad x` exits non-zero; the PostgreSQL log shows the wrapper's lines on a failure (`eru logs postgres --db <db>`).
+- [ ] **Rebuild `mbvlabs` from scratch**
+    - A fresh `server init` on the old prefix is refused with `repo_in_use` (the prefix holds an earlier install's epoch or stanzas: a fresh install never takes it, or it would fence itself). Use a new prefix, or empty the old one first.
+    - Destroy the old server, `eru server init` on a fresh VPS with R2. Expected: `master-backup-v1` applies, `<prefix>/master/` has a bundle and its sidecar, and `epoch.json` names epoch 1 and the node's instance id (`cat /var/lib/eru/instance`).
+    - `eru server backup list` shows it as complete and uploaded; `eru server backup verify` says `current`.
+- [ ] **Make changes**
+    - `eru db create app --size small`, `eru db create other --size small`, a write loop on `app`, `eru protect init` and `eru db protect app`.
+    - `eru restore app --time <t> --confirm app/restore`, promote, then `restore undo` (records a timeline switch), and `restore cleanup`.
+    - `eru db create scratch` then `eru db drop scratch --confirm scratch` (a dropped stanza).
+    - `eru config set clusters.other.settings.work_mem 8MB` and `apply`.
+    - Expected: a new bundle within ~10 s of each change (`server backup list`); three `config set`s in a row make one or two bundles, not three; `eru backup now --db app` makes none; `eru server backup verify` says `current`.
+    - Also check: `eru-master-backup.prom` lines; `eru doctor` shows `master.backup`, `master.verified` passing; `eru status` has the Master backup row.
+- [ ] **The archive wrapper**
+    - `SHOW archive_command` in `app` names `eru node archive-push`; `pg_stat_archiver.archived_count` rises under the write loop; `pgbackrest --stanza=<app's stanza> check` passes.
+- [ ] **Destroy the VPS**
+    - Take a provider snapshot of the VPS first (it plays the old master that comes back, below). Note the time of the last write in `app` (`select max(created_at)`), then destroy the VPS in the provider's console. Start the stopwatch.
+- [ ] **`server init --restore` on a new VPS**
+    - Create a new VPS (a new IP, unless you test the floating-IP path). `eru server init --restore --host root@<new-ip>`. Expected: it lists the bundle (created at, epoch 1, the databases), asks for `mbvlabs/replace`, writes epoch 2, does first contact and the lockdown, asks to move `db1.<domain>` to the new IP and waits for it, and ends with a new handoff (the address changed), the phase timings, and `app`, `other` awaiting recovery.
+    - Also check: the old-master probe said it couldn't reach the old master; `epoch.json` names epoch 2 and the new instance; `<prefix>/master/` has a new bundle with `-e2-`.
+    - The context works without edits: `eru status`, `eru ssh`, `eru doctor` from the same laptop. `ssh-keygen -lf` of the new server's host key equals the old pin; `wg show` on the node has the same public key as before.
+    - On a second machine that logged in before the loss: `eru status` warns `context_endpoint_updated` once and works.
+    - Records intact: `records.json` has the timeline switch for `app`, the dropped stanza of `scratch` with its expiry, the drill and backup history; no restore leftovers (reported as `restore_leftovers_lost` if there were any).
+    - TLS: `openssl s_client -connect db1.<domain>:6432 -starttls postgres` shows the old certificate's serial; no ACME order was placed (`journalctl -u eru-certs`).
+    - Metrics: the scraper's existing credential still gets 200 on `/metrics/node`.
+    - `eru doctor`: databases awaiting recovery are `skip`, everything else passes; `secrets.confirmed` passes.
+- [ ] **The databases come back: `db recover --all`**
+    - First `eru db recover app --time <t> --confirm app/recover`: refused with `database_protected`.
+    - Then `eru db recover --all`. Expected: `app` first (protected), then `other`; each is restored, promoted on a new timeline and opened; the summary has the recovered-to time per database and the durations; then one full each.
+    - `app`'s newest rows match the last write noted before the destroy (within `archive_timeout`, 60 s); `app_app` connects with its old password through 6432 and 443; `other` keeps `work_mem = 8MB`.
+    - Archiving is on from the first start of each recovered cluster: `SHOW archive_command` names the wrapper (not `/bin/true`); the new timeline's `0000000N.history` file and its first segments are in the stanza's archive (`pgbackrest --stanza=<stanza> repo-ls archive/<stanza> --recurse` or the bucket listing); `pgbackrest check` passes.
+    - A single `eru db recover <db>` (no `--all`) starts that database's full backup itself once promoted (`eru job list`, `eru backup list --db <db>`).
+    - A failure part way through `--all` (stage one, e.g. a database whose stanza has no backup): it is reported with its reason, the other databases recover, and the failed one stays `awaiting_recovery`; `eru db recover <db>` retries it from the start.
+    - Also check: `db list` shows both `running`; timers back (`systemctl list-timers 'eru-*'`); `targets.json` lists both; `eru protect status` shows `app` protected and a current code is accepted; `select timeline_id from pg_control_checkpoint()` in `app` is one above its timeline before the loss.
+    - Stop the stopwatch at the second database open. Write the RTO table below.
+- [ ] **The old master comes back and is fenced**
+    - Create a VPS from the snapshot taken before the destroy and boot it. Expected: at boot `eru-fence.service` writes `/etc/eru/fenced` before the poolers start; its timers and poolers are stopped and disabled; `archive-push` refuses (`pg_stat_archiver.failed_count` rises and nothing new from it appears in the stanzas); over break-glass, `sudo eru node rpc` of a mutating method gets `node_fenced`; `eru doctor` on it (break-glass) fails `master.fenced`. Destroy it afterwards.
+    - Also check: the old master's PostgreSQL log has the wrapper's "this node is fenced" lines; whether it pushed anything to the stanzas in the seconds between its PostgreSQL starting and the fence check at boot (the fence orders only the poolers; compare the archive objects' times with its boot time).
+    - `sudo eru node unfence --confirm mbvlabs/unfence` on it refuses (the bucket's epoch names the new instance); `--dry-run --reclaim` says it would write the next epoch. Don't reclaim.
+    - The unfence path, on the new master (test only): `sudo touch /etc/eru/fenced`; within five minutes its timers and poolers stop and `failed_count` rises; then `sudo eru node unfence --confirm mbvlabs/unfence` lifts it (the bucket names this node), `eru apply` brings the timers and poolers back, and the WAL kept locally is archived (`last_archived_wal` catches up, `pgbackrest check` passes).
+    - A healthy master is never fenced by less than a newer epoch: with the bucket unreachable (block its endpoint in ufw for ten minutes), `journalctl -u eru-fence` says the epoch can't be read and nothing is fenced.
+    - The split-brain check: mark a recovered test database awaiting recovery by hand (test only), let the snapshot VPS push one segment to its stanza with the fence file removed, then `eru db recover <db>`: refused with `stanza_still_written`. Skip this item if it can't be staged cleanly; unit 13's tests cover the comparison.
+- [ ] **Failure modes**
+    - A corrupt bundle: upload a copy of the newest bundle with one byte flipped under a newer name and its sidecar; `server init --restore --dry-run` (or `server backup verify`) refuses with `bundle_corrupt` and names the previous bundle. Remove it.
+    - An incomplete upload: delete the newest sidecar; `server backup list` marks the bundle incomplete; the daily run (or `server backup now` after a change) uploads again.
+    - Bucket unreachable: point the context's endpoint at a wrong host (edit `credentials.json` on a copy of the context) and run `server init --restore --dry-run`: `endpoint_unreachable` before anything happens.
+
+**Part B: without a bucket**
+
+- [ ] **A server without a bucket**
+    - `eru server init` on a fresh VPS, skipping backups; `eru db create app`; a few changes. Expected: bundles in `/var/lib/eru/master-backup/` only (`local_keep` 10), `eru doctor` warns `master.offsite` with the export fix.
+    - `eru server backup export --out mbvlabs-master.tar.age`: a 0600 file; `master.offsite` passes until the next change.
+    - `eru server backup verify --bundle-file mbvlabs-master.tar.age` says it's valid.
+- [ ] **Rebuild from the export**
+    - Destroy the VPS. `eru server init --restore --host root@<new-ip> --bundle-file mbvlabs-master.tar.age`. Expected: no fence (it says so and repeats the power-off rule), then the same rebuild as Part A; `app` comes back `awaiting_recovery`.
+    - `eru db recover app` refuses with `no_offsite_backup` and the drop-and-create hint. `eru db drop app --confirm app` and `eru db create app` bring an empty `app` back (the data is lost: that's what a bucket is for). Expected otherwise as Part A: same context, same host keys and WireGuard key, records intact.
+
+**RTO**
+
+| Measure | Time |
+| --- | --- |
+| Destroy → `server init --restore` started (new VPS ready) | |
+| `server init --restore` (first contact → handoff), of which DNS wait | |
+| `db recover` per database (size, time) | |
+| Destroy → last database open | |
+| Fulls after recovery | |
+

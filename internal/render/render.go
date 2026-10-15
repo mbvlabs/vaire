@@ -390,6 +390,17 @@ func JobService(job, arg string) []byte {
 	return execute("eru-job.service.tmpl", map[string]any{"Job": job, "Arg": arg})
 }
 
+// MasterBackupPath renders eru-master-backup.path (Phase 5): it starts the
+// master-backup job while the dirty flag exists, and again when the job
+// stops if a change set the flag during the build.
+func MasterBackupPath(dirty string) []byte {
+	return execute("eru-master-backup.path.tmpl", map[string]any{"Dirty": dirty})
+}
+
+// FenceService renders eru-fence.service (Phase 5): the epoch check at boot,
+// ordered before both poolers, and on its timer.
+func FenceService() []byte { return execute("eru-fence.service.tmpl", nil) }
+
 // JobTimer renders an eru-<job>.timer (§18).
 func JobTimer(description, schedule, jitter string) []byte {
 	return execute("eru-job.timer.tmpl", map[string]any{"Description": description, "Schedule": schedule, "Jitter": jitter})

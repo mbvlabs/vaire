@@ -882,6 +882,9 @@ func jobDump(ctx context.Context, env *jobEnv) (any, error) {
 
 // dumpToBucket takes one dump and records it.
 func dumpToBucket(ctx context.Context, cfg config.Cluster, sh engine.Shell, stepID string, report engine.Reporter, db string, final bool) (backup.Dump, error) {
+	if err := requireNotFenced(ctx, cfg, report); err != nil {
+		return backup.Dump{}, err
+	}
 	target, recipient, err := steps.BackupTarget(cfg)
 	if err != nil {
 		return backup.Dump{}, err

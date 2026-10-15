@@ -9,7 +9,8 @@ import (
 
 // Catalog returns the steps in run order (§11, D1). Phase 2 has steps 1-13,
 // Phase 3 adds 14 (pgbackrest-v1) and 17 (timers-v1), Phase 4 adds 16
-// (metrics-v1); step 18, doctor, is a gate after apply, not a step.
+// (metrics-v1), Phase 5 adds 15 (master-backup-v1); step 18, doctor, is a
+// gate after apply, not a step.
 func Catalog() []engine.Step {
 	return []engine.Step{
 		basePackages{},
@@ -26,6 +27,7 @@ func Catalog() []engine.Step {
 		postgresRoles{},
 		pgbouncer{},
 		pgbackrestStep{},
+		masterBackupStep{},
 		metricsStep{},
 		timersStep{},
 	}
@@ -57,6 +59,7 @@ func DatabaseStepIDs() []string {
 		postgresRolesID,
 		pgbouncerID,
 		pgbackrestID,
+		masterBackupID,
 		metricsID,
 		timersID,
 	}
@@ -66,7 +69,7 @@ func DatabaseStepIDs() []string {
 // every cluster's archive_command (a reload), the repository with a stanza
 // per cluster, and the timers.
 func BackupStepIDs() []string {
-	return []string{postgresConfigID, pgbackrestID, timersID}
+	return []string{postgresConfigID, pgbackrestID, masterBackupID, timersID}
 }
 
 // PgBackRestStepIDs is the repository step db create runs once the new

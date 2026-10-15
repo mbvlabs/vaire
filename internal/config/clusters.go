@@ -82,6 +82,15 @@ func (c Cluster) ClusterByName(name string) (ClusterSpec, bool) {
 	return ClusterSpec{}, false
 }
 
+// Stanzas lists every database's stanza.
+func (c Cluster) Stanzas() []string {
+	out := make([]string, 0, len(c.Clusters))
+	for _, s := range c.Clusters {
+		out = append(out, s.Stanza)
+	}
+	return out
+}
+
 // Resources resolves spec's limits against [postgres] default_size.
 func (c Cluster) Resources(spec ClusterSpec) (Resources, error) {
 	return ResolveResources(spec, c.Postgres.DefaultSize)

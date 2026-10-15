@@ -24,6 +24,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/mbvlabs/eru/internal/steps"
 	"golang.org/x/crypto/acme"
 )
@@ -130,7 +131,11 @@ func installCert(chainPEM, keyPEM []byte) error {
 	if err := engine.WriteFileAtomicOwned(steps.TLSKeyPath, keyPEM, 0o640, steps.TLSKeyOwner, steps.TLSKeyGroup); err != nil {
 		return err
 	}
-	return engine.WriteFileAtomic(steps.TLSCertPath, chainPEM, 0o644)
+	if err := engine.WriteFileAtomic(steps.TLSCertPath, chainPEM, 0o644); err != nil {
+		return err
+	}
+	masterbackup.MarkDirty("certificate")
+	return nil
 }
 
 // issueACME gets a certificate for this node's hostname over HTTP-01. nginx
@@ -326,7 +331,11 @@ func loadOrCreateKey(path string) (crypto.Signer, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	return key, engine.WriteFileAtomic(path, raw, 0o600)
+	if err := engine.WriteFileAtomic(path, raw, 0o600); err != nil {
+		return nil, err
+	}
+	masterbackup.MarkDirty("acme account")
+	return key, nil
 }
 
 func encodeKey(key *ecdsa.PrivateKey) ([]byte, error) {

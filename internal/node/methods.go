@@ -236,6 +236,11 @@ func methods() map[string]method {
 		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintKill},
 		{name: "queries.reset", cluster: true, confirm: statsToken, runLog: always, handler: handleQueriesReset},
 		{name: "metrics.rotate", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: metricsToken, runLog: always, handler: handleMetricsRotate},
+		// Phase 5. The master backup takes no node lock (D3): it has its own.
+		{name: "master-backup.now", cluster: true, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMasterBackupNow},
+		{name: "master-backup.list", cluster: true, handler: handleMasterBackupList},
+		{name: "master-backup.get", cluster: true, handler: handleMasterBackupGet},
+		{name: "db.recover", cluster: true, confirm: recoverToken, runLog: always, handler: refuseProtected("db recover --time", "database", recoverAtTime, handleDBRecover)},
 	}
 	table := make(map[string]method, len(list))
 	for _, m := range list {

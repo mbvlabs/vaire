@@ -57,6 +57,9 @@ const (
 	stateStopped  = "stopped"
 	statePending  = "pending"
 	stateOrphaned = "orphaned"
+	// stateAwaiting is a database a rebuilt master hasn't recovered yet
+	// (Phase 5): in cluster.toml, no cluster until db recover.
+	stateAwaiting = "awaiting_recovery"
 )
 
 type dbCreateParams struct {
@@ -129,6 +132,13 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 				info.State = stateRunning
 			}
 			delete(live, spec.Name)
+		}
+		if records.IsAwaiting(spec.Name) {
+			info.State = stateAwaiting
+			// No cluster to measure: the stanza's size orders db recover --all.
+			info.SizeBytes = records.Repo[spec.Name].RepoSize
+			out = append(out, info)
+			continue
 		}
 		local := steps.ClusterPG(spec)
 		rows, err := local.Query(ctx, "postgres",

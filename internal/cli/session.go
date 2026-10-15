@@ -126,7 +126,21 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	client, err := s.dial(ctx)
 	if err != nil {
 		s.Close()
-		return nil, tunnelHint(err, nodeSpec.PublicAddress, nodeSpec.ListenPort)
+		err = tunnelHint(err, nodeSpec.PublicAddress, nodeSpec.ListenPort)
+		// A rebuilt master on a new address (Phase 5): heal the context
+		// from DNS once and try again.
+		if !endpointHealed(cmd) {
+			if healed, w := healEndpoint(ctx, c, err); healed {
+				markEndpointHealed(cmd)
+				again, err := openSession(cmd, p)
+				if err != nil {
+					return nil, err
+				}
+				again.warnings = append(again.warnings, w)
+				return again, nil
+			}
+		}
+		return nil, err
 	}
 	s.node = &remote.Node{SSH: client, Operator: c.Operator.Name}
 	if p.opts.Verbose {

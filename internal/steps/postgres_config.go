@@ -46,6 +46,14 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) [
 	}
 }
 
+// WriteBackupConf writes spec's 40-eru-backup.conf as postgres-config-v1
+// renders it, without reloading the cluster. db recover uses it to arm the
+// recovered data's archiving before its first start (Phase 5): the empty
+// scaffold was built without archiving.
+func WriteBackupConf(cfg config.Cluster, spec config.ClusterSpec) error {
+	return writeFileOwned(PGConfD(spec.Name)+"/40-eru-backup.conf", string(render.BackupConf(cfg, spec)), 0o644, pgFileOwner, pgFileGroup)
+}
+
 // postgresConfig renders one cluster's configuration from its tuning
 // (RFC 7.3) and classifies the change as a reload or a restart of that
 // cluster only.

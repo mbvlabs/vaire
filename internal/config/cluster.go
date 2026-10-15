@@ -142,7 +142,6 @@ type Backup struct {
 	Prefix   string         `toml:"prefix"`
 	URIStyle string         `toml:"uri_style"`
 	Database BackupDatabase `toml:"database"`
-	VPS      BackupVPS      `toml:"vps"`
 }
 
 // BackupDatabase is [backup.database].
@@ -154,16 +153,6 @@ type BackupDatabase struct {
 	LocalRepo      bool   `toml:"local_repo"`
 	VerifySchedule string `toml:"verify_schedule"`
 	DrillSchedule  string `toml:"drill_schedule"`
-}
-
-// BackupVPS is [backup.vps].
-type BackupVPS struct {
-	Enabled       bool     `toml:"enabled"`
-	Schedule      string   `toml:"schedule"`
-	KeepWeekly    int      `toml:"keep_weekly"`
-	KeepMonthly   int      `toml:"keep_monthly"`
-	CheckSchedule string   `toml:"check_schedule"`
-	ExtraPaths    []string `toml:"extra_paths"`
 }
 
 // Maintenance is [maintenance].
@@ -213,14 +202,6 @@ func DefaultCluster() Cluster {
 				RetentionFull:  4,
 				VerifySchedule: "Wed *-*-* 04:00:00",
 				DrillSchedule:  "*-*-01 05:00:00",
-			},
-			VPS: BackupVPS{
-				Enabled:       true,
-				Schedule:      "Sun *-*-* 03:30:00",
-				KeepWeekly:    8,
-				KeepMonthly:   6,
-				CheckSchedule: "*-*-15 04:30:00",
-				ExtraPaths:    []string{},
 			},
 		},
 		MasterBackup: MasterBackup{RetentionDays: 30, RetentionWeeks: 52, LocalKeep: 10},
@@ -317,6 +298,10 @@ func LoadCluster(path string) (Cluster, error) {
 // ParseCluster decodes raw over the defaults with a strict decoder (§6.1,
 // D8). An unknown key is reported by name.
 func ParseCluster(raw []byte) (Cluster, error) {
+	raw, err := dropLegacyVPS(raw)
+	if err != nil {
+		return Cluster{}, err
+	}
 	cfg := DefaultCluster()
 	dec := toml.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -336,10 +321,48 @@ func ParseCluster(raw []byte) (Cluster, error) {
 	if cfg.Postgres.Settings == nil {
 		cfg.Postgres.Settings = map[string]string{}
 	}
-	if cfg.Backup.VPS.ExtraPaths == nil {
-		cfg.Backup.VPS.ExtraPaths = []string{}
-	}
 	return cfg, nil
+}
+
+// dropLegacyVPS removes [backup.vps] (Phase 5, D15): restic is gone, but a
+// cluster.toml, or a master bundle, from before Phase 5 still has the table.
+// It is the one exception to strict decoding; the next save writes the file
+// without it. Remove it after the first alpha.
+func dropLegacyVPS(raw []byte) ([]byte, error) {
+	if !HasLegacyVPS(raw) {
+		return raw, nil
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal(raw, &doc); err != nil {
+		return raw, nil //nolint:nilerr // the strict decode reports the syntax error.
+	}
+	b, ok := doc["backup"].(map[string]any)
+	if !ok {
+		return raw, nil
+	}
+	if _, legacy := b["vps"]; !legacy {
+		return raw, nil
+	}
+	delete(b, "vps")
+	return toml.Marshal(doc)
+}
+
+// HasLegacyVPS reports whether raw still has the [backup.vps] table that
+// ParseCluster ignores.
+func HasLegacyVPS(raw []byte) bool {
+	if !bytes.Contains(raw, []byte("vps")) {
+		return false
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal(raw, &doc); err != nil {
+		return false
+	}
+	b, ok := doc["backup"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, legacy := b["vps"]
+	return legacy
 }
 
 // unknownKeys turns a strict-decode failure into a message naming the keys.
@@ -618,9 +641,6 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 		}
 		if c.Backup.Database.RetentionFull < 1 {
 			add("backup.database.retention_full must be at least 1")
-		}
-		if c.Backup.VPS.KeepWeekly < 1 {
-			add("backup.vps.keep_weekly must be at least 1")
 		}
 	}
 }

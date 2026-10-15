@@ -84,12 +84,14 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 
 	f.MetricsEnabled = cfg.Metrics.Enabled
 	if f.MetricsEnabled {
-		f.Exporters = exporterHealth(ctx, len(cfg.Clusters) > 0)
+		f.Exporters = exporterHealth(ctx, len(stepsView(cfg).Clusters) > 0)
 		f.EndpointStatus, f.EndpointError = endpointStatus(ctx, f.Hostname, cfg.Metrics.PathPrefix)
-		f.PGProbes, f.PGExporterLog = postgresProbes(ctx, cfg)
+		f.PGProbes, f.PGExporterLog = postgresProbes(ctx, stepsView(cfg))
 	}
 	f.NginxActive = steps.ServiceActive(ctx, steps.NginxService)
-	f.HasDatabases = len(cfg.Clusters) > 0
+	// Databases awaiting recovery have no cluster and no pooler entry yet
+	// (Phase 5), so the poolers run only once one is recovered.
+	f.HasDatabases = len(stepsView(cfg).Clusters) > 0
 	if f.HasDatabases {
 		f.PoolersActive = map[string]bool{
 			steps.PgbouncerService:     steps.ServiceActive(ctx, steps.PgbouncerService),
@@ -101,11 +103,17 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 		f.BudgetWarnings = append(f.BudgetWarnings, doctor.Warning{Code: w.Code, Message: w.Message})
 	}
 	f.Records, _ = backup.LoadRecords()
+	f.Master = masterFacts(cfg)
 
 	prev, havePrev := loadDoctorState()
 	created := clusterCreated()
 	for _, s := range readClusters(ctx, cfg, "", false) {
 		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample}
+		if f.Records.IsAwaiting(s.Spec.Name) {
+			c.AwaitingRecovery = true
+			f.Clusters = append(f.Clusters, c)
+			continue
+		}
 		c.ConfigDrift = driftOf(ctx, cfg, rt, steps.ConfigStepID(s.Spec.Name))
 		c.Overrides = overriddenSettings(filepath.Join(steps.PGConfD(s.Spec.Name), "90-overrides.conf"))
 		if s.State == "running" {

@@ -9,7 +9,7 @@ STALE="${STALE:-}"
 
 for unit in ${STALE}; do
   case "${unit}" in
-    *.timer) systemctl disable --now "${unit}" 2>/dev/null || true ;;
+    *.timer|*.path|eru-fence.service) systemctl disable --now "${unit}" 2>/dev/null || true ;;
   esac
   rm -f "${SYSTEMD_DIR}/${unit}"
   printf 'removed %s\n' "${unit}"

@@ -1,0 +1,12 @@
+# managed by eru - do not edit
+[Unit]
+Description=eru epoch fence check (Phase 5)
+After=network-online.target
+Wants=network-online.target
+Before=pgbouncer.service eru-pgbouncer-session.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eru node run fence-check
+TimeoutStartSec=30
+[Install]
+WantedBy=multi-user.target

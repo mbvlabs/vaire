@@ -11,7 +11,7 @@ From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu
 | Area | Commands |
 | --- | --- |
 | Setup | `eru server init` (remote over SSH, or `--local` on the server), `--resume` |
-| Access | `eru login`, `eru context list\|show\|use\|remove`, `eru ssh`, `eru tunnel` |
+| Access | `eru login`, `eru context list\|show\|use\|remove\|set-address`, `eru ssh`, `eru tunnel` |
 | Desired state | `eru plan`, `eru apply`, `eru config show\|get\|set\|edit\|validate` |
 | Databases | `eru db list\|create\|resize\|drop\|credentials\|fork\|protect\|unprotect` |
 | Protection | `eru protect init\|status` (two-factor code), `eru db protect\|unprotect` |
@@ -19,6 +19,7 @@ From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu
 | Tuning | `eru tune show\|explain\|apply` |
 | Backups | `eru backup setup\|now\|list\|verify`, `eru dump`, `eru dump list\|get` |
 | Restores | `eru restore <db>` (`--time`, `--latest`, `--set`, `--dump`), `eru restore status\|promote\|undo\|abort\|cleanup\|drill` |
+| Disaster recovery | `eru server backup now\|list\|verify\|export` (the master bundle), `eru server init --restore`, `eru db recover <db>\|--all` (Phase 5, manual test pending) |
 | Jobs | `eru job list\|follow` |
 | Health | `eru status [--watch]`, `eru doctor [--only security]`, `eru top`, `eru queries` (Phase 4, manual test pending) |
 | Metrics | `eru metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
@@ -116,7 +117,7 @@ Creating, forking, restoring, resizing or dropping a database never touches DNS 
 - **Disk space and the page cache are shared.** A database that fills the disk affects its neighbours.
 - **Density costs.** Each cluster carries its own processes (about 19 MiB idle) and buffers; a 1 GiB VPS isn't a sensible home for several databases.
 - **One server is a single point of failure** until HA (Phase 11).
-- **Recovering a lost server.** Until Phase 5 brings the master backup and `server init --restore`, a lost server is recovered by creating a new one with `eru server init` and restoring each database's pgBackRest stanza by hand with the recovery kit from your secrets handoff. The stanzas are in the bucket under `<prefix>/pgbackrest/`.
+- **Recovering a lost server.** The server backs its own state up after every change: an age-encrypted master bundle in the bucket under `<prefix>/master/` (`eru server backup list`). When the server is lost, power the old VPS off or destroy it, create a new one, and run `eru server init --restore --host root@<new-ip>` from your machine: the new server takes over the old one's WireGuard key, SSH host keys and certificate, so your context keeps working; then `eru db recover --all` brings each database back from its stanza. Move the `db1.<domain>` record to the new IP, or use a provider IP that moves between servers (a Hetzner Primary IP, a floating IP) so nothing changes in DNS; a short TTL on that record shortens the wait for clients. Without a bucket, keep copies with `eru server backup export`; the server comes back from one with `--bundle-file`, but the databases' data doesn't: configure a bucket for production.
 
 ## Security design
 
@@ -341,7 +342,7 @@ No ACME client (certbot and the like) is installed: eru issues certificates itse
 | WireGuard, SSH | Every remote command | Built into eru (userspace WireGuard, in-process SSH). Nothing to install and no root needed |
 | `psql` ≥ 16 | `eru psql` only | Your package manager; eru offers the install command |
 | `usql` | `eru console` only | On PATH, or eru downloads a pinned release (v0.21.4) into `~/.cache/eru/tools` and checks its SHA-256 |
-| `wireguard-tools` | `eru wg export --install` only | Your package manager; for a kernel WireGuard interface instead of the built-in one |
+| `wireguard-tools` | `eru wg export --install` only (not implemented yet) | Your package manager; for a kernel WireGuard interface instead of the built-in one |
 
 ### Built into the binary
 

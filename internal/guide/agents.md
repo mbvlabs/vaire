@@ -50,9 +50,9 @@ Take confirmation tokens from the tool. When a command needs one, `error.code` i
 | `ambiguous_input`, `input_required` | 8 |
 | `remote_unreachable`, `transport_failed`, `host_key_mismatch`, `endpoint_unreachable`, `bucket_not_found`, `backup_auth_failed` | 9 |
 | `node_version_mismatch`, `update_required` | 10 |
-| `precondition_failed` | 11 |
+| `precondition_failed`, `bundle_not_found`, `node_fenced` | 11 |
 | `lockdown_failed` | 12 |
-| `secrets_error` | 13 |
+| `secrets_error`, `bundle_corrupt` | 13 |
 | `release_verification_failed` | 14 |
 | `error` | 70 |
 
@@ -88,6 +88,11 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `extension_missing`: `eru queries` found a database without `pg_stat_statements`; its statements are left out.
 - `database_stopped`, `database_unreachable`, `restore_in_progress`: `eru status` saw a database whose cluster isn't running, doesn't answer, or has an open restore. Follow with `eru doctor --db <db>`.
 - `metrics_disabled`: `[metrics] enabled` is false; the exporters are stopped and `/metrics` answers 404.
+- `awaiting_recovery`: the master was rebuilt and these databases have no cluster yet; `eru backup now` and the other per-database commands skip or refuse them. Recover them with `eru db recover --all`.
+- `context_endpoint_updated`: the server answered at a new public address (it was rebuilt), and the context follows it now. Nothing to do.
+- `restore_leftovers_lost`: `server init --restore` dropped records of restore leftovers, open restores or drills; their data was on the lost server's disk.
+- `master_backup_failed`: the master bundle couldn't be built or uploaded. Run `eru server backup now --output agent` and read its error.
+- `no_fence`: `server init --restore` had no bucket, so the old master isn't fenced. Ask the human to make sure the old server is powered off or destroyed.
 
 ## Node errors
 
@@ -101,6 +106,12 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `doctor_failed` (exit 5): `eru doctor` found failing checks, or `server init` stopped after its database phase on one. `details.checks` lists every result with its `fix`; run the fixes (ask the human for anything destructive), then `eru doctor` again or `eru server init --resume`.
 - `precondition_failed` with `details.reason = "extension_missing"`: `eru maint repack` needs `pg_repack` (Phase 7), or `eru queries --db` needs `pg_stat_statements` in that database.
 - `precondition_failed` with `details.reason = "protected_backend"`: `eru maint kill --pid` named a superuser's backend, which eru never terminates.
+- `node_fenced` (exit 11): a newer master took over this server's bucket (`eru server init --restore` rebuilt it elsewhere). The node refuses every change, its timers and poolers are stopped and WAL archiving refuses. Tell the human to destroy it; never try to undo the fence yourself. Only a human who knows the rebuild that fenced it was abandoned or a mistake lifts it, on the node: `sudo eru node unfence --confirm <server>/unfence` (it refuses while the bucket's epoch names another instance; `--reclaim` takes the bucket back and fences that other instance), then `eru apply`.
+- `precondition_failed` with `details.reason = "awaiting_recovery"`: the database has no cluster since the master was rebuilt. Run `eru db recover <db>` first.
+- `precondition_failed` with `details.reason = "stanza_still_written"`: `eru db recover` saw WAL reach the database's stanza after the rebuild: the old master is still running. Ask the human to power it off or destroy it, then retry.
+- `precondition_failed` with `details.reason = "no_backup_in_stanza"` or `"no_offsite_backup"`: there is nothing to recover the database from. Show the human the hint (drop and create it again, then restore a dump if one exists); never drop a database without the human's approval.
+- `precondition_failed` with `details.reason = "old_master_alive"`: `server init --restore` reached the old master over WireGuard. Ask the human to power it off first.
+- `bundle_corrupt` (exit 13): a master bundle failed its checks. The hint names the next older bundle; ask the human before rebuilding from an older one.
 
 ## Workflows
 
@@ -122,7 +133,9 @@ Add an extension: `eru ext add <name> --db <name> --output agent`. When the resu
 
 Maintenance report: `eru maint report bloat --db <name> --output agent` (an estimate from statistics), or `wraparound`, `unused-indexes`, `missing-indexes`, `long-queries`, `locks`. `eru maint vacuum|analyze|reindex [--db] [--table]` run as detachable jobs on the node as `eru_admin`; a whole-database vacuum and every reindex take the heavy-I/O lock and are refused with `lock_held` while a full backup or a drill runs. `eru maint kill --db <db> --idle-in-tx --confirm <db>/kill` terminates sessions: ask the human first. `eru maint repack` waits for Phase 7. `eru db resize --defer-restart` leaves the restart for the start of the maintenance window, when `maint-daily` performs it.
 
-Upgrade: `eru upgrade --output agent` updates only the local binary for now; node upgrades come with `eru node upgrade`. `release_verification_failed` must never be retried; report it to a human. Rolling a node back with `eru node upgrade --rollback` needs the human's confirm token.
+Disaster recovery of the master: `eru server backup list --output agent` shows the master bundles (the server's own state, made after every change); `eru server backup verify` proves the newest opens with the recovery identity. When the server is lost: the human powers off or destroys the old VPS and creates a new one, then `eru server init --restore --host root@<new-ip> --confirm <server>/replace` rebuilds it from the newest bundle (fencing the old one in the bucket). The context keeps working. Every database comes back `awaiting_recovery`; `eru db recover --all --output agent` restores each from its stanza, one at a time, protected databases first. `db recover <db> --time <ts>` needs the human's token `<db>/recover`, and is refused for a protected database. Without a bucket, the human keeps copies with `eru server backup export`, and rebuilds with `--bundle-file`; the databases' data is then lost. Never print or decrypt a bundle yourself.
+
+Upgrade: `eru upgrade --output agent` updates only the local binary for now; nodes are upgraded with `eru apply --auto-upgrade-nodes` until `eru node upgrade` arrives. `release_verification_failed` must never be retried; report it to a human. Rolling a node back with `eru node upgrade --rollback` needs the human's confirm token.
 
 ## Refusals
 

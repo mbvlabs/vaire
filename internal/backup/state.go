@@ -8,6 +8,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 )
 
 // RecordsPath holds the node's durable records, beside state.json (which
@@ -61,6 +62,35 @@ type Records struct {
 	// the data directories are renamed: an undo that fails after its swap
 	// resumes from the same names, and its aside cluster is never lost.
 	Undoing map[string]Undo `json:"undoing,omitempty"`
+	// AwaitingRecovery are the databases a rebuilt master hasn't recovered
+	// yet (Phase 5): cluster.toml has them, the server has no cluster for
+	// them. db recover (or db drop) clears an entry.
+	AwaitingRecovery map[string]Awaiting `json:"awaiting_recovery,omitempty"`
+}
+
+// Awaiting is one database awaiting recovery after a rebuild.
+type Awaiting struct {
+	Stanza string `json:"stanza"`
+	Since  string `json:"since"`
+}
+
+// IsAwaiting reports whether db awaits recovery.
+func (s Records) IsAwaiting(db string) bool {
+	_, ok := s.AwaitingRecovery[db]
+	return ok
+}
+
+// durableHash covers the sections that exist nowhere else and must reach
+// the master bundle at once: dropped and replaced stanzas, timeline
+// switches, databases awaiting recovery. Backup facts change after every
+// backup and ride along in the next bundle.
+func (s Records) durableHash() string {
+	raw, _ := json.Marshal(struct {
+		Dropped   []DroppedStanza           `json:"d"`
+		Timelines map[string]TimelineSwitch `json:"t"`
+		Awaiting  map[string]Awaiting       `json:"a"`
+	}{s.DroppedStanzas, s.Timelines, s.AwaitingRecovery})
+	return masterbackup.SHA256(raw)
 }
 
 // Undo is one restore undo under way.
@@ -161,6 +191,12 @@ type Restore struct {
 	// AsideArchivedAt is when the live data last archived WAL, read before
 	// the swap of a restore from a dump, whose old stanza is dropped.
 	AsideArchivedAt string `json:"aside_archived_at,omitempty"`
+	// Recover marks a db recover after a rebuild (Phase 5): the live
+	// cluster promote sets aside is an empty scaffold, dropped at once.
+	Recover bool `json:"recover,omitempty"`
+	// NoFull skips the full backup promote starts (db recover --all takes
+	// the fulls once every database is back).
+	NoFull bool `json:"no_full,omitempty"`
 }
 
 // Leftover is a cluster a promote or undo put aside, stopped: the
@@ -349,6 +385,9 @@ func decode(raw []byte) (Records, error) {
 	if s.Undoing == nil {
 		s.Undoing = map[string]Undo{}
 	}
+	if s.AwaitingRecovery == nil {
+		s.AwaitingRecovery = map[string]Awaiting{}
+	}
 	return s, nil
 }
 
@@ -360,6 +399,7 @@ func UpdateRecords(fn func(*Records) error) error {
 		if err != nil {
 			return err
 		}
+		before := s.durableHash()
 		if err := fn(&s); err != nil {
 			return err
 		}
@@ -368,7 +408,13 @@ func UpdateRecords(fn func(*Records) error) error {
 		if err != nil {
 			return err
 		}
-		return engine.WriteFileAtomic(RecordsPath, append(raw, '\n'), 0o600)
+		if err := engine.WriteFileAtomic(RecordsPath, append(raw, '\n'), 0o600); err != nil {
+			return err
+		}
+		if s.durableHash() != before {
+			masterbackup.MarkDirty("records.json")
+		}
+		return nil
 	})
 }
 

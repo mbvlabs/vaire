@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -91,10 +92,10 @@ const ProbeKey = ".eru-probe"
 
 // Probe checks the bucket from wherever eru runs, before anything reaches
 // the node: it reads the bucket, then puts, gets and deletes
-// <prefix>/.eru-probe. It refuses a prefix whose pgBackRest repository
-// belongs to another stanza. The error codes name the cause:
-// backup_auth_failed, bucket_not_found and endpoint_unreachable.
-func Probe(ctx context.Context, t Target, stanza string) error {
+// <prefix>/.eru-probe. It refuses a prefix that belongs to another server,
+// or to an earlier install of this one (OwnsPrefix). The error codes name
+// the cause: backup_auth_failed, bucket_not_found and endpoint_unreachable.
+func Probe(ctx context.Context, t Target, owner PrefixOwner) error {
 	c, err := t.client()
 	if err != nil {
 		return err
@@ -133,16 +134,66 @@ func Probe(ctx context.Context, t Target, stanza string) error {
 	if err != nil {
 		return err
 	}
-	for _, other := range stanzas {
-		if other != stanza {
-			return output.NewError(output.CodePrecondition,
-				"prefix "+t.Prefix+" already holds the pgBackRest repository of cluster "+other,
-				output.ExitPrecondition,
-				"Pick another prefix (the default is the cluster name). Two clusters must never share a repository.").
-				WithDetails(map[string]any{"reason": "repo_in_use", "stanza": other, "prefix": t.Prefix})
+	epoch, err := ReadEpoch(ctx, t)
+	if err != nil {
+		return err
+	}
+	if other, ok := OwnsPrefix(owner, epoch, stanzas); !ok {
+		hint := "Pick another prefix (the default is the server name). Two servers must never share a repository."
+		if epoch != nil && epoch.Server == owner.Server {
+			hint = "The prefix holds the master backup of an earlier " + owner.Server + ": to rebuild that server use eru server init --restore; otherwise pick another prefix. Using it would fence this server."
 		}
+		return output.NewError(output.CodePrecondition,
+			"prefix "+t.Prefix+" already holds the backups of "+other,
+			output.ExitPrecondition, hint).
+			WithDetails(map[string]any{"reason": "repo_in_use", "owner": other, "prefix": t.Prefix})
 	}
 	return nil
+}
+
+// PrefixOwner is who wants to use a prefix: the server's name, the node's
+// instance id ("" when there is no node yet), its stanzas (live and dropped),
+// and Resumed when an earlier run of the same server init already probed the
+// prefix (its node may have written epoch 1 since).
+type PrefixOwner struct {
+	Server   string
+	Instance string
+	Stanzas  []string
+	Resumed  bool
+}
+
+// OwnsPrefix decides whether owner may use a prefix (Phase 5). With a master
+// epoch, the prefix is the server's only when the epoch names this server
+// and this node's instance: an epoch of another instance would fence the
+// node at its first upload, so a fresh install never takes a prefix that
+// holds one (server init --restore does, by writing a newer epoch). Without
+// an epoch, every stanza already there must be one of the server's own.
+// other names what's in the way when it may not.
+func OwnsPrefix(owner PrefixOwner, epoch *masterbackup.Epoch, stanzas []string) (other string, ok bool) {
+	if epoch != nil {
+		if epoch.Server != owner.Server {
+			return "server " + epoch.Server, false
+		}
+		if owner.Resumed || (owner.Instance != "" && epoch.InstanceID == owner.Instance) {
+			return "", true
+		}
+		return "an earlier install of server " + epoch.Server + " (instance " + epoch.InstanceID + ")", false
+	}
+	if owner.Resumed {
+		// The prefix was accepted before (an earlier run of this init, or the
+		// configured prefix): the stanzas since are the server's own.
+		return "", true
+	}
+	mine := map[string]bool{}
+	for _, s := range owner.Stanzas {
+		mine[s] = true
+	}
+	for _, s := range stanzas {
+		if !mine[s] {
+			return "stanza " + s, false
+		}
+	}
+	return "", true
 }
 
 // stanzas lists the stanza directories under <prefix>/pgbackrest/backup/.

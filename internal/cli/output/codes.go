@@ -33,6 +33,9 @@ const (
 	CodeReleaseVerification   = "release_verification_failed"
 	CodeDatabaseProtected     = "database_protected"
 	CodeProtectCodeRejected   = "protect_code_rejected"
+	CodeBundleCorrupt         = "bundle_corrupt"
+	CodeBundleNotFound        = "bundle_not_found"
+	CodeNodeFenced            = "node_fenced"
 	CodeError                 = "error"
 )
 
@@ -84,6 +87,9 @@ var exitByCode = map[string]int{
 	CodeReleaseVerification:   ExitReleaseVerification,
 	CodeDatabaseProtected:     ExitUnsafe,
 	CodeProtectCodeRejected:   ExitUnsafe,
+	CodeBundleCorrupt:         ExitSecrets,
+	CodeBundleNotFound:        ExitPrecondition,
+	CodeNodeFenced:            ExitPrecondition,
 	CodeError:                 ExitGeneric,
 }
 

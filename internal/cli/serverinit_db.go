@@ -8,6 +8,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/eru/internal/steps"
 )
 
 // callDatabasePhase runs cluster.bootstrap phase=database over WireGuard.
@@ -15,6 +16,14 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 	raw, err := r.nodeConfig().Encode()
 	if err != nil {
 		return node.BootstrapResult{}, err
+	}
+	// master-backup-v1 encrypts the master bundles to the recovery
+	// recipient, with or without a bucket (Phase 5).
+	if r.sec.Backup != nil && r.sec.Backup.Dumps.AgeRecipient != "" {
+		if r.dbSecrets == nil {
+			r.dbSecrets = map[string]string{}
+		}
+		r.dbSecrets[steps.SecretBackupAgeRecipient] = r.sec.Backup.Dumps.AgeRecipient
 	}
 	reply, err := r.p.call(ctx, caller, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseDatabase,
@@ -184,7 +193,7 @@ func (r *initRun) tlsStatus(ctx context.Context, caller remote.Caller) (*node.TL
 // server's addresses and asks the operator to confirm them, so the records
 // propagate while the host phase runs (D10).
 func (r *initRun) confirmDNSEarly() error {
-	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) {
+	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) || (r.restore != nil && !r.restore.addressChanged()) {
 		return nil
 	}
 	return r.askDNS(r.master().PublicAddress, r.prog.PublicIPv6, true)

@@ -1,0 +1,8 @@
+# managed by eru - do not edit
+[Unit]
+Description=eru master backup after a change (Phase 5)
+[Path]
+PathExists={{ .Dirty }}
+Unit=eru-master-backup.service
+[Install]
+WantedBy=paths.target

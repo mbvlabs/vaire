@@ -12,6 +12,7 @@ import (
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/health"
 	"github.com/mbvlabs/eru/internal/hostinfo"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/mbvlabs/eru/internal/steps"
 )
 
@@ -186,6 +187,31 @@ type statusData struct {
 	TLS        *TLSState               `json:"tls,omitempty"`
 	Backups    bool                    `json:"backups_configured"`
 	Databases  []statusDatabase        `json:"databases"`
+	// Master is the master backup's last bundle (Phase 5).
+	Master *statusMaster `json:"master_backup,omitempty"`
+}
+
+// statusMaster is the master backup's row on the server card.
+type statusMaster struct {
+	Last       string `json:"last,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	Uploaded   bool   `json:"uploaded"`
+	Bucket     bool   `json:"bucket"`
+	Epoch      int64  `json:"epoch"`
+	Pending    bool   `json:"pending"`
+	Fenced     bool   `json:"fenced"`
+	LastFailed string `json:"last_failure,omitempty"`
+}
+
+func masterStatusRow(cfg config.Cluster) *statusMaster {
+	f := masterFacts(cfg)
+	if !f.Known {
+		return nil
+	}
+	last := loadMasterLast()
+	e, _ := masterbackup.ReadLocalEpoch("")
+	return &statusMaster{Last: last.Name, CreatedAt: last.CreatedAt, Uploaded: last.Name != "" && last.UploadedName == last.Name,
+		Bucket: f.Bucket, Epoch: e.Epoch, Pending: f.PendingSince != "" || f.Dirty, Fenced: f.Fenced, LastFailed: last.LastFailure}
 }
 
 // handleStatus is eru status: the server's summary and a row per database
@@ -219,6 +245,7 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	if total, free, ok := hostinfo.DiskUsage(cfg.Server.DataRoot); ok {
 		data.Disk = map[string]any{"path": cfg.Server.DataRoot, "total_bytes": total, "free_bytes": free, "free_pct": freePct(total, free)}
 	}
+	data.Master = masterStatusRow(cfg)
 	snaps := readClusters(ctx, cfg, p.DB, true)
 	if len(cfg.Clusters) > 0 {
 		data.Poolers = readPools(ctx)
@@ -228,6 +255,9 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	pending := pendingRestarts()
 	for _, s := range snaps {
 		row := statusRow(cfg, s, rs, st, pending)
+		if rs.IsAwaiting(s.Spec.Name) {
+			row.State, row.Error = stateAwaiting, "eru db recover "+s.Spec.Name
+		}
 		if data.PGVersion == "" {
 			data.PGVersion = s.Sample.ServerVersion
 		}

@@ -13,7 +13,7 @@ import (
 // NodeChecks are the checks the node runs, in report order. The operator
 // adds its own (eru.version_skew, ctx.file_modes, metrics.auth).
 func NodeChecks() []Check {
-	return []Check{
+	checks := []Check{
 		{ID: "host.os_supported", Category: CatHost, AtInit: true, Run: osSupported},
 		{ID: "host.reboot_required", Category: CatHost, AtInit: true, Run: rebootRequired},
 		{ID: "host.disk_data", Category: CatHost, AtInit: true, Run: diskData},
@@ -53,6 +53,7 @@ func NodeChecks() []Check {
 		{ID: "backup.verify", Category: CatBackups, Run: backupVerify},
 		{ID: "backup.drill", Category: CatBackups, Run: backupDrill},
 	}
+	return append(checks, MasterChecks()...)
 }
 
 func osSupported(f Facts) []Result {

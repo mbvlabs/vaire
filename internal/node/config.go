@@ -10,6 +10,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/masterbackup"
 	"github.com/mbvlabs/eru/internal/state"
 	"github.com/mbvlabs/eru/internal/steps"
 )
@@ -238,5 +239,9 @@ func syncNodeHostname(cfg config.Cluster) error {
 	if err != nil {
 		return err
 	}
-	return engine.WriteFileAtomic(config.NodePath, raw, 0o640)
+	if err := engine.WriteFileAtomic(config.NodePath, raw, 0o640); err != nil {
+		return err
+	}
+	masterbackup.MarkDirty("node.toml")
+	return nil
 }

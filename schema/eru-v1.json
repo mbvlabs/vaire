@@ -31,6 +31,12 @@
         "lockdown_failed",
         "secrets_error",
         "release_verification_failed",
+        "doctor_failed",
+        "database_protected",
+        "protect_code_rejected",
+        "bundle_corrupt",
+        "bundle_not_found",
+        "node_fenced",
         "error"
       ]
     },

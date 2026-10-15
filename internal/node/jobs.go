@@ -31,15 +31,25 @@ const JobDir = "/var/lib/eru/jobs"
 // dump-create run only as detachable jobs an RPC starts (--job-id).
 var jobNames = []string{
 	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump",
-	"stanza-expiry", "restore", "db-fork", "maint",
-	"vps-backup", "maint-daily", "maint-weekly", "certs-renew", "metrics-refresh", "doctor",
+	"stanza-expiry", "restore", "db-fork", "maint", "recover",
+	"maint-daily", "maint-weekly", "certs-renew", "metrics-refresh", "doctor",
+	"master-backup", "fence-check",
 }
 
-// laterJobs are the jobs of later phases.
-var laterJobs = map[string]bool{"vps-backup": true}
+// bucketWriteJobs write to or delete from the bucket, so they check the
+// epoch fence first (Phase 5, D5).
+var bucketWriteJobs = map[string]bool{
+	"backup-full": true, "backup-diff": true, "backup-incr": true, "db-dump": true,
+	"stanza-expiry": true, "db-fork": true, "restore": true, "recover": true,
+}
+
+// locklessJobs take no node lock (Phase 5): the master backup must never
+// wait for a long apply, and the fence check must run at boot whatever
+// holds the lock. The master backup has its own lock.
+var locklessJobs = map[string]bool{"master-backup": true, "fence-check": true}
 
 // rpcOnlyJobs need a spec written by the RPC that starts them.
-var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true, "maint": true}
+var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true, "maint": true, "recover": true}
 
 // quietJobs run often and are not recorded in state.json's job list, which
 // keeps only the last 50 runs: metrics-refresh runs every minute and would
@@ -104,10 +114,6 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		return nil, "", output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
 			WithDetails(map[string]any{"jobs": jobNames})
 	}
-	if laterJobs[job] {
-		return nil, "", output.NewError(output.CodeError, "job "+job+" is not implemented yet", output.ExitGeneric,
-			"This job arrives in a later phase of the roadmap.")
-	}
 	if _, err := os.Stat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
 		return nil, "", output.NewError(
 			output.CodePrecondition,
@@ -130,6 +136,18 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		}
 		defer release()
 		res, err := certsRenew(ctx, report)
+		return res, "", err
+	}
+	if locklessJobs[job] {
+		cfg, err := config.LoadCluster(config.ClusterPath)
+		if err != nil {
+			return nil, "", err
+		}
+		if job == "fence-check" {
+			res, err := runFenceCheck(ctx, cfg, report)
+			return res, "", err
+		}
+		res, err := runMasterBackup(ctx, cfg, report, masterBackupOptions{debounce: true})
 		return res, "", err
 	}
 	if quietJobs[job] {
@@ -222,6 +240,12 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	}
 	defer release()
 
+	if bucketWriteJobs[job] {
+		if err := requireNotFenced(ctx, cfg, report); err != nil {
+			finishJob(rec, engine.JobFailed, "", nil, err)
+			return nil, "", err
+		}
+	}
 	res, err = runJobFunc(ctx, env)
 	if err != nil {
 		if errors.Is(err, errSkipped) {
@@ -367,7 +391,7 @@ func putJob(rec engine.JobRecord) {
 // is removed, as its cluster was never made.
 func notRun(env *jobEnv, cause error) {
 	switch env.Job {
-	case "restore":
+	case "restore", "recover":
 		failRestore(env, cause)
 	case "db-fork":
 		var p dbForkParams
@@ -403,6 +427,8 @@ func runJobFunc(ctx context.Context, env *jobEnv) (any, error) {
 		return jobMaintDaily(ctx, env)
 	case "maint-weekly":
 		return jobMaintWeekly(ctx, env)
+	case "recover":
+		return jobRecover(ctx, env)
 	}
 	return nil, fmt.Errorf("job %s has no implementation", env.Job)
 }
@@ -917,7 +943,7 @@ func rpcJobDatabase(job string, params json.RawMessage) string {
 		_ = json.Unmarshal(params, &p)
 	}
 	switch job {
-	case "restore":
+	case "restore", "recover":
 		return p.Database
 	case "db-fork":
 		return p.Name
@@ -945,7 +971,7 @@ func jobClusters(env *jobEnv) []string {
 		names = []string{env.DB}
 	case env.Job == "maint":
 		names = []string{p.DB}
-	case env.Job == "restore":
+	case env.Job == "restore", env.Job == "recover":
 		names = []string{p.Database}
 	case env.Job == "db-fork":
 		names = []string{p.Source, p.Name}
