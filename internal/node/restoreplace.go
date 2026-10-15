@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -35,14 +38,55 @@ type RestorePlaced struct {
 	SSHHostKeys []string              `json:"ssh_host_keys"`
 }
 
-// firstLoginID is where login users and groups start: a bundled file is
-// owned by root or a system account, never a person's.
-const firstLoginID = 1000
+// placement is how one bundled file is written on the new host: the owner,
+// group and mode the step or writer that owns the file gives it, by name.
+// The manifest's owners and modes describe the old host and are never used:
+// ids differ between hosts, and a mode in the bundle is only data.
+type placement struct {
+	owner, group string
+	mode         os.FileMode
+}
 
-// placeDirs are the modes of the directories bundled files live in.
+// placements is every bundled path, or glob, with its placement. Each value
+// is the constant its writer uses; TestPlacementsMatchTheWriters ties the
+// two together, and refuses a bundled path without an entry.
+var placements = []struct {
+	pattern string
+	placement
+}{
+	{masterbackup.ClusterPath, placement{"root", "root", config.FileMode}},
+	{masterbackup.NodePath, placement{"root", "root", config.FileMode}},
+	{masterbackup.OperatorsPath, placement{"root", "root", config.FileMode}},
+	{masterbackup.RecordsPath, placement{"root", "root", backup.RecordsMode}},
+	{masterbackup.ProtectPath, placement{"root", "root", protectStateMode}},
+	{masterbackup.WGKeyPath, placement{"root", "root", steps.WGPrivateKeyMode}},
+	// OpenSSH's own: private keys root 0600, public keys 0644.
+	{masterbackup.HostKeyGlob, placement{"root", "root", 0o600}},
+	{masterbackup.HostKeyPubGlob, placement{"root", "root", 0o644}},
+	{masterbackup.TLSCertPath, placement{steps.TLSCertOwner, steps.TLSCertGroup, steps.TLSCertMode}},
+	{masterbackup.TLSKeyPath, placement{steps.TLSKeyOwner, steps.TLSKeyGroup, steps.TLSKeyMode}},
+	{masterbackup.ACMEGlob, placement{"root", "root", steps.ACMEAccountKeyMode}},
+}
+
+// placementOf is p's placement.
+func placementOf(p string) (placement, bool) {
+	for _, e := range placements {
+		if ok, _ := path.Match(e.pattern, p); ok {
+			return e.placement, true
+		}
+	}
+	return placement{}, false
+}
+
+// placeDirs are the modes of the directories bundled files live in, as their
+// owners create them. Every one is root's.
 var placeDirs = map[string]os.FileMode{
-	"/etc/eru": 0o755, "/etc/eru/tls": 0o755, "/etc/eru/acme": 0o700,
-	"/etc/wireguard": 0o700, "/var/lib/eru": 0o700, "/etc/ssh": 0o755,
+	config.Dir:                       config.DirMode,
+	steps.TLSDir:                     steps.TLSDirMode,
+	steps.ACMEDir:                    steps.ACMEDirMode,
+	path.Dir(steps.WGPrivateKeyPath): steps.WGDirMode,
+	path.Dir(engine.StatePath):       0o700,
+	"/etc/ssh":                       0o755,
 }
 
 func bootstrapRestore(ctx context.Context, env *Env, p bootstrapParams) (Result, error) {
@@ -208,28 +252,63 @@ func checkHostKey(f masterbackup.File) error {
 	return nil
 }
 
-// placeFile writes one file with its owner, group and mode. An owner or
-// group this host doesn't have yet (ssl-cert before nginx is installed) is
-// root; the step that owns the file sets it right later.
+// placeFile writes one file with its placement's owner, group and mode.
 func placeFile(f masterbackup.File) error {
-	dir := filepath.Dir(f.Path)
+	owner, group, mode, err := placedAs(f.Path)
+	if err != nil {
+		return err
+	}
+	if err := placeDir("/", filepath.Dir(f.Path)); err != nil {
+		return err
+	}
+	return engine.WriteFileAtomicOwned(f.Path, f.Data, mode, owner, group)
+}
+
+// placedAs is the owner, group and mode p is written with on this host. A
+// group the host doesn't have yet (ssl-cert before tls-v1 installs it) is
+// root; the step that owns the file creates the group and sets it, and its
+// Check reports the file until it has.
+func placedAs(p string) (owner, group string, mode os.FileMode, err error) {
+	pl, ok := placementOf(p)
+	if !ok {
+		return "", "", 0, fmt.Errorf("%s has no placement", p)
+	}
+	owner, group = pl.owner, pl.group
+	if _, _, err := engine.ResolveIDs(owner, ""); err != nil {
+		owner = "root"
+	}
+	if _, _, err := engine.ResolveIDs("", group); err != nil {
+		group = "root"
+	}
+	return owner, group, pl.mode, nil
+}
+
+// placeDir creates dir under root, and each missing parent, each with its
+// own mode from placeDirs (0755 for any other), set with chmod after the
+// mkdir so the umask can't narrow it. os.MkdirAll would give every parent
+// the leaf's mode: /etc/eru/acme placed first made /etc/eru 0700, and
+// postgres could no longer reach /etc/eru/tls. An existing directory is
+// left as it is.
+func placeDir(root, dir string) error {
+	if parent := filepath.Dir(dir); parent != dir {
+		if err := placeDir(root, parent); err != nil {
+			return err
+		}
+	} else {
+		return nil
+	}
 	mode, known := placeDirs[dir]
 	if !known {
 		mode = 0o755
 	}
-	if err := os.MkdirAll(dir, mode); err != nil {
+	full := filepath.Join(root, dir)
+	if err := os.Mkdir(full, mode); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil
+		}
 		return err
 	}
-	owner, group := f.Owner, f.Group
-	if uid, _, err := engine.ResolveIDs(owner, ""); err != nil || uid >= firstLoginID {
-		owner = "root"
-	}
-	if _, gid, err := engine.ResolveIDs("", group); err != nil || gid >= firstLoginID {
-		group = "root"
-	}
-	// Every bundled file is data (keys, configuration, records): never
-	// executable, setuid or sticky, whatever the manifest says.
-	return engine.WriteFileAtomicOwned(f.Path, f.Data, os.FileMode(f.Mode)&0o666, owner, group)
+	return os.Chmod(full, mode)
 }
 
 // placeInstance writes the instance id the operator generated and the epoch

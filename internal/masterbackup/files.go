@@ -56,9 +56,9 @@ const (
 	WGKeyPath      = "/etc/wireguard/eru.key"
 	TLSCertPath    = "/etc/eru/tls/server.crt"
 	TLSKeyPath     = "/etc/eru/tls/server.key"
-	hostKeyGlob    = "/etc/ssh/ssh_host_*_key"
-	hostKeyPubGlob = "/etc/ssh/ssh_host_*_key.pub"
-	acmeGlob       = "/etc/eru/acme/*"
+	HostKeyGlob    = "/etc/ssh/ssh_host_*_key"
+	HostKeyPubGlob = "/etc/ssh/ssh_host_*_key.pub"
+	ACMEGlob       = "/etc/eru/acme/*"
 )
 
 // Spec is one path, or glob, of the bundle.
@@ -77,11 +77,11 @@ func Specs() []Spec {
 		{Path: RecordsPath},
 		{Path: ProtectPath},
 		{Path: WGKeyPath},
-		{Path: hostKeyGlob, Glob: true},
-		{Path: hostKeyPubGlob, Glob: true},
+		{Path: HostKeyGlob, Glob: true},
+		{Path: HostKeyPubGlob, Glob: true},
 		{Path: TLSCertPath},
 		{Path: TLSKeyPath},
-		{Path: acmeGlob, Glob: true},
+		{Path: ACMEGlob, Glob: true},
 	}
 }
 

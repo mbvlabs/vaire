@@ -19,6 +19,10 @@ const (
 	WGPrivateKeyPath = "/etc/wireguard/eru.key"
 	WGPublicKeyPath  = "/etc/wireguard/eru.pub"
 	WGConfigPath     = "/etc/wireguard/wg0.conf"
+	// WGDirMode and WGPrivateKeyMode are what wireguard-key.sh gives
+	// /etc/wireguard and the private key; root owns both.
+	WGDirMode        os.FileMode = 0o700
+	WGPrivateKeyMode os.FileMode = 0o600
 )
 
 type wireguard struct{}

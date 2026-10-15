@@ -65,7 +65,7 @@ func (s FileStore) Save(raw []byte) error {
 	if err := cfg.Validate(); err != nil {
 		return config.ValidationError(err)
 	}
-	if err := engine.WriteFileAtomic(s.path(), raw, 0o640); err != nil {
+	if err := engine.WriteFileAtomic(s.path(), raw, config.FileMode); err != nil {
 		return err
 	}
 	if s.path() == Path {

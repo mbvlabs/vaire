@@ -5,13 +5,20 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"os"
+	"os/user"
+	"path"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/eru/internal/steps"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -156,5 +163,145 @@ func TestRecoverTokenAndSplitBrain(t *testing.T) {
 	}
 	if scaffoldSteps("app")[1] != "postgres-cluster-v1@app" {
 		t.Errorf("scaffold steps %v", scaffoldSteps("app"))
+	}
+}
+
+// samplePath is a concrete path a bundle spec matches.
+func samplePath(s masterbackup.Spec) string {
+	switch s.Path {
+	case masterbackup.HostKeyGlob:
+		return "/etc/ssh/ssh_host_ed25519_key"
+	case masterbackup.HostKeyPubGlob:
+		return "/etc/ssh/ssh_host_ed25519_key.pub"
+	case masterbackup.ACMEGlob:
+		return steps.ACMEAccountKeyPath
+	}
+	return s.Path
+}
+
+// TestPlacementsMatchTheWriters: every bundled path has a placement, and it
+// is the owner, group and mode the file's own writer gives it (the steps'
+// scripts included), so a restored file is what apply expects.
+func TestPlacementsMatchTheWriters(t *testing.T) {
+	want := map[string]placement{
+		masterbackup.ClusterPath:            {"root", "root", 0o640},
+		masterbackup.NodePath:               {"root", "root", 0o640},
+		masterbackup.OperatorsPath:          {"root", "root", 0o640},
+		masterbackup.RecordsPath:            {"root", "root", 0o600},
+		masterbackup.ProtectPath:            {"root", "root", 0o600},
+		masterbackup.WGKeyPath:              {"root", "root", 0o600},
+		"/etc/ssh/ssh_host_ed25519_key":     {"root", "root", 0o600},
+		"/etc/ssh/ssh_host_ed25519_key.pub": {"root", "root", 0o644},
+		masterbackup.TLSCertPath:            {"root", "root", 0o644},
+		masterbackup.TLSKeyPath:             {"root", "ssl-cert", 0o640},
+		steps.ACMEAccountKeyPath:            {"root", "root", 0o600},
+	}
+	specs := masterbackup.Specs()
+	if len(specs) != len(want) {
+		t.Fatalf("%d bundle specs, %d expected placements: add the new path here and to placements", len(specs), len(want))
+	}
+	for _, s := range specs {
+		p := samplePath(s)
+		got, ok := placementOf(p)
+		if !ok {
+			t.Errorf("%s has no placement", p)
+			continue
+		}
+		if got != want[p] {
+			t.Errorf("%s placed as %s:%s %04o, want %s:%s %04o", p, got.owner, got.group, got.mode, want[p].owner, want[p].group, want[p].mode)
+		}
+	}
+	if _, ok := placementOf("/etc/eru/runtime/backup.env"); ok {
+		t.Error("a path outside the bundle has a placement")
+	}
+
+	// The writers in Go use the same constants placements does; the steps'
+	// scripts spell them out.
+	if steps.TLSKeyOwner != "root" || steps.TLSKeyGroup != "ssl-cert" || steps.TLSCertOwner != "root" || steps.TLSCertGroup != "root" {
+		t.Error("the TLS owners changed: update tls.sh and this test")
+	}
+	tls := steps.Script("tls")
+	for _, line := range []string{
+		fmt.Sprintf("install -d -m %04o %s", steps.TLSDirMode, steps.TLSDir),
+		fmt.Sprintf("install -d -m %04o %s", steps.ACMEDirMode, steps.ACMEDir),
+		fmt.Sprintf("chown %s:%s %s", steps.TLSKeyOwner, steps.TLSKeyGroup, steps.TLSKeyPath),
+		fmt.Sprintf("chmod %04o %s", steps.TLSKeyMode, steps.TLSKeyPath),
+		fmt.Sprintf("chown %s:%s %s", steps.TLSCertOwner, steps.TLSCertGroup, steps.TLSCertPath),
+		fmt.Sprintf("chmod %04o %s", steps.TLSCertMode, steps.TLSCertPath),
+	} {
+		if !strings.Contains(tls, line) {
+			t.Errorf("tls.sh lacks %q", line)
+		}
+	}
+	wg := steps.Script("wireguard-key")
+	for _, line := range []string{
+		fmt.Sprintf(`install -d -m %04o "$(dirname "${WG_PRIVATE_KEY_PATH}")"`, steps.WGDirMode),
+		fmt.Sprintf(`chmod %04o "${tmp}"`, steps.WGPrivateKeyMode),
+	} {
+		if !strings.Contains(wg, line) {
+			t.Errorf("wireguard-key.sh lacks %q", line)
+		}
+	}
+
+	// The directories as their owners create them.
+	if placeDirs[config.Dir] != 0o755 || placeDirs[steps.TLSDir] != 0o755 {
+		t.Error("/etc/eru and /etc/eru/tls must be 0755: postgres reads the certificate through them")
+	}
+	for _, d := range nodeDirs {
+		if m, ok := placeDirs[d.path]; ok && m != d.mode {
+			t.Errorf("%s placed %04o, selfcheck makes it %04o", d.path, m, d.mode)
+		}
+	}
+	for _, s := range specs {
+		dir := path.Dir(samplePath(s))
+		if _, ok := placeDirs[dir]; !ok {
+			t.Errorf("%s's directory %s has no mode in placeDirs", samplePath(s), dir)
+		}
+	}
+}
+
+// TestPlacedAsResolvesNames: placement uses the table's names, never the
+// manifest's, and a group this host lacks is root until its step makes it.
+func TestPlacedAsResolvesNames(t *testing.T) {
+	owner, group, mode, err := placedAs(masterbackup.ClusterPath)
+	if err != nil || owner != "root" || group != "root" || mode != config.FileMode {
+		t.Errorf("cluster.toml placed as %s:%s %04o, %v", owner, group, mode, err)
+	}
+	_, group, mode, err = placedAs(masterbackup.TLSKeyPath)
+	if err != nil || mode != steps.TLSKeyMode {
+		t.Fatalf("server.key placed %04o, %v", mode, err)
+	}
+	if _, lookErr := user.LookupGroup(steps.TLSKeyGroup); lookErr == nil && group != steps.TLSKeyGroup {
+		t.Errorf("server.key's group is %s on a host with %s", group, steps.TLSKeyGroup)
+	} else if lookErr != nil && group != "root" {
+		t.Errorf("server.key's group is %s on a host without %s", group, steps.TLSKeyGroup)
+	}
+	if _, _, _, err := placedAs("/etc/passwd"); err == nil {
+		t.Error("a path without a placement was placed")
+	}
+}
+
+// TestPlaceDirGivesEachDirectoryItsMode is the live DR blocker: the ACME
+// key sorts first, and MkdirAll made /etc/eru 0700 with /etc/eru/acme.
+func TestPlaceDirGivesEachDirectoryItsMode(t *testing.T) {
+	root := t.TempDir()
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	for _, d := range []string{steps.ACMEDir, steps.TLSDir, config.Dir, "/etc/wireguard", "/var/lib/eru", "/etc/ssh"} {
+		if err := placeDir(root, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for dir, want := range placeDirs {
+		info, err := os.Stat(filepath.Join(root, dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s is %04o, want %04o", dir, got, want)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(root, "/etc")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("/etc is not 0755: %v", err)
 	}
 }

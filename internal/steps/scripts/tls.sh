@@ -42,8 +42,10 @@ if [ "${PHASE}" = "install" ]; then
       -keyout /etc/eru/tls/server.key -out /etc/eru/tls/server.crt \
       -subj "/CN=${TLS_HOSTNAME}" -addext "subjectAltName=DNS:${TLS_HOSTNAME}"
   fi
+  chown root:root /etc/eru/tls
   chown root:ssl-cert /etc/eru/tls/server.key
   chmod 0640 /etc/eru/tls/server.key
+  chown root:root /etc/eru/tls/server.crt
   chmod 0644 /etc/eru/tls/server.crt
   printf 'nginx %s installed\n' "${version}"
   exit 0

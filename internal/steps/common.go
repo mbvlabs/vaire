@@ -78,6 +78,16 @@ func fileIs(path, content string, perm os.FileMode) bool {
 // fileIsOwned is fileIs that also checks the owner and group, so a file a
 // service cannot read counts as drift. An empty owner or group is not checked.
 func fileIsOwned(path, content string, perm os.FileMode, owner, group string) bool {
+	if !ownedAs(path, perm, owner, group) {
+		return false
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: managed file paths from the step catalogue.
+	return err == nil && string(raw) == content
+}
+
+// ownedAs reports whether path exists with mode perm and the named owner
+// and group, whatever its content. An empty owner or group is not checked.
+func ownedAs(path string, perm os.FileMode, owner, group string) bool {
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != perm {
 		return false
@@ -92,8 +102,7 @@ func fileIsOwned(path, content string, perm os.FileMode, owner, group string) bo
 			return false
 		}
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: managed file paths from the step catalogue.
-	return err == nil && string(raw) == content
+	return true
 }
 
 // writeFile writes a managed file atomically, creating its directory.

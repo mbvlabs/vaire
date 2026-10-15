@@ -17,6 +17,18 @@ import (
 // ClusterPath is the desired state on the central command.
 const ClusterPath = "/etc/eru/cluster.toml"
 
+// Dir holds cluster.toml, node.toml and operators.toml. It is 0755: the
+// services read /etc/eru/tls through it, and the archive wrapper (running as
+// postgres) stats /etc/eru/fenced.
+const Dir = "/etc/eru"
+
+// DirMode is Dir's mode; FileMode is the mode of the files eru writes in it
+// (cluster.toml, node.toml, operators.toml), owned by root.
+const (
+	DirMode  os.FileMode = 0o755
+	FileMode os.FileMode = 0o640
+)
+
 // ClusterSchema is the cluster.toml format version.
 const ClusterSchema = 1
 

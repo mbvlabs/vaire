@@ -15,6 +15,9 @@ import (
 // keeps only jobs and the lockdown flags). The master backup carries it.
 const RecordsPath = "/var/lib/eru/records.json"
 
+// RecordsMode is records.json's mode; root owns it.
+const RecordsMode os.FileMode = 0o600
+
 // recordsLockPath serializes read-modify-write cycles of records.json.
 const recordsLockPath = RecordsPath + ".lock"
 
@@ -408,7 +411,7 @@ func UpdateRecords(fn func(*Records) error) error {
 		if err != nil {
 			return err
 		}
-		if err := engine.WriteFileAtomic(RecordsPath, append(raw, '\n'), 0o600); err != nil {
+		if err := engine.WriteFileAtomic(RecordsPath, append(raw, '\n'), RecordsMode); err != nil {
 			return err
 		}
 		if s.durableHash() != before {

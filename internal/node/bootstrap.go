@@ -278,7 +278,7 @@ func osName(o hostinfo.OS) string {
 // writeBootstrapFiles writes cluster.toml, node.toml and the operator into
 // operators.toml. A re-run keeps installed_at and the other operators.
 func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Operator) error {
-	if err := os.MkdirAll(filepath.Dir(config.ClusterPath), 0o755); err != nil { //nolint:gosec // G301: §6.2 /etc/eru is world-listable; files inside are 0640.
+	if err := os.MkdirAll(config.Dir, config.DirMode); err != nil {
 		return err
 	}
 	clusterRaw, err := cfg.Encode()
@@ -309,7 +309,7 @@ func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Ope
 		config.NodePath:      nodeRaw,
 		config.OperatorsPath: opsRaw,
 	} {
-		if err := engine.WriteFileAtomic(path, raw, 0o640); err != nil {
+		if err := engine.WriteFileAtomic(path, raw, config.FileMode); err != nil {
 			return err
 		}
 	}

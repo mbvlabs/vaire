@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"os"
+
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/hostinfo"
 	"github.com/mbvlabs/eru/internal/pg"
@@ -20,10 +22,18 @@ const (
 	TLSCertPath = TLSDir + "/server.crt"
 	// TLSKeyPath is the served private key.
 	TLSKeyPath = TLSDir + "/server.key"
-	// TLSKeyOwner and TLSKeyGroup own the served private key. PostgreSQL and
-	// PgBouncer are in the ssl-cert group.
-	TLSKeyOwner = "root"
-	TLSKeyGroup = "ssl-cert"
+	// TLSDirMode is TLSDir's mode: PostgreSQL, PgBouncer and nginx enter it.
+	TLSDirMode os.FileMode = 0o755
+	// TLSCertOwner, TLSCertGroup and TLSCertMode are the served
+	// certificate's: world-readable.
+	TLSCertOwner             = "root"
+	TLSCertGroup             = "root"
+	TLSCertMode  os.FileMode = 0o644
+	// TLSKeyOwner, TLSKeyGroup and TLSKeyMode are the served private key's.
+	// PostgreSQL and PgBouncer are in the ssl-cert group.
+	TLSKeyOwner             = "root"
+	TLSKeyGroup             = "ssl-cert"
+	TLSKeyMode  os.FileMode = 0o640
 	// RuntimeDir holds the secrets services need at runtime.
 	RuntimeDir = "/etc/eru/runtime"
 	// PgbouncerDir holds the PgBouncer configuration.
@@ -47,8 +57,11 @@ const (
 	NginxConfPath = "/etc/nginx/nginx.conf"
 	// ACMEDir holds the ACME account key.
 	ACMEDir = "/etc/eru/acme"
-	// ACMEAccountKeyPath is the ACME account's private key.
-	ACMEAccountKeyPath = ACMEDir + "/account.key"
+	// ACMEDirMode is ACMEDir's mode: root only.
+	ACMEDirMode os.FileMode = 0o700
+	// ACMEAccountKeyPath is the ACME account's private key, root 0600.
+	ACMEAccountKeyPath             = ACMEDir + "/account.key"
+	ACMEAccountKeyMode os.FileMode = 0o600
 	// ACMEWebroot is served by nginx for HTTP-01 challenges. It sits outside
 	// /var/lib/eru, which is root 0700 and that nginx's workers can't enter.
 	ACMEWebroot = "/var/lib/eru-acme"

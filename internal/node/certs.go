@@ -128,10 +128,10 @@ func renewReason(cert *x509.Certificate, domain string, selfSigned bool) string 
 // chowned before the rename, so PostgreSQL, PgBouncer and nginx never see it
 // with the wrong owner.
 func installCert(chainPEM, keyPEM []byte) error {
-	if err := engine.WriteFileAtomicOwned(steps.TLSKeyPath, keyPEM, 0o640, steps.TLSKeyOwner, steps.TLSKeyGroup); err != nil {
+	if err := engine.WriteFileAtomicOwned(steps.TLSKeyPath, keyPEM, steps.TLSKeyMode, steps.TLSKeyOwner, steps.TLSKeyGroup); err != nil {
 		return err
 	}
-	if err := engine.WriteFileAtomic(steps.TLSCertPath, chainPEM, 0o644); err != nil {
+	if err := engine.WriteFileAtomicOwned(steps.TLSCertPath, chainPEM, steps.TLSCertMode, steps.TLSCertOwner, steps.TLSCertGroup); err != nil {
 		return err
 	}
 	masterbackup.MarkDirty("certificate")
@@ -328,10 +328,10 @@ func loadOrCreateKey(path string) (crypto.Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), steps.ACMEDirMode); err != nil {
 		return nil, err
 	}
-	if err := engine.WriteFileAtomic(path, raw, 0o600); err != nil {
+	if err := engine.WriteFileAtomic(path, raw, steps.ACMEAccountKeyMode); err != nil {
 		return nil, err
 	}
 	masterbackup.MarkDirty("acme account")

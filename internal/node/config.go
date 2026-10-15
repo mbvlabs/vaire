@@ -239,7 +239,7 @@ func syncNodeHostname(cfg config.Cluster) error {
 	if err != nil {
 		return err
 	}
-	if err := engine.WriteFileAtomic(config.NodePath, raw, 0o640); err != nil {
+	if err := engine.WriteFileAtomic(config.NodePath, raw, config.FileMode); err != nil {
 		return err
 	}
 	masterbackup.MarkDirty("node.toml")

@@ -242,16 +242,16 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 
 	// 1. The scaffold: 18/<db> empty, on its port, with its configuration
 	// but no archiving into the stanza (an empty cluster's WAL must never
-	// reach it).
-	if !steps.ClusterExists(ctx, db) {
-		logLine(env.Report, env.Job, "building the empty cluster 18/"+db+" for the recovered data")
-		scaffold := cfg
-		scaffold.Backup.Provider = ""
-		if _, _, err := engine.Apply(ctx, steps.Catalog(), scaffold, rt, engine.Options{
-			Only: scaffoldSteps(db), Recovering: db, Restarter: steps.Restarter(scaffold), Report: env.Report,
-		}); err != nil {
-			return nil, err
-		}
+	// reach it). Its steps run on every attempt, so a retry after a failure
+	// part way through (the cluster made, its configuration step failed)
+	// finishes the scaffold; on a complete one they change nothing.
+	logLine(env.Report, env.Job, "building the empty cluster 18/"+db+" for the recovered data")
+	scaffold := cfg
+	scaffold.Backup.Provider = ""
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), scaffold, rt, engine.Options{
+		Only: scaffoldSteps(db), Recovering: db, Restarter: steps.Restarter(scaffold), Report: env.Report,
+	}); err != nil {
+		return nil, err
 	}
 
 	// 2. Materialise the stanza into <db>__restoring.

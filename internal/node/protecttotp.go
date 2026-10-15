@@ -21,6 +21,9 @@ import (
 // cluster.toml, which operators read and pull.
 const ProtectStatePath = "/etc/eru/protect.json"
 
+// protectStateMode is protect.json's mode; root owns it.
+const protectStateMode os.FileMode = 0o600
+
 // ProtectCodeSecret is the request secret that carries a TOTP code. As a
 // secret it is redacted from every output and never written to a run log.
 const ProtectCodeSecret = "protect_code"
@@ -77,7 +80,7 @@ func (g protectGuard) save(st protectState) error {
 	if err != nil {
 		return err
 	}
-	if err := engine.WriteFileAtomic(g.path, append(raw, '\n'), 0o600); err != nil {
+	if err := engine.WriteFileAtomic(g.path, append(raw, '\n'), protectStateMode); err != nil {
 		return err
 	}
 	if g.path == ProtectStatePath {

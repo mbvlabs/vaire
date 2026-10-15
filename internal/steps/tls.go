@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/mbvlabs/eru/internal/config"
@@ -58,6 +59,21 @@ func (tlsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) 
 	}
 	if _, err := os.Stat(TLSCertPath); err != nil {
 		return incomplete(TLSCertPath + " is missing"), nil
+	}
+	// PostgreSQL, PgBouncer and nginx read these as their own users: a
+	// drifted owner or mode is drift like a changed file.
+	for _, f := range []struct {
+		path         string
+		mode         os.FileMode
+		owner, group string
+	}{
+		{TLSDir, TLSDirMode, "root", "root"},
+		{TLSCertPath, TLSCertMode, TLSCertOwner, TLSCertGroup},
+		{TLSKeyPath, TLSKeyMode, TLSKeyOwner, TLSKeyGroup},
+	} {
+		if !ownedAs(f.path, f.mode, f.owner, f.group) {
+			return incomplete(fmt.Sprintf("%s isn't %s:%s %04o", f.path, f.owner, f.group, f.mode)), nil
+		}
 	}
 	return complete(), nil
 }
