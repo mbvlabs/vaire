@@ -45,7 +45,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	user, password, err := adminCredentials(s.ctx)
+	user, password, err := sessionLogin(cmd, s, p, db, flagTrue(cmd, "write"))
 	if err != nil {
 		return err
 	}

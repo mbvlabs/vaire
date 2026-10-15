@@ -86,6 +86,11 @@ func TimersStepIDs() []string { return []string{timersID} }
 // RolesStepIDs is the step db.create runs on its own.
 func RolesStepIDs() []string { return []string{postgresRolesID} }
 
+// RolesStepID is cluster's postgres-roles-v1 instance. config.set runs it
+// when a database's protection changes, so eru_admin's write access follows
+// the flag at once (AdminAccessSQL).
+func RolesStepID(cluster string) string { return engine.InstanceID(postgresRolesID, cluster) }
+
 // PoolerStepIDs is the step db create and db drop run after the cluster
 // changes, so the poolers pick up the database's entries with a reload.
 func PoolerStepIDs() []string { return []string{pgbouncerID} }

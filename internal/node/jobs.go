@@ -20,6 +20,7 @@ import (
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/rpc"
 	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/eru/internal/steps"
 )
 
 // JobDir holds the specs of detachable jobs between the RPC that starts one
@@ -904,6 +905,21 @@ func jobLogHint(rec engine.JobRecord) string {
 		return "Read journalctl _SYSTEMD_INVOCATION_ID=" + rec.InvocationID + " on the node."
 	}
 	return ""
+}
+
+// stepSecrets are the request secrets a job's steps read (steps.StepSecrets)
+// out of req, for the spec of a job that runs steps. Only the request that
+// starts a job carries secrets: without them in its spec, a step that needs
+// one the node lacks fails with input_required (postgres-roles-v1 on a
+// rebuilt master, which has no service password files yet).
+func stepSecrets(req map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, key := range steps.StepSecrets {
+		if v := req[key]; v != "" {
+			out[key] = v
+		}
+	}
+	return out
 }
 
 // runJobRPC starts job as a detachable unit and follows it.

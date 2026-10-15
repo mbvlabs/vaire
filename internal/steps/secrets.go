@@ -28,6 +28,16 @@ const (
 	SecretBackupAgeIdentity = "backup.age_identity" //nolint:gosec // G101: a key name, not a value.
 )
 
+// StepSecrets are the request secrets steps read (engine.Runtime.SecretValues):
+// the eru_admin and service passwords, the /metrics credential's hash and the
+// recovery kit. apply and db create hand them to their steps directly; a
+// detachable job that runs steps (db recover, db fork) gets them in its spec
+// from the RPC that starts it.
+var StepSecrets = []string{
+	SecretAdminPassword, SecretPgbouncerAuth, SecretMonitor, SecretMetricsHash,
+	SecretBackupKeyID, SecretBackupKeySecret, SecretBackupCipherPass, SecretBackupAgeRecipient,
+}
+
 // SecretMasterBundle is the decrypted master bundle (a tar, base64) that
 // server init --restore places on a new server (Phase 5). The operator
 // decrypts it; the node never sees the recovery identity.

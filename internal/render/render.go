@@ -348,7 +348,7 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 			// retention_full is the restore window in weeks. Time-based
 			// retention keeps it, however many full backups are taken in it.
 			"RetentionDays": cfg.RetentionFull(c) * 7,
-			"QueueMaxMiB":   ArchiveQueueMaxMiB(len(cfg.Clusters)),
+			"QueueMaxMiB":   ArchiveQueueMaxMiB(len(cfg.Clusters) + len(cfg.Awaiting)),
 		})
 	}
 	return execute("pgbackrest.conf.tmpl", map[string]any{

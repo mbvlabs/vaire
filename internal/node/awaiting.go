@@ -21,7 +21,8 @@ func init() {
 }
 
 // stepsView is cluster.toml without the databases awaiting recovery, for the
-// step engine only; keep is one db recover is building. A records file that
+// step engine only; keep is one db recover is building. The left-out
+// databases go to Awaiting, which the tuning counts. A records file that
 // can't be read changes nothing.
 func stepsView(cfg config.Cluster) config.Cluster { return engineView(cfg, "") }
 
@@ -35,10 +36,12 @@ func engineView(cfg config.Cluster, keep string) config.Cluster {
 
 func withoutAwaiting(cfg config.Cluster, recs backup.Records, keep string) config.Cluster {
 	out := cfg
-	out.Clusters = nil
+	out.Clusters, out.Awaiting = nil, nil
 	for _, c := range cfg.Clusters {
 		if c.Name == keep || !recs.IsAwaiting(c.Name) {
 			out.Clusters = append(out.Clusters, c)
+		} else {
+			out.Awaiting = append(out.Awaiting, c)
 		}
 	}
 	return out

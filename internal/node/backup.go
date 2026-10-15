@@ -50,7 +50,9 @@ func oneDatabase(method string) error {
 		"eru backup now, eru backup verify and eru restore drill without --db call it once per database.")
 }
 
-type backupNowParams struct {
+// BackupNowParams are backup.now's params, decoded strictly: the CLI builds
+// its requests (backup now, the fulls after db recover --all) from this type.
+type BackupNowParams struct {
 	Type     string `json:"type"`
 	Database string `json:"database"`
 }
@@ -65,7 +67,7 @@ type backupPlan struct {
 // database plans one per cluster. Without a type, a stanza with a full gets
 // an incremental and one without gets a full.
 func handleBackupNow(ctx context.Context, env *Env) (Result, error) {
-	var p backupNowParams
+	var p BackupNowParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}

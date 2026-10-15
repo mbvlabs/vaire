@@ -361,11 +361,14 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 	return res, nil
 }
 
-// jobRuntime is the step runtime for a job's applies: request secrets aren't
-// needed, the steps it runs read theirs from the node.
+// jobRuntime is the step runtime for a job's applies. Its secret values are
+// the ones the RPC that started the job put in its spec (stepSecrets): a
+// step that finds a secret missing on the node (a service password file on
+// a rebuilt master) takes it from them, as it would in apply. A timer run
+// has none, and its steps read theirs from the node.
 func jobRuntime(env *jobEnv) engine.Runtime {
 	host, _ := hostinfo.Detect(env.Cluster.Server.DataRoot)
-	return engine.Runtime{Shell: env.shell(), Secrets: secrets.Default, Host: host}
+	return engine.Runtime{Shell: env.shell(), Secrets: secrets.Default, SecretValues: env.Secrets, Host: host}
 }
 
 // applyPoolers runs pgbouncer-v1, which renders both poolers' entries,
@@ -597,7 +600,12 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		err = backup.StartCluster(ctx, rt.Shell, step, report, db, cfg.Server.DataDirectory(db), spec.Port, until)
 	}
 	if err == nil {
-		err = backup.Promote(ctx, steps.ClusterPG(spec), cfg.Server.DataDirectory(db))
+		var dropped []string
+		if dropped, err = backup.Promote(ctx, steps.ClusterPG(spec), cfg.Server.DataDirectory(db)); err == nil {
+			// Still paused: a recovery target dropped above leaves only with
+			// a restart, which postgres-config-v1 would otherwise refuse.
+			err = backup.SettlePromoted(ctx, rt.Shell, step, report, steps.ClusterPG(spec), db, cfg.Server.DataDirectory(db), spec.Port, dropped)
+		}
 	}
 	resume()
 	if err != nil {
@@ -1243,7 +1251,9 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	env.Cluster = saved
-	jobSecrets := map[string]string{}
+	// The new roles' passwords for the rename, and what the fork's steps
+	// read (the service passwords db fork sends, as db create does).
+	jobSecrets := stepSecrets(env.Req.Secrets)
 	for _, role := range steps.DatabaseRoles {
 		key := steps.SecretDatabaseRole(p.Name, role)
 		jobSecrets[key] = env.Req.Secrets[key]
@@ -1370,7 +1380,9 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 		err = restoreFork(ctx, env, p, src, m)
 	}
 	if err == nil {
-		err = backup.Promote(ctx, m.PG(), m.Data)
+		// The copy stops before Adopt starts it as 18/<new>, which drops
+		// the recovery targets with it.
+		_, err = backup.Promote(ctx, m.PG(), m.Data)
 	}
 	if err == nil {
 		logLine(env.Report, env.Job, "renaming "+p.Source+" and its roles to "+p.Name)

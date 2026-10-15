@@ -77,6 +77,12 @@ type Cluster struct {
 	MasterBackup MasterBackup `toml:"master_backup"`
 	Maintenance  Maintenance  `toml:"maintenance"`
 	Metrics      Metrics      `toml:"metrics"`
+	// Awaiting are the databases the node's steps view leaves out of
+	// Clusters while they await recovery after a rebuild (Phase 5). Never
+	// read or saved: the view sets it, so the tuning of the databases
+	// already recovered still counts them, as the server's will once they
+	// are back.
+	Awaiting []ClusterSpec `toml:"-" json:"-"`
 }
 
 // TLS is [tls].

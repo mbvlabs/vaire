@@ -17,6 +17,7 @@ import (
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/contexts"
 	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/steps"
@@ -749,7 +750,7 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	if dryRun(cmd) {
-		reply, err := p.call(commandContext(cmd), s.node, "backup.now", map[string]string{"type": kind, "database": stringFlag(cmd, "db")},
+		reply, err := p.call(commandContext(cmd), s.node, "backup.now", node.BackupNowParams{Type: kind, Database: stringFlag(cmd, "db")},
 			remote.CallOptions{DryRun: true, OnEvent: p.event})
 		if err != nil {
 			return err
@@ -772,7 +773,7 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	outcomes, lines, warnings, detached := eachDatabase(cmd, s, p, dbs, "backup.now",
-		func(db string) any { return map[string]string{"type": kind, "database": db} },
+		func(db string) any { return node.BackupNowParams{Type: kind, Database: db} },
 		func(raw []byte) (any, string, error) {
 			var res struct {
 				DB  string     `json:"db"`

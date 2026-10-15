@@ -51,6 +51,9 @@ type databaseInputs struct {
 	Name             string   `json:"name"`
 	StatementTimeout string   `json:"statement_timeout"`
 	Extensions       []string `json:"extensions"`
+	// Protected takes eru_admin's write access away (AdminAccessSQL), so
+	// protecting or lifting a protection re-runs the step.
+	Protected bool `json:"protected,omitempty"`
 }
 
 func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
@@ -60,7 +63,7 @@ func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, err
 	}
 	return canonical(roleInputs{
 		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL, MonitorSQL: monitorSQL,
-		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions},
+		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions, Protected: spec.Protected},
 	})
 }
 
@@ -98,6 +101,26 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		if !strings.Contains(src[0], fn.needs) {
 			return incomplete("eru." + fn.name + " is out of date"), nil
 		}
+	}
+	member, err := queryColumn(ctx, local, "postgres", adminOwnerMemberSQL(spec.Name))
+	if err != nil || len(member) != 1 {
+		return incomplete("cannot read eru_admin's membership in " + spec.Name + "_owner"), nil
+	}
+	if (member[0] == "t") == spec.Protected {
+		if spec.Protected {
+			return incomplete("eru_admin can still write to protected " + spec.Name), nil
+		}
+		return incomplete("eru_admin is not a member of " + spec.Name + "_owner"), nil
+	}
+	signal, err := queryColumn(ctx, local, "postgres", adminSignalSQL)
+	if err != nil || len(signal) != 1 {
+		return incomplete("cannot read eru_admin's membership in pg_signal_backend"), nil
+	}
+	if (signal[0] == "t") == spec.Protected {
+		if spec.Protected {
+			return incomplete("eru_admin can still terminate sessions of protected " + spec.Name), nil
+		}
+		return incomplete("eru_admin is not a member of pg_signal_backend"), nil
 	}
 	direct, err := queryColumn(ctx, local, "postgres", directOnlyMembersSQL)
 	if err != nil {
@@ -150,7 +173,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	service := []struct {
 		role, secret, attrs, grants string
 	}{
-		{"eru_admin", SecretAdminPassword, "LOGIN CREATEDB CREATEROLE", "pg_monitor, pg_signal_backend, pg_maintain, pg_use_reserved_connections"},
+		{"eru_admin", SecretAdminPassword, "LOGIN CREATEDB CREATEROLE", adminGrants(spec)},
 		{"eru_monitor", SecretMonitor, "LOGIN", "pg_monitor"},
 		{"pgbouncer_auth", SecretPgbouncerAuth, "LOGIN", ""},
 	}
@@ -256,9 +279,89 @@ func databaseSQL(ctx context.Context, rt engine.Runtime, db config.ClusterSpec, 
 		fmt.Fprintf(&b, "CREATE DATABASE %s OWNER %s;\n", pg.Quote(db.Name), pg.Quote(owner))
 	}
 	b.WriteString(DatabaseConnectSQL(db.Name, db.Name))
-	fmt.Fprintf(&b, "GRANT %s TO eru_admin WITH ADMIN OPTION;\n", pg.Quote(owner))
+	b.WriteString(AdminAccessSQL(db))
 	return b.String(), nil
 }
+
+// adminOwnerMemberSQL reports, as t or f, whether eru_admin is a member of
+// db's owner role, directly or not.
+func adminOwnerMemberSQL(db string) string {
+	return "SELECT pg_has_role('eru_admin', " + literal(db+"_owner") + ", 'MEMBER')"
+}
+
+// adminSignalSQL reports, as t or f, whether eru_admin is a member of
+// pg_signal_backend.
+const adminSignalSQL = "SELECT pg_has_role('eru_admin', 'pg_signal_backend', 'MEMBER')"
+
+// adminGrants are the predefined roles eru_admin holds in spec's cluster.
+// On a protected database it holds no pg_signal_backend: it could end the
+// database's sessions from a read-only eru sql, and eru maint kill there
+// needs a code from the authenticator app (node.handleMaintKill terminates
+// as the superuser with SET ROLE pg_signal_backend instead).
+func adminGrants(spec config.ClusterSpec) string {
+	if spec.Protected {
+		return "pg_monitor, pg_maintain, pg_use_reserved_connections"
+	}
+	return "pg_monitor, pg_signal_backend, pg_maintain, pg_use_reserved_connections"
+}
+
+// AdminAccessSQL is eru_admin's access to db, run in postgres. On an
+// unprotected database eru_admin is a member of <db>_owner, so eru sql,
+// psql and console --write act as the owner. On a protected one it is not:
+// every grant of the owner role to eru_admin goes, with CASCADE, so the
+// grants eru_admin made from its ADMIN OPTION go too, and the owner role
+// cannot log in. eru_admin gets pg_read_all_data for reads, keeps
+// pg_maintain for vacuum, analyze and reindex, and loses pg_signal_backend
+// (adminGrants). A write then needs a
+// short-lived role the node creates after it checks a code from the
+// authenticator app (db.write_access). eru_admin's own sessions on the
+// database end the moment its membership goes, since one may have SET ROLE
+// to the owner already. The eru_admin password alone, in a context or
+// through eru tunnel, can then only read a protected database.
+func AdminAccessSQL(db config.ClusterSpec) string {
+	owner := db.Name + "_owner"
+	if !db.Protected {
+		return fmt.Sprintf(`GRANT %s TO eru_admin WITH ADMIN OPTION;
+DO $eru$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_read_all_data'::regrole AND member = 'eru_admin'::regrole) THEN
+    REVOKE pg_read_all_data FROM eru_admin;
+  END IF;
+END $eru$;
+`, pg.Quote(owner))
+	}
+	return fmt.Sprintf(`GRANT pg_read_all_data TO eru_admin;
+ALTER ROLE %[1]s NOLOGIN;
+DO $eru$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_signal_backend'::regrole AND member = 'eru_admin'::regrole) THEN
+    REVOKE pg_signal_backend FROM eru_admin;
+  END IF;
+END $eru$;
+DO $eru$
+DECLARE
+  g name;
+  was boolean := pg_has_role('eru_admin', %[2]s, 'MEMBER');
+BEGIN
+  FOR g IN SELECT r.rolname FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.grantor
+      WHERE m.roleid = %[2]s::regrole AND m.member = 'eru_admin'::regrole LOOP
+    BEGIN
+      EXECUTE format('REVOKE %%I FROM eru_admin GRANTED BY %%I CASCADE', %[2]s, g);
+    EXCEPTION WHEN OTHERS THEN
+      NULL; -- gone already with an earlier grant's CASCADE
+    END;
+  END LOOP;
+  IF pg_has_role('eru_admin', %[2]s, 'MEMBER') THEN
+    RAISE EXCEPTION 'eru_admin is still a member of %%', %[2]s;
+  END IF;
+  IF was THEN
+    PERFORM pg_terminate_backend(pid) FROM pg_stat_activity
+      WHERE usename = 'eru_admin' AND datname = %[3]s AND backend_type = 'client backend' AND pid <> pg_backend_pid();
+  END IF;
+END $eru$;
+`, pg.Quote(owner), literal(owner), literal(db.Name))
+}
+
+// literal quotes s as an SQL string literal.
+func literal(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // DatabaseConnectSQL is the database-level access SQL for database target,
 // granted to the roles of roleDB, run in postgres. A restore from a dump
@@ -312,13 +415,17 @@ const directOnlyMembersSQL = `SELECT m.rolname FROM pg_auth_members a
 // (§14.2, RFC 8.1): pgbouncer_get_auth for the transaction pooler refuses
 // members of eru_direct_only; pgbouncer_get_auth_session for the session
 // pooler refuses only postgres and the pooler's own service roles, and lets
-// eru_admin in for eru sql, psql, console and tunnel (RFC 6.3).
+// eru_admin in for eru sql, psql, console and tunnel (RFC 6.3). Both refuse
+// a role past its VALID UNTIL, so a short-lived write role
+// (db.write_access) cannot log in again through a pooled server connection
+// once it expires.
 const pgbouncerAuthSQL = `CREATE SCHEMA IF NOT EXISTS eru AUTHORIZATION postgres;
 CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
   RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $eru$
   SELECT usename, passwd FROM pg_shadow
   WHERE usename = p_usename AND NOT usesuper
     AND usename NOT IN ('postgres','pgbouncer_auth','eru_monitor')
+    AND (valuntil IS NULL OR valuntil > now())
     AND NOT pg_has_role(usename, '` + RoleDirectOnly + `', 'MEMBER')
 $eru$;
 CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth_session(p_usename text)
@@ -327,6 +434,7 @@ CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth_session(p_usename text)
   SELECT usename, passwd FROM pg_shadow
   WHERE usename = p_usename AND NOT usesuper
     AND usename NOT IN ('postgres','pgbouncer_auth','eru_monitor')
+    AND (valuntil IS NULL OR valuntil > now())
 $eru$;
 REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth_session(text) FROM PUBLIC;

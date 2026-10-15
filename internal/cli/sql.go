@@ -49,7 +49,8 @@ func (e dbEndpoint) addr(port int) string {
 
 // adminCredentials returns the eru_admin user and password. eru keeps no
 // application database passwords, so eru sql, psql and console connect as
-// eru_admin, read-only unless --write.
+// eru_admin, read-only unless --write. A write to a protected database
+// connects as a short-lived role instead (sessionLogin).
 func adminCredentials(c *contexts.Context) (user, password string, err error) {
 	creds, err := contexts.LoadCredentials(c.Name)
 	if err != nil {
@@ -120,7 +121,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return output.NewError(output.CodeInputRequired, "eru sql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
-	user, password, err := adminCredentials(s.ctx)
+	user, password, err := sessionLogin(cmd, s, p, db, write)
 	if err != nil {
 		return err
 	}

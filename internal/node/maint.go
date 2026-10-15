@@ -342,7 +342,11 @@ func killToken(_ config.Cluster, params json.RawMessage) string {
 }
 
 // handleMaintKill terminates backends of one database as eru_admin, whose
-// pg_signal_backend can't reach a superuser's.
+// pg_signal_backend can't reach a superuser's. On a protected database
+// eru_admin holds no pg_signal_backend (steps.AdminAccessSQL), and the
+// request carries a code from the authenticator app (requireWriteCode): it
+// terminates as the superuser with SET ROLE pg_signal_backend, which can't
+// reach a superuser's backend either.
 func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	var p maintKillParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -389,7 +393,11 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	for _, b := range selected {
 		pids = append(pids, b.PID)
 	}
-	out, err := local.Query(ctx, p.DB, maint.TerminateSQL(pids), nil)
+	killer, terminate := local, maint.TerminateSQL(pids)
+	if spec.Protected {
+		killer, terminate = steps.ClusterPG(spec), "SET ROLE pg_signal_backend;\n"+terminate
+	}
+	out, err := killer.Query(ctx, p.DB, terminate, nil)
 	if err != nil {
 		return Result{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}

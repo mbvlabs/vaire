@@ -321,15 +321,25 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 			WithDetails(map[string]any{"reason": "locked", "locked_until": status.LockedUntil})
 	}
 	p.note(liftNotice(names))
+	return readAuthenticatorCode(cmd, "the protection of "+names+" was kept", map[string]any{"databases": lifted})
+}
+
+// readAuthenticatorCode reads a code from the authenticator app without
+// echo and returns it as the request's protect_code secret. A code that is
+// not 6 digits is refused here, saying kept, with details added.
+func readAuthenticatorCode(cmd *cobra.Command, kept string, details map[string]any) (map[string]string, error) {
 	code, err := readSecretTTY(cmd, "Current code from the authenticator app")
 	if err != nil {
 		return nil, err
 	}
 	code = totp.NormalizeCode(code)
 	if !totp.WellFormed(code) {
-		return nil, output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits; the protection of "+names+" was kept", output.ExitUnsafe,
-			"Type the 6-digit code the authenticator app shows for eru.").
-			WithDetails(map[string]any{"reason": "code_invalid", "databases": lifted})
+		d := map[string]any{"reason": "code_invalid"}
+		for k, v := range details {
+			d[k] = v
+		}
+		return nil, output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits; "+kept, output.ExitUnsafe,
+			"Type the 6-digit code the authenticator app shows for eru.").WithDetails(d)
 	}
 	return map[string]string{node.ProtectCodeSecret: code}, nil
 }

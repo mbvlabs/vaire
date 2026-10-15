@@ -6,6 +6,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/eru/internal/steps"
 )
 
 type sqlParams struct {
@@ -18,7 +19,9 @@ type sqlParams struct {
 // handleSQL runs one statement for eru sql --local, where there is no tunnel.
 // It runs as postgres (peer) inside one transaction with SET LOCAL ROLE to the
 // requested database role and, unless write is set, READ ONLY. migrate acts as
-// <db>_owner, matching the role's session default.
+// <db>_owner, matching the role's session default. On a protected database
+// a write needs a code from the authenticator app (requireWriteCode), and a
+// read runs as eru_admin instead.
 func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	var p sqlParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -48,6 +51,13 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 		mode = "READ ONLY"
 	}
 	statement := fmt.Sprintf("BEGIN %s;\nSET LOCAL ROLE %s;\n%s\n;\nCOMMIT;\n", mode, pg.Quote(user), p.Query)
+	if spec, _ := clusterOf(env.Cluster, p.DB); spec.Protected && !p.Write {
+		// psql runs every statement in the query, a COMMIT too, and as the
+		// superuser what follows would write. On a protected database a
+		// read runs as eru_admin, which cannot write to it.
+		local = steps.AdminPG(spec)
+		statement = fmt.Sprintf("BEGIN READ ONLY;\n%s\n;\nCOMMIT;\n", p.Query)
+	}
 	if p.Write {
 		if err := local.Exec(ctx, p.DB, statement, nil); err != nil {
 			return Result{}, err

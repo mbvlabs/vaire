@@ -211,12 +211,15 @@ Run migrations as `migrate` and the application as `app`. The transaction pooler
 
 A protected database refuses `db drop`, a shrinking resize, credential rotation and restore promote/undo, even with `--confirm`. Lifting the protection asks for a current 6-digit code from an authenticator app, typed at a terminal and checked on the node, so an agent with a shell can't lift it by typing a word.
 
+Writing to it takes a code too. `eru sql --write`, `eru psql --write`, `eru console --write` and `eru maint kill` ask for one when they start, before anything connects; a `psql` or `console` session then stays writable until you close it, and `eru sql --write` asks on every run. Reads never ask. Without a terminal, with `--yes` or with `--output json`/`agent` the write is refused, so an agent gets read-only access. The node enforces it: on a protected database the `eru_admin` login in every context can only read, and a write runs as a two-minute login role the node creates after it checks the code. Vacuum, analyze and reindex, restores into a copy and forks work as before.
+
 Set it up once with `eru protect init`: the node makes the secret and keeps it root-only, and eru shows it as a QR code. Once the code is confirmed, it asks which of your databases to protect (all of them picked to start with) and protects them in the same run; `--all` or `--db app` (repeatable) choose without asking. After that:
 
 ```sh
 eru db protect app billing     # or --all; in effect at once, no apply
 eru db create scratch --protected
 eru db unprotect app           # asks for a code from the authenticator app
+eru sql --db app --write "…"   # on a protected database, asks for a code too
 eru protect status             # every database, protected yes or no
 ```
 

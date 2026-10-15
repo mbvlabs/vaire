@@ -196,17 +196,25 @@ func ensureIncludeDir(cluster string) error {
 
 // validateConfig fails when PostgreSQL reports an error in the new files.
 // pg_file_settings reports every changed postmaster setting as "setting could
-// not be applied" because it needs a restart; those rows are skipped, and
-// postgres -C parses the files as a starting server would to catch an invalid
-// value among them.
+// not be applied" because it needs a restart, and every postmaster setting
+// the files no longer set as a row without a file or name; those rows are
+// skipped (restartOnly), and postgres -C parses the files as a starting
+// server would to catch an invalid value among them.
 func validateConfig(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) error {
 	local := ClusterPG(spec)
-	settings, err := local.Query(ctx, "postgres", `SELECT f.sourcefile, f.sourceline, f.name, f.error
+	rows, err := local.Query(ctx, "postgres", `SELECT coalesce(f.sourcefile, '') AS sourcefile, coalesce(f.sourceline::text, '') AS sourceline,
+  coalesce(f.name, '') AS name, f.error, coalesce(s.context, '') AS context
 FROM pg_file_settings f LEFT JOIN pg_settings s ON s.name = f.name
-WHERE f.error IS NOT NULL AND NOT (f.error = 'setting could not be applied' AND s.context = 'postmaster')
+WHERE f.error IS NOT NULL
 ORDER BY f.seqno`, nil)
 	if err != nil {
 		return fmt.Errorf("validating the rendered configuration: %w", err)
+	}
+	var settings []map[string]string
+	for _, row := range rows {
+		if !restartOnly(row) {
+			settings = append(settings, row)
+		}
 	}
 	hba, err := local.Query(ctx, "postgres", "SELECT file_name, line_number, error FROM pg_hba_file_rules WHERE error IS NOT NULL ORDER BY rule_number", nil)
 	if err != nil {
@@ -236,6 +244,21 @@ ORDER BY f.seqno`, nil)
 		output.ExitStep,
 		"The previous files were restored. Fix the settings named in the message.",
 	).WithDetails(details)
+}
+
+// restartOnly reports whether a pg_file_settings error row only says a
+// setting waits for a restart: a postmaster setting the files change ("setting
+// could not be applied"), or one they no longer set, which PostgreSQL reports
+// without a file or name ("parameter ... cannot be changed without restarting
+// the server"). Apply reports those as a pending restart.
+func restartOnly(row map[string]string) bool {
+	switch {
+	case row["error"] == "setting could not be applied" && row["context"] == "postmaster":
+		return true
+	case row["sourcefile"] == "" && row["name"] == "" && strings.HasSuffix(row["error"], "cannot be changed without restarting the server"):
+		return true
+	}
+	return false
 }
 
 // pendingRestartSettings lists the cluster's settings that need a restart.

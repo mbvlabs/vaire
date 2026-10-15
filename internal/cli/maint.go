@@ -130,14 +130,14 @@ func maintCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Terminate backends of one database that match the filter",
-					WhenToUse:      []string{"Stop a stuck session after the human approves the confirm token <db>/kill."},
+					WhenToUse:      []string{"Stop a stuck session after the human approves the confirm token <db>/kill.", "On a protected database it also asks, after the token and without echo, for the current 6-digit code from the authenticator app, which the node checks. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). A dry run needs no code."},
 					Examples:       []string{"eru maint kill --db app --idle-in-tx --older-than 10m --confirm app/kill", "eru maint kill --db app --pid 4242 --dry-run"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ConfirmToken:   "{db}/kill",
-					ErrorCodes:     []string{"precondition_failed", "unsafe_action_requires_confirmation"},
+					ErrorCodes:     []string{"precondition_failed", "unsafe_action_requires_confirmation", "database_protected", "protect_code_rejected"},
 				},
 			},
 		},
@@ -372,12 +372,20 @@ func runMaintKill(cmd *cobra.Command, _ []string) error {
 	defer s.Close()
 	params := map[string]any{"db": db, "pid": pid, "idle_in_tx": idle, "older_than": stringFlag(cmd, "older-than")}
 	token := db + "/kill"
+	var code map[string]string
 	if !dryRun(cmd) {
 		if err := Confirm(cmd, token); err != nil {
 			return err
 		}
+		// On a protected database it also takes a code from the
+		// authenticator app; the node checks it.
+		code, err = protectedWriteCode(cmd, db, "terminating its sessions",
+			func() (protectStatusData, error) { return fetchProtectStatus(cmd, s, p) }, p.note)
+		if err != nil {
+			return err
+		}
 	}
-	reply, err := p.call(commandContext(cmd), s.node, "maint.kill", params, remote.CallOptions{DryRun: dryRun(cmd), Confirm: token, OnEvent: p.event})
+	reply, err := p.call(commandContext(cmd), s.node, "maint.kill", params, remote.CallOptions{DryRun: dryRun(cmd), Confirm: token, Secrets: code, OnEvent: p.event})
 	if err != nil {
 		return err
 	}

@@ -125,7 +125,10 @@ func handleDBRecover(ctx context.Context, env *Env) (Result, error) {
 	}); err != nil {
 		return Result{}, err
 	}
-	return runJobRPC(ctx, env, "recover", p, nil)
+	// The recovered database's steps (postgres-roles-v1, metrics-v1,
+	// pgbackrest-v1) run inside the job: a rebuilt master has no service
+	// password files until they write them from these.
+	return runJobRPC(ctx, env, "recover", p, stepSecrets(env.Req.Secrets))
 }
 
 // stanzaHasBackup refuses a stanza without a backup set: a database created
@@ -273,7 +276,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	// from its first start (its new timeline's history file above all), here
 	// and when restore promote finishes a --no-promote run. Stop the empty
 	// scaffold first, so no reload can make it archive into the stanza.
-	if err := armArchiving(ctx, env, cfg, spec); err != nil {
+	if err := armArchiving(ctx, env, cfg, spec, rt); err != nil {
 		return nil, err
 	}
 
@@ -332,12 +335,14 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	}
 
 	// 6. The database's own steps (roles and grants are in the data, so this
-	// only reconciles), then metrics.
+	// only reconciles and writes the service password files a rebuilt master
+	// lacks), then metrics. The data is back either way; a failure here is
+	// reported as what is left, with the command that finishes it.
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: db, Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
-		res["steps_warning"] = err.Error() + "; run eru apply"
+		res["steps_warning"] = "the data is recovered, but its configuration did not finish: " + err.Error() + "; eru apply finishes it"
 	}
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.MetricsStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
-		res["metrics_warning"] = err.Error()
+		res["metrics_warning"] = "the data is recovered, but its metrics did not finish: " + err.Error() + "; eru apply finishes them"
 	}
 	if t := recoveredTo(ctx, spec); t != "" {
 		res["recovered_to"] = t
@@ -367,13 +372,30 @@ func applyRecoveredTimers(ctx context.Context, cfg config.Cluster, rt engine.Run
 	}
 }
 
-// armArchiving stops the empty scaffold 18/<db> and writes the database's
-// real 40-eru-backup.conf, which the recovered data starts with.
-func armArchiving(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec) error {
+// armArchiving stops the empty scaffold 18/<db>, renders pgbackrest.conf
+// with the database's stanza section, then writes the database's real
+// 40-eru-backup.conf, which the recovered data starts with. In that order:
+// the archive_command passes archive-push a WAL path relative to the data
+// directory (%p), which pgBackRest resolves with the section's pg1-path, so
+// a conf without the section fails the very first push (the new timeline's
+// history file). server init --restore rendered it with no stanza at all,
+// every database awaiting recovery then.
+func armArchiving(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) error {
 	if err := env.shell().Exec(ctx, env.Job, engine.Command{Name: "systemctl", Args: []string{"stop", "postgresql@18-" + spec.Name}}, env.Report); err != nil {
 		return err
 	}
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, stanzaConfOptions(cfg, spec.Name, env.Report)); err != nil {
+		return err
+	}
 	return steps.WriteBackupConf(cfg, spec)
+}
+
+// stanzaConfOptions is the apply of pgbackrest-v1 that gives db, still
+// awaiting recovery, its section in pgbackrest.conf (pg1-path, pg1-port,
+// retention) beside the databases recovered before it. Its stanza holds a
+// full backup (stanzaHasBackup), so the step only renders the file.
+func stanzaConfOptions(cfg config.Cluster, db string, report engine.Reporter) engine.Options {
+	return engine.Options{Only: steps.PgBackRestStepIDs(), Recovering: db, Restarter: steps.Restarter(cfg), Report: report}
 }
 
 // dropScaffold drops the empty cluster promote set aside and its leftover

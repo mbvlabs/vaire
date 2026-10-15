@@ -2,6 +2,7 @@ package steps
 
 import (
 	"os"
+	"slices"
 
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/hostinfo"
@@ -142,7 +143,9 @@ const (
 // tuningFor computes spec's tuning on host (RFC 7.3): the cluster's memory
 // stands in for RAM, its share of the CPU caps the worker settings, its size
 // sets max_connections, and its share of the data disk, in proportion to its
-// memory, sizes WAL (RFC 7.7).
+// memory, sizes WAL (RFC 7.7). The shares count the databases awaiting
+// recovery too, so a database recovered first keeps its tuning when the
+// others come back.
 func tuningFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) tune.Result {
 	res, _ := cfg.Resources(spec)
 	profile := spec.Profile
@@ -152,7 +155,7 @@ func tuningFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) 
 	return tune.Calculate(tune.Input{
 		RAMMiB:            res.MemoryMiB,
 		VCPU:              host.VCPU,
-		Clusters:          len(cfg.Clusters),
+		Clusters:          len(cfg.Clusters) + len(cfg.Awaiting),
 		DiskRotational:    host.DataDisk.Rotational,
 		DataDiskGiB:       diskShareGiB(cfg, res.MemoryMiB, host.DataDisk.SizeGiB),
 		Profile:           profile,
@@ -166,7 +169,7 @@ func tuningFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) 
 // of memoryMiB to the memory of every cluster.
 func diskShareGiB(cfg config.Cluster, memoryMiB, diskGiB int) int {
 	total := 0
-	for _, c := range cfg.Clusters {
+	for _, c := range slices.Concat(cfg.Clusters, cfg.Awaiting) {
 		if r, err := cfg.Resources(c); err == nil {
 			total += r.MemoryMiB
 		}

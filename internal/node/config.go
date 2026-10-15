@@ -73,7 +73,8 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	if err := checkSchedules(ctx, cfg); err != nil {
 		return Result{}, err
 	}
-	if old, _, err := store.Load(); err == nil {
+	old, _, oldErr := store.Load()
+	if oldErr == nil {
 		if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
 			return Result{}, err
 		}
@@ -88,7 +89,16 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	}
 	// A dry run previews the plan for the new file without saving it.
 	revision := current
+	var synced []output.Warning
 	if !env.Req.DryRun {
+		// eru_admin's write access follows the protection before the file
+		// says so: a protection is never saved while eru_admin can still
+		// write to the database.
+		if oldErr == nil {
+			if synced, err = syncProtectedAccess(ctx, env, old, cfg); err != nil {
+				return Result{}, err
+			}
+		}
 		if err := store.Save(raw); err != nil {
 			return Result{}, err
 		}
@@ -103,7 +113,7 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	rt := runtimeFor(env, true)
 	plan, planErr := engine.Plan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
 	data := map[string]any{"revision": revision, "plan": plan, "saved": !env.Req.DryRun}
-	warnings := oversubscriptionWarnings(cfg, rt.Host)
+	warnings := append(synced, oversubscriptionWarnings(cfg, rt.Host)...)
 	if planErr != nil {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}
