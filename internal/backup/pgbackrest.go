@@ -72,10 +72,51 @@ func (p PgBackRest) runDetail(ctx context.Context, onLine func(string), args ...
 	return p.run(ctx, nil, onLine, append([]string{"--log-level-console=detail"}, args...)...)
 }
 
+// stanzaLockBusy is pgBackRest's exit status when it cannot acquire a
+// stanza's lock (error 050). PostgreSQL archives a WAL segment whenever it
+// likes, and the archive-push that runs then holds the same stanza lock for
+// the moment the push takes; stanza-create can meet it there. The holder is
+// an async archive-push, so the conflict is transient and unavoidable.
+const stanzaLockBusy = 50
+
+// stanzaLockWait and stanzaLockRetries bound the wait for that archive-push:
+// one segment pushes in well under a second, and this gives it a few seconds
+// before failing honestly.
+const (
+	stanzaLockWait    = 250 * time.Millisecond
+	stanzaLockRetries = 8
+)
+
 // StanzaCreate runs stanza-create, which also checks an existing stanza
-// against this cluster's system identifier.
+// against this cluster's system identifier. When an async archive-push holds
+// the stanza lock, it waits and tries again (see stanzaLockBusy).
 func (p PgBackRest) StanzaCreate(ctx context.Context) error {
-	return wrapTool("pgbackrest stanza-create", p.run(ctx, nil, nil, p.withPort("stanza-create")...))
+	err := retryStanzaLock(ctx, func(ctx context.Context) error {
+		return p.run(ctx, nil, nil, p.withPort("stanza-create")...)
+	})
+	return wrapTool("pgbackrest stanza-create", err)
+}
+
+// retryStanzaLock runs op, and while it fails with pgBackRest's stanza-lock
+// busy status (an async archive-push holds the lock) waits stanzaLockWait and
+// tries again, up to stanzaLockRetries. Any other failure, and the last
+// attempt, return at once.
+func retryStanzaLock(ctx context.Context, op func(context.Context) error) error {
+	for attempt := 0; ; attempt++ {
+		err := op(ctx)
+		if err == nil {
+			return nil
+		}
+		var scriptErr *engine.ScriptError
+		if !errors.As(err, &scriptErr) || scriptErr.Status != stanzaLockBusy || attempt >= stanzaLockRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(stanzaLockWait):
+		}
+	}
 }
 
 // withPort puts --pg1-port before the commands that connect to the cluster.
