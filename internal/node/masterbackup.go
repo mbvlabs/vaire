@@ -147,10 +147,21 @@ func masterBackupLocked(ctx context.Context, cfg config.Cluster, report engine.R
 		return res, recordMasterFailure(last, now, err)
 	}
 	hash := masterbackup.ContentHash(files)
+	// With a bucket, the fence and the first epoch come before the build,
+	// so the bundle is named for the epoch it belongs to: the first one of a
+	// fresh server is -e1-, not -e0-. A bucket that can't be reached still
+	// gets a local bundle; the failure is recorded once it is built.
+	var target backup.Target
+	var bucketErr error
+	if cfg.BackupConfigured() {
+		target, bucketErr = settleEpoch(ctx, cfg, report)
+		if masterbackup.IsFenced() {
+			return res, recordMasterFailure(last, now, fencedError())
+		}
+	}
 	local, _ := masterbackup.ReadLocalEpoch("")
 	res.Epoch = local.Epoch
-	changed := hash != last.ContentHash || last.Name == "" || !localBundleExists(last.Name)
-	if changed || opts.force {
+	if needsBuild(last, hash, local.Epoch, localBundleExists(last.Name)) || opts.force {
 		recipient := steps.ReadRecipient()
 		if recipient == "" {
 			return res, recordMasterFailure(last, now, output.NewError(output.CodeInputRequired,
@@ -178,17 +189,26 @@ func masterBackupLocked(ctx context.Context, cfg config.Cluster, report engine.R
 		last.LastFailure, last.LastFailureAt = "", ""
 		return res, saveMasterLast(last)
 	}
-	uploaded, verified, pruned, err := syncBucket(ctx, cfg, report, &last, now, opts.verify)
+	if bucketErr != nil {
+		return res, recordMasterFailure(last, now, bucketErr)
+	}
+	uploaded, verified, pruned, err := syncBucket(ctx, cfg, target, report, &last, now, opts.verify)
 	res.Uploaded, res.Verified, res.Pruned = uploaded, verified, pruned
 	if err != nil {
 		return res, recordMasterFailure(last, now, err)
 	}
-	if e, err := masterbackup.ReadLocalEpoch(""); err == nil {
-		res.Epoch = e.Epoch
-	}
 	last.PendingSince = ""
 	last.LastFailure, last.LastFailureAt = "", ""
 	return res, saveMasterLast(last)
+}
+
+// needsBuild reports whether a run builds a new bundle: the content changed,
+// there is none yet, the last one is gone from the node, or it was built
+// under another epoch than the node's current one (a bucket's first epoch
+// written since, or a reclaim), so every bundle's name carries the epoch it
+// belongs to.
+func needsBuild(last MasterLast, hash string, epoch int64, exists bool) bool {
+	return hash != last.ContentHash || last.Name == "" || !exists || last.Epoch != epoch
 }
 
 // waitQuiet waits until the dirty flag has been untouched for debounceQuiet,
@@ -315,31 +335,38 @@ func readLocalBundle(name string) ([]byte, masterbackup.Sidecar, error) {
 	return raw, side, nil
 }
 
-// syncBucket checks the fence, writes the first epoch, uploads the newest
-// local bundle when the bucket lacks it, confirms it once a day (every run
-// with verify) and prunes.
-func syncBucket(ctx context.Context, cfg config.Cluster, report engine.Reporter, last *MasterLast, now time.Time, verify bool) (uploaded, verified bool, pruned int, err error) {
+// settleEpoch checks the fence and writes the first epoch when the bucket
+// has none, so the node's local epoch is the bucket's before a bundle is
+// named. It returns the bucket target for the upload.
+func settleEpoch(ctx context.Context, cfg config.Cluster, report engine.Reporter) (backup.Target, error) {
 	t, _, err := steps.BackupTarget(cfg)
 	if err != nil {
-		return false, false, 0, err
+		return t, err
 	}
 	state, bucketEpoch, err := checkFence(ctx, cfg, t, report)
 	if err != nil {
-		return false, false, 0, err
+		return t, err
 	}
-	if state == masterbackup.FenceUnknown && bucketEpoch != nil {
+	switch {
+	case state == masterbackup.FenceUnknown && bucketEpoch != nil:
 		// An epoch that isn't ours but no proof of a newer master either:
 		// don't upload or prune beside whoever wrote it.
-		return false, false, 0, epochConflict()
-	}
-	if state == masterbackup.FenceAbsent {
+		return t, epochConflict()
+	case state == masterbackup.FenceAbsent:
 		if err := writeFirstEpoch(ctx, cfg, t); err != nil {
-			return false, false, 0, err
+			return t, err
 		}
 		logLine(report, "master-backup", "wrote epoch 1 to the bucket")
-	} else if bucketEpoch != nil && state == masterbackup.FenceOK {
+	case state == masterbackup.FenceOK && bucketEpoch != nil:
 		_ = saveLocalEpoch(*bucketEpoch)
 	}
+	return t, nil
+}
+
+// syncBucket uploads the newest local bundle when the bucket lacks it,
+// confirms it once a day (every run with verify) and prunes. settleEpoch
+// has checked the fence.
+func syncBucket(ctx context.Context, cfg config.Cluster, t backup.Target, report engine.Reporter, last *MasterLast, now time.Time, verify bool) (uploaded, verified bool, pruned int, err error) {
 	if last.Name == "" {
 		return false, false, 0, nil
 	}

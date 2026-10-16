@@ -62,6 +62,31 @@ func TestPruneKeepsTheNewestThreeWhateverTheirAge(t *testing.T) {
 	}
 }
 
+// A run builds a new bundle when the content changed, there is none, the last
+// one is gone, or the epoch moved (so a bundle's name carries its epoch).
+func TestNeedsBuild(t *testing.T) {
+	base := MasterLast{Name: "m-prod-20261015T120000Z-e1-abc.tar.age", ContentHash: "h1", Epoch: 1}
+	if needsBuild(base, "h1", 1, true) {
+		t.Error("unchanged, present: should not build")
+	}
+	for _, tc := range []struct {
+		name string
+		last MasterLast
+		hash string
+		ep   int64
+		ex   bool
+	}{
+		{"content changed", base, "h2", 1, true},
+		{"none yet", MasterLast{}, "h1", 1, true},
+		{"gone from the node", base, "h1", 1, false},
+		{"new epoch", base, "h1", 2, true},
+	} {
+		if !needsBuild(tc.last, tc.hash, tc.ep, tc.ex) {
+			t.Errorf("%s: should build", tc.name)
+		}
+	}
+}
+
 func TestMasterFamilies(t *testing.T) {
 	cfg := config.DefaultCluster()
 	last := MasterLast{CreatedAt: "2026-10-15T10:00:00Z", UploadedAt: "2026-10-15T10:00:05Z", Size: 4096, LastVerifiedAt: "2026-10-15T10:00:05Z"}

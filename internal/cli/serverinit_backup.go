@@ -8,6 +8,7 @@ import (
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/eru/internal/node"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -191,4 +192,51 @@ func initBackupPhaseText(bucket string, databases int) (started, completed strin
 			"backups configured; each database's first full backup runs at db create"
 	}
 	return "turn on WAL archiving and take the first full backup to " + bucket, "WAL archiving on, first full backup taken"
+}
+
+// firstMasterBundle makes the server's first master bundle before init
+// reports ready. With a bucket, the node writes epoch 1 and uploads the
+// bundle, so a fresh server has an offsite copy of its control state at
+// once instead of at the next change or the daily run. It runs after the
+// secrets are confirmed, so the bundle holds the final state. A failure
+// doesn't undo the server, but init says so in a warning.
+func (r *initRun) firstMasterBundle(ctx context.Context, caller remote.Caller) {
+	detail := "keep the first master bundle on the server"
+	if r.cfg.BackupConfigured() {
+		detail = "upload the first master bundle to " + r.backupSettings().Bucket
+	}
+	r.p.phase("init.master-backup", "started", detail)
+	res, err := masterBundleNow(ctx, r.p, caller)
+	if w := firstBundleWarning(r.cfg.BackupConfigured(), r.backupSettings().Bucket, res, err); w != nil {
+		r.warnings = append(r.warnings, *w)
+		r.p.phase("init.master-backup", "failed", w.Message)
+		return
+	}
+	r.p.phase("init.master-backup", "completed", res.Name)
+}
+
+// masterBundleNow runs master-backup.now: build a bundle when the state
+// changed, and with a bucket make sure the bucket holds it.
+func masterBundleNow(ctx context.Context, p *progress, caller remote.Caller) (node.MasterBackupResult, error) {
+	var res node.MasterBackupResult
+	reply, err := p.call(ctx, caller, "master-backup.now", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return res, err
+	}
+	return res, reply.Decode(&res)
+}
+
+// firstBundleWarning is master_backup_failed when the master bundle failed,
+// or, with a bucket, didn't reach it; nil when it is where it belongs.
+func firstBundleWarning(bucket bool, name string, res node.MasterBackupResult, err error) *output.Warning {
+	const noCopy = ". The bucket has no copy of the server's current control state until eru server backup now succeeds"
+	switch {
+	case err != nil && bucket:
+		return &output.Warning{Code: "master_backup_failed", Message: "the master bundle didn't reach the bucket " + name + ": " + err.Error() + noCopy}
+	case err != nil:
+		return &output.Warning{Code: "master_backup_failed", Message: "the first master bundle failed: " + err.Error() + "; run eru server backup now"}
+	case bucket && !res.Uploaded && !res.Verified:
+		return &output.Warning{Code: "master_backup_failed", Message: "master bundle " + res.Name + " isn't confirmed in the bucket " + name + noCopy}
+	}
+	return nil
 }

@@ -497,6 +497,8 @@ func phaseTitle(step string) (title, header string) {
 		return "Certificate", "TLS"
 	case "init.backups":
 		return "Turn on backups", "Backups"
+	case "init.master-backup":
+		return "First master bundle", "Master backup"
 	case "init.secrets-document":
 		return "Secrets handoff", "Secrets"
 	}

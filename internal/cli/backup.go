@@ -489,6 +489,12 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	warnings = append(s.warnings, warnings...)
+	// The newest master bundle goes up at once, with epoch 1 on a new
+	// bucket, rather than waiting for the next change or the daily run.
+	mb, mbErr := masterBundleNow(ctx, p, s.node)
+	if w := firstBundleWarning(true, settings.Bucket, mb, mbErr); w != nil {
+		warnings = append(warnings, *w)
+	}
 	// A changed kit is shown in a new handoff right here when there is a
 	// terminal; the warning and the export step remain only when the
 	// operator didn't store it during this command.

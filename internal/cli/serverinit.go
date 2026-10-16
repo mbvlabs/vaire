@@ -838,6 +838,8 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.mark(phaseSecretsDone); err != nil {
 		return err
 	}
+	// The first master bundle, uploaded with epoch 1 when there is a bucket.
+	r.firstMasterBundle(ctx, wgNode)
 
 	// 13. Local context, then drop the pending state.
 	if contexts.Exists(r.name) {
@@ -1441,6 +1443,7 @@ func runInitLocal(cmd *cobra.Command) error {
 	if _, err := r.p.call(ctx, caller, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
 		return err
 	}
+	r.firstMasterBundle(ctx, caller)
 	if err := contexts.RemovePending(r.name); err != nil {
 		return err
 	}
