@@ -314,7 +314,7 @@ func adminGrants(spec config.ClusterSpec) string {
 // pg_maintain for vacuum, analyze and reindex, and loses pg_signal_backend
 // (adminGrants). A write then needs a
 // short-lived role the node creates after it checks a code from the
-// authenticator app (db.write_access). eru_admin's own sessions on the
+// authenticator app (db.write-access). eru_admin's own sessions on the
 // database end the moment its membership goes, since one may have SET ROLE
 // to the owner already. The eru_admin password alone, in a context or
 // through eru tunnel, can then only read a protected database.
@@ -417,7 +417,7 @@ const directOnlyMembersSQL = `SELECT m.rolname FROM pg_auth_members a
 // pooler refuses only postgres and the pooler's own service roles, and lets
 // eru_admin in for eru sql, psql, console and tunnel (RFC 6.3). Both refuse
 // a role past its VALID UNTIL, so a short-lived write role
-// (db.write_access) cannot log in again through a pooled server connection
+// (db.write-access) cannot log in again through a pooled server connection
 // once it expires.
 const pgbouncerAuthSQL = `CREATE SCHEMA IF NOT EXISTS eru AUTHORIZATION postgres;
 CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)

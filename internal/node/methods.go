@@ -225,7 +225,7 @@ func methods() map[string]method {
 		},
 		{
 			// No run log: the result carries the write role's password.
-			name:    "db.write_access",
+			name:    "db.write-access",
 			cluster: true,
 			handler: handleWriteAccess,
 		},

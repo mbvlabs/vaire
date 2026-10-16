@@ -172,3 +172,7 @@ func encodeULID(id [16]byte) string {
 	}
 	return string(out)
 }
+
+// ValidMethod reports whether name is a well-formed method name, the check
+// DecodeRequest applies to every request.
+func ValidMethod(name string) bool { return methodPattern.MatchString(name) }

@@ -203,7 +203,7 @@ func TestWriteMethodsGuarded(t *testing.T) {
 	for _, tc := range []struct{ method, params string }{
 		{"sql", `{"db":"app","query":"delete from t","write":true}`},
 		{"maint.kill", `{"db":"app","idle_in_tx":true}`},
-		{"db.write_access", `{"db":"app"}`},
+		{"db.write-access", `{"db":"app"}`},
 	} {
 		meth, ok := m[tc.method]
 		if !ok {
@@ -214,7 +214,7 @@ func TestWriteMethodsGuarded(t *testing.T) {
 			t.Fatalf("%s on protected app without a code ran", tc.method)
 		}
 	}
-	if m["db.write_access"].runLog != nil {
-		t.Fatal("db.write_access must write no run log: its result carries a password")
+	if m["db.write-access"].runLog != nil {
+		t.Fatal("db.write-access must write no run log: its result carries a password")
 	}
 }

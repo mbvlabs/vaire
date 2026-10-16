@@ -51,7 +51,7 @@ func protectedWriteCode(cmd *cobra.Command, db, what string, status func() (prot
 // sessionLogin is the login eru sql, psql and console use on db: eru_admin,
 // or for a write to a protected database a short-lived role in <db>_owner
 // that the node creates once the code from the authenticator app checks out
-// (db.write_access). eru_admin cannot write to a protected database, so the
+// (db.write-access). eru_admin cannot write to a protected database, so the
 // node enforces it whatever the client does.
 func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write bool) (user, password string, err error) {
 	user, password, err = adminCredentials(s.ctx)
@@ -63,7 +63,7 @@ func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write 
 	if err != nil || code == nil {
 		return user, password, err
 	}
-	reply, err := p.call(commandContext(cmd), s.node, "db.write_access", map[string]any{"db": db},
+	reply, err := p.call(commandContext(cmd), s.node, "db.write-access", map[string]any{"db": db},
 		remote.CallOptions{Secrets: code, OnEvent: p.event})
 	if err != nil {
 		return "", "", err

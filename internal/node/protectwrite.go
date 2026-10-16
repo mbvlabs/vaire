@@ -23,7 +23,7 @@ import (
 // eru_admin, whose password every context holds, so a read-only session
 // option alone would stop nobody: on a protected database eru_admin is not a
 // member of <db>_owner at all (steps.AdminAccessSQL) and can only read. A
-// write takes a short-lived login role in <db>_owner that db.write_access
+// write takes a short-lived login role in <db>_owner that db.write-access
 // creates once a current code from the authenticator app checks out. The
 // CLI asks for the code once, when the command starts; the role can log in
 // for writeRoleLogin, so a code never unlocks a later command.
@@ -35,7 +35,7 @@ const writeRolePrefix = "eru_write_"
 // lasts as long as the client keeps it.
 const writeRoleLogin = 2 * time.Minute
 
-// WriteAccess is the db.write_access result. Protected false means the
+// WriteAccess is the db.write-access result. Protected false means the
 // database is not protected: the CLI writes as eru_admin, as before.
 type WriteAccess struct {
 	Protected  bool   `json:"protected"`
@@ -71,7 +71,7 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 		return Result{}, err
 	}
 	if p.DB == "" {
-		return Result{}, output.NewError(output.CodeInputRequired, "db.write_access needs db", output.ExitInput,
+		return Result{}, output.NewError(output.CodeInputRequired, "db.write-access needs db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 	spec, ok := env.Cluster.ClusterByName(p.DB)
