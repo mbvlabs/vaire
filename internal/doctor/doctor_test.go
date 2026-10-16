@@ -63,6 +63,22 @@ func TestDiskThresholds(t *testing.T) {
 	}
 }
 
+// With no databases the data root isn't made yet; the filesystem measured is
+// its parent, and the check passes with an honest detail instead of warning
+// that it cannot read the data root.
+func TestDiskDataWithoutDataRoot(t *testing.T) {
+	f := healthy()
+	f.DiskFree, f.DiskTotal = 60, 100
+	f.DataRoot, f.DiskPath = "/var/lib/eru/clusters", "/var/lib"
+	r := byID(Run(NodeChecks(), f, ""), "host.disk_data", "")
+	if r.Status != Pass || !strings.Contains(r.Detail, "/var/lib") || !strings.Contains(r.Detail, "no databases yet") {
+		t.Fatalf("disk_data = %s: %s", r.Status, r.Detail)
+	}
+	if f.DiskKnown && f.DiskPath == f.DataRoot {
+		t.Fatal("the test did not set a distinct parent")
+	}
+}
+
 func TestTLSExpiry(t *testing.T) {
 	for days, want := range map[int]Status{80: Pass, 20: Warn, 5: Fail} {
 		f := healthy()

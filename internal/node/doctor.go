@@ -48,6 +48,22 @@ func loadDoctorState() (doctorState, bool) {
 	return st, true
 }
 
+// nearestExisting is path, or its nearest parent that exists: the data root
+// is made with the first cluster and removed with the last, and until then
+// the filesystem it will live on is its parent's.
+func nearestExisting(path string, exists func(string) bool) string {
+	for p := filepath.Clean(path); ; p = filepath.Dir(p) {
+		if exists(p) || p == filepath.Dir(p) {
+			return p
+		}
+	}
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 // gatherFacts reads everything doctor's checks need from the node.
 func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init bool) doctor.Facts {
 	f := doctor.Facts{Now: time.Now().UTC(), Init: init, DataRoot: cfg.Server.DataRoot}
@@ -56,7 +72,8 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	}
 	_, err := os.Stat("/var/run/reboot-required")
 	f.RebootRequired = err == nil
-	f.DiskTotal, f.DiskFree, f.DiskKnown = hostinfo.DiskUsage(cfg.Server.DataRoot)
+	f.DiskPath = nearestExisting(cfg.Server.DataRoot, pathExists)
+	f.DiskTotal, f.DiskFree, f.DiskKnown = hostinfo.DiskUsage(f.DiskPath)
 	f.UnattendedActive = steps.ServiceActive(ctx, "unattended-upgrades")
 	if out, err := steps.Probe(ctx, "timedatectl", "show", "-p", "NTPSynchronized", "--value"); err == nil {
 		f.TimeKnown, f.TimeSynced = true, out == "yes"

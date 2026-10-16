@@ -76,6 +76,10 @@ type Facts struct {
 	DiskFree       uint64
 	DiskKnown      bool
 	DataRoot       string
+	// DiskPath is the path whose filesystem was measured: the data root,
+	// or its nearest existing parent while the data root doesn't exist yet
+	// (no database has been created, or the last one was dropped).
+	DiskPath string
 	// UnattendedActive is unattended-upgrades' unit state.
 	UnattendedActive bool
 	TimeSynced       bool

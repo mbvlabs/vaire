@@ -84,6 +84,9 @@ func diskData(f Facts) []Result {
 	}
 	pct := FreePct(f.DiskTotal, f.DiskFree)
 	detail := fmt.Sprintf("%.0f%% free on %s", pct, f.DataRoot)
+	if f.DiskPath != "" && f.DiskPath != f.DataRoot {
+		detail = fmt.Sprintf("%.0f%% free on %s, where the data root %s goes (no databases yet)", pct, f.DiskPath, f.DataRoot)
+	}
 	switch {
 	case pct < DiskFailFreePct:
 		return one(Fail, detail+" (fails under 10%: a full disk stops every database)", "free space or grow the volume; eru backup list shows dropped stanzas, eru restore cleanup leftovers")
