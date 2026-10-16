@@ -1676,7 +1676,7 @@ func nodeCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Open public SSH for a limited time from the provider console",
-					WhenToUse:      []string{"Break glass when WireGuard is unreachable. Run as root on the server."},
+					WhenToUse:      []string{"Break glass when WireGuard is unreachable. This runs on the server, as root, for example from the provider's console; it is not an operator-machine command and there is nothing to run from your machine until the tunnel works."},
 					Examples:       []string{"sudo eru node unlock-ssh --minutes 30"},
 					Mutating:       true,
 					SupportsDryRun: true,

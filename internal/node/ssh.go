@@ -391,8 +391,15 @@ type UnlockResult struct {
 
 // UnlockSSH is eru node unlock-ssh: break-glass from the provider console
 // (§8.4). It opens public 22/tcp, allows password login for the admin user
-// only, and arms a timer that closes both again.
+// only, and arms a timer that closes both again. It runs on the server as
+// root; on an operator machine it says so instead of a config error.
 func UnlockSSH(ctx context.Context, minutes int, dryRun bool, report engine.Reporter) (UnlockResult, error) {
+	if _, err := os.Stat(config.ClusterPath); err != nil {
+		if os.IsNotExist(err) {
+			return UnlockResult{}, unlockSSHNotOnServer()
+		}
+		return UnlockResult{}, err
+	}
 	if minutes <= 0 {
 		minutes = defaultUnlockMins
 	}
@@ -441,4 +448,16 @@ func rootRequired(command string) error {
 		output.ExitPrecondition,
 		"Run it with sudo, or as root from the provider console.",
 	).WithDetails(map[string]any{"reason": "root_required"})
+}
+
+// unlockSSHNotOnServer is what eru node unlock-ssh returns on an operator
+// machine, where there is no cluster.toml: the command opens break-glass on
+// the server, so it must run there.
+func unlockSSHNotOnServer() *output.CLIError {
+	return output.NewError(
+		output.CodePrecondition,
+		"eru node unlock-ssh runs on the server, as root, not on this machine",
+		output.ExitPrecondition,
+		"Open break-glass from the server: log in at the provider's console (or a root shell), then run sudo eru node unlock-ssh --minutes 30 there. From this machine there is nothing to run until WireGuard works; check eru tunnel status, and that UDP reaches the server.",
+	).WithDetails(map[string]any{"reason": "runs_on_server", "path": config.ClusterPath})
 }
