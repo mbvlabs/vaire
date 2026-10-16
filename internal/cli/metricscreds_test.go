@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mbvlabs/eru/internal/contexts"
@@ -81,5 +82,17 @@ func TestServiceSecretsNameWhatWasGenerated(t *testing.T) {
 	}
 	if got := staleWarning([]string{"the eru_admin password", "a /metrics credential"})[0].Message; got != "the eru_admin password and a /metrics credential were generated; run eru secrets export to refresh the secrets document" {
 		t.Errorf("two items: %q", got)
+	}
+}
+
+func TestMetricsPasswordNote(t *testing.T) {
+	if note := metricsPasswordNote(true, false); !strings.Contains(note, "--reveal") {
+		t.Fatalf("hidden password note = %q, want it to name --reveal", note)
+	}
+	if note := metricsPasswordNote(true, true); note != "" {
+		t.Fatalf("revealed password note = %q, want none", note)
+	}
+	if note := metricsPasswordNote(false, false); note != "" {
+		t.Fatalf("no-credential note = %q, want none", note)
 	}
 }

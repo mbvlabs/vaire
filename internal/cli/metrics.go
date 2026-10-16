@@ -124,6 +124,9 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 		lines = append(lines, "  "+path.Path)
 	}
 	lines = append(lines, "", "service discovery: "+data.TargetsURL, "", "Prometheus:", indent(data.Prometheus), "", "Grafana Alloy:", indent(data.Alloy))
+	if note := metricsPasswordNote(creds.Metrics != nil, flagTrue(cmd, "reveal")); note != "" {
+		lines = append(lines, "", note)
+	}
 	if !data.Credential {
 		lines = append(lines, "", "the node has no credential yet; run eru apply")
 	}
@@ -133,6 +136,15 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 			Message: "this machine's context has no /metrics credential; run eru apply, then eru secrets export"})
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: warnings})
+}
+
+// metricsPasswordNote tells a human how to see the password the snippets
+// leave out. It is empty when the password is shown or this machine has none.
+func metricsPasswordNote(hasCredential, revealed bool) string {
+	if !hasCredential || revealed {
+		return ""
+	}
+	return "the password is hidden; eru metrics show --reveal prints it, or copy it from the secrets handoff"
 }
 
 func indent(block string) string {
