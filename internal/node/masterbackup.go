@@ -102,10 +102,13 @@ type MasterBackupResult struct {
 }
 
 // masterBackupOptions tune a run: debounce waits for a quiet dirty flag (the
-// path unit's run), force builds even when nothing changed.
+// path unit's run), force builds even when nothing changed, verify checks
+// the bucket for the newest bundle however recently it last did
+// (master-backup.now).
 type masterBackupOptions struct {
 	debounce bool
 	force    bool
+	verify   bool
 }
 
 // runMasterBackup runs the job under its own lock.
@@ -175,7 +178,7 @@ func masterBackupLocked(ctx context.Context, cfg config.Cluster, report engine.R
 		last.LastFailure, last.LastFailureAt = "", ""
 		return res, saveMasterLast(last)
 	}
-	uploaded, verified, pruned, err := syncBucket(ctx, cfg, report, &last, now)
+	uploaded, verified, pruned, err := syncBucket(ctx, cfg, report, &last, now, opts.verify)
 	res.Uploaded, res.Verified, res.Pruned = uploaded, verified, pruned
 	if err != nil {
 		return res, recordMasterFailure(last, now, err)
@@ -313,8 +316,9 @@ func readLocalBundle(name string) ([]byte, masterbackup.Sidecar, error) {
 }
 
 // syncBucket checks the fence, writes the first epoch, uploads the newest
-// local bundle when the bucket lacks it, confirms it once a day and prunes.
-func syncBucket(ctx context.Context, cfg config.Cluster, report engine.Reporter, last *MasterLast, now time.Time) (uploaded, verified bool, pruned int, err error) {
+// local bundle when the bucket lacks it, confirms it once a day (every run
+// with verify) and prunes.
+func syncBucket(ctx context.Context, cfg config.Cluster, report engine.Reporter, last *MasterLast, now time.Time, verify bool) (uploaded, verified bool, pruned int, err error) {
 	t, _, err := steps.BackupTarget(cfg)
 	if err != nil {
 		return false, false, 0, err
@@ -340,7 +344,7 @@ func syncBucket(ctx context.Context, cfg config.Cluster, report engine.Reporter,
 		return false, false, 0, nil
 	}
 	needUpload := last.UploadedName != last.Name
-	if !needUpload && sinceRFC3339(last.LastVerifiedAt, now) >= verifyEvery {
+	if bucketCheckDue(*last, now, verify) {
 		ok, err := backup.MasterHasSidecar(ctx, t, last.Name)
 		if err != nil {
 			return false, false, 0, err
@@ -373,6 +377,16 @@ func syncBucket(ctx context.Context, cfg config.Cluster, report engine.Reporter,
 		}
 	}
 	return uploaded, verified, pruned, nil
+}
+
+// bucketCheckDue reports whether a run checks the bucket for the bundle
+// last.json says was uploaded: daily, or on every run with verify, since
+// the bucket can lose it without the node knowing.
+func bucketCheckDue(last MasterLast, now time.Time, verify bool) bool {
+	if last.UploadedName != last.Name {
+		return false // it's uploaded anyway
+	}
+	return verify || sinceRFC3339(last.LastVerifiedAt, now) >= verifyEvery
 }
 
 // sinceRFC3339 is how long ago ts was; forever when it doesn't parse.

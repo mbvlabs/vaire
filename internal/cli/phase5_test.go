@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +132,20 @@ func TestOpenFetched(t *testing.T) {
 	}
 	if _, err := openFetched(fetchedBundle{Name: "n", Cipher: bad}, id.String(), "prod"); !errors.As(err, &ce) || ce.Code != output.CodeBundleCorrupt {
 		t.Errorf("a corrupt file without a sidecar: %v", err)
+	}
+	// An exported file under any name: the message names the file, doesn't
+	// repeat "the bundle is corrupt", and the hint offers another file.
+	for name, cipher := range map[string][]byte{"flipped": bad, "truncated": sealed[:len(sealed)/2]} {
+		_, err := openFetched(fetchedBundle{Cipher: cipher, From: "/tmp/prod-master.tar.age"}, id.String(), "prod")
+		if !errors.As(err, &ce) || ce.Code != output.CodeBundleCorrupt {
+			t.Fatalf("%s file: %v", name, err)
+		}
+		if !strings.HasPrefix(ce.Message, "master bundle /tmp/prod-master.tar.age is corrupt: ") {
+			t.Errorf("%s file: message %q", name, ce.Message)
+		}
+		if strings.Contains(ce.Message, "the bundle is corrupt") || !strings.Contains(ce.Hint, "--bundle-file") {
+			t.Errorf("%s file: message %q, hint %q", name, ce.Message, ce.Hint)
+		}
 	}
 }
 

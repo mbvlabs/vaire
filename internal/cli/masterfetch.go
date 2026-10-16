@@ -103,34 +103,55 @@ func readBundleFile(path string, stdin io.Reader) (fetchedBundle, error) {
 
 func baseName(p string) string { return p[strings.LastIndex(p, "/")+1:] }
 
+// fromFile reports whether the bundle was read from a file (or stdin)
+// rather than the bucket.
+func (f fetchedBundle) fromFile() bool { return f.From != "" && f.From != "bucket" }
+
+// label names the bundle in messages: its name, else the file it was read
+// from.
+func (f fetchedBundle) label() string {
+	switch {
+	case f.Name != "":
+		return f.Name
+	case f.From == "-":
+		return "on stdin"
+	default:
+		return f.From
+	}
+}
+
 // openFetched checks the sidecar's ciphertext hash, decrypts with the
 // recovery identity and validates the bundle. A failed check is
 // bundle_corrupt naming the next older bundle.
 func openFetched(f fetchedBundle, identity, server string) (masterbackup.Bundle, error) {
 	corrupt := func(cause string) error {
 		hint := "Pick another bundle with --bundle (eru server backup list)."
-		if f.Older != "" {
+		switch {
+		case f.fromFile():
+			hint = "Use another exported file with --bundle-file, or a bundle from the bucket with --bundle (eru server backup list)."
+		case f.Older != "":
 			hint = "The next older complete bundle is " + f.Older + ": --bundle " + f.Older + "."
 		}
-		return output.NewError(output.CodeBundleCorrupt, "master bundle "+f.Name+" is corrupt: "+cause, output.ExitSecrets, hint).
-			WithDetails(map[string]any{"bundle": f.Name, "older": f.Older})
+		return output.NewError(output.CodeBundleCorrupt, "master bundle "+f.label()+" is corrupt: "+cause, output.ExitSecrets, hint).
+			WithDetails(map[string]any{"bundle": f.Name, "from": f.From, "older": f.Older})
 	}
 	if f.Sidecar != nil && f.Sidecar.SHA256 != "" && f.Sidecar.SHA256 != masterbackup.SHA256(f.Cipher) {
 		return masterbackup.Bundle{}, corrupt("its sha256 differs from its sidecar's")
 	}
 	b, err := masterbackup.Open(f.Cipher, identity)
 	if errors.Is(err, masterbackup.ErrCorrupt) {
-		return masterbackup.Bundle{}, corrupt(err.Error())
+		// The cause without ErrCorrupt's own "the bundle is corrupt: ".
+		return masterbackup.Bundle{}, corrupt(strings.TrimPrefix(err.Error(), masterbackup.ErrCorrupt.Error()+": "))
 	}
 	if err != nil {
 		return masterbackup.Bundle{}, output.WrapError(output.CodeSecrets, err, output.ExitSecrets, "")
 	}
 	if server != "" && b.Manifest.Server != server {
-		return b, output.NewError(output.CodePrecondition, "master bundle "+f.Name+" belongs to server "+b.Manifest.Server+", not "+server, output.ExitPrecondition,
+		return b, output.NewError(output.CodePrecondition, "master bundle "+f.label()+" belongs to server "+b.Manifest.Server+", not "+server, output.ExitPrecondition,
 			"Use the context of the server the bundle came from.").WithDetails(map[string]any{"reason": "bundle_server_mismatch", "bundle_server": b.Manifest.Server})
 	}
 	if newerThanBuild(b.Manifest.EruVersion) {
-		return b, output.NewError(output.CodeUpdateRequired, "master bundle "+f.Name+" was written by eru "+b.Manifest.EruVersion+", newer than this "+buildinfo.Version,
+		return b, output.NewError(output.CodeUpdateRequired, "master bundle "+f.label()+" was written by eru "+b.Manifest.EruVersion+", newer than this "+buildinfo.Version,
 			output.ExitVersion, "Run eru upgrade first.").WithDetails(map[string]any{"bundle_version": b.Manifest.EruVersion})
 	}
 	return b, nil

@@ -86,3 +86,25 @@ func TestMasterFamilies(t *testing.T) {
 		t.Error("a pending change isn't dirty")
 	}
 }
+
+func TestBucketCheckDue(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-time.Hour).Format(time.RFC3339)
+	stale := now.Add(-verifyEvery - time.Minute).Format(time.RFC3339)
+	for _, c := range []struct {
+		name   string
+		last   MasterLast
+		verify bool
+		want   bool
+	}{
+		{"timer, checked an hour ago", MasterLast{Name: "a", UploadedName: "a", LastVerifiedAt: fresh}, false, false},
+		{"timer, checked a day ago", MasterLast{Name: "a", UploadedName: "a", LastVerifiedAt: stale}, false, true},
+		{"timer, never checked", MasterLast{Name: "a", UploadedName: "a"}, false, true},
+		{"now, checked an hour ago", MasterLast{Name: "a", UploadedName: "a", LastVerifiedAt: fresh}, true, true},
+		{"not uploaded yet", MasterLast{Name: "b", UploadedName: "a", LastVerifiedAt: fresh}, true, false},
+	} {
+		if got := bucketCheckDue(c.last, now, c.verify); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}

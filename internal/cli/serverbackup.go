@@ -125,10 +125,14 @@ func runServerBackupNow(cmd *cobra.Command, _ []string) error {
 		msg = "built master bundle " + res.Name
 	}
 	switch {
-	case res.Uploaded:
+	case res.Uploaded && res.Built:
 		msg += " and uploaded it to the bucket"
-	case res.Bucket:
+	case res.Uploaded:
+		msg += "; the bucket lacked it, so it was uploaded"
+	case res.Bucket && res.Verified:
 		msg += "; the bucket has it"
+	case res.Bucket:
+		msg += "; it was uploaded before (the bucket wasn't checked this run)"
 	default:
 		msg += "; no bucket, so it stays on the server (eru server backup export)"
 	}
@@ -277,7 +281,7 @@ func runServerBackupVerify(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	data := map[string]any{"bundle": f.Name, "from": f.From, "manifest": manifestSummary(b.Manifest), "state": "unknown"}
-	message := fmt.Sprintf("master bundle %s opens and checks out: %d files, created %s, epoch %d", nameOr(f.Name, f.From), len(b.Files), b.Manifest.CreatedAt, b.Manifest.Epoch)
+	message := fmt.Sprintf("master bundle %s opens and checks out: %d files, created %s, epoch %d", f.label(), len(b.Files), b.Manifest.CreatedAt, b.Manifest.Epoch)
 	var warnings []output.Warning
 	p := newProgress(cmd)
 	if s, err := openSession(cmd, p); err == nil {
@@ -298,13 +302,6 @@ func runServerBackupVerify(cmd *cobra.Command, _ []string) error {
 		warnings = append(warnings, output.Warning{Code: "server_unreachable", Message: "couldn't compare with the server: " + err.Error()})
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings})
-}
-
-func nameOr(name, alt string) string {
-	if name != "" {
-		return name
-	}
-	return alt
 }
 
 // manifestSummary is a manifest without file hashes, for output.

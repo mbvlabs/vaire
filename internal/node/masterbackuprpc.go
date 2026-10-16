@@ -26,7 +26,8 @@ func handleMasterBackupNow(ctx context.Context, env *Env) (Result, error) {
 			"changed": st.ContentHash != st.Last.ContentHash, "last": st.Last.Name,
 		}}, nil
 	}
-	res, err := runMasterBackup(ctx, env.Cluster, env.Report, masterBackupOptions{force: p.Force})
+	// The operator asked: check the bucket rather than trust last.json.
+	res, err := runMasterBackup(ctx, env.Cluster, env.Report, masterBackupOptions{force: p.Force, verify: true})
 	if err != nil {
 		return Result{}, err
 	}
