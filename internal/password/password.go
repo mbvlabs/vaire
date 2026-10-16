@@ -7,6 +7,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -50,28 +52,56 @@ func Hash(pw string) (string, error) {
 // Verify reports whether pw matches the encoded hash. A malformed hash
 // verifies nothing.
 func Verify(encoded, pw string) bool {
-	parts := strings.Split(encoded, "$")
-	// "", "argon2id", "v=19", "m=..,t=..,p=..", salt, hash
-	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
+	params, salt, want, ok := parseHash(encoded)
+	if !ok {
 		return false
 	}
-	var version int
-	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
-		return false
-	}
-	var m, t uint32
-	var p uint8
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil || p == 0 {
-		return false
-	}
-	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
-		return false
-	}
-	want, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil || len(want) == 0 {
-		return false
-	}
-	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want))) //nolint:gosec // G115: len fits uint32 for any stored hash.
+	got := argon2.IDKey([]byte(pw), salt, params[1], params[0], uint8(params[2]), uint32(len(want))) //nolint:gosec // G115: parseHash bounds all parameters and lengths.
 	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+var hashParams = regexp.MustCompile(`^m=([1-9][0-9]*),t=([1-9][0-9]*),p=([1-9][0-9]*)$`)
+
+// Valid checks an encoded verifier without deriving a key. Imported hashes
+// must have bounded costs too: they are data, not resource-allocation policy.
+func Valid(encoded string) bool {
+	_, _, _, ok := parseHash(encoded)
+	return ok
+}
+
+func parseHash(encoded string) (params [3]uint32, salt, sum []byte, ok bool) {
+	if len(encoded) > 256 {
+		return params, nil, nil, false
+	}
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" || parts[2] != "v=19" {
+		return params, nil, nil, false
+	}
+	m := hashParams.FindStringSubmatch(parts[3])
+	if m == nil {
+		return params, nil, nil, false
+	}
+	// At most 64 MiB, three passes and four lanes. Raise these bounds
+	// deliberately if a future release starts generating stronger hashes.
+	limits := [3]uint64{64 * 1024, 3, 4}
+	for i := range params {
+		n, err := strconv.ParseUint(m[i+1], 10, 32)
+		if err != nil || n == 0 || n > limits[i] {
+			return params, nil, nil, false
+		}
+		params[i] = uint32(n)
+	}
+	if params[0] < 8*params[2] {
+		return params, nil, nil, false
+	}
+	var err error
+	salt, err = base64.RawStdEncoding.Strict().DecodeString(parts[4])
+	if err != nil || len(salt) < saltLen || len(salt) > 32 || base64.RawStdEncoding.EncodeToString(salt) != parts[4] {
+		return params, nil, nil, false
+	}
+	sum, err = base64.RawStdEncoding.Strict().DecodeString(parts[5])
+	if err != nil || len(sum) < keyLen || len(sum) > 64 || base64.RawStdEncoding.EncodeToString(sum) != parts[5] {
+		return params, nil, nil, false
+	}
+	return params, salt, sum, true
 }

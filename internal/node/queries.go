@@ -30,13 +30,17 @@ type statement struct {
 var queryOrders = map[string]string{"total": "total_exec_time", "mean": "mean_exec_time", "calls": "calls"}
 
 // statementsSQL reads the cluster's top statements of its own database.
-func statementsSQL(order string, limit int) string {
+func statementsSQL(order string, limit int, allSessions bool) string {
+	filter := ""
+	if !allSessions {
+		filter = "\n  AND NOT " + pg.EruRoleSQL("r.rolname")
+	}
 	return `SELECT r.rolname AS role, s.queryid::text AS queryid, s.calls,
   round(s.total_exec_time::numeric, 1) AS total_ms, round(s.mean_exec_time::numeric, 2) AS mean_ms, s.rows,
   coalesce(round((100.0 * s.shared_blks_hit / nullif(s.shared_blks_hit + s.shared_blks_read, 0))::numeric, 1), 100) AS hit_pct,
   left(regexp_replace(s.query, '\s+', ' ', 'g'), 500) AS query
 FROM pg_stat_statements s JOIN pg_roles r ON r.oid = s.userid
-WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())` + filter + `
 ORDER BY s.` + queryOrders[order] + ` DESC LIMIT ` + strconv.Itoa(limit)
 }
 
@@ -93,7 +97,7 @@ func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 			data.Missing = append(data.Missing, spec.Name)
 			continue
 		}
-		rows, err = local.Query(ctx, spec.Name, statementsSQL(p.Order, p.Limit), nil)
+		rows, err = local.Query(ctx, spec.Name, statementsSQL(p.Order, p.Limit, p.AllSessions), nil)
 		if err != nil {
 			warnings = append(warnings, output.Warning{Code: "database_unreachable", Message: spec.Name + ": " + err.Error()})
 			continue

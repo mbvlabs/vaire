@@ -11,6 +11,7 @@ import (
 	"github.com/mbvlabs/eru/internal/buildinfo"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/eru/internal/password"
 	"github.com/mbvlabs/eru/internal/transport"
 )
 
@@ -49,6 +50,9 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 	}
 	if len(doc.Nodes) == 0 {
 		return nil, secretsError("the secrets document lists no node", nil)
+	}
+	if doc.MasterPassword != "" && !password.Valid(doc.MasterPassword) {
+		return nil, secretsError("the master password verifier in the document is invalid or has unsupported costs", nil)
 	}
 	ctx := &contexts.Context{
 		Name:      name,

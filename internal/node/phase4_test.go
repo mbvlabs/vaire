@@ -26,7 +26,7 @@ func TestMergeStatements(t *testing.T) {
 	if got := mergeStatements(per, "calls", 1); got[0].QueryID != "3" {
 		t.Errorf("calls %+v", got)
 	}
-	if !strings.Contains(statementsSQL("mean", 5), "ORDER BY s.mean_exec_time DESC LIMIT 5") {
+	if !strings.Contains(statementsSQL("mean", 5, false), "ORDER BY s.mean_exec_time DESC LIMIT 5") {
 		t.Error("order column")
 	}
 }

@@ -63,7 +63,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           scripts/sign-release.sh "dist/release-stable-${version%%.*}.x"
-      - name: Upload the immutable artifacts and the line channel
+      - name: Upload the immutable artifacts
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -80,7 +80,21 @@ jobs:
             echo "Release ${version} already exists and will not be overwritten" >&2
             exit 1
           }
-          scripts/upload-release.sh "dist/release-stable-${version%%.*}.x" "${line}" "${RELEASE_BUCKET}" "${R2_ENDPOINT}"
+          scripts/upload-release.sh "dist/release-stable-${version%%.*}.x" "${line}" "${RELEASE_BUCKET}" "${R2_ENDPOINT}" artifacts
+      - name: Promote the major line only forward
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          line="${version%%.*}.x"
+          promote="$(go run ./internal/release/cmd/promote --bucket "${RELEASE_BUCKET}" --key "${line}/manifest.json" --endpoint "${R2_ENDPOINT}" "${version}")"
+          if [ "${promote}" = yes ]; then
+            scripts/upload-release.sh "dist/release-stable-${line}" "stable-${line}" "${RELEASE_BUCKET}" "${R2_ENDPOINT}" channel
+          fi
       - name: Move the root channel when this is the highest version
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -88,14 +102,14 @@ jobs:
           AWS_DEFAULT_REGION: auto
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          current="$(aws s3 cp "s3://${RELEASE_BUCKET}/manifest.json" - --endpoint-url "${R2_ENDPOINT}" 2>/dev/null | jq -r '.version // empty' || true)"
-          if [ "$(go run ./internal/release/cmd/promote "${current}" "${version}")" != yes ]; then
-            echo "the root channel stays on ${current:-nothing}: ${version} does not move it"
+          promote="$(go run ./internal/release/cmd/promote --bucket "${RELEASE_BUCKET}" --key manifest.json --endpoint "${R2_ENDPOINT}" "${version}")"
+          if [ "${promote}" != yes ]; then
+            echo "the root channel stays unchanged: ${version} does not move it"
             exit 0
           fi
-          scripts/build-release.sh "${version}" stable "${RELEASE_BASE_URL}"
-          scripts/sign-release.sh dist/release-stable
-          scripts/upload-release.sh dist/release-stable stable "${RELEASE_BUCKET}" "${R2_ENDPOINT}"
+          release_root="dist/release-stable-${version%%.*}.x"
+          cp "${release_root}/${version%%.*}.x/manifest.json" "${release_root}/manifest.json"
+          cp "${release_root}/${version%%.*}.x/manifest.json.sigstore.json" "${release_root}/manifest.json.sigstore.json"
+          scripts/upload-release.sh "${release_root}" stable "${RELEASE_BUCKET}" "${R2_ENDPOINT}" channel

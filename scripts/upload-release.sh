@@ -5,6 +5,11 @@ release_root="${1:?usage: scripts/upload-release.sh RELEASE_ROOT CHANNEL BUCKET 
 channel="${2:?usage: scripts/upload-release.sh RELEASE_ROOT CHANNEL BUCKET ENDPOINT}"
 bucket="${3:?usage: scripts/upload-release.sh RELEASE_ROOT CHANNEL BUCKET ENDPOINT}"
 endpoint="${4:?usage: scripts/upload-release.sh RELEASE_ROOT CHANNEL BUCKET ENDPOINT}"
+mode="${5:-all}"
+case "${mode}" in
+  all | artifacts | channel) ;;
+  *) echo "upload mode must be all, artifacts or channel" >&2; exit 1 ;;
+esac
 
 case "${channel}" in
   stable)
@@ -37,8 +42,13 @@ for name in install.sh manifest.json manifest.json.sigstore.json; do
   }
 done
 
-aws s3 cp "${release_root}/releases" "s3://${bucket}/releases" --recursive \
-  --cache-control 'public,max-age=31536000,immutable' --endpoint-url "${endpoint}"
+if [ "${mode}" != channel ]; then
+  aws s3 cp "${release_root}/releases" "s3://${bucket}/releases" --recursive \
+    --cache-control 'public,max-age=31536000,immutable' --endpoint-url "${endpoint}"
+fi
+if [ "${mode}" = artifacts ]; then
+  exit 0
+fi
 aws s3 cp "${channel_dir}/install.sh" "${dest_prefix}/install.sh" \
   --cache-control no-cache --content-type text/x-shellscript --endpoint-url "${endpoint}"
 aws s3 cp "${channel_dir}/manifest.json.sigstore.json" \

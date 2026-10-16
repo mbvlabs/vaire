@@ -104,7 +104,7 @@ func (c *topCollector) sample(ctx context.Context, filter string) top.Snapshot {
 			}
 		}
 		if tc.statements {
-			if res, err := tc.conn.Query(ctx, top.StatementsSQL); err == nil {
+			if res, err := tc.conn.Query(ctx, top.StatementsSQL(c.includeEru)); err == nil {
 				s.Statements = top.ParseStatements(res.Maps())
 			}
 		}

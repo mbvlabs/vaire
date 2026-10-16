@@ -62,23 +62,36 @@ func openSecretGateSession(cmd *cobra.Command) (*session, *progress, func()) {
 // node verify a code. It refuses with secret_gate_required when no factor can
 // be checked.
 func secretGateUnlock(cmd *cobra.Command, c *contexts.Context, hash string, s *session, p *progress, action string) error {
-	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
-		return secretGateRequired(hash != "")
-	}
-	configured := false
-	if s != nil && p != nil {
-		if st, err := fetchProtectStatus(cmd, s, p); err == nil {
-			configured = st.Configured
+	return unlockSecretFactors(!MustNotPrompt(cmd) && !flagTrue(cmd, "yes"), hash != "", func() (func() error, func()) {
+		closeFn := func() {}
+		if s == nil || p == nil {
+			s, p, closeFn = openSecretGateSession(cmd)
 		}
+		if s != nil && p != nil {
+			if st, err := fetchProtectStatus(cmd, s, p); err == nil && st.Configured {
+				return func() error { return secretGateCode(cmd, s, p, hash, action) }, closeFn
+			}
+		}
+		return nil, closeFn
+	}, func() error { return secretGatePassword(cmd, hash, action) })
+}
+
+// unlockSecretFactors always discovers the code factor, even when a password
+// exists. A failed node connection leaves the local password available. The
+// human check precedes discovery so non-interactive exports never dial a node.
+func unlockSecretFactors(human, passwordSet bool, openCode func() (func() error, func()), password func() error) error {
+	if !human {
+		return secretGateRequired(passwordSet)
 	}
-	switch {
-	case configured:
-		return secretGateCode(cmd, s, p, hash, action)
-	case hash != "":
-		return secretGatePassword(cmd, hash, action)
-	default:
-		return secretGateRequired(false)
+	code, closeFn := openCode()
+	defer closeFn()
+	if code != nil {
+		return code()
 	}
+	if passwordSet {
+		return password()
+	}
+	return secretGateRequired(false)
 }
 
 // secretGateCode asks for a code from the authenticator app and has the node
@@ -158,9 +171,7 @@ func runSecretsPasswordSet(cmd *cobra.Command, _ []string) error {
 		if !stdinIsTTY() {
 			return secretGateRequired(true)
 		}
-		s, p, closeFn := openSecretGateSession(cmd)
-		defer closeFn()
-		if err := secretGateUnlock(cmd, c, hash, s, p, "changing the master password"); err != nil {
+		if err := secretGateUnlock(cmd, c, hash, nil, nil, "changing the master password"); err != nil {
 			return err
 		}
 	}

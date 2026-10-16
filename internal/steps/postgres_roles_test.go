@@ -1,12 +1,63 @@
 package steps
 
 import (
+	"context"
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
 )
+
+// An old completed journal entry must not hide an access-policy upgrade.
+func TestRolesAccessPolicyUpgrade(t *testing.T) {
+	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app", Protected: true}}}
+	step := postgresRoles{}.Instance("app")
+	inputs, err := step.Inputs(cfg, engine.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current roleInputs
+	if err := json.Unmarshal(inputs, &current); err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the previous release's exact field order and encoding.
+	oldInputs, err := canonical(struct {
+		Admin      bool           `json:"admin"`
+		Monitor    bool           `json:"monitor"`
+		Auth       bool           `json:"auth"`
+		AuthSQL    string         `json:"auth_sql"`
+		MonitorSQL string         `json:"monitor_sql"`
+		DB         databaseInputs `json:"database"`
+	}{current.Admin, current.Monitor, current.Auth, current.AuthSQL, current.MonitorSQL, current.DB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "journal.json")
+	j := &engine.Journal{Steps: map[string]engine.JournalEntry{
+		step.ID(): {Status: engine.StatusCompleted, InputsHash: engine.InputsHash(step.ID(), oldInputs)},
+	}}
+	if err := j.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := engine.Plan(context.Background(), []engine.Step{postgresRoles{}}, cfg, engine.Runtime{}, engine.Options{JournalPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.WouldApply != 1 || plan.Steps[0].Reason != engine.ReasonInputsChanged {
+		t.Fatalf("old completed entry skipped the policy upgrade: %+v", plan)
+	}
+	j.Steps[step.ID()] = engine.JournalEntry{Status: engine.StatusCompleted, InputsHash: engine.InputsHash(step.ID(), inputs)}
+	if err := j.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = engine.Plan(context.Background(), []engine.Step{postgresRoles{}}, cfg, engine.Runtime{}, engine.Options{JournalPath: path})
+	if err != nil || plan.WouldApply != 0 {
+		t.Fatalf("current policy should skip: %+v, %v", plan, err)
+	}
+}
 
 // On a protected database eru_admin is no member of the owner role and
 // holds neither pg_signal_backend nor pg_maintain, so its password alone can

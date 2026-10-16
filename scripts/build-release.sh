@@ -144,6 +144,17 @@ sed \
   -e "s|@@COSIGN_TRUST_ARGS@@|$(sed_escape "${trust_args}")|g" \
   scripts/install.sh >"${channel_dir}/install.sh"
 chmod 0755 "${channel_dir}/install.sh"
+
+# A line release may also promote the root pointer. Prepare that installer
+# without rebuilding or overwriting the immutable version's artifacts.
+if [ -n "${line_dir}" ]; then
+  sed \
+    -e "s|@@CHANNEL_ROOT@@|$(sed_escape "${base_url}")|g" \
+    -e "s|@@CHANNEL@@|$(sed_escape "${signing_channel}")|g" \
+    -e "s|@@COSIGN_TRUST_ARGS@@|$(sed_escape "${trust_args}")|g" \
+    scripts/install.sh >"${out}/install.sh"
+  chmod 0755 "${out}/install.sh"
+fi
 if grep -q '@@' "${channel_dir}/install.sh"; then
   echo "install.sh still contains unsubstituted placeholders" >&2
   exit 1

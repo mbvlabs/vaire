@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mbvlabs/eru/internal/pg"
 )
 
 // ActivitySQL lists the client sessions of the connected database, with
@@ -28,12 +30,19 @@ const DatabaseSQL = `SELECT (xact_commit + xact_rollback)::text AS xacts, blks_h
   current_setting('max_connections') AS max_connections
 FROM pg_stat_database WHERE datname = current_database()`
 
-// StatementsSQL reads the connected database's statements, for deltas.
-const StatementsSQL = `SELECT s.queryid::text AS queryid, s.calls::text AS calls, s.total_exec_time::text AS total_ms,
+// StatementsSQL reads statement deltas, excluding internal roles before the
+// limit unless allSessions is set, just like eru queries.
+func StatementsSQL(allSessions bool) string {
+	filter := ""
+	if !allSessions {
+		filter = "\n  AND NOT " + pg.EruRoleSQL("r.rolname")
+	}
+	return `SELECT s.queryid::text AS queryid, s.calls::text AS calls, s.total_exec_time::text AS total_ms,
   left(regexp_replace(s.query, '\s+', ' ', 'g'), 200) AS query
-FROM pg_stat_statements s
-WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+FROM pg_stat_statements s JOIN pg_roles r ON r.oid = s.userid
+WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())` + filter + `
 ORDER BY s.total_exec_time DESC LIMIT 300`
+}
 
 // HasStatementsSQL tells whether pg_stat_statements is installed.
 const HasStatementsSQL = `SELECT count(*)::text AS n FROM pg_extension WHERE extname = 'pg_stat_statements'`

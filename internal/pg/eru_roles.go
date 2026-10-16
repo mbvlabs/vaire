@@ -24,6 +24,13 @@ func IsEruRole(role string) bool {
 	return strings.HasPrefix(role, roleWritePfx)
 }
 
+// EruRoleSQL is the SQL equivalent of IsEruRole. column is a trusted SQL
+// expression, never user input. Filter before LIMIT so internal work cannot
+// crowd application statements out of a top-N result.
+func EruRoleSQL(column string) string {
+	return "(" + column + " IN ('" + RoleAdmin + "', '" + RoleMonitor + "', '" + RoleAuth + "') OR starts_with(" + column + ", '" + roleWritePfx + "'))"
+}
+
 // IsEruSession reports whether a session is eru's own: one of eru's roles, or
 // any client that set an application_name beginning with "eru" (eru top,
 // eru-console). Both eru queries and eru top leave these out unless

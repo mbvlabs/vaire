@@ -47,6 +47,9 @@ type roleInputs struct {
 	Monitor bool   `json:"monitor"`
 	Auth    bool   `json:"auth"`
 	AuthSQL string `json:"auth_sql"`
+	// AccessSQL makes changes to the admin access policy reapply on upgrade,
+	// even when the database's desired configuration has not changed.
+	AccessSQL string `json:"access_sql"`
 	// MonitorSQL joins the inputs so every cluster re-runs it once when it
 	// changes (Phase 4).
 	MonitorSQL string         `json:"monitor_sql"`
@@ -68,7 +71,7 @@ func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, err
 		return nil, err
 	}
 	return canonical(roleInputs{
-		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL, MonitorSQL: monitorSQL,
+		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL, AccessSQL: AdminRoleSQL(spec), MonitorSQL: monitorSQL,
 		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions, Protected: spec.Protected},
 	})
 }
