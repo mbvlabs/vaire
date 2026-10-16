@@ -78,6 +78,31 @@ func handleWriteAccess(ctx context.Context, env *Env) (Result, error) {
 	return defaultProtectGuard.writeAccess(ctx, env, createWriteRole)
 }
 
+// writeSpec resolves the cluster a write targets: the database's own, or,
+// for an open copy (<db>__restoring, from a restore or a drill), the live
+// database's spec pointed at the copy's port. The copy holds the live
+// database's roles, so it follows the live database's protection; a copy the
+// server isn't holding open has no cluster and isn't writable at all.
+func writeSpec(cfg config.Cluster, recs backup.Records, name string) (config.ClusterSpec, bool) {
+	if spec, ok := cfg.ClusterByName(name); ok {
+		return spec, true
+	}
+	live := backup.LiveDatabase(name)
+	if live == name {
+		return config.ClusterSpec{}, false
+	}
+	spec, ok := cfg.ClusterByName(live)
+	if !ok {
+		return config.ClusterSpec{}, false
+	}
+	r, ok := recs.OpenRestore(live)
+	if !ok || backup.RestoringName(live) != name || r.Port == 0 {
+		return config.ClusterSpec{}, false
+	}
+	spec.Port = r.Port
+	return spec, true
+}
+
 func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWriteFunc) (Result, error) {
 	var p writeAccessParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -87,12 +112,14 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 		return Result{}, output.NewError(output.CodeInputRequired, "db.write-access needs db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
-	spec, ok := env.Cluster.ClusterByName(p.DB)
+	recs, _ := backup.LoadRecords()
+	spec, ok := writeSpec(env.Cluster, recs, p.DB)
 	if !ok || !spec.Protected {
-		// A copy (a restore's or a fork's) is never protected itself.
+		// A copy the server isn't holding open, or an unprotected database:
+		// the CLI writes as eru_admin, as before.
 		return Result{Data: WriteAccess{}}, nil
 	}
-	if err := g.checkWrite(spec.Name, "writing to it", env.Req.Secrets[ProtectCodeSecret]); err != nil {
+	if err := g.checkWrite(p.DB, "writing to it", env.Req.Secrets[ProtectCodeSecret]); err != nil {
 		return Result{}, err
 	}
 	password := env.Req.Secrets[WritePasswordSecret]

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/rpc"
@@ -138,8 +139,8 @@ func TestWriteAccess(t *testing.T) {
 	}
 	access := func(params, code string) (WriteAccess, error) { return accessWith(params, code, password) }
 
-	// Not protected (or not a database of the server's, such as a copy):
-	// the CLI writes as eru_admin, and no role is made.
+	// Not protected, and no copy the server holds open (this test node has
+	// no records.json): the CLI writes as eru_admin, and no role is made.
 	for _, db := range []string{"other", "app__restoring"} {
 		got, err := access(`{"db":"`+db+`"}`, "")
 		if err != nil || got.Protected || len(granted) != 0 {
@@ -196,6 +197,41 @@ func TestWriteAccess(t *testing.T) {
 	wantReason(t, err, output.CodeProtectCodeRejected, "code_reused")
 	if len(granted) != 1 {
 		t.Fatalf("granted %d roles", len(granted))
+	}
+}
+
+// A copy the server holds open resolves to the live database's spec, pointed
+// at the copy's port, so a write to it follows the live database's
+// protection; anything else is not a database of the server's.
+func TestWriteSpec(t *testing.T) {
+	recs := backup.Records{Restores: map[string]backup.Restore{"app": {Database: "app", Port: 5439}}}
+	cfg := protectedCluster()
+	spec, ok := writeSpec(cfg, backup.Records{}, "app")
+	if !ok || !spec.Protected || spec.Port != 0 {
+		t.Fatalf("app: %+v %v", spec, ok)
+	}
+	spec, ok = writeSpec(cfg, recs, "app__restoring")
+	if !ok || !spec.Protected || spec.Name != "app" || spec.Port != 5439 {
+		t.Fatalf("app__restoring: %+v %v, want app at 5439", spec, ok)
+	}
+	for _, name := range []string{"app__restoring", "app__pre_restore_20260101T000000", "other__restoring", "missing"} {
+		if spec, ok := writeSpec(cfg, backup.Records{}, name); ok {
+			t.Errorf("%s: resolved to %+v, want no cluster", name, spec)
+		}
+	}
+}
+
+// An open copy of a protected database is listed in the gate's protected
+// names, so the CLI asks for a code before writing to it.
+func TestProtectedCopies(t *testing.T) {
+	recs := backup.Records{Restores: map[string]backup.Restore{
+		"app":   {Database: "app", Port: 5439},
+		"other": {Database: "other", Port: 5440},
+		"gone":  {Database: "gone"},
+	}}
+	got := copiesOf(protectedCluster(), recs)
+	if len(got) != 1 || got[0] != "app__restoring" {
+		t.Fatalf("copies = %v, want [app__restoring]", got)
 	}
 }
 

@@ -118,15 +118,20 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		}
 		return incomplete("eru_admin is not a member of " + spec.Name + "_owner"), nil
 	}
-	signal, err := queryColumn(ctx, local, "postgres", adminSignalSQL)
-	if err != nil || len(signal) != 1 {
-		return incomplete("cannot read eru_admin's membership in pg_signal_backend"), nil
-	}
-	if (signal[0] == "t") == spec.Protected {
-		if spec.Protected {
-			return incomplete("eru_admin can still terminate sessions of protected " + spec.Name), nil
+	for _, r := range []struct{ role, protectedGap string }{
+		{"pg_signal_backend", "eru_admin can still terminate sessions of protected " + spec.Name},
+		{"pg_maintain", "eru_admin can still lock the tables of protected " + spec.Name},
+	} {
+		held, err := queryColumn(ctx, local, "postgres", adminMemberSQL(r.role))
+		if err != nil || len(held) != 1 {
+			return incomplete("cannot read eru_admin's membership in " + r.role), nil
 		}
-		return incomplete("eru_admin is not a member of pg_signal_backend"), nil
+		if (held[0] == "t") == spec.Protected {
+			if spec.Protected {
+				return incomplete(r.protectedGap), nil
+			}
+			return incomplete("eru_admin is not a member of " + r.role), nil
+		}
 	}
 	direct, err := queryColumn(ctx, local, "postgres", directOnlyMembersSQL)
 	if err != nil {
@@ -295,20 +300,36 @@ func adminOwnerMemberSQL(db string) string {
 	return "SELECT pg_has_role('eru_admin', " + literal(db+"_owner") + ", 'MEMBER')"
 }
 
-// adminSignalSQL reports, as t or f, whether eru_admin is a member of
-// pg_signal_backend.
-const adminSignalSQL = "SELECT pg_has_role('eru_admin', 'pg_signal_backend', 'MEMBER')"
+// adminMemberSQL reports, as t or f, whether eru_admin is a member of the
+// predefined role role.
+func adminMemberSQL(role string) string {
+	return "SELECT pg_has_role('eru_admin', " + literal(role) + ", 'MEMBER')"
+}
 
 // adminGrants are the predefined roles eru_admin holds in spec's cluster.
-// On a protected database it holds no pg_signal_backend: it could end the
-// database's sessions from a read-only eru sql, and eru maint kill there
-// needs a code from the authenticator app (node.handleMaintKill terminates
-// as the superuser with SET ROLE pg_signal_backend instead).
+// On a protected database it holds neither pg_signal_backend nor
+// pg_maintain. pg_signal_backend would let it end the database's sessions
+// from a read-only eru sql, and eru maint kill there needs a code from the
+// authenticator app (node.handleMaintKill terminates as the superuser with
+// SET ROLE pg_signal_backend instead). pg_maintain would let it LOCK TABLE
+// the application's tables (and CLUSTER, VACUUM FULL or REFRESH
+// MATERIALIZED VIEW them) from the same session: a read-only option it can
+// turn off stops none of these. eru maint there runs as the superuser with
+// SET ROLE pg_maintain (node.maintPG), so vacuum, analyze and reindex still
+// need no code.
 func adminGrants(spec config.ClusterSpec) string {
 	if spec.Protected {
-		return "pg_monitor, pg_maintain, pg_use_reserved_connections"
+		return "pg_monitor, pg_use_reserved_connections"
 	}
 	return "pg_monitor, pg_signal_backend, pg_maintain, pg_use_reserved_connections"
+}
+
+// AdminRoleSQL is eru_admin's predefined roles and access to db
+// (adminGrants, AdminAccessSQL), run in postgres. A restore from a dump
+// runs it in its new cluster after copying the live cluster's roles, so the
+// copy's eru_admin follows db's protection as it is now.
+func AdminRoleSQL(db config.ClusterSpec) string {
+	return "GRANT " + adminGrants(db) + " TO eru_admin;\n" + AdminAccessSQL(db)
 }
 
 // AdminAccessSQL is eru_admin's access to db, run in postgres. On an
@@ -316,9 +337,8 @@ func adminGrants(spec config.ClusterSpec) string {
 // psql and console --write act as the owner. On a protected one it is not:
 // every grant of the owner role to eru_admin goes, with CASCADE, so the
 // grants eru_admin made from its ADMIN OPTION go too, and the owner role
-// cannot log in. eru_admin gets pg_read_all_data for reads, keeps
-// pg_maintain for vacuum, analyze and reindex, and loses pg_signal_backend
-// (adminGrants). A write then needs a
+// cannot log in. eru_admin gets pg_read_all_data for reads and loses
+// pg_signal_backend and pg_maintain (adminGrants). A write then needs a
 // short-lived role the node creates after it checks a code from the
 // authenticator app (db.write-access). eru_admin's own sessions on the
 // database end the moment its membership goes, since one may have SET ROLE
@@ -340,6 +360,9 @@ ALTER ROLE %[1]s NOLOGIN;
 DO $eru$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_signal_backend'::regrole AND member = 'eru_admin'::regrole) THEN
     REVOKE pg_signal_backend FROM eru_admin;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_maintain'::regrole AND member = 'eru_admin'::regrole) THEN
+    REVOKE pg_maintain FROM eru_admin;
   END IF;
 END $eru$;
 DO $eru$

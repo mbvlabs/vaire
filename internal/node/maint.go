@@ -15,6 +15,7 @@ import (
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/hostinfo"
 	"github.com/mbvlabs/eru/internal/maint"
+	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/mbvlabs/eru/internal/promfile"
 	"github.com/mbvlabs/eru/internal/rpc"
 	"github.com/mbvlabs/eru/internal/steps"
@@ -196,7 +197,7 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
 		data := map[string]any{"db": p.DB, "kind": p.Kind, "statements": statements, "dry_run": true, "heavy_io": p.Heavy()}
 		if len(statements) == 0 {
-			data["command"] = "vacuumdb " + strings.Join(p.VacuumdbArgs(steps.PGSocketDir, spec.Port, vacuumJobs(env.Cluster)), " ")
+			data["command"] = "vacuumdb " + strings.Join(vacuumdbArgs(spec, p, vacuumJobs(env.Cluster)), " ")
 		}
 		return Result{Data: data}, nil
 	}
@@ -229,6 +230,42 @@ func vacuumJobs(cfg config.Cluster) int {
 	return share
 }
 
+// maintPG is how maintenance reaches spec's database, with the SQL that
+// starts each of its sessions: as eru_admin, with its pg_maintain. On a
+// protected database eru_admin holds no pg_maintain, which would let it
+// LOCK TABLE the application's tables without a code
+// (steps.AdminAccessSQL): there the superuser runs it with SET ROLE
+// pg_maintain, which may vacuum, analyze and reindex every table and write
+// to none.
+func maintPG(spec config.ClusterSpec) (pg.Local, string) {
+	if spec.Protected {
+		return steps.ClusterPG(spec), "SET ROLE pg_maintain;\n"
+	}
+	return steps.AdminPG(spec), ""
+}
+
+// vacuumdbArgs are vacuumdb's arguments for p on spec's cluster: as
+// eru_admin, or on a protected database as postgres, whose sessions
+// vacuumdbCommand starts with role pg_maintain (maintPG).
+func vacuumdbArgs(spec config.ClusterSpec, p maint.Options, jobs int) []string {
+	user := "eru_admin"
+	if spec.Protected {
+		user = "postgres"
+	}
+	return p.VacuumdbArgs(steps.PGSocketDir, user, spec.Port, jobs)
+}
+
+// vacuumdbCommand runs vacuumdb with args on spec's cluster. root logs in
+// as eru_admin (pg_ident); on a protected database it runs as the postgres
+// OS user, and every one of its sessions starts as role pg_maintain.
+func vacuumdbCommand(spec config.ClusterSpec, args []string) engine.Command {
+	if spec.Protected {
+		return engine.Command{Name: "runuser", Args: append([]string{"-u", "postgres", "--", "vacuumdb"}, args...),
+			Env: map[string]string{"PGOPTIONS": "-c lock_timeout=5s -c role=pg_maintain"}}
+	}
+	return engine.Command{Name: "vacuumdb", Args: args, Env: map[string]string{"PGOPTIONS": "-c lock_timeout=5s"}}
+}
+
 // maintHeavy reports whether a maint job takes the heavy-I/O lock.
 func maintHeavy(env *jobEnv) bool {
 	if env.Job != "maint" {
@@ -241,7 +278,8 @@ func maintHeavy(env *jobEnv) bool {
 	return p.Heavy()
 }
 
-// jobMaint runs one vacuum, analyze or reindex as eru_admin.
+// jobMaint runs one vacuum, analyze or reindex as eru_admin, or on a
+// protected database as role pg_maintain (maintPG).
 func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	var p maint.Options
 	if err := json.Unmarshal(env.Params, &p); err != nil {
@@ -256,25 +294,25 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	res := map[string]any{"db": p.DB, "kind": p.Kind}
 	statements, _ := p.Statements()
-	local := steps.AdminPG(spec)
+	local, setup := maintPG(spec)
 	local.Timeout = maintRunTimeout
 	var runErr error
 	if len(statements) == 0 {
-		args := p.VacuumdbArgs(steps.PGSocketDir, spec.Port, vacuumJobs(env.Cluster))
+		args := vacuumdbArgs(spec, p, vacuumJobs(env.Cluster))
 		res["command"] = "vacuumdb " + strings.Join(args, " ")
 		logLine(env.Report, env.Job, "vacuumdb "+strings.Join(args, " "))
-		runErr = env.shell().Exec(ctx, env.Job, engine.Command{Name: "vacuumdb", Args: args, Env: map[string]string{"PGOPTIONS": "-c lock_timeout=5s"}}, env.Report)
+		runErr = env.shell().Exec(ctx, env.Job, vacuumdbCommand(spec, args), env.Report)
 	} else {
 		res["statements"] = statements
 		for _, stmt := range statements {
 			logLine(env.Report, env.Job, stmt)
-			if runErr = local.Exec(ctx, p.DB, maint.SessionSetup+stmt+";\n", nil); runErr != nil {
+			if runErr = local.Exec(ctx, p.DB, setup+maint.SessionSetup+stmt+";\n", nil); runErr != nil {
 				break
 			}
 		}
 	}
 	if p.Kind == maint.Reindex {
-		invalid, dropped := reindexLeftovers(ctx, local, p)
+		invalid, dropped := reindexLeftovers(ctx, local, leftoverDropSetup(spec), p)
 		if len(invalid) > 0 {
 			res["invalid_indexes"] = invalid
 			res["warnings"] = []output.Warning{{Code: "reindex_left_invalid",
@@ -292,12 +330,23 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	return res, nil
 }
 
+// leftoverDropSetup starts the session that drops a concurrent reindex's
+// leftover index, which only the table's owner may do: eru_admin is a
+// member of <db>_owner, and on a protected database, where it is not, the
+// superuser acts as <db>_owner.
+func leftoverDropSetup(spec config.ClusterSpec) string {
+	if spec.Protected {
+		return "SET ROLE " + pg.Quote(spec.Name+"_owner") + ";\n"
+	}
+	return ""
+}
+
 // reindexLeftovers lists the invalid indexes a concurrent reindex left, and
-// with --cleanup-invalid drops them.
+// with --cleanup-invalid drops them, each session starting with setup.
 func reindexLeftovers(ctx context.Context, local interface {
 	Query(context.Context, string, string, map[string]string) ([]map[string]string, error)
 	Exec(context.Context, string, string, map[string]string) error
-}, p maint.Options) (invalid, dropped []string) {
+}, setup string, p maint.Options) (invalid, dropped []string) {
 	rows, err := local.Query(ctx, p.DB, maint.InvalidIndexesSQL, nil)
 	if err != nil {
 		return nil, nil
@@ -312,7 +361,7 @@ func reindexLeftovers(ctx context.Context, local interface {
 	for _, name := range invalid {
 		stmt, err := maint.DropInvalidSQL(name)
 		if err == nil {
-			err = local.Exec(ctx, p.DB, maint.SessionSetup+stmt+";\n", nil)
+			err = local.Exec(ctx, p.DB, setup+maint.SessionSetup+stmt+";\n", nil)
 		}
 		if err != nil {
 			left = append(left, name)
@@ -436,7 +485,7 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 		if !clusterRunning(spec) {
 			continue
 		}
-		local := steps.AdminPG(spec)
+		local, setup := maintPG(spec)
 		if rows, err := local.Query(ctx, spec.Name, "SELECT max(age(datfrozenxid))::bigint AS xid, max(mxid_age(datminmxid))::bigint AS mxid FROM pg_database", nil); err == nil && len(rows) == 1 {
 			st.Wraparound[spec.Name] = map[string]int64{"xid": atoi64(rows[0]["xid"]), "mxid": atoi64(rows[0]["mxid"])}
 		}
@@ -456,7 +505,7 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 			if err != nil {
 				continue
 			}
-			if err := local.Exec(ctx, spec.Name, maint.SessionSetup+"ANALYZE "+q+";\n", nil); err != nil {
+			if err := local.Exec(ctx, spec.Name, setup+maint.SessionSetup+"ANALYZE "+q+";\n", nil); err != nil {
 				logLine(env.Report, env.Job, "ANALYZE "+r["name"]+" in "+spec.Name+" failed: "+err.Error())
 				continue
 			}

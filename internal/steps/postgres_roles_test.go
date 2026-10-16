@@ -9,8 +9,8 @@ import (
 )
 
 // On a protected database eru_admin is no member of the owner role and
-// holds no pg_signal_backend, so its password alone can only read; lifting
-// the protection gives both back.
+// holds neither pg_signal_backend nor pg_maintain, so its password alone can
+// only read; lifting the protection gives the owner membership back.
 func TestAdminAccessSQL(t *testing.T) {
 	open := AdminAccessSQL(config.ClusterSpec{Name: "app"})
 	if !strings.Contains(open, `GRANT "app_owner" TO eru_admin WITH ADMIN OPTION;`) || !strings.Contains(open, "REVOKE pg_read_all_data FROM eru_admin") {
@@ -25,6 +25,7 @@ func TestAdminAccessSQL(t *testing.T) {
 	for _, want := range []string{
 		"GRANT pg_read_all_data TO eru_admin;",
 		"REVOKE pg_signal_backend FROM eru_admin;",
+		"REVOKE pg_maintain FROM eru_admin;",
 		"REVOKE %I FROM eru_admin GRANTED BY %I CASCADE",
 		"RAISE EXCEPTION 'eru_admin is still a member of %'",
 		"pg_terminate_backend(pid)",
@@ -39,7 +40,10 @@ func TestAdminAccessSQL(t *testing.T) {
 	if strings.Contains(adminGrants(spec), "pg_signal_backend") {
 		t.Fatal("protected: eru_admin must not hold pg_signal_backend")
 	}
-	for _, keep := range []string{"pg_monitor", "pg_maintain", "pg_use_reserved_connections"} {
+	if strings.Contains(adminGrants(spec), "pg_maintain") {
+		t.Fatal("protected: eru_admin must not hold pg_maintain (it could LOCK TABLE the application's tables)")
+	}
+	for _, keep := range []string{"pg_monitor", "pg_use_reserved_connections"} {
 		if !strings.Contains(adminGrants(spec), keep) {
 			t.Errorf("protected: eru_admin lost %s", keep)
 		}

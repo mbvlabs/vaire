@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/mbvlabs/eru/internal/backup"
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
 	"github.com/mbvlabs/eru/internal/engine"
@@ -363,8 +365,37 @@ func (g protectGuard) status(clusterPath string) (Result, error) {
 	}
 	if cfg, err := config.LoadCluster(clusterPath); err == nil {
 		out.Protected, out.Databases = protectionOf(cfg)
+		// An open copy of a protected database (<db>__restoring) holds the
+		// live database's roles, so writing to it needs a code too. It is
+		// listed in Protected (the gate's list) but not Databases (which is
+		// cluster.toml's own databases).
+		out.Protected = append(out.Protected, protectedCopies(cfg)...)
 	}
 	return Result{Data: out}, nil
+}
+
+// protectedCopies lists the open copies (<db>__restoring) of a protected
+// database, from the restores the server holds open. A copy is read-only
+// until promote when it came from a backup, but a dump copy takes writes;
+// both follow the live database's protection.
+func protectedCopies(cfg config.Cluster) []string {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return nil
+	}
+	return copiesOf(cfg, recs)
+}
+
+// copiesOf is protectedCopies over records already read.
+func copiesOf(cfg config.Cluster, recs backup.Records) []string {
+	var out []string
+	for db, r := range recs.Restores {
+		if spec, ok := cfg.ClusterByName(db); ok && spec.Protected && r.Port != 0 {
+			out = append(out, backup.RestoringName(db))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // protectionOf lists the protected databases of cfg, and every database

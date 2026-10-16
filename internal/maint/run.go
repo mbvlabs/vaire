@@ -117,12 +117,13 @@ func boolWord(b bool) string {
 }
 
 // VacuumdbArgs are vacuumdb's arguments for a database-wide vacuum or
-// analyze as eru_admin over socketDir and port, with jobs workers.
-func (o Options) VacuumdbArgs(socketDir string, port, jobs int) []string {
+// analyze as user (eru_admin, or postgres on a protected database) over
+// socketDir and port, with jobs workers.
+func (o Options) VacuumdbArgs(socketDir, user string, port, jobs int) []string {
 	if jobs < 1 {
 		jobs = 1
 	}
-	args := []string{"-h", socketDir, "-p", strconv.Itoa(port), "-U", "eru_admin", "--jobs=" + strconv.Itoa(jobs)}
+	args := []string{"-h", socketDir, "-p", strconv.Itoa(port), "-U", user, "--jobs=" + strconv.Itoa(jobs)}
 	switch {
 	case o.Kind == Analyze:
 		args = append(args, "--analyze-only")

@@ -454,6 +454,13 @@ func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, spec config
 		return nil, err
 	}
 	local := m.PG()
+	// The copy holds the live database's roles, so its eru_admin follows
+	// the live database's protection: on a protected database it can only
+	// read and a write needs a code (db.write-access), exactly as on the
+	// live one, so a promote cannot launder the protection away.
+	if err := local.Exec(ctx, steps.AuthDB, steps.AdminRoleSQL(spec), nil); err != nil {
+		return nil, err
+	}
 	sql := steps.AuthFunctionsSQL() + fmt.Sprintf("CREATE DATABASE %s OWNER %s;\n", pg.Quote(spec.Name), pg.Quote(spec.Name+"_owner")) +
 		steps.DatabaseConnectSQL(spec.Name, spec.Name)
 	if err := local.Exec(ctx, steps.AuthDB, sql, nil); err != nil {

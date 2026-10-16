@@ -88,12 +88,12 @@ func TestHeavyAndVacuumdb(t *testing.T) {
 	if !(Options{Kind: Vacuum}).Heavy() || (Options{Kind: Vacuum, Table: "t"}).Heavy() || !(Options{Kind: Reindex, Table: "t"}).Heavy() || (Options{Kind: Analyze}).Heavy() {
 		t.Error("heavy")
 	}
-	got := strings.Join(Options{Kind: Vacuum, DB: "app", Analyze: true, Freeze: true}.VacuumdbArgs("/var/run/postgresql", 5433, 2), " ")
+	got := strings.Join(Options{Kind: Vacuum, DB: "app", Analyze: true, Freeze: true}.VacuumdbArgs("/var/run/postgresql", "eru_admin", 5433, 2), " ")
 	if got != "-h /var/run/postgresql -p 5433 -U eru_admin --jobs=2 --analyze --freeze --dbname=app" {
 		t.Errorf("vacuumdb %s", got)
 	}
-	got = strings.Join(Options{Kind: Analyze, DB: "app"}.VacuumdbArgs("/s", 5433, 0), " ")
-	if !strings.Contains(got, "--analyze-only") || !strings.Contains(got, "--jobs=1") {
+	got = strings.Join(Options{Kind: Analyze, DB: "app"}.VacuumdbArgs("/s", "postgres", 5433, 0), " ")
+	if !strings.Contains(got, "--analyze-only") || !strings.Contains(got, "--jobs=1") || !strings.Contains(got, "-U postgres") {
 		t.Errorf("analyze %s", got)
 	}
 }
