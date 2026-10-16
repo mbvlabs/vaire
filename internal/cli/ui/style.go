@@ -105,27 +105,32 @@ func Panel(title, body string) string {
 // wraps inside it, and below minPanelWidth the frame is left out, so a
 // narrow terminal never breaks the border.
 func PanelFit(title, body string, width int) string {
-	framed := Panel(title, body)
+	content := body
+	if title != "" {
+		content = styleTitle.Render(title) + "\n" + body
+	}
+	return fitBox(stylePanel, content, width)
+}
+
+// fitBox renders content in the bordered style within width columns: content
+// too wide for the frame wraps inside it, and below minPanelWidth the frame is
+// left out, so a narrow terminal never breaks the border. A width of zero or
+// less means unknown and draws the box as is.
+func fitBox(style lipgloss.Style, content string, width int) string {
+	framed := style.Render(content)
 	if width <= 0 || lipgloss.Width(framed) <= width {
 		return framed
 	}
 	if width >= minPanelWidth {
-		content := body
-		if title != "" {
-			content = styleTitle.Render(title) + "\n" + body
-		}
 		// Whether Width counts the border differs between lipgloss
 		// versions; take the first that fits.
 		for _, w := range []int{width, width - 2} {
-			if out := stylePanel.Width(w).Render(content); lipgloss.Width(out) <= width {
+			if out := style.Width(w).Render(content); lipgloss.Width(out) <= width {
 				return out
 			}
 		}
 	}
-	if title == "" {
-		return body
-	}
-	return styleTitle.Render(title) + "\n" + body
+	return content
 }
 
 // minPanelWidth is the narrowest terminal PanelFit draws a frame in.
@@ -156,9 +161,9 @@ type ErrorBlock struct {
 	Hint    string
 }
 
-// Render draws the error box: the message, the failed step, its last output
-// lines and the hint. The step is only shown when the message does not already
-// name it.
+// Render draws the error box within width columns: the message, the failed
+// step, its last output lines and the hint. Long lines wrap inside the border.
+// The step is only shown when the message does not already name it.
 func (e ErrorBlock) Render(width int) string {
 	var b strings.Builder
 	b.WriteString(styleFail.Render(SymFail+" "+e.Message) + "  " + styleDim.Render("["+e.Code+"]"))
@@ -175,7 +180,7 @@ func (e ErrorBlock) Render(width int) string {
 	if e.Hint != "" {
 		b.WriteString("\n\n" + styleInfo.Render("→ ") + e.Hint)
 	}
-	return styleErrorBox.Render(b.String())
+	return fitBox(styleErrorBox, b.String(), width)
 }
 
 // Card renders the final summary card: a title and key/value rows.
