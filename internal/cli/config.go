@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/render"
 	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -79,7 +81,107 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return output.Success(cmd, output.Result{Data: map[string]any{"key": args[0], "value": value}, Message: fmt.Sprintf("%s = %v", args[0], value), Warnings: s.warnings})
+	shown, message, err := configValueOutput(args[0], value)
+	if err != nil {
+		return err
+	}
+	return output.Success(cmd, output.Result{Data: map[string]any{"key": args[0], "value": shown}, Message: message, Warnings: s.warnings})
+}
+
+// configValueOutput shapes a config get value for both outputs. A scalar is
+// itself and "key = value". Anything else goes through TOML, so structured
+// output gets the TOML key names (a table is a JSON object, an array a JSON
+// array) and a human gets the TOML as it reads in cluster.toml: a table under
+// its key's header, an array as an inline value.
+func configValueOutput(key string, value any) (any, string, error) {
+	if scalar, ok := configScalar(value); ok {
+		return scalar, fmt.Sprintf("%s = %v", key, scalar), nil
+	}
+	raw, err := toml.Marshal(map[string]any{"v": value})
+	if err != nil {
+		return nil, "", err
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal(raw, &doc); err != nil {
+		return nil, "", err
+	}
+	data := doc["v"]
+	if !configTable(data) {
+		// One key-value line, with the value in TOML's inline syntax.
+		line := strings.TrimSpace(string(raw))
+		if inline, ok := strings.CutPrefix(line, "v = "); ok && !strings.Contains(inline, "\n") {
+			return data, key + " = " + inline, nil
+		}
+		return data, fmt.Sprintf("%s = %v", key, data), nil
+	}
+	// Nest the value under the key's segments, so the TOML carries the
+	// header ([maintenance], [[clusters]], [postgres.settings]).
+	segs := strings.Split(key, ".")
+	nested := value
+	for i := len(segs) - 1; i >= 0; i-- {
+		nested = map[string]any{segs[i]: nested}
+	}
+	out, err := toml.Marshal(nested)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, dropEmptyHeaders(strings.TrimRight(string(out), "\n")), nil
+}
+
+// dropEmptyHeaders leaves out the table headers TOML writes for the parents
+// of a nested table ([postgres] before [postgres.settings]): a [table] header
+// whose next line is another header holds nothing.
+func dropEmptyHeaders(doc string) string {
+	lines := strings.Split(doc, "\n")
+	kept := lines[:0]
+	for i, line := range lines {
+		header := strings.HasPrefix(line, "[") && !strings.HasPrefix(line, "[[")
+		if header && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "[") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// configScalar is value with pointers followed when it is a string, number
+// or bool.
+func configScalar(value any) (any, bool) {
+	v := reflect.ValueOf(value)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil, true
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.String, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
+		return v.Interface(), true
+	case reflect.Invalid:
+		return nil, true
+	}
+	return nil, false
+}
+
+// configTable reports whether a value decoded from TOML is a table or a
+// non-empty array of tables.
+func configTable(value any) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		return true
+	case []any:
+		if len(v) == 0 {
+			return false
+		}
+		for _, e := range v {
+			if _, ok := e.(map[string]any); !ok {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func runConfigSet(cmd *cobra.Command, args []string) error {
