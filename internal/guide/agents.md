@@ -64,7 +64,7 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `tls_pending`: the ACME certificate is not issued yet. `eru-certs.timer` retries every hour; once DNS points at the server (DNS only, not proxied) it is issued without any action.
 - `dns_mismatch` / `dns_proxied`: the domain doesn't resolve to the server yet, or is proxied by Cloudflare. Ask the human to fix the record (DNS only); init continues either way.
 - `tls_unverified`: a connection used `sslmode=require` (self-signed mode) or DNS was not verified before continuing.
-- `no_backup_before_drop`: `eru db drop` removed a database without a final dump. Its stanza is still kept (`data.stanza_kept`), so earlier pgBackRest backups stay restorable until they expire.
+- `no_backup_before_drop`: `eru db drop` removed a database without a final dump. With a bucket its stanza is still kept (`data.stanza_kept`), so earlier pgBackRest backups stay restorable until they expire; without one there are no backups to keep.
 - `records_not_updated`: `eru db drop` kept the dropped database's stanza but couldn't record it in `records.json`. Report it to a human.
 - `no_backups`: `eru backup list` found a database (or, with `--db`, that database) whose stanza holds no backup yet. Take one with `eru backup now --db <name> --type full`.
 - `archive_status_unavailable`: `eru backup list` couldn't read a database's `pg_stat_archiver` (its cluster is likely stopped), so that row's window ends at its newest backup.
@@ -88,7 +88,7 @@ A success envelope may carry `warnings[]`, each with a stable `code` and a `mess
 - `extension_missing`: `eru queries` found a database without `pg_stat_statements`; its statements are left out.
 - `database_stopped`, `database_unreachable`, `restore_in_progress`: `eru status` saw a database whose cluster isn't running, doesn't answer, or has an open restore. Follow with `eru doctor --db <db>`.
 - `metrics_disabled`: `[metrics] enabled` is false; the exporters are stopped and `/metrics` answers 404.
-- `awaiting_recovery`: the master was rebuilt and these databases have no cluster yet; `eru backup now` and the other per-database commands skip or refuse them. Recover them with `eru db recover --all`.
+- `awaiting_recovery`: the master was rebuilt and these databases have no cluster yet; `eru backup now` and the other per-database commands skip or refuse them. Recover them with `eru db recover --all`. Without a bucket there is nothing to recover from (`no_offsite_backup`): with the human's approval, drop and create them again.
 - `context_endpoint_updated`: the server answered at a new public address (it was rebuilt), and the context follows it now. Nothing to do.
 - `restore_leftovers_lost`: `server init --restore` dropped records of restore leftovers, open restores or drills; their data was on the lost server's disk.
 - `master_backup_failed`: the master bundle couldn't be built or uploaded. Run `eru server backup now --output agent` and read its error.

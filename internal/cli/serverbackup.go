@@ -349,7 +349,7 @@ func runServerBackupExport(cmd *cobra.Command, _ []string) error {
 	}
 	return output.Success(cmd, output.Result{
 		Data:    map[string]any{"bundle": got.Name, "out": out, "size": len(raw)},
-		Message: fmt.Sprintf("exported master bundle %s (%s, still encrypted) to %s\nrebuild from it with eru server init --restore --bundle-file %s", got.Name, humanBytes(int64(len(raw))), out, out),
+		Message: fmt.Sprintf("exported master bundle %s (%s, still encrypted) to %s\nrebuild from it with eru server init --restore --host root@<new-ip> --bundle-file %s", got.Name, humanBytes(int64(len(raw))), out, out),
 	})
 }
 

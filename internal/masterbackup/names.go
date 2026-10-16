@@ -34,6 +34,13 @@ func Name(created time.Time, epoch int64, revision string) string {
 	return fmt.Sprintf("%s-e%d-r%s", created.UTC().Format(nameTimeFmt), epoch, rev)
 }
 
+// Name is the name the node gave the bundle m describes: it names a bundle
+// by the second it built it, which the manifest records as created_at.
+func (m Manifest) Name() string {
+	created, _ := time.Parse(time.RFC3339, m.CreatedAt)
+	return Name(created, m.Epoch, m.Revision)
+}
+
 // Parsed is a parsed bundle name.
 type Parsed struct {
 	Name      string

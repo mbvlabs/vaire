@@ -96,3 +96,19 @@ func TestStepsViewKeepsTheAwaitingAside(t *testing.T) {
 		t.Error("the view changed the configuration it was given")
 	}
 }
+
+// A database dropped while it awaited recovery leaves no awaiting entry: one
+// created again under its name is in the steps' view, so its own steps run
+// instead of failing with "not in cluster.toml".
+func TestDropForgetsAwaitingRecovery(t *testing.T) {
+	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"app": {Stanza: "app-b2593e"}, "other": {}}}
+	forgetDropped(&recs, "app")
+	if recs.IsAwaiting("app") || !recs.IsAwaiting("other") {
+		t.Fatalf("awaiting after the drop: %v", recs.AwaitingRecovery)
+	}
+	cfg := config.DefaultCluster()
+	cfg.Clusters = []config.ClusterSpec{{Name: "app"}}
+	if got := withoutAwaiting(cfg, recs, ""); len(got.Clusters) != 1 || got.Clusters[0].Name != "app" {
+		t.Errorf("the new app is left out of the view: %v", got.Clusters)
+	}
+}

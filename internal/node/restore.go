@@ -1453,7 +1453,8 @@ func renameFork(ctx context.Context, local pg.Local, source, name string, passwo
 // dropLeftovers drops db's restore leftover clusters and their records: db
 // drop takes them with the database, as they were its data before a
 // promote or undo, with the aside of an undo that stopped part way. A
-// <db>__drill a killed drill left goes too.
+// <db>__drill a killed drill left goes too, and so does the rest of db's
+// records (forgetDropped).
 func dropLeftovers(env *Env, db string) error {
 	bs, err := backup.LoadRecords()
 	if err != nil {
@@ -1476,16 +1477,26 @@ func dropLeftovers(env *Env, db string) error {
 		}
 	}
 	return backup.UpdateRecords(func(s *backup.Records) error {
-		kept := s.Leftovers[:0]
-		for _, l := range s.Leftovers {
-			if l.Database != db {
-				kept = append(kept, l)
-			}
-		}
-		s.Leftovers = kept
-		delete(s.Timelines, db)
-		delete(s.Drilling, db)
-		delete(s.Undoing, db)
+		forgetDropped(s, db)
 		return nil
 	})
+}
+
+// forgetDropped removes what records.json holds of the dropped database db:
+// its leftovers, timeline switch, drill, undo and its awaiting recovery
+// entry. A database created again under its name starts with none of them;
+// an awaiting entry would keep it out of every step, so it never got a
+// cluster.
+func forgetDropped(s *backup.Records, db string) {
+	kept := s.Leftovers[:0]
+	for _, l := range s.Leftovers {
+		if l.Database != db {
+			kept = append(kept, l)
+		}
+	}
+	s.Leftovers = kept
+	delete(s.Timelines, db)
+	delete(s.Drilling, db)
+	delete(s.Undoing, db)
+	delete(s.AwaitingRecovery, db)
 }

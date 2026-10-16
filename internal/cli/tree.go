@@ -940,7 +940,7 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Drop a database and its roles after a final dump to the bucket",
-					WhenToUse:      []string{"Remove an application database the human has approved dropping. With backups on, a final age-encrypted dump goes to the bucket first. Its cluster is stopped and deleted with its data, roles, pooler entries and timers; its pgBackRest stanza is kept (data.stanza_kept) and recorded as dropped, so its backups stay restorable until they expire. The other databases' changed postgres-config (their larger share of the server) is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending). Dropping the last database stops both poolers. A protected database (clusters.<db>.protected) is refused with database_protected, even with --confirm."},
+					WhenToUse:      []string{"Remove an application database the human has approved dropping. With backups on, a final age-encrypted dump goes to the bucket first. Its cluster is stopped and deleted with its data, roles, pooler entries and timers. With backups on, its pgBackRest stanza is kept (data.stanza_kept) and recorded as dropped, so its backups stay restorable until they expire. The other databases' changed postgres-config (their larger share of the server) is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending). Dropping the last database stops both poolers. A protected database (clusters.<db>.protected) is refused with database_protected, even with --confirm."},
 					Examples:       []string{"eru db drop app --confirm app", "eru db drop app --dry-run"},
 					Mutating:       true,
 					Destructive:    true,

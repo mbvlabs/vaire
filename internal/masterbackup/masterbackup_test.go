@@ -210,6 +210,25 @@ func TestNames(t *testing.T) {
 	}
 }
 
+// A bundle read from a file named otherwise is named by its manifest, the
+// same name the node gave it when it built it.
+func TestManifestNamesTheBundle(t *testing.T) {
+	files, err := Snapshot(sampleTree(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := meta()
+	built := m.CreatedAt.Add(400 * time.Millisecond)
+	m.CreatedAt = built
+	_, manifest, err := Build(m, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := manifest.Name(), Name(built, m.Epoch, manifest.Revision); got != want {
+		t.Fatalf("manifest names the bundle %s, the node named it %s", got, want)
+	}
+}
+
 func TestKeep(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	name := func(daysAgo int, hour int) string {

@@ -109,7 +109,7 @@ func runInitRestore(cmd *cobra.Command) error {
 	if dryRun(cmd) {
 		return r.restoreDryRun()
 	}
-	if err := r.restoreConfirm(); err != nil {
+	if err := r.restoreConfirm(kit); err != nil {
 		return err
 	}
 	if err := r.savePending(); err != nil {
@@ -250,7 +250,8 @@ func (r *initRun) restoreFetch(ctx context.Context, kit *contexts.BackupCreds) e
 	}
 	rr.fetched, rr.bundle = f, b
 	if f.Name == "" {
-		f.Name = masterbackup.Name(time.Now(), b.Manifest.Epoch, b.Manifest.Revision)
+		// A file whose name isn't the bundle's: its manifest names it.
+		f.Name = b.Manifest.Name()
 	}
 	rr.state.Bundle, rr.state.From = f.Name, f.From
 	return nil
@@ -313,24 +314,32 @@ func (r *initRun) restoreDryRun() error {
 	}
 	data := map[string]any{"server": r.name, "bundle": rr.state.Bundle, "from": rr.state.From, "created_at": m.CreatedAt,
 		"epoch": m.Epoch, "databases": dbs, "host": r.boot.User + "@" + r.boot.Host, "public_address": rr.state.NewAddress, "dry_run": true}
-	msg := fmt.Sprintf("Would rebuild server %s on %s from master bundle %s (created %s, epoch %d): fence the old master, place the bundle, run every server step; then %s await eru db recover.",
-		r.name, rr.state.NewAddress, rr.state.Bundle, m.CreatedAt, m.Epoch, strings.Join(dbs, ", "))
+	plan := "fence the old master, place the bundle, run every server step; then " + strings.Join(dbs, ", ") + " await eru db recover."
+	if !r.cfg.BackupConfigured() {
+		plan = "place the bundle, run every server step; with no bucket the old master isn't fenced, and the data of " + strings.Join(dbs, ", ") + " is lost with it."
+	}
+	msg := fmt.Sprintf("Would rebuild server %s on %s from master bundle %s (created %s, epoch %d): %s",
+		r.name, rr.state.NewAddress, rr.state.Bundle, m.CreatedAt, m.Epoch, plan)
 	return output.Success(r.cmd, output.Result{Data: data, Message: msg})
 }
 
 // restoreConfirm asks for <server>/replace.
-func (r *initRun) restoreConfirm() error {
+func (r *initRun) restoreConfirm(kit *contexts.BackupCreds) error {
 	cmd := r.cmd
 	token := r.name + "/replace"
 	if stringFlag(cmd, "confirm") != "" || MustNotPrompt(cmd) {
 		return Confirm(cmd, token)
 	}
 	rr := r.restore
+	takeover := "This takes over the old server's identity and fences it: power it off or destroy it first."
+	if !canFence(r.cfg, kit) {
+		takeover = "This takes over the old server's identity. With no bucket it can't be fenced: power it off or destroy it first."
+	}
 	r.p.panel("Rebuild "+r.name, []string{
 		"bundle   " + rr.state.Bundle + " (" + rr.bundle.Manifest.CreatedAt + ")",
 		"new VPS  " + r.boot.User + "@" + rr.state.NewAddress,
 		"",
-		"This takes over the old server's identity and fences it: power it off or destroy it first.",
+		takeover,
 	})
 	return typeWord(cmd, "Type '"+token+"' to rebuild", "", token)
 }
@@ -369,6 +378,12 @@ func (r *initRun) checkOldMaster(ctx context.Context) error {
 		WithDetails(map[string]any{"reason": "old_master_alive", "address": old.PublicAddress})
 }
 
+// canFence reports whether a rebuild can fence the old master: the epoch
+// lives in the bucket.
+func canFence(cfg config.Cluster, kit *contexts.BackupCreds) bool {
+	return cfg.BackupConfigured() && kit != nil && kit.HasBucket()
+}
+
 // fence writes the next epoch with a new instance id (D5). Without a bucket
 // there is nothing to fence.
 func (r *initRun) fence(ctx context.Context, kit *contexts.BackupCreds) error {
@@ -380,7 +395,7 @@ func (r *initRun) fence(ctx context.Context, kit *contexts.BackupCreds) error {
 		}
 		rr.state.InstanceID = id
 	}
-	if !r.cfg.BackupConfigured() || kit == nil || !kit.HasBucket() {
+	if !canFence(r.cfg, kit) {
 		r.warnings = append(r.warnings, output.Warning{Code: "no_fence",
 			Message: "no bucket, so the old master can't be fenced: make sure it is powered off or destroyed"})
 		return nil
@@ -657,9 +672,13 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 	if err := contexts.RemovePending(r.name); err != nil {
 		return err
 	}
+	awaiting := "The databases await recovery: " + strings.Join(res.AwaitingRecovery, ", ") + "."
+	if !r.cfg.BackupConfigured() {
+		awaiting = "With no bucket the databases' data is lost with the old server: drop and create " + strings.Join(res.AwaitingRecovery, ", ") + " again."
+	}
 	msg := []string{
 		fmt.Sprintf("Server %s is rebuilt on %s from master bundle %s.", r.name, rr.state.NewAddress, rr.state.Bundle),
-		"Your context works as before. The databases await recovery: " + strings.Join(res.AwaitingRecovery, ", ") + ".",
+		"Your context works as before. " + awaiting,
 	}
 	if rr.addressChanged() && r.cfg.TLS.Mode == "acme" {
 		msg = append(msg, "Clients reconnect once "+r.cfg.MasterHostname()+" resolves to "+rr.state.NewAddress+".")
@@ -713,8 +732,15 @@ func (r *initRun) restoreResultData() restoreResult {
 	for _, c := range r.cfg.Clusters {
 		res.AwaitingRecovery = append(res.AwaitingRecovery, c.Name)
 	}
-	if len(res.AwaitingRecovery) > 0 {
+	switch {
+	case len(res.AwaitingRecovery) == 0:
+	case r.cfg.BackupConfigured():
 		res.Next = append(res.Next, "eru db recover --all")
+	default:
+		// Without a bucket there is no stanza to recover from.
+		for _, db := range res.AwaitingRecovery {
+			res.Next = append(res.Next, "eru db drop "+db+" --confirm "+db, "eru db create "+db)
+		}
 	}
 	res.Next = append(res.Next, "eru doctor", "eru server backup list")
 	return res

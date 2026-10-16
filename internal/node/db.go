@@ -628,7 +628,9 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	env.Cluster = cfg
-	if inConfig && spec.Stanza != "" {
+	// Without a bucket the stanza never held a backup, so nothing is kept.
+	stanzaKept := inConfig && spec.Stanza != "" && cfg.BackupConfigured()
+	if stanzaKept {
 		if err := recordDroppedStanza(cfg, spec, final, lastArchived); err != nil {
 			warnings = append(warnings, output.Warning{Code: "records_not_updated",
 				Message: "the stanza " + spec.Stanza + " of " + p.Name + " is kept, but recording it failed: " + err.Error()})
@@ -647,7 +649,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	data := map[string]any{"dropped": p.Name, "roles_dropped": roles}
-	if inConfig && spec.Stanza != "" {
+	if stanzaKept {
 		data["stanza_kept"] = spec.Stanza
 	}
 	if final != nil {
