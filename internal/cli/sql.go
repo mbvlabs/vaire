@@ -162,7 +162,9 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		}
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
-	res, err := conn.Query(ctx, query)
+	// The simple query protocol runs several statements in one call; eru sql
+	// takes no parameters, so it loses nothing.
+	results, err := conn.QueryAll(ctx, query)
 	if err != nil {
 		_, _ = conn.Exec(ctx, "ROLLBACK")
 		if rerr := readOnlyCopyError(db, err); rerr != nil {
@@ -178,7 +180,39 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "The transaction did not commit.")
 	}
 	stopWait()
-	return output.Success(cmd, output.Result{Data: res, Message: renderTable(res), Warnings: warnings})
+	data := newSQLData(results)
+	return output.Success(cmd, output.Result{Data: data, Message: data.render(), Warnings: warnings})
+}
+
+// sqlData is eru sql's result: the last statement's columns, rows and tag at
+// the top, as for a single statement, and with several statements every
+// statement's result in order.
+type sqlData struct {
+	*pg.Result
+	Results []*pg.Result `json:"results,omitempty"`
+}
+
+func newSQLData(results []*pg.Result) sqlData {
+	switch len(results) {
+	case 0:
+		return sqlData{Result: &pg.Result{}}
+	case 1:
+		return sqlData{Result: results[0]}
+	}
+	return sqlData{Result: results[len(results)-1], Results: results}
+}
+
+// render is the human output: each statement's table or command tag, in
+// order, separated by a blank line.
+func (d sqlData) render() string {
+	if len(d.Results) == 0 {
+		return renderTable(d.Result)
+	}
+	parts := make([]string, len(d.Results))
+	for i, res := range d.Results {
+		parts[i] = renderTable(res)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // sqlstateRecovery is feature_not_supported, which PostgreSQL returns for

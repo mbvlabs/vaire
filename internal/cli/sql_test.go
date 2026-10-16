@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/eru/internal/pg"
 )
 
 func TestReadOnlyCopyError(t *testing.T) {
@@ -36,5 +39,52 @@ func TestReadOnlyCopyError(t *testing.T) {
 		if !errors.As(err, &cliErr) || cliErr.Code != output.CodePrecondition {
 			t.Fatalf("%s: got %v, want precondition_failed", c.name, err)
 		}
+	}
+}
+
+func TestSQLDataSeveralStatements(t *testing.T) {
+	one := "1"
+	results := []*pg.Result{
+		{CommandTag: "CREATE TABLE"},
+		{Columns: []string{"n"}, Rows: [][]*string{{&one}}, CommandTag: "SELECT 1", RowCount: 1},
+	}
+	data := newSQLData(results)
+	human := data.render()
+	if !strings.Contains(human, "CREATE TABLE") || !strings.Contains(human, "(1 rows)") {
+		t.Fatalf("render = %q, want both statements", human)
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Columns    []string `json:"columns"`
+		CommandTag string   `json:"command_tag"`
+		Results    []struct {
+			CommandTag string `json:"command_tag"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CommandTag != "SELECT 1" || len(got.Columns) != 1 || len(got.Results) != 2 || got.Results[0].CommandTag != "CREATE TABLE" {
+		t.Fatalf("json = %s", raw)
+	}
+}
+
+func TestSQLDataOneStatementKeepsShape(t *testing.T) {
+	data := newSQLData([]*pg.Result{{CommandTag: "UPDATE 3"}})
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "results") || !strings.Contains(string(raw), `"command_tag":"UPDATE 3"`) {
+		t.Fatalf("json = %s", raw)
+	}
+	if data.render() != "UPDATE 3" {
+		t.Fatalf("render = %q", data.render())
+	}
+	if newSQLData(nil).render() != "no rows" {
+		t.Fatal("no statements should render as no rows")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mbvlabs/eru/internal/transport"
 )
 
@@ -119,6 +120,55 @@ func (r *Remote) Query(ctx context.Context, sql string, args ...any) (*Result, e
 	res.CommandTag = rows.CommandTag().String()
 	res.RowCount = len(res.Rows)
 	return res, nil
+}
+
+// QueryAll runs sql, which may hold several statements separated by
+// semicolons, with the simple query protocol and returns one result per
+// statement, in order. The extended protocol Query uses refuses more than one
+// statement, and it takes no parameters. Every value comes back as text. On an
+// error the statements before the failing one keep their results, and the rest
+// do not run.
+func (r *Remote) QueryAll(ctx context.Context, sql string) ([]*Result, error) {
+	mrr := r.conn.PgConn().Exec(ctx, sql)
+	var out []*Result
+	for mrr.NextResult() {
+		res, err := readResult(mrr.ResultReader())
+		if err != nil {
+			_ = mrr.Close()
+			return out, err
+		}
+		out = append(out, res)
+	}
+	return out, mrr.Close()
+}
+
+// readResult reads one statement's result. pgconn's own Read leaves the
+// columns out when there are no rows, which would hide an empty SELECT's
+// header.
+func readResult(rr *pgconn.ResultReader) (*Result, error) {
+	out := &Result{}
+	for _, fd := range rr.FieldDescriptions() {
+		out.Columns = append(out.Columns, fd.Name)
+	}
+	for rr.NextRow() {
+		values := rr.Values()
+		row := make([]*string, len(values))
+		for i, v := range values {
+			if v == nil {
+				continue
+			}
+			s := string(v)
+			row[i] = &s
+		}
+		out.Rows = append(out.Rows, row)
+	}
+	tag, err := rr.Close()
+	if err != nil {
+		return nil, err
+	}
+	out.CommandTag = tag.String()
+	out.RowCount = len(out.Rows)
+	return out, nil
 }
 
 // Maps returns the rows as column-name -> value maps; NULL is "".

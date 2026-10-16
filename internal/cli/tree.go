@@ -327,9 +327,10 @@ func phase1Commands() []cmdSpec {
 			meta: CommandMeta{
 				Summary: "Run SQL as eru_admin. Read-only unless --write is set",
 				WhenToUse: []string{"Inspect data or, with --write, change it. eru keeps no application database passwords, so it connects as eru_admin through the session pooler on 5432 of the node the database runs on, which routes by --db.",
+					"Several statements separated by semicolons run in order in one transaction; human output prints each statement's rows or command tag, and --json keeps the last statement's columns, rows and command_tag at the top with every statement's result under results.",
 					"On a protected database a read needs nothing; --write asks once per command, without echo, for the current 6-digit code from the authenticator app set up with eru protect init, before it connects, and the node checks it and hands out a short-lived write login (protect_code_rejected when wrong, reused or locked out). With --yes, without a terminal or with structured output it is refused (database_protected, reason write_requires_human): agents get read-only access to a protected database."},
 				WhenNotToUse:     []string{"Interactive exploration; use eru psql.", "Agents: --write on a protected database. Ask the human to run it at their terminal."},
-				Examples:         []string{"eru sql --db app \"select 1\"", "eru sql --db app --write \"alter role app_app set statement_timeout = '30s'\""},
+				Examples:         []string{"eru sql --db app \"select 1\"", "eru sql --db app \"select count(*) from users; select count(*) from orders\"", "eru sql --db app --write \"alter role app_app set statement_timeout = '30s'\""},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
 				SkipDryRunReason: "--write runs SQL immediately and is not a host step",
