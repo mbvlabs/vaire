@@ -2,6 +2,7 @@
 
 ## Status (2026-10-14)
 
+- **Fix (2026-10-16):** a client dialing through the daemon now waits `transport.SharedDialTimeout` (2 minutes) for the `dial` reply, the same budget the daemon uses for a dial that includes a WireGuard re-handshake after the tunnel has idled. `DialSSH` gives a shared-tunnel dial that budget while the SSH handshake keeps `--timeout`; other dialers keep their own. The `--timeout` flag therefore does not bound the tunnel dial. A read timeout is `transport.ErrDaemonNoAnswer`, a daemon `dial_failed` is `transport.TunnelDialError`, and `tunnelHint` picks the hint by cause (daemon not running / daemon not answering / a real handshake timeout; only the last mentions break-glass). `eru node unlock-ssh` on an operator machine now says it runs on the server.
 - **Implemented, not yet tested live:** the shared-tunnel daemon (Phases 4–6, all at once). It is the default; `ERU_TUNNEL=inprocess` keeps the old in-process tunnel under the tunnel lock.
   - `internal/transport/shared.go` (client, protocol, fingerprint), `internal/transport/sharedserver.go` (server), `internal/transport/peercred_{linux,darwin}.go`, tests in `internal/transport/shared_test.go`.
   - `internal/cli/tunneld.go`: spawn, hidden `eru tunnel serve`, `eru tunnel status`, `eru tunnel stop [--force]`, socket path with the short-path fallback, persist window.

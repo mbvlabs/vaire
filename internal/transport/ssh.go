@@ -93,7 +93,16 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	// The dial may include a WireGuard handshake, which takes longer than an
+	// SSH handshake; a dialer that knows its own budget (the shared tunnel)
+	// sets it. The SSH handshake itself keeps the normal timeout.
+	dialTimeout := timeout
+	if b, ok := d.(interface{ DialBudget() time.Duration }); ok {
+		if bt := b.DialBudget(); bt > dialTimeout {
+			dialTimeout = bt
+		}
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	raw, err := d.DialContext(dialCtx, "tcp", target.Addr)
 	if err != nil {

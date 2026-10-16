@@ -267,13 +267,30 @@ func upTunnel(ctx context.Context, contextName, privateKey, operatorAddr, nodePu
 	return tun, nil
 }
 
-// tunnelHint replaces a bare dial failure inside the tunnel with what to check.
+// tunnelHint replaces a bare dial failure inside the tunnel with what to
+// check, matching the cause: the daemon not running, the daemon not
+// answering, or a dial that timed out after a real WireGuard handshake
+// window. A transient timeout is not the place for break-glass.
 func tunnelHint(err error, publicAddr string, port int) error {
 	var cliErr *output.CLIError
-	if errors.As(err, &cliErr) && cliErr.Code == output.CodeRemoteUnreachable {
-		cliErr.Code = output.CodeTransportFailed
-		cliErr.Hint = "WireGuard to " + net.JoinHostPort(publicAddr, strconv.Itoa(port)) + " did not answer. Check that UDP " +
-			strconv.Itoa(port) + " leaves this network and reaches the server, and that wg0 runs there. Break-glass: eru node unlock-ssh from the provider console."
+	if !errors.As(err, &cliErr) || cliErr.Code != output.CodeRemoteUnreachable {
+		return err
+	}
+	cliErr.Code = output.CodeTransportFailed
+	target := net.JoinHostPort(publicAddr, strconv.Itoa(port))
+	var dialErr *transport.TunnelDialError
+	switch {
+	case transport.IsNoDaemon(err):
+		cliErr.Hint = "The tunnel daemon isn't running. It starts with the next command; retry, or run eru tunnel status."
+	case errors.As(err, &dialErr):
+		cliErr.Hint = "WireGuard to " + target + " did not answer within the tunnel's dial timeout. Check that UDP " +
+			strconv.Itoa(port) + " reaches the server and that wg0 runs there, then retry. If it keeps failing, use break-glass from the provider console: eru node unlock-ssh."
+	case errors.Is(err, transport.ErrDaemonNoAnswer):
+		cliErr.Hint = "The tunnel daemon did not reply. Run eru tunnel status, and see tunnel.log in the context directory; " +
+			"eru tunnel stop --force restarts it. A WireGuard re-handshake after idling can take a few seconds, so retry once first."
+	default:
+		cliErr.Hint = "WireGuard to " + target + " did not answer. Check that UDP " +
+			strconv.Itoa(port) + " leaves this network and reaches the server, then retry."
 	}
 	return err
 }

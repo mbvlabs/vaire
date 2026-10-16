@@ -349,7 +349,7 @@ func runTunnelServe(cmd *cobra.Command, _ []string) error {
 		Fingerprint:   transport.TunnelFingerprint(cfg),
 		Build:         tunnelBuild(),
 		Persist:       persist,
-		DialTimeout:   2 * time.Minute,
+		DialTimeout:   transport.SharedDialTimeout,
 		LastHandshake: tun.LastHandshake,
 		Logf:          logLine,
 	})

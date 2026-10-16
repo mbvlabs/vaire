@@ -512,3 +512,64 @@ func TestTunnelFingerprint(t *testing.T) {
 		t.Fatal("a new endpoint should change the fingerprint")
 	}
 }
+
+// A shared-tunnel dial may include a WireGuard re-handshake, so the client
+// waits longer for a dial reply than for a control op, and longer than the
+// daemon's own dial timeout so the daemon's failure reply wins the race.
+func TestSharedDialBudget(t *testing.T) {
+	if sharedDialBudget <= SharedDialTimeout {
+		t.Fatalf("client budget %s must exceed the daemon's %s", sharedDialBudget, SharedDialTimeout)
+	}
+	var d Dialer = NewSharedDialer(SharedDialerConfig{Socket: "x"})
+	if b, ok := d.(interface{ DialBudget() time.Duration }); !ok || b.DialBudget() != sharedDialBudget {
+		t.Fatalf("SharedDialer budget = %v, %v", b, ok)
+	}
+	// A dialer with no budget (the direct one) keeps its own timeout.
+	if _, ok := any(Direct{}).(interface{ DialBudget() time.Duration }); ok {
+		t.Fatal("Direct must not declare a dial budget")
+	}
+}
+
+// roundTripWithin returns ErrDaemonNoAnswer when the daemon does not reply in
+// the budget, and succeeds within it.
+func TestRoundTripBudget(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "slow.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				_, _ = readLine(c)
+				time.Sleep(60 * time.Millisecond)
+				_ = writeReply(c, sharedReply{OK: true})
+				_ = c.Close()
+			}()
+		}
+	}()
+
+	ctx := context.Background()
+	conn, reply, err := roundTripWithin(ctx, socket, sharedRequest{Op: "hello"}, time.Second)
+	if err != nil || !reply.OK {
+		t.Fatalf("within budget: %v %+v", err, reply)
+	}
+	_ = conn.Close()
+
+	_, _, err = roundTripWithin(ctx, socket, sharedRequest{Op: "hello"}, 10*time.Millisecond)
+	if !errors.Is(err, ErrDaemonNoAnswer) {
+		t.Fatalf("over budget: got %v, want ErrDaemonNoAnswer", err)
+	}
+}
+
+func TestTunnelDialErrorText(t *testing.T) {
+	err := &TunnelDialError{Addr: "10.42.0.1:22", Message: "i/o timeout"}
+	if !strings.Contains(err.Error(), "10.42.0.1:22") || !strings.Contains(err.Error(), "i/o timeout") {
+		t.Fatalf("text = %q", err.Error())
+	}
+}

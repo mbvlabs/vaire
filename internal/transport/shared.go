@@ -31,6 +31,38 @@ const SharedProto = 1
 // maxSharedLine caps one protocol line.
 const maxSharedLine = 64 << 10
 
+// SharedDialTimeout bounds one dial the daemon makes into the tunnel. It must
+// allow for a WireGuard handshake: after the tunnel has been idle the session
+// expired, and the first packet triggers a re-handshake that wireguard-go
+// retries every REKEY_TIMEOUT (5s). A per-command client waits
+// sharedDialBudget for the daemon's reply, a little longer than this so the
+// daemon's own failure reply wins the race.
+const SharedDialTimeout = 2 * time.Minute
+
+// sharedDialBudget is how long a client waits for a dial reply from the
+// daemon: SharedDialTimeout plus a margin.
+const sharedDialBudget = SharedDialTimeout + 15*time.Second
+
+// sharedControlTimeout bounds the control ops (hello, attach, stop), which
+// the daemon answers at once.
+const sharedControlTimeout = 30 * time.Second
+
+// ErrDaemonNoAnswer is what a client read from the daemon returns when it
+// timed out: the daemon is up but did not reply.
+var ErrDaemonNoAnswer = errors.New("the tunnel daemon did not answer")
+
+// TunnelDialError is the daemon's dial_failed reply: the tunnel could not
+// reach the address within SharedDialTimeout, usually a WireGuard handshake
+// that did not complete.
+type TunnelDialError struct {
+	Addr    string
+	Message string
+}
+
+func (e *TunnelDialError) Error() string {
+	return "the tunnel could not reach " + e.Addr + ": " + e.Message
+}
+
 type sharedRequest struct {
 	V     int    `json:"v"`
 	Op    string `json:"op"`
@@ -134,6 +166,12 @@ func writeReply(w io.Writer, r sharedReply) error {
 // roundTrip connects to the socket, sends req and reads the reply line. The
 // connection stays open for an attach or a dial; the caller closes it.
 func roundTrip(ctx context.Context, socket string, req sharedRequest) (net.Conn, sharedReply, error) {
+	return roundTripWithin(ctx, socket, req, sharedControlTimeout)
+}
+
+// roundTripWithin is roundTrip with the budget bounding the wait when ctx has
+// no deadline of its own.
+func roundTripWithin(ctx context.Context, socket string, req sharedRequest, budget time.Duration) (net.Conn, sharedReply, error) {
 	req.V = SharedProto
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", socket)
@@ -145,7 +183,7 @@ func roundTrip(ctx context.Context, socket string, req sharedRequest) (net.Conn,
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	} else {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(budget))
 	}
 	raw, _ := json.Marshal(req)
 	if _, err := conn.Write(append(raw, '\n')); err != nil {
@@ -158,7 +196,7 @@ func roundTrip(ctx context.Context, socket string, req sharedRequest) (net.Conn,
 		if ctx.Err() != nil {
 			return nil, sharedReply{}, ctx.Err()
 		}
-		return nil, sharedReply{}, fmt.Errorf("the tunnel daemon did not answer: %w", err)
+		return nil, sharedReply{}, fmt.Errorf("%w: %w", ErrDaemonNoAnswer, err)
 	}
 	var reply sharedReply
 	if err := json.Unmarshal(line, &reply); err != nil {
@@ -421,8 +459,16 @@ func sharedError(err error) error {
 		"See tunnel.log in the context directory; eru tunnel stop --force restarts the tunnel daemon.")
 }
 
+// DialBudget is how long a dial the daemon makes may take, including the
+// WireGuard re-handshake after the tunnel has idled. DialSSH gives a
+// shared-tunnel dial this long instead of its own shorter timeout.
+func (d *SharedDialer) DialBudget() time.Duration { return sharedDialBudget }
+
 // DialContext dials addr inside the tunnel through the daemon. When the
-// daemon is gone it starts a new one and dials again.
+// daemon is gone it starts a new one and dials again. The wait for the
+// daemon's reply allows for a WireGuard handshake (sharedDialBudget), not the
+// caller's shorter timeout: the daemon owns the tunnel and knows how long a
+// handshake takes.
 func (d *SharedDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if network != "tcp" && network != "tcp4" {
 		return nil, fmt.Errorf("the shared tunnel dials tcp, not %s", network)
@@ -431,7 +477,7 @@ func (d *SharedDialer) DialContext(ctx context.Context, network, addr string) (n
 		if err := d.Attach(ctx); err != nil {
 			return nil, err
 		}
-		conn, reply, err := roundTrip(ctx, d.cfg.Socket, sharedRequest{Op: "dial", Addr: addr})
+		conn, reply, err := roundTripWithin(ctx, d.cfg.Socket, sharedRequest{Op: "dial", Addr: addr}, sharedDialBudget)
 		if err != nil {
 			if IsNoDaemon(err) && attempt == 0 {
 				d.dropLease()
@@ -441,7 +487,7 @@ func (d *SharedDialer) DialContext(ctx context.Context, network, addr string) (n
 		}
 		if !reply.OK {
 			_ = conn.Close()
-			return nil, errors.New(reply.Message)
+			return nil, &TunnelDialError{Addr: addr, Message: reply.Message}
 		}
 		return conn, nil
 	}
