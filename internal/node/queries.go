@@ -9,6 +9,7 @@ import (
 
 	"github.com/mbvlabs/eru/internal/cli/output"
 	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/mbvlabs/eru/internal/steps"
 )
 
@@ -45,6 +46,9 @@ type queriesParams struct {
 	DB    string `json:"db,omitempty"`
 	Limit int    `json:"limit,omitempty"`
 	Order string `json:"order,omitempty"`
+	// AllSessions includes eru's own sessions (its roles), which are left
+	// out by default.
+	AllSessions bool `json:"all_sessions,omitempty"`
 }
 
 // queriesData is queries.top's result.
@@ -94,7 +98,7 @@ func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 			warnings = append(warnings, output.Warning{Code: "database_unreachable", Message: spec.Name + ": " + err.Error()})
 			continue
 		}
-		perDB[spec.Name] = parseStatements(spec.Name, rows)
+		perDB[spec.Name] = parseStatements(spec.Name, rows, p.AllSessions)
 	}
 	data.Statements = mergeStatements(perDB, p.Order, p.Limit)
 	if len(data.Missing) > 0 {
@@ -124,9 +128,15 @@ func targetClusters(cfg config.Cluster, db string) ([]config.ClusterSpec, error)
 	return []config.ClusterSpec{spec}, nil
 }
 
-func parseStatements(db string, rows []map[string]string) []statement {
+// parseStatements reads the rows. Unless allSessions, it leaves out
+// statements run by eru's own roles (eru queries, psql, maintenance, the
+// exporters), so the application's statements stand out.
+func parseStatements(db string, rows []map[string]string, allSessions bool) []statement {
 	out := make([]statement, 0, len(rows))
 	for _, r := range rows {
+		if !allSessions && pg.IsEruRole(r["role"]) {
+			continue
+		}
 		f := func(k string) float64 { v, _ := strconv.ParseFloat(r[k], 64); return v }
 		i := func(k string) int64 { v, _ := strconv.ParseInt(r[k], 10, 64); return v }
 		out = append(out, statement{DB: db, Role: r["role"], QueryID: r["queryid"], Calls: i("calls"),

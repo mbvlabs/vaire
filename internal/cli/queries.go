@@ -52,6 +52,9 @@ func runQueries(cmd *cobra.Command, _ []string) error {
 	if db != "" {
 		params["db"] = db
 	}
+	if flagTrue(cmd, "all-sessions") {
+		params["all_sessions"] = true
+	}
 	if flagTrue(cmd, "reset") {
 		server := s.ctx.Server
 		if server == "" {
@@ -78,10 +81,10 @@ func runQueries(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: queriesMessage(data), Warnings: append(s.warnings, reply.Warnings...)})
+	return output.Success(cmd, output.Result{Data: data, Message: queriesMessage(data, flagTrue(cmd, "all-sessions")), Warnings: append(s.warnings, reply.Warnings...)})
 }
 
-func queriesMessage(d queriesData) string {
+func queriesMessage(d queriesData, allSessions bool) string {
 	if len(d.Statements) == 0 {
 		return "no statements recorded yet"
 	}
@@ -94,5 +97,8 @@ func queriesMessage(d queriesData) string {
 		lines = append(lines, fmt.Sprintf("%-12s %-14s %9d %11.1f %9.2f %6.1f  %s", st.DB, st.Role, st.Calls, st.TotalMS, st.MeanMS, st.HitPct, q))
 	}
 	lines = append(lines, "sorted by "+d.Order+"; --json has the full query text")
+	if !allSessions {
+		lines = append(lines, "eru's own sessions (its roles) are hidden; --all-sessions includes them")
+	}
 	return strings.Join(lines, "\n")
 }

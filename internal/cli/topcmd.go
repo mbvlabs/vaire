@@ -33,6 +33,9 @@ type topCollector struct {
 	conns []*topConn
 	pools map[string]*pg.Remote
 	prev  map[string]top.Sample
+	// includeEru shows eru's own sessions (its roles, or an application_name
+	// beginning with "eru"), left out by default.
+	includeEru bool
 }
 
 func openTop(ctx context.Context, cmd *cobra.Command, s *session, p *progress, dbs []string) (*topCollector, error) {
@@ -96,6 +99,9 @@ func (c *topCollector) sample(ctx context.Context, filter string) top.Snapshot {
 		}
 		if res, err := tc.conn.Query(ctx, top.ActivitySQL); err == nil {
 			s.Sessions = top.ParseSessions(tc.db, res.Maps())
+			if !c.includeEru {
+				s.Sessions = withoutEruSessions(s.Sessions)
+			}
 		}
 		if tc.statements {
 			if res, err := tc.conn.Query(ctx, top.StatementsSQL); err == nil {
@@ -145,6 +151,7 @@ func runTop(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	c.includeEru = flagTrue(cmd, "all-sessions")
 	defer c.close(context.Background())
 	interactive := !flagTrue(cmd, "once") && !MustNotPrompt(cmd) && term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // G115: a file descriptor fits in int.
 	if !interactive {
@@ -156,7 +163,11 @@ func runTop(cmd *cobra.Command, _ []string) error {
 		case <-time.After(topRefresh):
 		}
 		snap := c.sample(ctx, filter)
-		return output.Success(cmd, output.Result{Data: snap, Message: top.Render(snap, filter, "time", 0, 1000), Warnings: s.warnings})
+		msg := top.Render(snap, filter, "time", 0, 1000)
+		if !c.includeEru {
+			msg += "\neru's own sessions (its roles, or an application_name beginning with \"eru\") are hidden; --all-sessions includes them"
+		}
+		return output.Success(cmd, output.Result{Data: snap, Message: msg, Warnings: s.warnings})
 	}
 	m := &topModel{ctx: ctx, c: c, dbs: append([]string{""}, dbs...), sortKey: "time", width: 120, height: 40}
 	for i, db := range m.dbs {
@@ -170,6 +181,20 @@ func runTop(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	return err
+}
+
+// withoutEruSessions leaves out eru's own sessions (its roles, or an
+// application_name beginning with "eru"), so the application's sessions
+// stand out. --all-sessions keeps them.
+func withoutEruSessions(sessions []top.Session) []top.Session {
+	out := make([]top.Session, 0, len(sessions))
+	for _, s := range sessions {
+		if pg.IsEruSession(s.Role, s.App) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // topDatabases are the databases in the context's placement cache, refreshed
