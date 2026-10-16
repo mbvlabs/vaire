@@ -239,6 +239,7 @@ func runMaint(cmd *cobra.Command, kind string) error {
 }
 
 // runMaintRepack refuses until pg_repack arrives with extensions (Phase 7).
+// The node's precondition check runs before the confirm token is asked for.
 func runMaintRepack(cmd *cobra.Command, _ []string) error {
 	db := stringFlag(cmd, "db")
 	if db == "" {
@@ -252,12 +253,22 @@ func runMaintRepack(cmd *cobra.Command, _ []string) error {
 	defer s.Close()
 	o := maintOptions(cmd, maint.Repack)
 	o.DB = db
-	if !dryRun(cmd) {
-		if err := Confirm(cmd, db); err != nil {
-			return err
-		}
+	// The node checks pg_repack's preconditions on a dry run too: ask it
+	// first, so a repack that cannot run fails before the confirm token is
+	// asked for.
+	plan, err := p.call(commandContext(cmd), s.node, "maint.run", o, remote.CallOptions{DryRun: true, OnEvent: p.event})
+	if err != nil {
+		return err
 	}
-	reply, err := p.call(commandContext(cmd), s.node, "maint.run", o, remote.CallOptions{DryRun: dryRun(cmd), Confirm: db, OnEvent: p.event})
+	if dryRun(cmd) {
+		var data map[string]any
+		_ = plan.Decode(&data)
+		return output.Success(cmd, output.Result{Data: data, Message: "dry run: repack " + db, Warnings: append(s.warnings, plan.Warnings...)})
+	}
+	if err := Confirm(cmd, db); err != nil {
+		return err
+	}
+	reply, err := p.call(commandContext(cmd), s.node, "maint.run", o, remote.CallOptions{Confirm: db, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
