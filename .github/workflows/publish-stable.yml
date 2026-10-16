@@ -40,19 +40,30 @@ jobs:
           }
       - name: Verify tagged source
         run: |
-          git fetch origin master
-          git merge-base --is-ancestor "${GITHUB_SHA}" origin/master
+          version="${GITHUB_REF_NAME#v}"
+          case "${version}" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "a stable tag must be vMAJOR.MINOR.PATCH[-alpha.N|-beta.N|-rc.N]" >&2; exit 1 ;;
+          esac
+          major="${version%%.*}"
+          # A stable tag is on its own major line, not on master.
+          git fetch --no-tags origin "${major}.x"
+          git merge-base --is-ancestor "${GITHUB_SHA}" FETCH_HEAD
           mapfile -t go_files < <(git ls-files '*.go')
           test -z "$(gofmt -l "${go_files[@]}")"
           go vet ./...
           just lint
-      - name: Build stable release
+      - name: Build the major line release
         env:
           RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
-        run: scripts/build-release.sh "${GITHUB_REF_NAME#v}" stable "${RELEASE_BASE_URL}"
-      - name: Sign and verify stable release
-        run: scripts/sign-release.sh dist/release-stable
-      - name: Refuse to overwrite an existing release
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          scripts/build-release.sh "${version}" "stable-${version%%.*}.x" "${RELEASE_BASE_URL}"
+      - name: Sign and verify the line release
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          scripts/sign-release.sh "dist/release-stable-${version%%.*}.x"
+      - name: Upload the immutable artifacts and the line channel
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -61,6 +72,7 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: |
           version="${GITHUB_REF_NAME#v}"
+          line="stable-${version%%.*}.x"
           existing="$(aws s3api list-objects-v2 \
             --bucket "${RELEASE_BUCKET}" --prefix "releases/${version}/" --max-keys 1 \
             --query KeyCount --output text --endpoint-url "${R2_ENDPOINT}")"
@@ -68,11 +80,22 @@ jobs:
             echo "Release ${version} already exists and will not be overwritten" >&2
             exit 1
           }
-      - name: Upload immutable artifacts and channel files
+          scripts/upload-release.sh "dist/release-stable-${version%%.*}.x" "${line}" "${RELEASE_BUCKET}" "${R2_ENDPOINT}"
+      - name: Move the root channel when this is the highest version
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-        run: scripts/upload-release.sh dist/release-stable stable "${RELEASE_BUCKET}" "${R2_ENDPOINT}"
+          RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          current="$(aws s3 cp "s3://${RELEASE_BUCKET}/manifest.json" - --endpoint-url "${R2_ENDPOINT}" 2>/dev/null | jq -r '.version // empty' || true)"
+          if [ "$(go run ./internal/release/cmd/promote "${current}" "${version}")" != yes ]; then
+            echo "the root channel stays on ${current:-nothing}: ${version} does not move it"
+            exit 0
+          fi
+          scripts/build-release.sh "${version}" stable "${RELEASE_BASE_URL}"
+          scripts/sign-release.sh dist/release-stable
+          scripts/upload-release.sh dist/release-stable stable "${RELEASE_BUCKET}" "${R2_ENDPOINT}"

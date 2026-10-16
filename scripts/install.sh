@@ -80,9 +80,16 @@ manifest_channel="$(json_string channel "${work_dir}/manifest.json")"
 [ "${manifest_channel}" = "${release_channel}" ] || fail "release manifest channel is invalid"
 manifest_version="$(json_string version "${work_dir}/manifest.json")"
 release_base_url="$(json_string releaseBaseUrl "${work_dir}/manifest.json")"
-origin="${channel_root%/edge}"
+# The site origin holds /releases/<version>/ and every channel directory
+# (the root, /edge and each major line such as /1.x): validate the manifest's
+# release base against it, so a line's install.sh works too.
+origin="${release_base_url%/releases/*}"
 case "${release_base_url}" in
   "${origin}"/releases/*) ;;
+  *) fail "release manifest is invalid" ;;
+esac
+case "${channel_root}" in
+  "${origin}" | "${origin}"/*) ;;
   *) fail "release manifest is invalid" ;;
 esac
 

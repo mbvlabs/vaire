@@ -60,7 +60,7 @@ The first goal is the **master node**: one VPS that hosts every database and own
 | Agent integration | First: CLI + `--json` + `eru guide agents` / `eru skill install`. `eru mcp` comes later |
 | CLI conventions | Modelled on the andurel CLI's agent support (§5.4) |
 | Testing | Manual testing on real VPSes from Phase 2 on; CI runs lint and builds only. No unit tests (§8) |
-| Release site | `https://eru.mbvlabs.com`. Stable lives at the root, edge under `/edge/`, and every version is kept under `/releases/<version>/`. Edge publishes on every push to `master`, stable on `vX.Y.Z` tags. Releases are signed with cosign (pinned 3.1.3) |
+| Release site | `https://eru.mbvlabs.com`. The root manifest is the highest stable line, each major line under `/<major>.x/` (for example `/1.x/`), edge under `/edge/`, and every version is kept under `/releases/<version>/`. Edge publishes on every push to `master`, stable on `vX.Y.Z[-alpha.N\|-beta.N\|-rc.N]` tags whose commit is on `origin/<major>.x`. A binary from a line tag follows its line by default. Releases are signed with cosign (pinned 3.1.3) |
 | Platforms | The CLI runs on Linux and macOS. Node-side commands are Linux-only and are marked that way in `eru commands --json` |
 | Self-upgrade | `eru upgrade` keeps the previous binary next to it as `eru.prev`, and refuses to replace a binary installed by Homebrew or Nix |
 | Risky flags | A command can mark a single flag as changing or destroying something (for example `queries --reset`), so agents don't treat the plain read as dangerous |
@@ -551,7 +551,7 @@ The CLI contract, releases and the node-side engine. No server work.
 | Module | What it does | Status |
 | --- | --- | --- |
 | `internal/cli`, `cli/output` | Cobra tree, `CommandMeta` + `--check-meta`, output modes, error/exit codes, `commands --json`, `skill install`, `guide agents` (stub text) | ✅ |
-| `internal/release`, `scripts/`, publish workflows | Build, sign, upload, `install.sh`, sigstore verification, edge + stable channels | ✅ edge published |
+| `internal/release`, `scripts/`, publish workflows | Build, sign, upload, `install.sh`, sigstore verification, edge + per-major stable channels (`stable-1.x`), pre-release versions | ✅ edge published; stable tooling ready, not yet published |
 | `internal/upgrade` (local) | `eru upgrade` for the local CLI, keeping `.prev` | ✅ |
 | `internal/localenv` (escalation) | Sudo re-exec | ✅ |
 | `internal/engine` | Steps, plan/apply runner, journal, locks, run logs, shell, redaction | ✅ |

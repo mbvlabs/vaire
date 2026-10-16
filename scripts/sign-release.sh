@@ -19,8 +19,12 @@ if [ -f "${release_root}/manifest.json" ]; then
 elif [ -f "${release_root}/edge/manifest.json" ]; then
   channel_manifest="${release_root}/edge/manifest.json"
 else
-  echo "channel manifest is missing under ${release_root}" >&2
-  exit 1
+  channel_manifests=("${release_root}"/[0-9]*.x/manifest.json)
+  if [ "${#channel_manifests[@]}" -ne 1 ]; then
+    echo "channel manifest is missing under ${release_root}" >&2
+    exit 1
+  fi
+  channel_manifest="${channel_manifests[0]}"
 fi
 
 artifacts=(

@@ -543,7 +543,7 @@ func phase1Commands() []cmdSpec {
 			run: runUpgrade,
 			flags: []fl{
 				flagString("version", "", "Release version to install"),
-				flagString("channel", "", "Release channel, stable or edge"),
+				flagString("channel", "", "Release channel: stable, stable-<major>.x (for example stable-1.x) or edge"),
 				flagBool("skip-nodes", "Update only the local binary"),
 			},
 			meta: CommandMeta{

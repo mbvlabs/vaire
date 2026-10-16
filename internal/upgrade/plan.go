@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/mbvlabs/eru/internal/buildinfo"
@@ -63,20 +62,31 @@ func managedByPackageManager(path string) bool {
 	return false
 }
 
-// SelectChannel returns the release channel to follow.
+// SelectChannel returns the release channel to follow. Without --channel, a
+// stable build follows its own major line (stable-1.x for 1.y.z), so moving
+// to the next major is an explicit --channel stable or stable-<major>.x.
 func SelectChannel(flag string) (string, error) {
+	return selectChannel(flag, buildinfo.Channel, buildinfo.Version)
+}
+
+func selectChannel(flag, channel, version string) (string, error) {
 	if strings.TrimSpace(flag) != "" {
 		return flag, nil
 	}
-	if buildinfo.Channel == "dev" {
+	if channel == "dev" {
 		return "", output.NewError(
 			output.CodeInputRequired,
 			"upgrade needs --channel",
 			output.ExitInput,
-			"A dev build has no channel to follow. Pass --channel stable or --channel edge.",
+			"A dev build has no channel to follow. Pass --channel stable, --channel stable-<major>.x or --channel edge.",
 		).WithDetails(map[string]any{"flag": "--channel"})
 	}
-	return buildinfo.Channel, nil
+	if channel == release.ChannelStable {
+		if v, ok := release.ParseStable(version); ok {
+			return v.Channel(), nil
+		}
+	}
+	return channel, nil
 }
 
 // Decide compares the running binary with a verified manifest.
@@ -98,6 +108,16 @@ func Decide(from Version, m release.Manifest, versionSet bool) Plan {
 	if from.Channel == release.ChannelStable && m.Channel == release.ChannelStable && cmpSemver(m.Version, from.Version) < 0 {
 		plan.Warnings = append(plan.Warnings, output.Warning{Code: "downgrade", Message: "installing an older stable version"})
 	}
+	if from.Channel == release.ChannelStable && m.Channel == release.ChannelStable {
+		fromV, okFrom := release.ParseStable(from.Version)
+		toV, okTo := release.ParseStable(m.Version)
+		if okFrom && okTo && fromV.Major != toV.Major {
+			plan.Warnings = append(plan.Warnings, output.Warning{
+				Code:    "major_line_changed",
+				Message: fmt.Sprintf("switching major line from %s to %s", fromV.Line(), toV.Line()),
+			})
+		}
+	}
 	if from.Channel != "" && from.Channel != "dev" && from.Channel != m.Channel {
 		plan.Warnings = append(plan.Warnings, output.Warning{
 			Code:    "channel_changed",
@@ -107,35 +127,8 @@ func Decide(from Version, m release.Manifest, versionSet bool) Plan {
 	return plan
 }
 
+// cmpSemver orders stable versions by semver precedence, so
+// 1.0.0-alpha.2 < 1.0.0-alpha.10 < 1.0.0-beta.1 < 1.0.0-rc.1 < 1.0.0.
 func cmpSemver(a, b string) int {
-	pa, okA := parseSemver(a)
-	pb, okB := parseSemver(b)
-	if !okA || !okB {
-		return strings.Compare(a, b)
-	}
-	for i := range pa {
-		if pa[i] < pb[i] {
-			return -1
-		}
-		if pa[i] > pb[i] {
-			return 1
-		}
-	}
-	return 0
-}
-
-func parseSemver(v string) ([3]int, bool) {
-	var out [3]int
-	parts := strings.Split(v, ".")
-	if len(parts) != 3 {
-		return out, false
-	}
-	for i, part := range parts {
-		n, err := strconv.Atoi(part)
-		if err != nil || n < 0 || strconv.Itoa(n) != part {
-			return [3]int{}, false
-		}
-		out[i] = n
-	}
-	return out, true
+	return release.CompareVersions(a, b)
 }

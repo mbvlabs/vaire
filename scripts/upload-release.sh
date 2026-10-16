@@ -7,20 +7,24 @@ bucket="${3:?usage: scripts/upload-release.sh RELEASE_ROOT CHANNEL BUCKET ENDPOI
 endpoint="${4:?usage: scripts/upload-release.sh RELEASE_ROOT CHANNEL BUCKET ENDPOINT}"
 
 case "${channel}" in
-  stable | edge) ;;
+  stable)
+    channel_dir="${release_root}"
+    dest_prefix="s3://${bucket}"
+    ;;
+  edge)
+    channel_dir="${release_root}/edge"
+    dest_prefix="s3://${bucket}/edge"
+    ;;
+  stable-[0-9]*.x)
+    line="${channel#stable-}"
+    channel_dir="${release_root}/${line}"
+    dest_prefix="s3://${bucket}/${line}"
+    ;;
   *)
-    echo "channel must be stable or edge" >&2
+    echo "channel must be stable, stable-<major>.x (for example stable-1.x) or edge" >&2
     exit 1
     ;;
 esac
-
-if [ "${channel}" = edge ]; then
-  channel_dir="${release_root}/edge"
-  dest_prefix="s3://${bucket}/edge"
-else
-  channel_dir="${release_root}"
-  dest_prefix="s3://${bucket}"
-fi
 
 [ -d "${release_root}/releases" ] || {
   echo "release tree is missing ${release_root}/releases" >&2

@@ -40,15 +40,16 @@ type peekManifest struct {
 	Version string `json:"version"`
 }
 
-// Validate checks a verified manifest against the channel policy.
+// Validate checks a verified manifest against the channel policy. A major
+// line's manifest says stable and must carry a version on that line.
 func Validate(m Manifest, channel, wantVersion string) error {
 	if m.SchemaVersion != schemaVersion {
 		return verificationFailed("release manifest schemaVersion is invalid")
 	}
-	if m.Channel != channel {
+	if m.Channel != SigningChannel(channel) {
 		return verificationFailed("release manifest channel is invalid")
 	}
-	if err := matchVersion(m.Channel, m.Version); err != nil {
+	if err := matchVersion(channel, m.Version); err != nil {
 		return verificationFailed("release manifest version is invalid")
 	}
 	if wantVersion != "" && m.Version != wantVersion {
