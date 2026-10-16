@@ -501,6 +501,14 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	stored := false
 	if generated && !MustNotPrompt(cmd) {
 		if ok, _ := PromptYes(cmd, "Show the secrets handoff with the recovery kit now?"); ok {
+			// Revealing the whole document needs a human factor.
+			hash, err := masterPasswordHash(s.ctx.Name)
+			if err != nil {
+				return err
+			}
+			if err := secretGateUnlock(cmd, s.ctx, hash, s, p, "showing the secrets handoff"); err != nil {
+				return err
+			}
 			// show returns nil only once the operator typed 'stored'.
 			if _, err := showContextHandoff(cmd, s.ctx); err != nil {
 				return err

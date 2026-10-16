@@ -15,10 +15,30 @@ import (
 )
 
 // runSecretsExport rebuilds the secrets handoff from the local context
-// (§10.1). It generates a fresh bundle passphrase and never touches the node.
+// (§10.1). It generates a fresh bundle passphrase and never touches the node
+// (except to offer the node-verified code when no master password is set).
+// The whole document is revealed, so a human master password or a code from
+// the authenticator app is required (secretGateUnlock).
 func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	c, err := contexts.Resolve(stringFlag(cmd, "context"))
 	if err != nil {
+		return err
+	}
+	hash, err := masterPasswordHash(c.Name)
+	if err != nil {
+		return err
+	}
+	// With a master password the gate checks it locally, so export still
+	// works when the server is unreachable. Without one the only factor is a
+	// code the node verifies, which needs a session.
+	var s *session
+	var p *progress
+	if hash == "" {
+		var closeFn func()
+		s, p, closeFn = openSecretGateSession(cmd)
+		defer closeFn()
+	}
+	if err := secretGateUnlock(cmd, c, hash, s, p, "eru secrets export"); err != nil {
 		return err
 	}
 	doc, err := contextDocument(c)
@@ -121,6 +141,9 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 		},
 		Database: creds.Database,
 		Backup:   creds.Backup,
+		// Carry the master password hash so eru login installs it on another
+		// machine and the gate follows the document.
+		MasterPassword: creds.MasterPasswordHash,
 	}
 	var master string
 	for _, n := range c.Nodes {

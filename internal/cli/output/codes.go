@@ -33,6 +33,7 @@ const (
 	CodeReleaseVerification   = "release_verification_failed"
 	CodeDatabaseProtected     = "database_protected"
 	CodeProtectCodeRejected   = "protect_code_rejected"
+	CodeSecretGateRequired    = "secret_gate_required" //nolint:gosec // G101: a stable error code, not a credential.
 	CodeBundleCorrupt         = "bundle_corrupt"
 	CodeBundleNotFound        = "bundle_not_found"
 	CodeNodeFenced            = "node_fenced"
@@ -87,6 +88,7 @@ var exitByCode = map[string]int{
 	CodeReleaseVerification:   ExitReleaseVerification,
 	CodeDatabaseProtected:     ExitUnsafe,
 	CodeProtectCodeRejected:   ExitUnsafe,
+	CodeSecretGateRequired:    ExitUnsafe,
 	CodeBundleCorrupt:         ExitSecrets,
 	CodeBundleNotFound:        ExitPrecondition,
 	CodeNodeFenced:            ExitPrecondition,

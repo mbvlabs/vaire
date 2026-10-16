@@ -125,6 +125,11 @@ func methods() map[string]method {
 			handler: handleProtectStatus,
 		},
 		{
+			// No run log: its request carries a TOTP code.
+			name:    "protect.verify",
+			handler: handleProtectVerify,
+		},
+		{
 			name:    "db.list",
 			lock:    fixedLock(engine.LockShared),
 			cluster: true,

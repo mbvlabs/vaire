@@ -140,6 +140,6 @@ Upgrade: `eru upgrade --output agent` updates only the local binary for now; nod
 
 ## Refusals
 
-- Printing the secrets handoff, the transfer bundle or its passphrase. Without a terminal, init and `secrets export` need `--secrets-out`/`--out` (the bundle is written there) and `--reveal-passphrase`; only pass `--reveal-passphrase` when the human asked for it.
+- Printing the secrets handoff, the transfer bundle or its passphrase. `eru secrets export` and a new handoff are gated: a human master password (`eru secrets password set`) or a current code from the authenticator app the node verifies. There is no flag or environment variable for either, so with `--json`, `--no-input` or no terminal they are refused with `secret_gate_required`; an agent cannot export. Without a terminal, init still needs `--secrets-out`/`--out` (the bundle is written there) and `--reveal-passphrase`; only pass `--reveal-passphrase` when the human asked for it.
 - `eru restore cleanup` or `eru db drop` without explicit human approval of that action.
 - `--sudo` or `--install-missing` without human approval of that escalation.

@@ -188,7 +188,8 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru maint vacuum\|analyze\|reindex\|repack` | §16 | ✓ | | ✓ | | repack: `<db>` |
 | `eru maint report <kind>` | §16 | | | | | |
 | `eru maint kill` | `--db` (required), `--idle-in-tx`, `--pid`, `--older-than` | ✓ | ✓ | ✓ | on a protected database (TOTP code) | `<db>/kill` |
-| `eru secrets export` | `--out`, `--reveal-passphrase` | ✓ | | | ✓ | |
+| `eru secrets export` | `--out`, `--reveal-passphrase` | ✓ | | | human master password or TOTP code (`secret_gate_required` otherwise) | |
+| `eru secrets password set` | | | | | current password or TOTP code when changing | |
 | `eru wg export` | `--out`, `--install` | `--install` | | ✓ | ✓ | |
 | `eru upgrade` | `--version`, `--channel`, `--skip-nodes` | ✓ | | ✓ | ✓ | |
 | `eru node upgrade` | `--version`, `--rollback` | ✓ | rollback | ✓ | | `<server>/rollback` |
@@ -818,6 +819,7 @@ The bundle is `age` scrypt-encrypted (`age.NewScryptRecipient(passphrase)`, work
 - **Passphrase**: 8 words from the EFF large wordlist (embedded, about 103 bits), joined with `-`. It's displayed once in the handoff and never stored by eru.
 - **`eru login [bundle-file|-]`**: with no argument in a TTY, prompt to paste the bundle and read up to its END line; `-` reads it from stdin (not together with `--passphrase-stdin`); a path reads a file. Armored and binary `age` both work, so old `.secrets.age` files still open. Decrypt (passphrase from TTY, `--passphrase-stdin` or `--passphrase-file`) and create `contexts/<name>/…`. Bad passphrase returns `secrets_error`.
 - **`eru secrets export`**: rebuilds the document from the context and shows a new handoff with a new passphrase, with the same `stored` confirmation. `--out <path>` also writes the armored bundle. Without a TTY it needs `--out` and `--reveal-passphrase`, like init. Credentials rotated since login require a re-login or the `credentials` command. The previous bundle still opens with its own passphrase.
+- **The export gate.** `eru secrets export`, and the new handoff `eru backup setup` shows, reveal the whole document, so a human factor is required: the **master password**, or a current code from the authenticator app the node verifies. There is no flag or environment variable for either; with `--json`, `--no-input`, `--yes` or no terminal the command is refused (`secret_gate_required`) and an agent cannot export. The master password is set with `eru secrets password set` (interactive, twice) or at `server init`; only its argon2id hash (salt and parameters, `internal/password`, minimum 12 characters) is stored, in `credentials.json` (0600), and it rides in the secrets document so `eru login` installs it on another machine. Changing it needs the current password, or a code when protection is set up. The code factor is `protect.verify`: the node checks it with the same guard as a write (one use, five wrong codes lock codes out for 15 minutes). When protection is set up the code is asked first, with the password as an option; `eru secrets export` checks the password locally when one is set, so it still works with the server unreachable, and only opens a session for the code when no password is set. Init's own first handoff and `server init --restore`'s are not gated: they are the console that creates the document, and there is no other copy to protect yet.
 
 ### 10.2 Generated secrets
 

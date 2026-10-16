@@ -34,6 +34,7 @@
         "doctor_failed",
         "database_protected",
         "protect_code_rejected",
+        "secret_gate_required",
         "bundle_corrupt",
         "bundle_not_found",
         "node_fenced",

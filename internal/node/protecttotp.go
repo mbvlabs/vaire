@@ -350,6 +350,30 @@ func handleProtectStatus(_ context.Context, _ *Env) (Result, error) {
 	return defaultProtectGuard.status(config.ClusterPath)
 }
 
+// protectVerify is protect.verify's result.
+type protectVerify struct {
+	Verified bool `json:"verified"`
+}
+
+// handleProtectVerify checks a code from the authenticator app without
+// changing anything: the node-side check the eru secrets export gate uses.
+// It reuses the write path's guard, so a code is one use and failures lock
+// codes out as they do there.
+func handleProtectVerify(_ context.Context, env *Env) (Result, error) {
+	ok, err := defaultProtectGuard.configured()
+	if err != nil {
+		return Result{}, err
+	}
+	if !ok {
+		return Result{}, protectNotInitialized(output.CodePrecondition,
+			"this node has no two-factor protection set up", output.ExitPrecondition)
+	}
+	if _, err := defaultProtectGuard.verify(env.Req.Secrets[ProtectCodeSecret], false); err != nil {
+		return Result{}, err
+	}
+	return Result{Data: protectVerify{Verified: true}}, nil
+}
+
 func (g protectGuard) status(clusterPath string) (Result, error) {
 	st, err := g.load()
 	if err != nil {

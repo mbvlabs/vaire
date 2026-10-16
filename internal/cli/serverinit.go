@@ -20,6 +20,7 @@ import (
 	"github.com/mbvlabs/eru/internal/hostinfo"
 	"github.com/mbvlabs/eru/internal/localenv"
 	"github.com/mbvlabs/eru/internal/node"
+	"github.com/mbvlabs/eru/internal/password"
 	"github.com/mbvlabs/eru/internal/remote"
 	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/secretsdoc"
@@ -91,6 +92,9 @@ type initRun struct {
 	backupsDone bool
 	// restore is set for server init --restore (Phase 5).
 	restore *restoreRun
+	// masterHash is the argon2id hash of the master password asked for
+	// during init, if any; it goes in the document and the local context.
+	masterHash string
 }
 
 type initPlanData struct {
@@ -828,6 +832,9 @@ func runInitRemote(cmd *cobra.Command) error {
 	}
 
 	// 12. Secrets handoff, then the node records the confirmation.
+	if err := r.askMasterPassword(cmd); err != nil {
+		return err
+	}
 	doc, res, err := r.writeDocument()
 	if err != nil {
 		return err
@@ -1246,6 +1253,45 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 }
 
 // document builds the secrets document from the pending state (§10.1).
+// askMasterPassword offers to set the master password that gates eru secrets
+// export. It is optional and needs a terminal: skipping leaves the gate to a
+// code from the authenticator app (eru protect init) or a later
+// eru secrets password set. Only the argon2id hash is kept.
+func (r *initRun) askMasterPassword(cmd *cobra.Command) error {
+	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
+		return nil
+	}
+	ok, err := PromptYes(cmd, "Set a master password now to gate eru secrets export?")
+	if err != nil || !ok {
+		return err
+	}
+	for range 3 {
+		pw, err := readSecretTTY(cmd, fmt.Sprintf("Master password (at least %d characters)", password.MinLength))
+		if err != nil {
+			return err
+		}
+		again, err := readSecretTTY(cmd, "Repeat the master password")
+		if err != nil {
+			return err
+		}
+		switch {
+		case pw != again:
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "The two passwords do not match.")
+		default:
+			hash, herr := password.Hash(pw)
+			if herr != nil {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), herr.Error())
+				continue
+			}
+			r.masterHash = hash
+			return nil
+		}
+	}
+	r.warnings = append(r.warnings, output.Warning{Code: "master_password_unset",
+		Message: "no master password was set; set one later with eru secrets password set, or use a code from the authenticator app"})
+	return nil
+}
+
 func (r *initRun) document() (secretsdoc.Document, error) {
 	n := r.master()
 	if r.prog.WGPublicKey == "" || len(r.prog.SSHHostKeys) == 0 {
@@ -1274,10 +1320,11 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 			SSHPrivateKey: r.sec.SSHPrivateKey,
 			SudoPassword:  r.sec.SudoPassword,
 		},
-		Database:   r.sec.Database,
-		Backup:     r.sec.Backup,
-		Metrics:    metricsDocument(r.sec.Metrics, r.cfg.Hostname(n.Name), r.cfg.Metrics.PathPrefix),
-		BreakGlass: secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
+		Database:       r.sec.Database,
+		Backup:         r.sec.Backup,
+		Metrics:        metricsDocument(r.sec.Metrics, r.cfg.Hostname(n.Name), r.cfg.Metrics.PathPrefix),
+		MasterPassword: r.masterHash,
+		BreakGlass:     secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
 	}, nil
 }
 
@@ -1434,6 +1481,9 @@ func runInitLocal(cmd *cobra.Command) error {
 		}
 	}
 	if err := r.configureInitBackups(ctx, caller); err != nil {
+		return err
+	}
+	if err := r.askMasterPassword(cmd); err != nil {
 		return err
 	}
 	_, res, err := r.writeDocument()

@@ -90,6 +90,10 @@ type Credentials struct {
 	// Metrics is the /metrics endpoint credential (Phase 4). The node keeps
 	// only its bcrypt hash.
 	Metrics *MetricsCreds `json:"metrics,omitempty"`
+	// MasterPasswordHash gates eru secrets export: an argon2id hash of the
+	// master password, never the password. It travels in the secrets
+	// document so eru login carries it to another machine.
+	MasterPasswordHash string `json:"master_password_hash,omitempty"`
 }
 
 // RoleMaster is the master node's role.
@@ -292,6 +296,16 @@ func LoadCredentials(name string) (Credentials, error) {
 		return Credentials{}, err
 	}
 	return creds, nil
+}
+
+// SetMasterPasswordHash stores the master password hash for a context.
+func SetMasterPasswordHash(name, hash string) error {
+	creds, err := LoadCredentials(name)
+	if err != nil {
+		return err
+	}
+	creds.MasterPasswordHash = hash
+	return SaveCredentials(name, creds)
 }
 
 // Remove deletes contexts/<name> and clears the current context if it was

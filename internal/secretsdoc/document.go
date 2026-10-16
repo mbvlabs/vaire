@@ -40,6 +40,10 @@ type Document struct {
 	Backup     *Backup   `json:"backup,omitempty"`
 	Metrics    *Metrics  `json:"metrics,omitempty"`
 	BreakGlass string    `json:"break_glass"`
+	// MasterPassword is the argon2id hash of the master password that gates
+	// eru secrets export, carried so eru login installs it on another
+	// machine. It is a verifier, not the password.
+	MasterPassword string `json:"master_password_hash,omitempty"`
 }
 
 // ConnectionNotes explains the URLs eru db create and eru db credentials
