@@ -456,7 +456,7 @@ func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, spec config
 	local := m.PG()
 	sql := steps.AuthFunctionsSQL() + fmt.Sprintf("CREATE DATABASE %s OWNER %s;\n", pg.Quote(spec.Name), pg.Quote(spec.Name+"_owner")) +
 		steps.DatabaseConnectSQL(spec.Name, spec.Name)
-	if err := local.Exec(ctx, "postgres", sql, nil); err != nil {
+	if err := local.Exec(ctx, steps.AuthDB, sql, nil); err != nil {
 		return nil, err
 	}
 	if err := local.Exec(ctx, spec.Name, steps.DatabaseGrantsSQL(spec), nil); err != nil {

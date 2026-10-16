@@ -63,6 +63,14 @@ func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write 
 	if err != nil || code == nil {
 		return user, password, err
 	}
+	// The CLI makes the write role's password and sends it as a secret:
+	// the node redacts every secret from its result, so it cannot hand one
+	// back (node.WritePasswordSecret).
+	writePassword, err := secrets.Base62(32)
+	if err != nil {
+		return "", "", err
+	}
+	code[node.WritePasswordSecret] = writePassword
 	reply, err := p.call(commandContext(cmd), s.node, "db.write-access", map[string]any{"db": db},
 		remote.CallOptions{Secrets: code, OnEvent: p.event})
 	if err != nil {
@@ -76,6 +84,5 @@ func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write 
 		// The protection was lifted meanwhile: eru_admin writes again.
 		return user, password, nil
 	}
-	secrets.Add(access.Password)
-	return access.User, access.Password, nil
+	return access.User, writePassword, nil
 }

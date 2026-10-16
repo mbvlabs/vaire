@@ -121,13 +121,22 @@ func TestWriteAccess(t *testing.T) {
 		granted = append(granted, role)
 		return nil
 	}
-	access := func(params, code string) (WriteAccess, error) {
-		res, err := g.writeAccess(context.Background(), writeEnv(params, code, false), grant)
+	password := strings.Repeat("p", writeRolePasswordMin)
+	accessWith := func(params, code, password string) (WriteAccess, error) {
+		env := writeEnv(params, code, false)
+		if password != "" {
+			if env.Req.Secrets == nil {
+				env.Req.Secrets = map[string]string{}
+			}
+			env.Req.Secrets[WritePasswordSecret] = password
+		}
+		res, err := g.writeAccess(context.Background(), env, grant)
 		if err != nil {
 			return WriteAccess{}, err
 		}
 		return res.Data.(WriteAccess), nil
 	}
+	access := func(params, code string) (WriteAccess, error) { return accessWith(params, code, password) }
 
 	// Not protected (or not a database of the server's, such as a copy):
 	// the CLI writes as eru_admin, and no role is made.
@@ -156,16 +165,27 @@ func TestWriteAccess(t *testing.T) {
 		t.Fatalf("a role was made without a valid code: %+v", granted)
 	}
 
+	// A valid code without the CLI's password (or a short one) makes no
+	// role.
+	for _, pw := range []string{"", "short"} {
+		_, err = accessWith(`{"db":"app"}`, codeFor(t, secret, clock.t, 0), pw)
+		if code, _ := errReason(t, err); code != output.CodeInputRequired || len(granted) != 0 {
+			t.Fatalf("password %q: %v, granted %d", pw, err, len(granted))
+		}
+		clock.t = clock.t.Add(totp.Period)
+	}
+
 	code := codeFor(t, secret, clock.t, 0)
 	got, err := access(`{"db":"app"}`, code)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Protected || len(granted) != 1 || got.User != granted[0].User || got.Password != granted[0].Password {
+	// The role logs in with the password the CLI sent.
+	if !got.Protected || len(granted) != 1 || got.User != granted[0].User || granted[0].Password != password {
 		t.Fatalf("access %+v, granted %+v", got, granted)
 	}
-	if !strings.HasPrefix(got.User, writeRolePrefix) || len(got.Password) < 32 {
-		t.Fatalf("role %q password length %d", got.User, len(got.Password))
+	if !strings.HasPrefix(got.User, writeRolePrefix) {
+		t.Fatalf("role %q", got.User)
 	}
 	until, err := time.Parse(time.RFC3339, got.ValidUntil)
 	if err != nil || !until.Equal(clock.t.Add(writeRoleLogin).Truncate(time.Second)) {

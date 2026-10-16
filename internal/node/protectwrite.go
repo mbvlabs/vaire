@@ -15,7 +15,6 @@ import (
 	"github.com/mbvlabs/eru/internal/engine"
 	"github.com/mbvlabs/eru/internal/pg"
 	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/secrets"
 	"github.com/mbvlabs/eru/internal/steps"
 )
 
@@ -27,20 +26,34 @@ import (
 // creates once a current code from the authenticator app checks out. The
 // CLI asks for the code once, when the command starts; the role can log in
 // for writeRoleLogin, so a code never unlocks a later command.
+//
+// The CLI makes the role's password and sends it as the request's
+// write_password secret, as it does for every password (D5); the result
+// carries none. The node redacts every registered secret from every event
+// it writes, its result included, so a password the node made and returned
+// would reach the CLI as the redaction placeholder.
 
 // writeRolePrefix names the short-lived write roles.
 const writeRolePrefix = "eru_write_"
+
+// WritePasswordSecret is the request secret that carries the write role's
+// password, made by the CLI.
+const WritePasswordSecret = "write_password"
+
+// writeRolePasswordMin is the shortest write_password db.write-access
+// takes: the CLI sends 32 base62 characters.
+const writeRolePasswordMin = 32
 
 // writeRoleLogin is how long a write role can log in. A session it opened
 // lasts as long as the client keeps it.
 const writeRoleLogin = 2 * time.Minute
 
 // WriteAccess is the db.write-access result. Protected false means the
-// database is not protected: the CLI writes as eru_admin, as before.
+// database is not protected: the CLI writes as eru_admin, as before. The
+// role's password is the request's write_password secret.
 type WriteAccess struct {
 	Protected  bool   `json:"protected"`
 	User       string `json:"user,omitempty"`
-	Password   string `json:"password,omitempty"`
 	ValidUntil string `json:"valid_until,omitempty"`
 }
 
@@ -59,8 +72,8 @@ type writeRole struct {
 type grantWriteFunc func(ctx context.Context, spec config.ClusterSpec, role writeRole) error
 
 // handleWriteAccess hands out a write role for a protected database after
-// checking the request's protect_code. The result carries a password, so
-// the method writes no run log.
+// checking the request's protect_code. The role logs in with the request's
+// write_password secret.
 func handleWriteAccess(ctx context.Context, env *Env) (Result, error) {
 	return defaultProtectGuard.writeAccess(ctx, env, createWriteRole)
 }
@@ -82,14 +95,21 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 	if err := g.checkWrite(spec.Name, "writing to it", env.Req.Secrets[ProtectCodeSecret]); err != nil {
 		return Result{}, err
 	}
-	role, err := newWriteRole(g.now())
+	password := env.Req.Secrets[WritePasswordSecret]
+	if len(password) < writeRolePasswordMin {
+		return Result{}, output.NewError(output.CodeInputRequired,
+			"db.write-access needs the write role's password in the write_password secret", output.ExitInput,
+			"Run the write with an eru CLI of the node's version: it sends the password.").
+			WithDetails(map[string]any{"secret": WritePasswordSecret})
+	}
+	role, err := newWriteRole(g.now(), password)
 	if err != nil {
 		return Result{}, err
 	}
 	if err := grant(ctx, spec, role); err != nil {
 		return Result{}, err
 	}
-	return Result{Data: WriteAccess{Protected: true, User: role.User, Password: role.Password,
+	return Result{Data: WriteAccess{Protected: true, User: role.User,
 		ValidUntil: role.ValidUntil.UTC().Format(time.RFC3339)}}, nil
 }
 
@@ -149,14 +169,10 @@ func sqlWrites(req rpc.Request) bool {
 	return json.Unmarshal(req.Params, &p) == nil && p.Write
 }
 
-// newWriteRole makes a write role's name, password and expiry.
-func newWriteRole(now time.Time) (writeRole, error) {
+// newWriteRole makes a write role's name and expiry for password.
+func newWriteRole(now time.Time, password string) (writeRole, error) {
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {
-		return writeRole{}, err
-	}
-	password, err := secrets.Base62(32)
-	if err != nil {
 		return writeRole{}, err
 	}
 	return writeRole{User: writeRolePrefix + hex.EncodeToString(suffix), Password: password, ValidUntil: now.Add(writeRoleLogin)}, nil
@@ -173,13 +189,14 @@ func createWriteRole(ctx context.Context, spec config.ClusterSpec, role writeRol
 	if err != nil {
 		return err
 	}
-	if err := local.Exec(ctx, "postgres", writeRoleSQL(spec, role, verifier), nil); err != nil {
+	if err := local.Exec(ctx, steps.AuthDB, writeRoleSQL(spec, role, verifier), nil); err != nil {
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("create the write role: %w", err), output.ExitExternal, "")
 	}
 	return nil
 }
 
-// writeRoleSQL creates role, run in postgres.
+// writeRoleSQL creates role, run in steps.AuthDB, where the session
+// pooler's auth_query looks it up.
 func writeRoleSQL(spec config.ClusterSpec, role writeRole, verifier string) string {
 	user := pg.Quote(role.User)
 	return fmt.Sprintf("CREATE ROLE %s LOGIN NOINHERIT PASSWORD '%s' VALID UNTIL '%s' IN ROLE %s;\nGRANT CONNECT, TEMPORARY ON DATABASE %s TO %s;\n",

@@ -224,7 +224,7 @@ func methods() map[string]method {
 			handler: defaultProtectGuard.requireWriteCode("writing to it", "db", sqlWrites, handleSQL),
 		},
 		{
-			// No run log: the result carries the write role's password.
+			// No run log, like sql, whose writes it serves.
 			name:    "db.write-access",
 			cluster: true,
 			handler: handleWriteAccess,

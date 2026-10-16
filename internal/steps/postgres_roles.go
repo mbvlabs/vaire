@@ -17,6 +17,12 @@ import (
 
 const postgresRolesID = "postgres-roles-v1"
 
+// AuthDB is the database of each cluster that holds the pooler auth
+// functions: the <db>__auth alias in both poolers' [databases] opens it, so
+// auth_query runs there (render.AuthAlias). Roles are cluster-wide, so a
+// write role made from it is visible there too.
+const AuthDB = "postgres"
+
 // systemDatabases are never reported as orphaned.
 var systemDatabases = map[string]bool{"postgres": true, "template0": true, "template1": true}
 
@@ -94,7 +100,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		{"pgbouncer_get_auth", RoleDirectOnly},
 		{"pgbouncer_get_auth_session", "operator connections"},
 	} {
-		src, err := queryColumn(ctx, local, "postgres", "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
+		src, err := queryColumn(ctx, local, AuthDB, "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
 		if err != nil || len(src) == 0 {
 			return incomplete("eru." + fn.name + " is missing"), nil
 		}
@@ -200,7 +206,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 		return engine.ApplyResult{}, err
 	}
 	cluster.WriteString(sql)
-	if err := local.Exec(ctx, "postgres", cluster.String(), nil); err != nil {
+	if err := local.Exec(ctx, AuthDB, cluster.String(), nil); err != nil {
 		return engine.ApplyResult{}, err
 	}
 	if err := local.Exec(ctx, spec.Name, databaseGrantsSQL(spec), nil); err != nil {
@@ -537,5 +543,5 @@ func prefixed(name string, roles []string) []string {
 }
 
 // AuthFunctionsSQL is the pooler auth functions and their grants, run in
-// postgres. A restore from a dump creates them in its new cluster.
+// AuthDB. A restore from a dump creates them in its new cluster.
 func AuthFunctionsSQL() string { return pgbouncerAuthSQL }
