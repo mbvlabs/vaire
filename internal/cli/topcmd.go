@@ -165,7 +165,7 @@ func runTop(cmd *cobra.Command, _ []string) error {
 		snap := c.sample(ctx, filter)
 		msg := top.Render(snap, filter, "time", 0, 1000)
 		if !c.includeEru {
-			msg += "\neru's own sessions (its roles, or an application_name beginning with \"eru\") are hidden; --all-sessions includes them"
+			msg += "\ninternal/administrative roles (including postgres and maintenance roles) and sessions whose application_name begins with \"eru\" are hidden; --all-sessions includes them"
 		}
 		return output.Success(cmd, output.Result{Data: snap, Message: msg, Warnings: s.warnings})
 	}

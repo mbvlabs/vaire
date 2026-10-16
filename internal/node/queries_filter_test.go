@@ -27,9 +27,36 @@ func TestStatementsFilterBeforeLimit(t *testing.T) {
 			if filterAt < 0 || orderAt < filterAt || limitAt < orderAt || !strings.Contains(sql, "r.oid = s.userid") {
 				t.Fatalf("filter must run before ranking/limit: %s", sql)
 			}
+			for _, role := range []string{"postgres", "pg_maintain", "pg_signal_backend"} {
+				if !strings.Contains(sql[filterAt:orderAt], "'"+role+"'") {
+					t.Errorf("administrative role %s not filtered before ranking/limit: %s", role, sql)
+				}
+			}
 			if strings.Contains(query.sql(true), predicate) {
 				t.Fatal("--all-sessions still filters internal roles")
 			}
 		})
+	}
+}
+
+func TestParseStatementsAdministrativeRoles(t *testing.T) {
+	rows := []map[string]string{
+		{"role": "postgres", "query": "CREATE EXTENSION", "total_ms": "9.6"},
+		{"role": "pg_maintain", "query": "REINDEX TABLE CONCURRENTLY", "total_ms": "4.0"},
+		{"role": "pg_signal_backend", "query": "SELECT pg_terminate_backend", "total_ms": "3.0"},
+		{"role": "app_owner", "query": "CREATE TABLE", "total_ms": "2.2"},
+	}
+	filtered := parseStatements("app", rows, false)
+	got := mergeStatements(map[string][]statement{"app": filtered}, "total", 1)
+	if len(got) != 1 || got[0].Role != "app_owner" {
+		t.Fatalf("application work lost behind administrative statements: %+v", got)
+	}
+	all := parseStatements("app", rows, true)
+	if len(all) != len(rows) {
+		t.Fatalf("--all-sessions lost administrative statements: %+v", all)
+	}
+	got = mergeStatements(map[string][]statement{"app": all}, "total", 1)
+	if len(got) != 1 || got[0].Role != "postgres" {
+		t.Fatalf("--all-sessions must retain higher-ranked administrative work: %+v", got)
 	}
 }

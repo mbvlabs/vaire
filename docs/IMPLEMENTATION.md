@@ -154,7 +154,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `eru status` | `--watch`, `--db` | | | | | |
 | `eru doctor` | `--only security\|backups\|host\|postgres\|tls\|metrics`, `--db` | | | | | |
 | `eru top` | `--db`, `--once` | | | | | |
-| `eru queries` | `--db`, `--limit`, `--order total\|mean\|calls`, `--reset` (D) | reset | reset | | | `<db>/stats`, `<server>/stats` without `--db` |
+| `eru queries` | `--db`, `--limit`, `--order total\|mean\|calls`, `--all-sessions`, `--reset` (D) | reset | reset | | | `<db>/stats`, `<server>/stats` without `--db` |
 | `eru metrics show\|rotate` | `show`: `--reveal` | rotate | rotate | ✓ | | `<server>/metrics` |
 | `eru logs [unit]` | `--db`, `--since`, `--follow`, `--lines` | | | | | |
 | `eru sql <query>` | `--db`, `--file`, `--write` | `--write` | | | `--write` on a protected database (TOTP code) | |
@@ -1317,6 +1317,8 @@ CREATE EXTENSION IF NOT EXISTS ... ;                         -- per [[clusters]]
 Role names are validated by regex and also quoted with `pgx.Identifier{}.Sanitize()` (`pg.Quote`). The `:'pw'` placeholders above are SCRAM verifiers computed in Go (§10.2), never plaintext. psql `-v` variables carry only validated identifiers and non-secret literals.
 
 **Operator SQL** (`eru sql`, `eru psql`, `eru console`) connects to the session pooler on 5432 of the database's node over the tunnel (pgx with `transport.Tunnel.DialContext`, `ServerName` = the node's hostname, `verify-full` against system roots; `self-signed` mode uses `require` and warns `tls_unverified`), which routes by `--db` to that database's cluster. `--db` is required, and there is no default database; a missing `--db` is `input_required`. It logs in as `eru_admin`, read-only unless `--write`, which acts as `<db>_owner`. On a protected database `--write` asks for a TOTP code and logs in as a short-lived write role from `db.write-access` instead (see Protected databases). Each `eru sql` call runs in one transaction, `READ ONLY` unless `--write`. `--db <db>__restoring` reaches an open restore's paused copy.
+
+**Query/activity filtering.** `eru queries` and `eru top` hide statements run by `eru_admin`, `eru_monitor`, `pgbouncer_auth`, `eru_write_*`, `postgres`, `pg_maintain` and `pg_signal_backend` by default. Node setup runs as `postgres`, and protected maintenance switches to the maintenance/signal roles, so filtering only eru-named roles would still let internal work crowd out application work. Both statement readers filter these roles in SQL before ranking and limiting; top uses the same role policy for sessions and also hides sessions whose `application_name` begins with `eru`. Application owner, migrate, app and read-only roles remain visible. `--all-sessions` includes the hidden statements/sessions. This is deliberately a role-based administrative filter: manually issued work under `postgres` or the maintenance/signal roles is hidden too, and requires `--all-sessions` to inspect; statement statistics cannot distinguish those sessions by application name.
 
 ### 14.3 The two poolers
 

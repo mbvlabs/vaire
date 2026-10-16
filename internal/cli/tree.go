@@ -266,12 +266,12 @@ func phase1Commands() []cmdSpec {
 			flags: []fl{
 				flagString("db", "", "Start filtered to one database"),
 				flagBool("once", "Print one snapshot and exit"),
-				flagBool("all-sessions", "Include eru's own sessions (its roles, or an application_name beginning with \"eru\")"),
+				flagBool("all-sessions", "Include internal/administrative sessions and statements, including postgres and maintenance roles"),
 			},
 			meta: CommandMeta{
 				Summary: "Show live PostgreSQL and PgBouncer activity",
 				WhenToUse: []string{"Watch sessions, waits, blocking chains and the busiest statements. It reads each database over the tunnel " +
-					"through the session pooler as eru_admin, read-only; --json or no terminal prints one snapshot. eru's own sessions are hidden by default; --all-sessions shows them."},
+					"through the session pooler as eru_admin, read-only; --json or no terminal prints one snapshot. Internal sessions and statements are hidden by default, including postgres and maintenance roles (even manually issued work), and sessions whose application_name begins with eru; --all-sessions shows them."},
 				Examples: []string{"eru top", "eru top --db app", "eru top --all-sessions", "eru top --json"},
 				Next:     []string{"eru queries", "eru maint report long-queries"},
 			},
@@ -284,11 +284,11 @@ func phase1Commands() []cmdSpec {
 				flagInt("limit", 20, "How many statements to return"),
 				flagString("order", "total", "Sort by total, mean, or calls"),
 				flagBool("reset", "Reset pg_stat_statements. Requires --confirm"),
-				flagBool("all-sessions", "Include statements run by eru's own roles, hidden by default"),
+				flagBool("all-sessions", "Include statements run by internal/administrative roles, including postgres and maintenance roles"),
 			},
 			meta: CommandMeta{
 				Summary:          "Show statement statistics, or reset them",
-				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements: --confirm <db>/stats with --db, <server>/stats for every database. Statements run by eru's own roles (eru sql, maintenance, the exporters) are hidden by default; --all-sessions shows them."},
+				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements: --confirm <db>/stats with --db, <server>/stats for every database. Statements run by internal/administrative roles (eru sql, node setup, maintenance, the exporters) are hidden by default, including postgres and maintenance roles even for manually issued work; --all-sessions shows them. Application owner, migrate, app and read-only roles remain visible."},
 				Examples:         []string{"eru queries --db app --limit 20", "eru queries --order mean", "eru queries --all-sessions", "eru queries --db app --reset --confirm app/stats"},
 				Remote:           true,
 				MutatingFlags:    []string{"--reset"},

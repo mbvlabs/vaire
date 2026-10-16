@@ -98,7 +98,7 @@ func queriesMessage(d queriesData, allSessions bool) string {
 	}
 	lines = append(lines, "sorted by "+d.Order+"; --json has the full query text")
 	if !allSessions {
-		lines = append(lines, "eru's own sessions (its roles) are hidden; --all-sessions includes them")
+		lines = append(lines, "internal/administrative roles (including postgres and maintenance roles) are hidden; --all-sessions includes them")
 	}
 	return strings.Join(lines, "\n")
 }
