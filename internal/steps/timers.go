@@ -131,9 +131,11 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 }
 
 // timerFiles returns every unit file timers-v1 owns, by file name: the
-// certificate timer, and with backups on the stanza-expiry timer, a template
-// service per job (eru-<job>@.service runs eru node run <job> --db %i) and a
-// timer per cluster and job (eru-<job>@<cluster>.timer), staggered by the
+// certificate timer, and with backups on the stanza-expiry timer and every
+// job's template service (eru-<job>@.service runs eru node run <job> --db %i).
+// Templates exist even without active databases or schedules: recovery starts
+// its first full before enabling the recovered database's timers. Only a
+// scheduled job gets a timer (eru-<job>@<cluster>.timer), staggered by the
 // cluster's stanza (RFC 9.3): within the day, and the monthly drills over
 // the month too (RFC 9.4).
 func timerFiles(cfg config.Cluster) map[string][]byte {
@@ -144,6 +146,9 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 	}
 	files["eru-stanza-expiry.service"] = render.JobService("stanza-expiry", "")
 	files[StanzaExpiryTimerName] = render.JobTimer("eru expiry of dropped databases' stanzas", stanzaExpirySchedule, "30m")
+	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump"} {
+		files["eru-"+job+"@.service"] = render.JobService(job, "--db %i")
+	}
 	spread := StaggerSpread(cfg)
 	for _, spec := range cfg.Clusters {
 		offset := StaggerOffset(spec.Stanza, spread)
@@ -152,7 +157,6 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 			if j.Job == "restore-drill" {
 				schedule = StaggerDay(schedule, spec.Stanza)
 			}
-			files["eru-"+j.Job+"@.service"] = render.JobService(j.Job, "--db %i")
 			files["eru-"+j.Job+"@"+spec.Name+".timer"] = render.JobTimer(j.Description, schedule, j.Jitter)
 		}
 	}
