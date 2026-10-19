@@ -1,9 +1,11 @@
 # Plan: one shared WireGuard tunnel per context (ControlMaster-style), plus stream hardening
 
-## Status (2026-10-14)
+## Implementation record and qualification
+
+Current evidence (2026-10-19): concurrent shared-tunnel use and daemon reattachment passed in earlier VPS testing; the latest qualification passed five-minute idle reuse and a full unreachable-peer timeout with the correct hint. Forced stalled-handshake recovery success and absent/non-answering-daemon branches have local-test evidence only. See [MANUAL-TESTING.md](MANUAL-TESTING.md) for exact versions, timings and caveats. The original problem analysis/design below is historical, not the current per-command tunnel implementation.
 
 - **Fix (2026-10-16):** a client dialing through the daemon now waits `transport.SharedDialTimeout` (2 minutes) for the `dial` reply, the same budget the daemon uses for a dial that includes a WireGuard re-handshake after the tunnel has idled. `DialSSH` gives a shared-tunnel dial that budget while the SSH handshake keeps `--timeout`; other dialers keep their own. The `--timeout` flag therefore does not bound the tunnel dial. A read timeout is `transport.ErrDaemonNoAnswer`, a daemon `dial_failed` is `transport.TunnelDialError`, and `tunnelHint` picks the hint by cause (daemon not running / daemon not answering / a real handshake timeout; only the last mentions break-glass). `eru node unlock-ssh` on an operator machine now says it runs on the server.
-- **Implemented, not yet tested live:** the shared-tunnel daemon (Phases 4–6, all at once). It is the default; `ERU_TUNNEL=inprocess` keeps the old in-process tunnel under the tunnel lock.
+- **Implemented and live-tested, with the limits above:** the shared-tunnel daemon (this document's implementation units 4–6, not roadmap Phases 4–6). It is the default; `ERU_TUNNEL=inprocess` keeps the old in-process tunnel under the tunnel lock.
   - `internal/transport/shared.go` (client, protocol, fingerprint), `internal/transport/sharedserver.go` (server), `internal/transport/peercred_{linux,darwin}.go`, tests in `internal/transport/shared_test.go`.
   - `internal/cli/tunneld.go`: spawn, hidden `eru tunnel serve`, `eru tunnel status`, `eru tunnel stop [--force]`, socket path with the short-path fallback, persist window.
   - `internal/cli/session.go`: `session.dialer`/`closeDialer`; `tunnelConfig` split out of `upTunnel`.

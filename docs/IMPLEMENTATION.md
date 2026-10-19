@@ -19,7 +19,7 @@
 
 ### 0.1 Hard rules
 
-- **No automated tests.** Don't add `_test.go` files. Behaviour is verified by manual tests on real VPSes (§22).
+- **Unit and regression tests, then real VPS tests.** Use Go tests for isolated logic; no Docker, Incus or scratch-VM harnesses. Host behaviour is verified manually on real VPSes. See `AGENTS.md` for the required verification commands.
 - Every host-mutating action is a step (§9) or a node RPC (§7.4). Nothing mutates a host through ad-hoc SSH commands.
 - Secrets never appear in argv, logs, events, JSON output (unless explicitly requested by a `credentials` command), journal files or error messages. Pass them via stdin or 0600 files and redact on every output path (§9.6).
 - Every command has `CommandMeta` (§5.3). The build-time check fails otherwise.
@@ -1675,7 +1675,7 @@ When the current process isn't root and an operation needs root:
 
 ## 22. Testing
 
-There's no automated test suite and no `_test.go` files. CI runs `just lint` and builds. Each phase ends with the manual test listed for it in [`MASTER.md`](./MASTER.md) §7, run on a real VPS. See MASTER §8.
+Go unit and regression tests cover isolated logic; host behaviour is tested manually on real VPSes. No Docker, Incus or scratch-VM harnesses. CI runs `just lint` and builds; local verification also runs `go test ./...` and the complete sequence in `AGENTS.md`. Each phase's real-host evidence is recorded in [MANUAL-TESTING.md](MANUAL-TESTING.md), with current status in [MASTER.md](MASTER.md).
 
 ---
 

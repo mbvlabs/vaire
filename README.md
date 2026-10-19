@@ -2,9 +2,9 @@
 
 One CLI that turns a fresh VPS into a hardened PostgreSQL 18 server, and then stays the only way in.
 
-From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu 26.04 server, locks it down, installs PostgreSQL 18 with PgBouncer and nginx, issues its TLS certificate, and connects you to it over WireGuard. Each database you create gets its own tuned PostgreSQL cluster with a size and resource limits, the way a managed provider gives each database its own instance. Every later operation goes through the same binary, over SSH, inside WireGuard. There is no daemon, no web UI and no open control port.
+From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu 26.04 server, locks it down, installs PostgreSQL 18 with PgBouncer and nginx, issues its TLS certificate, and connects you to it over WireGuard. Each database you create gets its own tuned PostgreSQL cluster with a size and resource limits, the way a managed provider gives each database its own instance. Every later operation goes through the same binary, over SSH, inside WireGuard. There is no server control daemon, web UI or open control API port; an operator-side shared tunnel daemon keeps concurrent CLI commands on one WireGuard connection per context.
 
-> **Status:** early and under active development. Bootstrap and the first server (Phases 1 and 2) work end to end on a real VPS. Phase 3 (databases as clusters, backups and native restore) is built and waiting for its manual test on a VPS. Upgrades, observability and multi-node are still to come. See [the roadmap](docs/MASTER.md#7-roadmap-and-status).
+> **Status (2026-10-19):** preparing the first v1 alpha; not yet tagged or published. Phases 0–5 have live qualification evidence, including backups, disaster recovery, protected writes, observability, local bootstrap and automatic SSH-lockdown revert. Known coverage limits are recorded in [manual testing](docs/MANUAL-TESTING.md). Followers, extensions and multi-node remain future work. See [the roadmap](docs/MASTER.md#7-roadmap-and-status) and [draft alpha notes](docs/RELEASE-v1.0.0-alpha.1.md). Alpha formats are not frozen; a later alpha may require a rebuild and restore.
 
 ## What works today
 
@@ -15,13 +15,13 @@ From your laptop (or from a coding agent), `eru` takes a new Debian 13 or Ubuntu
 | Desired state | `eru plan`, `eru apply`, `eru config show\|get\|set\|edit\|validate` |
 | Databases | `eru db list\|create\|resize\|drop\|credentials\|fork\|protect\|unprotect` |
 | Protection | `eru protect init\|status` (two-factor code), `eru db protect\|unprotect` |
-| SQL | `eru sql` (one statement, JSON-friendly), `eru psql`, `eru console` (usql) |
+| SQL | `eru sql` (multiple statements and ordered results, JSON-friendly), `eru psql`, `eru console` (usql) |
 | Tuning | `eru tune show\|explain\|apply` |
 | Backups | `eru backup setup\|now\|list\|verify`, `eru dump`, `eru dump list\|get` |
 | Restores | `eru restore <db>` (`--time`, `--latest`, `--set`, `--dump`), `eru restore status\|promote\|undo\|abort\|cleanup\|drill` |
-| Disaster recovery | `eru server backup now\|list\|verify\|export` (the master bundle), `eru server init --restore`, `eru db recover <db>\|--all` (Phase 5, manual test pending) |
+| Disaster recovery | `eru server backup now\|list\|verify\|export` (the master bundle), `eru server init --restore`, `eru db recover <db>\|--all` |
 | Jobs | `eru job list\|follow` |
-| Health | `eru status [--watch]`, `eru doctor [--only security]`, `eru top`, `eru queries` (Phase 4, manual test pending) |
+| Health | `eru status [--watch]`, `eru doctor [--only security]`, `eru top`, `eru queries` |
 | Metrics | `eru metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
 | Maintenance | `eru maint vacuum\|analyze\|reindex\|report\|kill` (`repack` waits for Phase 7), nightly and weekly maintenance timers |
 | Operations | `eru logs`, `eru secrets export`, `eru upgrade` |
@@ -33,7 +33,7 @@ Commands from later phases are already in the tree and return `not implemented y
 
 ```sh
 # On your laptop: install the CLI (signed release, verified with cosign)
-curl -fsSL https://eru.mbvlabs.com/install.sh | bash
+curl -fsSL https://eru.mbvlabs.com/edge/install.sh | bash
 
 # Bootstrap a fresh server (provider root key or password for first contact)
 eru server init --host root@203.0.113.10
@@ -198,13 +198,14 @@ Run migrations as `migrate` and the application as `app`. The transaction pooler
 
 ### Secrets
 
-- eru generates every password. You never type one in.
+- eru generates server and database passwords. The optional master password for the secrets-export gate is chosen by the operator.
 - The server keeps only SCRAM verifiers, plus the two service passwords PgBouncer and the exporters need at runtime.
 - At the end of `server init`, eru prints the **secrets handoff** once:
   - every secret in plain text, grouped for a password manager;
   - an ASCII-armored `age` transfer bundle (scrypt), with a generated passphrase.
 - You type `stored` to confirm you've saved it, and eru offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
 - `eru login` on any machine takes the bundle and passphrase and sets up a **context**: credentials under `~/.config/eru/contexts/<server>/`, files 0600.
+- Later full-document reveals (`eru secrets export` and replacement handoffs) require a master password or a node-verified authenticator code at a real terminal. With neither configured, set one using `eru secrets password set` or `eru protect init`. This is a command gate, not encryption of context files at rest.
 - Releases are signed with cosign. `eru upgrade` and node upgrades verify the signature and the sha256 before swapping binaries.
 
 ### Protected databases
@@ -366,12 +367,13 @@ No ACME client (certbot and the like) is installed: eru issues certificates itse
 
 ## Agent-first
 
-Every command can run non-interactively and emit structured JSON (`--output json`), with documented exit codes. Commands support `--dry-run` where it makes sense. Destructive operations need a `--confirm <token>` that `--yes` never satisfies. `eru commands --json` describes the whole surface, and `eru guide agents` / `eru skill install` load the operating guide into a coding agent.
+Operational commands support non-interactive structured JSON (`--output json`), with documented exit codes and `--dry-run` where it makes sense. Human-only secrets reveals and protected writes deliberately refuse unattended use. Destructive operations need a `--confirm <token>` that `--yes` never satisfies. `eru commands --json` describes the whole surface, and `eru guide agents` / `eru skill install` load the operating guide into a coding agent.
 
 ## Development
 
 ```sh
 just build   # bin/eru
+go test ./... # unit and regression tests; no local server harness
 just lint    # golangci-lint, metadata and step checks, shellcheck, actionlint
 ```
 
@@ -380,4 +382,5 @@ just lint    # golangci-lint, metadata and step checks, shellcheck, actionlint
 - [docs/MASTER.md](docs/MASTER.md): goal, decisions, architecture, roadmap and current status.
 - [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md): the detailed spec for each phase.
 - [docs/RFC-cluster-per-database.md](docs/RFC-cluster-per-database.md): why each database is its own cluster, and how that shapes every phase.
-- [docs/MANUAL-TESTING.md](docs/MANUAL-TESTING.md): manual VPS checks still to run.
+- [docs/MANUAL-TESTING.md](docs/MANUAL-TESTING.md): live evidence, historical failures and remaining coverage limits.
+- [docs/README.md](docs/README.md): document index, including release preparation and archived work records.

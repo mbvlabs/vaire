@@ -12,7 +12,9 @@ Source: MASTER's Phase 4 row and its "Still to decide" list, and IMPLEMENTATION'
 
 ---
 
-## Status (2026-10-14): built, manual test pending
+## Implementation record (2026-10-14)
+
+Current status is in [MASTER.md](MASTER.md): main alpha live qualification completed 2026-10-15–19, with coverage limits in [MANUAL-TESTING.md](MANUAL-TESTING.md). The dated build notes and units below are historical, not an active pending-test list.
 
 Units 1-21 are built on `phase-4-observability` (not verified on a server; the manual test is unit 22). Every "Decided (recommended)" item was approved as written. Where the build differs from the units below:
 

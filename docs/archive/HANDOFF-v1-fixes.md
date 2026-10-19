@@ -1,5 +1,7 @@
 # Handoff: fixes before the v1 alpha (2026-10-16)
 
+> **Archived 2026-10-19: completed work record, not active instructions.** The original fixes and review follow-ups are implemented; main live qualification is complete. Two live-discovered regressions were fixed and retested in `eaa1a73` and `65c4f91`. Current status and coverage limits: [MASTER](../MASTER.md), [testing evidence](../MANUAL-TESTING.md), [release checklist](../PLAN-v1-release.md). The steps below describe the historical handoff; they do not authorize further commits, deployments or release actions.
+
 If this session stops (usage limit, crash), a new session can continue from this file. The release plan and the decisions are in `docs/PLAN-v1-release.md`.
 
 ## State when written

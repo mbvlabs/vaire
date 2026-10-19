@@ -1,6 +1,6 @@
 # Phase 3 plan: database backups & restore
 
-> **Superseded** (2026-10-13). Phase 3 was re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) to "Databases as clusters, backups and native restore" and built from [`PHASE-3-WORK-UNITS.md`](./PHASE-3-WORK-UNITS.md). This plan describes the earlier shared-cluster design (one `18/main`, scratch restores and a rename swap) and is kept only as history.
+> **Superseded** (2026-10-13), archived 2026-10-19. Phase 3 was re-scoped by [`RFC-cluster-per-database.md`](../RFC-cluster-per-database.md) to "Databases as clusters, backups and native restore" and built from [`PHASE-3-WORK-UNITS.md`](../PHASE-3-WORK-UNITS.md). This plan describes the earlier shared-cluster design (one `18/main`, scratch restores and a rename swap) and is kept only as history.
 
 Goal (MASTER roadmap): back up to S3/R2, PITR restore, drills, per-database backup policies and `db fork`.
 

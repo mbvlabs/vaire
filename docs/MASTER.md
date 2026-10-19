@@ -59,7 +59,7 @@ The first goal is the **master node**: one VPS that hosts every database and own
 | Secrets handoff | Printed once in the terminal: plain secrets for a password manager, plus an armored age transfer bundle with a passphrase eru generates. No file unless `--secrets-out` |
 | Agent integration | First: CLI + `--json` + `eru guide agents` / `eru skill install`. `eru mcp` comes later |
 | CLI conventions | Modelled on the andurel CLI's agent support (§5.4) |
-| Testing | Manual testing on real VPSes from Phase 2 on; CI runs lint and builds only. No unit tests (§8) |
+| Testing | Go unit/regression tests for isolated logic; manual qualification on real VPSes from Phase 2 on. No Docker, Incus or scratch-VM test harnesses. CI runs lint and builds |
 | Release site | `https://eru.mbvlabs.com`. The root manifest is the highest stable line, each major line under `/<major>.x/` (for example `/1.x/`), edge under `/edge/`, and every version is kept under `/releases/<version>/`. Edge publishes on every push to `master`, stable on `vX.Y.Z[-alpha.N\|-beta.N\|-rc.N]` tags whose commit is on `origin/<major>.x`. A binary from a line tag follows its line by default. Releases are signed with cosign (pinned 3.1.3) |
 | Platforms | The CLI runs on Linux and macOS. Node-side commands are Linux-only and are marked that way in `eru commands --json` |
 | Self-upgrade | `eru upgrade` keeps the previous binary next to it as `eru.prev`, and refuses to replace a binary installed by Homebrew or Nix |
@@ -126,15 +126,13 @@ The first goal is the **master node**: one VPS that hosts every database and own
                                                      └──────────────────────────────────────┘
 ```
 
-- **Operator mode** (`eru <command>` on a laptop) resolves the server's context, brings up an in-process WireGuard tunnel, opens SSH to the right node, and runs `eru node <subcommand> --json` there. It streams progress back and renders it, or passes it through as JSON.
+- **Operator mode** (`eru <command>` on a laptop) resolves the server's context, uses the operator-side shared userspace WireGuard tunnel daemon, opens SSH to the right node, and runs `eru node <subcommand> --json` there. It streams progress back and renders it, or passes it through as JSON. Bootstrap uses an in-process tunnel before a complete context exists.
 - **Node mode** (`eru node …`, only on servers) does the actual work as root via sudo: steps, backups, restores, maintenance. It's also what the systemd timers call. A human can SSH in and run it by hand.
 - **Version lockstep.** Before running anything, operator mode checks the node's eru version. If it differs, operator mode refuses to continue and tells the user to run `eru upgrade`, unless `--auto-upgrade-nodes` is set or configured on the context. One CLI version means one behaviour.
 - **Upgrading nodes from the operator.** Node binaries are always upgraded from outside the VPS, through the operator CLI:
-  - `eru upgrade` self-updates the local CLI (signed), then upgrades every node.
-  - `eru node upgrade [--node <name>|--all] [--version <v>]` upgrades nodes only, for example to roll back or to pin a version.
-  - Each node upgrade downloads the matching linux build, verifies its cosign signature and sha256 against the manifest, and swaps `/usr/local/bin/eru` atomically, keeping the previous binary. It runs `eru node selfcheck`, then `eru apply` re-runs only the steps whose versioned IDs changed.
-  - Upgrades wait for running timers (backups, maintenance) to finish. In HA (Phase 11) they roll one node at a time, replicas first.
-  - `eru node upgrade --rollback` restores the previous binary.
+  - `eru upgrade` self-updates only the local CLI from the signed release and keeps its previous binary. It explicitly warns that nodes are not upgraded.
+  - `eru -c <context> apply --auto-upgrade-nodes` upgrades a mismatched node to the CLI's signed build, then converges its steps. Follow with doctor and plan on the same explicitly selected context.
+  - Dedicated node version pinning/rollback and controlled PostgreSQL minor upgrades remain Phase 8 work. Future HA rolling upgrades are not an alpha feature.
 - **State.** The desired state (`/etc/eru/cluster.toml`), the durable records (`/var/lib/eru/records.json`: restores, leftovers, timeline switches, dropped stanzas, drills and last results per database) and the journal live on the master. From Phase 5 the master backs its own state up to the bucket after every change. The operator machine holds only credentials, in its contexts, plus a cache of the nodes and of which node holds each database. Any machine with the transfer bundle and its passphrase can take over operation.
 
 ### 5.2 Bootstrap: from a fresh VPS to WireGuard-only SSH
@@ -510,7 +508,16 @@ This section is the only place that tracks progress. Update it whenever a module
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
-### 7.1 Current state (2026-10-15)
+### 7.1 Current state (2026-10-19)
+
+- **Phases 0–5 are live-qualified for the first alpha, not released.** Main scenarios completed, including genuine protected-policy upgrade, protected SQL/maintenance/dump-copy writes, metrics/query filtering, fresh bucket-backed init, rebuild/recovery with automatic full backup, local init and journal-proven lockdown self-revert. Detailed checklist variants and coverage limits remain in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md); this is not a claim that every historical checkbox passed.
+- **Latest qualified code:** `65c4f91`, published as `edge-65c4f9157253` after successful edge workflow `39234654792`. The recovered fixture had doctor 44 pass / 0 warn / 0 fail and plan 0 pending / 17 steps. It was subsequently replaced during operator-run bootstrap tests; these numbers are qualification evidence, not current VPS health.
+- **Publication still needs authorization.** No v1 branch/tag or stable publication was performed in this qualification. Linux install/upgrade passed; macOS live testing was excluded by the operator (cross-build only). See [`PLAN-v1-release.md`](./PLAN-v1-release.md), the [draft alpha notes](./RELEASE-v1.0.0-alpha.1.md) and the [document index](./README.md).
+- **Current command inventory:** `eru commands --json`; the README summarizes implemented operations. Phases 6–7 and major-upgrade work remain outside this alpha qualification.
+
+#### Historical implementation milestones (through 2026-10-15)
+
+The dated notes below preserve the implementation sequence. Their then-pending tests are superseded by the current summary and testing log above.
 
 - **Phase 0 is done.** The CLI, releases and the node engine are on `master`, the first edge release has been published, and the incus test suite has been removed.
 - **Phases 1 and 2 are done (2026-10-12, Hetzner, Ubuntu 26.04 and Debian 13).** `server init` (then `cluster init`) goes from a fresh server to public 22 closed, SSH over WireGuard and a working PostgreSQL 18 cluster. The ACME certificate is issued, the secrets handoff is accepted by `eru login`, `eru sql` connects with verify-full, `eru apply --auto-upgrade-nodes` upgrades the node, and an app connects to 6432 through PgBouncer with `sslmode=verify-full`. The checks not yet run on a VPS (lockdown self-revert, `--local`, a no-op `apply`, `db drop` refusal, `eru console`, direct TLS on 443) are in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) and don't block Phase 3.
@@ -529,8 +536,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | 1 | Bootstrap | Turn a fresh VPS into a hardened, WireGuard-only host and get a secrets document | ✅ |
 | 2 | First server | Set up a new server with a working PostgreSQL 18 database. **Manual testing starts here** | ✅ |
 | 3 | Databases as clusters, backups & native restore | Each database its own cluster with a size and limits, two poolers, one hostname per node; a stanza per database, native PITR restore with an in-place cut-over, native `db fork`, drills per database | ✅ |
-| 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | 🟡 |
-| 5 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | 🟡 |
+| 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ✅ alpha-qualified; coverage limits logged |
+| 5 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | ✅ alpha-qualified; coverage limits logged |
 | 6 | Followers | Per-database physical standby followers; unfollow one to rehearse a risky migration on current data | ⬜ |
 | 7 | Extensions | Extension catalog and `eru ext` | ⬜ |
 | 8 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
@@ -572,7 +579,7 @@ From a laptop, take a fresh Debian/Ubuntu VPS to "hardened, SSH only over WireGu
 
 Built alongside, ahead of their phase because Phase 1 needs them: the Phase 1 subset of `cluster.toml` with validation (`internal/config`), OS and RAM detection (`internal/hostinfo`), and `eru plan` / `eru apply` over the tunnel (they run steps 1–6 and are how an operator first reaches a `--local` node).
 
-**Exit:** `eru server init --host root@<vps>` ends with public 22 closed, SSH working over WireGuard, and a secrets document that `eru login` accepts on a second machine. A broken tunnel during lockdown reverts by itself (not yet forced on a VPS; see [`MANUAL-TESTING.md`](./MANUAL-TESTING.md)).
+**Exit:** `eru server init --host root@<vps>` ends with public 22 closed, SSH working over WireGuard, and a secrets document that `eru login` accepts on a second machine. Unconfirmed lockdown reverts by itself: interruption, automatic snapshot restoration and native resume passed on 2026-10-19 with service-journal evidence. Local init and operator confirmation also passed; see [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 
 ### 7.5 Phase 2 — First server ✅
 
@@ -608,36 +615,36 @@ Re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) and 
 
 **Manual test (the RFC's exit test, on a real VPS with R2):** rebuild `mbvlabs`. Create `app` and `other` (two clusters), check the memory split and the cgroup limits, and that `other` keeps serving while `app` restarts. Run a memory-heavy query in `app` and see it throttled while `other` stays responsive. Connect a migration tool through `db1.<domain>:5432/app` and an application through `db1.<domain>:443/app`. Back up, write rows to `app`, `restore app --time` and inspect the paused copy, then promote while `other` keeps writing. Undo and cleanup. Fork `app` at a time and without one. A drill per cluster. Drop a database and see its stanza stay listed. Change a restart-only setting of one cluster and check that only it restarts (a preload extension waits for Phase 7). Create a third database that would overcommit the server and see it refused with the size that fits, then resize one down. A second `apply` changes nothing. The checklist, with what to verify at each step, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Passed on 2026-10-14.
 
-### 7.7 Phase 4 — Observability & maintenance 🟡
+### 7.7 Phase 4 — Observability & maintenance ✅
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| Step 16 | `metrics-v1`: pinned node_exporter, postgres_exporter (a `/probe` per cluster) and two pgbouncer_exporters on loopback in `eru-exporters.slice`; the authenticated `/metrics` endpoint on nginx (bcrypt basic auth, PROXY protocol on the internal hops, optional allowlist, fail2ban) with `targets.json` for `http_sd`; `eru metrics show|rotate`; eru's textfiles in place of `pgbackrest_exporter` | ✅ built, manual test pending |
-| Status views | `status`, `top`, `queries`, `doctor` (every check, `--only security`, operator-side checks), per database with a server summary; doctor reads cgroup pressure, the memory budget, `CommitLimit`, disk use (fails at 90%) and the offsite-backup state | ✅ built, manual test pending |
-| `internal/maint` | `maint vacuum/analyze/reindex/report/kill` per database (jobs as `eru_admin`, heavy-I/O lock), the ioguix bloat estimate, `maint repack` refusing until Phase 7; `maint-daily` and `maint-weekly`; `--defer-restart` restarts at the window's start | ✅ built, manual test pending |
-| Step 18 and timers | `doctor` as the gate after `apply` (warnings) and `server init`'s database phase (fails); `eru-maint-daily`, `eru-maint-weekly`, `eru-metrics-refresh` (every minute), `eru-doctor` (hourly) | ✅ built, manual test pending |
+| Step 16 | Exporters on loopback, authenticated `/metrics`, service discovery, metrics credentials and textfiles | ✅ alpha-qualified |
+| Status views | `status`, `top`, `queries`, `doctor`; internal work hidden by default, `--all-sessions` includes it | ✅ alpha-qualified |
+| `internal/maint` | Per-database vacuum/analyze/reindex/report/kill and scheduled maintenance; repack waits for Phase 7 | ✅ alpha-qualified |
+| Step 18 and timers | Doctor gates and certificate, metrics, doctor and maintenance schedules | ✅ alpha-qualified; not every fault-injection variant exercised |
 
 `maint repack` and auto-repack need `pg_repack`, which `eru ext add` brings in Phase 7. Until then `maint repack` fails with `precondition_failed`, and the repack is tested in Phase 7.
 
-Built in the units of [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md) (2026-10-14); it stays 🟡 until the manual test passes.
+Built in the units of [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md); main live qualification completed 2026-10-15–19. Evidence and detailed coverage limits remain in the testing log.
 
-**Manual test:** scrape `/metrics` with and without credentials. `doctor` is clean on a fresh server with two databases. Run a bloat report. The checklist is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Not run yet.
+**Manual evidence:** authenticated and unauthenticated scrapes, exporter probes, clean doctor, reports, protected maintenance and query/top filtering. See [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 
-### 7.8 Phase 5 — Master backup & disaster recovery 🟡
+### 7.8 Phase 5 — Master backup & disaster recovery ✅
 
 This phase is what eru needs to run in production. It comes before followers and extensions, so the bundle and `db recover` cover databases as Phase 3 left them; Phases 6 and 7 extend them to followers and extensions.
 
-Built in the units of [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md) (2026-10-15); it stays 🟡 until the manual test passes.
+Built in the units of [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md); main alpha qualification completed 2026-10-15–19. Both bucket-backed recovery and exported-bundle rebuilds have live evidence. Detailed exclusions and limits remain in the testing log.
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| Master bundle | `internal/masterbackup` and step 15 `master-backup-v1`: the age-encrypted bundle of the master's own state, the dirty flag and `eru-master-backup.path` (every change, debounced), the daily safety net, retention in the bucket and local copies | ✅ built, manual test pending |
-| The fence | The epoch in the bucket, `eru-fence` at boot and every five minutes, the `archive-push` wrapper, `node_fenced` | ✅ built, manual test pending |
-| Commands | `server backup now|list|verify|export`, `server init --restore [--bundle <name\|time> \| --bundle-file <file>]`, `db recover <db>…|--all`, `context set-address` | ✅ built, manual test pending |
-| Phase 4 hooks | doctor `master.*` checks, `eru-master-backup.prom`, the status row, databases awaiting recovery skipped | ✅ built, manual test pending |
+| Master bundle | Encrypted state bundle, change trigger, retention, local/offsite copies and verification | ✅ alpha-qualified; telemetry freshness caveat logged |
+| The fence | Epoch ownership, fence service, archive wrapper and mutation guard | ✅ built; coverage qualified in testing log |
+| Commands | `server backup now|list|verify|export`, `server init --restore`, `db recover`, `context set-address` | ✅ main rebuild/recovery scenarios live-tested |
+| Phase 4 hooks | Doctor, metrics and status; awaiting databases honestly skipped | ✅ alpha-qualified |
 | Dropped | restic, `vps backup|restore`, `--vps-backup-schedule`, `--restore-time`, `[backup.vps]` | ✅ |
 
-**Manual test:** rebuild `mbvlabs` from scratch, make changes, destroy the VPS, run `server init --restore` on a new one, then `db recover --all`. The operator's context works without edits, records (timeline switches, dropped stanzas) are intact, the old master's jobs stop on the epoch, and the measured RTO goes into the risks below. Then the same without a bucket: `server backup export`, destroy, `server init --restore --bundle-file`.
+**Manual evidence:** bucket-backed rebuild with preserved identity, records/protection and database recovery; exported-bundle rebuild without a bucket and honest no-offsite-data refusal; genuine awaiting-recovery write-access refusal; automatic full after corrected recovery. Small-fixture recovery timings and remaining detailed coverage limits are in [MANUAL-TESTING.md](MANUAL-TESTING.md), not production RTO guarantees.
 
 ### 7.9 Phase 6 — Followers ⬜
 
@@ -691,11 +698,11 @@ More PostgreSQL versions, major upgrades (`pg_upgrade --link` or logical blue/gr
 
 ## 8. Testing strategy
 
-There's no automated test suite. The incus VM suite was dropped on 2026-10-10 because it was too flaky to trust.
+Go unit and regression tests cover isolated logic. The Incus VM suite was dropped on 2026-10-10; no Docker, Incus or scratch-VM test harnesses are allowed.
 
 - **CI** runs `just lint` (golangci-lint, shellcheck, actionlint, `--check-meta`, `--check-steps` and the cosign pin check) and builds for all four OS/arch targets. Both are fast and deterministic.
 - **Manual testing** starts at the end of Phase 2, once eru can set up a new server with a database. Each phase from then on ends with the manual test listed for it in §7. Run it on a real VPS, and record the date, eru version and VPS (provider, OS, size) next to the phase when it passes. Checks that couldn't be run before a phase was closed go in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
-- **No unit tests.** The behaviour that matters is what happens on a real host.
+- **Local verification:** build, vet, Go tests, golangci-lint, Darwin cross-build and `just lint`, as specified in `AGENTS.md`. Unit tests do not replace real-host evidence.
 - **The agent JSON contract** is described in `schema/eru-v1.json`. Bump `"schema"` when envelopes change incompatibly.
 
 ## 9. Risks

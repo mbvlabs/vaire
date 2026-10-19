@@ -14,7 +14,9 @@ v1 (alpha) is Phases 0-5, so this is the last phase before a first release. The 
 
 ---
 
-## Status (2026-10-15): built, manual test pending
+## Implementation record (2026-10-15)
+
+Current status is in [MASTER.md](MASTER.md): main alpha live qualification completed 2026-10-15–19, with coverage limits in [MANUAL-TESTING.md](MANUAL-TESTING.md). The dated build notes and units below are historical, not an active pending-test list. Draft release notes are now in [RELEASE-v1.0.0-alpha.1.md](RELEASE-v1.0.0-alpha.1.md).
 
 Units 1-16 are built on `phase-5-master-backup` (not verified on a server; the manual test is unit 18). Every "Decided (recommended)" item was approved as written. Where the build differs from the units below:
 
@@ -28,7 +30,7 @@ Units 1-16 are built on `phase-5-master-backup` (not verified on a server; the m
 - **Unit 4 also fixed `backup.Probe`**: it refused every stanza not named after the server, so a second `backup setup` or a rebuild would have failed `repo_in_use`. It now follows the epoch's server, or the server's own stanzas when there's no epoch.
 - **Unit 12:** a rebuild whose bundle lacked the WireGuard key updates the context's node key too (`context_wg_key_updated`).
 - **Unit 15:** `schema/eru-v1.json` also gained `doctor_failed`, `database_protected` and `protect_code_rejected`, which earlier phases missed.
-- **Unit 17 (changelog) isn't done:** there's no changelog yet; it belongs to the release work in "v1 alpha readiness".
+- **Unit 17 (release notes):** draft alpha notes added during release preparation on 2026-10-19; final version/commit/publication evidence remains part of the authorized release cut.
 - **Review fixes (safety):** the fence decision fences only on positive proof (a well-formed epoch of this server, another instance, an epoch newer than the node's own); anything else is unknown, and the master backup refuses to upload beside a foreign epoch (`epoch_conflict`). `backup.Probe` takes the node's instance id: a prefix whose epoch names an earlier install of the server is refused (`repo_in_use`) for a fresh `server init` or `backup setup`, which would otherwise fence the new server at its first upload; a resumed init and the configured prefix are accepted. `archive-push` refuses when it can't stat the fence marker, and falls back to `/usr/bin/pgbackrest`. Placement refuses a host that is already a node unless it is this rebuild's own earlier placement, writes modes without execute or setuid bits and owners below uid 1000. `db recover` writes the real `40-eru-backup.conf` (and stops the empty scaffold) before promote, so the new timeline's history file reaches the stanza; the database stays awaiting recovery until promote's swap; its full backup starts after the heavy-I/O lock is released; the stale-WAL check uses the bucket's own time of `epoch.json`. A resumed `server init --restore` keeps its first epoch write. New `eru node unfence --confirm <server>/unfence [--reclaim]`. A leftover `[backup.vps]` gives the warning `legacy_config_ignored`.
 - **From "v1 alpha readiness", done here because they were wording only:** `eru upgrade`'s `nodes_not_upgraded` warning names `eru apply --auto-upgrade-nodes` instead of the unbuilt `eru node upgrade`, and the README marks `eru wg export --install` as not implemented yet.
 
