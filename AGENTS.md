@@ -13,7 +13,7 @@ eru is a Go CLI that manages PostgreSQL 18 servers, one cluster per database. St
 - **Chat:** never cite section numbers ("§12"); describe the content instead.
 - **Commands for the user:** complete, copy-pasteable commands with real values, one step at a time, short replies. Run eru, curl and ssh checks yourself on thelab. Hand the user only what needs sudo, a TOTP code, an interactive prompt or another machine.
 - **Out of scope:** don't bring up the deferred "old master comes back and is fenced" live test.
-- **Release model:** a `1.x` branch is the v1 line, tagged `v1.0.0-alpha.N` and later `v1.0.0`. `master` is the edge channel. Fixes are cherry-picked both ways. Never cut a branch or push a tag without the user.
+- **Release model:** `master` is edge; `1.x` is the whole v1 line (alphas, final, minors, patches). Changes go in by pull request; v1 fixes target `1.x`, which is merged up into `master` with a merge commit; no cherry-picks. Details in `docs/PLAN-v1-release.md`. Never cut a branch or push a tag without the user.
 
 ## Verify before every commit
 

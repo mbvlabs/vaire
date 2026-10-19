@@ -545,7 +545,7 @@ The dated notes below preserve the implementation sequence. Their then-pending t
 | 10 | Multi-node & replicas | Worker nodes driven from the master, a node for one database, `db move`, followers and replicas on other nodes | ⬜ |
 | 11 | High availability | Patroni per cluster + etcd, automatic failover; the master stops being a single point | ⬜ last |
 
-**v1 is Phases 0–5**, with observability and the master backup (disaster recovery) as release requirements. Followers (Phase 6), extensions (Phase 7), upgrades, operators and agents, multi-node and HA come after the first release.
+**v1.0.0 (every alpha and the final) is Phases 0–5**, with observability and the master backup (disaster recovery) as release requirements. Followers (Phase 6), extensions (Phase 7), upgrades, operators and agents, multi-node and HA come after `v1.0.0` final. Followers and extensions are intended for later compatible v1 minor releases (from `v1.1.0`), not automatically a new major. `master` remains development/edge; v1 fixes land on `1.x` by pull request and `1.x` is merged up into `master` (Laravel-style, no cherry-picks). Minor numbers advance sequentially by release, independently of roadmap phases. See [the release strategy](PLAN-v1-release.md).
 
 **v1 is an alpha: nothing is frozen.** `cluster.toml`, the secrets document (`eru-secrets/v1`), the bundle format (`eru-master-bundle/v1`), the `eru/v1` JSON and the step IDs may change between alpha releases, and a later alpha release may require rebuilding a server with a fresh `server init` and restoring its databases. Compatibility promises start after the alpha.
 
