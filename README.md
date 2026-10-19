@@ -384,3 +384,7 @@ just lint    # golangci-lint, metadata and step checks, shellcheck, actionlint
 - [docs/RFC-cluster-per-database.md](docs/RFC-cluster-per-database.md): why each database is its own cluster, and how that shapes every phase.
 - [docs/MANUAL-TESTING.md](docs/MANUAL-TESTING.md): live evidence, historical failures and remaining coverage limits.
 - [docs/README.md](docs/README.md): document index, including release preparation and archived work records.
+
+## License
+
+eru is released under the [MIT License](LICENSE). Embedded third-party code keeps its own licence (see above).

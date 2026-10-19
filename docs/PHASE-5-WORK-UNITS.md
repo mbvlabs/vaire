@@ -498,7 +498,7 @@ What a first alpha release needs besides Phase 5. Gaps only, not designs.
 - **The stable channel accepts only `X.Y.Z`.** `build-release.sh`, `release.matchVersion` and the signing identity regexp refuse a pre-release like `0.1.0-alpha.1`, and `upgrade.cmpSemver` falls back to string comparison for one. Decide between tagging `v0.1.0` on stable and calling 0.x the alpha (no tooling change), or adding pre-release support (four places plus `install.sh`), or a separate `alpha` channel (a third channel root, workflow, identity and `eru upgrade --channel` value).
 - **Compatibility: decided, nothing is frozen during the alpha.** `cluster.toml` schema 1, `eru-secrets/v1`, `eru/v1` JSON, `eru-master-bundle/v1` and the step IDs may change between alpha releases, and a later alpha may require a server rebuild. Recorded in MASTER beside the v1 line; the README's alpha caveats should say it too.
 - **Release notes.** There's no `CHANGELOG.md`, and `publish-stable.yml` uploads to R2 only: no GitHub release, no notes. `eru upgrade` shows no notes either.
-- **No `LICENSE` file** in the repository, while the README names third-party licences.
+- **`LICENSE`: done.** MIT, at the repository root and linked from the README.
 
 **Commands that v1 promises but don't work**
 
