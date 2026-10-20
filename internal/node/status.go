@@ -5,15 +5,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/health"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/health"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // clusterSnapshot is one cluster read for status and doctor.
@@ -149,7 +149,7 @@ type statusBackup struct {
 	LastFailure      string `json:"last_failure,omitempty"`
 }
 
-// statusDatabase is one database's row of eru status.
+// statusDatabase is one database's row of vaire status.
 type statusDatabase struct {
 	Name              string            `json:"name"`
 	State             string            `json:"state"`
@@ -174,19 +174,19 @@ type statusDatabase struct {
 	Protected         bool              `json:"protected,omitempty"`
 }
 
-// statusData is eru status's result (Phase 4).
+// statusData is vaire status's result (Phase 4).
 type statusData struct {
-	Server     string                  `json:"server"`
-	Node       string                  `json:"node"`
-	Role       string                  `json:"role"`
-	EruVersion string                  `json:"eru_version"`
-	PGVersion  string                  `json:"pg_version,omitempty"`
-	Budget     map[string]any          `json:"budget"`
-	Poolers    map[string]health.Pools `json:"poolers"`
-	Disk       map[string]any          `json:"disk,omitempty"`
-	TLS        *TLSState               `json:"tls,omitempty"`
-	Backups    bool                    `json:"backups_configured"`
-	Databases  []statusDatabase        `json:"databases"`
+	Server       string                  `json:"server"`
+	Node         string                  `json:"node"`
+	Role         string                  `json:"role"`
+	VaireVersion string                  `json:"vaire_version"`
+	PGVersion    string                  `json:"pg_version,omitempty"`
+	Budget       map[string]any          `json:"budget"`
+	Poolers      map[string]health.Pools `json:"poolers"`
+	Disk         map[string]any          `json:"disk,omitempty"`
+	TLS          *TLSState               `json:"tls,omitempty"`
+	Backups      bool                    `json:"backups_configured"`
+	Databases    []statusDatabase        `json:"databases"`
 	// Master is the master backup's last bundle (Phase 5).
 	Master *statusMaster `json:"master_backup,omitempty"`
 }
@@ -214,7 +214,7 @@ func masterStatusRow(cfg config.Cluster) *statusMaster {
 		Bucket: f.Bucket, Epoch: e.Epoch, Pending: f.PendingSince != "" || f.Dirty, Fenced: f.Fenced, LastFailed: last.LastFailure}
 }
 
-// handleStatus is eru status: the server's summary and a row per database
+// handleStatus is vaire status: the server's summary and a row per database
 // (Phase 4). It takes no lock, so it answers while an apply runs; a cluster
 // that can't be read is shown as unreachable, never a failed RPC.
 func handleStatus(ctx context.Context, env *Env) (Result, error) {
@@ -230,14 +230,14 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	}
 	host, _ := hostinfo.Detect(cfg.Server.DataRoot)
 	data := statusData{
-		Server:     cfg.Name(),
-		Role:       config.RoleMaster,
-		EruVersion: buildinfo.Version,
-		Budget:     serverBudget(cfg, host),
-		Poolers:    map[string]health.Pools{},
-		TLS:        inspectTLS(cfg),
-		Backups:    cfg.BackupConfigured(),
-		Databases:  []statusDatabase{},
+		Server:       cfg.Name(),
+		Role:         config.RoleMaster,
+		VaireVersion: buildinfo.Version,
+		Budget:       serverBudget(cfg, host),
+		Poolers:      map[string]health.Pools{},
+		TLS:          inspectTLS(cfg),
+		Backups:      cfg.BackupConfigured(),
+		Databases:    []statusDatabase{},
 	}
 	if n, ok := cfg.Master(); ok {
 		data.Node = n.Name
@@ -256,7 +256,7 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	for _, s := range snaps {
 		row := statusRow(cfg, s, rs, st, pending)
 		if rs.IsAwaiting(s.Spec.Name) {
-			row.State, row.Error = stateAwaiting, "eru db recover "+s.Spec.Name
+			row.State, row.Error = stateAwaiting, "vaire db recover "+s.Spec.Name
 		}
 		if data.PGVersion == "" {
 			data.PGVersion = s.Sample.ServerVersion
@@ -348,7 +348,7 @@ func statusWarnings(d statusData) []output.Warning {
 			out = append(out, output.Warning{Code: "restart_pending", Message: msg})
 		}
 		if db.RestoreInProgress {
-			out = append(out, output.Warning{Code: "restore_in_progress", Message: "a restore of " + db.Name + " is open (eru restore status " + db.Name + ")"})
+			out = append(out, output.Warning{Code: "restore_in_progress", Message: "a restore of " + db.Name + " is open (vaire restore status " + db.Name + ")"})
 		}
 	}
 	return out

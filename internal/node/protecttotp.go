@@ -10,18 +10,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/totp"
 )
 
 // ProtectStatePath holds the TOTP secret that lifts a database's protection,
 // with its replay and lockout state. Root only (0600), and outside
 // cluster.toml, which operators read and pull.
-const ProtectStatePath = "/etc/eru/protect.json"
+const ProtectStatePath = "/etc/vaire/protect.json"
 
 // protectStateMode is protect.json's mode; root owns it.
 const protectStateMode os.FileMode = 0o600
@@ -35,8 +35,8 @@ const (
 	protectMaxFailures = 5
 	// protectLockout is how long a lockout lasts.
 	protectLockout = 15 * time.Minute
-	// protectIssuer names eru in the authenticator app.
-	protectIssuer = "eru"
+	// protectIssuer names vaire in the authenticator app.
+	protectIssuer = "vaire"
 )
 
 // protectState is ProtectStatePath.
@@ -187,13 +187,13 @@ func protectCodeError(message, reason, hint string, extra map[string]any) error 
 
 func protectLocked(until time.Time) error {
 	return protectCodeError("too many wrong codes; codes are locked out until "+until.UTC().Format(time.RFC3339), "locked",
-		"Wait until the lockout ends, then try again with a fresh code. eru protect status shows it.",
+		"Wait until the lockout ends, then try again with a fresh code. vaire protect status shows it.",
 		map[string]any{"locked_until": until.UTC().Format(time.RFC3339)})
 }
 
 func protectNotInitialized(code, message string, exit int) error {
 	return output.NewError(code, message, exit,
-		"A human runs eru protect init first, at a terminal, and scans the QR code with an authenticator app. Lifting a protection then needs a current code from it.").
+		"A human runs vaire protect init first, at a terminal, and scans the QR code with an authenticator app. Lifting a protection then needs a current code from it.").
 		WithDetails(map[string]any{"reason": "protect_not_initialized"})
 }
 
@@ -276,11 +276,11 @@ func (g protectGuard) init(env *Env) (Result, error) {
 	switch {
 	case st.Secret != "" && !p.Rotate:
 		return Result{}, output.NewError(output.CodePrecondition, "two-factor protection is already set up on this node", output.ExitPrecondition,
-			"To replace the secret, run eru protect init --rotate; it asks for a current code from the existing one.").
+			"To replace the secret, run vaire protect init --rotate; it asks for a current code from the existing one.").
 			WithDetails(map[string]any{"reason": "protect_already_initialized"})
 	case st.Secret == "" && p.Rotate:
 		return Result{}, output.NewError(output.CodePrecondition, "two-factor protection is not set up, so there is nothing to rotate", output.ExitPrecondition,
-			"Run eru protect init without --rotate.").
+			"Run vaire protect init without --rotate.").
 			WithDetails(map[string]any{"reason": "protect_not_initialized"})
 	case p.Rotate:
 		if st, err = g.verify(env.Req.Secrets[ProtectCodeSecret], false); err != nil {
@@ -319,7 +319,7 @@ func (g protectGuard) confirm(env *Env) (Result, error) {
 	}
 	if st.Pending == "" {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no pending two-factor setup to confirm", output.ExitPrecondition,
-			"Run eru protect init first.").WithDetails(map[string]any{"reason": "protect_not_pending"})
+			"Run vaire protect init first.").WithDetails(map[string]any{"reason": "protect_not_pending"})
 	}
 	rotated := st.Secret != ""
 	if st, err = g.verify(env.Req.Secrets[ProtectCodeSecret], true); err != nil {
@@ -356,7 +356,7 @@ type protectVerify struct {
 }
 
 // handleProtectVerify checks a code from the authenticator app without
-// changing anything: the node-side check the eru secrets export gate uses.
+// changing anything: the node-side check the vaire secrets export gate uses.
 // It reuses the write path's guard, so a code is one use and failures lock
 // codes out as they do there.
 func handleProtectVerify(_ context.Context, env *Env) (Result, error) {

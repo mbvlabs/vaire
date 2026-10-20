@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/top"
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/cli/top"
+	"github.com/mbvlabs/vaire/internal/pg"
 )
 
 // Even with --limit 1, an internal statement ranking ahead of application
@@ -20,7 +20,7 @@ func TestStatementsFilterBeforeLimit(t *testing.T) {
 	} {
 		t.Run(query.name, func(t *testing.T) {
 			sql := query.sql(false)
-			predicate := "AND NOT " + pg.EruRoleSQL("r.rolname")
+			predicate := "AND NOT " + pg.VaireRoleSQL("r.rolname")
 			filterAt := strings.Index(sql, predicate)
 			orderAt := strings.Index(sql, "ORDER BY")
 			limitAt := strings.Index(sql, "LIMIT")

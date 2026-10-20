@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +27,7 @@ type jobReply struct {
 }
 
 // callJob calls a method that starts a detachable job and follows it.
-// Ctrl-C detaches: the job keeps running on the node and eru job follow <id>
+// Ctrl-C detaches: the job keeps running on the node and vaire job follow <id>
 // re-attaches. A lost connection after the node announced the job
 // reconnects and re-attaches by itself a few times before giving up.
 // detached reports the Ctrl-C case, with the job ID when the node had
@@ -46,7 +46,7 @@ func callJob(cmd *cobra.Command, s *session, p *progress, method string, params 
 	opts.OnEvent = func(ev output.Event) {
 		if ev.Type == "progress" && ev.Phase == "job" {
 			jobID = ev.Detail
-			p.note("job " + jobID + " started; Ctrl-C detaches and it keeps running (eru job follow " + jobID + ")")
+			p.note("job " + jobID + " started; Ctrl-C detaches and it keeps running (vaire job follow " + jobID + ")")
 			return
 		}
 		if jobID != "" {
@@ -123,10 +123,10 @@ func isStreamLost(err error) bool {
 func detachedResult(cmd *cobra.Command, s *session, jobID, what string) error {
 	data := map[string]any{"job_id": jobID, "detached": true}
 	message := "Detached; " + what + " keeps running on the node."
-	next := []string{"eru job list"}
+	next := []string{"vaire job list"}
 	if jobID != "" {
-		message += " Re-attach with eru job follow " + jobID + "."
-		next = []string{"eru job follow " + jobID}
+		message += " Re-attach with vaire job follow " + jobID + "."
+		next = []string{"vaire job follow " + jobID}
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings, Next: next})
 }
@@ -216,8 +216,8 @@ func runJobFollow(cmd *cobra.Command, args []string) error {
 }
 
 // jobResultMessage is the result line the command that started a job prints
-// for its result (eru backup now, backup verify, restore drill, dump, restore,
-// db fork), so eru job follow on a finished job says the same. It is empty
+// for its result (vaire backup now, backup verify, restore drill, dump, restore,
+// db fork), so vaire job follow on a finished job says the same. It is empty
 // for a result it can't read.
 func jobResultMessage(job string, raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
@@ -263,9 +263,9 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 			return ""
 		}
 		if res.Phase == "promoted" {
-			return res.Database + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until eru restore cleanup " + res.Database + "; eru restore undo " + res.Database + " swaps it back."
+			return res.Database + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until vaire restore cleanup " + res.Database + "; vaire restore undo " + res.Database + " swaps it back."
 		}
-		return "the temporary cluster " + res.Restoring + " is ready beside the live " + res.Database + "; inspect it with eru sql --db " + res.Restoring + ", then eru restore promote " + res.Database + " or eru restore abort " + res.Database + "."
+		return "the temporary cluster " + res.Restoring + " is ready beside the live " + res.Database + "; inspect it with vaire sql --db " + res.Restoring + ", then vaire restore promote " + res.Database + " or vaire restore abort " + res.Database + "."
 	case "db-fork":
 		var res struct {
 			Source string `json:"source"`
@@ -274,7 +274,7 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 		if json.Unmarshal(raw, &res) != nil || res.Name == "" {
 			return ""
 		}
-		return "forked " + res.Source + " into " + res.Name + " with its own roles (the credentials were shown only by eru db fork)"
+		return "forked " + res.Source + " into " + res.Name + " with its own roles (the credentials were shown only by vaire db fork)"
 	}
 	return ""
 }

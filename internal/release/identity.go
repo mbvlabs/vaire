@@ -50,9 +50,9 @@ func Identity(channel, version string) (string, error) {
 	}
 	switch SigningChannel(channel) {
 	case ChannelStable:
-		return "https://github.com/mbvlabs/eru/.github/workflows/publish-stable.yml@refs/tags/v" + version, nil
+		return "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v" + version, nil
 	case ChannelEdge:
-		return "https://github.com/mbvlabs/eru/.github/workflows/publish-edge.yml@refs/heads/master", nil
+		return "https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master", nil
 	default:
 		return "", fmt.Errorf("release channel %q is invalid", channel)
 	}

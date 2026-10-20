@@ -21,11 +21,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"golang.org/x/crypto/acme"
 )
 
@@ -50,7 +50,7 @@ func logLine(report engine.Reporter, step, line string) {
 	}
 }
 
-// certsRenew makes sure /etc/eru/tls holds a current certificate for the
+// certsRenew makes sure /etc/vaire/tls holds a current certificate for the
 // domain: an ACME certificate in acme mode, a self-signed one otherwise. It
 // does nothing while the certificate has more than 30 days left, and reloads
 // both poolers, nginx and then each cluster after writing a new one (D11). The
@@ -145,7 +145,7 @@ func issueACME(ctx context.Context, cfg config.Cluster, hostname string, report 
 	switch {
 	case err != nil && reached:
 		return nil, nil, output.NewError(output.CodePrecondition, err.Error(), output.ExitPrecondition,
-			"Point "+hostname+" at this server (DNS only, not proxied); eru-certs.timer retries every hour.").
+			"Point "+hostname+" at this server (DNS only, not proxied); vaire-certs.timer retries every hour.").
 			WithDetails(map[string]any{"reason": "tls_pending"})
 	case err != nil:
 		// Some networks can't reach their own public address; let the ACME
@@ -156,7 +156,7 @@ func issueACME(ctx context.Context, cfg config.Cluster, hostname string, report 
 	if err != nil {
 		return nil, nil, err
 	}
-	client := &acme.Client{Key: accountKey, DirectoryURL: acme.LetsEncryptURL, UserAgent: "eru"}
+	client := &acme.Client{Key: accountKey, DirectoryURL: acme.LetsEncryptURL, UserAgent: "vaire"}
 	if cfg.TLS.ACMECA != "" {
 		client.DirectoryURL = cfg.TLS.ACMECA
 	}
@@ -249,7 +249,7 @@ func probeHTTP(ctx context.Context, domain string) (reached bool, err error) {
 	if _, err := rand.Read(raw); err != nil {
 		return false, err
 	}
-	token := "eru-probe-" + hex.EncodeToString(raw)
+	token := "vaire-probe-" + hex.EncodeToString(raw)
 	path := filepath.Join(steps.ACMEChallengeDir, token)
 	if err := engine.WriteFileAtomic(path, []byte(token), 0o644); err != nil {
 		return false, err
@@ -275,7 +275,7 @@ func probeHTTP(ctx context.Context, domain string) (reached bool, err error) {
 }
 
 func acmeError(what string, err error) error {
-	hint := "eru-certs.timer retries every hour. See eru logs --unit eru-certs."
+	hint := "vaire-certs.timer retries every hour. See vaire logs --unit vaire-certs."
 	if d, ok := acme.RateLimit(err); ok {
 		hint = "Let's Encrypt rate limit: retry after " + d.Round(time.Minute).String() + "."
 	}

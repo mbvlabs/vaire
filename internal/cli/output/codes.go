@@ -1,8 +1,8 @@
 package output
 
-const Schema = "eru/v1"
+const Schema = "vaire/v1"
 
-const EventSchema = "eru-event/v1"
+const EventSchema = "vaire-event/v1"
 
 const (
 	CodeUsage                 = "usage_error"
@@ -95,7 +95,7 @@ var exitByCode = map[string]int{
 	CodeError:                 ExitGeneric,
 }
 
-// IsKnownCode reports whether code is a stable eru error code.
+// IsKnownCode reports whether code is a stable vaire error code.
 func IsKnownCode(code string) bool {
 	_, ok := exitByCode[code]
 	return ok

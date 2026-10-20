@@ -1,13 +1,13 @@
-# managed by eru - do not edit; use cluster.toml
+# managed by vaire - do not edit; use cluster.toml
 [Unit]
-Description=eru session pooler (PgBouncer in session mode on 5432)
+Description=vaire session pooler (PgBouncer in session mode on 5432)
 After=network-online.target
 Wants=network-online.target
 [Service]
 Type=notify
 User=postgres
 Group=postgres
-RuntimeDirectory=eru-pgbouncer-session
+RuntimeDirectory=vaire-pgbouncer-session
 RuntimeDirectoryMode=0755
 ExecStart=/usr/sbin/pgbouncer /etc/pgbouncer/session.ini
 ExecReload=/bin/kill -HUP $MAINPID

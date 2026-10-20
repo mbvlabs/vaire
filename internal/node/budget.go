@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 // budgetHost is the server's side of the oversubscription arithmetic
@@ -191,7 +191,7 @@ func overcommitRefusal(sheet tune.Sheet, now tune.Demand, beforeMiB int, candida
 		if beforeMiB > 0 {
 			none = "No size larger than " + tune.FormatMiB(beforeMiB) + " fits in what is left"
 		}
-		hint = none + ": resize another database down with eru db resize"
+		hint = none + ": resize another database down with vaire db resize"
 		if largest, ok := largestOther(sheet, now.Name); ok {
 			hint += " (the largest is " + largest.Name + " at " + largest.Size + ", " + tune.FormatMiB(largest.MemoryMiB) + ")"
 		}

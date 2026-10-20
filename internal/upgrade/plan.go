@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/release"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/release"
 )
 
 var managedPrefixes = []string{
@@ -47,7 +47,7 @@ func ResolveSelf() (string, error) {
 			output.CodePrecondition,
 			"this binary is managed by a package manager",
 			output.ExitPrecondition,
-			"Upgrade with the package manager that installed eru.",
+			"Upgrade with the package manager that installed vaire.",
 		).WithDetails(map[string]any{"reason": "managed_by_package_manager", "path": resolved})
 	}
 	return resolved, nil

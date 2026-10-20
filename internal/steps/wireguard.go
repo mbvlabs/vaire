@@ -8,16 +8,16 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 const wireguardID = "wireguard-v1"
 
 // WireGuard files on the node.
 const (
-	WGPrivateKeyPath = "/etc/wireguard/eru.key"
-	WGPublicKeyPath  = "/etc/wireguard/eru.pub"
+	WGPrivateKeyPath = "/etc/wireguard/vaire.key"
+	WGPublicKeyPath  = "/etc/wireguard/vaire.pub"
 	WGConfigPath     = "/etc/wireguard/wg0.conf"
 	// WGDirMode and WGPrivateKeyMode are what wireguard-key.sh gives
 	// /etc/wireguard and the private key; root owns both.
@@ -94,7 +94,7 @@ func renderWG(cfg config.Cluster) (wgRender, error) {
 
 func (r wgRender) config(privateKey string) string {
 	var b strings.Builder
-	b.WriteString("# managed by eru: peers come from " + config.OperatorsPath + "\n")
+	b.WriteString("# managed by vaire: peers come from " + config.OperatorsPath + "\n")
 	b.WriteString("[Interface]\n")
 	b.WriteString("PrivateKey = " + privateKey + "\n")
 	b.WriteString("Address = " + r.Address + "\n")

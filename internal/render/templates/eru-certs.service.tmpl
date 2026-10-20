@@ -1,8 +1,0 @@
-# managed by eru - do not edit; use cluster.toml
-[Unit]
-Description=eru certificate issuance and renewal
-After=network-online.target nginx.service postgresql.service
-Wants=network-online.target
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/eru node run certs-renew

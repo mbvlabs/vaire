@@ -4,12 +4,12 @@ import (
 	"context"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -36,7 +36,7 @@ func answersBackupCreds(raw []byte) (keyID, secret string) {
 }
 
 // collectBackups asks init's Backups page: configure a bucket now, or skip
-// for now and run eru backup setup later. Flags and the answers file answer
+// for now and run vaire backup setup later. Flags and the answers file answer
 // it without a prompt.
 func (r *initRun) collectBackups(cfg *config.Cluster, answersRaw []byte) error {
 	cmd := r.cmd
@@ -48,7 +48,7 @@ func (r *initRun) collectBackups(cfg *config.Cluster, answersRaw []byte) error {
 	if s.Provider == "" && !MustNotPrompt(cmd) {
 		choice, err := chooseOption(cmd, "Backups", [][2]string{
 			{"Configure an S3-compatible bucket now", "configure"},
-			{"Skip for now (eru backup setup later)", "skip"},
+			{"Skip for now (vaire backup setup later)", "skip"},
 		})
 		if err != nil {
 			return err
@@ -140,7 +140,7 @@ func (r *initRun) initPrefixOwner() backup.PrefixOwner {
 
 // nodeConfig is cluster.toml as the host and database phases send it:
 // without [backup], which the backups phase writes through config.set so
-// eru backup setup and init share one path.
+// vaire backup setup and init share one path.
 func (r *initRun) nodeConfig() config.Cluster {
 	if r.restore != nil {
 		// A rebuild's cluster.toml already has [backup].
@@ -172,7 +172,7 @@ func (r *initRun) configureInitBackups(ctx context.Context, caller remote.Caller
 // backupSummary is the Backups row of init's summary.
 func (r *initRun) backupSummary() string {
 	if !r.cfg.BackupConfigured() {
-		return "none off the server: run eru backup setup"
+		return "none off the server: run vaire backup setup"
 	}
 	s := r.backupSettings()
 	state := "first full backup taken"
@@ -229,12 +229,12 @@ func masterBundleNow(ctx context.Context, p *progress, caller remote.Caller) (no
 // firstBundleWarning is master_backup_failed when the master bundle failed,
 // or, with a bucket, didn't reach it; nil when it is where it belongs.
 func firstBundleWarning(bucket bool, name string, res node.MasterBackupResult, err error) *output.Warning {
-	const noCopy = ". The bucket has no copy of the server's current control state until eru server backup now succeeds"
+	const noCopy = ". The bucket has no copy of the server's current control state until vaire server backup now succeeds"
 	switch {
 	case err != nil && bucket:
 		return &output.Warning{Code: "master_backup_failed", Message: "the master bundle didn't reach the bucket " + name + ": " + err.Error() + noCopy}
 	case err != nil:
-		return &output.Warning{Code: "master_backup_failed", Message: "the first master bundle failed: " + err.Error() + "; run eru server backup now"}
+		return &output.Warning{Code: "master_backup_failed", Message: "the first master bundle failed: " + err.Error() + "; run vaire server backup now"}
 	case bucket && !res.Uploaded && !res.Verified:
 		return &output.Warning{Code: "master_backup_failed", Message: "master bundle " + res.Name + " isn't confirmed in the bucket " + name + noCopy}
 	}

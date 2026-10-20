@@ -1,0 +1,8 @@
+# managed by vaire - do not edit
+[Unit]
+Description=vaire master backup after a change (Phase 5)
+[Path]
+PathExists={{ .Dirty }}
+Unit=vaire-master-backup.service
+[Install]
+WantedBy=paths.target

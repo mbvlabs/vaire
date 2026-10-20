@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/doctor"
-	"github.com/mbvlabs/eru/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/doctor"
+	"github.com/mbvlabs/vaire/internal/promfile"
 )
 
 func TestMergeStatements(t *testing.T) {
@@ -58,10 +58,10 @@ func TestDoctorFamilies(t *testing.T) {
 	}
 	out := string(promfile.Render(doctorFamilies(time.Unix(100, 0), results)))
 	for _, want := range []string{
-		`eru_doctor_check{check="host.disk_data",db="",status="fail"} 1`,
-		`eru_doctor_check{check="pg.ssl",db="app",status="pass"} 1`,
-		`eru_doctor_last_run_timestamp_seconds 100`,
-		`eru_doctor_failing_checks 1`,
+		`vaire_doctor_check{check="host.disk_data",db="",status="fail"} 1`,
+		`vaire_doctor_check{check="pg.ssl",db="app",status="pass"} 1`,
+		`vaire_doctor_last_run_timestamp_seconds 100`,
+		`vaire_doctor_failing_checks 1`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in\n%s", want, out)
@@ -78,9 +78,9 @@ func TestMaintFamilies(t *testing.T) {
 	}
 	out := string(promfile.Render(maintFamilies(st)))
 	for _, want := range []string{
-		`eru_wraparound_age{db="app"} 5`, `eru_mxid_age{db="app"} 2`,
-		`eru_bloat_estimated_bytes{db="app",kind="index"} 50`, `eru_maint_analyzed_tables{db="app"} 3`,
-		`eru_maint_last_run_timestamp_seconds{job="maint-daily"}`,
+		`vaire_wraparound_age{db="app"} 5`, `vaire_mxid_age{db="app"} 2`,
+		`vaire_bloat_estimated_bytes{db="app",kind="index"} 50`, `vaire_maint_analyzed_tables{db="app"} 3`,
+		`vaire_maint_last_run_timestamp_seconds{job="maint-daily"}`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in\n%s", want, out)

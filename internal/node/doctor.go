@@ -14,20 +14,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/doctor"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/promfile"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/doctor"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-// DoctorStatePath keeps the last doctor run: its results, for eru-doctor.prom
+// DoctorStatePath keeps the last doctor run: its results, for vaire-doctor.prom
 // and the next run's memory.events comparison. It is regenerable and not part
 // of the master backup.
-const DoctorStatePath = "/var/lib/eru/doctor.json"
+const DoctorStatePath = "/var/lib/vaire/doctor.json"
 
 // doctorState is doctor.json.
 type doctorState struct {
@@ -395,7 +395,7 @@ func handleDoctorRun(ctx context.Context, env *Env) (Result, error) {
 }
 
 // runDoctor gathers the facts, runs the checks and, for a full run, records
-// the results in doctor.json and eru-doctor.prom.
+// the results in doctor.json and vaire-doctor.prom.
 func runDoctor(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init bool, only, db string) []doctor.Result {
 	f := gatherFacts(ctx, cfg, rt, init)
 	results := doctor.Run(doctor.Filter(doctor.NodeChecks(), only), f, db)
@@ -405,7 +405,7 @@ func runDoctor(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init 
 	return results
 }
 
-// recordDoctor writes doctor.json and eru-doctor.prom.
+// recordDoctor writes doctor.json and vaire-doctor.prom.
 func recordDoctor(f doctor.Facts, results []doctor.Result) {
 	st := doctorState{At: f.Now.Format(time.RFC3339), Results: results, HighEvents: map[string]int64{}}
 	for _, c := range f.Clusters {
@@ -417,10 +417,10 @@ func recordDoctor(f doctor.Facts, results []doctor.Result) {
 	_ = promfile.Write(promfile.Doctor, doctorFamilies(f.Now, results))
 }
 
-// doctorFamilies are eru-doctor.prom's families: one line per result, so an
+// doctorFamilies are vaire-doctor.prom's families: one line per result, so an
 // external Prometheus can alert on any failing check until Phase 9's alerts.
 func doctorFamilies(at time.Time, results []doctor.Result) []*promfile.Family {
-	check := promfile.Gauge("eru_doctor_check", "eru doctor results: 1 for the check's status.")
+	check := promfile.Gauge("vaire_doctor_check", "vaire doctor results: 1 for the check's status.")
 	sorted := append([]doctor.Result(nil), results...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if sorted[i].ID != sorted[j].ID {
@@ -431,9 +431,9 @@ func doctorFamilies(at time.Time, results []doctor.Result) []*promfile.Family {
 	for _, r := range sorted {
 		check.Add(1, promfile.L("check", r.ID, "db", r.DB, "status", string(r.Status))...)
 	}
-	last := promfile.Gauge("eru_doctor_last_run_timestamp_seconds", "When eru doctor last ran on the node.")
+	last := promfile.Gauge("vaire_doctor_last_run_timestamp_seconds", "When vaire doctor last ran on the node.")
 	last.Add(float64(at.Unix()))
-	failing := promfile.Gauge("eru_doctor_failing_checks", "How many doctor checks fail.")
+	failing := promfile.Gauge("vaire_doctor_failing_checks", "How many doctor checks fail.")
 	failing.Add(float64(len(doctor.Failed(results))))
 	return []*promfile.Family{check, last, failing}
 }
@@ -455,7 +455,7 @@ func doctorGate(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init
 			names = append(names, resultName(r))
 		}
 		return data, nil, output.NewError(output.CodeDoctorFailed, "doctor checks fail after the database phase: "+strings.Join(names, ", "), output.ExitStep,
-			"Run the fix of each failing check (eru doctor shows them), then eru server init --resume.").WithDetails(map[string]any{"checks": failed, "summary": data.Summary})
+			"Run the fix of each failing check (vaire doctor shows them), then vaire server init --resume.").WithDetails(map[string]any{"checks": failed, "summary": data.Summary})
 	}
 	var warnings []output.Warning
 	for _, r := range failed {
@@ -475,7 +475,7 @@ func resultName(r doctor.Result) string {
 	return r.ID
 }
 
-// runDoctorJob is the hourly eru-doctor timer's run.
+// runDoctorJob is the hourly vaire-doctor timer's run.
 func runDoctorJob(ctx context.Context, cfg config.Cluster, report engine.Reporter) (any, error) {
 	env := &Env{Cluster: cfg, Report: report}
 	results := runDoctor(ctx, cfg, runtimeFor(env, true), false, "", "")

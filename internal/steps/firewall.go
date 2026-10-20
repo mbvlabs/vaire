@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 const firewallID = "firewall-v1"
@@ -19,10 +19,10 @@ const (
 	RuleWGSSH     = "allow in on wg0 to any port 22 proto tcp"
 )
 
-// SSHUnlockUnit is the break-glass unlock's timer and service (eru node
+// SSHUnlockUnit is the break-glass unlock's timer and service (vaire node
 // unlock-ssh, §8.4): while its timer is active, public 22/tcp is open on
 // purpose.
-const SSHUnlockUnit = "eru-ssh-unlock"
+const SSHUnlockUnit = "vaire-ssh-unlock"
 
 // FirewallRules is the rule set step 5 converges to. Public 22/tcp stays until
 // the commit-confirm lockdown is confirmed (§8.3), and while a break-glass
@@ -144,7 +144,7 @@ func (firewall) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
 
 // Recheck makes the runner check ufw even when the journal says the step is
 // current: a rule added or deleted by hand drifts without any input
-// changing, and doctor's fw.rules fix is eru apply.
+// changing, and doctor's fw.rules fix is vaire apply.
 func (firewall) Recheck() bool { return true }
 
 func (firewall) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {
@@ -188,7 +188,7 @@ func publicSSHExpectation(st engine.State, unlockOpen bool) int {
 }
 
 // firewallDrift names the rules missing from ufw and the ones ufw has that
-// eru doesn't manage, or "" when they match.
+// vaire doesn't manage, or "" when they match.
 func firewallDrift(want, have []string, publicSSH int) string {
 	switch publicSSH {
 	case publicSSHPresent:
@@ -203,7 +203,7 @@ func firewallDrift(want, have []string, publicSSH int) string {
 		parts = append(parts, "ufw is missing "+quoteRules(missing))
 	}
 	if len(extra) > 0 {
-		parts = append(parts, "ufw has "+quoteRules(extra)+", which eru doesn't manage")
+		parts = append(parts, "ufw has "+quoteRules(extra)+", which vaire doesn't manage")
 	}
 	return strings.Join(parts, "; ")
 }

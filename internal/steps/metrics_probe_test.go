@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/render"
+	"github.com/mbvlabs/vaire/internal/render"
 )
 
 // exporterConnString is what postgres_exporter 0.20.1 hands lib/pq for a
@@ -68,23 +68,23 @@ func TestPostgresProbeReachesSocket(t *testing.T) {
 	if got.Get("host") != PGSocketDir || got.Get("port") != "5434" || got.Get("sslmode") != "disable" || got.Get("connect_timeout") != "5" {
 		t.Errorf("connection %q: want the socket %s, port 5434", conn, PGSocketDir)
 	}
-	if u.Path != "/other" || u.User.Username() != "eru_monitor" {
-		t.Errorf("connection %q: want database other as eru_monitor", conn)
+	if u.Path != "/other" || u.User.Username() != "vaire_monitor" {
+		t.Errorf("connection %q: want database other as vaire_monitor", conn)
 	}
 	if p, _ := u.User.Password(); p != "" || got.Get("password") != "" {
-		t.Errorf("connection %q carries a password; eru_monitor uses peer auth", conn)
+		t.Errorf("connection %q carries a password; vaire_monitor uses peer auth", conn)
 	}
 
 	// The old key=value form, as postgres_exporter rebuilt it, is what
 	// lib/pq refused.
-	old := url.URL{Scheme: "postgresql", User: url.UserPassword("eru_monitor", ""), Host: PGSocketDir + ":5434"}
+	old := url.URL{Scheme: "postgresql", User: url.UserPassword("vaire_monitor", ""), Host: PGSocketDir + ":5434"}
 	if _, err := url.Parse(old.String()); err == nil {
 		t.Error("the key=value regression check no longer reproduces the refusal")
 	}
 }
 
 // TestPostgresExporterUnitReachesSocket: the unit must leave AF_UNIX and the
-// socket directory alone, and pg_ident must map its user to eru_monitor.
+// socket directory alone, and pg_ident must map its user to vaire_monitor.
 func TestPostgresExporterUnitReachesSocket(t *testing.T) {
 	unit := string(exporterUnits(metricsCluster("app"))[PostgresExporterService])
 	if !strings.Contains(unit, "\nUser=postgres_exporter\n") {
@@ -117,10 +117,10 @@ func TestPostgresExporterUnitReachesSocket(t *testing.T) {
 		}
 	}
 	ident := string(render.Ident(metricsCluster("app")))
-	if !regexp.MustCompile(`(?m)^eru\s+postgres_exporter\s+eru_monitor$`).MatchString(ident) {
-		t.Errorf("pg_ident lacks postgres_exporter -> eru_monitor:\n%s", ident)
+	if !regexp.MustCompile(`(?m)^vaire\s+postgres_exporter\s+vaire_monitor$`).MatchString(ident) {
+		t.Errorf("pg_ident lacks postgres_exporter -> vaire_monitor:\n%s", ident)
 	}
-	if !regexp.MustCompile(`(?m)^local\s+all\s+eru_monitor\s+peer map=eru$`).MatchString(string(render.HBA())) {
-		t.Error("pg_hba lacks eru_monitor's peer rule")
+	if !regexp.MustCompile(`(?m)^local\s+all\s+vaire_monitor\s+peer map=vaire$`).MatchString(string(render.HBA())) {
+		t.Error("pg_hba lacks vaire_monitor's peer rule")
 	}
 }

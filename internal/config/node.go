@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/pelletier/go-toml/v2"
 )
 
-// NodePath marks a host as an eru node.
-const NodePath = "/etc/eru/node.toml"
+// NodePath marks a host as an vaire node.
+const NodePath = "/etc/vaire/node.toml"
 
-// Node is /etc/eru/node.toml (§6.2). Bootstrap writes it: the server
+// Node is /etc/vaire/node.toml (§6.2). Bootstrap writes it: the server
 // (setup) this node belongs to, the node's name and hostname, and its role.
 type Node struct {
 	Server      string    `toml:"server"`

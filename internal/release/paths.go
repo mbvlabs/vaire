@@ -11,7 +11,7 @@ func configHome() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "eru-config")
+		return filepath.Join(os.TempDir(), "vaire-config")
 	}
 	return filepath.Join(home, ".config")
 }
@@ -22,15 +22,15 @@ func cacheHome() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "eru-cache")
+		return filepath.Join(os.TempDir(), "vaire-cache")
 	}
 	return filepath.Join(home, ".cache")
 }
 
 func releaseCacheDir(version, goos, goarch string) string {
-	return filepath.Join(configHome(), "eru", "cache", "releases", version, goos+"-"+goarch)
+	return filepath.Join(configHome(), "vaire", "cache", "releases", version, goos+"-"+goarch)
 }
 
 func tufCacheDir() string {
-	return filepath.Join(cacheHome(), "eru", "sigstore-tuf")
+	return filepath.Join(cacheHome(), "vaire", "sigstore-tuf")
 }

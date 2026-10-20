@@ -9,15 +9,15 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/state"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/state"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 // databaseInfo is one entry in db.list: the database, where its cluster
@@ -100,7 +100,7 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 	for _, db := range databases {
 		if db.State == stateOrphaned {
 			warnings = append(warnings, output.Warning{Code: "orphaned_database",
-				Message: "cluster 18/" + db.Name + " is on the server but not in cluster.toml; drop it with eru db drop " + db.Name})
+				Message: "cluster 18/" + db.Name + " is on the server but not in cluster.toml; drop it with vaire db drop " + db.Name})
 		}
 	}
 	return Result{Data: map[string]any{"databases": databases}, Warnings: warnings}, nil
@@ -205,7 +205,7 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 // memory_overcommitted refusal suggests.
 func createCommand(p dbCreateParams) func(size string) string {
 	return func(size string) string {
-		cmd := "eru db create " + p.Name + " --size " + size
+		cmd := "vaire db create " + p.Name + " --size " + size
 		if p.Profile != "" {
 			cmd += " --profile " + p.Profile
 		}
@@ -251,7 +251,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 	if err != nil {
 		// Keep cluster.toml in step with the server: an entry whose cluster
 		// was never created would make the retry refuse the name. Once the
-		// cluster exists, eru apply --db finishes it.
+		// cluster exists, vaire apply --db finishes it.
 		if !steps.ClusterExists(ctx, db.Name) {
 			_ = store.Save(previous)
 			return db, nil, errors.Join(err, forgetNewCluster(cfg, db.Name))
@@ -259,7 +259,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 		return db, nil, withHint(err, finishNewCluster(db.Name))
 	}
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
-		return db, nil, withHint(err, "Finish it with eru apply.")
+		return db, nil, withHint(err, "Finish it with vaire apply.")
 	}
 	if w := applyMetrics(ctx, cfg, rt, env.Report, db.Name); w != nil {
 		warnings = append(warnings, *w)
@@ -383,8 +383,8 @@ func createRuns(cfg config.Cluster, name string, others []string) []engine.Optio
 // others: its share of the data disk sizes min_wal_size and max_wal_size,
 // and the number of clusters its CPU share. So adding, forking or dropping
 // a database changes them, and db create, db fork and db drop apply them in
-// the same run instead of leaving them to the next eru apply. A database
-// never configured (a cluster still pending) is left to eru apply.
+// the same run instead of leaving them to the next vaire apply. A database
+// never configured (a cluster still pending) is left to vaire apply.
 // journal is the journal path, "" for the node's.
 func otherConfigs(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, except, journal string) []string {
 	var ids []string
@@ -414,7 +414,7 @@ func otherConfigs(ctx context.Context, catalog []engine.Step, cfg config.Cluster
 // that needs a restart restarts nothing and stays pending, with the
 // restart_pending warning naming the token. The database being created or
 // dropped is done by then, so a failure is the warning
-// other_config_failed, which eru apply retries.
+// other_config_failed, which vaire apply retries.
 func applyOtherConfigs(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, ids []string, opts engine.Options) []output.Warning {
 	if len(ids) == 0 {
 		return nil
@@ -423,7 +423,7 @@ func applyOtherConfigs(ctx context.Context, catalog []engine.Step, cfg config.Cl
 	_, warnings, err := engine.Apply(ctx, catalog, cfg, rt, opts)
 	if err != nil {
 		return []output.Warning{{Code: "other_config_failed",
-			Message: "the configuration of " + strings.Join(clustersOf(ids), ", ") + " was not updated for the new split of the server: " + err.Error() + "; run eru apply"}}
+			Message: "the configuration of " + strings.Join(clustersOf(ids), ", ") + " was not updated for the new split of the server: " + err.Error() + "; run vaire apply"}}
 	}
 	return warnings
 }
@@ -457,7 +457,7 @@ func applyNewCluster(ctx context.Context, cfg config.Cluster, rt engine.Runtime,
 // was created: its own steps with the restart it may still need, then the
 // poolers, its stanza and first full, and its timers.
 func finishNewCluster(name string) string {
-	return "Finish it with eru apply --db " + name + " --confirm " + name + "/restart, then eru apply."
+	return "Finish it with vaire apply --db " + name + " --confirm " + name + "/restart, then vaire apply."
 }
 
 // reloadPoolers runs pgbouncer-v1, which renders an entry per database and
@@ -485,7 +485,7 @@ func applyMetrics(ctx context.Context, cfg config.Cluster, rt engine.Runtime, re
 	}
 	return &output.Warning{
 		Code:    "metrics_reload_failed",
-		Message: "the /metrics endpoint was not updated for " + db + ": " + err.Error() + "; run eru apply to retry",
+		Message: "the /metrics endpoint was not updated for " + db + ": " + err.Error() + "; run vaire apply to retry",
 	}
 }
 
@@ -512,8 +512,8 @@ func firstBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime, rep
 // firstBackupWarning is first_backup_failed for err. A step that refused for
 // a reason the operator has to act on (input_required, such as bucket keys
 // that are neither on the node nor in the operator's recovery kit, or
-// precondition_failed) carries its own hint: a bare eru apply would refuse
-// the same way. Any other failure is retried by eru apply, which re-runs the
+// precondition_failed) carries its own hint: a bare vaire apply would refuse
+// the same way. Any other failure is retried by vaire apply, which re-runs the
 // unfinished steps with the recovery kit.
 func firstBackupWarning(db string, err error) output.Warning {
 	msg := db + " was created, but its stanza, first full backup or backup timers failed: " + err.Error()
@@ -521,12 +521,12 @@ func firstBackupWarning(db string, err error) output.Warning {
 	if errors.As(err, &cliErr) && (cliErr.Code == output.CodeInputRequired || cliErr.Code == output.CodePrecondition) && cliErr.Hint != "" {
 		return output.Warning{Code: "first_backup_failed", Message: msg + ". " + cliErr.Hint}
 	}
-	return output.Warning{Code: "first_backup_failed", Message: msg + "; run eru apply to retry"}
+	return output.Warning{Code: "first_backup_failed", Message: msg + "; run vaire apply to retry"}
 }
 
 func existingDatabase(name string) error {
 	return output.NewError(output.CodePrecondition, "database "+name+" already exists", output.ExitPrecondition,
-		"Pick another name, or drop it first with eru db drop "+name+".").WithDetails(map[string]any{"reason": "database_exists", "database": name})
+		"Pick another name, or drop it first with vaire db drop "+name+".").WithDetails(map[string]any{"reason": "database_exists", "database": name})
 }
 
 // databaseIn reports whether database name exists in the cluster at local.
@@ -558,7 +558,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	clusterExists := steps.ClusterExists(ctx, p.Name)
 	if !inConfig && !clusterExists {
 		return Result{}, output.NewError(output.CodePrecondition, "database "+p.Name+" does not exist", output.ExitPrecondition,
-			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": p.Name})
+			"Run vaire db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": p.Name})
 	}
 
 	if err := restoreInProgress(p.Name, "db drop"); err != nil {
@@ -640,7 +640,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	others := otherConfigs(ctx, steps.Catalog(), cfg, rt, "", "")
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, dropRuns(cfg, others)...))
 	if err := dropRouting(ctx, env, cfg); err != nil {
-		return Result{}, withHint(err, p.Name+" is dropped, but the poolers or timers still refer to it. Fix it with eru apply.")
+		return Result{}, withHint(err, p.Name+" is dropped, but the poolers or timers still refer to it. Fix it with vaire apply.")
 	}
 	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name); w != nil {
 		warnings = append(warnings, *w)
@@ -818,7 +818,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	}
 	// The huge-page pool follows the new sum before the cluster restarts.
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
-		return Result{}, withHint(err, "The new size is saved. Finish it with eru apply --db "+p.Name+".")
+		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
 	confirm := restartConfirmation(cfg, env.Req)
 	if p.DeferRestart {
@@ -831,7 +831,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		Report:    env.Report,
 	})
 	if err != nil {
-		return Result{}, withHint(err, "The new size is saved. Finish it with eru apply --db "+p.Name+".")
+		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
 	warnings = append(append(warnings, applyWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
 	// A deferred restart runs at the start of the maintenance window
@@ -851,7 +851,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 // request's restart choice: what the memory_overcommitted refusal suggests.
 func resizeCommand(p dbResizeParams, confirmed bool) func(size string) string {
 	return func(size string) string {
-		cmd := "eru db resize " + p.Name + " --size " + size
+		cmd := "vaire db resize " + p.Name + " --size " + size
 		switch {
 		case p.DeferRestart:
 			cmd += " --defer-restart"
@@ -869,7 +869,7 @@ func checkDatabaseName(name string) error {
 	}
 	switch name {
 	case "postgres", "template0", "template1":
-		return output.NewError(output.CodeValidation, "database "+name+" is a system database eru does not manage", output.ExitConfig, "")
+		return output.NewError(output.CodeValidation, "database "+name+" is a system database vaire does not manage", output.ExitConfig, "")
 	}
 	return nil
 }
@@ -896,7 +896,7 @@ func dropCluster(ctx context.Context, env *Env, name string) error {
 	return sh.Exec(ctx, "db.drop", engine.Command{Name: "systemctl", Args: []string{"daemon-reload"}}, env.Report)
 }
 
-// existingRolesIn returns the eru roles of database name that exist in the
+// existingRolesIn returns the vaire roles of database name that exist in the
 // cluster at local.
 func existingRolesIn(ctx context.Context, local pg.Local, name string) ([]string, error) {
 	wanted := append([]string{name + "_owner"}, prefixedRoles(name)...)
@@ -934,7 +934,7 @@ func handleDBCredentials(ctx context.Context, env *Env) (Result, error) {
 			output.CodePrecondition,
 			"credentials live on the operator, not the node",
 			output.ExitPrecondition,
-			"Run eru db credentials "+p.Name+" on your machine, or pass --rotate to set a new password.",
+			"Run vaire db credentials "+p.Name+" on your machine, or pass --rotate to set a new password.",
 		).WithDetails(map[string]any{"reason": "operator_only", "database": p.Name})
 	}
 	if err := checkDatabaseName(p.Name); err != nil {

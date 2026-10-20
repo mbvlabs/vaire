@@ -10,21 +10,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // Commit-confirm files and units (§8.3, §8.4).
 const (
-	SSHSnapshotDir    = "/var/lib/eru/ssh-snapshot"
+	SSHSnapshotDir    = "/var/lib/vaire/ssh-snapshot"
 	snapshotDropIn    = "sshd-dropin.conf"
 	snapshotRules     = "ufw-rules.txt"
 	snapshotMeta      = "snapshot.json"
 	revertedFile      = "reverted.json"
-	revertUnit        = "eru-ssh-revert"
+	revertUnit        = "vaire-ssh-revert"
 	unlockUnit        = steps.SSHUnlockUnit
 	defaultLockdownS  = 120
 	maxLockdownS      = 2 * 60 * 60
@@ -274,13 +274,13 @@ func handleSSHStatus(ctx context.Context, _ *Env) (Result, error) {
 	return Result{Data: status}, nil
 }
 
-// RevertSSH is eru node ssh-revert. Without lockdownOnly it restores the
+// RevertSSH is vaire node ssh-revert. Without lockdownOnly it restores the
 // commit-confirm snapshot when a lockdown is still pending (§8.3). With
 // lockdownOnly it ends a break-glass window: the break-glass drop-in goes and
 // public 22/tcp closes again when the node was locked down (§8.4).
 func RevertSSH(ctx context.Context, lockdownOnly bool, report engine.Reporter) (RevertResult, error) {
 	if os.Geteuid() != 0 {
-		return RevertResult{}, rootRequired("eru node ssh-revert")
+		return RevertResult{}, rootRequired("vaire node ssh-revert")
 	}
 	release, err := engine.Acquire(ctx, engine.LockExclusive, "ssh-revert", "", revertLockTimeout)
 	if err != nil {
@@ -380,7 +380,7 @@ func writeReverted(res RevertResult) error {
 	return engine.WriteFileAtomic(filepath.Join(SSHSnapshotDir, revertedFile), append(raw, '\n'), snapshotFileMode)
 }
 
-// UnlockResult is the eru node unlock-ssh result.
+// UnlockResult is the vaire node unlock-ssh result.
 type UnlockResult struct {
 	AdminUser  string `json:"admin_user"`
 	Minutes    int    `json:"minutes"`
@@ -389,7 +389,7 @@ type UnlockResult struct {
 	RevertUnit string `json:"revert_unit"`
 }
 
-// UnlockSSH is eru node unlock-ssh: break-glass from the provider console
+// UnlockSSH is vaire node unlock-ssh: break-glass from the provider console
 // (§8.4). It opens public 22/tcp, allows password login for the admin user
 // only, and arms a timer that closes both again. It runs on the server as
 // root; on an operator machine it says so instead of a config error.
@@ -421,7 +421,7 @@ func UnlockSSH(ctx context.Context, minutes int, dryRun bool, report engine.Repo
 		return res, nil
 	}
 	if os.Geteuid() != 0 {
-		return res, rootRequired("eru node unlock-ssh")
+		return res, rootRequired("vaire node unlock-ssh")
 	}
 	release, err := engine.Acquire(ctx, engine.LockExclusive, "unlock-ssh", "", revertLockTimeout)
 	if err != nil {
@@ -450,14 +450,14 @@ func rootRequired(command string) error {
 	).WithDetails(map[string]any{"reason": "root_required"})
 }
 
-// unlockSSHNotOnServer is what eru node unlock-ssh returns on an operator
+// unlockSSHNotOnServer is what vaire node unlock-ssh returns on an operator
 // machine, where there is no cluster.toml: the command opens break-glass on
 // the server, so it must run there.
 func unlockSSHNotOnServer() *output.CLIError {
 	return output.NewError(
 		output.CodePrecondition,
-		"eru node unlock-ssh runs on the server, as root, not on this machine",
+		"vaire node unlock-ssh runs on the server, as root, not on this machine",
 		output.ExitPrecondition,
-		"Open break-glass from the server: log in at the provider's console (or a root shell), then run sudo eru node unlock-ssh --minutes 30 there. From this machine there is nothing to run until WireGuard works; check eru tunnel status, and that UDP reaches the server.",
+		"Open break-glass from the server: log in at the provider's console (or a root shell), then run sudo vaire node unlock-ssh --minutes 30 there. From this machine there is nothing to run until WireGuard works; check vaire tunnel status, and that UDP reaches the server.",
 	).WithDetails(map[string]any{"reason": "runs_on_server", "path": config.ClusterPath})
 }

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/promfile"
 )
 
 func TestBackupFamilies(t *testing.T) {
@@ -30,19 +30,19 @@ func TestBackupFamilies(t *testing.T) {
 	jobs := []engine.JobRecord{{Job: "backup-full", DB: "other", State: engine.JobSkipped, FinishedAt: "2026-10-14T01:00:00Z"}}
 	out := string(promfile.Render(BackupFamilies("prod", "db1", "1.0.0", rs, jobs)))
 	for _, line := range []string{
-		`eru_info{version="1.0.0",server="prod",node="db1"} 1`,
-		`eru_backup_last_success_timestamp_seconds{db="app",type="full"} 1791939750`,
-		`eru_backup_last_size_bytes{db="app",type="full"} 1000`,
-		`eru_backup_last_repo_size_bytes{db="app",type="full"} 300`,
-		`eru_backup_last_duration_seconds{db="app",type="full"} 150`,
-		`eru_backup_last_failure_timestamp_seconds{db="app",type="diff"} 1791943200`,
-		`eru_backup_window_start_timestamp_seconds{db="app"} 1791334800`,
-		`eru_backup_sets{db="app"} 3`,
-		`eru_backup_repo_size_bytes{db="app"} 550`,
-		`eru_backup_verify_last_success_timestamp_seconds{db="app"}`,
-		`eru_restore_drill_last_result{db="app",result="pass"} 1`,
-		`eru_restore_in_progress 0`,
-		`eru_job_last_skipped_timestamp_seconds{job="backup-full",db="other"}`,
+		`vaire_info{version="1.0.0",server="prod",node="db1"} 1`,
+		`vaire_backup_last_success_timestamp_seconds{db="app",type="full"} 1791939750`,
+		`vaire_backup_last_size_bytes{db="app",type="full"} 1000`,
+		`vaire_backup_last_repo_size_bytes{db="app",type="full"} 300`,
+		`vaire_backup_last_duration_seconds{db="app",type="full"} 150`,
+		`vaire_backup_last_failure_timestamp_seconds{db="app",type="diff"} 1791943200`,
+		`vaire_backup_window_start_timestamp_seconds{db="app"} 1791334800`,
+		`vaire_backup_sets{db="app"} 3`,
+		`vaire_backup_repo_size_bytes{db="app"} 550`,
+		`vaire_backup_verify_last_success_timestamp_seconds{db="app"}`,
+		`vaire_restore_drill_last_result{db="app",result="pass"} 1`,
+		`vaire_restore_in_progress 0`,
+		`vaire_job_last_skipped_timestamp_seconds{job="backup-full",db="other"}`,
 	} {
 		if !strings.Contains(out, line) {
 			t.Errorf("missing %s in\n%s", line, out)

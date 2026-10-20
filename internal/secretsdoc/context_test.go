@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/password"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/password"
+	"github.com/mbvlabs/vaire/internal/transport"
 )
 
 func TestInstallMasterPasswordHash(t *testing.T) {

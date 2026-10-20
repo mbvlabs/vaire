@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 // JournalPath is the node's step journal (§9.3).
-const JournalPath = "/var/lib/eru/journal.json"
+const JournalPath = "/var/lib/vaire/journal.json"
 
 // JournalSchema is the journal format version.
 const JournalSchema = 1
@@ -27,10 +27,10 @@ const (
 // Journal records what ran on this node. Steps is keyed by step ID, and a
 // cluster's instance by <id>@<cluster>.
 type Journal struct {
-	Schema     int                     `json:"schema"`
-	EruVersion string                  `json:"eru_version"`
-	UpdatedAt  string                  `json:"updated_at"`
-	Steps      map[string]JournalEntry `json:"steps"`
+	Schema       int                     `json:"schema"`
+	VaireVersion string                  `json:"vaire_version"`
+	UpdatedAt    string                  `json:"updated_at"`
+	Steps        map[string]JournalEntry `json:"steps"`
 	// RestartPending lists steps whose restart has not been performed yet. It
 	// survives runs, so a later apply with the confirm token performs it.
 	RestartPending []string `json:"restart_pending,omitempty"`
@@ -162,7 +162,7 @@ func journalCorrupt(path string) *output.CLIError {
 		output.CodePrecondition,
 		"the step journal is corrupt",
 		output.ExitPrecondition,
-		"Inspect "+path+" and restore it, or move it aside to re-run every step. eru never resets it on its own.",
+		"Inspect "+path+" and restore it, or move it aside to re-run every step. vaire never resets it on its own.",
 	).WithDetails(map[string]any{"reason": "journal_corrupt", "path": path})
 }
 
@@ -170,7 +170,7 @@ func journalCorrupt(path string) *output.CLIError {
 // redacted before they reach disk.
 func (j *Journal) Save(path string) error {
 	j.Schema = JournalSchema
-	j.EruVersion = buildinfo.Version
+	j.VaireVersion = buildinfo.Version
 	j.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	for id, entry := range j.Steps {
 		entry.Error = secrets.Redact(entry.Error)

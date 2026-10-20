@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/vaire/internal/config"
 )
 
 // Numbering numbers the steps of several Apply runs in one request as one

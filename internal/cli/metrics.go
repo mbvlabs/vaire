@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 )
 
@@ -41,7 +41,7 @@ func metricsCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "Show or rotate the authenticated /metrics endpoint",
 			WhenToUse: []string{"Point a Prometheus or Grafana Alloy at the server, or replace the endpoint's credential."},
-			Examples:  []string{"eru metrics show"},
+			Examples:  []string{"vaire metrics show"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -57,9 +57,9 @@ func metricsCommands() cmdSpec {
 					WhenNotToUse: []string{
 						"Agents: never pass --reveal or print the password; the human copies it from the secrets handoff.",
 					},
-					Examples: []string{"eru metrics show", "eru metrics show --json --jq .data.prometheus_config"},
+					Examples: []string{"vaire metrics show", "vaire metrics show --json --jq .data.prometheus_config"},
 					Remote:   true,
-					Next:     []string{"eru doctor --only metrics"},
+					Next:     []string{"vaire doctor --only metrics"},
 				},
 			},
 			{
@@ -68,14 +68,14 @@ func metricsCommands() cmdSpec {
 				meta: CommandMeta{ //nolint:gosec // G101: help text, not a credential.
 					Summary:        "Replace the /metrics credential",
 					WhenToUse:      []string{"The endpoint's password leaked. Scrapers fail until they get the new one."},
-					Examples:       []string{"eru metrics rotate --confirm prod/metrics"},
+					Examples:       []string{"vaire metrics rotate --confirm prod/metrics"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ConfirmToken:   "{server}/metrics",
 					ErrorCodes:     []string{"unsafe_action_requires_confirmation", "input_required"},
-					Next:           []string{"eru secrets export", "eru metrics show"},
+					Next:           []string{"vaire secrets export", "vaire metrics show"},
 				},
 			},
 		},
@@ -128,12 +128,12 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 		lines = append(lines, "", note)
 	}
 	if !data.Credential {
-		lines = append(lines, "", "the node has no credential yet; run eru apply")
+		lines = append(lines, "", "the node has no credential yet; run vaire apply")
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	if creds.Metrics == nil {
 		warnings = append(warnings, output.Warning{Code: "metrics_credential_missing",
-			Message: "this machine's context has no /metrics credential; run eru apply, then eru secrets export"})
+			Message: "this machine's context has no /metrics credential; run vaire apply, then vaire secrets export"})
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: warnings})
 }
@@ -144,7 +144,7 @@ func metricsPasswordNote(hasCredential, revealed bool) string {
 	if !hasCredential || revealed {
 		return ""
 	}
-	return "the password is hidden; eru metrics show --reveal prints it, or copy it from the secrets handoff"
+	return "the password is hidden; vaire metrics show --reveal prints it, or copy it from the secrets handoff"
 }
 
 func indent(block string) string {
@@ -158,7 +158,7 @@ func indent(block string) string {
 // prometheusSnippet is a scrape_configs entry that follows targets.json.
 func prometheusSnippet(server, targetsURL, user, password string) string {
 	return fmt.Sprintf(`scrape_configs:
-  - job_name: eru-%s
+  - job_name: vaire-%s
     scheme: https
     basic_auth:
       username: %s
@@ -175,7 +175,7 @@ func prometheusSnippet(server, targetsURL, user, password string) string {
 // alloySnippet is the Grafana Alloy equivalent.
 func alloySnippet(server, targetsURL, user, password string) string {
 	id := strings.ReplaceAll(server, "-", "_")
-	return fmt.Sprintf(`discovery.http "eru_%s" {
+	return fmt.Sprintf(`discovery.http "vaire_%s" {
   url              = "%s"
   refresh_interval = "5m"
   basic_auth {
@@ -184,8 +184,8 @@ func alloySnippet(server, targetsURL, user, password string) string {
   }
 }
 
-prometheus.scrape "eru_%s" {
-  targets    = discovery.http.eru_%s.targets
+prometheus.scrape "vaire_%s" {
+  targets    = discovery.http.vaire_%s.targets
   scheme     = "https"
   basic_auth {
     username = "%s"
@@ -236,11 +236,11 @@ func runMetricsRotate(cmd *cobra.Command, _ []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	warnings = append(warnings, output.Warning{Code: "secrets_document_stale",
-		Message: "the /metrics credential changed; run eru secrets export to refresh the secrets document, and update your scrapers"})
+		Message: "the /metrics credential changed; run vaire secrets export to refresh the secrets document, and update your scrapers"})
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"rotated": true, "username": creds.Metrics.Username},
-		Message:  "replaced the /metrics credential; eru metrics show --reveal prints the new password",
+		Message:  "replaced the /metrics credential; vaire metrics show --reveal prints the new password",
 		Warnings: warnings,
-		Next:     []string{"eru secrets export", "eru metrics show --reveal"},
+		Next:     []string{"vaire secrets export", "vaire metrics show --reveal"},
 	})
 }

@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/spf13/cobra"
 )
 
@@ -47,9 +47,9 @@ func (e dbEndpoint) addr(port int) string {
 	return net.JoinHostPort(e.WGAddress, strconv.Itoa(port))
 }
 
-// adminCredentials returns the eru_admin user and password. eru keeps no
-// application database passwords, so eru sql, psql and console connect as
-// eru_admin, read-only unless --write. A write to a protected database
+// adminCredentials returns the vaire_admin user and password. vaire keeps no
+// application database passwords, so vaire sql, psql and console connect as
+// vaire_admin, read-only unless --write. A write to a protected database
 // connects as a short-lived role instead (sessionLogin).
 func adminCredentials(c *contexts.Context) (user, password string, err error) {
 	creds, err := contexts.LoadCredentials(c.Name)
@@ -57,13 +57,13 @@ func adminCredentials(c *contexts.Context) (user, password string, err error) {
 		return "", "", err
 	}
 	if creds.Database == nil || creds.Database.Admin.Password == "" {
-		return "", "", output.NewError(output.CodePrecondition, "this context has no eru_admin password", output.ExitPrecondition,
-			"Re-run eru login with a newer secrets document.")
+		return "", "", output.NewError(output.CodePrecondition, "this context has no vaire_admin password", output.ExitPrecondition,
+			"Re-run vaire login with a newer secrets document.")
 	}
 	return creds.Database.Admin.User, creds.Database.Admin.Password, nil
 }
 
-// sessionOptions is the libpq options value for an eru_admin session on db:
+// sessionOptions is the libpq options value for an vaire_admin session on db:
 // read-only, or with write acting as the database's owner role so new objects
 // get the owner and its default privileges, like a migration. It uses the
 // --name=value form: usql rewrites the URL into a key=value conninfo without
@@ -118,7 +118,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 	if db == "" {
-		return output.NewError(output.CodeInputRequired, "eru sql needs --db", output.ExitInput,
+		return output.NewError(output.CodeInputRequired, "vaire sql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 	user, password, err := sessionLogin(cmd, s, p, db, write)
@@ -137,7 +137,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	})
 	if err != nil {
 		return output.WrapError(output.CodeRemoteUnreachable, fmt.Errorf("connect to PostgreSQL: %w", err), output.ExitTransport,
-			"Check that the database exists (eru db list), that the session pooler runs (eru logs pgbouncer-session), and that the credentials are current.")
+			"Check that the database exists (vaire db list), that the session pooler runs (vaire logs pgbouncer-session), and that the credentials are current.")
 	}
 	defer conn.Close(ctx)
 	p.setPhase("running the query on " + db)
@@ -162,7 +162,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		}
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
-	// The simple query protocol runs several statements in one call; eru sql
+	// The simple query protocol runs several statements in one call; vaire sql
 	// takes no parameters, so it loses nothing.
 	results, err := conn.QueryAll(ctx, query)
 	if err != nil {
@@ -172,7 +172,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		}
 		hint := "Fix the statement and retry."
 		if write && backup.LiveDatabase(db) != db {
-			hint += " " + db + " is a copy: one restored from a backup is read-only (in recovery) until eru restore promote " + backup.LiveDatabase(db) + "; one restored from a dump takes writes."
+			hint += " " + db + " is a copy: one restored from a backup is read-only (in recovery) until vaire restore promote " + backup.LiveDatabase(db) + "; one restored from a dump takes writes."
 		}
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, hint)
 	}
@@ -184,7 +184,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	return output.Success(cmd, output.Result{Data: data, Message: data.render(), Warnings: warnings})
 }
 
-// sqlData is eru sql's result: the last statement's columns, rows and tag at
+// sqlData is vaire sql's result: the last statement's columns, rows and tag at
 // the top, as for a single statement, and with several statements every
 // statement's result in order.
 type sqlData struct {
@@ -235,7 +235,7 @@ func readOnlyCopyError(db string, err error) error {
 		}
 	}
 	return output.WrapError(output.CodePrecondition, fmt.Errorf("%s is read-only: it was restored from a backup and stays in recovery until promoted: %w", db, err),
-		output.ExitPrecondition, "Inspect it read-only (eru sql --db "+db+" without --write), or promote it with eru restore promote "+live+" --confirm "+live+"/restore and write to "+live+".").
+		output.ExitPrecondition, "Inspect it read-only (vaire sql --db "+db+" without --write), or promote it with vaire restore promote "+live+" --confirm "+live+"/restore and write to "+live+".").
 		WithDetails(map[string]any{"reason": "restore_copy_read_only", "sqlstate": sqlstateRecovery})
 }
 

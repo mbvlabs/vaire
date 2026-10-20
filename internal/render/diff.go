@@ -114,7 +114,7 @@ func numberOps(ops []op) {
 func formatDiff(path string, ops []op) string {
 	const ctx = 3
 	var b strings.Builder
-	fmt.Fprintf(&b, "--- %s\n+++ %s (eru)\n", path, path)
+	fmt.Fprintf(&b, "--- %s\n+++ %s (vaire)\n", path, path)
 	i := 0
 	for i < len(ops) {
 		if ops[i].kind == ' ' {

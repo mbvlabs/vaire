@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/spf13/cobra"
 )
 
@@ -63,7 +63,7 @@ func Escalate(cmd *cobra.Command, reason string, extraArgs ...string) (bool, err
 		return reexec(true, extraArgs)
 	}
 	if canPrompt(cmd) {
-		ok, err := ask(cmd, "eru needs root to "+reason+". Escalate with sudo?")
+		ok, err := ask(cmd, "vaire needs root to "+reason+". Escalate with sudo?")
 		if err != nil {
 			return false, err
 		}
@@ -152,7 +152,7 @@ func filteredArgs() []string {
 func sudoLine(extraArgs []string) string {
 	self, err := os.Executable()
 	if err != nil {
-		self = "eru"
+		self = "vaire"
 	}
 	parts := []string{"sudo", self}
 	parts = append(parts, filteredArgs()...)

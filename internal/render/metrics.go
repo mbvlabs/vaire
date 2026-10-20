@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/vaire/internal/config"
 )
 
 // ExporterUnit is one exporter's systemd unit (Phase 4).
@@ -24,13 +24,13 @@ type ExporterUnit struct {
 // ExporterService renders an exporter's unit.
 func ExporterService(u ExporterUnit) []byte { return execute("exporter.service.tmpl", u) }
 
-// ExportersSlice renders eru-exporters.slice.
-func ExportersSlice() []byte { return execute("eru-exporters.slice.tmpl", nil) }
+// ExportersSlice renders vaire-exporters.slice.
+func ExportersSlice() []byte { return execute("vaire-exporters.slice.tmpl", nil) }
 
 // ProbeTarget is the DSN postgres_exporter's /probe connects to for a
 // cluster (Phase 4 D4): its socket and port, the application database (so
 // stat_user_tables and stat_statements see the application's tables) as
-// eru_monitor with peer auth. The role's statement_timeout bounds a probe.
+// vaire_monitor with peer auth. The role's statement_timeout bounds a probe.
 //
 // It is a URL with the socket directory in the query, never a key=value
 // string: postgres_exporter 0.20.1 turns a key=value target into a URL with
@@ -43,7 +43,7 @@ func ProbeTarget(socketDir string, spec config.ClusterSpec) string {
 	q.Set("port", strconv.Itoa(spec.Port))
 	q.Set("sslmode", "disable")
 	q.Set("connect_timeout", "5")
-	u := url.URL{Scheme: "postgresql", User: url.User("eru_monitor"), Path: "/" + spec.Name, RawQuery: q.Encode()}
+	u := url.URL{Scheme: "postgresql", User: url.User("vaire_monitor"), Path: "/" + spec.Name, RawQuery: q.Encode()}
 	return u.String()
 }
 
@@ -61,7 +61,7 @@ type MetricsLocation struct {
 	Labels map[string]string
 }
 
-// MetricsConf renders /etc/nginx/eru-metrics.conf from the locations, with
+// MetricsConf renders /etc/nginx/vaire-metrics.conf from the locations, with
 // the basic-auth file and the optional allowlist (CIDRs, masked). A set
 // allowlist also admits loopback, so doctor's probe through 443 gets the 401
 // it checks for: the address comes from the PROXY header the 443 hop writes
@@ -79,7 +79,7 @@ func MetricsConf(locations []MetricsLocation, htpasswd string, allowlist []strin
 			allow = append(allow, a.String())
 		}
 	}
-	return execute("eru-metrics.conf.tmpl", map[string]any{"Locations": locations, "Htpasswd": htpasswd, "Allow": allow})
+	return execute("vaire-metrics.conf.tmpl", map[string]any{"Locations": locations, "Htpasswd": htpasswd, "Allow": allow})
 }
 
 // ProbeArgs is the query string of a probe of target.

@@ -1,7 +1,7 @@
-// Package promfile writes eru's node_exporter textfiles (Phase 4). Each
+// Package promfile writes vaire's node_exporter textfiles (Phase 4). Each
 // owner writes its own file in Dir, so no writer needs another's data or a
-// shared lock: eru.prom (backups), eru-host.prom (cgroups, TLS, budget),
-// eru-doctor.prom and eru-maint.prom. Phase 5 adds eru-master-backup.prom.
+// shared lock: vaire.prom (backups), vaire-host.prom (cgroups, TLS, budget),
+// vaire-doctor.prom and vaire-maint.prom. Phase 5 adds vaire-master-backup.prom.
 package promfile
 
 import (
@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // Dir is node_exporter's textfile collector directory.
@@ -20,10 +20,10 @@ const Dir = "/var/lib/node_exporter/textfile"
 
 // The textfiles, by owner.
 const (
-	Backup = "eru.prom"
-	Host   = "eru-host.prom"
-	Doctor = "eru-doctor.prom"
-	Maint  = "eru-maint.prom"
+	Backup = "vaire.prom"
+	Host   = "vaire-host.prom"
+	Doctor = "vaire-doctor.prom"
+	Maint  = "vaire-maint.prom"
 )
 
 // Label is one name="value" pair. Labels keep their order.

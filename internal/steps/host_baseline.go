@@ -6,15 +6,15 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 const hostBaselineID = "host-baseline-v1"
 
 // hostFiles are the fixed files step 6 renders. They carry no secrets.
 var hostFiles = map[string]string{
-	"/etc/systemd/journald.conf.d/eru.conf": `# managed by eru
+	"/etc/systemd/journald.conf.d/vaire.conf": `# managed by vaire
 [Journal]
 Storage=persistent
 Compress=yes
@@ -24,13 +24,13 @@ RuntimeMaxUse=256M
 RuntimeKeepFree=256M
 MaxRetentionSec=14day
 `,
-	"/etc/apt/apt.conf.d/20auto-upgrades": `// managed by eru
+	"/etc/apt/apt.conf.d/20auto-upgrades": `// managed by vaire
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 `,
 	// #clear drops the distribution's default origins, so only security
-	// updates install. PostgreSQL and its tools move only with eru pg update.
-	"/etc/apt/apt.conf.d/52eru-unattended-upgrades": `// managed by eru: security updates only
+	// updates install. PostgreSQL and its tools move only with vaire pg update.
+	"/etc/apt/apt.conf.d/52vaire-unattended-upgrades": `// managed by vaire: security updates only
 #clear Unattended-Upgrade::Origins-Pattern;
 #clear Unattended-Upgrade::Allowed-Origins;
 #clear Unattended-Upgrade::Package-Blacklist;
@@ -51,7 +51,7 @@ Unattended-Upgrade::Automatic-Reboot "false";
 `,
 	// iptables actions keep bans in fail2ban's own chains, out of the ufw rule
 	// set that firewall-v1 converges.
-	"/etc/fail2ban/jail.d/eru.conf": `# managed by eru
+	"/etc/fail2ban/jail.d/vaire.conf": `# managed by vaire
 [DEFAULT]
 banaction = iptables-multiport
 banaction_allports = iptables-allports
@@ -63,8 +63,8 @@ maxretry = 5
 findtime = 10m
 bantime = 1h
 `,
-	"/etc/logrotate.d/eru": `# managed by eru
-/var/log/eru/*.log {
+	"/etc/logrotate.d/vaire": `# managed by vaire
+/var/log/vaire/*.log {
 	daily
 	rotate 30
 	maxage 30

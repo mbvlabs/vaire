@@ -78,13 +78,13 @@ func phase1Commands() []cmdSpec {
 			use: "version",
 			run: runVersion,
 			flags: []fl{
-				flagHiddenBool("licenses", "Print the third-party notices eru embeds"),
+				flagHiddenBool("licenses", "Print the third-party notices vaire embeds"),
 			},
 			meta: CommandMeta{
-				Summary:   "Print the eru version",
-				WhenToUse: []string{"Check which eru binary is running before an upgrade or a bug report."},
-				Examples:  []string{"eru version", "eru version --output json"},
-				Next:      []string{"eru commands --json"},
+				Summary:   "Print the vaire version",
+				WhenToUse: []string{"Check which vaire binary is running before an upgrade or a bug report."},
+				Examples:  []string{"vaire version", "vaire version --output json"},
+				Next:      []string{"vaire commands --json"},
 			},
 		},
 		{
@@ -99,7 +99,7 @@ func phase1Commands() []cmdSpec {
 			meta: CommandMeta{
 				Summary:   "Show the command catalog and its safety metadata",
 				WhenToUse: []string{"Discover commands, flags, and confirm tokens before choosing an action."},
-				Examples:  []string{"eru commands --json", "eru commands --path \"backup list\"", "eru commands --check-meta"},
+				Examples:  []string{"vaire commands --json", "vaire commands --path \"backup list\"", "vaire commands --check-meta"},
 			},
 		},
 		{
@@ -107,9 +107,9 @@ func phase1Commands() []cmdSpec {
 			run: parentRun,
 			meta: CommandMeta{
 				Summary:   "Print operator and agent guides",
-				WhenToUse: []string{"Read how to operate eru before running mutating commands."},
-				Examples:  []string{"eru guide agents"},
-				Next:      []string{"eru skill install"},
+				WhenToUse: []string{"Read how to operate vaire before running mutating commands."},
+				Examples:  []string{"vaire guide agents"},
+				Next:      []string{"vaire skill install"},
 			},
 			children: []cmdSpec{{
 				use: "agents",
@@ -117,8 +117,8 @@ func phase1Commands() []cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Print the agent operating guide",
 					WhenToUse: []string{"Load the rules for structured output, confirm tokens, and exit codes."},
-					Examples:  []string{"eru guide agents", "eru guide agents --output json"},
-					Next:      []string{"eru skill install", "eru commands --json"},
+					Examples:  []string{"vaire guide agents", "vaire guide agents --output json"},
+					Next:      []string{"vaire skill install", "vaire commands --json"},
 				},
 			}},
 		},
@@ -126,9 +126,9 @@ func phase1Commands() []cmdSpec {
 			use: "skill",
 			run: parentRun,
 			meta: CommandMeta{
-				Summary:   "Install the eru agent skill",
+				Summary:   "Install the vaire agent skill",
 				WhenToUse: []string{"Copy the agent guide into a coding-agent harness."},
-				Examples:  []string{"eru skill install --harness pi"},
+				Examples:  []string{"vaire skill install --harness pi"},
 			},
 			children: []cmdSpec{{
 				use: "install",
@@ -138,14 +138,14 @@ func phase1Commands() []cmdSpec {
 					flagString("dir", "", "Directory to install into (default: the current directory)"),
 				},
 				meta: CommandMeta{
-					Summary:          "Write the eru skill into harness directories",
+					Summary:          "Write the vaire skill into harness directories",
 					WhenToUse:        []string{"Install the agent guide into Codex, Claude, Pi, OpenCode, or Crush."},
-					Examples:         []string{"eru skill install --harness pi", "eru skill install --harness claude,pi --dir /srv/app --dry-run"},
+					Examples:         []string{"vaire skill install --harness pi", "vaire skill install --harness claude,pi --dir /srv/app --dry-run"},
 					Mutating:         true,
 					SupportsDryRun:   true,
 					Prompts:          true,
 					InteractiveFlags: []string{"--harness"},
-					Next:             []string{"eru guide agents"},
+					Next:             []string{"vaire guide agents"},
 				},
 			}},
 		},
@@ -160,15 +160,15 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:          "Create a local context from a transfer bundle",
-				WhenToUse:        []string{"Open a server on a machine that has the transfer bundle and its passphrase from the secrets handoff.", "The file or stdin may hold the bundle alone or the whole copied handoff; eru uses the armored block inside it. The passphrase is never read from the file."},
-				Examples:         []string{"eru login", "eru login bundle.txt --passphrase-file pass.txt", "eru login handoff.md --passphrase-file pass.txt", "eru login - --passphrase-file pass.txt < bundle.txt"},
+				WhenToUse:        []string{"Open a server on a machine that has the transfer bundle and its passphrase from the secrets handoff.", "The file or stdin may hold the bundle alone or the whole copied handoff; vaire uses the armored block inside it. The passphrase is never read from the file."},
+				Examples:         []string{"vaire login", "vaire login bundle.txt --passphrase-file pass.txt", "vaire login handoff.md --passphrase-file pass.txt", "vaire login - --passphrase-file pass.txt < bundle.txt"},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
 				SkipDryRunReason: "login writes a local context from a secrets document and has no host change to preview",
 				Prompts:          true,
 				InteractiveFlags: []string{"--passphrase-stdin", "--passphrase-file"},
 				ErrorCodes:       []string{"secrets_error", "precondition_failed", "input_required", "validation_failed"},
-				Next:             []string{"eru plan", "eru context show"},
+				Next:             []string{"vaire plan", "vaire context show"},
 			},
 		},
 		contextCommands(),
@@ -181,14 +181,14 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:   "Show the steps and file diffs an apply would run",
-				WhenToUse: []string{"Review pending step changes before eru apply. Per-database steps show as <step>@<db>."},
-				Examples:  []string{"eru plan", "eru plan --db app", "eru plan --output json"},
+				WhenToUse: []string{"Review pending step changes before vaire apply. Per-database steps show as <step>@<db>."},
+				Examples:  []string{"vaire plan", "vaire plan --db app", "vaire plan --output json"},
 				Remote:    true,
 				ErrorCodes: []string{
 					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 					"node_version_mismatch", "precondition_failed",
 				},
-				Next: []string{"eru apply"},
+				Next: []string{"vaire apply"},
 			},
 		},
 		{
@@ -207,8 +207,8 @@ func phase1Commands() []cmdSpec {
 					"A restart a step needs waits for --confirm <db>/restart, or --confirm {server}/restart, which restarts every database one at a time.",
 				},
 				Examples: []string{
-					"eru apply", "eru apply --dry-run", "eru apply --db app",
-					"eru apply --step postgres-config-v1@app", "eru apply --confirm app/restart --confirm web/restart",
+					"vaire apply", "vaire apply --dry-run", "vaire apply --db app",
+					"vaire apply --step postgres-config-v1@app", "vaire apply --confirm app/restart --confirm web/restart",
 				},
 				Mutating:         true,
 				SupportsDryRun:   true,
@@ -222,7 +222,7 @@ func phase1Commands() []cmdSpec {
 					"node_version_mismatch", "precondition_failed", "step_failed", "unsafe_action_requires_confirmation",
 					"validation_failed",
 				},
-				Next: []string{"eru plan"},
+				Next: []string{"vaire plan"},
 			},
 		},
 		configCommands(),
@@ -237,10 +237,10 @@ func phase1Commands() []cmdSpec {
 				Summary: "Show the server summary and each database's health, backups and capacity",
 				WhenToUse: []string{"Check whether the databases are serving, how much memory and how many connections each uses, " +
 					"and when each was last backed up. It answers while an apply runs."},
-				Examples:   []string{"eru status", "eru status --db app --output agent", "eru status --watch"},
+				Examples:   []string{"vaire status", "vaire status --db app --output agent", "vaire status --watch"},
 				Remote:     true,
 				ErrorCodes: []string{"precondition_failed"},
-				Next:       []string{"eru doctor", "eru backup list"},
+				Next:       []string{"vaire doctor", "vaire backup list"},
 			},
 		},
 		{
@@ -254,10 +254,10 @@ func phase1Commands() []cmdSpec {
 				Summary: "Run health checks and print a fix command when one exists",
 				WhenToUse: []string{"Explain a failing or warning condition from status, or audit the server " +
 					"(--only security is the CIS-style subset). Any failing check exits 5 with doctor_failed."},
-				Examples:   []string{"eru doctor", "eru doctor --only backups", "eru doctor --only security --json"},
+				Examples:   []string{"vaire doctor", "vaire doctor --only backups", "vaire doctor --only security --json"},
 				Remote:     true,
 				ErrorCodes: []string{"doctor_failed", "precondition_failed"},
-				Next:       []string{"eru status"},
+				Next:       []string{"vaire status"},
 			},
 		},
 		{
@@ -271,9 +271,9 @@ func phase1Commands() []cmdSpec {
 			meta: CommandMeta{
 				Summary: "Show live PostgreSQL and PgBouncer activity",
 				WhenToUse: []string{"Watch sessions, waits, blocking chains and the busiest statements. It reads each database over the tunnel " +
-					"through the session pooler as eru_admin, read-only; --json or no terminal prints one snapshot. Internal sessions and statements are hidden by default, including postgres and maintenance roles (even manually issued work), and sessions whose application_name begins with eru; --all-sessions shows them."},
-				Examples: []string{"eru top", "eru top --db app", "eru top --all-sessions", "eru top --json"},
-				Next:     []string{"eru queries", "eru maint report long-queries"},
+					"through the session pooler as vaire_admin, read-only; --json or no terminal prints one snapshot. Internal sessions and statements are hidden by default, including postgres and maintenance roles (even manually issued work), and sessions whose application_name begins with vaire; --all-sessions shows them."},
+				Examples: []string{"vaire top", "vaire top --db app", "vaire top --all-sessions", "vaire top --json"},
+				Next:     []string{"vaire queries", "vaire maint report long-queries"},
 			},
 		},
 		{
@@ -288,8 +288,8 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:          "Show statement statistics, or reset them",
-				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements: --confirm <db>/stats with --db, <server>/stats for every database. Statements run by internal/administrative roles (eru sql, node setup, maintenance, the exporters) are hidden by default, including postgres and maintenance roles even for manually issued work; --all-sessions shows them. Application owner, migrate, app and read-only roles remain visible."},
-				Examples:         []string{"eru queries --db app --limit 20", "eru queries --order mean", "eru queries --all-sessions", "eru queries --db app --reset --confirm app/stats"},
+				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements: --confirm <db>/stats with --db, <server>/stats for every database. Statements run by internal/administrative roles (vaire sql, node setup, maintenance, the exporters) are hidden by default, including postgres and maintenance roles even for manually issued work; --all-sessions shows them. Application owner, migrate, app and read-only roles remain visible."},
+				Examples:         []string{"vaire queries --db app --limit 20", "vaire queries --order mean", "vaire queries --all-sessions", "vaire queries --db app --reset --confirm app/stats"},
 				Remote:           true,
 				MutatingFlags:    []string{"--reset"},
 				DestructiveFlags: []string{"--reset"},
@@ -297,7 +297,7 @@ func phase1Commands() []cmdSpec {
 				SkipDryRunReason: "--reset is the only mutation and requires a confirm token",
 				ConfirmToken:     "{db}/stats",
 				ErrorCodes:       []string{"precondition_failed", "unsafe_action_requires_confirmation"},
-				Next:             []string{"eru maint report missing-indexes"},
+				Next:             []string{"vaire maint report missing-indexes"},
 			},
 		},
 		{
@@ -311,9 +311,9 @@ func phase1Commands() []cmdSpec {
 				flagString("db", "", "The database whose PostgreSQL log to read; needed when there are several"),
 			},
 			meta: CommandMeta{
-				Summary:   "Read systemd journal lines for an eru-managed unit",
-				WhenToUse: []string{"Inspect Postgres (one database's cluster, postgresql@18-<db>), the transaction pooler (pgbouncer), the session pooler on 5432 (pgbouncer-session), nginx, certificate renewal, or eru run logs."},
-				Examples:  []string{"eru logs postgres --db app", "eru logs pgbouncer --since 1h"},
+				Summary:   "Read systemd journal lines for an vaire-managed unit",
+				WhenToUse: []string{"Inspect Postgres (one database's cluster, postgresql@18-<db>), the transaction pooler (pgbouncer), the session pooler on 5432 (pgbouncer-session), nginx, certificate renewal, or vaire run logs."},
+				Examples:  []string{"vaire logs postgres --db app", "vaire logs pgbouncer --since 1h"},
 				Remote:    true,
 			},
 		},
@@ -327,12 +327,12 @@ func phase1Commands() []cmdSpec {
 				flagBool("write", "Allow a statement that modifies data"),
 			},
 			meta: CommandMeta{
-				Summary: "Run SQL as eru_admin. Read-only unless --write is set",
-				WhenToUse: []string{"Inspect data or, with --write, change it. eru keeps no application database passwords, so it connects as eru_admin through the session pooler on 5432 of the node the database runs on, which routes by --db.",
+				Summary: "Run SQL as vaire_admin. Read-only unless --write is set",
+				WhenToUse: []string{"Inspect data or, with --write, change it. vaire keeps no application database passwords, so it connects as vaire_admin through the session pooler on 5432 of the node the database runs on, which routes by --db.",
 					"Several statements separated by semicolons run in order in one transaction; human output prints each statement's rows or command tag, and --json keeps the last statement's columns, rows and command_tag at the top with every statement's result under results.",
-					"On a protected database a read needs nothing; --write asks once per command, without echo, for the current 6-digit code from the authenticator app set up with eru protect init, before it connects, and the node checks it and hands out a short-lived write login (protect_code_rejected when wrong, reused or locked out). With --yes, without a terminal or with structured output it is refused (database_protected, reason write_requires_human): agents get read-only access to a protected database."},
-				WhenNotToUse:     []string{"Interactive exploration; use eru psql.", "Agents: --write on a protected database. Ask the human to run it at their terminal."},
-				Examples:         []string{"eru sql --db app \"select 1\"", "eru sql --db app \"select count(*) from users; select count(*) from orders\"", "eru sql --db app --write \"alter role app_app set statement_timeout = '30s'\""},
+					"On a protected database a read needs nothing; --write asks once per command, without echo, for the current 6-digit code from the authenticator app set up with vaire protect init, before it connects, and the node checks it and hands out a short-lived write login (protect_code_rejected when wrong, reused or locked out). With --yes, without a terminal or with structured output it is refused (database_protected, reason write_requires_human): agents get read-only access to a protected database."},
+				WhenNotToUse:     []string{"Interactive exploration; use vaire psql.", "Agents: --write on a protected database. Ask the human to run it at their terminal."},
+				Examples:         []string{"vaire sql --db app \"select 1\"", "vaire sql --db app \"select count(*) from users; select count(*) from orders\"", "vaire sql --db app --write \"alter role app_app set statement_timeout = '30s'\""},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
 				SkipDryRunReason: "--write runs SQL immediately and is not a host step",
@@ -348,11 +348,11 @@ func phase1Commands() []cmdSpec {
 				flagBool("write", "Allow statements that modify data"),
 			},
 			meta: CommandMeta{
-				Summary: "Open psql as eru_admin through the WireGuard tunnel, read-only unless --write",
-				WhenToUse: []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; -c before -- is eru's --context.",
+				Summary: "Open psql as vaire_admin through the WireGuard tunnel, read-only unless --write",
+				WhenToUse: []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; -c before -- is vaire's --context.",
 					"On a protected database --write asks once, when it starts and before psql connects, for the current 6-digit code from the authenticator app; the session stays writable for its whole length. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). Reads need no code."},
 				Prerequisites: []string{"psql 16 or newer on PATH"},
-				Examples:      []string{"eru psql --db app", "eru psql --db app --write", `eru psql --db app -- -c "select 1"`},
+				Examples:      []string{"vaire psql --db app", "vaire psql --db app --write", `vaire psql --db app -- -c "select 1"`},
 				ErrorCodes:    []string{"database_protected", "protect_code_rejected"},
 			},
 		},
@@ -365,12 +365,12 @@ func phase1Commands() []cmdSpec {
 				flagBool("write", "Allow statements that modify data"),
 			},
 			meta: CommandMeta{
-				Summary: "Open a usql console on a database as eru_admin through the WireGuard tunnel, read-only unless --write",
-				WhenToUse: []string{"Explore a database interactively without installing psql. eru verifies the server certificate itself.",
+				Summary: "Open a usql console on a database as vaire_admin through the WireGuard tunnel, read-only unless --write",
+				WhenToUse: []string{"Explore a database interactively without installing psql. vaire verifies the server certificate itself.",
 					"On a protected database --write asks once, when it starts and before the console connects, for the current 6-digit code from the authenticator app; the session stays writable for its whole length. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). Reads need no code."},
-				WhenNotToUse:  []string{"Agents and scripts; use eru sql."},
-				Prerequisites: []string{"usql on PATH, or let eru download its pinned copy"},
-				Examples:      []string{"eru console app", "eru console app --write"},
+				WhenNotToUse:  []string{"Agents and scripts; use vaire sql."},
+				Prerequisites: []string{"usql on PATH, or let vaire download its pinned copy"},
+				Examples:      []string{"vaire console app", "vaire console app --write"},
 				ErrorCodes:    []string{"database_protected", "protect_code_rejected"},
 			},
 		},
@@ -388,7 +388,7 @@ func phase1Commands() []cmdSpec {
 					"Point a GUI or library at 127.0.0.1 through the tunnel. Both poolers route by the database name in the DSN.",
 					"Run migrations as <db>_migrate with --target postgres, the session pooler on 5432: the transaction pooler refuses the migrate role, and 5432 is closed to the internet unless network.expose_postgres is set.",
 				},
-				Examples: []string{"eru tunnel", "eru tunnel --db app --target postgres --local-port 6544"},
+				Examples: []string{"vaire tunnel", "vaire tunnel --db app --target postgres --local-port 6544"},
 			},
 			children: []cmdSpec{
 				{
@@ -396,8 +396,8 @@ func phase1Commands() []cmdSpec {
 					run: runTunnelStatus,
 					meta: CommandMeta{
 						Summary:    "Show the context's shared tunnel daemon",
-						WhenToUse:  []string{"See whether the tunnel daemon runs, which eru commands use it, its last WireGuard handshake, and when it exits idle."},
-						Examples:   []string{"eru tunnel status", "eru tunnel status --output json"},
+						WhenToUse:  []string{"See whether the tunnel daemon runs, which vaire commands use it, its last WireGuard handshake, and when it exits idle."},
+						Examples:   []string{"vaire tunnel status", "vaire tunnel status --output json"},
 						ErrorCodes: []string{"transport_failed", "context_not_found"},
 					},
 				},
@@ -413,8 +413,8 @@ func phase1Commands() []cmdSpec {
 							"Restart the tunnel: without --force the daemon takes no new commands and exits once the running ones finish; the next command starts a new one.",
 							"--force closes it now. Node work keeps running either way; job commands re-attach and other commands report stream_lost.",
 						},
-						Examples:         []string{"eru tunnel stop", "eru tunnel stop --force"},
-						Next:             []string{"eru tunnel status"},
+						Examples:         []string{"vaire tunnel stop", "vaire tunnel stop --force"},
+						Next:             []string{"vaire tunnel status"},
 						Mutating:         true,
 						SkipDryRunCheck:  true,
 						SkipDryRunReason: "stopping the local tunnel daemon changes nothing on the node",
@@ -427,9 +427,9 @@ func phase1Commands() []cmdSpec {
 					run:    runTunnelServe,
 					meta: CommandMeta{
 						Summary:          "Run the context's shared tunnel daemon",
-						WhenToUse:        []string{"eru commands spawn this themselves; it owns the context's only WireGuard device and serves tunnel.sock."},
+						WhenToUse:        []string{"vaire commands spawn this themselves; it owns the context's only WireGuard device and serves tunnel.sock."},
 						WhenNotToUse:     []string{"Do not run it by hand; any remote command starts it."},
-						Examples:         []string{"eru tunnel serve --context prod"},
+						Examples:         []string{"vaire tunnel serve --context prod"},
 						Mutating:         true,
 						SkipDryRunCheck:  true,
 						SkipDryRunReason: "the daemon only proxies connections into the tunnel",
@@ -446,8 +446,8 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:   "Open an SSH session to the node over WireGuard",
-				WhenToUse: []string{"Reach the admin user when a task has no eru command yet.", "With stdout piped or redirected, --command runs without a PTY so the output stays clean; sudo then cannot ask for a password."},
-				Examples:  []string{"eru ssh", "eru ssh --command uptime"},
+				WhenToUse: []string{"Reach the admin user when a task has no vaire command yet.", "With stdout piped or redirected, --command runs without a PTY so the output stays clean; sudo then cannot ask for a password."},
+				Examples:  []string{"vaire ssh", "vaire ssh --command uptime"},
 			},
 		},
 		dbCommands(),
@@ -467,7 +467,7 @@ func phase1Commands() []cmdSpec {
 			meta: CommandMeta{
 				Summary:   "Show a replacement secrets handoff",
 				WhenToUse: []string{"Rebuild the handoff and transfer bundle after credentials change."},
-				Examples:  []string{"eru secrets export"},
+				Examples:  []string{"vaire secrets export"},
 			},
 			children: []cmdSpec{{
 				use: "export",
@@ -479,8 +479,8 @@ func phase1Commands() []cmdSpec {
 				meta: CommandMeta{
 					Summary: "Rebuild the secrets handoff from the local context",
 					WhenToUse: []string{"Replace the stored secrets after a password rotation.",
-						"The whole document is shown, so a human factor is required: the master password set with eru secrets password set, or a current code from the authenticator app that the node verifies. There is no flag or environment variable for either, so with --json, --no-input or no terminal it is refused (secret_gate_required) and an agent cannot export."},
-					Examples:         []string{"eru secrets export", "eru secrets export --out bundle.txt --reveal-passphrase --output json"},
+						"The whole document is shown, so a human factor is required: the master password set with vaire secrets password set, or a current code from the authenticator app that the node verifies. There is no flag or environment variable for either, so with --json, --no-input or no terminal it is refused (secret_gate_required) and an agent cannot export."},
+					Examples:         []string{"vaire secrets export", "vaire secrets export --out bundle.txt --reveal-passphrase --output json"},
 					Mutating:         true,
 					Prompts:          true,
 					InteractiveFlags: []string{"--out", "--reveal-passphrase"},
@@ -493,16 +493,16 @@ func phase1Commands() []cmdSpec {
 				run: parentRun,
 				meta: CommandMeta{
 					Summary:   "Set the master password that gates secrets export",
-					WhenToUse: []string{"Guard eru secrets export and a new handoff with a password that lives only in the context as an argon2id hash."},
-					Examples:  []string{"eru secrets password set"},
+					WhenToUse: []string{"Guard vaire secrets export and a new handoff with a password that lives only in the context as an argon2id hash."},
+					Examples:  []string{"vaire secrets password set"},
 				},
 				children: []cmdSpec{{
 					use: "set",
 					run: runSecretsPasswordSet,
 					meta: CommandMeta{
 						Summary:          "Set or change the master password",
-						WhenToUse:        []string{"Set a master password, or change it (the current password, or a code from the authenticator app, is required to change it). It is never taken from a flag and only its argon2id hash is stored (0600); eru login carries the hash from the document to another machine. It prompts for the password at a terminal and is refused without one."},
-						Examples:         []string{"eru secrets password set"},
+						WhenToUse:        []string{"Set a master password, or change it (the current password, or a code from the authenticator app, is required to change it). It is never taken from a flag and only its argon2id hash is stored (0600); vaire login carries the hash from the document to another machine. It prompts for the password at a terminal and is refused without one."},
+						Examples:         []string{"vaire secrets password set"},
 						Mutating:         true,
 						SkipDryRunCheck:  true,
 						SkipDryRunReason: "the password is never previewed or passed by flag",
@@ -517,7 +517,7 @@ func phase1Commands() []cmdSpec {
 			meta: CommandMeta{
 				Summary:   "Export the operator WireGuard configuration",
 				WhenToUse: []string{"Install a system WireGuard interface instead of the userspace tunnel."},
-				Examples:  []string{"eru wg export"},
+				Examples:  []string{"vaire wg export"},
 			},
 			children: []cmdSpec{{
 				use: "export",
@@ -529,7 +529,7 @@ func phase1Commands() []cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Write or install a system WireGuard config for this operator",
 					WhenToUse:        []string{"Use the kernel WireGuard interface instead of the embedded userspace tunnel."},
-					Examples:         []string{"eru wg export --out prod.conf", "eru wg export --install --dry-run"},
+					Examples:         []string{"vaire wg export --out prod.conf", "vaire wg export --install --dry-run"},
 					Mutating:         true,
 					SupportsDryRun:   true,
 					Prompts:          true,
@@ -547,9 +547,9 @@ func phase1Commands() []cmdSpec {
 				flagBool("skip-nodes", "Update only the local binary"),
 			},
 			meta: CommandMeta{
-				Summary:          "Install a signed eru release and upgrade nodes",
+				Summary:          "Install a signed vaire release and upgrade nodes",
 				WhenToUse:        []string{"Move the operator CLI and its nodes to a newer signed release."},
-				Examples:         []string{"eru upgrade", "eru upgrade --version 1.2.0 --dry-run"},
+				Examples:         []string{"vaire upgrade", "vaire upgrade --version 1.2.0 --dry-run"},
 				Mutating:         true,
 				SupportsDryRun:   true,
 				Prompts:          true,
@@ -562,7 +562,7 @@ func phase1Commands() []cmdSpec {
 					"precondition_failed",
 					"input_required",
 				},
-				Next: []string{"eru version"},
+				Next: []string{"vaire version"},
 			},
 		},
 		{
@@ -571,7 +571,7 @@ func phase1Commands() []cmdSpec {
 			meta: CommandMeta{
 				Summary:   "Update PostgreSQL packages",
 				WhenToUse: []string{"Install held PostgreSQL, PgBouncer, and pgBackRest package updates."},
-				Examples:  []string{"eru pg update"},
+				Examples:  []string{"vaire pg update"},
 			},
 			children: []cmdSpec{{
 				use: "update",
@@ -582,7 +582,7 @@ func phase1Commands() []cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Upgrade held Postgres-related packages",
 					WhenToUse:      []string{"Apply a minor package update after a VPS backup and an incremental database backup."},
-					Examples:       []string{"eru pg update --dry-run", "eru pg update --now --confirm prod/restart"},
+					Examples:       []string{"vaire pg update --dry-run", "vaire pg update --now --confirm prod/restart"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -602,7 +602,7 @@ func contextCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "List and switch local server contexts",
 			WhenToUse: []string{"Choose which server later commands talk to."},
-			Examples:  []string{"eru context list", "eru context use prod"},
+			Examples:  []string{"vaire context list", "vaire context use prod"},
 		},
 		children: []cmdSpec{
 			{
@@ -611,7 +611,7 @@ func contextCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "List local contexts",
 					WhenToUse: []string{"See which servers this machine can operate."},
-					Examples:  []string{"eru context list"},
+					Examples:  []string{"vaire context list"},
 				},
 			},
 			{
@@ -621,7 +621,7 @@ func contextCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Show one context, or the current context",
 					WhenToUse: []string{"Read addresses, keys' public parts, and the operator name for a context."},
-					Examples:  []string{"eru context show", "eru context show prod"},
+					Examples:  []string{"vaire context show", "vaire context show prod"},
 				},
 			},
 			{
@@ -631,7 +631,7 @@ func contextCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Select the current context",
 					WhenToUse:        []string{"Point later commands at a different server."},
-					Examples:         []string{"eru context use prod"},
+					Examples:         []string{"vaire context use prod"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "use switches the local current-context pointer",
@@ -644,7 +644,7 @@ func contextCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Delete a local context",
 					WhenToUse:        []string{"Remove operator credentials for a server from this machine."},
-					Examples:         []string{"eru context remove prod --confirm prod"},
+					Examples:         []string{"vaire context remove prod --confirm prod"},
 					Mutating:         true,
 					Destructive:      true,
 					ConfirmToken:     "{name}",
@@ -661,11 +661,11 @@ func contextCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Point a context at the server's new public address",
-					WhenToUse:      []string{"After the server was rebuilt on a new IP (server init --restore on another machine). In acme mode eru finds the new address in DNS by itself."},
-					Examples:       []string{"eru context set-address 198.51.100.7", "eru context set-address '[2001:db8::7]:51820' --name prod"},
+					WhenToUse:      []string{"After the server was rebuilt on a new IP (server init --restore on another machine). In acme mode vaire finds the new address in DNS by itself."},
+					Examples:       []string{"vaire context set-address 198.51.100.7", "vaire context set-address '[2001:db8::7]:51820' --name prod"},
 					Mutating:       true,
 					SupportsDryRun: true,
-					Next:           []string{"eru status"},
+					Next:           []string{"vaire status"},
 				},
 			},
 		},
@@ -679,7 +679,7 @@ func serverCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "Set up a server",
 			WhenToUse: []string{"Bootstrap a new server or rebuild one from a transfer bundle."},
-			Examples:  []string{"eru server init --host root@203.0.113.10"},
+			Examples:  []string{"vaire server init --host root@203.0.113.10"},
 			Remote:    true,
 		},
 		children: []cmdSpec{{
@@ -695,7 +695,7 @@ func serverCommands() cmdSpec {
 				flagString("name", "", "Server name"),
 				flagString("node-name", "", "The master's node name; its hostname is <node-name>.<domain> (default db1)"),
 				flagString("domain", "", "Base domain: each node is <node>.<domain>"),
-				flagString("admin-user", "", "Admin login user created on the server (default eru)"),
+				flagString("admin-user", "", "Admin login user created on the server (default vaire)"),
 				flagString("timezone", "", "Server timezone (default UTC)"),
 				flagString("data-root", "", "Directory holding the PostgreSQL data directories (default /var/lib/postgresql/18)"),
 				flagString("acme-email", "", "ACME account contact email (optional)"),
@@ -732,10 +732,10 @@ func serverCommands() cmdSpec {
 				Summary:   "Bootstrap a new server, this machine, or a rebuild from a backup",
 				WhenToUse: []string{"Turn a fresh Debian or Ubuntu server into the central command, or rebuild one from a transfer bundle."},
 				Examples: []string{
-					"eru server init --host root@203.0.113.10 --answers answers.toml --no-input --confirm prod",
-					"eru server init --local",
-					"eru server init --discard --name prod",
-					"eru server init --restore --host root@198.51.100.7 --confirm prod/replace",
+					"vaire server init --host root@203.0.113.10 --answers answers.toml --no-input --confirm prod",
+					"vaire server init --local",
+					"vaire server init --discard --name prod",
+					"vaire server init --restore --host root@198.51.100.7 --confirm prod/replace",
 				},
 				Mutating:       true,
 				SupportsDryRun: true,
@@ -771,7 +771,7 @@ func serverCommands() cmdSpec {
 					"transport_failed", "host_key_mismatch", "node_version_mismatch", "precondition_failed", "step_failed",
 					"lockdown_failed", "release_verification_failed", "bundle_corrupt", "bundle_not_found",
 				},
-				Next: []string{"eru plan", "eru db recover --all"},
+				Next: []string{"vaire plan", "vaire db recover --all"},
 			},
 		}, serverBackupCommands()},
 	}
@@ -784,7 +784,7 @@ func configCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "Show and edit cluster.toml",
 			WhenToUse: []string{"Read or change desired state, then apply it."},
-			Examples:  []string{"eru config show", "eru config set postgres.settings.work_mem 64MB"},
+			Examples:  []string{"vaire config show", "vaire config set postgres.settings.work_mem 64MB"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -794,7 +794,7 @@ func configCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Print cluster.toml",
 					WhenToUse: []string{"Read the desired state stored on the node."},
-					Examples:  []string{"eru config show"},
+					Examples:  []string{"vaire config show"},
 					Remote:    true,
 				},
 			},
@@ -805,7 +805,7 @@ func configCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Print one cluster.toml value",
 					WhenToUse: []string{"Read a dotted key such as clusters.app.memory."},
-					Examples:  []string{"eru config get clusters.app.memory"},
+					Examples:  []string{"vaire config get clusters.app.memory"},
 					Remote:    true,
 				},
 			},
@@ -818,19 +818,19 @@ func configCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:   "Set one cluster.toml key",
-					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database; it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized). Setting it false, or removing a protected entry, asks for the current 6-digit code from the authenticator app, typed without echo at an interactive terminal; the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it. eru db protect and eru db unprotect make the same change for one or more databases."},
+					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database; it is refused until vaire protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized). Setting it false, or removing a protected entry, asks for the current 6-digit code from the authenticator app, typed without echo at an interactive terminal; the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it. vaire db protect and vaire db unprotect make the same change for one or more databases."},
 					Examples: []string{
-						"eru config set postgres.settings.work_mem 64MB",
-						"eru config set clusters.app.size large",
-						"eru config set clusters.app.settings.work_mem 32MB --apply --dry-run",
-						"eru config set clusters.app.backup.retention_full 1",
-						"eru config set clusters.app.protected true",
+						"vaire config set postgres.settings.work_mem 64MB",
+						"vaire config set clusters.app.size large",
+						"vaire config set clusters.app.settings.work_mem 32MB --apply --dry-run",
+						"vaire config set clusters.app.backup.retention_full 1",
+						"vaire config set clusters.app.protected true",
 					},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
 					NeedsRestart:   "maybe",
-					Next:           []string{"eru apply"},
+					Next:           []string{"vaire apply"},
 				},
 			},
 			{
@@ -841,8 +841,8 @@ func configCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:          "Edit cluster.toml in a local editor",
-					WhenToUse:        []string{"Change several settings together. Non-interactive edits use eru config set."},
-					Examples:         []string{"eru config edit", "eru config edit --apply --dry-run"},
+					WhenToUse:        []string{"Change several settings together. Non-interactive edits use vaire config set."},
+					Examples:         []string{"vaire config edit", "vaire config edit --apply --dry-run"},
 					Mutating:         true,
 					SupportsDryRun:   true,
 					Prompts:          true,
@@ -857,7 +857,7 @@ func configCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Validate cluster.toml",
 					WhenToUse: []string{"Check names, schedules, CIDRs, and the extension catalog before apply."},
-					Examples:  []string{"eru config validate"},
+					Examples:  []string{"vaire config validate"},
 					Remote:    true,
 				},
 			},
@@ -871,8 +871,8 @@ func protectCommands() cmdSpec {
 		run: parentRun,
 		meta: CommandMeta{
 			Summary:   "Set up the two-factor code that lifts a database's protection, and protect databases",
-			WhenToUse: []string{"Protected databases (clusters.<db>.protected) refuse db drop, a shrinking resize, credential rotation and restore promote/undo. Lifting the protection asks for a TOTP code from an authenticator app; eru protect init sets that up and protects the databases in the same run. eru db protect and eru db unprotect change it later."},
-			Examples:  []string{"eru protect init", "eru protect init --all", "eru protect status"},
+			WhenToUse: []string{"Protected databases (clusters.<db>.protected) refuse db drop, a shrinking resize, credential rotation and restore promote/undo. Lifting the protection asks for a TOTP code from an authenticator app; vaire protect init sets that up and protects the databases in the same run. vaire db protect and vaire db unprotect change it later."},
+			Examples:  []string{"vaire protect init", "vaire protect init --all", "vaire protect status"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -888,10 +888,10 @@ func protectCommands() cmdSpec {
 					Summary: "Set up the TOTP secret that lifting a database's protection asks a code from, and protect databases",
 					WhenToUse: []string{
 						"Once per cluster, by a human, before the first database is protected: the node makes a 160-bit secret and keeps it root-only, this shows it once as a QR code (and as base32), and a code from the authenticator app confirms it before the node uses it. Interactive only: without a terminal, with --yes or with structured output it is refused (input_required).",
-						"Once the code is confirmed it protects databases in the same run: the ones --db names (repeatable) or every one with --all, or else it asks which of the unprotected databases to protect, all of them picked to start with. An unknown --db name is refused before the QR code is shown. The result names the protected databases (data.protected_databases, data.newly_protected) and gives eru db protect with the names of any left unprotected. With no databases yet, create them protected with eru db create --protected.",
+						"Once the code is confirmed it protects databases in the same run: the ones --db names (repeatable) or every one with --all, or else it asks which of the unprotected databases to protect, all of them picked to start with. An unknown --db name is refused before the QR code is shown. The result names the protected databases (data.protected_databases, data.newly_protected) and gives vaire db protect with the names of any left unprotected. With no databases yet, create them protected with vaire db create --protected.",
 						"With a secret already set up it is refused (precondition_failed, reason protect_already_initialized) unless --rotate, which asks for a current code from the old secret first; the old one keeps working until the new one is confirmed.",
 					},
-					Examples:         []string{"eru protect init", "eru protect init --all", "eru protect init --db app --db billing", "eru protect init --rotate"},
+					Examples:         []string{"vaire protect init", "vaire protect init --all", "vaire protect init --db app --db billing", "vaire protect init --rotate"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "init is interactive and only writes the node's TOTP secret, which has nothing to preview",
@@ -905,7 +905,7 @@ func protectCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Show whether two-factor protection is set up, any lockout, and each database's protection",
 					WhenToUse: []string{"Check before protecting a database or lifting a protection: it lists every database with protected yes or no (data.databases). Five wrong codes in a row lock codes out for 15 minutes; status shows until when."},
-					Examples:  []string{"eru protect status"},
+					Examples:  []string{"vaire protect status"},
 					Remote:    true,
 				},
 			},
@@ -920,7 +920,7 @@ func dbCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "Create, list, resize, fork, drop, protect, and rotate application databases",
 			WhenToUse: []string{"Manage databases declared for the cluster."},
-			Examples:  []string{"eru db list", "eru db create app"},
+			Examples:  []string{"vaire db list", "vaire db create app"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -930,8 +930,8 @@ func dbCommands() cmdSpec {
 				run: runDBList,
 				meta: CommandMeta{
 					Summary:   "List application databases with their node, host, size, limits, stanza, protection and state",
-					WhenToUse: []string{"See the databases eru manages: where each runs, its URL host, its size and limits, its pgBackRest stanza, whether it is protected (PROTECTED, data.databases[].protected), and whether its cluster is running, stopped, pending or orphaned (a cluster on the server that cluster.toml doesn't list)."},
-					Examples:  []string{"eru db list"},
+					WhenToUse: []string{"See the databases vaire manages: where each runs, its URL host, its size and limits, its pgBackRest stanza, whether it is protected (PROTECTED, data.databases[].protected), and whether its cluster is running, stopped, pending or orphaned (a cluster on the server that cluster.toml doesn't list)."},
+					Examples:  []string{"vaire db list"},
 					Remote:    true,
 				},
 			},
@@ -945,13 +945,13 @@ func dbCommands() cmdSpec {
 					flagString("size", "", "Size of the database's cluster: nano, small, medium, large, xlarge or custom (default [postgres] default_size)"),
 					flagString("memory", "", "Memory for the cluster, such as 768MiB or 2GiB; overrides the size's (custom needs it)"),
 					flagString("profile", "", "Workload profile for its tuning: oltp, mixed or analytics (default [postgres] profile)"),
-					flagBool("protected", "Protect it (clusters.<db>.protected): db drop, a shrinking resize, credential rotation and restore promote/undo are refused even with --confirm. Needs eru protect init first"),
+					flagBool("protected", "Protect it (clusters.<db>.protected): db drop, a shrinking resize, credential rotation and restore promote/undo are refused even with --confirm. Needs vaire protect init first"),
 					flagBool("allow-overcommit", "Create it even when its size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
 				},
 				meta: CommandMeta{
 					Summary:        "Create a database in its own PostgreSQL cluster, with its migrate, app, and read-only roles",
-					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory it gets [postgres] default_size. A size that pushes the databases' sizes past the server's memory budget (RAM less the reserve) is refused, with or without --size (precondition_failed, reason memory_overcommitted): the error gives the numbers and the largest size that still fits with the complete command (details.largest_size, details.suggested_command), or says no size fits and to resize another database down or use a bigger server. Nothing steps down by itself. --allow-overcommit creates it anyway with the warning memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). Creating a database changes the other databases' share of the server, so their changed postgres-config is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending with the confirm token). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; eru apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and eru apply finishes it. --protected marks it protected (see eru db protect); it is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized)."},
-					Examples:       []string{"eru db create app --size small", "eru db create app --protected", "eru db create app --memory 768MiB --profile oltp", "eru db create big --size xlarge --allow-overcommit", "eru db create app --dry-run"},
+					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory it gets [postgres] default_size. A size that pushes the databases' sizes past the server's memory budget (RAM less the reserve) is refused, with or without --size (precondition_failed, reason memory_overcommitted): the error gives the numbers and the largest size that still fits with the complete command (details.largest_size, details.suggested_command), or says no size fits and to resize another database down or use a bigger server. Nothing steps down by itself. --allow-overcommit creates it anyway with the warning memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). Creating a database changes the other databases' share of the server, so their changed postgres-config is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending with the confirm token). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; vaire apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and vaire apply finishes it. --protected marks it protected (see vaire db protect); it is refused until vaire protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized)."},
+					Examples:       []string{"vaire db create app --size small", "vaire db create app --protected", "vaire db create app --memory 768MiB --profile oltp", "vaire db create big --size xlarge --allow-overcommit", "vaire db create app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -967,7 +967,7 @@ func dbCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Drop a database and its roles after a final dump to the bucket",
 					WhenToUse:      []string{"Remove an application database the human has approved dropping. With backups on, a final age-encrypted dump goes to the bucket first. Its cluster is stopped and deleted with its data, roles, pooler entries and timers. With backups on, its pgBackRest stanza is kept (data.stanza_kept) and recorded as dropped, so its backups stay restorable until they expire. The other databases' changed postgres-config (their larger share of the server) is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending). Dropping the last database stops both poolers. A protected database (clusters.<db>.protected) is refused with database_protected, even with --confirm."},
-					Examples:       []string{"eru db drop app --confirm app", "eru db drop app --dry-run"},
+					Examples:       []string{"vaire db drop app --confirm app", "vaire db drop app --dry-run"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
@@ -989,8 +989,8 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Change a database's size or memory",
-					WhenToUse:      []string{"Give a database more or less memory, CPU weight and connections. The cgroup limits and reload-only settings change live; shared_buffers, max_connections and huge_pages need a restart of that database only, confirmed with --confirm <db>/restart, or left pending with --defer-restart (finish later with eru apply --db <db> --confirm <db>/restart). A size that couldn't start is refused (would_not_start). A larger size that pushes the databases' sizes past the server's memory budget is refused (precondition_failed, reason memory_overcommitted) with the numbers and the largest larger size that still fits, as a complete command, or says none does; --allow-overcommit grows it anyway with the warning memory_overcommitted. Shrinking is never refused for the budget; shrinking below current use warns (shrink_below_use). eru config set clusters.<db>.size does the same change without applying it. Shrinking a protected database is refused (database_protected)."},
-					Examples:       []string{"eru db resize app --size large --confirm app/restart", "eru db resize app --memory 768MiB --defer-restart", "eru db resize app --size xlarge --confirm app/restart --allow-overcommit", "eru db resize app --size small --dry-run"},
+					WhenToUse:      []string{"Give a database more or less memory, CPU weight and connections. The cgroup limits and reload-only settings change live; shared_buffers, max_connections and huge_pages need a restart of that database only, confirmed with --confirm <db>/restart, or left pending with --defer-restart (finish later with vaire apply --db <db> --confirm <db>/restart). A size that couldn't start is refused (would_not_start). A larger size that pushes the databases' sizes past the server's memory budget is refused (precondition_failed, reason memory_overcommitted) with the numbers and the largest larger size that still fits, as a complete command, or says none does; --allow-overcommit grows it anyway with the warning memory_overcommitted. Shrinking is never refused for the budget; shrinking below current use warns (shrink_below_use). vaire config set clusters.<db>.size does the same change without applying it. Shrinking a protected database is refused (database_protected)."},
+					Examples:       []string{"vaire db resize app --size large --confirm app/restart", "vaire db resize app --memory 768MiB --defer-restart", "vaire db resize app --size xlarge --confirm app/restart --allow-overcommit", "vaire db resize app --size small --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1010,8 +1010,8 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Copy one database under a new name, now or at a point in time",
-					WhenToUse:      []string{"Rehearse a migration on yesterday's data, or investigate a past state. The fork is a cluster of its own: a physical copy of the source, from its stanza at --at or from the live source without it (which works without backups), with the database and roles renamed and new passwords, printed once. It takes the source's size, limits and settings, 90-overrides.conf included, or the size --size gives it; like db create, a size that pushes the databases' sizes past the server's memory budget is refused (precondition_failed, reason memory_overcommitted) with the largest size that fits as a complete command (eru db fork <db> --name <new> --size <size>), and --allow-overcommit forks anyway with the warning; the other databases' changed postgres-config is applied in the same job as a reload; with backups on it gets its own stanza and first full backup (warning first_backup_failed when that fails). Needs free space for one copy of the source."},
-					Examples:       []string{"eru db fork app", "eru db fork app --at 2026-10-09T12:00:00Z --name app_before", "eru db fork app --name app_small --size small"},
+					WhenToUse:      []string{"Rehearse a migration on yesterday's data, or investigate a past state. The fork is a cluster of its own: a physical copy of the source, from its stanza at --at or from the live source without it (which works without backups), with the database and roles renamed and new passwords, printed once. It takes the source's size, limits and settings, 90-overrides.conf included, or the size --size gives it; like db create, a size that pushes the databases' sizes past the server's memory budget is refused (precondition_failed, reason memory_overcommitted) with the largest size that fits as a complete command (vaire db fork <db> --name <new> --size <size>), and --allow-overcommit forks anyway with the warning; the other databases' changed postgres-config is applied in the same job as a reload; with backups on it gets its own stanza and first full backup (warning first_backup_failed when that fails). Needs free space for one copy of the source."},
+					Examples:       []string{"vaire db fork app", "vaire db fork app --at 2026-10-09T12:00:00Z --name app_before", "vaire db fork app --name app_small --size small"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1027,8 +1027,8 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Protect databases so drop, a shrinking resize, credential rotation and restore promote/undo are refused",
-					WhenToUse:      []string{"Guard production databases against a drop or a destructive restore, by an agent or a slip. Takes one or more database names, or --all. It sets clusters.<db>.protected true in cluster.toml, as eru config set clusters.<db>.protected true does; the node checks it live, so nothing needs applying. Databases already protected are reported and left alone. It is refused until eru protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized), since a protection must be liftable. An unknown name is refused before anything changes (precondition_failed, reason database_not_found). Lifting it is eru db unprotect, for a human with the authenticator app."},
-					Examples:       []string{"eru db protect app", "eru db protect app billing", "eru db protect --all", "eru db protect app --dry-run"},
+					WhenToUse:      []string{"Guard production databases against a drop or a destructive restore, by an agent or a slip. Takes one or more database names, or --all. It sets clusters.<db>.protected true in cluster.toml, as vaire config set clusters.<db>.protected true does; the node checks it live, so nothing needs applying. Databases already protected are reported and left alone. It is refused until vaire protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized), since a protection must be liftable. An unknown name is refused before anything changes (precondition_failed, reason database_not_found). Lifting it is vaire db unprotect, for a human with the authenticator app."},
+					Examples:       []string{"vaire db protect app", "vaire db protect app billing", "vaire db protect --all", "vaire db protect app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1041,9 +1041,9 @@ func dbCommands() cmdSpec {
 				run:  runDBUnprotect,
 				meta: CommandMeta{
 					Summary:        "Lift the protection of databases, with a code from the authenticator app",
-					WhenToUse:      []string{"A human lifts a protection before dropping, shrinking, rotating or restoring a protected database. It asks once, without echo, for the current 6-digit code from the authenticator app set up with eru protect init, for every database named, and the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected, reason unprotect_requires_human), so an agent cannot lift it. It sets clusters.<db>.protected false, as eru config set clusters.<db>.protected false does. Databases that are not protected are reported and left alone."},
+					WhenToUse:      []string{"A human lifts a protection before dropping, shrinking, rotating or restoring a protected database. It asks once, without echo, for the current 6-digit code from the authenticator app set up with vaire protect init, for every database named, and the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected, reason unprotect_requires_human), so an agent cannot lift it. It sets clusters.<db>.protected false, as vaire config set clusters.<db>.protected false does. Databases that are not protected are reported and left alone."},
 					WhenNotToUse:   []string{"Agents: never. Ask the human to run it at their terminal."},
-					Examples:       []string{"eru db unprotect app", "eru db unprotect app billing"},
+					Examples:       []string{"vaire db unprotect app", "vaire db unprotect app billing"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1055,13 +1055,13 @@ func dbCommands() cmdSpec {
 				args: cobra.ExactArgs(1),
 				run:  runDBCredentials,
 				flags: []fl{
-					flagBool("rotate", "Generate a new password for --role (required: eru keeps no database passwords)"),
+					flagBool("rotate", "Generate a new password for --role (required: vaire keeps no database passwords)"),
 					flagString("role", "app", "Role to rotate: migrate, app, or ro"),
 				},
 				meta: CommandMeta{
 					Summary:          "Rotate one role password and print the new credentials",
-					WhenToUse:        []string{"A database password was lost or leaked: rotate it with --rotate --confirm <db>. eru does not keep database passwords. Refused for a protected database (database_protected)."},
-					Examples:         []string{"eru db credentials app --rotate --role app --confirm app"},
+					WhenToUse:        []string{"A database password was lost or leaked: rotate it with --rotate --confirm <db>. vaire does not keep database passwords. Refused for a protected database (database_protected)."},
+					Examples:         []string{"vaire db credentials app --rotate --role app --confirm app"},
 					MutatingFlags:    []string{"--rotate"},
 					DestructiveFlags: []string{"--rotate"},
 					SupportsDryRun:   true,
@@ -1080,7 +1080,7 @@ func extCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "List and change PostgreSQL extensions",
 			WhenToUse: []string{"Install a catalog extension into one or more databases."},
-			Examples:  []string{"eru ext list", "eru ext add vector --db app"},
+			Examples:  []string{"vaire ext list", "vaire ext add vector --db app"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -1093,7 +1093,7 @@ func extCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "List catalog extensions and where they are installed",
 					WhenToUse: []string{"See available, installed, and outdated extensions."},
-					Examples:  []string{"eru ext list", "eru ext list --db app"},
+					Examples:  []string{"vaire ext list", "vaire ext list --db app"},
 					Remote:    true,
 				},
 			},
@@ -1107,7 +1107,7 @@ func extCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Install an extension and persist it in cluster.toml",
 					WhenToUse:      []string{"Add a catalog extension. Preload extensions need a Postgres restart."},
-					Examples:       []string{"eru ext add vector --db app", "eru ext add pg_cron --confirm prod/restart"},
+					Examples:       []string{"vaire ext add vector --db app", "vaire ext add pg_cron --confirm prod/restart"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1126,7 +1126,7 @@ func extCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Drop an extension from a database",
 					WhenToUse:      []string{"Remove an extension after the human approves the database confirm token."},
-					Examples:       []string{"eru ext remove vector --db app --confirm app"},
+					Examples:       []string{"vaire ext remove vector --db app --confirm app"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
@@ -1146,7 +1146,7 @@ func tuneCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "Show and apply hardware-derived Postgres settings",
 			WhenToUse: []string{"Inspect or install the tuning calculator's settings."},
-			Examples:  []string{"eru tune explain"},
+			Examples:  []string{"vaire tune explain"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -1158,8 +1158,8 @@ func tuneCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:   "Print the server's budget sheet and the calculated settings",
-					WhenToUse: []string{"See how the server's memory is split between databases (each one's size, limits, and what is allocated, free or overcommitted), whether IOWeight is enforced, and the values eru would write for a database's cluster. Oversubscription comes back as warnings."},
-					Examples:  []string{"eru tune show", "eru tune show --db app"},
+					WhenToUse: []string{"See how the server's memory is split between databases (each one's size, limits, and what is allocated, free or overcommitted), whether IOWeight is enforced, and the values vaire would write for a database's cluster. Oversubscription comes back as warnings."},
+					Examples:  []string{"vaire tune show", "vaire tune show --db app"},
 					Remote:    true,
 				},
 			},
@@ -1172,7 +1172,7 @@ func tuneCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Print tuning inputs and the reason for each setting",
 					WhenToUse: []string{"Understand why a memory or WAL setting has its value."},
-					Examples:  []string{"eru tune explain", "eru tune explain --db app"},
+					Examples:  []string{"vaire tune explain", "vaire tune explain --db app"},
 					Remote:    true,
 				},
 			},
@@ -1185,7 +1185,7 @@ func tuneCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Write calculated settings and restart when required",
 					WhenToUse:      []string{"Install tuning after a resize. A restart needs --confirm <db>/restart, or {server}/restart for every database."},
-					Examples:       []string{"eru tune apply --dry-run", "eru tune apply --confirm app/restart"},
+					Examples:       []string{"vaire tune apply --dry-run", "vaire tune apply --confirm app/restart"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1210,7 +1210,7 @@ func backupCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "Set up, take, list, and verify database backups",
 			WhenToUse: []string{"Operate the pgBackRest repository. Backups cover every database; restores name one."},
-			Examples:  []string{"eru backup setup", "eru backup list --db app", "eru backup now --type full"},
+			Examples:  []string{"vaire backup setup", "vaire backup list --db app", "vaire backup now --type full"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -1239,14 +1239,14 @@ func backupCommands() cmdSpec {
 						"Re-run with the same bucket to rotate the access keys.",
 					},
 					WhenNotToUse:     []string{"Do not use it to move backups to another bucket or prefix: that is refused, because the restore window would be lost."},
-					Examples:         []string{"eru backup setup", "eru backup setup --provider r2 --endpoint https://<account>.r2.cloudflarestorage.com --bucket eru-backups --key-id KEY --secret-file key.txt"},
+					Examples:         []string{"vaire backup setup", "vaire backup setup --provider r2 --endpoint https://<account>.r2.cloudflarestorage.com --bucket vaire-backups --key-id KEY --secret-file key.txt"},
 					Mutating:         true,
 					SupportsDryRun:   true,
 					Prompts:          true,
 					InteractiveFlags: []string{"--provider", "--endpoint", "--region", "--bucket", "--prefix", "--key-id", "--secret-file"},
 					Remote:           true,
 					ErrorCodes:       append([]string{"backup_auth_failed", "bucket_not_found", "endpoint_unreachable", "step_failed"}, backupErrorCodes...),
-					Next:             []string{"eru secrets export", "eru backup list"},
+					Next:             []string{"vaire secrets export", "vaire backup list"},
 				},
 			},
 			{
@@ -1258,13 +1258,13 @@ func backupCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Take a backup now, one detachable job per database",
-					WhenToUse:      []string{"Take a backup outside the timers. Each database is its own cluster and stanza; without --db every database is backed up, one after another, because each job takes the server's heavy-I/O lock. A database whose job is skipped or fails doesn't stop the others; the command fails at the end. Ctrl-C detaches from the running job and starts no more; eru job follow re-attaches."},
-					Examples:       []string{"eru backup now --db app --type full", "eru backup now", "eru backup now --dry-run"},
+					WhenToUse:      []string{"Take a backup outside the timers. Each database is its own cluster and stanza; without --db every database is backed up, one after another, because each job takes the server's heavy-I/O lock. A database whose job is skipped or fails doesn't stop the others; the command fails at the end. Ctrl-C detaches from the running job and starts no more; vaire job follow re-attaches."},
+					Examples:       []string{"vaire backup now --db app --type full", "vaire backup now", "vaire backup now --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ErrorCodes:     backupErrorCodes,
-					Next:           []string{"eru backup list", "eru job list"},
+					Next:           []string{"vaire backup list", "vaire job list"},
 				},
 			},
 			{
@@ -1276,9 +1276,9 @@ func backupCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Show the restore window, backup sets, verify, drill, and dumps per database",
 					WhenToUse: []string{"Pick a restore target, or check that backups, verify and drills are current. Without --db: one row per database (window, sets, latest set, last verify, drill and dump), then the dropped databases whose stanzas are kept until they expire. --db: that database's sets, archive status, window and dumps; a dropped database still in its window is listed from its kept stanza."},
-					Examples:  []string{"eru backup list", "eru backup list --db app --output json"},
+					Examples:  []string{"vaire backup list", "vaire backup list --db app --output json"},
 					Remote:    true,
-					Next:      []string{"eru restore <db> --time <ts>", "eru backup verify"},
+					Next:      []string{"vaire restore <db> --time <ts>", "vaire backup verify"},
 				},
 			},
 			{
@@ -1289,14 +1289,14 @@ func backupCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:          "Check every file of each database's stanza against its checksum, one detachable job per database",
-					WhenToUse:        []string{"Prove the backups are readable. pgbackrest verify runs per stanza and downloads its backup files and WAL segments, so it can take a while; without --db every database is verified, one after another. Ctrl-C detaches from the running job and starts no more; eru job follow re-attaches. The result goes to records.json and eru.prom per database."},
-					Examples:         []string{"eru backup verify --db app", "eru backup verify"},
+					WhenToUse:        []string{"Prove the backups are readable. pgbackrest verify runs per stanza and downloads its backup files and WAL segments, so it can take a while; without --db every database is verified, one after another. Ctrl-C detaches from the running job and starts no more; vaire job follow re-attaches. The result goes to records.json and vaire.prom per database."},
+					Examples:         []string{"vaire backup verify --db app", "vaire backup verify"},
 					Mutating:         true,
 					Remote:           true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "verify only records a check and does not change cluster data",
 					ErrorCodes:       backupErrorCodes,
-					Next:             []string{"eru job list"},
+					Next:             []string{"vaire job list"},
 				},
 			},
 		},
@@ -1310,7 +1310,7 @@ func jobCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:   "List and follow detachable jobs",
 			WhenToUse: []string{"Backups, restores, drills, forks and dumps run as jobs on the node that survive a closed laptop."},
-			Examples:  []string{"eru job list", "eru job follow 01J..."},
+			Examples:  []string{"vaire job list", "vaire job follow 01J..."},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -1320,9 +1320,9 @@ func jobCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Show running and recent jobs",
 					WhenToUse: []string{"Find a job ID after detaching, or see what the timers ran."},
-					Examples:  []string{"eru job list", "eru job list --output json"},
+					Examples:  []string{"vaire job list", "vaire job list --output json"},
 					Remote:    true,
-					Next:      []string{"eru job follow <id>"},
+					Next:      []string{"vaire job follow <id>"},
 				},
 			},
 			{
@@ -1332,7 +1332,7 @@ func jobCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Re-attach to a job and wait for its result",
 					WhenToUse: []string{"Watch a job started earlier; a finished job prints its log and result."},
-					Examples:  []string{"eru job follow 01J9ZK3Q6V3W8Y2XH5N7T1C4BD"},
+					Examples:  []string{"vaire job follow 01J9ZK3Q6V3W8Y2XH5N7T1C4BD"},
 					Remote:    true,
 				},
 			},
@@ -1355,13 +1355,13 @@ func restoreCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary: "Rewind one database while the others keep serving",
 			WhenToUse: []string{
-				"Restore one database to a time, the latest WAL, a backup set or a dump. A physical restore of its stanza becomes the temporary cluster <db>__restoring, paused at the target, beside the live database, which keeps serving; inspect it with eru sql --db <db>__restoring, then promote (a cut-over in place, a few seconds plus the replay to the target) or abort. It needs free space for one copy of the database. A dump (for points older than the window) loads into a new cluster instead, which gets a new stanza on promote.",
+				"Restore one database to a time, the latest WAL, a backup set or a dump. A physical restore of its stanza becomes the temporary cluster <db>__restoring, paused at the target, beside the live database, which keeps serving; inspect it with vaire sql --db <db>__restoring, then promote (a cut-over in place, a few seconds plus the replay to the target) or abort. It needs free space for one copy of the database. A dump (for points older than the window) loads into a new cluster instead, which gets a new stanza on promote.",
 			},
-			WhenNotToUse: []string{"Do not use it to copy a database under a new name: use eru db fork. Rebuilding a whole server is server init --restore."},
+			WhenNotToUse: []string{"Do not use it to copy a database under a new name: use vaire db fork. Rebuilding a whole server is server init --restore."},
 			Examples: []string{
-				"eru restore app --time 2026-10-09T12:00:00Z --confirm app/restore",
-				"eru restore app --time -15m --promote --confirm app/restore",
-				"eru restore app --dump 20260701T030000Z --confirm app/restore",
+				"vaire restore app --time 2026-10-09T12:00:00Z --confirm app/restore",
+				"vaire restore app --time -15m --promote --confirm app/restore",
+				"vaire restore app --dump 20260701T030000Z --confirm app/restore",
 			},
 			Mutating:         true,
 			Destructive:      true,
@@ -1371,7 +1371,7 @@ func restoreCommands() cmdSpec {
 			Remote:           true,
 			ConfirmToken:     "{db}/restore",
 			ErrorCodes:       append([]string{"unsafe_action_requires_confirmation"}, backupErrorCodes...),
-			Next:             []string{"eru restore status <db>", "eru restore promote <db>", "eru restore abort <db>"},
+			Next:             []string{"vaire restore status <db>", "vaire restore promote <db>", "vaire restore abort <db>"},
 		},
 		children: []cmdSpec{
 			{
@@ -1381,7 +1381,7 @@ func restoreCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Show open restores, row estimates against live, and leftovers",
 					WhenToUse: []string{"Check a restore is ready and compare the restored copy with the live database before promoting."},
-					Examples:  []string{"eru restore status", "eru restore status app"},
+					Examples:  []string{"vaire restore status", "vaire restore status app"},
 					Remote:    true,
 				},
 			},
@@ -1392,13 +1392,13 @@ func restoreCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Cut the live database over to its restored copy",
 					WhenToUse:      []string{"After inspecting <db>__restoring: PgBouncer pauses the database, its cluster stops, the restored data directory takes the live one's place, and the cluster starts, reaches the target and opens on a new timeline, archiving to the same stanza; then a full backup starts. The URL and credentials don't change; the old data is kept as the stopped cluster <db>__pre_restore_<time> for undo."},
-					Examples:       []string{"eru restore promote app --confirm app/restore"},
+					Examples:       []string{"vaire restore promote app --confirm app/restore"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ConfirmToken:   "{db}/restore",
-					Next:           []string{"eru restore undo <db>", "eru restore cleanup <db>"},
+					Next:           []string{"vaire restore undo <db>", "vaire restore cleanup <db>"},
 				},
 			},
 			{
@@ -1407,8 +1407,8 @@ func restoreCommands() cmdSpec {
 				run:  runRestoreUndo,
 				meta: CommandMeta{
 					Summary:        "Swap the data from before the last promote back in",
-					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists. The old cluster resumes on its old timeline, eru records it so later restores follow it, and a full backup starts. After a restore from a dump it also takes the old stanza back."},
-					Examples:       []string{"eru restore undo app --confirm app/restore"},
+					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists. The old cluster resumes on its old timeline, vaire records it so later restores follow it, and a full backup starts. After a restore from a dump it also takes the old stanza back."},
+					Examples:       []string{"vaire restore undo app --confirm app/restore"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
@@ -1423,7 +1423,7 @@ func restoreCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Drop the temporary cluster <db>__restoring; the live database was never touched",
 					WhenToUse:      []string{"Throw away a restored copy you don't want, or clean up after a failed restore."},
-					Examples:       []string{"eru restore abort app"},
+					Examples:       []string{"vaire restore abort app"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1436,7 +1436,7 @@ func restoreCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "List restore leftovers, or drop those of one database",
 					WhenToUse:        []string{"Free the space of the stopped <db>__pre_restore_* clusters once the restore is good. Without a database it only lists."},
-					Examples:         []string{"eru restore cleanup", "eru restore cleanup app --confirm app/cleanup"},
+					Examples:         []string{"vaire restore cleanup", "vaire restore cleanup app --confirm app/cleanup"},
 					Mutating:         true,
 					Destructive:      true,
 					SupportsDryRun:   true,
@@ -1455,13 +1455,13 @@ func restoreCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Restore a database into a temporary cluster, check it against live, drop it",
-					WhenToUse:      []string{"Prove the backups restore. Each database's stanza is restored into the temporary cluster <db>__drill on the server's data disk (space for one copy), at the latest point or --time, and promoted there with archiving off; then pg_amcheck checks the database, its tables are compared with the live cluster's, and the copy is dropped. The live database keeps serving. Without --db every database is drilled, one after another, because each job takes the server's heavy-I/O lock; a database whose drill is skipped or fails doesn't stop the others. Each database's monthly timer runs it too, on a day of the month of its own; the result shows in eru backup list."},
-					Examples:       []string{"eru restore drill --db app", "eru restore drill", "eru restore drill --db app --time -2h", "eru restore drill --dry-run"},
+					WhenToUse:      []string{"Prove the backups restore. Each database's stanza is restored into the temporary cluster <db>__drill on the server's data disk (space for one copy), at the latest point or --time, and promoted there with archiving off; then pg_amcheck checks the database, its tables are compared with the live cluster's, and the copy is dropped. The live database keeps serving. Without --db every database is drilled, one after another, because each job takes the server's heavy-I/O lock; a database whose drill is skipped or fails doesn't stop the others. Each database's monthly timer runs it too, on a day of the month of its own; the result shows in vaire backup list."},
+					Examples:       []string{"vaire restore drill --db app", "vaire restore drill", "vaire restore drill --db app --time -2h", "vaire restore drill --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ErrorCodes:     backupErrorCodes,
-					Next:           []string{"eru backup list"},
+					Next:           []string{"vaire backup list"},
 				},
 			},
 		},
@@ -1480,13 +1480,13 @@ func dumpCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary:          "Write a pg_dump custom-format archive of one database",
 			WhenToUse:        []string{"Take a logical copy now: to this machine, or into the bucket next to the scheduled long-retention dumps."},
-			Examples:         []string{"eru dump app --out app.dump", "eru dump app --to bucket"},
+			Examples:         []string{"vaire dump app --out app.dump", "vaire dump app --to bucket"},
 			Mutating:         true,
 			Remote:           true,
 			SkipDryRunCheck:  true,
 			SkipDryRunReason: "dump writes an archive and does not change the cluster",
 			ErrorCodes:       backupErrorCodes,
-			Next:             []string{"eru dump list <db>"},
+			Next:             []string{"vaire dump list <db>"},
 		},
 		children: []cmdSpec{
 			{
@@ -1496,7 +1496,7 @@ func dumpCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "List the long-retention dumps in the bucket",
 					WhenToUse: []string{"Find a dump id for dump get or restore --dump. Reads the bucket with the recovery kit; the node is not involved."},
-					Examples:  []string{"eru dump list", "eru dump list app"},
+					Examples:  []string{"vaire dump list", "vaire dump list app"},
 				},
 			},
 			{
@@ -1509,7 +1509,7 @@ func dumpCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Download and decrypt one dump on this machine",
 					WhenToUse:        []string{"Get a dump older than the restore window as a plain pg_dump archive. The age identity never leaves this machine."},
-					Examples:         []string{"eru dump get app 20260701T030000Z --out app-july.dump"},
+					Examples:         []string{"vaire dump get app 20260701T030000Z --out app-july.dump"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "get writes a local file and changes nothing on the cluster",
@@ -1529,8 +1529,8 @@ func nodeCommands() cmdSpec {
 		run:    parentRun,
 		meta: CommandMeta{
 			Summary:   "Node-side operations, hidden from top-level help",
-			WhenToUse: []string{"Run the server half of eru. Operator commands call these over SSH."},
-			Examples:  []string{"eru node version", "sudo eru node rpc"},
+			WhenToUse: []string{"Run the server half of vaire. Operator commands call these over SSH."},
+			Examples:  []string{"vaire node version", "sudo vaire node rpc"},
 			LinuxOnly: true,
 		},
 		children: []cmdSpec{
@@ -1544,7 +1544,7 @@ func nodeCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Upgrade or roll back the node binary from the operator",
 					WhenToUse:        []string{"Install a node release, or roll back with --rollback and a confirm token."},
-					Examples:         []string{"eru node upgrade", "eru node upgrade --rollback --confirm prod/rollback"},
+					Examples:         []string{"vaire node upgrade", "vaire node upgrade --rollback --confirm prod/rollback"},
 					Mutating:         true,
 					DestructiveFlags: []string{"--rollback"},
 					SupportsDryRun:   true,
@@ -1564,11 +1564,11 @@ func nodeCommands() cmdSpec {
 						"Do not call it by hand to change a node. Use the operator commands, which run plan first.",
 					},
 					Prerequisites: []string{
-						"root, or sudo via /etc/sudoers.d/eru",
-						"the request's client_version, client_channel and, for dev builds, client_commit match eru node version",
-						"/etc/eru/cluster.toml for plan and apply",
+						"root, or sudo via /etc/sudoers.d/vaire",
+						"the request's client_version, client_channel and, for dev builds, client_commit match vaire node version",
+						"/etc/vaire/cluster.toml for plan and apply",
 					},
-					Examples:         []string{"sudo eru node rpc < request.json"},
+					Examples:         []string{"sudo vaire node rpc < request.json"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "dry-run is the request's dry_run field, not a flag",
@@ -1592,7 +1592,7 @@ func nodeCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Print the node binary version",
 					WhenToUse: []string{"The operator handshake compares this with its own version."},
-					Examples:  []string{"eru node version --output json"},
+					Examples:  []string{"vaire node version --output json"},
 					LinuxOnly: true,
 				},
 			},
@@ -1603,7 +1603,7 @@ func nodeCommands() cmdSpec {
 					Summary:       "Check that the node binary can read its config and tools",
 					WhenToUse:     []string{"Run after a node upgrade, before apply."},
 					Prerequisites: []string{"root"},
-					Examples:      []string{"sudo eru node selfcheck", "sudo eru node selfcheck --output json"},
+					Examples:      []string{"sudo vaire node selfcheck", "sudo vaire node selfcheck --output json"},
 					ErrorCodes:    []string{"precondition_failed"},
 					LinuxOnly:     true,
 				},
@@ -1618,8 +1618,8 @@ func nodeCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Run one timer job or detachable job",
-					WhenToUse:      []string{"systemd timers and transient eru-job-<id> units call this: certs-renew, stanza-expiry (daily: deletes the stanzas of dropped databases once their window has passed), and per database (--db, from eru-<job>@<db>.timer) backup-full|diff|incr, backup-verify, restore-drill and db-dump; restore and db-fork run only with --job-id. Full, diff, verify, drill and dump take the server's heavy-I/O lock, so one runs at a time. A busy lock records the job as skipped: a timer run first waits up to 15 minutes for its locks, a run by hand or by an operator command skips at once."},
-					Examples:       []string{"sudo eru node run certs-renew", "sudo eru node run backup-incr --db app", "sudo eru node run db-dump --db app", "sudo eru node run stanza-expiry"},
+					WhenToUse:      []string{"systemd timers and transient vaire-job-<id> units call this: certs-renew, stanza-expiry (daily: deletes the stanzas of dropped databases once their window has passed), and per database (--db, from vaire-<job>@<db>.timer) backup-full|diff|incr, backup-verify, restore-drill and db-dump; restore and db-fork run only with --job-id. Full, diff, verify, drill and dump take the server's heavy-I/O lock, so one runs at a time. A busy lock records the job as skipped: a timer run first waits up to 15 minutes for its locks, a run by hand or by an operator command skips at once."},
+					Examples:       []string{"sudo vaire node run certs-renew", "sudo vaire node run backup-incr --db app", "sudo vaire node run db-dump --db app", "sudo vaire node run stanza-expiry"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					LinuxOnly:      true,
@@ -1631,8 +1631,8 @@ func nodeCommands() cmdSpec {
 				run:  runNodeDump,
 				meta: CommandMeta{
 					Summary:        "Write pg_dump -Fc of one database to stdout",
-					WhenToUse:      []string{"eru dump --to local runs this over SSH and streams the archive to the operator."},
-					Examples:       []string{"sudo eru node dump app > app.dump"},
+					WhenToUse:      []string{"vaire dump --to local runs this over SSH and streams the archive to the operator."},
+					Examples:       []string{"sudo vaire node dump app > app.dump"},
 					SupportsDryRun: true,
 					LinuxOnly:      true,
 				},
@@ -1649,7 +1649,7 @@ func nodeCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Archive one WAL segment unless a newer master fenced this node",
 					WhenToUse:        []string{"Every cluster's archive_command; PostgreSQL runs it as postgres. It refuses on a fenced node, then runs pgbackrest archive-push."},
-					Examples:         []string{"/usr/local/bin/eru node archive-push --pgbackrest=/usr/bin/pgbackrest --stanza=app-3f9a1c %p"},
+					Examples:         []string{"/usr/local/bin/vaire node archive-push --pgbackrest=/usr/bin/pgbackrest --stanza=app-3f9a1c %p"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "archive-push is PostgreSQL's archive_command and must archive or fail",
@@ -1664,15 +1664,15 @@ func nodeCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Lift the epoch fence on this node",
-					WhenToUse:      []string{"Only when the server init --restore that fenced this server was a mistake or was abandoned. Run on the node over break-glass SSH, then eru apply from your machine. A server that was really replaced is destroyed instead."},
-					Examples:       []string{"sudo eru node unfence --confirm prod/unfence --dry-run", "sudo eru node unfence --confirm prod/unfence --reclaim"},
+					WhenToUse:      []string{"Only when the server init --restore that fenced this server was a mistake or was abandoned. Run on the node over break-glass SSH, then vaire apply from your machine. A server that was really replaced is destroyed instead."},
+					Examples:       []string{"sudo vaire node unfence --confirm prod/unfence --dry-run", "sudo vaire node unfence --confirm prod/unfence --reclaim"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
 					ConfirmToken:   "{server}/unfence",
 					LinuxOnly:      true,
 					ErrorCodes:     []string{"unsafe_action_requires_confirmation", "precondition_failed"},
-					Next:           []string{"eru apply"},
+					Next:           []string{"vaire apply"},
 				},
 			},
 			{
@@ -1684,7 +1684,7 @@ func nodeCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Restore SSH and firewall rules from the commit-confirm snapshot",
 					WhenToUse:        []string{"A transient timer calls this when lockdown was not confirmed."},
-					Examples:         []string{"sudo eru node ssh-revert"},
+					Examples:         []string{"sudo vaire node ssh-revert"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "ssh-revert is invoked by systemd and must restore the snapshot",
@@ -1700,7 +1700,7 @@ func nodeCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Open public SSH for a limited time from the provider console",
 					WhenToUse:      []string{"Break glass when WireGuard is unreachable. This runs on the server, as root, for example from the provider's console; it is not an operator-machine command and there is nothing to run from your machine until the tunnel works."},
-					Examples:       []string{"sudo eru node unlock-ssh --minutes 30"},
+					Examples:       []string{"sudo vaire node unlock-ssh --minutes 30"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					LinuxOnly:      true,

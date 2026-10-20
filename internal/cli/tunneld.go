@@ -21,22 +21,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/spf13/cobra"
 )
 
-// The context's tunnel daemon: eru tunnel serve owns the only WireGuard
-// device for the context and every eru process dials through its unix socket
+// The context's tunnel daemon: vaire tunnel serve owns the only WireGuard
+// device for the context and every vaire process dials through its unix socket
 // (internal/transport/shared.go). The first command that needs the node
 // spawns it; it exits after DefaultTunnelPersist with no command using it.
 
 const (
 	// tunnelDaemonCommand is how the daemon names itself in tunnel.lock.
-	tunnelDaemonCommand = "eru tunnel serve"
+	tunnelDaemonCommand = "vaire tunnel serve"
 	// TunnelSocketFile, TunnelSpawnLockFile and TunnelLogFile live in the
 	// context directory.
 	TunnelSocketFile    = "tunnel.sock"
@@ -46,17 +46,17 @@ const (
 	DefaultTunnelPersist = 10 * time.Minute
 	// envTunnel selects the tunnel: "inprocess" runs one in this process
 	// instead of using the daemon.
-	envTunnel        = "ERU_TUNNEL"
-	envTunnelPersist = "ERU_TUNNEL_PERSIST"
+	envTunnel        = "VAIRE_TUNNEL"
+	envTunnelPersist = "VAIRE_TUNNEL_PERSIST"
 	// envTunnelReadyFD tells the daemon its readiness pipe's descriptor.
-	envTunnelReadyFD = "ERU_TUNNEL_READY_FD"
+	envTunnelReadyFD = "VAIRE_TUNNEL_READY_FD"
 	// maxSocketPath leaves room under sun_path (104 bytes on macOS, 108 on
 	// Linux).
 	maxSocketPath = 100
 )
 
 // openDialer connects the session to the tunnel: the context's shared
-// daemon, or an in-process tunnel with ERU_TUNNEL=inprocess.
+// daemon, or an in-process tunnel with VAIRE_TUNNEL=inprocess.
 func (s *session) openDialer(ctx context.Context, cmd *cobra.Command, cfg transport.WireGuardConfig, p *progress) error {
 	if os.Getenv(envTunnel) == "inprocess" {
 		node, _ := s.ctx.Master()
@@ -120,9 +120,9 @@ func tunnelSocketPath(name string) (string, error) {
 		return path, nil
 	}
 	sum := sha256.Sum256([]byte(contexts.Dir(name)))
-	dir := filepath.Join(os.TempDir(), "eru-"+strconv.Itoa(os.Getuid()))
+	dir := filepath.Join(os.TempDir(), "vaire-"+strconv.Itoa(os.Getuid()))
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); runtime.GOOS == "linux" && xdg != "" {
-		dir = filepath.Join(xdg, "eru")
+		dir = filepath.Join(xdg, "vaire")
 	}
 	if err := privateDir(dir); err != nil {
 		return "", output.WrapError(output.CodePrecondition, err, output.ExitPrecondition,
@@ -161,7 +161,7 @@ func privateDir(dir string) error {
 	return nil
 }
 
-// tunnelPersist is how long an unused daemon stays up: ERU_TUNNEL_PERSIST,
+// tunnelPersist is how long an unused daemon stays up: VAIRE_TUNNEL_PERSIST,
 // else the context's tunnel_persist, else DefaultTunnelPersist.
 func tunnelPersist(c *contexts.Context) (time.Duration, error) {
 	for _, v := range []string{os.Getenv(envTunnelPersist), c.TunnelPersist} {
@@ -186,7 +186,7 @@ type daemonReady struct {
 	Hint    string `json:"hint,omitempty"`
 }
 
-// spawnTunnelDaemon starts eru tunnel serve for the context, detached in
+// spawnTunnelDaemon starts vaire tunnel serve for the context, detached in
 // its own session, and waits for it to report on the readiness pipe.
 func spawnTunnelDaemon(ctx context.Context, name string) error {
 	exe, err := os.Executable()
@@ -305,7 +305,7 @@ func runTunnelServe(cmd *cobra.Command, _ []string) error {
 
 	node, ok := c.Master()
 	if !ok {
-		return fail(output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with eru login."))
+		return fail(output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with vaire login."))
 	}
 	cfg, err := contextTunnelConfig(c, node)
 	if err != nil {
@@ -366,7 +366,7 @@ func logLine(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, "%s %s\n", time.Now().UTC().Format(time.RFC3339), line)
 }
 
-// tunnelStatusData is eru tunnel status's result.
+// tunnelStatusData is vaire tunnel status's result.
 type tunnelStatusData struct {
 	Context string `json:"context"`
 	Running bool   `json:"running"`
@@ -442,7 +442,7 @@ func runTunnelStop(cmd *cobra.Command, _ []string) error {
 	case draining:
 		return output.Success(cmd, output.Result{Data: data,
 			Message: fmt.Sprintf("the tunnel daemon of %s (pid %d) takes no new commands and exits once the running ones finish", c.Name, pid),
-			Next:    []string{"eru tunnel status", "eru tunnel stop --force"}})
+			Next:    []string{"vaire tunnel status", "vaire tunnel stop --force"}})
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("stopped the tunnel daemon of %s (pid %d)", c.Name, pid)})
 }
@@ -484,7 +484,7 @@ func stopTunnelDaemonQuietly(name string, force bool) {
 }
 
 // stopIdleTunnelDaemons stops every context's daemon that no command uses,
-// after the eru binary changed.
+// after the vaire binary changed.
 func stopIdleTunnelDaemons() {
 	names, err := contexts.List()
 	if err != nil {

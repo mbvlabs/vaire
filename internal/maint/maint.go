@@ -1,6 +1,6 @@
-// Package maint is eru's maintenance (Phase 4): the reports, the bloat
+// Package maint is vaire's maintenance (Phase 4): the reports, the bloat
 // estimate, the vacuum, analyze and reindex statements, and which backends
-// eru maint kill may terminate. The node runs it as eru_admin over each
+// vaire maint kill may terminate. The node runs it as vaire_admin over each
 // database's socket; this package builds the SQL and shapes the results.
 package maint
 
@@ -12,14 +12,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/pg"
 )
 
 //go:embed sql/*.sql sql/LICENSE.ioguix
 var sqlFS embed.FS
 
 // License is the ioguix bloat queries' BSD-2-Clause notice, which ships
-// with the binary (eru version --licenses).
+// with the binary (vaire version --licenses).
 func License() string {
 	raw, _ := sqlFS.ReadFile("sql/LICENSE.ioguix")
 	return string(raw)
@@ -128,7 +128,7 @@ func WraparoundStatus(age int64) string {
 	return "pass"
 }
 
-// relationPattern is a table or index name eru accepts: name or
+// relationPattern is a table or index name vaire accepts: name or
 // schema.name, plain identifiers only.
 var relationPattern = regexp.MustCompile(`^([a-zA-Z_][a-zA-Z0-9_$]*\.)?[a-zA-Z_][a-zA-Z0-9_$]*$`)
 

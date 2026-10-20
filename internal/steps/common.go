@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 //go:embed scripts/*.sh

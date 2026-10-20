@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/mbvlabs/eru/internal/cli"
+	"github.com/mbvlabs/vaire/internal/cli"
 )
 
 func main() {

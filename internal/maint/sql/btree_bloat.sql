@@ -1,7 +1,7 @@
 -- Vendored unchanged from https://github.com/ioguix/pgsql-bloat-estimation
 -- (btree/btree_bloat.sql at 8fde3c9e0e015ece51e10c1450228d23f7747db1),
 -- BSD-2-Clause, Copyright (c) 2015-2019 Jehan-Guillaume (ioguix) de Rorthais.
--- See LICENSE.ioguix. eru wraps it in internal/maint/bloat.go.
+-- See LICENSE.ioguix. vaire wraps it in internal/maint/bloat.go.
 -- WARNING: executed with a non-superuser role, the query inspect only index on tables you are granted to read.
 -- WARNING: rows with is_na = 't' are known to have bad statistics ("name" type is not supported).
 -- This query is compatible with PostgreSQL 8.2 and after

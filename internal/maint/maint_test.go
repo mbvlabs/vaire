@@ -88,8 +88,8 @@ func TestHeavyAndVacuumdb(t *testing.T) {
 	if !(Options{Kind: Vacuum}).Heavy() || (Options{Kind: Vacuum, Table: "t"}).Heavy() || !(Options{Kind: Reindex, Table: "t"}).Heavy() || (Options{Kind: Analyze}).Heavy() {
 		t.Error("heavy")
 	}
-	got := strings.Join(Options{Kind: Vacuum, DB: "app", Analyze: true, Freeze: true}.VacuumdbArgs("/var/run/postgresql", "eru_admin", 5433, 2), " ")
-	if got != "-h /var/run/postgresql -p 5433 -U eru_admin --jobs=2 --analyze --freeze --dbname=app" {
+	got := strings.Join(Options{Kind: Vacuum, DB: "app", Analyze: true, Freeze: true}.VacuumdbArgs("/var/run/postgresql", "vaire_admin", 5433, 2), " ")
+	if got != "-h /var/run/postgresql -p 5433 -U vaire_admin --jobs=2 --analyze --freeze --dbname=app" {
 		t.Errorf("vacuumdb %s", got)
 	}
 	got = strings.Join(Options{Kind: Analyze, DB: "app"}.VacuumdbArgs("/s", "postgres", 5433, 0), " ")
@@ -102,9 +102,9 @@ func TestSelectBackends(t *testing.T) {
 	all := ParseBackends([]map[string]string{
 		{"pid": "1", "role": "app_app", "state": "idle in transaction", "state_seconds": "900", "superuser": "f"},
 		{"pid": "2", "role": "app_app", "state": "idle in transaction", "state_seconds": "10", "superuser": "f"},
-		{"pid": "3", "role": "eru_admin", "state": "idle in transaction", "state_seconds": "900", "superuser": "f"},
+		{"pid": "3", "role": "vaire_admin", "state": "idle in transaction", "state_seconds": "900", "superuser": "f"},
 		{"pid": "4", "role": "postgres", "state": "active", "superuser": "t"},
-		{"pid": "5", "role": "app_ro", "state": "idle in transaction (aborted)", "state_seconds": "900", "app": "eru top"},
+		{"pid": "5", "role": "app_ro", "state": "idle in transaction (aborted)", "state_seconds": "900", "app": "vaire top"},
 		{"pid": "6", "role": "app_app", "state": "active", "state_seconds": "900"},
 	})
 	sel, _ := SelectBackends(all, KillOptions{IdleInTx: true, OlderThanSecond: 600})
@@ -117,7 +117,7 @@ func TestSelectBackends(t *testing.T) {
 	}
 	sel, _ = SelectBackends(all, KillOptions{PID: 3})
 	if len(sel) != 1 {
-		t.Error("an explicit pid of an eru role is allowed")
+		t.Error("an explicit pid of an vaire role is allowed")
 	}
 	if TerminateSQL([]int{1, 2}) != "SELECT pid, pg_terminate_backend(pid) AS terminated FROM unnest(ARRAY[1,2]::int[]) AS pid" {
 		t.Error("terminate sql")

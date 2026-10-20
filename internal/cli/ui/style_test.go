@@ -14,7 +14,7 @@ func TestErrorBlockWrapsToWidth(t *testing.T) {
 	block := ErrorBlock{
 		Code:    "precondition_failed",
 		Message: strings.Repeat("the database cannot be repacked because the extension is missing ", 3),
-		Hint:    strings.Repeat("run eru ext add pg_repack --db app and try again ", 3),
+		Hint:    strings.Repeat("run vaire ext add pg_repack --db app and try again ", 3),
 	}
 	for _, width := range []int{40, 60, 80} {
 		out := block.Render(width)

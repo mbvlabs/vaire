@@ -4,12 +4,12 @@ import (
 	"context"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/promfile"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 // clusterReading is one cluster's cgroup at refresh time; ok is false for a
@@ -21,7 +21,7 @@ type clusterReading struct {
 	RestartPending bool
 }
 
-// hostReadings is everything eru-host.prom is made of.
+// hostReadings is everything vaire-host.prom is made of.
 type hostReadings struct {
 	Clusters []clusterReading
 	Sheet    tune.Sheet
@@ -31,20 +31,20 @@ type hostReadings struct {
 	Deferred    map[string]string
 }
 
-// hostFamilies are eru-host.prom's families (Phase 4): each cluster's
+// hostFamilies are vaire-host.prom's families (Phase 4): each cluster's
 // cgroup memory against its limits, memory events, PSI, CPU and I/O
 // counters and a pending restart; the server's memory budget, commit limit,
 // certificate expiry and deferred restarts.
 func hostFamilies(r hostReadings) []*promfile.Family {
-	memCur := promfile.Gauge("eru_cluster_memory_current_bytes", "memory.current of each database's cluster cgroup.")
-	memHigh := promfile.Gauge("eru_cluster_memory_high_bytes", "MemoryHigh of each database's cluster (the throttling point).")
-	memMax := promfile.Gauge("eru_cluster_memory_max_bytes", "MemoryMax of each database's cluster, when one is set.")
-	events := promfile.Counter("eru_cluster_memory_events_total", "memory.events of each database's cluster: high (throttled), max, oom, oom_kill.")
-	pressure := promfile.Counter("eru_cluster_pressure_seconds_total", "Pressure stall time of each database's cluster, by resource and kind.")
-	cpu := promfile.Counter("eru_cluster_cpu_seconds_total", "CPU time used by each database's cluster.")
-	io := promfile.Counter("eru_cluster_io_bytes_total", "Bytes read and written by each database's cluster.")
-	up := promfile.Gauge("eru_cluster_running", "Whether each database's cluster has a running cgroup.")
-	pending := promfile.Gauge("eru_cluster_restart_pending", "Whether each database's cluster waits for a restart to apply settings.")
+	memCur := promfile.Gauge("vaire_cluster_memory_current_bytes", "memory.current of each database's cluster cgroup.")
+	memHigh := promfile.Gauge("vaire_cluster_memory_high_bytes", "MemoryHigh of each database's cluster (the throttling point).")
+	memMax := promfile.Gauge("vaire_cluster_memory_max_bytes", "MemoryMax of each database's cluster, when one is set.")
+	events := promfile.Counter("vaire_cluster_memory_events_total", "memory.events of each database's cluster: high (throttled), max, oom, oom_kill.")
+	pressure := promfile.Counter("vaire_cluster_pressure_seconds_total", "Pressure stall time of each database's cluster, by resource and kind.")
+	cpu := promfile.Counter("vaire_cluster_cpu_seconds_total", "CPU time used by each database's cluster.")
+	io := promfile.Counter("vaire_cluster_io_bytes_total", "Bytes read and written by each database's cluster.")
+	up := promfile.Gauge("vaire_cluster_running", "Whether each database's cluster has a running cgroup.")
+	pending := promfile.Gauge("vaire_cluster_restart_pending", "Whether each database's cluster waits for a restart to apply settings.")
 	for _, c := range r.Clusters {
 		db := promfile.L("db", c.Name)
 		running := 0.0
@@ -87,23 +87,23 @@ func hostFamilies(r hostReadings) []*promfile.Family {
 	}
 
 	const mib = 1 << 20
-	budget := promfile.Gauge("eru_memory_budget_bytes", "Memory the database clusters share: RAM minus the server reserve.")
+	budget := promfile.Gauge("vaire_memory_budget_bytes", "Memory the database clusters share: RAM minus the server reserve.")
 	budget.Add(float64(r.Sheet.BudgetMiB) * mib)
-	allocated := promfile.Gauge("eru_memory_allocated_bytes", "Memory the database clusters' sizes add up to.")
+	allocated := promfile.Gauge("vaire_memory_allocated_bytes", "Memory the database clusters' sizes add up to.")
 	allocated.Add(float64(r.Sheet.AllocatedMiB) * mib)
-	reserve := promfile.Gauge("eru_memory_reserve_bytes", "Memory kept for the OS, the poolers, nginx, the exporters and eru.")
+	reserve := promfile.Gauge("vaire_memory_reserve_bytes", "Memory kept for the OS, the poolers, nginx, the exporters and vaire.")
 	reserve.Add(float64(r.Sheet.ReserveMiB) * mib)
-	commit := promfile.Gauge("eru_commit_limit_bytes", "CommitLimit from /proc/meminfo.")
-	committed := promfile.Gauge("eru_committed_bytes", "Committed_AS from /proc/meminfo.")
+	commit := promfile.Gauge("vaire_commit_limit_bytes", "CommitLimit from /proc/meminfo.")
+	committed := promfile.Gauge("vaire_committed_bytes", "Committed_AS from /proc/meminfo.")
 	if r.Host.MemoryKnown {
 		commit.Add(float64(r.Host.CommitLimitMiB) * mib)
 		committed.Add(float64(r.Host.CommittedMiB) * mib)
 	}
-	tls := promfile.Gauge("eru_tls_cert_expiry_timestamp_seconds", "Expiry of the node's certificate.")
+	tls := promfile.Gauge("vaire_tls_cert_expiry_timestamp_seconds", "Expiry of the node's certificate.")
 	if !r.TLSNotAfter.IsZero() {
 		tls.Add(float64(r.TLSNotAfter.Unix()))
 	}
-	deferred := promfile.Gauge("eru_deferred_restart_requested_timestamp_seconds", "Databases whose restart waits for the maintenance window, by when it was asked.")
+	deferred := promfile.Gauge("vaire_deferred_restart_requested_timestamp_seconds", "Databases whose restart waits for the maintenance window, by when it was asked.")
 	for _, db := range promfile.SortedKeys(r.Deferred) {
 		if t, err := time.Parse(time.RFC3339, r.Deferred[db]); err == nil {
 			deferred.Add(float64(t.Unix()), promfile.L("db", db)...)
@@ -159,7 +159,7 @@ func pendingFromIDs(ids []string) map[string]bool {
 // pendingFor reports whether db has a pending restart in pending.
 func pendingFor(pending map[string]bool, db string) bool { return pending[db] || pending["*"] }
 
-// refreshMetrics rewrites eru.prom and eru-host.prom. It is the
+// refreshMetrics rewrites vaire.prom and vaire-host.prom. It is the
 // metrics-refresh job (every minute) and runs after the backup jobs too.
 func refreshMetrics(_ context.Context, cfg config.Cluster) error {
 	steps.WriteMetrics(cfg)

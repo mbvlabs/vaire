@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/doctor"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/doctor"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // pgUpLine matches postgres_exporter's pg_up sample.
@@ -32,7 +32,7 @@ func postgresProbes(ctx context.Context, cfg config.Cluster) (map[string]doctor.
 		url := "http://" + steps.PostgresExporterAddr + "/probe?" + l.Args
 		p := probePGUp(ctx, url)
 		if !p.Up {
-			// A scraper's probe may hold eru_monitor's connection slots;
+			// A scraper's probe may hold vaire_monitor's connection slots;
 			// one retry tells that apart from a real failure.
 			time.Sleep(2 * time.Second)
 			p = probePGUp(ctx, url)
@@ -117,7 +117,7 @@ func lastExporterErrors(journal string, n int) []string {
 }
 
 // exporterStartupNoise reports the warning postgres_exporter logs at every
-// start in eru's probe-only setup: with no DATA_SOURCE_NAME its legacy
+// start in vaire's probe-only setup: with no DATA_SOURCE_NAME its legacy
 // /metrics collector has no DSN. It says nothing about a failing probe. The
 // "Error loading config" warning is gone at the source (metrics-v1 renders
 // --config.file) but is left out too, for a unit not yet re-rendered.

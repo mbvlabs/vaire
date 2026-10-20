@@ -36,15 +36,15 @@ func sampleTree(t *testing.T) string {
 		"/etc/ssh/ssh_host_ed25519_key":     "private\n",
 		"/etc/ssh/ssh_host_ed25519_key.pub": "ssh-ed25519 AAAA\n",
 		"/etc/ssh/ssh_config":               "not bundled\n",
-		"/etc/eru/acme/account.key":         "acme\n",
-		"/etc/eru/runtime/backup.env":       "never bundled\n",
+		"/etc/vaire/acme/account.key":       "acme\n",
+		"/etc/vaire/runtime/backup.env":     "never bundled\n",
 		TLSCertPath:                         "cert\n",
 		TLSKeyPath:                          "key\n",
 	})
 }
 
 func meta() Meta {
-	return Meta{Server: "prod", Node: "db1", Epoch: 2, CreatedAt: time.Date(2026, 10, 15, 10, 15, 2, 0, time.UTC), EruVersion: "dev"}
+	return Meta{Server: "prod", Node: "db1", Epoch: 2, CreatedAt: time.Date(2026, 10, 15, 10, 15, 2, 0, time.UTC), VaireVersion: "dev"}
 }
 
 func TestSnapshotPicksTheBundleSetOnly(t *testing.T) {
@@ -56,7 +56,7 @@ func TestSnapshotPicksTheBundleSetOnly(t *testing.T) {
 	for _, f := range files {
 		paths = append(paths, f.Path)
 	}
-	want := []string{ClusterPath, NodePath, OperatorsPath, WGKeyPath, "/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_ed25519_key.pub", TLSCertPath, TLSKeyPath, "/etc/eru/acme/account.key"}
+	want := []string{ClusterPath, NodePath, OperatorsPath, WGKeyPath, "/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_ed25519_key.pub", TLSCertPath, TLSKeyPath, "/etc/vaire/acme/account.key"}
 	if len(paths) != len(want) {
 		t.Fatalf("paths %v, want %v", paths, want)
 	}
@@ -145,11 +145,11 @@ func TestReadTarRefusesStrangeContent(t *testing.T) {
 	if _, err := ReadTar(good); err != nil {
 		t.Fatalf("good tar: %v", err)
 	}
-	manifest := `{"schema":"eru-master-bundle/v1","files":[]}`
+	manifest := `{"schema":"vaire-master-bundle/v1","files":[]}`
 	cases := map[string][]byte{
-		"no manifest first": tarOf(t, [2]string{"etc/eru/cluster.toml", "x"}),
+		"no manifest first": tarOf(t, [2]string{"etc/vaire/cluster.toml", "x"}),
 		"escaping path":     tarOf(t, [2]string{ManifestName, manifest}, [2]string{"../etc/passwd", "x"}),
-		"extra file":        tarOf(t, [2]string{ManifestName, manifest}, [2]string{"etc/eru/cluster.toml", "x"}),
+		"extra file":        tarOf(t, [2]string{ManifestName, manifest}, [2]string{"etc/vaire/cluster.toml", "x"}),
 		"wrong schema":      tarOf(t, [2]string{ManifestName, `{"schema":"other"}`}),
 		"empty":             tarOf(t),
 	}
@@ -163,7 +163,7 @@ func TestReadTarRefusesStrangeContent(t *testing.T) {
 	tw := tar.NewWriter(&buf)
 	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: ManifestName, Mode: 0o600, Size: int64(len(manifest))})
 	_, _ = tw.Write([]byte(manifest))
-	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "etc/eru/cluster.toml", Linkname: "/etc/shadow"})
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "etc/vaire/cluster.toml", Linkname: "/etc/shadow"})
 	_ = tw.Close()
 	if _, err := ReadTar(buf.Bytes()); !errors.Is(err, ErrCorrupt) {
 		t.Errorf("symlink: %v, want ErrCorrupt", err)
@@ -172,16 +172,16 @@ func TestReadTarRefusesStrangeContent(t *testing.T) {
 
 func TestAllowed(t *testing.T) {
 	for p, want := range map[string]bool{
-		ClusterPath:                        true,
-		"/etc/ssh/ssh_host_rsa_key":        true,
-		"/etc/ssh/ssh_host_rsa_key.pub":    true,
-		"/etc/eru/acme/account.key":        true,
-		"/etc/eru/runtime/backup.env":      false,
-		"/etc/eru/../shadow":               false,
-		"etc/eru/cluster.toml":             false,
-		"/etc/ssh/sshd_config":             false,
-		"/var/lib/eru/master-backup/dirty": false,
-		"/etc/eru/acme/sub/dir":            false,
+		ClusterPath:                          true,
+		"/etc/ssh/ssh_host_rsa_key":          true,
+		"/etc/ssh/ssh_host_rsa_key.pub":      true,
+		"/etc/vaire/acme/account.key":        true,
+		"/etc/vaire/runtime/backup.env":      false,
+		"/etc/vaire/../shadow":               false,
+		"etc/vaire/cluster.toml":             false,
+		"/etc/ssh/sshd_config":               false,
+		"/var/lib/vaire/master-backup/dirty": false,
+		"/etc/vaire/acme/sub/dir":            false,
 	} {
 		if got := Allowed(p); got != want {
 			t.Errorf("Allowed(%q) = %v, want %v", p, got, want)

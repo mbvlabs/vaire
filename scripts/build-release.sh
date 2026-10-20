@@ -73,7 +73,7 @@ out="dist/release-${channel}"
 rm -rf "${out}"
 mkdir -p "${out}/releases/${version}"
 
-pkg="github.com/mbvlabs/eru/internal/buildinfo"
+pkg="github.com/mbvlabs/vaire/internal/buildinfo"
 commit="$(git rev-parse --short=12 HEAD)"
 ldflags="-s -w -X ${pkg}.Version=${version} -X ${pkg}.Commit=${commit} -X ${pkg}.Channel=${signing_channel}"
 build_args=(go build -trimpath -ldflags "${ldflags}")
@@ -88,10 +88,10 @@ build_one() {
   local arch="$2"
   local platform_dir="${out}/releases/${version}/${os}/${arch}"
   mkdir -p "${platform_dir}"
-  CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" "${build_args[@]}" -o "${platform_dir}/eru" ./cmd/eru
+  CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" "${build_args[@]}" -o "${platform_dir}/vaire" ./cmd/vaire
   local hex
-  hex="$(sha256_hex "${platform_dir}/eru")"
-  printf '%s  eru\n' "${hex}" >"${platform_dir}/eru.sha256"
+  hex="$(sha256_hex "${platform_dir}/vaire")"
+  printf '%s  vaire\n' "${hex}" >"${platform_dir}/vaire.sha256"
   printf '%s' "${hex}"
 }
 
@@ -115,10 +115,10 @@ jq -n \
     version: $version,
     releaseBaseUrl: $releaseBaseUrl,
     artifacts: {
-      "linux/amd64":  {"url": ($releaseBaseUrl + "/linux/amd64/eru"),  "sha256": $linux_amd64},
-      "linux/arm64":  {"url": ($releaseBaseUrl + "/linux/arm64/eru"),  "sha256": $linux_arm64},
-      "darwin/amd64": {"url": ($releaseBaseUrl + "/darwin/amd64/eru"), "sha256": $darwin_amd64},
-      "darwin/arm64": {"url": ($releaseBaseUrl + "/darwin/arm64/eru"), "sha256": $darwin_arm64}
+      "linux/amd64":  {"url": ($releaseBaseUrl + "/linux/amd64/vaire"),  "sha256": $linux_amd64},
+      "linux/arm64":  {"url": ($releaseBaseUrl + "/linux/arm64/vaire"),  "sha256": $linux_arm64},
+      "darwin/amd64": {"url": ($releaseBaseUrl + "/darwin/amd64/vaire"), "sha256": $darwin_amd64},
+      "darwin/arm64": {"url": ($releaseBaseUrl + "/darwin/arm64/vaire"), "sha256": $darwin_arm64}
     }
   }' >"${out}/releases/${version}/manifest.json"
 
@@ -133,9 +133,9 @@ mkdir -p "${channel_dir}"
 cp "${out}/releases/${version}/manifest.json" "${channel_dir}/manifest.json"
 
 if [ "${signing_channel}" = stable ]; then
-  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/eru/\\.github/workflows/publish-stable\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/vaire/\\.github/workflows/publish-stable\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
 else
-  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/eru/\\.github/workflows/publish-edge\\.yml@refs/heads/master$'"
+  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/vaire/\\.github/workflows/publish-edge\\.yml@refs/heads/master$'"
 fi
 
 sed \

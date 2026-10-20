@@ -3,12 +3,12 @@ package steps
 // Secret key names on the RPC wire (D6). The operator generates every database
 // password and passes it in the request's secrets map.
 const (
-	// SecretAdminPassword is the eru_admin password.
+	// SecretAdminPassword is the vaire_admin password.
 	SecretAdminPassword = "db.admin"
 	// SecretPgbouncerAuth is the pgbouncer_auth service password key name.
 	SecretPgbouncerAuth = "svc.pgbouncer_auth" //nolint:gosec // G101: a key name, not a value.
-	// SecretMonitor is the eru_monitor service password key name.
-	SecretMonitor = "svc.eru_monitor" //nolint:gosec // G101: a key name, not a value.
+	// SecretMonitor is the vaire_monitor service password key name.
+	SecretMonitor = "svc.vaire_monitor" //nolint:gosec // G101: a key name, not a value.
 	// SecretMetricsHash is the bcrypt hash of the /metrics credential
 	// (Phase 4). The operator computes it; the node never sees the password.
 	SecretMetricsHash = "metrics.htpasswd" //nolint:gosec // G101: a key name, not a value.
@@ -29,7 +29,7 @@ const (
 )
 
 // StepSecrets are the request secrets steps read (engine.Runtime.SecretValues):
-// the eru_admin and service passwords, the /metrics credential's hash and the
+// the vaire_admin and service passwords, the /metrics credential's hash and the
 // recovery kit. apply and db create hand them to their steps directly; a
 // detachable job that runs steps (db recover, db fork) gets them in its spec
 // from the RPC that starts it.
@@ -50,7 +50,7 @@ const (
 	RoleRO      = "ro"
 )
 
-// DatabaseRoles lists the login roles eru creates per database.
+// DatabaseRoles lists the login roles vaire creates per database.
 var DatabaseRoles = []string{RoleMigrate, RoleApp, RoleRO}
 
 // SecretDatabaseRole is the secret key for a database role password, for
@@ -60,14 +60,14 @@ func SecretDatabaseRole(db, role string) string {
 }
 
 // ServiceRoles are the cluster-wide service roles with a stored password.
-var ServiceRoles = []string{"pgbouncer_auth", "eru_monitor"}
+var ServiceRoles = []string{"pgbouncer_auth", "vaire_monitor"}
 
 // ServiceRoleSecret maps a service role name to its secret key.
 func ServiceRoleSecret(role string) string {
 	switch role {
 	case "pgbouncer_auth":
 		return SecretPgbouncerAuth
-	case "eru_monitor":
+	case "vaire_monitor":
 		return SecretMonitor
 	}
 	return ""

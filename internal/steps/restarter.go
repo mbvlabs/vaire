@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // pgReadyTimeout bounds the wait for PostgreSQL to accept connections.

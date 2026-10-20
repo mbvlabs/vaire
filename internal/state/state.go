@@ -1,5 +1,5 @@
 // Package state is the desired-state store (§5.1, D15): the file at
-// /etc/eru/cluster.toml. Every save marks the master backup dirty, so the
+// /etc/vaire/cluster.toml. Every save marks the master backup dirty, so the
 // bundle in the bucket follows within seconds (Phase 5).
 package state
 
@@ -8,10 +8,10 @@ import (
 	"encoding/hex"
 	"os"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 )
 
 // Path is the default desired-state file.
@@ -27,7 +27,7 @@ type Store interface {
 	Revision() (string, error)
 }
 
-// FileStore is the node's /etc/eru/cluster.toml.
+// FileStore is the node's /etc/vaire/cluster.toml.
 type FileStore struct {
 	// Path defaults to Path.
 	Path string

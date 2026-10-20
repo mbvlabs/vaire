@@ -1,4 +1,4 @@
-// Package hostinfo detects the host eru runs on. Phase 1 needs the OS release
+// Package hostinfo detects the host vaire runs on. Phase 1 needs the OS release
 // and RAM; Phase 2 adds CPU, disks and the kernel.
 package hostinfo
 
@@ -13,14 +13,14 @@ import (
 // OSReleasePath is the os-release file.
 const OSReleasePath = "/etc/os-release"
 
-// OS is the subset of os-release eru checks.
+// OS is the subset of os-release vaire checks.
 type OS struct {
 	ID        string `json:"id"`
 	VersionID string `json:"version_id"`
 	Pretty    string `json:"pretty_name"`
 }
 
-// supported lists the server releases eru supports (§0.1).
+// supported lists the server releases vaire supports (§0.1).
 var supported = map[string][]string{
 	"debian": {"13"},
 	"ubuntu": {"26.04"},

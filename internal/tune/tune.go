@@ -36,7 +36,7 @@ type Input struct {
 // the mercy of another cluster's (RFC 7.3).
 const HugePagesMinMiB = 2048
 
-// Server reserve (RFC 7.3): what the OS, both poolers, nginx, eru's jobs and
+// Server reserve (RFC 7.3): what the OS, both poolers, nginx, vaire's jobs and
 // the page cache keep before the clusters get the rest.
 const (
 	ReserveMinMiB  = 512
@@ -141,7 +141,7 @@ func (c *calc) add() {
 	// Superusers may take reserved_connections' slots too, so no separate
 	// superuser set is kept.
 	c.set("superuser_reserved_connections", "0", "", "postgres shares reserved_connections", "postmaster")
-	c.set("reserved_connections", "3", "", "shared by eru_admin, eru_monitor (pg_use_reserved_connections) and postgres", "postmaster")
+	c.set("reserved_connections", "3", "", "shared by vaire_admin, vaire_monitor (pg_use_reserved_connections) and postgres", "postmaster")
 
 	// work_mem.
 	factor := map[string]int{ProfileOLTP: 3, ProfileMixed: 2, ProfileAnalytics: 1}[in.Profile]

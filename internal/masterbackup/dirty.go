@@ -12,7 +12,7 @@ import (
 var testRoot = ""
 
 // MarkDirty touches the dirty flag: a bundled file changed, and the path unit
-// eru-master-backup.path starts the job that bundles it. It never fails the
+// vaire-master-backup.path starts the job that bundles it. It never fails the
 // caller: a missing directory (a host before master-backup-v1, or the
 // operator's machine) is ignored, and the daily safety net catches anything
 // lost.

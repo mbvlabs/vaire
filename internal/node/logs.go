@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 type logsParams struct {
@@ -28,22 +28,22 @@ type logsParams struct {
 	Follow bool   `json:"follow"`
 }
 
-// logUnits are the units eru reads, mapped to their source. postgres is
+// logUnits are the units vaire reads, mapped to their source. postgres is
 // the log file of one database's cluster, postgresql@18-<db>. pgbouncer is
 // the transaction pooler, pgbouncer-session the session pooler on 5432.
 var logUnits = map[string]string{
 	"postgres":          "file:",
 	"pgbouncer":         "journal:pgbouncer.service",
-	"pgbouncer-session": "journal:eru-pgbouncer-session.service",
+	"pgbouncer-session": "journal:vaire-pgbouncer-session.service",
 	"nginx":             "journal:nginx.service",
-	"eru-certs":         "journal:eru-certs.service",
-	"eru":               "runlog:",
+	"vaire-certs":       "journal:vaire-certs.service",
+	"vaire":             "runlog:",
 	// The exporters (Phase 4).
 	"node_exporter":              "journal:node_exporter.service",
 	"postgres_exporter":          "journal:postgres_exporter.service",
 	"pgbouncer_exporter":         "journal:pgbouncer_exporter.service",
 	"pgbouncer_exporter-session": "journal:pgbouncer_exporter-session.service",
-	"eru-maint":                  "journal:eru-maint-daily.service",
+	"vaire-maint":                "journal:vaire-maint-daily.service",
 }
 
 func handleLogs(ctx context.Context, env *Env) (Result, error) {
@@ -111,7 +111,7 @@ func streamLog(ctx context.Context, source, since string, lines int, follow bool
 	case "runlog":
 		path, err := newestRunLog()
 		if err != nil {
-			return output.NewError(output.CodePrecondition, "there are no eru run logs yet", output.ExitPrecondition, "")
+			return output.NewError(output.CodePrecondition, "there are no vaire run logs yet", output.ExitPrecondition, "")
 		}
 		name = "tail"
 		args = []string{"-n", strconv.Itoa(lines)}

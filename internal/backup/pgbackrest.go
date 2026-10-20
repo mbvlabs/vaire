@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
 )
 
 // ConfPath is pgBackRest's configuration (postgres:postgres 0600).
@@ -169,7 +169,7 @@ func (p PgBackRest) Backup(ctx context.Context, kind string) (Set, error) {
 	return latest, nil
 }
 
-// infoJSON is the part of pgbackrest info --output=json eru reads.
+// infoJSON is the part of pgbackrest info --output=json vaire reads.
 type infoJSON struct {
 	Name   string `json:"name"`
 	Status struct {
@@ -328,7 +328,7 @@ func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 		res.OK = true
 	case errors.As(err, &scriptErr):
 		// verify exits non-zero when it finds a problem: a result, not an
-		// error of eru's.
+		// error of vaire's.
 		res.OK = false
 	default:
 		return res, err
@@ -453,5 +453,5 @@ func wrapTool(what string, err error) error {
 		details["output_tail"] = scriptErr.Tail
 	}
 	return output.WrapError(output.CodeExternalCommand, fmt.Errorf("%s failed: %w", what, err), output.ExitExternal,
-		"Read details.output_tail, or the run log under /var/log/eru and /var/log/pgbackrest.").WithDetails(details)
+		"Read details.output_tail, or the run log under /var/log/vaire and /var/log/pgbackrest.").WithDetails(details)
 }

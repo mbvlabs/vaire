@@ -107,7 +107,7 @@ func (s Sheet) Warnings(h Host) []Warning {
 	var out []Warning
 	if s.FreeMiB < 0 {
 		out = append(out, Warning{Code: WarnMemoryOvercommitted, Message: fmt.Sprintf(
-			"%s of database sizes on a %s budget (%s RAM less a %s reserve): under load they are throttled and the page cache shrinks. Shrink one with eru db resize, move one to its own node, or use a bigger server.",
+			"%s of database sizes on a %s budget (%s RAM less a %s reserve): under load they are throttled and the page cache shrinks. Shrink one with vaire db resize, move one to its own node, or use a bigger server.",
 			FormatMiB(s.AllocatedMiB), FormatMiB(s.BudgetMiB), FormatMiB(s.RAMMiB), FormatMiB(s.ReserveMiB))})
 	}
 	quota := 0

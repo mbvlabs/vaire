@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/state"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/state"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // bootstrapDatabase runs cluster.bootstrap phase=database: steps 7-13 (§11).
@@ -27,9 +27,9 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	if err != nil {
 		return Result{}, output.NewError(
 			output.CodePrecondition,
-			"this server is not an eru node yet",
+			"this server is not an vaire node yet",
 			output.ExitPrecondition,
-			"Run the host phase first with eru server init.",
+			"Run the host phase first with vaire server init.",
 		).WithDetails(map[string]any{"reason": "not_a_node"})
 	}
 	if nodeCfg.Server != cfg.Name() {
@@ -45,7 +45,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 			output.CodePrecondition,
 			"the host phase has not finished on this node",
 			output.ExitPrecondition,
-			"Re-run eru server init --resume.",
+			"Re-run vaire server init --resume.",
 		).WithDetails(map[string]any{"reason": "host_phase_incomplete"})
 	}
 

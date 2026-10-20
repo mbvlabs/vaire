@@ -16,7 +16,7 @@ func TestMetricsPGUp(t *testing.T) {
 	if got["app"].Status != Pass || got["off"].Status != Skip {
 		t.Errorf("results %+v", got)
 	}
-	if o := got["other"]; o.Status != Warn || !strings.Contains(o.Detail, "invalid URL escape") || o.Fix != "eru logs postgres_exporter" {
+	if o := got["other"]; o.Status != Warn || !strings.Contains(o.Detail, "invalid URL escape") || o.Fix != "vaire logs postgres_exporter" {
 		t.Errorf("failed probe %+v: want the exporter's error in the detail", o)
 	}
 	if r := metricsPGUp(Facts{}); r[0].Status != Skip {

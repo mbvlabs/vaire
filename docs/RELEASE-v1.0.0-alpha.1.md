@@ -4,7 +4,7 @@
 
 ## Scope
 
-The first alpha covers Phases 0–5: a single hardened PostgreSQL 18 server, one cluster per database, operated through the eru CLI over WireGuard and SSH.
+The first alpha covers Phases 0–5: a single hardened PostgreSQL 18 server, one cluster per database, operated through the vaire CLI over WireGuard and SSH.
 
 - Remote and local bootstrap, resumable setup, TLS certificates and automatic unconfirmed-lockdown revert.
 - Database sizes, tuning, resource limits, two PgBouncers and per-database lifecycle operations.
@@ -39,6 +39,6 @@ The corrected recovery run completed without warnings, took its automatic full a
 
 ## Installation and channels
 
-Until publication, use the signed [edge installer](https://eru.mbvlabs.com/edge/install.sh). After an authorized successful release, `/1.x/install.sh` installs the v1 line; binaries from that line follow `stable-1.x`. `master` remains edge. The root channel follows the highest eligible release.
+Until publication, use the signed [edge installer](https://vaire.mbvlabs.com/edge/install.sh). After an authorized successful release, `/1.x/install.sh` installs the v1 line; binaries from that line follow `stable-1.x`. `master` remains edge. The root channel follows the highest eligible release.
 
 Do not run release branch/tag or stable-install steps until publication is explicitly authorized and verified. See the [release checklist](PLAN-v1-release.md).

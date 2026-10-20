@@ -4,19 +4,19 @@ import (
 	"context"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 const sshdHardeningID = "sshd-hardening-v1"
 
-// SSHDropInPath is eru's sshd drop-in. sshd keeps the first value it reads for
+// SSHDropInPath is vaire's sshd drop-in. sshd keeps the first value it reads for
 // most keywords and reads sshd_config.d in lexical order, so the drop-in sorts
 // first to win over provider drop-ins such as 50-cloud-init.conf.
-const SSHDropInPath = "/etc/ssh/sshd_config.d/00-eru.conf"
+const SSHDropInPath = "/etc/ssh/sshd_config.d/00-vaire.conf"
 
-// BreakGlassPath is the temporary drop-in eru node unlock-ssh writes.
-const BreakGlassPath = "/etc/ssh/sshd_config.d/01-eru-break-glass.conf"
+// BreakGlassPath is the temporary drop-in vaire node unlock-ssh writes.
+const BreakGlassPath = "/etc/ssh/sshd_config.d/01-vaire-break-glass.conf"
 
 // sshdExpect are effective sshd -T lines the hardening must produce.
 const sshdExpect = "permitrootlogin no\npasswordauthentication no\n"
@@ -24,7 +24,7 @@ const sshdExpect = "permitrootlogin no\npasswordauthentication no\n"
 // RenderSSHDropIn returns the fixed drop-in content (§11.1).
 func RenderSSHDropIn(cfg config.Cluster) string {
 	return strings.Join([]string{
-		"# managed by eru: SSH is reachable only over WireGuard once locked down (ufw)",
+		"# managed by vaire: SSH is reachable only over WireGuard once locked down (ufw)",
 		"PermitRootLogin no",
 		"PubkeyAuthentication yes",
 		"PasswordAuthentication no",
@@ -44,10 +44,10 @@ func RenderSSHDropIn(cfg config.Cluster) string {
 }
 
 // RenderBreakGlass returns the drop-in that allows password login for the
-// admin user only, for eru node unlock-ssh (§8.4).
+// admin user only, for vaire node unlock-ssh (§8.4).
 func RenderBreakGlass(adminUser string) string {
 	return strings.Join([]string{
-		"# eru break-glass: removed by eru node ssh-revert --lockdown-only",
+		"# vaire break-glass: removed by vaire node ssh-revert --lockdown-only",
 		"Match User " + adminUser,
 		"    PasswordAuthentication yes",
 		"Match all",

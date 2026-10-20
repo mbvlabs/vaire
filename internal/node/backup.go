@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // driver is the pgBackRest driver for spec's stanza.
@@ -39,7 +39,7 @@ func requireBackups(cfg config.Cluster) error {
 		return nil
 	}
 	return output.NewError(output.CodePrecondition, "backups are not configured on this cluster", output.ExitPrecondition,
-		"Run eru backup setup first.").WithDetails(map[string]any{"reason": "backup_not_configured"})
+		"Run vaire backup setup first.").WithDetails(map[string]any{"reason": "backup_not_configured"})
 }
 
 // oneDatabase is the usage error of a backup method that runs one job: the
@@ -47,7 +47,7 @@ func requireBackups(cfg config.Cluster) error {
 // the heavy-I/O lock.
 func oneDatabase(method string) error {
 	return output.NewError(output.CodeUsage, method+" runs for one database: name it in params.database", output.ExitUsage,
-		"eru backup now, eru backup verify and eru restore drill without --db call it once per database.")
+		"vaire backup now, vaire backup verify and vaire restore drill without --db call it once per database.")
 }
 
 // BackupNowParams are backup.now's params, decoded strictly: the CLI builds
@@ -198,7 +198,7 @@ func verify(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, st
 	steps.WriteMetrics(cfg)
 	if !res.OK {
 		return res, output.NewError(output.CodeExternalCommand, "pgbackrest verify found problems in the stanza of "+spec.Name, output.ExitExternal,
-			"Read details.output, then take a new full backup with eru backup now --db "+spec.Name+" --type full.").
+			"Read details.output, then take a new full backup with vaire backup now --db "+spec.Name+" --type full.").
 			WithDetails(map[string]any{"output": res.Output, "db": spec.Name})
 	}
 	return res, nil
@@ -313,7 +313,7 @@ func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (
 	}
 	if empty > 0 {
 		warnings = append(warnings, output.Warning{Code: "no_backups",
-			Message: fmt.Sprintf("%d database(s) have no backup yet; run eru backup now --type full", empty)})
+			Message: fmt.Sprintf("%d database(s) have no backup yet; run vaire backup now --type full", empty)})
 	}
 	return Result{Data: map[string]any{"databases": rows, "restores": rs.Restores}, Warnings: warnings}, nil
 }
@@ -406,7 +406,7 @@ func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, d
 		}
 	}
 	if len(out.Sets) == 0 {
-		warnings = append(warnings, output.Warning{Code: "no_backups", Message: "the stanza of " + db + " holds no backup yet; run eru backup now --db " + db + " --type full"})
+		warnings = append(warnings, output.Warning{Code: "no_backups", Message: "the stanza of " + db + " holds no backup yet; run vaire backup now --db " + db + " --type full"})
 	}
 	return Result{Data: out, Warnings: warnings}, nil
 }
@@ -452,13 +452,13 @@ func inWindow(w Window, t time.Time) error {
 	to, errTo := time.Parse(time.RFC3339, w.To)
 	if errFrom != nil || errTo != nil {
 		return output.NewError(output.CodePrecondition, "there is no restore window yet: the repository has no backup", output.ExitPrecondition,
-			"Take a backup first with eru backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
+			"Take a backup first with vaire backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
 	}
 	if t.Before(from) || t.After(to) {
 		return output.NewError(output.CodePrecondition,
 			fmt.Sprintf("%s is outside the restore window %s to %s", t.UTC().Format(time.RFC3339), w.From, w.To),
 			output.ExitPrecondition,
-			"Pick a time inside the window (eru backup list). A time just now becomes restorable once its WAL is archived, within about a minute; older points need a long-retention dump (restore --dump).").
+			"Pick a time inside the window (vaire backup list). A time just now becomes restorable once its WAL is archived, within about a minute; older points need a long-retention dump (restore --dump).").
 			WithDetails(map[string]any{"reason": "outside_window", "window": w})
 	}
 	return nil
@@ -488,7 +488,7 @@ func humanSize(n int64) string {
 
 func databaseNotFound(name string) error {
 	return output.NewError(output.CodePrecondition, "database "+name+" is not in cluster.toml", output.ExitPrecondition,
-		"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": name})
+		"Run vaire db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": name})
 }
 
 // databaseSize returns pg_database_size of db on the cluster at local.
@@ -662,7 +662,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		drill.Result = backup.DrillFail
 		record()
 		return drill, output.WrapError(output.CodeExternalCommand, fmt.Errorf("the restore drill of %s failed at %s: %w", db, check, err), output.ExitExternal,
-			"Read the job log with eru job follow "+env.ID+".")
+			"Read the job log with vaire job follow "+env.ID+".")
 	}
 	if err := m.Restore(ctx, d, opts); err != nil {
 		// pg_dropcluster removes the copy's log with it.
@@ -703,7 +703,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	record()
 	if !ok {
 		return drill, output.NewError(output.CodeExternalCommand, "the restore drill of "+db+" failed its checks", output.ExitExternal,
-			"Read the checks in the job result with eru job follow "+env.ID+".").WithDetails(map[string]any{"drill": drill})
+			"Read the checks in the job result with vaire job follow "+env.ID+".").WithDetails(map[string]any{"drill": drill})
 	}
 	return drill, nil
 }
@@ -815,7 +815,7 @@ func jobStanzaExpiry(ctx context.Context, env *jobEnv) (any, error) {
 	res := map[string]any{"expired": expired}
 	if len(failed) > 0 {
 		return res, output.NewError(output.CodeExternalCommand, "deleting the stanzas "+strings.Join(failed, ", ")+" failed", output.ExitExternal,
-			"Read the job log; the records stay, so the next eru-stanza-expiry run tries again.").
+			"Read the job log; the records stay, so the next vaire-stanza-expiry run tries again.").
 			WithDetails(map[string]any{"failed": failed, "expired": expired})
 	}
 	return res, nil
@@ -893,7 +893,7 @@ func dumpToBucket(ctx context.Context, cfg config.Cluster, sh engine.Shell, step
 	}
 	if recipient == "" {
 		return backup.Dump{}, output.NewError(output.CodePrecondition, "the node has no age recipient for dumps", output.ExitPrecondition,
-			"Run eru backup setup again; it sends the recipient.").WithDetails(map[string]any{"reason": "no_dump_recipient"})
+			"Run vaire backup setup again; it sends the recipient.").WithDetails(map[string]any{"reason": "no_dump_recipient"})
 	}
 	local, err := clusterPG(cfg, db)
 	if err != nil {
@@ -912,11 +912,11 @@ func dumpToBucket(ctx context.Context, cfg config.Cluster, sh engine.Shell, step
 	return dump, nil
 }
 
-// DumpStream writes pg_dump -Fc of db to w. It backs eru node dump, which
-// eru dump --to local runs over SSH to stream an archive to the laptop.
+// DumpStream writes pg_dump -Fc of db to w. It backs vaire node dump, which
+// vaire dump --to local runs over SSH to stream an archive to the laptop.
 func DumpStream(ctx context.Context, db string, w io.Writer) error {
 	if os.Geteuid() != 0 {
-		return rootRequired("eru node dump")
+		return rootRequired("vaire node dump")
 	}
 	cfg, err := config.LoadCluster(config.ClusterPath)
 	if err != nil {
@@ -930,7 +930,7 @@ func DumpStream(ctx context.Context, db string, w io.Writer) error {
 }
 
 // NoOffsiteWarning is the no_offsite_backup warning for a server without a
-// bucket: server init ends with it, and every apply carries it until eru
+// bucket: server init ends with it, and every apply carries it until vaire
 // backup setup runs.
 func NoOffsiteWarning(cfg config.Cluster) []output.Warning {
 	if cfg.BackupConfigured() {
@@ -938,6 +938,6 @@ func NoOffsiteWarning(cfg config.Cluster) []output.Warning {
 	}
 	return []output.Warning{{
 		Code:    "no_offsite_backup",
-		Message: "no backups leave this server: a lost disk loses every database. Run eru backup setup to send them to an S3-compatible bucket.",
+		Message: "no backups leave this server: a lost disk loses every database. Run vaire backup setup to send them to an S3-compatible bucket.",
 	}}
 }

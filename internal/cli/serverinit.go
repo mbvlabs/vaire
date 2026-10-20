@@ -12,20 +12,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/localenv"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/password"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/secretsdoc"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/password"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -169,7 +169,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 				output.CodePrecondition,
 				"a context named "+r.name+" already exists on this machine",
 				output.ExitPrecondition,
-				"Pick another --name, or remove the context with eru context remove "+r.name+".",
+				"Pick another --name, or remove the context with vaire context remove "+r.name+".",
 			).WithDetails(map[string]any{"reason": "context_exists", "context": r.name})
 		}
 		if contexts.PendingExists(r.name) {
@@ -177,7 +177,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 				output.CodePrecondition,
 				"an unfinished init for "+r.name+" exists",
 				output.ExitPrecondition,
-				"Continue it with eru server init --resume --name "+r.name+", or drop it with eru server init --discard --name "+r.name+".",
+				"Continue it with vaire server init --resume --name "+r.name+", or drop it with vaire server init --discard --name "+r.name+".",
 			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": contexts.PendingDir(r.name)})
 		}
 	}
@@ -232,7 +232,7 @@ func (r *initRun) collect() error {
 		}
 		if len(cfg.Clusters) > 0 {
 			return output.NewError(output.CodeValidation, path+" declares [[clusters]]: server init creates no databases", output.ExitConfig,
-				"Remove [[clusters]] from the answers file and add each database after init with eru db create <name>.")
+				"Remove [[clusters]] from the answers file and add each database after init with vaire db create <name>.")
 		}
 		_, r.boot, err = decodeBootstrap(raw)
 		if err != nil {
@@ -470,7 +470,7 @@ func (r *initRun) loadPending() error {
 		switch len(pending) {
 		case 0:
 			return output.NewError(output.CodePrecondition, "there is no unfinished init to resume", output.ExitPrecondition,
-				"Start one with eru server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
+				"Start one with vaire server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 		case 1:
 			name = pending[0]
 		default:
@@ -480,7 +480,7 @@ func (r *initRun) loadPending() error {
 	}
 	if !contexts.PendingExists(name) {
 		return output.NewError(output.CodePrecondition, "there is no unfinished init for "+name, output.ExitPrecondition,
-			"Start one with eru server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
+			"Start one with vaire server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 	}
 	raw, boot, err := contexts.LoadAnswers(name)
 	if err != nil {
@@ -605,7 +605,7 @@ func (r *initRun) generateSecrets() error {
 	if err != nil {
 		return err
 	}
-	sshPriv, _, err := transport.GenerateSSHKey("eru-" + r.name + "-" + firstOperatorName)
+	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + firstOperatorName)
 	if err != nil {
 		return err
 	}
@@ -627,7 +627,7 @@ func (r *initRun) generateSecrets() error {
 	return r.mark(phaseSecrets)
 }
 
-// ensureDatabaseSecrets fills the operator's eru_admin and service role
+// ensureDatabaseSecrets fills the operator's vaire_admin and service role
 // credentials and records the RPC secret map (D7). Init creates no
 // application databases.
 func (r *initRun) ensureDatabaseSecrets() error {
@@ -654,7 +654,7 @@ func (r *initRun) operator() (config.Operator, error) {
 	if err != nil {
 		return config.Operator{}, err
 	}
-	sshPub, err := transport.AuthorizedKey([]byte(r.sec.SSHPrivateKey), "eru-"+r.name+"-"+r.sec.OperatorName)
+	sshPub, err := transport.AuthorizedKey([]byte(r.sec.SSHPrivateKey), "vaire-"+r.name+"-"+r.sec.OperatorName)
 	if err != nil {
 		return config.Operator{}, err
 	}
@@ -851,7 +851,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	// 13. Local context, then drop the pending state.
 	if contexts.Exists(r.name) {
 		return output.NewError(output.CodePrecondition, "a context named "+r.name+" appeared during init", output.ExitPrecondition,
-			"Remove it, then run eru login and paste the transfer bundle.")
+			"Remove it, then run vaire login and paste the transfer bundle.")
 	}
 	if _, err := secretsdoc.Install(doc, r.name, lockedAt); err != nil {
 		return err
@@ -868,8 +868,8 @@ func runInitRemote(cmd *cobra.Command) error {
 	message := strings.Join([]string{
 		fmt.Sprintf("Server %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.MasterHostname()),
 		"TLS: " + r.tlsSummary() + r.healthSuffix(),
-		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
-		"Context " + r.name + " is the current context on this machine. On another machine run eru login and paste the transfer bundle.",
+		"No application databases yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents).",
+		"Context " + r.name + " is the current context on this machine. On another machine run vaire login and paste the transfer bundle.",
 	}, "\n")
 	r.warnings = append(r.warnings, node.NoOffsiteWarning(r.cfg)...)
 	return r.finish(res, message, res.Next, fmt.Sprintf("Server %s is ready", r.name), nil)
@@ -888,8 +888,8 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 		{"PgBouncer", r.cfg.MasterHostname() + ":6432"},
 		{"Direct TLS", r.cfg.MasterHostname() + ":443  (sslnegotiation=direct)"},
 		{"TLS", r.tlsSummary()},
-		{"Secrets", "in your password manager (transfer bundle: eru login on another machine)"},
-		{"Databases", "none yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents)"},
+		{"Secrets", "in your password manager (transfer bundle: vaire login on another machine)"},
+		{"Databases", "none yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents)"},
 		{"Backups", r.backupSummary()},
 	}
 	if r.health != "" {
@@ -917,9 +917,9 @@ func (r *initRun) fillResult(res *initResult) {
 		res.TLSNotAfter = r.tlsState.NotAfter
 	}
 	res.RestartPerformed = r.dbRestart
-	res.Next = []string{"eru db create <name>", "eru guide agents"}
+	res.Next = []string{"vaire db create <name>", "vaire guide agents"}
 	if !r.cfg.BackupConfigured() {
-		res.Next = append(res.Next, "eru backup setup")
+		res.Next = append(res.Next, "vaire backup setup")
 	}
 }
 
@@ -966,7 +966,7 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 		return err
 	}
 	if !osInfo.Supported() {
-		return output.NewError(output.CodePrecondition, "the server runs "+osInfo.Pretty+", which eru does not support", output.ExitPrecondition,
+		return output.NewError(output.CodePrecondition, "the server runs "+osInfo.Pretty+", which vaire does not support", output.ExitPrecondition,
 			"Use "+hostinfo.SupportedList+".").WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
 	}
 	arch, err := n.Arch(ctx)
@@ -983,7 +983,7 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 		return err
 	}
 
-	r.p.phase("init.binary", "started", "install eru "+buildinfo.Version+" on the node")
+	r.p.phase("init.binary", "started", "install vaire "+buildinfo.Version+" on the node")
 	got, installed, err := n.Version(ctx)
 	if err != nil {
 		return err
@@ -1234,7 +1234,7 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 		details["public_ssh"] = secrets.Redact(err.Error())
 		return output.NewError(output.CodeLockdownFailed,
 			"SSH over WireGuard did not work, and the node is not reachable over public SSH either", output.ExitLockdown,
-			"Use the provider console: run eru node ssh-revert as root, check ufw and wg0, then eru server init --resume.").WithDetails(details)
+			"Use the provider console: run vaire node ssh-revert as root, check ufw and wg0, then vaire server init --resume.").WithDetails(details)
 	}
 	defer client.Close()
 	n := &remote.Node{SSH: client, Operator: r.sec.OperatorName}
@@ -1248,20 +1248,20 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 	}
 	return output.NewError(output.CodeLockdownFailed,
 		"SSH over WireGuard did not work, so the node reverted to public SSH", output.ExitLockdown,
-		"Check that UDP "+strconv.Itoa(r.cfg.Transport.ListenPort)+" reaches the server (provider firewall, local network), then run eru server init --resume.").
+		"Check that UDP "+strconv.Itoa(r.cfg.Transport.ListenPort)+" reaches the server (provider firewall, local network), then run vaire server init --resume.").
 		WithDetails(details)
 }
 
 // document builds the secrets document from the pending state (§10.1).
-// askMasterPassword offers to set the master password that gates eru secrets
+// askMasterPassword offers to set the master password that gates vaire secrets
 // export. It is optional and needs a terminal: skipping leaves the gate to a
-// code from the authenticator app (eru protect init) or a later
-// eru secrets password set. Only the argon2id hash is kept.
+// code from the authenticator app (vaire protect init) or a later
+// vaire secrets password set. Only the argon2id hash is kept.
 func (r *initRun) askMasterPassword(cmd *cobra.Command) error {
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil
 	}
-	ok, err := PromptYes(cmd, "Set a master password now to gate eru secrets export?")
+	ok, err := PromptYes(cmd, "Set a master password now to gate vaire secrets export?")
 	if err != nil || !ok {
 		return err
 	}
@@ -1288,7 +1288,7 @@ func (r *initRun) askMasterPassword(cmd *cobra.Command) error {
 		}
 	}
 	r.warnings = append(r.warnings, output.Warning{Code: "master_password_unset",
-		Message: "no master password was set; set one later with eru secrets password set, or use a code from the authenticator app"})
+		Message: "no master password was set; set one later with vaire secrets password set, or use a code from the authenticator app"})
 	return nil
 }
 
@@ -1298,10 +1298,10 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		return secretsdoc.Document{}, errors.New("the node identity is missing from the pending init; re-run with --resume")
 	}
 	return secretsdoc.Document{
-		Schema:     secretsdoc.Schema,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		EruVersion: buildinfo.Version,
-		Server:     secretsdoc.Server{Name: r.name, Domain: r.cfg.Domain, TLSMode: r.cfg.TLS.Mode},
+		Schema:       secretsdoc.Schema,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		VaireVersion: buildinfo.Version,
+		Server:       secretsdoc.Server{Name: r.name, Domain: r.cfg.Domain, TLSMode: r.cfg.TLS.Mode},
 		Nodes: []secretsdoc.Node{{
 			Name:          n.Name,
 			Role:          n.Role,
@@ -1383,19 +1383,19 @@ func runInitLocal(cmd *cobra.Command) error {
 	}
 	osInfo, err := hostinfo.ReadOS()
 	if err != nil || !osInfo.Supported() {
-		return output.NewError(output.CodePrecondition, "this server runs "+osInfo.Pretty+", which eru does not support", output.ExitPrecondition,
+		return output.NewError(output.CodePrecondition, "this server runs "+osInfo.Pretty+", which vaire does not support", output.ExitPrecondition,
 			"Use "+hostinfo.SupportedList+".").WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
 	}
 	if self, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(self); err == nil && resolved != node.BinaryPath {
 			return output.NewError(output.CodePrecondition, "server init --local must run as "+node.BinaryPath, output.ExitPrecondition,
-				"Install eru with the install script as root (curl -fsSL <base>/install.sh | sudo bash), then run "+node.BinaryPath+" server init --local.").
+				"Install vaire with the install script as root (curl -fsSL <base>/install.sh | sudo bash), then run "+node.BinaryPath+" server init --local.").
 				WithDetails(map[string]any{"reason": "binary_not_installed", "running": resolved})
 		}
 	}
 	if _, err := os.Stat(config.NodePath); err == nil && !flagTrue(cmd, "resume") {
-		return output.NewError(output.CodePrecondition, "this server is already an eru node ("+config.NodePath+" exists)", output.ExitPrecondition,
-			"Operate it from your machine with eru login, or continue an unfinished init with --resume.").
+		return output.NewError(output.CodePrecondition, "this server is already an vaire node ("+config.NodePath+" exists)", output.ExitPrecondition,
+			"Operate it from your machine with vaire login, or continue an unfinished init with --resume.").
 			WithDetails(map[string]any{"reason": "already_a_node"})
 	}
 	r, err := prepareInit(cmd, true)
@@ -1499,18 +1499,18 @@ func runInitLocal(cmd *cobra.Command) error {
 	}
 	res.LockdownPending = true
 	res.LockdownDeadline = deadline
-	res.LoginCommand = "eru login"
+	res.LoginCommand = "vaire login"
 	r.fillResult(&res)
 	message := strings.Join([]string{
 		fmt.Sprintf("Server %s is bootstrapped on this machine (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
 		"TLS: " + r.tlsSummary() + r.healthSuffix(),
-		"No application databases yet: create one with eru db create <name>, or point your agent to the CLI (eru guide agents).",
-		"On your machine run eru login and paste the transfer bundle from the handoff.",
-		"Then run any remote command, such as eru plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
+		"No application databases yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents).",
+		"On your machine run vaire login and paste the transfer bundle from the handoff.",
+		"Then run any remote command, such as vaire plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
 		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",
 	}, "\n")
 	return r.finish(res, message, append([]string{res.LoginCommand}, res.Next...), fmt.Sprintf("Server %s is bootstrapped on this machine", r.name), []string{
-		"On your machine run eru login and paste the transfer bundle,",
+		"On your machine run vaire login and paste the transfer bundle,",
 		"then any remote command within 30 minutes. That closes public SSH; otherwise the SSH change reverts.",
 	})
 }

@@ -1,4 +1,4 @@
-// Package ui is eru's terminal presentation for humans: styled headers,
+// Package ui is vaire's terminal presentation for humans: styled headers,
 // panels, spinners, progress bars and huh prompts. It is used only when
 // stderr is a terminal and the output mode is human; every other mode keeps
 // plain lines.
@@ -59,7 +59,7 @@ const (
 	SymSkip = "–"
 )
 
-// Theme is the huh theme for every eru prompt. It is built on ThemeBase16, so
+// Theme is the huh theme for every vaire prompt. It is built on ThemeBase16, so
 // it follows the terminal's 16 colors, with the accent, the selected option
 // and the focused button picked per background for contrast.
 var Theme = huh.ThemeFunc(func(isDark bool) *huh.Styles {

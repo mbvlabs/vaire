@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // metricsPath is one path of the /metrics endpoint.
@@ -46,7 +46,7 @@ func handleMetricsShow(_ context.Context, env *Env) (Result, error) {
 			data.TargetsPath = l.Path
 			continue
 		}
-		data.Paths = append(data.Paths, metricsPath{Path: l.Path, Component: l.Labels["eru_component"], Labels: l.Labels})
+		data.Paths = append(data.Paths, metricsPath{Path: l.Path, Component: l.Labels["vaire_component"], Labels: l.Labels})
 	}
 	var warnings []output.Warning
 	if !cfg.Metrics.Enabled {
@@ -55,7 +55,7 @@ func handleMetricsShow(_ context.Context, env *Env) (Result, error) {
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
-// metricsToken is eru metrics rotate's confirm token: <server>/metrics.
+// metricsToken is vaire metrics rotate's confirm token: <server>/metrics.
 func metricsToken(cfg config.Cluster, _ json.RawMessage) string { return cfg.Name() + "/metrics" }
 
 // handleMetricsRotate replaces the /metrics credential's hash with the one

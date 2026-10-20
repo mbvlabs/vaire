@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/render"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/render"
 )
 
 func metricsCluster(dbs ...string) config.Cluster {
@@ -40,10 +40,10 @@ func TestMetricsLocations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.Get("target") != "postgresql://eru_monitor@/app?connect_timeout=5&host=%2Fvar%2Frun%2Fpostgresql&port=5433&sslmode=disable" {
+	if q.Get("target") != "postgresql://vaire_monitor@/app?connect_timeout=5&host=%2Fvar%2Frun%2Fpostgresql&port=5433&sslmode=disable" {
 		t.Errorf("target %q", q.Get("target"))
 	}
-	if app.Upstream != "http://127.0.0.1:9187/probe" || app.Labels["db"] != "app" || app.Labels["eru_component"] != "postgres" {
+	if app.Upstream != "http://127.0.0.1:9187/probe" || app.Labels["db"] != "app" || app.Labels["vaire_component"] != "postgres" {
 		t.Errorf("app location %+v", app)
 	}
 }
@@ -91,7 +91,7 @@ func TestTargetsJSON(t *testing.T) {
 		if tg.Targets[0] != "db1.example.com:443" || tg.Labels["__scheme__"] != "https" || !strings.HasPrefix(tg.Labels["__metrics_path__"], "/metrics/") {
 			t.Errorf("target %+v", tg)
 		}
-		if tg.Labels["eru_server"] != "prod" || tg.Labels["eru_node"] != "db1" {
+		if tg.Labels["vaire_server"] != "prod" || tg.Labels["vaire_node"] != "db1" {
 			t.Errorf("labels %v", tg.Labels)
 		}
 	}
@@ -104,9 +104,9 @@ func TestExporterUnits(t *testing.T) {
 	}
 	node := string(units[NodeExporterService])
 	for _, want := range []string{
-		"User=node_exporter", "Slice=eru-exporters.slice", "--web.listen-address=127.0.0.1:9100",
+		"User=node_exporter", "Slice=vaire-exporters.slice", "--web.listen-address=127.0.0.1:9100",
 		"--collector.textfile.directory=/var/lib/node_exporter/textfile", "MemoryMax=64M", "ProtectSystem=strict",
-		"/usr/local/lib/eru/exporters/node_exporter-1.12.1/node_exporter",
+		"/usr/local/lib/vaire/exporters/node_exporter-1.12.1/node_exporter",
 	} {
 		if !strings.Contains(node, want) {
 			t.Errorf("node_exporter unit lacks %s:\n%s", want, node)
@@ -128,7 +128,7 @@ func TestExporterUnits(t *testing.T) {
 
 func TestPgbouncerConnection(t *testing.T) {
 	got := pgbouncerConnection(SessionSocketDir, SessionPoolerPort, "pw")
-	want := "PGBOUNCER_EXPORTER_CONNECTION_STRING=postgres://eru_monitor:pw@/pgbouncer?host=/run/eru-pgbouncer-session&port=5432&sslmode=disable\n"
+	want := "PGBOUNCER_EXPORTER_CONNECTION_STRING=postgres://vaire_monitor:pw@/pgbouncer?host=/run/vaire-pgbouncer-session&port=5432&sslmode=disable\n"
 	if got != want {
 		t.Errorf("got %q", got)
 	}
@@ -151,8 +151,8 @@ func TestNginxConfProxyProtocol(t *testing.T) {
 		"listen 127.0.0.1:6435 proxy_protocol;",
 		"listen 127.0.0.1:8443 ssl proxy_protocol default_server;",
 		"real_ip_header proxy_protocol;",
-		"include /etc/nginx/eru-metrics*.conf;",
-		"limit_req_zone $binary_remote_addr zone=eru_metrics",
+		"include /etc/nginx/vaire-metrics*.conf;",
+		"limit_req_zone $binary_remote_addr zone=vaire_metrics",
 	} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("nginx.conf lacks %q", want)

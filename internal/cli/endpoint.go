@@ -7,8 +7,8 @@ import (
 	"net/netip"
 	"strconv"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +16,7 @@ import (
 // dials the master's public address. After server init --restore on a new
 // IP, the machine that ran it has the new address; another machine heals
 // itself in acme mode by asking the public resolvers for the master's
-// hostname, and anywhere else eru context set-address sets it. WireGuard
+// hostname, and anywhere else vaire context set-address sets it. WireGuard
 // authenticates the peer by its pinned key, so a wrong DNS answer can't
 // impersonate the server.
 
@@ -97,7 +97,7 @@ func healEndpoint(ctx context.Context, c *contexts.Context, err error) (bool, ou
 
 // endpointHealedKey marks a command that already healed its endpoint once,
 // so a second failure doesn't loop.
-const endpointHealedKey = "eru.endpoint_healed"
+const endpointHealedKey = "vaire.endpoint_healed"
 
 func endpointHealed(cmd *cobra.Command) bool { return cmd.Annotations[endpointHealedKey] == "1" }
 

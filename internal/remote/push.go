@@ -13,15 +13,15 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/release"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/release"
 )
 
 // EnvNodeBinary points a dev build at the linux binary to push (§7.3).
-const EnvNodeBinary = "ERU_NODE_BINARY"
+const EnvNodeBinary = "VAIRE_NODE_BINARY"
 
 // Artifact is a verified linux binary ready to push.
 type Artifact struct {
@@ -34,7 +34,7 @@ var safeVersion = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // NodeArtifact returns the node binary for arch (§7.5 step 1). Release builds
 // download and verify the matching linux artifact into the release cache. Dev
-// builds push ERU_NODE_BINARY, or the running binary when it is already
+// builds push VAIRE_NODE_BINARY, or the running binary when it is already
 // linux/<arch>.
 func NodeArtifact(ctx context.Context, arch string) (Artifact, error) {
 	build := LocalBuild()
@@ -99,7 +99,7 @@ func (n *Node) Arch(ctx context.Context) (string, error) {
 			output.CodePrecondition,
 			"the node's architecture "+strings.TrimSpace(string(stdout))+" is not supported",
 			output.ExitPrecondition,
-			"eru nodes run on amd64 and arm64.",
+			"vaire nodes run on amd64 and arm64.",
 		).WithDetails(map[string]any{"reason": "arch_unsupported"})
 	}
 	return arch, nil
@@ -125,7 +125,7 @@ func (n *Node) OS(ctx context.Context) (hostinfo.OS, error) {
 	return hostinfo.ParseOSRelease(stdout), nil
 }
 
-// Upload streams art to /tmp/eru-<version>-<rand> as the SSH user (§7.5
+// Upload streams art to /tmp/vaire-<version>-<rand> as the SSH user (§7.5
 // step 2) and returns the remote path.
 func (n *Node) Upload(ctx context.Context, art Artifact) (string, error) {
 	if !safeVersion.MatchString(art.Build.Version) {
@@ -135,7 +135,7 @@ func (n *Node) Upload(ctx context.Context, art Artifact) (string, error) {
 	if _, err := rand.Read(suffix); err != nil {
 		return "", err
 	}
-	remote := "/tmp/eru-" + art.Build.Version + "-" + hex.EncodeToString(suffix)
+	remote := "/tmp/vaire-" + art.Build.Version + "-" + hex.EncodeToString(suffix)
 	f, err := os.Open(art.Path)
 	if err != nil {
 		return "", err
@@ -175,8 +175,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 const bootstrapInstall = `set -eu
 src="$1"
 want="$2"
-dst=/usr/local/bin/eru
-stage=/usr/local/bin/eru.new
+dst=/usr/local/bin/vaire
+stage=/usr/local/bin/vaire.new
 trap 'rm -f "$src" "$stage"' EXIT
 install -d -m 0755 /usr/local/bin
 rm -f "$stage"
@@ -195,7 +195,7 @@ mv -f "$stage" "$dst"
 echo "installed $dst"
 `
 
-// InstallBootstrap pushes and installs art on a node that has no eru yet.
+// InstallBootstrap pushes and installs art on a node that has no vaire yet.
 func (n *Node) InstallBootstrap(ctx context.Context, art Artifact) error {
 	remote, err := n.Upload(ctx, art)
 	if err != nil {

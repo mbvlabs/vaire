@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/spf13/cobra"
 )
 
@@ -116,7 +116,7 @@ func defaultAudience(cmd *cobra.Command) string {
 	if cmd == nil {
 		return "operator"
 	}
-	if cmd.CommandPath() == "eru node upgrade" {
+	if cmd.CommandPath() == "vaire node upgrade" {
 		return "operator"
 	}
 	for cur := cmd; cur != nil; cur = cur.Parent() {
@@ -144,7 +144,7 @@ func walkCommands(root *cobra.Command) []*cobra.Command {
 }
 
 func commandHidden(cmd *cobra.Command) bool {
-	// eru node upgrade is operator-audience under the hidden node parent.
+	// vaire node upgrade is operator-audience under the hidden node parent.
 	if meta, ok := metaFor(cmd); ok && meta.Audience == "operator" && cmd.Parent() != nil && cmd.Parent().Hidden {
 		return false
 	}
@@ -245,11 +245,11 @@ func checkOneCommand(cmd *cobra.Command) []string {
 	if meta.Group != groupFromCommand(cmd) {
 		failures = append(failures, fmt.Sprintf("%s: group %q does not match cobra parent %q", path, meta.Group, groupFromCommand(cmd)))
 	}
-	if meta.Audience == "node" && !strings.HasPrefix(path, "eru node") {
-		failures = append(failures, path+": node audience is only valid under eru node")
+	if meta.Audience == "node" && !strings.HasPrefix(path, "vaire node") {
+		failures = append(failures, path+": node audience is only valid under vaire node")
 	}
-	if strings.HasPrefix(path, "eru node") && path != "eru node upgrade" && meta.Audience != "node" {
-		failures = append(failures, path+": command under eru node must have node audience")
+	if strings.HasPrefix(path, "vaire node") && path != "vaire node upgrade" && meta.Audience != "node" {
+		failures = append(failures, path+": command under vaire node must have node audience")
 	}
 	for _, code := range meta.ErrorCodes {
 		if !output.IsKnownCode(code) {

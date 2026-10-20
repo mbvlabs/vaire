@@ -1,4 +1,4 @@
-// Package top is eru top's model (Phase 4): the SQL it reads each database
+// Package top is vaire top's model (Phase 4): the SQL it reads each database
 // with, the deltas between two samples, the blocking chains, and the
 // rendering. The terminal program and the connections live in package cli.
 package top
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/pg"
 )
 
 // ActivitySQL lists the client sessions of the connected database, with
@@ -31,11 +31,11 @@ const DatabaseSQL = `SELECT (xact_commit + xact_rollback)::text AS xacts, blks_h
 FROM pg_stat_database WHERE datname = current_database()`
 
 // StatementsSQL reads statement deltas, excluding internal roles before the
-// limit unless allSessions is set, just like eru queries.
+// limit unless allSessions is set, just like vaire queries.
 func StatementsSQL(allSessions bool) string {
 	filter := ""
 	if !allSessions {
-		filter = "\n  AND NOT " + pg.EruRoleSQL("r.rolname")
+		filter = "\n  AND NOT " + pg.VaireRoleSQL("r.rolname")
 	}
 	return `SELECT s.queryid::text AS queryid, s.calls::text AS calls, s.total_exec_time::text AS total_ms,
   left(regexp_replace(s.query, '\s+', ' ', 'g'), 200) AS query
@@ -83,7 +83,7 @@ type Sample struct {
 	Error      string
 }
 
-// DBRow is one database's line in eru top.
+// DBRow is one database's line in vaire top.
 type DBRow struct {
 	DB          string   `json:"db"`
 	Connections int      `json:"connections"`
@@ -116,7 +116,7 @@ type Pool struct {
 	MaxWait   int64  `json:"maxwait_s"`
 }
 
-// Snapshot is what eru top shows and --json prints.
+// Snapshot is what vaire top shows and --json prints.
 type Snapshot struct {
 	At         time.Time `json:"at"`
 	Databases  []DBRow   `json:"databases"`
@@ -305,7 +305,7 @@ func SortSessions(sessions []Session, key string) {
 // fit height rows.
 func Render(s Snapshot, filter, sortKey string, width, height int) string {
 	var b strings.Builder
-	title := "eru top · " + s.At.Format("15:04:05")
+	title := "vaire top · " + s.At.Format("15:04:05")
 	if filter != "" {
 		title += " · " + filter
 	}

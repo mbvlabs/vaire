@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"syscall"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/render"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/render"
 )
 
 // PgBackRestBin is the binary archive-push runs without --pgbackrest: where
@@ -36,7 +36,7 @@ var archiveLog io.Writer = os.Stderr
 // refusal writes its reason to stderr, so it shows in the PostgreSQL log.
 func ArchivePush(bin, stanza, walPath string) error {
 	refuse := func(reason string, err error) error {
-		_, _ = fmt.Fprintf(archiveLog, "eru archive-push: not archiving %q to stanza %q: %s\n", walPath, stanza, reason)
+		_, _ = fmt.Fprintf(archiveLog, "vaire archive-push: not archiving %q to stanza %q: %s\n", walPath, stanza, reason)
 		return err
 	}
 	if !stanzaPattern.MatchString(stanza) {
@@ -57,13 +57,13 @@ func ArchivePush(bin, stanza, walPath string) error {
 	if fenced, err := archiveFenced(); err != nil {
 		// Fail closed: PostgreSQL keeps the segment and retries.
 		return refuse("can't tell whether this node is fenced ("+err.Error()+")",
-			output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Check that postgres can stat "+masterbackup.FencedPath+" (/etc/eru is 0755)."))
+			output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Check that postgres can stat "+masterbackup.FencedPath+" (/etc/vaire is 0755)."))
 	} else if fenced {
 		return refuse("this node is fenced by a newer master", fencedError())
 	}
 	if _, err := os.Stat(bin); err != nil {
 		return refuse("pgBackRest is not at "+bin+" ("+err.Error()+")",
-			output.WrapError(output.CodeMissingTool, err, output.ExitMissingTool, "pgBackRest is installed by postgres-packages-v1: run eru apply."))
+			output.WrapError(output.CodeMissingTool, err, output.ExitMissingTool, "pgBackRest is installed by postgres-packages-v1: run vaire apply."))
 	}
 	err := syscall.Exec(bin, []string{"pgbackrest", "--stanza=" + stanza, "archive-push", walPath}, os.Environ()) //nolint:gosec // G204: a validated stanza and binary, and PostgreSQL's %p.
 	return refuse("exec "+bin+" failed ("+err.Error()+")", output.WrapError(output.CodeMissingTool, err, output.ExitMissingTool, ""))

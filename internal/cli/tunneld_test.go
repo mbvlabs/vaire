@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/contexts"
 )
 
 func TestTunnelSocketPathShort(t *testing.T) {
-	dir, err := os.MkdirTemp("", "eru")
+	dir, err := os.MkdirTemp("", "vaire")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestTunnelSocketPathShort(t *testing.T) {
 func TestTunnelSocketPathFallsBackWhenTooLong(t *testing.T) {
 	long := filepath.Join(t.TempDir(), strings.Repeat("x", 120))
 	t.Setenv("XDG_CONFIG_HOME", long)
-	runtimeDir, err := os.MkdirTemp("", "eru-rt")
+	runtimeDir, err := os.MkdirTemp("", "vaire-rt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestTunnelSocketPathFallsBackWhenTooLong(t *testing.T) {
 }
 
 func TestPrivateDirRefusesLooseMode(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "eru")
+	dir := filepath.Join(t.TempDir(), "vaire")
 	if err := os.Mkdir(dir, 0o755); err != nil { //nolint:gosec // G301: the test needs a loose mode.
 		t.Fatal(err)
 	}

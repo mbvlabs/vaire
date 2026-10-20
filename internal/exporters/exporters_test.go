@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/versions"
+	"github.com/mbvlabs/vaire/internal/versions"
 )
 
 func TestPinsComplete(t *testing.T) {
@@ -34,7 +34,7 @@ func TestArtifactLayout(t *testing.T) {
 	if a.URL != "https://github.com/prometheus/node_exporter/releases/download/v1.12.1/node_exporter-1.12.1.linux-amd64.tar.gz" {
 		t.Errorf("url %s", a.URL)
 	}
-	if a.BinaryPath() != "/usr/local/lib/eru/exporters/node_exporter-1.12.1/node_exporter" {
+	if a.BinaryPath() != "/usr/local/lib/vaire/exporters/node_exporter-1.12.1/node_exporter" {
 		t.Errorf("path %s", a.BinaryPath())
 	}
 	p, err := ArtifactFor(versions.PgbouncerExporter, "arm64")

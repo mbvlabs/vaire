@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 const adminUserID = "admin-user-v1"
 
-// SudoersPath lets the admin user run eru node commands as root (§7.4).
-const SudoersPath = "/etc/sudoers.d/eru"
+// SudoersPath lets the admin user run vaire node commands as root (§7.4).
+const SudoersPath = "/etc/sudoers.d/vaire"
 
 // SecretSudoPassword is the request secret holding the admin sudo password.
 const SecretSudoPassword = "sudo_password"
@@ -24,7 +24,7 @@ type adminUser struct{}
 func (adminUser) ID() string { return adminUserID }
 
 func (adminUser) Describe(cfg config.Cluster) string {
-	return "create admin user " + cfg.Server.AdminUser + " with the operator SSH keys and the eru sudoers rule"
+	return "create admin user " + cfg.Server.AdminUser + " with the operator SSH keys and the vaire sudoers rule"
 }
 
 // adminUserRender is everything step 2 writes. The sudo password is applied
@@ -44,14 +44,14 @@ func renderAdminUser(cfg config.Cluster) (adminUserRender, error) {
 		return adminUserRender{}, errors.New("operators.toml lists no operator; refusing to install an empty authorized_keys")
 	}
 	var keys strings.Builder
-	keys.WriteString("# managed by eru: operator keys from " + config.OperatorsPath + "\n")
+	keys.WriteString("# managed by vaire: operator keys from " + config.OperatorsPath + "\n")
 	for _, op := range ops.Operators {
 		keys.WriteString(strings.TrimSpace(op.SSHPublicKey) + "\n")
 	}
 	return adminUserRender{
 		User:           cfg.Server.AdminUser,
 		AuthorizedKeys: keys.String(),
-		Sudoers:        "# managed by eru\n" + cfg.Server.AdminUser + " ALL=(root) NOPASSWD: /usr/local/bin/eru node *\n",
+		Sudoers:        "# managed by vaire\n" + cfg.Server.AdminUser + " ALL=(root) NOPASSWD: /usr/local/bin/vaire node *\n",
 	}, nil
 }
 

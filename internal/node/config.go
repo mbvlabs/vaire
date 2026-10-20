@@ -7,12 +7,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/state"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/state"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 type configSetParams struct {
@@ -30,7 +30,7 @@ func handleConfigGet(context.Context, *Env) (Result, error) {
 	raw, err := os.ReadFile(state.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run eru server init first.")
+			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run vaire server init first.")
 		}
 		return Result{}, err
 	}
@@ -91,8 +91,8 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	revision := current
 	var synced []output.Warning
 	if !env.Req.DryRun {
-		// eru_admin's write access follows the protection before the file
-		// says so: a protection is never saved while eru_admin can still
+		// vaire_admin's write access follows the protection before the file
+		// says so: a protection is never saved while vaire_admin can still
 		// write to the database.
 		if oldErr == nil {
 			if synced, err = syncProtectedAccess(ctx, env, old, cfg); err != nil {
@@ -165,7 +165,7 @@ func handleConfigValidate(_ context.Context, env *Env) (Result, error) {
 	if p.TOML == "" {
 		file, err := os.ReadFile(state.Path)
 		if err != nil {
-			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run eru server init first.")
+			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run vaire server init first.")
 		}
 		raw = file
 	}
@@ -226,7 +226,7 @@ func checkRepoMove(ctx context.Context, old, updated config.Cluster) error {
 	return output.NewError(output.CodePrecondition,
 		"backups already live in "+ob.Bucket+"/"+ob.Prefix+"; moving them would lose the restore window",
 		output.ExitPrecondition,
-		"Keep the endpoint, bucket and prefix. Re-running eru backup setup with the same bucket rotates the keys.").
+		"Keep the endpoint, bucket and prefix. Re-running vaire backup setup with the same bucket rotates the keys.").
 		WithDetails(map[string]any{"reason": "repo_in_use", "bucket": ob.Bucket, "prefix": ob.Prefix})
 }
 

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/totp"
 )
 
 // testClock is a settable clock for the guard.
@@ -93,7 +93,7 @@ func TestProtectInitConfirm(t *testing.T) {
 	}
 	data := res.Data.(map[string]any)
 	secret := data["secret"].(string)
-	if uri := data["uri"].(string); uri != totp.URI("eru", "prod", secret) {
+	if uri := data["uri"].(string); uri != totp.URI("vaire", "prod", secret) {
 		t.Fatalf("uri %s", uri)
 	}
 	if ok, _ := g.configured(); ok {

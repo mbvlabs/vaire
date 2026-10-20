@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // NodeChecks are the checks the node runs, in report order. The operator
-// adds its own (eru.version_skew, ctx.file_modes, metrics.auth).
+// adds its own (vaire.version_skew, ctx.file_modes, metrics.auth).
 func NodeChecks() []Check {
 	checks := []Check{
 		{ID: "host.os_supported", Category: CatHost, AtInit: true, Run: osSupported},
@@ -65,7 +65,7 @@ func osSupported(f Facts) []Result {
 
 func rebootRequired(f Facts) []Result {
 	if f.RebootRequired {
-		return one(Warn, "/var/run/reboot-required exists: a security update waits for a reboot", "reboot the server in a quiet hour (eru ssh --command 'sudo reboot')")
+		return one(Warn, "/var/run/reboot-required exists: a security update waits for a reboot", "reboot the server in a quiet hour (vaire ssh --command 'sudo reboot')")
 	}
 	return one(Pass, "no reboot pending", "")
 }
@@ -89,7 +89,7 @@ func diskData(f Facts) []Result {
 	}
 	switch {
 	case pct < DiskFailFreePct:
-		return one(Fail, detail+" (fails under 10%: a full disk stops every database)", "free space or grow the volume; eru backup list shows dropped stanzas, eru restore cleanup leftovers")
+		return one(Fail, detail+" (fails under 10%: a full disk stops every database)", "free space or grow the volume; vaire backup list shows dropped stanzas, vaire restore cleanup leftovers")
 	case pct < DiskWarnFreePct:
 		return one(Warn, detail, "free space or grow the volume before it reaches 10%")
 	}
@@ -100,7 +100,7 @@ func unattended(f Facts) []Result {
 	if f.UnattendedActive {
 		return one(Pass, "unattended-upgrades is active (security updates only)", "")
 	}
-	return one(Warn, "unattended-upgrades is not active", "eru apply")
+	return one(Warn, "unattended-upgrades is not active", "vaire apply")
 }
 
 func timeSync(f Facts) []Result {
@@ -111,31 +111,31 @@ func timeSync(f Facts) []Result {
 		return one(Pass, "the clock is synchronised", "")
 	}
 	if f.Init {
-		return one(Warn, "the clock is not synchronised yet", "eru apply")
+		return one(Warn, "the clock is not synchronised yet", "vaire apply")
 	}
-	return one(Fail, "the clock is not synchronised (chrony): TLS, TOTP and PITR targets depend on it", "eru apply")
+	return one(Fail, "the clock is not synchronised (chrony): TLS, TOTP and PITR targets depend on it", "vaire apply")
 }
 
 func publicSSH(f Facts) []Result {
 	switch {
 	case f.BreakGlassOpen:
-		return one(Warn, "break-glass public SSH is open", "close it: eru ssh --command 'sudo eru node ssh-revert --lockdown-only'")
+		return one(Warn, "break-glass public SSH is open", "close it: vaire ssh --command 'sudo vaire node ssh-revert --lockdown-only'")
 	case f.LockdownPending:
-		return one(Warn, "the SSH lockdown is pending confirmation", "eru server init --resume")
+		return one(Warn, "the SSH lockdown is pending confirmation", "vaire server init --resume")
 	case f.LockedDownAt == "" && f.Init:
 		// The lockdown is init's own phase with its own failure handling
 		// (--local leaves it to the first operator command), so it doesn't
 		// block the gate.
-		return one(Warn, "public SSH (22/tcp) is still open", "confirm the lockdown over WireGuard (any eru command from your machine)")
+		return one(Warn, "public SSH (22/tcp) is still open", "confirm the lockdown over WireGuard (any vaire command from your machine)")
 	case f.LockedDownAt == "":
-		return one(Fail, "public SSH (22/tcp) is still open", "eru server init --resume")
+		return one(Fail, "public SSH (22/tcp) is still open", "vaire server init --resume")
 	}
 	return one(Pass, "SSH listens on WireGuard only since "+f.LockedDownAt, "")
 }
 
 func sshConfig(f Facts) []Result {
 	if f.SSHConfigDrift != "" {
-		return one(Fail, "the sshd drop-in differs: "+f.SSHConfigDrift, "eru apply")
+		return one(Fail, "the sshd drop-in differs: "+f.SSHConfigDrift, "vaire apply")
 	}
 	return one(Pass, "the sshd drop-in matches", "")
 }
@@ -144,34 +144,34 @@ func fwActive(f Facts) []Result {
 	if f.UFWActive {
 		return one(Pass, "ufw is active", "")
 	}
-	return one(Fail, "ufw is not active", "eru apply")
+	return one(Fail, "ufw is not active", "vaire apply")
 }
 
 func fwRules(f Facts) []Result {
 	if f.FirewallDrift != "" {
-		return one(Fail, "the firewall rules differ: "+f.FirewallDrift, "eru apply")
+		return one(Fail, "the firewall rules differ: "+f.FirewallDrift, "vaire apply")
 	}
 	return one(Pass, "the firewall rules match", "")
 }
 
 func allowlistOpen(f Facts) []Result {
 	if len(f.OpenAllowlists) > 0 {
-		return one(Warn, "open to every address: "+joinSorted(f.OpenAllowlists), "narrow the CIDRs with eru config set")
+		return one(Warn, "open to every address: "+joinSorted(f.OpenAllowlists), "narrow the CIDRs with vaire config set")
 	}
 	return one(Pass, "no allowlist is open to every address", "")
 }
 
 func tlsExpiry(f Facts) []Result {
 	if !f.CertKnown {
-		return one(Fail, "cannot read the node's certificate", "eru apply")
+		return one(Fail, "cannot read the node's certificate", "vaire apply")
 	}
 	days := f.CertNotAfter.Sub(f.Now).Hours() / 24
 	detail := fmt.Sprintf("the certificate expires %s (%.0f days)", f.CertNotAfter.UTC().Format(time.RFC3339), math.Floor(days))
 	switch {
 	case days < TLSFailDays:
-		return one(Fail, detail, "eru ssh --command 'sudo eru node run certs-renew'")
+		return one(Fail, detail, "vaire ssh --command 'sudo vaire node run certs-renew'")
 	case days < TLSWarnDays:
-		return one(Warn, detail+"; renewal starts 30 days ahead, so it is failing", "eru logs eru-certs")
+		return one(Warn, detail+"; renewal starts 30 days ahead, so it is failing", "vaire logs vaire-certs")
 	}
 	return one(Pass, detail, "")
 }
@@ -192,16 +192,16 @@ func tlsDNS(f Facts) []Result {
 func tlsMode(f Facts) []Result {
 	switch {
 	case f.TLSMode == "self-signed":
-		return one(Warn, "self-signed mode: clients can't verify the server (sslmode=require)", "eru config set tls.mode acme")
+		return one(Warn, "self-signed mode: clients can't verify the server (sslmode=require)", "vaire config set tls.mode acme")
 	case f.CertSelfSign:
-		return one(Warn, "the ACME certificate is still pending; the placeholder is served", "eru logs eru-certs")
+		return one(Warn, "the ACME certificate is still pending; the placeholder is served", "vaire logs vaire-certs")
 	}
 	return one(Pass, "an ACME certificate is served", "")
 }
 
 func secretsConfirmed(f Facts) []Result {
 	if f.SecretsAtTime == "" {
-		return one(Fail, "the secrets handoff was never confirmed as stored", "eru secrets export")
+		return one(Fail, "the secrets handoff was never confirmed as stored", "vaire secrets export")
 	}
 	return one(Pass, "the secrets handoff was stored "+f.SecretsAtTime, "")
 }
@@ -217,14 +217,14 @@ func metricsEndpoint(f Facts) []Result {
 		}
 	}
 	if len(down) > 0 {
-		return one(Warn, "not answering: "+joinSorted(down), "eru apply")
+		return one(Warn, "not answering: "+joinSorted(down), "vaire apply")
 	}
 	if f.EndpointStatus != 401 {
 		detail := fmt.Sprintf("/metrics answered %d without a credential, want 401", f.EndpointStatus)
 		if f.EndpointStatus == 0 {
 			detail = "/metrics did not answer: " + f.EndpointError
 		}
-		return one(Warn, detail, "eru apply")
+		return one(Warn, detail, "vaire apply")
 	}
 	return one(Pass, "every exporter answers and /metrics refuses a request without the credential", "")
 }
@@ -233,7 +233,7 @@ func nginxRunning(f Facts) []Result {
 	if f.NginxActive {
 		return one(Pass, "nginx is active", "")
 	}
-	return one(Fail, "nginx is not active: 443 and /metrics are down", "eru apply")
+	return one(Fail, "nginx is not active: 443 and /metrics are down", "vaire apply")
 }
 
 func poolerRunning(f Facts) []Result {
@@ -247,7 +247,7 @@ func poolerRunning(f Facts) []Result {
 		}
 	}
 	if len(down) > 0 {
-		return one(Fail, "not active: "+joinSorted(down), "eru apply")
+		return one(Fail, "not active: "+joinSorted(down), "vaire apply")
 	}
 	return one(Pass, "both poolers are active", "")
 }
@@ -260,7 +260,7 @@ func perCluster(f Facts, needsRunning bool, fn func(c ClusterFacts) (Status, str
 		r := Result{DB: c.Name}
 		switch {
 		case c.AwaitingRecovery:
-			r.Status, r.Detail = Skip, "awaiting recovery (eru db recover "+c.Name+")"
+			r.Status, r.Detail = Skip, "awaiting recovery (vaire db recover "+c.Name+")"
 		case needsRunning && c.State != "running":
 			r.Status, r.Detail = Skip, "the cluster is "+c.State
 		default:
@@ -277,16 +277,16 @@ func pgRunning(f Facts) []Result {
 		case "running":
 			return Pass, "running", ""
 		case "unreachable":
-			return Fail, "the cluster does not answer: " + c.Error, "eru logs postgres --db " + c.Name
+			return Fail, "the cluster does not answer: " + c.Error, "vaire logs postgres --db " + c.Name
 		}
-		return Fail, "the cluster is not running", "eru logs postgres --db " + c.Name
+		return Fail, "the cluster is not running", "vaire logs postgres --db " + c.Name
 	})
 }
 
 func pgConfigDrift(f Facts) []Result {
 	return perCluster(f, false, func(c ClusterFacts) (Status, string, string) {
 		if c.ConfigDrift != "" {
-			return Warn, "the managed configuration differs: " + c.ConfigDrift, "eru apply --db " + c.Name
+			return Warn, "the managed configuration differs: " + c.ConfigDrift, "vaire apply --db " + c.Name
 		}
 		if len(c.Overrides) > 0 {
 			return Warn, "90-overrides.conf sets " + joinSorted(c.Overrides), ""
@@ -298,7 +298,7 @@ func pgConfigDrift(f Facts) []Result {
 func pgRestartPending(f Facts) []Result {
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
 		if c.Sample.PendingRestart > 0 {
-			return Warn, fmt.Sprintf("%d settings wait for a restart", c.Sample.PendingRestart), "eru apply --db " + c.Name + " --confirm " + c.Name + "/restart"
+			return Warn, fmt.Sprintf("%d settings wait for a restart", c.Sample.PendingRestart), "vaire apply --db " + c.Name + " --confirm " + c.Name + "/restart"
 		}
 		return Pass, "no setting waits for a restart", ""
 	})
@@ -307,7 +307,7 @@ func pgRestartPending(f Facts) []Result {
 func pgAlterSystem(f Facts) []Result {
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
 		if c.Sample.AllowAlterSystem != "off" {
-			return Fail, "allow_alter_system is " + c.Sample.AllowAlterSystem, "eru apply --db " + c.Name
+			return Fail, "allow_alter_system is " + c.Sample.AllowAlterSystem, "vaire apply --db " + c.Name
 		}
 		return Pass, "allow_alter_system is off", ""
 	})
@@ -316,7 +316,7 @@ func pgAlterSystem(f Facts) []Result {
 func pgHBA(f Facts) []Result {
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
 		if len(c.HBAWeak) > 0 {
-			return Fail, "pg_hba allows " + joinSorted(c.HBAWeak), "eru apply --db " + c.Name
+			return Fail, "pg_hba allows " + joinSorted(c.HBAWeak), "vaire apply --db " + c.Name
 		}
 		return Pass, "no trust, password or md5 line", ""
 	})
@@ -325,7 +325,7 @@ func pgHBA(f Facts) []Result {
 func pgSSL(f Facts) []Result {
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
 		if c.Sample.SSL != "on" {
-			return Fail, "ssl is " + c.Sample.SSL, "eru apply --db " + c.Name
+			return Fail, "ssl is " + c.Sample.SSL, "vaire apply --db " + c.Name
 		}
 		return Pass, "ssl is on", ""
 	})
@@ -334,7 +334,7 @@ func pgSSL(f Facts) []Result {
 func pgSocketOnly(f Facts) []Result {
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
 		if strings.TrimSpace(c.Sample.ListenAddresses) != "" {
-			return Fail, "the cluster listens on TCP (" + c.Sample.ListenAddresses + "); only the poolers should", "eru apply --db " + c.Name
+			return Fail, "the cluster listens on TCP (" + c.Sample.ListenAddresses + "); only the poolers should", "vaire apply --db " + c.Name
 		}
 		return Pass, "socket only", ""
 	})
@@ -358,9 +358,9 @@ func pgWraparound(f Facts) []Result {
 		detail := fmt.Sprintf("oldest transaction ID age %d", age)
 		switch {
 		case age > WraparoundFail:
-			return Fail, detail + " (fails above 1.6 billion)", "eru maint vacuum --db " + c.Name + " --freeze"
+			return Fail, detail + " (fails above 1.6 billion)", "vaire maint vacuum --db " + c.Name + " --freeze"
 		case age > WraparoundWarn:
-			return Warn, detail, "eru maint report wraparound --db " + c.Name
+			return Warn, detail, "vaire maint report wraparound --db " + c.Name
 		}
 		return Pass, detail, ""
 	})
@@ -370,7 +370,7 @@ func pgConnections(f Facts) []Result {
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
 		detail := fmt.Sprintf("%d of %d connections", c.Sample.Connections, c.Sample.MaxConnections)
 		if c.Sample.MaxConnections > 0 && float64(c.Sample.Connections) > ConnectionsWarn*float64(c.Sample.MaxConnections) {
-			return Warn, detail, "eru top --db " + c.Name
+			return Warn, detail, "vaire top --db " + c.Name
 		}
 		return Pass, detail, ""
 	})
@@ -384,9 +384,9 @@ func pgMemoryPressure(f Facts) []Result {
 		throttled := c.PrevKnown && c.HighEvents > c.PrevHighEvents
 		switch {
 		case c.PressureAvg300 > PressureWarnPct:
-			return Warn, fmt.Sprintf("memory pressure %.1f%% over 5 minutes: the cluster stalls at its MemoryHigh", c.PressureAvg300), "eru db resize " + c.Name + " --size <larger>"
+			return Warn, fmt.Sprintf("memory pressure %.1f%% over 5 minutes: the cluster stalls at its MemoryHigh", c.PressureAvg300), "vaire db resize " + c.Name + " --size <larger>"
 		case throttled:
-			return Warn, fmt.Sprintf("throttled at MemoryHigh %d times since the last check", c.HighEvents-c.PrevHighEvents), "eru db resize " + c.Name + " --size <larger>"
+			return Warn, fmt.Sprintf("throttled at MemoryHigh %d times since the last check", c.HighEvents-c.PrevHighEvents), "vaire db resize " + c.Name + " --size <larger>"
 		}
 		return Pass, fmt.Sprintf("memory pressure %.1f%%", c.PressureAvg300), ""
 	})
@@ -398,7 +398,7 @@ func pgWouldNotStart(f Facts) []Result {
 			return Pass, "running", ""
 		}
 		if c.WouldNotStart != "" {
-			return Fail, c.WouldNotStart, "eru db resize " + c.Name + " --size <smaller>"
+			return Fail, c.WouldNotStart, "vaire db resize " + c.Name + " --size <smaller>"
 		}
 		return Pass, "it would start", ""
 	})
@@ -412,7 +412,7 @@ func memoryBudget(f Facts) []Result {
 	for _, w := range f.BudgetWarnings {
 		msgs = append(msgs, w.Code+": "+w.Message)
 	}
-	return one(Warn, strings.Join(msgs, "; "), "eru tune show")
+	return one(Warn, strings.Join(msgs, "; "), "vaire tune show")
 }
 
 // timerJobs are the timer jobs doctor watches for skips and failures.
@@ -454,7 +454,7 @@ func jobsSkipped(f Facts) []Result {
 		}
 	}
 	if len(bad) > 0 {
-		return one(Warn, "skipped three runs in a row (a lock was busy): "+joinSorted(bad), "eru job list")
+		return one(Warn, "skipped three runs in a row (a lock was busy): "+joinSorted(bad), "vaire job list")
 	}
 	return one(Pass, "no timer job keeps being skipped", "")
 }
@@ -467,14 +467,14 @@ func jobsFailed(f Facts) []Result {
 		}
 	}
 	if len(bad) > 0 {
-		return one(Warn, "the last run failed: "+joinSorted(bad), "eru job list")
+		return one(Warn, "the last run failed: "+joinSorted(bad), "vaire job list")
 	}
 	return one(Pass, "no timer job's last run failed", "")
 }
 
 func backupOffsite(f Facts) []Result {
 	if !f.BackupConfigured {
-		return one(Warn, "no backups leave the server (no_offsite_backup)", "eru backup setup")
+		return one(Warn, "no backups leave the server (no_offsite_backup)", "vaire backup setup")
 	}
 	return one(Pass, "backups go to the bucket", "")
 }
@@ -499,13 +499,13 @@ func backupArchiving(f Facts) []Result {
 		s := c.Sample
 		if s.ArchiveFailed > 0 && s.LastFailedAgeS >= 0 && s.LastFailedAgeS < 3600 &&
 			(s.LastArchivedAgeS < 0 || s.LastFailedAgeS < s.LastArchivedAgeS) {
-			return Fail, fmt.Sprintf("WAL archiving failed %d s ago and has not succeeded since", s.LastFailedAgeS), "eru logs postgres --db " + c.Name
+			return Fail, fmt.Sprintf("WAL archiving failed %d s ago and has not succeeded since", s.LastFailedAgeS), "vaire logs postgres --db " + c.Name
 		}
 		// An idle database archives nothing (archive_timeout only switches a
 		// segment with WAL in it), so a long gap alone is not a problem; a
 		// database that never archived anything once it should have is.
 		if s.LastArchivedAgeS < 0 && !young(f, c) {
-			return Warn, "nothing was ever archived", "eru backup list --db " + c.Name
+			return Warn, "nothing was ever archived", "vaire backup list --db " + c.Name
 		}
 		return Pass, "archiving works", ""
 	})
@@ -524,7 +524,7 @@ func backupFullAge(f Facts) []Result {
 			if young(f, c) {
 				return Skip, "no full backup yet; the first is due on schedule", ""
 			}
-			return Fail, "no full backup", "eru backup now --db " + c.Name + " --type full"
+			return Fail, "no full backup", "vaire backup now --db " + c.Name + " --type full"
 		}
 		at, err := time.Parse(time.RFC3339, last.FinishedAt)
 		if err != nil {
@@ -537,9 +537,9 @@ func backupFullAge(f Facts) []Result {
 		detail := fmt.Sprintf("last full %s ago (schedule every %s)", age.Round(time.Minute), c.FullInterval)
 		switch {
 		case age > 2*c.FullInterval:
-			return Fail, detail, "eru backup now --db " + c.Name + " --type full"
+			return Fail, detail, "vaire backup now --db " + c.Name + " --type full"
 		case age > c.FullInterval+24*time.Hour:
-			return Warn, detail, "eru job list"
+			return Warn, detail, "vaire job list"
 		}
 		return Pass, detail, ""
 	})
@@ -552,14 +552,14 @@ func backupVerify(f Facts) []Result {
 			if young(f, c) {
 				return Skip, "no verify yet", ""
 			}
-			return Warn, "the stanza was never verified", "eru backup verify --db " + c.Name
+			return Warn, "the stanza was never verified", "vaire backup verify --db " + c.Name
 		}
 		if !v.OK {
-			return Warn, "the last verify found problems", "eru backup verify --db " + c.Name
+			return Warn, "the last verify found problems", "vaire backup verify --db " + c.Name
 		}
 		at, err := time.Parse(time.RFC3339, v.FinishedAt)
 		if err == nil && f.Now.Sub(at) > VerifyMaxAge {
-			return Warn, "the last verify is older than 14 days", "eru backup verify --db " + c.Name
+			return Warn, "the last verify is older than 14 days", "vaire backup verify --db " + c.Name
 		}
 		return Pass, "verified " + v.FinishedAt, ""
 	})
@@ -572,10 +572,10 @@ func backupDrill(f Facts) []Result {
 			if c.CreatedAt.IsZero() || f.Now.Sub(c.CreatedAt) < DrillMaxAge {
 				return Skip, "the first drill is not due yet", ""
 			}
-			return Warn, "never drilled", "eru restore drill --db " + c.Name
+			return Warn, "never drilled", "vaire restore drill --db " + c.Name
 		}
 		if last.Result == backup.DrillFail {
-			return Fail, "the last restore drill failed: " + last.Reason, "eru restore drill --db " + c.Name
+			return Fail, "the last restore drill failed: " + last.Reason, "vaire restore drill --db " + c.Name
 		}
 		var lastPass time.Time
 		for _, d := range f.Records.Drills {
@@ -586,7 +586,7 @@ func backupDrill(f Facts) []Result {
 			}
 		}
 		if lastPass.IsZero() || f.Now.Sub(lastPass) > DrillMaxAge {
-			return Warn, "no passing drill in 40 days", "eru restore drill --db " + c.Name
+			return Warn, "no passing drill in 40 days", "vaire restore drill --db " + c.Name
 		}
 		return Pass, "last drill passed " + lastPass.UTC().Format(time.RFC3339), ""
 	})

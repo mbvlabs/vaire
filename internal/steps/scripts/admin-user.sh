@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Step 2 (admin-user-v1): create the admin user, install the operators' SSH
 # keys, set the sudo password when one is given, and install the validated
-# sudoers drop-in that lets the admin user run eru node commands as root.
+# sudoers drop-in that lets the admin user run vaire node commands as root.
 set -euo pipefail
 
 : "${ADMIN_USER:?ADMIN_USER is required}"
@@ -32,7 +32,7 @@ chown "${ADMIN_USER}:${ADMIN_USER}" "${keys_tmp}"
 chmod 0600 "${keys_tmp}"
 mv -f "${keys_tmp}" "${home}/.ssh/authorized_keys"
 
-sudoers_tmp="$(mktemp /etc/sudoers.d/.eru.XXXXXX)"
+sudoers_tmp="$(mktemp /etc/sudoers.d/.vaire.XXXXXX)"
 trap 'rm -f "${keys_tmp}" "${sudoers_tmp}"' EXIT
 printf '%s' "${SUDOERS}" > "${sudoers_tmp}"
 chmod 0440 "${sudoers_tmp}"

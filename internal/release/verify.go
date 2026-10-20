@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // Verifier checks a sigstore bundle over raw bytes for an expected identity.

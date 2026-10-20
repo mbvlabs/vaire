@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/versions"
+	"github.com/mbvlabs/vaire/internal/versions"
 )
 
 func main() {
