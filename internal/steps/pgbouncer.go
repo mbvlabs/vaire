@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 const pgbouncerID = "pgbouncer-v1"
@@ -62,7 +62,7 @@ func poolerDatabases(cfg config.Cluster, session bool) []render.PoolerDatabase {
 }
 
 // restoreEntries route each ready restore's <db>__restoring to its
-// temporary cluster, where the database is still called <db>, so eru sql
+// temporary cluster, where the database is still called <db>, so vaire sql
 // --db <db>__restoring reaches the paused copy (RFC 10.1). Only the session
 // pooler has them; promote and abort reload it without them.
 func restoreEntries(cfg config.Cluster) []render.PoolerDatabase {
@@ -178,7 +178,7 @@ func roleVerifiers(ctx context.Context, cfg config.Cluster) (map[string]string, 
 		return nil, fmt.Errorf("there is no cluster to read the service roles from")
 	}
 	rows, err := ClusterPG(cfg.Clusters[0]).Query(ctx, "postgres",
-		"SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('pgbouncer_auth','eru_monitor')", nil)
+		"SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('pgbouncer_auth','vaire_monitor')", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -201,13 +201,13 @@ func pgbouncerResponds(ctx context.Context, socketDir string, port int) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp("", "eru-pgpass-*")
+	f, err := os.CreateTemp("", "vaire-pgpass-*")
 	if err != nil {
 		return err
 	}
 	name := f.Name()
 	defer func() { _ = os.Remove(name) }()
-	if _, err := fmt.Fprintf(f, "*:*:*:eru_monitor:%s\n", strings.TrimSpace(string(password))); err != nil {
+	if _, err := fmt.Fprintf(f, "*:*:*:vaire_monitor:%s\n", strings.TrimSpace(string(password))); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -218,7 +218,7 @@ func pgbouncerResponds(ctx context.Context, socketDir string, port int) error {
 		return err
 	}
 	_, err = ProbeWithEnv(ctx, []string{"PGPASSFILE=" + name}, "psql",
-		"-h", socketDir, "-p", strconv.Itoa(port), "-U", "eru_monitor", "-d", "pgbouncer", "-tAc", "SHOW VERSION")
+		"-h", socketDir, "-p", strconv.Itoa(port), "-U", "vaire_monitor", "-d", "pgbouncer", "-tAc", "SHOW VERSION")
 	return err
 }
 

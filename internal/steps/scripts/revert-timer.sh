@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Arm or disarm a transient systemd timer that runs /usr/local/bin/eru with
+# Arm or disarm a transient systemd timer that runs /usr/local/bin/vaire with
 # EXEC_ARGS after ON_ACTIVE seconds. Commit-confirm (§8.3) and break-glass
 # (§8.4) use it to undo an SSH change that nobody confirmed.
 set -euo pipefail
@@ -17,8 +17,8 @@ case "${ACTION}" in
     [ "${ON_ACTIVE}" -gt 0 ] || { printf 'ON_ACTIVE must be positive\n' >&2; exit 2; }
     read -r -a args <<< "${EXEC_ARGS}"
     systemd-run --quiet --unit="${UNIT}" --on-active="${ON_ACTIVE}s" \
-      --timer-property=AccuracySec=1s --description="eru ${UNIT}" \
-      /usr/local/bin/eru "${args[@]}"
+      --timer-property=AccuracySec=1s --description="vaire ${UNIT}" \
+      /usr/local/bin/vaire "${args[@]}"
     printf 'armed %s.timer for %s seconds\n' "${UNIT}" "${ON_ACTIVE}"
     ;;
   disarm)

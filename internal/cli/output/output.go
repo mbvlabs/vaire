@@ -206,7 +206,7 @@ func ParseOptions(cmd *cobra.Command) (Options, error) {
 // flag. It covers errors raised before cobra reaches the output flags, such as
 // an unknown command or an unknown flag earlier on the line.
 func OptionsFromArgs(args []string) (Options, error) {
-	flags := pflag.NewFlagSet("eru", pflag.ContinueOnError)
+	flags := pflag.NewFlagSet("vaire", pflag.ContinueOnError)
 	flags.ParseErrorsAllowlist.UnknownFlags = true
 	flags.SetOutput(io.Discard)
 	addOutputFlags(flags)

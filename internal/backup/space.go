@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
 )
 
 // Space headroom: what a copy of a database needs beyond the database itself

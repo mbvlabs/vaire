@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/node"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/spf13/cobra"
 )
 
@@ -103,9 +103,9 @@ func TestProtectInitOutcome(t *testing.T) {
 		next                   []string
 	}{
 		{nil, nil, "no databases yet", nil},
-		{[]string{"app", "billing"}, nil, "protected: app, billing", []string{"eru protect status"}},
-		{nil, []string{"app", "billing"}, "no database is protected", []string{"eru db protect app billing", "eru protect status"}},
-		{[]string{"app"}, []string{"scratch"}, "protected: app; not protected: scratch", []string{"eru db protect scratch", "eru protect status"}},
+		{[]string{"app", "billing"}, nil, "protected: app, billing", []string{"vaire protect status"}},
+		{nil, []string{"app", "billing"}, "no database is protected", []string{"vaire db protect app billing", "vaire protect status"}},
+		{[]string{"app"}, []string{"scratch"}, "protected: app; not protected: scratch", []string{"vaire db protect scratch", "vaire protect status"}},
 	}
 	for _, c := range cases {
 		message, next := protectInitOutcome(c.protected, c.unprotected)
@@ -136,7 +136,7 @@ func TestSplitProtectedAndSet(t *testing.T) {
 	if len(set) != 2 || set["clusters.billing.protected"] != "true" || set["clusters.other.protected"] != "true" {
 		t.Fatalf("protectSet = %v", set)
 	}
-	// The keys are the ones eru config set takes.
+	// The keys are the ones vaire config set takes.
 	for key, value := range protectSet([]string{"app"}, false) {
 		if err := cfg.Set(key, value); err != nil {
 			t.Fatal(err)
@@ -189,7 +189,7 @@ func commandAt(t *testing.T, path string, args ...string) *cobra.Command {
 	t.Helper()
 	root := NewRoot()
 	cmd, _, err := root.Find(strings.Fields(path))
-	if err != nil || cmd.CommandPath() != "eru "+path {
+	if err != nil || cmd.CommandPath() != "vaire "+path {
 		t.Fatalf("find %s: %v", path, err)
 	}
 	if err := cmd.ParseFlags(args); err != nil {

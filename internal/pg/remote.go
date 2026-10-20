@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/transport"
 )
 
 // Params describe an operator-side connection over the tunnel (D12). Host is
@@ -24,7 +24,7 @@ type Params struct {
 	Password   string
 	Database   string
 	// SimpleProtocol uses the simple query protocol, which PgBouncer's
-	// admin console needs (eru top).
+	// admin console needs (vaire top).
 	SimpleProtocol bool
 	// ApplicationName names the session in pg_stat_activity.
 	ApplicationName string

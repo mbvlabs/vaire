@@ -9,7 +9,7 @@ import (
 )
 
 func TestQRSquare(t *testing.T) {
-	out, err := QR("otpauth://totp/eru:prod?algorithm=SHA1&digits=6&issuer=eru&period=30&secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
+	out, err := QR("otpauth://totp/vaire:prod?algorithm=SHA1&digits=6&issuer=vaire&period=30&secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
 	if err != nil {
 		t.Fatal(err)
 	}

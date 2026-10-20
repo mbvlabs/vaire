@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/spf13/cobra"
 )
 
@@ -24,10 +24,10 @@ func TestSecretGateRefusesWithoutTerminal(t *testing.T) {
 	_ = cmd.Flags().Set("no-input", "true")
 	c := &contexts.Context{Name: "prod"}
 
-	if err := secretGateUnlock(cmd, c, "", nil, nil, "eru secrets export"); !isSecretGateErr(err) {
+	if err := secretGateUnlock(cmd, c, "", nil, nil, "vaire secrets export"); !isSecretGateErr(err) {
 		t.Fatalf("no factor: %v", err)
 	}
-	err := secretGateUnlock(cmd, c, "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA", nil, nil, "eru secrets export")
+	err := secretGateUnlock(cmd, c, "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA", nil, nil, "vaire secrets export")
 	if !isSecretGateErr(err) {
 		t.Fatalf("password set: %v", err)
 	}

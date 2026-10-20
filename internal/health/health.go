@@ -1,4 +1,4 @@
-// Package health holds the readings eru status and eru doctor share (Phase
+// Package health holds the readings vaire status and vaire doctor share (Phase
 // 4): one query per cluster, the poolers' SHOW POOLS, and the arithmetic on
 // top. Collecting them is the node's job; this package is pure.
 package health

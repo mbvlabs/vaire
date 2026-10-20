@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // isAwaitingErr reports whether err is the refusal for a database awaiting

@@ -1,4 +1,4 @@
-module github.com/mbvlabs/eru
+module github.com/mbvlabs/vaire
 
 go 1.27.1
 

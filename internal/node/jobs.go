@@ -15,20 +15,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // JobDir holds the specs of detachable jobs between the RPC that starts one
 // and the unit that runs it. The secrets in a spec are read once and the file
 // is deleted before the job does anything else.
-const JobDir = "/var/lib/eru/jobs"
+const JobDir = "/var/lib/vaire/jobs"
 
-// jobNames lists every job eru node run accepts. restore, db-fork and
+// jobNames lists every job vaire node run accepts. restore, db-fork and
 // dump-create run only as detachable jobs an RPC starts (--job-id).
 var jobNames = []string{
 	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump",
@@ -59,7 +59,7 @@ var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true, "maint": tru
 var quietJobs = map[string]bool{"metrics-refresh": true, "doctor": true}
 
 // databaseJobs are the template-unit jobs: each runs for one database, named
-// by --db on a timer run (eru-<job>@<db>) or by the RPC's params.
+// by --db on a timer run (vaire-<job>@<db>) or by the RPC's params.
 var databaseJobs = map[string]bool{
 	"backup-full": true, "backup-diff": true, "backup-incr": true, "backup-verify": true, "restore-drill": true, "db-dump": true,
 }
@@ -71,11 +71,11 @@ var heavyIOJobs = map[string]bool{
 	"backup-full": true, "backup-diff": true, "backup-verify": true, "restore-drill": true, "db-dump": true,
 }
 
-// JobOptions are eru node run's flags.
+// JobOptions are vaire node run's flags.
 type JobOptions struct {
 	// ID names a detachable job whose spec an RPC wrote.
 	ID string
-	// DB is the database of a template-unit timer run (eru-<job>@<db>).
+	// DB is the database of a template-unit timer run (vaire-<job>@<db>).
 	DB string
 }
 
@@ -103,7 +103,7 @@ func (j *jobEnv) shell() engine.Shell {
 
 func knownJob(job string) bool { return slices.Contains(jobNames, job) }
 
-// RunJob runs one job of eru node run: a timer run or a detachable job an RPC
+// RunJob runs one job of vaire node run: a timer run or a detachable job an RPC
 // started. It records the job in state.json, takes the node lock (shared),
 // the heavy-I/O lock for heavy backup jobs and the clusters' locks, runs it
 // and records the outcome. A busy lock records skipped and exits 0: at once
@@ -118,13 +118,13 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	if _, err := os.Stat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
 		return nil, "", output.NewError(
 			output.CodePrecondition,
-			"this machine is not an eru node: "+config.ClusterPath+" does not exist",
+			"this machine is not an vaire node: "+config.ClusterPath+" does not exist",
 			output.ExitPrecondition,
-			"eru node run runs on the server. From your machine: eru ssh --command 'sudo eru node run "+job+"'",
+			"vaire node run runs on the server. From your machine: vaire ssh --command 'sudo vaire node run "+job+"'",
 		).WithDetails(map[string]any{"reason": "not_a_node"})
 	}
 	if os.Geteuid() != 0 {
-		return nil, "", rootRequired("eru node run")
+		return nil, "", rootRequired("vaire node run")
 	}
 	if job == "certs-renew" {
 		release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), certsLockWait)
@@ -170,7 +170,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	}
 	if rpcOnlyJobs[job] && opts.ID == "" {
 		return nil, "", output.NewError(output.CodeUsage, "job "+job+" is started by its operator command, not by hand", output.ExitUsage,
-			"Use eru restore or eru db fork from your machine.")
+			"Use vaire restore or vaire db fork from your machine.")
 	}
 
 	env := &jobEnv{ID: opts.ID, Job: job, Report: report, DB: opts.DB}
@@ -195,7 +195,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		env.DB = jobDatabase(env)
 		if env.DB == "" {
 			return nil, "", output.NewError(output.CodeUsage, "job "+job+" runs for one database", output.ExitUsage,
-				"Pass --db <database>, as the eru-"+job+"@<database> timer does.")
+				"Pass --db <database>, as the vaire-"+job+"@<database> timer does.")
 		}
 		if _, ok := cfg.ClusterByName(env.DB); !ok {
 			return nil, "", databaseNotFound(env.DB)
@@ -508,7 +508,7 @@ func validJobID(id string) bool {
 }
 
 // jobUnit is the transient unit of a detachable job.
-func jobUnit(id string) string { return "eru-job-" + id + ".service" }
+func jobUnit(id string) string { return "vaire-job-" + id + ".service" }
 
 // startJob writes the job's spec and starts it as a transient unit
 // (systemd-run), so it outlives the RPC: Ctrl-C or a dropped tunnel detaches
@@ -542,7 +542,7 @@ func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets 
 	}
 	sh := engine.Shell{Secrets: secrets.Default, Log: env.Log}
 	if err := sh.Exec(ctx, "job", engine.Command{Name: "systemd-run", Args: []string{
-		"--unit=" + strings.TrimSuffix(unit, ".service"), "--description=eru " + job, "--collect",
+		"--unit=" + strings.TrimSuffix(unit, ".service"), "--description=vaire " + job, "--collect",
 		"--property=After=postgresql.service", "--property=Nice=10",
 		BinaryPath, "node", "run", job, "--job-id", id, "--output", "json",
 	}}, env.Report); err != nil {
@@ -564,7 +564,7 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 	rec, ok := st.Job(id)
 	if !ok {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no job "+id, output.ExitPrecondition,
-			"List the jobs with eru job list.").WithDetails(map[string]any{"reason": "job_not_found", "job_id": id})
+			"List the jobs with vaire job list.").WithDetails(map[string]any{"reason": "job_not_found", "job_id": id})
 	}
 	args := []string{"-o", "cat", "--no-pager", "-n", "all"}
 	switch {
@@ -618,7 +618,7 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 			continue
 		}
 		// A unit that ended without recording a result crashed.
-		out, _ := exec.CommandContext(ctx, "systemctl", "is-active", rec.Unit).Output() //nolint:gosec // G204: the unit name is eru-job-<validated id>.
+		out, _ := exec.CommandContext(ctx, "systemctl", "is-active", rec.Unit).Output() //nolint:gosec // G204: the unit name is vaire-job-<validated id>.
 		if state := strings.TrimSpace(string(out)); state != "active" && state != "activating" {
 			if inactiveSince.IsZero() {
 				inactiveSince = time.Now()
@@ -659,7 +659,7 @@ func jobOutcome(rec engine.JobRecord) (Result, error) {
 		return Result{Data: map[string]any{"job_id": rec.ID, "job": rec.Job, "state": rec.State, "result": rec.Result}}, nil
 	case engine.JobSkipped:
 		return Result{}, output.NewError(output.CodePrecondition, "job "+rec.ID+" was skipped: "+rec.Detail, output.ExitPrecondition,
-			"Another eru operation or backup holds the lock; retry when it has finished.").
+			"Another vaire operation or backup holds the lock; retry when it has finished.").
 			WithDetails(map[string]any{"reason": "lock_held", "job_id": rec.ID, "result": rec.Result})
 	}
 	body := output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " failed"}
@@ -694,7 +694,7 @@ func jobErrorDetails(rec engine.JobRecord, details any) map[string]any {
 }
 
 // streamJournal runs journalctl and re-emits the job's events: lines that
-// are eru events pass through, other lines become log events.
+// are vaire events pass through, other lines become log events.
 func streamJournal(ctx context.Context, args []string, report engine.Reporter) {
 	cmd := exec.CommandContext(ctx, "journalctl", args...) //nolint:gosec // G204: fixed journalctl with a validated unit or invocation id.
 	cmd.WaitDelay = time.Second
@@ -717,7 +717,7 @@ func streamJournal(ctx context.Context, args []string, report engine.Reporter) {
 }
 
 // journalFilter turns a job's journal lines into the events a follower
-// sees. eru node run --output json writes one event per line and, at the
+// sees. vaire node run --output json writes one event per line and, at the
 // end, its result envelope indented over many lines: the envelope is
 // dropped (the job record carries the result, and the follower prints its
 // result line from that), as are result events and journalNoise.
@@ -747,7 +747,7 @@ func (f *journalFilter) event(line string) (output.Event, bool) {
 		ev.TS = ""
 		return ev, true
 	}
-	if strings.HasPrefix(line, "{") && strings.Contains(line, `"schema":"eru/v1"`) {
+	if strings.HasPrefix(line, "{") && strings.Contains(line, `"schema":"vaire/v1"`) {
 		// A compact final envelope.
 		return output.Event{}, false
 	}
@@ -785,7 +785,7 @@ func handleJobFollow(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if !validJobID(strings.ToUpper(p.ID)) {
-		return Result{}, output.NewError(output.CodeUsage, "job id "+p.ID+" is not a job id", output.ExitUsage, "List the jobs with eru job list.")
+		return Result{}, output.NewError(output.CodeUsage, "job id "+p.ID+" is not a job id", output.ExitUsage, "List the jobs with vaire job list.")
 	}
 	return followJob(ctx, env, strings.ToUpper(p.ID))
 }
@@ -827,7 +827,7 @@ func reapJobs(ctx context.Context, id string) error {
 }
 
 // jobGone reports whether an unfinished job's process or unit has ended: its
-// recorded PID no longer runs eru node run <job>, or its unit (the RPC's
+// recorded PID no longer runs vaire node run <job>, or its unit (the RPC's
 // transient unit, or the timer's service for this invocation) isn't active.
 func jobGone(ctx context.Context, rec engine.JobRecord) bool {
 	if rec.PID > 0 {
@@ -853,7 +853,7 @@ func jobGone(ctx context.Context, rec engine.JobRecord) bool {
 	return !active || invocation != "" && current != invocation
 }
 
-// jobProcessAlive reports whether pid runs eru node run job. Where /proc
+// jobProcessAlive reports whether pid runs vaire node run job. Where /proc
 // can't be read it trusts the PID alone.
 func jobProcessAlive(pid int, job string) bool {
 	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
@@ -870,9 +870,9 @@ func jobProcessAlive(pid int, job string) bool {
 func timerUnit(rec engine.JobRecord) string {
 	switch {
 	case databaseJobs[rec.Job] && rec.DB != "":
-		return "eru-" + rec.Job + "@" + rec.DB + ".service"
+		return "vaire-" + rec.Job + "@" + rec.DB + ".service"
 	case rec.Job == "stanza-expiry":
-		return "eru-stanza-expiry.service"
+		return "vaire-stanza-expiry.service"
 	}
 	return ""
 }
@@ -880,7 +880,7 @@ func timerUnit(rec engine.JobRecord) string {
 // unitState is whether unit is active (or activating) and its current
 // invocation id. ok is false when systemctl can't be asked.
 func unitState(ctx context.Context, unit string) (active bool, invocation string, ok bool) {
-	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveState,InvocationID", unit).Output() //nolint:gosec // G204: an eru unit name built from a validated id or a configured database.
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveState,InvocationID", unit).Output() //nolint:gosec // G204: an vaire unit name built from a validated id or a configured database.
 	if err != nil {
 		return false, "", false
 	}

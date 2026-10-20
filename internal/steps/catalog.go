@@ -3,8 +3,8 @@ package steps
 import (
 	"context"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // Catalog returns the steps in run order (§11, D1). Phase 2 has steps 1-13,
@@ -47,7 +47,7 @@ func HostStepIDs() []string {
 
 // DatabaseStepIDs are the steps cluster.bootstrap phase=database runs (steps
 // 7-14 and 17, D1). pgbackrest-v1 skips itself until [backup] names a bucket. tls-v1 runs before postgres-config-v1: the security settings turn
-// ssl on and point at /etc/eru/tls, so the certificate and the ssl-cert group
+// ssl on and point at /etc/vaire/tls, so the certificate and the ssl-cert group
 // membership have to exist before PostgreSQL restarts.
 func DatabaseStepIDs() []string {
 	return []string{
@@ -65,7 +65,7 @@ func DatabaseStepIDs() []string {
 	}
 }
 
-// BackupStepIDs are the steps eru backup setup runs after writing [backup]:
+// BackupStepIDs are the steps vaire backup setup runs after writing [backup]:
 // every cluster's archive_command (a reload), the repository with a stanza
 // per cluster, and the timers.
 func BackupStepIDs() []string {
@@ -76,8 +76,8 @@ func BackupStepIDs() []string {
 // cluster is up, for its stanza and first full backup.
 func PgBackRestStepIDs() []string { return []string{pgbackrestID} }
 
-// PackagesStepIDs is the step that installs pgBackRest. eru backup setup
-// plans it to refuse a node that eru apply hasn't brought up to date.
+// PackagesStepIDs is the step that installs pgBackRest. vaire backup setup
+// plans it to refuse a node that vaire apply hasn't brought up to date.
 func PackagesStepIDs() []string { return []string{postgresPackagesID} }
 
 // TimersStepIDs is the step a per-database dump schedule change needs.
@@ -87,7 +87,7 @@ func TimersStepIDs() []string { return []string{timersID} }
 func RolesStepIDs() []string { return []string{postgresRolesID} }
 
 // RolesStepID is cluster's postgres-roles-v1 instance. config.set runs it
-// when a database's protection changes, so eru_admin's write access follows
+// when a database's protection changes, so vaire_admin's write access follows
 // the flag at once (AdminAccessSQL).
 func RolesStepID(cluster string) string { return engine.InstanceID(postgresRolesID, cluster) }
 

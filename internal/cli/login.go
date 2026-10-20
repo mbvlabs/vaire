@@ -10,12 +10,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/secretsdoc"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
@@ -66,12 +66,12 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	if current == ctx.Name {
 		message += " It is the current context."
 	} else {
-		message += " Switch to it with eru context use " + ctx.Name + "."
+		message += " Switch to it with vaire context use " + ctx.Name + "."
 	}
 	return output.Success(cmd, output.Result{
 		Data:    loginData{Context: ctx.Name, Current: current == ctx.Name, Path: contexts.Dir(ctx.Name), Document: summary},
 		Message: message,
-		Next:    []string{"eru plan"},
+		Next:    []string{"vaire plan"},
 	})
 }
 
@@ -134,7 +134,7 @@ func extractBundle(raw []byte, where string) ([]byte, error) {
 	}
 	if !secretsdoc.IsArmored(block) {
 		return nil, output.NewError(output.CodeUsage, "no transfer bundle found "+where, output.ExitUsage,
-			"Pass the bundle file eru printed, or the whole copied handoff with its "+secretsdoc.ArmorHeader+" block. Or run eru login with no argument and paste it.")
+			"Pass the bundle file vaire printed, or the whole copied handoff with its "+secretsdoc.ArmorHeader+" block. Or run vaire login with no argument and paste it.")
 	}
 	return block, nil
 }
@@ -187,7 +187,7 @@ func runContextList(cmd *cobra.Command, _ []string) error {
 	}
 	message := strings.Join(lines, "\n")
 	if len(rows) == 0 {
-		message = "No contexts. Create one with eru login and the transfer bundle."
+		message = "No contexts. Create one with vaire login and the transfer bundle."
 	}
 	return output.Success(cmd, output.Result{Data: rows, Message: message})
 }

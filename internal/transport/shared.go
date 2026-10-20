@@ -17,12 +17,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // The shared tunnel: one daemon per context owns the only WireGuard device
 // for the operator key and proxies TCP dials into it over a unix socket.
-// Every eru process, the one that spawned the daemon included, dials through
+// Every vaire process, the one that spawned the daemon included, dials through
 // it, so two commands no longer steal the node's single peer from each other.
 
 // SharedProto is the socket protocol version.
@@ -72,7 +72,7 @@ type sharedRequest struct {
 	Force bool   `json:"force,omitempty"`
 }
 
-// SharedClient is one eru process attached to the daemon.
+// SharedClient is one vaire process attached to the daemon.
 type SharedClient struct {
 	PID     int    `json:"pid"`
 	Command string `json:"command"`
@@ -271,10 +271,10 @@ type SharedDialerConfig struct {
 	SpawnLock string
 	// Fingerprint is TunnelFingerprint of this client's context.
 	Fingerprint string
-	// Build is this client's eru build. An idle daemon of another build is
+	// Build is this client's vaire build. An idle daemon of another build is
 	// replaced; a busy one is used as it is.
 	Build string
-	// PID and Command describe this client in eru tunnel status.
+	// PID and Command describe this client in vaire tunnel status.
 	PID     int
 	Command string
 	// Spawn starts a daemon and returns once it serves Socket, or with its
@@ -400,7 +400,7 @@ func (d *SharedDialer) ensure(ctx context.Context) (SharedStatus, error) {
 		}
 	}
 	return SharedStatus{}, output.WrapError(output.CodePrecondition, lastErr, output.ExitPrecondition,
-		"Another eru process holds the tunnel lock without serving the shared tunnel (eru server init uses its own); wait for it, then retry.").
+		"Another vaire process holds the tunnel lock without serving the shared tunnel (vaire server init uses its own); wait for it, then retry.").
 		WithDetails(map[string]any{"reason": "tunnel_busy"})
 }
 
@@ -429,13 +429,13 @@ func (d *SharedDialer) check(ctx context.Context, st SharedStatus) (SharedStatus
 	}
 	return st, output.NewError(output.CodeTransportFailed,
 		"the running tunnel daemon serves another configuration of this context", output.ExitTransport,
-		"Another eru command ("+describeClients(st.Clients)+") is using the old tunnel; wait for it, or run eru tunnel stop --force.").
+		"Another vaire command ("+describeClients(st.Clients)+") is using the old tunnel; wait for it, or run vaire tunnel stop --force.").
 		WithDetails(map[string]any{"reason": "tunnel_config_changed", "daemon_pid": st.PID})
 }
 
 func stoppingError(st SharedStatus) error {
 	return output.NewError(output.CodePrecondition, "the tunnel daemon is stopping and takes no new commands", output.ExitPrecondition,
-		"It exits once "+describeClients(st.Clients)+" finishes; wait, or run eru tunnel stop --force.").
+		"It exits once "+describeClients(st.Clients)+" finishes; wait, or run vaire tunnel stop --force.").
 		WithDetails(map[string]any{"reason": "tunnel_stopping", "daemon_pid": st.PID})
 }
 
@@ -456,7 +456,7 @@ func sharedError(err error) error {
 		return err
 	}
 	return output.WrapError(output.CodeTransportFailed, fmt.Errorf("shared tunnel: %w", err), output.ExitTransport,
-		"See tunnel.log in the context directory; eru tunnel stop --force restarts the tunnel daemon.")
+		"See tunnel.log in the context directory; vaire tunnel stop --force restarts the tunnel daemon.")
 }
 
 // DialBudget is how long a dial the daemon makes may take, including the

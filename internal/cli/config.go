@@ -9,15 +9,15 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/totp"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 )
@@ -287,8 +287,8 @@ func runConfigValidate(cmd *cobra.Command, _ []string) error {
 
 func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if MustNotPrompt(cmd) {
-		return output.NewError(output.CodeInputRequired, "eru config edit needs a terminal", output.ExitInput,
-			"Use eru config set <key> <value> instead.").WithDetails(map[string]any{"flag": "--file"})
+		return output.NewError(output.CodeInputRequired, "vaire config edit needs a terminal", output.ExitInput,
+			"Use vaire config set <key> <value> instead.").WithDetails(map[string]any{"flag": "--file"})
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -300,7 +300,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp("", "eru-cluster-*.toml")
+	tmp, err := os.CreateTemp("", "vaire-cluster-*.toml")
 	if err != nil {
 		return err
 	}
@@ -337,7 +337,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	p.note(render.DiffBytes("cluster.toml", []byte(data.TOML), edited) +
-		fmt.Sprintf("%d of %d steps would apply on the next eru apply.", planned.Plan.WouldApply, planned.Plan.Total))
+		fmt.Sprintf("%d of %d steps would apply on the next vaire apply.", planned.Plan.WouldApply, planned.Plan.Total))
 	ok, err := PromptYes(cmd, "Push this configuration?")
 	if err != nil {
 		return err
@@ -389,7 +389,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 }
 
 // unprotectCode asks for a current code from the authenticator app that
-// eru protect init set up when the change lifts a database's protection, and
+// vaire protect init set up when the change lifts a database's protection, and
 // returns it as the request's protect_code secret: secrets are redacted and
 // never logged. The node checks the code; a typed word would prove nothing,
 // since an agent at a terminal can type it too. It refuses without an
@@ -403,7 +403,7 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil, output.NewError(output.CodeDatabaseProtected,
 			"lifting the protection of "+names+" needs a code from the authenticator app, typed at a terminal", output.ExitUnsafe,
-			"A person runs this command in an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with eru protect init.").
+			"A person runs this command in an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with vaire protect init.").
 			WithDetails(map[string]any{"reason": "unprotect_requires_human", "databases": lifted})
 	}
 	// Ask the node first, so nobody types a code that cannot work.
@@ -414,7 +414,7 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 	if !status.Configured {
 		return nil, output.NewError(output.CodeDatabaseProtected,
 			"lifting the protection of "+names+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe,
-			"A human runs eru protect init first, at a terminal, and scans the QR code with an authenticator app. Lifting a protection then needs a current code from it.").
+			"A human runs vaire protect init first, at a terminal, and scans the QR code with an authenticator app. Lifting a protection then needs a current code from it.").
 			WithDetails(map[string]any{"reason": "protect_not_initialized", "databases": lifted})
 	}
 	if status.LockedUntil != "" {
@@ -441,7 +441,7 @@ func readAuthenticatorCode(cmd *cobra.Command, kept string, details map[string]a
 			d[k] = v
 		}
 		return nil, output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits; "+kept, output.ExitUnsafe,
-			"Type the 6-digit code the authenticator app shows for eru.").WithDetails(d)
+			"Type the 6-digit code the authenticator app shows for vaire.").WithDetails(d)
 	}
 	return map[string]string{node.ProtectCodeSecret: code}, nil
 }
@@ -498,7 +498,7 @@ func runEditor(cmd *cobra.Command, path string) error {
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
-	// The editor owns the terminal: nothing of eru's live area may draw.
+	// The editor owns the terminal: nothing of vaire's live area may draw.
 	resume := ui.Suspend()
 	err := child.Run()
 	resume()
@@ -509,7 +509,7 @@ func runEditor(cmd *cobra.Command, path string) error {
 }
 
 // syncContext refreshes the local context from cfg: the domain and TLS mode,
-// each cached node's hostname, and the database placement map. eru sql,
+// each cached node's hostname, and the database placement map. vaire sql,
 // psql, console, tunnel and secrets export verify the server certificate
 // against the master's hostname, so it has to follow a domain change made
 // with config set, config edit, or by another operator.
@@ -540,7 +540,7 @@ func syncContext(s *session, cfg config.Cluster) ([]output.Warning, error) {
 	message := fmt.Sprintf("context %s now verifies the server as %s (tls.mode %s)", s.ctx.Name, hostname, cfg.TLS.Mode)
 	if previous != hostname {
 		message += "; until the node holds a certificate for " + hostname +
-			", connections from eru fail with a hostname mismatch. eru-certs.timer issues it within the hour, or now with: eru ssh --command 'sudo eru node run certs-renew'"
+			", connections from vaire fail with a hostname mismatch. vaire-certs.timer issues it within the hour, or now with: vaire ssh --command 'sudo vaire node run certs-renew'"
 	}
 	return []output.Warning{{Code: "context_tls_updated", Message: message}}, nil
 }
@@ -575,28 +575,28 @@ func syncContextFromNode(cmd *cobra.Command, s *session, p *progress) []output.W
 func contextSyncFailed(s *session, err error) []output.Warning {
 	return []output.Warning{{
 		Code:    "context_sync_failed",
-		Message: "could not update the domain and TLS mode of context " + s.ctx.Name + ": " + err.Error() + ". Run eru apply to retry.",
+		Message: "could not update the domain and TLS mode of context " + s.ctx.Name + ": " + err.Error() + ". Run vaire apply to retry.",
 	}}
 }
 
 // liftNotice is printed before the code prompt of a change that lifts a
 // protection.
 func liftNotice(names string) string {
-	return "Lifting the protection of " + names + " needs a code from the authenticator app set up with eru protect init."
+	return "Lifting the protection of " + names + " needs a code from the authenticator app set up with vaire protect init."
 }
 
-// pendingSteps says what the next eru apply would do after a config change.
+// pendingSteps says what the next vaire apply would do after a config change.
 func pendingSteps(plan engine.PlanData) string {
 	if plan.WouldApply == 0 {
 		return "nothing to apply"
 	}
-	return fmt.Sprintf("%d of %d steps would apply on the next eru apply", plan.WouldApply, plan.Total)
+	return fmt.Sprintf("%d of %d steps would apply on the next vaire apply", plan.WouldApply, plan.Total)
 }
 
-// applyNext suggests eru apply only when a step would apply.
+// applyNext suggests vaire apply only when a step would apply.
 func applyNext(plan engine.PlanData) []string {
 	if plan.WouldApply == 0 {
 		return nil
 	}
-	return []string{"eru apply"}
+	return []string{"vaire apply"}
 }

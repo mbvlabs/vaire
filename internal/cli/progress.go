@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -181,7 +181,7 @@ func (p *progress) during(label string, fn func() error) error {
 }
 
 // waitOn is wait for code that has no progress of its own, such as tool
-// downloads and eru upgrade. It shares the process's live area.
+// downloads and vaire upgrade. It shares the process's live area.
 func waitOn(cmd *cobra.Command, label string) func() {
 	if cmd == nil {
 		return func() {}
@@ -482,7 +482,7 @@ func phaseTitle(step string) (title, header string) {
 	case "init.first-contact":
 		return "First contact over SSH", "Host"
 	case "init.binary":
-		return "Install eru on the server", "Host"
+		return "Install vaire on the server", "Host"
 	case "init.bootstrap":
 		return "Harden the host", "Host"
 	case "init.transport":
@@ -522,7 +522,7 @@ func (p *progress) task(name string) *ui.Task {
 // streaming.
 func (p *progress) note(line string) {
 	if p.opts.Stream {
-		p.event(output.Event{Type: "log", Step: "eru", Line: line})
+		p.event(output.Event{Type: "log", Step: "vaire", Line: line})
 		return
 	}
 	if p.live != nil {
@@ -561,7 +561,7 @@ func (p *progress) shown(msg string) {
 func (p *progress) panel(title string, lines []string) {
 	switch {
 	case p.opts.Stream:
-		p.event(output.Event{Type: "log", Step: "eru", Line: title + ": " + strings.Join(lines, "; ")})
+		p.event(output.Event{Type: "log", Step: "vaire", Line: title + ": " + strings.Join(lines, "; ")})
 	case p.live != nil:
 		p.live.Println(ui.PanelFit(title, strings.Join(lines, "\n"), p.live.Width()))
 	case p.human():

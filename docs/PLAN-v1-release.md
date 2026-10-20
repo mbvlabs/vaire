@@ -12,7 +12,7 @@ Status, 2026-10-19: main live qualification for Phases 0–5 is complete, with e
   - breaking changes stay out of `1.x` once compatibility freezes at `v1.0.0` final. They ship on a later major line cut from master. During alpha, the documented compatibility caveats still apply.
 - **Version names:** v1 is an alpha, so `1.x` is tagged `v1.0.0-alpha.1`, `v1.0.0-alpha.2`, …, then `v1.0.0` when the formats freeze.
 - **Release gate:** review the documented evidence limits and draft notes, commit the documentation with authorization, then separately authorize the v1 branch/tag and publication.
-- **Secrets export gets a gate:** `eru secrets export` needs the master password or a TOTP code. If the secrets document is lost, it's lost; there's no bypass.
+- **Secrets export gets a gate:** `vaire secrets export` needs the master password or a TOTP code. If the secrets document is lost, it's lost; there's no bypass.
 - **Phases 6 and 7** merge into master after `1.x` is cut, one at a time. They never enter a v1 alpha: every `v1.0.0-alpha.N` and `v1.0.0` itself are Phases 0–5 only. Followers and extensions are intended for later v1 minor releases (from `v1.1.0`), not automatically v2; they enter `1.x` only after `v1.0.0` final, once approved, qualified and compatible with the v1 contract below. Because they are on master, they reach `1.x` by merging `master` into `1.x` (see promoting changes, below).
 
 ### Version numbers and branches
@@ -26,14 +26,14 @@ Status, 2026-10-19: main live qualification for Phases 0–5 is complete, with e
 
 From `v1.0.0` final, every later `1.x` release keeps these working unchanged for an existing v1 install. Anything that breaks one of them needs a new major line. Before final the contract is not in force (see MASTER.md on alpha compatibility).
 
-- **Files and documents:** `cluster.toml` (existing keys keep their meaning; new keys are optional with defaults matching the old behaviour), the secrets document `eru-secrets/v1`, the master bundle `eru-master-bundle/v1`, context files under `~/.config/eru/contexts/`, and backups and WAL archives written by earlier 1.x releases (still restorable).
-- **Machine output:** the `eru/v1` JSON (fields are added, never removed, renamed or retyped) and step IDs.
+- **Files and documents:** `cluster.toml` (existing keys keep their meaning; new keys are optional with defaults matching the old behaviour), the secrets document `vaire-secrets/v1`, the master bundle `vaire-master-bundle/v1`, context files under `~/.config/vaire/contexts/`, and backups and WAL archives written by earlier 1.x releases (still restorable).
+- **Machine output:** the `vaire/v1` JSON (fields are added, never removed, renamed or retyped) and step IDs.
 - **CLI:** existing commands, flags and their meaning, and exit codes. New commands and flags may be added; deprecations warn and keep working within the line.
-- **Upgrade path:** `eru upgrade` followed by `eru apply --auto-upgrade-nodes` moves any 1.x server to a later 1.x release.
+- **Upgrade path:** `vaire upgrade` followed by `vaire apply --auto-upgrade-nodes` moves any 1.x server to a later 1.x release.
 
 What an upgrade may and may not require within the line:
 
-- **Allowed in a minor release:** a database restart, provided `eru apply` asks for it with `--confirm <db>/restart`, does nothing until confirmed, and the release notes name it (Phase 6's `wal_level = replica` is the known case).
+- **Allowed in a minor release:** a database restart, provided `vaire apply` asks for it with `--confirm <db>/restart`, does nothing until confirmed, and the release notes name it (Phase 6's `wal_level = replica` is the known case).
 - **Breaking (major only):** anything that needs a rebuild, a fresh `server init`, a restore, a manual migration or editing a file by hand, or that changes data already stored.
 
 ## What exists today, and what the model needs
@@ -60,7 +60,7 @@ No unresolved reproducible code blocker remains from the main qualification run.
 
 - Merge Phase 6 into master (rebase, conflict resolution, its manual test), then Phase 7. Expect conflicts in node/methods.go, db.go, restore.go, recover.go, steps/postgres_roles.go, restarter.go and doctor.
 - Until `v1.0.0` final, v1 fixes target `1.x` and are merged up into master; Phases 6 and 7 stay on master only. After final, master (with Phases 6 and 7) is merged into `1.x` for `v1.1.0`, then qualified on the line.
-- Phase 6's `wal_level = replica` means a restart is pending on every database when upgrading to it. `eru apply` asks with `--confirm <db>/restart`, and the release notes have to say so.
+- Phase 6's `wal_level = replica` means a restart is pending on every database when upgrading to it. `vaire apply` asks with `--confirm <db>/restart`, and the release notes have to say so.
 
 ## Cut checklist
 
@@ -82,10 +82,10 @@ Only when the user asks: `git branch 1.x master && git push origin 1.x`. From th
 
 1. `git tag -a v1.0.0-alpha.N 1.x && git push origin v1.0.0-alpha.N` (never without the user).
    Tags are annotated, not GPG-signed: the release artifacts and manifests carry sigstore signatures from the workflow's OIDC identity, which is what installs verify.
-2. `publish-stable.yml` runs: it checks the tag's commit is on `origin/<major>.x` (a `v1.*` tag on `origin/1.x`), then `gofmt`, `go vet` and `just lint`, then builds with `scripts/build-release.sh <version> stable-<major>.x <base-url>`. The manifest's channel is `stable`; the binary's `Channel` is `stable` and its `Version` is the tag, so `eru upgrade` with no `--channel` follows `stable-<major>.x`.
+2. `publish-stable.yml` runs: it checks the tag's commit is on `origin/<major>.x` (a `v1.*` tag on `origin/1.x`), then `gofmt`, `go vet` and `just lint`, then builds with `scripts/build-release.sh <version> stable-<major>.x <base-url>`. The manifest's channel is `stable`; the binary's `Channel` is `stable` and its `Version` is the tag, so `vaire upgrade` with no `--channel` follows `stable-<major>.x`.
 3. It signs and uploads immutable `/releases/<version>/` artifacts, refusing an existing version prefix. The line channel `/1.x/manifest.json`, `/1.x/manifest.json.sigstore.json` and `/1.x/install.sh` moves only when the candidate passes the same monotonic/prerelease promotion policy as root. Read/list/parse errors abort rather than masquerading as an empty channel.
 4. It moves the **root** channel (`/manifest.json` and `/install.sh`) only when the new version should be the highest: `internal/release/cmd/promote CURRENT CANDIDATE` prints yes when the candidate is newer by semver precedence, and a pre-release moves the root only while the root has no final release (so `1.0.0-alpha.2` moves the root off `1.0.0-alpha.1`, but `1.0.0` never moves it back down below a `2.x` final).
-5. Watch the run (`gh run watch <id> --repo mbvlabs/eru --exit-status`), then check both manifests show the version and install from `stable-1.x` on a clean machine.
+5. Watch the run (`gh run watch <id> --repo mbvlabs/vaire --exit-status`), then check both manifests show the version and install from `stable-1.x` on a clean machine.
 
 ### Promoting changes between branches
 
@@ -100,7 +100,7 @@ Only when the user asks: `git branch 1.x master && git push origin 1.x`. From th
 
 - **Root install** (`https://…/install.sh`): tracks the root manifest, the highest stable line. After `2.0.0`, that is `2.x`.
 - **Line install** (`https://…/1.x/install.sh`): pins `1.x`; it keeps installing 1.x patches even after `2.0.0`.
-- **`eru upgrade`**: with no `--channel`, a 1.x binary follows `stable-1.x` (its own line) and a 2.x binary `stable-2.x`; a dev build must pass `--channel`. `eru upgrade --channel stable` moves to the highest stable line explicitly; `--channel stable-1.x` pins the line; `--channel edge` follows `master`.
+- **`vaire upgrade`**: with no `--channel`, a 1.x binary follows `stable-1.x` (its own line) and a 2.x binary `stable-2.x`; a dev build must pass `--channel`. `vaire upgrade --channel stable` moves to the highest stable line explicitly; `--channel stable-1.x` pins the line; `--channel edge` follows `master`.
 - **Edge install**: `https://…/edge/install.sh`, the edge manifest on every push to `master`.
 
 ### GitHub-side settings
@@ -110,9 +110,9 @@ Only when the user asks: `git branch 1.x master && git push origin 1.x`. From th
 - Merge commits must stay enabled in the repository settings (they are today, alongside squash and rebase): merge-up pull requests between `1.x` and `master` always use them. Feature and fix pull requests into a branch may be squashed.
 - A pull-request workflow running the `AGENTS.md` verification sequence (build, vet, test, golangci-lint, darwin cross-build, `just lint`) should exist and be a required check on both branches; today only the edge and stable publish workflows exist, so a pull request has no automated check.
 - Tag protection for `v*`: only maintainers may create or delete a release tag, so `publish-stable.yml` cannot be pointed at an arbitrary commit.
-- The `stable` environment may require a reviewer if more than one person can push tags. The release workflow's OIDC identity is what `install.sh` and `eru upgrade` pin, so the environment name and workflow path must not change.
+- The `stable` environment may require a reviewer if more than one person can push tags. The release workflow's OIDC identity is what `install.sh` and `vaire upgrade` pin, so the environment name and workflow path must not change.
 
 ## Open questions
 
-- Is anyone besides you going to install the alpha? If so, where do they report issues (GitHub issues on `mbvlabs/eru`, or private)?
+- Is anyone besides you going to install the alpha? If so, where do they report issues (GitHub issues on `mbvlabs/vaire`, or private)?
 - Edge continues publishing on every push to master after the cut, as already decided above.

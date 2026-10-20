@@ -1,2 +1,2 @@
-// Package upgrade plans and applies a local self-update of the eru binary.
+// Package upgrade plans and applies a local self-update of the vaire binary.
 package upgrade

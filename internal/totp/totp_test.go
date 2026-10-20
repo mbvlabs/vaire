@@ -113,8 +113,8 @@ func TestSecretRoundTrip(t *testing.T) {
 }
 
 func TestURI(t *testing.T) {
-	got := URI("eru", "prod", "JBSWY3DPEHPK3PXP")
-	want := "otpauth://totp/eru:prod?algorithm=SHA1&digits=6&issuer=eru&period=30&secret=JBSWY3DPEHPK3PXP"
+	got := URI("vaire", "prod", "JBSWY3DPEHPK3PXP")
+	want := "otpauth://totp/vaire:prod?algorithm=SHA1&digits=6&issuer=vaire&period=30&secret=JBSWY3DPEHPK3PXP"
 	if got != want {
 		t.Fatalf("got %s\nwant %s", got, want)
 	}

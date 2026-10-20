@@ -4,12 +4,12 @@ import (
 	"net"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/secretsdoc"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
@@ -28,7 +28,7 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := secretGateUnlock(cmd, c, hash, nil, nil, "eru secrets export"); err != nil {
+	if err := secretGateUnlock(cmd, c, hash, nil, nil, "vaire secrets export"); err != nil {
 		return err
 	}
 	doc, err := contextDocument(c)
@@ -65,7 +65,7 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 }
 
 // showContextHandoff shows a new handoff for c in a terminal, for commands
-// that change the recovery kit (eru backup setup).
+// that change the recovery kit (vaire backup setup).
 func showContextHandoff(cmd *cobra.Command, c *contexts.Context) (string, error) {
 	doc, err := contextDocument(c)
 	if err != nil {
@@ -117,10 +117,10 @@ func contextDocument(c *contexts.Context) (secretsdoc.Document, error) {
 // rebuildDocument builds a document from the context and credentials.
 func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.Credentials, known *transport.KnownHosts) (secretsdoc.Document, error) {
 	doc := secretsdoc.Document{
-		Schema:     secretsdoc.Schema,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		EruVersion: buildinfo.Version,
-		Server:     secretsdoc.Server{Name: c.Server, Domain: c.Domain, TLSMode: c.TLSMode},
+		Schema:       secretsdoc.Schema,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		VaireVersion: buildinfo.Version,
+		Server:       secretsdoc.Server{Name: c.Server, Domain: c.Domain, TLSMode: c.TLSMode},
 		Operator: secretsdoc.Operator{
 			Name:          c.Operator.Name,
 			WGAddress:     c.Operator.WGAddress,
@@ -131,7 +131,7 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 		},
 		Database: creds.Database,
 		Backup:   creds.Backup,
-		// Carry the master password hash so eru login installs it on another
+		// Carry the master password hash so vaire login installs it on another
 		// machine and the gate follows the document.
 		MasterPassword: creds.MasterPasswordHash,
 	}
@@ -168,7 +168,7 @@ func hostKeyLines(known *transport.KnownHosts, wgAddress string) ([]string, erro
 	if len(keys) == 0 {
 		return nil, output.NewError(output.CodePrecondition,
 			"no pinned host keys for "+wgAddress, output.ExitPrecondition,
-			"Re-run eru login with the secrets document that carries the host keys.")
+			"Re-run vaire login with the secrets document that carries the host keys.")
 	}
 	out := make([]string, 0, len(keys))
 	for _, key := range keys {

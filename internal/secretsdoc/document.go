@@ -14,12 +14,12 @@ import (
 
 	"filippo.io/age"
 	"filippo.io/age/armor"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
 )
 
 // Schema is the plaintext document schema.
-const Schema = "eru-secrets/v1"
+const Schema = "vaire-secrets/v1"
 
 // ScryptWorkFactor is the age scrypt work factor (§10.1).
 const ScryptWorkFactor = 18
@@ -30,28 +30,28 @@ const maxDocument = 4 << 20
 // Document is the plaintext of the secrets document. Database, backup and
 // metrics are filled from Phase 2 on.
 type Document struct {
-	Schema     string    `json:"schema"`
-	CreatedAt  string    `json:"created_at"`
-	EruVersion string    `json:"eru_version"`
-	Server     Server    `json:"server"`
-	Nodes      []Node    `json:"nodes"`
-	Operator   Operator  `json:"operator"`
-	Database   *Database `json:"database,omitempty"`
-	Backup     *Backup   `json:"backup,omitempty"`
-	Metrics    *Metrics  `json:"metrics,omitempty"`
-	BreakGlass string    `json:"break_glass"`
+	Schema       string    `json:"schema"`
+	CreatedAt    string    `json:"created_at"`
+	VaireVersion string    `json:"vaire_version"`
+	Server       Server    `json:"server"`
+	Nodes        []Node    `json:"nodes"`
+	Operator     Operator  `json:"operator"`
+	Database     *Database `json:"database,omitempty"`
+	Backup       *Backup   `json:"backup,omitempty"`
+	Metrics      *Metrics  `json:"metrics,omitempty"`
+	BreakGlass   string    `json:"break_glass"`
 	// MasterPassword is the argon2id hash of the master password that gates
-	// eru secrets export, carried so eru login installs it on another
+	// vaire secrets export, carried so vaire login installs it on another
 	// machine. It is a verifier, not the password.
 	MasterPassword string `json:"master_password_hash,omitempty"`
 }
 
-// ConnectionNotes explains the URLs eru db create and eru db credentials
+// ConnectionNotes explains the URLs vaire db create and vaire db credentials
 // --rotate show (§10.1).
 const ConnectionNotes = "The app URL goes through the transaction pooler (PgBouncer) on port 6432; use it for application traffic. " +
 	"The migrate URL goes through the session pooler on port 5432, which keeps one PostgreSQL connection per client for session features that migrations need (advisory locks, session SET, temporary tables). " +
 	"The transaction pooler refuses the migrate role on 6432 and 443 on purpose; there it fails as an authentication error. " +
-	"Port 5432 is reachable only over WireGuard (eru tunnel --target postgres) or when network.expose_postgres = true, and requires TLS. " +
+	"Port 5432 is reachable only over WireGuard (vaire tunnel --target postgres) or when network.expose_postgres = true, and requires TLS. " +
 	"Both poolers route by the database name in the URL's path. " +
 	"The app_direct_tls URL is the same transaction pooler through port 443; it does not bypass PgBouncer. It is for networks that only allow 443, " +
 	"and the client must negotiate TLS directly (sslnegotiation=direct, PostgreSQL 17+ libpq or pgx 5.7+); other clients get \"server refused TLS\" and should use 6432. " +
@@ -87,7 +87,7 @@ type Operator struct {
 	SudoPassword  string `json:"sudo_password"`
 }
 
-// Database holds the cluster-wide database credentials (D4): eru_admin and the
+// Database holds the cluster-wide database credentials (D4): vaire_admin and the
 // service roles. It is the same shape the operator context stores.
 type Database = contexts.DatabaseCreds
 
@@ -196,7 +196,7 @@ func Decrypt(raw []byte, passphrase string) (Document, error) {
 		if errors.As(err, &noMatch) {
 			return Document{}, secretsError("the passphrase does not open this secrets document", err)
 		}
-		return Document{}, secretsError("the file is not an eru secrets document or is damaged", err)
+		return Document{}, secretsError("the file is not an vaire secrets document or is damaged", err)
 	}
 	plain, err := io.ReadAll(io.LimitReader(r, maxDocument))
 	if err != nil {

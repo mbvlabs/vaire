@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // Client resolves signed manifests and fetches verified artifacts.
@@ -113,7 +113,7 @@ func (c *Client) Fetch(ctx context.Context, m Manifest, goos, goarch string) (st
 		)
 	}
 	dir := releaseCacheDir(m.Version, goos, goarch)
-	dest := filepath.Join(dir, "eru")
+	dest := filepath.Join(dir, "vaire")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create release cache: %w", err)
 	}
@@ -128,7 +128,7 @@ func (c *Client) Fetch(ctx context.Context, m Manifest, goos, goarch string) (st
 		_ = os.Remove(dest)
 	}
 
-	tmp, err := os.CreateTemp(dir, ".eru-download-*")
+	tmp, err := os.CreateTemp(dir, ".vaire-download-*")
 	if err != nil {
 		return "", fmt.Errorf("create release download: %w", err)
 	}

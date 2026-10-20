@@ -1,2 +1,2 @@
-// Package cli is the eru command line.
+// Package cli is the vaire command line.
 package cli

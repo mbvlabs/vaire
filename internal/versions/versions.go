@@ -11,7 +11,7 @@ const (
 	NginxMinVersion = "1.26"
 	// PgBackRestMinVersion is the oldest pgBackRest step 8 installs. 2.59.3
 	// fixes an unchecked error when generating random data for repository
-	// encryption, and eru always encrypts the repository. pgBackRest comes from
+	// encryption, and vaire always encrypts the repository. pgBackRest comes from
 	// PGDG and is held like PostgreSQL.
 	PgBackRestMinVersion = "2.59.3"
 )
@@ -34,7 +34,7 @@ var CosignTargets = []string{
 
 // Exporter pins (Phase 4). The upstream release binaries are the same on
 // Debian 13 and Ubuntu 26.04, unlike the distribution packages, and their
-// sha256 lives here, inside the signed eru binary. Re-check them before each
+// sha256 lives here, inside the signed vaire binary. Re-check them before each
 // phase, as for pgBackRest.
 const (
 	NodeExporterVersion      = "1.12.1"
@@ -52,7 +52,7 @@ const (
 // Exporters lists the pinned exporters in install order.
 var Exporters = []string{NodeExporter, PostgresExporter, PgbouncerExporter}
 
-// ExporterArches are the server architectures eru installs exporters for.
+// ExporterArches are the server architectures vaire installs exporters for.
 var ExporterArches = []string{"amd64", "arm64"}
 
 // ExporterVersion is the pinned version of an exporter, "" for an unknown
@@ -81,7 +81,7 @@ var ExporterSHA256 = map[string]string{
 }
 
 // CheckExporterPins reports a pinned exporter without a version or without a
-// sha256 for one of ExporterArches. just lint runs it through eru commands
+// sha256 for one of ExporterArches. just lint runs it through vaire commands
 // --check-steps.
 func CheckExporterPins() error {
 	for _, name := range Exporters {

@@ -11,19 +11,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
 
 // session is one operator command's connection to the primary: a dialer
 // into the WireGuard tunnel (the context's shared tunnel daemon, or an
-// in-process tunnel with ERU_TUNNEL=inprocess), SSH over it, and a checked
+// in-process tunnel with VAIRE_TUNNEL=inprocess), SSH over it, and a checked
 // node version (§3).
 type session struct {
 	ctx *contexts.Context
@@ -93,7 +93,7 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	s := &session{ctx: c, warnings: contexts.FixModes(c.Name)}
 	nodeSpec, ok := c.Master()
 	if !ok {
-		return nil, output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with eru login.")
+		return nil, output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with vaire login.")
 	}
 	wgCfg, err := contextTunnelConfig(c, nodeSpec)
 	if err != nil {
@@ -149,7 +149,7 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	auto := flagTrue(cmd, "auto-upgrade-nodes") || c.AutoUpgradeNodes
 	upgrading := func(line string) {
 		p.note(line)
-		p.setPhase("upgrading eru on " + nodeLabel(c, nodeSpec))
+		p.setPhase("upgrading vaire on " + nodeLabel(c, nodeSpec))
 	}
 	if err := s.node.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: auto, Progress: upgrading}); err != nil {
 		s.Close()
@@ -177,7 +177,7 @@ func nodeLabel(c *contexts.Context, n contexts.Node) string {
 
 func contextFileError(name, file string, err error) error {
 	return output.WrapError(output.CodeConfig, fmt.Errorf("read %s: %w", contexts.Path(name, file), err), output.ExitConfig,
-		"Recreate the context with eru login <secrets.age>.")
+		"Recreate the context with vaire login <secrets.age>.")
 }
 
 func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
@@ -241,9 +241,9 @@ func contextTunnelConfig(c *contexts.Context, n contexts.Node) (transport.WireGu
 	return tunnelConfig(string(wgKey), c.Operator.WGAddress, n.WGPublicKey, n.PublicAddress, n.ListenPort, n.WGAddress)
 }
 
-// upTunnel starts an in-process userspace tunnel to a node, for eru server
-// init and ERU_TUNNEL=inprocess. It first takes the context's tunnel lock
-// (see tunnellock.go), waiting while another eru process or the context's
+// upTunnel starts an in-process userspace tunnel to a node, for vaire server
+// init and VAIRE_TUNNEL=inprocess. It first takes the context's tunnel lock
+// (see tunnellock.go), waiting while another vaire process or the context's
 // tunnel daemon holds it, and holds it until the tunnel closes: two devices
 // with one operator key would steal the node's peer from each other.
 func upTunnel(ctx context.Context, contextName, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
@@ -281,13 +281,13 @@ func tunnelHint(err error, publicAddr string, port int) error {
 	var dialErr *transport.TunnelDialError
 	switch {
 	case transport.IsNoDaemon(err):
-		cliErr.Hint = "The tunnel daemon isn't running. It starts with the next command; retry, or run eru tunnel status."
+		cliErr.Hint = "The tunnel daemon isn't running. It starts with the next command; retry, or run vaire tunnel status."
 	case errors.As(err, &dialErr):
 		cliErr.Hint = "WireGuard to " + target + " did not answer within the tunnel's dial timeout. Check that UDP " +
-			strconv.Itoa(port) + " reaches the server and that wg0 runs there, then retry. If it keeps failing, use break-glass from the provider console: eru node unlock-ssh."
+			strconv.Itoa(port) + " reaches the server and that wg0 runs there, then retry. If it keeps failing, use break-glass from the provider console: vaire node unlock-ssh."
 	case errors.Is(err, transport.ErrDaemonNoAnswer):
-		cliErr.Hint = "The tunnel daemon did not reply. Run eru tunnel status, and see tunnel.log in the context directory; " +
-			"eru tunnel stop --force restarts it. A WireGuard re-handshake after idling can take a few seconds, so retry once first."
+		cliErr.Hint = "The tunnel daemon did not reply. Run vaire tunnel status, and see tunnel.log in the context directory; " +
+			"vaire tunnel stop --force restarts it. A WireGuard re-handshake after idling can take a few seconds, so retry once first."
 	default:
 		cliErr.Hint = "WireGuard to " + target + " did not answer. Check that UDP " +
 			strconv.Itoa(port) + " leaves this network and reaches the server, then retry."
@@ -385,13 +385,13 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	// The recovery kit rides along so a node that lost its copy gets it
 	// back; the node writes it only when missing (D7). Backups that are on
-	// without a kit here is input_required: eru never makes a new cipher for
+	// without a kit here is input_required: vaire never makes a new cipher for
 	// an existing repository.
 	if creds.Backup != nil && creds.Backup.HasBucket() {
 		addRecoveryKit(secretValues, creds.Backup)
 	} else if cfg, _, err := remoteConfig(cmd, s, p); err == nil && cfg.BackupConfigured() {
 		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's context has no recovery kit", output.ExitInput,
-			"Log in from a current transfer bundle (eru login), which carries the recovery kit, then retry.").
+			"Log in from a current transfer bundle (vaire login), which carries the recovery kit, then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 	params := map[string]any{}
@@ -449,7 +449,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	var next []string
 	if len(data.RestartPending) > 0 {
 		message += "; restart pending for " + strings.Join(data.RestartPending, ", ")
-		next = []string{"eru apply " + confirmFlags(data.ConfirmTokens)}
+		next = []string{"vaire apply " + confirmFlags(data.ConfirmTokens)}
 		for _, w := range warnings {
 			if w.Code == "restart_pending" {
 				p.shown(w.Message)
@@ -478,7 +478,7 @@ func planMessage(header string, data engine.PlanData) string {
 	}
 	if len(data.RestartPending) > 0 {
 		lines = append(lines, "", "restart pending for: "+strings.Join(data.RestartPending, ", "),
-			"run eru apply "+confirmFlags(data.ConfirmTokens)+" to restart those clusters")
+			"run vaire apply "+confirmFlags(data.ConfirmTokens)+" to restart those clusters")
 	}
 	return strings.Join(lines, "\n")
 }

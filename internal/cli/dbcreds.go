@@ -7,13 +7,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/secretsdoc"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -22,11 +22,11 @@ import (
 // credentials, the admin and service roles, generating any password it does
 // not have (D7). It returns the RPC secret map and what it generated, for
 // the secrets_document_stale warning. Application database passwords are
-// never generated here: only eru db create and eru db credentials --rotate
+// never generated here: only vaire db create and vaire db credentials --rotate
 // make them.
 func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, []string, error) {
 	if creds.Admin.User == "" {
-		creds.Admin.User = "eru_admin"
+		creds.Admin.User = "vaire_admin"
 	}
 	var generated []string
 	rpc := map[string]string{}
@@ -64,7 +64,7 @@ func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, []s
 }
 
 // databaseSecret is one application database's roles and connection URLs.
-// eru shows it once and never stores it.
+// vaire shows it once and never stores it.
 type databaseSecret struct {
 	Name  string                   `json:"name"`
 	Roles map[string]contexts.Role `json:"roles"`
@@ -125,7 +125,7 @@ func staleWarning(generated []string) []output.Warning {
 	}
 	return []output.Warning{{
 		Code:    "secrets_document_stale",
-		Message: joinAnd(generated) + " " + verb + " generated; run eru secrets export to refresh the secrets document",
+		Message: joinAnd(generated) + " " + verb + " generated; run vaire secrets export to refresh the secrets document",
 	}}
 }
 
@@ -137,7 +137,7 @@ func joinAnd(items []string) string {
 	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
-// serviceSecrets tops up the context's eru_admin and service passwords (D7)
+// serviceSecrets tops up the context's vaire_admin and service passwords (D7)
 // and returns them as the RPC secret map, with the loaded credentials and
 // whether anything was generated. Every command that may create a cluster
 // sends them: the first cluster computes its service verifiers from them.
@@ -227,7 +227,7 @@ func createInterrupted(cmd *cobra.Command, err error, name, title string, secret
 		return err
 	}
 	note := "The connection was lost after the request was sent, so the node may still be creating " + name +
-		" with these credentials. Check with eru db list: eru apply finishes a database it left half made; if " + name + " is not listed, nothing was created and these are unused."
+		" with these credentials. Check with vaire db list: vaire apply finishes a database it left half made; if " + name + " is not listed, nothing was created and these are unused."
 	out := *cliErr
 	details := map[string]any{}
 	if m, ok := cliErr.Details.(map[string]any); ok {
@@ -238,7 +238,7 @@ func createInterrupted(cmd *cobra.Command, err error, name, title string, secret
 	details["database"] = secret
 	details["credentials_note"] = note + " " + shownOnceNote
 	out.Details = details
-	out.Hint = strings.TrimSpace(out.Hint + " The credentials were printed above (details.database); eru apply finishes " + name + ".")
+	out.Hint = strings.TrimSpace(out.Hint + " The credentials were printed above (details.database); vaire apply finishes " + name + ".")
 	opts, _ := output.ParseOptions(cmd)
 	if !output.UsesStructuredOutput(opts) {
 		text := note + "\n" + secret.String() + "\n" + shownOnceNote

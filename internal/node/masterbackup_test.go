@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/promfile"
 )
 
 func TestPruneBundles(t *testing.T) {
@@ -92,10 +92,10 @@ func TestMasterFamilies(t *testing.T) {
 	last := MasterLast{CreatedAt: "2026-10-15T10:00:00Z", UploadedAt: "2026-10-15T10:00:05Z", Size: 4096, LastVerifiedAt: "2026-10-15T10:00:05Z"}
 	out := string(promfile.Render(masterFamilies(cfg, last, time.Now())))
 	for _, want := range []string{
-		"eru_master_backup_last_success_timestamp_seconds 1792058400",
-		"eru_master_backup_size_bytes 4096",
-		"eru_master_backup_dirty 0",
-		"eru_master_fenced 0",
+		"vaire_master_backup_last_success_timestamp_seconds 1792058400",
+		"vaire_master_backup_size_bytes 4096",
+		"vaire_master_backup_dirty 0",
+		"vaire_master_fenced 0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
@@ -103,11 +103,11 @@ func TestMasterFamilies(t *testing.T) {
 	}
 	cfg.Backup.Provider = "r2"
 	out = string(promfile.Render(masterFamilies(cfg, last, time.Now())))
-	if !strings.Contains(out, "eru_master_backup_last_success_timestamp_seconds 1792058405") {
+	if !strings.Contains(out, "vaire_master_backup_last_success_timestamp_seconds 1792058405") {
 		t.Errorf("with a bucket, success is the upload:\n%s", out)
 	}
 	last.PendingSince = "2026-10-15T10:01:00Z"
-	if !strings.Contains(string(promfile.Render(masterFamilies(cfg, last, time.Now()))), "eru_master_backup_dirty 1") {
+	if !strings.Contains(string(promfile.Render(masterFamilies(cfg, last, time.Now()))), "vaire_master_backup_dirty 1") {
 		t.Error("a pending change isn't dirty")
 	}
 }

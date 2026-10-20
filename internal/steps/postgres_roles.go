@@ -7,12 +7,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/catalog"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/catalog"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 const postgresRolesID = "postgres-roles-v1"
@@ -26,8 +26,8 @@ const AuthDB = "postgres"
 // systemDatabases are never reported as orphaned.
 var systemDatabases = map[string]bool{"postgres": true, "template0": true, "template1": true}
 
-// postgresRoles creates, in one cluster, the service roles, eru_direct_only,
-// the eru schema with both pooler auth functions, and that cluster's
+// postgresRoles creates, in one cluster, the service roles, vaire_direct_only,
+// the vaire schema with both pooler auth functions, and that cluster's
 // database with its four roles, grants and extensions (RFC 12).
 type postgresRoles struct{ clusterStep }
 
@@ -60,7 +60,7 @@ type databaseInputs struct {
 	Name             string   `json:"name"`
 	StatementTimeout string   `json:"statement_timeout"`
 	Extensions       []string `json:"extensions"`
-	// Protected takes eru_admin's write access away (AdminAccessSQL), so
+	// Protected takes vaire_admin's write access away (AdminAccessSQL), so
 	// protecting or lifting a protection re-runs the step.
 	Protected bool `json:"protected,omitempty"`
 }
@@ -87,7 +87,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		return incomplete("cannot read pg_roles"), nil
 	}
 	roleSet := stringSet(roles)
-	for _, role := range append([]string{"eru_admin", "eru_monitor", "pgbouncer_auth", RoleDirectOnly, spec.Name + "_owner"}, prefixed(spec.Name, DatabaseRoles)...) {
+	for _, role := range append([]string{"vaire_admin", "vaire_monitor", "pgbouncer_auth", RoleDirectOnly, spec.Name + "_owner"}, prefixed(spec.Name, DatabaseRoles)...) {
 		if !roleSet[role] {
 			return incomplete("role " + role + " is missing"), nil
 		}
@@ -105,35 +105,35 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 	} {
 		src, err := queryColumn(ctx, local, AuthDB, "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
 		if err != nil || len(src) == 0 {
-			return incomplete("eru." + fn.name + " is missing"), nil
+			return incomplete("vaire." + fn.name + " is missing"), nil
 		}
 		if !strings.Contains(src[0], fn.needs) {
-			return incomplete("eru." + fn.name + " is out of date"), nil
+			return incomplete("vaire." + fn.name + " is out of date"), nil
 		}
 	}
 	member, err := queryColumn(ctx, local, "postgres", adminOwnerMemberSQL(spec.Name))
 	if err != nil || len(member) != 1 {
-		return incomplete("cannot read eru_admin's membership in " + spec.Name + "_owner"), nil
+		return incomplete("cannot read vaire_admin's membership in " + spec.Name + "_owner"), nil
 	}
 	if (member[0] == "t") == spec.Protected {
 		if spec.Protected {
-			return incomplete("eru_admin can still write to protected " + spec.Name), nil
+			return incomplete("vaire_admin can still write to protected " + spec.Name), nil
 		}
-		return incomplete("eru_admin is not a member of " + spec.Name + "_owner"), nil
+		return incomplete("vaire_admin is not a member of " + spec.Name + "_owner"), nil
 	}
 	for _, r := range []struct{ role, protectedGap string }{
-		{"pg_signal_backend", "eru_admin can still terminate sessions of protected " + spec.Name},
-		{"pg_maintain", "eru_admin can still lock the tables of protected " + spec.Name},
+		{"pg_signal_backend", "vaire_admin can still terminate sessions of protected " + spec.Name},
+		{"pg_maintain", "vaire_admin can still lock the tables of protected " + spec.Name},
 	} {
 		held, err := queryColumn(ctx, local, "postgres", adminMemberSQL(r.role))
 		if err != nil || len(held) != 1 {
-			return incomplete("cannot read eru_admin's membership in " + r.role), nil
+			return incomplete("cannot read vaire_admin's membership in " + r.role), nil
 		}
 		if (held[0] == "t") == spec.Protected {
 			if spec.Protected {
 				return incomplete(r.protectedGap), nil
 			}
-			return incomplete("eru_admin is not a member of " + r.role), nil
+			return incomplete("vaire_admin is not a member of " + r.role), nil
 		}
 	}
 	direct, err := queryColumn(ctx, local, "postgres", directOnlyMembersSQL)
@@ -183,12 +183,12 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	dbSet := stringSet(dbs)
 
 	var cluster strings.Builder
-	cluster.WriteString("-- managed by eru - do not edit; use cluster.toml\n")
+	cluster.WriteString("-- managed by vaire - do not edit; use cluster.toml\n")
 	service := []struct {
 		role, secret, attrs, grants string
 	}{
-		{"eru_admin", SecretAdminPassword, "LOGIN CREATEDB CREATEROLE", adminGrants(spec)},
-		{"eru_monitor", SecretMonitor, "LOGIN", "pg_monitor"},
+		{"vaire_admin", SecretAdminPassword, "LOGIN CREATEDB CREATEROLE", adminGrants(spec)},
+		{"vaire_monitor", SecretMonitor, "LOGIN", "pg_monitor"},
 		{"pgbouncer_auth", SecretPgbouncerAuth, "LOGIN", ""},
 	}
 	for _, r := range service {
@@ -231,18 +231,18 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	return engine.ApplyResult{Restart: engine.RestartNone, Warnings: orphanedWarnings(spec, dbs, roleSet)}, nil
 }
 
-// monitorSQL sets eru_monitor up for the exporters (Phase 4 D4): a
+// monitorSQL sets vaire_monitor up for the exporters (Phase 4 D4): a
 // postgres_exporter probe needs a connection slot exactly when the pools
-// are full, so the role shares the three reserved slots with eru_admin.
+// are full, so the role shares the three reserved slots with vaire_admin.
 // CONNECTION LIMIT 2 is one probe: postgres_exporter 0.20.1's /probe opens
 // two connections at once (the legacy exporter's, for pg_up and the default
 // metrics, and the probe collectors'), so a limit of 1 would fail one of
-// them on every scrape; it leaves at least one reserved slot to eru_admin.
+// them on every scrape; it leaves at least one reserved slot to vaire_admin.
 // The timeouts keep a probe from holding a backend or waiting on a lock.
-const monitorSQL = `GRANT pg_use_reserved_connections TO eru_monitor;
-ALTER ROLE eru_monitor CONNECTION LIMIT 2;
-ALTER ROLE eru_monitor SET statement_timeout = '10s';
-ALTER ROLE eru_monitor SET lock_timeout = '1s';
+const monitorSQL = `GRANT pg_use_reserved_connections TO vaire_monitor;
+ALTER ROLE vaire_monitor CONNECTION LIMIT 2;
+ALTER ROLE vaire_monitor SET statement_timeout = '10s';
+ALTER ROLE vaire_monitor SET lock_timeout = '1s';
 `
 
 // serviceVerifier is the SCRAM verifier for a service role in spec's
@@ -297,27 +297,27 @@ func databaseSQL(ctx context.Context, rt engine.Runtime, db config.ClusterSpec, 
 	return b.String(), nil
 }
 
-// adminOwnerMemberSQL reports, as t or f, whether eru_admin is a member of
+// adminOwnerMemberSQL reports, as t or f, whether vaire_admin is a member of
 // db's owner role, directly or not.
 func adminOwnerMemberSQL(db string) string {
-	return "SELECT pg_has_role('eru_admin', " + literal(db+"_owner") + ", 'MEMBER')"
+	return "SELECT pg_has_role('vaire_admin', " + literal(db+"_owner") + ", 'MEMBER')"
 }
 
-// adminMemberSQL reports, as t or f, whether eru_admin is a member of the
+// adminMemberSQL reports, as t or f, whether vaire_admin is a member of the
 // predefined role role.
 func adminMemberSQL(role string) string {
-	return "SELECT pg_has_role('eru_admin', " + literal(role) + ", 'MEMBER')"
+	return "SELECT pg_has_role('vaire_admin', " + literal(role) + ", 'MEMBER')"
 }
 
-// adminGrants are the predefined roles eru_admin holds in spec's cluster.
+// adminGrants are the predefined roles vaire_admin holds in spec's cluster.
 // On a protected database it holds neither pg_signal_backend nor
 // pg_maintain. pg_signal_backend would let it end the database's sessions
-// from a read-only eru sql, and eru maint kill there needs a code from the
+// from a read-only vaire sql, and vaire maint kill there needs a code from the
 // authenticator app (node.handleMaintKill terminates as the superuser with
 // SET ROLE pg_signal_backend instead). pg_maintain would let it LOCK TABLE
 // the application's tables (and CLUSTER, VACUUM FULL or REFRESH
 // MATERIALIZED VIEW them) from the same session: a read-only option it can
-// turn off stops none of these. eru maint there runs as the superuser with
+// turn off stops none of these. vaire maint there runs as the superuser with
 // SET ROLE pg_maintain (node.maintPG), so vacuum, analyze and reindex still
 // need no code.
 func adminGrants(spec config.ClusterSpec) string {
@@ -327,68 +327,68 @@ func adminGrants(spec config.ClusterSpec) string {
 	return "pg_monitor, pg_signal_backend, pg_maintain, pg_use_reserved_connections"
 }
 
-// AdminRoleSQL is eru_admin's predefined roles and access to db
+// AdminRoleSQL is vaire_admin's predefined roles and access to db
 // (adminGrants, AdminAccessSQL), run in postgres. A restore from a dump
 // runs it in its new cluster after copying the live cluster's roles, so the
-// copy's eru_admin follows db's protection as it is now.
+// copy's vaire_admin follows db's protection as it is now.
 func AdminRoleSQL(db config.ClusterSpec) string {
-	return "GRANT " + adminGrants(db) + " TO eru_admin;\n" + AdminAccessSQL(db)
+	return "GRANT " + adminGrants(db) + " TO vaire_admin;\n" + AdminAccessSQL(db)
 }
 
-// AdminAccessSQL is eru_admin's access to db, run in postgres. On an
-// unprotected database eru_admin is a member of <db>_owner, so eru sql,
+// AdminAccessSQL is vaire_admin's access to db, run in postgres. On an
+// unprotected database vaire_admin is a member of <db>_owner, so vaire sql,
 // psql and console --write act as the owner. On a protected one it is not:
-// every grant of the owner role to eru_admin goes, with CASCADE, so the
-// grants eru_admin made from its ADMIN OPTION go too, and the owner role
-// cannot log in. eru_admin gets pg_read_all_data for reads and loses
+// every grant of the owner role to vaire_admin goes, with CASCADE, so the
+// grants vaire_admin made from its ADMIN OPTION go too, and the owner role
+// cannot log in. vaire_admin gets pg_read_all_data for reads and loses
 // pg_signal_backend and pg_maintain (adminGrants). A write then needs a
 // short-lived role the node creates after it checks a code from the
-// authenticator app (db.write-access). eru_admin's own sessions on the
+// authenticator app (db.write-access). vaire_admin's own sessions on the
 // database end the moment its membership goes, since one may have SET ROLE
-// to the owner already. The eru_admin password alone, in a context or
-// through eru tunnel, can then only read a protected database.
+// to the owner already. The vaire_admin password alone, in a context or
+// through vaire tunnel, can then only read a protected database.
 func AdminAccessSQL(db config.ClusterSpec) string {
 	owner := db.Name + "_owner"
 	if !db.Protected {
-		return fmt.Sprintf(`GRANT %s TO eru_admin WITH ADMIN OPTION;
-DO $eru$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_read_all_data'::regrole AND member = 'eru_admin'::regrole) THEN
-    REVOKE pg_read_all_data FROM eru_admin;
+		return fmt.Sprintf(`GRANT %s TO vaire_admin WITH ADMIN OPTION;
+DO $vaire$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_read_all_data'::regrole AND member = 'vaire_admin'::regrole) THEN
+    REVOKE pg_read_all_data FROM vaire_admin;
   END IF;
-END $eru$;
+END $vaire$;
 `, pg.Quote(owner))
 	}
-	return fmt.Sprintf(`GRANT pg_read_all_data TO eru_admin;
+	return fmt.Sprintf(`GRANT pg_read_all_data TO vaire_admin;
 ALTER ROLE %[1]s NOLOGIN;
-DO $eru$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_signal_backend'::regrole AND member = 'eru_admin'::regrole) THEN
-    REVOKE pg_signal_backend FROM eru_admin;
+DO $vaire$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_signal_backend'::regrole AND member = 'vaire_admin'::regrole) THEN
+    REVOKE pg_signal_backend FROM vaire_admin;
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_maintain'::regrole AND member = 'eru_admin'::regrole) THEN
-    REVOKE pg_maintain FROM eru_admin;
+  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_maintain'::regrole AND member = 'vaire_admin'::regrole) THEN
+    REVOKE pg_maintain FROM vaire_admin;
   END IF;
-END $eru$;
-DO $eru$
+END $vaire$;
+DO $vaire$
 DECLARE
   g name;
-  was boolean := pg_has_role('eru_admin', %[2]s, 'MEMBER');
+  was boolean := pg_has_role('vaire_admin', %[2]s, 'MEMBER');
 BEGIN
   FOR g IN SELECT r.rolname FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.grantor
-      WHERE m.roleid = %[2]s::regrole AND m.member = 'eru_admin'::regrole LOOP
+      WHERE m.roleid = %[2]s::regrole AND m.member = 'vaire_admin'::regrole LOOP
     BEGIN
-      EXECUTE format('REVOKE %%I FROM eru_admin GRANTED BY %%I CASCADE', %[2]s, g);
+      EXECUTE format('REVOKE %%I FROM vaire_admin GRANTED BY %%I CASCADE', %[2]s, g);
     EXCEPTION WHEN OTHERS THEN
       NULL; -- gone already with an earlier grant's CASCADE
     END;
   END LOOP;
-  IF pg_has_role('eru_admin', %[2]s, 'MEMBER') THEN
-    RAISE EXCEPTION 'eru_admin is still a member of %%', %[2]s;
+  IF pg_has_role('vaire_admin', %[2]s, 'MEMBER') THEN
+    RAISE EXCEPTION 'vaire_admin is still a member of %%', %[2]s;
   END IF;
   IF was THEN
     PERFORM pg_terminate_backend(pid) FROM pg_stat_activity
-      WHERE usename = 'eru_admin' AND datname = %[3]s AND backend_type = 'client backend' AND pid <> pg_backend_pid();
+      WHERE usename = 'vaire_admin' AND datname = %[3]s AND backend_type = 'client backend' AND pid <> pg_backend_pid();
   END IF;
-END $eru$;
+END $vaire$;
 `, pg.Quote(owner), literal(owner), literal(db.Name))
 }
 
@@ -401,14 +401,14 @@ func literal(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + 
 func DatabaseConnectSQL(target, roleDB string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "REVOKE ALL ON DATABASE %s FROM PUBLIC;\n", pg.Quote(target))
-	fmt.Fprintf(&b, "GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s, %s, %s, eru_admin, eru_monitor;\n",
+	fmt.Fprintf(&b, "GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s, %s, %s, vaire_admin, vaire_monitor;\n",
 		pg.Quote(target), pg.Quote(roleDB+"_migrate"), pg.Quote(roleDB+"_app"), pg.Quote(roleDB+"_ro"))
 	return b.String()
 }
 
 // DatabaseGrantsSQL is postgres-roles-v1's schema, default-privilege and
 // extension SQL for db, run inside the database it is for. A restore from a
-// dump and eru db fork run it in the databases they load.
+// dump and vaire db fork run it in the databases they load.
 func DatabaseGrantsSQL(db config.ClusterSpec) string { return databaseGrantsSQL(db) }
 
 // databaseGrantsSQL is the schema and default-privilege SQL run inside db.
@@ -436,7 +436,7 @@ func databaseGrantsSQL(db config.ClusterSpec) string {
 // PgBouncer's auth query returns nothing for its members, so they are refused
 // on 6432 and 443. Each <db>_migrate is a member, because migrations need
 // session features that transaction pooling breaks.
-const RoleDirectOnly = "eru_direct_only"
+const RoleDirectOnly = "vaire_direct_only"
 
 // directOnlyMembersSQL lists the direct members of RoleDirectOnly.
 const directOnlyMembersSQL = `SELECT m.rolname FROM pg_auth_members a
@@ -445,36 +445,36 @@ const directOnlyMembersSQL = `SELECT m.rolname FROM pg_auth_members a
 
 // pgbouncerAuthSQL is the SECURITY DEFINER auth functions and their grants
 // (§14.2, RFC 8.1): pgbouncer_get_auth for the transaction pooler refuses
-// members of eru_direct_only; pgbouncer_get_auth_session for the session
+// members of vaire_direct_only; pgbouncer_get_auth_session for the session
 // pooler refuses only postgres and the pooler's own service roles, and lets
-// eru_admin in for eru sql, psql, console and tunnel (RFC 6.3). Both refuse
+// vaire_admin in for vaire sql, psql, console and tunnel (RFC 6.3). Both refuse
 // a role past its VALID UNTIL, so a short-lived write role
 // (db.write-access) cannot log in again through a pooled server connection
 // once it expires.
-const pgbouncerAuthSQL = `CREATE SCHEMA IF NOT EXISTS eru AUTHORIZATION postgres;
-CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth(p_usename text)
-  RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $eru$
+const pgbouncerAuthSQL = `CREATE SCHEMA IF NOT EXISTS vaire AUTHORIZATION postgres;
+CREATE OR REPLACE FUNCTION vaire.pgbouncer_get_auth(p_usename text)
+  RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $vaire$
   SELECT usename, passwd FROM pg_shadow
   WHERE usename = p_usename AND NOT usesuper
-    AND usename NOT IN ('postgres','pgbouncer_auth','eru_monitor')
+    AND usename NOT IN ('postgres','pgbouncer_auth','vaire_monitor')
     AND (valuntil IS NULL OR valuntil > now())
     AND NOT pg_has_role(usename, '` + RoleDirectOnly + `', 'MEMBER')
-$eru$;
-CREATE OR REPLACE FUNCTION eru.pgbouncer_get_auth_session(p_usename text)
-  RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $eru$
-  -- eru_admin may log in: operator connections come through here (RFC 6.3).
+$vaire$;
+CREATE OR REPLACE FUNCTION vaire.pgbouncer_get_auth_session(p_usename text)
+  RETURNS TABLE(usename name, passwd text) LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $vaire$
+  -- vaire_admin may log in: operator connections come through here (RFC 6.3).
   SELECT usename, passwd FROM pg_shadow
   WHERE usename = p_usename AND NOT usesuper
-    AND usename NOT IN ('postgres','pgbouncer_auth','eru_monitor')
+    AND usename NOT IN ('postgres','pgbouncer_auth','vaire_monitor')
     AND (valuntil IS NULL OR valuntil > now())
-$eru$;
-REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth(text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION eru.pgbouncer_get_auth_session(text) FROM PUBLIC;
-GRANT USAGE ON SCHEMA eru TO pgbouncer_auth;
-GRANT EXECUTE ON FUNCTION eru.pgbouncer_get_auth(text) TO pgbouncer_auth;
-GRANT EXECUTE ON FUNCTION eru.pgbouncer_get_auth_session(text) TO pgbouncer_auth;
+$vaire$;
+REVOKE ALL ON FUNCTION vaire.pgbouncer_get_auth(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION vaire.pgbouncer_get_auth_session(text) FROM PUBLIC;
+GRANT USAGE ON SCHEMA vaire TO pgbouncer_auth;
+GRANT EXECUTE ON FUNCTION vaire.pgbouncer_get_auth(text) TO pgbouncer_auth;
+GRANT EXECUTE ON FUNCTION vaire.pgbouncer_get_auth_session(text) TO pgbouncer_auth;
 REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
-GRANT CONNECT ON DATABASE postgres TO pgbouncer_auth, eru_admin, eru_monitor;
+GRANT CONNECT ON DATABASE postgres TO pgbouncer_auth, vaire_admin, vaire_monitor;
 `
 
 // roleVerifier returns the SCRAM verifier for a login role from the request's
@@ -484,7 +484,7 @@ func roleVerifier(rt engine.Runtime, secretKey, role, db string) (string, error)
 	if password == "" {
 		hint := "Re-run init with --resume so the operator can supply the password."
 		if db != "" {
-			hint = "Databases are created with eru db create " + db + ", which supplies the passwords; remove " + db + " from cluster.toml (eru config edit) and create it that way."
+			hint = "Databases are created with vaire db create " + db + ", which supplies the passwords; remove " + db + " from cluster.toml (vaire config edit) and create it that way."
 		}
 		return "", output.NewError(
 			output.CodeInputRequired,
@@ -497,7 +497,7 @@ func roleVerifier(rt engine.Runtime, secretKey, role, db string) (string, error)
 	return pg.SCRAMVerifier(password)
 }
 
-// writeRuntimePass writes /etc/eru/runtime/<name>.pass from a supplied secret
+// writeRuntimePass writes /etc/vaire/runtime/<name>.pass from a supplied secret
 // when the file is missing. It never generates a password on the node (D5).
 func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 	path := RuntimeDir + "/" + name + ".pass"
@@ -518,7 +518,7 @@ func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 }
 
 // orphanedWarnings reports databases in spec's cluster other than its own
-// that look like eru databases.
+// that look like vaire databases.
 func orphanedWarnings(spec config.ClusterSpec, dbs []string, roleSet map[string]bool) []output.Warning {
 	var warnings []output.Warning
 	for _, name := range dbs {

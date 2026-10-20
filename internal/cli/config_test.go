@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/vaire/internal/config"
 )
 
 func TestConfigValueOutputTable(t *testing.T) {

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/transport"
 )
 
 // LocalBuild is the operator's own build.
@@ -29,8 +29,8 @@ func SameBuild(a, b node.BuildID) bool {
 	return true
 }
 
-// Version runs eru node version on the node. installed is false when the
-// node has no eru binary yet.
+// Version runs vaire node version on the node. installed is false when the
+// node has no vaire binary yet.
 func (n *Node) Version(ctx context.Context) (node.BuildID, bool, error) {
 	stdout, stderr, err := n.SSH.Output(ctx, node.BinaryPath+" node version --output json", nil)
 	if err != nil {
@@ -40,14 +40,14 @@ func (n *Node) Version(ctx context.Context) (node.BuildID, bool, error) {
 		if strings.Contains(string(stderr), "No such file") || strings.Contains(string(stderr), "not found") {
 			return node.BuildID{}, false, nil
 		}
-		return node.BuildID{}, false, output.WrapError(output.CodeTransportFailed, fmt.Errorf("eru node version failed on %s: %w", n.SSH.Target, err), output.ExitTransport, "")
+		return node.BuildID{}, false, output.WrapError(output.CodeTransportFailed, fmt.Errorf("vaire node version failed on %s: %w", n.SSH.Target, err), output.ExitTransport, "")
 	}
 	var env struct {
 		OK   bool         `json:"ok"`
 		Data node.BuildID `json:"data"`
 	}
 	if err := json.Unmarshal(stdout, &env); err != nil || !env.OK {
-		return node.BuildID{}, true, output.NewError(output.CodeTransportFailed, "eru node version on "+n.SSH.Target.String()+" printed no version", output.ExitTransport, "")
+		return node.BuildID{}, true, output.NewError(output.CodeTransportFailed, "vaire node version on "+n.SSH.Target.String()+" printed no version", output.ExitTransport, "")
 	}
 	return env.Data, true, nil
 }
@@ -103,15 +103,15 @@ func (n *Node) Handshake(ctx context.Context, opts HandshakeOptions) error {
 }
 
 func versionMismatch(got, want node.BuildID, installed bool) *output.CLIError {
-	message := fmt.Sprintf("the node runs eru %s (%s, %s); this CLI is %s (%s, %s)",
+	message := fmt.Sprintf("the node runs vaire %s (%s, %s); this CLI is %s (%s, %s)",
 		got.Version, got.Commit, got.Channel, want.Version, want.Commit, want.Channel)
 	if !installed {
-		message = "eru is not installed on the node"
+		message = "vaire is not installed on the node"
 	}
 	return output.NewError(
 		output.CodeNodeVersionMismatch,
 		message,
 		output.ExitVersion,
-		"Run eru node upgrade, or re-run with --auto-upgrade-nodes.",
+		"Run vaire node upgrade, or re-run with --auto-upgrade-nodes.",
 	).WithDetails(map[string]any{"node": got, "client": want, "installed": installed})
 }

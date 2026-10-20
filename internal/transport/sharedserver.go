@@ -25,7 +25,7 @@ type SharedServerConfig struct {
 	Allowed []netip.Prefix
 	// Fingerprint identifies the tunnel's configuration (TunnelFingerprint).
 	Fingerprint string
-	// Build is the daemon's eru build, shown by eru tunnel status.
+	// Build is the daemon's vaire build, shown by vaire tunnel status.
 	Build string
 	// Persist is how long the daemon stays up with no lease and no stream.
 	// Zero exits as soon as the last one ends.

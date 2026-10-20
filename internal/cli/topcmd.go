@@ -8,14 +8,14 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/top"
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/top"
+	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
-// topRefresh is how often eru top reads every database again.
+// topRefresh is how often vaire top reads every database again.
 const topRefresh = 2 * time.Second
 
 // topConn is one database's connection through the session pooler.
@@ -26,16 +26,16 @@ type topConn struct {
 	err        string
 }
 
-// topCollector holds eru top's connections: one per database through the
-// session pooler as eru_admin, read-only, plus both poolers' admin consoles
+// topCollector holds vaire top's connections: one per database through the
+// session pooler as vaire_admin, read-only, plus both poolers' admin consoles
 // (Phase 4 D9).
 type topCollector struct {
 	conns []*topConn
 	pools map[string]*pg.Remote
 	prev  map[string]top.Sample
-	// includeEru shows eru's own sessions (its roles, or an application_name
-	// beginning with "eru"), left out by default.
-	includeEru bool
+	// includeVaire shows vaire's own sessions (its roles, or an application_name
+	// beginning with "vaire"), left out by default.
+	includeVaire bool
 }
 
 func openTop(ctx context.Context, cmd *cobra.Command, s *session, p *progress, dbs []string) (*topCollector, error) {
@@ -48,7 +48,7 @@ func openTop(ctx context.Context, cmd *cobra.Command, s *session, p *progress, d
 		at := databaseEndpoint(cmd, s, p, db)
 		tc := &topConn{db: db}
 		conn, err := pg.Connect(ctx, s.dialer, pg.Params{Host: at.WGAddress, Port: pgPort, ServerName: at.Hostname, TLSMode: s.ctx.TLSMode,
-			User: user, Password: password, Database: db, ApplicationName: "eru top"})
+			User: user, Password: password, Database: db, ApplicationName: "vaire top"})
 		if err != nil {
 			tc.err = err.Error()
 		} else {
@@ -99,12 +99,12 @@ func (c *topCollector) sample(ctx context.Context, filter string) top.Snapshot {
 		}
 		if res, err := tc.conn.Query(ctx, top.ActivitySQL); err == nil {
 			s.Sessions = top.ParseSessions(tc.db, res.Maps())
-			if !c.includeEru {
-				s.Sessions = withoutEruSessions(s.Sessions)
+			if !c.includeVaire {
+				s.Sessions = withoutVaireSessions(s.Sessions)
 			}
 		}
 		if tc.statements {
-			if res, err := tc.conn.Query(ctx, top.StatementsSQL(c.includeEru)); err == nil {
+			if res, err := tc.conn.Query(ctx, top.StatementsSQL(c.includeVaire)); err == nil {
 				s.Statements = top.ParseStatements(res.Maps())
 			}
 		}
@@ -143,7 +143,7 @@ func runTop(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	if len(dbs) == 0 {
-		return output.Success(cmd, output.Result{Data: top.Snapshot{At: time.Now()}, Message: "no databases yet (eru db create <name>)", Warnings: s.warnings})
+		return output.Success(cmd, output.Result{Data: top.Snapshot{At: time.Now()}, Message: "no databases yet (vaire db create <name>)", Warnings: s.warnings})
 	}
 	stopWait := p.wait("connecting to " + strconv.Itoa(len(dbs)) + " databases")
 	c, err := openTop(ctx, cmd, s, p, dbs)
@@ -151,7 +151,7 @@ func runTop(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	c.includeEru = flagTrue(cmd, "all-sessions")
+	c.includeVaire = flagTrue(cmd, "all-sessions")
 	defer c.close(context.Background())
 	interactive := !flagTrue(cmd, "once") && !MustNotPrompt(cmd) && term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // G115: a file descriptor fits in int.
 	if !interactive {
@@ -164,8 +164,8 @@ func runTop(cmd *cobra.Command, _ []string) error {
 		}
 		snap := c.sample(ctx, filter)
 		msg := top.Render(snap, filter, "time", 0, 1000)
-		if !c.includeEru {
-			msg += "\ninternal/administrative roles (including postgres and maintenance roles) and sessions whose application_name begins with \"eru\" are hidden; --all-sessions includes them"
+		if !c.includeVaire {
+			msg += "\ninternal/administrative roles (including postgres and maintenance roles) and sessions whose application_name begins with \"vaire\" are hidden; --all-sessions includes them"
 		}
 		return output.Success(cmd, output.Result{Data: snap, Message: msg, Warnings: s.warnings})
 	}
@@ -183,13 +183,13 @@ func runTop(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-// withoutEruSessions leaves out eru's own sessions (its roles, or an
-// application_name beginning with "eru"), so the application's sessions
+// withoutVaireSessions leaves out vaire's own sessions (its roles, or an
+// application_name beginning with "vaire"), so the application's sessions
 // stand out. --all-sessions keeps them.
-func withoutEruSessions(sessions []top.Session) []top.Session {
+func withoutVaireSessions(sessions []top.Session) []top.Session {
 	out := make([]top.Session, 0, len(sessions))
 	for _, s := range sessions {
-		if pg.IsEruSession(s.Role, s.App) {
+		if pg.IsVaireSession(s.Role, s.App) {
 			continue
 		}
 		out = append(out, s)
@@ -215,7 +215,7 @@ type topTick struct{}
 
 type topSnap struct{ snap top.Snapshot }
 
-// topModel is eru top's terminal program.
+// topModel is vaire top's terminal program.
 type topModel struct {
 	ctx     context.Context
 	c       *topCollector

@@ -12,15 +12,15 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/localenv"
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/spf13/cobra"
 )
 
-// runConsole opens usql on a database through the tunnel. eru terminates TLS
-// itself: usql talks plaintext to a loopback listener, and eru makes the
+// runConsole opens usql on a database through the tunnel. vaire terminates TLS
+// itself: usql talks plaintext to a loopback listener, and vaire makes the
 // verified TLS connection to Postgres over WireGuard.
 func runConsole(cmd *cobra.Command, args []string) error {
 	db := stringFlag(cmd, "db")
@@ -28,12 +28,12 @@ func runConsole(cmd *cobra.Command, args []string) error {
 		db = args[0]
 	}
 	if db == "" {
-		return output.NewError(output.CodeInputRequired, "eru console needs a database", output.ExitInput,
-			"Pass the database name, for example eru console app.").WithDetails(map[string]any{"flag": "--db"})
+		return output.NewError(output.CodeInputRequired, "vaire console needs a database", output.ExitInput,
+			"Pass the database name, for example vaire console app.").WithDetails(map[string]any{"flag": "--db"})
 	}
 	if MustNotPrompt(cmd) {
-		return output.NewError(output.CodeUsage, "eru console is interactive and needs a terminal", output.ExitUsage,
-			"Use eru sql for one statement.")
+		return output.NewError(output.CodeUsage, "vaire console is interactive and needs a terminal", output.ExitUsage,
+			"Use vaire sql for one statement.")
 	}
 	usql, err := localenv.UsqlPath(cmd)
 	if err != nil {
@@ -65,7 +65,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	}
 	query := url.Values{
 		"sslmode":          {"disable"},
-		"application_name": {"eru-console"},
+		"application_name": {"vaire-console"},
 		"options":          {sessionOptions(db, flagTrue(cmd, "write"))},
 	}
 	dsn := url.URL{
@@ -75,17 +75,17 @@ func runConsole(cmd *cobra.Command, args []string) error {
 		Path:     "/" + db,
 		RawQuery: query.Encode(),
 	}
-	// Ctrl-C belongs to usql (it cancels the running query), not to eru.
+	// Ctrl-C belongs to usql (it cancels the running query), not to vaire.
 	signal.Ignore(syscall.SIGINT)
 	defer signal.Reset(syscall.SIGINT)
 	// usql's default prompt shows the host up to its first dot, which for the
 	// loopback listener is "127"; name the node instead.
-	child := exec.CommandContext(ctx, usql, "--set", consolePrompt(at.Hostname, s.ctx.Name), dsn.String()) //nolint:gosec // G204: usql from PATH or eru's pinned copy.
+	child := exec.CommandContext(ctx, usql, "--set", consolePrompt(at.Hostname, s.ctx.Name), dsn.String()) //nolint:gosec // G204: usql from PATH or vaire's pinned copy.
 	child.Env = append(os.Environ(), "PGPASSWORD="+password)
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
 	child.Stderr = cmd.ErrOrStderr()
-	// usql owns the terminal from here: nothing of eru's live area may draw.
+	// usql owns the terminal from here: nothing of vaire's live area may draw.
 	defer ui.Suspend()()
 	if err := child.Run(); err != nil {
 		var exitErr *exec.ExitError

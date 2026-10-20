@@ -6,6 +6,6 @@ set -euo pipefail
 sysctl --system >/dev/null
 
 systemctl daemon-reload
-systemctl enable --now eru-thp.service
+systemctl enable --now vaire-thp.service
 
 printf 'kernel tuning applied\n'

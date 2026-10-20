@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -190,13 +190,13 @@ func validateOperator(op config.Operator) error {
 }
 
 // bootstrapPreflight is the node-side preflight (MASTER §6.1): a supported OS,
-// enough RAM, and either no eru node yet or a node of the same cluster.
+// enough RAM, and either no vaire node yet or a node of the same cluster.
 func bootstrapPreflight(cfg config.Cluster) (hostinfo.OS, error) {
 	osInfo, err := hostinfo.ReadOS()
 	if err != nil || !osInfo.Supported() {
 		return osInfo, output.NewError(
 			output.CodePrecondition,
-			"this server runs "+osName(osInfo)+", which eru does not support",
+			"this server runs "+osName(osInfo)+", which vaire does not support",
 			output.ExitPrecondition,
 			"Use "+hostinfo.SupportedList+".",
 		).WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
@@ -204,7 +204,7 @@ func bootstrapPreflight(cfg config.Cluster) (hostinfo.OS, error) {
 	if mib, err := hostinfo.MemTotalMiB(); err == nil && mib < minRAMMiB {
 		return osInfo, output.NewError(
 			output.CodePrecondition,
-			fmt.Sprintf("this server has %d MiB of RAM; eru needs at least 1 GB", mib),
+			fmt.Sprintf("this server has %d MiB of RAM; vaire needs at least 1 GB", mib),
 			output.ExitPrecondition,
 			"Resize the VPS and retry.",
 		).WithDetails(map[string]any{"reason": "ram_too_small", "ram_mib": mib})
@@ -232,7 +232,7 @@ func bootstrapPreflight(cfg config.Cluster) (hostinfo.OS, error) {
 				output.CodePrecondition,
 				"PostgreSQL is already installed on this server",
 				output.ExitPrecondition,
-				"Bootstrap a fresh server. eru will not adopt an existing PostgreSQL.",
+				"Bootstrap a fresh server. vaire will not adopt an existing PostgreSQL.",
 			).WithDetails(map[string]any{"reason": "postgres_present", "path": dir})
 		}
 	}
@@ -261,7 +261,7 @@ func sshdOnPort22() error {
 		output.CodePrecondition,
 		"sshd does not listen on port 22 (ports: "+strings.Join(ports, ", ")+")",
 		output.ExitPrecondition,
-		"eru serves SSH on port 22 over WireGuard. Add Port 22 to the server's sshd config, then retry.",
+		"vaire serves SSH on port 22 over WireGuard. Add Port 22 to the server's sshd config, then retry.",
 	).WithDetails(map[string]any{"reason": "sshd_port_not_22", "ports": ports})
 }
 
@@ -351,10 +351,10 @@ func handleConfirmSecrets(context.Context, *Env) (Result, error) {
 }
 
 // initFailureHint is the step_failed hint during server init, where there is
-// no context yet for eru apply. local names the resume command for the mode
+// no context yet for vaire apply. local names the resume command for the mode
 // that started the init, so a remote init is not told to add --local.
 func initFailureHint(cluster string, local bool) string {
-	command := "eru server init --resume --name " + cluster
+	command := "vaire server init --resume --name " + cluster
 	if local {
 		command += " --local"
 	}

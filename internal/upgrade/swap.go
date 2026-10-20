@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/release"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/release"
 )
 
 const preflightTimeout = 10 * time.Second
@@ -80,7 +80,7 @@ func Swap(target, cached string) (previous string, warnings []output.Warning, er
 	if err != nil {
 		return previous, warnings, err
 	}
-	tmp := filepath.Join(dir, ".eru.new-"+suffix)
+	tmp := filepath.Join(dir, ".vaire.new-"+suffix)
 	if err := copyFile(tmp, cached, 0o755); err != nil {
 		_ = os.Remove(tmp)
 		return previous, warnings, err

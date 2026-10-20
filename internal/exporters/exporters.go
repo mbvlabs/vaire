@@ -8,12 +8,12 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/mbvlabs/eru/internal/versions"
+	"github.com/mbvlabs/vaire/internal/versions"
 )
 
-// Root is where eru keeps the exporter binaries, one directory per version:
-// /usr/local/lib/eru/exporters/<name>-<version>/<name>.
-const Root = "/usr/local/lib/eru/exporters"
+// Root is where vaire keeps the exporter binaries, one directory per version:
+// /usr/local/lib/vaire/exporters/<name>-<version>/<name>.
+const Root = "/usr/local/lib/vaire/exporters"
 
 // Artifact is one exporter's release tarball for one architecture.
 type Artifact struct {

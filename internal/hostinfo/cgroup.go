@@ -16,7 +16,7 @@ func ServiceCgroup(unit string) string {
 	return filepath.Join(PostgresSlice, unit+".service")
 }
 
-// Cgroup is what eru reads about one cluster's cgroup (Phase 4): its memory
+// Cgroup is what vaire reads about one cluster's cgroup (Phase 4): its memory
 // against its limits, the throttling and OOM events, pressure stall
 // information and CPU and I/O counters.
 type Cgroup struct {

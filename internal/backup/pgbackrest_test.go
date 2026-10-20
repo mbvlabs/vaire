@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // A stanza-create that meets an async archive-push holding the stanza lock

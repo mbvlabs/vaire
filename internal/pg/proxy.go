@@ -9,7 +9,7 @@ import (
 	"io"
 	"net"
 
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/transport"
 )
 
 // Protocol request codes a client sends before its startup message.

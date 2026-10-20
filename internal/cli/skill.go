@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/guide"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/guide"
 	"github.com/spf13/cobra"
 )
 
@@ -27,11 +27,11 @@ type skillInstallation struct {
 }
 
 var skillHarnesses = []skillHarness{
-	{name: "codex", label: "Codex", directory: ".codex/skills/eru"},
-	{name: "claude", label: "Claude", directory: ".claude/skills/eru"},
-	{name: "pi", label: "Pi", directory: ".pi/skills/eru"},
-	{name: "opencode", label: "OpenCode", directory: ".opencode/skills/eru"},
-	{name: "crush", label: "Crush", directory: ".crush/skills/eru"},
+	{name: "codex", label: "Codex", directory: ".codex/skills/vaire"},
+	{name: "claude", label: "Claude", directory: ".claude/skills/vaire"},
+	{name: "pi", label: "Pi", directory: ".pi/skills/vaire"},
+	{name: "opencode", label: "OpenCode", directory: ".opencode/skills/vaire"},
+	{name: "crush", label: "Crush", directory: ".crush/skills/vaire"},
 }
 
 func runSkillInstall(cmd *cobra.Command, _ []string) error {
@@ -71,12 +71,12 @@ func runSkillInstall(cmd *cobra.Command, _ []string) error {
 		installations = append(installations, skillInstallation{Harness: harness.name, Path: target})
 		labels = append(labels, harness.label)
 	}
-	message := "Installed eru skill for " + strings.Join(labels, ", ")
+	message := "Installed vaire skill for " + strings.Join(labels, ", ")
 	if dry {
-		message = "Would install eru skill for " + strings.Join(labels, ", ")
+		message = "Would install vaire skill for " + strings.Join(labels, ", ")
 	}
 	data := map[string]any{
-		"name":          "eru",
+		"name":          "vaire",
 		"dry_run":       dry,
 		"installations": installations,
 	}
@@ -92,7 +92,7 @@ func writeSkillFile(target, document string) error {
 
 func skillDocument() string {
 	body := strings.TrimSpace(guide.Agents)
-	return "---\nname: eru\ndescription: Operate a production PostgreSQL cluster with the eru CLI. Use --output agent, read error.code and next, and ask a human before passing destructive confirm tokens.\n---\n\n" + body + "\n"
+	return "---\nname: vaire\ndescription: Operate a production PostgreSQL cluster with the vaire CLI. Use --output agent, read error.code and next, and ask a human before passing destructive confirm tokens.\n---\n\n" + body + "\n"
 }
 
 func selectSkillHarnesses(cmd *cobra.Command, requested []string) ([]skillHarness, error) {

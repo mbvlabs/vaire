@@ -2,7 +2,7 @@
 package buildinfo
 
 // Version, Commit, and Channel are set with -ldflags. Dev builds skip
-// signature checks and push ERU_NODE_BINARY when the operator OS differs.
+// signature checks and push VAIRE_NODE_BINARY when the operator OS differs.
 var (
 	Version = "dev"
 	Commit  = "none"
@@ -11,4 +11,4 @@ var (
 
 // ReleaseBaseURL is the channel root for manifests and artifacts.
 // Recorded in the decisions table in docs/MASTER.md.
-const ReleaseBaseURL = "https://eru.mbvlabs.com"
+const ReleaseBaseURL = "https://vaire.mbvlabs.com"

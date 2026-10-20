@@ -1,12 +1,12 @@
 package cli
 
 import (
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/spf13/cobra"
 )
 
-// discardResult is the result of eru server init --discard.
+// discardResult is the result of vaire server init --discard.
 type discardResult struct {
 	Server           string `json:"server"`
 	PendingPath      string `json:"pending_path"`

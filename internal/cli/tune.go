@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/tune"
 	"github.com/spf13/cobra"
 )
 
@@ -135,9 +135,9 @@ func runTuneShow(cmd *cobra.Command, _ []string) error {
 	}
 	lines := sheetLines(s.ctx.Name, data.Server)
 	if data.Database != "" {
-		lines = append(lines, "", fmt.Sprintf("%d settings for %s (eru tune explain --db %s shows them)", len(data.Settings), data.Database, data.Database))
+		lines = append(lines, "", fmt.Sprintf("%d settings for %s (vaire tune explain --db %s shows them)", len(data.Settings), data.Database, data.Database))
 	} else if len(data.Server.Clusters) > 1 {
-		lines = append(lines, "", "eru tune show --db <name> for a database's settings")
+		lines = append(lines, "", "vaire tune show --db <name> for a database's settings")
 	}
 	message := strings.Join(lines, "\n")
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings})
@@ -216,7 +216,7 @@ func runTuneApply(cmd *cobra.Command, _ []string) error {
 	var next []string
 	if len(data.RestartPending) > 0 {
 		message += "; restart pending: " + strings.Join(data.RestartPending, ", ")
-		next = []string{"eru tune apply " + confirmFlags(data.ConfirmTokens)}
+		next = []string{"vaire tune apply " + confirmFlags(data.ConfirmTokens)}
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
 }

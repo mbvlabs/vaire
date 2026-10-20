@@ -6,13 +6,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/localenv"
 	"github.com/spf13/cobra"
 )
 
-// Main executes the eru CLI and returns the process exit status.
+// Main executes the vaire CLI and returns the process exit status.
 func Main() int {
 	root := NewRoot()
 	cmd, err := root.ExecuteC()
@@ -41,9 +41,9 @@ func Main() int {
 // NewRoot builds the Phase 1 command tree.
 func NewRoot() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "eru",
+		Use:           "vaire",
 		Short:         "Operate a production PostgreSQL cluster",
-		Long:          "Operate a production PostgreSQL cluster. Agents should start with eru commands --json.",
+		Long:          "Operate a production PostgreSQL cluster. Agents should start with vaire commands --json.",
 		RunE:          runRoot,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -89,13 +89,13 @@ func rootMeta() CommandMeta {
 	return CommandMeta{
 		Summary: "Operate a production PostgreSQL cluster",
 		WhenToUse: []string{
-			"Run an eru command. Agents should start with eru commands --json when the next step is unknown.",
+			"Run an vaire command. Agents should start with vaire commands --json when the next step is unknown.",
 		},
 		Examples: []string{
-			"eru version",
-			"eru commands --json",
-			"eru guide agents",
+			"vaire version",
+			"vaire commands --json",
+			"vaire guide agents",
 		},
-		Next: []string{"eru commands --json", "eru guide agents"},
+		Next: []string{"vaire commands --json", "vaire guide agents"},
 	}
 }

@@ -3,7 +3,7 @@ package upgrade
 import (
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/release"
+	"github.com/mbvlabs/vaire/internal/release"
 )
 
 func TestCmpSemver(t *testing.T) {

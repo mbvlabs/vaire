@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 const pgbackrestID = "pgbackrest-v1"
@@ -26,7 +26,7 @@ const BackupEnvPath = RuntimeDir + "/backup.env"
 const (
 	envKeyID     = "AWS_ACCESS_KEY_ID"
 	envSecret    = "AWS_SECRET_ACCESS_KEY" //nolint:gosec // G101: a key name, not a value.
-	envRecipient = "ERU_DUMP_AGE_RECIPIENT"
+	envRecipient = "VAIRE_DUMP_AGE_RECIPIENT"
 )
 
 // redactedValue stands in for a secret the plan cannot know.
@@ -63,7 +63,7 @@ type backupValues struct {
 	Recipient string
 }
 
-// ReadBackupEnv parses /etc/eru/runtime/backup.env.
+// ReadBackupEnv parses /etc/vaire/runtime/backup.env.
 func ReadBackupEnv() map[string]string {
 	out := map[string]string{}
 	f, err := os.Open(BackupEnvPath)
@@ -88,7 +88,7 @@ func BackupTarget(cfg config.Cluster) (backup.Target, string, error) {
 	env := ReadBackupEnv()
 	if env[envKeyID] == "" || env[envSecret] == "" {
 		return backup.Target{}, "", output.NewError(output.CodePrecondition, "the bucket keys are not on this node", output.ExitPrecondition,
-			"Run eru backup setup, or eru apply, so the node gets them.").WithDetails(map[string]any{"reason": "backup_not_configured", "path": BackupEnvPath})
+			"Run vaire backup setup, or vaire apply, so the node gets them.").WithDetails(map[string]any{"reason": "backup_not_configured", "path": BackupEnvPath})
 	}
 	return backup.Target{
 		Endpoint: cfg.Backup.Endpoint,
@@ -142,7 +142,7 @@ func resolveBackupValues(rt engine.Runtime) (backupValues, []string, error) {
 			return v, nil, output.NewError(output.CodePrecondition,
 				"the request carries a different pgBackRest cipher pass than the repository uses",
 				output.ExitPrecondition,
-				"The cipher of an existing repository never changes. Log in again from a current transfer bundle (eru login), then retry.").
+				"The cipher of an existing repository never changes. Log in again from a current transfer bundle (vaire login), then retry.").
 				WithDetails(map[string]any{"reason": "cipher_mismatch"})
 		}
 	}
@@ -168,7 +168,7 @@ func resolveBackupValues(rt engine.Runtime) (backupValues, []string, error) {
 
 func backupEnv(v backupValues) string {
 	lines := []string{
-		"# managed by eru - bucket keys for node-side backup jobs",
+		"# managed by vaire - bucket keys for node-side backup jobs",
 		envKeyID + "=" + v.KeyID,
 		envSecret + "=" + v.Secret,
 	}
@@ -264,7 +264,7 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		return engine.ApplyResult{}, output.NewError(output.CodeInputRequired,
 			"the bucket keys or the cipher pass are not on the node and were not supplied",
 			output.ExitInput,
-			"Run eru backup setup, or eru apply from a machine whose context has the recovery kit (eru login from a current transfer bundle).",
+			"Run vaire backup setup, or vaire apply from a machine whose context has the recovery kit (vaire login from a current transfer bundle).",
 		).WithDetails(map[string]any{"secrets": missing})
 	}
 	local := "false"
@@ -335,7 +335,7 @@ func BackupDriver(spec config.ClusterSpec, shell engine.Shell, stepID string, re
 }
 
 // RecordBackup stores a successful backup of db in records.json and refreshes
-// the eru.prom backup lines. Neither failing fails the backup.
+// the vaire.prom backup lines. Neither failing fails the backup.
 func RecordBackup(cfg config.Cluster, db string, set backup.Set) {
 	finished := set.Stop
 	if finished == "" {
@@ -349,7 +349,7 @@ func RecordBackup(cfg config.Cluster, db string, set backup.Set) {
 }
 
 // RecordBackupFailure stores a failed backup of db in records.json and
-// refreshes eru.prom.
+// refreshes vaire.prom.
 func RecordBackupFailure(cfg config.Cluster, db, kind string) {
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.RecordBackupFailure(db, kind, time.Now().UTC().Format(time.RFC3339))
@@ -359,7 +359,7 @@ func RecordBackupFailure(cfg config.Cluster, db, kind string) {
 }
 
 // RecordRepo reads db's stanza once with pgbackrest info and stores its
-// facts (window start, sets, repository size) for eru.prom, in place of a
+// facts (window start, sets, repository size) for vaire.prom, in place of a
 // pgbackrest_exporter polling the bucket. A failure leaves the old facts.
 func RecordRepo(ctx context.Context, cfg config.Cluster, d backup.PgBackRest, db string) {
 	info, err := d.Info(ctx, "")
@@ -373,7 +373,7 @@ func RecordRepo(ctx context.Context, cfg config.Cluster, d backup.PgBackRest, db
 	WriteMetrics(cfg)
 }
 
-// WriteMetrics refreshes eru.prom; a failure is ignored.
+// WriteMetrics refreshes vaire.prom; a failure is ignored.
 func WriteMetrics(cfg config.Cluster) {
 	node := ""
 	if n, ok := cfg.Master(); ok {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 type sqlParams struct {
@@ -16,19 +16,19 @@ type sqlParams struct {
 	Write bool   `json:"write"`
 }
 
-// handleSQL runs one statement for eru sql --local, where there is no tunnel.
+// handleSQL runs one statement for vaire sql --local, where there is no tunnel.
 // It runs as postgres (peer) inside one transaction with SET LOCAL ROLE to the
 // requested database role and, unless write is set, READ ONLY. migrate acts as
 // <db>_owner, matching the role's session default. On a protected database
 // a write needs a code from the authenticator app (requireWriteCode), and a
-// read runs as eru_admin instead.
+// read runs as vaire_admin instead.
 func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	var p sqlParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
 	if p.DB == "" {
-		return Result{}, output.NewError(output.CodeInputRequired, "eru sql needs --db", output.ExitInput,
+		return Result{}, output.NewError(output.CodeInputRequired, "vaire sql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 	local, err := clusterPG(env.Cluster, p.DB)
@@ -54,7 +54,7 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	if spec, _ := clusterOf(env.Cluster, p.DB); spec.Protected && !p.Write {
 		// psql runs every statement in the query, a COMMIT too, and as the
 		// superuser what follows would write. On a protected database a
-		// read runs as eru_admin, which cannot write to it.
+		// read runs as vaire_admin, which cannot write to it.
 		local = steps.AdminPG(spec)
 		statement = fmt.Sprintf("BEGIN READ ONLY;\n%s\n;\nCOMMIT;\n", p.Query)
 	}
@@ -81,7 +81,7 @@ func sqlRoleUser(db, role string) (string, error) {
 	case "migrate":
 		return db + "_migrate", nil
 	case "admin":
-		return "eru_admin", nil
+		return "vaire_admin", nil
 	default:
 		return "", output.NewError(output.CodeValidation, "role must be ro, app, migrate or admin", output.ExitConfig, "")
 	}

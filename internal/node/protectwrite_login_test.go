@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/totp"
 )
 
 // TestWriteAccessLoginPath follows a write login to a protected database
@@ -113,7 +113,7 @@ func TestWriteAccessLoginPath(t *testing.T) {
 
 	// The session pooler: the app entry's auth_query runs on app__auth,
 	// which must open the database the auth functions and roles are made in.
-	ini := string(render.SessionIni(config.Cluster{}, []render.PoolerDatabase{{Name: "app", Port: 5433, MaxConnections: 10}}, "/run/eru-pgbouncer-session"))
+	ini := string(render.SessionIni(config.Cluster{}, []render.PoolerDatabase{{Name: "app", Port: 5433, MaxConnections: 10}}, "/run/vaire-pgbouncer-session"))
 	alias := iniValue(t, ini, render.AuthAlias("app"))
 	if !strings.Contains(" "+alias+" ", " dbname="+steps.AuthDB+" ") {
 		t.Fatalf("%s = %s does not open %s", render.AuthAlias("app"), alias, steps.AuthDB)
@@ -124,13 +124,13 @@ func TestWriteAccessLoginPath(t *testing.T) {
 	if user := iniValue(t, ini, "auth_user"); user != "pgbouncer_auth" {
 		t.Fatalf("auth_user = %s", user)
 	}
-	fn := regexp.MustCompile(`FROM eru\.(\w+)\(\$1\)`).FindStringSubmatch(iniValue(t, ini, "auth_query"))
+	fn := regexp.MustCompile(`FROM vaire\.(\w+)\(\$1\)`).FindStringSubmatch(iniValue(t, ini, "auth_query"))
 	if fn == nil {
 		t.Fatalf("auth_query in\n%s", ini)
 	}
 	authSQL := steps.AuthFunctionsSQL()
-	if !strings.Contains(authSQL, "GRANT EXECUTE ON FUNCTION eru."+fn[1]+"(text) TO pgbouncer_auth;") {
-		t.Fatalf("pgbouncer_auth may not run eru.%s", fn[1])
+	if !strings.Contains(authSQL, "GRANT EXECUTE ON FUNCTION vaire."+fn[1]+"(text) TO pgbouncer_auth;") {
+		t.Fatalf("pgbouncer_auth may not run vaire.%s", fn[1])
 	}
 	where := authWhere(t, authSQL, fn[1])
 
@@ -138,17 +138,17 @@ func TestWriteAccessLoginPath(t *testing.T) {
 	row := shadowRow{usename: role, valuntil: validUntil, memberOf: []string{"app_owner"}}
 	for _, at := range []time.Duration{0, time.Minute, writeRoleLogin - time.Second} {
 		if !evalAuthWhere(t, where, row, role, clock.t.Add(at)) {
-			t.Fatalf("eru.%s returns nothing for %s %s after it was made", fn[1], role, at)
+			t.Fatalf("vaire.%s returns nothing for %s %s after it was made", fn[1], role, at)
 		}
 	}
 	// Expired: the function returns nothing, and the pooler refuses it.
 	for _, at := range []time.Duration{writeRoleLogin, writeRoleLogin + time.Second, time.Hour} {
 		if evalAuthWhere(t, where, row, role, clock.t.Add(at)) {
-			t.Fatalf("eru.%s returns %s %s after it was made, past its VALID UNTIL", fn[1], role, at)
+			t.Fatalf("vaire.%s returns %s %s after it was made, past its VALID UNTIL", fn[1], role, at)
 		}
 	}
 	// Another user's name never returns the write role.
-	if evalAuthWhere(t, where, row, "eru_admin", clock.t) {
+	if evalAuthWhere(t, where, row, "vaire_admin", clock.t) {
 		t.Fatal("the auth function matched another name")
 	}
 }
@@ -196,17 +196,17 @@ func iniValue(t *testing.T, ini, key string) string {
 // authWhere is the WHERE clauses of auth function fn in sql.
 func authWhere(t *testing.T, sql, fn string) []string {
 	t.Helper()
-	_, body, ok := strings.Cut(sql, "CREATE OR REPLACE FUNCTION eru."+fn+"(p_usename text)")
+	_, body, ok := strings.Cut(sql, "CREATE OR REPLACE FUNCTION vaire."+fn+"(p_usename text)")
 	if !ok {
-		t.Fatalf("eru.%s is not created in\n%s", fn, sql)
+		t.Fatalf("vaire.%s is not created in\n%s", fn, sql)
 	}
-	body, _, _ = strings.Cut(body, "$eru$;")
+	body, _, _ = strings.Cut(body, "$vaire$;")
 	if !strings.Contains(body, "FROM pg_shadow") {
-		t.Fatalf("eru.%s does not read pg_shadow:\n%s", fn, body)
+		t.Fatalf("vaire.%s does not read pg_shadow:\n%s", fn, body)
 	}
 	_, where, ok := strings.Cut(body, "WHERE ")
 	if !ok {
-		t.Fatalf("eru.%s has no WHERE", fn)
+		t.Fatalf("vaire.%s has no WHERE", fn)
 	}
 	var kept []string
 	for _, line := range strings.Split(where, "\n") {

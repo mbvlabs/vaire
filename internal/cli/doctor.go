@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/doctor"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/doctor"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -66,7 +66,7 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), message)
 		}
 		return output.NewError(output.CodeDoctorFailed, doctorFailedMessage(ids), output.ExitStep,
-			"Run the fix shown under each failing check, then eru doctor again.").
+			"Run the fix shown under each failing check, then vaire doctor again.").
 			WithDetails(map[string]any{"checks": data.Results, "summary": data.Summary, "report": message})
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings})
@@ -110,7 +110,7 @@ func doctorMessage(results []doctor.Result) string {
 }
 
 // operatorChecks are the checks only the operator can run: its context's
-// file modes, the node's eru version against this one, and an authenticated
+// file modes, the node's vaire version against this one, and an authenticated
 // scrape of /metrics through the tunnel.
 func operatorChecks(ctx context.Context, s *session, only string) []doctor.Result {
 	var out []doctor.Result
@@ -125,7 +125,7 @@ func operatorChecks(ctx context.Context, s *session, only string) []doctor.Resul
 	} else {
 		add("ctx.file_modes", doctor.CatHost, true, doctor.Pass, "the context's files are private", "")
 	}
-	add("eru.version_skew", doctor.CatHost, false, doctor.Pass, "the node runs this CLI's build (checked when the session opened)", "")
+	add("vaire.version_skew", doctor.CatHost, false, doctor.Pass, "the node runs this CLI's build (checked when the session opened)", "")
 	status, detail, fix := metricsAuth(ctx, s)
 	add("metrics.auth", doctor.CatMetrics, true, status, detail, fix)
 	return out
@@ -156,7 +156,7 @@ func looseContextFiles(name string) []string {
 func metricsAuth(ctx context.Context, s *session) (doctor.Status, string, string) {
 	creds, err := contexts.LoadCredentials(s.ctx.Name)
 	if err != nil || creds.Metrics == nil {
-		return doctor.Warn, "this context has no /metrics credential", "eru apply, then eru secrets export"
+		return doctor.Warn, "this context has no /metrics credential", "vaire apply, then vaire secrets export"
 	}
 	n, ok := s.ctx.Master()
 	if !ok || n.Hostname == "" {
@@ -165,11 +165,11 @@ func metricsAuth(ctx context.Context, s *session) (doctor.Status, string, string
 	code, err := scrapeMetrics(ctx, s.dialer, n.WGAddress, n.Hostname, s.ctx.TLSMode, creds.Metrics)
 	switch {
 	case err != nil:
-		return doctor.Warn, "scraping /metrics/node failed: " + err.Error(), "eru doctor --only metrics"
+		return doctor.Warn, "scraping /metrics/node failed: " + err.Error(), "vaire doctor --only metrics"
 	case code == http.StatusOK:
 		return doctor.Pass, "the credential scrapes https://" + n.Hostname + "/metrics/node", ""
 	case code == http.StatusUnauthorized:
-		return doctor.Fail, "the node refuses this context's credential", "eru metrics rotate --confirm " + s.ctx.Server + "/metrics"
+		return doctor.Fail, "the node refuses this context's credential", "vaire metrics rotate --confirm " + s.ctx.Server + "/metrics"
 	case code == http.StatusNotFound:
 		return doctor.Skip, "/metrics is off on the node", ""
 	}
@@ -211,7 +211,7 @@ type applyReplyData struct {
 func healthLine(s map[doctor.Status]int) string {
 	line := fmt.Sprintf("health: %d pass, %d warn, %d fail", s[doctor.Pass], s[doctor.Warn], s[doctor.Fail])
 	if s[doctor.Warn]+s[doctor.Fail] > 0 {
-		line += " (eru doctor)"
+		line += " (vaire doctor)"
 	}
 	return line
 }

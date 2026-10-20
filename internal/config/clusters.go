@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/catalog"
+	"github.com/mbvlabs/vaire/internal/catalog"
 )
 
 // Cluster ports (RFC 8.2). A cluster listens on its Unix socket only, and
@@ -45,7 +45,7 @@ type ClusterSpec struct {
 	Backup           ClusterBackup     `toml:"backup,omitempty"`
 	// Protected refuses db drop, a shrinking db resize, credential
 	// rotation and restore promote/undo, even with a confirm token. Lifting
-	// it takes a current code from the TOTP authenticator that eru protect
+	// it takes a current code from the TOTP authenticator that vaire protect
 	// init set up.
 	Protected bool `toml:"protected,omitempty"`
 }
@@ -161,7 +161,7 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 		}
 		for _, ext := range s.Extensions {
 			if _, ok := catalog.Lookup(ext); !ok {
-				add("%s.extensions %q is not in the catalog (it arrives with eru ext in Phase 7)", at, ext)
+				add("%s.extensions %q is not in the catalog (it arrives with vaire ext in Phase 7)", at, ext)
 			}
 		}
 		for key := range s.Settings {
@@ -169,7 +169,7 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 				add("%s.settings key %q must match %s", at, key, SettingKeyPattern)
 			}
 			if isReservedSetting(key) {
-				add("%s.settings key %q is managed by eru and cannot be overridden", at, key)
+				add("%s.settings key %q is managed by vaire and cannot be overridden", at, key)
 			}
 		}
 		c.validateClusterBackup(add, at, s.Name, s.Backup)
@@ -215,10 +215,10 @@ func (c Cluster) validateClusterBackup(add func(string, ...any), at, name string
 	}
 	if b.DumpSchedule != "" {
 		if c.Backup.Provider == "" {
-			add("%s.backup.dump_schedule needs a bucket: run eru backup setup first", at)
+			add("%s.backup.dump_schedule needs a bucket: run vaire backup setup first", at)
 		}
 		if b.DumpRetention < 1 {
-			add("%s.backup.dump_retention must be at least 1 when dump_schedule is set: set it first with eru config set clusters.%s.backup.dump_retention <n>", at, name)
+			add("%s.backup.dump_retention must be at least 1 when dump_schedule is set: set it first with vaire config set clusters.%s.backup.dump_retention <n>", at, name)
 		}
 	}
 	if b.DumpRetention < 0 {

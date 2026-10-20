@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // methods is the node's method table. Later phases add entries here.
@@ -352,7 +352,7 @@ type stepParams struct {
 	// DB limits plan and apply to one cluster's step instances.
 	DB string `json:"db,omitempty"`
 	// RotateBackupSecrets lets pgbackrest-v1 replace the bucket keys on
-	// disk with the request's; only eru backup setup sets it.
+	// disk with the request's; only vaire backup setup sets it.
 	RotateBackupSecrets bool `json:"rotate_backup_secrets,omitempty"`
 	// SkipDoctor skips the doctor checks after a full apply (Phase 4).
 	SkipDoctor bool `json:"skip_doctor,omitempty"`

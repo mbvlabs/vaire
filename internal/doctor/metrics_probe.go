@@ -17,7 +17,7 @@ type PGProbe struct {
 
 // metricsPGUp reports pg_up per database. On a failed probe the detail
 // carries postgres_exporter's last errors from its journal, so the cause
-// shows in eru doctor without sudo on the node.
+// shows in vaire doctor without sudo on the node.
 func metricsPGUp(f Facts) []Result {
 	if !f.MetricsEnabled {
 		return one(Skip, "[metrics] enabled is false", "")
@@ -40,6 +40,6 @@ func metricsPGUp(f Facts) []Result {
 		if len(f.PGExporterLog) > 0 {
 			detail += fmt.Sprintf("; postgres_exporter's last log lines: %s", strings.Join(f.PGExporterLog, " | "))
 		}
-		return Warn, detail, "eru logs postgres_exporter"
+		return Warn, detail, "vaire logs postgres_exporter"
 	})
 }

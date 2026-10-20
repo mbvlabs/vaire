@@ -3,8 +3,8 @@ package steps
 import (
 	"fmt"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // clusterStep is what a per-cluster step's instance knows: its cluster. The
@@ -24,7 +24,7 @@ func (c clusterStep) id(base string) string {
 // spec is the instance's [[clusters]] entry.
 func (c clusterStep) spec(cfg config.Cluster) (config.ClusterSpec, error) {
 	if c.cluster == "" {
-		return config.ClusterSpec{}, fmt.Errorf("a per-cluster step ran without a cluster; this is an eru bug")
+		return config.ClusterSpec{}, fmt.Errorf("a per-cluster step ran without a cluster; this is an vaire bug")
 	}
 	spec, ok := cfg.ClusterByName(c.cluster)
 	if !ok {

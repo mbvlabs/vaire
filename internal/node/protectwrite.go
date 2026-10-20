@@ -9,18 +9,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-// Writing to a protected database. eru sql, psql and console connect as
-// eru_admin, whose password every context holds, so a read-only session
-// option alone would stop nobody: on a protected database eru_admin is not a
+// Writing to a protected database. vaire sql, psql and console connect as
+// vaire_admin, whose password every context holds, so a read-only session
+// option alone would stop nobody: on a protected database vaire_admin is not a
 // member of <db>_owner at all (steps.AdminAccessSQL) and can only read. A
 // write takes a short-lived login role in <db>_owner that db.write-access
 // creates once a current code from the authenticator app checks out. The
@@ -34,7 +34,7 @@ import (
 // would reach the CLI as the redaction placeholder.
 
 // writeRolePrefix names the short-lived write roles.
-const writeRolePrefix = "eru_write_"
+const writeRolePrefix = "vaire_write_"
 
 // WritePasswordSecret is the request secret that carries the write role's
 // password, made by the CLI.
@@ -49,7 +49,7 @@ const writeRolePasswordMin = 32
 const writeRoleLogin = 2 * time.Minute
 
 // WriteAccess is the db.write-access result. Protected false means the
-// database is not protected: the CLI writes as eru_admin, as before. The
+// database is not protected: the CLI writes as vaire_admin, as before. The
 // role's password is the request's write_password secret.
 type WriteAccess struct {
 	Protected  bool   `json:"protected"`
@@ -116,7 +116,7 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 	spec, ok := writeSpec(env.Cluster, recs, p.DB)
 	if !ok || !spec.Protected {
 		// A copy the server isn't holding open, or an unprotected database:
-		// the CLI writes as eru_admin, as before.
+		// the CLI writes as vaire_admin, as before.
 		return Result{Data: WriteAccess{}}, nil
 	}
 	if err := g.checkWrite(p.DB, "writing to it", env.Req.Secrets[ProtectCodeSecret]); err != nil {
@@ -126,7 +126,7 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 	if len(password) < writeRolePasswordMin {
 		return Result{}, output.NewError(output.CodeInputRequired,
 			"db.write-access needs the write role's password in the write_password secret", output.ExitInput,
-			"Run the write with an eru CLI of the node's version: it sends the password.").
+			"Run the write with an vaire CLI of the node's version: it sends the password.").
 			WithDetails(map[string]any{"secret": WritePasswordSecret})
 	}
 	role, err := newWriteRole(g.now(), password)
@@ -154,7 +154,7 @@ func (g protectGuard) checkWrite(name, action, code string) error {
 	if strings.TrimSpace(code) == "" {
 		return output.NewError(output.CodeDatabaseProtected,
 			"database "+name+" is protected, so "+action+" needs a code from the authenticator app", output.ExitUnsafe,
-			"A person runs the command at an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with eru protect init. Reads need no code.").
+			"A person runs the command at an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with vaire protect init. Reads need no code.").
 			WithDetails(map[string]any{"reason": "write_requires_human", "database": name})
 	}
 	_, err = g.verify(code, false)
@@ -207,7 +207,7 @@ func newWriteRole(now time.Time, password string) (writeRole, error) {
 
 // createWriteRole drops the write roles that expired and have no session
 // left, then creates role in spec's cluster: a login role that inherits
-// nothing and may SET ROLE to <db>_owner, as eru sql, psql and console do,
+// nothing and may SET ROLE to <db>_owner, as vaire sql, psql and console do,
 // so whatever it creates belongs to the owner.
 func createWriteRole(ctx context.Context, spec config.ClusterSpec, role writeRole) error {
 	local := steps.ClusterPG(spec)
@@ -233,7 +233,7 @@ func writeRoleSQL(spec config.ClusterSpec, role writeRole, verifier string) stri
 // expiredWriteRolesSQL lists the write roles past their VALID UNTIL with
 // no session left.
 const expiredWriteRolesSQL = `SELECT rolname FROM pg_roles
-  WHERE rolname LIKE 'eru\_write\_%' AND rolvaliduntil < now()
+  WHERE rolname LIKE 'vaire\_write\_%' AND rolvaliduntil < now()
     AND rolname NOT IN (SELECT usename FROM pg_stat_activity WHERE usename IS NOT NULL)`
 
 // dropExpiredWriteRoles drops expired write roles, giving whatever one
@@ -268,7 +268,7 @@ func protectionChanged(old, updated config.Cluster) []string {
 }
 
 // syncProtectedAccess runs the roles step of each database whose
-// protection changes, so eru_admin's write access follows the flag at once:
+// protection changes, so vaire_admin's write access follows the flag at once:
 // protecting one takes it away, lifting the protection gives it back. A
 // database that awaits recovery is left to db recover, which builds its
 // roles afresh.
@@ -288,7 +288,7 @@ func syncProtectedAccess(ctx context.Context, env *Env, old, updated config.Clus
 			Only: []string{steps.RolesStepID(name)}, DB: name, Restarter: steps.Restarter(updated), Report: env.Report,
 		})
 		if err != nil {
-			return warnings, withHint(err, "The protection of "+name+" was not changed: eru_admin's access to it could not be set. Check that its cluster runs (eru status) and retry.")
+			return warnings, withHint(err, "The protection of "+name+" was not changed: vaire_admin's access to it could not be set. Check that its cluster runs (vaire status) and retry.")
 		}
 		warnings = append(warnings, w...)
 	}

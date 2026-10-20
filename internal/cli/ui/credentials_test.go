@@ -12,7 +12,7 @@ func credentialsFixture(width int) string {
 	return Credentials("created database app2 and its roles", "app2 (medium, 1 GiB)",
 		[]CredentialRow{{Role: "migrate", User: "app2_migrate", Password: "Abc123"}, {Role: "app", User: "app2_app", Password: "Def456"}},
 		[]URLRow{{Label: "app URL", URL: "postgres://app2_app:Def456@db1.example.com:6432/app2?sslmode=verify-full"}}, //nolint:gosec // G101: a test fixture.
-		"Store these now: eru does not keep database passwords. If they are lost, run eru db credentials <db> --rotate --role <role>.", width)
+		"Store these now: vaire does not keep database passwords. If they are lost, run vaire db credentials <db> --rotate --role <role>.", width)
 }
 
 func TestCredentialsURLsBetweenRules(t *testing.T) {

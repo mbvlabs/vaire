@@ -12,10 +12,10 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/mbvlabs/eru/internal/catalog"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/catalog"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 //go:embed templates/*.tmpl
@@ -39,34 +39,34 @@ func execute(name string, data any) []byte {
 	return buf.Bytes()
 }
 
-// SysctlConf renders /etc/sysctl.d/90-eru.conf (§11.1).
+// SysctlConf renders /etc/sysctl.d/90-vaire.conf (§11.1).
 func SysctlConf(host hostinfo.Info, hugePages int) []byte {
 	return execute("sysctl.conf.tmpl", map[string]any{"RAMMiB": host.RAMMiB, "HugePages": hugePages})
 }
 
-// THPUnit renders /etc/systemd/system/eru-thp.service (§11.1).
-func THPUnit() []byte { return execute("eru-thp.service.tmpl", nil) }
+// THPUnit renders /etc/systemd/system/vaire-thp.service (§11.1).
+func THPUnit() []byte { return execute("vaire-thp.service.tmpl", nil) }
 
 // CreateClusterConf renders
-// /etc/postgresql-common/createcluster.d/00-eru.conf.
+// /etc/postgresql-common/createcluster.d/00-vaire.conf.
 func CreateClusterConf() []byte { return execute("createcluster.conf.tmpl", nil) }
 
-// TuningConf renders conf.d/10-eru-tuning.conf from the tuning result.
+// TuningConf renders conf.d/10-vaire-tuning.conf from the tuning result.
 func TuningConf(res tune.Result) []byte {
 	items := make([]setting, 0, len(res.Settings))
 	for _, s := range res.Settings {
 		items = append(items, setting{Name: s.Name, Value: s.Value, Reason: s.Reason})
 	}
-	return execute("10-eru-tuning.conf.tmpl", map[string]any{"Settings": items})
+	return execute("10-vaire-tuning.conf.tmpl", map[string]any{"Settings": items})
 }
 
-// SecurityConf renders a cluster's conf.d/20-eru-security.conf (§14.1): no
+// SecurityConf renders a cluster's conf.d/20-vaire-security.conf (§14.1): no
 // TCP listener, and port only names the socket (RFC 8.2).
 func SecurityConf(port int) []byte {
-	return execute("20-eru-security.conf.tmpl", map[string]any{"Port": port})
+	return execute("20-vaire-security.conf.tmpl", map[string]any{"Port": port})
 }
 
-// ExtensionsConf renders a cluster's conf.d/30-eru-extensions.conf:
+// ExtensionsConf renders a cluster's conf.d/30-vaire-extensions.conf:
 // shared_preload_libraries and the catalog settings of its database's
 // extensions. auto_explain.log_min_duration is twice the tuned
 // log_min_duration_statement.
@@ -99,7 +99,7 @@ func ExtensionsConf(spec config.ClusterSpec, res tune.Result) []byte {
 			setting{Name: "auto_explain.log_analyze", Value: "off"},
 		)
 	}
-	return execute("30-eru-extensions.conf.tmpl", map[string]any{"Settings": items})
+	return execute("30-vaire-extensions.conf.tmpl", map[string]any{"Settings": items})
 }
 
 // baseLogDuration is the tuned log_min_duration_statement, defaulting to 1s.
@@ -124,7 +124,7 @@ func doubleDuration(value string) string {
 	return value
 }
 
-// SettingsConf renders a cluster's conf.d/50-eru-settings.conf: the
+// SettingsConf renders a cluster's conf.d/50-vaire-settings.conf: the
 // setup-wide [postgres.settings], with the cluster's [clusters.settings]
 // winning.
 func SettingsConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
@@ -144,7 +144,7 @@ func SettingsConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
 	for _, k := range keys {
 		items = append(items, setting{Name: k, Value: quote(merged[k])})
 	}
-	return execute("50-eru-settings.conf.tmpl", map[string]any{"Settings": items})
+	return execute("50-vaire-settings.conf.tmpl", map[string]any{"Settings": items})
 }
 
 // quote single-quotes a PostgreSQL string literal, doubling embedded quotes.
@@ -205,7 +205,7 @@ func PgbouncerIni(cfg config.Cluster, host hostinfo.Info, dbs []PoolerDatabase) 
 // (RFC 8.1). It has the same [databases] shape as the transaction pooler,
 // sized from session_pool_size, admits every database role but the service
 // roles, terminates TLS itself and requires it. It doesn't ignore the options
-// startup parameter: eru psql and console send read-only or the owner role
+// startup parameter: vaire psql and console send read-only or the owner role
 // in it, which it applies as tracked parameters, and anything else in it is
 // refused rather than silently dropped. Its socket directory, which
 // carries its admin console, and its pidfile are its own.
@@ -235,9 +235,9 @@ func SessionIni(cfg config.Cluster, dbs []PoolerDatabase, socketDir string) []by
 func SessionHBA() []byte { return execute("session_hba.conf.tmpl", nil) }
 
 // SessionUnit renders the session pooler's systemd unit,
-// eru-pgbouncer-session.service. It runs PGDG's pgbouncer binary as postgres
+// vaire-pgbouncer-session.service. It runs PGDG's pgbouncer binary as postgres
 // beside Debian's pgbouncer.service.
-func SessionUnit() []byte { return execute("eru-pgbouncer-session.service.tmpl", nil) }
+func SessionUnit() []byte { return execute("vaire-pgbouncer-session.service.tmpl", nil) }
 
 // poolerEntries sorts the databases by name and floors each pool at one.
 func poolerEntries(dbs []PoolerDatabase) []PoolerDatabase {
@@ -250,7 +250,7 @@ func poolerEntries(dbs []PoolerDatabase) []PoolerDatabase {
 }
 
 // adminAuthDB is the global auth_dbname, which only the admin console uses
-// (its eru_admin login has no entry of its own). The service passwords are
+// (its vaire_admin login has no entry of its own). The service passwords are
 // the same in every cluster (RFC 12), so the first database's alias serves.
 func adminAuthDB(dbs []PoolerDatabase) string {
 	for _, db := range poolerEntries(dbs) {
@@ -315,13 +315,13 @@ func PGServiceDropin(r config.Resources) []byte {
 // MemoryHighMiB is a cluster's MemoryHigh: its memory plus 25%.
 func MemoryHighMiB(r config.Resources) int { return r.MemoryMiB + r.MemoryMiB/4 }
 
-// CertsService renders eru-certs.service, which runs eru node run
+// CertsService renders vaire-certs.service, which runs vaire node run
 // certs-renew (D11). tls-v1 installs it and starts it once.
-func CertsService() []byte { return execute("eru-certs.service.tmpl", nil) }
+func CertsService() []byte { return execute("vaire-certs.service.tmpl", nil) }
 
-// CertsTimer renders eru-certs.timer, the hourly certificate check. timers-v1
+// CertsTimer renders vaire-certs.timer, the hourly certificate check. timers-v1
 // owns it from Phase 3 on.
-func CertsTimer() []byte { return execute("eru-certs.timer.tmpl", nil) }
+func CertsTimer() []byte { return execute("vaire-certs.timer.tmpl", nil) }
 
 // BackupSecrets are the values pgbackrest.conf carries that never enter a
 // step's inputs.
@@ -377,40 +377,40 @@ func ArchiveQueueMaxMiB(clusters int) int {
 // pgBackRest.
 const PgBackRestBin = "/usr/bin/pgbackrest"
 
-// BackupConf renders a cluster's conf.d/40-eru-backup.conf: archive_mode on
+// BackupConf renders a cluster's conf.d/40-vaire-backup.conf: archive_mode on
 // from creation, with archive-push to the cluster's stanza once [backup]
 // names a bucket and /bin/true before (RFC 9.1). The archive_command passes
 // --pgbackrest=/usr/bin/pgbackrest: pgBackRest's check and backup refuse an
 // archive_command that doesn't contain "pgbackrest" (error 068,
-// archive-command-invalid), and eru's wrapper alone doesn't.
+// archive-command-invalid), and vaire's wrapper alone doesn't.
 func BackupConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
 	stanza := ""
 	if cfg.BackupConfigured() {
 		stanza = spec.Stanza
 	}
-	return execute("40-eru-backup.conf.tmpl", map[string]any{"Stanza": stanza, "PgBackRest": PgBackRestBin})
+	return execute("40-vaire-backup.conf.tmpl", map[string]any{"Stanza": stanza, "PgBackRest": PgBackRestBin})
 }
 
-// JobService renders the eru-<job>.service a timer starts (§18). arg is
-// appended to eru node run <job>, for example --db %i for the dump template.
+// JobService renders the vaire-<job>.service a timer starts (§18). arg is
+// appended to vaire node run <job>, for example --db %i for the dump template.
 func JobService(job, arg string) []byte {
-	return execute("eru-job.service.tmpl", map[string]any{"Job": job, "Arg": arg})
+	return execute("vaire-job.service.tmpl", map[string]any{"Job": job, "Arg": arg})
 }
 
-// MasterBackupPath renders eru-master-backup.path (Phase 5): it starts the
+// MasterBackupPath renders vaire-master-backup.path (Phase 5): it starts the
 // master-backup job while the dirty flag exists, and again when the job
 // stops if a change set the flag during the build.
 func MasterBackupPath(dirty string) []byte {
-	return execute("eru-master-backup.path.tmpl", map[string]any{"Dirty": dirty})
+	return execute("vaire-master-backup.path.tmpl", map[string]any{"Dirty": dirty})
 }
 
-// FenceService renders eru-fence.service (Phase 5): the epoch check at boot,
+// FenceService renders vaire-fence.service (Phase 5): the epoch check at boot,
 // ordered before both poolers, and on its timer.
-func FenceService() []byte { return execute("eru-fence.service.tmpl", nil) }
+func FenceService() []byte { return execute("vaire-fence.service.tmpl", nil) }
 
-// JobTimer renders an eru-<job>.timer (§18).
+// JobTimer renders an vaire-<job>.timer (§18).
 func JobTimer(description, schedule, jitter string) []byte {
-	return execute("eru-job.timer.tmpl", map[string]any{"Description": description, "Schedule": schedule, "Jitter": jitter})
+	return execute("vaire-job.timer.tmpl", map[string]any{"Description": description, "Schedule": schedule, "Jitter": jitter})
 }
 
 func clamp(v, lo, hi int) int { return minInt(maxInt(v, lo), hi) }

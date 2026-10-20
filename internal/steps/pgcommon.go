@@ -4,10 +4,10 @@ import (
 	"os"
 	"slices"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 // PostgreSQL layout on the node (§11, §14).
@@ -18,7 +18,7 @@ const (
 	// its socket file.
 	PGSocketDir = "/var/run/postgresql"
 	// TLSDir holds the certificate PostgreSQL and PgBouncer serve.
-	TLSDir = "/etc/eru/tls"
+	TLSDir = "/etc/vaire/tls"
 	// TLSCertPath is the served certificate.
 	TLSCertPath = TLSDir + "/server.crt"
 	// TLSKeyPath is the served private key.
@@ -36,7 +36,7 @@ const (
 	TLSKeyGroup             = "ssl-cert"
 	TLSKeyMode  os.FileMode = 0o640
 	// RuntimeDir holds the secrets services need at runtime.
-	RuntimeDir = "/etc/eru/runtime"
+	RuntimeDir = "/etc/vaire/runtime"
 	// PgbouncerDir holds the PgBouncer configuration.
 	PgbouncerDir = "/etc/pgbouncer"
 	// PgbouncerIniPath is the rendered PgBouncer configuration.
@@ -57,31 +57,31 @@ const (
 	// NginxConfPath is the rendered nginx configuration.
 	NginxConfPath = "/etc/nginx/nginx.conf"
 	// ACMEDir holds the ACME account key.
-	ACMEDir = "/etc/eru/acme"
+	ACMEDir = "/etc/vaire/acme"
 	// ACMEDirMode is ACMEDir's mode: root only.
 	ACMEDirMode os.FileMode = 0o700
 	// ACMEAccountKeyPath is the ACME account's private key, root 0600.
 	ACMEAccountKeyPath             = ACMEDir + "/account.key"
 	ACMEAccountKeyMode os.FileMode = 0o600
 	// ACMEWebroot is served by nginx for HTTP-01 challenges. It sits outside
-	// /var/lib/eru, which is root 0700 and that nginx's workers can't enter.
-	ACMEWebroot = "/var/lib/eru-acme"
+	// /var/lib/vaire, which is root 0700 and that nginx's workers can't enter.
+	ACMEWebroot = "/var/lib/vaire-acme"
 	// ACMEChallengeDir is where challenge tokens are written.
 	ACMEChallengeDir = ACMEWebroot + "/.well-known/acme-challenge"
 	// SysctlPath is the sysctl drop-in.
-	SysctlPath = "/etc/sysctl.d/90-eru.conf"
+	SysctlPath = "/etc/sysctl.d/90-vaire.conf"
 	// THPUnitPath is the transparent-huge-pages oneshot unit.
-	THPUnitPath = "/etc/systemd/system/eru-thp.service"
+	THPUnitPath = "/etc/systemd/system/vaire-thp.service"
 	// CreateClusterConfPath disables Debian's automatic cluster creation.
-	CreateClusterConfPath = "/etc/postgresql-common/createcluster.d/00-eru.conf"
-	// SystemdSystemDir holds the eru-certs units.
+	CreateClusterConfPath = "/etc/postgresql-common/createcluster.d/00-vaire.conf"
+	// SystemdSystemDir holds the vaire-certs units.
 	SystemdSystemDir = "/etc/systemd/system"
 	// PgbouncerService is the PgBouncer systemd unit.
 	PgbouncerService = "pgbouncer"
 	// PgbouncerPort is the transaction pooler's port, behind nginx on 443.
 	PgbouncerPort = 6432
 	// SessionPoolerService is the session pooler's systemd unit.
-	SessionPoolerService = "eru-pgbouncer-session"
+	SessionPoolerService = "vaire-pgbouncer-session"
 	// SessionPoolerPort is the session pooler's port: where operators,
 	// migrations and tools that need a session connect (RFC 8.1).
 	SessionPoolerPort = 5432
@@ -96,7 +96,7 @@ const (
 // PGConfDir is the cluster's configuration directory.
 func PGConfDir(cluster string) string { return "/etc/postgresql/18/" + cluster }
 
-// PGConfD is the cluster's conf.d directory, which eru manages.
+// PGConfD is the cluster's conf.d directory, which vaire manages.
 func PGConfD(cluster string) string { return PGConfDir(cluster) + "/conf.d" }
 
 // PGServiceName is the cluster's systemd unit.
@@ -107,8 +107,8 @@ func PGServiceDropInDir(cluster string) string {
 	return SystemdSystemDir + "/" + PGServiceName(cluster) + ".service.d"
 }
 
-// PGServiceDropIn is the cluster unit's eru drop-in: its cgroup limits.
-func PGServiceDropIn(cluster string) string { return PGServiceDropInDir(cluster) + "/10-eru.conf" }
+// PGServiceDropIn is the cluster unit's vaire drop-in: its cgroup limits.
+func PGServiceDropIn(cluster string) string { return PGServiceDropInDir(cluster) + "/10-vaire.conf" }
 
 // PGLogPath is the cluster's log file.
 func PGLogPath(cluster string) string { return "/var/log/postgresql/postgresql-18-" + cluster + ".log" }
@@ -118,12 +118,12 @@ func ClusterPG(spec config.ClusterSpec) pg.Local {
 	return pg.Local{Host: PGSocketDir, Port: spec.Port}
 }
 
-// AdminPG talks to spec's cluster as eru_admin over its socket, as root
-// (pg_ident maps root to eru_admin only): maintenance and reports run with
-// eru_admin's pg_maintain, pg_monitor and pg_signal_backend, not as the
+// AdminPG talks to spec's cluster as vaire_admin over its socket, as root
+// (pg_ident maps root to vaire_admin only): maintenance and reports run with
+// vaire_admin's pg_maintain, pg_monitor and pg_signal_backend, not as the
 // superuser (Phase 4).
 func AdminPG(spec config.ClusterSpec) pg.Local {
-	return pg.Local{Host: PGSocketDir, Port: spec.Port, User: "eru_admin", AsRoot: true}
+	return pg.Local{Host: PGSocketDir, Port: spec.Port, User: "vaire_admin", AsRoot: true}
 }
 
 // PoolerAdminPG talks to a pooler's admin console as the pgbouncer user,

@@ -11,7 +11,7 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/mbvlabs/eru/internal/release"
+	"github.com/mbvlabs/vaire/internal/release"
 )
 
 func main() {

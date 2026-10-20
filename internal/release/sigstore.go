@@ -5,7 +5,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"

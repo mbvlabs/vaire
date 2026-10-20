@@ -161,10 +161,10 @@ func TestChannelRoot(t *testing.T) {
 		channel string
 		want    string
 	}{
-		{"stable", "https://eru.mbvlabs.com"},
-		{"edge", "https://eru.mbvlabs.com/edge"},
-		{"stable-1.x", "https://eru.mbvlabs.com/1.x"},
-		{"stable-2.x", "https://eru.mbvlabs.com/2.x"},
+		{"stable", "https://vaire.mbvlabs.com"},
+		{"edge", "https://vaire.mbvlabs.com/edge"},
+		{"stable-1.x", "https://vaire.mbvlabs.com/1.x"},
+		{"stable-2.x", "https://vaire.mbvlabs.com/2.x"},
 	} {
 		got, err := ChannelRoot(c.channel)
 		if err != nil || got != c.want {
@@ -179,8 +179,8 @@ func TestChannelRoot(t *testing.T) {
 }
 
 func TestIdentity(t *testing.T) {
-	const stablePrefix = "https://github.com/mbvlabs/eru/.github/workflows/publish-stable.yml@refs/tags/v"
-	const edgeIdentity = "https://github.com/mbvlabs/eru/.github/workflows/publish-edge.yml@refs/heads/master"
+	const stablePrefix = "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v"
+	const edgeIdentity = "https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master"
 	cases := []struct {
 		channel string
 		version string
@@ -227,7 +227,7 @@ func testManifest(channel, version string) Manifest {
 		Artifacts:      map[string]Artifact{},
 	}
 	for _, key := range artifactKeys {
-		m.Artifacts[key] = Artifact{URL: base + "/" + key + "/eru", SHA256: strings.Repeat("a", 64)}
+		m.Artifacts[key] = Artifact{URL: base + "/" + key + "/vaire", SHA256: strings.Repeat("a", 64)}
 	}
 	return m
 }

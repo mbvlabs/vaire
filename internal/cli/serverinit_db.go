@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // callDatabasePhase runs cluster.bootstrap phase=database over WireGuard.
@@ -149,7 +149,7 @@ func (r *initRun) waitForTLS(ctx context.Context, caller remote.Caller) error {
 		}
 		if time.Now().After(deadline) {
 			check := checkDNS(ctx, r.cfg.MasterHostname(), r.master().PublicAddress, r.prog.PublicIPv6)
-			msg := "the certificate is still pending; eru retries every hour, so it is issued within the hour after DNS points at the server"
+			msg := "the certificate is still pending; vaire retries every hour, so it is issued within the hour after DNS points at the server"
 			if check.Proxied {
 				msg += ". " + r.cfg.MasterHostname() + " is proxied by Cloudflare: set it to DNS only (grey cloud)"
 			} else if !check.Matches {
@@ -200,7 +200,7 @@ func (r *initRun) confirmDNSEarly() error {
 }
 
 // askDNS shows the records in one panel and waits for 'confirmed', unless
-// eru must not prompt or --dns-ready says they exist.
+// vaire must not prompt or --dns-ready says they exist.
 func (r *initRun) askDNS(ipv4, ipv6 string, early bool) error {
 	records := dnsRecords(r.cfg.MasterHostname(), ipv4, ipv6)
 	if len(records) == 0 {
@@ -216,7 +216,7 @@ func (r *initRun) askDNS(ipv4, ipv6 string, early bool) error {
 	}
 	body = append(body, "", dnsHelp)
 	if early {
-		body = append(body, "eru checks that they resolve after it sets up the host, before the database.")
+		body = append(body, "vaire checks that they resolve after it sets up the host, before the database.")
 	}
 	r.p.panel(title, body)
 	r.dnsShown, r.dnsIPv6 = true, ipv6

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -87,7 +87,7 @@ func runCommands(cmd *cobra.Command, _ []string) error {
 			output.CodeUsage,
 			"choose only one of --check-meta or --path",
 			output.ExitUsage,
-			"Run eru commands --json, --path, or --check-meta.",
+			"Run vaire commands --json, --path, or --check-meta.",
 		)
 	}
 	if check {
@@ -104,7 +104,7 @@ func runCommands(cmd *cobra.Command, _ []string) error {
 				output.CodeUsage,
 				"unknown command "+path,
 				output.ExitUsage,
-				"Run eru commands --json to list commands.",
+				"Run vaire commands --json to list commands.",
 			)
 		}
 		if opts.Mode == output.ModeHuman || opts.Mode == output.ModeMarkdown {
@@ -123,7 +123,7 @@ func runCommands(cmd *cobra.Command, _ []string) error {
 		commandDiscovery: discoverCommandTree(root),
 		Catalog:          flattenCatalog(root),
 	}
-	return output.OK(cmd, payload, "Discovered eru commands")
+	return output.OK(cmd, payload, "Discovered vaire commands")
 }
 
 func findCommand(root *cobra.Command, path string) (*cobra.Command, bool) {

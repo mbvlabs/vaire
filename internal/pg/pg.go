@@ -12,7 +12,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 // SCRAMIterations is the SCRAM-SHA-256 iteration count (§10.2).

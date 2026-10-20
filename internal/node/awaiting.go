@@ -3,11 +3,11 @@ package node
 import (
 	"encoding/json"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/rpc"
 )
 
 // Databases awaiting recovery (Phase 5, D9). After server init --restore
@@ -51,7 +51,7 @@ func withoutAwaiting(cfg config.Cluster, recs backup.Records, keep string) confi
 func awaitingError(db, action string) error {
 	return output.NewError(output.CodePrecondition,
 		"database "+db+" awaits recovery after the master was rebuilt, so "+action+" is refused", output.ExitPrecondition,
-		"Recover it first: eru db recover "+db).
+		"Recover it first: vaire db recover "+db).
 		WithDetails(map[string]any{"reason": "awaiting_recovery", "database": db})
 }
 

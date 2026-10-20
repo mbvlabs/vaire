@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // The jobs that run steps (db recover, db fork) carry the step secrets of

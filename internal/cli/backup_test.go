@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 func TestAgo(t *testing.T) {
@@ -147,7 +147,7 @@ func TestNotStarted(t *testing.T) {
 }
 
 func TestAddRecoveryKit(t *testing.T) {
-	values := map[string]string{"svc.eru_monitor": "pw"}
+	values := map[string]string{"svc.vaire_monitor": "pw"}
 	addRecoveryKit(values, nil)
 	if len(values) != 1 {
 		t.Errorf("no kit: secrets = %v", values)
@@ -160,12 +160,12 @@ func TestAddRecoveryKit(t *testing.T) {
 	if len(values) != 2 || values[steps.SecretBackupAgeRecipient] != "age1xyz" {
 		t.Errorf("identity only: secrets = %v", values)
 	}
-	kit := &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "eru-backups-test", Prefix: "mbvlabs"}
+	kit := &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"}
 	kit.PgBackRest.CipherPass = "cipher"
 	kit.Dumps.AgeIdentity, kit.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, kit)
 	want := map[string]string{
-		"svc.eru_monitor":              "pw",
+		"svc.vaire_monitor":            "pw",
 		steps.SecretBackupKeyID:        "AKID",
 		steps.SecretBackupKeySecret:    "s3cret",
 		steps.SecretBackupCipherPass:   "cipher",
@@ -180,13 +180,13 @@ func TestAddRecoveryKit(t *testing.T) {
 }
 
 func TestInitBackupPhaseText(t *testing.T) {
-	started, completed := initBackupPhaseText("eru-backups-test", 0)
+	started, completed := initBackupPhaseText("vaire-backups-test", 0)
 	for _, line := range []string{started, completed} {
 		if strings.Contains(line, "first full backup taken") || strings.Contains(line, "take the first full") {
 			t.Errorf("no databases: %q promises a backup init doesn't take", line)
 		}
 	}
-	if !strings.Contains(started, "eru-backups-test") {
+	if !strings.Contains(started, "vaire-backups-test") {
 		t.Errorf("started = %q, want the bucket", started)
 	}
 	if _, completed := initBackupPhaseText("b", 1); completed != "WAL archiving on, first full backup taken" {

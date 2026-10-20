@@ -10,28 +10,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/exporters"
-	"github.com/mbvlabs/eru/internal/promfile"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/versions"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/exporters"
+	"github.com/mbvlabs/vaire/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/versions"
 )
 
 const metricsID = "metrics-v1"
 
 // Files and units metrics-v1 owns (Phase 4).
 const (
-	MetricsConfPath     = "/etc/nginx/eru-metrics.conf"
-	MetricsHtpasswdPath = "/etc/nginx/eru-metrics.htpasswd" //nolint:gosec // G101: a path, not a credential.
-	MetricsTargetsPath  = "/etc/nginx/eru-metrics-targets.json"
-	MetricsJailPath     = "/etc/fail2ban/jail.d/eru-metrics.conf"
-	// PostgresExporterConfPath is postgres_exporter's --config.file. eru
+	MetricsConfPath     = "/etc/nginx/vaire-metrics.conf"
+	MetricsHtpasswdPath = "/etc/nginx/vaire-metrics.htpasswd" //nolint:gosec // G101: a path, not a credential.
+	MetricsTargetsPath  = "/etc/nginx/vaire-metrics-targets.json"
+	MetricsJailPath     = "/etc/fail2ban/jail.d/vaire-metrics.conf"
+	// PostgresExporterConfPath is postgres_exporter's --config.file. vaire
 	// logs in by peer auth, so it has no auth modules; the file exists so
 	// the exporter doesn't warn "Error loading config" at every start.
 	PostgresExporterConfPath = "/etc/postgres_exporter/postgres_exporter.yml"
-	ExportersSlice           = "eru-exporters.slice"
+	ExportersSlice           = "vaire-exporters.slice"
 
 	NodeExporterService     = "node_exporter.service"
 	PostgresExporterService = "postgres_exporter.service"
@@ -45,13 +45,13 @@ const (
 )
 
 // exporterUsers are the system users the exporters run as. postgres_exporter
-// is in pg_ident's eru map, so it logs in as eru_monitor with peer auth.
+// is in pg_ident's vaire map, so it logs in as vaire_monitor with peer auth.
 var exporterUsers = []string{"node_exporter", "postgres_exporter", "pgbouncer_exporter"}
 
 // metricsJail turns on fail2ban's stock nginx-http-auth jail for bad
 // /metrics passwords; nginx logs the client's real address thanks to the
 // PROXY protocol on its internal hops.
-const metricsJail = `# managed by eru
+const metricsJail = `# managed by vaire
 [nginx-http-auth]
 enabled = true
 port = 443
@@ -63,9 +63,9 @@ bantime = 1h
 `
 
 // postgresExporterConf has no auth modules: every probe logs in as
-// eru_monitor by peer auth. It can't be empty: the exporter's YAML decoder
+// vaire_monitor by peer auth. It can't be empty: the exporter's YAML decoder
 // fails on an empty document.
-const postgresExporterConf = `# managed by eru
+const postgresExporterConf = `# managed by vaire
 auth_modules: {}
 `
 
@@ -92,7 +92,7 @@ type metricsFile struct {
 func exporterUnits(cfg config.Cluster) map[string][]byte {
 	units := map[string][]byte{
 		NodeExporterService: render.ExporterService(render.ExporterUnit{
-			Description: "Prometheus node_exporter (eru)",
+			Description: "Prometheus node_exporter (vaire)",
 			User:        "node_exporter",
 			Slice:       ExportersSlice,
 			Binary:      exporters.BinaryPath(versions.NodeExporter),
@@ -100,12 +100,12 @@ func exporterUnits(cfg config.Cluster) map[string][]byte {
 				"--web.listen-address=" + NodeExporterAddr,
 				"--collector.textfile.directory=" + promfile.Dir,
 				"--collector.systemd",
-				"--collector.systemd.unit-include=(postgresql@18-.+|pgbouncer|eru-.+|nginx|wg-quick@wg0)[.](service|timer)",
+				"--collector.systemd.unit-include=(postgresql@18-.+|pgbouncer|vaire-.+|nginx|wg-quick@wg0)[.](service|timer)",
 			},
 			MemoryMax: "64M",
 		}),
 		PostgresExporterService: render.ExporterService(render.ExporterUnit{
-			Description: "Prometheus postgres_exporter, one probe per cluster (eru)",
+			Description: "Prometheus postgres_exporter, one probe per cluster (vaire)",
 			User:        "postgres_exporter",
 			Slice:       ExportersSlice,
 			Binary:      exporters.BinaryPath(versions.PostgresExporter),
@@ -128,8 +128,8 @@ func exporterUnits(cfg config.Cluster) map[string][]byte {
 	return units
 }
 
-// The pgbouncer_exporters' connection strings carry eru_monitor's password,
-// so they live in /etc/eru/runtime (systemd reads EnvironmentFile as PID 1).
+// The pgbouncer_exporters' connection strings carry vaire_monitor's password,
+// so they live in /etc/vaire/runtime (systemd reads EnvironmentFile as PID 1).
 const (
 	PgbouncerExporterEnv        = RuntimeDir + "/pgbouncer_exporter.env"
 	PgbouncerSessionExporterEnv = RuntimeDir + "/pgbouncer_exporter-session.env"
@@ -137,7 +137,7 @@ const (
 
 func pgbouncerExporterUnit(pooler, addr, env, after string) []byte {
 	return render.ExporterService(render.ExporterUnit{
-		Description:     "Prometheus pgbouncer_exporter for the " + pooler + " (eru)",
+		Description:     "Prometheus pgbouncer_exporter for the " + pooler + " (vaire)",
 		User:            "pgbouncer_exporter",
 		Slice:           ExportersSlice,
 		Binary:          exporters.BinaryPath(versions.PgbouncerExporter),
@@ -149,9 +149,9 @@ func pgbouncerExporterUnit(pooler, addr, env, after string) []byte {
 }
 
 // pgbouncerConnection is a pgbouncer_exporter's connection string: the
-// pooler's admin console over its socket as eru_monitor (a stats_user).
+// pooler's admin console over its socket as vaire_monitor (a stats_user).
 func pgbouncerConnection(socketDir string, port int, password string) string {
-	return fmt.Sprintf("PGBOUNCER_EXPORTER_CONNECTION_STRING=postgres://eru_monitor:%s@/pgbouncer?host=%s&port=%d&sslmode=disable\n", password, socketDir, port)
+	return fmt.Sprintf("PGBOUNCER_EXPORTER_CONNECTION_STRING=postgres://vaire_monitor:%s@/pgbouncer?host=%s&port=%d&sslmode=disable\n", password, socketDir, port)
 }
 
 // allExporterUnits lists every unit name the step may own, for teardown.
@@ -170,7 +170,7 @@ func MetricsLocations(cfg config.Cluster) []render.MetricsLocation {
 		node = n.Name
 	}
 	base := func(component string, extra ...string) map[string]string {
-		labels := map[string]string{"eru_server": server, "eru_node": node, "eru_component": component}
+		labels := map[string]string{"vaire_server": server, "vaire_node": node, "vaire_component": component}
 		for i := 0; i+1 < len(extra); i += 2 {
 			labels[extra[i]] = extra[i+1]
 		}
@@ -368,7 +368,7 @@ func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Ru
 func writePgbouncerExporterEnv() error {
 	raw, err := os.ReadFile(RuntimeDir + "/monitor.pass")
 	if err != nil {
-		return fmt.Errorf("the eru_monitor password is missing (%w); run eru apply so postgres-roles-v1 writes it", err)
+		return fmt.Errorf("the vaire_monitor password is missing (%w); run vaire apply so postgres-roles-v1 writes it", err)
 	}
 	password := strings.TrimSpace(string(raw))
 	if err := writeFile(PgbouncerExporterEnv, pgbouncerConnection(PGSocketDir, PgbouncerPort, password), 0o600); err != nil {
@@ -388,7 +388,7 @@ func writeHtpasswd(rt engine.Runtime, rotate bool) error {
 	hash := rt.SecretValues[SecretMetricsHash]
 	if hash == "" {
 		return output.NewError(output.CodeInputRequired, "the /metrics credential is missing on the node and the request carries none", output.ExitInput,
-			"Run eru apply from a machine whose context has the metrics credential (eru login with a current transfer bundle).").
+			"Run vaire apply from a machine whose context has the metrics credential (vaire login with a current transfer bundle).").
 			WithDetails(map[string]any{"secret": SecretMetricsHash})
 	}
 	if !strings.HasPrefix(hash, "$2") {
@@ -397,7 +397,7 @@ func writeHtpasswd(rt engine.Runtime, rotate bool) error {
 	return writeFileOwned(MetricsHtpasswdPath, HtpasswdLine(hash), 0o640, "root", "www-data")
 }
 
-// WriteHtpasswd replaces the /metrics credential's hash (eru metrics rotate).
+// WriteHtpasswd replaces the /metrics credential's hash (vaire metrics rotate).
 func WriteHtpasswd(rt engine.Runtime) error { return writeHtpasswd(rt, true) }
 
 // HtpasswdLine is the htpasswd file for the metrics user's hash.

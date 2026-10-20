@@ -15,7 +15,7 @@ import (
 // Esc.
 var ErrAborted = errors.New("prompt cancelled")
 
-// run shows one form on stderr with the eru theme, with the live area
+// run shows one form on stderr with the vaire theme, with the live area
 // suspended. huh erases the form when it ends, so once it is answered run
 // prints the question and answer() as one line that stays in the
 // scrollback.
@@ -63,7 +63,7 @@ func printAnswered(w io.Writer, title, answer string) {
 	}
 }
 
-// RunForm runs a multi-group form (the init interview) with the eru theme.
+// RunForm runs a multi-group form (the init interview) with the vaire theme.
 func RunForm(groups ...*huh.Group) error {
 	resume := Suspend()
 	defer resume()

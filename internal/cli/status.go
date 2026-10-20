@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/health"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/health"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/tune"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -63,14 +63,14 @@ type statusDB struct {
 }
 
 type statusData struct {
-	Server     string                 `json:"server"`
-	Node       string                 `json:"node"`
-	Role       string                 `json:"role"`
-	EruVersion string                 `json:"eru_version"`
-	PGVersion  string                 `json:"pg_version,omitempty"`
-	Budget     tuneServer             `json:"budget"`
-	Poolers    map[string]statusPools `json:"poolers"`
-	Disk       *struct {
+	Server       string                 `json:"server"`
+	Node         string                 `json:"node"`
+	Role         string                 `json:"role"`
+	VaireVersion string                 `json:"vaire_version"`
+	PGVersion    string                 `json:"pg_version,omitempty"`
+	Budget       tuneServer             `json:"budget"`
+	Poolers      map[string]statusPools `json:"poolers"`
+	Disk         *struct {
 		Path       string  `json:"path"`
 		TotalBytes int64   `json:"total_bytes"`
 		FreeBytes  int64   `json:"free_bytes"`
@@ -94,7 +94,7 @@ type statusData struct {
 	} `json:"master_backup,omitempty"`
 }
 
-// statusWatchInterval is how often eru status --watch refreshes.
+// statusWatchInterval is how often vaire status --watch refreshes.
 const statusWatchInterval = 5 * time.Second
 
 func runStatus(cmd *cobra.Command, _ []string) error {
@@ -151,7 +151,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 func statusNext(d statusData) []string {
 	for _, db := range d.Databases {
 		if db.State != "running" || db.RestartPending {
-			return []string{"eru doctor"}
+			return []string{"vaire doctor"}
 		}
 	}
 	return nil
@@ -160,7 +160,7 @@ func statusNext(d statusData) []string {
 // statusMessage renders the server card and a row per database.
 func statusMessage(d statusData, warnings []output.Warning) string {
 	var lines []string
-	head := fmt.Sprintf("server %s · node %s · eru %s", d.Server, d.Node, d.EruVersion)
+	head := fmt.Sprintf("server %s · node %s · vaire %s", d.Server, d.Node, d.VaireVersion)
 	if d.PGVersion != "" {
 		head += " · PostgreSQL " + d.PGVersion
 	}
@@ -189,7 +189,7 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 		}
 	}
 	if !d.Backups {
-		lines = append(lines, "  backups none off the server (eru backup setup)")
+		lines = append(lines, "  backups none off the server (vaire backup setup)")
 	}
 	if m := d.Master; m != nil {
 		line := "  master  "
@@ -206,7 +206,7 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 			case m.Bucket:
 				line += ", not uploaded yet"
 			default:
-				line += ", on the server only (eru server backup export)"
+				line += ", on the server only (vaire server backup export)"
 			}
 			if m.Pending {
 				line += "; a change is being bundled"
@@ -218,7 +218,7 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 		lines = append(lines, line)
 	}
 	if len(d.Databases) == 0 {
-		lines = append(lines, "", "no databases yet (eru db create <name>)")
+		lines = append(lines, "", "no databases yet (vaire db create <name>)")
 		return strings.Join(lines, "\n")
 	}
 	lines = append(lines, "", fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",

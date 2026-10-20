@@ -8,11 +8,11 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/localenv"
-	"github.com/mbvlabs/eru/internal/release"
-	"github.com/mbvlabs/eru/internal/upgrade"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/release"
+	"github.com/mbvlabs/vaire/internal/upgrade"
 	"github.com/spf13/cobra"
 )
 
@@ -57,7 +57,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	stop := waitOn(cmd, "checking for an eru release on "+channel)
+	stop := waitOn(cmd, "checking for an vaire release on "+channel)
 	manifest, err := client.Resolve(ctx, channel, version)
 	stop()
 	if err != nil {
@@ -82,7 +82,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 			Data:     data,
 			Warnings: warnings,
 			Message:  "already on " + plan.From.Version,
-			Next:     []string{"eru version"},
+			Next:     []string{"vaire version"},
 		})
 	}
 	if dry {
@@ -95,13 +95,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return output.Success(cmd, output.Result{
 			Data:     data,
 			Warnings: warnings,
-			Message:  fmt.Sprintf("Would upgrade eru %s → %s (%s) at %s", plan.From.Version, plan.To.Version, plan.To.Channel, target),
-			Next:     []string{"eru version"},
+			Message:  fmt.Sprintf("Would upgrade vaire %s → %s (%s) at %s", plan.From.Version, plan.To.Version, plan.To.Channel, target),
+			Next:     []string{"vaire version"},
 		})
 	}
 
 	if !yes && !MustNotPrompt(cmd) {
-		ok, err := PromptYes(cmd, fmt.Sprintf("Upgrade eru %s → %s (%s) at %s?", plan.From.Version, plan.To.Version, plan.To.Channel, target))
+		ok, err := PromptYes(cmd, fmt.Sprintf("Upgrade vaire %s → %s (%s) at %s?", plan.From.Version, plan.To.Version, plan.To.Channel, target))
 		if err != nil {
 			return err
 		}
@@ -125,13 +125,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	stop = waitOn(cmd, "downloading eru "+manifest.Version)
+	stop = waitOn(cmd, "downloading vaire "+manifest.Version)
 	cached, err := client.Fetch(ctx, manifest, runtime.GOOS, runtime.GOARCH)
 	stop()
 	if err != nil {
 		return err
 	}
-	stop = waitOn(cmd, "verifying eru "+manifest.Version)
+	stop = waitOn(cmd, "verifying vaire "+manifest.Version)
 	err = upgrade.Preflight(ctx, cached, manifest)
 	stop()
 	if err != nil {
@@ -157,7 +157,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	}
 
 	lines := []string{
-		fmt.Sprintf("eru upgraded %s → %s", plan.From.Version, plan.To.Version),
+		fmt.Sprintf("vaire upgraded %s → %s", plan.From.Version, plan.To.Version),
 	}
 	if previous != "" {
 		lines = insert(lines, 0, "kept previous binary at "+previous)
@@ -166,19 +166,19 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		Data:     data,
 		Warnings: warnings,
 		Message:  strings.Join(lines, "\n"),
-		Next:     []string{"eru version"},
+		Next:     []string{"vaire version"},
 	})
 }
 
 func nodesWarning() output.Warning {
 	return output.Warning{
 		Code:    "nodes_not_upgraded",
-		Message: "nodes are not upgraded: run eru apply --auto-upgrade-nodes",
+		Message: "nodes are not upgraded: run vaire apply --auto-upgrade-nodes",
 	}
 }
 
 func dirWritable(dir string) bool {
-	f, err := os.CreateTemp(dir, ".eru-writetest-*")
+	f, err := os.CreateTemp(dir, ".vaire-writetest-*")
 	if err != nil {
 		return false
 	}

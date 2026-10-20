@@ -5,8 +5,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
 )
 
 // The secrets a job hands its steps are the ones the steps in db recover
@@ -41,10 +41,10 @@ func TestRestartOnly(t *testing.T) {
 		row  map[string]string
 		want bool
 	}{
-		{map[string]string{"sourcefile": "/etc/postgresql/18/app/conf.d/10-eru-tuning.conf", "name": "shared_buffers", "error": "setting could not be applied", "context": "postmaster"}, true},
+		{map[string]string{"sourcefile": "/etc/postgresql/18/app/conf.d/10-vaire-tuning.conf", "name": "shared_buffers", "error": "setting could not be applied", "context": "postmaster"}, true},
 		{map[string]string{"error": `parameter "recovery_target_timeline" cannot be changed without restarting the server`}, true},
-		{map[string]string{"sourcefile": "/etc/postgresql/18/app/conf.d/50-eru-settings.conf", "sourceline": "3", "name": "work_mem", "error": "setting could not be applied", "context": "user"}, false},
-		{map[string]string{"sourcefile": "/etc/postgresql/18/app/conf.d/50-eru-settings.conf", "sourceline": "4", "name": "bogus", "error": "unrecognized configuration parameter"}, false},
+		{map[string]string{"sourcefile": "/etc/postgresql/18/app/conf.d/50-vaire-settings.conf", "sourceline": "3", "name": "work_mem", "error": "setting could not be applied", "context": "user"}, false},
+		{map[string]string{"sourcefile": "/etc/postgresql/18/app/conf.d/50-vaire-settings.conf", "sourceline": "4", "name": "bogus", "error": "unrecognized configuration parameter"}, false},
 	} {
 		if got := restartOnly(c.row); got != c.want {
 			t.Errorf("%v: %v, want %v", c.row, got, c.want)

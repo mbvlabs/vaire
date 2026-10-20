@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // StatePath is the node's run state beside the journal (§6.2).
-const StatePath = "/var/lib/eru/state.json"
+const StatePath = "/var/lib/vaire/state.json"
 
 // stateLockPath serializes read-modify-write cycles of state.json between
 // processes, because backup jobs and RPCs update it concurrently.
@@ -19,7 +19,7 @@ const stateLockPath = StatePath + ".lock"
 // maxJobs is how many job records state.json keeps.
 const maxJobs = 50
 
-// State is /var/lib/eru/state.json: the job records and the lockdown flags.
+// State is /var/lib/vaire/state.json: the job records and the lockdown flags.
 // Durable records (restores, drills, last results) live in records.json,
 // which internal/backup owns.
 type State struct {
@@ -38,8 +38,8 @@ type State struct {
 	DeferredRestarts map[string]string `json:"deferred_restarts,omitempty"`
 }
 
-// JobRecord is one run of eru node run: a detachable job started by an RPC
-// (unit eru-job-<id>) or a timer run. PID is the eru node run process, so a
+// JobRecord is one run of vaire node run: a detachable job started by an RPC
+// (unit vaire-job-<id>) or a timer run. PID is the vaire node run process, so a
 // record still running whose process was killed can be told from a live job.
 type JobRecord struct {
 	ID           string            `json:"id"`
@@ -152,7 +152,7 @@ func LoadState(path string) (State, error) {
 			output.CodePrecondition,
 			"the node state file is corrupt",
 			output.ExitPrecondition,
-			"Inspect "+path+" and fix or remove it. eru never resets it on its own.",
+			"Inspect "+path+" and fix or remove it. vaire never resets it on its own.",
 		).WithDetails(map[string]any{"reason": "state_corrupt", "path": path})
 	}
 	return s, nil

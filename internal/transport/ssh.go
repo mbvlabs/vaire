@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -364,7 +364,7 @@ func ProbeHostKey(ctx context.Context, d Dialer, addr string, timeout time.Durat
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	target := SSHTarget{User: "eru-host-key-probe", Addr: addr}
+	target := SSHTarget{User: "vaire-host-key-probe", Addr: addr}
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	nc, err := d.DialContext(dialCtx, "tcp", addr)

@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/totp"
 )
 
 // writeEnv is a request on protectedCluster with params and, when code is
@@ -140,7 +140,7 @@ func TestWriteAccess(t *testing.T) {
 	access := func(params, code string) (WriteAccess, error) { return accessWith(params, code, password) }
 
 	// Not protected, and no copy the server holds open (this test node has
-	// no records.json): the CLI writes as eru_admin, and no role is made.
+	// no records.json): the CLI writes as vaire_admin, and no role is made.
 	for _, db := range []string{"other", "app__restoring"} {
 		got, err := access(`{"db":"`+db+`"}`, "")
 		if err != nil || got.Protected || len(granted) != 0 {
@@ -236,11 +236,11 @@ func TestProtectedCopies(t *testing.T) {
 }
 
 func TestWriteRoleSQL(t *testing.T) {
-	role := writeRole{User: "eru_write_0a1b2c3d4e5f", Password: "x", ValidUntil: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	role := writeRole{User: "vaire_write_0a1b2c3d4e5f", Password: "x", ValidUntil: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
 	sql := writeRoleSQL(config.ClusterSpec{Name: "app"}, role, "SCRAM-SHA-256$v")
 	for _, want := range []string{
-		`CREATE ROLE "eru_write_0a1b2c3d4e5f" LOGIN NOINHERIT PASSWORD 'SCRAM-SHA-256$v' VALID UNTIL '2026-10-15T12:00:00Z' IN ROLE "app_owner";`,
-		`GRANT CONNECT, TEMPORARY ON DATABASE "app" TO "eru_write_0a1b2c3d4e5f";`,
+		`CREATE ROLE "vaire_write_0a1b2c3d4e5f" LOGIN NOINHERIT PASSWORD 'SCRAM-SHA-256$v' VALID UNTIL '2026-10-15T12:00:00Z' IN ROLE "app_owner";`,
+		`GRANT CONNECT, TEMPORARY ON DATABASE "app" TO "vaire_write_0a1b2c3d4e5f";`,
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("missing %q in\n%s", want, sql)

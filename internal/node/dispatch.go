@@ -1,4 +1,4 @@
-// Package node is the node side of eru: the RPC dispatcher, its method table,
+// Package node is the node side of vaire: the RPC dispatcher, its method table,
 // selfcheck and upgrade.install.
 package node
 
@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 // Env is what a method handler gets for one request.
@@ -83,7 +83,7 @@ func fixedLock(mode engine.LockMode) func(rpc.Request) engine.LockMode {
 	return func(rpc.Request) engine.LockMode { return mode }
 }
 
-// Serve runs `eru node rpc`: read one request from stdin, run it, and stream
+// Serve runs `vaire node rpc`: read one request from stdin, run it, and stream
 // redacted NDJSON events ending in exactly one result. It returns the exit
 // status, which equals the result envelope's exit code.
 func Serve(stdin io.Reader, stdout io.Writer) (code int) {
@@ -101,9 +101,9 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	if os.Geteuid() != 0 {
 		return out.fail(command, output.NewError(
 			output.CodePrecondition,
-			"eru node rpc must run as root",
+			"vaire node rpc must run as root",
 			output.ExitPrecondition,
-			"Run it through sudo -n /usr/local/bin/eru node rpc.",
+			"Run it through sudo -n /usr/local/bin/vaire node rpc.",
 		).WithDetails(map[string]any{"reason": "root_required"}))
 	}
 
@@ -269,9 +269,9 @@ func runHandler(ctx context.Context, m method, env *Env, out *eventWriter) (res 
 func panicError() *output.CLIError {
 	return output.NewError(
 		output.CodeError,
-		"eru node rpc hit an internal error",
+		"vaire node rpc hit an internal error",
 		output.ExitGeneric,
-		"This is an eru bug. The stack trace is in the run log.",
+		"This is an vaire bug. The stack trace is in the run log.",
 	)
 }
 

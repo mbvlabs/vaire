@@ -16,7 +16,7 @@ import (
 )
 
 // Schema is the manifest's schema.
-const Schema = "eru-master-bundle/v1"
+const Schema = "vaire-master-bundle/v1"
 
 // ManifestName is the tar entry that comes first.
 const ManifestName = "manifest.json"
@@ -26,24 +26,24 @@ const maxBundleSize = 32 << 20
 
 // Meta describes a bundle.
 type Meta struct {
-	Server     string
-	Node       string
-	Epoch      int64
-	CreatedAt  time.Time
-	EruVersion string
+	Server       string
+	Node         string
+	Epoch        int64
+	CreatedAt    time.Time
+	VaireVersion string
 }
 
 // Manifest is manifest.json inside the tar.
 type Manifest struct {
-	Schema     string `json:"schema"`
-	EruVersion string `json:"eru_version"`
-	Server     string `json:"server"`
-	Node       string `json:"node"`
-	Epoch      int64  `json:"epoch"`
-	Revision   string `json:"revision"`
-	CreatedAt  string `json:"created_at"`
-	Content    string `json:"content_hash"`
-	Files      []File `json:"files"`
+	Schema       string `json:"schema"`
+	VaireVersion string `json:"vaire_version"`
+	Server       string `json:"server"`
+	Node         string `json:"node"`
+	Epoch        int64  `json:"epoch"`
+	Revision     string `json:"revision"`
+	CreatedAt    string `json:"created_at"`
+	Content      string `json:"content_hash"`
+	Files        []File `json:"files"`
 }
 
 // Bundle is an opened bundle: its manifest and its files with their data.
@@ -67,15 +67,15 @@ func (b Bundle) File(p string) (File, bool) {
 func Build(meta Meta, files []File) ([]byte, Manifest, error) {
 	created := meta.CreatedAt.UTC().Truncate(time.Second)
 	m := Manifest{
-		Schema:     Schema,
-		EruVersion: meta.EruVersion,
-		Server:     meta.Server,
-		Node:       meta.Node,
-		Epoch:      meta.Epoch,
-		Revision:   Revision(files),
-		CreatedAt:  created.Format(time.RFC3339),
-		Content:    ContentHash(files),
-		Files:      files,
+		Schema:       Schema,
+		VaireVersion: meta.VaireVersion,
+		Server:       meta.Server,
+		Node:         meta.Node,
+		Epoch:        meta.Epoch,
+		Revision:     Revision(files),
+		CreatedAt:    created.Format(time.RFC3339),
+		Content:      ContentHash(files),
+		Files:        files,
 	}
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

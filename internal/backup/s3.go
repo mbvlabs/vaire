@@ -11,14 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // Target is a bucket and the keys to reach it. The operator builds it from
-// credentials.json, the node from cluster.toml and /etc/eru/runtime/backup.env.
+// credentials.json, the node from cluster.toml and /etc/vaire/runtime/backup.env.
 type Target struct {
 	Endpoint string
 	Region   string
@@ -88,11 +88,11 @@ func (t Target) key(rest string) string {
 }
 
 // ProbeKey is the object the probe writes and removes.
-const ProbeKey = ".eru-probe"
+const ProbeKey = ".vaire-probe"
 
-// Probe checks the bucket from wherever eru runs, before anything reaches
+// Probe checks the bucket from wherever vaire runs, before anything reaches
 // the node: it reads the bucket, then puts, gets and deletes
-// <prefix>/.eru-probe. It refuses a prefix that belongs to another server,
+// <prefix>/.vaire-probe. It refuses a prefix that belongs to another server,
 // or to an earlier install of this one (OwnsPrefix). The error codes name
 // the cause: backup_auth_failed, bucket_not_found and endpoint_unreachable.
 func Probe(ctx context.Context, t Target, owner PrefixOwner) error {
@@ -109,7 +109,7 @@ func Probe(ctx context.Context, t Target, owner PrefixOwner) error {
 	if !exists {
 		return bucketMissing(t)
 	}
-	body := []byte("eru probe " + time.Now().UTC().Format(time.RFC3339) + "\n")
+	body := []byte("vaire probe " + time.Now().UTC().Format(time.RFC3339) + "\n")
 	key := t.key(ProbeKey)
 	if _, err := c.PutObject(ctx, t.Bucket, key, bytes.NewReader(body), int64(len(body)), minio.PutObjectOptions{ContentType: "text/plain"}); err != nil {
 		return s3Error(t, "write "+key, err)
@@ -124,7 +124,7 @@ func Probe(ctx context.Context, t Target, owner PrefixOwner) error {
 		return s3Error(t, "read "+key, err)
 	}
 	if !bytes.Equal(got, body) {
-		return output.NewError(output.CodeBackupAuthFailed, "the bucket returned different bytes than eru wrote to "+key, output.ExitTransport,
+		return output.NewError(output.CodeBackupAuthFailed, "the bucket returned different bytes than vaire wrote to "+key, output.ExitTransport,
 			"Check that the endpoint is the bucket's S3 API and not a proxy or cache.").WithDetails(map[string]any{"key": key})
 	}
 	if err := c.RemoveObject(ctx, t.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
@@ -141,7 +141,7 @@ func Probe(ctx context.Context, t Target, owner PrefixOwner) error {
 	if other, ok := OwnsPrefix(owner, epoch, stanzas); !ok {
 		hint := "Pick another prefix (the default is the server name). Two servers must never share a repository."
 		if epoch != nil && epoch.Server == owner.Server {
-			hint = "The prefix holds the master backup of an earlier " + owner.Server + ": to rebuild that server use eru server init --restore; otherwise pick another prefix. Using it would fence this server."
+			hint = "The prefix holds the master backup of an earlier " + owner.Server + ": to rebuild that server use vaire server init --restore; otherwise pick another prefix. Using it would fence this server."
 		}
 		return output.NewError(output.CodePrecondition,
 			"prefix "+t.Prefix+" already holds the backups of "+other,
@@ -212,7 +212,7 @@ func (t Target) stanzas(ctx context.Context, c *minio.Client) ([]string, error) 
 	return out, nil
 }
 
-// s3Error maps a minio error to eru's codes.
+// s3Error maps a minio error to vaire's codes.
 func s3Error(t Target, what string, err error) error {
 	resp := minio.ToErrorResponse(err)
 	details := map[string]any{"endpoint": t.Endpoint, "bucket": t.Bucket, "action": what}

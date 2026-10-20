@@ -7,13 +7,13 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // BinaryPath is where the node binary lives.
-const BinaryPath = "/usr/local/bin/eru"
+const BinaryPath = "/usr/local/bin/vaire"
 
 // Check statuses.
 const (
@@ -38,7 +38,7 @@ var requiredTools = []string{"bash", "systemd-run", "systemctl", "sha256sum", "i
 
 var toolDirs = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
 
-// nodeDirs are the directories the node writes, with the mode used when eru
+// nodeDirs are the directories the node writes, with the mode used when vaire
 // creates them.
 var nodeDirs = []struct {
 	path string
@@ -56,7 +56,7 @@ func SelfCheck() (SelfCheckData, []output.Warning, error) {
 		checks := []Check{{Name: "root", Status: CheckFail, Detail: "selfcheck must run as root"}}
 		return SelfCheckData{Checks: checks}, nil, output.NewError(
 			output.CodePrecondition,
-			"eru node selfcheck must run as root",
+			"vaire node selfcheck must run as root",
 			output.ExitPrecondition,
 			"Run it with sudo.",
 		).WithDetails(map[string]any{"reason": "root_required", "checks": checks})
@@ -130,7 +130,7 @@ func checkConfig(name, path string, load func(string) error) Check {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			c.Status = CheckWarn
-			c.Detail = path + " is absent: not an eru node yet"
+			c.Detail = path + " is absent: not an vaire node yet"
 			return c
 		}
 		return fail(c, err.Error())
@@ -182,7 +182,7 @@ func checkDirs() Check {
 		if info.Mode().Perm()&0o700 != 0o700 {
 			return fail(c, fmt.Sprintf("%s has mode %04o; root needs rwx", d.path, info.Mode().Perm()))
 		}
-		probe, err := os.CreateTemp(d.path, ".eru-selfcheck-*")
+		probe, err := os.CreateTemp(d.path, ".vaire-selfcheck-*")
 		if err != nil {
 			return fail(c, "cannot write "+d.path+": "+err.Error())
 		}

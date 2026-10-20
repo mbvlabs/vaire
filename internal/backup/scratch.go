@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
 )
 
 // pgBin is the PostgreSQL 18 server binaries.
@@ -28,7 +28,7 @@ const recoveryWait = 24 * time.Hour
 // skips it before the cluster is registered or the instance has started.
 // It is on /run, so a reboot frees reservations whose cluster pg_lsclusters
 // lists anyway.
-const TemporaryPortDir = "/run/eru-ports"
+const TemporaryPortDir = "/run/vaire-ports"
 
 // reserveTemporaryPort picks the first free port of the temporary range and
 // records it for owner. A port is taken when a cluster uses it, a socket
@@ -40,7 +40,7 @@ func reserveTemporaryPort(owner string) (int, error) {
 		taken := clusterPorts()
 		files, _ := os.ReadDir(TemporaryPortDir)
 		for _, f := range files {
-			raw, err := os.ReadFile(filepath.Join(TemporaryPortDir, f.Name())) //nolint:gosec // G304: eru's own reservations.
+			raw, err := os.ReadFile(filepath.Join(TemporaryPortDir, f.Name())) //nolint:gosec // G304: vaire's own reservations.
 			if err != nil {
 				continue
 			}
@@ -88,9 +88,9 @@ func clusterPorts() map[int]bool {
 // cluster at dst, as owner. pg_restore's own errors (an object the owner may
 // not create, for example) don't stop the load: they come back as warnings,
 // and the caller asks the operator to inspect the result before using it.
-// The one error every dump of an eru database has, that the owner may not
+// The one error every dump of an vaire database has, that the owner may not
 // COMMENT ON EXTENSION (the extensions belong to the superuser, and
-// eru created them before the load, with their comments), is harmless
+// vaire created them before the load, with their comments), is harmless
 // and filtered out.
 func LoadDump(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, r io.Reader, dst pg.Local, target, owner string) ([]string, error) {
 	f := &restoreFilter{out: func(line string) {

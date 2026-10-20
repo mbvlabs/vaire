@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // Command is one fixed program the shell runs without bash: the backup tools
-// (pgbackrest, pg_dump, pg_restore, pg_ctl) whose output eru needs to read.
+// (pgbackrest, pg_dump, pg_restore, pg_ctl) whose output vaire needs to read.
 // Arguments never carry a secret; secrets travel in Env or Stdin.
 type Command struct {
 	Name string

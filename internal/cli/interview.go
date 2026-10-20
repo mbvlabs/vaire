@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"charm.land/huh/v2"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -125,7 +125,7 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 	}
 	ask(qDefaultSize, huh.NewSelect[string]().
 		Title("Default database size").
-		Description("eru db create uses it without --size, and steps down when it doesn't fit.").
+		Description("vaire db create uses it without --size, and steps down when it doesn't fit.").
 		Options(sizes...).
 		Value(&a.DefaultSize), &workload)
 	ask(qClientConnections, huh.NewInput().Title("Expected client connections").Validate(validateClientConnections).Value(&a.ClientConnections), &workload)

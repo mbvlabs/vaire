@@ -11,15 +11,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/contexts"
 )
 
 // One WireGuard device per context: the node keeps one peer per operator
 // key, and a second device with the same key moves that peer's endpoint and
 // session to itself, so the first one's streams hang. tunnel.lock in the
 // context directory guards that. The context's tunnel daemon (tunneld.go)
-// holds it for its lifetime and every other eru process dials through the
-// daemon. The in-process tunnels (eru server init, ERU_TUNNEL=inprocess)
+// holds it for its lifetime and every other vaire process dials through the
+// daemon. The in-process tunnels (vaire server init, VAIRE_TUNNEL=inprocess)
 // take it too, so they wait while a daemon or another in-process tunnel
 // runs.
 
@@ -47,7 +47,7 @@ type heldTunnelLock struct {
 	refs int
 }
 
-// lockTunnel takes the context's tunnel lock, waiting while another eru
+// lockTunnel takes the context's tunnel lock, waiting while another vaire
 // process holds it. It reports the wait once through p and gives up when
 // ctx ends. The returned func releases the lock.
 func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
@@ -93,7 +93,7 @@ func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
 	if told && p != nil {
 		p.setPhase("")
 	}
-	command := "eru"
+	command := "vaire"
 	if p != nil && p.cmd != nil {
 		command = p.cmd.CommandPath()
 	}
@@ -151,20 +151,20 @@ func releaseTunnelLock(name string) {
 }
 
 func tunnelWaitNote(p *progress, name, path string) {
-	who := "another eru command"
+	who := "another vaire command"
 	if raw, err := os.ReadFile(path); err == nil { //nolint:gosec // G304: the context's own lock file.
 		var h tunnelHolder
 		if json.Unmarshal(raw, &h) == nil && h.PID > 0 {
 			cmd := h.Command
 			if cmd == "" {
-				cmd = "eru"
+				cmd = "vaire"
 			}
 			who = fmt.Sprintf("%s (pid %d)", cmd, h.PID)
 		}
 	}
 	line := fmt.Sprintf("%s is using the tunnel to %s; waiting for it to finish (close it, or press Ctrl-C to give up)…", who, name)
 	if strings.Contains(who, tunnelDaemonCommand) {
-		line = fmt.Sprintf("the tunnel daemon of %s (%s) holds the tunnel; waiting for it to exit (eru tunnel stop -c %s ends it, or press Ctrl-C to give up)…", name, who, name)
+		line = fmt.Sprintf("the tunnel daemon of %s (%s) holds the tunnel; waiting for it to exit (vaire tunnel stop -c %s ends it, or press Ctrl-C to give up)…", name, who, name)
 	}
 	if p == nil {
 		_, _ = fmt.Fprintln(os.Stderr, line)

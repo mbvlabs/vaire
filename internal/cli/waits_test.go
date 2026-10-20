@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 func TestWaitStopTwice(t *testing.T) {
@@ -59,7 +59,7 @@ func TestApplyNextOnlyWhenStepsApply(t *testing.T) {
 	if got := pendingSteps(engine.PlanData{Total: 20}); got != "nothing to apply" {
 		t.Errorf("pendingSteps = %q", got)
 	}
-	if next := applyNext(engine.PlanData{WouldApply: 2, Total: 20}); len(next) != 1 || next[0] != "eru apply" {
+	if next := applyNext(engine.PlanData{WouldApply: 2, Total: 20}); len(next) != 1 || next[0] != "vaire apply" {
 		t.Errorf("2 steps suggested %v", next)
 	}
 }

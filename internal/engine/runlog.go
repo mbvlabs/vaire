@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 // LogDir holds one log per RPC or job.
-const LogDir = "/var/log/eru"
+const LogDir = "/var/log/vaire"
 
 var logNamePart = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -34,7 +34,7 @@ func OpenRunLog(method, requestID string) (*RunLog, error) {
 	if err := os.MkdirAll(LogDir, 0o750); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(LogDir, 0o750); err != nil { //nolint:gosec // G302: §6.2 sets /var/log/eru to 0750.
+	if err := os.Chmod(LogDir, 0o750); err != nil { //nolint:gosec // G302: §6.2 sets /var/log/vaire to 0750.
 		return nil, err
 	}
 	name := fmt.Sprintf("%s-%s-%s.log", time.Now().UTC().Format("20060102T150405Z"), method, requestID)

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Step 16 (metrics-v1). PHASE=users: the exporters' system users and the
-# textfile directory, before eru writes the units and fetches the binaries.
-# PHASE=start (after eru wrote everything): reload systemd, start the
+# textfile directory, before vaire writes the units and fetches the binaries.
+# PHASE=start (after vaire wrote everything): reload systemd, start the
 # exporters in START_UNITS (restarting running ones, since their unit or
 # binary may have changed), stop and disable those in STOP_UNITS, reload nginx
 # and fail2ban. PHASE=disable ([metrics] enabled = false): stop and disable
-# every exporter and reload nginx without the metrics include, which eru has
+# every exporter and reload nginx without the metrics include, which vaire has
 # already removed.
 set -euo pipefail
 

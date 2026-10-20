@@ -8,7 +8,7 @@ type Role struct {
 
 // DatabaseCreds holds the setup-wide database credentials: the admin role
 // and the service roles (D4). Application database passwords are never kept:
-// eru db create shows them once.
+// vaire db create shows them once.
 type DatabaseCreds struct {
 	Admin    Role            `json:"admin"`
 	Services map[string]Role `json:"services,omitempty"`

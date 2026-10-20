@@ -30,7 +30,7 @@ func (d Document) Groups() []Group {
 		Field{"Name", d.Server.Name},
 		Field{"Domain", d.Server.Domain},
 		Field{"TLS mode", d.Server.TLSMode},
-		Field{"eru version", d.EruVersion},
+		Field{"vaire version", d.VaireVersion},
 		Field{"Created at", d.CreatedAt},
 	)}}
 	for _, n := range d.Nodes {
@@ -120,7 +120,7 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 // EncryptArmored returns doc as an ASCII-armored age file, the transfer
-// bundle that is pasted into eru login.
+// bundle that is pasted into vaire login.
 func EncryptArmored(doc Document, passphrase string) ([]byte, error) {
 	raw, err := Encrypt(doc, passphrase)
 	if err != nil {

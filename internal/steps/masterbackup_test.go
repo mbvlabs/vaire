@@ -5,17 +5,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/vaire/internal/config"
 )
 
 func TestMasterBackupUnits(t *testing.T) {
 	cfg := metricsCluster("app")
 	files := timerFiles(cfg)
 	path := string(files[MasterBackupPath])
-	if !strings.Contains(path, "PathExists=/var/lib/eru/master-backup/dirty") || !strings.Contains(path, "Unit=eru-master-backup.service") {
+	if !strings.Contains(path, "PathExists=/var/lib/vaire/master-backup/dirty") || !strings.Contains(path, "Unit=vaire-master-backup.service") {
 		t.Errorf("path unit:\n%s", path)
 	}
-	if !strings.Contains(string(files[MasterBackupService]), "eru node run master-backup") {
+	if !strings.Contains(string(files[MasterBackupService]), "vaire node run master-backup") {
 		t.Error("master-backup service")
 	}
 	if !strings.Contains(string(files[MasterBackupTimer]), "OnCalendar=*-*-* 02:00:00") {
@@ -28,7 +28,7 @@ func TestMasterBackupUnits(t *testing.T) {
 	cfg.Backup = config.Backup{Provider: "r2", Endpoint: "https://x.r2.cloudflarestorage.com", Region: "auto", Bucket: "b", Prefix: "prod", URIStyle: "path", Database: cfg.Backup.Database}
 	files = timerFiles(cfg)
 	fence := string(files[FenceService])
-	for _, want := range []string{"Before=pgbouncer.service eru-pgbouncer-session.service", "eru node run fence-check", "WantedBy=multi-user.target", "TimeoutStartSec=30"} {
+	for _, want := range []string{"Before=pgbouncer.service vaire-pgbouncer-session.service", "vaire node run fence-check", "WantedBy=multi-user.target", "TimeoutStartSec=30"} {
 		if !strings.Contains(fence, want) {
 			t.Errorf("fence service lacks %q:\n%s", want, fence)
 		}

@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/totp"
 	"github.com/spf13/cobra"
 )
 
@@ -59,7 +59,7 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 			"--all protects every database; --db names one and can be repeated.")
 	}
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
-		return output.NewError(output.CodeInputRequired, "eru protect init needs a human at an interactive terminal", output.ExitInput,
+		return output.NewError(output.CodeInputRequired, "vaire protect init needs a human at an interactive terminal", output.ExitInput,
 			"Run it yourself in a terminal, without --yes, --no-input or structured output: it shows a QR code to scan with an authenticator app and asks for a code from it.").
 			WithDetails(map[string]any{"reason": "protect_requires_human"})
 	}
@@ -82,7 +82,7 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 	}
 	var initSecrets map[string]string
 	if rotate {
-		code, err := readProtectCode(cmd, "Current code from the existing eru entry in the authenticator app")
+		code, err := readProtectCode(cmd, "Current code from the existing vaire entry in the authenticator app")
 		if err != nil {
 			return err
 		}
@@ -104,7 +104,7 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	for attempt := 1; ; attempt++ {
-		code, err := readProtectCode(cmd, "Code the authenticator app now shows for eru:"+s.ctx.Name)
+		code, err := readProtectCode(cmd, "Code the authenticator app now shows for vaire:"+s.ctx.Name)
 		if err != nil {
 			return err
 		}
@@ -122,9 +122,9 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 		Rotated bool `json:"rotated"`
 	}
 	_ = reply.Decode(&done)
-	message := "two-factor protection is set up: lifting a database's protection now asks for a code from eru:" + s.ctx.Name + " in the authenticator app"
+	message := "two-factor protection is set up: lifting a database's protection now asks for a code from vaire:" + s.ctx.Name + " in the authenticator app"
 	if done.Rotated {
-		message = "the two-factor secret was rotated: remove the old eru:" + s.ctx.Name + " entry from the authenticator app and keep the new one"
+		message = "the two-factor secret was rotated: remove the old vaire:" + s.ctx.Name + " entry from the authenticator app and keep the new one"
 	}
 
 	// The secret works now, so protecting can no longer be refused for the
@@ -141,7 +141,7 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 	if len(todo) > 0 {
 		if err := setProtected(cmd, s, p, todo, true, nil); err != nil {
 			warnings = append(warnings, output.Warning{Code: "protect_failed",
-				Message: "two-factor protection is set up, but protecting " + strings.Join(todo, ", ") + " failed: " + err.Error() + ". Run eru db protect " + strings.Join(todo, " ") + " to retry"})
+				Message: "two-factor protection is set up, but protecting " + strings.Join(todo, ", ") + " failed: " + err.Error() + ". Run vaire db protect " + strings.Join(todo, " ") + " to retry"})
 		} else {
 			newly = todo
 			for _, name := range todo {
@@ -166,21 +166,21 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 func protectInitOutcome(protected, unprotected []string) (string, []string) {
 	switch {
 	case len(protected) == 0 && len(unprotected) == 0:
-		return "there are no databases yet; create them protected with eru db create and --protected", nil
+		return "there are no databases yet; create them protected with vaire db create and --protected", nil
 	case len(unprotected) == 0:
-		return "protected: " + strings.Join(protected, ", "), []string{"eru protect status"}
+		return "protected: " + strings.Join(protected, ", "), []string{"vaire protect status"}
 	case len(protected) == 0:
-		return "no database is protected (" + strings.Join(unprotected, ", ") + " can be protected with eru db protect)",
-			[]string{"eru db protect " + strings.Join(unprotected, " "), "eru protect status"}
+		return "no database is protected (" + strings.Join(unprotected, ", ") + " can be protected with vaire db protect)",
+			[]string{"vaire db protect " + strings.Join(unprotected, " "), "vaire protect status"}
 	default:
 		return "protected: " + strings.Join(protected, ", ") + "; not protected: " + strings.Join(unprotected, ", "),
-			[]string{"eru db protect " + strings.Join(unprotected, " "), "eru protect status"}
+			[]string{"vaire db protect " + strings.Join(unprotected, " "), "vaire protect status"}
 	}
 }
 
 // chooseToProtect asks which of options to protect, all of them picked to
 // start with. Cancelling the prompt picks none: the secret is set up
-// already, and eru db protect protects later.
+// already, and vaire db protect protects later.
 func chooseToProtect(cmd *cobra.Command, options []string) ([]string, error) {
 	title := "Protect which databases?"
 	if richOutput(cmd) {
@@ -249,7 +249,7 @@ func protectTargets(names []string, all bool, databases []string) ([]string, err
 	}
 	if len(names) == 0 {
 		return nil, output.NewError(output.CodeUsage, "name at least one database, or pass --all", output.ExitUsage,
-			"Run eru db list to see the databases.")
+			"Run vaire db list to see the databases.")
 	}
 	var out, unknown []string
 	for _, name := range names {
@@ -268,7 +268,7 @@ func protectTargets(names []string, all bool, databases []string) ([]string, err
 			noun = "databases " + strings.Join(unknown, ", ") + " do not"
 		}
 		return nil, output.NewError(output.CodePrecondition, noun+" exist", output.ExitPrecondition,
-			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "databases": unknown})
+			"Run vaire db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "databases": unknown})
 	}
 	return out, nil
 }
@@ -295,7 +295,7 @@ func splitProtected(cfg config.Cluster, names []string) (protected, unprotected 
 }
 
 // protectSet is the config.set keys that set clusters.<db>.protected to
-// value for each of names, as eru config set does one at a time.
+// value for each of names, as vaire config set does one at a time.
 func protectSet(names []string, value bool) map[string]string {
 	out := make(map[string]string, len(names))
 	for _, name := range names {
@@ -327,7 +327,7 @@ func nonNil(names []string) []string {
 }
 
 // runDBProtect protects the named databases, or every one with --all. It
-// needs eru protect init first: a database is never protected without a
+// needs vaire protect init first: a database is never protected without a
 // way to lift it.
 func runDBProtect(cmd *cobra.Command, args []string) error {
 	all := flagTrue(cmd, "all")
@@ -373,7 +373,7 @@ func runDBProtect(cmd *cobra.Command, args []string) error {
 // runDBUnprotect lifts the protection of the named databases. It asks once
 // for a current code from the authenticator app, for all of them, and
 // refuses with --yes, without a terminal and in structured output, as
-// eru config set clusters.<db>.protected false does.
+// vaire config set clusters.<db>.protected false does.
 func runDBUnprotect(cmd *cobra.Command, args []string) error {
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -409,7 +409,7 @@ func runDBUnprotect(cmd *cobra.Command, args []string) error {
 		message += " (not protected: " + strings.Join(notProtected, ", ") + ")"
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings,
-		Next: []string{"eru db protect " + strings.Join(lift, " ")}})
+		Next: []string{"vaire db protect " + strings.Join(lift, " ")}})
 }
 
 // retryableCode reports whether err is a wrong or reused code, which a
@@ -464,7 +464,7 @@ func readProtectCode(cmd *cobra.Command, label string) (string, error) {
 		}
 		if attempt >= protectCodeAttempts {
 			return "", output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits", output.ExitUnsafe,
-				"Type the 6-digit code the authenticator app shows for eru.").WithDetails(map[string]any{"reason": "code_invalid"})
+				"Type the 6-digit code the authenticator app shows for vaire.").WithDetails(map[string]any{"reason": "code_invalid"})
 		}
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "The code is 6 digits.")
 	}
@@ -491,7 +491,7 @@ func runProtectStatus(cmd *cobra.Command, _ []string) error {
 		message = "two-factor protection is not set up"
 	}
 	if data.Pending {
-		message += "; a new secret from eru protect init is waiting for its first code"
+		message += "; a new secret from vaire protect init is waiting for its first code"
 	}
 	if data.LockedUntil != "" {
 		message += "; codes are locked out until " + data.LockedUntil + " after too many wrong codes"
@@ -502,10 +502,10 @@ func runProtectStatus(cmd *cobra.Command, _ []string) error {
 	warnings := s.warnings
 	var next []string
 	if !data.Configured {
-		next = []string{"eru protect init"}
+		next = []string{"vaire protect init"}
 		if len(data.Protected) > 0 {
 			warnings = append(warnings, output.Warning{Code: "protect_not_initialized",
-				Message: strings.Join(data.Protected, ", ") + " is protected but two-factor protection is not set up, so the protection cannot be lifted until a human runs eru protect init"})
+				Message: strings.Join(data.Protected, ", ") + " is protected but two-factor protection is not set up, so the protection cannot be lifted until a human runs vaire protect init"})
 		}
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 // Step is one versioned, idempotent unit of host convergence (§9.1).
@@ -47,7 +47,7 @@ type Forcer interface {
 // Rechecker is implemented by steps whose result can drift on the host with
 // no input changing, such as a ufw rule added or deleted by hand. The runner
 // runs Check even when the journal says the step is current, and applies the
-// step when the host no longer matches, so "eru apply" repairs what doctor
+// step when the host no longer matches, so "vaire apply" repairs what doctor
 // reports. Check must be cheap and read-only: it also runs in every plan.
 type Rechecker interface {
 	Recheck() bool
@@ -103,7 +103,7 @@ type Runtime struct {
 	// RotateSecrets asks steps to replace runtime secrets already on disk with
 	// the ones in the request. Without it a step writes a runtime secret only
 	// when the file is missing, so an operator with stale credentials can't
-	// overwrite newer ones. eru backup setup sets it.
+	// overwrite newer ones. vaire backup setup sets it.
 	RotateSecrets bool
 }
 

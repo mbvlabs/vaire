@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/doctor"
-	"github.com/mbvlabs/eru/internal/maint"
+	"github.com/mbvlabs/vaire/internal/doctor"
+	"github.com/mbvlabs/vaire/internal/maint"
 )
 
 func TestStatsTokenCLI(t *testing.T) {
@@ -17,7 +17,7 @@ func TestStatsTokenCLI(t *testing.T) {
 func TestStatusMessage(t *testing.T) {
 	tps, hit := 12.5, 0.991
 	var cur int64 = 300
-	d := statusData{Server: "prod", Node: "db1", EruVersion: "1.0.0", PGVersion: "18.1",
+	d := statusData{Server: "prod", Node: "db1", VaireVersion: "1.0.0", PGVersion: "18.1",
 		Poolers:   map[string]statusPools{"transaction": {ClientsActive: 2}},
 		Databases: []statusDB{{Name: "app", State: "running", Size: "small", MemoryMiB: 512, MemoryCurrentMiB: &cur, TPS: &tps, CacheHitRatio: &hit, RestartPending: true}},
 	}
@@ -68,11 +68,11 @@ func TestReportMessage(t *testing.T) {
 
 func TestSnippets(t *testing.T) {
 	p := prometheusSnippet("prod", "https://db1.example.com/metrics/targets.json", "metrics", "pw")
-	if !strings.Contains(p, "http_sd_configs") || !strings.Contains(p, "job_name: eru-prod") {
+	if !strings.Contains(p, "http_sd_configs") || !strings.Contains(p, "job_name: vaire-prod") {
 		t.Errorf("%s", p)
 	}
 	a := alloySnippet("my-prod", "https://x/metrics/targets.json", "metrics", "pw")
-	if !strings.Contains(a, `discovery.http "eru_my_prod"`) {
+	if !strings.Contains(a, `discovery.http "vaire_my_prod"`) {
 		t.Errorf("%s", a)
 	}
 }

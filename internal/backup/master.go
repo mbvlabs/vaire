@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/minio/minio-go/v7"
 )
 

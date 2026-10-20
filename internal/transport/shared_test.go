@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // echoServer accepts loopback TCP connections and echoes them, standing in
@@ -41,7 +41,7 @@ func echoServer(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// daemon is one fake tunnel daemon, run in-process the way eru tunnel serve
+// daemon is one fake tunnel daemon, run in-process the way vaire tunnel serve
 // runs: singleton lock, stale socket removed, listen, serve.
 type daemon struct {
 	srv    *SharedServer
@@ -68,7 +68,7 @@ type daemons struct {
 func newDaemons(t *testing.T) *daemons {
 	t.Helper()
 	// Unix socket paths are short; t.TempDir can be too long on macOS.
-	dir, err := os.MkdirTemp("", "eru-shared")
+	dir, err := os.MkdirTemp("", "vaire-shared")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func waitDone(t *testing.T, d *daemon, within time.Duration) string {
 func TestSharedStartsDaemonAndDials(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
-	d := f.dialer("eru test")
+	d := f.dialer("vaire test")
 	defer d.Close()
 	echoOnce(t, d, addr, "hello through the daemon")
 	echoOnce(t, d, addr, "and again")
@@ -214,7 +214,7 @@ func TestSharedStartsDaemonAndDials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Attached != 1 || len(st.Clients) != 1 || st.Clients[0].Command != "eru test" || st.PID != os.Getpid() {
+	if st.Attached != 1 || len(st.Clients) != 1 || st.Clients[0].Command != "vaire test" || st.PID != os.Getpid() {
 		t.Fatalf("hello = %+v, want one attached client", st)
 	}
 }
@@ -222,10 +222,10 @@ func TestSharedStartsDaemonAndDials(t *testing.T) {
 func TestSharedReusesRunningDaemon(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
-	first := f.dialer("eru first")
+	first := f.dialer("vaire first")
 	defer first.Close()
 	echoOnce(t, first, addr, "one")
-	second := f.dialer("eru second")
+	second := f.dialer("vaire second")
 	defer second.Close()
 	echoOnce(t, second, addr, "two")
 	if n := f.spawns.Load(); n != 1 {
@@ -242,7 +242,7 @@ func TestSharedReusesRunningDaemon(t *testing.T) {
 
 func TestSharedRefusesAddressOutsidePrefix(t *testing.T) {
 	f := newDaemons(t)
-	d := f.dialer("eru test")
+	d := f.dialer("vaire test")
 	defer d.Close()
 	_, err := d.DialContext(ctxT(t), "tcp", "10.9.9.9:22")
 	if err == nil || !strings.Contains(err.Error(), "outside") {
@@ -258,7 +258,7 @@ func TestSharedIdleExit(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
 	f.persist = 50 * time.Millisecond
-	d := f.dialer("eru test")
+	d := f.dialer("vaire test")
 	echoOnce(t, d, addr, "x")
 	d.Close()
 	if reason := waitDone(t, f.last(), 2*time.Second); reason != "idle" {
@@ -272,7 +272,7 @@ func TestSharedIdleExit(t *testing.T) {
 func TestSharedLeaseKeepsDaemonAlive(t *testing.T) {
 	f := newDaemons(t)
 	f.persist = 30 * time.Millisecond
-	d := f.dialer("eru tunnel")
+	d := f.dialer("vaire tunnel")
 	if err := d.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestSharedOpenStreamKeepsDaemonAlive(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
 	f.persist = 30 * time.Millisecond
-	d := f.dialer("eru test")
+	d := f.dialer("vaire test")
 	conn, err := d.DialContext(ctxT(t), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +307,7 @@ func TestSharedOpenStreamKeepsDaemonAlive(t *testing.T) {
 func TestSharedRecoversFromStaleSocket(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
-	d := f.dialer("eru test")
+	d := f.dialer("vaire test")
 	defer d.Close()
 	echoOnce(t, d, addr, "before")
 	f.kill()
@@ -337,7 +337,7 @@ func TestSharedConcurrentClientsSpawnOneDaemon(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
 	for i := range n {
-		dialers[i] = f.dialer("eru parallel")
+		dialers[i] = f.dialer("vaire parallel")
 		wg.Add(1)
 		go func(d *SharedDialer) {
 			defer wg.Done()
@@ -382,7 +382,7 @@ func TestSharedReplacesIdleStaleDaemon(t *testing.T) {
 	}
 	old := f.last()
 	f.fingerprint = "fp-2" // a re-login changed the context
-	d := f.dialer("eru test")
+	d := f.dialer("vaire test")
 	defer d.Close()
 	if err := d.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
@@ -401,25 +401,25 @@ func TestSharedReplacesIdleStaleDaemon(t *testing.T) {
 
 func TestSharedBusyStaleDaemonIsNotKilled(t *testing.T) {
 	f := newDaemons(t)
-	busy := f.dialer("eru restore")
+	busy := f.dialer("vaire restore")
 	defer busy.Close()
 	if err := busy.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
 	f.fingerprint = "fp-2"
-	d := f.dialer("eru plan")
+	d := f.dialer("vaire plan")
 	defer d.Close()
 	err := d.Attach(ctxT(t))
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) || cliErr.Details.(map[string]any)["reason"] != "tunnel_config_changed" {
 		t.Fatalf("err = %v, want tunnel_config_changed", err)
 	}
-	if !strings.Contains(cliErr.Hint, "eru restore") {
+	if !strings.Contains(cliErr.Hint, "vaire restore") {
 		t.Fatalf("hint %q should name the busy command", cliErr.Hint)
 	}
 	// Another build with the same configuration is used as it is.
 	f.fingerprint, f.build = "fp-1", "build-2"
-	other := f.dialer("eru plan")
+	other := f.dialer("vaire plan")
 	defer other.Close()
 	if err := other.Attach(ctxT(t)); err != nil {
 		t.Fatalf("a busy daemon of another build should serve: %v", err)
@@ -431,7 +431,7 @@ func TestSharedBusyStaleDaemonIsNotKilled(t *testing.T) {
 
 func TestSharedStopDrainsThenExits(t *testing.T) {
 	f := newDaemons(t)
-	d := f.dialer("eru restore")
+	d := f.dialer("vaire restore")
 	if err := d.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +439,7 @@ func TestSharedStopDrainsThenExits(t *testing.T) {
 	if err != nil || !draining {
 		t.Fatalf("stop = %v, %v; want draining", draining, err)
 	}
-	late := f.dialer("eru plan")
+	late := f.dialer("vaire plan")
 	defer late.Close()
 	err = late.Attach(ctxT(t))
 	var cliErr *output.CLIError
@@ -455,7 +455,7 @@ func TestSharedStopDrainsThenExits(t *testing.T) {
 func TestSharedForceStopDropsStreams(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
-	d := f.dialer("eru backup now")
+	d := f.dialer("vaire backup now")
 	defer d.Close()
 	conn, err := d.DialContext(ctxT(t), "tcp", addr)
 	if err != nil {

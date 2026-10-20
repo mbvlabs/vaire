@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/localenv"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/spf13/cobra"
 )
 
@@ -94,7 +94,7 @@ func runNodeRun(cmd *cobra.Command, args []string) error {
 	report := nodeReporter(cmd)
 	if opts.ID != "" || os.Getenv("INVOCATION_ID") != "" {
 		// Under systemd the events go to the journal as NDJSON, which
-		// eru job follow replays.
+		// vaire job follow replays.
 		report = jobReporter(cmd)
 	}
 	data, skipped, err := node.RunJob(commandContext(cmd), job, opts, report)
@@ -122,7 +122,7 @@ func jobReporter(cmd *cobra.Command) engine.Reporter {
 }
 
 // runNodeDump writes pg_dump -Fc of one database to stdout, for
-// eru dump --to local.
+// vaire dump --to local.
 func runNodeDump(cmd *cobra.Command, args []string) error {
 	if dryRun(cmd) {
 		return output.OK(cmd, map[string]any{"database": args[0], "dry_run": true}, "would dump "+args[0])
@@ -161,11 +161,11 @@ func runNodeUnfence(cmd *cobra.Command, _ []string) error {
 	case res.DryRun:
 		message = "dry run: would lift the fence"
 	case res.Reclaimed:
-		message = fmt.Sprintf("wrote epoch %d naming this node and lifted the fence; run eru apply to bring back the timers and poolers", res.Epoch)
+		message = fmt.Sprintf("wrote epoch %d naming this node and lifted the fence; run vaire apply to bring back the timers and poolers", res.Epoch)
 	default:
-		message = "lifted the fence; run eru apply to bring back the timers and poolers"
+		message = "lifted the fence; run vaire apply to bring back the timers and poolers"
 	}
-	return output.Success(cmd, output.Result{Data: res, Message: message, Next: []string{"eru apply"}})
+	return output.Success(cmd, output.Result{Data: res, Message: message, Next: []string{"vaire apply"}})
 }
 
 func runNodeUnlockSSH(cmd *cobra.Command, _ []string) error {
@@ -181,7 +181,7 @@ func runNodeUnlockSSH(cmd *cobra.Command, _ []string) error {
 	if res.DryRun {
 		verb = "Would open"
 	}
-	message := fmt.Sprintf("%s public SSH (22/tcp) until %s. Only %s may log in, with its password from the secrets document.\nClose it early with: sudo eru node ssh-revert --lockdown-only",
+	message := fmt.Sprintf("%s public SSH (22/tcp) until %s. Only %s may log in, with its password from the secrets document.\nClose it early with: sudo vaire node ssh-revert --lockdown-only",
 		verb, res.OpenUntil, res.AdminUser)
 	return output.OK(cmd, res, message)
 }

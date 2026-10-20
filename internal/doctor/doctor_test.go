@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/health"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/health"
 )
 
 var now = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
@@ -23,7 +23,7 @@ func healthy() Facts {
 		UnattendedActive: true, TimeKnown: true, TimeSynced: true, LockedDownAt: "2026-10-13T10:00:00Z", UFWActive: true,
 		TLSMode: "acme", CertKnown: true, CertNotAfter: now.Add(80 * 24 * time.Hour), DNSChecked: true, DNSMatches: true, Hostname: "db1.example.com",
 		SecretsAtTime: "2026-10-13T10:05:00Z", MetricsEnabled: true, Exporters: map[string]error{"node_exporter": nil}, EndpointStatus: 401,
-		NginxActive: true, PoolersActive: map[string]bool{"pgbouncer": true, "eru-pgbouncer-session": true}, HasDatabases: true,
+		NginxActive: true, PoolersActive: map[string]bool{"pgbouncer": true, "vaire-pgbouncer-session": true}, HasDatabases: true,
 		BackupConfigured: true, Records: rs,
 		Clusters: []ClusterFacts{
 			{Name: "app", Stanza: "app-abc123", State: "running", Sample: sample, PressureKnown: true, CreatedAt: now.Add(-time.Hour), FullInterval: 7 * 24 * time.Hour},
@@ -69,7 +69,7 @@ func TestDiskThresholds(t *testing.T) {
 func TestDiskDataWithoutDataRoot(t *testing.T) {
 	f := healthy()
 	f.DiskFree, f.DiskTotal = 60, 100
-	f.DataRoot, f.DiskPath = "/var/lib/eru/clusters", "/var/lib"
+	f.DataRoot, f.DiskPath = "/var/lib/vaire/clusters", "/var/lib"
 	r := byID(Run(NodeChecks(), f, ""), "host.disk_data", "")
 	if r.Status != Pass || !strings.Contains(r.Detail, "/var/lib") || !strings.Contains(r.Detail, "no databases yet") {
 		t.Fatalf("disk_data = %s: %s", r.Status, r.Detail)
