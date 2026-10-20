@@ -161,7 +161,7 @@ func PublicIPv6() string {
 }
 
 // IPv6RouteCommand prints the IPv6 default route's source address; init runs
-// it over SSH at first contact, before eru is on the server.
+// it over SSH at first contact, before vaire is on the server.
 const IPv6RouteCommand = "ip -6 route get 2606:4700:4700::1111"
 
 // ParseIPv6Route returns the source address in the output of

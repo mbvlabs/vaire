@@ -10,9 +10,9 @@ import (
 
 // OperatorsPath is the node's operator registry: every operator is a
 // WireGuard peer and an authorized SSH key for the admin user.
-const OperatorsPath = "/etc/eru/operators.toml"
+const OperatorsPath = "/etc/vaire/operators.toml"
 
-// Operators is /etc/eru/operators.toml.
+// Operators is /etc/vaire/operators.toml.
 type Operators struct {
 	Operators []Operator `toml:"operators"`
 }
@@ -58,7 +58,7 @@ func (o Operators) Encode() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte("# managed by eru: operator WireGuard peers and SSH keys\n"), raw...), nil
+	return append([]byte("# managed by vaire: operator WireGuard peers and SSH keys\n"), raw...), nil
 }
 
 // EncodeNode returns node.toml bytes.

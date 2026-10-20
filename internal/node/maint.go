@@ -10,21 +10,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/maint"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/promfile"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/maint"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 // MaintStatePath keeps the last maintenance results (wraparound ages, bloat
-// totals) for eru-maint.prom. Regenerable; not part of the master backup.
-const MaintStatePath = "/var/lib/eru/maint.json"
+// totals) for vaire-maint.prom. Regenerable; not part of the master backup.
+const MaintStatePath = "/var/lib/vaire/maint.json"
 
 // maintRunTimeout bounds one vacuum, analyze or reindex statement.
 const maintRunTimeout = 24 * time.Hour
@@ -55,7 +55,7 @@ func loadMaintState() maintState {
 	return st
 }
 
-// saveMaintState writes maint.json and eru-maint.prom.
+// saveMaintState writes maint.json and vaire-maint.prom.
 func saveMaintState(cfg config.Cluster, st maintState) {
 	// A dropped database's numbers go.
 	for _, m := range []map[string]map[string]int64{st.Wraparound, st.Bloat} {
@@ -71,25 +71,25 @@ func saveMaintState(cfg config.Cluster, st maintState) {
 	_ = promfile.Write(promfile.Maint, maintFamilies(st))
 }
 
-// maintFamilies are eru-maint.prom's families.
+// maintFamilies are vaire-maint.prom's families.
 func maintFamilies(st maintState) []*promfile.Family {
-	xid := promfile.Gauge("eru_wraparound_age", "Oldest transaction ID age per database (maint-daily).")
-	mxid := promfile.Gauge("eru_mxid_age", "Oldest multixact ID age per database (maint-daily).")
+	xid := promfile.Gauge("vaire_wraparound_age", "Oldest transaction ID age per database (maint-daily).")
+	mxid := promfile.Gauge("vaire_mxid_age", "Oldest multixact ID age per database (maint-daily).")
 	for _, db := range promfile.SortedKeys(st.Wraparound) {
 		xid.Add(float64(st.Wraparound[db]["xid"]), promfile.L("db", db)...)
 		mxid.Add(float64(st.Wraparound[db]["mxid"]), promfile.L("db", db)...)
 	}
-	bloat := promfile.Gauge("eru_bloat_estimated_bytes", "Estimated bloat per database and kind (maint-weekly, ioguix estimate).")
+	bloat := promfile.Gauge("vaire_bloat_estimated_bytes", "Estimated bloat per database and kind (maint-weekly, ioguix estimate).")
 	for _, db := range promfile.SortedKeys(st.Bloat) {
 		for _, kind := range promfile.SortedKeys(st.Bloat[db]) {
 			bloat.Add(float64(st.Bloat[db][kind]), promfile.L("db", db, "kind", kind)...)
 		}
 	}
-	analyzed := promfile.Gauge("eru_maint_analyzed_tables", "Tables maint-daily analyzed per database on its last run.")
+	analyzed := promfile.Gauge("vaire_maint_analyzed_tables", "Tables maint-daily analyzed per database on its last run.")
 	for _, db := range promfile.SortedKeys(st.Analyzed) {
 		analyzed.Add(float64(st.Analyzed[db]), promfile.L("db", db)...)
 	}
-	last := promfile.Gauge("eru_maint_last_run_timestamp_seconds", "Last run of each maintenance timer job.")
+	last := promfile.Gauge("vaire_maint_last_run_timestamp_seconds", "Last run of each maintenance timer job.")
 	for job, at := range map[string]string{"maint-daily": st.LastDaily, "maint-weekly": st.LastWeekly} {
 		if t, err := time.Parse(time.RFC3339, at); err == nil {
 			last.Add(float64(t.Unix()), promfile.L("job", job)...)
@@ -117,7 +117,7 @@ type maintReportDB struct {
 }
 
 // handleMaintReport runs a read-only report in one or every database as
-// eru_admin (Phase 4 D8). No lock: reports only read.
+// vaire_admin (Phase 4 D8). No lock: reports only read.
 func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 	var p maintReportParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -210,10 +210,10 @@ func repackRefusal(ctx context.Context, spec config.ClusterSpec) error {
 	installed := err == nil && len(rows) == 1 && rows[0]["n"] != "0"
 	reason, msg := "extension_missing", "pg_repack is not installed in "+spec.Name
 	if installed {
-		reason, msg = "repack_unavailable", "eru runs pg_repack from Phase 7 on"
+		reason, msg = "repack_unavailable", "vaire runs pg_repack from Phase 7 on"
 	}
 	return output.NewError(output.CodePrecondition, msg, output.ExitPrecondition,
-		"pg_repack arrives with extensions in Phase 7: eru ext add pg_repack --db "+spec.Name+". Until then, eru maint vacuum reclaims space for reuse without shrinking the table.").
+		"pg_repack arrives with extensions in Phase 7: vaire ext add pg_repack --db "+spec.Name+". Until then, vaire maint vacuum reclaims space for reuse without shrinking the table.").
 		WithDetails(map[string]any{"reason": reason, "extension": "pg_repack", "database": spec.Name})
 }
 
@@ -231,8 +231,8 @@ func vacuumJobs(cfg config.Cluster) int {
 }
 
 // maintPG is how maintenance reaches spec's database, with the SQL that
-// starts each of its sessions: as eru_admin, with its pg_maintain. On a
-// protected database eru_admin holds no pg_maintain, which would let it
+// starts each of its sessions: as vaire_admin, with its pg_maintain. On a
+// protected database vaire_admin holds no pg_maintain, which would let it
 // LOCK TABLE the application's tables without a code
 // (steps.AdminAccessSQL): there the superuser runs it with SET ROLE
 // pg_maintain, which may vacuum, analyze and reindex every table and write
@@ -245,10 +245,10 @@ func maintPG(spec config.ClusterSpec) (pg.Local, string) {
 }
 
 // vacuumdbArgs are vacuumdb's arguments for p on spec's cluster: as
-// eru_admin, or on a protected database as postgres, whose sessions
+// vaire_admin, or on a protected database as postgres, whose sessions
 // vacuumdbCommand starts with role pg_maintain (maintPG).
 func vacuumdbArgs(spec config.ClusterSpec, p maint.Options, jobs int) []string {
-	user := "eru_admin"
+	user := "vaire_admin"
 	if spec.Protected {
 		user = "postgres"
 	}
@@ -256,7 +256,7 @@ func vacuumdbArgs(spec config.ClusterSpec, p maint.Options, jobs int) []string {
 }
 
 // vacuumdbCommand runs vacuumdb with args on spec's cluster. root logs in
-// as eru_admin (pg_ident); on a protected database it runs as the postgres
+// as vaire_admin (pg_ident); on a protected database it runs as the postgres
 // OS user, and every one of its sessions starts as role pg_maintain.
 func vacuumdbCommand(spec config.ClusterSpec, args []string) engine.Command {
 	if spec.Protected {
@@ -278,7 +278,7 @@ func maintHeavy(env *jobEnv) bool {
 	return p.Heavy()
 }
 
-// jobMaint runs one vacuum, analyze or reindex as eru_admin, or on a
+// jobMaint runs one vacuum, analyze or reindex as vaire_admin, or on a
 // protected database as role pg_maintain (maintPG).
 func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	var p maint.Options
@@ -316,7 +316,7 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 		if len(invalid) > 0 {
 			res["invalid_indexes"] = invalid
 			res["warnings"] = []output.Warning{{Code: "reindex_left_invalid",
-				Message: "a concurrent reindex left invalid indexes in " + p.DB + ": " + strings.Join(invalid, ", ") + "; eru maint reindex --db " + p.DB + " --cleanup-invalid drops them"}}
+				Message: "a concurrent reindex left invalid indexes in " + p.DB + ": " + strings.Join(invalid, ", ") + "; vaire maint reindex --db " + p.DB + " --cleanup-invalid drops them"}}
 		}
 		if len(dropped) > 0 {
 			res["dropped"] = dropped
@@ -324,14 +324,14 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	if runErr != nil {
 		return res, output.WrapError(output.CodeExternalCommand, runErr, output.ExitExternal,
-			"Read the job log (eru job follow). A lock timeout means a long transaction held the table; retry in a quieter moment.")
+			"Read the job log (vaire job follow). A lock timeout means a long transaction held the table; retry in a quieter moment.")
 	}
 	logLine(env.Report, env.Job, p.Kind+" of "+p.DB+" finished")
 	return res, nil
 }
 
 // leftoverDropSetup starts the session that drops a concurrent reindex's
-// leftover index, which only the table's owner may do: eru_admin is a
+// leftover index, which only the table's owner may do: vaire_admin is a
 // member of <db>_owner, and on a protected database, where it is not, the
 // superuser acts as <db>_owner.
 func leftoverDropSetup(spec config.ClusterSpec) string {
@@ -381,7 +381,7 @@ type maintKillParams struct {
 	OlderThan string `json:"older_than,omitempty"`
 }
 
-// killToken is eru maint kill's confirm token: <db>/kill (Phase 4 D12).
+// killToken is vaire maint kill's confirm token: <db>/kill (Phase 4 D12).
 func killToken(_ config.Cluster, params json.RawMessage) string {
 	var p maintKillParams
 	if json.Unmarshal(params, &p) != nil || p.DB == "" {
@@ -390,9 +390,9 @@ func killToken(_ config.Cluster, params json.RawMessage) string {
 	return p.DB + "/kill"
 }
 
-// handleMaintKill terminates backends of one database as eru_admin, whose
+// handleMaintKill terminates backends of one database as vaire_admin, whose
 // pg_signal_backend can't reach a superuser's. On a protected database
-// eru_admin holds no pg_signal_backend (steps.AdminAccessSQL), and the
+// vaire_admin holds no pg_signal_backend (steps.AdminAccessSQL), and the
 // request carries a code from the authenticator app (requireWriteCode): it
 // terminates as the superuser with SET ROLE pg_signal_backend, which can't
 // reach a superuser's backend either.
@@ -423,12 +423,12 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	}
 	selected, refused := maint.SelectBackends(maint.ParseBackends(rows), opts)
 	if len(refused) > 0 {
-		return Result{}, output.NewError(output.CodePrecondition, fmt.Sprintf("backend %d is a superuser's; eru maint kill never terminates it", refused[0].PID),
-			output.ExitPrecondition, "Terminate it from a superuser session if you must (eru ssh).").
+		return Result{}, output.NewError(output.CodePrecondition, fmt.Sprintf("backend %d is a superuser's; vaire maint kill never terminates it", refused[0].PID),
+			output.ExitPrecondition, "Terminate it from a superuser session if you must (vaire ssh).").
 			WithDetails(map[string]any{"reason": "protected_backend", "pid": refused[0].PID})
 	}
 	if p.PID != 0 && len(selected) == 0 {
-		return Result{}, output.NewError(output.CodePrecondition, fmt.Sprintf("no client backend %d in %s", p.PID, p.DB), output.ExitPrecondition, "eru top --db "+p.DB).
+		return Result{}, output.NewError(output.CodePrecondition, fmt.Sprintf("no client backend %d in %s", p.PID, p.DB), output.ExitPrecondition, "vaire top --db "+p.DB).
 			WithDetails(map[string]any{"reason": "backend_not_found", "pid": p.PID})
 	}
 	data := map[string]any{"db": p.DB, "targets": selected, "dry_run": env.Req.DryRun}
@@ -582,7 +582,7 @@ func clearDeferred(dbs ...string) {
 	})
 }
 
-// jobMaintWeekly estimates every database's bloat for eru-maint.prom.
+// jobMaintWeekly estimates every database's bloat for vaire-maint.prom.
 // auto_repack waits for pg_repack (Phase 7).
 func jobMaintWeekly(ctx context.Context, env *jobEnv) (any, error) {
 	cfg := env.Cluster

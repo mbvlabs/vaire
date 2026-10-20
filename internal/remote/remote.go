@@ -13,13 +13,13 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/rpc"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/transport"
 )
 
 // CallOptions are the per-request fields beyond method and params.
@@ -146,7 +146,7 @@ func parseResult(raw json.RawMessage) (Reply, error) {
 }
 
 // Node is a node reached over SSH. Methods run as root through
-// sudo -n /usr/local/bin/eru node rpc, or directly when the SSH user is root.
+// sudo -n /usr/local/bin/vaire node rpc, or directly when the SSH user is root.
 type Node struct {
 	SSH      *transport.SSHClient
 	Operator string
@@ -198,9 +198,9 @@ func (n *Node) Call(ctx context.Context, method string, params any, opts CallOpt
 	status, _ := transport.ExitStatus(err)
 	return Reply{}, output.NewError(
 		output.CodeTransportFailed,
-		fmt.Sprintf("eru node rpc %s on %s ended without a result", method, n.SSH.Target),
+		fmt.Sprintf("vaire node rpc %s on %s ended without a result", method, n.SSH.Target),
 		output.ExitTransport,
-		"Re-run with --verbose to see the node's stderr. sudo may be refusing eru node rpc.",
+		"Re-run with --verbose to see the node's stderr. sudo may be refusing vaire node rpc.",
 	).WithDetails(map[string]any{"exit_status": status, "stderr": detail, "error": errString(err)})
 }
 
@@ -217,7 +217,7 @@ func streamLost(method, requestID string, c *transport.SSHClient, err error) *ou
 		output.CodeTransportFailed,
 		fmt.Sprintf("lost the connection to %s during %s (%s); the node keeps running it", c.Target, method, why),
 		output.ExitTransport,
-		"Its outcome will be in the node's run log "+runLog+" (eru ssh, then sudo cat it). Check it, or eru plan, before re-running.",
+		"Its outcome will be in the node's run log "+runLog+" (vaire ssh, then sudo cat it). Check it, or vaire plan, before re-running.",
 	).WithDetails(map[string]any{"reason": "stream_lost", "request_id": requestID, "run_log": runLog, "error": errString(err)})
 }
 
@@ -267,8 +267,8 @@ func (t *tail) Write(p []byte) (int, error) {
 
 func (t *tail) String() string { return t.buf.String() }
 
-// Stream runs eru node <args> as root and copies its standard output to w,
-// for commands that produce raw bytes instead of NDJSON (eru node dump). The
+// Stream runs vaire node <args> as root and copies its standard output to w,
+// for commands that produce raw bytes instead of NDJSON (vaire node dump). The
 // operator has already done the version handshake on this connection.
 func (n *Node) Stream(ctx context.Context, args string, w io.Writer) error {
 	stderr := &tail{max: 8 * 1024}
@@ -279,6 +279,6 @@ func (n *Node) Stream(ctx context.Context, args string, w io.Writer) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return output.NewError(output.CodeExternalCommand, "eru node "+args+" failed on "+n.SSH.Target.String(), output.ExitExternal,
+	return output.NewError(output.CodeExternalCommand, "vaire node "+args+" failed on "+n.SSH.Target.String(), output.ExitExternal,
 		"Read details.stderr.").WithDetails(map[string]any{"stderr": strings.TrimSpace(secrets.Redact(stderr.String())), "error": errString(err)})
 }

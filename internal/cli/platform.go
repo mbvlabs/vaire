@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/spf13/cobra"
 )
 

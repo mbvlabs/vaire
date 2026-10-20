@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // The full backup after db recover --all decodes as backup.now's params,
@@ -43,9 +43,9 @@ func TestRecoverFullParamsDecode(t *testing.T) {
 func TestRecoverSecrets(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	creds := contexts.Credentials{
-		Database: &contexts.DatabaseCreds{Admin: contexts.Role{User: "eru_admin", Password: "admin-pw"}, Services: map[string]contexts.Role{}},
+		Database: &contexts.DatabaseCreds{Admin: contexts.Role{User: "vaire_admin", Password: "admin-pw"}, Services: map[string]contexts.Role{}},
 		Metrics:  &contexts.MetricsCreds{Username: "metrics", Password: "metrics-pw"},
-		Backup:   &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "eru-backups-test", Prefix: "mbvlabs"},
+		Backup:   &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"},
 	}
 	creds.Backup.PgBackRest.CipherPass = "cipher"
 	creds.Backup.Dumps.AgeIdentity, creds.Backup.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
@@ -63,7 +63,7 @@ func TestRecoverSecrets(t *testing.T) {
 		t.Errorf("generated %v from a complete context", generated)
 	}
 	want := map[string]string{
-		steps.SecretPgbouncerAuth: "pgbouncer_auth-pw", steps.SecretMonitor: "eru_monitor-pw", steps.SecretAdminPassword: "admin-pw",
+		steps.SecretPgbouncerAuth: "pgbouncer_auth-pw", steps.SecretMonitor: "vaire_monitor-pw", steps.SecretAdminPassword: "admin-pw",
 		steps.SecretBackupKeyID: "AKID", steps.SecretBackupKeySecret: "s3cret", steps.SecretBackupCipherPass: "cipher",
 		steps.SecretBackupAgeRecipient: "age1xyz",
 	}
@@ -92,7 +92,7 @@ func TestRecoverSummaryReportsWhatFailed(t *testing.T) {
 		t.Errorf("clean warnings %+v", w)
 	}
 	failed := map[string]any{"phase": "recovered", "duration_s": float64(42),
-		"steps_warning": "the data is recovered, but its configuration did not finish: step postgres-roles-v1@app failed: x; eru apply finishes it",
+		"steps_warning": "the data is recovered, but its configuration did not finish: step postgres-roles-v1@app failed: x; vaire apply finishes it",
 		"promoted":      map[string]any{"warning": map[string]any{"code": "after_cutover_failed", "message": "app is restored, but y"}}}
 	w := recoverWarnings("app", failed)
 	if len(w) != 2 || w[0].Code != "after_cutover_failed" || w[1].Code != "recover_steps" || !strings.HasPrefix(w[1].Message, "app: the data is recovered") {

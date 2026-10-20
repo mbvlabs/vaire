@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Step 3 (wireguard-v1), part 1: make sure the node has a WireGuard key pair.
-# eru renders wg0.conf from it afterwards.
+# vaire renders wg0.conf from it afterwards.
 set -euo pipefail
 
 : "${WG_PRIVATE_KEY_PATH:?WG_PRIVATE_KEY_PATH is required}"

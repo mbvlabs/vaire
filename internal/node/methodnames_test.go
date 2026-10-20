@@ -3,7 +3,7 @@ package node
 import (
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/rpc"
 )
 
 // Every registered method must pass DecodeRequest's name check, or the node

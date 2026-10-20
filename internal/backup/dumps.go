@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -187,7 +187,7 @@ func OpenDump(ctx context.Context, t Target, db, id, identity string) (io.ReadCl
 	ident, err := age.ParseX25519Identity(strings.TrimSpace(identity))
 	if err != nil {
 		return nil, output.NewError(output.CodeSecrets, "the dump age identity in the recovery kit is invalid", output.ExitSecrets,
-			"Log in again from a current transfer bundle (eru login).")
+			"Log in again from a current transfer bundle (vaire login).")
 	}
 	c, err := t.client()
 	if err != nil {
@@ -197,7 +197,7 @@ func OpenDump(ctx context.Context, t Target, db, id, identity string) (io.ReadCl
 	if _, err := c.StatObject(ctx, t.Bucket, key, minio.StatObjectOptions{}); err != nil {
 		if minio.ToErrorResponse(err).Code == "NoSuchKey" {
 			return nil, output.NewError(output.CodePrecondition, "there is no dump "+id+" of "+db, output.ExitPrecondition,
-				"List the dumps with eru dump list "+db+".").WithDetails(map[string]any{"reason": "dump_not_found", "database": db, "id": id})
+				"List the dumps with vaire dump list "+db+".").WithDetails(map[string]any{"reason": "dump_not_found", "database": db, "id": id})
 		}
 		return nil, s3Error(t, "read "+key, err)
 	}

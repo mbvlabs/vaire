@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 )
 
 func TestRecoverOrder(t *testing.T) {
@@ -101,7 +101,7 @@ func TestOpenFetched(t *testing.T) {
 		masterbackup.NewFile(masterbackup.NodePath, "root", "root", 0o640, []byte("server = \"prod\"\n")),
 		masterbackup.NewFile(masterbackup.OperatorsPath, "root", "root", 0o640, []byte("[[operators]]\nname = 'op-1'\n")),
 	}
-	tarball, m, err := masterbackup.Build(masterbackup.Meta{Server: "prod", Epoch: 1, CreatedAt: time.Now(), EruVersion: "dev"}, files)
+	tarball, m, err := masterbackup.Build(masterbackup.Meta{Server: "prod", Epoch: 1, CreatedAt: time.Now(), VaireVersion: "dev"}, files)
 	if err != nil {
 		t.Fatal(err)
 	}

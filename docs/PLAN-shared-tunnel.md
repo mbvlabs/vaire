@@ -4,26 +4,26 @@
 
 Current evidence (2026-10-19): concurrent shared-tunnel use and daemon reattachment passed in earlier VPS testing; the latest qualification passed five-minute idle reuse and a full unreachable-peer timeout with the correct hint. Forced stalled-handshake recovery success and absent/non-answering-daemon branches have local-test evidence only. See [MANUAL-TESTING.md](MANUAL-TESTING.md) for exact versions, timings and caveats. The original problem analysis/design below is historical, not the current per-command tunnel implementation.
 
-- **Fix (2026-10-16):** a client dialing through the daemon now waits `transport.SharedDialTimeout` (2 minutes) for the `dial` reply, the same budget the daemon uses for a dial that includes a WireGuard re-handshake after the tunnel has idled. `DialSSH` gives a shared-tunnel dial that budget while the SSH handshake keeps `--timeout`; other dialers keep their own. The `--timeout` flag therefore does not bound the tunnel dial. A read timeout is `transport.ErrDaemonNoAnswer`, a daemon `dial_failed` is `transport.TunnelDialError`, and `tunnelHint` picks the hint by cause (daemon not running / daemon not answering / a real handshake timeout; only the last mentions break-glass). `eru node unlock-ssh` on an operator machine now says it runs on the server.
-- **Implemented and live-tested, with the limits above:** the shared-tunnel daemon (this document's implementation units 4–6, not roadmap Phases 4–6). It is the default; `ERU_TUNNEL=inprocess` keeps the old in-process tunnel under the tunnel lock.
+- **Fix (2026-10-16):** a client dialing through the daemon now waits `transport.SharedDialTimeout` (2 minutes) for the `dial` reply, the same budget the daemon uses for a dial that includes a WireGuard re-handshake after the tunnel has idled. `DialSSH` gives a shared-tunnel dial that budget while the SSH handshake keeps `--timeout`; other dialers keep their own. The `--timeout` flag therefore does not bound the tunnel dial. A read timeout is `transport.ErrDaemonNoAnswer`, a daemon `dial_failed` is `transport.TunnelDialError`, and `tunnelHint` picks the hint by cause (daemon not running / daemon not answering / a real handshake timeout; only the last mentions break-glass). `vaire node unlock-ssh` on an operator machine now says it runs on the server.
+- **Implemented and live-tested, with the limits above:** the shared-tunnel daemon (this document's implementation units 4–6, not roadmap Phases 4–6). It is the default; `VAIRE_TUNNEL=inprocess` keeps the old in-process tunnel under the tunnel lock.
   - `internal/transport/shared.go` (client, protocol, fingerprint), `internal/transport/sharedserver.go` (server), `internal/transport/peercred_{linux,darwin}.go`, tests in `internal/transport/shared_test.go`.
-  - `internal/cli/tunneld.go`: spawn, hidden `eru tunnel serve`, `eru tunnel status`, `eru tunnel stop [--force]`, socket path with the short-path fallback, persist window.
+  - `internal/cli/tunneld.go`: spawn, hidden `vaire tunnel serve`, `vaire tunnel status`, `vaire tunnel stop [--force]`, socket path with the short-path fallback, persist window.
   - `internal/cli/session.go`: `session.dialer`/`closeDialer`; `tunnelConfig` split out of `upTunnel`.
-  - Stop hooks: `eru context remove` (forced), `eru server init` before its in-process tunnel (forced), `eru upgrade` (idle daemons only).
+  - Stop hooks: `vaire context remove` (forced), `vaire server init` before its in-process tunnel (forced), `vaire upgrade` (idle daemons only).
 - **Implemented earlier:** node stdout decoupling and SIGPIPE (Phase 1), SSH keepalive and MTU 1380 (Phase 2), re-dial and re-attach in `callJob` (Phase 3; it replays `job.follow` and skips the events already shown instead of a journal cursor), the stopgap tunnel lock (Phase 0).
 - **Dropped:** compatibility with older CLIs and nodes (version skew). Every machine runs matching builds.
 - **Differences from the design below:**
   - No `tunnel.addr` file: the fallback socket path is derived from a hash of the context directory, so every client computes the same path.
-  - `eru login` gets no stop hook: it refuses an existing context name, and `eru context remove` already stops the daemon.
+  - `vaire login` gets no stop hook: it refuses an existing context name, and `vaire context remove` already stops the daemon.
   - The daemon compares builds as well as the fingerprint. A client of another build (version, commit, and the executable's size and modification time) replaces an idle daemon; a busy daemon with the same fingerprint keeps serving it.
   - A non-forced stop refuses new clients (`precondition_failed`, `reason: tunnel_stopping`) until it exits.
-  - A new daemon waits up to 30s for its first client before the idle rule applies, so `ERU_TUNNEL_PERSIST=0` can't exit before the spawner attaches.
+  - A new daemon waits up to 30s for its first client before the idle rule applies, so `VAIRE_TUNNEL_PERSIST=0` can't exit before the spawner attaches.
 
 ## 0. Where things stand (grounded in the code)
 
 - **Tunnel bring-up.** `openSession` (`internal/cli/session.go`) calls `upTunnel` → `transport.UpWireGuard` (`internal/transport/wireguard.go`) for every command. That builds a fresh `device.NewDevice(..., conn.NewDefaultBind(), ...)`, which binds a random UDP port, with the same `private_key` and the same operator address (`c.Operator.WGAddress`, 10.42.255.1). The node has one `[Peer]`, so whichever process handshook last owns the session keys and endpoint.
 - **Why the loser hangs forever.** `persistent_keepalive_interval=25` sends empty keepalives. Those don't arm wireguard-go's "data sent, no reply in 15s → rehandshake" timer. While a CLI waits for a result it sends no TCP data, and `transport.SSHClient` has no SSH keepalive. So `readEvents` in `internal/remote/remote.go` blocks on a socket that will never get another packet.
-- **The node side makes it worse (new finding).** `steps/sshd.go` sets `ClientAliveInterval 300` / `ClientAliveCountMax 2`. About 10 minutes after the client vanishes, sshd tears down the session, and `eru node rpc`'s stdout becomes a broken pipe. `runNodeRPC` (`internal/cli/node.go`) → `node.Serve` never calls `signal.Notify`/`Ignore` for `SIGPIPE` (grep finds no SIGPIPE anywhere). Go's rule is that a write to a broken pipe on fd 1 kills the process with SIGPIPE.
+- **The node side makes it worse (new finding).** `steps/sshd.go` sets `ClientAliveInterval 300` / `ClientAliveCountMax 2`. About 10 minutes after the client vanishes, sshd tears down the session, and `vaire node rpc`'s stdout becomes a broken pipe. `runNodeRPC` (`internal/cli/node.go`) → `node.Serve` never calls `signal.Notify`/`Ignore` for `SIGPIPE` (grep finds no SIGPIPE anywhere). Go's rule is that a write to a broken pipe on fd 1 kills the process with SIGPIPE.
   - `eventWriter.writeLocked` (`internal/node/dispatch.go`) writes to stdout before `e.log.Line(...)`. So the run log never gets the line that killed the process, and the handler dies mid-step.
   - This matches the Part 8 report: "run log stops at stanza-create ..., no node process left".
   - Before sshd gives up, a stalled SSH channel window blocks `e.w.Write` while `e.mu` is held. Every `env.Report` (handlers, `streamJournal`) then blocks too, so the node's work stalls along with the client.
@@ -33,19 +33,19 @@ Current evidence (2026-10-19): concurrent shared-tunnel use and daemon reattachm
   - Every consumer only needs a `Dialer`. That is the seam the design uses.
 - **Stopgap (done).** `Tunnel.OnClose` releases a per-context flock (`contexts/<name>/tunnel.lock`) when the tunnel closes; `upTunnel` takes it.
 - **Supported OSes.** `scripts/build-release.sh` and `scripts/sign-release.sh` build only `linux/{amd64,arm64}` and `darwin/{amd64,arm64}`. `internal/cli/ssh.go` uses `syscall.SIGWINCH`, so the CLI doesn't build for Windows today. **Windows is out of scope.** Everything new is `//go:build unix`, with Linux and macOS as first-class targets.
-- **A gap this design does not close.** `eru login` on a second machine reuses the same operator key and address. Two laptops will still steal the peer from each other. The real fix is a per-machine peer (`eru operator add`, a later-phase command). Phase 2's keepalives make the loser recover instead of hang.
+- **A gap this design does not close.** `vaire login` on a second machine reuses the same operator key and address. Two laptops will still steal the peer from each other. The real fix is a per-machine peer (`vaire operator add`, a later-phase command). Phase 2's keepalives make the loser recover instead of hang.
 
 ---
 
 ## 1. Design decisions
 
 ### 1.1 A detached daemon, not "first process becomes master"
-The first eru process that needs the node spawns a background daemon: the hidden command `eru tunnel serve --context <name>`. The daemon owns the only wireguard-go device for that context and serves a unix socket in the context directory. Every eru process, including the one that spawned it, is a client.
+The first vaire process that needs the node spawns a background daemon: the hidden command `vaire tunnel serve --context <name>`. The daemon owns the only wireguard-go device for that context and serves a unix socket in the context directory. Every vaire process, including the one that spawned it, is a client.
 
-Rejected alternative: the first CLI process acts as master. Its lifetime is the first command's lifetime. An `eru ssh` that became master would kill every other command's streams when the shell exits, and handing mastership over is complex and racy. OpenSSH's `ControlPersist` solves the same problem by forking a persistent master, and so does this design.
+Rejected alternative: the first CLI process acts as master. Its lifetime is the first command's lifetime. An `vaire ssh` that became master would kill every other command's streams when the shell exits, and handing mastership over is complex and racy. OpenSSH's `ControlPersist` solves the same problem by forking a persistent master, and so does this design.
 
 ### 1.2 Share the tunnel's TCP dials, not the SSH connection
-The daemon proxies **TCP dials** into the netstack. Each eru process still runs its own SSH client over its proxied stream: `DialSSH`, `Handshake`, `remote.Node.Call` and `eru ssh` stay as they are.
+The daemon proxies **TCP dials** into the netstack. Each vaire process still runs its own SSH client over its proxied stream: `DialSSH`, `Handshake`, `remote.Node.Call` and `vaire ssh` stay as they are.
 
 The bug is about WireGuard peer identity, not SSH. Multiplexing SSH sessions through the daemon would need a session protocol over the socket for small gain, about one SSH handshake RTT. It can be a later optimisation.
 
@@ -61,7 +61,7 @@ Each client action is one unix connection. The client sends one JSON line, the d
 
 - **Fingerprint.** sha256 over the operator WG public key (derived), operator address, node public key, endpoint, AllowedIPs, MTU and proto. The client computes the same value from the context and compares. A mismatch means a re-login, a node rebuild or a new build changed something.
 - **Dial policy.** The daemon only dials `tcp` to addresses inside the AllowedIPs prefix (the node /24 built in `upTunnel`). It is not a general proxy.
-- **Lease.** The `attach` connection counts toward liveness. That is what keeps an idle `eru tunnel` listener, or an `eru console` between queries, from losing its daemon. EOF on it also tells the client right away that the daemon died.
+- **Lease.** The `attach` connection counts toward liveness. That is what keeps an idle `vaire tunnel` listener, or an `vaire console` between queries, from losing its daemon. EOF on it also tells the client right away that the daemon died.
 
 ### 1.4 Who starts it, and the startup race
 New code lives in `internal/transport/shared.go` (client) and `internal/transport/sharedserver.go` (server). Spawning lives in `internal/cli/tunneld.go`.
@@ -84,29 +84,29 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 
 ### 1.5 Lifetime
 - **Idle exit.** The daemon exits when there are **no attached leases and no open streams** for the persist window.
-  - Default 10m. Override with `ERU_TUNNEL_PERSIST` (a Go duration; `0` = exit as soon as the last lease drops) or a context.toml key `tunnel_persist`.
-- **Explicit stop.** `eru tunnel stop [--force]` (new child of the existing `tunnel` spec in `internal/cli/tree.go`; cobra resolves children before the parent's `runTunnel`).
+  - Default 10m. Override with `VAIRE_TUNNEL_PERSIST` (a Go duration; `0` = exit as soon as the last lease drops) or a context.toml key `tunnel_persist`.
+- **Explicit stop.** `vaire tunnel stop [--force]` (new child of the existing `tunnel` spec in `internal/cli/tree.go`; cobra resolves children before the parent's `runTunnel`).
   - Without `--force`, the daemon refuses new leases, drains, and exits when idle.
   - `--force` closes everything now.
-  - `eru tunnel status` prints the `hello` reply as JSON or human output: pid, build, attached clients with their pid and command, streams, last handshake (from `dev.IpcGet()` → `last_handshake_time_sec`), and the idle deadline.
+  - `vaire tunnel status` prints the `hello` reply as JSON or human output: pid, build, attached clients with their pid and command, streams, last handshake (from `dev.IpcGet()` → `last_handshake_time_sec`), and the idle deadline.
 - **Other exits.**
   - `runContextRemove` (`internal/cli/login.go`) sends a forced `stop` before `contexts.Remove`.
-  - `eru login` over an existing context sends a non-forced `stop`.
-  - `eru upgrade` (self-upgrade) sends a non-forced `stop` to idle daemons.
+  - `vaire login` over an existing context sends a non-forced `stop`.
+  - `vaire upgrade` (self-upgrade) sends a non-forced `stop` to idle daemons.
   - SIGTERM or SIGINT to the daemon shuts it down cleanly: close the listener, `Tunnel.Close`, release the lock.
 - **Config or build mismatch on `hello`** (the fingerprint or the build differs):
   - if `attached == 0`, send `stop{force:true}` and respawn;
-  - otherwise fail with `transport_failed`, `reason: tunnel_config_changed`, and the hint "another eru command (pid X, `restore`) is using the old tunnel; wait for it or run eru tunnel stop --force".
+  - otherwise fail with `transport_failed`, `reason: tunnel_config_changed`, and the hint "another vaire command (pid X, `restore`) is using the old tunnel; wait for it or run vaire tunnel stop --force".
   - A busy daemon of another build with the same fingerprint is used as it is: the dial protocol doesn't depend on the build.
 
 ### 1.6 What clients look like
 - `session.tunnel *transport.Tunnel` becomes `session.dialer transport.Dialer` plus `closeDialer func()`.
 - `openSession` picks the dialer:
   - `transport.SharedDialer` by default (after Phase 6);
-  - `upTunnel` in-process when `ERU_TUNNEL=inprocess` is set, still under the stopgap lock.
+  - `upTunnel` in-process when `VAIRE_TUNNEL=inprocess` is set, still under the stopgap lock.
 - The call sites only change field names: `psql.go:43`, `console.go:59`, `sql.go:122`, `tunnel.go:98` and the `DialSSH` call in `openSession`. All of them already take a `transport.Dialer`.
 - `session.Close` closes the SSH client and releases the lease. It never closes the device.
-- **`eru tunnel` and `eru console`.** Each local connection already dials on its own (`proxy`, `pg.ServeTLSProxy`), so each becomes one proxied stream. While those commands run, the lease keeps the daemon alive.
+- **`vaire tunnel` and `vaire console`.** Each local connection already dials on its own (`proxy`, `pg.ServeTLSProxy`), so each becomes one proxied stream. While those commands run, the lease keeps the daemon alive.
 - **`server init`.** Stays in-process (`serverinit.go:748`). No context exists yet, and the keys are in memory as `r.sec.WGPrivateKey` with `config.DefaultFirstOperatorWG`. A `--resume` against an existing context name first sends `stop{force:true}` to that context's daemon, then takes the singleton lock for its in-process tunnel. Init is the only remaining in-process user.
 
 ### 1.7 When the daemon dies mid-command
@@ -115,10 +115,10 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 - **Respawn.** The next `SharedDialer.DialContext` sees `ECONNREFUSED`, goes through `ensure()` and respawns. The kernel released the dead daemon's flock, and the stale socket gets unlinked. The new device is the only one, so its handshake wins cleanly.
 - **Recovery by command type:**
   - **Job commands** (`callJob` in `internal/cli/jobs.go`: backup now/verify, restore, drill, fork, dump): re-dial SSH and resume with `job.follow` from the last cursor (Phase 3). The user sees "connection lost; re-attached to job X" and the command finishes.
-  - **Non-job RPCs** (`apply`, `db create`, `db drop` ...): no transparent resume. Fail with `transport_failed`, `reason: stream_lost`, `request_id`, and the hint "the node keeps running it; its run log is /var/log/eru/runs/...<request_id>; check with eru logs / eru plan".
+  - **Non-job RPCs** (`apply`, `db create`, `db drop` ...): no transparent resume. Fail with `transport_failed`, `reason: stream_lost`, `request_id`, and the hint "the node keeps running it; its run log is /var/log/vaire/runs/...<request_id>; check with vaire logs / vaire plan".
     - A later `run.status <request_id>` RPC could read the run log result. Not in this plan.
-  - **`eru ssh`**: the shell ends, like an OpenSSH ControlMaster death.
-  - **`eru tunnel` and `eru console`**: in-flight client connections drop, and the next connection respawns the daemon.
+  - **`vaire ssh`**: the shell ends, like an OpenSSH ControlMaster death.
+  - **`vaire tunnel` and `vaire console`**: in-flight client connections drop, and the next connection respawns the daemon.
 
 ### 1.8 Security
 - **Location.** The socket lives in `contexts/<name>/` (0700, enforced by `contexts.FixModes`). The socket file is created under umask 077 and then chmodded to 0600.
@@ -131,16 +131,16 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 - **Secrets.** The daemon reads `wg.key` itself through `contexts.ReadFile`; it is never on argv or in the environment. It calls `secrets.Add` so `tunnel.log` is redacted. WireGuard `Errorf` goes to `tunnel.log` (what `--verbose`'s `logf` used to print).
 - **No new exposure.** Any same-uid process can already read `wg.key`.
 - **Socket path length.** `sun_path` is 104 bytes on macOS and 108 on Linux, and a long `XDG_CONFIG_HOME` or context name can exceed that.
-  - When `len(path) > 100`, use `$XDG_RUNTIME_DIR/eru/<sha256(ctxdir)[:16]>.sock` on Linux, or `os.TempDir()/eru-<uid>/<hash>.sock` on macOS (macOS `$TMPDIR` is per-user).
+  - When `len(path) > 100`, use `$XDG_RUNTIME_DIR/vaire/<sha256(ctxdir)[:16]>.sock` on Linux, or `os.TempDir()/vaire-<uid>/<hash>.sock` on macOS (macOS `$TMPDIR` is per-user).
   - Create the directory 0700 and refuse to use it if it already exists with another owner or looser mode (`lstat`, no symlinks).
   - Write the chosen path to `contexts/<name>/tunnel.addr` (0600).
 
 ### 1.9 How it replaces the stopgap lock
-- **Today (stopgap).** An exclusive per-context flock is held for the tunnel's lifetime (`Tunnel.OnClose` releases it), so eru processes run one at a time.
+- **Today (stopgap).** An exclusive per-context flock is held for the tunnel's lifetime (`Tunnel.OnClose` releases it), so vaire processes run one at a time.
 - **With the daemon.** The **same lock file** becomes the daemon's singleton lock: the daemon holds it, clients never do.
-- **An in-process holder.** A client whose spawn fails with `already_running` but gets no `hello` reply (`eru server init` holds the lock in-process, or a daemon is exiting) retries for about 10s, then fails with `precondition_failed`, `reason: tunnel_busy`.
+- **An in-process holder.** A client whose spawn fails with `already_running` but gets no `hello` reply (`vaire server init` holds the lock in-process, or a daemon is exiting) retries for about 10s, then fails with `precondition_failed`, `reason: tunnel_busy`.
 - **Holder info.** The holder writes its pid, command and start time into the lock file, so the in-process wait message names it.
-- After Phase 6, the in-process path (`ERU_TUNNEL=inprocess`, `server init`) still takes the lock exclusively. That rules out two devices on one machine.
+- After Phase 6, the in-process path (`VAIRE_TUNNEL=inprocess`, `server init`) still takes the lock exclusively. That rules out two devices on one machine.
 
 ---
 
@@ -168,7 +168,7 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 ### 2.3 Re-dial with `job.follow` resume
 - **Node side** (`followJob` / `streamJournal`):
   - switch journalctl to `-o json` and take `MESSAGE` as the line;
-  - carry `__CURSOR` on each re-emitted event in a new optional `output.Event.Cursor` field (`json:"cursor,omitempty"`); update `schema/eru-v1.json`;
+  - carry `__CURSOR` on each re-emitted event in a new optional `output.Event.Cursor` field (`json:"cursor,omitempty"`); update `schema/vaire-v1.json`;
   - `jobFollowParams` gains `AfterCursor string`, passed as `--after-cursor=` instead of `-n all`.
 - **Client side** (`callJob`):
   - track the last cursor and the `jobID` (already captured from the `progress/job` event);
@@ -201,7 +201,7 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
 
 **Phase 3: `job.follow` resume and re-dial in `callJob`** (§2.3; done, with event skipping instead of a cursor). Needs a matching node build, which the handshake enforces. Restore and backup commands then survive a dropped stream even with only the stopgap.
 
-**Phase 4: shared-tunnel daemon** (implemented together with Phases 5 and 6, so there is no opt-in `ERU_TUNNEL=shared` stage).
+**Phase 4: shared-tunnel daemon** (implemented together with Phases 5 and 6, so there is no opt-in `VAIRE_TUNNEL=shared` stage).
 - `internal/transport/sharedserver.go`: listener, peer-cred check, protocol, dial policy, stream and lease accounting, idle timer, fingerprint, `hello`/`attach`/`dial`/`stop`.
 - `internal/transport/shared.go`: `SharedDialer` (implements `Dialer`; `ensure`, respawn on `ECONNREFUSED`, lease).
 - `peercred_{linux,darwin}.go`; `//go:build unix` throughout.
@@ -218,36 +218,36 @@ The "who brings up the device" logic moves out of `upTunnel`'s callers into the 
   - fingerprint mismatch handling.
 
 **Phase 5: control surface and lifecycle hooks** (implemented; the MASTER doc edit is still open).
-- `eru tunnel status|stop [--force]` and the hidden `tunnel serve` in `tree.go`, with `CommandMeta` (error codes `transport_failed`, `context_not_found`; stop counts as `Mutating`, with a `SkipDryRunReason`).
-- Stop hooks in `runContextRemove`, `eru login` and `eru upgrade`.
+- `vaire tunnel status|stop [--force]` and the hidden `tunnel serve` in `tree.go`, with `CommandMeta` (error codes `transport_failed`, `context_not_found`; stop counts as `Mutating`, with a `SkipDryRunReason`).
+- Stop hooks in `runContextRemove`, `vaire login` and `vaire upgrade`.
 - `--verbose` prints the daemon pid and the `tunnel.log` path.
 - Docs:
-  - MASTER §7.2: "a userspace tunnel per context, shared by eru processes";
-  - MANUAL-TESTING: a new part "concurrent commands", and remove "Practical rule until the tunnel fix: run one eru process at a time";
-  - `eru guide agents` text: agents may run commands in parallel.
+  - MASTER §7.2: "a userspace tunnel per context, shared by vaire processes";
+  - MANUAL-TESTING: a new part "concurrent commands", and remove "Practical rule until the tunnel fix: run one vaire process at a time";
+  - `vaire guide agents` text: agents may run commands in parallel.
 
-**Phase 6: default on** (implemented). Shared becomes the default. `ERU_TUNNEL=inprocess` is the escape hatch. The stopgap lock is now the daemon singleton plus the in-process guard (§1.9), with no serialisation of clients.
+**Phase 6: default on** (implemented). Shared becomes the default. `VAIRE_TUNNEL=inprocess` is the escape hatch. The stopgap lock is now the daemon singleton plus the in-process guard (§1.9), with no serialisation of clients.
 
 Manual test before flipping the default:
-1. A `restore` running while `eru ssh` is open completes.
-2. `eru tunnel --db app` stays usable across 15 minutes of idleness.
-3. `kill -9` of the daemon during `eru backup now` → the client re-attaches and prints the result.
-4. `kill -9` during `eru apply` → `stream_lost` with `request_id`, and the node finishes; check the run log.
+1. A `restore` running while `vaire ssh` is open completes.
+2. `vaire tunnel --db app` stays usable across 15 minutes of idleness.
+3. `kill -9` of the daemon during `vaire backup now` → the client re-attaches and prints the result.
+4. `kill -9` during `vaire apply` → `stream_lost` with `request_id`, and the node finishes; check the run log.
 5. On macOS: a long `$XDG_CONFIG_HOME` exercises the short-path fallback, plus sleep/wake and a Wi-Fi switch mid-command (WireGuard roaming plus keepalive).
 6. Two contexts at once each get their own daemon.
-7. `eru context remove` stops the daemon.
+7. `vaire context remove` stops the daemon.
 
 ---
 
 ## 4. Risks and open points
-- **Daemon on an old binary after `eru upgrade` or a rebuild.** `eru upgrade` stops idle daemons, and a client of another build replaces an idle daemon on `hello`. A busy one keeps serving until it goes idle. The binary path can change under a running daemon; that's harmless because the daemon never re-execs.
+- **Daemon on an old binary after `vaire upgrade` or a rebuild.** `vaire upgrade` stops idle daemons, and a client of another build replaces an idle daemon on `hello`. A busy one keeps serving until it goes idle. The binary path can change under a running daemon; that's harmless because the daemon never re-execs.
 - **Non-job RPCs can't resume** (`apply`, `db create`). Phase 1 makes them finish on the node. Showing the outcome later needs a small `run.status` RPC; it's worth adding next because `db create` loses one-time credentials when its stream dies (an open MANUAL-TESTING item).
 - **Second machine with the same key.** Unchanged (§0); needs per-machine operators.
 - **Windows.** Not supported by the CLI today (`SIGWINCH`, no release target). The unix build tags keep it that way explicitly.
 
 ### Critical Files for Implementation
-- /home/mbv/work/eru/internal/cli/session.go
-- /home/mbv/work/eru/internal/transport/wireguard.go (plus new /home/mbv/work/eru/internal/transport/shared.go and sharedserver.go)
-- /home/mbv/work/eru/internal/transport/ssh.go
-- /home/mbv/work/eru/internal/node/dispatch.go (and /home/mbv/work/eru/internal/cli/node.go for SIGPIPE)
-- /home/mbv/work/eru/internal/cli/jobs.go and /home/mbv/work/eru/internal/node/jobs.go (job.follow resume)
+- /home/mbv/work/vaire/internal/cli/session.go
+- /home/mbv/work/vaire/internal/transport/wireguard.go (plus new /home/mbv/work/vaire/internal/transport/shared.go and sharedserver.go)
+- /home/mbv/work/vaire/internal/transport/ssh.go
+- /home/mbv/work/vaire/internal/node/dispatch.go (and /home/mbv/work/vaire/internal/cli/node.go for SIGPIPE)
+- /home/mbv/work/vaire/internal/cli/jobs.go and /home/mbv/work/vaire/internal/node/jobs.go (job.follow resume)

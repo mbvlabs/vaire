@@ -3,14 +3,14 @@ package cli
 import (
 	"fmt"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/versions"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/versions"
 	"github.com/spf13/cobra"
 )
 
-// runCheckSteps backs the hidden eru commands --check-steps used by just lint:
+// runCheckSteps backs the hidden vaire commands --check-steps used by just lint:
 // it validates step IDs and uniqueness and reports the catalogue size.
 func runCheckSteps(cmd *cobra.Command) error {
 	catalog := steps.Catalog()

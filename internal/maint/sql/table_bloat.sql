@@ -1,7 +1,7 @@
 -- Vendored unchanged from https://github.com/ioguix/pgsql-bloat-estimation
 -- (table/table_bloat.sql at 8fde3c9e0e015ece51e10c1450228d23f7747db1),
 -- BSD-2-Clause, Copyright (c) 2015-2019 Jehan-Guillaume (ioguix) de Rorthais.
--- See LICENSE.ioguix. eru wraps it in internal/maint/bloat.go.
+-- See LICENSE.ioguix. vaire wraps it in internal/maint/bloat.go.
 /* WARNING: executed with a non-superuser role, the query inspect only tables and materialized view (9.3+) you are granted to read.
 * This query is compatible with PostgreSQL 9.0 and more
 */

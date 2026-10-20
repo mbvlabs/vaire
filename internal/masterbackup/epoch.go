@@ -12,7 +12,7 @@ import (
 )
 
 // EpochSchema is epoch.json's schema.
-const EpochSchema = "eru-master-epoch/v1"
+const EpochSchema = "vaire-master-epoch/v1"
 
 // Epoch is <prefix>/master/epoch.json, and the node's copy of it: the one
 // instance allowed to write to the bucket.

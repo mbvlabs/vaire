@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/rpc"
 )
 
 func fenceForTest(t *testing.T) {
@@ -74,12 +74,12 @@ func TestArchivePushRefusesWhenFenced(t *testing.T) {
 func TestArchivePushLogsEveryRefusal(t *testing.T) {
 	const wal = "pg_wal/000000010000000000000001"
 	notADir := t.TempDir()
-	// /etc/eru is a file here, so the fence marker's stat fails with
+	// /etc/vaire is a file here, so the fence marker's stat fails with
 	// ENOTDIR: neither fenced nor provably not, so it must refuse.
 	if err := os.MkdirAll(filepath.Join(notADir, "etc"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(notADir, "etc", "eru"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(notADir, "etc", "vaire"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(t.TempDir(), "pgbackrest")
@@ -103,14 +103,14 @@ func TestArchivePushLogsEveryRefusal(t *testing.T) {
 				t.Fatal("archive-push accepted")
 			}
 			line := logged.String()
-			if !strings.HasPrefix(line, "eru archive-push: not archiving") || !strings.Contains(line, c.reason) {
+			if !strings.HasPrefix(line, "vaire archive-push: not archiving") || !strings.Contains(line, c.reason) {
 				t.Fatalf("stderr %q lacks %q", line, c.reason)
 			}
 		})
 	}
 }
 
-// archiveCommand is the archive_command 40-eru-backup.conf sets.
+// archiveCommand is the archive_command 40-vaire-backup.conf sets.
 func archiveCommand(t *testing.T, conf string) string {
 	t.Helper()
 	for _, line := range strings.Split(conf, "\n") {
@@ -127,7 +127,7 @@ func TestArchiveCommandUsesTheWrapper(t *testing.T) {
 	cfg.Backup.Provider = "r2"
 	spec := config.ClusterSpec{Name: "app", Stanza: "app-3f9a1c"}
 	cmd := archiveCommand(t, string(render.BackupConf(cfg, spec)))
-	if cmd != "/usr/local/bin/eru node archive-push --pgbackrest=/usr/bin/pgbackrest --stanza=app-3f9a1c %p" {
+	if cmd != "/usr/local/bin/vaire node archive-push --pgbackrest=/usr/bin/pgbackrest --stanza=app-3f9a1c %p" {
 		t.Fatalf("archive_command: %s", cmd)
 	}
 	// Regression: pgBackRest's check and backup refuse an archive_command

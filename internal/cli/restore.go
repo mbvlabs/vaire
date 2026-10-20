@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +27,7 @@ func recoveryKit(name string) (*contexts.BackupCreds, error) {
 	}
 	if creds.Backup == nil || creds.Backup.AccessKeyID == "" {
 		return nil, output.NewError(output.CodeInputRequired, "this context has no recovery kit", output.ExitInput,
-			"Run eru backup setup, or log in from a transfer bundle that carries the recovery kit (eru login).").
+			"Run vaire backup setup, or log in from a transfer bundle that carries the recovery kit (vaire login).").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 	return creds.Backup, nil
@@ -38,7 +38,7 @@ func recoveryKit(name string) (*contexts.BackupCreds, error) {
 func dumpIdentity(k *contexts.BackupCreds) (string, error) {
 	if k.Dumps.AgeIdentity == "" {
 		return "", output.NewError(output.CodeInputRequired, "this context's recovery kit has no dump age identity", output.ExitInput,
-			"Dumps open with the age identity from the recovery kit. Run eru secrets export on the machine that ran eru backup setup, then eru login with that bundle here.").
+			"Dumps open with the age identity from the recovery kit. Run vaire secrets export on the machine that ran vaire backup setup, then vaire login with that bundle here.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing", "secret": steps.SecretBackupAgeIdentity})
 	}
 	return k.Dumps.AgeIdentity, nil
@@ -79,7 +79,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	}
 	if kinds != 1 {
 		return output.NewError(output.CodeUsage, "pass exactly one of --time, --latest, --set or --dump", output.ExitUsage,
-			"For example eru restore "+db+" --time -15m.")
+			"For example vaire restore "+db+" --time -15m.")
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -161,9 +161,9 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if res.Phase == "promoted" {
 		return output.Success(cmd, output.Result{
 			Data:     map[string]any{"job_id": jr.JobID, "result": res},
-			Message:  db + " is restored and promoted, " + promotedWhere(res.Promoted.Stanza) + " The replaced data is kept as a stopped cluster until eru restore cleanup " + db + "; eru restore undo " + db + " swaps it back.",
+			Message:  db + " is restored and promoted, " + promotedWhere(res.Promoted.Stanza) + " The replaced data is kept as a stopped cluster until vaire restore cleanup " + db + "; vaire restore undo " + db + " swaps it back.",
 			Warnings: warnings,
-			Next:     []string{"eru restore undo " + db, "eru restore cleanup " + db},
+			Next:     []string{"vaire restore undo " + db, "vaire restore cleanup " + db},
 		})
 	}
 	ready := "the temporary cluster " + res.Restoring + " is ready, paused at the target, beside the live " + db + ", which kept serving."
@@ -181,10 +181,10 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		Data: map[string]any{"job_id": jr.JobID, "result": res},
 		Message: strings.Join([]string{
 			ready,
-			"Inspect it with eru sql --db " + res.Restoring + " \"select ...\", then promote or abort.",
+			"Inspect it with vaire sql --db " + res.Restoring + " \"select ...\", then promote or abort.",
 		}, "\n"),
 		Warnings: warnings,
-		Next:     []string{"eru restore status " + db, "eru restore promote " + db + " --confirm " + token, "eru restore abort " + db},
+		Next:     []string{"vaire restore status " + db, "vaire restore promote " + db + " --confirm " + token, "vaire restore abort " + db},
 	})
 }
 
@@ -236,7 +236,7 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 	for _, l := range data.Leftovers {
-		lines = append(lines, "leftover "+l.Name+" (from "+l.CreatedAt+"); drop it with eru restore cleanup "+l.Database)
+		lines = append(lines, "leftover "+l.Name+" (from "+l.CreatedAt+"); drop it with vaire restore cleanup "+l.Database)
 	}
 	if len(lines) == 0 {
 		lines = []string{"no restore is open"}
@@ -308,7 +308,7 @@ func runRestorePromote(cmd *cobra.Command, args []string) error {
 	db := args[0]
 	return restoreAction(cmd, db, "restore.promote", db+"/restore", "restore promote", func(data map[string]any) string {
 		stanza, _ := data["stanza"].(string)
-		return db + " now holds the restored data, " + promotedWhere(stanza) + " The previous data is kept as a stopped cluster: eru restore undo " + db + " swaps it back, eru restore cleanup " + db + " drops it."
+		return db + " now holds the restored data, " + promotedWhere(stanza) + " The previous data is kept as a stopped cluster: vaire restore undo " + db + " swaps it back, vaire restore cleanup " + db + " drops it."
 	})
 }
 
@@ -317,7 +317,7 @@ func runRestoreUndo(cmd *cobra.Command, args []string) error {
 	return restoreAction(cmd, db, "restore.undo", db+"/restore", "restore undo", func(data map[string]any) string {
 		msg := db + " is back to its data from before the restore, on its old timeline; a full backup is running."
 		if aside, _ := data["pre_undo"].(string); aside != "" {
-			msg += " The restored data is kept as the stopped cluster " + aside + " until eru restore cleanup " + db + "; undo can't swap it back in."
+			msg += " The restored data is kept as the stopped cluster " + aside + " until vaire restore cleanup " + db + "; undo can't swap it back in."
 		}
 		return msg
 	})
@@ -365,7 +365,7 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	}
 	if db == "" || dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: data, Message: "restore leftovers:\n" + strings.Join(lines, "\n"), Warnings: s.warnings,
-			Next: []string{"eru restore cleanup <db> --confirm <db>/cleanup"}})
+			Next: []string{"vaire restore cleanup <db> --confirm <db>/cleanup"}})
 	}
 	p.panel("Leftovers of "+db, lines)
 	token := db + "/cleanup"
@@ -435,9 +435,9 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 	if detached != nil {
 		return detachedEach(cmd, s, *detached, "the drill", notStarted(dbs, outcomes), func(db string) string {
 			if at != "" {
-				return "eru restore drill --db " + db + " --time " + at
+				return "vaire restore drill --db " + db + " --time " + at
 			}
-			return "eru restore drill --db " + db
+			return "vaire restore drill --db " + db
 		})
 	}
 	if err := failedOutcomes("the restore drill", "drills", outcomes); err != nil {
@@ -447,7 +447,7 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 		Data:     map[string]any{"drills": outcomes},
 		Message:  strings.Join(lines, "\n"),
 		Warnings: append(s.warnings, warnings...),
-		Next:     []string{"eru backup list"},
+		Next:     []string{"vaire backup list"},
 	})
 }
 
@@ -524,7 +524,7 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
 		message, human := credentialsMessage(cmd, "fork detached; credentials shown only now", "fork detached; credentials shown only now", name, secret)
 		return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
-			Message: message, Human: human, Next: []string{"eru job follow " + jobID}})
+			Message: message, Human: human, Next: []string{"vaire job follow " + jobID}})
 	}
 	var res struct {
 		Warnings []output.Warning `json:"warnings"`

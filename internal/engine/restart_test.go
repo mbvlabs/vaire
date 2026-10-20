@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/vaire/internal/config"
 )
 
 type templateStep struct{ countedStep }

@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
-// upgrade.install params and result are frozen with eru-rpc/v1: a newer
+// upgrade.install params and result are frozen with vaire-rpc/v1: a newer
 // operator calls this method on an older node binary. Additions must be
 // optional fields.
 
@@ -34,7 +34,7 @@ const (
 )
 
 var (
-	installPathPattern = regexp.MustCompile(`^/tmp/eru-[A-Za-z0-9._-]+$`)
+	installPathPattern = regexp.MustCompile(`^/tmp/vaire-[A-Za-z0-9._-]+$`)
 	sha256Pattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
@@ -46,7 +46,7 @@ type installParams struct {
 	Channel string `json:"channel"`
 }
 
-// BuildID names one eru build.
+// BuildID names one vaire build.
 type BuildID struct {
 	Version string `json:"version"`
 	Commit  string `json:"commit"`
@@ -111,7 +111,7 @@ func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
 	}
 	progress("version preflight passed")
 
-	// 4. Swap: eru -> eru.prev (hard link), eru.new -> eru.
+	// 4. Swap: vaire -> vaire.prev (hard link), vaire.new -> vaire.
 	var previous *BuildID
 	hadPrevious := false
 	if _, err := os.Lstat(BinaryPath); err == nil {
@@ -188,7 +188,7 @@ func validateInstallParams(p installParams) error {
 		output.CodeValidation,
 		"upgrade.install params are invalid: "+strings.Join(bad, ", "),
 		output.ExitConfig,
-		"path must match /tmp/eru-*, sha256 is 64 hex characters, and version, commit and channel are required.",
+		"path must match /tmp/vaire-*, sha256 is 64 hex characters, and version, commit and channel are required.",
 	).WithDetails(map[string]any{"invalid": bad})
 }
 
@@ -228,7 +228,7 @@ func installSourceInvalid(path, why string) error {
 // stageBinary copies src to installStaging (root, 0700) and returns the
 // sha256 of the copied bytes.
 func stageBinary(src string) (string, error) {
-	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: path matched /tmp/eru-* and was checked.
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: path matched /tmp/vaire-* and was checked.
 	if err != nil {
 		return "", err
 	}

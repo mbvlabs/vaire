@@ -2,7 +2,7 @@
 // of what is born on the master and can't be regenerated, its manifest and
 // sidecar, the names and retention of bundles, the dirty flag that triggers a
 // new one, and the epoch decision that fences an old master. It has no
-// dependency on the rest of eru, so the operator (which opens bundles) and
+// dependency on the rest of vaire, so the operator (which opens bundles) and
 // the node (which builds them) share it, and every writer of a bundled file
 // can mark the state dirty without an import cycle.
 package masterbackup
@@ -26,39 +26,39 @@ import (
 const (
 	// Dir holds the local bundles, the dirty flag, last.json and the local
 	// epoch. root 0700.
-	Dir = "/var/lib/eru/master-backup"
+	Dir = "/var/lib/vaire/master-backup"
 	// DirtyPath is touched by every writer of a bundled file; the path unit
-	// eru-master-backup.path starts the job while it exists.
+	// vaire-master-backup.path starts the job while it exists.
 	DirtyPath = Dir + "/dirty"
 	// LastPath records the last bundle: name, content hash, upload state.
 	LastPath = Dir + "/last.json"
 	// EpochPath is the node's copy of the bucket's epoch.json.
 	EpochPath = Dir + "/epoch.json"
 	// InstancePath is this install's random id. A restore places a new one.
-	InstancePath = "/var/lib/eru/instance"
+	InstancePath = "/var/lib/vaire/instance"
 	// FencedPath exists once the node has seen a newer epoch for another
-	// instance in the bucket. It lives in /etc/eru (0755), not /var/lib/eru
+	// instance in the bucket. It lives in /etc/vaire (0755), not /var/lib/vaire
 	// (root 0700), because the archive wrapper runs as postgres and must be
 	// able to see it.
-	FencedPath = "/etc/eru/fenced"
+	FencedPath = "/etc/vaire/fenced"
 	// RecipientPath is the recovery kit's age recipient on the node, written
 	// with or without a bucket so bundles can always be encrypted.
-	RecipientPath = "/etc/eru/runtime/recovery.recipient"
+	RecipientPath = "/etc/vaire/runtime/recovery.recipient"
 )
 
 // Bundled paths (D1). They are absolute node paths; a test passes a root.
 const (
-	ClusterPath    = "/etc/eru/cluster.toml"
-	NodePath       = "/etc/eru/node.toml"
-	OperatorsPath  = "/etc/eru/operators.toml"
-	RecordsPath    = "/var/lib/eru/records.json"
-	ProtectPath    = "/etc/eru/protect.json"
-	WGKeyPath      = "/etc/wireguard/eru.key"
-	TLSCertPath    = "/etc/eru/tls/server.crt"
-	TLSKeyPath     = "/etc/eru/tls/server.key"
+	ClusterPath    = "/etc/vaire/cluster.toml"
+	NodePath       = "/etc/vaire/node.toml"
+	OperatorsPath  = "/etc/vaire/operators.toml"
+	RecordsPath    = "/var/lib/vaire/records.json"
+	ProtectPath    = "/etc/vaire/protect.json"
+	WGKeyPath      = "/etc/wireguard/vaire.key"
+	TLSCertPath    = "/etc/vaire/tls/server.crt"
+	TLSKeyPath     = "/etc/vaire/tls/server.key"
 	HostKeyGlob    = "/etc/ssh/ssh_host_*_key"
 	HostKeyPubGlob = "/etc/ssh/ssh_host_*_key.pub"
-	ACMEGlob       = "/etc/eru/acme/*"
+	ACMEGlob       = "/etc/vaire/acme/*"
 )
 
 // Spec is one path, or glob, of the bundle.

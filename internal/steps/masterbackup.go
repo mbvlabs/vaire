@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 )
 
 const masterBackupID = "master-backup-v1"
@@ -81,7 +81,7 @@ func (masterBackupStep) Apply(_ context.Context, _ config.Cluster, rt engine.Run
 		if recipient == "" {
 			return engine.ApplyResult{}, output.NewError(output.CodeInputRequired,
 				"the recovery recipient is not on this node and the request has none", output.ExitInput,
-				"Run eru apply from a context whose recovery kit has the age identity (eru login from a current secrets document).").
+				"Run vaire apply from a context whose recovery kit has the age identity (vaire login from a current secrets document).").
 				WithDetails(map[string]any{"secret": SecretBackupAgeRecipient, "path": masterbackup.RecipientPath})
 		}
 		if err := os.MkdirAll(RuntimeDir, 0o700); err != nil {

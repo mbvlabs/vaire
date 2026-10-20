@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Step 14 (pgbackrest-v1): the directories pgBackRest needs, owned by
-# postgres. eru writes pgbackrest.conf and backup.env itself, then runs
+# postgres. vaire writes pgbackrest.conf and backup.env itself, then runs
 # stanza-create, check and the first full backup as postgres.
 set -euo pipefail
 

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // maxTarball bounds a download; the exporters are 5-15 MiB.
@@ -48,14 +48,14 @@ func Fetch(ctx context.Context, a Artifact) error {
 	defer func() { _ = archive.Close(); _ = os.Remove(archive.Name()) }()
 	if err := download(ctx, a.URL, archive); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
-			"Check that the server reaches github.com, then run eru apply again.").WithDetails(map[string]any{"url": a.URL})
+			"Check that the server reaches github.com, then run vaire apply again.").WithDetails(map[string]any{"url": a.URL})
 	}
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 	if err := Verify(archive, a.SHA256); err != nil {
 		return output.WrapError(output.CodeReleaseVerification, err, output.ExitReleaseVerification,
-			"The download does not match the sha256 pinned in eru; do not install it.").WithDetails(map[string]any{"url": a.URL, "exporter": a.Name})
+			"The download does not match the sha256 pinned in vaire; do not install it.").WithDetails(map[string]any{"url": a.URL, "exporter": a.Name})
 	}
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return err

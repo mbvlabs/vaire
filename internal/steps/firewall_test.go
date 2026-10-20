@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // showAdded is "ufw show added" on a node with public 22 closed and an
@@ -26,7 +26,7 @@ ufw allow from 203.0.113.7 to any port 5432 proto tcp
 ufw allow from 198.51.100.0/24 to any port 5432 proto tcp
 ufw allow from 2001:db8::1 to any port 5432 proto tcp`
 
-// The rules eru renders are the ones ufw prints back, so a converged
+// The rules vaire renders are the ones ufw prints back, so a converged
 // firewall shows no drift. Before, the /32 allowlist entries never matched
 // and doctor's fw.rules failed on a converged firewall.
 func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
@@ -68,7 +68,7 @@ func TestFirewallDriftNamesTheRules(t *testing.T) {
 		t.Errorf("order counts: %s", d)
 	}
 	d := firewallDrift(want, []string{RuleWGSSH, "allow 8080/tcp"}, publicSSHAbsent)
-	if !strings.Contains(d, `ufw is missing "allow 80/tcp"`) || !strings.Contains(d, `ufw has "allow 8080/tcp", which eru doesn't manage`) {
+	if !strings.Contains(d, `ufw is missing "allow 80/tcp"`) || !strings.Contains(d, `ufw has "allow 8080/tcp", which vaire doesn't manage`) {
 		t.Errorf("detail %q", d)
 	}
 	// Public 22: required before lockdown, refused after it, either way while

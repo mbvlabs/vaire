@@ -5,7 +5,7 @@ channel_root="@@CHANNEL_ROOT@@"
 release_channel="@@CHANNEL@@"
 cosign_version="3.1.3"
 
-fail() { printf 'eru installer: %s\n' "$1" >&2; exit 1; }
+fail() { printf 'vaire installer: %s\n' "$1" >&2; exit 1; }
 
 sha256_hex() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -102,37 +102,37 @@ manifest_sha256="$(awk -v key="\"${os}/${arch}\"" '
 ' "${work_dir}/manifest.json")"
 [ -n "${manifest_sha256}" ] || fail "release manifest is missing ${os}/${arch}"
 
-artifact_url="${release_base_url}/${os}/${arch}/eru"
-curl -fsSL --proto '=https' --tlsv1.2 "${artifact_url}" -o "${work_dir}/eru"
+artifact_url="${release_base_url}/${os}/${arch}/vaire"
+curl -fsSL --proto '=https' --tlsv1.2 "${artifact_url}" -o "${work_dir}/vaire"
 curl -fsSL --proto '=https' --tlsv1.2 \
-  "${artifact_url}.sigstore.json" -o "${work_dir}/eru.sigstore.json"
+  "${artifact_url}.sigstore.json" -o "${work_dir}/vaire.sigstore.json"
 # shellcheck disable=SC2086
-if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/eru" \
-  --bundle "${work_dir}/eru.sigstore.json" \
+if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/vaire" \
+  --bundle "${work_dir}/vaire.sigstore.json" \
   @@COSIGN_TRUST_ARGS@@ 2>&1)"; then
-  fail "eru signature verification failed: ${verify_out}"
+  fail "vaire signature verification failed: ${verify_out}"
 fi
-got="$(sha256_hex "${work_dir}/eru")"
+got="$(sha256_hex "${work_dir}/vaire")"
 [ "${got}" = "${manifest_sha256}" ] || fail "checksum verification failed"
-chmod 0755 "${work_dir}/eru"
+chmod 0755 "${work_dir}/vaire"
 
-smoke="$("${work_dir}/eru" version --output json)" || fail "downloaded eru failed to run"
+smoke="$("${work_dir}/vaire" version --output json)" || fail "downloaded vaire failed to run"
 smoke_version="$(printf '%s\n' "${smoke}" | sed -n 's/.*"version": "\([^"]*\)".*/\1/p' | head -1)"
-[ "${smoke_version}" = "${manifest_version}" ] || fail "downloaded eru reported ${smoke_version}, expected ${manifest_version}"
+[ "${smoke_version}" = "${manifest_version}" ] || fail "downloaded vaire reported ${smoke_version}, expected ${manifest_version}"
 
 if [ "$(id -u)" -eq 0 ]; then
   dest_dir="/usr/local/bin"
 else
-  dest_dir="${ERU_INSTALL_DIR:-$HOME/.local/bin}"
+  dest_dir="${VAIRE_INSTALL_DIR:-$HOME/.local/bin}"
   mkdir -p "${dest_dir}"
 fi
-dest="${dest_dir}/eru"
-tmp_dest="${dest_dir}/.eru-new.$$"
-cp "${work_dir}/eru" "${tmp_dest}"
+dest="${dest_dir}/vaire"
+tmp_dest="${dest_dir}/.vaire-new.$$"
+cp "${work_dir}/vaire" "${tmp_dest}"
 chmod 0755 "${tmp_dest}"
 mv "${tmp_dest}" "${dest}"
 
-printf 'eru %s installed to %s\n' "${manifest_version}" "${dest}"
+printf 'vaire %s installed to %s\n' "${manifest_version}" "${dest}"
 
 case ":${PATH}:" in
   *":${dest_dir}:"*) ;;
@@ -144,11 +144,11 @@ case ":${PATH}:" in
     ;;
 esac
 
-if [ "${ERU_INSTALL_ONLY:-0}" = 1 ]; then
+if [ "${VAIRE_INSTALL_ONLY:-0}" = 1 ]; then
   exit 0
 fi
 
-# A supported server release, where eru server init --local can run.
+# A supported server release, where vaire server init --local can run.
 supported_server() {
   [ "${os}" = linux ] && [ -r /etc/os-release ] || return 1
   # shellcheck disable=SC1091
@@ -161,7 +161,7 @@ supported_server() {
 # curl | sudo bash feeds this script on stdin, so the question goes to the
 # terminal directly.
 if [ "$(id -u)" -eq 0 ] && supported_server && { : </dev/tty; } 2>/dev/null; then
-  printf '\nInitialise this server now (eru server init --local)? [y/N] ' >/dev/tty
+  printf '\nInitialise this server now (vaire server init --local)? [y/N] ' >/dev/tty
   answer=""
   read -r answer </dev/tty || answer=""
   case "${answer}" in
@@ -170,7 +170,7 @@ if [ "$(id -u)" -eq 0 ] && supported_server && { : </dev/tty; } 2>/dev/null; the
       exec "${dest}" server init --local </dev/tty
       ;;
   esac
-  printf '\nNext: eru server init --local, or eru --help\n'
+  printf '\nNext: vaire server init --local, or vaire --help\n'
   exit 0
 fi
-printf '\nNext: eru --help\n'
+printf '\nNext: vaire --help\n'

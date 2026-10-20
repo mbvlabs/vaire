@@ -33,7 +33,7 @@ artifacts=(
 )
 for os in linux darwin; do
   for arch in amd64 arm64; do
-    artifacts+=("${version_root}/${os}/${arch}/eru")
+    artifacts+=("${version_root}/${os}/${arch}/vaire")
   done
 done
 

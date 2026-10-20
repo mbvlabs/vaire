@@ -1,4 +1,4 @@
-// Package contexts manages the operator's files under $XDG_CONFIG_HOME/eru
+// Package contexts manages the operator's files under $XDG_CONFIG_HOME/vaire
 // (§6.3): the current context, one directory of credentials per server, and
 // the pending state of an unfinished server init.
 package contexts
@@ -13,9 +13,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -29,7 +29,7 @@ const (
 )
 
 // EnvContext overrides the current context.
-const EnvContext = "ERU_CONTEXT"
+const EnvContext = "VAIRE_CONTEXT"
 
 // NamePattern is a context name. Server names always match it.
 var NamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
@@ -54,11 +54,11 @@ type Context struct {
 	// calls ssh.confirm.
 	LockdownConfirmedAt string `toml:"lockdown_confirmed_at,omitempty" json:"lockdown_confirmed_at,omitempty"`
 	// TunnelPersist is how long the context's tunnel daemon stays up with
-	// no eru command using it, as a Go duration ("10m", "0" exits with the
-	// last command). ERU_TUNNEL_PERSIST overrides it.
+	// no vaire command using it, as a Go duration ("10m", "0" exits with the
+	// last command). VAIRE_TUNNEL_PERSIST overrides it.
 	TunnelPersist string `toml:"tunnel_persist,omitempty" json:"tunnel_persist,omitempty"`
 	CreatedAt     string `toml:"created_at" json:"created_at"`
-	EruVersion    string `toml:"eru_version" json:"eru_version"`
+	VaireVersion  string `toml:"vaire_version" json:"vaire_version"`
 }
 
 // Node is one node the context can reach: its name, hostname and WireGuard
@@ -90,9 +90,9 @@ type Credentials struct {
 	// Metrics is the /metrics endpoint credential (Phase 4). The node keeps
 	// only its bcrypt hash.
 	Metrics *MetricsCreds `json:"metrics,omitempty"`
-	// MasterPasswordHash gates eru secrets export: an argon2id hash of the
+	// MasterPasswordHash gates vaire secrets export: an argon2id hash of the
 	// master password, never the password. It travels in the secrets
-	// document so eru login carries it to another machine.
+	// document so vaire login carries it to another machine.
 	MasterPasswordHash string `json:"master_password_hash,omitempty"`
 }
 
@@ -132,16 +132,16 @@ func (c *Context) MasterHostname() string {
 	return n.Hostname
 }
 
-// Root is $XDG_CONFIG_HOME/eru, default ~/.config/eru.
+// Root is $XDG_CONFIG_HOME/vaire, default ~/.config/vaire.
 func Root() string {
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return filepath.Join(v, "eru")
+		return filepath.Join(v, "vaire")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "eru-config", "eru")
+		return filepath.Join(os.TempDir(), "vaire-config", "vaire")
 	}
-	return filepath.Join(home, ".config", "eru")
+	return filepath.Join(home, ".config", "vaire")
 }
 
 // Dir is contexts/<name>.
@@ -165,9 +165,9 @@ func ValidateName(name string) error {
 	}
 	hint := "Use lower-case letters, digits, '.', '_' and '-'."
 	if strings.ContainsAny(name, " \t") {
-		// Most likely psql's -c landing on eru's global -c (--context).
-		hint = "-c is eru's --context. To pass arguments to psql, put them after --: " +
-			"eru psql --db <db> -- -c \"select 1\"."
+		// Most likely psql's -c landing on vaire's global -c (--context).
+		hint = "-c is vaire's --context. To pass arguments to psql, put them after --: " +
+			"vaire psql --db <db> -- -c \"select 1\"."
 	}
 	return output.NewError(
 		output.CodeValidation,
@@ -217,7 +217,7 @@ func Load(name string) (*Context, error) {
 	var c Context
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&c); err != nil {
 		return nil, output.NewError(output.CodeConfig, Path(name, ContextFile)+" does not parse: "+err.Error(), output.ExitConfig,
-			"Recreate the context with eru login.")
+			"Recreate the context with vaire login.")
 	}
 	c.Name = name
 	return &c, nil
@@ -228,19 +228,19 @@ func notFound(name string) *output.CLIError {
 		output.CodeContextNotFound,
 		"context "+name+" does not exist",
 		output.ExitContext,
-		contextHint("List contexts with eru context list, or create one with eru login <secrets.age>."),
+		contextHint("List contexts with vaire context list, or create one with vaire login <secrets.age>."),
 	).WithDetails(map[string]any{"context": name})
 }
 
-// nodeMarker is the file whose presence makes this machine an eru node.
+// nodeMarker is the file whose presence makes this machine an vaire node.
 var nodeMarker = config.ClusterPath
 
-// contextHint returns hint, or on an eru node (which holds no contexts) a
+// contextHint returns hint, or on an vaire node (which holds no contexts) a
 // hint to run the command from the operator machine instead.
 func contextHint(hint string) string {
 	if _, err := os.Stat(nodeMarker); err == nil {
-		return "This machine is an eru node (" + nodeMarker + " exists) and holds no contexts. " +
-			"Run this command from your own machine; on the node, use sudo eru node run or sudo eru node selfcheck."
+		return "This machine is an vaire node (" + nodeMarker + " exists) and holds no contexts. " +
+			"Run this command from your own machine; on the node, use sudo vaire node run or sudo vaire node selfcheck."
 	}
 	return hint
 }
@@ -361,7 +361,7 @@ func SetCurrent(name string) error {
 	return transport.WriteSecretFile(filepath.Join(Root(), "config.toml"), raw)
 }
 
-// Resolve picks the context: the --context flag, then ERU_CONTEXT, then the
+// Resolve picks the context: the --context flag, then VAIRE_CONTEXT, then the
 // current context.
 func Resolve(flag string) (*Context, error) {
 	name := strings.TrimSpace(flag)
@@ -380,7 +380,7 @@ func Resolve(flag string) (*Context, error) {
 			output.CodeContextNotFound,
 			"no context is selected",
 			output.ExitContext,
-			contextHint("Run eru login <secrets.age>, or pick one with eru context use <name>."),
+			contextHint("Run vaire login <secrets.age>, or pick one with vaire context use <name>."),
 		)
 	}
 	return Load(name)

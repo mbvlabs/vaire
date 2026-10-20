@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/render"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/render"
 )
 
 const postgresClusterID = "postgres-cluster-v1"
@@ -154,7 +154,7 @@ func (s postgresCluster) Apply(ctx context.Context, cfg config.Cluster, rt engin
 			output.CodePrecondition,
 			"cluster 18/"+spec.Name+" already exists with data directory "+row.DataDir+" on port "+strconv.Itoa(row.Port),
 			output.ExitPrecondition,
-			"eru never re-creates an existing cluster. Drop it with pg_dropcluster, or move the data to match cluster.toml.",
+			"vaire never re-creates an existing cluster. Drop it with pg_dropcluster, or move the data to match cluster.toml.",
 		).WithDetails(map[string]any{
 			"reason": "cluster_mismatch", "cluster": spec.Name,
 			"existing": map[string]any{"data_directory": row.DataDir, "port": row.Port},

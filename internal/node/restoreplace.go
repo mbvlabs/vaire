@@ -15,12 +15,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -106,7 +106,7 @@ func bootstrapRestore(ctx context.Context, env *Env, p bootstrapParams) (Result,
 	raw, err := base64.StdEncoding.DecodeString(env.Req.Secrets[steps.SecretMasterBundle])
 	if err != nil || len(raw) == 0 {
 		return Result{}, output.NewError(output.CodeInputRequired, "the request has no master bundle", output.ExitInput,
-			"Run eru server init --restore from your machine; it sends the decrypted bundle.").WithDetails(map[string]any{"secret": steps.SecretMasterBundle})
+			"Run vaire server init --restore from your machine; it sends the decrypted bundle.").WithDetails(map[string]any{"secret": steps.SecretMasterBundle})
 	}
 	b, err := masterbackup.ReadTar(raw)
 	if err != nil {
@@ -166,7 +166,7 @@ func placementFresh(instance string) error {
 	if entries, err := os.ReadDir("/etc/postgresql/18"); err == nil && len(entries) > 0 {
 		return output.NewError(output.CodePrecondition,
 			"this rebuild's node already has PostgreSQL clusters; the bundle was placed before",
-			output.ExitPrecondition, "Continue with eru server init --restore --resume.").
+			output.ExitPrecondition, "Continue with vaire server init --restore --resume.").
 			WithDetails(map[string]any{"reason": "already_placed"})
 	}
 	return nil
@@ -286,8 +286,8 @@ func placedAs(p string) (owner, group string, mode os.FileMode, err error) {
 // placeDir creates dir under root, and each missing parent, each with its
 // own mode from placeDirs (0755 for any other), set with chmod after the
 // mkdir so the umask can't narrow it. os.MkdirAll would give every parent
-// the leaf's mode: /etc/eru/acme placed first made /etc/eru 0700, and
-// postgres could no longer reach /etc/eru/tls. An existing directory is
+// the leaf's mode: /etc/vaire/acme placed first made /etc/vaire 0700, and
+// postgres could no longer reach /etc/vaire/tls. An existing directory is
 // left as it is.
 func placeDir(root, dir string) error {
 	if parent := filepath.Dir(dir); parent != dir {

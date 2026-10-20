@@ -1,0 +1,12 @@
+# managed by vaire - do not edit
+[Unit]
+Description=vaire epoch fence check (Phase 5)
+After=network-online.target
+Wants=network-online.target
+Before=pgbouncer.service vaire-pgbouncer-session.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vaire node run fence-check
+TimeoutStartSec=30
+[Install]
+WantedBy=multi-user.target

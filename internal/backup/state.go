@@ -6,14 +6,14 @@ import (
 	"sort"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 )
 
 // RecordsPath holds the node's durable records, beside state.json (which
 // keeps only jobs and the lockdown flags). The master backup carries it.
-const RecordsPath = "/var/lib/eru/records.json"
+const RecordsPath = "/var/lib/vaire/records.json"
 
 // RecordsMode is records.json's mode; root owns it.
 const RecordsMode os.FileMode = 0o600
@@ -24,7 +24,7 @@ const recordsLockPath = RecordsPath + ".lock"
 // maxDrills is how many drill results records.json keeps per database.
 const maxDrills = 12
 
-// Records is /var/lib/eru/records.json: open restores per database, restore
+// Records is /var/lib/vaire/records.json: open restores per database, restore
 // leftovers, drills, the dropped stanzas and the last backup, verify and dump
 // results per database, and the timelines restore undo went back to.
 type Records struct {
@@ -363,7 +363,7 @@ func decode(raw []byte) (Records, error) {
 				output.CodePrecondition,
 				"the node records file is corrupt",
 				output.ExitPrecondition,
-				"Inspect "+RecordsPath+" and fix or remove it. eru never resets it on its own.",
+				"Inspect "+RecordsPath+" and fix or remove it. vaire never resets it on its own.",
 			).WithDetails(map[string]any{"reason": "records_corrupt", "path": RecordsPath})
 		}
 	}

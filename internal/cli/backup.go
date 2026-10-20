@@ -11,20 +11,20 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/spf13/cobra"
 )
 
-// backupSettings are the answers of eru backup setup and of init's Backups
+// backupSettings are the answers of vaire backup setup and of init's Backups
 // page.
 type backupSettings struct {
 	Provider      string
@@ -41,7 +41,7 @@ type backupSettings struct {
 	RetentionFull int
 }
 
-// backupFlagNames maps the settings to flag names: eru backup setup uses
+// backupFlagNames maps the settings to flag names: vaire backup setup uses
 // --provider, server init --backup-provider and its --db-*-schedule flags.
 type backupFlagNames struct {
 	Provider, Endpoint, Region, Bucket, Prefix, URIStyle, KeyID, SecretStdin, SecretFile string
@@ -138,7 +138,7 @@ func fillPreset(s *backupSettings) {
 }
 
 // requireBackupSettings fails with input_required naming the first missing
-// value when eru must not prompt.
+// value when vaire must not prompt.
 func requireBackupSettings(cmd *cobra.Command, names backupFlagNames, s backupSettings, action string) error {
 	checks := []struct {
 		ok   bool
@@ -280,7 +280,7 @@ func prepareKit(kit *contexts.BackupCreds, s backupSettings, wasConfigured bool)
 		return nil, false, output.NewError(output.CodeInputRequired,
 			"backups are on, but this machine's context has no recovery kit for "+s.Bucket+"/"+s.Prefix,
 			output.ExitInput,
-			"eru never makes a new cipher for an existing repository. Log in from a current transfer bundle (eru login), then retry.").
+			"vaire never makes a new cipher for an existing repository. Log in from a current transfer bundle (vaire login), then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 	generated := false
@@ -354,7 +354,7 @@ func addRecoveryKit(secretValues map[string]string, kit *contexts.BackupCreds) {
 }
 
 // requirePackagesCurrent refuses a node whose package step would still run,
-// such as one set up before pgBackRest was part of it. eru apply is the
+// such as one set up before pgBackRest was part of it. vaire apply is the
 // update path; backup setup doesn't install packages itself.
 func requirePackagesCurrent(ctx context.Context, caller remote.Caller, p *progress) error {
 	reply, err := p.call(ctx, caller, "plan", map[string]any{"steps": steps.PackagesStepIDs()}, remote.CallOptions{OnEvent: p.event})
@@ -371,7 +371,7 @@ func requirePackagesCurrent(ctx context.Context, caller remote.Caller, p *progre
 	return output.NewError(output.CodePrecondition,
 		"the node's packages are out of date: pgBackRest isn't installed yet",
 		output.ExitPrecondition,
-		"Run eru apply to bring the node up to date, then run eru backup setup again.",
+		"Run vaire apply to bring the node up to date, then run vaire backup setup again.",
 	).WithDetails(map[string]any{"reason": "node_outdated", "steps": steps.PackagesStepIDs()})
 }
 
@@ -516,15 +516,15 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 			stored = true
 		}
 	}
-	next := []string{"eru backup list"}
+	next := []string{"vaire backup list"}
 	if generated && !stored {
 		warnings = append(warnings, output.Warning{
 			Code:    "recovery_kit_changed",
-			Message: "the recovery kit changed; run eru secrets export and store the new handoff",
+			Message: "the recovery kit changed; run vaire secrets export and store the new handoff",
 		})
 	}
 	if !stored {
-		next = append([]string{"eru secrets export"}, next...)
+		next = append([]string{"vaire secrets export"}, next...)
 	}
 	message := []string{fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total)}
 	if list, err := p.call(ctx, s.node, "backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
@@ -668,11 +668,11 @@ func backupDatabases(cmd *cobra.Command, s *session, p *progress) ([]string, err
 	}
 	if len(awaiting) > 0 {
 		s.warnings = append(s.warnings, output.Warning{Code: "awaiting_recovery",
-			Message: "skipped, awaiting recovery after the rebuild: " + strings.Join(awaiting, ", ") + " (eru db recover --all)"})
+			Message: "skipped, awaiting recovery after the rebuild: " + strings.Join(awaiting, ", ") + " (vaire db recover --all)"})
 	}
 	if len(names) == 0 {
 		return nil, output.NewError(output.CodePrecondition, "there is no database to back up", output.ExitPrecondition,
-			"Create one with eru db create <name>, or recover the databases with eru db recover --all.").WithDetails(map[string]any{"reason": "no_databases"})
+			"Create one with vaire db create <name>, or recover the databases with vaire db recover --all.").WithDetails(map[string]any{"reason": "no_databases"})
 	}
 	return names, nil
 }
@@ -801,9 +801,9 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 	if detached != nil {
 		return detachedEach(cmd, s, *detached, "the backup", notStarted(dbs, outcomes), func(db string) string {
 			if kind != "" {
-				return "eru backup now --db " + db + " --type " + kind
+				return "vaire backup now --db " + db + " --type " + kind
 			}
-			return "eru backup now --db " + db
+			return "vaire backup now --db " + db
 		})
 	}
 	if err := failedOutcomes("the backup", "backups", outcomes); err != nil {
@@ -813,7 +813,7 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 		Data:     map[string]any{"backups": outcomes},
 		Message:  strings.Join(lines, "\n"),
 		Warnings: append(s.warnings, warnings...),
-		Next:     []string{"eru backup list"},
+		Next:     []string{"vaire backup list"},
 	})
 }
 
@@ -837,10 +837,10 @@ func detachedEach(cmd *cobra.Command, s *session, jobID, what string, rest []str
 		commands[i] = command(db)
 	}
 	message := "Detached; " + what + " keeps running on the node."
-	next := []string{"eru job list"}
+	next := []string{"vaire job list"}
 	if jobID != "" {
-		message += " Re-attach with eru job follow " + jobID + "."
-		next = []string{"eru job follow " + jobID}
+		message += " Re-attach with vaire job follow " + jobID + "."
+		next = []string{"vaire job follow " + jobID}
 	}
 	message += "\nNot started for " + strings.Join(rest, ", ") + ": each job takes the heavy-I/O lock, so once this one is done, start the rest with " +
 		strings.Join(commands, ", then ") + "."
@@ -1077,7 +1077,7 @@ func runBackupVerify(cmd *cobra.Command, _ []string) error {
 		})
 	if detached != nil {
 		return detachedEach(cmd, s, *detached, "the verify", notStarted(dbs, outcomes), func(db string) string {
-			return "eru backup verify --db " + db
+			return "vaire backup verify --db " + db
 		})
 	}
 	if err := failedOutcomes("pgbackrest verify", "verifies", outcomes); err != nil {

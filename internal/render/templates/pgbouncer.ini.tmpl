@@ -1,4 +1,4 @@
-; managed by eru - do not edit; use cluster.toml
+; managed by vaire - do not edit; use cluster.toml
 [databases]
 {{- range .Databases }}
 {{ .Name }} = host=/var/run/postgresql port={{ .Port }}{{ if .DBName }} dbname={{ .DBName }}{{ end }} auth_dbname={{ .Name }}__auth max_db_connections={{ .MaxConnections }}
@@ -19,7 +19,7 @@ auth_user = pgbouncer_auth
 {{- if .AdminAuthDB }}
 auth_dbname = {{ .AdminAuthDB }}
 {{- end }}
-auth_query = SELECT usename, passwd FROM eru.{{ .AuthFunction }}($1)
+auth_query = SELECT usename, passwd FROM vaire.{{ .AuthFunction }}($1)
 pool_mode = {{ .Mode }}
 {{- if eq .Mode "transaction" }}
 max_prepared_statements = 200
@@ -40,11 +40,11 @@ ignore_startup_parameters = extra_float_digits
 track_extra_parameters = IntervalStyle,search_path,default_transaction_read_only,role
 {{- end }}
 client_tls_sslmode = {{ .ClientTLS }}
-client_tls_cert_file = /etc/eru/tls/server.crt
-client_tls_key_file = /etc/eru/tls/server.key
+client_tls_cert_file = /etc/vaire/tls/server.crt
+client_tls_key_file = /etc/vaire/tls/server.key
 client_tls_protocols = tlsv1.2,tlsv1.3
 server_tls_sslmode = disable
-admin_users = eru_admin
-stats_users = eru_monitor
+admin_users = vaire_admin
+stats_users = vaire_monitor
 log_connections = 1
 log_disconnections = 1

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // An old completed journal entry must not hide an access-policy upgrade.
@@ -59,44 +59,44 @@ func TestRolesAccessPolicyUpgrade(t *testing.T) {
 	}
 }
 
-// On a protected database eru_admin is no member of the owner role and
+// On a protected database vaire_admin is no member of the owner role and
 // holds neither pg_signal_backend nor pg_maintain, so its password alone can
 // only read; lifting the protection gives the owner membership back.
 func TestAdminAccessSQL(t *testing.T) {
 	open := AdminAccessSQL(config.ClusterSpec{Name: "app"})
-	if !strings.Contains(open, `GRANT "app_owner" TO eru_admin WITH ADMIN OPTION;`) || !strings.Contains(open, "REVOKE pg_read_all_data FROM eru_admin") {
+	if !strings.Contains(open, `GRANT "app_owner" TO vaire_admin WITH ADMIN OPTION;`) || !strings.Contains(open, "REVOKE pg_read_all_data FROM vaire_admin") {
 		t.Fatalf("unprotected:\n%s", open)
 	}
 	if !strings.Contains(adminGrants(config.ClusterSpec{Name: "app"}), "pg_signal_backend") {
-		t.Fatal("unprotected: eru_admin must hold pg_signal_backend for maint kill")
+		t.Fatal("unprotected: vaire_admin must hold pg_signal_backend for maint kill")
 	}
 
 	spec := config.ClusterSpec{Name: "app", Protected: true}
 	shut := AdminAccessSQL(spec)
 	for _, want := range []string{
-		"GRANT pg_read_all_data TO eru_admin;",
-		"REVOKE pg_signal_backend FROM eru_admin;",
-		"REVOKE pg_maintain FROM eru_admin;",
-		"REVOKE %I FROM eru_admin GRANTED BY %I CASCADE",
-		"RAISE EXCEPTION 'eru_admin is still a member of %'",
+		"GRANT pg_read_all_data TO vaire_admin;",
+		"REVOKE pg_signal_backend FROM vaire_admin;",
+		"REVOKE pg_maintain FROM vaire_admin;",
+		"REVOKE %I FROM vaire_admin GRANTED BY %I CASCADE",
+		"RAISE EXCEPTION 'vaire_admin is still a member of %'",
 		"pg_terminate_backend(pid)",
 	} {
 		if !strings.Contains(shut, want) {
 			t.Errorf("protected: missing %q in\n%s", want, shut)
 		}
 	}
-	if strings.Contains(shut, "TO eru_admin WITH ADMIN OPTION") {
+	if strings.Contains(shut, "TO vaire_admin WITH ADMIN OPTION") {
 		t.Fatalf("protected still grants the owner role:\n%s", shut)
 	}
 	if strings.Contains(adminGrants(spec), "pg_signal_backend") {
-		t.Fatal("protected: eru_admin must not hold pg_signal_backend")
+		t.Fatal("protected: vaire_admin must not hold pg_signal_backend")
 	}
 	if strings.Contains(adminGrants(spec), "pg_maintain") {
-		t.Fatal("protected: eru_admin must not hold pg_maintain (it could LOCK TABLE the application's tables)")
+		t.Fatal("protected: vaire_admin must not hold pg_maintain (it could LOCK TABLE the application's tables)")
 	}
 	for _, keep := range []string{"pg_monitor", "pg_use_reserved_connections"} {
 		if !strings.Contains(adminGrants(spec), keep) {
-			t.Errorf("protected: eru_admin lost %s", keep)
+			t.Errorf("protected: vaire_admin lost %s", keep)
 		}
 	}
 }

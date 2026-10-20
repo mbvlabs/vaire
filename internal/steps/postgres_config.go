@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 const postgresConfigID = "postgres-config-v1"
@@ -36,22 +36,22 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) [
 		return managedFile{Path: path, Content: string(content), Mode: mode, Owner: pgFileOwner, Group: pgFileGroup}
 	}
 	return []managedFile{
-		conf(confD+"/10-eru-tuning.conf", render.TuningConf(res), 0o644),
-		conf(confD+"/20-eru-security.conf", render.SecurityConf(spec.Port), 0o644),
-		conf(confD+"/30-eru-extensions.conf", render.ExtensionsConf(spec, res), 0o644),
-		conf(confD+"/40-eru-backup.conf", render.BackupConf(cfg, spec), 0o644),
-		conf(confD+"/50-eru-settings.conf", render.SettingsConf(cfg, spec), 0o644),
+		conf(confD+"/10-vaire-tuning.conf", render.TuningConf(res), 0o644),
+		conf(confD+"/20-vaire-security.conf", render.SecurityConf(spec.Port), 0o644),
+		conf(confD+"/30-vaire-extensions.conf", render.ExtensionsConf(spec, res), 0o644),
+		conf(confD+"/40-vaire-backup.conf", render.BackupConf(cfg, spec), 0o644),
+		conf(confD+"/50-vaire-settings.conf", render.SettingsConf(cfg, spec), 0o644),
 		conf(dir+"/pg_hba.conf", render.HBA(), 0o640),
 		conf(dir+"/pg_ident.conf", render.Ident(cfg), 0o640),
 	}
 }
 
-// WriteBackupConf writes spec's 40-eru-backup.conf as postgres-config-v1
+// WriteBackupConf writes spec's 40-vaire-backup.conf as postgres-config-v1
 // renders it, without reloading the cluster. db recover uses it to arm the
 // recovered data's archiving before its first start (Phase 5): the empty
 // scaffold was built without archiving.
 func WriteBackupConf(cfg config.Cluster, spec config.ClusterSpec) error {
-	return writeFileOwned(PGConfD(spec.Name)+"/40-eru-backup.conf", string(render.BackupConf(cfg, spec)), 0o644, pgFileOwner, pgFileGroup)
+	return writeFileOwned(PGConfD(spec.Name)+"/40-vaire-backup.conf", string(render.BackupConf(cfg, spec)), 0o644, pgFileOwner, pgFileGroup)
 }
 
 // postgresConfig renders one cluster's configuration from its tuning
@@ -190,7 +190,7 @@ func ensureIncludeDir(cluster string) error {
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
-	content += "\n# managed by eru\ninclude_dir = 'conf.d'\n"
+	content += "\n# managed by vaire\ninclude_dir = 'conf.d'\n"
 	return writeFileOwned(path, content, 0o644, pgFileOwner, pgFileGroup)
 }
 

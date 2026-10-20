@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -43,15 +43,15 @@ func (c *Cluster) Set(key, value string) error {
 	return nil
 }
 
-// immutableHint names the keys eru refuses to change.
+// immutableHint names the keys vaire refuses to change.
 const immutableHint = "schema, name, nodes.*.wg_address, transport.* and clusters.*.name, .port, .stanza and .follows " +
-	"cannot be changed once they exist. A cluster's port and stanza are assigned by eru db create."
+	"cannot be changed once they exist. A cluster's port and stanza are assigned by vaire db create."
 
 // immutableClusterKeys are the [[clusters]] keys fixed at create. follows
 // arrives with followers in Phase 6.
 var immutableClusterKeys = map[string]bool{"name": true, "port": true, "stanza": true, "follows": true}
 
-// immutableKey reports whether a dotted key names a value eru refuses to change.
+// immutableKey reports whether a dotted key names a value vaire refuses to change.
 func immutableKey(segs []string) bool {
 	switch segs[0] {
 	case "schema", "name", "transport":
@@ -238,7 +238,7 @@ func setScalar(field reflect.Value, value string) error {
 		field.Set(reflect.ValueOf(list))
 	default:
 		return output.NewError(output.CodeValidation, "this key cannot be set from the command line", output.ExitConfig,
-			"Edit cluster.toml with eru config edit instead.")
+			"Edit cluster.toml with vaire config edit instead.")
 	}
 	return nil
 }
@@ -276,7 +276,7 @@ func unknownKeyError(key string) *output.CLIError {
 		output.CodeConfig,
 		"unknown key "+key,
 		output.ExitConfig,
-		"Run eru config show to see the keys, or eru config edit for a full view.",
+		"Run vaire config show to see the keys, or vaire config edit for a full view.",
 	).WithDetails(map[string]any{"key": key})
 }
 

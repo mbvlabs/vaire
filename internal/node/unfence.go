@@ -8,14 +8,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-// UnfenceResult is what eru node unfence did.
+// UnfenceResult is what vaire node unfence did.
 type UnfenceResult struct {
 	WasFenced bool   `json:"was_fenced"`
 	DryRun    bool   `json:"dry_run,omitempty"`
@@ -24,7 +24,7 @@ type UnfenceResult struct {
 	Epoch     int64  `json:"epoch,omitempty"`
 }
 
-// ReasonReclaim is the epoch reason of eru node unfence --reclaim.
+// ReasonReclaim is the epoch reason of vaire node unfence --reclaim.
 const ReasonReclaim = "reclaim"
 
 // Unfence lifts the fence on this node (Phase 5): run on the node as root,
@@ -33,7 +33,7 @@ const ReasonReclaim = "reclaim"
 // instance (a rebuild elsewhere), it refuses unless reclaim is set: reclaim
 // writes a newer epoch naming this node, which fences that other instance,
 // so it is only for a rebuild that was abandoned and whose VPS is gone. It
-// then removes the fence marker; eru apply brings the timers and poolers
+// then removes the fence marker; vaire apply brings the timers and poolers
 // back.
 func Unfence(ctx context.Context, confirm string, reclaim, dryRun bool) (UnfenceResult, error) {
 	cfg, err := config.LoadCluster(config.ClusterPath)
@@ -52,7 +52,7 @@ func Unfence(ctx context.Context, confirm string, reclaim, dryRun bool) (Unfence
 		return res, nil
 	}
 	if !dryRun && os.Geteuid() != 0 {
-		return res, rootRequired("eru node unfence")
+		return res, rootRequired("vaire node unfence")
 	}
 	if cfg.BackupConfigured() {
 		if err := unfenceBucket(ctx, cfg, reclaim, dryRun, &res); err != nil {

@@ -10,19 +10,19 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/pelletier/go-toml/v2"
 )
 
 // ClusterPath is the desired state on the central command.
-const ClusterPath = "/etc/eru/cluster.toml"
+const ClusterPath = "/etc/vaire/cluster.toml"
 
 // Dir holds cluster.toml, node.toml and operators.toml. It is 0755: the
-// services read /etc/eru/tls through it, and the archive wrapper (running as
-// postgres) stats /etc/eru/fenced.
-const Dir = "/etc/eru"
+// services read /etc/vaire/tls through it, and the archive wrapper (running as
+// postgres) stats /etc/vaire/fenced.
+const Dir = "/etc/vaire"
 
-// DirMode is Dir's mode; FileMode is the mode of the files eru writes in it
+// DirMode is Dir's mode; FileMode is the mode of the files vaire writes in it
 // (cluster.toml, node.toml, operators.toml), owned by root.
 const (
 	DirMode  os.FileMode = 0o755
@@ -38,7 +38,7 @@ const (
 	DefaultListenPort      = 51820
 	DefaultCentralWG       = "10.42.0.1"
 	DefaultFirstOperatorWG = "10.42.255.1"
-	DefaultAdminUser       = "eru"
+	DefaultAdminUser       = "vaire"
 	DefaultSwapMB          = 1024
 	DefaultTimezone        = "UTC"
 	DefaultDataRoot        = "/var/lib/postgresql/18"
@@ -107,7 +107,7 @@ type NodeSpec struct {
 }
 
 // Server is [server]. DataRoot holds one directory per PostgreSQL cluster.
-// MemoryReserve is what the OS, the poolers, nginx and eru keep; empty means
+// MemoryReserve is what the OS, the poolers, nginx and vaire keep; empty means
 // max(512MiB, 25% of RAM).
 type Server struct {
 	AdminUser     string `toml:"admin_user"`
@@ -298,7 +298,7 @@ func LoadCluster(path string) (Cluster, error) {
 				output.CodeClusterNotInitialized,
 				"this node has no cluster.toml",
 				output.ExitContext,
-				"Initialise the cluster first with eru server init.",
+				"Initialise the cluster first with vaire server init.",
 			).WithDetails(map[string]any{"path": path})
 		}
 		return Cluster{}, configError(path, err)
@@ -432,7 +432,7 @@ func (c Cluster) Encode() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte("# managed by eru: change it with eru config set or eru config edit\n"), raw...), nil
+	return append([]byte("# managed by vaire: change it with vaire config set or vaire config edit\n"), raw...), nil
 }
 
 var (
@@ -453,16 +453,16 @@ var (
 	schedulePattern = regexp.MustCompile(`^[A-Za-z0-9 *:,./~+-]{1,120}$`)
 )
 
-// reservedSettings are the settings eru owns; a user override is rejected.
+// reservedSettings are the settings vaire owns; a user override is rejected.
 var reservedSettings = []string{
 	"allow_alter_system", "listen_addresses", "port", "password_encryption",
 	"shared_preload_libraries", "data_directory", "hba_file", "ident_file",
 }
 
-// reservedSettingPrefixes are the setting families eru owns.
+// reservedSettingPrefixes are the setting families vaire owns.
 var reservedSettingPrefixes = []string{"ssl", "archive_", "include"}
 
-// isReservedSetting reports whether key is one eru writes itself.
+// isReservedSetting reports whether key is one vaire writes itself.
 func isReservedSetting(key string) bool {
 	for _, name := range reservedSettings {
 		if key == name {
@@ -578,7 +578,7 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 		return
 	}
 	if c.Domain == "" {
-		add("domain is required (set it with eru config set domain <fqdn>)")
+		add("domain is required (set it with vaire config set domain <fqdn>)")
 	}
 	switch c.TLS.Mode {
 	case "acme", "self-signed":
@@ -624,7 +624,7 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 			add("postgres.settings key %q must match %s", key, SettingKeyPattern)
 		}
 		if isReservedSetting(key) {
-			add("postgres.settings key %q is managed by eru and cannot be overridden", key)
+			add("postgres.settings key %q is managed by vaire and cannot be overridden", key)
 		}
 	}
 	c.validateClusters(add)

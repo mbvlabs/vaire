@@ -16,15 +16,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/state"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/state"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // Restore source kinds beyond the pgBackRest targets.
@@ -74,7 +74,7 @@ func restoreInProgress(db, action string) error {
 	return output.NewError(output.CodePrecondition,
 		"a restore of "+db+" is open ("+r.Phase+"); "+action+" waits until it is promoted or aborted",
 		output.ExitPrecondition,
-		"Finish it with eru restore promote "+db+" or eru restore abort "+db+".").
+		"Finish it with vaire restore promote "+db+" or vaire restore abort "+db+".").
 		WithDetails(map[string]any{"reason": "restore_in_progress", "database": db, "restore_id": r.ID})
 }
 
@@ -131,9 +131,9 @@ func restoringInTheWay(ctx context.Context, cfg config.Cluster, db string) error
 	if !steps.ClusterExists(ctx, name) && statErr != nil {
 		return nil
 	}
-	hint := "Drop it with eru restore abort " + db + "."
+	hint := "Drop it with vaire restore abort " + db + "."
 	if _, ok := cfg.ClusterByName(name); ok {
-		hint = "It is the database " + name + "; rename one of them or drop it with eru db drop " + name + "."
+		hint = "It is the database " + name + "; rename one of them or drop it with vaire db drop " + name + "."
 	}
 	return output.NewError(output.CodePrecondition, "cluster 18/"+name+" is in the way of a restore of "+db, output.ExitPrecondition, hint).
 		WithDetails(map[string]any{"reason": "restoring_exists", "cluster": name})
@@ -242,7 +242,7 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 		}
 		if _, ok := info.Latest(); !ok {
 			return "", output.NewError(output.CodePrecondition, "the repository has no backup", output.ExitPrecondition,
-				"Take one with eru backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
+				"Take one with vaire backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
 		}
 		return "latest", nil
 	case backup.TargetTime:
@@ -269,13 +269,13 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 		}
 		if _, ok := info.Find(p.Set); !ok {
 			return "", output.NewError(output.CodePrecondition, "there is no backup set "+p.Set, output.ExitPrecondition,
-				"List the sets with eru backup list.").WithDetails(map[string]any{"reason": "set_not_found"})
+				"List the sets with vaire backup list.").WithDetails(map[string]any{"reason": "set_not_found"})
 		}
 		return "set " + p.Set, nil
 	case targetDump:
 		if sec[steps.SecretBackupAgeIdentity] == "" {
 			return "", output.NewError(output.CodeInputRequired, "a restore from a dump needs the age identity from the recovery kit", output.ExitInput,
-				"Run the restore with an eru that has the recovery kit (eru login from a transfer bundle made with eru secrets export); it sends the identity with the request.").WithDetails(map[string]any{"secret": steps.SecretBackupAgeIdentity})
+				"Run the restore with an vaire that has the recovery kit (vaire login from a transfer bundle made with vaire secrets export); it sends the identity with the request.").WithDetails(map[string]any{"secret": steps.SecretBackupAgeIdentity})
 		}
 		target, _, err := steps.BackupTarget(cfg)
 		if err != nil {
@@ -291,7 +291,7 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 			}
 		}
 		return "", output.NewError(output.CodePrecondition, "there is no dump "+p.Dump+" of "+p.Database, output.ExitPrecondition,
-			"List the dumps with eru dump list "+p.Database+".").WithDetails(map[string]any{"reason": "dump_not_found"})
+			"List the dumps with vaire dump list "+p.Database+".").WithDetails(map[string]any{"reason": "dump_not_found"})
 	}
 	return "", output.NewError(output.CodeUsage, "kind must be latest, time, set or dump", output.ExitUsage, "")
 }
@@ -309,7 +309,7 @@ func olderStanzaHint(err error, db, stanza string) error {
 	if !ok || d.Stanza == stanza {
 		return err
 	}
-	return withHint(err, "Points before "+d.DroppedAt+" are in the older stanza "+d.Stanza+" (kept until "+d.ExpiresAt+"; eru backup list --db "+db+"), which eru restore doesn't read.")
+	return withHint(err, "Points before "+d.DroppedAt+" are in the older stanza "+d.Stanza+" (kept until "+d.ExpiresAt+"; vaire backup list --db "+db+"), which vaire restore doesn't read.")
 }
 
 // restoreSpace checks room beside the live data directory for one copy of
@@ -355,7 +355,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 		res["phase"] = "promoted"
 		res["promoted"] = promoted
 	} else if err := applyPoolers(ctx, env.Cluster, rt, env.Report); err != nil {
-		res["pooler_warning"] = "the session pooler was not reloaded, so eru sql --db " + backup.RestoringName(p.Database) + " fails until eru apply: " + err.Error()
+		res["pooler_warning"] = "the session pooler was not reloaded, so vaire sql --db " + backup.RestoringName(p.Database) + " fails until vaire apply: " + err.Error()
 	}
 	steps.WriteMetrics(env.Cluster)
 	return res, nil
@@ -434,7 +434,7 @@ func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int,
 }
 
 // loadFromDump creates the empty cluster m, copies the live cluster's roles
-// into it, creates the database with eru's grants, then downloads and
+// into it, creates the database with vaire's grants, then downloads and
 // decrypts the dump with the age identity the operator sent for this job
 // and loads it.
 func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, spec config.ClusterSpec, m *backup.Materialised) ([]string, error) {
@@ -454,7 +454,7 @@ func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, spec config
 		return nil, err
 	}
 	local := m.PG()
-	// The copy holds the live database's roles, so its eru_admin follows
+	// The copy holds the live database's roles, so its vaire_admin follows
 	// the live database's protection: on a protected database it can only
 	// read and a write needs a code (db.write-access), exactly as on the
 	// live one, so a promote cannot launder the protection away.
@@ -520,7 +520,7 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 	r, ok := bs.OpenRestore(p.Database)
 	if !ok || r.Phase != backup.PhaseReady {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no restore of "+p.Database+" ready to promote", output.ExitPrecondition,
-			"Start one with eru restore "+p.Database+", and check eru restore status.").WithDetails(map[string]any{"reason": "no_ready_restore"})
+			"Start one with vaire restore "+p.Database+", and check vaire restore status.").WithDetails(map[string]any{"reason": "no_ready_restore"})
 	}
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "restore": r, "dry_run": true}}, nil
@@ -616,7 +616,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	}
 	resume()
 	if err != nil {
-		return nil, withHint(err, "Read eru logs postgres --db "+db+" and eru restore status "+db+"; the old data is in the cluster "+aside+".")
+		return nil, withHint(err, "Read vaire logs postgres --db "+db+" and vaire restore status "+db+"; the old data is in the cluster "+aside+".")
 	}
 	took := time.Since(start)
 	newStanza := ""
@@ -660,7 +660,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		}
 	}
 	if warn != nil {
-		data["warning"] = output.Warning{Code: "after_cutover_failed", Message: db + " is restored, but " + warn.Error() + "; run eru apply, then eru backup now --db " + db + " --type full"}
+		data["warning"] = output.Warning{Code: "after_cutover_failed", Message: db + " is restored, but " + warn.Error() + "; run vaire apply, then vaire backup now --db " + db + " --type full"}
 	}
 	steps.WriteMetrics(cfg)
 	return data, nil
@@ -775,7 +775,7 @@ func startFullBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime,
 	if !cfg.BackupConfigured() {
 		return nil
 	}
-	return rt.Shell.Exec(ctx, step, engine.Command{Name: "systemctl", Args: []string{"start", "--no-block", "eru-backup-full@" + db + ".service"}}, report)
+	return rt.Shell.Exec(ctx, step, engine.Command{Name: "systemctl", Args: []string{"start", "--no-block", "vaire-backup-full@" + db + ".service"}}, report)
 }
 
 func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
@@ -851,7 +851,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	}
 	resume()
 	if err != nil {
-		return Result{}, withHint(err, "Read eru logs postgres --db "+p.Database+", then run eru restore undo "+p.Database+" again: it resumes; the restored data is in the cluster "+aside+".")
+		return Result{}, withHint(err, "Read vaire logs postgres --db "+p.Database+", then run vaire restore undo "+p.Database+" again: it resumes; the restored data is in the cluster "+aside+".")
 	}
 	timeline, err := backup.Timeline(ctx, local)
 	if err != nil {
@@ -902,7 +902,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	}
 	if err != nil {
 		warnings = append(warnings, output.Warning{Code: "after_cutover_failed",
-			Message: p.Database + " is back, but " + err.Error() + "; run eru apply, then eru backup now --db " + p.Database + " --type full"})
+			Message: p.Database + " is back, but " + err.Error() + "; run vaire apply, then vaire backup now --db " + p.Database + " --type full"})
 	}
 	steps.WriteMetrics(cfg)
 	return Result{Data: data, Warnings: warnings}, nil
@@ -935,7 +935,7 @@ func planUndo(bs backup.Records, db string) (backup.Undo, bool, error) {
 	last := leftovers[len(leftovers)-1]
 	if fromUndo(last) {
 		return backup.Undo{}, false, output.NewError(output.CodePrecondition, db+" was already undone; nothing to undo", output.ExitPrecondition,
-			"The restored data it left is kept as the stopped cluster "+last.Name+"; eru restore cleanup "+db+" drops it.").
+			"The restored data it left is kept as the stopped cluster "+last.Name+"; vaire restore cleanup "+db+" drops it.").
 			WithDetails(map[string]any{"reason": "already_undone", "aside": last.Name})
 	}
 	return backup.Undo{From: last}, false, nil
@@ -947,15 +947,15 @@ func noOpenRestore(bs backup.Records, db string) error {
 	reason, msg, hint := "no_open_restore", "there is no open restore of "+db, ""
 	if _, ok := bs.Undoing[db]; ok {
 		reason, msg = "undo_in_progress", "there is no open restore of "+db+"; an undo of its last restore stopped part way"
-		hint = "Finish it with eru restore undo " + db + " --confirm " + db + "/restore (it resumes)."
+		hint = "Finish it with vaire restore undo " + db + " --confirm " + db + "/restore (it resumes)."
 	} else if leftovers := bs.LeftoversOf(db); len(leftovers) > 0 {
 		last := leftovers[len(leftovers)-1]
 		if fromUndo(last) {
 			reason, msg = "restore_undone", "there is no open restore of "+db+"; its last restore was promoted and then undone"
-			hint = "The restored data is kept as the stopped cluster " + last.Name + "; eru restore cleanup " + db + " drops it."
+			hint = "The restored data is kept as the stopped cluster " + last.Name + "; vaire restore cleanup " + db + " drops it."
 		} else {
 			reason, msg = "restore_promoted", "there is no open restore of "+db+"; its last restore was promoted already"
-			hint = "eru restore undo " + db + " swaps the old data (the cluster " + last.Name + ") back in; eru restore cleanup " + db + " drops it."
+			hint = "vaire restore undo " + db + " swaps the old data (the cluster " + last.Name + ") back in; vaire restore cleanup " + db + " drops it."
 		}
 	}
 	return output.NewError(output.CodePrecondition, msg, output.ExitPrecondition, hint).WithDetails(map[string]any{"reason": reason})
@@ -981,7 +981,7 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 		}
 		if job, ok := st.Job(r.ID); ok && !job.Final() {
 			return Result{}, output.NewError(output.CodePrecondition, "the restore of "+p.Database+" is still materialising", output.ExitPrecondition,
-				"Wait for it (eru job follow "+r.ID+"), then abort.").WithDetails(map[string]any{"reason": "restore_running", "job_id": r.ID})
+				"Wait for it (vaire job follow "+r.ID+"), then abort.").WithDetails(map[string]any{"reason": "restore_running", "job_id": r.ID})
 		}
 	}
 	aside := r.Aside
@@ -993,7 +993,7 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 		// swapped in, and the old data is aside. Dropping the record would
 		// lose both.
 		return Result{}, output.NewError(output.CodePrecondition, "the restored copy of "+p.Database+" is already swapped in by a promote that stopped part way; the old data is the cluster "+aside,
-			output.ExitPrecondition, "Finish it with eru restore promote "+p.Database+" --confirm "+p.Database+"/restore (it resumes), then eru restore undo "+p.Database+" to go back.").
+			output.ExitPrecondition, "Finish it with vaire restore promote "+p.Database+" --confirm "+p.Database+"/restore (it resumes), then vaire restore undo "+p.Database+" to go back.").
 			WithDetails(map[string]any{"reason": "restore_swapped_in", "aside": aside})
 	}
 	if env.Req.DryRun {
@@ -1018,7 +1018,7 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	var warnings []output.Warning
 	if err := reloadPoolers(ctx, env, env.Cluster); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
-			Message: "the session pooler still lists " + backup.RestoringName(p.Database) + " until eru apply: " + err.Error()})
+			Message: "the session pooler still lists " + backup.RestoringName(p.Database) + " until vaire apply: " + err.Error()})
 	}
 	steps.WriteMetrics(env.Cluster)
 	return Result{Data: map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}, Warnings: warnings}, nil
@@ -1286,7 +1286,7 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 // memory_overcommitted refusal suggests.
 func forkCommand(p dbForkParams) func(size string) string {
 	return func(size string) string {
-		cmd := "eru db fork " + p.Source + " --name " + p.Name
+		cmd := "vaire db fork " + p.Source + " --name " + p.Name
 		if p.At != "" {
 			cmd += " --at " + p.At
 		}
@@ -1354,7 +1354,7 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	var warnings []output.Warning
 	if err := applyPoolers(ctx, cfg, rt, env.Report); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
-			Message: "the poolers were not reloaded, so " + p.Name + " is not reachable through them until eru apply: " + err.Error()})
+			Message: "the poolers were not reloaded, so " + p.Name + " is not reachable through them until vaire apply: " + err.Error()})
 	}
 	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name); w != nil {
 		warnings = append(warnings, *w)

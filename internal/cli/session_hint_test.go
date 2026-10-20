@@ -7,8 +7,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/transport"
 )
 
 // tunnelHint names the cause: the daemon not running, the daemon not

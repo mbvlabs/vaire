@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 // Plan and skip reasons (§5.3).
@@ -325,7 +325,7 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			output.CodeError,
 			"a step needs a restart but this build has no restarter",
 			output.ExitGeneric,
-			"This is an eru bug. Report it with the run log.",
+			"This is an vaire bug. Report it with the run log.",
 		).WithDetails(map[string]any{"restart_pending": pending})
 	}
 	restarts, err := restartConfirmed(ctx, j, path, opts, cfg, pending)
@@ -552,7 +552,7 @@ func stepFailed(id string, index int, cause error) *output.CLIError {
 // the steps opts selects. all is the expanded catalogue.
 func prepare(steps []Step, cfg config.Cluster, opts Options) (all, selected []Step, err error) {
 	if err := ValidateIDs(steps); err != nil {
-		return nil, nil, output.WrapError(output.CodeError, err, output.ExitGeneric, "This is an eru bug in the step catalogue.")
+		return nil, nil, output.WrapError(output.CodeError, err, output.ExitGeneric, "This is an vaire bug in the step catalogue.")
 	}
 	all = Expand(steps, cfg)
 	if opts.DB != "" {

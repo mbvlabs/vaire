@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 func TestWaitLabel(t *testing.T) {

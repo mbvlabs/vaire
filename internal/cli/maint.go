@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/maint"
-	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/maint"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 )
 
@@ -17,8 +17,8 @@ func maintCommands() cmdSpec {
 		run: parentRun,
 		meta: CommandMeta{
 			Summary:   "Run maintenance and capacity reports",
-			WhenToUse: []string{"Vacuum, analyze, reindex, or report on bloat, wraparound, indexes, long queries and locks. Everything runs on the node as eru_admin."},
-			Examples:  []string{"eru maint report bloat --db app"},
+			WhenToUse: []string{"Vacuum, analyze, reindex, or report on bloat, wraparound, indexes, long queries and locks. Everything runs on the node as vaire_admin."},
+			Examples:  []string{"vaire maint report bloat --db app"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -36,12 +36,12 @@ func maintCommands() cmdSpec {
 					Summary: "Vacuum a table or a whole database, as a detachable job",
 					WhenToUse: []string{"Reclaim space for reuse or freeze tuples outside the daily maintenance job. " +
 						"A whole database takes the heavy-I/O lock, so it never runs beside a full backup or a drill (lock_held)."},
-					Examples:       []string{"eru maint vacuum --db app --analyze", "eru maint vacuum --db app --table events", "eru maint vacuum --dry-run"},
+					Examples:       []string{"vaire maint vacuum --db app --analyze", "vaire maint vacuum --db app --table events", "vaire maint vacuum --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ErrorCodes:     []string{"precondition_failed", "external_command_failed"},
-					Next:           []string{"eru job list"},
+					Next:           []string{"vaire job list"},
 				},
 			},
 			{
@@ -54,7 +54,7 @@ func maintCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Refresh planner statistics, as a detachable job",
 					WhenToUse:      []string{"Update statistics after a large load."},
-					Examples:       []string{"eru maint analyze --db app"},
+					Examples:       []string{"vaire maint analyze --db app"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -67,14 +67,14 @@ func maintCommands() cmdSpec {
 					flagString("db", "", "Database, or every database one after another when omitted"),
 					flagString("table", "", "Reindex one table"),
 					flagString("index", "", "Reindex one index"),
-					flagBoolDefault("concurrently", true, "Rebuild indexes without blocking writes (eru refuses false)"),
+					flagBoolDefault("concurrently", true, "Rebuild indexes without blocking writes (vaire refuses false)"),
 					flagBool("cleanup-invalid", "Drop leftover invalid _ccnew indexes of a failed concurrent rebuild"),
 				},
 				meta: CommandMeta{
 					Summary: "Rebuild indexes concurrently, as a detachable job",
 					WhenToUse: []string{"Repair or compact indexes without blocking writes. A failed rebuild leaves invalid _ccnew indexes " +
 						"(warning reindex_left_invalid); --cleanup-invalid drops them."},
-					Examples:       []string{"eru maint reindex --db app --table events", "eru maint reindex --db app --cleanup-invalid"},
+					Examples:       []string{"vaire maint reindex --db app --table events", "vaire maint reindex --db app --cleanup-invalid"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -93,7 +93,7 @@ func maintCommands() cmdSpec {
 					Summary: "Repack a bloated table with pg_repack (Phase 7)",
 					WhenToUse: []string{"Rewrite a table online. pg_repack arrives with extensions in Phase 7; until then this fails with " +
 						"precondition_failed (extension_missing)."},
-					Examples:       []string{"eru maint repack --db app --table events --confirm app"},
+					Examples:       []string{"vaire maint repack --db app --table events --confirm app"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
@@ -115,7 +115,7 @@ func maintCommands() cmdSpec {
 					Summary: "Report bloat, wraparound, indexes, long queries, or locks",
 					WhenToUse: []string{"Read a maintenance report. kind is bloat, wraparound, unused-indexes, missing-indexes, long-queries, or locks. " +
 						"Bloat is an estimate from statistics (the ioguix queries)."},
-					Examples: []string{"eru maint report bloat --db app", "eru maint report wraparound", "eru maint report long-queries --older-than 10m"},
+					Examples: []string{"vaire maint report bloat --db app", "vaire maint report wraparound", "vaire maint report long-queries --older-than 10m"},
 					Remote:   true,
 				},
 			},
@@ -124,14 +124,14 @@ func maintCommands() cmdSpec {
 				run: runMaintKill,
 				flags: []fl{
 					flagString("db", "", "Database whose backends to terminate"),
-					flagBool("idle-in-tx", "Terminate idle-in-transaction sessions (never eru's or the superuser's)"),
+					flagBool("idle-in-tx", "Terminate idle-in-transaction sessions (never vaire's or the superuser's)"),
 					flagInt("pid", 0, "Terminate this backend pid"),
 					flagString("older-than", "", "Only sessions idle in transaction longer than this duration"),
 				},
 				meta: CommandMeta{
 					Summary:        "Terminate backends of one database that match the filter",
 					WhenToUse:      []string{"Stop a stuck session after the human approves the confirm token <db>/kill.", "On a protected database it also asks, after the token and without echo, for the current 6-digit code from the authenticator app, which the node checks. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). A dry run needs no code."},
-					Examples:       []string{"eru maint kill --db app --idle-in-tx --older-than 10m --confirm app/kill", "eru maint kill --db app --pid 4242 --dry-run"},
+					Examples:       []string{"vaire maint kill --db app --idle-in-tx --older-than 10m --confirm app/kill", "vaire maint kill --db app --pid 4242 --dry-run"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
@@ -228,7 +228,7 @@ func runMaint(cmd *cobra.Command, kind string) error {
 		})
 	if detached != nil {
 		return detachedEach(cmd, s, *detached, "the "+kind, notStarted(dbs, outcomes), func(db string) string {
-			return "eru maint " + kind + " --db " + db
+			return "vaire maint " + kind + " --db " + db
 		})
 	}
 	if err := failedOutcomes("the "+kind, "runs", outcomes); err != nil {

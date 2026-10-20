@@ -3,7 +3,7 @@ package backup
 import (
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 )
 
 func TestDurableHashIgnoresBackupFacts(t *testing.T) {

@@ -4,19 +4,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/password"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/totp"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/password"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/totp"
 	"github.com/spf13/cobra"
 )
 
-// The secrets export gate. eru secrets export rebuilds the whole secrets
-// document, and commands that show a new handoff (eru backup setup) reveal the
+// The secrets export gate. vaire secrets export rebuilds the whole secrets
+// document, and commands that show a new handoff (vaire backup setup) reveal the
 // same. They need a human factor: the master password (an argon2id hash in the
-// context, set with eru secrets password set or at server init), or a current
+// context, set with vaire secrets password set or at server init), or a current
 // code from the authenticator app the node verifies. There is no flag or
 // environment variable for either, so an agent cannot export: structured
 // output, --no-input and a missing terminal all refuse with
@@ -25,7 +25,7 @@ import (
 // secretGateRequired refuses when the gate cannot ask a human: structured
 // output, --yes, --no-input or no terminal.
 func secretGateRequired(masterPasswordSet bool) *output.CLIError {
-	hint := "Set a master password with eru secrets password set, then run this at a terminal and type it. Two-factor protection (eru protect init) also opens the gate, with a code from the authenticator app."
+	hint := "Set a master password with vaire secrets password set, then run this at a terminal and type it. Two-factor protection (vaire protect init) also opens the gate, with a code from the authenticator app."
 	if masterPasswordSet {
 		hint = "Run this at a terminal and type the master password, or a current code from the authenticator app. There is no flag or environment variable for either, so scripts and agents cannot export."
 	}
@@ -158,7 +158,7 @@ func runSecretsPasswordSet(cmd *cobra.Command, _ []string) error {
 	if MustNotPrompt(cmd) {
 		return output.NewError(output.CodeInputRequired,
 			"setting the master password needs a terminal", output.ExitInput,
-			"Run eru secrets password set yourself at a terminal. There is no flag or environment variable for the password.").
+			"Run vaire secrets password set yourself at a terminal. There is no flag or environment variable for the password.").
 			WithDetails(map[string]any{"reason": "password_requires_human"})
 	}
 	hash, err := masterPasswordHash(c.Name)
@@ -197,6 +197,6 @@ func runSecretsPasswordSet(cmd *cobra.Command, _ []string) error {
 	}
 	return output.Success(cmd, output.Result{
 		Data:    map[string]any{"context": c.Name, "master_password_set": true},
-		Message: "master password set for context " + c.Name + "; eru secrets export and a new handoff now need it, or a code from the authenticator app",
+		Message: "master password set for context " + c.Name + "; vaire secrets export and a new handoff now need it, or a code from the authenticator app",
 	})
 }

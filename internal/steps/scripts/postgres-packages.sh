@@ -39,7 +39,7 @@ if ((${#missing[@]})); then
       exit 3
     fi
     if ! dpkg --compare-versions "${candidate}" ge "${PGBACKREST_MIN}"; then
-      printf 'PGDG offers pgbackrest %s; eru needs %s or newer\n' "${candidate}" "${PGBACKREST_MIN}" >&2
+      printf 'PGDG offers pgbackrest %s; vaire needs %s or newer\n' "${candidate}" "${PGBACKREST_MIN}" >&2
       exit 3
     fi
   fi
@@ -48,7 +48,7 @@ fi
 
 version="$(dpkg-query -W -f='${Version}' pgbackrest)"
 if ! dpkg --compare-versions "${version}" ge "${PGBACKREST_MIN}"; then
-  printf 'pgbackrest %s is installed; eru needs %s or newer (eru pg update)\n' "${version}" "${PGBACKREST_MIN}" >&2
+  printf 'pgbackrest %s is installed; vaire needs %s or newer (vaire pg update)\n' "${version}" "${PGBACKREST_MIN}" >&2
   exit 3
 fi
 

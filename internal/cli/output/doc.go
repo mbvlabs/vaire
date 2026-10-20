@@ -1,2 +1,2 @@
-// Package output is the eru CLI envelope, error codes, and exit codes.
+// Package output is the vaire CLI envelope, error codes, and exit codes.
 package output

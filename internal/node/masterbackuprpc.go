@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 )
 
 // master-backup.now (Phase 5, unit 6): build and upload a bundle now.
@@ -64,7 +64,7 @@ func handleMasterBackupGet(_ context.Context, env *Env) (Result, error) {
 		local := localBundles()
 		if len(local) == 0 {
 			return Result{}, output.NewError(output.CodeBundleNotFound, "the server has no master bundle yet", output.ExitPrecondition,
-				"Run eru server backup now.")
+				"Run vaire server backup now.")
 		}
 		name = local[0].Name
 	}

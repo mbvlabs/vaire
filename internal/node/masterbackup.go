@@ -13,26 +13,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/doctor"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/promfile"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/doctor"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/promfile"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // The master backup job (Phase 5, D3): build the bundle when a bundled file
 // changed, keep it locally, upload it with its sidecar when there is a
-// bucket, prune, and write eru-master-backup.prom.
+// bucket, prune, and write vaire-master-backup.prom.
 
 const (
 	// masterBackupLockPath keeps the path unit's run, the daily run and
 	// master-backup.now apart. It isn't the node lock: a long apply must
 	// never delay a bundle.
-	masterBackupLockPath = "/run/lock/eru-master-backup.lock"
+	masterBackupLockPath = "/run/lock/vaire-master-backup.lock"
 	// debounceQuiet is how long the dirty flag must be untouched before the
 	// job snapshots, so a burst of changes makes one bundle.
 	debounceQuiet = 5 * time.Second
@@ -49,10 +49,10 @@ const (
 	// without a bundle) must be before pruning removes it.
 	incompleteAge = 24 * time.Hour
 	// promMasterBackup is the master backup's textfile.
-	promMasterBackup = "eru-master-backup.prom"
+	promMasterBackup = "vaire-master-backup.prom"
 )
 
-// MasterLast is /var/lib/eru/master-backup/last.json: the last bundle and
+// MasterLast is /var/lib/vaire/master-backup/last.json: the last bundle and
 // how its upload went.
 type MasterLast struct {
 	Name           string `json:"name,omitempty"`
@@ -115,7 +115,7 @@ type masterBackupOptions struct {
 func runMasterBackup(ctx context.Context, cfg config.Cluster, report engine.Reporter, opts masterBackupOptions) (res MasterBackupResult, err error) {
 	if _, statErr := os.Stat(masterbackup.Dir); statErr != nil {
 		return res, output.NewError(output.CodePrecondition, masterbackup.Dir+" does not exist", output.ExitPrecondition,
-			"Run eru apply: master-backup-v1 prepares the node for the master backup.").WithDetails(map[string]any{"reason": "node_outdated"})
+			"Run vaire apply: master-backup-v1 prepares the node for the master backup.").WithDetails(map[string]any{"reason": "node_outdated"})
 	}
 	err = withMasterLock(func() error {
 		var runErr error
@@ -166,7 +166,7 @@ func masterBackupLocked(ctx context.Context, cfg config.Cluster, report engine.R
 		if recipient == "" {
 			return res, recordMasterFailure(last, now, output.NewError(output.CodeInputRequired,
 				"the recovery recipient is not on this node", output.ExitInput,
-				"Run eru apply: master-backup-v1 writes "+masterbackup.RecipientPath+" from the recovery kit.").
+				"Run vaire apply: master-backup-v1 writes "+masterbackup.RecipientPath+" from the recovery kit.").
 				WithDetails(map[string]any{"path": masterbackup.RecipientPath}))
 		}
 		name, size, err := buildLocalBundle(cfg, files, local.Epoch, recipient, now)
@@ -249,7 +249,7 @@ func buildLocalBundle(cfg config.Cluster, files []masterbackup.File, epoch int64
 	if n, err := config.LoadNode(config.NodePath); err == nil {
 		nodeName = n.NodeName
 	}
-	meta := masterbackup.Meta{Server: cfg.Name(), Node: nodeName, Epoch: epoch, CreatedAt: now, EruVersion: buildinfo.Version}
+	meta := masterbackup.Meta{Server: cfg.Name(), Node: nodeName, Epoch: epoch, CreatedAt: now, VaireVersion: buildinfo.Version}
 	tarball, manifest, err := masterbackup.Build(meta, files)
 	if err != nil {
 		return "", 0, err
@@ -319,12 +319,12 @@ func pruneLocalBundles(keep int) {
 func readLocalBundle(name string) ([]byte, masterbackup.Sidecar, error) {
 	var side masterbackup.Sidecar
 	if _, ok := masterbackup.ParseName(name); !ok {
-		return nil, side, output.NewError(output.CodeUsage, name+" is not a bundle name", output.ExitUsage, "Use a name from eru server backup list.")
+		return nil, side, output.NewError(output.CodeUsage, name+" is not a bundle name", output.ExitUsage, "Use a name from vaire server backup list.")
 	}
 	raw, err := os.ReadFile(filepath.Join(masterbackup.Dir, name+masterbackup.BundleSuffix)) //nolint:gosec // G304: a parsed bundle name in the fixed directory.
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, side, output.NewError(output.CodeBundleNotFound, "bundle "+name+" is not on the server", output.ExitPrecondition,
-			"List the bundles with eru server backup list.").WithDetails(map[string]any{"bundle": name})
+			"List the bundles with vaire server backup list.").WithDetails(map[string]any{"bundle": name})
 	}
 	if err != nil {
 		return nil, side, err
@@ -482,7 +482,7 @@ func writeFirstEpoch(ctx context.Context, cfg config.Cluster, t backup.Target) e
 	instance, err := masterbackup.ReadInstance("")
 	if err != nil || instance == "" {
 		return output.NewError(output.CodePrecondition, "this node has no instance id", output.ExitPrecondition,
-			"Run eru apply: master-backup-v1 makes one.").WithDetails(map[string]any{"reason": "node_outdated"})
+			"Run vaire apply: master-backup-v1 makes one.").WithDetails(map[string]any{"reason": "node_outdated"})
 	}
 	if existing, err := backup.ReadEpoch(ctx, t); err != nil {
 		return err
@@ -549,7 +549,7 @@ func fencedError() error {
 	f, _ := masterbackup.ReadFenced("")
 	return output.NewError(output.CodeNodeFenced,
 		"this node is fenced: a newer master took over its bucket", output.ExitPrecondition,
-		"This server was replaced by eru server init --restore. Destroy it; nothing here writes to the bucket any more.").
+		"This server was replaced by vaire server init --restore. Destroy it; nothing here writes to the bucket any more.").
 		WithDetails(map[string]any{"reason": "node_fenced", "epoch": f.Epoch, "instance_id": f.InstanceID, "seen_at": f.SeenAt})
 }
 
@@ -557,7 +557,7 @@ func fencedError() error {
 // still reach the old address get "connection refused".
 var fenceUnits = []string{"pgbouncer.service", steps.SessionPoolerService + ".service", steps.MasterBackupPath}
 
-// applyFence records the fence, stops and disables every eru timer but the
+// applyFence records the fence, stops and disables every vaire timer but the
 // fence check, and stops the poolers. Clusters keep running on their sockets
 // for break-glass inspection; archive-push refuses (unit 5's wrapper).
 func applyFence(ctx context.Context, e masterbackup.Epoch) error {
@@ -567,7 +567,7 @@ func applyFence(ctx context.Context, e masterbackup.Epoch) error {
 			return err
 		}
 	}
-	timers, _ := filepath.Glob(filepath.Join(steps.SystemdSystemDir, "eru-*.timer"))
+	timers, _ := filepath.Glob(filepath.Join(steps.SystemdSystemDir, "vaire-*.timer"))
 	var units []string
 	for _, p := range timers {
 		if name := filepath.Base(p); name != steps.FenceTimer {
@@ -631,7 +631,7 @@ func runFenceCheck(ctx context.Context, cfg config.Cluster, report engine.Report
 
 // --- metrics (Phase 4 hook) ---
 
-// writeMasterMetrics writes eru-master-backup.prom.
+// writeMasterMetrics writes vaire-master-backup.prom.
 func writeMasterMetrics(cfg config.Cluster) {
 	_ = promfile.Write(promMasterBackup, masterFamilies(cfg, loadMasterLast(), time.Now()))
 }
@@ -645,15 +645,15 @@ func unixOf(ts string) float64 {
 }
 
 func masterFamilies(cfg config.Cluster, last MasterLast, _ time.Time) []*promfile.Family {
-	success := promfile.Gauge("eru_master_backup_last_success_timestamp_seconds", "When the last master bundle reached its destination (the bucket, or the node without one).")
-	failure := promfile.Gauge("eru_master_backup_last_failure_timestamp_seconds", "When the master backup last failed.")
-	verified := promfile.Gauge("eru_master_backup_last_verified_timestamp_seconds", "When the bucket's newest bundle was last confirmed to be this node's.")
-	size := promfile.Gauge("eru_master_backup_size_bytes", "Size of the last master bundle.")
-	dirty := promfile.Gauge("eru_master_backup_dirty", "1 while a change waits to be bundled or uploaded.")
-	local := promfile.Gauge("eru_master_backup_local_bundles", "Master bundles kept on the node.")
-	epoch := promfile.Gauge("eru_master_epoch", "The master's epoch.")
-	fenced := promfile.Gauge("eru_master_fenced", "1 when this node was fenced by a newer master.")
-	awaiting := promfile.Gauge("eru_database_awaiting_recovery", "1 for a database a rebuilt master hasn't recovered yet.")
+	success := promfile.Gauge("vaire_master_backup_last_success_timestamp_seconds", "When the last master bundle reached its destination (the bucket, or the node without one).")
+	failure := promfile.Gauge("vaire_master_backup_last_failure_timestamp_seconds", "When the master backup last failed.")
+	verified := promfile.Gauge("vaire_master_backup_last_verified_timestamp_seconds", "When the bucket's newest bundle was last confirmed to be this node's.")
+	size := promfile.Gauge("vaire_master_backup_size_bytes", "Size of the last master bundle.")
+	dirty := promfile.Gauge("vaire_master_backup_dirty", "1 while a change waits to be bundled or uploaded.")
+	local := promfile.Gauge("vaire_master_backup_local_bundles", "Master bundles kept on the node.")
+	epoch := promfile.Gauge("vaire_master_epoch", "The master's epoch.")
+	fenced := promfile.Gauge("vaire_master_fenced", "1 when this node was fenced by a newer master.")
+	awaiting := promfile.Gauge("vaire_database_awaiting_recovery", "1 for a database a rebuilt master hasn't recovered yet.")
 
 	at := last.CreatedAt
 	if cfg.BackupConfigured() {

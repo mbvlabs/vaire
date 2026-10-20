@@ -1,2 +1,2 @@
-// Package release fetches, verifies, and caches signed eru releases.
+// Package release fetches, verifies, and caches signed vaire releases.
 package release

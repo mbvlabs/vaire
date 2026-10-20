@@ -8,11 +8,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // LockPath is the node's global lock (§9.5).
-const LockPath = "/run/lock/eru.lock"
+const LockPath = "/run/lock/vaire.lock"
 
 // LockInfoPath names the most recent holder.
 const LockInfoPath = LockPath + ".info"
@@ -21,13 +21,13 @@ const LockInfoPath = LockPath + ".info"
 // per-database jobs take it after the global lock, so work on different
 // clusters runs side by side. Locks are always taken global first, then
 // clusters in name order.
-func ClusterLockPath(cluster string) string { return "/run/lock/eru-" + cluster + ".lock" }
+func ClusterLockPath(cluster string) string { return "/run/lock/vaire-" + cluster + ".lock" }
 
 // HeavyIOLockPath is the server's heavy-I/O lock (RFC 9.3): the backup jobs
 // of every cluster take it exclusive after the global lock and before their
 // cluster's, so at most one full, diff, verify, drill or dump reads the disk
 // at a time. Database names have no hyphen, so no cluster lock shares it.
-const HeavyIOLockPath = "/run/lock/eru-heavy-io.lock"
+const HeavyIOLockPath = "/run/lock/vaire-heavy-io.lock"
 
 // LockMode is shared or exclusive.
 type LockMode string
@@ -41,7 +41,7 @@ const (
 
 const lockPoll = 200 * time.Millisecond
 
-// Holder is the content of eru.lock.info and eru-<cluster>.lock.info.
+// Holder is the content of vaire.lock.info and vaire-<cluster>.lock.info.
 type Holder struct {
 	PID       int    `json:"pid"`
 	Cluster   string `json:"cluster,omitempty"`
@@ -143,10 +143,10 @@ func lockHeld(infoPath, cluster, lock string) *output.CLIError {
 			holder = &h
 		}
 	}
-	message := "another eru operation holds the node lock"
+	message := "another vaire operation holds the node lock"
 	details := map[string]any{"reason": "lock_held", "holder": holder}
 	if cluster != "" {
-		message = "another eru operation holds the lock of " + cluster
+		message = "another vaire operation holds the lock of " + cluster
 		details["cluster"] = cluster
 	}
 	if lock == "heavy_io" {

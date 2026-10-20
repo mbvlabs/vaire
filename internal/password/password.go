@@ -1,5 +1,5 @@
 // Package password hashes and verifies the master password that gates
-// eru secrets export. Only the argon2id hash is stored, never the password.
+// vaire secrets export. Only the argon2id hash is stored, never the password.
 package password
 
 import (

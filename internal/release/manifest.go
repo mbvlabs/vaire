@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"regexp"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 const schemaVersion = 1
@@ -67,7 +67,7 @@ func Validate(m Manifest, channel, wantVersion string) error {
 		if !ok {
 			return verificationFailed("release manifest is missing " + key)
 		}
-		if art.URL != wantBase+"/"+key+"/eru" {
+		if art.URL != wantBase+"/"+key+"/vaire" {
 			return verificationFailed("release manifest artifact URL is invalid")
 		}
 		if !sha256Pattern.MatchString(art.SHA256) {

@@ -5,13 +5,13 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/tune"
 	"github.com/spf13/cobra"
 )
 
@@ -240,7 +240,7 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	spec, ok := cfg.ClusterByName(name)
 	if !ok {
 		return output.NewError(output.CodePrecondition, "database "+name+" does not exist", output.ExitPrecondition,
-			"Run eru db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": name})
+			"Run vaire db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": name})
 	}
 	if size != "" {
 		spec.Size, spec.Memory = size, ""
@@ -287,14 +287,14 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 		}
 		if len(a.RestartPending) > 0 {
 			message += "; restart pending: " + strings.Join(a.RestartPending, ", ")
-			next = []string{"eru apply --db " + name + " " + confirmFlags(a.ConfirmTokens)}
+			next = []string{"vaire apply --db " + name + " " + confirmFlags(a.ConfirmTokens)}
 		}
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
 }
 
 // shownOnceNote follows every printed database password.
-const shownOnceNote = "Store these now: eru does not keep database passwords. If they are lost, run eru db credentials <db> --rotate --role <role>."
+const shownOnceNote = "Store these now: vaire does not keep database passwords. If they are lost, run vaire db credentials <db> --rotate --role <role>."
 
 func runDBDrop(cmd *cobra.Command, args []string) error {
 	name := args[0]
@@ -331,7 +331,7 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 		message += "; its stanza " + stanza + " is kept, so its backups stay restorable until they expire"
 	}
 	if final, ok := dropped["final_dump"].(map[string]any); ok {
-		message += fmt.Sprintf("; its final dump %v is in the bucket (eru dump get %s %v --out <file>)", final["id"], name, final["id"])
+		message += fmt.Sprintf("; its final dump %v is in the bucket (vaire dump get %s %v --out <file>)", final["id"], name, final["id"])
 	}
 	return output.Success(cmd, output.Result{
 		Data:     dropped,
@@ -340,7 +340,7 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	})
 }
 
-// runDBCredentials rotates one role password. eru keeps no database
+// runDBCredentials rotates one role password. vaire keeps no database
 // passwords, so there is nothing to print without --rotate.
 func runDBCredentials(cmd *cobra.Command, args []string) error {
 	name := args[0]
@@ -349,8 +349,8 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 		role = steps.RoleApp
 	}
 	if !flagTrue(cmd, "rotate") {
-		return output.NewError(output.CodeUsage, "eru does not keep database passwords, so there is nothing to print", output.ExitUsage,
-			"Rotate the role to get a new password: eru db credentials "+name+" --rotate --role "+role+" --confirm "+name+". Applications using the old password stop connecting.")
+		return output.NewError(output.CodeUsage, "vaire does not keep database passwords, so there is nothing to print", output.ExitUsage,
+			"Rotate the role to get a new password: vaire db credentials "+name+" --rotate --role "+role+" --confirm "+name+". Applications using the old password stop connecting.")
 	}
 	if !slices.Contains(steps.DatabaseRoles, role) {
 		return output.NewError(output.CodeValidation, "role must be migrate, app or ro", output.ExitConfig, "")

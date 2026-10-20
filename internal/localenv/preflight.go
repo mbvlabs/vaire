@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +27,7 @@ type Tool struct {
 	Reason string
 }
 
-// Tools eru knows how to offer.
+// Tools vaire knows how to offer.
 var (
 	ToolPsql = Tool{
 		Name:     "psql",

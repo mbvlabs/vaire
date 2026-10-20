@@ -12,31 +12,31 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/render"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/render"
 )
 
 const timersID = "timers-v1"
 
 // CertsTimerName is the hourly certificate timer timers-v1 owns.
-const CertsTimerName = "eru-certs.timer"
+const CertsTimerName = "vaire-certs.timer"
 
 // ownedService matches the template services timers-v1 writes, so a removed
-// schedule takes its service with it. eru-certs.service and eru-thp.service
+// schedule takes its service with it. vaire-certs.service and vaire-thp.service
 // belong to other steps.
-var ownedService = regexp.MustCompile(`^eru-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry|maint-daily|maint-weekly|metrics-refresh|doctor|master-backup|fence)\.service$`)
+var ownedService = regexp.MustCompile(`^vaire-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry|maint-daily|maint-weekly|metrics-refresh|doctor|master-backup|fence)\.service$`)
 
 // Master backup units (Phase 5): the job, the path unit that starts it after
 // a change, its daily safety-net timer, and with a bucket the epoch fence
 // check at boot and every five minutes.
 const (
-	MasterBackupService = "eru-master-backup.service"
-	MasterBackupPath    = "eru-master-backup.path"
-	MasterBackupTimer   = "eru-master-backup.timer"
-	FenceService        = "eru-fence.service"
-	FenceTimer          = "eru-fence.timer"
+	MasterBackupService = "vaire-master-backup.service"
+	MasterBackupPath    = "vaire-master-backup.path"
+	MasterBackupTimer   = "vaire-master-backup.timer"
+	FenceService        = "vaire-fence.service"
+	FenceTimer          = "vaire-fence.timer"
 )
 
 // masterBackupUnits are the master backup's units.
@@ -44,11 +44,11 @@ func masterBackupUnits(cfg config.Cluster, start string) map[string][]byte {
 	files := map[string][]byte{
 		MasterBackupService: render.JobService("master-backup", ""),
 		MasterBackupPath:    render.MasterBackupPath(masterbackup.DirtyPath),
-		MasterBackupTimer:   render.JobTimer("eru master backup safety net (daily)", "*-*-* "+start+":00", "30m"),
+		MasterBackupTimer:   render.JobTimer("vaire master backup safety net (daily)", "*-*-* "+start+":00", "30m"),
 	}
 	if cfg.BackupConfigured() {
 		files[FenceService] = render.FenceService()
-		files[FenceTimer] = render.JobTimer("eru epoch fence check", "*:0/5", "30s")
+		files[FenceTimer] = render.JobTimer("vaire epoch fence check", "*:0/5", "30s")
 	}
 	return files
 }
@@ -69,13 +69,13 @@ func serverTimers(cfg config.Cluster) map[string][]byte {
 	}
 	files := map[string][]byte{}
 	for _, t := range []struct{ job, description, schedule, jitter string }{
-		{"maint-daily", "eru daily maintenance (wraparound, ANALYZE of stale tables, deferred restarts)", "*-*-* " + start + ":00", "10m"},
-		{"maint-weekly", "eru weekly maintenance (bloat estimate)", "Sat *-*-* " + start + ":00", "10m"},
-		{"metrics-refresh", "eru textfile metrics refresh", "minutely", "0"},
-		{"doctor", "eru doctor checks for the metrics", "hourly", "10m"},
+		{"maint-daily", "vaire daily maintenance (wraparound, ANALYZE of stale tables, deferred restarts)", "*-*-* " + start + ":00", "10m"},
+		{"maint-weekly", "vaire weekly maintenance (bloat estimate)", "Sat *-*-* " + start + ":00", "10m"},
+		{"metrics-refresh", "vaire textfile metrics refresh", "minutely", "0"},
+		{"doctor", "vaire doctor checks for the metrics", "hourly", "10m"},
 	} {
-		files["eru-"+t.job+".service"] = render.JobService(t.job, "")
-		files["eru-"+t.job+".timer"] = render.JobTimer(t.description, t.schedule, t.jitter)
+		files["vaire-"+t.job+".service"] = render.JobService(t.job, "")
+		files["vaire-"+t.job+".timer"] = render.JobTimer(t.description, t.schedule, t.jitter)
 	}
 	for name, content := range masterBackupUnits(cfg, start) {
 		files[name] = content
@@ -85,14 +85,14 @@ func serverTimers(cfg config.Cluster) map[string][]byte {
 
 // StanzaExpiryTimerName is the daily timer that deletes the stanzas of
 // dropped databases once their window has passed (RFC 9.1).
-const StanzaExpiryTimerName = "eru-stanza-expiry.timer"
+const StanzaExpiryTimerName = "vaire-stanza-expiry.timer"
 
 // stanzaExpirySchedule runs after the default maintenance window, when the
 // night's backups are done.
 const stanzaExpirySchedule = "*-*-* 06:00:00"
 
 // unitNamePattern guards the unit names handed to the script.
-var unitNamePattern = regexp.MustCompile(`^eru-[a-z0-9@_.-]+\.(timer|service|path)$`)
+var unitNamePattern = regexp.MustCompile(`^vaire-[a-z0-9@_.-]+\.(timer|service|path)$`)
 
 // timerJob is one scheduled job of one cluster (RFC 9.2).
 type timerJob struct {
@@ -114,12 +114,12 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 		return def
 	}
 	all := []timerJob{
-		{"backup-full", "eru full backup of " + spec.Name, pick(own.FullSchedule, db.FullSchedule), "5m"},
-		{"backup-diff", "eru differential backup of " + spec.Name, pick(own.DiffSchedule, db.DiffSchedule), "5m"},
-		{"backup-incr", "eru incremental backup of " + spec.Name, pick(own.IncrSchedule, db.IncrSchedule), "2m"},
-		{"backup-verify", "eru backup verify of " + spec.Name, pick(own.VerifySchedule, db.VerifySchedule), "10m"},
-		{"restore-drill", "eru restore drill of " + spec.Name, pick(own.DrillSchedule, db.DrillSchedule), "30m"},
-		{"db-dump", "eru long-retention dump of " + spec.Name, own.DumpSchedule, "10m"},
+		{"backup-full", "vaire full backup of " + spec.Name, pick(own.FullSchedule, db.FullSchedule), "5m"},
+		{"backup-diff", "vaire differential backup of " + spec.Name, pick(own.DiffSchedule, db.DiffSchedule), "5m"},
+		{"backup-incr", "vaire incremental backup of " + spec.Name, pick(own.IncrSchedule, db.IncrSchedule), "2m"},
+		{"backup-verify", "vaire backup verify of " + spec.Name, pick(own.VerifySchedule, db.VerifySchedule), "10m"},
+		{"restore-drill", "vaire restore drill of " + spec.Name, pick(own.DrillSchedule, db.DrillSchedule), "30m"},
+		{"db-dump", "vaire long-retention dump of " + spec.Name, own.DumpSchedule, "10m"},
 	}
 	var out []timerJob
 	for _, j := range all {
@@ -132,10 +132,10 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 
 // timerFiles returns every unit file timers-v1 owns, by file name: the
 // certificate timer, and with backups on the stanza-expiry timer and every
-// job's template service (eru-<job>@.service runs eru node run <job> --db %i).
+// job's template service (vaire-<job>@.service runs vaire node run <job> --db %i).
 // Templates exist even without active databases or schedules: recovery starts
 // its first full before enabling the recovered database's timers. Only a
-// scheduled job gets a timer (eru-<job>@<cluster>.timer), staggered by the
+// scheduled job gets a timer (vaire-<job>@<cluster>.timer), staggered by the
 // cluster's stanza (RFC 9.3): within the day, and the monthly drills over
 // the month too (RFC 9.4).
 func timerFiles(cfg config.Cluster) map[string][]byte {
@@ -144,10 +144,10 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 	if !cfg.BackupConfigured() {
 		return files
 	}
-	files["eru-stanza-expiry.service"] = render.JobService("stanza-expiry", "")
-	files[StanzaExpiryTimerName] = render.JobTimer("eru expiry of dropped databases' stanzas", stanzaExpirySchedule, "30m")
+	files["vaire-stanza-expiry.service"] = render.JobService("stanza-expiry", "")
+	files[StanzaExpiryTimerName] = render.JobTimer("vaire expiry of dropped databases' stanzas", stanzaExpirySchedule, "30m")
 	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump"} {
-		files["eru-"+job+"@.service"] = render.JobService(job, "--db %i")
+		files["vaire-"+job+"@.service"] = render.JobService(job, "--db %i")
 	}
 	spread := StaggerSpread(cfg)
 	for _, spec := range cfg.Clusters {
@@ -157,7 +157,7 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 			if j.Job == "restore-drill" {
 				schedule = StaggerDay(schedule, spec.Stanza)
 			}
-			files["eru-"+j.Job+"@"+spec.Name+".timer"] = render.JobTimer(j.Description, schedule, j.Jitter)
+			files["vaire-"+j.Job+"@"+spec.Name+".timer"] = render.JobTimer(j.Description, schedule, j.Jitter)
 		}
 	}
 	return files
@@ -271,12 +271,12 @@ func StaggerDay(schedule, stanza string) string {
 	return schedule
 }
 
-// staleUnits are eru timers and owned services on disk that are not rendered.
+// staleUnits are vaire timers and owned services on disk that are not rendered.
 func staleUnits(want map[string][]byte) []string {
 	var out []string
-	timers, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "eru-*.timer"))
-	paths, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "eru-*.path"))
-	services, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "eru-*.service"))
+	timers, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "vaire-*.timer"))
+	paths, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "vaire-*.path"))
+	services, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "vaire-*.service"))
 	for _, path := range append(append(timers, paths...), services...) {
 		name := filepath.Base(path)
 		if _, ok := want[name]; ok {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 func TestContextHintOnNode(t *testing.T) {
@@ -21,14 +21,14 @@ func TestContextHintOnNode(t *testing.T) {
 	if err := os.WriteFile(nodeMarker, []byte(""), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := contextHint("default"); !strings.Contains(got, "eru node") || !strings.Contains(got, "your own machine") {
+	if got := contextHint("default"); !strings.Contains(got, "vaire node") || !strings.Contains(got, "your own machine") {
 		t.Fatalf("on a node: got %q, want the run-from-your-machine hint", got)
 	}
 }
 
 func TestValidateNameHintsAtDashDash(t *testing.T) {
 	var cliErr *output.CLIError
-	if err := ValidateName("select 1"); !errors.As(err, &cliErr) || !strings.Contains(cliErr.Hint, "eru psql --db <db> -- -c") {
+	if err := ValidateName("select 1"); !errors.As(err, &cliErr) || !strings.Contains(cliErr.Hint, "vaire psql --db <db> -- -c") {
 		t.Fatalf("got %v, want a hint about --", err)
 	}
 	if err := ValidateName("Prod"); !errors.As(err, &cliErr) || strings.Contains(cliErr.Hint, "psql") {

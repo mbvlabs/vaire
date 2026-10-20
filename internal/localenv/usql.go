@@ -17,11 +17,11 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/spf13/cobra"
 )
 
-// UsqlVersion is the usql release eru downloads when none is on PATH.
+// UsqlVersion is the usql release vaire downloads when none is on PATH.
 const UsqlVersion = "v0.21.4"
 
 // usqlSHA256 pins the release archive for each platform.
@@ -34,8 +34,8 @@ var usqlSHA256 = map[string]string{
 
 const usqlMaxArchive = 200 << 20
 
-// UsqlPath returns a usql binary: the one on PATH, or eru's pinned copy under
-// $XDG_CACHE_HOME/eru/tools. When neither exists it offers to download the
+// UsqlPath returns a usql binary: the one on PATH, or vaire's pinned copy under
+// $XDG_CACHE_HOME/vaire/tools. When neither exists it offers to download the
 // pinned release (or does so with --install-missing) and verifies its SHA-256.
 func UsqlPath(cmd *cobra.Command) (string, error) {
 	if p, err := exec.LookPath("usql"); err == nil {
@@ -48,7 +48,7 @@ func UsqlPath(cmd *cobra.Command) (string, error) {
 	platform := runtime.GOOS + "/" + runtime.GOARCH
 	want, ok := usqlSHA256[platform]
 	if !ok {
-		return "", output.NewError(output.CodeMissingTool, "usql is not on PATH and eru has no pinned build for "+platform,
+		return "", output.NewError(output.CodeMissingTool, "usql is not on PATH and vaire has no pinned build for "+platform,
 			output.ExitMissingTool, "Install usql from https://github.com/xo/usql and retry.").
 			WithDetails(map[string]any{"tool": "usql", "missing": []string{"usql"}})
 	}
@@ -87,11 +87,11 @@ func toolsDir() string {
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return filepath.Join(os.TempDir(), "eru-tools")
+			return filepath.Join(os.TempDir(), "vaire-tools")
 		}
 		base = filepath.Join(home, ".cache")
 	}
-	return filepath.Join(base, "eru", "tools")
+	return filepath.Join(base, "vaire", "tools")
 }
 
 // downloadUsql fetches the archive, checks it against wantSHA, and extracts

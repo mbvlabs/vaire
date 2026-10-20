@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"golang.org/x/crypto/curve25519"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -46,8 +46,8 @@ type WireGuardConfig struct {
 
 // Tunnel is an embedded userspace WireGuard device with a netstack. It needs
 // no root, no kernel interface and no system configuration. The context's
-// tunnel daemon (eru tunnel serve) owns one for all eru processes; eru server
-// init and ERU_TUNNEL=inprocess run one for a single command.
+// tunnel daemon (vaire tunnel serve) owns one for all vaire processes; vaire server
+// init and VAIRE_TUNNEL=inprocess run one for a single command.
 type Tunnel struct {
 	dev     *device.Device
 	net     *netstack.Net

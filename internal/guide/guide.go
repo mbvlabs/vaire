@@ -1,4 +1,4 @@
-// Package guide embeds the agent guide printed by eru guide agents.
+// Package guide embeds the agent guide printed by vaire guide agents.
 package guide
 
 import _ "embed"

@@ -7,13 +7,13 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/pg"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-// statement is one row of eru queries.
+// statement is one row of vaire queries.
 type statement struct {
 	DB      string  `json:"db"`
 	Role    string  `json:"role"`
@@ -33,7 +33,7 @@ var queryOrders = map[string]string{"total": "total_exec_time", "mean": "mean_ex
 func statementsSQL(order string, limit int, allSessions bool) string {
 	filter := ""
 	if !allSessions {
-		filter = "\n  AND NOT " + pg.EruRoleSQL("r.rolname")
+		filter = "\n  AND NOT " + pg.VaireRoleSQL("r.rolname")
 	}
 	return `SELECT r.rolname AS role, s.queryid::text AS queryid, s.calls,
   round(s.total_exec_time::numeric, 1) AS total_ms, round(s.mean_exec_time::numeric, 2) AS mean_ms, s.rows,
@@ -50,7 +50,7 @@ type queriesParams struct {
 	DB    string `json:"db,omitempty"`
 	Limit int    `json:"limit,omitempty"`
 	Order string `json:"order,omitempty"`
-	// AllSessions includes eru's own sessions (its roles), which are left
+	// AllSessions includes vaire's own sessions (its roles), which are left
 	// out by default.
 	AllSessions bool `json:"all_sessions,omitempty"`
 }
@@ -64,7 +64,7 @@ type queriesData struct {
 }
 
 // handleQueriesTop reads pg_stat_statements in one or every database as
-// eru_admin (pg_monitor reads every role's statements) and merges them.
+// vaire_admin (pg_monitor reads every role's statements) and merges them.
 func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 	var p queriesParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -116,7 +116,7 @@ func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 
 func statementsMissing(db string) error {
 	return output.NewError(output.CodePrecondition, "pg_stat_statements is not installed in "+db, output.ExitPrecondition,
-		"Add it to the database's extensions (eru config set clusters."+db+".extensions pg_stat_statements, then eru apply --db "+db+"); eru ext add arrives in Phase 7.").
+		"Add it to the database's extensions (vaire config set clusters."+db+".extensions pg_stat_statements, then vaire apply --db "+db+"); vaire ext add arrives in Phase 7.").
 		WithDetails(map[string]any{"reason": "extension_missing", "extension": "pg_stat_statements", "database": db})
 }
 
@@ -133,12 +133,12 @@ func targetClusters(cfg config.Cluster, db string) ([]config.ClusterSpec, error)
 }
 
 // parseStatements reads the rows. Unless allSessions, it leaves out
-// statements run by eru's own roles (eru queries, psql, maintenance, the
+// statements run by vaire's own roles (vaire queries, psql, maintenance, the
 // exporters), so the application's statements stand out.
 func parseStatements(db string, rows []map[string]string, allSessions bool) []statement {
 	out := make([]statement, 0, len(rows))
 	for _, r := range rows {
-		if !allSessions && pg.IsEruRole(r["role"]) {
+		if !allSessions && pg.IsVaireRole(r["role"]) {
 			continue
 		}
 		f := func(k string) float64 { v, _ := strconv.ParseFloat(r[k], 64); return v }

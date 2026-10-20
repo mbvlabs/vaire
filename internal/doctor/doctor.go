@@ -1,4 +1,4 @@
-// Package doctor holds eru doctor's checks (Phase 4). The node gathers Facts
+// Package doctor holds vaire doctor's checks (Phase 4). The node gathers Facts
 // (files, systemd, PostgreSQL, the records); every check is a pure function
 // of them, so thresholds and exemptions are testable without a server.
 package doctor
@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/health"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/health"
 )
 
 // Status is a check's outcome.

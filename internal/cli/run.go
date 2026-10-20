@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/guide"
-	"github.com/mbvlabs/eru/internal/maint"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/guide"
+	"github.com/mbvlabs/vaire/internal/maint"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +21,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 			output.CodeUsage,
 			"a command is required",
 			output.ExitUsage,
-			"Run eru commands --json to list commands.",
+			"Run vaire commands --json to list commands.",
 		)
 	}
 	return cmd.Help()
@@ -58,7 +58,7 @@ func notImplemented(cmd *cobra.Command, _ []string) error {
 
 func runVersion(cmd *cobra.Command, _ []string) error {
 	if f := cmd.Flags().Lookup("licenses"); f != nil && f.Value.String() == "true" {
-		notice := "eru embeds the table and btree bloat estimation queries of\n" +
+		notice := "vaire embeds the table and btree bloat estimation queries of\n" +
 			"https://github.com/ioguix/pgsql-bloat-estimation under this licence:\n\n" + maint.License()
 		return output.OK(cmd, map[string]string{"ioguix/pgsql-bloat-estimation": maint.License()}, notice)
 	}
@@ -68,7 +68,7 @@ func runVersion(cmd *cobra.Command, _ []string) error {
 		"channel":          buildinfo.Channel,
 		"release_base_url": buildinfo.ReleaseBaseURL,
 	}
-	message := fmt.Sprintf("eru %s (%s, %s)", buildinfo.Version, buildinfo.Commit, buildinfo.Channel)
+	message := fmt.Sprintf("vaire %s (%s, %s)", buildinfo.Version, buildinfo.Commit, buildinfo.Channel)
 	return output.OK(cmd, info, message)
 }
 
@@ -88,5 +88,5 @@ func runGuideAgents(cmd *cobra.Command, _ []string) error {
 		_, err := fmt.Fprint(cmd.OutOrStdout(), body)
 		return err
 	}
-	return output.OK(cmd, map[string]string{"markdown": body}, "eru agent guide")
+	return output.OK(cmd, map[string]string{"markdown": body}, "vaire agent guide")
 }

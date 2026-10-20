@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/versions"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/versions"
 )
 
 const tlsID = "tls-v1"
 
 // CertsServiceName is the unit step 10 installs (D11). timers-v1 owns
-// eru-certs.timer from Phase 3 on.
-const CertsServiceName = "eru-certs.service"
+// vaire-certs.timer from Phase 3 on.
+const CertsServiceName = "vaire-certs.service"
 
 type tlsStep struct{}
 
@@ -79,7 +79,7 @@ func (tlsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) 
 }
 
 func (s tlsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
-	// nginx and its distribution config are installed first, so eru's
+	// nginx and its distribution config are installed first, so vaire's
 	// nginx.conf is written over the package's default afterwards.
 	env := map[string]string{
 		"NGINX_MIN_VERSION": versions.NginxMinVersion,

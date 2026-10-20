@@ -5,11 +5,11 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/render"
-	"github.com/mbvlabs/eru/internal/versions"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/render"
+	"github.com/mbvlabs/vaire/internal/versions"
 )
 
 const postgresPackagesID = "postgres-packages-v1"
@@ -22,7 +22,7 @@ const pgdgScript = "/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh"
 var pgPackages = []string{"postgresql-18", "postgresql-client-18", "postgresql-contrib", "pgbouncer", "pgbackrest"}
 
 // pgHold are the packages pinned with apt-mark hold: the major version and
-// pgBackRest, which moves only with eru pg update.
+// pgBackRest, which moves only with vaire pg update.
 var pgHold = []string{"postgresql-18", "postgresql-client-18", "pgbackrest"}
 
 // pgbackrestTooOld is the script's exit status when PGDG offers a pgBackRest
@@ -86,7 +86,7 @@ func (s postgresPackages) Apply(ctx context.Context, _ config.Cluster, rt engine
 			output.CodePrecondition,
 			"PGDG offers a pgBackRest older than "+versions.PgBackRestMinVersion,
 			output.ExitPrecondition,
-			"eru needs pgBackRest "+versions.PgBackRestMinVersion+" or newer, which fixes a bug in encrypted repositories. Wait for PGDG to publish it, then re-run apply.",
+			"vaire needs pgBackRest "+versions.PgBackRestMinVersion+" or newer, which fixes a bug in encrypted repositories. Wait for PGDG to publish it, then re-run apply.",
 		).WithDetails(map[string]any{"reason": "pgbackrest_too_old", "min_version": versions.PgBackRestMinVersion, "output_tail": scriptErr.Tail})
 	}
 	return engine.ApplyResult{Restart: engine.RestartNone}, err

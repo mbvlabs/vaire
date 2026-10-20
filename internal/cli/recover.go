@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 )
 
-// eru db recover <db>…|--all (Phase 5, D8): bring back the databases a
+// vaire db recover <db>…|--all (Phase 5, D8): bring back the databases a
 // rebuilt master hasn't recovered, each from its stanza, one at a time.
 
 func dbRecoverCommand() cmdSpec {
@@ -27,7 +27,7 @@ func dbRecoverCommand() cmdSpec {
 		flags: []fl{
 			flagBool("all", "Every database awaiting recovery: protected first, then smallest first"),
 			flagString("time", "", "Recover to this time instead of the latest (RFC 3339 or a relative time); needs --confirm <db>/recover"),
-			flagBool("no-promote", "Stop at a ready copy to inspect; eru restore promote finishes it"),
+			flagBool("no-promote", "Stop at a ready copy to inspect; vaire restore promote finishes it"),
 			flagBool("no-full", "Don't take a full backup of each recovered database"),
 		},
 		meta: CommandMeta{ //nolint:gosec // G101: help text, not a credential.
@@ -35,18 +35,18 @@ func dbRecoverCommand() cmdSpec {
 			WhenToUse: []string{
 				"A rebuilt master lists its databases as awaiting_recovery: this materialises each from its pgBackRest stanza, promotes it on a new timeline and opens it with the same URL and passwords.",
 			},
-			WhenNotToUse: []string{"To go back in time on a running database: eru restore."},
+			WhenNotToUse: []string{"To go back in time on a running database: vaire restore."},
 			Examples: []string{
-				"eru db recover --all",
-				"eru db recover app",
-				"eru db recover app --time 2026-10-15T09:30:00Z --confirm app/recover",
+				"vaire db recover --all",
+				"vaire db recover app",
+				"vaire db recover app --time 2026-10-15T09:30:00Z --confirm app/recover",
 			},
 			Mutating:       true,
 			SupportsDryRun: true,
 			Remote:         true,
 			ConfirmToken:   "{db}/recover",
 			ErrorCodes:     []string{"precondition_failed", "database_protected", "node_fenced", "unsafe_action_requires_confirmation"},
-			Next:           []string{"eru db list", "eru doctor"},
+			Next:           []string{"vaire db list", "vaire doctor"},
 		},
 	}
 }
@@ -85,7 +85,7 @@ func recoverOrder(dbs []databaseInfo, named []string) []string {
 func runDBRecover(cmd *cobra.Command, args []string) error {
 	all := flagTrue(cmd, "all")
 	if !all && len(args) == 0 {
-		return output.NewError(output.CodeUsage, "name the databases to recover, or pass --all", output.ExitUsage, "For example eru db recover --all.")
+		return output.NewError(output.CodeUsage, "name the databases to recover, or pass --all", output.ExitUsage, "For example vaire db recover --all.")
 	}
 	var at string
 	if v := stringFlag(cmd, "time"); v != "" {
@@ -189,7 +189,7 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 		}
 		for i, f := range fulls {
 			if f.Error != nil {
-				warnings = append(warnings, output.Warning{Code: "full_backup_failed", Message: f.Database + ": " + f.Error.Message + "; run eru backup now --db " + f.Database + " --type full"})
+				warnings = append(warnings, output.Warning{Code: "full_backup_failed", Message: f.Database + ": " + f.Error.Message + "; run vaire backup now --db " + f.Database + " --type full"})
 			} else if i < len(fullLines) {
 				lines = append(lines, f.Database+": "+fullLines[i])
 			}
@@ -201,7 +201,7 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 	if failed := len(dbs) - len(recovered); failed > 0 {
 		return failedOutcomes("recover", "databases", outcomes)
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: []string{"eru db list", "eru doctor"}})
+	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: []string{"vaire db list", "vaire doctor"}})
 }
 
 // recoverSecrets are the secrets db.recover sends: what an apply sends,
@@ -248,7 +248,7 @@ func recoveredNames(outcomes []dbJobOutcome) []string {
 func recoverLine(db string, res map[string]any) string {
 	line := db + ": recovered"
 	if res["phase"] == "ready" {
-		line = db + ": ready to inspect as " + fmt.Sprint(res["restoring"]) + "; eru restore promote " + db + " finishes it"
+		line = db + ": ready to inspect as " + fmt.Sprint(res["restoring"]) + "; vaire restore promote " + db + " finishes it"
 	} else {
 		if t, _ := res["recovered_to"].(string); t != "" {
 			line += " to " + t

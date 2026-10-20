@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // db recover (Phase 5, D8): bring back a database awaiting recovery after
@@ -77,12 +77,12 @@ func handleDBRecover(ctx context.Context, env *Env) (Result, error) {
 	}
 	if !recs.IsAwaiting(p.Database) {
 		return Result{}, output.NewError(output.CodePrecondition, "database "+p.Database+" isn't awaiting recovery", output.ExitPrecondition,
-			"db recover is for databases a rebuilt master hasn't recovered. To go back in time on a running database use eru restore "+p.Database+".").
+			"db recover is for databases a rebuilt master hasn't recovered. To go back in time on a running database use vaire restore "+p.Database+".").
 			WithDetails(map[string]any{"reason": "not_awaiting_recovery", "database": p.Database})
 	}
 	if !cfg.BackupConfigured() {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no bucket, so there is no stanza to recover "+p.Database+" from", output.ExitPrecondition,
-			"The data is lost with the old server. Create the database again: eru db drop "+p.Database+" --confirm "+p.Database+", then eru db create "+p.Database+".").
+			"The data is lost with the old server. Create the database again: vaire db drop "+p.Database+" --confirm "+p.Database+", then vaire db create "+p.Database+".").
 			WithDetails(map[string]any{"reason": "no_offsite_backup", "database": p.Database})
 	}
 	if p.Time != "" && env.Req.Confirm == "" && !env.Req.DryRun {
@@ -142,8 +142,8 @@ func stanzaHasBackup(ctx context.Context, spec config.ClusterSpec, recs backup.R
 	if _, ok := info.Latest(); ok {
 		return nil
 	}
-	hint := "Create it again: eru db drop " + spec.Name + " --confirm " + spec.Name + ", eru db create " + spec.Name +
-		", then restore a long-retention dump with eru restore " + spec.Name + " --dump <id> (eru dump list " + spec.Name + ")."
+	hint := "Create it again: vaire db drop " + spec.Name + " --confirm " + spec.Name + ", vaire db create " + spec.Name +
+		", then restore a long-retention dump with vaire restore " + spec.Name + " --dump <id> (vaire dump list " + spec.Name + ")."
 	if d, ok := recs.Dropped(spec.Name); ok && d.Stanza != spec.Stanza {
 		hint += " Older history is in the stanza " + d.Stanza + " (kept until " + d.ExpiresAt + ")."
 	}
@@ -194,7 +194,7 @@ func stillWrittenSince(ctx context.Context, cfg config.Cluster, spec config.Clus
 	return output.NewError(output.CodePrecondition,
 		"the stanza "+spec.Stanza+" received WAL at "+newest.UTC().Format(time.RFC3339)+", after this master took over: the old master is still running",
 		output.ExitPrecondition,
-		"Power off or destroy the old server first; its fence check stops it within five minutes when it can reach the bucket. Then run eru db recover "+spec.Name+" again.").
+		"Power off or destroy the old server first; its fence check stops it within five minutes when it can reach the bucket. Then run vaire db recover "+spec.Name+" again.").
 		WithDetails(map[string]any{"reason": "stanza_still_written", "database": spec.Name, "stanza": spec.Stanza, "object": key, "written_at": newest.UTC().Format(time.RFC3339)})
 }
 
@@ -330,7 +330,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	res["promoted"] = promoted
 	if aside, _ := promoted["pre_restore"].(string); aside != "" {
 		if err := dropScaffold(env, cfg, db, aside); err != nil {
-			res["scaffold_warning"] = "the empty cluster " + aside + " is left; drop it with eru restore cleanup " + db + ": " + err.Error()
+			res["scaffold_warning"] = "the empty cluster " + aside + " is left; drop it with vaire restore cleanup " + db + ": " + err.Error()
 		}
 	}
 
@@ -339,10 +339,10 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	// lacks), then metrics. The data is back either way; a failure here is
 	// reported as what is left, with the command that finishes it.
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: db, Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
-		res["steps_warning"] = "the data is recovered, but its configuration did not finish: " + err.Error() + "; eru apply finishes it"
+		res["steps_warning"] = "the data is recovered, but its configuration did not finish: " + err.Error() + "; vaire apply finishes it"
 	}
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.MetricsStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
-		res["metrics_warning"] = "the data is recovered, but its metrics did not finish: " + err.Error() + "; eru apply finishes them"
+		res["metrics_warning"] = "the data is recovered, but its metrics did not finish: " + err.Error() + "; vaire apply finishes them"
 	}
 	if t := recoveredTo(ctx, spec); t != "" {
 		res["recovered_to"] = t
@@ -374,7 +374,7 @@ func applyRecoveredTimers(ctx context.Context, cfg config.Cluster, rt engine.Run
 
 // armArchiving stops the empty scaffold 18/<db>, renders pgbackrest.conf
 // with the database's stanza section, then writes the database's real
-// 40-eru-backup.conf, which the recovered data starts with. In that order:
+// 40-vaire-backup.conf, which the recovered data starts with. In that order:
 // the archive_command passes archive-push a WAL path relative to the data
 // directory (%p), which pgBackRest resolves with the section's pg1-path, so
 // a conf without the section fails the very first push (the new timeline's

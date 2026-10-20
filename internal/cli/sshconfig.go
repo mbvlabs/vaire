@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/kevinburke/ssh_config"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
 	"golang.org/x/crypto/ssh"
 )
 

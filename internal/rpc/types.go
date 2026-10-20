@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
 // Schema is the request schema. Its fields and the upgrade.install params are
 // frozen: later versions may only add optional fields.
-const Schema = "eru-rpc/v1"
+const Schema = "vaire-rpc/v1"
 
 // MaxRequestBytes caps the request read from stdin.
 const MaxRequestBytes = 1 << 20

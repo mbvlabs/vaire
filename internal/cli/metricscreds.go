@@ -1,10 +1,10 @@
 package cli
 
 import (
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/secretsdoc"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -16,7 +16,7 @@ const metricsBcryptCost = 8
 
 // ensureMetricsCreds fills creds with the /metrics credential when it has
 // none, and returns whether it generated one. The operator generates it like
-// every eru secret (Phase 4 D5).
+// every vaire secret (Phase 4 D5).
 func ensureMetricsCreds(creds **contexts.MetricsCreds) (bool, error) {
 	if *creds != nil && (*creds).Password != "" {
 		if (*creds).Username == "" {

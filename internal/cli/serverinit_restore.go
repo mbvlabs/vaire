@@ -10,23 +10,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/localenv"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/steps"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
 
-// eru server init --restore (Phase 5, D7): rebuild this context's server on
+// vaire server init --restore (Phase 5, D7): rebuild this context's server on
 // a new VPS from its master bundle. The bundle is decrypted here, with the
 // recovery identity, and never written in clear; the new server takes over
 // the old one's WireGuard key, SSH host keys and certificate, so the context
@@ -75,7 +75,7 @@ type restoreResult struct {
 func runInitRestore(cmd *cobra.Command) error {
 	if flagTrue(cmd, "local") {
 		return output.NewError(output.CodeUsage, "--restore runs from your machine, not with --local", output.ExitUsage,
-			"The bundle is decrypted with the recovery identity, which only your machine holds. Run eru server init --restore --host root@<new-ip> there.")
+			"The bundle is decrypted with the recovery identity, which only your machine holds. Run vaire server init --restore --host root@<new-ip> there.")
 	}
 	name := stringFlag(cmd, "name")
 	if name == "" {
@@ -83,7 +83,7 @@ func runInitRestore(cmd *cobra.Command) error {
 	}
 	c, err := contexts.Resolve(name)
 	if err != nil {
-		return withHint(err, "server init --restore rebuilds the server of an existing context. With only the secrets document, run eru login first.")
+		return withHint(err, "server init --restore rebuilds the server of an existing context. With only the secrets document, run vaire login first.")
 	}
 	r := &initRun{cmd: cmd, p: newProgress(cmd), name: c.Name}
 	rr := &restoreRun{ctx: c}
@@ -156,7 +156,7 @@ func (r *initRun) restoreLoadPending() error {
 	if contexts.PendingExists(name) {
 		if !resume {
 			return output.NewError(output.CodePrecondition, "an unfinished init or rebuild of "+name+" exists", output.ExitPrecondition,
-				"Continue it with eru server init --restore --resume --name "+name+", or drop it with eru server init --discard --name "+name+".").
+				"Continue it with vaire server init --restore --resume --name "+name+", or drop it with vaire server init --discard --name "+name+".").
 				WithDetails(map[string]any{"reason": "init_pending", "server": name})
 		}
 		prog, err := contexts.LoadProgress(name)
@@ -165,7 +165,7 @@ func (r *initRun) restoreLoadPending() error {
 		}
 		if prog.Restore == nil {
 			return output.NewError(output.CodePrecondition, "the unfinished init of "+name+" is not a rebuild", output.ExitPrecondition,
-				"Resume it without --restore, or drop it with eru server init --discard --name "+name+".")
+				"Resume it without --restore, or drop it with vaire server init --discard --name "+name+".")
 		}
 		raw, boot, err := contexts.LoadAnswers(name)
 		if err != nil {
@@ -183,7 +183,7 @@ func (r *initRun) restoreLoadPending() error {
 		return nil
 	} else if resume {
 		return output.NewError(output.CodePrecondition, "there is no unfinished rebuild of "+name+" to resume", output.ExitPrecondition,
-			"Start one with eru server init --restore --host root@<new-ip>.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
+			"Start one with vaire server init --restore --host root@<new-ip>.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 	}
 	host := stringFlag(r.cmd, "host")
 	if err := RequireFlag(r.cmd, host != "", "--host", "server init --restore"); err != nil {
@@ -229,7 +229,7 @@ func (r *initRun) restoreFetch(ctx context.Context, kit *contexts.BackupCreds) e
 	default:
 		if kit == nil || !kit.HasBucket() {
 			return output.NewError(output.CodeInputRequired, "this context has no bucket to fetch the master bundle from", output.ExitInput,
-				"Rebuild from an exported bundle: --bundle-file <file> (eru server backup export made it).").WithDetails(map[string]any{"flag": "--bundle-file"})
+				"Rebuild from an exported bundle: --bundle-file <file> (vaire server backup export made it).").WithDetails(map[string]any{"flag": "--bundle-file"})
 		}
 		stop := r.p.wait("fetching the master bundle from " + kit.Bucket)
 		f, err = fetchBundleFromBucket(ctx, kit, stringFlag(r.cmd, "bundle"))
@@ -314,7 +314,7 @@ func (r *initRun) restoreDryRun() error {
 	}
 	data := map[string]any{"server": r.name, "bundle": rr.state.Bundle, "from": rr.state.From, "created_at": m.CreatedAt,
 		"epoch": m.Epoch, "databases": dbs, "host": r.boot.User + "@" + r.boot.Host, "public_address": rr.state.NewAddress, "dry_run": true}
-	plan := "fence the old master, place the bundle, run every server step; then " + strings.Join(dbs, ", ") + " await eru db recover."
+	plan := "fence the old master, place the bundle, run every server step; then " + strings.Join(dbs, ", ") + " await vaire db recover."
 	if !r.cfg.BackupConfigured() {
 		plan = "place the bundle, run every server step; with no bucket the old master isn't fenced, and the data of " + strings.Join(dbs, ", ") + " is lost with it."
 	}
@@ -464,7 +464,7 @@ func (r *initRun) restoreSecrets() error {
 	}
 	addRecoveryKit(r.dbSecrets, r.sec.Backup)
 	if r.sec.Database != nil && creds.Database != nil && len(r.sec.Database.Services) != len(creds.Database.Services) {
-		r.warnings = append(r.warnings, output.Warning{Code: "secrets_document_stale", Message: "service credentials were missing from this context and were generated; run eru secrets export"})
+		r.warnings = append(r.warnings, output.Warning{Code: "secrets_document_stale", Message: "service credentials were missing from this context and were generated; run vaire secrets export"})
 	}
 	// Generated credentials (a context from before a phase) go back into
 	// the context too, not only the pending state.
@@ -481,7 +481,7 @@ func (rr *restoreRun) place(ctx context.Context, r *initRun, n *remote.Node) ([]
 	}
 	tarball, _, err := masterbackup.Build(masterbackup.Meta{
 		Server: rr.bundle.Manifest.Server, Node: rr.bundle.Manifest.Node, Epoch: rr.bundle.Manifest.Epoch,
-		CreatedAt: parseRFC3339(rr.bundle.Manifest.CreatedAt), EruVersion: rr.bundle.Manifest.EruVersion,
+		CreatedAt: parseRFC3339(rr.bundle.Manifest.CreatedAt), VaireVersion: rr.bundle.Manifest.VaireVersion,
 	}, rr.bundle.Files)
 	if err != nil {
 		return nil, err
@@ -641,7 +641,7 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 			_, err := r.p.call(ctx, wgNode, "master-backup.now", map[string]any{"force": true}, remote.CallOptions{OnEvent: r.p.event})
 			return err
 		}); err != nil {
-			r.warnings = append(r.warnings, output.Warning{Code: "master_backup_failed", Message: "the rebuilt master's first bundle failed: " + err.Error() + "; run eru server backup now"})
+			r.warnings = append(r.warnings, output.Warning{Code: "master_backup_failed", Message: "the rebuilt master's first bundle failed: " + err.Error() + "; run vaire server backup now"})
 		}
 		if err := r.mark(phaseFirstBundle); err != nil {
 			return err
@@ -703,7 +703,7 @@ func (r *initRun) updateContext() error {
 			if k := r.prog.WGPublicKey; k != "" && k != c.Nodes[i].WGPublicKey {
 				// A bundle without the WireGuard key made a new one.
 				r.warnings = append(r.warnings, output.Warning{Code: "context_wg_key_updated",
-					Message: "the rebuilt server has a new WireGuard key; context " + c.Name + " follows it, other machines need eru secrets export and eru login"})
+					Message: "the rebuilt server has a new WireGuard key; context " + c.Name + " follows it, other machines need vaire secrets export and vaire login"})
 				c.Nodes[i].WGPublicKey = k
 			}
 		}
@@ -718,7 +718,7 @@ func (r *initRun) updateContext() error {
 func (r *initRun) restoreHandoff() error {
 	if MustNotPrompt(r.cmd) {
 		r.warnings = append(r.warnings, output.Warning{Code: "secrets_document_stale",
-			Message: "the server's address changed; run eru secrets export at a terminal and store the new handoff"})
+			Message: "the server's address changed; run vaire secrets export at a terminal and store the new handoff"})
 		return nil
 	}
 	_, err := showContextHandoff(r.cmd, r.restore.ctx)
@@ -735,14 +735,14 @@ func (r *initRun) restoreResultData() restoreResult {
 	switch {
 	case len(res.AwaitingRecovery) == 0:
 	case r.cfg.BackupConfigured():
-		res.Next = append(res.Next, "eru db recover --all")
+		res.Next = append(res.Next, "vaire db recover --all")
 	default:
 		// Without a bucket there is no stanza to recover from.
 		for _, db := range res.AwaitingRecovery {
-			res.Next = append(res.Next, "eru db drop "+db+" --confirm "+db, "eru db create "+db)
+			res.Next = append(res.Next, "vaire db drop "+db+" --confirm "+db, "vaire db create "+db)
 		}
 	}
-	res.Next = append(res.Next, "eru doctor", "eru server backup list")
+	res.Next = append(res.Next, "vaire doctor", "vaire server backup list")
 	return res
 }
 

@@ -8,25 +8,25 @@ import (
 )
 
 func TestRenderEscapesAndOrders(t *testing.T) {
-	g := Gauge("eru_x", "A help line\nwith a newline.")
+	g := Gauge("vaire_x", "A help line\nwith a newline.")
 	g.Add(1, L("db", `a"b\c`+"\n")...)
 	g.Add(2.5, L("db", "z")...)
-	empty := Counter("eru_empty", "never rendered")
-	c := Counter("eru_y_total", "Counter.")
+	empty := Counter("vaire_empty", "never rendered")
+	c := Counter("vaire_y_total", "Counter.")
 	c.Add(1234567)
 	got := string(Render([]*Family{g, empty, nil, c}))
-	want := `# HELP eru_x A help line\nwith a newline.
-# TYPE eru_x gauge
-eru_x{db="a\"b\\c\n"} 1
-eru_x{db="z"} 2.5
-# HELP eru_y_total Counter.
-# TYPE eru_y_total counter
-eru_y_total 1234567
+	want := `# HELP vaire_x A help line\nwith a newline.
+# TYPE vaire_x gauge
+vaire_x{db="a\"b\\c\n"} 1
+vaire_x{db="z"} 2.5
+# HELP vaire_y_total Counter.
+# TYPE vaire_y_total counter
+vaire_y_total 1234567
 `
 	if got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
-	if strings.Contains(got, "eru_empty") {
+	if strings.Contains(got, "vaire_empty") {
 		t.Error("an empty family was rendered")
 	}
 }
@@ -41,7 +41,7 @@ func TestFormatValue(t *testing.T) {
 
 func TestWriteIn(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "textfile")
-	g := Gauge("eru_a", "a")
+	g := Gauge("vaire_a", "a")
 	g.Add(1)
 	if err := WriteIn(dir, Host, []*Family{g}); err != nil {
 		t.Fatal(err)

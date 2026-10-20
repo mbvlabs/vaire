@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
 // Local runs SQL on the node through the postgres OS user, because pg_hba
@@ -28,8 +28,8 @@ type Local struct {
 	// User is the role psql logs in as (-U); empty is the OS user's name.
 	User string
 	// AsRoot runs psql as root instead of the postgres OS user, so peer
-	// auth maps it through pg_ident (root may log in as eru_admin only).
-	// Maintenance runs as eru_admin this way (Phase 4).
+	// auth maps it through pg_ident (root may log in as vaire_admin only).
+	// Maintenance runs as vaire_admin this way (Phase 4).
 	AsRoot bool
 	// Timeout bounds one psql run; 0 is five minutes. A vacuum or a
 	// concurrent reindex needs longer.

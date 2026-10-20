@@ -1,7 +1,7 @@
-// Package backup is eru's database backup layer (Phase 3): the Driver seam
+// Package backup is vaire's database backup layer (Phase 3): the Driver seam
 // with its pgBackRest implementation, temporary clusters (restores, forks,
 // drills) and the data-directory swap, age-encrypted long-retention dumps,
-// the durable records in records.json, the eru.prom backup lines and the
+// the durable records in records.json, the vaire.prom backup lines and the
 // free-space checks.
 //
 // Each database is its own PostgreSQL cluster with its own WAL stream, so
@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Driver is the seam between eru and the physical backup tool. pgBackRest is
+// Driver is the seam between vaire and the physical backup tool. pgBackRest is
 // the only implementation; WAL-G would be another.
 type Driver interface {
 	// StanzaCreate creates the stanza in the repository, or checks an

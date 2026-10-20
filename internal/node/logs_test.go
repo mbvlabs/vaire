@@ -24,7 +24,7 @@ func TestJournalSince(t *testing.T) {
 	}
 }
 
-// postgres_exporter's two start-up warnings in eru's probe-only setup are
+// postgres_exporter's two start-up warnings in vaire's probe-only setup are
 // not quoted as the reason a probe fails.
 func TestExporterStartupNoiseLeftOut(t *testing.T) {
 	journal := `time=2026-10-15T06:00:00Z level=INFO source=main.go:80 msg="Starting postgres_exporter"

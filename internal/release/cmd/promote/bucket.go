@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/release"
+	"github.com/mbvlabs/vaire/internal/release"
 )
 
 type awsRunner func(context.Context, ...string) ([]byte, error)

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/mbvlabs/eru/internal/pg"
+	"github.com/mbvlabs/vaire/internal/pg"
 )
 
 // Run kinds.
@@ -30,7 +30,7 @@ type Options struct {
 	Freeze         bool   `json:"freeze,omitempty"`
 	Parallel       int    `json:"parallel,omitempty"`
 	CleanupInvalid bool   `json:"cleanup_invalid,omitempty"`
-	// NotConcurrently is reindex --concurrently=false, which eru refuses.
+	// NotConcurrently is reindex --concurrently=false, which vaire refuses.
 	NotConcurrently bool `json:"not_concurrently,omitempty"`
 }
 
@@ -49,7 +49,7 @@ func (o Options) Validate() error {
 		return errors.New("--index is for reindex")
 	}
 	if o.Kind == Reindex && o.NotConcurrently {
-		return errors.New("REINDEX without CONCURRENTLY blocks writes to the table; eru only reindexes concurrently")
+		return errors.New("REINDEX without CONCURRENTLY blocks writes to the table; vaire only reindexes concurrently")
 	}
 	if o.Parallel < 0 || o.Parallel > 16 {
 		return errors.New("--parallel must be 0-16")
@@ -117,7 +117,7 @@ func boolWord(b bool) string {
 }
 
 // VacuumdbArgs are vacuumdb's arguments for a database-wide vacuum or
-// analyze as user (eru_admin, or postgres on a protected database) over
+// analyze as user (vaire_admin, or postgres on a protected database) over
 // socketDir and port, with jobs workers.
 func (o Options) VacuumdbArgs(socketDir, user string, port, jobs int) []string {
 	if jobs < 1 {

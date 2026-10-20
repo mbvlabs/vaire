@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/hostinfo"
-	"github.com/mbvlabs/eru/internal/tune"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/tune"
 )
 
 // db2Host is the test node db2.mbvlabs.com: 7.6 GiB of RAM, so a 1.9 GiB
@@ -64,7 +64,7 @@ func TestCheckBudgetRefusedWithSuggestion(t *testing.T) {
 	if details["largest_size"] != "small" {
 		t.Errorf("largest_size = %v, want small", details["largest_size"])
 	}
-	if want := "eru db create big2 --size small"; details["suggested_command"] != want || !strings.Contains(cliErr.Hint, want) {
+	if want := "vaire db create big2 --size small"; details["suggested_command"] != want || !strings.Contains(cliErr.Hint, want) {
 		t.Errorf("suggested %v, hint %q, want %q", details["suggested_command"], cliErr.Hint, want)
 	}
 	if !strings.Contains(cliErr.Hint, "--allow-overcommit") {
@@ -85,7 +85,7 @@ func TestCheckBudgetNothingFits(t *testing.T) {
 	if _, ok := details["largest_size"]; ok {
 		t.Errorf("largest_size = %v, want none", details["largest_size"])
 	}
-	for _, want := range []string{"No size fits", "eru db resize", "big at xlarge", "bigger server"} {
+	for _, want := range []string{"No size fits", "vaire db resize", "big at xlarge", "bigger server"} {
 		if !strings.Contains(cliErr.Hint, want) {
 			t.Errorf("hint %q lacks %q", cliErr.Hint, want)
 		}
@@ -128,7 +128,7 @@ func TestCheckBudgetResize(t *testing.T) {
 	cfg = budgetCluster(config.ClusterSpec{Name: "app2", Size: "large"}, config.ClusterSpec{Name: "other", Size: "xlarge"})
 	suggest = resizeCommand(dbResizeParams{Name: "other", Size: "xlarge"}, true)
 	_, details = overcommitDetails(t, checkBudget(cfg, "other", 512, db2Host, false, suggest))
-	if want := "eru db resize other --size large --confirm other/restart"; details["suggested_command"] != want {
+	if want := "vaire db resize other --size large --confirm other/restart"; details["suggested_command"] != want {
 		t.Errorf("suggested %v, want %q", details["suggested_command"], want)
 	}
 
@@ -141,11 +141,11 @@ func TestCheckBudgetResize(t *testing.T) {
 
 func TestForkCommand(t *testing.T) {
 	got := forkCommand(dbForkParams{Source: "app2", Name: "app2_copy", At: "2026-10-14T12:00:00Z"})("small")
-	if want := "eru db fork app2 --name app2_copy --at 2026-10-14T12:00:00Z --size small"; got != want {
+	if want := "vaire db fork app2 --name app2_copy --at 2026-10-14T12:00:00Z --size small"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 	got = createCommand(dbCreateParams{Name: "big2", Profile: "oltp", Protected: true, StatementTimeout: "60s"})("small")
-	if want := "eru db create big2 --size small --profile oltp --protected"; got != want {
+	if want := "vaire db create big2 --size small --profile oltp --protected"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/steps"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/steps"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -211,7 +211,7 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 			t.Errorf("%s placed as %s:%s %04o, want %s:%s %04o", p, got.owner, got.group, got.mode, want[p].owner, want[p].group, want[p].mode)
 		}
 	}
-	if _, ok := placementOf("/etc/eru/runtime/backup.env"); ok {
+	if _, ok := placementOf("/etc/vaire/runtime/backup.env"); ok {
 		t.Error("a path outside the bundle has a placement")
 	}
 
@@ -245,7 +245,7 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 
 	// The directories as their owners create them.
 	if placeDirs[config.Dir] != 0o755 || placeDirs[steps.TLSDir] != 0o755 {
-		t.Error("/etc/eru and /etc/eru/tls must be 0755: postgres reads the certificate through them")
+		t.Error("/etc/vaire and /etc/vaire/tls must be 0755: postgres reads the certificate through them")
 	}
 	for _, d := range nodeDirs {
 		if m, ok := placeDirs[d.path]; ok && m != d.mode {
@@ -282,12 +282,12 @@ func TestPlacedAsResolvesNames(t *testing.T) {
 }
 
 // TestPlaceDirGivesEachDirectoryItsMode is the live DR blocker: the ACME
-// key sorts first, and MkdirAll made /etc/eru 0700 with /etc/eru/acme.
+// key sorts first, and MkdirAll made /etc/vaire 0700 with /etc/vaire/acme.
 func TestPlaceDirGivesEachDirectoryItsMode(t *testing.T) {
 	root := t.TempDir()
 	old := syscall.Umask(0o077)
 	defer syscall.Umask(old)
-	for _, d := range []string{steps.ACMEDir, steps.TLSDir, config.Dir, "/etc/wireguard", "/var/lib/eru", "/etc/ssh"} {
+	for _, d := range []string{steps.ACMEDir, steps.TLSDir, config.Dir, "/etc/wireguard", "/var/lib/vaire", "/etc/ssh"} {
 		if err := placeDir(root, d); err != nil {
 			t.Fatal(err)
 		}

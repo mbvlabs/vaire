@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/buildinfo"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/buildinfo"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 )
 
 // Operator-side master bundles (Phase 5): list, pick, download, check and
@@ -44,7 +44,7 @@ func pickBundleName(list []backup.MasterBundle, want string) (masterbackup.Parse
 			t, err := parseTarget(want, time.Now())
 			if err != nil {
 				return masterbackup.Parsed{}, "", output.NewError(output.CodeUsage, "--bundle "+want+" is neither a bundle name nor a time", output.ExitUsage,
-					"Use a name from eru server backup list, or an RFC 3339 time.")
+					"Use a name from vaire server backup list, or an RFC 3339 time.")
 			}
 			before, name = t, ""
 		}
@@ -52,7 +52,7 @@ func pickBundleName(list []backup.MasterBundle, want string) (masterbackup.Parse
 	p, ok := masterbackup.Pick(complete, name, before)
 	if !ok {
 		return p, "", output.NewError(output.CodeBundleNotFound, "no complete master bundle matches", output.ExitPrecondition,
-			"List the bundles with eru server backup list; without a bucket, restore from an export with --bundle-file.").
+			"List the bundles with vaire server backup list; without a bucket, restore from an export with --bundle-file.").
 			WithDetails(map[string]any{"bundle": want})
 	}
 	older := ""
@@ -125,10 +125,10 @@ func (f fetchedBundle) label() string {
 // bundle_corrupt naming the next older bundle.
 func openFetched(f fetchedBundle, identity, server string) (masterbackup.Bundle, error) {
 	corrupt := func(cause string) error {
-		hint := "Pick another bundle with --bundle (eru server backup list)."
+		hint := "Pick another bundle with --bundle (vaire server backup list)."
 		switch {
 		case f.fromFile():
-			hint = "Use another exported file with --bundle-file, or a bundle from the bucket with --bundle (eru server backup list)."
+			hint = "Use another exported file with --bundle-file, or a bundle from the bucket with --bundle (vaire server backup list)."
 		case f.Older != "":
 			hint = "The next older complete bundle is " + f.Older + ": --bundle " + f.Older + "."
 		}
@@ -150,14 +150,14 @@ func openFetched(f fetchedBundle, identity, server string) (masterbackup.Bundle,
 		return b, output.NewError(output.CodePrecondition, "master bundle "+f.label()+" belongs to server "+b.Manifest.Server+", not "+server, output.ExitPrecondition,
 			"Use the context of the server the bundle came from.").WithDetails(map[string]any{"reason": "bundle_server_mismatch", "bundle_server": b.Manifest.Server})
 	}
-	if newerThanBuild(b.Manifest.EruVersion) {
-		return b, output.NewError(output.CodeUpdateRequired, "master bundle "+f.label()+" was written by eru "+b.Manifest.EruVersion+", newer than this "+buildinfo.Version,
-			output.ExitVersion, "Run eru upgrade first.").WithDetails(map[string]any{"bundle_version": b.Manifest.EruVersion})
+	if newerThanBuild(b.Manifest.VaireVersion) {
+		return b, output.NewError(output.CodeUpdateRequired, "master bundle "+f.label()+" was written by vaire "+b.Manifest.VaireVersion+", newer than this "+buildinfo.Version,
+			output.ExitVersion, "Run vaire upgrade first.").WithDetails(map[string]any{"bundle_version": b.Manifest.VaireVersion})
 	}
 	return b, nil
 }
 
-// newerThanBuild reports whether a bundle's eru version is a newer stable
+// newerThanBuild reports whether a bundle's vaire version is a newer stable
 // release than this build. Edge and dev builds aren't compared.
 func newerThanBuild(v string) bool {
 	a, okA := semverParts(v)
@@ -203,7 +203,7 @@ func recoveryIdentity(name string) (*contexts.BackupCreds, string, error) {
 	}
 	if creds.Backup == nil || creds.Backup.Dumps.AgeIdentity == "" {
 		return creds.Backup, "", output.NewError(output.CodeInputRequired, "this context's recovery kit has no age identity", output.ExitInput,
-			"Master bundles open with the recovery identity. eru login with a current secrets document (eru secrets export).").
+			"Master bundles open with the recovery identity. vaire login with a current secrets document (vaire secrets export).").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 	return creds.Backup, creds.Backup.Dumps.AgeIdentity, nil

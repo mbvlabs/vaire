@@ -1,0 +1,8 @@
+# managed by vaire - do not edit; use cluster.toml
+[Unit]
+Description=vaire certificate issuance and renewal
+After=network-online.target nginx.service postgresql.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vaire node run certs-renew

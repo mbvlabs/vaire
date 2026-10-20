@@ -87,17 +87,17 @@ func SplitKey(key string) (name string, isBundle, ok bool) {
 // Sidecar is <name>.json, written after the bundle. It holds no plaintext
 // file hashes: those are only inside the encrypted manifest.
 type Sidecar struct {
-	Schema     string        `json:"schema"`
-	Name       string        `json:"name"`
-	Server     string        `json:"server"`
-	Node       string        `json:"node"`
-	Epoch      int64         `json:"epoch"`
-	Revision   string        `json:"revision"`
-	CreatedAt  string        `json:"created_at"`
-	EruVersion string        `json:"eru_version"`
-	Files      []SidecarFile `json:"files"`
-	Size       int64         `json:"size"`
-	SHA256     string        `json:"sha256"`
+	Schema       string        `json:"schema"`
+	Name         string        `json:"name"`
+	Server       string        `json:"server"`
+	Node         string        `json:"node"`
+	Epoch        int64         `json:"epoch"`
+	Revision     string        `json:"revision"`
+	CreatedAt    string        `json:"created_at"`
+	VaireVersion string        `json:"vaire_version"`
+	Files        []SidecarFile `json:"files"`
+	Size         int64         `json:"size"`
+	SHA256       string        `json:"sha256"`
 }
 
 // SidecarFile is one file's path and size.
@@ -107,13 +107,13 @@ type SidecarFile struct {
 }
 
 // SidecarSchema is the sidecar's schema.
-const SidecarSchema = "eru-master-sidecar/v1"
+const SidecarSchema = "vaire-master-sidecar/v1"
 
 // NewSidecar describes a sealed bundle.
 func NewSidecar(name string, m Manifest, ciphertext []byte) Sidecar {
 	s := Sidecar{
 		Schema: SidecarSchema, Name: name, Server: m.Server, Node: m.Node, Epoch: m.Epoch,
-		Revision: m.Revision, CreatedAt: m.CreatedAt, EruVersion: m.EruVersion,
+		Revision: m.Revision, CreatedAt: m.CreatedAt, VaireVersion: m.VaireVersion,
 		Size: int64(len(ciphertext)), SHA256: SHA256(ciphertext),
 	}
 	for _, f := range m.Files {

@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 func TestJournalNoise(t *testing.T) {
@@ -26,12 +26,12 @@ func TestJournalNoise(t *testing.T) {
 
 func TestJournalFilterDropsEnvelope(t *testing.T) {
 	lines := []string{
-		`{"schema":"eru-event/v1","type":"step","step":"backup","ts":"2026-10-14T12:00:00Z"}`,
+		`{"schema":"vaire-event/v1","type":"step","step":"backup","ts":"2026-10-14T12:00:00Z"}`,
 		"backup 20261014-101010F finished",
 		"Executing: /usr/lib/systemd/systemd-sysv-install enable pgbouncer",
-		`{"schema":"eru-event/v1","type":"result"}`,
+		`{"schema":"vaire-event/v1","type":"result"}`,
 		"{",
-		`  "schema": "eru/v1",`,
+		`  "schema": "vaire/v1",`,
 		`  "ok": true,`,
 		`  "data": {`,
 		`    "label": "20261014-101010F"`,
@@ -70,9 +70,9 @@ func TestJobErrorDetailsFlattens(t *testing.T) {
 
 func TestTimerUnit(t *testing.T) {
 	cases := map[string]engine.JobRecord{
-		"eru-db-dump@app2.service":  {Job: "db-dump", DB: "app2"},
-		"eru-stanza-expiry.service": {Job: "stanza-expiry"},
-		"":                          {Job: "restore", DB: "app"},
+		"vaire-db-dump@app2.service":  {Job: "db-dump", DB: "app2"},
+		"vaire-stanza-expiry.service": {Job: "stanza-expiry"},
+		"":                            {Job: "restore", DB: "app"},
 	}
 	for want, rec := range cases {
 		if got := timerUnit(rec); got != want {
@@ -82,10 +82,10 @@ func TestTimerUnit(t *testing.T) {
 }
 
 func TestJobProcessAlive(t *testing.T) {
-	// The test binary is alive but isn't eru node run backup-full: a reused
+	// The test binary is alive but isn't vaire node run backup-full: a reused
 	// PID doesn't keep a dead job running.
 	if _, err := os.Stat("/proc/self/cmdline"); err == nil && jobProcessAlive(os.Getpid(), "backup-full") {
-		t.Fatal("the test process counted as eru node run backup-full")
+		t.Fatal("the test process counted as vaire node run backup-full")
 	}
 	if jobProcessAlive(1<<22+12345, "backup-full") {
 		t.Fatal("a PID that doesn't exist counted as alive")

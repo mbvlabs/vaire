@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/render"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/render"
 )
 
 // Recovery starts its first full before enabling the recovered database's
@@ -27,7 +27,7 @@ func TestBackupServiceTemplatesDoNotDependOnDatabasesOrSchedules(t *testing.T) {
 			}
 			files := timerFiles(cfg)
 			for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump"} {
-				name := "eru-" + job + "@.service"
+				name := "vaire-" + job + "@.service"
 				if got := string(files[name]); got != string(render.JobService(job, "--db %i")) {
 					t.Errorf("%s missing or incorrect", name)
 				}

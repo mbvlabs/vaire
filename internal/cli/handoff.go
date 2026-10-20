@@ -11,11 +11,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/secrets"
-	"github.com/mbvlabs/eru/internal/secretsdoc"
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -89,7 +89,7 @@ func requireStructuredHandoff(cmd *cobra.Command, outFlag, action string, confir
 // show prints a short handoff: what the record is and the bundle
 // passphrase. The operator then copies the whole record to the clipboard,
 // prints it when the terminal blocks the copy, or, with canSave, saves it
-// to a file, and confirms with 'stored'. It does nothing when eru must not
+// to a file, and confirms with 'stored'. It does nothing when vaire must not
 // prompt.
 func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	if MustNotPrompt(cmd) {
@@ -112,7 +112,7 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 		_, _ = fmt.Fprintln(w, "\n== Secrets handoff ==")
 	}
 	_, _ = fmt.Fprintln(w, "The cluster's master record: the operator's keys, the sudo password and the database passwords.")
-	_, _ = fmt.Fprintln(w, "eru keeps no copy and doesn't show it again. Store it in your password manager.")
+	_, _ = fmt.Fprintln(w, "vaire keeps no copy and doesn't show it again. Store it in your password manager.")
 	_, _ = fmt.Fprintln(w)
 	label := "Bundle passphrase"
 	if rich {
@@ -205,7 +205,7 @@ func (h *handoff) save(cmd *cobra.Command) error {
 // passphrase.
 func (h handoff) record() string {
 	var b strings.Builder
-	b.WriteString("eru secrets handoff for server " + h.doc.Server.Name + "\n")
+	b.WriteString("vaire secrets handoff for server " + h.doc.Server.Name + "\n")
 	for _, g := range h.doc.Groups() {
 		b.WriteString("\n## " + g.Title + "\n")
 		for _, f := range g.Fields {
@@ -218,7 +218,7 @@ func (h handoff) record() string {
 		}
 	}
 	b.WriteString("\n## Transfer bundle\n")
-	b.WriteString("On another machine run eru login and paste this block.\n")
+	b.WriteString("On another machine run vaire login and paste this block.\n")
 	b.WriteString("Passphrase: " + h.passphrase + "\n")
 	b.Write(h.bundle)
 	return b.String()

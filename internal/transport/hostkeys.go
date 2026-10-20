@@ -10,12 +10,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// KnownHosts is a known_hosts file of pinned host keys. Matching is eru's
+// KnownHosts is a known_hosts file of pinned host keys. Matching is vaire's
 // own: a presented key must equal one of the host's pinned keys, so a host
 // pinned with several key types never trips a false mismatch.
 type KnownHosts struct {
@@ -47,7 +47,7 @@ func HostID(addr string) string {
 // LoadKnownHosts reads path. A missing file is empty.
 func LoadKnownHosts(path string) (*KnownHosts, error) {
 	k := &KnownHosts{path: path, hosts: map[string][]ssh.PublicKey{}}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: known_hosts under the eru config directory.
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: known_hosts under the vaire config directory.
 	if err != nil {
 		if os.IsNotExist(err) {
 			return k, nil
@@ -61,7 +61,7 @@ func LoadKnownHosts(path string) (*KnownHosts, error) {
 			break
 		}
 		if err != nil {
-			return nil, output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "Restore it from the secrets document with eru login.")
+			return nil, output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "Restore it from the secrets document with vaire login.")
 		}
 		for _, host := range hosts {
 			k.add(host, key)

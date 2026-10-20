@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"sort"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/config"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 )
 
 // CheckNotProtected refuses action on database name while cluster.toml marks
 // it protected. A confirm token never overrides it: the protection has to be
-// lifted first, with a code from the authenticator app eru protect init set
+// lifted first, with a code from the authenticator app vaire protect init set
 // up.
 func CheckNotProtected(cfg config.Cluster, name, action string) error {
 	spec, ok := cfg.ClusterByName(name)
@@ -24,7 +24,7 @@ func CheckNotProtected(cfg config.Cluster, name, action string) error {
 func protectedError(name, action string) error {
 	return output.NewError(output.CodeDatabaseProtected,
 		"database "+name+" is protected, so "+action+" is refused", output.ExitUnsafe,
-		"A human lifts the protection first, at a terminal: eru db unprotect "+name+" asks for a current code from the authenticator app set up with eru protect init. A confirm token does not override it.").
+		"A human lifts the protection first, at a terminal: vaire db unprotect "+name+" asks for a current code from the authenticator app set up with vaire protect init. A confirm token does not override it.").
 		WithDetails(map[string]any{"reason": "database_protected", "database": name, "action": action})
 }
 

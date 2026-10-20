@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/transport"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/pelletier/go-toml/v2"
 )
 

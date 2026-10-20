@@ -7,16 +7,16 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mbvlabs/eru/internal/backup"
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/contexts"
-	"github.com/mbvlabs/eru/internal/masterbackup"
-	"github.com/mbvlabs/eru/internal/node"
-	"github.com/mbvlabs/eru/internal/remote"
+	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 )
 
-// eru server backup now|list|verify|export (Phase 5): the master bundle.
+// vaire server backup now|list|verify|export (Phase 5): the master bundle.
 
 func serverBackupCommands() cmdSpec {
 	return cmdSpec{
@@ -24,8 +24,8 @@ func serverBackupCommands() cmdSpec {
 		run: parentRun,
 		meta: CommandMeta{
 			Summary:   "Back up the master's own state (the master bundle)",
-			WhenToUse: []string{"Check, take or copy the encrypted bundle that server init --restore rebuilds the master from. Databases are backed up by eru backup."},
-			Examples:  []string{"eru server backup list"},
+			WhenToUse: []string{"Check, take or copy the encrypted bundle that server init --restore rebuilds the master from. Databases are backed up by vaire backup."},
+			Examples:  []string{"vaire server backup list"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
@@ -38,12 +38,12 @@ func serverBackupCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:        "Build and upload a master bundle now",
 					WhenToUse:      []string{"Before a risky change, or to check the master backup works. Bundles are also made after every change and daily."},
-					Examples:       []string{"eru server backup now", "eru server backup now --dry-run"},
+					Examples:       []string{"vaire server backup now", "vaire server backup now --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ErrorCodes:     []string{"node_fenced", "input_required", "backup_auth_failed", "endpoint_unreachable"},
-					Next:           []string{"eru server backup list"},
+					Next:           []string{"vaire server backup list"},
 				},
 			},
 			{
@@ -56,7 +56,7 @@ func serverBackupCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "List the master bundles in the bucket and on the server",
 					WhenToUse: []string{"Pick a bundle for server init --restore --bundle, or check the newest is current."},
-					Examples:  []string{"eru server backup list", "eru server backup list --bucket --json"},
+					Examples:  []string{"vaire server backup list", "vaire server backup list --bucket --json"},
 					Remote:    true,
 				},
 			},
@@ -70,7 +70,7 @@ func serverBackupCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:   "Download, decrypt and check a master bundle on this machine",
 					WhenToUse: []string{"Prove a rebuild would work: the bundle opens with the recovery identity and matches the server's live state."},
-					Examples:  []string{"eru server backup verify", "eru server backup verify --bundle-file prod-master.tar.age"},
+					Examples:  []string{"vaire server backup verify", "vaire server backup verify --bundle-file prod-master.tar.age"},
 					Remote:    true,
 					ErrorCodes: []string{
 						"bundle_corrupt", "bundle_not_found", "secrets_error",
@@ -87,13 +87,13 @@ func serverBackupCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary:          "Copy a master bundle, still encrypted, to this machine",
 					WhenToUse:        []string{"Without a bucket: keep a copy off the server, so server init --restore --bundle-file can rebuild it."},
-					Examples:         []string{"eru server backup export --out prod-master.tar.age"},
+					Examples:         []string{"vaire server backup export --out prod-master.tar.age"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
 					SkipDryRunReason: "export only writes a local file",
 					Remote:           true,
 					ErrorCodes:       []string{"bundle_not_found"},
-					Next:             []string{"eru server backup verify --bundle-file <file>"},
+					Next:             []string{"vaire server backup verify --bundle-file <file>"},
 				},
 			},
 		},
@@ -134,7 +134,7 @@ func runServerBackupNow(cmd *cobra.Command, _ []string) error {
 	case res.Bucket:
 		msg += "; it was uploaded before (the bucket wasn't checked this run)"
 	default:
-		msg += "; no bucket, so it stays on the server (eru server backup export)"
+		msg += "; no bucket, so it stays on the server (vaire server backup export)"
 	}
 	return output.Success(cmd, output.Result{Data: res, Message: msg, Warnings: warnings})
 }
@@ -294,7 +294,7 @@ func runServerBackupVerify(cmd *cobra.Command, _ []string) error {
 					message += "\nit matches the server's live state (current)"
 				} else {
 					data["state"] = "behind"
-					message += "\nthe server has changed since (behind): eru server backup now"
+					message += "\nthe server has changed since (behind): vaire server backup now"
 				}
 			}
 		}
@@ -311,7 +311,7 @@ func manifestSummary(m masterbackup.Manifest) map[string]any {
 		files = append(files, f.Path)
 	}
 	return map[string]any{"server": m.Server, "node": m.Node, "epoch": m.Epoch, "revision": m.Revision,
-		"created_at": m.CreatedAt, "eru_version": m.EruVersion, "files": files}
+		"created_at": m.CreatedAt, "vaire_version": m.VaireVersion, "files": files}
 }
 
 func runServerBackupExport(cmd *cobra.Command, _ []string) error {
@@ -349,7 +349,7 @@ func runServerBackupExport(cmd *cobra.Command, _ []string) error {
 	}
 	return output.Success(cmd, output.Result{
 		Data:    map[string]any{"bundle": got.Name, "out": out, "size": len(raw)},
-		Message: fmt.Sprintf("exported master bundle %s (%s, still encrypted) to %s\nrebuild from it with eru server init --restore --host root@<new-ip> --bundle-file %s", got.Name, humanBytes(int64(len(raw))), out, out),
+		Message: fmt.Sprintf("exported master bundle %s (%s, still encrypted) to %s\nrebuild from it with vaire server init --restore --host root@<new-ip> --bundle-file %s", got.Name, humanBytes(int64(len(raw))), out, out),
 	})
 }
 

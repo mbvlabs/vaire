@@ -8,17 +8,17 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/localenv"
 	"github.com/spf13/cobra"
 )
 
 // psqlArgs accepts positional arguments only after --; they go to psql.
 func psqlArgs(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {
-		return output.NewError(output.CodeUsage, "eru psql takes psql's arguments only after --", output.ExitUsage,
-			`Put them after --: eru psql --db <db> -- -c "select 1".`)
+		return output.NewError(output.CodeUsage, "vaire psql takes psql's arguments only after --", output.ExitUsage,
+			`Put them after --: vaire psql --db <db> -- -c "select 1".`)
 	}
 	return nil
 }
@@ -26,7 +26,7 @@ func psqlArgs(cmd *cobra.Command, args []string) error {
 func runPsql(cmd *cobra.Command, args []string) error {
 	db := stringFlag(cmd, "db")
 	if db == "" {
-		return output.NewError(output.CodeInputRequired, "eru psql needs --db", output.ExitInput,
+		return output.NewError(output.CodeInputRequired, "vaire psql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 	if err := localenv.RequireTool(cmd, localenv.ToolPsql); err != nil {
@@ -80,7 +80,7 @@ func runPsql(cmd *cobra.Command, args []string) error {
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
 	child.Stderr = cmd.ErrOrStderr()
-	// psql owns the terminal from here: nothing of eru's live area may draw.
+	// psql owns the terminal from here: nothing of vaire's live area may draw.
 	defer ui.Suspend()()
 	if err := child.Run(); err != nil {
 		var exitErr *exec.ExitError

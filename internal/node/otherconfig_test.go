@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/eru/internal/config"
-	"github.com/mbvlabs/eru/internal/engine"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 )
 
 // fakeConfig stands in for postgres-config-v1: its inputs depend on how many

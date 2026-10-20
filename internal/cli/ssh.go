@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/mbvlabs/eru/internal/cli/output"
-	"github.com/mbvlabs/eru/internal/cli/ui"
-	"github.com/mbvlabs/eru/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/localenv"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
@@ -20,7 +20,7 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	command := stringFlag(cmd, "command")
 	opts, _ := output.ParseOptions(cmd)
 	if command == "" && (output.UsesStructuredOutput(opts) || MustNotPrompt(cmd)) {
-		return output.NewError(output.CodeUsage, "eru ssh needs a terminal or --command", output.ExitUsage,
+		return output.NewError(output.CodeUsage, "vaire ssh needs a terminal or --command", output.ExitUsage,
 			"Pass --command to run one command, or use a TTY for a shell.")
 	}
 	p := newProgress(cmd)
@@ -42,7 +42,7 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	// A command run from a terminal gets a PTY too (like ssh -t), so sudo can
 	// ask for the admin password. With stdout piped or redirected it runs
 	// without one: a PTY merges the remote stderr (sudo's prompt) into stdout
-	// and turns every newline into \r\n, which breaks eru ssh --command … | jq.
+	// and turns every newline into \r\n, which breaks vaire ssh --command … | jq.
 	if command != "" && (!stdinIsTTY() || !stdoutIsTTY() || MustNotPrompt(cmd)) {
 		stderr := &sudoPasswordWatch{w: cmd.ErrOrStderr()}
 		sess.Stdin = cmd.InOrStdin()
@@ -54,7 +54,7 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 			return output.NewError(output.CodeInputRequired,
 				"sudo on the node needs a password, and without a terminal there is none to ask for", output.ExitInput,
 				"Run the command from a terminal with stdout not piped so sudo can prompt, "+
-					"or have sudo write the output to a file and read it back with eru ssh --no-input --command 'cat <file>'.").
+					"or have sudo write the output to a file and read it back with vaire ssh --no-input --command 'cat <file>'.").
 				WithDetails(map[string]any{"exit_status": exitErr.ExitStatus()})
 		}
 		return sshExit(err)
@@ -69,11 +69,11 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	if err := sess.RequestPty("xterm-256color", height, width, modes); err != nil {
 		return output.WrapError(output.CodeTransportFailed, err, output.ExitTransport, "The node refused a PTY.")
 	}
-	// The remote shell owns the terminal: nothing of eru's live area may draw.
+	// The remote shell owns the terminal: nothing of vaire's live area may draw.
 	defer ui.Suspend()()
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
-		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Run eru ssh from a terminal.")
+		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Run vaire ssh from a terminal.")
 	}
 	defer func() { _ = term.Restore(fd, oldState) }()
 	sess.Stdin = os.Stdin
