@@ -4,6 +4,7 @@
 
 - [MASTER.md](MASTER.md): decisions, architecture and current roadmap/status.
 - [IMPLEMENTATION.md](IMPLEMENTATION.md): implementation details; `AGENTS.md` at the repository root defines working rules.
+- [WIREGUARD-OVERVIEW.md](WIREGUARD-OVERVIEW.md): illustrated walkthrough of private networking, managed credential files and the encrypted handoff, grounded in the code.
 - [MANUAL-TESTING.md](MANUAL-TESTING.md): qualification summary, coverage limits and chronological live evidence. Historical failures are retained, not current blockers unless explicitly listed as unresolved.
 - [PLAN-v1-release.md](PLAN-v1-release.md): remaining release gates and authorized-release procedure.
 - [RELEASE-v1.0.0-alpha.1.md](RELEASE-v1.0.0-alpha.1.md): draft release notes; no alpha has been published by this qualification.
