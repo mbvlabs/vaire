@@ -83,4 +83,10 @@ func TestProtectionOf(t *testing.T) {
 	if protected == nil || all == nil || len(protected)+len(all) != 0 {
 		t.Fatalf("empty cluster: %v %v, want empty, non-nil lists", protected, all)
 	}
+	// A follower's protection carries its source, so the write-code gate can
+	// tell it has no writable path (Phase 6).
+	protected, all = protectionOf(followerCfg())
+	if len(all) != 2 || all[1].Name != "app_follower" || all[1].Follows != "app" || len(protected) != 0 {
+		t.Fatalf("followers = %+v, protected = %v", all, protected)
+	}
 }

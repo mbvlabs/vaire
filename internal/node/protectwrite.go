@@ -114,6 +114,12 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 	}
 	recs, _ := backup.LoadRecords()
 	spec, ok := writeSpec(env.Cluster, recs, p.DB)
+	if ok && spec.IsFollower() {
+		// Nothing can be written on a follower: its cluster follows its
+		// source, and a code from the authenticator app could never make
+		// it writable (Phase 6).
+		return Result{}, followerError(spec, "writing to it")
+	}
 	if !ok || !spec.Protected {
 		// A copy the server isn't holding open, or an unprotected database:
 		// the CLI writes as vaire_admin, as before.
@@ -177,7 +183,10 @@ func (g protectGuard) requireWriteCode(action, field string, applies func(rpc.Re
 			var params map[string]any
 			_ = json.Unmarshal(env.Req.Params, &params)
 			if name, _ := params[field].(string); name != "" {
-				if spec, ok := env.Cluster.ClusterByName(name); ok && spec.Protected {
+				if spec, ok := env.Cluster.ClusterByName(name); ok && spec.Protected && !spec.IsFollower() {
+					// A follower takes no writes, so a code from the
+					// authenticator app can never authorise one: its handler
+					// or PostgreSQL refuses the write instead (Phase 6).
 					if err := g.checkWrite(name, action, env.Req.Secrets[ProtectCodeSecret]); err != nil {
 						return Result{}, err
 					}

@@ -70,6 +70,11 @@ func TestRefuseFollower(t *testing.T) {
 		request("db.resize", map[string]any{"name": "app_follower", "size": "medium"}),
 		request("maint.report", map[string]any{"db": "app_follower"}),
 		request("sql", map[string]any{"db": "app_follower"}),
+		// D10: a follower may be unfollowed, protected or not. db.follow's
+		// refusal of a follower is its handler's (follows_follower), not
+		// this list's.
+		request("db.unfollow", map[string]any{"name": "app_follower"}),
+		request("db.follow", map[string]any{"source": "app", "name": "app_follower"}),
 	}
 	for _, req := range allowed {
 		if err := refuseFollower(req, cfg); err != nil {

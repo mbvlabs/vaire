@@ -65,6 +65,7 @@ var awaitingRefused = map[string]string{ //nolint:gosec // G101: method names an
 	"db.credentials": "rotating its credentials", "maint.run": "maintenance", "maint.kill": "maint kill",
 	"maint.report": "a maintenance report", "queries.reset": "a statistics reset", "apply": "apply --db",
 	"sql": "sql", "db.write-access": "writing to it",
+	"db.follow": "a follow", "db.unfollow": "an unfollow",
 }
 
 // awaitingParamFields are the params that name a database.

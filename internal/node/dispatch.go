@@ -195,8 +195,10 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		}
 		env.Cluster = cfg
 		// A follower refuses what needs a stanza or a writable database
-		// (Phase 6).
+		// (Phase 6). Record it like the other refusals that happen before a
+		// handler runs.
 		if err := refuseFollower(req, cfg); err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "is_follower")
 			return out.fail(command, err)
 		}
 		if raw, err := os.ReadFile(config.ClusterPath); err == nil && config.HasLegacyVPS(raw) {

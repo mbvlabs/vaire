@@ -200,6 +200,81 @@ func TestWriteAccess(t *testing.T) {
 	}
 }
 
+// A follower takes no writes, so db.write-access refuses it before the
+// authenticator code is checked and makes no role, protected or not (D9).
+func TestWriteAccessRefusesAFollower(t *testing.T) {
+	for _, protected := range []bool{false, true} {
+		cfg := followerCfg()
+		for i := range cfg.Clusters {
+			if cfg.Clusters[i].Name == "app_follower" {
+				cfg.Clusters[i].Protected = protected
+			}
+		}
+		g, _ := newTestGuard(t)
+		granted := 0
+		grant := func(context.Context, config.ClusterSpec, writeRole) error {
+			granted++
+			return nil
+		}
+		env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"db":"app_follower"}`)}}
+		env.Req.Secrets = map[string]string{WritePasswordSecret: strings.Repeat("p", writeRolePasswordMin)}
+		_, err := g.writeAccess(context.Background(), env, grant)
+		wantReason(t, err, output.CodePrecondition, "is_follower")
+		if granted != 0 {
+			t.Fatalf("protected=%v: granted %d roles on a follower", protected, granted)
+		}
+	}
+}
+
+// The write-code gate skips a follower: a code can never make the read-only
+// cluster writable, so the handler runs and refuses (or serves maint kill)
+// on its own. A protected primary is still gated (Phase 6).
+func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
+	g, clock := newTestGuard(t)
+	secret := setUp(t, g, clock)
+	clock.t = clock.t.Add(totp.Period)
+	cfg := followerCfg()
+	for i := range cfg.Clusters {
+		cfg.Clusters[i].Protected = true
+	}
+	called := func(context.Context, *Env) (Result, error) { return Result{}, nil }
+	run := func(params, code string) (bool, error) {
+		env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(params)}}
+		if code != "" {
+			env.Req.Secrets = map[string]string{ProtectCodeSecret: code}
+		}
+		handlerRan := false
+		wrapped := g.requireWriteCode("writing to it", "db", sqlWrites, func(ctx context.Context, env *Env) (Result, error) {
+			handlerRan = true
+			return called(ctx, env)
+		})
+		_, err := wrapped(context.Background(), env)
+		return handlerRan, err
+	}
+
+	// The protected source still needs a code.
+	if ran, err := run(`{"db":"app","write":true}`, ""); ran {
+		t.Fatalf("the protected source ran without a code: %v", err)
+	} else {
+		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+	}
+	if ran, err := run(`{"db":"app","write":true}`, codeFor(t, secret, clock.t, 0)); err != nil || !ran {
+		t.Fatalf("the protected source: err %v, ran %v", err, ran)
+	}
+
+	// The protected follower runs without one: it cannot be written.
+	if ran, err := run(`{"db":"app_follower","write":true}`, ""); err != nil || !ran {
+		t.Fatalf("the protected follower: err %v, ran %v", err, ran)
+	}
+	// maint kill's gate is the same guard; a follower's sessions may be
+	// terminated without a code (D9).
+	wrappedKill := g.requireWriteCode("terminating its sessions", "db", nil, called)
+	env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"db":"app_follower","idle_in_tx":true}`)}}
+	if _, err := wrappedKill(context.Background(), env); err != nil {
+		t.Fatalf("maint kill on the protected follower: %v", err)
+	}
+}
+
 // A copy the server holds open resolves to the live database's spec, pointed
 // at the copy's port, so a write to it follows the live database's
 // protection; anything else is not a database of the server's.
