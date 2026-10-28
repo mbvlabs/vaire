@@ -5,11 +5,15 @@
 - [MASTER.md](MASTER.md): decisions, architecture and current roadmap/status.
 - [IMPLEMENTATION.md](IMPLEMENTATION.md): implementation details; `AGENTS.md` at the repository root defines working rules.
 - [WIREGUARD-OVERVIEW.md](WIREGUARD-OVERVIEW.md): illustrated walkthrough of private networking, managed credential files and the encrypted handoff, grounded in the code.
+- [ACTIVITY.md](ACTIVITY.md): local activity history, evidence coverage and metadata-only incident files; qualification status remains in `MASTER.md`.
+- [FINDINGS-activity-review.md](FINDINGS-activity-review.md): findings from the activity-history review, their fixes and decisions.
 - [MANUAL-TESTING.md](MANUAL-TESTING.md): qualification summary, coverage limits and chronological live evidence. Historical failures are retained, not current blockers unless explicitly listed as unresolved.
 - [PLAN-v1-release.md](PLAN-v1-release.md): remaining release gates and authorized-release procedure.
 - [RELEASE-v1.0.0-alpha.1.md](RELEASE-v1.0.0-alpha.1.md): draft release notes; no alpha has been published by this qualification.
 
 ## Design and implementation history
+
+Selected design, implementation authorized: [RFC-activity-and-diagnostics.md](RFC-activity-and-diagnostics.md) records local activity history, on-demand incident bundles and metadata-first agent access. Off-node logging and continuous runtime-log search are deferred; current implementation/qualification status is in `MASTER.md`.
 
 Keep these as rationale and implementation references, not as parallel status trackers:
 

@@ -87,6 +87,8 @@ internal/node/               node-side RPC dispatcher + method handlers
 internal/contexts/           ~/.config/vaire layout, context files, pending-init state
 internal/secretsdoc/         schema, age encrypt/decrypt, passphrase generation (EFF wordlist embedded)
 internal/secrets/            secret generation (passwords, cipher passes), redaction registry
+internal/activity/           bounded metadata-only activity store and query contract
+internal/diagnostics/        incident-bundle validation and offline reading
 internal/config/             cluster.toml schema ([[clusters]], sizes), defaults, validation, answers-file merge
 internal/hostinfo/           OS, arch, RAM, vCPU, disks (rotational, size), kernel, public IP
 internal/engine/             step interface, runner, journal, locks, plan, events
@@ -247,9 +249,12 @@ Failure (also printed to stdout in structured modes; human mode prints to stderr
     "message": "restore replaces the running database",
     "hint": "re-run with --confirm app/restore",
     "details": { "confirm_token": "app/restore" }
-  }
+  },
+  "warnings": [ { "code": "activity_not_recorded", "message": "…" } ]
 }
 ```
+
+`warnings` is optional on failures too: it carries only typed evidence notices observed before the error, without changing the error code, hint, details or exit status.
 
 - `agent` mode is `json`, plus each command's `CommandMeta.next` suggestions and terse `message`s.
 - `markdown` renders tables for list-like data.
@@ -283,9 +288,9 @@ The last line is always `type: result`. `type` ∈ `step|log|progress|warning|pr
 | `ambiguous_input`, `input_required` | 8 |
 | `remote_unreachable`, `transport_failed`, `host_key_mismatch`, `endpoint_unreachable`, `bucket_not_found`, `backup_auth_failed` | 9 |
 | `node_version_mismatch`, `update_required` | 10 |
-| `precondition_failed` (e.g. lock held, backup running, outside PITR window, insufficient disk), `bundle_not_found`, `node_fenced` (Phase 5) | 11 |
+| `precondition_failed` (e.g. lock held, backup running, outside PITR window, insufficient disk), `bundle_not_found` (a master or incident bundle is absent), `node_fenced` (Phase 5) | 11 |
 | `lockdown_failed` (commit-confirm reverted) | 12 |
-| `secrets_error` (decrypt failed, bad passphrase), `bundle_corrupt` (a master bundle failed its checks, Phase 5) | 13 |
+| `secrets_error` (decrypt failed, bad passphrase), `bundle_corrupt` (a master backup or incident bundle failed its typed checks) | 13 |
 | `release_verification_failed` (signature, identity, sha256 or preflight of a downloaded binary) | 14 |
 | `error` (generic) | 70 |
 
@@ -519,6 +524,7 @@ Explicit values win: `size = "small"` with `memory = "768MiB"` is a small with m
 | `/run/vaire-ports/<owner>` | root | Port reservations of temporary clusters in 5480–5499, under `ports.lock` (§13.5) |
 | `/var/lib/node_exporter/textfile/vaire.prom` | root 0644 | §15.4 |
 | `/var/log/vaire/` | root 0750 | One log per RPC/job: `<UTC ts>-<method>-<request_id>.log`, rotated by logrotate (30 days) |
+| `/var/log/vaire/activity/` | root 0700 | Bounded metadata-only activity segments and private state; files `0600`, 32 MiB / 1 MiB segments / 14 days by default. Queries never create it |
 | `/var/log/postgresql/postgresql-18-<db>.log` | postgres | The cluster's log (`vaire logs postgres --db <db>`) |
 | `/run/lock/vaire.lock`, `/run/lock/vaire-<db>.lock`, `/run/lock/vaire-heavy-io.lock` | | The global lock, each database's cluster lock and the heavy-I/O lock (§9.5) |
 
@@ -776,6 +782,20 @@ Maintenance additionally refuses while a pgBackRest backup of that database is r
 ### 9.6 Redaction
 
 `secrets.Registry` collects every secret value loaded or generated in the process. All output paths (events, logs, errors, envelopes) pass through `Redact`, which replaces values of 6 or more characters with `«redacted»`.
+
+### Activity history and incident files
+
+The metadata-only activity stream is separate from the per-run logs above. `internal/activity` owns bounded NDJSON segments and private coordination/state under `/var/log/vaire/activity` (`0700`, files `0600`), with defaults of 32 MiB total, 1 MiB segments and 14-day retention. No PostgreSQL database, collector, HTTP control API or continuously running vaire node service is involved.
+
+- `activity.list`, `activity.show` and `activity.health` are read-only node RPCs. They do not take an operation lock, create a run log, initialize a missing activity directory or record their own queries. The CLI queries the context master only; fleet fan-out remains future work.
+- RPCs, jobs and steps emit typed `vaire-activity/v1` records. Safe early refusals and sensitive-operation outcomes are included without copying request/response bodies, secret factors, raw logs, SQL or error messages. Actions/reasons use explicit allowlists; new reason strings are omitted until included deliberately. Claimed actor labels are not authenticated person identities.
+- Optional `operation_id` and `parent_request_id` extend the RPC request additively. A CLI invocation carries one operation ID across its RPCs; each attempt still has a distinct request ID. Job specs propagate the existing request/job identity and operation relationship. Typed remote failures carry correlation IDs without changing their error codes or retrying work.
+- Important interactive mutations require a checked local start record; reads and explicit safety-critical work (backups, verification, restore copies/cut-over/undo, drills, dumps, database recovery, master backups, maintenance job starts) degrade with `activity_not_recorded` instead, so diagnostic storage cannot block disaster recovery. Each write, including the node's identity reads, is handed to one serialized local writer and the caller waits at most two seconds, so a stalled filesystem cannot hold an operation lock or a safety job; a process bounds how many writers may be pinned on the store at once. A checked start that lands after that wait is closed as `unknown` while the process lives (a `node rpc` process may exit first, leaving a start with no terminal event); work that continued keeps its late `started` record and is never rewritten as a refusal. A store whose state counts events that no segment holds refuses further appends instead of re-baselining its counters. A reader treats an unterminated final line of the newest segment as a live append while the append lock is held, and otherwise as a torn tail. Losing completion evidence after side effects never triggers replay/rollback. Missing terminal evidence is incomplete/unknown; job replay preserves original event times. Job completion-evidence settlement also runs behind a bounded state-lock wait and a process-wide waiter cap: an unsettled record stays pending for the follower to report rather than holding the finished job.
+- Pages carry bounded scan counts, retained/returned bounds, loss/partial/truncation flags and continuation cursors. Callers must not equate missing evidence with a clean outcome. Cursors keep the original filter/window/page-size snapshot; queries return at most 500 events.
+- `internal/diagnostics` handles `vaire-incident/v1` JSON incident files, capped at 8 MiB, created owner-only without overwriting an existing path. Collection reads a bounded typed activity page and fixed source/version metadata; inspection validates it offline without loading a context or contacting a server. Neither contexts/recovery credentials nor raw service logs/configuration bodies are included.
+- Doctor checks activity storage, permissions and coverage independently of PostgreSQL. It reports unavailable evidence rather than silently repairing unsafe/corrupt storage. Registered-secret redaction remains defense in depth; it is not proof that arbitrary existing logs are shareable.
+
+See [ACTIVITY.md](ACTIVITY.md) for usage and limitations, the [selected design](RFC-activity-and-diagnostics.md) for rationale, and `schema/vaire-activity-v1.json` / `schema/vaire-incident-v1.json` for the public shapes. Automatic off-node collection, continuous runtime-log search, separately scoped operator identities and encryption of local credentials are not part of this feature. Current qualification is tracked only in [MASTER.md](MASTER.md) and [MANUAL-TESTING.md](MANUAL-TESTING.md).
 
 ---
 

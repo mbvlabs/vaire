@@ -22,12 +22,15 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Disaster recovery | `vaire server backup now\|list\|verify\|export` (the master bundle), `vaire server init --restore`, `vaire db recover <db>\|--all` |
 | Jobs | `vaire job list\|follow` |
 | Health | `vaire status [--watch]`, `vaire doctor [--only security]`, `vaire top`, `vaire queries` |
+| Evidence | `vaire activity list\|show\|health`, `vaire diagnostics collect\|inspect` (local metadata-only history and portable incident files) |
 | Metrics | `vaire metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
 | Maintenance | `vaire maint vacuum\|analyze\|reindex\|report\|kill` (`repack` waits for Phase 7), nightly and weekly maintenance timers |
 | Operations | `vaire logs`, `vaire secrets export`, `vaire upgrade` |
 | Agents | `vaire commands --json`, `vaire guide agents`, `vaire skill install` |
 
 Commands from later phases are already in the tree and return `not implemented yet`.
+
+**New in this checkout, awaiting live qualification:** `vaire activity list|show|health` and `vaire diagnostics collect|inspect` provide local, metadata-only operation history and portable incident evidence. No logging database, external collector or raw-log export is required. See [activity and diagnostics](docs/ACTIVITY.md).
 
 ## Quick start
 

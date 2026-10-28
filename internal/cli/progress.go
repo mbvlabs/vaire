@@ -35,6 +35,9 @@ type progress struct {
 	// hidden holds warning codes the human output leaves out because the
 	// command's result already says the same.
 	hidden map[string]bool
+	// warned holds the warnings printed in the human output, so the same
+	// notice arriving again as an event does not print twice.
+	warned map[output.Warning]bool
 	// status is the terminal UI's waiting line while wait runs.
 	status *ui.Status
 	// beat is the plain output's heartbeat while wait runs.
@@ -82,6 +85,9 @@ func (p *progress) human() bool {
 
 // event renders one node or local event.
 func (p *progress) event(ev output.Event) {
+	if ev.Type == "warning" {
+		output.RecordWarning(p.cmd, output.Warning{Code: secrets.Redact(ev.Code), Message: secrets.Redact(ev.Message)})
+	}
 	if p.opts.Stream {
 		ev.Schema = output.EventSchema
 		if ev.TS == "" {
@@ -99,6 +105,9 @@ func (p *progress) event(ev output.Event) {
 	p.track(ev)
 	if ev.Type == "warning" && ev.Code != "" && p.hidden[ev.Code] {
 		p.shown(ev.Message)
+		return
+	}
+	if ev.Type == "warning" && !p.claimWarning(ev) {
 		return
 	}
 	if p.live != nil {
@@ -554,6 +563,23 @@ func (p *progress) warn(msg string) {
 // leaves it out instead of printing it again.
 func (p *progress) shown(msg string) {
 	output.MarkWarningShown(p.cmd, msg)
+}
+
+// claimWarning reports whether ev is a warning the human output has not printed
+// yet, and records it. The node can send the same warning as it happens and
+// again with the result, and a followed job can replay one from its journal.
+// The redacted code and message identify the notice, as in the structured
+// result; a warning with the same text but another code stays distinct.
+func (p *progress) claimWarning(ev output.Event) bool {
+	key := output.Warning{Code: secrets.Redact(ev.Code), Message: secrets.Redact(ev.Message)}
+	if p.warned[key] {
+		return false
+	}
+	if p.warned == nil {
+		p.warned = map[output.Warning]bool{}
+	}
+	p.warned[key] = true
+	return true
 }
 
 // panel prints a titled block, boxed on a terminal. Lines inside stay plain

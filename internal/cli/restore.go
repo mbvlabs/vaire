@@ -132,7 +132,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		if tl, _ := data["timeline"].(string); tl != "" {
 			msg += ", with --target-timeline=" + tl
 		}
-		return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: s.warnings})
+		return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
 	}
 	var res struct {
 		Phase         string   `json:"phase"`
@@ -241,7 +241,7 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	if len(lines) == 0 {
 		lines = []string{"no restore is open"}
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: s.warnings})
+	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
 }
 
 func rowCount(n *int64) string {
@@ -361,10 +361,10 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	}
 	lines := alignColumns(rows)
 	if len(lines) == 0 {
-		return output.Success(cmd, output.Result{Data: data, Message: "no restore leftovers", Warnings: s.warnings})
+		return output.Success(cmd, output.Result{Data: data, Message: "no restore leftovers", Warnings: append(s.warnings, reply.Warnings...)})
 	}
 	if db == "" || dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: data, Message: "restore leftovers:\n" + strings.Join(lines, "\n"), Warnings: s.warnings,
+		return output.Success(cmd, output.Result{Data: data, Message: "restore leftovers:\n" + strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...),
 			Next: []string{"vaire restore cleanup <db> --confirm <db>/cleanup"}})
 	}
 	p.panel("Leftovers of "+db, lines)
@@ -378,7 +378,7 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	}
 	var res map[string]any
 	_ = reply.Decode(&res)
-	return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dropped %d leftover cluster(s) of %s", len(lines), db), Warnings: s.warnings})
+	return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dropped %d leftover cluster(s) of %s", len(lines), db), Warnings: append(s.warnings, reply.Warnings...)})
 }
 
 func runRestoreDrill(cmd *cobra.Command, _ []string) error {
@@ -524,7 +524,7 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
 		message, human := credentialsMessage(cmd, "fork detached; credentials shown only now", "fork detached; credentials shown only now", name, secret)
 		return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
-			Message: message, Human: human, Next: []string{"vaire job follow " + jobID}})
+			Message: message, Human: human, Warnings: s.warnings, Next: []string{"vaire job follow " + jobID}})
 	}
 	var res struct {
 		Warnings []output.Warning `json:"warnings"`
@@ -579,7 +579,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 		if _, err := decodeJob(reply, &res); err != nil {
 			return err
 		}
-		return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, db, humanBytes(res.Dump.Size)), Warnings: s.warnings})
+		return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, db, humanBytes(res.Dump.Size)), Warnings: append(s.warnings, reply.Warnings...)})
 	}
 	out := stringFlag(cmd, "out")
 	if out == "" {

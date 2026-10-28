@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vaire.mbvlabs.com/schema/vaire-activity-v1.json",
+  "title": "vaire metadata-only activity page",
+  "$ref": "#/$defs/page",
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"
+    },
+    "label": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+/-]*$" },
+    "shortLabel": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+/-]*$" },
+    "database": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_][A-Za-z0-9._@+/-]*$" },
+    "count": { "type": "integer", "minimum": 0 },
+    "mode": { "type": "string", "pattern": "^[0-7]{4}$" },
+    "queryTime": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "An RFC3339 timestamp or a positive Go duration; vaire also checks the resolved range and maximum lookback.",
+      "anyOf": [
+        { "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$" },
+        { "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|μs|ms|s|m|h))+$" }
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["started", "succeeded", "failed", "refused", "skipped", "unknown"]
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "since": { "$ref": "#/$defs/queryTime" },
+        "until": { "$ref": "#/$defs/queryTime" },
+        "operation_id": { "$ref": "#/$defs/label" },
+        "request_id": { "$ref": "#/$defs/label" },
+        "job_id": { "$ref": "#/$defs/label" },
+        "database": { "$ref": "#/$defs/database" },
+        "action": { "$ref": "#/$defs/shortLabel" },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "cursor": { "type": "string", "maxLength": 2048, "pattern": "^c1\\.[A-Za-z0-9_-]+$" },
+        "limit": { "type": "integer", "minimum": 0, "maximum": 500 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "event_id", "occurred_at", "sequence", "source", "action", "outcome", "actor_verified"],
+      "properties": {
+        "schema": { "const": "vaire-activity/v1" },
+        "event_id": { "$ref": "#/$defs/label" },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 18446744073709551614 },
+        "server": { "$ref": "#/$defs/label" },
+        "node": { "$ref": "#/$defs/label" },
+        "node_instance_id": { "$ref": "#/$defs/label" },
+        "boot_id": { "$ref": "#/$defs/label" },
+        "operation_id": { "$ref": "#/$defs/label" },
+        "request_id": { "$ref": "#/$defs/label" },
+        "parent_request_id": { "$ref": "#/$defs/label" },
+        "job_id": { "$ref": "#/$defs/label" },
+        "source": { "enum": ["rpc", "job", "step", "service", "operator"] },
+        "action": { "$ref": "#/$defs/shortLabel" },
+        "step": { "$ref": "#/$defs/label" },
+        "database": { "$ref": "#/$defs/database" },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "error_code": { "$ref": "#/$defs/shortLabel" },
+        "reason_code": { "$ref": "#/$defs/shortLabel" },
+        "duration_ms": { "type": "integer", "minimum": 0, "maximum": 315360000000 },
+        "actor_kind": { "enum": ["operator", "timer", "system"] },
+        "actor_label": { "$ref": "#/$defs/label" },
+        "actor_verified": { "type": "boolean" },
+        "node_version": { "$ref": "#/$defs/label" }
+      },
+      "dependentRequired": { "actor_label": ["actor_kind"] },
+      "if": { "required": ["actor_verified"], "properties": { "actor_verified": { "const": true } } },
+      "then": { "required": ["actor_kind"], "properties": { "actor_kind": { "enum": ["timer", "system"] } } }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available", "partial", "truncated", "limit_reached", "cursor_expired", "loss_detected",
+        "events_returned", "events_scanned", "segments_scanned", "bytes_scanned",
+        "malformed_segments", "malformed_events", "dropped_events", "sequence_gaps"
+      ],
+      "properties": {
+        "node": { "$ref": "#/$defs/label" },
+        "available": { "type": "boolean" },
+        "first_retained_at": { "$ref": "#/$defs/timestamp" },
+        "last_retained_at": { "$ref": "#/$defs/timestamp" },
+        "first_returned_at": { "$ref": "#/$defs/timestamp" },
+        "last_returned_at": { "$ref": "#/$defs/timestamp" },
+        "partial": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
+        "limit_reached": { "type": "boolean" },
+        "cursor_expired": { "type": "boolean" },
+        "loss_detected": { "type": "boolean" },
+        "events_returned": { "$ref": "#/$defs/count" },
+        "events_scanned": { "$ref": "#/$defs/count" },
+        "segments_scanned": { "$ref": "#/$defs/count" },
+        "bytes_scanned": { "$ref": "#/$defs/count" },
+        "malformed_segments": { "$ref": "#/$defs/count" },
+        "malformed_events": { "$ref": "#/$defs/count" },
+        "dropped_events": { "$ref": "#/$defs/count" },
+        "sequence_gaps": { "$ref": "#/$defs/count" }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "events", "coverage"],
+      "properties": {
+        "schema": { "const": "vaire-activity/v1" },
+        "events": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "$ref": "#/$defs/event" }
+        },
+        "coverage": { "$ref": "#/$defs/coverage" },
+        "next_cursor": { "type": "string", "maxLength": 2048, "pattern": "^c1\\.[A-Za-z0-9_-]+$" }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dir", "exists", "is_dir", "readable", "writable", "owner_only", "non_owner_only_segments",
+        "max_bytes", "used_bytes", "segment_bytes", "segments", "retention_s", "over_budget",
+        "malformed_segments", "malformed_events", "dropped_events", "sequence_gaps", "loss_detected"
+      ],
+      "properties": {
+        "node": { "$ref": "#/$defs/label" },
+        "dir": { "const": "/var/log/vaire/activity" },
+        "exists": { "type": "boolean" },
+        "is_dir": { "type": "boolean" },
+        "dir_mode": { "$ref": "#/$defs/mode" },
+        "readable": { "type": "boolean" },
+        "writable": { "type": "boolean" },
+        "segment_mode": { "$ref": "#/$defs/mode" },
+        "owner_only": { "type": "boolean" },
+        "non_owner_only_segments": { "$ref": "#/$defs/count" },
+        "max_bytes": { "$ref": "#/$defs/count" },
+        "used_bytes": { "$ref": "#/$defs/count" },
+        "segment_bytes": { "$ref": "#/$defs/count" },
+        "segments": { "$ref": "#/$defs/count" },
+        "retention_s": { "$ref": "#/$defs/count" },
+        "over_budget": { "type": "boolean" },
+        "first_retained_at": { "$ref": "#/$defs/timestamp" },
+        "last_retained_at": { "$ref": "#/$defs/timestamp" },
+        "last_write_at": { "$ref": "#/$defs/timestamp" },
+        "malformed_segments": { "$ref": "#/$defs/count" },
+        "malformed_events": { "$ref": "#/$defs/count" },
+        "dropped_events": { "$ref": "#/$defs/count" },
+        "sequence_gaps": { "$ref": "#/$defs/count" },
+        "loss_detected": { "type": "boolean" }
+      }
+    }
+  }
+}

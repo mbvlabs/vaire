@@ -63,13 +63,16 @@ type ErrorBody struct {
 	Details any    `json:"details,omitempty"`
 }
 
-// Failure is the envelope printed for a failed command.
+// Failure is the envelope printed for a failed command. Warnings are bounded
+// evidence notices observed before the failure; they qualify the error but do
+// not change it.
 type Failure struct {
-	Schema  string    `json:"schema"`
-	OK      bool      `json:"ok"`
-	Command string    `json:"command,omitempty"`
-	Context string    `json:"context,omitempty"`
-	Error   ErrorBody `json:"error"`
+	Schema   string    `json:"schema"`
+	OK       bool      `json:"ok"`
+	Command  string    `json:"command,omitempty"`
+	Context  string    `json:"context,omitempty"`
+	Error    ErrorBody `json:"error"`
+	Warnings []Warning `json:"warnings,omitempty"`
 }
 
 // Event is one NDJSON line on the RPC wire and for --stream.
@@ -109,6 +112,9 @@ type CLIError struct {
 	ExitCode int
 	Details  any
 	Cause    error
+	// Warnings are bounded notices that qualify the failure, such as lost
+	// activity evidence. They are never free-form diagnostic payloads.
+	Warnings []Warning
 }
 
 // CommandNext supplies CommandMeta.next when the output mode is agent.
@@ -134,6 +140,50 @@ func (e *CLIError) Unwrap() error {
 		return nil
 	}
 	return e.Cause
+}
+
+// failureWarnings is implemented by an error that carries bounded failure
+// notices. Warnings are deliberately separate from the error payload.
+type failureWarnings interface {
+	FailureWarnings() []Warning
+}
+
+// warnedError attaches bounded failure notices to an error without changing
+// its text, cause, classification or errors.Is/errors.As behavior.
+type warnedError struct {
+	err      error
+	warnings []Warning
+}
+
+func (e *warnedError) Error() string { return e.err.Error() }
+
+func (e *warnedError) Unwrap() error { return e.err }
+
+func (e *warnedError) FailureWarnings() []Warning { return e.warnings }
+
+// WithWarnings returns err with bounded warnings attached. A typed CLIError is
+// copied so its code, hint, details, exit status and cause stay intact; any
+// other error is wrapped so its original text and identity remain reachable
+// through errors.Is and errors.As.
+func WithWarnings(err error, warnings ...Warning) error {
+	if err == nil {
+		return nil
+	}
+	compact := compactWarnings(warnings)
+	if len(compact) == 0 {
+		return err
+	}
+	var carried failureWarnings
+	if errors.As(err, &carried) {
+		compact = compactWarnings(append(append([]Warning{}, carried.FailureWarnings()...), compact...))
+	}
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) {
+		copied := *cliErr
+		copied.Warnings = compactWarnings(append(append([]Warning{}, cliErr.Warnings...), compact...))
+		return &copied
+	}
+	return &warnedError{err: err, warnings: compact}
 }
 
 // WithDetails attaches a structured details object.
@@ -286,7 +336,7 @@ func Success(cmd *cobra.Command, result Result) error {
 		Command:  commandID(cmd),
 		Context:  contextName(cmd),
 		Data:     result.Data,
-		Warnings: result.Warnings,
+		Warnings: resultWarnings(cmd, result.Warnings),
 		Next:     result.Next,
 	}
 	if opts.Mode == ModeAgent {
@@ -300,6 +350,18 @@ func Success(cmd *cobra.Command, result Result) error {
 		message = result.Human
 	}
 	return renderSuccess(cmd, opts, env, message)
+}
+
+// failureWarningsOf merges warnings carried on the original error with those
+// on its typed form. The wrapper is checked separately because errors.As
+// resolves a typed CLIError through it.
+func failureWarningsOf(err error, cliErr *CLIError) []Warning {
+	warnings := append([]Warning{}, cliErr.Warnings...)
+	var carried failureWarnings
+	if errors.As(err, &carried) {
+		warnings = append(warnings, carried.FailureWarnings()...)
+	}
+	return warnings
 }
 
 // Fail converts err into a failure envelope.
@@ -328,6 +390,7 @@ func Fail(cmd *cobra.Command, err error) Failure {
 			Hint:    cliErr.Hint,
 			Details: cliErr.Details,
 		},
+		Warnings: compactWarnings(resultWarnings(cmd, failureWarningsOf(err, cliErr))),
 	}
 }
 
@@ -359,7 +422,12 @@ func RenderError(cmd *cobra.Command, err error) error {
 	if opts.JQ != "" && parseErr == nil && !errors.Is(err, errJQFilter) {
 		selected, jerr := applyJQ(failure, opts.JQ)
 		if jerr != nil {
-			return writeHumanError(cmd.ErrOrStderr(), Fail(cmd, jerr))
+			failed := Fail(cmd, jerr)
+			failed.Warnings = unshownWarnings(cmd, failed.Warnings)
+			if opts.Quiet {
+				failed.Warnings = nil
+			}
+			return writeHumanError(cmd.ErrOrStderr(), failed)
 		}
 		return writeJSON(cmd.OutOrStdout(), selected)
 	}
@@ -368,6 +436,12 @@ func RenderError(cmd *cobra.Command, err error) error {
 	}
 	if opts.Mode == ModeJSON || opts.Mode == ModeAgent {
 		return writeJSON(cmd.OutOrStdout(), failure)
+	}
+	// A human already saw warnings that arrived as events; print only the ones
+	// that did not. Quiet mode keeps its human promise and prints no warnings.
+	failure.Warnings = unshownWarnings(cmd, failure.Warnings)
+	if opts.Quiet {
+		failure.Warnings = nil
 	}
 	if opts.Mode == ModeMarkdown {
 		return writeMarkdownError(cmd.ErrOrStderr(), failure)
@@ -435,15 +509,17 @@ func writeHuman(w io.Writer, opts Options, message string, warnings []Warning, n
 
 type shownKey struct{}
 
-// shownWarnings records the warning messages already printed while the
-// command ran.
+// shownWarnings records warnings observed while the command ran, separately
+// from the messages already printed to a human.
 type shownWarnings struct {
-	mu   sync.Mutex
-	msgs map[string]bool
+	mu       sync.Mutex
+	msgs     map[string]bool
+	observed map[Warning]bool
+	warnings []Warning
 }
 
-// TrackShownWarnings gives cmd a fresh record of warnings shown while it
-// runs. The progress renderer calls it once per command.
+// TrackShownWarnings gives cmd a fresh record of observed and shown warnings.
+// The progress renderer calls it once per command.
 func TrackShownWarnings(cmd *cobra.Command) {
 	if cmd == nil {
 		return
@@ -452,7 +528,64 @@ func TrackShownWarnings(cmd *cobra.Command) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd.SetContext(context.WithValue(ctx, shownKey{}, &shownWarnings{msgs: map[string]bool{}}))
+	cmd.SetContext(context.WithValue(ctx, shownKey{}, &shownWarnings{
+		msgs: map[string]bool{}, observed: map[Warning]bool{},
+	}))
+}
+
+// RecordWarning preserves a streamed warning for the final result envelope,
+// including when a caller discards an RPC reply or structured mode hides events.
+func RecordWarning(cmd *cobra.Command, warning Warning) {
+	if warning.Code == "" || warning.Message == "" {
+		return
+	}
+	if set := shownSet(cmd); set != nil {
+		set.mu.Lock()
+		defer set.mu.Unlock()
+		if !set.observed[warning] {
+			set.observed[warning] = true
+			set.warnings = append(set.warnings, warning)
+		}
+	}
+}
+
+// compactWarnings drops empty and duplicate notices. A warning needs both a
+// stable code and a message to be useful; anything else is omitted rather than
+// promoted from an untrusted payload.
+func compactWarnings(warnings []Warning) []Warning {
+	out := make([]Warning, 0, len(warnings))
+	seen := make(map[Warning]bool, len(warnings))
+	for _, warning := range warnings {
+		if warning.Code == "" || warning.Message == "" || seen[warning] {
+			continue
+		}
+		seen[warning] = true
+		out = append(out, warning)
+	}
+	return out
+}
+
+// resultWarnings merges explicit and observed warnings without duplicating a
+// notice that arrived both as an event and in an RPC reply. On a failure the
+// same merge keeps evidence warnings visible alongside the error.
+func resultWarnings(cmd *cobra.Command, explicit []Warning) []Warning {
+	set := shownSet(cmd)
+	if set == nil {
+		return explicit
+	}
+	set.mu.Lock()
+	defer set.mu.Unlock()
+	var merged []Warning
+	seen := make(map[Warning]bool, len(explicit)+len(set.warnings))
+	for _, group := range [][]Warning{explicit, set.warnings} {
+		for _, warning := range group {
+			if !seen[warning] {
+				seen[warning] = true
+				merged = append(merged, warning)
+			}
+		}
+	}
+	return merged
 }
 
 // MarkWarningShown records that msg was already printed to a human while
@@ -497,13 +630,23 @@ var RichError func(w io.Writer, failure Failure) bool
 
 func writeHumanError(w io.Writer, failure Failure) error {
 	if RichError != nil && RichError(w, failure) {
-		return nil
+		return writeHumanErrorWarnings(w, failure.Warnings)
 	}
 	if _, err := fmt.Fprintf(w, "Error: %s [%s]\n", failure.Error.Message, failure.Error.Code); err != nil {
 		return err
 	}
 	if failure.Error.Hint != "" {
 		if _, err := fmt.Fprintf(w, "Hint: %s\n", failure.Error.Hint); err != nil {
+			return err
+		}
+	}
+	return writeHumanErrorWarnings(w, failure.Warnings)
+}
+
+// writeHumanErrorWarnings prints the bounded notices that qualify a failure.
+func writeHumanErrorWarnings(w io.Writer, warnings []Warning) error {
+	for _, warning := range warnings {
+		if _, err := fmt.Fprintf(w, "warning: %s\n", warning.Message); err != nil {
 			return err
 		}
 	}
@@ -517,6 +660,16 @@ func writeMarkdownError(w io.Writer, failure Failure) error {
 	if failure.Error.Hint != "" {
 		if _, err := fmt.Fprintf(w, "\n%s\n", failure.Error.Hint); err != nil {
 			return err
+		}
+	}
+	if len(failure.Warnings) > 0 {
+		if _, err := fmt.Fprintln(w, "\nWarnings:"); err != nil {
+			return err
+		}
+		for _, warning := range failure.Warnings {
+			if _, err := fmt.Fprintf(w, "- `%s`: %s\n", warning.Code, warning.Message); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/activity"
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/health"
@@ -129,6 +130,13 @@ type Facts struct {
 	Clusters         []ClusterFacts
 	// Master is the master backup (Phase 5).
 	Master MasterFacts
+	// ActivityHealth is the node's local activity store metadata.
+	// ActivityHealthChecked says gatherFacts attempted the read;
+	// ActivityHealthKnown says it succeeded. A pure test fixture can leave both
+	// false and skip the checks.
+	ActivityHealth        activity.Health
+	ActivityHealthChecked bool
+	ActivityHealthKnown   bool
 }
 
 // Warning is an oversubscription warning (memory_overcommitted, cpu_crowded,

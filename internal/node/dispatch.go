@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/activity"
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
@@ -83,22 +84,41 @@ func fixedLock(mode engine.LockMode) func(rpc.Request) engine.LockMode {
 	return func(rpc.Request) engine.LockMode { return mode }
 }
 
+// serveRunsAsRoot is the dispatcher's privilege check. Tests replace it; a
+// production process always checks the real effective uid.
+var serveRunsAsRoot = func() bool { return os.Geteuid() == 0 }
+
 // Serve runs `vaire node rpc`: read one request from stdin, run it, and stream
 // redacted NDJSON events ending in exactly one result. It returns the exit
 // status, which equals the result envelope's exit code.
 func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	out := &eventWriter{w: stdout}
 	command := "node rpc"
+	var req rpc.Request
+	var err error
+	var rec *activityRecorder
+	var scope *activityScope
 	defer func() {
 		if r := recover(); r != nil {
 			out.log.Line("panic", fmt.Sprintf("%v\n%s", r, debug.Stack()))
+			if scope != nil {
+				// A panic after the handler started leaves incomplete work:
+				// report unknown, never success or failure.
+				_ = scope.finish(context.Background(), activity.OutcomeUnknown, output.CodeError, "panic")
+			} else if rec != nil {
+				action := req.Method
+				if action == "" {
+					action = "node.rpc"
+				}
+				recordActivityRefusal(rec, req, action, panicError(), "panic")
+			}
 			code = out.fail(command, panicError())
 		}
 		_ = out.log.Close()
 	}()
 
 	// 1. Root only.
-	if os.Geteuid() != 0 {
+	if !serveRunsAsRoot() {
 		return out.fail(command, output.NewError(
 			output.CodePrecondition,
 			"vaire node rpc must run as root",
@@ -108,8 +128,10 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	}
 
 	// 2. Decode.
-	req, err := rpc.DecodeRequest(stdin)
+	req, err = rpc.DecodeRequest(stdin)
 	if err != nil {
+		rec = activityRecorderFactory()
+		recordActivityRefusal(rec, rpc.Request{}, "node.rpc", err, "request_rejected")
 		return out.fail(command, err)
 	}
 	command = req.Method
@@ -119,11 +141,18 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		secrets.Add(value)
 	}
 
+	// History queries are never recorded in history and never open it for
+	// writing.
+	if !isActivityMethod(req.Method) {
+		rec = activityRecorderFactory()
+	}
+
 	// 4. Version check. upgrade.install is the only exempt method.
 	table := methods()
 	m, known := table[req.Method]
 	if !known || !m.versionExempt {
 		if err := checkVersion(req); err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "version_mismatch")
 			return out.fail(command, err)
 		}
 	}
@@ -135,20 +164,25 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		return out.fail(command, output.NewError(
+		err := output.NewError(
 			output.CodeUsage,
 			"unknown method "+req.Method,
 			output.ExitUsage,
 			"Use one of details.methods.",
-		).WithDetails(map[string]any{"methods": names}))
+		).WithDetails(map[string]any{"methods": names})
+		recordActivityRefusal(rec, req, req.Method, err, "unknown_method")
+		return out.fail(command, err)
 	}
 
 	// A fenced node (a newer master took over its bucket) refuses every
 	// method that changes something; reads still answer (Phase 5, D5).
 	if fencedRefuses(m, req) {
-		return out.fail(command, fencedError())
+		err := fencedError()
+		recordActivityRefusal(rec, req, req.Method, err, "node_fenced")
+		return out.fail(command, err)
 	}
 	if err := refuseAwaiting(req); err != nil {
+		recordActivityRefusal(rec, req, req.Method, err, "awaiting_recovery")
 		return out.fail(command, err)
 	}
 
@@ -156,6 +190,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	if m.cluster {
 		cfg, err := config.LoadCluster(config.ClusterPath)
 		if err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "config_error")
 			return out.fail(command, err)
 		}
 		env.Cluster = cfg
@@ -168,6 +203,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	// 6. Confirm tokens, recomputed on the node. A wrong token is refused
 	// before any step runs.
 	if err := checkConfirm(m, env.Cluster, req); err != nil {
+		recordActivityRefusal(rec, req, req.Method, err, "confirm_mismatch")
 		return out.fail(command, err)
 	}
 
@@ -178,6 +214,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	if m.lock != nil {
 		release, err := engine.Acquire(ctx, m.lock(req), req.Method, req.RequestID, req.LockTimeout())
 		if err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "")
 			return out.fail(command, err)
 		}
 		defer release()
@@ -185,20 +222,32 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	if m.clusterLock != nil {
 		if cluster, mode := m.clusterLock(req); cluster != "" {
 			if _, ok := env.Cluster.ClusterByName(cluster); !ok {
-				return out.fail(command, databaseNotFound(cluster))
+				err := databaseNotFound(cluster)
+				recordActivityRefusal(rec, req, req.Method, err, "database_not_found")
+				return out.fail(command, err)
 			}
 			release, err := engine.AcquireCluster(ctx, cluster, mode, req.Method, req.RequestID, req.LockTimeout())
 			if err != nil {
+				recordActivityRefusal(rec, req, req.Method, err, "")
 				return out.fail(command, err)
 			}
 			defer release()
 		}
 	}
 
-	// 8. Run log, handler, result.
+	// 8. Checked local start, run log, handler, result.
+	important := activityImportant(m, req)
+	if rec != nil {
+		scope = newRPCScope(rec, m.name, req)
+		if err := beginActivityScope(ctx, scope, important, out.emit); err != nil {
+			return out.fail(command, err)
+		}
+		env.Report = scope.recorder(out.emit)
+	}
 	if m.runLog != nil && m.runLog(req) {
 		log, err := engine.OpenRunLog(req.Method, req.RequestID)
 		if err != nil {
+			_ = scope.finishWarn(ctx, activity.OutcomeFailed, output.CodePrecondition, "run_log_unavailable", out.emit)
 			return out.fail(command, output.WrapError(output.CodePrecondition, err, output.ExitPrecondition,
 				"Check that "+engine.LogDir+" is writable by root.").WithDetails(map[string]any{"reason": "run_log_unavailable"}))
 		}
@@ -206,10 +255,17 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		env.Log = log
 		log.JSON("request", req.Loggable())
 	}
-	res, err := runHandler(ctx, m, env, out)
+	res, err, panicked := runHandler(ctx, m, env, out)
 	if err != nil {
+		if panicked {
+			_ = scope.finishWarn(context.Background(), activity.OutcomeUnknown, output.CodeError, "panic", out.emit)
+		} else {
+			code, reason := activityErrorTokens(err)
+			_ = scope.finishWarn(context.Background(), activity.OutcomeFailed, code, reason, out.emit)
+		}
 		return out.fail(command, err)
 	}
+	finishActivitySuccess(context.Background(), scope, &res, out.emit)
 	return out.ok(command, res)
 }
 
@@ -256,14 +312,16 @@ func checkConfirm(m method, cfg config.Cluster, req rpc.Request) error {
 	return nil
 }
 
-func runHandler(ctx context.Context, m method, env *Env, out *eventWriter) (res Result, err error) {
+func runHandler(ctx context.Context, m method, env *Env, out *eventWriter) (res Result, err error, panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			out.log.Line("panic", fmt.Sprintf("%v\n%s", r, debug.Stack()))
+			panicked = true
 			err = panicError()
 		}
 	}()
-	return m.handler(ctx, env)
+	res, err = m.handler(ctx, env)
+	return res, err, false
 }
 
 func panicError() *output.CLIError {

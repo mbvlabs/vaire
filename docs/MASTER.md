@@ -236,6 +236,8 @@ internal/release/            release manifest fetch, sigstore verification, down
 internal/rpc/                vaire-rpc/v1 request types
 internal/node/               node-side RPC dispatcher, selfcheck, upgrade.install
 internal/secrets/            secret registry and redaction
+internal/activity/           bounded metadata-only activity history
+internal/diagnostics/        portable incident evidence, validated offline
 internal/versions/           pinned external versions and checksums
 internal/buildinfo/          version, commit, channel, release base URL
 internal/guide/              embedded agent guide
@@ -285,6 +287,7 @@ schema/vaire-v1.json           agent JSON contract
 | `/etc/pgbackrest/pgbackrest.conf` | postgres 0600 | One repository, a section per stanza |
 | `/run/vaire-ports/` | | Port reservations of temporary clusters (5480–5499) |
 | `/var/log/vaire/` | | Per-run logs for apply, backup, maintenance and restore drills |
+| `/var/log/vaire/activity/` | root 0700 | Bounded metadata-only operation history; files `0600`, no PostgreSQL dependency; query commands do not create it |
 
 ### 5.8 Databases as clusters
 
@@ -510,6 +513,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 
 ### 7.1 Current state (2026-10-19)
 
+- **Activity history implementation is committed (2026-10-28, not released):** the operator authorized and selected the local, metadata-only activity history and on-demand incident bundles in [`RFC-activity-and-diagnostics.md`](./RFC-activity-and-diagnostics.md). It adds the activity store, `activity list|show|health`, `diagnostics collect|inspect`, job/step correlation, doctor health checks and typed schemas. Local tests/build/vet/lint pass (including the macOS cross-build); review findings are fixed (see [`FINDINGS-activity-review.md`](./FINDINGS-activity-review.md)); the work is committed but has **not** been released, deployed or live-qualified. Off-node collection, continuous runtime-log search, separate agent identities and credential-vault encryption remain outside this work.
+- **Activity review fixes (2026-10-27, local only):** regression tests cover preserving streamed evidence warnings in final structured results even when callers discard RPC replies, retaining fresh evidence before a backdated segment tail, underscore-prefixed database correlation/filtering through incident export, and frozen cursor windows after the clock advances. Build, vet, tests, Go/repository lint and the macOS cross-build pass; race tests remain unavailable because this machine has no C compiler. No commit, release, deployment or live qualification was performed.
 - **Phases 0–5 are live-qualified for the first alpha, not released.** Main scenarios completed, including genuine protected-policy upgrade, protected SQL/maintenance/dump-copy writes, metrics/query filtering, fresh bucket-backed init, rebuild/recovery with automatic full backup, local init and journal-proven lockdown self-revert. Detailed checklist variants and coverage limits remain in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md); this is not a claim that every historical checkbox passed.
 - **Latest qualified code:** `65c4f91`, published as `edge-65c4f9157253` after successful edge workflow `39234654792`. The recovered fixture had doctor 44 pass / 0 warn / 0 fail and plan 0 pending / 17 steps. It was subsequently replaced during operator-run bootstrap tests; these numbers are qualification evidence, not current VPS health.
 - **Publication still needs authorization.** No v1 branch/tag or stable publication was performed in this qualification. Linux install/upgrade passed; macOS live testing was excluded by the operator (cross-build only). See [`PLAN-v1-release.md`](./PLAN-v1-release.md), the [draft alpha notes](./RELEASE-v1.0.0-alpha.1.md) and the [document index](./README.md).

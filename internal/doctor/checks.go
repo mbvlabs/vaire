@@ -53,6 +53,7 @@ func NodeChecks() []Check {
 		{ID: "backup.verify", Category: CatBackups, Run: backupVerify},
 		{ID: "backup.drill", Category: CatBackups, Run: backupDrill},
 	}
+	checks = append(checks, ActivityChecks()...)
 	return append(checks, MasterChecks()...)
 }
 
