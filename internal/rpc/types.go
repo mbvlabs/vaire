@@ -36,12 +36,18 @@ type Request struct {
 	Confirm   string            `json:"confirm"`
 	// Confirms are further confirm tokens, for methods that take several
 	// (apply: one <cluster>/restart per cluster).
-	Confirms      []string `json:"confirms,omitempty"`
-	Operator      string   `json:"operator"`
-	ClientVersion string   `json:"client_version"`
-	ClientCommit  string   `json:"client_commit"`
-	ClientChannel string   `json:"client_channel"`
-	LockTimeoutS  *int     `json:"lock_timeout_s,omitempty"`
+	Confirms []string `json:"confirms,omitempty"`
+	// OperationID spans one logical operation across attempts and later
+	// nodes. It is optional and defaults to RequestID on the operator.
+	OperationID string `json:"operation_id,omitempty"`
+	// ParentRequestID names the request that caused this one, when a request
+	// runs another. It is optional metadata, never authorization.
+	ParentRequestID string `json:"parent_request_id,omitempty"`
+	Operator        string `json:"operator"`
+	ClientVersion   string `json:"client_version"`
+	ClientCommit    string `json:"client_commit"`
+	ClientChannel   string `json:"client_channel"`
+	LockTimeoutS    *int   `json:"lock_timeout_s,omitempty"`
 }
 
 // ConfirmTokens returns every confirm token the request carries.
@@ -77,18 +83,20 @@ func (r Request) Loggable() map[string]any {
 		names = append(names, name)
 	}
 	out := map[string]any{
-		"schema":         r.Schema,
-		"request_id":     r.RequestID,
-		"method":         r.Method,
-		"dry_run":        r.DryRun,
-		"confirm":        r.Confirm,
-		"confirms":       r.Confirms,
-		"operator":       r.Operator,
-		"client_version": r.ClientVersion,
-		"client_commit":  r.ClientCommit,
-		"client_channel": r.ClientChannel,
-		"lock_timeout_s": r.LockTimeout().Seconds(),
-		"secret_names":   names,
+		"schema":            r.Schema,
+		"request_id":        r.RequestID,
+		"operation_id":      r.OperationID,
+		"parent_request_id": r.ParentRequestID,
+		"method":            r.Method,
+		"dry_run":           r.DryRun,
+		"confirm":           r.Confirm,
+		"confirms":          r.Confirms,
+		"operator":          r.Operator,
+		"client_version":    r.ClientVersion,
+		"client_commit":     r.ClientCommit,
+		"client_channel":    r.ClientChannel,
+		"lock_timeout_s":    r.LockTimeout().Seconds(),
+		"secret_names":      names,
 	}
 	if len(r.Params) > 0 {
 		out["params"] = r.Params
@@ -132,6 +140,14 @@ func DecodeRequest(r io.Reader) (Request, error) {
 	req.RequestID = strings.ToUpper(req.RequestID)
 	if !requestIDPattern.MatchString(req.RequestID) {
 		return Request{}, usage("request_id must be a ULID", "Omit request_id and the node assigns one.")
+	}
+	req.OperationID = strings.ToUpper(strings.TrimSpace(req.OperationID))
+	if req.OperationID != "" && !requestIDPattern.MatchString(req.OperationID) {
+		return Request{}, usage("operation_id must be a ULID", "Omit operation_id, or set the ULID of the operation this request belongs to.")
+	}
+	req.ParentRequestID = strings.ToUpper(strings.TrimSpace(req.ParentRequestID))
+	if req.ParentRequestID != "" && !requestIDPattern.MatchString(req.ParentRequestID) {
+		return Request{}, usage("parent_request_id must be a ULID", "Omit parent_request_id, or set the requesting ULID.")
 	}
 	if len(req.Params) > 0 && !bytes.HasPrefix(bytes.TrimSpace(req.Params), []byte("{")) && string(bytes.TrimSpace(req.Params)) != "null" {
 		return Request{}, usage("params must be a JSON object", "")

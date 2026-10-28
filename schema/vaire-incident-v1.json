@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vaire.mbvlabs.com/schema/vaire-incident-v1.json",
+  "title": "vaire metadata-only incident bundle",
+  "description": "An explicitly collected local JSON file, limited by vaire to 8 MiB. No raw logs, credentials, SQL or configuration bodies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "created_at", "metadata", "activity"],
+  "properties": {
+    "schema": { "const": "vaire-incident/v1" },
+    "created_at": { "$ref": "vaire-activity-v1.json#/$defs/timestamp" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server", "node", "node_version", "client_version", "collected_at"],
+      "properties": {
+        "server": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "node": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "node_version": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$" },
+        "client_version": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$" },
+        "collected_at": { "$ref": "vaire-activity-v1.json#/$defs/timestamp" }
+      }
+    },
+    "activity": { "$ref": "vaire-activity-v1.json#/$defs/page" },
+    "query": { "$ref": "vaire-activity-v1.json#/$defs/query" }
+  }
+}

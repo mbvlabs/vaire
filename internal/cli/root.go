@@ -9,6 +9,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 )
 
@@ -51,11 +52,19 @@ func NewRoot() *cobra.Command {
 			DisableDefaultCmd: true,
 		},
 		PersistentPreRunE: chainPersistentPreRun(
+			chainPersistentPreRun(
+				func(cmd *cobra.Command, _ []string) error {
+					_, err := output.ParseOptions(cmd)
+					return err
+				},
+				platformPreRun,
+			),
+			// One fresh operation per Execute: every RPC this command makes
+			// shares it, while a test that reuses the root gets a new one.
 			func(cmd *cobra.Command, _ []string) error {
-				_, err := output.ParseOptions(cmd)
-				return err
+				cmd.SetContext(remote.WithNewOperation(cmd.Context()))
+				return nil
 			},
-			platformPreRun,
 		),
 	}
 	flags := root.PersistentFlags()

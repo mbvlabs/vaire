@@ -30,6 +30,12 @@ type CallOptions struct {
 	// Confirms are further tokens, for methods that take several.
 	Confirms    []string
 	LockTimeout *int
+	// OperationID groups several requests into one logical operation. Empty
+	// uses the request's own id, so a single request is still traceable.
+	OperationID string
+	// ParentRequestID names the request that caused this one, when this call
+	// is itself part of another request.
+	ParentRequestID string
 	// OnEvent receives every event before the result: step, log, progress,
 	// warning.
 	OnEvent func(output.Event)
@@ -68,19 +74,24 @@ func newRequest(method string, params any, operator string, opts CallOptions) ([
 		secrets.Add(v)
 	}
 	req := rpc.Request{
-		Schema:        rpc.Schema,
-		RequestID:     rpc.NewRequestID(),
-		Method:        method,
-		Params:        rawParams,
-		Secrets:       opts.Secrets,
-		DryRun:        opts.DryRun,
-		Confirm:       opts.Confirm,
-		Confirms:      opts.Confirms,
-		Operator:      operator,
-		ClientVersion: buildinfo.Version,
-		ClientCommit:  buildinfo.Commit,
-		ClientChannel: buildinfo.Channel,
-		LockTimeoutS:  opts.LockTimeout,
+		Schema:          rpc.Schema,
+		RequestID:       rpc.NewRequestID(),
+		Method:          method,
+		Params:          rawParams,
+		Secrets:         opts.Secrets,
+		DryRun:          opts.DryRun,
+		Confirm:         opts.Confirm,
+		Confirms:        opts.Confirms,
+		Operator:        operator,
+		ClientVersion:   buildinfo.Version,
+		ClientCommit:    buildinfo.Commit,
+		ClientChannel:   buildinfo.Channel,
+		LockTimeoutS:    opts.LockTimeout,
+		OperationID:     opts.OperationID,
+		ParentRequestID: opts.ParentRequestID,
+	}
+	if req.OperationID == "" {
+		req.OperationID = req.RequestID
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -142,6 +153,7 @@ func parseResult(raw json.RawMessage) (Reply, error) {
 		Hint:     env.Error.Hint,
 		Details:  env.Error.Details,
 		ExitCode: output.ExitFor(env.Error.Code),
+		Warnings: env.Warnings,
 	}
 }
 
@@ -167,10 +179,12 @@ func (n *Node) asRoot(command string) string {
 
 // Call runs one RPC method and streams its events to opts.OnEvent.
 func (n *Node) Call(ctx context.Context, method string, params any, opts CallOptions) (Reply, error) {
+	opts = callOptionsForContext(ctx, opts)
 	payload, requestID, err := newRequest(method, params, n.Operator, opts)
 	if err != nil {
 		return Reply{}, err
 	}
+	operationID := effectiveOperationID(opts.OperationID, requestID)
 	pr, pw := io.Pipe()
 	stderr := &tail{max: 8 * 1024}
 	var errOut io.Writer = stderr
@@ -186,39 +200,43 @@ func (n *Node) Call(ctx context.Context, method string, params any, opts CallOpt
 	reply, got, perr := readEvents(pr, opts.OnEvent)
 	err = <-runErr
 	if got {
-		return reply, perr
+		return reply, annotateRPCError(perr, operationID, requestID)
 	}
 	if ctx.Err() != nil {
 		return Reply{}, ctx.Err()
 	}
 	if n.SSH.StreamLost(err) {
-		return Reply{}, streamLost(method, requestID, n.SSH, err)
+		return Reply{}, streamLost(method, requestID, operationID, n.SSH, err)
 	}
 	detail := strings.TrimSpace(secrets.Redact(stderr.String()))
 	status, _ := transport.ExitStatus(err)
-	return Reply{}, output.NewError(
+	return Reply{}, annotateRPCError(output.NewError(
 		output.CodeTransportFailed,
 		fmt.Sprintf("vaire node rpc %s on %s ended without a result", method, n.SSH.Target),
 		output.ExitTransport,
 		"Re-run with --verbose to see the node's stderr. sudo may be refusing vaire node rpc.",
-	).WithDetails(map[string]any{"exit_status": status, "stderr": detail, "error": errString(err)})
+	).WithDetails(map[string]any{"exit_status": status, "stderr": detail, "error": errString(err)}), operationID, requestID)
 }
 
 // streamLost is the error for a connection that died before the result. The
 // node does not notice a dropped stream: it finishes the request and writes
 // the result to its run log, which is named after the request id.
-func streamLost(method, requestID string, c *transport.SSHClient, err error) *output.CLIError {
+func streamLost(method, requestID, operationID string, c *transport.SSHClient, err error) *output.CLIError {
 	runLog := fmt.Sprintf("%s/*-%s-%s.log", engine.LogDir, method, requestID)
 	why := "the connection closed"
 	if c.Lost() {
 		why = "nothing came back from the node, not even an SSH keepalive reply, for " + c.Silence().String()
 	}
+	details := map[string]any{"reason": "stream_lost", "request_id": requestID, "run_log": runLog, "error": errString(err)}
+	if operationID != "" {
+		details["operation_id"] = operationID
+	}
 	return output.NewError(
 		output.CodeTransportFailed,
 		fmt.Sprintf("lost the connection to %s during %s (%s); the node keeps running it", c.Target, method, why),
 		output.ExitTransport,
-		"Its outcome will be in the node's run log "+runLog+" (vaire ssh, then sudo cat it). Check it, or vaire plan, before re-running.",
-	).WithDetails(map[string]any{"reason": "stream_lost", "request_id": requestID, "run_log": runLog, "error": errString(err)})
+		"Inspect its activity with vaire activity show --request "+requestID+" before re-running; missing terminal evidence is an unknown outcome. The node run log "+runLog+" may contain sensitive diagnostics.",
+	).WithDetails(details)
 }
 
 func errString(err error) string {
@@ -235,11 +253,13 @@ type Local struct {
 }
 
 // Call runs one RPC method in-process.
-func (l Local) Call(_ context.Context, method string, params any, opts CallOptions) (Reply, error) {
-	payload, _, err := newRequest(method, params, l.Operator, opts)
+func (l Local) Call(ctx context.Context, method string, params any, opts CallOptions) (Reply, error) {
+	opts = callOptionsForContext(ctx, opts)
+	payload, requestID, err := newRequest(method, params, l.Operator, opts)
 	if err != nil {
 		return Reply{}, err
 	}
+	operationID := effectiveOperationID(opts.OperationID, requestID)
 	pr, pw := io.Pipe()
 	go func() {
 		node.Serve(bytes.NewReader(payload), pw)
@@ -249,7 +269,7 @@ func (l Local) Call(_ context.Context, method string, params any, opts CallOptio
 	if !got {
 		return Reply{}, errors.New("the in-process node dispatcher ended without a result")
 	}
-	return reply, perr
+	return reply, annotateRPCError(perr, operationID, requestID)
 }
 
 type tail struct {

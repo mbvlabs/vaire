@@ -458,6 +458,8 @@ func phase1Commands() []cmdSpec {
 		restoreCommands(),
 		dumpCommands(),
 		jobCommands(),
+		activityCommands(),
+		diagnosticsCommands(),
 
 		maintCommands(),
 		metricsCommands(),

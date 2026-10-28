@@ -1,10 +1,13 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 )
@@ -55,6 +58,13 @@ type JobRecord struct {
 	FinishedAt   string            `json:"finished_at,omitempty"`
 	Result       json.RawMessage   `json:"result,omitempty"`
 	Error        *output.ErrorBody `json:"error,omitempty"`
+	// ActivityPending is set while the job's final activity record is still
+	// being written. A follower waits for it so a missing evidence warning is
+	// not reported after the result it qualifies.
+	ActivityPending bool `json:"activity_pending,omitempty"`
+	// Warnings are bounded evidence notices carried with the terminal record,
+	// so a follower sees them even when its journal replay ends first.
+	Warnings []output.Warning `json:"warnings,omitempty"`
 }
 
 // Job states. Queued is written by the RPC before the unit starts.
@@ -100,16 +110,36 @@ func (s *State) PutJob(rec JobRecord) {
 // changes. fn returning an error leaves the file unchanged.
 func UpdateState(fn func(*State) error) error {
 	return WithFileLock(stateLockPath, func() error {
-		st, err := LoadState(StatePath)
-		if err != nil {
-			return err
-		}
-		if err := fn(&st); err != nil {
-			return err
-		}
-		return st.Save(StatePath)
+		return updateState(fn)
 	})
 }
+
+// UpdateStateWithin is UpdateState with a context-bounded wait for the state
+// lock. It is for diagnostic bookkeeping that must not hold a finished job on
+// another process's state write. Loading and saving the state run after the
+// lock is acquired and are not cancellable; a caller that must bound them
+// keeps this off its critical path.
+func UpdateStateWithin(ctx context.Context, fn func(*State) error) error {
+	return withFileLockContext(ctx, stateLockPath, func() error {
+		return updateState(fn)
+	})
+}
+
+// updateState applies fn to the current state and saves it. The caller holds
+// state.json.lock.
+func updateState(fn func(*State) error) error {
+	st, err := LoadState(StatePath)
+	if err != nil {
+		return err
+	}
+	if err := fn(&st); err != nil {
+		return err
+	}
+	return st.Save(StatePath)
+}
+
+// stateLockPoll is how often withFileLockContext retries a busy state lock.
+const stateLockPoll = 10 * time.Millisecond
 
 // WithFileLock runs fn holding an exclusive flock on lockPath, so
 // read-modify-write cycles of a node file don't lose each other's changes
@@ -126,6 +156,44 @@ func WithFileLock(lockPath string, fn func() error) error {
 	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		return err
+	}
+	defer func() { _ = syscall.Flock(fd, syscall.LOCK_UN) }()
+	return fn()
+}
+
+// withFileLockContext is WithFileLock with a bounded wait for the lock. Once
+// the lock is acquired it is held for the whole call, including fn's writes.
+func withFileLockContext(ctx context.Context, lockPath string, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: fixed node lock paths.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	ticker := time.NewTicker(stateLockPoll)
+	defer ticker.Stop()
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 	defer func() { _ = syscall.Flock(fd, syscall.LOCK_UN) }()
 	return fn()

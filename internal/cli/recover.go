@@ -118,7 +118,7 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 		}
 		dbs = recoverOrder(data.Databases, args)
 		if len(dbs) == 0 {
-			return output.Success(cmd, output.Result{Data: map[string]any{"recovered": []string{}}, Message: "no database awaits recovery", Warnings: s.warnings})
+			return output.Success(cmd, output.Result{Data: map[string]any{"recovered": []string{}}, Message: "no database awaits recovery", Warnings: append(s.warnings, reply.Warnings...)})
 		}
 		p.note("recovering, in order: " + strings.Join(dbs, ", "))
 	}

@@ -239,6 +239,11 @@ func methods() map[string]method {
 		// status takes no lock: it must answer while an apply holds the
 		// global one.
 		{name: "status", cluster: true, handler: handleStatus},
+		// Activity history reads take no lock and write no run log: querying
+		// history must not become an operation recorded in that history.
+		{name: "activity.list", handler: handleActivityList},
+		{name: "activity.show", handler: handleActivityShow},
+		{name: "activity.health", handler: handleActivityHealth},
 		{name: "doctor.run", cluster: true, handler: handleDoctorRun},
 		{name: "queries.top", cluster: true, handler: handleQueriesTop},
 		{name: "maint.report", cluster: true, handler: handleMaintReport},

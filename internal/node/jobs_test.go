@@ -46,7 +46,7 @@ func TestJournalFilterDropsEnvelope(t *testing.T) {
 			got = append(got, ev)
 		}
 	}
-	if len(got) != 3 || got[0].Type != "step" || got[0].TS != "" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after" {
+	if len(got) != 3 || got[0].Type != "step" || got[0].TS != "2026-10-14T12:00:00Z" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after" {
 		t.Fatalf("events = %+v", got)
 	}
 }
