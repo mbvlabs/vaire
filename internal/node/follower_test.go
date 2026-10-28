@@ -184,10 +184,31 @@ func TestFollowerFamilies(t *testing.T) {
 }
 
 func TestUnfollowRenames(t *testing.T) {
-	cfg := followerCfg()
-	f, _ := cfg.ClusterByName("app_follower")
-	r := unfollowRenames(f)
+	r := unfollowRenames("app", "app_follower")
 	if r["app"] != "app_follower" || r["app_migrate"] != "app_follower_migrate" || r["app_owner"] != "app_follower_owner" {
 		t.Fatalf("%v", r)
+	}
+}
+
+// A completed copy may only be resumed on a slot that still retains WAL: a
+// missing, lost, unreserved or restartless slot is not usable, nor is a status
+// vaire does not know, while an ordinary inactive slot with an older position
+// is.
+func TestFollowerSlotState(t *testing.T) {
+	for name, test := range map[string]struct {
+		rows []map[string]string
+		want followerSlotState
+	}{
+		"missing":        {want: followerSlotState{}},
+		"retaining":      {rows: []map[string]string{{"wal_status": "reserved", "has_restart": "true"}}, want: followerSlotState{Exists: true, Usable: true}},
+		"inactive":       {rows: []map[string]string{{"wal_status": "extended", "has_restart": "true"}}, want: followerSlotState{Exists: true, Usable: true}},
+		"lost":           {rows: []map[string]string{{"wal_status": "lost", "has_restart": "true"}}, want: followerSlotState{Exists: true}},
+		"unreserved":     {rows: []map[string]string{{"wal_status": "unreserved", "has_restart": "true"}}, want: followerSlotState{Exists: true}},
+		"no restart":     {rows: []map[string]string{{"wal_status": "reserved", "has_restart": "false"}}, want: followerSlotState{Exists: true}},
+		"unknown status": {rows: []map[string]string{{"wal_status": "future_status", "has_restart": "true"}}, want: followerSlotState{Exists: true}},
+	} {
+		if got := followerSlotStateOf(test.rows); got != test.want {
+			t.Errorf("%s: %+v", name, got)
+		}
 	}
 }

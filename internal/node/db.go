@@ -259,7 +259,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 	// configure it, then its roles and database (RFC 11.2).
 	_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		err = applyNewCluster(ctx, cfg, rt, db.Name, env.Report)
+		err = applyNewCluster(ctx, cfg, rt, db.Name, "", env.Report)
 	}
 	if err != nil {
 		// Keep cluster.toml in step with the server: an entry whose cluster
@@ -274,7 +274,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with vaire apply.")
 	}
-	if w := applyMetrics(ctx, cfg, rt, env.Report, db.Name); w != nil {
+	if w := applyMetrics(ctx, cfg, rt, env.Report, db.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
@@ -456,13 +456,15 @@ func clustersOf(ids []string) []string {
 // configure, roles) and restarts it without a confirm token when a setting
 // still needs one: nothing connects to it yet, so the restart costs no
 // client anything. It runs before the poolers route to it and before its
-// stanza, whose archive check needs archive_mode on.
-func applyNewCluster(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name string, report engine.Reporter) error {
+// stanza, whose archive check needs archive_mode on. recovering keeps a
+// database that awaits recovery in the steps' view (db recover builds it).
+func applyNewCluster(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name, recovering string, report engine.Reporter) error {
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
-		DB:        name,
-		Confirm:   engine.Confirmation{Clusters: []string{name}},
-		Restarter: steps.Restarter(cfg),
-		Report:    report,
+		DB:         name,
+		Confirm:    engine.Confirmation{Clusters: []string{name}},
+		Recovering: recovering,
+		Restarter:  steps.Restarter(cfg),
+		Report:     report,
 	})
 	return err
 }
@@ -488,11 +490,13 @@ func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
 // applyMetrics runs metrics-v1 after a database is created, forked or
 // dropped, so its /metrics path and targets.json entry follow (Phase 4). The
 // database already works, so a failure is the warning metrics_reload_failed.
-func applyMetrics(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter, db string) *output.Warning {
+// recovering keeps a database that awaits recovery in the steps' view.
+func applyMetrics(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter, db, recovering string) *output.Warning {
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
-		Only:      steps.MetricsStepIDs(),
-		Restarter: steps.Restarter(cfg),
-		Report:    report,
+		Only:       steps.MetricsStepIDs(),
+		Recovering: recovering,
+		Restarter:  steps.Restarter(cfg),
+		Report:     report,
 	})
 	if err == nil {
 		return nil
@@ -665,7 +669,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := dropRouting(ctx, env, cfg); err != nil {
 		return Result{}, withHint(err, p.Name+" is dropped, but the poolers or timers still refer to it. Fix it with vaire apply.")
 	}
-	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name); w != nil {
+	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
 	clearDeferred(p.Name)

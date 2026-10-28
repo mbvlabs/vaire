@@ -357,7 +357,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 		for _, w := range followersDiverged(env.Cluster, p.Database) {
 			res["warnings"] = append(warnings, w.Message)
 		}
-	} else if err := applyPoolers(ctx, env.Cluster, rt, env.Report); err != nil {
+	} else if err := applyPoolers(ctx, env.Cluster, rt, "", env.Report); err != nil {
 		res["pooler_warning"] = "the session pooler was not reloaded, so vaire sql --db " + backup.RestoringName(p.Database) + " fails until vaire apply: " + err.Error()
 	}
 	steps.WriteMetrics(env.Cluster)
@@ -376,8 +376,10 @@ func jobRuntime(env *jobEnv) engine.Runtime {
 
 // applyPoolers runs pgbouncer-v1, which renders both poolers' entries,
 // including the session pooler's for ready restores, and reloads them.
-func applyPoolers(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) error {
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.PoolerStepIDs(), Restarter: steps.Restarter(cfg), Report: report})
+// recovering keeps a database that awaits recovery in the steps' view, so its
+// entry is rendered while it is being recovered.
+func applyPoolers(ctx context.Context, cfg config.Cluster, rt engine.Runtime, recovering string, report engine.Reporter) error {
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.PoolerStepIDs(), Recovering: recovering, Restarter: steps.Restarter(cfg), Report: report})
 	return err
 }
 
@@ -649,7 +651,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		runs = append(runs, stanzaRuns(db)...)
 	}
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, runs...))
-	if err := applyPoolers(ctx, cfg, rt, report); err != nil {
+	if err := applyPoolers(ctx, cfg, rt, "", report); err != nil {
 		warn = err
 	}
 	if newStanza != "" {
@@ -1351,17 +1353,17 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	logLine(env.Report, env.Job, "starting "+p.Name+" with its own configuration")
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		err = applyNewCluster(ctx, cfg, rt, p.Name, env.Report)
+		err = applyNewCluster(ctx, cfg, rt, p.Name, "", env.Report)
 	}
 	if err != nil {
 		return nil, withHint(err, finishNewCluster(p.Name))
 	}
 	var warnings []output.Warning
-	if err := applyPoolers(ctx, cfg, rt, env.Report); err != nil {
+	if err := applyPoolers(ctx, cfg, rt, "", env.Report); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the poolers were not reloaded, so " + p.Name + " is not reachable through them until vaire apply: " + err.Error()})
 	}
-	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name); w != nil {
+	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
@@ -1436,30 +1438,14 @@ func restoreFork(ctx context.Context, env *jobEnv, p dbForkParams, src config.Cl
 // privileges and per-role settings follow the role OIDs; only
 // <name>_migrate's SET role names the owner, so it is rewritten. The login
 // roles get the passwords the operator generated for the fork, as SCRAM
-// verifiers: the source's no longer work.
-func renameFork(ctx context.Context, local pg.Local, source, name string, passwords map[string]string) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, "ALTER DATABASE %s RENAME TO %s;\n", pg.Quote(source), pg.Quote(name))
-	for _, role := range append([]string{"owner"}, steps.DatabaseRoles...) {
-		fmt.Fprintf(&b, "ALTER ROLE %s RENAME TO %s;\n", pg.Quote(source+"_"+role), pg.Quote(name+"_"+role))
+// verifiers: the source's no longer work. A fork's copy always has every old
+// name, so it renames them all; db unfollow reads which are left instead.
+func renameFork(ctx context.Context, local sqlRunner, source, name string, passwords map[string]string) error {
+	statements, err := renameStatements(renameState{database: true, roles: renameRoles()}, source, name, passwords)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(&b, "ALTER ROLE %s SET role = '%s';\n", pg.Quote(name+"_"+steps.RoleMigrate), name+"_owner")
-	for _, role := range steps.DatabaseRoles {
-		key := steps.SecretDatabaseRole(name, role)
-		password := passwords[key]
-		if password == "" {
-			return output.NewError(output.CodeInputRequired, "the password for "+name+"_"+role+" was not supplied", output.ExitInput,
-				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
-		}
-		secrets.Add(password)
-		verifier, err := pg.SCRAMVerifier(password)
-		if err != nil {
-			return err
-		}
-		secrets.Add(verifier)
-		fmt.Fprintf(&b, "ALTER ROLE %s PASSWORD '%s';\n", pg.Quote(name+"_"+role), verifier)
-	}
-	return local.Exec(ctx, "postgres", b.String(), nil)
+	return local.Exec(ctx, "postgres", statements, nil)
 }
 
 // dropLeftovers drops db's restore leftover clusters and their records: db
@@ -1511,4 +1497,7 @@ func forgetDropped(s *backup.Records, db string) {
 	delete(s.Drilling, db)
 	delete(s.Undoing, db)
 	delete(s.AwaitingRecovery, db)
+	// An unfollow that was under way for db goes with it: a database created
+	// again under its name starts its own life.
+	delete(s.Unfollowing, db)
 }

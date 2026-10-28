@@ -213,7 +213,10 @@ func largestOther(sheet tune.Sheet, name string) (tune.Demand, bool) {
 }
 
 // clusterRunning reports whether spec's postmaster holds its socket.
-func clusterRunning(spec config.ClusterSpec) bool {
+// clusterRunning reports whether spec's cluster has a live socket. It is a
+// variable so tests say which clusters run without a server; the node's own is
+// the socket check.
+var clusterRunning = func(spec config.ClusterSpec) bool {
 	_, err := os.Stat(filepath.Join(steps.PGSocketDir, fmt.Sprintf(".s.PGSQL.%d.lock", spec.Port)))
 	return err == nil
 }

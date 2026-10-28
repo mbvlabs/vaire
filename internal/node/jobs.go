@@ -74,6 +74,17 @@ var heavyIOJobs = map[string]bool{
 	"backup-full": true, "backup-diff": true, "backup-verify": true, "restore-drill": true, "db-dump": true,
 }
 
+// exclusiveJobs change the desired state and a cluster's own identity, so they
+// take the node lock exclusive and their clusters' locks exclusive: no other
+// job or RPC writes cluster.toml while they run (db create, config set and db
+// drop take the node lock exclusive the same way), a second unfollow of the
+// same follower can't promote and rename beside the first, and an apply of that
+// cluster waits. Nothing they run takes the node or cluster lock again, so the
+// exclusive lock can't deadlock with themselves.
+var exclusiveJobs = map[string]bool{
+	"db-unfollow": true,
+}
+
 // JobOptions are vaire node run's flags.
 type JobOptions struct {
 	// ID names a detachable job whose spec an RPC wrote.
@@ -382,17 +393,54 @@ type jobLockBusy struct {
 	fields map[string]any
 }
 
-// tryJobLocks takes a job's locks once each, in order: the node lock
-// (shared), the heavy-I/O lock for heavy jobs, then its clusters' locks. On a
-// busy lock it releases what it took and returns which one was busy.
+// jobLockers are the node's lock acquisitions, as tryJobLocks takes them:
+// nodeLockers holds the node's own, and a test passes ones that record the
+// modes asked for and hold them, so the node's /run/lock files aren't needed.
+type jobLockers struct {
+	node    func(ctx context.Context, mode engine.LockMode, method, requestID string, timeout time.Duration) (engine.Release, error)
+	heavyIO func(ctx context.Context, method, requestID string) (engine.Release, error)
+	cluster func(ctx context.Context, cluster string, mode engine.LockMode, method, requestID string, timeout time.Duration) (engine.Release, error)
+}
+
+var nodeLockers = jobLockers{node: engine.Acquire, heavyIO: engine.AcquireHeavyIO, cluster: engine.AcquireCluster}
+
+// jobLockMode is the mode a job takes the node lock and its clusters' locks in:
+// shared for the common jobs, exclusive for the ones that change the desired
+// state and a cluster's identity (exclusiveJobs). A follower recovery mutates
+// the deterministic data and configuration paths an interrupted attempt owns,
+// so it is exclusive too: a competing recovery must not race its ownership
+// record or its rebuild, and no drop or apply may run beside it.
+func jobLockMode(env *jobEnv) engine.LockMode {
+	if exclusiveJobs[env.Job] || env.Job == "db-follow" && dbFollowRecover(env.Params) {
+		return engine.LockExclusive
+	}
+	return engine.LockShared
+}
+
+func dbFollowRecover(params json.RawMessage) bool {
+	var p dbFollowParams
+	return json.Unmarshal(params, &p) == nil && p.Recover
+}
+
+// tryJobLocks takes a job's locks once each, in order: the node lock, the
+// heavy-I/O lock for heavy jobs, then its clusters' locks, in the job's mode
+// (shared, or exclusive for exclusiveJobs). On a busy lock it releases what it
+// took and returns which one was busy.
 func tryJobLocks(ctx context.Context, env *jobEnv) (engine.Release, *jobLockBusy, error) {
+	return takeJobLocks(ctx, env, nodeLockers)
+}
+
+// takeJobLocks is tryJobLocks with the lock acquisitions given, so a test runs
+// the real order and modes against its own locks.
+func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Release, *jobLockBusy, error) {
 	var held []engine.Release
 	releaseAll := func() {
 		for i := len(held) - 1; i >= 0; i-- {
 			held[i]()
 		}
 	}
-	release, err := engine.Acquire(ctx, engine.LockShared, env.Job, env.ID, 0)
+	mode := jobLockMode(env)
+	release, err := locks.node(ctx, mode, env.Job, env.ID, 0)
 	if engine.IsLockHeld(err) {
 		return nil, &jobLockBusy{what: "the node lock", log: "the node lock is busy"}, nil
 	}
@@ -401,7 +449,7 @@ func tryJobLocks(ctx context.Context, env *jobEnv) (engine.Release, *jobLockBusy
 	}
 	held = append(held, release)
 	if heavyIOJobs[env.Job] || maintHeavy(env) {
-		release, err := engine.AcquireHeavyIO(ctx, env.Job, env.ID)
+		release, err := locks.heavyIO(ctx, env.Job, env.ID)
 		if engine.IsLockHeld(err) {
 			releaseAll()
 			return nil, &jobLockBusy{what: "the heavy-I/O lock", log: "another backup job holds the heavy-I/O lock",
@@ -414,7 +462,7 @@ func tryJobLocks(ctx context.Context, env *jobEnv) (engine.Release, *jobLockBusy
 		held = append(held, release)
 	}
 	for _, cluster := range jobClusters(env) {
-		release, err := engine.AcquireCluster(ctx, cluster, engine.LockShared, env.Job, env.ID, 0)
+		release, err := locks.cluster(ctx, cluster, mode, env.Job, env.ID, 0)
 		if engine.IsLockHeld(err) {
 			releaseAll()
 			return nil, &jobLockBusy{what: "the lock of " + cluster, log: "the lock of " + cluster + " is busy",
@@ -571,6 +619,24 @@ func finishJobWithActivity(rec engine.JobRecord, ja *jobActivity, state, detail 
 	}
 	rec.ActivityPending = ja != nil && !ja.finished
 	finishJob(rec, state, detail, res, cause)
+}
+
+// JobOutcomeUnknown is the error detail of a job whose process or unit ended
+// without recording a result: it may have run any part of its work, so a
+// caller that handed secrets to the job has to treat them as possibly used.
+const JobOutcomeUnknown = "job_outcome_unknown"
+
+// crashedJobRecord is the terminal record of a job whose unit ended without
+// recording a result. It builds the JobOutcomeUnknown body first and finishes
+// from a structured error carrying that body: a plain error would make
+// finishedJobRecord rebuild the body and drop the detail, and with it the
+// evidence that an unfollow may have installed its passwords.
+func crashedJobRecord(rec engine.JobRecord) engine.JobRecord {
+	body := output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result",
+		Hint: "Read journalctl -u " + rec.Unit + " on the node.", Details: map[string]any{"reason": JobOutcomeUnknown}}
+	return finishedJobRecord(rec, engine.JobFailed, "ended without a result", nil, &output.CLIError{
+		Code: body.Code, Message: body.Message, Hint: body.Hint, Details: body.Details,
+	})
 }
 
 // finishedJobRecord is finishJob's pure part: it builds the terminal record
@@ -816,9 +882,8 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 			if inactiveSince.IsZero() {
 				inactiveSince = time.Now()
 			} else if grace := 15 * time.Second; rec.State == engine.JobQueued && time.Since(inactiveSince) > 4*grace || rec.State != engine.JobQueued && time.Since(inactiveSince) > grace {
-				rec.State = engine.JobFailed
-				rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + id + " ended without recording a result", Hint: "Read journalctl -u " + rec.Unit + " on the node."}
-				finishJob(rec, engine.JobFailed, "ended without a result", nil, errors.New(rec.Error.Message))
+				rec = crashedJobRecord(rec)
+				putFinishedJob(rec)
 			}
 		}
 	}
@@ -1042,7 +1107,8 @@ func reapJobs(ctx context.Context, id string) error {
 				continue
 			}
 			rec.State, rec.Detail, rec.FinishedAt = engine.JobFailed, "ended without a result", stamp()
-			rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result", Hint: jobLogHint(rec)}
+			rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result", Hint: jobLogHint(rec),
+				Details: map[string]any{"reason": JobOutcomeUnknown}}
 			st.Jobs[i] = rec
 		}
 		return nil

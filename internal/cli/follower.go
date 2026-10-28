@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/health"
+	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/spf13/cobra"
@@ -171,7 +175,14 @@ func runDBUnfollow(cmd *cobra.Command, args []string) error {
 	opts.Secrets = rpcSecrets
 	reply, jobID, detached, err := callJob(cmd, s, p, "db.unfollow", map[string]any{"name": name}, opts)
 	if err != nil {
-		return err
+		// The node marks every failure of an unfollow that started, and a lost
+		// connection leaves its outcome unknown: the passwords may be on the
+		// database, so they are handed over here (D10).
+		note, out := unfollowCredentials(err, name, secret, dryRun(cmd))
+		if note != "" {
+			printCredentialBlock(cmd, note, name, secret)
+		}
+		return out
 	}
 	if dryRun(cmd) {
 		var data map[string]any
@@ -204,4 +215,67 @@ func runDBUnfollow(cmd *cobra.Command, args []string) error {
 		Warnings: warnings,
 		Next:     []string{"vaire backup list --db " + name},
 	})
+}
+
+// unfollowCredentials hands a failed db unfollow's generated passwords to the
+// operator when the node may have installed them already: it returns the note
+// that goes above the credential block, and the failure to report with the
+// credentials in details.database (as db create's interrupted output does).
+// The node's flag says they may have changed, never that they did, a lost
+// connection leaves the outcome unknown, and so does a job whose process died
+// without a result. Ordinary errors, the job's record and the activity history
+// never carry the passwords, so nothing is handed over for a refusal the node
+// answered before it started (a preflight failure, a missing confirmation) or
+// for a dry run, which starts no job at all.
+func unfollowCredentials(err error, name string, secret databaseSecret, dryRun bool) (string, error) {
+	var cliErr *output.CLIError
+	if dryRun || !errors.As(err, &cliErr) || !unfollowPasswordsUnknown(cliErr) {
+		return "", err
+	}
+	note := "The unfollow failed after it may have changed " + name + "'s roles and passwords, so these are the credentials to try first. " +
+		"If " + name + " still follows its source, they are unused and the next vaire db unfollow makes new ones."
+	out := *cliErr
+	details := map[string]any{}
+	if m, ok := cliErr.Details.(map[string]any); ok {
+		for k, v := range m {
+			details[k] = v
+		}
+	}
+	details["database"] = secret
+	details["credentials_note"] = note + " " + shownOnceNote
+	out.Details = details
+	out.Hint = strings.TrimSpace(out.Hint + " If they don't work, run vaire db unfollow " + name + " again; it finishes the unfollow and prints new ones.")
+	return note, &out
+}
+
+// unfollowPasswordsUnknown reports whether err may have installed the
+// unfollow's new passwords: the node marks every failure of a job it started,
+// a lost connection leaves the outcome unknown, and a job whose process died
+// without recording a result may have stopped anywhere.
+func unfollowPasswordsUnknown(cliErr *output.CLIError) bool {
+	if cliErr.Code == output.CodeTransportFailed {
+		return true
+	}
+	details, _ := cliErr.Details.(map[string]any)
+	if changed, _ := details[node.UnfollowPasswordsDetail].(bool); changed {
+		return true
+	}
+	reason, _ := details["reason"].(string)
+	return reason == node.JobOutcomeUnknown
+}
+
+// printCredentials writes the credential block of a failed unfollow to the
+// human output: structured output carries it in details.database instead.
+func printCredentialBlock(cmd *cobra.Command, note, title string, secret databaseSecret) {
+	opts, _ := output.ParseOptions(cmd)
+	if output.UsesStructuredOutput(opts) {
+		return
+	}
+	text := note + "\n" + secret.String() + "\n" + shownOnceNote
+	if width, ok := styledStdout(cmd); ok {
+		text = ui.Warn(note) + "\n" + secret.styled("", title, shownOnceNote, width)
+	}
+	resume := ui.Suspend()
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), text)
+	resume()
 }

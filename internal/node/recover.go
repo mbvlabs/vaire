@@ -292,7 +292,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 			return nil, err
 		}
 		applyRecoveredTimers(ctx, cfg, rt, env, res)
-		if err := applyPoolers(ctx, cfg, rt, env.Report); err != nil {
+		if err := applyPoolers(ctx, cfg, rt, "", env.Report); err != nil {
 			res["pooler_warning"] = err.Error()
 		}
 		res["phase"] = backup.PhaseReady
