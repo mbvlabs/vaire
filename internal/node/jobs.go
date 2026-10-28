@@ -35,7 +35,7 @@ var jobNames = []string{
 	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump",
 	"stanza-expiry", "restore", "db-fork", "maint", "recover",
 	"maint-daily", "maint-weekly", "certs-renew", "metrics-refresh", "doctor",
-	"master-backup", "fence-check",
+	"master-backup", "fence-check", "db-follow", "db-unfollow",
 }
 
 // bucketWriteJobs write to or delete from the bucket, so they check the
@@ -43,6 +43,8 @@ var jobNames = []string{
 var bucketWriteJobs = map[string]bool{
 	"backup-full": true, "backup-diff": true, "backup-incr": true, "db-dump": true,
 	"stanza-expiry": true, "db-fork": true, "restore": true, "recover": true,
+	// db unfollow creates the follower's stanza and its first full (Phase 6).
+	"db-unfollow": true,
 }
 
 // locklessJobs take no node lock (Phase 5): the master backup must never
@@ -51,7 +53,7 @@ var bucketWriteJobs = map[string]bool{
 var locklessJobs = map[string]bool{"master-backup": true, "fence-check": true}
 
 // rpcOnlyJobs need a spec written by the RPC that starts them.
-var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true, "maint": true, "recover": true}
+var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true, "maint": true, "recover": true, "db-follow": true, "db-unfollow": true}
 
 // quietJobs run often and are not recorded in state.json's job list, which
 // keeps only the last 50 runs: metrics-refresh runs every minute and would
@@ -494,6 +496,13 @@ func notRun(env *jobEnv, cause error) {
 		if json.Unmarshal(env.Params, &p) == nil && p.Name != "" {
 			_ = forgetDatabase(p.Name)
 		}
+	case "db-follow":
+		// A follower's entry whose cluster was never made; one awaiting
+		// recovery stays awaiting.
+		var p dbFollowParams
+		if json.Unmarshal(env.Params, &p) == nil && p.Name != "" && !p.Recover {
+			_ = forgetDatabase(p.Name)
+		}
 	}
 }
 
@@ -517,6 +526,10 @@ func runJobFunc(ctx context.Context, env *jobEnv) (any, error) {
 		return jobRestore(ctx, env)
 	case "db-fork":
 		return jobFork(ctx, env)
+	case "db-follow":
+		return jobFollow(ctx, env)
+	case "db-unfollow":
+		return jobUnfollow(ctx, env)
 	case "maint":
 		return jobMaint(ctx, env)
 	case "maint-daily":
@@ -1171,7 +1184,7 @@ func rpcJobDatabase(job string, params json.RawMessage) string {
 	switch job {
 	case "restore", "recover":
 		return p.Database
-	case "db-fork":
+	case "db-fork", "db-follow", "db-unfollow":
 		return p.Name
 	case "maint":
 		return p.DB
@@ -1199,8 +1212,10 @@ func jobClusters(env *jobEnv) []string {
 		names = []string{p.DB}
 	case env.Job == "restore", env.Job == "recover":
 		names = []string{p.Database}
-	case env.Job == "db-fork":
+	case env.Job == "db-fork", env.Job == "db-follow":
 		names = []string{p.Source, p.Name}
+	case env.Job == "db-unfollow":
+		names = []string{p.Name}
 	}
 	var out []string
 	for _, name := range names {

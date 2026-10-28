@@ -221,6 +221,10 @@ func methods() map[string]method {
 		{name: "restore.cleanup", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: cleanupToken, runLog: always, handler: handleRestoreCleanup},
 		{name: "restore.drill", cluster: true, runLog: always, handler: handleRestoreDrill},
 		{name: "db.fork", cluster: true, runLog: always, handler: handleDBFork},
+		// Phase 6: followers. Both start jobs, which take their own locks;
+		// db.follow takes the exclusive lock itself to add the entry.
+		{name: "db.follow", cluster: true, runLog: always, handler: handleDBFollow},
+		{name: "db.unfollow", cluster: true, confirm: unfollowToken, runLog: always, handler: handleDBUnfollow},
 		{name: "dump.create", cluster: true, runLog: always, handler: handleDumpCreate},
 		{
 			name:    "sql",

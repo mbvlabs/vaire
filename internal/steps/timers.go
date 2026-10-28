@@ -150,7 +150,7 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 		files["vaire-"+job+"@.service"] = render.JobService(job, "--db %i")
 	}
 	spread := StaggerSpread(cfg)
-	for _, spec := range cfg.Clusters {
+	for _, spec := range cfg.StanzaClusters() {
 		offset := StaggerOffset(spec.Stanza, spread)
 		for _, j := range scheduledJobs(cfg, spec) {
 			schedule := Stagger(j.Schedule, offset)

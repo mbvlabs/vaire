@@ -47,6 +47,10 @@ func poolerDatabases(cfg config.Cluster, session bool) []render.PoolerDatabase {
 	out := make([]render.PoolerDatabase, 0, len(cfg.Clusters))
 	for _, c := range cfg.Clusters {
 		db := render.PoolerDatabase{Name: c.Name, Port: c.Port}
+		if c.IsFollower() {
+			// The follower's cluster holds its source's database (Phase 6).
+			db.DBName = c.Follows
+		}
 		if r, err := cfg.Resources(c); err == nil {
 			db.MaxConnections = r.PoolSize
 			if session {

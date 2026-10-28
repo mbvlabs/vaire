@@ -48,6 +48,10 @@ type ClusterSpec struct {
 	// it takes a current code from the TOTP authenticator that vaire protect
 	// init set up.
 	Protected bool `toml:"protected,omitempty"`
+	// Follows names the database this one is a physical standby of (Phase
+	// 6): a follower has no stanza and no [clusters.backup] while it
+	// follows. Immutable; only db unfollow clears it.
+	Follows string `toml:"follows,omitempty"`
 }
 
 // ClusterBackup is [clusters.backup]: the cluster's restore window and
@@ -82,11 +86,13 @@ func (c Cluster) ClusterByName(name string) (ClusterSpec, bool) {
 	return ClusterSpec{}, false
 }
 
-// Stanzas lists every database's stanza.
+// Stanzas lists every database's stanza. A follower has none (Phase 6).
 func (c Cluster) Stanzas() []string {
 	out := make([]string, 0, len(c.Clusters))
 	for _, s := range c.Clusters {
-		out = append(out, s.Stanza)
+		if s.Stanza != "" {
+			out = append(out, s.Stanza)
+		}
 	}
 	return out
 }
@@ -143,10 +149,13 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 			add("%s.port %d is already used by %s", at, s.Port, other)
 		}
 		ports[s.Port] = s.Name
-		if !stanzaPattern.MatchString(s.Stanza) || !strings.HasPrefix(s.Stanza, s.Name+"-") {
+		switch {
+		case s.IsFollower():
+			c.validateFollower(add, at, s)
+		case !stanzaPattern.MatchString(s.Stanza) || !strings.HasPrefix(s.Stanza, s.Name+"-"):
 			add("%s.stanza %q must be %s-<6 hex>", at, s.Stanza, s.Name)
 		}
-		if stanzas[s.Stanza] {
+		if s.Stanza != "" && stanzas[s.Stanza] {
 			add("%s.stanza %q is a duplicate", at, s.Stanza)
 		}
 		stanzas[s.Stanza] = true

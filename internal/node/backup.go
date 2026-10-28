@@ -79,7 +79,7 @@ func handleBackupNow(ctx context.Context, env *Env) (Result, error) {
 	default:
 		return Result{}, output.NewError(output.CodeUsage, "type must be full, diff or incr", output.ExitUsage, "")
 	}
-	specs := env.Cluster.Clusters
+	specs := env.Cluster.StanzaClusters() // a follower has no stanza (Phase 6)
 	if p.Database != "" {
 		spec, ok := env.Cluster.ClusterByName(p.Database)
 		if !ok {
@@ -292,7 +292,8 @@ func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (
 	var warnings []output.Warning
 	rows := make([]backupRow, 0, len(cfg.Clusters)+len(rs.DroppedStanzas))
 	empty := 0
-	for _, spec := range cfg.Clusters {
+	// One row per stanza: a follower has none (Phase 6).
+	for _, spec := range cfg.StanzaClusters() {
 		info := infos[spec.Stanza]
 		archive, err := driver(spec, "backup.list", nil).ArchiveStatus(ctx)
 		if err != nil {
@@ -525,7 +526,7 @@ func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
-	specs := env.Cluster.Clusters
+	specs := env.Cluster.StanzaClusters() // a follower has no stanza (Phase 6)
 	if p.Database != "" {
 		spec, ok := env.Cluster.ClusterByName(p.Database)
 		if !ok {

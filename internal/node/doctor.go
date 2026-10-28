@@ -129,8 +129,15 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 
 	prev, havePrev := loadDoctorState()
 	created := clusterCreated()
+	followers := readFollowers(ctx, stepsView(cfg), "")
+	for _, o := range orphanSlots(ctx, stepsView(cfg)) {
+		f.OrphanSlots = append(f.OrphanSlots, doctor.OrphanSlot{Source: o.Source, Port: o.Port, Slot: o.Slot})
+	}
 	for _, s := range readClusters(ctx, cfg, "", false) {
-		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample}
+		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}
+		if st, ok := followers[s.Spec.Name]; ok {
+			c.Follower = &st
+		}
 		if f.Records.IsAwaiting(s.Spec.Name) {
 			c.AwaitingRecovery = true
 			f.Clusters = append(f.Clusters, c)

@@ -148,7 +148,7 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 			out = append(out, r)
 			continue
 		}
-		rows, err := steps.AdminPG(spec).Query(ctx, spec.Name, maint.ReportSetup+sql, nil)
+		rows, err := steps.AdminPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
 		switch {
 		case err != nil:
 			r.Error = err.Error()
@@ -206,7 +206,7 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 
 // repackRefusal is maint repack until Phase 7 brings pg_repack (Phase 4).
 func repackRefusal(ctx context.Context, spec config.ClusterSpec) error {
-	rows, err := steps.AdminPG(spec).Query(ctx, spec.Name, maint.HasRepackSQL, nil)
+	rows, err := steps.AdminPG(spec).Query(ctx, spec.DatabaseName(), maint.HasRepackSQL, nil)
 	installed := err == nil && len(rows) == 1 && rows[0]["n"] != "0"
 	reason, msg := "extension_missing", "pg_repack is not installed in "+spec.Name
 	if installed {
@@ -482,7 +482,8 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 	res := map[string]any{}
 	analyzed := map[string][]string{}
 	for _, spec := range cfg.Clusters {
-		if !clusterRunning(spec) {
+		// A follower is read-only: its source's ANALYZE replicates (Phase 6).
+		if !clusterRunning(spec) || spec.IsFollower() {
 			continue
 		}
 		local, setup := maintPG(spec)
@@ -590,7 +591,8 @@ func jobMaintWeekly(ctx context.Context, env *jobEnv) (any, error) {
 	reports := map[string]maint.BloatReport{}
 	var errs []error
 	for _, spec := range cfg.Clusters {
-		if !clusterRunning(spec) {
+		// A follower's tables are its source's (Phase 6).
+		if !clusterRunning(spec) || spec.IsFollower() {
 			continue
 		}
 		rows, err := steps.AdminPG(spec).Query(ctx, spec.Name, maint.ReportSetup+maint.BloatSQL(), nil)

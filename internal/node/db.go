@@ -45,18 +45,24 @@ type databaseInfo struct {
 	MaxConnections int    `json:"max_connections,omitempty"`
 	// Protected is clusters.<db>.protected.
 	Protected bool `json:"protected,omitempty"`
-	// State is running, stopped (the cluster exists but is down), pending
-	// (in cluster.toml, no cluster yet) or orphaned (a cluster cluster.toml
-	// doesn't list).
+	// State is running, following (a running follower), stopped (the
+	// cluster exists but is down), pending (in cluster.toml, no cluster
+	// yet) or orphaned (a cluster cluster.toml doesn't list).
 	State string `json:"state"`
+	// Follows is the database a follower streams from, and Follower its
+	// replication: lag, slot, streaming (Phase 6).
+	Follows  string           `json:"follows,omitempty"`
+	Follower *followerReading `json:"follower,omitempty"`
 }
 
 // Database states in db.list.
 const (
-	stateRunning  = "running"
-	stateStopped  = "stopped"
-	statePending  = "pending"
-	stateOrphaned = "orphaned"
+	stateRunning = "running"
+	// stateFollowing is a running follower (Phase 6).
+	stateFollowing = "following"
+	stateStopped   = "stopped"
+	statePending   = "pending"
+	stateOrphaned  = "orphaned"
 	// stateAwaiting is a database a rebuilt master hasn't recovered yet
 	// (Phase 5): in cluster.toml, no cluster until db recover.
 	stateAwaiting = "awaiting_recovery"
@@ -121,7 +127,7 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	out := make([]databaseInfo, 0, len(cfg.Clusters))
 	for _, spec := range cfg.Clusters {
 		info := databaseInfo{Name: spec.Name, InConfig: true, Node: spec.Node, Host: cfg.DatabaseHostname(spec.Name),
-			Port: spec.Port, Stanza: spec.Stanza, Protected: spec.Protected, State: statePending}
+			Port: spec.Port, Stanza: spec.Stanza, Protected: spec.Protected, State: statePending, Follows: spec.Follows}
 		if res, err := cfg.Resources(spec); err == nil {
 			info.Size, info.MemoryMiB, info.MemoryMaxMiB = res.Size, res.MemoryMiB, res.MemoryMaxMiB
 			info.CPUWeight, info.CPUQuota, info.IOWeight, info.MaxConnections = res.CPUWeight, res.CPUQuota, res.IOWeight, res.MaxConnections
@@ -133,6 +139,13 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 			}
 			delete(live, spec.Name)
 		}
+		if spec.IsFollower() && info.State == stateRunning && !records.IsAwaiting(spec.Name) {
+			info.State = stateFollowing
+			if src, ok := cfg.ClusterByName(spec.Follows); ok {
+				st := readFollower(ctx, spec, src)
+				info.Follower = &st
+			}
+		}
 		if records.IsAwaiting(spec.Name) {
 			info.State = stateAwaiting
 			// No cluster to measure: the stanza's size orders db recover --all.
@@ -142,7 +155,7 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 		}
 		local := steps.ClusterPG(spec)
 		rows, err := local.Query(ctx, "postgres",
-			"SELECT pg_database_size(datname) AS size FROM pg_database WHERE datname = "+quoteLiteral(spec.Name), nil)
+			"SELECT pg_database_size(datname) AS size FROM pg_database WHERE datname = "+quoteLiteral(spec.DatabaseName()), nil)
 		if err != nil || len(rows) == 0 {
 			out = append(out, info)
 			continue
@@ -151,11 +164,11 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 		if _, err := fmt.Sscan(rows[0]["size"], &info.SizeBytes); err != nil {
 			info.SizeBytes = 0
 		}
-		roles, err := existingRolesIn(ctx, local, spec.Name)
+		roles, err := existingRolesIn(ctx, local, spec.DatabaseName())
 		if err == nil {
 			info.Roles = roles
 		}
-		exts, err := local.Query(ctx, spec.Name, "SELECT extname FROM pg_extension ORDER BY extname", nil)
+		exts, err := local.Query(ctx, spec.DatabaseName(), "SELECT extname FROM pg_extension ORDER BY extname", nil)
 		if err == nil {
 			for _, row := range exts {
 				info.Extensions = append(info.Extensions, row["extname"])
@@ -293,7 +306,8 @@ func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOver
 	}
 	for _, role := range steps.DatabaseRoles {
 		key := steps.SecretDatabaseRole(db.Name, role)
-		if env.Req.Secrets[key] == "" {
+		// A follower's roles are its source's, replicated (Phase 6).
+		if env.Req.Secrets[key] == "" && !db.IsFollower() {
 			return cfg, nil, db, output.NewError(output.CodeInputRequired, "the password for "+db.Name+"_"+role+" was not supplied", output.ExitInput,
 				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
 		}
@@ -564,6 +578,9 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := restoreInProgress(p.Name, "db drop"); err != nil {
 		return Result{}, err
 	}
+	if err := refuseSourceDrop(cfg, p.Name); err != nil {
+		return Result{}, err
+	}
 	local := steps.ClusterPG(spec)
 	exists := false
 	if inConfig && clusterExists {
@@ -601,6 +618,12 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if clusterExists {
 		if err := dropCluster(ctx, env, p.Name); err != nil {
 			return Result{}, err
+		}
+	}
+	// A follower's slot on its source goes with it (Phase 6).
+	if inConfig && spec.IsFollower() {
+		if w := dropFollowerSlot(ctx, cfg, spec); w != nil {
+			warnings = append(warnings, *w)
 		}
 	}
 	if err := dropLeftovers(env, p.Name); err != nil {
@@ -824,6 +847,9 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if p.DeferRestart {
 		confirm = engine.Confirmation{}
 	}
+	// Its followers' hot-standby floors follow its new size (Phase 6, D6):
+	// their configuration goes first, restarted only with their own token.
+	warnings = append(warnings, applyFollowerConfigs(ctx, cfg, rt, p.Name, confirm, env.Report)...)
 	data, applyWarnings, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		DB:        p.Name,
 		Confirm:   confirm,
@@ -982,7 +1008,7 @@ func quoteLiteral(value string) string {
 }
 
 // placeCluster fills what db create assigns: the node (the master), a free
-// port, a new stanza and the default size.
+// port, a new stanza (none for a follower) and the default size.
 func placeCluster(cfg config.Cluster, db *config.ClusterSpec) error {
 	master, ok := cfg.Master()
 	if !ok {
@@ -996,8 +1022,11 @@ func placeCluster(cfg config.Cluster, db *config.ClusterSpec) error {
 			WithDetails(map[string]any{"reason": "no_cluster_port"})
 	}
 	db.Port = port
-	if db.Stanza, err = config.NewStanza(db.Name); err != nil {
-		return err
+	// A follower has no stanza while it follows (Phase 6).
+	if !db.IsFollower() {
+		if db.Stanza, err = config.NewStanza(db.Name); err != nil {
+			return err
+		}
 	}
 	if db.Size == "" {
 		db.Size = cfg.Postgres.DefaultSize

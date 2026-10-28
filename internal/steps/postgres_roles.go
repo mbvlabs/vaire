@@ -37,6 +37,15 @@ func (postgresRoles) Instance(cluster string) engine.Step {
 	return postgresRoles{clusterStep{cluster: cluster}}
 }
 
+// SkipReason skips a follower (Phase 6): its roles, database and auth
+// functions are its source's, replicated, and it takes no writes.
+func (s postgresRoles) SkipReason(cfg config.Cluster) string {
+	if spec, err := s.spec(cfg); err == nil && spec.IsFollower() {
+		return "follower"
+	}
+	return ""
+}
+
 func (s postgresRoles) Describe(config.Cluster) string {
 	return "create the service roles, the auth functions and " + s.cluster + "'s roles, database, grants and extensions"
 }

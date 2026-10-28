@@ -35,7 +35,7 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) [
 	conf := func(path string, content []byte, mode os.FileMode) managedFile {
 		return managedFile{Path: path, Content: string(content), Mode: mode, Owner: pgFileOwner, Group: pgFileGroup}
 	}
-	return []managedFile{
+	files := []managedFile{
 		conf(confD+"/10-vaire-tuning.conf", render.TuningConf(res), 0o644),
 		conf(confD+"/20-vaire-security.conf", render.SecurityConf(spec.Port), 0o644),
 		conf(confD+"/30-vaire-extensions.conf", render.ExtensionsConf(spec, res), 0o644),
@@ -44,6 +44,8 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) [
 		conf(dir+"/pg_hba.conf", render.HBA(), 0o640),
 		conf(dir+"/pg_ident.conf", render.Ident(cfg), 0o640),
 	}
+	// A follower's floors and replication settings (Phase 6).
+	return append(files, followerFiles(cfg, spec, rt)...)
 }
 
 // WriteBackupConf writes spec's 40-vaire-backup.conf as postgres-config-v1

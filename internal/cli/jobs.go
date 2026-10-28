@@ -275,6 +275,24 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 			return ""
 		}
 		return "forked " + res.Source + " into " + res.Name + " with its own roles (the credentials were shown only by vaire db fork)"
+	case "db-follow":
+		var res struct {
+			Source string `json:"source"`
+			Name   string `json:"name"`
+		}
+		if json.Unmarshal(raw, &res) != nil || res.Name == "" {
+			return ""
+		}
+		return res.Name + " follows " + res.Source + " (vaire status --db " + res.Name + " shows its lag)"
+	case "db-unfollow":
+		var res struct {
+			Source string `json:"source"`
+			Name   string `json:"name"`
+		}
+		if json.Unmarshal(raw, &res) != nil || res.Name == "" {
+			return ""
+		}
+		return res.Name + " no longer follows " + res.Source + " and is independent (the credentials were shown only by vaire db unfollow)"
 	}
 	return ""
 }
@@ -299,7 +317,7 @@ func jobListDB(j engine.JobRecord) string {
 		switch {
 		case j.Job == "restore" && res.Database != "":
 			return res.Database
-		case j.Job == "db-fork" && res.Name != "":
+		case (j.Job == "db-fork" || j.Job == "db-follow" || j.Job == "db-unfollow") && res.Name != "":
 			return res.Name
 		}
 		var dbs []string

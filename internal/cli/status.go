@@ -60,6 +60,9 @@ type statusDB struct {
 	DeferredRestart   string            `json:"deferred_restart,omitempty"`
 	RestoreInProgress bool              `json:"restore_in_progress"`
 	Protected         bool              `json:"protected,omitempty"`
+	// Follows and Follower are a follower's source and replication (Phase 6).
+	Follows  string                `json:"follows,omitempty"`
+	Follower *health.FollowerState `json:"follower,omitempty"`
 }
 
 type statusData struct {
@@ -249,6 +252,11 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 		}
 	}
 	for _, db := range d.Databases {
+		if line := followerLine(db); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	for _, db := range d.Databases {
 		if db.RestartPending {
 			lines = append(lines, "  * restart pending")
 			break
@@ -277,4 +285,35 @@ func latestBackup(db statusDB) string {
 		return "-"
 	}
 	return last
+}
+
+// followerLine is a follower's replication under the table (Phase 6): its
+// source, the lag and the slot the source keeps for it.
+func followerLine(db statusDB) string {
+	f := db.Follower
+	if db.Follows == "" {
+		return ""
+	}
+	line := "  " + db.Name + ": follows " + db.Follows
+	switch {
+	case f == nil || !f.Known:
+		return line + " (replication unknown)"
+	case !f.InRecovery:
+		return line + ", but is out of recovery"
+	case f.ReplayPaused:
+		line += ", replay PAUSED"
+	case f.Streaming:
+		line += fmt.Sprintf(", streaming, lag %s / %s", humanBytes(f.LagBytes), time.Duration(f.LagSeconds*float64(time.Second)).Round(time.Second))
+	default:
+		line += ", NOT streaming"
+	}
+	switch {
+	case !f.SlotExists:
+		line += " · slot " + f.Slot + " missing"
+	case f.SlotWALStatus == "lost":
+		line += " · slot " + f.Slot + " LOST"
+	default:
+		line += " · slot " + f.Slot + " holds " + humanBytes(f.SlotRetainedBytes)
+	}
+	return line
 }

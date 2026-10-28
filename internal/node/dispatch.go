@@ -194,6 +194,11 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 			return out.fail(command, err)
 		}
 		env.Cluster = cfg
+		// A follower refuses what needs a stanza or a writable database
+		// (Phase 6).
+		if err := refuseFollower(req, cfg); err != nil {
+			return out.fail(command, err)
+		}
 		if raw, err := os.ReadFile(config.ClusterPath); err == nil && config.HasLegacyVPS(raw) {
 			out.emit(output.Event{Type: "warning", Code: "legacy_config_ignored",
 				Message: "cluster.toml still has [backup.vps] from before Phase 5 (restic is gone); it is ignored, and the next config change drops it"})

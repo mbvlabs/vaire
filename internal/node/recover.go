@@ -80,6 +80,10 @@ func handleDBRecover(ctx context.Context, env *Env) (Result, error) {
 			"db recover is for databases a rebuilt master hasn't recovered. To go back in time on a running database use vaire restore "+p.Database+".").
 			WithDetails(map[string]any{"reason": "not_awaiting_recovery", "database": p.Database})
 	}
+	if spec.IsFollower() {
+		// A follower follows its recovered source again (Phase 6, D14).
+		return recoverFollower(ctx, env, p, spec, recs)
+	}
 	if !cfg.BackupConfigured() {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no bucket, so there is no stanza to recover "+p.Database+" from", output.ExitPrecondition,
 			"The data is lost with the old server. Create the database again: vaire db drop "+p.Database+" --confirm "+p.Database+", then vaire db create "+p.Database+".").

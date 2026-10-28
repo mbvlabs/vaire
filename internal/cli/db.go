@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/health"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/steps"
@@ -48,6 +50,9 @@ type databaseInfo struct {
 	MaxConnections int      `json:"max_connections,omitempty"`
 	Protected      bool     `json:"protected"`
 	State          string   `json:"state"`
+	// Follows and Follower are a follower's source and replication (Phase 6).
+	Follows  string                `json:"follows,omitempty"`
+	Follower *health.FollowerState `json:"follower,omitempty"`
 }
 
 // limits is the database's limits in one column: cpu and io weights,
@@ -103,7 +108,10 @@ func dbListLines(dbs []databaseInfo) []string {
 		if db.InConfig {
 			memory, size, nodeName, host, stanza, protected = tune.FormatMiB(db.MemoryMiB), db.Size, db.Node, db.Host, db.Stanza, yesNo(db.Protected)
 		}
-		lines = append(lines, fmt.Sprintf(row, db.Name, nodeName, host, size, memory, db.limits(), stanza, protected, db.State))
+		if db.Follows != "" {
+			stanza = "follows " + db.Follows
+		}
+		lines = append(lines, fmt.Sprintf(row, db.Name, nodeName, host, size, memory, db.limits(), stanza, protected, db.State+followerSuffix(db.Follower)))
 	}
 	return lines
 }
@@ -392,4 +400,16 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 		Human:    human,
 		Warnings: s.warnings,
 	})
+}
+
+// followerSuffix is a follower's lag after its state in db list: ", lag
+// 4.0 KiB / 0s", or ", not streaming".
+func followerSuffix(f *health.FollowerState) string {
+	if f == nil || !f.Known {
+		return ""
+	}
+	if !f.Streaming {
+		return ", not streaming"
+	}
+	return fmt.Sprintf(", lag %s / %s", humanBytes(f.LagBytes), (time.Duration(f.LagSeconds * float64(time.Second))).Round(time.Second))
 }

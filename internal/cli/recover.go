@@ -51,8 +51,9 @@ func dbRecoverCommand() cmdSpec {
 	}
 }
 
-// recoverOrder is --all's order (D8): the named databases first, then the
-// protected ones, then smallest first.
+// recoverOrder is --all's order (D8): followers after every other database,
+// as they follow their recovered source (Phase 6, D14); then the named
+// databases first, then the protected ones, then smallest first.
 func recoverOrder(dbs []databaseInfo, named []string) []string {
 	var awaiting []databaseInfo
 	for _, d := range dbs {
@@ -64,6 +65,8 @@ func recoverOrder(dbs []databaseInfo, named []string) []string {
 		a, b := awaiting[i], awaiting[j]
 		ai, bi := slices.Index(named, a.Name), slices.Index(named, b.Name)
 		switch {
+		case (a.Follows != "") != (b.Follows != ""):
+			return a.Follows == ""
 		case ai >= 0 && bi >= 0:
 			return ai < bi
 		case ai >= 0 || bi >= 0:
@@ -179,9 +182,10 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 		return output.Success(cmd, output.Result{Data: map[string]any{"databases": outcomes, "dry_run": true}, Message: strings.Join(lines, "\n"), Warnings: warnings})
 	}
 	recovered := recoveredNames(outcomes)
-	if len(dbs) > 1 && !flagTrue(cmd, "no-full") && !flagTrue(cmd, "no-promote") && len(recovered) > 0 {
+	toBackUp := withStanza(outcomes)
+	if len(dbs) > 1 && !flagTrue(cmd, "no-full") && !flagTrue(cmd, "no-promote") && len(toBackUp) > 0 {
 		p.note("taking a full backup of each recovered database")
-		fulls, fullLines, fullWarnings, detached := eachDatabase(cmd, s, p, recovered, "backup.now",
+		fulls, fullLines, fullWarnings, detached := eachDatabase(cmd, s, p, toBackUp, "backup.now",
 			func(db string) any { return recoverFullParams(db) },
 			func(raw []byte) (any, string, error) { return json.RawMessage(raw), "full backup done", nil })
 		if detached != nil {
@@ -235,6 +239,19 @@ func errorBody(err error) *output.ErrorBody {
 	return &body
 }
 
+// withStanza are the recovered databases that get a full backup: not the
+// followers, whose result names the source they follow again (Phase 6).
+func withStanza(outcomes []dbJobOutcome) []string {
+	var out []string
+	for _, o := range outcomes {
+		res, _ := o.Result.(map[string]any)
+		if f, _ := res["follows"].(string); o.Error == nil && f == "" {
+			out = append(out, o.Database)
+		}
+	}
+	return out
+}
+
 func recoveredNames(outcomes []dbJobOutcome) []string {
 	var out []string
 	for _, o := range outcomes {
@@ -246,6 +263,9 @@ func recoveredNames(outcomes []dbJobOutcome) []string {
 }
 
 func recoverLine(db string, res map[string]any) string {
+	if f, _ := res["follows"].(string); f != "" {
+		return db + ": following " + f + " again (" + fmt.Sprint(res["from"]) + ")"
+	}
 	line := db + ": recovered"
 	if res["phase"] == "ready" {
 		line = db + ": ready to inspect as " + fmt.Sprint(res["restoring"]) + "; vaire restore promote " + db + " finishes it"

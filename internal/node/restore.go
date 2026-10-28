@@ -354,6 +354,9 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 		}
 		res["phase"] = "promoted"
 		res["promoted"] = promoted
+		for _, w := range followersDiverged(env.Cluster, p.Database) {
+			res["warnings"] = append(warnings, w.Message)
+		}
 	} else if err := applyPoolers(ctx, env.Cluster, rt, env.Report); err != nil {
 		res["pooler_warning"] = "the session pooler was not reloaded, so vaire sql --db " + backup.RestoringName(p.Database) + " fails until vaire apply: " + err.Error()
 	}
@@ -539,6 +542,7 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 		warnings = append(warnings, w)
 		delete(data, "warning")
 	}
+	warnings = append(warnings, followersDiverged(env.Cluster, p.Database)...)
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
@@ -905,6 +909,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 			Message: p.Database + " is back, but " + err.Error() + "; run vaire apply, then vaire backup now --db " + p.Database + " --type full"})
 	}
 	steps.WriteMetrics(cfg)
+	warnings = append(warnings, followersDiverged(cfg, p.Database)...)
 	return Result{Data: data, Warnings: warnings}, nil
 }
 

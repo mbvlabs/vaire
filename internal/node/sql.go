@@ -35,16 +35,21 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// A follower's cluster holds its source's database and roles (Phase 6).
+	db := p.DB
+	if spec, err := clusterOf(env.Cluster, p.DB); err == nil {
+		db = spec.DatabaseName()
+	}
 	role := p.Role
 	if role == "" {
 		role = "ro"
 	}
-	user, err := sqlRoleUser(p.DB, role)
+	user, err := sqlRoleUser(db, role)
 	if err != nil {
 		return Result{}, err
 	}
 	if role == "migrate" {
-		user = p.DB + "_owner"
+		user = db + "_owner"
 	}
 	mode := "READ WRITE"
 	if !p.Write {
@@ -59,12 +64,12 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 		statement = fmt.Sprintf("BEGIN READ ONLY;\n%s\n;\nCOMMIT;\n", p.Query)
 	}
 	if p.Write {
-		if err := local.Exec(ctx, p.DB, statement, nil); err != nil {
+		if err := local.Exec(ctx, db, statement, nil); err != nil {
 			return Result{}, err
 		}
 		return Result{Data: map[string]any{"command_tag": "OK", "row_count": 0}}, nil
 	}
-	columns, rows, err := local.QueryRows(ctx, p.DB, statement, nil)
+	columns, rows, err := local.QueryRows(ctx, db, statement, nil)
 	if err != nil {
 		return Result{}, err
 	}
