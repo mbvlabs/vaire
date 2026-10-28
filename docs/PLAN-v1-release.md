@@ -10,15 +10,15 @@ Status, 2026-10-19: main live qualification for Phases 0–5 is complete, with e
   - every change reaches `1.x` and `master` through a pull request. A change targets the oldest branch it belongs on: a v1 fix targets `1.x`, work for an unreleased line targets `master`;
   - `1.x` is then merged up into `master` with a pull request, so every v1 fix reaches master without being copied. Nothing is cherry-picked in either direction;
   - breaking changes stay out of `1.x` once compatibility freezes at `v1.0.0` final. They ship on a later major line cut from master. During alpha, the documented compatibility caveats still apply.
-- **Version names:** v1 is an alpha, so `1.x` is tagged `v1.0.0-alpha.1`, `v1.0.0-alpha.2`, …, then `v1.0.0` when the formats freeze.
+- **Version names:** v1 is an alpha, so `1.x` is tagged `v1.0.0-alpha.1`, `v1.0.0-alpha.2`, …, then `v1.0.0-beta.1`, … once Phases 6 and 7 and activity history are on the line, then `v1.0.0` when the formats freeze.
 - **Release gate:** review the documented evidence limits and draft notes, commit the documentation with authorization, then separately authorize the v1 branch/tag and publication.
 - **Secrets export gets a gate:** `vaire secrets export` needs the master password or a TOTP code. If the secrets document is lost, it's lost; there's no bypass.
-- **Phases 6 and 7** merge into master after `1.x` is cut, one at a time. They never enter a v1 alpha: every `v1.0.0-alpha.N` and `v1.0.0` itself are Phases 0–5 only. Followers and extensions are intended for later v1 minor releases (from `v1.1.0`), not automatically v2; they enter `1.x` only after `v1.0.0` final, once approved, qualified and compatible with the v1 contract below. Because they are on master, they reach `1.x` by merging `master` into `1.x` (see promoting changes, below).
+- **v1.0.0 scope (decided 2026-10-28):** `v1.0.0` is Phases 0–7 plus local activity history. The published alphas (`v1.0.0-alpha.1`, `v1.0.0-alpha.2`) are Phases 0–5. Activity history, then Phase 6 and Phase 7, merge into master one at a time, each live-tested on edge. Master is then merged into `1.x` with a merge-commit pull request and tagged `v1.0.0-beta.1`. Betas replace the alphas from then on; `v1.0.0` final follows qualification of the betas. This supersedes the earlier plan to ship followers and extensions after final as `v1.1.0`.
 
 ### Version numbers and branches
 
 - Roadmap phase numbers do not determine release numbers; minor releases are sequential.
-- After `v1.0.0`, followers and extensions shipped together in the next feature release would normally be `v1.1.0`. Shipped in separate feature releases, they could be `v1.1.0` and `v1.2.0`; the order is not fixed here.
+- After `v1.0.0`, the next compatible feature release is `v1.1.0`, then `v1.2.0`, and so on.
 - A backward-compatible feature release increments the minor and resets the patch; a fixes-only release increments the patch (for example `v1.1.1`). Breaking changes require a new major after final. Alpha releases remain `v1.0.0-alpha.N` until the first final.
 - `1.x` is a moving branch; `v1.1.0`, `v1.1.1` and `v1.2.0` are immutable release tags on it. No minor or patch branch is needed by default. Maintaining an older minor independently would require a separately agreed support policy and tooling changes; the current tooling publishes one channel per major.
 
@@ -33,7 +33,7 @@ From `v1.0.0` final, every later `1.x` release keeps these working unchanged for
 
 What an upgrade may and may not require within the line:
 
-- **Allowed in a minor release:** a database restart, provided `vaire apply` asks for it with `--confirm <db>/restart`, does nothing until confirmed, and the release notes name it (Phase 6's `wal_level = replica` is the known case).
+- **Allowed in a minor release:** a database restart, provided `vaire apply` asks for it with `--confirm <db>/restart`, does nothing until confirmed, and the release notes name it (no known case after `v1.0.0`; Phase 6's `wal_level = replica` restart lands before final, in the beta).
 - **Breaking (major only):** anything that needs a rebuild, a fresh `server init`, a restore, a manual migration or editing a file by hand, or that changes data already stored.
 
 ## What exists today, and what the model needs
@@ -52,15 +52,18 @@ What an upgrade may and may not require within the line:
 - **Main live scenarios completed:** genuine existing-protected-policy upgrade, SQL/results/rollback, protected maintenance and interactive writes, secrets factor/refusal matrix, query/top filtering, CLI UX, idle tunnel and peer timeout, fresh bucket-backed init and database-free doctor, first database/full/verify, protected dump copy/promotion, genuine awaiting-recovery refusal, rebuild/recovery, local init and automatic lockdown revert with journal evidence.
 - **Live-discovered fixes published and retested:** `eaa1a73` (administrative query/top filtering) and `65c4f91` (backup service templates available before first recovery full). Latest code qualification: `edge-65c4f9157253`, edge workflow `39234654792` succeeded.
 - **Not claimed:** every historical fault-injection/checklist variant. Exact limitations, including imported-password authorization, forced handshake branches, handoff completion, telemetry freshness and final resumed DNS/TLS output, remain in the testing log and [draft release notes](RELEASE-v1.0.0-alpha.1.md).
-- **Excluded/deferred:** macOS live tests were excluded by the operator; cross-build passed. Actual stable publication is pending authorization. Major-upgrade design and Phases 6–7 are not part of this preparation.
+- **Excluded/deferred:** macOS live tests were excluded by the operator; cross-build passed. Major-upgrade design is not part of this preparation. Phases 6–7 and activity history were outside the alpha qualification; they are qualified for the beta.
 
 No unresolved reproducible code blocker remains from the main qualification run. Publication readiness still requires reviewing the stated limits and completing the cut checklist, not silently treating missing evidence as passed.
 
-## After the cut
+## Toward the beta
 
-- Merge Phase 6 into master (rebase, conflict resolution, its manual test), then Phase 7. Expect conflicts in node/methods.go, db.go, restore.go, recover.go, steps/postgres_roles.go, restarter.go and doctor.
-- Until `v1.0.0` final, v1 fixes target `1.x` and are merged up into master; Phases 6 and 7 stay on master only. After final, master (with Phases 6 and 7) is merged into `1.x` for `v1.1.0`, then qualified on the line.
-- Phase 6's `wal_level = replica` means a restart is pending on every database when upgrading to it. `vaire apply` asks with `--confirm <db>/restart`, and the release notes have to say so.
+1. Live-test activity history on edge (committed as `4df4665`).
+2. Merge Phase 6 into master (rebase, conflict resolution, its manual test), then Phase 7. Expect conflicts in node/methods.go, db.go, restore.go, recover.go, steps/postgres_roles.go, restarter.go and doctor.
+3. Open a pull request from `master` into `1.x` and merge it with a merge commit; tag `v1.0.0-beta.1` on `1.x` (with authorization) and qualify it as in the cut checklist.
+
+- Until then, v1 fixes still target `1.x` and are merged up into master.
+- Phase 6's `wal_level = replica` means a restart is pending on every database when upgrading from an alpha to the beta. `vaire apply` asks with `--confirm <db>/restart`, and the beta's release notes have to say so.
 
 ## Cut checklist
 
@@ -92,8 +95,8 @@ Only when the user asks: `git branch 1.x master && git push origin 1.x`. From th
 - **A v1 fix:** branch from `1.x`, open a pull request into `1.x`, merge it. Then open a merge-up pull request from `1.x` into `master` (`gh pr create --base master --head 1.x`) and merge it with a **merge commit**, never squash or rebase: the merge commit is what tells git the fix is already in master, so the next merge-up does not conflict on it again. Conflicts are resolved in the merge-up, against master's newer code.
 - **Merge up often:** after every fix, or at the latest before each tag on `1.x`, so master never falls far behind the line.
 - **Edge testing of a v1 fix:** the merge-up push to master publishes `edge-<sha>`, which carries the fix together with master's newer work. That tests the fix on edge, not the exact `1.x` tree; the release candidate itself is checked with a pre-release tag (below).
-- **Compatible features after final (Phases 6 and 7):** while master holds only work that is compatible with the v1 contract, bring it into the line with a pull request from `master` into `1.x`, also merged with a merge commit. Once master holds breaking work, this stops: from then on compatible v1 features target `1.x` directly (and are merged up), and breaking work stays on master for the next major.
-- **Qualifying a line release:** before a final or minor release, tag a pre-release on `1.x` (`v1.1.0-rc.1`) and run the manual tests against it. After `v1.0.0` a pre-release does not move the `1.x` or root channels, so it is installed explicitly from `/releases/<version>/`. Before final the alpha tags play this role.
+- **Compatible features after final:** while master holds only work that is compatible with the v1 contract, bring it into the line with a pull request from `master` into `1.x`, also merged with a merge commit. Once master holds breaking work, this stops: from then on compatible v1 features target `1.x` directly (and are merged up), and breaking work stays on master for the next major.
+- **Qualifying a line release:** before a final or minor release, tag a pre-release on `1.x` (`v1.1.0-rc.1`) and run the manual tests against it. After `v1.0.0` a pre-release does not move the `1.x` or root channels, so it is installed explicitly from `/releases/<version>/`. Before final the alpha and beta tags play this role.
 - Release notes name the features and fixes included in each release.
 
 ### Which channel an install follows
