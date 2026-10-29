@@ -1,14 +1,24 @@
 package node
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/render"
 	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/state"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 func followerCfg() config.Cluster {
@@ -210,5 +220,381 @@ func TestFollowerSlotState(t *testing.T) {
 		if got := followerSlotStateOf(test.rows); got != test.want {
 			t.Errorf("%s: %+v", name, got)
 		}
+	}
+}
+
+// A follower's configuration is applied one follower at a time, each run
+// limited to that follower and its own pending restarts: the source is never
+// in a follower's run, even with the server's restart token (R1-1).
+func TestApplyFollowerConfigsRunsEachFollowerAlone(t *testing.T) {
+	cfg := followerCfg()
+	cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: "app_follower2", Node: "db1", Port: 5435, Size: "small", StatementTimeout: "60s", Follows: "app"})
+	var runs []engine.Options
+	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+		runs = append(runs, opts)
+		return engine.ApplyData{Restarts: []engine.ClusterRestart{{Cluster: opts.DB}}}, nil, nil
+	}
+	defer func() { applyFollowerStep = engine.Apply }()
+	got, err := applyFollowerConfigs(context.Background(), cfg, engine.Runtime{}, "app", engine.Options{Confirm: engine.Confirmation{Server: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"app_follower", "app_follower2"}
+	if len(runs) != len(want) {
+		t.Fatalf("ran %d applies, want one per follower (%d)", len(runs), len(want))
+	}
+	for i, f := range want {
+		if runs[i].DB != f {
+			t.Errorf("run %d is for %q, want %q", i, runs[i].DB, f)
+		}
+		if !slices.Equal(runs[i].Only, []string{steps.ConfigStepID(f)}) {
+			t.Errorf("run %d selects %v, want only %s", i, runs[i].Only, steps.ConfigStepID(f))
+		}
+		if !runs[i].Confirm.Server {
+			t.Errorf("run %d lost the restart confirmation", i)
+		}
+	}
+	if got.Failed != "" || len(got.Restarts) != 2 {
+		t.Errorf("result %+v, want both followers restarted", got)
+	}
+}
+
+// A failed follower update stops the run: the next follower is not touched,
+// and the failure names the follower it was (Q1).
+func TestApplyFollowerConfigsStopsOnAFailure(t *testing.T) {
+	cfg := followerCfg()
+	cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: "app_follower2", Node: "db1", Port: 5435, Size: "small", StatementTimeout: "60s", Follows: "app"})
+	boom := errors.New("postgres-config-v1@app_follower: writing the rendered configuration: disk full")
+	var runs []string
+	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+		runs = append(runs, opts.DB)
+		if opts.DB == "app_follower" {
+			return engine.ApplyData{}, nil, boom
+		}
+		return engine.ApplyData{}, nil, nil
+	}
+	defer func() { applyFollowerStep = engine.Apply }()
+	got, err := applyFollowerConfigs(context.Background(), cfg, engine.Runtime{}, "app", engine.Options{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("got %v, want the follower's error", err)
+	}
+	if !slices.Equal(runs, []string{"app_follower"}) {
+		t.Errorf("ran %v, want the run to stop at app_follower", runs)
+	}
+	if got.Failed != "app_follower" {
+		t.Errorf("Failed %q, want app_follower", got.Failed)
+	}
+}
+
+// The dry run shows each follower's own configuration plan, with the floors
+// the source change renders and the restart it would take; a database that
+// does not follow the resized one stays out (R1-3).
+func TestFollowerPlansShowTheFloorChange(t *testing.T) {
+	cfg := followerCfg()
+	cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: "other", Node: "db1", Port: 5436, Size: "small", StatementTimeout: "60s", Stanza: "other-1a2b3c"})
+	rt := engine.Runtime{Host: hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}}
+	was, _ := cfg.ClusterByName("app")
+	was.Size = "small"
+	now, _ := cfg.ClusterByName("app")
+	plans, err := followerPlans(context.Background(), cfg, rt, "app", was, now, engine.Options{JournalPath: filepath.Join(t.TempDir(), "journal.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Follower != "app_follower" {
+		t.Fatalf("plans %+v, want app_follower only", plans)
+	}
+	if plans[0].Restart != engine.RestartRestart {
+		t.Errorf("restart %q, want a restart: the floors are postmaster settings", plans[0].Restart)
+	}
+	var step *engine.PlanStep
+	for i := range plans[0].Plan.Steps {
+		if id := plans[0].Plan.Steps[i].ID; strings.Contains(id, "other") || id == steps.ConfigStepID("app") {
+			t.Errorf("the follower's plan includes %s", id)
+		}
+		if plans[0].Plan.Steps[i].ID == steps.ConfigStepID("app_follower") {
+			step = &plans[0].Plan.Steps[i]
+		}
+	}
+	if step == nil || step.Action != "apply" {
+		t.Fatalf("plan %+v lacks an apply of app_follower's configuration", plans[0].Plan.Steps)
+	}
+	var conf string
+	for _, d := range step.Diffs {
+		if strings.HasSuffix(d.Path, render.FollowerConfName) {
+			conf = d.Diff
+		}
+	}
+	if !strings.Contains(conf, "max_connections = 100") {
+		t.Errorf("the plan does not render the source's max_connections floor:\n%s", conf)
+	}
+}
+
+// resizeFixture saves cfg as the node's cluster.toml and points the node's
+// records beside it, so db resize runs against the test's files.
+func resizeFixture(t *testing.T, cfg config.Cluster, size string, dryRun bool) (*Env, state.FileStore) {
+	t.Helper()
+	dir := t.TempDir()
+	store := state.FileStore{Path: filepath.Join(dir, "cluster.toml")}
+	oldState, oldRecords := followerState, backup.RecordsPath
+	followerState = func() state.Store { return store }
+	backup.RecordsPath = filepath.Join(dir, "records.json")
+	t.Cleanup(func() { followerState, backup.RecordsPath = oldState, oldRecords })
+	raw, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(raw); err != nil {
+		t.Fatal(err)
+	}
+	env := &Env{Cluster: cfg, Req: request("db.resize", map[string]any{"name": "app", "size": size})}
+	env.Req.DryRun = dryRun
+	return env, store
+}
+
+// A resize that would lower a follower's hot-standby floors is refused before
+// it saves or applies anything, in a dry run too (Q1a).
+func TestResizeRefusesADecreasedFollowerFloor(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		env, store := resizeFixture(t, followerLifecycleCfg(t, "app_follower"), "small", dryRun)
+		_, before, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		applies := 0
+		oldResize, oldFollower := applyResizeStep, applyFollowerStep
+		applyResizeStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
+			applies++
+			return engine.ApplyData{}, nil, nil
+		}
+		applyFollowerStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
+			applies++
+			return engine.ApplyData{}, nil, nil
+		}
+		_, err = handleDBResize(context.Background(), env)
+		applyResizeStep, applyFollowerStep = oldResize, oldFollower
+		if err == nil || reason(t, err) != "has_followers" {
+			t.Fatalf("dry run %v: got %v, want has_followers", dryRun, err)
+		}
+		var cliErr *output.CLIError
+		if !errors.As(err, &cliErr) || cliErr.Code != output.CodePrecondition || cliErr.ExitCode != output.ExitPrecondition {
+			t.Fatalf("dry run %v: %v is not a precondition error", dryRun, err)
+		}
+		details, _ := cliErr.Details.(map[string]any)
+		if details["database"] != "app" {
+			t.Errorf("details database %v", details["database"])
+		}
+		followers, _ := details["followers"].([]string)
+		if !slices.Contains(followers, "app_follower") {
+			t.Errorf("details followers %v", followers)
+		}
+		settings, _ := details["settings"].([]steps.FollowerFloorDrop)
+		found := false
+		for _, s := range settings {
+			if s.Follower == "app_follower" && s.Setting == "max_connections" && s.From == 100 && s.To == 30 {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("details settings %v lack app_follower max_connections 100 -> 30", settings)
+		}
+		if !strings.Contains(cliErr.Message, "hot-standby floors would fall") || !strings.Contains(cliErr.Hint, "vaire db follow app again") {
+			t.Errorf("message %q, hint %q", cliErr.Message, cliErr.Hint)
+		}
+		if applies != 0 {
+			t.Errorf("dry run %v: %d applies, want none", dryRun, applies)
+		}
+		_, after, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(before) != string(after) {
+			t.Errorf("dry run %v: the refusal saved cluster.toml", dryRun)
+		}
+	}
+}
+
+// Growth and a database without followers pass the floor-drop refusal; a mixed
+// change still falls on the setting that would drop (Q1a).
+func TestRefuseFollowerFloorDrop(t *testing.T) {
+	cfg := followerCfg()
+	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192}
+	large := cfg.Clusters[0] // app at large
+	small := large
+	small.Size = "small"
+	if err := refuseFollowerFloorDrop(cfg, "app", small, large, host); err != nil {
+		t.Fatalf("growth: %v", err)
+	}
+	if err := refuseFollowerFloorDrop(cfg, "app_follower", large, small, host); err != nil {
+		t.Fatalf("a database without followers: %v", err)
+	}
+	if err := refuseFollowerFloorDrop(cfg, "app", large, small, host); err == nil || reason(t, err) != "has_followers" {
+		t.Fatalf("shrink: %v, want has_followers", err)
+	}
+	was, now := large, large
+	was.Settings = map[string]string{"max_connections": "200"}
+	now.Settings = map[string]string{"max_connections": "100", "max_locks_per_transaction": "512"}
+	if err := refuseFollowerFloorDrop(cfg, "app", was, now, host); err == nil || reason(t, err) != "has_followers" {
+		t.Fatalf("mixed change: %v, want has_followers", err)
+	}
+}
+
+// The followers always run before the source, including an identical retry
+// after a follower update failed: the size is saved, but the source is not
+// applied until every follower succeeded (Q1a).
+func TestResizeAppliesFollowersFirstOnRetry(t *testing.T) {
+	cfg := followerLifecycleCfg(t, "app_follower")
+	cfg.Clusters[0].Size = "small"
+	env, store := resizeFixture(t, cfg, "medium", false)
+	var runs []string
+	followerRuns := 0
+	oldResize, oldFollower := applyResizeStep, applyFollowerStep
+	applyResizeStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+		if opts.DB == "app" {
+			runs = append(runs, "source")
+			return engine.ApplyData{Restarts: []engine.ClusterRestart{{Cluster: "app"}}}, nil, nil
+		}
+		runs = append(runs, "kernel")
+		return engine.ApplyData{}, nil, nil
+	}
+	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+		runs = append(runs, opts.DB)
+		followerRuns++
+		if followerRuns == 1 {
+			return engine.ApplyData{}, nil, errors.New("writing app_follower's 60-vaire-follower.conf: disk full")
+		}
+		return engine.ApplyData{Restarts: []engine.ClusterRestart{{Cluster: opts.DB}}}, nil, nil
+	}
+	defer func() { applyResizeStep, applyFollowerStep = oldResize, oldFollower }()
+
+	_, err := handleDBResize(context.Background(), env)
+	var followerErr *output.CLIError
+	if !errors.As(err, &followerErr) || !strings.Contains(followerErr.Error(), "app_follower") || !strings.Contains(followerErr.Hint, "run the same db resize again") {
+		t.Fatalf("failed follower update: %v", err)
+	}
+	if !slices.Equal(runs, []string{"kernel", "app_follower"}) {
+		t.Fatalf("first attempt ran %v, want the kernel and the follower only", runs)
+	}
+	saved, _, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Clusters[0].Size != "medium" {
+		t.Fatalf("the failed attempt saved size %q, want medium", saved.Clusters[0].Size)
+	}
+	// The identical request sees no size change; the followers still lead.
+	env.Cluster = saved
+	runs = nil
+	res, err := handleDBResize(context.Background(), env)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !slices.Equal(runs, []string{"kernel", "app_follower", "source"}) {
+		t.Fatalf("retry ran %v, want the follower before the source", runs)
+	}
+	data, _ := res.Data.(map[string]any)
+	apply, _ := data["apply"].(engine.ApplyData)
+	if len(apply.Restarts) != 2 || apply.Restarts[0].Cluster != "app_follower" || apply.Restarts[1].Cluster != "app" {
+		t.Errorf("restarts %+v, want app_follower then app", apply.Restarts)
+	}
+}
+
+// A follower whose restart is already pending counts as restarting in the
+// preview, even when its floors do not change, and the preview changes
+// neither the journal nor the configuration (R1-3).
+func TestFollowerPlansMarkAPendingRestart(t *testing.T) {
+	cfg := followerCfg()
+	rt := engine.Runtime{Host: hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}}
+	path := filepath.Join(t.TempDir(), "journal.json")
+	id := steps.ConfigStepID("app_follower")
+	var inputs []byte
+	for _, step := range engine.Expand(steps.Catalog(), cfg) {
+		if step.ID() == id {
+			var err error
+			inputs, err = step.Inputs(cfg, rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	journal := &engine.Journal{
+		Steps:          map[string]engine.JournalEntry{id: {Status: engine.StatusCompleted, InputsHash: engine.InputsHash(id, inputs)}},
+		RestartPending: []string{id},
+	}
+	if err := journal.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	journalBefore, err := os.ReadFile(path) //nolint:gosec // G304: the test's own temp journal.
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgBefore, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, _ := cfg.ClusterByName("app")
+	plans, err := followerPlans(context.Background(), cfg, rt, "app", spec, spec, engine.Options{JournalPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Follower != "app_follower" || plans[0].Restart != engine.RestartRestart {
+		t.Fatalf("plans %+v, want app_follower restarting", plans)
+	}
+	if plans[0].Plan.WouldApply != 0 {
+		t.Errorf("the preview would apply %d steps, want none", plans[0].Plan.WouldApply)
+	}
+	journalAfter, err := os.ReadFile(path) //nolint:gosec // G304: the test's own temp journal.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(journalBefore) != string(journalAfter) {
+		t.Error("the preview changed the journal")
+	}
+	cfgAfter, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cfgBefore) != string(cfgAfter) {
+		t.Error("the preview changed the configuration")
+	}
+}
+
+// A follower whose restart is deferred for lack of its token says its replay
+// may pause until it restarts (Q1a).
+func TestApplyFollowerConfigsExplainsADeferredRestart(t *testing.T) {
+	cfg := followerCfg()
+	old := applyFollowerStep
+	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+		id := steps.ConfigStepID(opts.DB)
+		return engine.ApplyData{RestartPending: []string{id}, ConfirmTokens: []string{opts.DB + "/restart"}},
+			[]output.Warning{{Code: "restart_pending", Message: "a restart is pending for " + id + "; re-run apply with --confirm " + opts.DB + "/restart"}}, nil
+	}
+	defer func() { applyFollowerStep = old }()
+	got, err := applyFollowerConfigs(context.Background(), cfg, engine.Runtime{}, "app", engine.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0].Message, "app_follower may pause replay until it restarts") ||
+		!strings.Contains(got.Warnings[0].Message, "PostgreSQL 18 pauses recovery") {
+		t.Fatalf("warnings %+v, want the replay pause", got.Warnings)
+	}
+}
+
+// A retried resize whose earlier follower write failed has the same old and
+// new entry, and no restart pending yet; the follower's file on disk still
+// lacks the new floors, so the preview still shows its restart (R1-3). This
+// host has no follower file, which is the failed write's case.
+func TestFollowerPlansShowARetrysRestart(t *testing.T) {
+	cfg := followerCfg()
+	rt := engine.Runtime{Host: hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}}
+	spec, _ := cfg.ClusterByName("app")
+	plans, err := followerPlans(context.Background(), cfg, rt, "app", spec, spec, engine.Options{JournalPath: filepath.Join(t.TempDir(), "journal.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Follower != "app_follower" || plans[0].Restart != engine.RestartRestart {
+		t.Fatalf("plans %+v, want app_follower restarting", plans)
+	}
+	if len(plans[0].Plan.RestartPending) != 0 {
+		t.Fatalf("restart pending %v, want none: the restart comes from the file", plans[0].Plan.RestartPending)
 	}
 }

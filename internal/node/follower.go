@@ -15,6 +15,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
@@ -216,6 +217,30 @@ func refuseSourceDrop(cfg config.Cluster, db string) error {
 		db+" has followers ("+strings.Join(followers, ", ")+"), so it can't be dropped", output.ExitPrecondition,
 		"Drop each follower first (vaire db drop "+f+" --confirm "+f+"), or make it independent (vaire db unfollow "+f+" --confirm "+f+"/unfollow).").
 		WithDetails(map[string]any{"reason": "has_followers", "database": db, "followers": followers})
+}
+
+// refuseFollowerFloorDrop refuses a resize that would lower a follower's
+// hot-standby floors (Phase 6, Q1a): until the follower restarts above the
+// source's old values its replay can pause, and a retry cannot order that
+// restart around the source.
+func refuseFollowerFloorDrop(cfg config.Cluster, db string, was, now config.ClusterSpec, host hostinfo.Info) error {
+	drops, err := steps.FollowerFloorDrops(cfg, db, was, now, host)
+	if err != nil {
+		return err
+	}
+	if len(drops) == 0 {
+		return nil
+	}
+	followers := cfg.FollowerNames(db)
+	falls := make([]string, 0, len(drops))
+	for _, d := range drops {
+		falls = append(falls, fmt.Sprintf("%s %s %d -> %d", d.Follower, d.Setting, d.From, d.To))
+	}
+	f := followers[0]
+	return output.NewError(output.CodePrecondition,
+		db+" has followers ("+strings.Join(followers, ", ")+") whose hot-standby floors would fall: "+strings.Join(falls, ", "), output.ExitPrecondition,
+		"Unfollow or drop "+f+" first (vaire db unfollow "+f+" --confirm "+f+"/unfollow, or vaire db drop "+f+" --confirm "+f+"), resize "+db+", then run vaire db follow "+db+" again.").
+		WithDetails(map[string]any{"reason": "has_followers", "database": db, "followers": followers, "settings": drops})
 }
 
 // unfollowToken is db.unfollow's confirm token: <follower>/unfollow.
@@ -1312,25 +1337,120 @@ func independent(name, stanza string) (config.Cluster, error) {
 
 // --- the source's followers ---
 
-// applyFollowerConfigs applies the configuration of db's followers, whose
-// hot-standby floors come from db's entry: before db's own steps when its
-// size changes (D6). A follower restarts only when confirm allows it; else
-// the warning restart_pending names its token.
-func applyFollowerConfigs(ctx context.Context, cfg config.Cluster, rt engine.Runtime, db string, confirm engine.Confirmation, report engine.Reporter) []output.Warning {
-	followers := cfg.FollowerNames(db)
-	if len(followers) == 0 {
-		return nil
+// followerConfigRun is one follower's configuration during db resize: that
+// follower's own step, and only that follower's pending restarts (Phase 6,
+// D6). The source's configuration and its pending restart stay out of it.
+// base carries the request's confirmation, restarter, report and journal;
+// Only and DB are the follower's.
+func followerConfigRun(f string, base engine.Options) engine.Options {
+	base.Only = []string{steps.ConfigStepID(f)}
+	base.DB = f
+	return base
+}
+
+// followerApplyResult is what db resize's follower runs did.
+type followerApplyResult struct {
+	Restarts []engine.ClusterRestart
+	Settled  []string
+	Warnings []output.Warning
+	// Failed is the follower whose update stopped the run.
+	Failed string
+}
+
+// applyFollowerStep is engine.Apply for a follower's run; a variable so tests
+// record the runs and their failures.
+var applyFollowerStep = engine.Apply
+
+// applyFollowerConfigs applies the configuration of db's followers, one
+// follower at a time, each run limited to that follower and its own pending
+// restarts, so db itself never restarts here. A follower restarts only when
+// the request's confirmation covers it; else the warning restart_pending
+// names its token and says its replay may pause. The first failure stops, and
+// is returned with the follower it was.
+func applyFollowerConfigs(ctx context.Context, cfg config.Cluster, rt engine.Runtime, db string, base engine.Options) (followerApplyResult, error) {
+	var out followerApplyResult
+	for _, f := range cfg.FollowerNames(db) {
+		data, warnings, err := applyFollowerStep(ctx, steps.Catalog(), cfg, rt, followerConfigRun(f, base))
+		out.Warnings = append(out.Warnings, followerReplayWarnings(warnings, f)...)
+		out.Restarts = append(out.Restarts, data.Restarts...)
+		out.Settled = append(out.Settled, data.RestartsSettled...)
+		if err != nil {
+			out.Failed = f
+			return out, err
+		}
 	}
-	ids := make([]string, 0, len(followers))
-	for _, f := range followers {
-		ids = append(ids, steps.ConfigStepID(f))
+	return out, nil
+}
+
+// followerReplayWarnings says what a deferred restart means for a follower:
+// PostgreSQL 18 pauses recovery when replay meets a parameter change whose
+// value is above the standby's own, and only a restart with the new floors
+// lets replay continue.
+func followerReplayWarnings(warnings []output.Warning, follower string) []output.Warning {
+	out := make([]output.Warning, 0, len(warnings))
+	for _, w := range warnings {
+		if w.Code == "restart_pending" {
+			w.Message += "; " + follower + " may pause replay until it restarts: PostgreSQL 18 pauses recovery when replay meets a parameter change above the standby's own value"
+		}
+		out = append(out, w)
 	}
-	_, warnings, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: ids, Confirm: confirm, Restarter: steps.Restarter(cfg), Report: report})
-	if err != nil {
-		return []output.Warning{{Code: "other_config_failed",
-			Message: "the configuration of " + strings.Join(followers, ", ") + " was not updated for " + db + "'s new size: " + err.Error() + "; run vaire apply"}}
+	return out
+}
+
+// followerPlan is one of db's followers in a resize dry run, with the plan
+// of its own configuration and the restart it would take (Phase 6, D6).
+type followerPlan struct {
+	Follower string `json:"follower"`
+	// Restart is "restart" when the new floors change a postmaster setting
+	// the follower applies only at its start, or when its restart is already
+	// pending; "none" otherwise.
+	Restart engine.RestartNeed `json:"restart"`
+	Plan    engine.PlanData    `json:"plan"`
+}
+
+// followerFloorsOnDiskDiffer reports whether plan would rewrite follower's
+// 60-vaire-follower.conf with other floor values than the file on disk has:
+// a retried resize whose earlier follower write failed has the same old and
+// new entry, yet the follower still restarts.
+func followerFloorsOnDiskDiffer(plan engine.PlanData, follower string) bool {
+	for _, s := range plan.Steps {
+		for _, d := range s.Diffs {
+			if d.Path == steps.FollowerConfPath(follower) && steps.FloorsDiffer(d.Diff) {
+				return true
+			}
+		}
 	}
-	return warnings
+	return false
+}
+
+// followerPlans plans db's followers' configuration as db resize applies it:
+// one follower at a time, each limited to that follower's own step and
+// pending restarts. Only an affected follower is listed, one whose
+// configuration step would run or that has a restart pending, with the
+// rendered floor change and the restart it would take.
+func followerPlans(ctx context.Context, cfg config.Cluster, rt engine.Runtime, db string, was, now config.ClusterSpec, base engine.Options) ([]followerPlan, error) {
+	names := cfg.FollowerNames(db)
+	out := make([]followerPlan, 0, len(names))
+	for _, f := range names {
+		data, err := engine.Plan(ctx, steps.Catalog(), cfg, rt, followerConfigRun(f, base))
+		if err != nil {
+			return nil, err
+		}
+		if data.WouldApply == 0 && len(data.RestartPending) == 0 {
+			continue
+		}
+		spec, _ := cfg.ClusterByName(f)
+		changed, err := steps.FollowerFloorsChange(cfg, spec, was, now, rt.Host)
+		if err != nil {
+			return nil, err
+		}
+		restart := engine.RestartNone
+		if changed || len(data.RestartPending) > 0 || followerFloorsOnDiskDiffer(data, f) {
+			restart = engine.RestartRestart
+		}
+		out = append(out, followerPlan{Follower: f, Restart: restart, Plan: data})
+	}
+	return out, nil
 }
 
 // followersDiverged is the warning restore promote and undo give a source

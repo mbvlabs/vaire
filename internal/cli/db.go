@@ -275,9 +275,10 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	var data struct {
-		Database config.ClusterSpec `json:"database"`
-		Plan     *engine.PlanData   `json:"plan,omitempty"`
-		Apply    *engine.ApplyData  `json:"apply,omitempty"`
+		Database  config.ClusterSpec   `json:"database"`
+		Plan      *engine.PlanData     `json:"plan,omitempty"`
+		Apply     *engine.ApplyData    `json:"apply,omitempty"`
+		Followers []resizeFollowerPlan `json:"followers,omitempty"`
 	}
 	if err := reply.Decode(&data); err != nil {
 		return err
@@ -285,7 +286,7 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	summary := sizeSummary(cfg, data.Database)
 	if data.Plan != nil {
 		return output.Success(cmd, output.Result{Data: data, Warnings: warnings,
-			Message: fmt.Sprintf("dry run: would resize %s to %s; %d of %d steps would apply", name, summary, data.Plan.WouldApply, data.Plan.Total)})
+			Message: resizePreviewMessage(name, summary, *data.Plan, data.Followers)})
 	}
 	message := fmt.Sprintf("resized %s to %s", name, summary)
 	var next []string
@@ -299,6 +300,35 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
+}
+
+// resizeFollowerPlan is one of the resized database's followers in a resize
+// preview: its own configuration plan and the restart it would take.
+type resizeFollowerPlan struct {
+	Follower string             `json:"follower"`
+	Restart  engine.RestartNeed `json:"restart"`
+	Plan     engine.PlanData    `json:"plan"`
+}
+
+// resizePreviewMessage is the human summary of a resize preview, the
+// followers included: they change before the source (Phase 6, Q1a).
+func resizePreviewMessage(name, summary string, plan engine.PlanData, followers []resizeFollowerPlan) string {
+	if len(followers) == 0 {
+		return fmt.Sprintf("dry run: would resize %s to %s; %d of %d steps would apply", name, summary, plan.WouldApply, plan.Total)
+	}
+	steps := func(cluster string, p engine.PlanData) string {
+		return fmt.Sprintf("%s (%d of %d steps)", cluster, p.WouldApply, p.Total)
+	}
+	parts := make([]string, 0, len(followers))
+	for _, f := range followers {
+		part := steps(f.Follower, f.Plan)
+		if f.Restart == engine.RestartRestart {
+			part += " and restarts"
+		}
+		parts = append(parts, part)
+	}
+	return fmt.Sprintf("dry run: would resize %s to %s; the followers first: %s; then %s",
+		name, summary, strings.Join(parts, ", "), steps(name, plan))
 }
 
 // shownOnceNote follows every printed database password.

@@ -72,7 +72,18 @@ Reviewer artifact `a76bf826-0706-45e2-8793-8bcc41e444a4_reviewer_output.md` conf
 - **R2-1 partial configuration directories:** artifact discovery checks `postgresql.conf`, but the constructor refuses any existing config directory. Interrupted registration/cleanup can leave an owned directory with no postgresql.conf or data; retry skips cleanup and can clear ownership on constructor failure, stranding it. Track directory presence separately from valid registration, clean only proven-owned directories, retain ownership while any owned artefacts remain. Test owned and foreign directory-only cases through public admission and build.
 - **R2-6 new regression, Major, open:** fresh-copy constructor failure after slot creation returns without slot cleanup. Normal follow then removes its desired-state entry, orphaning a WAL-retaining slot. Restore bounded cleanup for normal follow and fresh recovery constructor failures; do not drop retained slot for completed-copy resume. Test exhausted-port/constructor failure and cleanup error propagation with no foreign local deletion.
 
-No lifecycle changes have been committed. This batch has needed repeated corrections despite passing local checks; pause for operator direction before another worker attempt.
+The operator authorised one more narrow attempt.
+
+### Third and fourth lifecycle re-reviews
+
+Reviewer artifact `ab7f261c-fe0f-4a1e-90cc-5ae99b8c9843_reviewer_output.md` confirms the partial configuration directory fix, R2-6 and R2-2 through R2-5. It found two more issues, both since fixed:
+
+- **P1:** `wal_status=unreserved` was treated as reusable. Only `reserved` or `extended` with a restart position is reusable now; every other status takes the owned recopy path.
+- **P2:** the recover dry run promised `resume=true` without reading the slot. The preview now reads the slot without changing it, reports `recopy_reason`, and sets `resume_conditional` when the slot cannot be read.
+
+The final focused review could not run: the `gpt-6.1-sol` quota was exhausted. The orchestrator reviewed this last delta, the full verification passed, and the operator approved committing on that basis. The U6 whole-branch review covers it again.
+
+**Status:** R2-1 through R2-6 fixed in the lifecycle commit. No live evidence yet; the manual test must kill recovery inside the copy, inside adoption and before the adopted marker, and exercise an `unreserved` slot.
 
 ## U4 batching after decisions
 
@@ -84,3 +95,37 @@ One writer at a time in the phase worktree; no push/deploy. Each batch gets full
 4. **Visibility:** R4-1 through R4-6 and approved Q3 semantics.
 
 Source reports remain available in session artifacts: R1 `38e2efb4-3abd-4649-8c0c-8123b20c4a93`, R2 `b576965c-3c40-4337-8db4-1a09c617d222`, R3 `acdec093-27c3-4869-b6c7-aa48b7eb14db`, R4 `817cb363-f379-4df6-8b75-f5ca833fb43c` (each `_reviewer_output.md`).
+
+## U4 configuration re-review record
+
+The lifecycle batch is committed as `0511ecf`.
+
+Reviewer artifact `258a321c-12f0-4b12-86db-973985313370_reviewer_output.md` reviewed the first configuration fix. Verdict: BLOCK.
+
+- **R1-1:** fixed. Each follower runs with `Only` and `DB`, so a follower update never restarts its source.
+- **R1-2:** partial. The parser rejects valid PG18 fractions such as `0.6` and `010.5`. It must match `parse_int`: integer first, then the whole value as a float when parsing stops at `.`, `e` or `E`, or overflows.
+- **R1-3:** partial. A follower restart that is already pending is missing from the human preview.
+- **Q1, retry:** partial. A retried resize after a failed follower update sees no size change and goes source first.
+- **Q1, decrease:** partial. Doing the source first does not make lowering a follower safe. Until the follower replays the source's parameter change, its control file still requires the old, higher values, and it fails recovery at startup with lower ones.
+- `applyOtherConfigs` clears its confirmations, so it does not have the R1-1 defect.
+
+### Decision Q1a (operator, supersedes the decrease half of Q1)
+
+`db resize` refuses any change that would lower a follower's hot-standby floors, with reason `has_followers`. To shrink such a source, unfollow or drop the follower, shrink, then run `db follow` again.
+
+Because a resize can no longer lower a follower's floors, it always applies the followers first, which also fixes the retry order. A deferred follower restart lets the source proceed with `restart_pending`, and that warning says replay may pause until the follower restarts.
+
+Known limitation, documented in U5: a hand edit to the floor settings in `cluster.toml` followed by plain `vaire apply` is not ordered. Run `vaire apply --db <follower>` first.
+
+### Second configuration re-review
+
+The second worker's runner crashed after it finished, because the per-user `/tmp` quota was full. The orchestrator verified its edits. The first re-review run died on the same quota; stale `go-build*` directories were removed and the review was rerun.
+
+Reviewer artifact `8238b7f1-b362-4e2a-a6ed-c971ae43b901_reviewer_output.md`: verdict PASS with notes. R1-1 and Q1/Q1a passed. R1-2 and R1-3 each had one minor gap, which the orchestrator fixed:
+
+- **R1-2:** Go's `ParseFloat` returns zero without an error on underflow, where `strtod` reports `ERANGE` and PostgreSQL rejects the value. A nonzero literal that comes out zero or subnormal is now rejected; `0e-400` is still zero.
+- **R1-3:** a dry run of a retried resize, after a failed follower write, has the same old and new entry and no pending restart, so it said no restart. The preview now also counts a restart when the planned `60-vaire-follower.conf` diff changes a floor's value; a changed reason alone does not count.
+
+The reviewer noted, outside this batch: a follower's own resize and a new follow are not guarded by Q1a. Both are pre-existing; floors take the larger of the follower's and the source's values, so a follower's own resize cannot go below its source.
+
+**Status:** R1-1, R1-2, R1-3, Q1 and Q1a fixed in the configuration commit. No live evidence yet.

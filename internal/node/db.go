@@ -764,12 +764,17 @@ type dbResizeParams struct {
 	AllowOvercommit bool `json:"allow_overcommit,omitempty"`
 }
 
+// applyResizeStep is engine.Apply for db resize's kernel and source runs; a
+// variable so tests record their order beside the followers' runs.
+var applyResizeStep = engine.Apply
+
 // handleDBResize changes a database's size or memory (RFC 7.4). The cgroup
 // limits and reload-only settings change live; shared_buffers,
 // max_connections and huge_pages wait for <db>/restart, or stay pending
 // with defer_restart. A size that could not start is refused, and so is a
 // larger size that overcommits the server unless allow_overcommit; shrinking
-// below what the cluster uses now is a warning.
+// below what the cluster uses now is a warning. A resize that would lower a
+// follower's hot-standby floors is refused (Q1a).
 func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	var p dbResizeParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -781,7 +786,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err := restoreInProgress(p.Name, "db resize"); err != nil {
 		return Result{}, err
 	}
-	store := state.FileStore{}
+	store := followerState()
 	cfg, _, err := store.Load()
 	if err != nil {
 		return Result{}, err
@@ -801,6 +806,10 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if old.Protected && ResizeShrinks(cfg, old, resized) {
 		return Result{}, protectedError(p.Name, "shrinking it")
 	}
+	rt := runtimeFor(env, env.Req.DryRun)
+	if err := refuseFollowerFloorDrop(cfg, p.Name, old, resized, rt.Host); err != nil {
+		return Result{}, err
+	}
 	for i := range cfg.Clusters {
 		if cfg.Clusters[i].Name == p.Name {
 			cfg.Clusters[i] = resized
@@ -809,7 +818,6 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err := cfg.Validate(); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
-	rt := runtimeFor(env, env.Req.DryRun)
 	freed := 0
 	if before := demandFor(env.Cluster, old, rt.Host); before.Running {
 		freed = before.SharedMemoryMiB
@@ -833,8 +841,15 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Data: map[string]any{"database": resized, "plan": data},
-			Warnings: append(warnings, oversubscriptionWarnings(cfg, rt.Host)...)}, nil
+		followers, err := followerPlans(ctx, cfg, rt, p.Name, old, resized, engine.Options{})
+		if err != nil {
+			return Result{}, err
+		}
+		out := map[string]any{"database": resized, "plan": data}
+		if len(followers) > 0 {
+			out["followers"] = followers
+		}
+		return Result{Data: out, Warnings: append(warnings, oversubscriptionWarnings(cfg, rt.Host)...)}, nil
 	}
 	raw, err := cfg.Encode()
 	if err != nil {
@@ -844,17 +859,22 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	// The huge-page pool follows the new sum before the cluster restarts.
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
+	if _, _, err := applyResizeStep(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
 		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
 	confirm := restartConfirmation(cfg, env.Req)
 	if p.DeferRestart {
 		confirm = engine.Confirmation{}
 	}
-	// Its followers' hot-standby floors follow its new size (Phase 6, D6):
-	// their configuration goes first, restarted only with their own token.
-	warnings = append(warnings, applyFollowerConfigs(ctx, cfg, rt, p.Name, confirm, env.Report)...)
-	data, applyWarnings, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
+	// Resize never lowers a follower's floors (Q1a), so the followers always
+	// take the source's new values first, even on a retry after a follower
+	// update failed (Phase 6, Q1, D6).
+	base := engine.Options{Confirm: confirm, Restarter: steps.Restarter(cfg), Report: env.Report}
+	followers, err := applyFollowerConfigs(ctx, cfg, rt, p.Name, base)
+	if err != nil {
+		return Result{}, withHint(err, "The new size is saved and "+p.Name+" is not updated yet. Fix "+followers.Failed+", then run the same db resize again.")
+	}
+	data, applyWarnings, err := applyResizeStep(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		DB:        p.Name,
 		Confirm:   confirm,
 		Restarter: steps.Restarter(cfg),
@@ -863,7 +883,11 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
-	warnings = append(append(warnings, applyWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
+	sourceRestarts := len(data.Restarts)
+	// The restarts are listed in the order they ran: the followers' first.
+	data.Restarts = append(followers.Restarts, data.Restarts...)
+	data.RestartsSettled = append(followers.Settled, data.RestartsSettled...)
+	warnings = append(append(append(warnings, followers.Warnings...), applyWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
 	// A deferred restart runs at the start of the maintenance window
 	// (maint-daily, Phase 4 D11); one done now clears an older deferral.
 	out := map[string]any{"database": resized, "apply": data}
@@ -871,7 +895,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	case p.DeferRestart && len(data.RestartPending) > 0:
 		recordDeferred(p.Name)
 		out["deferred_to_window"] = env.Cluster.Maintenance.Window
-	case len(data.Restarts) > 0:
+	case sourceRestarts > 0:
 		clearDeferred(p.Name)
 	}
 	return Result{Data: out, Warnings: warnings}, nil
