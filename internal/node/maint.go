@@ -381,6 +381,15 @@ type maintKillParams struct {
 	OlderThan string `json:"older_than,omitempty"`
 }
 
+// maintKillAdminPG and maintKillClusterPG are handleMaintKill's connections
+// to the database's cluster: vaire_admin's, and the superuser's for a
+// protected database. Variables so a test sees which database each query
+// names.
+var (
+	maintKillAdminPG   = func(spec config.ClusterSpec) sqlRunner { return steps.AdminPG(spec) }
+	maintKillClusterPG = func(spec config.ClusterSpec) sqlRunner { return steps.ClusterPG(spec) }
+)
+
 // killToken is vaire maint kill's confirm token: <db>/kill (Phase 4 D12).
 func killToken(_ config.Cluster, params json.RawMessage) string {
 	var p maintKillParams
@@ -416,8 +425,10 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 		}
 		opts.OlderThanSecond = int64(d.Seconds())
 	}
-	local := steps.AdminPG(spec)
-	rows, err := local.Query(ctx, p.DB, maint.KillCandidatesSQL, nil)
+	// The cluster holds spec.DatabaseName(), which is its source's name for a
+	// follower: p.DB only names the cluster, in the token and the output.
+	local := maintKillAdminPG(spec)
+	rows, err := local.Query(ctx, spec.DatabaseName(), maint.KillCandidatesSQL, nil)
 	if err != nil {
 		return Result{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
@@ -444,9 +455,9 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	}
 	killer, terminate := local, maint.TerminateSQL(pids)
 	if spec.Protected {
-		killer, terminate = steps.ClusterPG(spec), "SET ROLE pg_signal_backend;\n"+terminate
+		killer, terminate = maintKillClusterPG(spec), "SET ROLE pg_signal_backend;\n"+terminate
 	}
-	out, err := killer.Query(ctx, p.DB, terminate, nil)
+	out, err := killer.Query(ctx, spec.DatabaseName(), terminate, nil)
 	if err != nil {
 		return Result{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}

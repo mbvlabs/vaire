@@ -57,6 +57,8 @@ func TestRefuseFollower(t *testing.T) {
 		request("backup.verify", map[string]any{"database": "app_follower"}),
 		request("backup.list", map[string]any{"database": "app_follower"}),
 		request("restore.start", map[string]any{"database": "app_follower"}),
+		request("restore.promote", map[string]any{"database": "app_follower"}),
+		request("restore.undo", map[string]any{"database": "app_follower"}),
 		request("restore.drill", map[string]any{"database": "app_follower"}),
 		request("dump.create", map[string]any{"database": "app_follower"}),
 		request("db.fork", map[string]any{"source": "app_follower", "name": "x"}),
@@ -89,6 +91,35 @@ func TestRefuseFollower(t *testing.T) {
 	for _, req := range allowed {
 		if err := refuseFollower(req, cfg); err != nil {
 			t.Errorf("%s is refused: %v", req.Method, err)
+		}
+	}
+}
+
+// A protected follower is refused with is_follower and its source, not with
+// database_protected: the dispatcher asks refuseFollower before the method's
+// own protection check, for restore promote and undo too (D9, R3-2).
+func TestRefuseFollowerRestorePromoteAndUndo(t *testing.T) {
+	cfg := followerCfg()
+	for i := range cfg.Clusters {
+		if cfg.Clusters[i].Name == "app_follower" {
+			cfg.Clusters[i].Protected = true
+		}
+	}
+	for _, method := range []string{"restore.promote", "restore.undo"} {
+		err := refuseFollower(request(method, map[string]any{"database": "app_follower"}), cfg)
+		var ce *output.CLIError
+		if !errors.As(err, &ce) || ce.Code != output.CodePrecondition {
+			t.Fatalf("%s on a protected follower: %v", method, err)
+		}
+		details, _ := ce.Details.(map[string]any)
+		if details["reason"] != "is_follower" || details["database"] != "app_follower" || details["source"] != "app" {
+			t.Fatalf("%s: details %v", method, details)
+		}
+		if !strings.Contains(ce.Message, "app_follower is a follower of app") || !strings.Contains(ce.Hint, "vaire db unfollow app_follower") {
+			t.Fatalf("%s: message %q, hint %q", method, ce.Message, ce.Hint)
+		}
+		if err := refuseFollower(request(method, map[string]any{"database": "app"}), cfg); err != nil {
+			t.Fatalf("%s on the source: %v", method, err)
 		}
 	}
 }
@@ -137,6 +168,82 @@ func TestFollowerSpecAndCommand(t *testing.T) {
 	}
 	if got := followCommand(dbFollowParams{Source: "app", Name: "f"})("small"); got != "vaire db follow app --name f --size small" {
 		t.Fatalf("suggested command %q", got)
+	}
+}
+
+// Q2: protection is not inherited. A follower made from a protected source
+// is unprotected; the operator protects the copy independently if it should
+// be, and the source stays as it was.
+func TestFollowDoesNotInheritProtection(t *testing.T) {
+	cfg := followerCfg()
+	for i := range cfg.Clusters {
+		if cfg.Clusters[i].Name == "app" {
+			cfg.Clusters[i].Protected = true
+		}
+	}
+	src, _ := cfg.ClusterByName("app")
+	spec := followerSpec(src, "app_follower", "")
+	if spec.Protected {
+		t.Fatalf("the follower inherited the source's protection: %+v", spec)
+	}
+	if !src.Protected {
+		t.Fatal("following changed the source's protection")
+	}
+}
+
+// Q2: the database an unfollow leaves keeps its own protection and never the
+// old source's: a copy made from a protected source stays unprotected, while
+// one the operator protected itself stays protected.
+func TestUnfollowKeepsNoInheritedProtection(t *testing.T) {
+	for _, ownProtection := range []bool{false, true} {
+		name := "protection from the follow only"
+		if ownProtection {
+			name = "protected by the operator"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := followerLifecycleCfg(t, "app_follower")
+			for i := range cfg.Clusters {
+				switch cfg.Clusters[i].Name {
+				case "app":
+					cfg.Clusters[i].Protected = true
+				case "app_follower":
+					cfg.Clusters[i].Protected = ownProtection
+				}
+			}
+			dir := t.TempDir()
+			store := state.FileStore{Path: filepath.Join(dir, "cluster.toml")}
+			old := followerState
+			followerState = func() state.Store { return store }
+			t.Cleanup(func() { followerState = old })
+			raw, err := cfg.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Save(raw); err != nil {
+				t.Fatal(err)
+			}
+			stanza, err := config.NewStanza("app_follower")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := independent("app_follower", stanza); err != nil {
+				t.Fatal(err)
+			}
+			updated, _, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f, _ := updated.ClusterByName("app_follower")
+			if f.Follows != "" || f.Stanza != stanza {
+				t.Fatalf("unfollowed %+v", f)
+			}
+			if f.Protected != ownProtection {
+				t.Fatalf("the unfollowed copy has protected=%v, want %v", f.Protected, ownProtection)
+			}
+			if src, _ := updated.ClusterByName("app"); !src.Protected {
+				t.Fatal("unfollow cleared the source's protection")
+			}
+		})
 	}
 }
 

@@ -354,9 +354,10 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 		}
 		res["phase"] = "promoted"
 		res["promoted"] = promoted
-		for _, w := range followersDiverged(env.Cluster, p.Database) {
-			res["warnings"] = append(warnings, w.Message)
-		}
+		// A restored source opens on a new timeline, so its followers stop
+		// following it (D12). They stay structured warnings: the CLI forwards
+		// their followers_diverged code, not the dump warnings' label.
+		res["follower_warnings"] = followersDiverged(env.Cluster, p.Database)
 	} else if err := applyPoolers(ctx, env.Cluster, rt, "", env.Report); err != nil {
 		res["pooler_warning"] = "the session pooler was not reloaded, so vaire sql --db " + backup.RestoringName(p.Database) + " fails until vaire apply: " + err.Error()
 	}

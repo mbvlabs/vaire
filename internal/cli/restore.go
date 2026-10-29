@@ -48,6 +48,41 @@ func kitTarget(k *contexts.BackupCreds) backup.Target {
 	return backup.Target{Endpoint: k.Endpoint, Region: k.Region, Bucket: k.Bucket, Prefix: k.Prefix, URIStyle: k.URIStyle, KeyID: k.AccessKeyID, Secret: k.SecretAccessKey}
 }
 
+// restoreJobResult is the restore.start job's result, as the restore command
+// reads it back.
+type restoreJobResult struct {
+	Phase     string   `json:"phase"`
+	Restoring string   `json:"restoring"`
+	Warnings  []string `json:"warnings"`
+	// FollowerWarnings are a combined --promote's structured warnings, such
+	// as followers_diverged (D12): they keep their code.
+	FollowerWarnings []output.Warning `json:"follower_warnings"`
+	PoolerWarning    string           `json:"pooler_warning"`
+	Promoted         struct {
+		Warning *output.Warning `json:"warning"`
+		Stanza  string          `json:"stanza"`
+	} `json:"promoted"`
+}
+
+// restoreWarnings is the restore command's warning list: the run's own and
+// the reply's, the job's dump warnings (sentences, so labelled
+// restore_dump_errors) and the job's structured warnings, which keep the code
+// the node gave them.
+func restoreWarnings(own, reply []output.Warning, res restoreJobResult) []output.Warning {
+	warnings := append(own, reply...)
+	for _, w := range res.Warnings {
+		warnings = append(warnings, output.Warning{Code: "restore_dump_errors", Message: w})
+	}
+	warnings = append(warnings, res.FollowerWarnings...)
+	if res.PoolerWarning != "" {
+		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: res.PoolerWarning})
+	}
+	if res.Promoted.Warning != nil {
+		warnings = append(warnings, *res.Promoted.Warning)
+	}
+	return warnings
+}
+
 func runRestore(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return parentRun(cmd, args)
@@ -134,30 +169,12 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		}
 		return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
 	}
-	var res struct {
-		Phase         string   `json:"phase"`
-		Restoring     string   `json:"restoring"`
-		Warnings      []string `json:"warnings"`
-		PoolerWarning string   `json:"pooler_warning"`
-		Promoted      struct {
-			Warning *output.Warning `json:"warning"`
-			Stanza  string          `json:"stanza"`
-		} `json:"promoted"`
-	}
+	res := restoreJobResult{}
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
-	warnings := append(s.warnings, reply.Warnings...)
-	for _, w := range res.Warnings {
-		warnings = append(warnings, output.Warning{Code: "restore_dump_errors", Message: w})
-	}
-	if res.PoolerWarning != "" {
-		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: res.PoolerWarning})
-	}
-	if res.Promoted.Warning != nil {
-		warnings = append(warnings, *res.Promoted.Warning)
-	}
+	warnings := restoreWarnings(s.warnings, reply.Warnings, res)
 	if res.Phase == "promoted" {
 		return output.Success(cmd, output.Result{
 			Data:     map[string]any{"job_id": jr.JobID, "result": res},
@@ -279,7 +296,7 @@ func restoreAction(cmd *cobra.Command, db, method, token, action string, done fu
 		if err != nil {
 			return err
 		}
-		if err := node.CheckNotProtected(cfg, db, action); err != nil {
+		if err := restorePreflight(cfg, db, method, action); err != nil {
 			return err
 		}
 	}
@@ -302,6 +319,16 @@ func restoreAction(cmd *cobra.Command, db, method, token, action string, done fu
 		msg = "dry run: " + method + " " + db + " would run"
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
+}
+
+// restorePreflight is what restoreAction refuses before it asks for the
+// token: a follower first, with the node's is_follower error, then a
+// protected database.
+func restorePreflight(cfg config.Cluster, db, method, action string) error {
+	if err := node.RefuseFollowerMethod(cfg, method, map[string]string{"database": db}); err != nil {
+		return err
+	}
+	return node.CheckNotProtected(cfg, db, action)
 }
 
 func runRestorePromote(cmd *cobra.Command, args []string) error {

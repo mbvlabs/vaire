@@ -174,15 +174,17 @@ type followerRefusal struct {
 // database (D9). db.follow of a follower is refused by its handler, with
 // follows_follower.
 var followerRefused = map[string]followerRefusal{
-	"backup.now":     {action: "a backup", field: "database"},
-	"backup.verify":  {action: "a verify", field: "database"},
-	"backup.list":    {action: "listing backups", field: "database"},
-	"restore.start":  {action: "a restore", field: "database"},
-	"restore.drill":  {action: "a restore drill", field: "database"},
-	"dump.create":    {action: "a dump", field: "database"},
-	"db.fork":        {action: "a fork", field: "source"},
-	"maint.run":      {action: "maintenance", field: "db"},
-	"db.credentials": {action: "rotating its credentials", field: "name", applies: func(p map[string]any) bool { r, _ := p["rotate"].(bool); return r }},
+	"backup.now":      {action: "a backup", field: "database"},
+	"backup.verify":   {action: "a verify", field: "database"},
+	"backup.list":     {action: "listing backups", field: "database"},
+	"restore.start":   {action: "a restore", field: "database"},
+	"restore.promote": {action: "a restore promote", field: "database"},
+	"restore.undo":    {action: "a restore undo", field: "database"},
+	"restore.drill":   {action: "a restore drill", field: "database"},
+	"dump.create":     {action: "a dump", field: "database"},
+	"db.fork":         {action: "a fork", field: "source"},
+	"maint.run":       {action: "maintenance", field: "db"},
+	"db.credentials":  {action: "rotating its credentials", field: "name", applies: func(p map[string]any) bool { r, _ := p["rotate"].(bool); return r }},
 }
 
 // refuseFollower refuses req when its method needs a stanza or a writable
@@ -204,6 +206,17 @@ func refuseFollower(req rpc.Request, cfg config.Cluster) error {
 		return followerError(spec, r.action)
 	}
 	return nil
+}
+
+// RefuseFollowerMethod is refuseFollower for the CLI, which refuses a method
+// on a follower before it checks protection or asks for a confirmation,
+// with the same is_follower error the node gives.
+func RefuseFollowerMethod(cfg config.Cluster, method string, params any) error {
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	return refuseFollower(rpc.Request{Method: method, Params: raw}, cfg)
 }
 
 // refuseSourceDrop refuses dropping a database that has followers (D11).

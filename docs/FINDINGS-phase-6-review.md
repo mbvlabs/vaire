@@ -129,3 +129,13 @@ Reviewer artifact `8238b7f1-b362-4e2a-a6ed-c971ae43b901_reviewer_output.md`: ver
 The reviewer noted, outside this batch: a follower's own resize and a new follow are not guarded by Q1a. Both are pre-existing; floors take the larger of the follower's and the source's values, so a follower's own resize cannot go below its source.
 
 **Status:** R1-1, R1-2, R1-3, Q1 and Q1a fixed in the configuration commit. No live evidence yet.
+
+## U4 guards re-review record
+
+Reviewer artifact `dbc72399-c077-4f0d-85e3-d2597fa436a4_reviewer_output.md`: R3-1, R3-3 and R3-4 fixed. R3-2 was partial: the node refused `restore.promote` and `restore.undo` on a follower, but the CLI checked protection and asked for the token first, so a protected follower answered `database_protected`. The orchestrator fixed it: `restoreAction` refuses a follower first with the node's own `is_follower` error (`node.RefuseFollowerMethod`), tested for both methods on protected and unprotected followers.
+
+- R3-1: other maintenance paths already use `DatabaseName()`, refuse followers or skip them.
+- R3-3: mixed-version RPCs are rejected by the version and channel checks, so the new `follower_warnings` key needs no compatibility handling.
+- Q2: behaviour is tested. Operator documentation is still open for U5: follow and unfollow help and the guide must say that a follower and an unfollowed copy do not inherit protection.
+
+**Status:** R3-1 through R3-4 fixed in the guards commit. Q2 docs open (U5).
