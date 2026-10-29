@@ -432,14 +432,41 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 	})
 }
 
-// followerSuffix is a follower's lag after its state in db list: ", lag
-// 4.0 KiB / 0s", or ", not streaming".
+// followerSuffix is a follower's state after its db list state: paused or
+// out of recovery when known, otherwise its measured lag, or that replication
+// is unknown.
 func followerSuffix(f *health.FollowerState) string {
-	if f == nil || !f.Known {
+	switch {
+	case f == nil:
 		return ""
-	}
-	if !f.Streaming {
+	case !f.SourceKnown && !f.SelfKnown:
+		return ", replication unknown"
+	case f.SelfKnown && !f.InRecovery:
+		return ", out of recovery"
+	case f.SelfKnown && f.ReplayPaused:
+		return ", replay PAUSED"
+	case !f.SourceKnown:
+		return ", source state unknown"
+	case !f.Streaming:
 		return ", not streaming"
+	case !f.SelfKnown:
+		return ", lag " + followerLagText(f) + ", follower state unknown"
 	}
-	return fmt.Sprintf(", lag %s / %s", humanBytes(f.LagBytes), (time.Duration(f.LagSeconds * float64(time.Second))).Round(time.Second))
+	return ", lag " + followerLagText(f)
+}
+
+// followerLagText is a follower's byte backlog and replay delay, naming an
+// unknown part instead of printing zero.
+func followerLagText(f *health.FollowerState) string {
+	if f == nil || (f.LagBytes == nil && f.LagSeconds == nil) {
+		return "unknown"
+	}
+	bytes, seconds := "unknown WAL", "delay unknown"
+	if f.LagBytes != nil {
+		bytes = humanBytes(*f.LagBytes)
+	}
+	if f.LagSeconds != nil {
+		seconds = (time.Duration(*f.LagSeconds * float64(time.Second))).Round(time.Second).String()
+	}
+	return bytes + " / " + seconds
 }

@@ -883,7 +883,10 @@ func startFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, src, sp
 		warnings = append(warnings, output.Warning{Code: "follower_not_streaming",
 			Message: spec.Name + " is not streaming from " + src.Name + " yet: vaire doctor --db " + spec.Name + " and vaire logs postgres --db " + spec.Name + " show why"})
 	}
-	writeFollowerMetrics(ctx, cfg)
+	if err := writeFollowerMetrics(ctx, cfg); err != nil {
+		warnings = append(warnings, output.Warning{Code: "follower_metrics_failed",
+			Message: "the follower metrics were not written: " + err.Error()})
+	}
 	return warnings, st, nil
 }
 
@@ -1104,7 +1107,10 @@ func finishUnfollow(ctx context.Context, env *jobEnv, cfg config.Cluster, spec c
 		warnings = append(warnings, *w)
 	}
 	steps.WriteMetrics(cfg)
-	writeFollowerMetrics(ctx, cfg)
+	if err := writeFollowerMetrics(ctx, cfg); err != nil {
+		warnings = append(warnings, output.Warning{Code: "follower_metrics_failed",
+			Message: "the follower metrics were not written: " + err.Error()})
+	}
 	return warnings, nil
 }
 

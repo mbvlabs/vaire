@@ -296,24 +296,33 @@ func followerLine(db statusDB) string {
 	}
 	line := "  " + db.Name + ": follows " + db.Follows
 	switch {
-	case f == nil || !f.Known:
+	case f == nil || (!f.SourceKnown && !f.SelfKnown):
 		return line + " (replication unknown)"
-	case !f.InRecovery:
+	case f.SelfKnown && !f.InRecovery:
 		return line + ", but is out of recovery"
-	case f.ReplayPaused:
+	case f.SelfKnown && f.ReplayPaused:
 		line += ", replay PAUSED"
+	case !f.SourceKnown:
+		return line + " (source state unknown)"
+	case !f.SelfKnown:
+		line += ", follower state unknown"
 	case f.Streaming:
-		line += fmt.Sprintf(", streaming, lag %s / %s", humanBytes(f.LagBytes), time.Duration(f.LagSeconds*float64(time.Second)).Round(time.Second))
+		line += ", streaming, lag " + followerLagText(f)
 	default:
 		line += ", NOT streaming"
+	}
+	if !f.SourceKnown {
+		return line
 	}
 	switch {
 	case !f.SlotExists:
 		line += " · slot " + f.Slot + " missing"
 	case f.SlotWALStatus == "lost":
 		line += " · slot " + f.Slot + " LOST"
+	case f.SlotRetainedBytes == nil:
+		line += " · slot " + f.Slot + " holds an unknown amount"
 	default:
-		line += " · slot " + f.Slot + " holds " + humanBytes(f.SlotRetainedBytes)
+		line += " · slot " + f.Slot + " holds " + humanBytes(*f.SlotRetainedBytes)
 	}
 	return line
 }

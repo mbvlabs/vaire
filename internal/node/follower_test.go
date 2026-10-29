@@ -285,8 +285,10 @@ func TestOwnedSlots(t *testing.T) {
 
 func TestFollowerFamilies(t *testing.T) {
 	fams := followerFamilies(map[string]followerReading{
-		"app_follower": {Source: "app", Streaming: true, LagBytes: 10, SlotExists: true},
-		"old":          {Source: "app", SlotExists: true, SlotWALStatus: "lost"},
+		"app_follower": {Source: "app", SourceKnown: true, Streaming: true, LagBytes: int64p(10), LagSeconds: float64p(1),
+			SlotExists: true, SlotRetainedBytes: int64p(100)},
+		"old":    {Source: "app", SourceKnown: true, SlotExists: true, SlotWALStatus: "lost"},
+		"unread": {Source: "app"},
 	})
 	byName := map[string]float64{}
 	for _, f := range fams {
@@ -295,8 +297,20 @@ func TestFollowerFamilies(t *testing.T) {
 		}
 	}
 	if byName["vaire_follower_streaming/app_follower"] != 1 || byName["vaire_follower_lag_bytes/app_follower"] != 10 ||
+		byName["vaire_follower_lag_seconds/app_follower"] != 1 || byName["vaire_follower_slot_retained_bytes/app_follower"] != 100 ||
 		byName["vaire_follower_slot_lost/old"] != 1 || byName["vaire_follower_slot_lost/app_follower"] != 0 {
 		t.Fatalf("%v", byName)
+	}
+	for _, metric := range []string{"vaire_follower_streaming", "vaire_follower_lag_bytes", "vaire_follower_lag_seconds",
+		"vaire_follower_slot_retained_bytes", "vaire_follower_slot_lost"} {
+		if _, ok := byName[metric+"/unread"]; ok {
+			t.Errorf("an unread follower published %s: %v", metric, byName)
+		}
+	}
+	for _, metric := range []string{"vaire_follower_lag_bytes", "vaire_follower_lag_seconds", "vaire_follower_slot_retained_bytes"} {
+		if _, ok := byName[metric+"/old"]; ok {
+			t.Errorf("an unmeasured value published %s for old: %v", metric, byName)
+		}
 	}
 }
 

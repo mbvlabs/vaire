@@ -355,7 +355,7 @@ func statusWarnings(d statusData) []output.Warning {
 			}
 			out = append(out, output.Warning{Code: "restart_pending", Message: msg})
 		}
-		if f := db.Follower; f != nil && db.State == "running" && (!f.Streaming || !f.InRecovery || f.ReplayPaused) {
+		if f := db.Follower; f != nil && db.State == "running" && ((f.SourceKnown && !f.Streaming) || (f.SelfKnown && (!f.InRecovery || f.ReplayPaused))) {
 			out = append(out, output.Warning{Code: "follower_not_streaming", Message: db.Name + " is not streaming from " + db.Follows + " (vaire doctor --db " + db.Name + ")"})
 		}
 		if db.RestoreInProgress {

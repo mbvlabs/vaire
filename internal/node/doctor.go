@@ -130,8 +130,12 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	prev, havePrev := loadDoctorState()
 	created := clusterCreated()
 	followers := readFollowers(ctx, stepsView(cfg), "")
-	for _, o := range orphanSlots(ctx, stepsView(cfg)) {
+	slots, slotFailures := orphanSlots(ctx, stepsView(cfg))
+	for _, o := range slots {
 		f.OrphanSlots = append(f.OrphanSlots, doctor.OrphanSlot{Source: o.Source, Port: o.Port, Slot: o.Slot})
+	}
+	for _, e := range slotFailures {
+		f.OrphanSlotErrors = append(f.OrphanSlotErrors, doctor.OrphanSlotError{Source: e.Source, Port: e.Port, Error: e.Error})
 	}
 	for _, s := range readClusters(ctx, cfg, "", false) {
 		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}

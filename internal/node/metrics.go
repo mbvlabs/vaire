@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/config"
@@ -163,7 +164,7 @@ func pendingFor(pending map[string]bool, db string) bool { return pending[db] ||
 // metrics-refresh job (every minute) and runs after the backup jobs too.
 func refreshMetrics(ctx context.Context, cfg config.Cluster) error {
 	steps.WriteMetrics(cfg)
-	writeFollowerMetrics(ctx, cfg)
+	followerErr := writeFollowerMetrics(ctx, cfg)
 	host, _ := hostinfo.Detect(cfg.Server.DataRoot)
-	return promfile.Write(promfile.Host, hostFamilies(readHost(cfg, host)))
+	return errors.Join(followerErr, promfile.Write(promfile.Host, hostFamilies(readHost(cfg, host))))
 }

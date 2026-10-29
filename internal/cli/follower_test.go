@@ -40,7 +40,10 @@ func TestRecoverFullsSkipFollowers(t *testing.T) {
 }
 
 func TestFollowerRendering(t *testing.T) {
-	st := &health.FollowerState{Known: true, Streaming: true, InRecovery: true, LagBytes: 2048, LagSeconds: 1.4, SlotExists: true, Slot: "vaire_f"}
+	int64p := func(v int64) *int64 { return &v }
+	float64p := func(v float64) *float64 { return &v }
+	st := &health.FollowerState{SourceKnown: true, SelfKnown: true, Streaming: true, InRecovery: true,
+		LagBytes: int64p(2048), LagSeconds: float64p(1.4), SlotExists: true, SlotRetainedBytes: int64p(4096), Slot: "vaire_f"}
 	if got := followerSuffix(st); got != ", lag 2.0 KiB / 1s" {
 		t.Fatalf("suffix %q", got)
 	}
@@ -54,6 +57,39 @@ func TestFollowerRendering(t *testing.T) {
 	line := followerLine(statusDB{Name: "f", Follows: "app", Follower: st})
 	if !strings.Contains(line, "streaming") || !strings.Contains(line, "slot vaire_f holds") {
 		t.Fatal(line)
+	}
+
+	// R4-3: a streaming follower whose replay is paused says so; unknown
+	// readings and a promoted follower are named, not shown as healthy lag.
+	paused := *st
+	paused.ReplayPaused = true
+	if got := followerSuffix(&paused); got != ", replay PAUSED" {
+		t.Fatalf("paused suffix %q", got)
+	}
+	// A source that measures the lag does not hide an unread follower.
+	selfUnknown := *st
+	selfUnknown.SelfKnown, selfUnknown.SelfError = false, "connection refused"
+	if got := followerSuffix(&selfUnknown); got != ", lag 2.0 KiB / 1s, follower state unknown" {
+		t.Fatalf("self-unknown suffix %q", got)
+	}
+	promoted := *st
+	promoted.InRecovery = false
+	if got := followerSuffix(&promoted); got != ", out of recovery" {
+		t.Fatalf("promoted suffix %q", got)
+	}
+	unknown := health.FollowerState{Source: "app", Slot: "vaire_f"}
+	if got := followerSuffix(&unknown); got != ", replication unknown" {
+		t.Fatalf("unknown suffix %q", got)
+	}
+	if got := followerLine(statusDB{Name: "f", Follows: "app", Follower: &unknown}); !strings.Contains(got, "replication unknown") {
+		t.Fatalf("unknown line %q", got)
+	}
+
+	// R4-4: an unknown measurement is not printed as zero.
+	noSeconds := *st
+	noSeconds.LagSeconds = nil
+	if got := followerSuffix(&noSeconds); !strings.Contains(got, "delay unknown") {
+		t.Fatalf("unknown seconds printed as zero: %q", got)
 	}
 }
 

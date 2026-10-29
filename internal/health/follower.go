@@ -1,6 +1,7 @@
 package health
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -15,9 +16,12 @@ import (
 type FollowerState struct {
 	Source string `json:"source"`
 	Slot   string `json:"slot"`
-	// Known is false when neither side could be read.
-	Known bool   `json:"known"`
-	Error string `json:"error,omitempty"`
+	// SourceKnown and SelfKnown say independently whether the source and the
+	// follower answered. A measurement is meaningful only when its side is.
+	SourceKnown bool   `json:"source_known"`
+	SelfKnown   bool   `json:"self_known"`
+	SourceError string `json:"source_error,omitempty"`
+	SelfError   string `json:"self_error,omitempty"`
 	// Streaming is pg_stat_replication's state streaming on the source.
 	Streaming bool `json:"streaming"`
 	// SenderState is pg_stat_replication's state, empty without a sender.
@@ -27,18 +31,43 @@ type FollowerState struct {
 	InRecovery   bool `json:"in_recovery"`
 	ReplayPaused bool `json:"replay_paused"`
 	// LagBytes is how much WAL the source wrote that the follower hasn't
-	// replayed; LagSeconds how far behind its replay is (zero when caught
-	// up).
-	LagBytes   int64   `json:"lag_bytes"`
-	LagSeconds float64 `json:"lag_seconds"`
+	// replayed; LagSeconds is PostgreSQL's replay delay. Either is nil when
+	// it couldn't be measured: an unknown lag is not zero.
+	LagBytes   *int64   `json:"lag_bytes,omitempty"`
+	LagSeconds *float64 `json:"lag_seconds,omitempty"`
 	// The slot on the source: whether it exists and is active, its
 	// wal_status (reserved, extended, unreserved, lost), the WAL it holds,
 	// and how much more may be written before it is lost (-1: no cap).
 	SlotExists        bool   `json:"slot_exists"`
 	SlotActive        bool   `json:"slot_active"`
 	SlotWALStatus     string `json:"slot_wal_status,omitempty"`
-	SlotRetainedBytes int64  `json:"slot_retained_bytes"`
+	SlotRetainedBytes *int64 `json:"slot_retained_bytes,omitempty"`
 	SlotSafeBytes     int64  `json:"slot_safe_bytes"`
+}
+
+// MarshalJSON leaves out a fact whose side didn't answer, so an unknown
+// state is never encoded as false or as the -1 no-cap sentinel.
+func (s FollowerState) MarshalJSON() ([]byte, error) {
+	type state FollowerState
+	raw, err := json.Marshal(state(s))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	if !s.SourceKnown {
+		delete(fields, "streaming")
+		delete(fields, "slot_exists")
+		delete(fields, "slot_active")
+		delete(fields, "slot_safe_bytes")
+	}
+	if !s.SelfKnown {
+		delete(fields, "in_recovery")
+		delete(fields, "replay_paused")
+	}
+	return json.Marshal(fields)
 }
 
 // quote single-quotes a validated name for a SQL literal.
@@ -60,25 +89,21 @@ func FollowerSourceSQL(follower, slot string) string {
   coalesce((SELECT safe_wal_size ` + sl + `)::text, '') AS slot_safe`
 }
 
-// FollowerSelfSQL reads a follower's own side: recovery, a paused replay
-// and the age of its last replayed commit.
+// FollowerSelfSQL reads a follower's own side: recovery and a paused replay.
 const FollowerSelfSQL = `SELECT
   pg_is_in_recovery()::text AS in_recovery,
-  CASE WHEN pg_is_in_recovery() THEN pg_get_wal_replay_pause_state() ELSE '' END AS pause_state,
-  coalesce(extract(epoch FROM now() - pg_last_xact_replay_timestamp())::float8::text, '') AS replay_age`
+  CASE WHEN pg_is_in_recovery() THEN pg_get_wal_replay_pause_state() ELSE '' END AS pause_state`
 
 // SlotsSQL lists a cluster's vaire follower slots (vaire_*).
 const SlotsSQL = `SELECT slot_name FROM pg_replication_slots WHERE left(slot_name, 6) = 'vaire_' ORDER BY slot_name`
 
 // ParseFollower combines both sides' rows into a FollowerState. A nil row
-// is a side that couldn't be read.
+// is a side that couldn't be read; measurements from that side stay unknown.
 func ParseFollower(source, slot string, src, self map[string]string) FollowerState {
-	st := FollowerState{Source: source, Slot: slot, SlotSafeBytes: -1, Known: src != nil || self != nil}
-	replayAge := -1.0
+	st := FollowerState{Source: source, Slot: slot, SlotSafeBytes: -1, SourceKnown: src != nil, SelfKnown: self != nil}
 	if self != nil {
 		st.InRecovery = self["in_recovery"] == "true"
 		st.ReplayPaused = self["pause_state"] == "paused" || self["pause_state"] == "pause requested"
-		replayAge = parseFloat(self["replay_age"], -1)
 	}
 	if src == nil {
 		return st
@@ -86,30 +111,35 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 	st.SenderState = src["sender_state"]
 	st.Streaming = st.SenderState == "streaming"
 	st.SlotExists = src["slot_active"] != ""
-	st.SlotActive = src["slot_active"] == "true"
-	st.SlotWALStatus = src["slot_wal_status"]
-	st.SlotRetainedBytes = parseInt(src["slot_retained"], 0)
-	st.SlotSafeBytes = parseInt(src["slot_safe"], -1)
-	switch {
-	case src["lag_bytes"] != "":
-		st.LagBytes = parseInt(src["lag_bytes"], 0)
-	case st.SlotExists:
-		// No walsender: what the slot still holds is what the follower
-		// hasn't confirmed.
-		st.LagBytes = st.SlotRetainedBytes
+	if st.SlotExists {
+		st.SlotActive = src["slot_active"] == "true"
+		st.SlotWALStatus = src["slot_wal_status"]
+		if retained, ok := parseKnownInt(src["slot_retained"]); ok {
+			st.SlotRetainedBytes = &retained
+		}
+		st.SlotSafeBytes = parseInt(src["slot_safe"], -1)
 	}
-	if st.LagBytes < 0 {
-		st.LagBytes = 0
+	if lag, ok := parseKnownInt(src["lag_bytes"]); ok {
+		// A replay LSN at or ahead of the source's is a caught-up follower.
+		if lag < 0 {
+			lag = 0
+		}
+		st.LagBytes = &lag
 	}
 	switch {
-	case st.Streaming && src["replay_lag"] != "":
-		st.LagSeconds = parseFloat(src["replay_lag"], 0)
-	case st.Streaming:
+	case !st.Streaming:
+		// PostgreSQL reports replay_lag on a walsender: no sender, no
+		// seconds measurement.
+	case src["replay_lag"] != "":
+		if seconds, ok := parseKnownFloat(src["replay_lag"]); ok {
+			st.LagSeconds = &seconds
+		}
+	case st.LagBytes != nil && *st.LagBytes == 0:
 		// PostgreSQL shows NULL once a standby has caught up and the source
-		// is idle: that is no lag, however old the last commit is.
-		st.LagSeconds = 0
-	case st.LagBytes > 0 && replayAge >= 0:
-		st.LagSeconds = replayAge
+		// is idle: known zero bytes is no replay delay. Positive or unknown
+		// bytes leave the seconds unknown.
+		seconds := 0.0
+		st.LagSeconds = &seconds
 	}
 	return st
 }
@@ -117,7 +147,7 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 // SlotHalfUsed reports whether the slot holds more WAL than it may still
 // take before it is lost: past half of max_slot_wal_keep_size.
 func (s FollowerState) SlotHalfUsed() bool {
-	return s.SlotSafeBytes >= 0 && s.SlotRetainedBytes > s.SlotSafeBytes
+	return s.SlotExists && s.SlotRetainedBytes != nil && s.SlotSafeBytes >= 0 && *s.SlotRetainedBytes > s.SlotSafeBytes
 }
 
 func parseInt(v string, def int64) int64 {
@@ -128,10 +158,12 @@ func parseInt(v string, def int64) int64 {
 	return n
 }
 
-func parseFloat(v string, def float64) float64 {
+func parseKnownInt(v string) (int64, bool) {
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	return n, err == nil
+}
+
+func parseKnownFloat(v string) (float64, bool) {
 	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-	if err != nil {
-		return def
-	}
-	return f
+	return f, err == nil
 }

@@ -138,8 +138,10 @@ type Facts struct {
 	ActivityHealthChecked bool
 	ActivityHealthKnown   bool
 	// OrphanSlots are vaire_* slots on a source that no follower owns
-	// (Phase 6).
-	OrphanSlots []OrphanSlot
+	// (Phase 6). OrphanSlotErrors are sources whose slots could not be
+	// listed, so their absence is unknown.
+	OrphanSlots      []OrphanSlot
+	OrphanSlotErrors []OrphanSlotError
 }
 
 // OrphanSlot is a follower slot no follower owns.
@@ -147,6 +149,13 @@ type OrphanSlot struct {
 	Source string
 	Port   int
 	Slot   string
+}
+
+// OrphanSlotError is a source whose follower slots could not be listed.
+type OrphanSlotError struct {
+	Source string
+	Port   int
+	Error  string
 }
 
 // Warning is an oversubscription warning (memory_overcommitted, cpu_crowded,

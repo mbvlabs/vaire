@@ -129,7 +129,7 @@ func runDBFollow(cmd *cobra.Command, args []string) error {
 	warnings := append(append(s.warnings, reply.Warnings...), res.Warnings...)
 	state := "not streaming yet"
 	if res.Follower.Streaming {
-		state = "streaming, lag " + humanBytes(res.Follower.LagBytes)
+		state = "streaming, lag " + followerLagText(&res.Follower)
 	}
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"job_id": jr.JobID, "source": src, "name": name, "from": res.From, "follower": res.Follower},

@@ -139,3 +139,15 @@ Reviewer artifact `dbc72399-c077-4f0d-85e3-d2597fa436a4_reviewer_output.md`: R3-
 - Q2: behaviour is tested. Operator documentation is still open for U5: follow and unfollow help and the guide must say that a follower and an unfollowed copy do not inherit protection.
 
 **Status:** R3-1 through R3-4 fixed in the guards commit. Q2 docs open (U5).
+
+## U4 visibility re-review record
+
+Reviewer artifact `79fd50b1-5128-4d4d-a30c-81ad8e6980d7_reviewer_output.md`: R4-2 through R4-6 fixed. R4-1 and Q3 were partial; the orchestrator fixed the code findings:
+
+- **P1, fixed:** doctor's `follower.streaming` warned about an unread side before checking a failure the other side proved. Known failures now come first: self-proven out of recovery or paused replay, and source-proven not streaming, fail even when the other side is unread. Table-tested.
+- **P2, fixed:** `db list` showed source-measured lag with no hint that the follower's own state was unread. It now appends `follower state unknown`.
+- **P2, open for U5:** `docs/PHASE-6-WORK-UNITS.md` still promises the replay-timestamp fallback, which is gone. The visibility contract must document PostgreSQL's replay delay, the conditional idle zero, retention against `restart_lsn`, the omission rules, and `source_known`/`self_known`/`source_error`/`self_error` replacing `known`/`error`. Add status and `db list` JSON cases for both, source-only, self-only and neither side known.
+
+The reviewer accepted the conditional zero: PostgreSQL 18's documentation allows monitoring to show an idle NULL `replay_lag` as zero, and vaire does so only for a streaming follower with a measured zero byte backlog.
+
+**Status:** R4-1 through R4-6 fixed in the visibility commit. The Q3 docs and the JSON contract tests are open (U5).
