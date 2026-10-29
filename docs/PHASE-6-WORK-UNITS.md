@@ -141,6 +141,20 @@ Diff range: `master...phase-6-followers`. The lanes:
 
 ---
 
+## Implementation record
+
+Where the build differs from the design below; the findings file and the code win.
+
+- **Resize (Q1a, which supersedes D6's unconditional follower-first rule).** Any resize that would lower a follower's hot-standby floors is refused with `has_followers`; to shrink such a source, unfollow or drop the follower, resize, then follow again. A resize that grows or keeps the floors applies the followers' configuration first, one at a time, before the source, so a retry after a failed follower update runs in the same order. A deferred follower restart leaves `restart_pending` and warns that replay may pause. A hand edit of floor settings in `cluster.toml` followed by plain `vaire apply` is not ordered: run `vaire apply --db <follower>` first.
+- **Protection (Q2).** A follower and an unfollowed copy do not inherit the source's protection; an unfollowed copy keeps only the protection the operator gave it. The `db follow` and `db unfollow` help and the guide say so.
+- **Visibility (Q3).** The replay-timestamp fallback is gone. Lag in seconds is PostgreSQL's `replay_lag`, with the idle NULL reported as zero only for a streaming follower whose byte backlog was measured as zero; slot retention is measured against `restart_lsn` separately from the replay backlog against `replay_lsn`; unknown values are omitted from JSON and metrics; `source_known`/`self_known`/`source_error`/`self_error` replace one `known`/`error` bit. Doctor still checks a stopped follower's slot from the source, and `db list` names an unread follower side.
+- **Resumable recovery.** `db recover` of a follower writes the node-local `follow-<db>.json` ownership record before its first local mutation, reuses a completed copy only when the registration matches and the slot is `reserved` or `extended` with a restart position (missing, lost or `unreserved` takes the owned recopy path), marks the adopted copy durably, and refuses foreign paths. Its dry run reports `resume`, `recopy_reason` and `resume_conditional`.
+- **Resumable unfollow.** `db unfollow` records its source and stanza in `records.json` before the first irreversible step, holds the node and cluster locks, reloads `cluster.toml`, and resumes at the step an earlier attempt stopped at. A job that ends without a result is `job_outcome_unknown`; the CLI then hands the operator the new passwords, which may have been installed.
+- **New warnings.** `slot_not_dropped` (the source was down or refused the drop) and `follower_metrics_failed` (the follower file could not be written) join `followers_diverged` and `follower_not_streaming`.
+- **Hot-standby floors.** PostgreSQL numeric floor values are parsed as PostgreSQL reads them; an invalid or unrepresentable value fails the resize instead of silently using a lower floor.
+- **Integration.** `db.follow` and `db.unfollow` are in activity history, the protection and TOTP write guards, the awaiting-recovery refusals and the command metadata; the guide covers followers.
+
+
 # Design (carried over from the first build, 2026-10-16)
 
 The first build implemented every decision below as written. The user hasn't approved them yet. Annotate any you want changed. U3's reviewers check the code against this text.
@@ -266,14 +280,16 @@ The name stays the follower's: `--name` is deferred (fork the unfollowed databas
 
 ### D13. Lag and visibility
 
-**Decided (recommended):** read on the node from both sides (`followerState`):
+**Decided (recommended), as built:** read on the node from both sides, independently:
 
-- On the source: `pg_stat_replication` for `application_name = <follower>` (state, `replay_lag`, `pg_current_wal_lsn() - replay_lsn`), and `pg_replication_slots` for `vaire_<follower>` (active, `wal_status`, retained bytes `pg_current_wal_lsn() - restart_lsn`, `safe_wal_size`).
-- On the follower: `pg_is_in_recovery()`, `pg_get_wal_replay_pause_state()`, the age of `pg_last_xact_replay_timestamp()`.
-- **Lag in seconds** is `replay_lag` while streaming (zero when caught up: PostgreSQL shows NULL once idle, which the replay timestamp's age would wrongly count as growing), else the replay timestamp's age while bytes are behind.
-- `db list`: state `following` for a running follower, `follows <source>` in the STANZA column, the lag after the state, and `follower` in JSON (source, streaming, lag bytes and seconds, slot). `status`: the same per database, with the source's slot.
-- Doctor (category `postgres`, `internal/doctor/follower.go`): `follower.streaming` (fail when not streaming, out of recovery, or replay paused), `follower.lag` (warn at 5 min or 1 GiB, fail at 1 h or 16 GiB), `follower.slot` (warn when the slot holds more than half of what it may, fail when lost or missing), `follower.orphan_slots` (warn on a source). A server without followers gets one `skip` row per check.
-- Metrics: `vaire-followers.prom`, written by `metrics-refresh`: `vaire_follower_streaming{db,source}`, `vaire_follower_lag_bytes`, `vaire_follower_lag_seconds`, `vaire_follower_slot_retained_bytes`, `vaire_follower_slot_lost`.
+- On the source: the newest `pg_stat_replication` row for `application_name = <follower>` (state, `replay_lag`, `pg_current_wal_lsn() - replay_lsn` as the byte backlog), and the `pg_replication_slots` row for `vaire_<follower>` (active, `wal_status`, `pg_current_wal_lsn() - restart_lsn` as the WAL it retains, `safe_wal_size`).
+- On the follower: `pg_is_in_recovery()` and `pg_get_wal_replay_pause_state()`.
+- **Lag in seconds is PostgreSQL's `replay_lag`**, the replay/visibility delay; it is not a catch-up estimate and not the age of an idle source. PostgreSQL reports NULL once a standby has caught up and the source is idle: vaire reports zero only for a streaming follower whose byte backlog was measured as zero. A positive or unknown backlog with no timing sample leaves the seconds unknown. There is no replay-timestamp fallback.
+- **Slot retention is measured separately**, against `restart_lsn`; it is never substituted for the replay byte lag, which is measured against `replay_lsn` and needs a walsender.
+- **Unknown is not zero.** `lag_bytes`, `lag_seconds` and `slot_retained_bytes` are omitted when unmeasured. `source_known` and `self_known` say independently whether each side answered, and `source_error`/`self_error` say why not (they replace one `known`/`error` bit). A fact read from an unread side is omitted too: `streaming`, `slot_exists`, `slot_active` and `slot_safe_bytes` without the source (`slot_safe_bytes = -1` means no cap), `in_recovery` and `replay_paused` without the follower.
+- `db list`: state `following` for a running follower, `follows <source>` in the STANZA column, and the lag after the state, naming an unknown side or a paused replay instead of printing a healthy value. JSON carries `follower` (source, `source_known`/`self_known` and their errors, streaming, lag bytes and seconds, slot). `status` is the same per database, with the source's slot.
+- Doctor (category `postgres`, `internal/doctor/follower.go`): `follower.streaming` (fail when not streaming, out of recovery, or replay paused), `follower.lag` (warn at 5 min or 1 GiB, fail at 1 h or 16 GiB), `follower.slot` (warn when the slot holds more than half of what it may, fail when lost or missing), `follower.orphan_slots` (warn on a source). A stopped follower skips the streaming and lag checks but its slot is still checked from the source; a failure one side proves stands even when the other is unread, and an unread side warns. A server without followers gets one `skip` row per check.
+- Metrics: `vaire-followers.prom`, written by `metrics-refresh`: `vaire_follower_streaming{db,source}`, `vaire_follower_lag_bytes`, `vaire_follower_lag_seconds`, `vaire_follower_slot_retained_bytes`, `vaire_follower_slot_lost`. A sample is written only for a measured value; a failed write fails refresh and the job warns `follower_metrics_failed`.
 
 ### D14. Recovery after a rebuild
 

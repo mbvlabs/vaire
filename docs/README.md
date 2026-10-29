@@ -9,7 +9,15 @@
 - [FINDINGS-activity-review.md](FINDINGS-activity-review.md): findings from the activity-history review, their fixes and decisions.
 - [MANUAL-TESTING.md](MANUAL-TESTING.md): qualification summary, coverage limits and chronological live evidence. Historical failures are retained, not current blockers unless explicitly listed as unresolved.
 - [PLAN-v1-release.md](PLAN-v1-release.md): remaining release gates and authorized-release procedure.
-- [RELEASE-v1.0.0-alpha.1.md](RELEASE-v1.0.0-alpha.1.md): draft release notes; no alpha has been published by this qualification.
+- [RELEASE-v1.0.0-alpha.1.md](RELEASE-v1.0.0-alpha.1.md): draft alpha notes, kept as the qualification record.
+- [RELEASE-v1.0.0-beta.1.md](RELEASE-v1.0.0-beta.1.md): draft beta notes; Phase 7 and the beta qualification are pending.
+
+## Followers (Phase 6)
+
+- `vaire db follow <db> [--name <new>] [--size <size>] [--allow-overcommit]` makes a read-only physical standby of one database on the same node, streaming through a slot capped by `max_slot_wal_keep_size`. It is read at the node's host with the follower's name in the path and the source's credentials; writes fail.
+- `vaire db unfollow <follower> --confirm <follower>/unfollow` promotes it into an independent database with its own roles (new passwords, printed once), stanza and first full.
+- A follower and an unfollowed copy do not inherit the source's protection; an unfollowed copy keeps only the protection the operator gave it (`vaire db protect`).
+- Details are in [IMPLEMENTATION.md](IMPLEMENTATION.md); the design and the implementation record are in [PHASE-6-WORK-UNITS.md](PHASE-6-WORK-UNITS.md).
 
 ## Design and implementation history
 

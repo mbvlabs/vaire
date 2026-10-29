@@ -224,3 +224,114 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(raw)
 }
+
+// Q3/R4-1: db list and status carry a follower's state as it was read. A fact
+// whose side did not answer is left out of the JSON instead of being encoded
+// as false or zero, and a measured zero is kept.
+func TestFollowerJSONOmitsUnreadSides(t *testing.T) {
+	int64p := func(v int64) *int64 { return &v }
+	float64p := func(v float64) *float64 { return &v }
+	cases := map[string]struct {
+		state   health.FollowerState
+		present []string
+		absent  []string
+	}{
+		"both sides known": {
+			state: health.FollowerState{Source: "app", Slot: "vaire_f", SourceKnown: true, SelfKnown: true,
+				Streaming: true, SenderState: "streaming", InRecovery: true,
+				LagBytes: int64p(0), LagSeconds: float64p(0), SlotExists: true, SlotActive: true,
+				SlotWALStatus: "reserved", SlotRetainedBytes: int64p(0), SlotSafeBytes: 1024},
+			present: []string{"source_known", "self_known", "streaming", "sender_state", "in_recovery", "replay_paused",
+				"lag_bytes", "lag_seconds", "slot_exists", "slot_active", "slot_wal_status", "slot_retained_bytes", "slot_safe_bytes"},
+			absent: []string{"source_error", "self_error"},
+		},
+		"source only": {
+			state: health.FollowerState{Source: "app", Slot: "vaire_f", SourceKnown: true,
+				SelfError: "app_follower: connection refused", SlotExists: true, SlotWALStatus: "extended",
+				SlotRetainedBytes: int64p(3000), SlotSafeBytes: 1000},
+			present: []string{"source_known", "self_known", "streaming", "slot_exists", "slot_active",
+				"slot_wal_status", "slot_retained_bytes", "slot_safe_bytes", "self_error"},
+			absent: []string{"source_error", "in_recovery", "replay_paused", "lag_bytes", "lag_seconds"},
+		},
+		"self only": {
+			state: health.FollowerState{Source: "app", Slot: "vaire_f", SelfKnown: true,
+				SourceError: "app: connection refused", InRecovery: true, ReplayPaused: true},
+			present: []string{"source_known", "self_known", "source_error", "in_recovery", "replay_paused"},
+			absent: []string{"self_error", "streaming", "slot_exists", "slot_active", "slot_wal_status",
+				"slot_safe_bytes", "lag_bytes", "lag_seconds", "slot_retained_bytes"},
+		},
+		"neither side known": {
+			state:   health.FollowerState{Source: "app", Slot: "vaire_f", SourceError: "app: stopped", SelfError: "app_follower: stopped"},
+			present: []string{"source_known", "self_known", "source_error", "self_error"},
+			absent: []string{"streaming", "sender_state", "in_recovery", "replay_paused", "lag_bytes", "lag_seconds",
+				"slot_exists", "slot_active", "slot_wal_status", "slot_retained_bytes", "slot_safe_bytes"},
+		},
+	}
+	rows := map[string]func(*health.FollowerState) any{
+		"db list": func(st *health.FollowerState) any {
+			return databaseInfo{Name: "app_follower", InConfig: true, State: "following", Follows: "app", Follower: st}
+		},
+		"status": func(st *health.FollowerState) any {
+			return statusData{Databases: []statusDB{{Name: "app_follower", State: "following", Follows: "app", Follower: st}}}
+		},
+	}
+	for rowName, encode := range rows {
+		t.Run(rowName, func(t *testing.T) {
+			for name, tc := range cases {
+				st := tc.state
+				f := followerField(t, encode(&st))
+				if got, _ := f["source_known"].(bool); got != st.SourceKnown {
+					t.Errorf("%s: source_known %v, want %v", name, f["source_known"], st.SourceKnown)
+				}
+				if got, _ := f["self_known"].(bool); got != st.SelfKnown {
+					t.Errorf("%s: self_known %v, want %v", name, f["self_known"], st.SelfKnown)
+				}
+				for _, key := range tc.present {
+					if _, ok := f[key]; !ok {
+						t.Errorf("%s: %s is missing from %v", name, key, f)
+					}
+				}
+				for _, key := range tc.absent {
+					if _, ok := f[key]; ok {
+						t.Errorf("%s: %s is in JSON though its side is unread: %v", name, key, f)
+					}
+				}
+			}
+			// A measured zero is not an unknown: both sides answered, so the
+			// caught-up follower keeps its zeros.
+			st := cases["both sides known"].state
+			f := followerField(t, encode(&st))
+			for _, key := range []string{"lag_bytes", "lag_seconds", "slot_retained_bytes"} {
+				if got, ok := f[key].(float64); !ok || got != 0 {
+					t.Errorf("a measured zero was lost: %s = %v", key, f[key])
+				}
+			}
+		})
+	}
+}
+
+// followerField is the follower object inside a db list or status row's JSON.
+func followerField(t *testing.T, v any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	f, ok := doc["follower"].(map[string]any)
+	if !ok {
+		// status nests its rows under databases.
+		rows, _ := doc["databases"].([]any)
+		if len(rows) == 1 {
+			row, _ := rows[0].(map[string]any)
+			f, ok = row["follower"].(map[string]any)
+		}
+	}
+	if !ok {
+		t.Fatalf("no follower object in %s", raw)
+	}
+	return f
+}

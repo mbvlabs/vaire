@@ -63,7 +63,7 @@ No unresolved reproducible code blocker remains from the main qualification run.
 3. Open a pull request from `master` into `1.x` and merge it with a merge commit; tag `v1.0.0-beta.1` on `1.x` (with authorization) and qualify it as in the cut checklist.
 
 - Until then, v1 fixes still target `1.x` and are merged up into master.
-- Phase 6's `wal_level = replica` means a restart is pending on every database when upgrading from an alpha to the beta. `vaire apply` asks with `--confirm <db>/restart`, and the beta's release notes have to say so.
+- Phase 6's `wal_level = replica` means a restart is pending on every database when upgrading from an alpha to the beta: every database's `postgres-config-v1` changes, the first `vaire apply` leaves it in `restart_pending`, and nothing restarts by itself. `--confirm <db>/restart` (or `<server>/restart`) clears one at a time; until then the cluster keeps `logical`, which still serves followers. `max_slot_wal_keep_size` arrives with the same apply as a reload. The [draft beta notes](RELEASE-v1.0.0-beta.1.md) say so.
 
 ## Cut checklist
 

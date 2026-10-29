@@ -151,3 +151,9 @@ Reviewer artifact `79fd50b1-5128-4d4d-a30c-81ad8e6980d7_reviewer_output.md`: R4-
 The reviewer accepted the conditional zero: PostgreSQL 18's documentation allows monitoring to show an idle NULL `replay_lag` as zero, and vaire does so only for a streaming follower with a measured zero byte backlog.
 
 **Status:** R4-1 through R4-6 fixed in the visibility commit. The Q3 docs and the JSON contract tests are open (U5).
+
+## U5 docs record
+
+Docs updated for the build as it now is: MASTER, IMPLEMENTATION, both READMEs, MANUAL-TESTING, PLAN-v1-release, the Phase 6 work units (the visibility decision corrected and an implementation record added), and new draft beta notes `docs/RELEASE-v1.0.0-beta.1.md`, which did not exist before. The Q2 wording is in the follow and unfollow help and the agent guide. `TestFollowerJSONOmitsUnreadSides` pins the status and `db list` JSON omissions for both, source-only, self-only and neither side known.
+
+**Status:** Q2 and Q3 docs done. Docs-to-code agreement is checked in U6.
