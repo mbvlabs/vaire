@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +274,71 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 	env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"db":"app_follower","idle_in_tx":true}`)}}
 	if _, err := wrappedKill(context.Background(), env); err != nil {
 		t.Fatalf("maint kill on the protected follower: %v", err)
+	}
+}
+
+// A promoted follower whose unfollow stopped before cluster.toml stopped
+// saying it follows is writable in PostgreSQL but still a configured
+// follower. A write SQL request must be refused at the node boundary before
+// psql runs, protected or not, so it cannot bypass copy protection; a
+// protected primary still needs its code and runs once it has one. The
+// fake runuser records any psql invocation, so the test exercises the real
+// registry wrapper and the real pg.Local command path, not a handler stub.
+func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "psql-ran")
+	bin := t.TempDir()
+	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$*\" >> \"" + marker + "\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "runuser"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: the fake runuser must be executable for exec.CommandContext.
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	ran := func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}
+
+	g, clock := newTestGuard(t)
+	old := defaultProtectGuard
+	t.Cleanup(func() { defaultProtectGuard = old })
+	defaultProtectGuard = g
+	secret := setUp(t, g, clock)
+	clock.t = clock.t.Add(totp.Period)
+	sqlWrite := methods()["sql"].handler
+	write := func(cfg config.Cluster, db, code string) (Result, error) {
+		req := request("sql", map[string]any{"db": db, "query": "delete from t", "write": true})
+		if code != "" {
+			req.Secrets = map[string]string{ProtectCodeSecret: code}
+		}
+		return sqlWrite(context.Background(), &Env{Cluster: cfg, Req: req})
+	}
+
+	for _, protected := range []bool{false, true} {
+		cfg := followerCfg()
+		cfg.Clusters[1].Protected = protected
+		res, err := write(cfg, "app_follower", "")
+		wantReason(t, err, output.CodePrecondition, "is_follower")
+		if ran() {
+			t.Fatalf("protected %v: psql ran for a write to a configured follower", protected)
+		}
+		if res.Data != nil {
+			t.Fatalf("protected %v: a refused write returned data: %+v", protected, res.Data)
+		}
+	}
+
+	// The protected primary keeps its gate: no psql without a code.
+	cfg := protectedCluster()
+	if _, err := write(cfg, "app", ""); err != nil {
+		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+	}
+	if ran() {
+		t.Fatal("psql ran for a protected primary without a code")
+	}
+	// With the code, the primary path runs normally.
+	if _, err := write(cfg, "app", codeFor(t, secret, clock.t, 0)); err != nil {
+		t.Fatalf("the protected primary with a code: %v", err)
+	}
+	if !ran() {
+		t.Fatal("the protected primary's write did not reach psql with a code")
 	}
 }
 

@@ -357,8 +357,15 @@ func AdminRoleSQL(db config.ClusterSpec) string {
 // to the owner already. The vaire_admin password alone, in a context or
 // through vaire tunnel, can then only read a protected database.
 func AdminAccessSQL(db config.ClusterSpec) string {
-	owner := db.Name + "_owner"
-	if !db.Protected {
+	return AdminAccessSQLFor(db.Name+"_owner", db.Name, db.Protected)
+}
+
+// AdminAccessSQLFor is AdminAccessSQL for a database and owner role whose
+// names differ from one database's prefix: db unfollow settles a promoted
+// follower while the source's database and roles still exist, and again after
+// a partial rename, so the policy names what PostgreSQL actually holds.
+func AdminAccessSQLFor(owner, database string, protected bool) string {
+	if !protected {
 		return fmt.Sprintf(`GRANT %s TO vaire_admin WITH ADMIN OPTION;
 DO $vaire$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = 'pg_read_all_data'::regrole AND member = 'vaire_admin'::regrole) THEN
@@ -398,7 +405,7 @@ BEGIN
       WHERE usename = 'vaire_admin' AND datname = %[3]s AND backend_type = 'client backend' AND pid <> pg_backend_pid();
   END IF;
 END $vaire$;
-`, pg.Quote(owner), literal(owner), literal(db.Name))
+`, pg.Quote(owner), literal(owner), literal(database))
 }
 
 // literal quotes s as an SQL string literal.

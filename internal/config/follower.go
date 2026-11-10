@@ -80,6 +80,9 @@ func (c Cluster) validateFollower(add func(string, ...any), at string, s Cluster
 	if s.Backup != (ClusterBackup{}) {
 		add("%s.backup must be empty for a follower: it has no stanza of its own", at)
 	}
+	if s.FollowGeneration != "" && !followGenerationPattern.MatchString(s.FollowGeneration) {
+		add("%s.follow_generation %q is managed by vaire and must be 32 lowercase hexadecimal characters", at, s.FollowGeneration)
+	}
 }
 
 // IsFollowerName reports whether name is a follower in c.

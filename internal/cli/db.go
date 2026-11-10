@@ -378,6 +378,16 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	})
 }
 
+// credentialsPreflight is what db credentials --rotate refuses before the
+// token, the new secret or a dry-run success: a follower first, with the
+// node's is_follower error, then a protected database.
+func credentialsPreflight(cfg config.Cluster, name string) error {
+	if err := node.RefuseFollowerMethod(cfg, "db.credentials", map[string]any{"name": name, "rotate": true}); err != nil {
+		return err
+	}
+	return node.CheckNotProtected(cfg, name, "rotating its credentials")
+}
+
 // runDBCredentials rotates one role password. vaire keeps no database
 // passwords, so there is nothing to print without --rotate.
 func runDBCredentials(cmd *cobra.Command, args []string) error {
@@ -403,7 +413,7 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := node.CheckNotProtected(cfg, name, "rotating its credentials"); err != nil {
+	if err := credentialsPreflight(cfg, name); err != nil {
 		return err
 	}
 	if !dryRun(cmd) {

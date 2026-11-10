@@ -12,7 +12,7 @@ func float64p(v float64) *float64 { return &v }
 
 func followerState() health.FollowerState {
 	return health.FollowerState{Source: "app", Slot: "vaire_app_follower", SourceKnown: true, SelfKnown: true,
-		Streaming: true, InRecovery: true, SlotExists: true, SlotSafeBytes: -1,
+		Streaming: true, InRecovery: true, SlotExists: true, SlotUncapped: true,
 		LagBytes: int64p(0), LagSeconds: float64p(0)}
 }
 
@@ -135,7 +135,12 @@ func TestFollowerSlot(t *testing.T) {
 		"fine":    {func(*health.FollowerState) {}, Pass},
 		"missing": {func(s *health.FollowerState) { s.SlotExists = false }, Fail},
 		"lost":    {func(s *health.FollowerState) { s.SlotWALStatus = "lost" }, Fail},
-		"half":    {func(s *health.FollowerState) { s.SlotRetainedBytes, s.SlotSafeBytes = int64p(10), 5 }, Warn},
+		"half": {func(s *health.FollowerState) {
+			s.SlotRetainedBytes, s.SlotSafeBytes, s.SlotUncapped = int64p(10), int64p(5), false
+		}, Warn},
+		"negative": {func(s *health.FollowerState) {
+			s.SlotRetainedBytes, s.SlotSafeBytes, s.SlotUncapped = int64p(10), int64p(-2), false
+		}, Warn},
 	}
 	for name, tc := range cases {
 		st := base
@@ -143,6 +148,13 @@ func TestFollowerSlot(t *testing.T) {
 		if s := statusOf(followerSlot(followerFacts(st)), "app_follower"); s != tc.want {
 			t.Errorf("%s: %s, want %s", name, s, tc.want)
 		}
+	}
+	// An unknown allowance cannot trigger the half-used warning: it is not a
+	// measured cap.
+	unknown := base
+	unknown.SlotRetainedBytes, unknown.SlotSafeBytes, unknown.SlotUncapped = int64p(1<<30), nil, false
+	if s := statusOf(followerSlot(followerFacts(unknown)), "app_follower"); s != Pass {
+		t.Errorf("unknown allowance: %s, want %s", s, Pass)
 	}
 }
 
@@ -156,7 +168,9 @@ func TestFollowerSlotForAStoppedFollower(t *testing.T) {
 		want Status
 	}{
 		"healthy": {func(*health.FollowerState) {}, Pass},
-		"half":    {func(s *health.FollowerState) { s.SlotRetainedBytes, s.SlotSafeBytes = int64p(10), 5 }, Warn},
+		"half": {func(s *health.FollowerState) {
+			s.SlotRetainedBytes, s.SlotSafeBytes, s.SlotUncapped = int64p(10), int64p(5), false
+		}, Warn},
 		"lost":    {func(s *health.FollowerState) { s.SlotWALStatus = "lost" }, Fail},
 		"missing": {func(s *health.FollowerState) { s.SlotExists = false }, Fail},
 	} {

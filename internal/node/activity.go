@@ -1059,7 +1059,8 @@ var activityKnownReason = map[string]bool{
 	"restore_undone": true, "restoring_exists": true, "root_required": true,
 	"run_log_unavailable": true, "runs_on_server": true, "selfcheck_failed": true,
 	"selfcheck_failed_rolled_back": true, "set_not_found": true,
-	"source_awaiting_recovery": true, "source_not_running": true,
+	"source_awaiting_recovery": true, "source_not_running": true, "source_floors_unknown": true,
+	"source_floors_above_follower": true, "follow_ownership_missing": true,
 	"sshd_port_not_22": true, "stanza_still_written": true, "tls_pending": true,
 	"undo_in_progress": true, "write_requires_human": true,
 	// Protection code outcomes.

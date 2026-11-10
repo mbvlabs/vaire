@@ -264,7 +264,11 @@ func recoveredNames(outcomes []dbJobOutcome) []string {
 
 func recoverLine(db string, res map[string]any) string {
 	if f, _ := res["follows"].(string); f != "" {
-		return db + ": following " + f + " again (" + fmt.Sprint(res["from"]) + ")"
+		line := db + ": following " + f + " again (" + fmt.Sprint(res["from"]) + ")"
+		if n := len(recoverWarnings(db, res)); n > 0 {
+			line += fmt.Sprintf(", but %d part(s) of finishing it failed (see the warnings)", n)
+		}
+		return line
 	}
 	line := db + ": recovered"
 	if res["phase"] == "ready" {
@@ -286,8 +290,9 @@ func recoverLine(db string, res map[string]any) string {
 }
 
 // recoverWarnings are what failed after db's data was recovered: the job's
-// own *_warning results and the warning of the promote (the poolers or the
-// full backup after the cut-over), nested in its promoted result.
+// own *_warning results, the structured warning of the promote (the poolers or
+// the full backup after the cut-over), nested in its promoted result, and a
+// follower recovery's warnings, which keep their codes and messages.
 func recoverWarnings(db string, res map[string]any) []output.Warning {
 	var out []output.Warning
 	if promoted, ok := res["promoted"].(map[string]any); ok {
@@ -306,6 +311,32 @@ func recoverWarnings(db string, res map[string]any) []output.Warning {
 		if v, _ := res[key].(string); v != "" {
 			out = append(out, output.Warning{Code: "recover_" + strings.TrimSuffix(key, "_warning"), Message: db + ": " + v})
 		}
+	}
+	out = append(out, followerRecoverWarnings(res)...)
+	return out
+}
+
+// followerRecoverWarnings flattens the warnings of a recovered follower's job
+// result, which are structured like the node's other warnings, so they reach
+// the standard warning list with their own codes instead of staying nested in
+// the job result (Phase 6).
+func followerRecoverWarnings(res map[string]any) []output.Warning {
+	raw, ok := res["warnings"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []output.Warning
+	for _, item := range raw {
+		w, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		code, _ := w["code"].(string)
+		message, _ := w["message"].(string)
+		if message == "" {
+			continue
+		}
+		out = append(out, output.Warning{Code: code, Message: message})
 	}
 	return out
 }

@@ -37,12 +37,17 @@ type FollowerState struct {
 	LagSeconds *float64 `json:"lag_seconds,omitempty"`
 	// The slot on the source: whether it exists and is active, its
 	// wal_status (reserved, extended, unreserved, lost), the WAL it holds,
-	// and how much more may be written before it is lost (-1: no cap).
+	// and how much more may be written before it is lost. SlotSafeBytes is
+	// a measured allowance, negative once the slot is already past its cap;
+	// it is -1 only for a proven uncapped slot, and nil when unmeasured.
+	// SlotUncapped is set only from the source's effective
+	// max_slot_wal_keep_size = -1 evidence.
 	SlotExists        bool   `json:"slot_exists"`
 	SlotActive        bool   `json:"slot_active"`
 	SlotWALStatus     string `json:"slot_wal_status,omitempty"`
 	SlotRetainedBytes *int64 `json:"slot_retained_bytes,omitempty"`
-	SlotSafeBytes     int64  `json:"slot_safe_bytes"`
+	SlotSafeBytes     *int64 `json:"slot_safe_bytes,omitempty"`
+	SlotUncapped      bool   `json:"slot_uncapped,omitempty"`
 }
 
 // MarshalJSON leaves out a fact whose side didn't answer, so an unknown
@@ -62,6 +67,7 @@ func (s FollowerState) MarshalJSON() ([]byte, error) {
 		delete(fields, "slot_exists")
 		delete(fields, "slot_active")
 		delete(fields, "slot_safe_bytes")
+		delete(fields, "slot_uncapped")
 	}
 	if !s.SelfKnown {
 		delete(fields, "in_recovery")
@@ -86,7 +92,8 @@ func FollowerSourceSQL(follower, slot string) string {
   coalesce((SELECT active::text ` + sl + `), '') AS slot_active,
   coalesce((SELECT wal_status ` + sl + `), '') AS slot_wal_status,
   coalesce((SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint ` + sl + `)::text, '') AS slot_retained,
-  coalesce((SELECT safe_wal_size ` + sl + `)::text, '') AS slot_safe`
+  coalesce((SELECT safe_wal_size ` + sl + `)::text, '') AS slot_safe,
+  coalesce((SELECT (setting = '-1')::text FROM pg_settings WHERE name = 'max_slot_wal_keep_size'), '') AS slot_uncapped`
 }
 
 // FollowerSelfSQL reads a follower's own side: recovery and a paused replay.
@@ -100,7 +107,7 @@ const SlotsSQL = `SELECT slot_name FROM pg_replication_slots WHERE left(slot_nam
 // ParseFollower combines both sides' rows into a FollowerState. A nil row
 // is a side that couldn't be read; measurements from that side stay unknown.
 func ParseFollower(source, slot string, src, self map[string]string) FollowerState {
-	st := FollowerState{Source: source, Slot: slot, SlotSafeBytes: -1, SourceKnown: src != nil, SelfKnown: self != nil}
+	st := FollowerState{Source: source, Slot: slot, SourceKnown: src != nil, SelfKnown: self != nil}
 	if self != nil {
 		st.InRecovery = self["in_recovery"] == "true"
 		st.ReplayPaused = self["pause_state"] == "paused" || self["pause_state"] == "pause requested"
@@ -117,7 +124,7 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 		if retained, ok := parseKnownInt(src["slot_retained"]); ok {
 			st.SlotRetainedBytes = &retained
 		}
-		st.SlotSafeBytes = parseInt(src["slot_safe"], -1)
+		st.SlotSafeBytes, st.SlotUncapped = slotSafety(src)
 	}
 	if lag, ok := parseKnownInt(src["lag_bytes"]); ok {
 		// A replay LSN at or ahead of the source's is a caught-up follower.
@@ -145,17 +152,40 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 }
 
 // SlotHalfUsed reports whether the slot holds more WAL than it may still
-// take before it is lost: past half of max_slot_wal_keep_size.
+// take before it is lost: past half of max_slot_wal_keep_size. A measured
+// negative allowance is already past the cap. An unknown allowance or a
+// proven uncapped slot cannot be half used.
 func (s FollowerState) SlotHalfUsed() bool {
-	return s.SlotExists && s.SlotRetainedBytes != nil && s.SlotSafeBytes >= 0 && *s.SlotRetainedBytes > s.SlotSafeBytes
+	if s.SlotUncapped || s.SlotSafeBytes == nil || s.SlotRetainedBytes == nil {
+		return false
+	}
+	return s.SlotExists && *s.SlotRetainedBytes > *s.SlotSafeBytes
 }
 
-func parseInt(v string, def int64) int64 {
-	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-	if err != nil {
-		return def
+// slotSafety reads the source's slot allowance. A measured safe_wal_size
+// (zero and negative included; negative means already past the cap) is the
+// allowance. NULL is not unlimited by itself: it is the -1 no-cap sentinel
+// only when the source's effective max_slot_wal_keep_size is -1, the slot is
+// not lost, and its restart position was readable. A malformed or NULL value
+// without that evidence is unknown, and so is a lost or missing slot.
+func slotSafety(src map[string]string) (*int64, bool) {
+	if n, ok := parseKnownInt(src["slot_safe"]); ok {
+		return &n, false
 	}
-	return n
+	if strings.TrimSpace(src["slot_safe"]) != "" {
+		return nil, false
+	}
+	if strings.TrimSpace(src["slot_uncapped"]) != "true" {
+		return nil, false
+	}
+	if status := strings.TrimSpace(src["slot_wal_status"]); status == "" || status == "lost" {
+		return nil, false
+	}
+	if strings.TrimSpace(src["slot_retained"]) == "" {
+		return nil, false
+	}
+	unlimited := int64(-1)
+	return &unlimited, true
 }
 
 func parseKnownInt(v string) (int64, bool) {

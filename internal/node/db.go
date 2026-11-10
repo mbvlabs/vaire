@@ -112,6 +112,14 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: map[string]any{"databases": databases}, Warnings: warnings}, nil
 }
 
+// databaseListClusterNames and databaseListPG are db.list's host facts: the
+// cluster inventory pg_lsclusters reports and each cluster's local SQL. They
+// are variables so tests model a stopped follower without the node's commands.
+var (
+	databaseListClusterNames = steps.ClusterNames
+	databaseListPG           = func(spec config.ClusterSpec) sqlRunner { return steps.ClusterPG(spec) }
+)
+
 // listDatabases reads each [[clusters]] entry's database from its own
 // cluster. A cluster that is not up lists as not existing; a cluster
 // pg_lsclusters knows that cluster.toml doesn't is orphaned, unless a
@@ -119,7 +127,7 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 // or a drill does (<db>__drill).
 func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	cfg := env.Cluster
-	live := steps.ClusterNames(ctx)
+	live := databaseListClusterNames(ctx)
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return nil, err
@@ -153,7 +161,7 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 			out = append(out, info)
 			continue
 		}
-		local := steps.ClusterPG(spec)
+		local := databaseListPG(spec)
 		rows, err := local.Query(ctx, "postgres",
 			"SELECT pg_database_size(datname) AS size FROM pg_database WHERE datname = "+quoteLiteral(spec.DatabaseName()), nil)
 		if err != nil || len(rows) == 0 {
@@ -293,8 +301,25 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 // creating anything. It returns the saved configuration and the previous
 // file for a rollback. db create and db fork share it.
 func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string) (config.Cluster, []byte, config.ClusterSpec, error) {
-	store := state.FileStore{}
+	return addDatabaseFrom(ctx, env, func(config.Cluster) (config.ClusterSpec, error) { return db, nil }, allowOvercommit, suggest, nil)
+}
+
+// addDatabaseCheckStarts refuses a proposal PostgreSQL would not start. It is
+// a variable so handler tests can use deterministic host facts.
+var addDatabaseCheckStarts = checkStarts
+
+// addDatabaseFrom is addDatabase with the entry built from the freshly loaded
+// configuration and an optional check of the exact placed proposal before it
+// is saved. A fresh follow uses both: its entry derives from the source's
+// current values, and its floors are compared with the target present exactly
+// once under the preparation lock.
+func addDatabaseFrom(ctx context.Context, env *Env, build func(config.Cluster) (config.ClusterSpec, error), allowOvercommit bool, suggest func(size string) string, beforeSave func(config.Cluster, config.ClusterSpec) error) (config.Cluster, []byte, config.ClusterSpec, error) {
+	store := followerState()
 	cfg, previous, err := store.Load()
+	if err != nil {
+		return cfg, nil, config.ClusterSpec{}, err
+	}
+	db, err := build(cfg)
 	if err != nil {
 		return cfg, nil, db, err
 	}
@@ -320,11 +345,16 @@ func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOver
 	if err := cfg.Validate(); err != nil {
 		return cfg, nil, db, config.ValidationError(err)
 	}
-	if err := checkStarts(cfg, db, host, 0); err != nil {
+	if err := addDatabaseCheckStarts(cfg, db, host, 0); err != nil {
 		return cfg, nil, db, err
 	}
 	if err := checkBudget(cfg, db.Name, 0, host, allowOvercommit, suggest); err != nil {
 		return cfg, nil, db, err
+	}
+	if beforeSave != nil {
+		if err := beforeSave(cfg, db); err != nil {
+			return cfg, nil, db, err
+		}
 	}
 	raw, err := cfg.Encode()
 	if err != nil {
@@ -351,13 +381,18 @@ func forgetNewCluster(cfg config.Cluster, name string) error {
 	return engine.ForgetCluster(engine.JournalPath, name)
 }
 
+// forgetClusterJournal drops a cluster's journal entries. It is a variable so
+// a rollback test can run the desired-state transaction without the node's
+// journal path.
+var forgetClusterJournal = engine.ForgetCluster
+
 // forgetDatabase removes name's entry from cluster.toml and its journal
 // entries: db fork's rollback when its cluster was never made.
 func forgetDatabase(name string) error {
-	if err := engine.ForgetCluster(engine.JournalPath, name); err != nil {
+	if err := forgetClusterJournal(engine.JournalPath, name); err != nil {
 		return err
 	}
-	store := state.FileStore{}
+	store := followerState()
 	cfg, _, err := store.Load()
 	if err != nil {
 		return err
@@ -675,6 +710,12 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	clearDeferred(p.Name)
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
+	if inConfig && spec.IsFollower() {
+		if err := retireFollowOwnershipAfterDrop(p.Name, spec.Follows, spec.FollowGeneration); err != nil {
+			warnings = append(warnings, output.Warning{Code: "follow_record_not_retired",
+				Message: "the node-local follow record of " + p.Name + " was left after the drop: " + err.Error()})
+		}
+	}
 	data := map[string]any{"dropped": p.Name, "roles_dropped": roles}
 	if stanzaKept {
 		data["stanza_kept"] = spec.Stanza
@@ -952,7 +993,7 @@ func dropCluster(ctx context.Context, env *Env, name string) error {
 
 // existingRolesIn returns the vaire roles of database name that exist in the
 // cluster at local.
-func existingRolesIn(ctx context.Context, local pg.Local, name string) ([]string, error) {
+func existingRolesIn(ctx context.Context, local sqlRunner, name string) ([]string, error) {
 	wanted := append([]string{name + "_owner"}, prefixedRoles(name)...)
 	quoted := make([]string, len(wanted))
 	for i, role := range wanted {

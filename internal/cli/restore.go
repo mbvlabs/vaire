@@ -127,8 +127,9 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if flagTrue(cmd, "promote") {
-		// The node refuses it too; this saves asking for the token first.
-		if err := node.CheckNotProtected(cfg, db, "restore promote"); err != nil {
+		// The node refuses it too; this saves asking for the token, loading
+		// the dump identity or reporting a dry run first.
+		if err := combinedRestorePreflight(cfg, db); err != nil {
 			return err
 		}
 	}
@@ -329,6 +330,12 @@ func restorePreflight(cfg config.Cluster, db, method, action string) error {
 		return err
 	}
 	return node.CheckNotProtected(cfg, db, action)
+}
+
+// combinedRestorePreflight is what restore --promote refuses, in the same
+// order as the node: a follower first, then a protected database.
+func combinedRestorePreflight(cfg config.Cluster, db string) error {
+	return restorePreflight(cfg, db, "restore.start", "restore promote")
 }
 
 func runRestorePromote(cmd *cobra.Command, args []string) error {

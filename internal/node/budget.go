@@ -14,6 +14,10 @@ import (
 	"github.com/mbvlabs/vaire/internal/tune"
 )
 
+// readHostMemory is hostinfo.ReadMemory for the commit headroom in the
+// admission checks. It is a variable so tests supply fixed host facts.
+var readHostMemory = hostinfo.ReadMemory
+
 // budgetHost is the server's side of the oversubscription arithmetic
 // (RFC 7.5): RAM and the reserve, what /proc/meminfo says can still start,
 // and the data disk.
@@ -28,7 +32,7 @@ func budgetHost(cfg config.Cluster, host hostinfo.Info) tune.Host {
 		ReserveMiB: tune.ServerReserve(host.RAMMiB, override),
 		DiskGiB:    host.DataDisk.SizeGiB,
 	}
-	if m, ok := hostinfo.ReadMemory(); ok {
+	if m, ok := readHostMemory(); ok {
 		h.MemoryKnown = true
 		h.CommitLimitMiB, h.CommittedMiB, h.AvailableMiB = m.CommitLimitMiB, m.CommittedMiB, m.AvailableMiB
 		h.HugePagesFree, h.HugePageSizeKiB = m.HugePagesFree, m.HugePageSizeKiB

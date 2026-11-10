@@ -1,10 +1,17 @@
 package steps
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
@@ -124,11 +131,388 @@ func TestRolesSkipFollowers(t *testing.T) {
 	}
 }
 
+func TestPgbouncerWithholdsAnUnsettledUnfollowsAlias(t *testing.T) {
+	old := backup.RecordsPath
+	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
+	t.Cleanup(func() { backup.RecordsPath = old })
+	cfg := followerConfig()
+	setRecord := func(settled bool) {
+		t.Helper()
+		if err := backup.UpdateRecords(func(s *backup.Records) error {
+			s.Unfollowing["app_follower"] = backup.Unfollow{
+				Source: "app", Stanza: "app_follower-abc123", StartedAt: "2026-11-10T00:00:00Z", Settled: settled,
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := func(session bool) map[string]render.PoolerDatabase {
+		recs, err := backup.LoadRecords()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]render.PoolerDatabase{}
+		for _, db := range poolerDatabases(cfg, recs, session) {
+			out[db.Name] = db
+		}
+		return out
+	}
+	rendered := func(session bool) string {
+		recs, err := backup.LoadRecords()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if session {
+			return string(render.SessionIni(cfg, poolerDatabases(cfg, recs, true), SessionSocketDir))
+		}
+		return string(render.PgbouncerIni(cfg, followerHost, poolerDatabases(cfg, recs, false)))
+	}
+
+	setRecord(false)
+	for _, session := range []bool{false, true} {
+		got := entries(session)
+		if _, ok := got["app_follower"]; ok {
+			t.Errorf("session=%v: an unsettled unfollow's alias is rendered", session)
+		}
+		if _, ok := got["app"]; !ok {
+			t.Errorf("session=%v: the source's alias is missing", session)
+		}
+		if ini := rendered(session); strings.Contains(ini, "app_follower") {
+			t.Errorf("session=%v: the rendered configuration names the unsettled alias:\n%s", session, ini)
+		}
+	}
+
+	setRecord(true)
+	for _, session := range []bool{false, true} {
+		got := entries(session)
+		db, ok := got["app_follower"]
+		if !ok || db.DBName != "app" || db.Port != 5434 {
+			t.Errorf("session=%v: the settled alias is not routed to the follower: %+v", session, db)
+		}
+		if ini := rendered(session); !strings.Contains(ini, "app_follower") {
+			t.Errorf("session=%v: a settled alias is still withheld:\n%s", session, ini)
+		}
+	}
+}
+
+// AF-A1: the direct unfollow fence is a full-configuration entry point, so it
+// applies the same routing lifecycle eligibility as general apply. An awaiting
+// recovery database and an unrelated unfinished ordinary follow keep both their
+// main and __auth aliases out of both poolers, while the ordinary source stays
+// routable and the unsettled unfollow target is still withheld. A missing
+// records file remains the legitimate empty initial state for a fresh boot.
+func TestUnfollowFenceKeepsOtherUnfinishedAliasesExcluded(t *testing.T) {
+	oldPath := backup.RecordsPath
+	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
+	t.Cleanup(func() { backup.RecordsPath = oldPath })
+
+	cfg := followerConfig()
+	for i := range cfg.Clusters {
+		if cfg.Clusters[i].StatementTimeout == "" {
+			cfg.Clusters[i].StatementTimeout = "60s"
+		}
+	}
+	generation := "0123456789abcdef0123456789abcdef"
+	cfg.Clusters = append(cfg.Clusters,
+		config.ClusterSpec{Name: "app_pending", Node: "db1", Port: 5435, Size: "small", StatementTimeout: "60s", Follows: "app", FollowGeneration: generation},
+		config.ClusterSpec{Name: "app_restored", Node: "db1", Port: 5436, Size: "small", StatementTimeout: "60s", Follows: "app"},
+	)
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWrite := writePoolerFile
+	t.Cleanup(func() { writePoolerFile = oldWrite })
+	written := map[string]string{}
+	writePoolerFile = func(path, content string, _ os.FileMode, _, _ string) error {
+		written[path] = content
+		return nil
+	}
+	fence := func() {
+		t.Helper()
+		// The dry shell refuses the reload after the files are written; the
+		// rendered content is this boundary's concern, as in the fail-closed
+		// test above.
+		_ = ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+	}
+	assertAlias := func(db string, want bool) {
+		t.Helper()
+		for _, path := range []string{poolerFilePaths.ini, poolerFilePaths.sessionIni} {
+			content, ok := written[path]
+			if !ok {
+				t.Fatalf("the direct fence did not render %s", path)
+			}
+			for _, alias := range []string{db, db + "__auth"} {
+				if got := strings.Contains(content, alias+" ="); got != want {
+					t.Errorf("%s: alias %s present = %v, want %v", filepath.Base(path), alias, got, want)
+				}
+			}
+		}
+	}
+
+	// No records file: an ordinary follower is still rendered (fresh boot).
+	fence()
+	assertAlias("app", true)
+	assertAlias("app_follower", true)
+
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		s.Unfollowing["app_follower"] = backup.Unfollow{
+			Source: "app", Stanza: "app_follower-abc123", StartedAt: "2026-11-10T00:00:00Z", Settled: false,
+		}
+		s.AwaitingRecovery["app_restored"] = backup.Awaiting{
+			Stanza: "app_restored-abc123", Since: "2026-11-10T00:00:00Z",
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	written = map[string]string{}
+	fence()
+	assertAlias("app", true)
+	assertAlias("app_follower", false) // the unsettled unfollow target
+	assertAlias("app_pending", false)  // an unrelated generated unfinished follow
+	assertAlias("app_restored", false) // awaiting recovery
+}
+
+// C2-A1/B2-01: the pooler render reads the transition records once. A missing
+// records file is the legitimate empty initial state; corrupt or unreadable
+// records are unknown transition state and fail closed before either pooler's
+// file is overwritten or a service is reloaded. The direct fence path used by
+// db unfollow has the same boundary.
+func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
+	oldPath := backup.RecordsPath
+	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
+	t.Cleanup(func() { backup.RecordsPath = oldPath })
+	cfg := followerConfig()
+	rt := engine.Runtime{Host: followerHost}
+	oldPaths := poolerFilePaths
+	dir := t.TempDir()
+	poolerFilePaths = struct {
+		ini, hba, sessionIni, sessionHBA, sessionUnit string
+	}{
+		ini: filepath.Join(dir, "pgbouncer.ini"), hba: filepath.Join(dir, "pgbouncer_hba.conf"),
+		sessionIni: filepath.Join(dir, "session.ini"), sessionHBA: filepath.Join(dir, "session_hba.conf"),
+		sessionUnit: filepath.Join(dir, "session.service"),
+	}
+	t.Cleanup(func() { poolerFilePaths = oldPaths })
+	safe := map[string]string{
+		poolerFilePaths.ini: "safe pgbouncer.ini\n", poolerFilePaths.hba: "safe hba\n",
+		poolerFilePaths.sessionIni: "safe session.ini\n", poolerFilePaths.sessionHBA: "safe session hba\n",
+		poolerFilePaths.sessionUnit: "safe unit\n",
+	}
+	for path, content := range safe {
+		if err := os.WriteFile(path, []byte(content), 0o640); err != nil { //nolint:gosec // G306: test-managed file.
+			t.Fatal(err)
+		}
+	}
+
+	// No records file: initial bootstrap, so a follower alias renders normally.
+	files, err := pgbouncerFiles(cfg, rt)
+	if err != nil {
+		t.Fatalf("missing records are refused: %v", err)
+	}
+	assertPoolerAlias(t, files, "app_follower", true)
+	assertPoolerAlias(t, files, "app", true)
+
+	// A readable unsettled unfollow withholds the alias and its auth alias from
+	// both poolers, on both the ordinary render and the direct fence path.
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		s.Unfollowing["app_follower"] = backup.Unfollow{
+			Source: "app", Stanza: "app_follower-abc123", StartedAt: "2026-11-10T00:00:00Z", Settled: false,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	files, err = pgbouncerFiles(cfg, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPoolerAlias(t, files, "app_follower", false)
+	assertPoolerAlias(t, files, "app", true)
+
+	oldWrite := writePoolerFile
+	t.Cleanup(func() { writePoolerFile = oldWrite })
+	var written map[string]string
+	writePoolerFile = func(path, content string, _ os.FileMode, _, _ string) error {
+		if written == nil {
+			written = map[string]string{}
+		}
+		written[path] = content
+		return nil
+	}
+	// The shell is dry, so the call stops after the writes; the rendered files
+	// are what this boundary protects.
+	_ = ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+	for _, path := range []string{poolerFilePaths.ini, poolerFilePaths.sessionIni} {
+		content, ok := written[path]
+		if !ok {
+			t.Fatalf("the fence did not render %s", path)
+		}
+		if strings.Contains(content, "app_follower =") || strings.Contains(content, "app_follower__auth =") {
+			t.Fatalf("the fence exposed the unsettled alias in %s:\n%s", path, content)
+		}
+	}
+
+	// Corrupt records are unknown, never "no unfinished unfollow".
+	if err := os.WriteFile(backup.RecordsPath, []byte("{"), 0o600); err != nil { //nolint:gosec // G306: test records file.
+		t.Fatal(err)
+	}
+	if files := (pgbouncer{}).RenderedFiles(cfg, rt); files != nil {
+		t.Fatalf("the plan render exposed files from unreadable records: %v", files)
+	}
+	for name, call := range map[string]func() error{
+		"render": func() error { _, err := pgbouncerFiles(cfg, rt); return err },
+		"inputs": func() error { _, err := (pgbouncer{}).Inputs(cfg, rt); return err },
+		"check": func() error {
+			_, err := (pgbouncer{}).Check(context.Background(), cfg, rt)
+			return err
+		},
+		"apply": func() error {
+			_, err := (pgbouncer{}).Apply(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+			return err
+		},
+		"direct fence": func() error {
+			return ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+		},
+	} {
+		err := call()
+		if err == nil {
+			t.Fatalf("%s accepted unreadable unfollow records", name)
+		}
+		var cliErr *output.CLIError
+		if !errors.As(err, &cliErr) || !strings.Contains(fmt.Sprint(cliErr.Details), "unfollow_state_unknown") {
+			t.Fatalf("%s error is not a fail-closed transition refusal: %v", name, err)
+		}
+	}
+
+	// No file was touched by any failing path: the previous safe files stay.
+	writePoolerFile = oldWrite
+	if err := ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil); err == nil || refusalReason(err) != "unfollow_state_unknown" {
+		t.Fatalf("the direct fence accepted unreadable unfollow records: %v", err)
+	}
+	for path, want := range safe {
+		got, err := os.ReadFile(path) //nolint:gosec // G304: test-managed path.
+		if err != nil {
+			t.Fatalf("safe file %s is gone: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("unreadable records overwrote %s: %q", path, got)
+		}
+	}
+}
+
+// refusalReason is an output error's details.reason.
+func refusalReason(err error) string {
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		return ""
+	}
+	details, _ := cliErr.Details.(map[string]any)
+	reason, _ := details["reason"].(string)
+	return reason
+}
+
+// assertPoolerAlias checks both poolers' rendered files for db's alias and its
+// __auth alias.
+func assertPoolerAlias(t *testing.T, files []pgbouncerFile, db string, want bool) {
+	t.Helper()
+	for _, f := range files {
+		if f.path != poolerFilePaths.ini && f.path != poolerFilePaths.sessionIni {
+			continue
+		}
+		for _, alias := range []string{db + " =", db + "__auth ="} {
+			if got := strings.Contains(f.content, alias); got != want {
+				t.Errorf("%s: alias %q present=%v, want %v:\n%s", f.path, alias, got, want, f.content)
+			}
+		}
+	}
+}
+
+func TestFencePoolerDatabasePausesAndKillsBothPoolers(t *testing.T) {
+	oldNames, oldAdmin := poolerDatabaseNames, poolerAdminAt
+	t.Cleanup(func() { poolerDatabaseNames, poolerAdminAt = oldNames, oldAdmin })
+	poolerDatabaseNames = func(context.Context, string, int) (map[string]bool, error) {
+		return map[string]bool{"app_follower": true}, nil
+	}
+	var got []string
+	poolerAdminAt = func(_ context.Context, _ string, port int, command string) error {
+		got = append(got, fmt.Sprintf("%d %s", port, command))
+		return nil
+	}
+	resume, err := FencePoolerDatabase(context.Background(), "app_follower")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{
+		"6432 RESUME app_follower", "6432 KILL app_follower", "6432 PAUSE app_follower",
+		"5432 RESUME app_follower", "5432 KILL app_follower", "5432 PAUSE app_follower",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("fence commands = %v, want %v", got, want)
+	}
+	resume()
+	if want := []string{"6432 RESUME app_follower", "5432 RESUME app_follower"}; !slices.Equal(got[6:], want) {
+		t.Fatalf("resume commands = %v, want %v", got[6:], want)
+	}
+}
+
+func TestFencePoolerDatabaseWithAnAliasAlreadyWithheld(t *testing.T) {
+	oldNames, oldAdmin := poolerDatabaseNames, poolerAdminAt
+	t.Cleanup(func() { poolerDatabaseNames, poolerAdminAt = oldNames, oldAdmin })
+	poolerDatabaseNames = func(context.Context, string, int) (map[string]bool, error) {
+		return map[string]bool{"app": true}, nil
+	}
+	var got []string
+	poolerAdminAt = func(_ context.Context, _ string, port int, command string) error {
+		got = append(got, fmt.Sprintf("%d %s", port, command))
+		return nil
+	}
+	resume, err := FencePoolerDatabase(context.Background(), "app_follower")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("a withheld alias was paused or killed: %v", got)
+	}
+	resume()
+}
+
+func TestFencePoolerDatabaseRefusesAFailedPause(t *testing.T) {
+	oldNames, oldAdmin := poolerDatabaseNames, poolerAdminAt
+	t.Cleanup(func() { poolerDatabaseNames, poolerAdminAt = oldNames, oldAdmin })
+	poolerDatabaseNames = func(context.Context, string, int) (map[string]bool, error) {
+		return map[string]bool{"app_follower": true}, nil
+	}
+	var resumed, pauseFailed bool
+	poolerAdminAt = func(_ context.Context, _ string, _ int, command string) error {
+		if command == "RESUME app_follower" && pauseFailed {
+			resumed = true
+			return nil
+		}
+		if command == "PAUSE app_follower" {
+			pauseFailed = true
+			return errors.New("the pooler did not answer")
+		}
+		return nil
+	}
+	if _, err := FencePoolerDatabase(context.Background(), "app_follower"); err == nil {
+		t.Fatal("a failed pause did not refuse the fence")
+	}
+	if !resumed {
+		t.Fatal("a failed fence left the pooler paused")
+	}
+}
+
 func TestFollowerRouting(t *testing.T) {
 	cfg := followerConfig()
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, session := range []bool{false, true} {
 		var found bool
-		for _, db := range poolerDatabases(cfg, session) {
+		for _, db := range poolerDatabases(cfg, recs, session) {
 			if db.Name == "app_follower" {
 				found = true
 				if db.DBName != "app" || db.Port != 5434 {
@@ -140,7 +524,7 @@ func TestFollowerRouting(t *testing.T) {
 			t.Errorf("session=%v: no entry for the follower", session)
 		}
 	}
-	ini := string(render.PgbouncerIni(cfg, followerHost, poolerDatabases(cfg, false)))
+	ini := string(render.PgbouncerIni(cfg, followerHost, poolerDatabases(cfg, recs, false)))
 	if !strings.Contains(ini, "app_follower = host=/var/run/postgresql port=5434 dbname=app auth_dbname=app_follower__auth") {
 		t.Errorf("pgbouncer.ini:\n%s", ini)
 	}
@@ -392,5 +776,35 @@ func TestFloorsDiffer(t *testing.T) {
 		if got := FloorsDiffer(render.DiffBytes(path, tc.have, tc.now)); got != tc.want {
 			t.Errorf("%s: FloorsDiffer = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// Admission reads the source's running floors from pg_settings: every floor
+// must be present and a valid PostgreSQL integer, and an unknown row or value
+// fails closed instead of becoming a default.
+func TestRunningFloorsOf(t *testing.T) {
+	rows := func(value string) []map[string]string {
+		out := make([]map[string]string, 0, len(FloorSettings))
+		for _, name := range FloorSettings {
+			out = append(out, map[string]string{"name": name, "setting": value})
+		}
+		return out
+	}
+	got, err := runningFloorsOf("app", rows("100"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range FloorSettings {
+		if got[name] != 100 {
+			t.Errorf("%s = %d, want 100", name, got[name])
+		}
+	}
+	if _, err := runningFloorsOf("app", rows("not a number")); err == nil {
+		t.Error("a malformed running floor was accepted")
+	}
+	missing := rows("100")
+	missing = missing[1:]
+	if _, err := runningFloorsOf("app", missing); err == nil {
+		t.Error("a missing running floor was accepted")
 	}
 }

@@ -325,7 +325,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		}
 		ja.pending(activity.OutcomeSkipped, output.CodePrecondition, jobSkipReason(busy, err))
 		finishJobWithActivity(rec, ja, engine.JobSkipped, detail, res, nil)
-		notRun(env, errors.New(detail))
+		notRun(ctx, env, errors.New(detail))
 		return res, detail, nil
 	}
 	if err != nil {
@@ -406,20 +406,16 @@ var nodeLockers = jobLockers{node: engine.Acquire, heavyIO: engine.AcquireHeavyI
 
 // jobLockMode is the mode a job takes the node lock and its clusters' locks in:
 // shared for the common jobs, exclusive for the ones that change the desired
-// state and a cluster's identity (exclusiveJobs). A follower recovery mutates
-// the deterministic data and configuration paths an interrupted attempt owns,
-// so it is exclusive too: a competing recovery must not race its ownership
-// record or its rebuild, and no drop or apply may run beside it.
+// state and a cluster's identity (exclusiveJobs). A follower follow or recovery
+// records ownership of the deterministic data and configuration paths and may
+// remove them, and a failed plain follow rolls back its cluster.toml entry, so
+// both take the locks exclusive: no competing follow, drop or apply may race
+// their record, their rebuild or the desired-state rollback.
 func jobLockMode(env *jobEnv) engine.LockMode {
-	if exclusiveJobs[env.Job] || env.Job == "db-follow" && dbFollowRecover(env.Params) {
+	if exclusiveJobs[env.Job] || env.Job == "db-follow" {
 		return engine.LockExclusive
 	}
 	return engine.LockShared
-}
-
-func dbFollowRecover(params json.RawMessage) bool {
-	var p dbFollowParams
-	return json.Unmarshal(params, &p) == nil && p.Recover
 }
 
 // tryJobLocks takes a job's locks once each, in order: the node lock, the
@@ -533,9 +529,11 @@ func putJob(rec engine.JobRecord) {
 }
 
 // notRun undoes what the RPC of a skipped job prepared: a restore is
-// recorded failed, so abort can clean it up, and a fork's cluster.toml entry
-// is removed, as its cluster was never made.
-func notRun(env *jobEnv, cause error) {
+// recorded failed, so abort can clean it up, and a fork's or follower's
+// cluster.toml entry is removed, as its cluster was never made. It holds no
+// job lock, so the follower cleanup takes the exclusive node lock, reloads the
+// desired state and removes only the entry its operation prepared.
+func notRun(ctx context.Context, env *jobEnv, cause error) {
 	switch env.Job {
 	case "restore", "recover":
 		failRestore(env, cause)
@@ -548,8 +546,10 @@ func notRun(env *jobEnv, cause error) {
 		// A follower's entry whose cluster was never made; one awaiting
 		// recovery stays awaiting.
 		var p dbFollowParams
-		if json.Unmarshal(env.Params, &p) == nil && p.Name != "" && !p.Recover {
-			_ = forgetDatabase(p.Name)
+		if json.Unmarshal(env.Params, &p) == nil && p.Name != "" && !p.Recover && p.PreparedNew {
+			if err := rollbackPreparedFollow(ctx, p); err != nil {
+				logLine(env.Report, env.Job, "the skipped follow's cluster.toml entry was left for a retry: "+err.Error())
+			}
 		}
 	}
 }

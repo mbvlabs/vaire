@@ -472,6 +472,81 @@ func resizeFixture(t *testing.T, cfg config.Cluster, size string, dryRun bool) (
 	return env, store
 }
 
+// FG-m5/B-05: db list reads a follower's replication only while it follows,
+// i.e. while its cluster runs. A stopped follower keeps follows and its
+// stopped state, but has no follower object: status, not list, still reads
+// the source's slot for it.
+func TestDBListStoppedFollowerDoesNotReadReplication(t *testing.T) {
+	cfg := followerLifecycleCfg(t, "app_follower")
+	dir := t.TempDir()
+	oldRecords := backup.RecordsPath
+	backup.RecordsPath = filepath.Join(dir, "records.json")
+	oldNames, oldPG, oldFollowerPG := databaseListClusterNames, databaseListPG, followerPG
+	t.Cleanup(func() {
+		backup.RecordsPath = oldRecords
+		databaseListClusterNames, databaseListPG, followerPG = oldNames, oldPG, oldFollowerPG
+	})
+	databaseListClusterNames = func(context.Context) map[string]string {
+		return map[string]string{"app": "online", "app_follower": "down"}
+	}
+	databaseListPG = func(config.ClusterSpec) sqlRunner { return &followerQueryPG{} }
+	followerReads := 0
+	followerPG = func(config.ClusterSpec) sqlRunner {
+		followerReads++
+		return &followerQueryPG{}
+	}
+
+	res, err := handleDBList(context.Background(), &Env{Cluster: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := res.Data.(map[string]any)
+	databases, _ := data["databases"].([]databaseInfo)
+	var app, follower *databaseInfo
+	for i := range databases {
+		switch databases[i].Name {
+		case "app":
+			app = &databases[i]
+		case "app_follower":
+			follower = &databases[i]
+		}
+	}
+	if app == nil || app.State != stateRunning {
+		t.Fatalf("app row %+v, want running", app)
+	}
+	if follower == nil {
+		t.Fatal("db list lost the stopped follower row")
+	}
+	if follower.State != stateStopped || follower.Follows != "app" {
+		t.Errorf("stopped follower %+v, want state %q and follows app", follower, stateStopped)
+	}
+	if follower.Follower != nil {
+		t.Errorf("db list read a stopped follower's replication: %+v", follower.Follower)
+	}
+	if followerReads != 0 {
+		t.Errorf("db list queried replication %d times for a stopped follower", followerReads)
+	}
+	raw, err := json.Marshal(follower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"follower"`) {
+		t.Errorf("stopped follower row carries a follower object: %s", raw)
+	}
+}
+
+// fixedResizeHost gives db resize deterministic host facts: Detect and the
+// /proc/meminfo read are the admission inputs, not this machine's state.
+// running says whether the old cluster gives its shared memory back.
+func fixedResizeHost(t *testing.T, host hostinfo.Info, mem hostinfo.Memory, running bool) {
+	t.Helper()
+	oldDetect, oldMemory, oldRunning := detectHost, readHostMemory, clusterRunning
+	detectHost = func(string) (hostinfo.Info, error) { return host, nil }
+	readHostMemory = func() (hostinfo.Memory, bool) { return mem, true }
+	clusterRunning = func(config.ClusterSpec) bool { return running }
+	t.Cleanup(func() { detectHost, readHostMemory, clusterRunning = oldDetect, oldMemory, oldRunning })
+}
+
 // A resize that would lower a follower's hot-standby floors is refused before
 // it saves or applies anything, in a dry run too (Q1a).
 func TestResizeRefusesADecreasedFollowerFloor(t *testing.T) {
@@ -566,6 +641,13 @@ func TestResizeAppliesFollowersFirstOnRetry(t *testing.T) {
 	cfg := followerLifecycleCfg(t, "app_follower")
 	cfg.Clusters[0].Size = "small"
 	env, store := resizeFixture(t, cfg, "medium", false)
+	// Both attempts must reach the injected follower failure: enough RAM and
+	// CommitLimit headroom for the source's new size, with its old cluster
+	// still running.
+	fixedResizeHost(t,
+		hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
+		hostinfo.Memory{CommitLimitMiB: 16384, CommittedMiB: 1024, AvailableMiB: 8192, HugePageSizeKiB: 2048},
+		true)
 	var runs []string
 	followerRuns := 0
 	oldResize, oldFollower := applyResizeStep, applyFollowerStep
@@ -616,6 +698,46 @@ func TestResizeAppliesFollowersFirstOnRetry(t *testing.T) {
 	apply, _ := data["apply"].(engine.ApplyData)
 	if len(apply.Restarts) != 2 || apply.Restarts[0].Cluster != "app_follower" || apply.Restarts[1].Cluster != "app" {
 		t.Errorf("restarts %+v, want app_follower then app", apply.Restarts)
+	}
+}
+
+// A resize whose new shared memory does not fit the CommitLimit is refused by
+// the production admission check before anything is saved or applied. The
+// fixed facts make this deterministic: the old cluster is down, so it frees
+// nothing.
+func TestResizeRefusesInsufficientCommitHeadroom(t *testing.T) {
+	cfg := followerLifecycleCfg(t, "app_follower")
+	cfg.Clusters[0].Size = "small"
+	env, store := resizeFixture(t, cfg, "medium", false)
+	fixedResizeHost(t,
+		hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
+		hostinfo.Memory{CommitLimitMiB: 1024, CommittedMiB: 1024, AvailableMiB: 0, HugePageSizeKiB: 2048},
+		false)
+	applies := 0
+	oldResize, oldFollower := applyResizeStep, applyFollowerStep
+	applyResizeStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
+		applies++
+		return engine.ApplyData{}, nil, nil
+	}
+	applyFollowerStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
+		applies++
+		return engine.ApplyData{}, nil, nil
+	}
+	defer func() { applyResizeStep, applyFollowerStep = oldResize, oldFollower }()
+
+	_, err := handleDBResize(context.Background(), env)
+	if err == nil || reason(t, err) != "would_not_start" {
+		t.Fatalf("no CommitLimit headroom: got %v, want would_not_start", err)
+	}
+	if applies != 0 {
+		t.Errorf("the refusal ran %d applies", applies)
+	}
+	saved, _, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Clusters[0].Size != "small" {
+		t.Errorf("the refusal saved size %q, want small", saved.Clusters[0].Size)
 	}
 }
 

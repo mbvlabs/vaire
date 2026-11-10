@@ -658,7 +658,7 @@ Built in the units of [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md); main a
 
 Heroku-style followers for rehearsing risky migrations on production data. **Decided: physical standbys.** A follower is a cluster of its own that streams from one source database's cluster; `wal_level` is `replica`. Logical replication stays possible later as an opt-in.
 
-Built in the units of [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md); the review findings and the decisions that changed the design are in [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md). The build is committed on `phase-6-followers`, not merged or released, and its live test has not run.
+Built in the units of [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md); findings and decisions are in [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md). The initial build is committed on `phase-6-followers`; final-gate corrections remain uncommitted. On 2026-11-10 both independent cumulative source reviews accepted with no remaining actionable findings, and independent full local verification plus uncached tests passed; see [`REVIEW-phase-6-final.md`](./REVIEW-phase-6-final.md). Not merged, published or live-qualified. Activity qualification must precede follower deployment, and publication/live operations remain separately gated.
 
 | Module | What it does | Status |
 | --- | --- | --- |

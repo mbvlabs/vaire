@@ -1,5 +1,67 @@
 # Phase 6 work units: followers
 
+## Current execution status — 2026-11-10
+
+**Final local gate:** both independent cumulative source reviews accept with
+no remaining actionable findings. Independent required chain, eight uncached
+targeted packages and full uncached suite pass. U6's local review/verification
+portion is complete, fixes uncommitted. Commit/publication portion remains
+separately gated; U7/live qualification has not started. Historical status
+updates below remain chronology, superseded by this disposition.
+
+Diagnostic/routing completion update: both B3-01 and AF-A1 were explicitly
+authorized and implemented. Worker full/uncached checks pass; both independent
+verdicts and final-tree verification pending. Diagnostic acquisition excludes
+only recovery-awaiting entries, while engine/direct-fence routing eligibility
+also excludes unfinished generations except explicit owned execution keep.
+
+Latest U6 result: independent local checks pass; targeted four corrections and
+original nine findings source-accepted. Lane A has one routing minor; lane B
+blocks on unfinished-follower diagnostic acquisition regression. Both are open
+and no further source writer is active pending user disposition. U7/live and
+publication remain unstarted/unauthorized.
+
+Latest: after the required stop the user authorized one additional targeted
+pass on the four remaining findings. It is implemented and worker checks pass;
+independent final-tree verification and both review verdicts are pending.
+
+Latest U6 disposition: **STOPPED after second corrective attempt**. Independent
+local full/uncached checks pass; both re-review lanes BLOCK with three majors
+and one minor after deduplication. Remaining areas: unread-state pooler security,
+follow/unfollow operation exclusion, general apply of unfinished followers and
+fresh-follow remediation. No third source correction without user disposition.
+No U7/live or publication authority has been granted.
+
+The port and fix batches are committed through `2155a07` on
+`phase-6-followers`, based on master `8d68056`. The current execution authority
+is main checkout's `docs/HANDOFF-followers-final-gate.md`, following the approved
+state-of-the-union direction. See [the final review](REVIEW-phase-6-final.md)
+for the frozen checkpoint and fresh evidence, and
+[the current findings ledger](FINDINGS-phase-6-review.md) for closure status.
+
+- U0–U5: historically implemented/committed; final independent acceptance pending.
+- U6: FG-01/02 complete; both independent whole-diff reviews returned BLOCK.
+  Four majors and five minors were found after deduplication. Authorized fix
+  batches and two explicitly approved lifecycle corrections are implemented
+  but await independent re-review. The final worker's full local chain and
+  uncached targeted tests passed; independent final-tree verification is pending.
+  First fixed-tree independent checks passed but re-review found six major
+  boundary gaps and two minor follow-ups. Second lifecycle/security corrections
+  are implemented, pending independent acceptance; no third attempt without
+  stopping and asking if the same unit remains incomplete.
+- U7: not started; activity qualification must precede follower deployment.
+  Commits, publication and all live operations remain separately gated.
+
+The initial-build introduction, setup instructions, old role/model names and
+unit-level commit permissions below are historical, not instructions to repeat
+setup or authority to mutate Git today. Preserve both legacy directories.
+Q1a/Q2/Q3 in the implementation record supersede conflicting original design
+prose. Manual checklist fault mechanisms still require a bounded run sheet;
+timing-only adoption kills, postgres chmod and disabled `ALTER SYSTEM` are not
+valid proof of the intended faults.
+
+## Historical initial-build introduction and execution plan
+
 Phase 6 is designed, and a first build exists. That build was made on 2026-10-16 in the worktree `.claude/worktrees/phase-6-followers`, on top of `fb13ec3`. It was never committed, reviewed or run on a server. Since then master has gained the rename to vaire, the v1 fixes (the TOTP write guard, hiding admin sessions from `queries` and `top`, `sql` with several statements, the secrets gate), pre-release versions, and local activity history. The worktree's git link still points at `/home/mbv/work/eru`, so git can't see the work there.
 
 This document turns what's left into work units that an orchestrator hands to worker and reviewer sub-agents. The design (scope, decisions D1–D15, the manual test checklist and the risks) is carried over from the first build's work-units file, renamed to vaire. It's in the second half of this document, and it's what reviewers check the code against.
@@ -148,7 +210,11 @@ Where the build differs from the design below; the findings file and the code wi
 - **Resize (Q1a, which supersedes D6's unconditional follower-first rule).** Any resize that would lower a follower's hot-standby floors is refused with `has_followers`; to shrink such a source, unfollow or drop the follower, resize, then follow again. A resize that grows or keeps the floors applies the followers' configuration first, one at a time, before the source, so a retry after a failed follower update runs in the same order. A deferred follower restart leaves `restart_pending` and warns that replay may pause. A hand edit of floor settings in `cluster.toml` followed by plain `vaire apply` is not ordered: run `vaire apply --db <follower>` first.
 - **Protection (Q2).** A follower and an unfollowed copy do not inherit the source's protection; an unfollowed copy keeps only the protection the operator gave it. The `db follow` and `db unfollow` help and the guide say so.
 - **Visibility (Q3).** The replay-timestamp fallback is gone. Lag in seconds is PostgreSQL's `replay_lag`, with the idle NULL reported as zero only for a streaming follower whose byte backlog was measured as zero; slot retention is measured against `restart_lsn` separately from the replay backlog against `replay_lsn`; unknown values are omitted from JSON and metrics; `source_known`/`self_known`/`source_error`/`self_error` replace one `known`/`error` bit. Doctor still checks a stopped follower's slot from the source, and `db list` names an unread follower side.
-- **Resumable recovery.** `db recover` of a follower writes the node-local `follow-<db>.json` ownership record before its first local mutation, reuses a completed copy only when the registration matches and the slot is `reserved` or `extended` with a restart position (missing, lost or `unreserved` takes the owned recopy path), marks the adopted copy durably, and refuses foreign paths. Its dry run reports `resume`, `recopy_reason` and `resume_conditional`.
+- **Resumable follow/recovery.** Both ordinary `db follow` and follower `db recover` write node-local ownership before local mutation. Public retry admits only matching unfinished owned progress. Copied and adopted unfinished copies require matching registration and a `reserved` or `extended` slot with a restart position for reuse; unsafe slots take proven-owned recopy, unreadable inspection fails closed, and foreign paths are refused. Ownership survives failed starts; destructive recopy first invalidates the adopted marker. Preview reports `resume`, `recopy_reason` and `resume_conditional`. These final-gate corrections await independent re-review and live qualification.
+- **Lifecycle serialization.** All follow jobs take exclusive locks, reload and revalidate desired state and operation identity before effects. Prepared-entry rollback, including skipped/start-failure cleanup, is serialized and checks entry identity. No repair or refresh command is added.
+- **Ordinary operation generation.** A managed immutable in-flight `follow_generation` distinguishes retries from same-shape replacements. Fresh-only untouched preparation cleanup checks current generation and artifacts under lock; retry cleanup never removes existing work. Successful completion clears the generation durably before ownership cleanup; drop retires matching ownership after physical cleanup. Empty awaiting stanza remains valid for follower recovery.
+- **Interrupted unfollow protection.** Durable unsettled transition records fence protected arbitrary SQL even for read-intent requests and withhold aliases from both rendered poolers. Strict fencing precedes promotion; admin policy is settled against actual names before exposure, including partial renames. Resume is no longer an unconditional failure cleanup. These second-attempt corrections remain subject to independent review and real-host qualification.
+- **New-follow floor admission.** New follow compares proposed standby floors against effective source settings, refusing an unsafe mismatch with an explicit source-restart hint. Unknown necessary facts fail closed. Unrelated pending restarts do not by themselves block admission; no automatic restart or runtime-derived floor configuration is added.
 - **Resumable unfollow.** `db unfollow` records its source and stanza in `records.json` before the first irreversible step, holds the node and cluster locks, reloads `cluster.toml`, and resumes at the step an earlier attempt stopped at. A job that ends without a result is `job_outcome_unknown`; the CLI then hands the operator the new passwords, which may have been installed.
 - **New warnings.** `slot_not_dropped` (the source was down or refused the drop) and `follower_metrics_failed` (the follower file could not be written) join `followers_diverged` and `follower_not_streaming`.
 - **Hot-standby floors.** PostgreSQL numeric floor values are parsed as PostgreSQL reads them; an invalid or unrepresentable value fails the resize instead of silently using a lower floor.
@@ -157,7 +223,9 @@ Where the build differs from the design below; the findings file and the code wi
 
 # Design (carried over from the first build, 2026-10-16)
 
-The first build implemented every decision below as written. The user hasn't approved them yet. Annotate any you want changed. U3's reviewers check the code against this text.
+Historical introduction: the first build implemented these original proposals.
+Later operator decisions and the implementation record above govern current
+review; the original approval-request wording is not a new approval gate.
 
 ## Scope
 
@@ -286,7 +354,7 @@ The name stays the follower's: `--name` is deferred (fork the unfollowed databas
 - On the follower: `pg_is_in_recovery()` and `pg_get_wal_replay_pause_state()`.
 - **Lag in seconds is PostgreSQL's `replay_lag`**, the replay/visibility delay; it is not a catch-up estimate and not the age of an idle source. PostgreSQL reports NULL once a standby has caught up and the source is idle: vaire reports zero only for a streaming follower whose byte backlog was measured as zero. A positive or unknown backlog with no timing sample leaves the seconds unknown. There is no replay-timestamp fallback.
 - **Slot retention is measured separately**, against `restart_lsn`; it is never substituted for the replay byte lag, which is measured against `replay_lsn` and needs a walsender.
-- **Unknown is not zero.** `lag_bytes`, `lag_seconds` and `slot_retained_bytes` are omitted when unmeasured. `source_known` and `self_known` say independently whether each side answered, and `source_error`/`self_error` say why not (they replace one `known`/`error` bit). A fact read from an unread side is omitted too: `streaming`, `slot_exists`, `slot_active` and `slot_safe_bytes` without the source (`slot_safe_bytes = -1` means no cap), `in_recovery` and `replay_paused` without the follower.
+- **Unknown is not zero.** `lag_bytes`, `lag_seconds` and `slot_retained_bytes` are omitted when unmeasured. `source_known` and `self_known` say independently whether each side answered, and `source_error`/`self_error` say why not (they replace one `known`/`error` bit). A fact read from an unread side is omitted too: `streaming`, `slot_exists`, `slot_active` and `slot_safe_bytes` without the source, `in_recovery` and `replay_paused` without the follower. Slot allowance is nullable independently: unknown/malformed/NULL without positive unlimited-cap evidence is omitted. Measured zero or negative allowance remains measured; proven unlimited capacity uses `slot_safe_bytes = -1` with `slot_uncapped = true`, distinct from a measured negative allowance. Missing/lost slots never establish unlimited capacity.
 - `db list`: state `following` for a running follower, `follows <source>` in the STANZA column, and the lag after the state, naming an unknown side or a paused replay instead of printing a healthy value. JSON carries `follower` (source, `source_known`/`self_known` and their errors, streaming, lag bytes and seconds, slot). `status` is the same per database, with the source's slot.
 - Doctor (category `postgres`, `internal/doctor/follower.go`): `follower.streaming` (fail when not streaming, out of recovery, or replay paused), `follower.lag` (warn at 5 min or 1 GiB, fail at 1 h or 16 GiB), `follower.slot` (warn when the slot holds more than half of what it may, fail when lost or missing), `follower.orphan_slots` (warn on a source). A stopped follower skips the streaming and lag checks but its slot is still checked from the source; a failure one side proves stands even when the other is unread, and an unread side warns. A server without followers gets one `skip` row per check.
 - Metrics: `vaire-followers.prom`, written by `metrics-refresh`: `vaire_follower_streaming{db,source}`, `vaire_follower_lag_bytes`, `vaire_follower_lag_seconds`, `vaire_follower_slot_retained_bytes`, `vaire_follower_slot_lost`. A sample is written only for a measured value; a failed write fails refresh and the job warns `follower_metrics_failed`.

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,14 +61,20 @@ type followerServer struct {
 	// 60-vaire-follower.conf, restart starts the cluster with its own
 	// configuration, dropSlot drops the follower's slot on its source, and
 	// finish makes the rest of it independent (its own steps, the poolers,
-	// metrics, its stanza, first full and timers). resume lets the poolers'
-	// clients in again after the renames.
+	// metrics, its stanza, first full and timers). fence cuts the poolers'
+	// clients and renders their alias out before the promotion, settle applies
+	// the protection policy to the database and owner names the cluster holds,
+	// and resume lets the poolers' clients in again after the renames and
+	// clears a pause an earlier attempt left.
 	promote    func(ctx context.Context, local pg.Local, data string) ([]string, error)
 	rename     func(ctx context.Context, local sqlRunner, source, name string, passwords map[string]string, report engine.Reporter, job string) error
 	removeConf func(cluster string) error
 	restart    func(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec) error
 	dropSlot   func(ctx context.Context, cfg config.Cluster, source, name string) *output.Warning
 	finish     func(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec, source string, resume func()) ([]output.Warning, error)
+	fence      func(ctx context.Context, env *jobEnv, cfg config.Cluster, name string) (func(), error)
+	settle     func(ctx context.Context, local sqlRunner, spec config.ClusterSpec, source, name string) error
+	resume     func(ctx context.Context, name string)
 }
 
 // followerCopy is the physical work of materialising one follower's copy.
@@ -117,6 +125,9 @@ var followerServerOps = followerServer{
 	restart:    restartFollower,
 	dropSlot:   dropUnfollowedSlot,
 	finish:     finishUnfollow,
+	fence:      fenceUnfollowPoolers,
+	settle:     settleUnfollowAdminAccess,
+	resume:     steps.ResumePoolerDatabase,
 }
 
 // dbFollowParams are db.follow's params, and the db-follow job's.
@@ -136,6 +147,16 @@ type dbFollowParams struct {
 	// Recover is db recover of a follower awaiting recovery (D14): its
 	// entry is in cluster.toml already.
 	Recover bool `json:"recover,omitempty"`
+	// Generation is an ordinary follow's opaque operation identity from its
+	// prepared cluster entry. A job or rollback whose entry no longer carries
+	// it refuses rather than acting on a replacement.
+	Generation string `json:"generation,omitempty"`
+	// RecoverSince is the awaiting record's nonempty generation for a
+	// recovery. A job whose awaiting record changed refuses.
+	RecoverSince string `json:"recover_since,omitempty"`
+	// PreparedNew is true only for the request that added a fresh follower
+	// entry. A public retry never is, so it never rolls the entry back.
+	PreparedNew bool `json:"prepared_new,omitempty"`
 }
 
 // dbUnfollowParams are db.unfollow's params, and the db-unfollow job's.
@@ -441,10 +462,13 @@ func checkFollowSource(src config.ClusterSpec, action string) error {
 	return nil
 }
 
-// handleDBFollow checks the source and the name, then, under the exclusive
-// lock, adds the follower to cluster.toml as db create with an explicit
-// size does (a port, no stanza, the budget refusal) and starts the
-// detachable job db-follow, which makes its cluster (D2).
+// handleDBFollow checks the source and the name, then either resumes an
+// unfinished owned follow the same request left, or, under the exclusive lock,
+// adds the follower to cluster.toml as db create with an explicit size does (a
+// port, no stanza, the budget refusal), and starts the detachable job
+// db-follow, which makes its cluster (D2). A new follow is refused when the
+// running source still demands higher hot-standby floors than the follower is
+// about to be configured with.
 func handleDBFollow(ctx context.Context, env *Env) (Result, error) {
 	var p dbFollowParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -465,32 +489,126 @@ func handleDBFollow(ctx context.Context, env *Env) (Result, error) {
 	if err := checkFollowSource(src, "db follow"); err != nil {
 		return Result{}, err
 	}
-	if _, ok := cfg.ClusterByName(p.Name); ok || steps.ClusterExists(ctx, p.Name) {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return Result{}, err
+	}
+	if err := refuseFollowWithUnfollow(recs, p.Name); err != nil {
+		return Result{}, err
+	}
+	existing, inConfig := cfg.ClusterByName(p.Name)
+	clusterExists := steps.ClusterExists(ctx, p.Name)
+	resume := false
+	if inConfig {
+		if existing.IsFollower() && existing.Follows == p.Source {
+			if resume, err = followRetryable(cfg, recs, existing); err != nil {
+				return Result{}, err
+			}
+		}
+		if !resume {
+			return Result{}, existingDatabase(p.Name)
+		}
+	} else if clusterExists {
 		return Result{}, existingDatabase(p.Name)
 	}
-	if _, err := restoreSpace(ctx, cfg, p.Source); err != nil {
+	host := runtimeFor(env, false).Host
+	if resume {
+		// The generation is the operation's identity; a later writer that
+		// removes or replaces the entry makes the job refuse rather than build
+		// under it. A retry never prepares or rolls back the entry.
+		if existing.FollowGeneration == "" {
+			return Result{}, existingDatabase(p.Name)
+		}
+		p.Generation = existing.FollowGeneration
+	} else {
+		// The preflight an operator sees before the lock is advisory; the
+		// authoritative check runs with the exact prepared entry under the
+		// preparation lock and again in the job after its locked reload.
+		previewCfg, previewSpec, err := followerPreviewEntry(cfg, src, p)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := refuseUnsafeFollowFloors(ctx, previewCfg, src, previewSpec, host, false); err != nil {
+			return Result{}, err
+		}
+	}
+	if _, err := followSpace(ctx, cfg, p.Source); err != nil {
 		return Result{}, err
 	}
 	p.From = followFrom(ctx, cfg, src)
 	if env.Req.DryRun {
-		return Result{Data: map[string]any{"source": p.Source, "name": p.Name, "size": p.Size, "from": p.From,
-			"slot": config.FollowerSlot(p.Name), "dry_run": true}}, nil
+		data := map[string]any{"source": p.Source, "name": p.Name, "size": p.Size, "from": p.From,
+			"slot": config.FollowerSlot(p.Name), "dry_run": true}
+		if resume {
+			preview, err := followerFollowResume(ctx, cfg, src, existing)
+			if err != nil {
+				return Result{}, err
+			}
+			data["resume"] = preview.Resume
+			if preview.RecopyReason != "" {
+				data["recopy_reason"] = preview.RecopyReason
+			}
+			if preview.Conditional {
+				data["resume_conditional"] = true
+			}
+		}
+		return Result{Data: data}, nil
 	}
-	release, err := engine.Acquire(ctx, engine.LockExclusive, "db.follow", env.Req.RequestID, env.Req.LockTimeout())
+	if resume {
+		env.Cluster = cfg
+		id, err := followStartJob(ctx, env, "db-follow", p, stepSecrets(env.Req.Secrets))
+		if err != nil {
+			return Result{}, err
+		}
+		res, err := followJob(ctx, env, id)
+		if err != nil {
+			return res, err
+		}
+		if m, ok := res.Data.(map[string]any); ok {
+			m["database"] = existing
+		}
+		return res, nil
+	}
+	followBeforePrepareLock()
+	release, err := followPrepareAcquire(ctx, env.Req.RequestID, env.Req.LockTimeout())
 	if err != nil {
 		return Result{}, err
 	}
-	saved, _, created, err := addDatabase(ctx, env, followerSpec(src, p.Name, p.Size), p.AllowOvercommit, followCommand(p))
+	generation, err := config.NewFollowGeneration()
+	if err != nil {
+		release()
+		return Result{}, err
+	}
+	saved, _, created, err := addDatabaseFrom(ctx, env,
+		func(cfg config.Cluster) (config.ClusterSpec, error) {
+			src, ok := cfg.ClusterByName(p.Source)
+			if !ok {
+				return config.ClusterSpec{}, databaseNotFound(p.Source)
+			}
+			spec := followerSpec(src, p.Name, p.Size)
+			spec.FollowGeneration = generation
+			return spec, nil
+		}, p.AllowOvercommit, followCommand(p),
+		func(cfg config.Cluster, spec config.ClusterSpec) error {
+			src, ok := cfg.ClusterByName(spec.Follows)
+			if !ok {
+				return databaseNotFound(spec.Follows)
+			}
+			return refuseUnsafeFollowFloors(ctx, cfg, src, spec, runtimeFor(env, false).Host, false)
+		})
 	release()
 	if err != nil {
 		return Result{}, err
 	}
 	env.Cluster = saved
-	id, err := startJob(ctx, env, "db-follow", p, stepSecrets(env.Req.Secrets))
+	p.Generation = created.FollowGeneration
+	p.PreparedNew = true
+	id, err := followStartJob(ctx, env, "db-follow", p, stepSecrets(env.Req.Secrets))
 	if err != nil {
 		// The job removes the entry when it fails; one that never started
-		// can't.
-		return Result{}, errors.Join(err, forgetDatabase(p.Name))
+		// can't. The cleanup serializes with every desired-state writer and
+		// removes only the untouched entry this request prepared.
+		return Result{}, errors.Join(err, rollbackPreparedFollow(ctx, p))
 	}
 	res, err := followJob(ctx, env, id)
 	if err != nil {
@@ -499,8 +617,204 @@ func handleDBFollow(ctx context.Context, env *Env) (Result, error) {
 	if m, ok := res.Data.(map[string]any); ok {
 		m["database"] = created
 	}
-	res.Warnings = append(res.Warnings, oversubscriptionWarnings(saved, runtimeFor(env, false).Host)...)
+	res.Warnings = append(res.Warnings, oversubscriptionWarnings(saved, host)...)
 	return res, nil
+}
+
+// followPrepareAcquire takes the node lock that prepares a fresh follower
+// entry. It is a variable so handler tests run the real preparation without
+// the node's /run/lock files.
+var followPrepareAcquire = func(ctx context.Context, requestID string, timeout time.Duration) (engine.Release, error) {
+	return engine.Acquire(ctx, engine.LockExclusive, "db.follow", requestID, timeout)
+}
+
+// followStartJob starts the detachable follow job; a handler test fails it
+// after the prepared entry exists to exercise the serialized cleanup.
+var followStartJob = startJob
+
+// followBeforePrepareLock runs after preflight and before the preparation lock;
+// a test uses it to change desired state while the preflight facts are stale.
+var followBeforePrepareLock = func() {}
+
+// followerPreviewEntry is the exact proposed entry for a dry run or preflight:
+// placed on a copy of cfg, so the target appears exactly once without writing.
+func followerPreviewEntry(cfg config.Cluster, src config.ClusterSpec, p dbFollowParams) (config.Cluster, config.ClusterSpec, error) {
+	preview := cfg
+	spec := followerSpec(src, p.Name, p.Size)
+	if err := placeCluster(preview, &spec); err != nil {
+		return config.Cluster{}, config.ClusterSpec{}, err
+	}
+	preview.Clusters = append(preview.Clusters, spec)
+	return preview, spec, nil
+}
+
+// followSpace checks the copy's free space; a variable so admission tests can
+// exercise the handler without a source cluster.
+var followSpace = restoreSpace
+
+// refuseFollowWithUnfollow makes the two operation kinds mutually exclusive.
+// Once a durable unfollow record owns name, a follow (preview, admission or
+// the locked job) must not adopt, recopy or start the target behind that newer
+// irreversible transition. The unfollow's own public retry is unaffected.
+func refuseFollowWithUnfollow(recs backup.Records, name string) error {
+	if _, ok := recs.Unfollowing[name]; !ok {
+		return nil
+	}
+	return output.NewError(output.CodePrecondition,
+		name+" has an unfinished unfollow that owns it, so a follow cannot start or resume", output.ExitPrecondition,
+		"Finish it with vaire db unfollow "+name+" --confirm "+name+"/unfollow, then retry.").
+		WithDetails(map[string]any{"reason": "unfollow_in_progress", "database": name})
+}
+
+// refuseUnfinishedFollowApply keeps a general plan or apply away from an
+// ordinary follow's entry until its own job has materialised and started it.
+// The engine view already leaves the entry out; this makes --db name the real
+// reason instead of a missing-database validation error.
+func refuseUnfinishedFollowApply(cfg config.Cluster, db string) error {
+	if db == "" {
+		return nil
+	}
+	spec, ok := cfg.ClusterByName(db)
+	if !ok || !spec.IsFollower() || spec.FollowGeneration == "" {
+		return nil
+	}
+	return output.NewError(output.CodePrecondition,
+		db+" is an unfinished db follow, so apply must not create or start it outside the follow job", output.ExitPrecondition,
+		"Retry the follow: vaire db follow "+spec.Follows+" --name "+db+".").
+		WithDetails(map[string]any{"reason": "follow_unfinished", "database": db, "source": spec.Follows})
+}
+
+// followRetryable reports whether spec is the unfinished ordinary follow the
+// same public db follow retry may continue. The prepared entry's generation is
+// the operation identity; matching ownership proves unfinished progress even
+// while the target already runs. A completed entry (empty generation), a
+// replaced entry, and local paths or a running cluster without matching
+// ownership are refused rather than reused or removed. An unfinished unfollow
+// that owns the target always wins: its promotion is irreversible and a
+// follow must not resume across it.
+func followRetryable(cfg config.Cluster, recs backup.Records, spec config.ClusterSpec) (bool, error) {
+	if err := refuseFollowWithUnfollow(recs, spec.Name); err != nil {
+		return false, err
+	}
+	if recs.IsAwaiting(spec.Name) || spec.FollowGeneration == "" {
+		// Recovery has its own awaiting identity; a missing generation is
+		// never evidence of an unfinished ordinary follow.
+		return false, nil
+	}
+	own, owned, err := readFollowOwnership(followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec})
+	if err != nil {
+		return false, err
+	}
+	art, err := followerArtefactsOf(cfg, spec.Name)
+	if err != nil {
+		return false, err
+	}
+	if owned {
+		// A running target is not completed: the job resumes the unfinished
+		// copy and only the completion write makes it complete.
+		return own.Phase != followPhaseStarted, nil
+	}
+	// Anything materialised or running without matching ownership is foreign
+	// or uncertain. An untouched prepared entry (no generation progress) is
+	// retried from its own fresh preparation.
+	return !art.any() && !clusterRunning(spec), nil
+}
+
+// followFloorMismatch is one hot-standby setting whose running source value is
+// above the floor a proposed follower would start with.
+type followFloorMismatch struct {
+	Setting  string `json:"setting"`
+	Source   int    `json:"source"`
+	Follower int    `json:"follower"`
+}
+
+// followerEffectiveFloors reads the source's currently effective floor values
+// from its running PostgreSQL. It is a variable so admission tests can present
+// a deferred source restart without a server.
+var followerEffectiveFloors = steps.RunningFloors
+
+// followFloorMismatches compares a proposed follower's rendered floors with
+// the source's running values. cfg must contain exactly the proposed target
+// once: its presence changes CPU-derived tuning, so a pre-member config would
+// not be the configuration the follower actually starts with. A missing
+// running value is unknown, not safe.
+func followFloorMismatches(cfg config.Cluster, src, spec config.ClusterSpec, host hostinfo.Info, running map[string]int) ([]followFloorMismatch, error) {
+	seen := 0
+	for _, c := range cfg.Clusters {
+		if c.Name == spec.Name {
+			seen++
+		}
+	}
+	if seen != 1 {
+		return nil, fmt.Errorf("the proposed follower %s appears %d times in the configuration, want exactly once", spec.Name, seen)
+	}
+	floors, err := steps.FollowerFloors(cfg, spec, src, host)
+	if err != nil {
+		return nil, err
+	}
+	var out []followFloorMismatch
+	for _, floor := range floors {
+		runningValue, ok := running[floor.Name]
+		if !ok {
+			return nil, fmt.Errorf("%s did not report its effective %s, so the follower's floor cannot be checked", src.Name, floor.Name)
+		}
+		value, err := strconv.Atoi(floor.Value)
+		if err != nil {
+			return nil, fmt.Errorf("the rendered floor %s = %q is not an integer: %w", floor.Name, floor.Value, err)
+		}
+		if value < runningValue {
+			out = append(out, followFloorMismatch{Setting: floor.Name, Source: runningValue, Follower: value})
+		}
+	}
+	return out, nil
+}
+
+// refuseUnsafeFollowFloors refuses a follower whose configured floors are below
+// the source's still effective values. It reports the actual and proposed
+// floors and the supported explicit-setting remedy. A retry names the existing
+// follower's own settings; a fresh proposal names the source's existing
+// settings, because the proposed follower is not in cluster.toml yet and the
+// follower inherits the larger of the two. The proposed membership itself
+// changes CPU-derived tuning, so a restart of a still one-cluster source would
+// not necessarily lower it, and no automatic restart or derived setting is
+// safe. Unknown facts fail closed.
+func refuseUnsafeFollowFloors(ctx context.Context, cfg config.Cluster, src, spec config.ClusterSpec, host hostinfo.Info, existing bool) error {
+	running, err := followerEffectiveFloors(ctx, src)
+	if err != nil {
+		return output.NewError(output.CodePrecondition,
+			"can't verify the running hot-standby floors of "+src.Name+", so "+spec.Name+" can't be followed safely: "+err.Error(), output.ExitPrecondition,
+			"Check that "+src.Name+" is running and answers PostgreSQL, then retry vaire db follow "+src.Name+" --name "+spec.Name+".").
+			WithDetails(map[string]any{"reason": "source_floors_unknown", "database": spec.Name, "source": src.Name})
+	}
+	mismatches, err := followFloorMismatches(cfg, src, spec, host, running)
+	if err != nil {
+		return output.NewError(output.CodePrecondition,
+			"can't verify the hot-standby floors "+spec.Name+" would start with, so the follow is refused: "+err.Error(), output.ExitPrecondition,
+			"Check cluster.toml's settings for "+src.Name+" and "+spec.Name+", then retry.").
+			WithDetails(map[string]any{"reason": "source_floors_unknown", "database": spec.Name, "source": src.Name})
+	}
+	if len(mismatches) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(mismatches))
+	settings := make([]string, 0, len(mismatches))
+	prerequisite := "Set the follower's explicit floors to the running values"
+	if !existing {
+		prerequisite = "Set the source's explicit floors to its running values, so the proposed follower inherits them"
+	}
+	for _, m := range mismatches {
+		parts = append(parts, fmt.Sprintf("%s %d > %d", m.Setting, m.Source, m.Follower))
+		target := spec.Name
+		if !existing {
+			target = src.Name
+		}
+		settings = append(settings, fmt.Sprintf("vaire config set clusters.%s.settings.%s %d", target, m.Setting, m.Source))
+	}
+	return output.NewError(output.CodePrecondition,
+		src.Name+" is still running with hot-standby settings above "+spec.Name+"'s floors ("+strings.Join(parts, ", ")+"), so the follower would pause replay",
+		output.ExitPrecondition,
+		prerequisite+" ("+strings.Join(settings, "; ")+"), then retry vaire db follow "+src.Name+" --name "+spec.Name+".").
+		WithDetails(map[string]any{"reason": "source_floors_above_follower", "database": spec.Name, "source": src.Name, "settings": mismatches})
 }
 
 // jobFollow makes a follower's cluster (D2): the slot on the source, the
@@ -510,20 +824,93 @@ func handleDBFollow(ctx context.Context, env *Env) (Result, error) {
 // metrics and the other databases' changed configuration. A failure before
 // the follower is 18/<name> drops the copy, the slot and the entry (or, for
 // db recover, leaves it awaiting recovery).
+//
+// The job holds its node and cluster locks by the time it runs, so it reloads
+// cluster.toml and records.json before any effect: a writer that changed or
+// removed the target while the job waited is respected, and an operation whose
+// entry, source or awaiting record no longer matches the one it was admitted
+// for is refused rather than built under stale names.
 func jobFollow(ctx context.Context, env *jobEnv) (any, error) {
 	var p dbFollowParams
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
-	cfg := env.Cluster
+	cfg, _, err := followerState().Load()
+	if err != nil {
+		return nil, err
+	}
+	env.Cluster = cfg
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
 	spec, ok := cfg.ClusterByName(p.Name)
 	if !ok || !spec.IsFollower() {
 		return nil, output.NewError(output.CodePrecondition, p.Name+" is not a follower in cluster.toml", output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": "not_a_follower", "database": p.Name})
 	}
+	if spec.Follows != p.Source {
+		return nil, output.NewError(output.CodePrecondition,
+			p.Name+" now follows "+spec.Follows+", not "+p.Source+", so this follow no longer applies", output.ExitPrecondition,
+			"Run vaire db follow for the source cluster.toml names.").
+			WithDetails(map[string]any{"reason": "config_changed", "database": p.Name, "source": spec.Follows})
+	}
 	src, err := clusterOf(cfg, spec.Follows)
 	if err != nil {
 		return nil, err
+	}
+	if p.Recover {
+		if !recs.IsAwaiting(p.Name) {
+			return nil, output.NewError(output.CodePrecondition, p.Name+" isn't awaiting recovery", output.ExitPrecondition,
+				"db recover is for databases a rebuilt master hasn't recovered.").
+				WithDetails(map[string]any{"reason": "not_awaiting_recovery", "database": p.Name})
+		}
+		if p.RecoverSince == "" || recs.AwaitingRecovery[p.Name].Since != p.RecoverSince {
+			return nil, output.NewError(output.CodePrecondition,
+				p.Name+"'s awaiting recovery record changed while this recovery waited, so it no longer applies", output.ExitPrecondition,
+				"Run vaire db recover again for the record records.json now has.").
+				WithDetails(map[string]any{"reason": "config_changed", "database": p.Name})
+		}
+		if recs.IsAwaiting(src.Name) {
+			return nil, output.NewError(output.CodePrecondition, p.Name+" follows "+src.Name+", which awaits recovery too", output.ExitPrecondition,
+				"Recover the source first: vaire db recover "+src.Name+" (vaire db recover --all does sources first).").
+				WithDetails(map[string]any{"reason": "source_awaiting_recovery", "database": p.Name, "source": src.Name})
+		}
+		if err := checkFollowSource(src, "db recover"); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := refuseFollowWithUnfollow(recs, p.Name); err != nil {
+			return nil, err
+		}
+		if recs.IsAwaiting(p.Name) {
+			return nil, awaitingError(p.Name, "a follow")
+		}
+		if recs.IsAwaiting(src.Name) {
+			return nil, output.NewError(output.CodePrecondition, p.Name+" follows "+src.Name+", which awaits recovery too", output.ExitPrecondition,
+				"Recover the source first: vaire db recover "+src.Name+" (vaire db recover --all does sources first).").
+				WithDetails(map[string]any{"reason": "source_awaiting_recovery", "database": p.Name, "source": src.Name})
+		}
+		if p.Generation == "" || spec.FollowGeneration != p.Generation {
+			return nil, output.NewError(output.CodePrecondition,
+				p.Name+"'s follow generation changed while this job waited, so it no longer prepares this copy", output.ExitPrecondition,
+				"Run vaire db follow again for the entry cluster.toml now has.").
+				WithDetails(map[string]any{"reason": "config_changed", "database": p.Name})
+		}
+		if err := checkFollowSource(src, "db follow"); err != nil {
+			return nil, err
+		}
+		// The source may have shrunk its desired floors with its restart
+		// deferred while this job waited. Re-read the running facts and
+		// compare the exact current entry before ownership, slot, copy or
+		// start effects.
+		if err := refuseUnsafeFollowFloors(ctx, cfg, src, spec, jobRuntime(env).Host, true); err != nil {
+			return nil, err
+		}
+	}
+	owner := followOwner{Name: p.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec}
+	if p.Recover {
+		owner.Awaiting = recs.AwaitingRecovery[p.Name]
 	}
 	// db recover keeps the database's durable awaiting entry until the
 	// follower runs: the steps see it through Options.Recovering instead
@@ -535,24 +922,21 @@ func jobFollow(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	build := true
 	if p.Recover {
-		// A copy an earlier attempt adopted is 18/<name> already: start it
-		// with the configuration and steps it is missing instead of copying
-		// over it (D14's resumption). An adopted record without the expected
-		// cluster is only rebuilt when nothing is there; mismatched paths are
-		// refused, never adopted or dropped.
-		if build, err = followerRecoveryNeedsBuild(cfg, spec); err != nil {
+		// An adopted copy whose retained slot still holds its WAL is started
+		// as it is; every other recovery continues or rebuilds through the
+		// same owned build path.
+		decision, err := decideFollowerBuild(ctx, cfg, src, spec, true, false)
+		if err != nil {
 			return nil, err
 		}
+		build = !decision.StartOnly
 	}
 	if build {
 		if err := followerServerOps.build(ctx, env, cfg, src, spec, p.From, p.Recover); err != nil {
 			if p.Recover {
 				return nil, err
 			}
-			if ferr := forgetDatabase(p.Name); ferr != nil {
-				err = errors.Join(err, ferr)
-			}
-			return nil, err
+			return nil, rollbackFailedFollow(p, err)
 		}
 		if p.Recover {
 			// The copy is 18/<name> on its own port: a recovery that stops
@@ -563,49 +947,28 @@ func jobFollow(ctx context.Context, env *jobEnv) (any, error) {
 			}
 		}
 	}
-	if p.Recover {
-		if err := clearFollowOwnership(p.Name); err != nil {
-			logLine(env.Report, env.Job, "the interrupted follow record was left: "+err.Error())
-		}
-	}
 	warnings, st, err := followerServerOps.start(ctx, env, cfg, src, spec, recovering)
 	if err != nil {
 		return nil, err
 	}
+	if err := clearFollowGeneration(spec.Name, spec.FollowGeneration); err != nil {
+		return nil, err
+	}
 	if p.Recover {
 		// The follower runs with its own configuration: recovery is done and
-		// it no longer awaits it.
+		// it no longer awaits it. The ownership record outlives this write
+		// only as best-effort cleanup.
 		if _, err := clearAwaiting(p.Name); err != nil {
 			return nil, err
 		}
+	} else if err := writeFollowOwnership(owner, followPhaseStarted); err != nil {
+		logLine(env.Report, env.Job, "the completed follow's durable mark was not written: "+err.Error())
+	}
+	if err := clearFollowOwnership(p.Name); err != nil {
+		logLine(env.Report, env.Job, "the interrupted follow record was left: "+err.Error())
 	}
 	return map[string]any{"source": src.Name, "follows": src.Name, "name": p.Name, "port": spec.Port, "from": p.From,
 		"slot": config.FollowerSlot(p.Name), "follower": st, "warnings": warnings}, nil
-}
-
-// followerRecoveryNeedsBuild reports whether a db recover of spec still has to
-// build. An adopted copy whose deterministic registration and data directory
-// match is started as it is. An adopted record with no local artefact is built
-// again; adopted or foreign artefacts that do not match are refused.
-func followerRecoveryNeedsBuild(cfg config.Cluster, spec config.ClusterSpec) (bool, error) {
-	recs, err := backup.LoadRecords()
-	if err != nil {
-		return false, err
-	}
-	art, err := followerArtefactsOf(cfg, spec.Name)
-	if err != nil {
-		return false, err
-	}
-	if !recs.AwaitingRecovery[spec.Name].Adopted {
-		return true, nil
-	}
-	if art.Match && art.Data {
-		return false, nil
-	}
-	if art.ConfDir || art.Conf || art.Data {
-		return false, clusterExistsRefusal(spec.Name)
-	}
-	return true, nil
 }
 
 // followerResumePreview is what db recover's dry run can say about a retry:
@@ -620,44 +983,170 @@ type followerResumePreview struct {
 }
 
 // followerRecoveryResumes reports whether a retry continues an existing copy
-// instead of copying again: either a durable adopted marker with both expected
-// artefacts present and pointing at each other, or an owned copy that finished
-// (phase copied) with the same proof and a source slot that still retains its
-// WAL. The slot is read, never changed, as the job reads it before it resumes.
+// instead of copying again. It is the preview of the same decision the recovery
+// build makes: an adopted or owned completed copy needs a reserved or extended
+// slot with a restart position, and a copy nothing proves is the operation's is
+// refused rather than removed.
 func followerRecoveryResumes(ctx context.Context, cfg config.Cluster, src, spec config.ClusterSpec) (followerResumePreview, error) {
-	art, err := followerArtefactsOf(cfg, spec.Name)
+	return followerResumePreviewFor(ctx, cfg, src, spec, true)
+}
+
+// followerFollowResume is followerRecoveryResumes for the public retry of an
+// ordinary follow: the same build decision, with no awaiting record to bind.
+func followerFollowResume(ctx context.Context, cfg config.Cluster, src, spec config.ClusterSpec) (followerResumePreview, error) {
+	return followerResumePreviewFor(ctx, cfg, src, spec, false)
+}
+
+func followerResumePreviewFor(ctx context.Context, cfg config.Cluster, src, spec config.ClusterSpec, recover bool) (followerResumePreview, error) {
+	decision, err := decideFollowerBuild(ctx, cfg, src, spec, recover, true)
 	if err != nil {
 		return followerResumePreview{}, err
 	}
-	if !art.Match || !art.Data {
-		return followerResumePreview{}, nil
-	}
+	return followerResumePreview{
+		Resume:       decision.Resume || decision.StartOnly,
+		RecopyReason: decision.Reason,
+		Conditional:  decision.Conditional,
+	}, nil
+}
+
+// followerBuildDecision is what a follow or recovery build must do with the
+// deterministic paths: continue the completed copy's adoption, remove and copy
+// again, or copy with no prior local path.
+type followerBuildDecision struct {
+	// Resume adopts the same completed copy again instead of copying it.
+	Resume bool
+	// StartOnly is an adopted copy whose slot still retains its WAL: it needs
+	// no build work at all, only the follower's start.
+	StartOnly bool
+	// Clean removes the owned artefacts before a fresh copy.
+	Clean bool
+	// Copy makes a fresh copy after any cleanup.
+	Copy bool
+	// ClearAdopted invalidates the start-only marker before this operation
+	// destroys or replaces the copy it describes.
+	ClearAdopted bool
+	// Reason explains a fresh copy in a preview.
+	Reason string
+	// Conditional marks a preview that could not read the source slot.
+	Conditional bool
+}
+
+// decideFollowerBuild reads the ownership record and the deterministic paths
+// and decides the build. A completed copy is one whose registration points at
+// its data directory and whose ownership phase is copied, or, for a recovery,
+// whose awaiting record says it was adopted. It is only resumed on a slot that
+// is reserved or extended with a restart position; every other slot takes the
+// proven-owned recopy, and an unreadable slot fails closed. preview reports an
+// unread slot as conditional instead of failing.
+func decideFollowerBuild(ctx context.Context, cfg config.Cluster, src, spec config.ClusterSpec, recover, preview bool) (followerBuildDecision, error) {
 	recs, err := backup.LoadRecords()
 	if err != nil {
-		return followerResumePreview{}, err
+		return followerBuildDecision{}, err
 	}
-	awaiting := recs.AwaitingRecovery[spec.Name]
-	if awaiting.Adopted {
-		// An adopted copy is started as it is: this retry copies and inspects
-		// no slot.
-		return followerResumePreview{Resume: true}, nil
+	awaiting := backup.Awaiting{}
+	if recover {
+		awaiting = recs.AwaitingRecovery[spec.Name]
 	}
-	own, owned, err := readFollowOwnership(spec.Name, spec.Follows, awaiting)
+	owner := followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec, Awaiting: awaiting}
+	own, owned, err := readFollowOwnership(owner)
 	if err != nil {
-		return followerResumePreview{}, err
+		return followerBuildDecision{}, err
 	}
-	if !owned || own.Phase != followPhaseCopied {
-		return followerResumePreview{}, nil
+	if owned && own.Phase == followPhaseStarted {
+		return followerBuildDecision{}, output.NewError(output.CodePrecondition, spec.Name+" already completed its follow", output.ExitPrecondition,
+			"Run vaire db list to see the follower.").WithDetails(map[string]any{"reason": "database_exists", "database": spec.Name})
+	}
+	art, err := followerArtefactsOf(cfg, spec.Name)
+	if err != nil {
+		return followerBuildDecision{}, err
+	}
+	adopted := recover && awaiting.Adopted
+	if !art.any() {
+		// A stale adopted marker describes no local copy: clear it before
+		// making a new one.
+		return followerBuildDecision{Copy: true, ClearAdopted: adopted}, nil
+	}
+	completed := art.Match && art.Data && ((owned && own.Phase == followPhaseCopied) || adopted)
+	if !completed {
+		if !owned || art.Conf && !art.Match {
+			return followerBuildDecision{}, clusterExistsRefusal(spec.Name)
+		}
+		return followerBuildDecision{Clean: true, Copy: true, ClearAdopted: adopted}, nil
 	}
 	slot := config.FollowerSlot(spec.Name)
 	state, err := followerSlotOps.inspect(ctx, src, slot)
 	if err != nil {
-		return followerResumePreview{RecopyReason: "the replication slot " + slot + " on " + src.Name + " could not be read", Conditional: true}, nil
+		if preview {
+			return followerBuildDecision{Reason: "the replication slot " + slot + " on " + src.Name + " could not be read", Conditional: true}, nil
+		}
+		return followerBuildDecision{}, err
 	}
 	if state.Usable {
-		return followerResumePreview{Resume: true}, nil
+		return followerBuildDecision{Resume: true, StartOnly: adopted}, nil
 	}
-	return followerResumePreview{RecopyReason: "the replication slot " + slot + " on " + src.Name + " cannot retain the WAL the completed copy needs"}, nil
+	if !owned || own.Phase != followPhaseCopied {
+		// The adopted marker is evidence that a copy was completed, not proof
+		// that this operation owns its paths: never remove it on that alone.
+		return followerBuildDecision{}, output.NewError(output.CodePrecondition,
+			"the adopted copy of "+spec.Name+" has no ownership record proving it is this operation's, and the replication slot "+slot+" on "+src.Name+" cannot retain the WAL it needs", output.ExitPrecondition,
+			"The copy and its slot were left untouched; inspect them on the node before choosing a manual recovery.").
+			WithDetails(map[string]any{"reason": "follow_ownership_missing", "database": spec.Name, "source": src.Name, "slot": slot})
+	}
+	return followerBuildDecision{Clean: true, Copy: true, ClearAdopted: adopted,
+		Reason: "the replication slot " + slot + " on " + src.Name + " cannot retain the WAL the completed copy needs"}, nil
+}
+
+// clearFollowerAdopted durably clears the start-only marker before a recopy
+// removes or replaces the copy it describes. A process that dies after this
+// write retries the recopy, never a start of a copy that is gone.
+func clearFollowerAdopted(name string) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		aw, ok := s.AwaitingRecovery[name]
+		if !ok || !aw.Adopted {
+			return nil
+		}
+		aw.Adopted = false
+		s.AwaitingRecovery[name] = aw
+		return nil
+	})
+}
+
+// clearFollowGeneration durably clears an ordinary follow's prepared-entry
+// generation after the follower has started successfully. It is the completion
+// marker: ownership is deleted only after this save, and a failed save leaves
+// the operation unfinished rather than reporting success.
+func clearFollowGeneration(name, generation string) error {
+	if generation == "" {
+		return nil
+	}
+	store := followerState()
+	cfg, _, err := store.Load()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range cfg.Clusters {
+		if cfg.Clusters[i].Name != name {
+			continue
+		}
+		if cfg.Clusters[i].FollowGeneration != generation {
+			return output.NewError(output.CodePrecondition,
+				name+"'s follow generation changed before its completion was recorded", output.ExitPrecondition,
+				"Run vaire db follow again for the entry cluster.toml now has.").
+				WithDetails(map[string]any{"reason": "config_changed", "database": name})
+		}
+		cfg.Clusters[i].FollowGeneration = ""
+		found = true
+	}
+	if !found {
+		return output.NewError(output.CodePrecondition, name+" is no longer in cluster.toml, so its follow completion can't be recorded", output.ExitPrecondition, "").
+			WithDetails(map[string]any{"reason": "not_a_follower", "database": name})
+	}
+	raw, err := cfg.Encode()
+	if err != nil {
+		return err
+	}
+	return store.Save(raw)
 }
 
 // markAdopted records that db's follower copy is its own cluster 18/<name>
@@ -722,64 +1211,60 @@ func dropFreshFollowerSlot(ctx context.Context, src config.ClusterSpec, slot str
 // materialiseFollower builds the follower's data in the temporary cluster
 // <name> from the source's stanza or with pg_basebackup through its slot,
 // drops pgBackRest's recovery settings and adopts it as 18/<name> on spec's
-// port. A plain follow drops a failed build and its slot. A db recover records
-// ownership before its first local mutation: a partial copy is removed and
-// rebuilt, while a completed copy is adopted again instead of recopied. A
-// completed copy keeps the source slot it left behind; only a missing or lost
-// slot makes the operation drop its own copy and copy again. An adoption error
-// keeps the owned copy for the retry. Foreign paths are refused.
+// port. A plain follow records ownership before its first local mutation too,
+// so a public retry can continue the same operation. A completed copy is
+// adopted again instead of recopied, and only when the source slot still
+// retains the WAL it needs; a missing, lost, unreserved or unknown slot makes
+// the operation remove its own copy and copy again. An adoption error keeps
+// the owned copy for the retry. Foreign paths are refused.
 func materialiseFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, src, spec config.ClusterSpec, from string, recover bool) error {
-	slot := config.FollowerSlot(spec.Name)
-	resume := false
-	var awaiting backup.Awaiting
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+	awaiting := backup.Awaiting{}
 	if recover {
-		recs, err := backup.LoadRecords()
-		if err != nil {
-			return err
-		}
 		awaiting = recs.AwaitingRecovery[spec.Name]
-		art, err := followerArtefactsOf(cfg, spec.Name)
-		if err != nil {
-			return err
-		}
-		own, owned, err := readFollowOwnership(spec.Name, spec.Follows, awaiting)
-		if err != nil {
-			return err
-		}
-		if owned && own.Phase == followPhaseCopied && art.Match && art.Data {
-			// The copy is complete. Its slot's older position protects the WAL
-			// it still has to stream, so the slot is only inspected here.
-			state, err := followerSlotOps.inspect(ctx, src, slot)
-			if err != nil {
-				return err
-			}
-			if state.Usable {
-				resume = true
-			} else {
-				// Reset would lose WAL beneath data that needs it. The owned
-				// copy is abandoned and copied again with a fresh slot instead.
-				logLine(env.Report, env.Job, "the replication slot "+slot+" on "+src.Name+" is missing or lost, so the owned copy of "+spec.Name+" is made again")
-				if err := dropOwnedFollowerCopy(env.shell(), env.Job, env.Report, spec.Name, cfg.Server.DataDirectory(spec.Name)); err != nil {
-					return fmt.Errorf("remove the completed copy of %s whose replication slot %s is missing or lost: %w", spec.Name, slot, err)
-				}
-			}
-		} else if art.ConfDir || art.Conf || art.Data {
-			if !owned || art.Conf && !art.Match {
-				return clusterExistsRefusal(spec.Name)
-			}
-			if err := dropOwnedFollowerCopy(env.shell(), env.Job, env.Report, spec.Name, cfg.Server.DataDirectory(spec.Name)); err != nil {
-				return fmt.Errorf("remove the interrupted copy of %s: %w", spec.Name, err)
-			}
-		}
-		if !resume {
-			if err := writeFollowOwnership(spec.Name, src.Name, awaiting, followPhaseCopying); err != nil {
-				return err
-			}
+		if _, ok := recs.AwaitingRecovery[spec.Name]; !ok {
+			return output.NewError(output.CodePrecondition, spec.Name+" isn't awaiting recovery", output.ExitPrecondition,
+				"db recover is for databases a rebuilt master hasn't recovered.").
+				WithDetails(map[string]any{"reason": "not_awaiting_recovery", "database": spec.Name})
 		}
 	}
-	if resume {
+	decision, err := decideFollowerBuild(ctx, cfg, src, spec, recover, false)
+	if err != nil {
+		return err
+	}
+	if decision.StartOnly {
+		return nil
+	}
+	if decision.Resume {
 		return resumeFollowerAdoption(ctx, env, cfg, src, spec)
 	}
+	owner := followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec, Awaiting: awaiting}
+	if !decision.Copy {
+		return fmt.Errorf("the follow of %s has nothing to build", spec.Name)
+	}
+	// Invalidate the start-only marker before anything destructive, then
+	// record that this attempt is the copy's owner again. If either write
+	// fails nothing local has been touched.
+	if decision.ClearAdopted {
+		if err := clearFollowerAdopted(spec.Name); err != nil {
+			return err
+		}
+	}
+	if err := writeFollowOwnership(owner, followPhaseCopying); err != nil {
+		return err
+	}
+	if decision.Clean {
+		// The owned copy goes before a fresh slot is made: a reset slot under
+		// data that still claims it would discard WAL for a copy this
+		// operation is abandoning anyway.
+		if err := dropOwnedFollowerCopy(env.shell(), env.Job, env.Report, spec.Name, cfg.Server.DataDirectory(spec.Name)); err != nil {
+			return fmt.Errorf("remove the interrupted copy of %s: %w", spec.Name, err)
+		}
+	}
+	slot := config.FollowerSlot(spec.Name)
 	logLine(env.Report, env.Job, "creating the replication slot "+slot+" on "+src.Name)
 	if err := prepareFollowerSlot(ctx, src, slot); err != nil {
 		return err
@@ -804,11 +1289,10 @@ func materialiseFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, s
 		err = m.StandbyBaseBackup(ctx, slot)
 	}
 	if err == nil {
-		if recover {
-			// The copy is complete and registered: from here a retry adopts
-			// it again instead of copying over it.
-			err = writeFollowOwnership(spec.Name, src.Name, awaiting, followPhaseCopied)
-		}
+		// The copy is complete and registered: from here a retry adopts it
+		// again instead of copying over it. The record is written for a plain
+		// follow too, so the same public follow can continue it.
+		err = writeFollowOwnership(owner, followPhaseCopied)
 		copied = err == nil
 	}
 	if err == nil {
@@ -818,7 +1302,7 @@ func materialiseFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, s
 		err = m.Adopt(ctx, spec.Port)
 	}
 	if err != nil {
-		if recover && copied {
+		if copied {
 			// The owned copy is complete: keep it and its slot for the retry,
 			// which resumes the adoption.
 			return err
@@ -833,6 +1317,106 @@ func materialiseFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, s
 		}
 	}
 	return err
+}
+
+// rollbackFailedFollow rolls back only a fresh preparation whose build failed
+// before any progress was recorded. A public retry never removes its existing
+// entry, and a build that wrote ownership or materialised anything keeps the
+// entry and record for that retry. The caller holds the job's exclusive lock.
+func rollbackFailedFollow(p dbFollowParams, cause error) error {
+	if !p.PreparedNew {
+		return cause
+	}
+	if err := forgetPreparedFollow(p); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+// followRollbackAcquire takes the exclusive node lock a cleanup that holds no
+// job lock needs. It is a variable so a test proves the wait with its own
+// locks instead of the node's /run/lock files.
+var followRollbackAcquire = func(ctx context.Context, job, requestID string) (engine.Release, error) {
+	return engine.Acquire(ctx, engine.LockExclusive, job+" rollback", requestID, followRollbackWait)
+}
+
+// followRollbackWait bounds a skipped job's cleanup wait: the operation that
+// held the lock when the job was skipped has to finish first.
+const followRollbackWait = time.Minute
+
+// followBeforeRollback runs after the rollback lock is held and before
+// cluster.toml is reloaded. A test uses it to hold two rollbacks at the
+// boundary and prove they serialize.
+var followBeforeRollback = func(string) {}
+
+// rollbackPreparedFollow runs the fresh-preparation cleanup after a job that
+// never started. It takes the node lock itself; a retry invocation and any
+// progressed entry are never removed.
+func rollbackPreparedFollow(ctx context.Context, p dbFollowParams) error {
+	if !p.PreparedNew {
+		return nil
+	}
+	release, err := followRollbackAcquire(ctx, "db-follow", p.Name)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return forgetPreparedFollow(p)
+}
+
+// forgetPreparedFollow removes a fresh prepared entry under the caller's
+// exclusive node lock, and only when it is still untouched: same generation,
+// not completed, no ownership record (progress), no configuration/data
+// artefact, not running, and not awaiting recovery. Anything else is preserved
+// for a public retry or an operator decision.
+func forgetPreparedFollow(p dbFollowParams) error {
+	if !p.PreparedNew || p.Name == "" || p.Recover || p.Generation == "" {
+		return nil
+	}
+	followBeforeRollback(p.Name)
+	cfg, _, err := followerState().Load()
+	if err != nil {
+		return err
+	}
+	spec, ok := cfg.ClusterByName(p.Name)
+	if !ok || !spec.IsFollower() || spec.Follows != p.Source || spec.FollowGeneration != p.Generation {
+		// Removed, replaced or completed by another writer.
+		return nil
+	}
+	if clusterRunning(spec) {
+		return nil
+	}
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+	if _, ok := recs.Unfollowing[p.Name]; ok {
+		// A newer unfollow owns the target: never remove its entry on the
+		// strength of this stale preparation.
+		return nil
+	}
+	if recs.IsAwaiting(p.Name) {
+		return nil
+	}
+	art, err := followerArtefactsOf(cfg, p.Name)
+	if err != nil {
+		return err
+	}
+	if art.any() {
+		return nil
+	}
+	path, err := followOwnershipPath(p.Name)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		// Any ownership record means the attempt progressed or another
+		// operation's evidence is present; leave it untouched.
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return forgetDatabase(p.Name)
 }
 
 // resumeFollowerAdoption finishes an owned copy whose registration a previous
@@ -854,29 +1438,36 @@ func resumeFollowerAdoption(ctx context.Context, env *jobEnv, cfg config.Cluster
 // the steps must see (db recover), empty for a plain follow.
 func startFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, src, spec config.ClusterSpec, recovering string) ([]output.Warning, followerReading, error) {
 	rt := jobRuntime(env)
+	// The engine view leaves an unfinished ordinary follow out until its own
+	// job completes; this run is that owned execution, so keep the target in
+	// the view exactly as db recover keeps its awaiting database.
+	keep := recovering
+	if keep == "" {
+		keep = spec.Name
+	}
 	if err := steps.WriteFollowerConf(cfg, spec, rt.Host); err != nil {
 		return nil, followerReading{}, err
 	}
 	others := otherConfigs(ctx, steps.Catalog(), cfg, rt, spec.Name, "")
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, followRuns(spec.Name, others)...))
 	logLine(env.Report, env.Job, "starting "+spec.Name+" as a standby of "+src.Name)
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Recovering: recovering, Restarter: steps.Restarter(cfg), Report: env.Report})
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Recovering: keep, Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		err = applyNewCluster(ctx, cfg, rt, spec.Name, recovering, env.Report)
+		err = applyNewCluster(ctx, cfg, rt, spec.Name, keep, env.Report)
 	}
 	if err != nil {
 		return nil, followerReading{}, withHint(err, finishNewCluster(spec.Name))
 	}
 	var warnings []output.Warning
-	if err := applyPoolers(ctx, cfg, rt, recovering, env.Report); err != nil {
+	if err := applyPoolers(ctx, cfg, rt, keep, env.Report); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the poolers were not reloaded, so " + spec.Name + " is not reachable through them until vaire apply: " + err.Error()})
 	}
-	if w := applyMetrics(ctx, cfg, rt, env.Report, spec.Name, recovering); w != nil {
+	if w := applyMetrics(ctx, cfg, rt, env.Report, spec.Name, keep); w != nil {
 		warnings = append(warnings, *w)
 	}
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
-		engine.Options{Recovering: recovering, Restarter: steps.Restarter(cfg), Report: env.Report})...)
+		engine.Options{Recovering: keep, Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	logLine(env.Report, env.Job, "waiting for "+spec.Name+" to stream from "+src.Name)
 	st := waitStreaming(ctx, spec, src, streamWait)
 	if !st.Streaming {
@@ -1029,8 +1620,10 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 		src = unfinished.Source
 	}
 	local := steps.ClusterPG(spec)
-	resume := sync.OnceFunc(steps.KillPoolerDatabase(ctx, p.Name))
-	defer resume()
+	// A settled retry still clears a pause an earlier attempt left before the
+	// alias is exposed again; the fence below replaces this with its own
+	// resume while the transition is unsettled.
+	resume := func() { followerServerOps.resume(ctx, p.Name) }
 
 	unfinished, err = beginUnfollow(p.Name, src)
 	if err != nil {
@@ -1045,11 +1638,35 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 			return nil, mayHaveChangedPasswords(err)
 		}
 	}
+	if !unfinished.Settled {
+		// The poolers' clients logged in as the source's roles. Fence them and
+		// render the alias out of both poolers before the promotion, so a
+		// client reconnecting or a pooler restart cannot reach the promoted
+		// database while its privilege transition is unsettled.
+		resume, err = followerServerOps.fence(ctx, env, cfg, p.Name)
+		if err != nil {
+			if resuming {
+				return nil, mayHaveChangedPasswords(err)
+			}
+			return nil, err
+		}
+	}
 	logLine(env.Report, env.Job, "promoting "+p.Name)
 	if _, err := followerServerOps.promote(ctx, local, cfg.Server.DataDirectory(p.Name)); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
+	// The promoted cluster still holds the source's database and owner names.
+	// Settle the protected admin policy against those exact names before the
+	// renames expose a primary that an inherited owner membership can write.
+	if err := followerServerOps.settle(ctx, local, spec, src, p.Name); err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
 	if err := followerServerOps.rename(ctx, local, src, p.Name, env.Secrets, env.Report, env.Job); err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
+	// A rename can stop part way, so settle again against whichever database
+	// and owner names the cluster actually holds now.
+	if err := followerServerOps.settle(ctx, local, spec, src, p.Name); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	cfg, err = independent(p.Name, unfinished.Stanza)
@@ -1068,11 +1685,17 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	if err := followerServerOps.restart(ctx, env, cfg, spec); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
+	// The renames carry the new passwords, the protection policy is settled
+	// and the cluster runs its own configuration: only now may the poolers'
+	// rendered configuration expose the alias again.
+	if err := markUnfollowSettled(p.Name); err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
 	var warnings []output.Warning
 	if w := followerServerOps.dropSlot(ctx, cfg, src, p.Name); w != nil {
 		warnings = append(warnings, *w)
 	}
-	more, err := followerServerOps.finish(ctx, env, cfg, spec, src, resume)
+	more, err := followerServerOps.finish(ctx, env, cfg, spec, src, sync.OnceFunc(resume))
 	warnings = append(warnings, more...)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
@@ -1098,8 +1721,9 @@ func finishUnfollow(ctx context.Context, env *jobEnv, cfg config.Cluster, spec c
 	if err := applyPoolers(ctx, cfg, rt, "", env.Report); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the poolers were not reloaded, so " + spec.Name + " is still routed to " + source + "'s database name until vaire apply: " + err.Error()})
+	} else {
+		resume()
 	}
-	resume()
 	if w := applyMetrics(ctx, cfg, rt, env.Report, spec.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
@@ -1112,6 +1736,103 @@ func finishUnfollow(ctx context.Context, env *jobEnv, cfg config.Cluster, spec c
 			Message: "the follower metrics were not written: " + err.Error()})
 	}
 	return warnings, nil
+}
+
+// fenceUnfollowPoolers cuts name's pooler clients and renders its alias out
+// of both poolers before db unfollow promotes it. The rendered files are the
+// durable part: a pooler restart after an interrupted unfollow reads them and
+// keeps the alias withheld until it is settled. A failure to pause, kill or
+// render resumes what was paused and returns the error, so the job never
+// promotes behind a fence it could not establish.
+func fenceUnfollowPoolers(ctx context.Context, env *jobEnv, cfg config.Cluster, name string) (func(), error) {
+	resume, err := steps.FencePoolerDatabase(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := steps.ApplyPoolerFence(ctx, cfg, jobRuntime(env), env.Report); err != nil {
+		// Nothing irreversible has run: a follower is still a read-only
+		// standby, so its clients may reconnect to it.
+		resume()
+		return nil, fmt.Errorf("render the poolers without %s: %w", name, err)
+	}
+	return resume, nil
+}
+
+// settleUnfollowAdminAccess applies the protected admin-access policy to the
+// actual database and owner role names a promoted follower holds. Before the
+// renames those are the source's names; after one they are the follower's.
+// A partially finished rename can leave the database and the owner under
+// different names, so both are read from the cluster rather than inferred.
+func settleUnfollowAdminAccess(ctx context.Context, local sqlRunner, spec config.ClusterSpec, source, name string) error {
+	if !spec.Protected {
+		return nil
+	}
+	database, owner, err := currentUnfollowNames(ctx, local, source, name)
+	if err != nil {
+		return err
+	}
+	if err := local.Exec(ctx, "postgres", steps.AdminAccessSQLFor(owner, database, true), nil); err != nil {
+		return fmt.Errorf("settle vaire_admin's access to %s: %w", database, err)
+	}
+	return nil
+}
+
+// currentUnfollowNames reads which database and owner role the promoted
+// follower currently has: exactly one of the source's name and the follower's
+// must exist for each. Anything else is ambiguous and refused rather than
+// settling the wrong role.
+func currentUnfollowNames(ctx context.Context, local sqlRunner, source, name string) (database, owner string, err error) {
+	database, err = currentUnfollowName(ctx, local, "database", "datname", "pg_database", source, name, name)
+	if err != nil {
+		return "", "", err
+	}
+	owner, err = currentUnfollowName(ctx, local, "owner role", "rolname", "pg_roles", source+"_owner", name+"_owner", name)
+	if err != nil {
+		return "", "", err
+	}
+	return database, owner, nil
+}
+
+func currentUnfollowName(ctx context.Context, local sqlRunner, kind, column, catalog, before, after, follower string) (string, error) {
+	rows, err := local.Query(ctx, "postgres",
+		"SELECT "+column+" FROM "+catalog+" WHERE "+column+" IN ("+quoteLiteral(before)+", "+quoteLiteral(after)+") ORDER BY "+column, nil)
+	if err != nil {
+		return "", err
+	}
+	has := map[string]bool{}
+	for _, row := range rows {
+		has[row[column]] = true
+	}
+	switch {
+	case has[before] && !has[after]:
+		return before, nil
+	case has[after] && !has[before]:
+		return after, nil
+	case has[before] && has[after]:
+		return "", output.NewError(output.CodePrecondition, "both "+before+" and "+after+" exist as a "+kind+" in "+follower+"'s cluster", output.ExitPrecondition,
+			"The unfollow can't settle protection until it knows which one is its own. Check the cluster (psql as postgres on the node), then retry vaire db unfollow "+follower+".")
+	default:
+		return "", output.NewError(output.CodePrecondition, "neither "+before+" nor "+after+" exists as a "+kind+" in "+follower+"'s cluster", output.ExitPrecondition,
+			"The unfollow can't settle protection without it. Check the cluster (psql as postgres on the node), then retry vaire db unfollow "+follower+".")
+	}
+}
+
+// markUnfollowSettled records that the unfollow has finished its privilege
+// transition. Until then both poolers withhold the alias and node SQL refuses
+// a protected database being unfollowed.
+func markUnfollowSettled(name string) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		u, ok := s.Unfollowing[name]
+		if !ok {
+			return fmt.Errorf("the unfollow record for %s is missing", name)
+		}
+		if u.Settled {
+			return nil
+		}
+		u.Settled = true
+		s.Unfollowing[name] = u
+		return nil
+	})
 }
 
 // restartFollower starts the unfollowed cluster with its own configuration.
@@ -1342,7 +2063,7 @@ func independent(name, stanza string) (config.Cluster, error) {
 		if cfg.Clusters[i].Name != name {
 			continue
 		}
-		cfg.Clusters[i].Follows, cfg.Clusters[i].Stanza = "", stanza
+		cfg.Clusters[i].Follows, cfg.Clusters[i].Stanza, cfg.Clusters[i].FollowGeneration = "", stanza, ""
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, config.ValidationError(err)
@@ -1511,7 +2232,8 @@ func recoverFollower(ctx context.Context, env *Env, p recoverParams, spec config
 	if err := followerRecoverInTheWay(env.Cluster, spec, recs); err != nil {
 		return Result{}, err
 	}
-	fp := dbFollowParams{Source: src.Name, Name: spec.Name, From: followFrom(ctx, env.Cluster, src), Recover: true}
+	fp := dbFollowParams{Source: src.Name, Name: spec.Name, From: followFrom(ctx, env.Cluster, src), Recover: true,
+		RecoverSince: recs.AwaitingRecovery[spec.Name].Since}
 	if env.Req.DryRun {
 		preview, err := followerRecoveryResumes(ctx, env.Cluster, src, spec)
 		if err != nil {
@@ -1539,7 +2261,7 @@ func followerRecoverInTheWay(cfg config.Cluster, spec config.ClusterSpec, recs b
 	if err != nil {
 		return err
 	}
-	_, owned, err := readFollowOwnership(spec.Name, spec.Follows, recs.AwaitingRecovery[spec.Name])
+	_, owned, err := readFollowOwnership(followOwner{Name: spec.Name, Source: spec.Follows, Spec: spec, Awaiting: recs.AwaitingRecovery[spec.Name]})
 	if err != nil {
 		return err
 	}

@@ -131,3 +131,58 @@ func TestStanzasSkipFollowers(t *testing.T) {
 		t.Fatalf("Stanzas %v", got)
 	}
 }
+
+// Follow generation is managed by vaire: opaque, valid on followers only,
+// immutable through config set/edit, and preserved by ordinary settings.
+func TestFollowGenerationIsManagedAndImmutable(t *testing.T) {
+	generation, err := NewFollowGeneration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !followGenerationPattern.MatchString(generation) || len(generation) != 32 {
+		t.Fatalf("generated %q", generation)
+	}
+	cfg := followerCluster()
+	cfg.Clusters[1].FollowGeneration = generation
+	if p := validationProblems(cfg); strings.Contains(p, "clusters[") {
+		t.Fatalf("a follower generation is refused: %s", p)
+	}
+	if err := cfg.Set("clusters.app_follower.follow_generation", "ffffffffffffffffffffffffffffffff"); err == nil {
+		t.Fatal("config set of follow_generation was accepted")
+	}
+	changed := ImmutableChanges(followerCluster(), cfg)
+	found := false
+	for _, key := range changed {
+		found = found || key == "clusters.app_follower.follow_generation"
+	}
+	if !found {
+		t.Fatalf("config edit of follow_generation is not refused: %v", changed)
+	}
+	same := followerCluster()
+	same.Clusters[1].FollowGeneration = generation
+	same.Clusters[1].Size = "large"
+	if changed := ImmutableChanges(cfg, same); len(changed) != 0 {
+		t.Fatalf("an ordinary settings change is refused: %v", changed)
+	}
+
+	nonFollower := followerCluster()
+	nonFollower.Clusters[0].FollowGeneration = generation
+	if p := validationProblems(nonFollower); !strings.Contains(p, "follow_generation") {
+		t.Fatalf("a non-follower generation is accepted: %s", p)
+	}
+	bad := followerCluster()
+	bad.Clusters[1].FollowGeneration = "not-a-generation"
+	if p := validationProblems(bad); !strings.Contains(p, "follow_generation") {
+		t.Fatalf("a malformed generation is accepted: %s", p)
+	}
+
+	oldPlain := followerCluster()
+	oldPlain.Clusters = oldPlain.Clusters[:1]
+	newEntry := followerCluster()
+	newEntry.Clusters[1].Follows = ""
+	newEntry.Clusters[1].Stanza = "app_follower-abc123"
+	newEntry.Clusters[1].FollowGeneration = generation
+	if changed := ImmutableChanges(oldPlain, newEntry); len(changed) != 1 || changed[0] != "clusters.app_follower.follow_generation" {
+		t.Fatalf("a new entry with a generation is not refused: %v", changed)
+	}
+}

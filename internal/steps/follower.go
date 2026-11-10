@@ -346,6 +346,49 @@ func FollowerFloors(cfg config.Cluster, spec, src config.ClusterSpec, host hosti
 	return out, nil
 }
 
+// RunningFloors reads the source's currently effective hot-standby floor
+// values from its running PostgreSQL. A setting the server does not report is
+// an error: admission must fail closed rather than assume a value.
+func RunningFloors(ctx context.Context, src config.ClusterSpec) (map[string]int, error) {
+	quoted := make([]string, 0, len(FloorSettings))
+	for _, name := range FloorSettings {
+		quoted = append(quoted, "'"+name+"'")
+	}
+	rows, err := ClusterPG(src).Query(ctx, "postgres",
+		"SELECT name, setting FROM pg_settings WHERE name IN ("+strings.Join(quoted, ", ")+")", nil)
+	if err != nil {
+		return nil, fmt.Errorf("read %s's running hot-standby settings: %w", src.Name, err)
+	}
+	return runningFloorsOf(src.Name, rows)
+}
+
+// runningFloorsOf parses pg_settings rows into the floor values admission
+// compares. An unknown or malformed row is an error, never a default.
+func runningFloorsOf(source string, rows []map[string]string) (map[string]int, error) {
+	out := make(map[string]int, len(FloorSettings))
+	known := make(map[string]bool, len(FloorSettings))
+	for _, name := range FloorSettings {
+		known[name] = true
+	}
+	for _, row := range rows {
+		name := row["name"]
+		if !known[name] {
+			continue
+		}
+		value, err := floorValue(name, row["setting"])
+		if err != nil {
+			return nil, fmt.Errorf("%s's running %s: %w", source, name, err)
+		}
+		out[name] = value
+	}
+	for _, name := range FloorSettings {
+		if _, ok := out[name]; !ok {
+			return nil, fmt.Errorf("%s did not report its running %s", source, name)
+		}
+	}
+	return out, nil
+}
+
 // FollowerFloorDrop is one hot-standby floor that a source change would lower:
 // the follower, the setting, and its effective value before and after.
 type FollowerFloorDrop struct {
@@ -527,30 +570,83 @@ func RemoveFollowerConf(cluster string) error {
 	return nil
 }
 
-// KillPoolerDatabase drops every client and server connection of db on
-// both poolers (KILL), and returns the RESUME that lets new clients in
-// again: db unfollow changes the roles a follower's clients logged in as.
-// A pooler that doesn't answer is skipped.
-func KillPoolerDatabase(ctx context.Context, db string) (resume func()) {
-	poolers := []struct {
-		dir  string
-		port int
-	}{{PGSocketDir, PgbouncerPort}, {SessionSocketDir, SessionPoolerPort}}
-	for _, p := range poolers {
-		_ = poolerAdminAt(ctx, p.dir, p.port, "KILL "+db)
-	}
-	return func() {
-		for _, p := range poolers {
-			_ = poolerAdminAt(context.WithoutCancel(ctx), p.dir, p.port, "RESUME "+db)
-		}
-	}
-}
+// unfollowPoolers are the two admin consoles db unfollow fences.
+var unfollowPoolers = []struct {
+	dir  string
+	port int
+}{{PGSocketDir, PgbouncerPort}, {SessionSocketDir, SessionPoolerPort}}
 
 // poolerAdminAt runs one admin console command on the pooler whose socket
 // is in dir, as poolerAdmin does for the transaction pooler.
-func poolerAdminAt(ctx context.Context, dir string, port int, command string) error {
+var poolerAdminAt = func(ctx context.Context, dir string, port int, command string) error {
 	ctx, cancel := context.WithTimeout(ctx, poolerAdminTimeout)
 	defer cancel()
 	return runCmd(ctx, "runuser", "-u", "postgres", "--", "psql", "-X", "-q",
 		"-h", dir, "-p", strconv.Itoa(port), "-U", "pgbouncer", "-d", "pgbouncer", "-c", command)
+}
+
+// poolerDatabaseNames are the aliases a pooler lists, by name. A pooler that
+// doesn't answer returns its error: db unfollow must not promote behind a
+// fence it could not verify.
+var poolerDatabaseNames = func(ctx context.Context, dir string, port int) (map[string]bool, error) {
+	rows, err := PoolerAdminPG(dir, port).Query(ctx, "pgbouncer", "SHOW DATABASES;", nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if name := row["name"]; name != "" {
+			out[name] = true
+		}
+	}
+	return out, nil
+}
+
+// FencePoolerDatabase stops db's clients on both poolers before an unfollow
+// promotes it: KILL drops the sessions that logged in as the source's roles,
+// and PAUSE holds any that reconnect until the transition's privileges are
+// settled. Killing first also keeps a long session from blocking the pause.
+// An alias the pooler no longer lists is already fenced: a resumed unfollow
+// finds it withheld from the rendered configuration. A failed query, KILL or
+// PAUSE returns an error and resumes what it paused, so a caller never
+// promotes behind a fence that may not hold. The returned RESUME lets clients
+// in again; it is only called after the transition's privileges are settled.
+func FencePoolerDatabase(ctx context.Context, db string) (resume func(), err error) {
+	resume = func() { ResumePoolerDatabase(ctx, db) }
+	fail := func(err error) (func(), error) {
+		resume()
+		return nil, err
+	}
+	for _, p := range unfollowPoolers {
+		names, err := poolerDatabaseNames(ctx, p.dir, p.port)
+		if err != nil {
+			return fail(fmt.Errorf("read the databases of the pooler at %s: %w", p.dir, err))
+		}
+		if !names[db] {
+			continue
+		}
+		// Clear a pause an earlier attempt left, drop the clients, then pause.
+		// Killing first keeps a long client from blocking PAUSE; PAUSE then
+		// holds reconnecting clients until the transition's privileges are
+		// settled. The database is still a standby here, so the moment between
+		// the commands cannot expose a write.
+		_ = poolerAdminAt(ctx, p.dir, p.port, "RESUME "+db)
+		if err := poolerAdminAt(ctx, p.dir, p.port, "KILL "+db); err != nil {
+			return fail(fmt.Errorf("kill %s's clients on the pooler at %s: %w", db, p.dir, err))
+		}
+		if err := poolerAdminAt(ctx, p.dir, p.port, "PAUSE "+db); err != nil {
+			return fail(fmt.Errorf("pause %s on the pooler at %s: %w", db, p.dir, err))
+		}
+	}
+	return resume, nil
+}
+
+// ResumePoolerDatabase lets db's clients in again on both poolers, clearing a
+// pause an interrupted unfollow left. A pooler that no longer lists the alias,
+// or does not answer, is ignored: the database's routing is whatever the
+// rendered configuration says.
+func ResumePoolerDatabase(ctx context.Context, db string) {
+	for _, p := range unfollowPoolers {
+		_ = poolerAdminAt(context.WithoutCancel(ctx), p.dir, p.port, "RESUME "+db)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/render"
@@ -36,16 +37,25 @@ func (pgbouncer) SkipReason(cfg config.Cluster) string {
 
 // pgbouncerIni is the transaction pooler's rendered ini, which never
 // contains a secret.
-func pgbouncerIni(cfg config.Cluster, rt engine.Runtime) string {
-	return string(render.PgbouncerIni(cfg, rt.Host, poolerDatabases(cfg, false)))
+func pgbouncerIni(cfg config.Cluster, rt engine.Runtime, dbs []render.PoolerDatabase) string {
+	return string(render.PgbouncerIni(cfg, rt.Host, dbs))
 }
 
 // poolerDatabases is one [databases] entry per cluster, routed by name to its
 // socket and capped at its pool for that pooler: pool_size for the
 // transaction pooler, session_pool_size for the session pooler (RFC 8.1).
-func poolerDatabases(cfg config.Cluster, session bool) []render.PoolerDatabase {
+// An unfinished unfollow's alias is left out on both poolers until its
+// privileges are settled: a reload or a pooler restart then cannot expose a
+// promoted database whose renames or protection policy are still in flight.
+// Both poolers are rendered from one records snapshot so they cannot disagree
+// about which aliases the transition withholds.
+func poolerDatabases(cfg config.Cluster, recs backup.Records, session bool) []render.PoolerDatabase {
+	fenced := fencedPoolerAliases(recs)
 	out := make([]render.PoolerDatabase, 0, len(cfg.Clusters))
 	for _, c := range cfg.Clusters {
+		if fenced[c.Name] {
+			continue
+		}
 		db := render.PoolerDatabase{Name: c.Name, Port: c.Port}
 		if c.IsFollower() {
 			// The follower's cluster holds its source's database (Phase 6).
@@ -60,22 +70,52 @@ func poolerDatabases(cfg config.Cluster, session bool) []render.PoolerDatabase {
 		out = append(out, db)
 	}
 	if session {
-		out = append(out, restoreEntries(cfg)...)
+		out = append(out, restoreEntries(cfg, recs)...)
 	}
 	return out
+}
+
+// fencedPoolerAliases are the databases whose unfollow has not settled its
+// privileges yet. The record is durable, so a render or restart after an
+// interruption keeps withholding them.
+func fencedPoolerAliases(recs backup.Records) map[string]bool {
+	var out map[string]bool
+	for name, u := range recs.Unfollowing {
+		if u.Settled {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[name] = true
+	}
+	return out
+}
+
+// poolerRecords is one read of records.json for rendering both poolers. A
+// missing file is the node's legitimate empty initial state; any other read or
+// decode failure is unknown transition state and stops the render rather than
+// dropping an unfinished unfollow's fence. The aliases stay withheld until the
+// records are readable again.
+func poolerRecords() (backup.Records, error) {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return backup.Records{}, output.NewError(output.CodePrecondition,
+			"the node's unfollow records could not be read, so the poolers' configuration cannot be rendered safely: "+err.Error(),
+			output.ExitPrecondition,
+			"Inspect the node's records file and fix it; vaire never resets it on its own.").
+			WithDetails(map[string]any{"reason": "unfollow_state_unknown"})
+	}
+	return recs, nil
 }
 
 // restoreEntries route each ready restore's <db>__restoring to its
 // temporary cluster, where the database is still called <db>, so vaire sql
 // --db <db>__restoring reaches the paused copy (RFC 10.1). Only the session
 // pooler has them; promote and abort reload it without them.
-func restoreEntries(cfg config.Cluster) []render.PoolerDatabase {
-	bs, err := backup.LoadRecords()
-	if err != nil {
-		return nil
-	}
+func restoreEntries(cfg config.Cluster, recs backup.Records) []render.PoolerDatabase {
 	var out []render.PoolerDatabase
-	for db, r := range bs.Restores {
+	for db, r := range recs.Restores {
 		if _, ok := cfg.ClusterByName(db); !ok || r.Phase != backup.PhaseReady || r.Port == 0 {
 			continue
 		}
@@ -94,20 +134,54 @@ type pgbouncerFile struct {
 	mode                        os.FileMode
 }
 
+// poolerFilePaths are the managed files pgbouncerFiles renders. Production
+// values are the constants in pgcommon.go; they are variables so the
+// fail-closed regression can use real files in a temporary directory.
+var poolerFilePaths = struct {
+	ini, hba, sessionIni, sessionHBA, sessionUnit string
+}{
+	ini: PgbouncerIniPath, hba: PgbouncerHBAPath, sessionIni: SessionIniPath,
+	sessionHBA: SessionHBAPath, sessionUnit: SessionUnitPath,
+}
+
 // pgbouncerFiles are both poolers' configuration and the session pooler's
-// unit (RFC 8.1). None of them contains a secret.
-func pgbouncerFiles(cfg config.Cluster, rt engine.Runtime) []pgbouncerFile {
+// unit (RFC 8.1). None of them contains a secret. The records are read once,
+// before any file is rendered or written: an unfinished unfollow's alias and a
+// ready restore are both taken from that one snapshot, and unreadable records
+// fail the whole render closed. The normal step does not narrow its config
+// here: the engine already handed it the view that keeps an explicitly owned
+// follow or recovery target.
+func pgbouncerFiles(cfg config.Cluster, rt engine.Runtime) ([]pgbouncerFile, error) {
+	recs, err := poolerRecords()
+	if err != nil {
+		return nil, err
+	}
+	return pgbouncerFilesFrom(cfg, rt, recs), nil
+}
+
+// pgbouncerFilesFrom renders both poolers from one records snapshot.
+func pgbouncerFilesFrom(cfg config.Cluster, rt engine.Runtime, recs backup.Records) []pgbouncerFile {
 	return []pgbouncerFile{
-		{PgbouncerIniPath, pgbouncerIni(cfg, rt), pgFileOwner, pgFileGroup, 0o640},
-		{PgbouncerHBAPath, string(render.PgbouncerHBA()), pgFileOwner, pgFileGroup, 0o640},
-		{SessionIniPath, string(render.SessionIni(cfg, poolerDatabases(cfg, true), SessionSocketDir)), pgFileOwner, pgFileGroup, 0o640},
-		{SessionHBAPath, string(render.SessionHBA()), pgFileOwner, pgFileGroup, 0o640},
-		{SessionUnitPath, string(render.SessionUnit()), "", "", 0o644},
+		{poolerFilePaths.ini, pgbouncerIni(cfg, rt, poolerDatabases(cfg, recs, false)), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.hba, string(render.PgbouncerHBA()), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.sessionIni, string(render.SessionIni(cfg, poolerDatabases(cfg, recs, true), SessionSocketDir)), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.sessionHBA, string(render.SessionHBA()), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.sessionUnit, string(render.SessionUnit()), "", "", 0o644},
 	}
 }
 
+// writePoolerFile writes one of both poolers' managed files. It is a variable
+// so the fail-closed regression can prove unreadable records leave the existing
+// safe files untouched.
+var writePoolerFile = writeFileOwned
+
 func (pgbouncer) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []engine.RenderedFile {
-	files := pgbouncerFiles(cfg, rt)
+	files, err := pgbouncerFiles(cfg, rt)
+	if err != nil {
+		// Inputs runs before a plan renders a diff, so an unreadable records
+		// file has already failed the plan; there is nothing safe to show.
+		return nil
+	}
 	out := make([]engine.RenderedFile, 0, len(files))
 	for _, f := range files {
 		out = append(out, engine.RenderedFile{Path: f.path, Content: []byte(f.content)})
@@ -118,15 +192,23 @@ func (pgbouncer) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []engine.R
 func (pgbouncer) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, error) {
 	// The verifiers change on rotation without changing the desired state, so
 	// they are not part of the inputs; Check re-renders them each time.
-	files := map[string]string{}
-	for _, f := range pgbouncerFiles(cfg, rt) {
-		files[f.path] = f.content
+	files, err := pgbouncerFiles(cfg, rt)
+	if err != nil {
+		return nil, err
 	}
-	return canonical(map[string]any{"files": files, "users": ServiceRoles})
+	rendered := map[string]string{}
+	for _, f := range files {
+		rendered[f.path] = f.content
+	}
+	return canonical(map[string]any{"files": rendered, "users": ServiceRoles})
 }
 
 func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
-	for _, f := range pgbouncerFiles(cfg, rt) {
+	files, err := pgbouncerFiles(cfg, rt)
+	if err != nil {
+		return engine.CheckResult{}, err
+	}
+	for _, f := range files {
 		if !fileIsOwned(f.path, f.content, f.mode, f.owner, f.group) {
 			return incomplete(f.path + " differs"), nil
 		}
@@ -153,6 +235,10 @@ func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 }
 
 func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
+	files, err := pgbouncerFiles(cfg, rt)
+	if err != nil {
+		return engine.ApplyResult{}, err
+	}
 	verifiers, err := roleVerifiers(ctx, cfg)
 	if err != nil {
 		return engine.ApplyResult{}, err
@@ -160,8 +246,8 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 	if len(verifiers) < len(ServiceRoles) {
 		return engine.ApplyResult{}, fmt.Errorf("the service role verifiers are missing; run postgres-roles-v1 first")
 	}
-	for _, f := range pgbouncerFiles(cfg, rt) {
-		if err := writeFileOwned(f.path, f.content, f.mode, f.owner, f.group); err != nil {
+	for _, f := range files {
+		if err := writePoolerFile(f.path, f.content, f.mode, f.owner, f.group); err != nil {
 			return engine.ApplyResult{}, err
 		}
 	}
@@ -173,6 +259,38 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 		"SESSION_SERVICE": SessionPoolerService,
 	}, report)
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
+}
+
+// ApplyPoolerFence writes both poolers' rendered configuration and reloads
+// them, without touching userlist.txt: db unfollow uses it to withhold an
+// unsettled alias durably, and the service roles (and their verifiers) do not
+// change. Unlike the pgbouncer-v1 step it always reloads, so a retry after a
+// crash between the file writes and the reload still completes the cut.
+//
+// It is a full-configuration entry point, so it applies the routing lifecycle
+// eligibility itself: a database awaiting recovery or an unfinished ordinary
+// follow has no routable cluster and is withheld exactly as general apply would
+// withhold it. Both the eligibility and the unsettled-unfollow aliases come
+// from one records snapshot. The normal pgbouncer-v1 step must not use this
+// narrowing: the engine already hands it a view that keeps an explicitly owned
+// follow or recovery target. Unreadable records fail before any file is
+// overwritten or a service is reloaded, so a retry never re-exposes an alias it
+// cannot prove is safe.
+func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) error {
+	recs, err := poolerRecords()
+	if err != nil {
+		return err
+	}
+	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs)
+	for _, f := range files {
+		if err := writePoolerFile(f.path, f.content, f.mode, f.owner, f.group); err != nil {
+			return err
+		}
+	}
+	return rt.Shell.Run(ctx, pgbouncerID, Script("pgbouncer"), map[string]string{
+		"PGBOUNCER_DIR":   PgbouncerDir,
+		"SESSION_SERVICE": SessionPoolerService,
+	}, report)
 }
 
 // roleVerifiers reads the SCRAM verifiers of the service roles from the

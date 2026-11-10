@@ -240,7 +240,7 @@ func TestFollowerJSONOmitsUnreadSides(t *testing.T) {
 			state: health.FollowerState{Source: "app", Slot: "vaire_f", SourceKnown: true, SelfKnown: true,
 				Streaming: true, SenderState: "streaming", InRecovery: true,
 				LagBytes: int64p(0), LagSeconds: float64p(0), SlotExists: true, SlotActive: true,
-				SlotWALStatus: "reserved", SlotRetainedBytes: int64p(0), SlotSafeBytes: 1024},
+				SlotWALStatus: "reserved", SlotRetainedBytes: int64p(0), SlotSafeBytes: int64p(0)},
 			present: []string{"source_known", "self_known", "streaming", "sender_state", "in_recovery", "replay_paused",
 				"lag_bytes", "lag_seconds", "slot_exists", "slot_active", "slot_wal_status", "slot_retained_bytes", "slot_safe_bytes"},
 			absent: []string{"source_error", "self_error"},
@@ -248,23 +248,41 @@ func TestFollowerJSONOmitsUnreadSides(t *testing.T) {
 		"source only": {
 			state: health.FollowerState{Source: "app", Slot: "vaire_f", SourceKnown: true,
 				SelfError: "app_follower: connection refused", SlotExists: true, SlotWALStatus: "extended",
-				SlotRetainedBytes: int64p(3000), SlotSafeBytes: 1000},
+				SlotRetainedBytes: int64p(3000), SlotSafeBytes: int64p(1000)},
 			present: []string{"source_known", "self_known", "streaming", "slot_exists", "slot_active",
 				"slot_wal_status", "slot_retained_bytes", "slot_safe_bytes", "self_error"},
 			absent: []string{"source_error", "in_recovery", "replay_paused", "lag_bytes", "lag_seconds"},
+		},
+		"source known, allowance unknown": {
+			state: health.FollowerState{Source: "app", Slot: "vaire_f", SourceKnown: true,
+				Streaming: true, SenderState: "streaming", SlotExists: true, SlotActive: true,
+				SlotWALStatus: "reserved", SlotRetainedBytes: int64p(3000)},
+			present: []string{"source_known", "self_known", "streaming", "slot_exists", "slot_active",
+				"slot_wal_status", "slot_retained_bytes"},
+			absent: []string{"source_error", "self_error", "in_recovery", "replay_paused",
+				"lag_bytes", "lag_seconds", "slot_safe_bytes", "slot_uncapped"},
+		},
+		"source known, uncapped": {
+			state: health.FollowerState{Source: "app", Slot: "vaire_f", SourceKnown: true,
+				Streaming: true, SenderState: "streaming", SlotExists: true, SlotActive: true,
+				SlotWALStatus: "reserved", SlotRetainedBytes: int64p(3000), SlotSafeBytes: int64p(-1), SlotUncapped: true},
+			present: []string{"source_known", "self_known", "streaming", "slot_exists", "slot_active",
+				"slot_wal_status", "slot_retained_bytes", "slot_safe_bytes", "slot_uncapped"},
+			absent: []string{"source_error", "self_error", "in_recovery", "replay_paused",
+				"lag_bytes", "lag_seconds"},
 		},
 		"self only": {
 			state: health.FollowerState{Source: "app", Slot: "vaire_f", SelfKnown: true,
 				SourceError: "app: connection refused", InRecovery: true, ReplayPaused: true},
 			present: []string{"source_known", "self_known", "source_error", "in_recovery", "replay_paused"},
 			absent: []string{"self_error", "streaming", "slot_exists", "slot_active", "slot_wal_status",
-				"slot_safe_bytes", "lag_bytes", "lag_seconds", "slot_retained_bytes"},
+				"slot_safe_bytes", "slot_uncapped", "lag_bytes", "lag_seconds", "slot_retained_bytes"},
 		},
 		"neither side known": {
 			state:   health.FollowerState{Source: "app", Slot: "vaire_f", SourceError: "app: stopped", SelfError: "app_follower: stopped"},
 			present: []string{"source_known", "self_known", "source_error", "self_error"},
 			absent: []string{"streaming", "sender_state", "in_recovery", "replay_paused", "lag_bytes", "lag_seconds",
-				"slot_exists", "slot_active", "slot_wal_status", "slot_retained_bytes", "slot_safe_bytes"},
+				"slot_exists", "slot_active", "slot_wal_status", "slot_retained_bytes", "slot_safe_bytes", "slot_uncapped"},
 		},
 	}
 	rows := map[string]func(*health.FollowerState) any{
@@ -301,7 +319,7 @@ func TestFollowerJSONOmitsUnreadSides(t *testing.T) {
 			// caught-up follower keeps its zeros.
 			st := cases["both sides known"].state
 			f := followerField(t, encode(&st))
-			for _, key := range []string{"lag_bytes", "lag_seconds", "slot_retained_bytes"} {
+			for _, key := range []string{"lag_bytes", "lag_seconds", "slot_retained_bytes", "slot_safe_bytes"} {
 				if got, ok := f[key].(float64); !ok || got != 0 {
 					t.Errorf("a measured zero was lost: %s = %v", key, f[key])
 				}

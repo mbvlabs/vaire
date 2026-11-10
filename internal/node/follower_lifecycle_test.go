@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,6 +20,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/state"
@@ -52,6 +56,7 @@ func followerLifecycleCfg(t *testing.T, names ...string) config.Cluster {
 	for i, name := range names {
 		cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{
 			Name: name, Node: "db1", Port: 5434 + i, Size: "small", StatementTimeout: "60s", Follows: "app",
+			FollowGeneration: fmt.Sprintf("%032x", i+1),
 		})
 	}
 	if err := cfg.Validate(); err != nil {
@@ -66,10 +71,10 @@ func newFollowerNode(t *testing.T, cfg config.Cluster) *followerNode {
 	n := &followerNode{t: t, dir: dir, store: state.FileStore{Path: filepath.Join(dir, "cluster.toml")}, instance: "test-instance", registered: map[string]string{}, confDirRoot: filepath.Join(dir, "postgresql", "18")}
 	oldRecords, oldState, oldServer, oldRunning := backup.RecordsPath, followerState, followerServerOps, clusterRunning
 	oldInstance, oldRegistered, oldConf := followHostInstance, followRegisteredData, followConfRegistered
-	oldConfDir := followConfDirectory
+	oldConfDir, oldFloors := followConfDirectory, followerEffectiveFloors
 	backup.RecordsPath = filepath.Join(dir, "records.json")
 	followerState = func() state.Store { return n.store }
-	clusterRunning = func(config.ClusterSpec) bool { return true }
+	clusterRunning = func(spec config.ClusterSpec) bool { return !spec.IsFollower() }
 	followHostInstance = func() (string, error) { return n.instance, nil }
 	followRegisteredData = func(name string) (string, error) { return n.registered[name], nil }
 	followConfRegistered = func(name string) bool { _, ok := n.registered[name]; return ok }
@@ -80,10 +85,19 @@ func newFollowerNode(t *testing.T, cfg config.Cluster) *followerNode {
 		}
 		return err == nil, err
 	}
+	// A running source reports no floor above any proposed follower unless a
+	// test supplies its own facts.
+	followerEffectiveFloors = func(context.Context, config.ClusterSpec) (map[string]int, error) {
+		out := map[string]int{}
+		for _, name := range steps.FloorSettings {
+			out[name] = 0
+		}
+		return out, nil
+	}
 	t.Cleanup(func() {
 		backup.RecordsPath, followerState, followerServerOps, clusterRunning = oldRecords, oldState, oldServer, oldRunning
 		followHostInstance, followRegisteredData, followConfRegistered = oldInstance, oldRegistered, oldConf
-		followConfDirectory = oldConfDir
+		followConfDirectory, followerEffectiveFloors = oldConfDir, oldFloors
 	})
 	raw, err := cfg.Encode()
 	if err != nil {
@@ -150,6 +164,27 @@ func (n *followerNode) partialRegistration(db string) {
 
 func (n *followerNode) confDir(db string) string { return filepath.Join(n.confDirRoot, db) }
 
+// recoveryOwner is the follow owner a db recover of db continues: its
+// cluster.toml entry and its current awaiting record.
+func recoveryOwner(n *followerNode, cfg config.Cluster, db string) followOwner {
+	n.t.Helper()
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		n.t.Fatalf("%s has no cluster.toml entry", db)
+	}
+	return followOwner{Name: db, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec, Awaiting: n.records().AwaitingRecovery[db]}
+}
+
+// ordinaryOwner is the follow owner an ordinary db follow of db prepared.
+func ordinaryOwner(n *followerNode, cfg config.Cluster, db string) followOwner {
+	n.t.Helper()
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		n.t.Fatalf("%s has no cluster.toml entry", db)
+	}
+	return followOwner{Name: db, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec}
+}
+
 func (n *followerNode) records() backup.Records {
 	n.t.Helper()
 	recs, err := backup.LoadRecords()
@@ -160,11 +195,12 @@ func (n *followerNode) records() backup.Records {
 }
 
 // awaitRecovery records db as awaiting recovery, as server init --restore's
-// placement does.
+// placement and pruning do. A follower's cluster.toml entry has no stanza, so
+// its real awaiting record has an empty stanza too.
 func (n *followerNode) awaitRecovery(db string) {
 	n.t.Helper()
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		s.AwaitingRecovery[db] = backup.Awaiting{Stanza: db + "-abc123", Since: "2026-01-01T00:00:00Z"}
+		s.AwaitingRecovery[db] = backup.Awaiting{Stanza: "", Since: "2026-01-01T00:00:00Z"}
 		return nil
 	}); err != nil {
 		n.t.Fatal(err)
@@ -235,6 +271,24 @@ func (s *followerStub) install(t *testing.T) *followerStub {
 			s.mu.Unlock()
 			return nil, nil
 		},
+		fence: func(context.Context, *jobEnv, config.Cluster, string) (func(), error) {
+			if err := s.stage("fence"); err != nil {
+				return nil, err
+			}
+			return func() {
+				s.mu.Lock()
+				s.resumed = true
+				s.mu.Unlock()
+			}, nil
+		},
+		settle: func(context.Context, sqlRunner, config.ClusterSpec, string, string) error {
+			return s.stage("settle")
+		},
+		resume: func(context.Context, string) {
+			s.mu.Lock()
+			s.resumed = true
+			s.mu.Unlock()
+		},
 	}
 	return s
 }
@@ -278,7 +332,15 @@ func (s *followerStub) reached(want ...string) bool {
 
 // followEnv is db-follow's job for name, as RunJob builds it.
 func followEnv(cfg config.Cluster, name string, recover bool) *jobEnv {
-	params, _ := json.Marshal(dbFollowParams{Source: "app", Name: name, From: followFromBaseBackup, Recover: recover})
+	since := ""
+	if recover {
+		recs, err := backup.LoadRecords()
+		if err != nil {
+			panic(err)
+		}
+		since = recs.AwaitingRecovery[name].Since
+	}
+	params, _ := json.Marshal(dbFollowParams{Source: "app", Name: name, From: followFromBaseBackup, Recover: recover, RecoverSince: since})
 	return &jobEnv{ID: "01J0000000000000000000TEST", Job: "db-follow", Cluster: cfg, Params: params}
 }
 
@@ -309,6 +371,7 @@ func TestRecoverKeepsAwaitingUntilTheFollowerRuns(t *testing.T) {
 	node := newFollowerNode(t, cfg)
 	node.awaitRecovery("app_follower")
 	stub := (&followerStub{}).install(t)
+	installRetainingSlot(t)
 
 	// Before the slot and the copy, on the copy itself, and before the
 	// adoption: each returns through the same boundary.
@@ -325,7 +388,7 @@ func TestRecoverKeepsAwaitingUntilTheFollowerRuns(t *testing.T) {
 		if aw.Adopted {
 			t.Errorf("an entry whose copy never finished (%s) is marked adopted", stopped)
 		}
-		if aw.Stanza != "app_follower-abc123" {
+		if aw.Stanza != "" {
 			t.Errorf("the entry lost its stanza %s: %+v", stopped, aw)
 		}
 		// The retry is admitted: db recover reaches the job again (its dry run
@@ -409,6 +472,17 @@ func TestFollowerRecoverInTheWay(t *testing.T) {
 			t.Errorf("%s: refusal reason %q", name, reason(t, err))
 		}
 	}
+}
+
+// installRetainingSlot makes the source slot read as a reserved slot that
+// still retains its position, without a live source cluster.
+func installRetainingSlot(t *testing.T) {
+	t.Helper()
+	old := followerSlotOps
+	followerSlotOps.inspect = func(context.Context, config.ClusterSpec, string) (followerSlotState, error) {
+		return followerSlotState{Exists: true, Usable: true}, nil
+	}
+	t.Cleanup(func() { followerSlotOps = old })
 }
 
 // followCopyPlan replaces the physical copy of a build at its narrowest seam:
@@ -570,14 +644,15 @@ func (p *followCopyPlan) count(call string) int {
 	return n
 }
 
-// R2-1: a recover continuation owns local paths, so its job takes the node and
-// both clusters' locks exclusively; a plain follow keeps the shared locks.
+// R2-1 / FG-M4: a follow and a recover continuation both own local paths and
+// roll back desired state, so their jobs take the node and both clusters'
+// locks exclusively.
 func TestRecoverFollowTakesExclusiveLocks(t *testing.T) {
 	cfg := followerLifecycleCfg(t, "app_follower")
 	if got := jobLockMode(followEnv(cfg, "app_follower", true)); got != engine.LockExclusive {
 		t.Fatalf("a recover follow takes %v", got)
 	}
-	if got := jobLockMode(followEnv(cfg, "app_follower", false)); got != engine.LockShared {
+	if got := jobLockMode(followEnv(cfg, "app_follower", false)); got != engine.LockExclusive {
 		t.Fatalf("a plain follow takes %v", got)
 	}
 }
@@ -595,7 +670,7 @@ func TestRecoverRebuildsAnOwnedInterruptedCopy(t *testing.T) {
 	installFollowCopy(t, plan)
 
 	// The crash left the copying record and a partial data directory.
-	if err := writeFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"], followPhaseCopying); err != nil {
+	if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopying); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(cfg.Server.DataDirectory("app_follower"), 0o700); err != nil {
@@ -645,7 +720,7 @@ func TestRecoverResumesAnOwnedAdoption(t *testing.T) {
 	if aw := node.records().AwaitingRecovery["app_follower"]; aw.Adopted {
 		t.Fatalf("an incomplete adoption is marked adopted: %+v", aw)
 	}
-	if own, ok, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || !ok || own.Phase != followPhaseCopied {
+	if own, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok || own.Phase != followPhaseCopied {
 		t.Fatalf("the completed copy has no copied record: %+v %v %v", own, ok, err)
 	}
 
@@ -684,7 +759,7 @@ func TestRecoverResumeKeepsTheCompletedCopysSlot(t *testing.T) {
 	if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil {
 		t.Fatal("an adoption that died returned no error")
 	}
-	if own, ok, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || !ok || own.Phase != followPhaseCopied {
+	if own, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok || own.Phase != followPhaseCopied {
 		t.Fatalf("the completed copy has no copied record: %+v %v %v", own, ok, err)
 	}
 
@@ -829,7 +904,7 @@ func TestRecoverDryRunReportsTheCompletedCopysSlot(t *testing.T) {
 					t.Fatalf("the preview made a change (%s): %v", effect, plan.calls)
 				}
 			}
-			if own, ok, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || !ok || own.Phase != followPhaseCopied {
+			if own, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok || own.Phase != followPhaseCopied {
 				t.Fatalf("the preview changed the ownership: %+v %v %v", own, ok, err)
 			}
 			if !node.records().IsAwaiting("app_follower") {
@@ -838,21 +913,35 @@ func TestRecoverDryRunReportsTheCompletedCopysSlot(t *testing.T) {
 		})
 	}
 
-	// An adopted copy is started as it is: even a missing slot is no recopy.
+	// An adopted copy is still validated against its retained slot: a usable
+	// slot starts it as it is, while a missing one takes the proven-owned
+	// recopy the preview reports. Both read the slot.
 	if err := markFollowerAdopted("app_follower"); err != nil {
 		t.Fatal(err)
 	}
-	plan.slot, plan.slotLSN, plan.inspectErr = followerSlotState{}, "", nil
+	plan.slot, plan.slotLSN, plan.inspectErr = followerSlotState{Exists: true, Usable: true}, "0/1000", nil
 	plan.calls = nil
 	res, err := handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg})
 	if err != nil {
 		t.Fatalf("the adopted dry run is refused: %v", err)
 	}
 	if data := res.Data.(map[string]any); data["resume"] != true {
-		t.Fatalf("an adopted copy is not resumed: %v", data)
+		t.Fatalf("an adopted copy on a retained slot is not resumed: %v", data)
 	}
-	if plan.has("inspect-slot") {
-		t.Fatalf("an adopted copy read the slot: %v", plan.calls)
+	if !plan.has("inspect-slot") {
+		t.Fatalf("an adopted copy did not read its slot: %v", plan.calls)
+	}
+	plan.slot, plan.slotLSN = followerSlotState{}, ""
+	plan.calls = nil
+	res, err = handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg})
+	if err != nil {
+		t.Fatalf("the adopted dry run with a missing slot is refused: %v", err)
+	}
+	if data := res.Data.(map[string]any); data["resume"] != false || data["recopy_reason"] == nil {
+		t.Fatalf("an adopted copy on a missing slot is not reported as recopied: %v", data)
+	}
+	if !plan.has("inspect-slot") {
+		t.Fatalf("the adopted preview did not read the missing slot: %v", plan.calls)
 	}
 }
 
@@ -881,8 +970,8 @@ func TestRecoverRecopyCleanupFailureKeepsTheOwnedCopy(t *testing.T) {
 	if plan.has("create-slot") || plan.has("reset-slot") || plan.has("copy") {
 		t.Fatalf("a failed cleanup left a fresh slot beneath the old copy: %v", plan.calls)
 	}
-	if own, ok, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || !ok || own.Phase != followPhaseCopied {
-		t.Fatalf("the failed cleanup lost the completed copy's ownership: %+v %v %v", own, ok, err)
+	if own, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok || own.Phase == followPhaseStarted {
+		t.Fatalf("the failed cleanup lost the copy's ownership: %+v %v %v", own, ok, err)
 	}
 	if _, err := handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg}); err != nil {
 		t.Fatalf("the retry is refused: %v", err)
@@ -913,7 +1002,7 @@ func TestRecoverResumeSlotInspectionFailureKeepsTheCopy(t *testing.T) {
 	if plan.has("drop-owned") || plan.has("reset-slot") || plan.has("create-slot") || plan.has("drop-slot") || plan.has("copy") {
 		t.Fatalf("a failed inspection touched the copy or its slot: %v", plan.calls)
 	}
-	if own, ok, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || !ok || own.Phase != followPhaseCopied {
+	if own, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok || own.Phase != followPhaseCopied {
 		t.Fatalf("the failed inspection lost the completed copy's ownership: %+v %v %v", own, ok, err)
 	}
 	if recs := node.records(); !recs.IsAwaiting("app_follower") {
@@ -949,7 +1038,7 @@ func TestRecoverCleansAnOwnedPartialConfigDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	node.partialRegistration("app_follower")
-	if err := writeFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"], followPhaseCopying); err != nil {
+	if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopying); err != nil {
 		t.Fatal(err)
 	}
 
@@ -969,7 +1058,7 @@ func TestRecoverCleansAnOwnedPartialConfigDirectory(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(node.confDir("app_follower"), "postgresql.conf")); !os.IsNotExist(err) {
 		t.Fatalf("the partial registration has a postgresql.conf: %v", err)
 	}
-	if own, ok, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || !ok || own.Phase != followPhaseCopying {
+	if own, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok || own.Phase != followPhaseCopying {
 		t.Fatalf("the interrupted cleanup lost ownership: %+v %v %v", own, ok, err)
 	}
 
@@ -1029,7 +1118,7 @@ func TestRecoverKeepsOwnershipWhileAnOwnedDirectoryRemains(t *testing.T) {
 	installFollowCopy(t, plan)
 
 	node.partialRegistration("app_follower")
-	if err := writeFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"], followPhaseCopying); err != nil {
+	if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopying); err != nil {
 		t.Fatal(err)
 	}
 	// The cleanup removes the data it owns and reports success while the
@@ -1038,7 +1127,7 @@ func TestRecoverKeepsOwnershipWhileAnOwnedDirectoryRemains(t *testing.T) {
 	if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil {
 		t.Fatal("the constructor failure returned no error")
 	}
-	if _, ok, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || !ok {
+	if _, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok {
 		t.Fatalf("ownership was cleared while the owned directory remains: %v %v", ok, err)
 	}
 
@@ -1107,7 +1196,7 @@ func TestFollowConstructorFailureDropsTheFreshSlot(t *testing.T) {
 		if !plan.has("create-slot") || !plan.has("drop-slot") {
 			t.Fatalf("the fresh slot was not dropped: %v", plan.calls)
 		}
-		if recs := node.records(); !recs.IsAwaiting("app_follower") || recs.AwaitingRecovery["app_follower"].Stanza != "app_follower-abc123" {
+		if recs := node.records(); !recs.IsAwaiting("app_follower") || recs.AwaitingRecovery["app_follower"].Stanza != "" {
 			t.Fatalf("the failed recovery lost its awaiting entry: %+v", recs)
 		}
 		if _, err := os.Stat(foreign); err != nil {
@@ -1186,7 +1275,7 @@ func TestRecoverRefusesForeignPathsAndIgnoresARebuiltHost(t *testing.T) {
 		t.Fatalf("a foreign cluster was admitted: %v", err)
 	}
 
-	if err := writeFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"], followPhaseCopied); err != nil {
+	if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
 		t.Fatal(err)
 	}
 	node.instance = "the rebuilt instance"
@@ -1222,11 +1311,10 @@ func TestFollowOwnershipIsBoundToTheAwaitingRecord(t *testing.T) {
 	cfg := followerLifecycleCfg(t, "app_follower")
 	node := newFollowerNode(t, cfg)
 	node.awaitRecovery("app_follower")
-	awaiting := node.records().AwaitingRecovery["app_follower"]
-	if err := writeFollowOwnership("app_follower", "app", awaiting, followPhaseCopied); err != nil {
+	if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
 		t.Fatal(err)
 	}
-	if _, owned, err := readFollowOwnership("app_follower", "app", awaiting); err != nil || !owned {
+	if _, owned, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !owned {
 		t.Fatalf("the matching awaiting record owns no copy: %v %v", owned, err)
 	}
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
@@ -1237,7 +1325,7 @@ func TestFollowOwnershipIsBoundToTheAwaitingRecord(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, owned, err := readFollowOwnership("app_follower", "app", node.records().AwaitingRecovery["app_follower"]); err != nil || owned {
+	if _, owned, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || owned {
 		t.Fatalf("a record from an older awaiting entry still owns the copy: %v %v", owned, err)
 	}
 }
@@ -1467,6 +1555,171 @@ func TestUnfollowRecordsBeforeItActs(t *testing.T) {
 				t.Fatalf("the continuation is refused: %v", err)
 			}
 		})
+	}
+}
+
+// A-R4 / RB-03: an unfollow that cannot fence both poolers must not promote.
+// The durable record remains unsettled, the cluster still follows, and no
+// resume is sent to a pooler that may never have been paused.
+func TestUnfollowFenceFailureRefusesPromotion(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	stub := (&followerStub{failAt: "fence", failErr: errors.New("the session pooler did not answer")}).install(t)
+
+	if _, err := jobUnfollow(ctx, unfollowEnv(cfg, "app_follower")); err == nil {
+		t.Fatal("an unfollow behind a failed fence returned no error")
+	}
+	if stub.reached("promote", "rename", "restart", "finish") {
+		t.Fatalf("a failed fence did not refuse the promotion: %v", stub.stages())
+	}
+	if stub.resumed {
+		t.Fatal("a failed fence resumed a pooler before any promotion")
+	}
+	recs := node.records()
+	unfinished, ok := recs.Unfollowing["app_follower"]
+	if !ok || unfinished.Settled {
+		t.Fatalf("the failed fence left no unsettled record: %+v", unfinished)
+	}
+	if spec, _ := node.config().ClusterByName("app_follower"); spec.Follows != "app" {
+		t.Fatalf("the failed fence changed cluster.toml: %+v", spec)
+	}
+}
+
+// A-R4 / RB-03: the privilege transition is settled after the promotion and
+// again after the rename, while the alias is still fenced, and only then is
+// the record marked settled for finishUnfollow (which re-renders the poolers
+// and resumes them).
+func TestUnfollowSettlesAccessBeforeExposingTheAlias(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	cfg.Clusters[1].Protected = true
+	node := newFollowerNode(t, cfg)
+	stub := (&followerStub{}).install(t)
+	var atPromote, atRestart, atFinish backup.Unfollow
+	stub.before = func(stage string) {
+		recs, err := backup.LoadRecords()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		switch stage {
+		case "promote":
+			atPromote = recs.Unfollowing["app_follower"]
+		case "restart":
+			atRestart = recs.Unfollowing["app_follower"]
+		case "finish":
+			atFinish = recs.Unfollowing["app_follower"]
+		}
+	}
+
+	if _, err := jobUnfollow(ctx, unfollowEnv(cfg, "app_follower")); err != nil {
+		t.Fatalf("the unfollow failed: %v", err)
+	}
+	want := []string{"fence", "promote", "settle", "rename", "settle", "remove_conf", "restart", "drop_slot", "finish"}
+	if got := stub.stages(); !slices.Equal(got, want) {
+		t.Fatalf("stages = %v, want %v", got, want)
+	}
+	if atPromote.Settled || atRestart.Settled {
+		t.Fatalf("the record was settled before the restart: promote %+v restart %+v", atPromote, atRestart)
+	}
+	if !atFinish.Settled {
+		t.Fatalf("finish saw an unsettled record: %+v", atFinish)
+	}
+	if !stub.resumed {
+		t.Fatal("the poolers were not resumed after the settled render")
+	}
+	if recs := node.records().Unfollowing; len(recs) != 0 {
+		t.Fatalf("the finished unfollow left a record: %v", recs)
+	}
+}
+
+// A-R4 / RB-03: the protected admin policy names the database and owner the
+// cluster holds, whichever phase a partial rename stopped at.
+func TestSettleUnfollowAdminAccessUsesActualNames(t *testing.T) {
+	ctx := context.Background()
+	spec := config.ClusterSpec{Name: "app_follower", Protected: true}
+	for _, tc := range []struct {
+		name      string
+		databases map[string]bool
+		roles     map[string]bool
+		want      []string
+	}{
+		{
+			name:      "before the renames",
+			databases: map[string]bool{"app": true},
+			roles:     map[string]bool{"app_owner": true, "app_migrate": true, "app_app": true, "app_ro": true},
+			want:      []string{`ALTER ROLE "app_owner" NOLOGIN;`, `datname = 'app'`},
+		},
+		{
+			name:      "after the renames",
+			databases: map[string]bool{"app_follower": true},
+			roles:     map[string]bool{"app_follower_owner": true, "app_follower_migrate": true},
+			want:      []string{`ALTER ROLE "app_follower_owner" NOLOGIN;`, `datname = 'app_follower'`},
+		},
+		{
+			name:      "database renamed first",
+			databases: map[string]bool{"app_follower": true},
+			roles:     map[string]bool{"app_owner": true},
+			want:      []string{`ALTER ROLE "app_owner" NOLOGIN;`, `datname = 'app_follower'`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeSQL{databases: tc.databases, roles: tc.roles}
+			if err := settleUnfollowAdminAccess(ctx, fake, spec, "app", "app_follower"); err != nil {
+				t.Fatal(err)
+			}
+			sql := fake.last()
+			for _, want := range tc.want {
+				if !strings.Contains(sql, want) {
+					t.Errorf("missing %q in\n%s", want, sql)
+				}
+			}
+		})
+	}
+
+	fake := &fakeSQL{databases: map[string]bool{"app": true, "app_follower": true}, roles: map[string]bool{"app_owner": true}}
+	if err := settleUnfollowAdminAccess(ctx, fake, spec, "app", "app_follower"); err == nil {
+		t.Fatal("an ambiguous database was settled instead of refused")
+	}
+	if fake.last() != "" {
+		t.Fatalf("an ambiguous database still had its policy run:\n%s", fake.last())
+	}
+	if err := settleUnfollowAdminAccess(ctx, &fakeSQL{}, config.ClusterSpec{Name: "app_follower"}, "app", "app_follower"); err != nil {
+		t.Fatalf("an unprotected database needs no policy: %v", err)
+	}
+}
+
+// A retry whose previous attempt already settled the privilege transition
+// does not fence again; finish still resumes both poolers, clearing a pause
+// the earlier attempt left before it stopped.
+func TestUnfollowSettledRetryResumesWithoutRefencing(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		s.Unfollowing["app_follower"] = backup.Unfollow{
+			Source: "app", Stanza: "app_follower-abc123", StartedAt: "2026-11-10T00:00:00Z", Settled: true,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stub := (&followerStub{}).install(t)
+	if _, err := jobUnfollow(ctx, unfollowEnv(cfg, "app_follower")); err != nil {
+		t.Fatalf("the settled retry failed: %v", err)
+	}
+	if stub.reached("fence") {
+		t.Fatalf("a settled retry fenced the poolers again: %v", stub.stages())
+	}
+	if !stub.reached("promote", "settle", "rename", "restart", "finish") {
+		t.Fatalf("the settled retry skipped work: %v", stub.stages())
+	}
+	if !stub.resumed {
+		t.Fatal("the settled retry did not resume the poolers")
+	}
+	if recs := node.records().Unfollowing; len(recs) != 0 {
+		t.Fatalf("the settled retry left a record: %v", recs)
 	}
 }
 
@@ -1702,6 +1955,37 @@ func fileJobLockers(t *testing.T) jobLockers {
 	}
 }
 
+// installForgetJournal keeps a rollback test's desired-state transaction off
+// the node's journal path.
+func installForgetJournal(t *testing.T) {
+	t.Helper()
+	old := forgetClusterJournal
+	forgetClusterJournal = func(string, string) error { return nil }
+	t.Cleanup(func() { forgetClusterJournal = old })
+}
+
+// waitingNodeLock is a node lock that waits like engine.Acquire does, on a
+// test's file locks, so a rollback test observes serialization rather than an
+// immediate lock_held.
+func waitingNodeLock(locks jobLockers) func(context.Context, string, string) (engine.Release, error) {
+	return func(ctx context.Context, job, requestID string) (engine.Release, error) {
+		for {
+			release, err := locks.node(ctx, engine.LockExclusive, job, requestID, 0)
+			if err == nil {
+				return release, nil
+			}
+			if !engine.IsLockHeld(err) {
+				return nil, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+}
+
 // fakeSQL models a promoted follower's cluster for the renames: the databases
 // and roles it holds. It records what renameFollower asked it to run.
 type fakeSQL struct {
@@ -1880,5 +2164,1706 @@ func TestUnfollowMarksFailuresThatMayHaveChangedPasswords(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ordinaryFollowEnv is db-follow's job for name as handleDBFollow starts it for
+// a retry: the prepared entry's generation travels in the job params. A retry
+// never carries PreparedNew.
+func ordinaryFollowEnv(cfg config.Cluster, name string) *jobEnv {
+	spec, _ := cfg.ClusterByName(name)
+	params, _ := json.Marshal(dbFollowParams{Source: spec.Follows, Name: name, From: followFromBaseBackup, Generation: spec.FollowGeneration})
+	return &jobEnv{ID: "01J0000000000000000000TEST", Job: "db-follow", Cluster: cfg, Params: params}
+}
+
+// preparedFollowEnv is the job of the request that added a fresh entry.
+func preparedFollowEnv(cfg config.Cluster, name string) *jobEnv {
+	env := ordinaryFollowEnv(cfg, name)
+	var p dbFollowParams
+	_ = json.Unmarshal(env.Params, &p)
+	p.PreparedNew = true
+	env.Params, _ = json.Marshal(p)
+	return env
+}
+
+// followDryRunRequest is db.follow's dry-run request, as the CLI sends it.
+func followDryRunRequest(source, name string) (req rpc.Request) {
+	req.Method = "db.follow"
+	req.Params, _ = json.Marshal(map[string]any{"source": source, "name": name})
+	req.DryRun = true
+	return req
+}
+
+// installFollowAdmission replaces the two live facts a public follow checks:
+// whether a cluster runs and how much space the copy needs.
+func installFollowAdmission(t *testing.T, running func(config.ClusterSpec) bool) {
+	t.Helper()
+	oldRunning, oldSpace := clusterRunning, followSpace
+	clusterRunning = running
+	followSpace = func(context.Context, config.Cluster, string) ([]backup.SpaceNeed, error) { return nil, nil }
+	t.Cleanup(func() { clusterRunning, followSpace = oldRunning, oldSpace })
+}
+
+// markAdoptedForTest writes a recovery's adopted marker without the build.
+func markAdoptedForTest(t *testing.T, name string) {
+	t.Helper()
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		aw := s.AwaitingRecovery[name]
+		aw.Adopted = true
+		s.AwaitingRecovery[name] = aw
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A-2/B-01: an adopted copy is not automatically safe. A reserved or extended
+// slot with a restart position starts it as it is; a missing, lost, unreserved
+// or restartless slot takes the proven-owned recopy only after the adopted
+// marker is durably cleared; an unreadable slot fails closed; an unowned copy
+// is never removed.
+func TestRecoverAdoptedCopyRequiresRetainedSlot(t *testing.T) {
+	for name, test := range map[string]struct {
+		slot        followerSlotState
+		owned       bool
+		inspectErr  error
+		recopy      bool
+		fresh       string
+		refused     bool
+		jobFails    bool
+		conditional bool
+	}{
+		"retained":        {slot: followerSlotState{Exists: true, Usable: true}, owned: true},
+		"missing":         {owned: true, recopy: true, fresh: "create-slot"},
+		"lost":            {slot: followerSlotState{Exists: true}, owned: true, recopy: true, fresh: "reset-slot"},
+		"unreserved":      {slot: followerSlotState{Exists: true}, owned: true, recopy: true, fresh: "reset-slot"},
+		"restartless":     {slot: followerSlotState{Exists: true}, owned: true, recopy: true, fresh: "reset-slot"},
+		"unknown status":  {slot: followerSlotState{Exists: true}, owned: true, recopy: true, fresh: "reset-slot"},
+		"unreadable":      {slot: followerSlotState{Exists: true, Usable: true}, owned: true, inspectErr: errors.New("the source cannot be read"), jobFails: true, conditional: true},
+		"unowned missing": {refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := followerLifecycleCfg(t, "app_follower")
+			node := newFollowerNode(t, cfg)
+			node.awaitRecovery("app_follower")
+			installFollowBuildJob(t)
+			adoptedAtDrop := true
+			plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
+			plan.onDropOwned = func(name, data string) error {
+				recs, err := backup.LoadRecords()
+				if err != nil {
+					return err
+				}
+				adoptedAtDrop = recs.AwaitingRecovery[name].Adopted
+				delete(node.registered, name)
+				return errors.Join(os.RemoveAll(data), os.RemoveAll(node.confDir(name)))
+			}
+			installFollowCopy(t, plan)
+			node.copyReady(cfg, "app_follower")
+			markAdoptedForTest(t, "app_follower")
+			if test.owned {
+				if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plan.slot, plan.slotLSN, plan.inspectErr = test.slot, "", test.inspectErr
+
+			res, err := handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg})
+			if test.refused {
+				if err == nil {
+					t.Fatalf("the dry run accepts an adopted copy it cannot reuse safely: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("the dry run is refused: %v", err)
+				}
+				data := res.Data.(map[string]any)
+				if test.conditional {
+					if data["resume"] != false || data["resume_conditional"] != true || data["recopy_reason"] == nil {
+						t.Fatalf("an unreadable adopted slot is not reported conditionally: %v", data)
+					}
+				}
+				for _, effect := range []string{"drop-owned", "create-slot", "reset-slot", "drop-slot", "copy", "adopt"} {
+					if plan.has(effect) {
+						t.Fatalf("the dry run made a change (%s): %v", effect, plan.calls)
+					}
+				}
+			}
+
+			plan.calls = nil
+			_, err = jobFollow(ctx, followEnv(cfg, "app_follower", true))
+			if test.refused || test.jobFails {
+				if err == nil {
+					t.Fatal("the recovery accepted an adopted copy it cannot reuse safely")
+				}
+				if plan.has("drop-owned") || plan.has("create-slot") || plan.has("reset-slot") || plan.has("drop-slot") || plan.has("copy") || plan.has("adopt") {
+					t.Fatalf("a refused adopted recovery touched the copy or slot: %v", plan.calls)
+				}
+				recs := node.records()
+				if !recs.IsAwaiting("app_follower") || !recs.AwaitingRecovery["app_follower"].Adopted {
+					t.Fatalf("a refused adopted recovery cleared its awaiting/adopted state: %+v", recs)
+				}
+				if test.owned {
+					if _, ok, err := readFollowOwnership(recoveryOwner(node, cfg, "app_follower")); err != nil || !ok {
+						t.Fatalf("a refused adopted recovery lost ownership: %v %v", ok, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the recovery failed: %v", err)
+			}
+			if test.recopy {
+				if !plan.has("drop-owned") || !plan.has(test.fresh) {
+					t.Fatalf("an unusable adopted slot did not take the owned recopy: %v", plan.calls)
+				}
+				if !plan.before("drop-owned", test.fresh) {
+					t.Fatalf("the fresh slot came before the owned copy was removed: %v", plan.calls)
+				}
+				if adoptedAtDrop {
+					t.Fatalf("the adopted marker survived to the destructive recopy: %v", plan.calls)
+				}
+				if plan.count("copy") != 1 || plan.count("adopt") != 1 {
+					t.Fatalf("the recopy did not copy and adopt once: %v", plan.calls)
+				}
+			} else {
+				for _, effect := range []string{"drop-owned", "create-slot", "reset-slot", "drop-slot", "copy", "adopt"} {
+					if plan.has(effect) {
+						t.Fatalf("a retained adopted copy was touched (%s): %v", effect, plan.calls)
+					}
+				}
+			}
+			if recs := node.records(); recs.IsAwaiting("app_follower") {
+				t.Fatal("the recovered follower still awaits recovery")
+			}
+			if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
+				t.Fatalf("the ownership record survived the recovery: %v", err)
+			}
+		})
+	}
+}
+
+// ADD: an ordinary follow interrupted after its entry and local paths were
+// recorded is resumed by the same public command. Its completed copy is adopted
+// again, its partial or unsafe copy is removed first, and only the operation's
+// own paths are ever deleted.
+func TestOrdinaryFollowRetryResumesOwnedProgress(t *testing.T) {
+	for name, test := range map[string]struct {
+		ready      bool
+		phase      string
+		slot       followerSlotState
+		recopy     bool
+		wantResume bool
+		wantReason bool
+	}{
+		"partial copy":   {phase: followPhaseCopying, recopy: true},
+		"completed copy": {ready: true, phase: followPhaseCopied, slot: followerSlotState{Exists: true, Usable: true}, wantResume: true},
+		"unsafe slot":    {ready: true, phase: followPhaseCopied, recopy: true, wantReason: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := followerLifecycleCfg(t, "app_follower")
+			node := newFollowerNode(t, cfg)
+			installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+			installFollowBuildJob(t)
+			plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
+			installFollowCopy(t, plan)
+			if test.ready {
+				node.copyReady(cfg, "app_follower")
+			} else if err := os.MkdirAll(cfg.Server.DataDirectory("app_follower"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), test.phase); err != nil {
+				t.Fatal(err)
+			}
+			plan.slot, plan.slotLSN = test.slot, "0/1000"
+
+			res, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()})
+			if err != nil {
+				t.Fatalf("the public retry is refused: %v", err)
+			}
+			data := res.Data.(map[string]any)
+			if data["resume"] != test.wantResume {
+				t.Fatalf("the public retry reports resume=%v: %v", data["resume"], data)
+			}
+			if _, ok := data["recopy_reason"]; ok != test.wantReason {
+				t.Fatalf("the public retry reports a recopy reason %v: %v", ok, data)
+			}
+
+			plan.calls = nil
+			if _, err := jobFollow(ctx, ordinaryFollowEnv(node.config(), "app_follower")); err != nil {
+				t.Fatalf("the retried follow failed: %v", err)
+			}
+			if test.recopy {
+				if !plan.has("drop-owned") || !plan.has("create-slot") || plan.count("copy") != 1 {
+					t.Fatalf("the interrupted copy was not rebuilt: %v", plan.calls)
+				}
+				if plan.count("adopt") != 1 {
+					t.Fatalf("the retried follow did not adopt once: %v", plan.calls)
+				}
+			} else {
+				if plan.has("drop-owned") || plan.has("create-slot") || plan.has("reset-slot") || plan.has("copy") {
+					t.Fatalf("the completed copy was not resumed: %v", plan.calls)
+				}
+				if plan.count("adopt") != 1 || plan.slotLSN != "0/1000" {
+					t.Fatalf("the completed copy was not adopted in place: %v slot %q", plan.calls, plan.slotLSN)
+				}
+			}
+			if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
+				t.Fatalf("the ownership record survived the completed follow: %v", err)
+			}
+			if spec, _ := node.config().ClusterByName("app_follower"); !spec.IsFollower() || spec.Follows != "app" {
+				t.Fatalf("the retried follow lost its entry: %+v", spec)
+			}
+		})
+	}
+}
+
+// ADD: a public follow retry refuses a completed or replaced follower, and a
+// job admitted for the old entry refuses to build after a writer replaced it.
+func TestOrdinaryFollowRetryRefusesForeignOrReplacedProgress(t *testing.T) {
+	ctx := context.Background()
+	t.Run("foreign paths", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+		installFollowBuildJob(t)
+		plan := &followCopyPlan{node: node, cfg: cfg}
+		installFollowCopy(t, plan)
+		node.copyReady(cfg, "app_follower")
+		if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()}); err == nil || reason(t, err) != "database_exists" {
+			t.Fatalf("foreign paths are not refused: %v", err)
+		}
+		if plan.has("drop-owned") || plan.has("copy") {
+			t.Fatalf("a refused retry touched foreign paths: %v", plan.calls)
+		}
+	})
+	t.Run("completed follower", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+		node.copyReady(cfg, "app_follower")
+		if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()}); err == nil || reason(t, err) != "database_exists" {
+			t.Fatalf("a completed follower is retried as unfinished: %v", err)
+		}
+	})
+	t.Run("replaced entry", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+		installFollowBuildJob(t)
+		plan := &followCopyPlan{node: node, cfg: cfg}
+		installFollowCopy(t, plan)
+		node.copyReady(cfg, "app_follower")
+		if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+			t.Fatal(err)
+		}
+		changed := node.config()
+		for i := range changed.Clusters {
+			if changed.Clusters[i].Name == "app_follower" {
+				changed.Clusters[i].Port = 5460
+				changed.Clusters[i].FollowGeneration = "ffffffffffffffffffffffffffffffff"
+			}
+		}
+		node.save(changed)
+		if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: changed}); err == nil || reason(t, err) != "database_exists" {
+			t.Fatalf("a replaced entry is treated as the old follow: %v", err)
+		}
+		plan.calls = nil
+		if _, err := jobFollow(ctx, ordinaryFollowEnv(cfg, "app_follower")); err == nil || reason(t, err) != "config_changed" {
+			t.Fatalf("a job admitted for the old entry built under the new one: %v", err)
+		}
+		if plan.has("copy") || plan.has("drop-owned") {
+			t.Fatalf("a replaced entry was built or removed: %v", plan.calls)
+		}
+	})
+	t.Run("removed entry", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+		stub := (&followerStub{}).install(t)
+		changed := node.config()
+		kept := changed.Clusters[:0]
+		for _, spec := range changed.Clusters {
+			if spec.Name != "app_follower" {
+				kept = append(kept, spec)
+			}
+		}
+		changed.Clusters = kept
+		node.save(changed)
+		if _, err := jobFollow(ctx, ordinaryFollowEnv(cfg, "app_follower")); err == nil || reason(t, err) != "not_a_follower" {
+			t.Fatalf("a job admitted for a removed entry acted: %v", err)
+		}
+		if stub.reached("build") {
+			t.Fatalf("a removed target reached the build: %v", stub.stages())
+		}
+	})
+}
+
+// A-3: the job reloads cluster.toml and records.json after its locks and
+// revalidates the target, source and awaiting record before any effect.
+func TestRecoverFollowReloadsDesiredStateAfterLock(t *testing.T) {
+	ctx := context.Background()
+	t.Run("fresh entry accepted", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		node.awaitRecovery("app_follower")
+		stub := (&followerStub{}).install(t)
+		changed := node.config()
+		for i := range changed.Clusters {
+			if changed.Clusters[i].Name == "app_follower" {
+				changed.Clusters[i].Port = 5461
+			}
+		}
+		node.save(changed)
+		out, err := jobFollow(ctx, followEnv(cfg, "app_follower", true))
+		if err != nil {
+			t.Fatalf("the fresh entry was refused: %v", err)
+		}
+		if data := out.(map[string]any); data["port"] != 5461 {
+			t.Fatalf("the job acted on its pre-lock entry: %v", data)
+		}
+		if !stub.reached("build", "start") {
+			t.Fatalf("the recovery did not build and start: %v", stub.stages())
+		}
+	})
+	t.Run("removed target", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		node.awaitRecovery("app_follower")
+		stub := (&followerStub{}).install(t)
+		changed := node.config()
+		changed.Clusters = changed.Clusters[:1] // app only
+		node.save(changed)
+		if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil || reason(t, err) != "not_a_follower" {
+			t.Fatalf("a removed target was recovered: %v", err)
+		}
+		if stub.reached("build") {
+			t.Fatalf("a removed target reached the build: %v", stub.stages())
+		}
+	})
+	t.Run("replaced source", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		node.awaitRecovery("app_follower")
+		stub := (&followerStub{}).install(t)
+		changed := node.config()
+		changed.Clusters = append(changed.Clusters, config.ClusterSpec{Name: "other", Node: "db1", Port: 5462, Stanza: "other-abc123", StatementTimeout: "60s"})
+		for i := range changed.Clusters {
+			if changed.Clusters[i].Name == "app_follower" {
+				changed.Clusters[i].Follows = "other"
+			}
+		}
+		node.save(changed)
+		if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil || reason(t, err) != "config_changed" {
+			t.Fatalf("a replaced source was recovered: %v", err)
+		}
+		if stub.reached("build") {
+			t.Fatalf("a replaced source reached the build: %v", stub.stages())
+		}
+	})
+	t.Run("no longer awaiting", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		newFollowerNode(t, cfg)
+		stub := (&followerStub{}).install(t)
+		if err := backup.UpdateRecords(func(s *backup.Records) error { delete(s.AwaitingRecovery, "app_follower"); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil || reason(t, err) != "not_awaiting_recovery" {
+			t.Fatalf("a database no longer awaiting was recovered: %v", err)
+		}
+		if stub.reached("build") {
+			t.Fatalf("a database no longer awaiting reached the build: %v", stub.stages())
+		}
+	})
+	t.Run("replaced awaiting generation", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		node.awaitRecovery("app_follower")
+		stub := (&followerStub{}).install(t)
+		env := followEnv(cfg, "app_follower", true)
+		if err := backup.UpdateRecords(func(s *backup.Records) error {
+			aw := s.AwaitingRecovery["app_follower"]
+			aw.Since = "2026-02-02T00:00:00Z"
+			s.AwaitingRecovery["app_follower"] = aw
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := jobFollow(ctx, env); err == nil || reason(t, err) != "config_changed" {
+			t.Fatalf("a replaced awaiting generation was recovered: %v", err)
+		}
+		if stub.reached("build") {
+			t.Fatalf("a replaced awaiting generation reached the build: %v", stub.stages())
+		}
+	})
+	t.Run("source awaiting", func(t *testing.T) {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		node := newFollowerNode(t, cfg)
+		node.awaitRecovery("app_follower")
+		if err := backup.UpdateRecords(func(s *backup.Records) error {
+			s.AwaitingRecovery["app"] = backup.Awaiting{Stanza: "app-abc123", Since: "2026-01-01T00:00:00Z"}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		stub := (&followerStub{}).install(t)
+		if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil || reason(t, err) != "source_awaiting_recovery" {
+			t.Fatalf("a follower of an awaiting source was recovered: %v", err)
+		}
+		if stub.reached("build") {
+			t.Fatalf("a follower of an awaiting source reached the build: %v", stub.stages())
+		}
+	})
+}
+
+// FG-M4/B-02: a plain follow's rollback and a skipped job's no-lock cleanup
+// serialize on the exclusive node lock. The second waits for the first, then
+// removes only the entry its own operation prepared.
+func TestFailedFollowsSerializeDesiredStateRollback(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower", "app_follower_2")
+	node := newFollowerNode(t, cfg)
+	installForgetJournal(t)
+	stub := (&followerStub{failAt: "build", failErr: errors.New("the copy failed")}).install(t)
+	locks := fileJobLockers(t)
+	oldAcquire, oldBefore := followRollbackAcquire, followBeforeRollback
+	followRollbackAcquire = waitingNodeLock(locks)
+	reached := make(chan string, 1)
+	releaseFirst := make(chan struct{})
+	followBeforeRollback = func(name string) {
+		if name == "app_follower" {
+			reached <- name
+			<-releaseFirst
+		}
+	}
+	t.Cleanup(func() { followRollbackAcquire, followBeforeRollback = oldAcquire, oldBefore })
+
+	first := make(chan error, 1)
+	go func() {
+		env := preparedFollowEnv(cfg, "app_follower")
+		release, busy, err := takeJobLocks(ctx, env, locks)
+		if err != nil || busy != nil {
+			first <- errors.Join(err, errors.New("the first follow could not take its locks"))
+			return
+		}
+		defer release()
+		_, err = jobFollow(ctx, env)
+		first <- err
+	}()
+	if got := <-reached; got != "app_follower" {
+		t.Fatalf("the first rollback reached %q", got)
+	}
+
+	// A second follow cannot take the node lock while the first holds it.
+	secondEnv := preparedFollowEnv(cfg, "app_follower_2")
+	if release, busy, err := takeJobLocks(ctx, secondEnv, locks); err != nil || busy == nil {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("the second follow took the node lock beside the first: %v %v", err, busy)
+	}
+
+	// Its skipped-job cleanup holds no lock itself: it waits, then removes
+	// its own entry.
+	second := make(chan error, 1)
+	go func() {
+		notRun(ctx, &jobEnv{Job: "db-follow", Params: secondEnv.Params, Report: func(output.Event) {}}, errors.New("lock busy"))
+		second <- nil
+	}()
+	select {
+	case <-second:
+		t.Fatal("the skipped follow's rollback ran beside the first rollback")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-first; err == nil || !strings.Contains(err.Error(), "the copy failed") {
+		t.Fatalf("the first follow returned %v", err)
+	}
+	<-second
+	saved := node.config()
+	for _, name := range []string{"app_follower", "app_follower_2"} {
+		if _, ok := saved.ClusterByName(name); ok {
+			t.Errorf("the rolled-back entry %s is still in cluster.toml", name)
+		}
+	}
+	if stub.reached("start") {
+		t.Error("a failed build started the follower")
+	}
+}
+
+// FG-M4/B-02: a skipped follow's cleanup waits for the desired-state writer
+// and removes only the entry its own operation prepared, leaving a replaced
+// entry alone.
+func TestSkippedFollowRollbackWaitsForDesiredStateWriter(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	installForgetJournal(t)
+	locks := fileJobLockers(t)
+	old := followRollbackAcquire
+	followRollbackAcquire = waitingNodeLock(locks)
+	t.Cleanup(func() { followRollbackAcquire = old })
+	release, err := locks.node(ctx, engine.LockExclusive, "config.set", "test", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	prepared := mustSpec(t, cfg, "app_follower")
+	go func() {
+		done <- rollbackPreparedFollow(ctx, dbFollowParams{Source: "app", Name: "app_follower", Generation: prepared.FollowGeneration, PreparedNew: true})
+	}()
+	select {
+	case <-done:
+		t.Fatal("the rollback ran while a desired-state writer held the node lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); ok {
+		t.Fatal("the skipped follow's entry was not removed")
+	}
+
+	// A replaced entry is not the operation's to remove.
+	node.save(cfg)
+	changed := node.config()
+	for i := range changed.Clusters {
+		if changed.Clusters[i].Name == "app_follower" {
+			changed.Clusters[i].Port = 5463
+			changed.Clusters[i].FollowGeneration = "ffffffffffffffffffffffffffffffff"
+		}
+	}
+	node.save(changed)
+	if err := rollbackPreparedFollow(ctx, dbFollowParams{Source: "app", Name: "app_follower", Generation: prepared.FollowGeneration, PreparedNew: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); !ok {
+		t.Fatal("a replaced entry was removed by a stale rollback")
+	}
+}
+
+func mustSpec(t *testing.T, cfg config.Cluster, name string) config.ClusterSpec {
+	t.Helper()
+	spec, ok := cfg.ClusterByName(name)
+	if !ok {
+		t.Fatalf("%s has no cluster.toml entry", name)
+	}
+	return spec
+}
+
+// applySuggestedFloorCommands executes every vaire config set command in a
+// floor refusal through the real config setter on node's persisted pre-follow
+// configuration, then saves the validated result.
+func applySuggestedFloorCommands(t *testing.T, node *followerNode, err error) {
+	t.Helper()
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("not a CLI error: %v", err)
+	}
+	commands := regexp.MustCompile(`vaire config set (clusters\.[^\s]+) (\d+)`).FindAllStringSubmatch(cliErr.Hint, -1)
+	if len(commands) == 0 {
+		t.Fatalf("the refusal has no executable config set prerequisite: %v", err)
+	}
+	set := map[string]string{}
+	for _, command := range commands {
+		set[command[1]] = command[2]
+	}
+	raw, err := newConfigBytes(node.store, configSetParams{Set: set})
+	if err != nil {
+		t.Fatalf("a suggested prerequisite is not executable: %v", err)
+	}
+	if err := node.store.Save(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ADD: new-follow admission compares the proposed floors with the source's
+// running values. Only a proven lower floor refuses; a missing fact fails
+// closed; a pending restart that leaves equal or lower values is no refusal.
+func TestFollowFloorMismatches(t *testing.T) {
+	cfg := followerLifecycleCfg(t, "app_follower")
+	src, _ := cfg.ClusterByName("app")
+	spec, _ := cfg.ClusterByName("app_follower")
+	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}
+	floors, err := steps.FollowerFloors(cfg, spec, src, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := map[string]int{}
+	for _, f := range floors {
+		value, err := strconv.Atoi(f.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		running[f.Name] = value
+	}
+	if got, err := followFloorMismatches(cfg, src, spec, host, running); err != nil || len(got) != 0 {
+		t.Fatalf("equal floors are refused: %v %v", got, err)
+	}
+	// A pending increase keeps the source below its desired values: safe.
+	if got, err := followFloorMismatches(cfg, src, spec, host, running); err != nil || len(got) != 0 {
+		t.Fatalf("a pending increase is refused: %v %v", got, err)
+	}
+	running["max_connections"]--
+	if got, err := followFloorMismatches(cfg, src, spec, host, running); err != nil || len(got) != 0 {
+		t.Fatalf("a lower running source is refused: %v %v", got, err)
+	}
+	running["max_connections"] += 2
+	got, err := followFloorMismatches(cfg, src, spec, host, running)
+	if err != nil || len(got) != 1 || got[0].Setting != "max_connections" {
+		t.Fatalf("an unsafe running floor is not reported: %+v %v", got, err)
+	}
+	absent := cfg
+	absent.Clusters = absent.Clusters[:1]
+	if _, err := followFloorMismatches(absent, src, spec, host, running); err == nil {
+		t.Fatal("a config without the proposed target was accepted")
+	}
+	duplicate := cfg
+	duplicate.Clusters = append(duplicate.Clusters, spec)
+	if _, err := followFloorMismatches(duplicate, src, spec, host, running); err == nil {
+		t.Fatal("a config with the proposed target twice was accepted")
+	}
+	delete(running, "max_locks_per_transaction")
+	if _, err := followFloorMismatches(cfg, src, spec, host, running); err == nil {
+		t.Fatal("a missing running floor was treated as safe")
+	}
+}
+
+// ADD: db follow refuses a new follower when the source's running floors are
+// above the follower's, and fails closed when they cannot be read, without
+// writing cluster.toml.
+func TestFollowRefusesUnsafeSourceFloors(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t)
+	// The source's desired setting is below what it still runs: a deferred
+	// shrink. The fresh proposal inherits the desired value, not the live one.
+	cfg.Clusters[0].Settings = map[string]string{"max_connections": "30"}
+	node := newFollowerNode(t, cfg)
+	installFollowAdmission(t, func(config.ClusterSpec) bool { return true })
+	oldFloors := followerEffectiveFloors
+	t.Cleanup(func() { followerEffectiveFloors = oldFloors })
+
+	running := map[string]int{}
+	for _, name := range steps.FloorSettings {
+		running[name] = 0
+	}
+	followerEffectiveFloors = func(context.Context, config.ClusterSpec) (map[string]int, error) {
+		return running, nil
+	}
+	// A safe source admits the dry run.
+	if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: cfg}); err != nil {
+		t.Fatalf("a safe source was refused: %v", err)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); ok {
+		t.Fatal("a dry run wrote the follower entry")
+	}
+
+	running["max_connections"] = 100000
+	_, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: cfg})
+	if err == nil || reason(t, err) != "source_floors_above_follower" {
+		t.Fatalf("an unsafe source was admitted: %v", err)
+	}
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) || !strings.Contains(cliErr.Hint, "clusters.app.settings.max_connections 100000") || strings.Contains(cliErr.Hint, "restart") {
+		t.Fatalf("the refusal does not name the source's executable prerequisite: %v", err)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); ok {
+		t.Fatal("the unsafe refusal wrote the follower entry")
+	}
+
+	// Execute exactly the suggested commands through the real config setter on
+	// the true pre-follow file, then prove the retry is admitted.
+	commands := regexp.MustCompile(`vaire config set (clusters\.[^\s]+) (\d+)`).FindAllStringSubmatch(cliErr.Hint, -1)
+	if len(commands) != 1 {
+		t.Fatalf("the refusal's executable prerequisites are not exact: %v", commands)
+	}
+	applySuggestedFloorCommands(t, node, err)
+	if spec := mustSpec(t, node.config(), "app"); spec.Settings["max_connections"] != "100000" {
+		t.Fatalf("the suggested setter did not persist the source setting: %+v", spec.Settings)
+	}
+	if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()}); err != nil {
+		t.Fatalf("the suggested prerequisite did not permit admission: %v", err)
+	}
+
+	followerEffectiveFloors = func(context.Context, config.ClusterSpec) (map[string]int, error) {
+		return nil, errors.New("the source cannot be read")
+	}
+	if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: cfg}); err == nil || reason(t, err) != "source_floors_unknown" {
+		t.Fatalf("an unknown running floor was treated as safe: %v", err)
+	}
+}
+
+// C2-A3: a prepared ordinary follow with no local progress is not a cluster.
+// General plan and apply leave it out (no initdb, start, timer or pooler
+// exposure), count it in the tuning view, and still allow an unrelated
+// database; --db names the real refusal. The owned follow job keeps the target
+// in its own execution view, and the public retry remains admitted.
+func TestApplyDoesNotInitialisePreparedFollower(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{
+		Name: "other", Node: "db1", Port: 5460, Size: "small", StatementTimeout: "60s", Stanza: "other-1a2b3c",
+	})
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	node := newFollowerNode(t, cfg)
+	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}
+	rt := engine.Runtime{Host: host}
+	journal := filepath.Join(t.TempDir(), "journal.json")
+	only := []string{"postgres-cluster-v1", "postgres-config-v1", "pgbouncer-v1"}
+	hasStep := func(plan engine.PlanData, id string) bool {
+		for _, s := range plan.Steps {
+			if s.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	plan, err := engine.Plan(ctx, steps.Catalog(), node.config(), rt, engine.Options{Only: only, JournalPath: journal})
+	if err != nil {
+		t.Fatalf("the general plan failed: %v", err)
+	}
+	for _, s := range plan.Steps {
+		if s.Cluster == "app_follower" {
+			t.Errorf("general plan includes %s for the prepared follower", s.ID)
+		}
+		if s.ID == "pgbouncer-v1" {
+			for _, d := range s.Diffs {
+				if strings.Contains(d.Diff, "app_follower") {
+					t.Errorf("general plan's pooler diff exposes the prepared follower:\n%s", d.Diff)
+				}
+			}
+		}
+	}
+	if !hasStep(plan, "postgres-cluster-v1@other") {
+		t.Fatal("the unrelated database is not applicable in the general plan")
+	}
+
+	// Direct plan/apply --db names the unfinished follow instead of pretending
+	// the entry does not exist.
+	for name, handler := range map[string]func(context.Context, *Env) (Result, error){"plan": handlePlan, "apply": handleApply} {
+		if _, err := handler(ctx, &Env{Req: request(name, map[string]any{"db": "app_follower"}), Cluster: node.config()}); err == nil || reason(t, err) != "follow_unfinished" {
+			t.Errorf("%s --db accepted the prepared follower: %v", name, err)
+		}
+	}
+
+	// The owned follow execution view keeps the prepared target after
+	// materialisation; the same view is what startFollower passes.
+	kept, err := engine.Plan(ctx, steps.Catalog(), node.config(), rt, engine.Options{Only: only, JournalPath: filepath.Join(t.TempDir(), "journal.json"), Recovering: "app_follower"})
+	if err != nil {
+		t.Fatalf("the owned follow plan failed: %v", err)
+	}
+	if !hasStep(kept, "postgres-cluster-v1@app_follower") {
+		t.Fatal("the owned follow view lost its prepared target")
+	}
+	// The normal pooler renderer must not apply the direct fence's lifecycle
+	// narrowing: the engine's owned view keeps the target, so its alias is
+	// still rendered.
+	keptView := engineView(node.config(), "app_follower")
+	for _, step := range engine.Expand(steps.Catalog(), keptView) {
+		renderer, ok := step.(engine.FileRenderer)
+		if !ok || step.ID() != "pgbouncer-v1" {
+			continue
+		}
+		routed := false
+		for _, f := range renderer.RenderedFiles(keptView, rt) {
+			if strings.Contains(string(f.Content), "app_follower =") {
+				routed = true
+			}
+		}
+		if !routed {
+			t.Error("the normal pooler renderer dropped the owned follow target")
+		}
+	}
+
+	// Apply the same production catalogue with every selected step complete:
+	// it must not select an instance for the prepared follower, and must not
+	// run anything for it. The unrelated database remains selectable/recorded.
+	viewed := engineView(node.config(), "")
+	expanded := map[string]engine.Step{}
+	for _, s := range engine.Expand(steps.Catalog(), viewed) {
+		expanded[s.ID()] = s
+	}
+	j := &engine.Journal{Schema: engine.JournalSchema, Steps: map[string]engine.JournalEntry{}}
+	for _, s := range plan.Steps {
+		step, ok := expanded[s.ID]
+		if !ok {
+			t.Fatalf("plan step %s is not in the viewed catalogue", s.ID)
+		}
+		inputs, err := step.Inputs(viewed, rt)
+		if err != nil {
+			t.Fatalf("inputs for %s: %v", s.ID, err)
+		}
+		j.Steps[s.ID] = engine.JournalEntry{Status: engine.StatusCompleted, InputsHash: engine.InputsHash(s.ID, inputs)}
+	}
+	if err := j.Save(journal); err != nil {
+		t.Fatal(err)
+	}
+	applied, _, err := engine.Apply(ctx, steps.Catalog(), node.config(), rt, engine.Options{Only: only, JournalPath: journal})
+	if err != nil {
+		t.Fatalf("the general apply failed: %v", err)
+	}
+	for _, s := range applied.Steps {
+		if s.Cluster == "app_follower" {
+			t.Errorf("general apply selected %s for the prepared follower", s.ID)
+		}
+	}
+	if applied.Applied != 0 {
+		t.Errorf("general apply ran %d steps for a prepared follower with no local progress", applied.Applied)
+	}
+
+	// The public follow retry is still admitted for the untouched prepared
+	// entry; it is the only operation that may build it.
+	installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+	res, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()})
+	if err != nil {
+		t.Fatalf("the public follow retry is refused: %v", err)
+	}
+	if data := res.Data.(map[string]any); data["resume"] != false {
+		t.Fatalf("the untouched prepared entry is not a fresh copy: %v", data)
+	}
+}
+
+// ADD: an ordinary follow that died after adopting its copy, before the start
+// completed, keeps its entry and ownership. The public retry resumes the same
+// copy and does not copy or remove it again.
+func TestOrdinaryFollowRetryAfterStartFailure(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+	stub := installFollowBuildJob(t)
+	plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
+	installFollowCopy(t, plan)
+	stub.failAt, stub.failErr = "start", errors.New("the start died")
+
+	if _, err := jobFollow(ctx, ordinaryFollowEnv(cfg, "app_follower")); err == nil {
+		t.Fatal("a failed start returned no error")
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); !ok {
+		t.Fatal("a failed start removed the prepared entry")
+	}
+	own, ok, err := readFollowOwnership(ordinaryOwner(node, cfg, "app_follower"))
+	if err != nil || !ok || own.Phase != followPhaseCopied {
+		t.Fatalf("a failed start lost the completed copy's ownership: %+v %v %v", own, ok, err)
+	}
+	if plan.count("copy") != 1 || plan.count("adopt") != 1 {
+		t.Fatalf("the first attempt did not copy and adopt once: %v", plan.calls)
+	}
+
+	res, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()})
+	if err != nil {
+		t.Fatalf("the public retry after a failed start is refused: %v", err)
+	}
+	if data := res.Data.(map[string]any); data["resume"] != true {
+		t.Fatalf("the retry after a failed start does not resume: %v", data)
+	}
+	stub.failAt, stub.failErr = "", nil
+	plan.calls = nil
+	if _, err := jobFollow(ctx, ordinaryFollowEnv(node.config(), "app_follower")); err != nil {
+		t.Fatalf("the retried follow failed: %v", err)
+	}
+	if plan.count("copy") != 0 || plan.count("adopt") != 1 || plan.has("drop-owned") {
+		t.Fatalf("the retry did not resume the same copy: %v", plan.calls)
+	}
+	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
+		t.Fatalf("the ownership record survived the retried follow: %v", err)
+	}
+}
+
+// followRequest is db.follow's real (non-dry-run) request.
+func followRequest(source, name, size string) (req rpc.Request) {
+	req.Method = "db.follow"
+	req.Params, _ = json.Marshal(map[string]any{"source": source, "name": name, "size": size})
+	return req
+}
+
+// installPrepareTestLocks makes a handler test's preparation and cleanup locks
+// local no-ops, so the real addDatabase/cleanup flow runs without /run/lock.
+func installPrepareTestLocks(t *testing.T) {
+	t.Helper()
+	oldPrepare, oldRollback := followPrepareAcquire, followRollbackAcquire
+	release := func() {}
+	followPrepareAcquire = func(context.Context, string, time.Duration) (engine.Release, error) { return release, nil }
+	followRollbackAcquire = func(context.Context, string, string) (engine.Release, error) { return release, nil }
+	t.Cleanup(func() { followPrepareAcquire, followRollbackAcquire = oldPrepare, oldRollback })
+}
+
+// installDeterministicAddChecks skips the host CommitLimit check that would
+// otherwise make a handler test depend on the runner's memory pressure.
+func installDeterministicAddChecks(t *testing.T) {
+	t.Helper()
+	old := addDatabaseCheckStarts
+	addDatabaseCheckStarts = func(config.Cluster, config.ClusterSpec, hostinfo.Info, int) error { return nil }
+	t.Cleanup(func() { addDatabaseCheckStarts = old })
+}
+
+// installStartFailure fails the detachable job after the entry exists.
+func installStartFailure(t *testing.T, inspect func(dbFollowParams)) {
+	t.Helper()
+	old := followStartJob
+	followStartJob = func(_ context.Context, _ *Env, _ string, params any, _ map[string]string) (string, error) {
+		p, _ := params.(dbFollowParams)
+		if inspect != nil {
+			inspect(p)
+		}
+		return "", errors.New("systemd-run failed")
+	}
+	t.Cleanup(func() { followStartJob = old })
+}
+
+// A-R2/RB-02: a fresh preparation's start failure removes only the untouched
+// same-generation entry, after the generation was persisted under the lock. A
+// retry never removes its entry.
+func TestFreshFollowPreparationStartFailureCleanup(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t)
+	node := newFollowerNode(t, cfg)
+	installForgetJournal(t)
+	installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+	installPrepareTestLocks(t)
+	installDeterministicAddChecks(t)
+	var started dbFollowParams
+	entryDuringStart := config.ClusterSpec{}
+	installStartFailure(t, func(p dbFollowParams) {
+		started = p
+		entryDuringStart, _ = node.config().ClusterByName(p.Name)
+	})
+	if _, err := handleDBFollow(ctx, &Env{Req: followRequest("app", "app_follower", "small"), Cluster: cfg}); err == nil {
+		t.Fatal("the failed start returned no error")
+	}
+	if !started.PreparedNew || !configFollowGeneration(started.Generation) {
+		t.Fatalf("the fresh preparation did not carry a new generation: %+v", started)
+	}
+	if entryDuringStart.FollowGeneration != started.Generation {
+		t.Fatalf("the prepared entry did not persist its generation: %+v", entryDuringStart)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); ok {
+		t.Fatal("an untouched fresh preparation survived its failed start")
+	}
+	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
+		t.Fatalf("the fresh preparation left an ownership record: %v", err)
+	}
+
+	// The same target as a retry is never rolled back.
+	cfg = followerLifecycleCfg(t, "app_follower")
+	node = newFollowerNode(t, cfg)
+	retry := ordinaryFollowEnv(cfg, "app_follower")
+	if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()}); err != nil {
+		t.Fatalf("the same-target public retry is refused: %v", err)
+	}
+	notRun(ctx, &jobEnv{Job: "db-follow", Params: retry.Params, Report: func(output.Event) {}}, errors.New("lock busy"))
+	if _, ok := node.config().ClusterByName("app_follower"); !ok {
+		t.Fatal("a retry invocation removed its existing entry")
+	}
+}
+
+func configFollowGeneration(generation string) bool {
+	if len(generation) != 32 {
+		return false
+	}
+	for _, r := range generation {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return false
+		}
+	}
+	return true
+}
+
+// A-R2/RB-02: fresh cleanup after the lock removes only an untouched entry of
+// the same generation. Ownership, materialised paths, a running cluster,
+// completion and uncertain records are preserved.
+func TestFreshFollowCleanupChecksProgressAfterLock(t *testing.T) {
+	for name, test := range map[string]struct {
+		ownership bool
+		artifact  bool
+		running   bool
+		completed bool
+		garbage   bool
+		removed   bool
+	}{
+		"untouched":        {removed: true},
+		"ownership":        {ownership: true},
+		"artifacts":        {artifact: true},
+		"running":          {running: true},
+		"completed":        {completed: true},
+		"uncertain record": {garbage: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := followerLifecycleCfg(t, "app_follower")
+			node := newFollowerNode(t, cfg)
+			installForgetJournal(t)
+			installPrepareTestLocks(t)
+			installDeterministicAddChecks(t)
+			spec := mustSpec(t, cfg, "app_follower")
+			if test.ownership {
+				if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.artifact {
+				if err := os.MkdirAll(cfg.Server.DataDirectory("app_follower"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.running {
+				clusterRunning = func(spec config.ClusterSpec) bool { return spec.Name == "app_follower" }
+			}
+			if test.completed {
+				changed := node.config()
+				for i := range changed.Clusters {
+					if changed.Clusters[i].Name == "app_follower" {
+						changed.Clusters[i].FollowGeneration = ""
+					}
+				}
+				node.save(changed)
+			}
+			if test.garbage {
+				path, err := followOwnershipPath("app_follower")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			params := dbFollowParams{Source: "app", Name: "app_follower", Generation: spec.FollowGeneration, PreparedNew: true}
+			if err := rollbackPreparedFollow(ctx, params); err != nil {
+				t.Fatal(err)
+			}
+			_, present := node.config().ClusterByName("app_follower")
+			if present == test.removed {
+				t.Fatalf("entry present %v, want removed %v", present, test.removed)
+			}
+		})
+	}
+}
+
+// A-R2/RB-02: a fresh cleanup that finds another attempt completed the entry
+// before its lock release leaves the completed replacement alone.
+func TestFreshFollowCleanupOvertakenByCompletion(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	installForgetJournal(t)
+	installPrepareTestLocks(t)
+	installDeterministicAddChecks(t)
+	spec := mustSpec(t, cfg, "app_follower")
+	oldHook := followBeforeRollback
+	followBeforeRollback = func(name string) {
+		completed := node.config()
+		for i := range completed.Clusters {
+			if completed.Clusters[i].Name == name {
+				completed.Clusters[i].FollowGeneration = ""
+			}
+		}
+		node.save(completed)
+	}
+	t.Cleanup(func() { followBeforeRollback = oldHook })
+	if err := rollbackPreparedFollow(ctx, dbFollowParams{Source: "app", Name: "app_follower", Generation: spec.FollowGeneration, PreparedNew: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); !ok {
+		t.Fatal("a completed replacement was removed by a stale fresh cleanup")
+	}
+}
+
+// A-R3/RB-02: a reused name/node/port with a different generation is a
+// replacement, not the old operation. Old ownership, a stale job and a stale
+// rollback cannot claim or remove it.
+func TestStaleGenerationCannotClaimReplacement(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	installForgetJournal(t)
+	installPrepareTestLocks(t)
+	installDeterministicAddChecks(t)
+	installFollowBuildJob(t)
+	plan := &followCopyPlan{node: node, cfg: cfg}
+	installFollowCopy(t, plan)
+	old := mustSpec(t, cfg, "app_follower")
+	if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+		t.Fatal(err)
+	}
+	changed := node.config()
+	replacement := "ffffffffffffffffffffffffffffffff"
+	for i := range changed.Clusters {
+		if changed.Clusters[i].Name == "app_follower" {
+			changed.Clusters[i].FollowGeneration = replacement
+		}
+	}
+	node.save(changed)
+	node.copyReady(changed, "app_follower")
+	newSpec := mustSpec(t, changed, "app_follower")
+
+	if _, owned, err := readFollowOwnership(ordinaryOwnerForSpec(newSpec)); err != nil || owned {
+		t.Fatalf("old ownership claimed the replacement: %v %v", owned, err)
+	}
+	retry, err := followRetryable(changed, node.records(), newSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry {
+		t.Fatal("a replacement with old ownership and materialised paths is retried as unfinished")
+	}
+	plan.calls = nil
+	if _, err := jobFollow(ctx, ordinaryFollowEnv(cfg, "app_follower")); err == nil || reason(t, err) != "config_changed" {
+		t.Fatalf("a stale job acted on the replacement: %v", err)
+	}
+	if plan.has("copy") || plan.has("drop-owned") {
+		t.Fatalf("a stale job changed the replacement: %v", plan.calls)
+	}
+	if err := rollbackPreparedFollow(ctx, dbFollowParams{Source: "app", Name: "app_follower", Generation: old.FollowGeneration, PreparedNew: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); !ok {
+		t.Fatal("a stale rollback removed the replacement")
+	}
+}
+
+// ordinaryOwnerForSpec is the owner record of one already-loaded entry.
+func ordinaryOwnerForSpec(spec config.ClusterSpec) followOwner {
+	return followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec}
+}
+
+// A-R3: successful completion saves the cleared generation before ownership is
+// deleted; a failed completion save leaves the operation unfinished.
+func TestOrdinaryFollowCompletionClearsGeneration(t *testing.T) {
+	for name, test := range map[string]struct {
+		failSave bool
+	}{
+		"completion saved": {},
+		"save failed":      {failSave: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := followerLifecycleCfg(t, "app_follower")
+			node := newFollowerNode(t, cfg)
+			installFollowAdmission(t, func(config.ClusterSpec) bool { return true })
+			stub := installFollowBuildJob(t)
+			plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
+			installFollowCopy(t, plan)
+			node.copyReady(cfg, "app_follower")
+			if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+				t.Fatal(err)
+			}
+			spec := mustSpec(t, cfg, "app_follower")
+			plan.slot, plan.slotLSN = followerSlotState{Exists: true, Usable: true}, "0/1000"
+			if test.failSave {
+				old := followerState
+				followerState = func() state.Store { return failingSaveStore{Store: node.store} }
+				t.Cleanup(func() { followerState = old })
+			}
+			_, err := jobFollow(ctx, ordinaryFollowEnv(cfg, "app_follower"))
+			if test.failSave {
+				if err == nil || !strings.Contains(err.Error(), "save failed") {
+					t.Fatalf("a failed completion save returned %v", err)
+				}
+				if _, ok := node.config().ClusterByName("app_follower"); !ok {
+					t.Fatal("a failed completion save lost the entry")
+				}
+				if got := mustSpec(t, node.config(), "app_follower").FollowGeneration; got != spec.FollowGeneration {
+					t.Fatalf("a failed completion save cleared the generation: %q", got)
+				}
+				if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); err != nil {
+					t.Fatalf("a failed completion save removed ownership: %v", err)
+				}
+				res, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()})
+				if err != nil {
+					t.Fatalf("the running unfinished follow is refused after a failed completion save: %v", err)
+				}
+				if data := res.Data.(map[string]any); data["resume"] != true {
+					t.Fatalf("the running unfinished follow is not resumed after a failed completion save: %v", data)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the completed follow failed: %v", err)
+			}
+			if got := mustSpec(t, node.config(), "app_follower").FollowGeneration; got != "" {
+				t.Fatalf("the completed follower kept generation %q", got)
+			}
+			if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
+				t.Fatalf("the completed follower kept ownership: %v", err)
+			}
+			if !stub.reached("start") {
+				t.Fatalf("the completion test did not start: %v", stub.stages())
+			}
+		})
+	}
+}
+
+type failingSaveStore struct{ state.Store }
+
+func (failingSaveStore) Save([]byte) error { return errors.New("save failed") }
+
+// A-R3: a successful drop retires only the matching old generation/ownership;
+// a different generation's evidence survives.
+func TestRetireFollowOwnershipAfterDrop(t *testing.T) {
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	spec := mustSpec(t, cfg, "app_follower")
+	if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireFollowOwnershipAfterDrop("app_follower", "app", "ffffffffffffffffffffffffffffffff"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); err != nil {
+		t.Fatalf("a mismatched generation's ownership was retired: %v", err)
+	}
+	if err := retireFollowOwnershipAfterDrop("app_follower", "app", spec.FollowGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
+		t.Fatalf("the matching ownership survived a successful drop: %v", err)
+	}
+
+	// A recovery record is identified by the awaiting source, not the
+	// prepared-entry generation.
+	node.awaitRecovery("app_follower")
+	if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireFollowOwnershipAfterDrop("app_follower", "other", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); err != nil {
+		t.Fatalf("a recovery record for another source was retired: %v", err)
+	}
+	if err := retireFollowOwnershipAfterDrop("app_follower", "app", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
+		t.Fatalf("the matching recovery record survived a successful drop: %v", err)
+	}
+}
+
+// A-R1/RB-01: real pruning of a follower entry (empty stanza) supports initial
+// copy, retained-slot continuation and adopted recopy.
+func TestRecoveryAcceptsRealEmptyFollowerAwaitingStanza(t *testing.T) {
+	for name, test := range map[string]struct {
+		ready  bool
+		phase  string
+		adopt  bool
+		slot   followerSlotState
+		recopy bool
+	}{
+		"initial copy":          {},
+		"retained continuation": {ready: true, phase: followPhaseCopied, slot: followerSlotState{Exists: true, Usable: true}},
+		"adopted recopy":        {ready: true, phase: followPhaseCopied, adopt: true, recopy: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := followerLifecycleCfg(t, "app_follower")
+			node := newFollowerNode(t, cfg)
+			raw, _, err := backup.PruneForRestore(nil, awaitingOf(cfg), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(backup.RecordsPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The source was recovered first, as db recover --all orders it.
+			if err := backup.UpdateRecords(func(s *backup.Records) error {
+				delete(s.AwaitingRecovery, "app")
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if aw := node.records().AwaitingRecovery["app_follower"]; aw.Stanza != "" || aw.Since == "" {
+				t.Fatalf("real pruning produced %+v, want empty stanza and a since", aw)
+			}
+			installFollowBuildJob(t)
+			plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
+			installFollowCopy(t, plan)
+			plan.slot, plan.slotLSN = test.slot, "0/1000"
+			if test.ready {
+				node.copyReady(cfg, "app_follower")
+				if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), test.phase); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.adopt {
+				markAdoptedForTest(t, "app_follower")
+			}
+			if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err != nil {
+				t.Fatalf("the recovery failed: %v", err)
+			}
+			if test.recopy {
+				if !plan.has("drop-owned") || !plan.has("create-slot") || plan.count("copy") != 1 {
+					t.Fatalf("the adopted recopy did not use the real empty-stanza record: %v", plan.calls)
+				}
+			}
+			if recs := node.records(); recs.IsAwaiting("app_follower") {
+				t.Fatal("the recovered follower still awaits recovery")
+			}
+		})
+	}
+}
+
+// A-R5/RB-05: a running target is not completed. Matching unfinished ownership
+// admits a retry whether the target runs or stopped; completed or unowned
+// running targets and unowned stopped targets are refused.
+func TestRunningUnfinishedFollowIsRetried(t *testing.T) {
+	for name, test := range map[string]struct {
+		generation bool
+		ownership  bool
+		ready      bool
+		wantResume bool
+	}{
+		"unfinished running": {generation: true, ownership: true, ready: true, wantResume: true},
+		"completed running":  {ready: true},
+		"unowned running":    {generation: true, ready: true},
+		"untouched prepared": {generation: true, wantResume: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := followerLifecycleCfg(t, "app_follower")
+			node := newFollowerNode(t, cfg)
+			installFollowAdmission(t, func(config.ClusterSpec) bool { return true })
+			if !test.generation {
+				changed := node.config()
+				for i := range changed.Clusters {
+					if changed.Clusters[i].Name == "app_follower" {
+						changed.Clusters[i].FollowGeneration = ""
+					}
+				}
+				node.save(changed)
+			}
+			if test.ready {
+				node.copyReady(node.config(), "app_follower")
+			}
+			if test.ownership {
+				plan := &followCopyPlan{node: node, cfg: node.config(), slot: followerSlotState{Exists: true, Usable: true}}
+				installFollowCopy(t, plan)
+				if err := writeFollowOwnership(ordinaryOwner(node, node.config(), "app_follower"), followPhaseCopied); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()})
+			if !test.wantResume {
+				if err == nil {
+					t.Fatalf("the target was admitted as unfinished: %v", res.Data)
+				}
+				if reason(t, err) != "database_exists" {
+					t.Fatalf("refusal reason %q, want database_exists", reason(t, err))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the running unfinished follow is refused: %v", err)
+			}
+			if data := res.Data.(map[string]any); data["resume"] != true {
+				t.Fatalf("the running unfinished follow is not resumed: %v", data)
+			}
+		})
+	}
+}
+
+// C2-A2: once an unfollow owns the target, an ordinary follow must not resume
+// across it, whether the retained copy looks reusable or unsafe. The unfollow
+// promoted the target and failed before independence/rename; the follow's
+// public preview, public admission and locked job all refuse before touching
+// the slot, copy, adoption or start, and never delete the prepared entry. The
+// unfollow's own retry stays admitted.
+func TestOrdinaryFollowCannotResumeAfterUnfollowBegins(t *testing.T) {
+	for name, test := range map[string]struct {
+		slot    followerSlotState
+		settled bool
+		ready   bool
+	}{
+		"retained copy": {slot: followerSlotState{Exists: true, Usable: true}, ready: true},
+		"unsafe slot":   {slot: followerSlotState{Exists: true}, ready: true},
+		"settled":       {slot: followerSlotState{Exists: true, Usable: true}, ready: true, settled: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := followerLifecycleCfg(t, "app_follower")
+			node := newFollowerNode(t, cfg)
+			installFollowAdmission(t, func(config.ClusterSpec) bool { return true })
+			stub := (&followerStub{}).install(t)
+			plan := &followCopyPlan{node: node, cfg: cfg, slot: test.slot}
+			installFollowCopy(t, plan)
+			if test.ready {
+				node.copyReady(cfg, "app_follower")
+			}
+			if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+				t.Fatal(err)
+			}
+
+			// The unfollow promotes the running unfinished follower, then dies
+			// after settling the policy (settle is also before the first rename)
+			// and before the independent configuration.
+			stub.failAt, stub.failErr = "rename", errors.New("stopped after promote")
+			if _, err := jobUnfollow(ctx, unfollowEnv(node.config(), "app_follower")); err == nil {
+				t.Fatal("the interrupted unfollow returned no error")
+			}
+			if !stub.reached("promote") {
+				t.Fatalf("the unfollow stopped before promoting: %v", stub.stages())
+			}
+			if _, ok := node.records().Unfollowing["app_follower"]; !ok {
+				t.Fatal("the interrupted unfollow left no durable record")
+			}
+			if test.settled {
+				if err := backup.UpdateRecords(func(s *backup.Records) error {
+					u := s.Unfollowing["app_follower"]
+					u.Settled = true
+					s.Unfollowing["app_follower"] = u
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := node.config()
+			gen := mustSpec(t, before, "app_follower").FollowGeneration
+
+			// Public preview and admission refuse before any slot inspection or
+			// copy decision.
+			plan.calls = nil
+			if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: before}); err == nil || reason(t, err) != "unfollow_in_progress" {
+				t.Fatalf("the follow preview crossed the unfollow: %v", err)
+			}
+			if _, err := handleDBFollow(ctx, &Env{Req: followRequest("app", "app_follower", "small"), Cluster: before}); err == nil || reason(t, err) != "unfollow_in_progress" {
+				t.Fatalf("the public follow crossed the unfollow: %v", err)
+			}
+			if len(plan.calls) != 0 {
+				t.Fatalf("a refused public follow touched the copy or slot: %v", plan.calls)
+			}
+
+			// The locked job sees the durable record on its own reload and stops
+			// before ownership, slot, copy, adoption or start effects.
+			stub.calls = nil
+			plan.calls = nil
+			if _, err := jobFollow(ctx, ordinaryFollowEnv(before, "app_follower")); err == nil || reason(t, err) != "unfollow_in_progress" {
+				t.Fatalf("the locked follow crossed the unfollow: %v", err)
+			}
+			if len(stub.stages()) != 0 || len(plan.calls) != 0 {
+				t.Fatalf("the locked follow started effects: stub=%v plan=%v", stub.stages(), plan.calls)
+			}
+
+			// A stale fresh-preparation rollback must not delete the entry a
+			// newer unfollow owns.
+			clusterRunning = func(spec config.ClusterSpec) bool { return spec.Name != "app_follower" }
+			if err := forgetPreparedFollow(dbFollowParams{Source: "app", Name: "app_follower", Generation: gen, PreparedNew: true}); err != nil {
+				t.Fatalf("the stale rollback failed: %v", err)
+			}
+			after := node.config()
+			if spec, ok := after.ClusterByName("app_follower"); !ok || spec.FollowGeneration != gen || spec.Follows != "app" {
+				t.Fatalf("the follow entry was removed or replaced: %+v", spec)
+			}
+			if _, ok, err := readFollowOwnership(ordinaryOwner(node, after, "app_follower")); err != nil || !ok {
+				t.Fatalf("the follow ownership was lost: %v %v", ok, err)
+			}
+			if _, ok := node.records().Unfollowing["app_follower"]; !ok {
+				t.Fatal("the unfollow record was lost")
+			}
+
+			// The unfollow's own public retry remains admitted.
+			res, err := handleDBUnfollow(ctx, &Env{Req: unfollowRequest("app_follower", true), Cluster: node.config()})
+			if err != nil {
+				t.Fatalf("the unfollow retry is refused: %v", err)
+			}
+			if data := res.Data.(map[string]any); data["resume"] != true {
+				t.Fatalf("the unfollow retry does not resume: %v", data)
+			}
+		})
+	}
+}
+
+// A-R6/RB-04: the exact proposed entry is floor-checked under the preparation
+// lock. A source shrink after the preflight but before the lock is refused
+// with the higher live values.
+func TestFollowFloorsCheckedUnderPreparationLock(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t)
+	cfg.Clusters[0].Settings = map[string]string{"max_connections": "100"}
+	node := newFollowerNode(t, cfg)
+	installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+	installPrepareTestLocks(t)
+	installDeterministicAddChecks(t)
+	installForgetJournal(t)
+	running := map[string]int{}
+	for _, name := range steps.FloorSettings {
+		running[name] = 0
+	}
+	running["max_connections"] = 100
+	followerEffectiveFloors = func(context.Context, config.ClusterSpec) (map[string]int, error) { return running, nil }
+	oldHook := followBeforePrepareLock
+	followBeforePrepareLock = func() {
+		changed := node.config()
+		for i := range changed.Clusters {
+			if changed.Clusters[i].Name == "app" {
+				changed.Clusters[i].Settings = map[string]string{"max_connections": "30"}
+			}
+		}
+		node.save(changed)
+	}
+	t.Cleanup(func() { followBeforePrepareLock = oldHook })
+	_, err := handleDBFollow(ctx, &Env{Req: followRequest("app", "app_follower", "small"), Cluster: cfg})
+	if err == nil || reason(t, err) != "source_floors_above_follower" {
+		t.Fatalf("the shrink between preflight and lock was admitted: %v", err)
+	}
+	if _, ok := node.config().ClusterByName("app_follower"); ok {
+		t.Fatal("the unsafe locked preparation saved the follower entry")
+	}
+	if got := mustSpec(t, node.config(), "app").Settings["max_connections"]; got != "30" {
+		t.Fatalf("the test did not retain the shrunken desired setting: %q", got)
+	}
+}
+
+// RB-06: the proposed membership itself lowers CPU-derived floors. Restarting
+// an unchanged one-cluster source cannot resolve that mismatch; the refusal
+// reports actual/proposed values and the supported explicit-setting remedy.
+func TestMembershipFloorMismatchNeedsExplicitSettings(t *testing.T) {
+	ctx := context.Background()
+	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}
+	cfg := followerLifecycleCfg(t)
+	src, _ := cfg.ClusterByName("app")
+	spec := followerSpec(src, "app_follower", "")
+	oneCluster, err := steps.FollowerFloors(cfg, spec, src, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := map[string]int{}
+	for _, f := range oneCluster {
+		value, err := strconv.Atoi(f.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		running[f.Name] = value
+	}
+	twoClusters := cfg
+	twoClusters.Clusters = append(twoClusters.Clusters, spec)
+	mismatches, err := followFloorMismatches(twoClusters, src, spec, host, running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range mismatches {
+		if m.Setting == "max_worker_processes" && m.Source == 12 && m.Follower == 10 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the membership-derived mismatch is not reported: %+v", mismatches)
+	}
+	// Restarting the source with its unchanged one-cluster configuration gives
+	// the same live floor, so a restart-only remedy would loop.
+	again, err := steps.FollowerFloors(cfg, spec, src, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range again {
+		if again[i].Name == "max_worker_processes" && again[i].Value != "12" {
+			t.Fatalf("the unchanged one-cluster source derives %s, want 12", again[i].Value)
+		}
+	}
+	followerEffectiveFloors = func(context.Context, config.ClusterSpec) (map[string]int, error) { return running, nil }
+	err = refuseUnsafeFollowFloors(ctx, twoClusters, src, spec, host, true)
+	if err == nil || reason(t, err) != "source_floors_above_follower" {
+		t.Fatalf("the membership mismatch is admitted: %v", err)
+	}
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("not a CLI error: %v", err)
+	}
+	if !strings.Contains(cliErr.Hint, "clusters.app_follower.settings.max_worker_processes 12") {
+		t.Fatalf("the remedy does not name the supported explicit setting: %q", cliErr.Hint)
+	}
+	if strings.Contains(cliErr.Hint, "restart") || strings.Contains(cliErr.Message, "restart was deferred") {
+		t.Fatalf("the refusal asserts a restart remedy that cannot resolve the membership mismatch: %q / %q", cliErr.Message, cliErr.Hint)
+	}
+}
+
+// C2-A4/B2-02: a fresh follow is refused before its entry exists, so its
+// remedy must target the existing source. The proposed two-cluster membership
+// lowers max_worker_processes from 12 to 10 on this four-vCPU host; setting
+// the source's explicit value to the running 12 is executable on the persisted
+// pre-follow file and makes the next admission safe. No restart is claimed.
+func TestFreshMembershipFloorMismatchSuggestsSourceSetting(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t)
+	node := newFollowerNode(t, cfg)
+	installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}
+	oldDetect := detectHost
+	detectHost = func(string) (hostinfo.Info, error) { return host, nil }
+	t.Cleanup(func() { detectHost = oldDetect })
+	src, _ := cfg.ClusterByName("app")
+	spec := followerSpec(src, "app_follower", "")
+	oneCluster, err := steps.FollowerFloors(cfg, spec, src, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := map[string]int{}
+	for _, f := range oneCluster {
+		value, err := strconv.Atoi(f.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		running[f.Name] = value
+	}
+	followerEffectiveFloors = func(context.Context, config.ClusterSpec) (map[string]int, error) { return running, nil }
+
+	_, err = handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()})
+	if err == nil || reason(t, err) != "source_floors_above_follower" {
+		t.Fatalf("the membership mismatch was admitted: %v", err)
+	}
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("not a CLI error: %v", err)
+	}
+	if !strings.Contains(cliErr.Hint, "clusters.app.settings.max_worker_processes 12") {
+		t.Fatalf("the fresh remedy does not target the existing source: %q", cliErr.Hint)
+	}
+	if strings.Contains(cliErr.Hint, "clusters.app_follower.") || strings.Contains(cliErr.Hint, "restart") {
+		t.Fatalf("the fresh remedy names the absent follower or an unproven restart: %q", cliErr.Hint)
+	}
+	applySuggestedFloorCommands(t, node, err)
+	if spec := mustSpec(t, node.config(), "app"); spec.Settings["max_worker_processes"] != "12" {
+		t.Fatalf("the suggested source setting was not persisted: %+v", spec.Settings)
+	}
+	if _, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()}); err != nil {
+		t.Fatalf("the source prerequisite did not permit admission: %v", err)
+	}
+}
+
+// A-R6/RB-04: a retried follow re-reads the running source facts inside its
+// locked job before ownership, slot, copy or start effects.
+func TestFollowRetryFloorCheckUsesCurrentFacts(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	installFollowBuildJob(t)
+	plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
+	installFollowCopy(t, plan)
+	if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
+		t.Fatal(err)
+	}
+	running := map[string]int{}
+	for _, name := range steps.FloorSettings {
+		running[name] = 0
+	}
+	running["max_connections"] = 100000
+	followerEffectiveFloors = func(context.Context, config.ClusterSpec) (map[string]int, error) { return running, nil }
+	_, err := jobFollow(ctx, ordinaryFollowEnv(cfg, "app_follower"))
+	if err == nil || reason(t, err) != "source_floors_above_follower" {
+		t.Fatalf("the retry did not check current floor facts: %v", err)
+	}
+	if plan.has("copy") || plan.has("drop-owned") || plan.has("inspect-slot") || plan.has("adopt") {
+		t.Fatalf("a refused retry touched the copy or slot: %v", plan.calls)
+	}
+	if _, ok, err := readFollowOwnership(ordinaryOwner(node, cfg, "app_follower")); err != nil || !ok {
+		t.Fatalf("a refused retry lost ownership: %v %v", ok, err)
+	}
+	if spec, _ := node.config().ClusterByName("app_follower"); spec.FollowGeneration == "" {
+		t.Fatal("a refused retry cleared the generation")
 	}
 }

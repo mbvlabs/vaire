@@ -42,6 +42,33 @@ func TestRestoreWarningsKeepFollowersDivergedStructured(t *testing.T) {
 	}
 }
 
+// The combined restore --promote uses the same node-order preflight: a
+// follower is refused with is_follower before protection is checked, so a
+// protected follower does not answer database_protected and no token, dump
+// identity or dry run follows (Phase 6, B-04).
+func TestCombinedRestorePreflightRefusesAFollowerFirst(t *testing.T) {
+	cfg := config.DefaultCluster()
+	cfg.Clusters = []config.ClusterSpec{
+		{Name: "app", Port: 5433, Stanza: "app-3f9a1c", Size: "large", StatementTimeout: "60s"},
+		{Name: "app_follower", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app"},
+	}
+	for _, protected := range []bool{false, true} {
+		cfg.Clusters[1].Protected = protected
+		err := combinedRestorePreflight(cfg, "app_follower")
+		var ce *output.CLIError
+		if !errors.As(err, &ce) {
+			t.Fatalf("combined restore on a follower (protected %v): %v, want is_follower", protected, err)
+		}
+		d, _ := ce.Details.(map[string]any)
+		if ce.Code != output.CodePrecondition || d["reason"] != "is_follower" || d["source"] != "app" {
+			t.Errorf("combined restore on a follower (protected %v): %s %v, want is_follower from app", protected, ce.Code, d)
+		}
+		if err := combinedRestorePreflight(cfg, "app"); err != nil {
+			t.Errorf("combined restore on the source (protected %v): %v", protected, err)
+		}
+	}
+}
+
 // restore promote and undo refuse a follower with the node's is_follower
 // error before protection is checked or the token asked for, so a protected
 // follower does not answer database_protected (R3-2). A source still passes.

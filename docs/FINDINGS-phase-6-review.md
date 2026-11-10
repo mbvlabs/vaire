@@ -1,12 +1,242 @@
 # Phase 6 review findings
 
-## Review record
+## Final current ledger — local review gate clear
+
+Both independent reviewers accept the cumulative final source tree with **no
+remaining actionable findings**. B3-01 and AF-A1 are accepted by both lanes.
+All original FG-M1–M4/FG-m1–m5, later C2 findings, lifecycle additions and
+historical R1-1–3/R2-1–6/R3-1–4/R4-1–6 closures remain accepted on source and
+regression assertion review. No independent finding remains open or deferred.
+Older open/partial/STOP/pending tables below are historical checkpoint evidence,
+not simultaneously current states.
+
+Fix identity: uncommitted cumulative delta over `2155a07`, final reviewed tracked
+SHA-256 `c9af17984e0bd4426425c75e5070f9fd107ecd84cc9bdff87fd644def92afb8f`,
+plus preserved untracked SQL regression. No fix commit exists. Independent final
+full chain, eight targeted uncached packages, full uncached suite and focused
+regressions all pass. Report `REVIEW-phase-6-final.md` records separate reviewer
+dispositions, exact checkpoint/evidence, historical failures and lost-log limits.
+
+This is local acceptance only. Real-host copy/slot/floor/crash/pooler/privilege
+behavior and activity qualification remain pending. No commits, publication or
+live operations authorized or performed; rerun full checks before any authorized
+commit. Final evidence-doc updates follow the reviewed source/test freeze.
+
+## Diagnostic/routing correction authorization
+
+Implementation update: B3-01 and AF-A1 are implemented but await independent
+acceptance. Worker full-chain/uncached checks pass. Shared routing eligibility
+and separate diagnostic acquisition views preserve engine exclusions, explicit
+owned keep and Q3. No source writer is active during final checks/reviews.
+
+The user explicitly authorized completing B3-01 and AF-A1, including their
+verification/re-review. Do not request the same scoped authorization again.
+Both findings remain open until independently accepted. One writer, root-cause
+view separation/eligibility integration, no unrelated behavior expansion.
+Commits, publication, Git mutations and live operations remain separately gated.
+
+## Latest additional-pass disposition — STOPPED
+
+All four targeted corrections and the original nine findings are accepted on
+source/assertion review. Lane A returns PASS WITH ONE MINOR; lane B returns
+BLOCK on an introduced diagnostic-view regression. Independent final-tree full
+chain, eight uncached targeted packages and full uncached suite pass. Remaining:
+
+| ID | Reviewer severity | Status |
+| --- | --- | --- |
+| B3-01 | Medium; blocking lane B verdict | Open: convergence exclusion is reused for status/doctor/metrics, hiding unfinished but materialised follower diagnostics and source-slot pressure |
+| AF-A1 | Minor/P2 | Open: direct unfollow fence uses full config and can restore unrelated unfinished/recovery-awaiting pooler aliases |
+
+These are separate integration defects, not duplicates or silent deferrals.
+General engine exclusion must remain while diagnostic acquisition keeps Q3 and
+direct routing respects lifecycle eligibility. No further writer has started;
+the additional authorized pass is complete and needs user disposition for
+these two findings. Later source acceptance does not erase these uncovered
+guarantee gaps or imply live qualification. Full reports and exact regression
+proposals are recorded in `REVIEW-phase-6-final.md`.
+
+## Additional corrective pass authorized
+
+Update: this pass is implemented; C2-A1/B2-01, C2-A2, C2-A3 and C2-A4/B2-02
+are pending independent re-review, not closed. Worker reports full required chain,
+uncached targeted/full tests and focused four-finding regressions passed.
+
+After the required stop, the user explicitly authorized one further targeted
+pass for C2-A1/B2-01, C2-A2, C2-A3 and C2-A4/B2-02. These four remain open until
+independent re-review and verification. This supersedes the no-third-attempt
+permission status below, not its historical findings or evidence. Scope is the
+four root-cause corrections and regressions, not a general refactor. Commits,
+publication, Git mutations and live operations remain separately gated.
+
+## Current stop gate — after second corrective attempt
+
+Both final re-review lanes **BLOCK**; independent full-chain and uncached local
+verification **PASS**. Three majors and one minor remain open. No third source
+fix attempt is running or authorized automatically. Older pending/open/accepted
+tables below are historical snapshots, superseded by this disposition.
+
+| ID / duplicate | Severity | Current status |
+| --- | --- | --- |
+| C2-A1 / B2-01 | Major | Open: unread transition state renders pooler aliases back in, defeating protected unsettled fence; FG-M1 remains partial |
+| C2-A2 | Major | Open: ordinary follow may resume across a newer irreversible unfollow transition |
+| C2-A3 | Major | Open: general apply may initdb a prepared unfinished follower as empty primary |
+| C2-A4 / B2-02 | Minor | Open: fresh-follow prerequisite command targets nonexistent follower |
+
+Both lanes accepted empty-stanza recovery, genuine generation identity,
+fresh/retry cleanup, running-owned retry, locked effective-floor safety and
+all original five minors for their stated scope. Cross-operation/general-apply
+integration and protected direct-pooler safety remain blocked. All findings,
+locations, scenarios and exact regression proposals plus full independent check
+evidence are in `REVIEW-phase-6-final.md`'s latest disposition.
+
+No commits or live/publication actions performed. User disposition is required
+before another corrective attempt; do not weaken protections or claim gate pass.
+
+## Final-gate disposition — 2026-11-10
+
+**Second-attempt checkpoint:** first fixed-tree re-review remained BLOCK:
+six majors covering real empty-stanza recovery, same-target cleanup, genuine
+generation identity, partial-unfollow read authority, running unfinished retry
+and locked floor freshness; two B minors covered membership diagnostics and
+stale implementation prose. All five original minors were accepted on source
+review. Both corrective units have now received their second implementation
+attempt; independent review/verification is pending. If the same unit remains
+incomplete, stop and ask rather than making a third attempt. See the final
+report for per-ID disposition, regression evidence and the renderer read-error
+boundary explicitly flagged by the security worker. Full first-fixed-tree
+independent checks passed, which did not establish these missed boundaries.
+
+**FG-05 update:** the user authorized all nine fixes and explicitly approved
+safe public ordinary-follow retry plus targeted unsafe-source-floor admission
+refusal. The redundant Plannotator gate was terminated at the user's request;
+chat approval is authority, not that termination. Three serial worker batches
+implemented these changes. Every current ID below is now **implemented, pending
+independent final-tree review/verification**, not closed; original open statuses
+in the disposition table are pre-fix history. No new commit exists. Final worker
+full-chain and uncached targeted checks passed, including the previously blocked
+resize regression. Independent tester/reviewers must establish acceptance.
+
+FG-03A/B both returned **BLOCK** at `2155a07` plus the frozen reconciliation
+delta. Full separate reports, current file locations, scenarios, proposed
+regressions, historical closure dispositions and RPC inventory are recorded in
+[REVIEW-phase-6-final.md](REVIEW-phase-6-final.md). This disposition supersedes
+the pre-review pending labels in the FG-02 snapshot below; that snapshot remains
+the evidence input, not a claim that reviews are still pending.
+
+| Current ID / original report IDs | Severity | Current status / next action |
+| --- | --- | --- |
+| FG-M1 / A-1 | Major | Open: write SQL can bypass explicit copy protection after interrupted unfollow; authorize node-boundary refusal/regression |
+| FG-M2 / A-2, B-01 | Major | Open; **R2-1 reopened**: adopted unfinished recovery skips retained-slot safety; authorize ownership/recopy correction |
+| FG-M3 / A-3 | Major | Open: recovery configuration stale after acquiring locks; authorize reload/revalidation |
+| FG-M4 / B-02 | Major | Open: normal-follow rollback writes desired state under shared/no locks; authorize serialized real transactions |
+| FG-m1 / A-4, B-06 | Minor | Open: resize-retry regression uses actual host commit headroom; deterministic test facts needed, production guards retained |
+| FG-m2 / A-5 | Minor | Open: NULL/malformed slot safety falsely means unlimited; establish unlimited positively, otherwise omit unknown |
+| FG-m3 / B-03 | Minor | Open: follower recovery warnings omitted from standard CLI warnings/human qualification |
+| FG-m4 / B-04 | Minor | Open: combined restore and credentials follower refusal ordering/dry-run incomplete |
+| FG-m5 / B-05 | Minor | Open: stopped-list manual JSON expectations contradict node acquisition behavior |
+
+No new fix diff/commit exists. Four majors and five minors after deduplication.
+R2-4's original unfollow lock/reload fix is accepted on source review, but
+whole-feature guarantees remain open through FG-M3/M4. Other historical fixes
+were accepted for their original scope on source/assertion inspection, not
+fresh test execution or live qualification. Q1a/Q2/Q3 remain the contract;
+FG-M1/M2 and FG-m2 prevent certifying all guarantees.
+
+Design/coverage questions requiring disposition: ordinary-follow process-death
+resumption, and new follow after a deferred source shrink with old effective
+floors. Do not silently implement a new policy or prescribe manual repairs.
+No reviewer established actual live process-death coverage.
+
+FG-04: build/vet passed; full tests and uncached node regression failed at the
+host-dependent resize test, with zero CommitLimit headroom. Seven other targeted
+packages passed. Lint, Darwin cross-build and `just lint` were not run after the
+chain stopped. `git diff --check` passed. No final gate pass is claimed.
+
+Next: concrete FG-05 implementation authorization; one writer, scoped root-cause
+batches, fresh full verification and independent re-review. All fixes remain
+unapproved. No commits/publication/live authority is implied.
+
+## Current ledger — FG-02, 2026-11-10
+
+Checkpoint: `2155a07300095d4845caedc37cd8c3d1c9928d73` over
+`8d68056621b19da318ce972552d45973b7feda4e`. All rows below are **historically
+claimed fixed; final independent closure pending FG-03A/B**. Commit file lists
+and current test symbols were checked during reconciliation, with read-only
+scout assistance; not every assertion was audited end-to-end. No fresh test
+pass or live qualification is implied. Original open rows below describe the
+initial review, not today's unresolved-defect register.
+
+Test paths below are relative to `internal/`; symbols are exact. Shared next
+review for every row: both whole-diff reviewers, with A emphasizing lifecycle
+and configuration and B integration/visibility. Every closure remains subject
+to their source/assertion audit and FG-04 execution.
+
+| ID | Severity | Claimed fix | Current regression entry points | Unresolved evidence |
+| --- | --- | --- | --- | --- |
+| R1-1 | Major | `7d79547` | `node/follower_test.go`: `TestApplyFollowerConfigsRunsEachFollowerAlone`, `TestApplyFollowerConfigsStopsOnAFailure` | Final audit of confirmation isolation and earlier-phase restarts |
+| R1-2 | Major | `7d79547` | `steps/follower_test.go`: `TestFloorValueReadsPostgreSQLSyntax`, `TestFollowerFloorsReadPostgreSQLNumbers`, `TestFollowerFloorsFailOnUnreadableValues` | Final numeric/underflow semantics audit |
+| R1-3 | Minor | `7d79547` | `node/follower_test.go`: `TestFollowerPlansShowTheFloorChange`, `TestFollowerPlansMarkAPendingRestart`, `TestFollowerPlansShowARetrysRestart` | Final human/JSON preview agreement |
+| R2-1 | Major | `0511ecf` | `node/follower_lifecycle_test.go`: `TestRecoverKeepsAwaitingUntilTheFollowerRuns`, `TestRecoverRebuildsAnOwnedInterruptedCopy`, `TestRecoverResumesAnOwnedAdoption`, `TestRecoverResumeKeepsTheCompletedCopysSlot`, `TestRecoverRebuildsACompletedCopyWhoseSlotIsMissingOrLost`, `TestRecoverDryRunReportsTheCompletedCopysSlot`, `TestRecoverCleansAnOwnedPartialConfigDirectory`, `TestRecoverRefusesAForeignPartialConfigDirectory`, `TestRecoverKeepsOwnershipWhileAnOwnedDirectoryRemains`, `TestRecoverRetriesAfterAdoptionBeforeMarker`, `TestRecoverRefusesForeignPathsAndIgnoresARebuiltHost`; `backup/materialise_adopt_test.go`: `TestAdoptFinishesAPartialRegistration`, `TestDropTemporaryClusterRemovesAPartialRegistration` | Actual copy/adoption/marker process death unqualified; inspect lower-level file operations, not only stub callbacks |
+| R2-2 | Major | `0511ecf` | `node/follower_lifecycle_test.go`: `TestUnfollowResumesAfterEveryBoundary`, `TestUnfollowResumeStartsAStoppedCluster`, `TestUnfollowRecordsBeforeItActs`, `TestUnfollowRefusesWhatItCannotResume` | Final durable-state and public retry audit; live pending |
+| R2-3 | Major | `0511ecf` | `node/follower_lifecycle_test.go`: `TestRenameFollowerFinishesASubsetOfRoles`, `TestRenameFollowerRenamesEverythingOnce`, `TestRenameFollowerRefusesWhatItCannotFinish` | Final partial rename audit; live pending |
+| R2-4 | Major | `0511ecf` | `node/follower_lifecycle_test.go`: `TestRecoverFollowTakesExclusiveLocks`, `TestUnfollowTakesExclusiveLocks`, `TestUnfollowSameTargetIsExclusive`, `TestUnfollowLocksSerializeTheDesiredState`, `TestUnfollowReloadsTheDesiredState` | Final lock/reload coverage audit |
+| R2-5 | Major | `0511ecf` | `node/follower_lifecycle_test.go`: `TestUnfollowMarksFailuresThatMayHaveChangedPasswords`; `cli/follower_test.go`: `TestUnfollowCredentialsOnFailure`, `TestUnfollowCredentialsAfterCrashedJobEnvelope` | Trace synthesis → finishJob → outcome → RPC → explicit CLI handoff; no secrets in persisted history |
+| R2-6 | Major | `0511ecf` | `node/follower_lifecycle_test.go`: `TestFollowConstructorFailureDropsTheFreshSlot` | Final cleanup-error, retained-slot and foreign-path audit |
+| R3-1 | Major | `183e5c4` | `node/maint_test.go`: `TestMaintKillUsesTheClusterDatabaseName` | Whole RPC/CLI inventory still required |
+| R3-2 | Minor | `183e5c4` | `node/follower_test.go`: `TestRefuseFollowerRestorePromoteAndUndo`; `cli/restore_test.go`: `TestRestorePreflightRefusesAFollowerFirst` | Final protected refusal-order audit |
+| R3-3 | Minor | `183e5c4` | `cli/restore_test.go`: `TestRestoreWarningsKeepFollowersDivergedStructured` | Final combined restore/RPC warning audit |
+| R3-4 | Minor | `183e5c4` | `cli/serverinit_restore_test.go`: `TestRestoreResultDataNoBucketOrdersFollowersFirst` | Final drop/recreate/follow guidance audit |
+| R4-1 | Major | `62f001c`, JSON coverage `2155a07` | `node/followerlag_visibility_test.go`: `TestReadFollowerTracksSidesIndependently`; `health/follower_test.go`: `TestParseFollowerSidesAndJSON`; `doctor/follower_test.go`: `TestFollowerPartialReadings`, `TestFollowerStreamingOneSideUnknown`; `cli/follower_test.go`: `TestFollowerJSONOmitsUnreadSides` | Final partial-read propagation through all surfaces |
+| R4-2 | Major | `62f001c` | `doctor/follower_test.go`: `TestFollowerSlotForAStoppedFollower` | Live stopped-follower source-slot readings pending |
+| R4-3 | Minor | `62f001c` | `cli/follower_test.go`: `TestFollowerRendering` | Final paused/unknown human rendering audit |
+| R4-4 | Minor | `62f001c` | `health/follower_test.go`: `TestParseFollowerCaughtUpAndIdle`, `TestParseFollowerNullReplayLagWithBacklog` | Final idle-NULL semantics audit; live pending |
+| R4-5 | Minor | `62f001c` | `node/followerlag_visibility_test.go`: `TestOrphanSlotsReportsQueryFailure`; `doctor/follower_test.go`: `TestFollowerOrphanSlotQueryFailure` | Final query-error propagation audit |
+| R4-6 | Minor | `62f001c` | `node/followerlag_visibility_test.go`: `TestFollowerMetricWriteFailureFailsRefresh` | Final atomic replacement/error propagation audit |
+
+### Later corrections and decisions carried into final review
+
+- **Lifecycle P1/P2 (`0511ecf`):** only `reserved`/`extended` with restart
+  position permit completed-copy reuse; `unreserved` requires owned recopy.
+  Preview must inspect the slot, report `recopy_reason`, and leave unread
+  inspection conditional. Review `TestRecoverRebuildsACompletedCopyWhoseSlotIsMissingOrLost`
+  and `TestRecoverDryRunReportsTheCompletedCopysSlot`, including their subcases.
+  The last focused independent review did not run; both final lanes must audit.
+- **Configuration final corrections (`7d79547`):** underflow/subnormal rejection
+  and retry-preview inference from changed floor values were orchestrator fixes
+  after focused review. Inspect `TestFloorValueReadsPostgreSQLSyntax` and
+  `TestFollowerPlansShowARetrysRestart`; do not infer acceptance from batch labels.
+- **Guards final correction (`183e5c4`):** CLI follower refusal precedes protection
+  for promote/undo; inspect `TestRestorePreflightRefusesAFollowerFirst`.
+- **Visibility P1/P2 (`62f001c`):** known failure precedes unknown-side warning
+  (`TestFollowerStreamingOneSideUnknown`); human list names unread follower state
+  (`TestFollowerRendering`). Documentation/JSON follow-up in `2155a07` includes
+  `TestFollowerJSONOmitsUnreadSides` for status/list and all four availability pairs.
+- **Q1a** supersedes the original decrease staging proposal: refuse decreases;
+  equal/increased floors and retries apply followers first, no catch-up wait,
+  no forced restart, separate target tokens. Additional entry points in
+  `node/follower_test.go`: `TestResizeRefusesADecreasedFollowerFloor`,
+  `TestResizeAppliesFollowersFirstOnRetry`,
+  `TestApplyFollowerConfigsExplainsADeferredRestart`. Real privileged write
+  failure remains unqualified; manual settings plus plain apply remain unordered.
+- **Q2:** protection is not inherited; unfollow retains only copy's explicit
+  protection. `node/follower_test.go`: `TestFollowDoesNotInheritProtection`,
+  `TestUnfollowKeepsNoInheritedProtection`; help/guide documentation in `2155a07`.
+- **Q3:** independent source/self availability; unknown omitted, retention
+  separate from backlog, seconds are replay delay, idle NULL zero only with
+  measured zero backlog while streaming. No catch-up ETA or timestamp fallback.
+
+No new conflicting design decision has been established by this reconciliation.
+Unresolved questions are evidence/coverage audits above, not silently closed
+defects. The historical reports are retained intact below. Current gate evidence
+lives in [REVIEW-phase-6-final.md](REVIEW-phase-6-final.md).
+
+## Historical initial review record
 
 U3 reviewed `master...243157c` with four read-only `reviewer` agents using `openai/gpt-6.1-sol`. All lanes completed. Earlier Claude attempts failed on quota before producing findings. No reviewer ran live tests or independently repeated local verification. The orchestrator ran the complete AGENTS verification chain at `243157c`; all passed. Passing local checks do not cover the lifecycle failure boundaries below.
 
 Verdict: **blocked before PR**. Ten majors and eight minors, no duplicates merged. All findings are open; none has a fix commit or regression test yet. The orchestrator spot-checked the early awaiting-state removal, unfollow state transition/resumption, shared-state update, follower-only engine options, and numeric floor parser against current source. Remaining findings are source-review evidence pending confirmation during fixes and re-review.
 
-## Findings register
+## Historical initial findings register
 
 All locations refer to `243157c`.
 

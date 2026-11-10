@@ -32,6 +32,11 @@ type clusterSnapshot struct {
 // unreachable instead of holding the whole status.
 const snapshotTimeout = 10 * time.Second
 
+// snapshotPG is steps.ClusterPG for the status and doctor snapshots. Tests
+// replace it to supply deterministic running samples without a server; the
+// follower's own replication queries use followerPG instead.
+var snapshotPG = func(spec config.ClusterSpec) sqlRunner { return steps.ClusterPG(spec) }
+
 // readClusters reads every cluster of cfg (only db when set) concurrently
 // over its socket. With tps it samples the transaction counter twice, a
 // second apart.
@@ -58,7 +63,7 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 			}
 			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 			defer cancel()
-			rows, err := steps.ClusterPG(spec).Query(qctx, spec.DatabaseName(), health.SampleSQL, nil)
+			rows, err := snapshotPG(spec).Query(qctx, spec.DatabaseName(), health.SampleSQL, nil)
 			if err != nil || len(rows) == 0 {
 				s.State = "unreachable"
 				if err != nil {
@@ -93,7 +98,7 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 			defer wg.Done()
 			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 			defer cancel()
-			rows, err := steps.ClusterPG(out[i].Spec).Query(qctx, out[i].Spec.DatabaseName(), health.XactsSQL, nil)
+			rows, err := snapshotPG(out[i].Spec).Query(qctx, out[i].Spec.DatabaseName(), health.XactsSQL, nil)
 			if err != nil || len(rows) == 0 {
 				return
 			}
@@ -256,7 +261,7 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	rs, _ := backup.LoadRecords()
 	st, _ := engine.LoadState(engine.StatePath)
 	pending := pendingRestarts()
-	followers := readFollowers(ctx, stepsView(cfg), p.DB)
+	followers := readFollowers(ctx, diagnosticsViewWith(cfg, rs), p.DB)
 	for _, s := range snaps {
 		row := statusRow(cfg, s, rs, st, pending)
 		if rs.IsAwaiting(s.Spec.Name) {

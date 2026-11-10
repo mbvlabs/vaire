@@ -129,8 +129,13 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 
 	prev, havePrev := loadDoctorState()
 	created := clusterCreated()
-	followers := readFollowers(ctx, stepsView(cfg), "")
-	slots, slotFailures := orphanSlots(ctx, stepsView(cfg))
+	// Awaiting recovery entries have no cluster, but an unfinished ordinary
+	// follow that materialised before its completion save failed still has
+	// measurable replication and source-slot facts (Q3). The convergence view
+	// is not used here: it would hide them from diagnostics.
+	view := diagnosticsViewWith(cfg, f.Records)
+	followers := readFollowers(ctx, view, "")
+	slots, slotFailures := orphanSlots(ctx, view)
 	for _, o := range slots {
 		f.OrphanSlots = append(f.OrphanSlots, doctor.OrphanSlot{Source: o.Source, Port: o.Port, Slot: o.Slot})
 	}

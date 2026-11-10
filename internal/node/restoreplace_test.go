@@ -117,10 +117,10 @@ func TestStepsViewKeepsTheRecovering(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app"}, {Name: "other"}}
 	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"app": {}, "other": {}}}
-	if got := withoutAwaiting(cfg, recs, ""); len(got.Clusters) != 0 {
+	if got := withoutUnfinished(cfg, recs, ""); len(got.Clusters) != 0 {
 		t.Errorf("view %v", got.Clusters)
 	}
-	got := withoutAwaiting(cfg, recs, "app")
+	got := withoutUnfinished(cfg, recs, "app")
 	if len(got.Clusters) != 1 || got.Clusters[0].Name != "app" {
 		t.Errorf("view keeping app: %v", got.Clusters)
 	}

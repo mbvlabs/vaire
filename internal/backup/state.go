@@ -97,6 +97,12 @@ type Unfollow struct {
 	Source    string `json:"source"`
 	Stanza    string `json:"stanza"`
 	StartedAt string `json:"started_at"`
+	// Settled records that the unfollow finished its privilege transition:
+	// the renames carry the operator's new passwords and, on a protected
+	// database, vaire_admin's access follows the protection policy. Until then
+	// the poolers' rendered configuration withholds the alias, and node SQL
+	// refuses a protected database being unfollowed.
+	Settled bool `json:"settled,omitempty"`
 }
 
 // IsAwaiting reports whether db awaits recovery.
