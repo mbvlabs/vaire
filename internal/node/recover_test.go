@@ -57,11 +57,11 @@ func TestRecoverRendersTheStanzaBeforeArming(t *testing.T) {
 		t.Errorf("options %+v", opts)
 	}
 	host := hostinfo.Info{VCPU: 2}
-	before := string(render.PgBackRestConf(withoutAwaiting(cfg, recs, ""), host, render.BackupSecrets{}))
+	before := string(render.PgBackRestConf(withoutUnfinished(cfg, recs, ""), host, render.BackupSecrets{}))
 	if strings.Contains(before, "[app-abc123]") {
 		t.Fatal("the init view already has the section; the test proves nothing")
 	}
-	conf := string(render.PgBackRestConf(withoutAwaiting(cfg, recs, opts.Recovering), host, render.BackupSecrets{}))
+	conf := string(render.PgBackRestConf(withoutUnfinished(cfg, recs, opts.Recovering), host, render.BackupSecrets{}))
 	for _, line := range []string{"[app-abc123]", "pg1-path=" + cfg.Server.DataDirectory("app"), "pg1-port=5433", "repo1-retention-full="} {
 		if !strings.Contains(conf, line) {
 			t.Errorf("pgbackrest.conf lacks %q:\n%s", line, conf)
@@ -88,7 +88,7 @@ func TestStepsViewKeepsTheAwaitingAside(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app"}, {Name: "other"}}
 	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"other": {}}}
-	got := withoutAwaiting(cfg, recs, "")
+	got := withoutUnfinished(cfg, recs, "")
 	if len(got.Clusters) != 1 || got.Clusters[0].Name != "app" || len(got.Awaiting) != 1 || got.Awaiting[0].Name != "other" {
 		t.Errorf("view %v, awaiting %v", got.Clusters, got.Awaiting)
 	}
@@ -108,7 +108,7 @@ func TestDropForgetsAwaitingRecovery(t *testing.T) {
 	}
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app"}}
-	if got := withoutAwaiting(cfg, recs, ""); len(got.Clusters) != 1 || got.Clusters[0].Name != "app" {
+	if got := withoutUnfinished(cfg, recs, ""); len(got.Clusters) != 1 || got.Clusters[0].Name != "app" {
 		t.Errorf("the new app is left out of the view: %v", got.Clusters)
 	}
 }

@@ -43,7 +43,7 @@ func ProbeTarget(socketDir string, spec config.ClusterSpec) string {
 	q.Set("port", strconv.Itoa(spec.Port))
 	q.Set("sslmode", "disable")
 	q.Set("connect_timeout", "5")
-	u := url.URL{Scheme: "postgresql", User: url.User("vaire_monitor"), Path: "/" + spec.Name, RawQuery: q.Encode()}
+	u := url.URL{Scheme: "postgresql", User: url.User("vaire_monitor"), Path: "/" + spec.DatabaseName(), RawQuery: q.Encode()}
 	return u.String()
 }
 

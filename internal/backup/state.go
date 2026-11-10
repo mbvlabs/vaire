@@ -12,14 +12,15 @@ import (
 )
 
 // RecordsPath holds the node's durable records, beside state.json (which
-// keeps only jobs and the lockdown flags). The master backup carries it.
-const RecordsPath = "/var/lib/vaire/records.json"
+// keeps only jobs and the lockdown flags). The master backup carries it. It is
+// a variable so tests read and write their own file instead of the node's.
+var RecordsPath = "/var/lib/vaire/records.json"
 
 // RecordsMode is records.json's mode; root owns it.
 const RecordsMode os.FileMode = 0o600
 
 // recordsLockPath serializes read-modify-write cycles of records.json.
-const recordsLockPath = RecordsPath + ".lock"
+func recordsLockPath() string { return RecordsPath + ".lock" }
 
 // maxDrills is how many drill results records.json keeps per database.
 const maxDrills = 12
@@ -69,12 +70,39 @@ type Records struct {
 	// yet (Phase 5): cluster.toml has them, the server has no cluster for
 	// them. db recover (or db drop) clears an entry.
 	AwaitingRecovery map[string]Awaiting `json:"awaiting_recovery,omitempty"`
+	// Unfollowing are the db unfollows under way, by follower, recorded
+	// before the first irreversible step: an unfollow that stops part way
+	// (its renames, its configuration, its restart, its first full) resumes
+	// from the same source and stanza, which cluster.toml no longer holds
+	// once follows is cleared. The job clears an entry when it finishes.
+	Unfollowing map[string]Unfollow `json:"unfollowing,omitempty"`
 }
 
 // Awaiting is one database awaiting recovery after a rebuild.
 type Awaiting struct {
 	Stanza string `json:"stanza"`
 	Since  string `json:"since"`
+	// Adopted records that a follower's copy is its own cluster 18/<name>
+	// already: a db recover that stopped after adoption starts and
+	// configures it instead of copying it again.
+	Adopted bool `json:"adopted,omitempty"`
+}
+
+// Unfollow is one db unfollow under way: the source the follower came from
+// and the stanza it keeps when it becomes independent, both fixed when the
+// unfollow starts so a resumed one never renames from or writes to another.
+// It holds no credentials: db unfollow passes the new passwords in its job
+// spec, which is read once.
+type Unfollow struct {
+	Source    string `json:"source"`
+	Stanza    string `json:"stanza"`
+	StartedAt string `json:"started_at"`
+	// Settled records that the unfollow finished its privilege transition:
+	// the renames carry the operator's new passwords and, on a protected
+	// database, vaire_admin's access follows the protection policy. Until then
+	// the poolers' rendered configuration withholds the alias, and node SQL
+	// refuses a protected database being unfollowed.
+	Settled bool `json:"settled,omitempty"`
 }
 
 // IsAwaiting reports whether db awaits recovery.
@@ -89,10 +117,11 @@ func (s Records) IsAwaiting(db string) bool {
 // backup and ride along in the next bundle.
 func (s Records) durableHash() string {
 	raw, _ := json.Marshal(struct {
-		Dropped   []DroppedStanza           `json:"d"`
-		Timelines map[string]TimelineSwitch `json:"t"`
-		Awaiting  map[string]Awaiting       `json:"a"`
-	}{s.DroppedStanzas, s.Timelines, s.AwaitingRecovery})
+		Dropped     []DroppedStanza           `json:"d"`
+		Timelines   map[string]TimelineSwitch `json:"t"`
+		Awaiting    map[string]Awaiting       `json:"a"`
+		Unfollowing map[string]Unfollow       `json:"u"`
+	}{s.DroppedStanzas, s.Timelines, s.AwaitingRecovery, s.Unfollowing})
 	return masterbackup.SHA256(raw)
 }
 
@@ -391,13 +420,16 @@ func decode(raw []byte) (Records, error) {
 	if s.AwaitingRecovery == nil {
 		s.AwaitingRecovery = map[string]Awaiting{}
 	}
+	if s.Unfollowing == nil {
+		s.Unfollowing = map[string]Unfollow{}
+	}
 	return s, nil
 }
 
 // UpdateRecords applies fn to records.json under its lock. fn returning an
 // error leaves the file unchanged.
 func UpdateRecords(fn func(*Records) error) error {
-	return engine.WithFileLock(recordsLockPath, func() error {
+	return engine.WithFileLock(recordsLockPath(), func() error {
 		s, err := LoadRecords()
 		if err != nil {
 			return err

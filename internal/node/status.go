@@ -32,6 +32,11 @@ type clusterSnapshot struct {
 // unreachable instead of holding the whole status.
 const snapshotTimeout = 10 * time.Second
 
+// snapshotPG is steps.ClusterPG for the status and doctor snapshots. Tests
+// replace it to supply deterministic running samples without a server; the
+// follower's own replication queries use followerPG instead.
+var snapshotPG = func(spec config.ClusterSpec) sqlRunner { return steps.ClusterPG(spec) }
+
 // readClusters reads every cluster of cfg (only db when set) concurrently
 // over its socket. With tps it samples the transaction counter twice, a
 // second apart.
@@ -58,7 +63,7 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 			}
 			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 			defer cancel()
-			rows, err := steps.ClusterPG(spec).Query(qctx, spec.Name, health.SampleSQL, nil)
+			rows, err := snapshotPG(spec).Query(qctx, spec.DatabaseName(), health.SampleSQL, nil)
 			if err != nil || len(rows) == 0 {
 				s.State = "unreachable"
 				if err != nil {
@@ -93,7 +98,7 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 			defer wg.Done()
 			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 			defer cancel()
-			rows, err := steps.ClusterPG(out[i].Spec).Query(qctx, out[i].Spec.Name, health.XactsSQL, nil)
+			rows, err := snapshotPG(out[i].Spec).Query(qctx, out[i].Spec.DatabaseName(), health.XactsSQL, nil)
 			if err != nil || len(rows) == 0 {
 				return
 			}
@@ -172,6 +177,9 @@ type statusDatabase struct {
 	DeferredRestart   string            `json:"deferred_restart,omitempty"`
 	RestoreInProgress bool              `json:"restore_in_progress"`
 	Protected         bool              `json:"protected,omitempty"`
+	// Follows and Follower are a follower's source and replication (Phase 6).
+	Follows  string           `json:"follows,omitempty"`
+	Follower *followerReading `json:"follower,omitempty"`
 }
 
 // statusData is vaire status's result (Phase 4).
@@ -253,10 +261,14 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	rs, _ := backup.LoadRecords()
 	st, _ := engine.LoadState(engine.StatePath)
 	pending := pendingRestarts()
+	followers := readFollowers(ctx, diagnosticsViewWith(cfg, rs), p.DB)
 	for _, s := range snaps {
 		row := statusRow(cfg, s, rs, st, pending)
 		if rs.IsAwaiting(s.Spec.Name) {
 			row.State, row.Error = stateAwaiting, "vaire db recover "+s.Spec.Name
+		}
+		if f, ok := followers[s.Spec.Name]; ok {
+			row.Follower = &f
 		}
 		if data.PGVersion == "" {
 			data.PGVersion = s.Sample.ServerVersion
@@ -287,6 +299,7 @@ func statusRow(cfg config.Cluster, s clusterSnapshot, rs backup.Records, st engi
 			Used: s.Sample.Connections, Max: s.Sample.MaxConnections,
 			Active: s.Sample.Active, Idle: s.Sample.Idle, IdleInTx: s.Sample.IdleInTx,
 		},
+		Follows:         spec.Follows,
 		RestartPending:  pendingFor(pending, spec.Name) || s.Sample.PendingRestart > 0,
 		DeferredRestart: st.DeferredRestarts[spec.Name],
 		Protected:       spec.Protected,
@@ -346,6 +359,9 @@ func statusWarnings(d statusData) []output.Warning {
 				msg += "; it restarts at the start of the maintenance window"
 			}
 			out = append(out, output.Warning{Code: "restart_pending", Message: msg})
+		}
+		if f := db.Follower; f != nil && db.State == "running" && ((f.SourceKnown && !f.Streaming) || (f.SelfKnown && (!f.InRecovery || f.ReplayPaused))) {
+			out = append(out, output.Warning{Code: "follower_not_streaming", Message: db.Name + " is not streaming from " + db.Follows + " (vaire doctor --db " + db.Name + ")"})
 		}
 		if db.RestoreInProgress {
 			out = append(out, output.Warning{Code: "restore_in_progress", Message: "a restore of " + db.Name + " is open (vaire restore status " + db.Name + ")"})

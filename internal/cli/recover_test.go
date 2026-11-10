@@ -80,6 +80,49 @@ func TestRecoverSecrets(t *testing.T) {
 	}
 }
 
+// A recovered follower's job result carries its structured warnings under
+// "warnings"; they must reach the standard warning list with their original
+// codes, and the human summary must not say only that it follows again when
+// part of finishing the recovery failed (Phase 6, B-03).
+func TestRecoverPreservesFollowerJobWarnings(t *testing.T) {
+	raw := `{
+		"source": "app", "follows": "app", "name": "app_follower", "port": 5434, "from": "stanza",
+		"warnings": [
+			{"code": "pooler_reload_failed", "message": "the poolers were not reloaded, so app_follower is not reachable through them until vaire apply: timeout"},
+			{"code": "follower_not_streaming", "message": "app_follower is not streaming from app yet: vaire doctor --db app_follower and vaire logs postgres --db app_follower show why"},
+			{"code": "follower_metrics_failed", "message": "the follower metrics were not written: bad path"}
+		]
+	}`
+	var res map[string]any
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		t.Fatal(err)
+	}
+	w := recoverWarnings("app_follower", res)
+	if len(w) != 3 {
+		t.Fatalf("warnings %+v, want the three follower job warnings", w)
+	}
+	for i, code := range []string{"pooler_reload_failed", "follower_not_streaming", "follower_metrics_failed"} {
+		if w[i].Code != code || w[i].Message == "" {
+			t.Errorf("warning %d = %+v, want code %s", i, w[i], code)
+		}
+	}
+	line := recoverLine("app_follower", res)
+	if !strings.Contains(line, "following app again (stanza)") || !strings.Contains(line, "3 part(s) of finishing it failed") {
+		t.Errorf("line %q does not qualify the follower's completion", line)
+	}
+
+	clean := `{"source": "app", "follows": "app", "name": "app_follower", "port": 5434, "from": "stanza", "warnings": []}`
+	if err := json.Unmarshal([]byte(clean), &res); err != nil {
+		t.Fatal(err)
+	}
+	if w := recoverWarnings("app_follower", res); len(w) != 0 {
+		t.Errorf("clean warnings %+v", w)
+	}
+	if got := recoverLine("app_follower", res); got != "app_follower: following app again (stanza)" {
+		t.Errorf("clean line %q", got)
+	}
+}
+
 // A failure after the data is back is on the database's line and among the
 // warnings, including the promote's own warning, nested in its result.
 func TestRecoverSummaryReportsWhatFailed(t *testing.T) {

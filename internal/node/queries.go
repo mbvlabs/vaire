@@ -88,7 +88,7 @@ func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 	var warnings []output.Warning
 	for _, spec := range specs {
 		local := steps.AdminPG(spec)
-		rows, err := local.Query(ctx, spec.Name, hasStatementsSQL, nil)
+		rows, err := local.Query(ctx, spec.DatabaseName(), hasStatementsSQL, nil)
 		if err != nil {
 			warnings = append(warnings, output.Warning{Code: "database_unreachable", Message: spec.Name + ": " + err.Error()})
 			continue
@@ -97,7 +97,7 @@ func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 			data.Missing = append(data.Missing, spec.Name)
 			continue
 		}
-		rows, err = local.Query(ctx, spec.Name, statementsSQL(p.Order, p.Limit, p.AllSessions), nil)
+		rows, err = local.Query(ctx, spec.DatabaseName(), statementsSQL(p.Order, p.Limit, p.AllSessions), nil)
 		if err != nil {
 			warnings = append(warnings, output.Warning{Code: "database_unreachable", Message: spec.Name + ": " + err.Error()})
 			continue
@@ -211,7 +211,7 @@ func handleQueriesReset(ctx context.Context, env *Env) (Result, error) {
 			reset = append(reset, spec.Name)
 			continue
 		}
-		if err := steps.ClusterPG(spec).Exec(ctx, spec.Name, "SELECT pg_stat_statements_reset()", nil); err != nil {
+		if err := steps.ClusterPG(spec).Exec(ctx, spec.DatabaseName(), "SELECT pg_stat_statements_reset()", nil); err != nil {
 			if p.DB != "" {
 				return Result{}, statementsMissing(spec.Name)
 			}

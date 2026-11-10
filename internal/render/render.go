@@ -254,7 +254,8 @@ func poolerEntries(dbs []PoolerDatabase) []PoolerDatabase {
 // the same in every cluster (RFC 12), so the first database's alias serves.
 func adminAuthDB(dbs []PoolerDatabase) string {
 	for _, db := range poolerEntries(dbs) {
-		// A restore's temporary entry goes away with the restore.
+		// A restore's temporary entry goes away with the restore, and a
+		// follower's with db unfollow.
 		if db.DBName == "" {
 			return AuthAlias(db.Name)
 		}
@@ -339,8 +340,17 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 	if h, p, ok := strings.Cut(endpoint, ":"); ok {
 		hostPart, port = h, p
 	}
-	stanzas := make([]map[string]any, 0, len(cfg.Clusters))
-	for _, c := range cfg.Clusters {
+	// A follower has no stanza: its source's backups cover it (Phase 6).
+	withStanza := cfg.StanzaClusters()
+	// The spool is shared by every stanza, those awaiting recovery too.
+	queueShares := len(withStanza)
+	for _, c := range cfg.Awaiting {
+		if !c.IsFollower() {
+			queueShares++
+		}
+	}
+	stanzas := make([]map[string]any, 0, len(withStanza))
+	for _, c := range withStanza {
 		stanzas = append(stanzas, map[string]any{
 			"Name":          c.Stanza,
 			"DataDirectory": cfg.Server.DataDirectory(c.Name),
@@ -348,7 +358,7 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 			// retention_full is the restore window in weeks. Time-based
 			// retention keeps it, however many full backups are taken in it.
 			"RetentionDays": cfg.RetentionFull(c) * 7,
-			"QueueMaxMiB":   ArchiveQueueMaxMiB(len(cfg.Clusters) + len(cfg.Awaiting)),
+			"QueueMaxMiB":   ArchiveQueueMaxMiB(queueShares),
 		})
 	}
 	return execute("pgbackrest.conf.tmpl", map[string]any{

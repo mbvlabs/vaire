@@ -322,6 +322,10 @@ func TestActivityImportantClassifications(t *testing.T) {
 		{"apply", rpc.Request{DryRun: true}, false},
 		{"tune.apply", rpc.Request{DryRun: true}, false},
 		{"db.fork", rpc.Request{DryRun: true}, false},
+		{"db.follow", rpc.Request{DryRun: true}, false},
+		{"db.unfollow", rpc.Request{DryRun: true}, false},
+		{"db.follow", rpc.Request{}, true},
+		{"db.unfollow", rpc.Request{}, true},
 		{"queries.reset", rpc.Request{DryRun: true}, false},
 		{"metrics.rotate", rpc.Request{DryRun: true}, false},
 		// These handlers ignore dry_run and still mutate, so a direct RPC must
@@ -725,6 +729,7 @@ func TestActivityActionAllowlist(t *testing.T) {
 	}
 	for input, want := range map[string]string{
 		"backup-full": "job.backup-full", "certs-renew": "job.certs-renew",
+		"db-follow": "job.db-follow", "db-unfollow": "job.db-unfollow",
 		"credential-ish": "job.unknown", "evil.job": "job.unknown", "": "job.unknown",
 	} {
 		if got := jobActivityAction(input); got != want {
@@ -763,6 +768,85 @@ func TestUnknownReasonTokensAreOmitted(t *testing.T) {
 	}
 	if got := safeActivityToken(canary); got != "" {
 		t.Fatalf("unknown lower-case reason = %q, want empty", got)
+	}
+}
+
+// A follower's refusals are recorded like any other refusal: the stable
+// reason survives into history and the follower is the event's database.
+func TestFollowerRefusalReasonsReachActivity(t *testing.T) {
+	store := &fakeActivityStore{}
+	rec, _ := testRecorder(t, store)
+	req := testRPCRequest()
+	req.Params = json.RawMessage(`{"source":"app","name":"app_follower"}`)
+	reasons := []string{"follower_not_running", "follows_follower", "has_followers", "is_follower", "not_a_follower", "source_awaiting_recovery", "source_not_running"}
+	for _, reason := range reasons {
+		err := output.NewError(output.CodePrecondition, "refused", output.ExitPrecondition, "").
+			WithDetails(map[string]any{"reason": reason, "database": "app_follower"})
+		recordActivityRefusal(rec, req, "db.follow", err, "is_follower")
+	}
+	events := store.recorded()
+	if len(events) != len(reasons) {
+		t.Fatalf("recorded %d events, want %d", len(events), len(reasons))
+	}
+	for i, ev := range events {
+		if ev.Outcome != activity.OutcomeRefused || ev.ReasonCode != reasons[i] || ev.Database != "app_follower" {
+			t.Errorf("event %d = %+v, want reason %s for app_follower", i, ev, reasons[i])
+		}
+	}
+}
+
+// The helpers that build a follower refusal carry the reason history keeps.
+func TestFollowerRefusalHelpersAreRecordable(t *testing.T) {
+	cfg := followerCfg()
+	spec, _ := cfg.ClusterByName("app_follower")
+	src, _ := cfg.ClusterByName("app")
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"is_follower", followerError(spec, "a backup")},
+		{"has_followers", refuseSourceDrop(cfg, "app")},
+		{"follows_follower", checkFollowSource(spec, "db follow")},
+		{"source_not_running", checkFollowSource(src, "db follow")},
+	}
+	for _, c := range cases {
+		if got := reason(t, c.err); got != c.name {
+			t.Errorf("%s: reason %q", c.name, got)
+		}
+		code, got := activityErrorTokens(c.err)
+		if code != output.CodePrecondition || got != c.name {
+			t.Errorf("%s: activity tokens %q/%q", c.name, code, got)
+		}
+	}
+}
+
+// db.follow and db.unfollow name a database in their name param, as db.fork
+// does, so history can attribute them to the follower.
+func TestFollowerMethodsCorrelateTheFollower(t *testing.T) {
+	for _, method := range []string{"db.follow", "db.unfollow"} {
+		if got := activityDatabaseFor(method, json.RawMessage(`{"source":"app","name":"app_follower"}`)); got != "app_follower" {
+			t.Errorf("activityDatabaseFor(%s) = %q", method, got)
+		}
+	}
+	if got := activityDatabaseFor("db.follow", json.RawMessage(`{"source":"app"}`)); got != "" {
+		t.Errorf("db.follow without a name = %q, want empty", got)
+	}
+}
+
+// The db-follow and db-unfollow jobs name the follower in their name param,
+// so their activity events carry the follower too (Phase 6).
+func TestFollowerJobsCorrelateTheFollower(t *testing.T) {
+	for _, job := range []string{"db-follow", "db-unfollow"} {
+		if got := rpcJobDatabase(job, json.RawMessage(`{"source":"app","name":"app_follower"}`)); got != "app_follower" {
+			t.Errorf("rpcJobDatabase(%s) = %q", job, got)
+		}
+	}
+}
+
+// The follower's postgres-roles-v1 skip is a stable step reason.
+func TestFollowerStepSkipReasonIsKept(t *testing.T) {
+	if got := safeActivityToken("follower"); got != "follower" {
+		t.Fatalf("safeActivityToken(follower) = %q", got)
 	}
 }
 

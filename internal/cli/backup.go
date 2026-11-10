@@ -662,6 +662,9 @@ func backupDatabases(cmd *cobra.Command, s *session, p *progress) ([]string, err
 		switch {
 		case db.State == stateAwaitingRecovery:
 			awaiting = append(awaiting, db.Name)
+		case db.Follows != "":
+			// A follower has no stanza and takes no maintenance: its
+			// source's cover it (Phase 6).
 		case db.InConfig:
 			names = append(names, db.Name)
 		}

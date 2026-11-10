@@ -62,6 +62,26 @@ func TestRolesAccessPolicyUpgrade(t *testing.T) {
 // On a protected database vaire_admin is no member of the owner role and
 // holds neither pg_signal_backend nor pg_maintain, so its password alone can
 // only read; lifting the protection gives the owner membership back.
+func TestAdminAccessSQLForNamesTheGivenDatabaseAndOwner(t *testing.T) {
+	sql := AdminAccessSQLFor("app_owner", "app_follower", true)
+	for _, want := range []string{
+		`ALTER ROLE "app_owner" NOLOGIN;`,
+		`pg_has_role('vaire_admin', 'app_owner', 'MEMBER')`,
+		`datname = 'app_follower'`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "app_follower_owner") {
+		t.Fatalf("the policy invented an owner name:\n%s", sql)
+	}
+	open := AdminAccessSQLFor("app_owner", "app", false)
+	if !strings.Contains(open, `GRANT "app_owner" TO vaire_admin WITH ADMIN OPTION;`) {
+		t.Fatalf("unprotected:\n%s", open)
+	}
+}
+
 func TestAdminAccessSQL(t *testing.T) {
 	open := AdminAccessSQL(config.ClusterSpec{Name: "app"})
 	if !strings.Contains(open, `GRANT "app_owner" TO vaire_admin WITH ADMIN OPTION;`) || !strings.Contains(open, "REVOKE pg_read_all_data FROM vaire_admin") {

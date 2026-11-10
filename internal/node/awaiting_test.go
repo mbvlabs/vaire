@@ -35,6 +35,16 @@ func TestAwaitingRefusedMethods(t *testing.T) {
 			t.Errorf("%s: got %v, want awaiting_recovery", method, err)
 		}
 	}
+	// A follower's own commands need its cluster too: db follow of a database
+	// awaiting recovery and db unfollow of a follower awaiting recovery are
+	// refused before their job could start (Phase 6, D15).
+	for _, tc := range []struct{ method, action string }{
+		{"db.follow", "a follow"}, {"db.unfollow", "an unfollow"},
+	} {
+		if got := awaitingRefused[tc.method]; got != tc.action {
+			t.Errorf("%s: action %q, want %q", tc.method, got, tc.action)
+		}
+	}
 }
 
 // A method that never needs a database's cluster, and a database that isn't

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/health"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/steps"
@@ -48,6 +50,9 @@ type databaseInfo struct {
 	MaxConnections int      `json:"max_connections,omitempty"`
 	Protected      bool     `json:"protected"`
 	State          string   `json:"state"`
+	// Follows and Follower are a follower's source and replication (Phase 6).
+	Follows  string                `json:"follows,omitempty"`
+	Follower *health.FollowerState `json:"follower,omitempty"`
 }
 
 // limits is the database's limits in one column: cpu and io weights,
@@ -103,7 +108,10 @@ func dbListLines(dbs []databaseInfo) []string {
 		if db.InConfig {
 			memory, size, nodeName, host, stanza, protected = tune.FormatMiB(db.MemoryMiB), db.Size, db.Node, db.Host, db.Stanza, yesNo(db.Protected)
 		}
-		lines = append(lines, fmt.Sprintf(row, db.Name, nodeName, host, size, memory, db.limits(), stanza, protected, db.State))
+		if db.Follows != "" {
+			stanza = "follows " + db.Follows
+		}
+		lines = append(lines, fmt.Sprintf(row, db.Name, nodeName, host, size, memory, db.limits(), stanza, protected, db.State+followerSuffix(db.Follower)))
 	}
 	return lines
 }
@@ -267,9 +275,10 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	var data struct {
-		Database config.ClusterSpec `json:"database"`
-		Plan     *engine.PlanData   `json:"plan,omitempty"`
-		Apply    *engine.ApplyData  `json:"apply,omitempty"`
+		Database  config.ClusterSpec   `json:"database"`
+		Plan      *engine.PlanData     `json:"plan,omitempty"`
+		Apply     *engine.ApplyData    `json:"apply,omitempty"`
+		Followers []resizeFollowerPlan `json:"followers,omitempty"`
 	}
 	if err := reply.Decode(&data); err != nil {
 		return err
@@ -277,7 +286,7 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	summary := sizeSummary(cfg, data.Database)
 	if data.Plan != nil {
 		return output.Success(cmd, output.Result{Data: data, Warnings: warnings,
-			Message: fmt.Sprintf("dry run: would resize %s to %s; %d of %d steps would apply", name, summary, data.Plan.WouldApply, data.Plan.Total)})
+			Message: resizePreviewMessage(name, summary, *data.Plan, data.Followers)})
 	}
 	message := fmt.Sprintf("resized %s to %s", name, summary)
 	var next []string
@@ -291,6 +300,35 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
+}
+
+// resizeFollowerPlan is one of the resized database's followers in a resize
+// preview: its own configuration plan and the restart it would take.
+type resizeFollowerPlan struct {
+	Follower string             `json:"follower"`
+	Restart  engine.RestartNeed `json:"restart"`
+	Plan     engine.PlanData    `json:"plan"`
+}
+
+// resizePreviewMessage is the human summary of a resize preview, the
+// followers included: they change before the source (Phase 6, Q1a).
+func resizePreviewMessage(name, summary string, plan engine.PlanData, followers []resizeFollowerPlan) string {
+	if len(followers) == 0 {
+		return fmt.Sprintf("dry run: would resize %s to %s; %d of %d steps would apply", name, summary, plan.WouldApply, plan.Total)
+	}
+	steps := func(cluster string, p engine.PlanData) string {
+		return fmt.Sprintf("%s (%d of %d steps)", cluster, p.WouldApply, p.Total)
+	}
+	parts := make([]string, 0, len(followers))
+	for _, f := range followers {
+		part := steps(f.Follower, f.Plan)
+		if f.Restart == engine.RestartRestart {
+			part += " and restarts"
+		}
+		parts = append(parts, part)
+	}
+	return fmt.Sprintf("dry run: would resize %s to %s; the followers first: %s; then %s",
+		name, summary, strings.Join(parts, ", "), steps(name, plan))
 }
 
 // shownOnceNote follows every printed database password.
@@ -340,6 +378,16 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	})
 }
 
+// credentialsPreflight is what db credentials --rotate refuses before the
+// token, the new secret or a dry-run success: a follower first, with the
+// node's is_follower error, then a protected database.
+func credentialsPreflight(cfg config.Cluster, name string) error {
+	if err := node.RefuseFollowerMethod(cfg, "db.credentials", map[string]any{"name": name, "rotate": true}); err != nil {
+		return err
+	}
+	return node.CheckNotProtected(cfg, name, "rotating its credentials")
+}
+
 // runDBCredentials rotates one role password. vaire keeps no database
 // passwords, so there is nothing to print without --rotate.
 func runDBCredentials(cmd *cobra.Command, args []string) error {
@@ -365,7 +413,7 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := node.CheckNotProtected(cfg, name, "rotating its credentials"); err != nil {
+	if err := credentialsPreflight(cfg, name); err != nil {
 		return err
 	}
 	if !dryRun(cmd) {
@@ -392,4 +440,43 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 		Human:    human,
 		Warnings: s.warnings,
 	})
+}
+
+// followerSuffix is a follower's state after its db list state: paused or
+// out of recovery when known, otherwise its measured lag, or that replication
+// is unknown.
+func followerSuffix(f *health.FollowerState) string {
+	switch {
+	case f == nil:
+		return ""
+	case !f.SourceKnown && !f.SelfKnown:
+		return ", replication unknown"
+	case f.SelfKnown && !f.InRecovery:
+		return ", out of recovery"
+	case f.SelfKnown && f.ReplayPaused:
+		return ", replay PAUSED"
+	case !f.SourceKnown:
+		return ", source state unknown"
+	case !f.Streaming:
+		return ", not streaming"
+	case !f.SelfKnown:
+		return ", lag " + followerLagText(f) + ", follower state unknown"
+	}
+	return ", lag " + followerLagText(f)
+}
+
+// followerLagText is a follower's byte backlog and replay delay, naming an
+// unknown part instead of printing zero.
+func followerLagText(f *health.FollowerState) string {
+	if f == nil || (f.LagBytes == nil && f.LagSeconds == nil) {
+		return "unknown"
+	}
+	bytes, seconds := "unknown WAL", "delay unknown"
+	if f.LagBytes != nil {
+		bytes = humanBytes(*f.LagBytes)
+	}
+	if f.LagSeconds != nil {
+		seconds = (time.Duration(*f.LagSeconds * float64(time.Second))).Round(time.Second).String()
+	}
+	return bytes + " / " + seconds
 }

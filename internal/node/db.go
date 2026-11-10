@@ -45,18 +45,24 @@ type databaseInfo struct {
 	MaxConnections int    `json:"max_connections,omitempty"`
 	// Protected is clusters.<db>.protected.
 	Protected bool `json:"protected,omitempty"`
-	// State is running, stopped (the cluster exists but is down), pending
-	// (in cluster.toml, no cluster yet) or orphaned (a cluster cluster.toml
-	// doesn't list).
+	// State is running, following (a running follower), stopped (the
+	// cluster exists but is down), pending (in cluster.toml, no cluster
+	// yet) or orphaned (a cluster cluster.toml doesn't list).
 	State string `json:"state"`
+	// Follows is the database a follower streams from, and Follower its
+	// replication: lag, slot, streaming (Phase 6).
+	Follows  string           `json:"follows,omitempty"`
+	Follower *followerReading `json:"follower,omitempty"`
 }
 
 // Database states in db.list.
 const (
-	stateRunning  = "running"
-	stateStopped  = "stopped"
-	statePending  = "pending"
-	stateOrphaned = "orphaned"
+	stateRunning = "running"
+	// stateFollowing is a running follower (Phase 6).
+	stateFollowing = "following"
+	stateStopped   = "stopped"
+	statePending   = "pending"
+	stateOrphaned  = "orphaned"
 	// stateAwaiting is a database a rebuilt master hasn't recovered yet
 	// (Phase 5): in cluster.toml, no cluster until db recover.
 	stateAwaiting = "awaiting_recovery"
@@ -106,6 +112,14 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: map[string]any{"databases": databases}, Warnings: warnings}, nil
 }
 
+// databaseListClusterNames and databaseListPG are db.list's host facts: the
+// cluster inventory pg_lsclusters reports and each cluster's local SQL. They
+// are variables so tests model a stopped follower without the node's commands.
+var (
+	databaseListClusterNames = steps.ClusterNames
+	databaseListPG           = func(spec config.ClusterSpec) sqlRunner { return steps.ClusterPG(spec) }
+)
+
 // listDatabases reads each [[clusters]] entry's database from its own
 // cluster. A cluster that is not up lists as not existing; a cluster
 // pg_lsclusters knows that cluster.toml doesn't is orphaned, unless a
@@ -113,7 +127,7 @@ func handleDBList(ctx context.Context, env *Env) (Result, error) {
 // or a drill does (<db>__drill).
 func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	cfg := env.Cluster
-	live := steps.ClusterNames(ctx)
+	live := databaseListClusterNames(ctx)
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return nil, err
@@ -121,7 +135,7 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 	out := make([]databaseInfo, 0, len(cfg.Clusters))
 	for _, spec := range cfg.Clusters {
 		info := databaseInfo{Name: spec.Name, InConfig: true, Node: spec.Node, Host: cfg.DatabaseHostname(spec.Name),
-			Port: spec.Port, Stanza: spec.Stanza, Protected: spec.Protected, State: statePending}
+			Port: spec.Port, Stanza: spec.Stanza, Protected: spec.Protected, State: statePending, Follows: spec.Follows}
 		if res, err := cfg.Resources(spec); err == nil {
 			info.Size, info.MemoryMiB, info.MemoryMaxMiB = res.Size, res.MemoryMiB, res.MemoryMaxMiB
 			info.CPUWeight, info.CPUQuota, info.IOWeight, info.MaxConnections = res.CPUWeight, res.CPUQuota, res.IOWeight, res.MaxConnections
@@ -133,6 +147,13 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 			}
 			delete(live, spec.Name)
 		}
+		if spec.IsFollower() && info.State == stateRunning && !records.IsAwaiting(spec.Name) {
+			info.State = stateFollowing
+			if src, ok := cfg.ClusterByName(spec.Follows); ok {
+				st := readFollower(ctx, spec, src)
+				info.Follower = &st
+			}
+		}
 		if records.IsAwaiting(spec.Name) {
 			info.State = stateAwaiting
 			// No cluster to measure: the stanza's size orders db recover --all.
@@ -140,9 +161,9 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 			out = append(out, info)
 			continue
 		}
-		local := steps.ClusterPG(spec)
+		local := databaseListPG(spec)
 		rows, err := local.Query(ctx, "postgres",
-			"SELECT pg_database_size(datname) AS size FROM pg_database WHERE datname = "+quoteLiteral(spec.Name), nil)
+			"SELECT pg_database_size(datname) AS size FROM pg_database WHERE datname = "+quoteLiteral(spec.DatabaseName()), nil)
 		if err != nil || len(rows) == 0 {
 			out = append(out, info)
 			continue
@@ -151,11 +172,11 @@ func listDatabases(ctx context.Context, env *Env) ([]databaseInfo, error) {
 		if _, err := fmt.Sscan(rows[0]["size"], &info.SizeBytes); err != nil {
 			info.SizeBytes = 0
 		}
-		roles, err := existingRolesIn(ctx, local, spec.Name)
+		roles, err := existingRolesIn(ctx, local, spec.DatabaseName())
 		if err == nil {
 			info.Roles = roles
 		}
-		exts, err := local.Query(ctx, spec.Name, "SELECT extname FROM pg_extension ORDER BY extname", nil)
+		exts, err := local.Query(ctx, spec.DatabaseName(), "SELECT extname FROM pg_extension ORDER BY extname", nil)
 		if err == nil {
 			for _, row := range exts {
 				info.Extensions = append(info.Extensions, row["extname"])
@@ -246,7 +267,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 	// configure it, then its roles and database (RFC 11.2).
 	_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		err = applyNewCluster(ctx, cfg, rt, db.Name, env.Report)
+		err = applyNewCluster(ctx, cfg, rt, db.Name, "", env.Report)
 	}
 	if err != nil {
 		// Keep cluster.toml in step with the server: an entry whose cluster
@@ -261,7 +282,7 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 	if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with vaire apply.")
 	}
-	if w := applyMetrics(ctx, cfg, rt, env.Report, db.Name); w != nil {
+	if w := applyMetrics(ctx, cfg, rt, env.Report, db.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
@@ -280,8 +301,25 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 // creating anything. It returns the saved configuration and the previous
 // file for a rollback. db create and db fork share it.
 func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string) (config.Cluster, []byte, config.ClusterSpec, error) {
-	store := state.FileStore{}
+	return addDatabaseFrom(ctx, env, func(config.Cluster) (config.ClusterSpec, error) { return db, nil }, allowOvercommit, suggest, nil)
+}
+
+// addDatabaseCheckStarts refuses a proposal PostgreSQL would not start. It is
+// a variable so handler tests can use deterministic host facts.
+var addDatabaseCheckStarts = checkStarts
+
+// addDatabaseFrom is addDatabase with the entry built from the freshly loaded
+// configuration and an optional check of the exact placed proposal before it
+// is saved. A fresh follow uses both: its entry derives from the source's
+// current values, and its floors are compared with the target present exactly
+// once under the preparation lock.
+func addDatabaseFrom(ctx context.Context, env *Env, build func(config.Cluster) (config.ClusterSpec, error), allowOvercommit bool, suggest func(size string) string, beforeSave func(config.Cluster, config.ClusterSpec) error) (config.Cluster, []byte, config.ClusterSpec, error) {
+	store := followerState()
 	cfg, previous, err := store.Load()
+	if err != nil {
+		return cfg, nil, config.ClusterSpec{}, err
+	}
+	db, err := build(cfg)
 	if err != nil {
 		return cfg, nil, db, err
 	}
@@ -293,7 +331,8 @@ func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOver
 	}
 	for _, role := range steps.DatabaseRoles {
 		key := steps.SecretDatabaseRole(db.Name, role)
-		if env.Req.Secrets[key] == "" {
+		// A follower's roles are its source's, replicated (Phase 6).
+		if env.Req.Secrets[key] == "" && !db.IsFollower() {
 			return cfg, nil, db, output.NewError(output.CodeInputRequired, "the password for "+db.Name+"_"+role+" was not supplied", output.ExitInput,
 				"Generate it on the operator and pass it as "+key+".").WithDetails(map[string]any{"secret": key})
 		}
@@ -306,11 +345,16 @@ func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOver
 	if err := cfg.Validate(); err != nil {
 		return cfg, nil, db, config.ValidationError(err)
 	}
-	if err := checkStarts(cfg, db, host, 0); err != nil {
+	if err := addDatabaseCheckStarts(cfg, db, host, 0); err != nil {
 		return cfg, nil, db, err
 	}
 	if err := checkBudget(cfg, db.Name, 0, host, allowOvercommit, suggest); err != nil {
 		return cfg, nil, db, err
+	}
+	if beforeSave != nil {
+		if err := beforeSave(cfg, db); err != nil {
+			return cfg, nil, db, err
+		}
 	}
 	raw, err := cfg.Encode()
 	if err != nil {
@@ -337,13 +381,18 @@ func forgetNewCluster(cfg config.Cluster, name string) error {
 	return engine.ForgetCluster(engine.JournalPath, name)
 }
 
+// forgetClusterJournal drops a cluster's journal entries. It is a variable so
+// a rollback test can run the desired-state transaction without the node's
+// journal path.
+var forgetClusterJournal = engine.ForgetCluster
+
 // forgetDatabase removes name's entry from cluster.toml and its journal
 // entries: db fork's rollback when its cluster was never made.
 func forgetDatabase(name string) error {
-	if err := engine.ForgetCluster(engine.JournalPath, name); err != nil {
+	if err := forgetClusterJournal(engine.JournalPath, name); err != nil {
 		return err
 	}
-	store := state.FileStore{}
+	store := followerState()
 	cfg, _, err := store.Load()
 	if err != nil {
 		return err
@@ -442,13 +491,15 @@ func clustersOf(ids []string) []string {
 // configure, roles) and restarts it without a confirm token when a setting
 // still needs one: nothing connects to it yet, so the restart costs no
 // client anything. It runs before the poolers route to it and before its
-// stanza, whose archive check needs archive_mode on.
-func applyNewCluster(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name string, report engine.Reporter) error {
+// stanza, whose archive check needs archive_mode on. recovering keeps a
+// database that awaits recovery in the steps' view (db recover builds it).
+func applyNewCluster(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name, recovering string, report engine.Reporter) error {
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
-		DB:        name,
-		Confirm:   engine.Confirmation{Clusters: []string{name}},
-		Restarter: steps.Restarter(cfg),
-		Report:    report,
+		DB:         name,
+		Confirm:    engine.Confirmation{Clusters: []string{name}},
+		Recovering: recovering,
+		Restarter:  steps.Restarter(cfg),
+		Report:     report,
 	})
 	return err
 }
@@ -474,11 +525,13 @@ func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
 // applyMetrics runs metrics-v1 after a database is created, forked or
 // dropped, so its /metrics path and targets.json entry follow (Phase 4). The
 // database already works, so a failure is the warning metrics_reload_failed.
-func applyMetrics(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter, db string) *output.Warning {
+// recovering keeps a database that awaits recovery in the steps' view.
+func applyMetrics(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter, db, recovering string) *output.Warning {
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
-		Only:      steps.MetricsStepIDs(),
-		Restarter: steps.Restarter(cfg),
-		Report:    report,
+		Only:       steps.MetricsStepIDs(),
+		Recovering: recovering,
+		Restarter:  steps.Restarter(cfg),
+		Report:     report,
 	})
 	if err == nil {
 		return nil
@@ -564,6 +617,9 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := restoreInProgress(p.Name, "db drop"); err != nil {
 		return Result{}, err
 	}
+	if err := refuseSourceDrop(cfg, p.Name); err != nil {
+		return Result{}, err
+	}
 	local := steps.ClusterPG(spec)
 	exists := false
 	if inConfig && clusterExists {
@@ -601,6 +657,12 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if clusterExists {
 		if err := dropCluster(ctx, env, p.Name); err != nil {
 			return Result{}, err
+		}
+	}
+	// A follower's slot on its source goes with it (Phase 6).
+	if inConfig && spec.IsFollower() {
+		if w := dropFollowerSlot(ctx, cfg, spec); w != nil {
+			warnings = append(warnings, *w)
 		}
 	}
 	if err := dropLeftovers(env, p.Name); err != nil {
@@ -642,12 +704,18 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := dropRouting(ctx, env, cfg); err != nil {
 		return Result{}, withHint(err, p.Name+" is dropped, but the poolers or timers still refer to it. Fix it with vaire apply.")
 	}
-	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name); w != nil {
+	if w := applyMetrics(ctx, cfg, rt, env.Report, p.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
 	clearDeferred(p.Name)
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
+	if inConfig && spec.IsFollower() {
+		if err := retireFollowOwnershipAfterDrop(p.Name, spec.Follows, spec.FollowGeneration); err != nil {
+			warnings = append(warnings, output.Warning{Code: "follow_record_not_retired",
+				Message: "the node-local follow record of " + p.Name + " was left after the drop: " + err.Error()})
+		}
+	}
 	data := map[string]any{"dropped": p.Name, "roles_dropped": roles}
 	if stanzaKept {
 		data["stanza_kept"] = spec.Stanza
@@ -737,12 +805,17 @@ type dbResizeParams struct {
 	AllowOvercommit bool `json:"allow_overcommit,omitempty"`
 }
 
+// applyResizeStep is engine.Apply for db resize's kernel and source runs; a
+// variable so tests record their order beside the followers' runs.
+var applyResizeStep = engine.Apply
+
 // handleDBResize changes a database's size or memory (RFC 7.4). The cgroup
 // limits and reload-only settings change live; shared_buffers,
 // max_connections and huge_pages wait for <db>/restart, or stay pending
 // with defer_restart. A size that could not start is refused, and so is a
 // larger size that overcommits the server unless allow_overcommit; shrinking
-// below what the cluster uses now is a warning.
+// below what the cluster uses now is a warning. A resize that would lower a
+// follower's hot-standby floors is refused (Q1a).
 func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	var p dbResizeParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -754,7 +827,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err := restoreInProgress(p.Name, "db resize"); err != nil {
 		return Result{}, err
 	}
-	store := state.FileStore{}
+	store := followerState()
 	cfg, _, err := store.Load()
 	if err != nil {
 		return Result{}, err
@@ -774,6 +847,10 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if old.Protected && ResizeShrinks(cfg, old, resized) {
 		return Result{}, protectedError(p.Name, "shrinking it")
 	}
+	rt := runtimeFor(env, env.Req.DryRun)
+	if err := refuseFollowerFloorDrop(cfg, p.Name, old, resized, rt.Host); err != nil {
+		return Result{}, err
+	}
 	for i := range cfg.Clusters {
 		if cfg.Clusters[i].Name == p.Name {
 			cfg.Clusters[i] = resized
@@ -782,7 +859,6 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err := cfg.Validate(); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
-	rt := runtimeFor(env, env.Req.DryRun)
 	freed := 0
 	if before := demandFor(env.Cluster, old, rt.Host); before.Running {
 		freed = before.SharedMemoryMiB
@@ -806,8 +882,15 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Data: map[string]any{"database": resized, "plan": data},
-			Warnings: append(warnings, oversubscriptionWarnings(cfg, rt.Host)...)}, nil
+		followers, err := followerPlans(ctx, cfg, rt, p.Name, old, resized, engine.Options{})
+		if err != nil {
+			return Result{}, err
+		}
+		out := map[string]any{"database": resized, "plan": data}
+		if len(followers) > 0 {
+			out["followers"] = followers
+		}
+		return Result{Data: out, Warnings: append(warnings, oversubscriptionWarnings(cfg, rt.Host)...)}, nil
 	}
 	raw, err := cfg.Encode()
 	if err != nil {
@@ -817,14 +900,22 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	// The huge-page pool follows the new sum before the cluster restarts.
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
+	if _, _, err := applyResizeStep(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
 		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
 	confirm := restartConfirmation(cfg, env.Req)
 	if p.DeferRestart {
 		confirm = engine.Confirmation{}
 	}
-	data, applyWarnings, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
+	// Resize never lowers a follower's floors (Q1a), so the followers always
+	// take the source's new values first, even on a retry after a follower
+	// update failed (Phase 6, Q1, D6).
+	base := engine.Options{Confirm: confirm, Restarter: steps.Restarter(cfg), Report: env.Report}
+	followers, err := applyFollowerConfigs(ctx, cfg, rt, p.Name, base)
+	if err != nil {
+		return Result{}, withHint(err, "The new size is saved and "+p.Name+" is not updated yet. Fix "+followers.Failed+", then run the same db resize again.")
+	}
+	data, applyWarnings, err := applyResizeStep(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		DB:        p.Name,
 		Confirm:   confirm,
 		Restarter: steps.Restarter(cfg),
@@ -833,7 +924,11 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
-	warnings = append(append(warnings, applyWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
+	sourceRestarts := len(data.Restarts)
+	// The restarts are listed in the order they ran: the followers' first.
+	data.Restarts = append(followers.Restarts, data.Restarts...)
+	data.RestartsSettled = append(followers.Settled, data.RestartsSettled...)
+	warnings = append(append(append(warnings, followers.Warnings...), applyWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
 	// A deferred restart runs at the start of the maintenance window
 	// (maint-daily, Phase 4 D11); one done now clears an older deferral.
 	out := map[string]any{"database": resized, "apply": data}
@@ -841,7 +936,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	case p.DeferRestart && len(data.RestartPending) > 0:
 		recordDeferred(p.Name)
 		out["deferred_to_window"] = env.Cluster.Maintenance.Window
-	case len(data.Restarts) > 0:
+	case sourceRestarts > 0:
 		clearDeferred(p.Name)
 	}
 	return Result{Data: out, Warnings: warnings}, nil
@@ -898,7 +993,7 @@ func dropCluster(ctx context.Context, env *Env, name string) error {
 
 // existingRolesIn returns the vaire roles of database name that exist in the
 // cluster at local.
-func existingRolesIn(ctx context.Context, local pg.Local, name string) ([]string, error) {
+func existingRolesIn(ctx context.Context, local sqlRunner, name string) ([]string, error) {
 	wanted := append([]string{name + "_owner"}, prefixedRoles(name)...)
 	quoted := make([]string, len(wanted))
 	for i, role := range wanted {
@@ -982,7 +1077,7 @@ func quoteLiteral(value string) string {
 }
 
 // placeCluster fills what db create assigns: the node (the master), a free
-// port, a new stanza and the default size.
+// port, a new stanza (none for a follower) and the default size.
 func placeCluster(cfg config.Cluster, db *config.ClusterSpec) error {
 	master, ok := cfg.Master()
 	if !ok {
@@ -996,8 +1091,11 @@ func placeCluster(cfg config.Cluster, db *config.ClusterSpec) error {
 			WithDetails(map[string]any{"reason": "no_cluster_port"})
 	}
 	db.Port = port
-	if db.Stanza, err = config.NewStanza(db.Name); err != nil {
-		return err
+	// A follower has no stanza while it follows (Phase 6).
+	if !db.IsFollower() {
+		if db.Stanza, err = config.NewStanza(db.Name); err != nil {
+			return err
+		}
 	}
 	if db.Size == "" {
 		db.Size = cfg.Postgres.DefaultSize
