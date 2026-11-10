@@ -27,6 +27,12 @@ func protectedWriteCode(cmd *cobra.Command, db, what string, status func() (prot
 	if !slices.Contains(st.Protected, db) {
 		return nil, nil
 	}
+	if isFollowerStatus(st.Databases, db) {
+		// A follower takes no writes: the node refuses a write code for it
+		// and the write itself fails on the read-only cluster. Asking for a
+		// code would suggest a code could make it writable (Phase 6).
+		return nil, nil
+	}
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil, output.NewError(output.CodeDatabaseProtected,
 			"database "+db+" is protected, so "+what+" needs a code from the authenticator app, typed at a terminal", output.ExitUnsafe,
@@ -46,6 +52,17 @@ func protectedWriteCode(cmd *cobra.Command, db, what string, status func() (prot
 	}
 	note("Database " + db + " is protected: " + what + " needs a code from the authenticator app set up with vaire protect init.")
 	return readAuthenticatorCode(cmd, "nothing was written to "+db, map[string]any{"database": db})
+}
+
+// isFollowerStatus reports whether db is a follower in a protect.status
+// result. A follower's protection, if any, has no writable path (Phase 6).
+func isFollowerStatus(dbs []node.ProtectedDatabase, db string) bool {
+	for _, d := range dbs {
+		if d.Name == db {
+			return d.Follows != ""
+		}
+	}
+	return false
 }
 
 // sessionLogin is the login vaire sql, psql and console use on db: vaire_admin,

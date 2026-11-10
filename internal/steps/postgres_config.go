@@ -28,14 +28,16 @@ type managedFile struct {
 }
 
 // confFiles returns spec's conf.d files in load order, then its pg_hba and
-// pg_ident. 90-overrides.conf is written only when missing.
-func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) []managedFile {
+// pg_ident. 90-overrides.conf is written only when missing. A follower's
+// floors that PostgreSQL cannot read as an integer are an error, never a
+// dropped setting.
+func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) ([]managedFile, error) {
 	res := tuningFor(cfg, spec, rt.Host)
 	dir, confD := PGConfDir(spec.Name), PGConfD(spec.Name)
 	conf := func(path string, content []byte, mode os.FileMode) managedFile {
 		return managedFile{Path: path, Content: string(content), Mode: mode, Owner: pgFileOwner, Group: pgFileGroup}
 	}
-	return []managedFile{
+	files := []managedFile{
 		conf(confD+"/10-vaire-tuning.conf", render.TuningConf(res), 0o644),
 		conf(confD+"/20-vaire-security.conf", render.SecurityConf(spec.Port), 0o644),
 		conf(confD+"/30-vaire-extensions.conf", render.ExtensionsConf(spec, res), 0o644),
@@ -44,6 +46,12 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) [
 		conf(dir+"/pg_hba.conf", render.HBA(), 0o640),
 		conf(dir+"/pg_ident.conf", render.Ident(cfg), 0o640),
 	}
+	// A follower's floors and replication settings (Phase 6).
+	follower, err := followerFiles(cfg, spec, rt)
+	if err != nil {
+		return nil, err
+	}
+	return append(files, follower...), nil
 }
 
 // WriteBackupConf writes spec's 40-vaire-backup.conf as postgres-config-v1
@@ -74,7 +82,10 @@ func (s postgresConfig) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []e
 	if err != nil {
 		return nil
 	}
-	files := confFiles(cfg, spec, rt)
+	files, err := confFiles(cfg, spec, rt)
+	if err != nil {
+		return nil
+	}
 	out := make([]engine.RenderedFile, 0, len(files))
 	for _, f := range files {
 		out = append(out, engine.RenderedFile{Path: f.Path, Content: []byte(f.Content)})
@@ -87,7 +98,10 @@ func (s postgresConfig) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	files := confFiles(cfg, spec, rt)
+	files, err := confFiles(cfg, spec, rt)
+	if err != nil {
+		return nil, err
+	}
 	payload := make([]map[string]string, 0, len(files))
 	for _, f := range files {
 		payload = append(payload, map[string]string{"path": f.Path, "content": f.Content})
@@ -100,7 +114,11 @@ func (s postgresConfig) Check(_ context.Context, cfg config.Cluster, rt engine.R
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
-	for _, f := range confFiles(cfg, spec, rt) {
+	files, err := confFiles(cfg, spec, rt)
+	if err != nil {
+		return engine.CheckResult{}, err
+	}
+	for _, f := range files {
 		if !fileIsOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group) {
 			return incomplete(f.Path + " differs"), nil
 		}
@@ -117,7 +135,10 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		return engine.ApplyResult{}, err
 	}
 	local := ClusterPG(spec)
-	files := confFiles(cfg, spec, rt)
+	files, err := confFiles(cfg, spec, rt)
+	if err != nil {
+		return engine.ApplyResult{}, err
+	}
 	// Keep the previous contents so a validation failure can be rolled back.
 	// None of the conf.d files exist yet: this is the cluster's first
 	// configuration. pg_hba.conf and pg_ident.conf don't count, because

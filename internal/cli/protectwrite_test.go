@@ -7,6 +7,7 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/node"
 )
 
 func statusOf(protected ...string) func() (protectStatusData, error) {
@@ -52,6 +53,32 @@ func TestProtectedWriteUnprotectedNeedsNoCode(t *testing.T) {
 		func() (protectStatusData, error) { return protectStatusData{}, boom }, noNote)
 	if !errors.Is(err, boom) {
 		t.Fatalf("status error: %v", err)
+	}
+}
+
+// A protected follower never asks for a code: it takes no writes, so a code
+// could not authorise anything. A protected primary still does.
+func TestProtectedWriteFollowerNeedsNoCode(t *testing.T) {
+	status := func() (protectStatusData, error) {
+		return protectStatusData{
+			Configured: true,
+			Protected:  []string{"app", "app_follower"},
+			Databases: []node.ProtectedDatabase{
+				{Name: "app", Protected: true},
+				{Name: "app_follower", Protected: true, Follows: "app"},
+			},
+		}, nil
+	}
+	for _, args := range [][]string{nil, {"--yes"}, {"--output", "json"}, {"--no-input"}} {
+		code, err := protectedWriteCode(commandAt(t, "sql", args...), "app_follower", "writing to it", status, noNote)
+		if err != nil || code != nil {
+			t.Fatalf("%v: code %v, err %v", args, code, err)
+		}
+	}
+	_, err := protectedWriteCode(commandAt(t, "sql", "--output", "json"), "app", "writing to it", status, noNote)
+	e := cliErrorOf(t, err)
+	if e.Code != output.CodeDatabaseProtected || reasonOf(e) != "write_requires_human" {
+		t.Fatalf("the protected source: %s %q", e.Code, reasonOf(e))
 	}
 }
 

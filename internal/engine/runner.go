@@ -44,8 +44,9 @@ type Options struct {
 	// FailureHint replaces the step_failed hint, for callers that resume
 	// differently from apply (server init uses --resume).
 	FailureHint string
-	// Recovering is a database ClusterView keeps although it awaits
-	// recovery: db recover builds its cluster (Phase 5).
+	// Recovering is a database ClusterView keeps although it awaits recovery
+	// or is an unfinished ordinary follow: db recover and the owned follow job
+	// build their cluster under it (Phase 5/6).
 	Recovering string
 }
 
@@ -170,8 +171,9 @@ type decision struct {
 
 // ClusterView, when set, narrows the configuration every Plan and Apply
 // sees. The node sets it (Phase 5): a database awaiting recovery after a
-// rebuild has no cluster, so no step may create an empty one, render its
-// pooler entry or start its timers. What's saved is never narrowed.
+// rebuild, or one whose ordinary follow has not completed, has no cluster to
+// converge, so no step may create an empty one, render its pooler entry or
+// start its timers. What's saved is never narrowed.
 var ClusterView func(cfg config.Cluster, keep string) config.Cluster
 
 func view(cfg config.Cluster, keep string) config.Cluster {

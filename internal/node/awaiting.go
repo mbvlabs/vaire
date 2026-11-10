@@ -20,28 +20,60 @@ func init() {
 	engine.ClusterView = engineView
 }
 
-// stepsView is cluster.toml without the databases awaiting recovery, for the
-// step engine only; keep is one db recover is building. The left-out
-// databases go to Awaiting, which the tuning counts. A records file that
-// can't be read changes nothing.
+// stepsView is cluster.toml without the databases that have no cluster yet,
+// for the step engine only. engineView carries the one database an owned
+// lifecycle operation is building (db recover, or an ordinary follow that has
+// just materialised). A records file that can't be read changes nothing about
+// an unfinished ordinary follow: its generation is in cluster.toml and still
+// leaves it out.
 func stepsView(cfg config.Cluster) config.Cluster { return engineView(cfg, "") }
 
 func engineView(cfg config.Cluster, keep string) config.Cluster {
 	recs, err := backup.LoadRecords()
-	if err != nil || len(recs.AwaitingRecovery) == 0 {
-		return cfg
+	if err != nil {
+		// The awaiting entries are unknown, so they cannot narrow the view;
+		// an unfinished follow's generation still does.
+		recs = backup.Records{}
 	}
-	return withoutAwaiting(cfg, recs, keep)
+	return withoutUnfinished(cfg, recs, keep)
 }
 
-func withoutAwaiting(cfg config.Cluster, recs backup.Records, keep string) config.Cluster {
+// withoutUnfinished is the steps' view: a database awaiting recovery or an
+// unfinished ordinary follow has no cluster of its own yet, so no step may
+// create, start, expose or time it. Both are counted in Awaiting for the
+// resource math. keep is the database an owned follow/recovery execution is
+// deliberately building; the saved configuration is never narrowed.
+func withoutUnfinished(cfg config.Cluster, recs backup.Records, keep string) config.Cluster {
+	return cfg.RoutingView(recs.IsAwaiting, keep)
+}
+
+// diagnosticsView is the read-only status, doctor and metrics view. A database
+// awaiting recovery still has no cluster, but a configured follower whose
+// ordinary follow has not completed is deliberately kept whatever its
+// follow_generation: if it materialised before the completion save failed, the
+// source's slot pressure and the follower's paused or lost state remain
+// measurable (Q3). This view must never select steps; the convergence view
+// above is the only one the engine may route, create, start and time from.
+func diagnosticsView(cfg config.Cluster) config.Cluster {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		// The awaiting entries are unknown, so they cannot narrow the view.
+		return cfg
+	}
+	return diagnosticsViewWith(cfg, recs)
+}
+
+// diagnosticsViewWith is diagnosticsView from an already-loaded records
+// snapshot, so status and doctor do not read the file twice while building the
+// same report.
+func diagnosticsViewWith(cfg config.Cluster, recs backup.Records) config.Cluster {
 	out := cfg
 	out.Clusters, out.Awaiting = nil, nil
 	for _, c := range cfg.Clusters {
-		if c.Name == keep || !recs.IsAwaiting(c.Name) {
-			out.Clusters = append(out.Clusters, c)
-		} else {
+		if recs.IsAwaiting(c.Name) {
 			out.Awaiting = append(out.Awaiting, c)
+		} else {
+			out.Clusters = append(out.Clusters, c)
 		}
 	}
 	return out
@@ -65,6 +97,7 @@ var awaitingRefused = map[string]string{ //nolint:gosec // G101: method names an
 	"db.credentials": "rotating its credentials", "maint.run": "maintenance", "maint.kill": "maint kill",
 	"maint.report": "a maintenance report", "queries.reset": "a statistics reset", "apply": "apply --db",
 	"sql": "sql", "db.write-access": "writing to it",
+	"db.follow": "a follow", "db.unfollow": "an unfollow",
 }
 
 // awaitingParamFields are the params that name a database.

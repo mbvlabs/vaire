@@ -178,7 +178,7 @@ func (c *calc) add() {
 	}
 
 	// WAL and checkpoints.
-	c.set("wal_level", "logical", "", "archiving, replication and logical-replication followers (Phases 3 and 6)", "postmaster")
+	c.set("wal_level", "replica", "", "archiving and physical-standby followers (Phases 3 and 6)", "postmaster")
 	c.set("wal_compression", "zstd", "", "cheap CPU for less WAL traffic", "user")
 	c.set("wal_buffers", "-1", "", "let PostgreSQL size WAL buffers from shared_buffers", "postmaster")
 	c.set("max_wal_senders", "10", "", "headroom for replication and pgBackRest (Phase 3)", "postmaster")
@@ -186,6 +186,8 @@ func (c *calc) add() {
 		fmt.Sprintf("2%% of the cluster's %d GiB share of the data disk", in.DataDiskGiB), "sighup")
 	c.set("max_wal_size", gib(clampFloat(float64(in.DataDiskGiB)*0.10, 2, 64)), "GiB",
 		fmt.Sprintf("10%% of the cluster's %d GiB share of the data disk", in.DataDiskGiB), "sighup")
+	c.set("max_slot_wal_keep_size", gib(SlotWALKeepGiB(in.DataDiskGiB)), "GiB",
+		fmt.Sprintf("10%% of the cluster's %d GiB share of the data disk: the most WAL a stopped follower's slot holds (Phase 6)", in.DataDiskGiB), "sighup")
 	c.set("checkpoint_timeout", "15min", "", "spread checkpoints over a quarter hour", "sighup")
 	c.set("checkpoint_completion_target", "0.9", "", "smooth checkpoint I/O", "sighup")
 
@@ -237,6 +239,12 @@ func (c *calc) add() {
 	c.set("log_min_duration_statement", profileDuration(in.Profile), "", profileReason(in.Profile, "slow-statement logging"), "user")
 
 	c.res.Settings = c.items
+}
+
+// SlotWALKeepGiB is max_slot_wal_keep_size for a cluster with diskGiB of
+// the data disk: 10%, 2-64 GiB (Phase 6, D4).
+func SlotWALKeepGiB(diskGiB int) float64 {
+	return clampFloat(float64(diskGiB)*0.10, 2, 64)
 }
 
 // HugePages estimates the huge pages needed for sharedBuffersMiB (§12.3).

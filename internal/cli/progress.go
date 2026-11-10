@@ -387,6 +387,10 @@ func waitLabel(method string, params any) string {
 		return with("dropping", db)
 	case "db.fork":
 		return with("forking", named.Source)
+	case "db.follow":
+		return with("following", named.Source)
+	case "db.unfollow":
+		return with("unfollowing", db)
 	case "dump.create":
 		return with("dumping", db)
 	case "restore.start":

@@ -54,7 +54,8 @@ func NodeChecks() []Check {
 		{ID: "backup.drill", Category: CatBackups, Run: backupDrill},
 	}
 	checks = append(checks, ActivityChecks()...)
-	return append(checks, MasterChecks()...)
+	checks = append(checks, MasterChecks()...)
+	return append(checks, FollowerChecks()...)
 }
 
 func osSupported(f Facts) []Result {
@@ -489,7 +490,12 @@ func backupCluster(f Facts, fn func(c ClusterFacts) (Status, string, string)) []
 		}
 		return out
 	}
-	return perCluster(f, false, fn)
+	return perCluster(f, false, func(c ClusterFacts) (Status, string, string) {
+		if c.Follows != "" {
+			return Skip, "a follower has no stanza; " + c.Follows + "'s backups cover it", ""
+		}
+		return fn(c)
+	})
 }
 
 func backupArchiving(f Facts) []Result {

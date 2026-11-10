@@ -221,6 +221,10 @@ func methods() map[string]method {
 		{name: "restore.cleanup", lock: fixedLock(engine.LockShared), clusterLock: dbClusterLock, cluster: true, confirm: cleanupToken, runLog: always, handler: handleRestoreCleanup},
 		{name: "restore.drill", cluster: true, runLog: always, handler: handleRestoreDrill},
 		{name: "db.fork", cluster: true, runLog: always, handler: handleDBFork},
+		// Phase 6: followers. Both start jobs, which take their own locks;
+		// db.follow takes the exclusive lock itself to add the entry.
+		{name: "db.follow", cluster: true, runLog: always, handler: handleDBFollow},
+		{name: "db.unfollow", cluster: true, confirm: unfollowToken, runLog: always, handler: handleDBUnfollow},
 		{name: "dump.create", cluster: true, runLog: always, handler: handleDumpCreate},
 		{
 			name:    "sql",
@@ -377,8 +381,13 @@ func decodeParams(raw json.RawMessage, v any) error {
 	return nil
 }
 
+// detectHost is hostinfo.Detect for a request's runtime facts. It is a
+// variable so tests supply fixed host facts without weakening the admission
+// checks that read them.
+var detectHost = hostinfo.Detect
+
 func runtimeFor(env *Env, dryRun bool) engine.Runtime {
-	host, _ := hostinfo.Detect(env.Cluster.Server.DataRoot)
+	host, _ := detectHost(env.Cluster.Server.DataRoot)
 	return engine.Runtime{
 		DryRun:       dryRun,
 		Shell:        engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},
@@ -394,6 +403,9 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
+		return Result{}, err
+	}
 	rt := runtimeFor(env, true)
 	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: p.Steps, DB: p.DB})
 	if err != nil {
@@ -405,6 +417,9 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 func handleApply(ctx context.Context, env *Env) (Result, error) {
 	var p stepParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
+		return Result{}, err
+	}
+	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
 	if env.Req.DryRun {

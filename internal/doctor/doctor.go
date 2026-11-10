@@ -137,6 +137,25 @@ type Facts struct {
 	ActivityHealth        activity.Health
 	ActivityHealthChecked bool
 	ActivityHealthKnown   bool
+	// OrphanSlots are vaire_* slots on a source that no follower owns
+	// (Phase 6). OrphanSlotErrors are sources whose slots could not be
+	// listed, so their absence is unknown.
+	OrphanSlots      []OrphanSlot
+	OrphanSlotErrors []OrphanSlotError
+}
+
+// OrphanSlot is a follower slot no follower owns.
+type OrphanSlot struct {
+	Source string
+	Port   int
+	Slot   string
+}
+
+// OrphanSlotError is a source whose follower slots could not be listed.
+type OrphanSlotError struct {
+	Source string
+	Port   int
+	Error  string
 }
 
 // Warning is an oversubscription warning (memory_overcommitted, cpu_crowded,
@@ -175,6 +194,10 @@ type ClusterFacts struct {
 	// AwaitingRecovery is a database a rebuilt master hasn't recovered yet
 	// (Phase 5): its PostgreSQL and backup checks are skipped.
 	AwaitingRecovery bool
+	// Follows is the database a follower streams from, and Follower its
+	// replication, nil when it wasn't read (Phase 6).
+	Follows  string
+	Follower *health.FollowerState
 }
 
 // Thresholds.

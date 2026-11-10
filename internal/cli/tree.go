@@ -927,6 +927,8 @@ func dbCommands() cmdSpec {
 		},
 		children: []cmdSpec{
 			dbRecoverCommand(),
+			dbFollowCommand(),
+			dbUnfollowCommand(),
 			{
 				use: "list",
 				run: runDBList,

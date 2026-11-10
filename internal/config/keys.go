@@ -45,11 +45,12 @@ func (c *Cluster) Set(key, value string) error {
 
 // immutableHint names the keys vaire refuses to change.
 const immutableHint = "schema, name, nodes.*.wg_address, transport.* and clusters.*.name, .port, .stanza and .follows " +
-	"cannot be changed once they exist. A cluster's port and stanza are assigned by vaire db create."
+	"cannot be changed once they exist. follow_generation is managed by vaire. A cluster's port and stanza are assigned by vaire db create."
 
 // immutableClusterKeys are the [[clusters]] keys fixed at create. follows
-// arrives with followers in Phase 6.
-var immutableClusterKeys = map[string]bool{"name": true, "port": true, "stanza": true, "follows": true}
+// is cleared only by db unfollow (Phase 6); follow_generation is written and
+// cleared only by the follow jobs.
+var immutableClusterKeys = map[string]bool{"name": true, "port": true, "stanza": true, "follows": true, "follow_generation": true}
 
 // immutableKey reports whether a dotted key names a value vaire refuses to change.
 func immutableKey(segs []string) bool {
@@ -85,6 +86,19 @@ func ImmutableChanges(old, updated Cluster) []string {
 			changed = append(changed, "nodes."+n.Name+".wg_address")
 		}
 	}
+	for _, u := range updated.Clusters {
+		// A follower is made by db follow only: apply would initdb an empty
+		// cluster for an entry it never copied (Phase 6). follow_generation
+		// is likewise written only by that preparation.
+		if _, existed := old.ClusterByName(u.Name); !existed {
+			if u.Follows != "" {
+				changed = append(changed, "clusters."+u.Name+".follows")
+			}
+			if u.FollowGeneration != "" {
+				changed = append(changed, "clusters."+u.Name+".follow_generation")
+			}
+		}
+	}
 	for _, cl := range old.Clusters {
 		u, ok := updated.ClusterByName(cl.Name)
 		if !ok {
@@ -95,6 +109,12 @@ func ImmutableChanges(old, updated Cluster) []string {
 		}
 		if u.Stanza != cl.Stanza {
 			changed = append(changed, "clusters."+cl.Name+".stanza")
+		}
+		if u.Follows != cl.Follows {
+			changed = append(changed, "clusters."+cl.Name+".follows")
+		}
+		if u.FollowGeneration != cl.FollowGeneration {
+			changed = append(changed, "clusters."+cl.Name+".follow_generation")
 		}
 	}
 	return changed

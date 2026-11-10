@@ -148,7 +148,7 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 			out = append(out, r)
 			continue
 		}
-		rows, err := steps.AdminPG(spec).Query(ctx, spec.Name, maint.ReportSetup+sql, nil)
+		rows, err := steps.AdminPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
 		switch {
 		case err != nil:
 			r.Error = err.Error()
@@ -206,7 +206,7 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 
 // repackRefusal is maint repack until Phase 7 brings pg_repack (Phase 4).
 func repackRefusal(ctx context.Context, spec config.ClusterSpec) error {
-	rows, err := steps.AdminPG(spec).Query(ctx, spec.Name, maint.HasRepackSQL, nil)
+	rows, err := steps.AdminPG(spec).Query(ctx, spec.DatabaseName(), maint.HasRepackSQL, nil)
 	installed := err == nil && len(rows) == 1 && rows[0]["n"] != "0"
 	reason, msg := "extension_missing", "pg_repack is not installed in "+spec.Name
 	if installed {
@@ -381,6 +381,15 @@ type maintKillParams struct {
 	OlderThan string `json:"older_than,omitempty"`
 }
 
+// maintKillAdminPG and maintKillClusterPG are handleMaintKill's connections
+// to the database's cluster: vaire_admin's, and the superuser's for a
+// protected database. Variables so a test sees which database each query
+// names.
+var (
+	maintKillAdminPG   = func(spec config.ClusterSpec) sqlRunner { return steps.AdminPG(spec) }
+	maintKillClusterPG = func(spec config.ClusterSpec) sqlRunner { return steps.ClusterPG(spec) }
+)
+
 // killToken is vaire maint kill's confirm token: <db>/kill (Phase 4 D12).
 func killToken(_ config.Cluster, params json.RawMessage) string {
 	var p maintKillParams
@@ -416,8 +425,10 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 		}
 		opts.OlderThanSecond = int64(d.Seconds())
 	}
-	local := steps.AdminPG(spec)
-	rows, err := local.Query(ctx, p.DB, maint.KillCandidatesSQL, nil)
+	// The cluster holds spec.DatabaseName(), which is its source's name for a
+	// follower: p.DB only names the cluster, in the token and the output.
+	local := maintKillAdminPG(spec)
+	rows, err := local.Query(ctx, spec.DatabaseName(), maint.KillCandidatesSQL, nil)
 	if err != nil {
 		return Result{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
@@ -444,9 +455,9 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	}
 	killer, terminate := local, maint.TerminateSQL(pids)
 	if spec.Protected {
-		killer, terminate = steps.ClusterPG(spec), "SET ROLE pg_signal_backend;\n"+terminate
+		killer, terminate = maintKillClusterPG(spec), "SET ROLE pg_signal_backend;\n"+terminate
 	}
-	out, err := killer.Query(ctx, p.DB, terminate, nil)
+	out, err := killer.Query(ctx, spec.DatabaseName(), terminate, nil)
 	if err != nil {
 		return Result{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
@@ -482,7 +493,8 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 	res := map[string]any{}
 	analyzed := map[string][]string{}
 	for _, spec := range cfg.Clusters {
-		if !clusterRunning(spec) {
+		// A follower is read-only: its source's ANALYZE replicates (Phase 6).
+		if !clusterRunning(spec) || spec.IsFollower() {
 			continue
 		}
 		local, setup := maintPG(spec)
@@ -590,7 +602,8 @@ func jobMaintWeekly(ctx context.Context, env *jobEnv) (any, error) {
 	reports := map[string]maint.BloatReport{}
 	var errs []error
 	for _, spec := range cfg.Clusters {
-		if !clusterRunning(spec) {
+		// A follower's tables are its source's (Phase 6).
+		if !clusterRunning(spec) || spec.IsFollower() {
 			continue
 		}
 		rows, err := steps.AdminPG(spec).Query(ctx, spec.Name, maint.ReportSetup+maint.BloatSQL(), nil)

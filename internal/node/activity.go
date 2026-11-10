@@ -774,6 +774,8 @@ func recordJobRefusal(rec *activityRecorder, job, id string, err error, defaultR
 var activityDryRunAware = map[string]bool{
 	"tune.apply":     true,
 	"db.fork":        true,
+	"db.follow":      true,
+	"db.unfollow":    true,
 	"queries.reset":  true,
 	"metrics.rotate": true,
 }
@@ -966,6 +968,7 @@ func activityDatabaseFor(method string, params json.RawMessage) string {
 // activityNameIsDatabase lists the methods whose name param is a database.
 var activityNameIsDatabase = map[string]bool{
 	"db.create": true, "db.drop": true, "db.resize": true, "db.credentials": true, "db.fork": true,
+	"db.follow": true, "db.unfollow": true,
 }
 
 // activityNodeInfoLoader reads the node's optional identity files. Tests
@@ -1025,7 +1028,7 @@ var activityKnownReason = map[string]bool{
 	"new": true, "inputs_changed": true, "check_incomplete": true,
 	"previous_failure": true, "journal": true, "check": true,
 	// Step skip reasons.
-	"no_databases": true, "backups_not_configured": true,
+	"no_databases": true, "backups_not_configured": true, "follower": true,
 	// Node refusal and outcome reasons.
 	"activity_unavailable": true, "already_a_node": true, "already_placed": true,
 	"already_undone": true, "awaiting_recovery": true, "backend_not_found": true,
@@ -1035,9 +1038,11 @@ var activityKnownReason = map[string]bool{
 	"config_changed": true, "confirm_mismatch": true, "database_exists": true,
 	"database_not_found": true, "database_protected": true, "database_required": true,
 	"dump_not_found": true, "epoch_conflict": true, "extension_missing": true,
-	"final_dump_failed": true, "heavy_io_lock_held": true, "host_phase_incomplete": true,
-	"immutable_key": true, "install_source_invalid": true, "job_not_found": true,
-	"job_skipped": true, "job_spec_missing": true, "job_spec_mismatch": true,
+	"final_dump_failed": true, "follower_not_running": true, "follows_follower": true,
+	"has_followers": true, "heavy_io_lock_held": true, "host_phase_incomplete": true,
+	"immutable_key": true, "install_source_invalid": true, "is_follower": true,
+	"job_not_found": true,
+	"job_skipped":   true, "job_spec_missing": true, "job_spec_mismatch": true,
 	"job_spec_required": true, "cluster_lock_held": true, "lock_held": true,
 	"journal_corrupt": true, "pgbackrest_too_old": true, "preflight_failed": true,
 	"sha256_mismatch": true, "state_corrupt": true,
@@ -1045,7 +1050,7 @@ var activityKnownReason = map[string]bool{
 	"no_dump_recipient": true, "no_leftover": true, "no_lockdown_pending": true,
 	"no_offsite_backup": true, "no_open_restore": true, "no_ready_restore": true,
 	"node_belongs_to_other_server": true, "node_fenced": true, "node_outdated": true,
-	"not_a_node": true, "not_awaiting_recovery": true, "operator_only": true,
+	"not_a_follower": true, "not_a_node": true, "not_awaiting_recovery": true, "operator_only": true,
 	"os_unsupported": true, "outside_window": true, "postgres_present": true,
 	"protect_already_initialized": true, "protect_not_initialized": true,
 	"protect_not_pending": true, "protected_backend": true, "ram_too_small": true,
@@ -1054,6 +1059,8 @@ var activityKnownReason = map[string]bool{
 	"restore_undone": true, "restoring_exists": true, "root_required": true,
 	"run_log_unavailable": true, "runs_on_server": true, "selfcheck_failed": true,
 	"selfcheck_failed_rolled_back": true, "set_not_found": true,
+	"source_awaiting_recovery": true, "source_not_running": true, "source_floors_unknown": true,
+	"source_floors_above_follower": true, "follow_ownership_missing": true,
 	"sshd_port_not_22": true, "stanza_still_written": true, "tls_pending": true,
 	"undo_in_progress": true, "write_requires_human": true,
 	// Protection code outcomes.
