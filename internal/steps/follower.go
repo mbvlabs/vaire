@@ -641,6 +641,33 @@ func FencePoolerDatabase(ctx context.Context, db string) (resume func(), err err
 	return resume, nil
 }
 
+// FenceRestorePoolers is the strict restore cutover fence: it KILLs and
+// PAUSEs both the target alias and the restore-inspection alias on both
+// running poolers, with no preliminary or error RESUME. A failure preserves
+// whatever pause was already applied; the caller leaves the durable fence and
+// never resumes before the routing finalizer proves the destination safe.
+func FenceRestorePoolers(ctx context.Context, db string) error {
+	aliases := []string{db, backup.RestoringName(db)}
+	for _, p := range unfollowPoolers {
+		names, err := poolerDatabaseNames(ctx, p.dir, p.port)
+		if err != nil {
+			return fmt.Errorf("read the databases of the pooler at %s: %w", p.dir, err)
+		}
+		for _, alias := range aliases {
+			if !names[alias] {
+				continue
+			}
+			if err := poolerAdminAt(ctx, p.dir, p.port, "KILL "+alias); err != nil {
+				return fmt.Errorf("kill %s's clients on the pooler at %s: %w", alias, p.dir, err)
+			}
+			if err := poolerAdminAt(ctx, p.dir, p.port, "PAUSE "+alias); err != nil {
+				return fmt.Errorf("pause %s on the pooler at %s: %w", alias, p.dir, err)
+			}
+		}
+	}
+	return nil
+}
+
 // ResumePoolerDatabase lets db's clients in again on both poolers, clearing a
 // pause an interrupted unfollow left. A pooler that no longer lists the alias,
 // or does not answer, is ignored: the database's routing is whatever the

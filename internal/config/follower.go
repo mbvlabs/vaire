@@ -1,6 +1,9 @@
 package config
 
-import "slices"
+import (
+	"slices"
+	"sort"
+)
 
 // Followers (Phase 6): a [[clusters]] entry with follows = "<source>" is a
 // read-only physical standby of the source's cluster, a cluster of its own
@@ -74,6 +77,14 @@ func (c Cluster) validateFollower(add func(string, ...any), at string, s Cluster
 	case src.Node != s.Node:
 		add("%s.follows %q is on node %q; a follower runs on its source's node until Phase 10", at, s.Follows, src.Node)
 	}
+	if ok && !src.IsFollower() {
+		if !sameExplicitExtensions(c, s.Extensions, src.Extensions) {
+			add("%s.extensions must equal its source %s's inherited list; edit %s, not the follower", at, s.Follows, s.Follows)
+		}
+		if !sameRecoveryDeclaration(c, s.RecoveryExtensions, src.RecoveryExtensions) {
+			add("%s.recovery_extensions must equal its source %s's declaration; edit %s, not the follower", at, s.Follows, s.Follows)
+		}
+	}
 	if s.Stanza != "" {
 		add("%s.stanza %q must be empty for a follower: its source's backups cover it", at, s.Stanza)
 	}
@@ -101,4 +112,28 @@ func (c Cluster) Sources() []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+func canonicalExplicit(c Cluster, names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		canonical, _ := c.ExtensionResolver().Canonical(name)
+		out = append(out, canonical)
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+func sameExplicitExtensions(c Cluster, a, b []string) bool {
+	return slices.Equal(canonicalExplicit(c, a), canonicalExplicit(c, b))
+}
+
+func sameRecoveryDeclaration(c Cluster, a, b *[]string) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	return slices.Equal(canonicalExplicit(c, *a), canonicalExplicit(c, *b))
 }

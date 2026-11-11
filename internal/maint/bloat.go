@@ -1,9 +1,12 @@
 package maint
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/mbvlabs/vaire/internal/pg"
 )
 
 // sqlFile reads an embedded query without its trailing semicolon, so it can
@@ -87,4 +90,104 @@ func TotalBloat(r BloatReport) map[string]int64 {
 		out[row.Kind] += row.BloatBytes
 	}
 	return out
+}
+
+// PgstattupleInstalledSQL distinguishes an installed pgstattuple from one
+// whose functions are missing or unreadable.
+const PgstattupleInstalledSQL = `SELECT extversion FROM pg_extension WHERE extname = 'pgstattuple'`
+
+// PgstattupleSchemaSQL resolves the schema of pgstattuple's function, so the
+// report calls it without relying on search_path.
+const PgstattupleSchemaSQL = `SELECT n.nspname AS schema
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+JOIN pg_extension e ON e.oid = d.refobjid
+WHERE e.extname = 'pgstattuple' AND p.proname = 'pgstattuple'
+LIMIT 1`
+
+// ExactBloatSQL is the full-scan pgstattuple measurement of one table. It
+// never uses pgstattuple_approx. schema is the extension's schema; the table
+// is a SQL-quoted regclass input.
+func ExactBloatSQL(table, schema string) (string, error) {
+	q, err := QuoteRelation(table)
+	if err != nil {
+		return "", err
+	}
+	if schema == "" {
+		return "", fmt.Errorf("pgstattuple schema is empty")
+	}
+	return `SELECT table_len::bigint AS table_len,
+  tuple_count::bigint AS tuple_count,
+  tuple_len::bigint AS tuple_len,
+  tuple_percent::float8 AS tuple_percent,
+  dead_tuple_count::bigint AS dead_tuple_count,
+  dead_tuple_len::bigint AS dead_tuple_len,
+  dead_tuple_percent::float8 AS dead_tuple_percent,
+  free_space::bigint AS free_space,
+  free_percent::float8 AS free_percent
+FROM ` + pg.Quote(schema) + `.pgstattuple(` + literal(q) + `::regclass)`, nil
+}
+
+// TableStats is one table's measured pgstattuple result. FreeBytes is the
+// measured free space in the heap, not a promise that it can be reclaimed;
+// TableBytes includes page overhead, so the components need not add up.
+type TableStats struct {
+	DB               string  `json:"db"`
+	Schema           string  `json:"schema"`
+	Table            string  `json:"table"`
+	Method           string  `json:"method"`
+	TableBytes       int64   `json:"table_bytes"`
+	TupleCount       int64   `json:"tuple_count"`
+	TupleBytes       int64   `json:"tuple_bytes"`
+	TuplePercent     float64 `json:"tuple_percent"`
+	DeadTupleCount   int64   `json:"dead_tuple_count"`
+	DeadTupleBytes   int64   `json:"dead_tuple_bytes"`
+	DeadTuplePercent float64 `json:"dead_tuple_percent"`
+	FreeBytes        int64   `json:"free_bytes"`
+	FreePercent      float64 `json:"free_percent"`
+}
+
+// ParseTableStats reads exactly one pgstattuple row.
+func ParseTableStats(db, schema, table string, rows []map[string]string) (TableStats, error) {
+	if len(rows) != 1 {
+		return TableStats{}, fmt.Errorf("pgstattuple returned %d rows for %s.%s, want one", len(rows), schema, table)
+	}
+	r := rows[0]
+	parseInt := func(name string) (int64, error) {
+		v, err := strconv.ParseInt(r[name], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", name, err)
+		}
+		return v, nil
+	}
+	parseFloat := func(name string) (float64, error) {
+		v, err := strconv.ParseFloat(r[name], 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", name, err)
+		}
+		return v, nil
+	}
+	var out TableStats
+	out.DB, out.Schema, out.Table, out.Method = db, schema, table, "pgstattuple"
+	for name, dst := range map[string]*int64{
+		"table_len": &out.TableBytes, "tuple_count": &out.TupleCount, "tuple_len": &out.TupleBytes,
+		"dead_tuple_count": &out.DeadTupleCount, "dead_tuple_len": &out.DeadTupleBytes, "free_space": &out.FreeBytes,
+	} {
+		v, err := parseInt(name)
+		if err != nil {
+			return TableStats{}, err
+		}
+		*dst = v
+	}
+	for name, dst := range map[string]*float64{
+		"tuple_percent": &out.TuplePercent, "dead_tuple_percent": &out.DeadTuplePercent, "free_percent": &out.FreePercent,
+	} {
+		v, err := parseFloat(name)
+		if err != nil {
+			return TableStats{}, err
+		}
+		*dst = v
+	}
+	return out, nil
 }

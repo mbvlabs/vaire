@@ -76,13 +76,14 @@ The first goal is the **master node**: one VPS that hosts every database and own
 | DNS and certificates | One certificate per node, for its one hostname. In `acme` mode, `server init` shows the DNS record to create, waits for the operator to confirm it, and checks it against public resolvers. TLS never blocks on ACME: a placeholder certificate lets the poolers and nginx start, and a certificate that's still pending after 120 s is a warning, not a failure |
 | Master backup (Phase 5) | Replaces the restic VPS backup: a small age-encrypted bundle of what's born on the master (desired state, registries, `records.json`, the TOTP secret, WireGuard and host keys, the certificate and ACME account), built after every change (a dirty flag and a path unit) and uploaded to `<prefix>/master/` with a sidecar, kept locally too. An epoch in the bucket fences an old master: it stops its timers and poolers, and every cluster's `archive_command` (`vaire node archive-push`) refuses. `server init --restore` rebuilds on a new VPS with the old identity; databases come back `awaiting_recovery` and `db recover` brings each back from its stanza. Decided in [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md) |
 | Followers (Phase 6) | Physical standbys of one database's cluster, with `wal_level = replica`; `db unfollow` promotes one into an independent database. Built 2026-10-29, live test pending. Protection is not inherited: a follower and an unfollowed copy are unprotected unless the operator protects them |
+| Extensions (Phase 7) | The built-in catalogue is a convenience, not an allowlist. Custom definitions select an explicit APT package from an already configured trusted repository or operator-preinstalled files; no source builds or automatic repository/key setup. Packages are installed and held server-wide and never uninstalled on removal. Protected addition preserves policy; protected removal is refused. Copies, followers and historical restores use declared copy/standby safety and stanza-bound retained requirements; unknown history needs an explicit `recovery_extensions` declaration |
 | HA (Phase 11, last) | Patroni per cluster with one shared etcd. Until then vaire runs plain `postgresql-common`, with a designed and tested adoption step into Patroni |
 
 **Still to decide** (when the phase that needs it starts):
 
 - ~~Which exporter versions to pin, and whether vaire's own metrics replace `pgbackrest_exporter` (Phase 4).~~ Decided in [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md): pinned upstream binaries (node_exporter 1.12.1, postgres_exporter 0.20.1, pgbouncer_exporter 0.12.1) with sha256 in `internal/versions`; no `pgbackrest_exporter`, `vaire.prom` carries the backup facts.
-- ~~Where the table-bloat query comes from (Phase 4).~~ Decided: the ioguix estimate queries, vendored under BSD-2-Clause (`vaire version --licenses`); exact numbers with pgstattuple wait for Phase 7.
-- Which catalog extensions to drop because they have no PostgreSQL 18 package (Phase 7).
+- ~~Where the table-bloat query comes from (Phase 4).~~ Decided: the ioguix estimate queries, vendored under BSD-2-Clause (`vaire version --licenses`); the one-table full-scan `pgstattuple` measurement arrived in Phase 7.
+- ~~Which catalog extensions to drop because they have no PostgreSQL 18 package (Phase 7).~~ Resolved: the built-in package names have metadata evidence across the supported OS/architecture matrix; installation and runtime qualification remain pending. The catalogue is not an allowlist, and explicit compatible alternate providers are supported.
 
 ## 4. Technology choices
 
@@ -335,7 +336,7 @@ vaire takes the same unit to the user's own VPS. The VPS plays the provider's ho
    - Workload: profile (web/OLTP, mixed, analytics), default database size, expected client connections. These are setup-wide defaults; each database can override them
    - Backups: provider preset (R2/S3/B2/Hetzner/MinIO/custom), endpoint, region, bucket, prefix, keys, or "Skip for now"
    - DB backup schedule and retention (presets plus a custom cron-style schedule)
-   - Extensions from the catalog (Phase 7)
+   - Extensions from the built-in catalogue or explicit custom definitions (Phase 7)
 4. **Plan**, then confirm with `--confirm <server>` when non-interactive.
 5. **Apply** the steps (§6.2) with live progress. Each step is logged and resumable. The server starts with **no databases**; `vaire db create` adds them afterwards, each as its own cluster. `server init` creates the age recovery identity either way, and without a bucket it ends with the `no_offsite_backup` warning and the fix, `vaire backup setup`.
 6. **Handoff**: show the secrets handoff, gate on "stored safely", then print connection info and the next steps (`vaire db create`).
@@ -457,15 +458,23 @@ The databases are covered by pgBackRest. What a rebuild also needs is the master
 
 ### 6.8 Extensions
 
-`internal/catalog` holds a curated list. Each entry has the PGDG package name, `shared_preload_libraries` needs, required settings, whether a restart is needed, and a trust note.
+`internal/catalog` holds a built-in convenience list. Each entry has its package or preinstalled source, `shared_preload_libraries` needs, required settings, whether a restart is needed, and copy/standby safety metadata. The list is **not an allowlist**: `[extensions.<name>]` descriptors add compatible PostgreSQL 18 extensions or explicitly override a built-in provider. A new descriptor names `source = "apt"` with an explicit `package`, or `source = "preinstalled"` with no package, plus optional `preload`, `settings`, `schema`, `note`, `copy_safety`, `copy_settings` and `standby_safe`; a built-in override keeps the built-in fields it does not replace.
 
-Initial catalog: `pg_stat_statements`, `pgvector`, `postgis`, `pg_cron`, `pgaudit`, `pg_repack`, `pg_partman`, `hypopg`, `pg_trgm`, `citext`, `btree_gin`/`btree_gist`, `timescaledb` (licence note).
+No extension-specific repository or signing key is configured automatically, and nothing is built from source. An APT package must already be in a configured trusted repository; preinstalled files must already exist. Native extensions are trusted server code, not a sandbox: selecting a package is a privileged installation decision. The built-in list includes the contrib modules, `vector` (alias `pgvector`), `postgis`, `pg_cron`, `pgaudit`, `pg_repack`, `pg_partman`, `hypopg` and PGDG's Apache-2 `timescaledb` build (alternate official packages are explicit custom providers); `pg_stat_statements` and `auto_explain` keep their vaire-managed default preload behavior.
 
 ```
-vaire ext list | add <name> [--db <db>] | remove <name> [--db <db>]
+vaire ext list [--db <db>]
+vaire ext add <name> [--db <db>] [--package <pkg> | --preinstalled] [--preload <lib>]
+              [--setting key=value]… [--schema <schema>] [--copy-safety unknown|safe|disabled]
+              [--copy-setting key=value]… [--standby-safe] [--confirm <db>/restart]…
+vaire ext remove <name> --db <db> [--cascade] [--confirm <db>] [--confirm <db>/restart]…
 ```
 
-Install is: apt package (server-wide) → render preload/settings into that database's cluster → restart that cluster only if required (needs `--confirm <db>/restart`) → `CREATE EXTENSION` in the database. An extension that needs preloading restarts one database, not the server.
+Addition installs or verifies the resolved package union server-wide, renders the target cluster's preload/settings, restarts **only** that cluster when required (`--confirm <db>/restart`), then creates the SQL. A preload that is not effective yet leaves the roles work incomplete and retryable; it never creates a preload-dependent extension prematurely. Direct add/remove validates the complete source/follower target set and every exact restart token before any effect. Followers are configured first, SQL runs only on the primary, and a direct change on a follower is refused. A protected database may take an addition without weakening its access policy; removal from a protected database is refused.
+
+Removal previews bounded dependents and extension-owned tables, requires the database token and any affected restart token, and only cascades with explicit `--cascade`. Re-adding an enabled extension finishes pending SQL or a supported `ALTER EXTENSION UPDATE` to the installed package's default; it reports the actual resulting version, refuses a proven downgrade, and never upgrades packages. Installed packages are retained after removal. `ext list` combines definitions, package/control facts and per-database catalog facts; stopped, awaiting or unreadable databases report unavailable facts, not absence or version zero. Doctor reports package, SQL/update and pending-restart facts separately.
+
+Copies, followers and historical restores use the same resolver. A custom definition with `copy_safety = "unknown"` is valid on a standalone primary but blocks a copy, drill, fork or follower until the operator declares `safe`, or `disabled` with settings that suppress background effects. Retained requirements are keyed by immutable stanza and cover only the UTC range vaire actually observed; older points need an explicit `recovery_extensions` declaration, where absent means unknown, `[]` asserts none, and a populated list supplies the complete requirement. Descriptor details, validation and examples are in [EXTENSION-DEFINITIONS.md](EXTENSION-DEFINITIONS.md).
 
 ### 6.9 Maintenance
 
@@ -475,15 +484,21 @@ Install is: apt package (server-wide) → render preload/settings into that data
 vaire maint vacuum   [--db] [--table] [--analyze] [--freeze]
 vaire maint analyze  [--db]
 vaire maint reindex  [--db] [--table|--index] --concurrently
-vaire maint repack   [--db] [--table]          # pg_repack, online "VACUUM FULL"
-vaire maint report   bloat | wraparound | unused-indexes | missing-indexes | long-queries | locks
+vaire maint repack   --db <db> [--table <table>] [--now] --confirm <db>   # pg_repack, online "VACUUM FULL"
+vaire maint report   bloat [--db <db>] [--table <table> --exact] | wraparound | unused-indexes | missing-indexes | long-queries | locks
 vaire maint kill     --idle-in-tx | --pid <pid>
 ```
+
+**Repack** is a detachable job. It requires `pg_repack`, the target's confirmation token, matching client/extension/library/SQL versions, a supported ordinary permanent heap table with a primary key or suitable unique index on NOT NULL columns, and free space for **twice** the table, index and TOAST footprint plus the existing host reserve. The table, TOAST, indexes, database default and postgres session default must all resolve to `pg_default`; anything else is a bounded refusal. It runs as `postgres` over the cluster socket only on an unprotected database, uses `--no-kill-backend` with a 60-second lock wait, takes the heavy-I/O and cluster locks, and respects the maintenance window unless `--now`. Protected databases are refused on every path, including manual jobs and weekly automation; there is no TOTP bypass or permanent broader grant. Every table is revalidated immediately before it starts. pg_repack's exit status and relation storage changes cannot prove a completed rewrite: the current classifier reports an attempted table as `unknown`/`completion_unknown`, never as confirmed `repacked`, and `failed` only for failures established before execution. A known skip diagnostic is `skipped` only when valid before/after storage facts are identical. Per-run state and metrics carry the same outcome counts.
+
+**Auto-repack** is opt-in (`auto_repack = false`). It acts only on estimated candidates at or above `repack_bloat_threshold` and at least 64 MiB, biggest first, one table at a time, taking the heavy-I/O and cluster locks per table and rechecking eligibility, protection and the window immediately before execution. At window end it starts no new table and does not cancel a running rewrite; busy locks and skipped/failed/unknown outcomes are recorded.
+
+The **exact bloat report** (`maint report bloat --db <db> --table <table> --exact`) requires `pgstattuple` and measures one supported ordinary table with the full-scan `pgstattuple` function, not `pgstattuple_approx`. It runs read-only as `vaire_admin` with `pg_monitor`, under the report's 5-second lock timeout and 60-second statement timeout, and returns measured table/live/dead/free bytes and percentages plus the method. It is not instantaneous under concurrent updates, free space is not guaranteed reclaimable, and it covers one physical table, not its indexes or a database-wide scan. Default bloat reports remain estimates from the vendored ioguix queries.
 
 **Scheduled with systemd timers on the node,** within a configurable maintenance window:
 
 - Daily: wraparound/age check and an `ANALYZE` of tables with stale stats.
-- Weekly: bloat report, plus opt-in auto-repack above a threshold.
+- Weekly: bloat report, plus the opt-in auto-repack above.
 
 Maintenance runs per database's cluster. It sets `lock_timeout` and refuses to run during a backup or a restore drill of that database.
 
@@ -506,22 +521,32 @@ This section is the only place that tracks progress. Update it whenever a module
 
 **Rules**
 
-1. **One phase at a time.** A phase starts only when the previous one is done, and there's no overlap. "Done" means its exit check passes.
+1. **One phase at a time, except the approved combined follower/extension candidate.** Phase 7 may be built and published before Phase 6 live qualification. Both are then qualified on the same signed edge candidate, after activity qualification or explicit acceptance of its named gaps. This exception does not waive either feature's live exit checks.
 2. **Each phase is a set of modules.** A module is a Go package, or a group of steps, with one clear job.
 3. **Each phase leaves something that works.** From Phase 2 on, every phase ends with a manual test on a real VPS (§8).
 4. **HA is last.** Extensions come late. Anything unscheduled goes in the backlog.
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
-### 7.1 Current state (2026-10-19)
+### 7.1 Current state (2026-11-11)
 
-- **Phase 6 is built (2026-10-29, not released or live-tested):** per-database physical followers with `db follow`, `db unfollow` and recovery after a rebuild, plus their doctor, status, metrics and guard integration. Its manual test in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) is pending; the design, the review findings and the decisions that changed it are in [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md) and [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md).
+#### Phase 7 execution update (2026-11-11)
+
+- Followers reached master and edge through [PR #14](https://github.com/mbvlabs/vaire/pull/14), at `0d8e1fcc493c`. Publication is historical evidence, not deployment or live qualification; the older implementation notes below predate that publication.
+- Extension foundations through source/follower, history, copy activation and maintenance are implemented locally. E7-02 through E7-04 passed targeted independent source acceptance. E7-05 is accepted by both independent cumulative source lanes, with fresh required checks and uncached tests passing on the stable manifest. E7-06 is at final targeted source closure: its unknown-outcome policy and final deadline ordering are accepted, and the small skip-classification correction has focused passing tests, but source-only targeted rereview is still active. No E7-06 final acceptance is claimed yet.
+- E7-08A/B (two whole-change reviews), E7-09 (fresh final-tree verification), publication and the combined live qualification are **not run**. Commit, push, PR, deployment and live actions are **not authorized**. The full change has therefore not passed its required final reviews or final checks, and no publication or live readiness is claimed.
+- The approved order is to finish and publish Phase 7, then separately authorize one combined follower/extension qualification candidate. Activity remains a deployment gate. The canonical documentation snapshot is prepared for that freeze but remains pending the final reviews.
+- Current local checkpoints and findings are in [STATE-phase-7-preserved-work.md](STATE-phase-7-preserved-work.md) and [FINDINGS-phase-7-review.md](FINDINGS-phase-7-review.md). The combined run sheet is preparation only, not execution-ready or passed evidence.
+
+#### Earlier dated summary
+
+- **Phase 6 is built (2026-10-29; published to edge through PR #14, not live-tested):** per-database physical followers with `db follow`, `db unfollow` and recovery after a rebuild, plus their doctor, status, metrics and guard integration. Its manual test in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) is pending; the design, the review findings and the decisions that changed it are in [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md) and [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md).
 - **Activity history implementation is committed (2026-10-28, not released):** the operator authorized and selected the local, metadata-only activity history and on-demand incident bundles in [`RFC-activity-and-diagnostics.md`](./RFC-activity-and-diagnostics.md). It adds the activity store, `activity list|show|health`, `diagnostics collect|inspect`, job/step correlation, doctor health checks and typed schemas. Local tests/build/vet/lint pass (including the macOS cross-build); review findings are fixed (see [`FINDINGS-activity-review.md`](./FINDINGS-activity-review.md)); the work is committed but has **not** been released, deployed or live-qualified. Off-node collection, continuous runtime-log search, separate agent identities and credential-vault encryption remain outside this work.
 - **Activity review fixes (2026-10-27, local only):** regression tests cover preserving streamed evidence warnings in final structured results even when callers discard RPC replies, retaining fresh evidence before a backdated segment tail, underscore-prefixed database correlation/filtering through incident export, and frozen cursor windows after the clock advances. Build, vet, tests, Go/repository lint and the macOS cross-build pass; race tests remain unavailable because this machine has no C compiler. No commit, release, deployment or live qualification was performed.
 - **Phases 0–5 are live-qualified for the first alpha, not released.** Main scenarios completed, including genuine protected-policy upgrade, protected SQL/maintenance/dump-copy writes, metrics/query filtering, fresh bucket-backed init, rebuild/recovery with automatic full backup, local init and journal-proven lockdown self-revert. Detailed checklist variants and coverage limits remain in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md); this is not a claim that every historical checkbox passed.
 - **Latest qualified code:** `65c4f91`, published as `edge-65c4f9157253` after successful edge workflow `39234654792`. The recovered fixture had doctor 44 pass / 0 warn / 0 fail and plan 0 pending / 17 steps. It was subsequently replaced during operator-run bootstrap tests; these numbers are qualification evidence, not current VPS health.
 - **Publication still needs authorization.** No v1 branch/tag or stable publication was performed in this qualification. Linux install/upgrade passed; macOS live testing was excluded by the operator (cross-build only). See [`PLAN-v1-release.md`](./PLAN-v1-release.md), the [draft alpha notes](./RELEASE-v1.0.0-alpha.1.md) and the [document index](./README.md).
-- **Current command inventory:** `vaire commands --json`; the README summarizes implemented operations. Phases 6–7 and major-upgrade work remain outside this alpha qualification; Phases 6–7 are qualified for the beta.
+- **Current command inventory:** `vaire commands --json`; the README summarizes implemented operations. Phases 6–7 and major-upgrade work remain outside this alpha qualification; Phases 6–7 are planned for the beta and have not been live-qualified.
 
 #### Historical implementation milestones (through 2026-10-15)
 
@@ -547,7 +572,7 @@ The dated notes below preserve the implementation sequence. Their then-pending t
 | 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ✅ alpha-qualified; coverage limits logged |
 | 5 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | ✅ alpha-qualified; coverage limits logged |
 | 6 | Followers | Per-database physical standby followers; unfollow one to rehearse a risky migration on current data | 🟡 built, live test pending |
-| 7 | Extensions | Extension catalog and `vaire ext` | ⬜ |
+| 7 | Extensions | Built-in/custom extension definitions, `vaire ext`, safe copies/recovery and extension-dependent maintenance | 🟡 local implementation stage-reviewed through E7-06; final reviews, publication and live qualification not run |
 | 8 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
 | 9 | Operators & agents | Teammate and agent identities, read-only agents, full agent guide, alerting | ⬜ |
 | 10 | Multi-node & replicas | Worker nodes driven from the master, a node for one database, `db move`, followers and replicas on other nodes | ⬜ |
@@ -621,7 +646,7 @@ Re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) and 
 | Restore drill | Per database: materialise `<db>__drill`, `pg_amcheck`, compare with live, drop; `restore drill --db`; the drill timer staggered over the month | ✅ |
 | Per-database policies | `[clusters.backup]` window, schedules and long-retention dumps: age-encrypted `pg_dump` to the bucket on a schedule, `dump list/get`, `restore --dump`, final dump on `db drop` | ✅ |
 
-**Manual test (the RFC's exit test, on a real VPS with R2):** rebuild `mbvlabs`. Create `app` and `other` (two clusters), check the memory split and the cgroup limits, and that `other` keeps serving while `app` restarts. Run a memory-heavy query in `app` and see it throttled while `other` stays responsive. Connect a migration tool through `db1.<domain>:5432/app` and an application through `db1.<domain>:443/app`. Back up, write rows to `app`, `restore app --time` and inspect the paused copy, then promote while `other` keeps writing. Undo and cleanup. Fork `app` at a time and without one. A drill per cluster. Drop a database and see its stanza stay listed. Change a restart-only setting of one cluster and check that only it restarts (a preload extension waits for Phase 7). Create a third database that would overcommit the server and see it refused with the size that fits, then resize one down. A second `apply` changes nothing. The checklist, with what to verify at each step, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Passed on 2026-10-14.
+**Manual test (the RFC's exit test, on a real VPS with R2):** rebuild `mbvlabs`. Create `app` and `other` (two clusters), check the memory split and the cgroup limits, and that `other` keeps serving while `app` restarts. Run a memory-heavy query in `app` and see it throttled while `other` stays responsive. Connect a migration tool through `db1.<domain>:5432/app` and an application through `db1.<domain>:443/app`. Back up, write rows to `app`, `restore app --time` and inspect the paused copy, then promote while `other` keeps writing. Undo and cleanup. Fork `app` at a time and without one. A drill per cluster. Drop a database and see its stanza stay listed. Change a restart-only setting of one cluster and check that only it restarts (a preload extension was still pending when this was written; Phase 7 now implements it). Create a third database that would overcommit the server and see it refused with the size that fits, then resize one down. A second `apply` changes nothing. The checklist, with what to verify at each step, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md). Passed on 2026-10-14.
 
 ### 7.7 Phase 4 — Observability & maintenance ✅
 
@@ -629,10 +654,10 @@ Re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) and 
 | --- | --- | --- |
 | Step 16 | Exporters on loopback, authenticated `/metrics`, service discovery, metrics credentials and textfiles | ✅ alpha-qualified |
 | Status views | `status`, `top`, `queries`, `doctor`; internal work hidden by default, `--all-sessions` includes it | ✅ alpha-qualified |
-| `internal/maint` | Per-database vacuum/analyze/reindex/report/kill and scheduled maintenance; repack waits for Phase 7 | ✅ alpha-qualified |
+| `internal/maint` | Per-database vacuum/analyze/reindex/report/kill and scheduled maintenance; repack and auto-repack arrived in Phase 7 (local source; final review pending) | ✅ alpha-qualified for the Phase 4 commands |
 | Step 18 and timers | Doctor gates and certificate, metrics, doctor and maintenance schedules | ✅ alpha-qualified; not every fault-injection variant exercised |
 
-`maint repack` and auto-repack need `pg_repack`, which `vaire ext add` brings in Phase 7. Until then `maint repack` fails with `precondition_failed`, and the repack is tested in Phase 7.
+`maint repack` and auto-repack need `pg_repack`, which `vaire ext add` provides. Phase 7 now implements them locally, together with the one-table full-scan `pgstattuple` report; their final source review and live qualification are pending.
 
 Built in the units of [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md); main live qualification completed 2026-10-15–19. Evidence and detailed coverage limits remain in the testing log.
 
@@ -658,7 +683,7 @@ Built in the units of [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md); main a
 
 Heroku-style followers for rehearsing risky migrations on production data. **Decided: physical standbys.** A follower is a cluster of its own that streams from one source database's cluster; `wal_level` is `replica`. Logical replication stays possible later as an opt-in.
 
-Built in the units of [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md); findings and decisions are in [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md). The initial build is committed on `phase-6-followers`; final-gate corrections remain uncommitted. On 2026-11-10 both independent cumulative source reviews accepted with no remaining actionable findings, and independent full local verification plus uncached tests passed; see [`REVIEW-phase-6-final.md`](./REVIEW-phase-6-final.md). Not merged, published or live-qualified. Activity qualification must precede follower deployment, and publication/live operations remain separately gated.
+Built in the units of [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md); findings and decisions are in [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md). The initial build and final-gate corrections were published through [PR #14](https://github.com/mbvlabs/vaire/pull/14) at `0d8e1fcc493c`. On 2026-11-10 both independent cumulative source reviews accepted with no remaining actionable findings, and independent full local verification plus uncached tests passed; see [`REVIEW-phase-6-final.md`](./REVIEW-phase-6-final.md). Published to master and edge, not deployed or live-qualified. Activity qualification must precede follower deployment, and live operations remain separately gated.
 
 | Module | What it does | Status |
 | --- | --- | --- |
@@ -670,13 +695,17 @@ Built in the units of [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md); findin
 
 **Manual test:** follow a database under write load and watch the lag reach zero. Unfollow it, check row counts and sequence values against the source, run a migration on the copy, then drop it. The full checklist, including interrupted recovery and a refused shrink, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 
-### 7.10 Phase 7 — Extensions ⬜
+### 7.10 Phase 7 — Extensions 🟡
 
-`internal/catalog` and `ext list/add/remove` per database, including extensions that need a restart: the package install is server-wide, the preload and the restart affect only that database's cluster. `pg_stat_statements` and `auto_explain` are already on by default from Phase 2.
+`internal/catalog` and `ext list/add/remove` cover built-in and custom definitions. The package install is server-wide and held; the preload and restart affect only the named database's cluster. `pg_stat_statements` and `auto_explain` keep their defaults from Phase 2. A custom definition may come from an explicit APT package in an already configured trusted repository or from operator-preinstalled files; no repository/key setup, source build or automatic package upgrade is performed. Native extensions are trusted code, not a sandbox.
 
-It also brings what Phase 4 left waiting for `pg_repack`: `maint repack` and auto-repack. A master rebuild (Phase 5) reinstalls each database's extension packages from the desired state.
+The catalogue is a convenience list, not an allowlist. Additions on a protected database preserve its policy; removals are refused. Source changes propagate to followers with per-target restart authorization and follower-first configuration, while SQL runs only on the primary. Copies and historical restores use the same resolved definitions: retained requirements are stanza-bound and cover only observed UTC time, unknown older points require an explicit `recovery_extensions` declaration, and unknown copy/standby safety blocks the copy. Copied `pg_cron` jobs stay suppressed through activation and are deactivated/retargeted by actual metadata identity before routing.
 
-**Manual test:** add a catalog extension that needs a preload to one database, apply, and check it in `pg_extension`; only that database restarts. Remove it again. Add `pg_repack` to a database and run `maint repack`.
+It also brings what Phase 4 left waiting for `pg_repack`: detachable `maint repack`, opt-in auto-repack and a one-table full-scan `pgstattuple` report. Repack refuses protected databases and unsupported storage; completion that cannot be attributed is reported unknown, never as a confirmed rewrite. The exact report measures one table with `pgstattuple` under the report timeouts and does not claim reclaimable or instantaneous bloat.
+
+**Status:** local source implementation through E7-06 has stage acceptance. The two whole-change reviews and fresh final verification have not run, and nothing is published, deployed or live-qualified. See [PHASE-7-WORK-UNITS.md](PHASE-7-WORK-UNITS.md) and [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
+
+**Manual test:** the full all-NOT-RUN procedure is in [MANUAL-TESTING.md](MANUAL-TESTING.md); the coordinated command map is in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
 
 ### 7.11 Phase 8 — Upgrades ⬜
 

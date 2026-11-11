@@ -29,7 +29,7 @@ func followerCfg() config.Cluster {
 		{Name: "app", Node: "db1", Port: 5433, Stanza: "app-3f9a1c", Size: "large", StatementTimeout: "60s",
 			Extensions: []string{"pg_stat_statements"}, Settings: map[string]string{"work_mem": "8MB"},
 			Backup: config.ClusterBackup{RetentionFull: 4}},
-		{Name: "app_follower", Node: "db1", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app"},
+		{Name: "app_follower", Node: "db1", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app", Extensions: []string{"pg_stat_statements"}},
 	}
 	return cfg
 }

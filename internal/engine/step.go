@@ -86,6 +86,11 @@ type ApplyResult struct {
 	Notes   []string
 	// Warnings are non-fatal notices a step surfaces to the caller.
 	Warnings []output.Warning
+	// Incomplete means Apply ran but deliberately left work for a later run,
+	// such as a preload-dependent CREATE waiting for a confirmed restart. The
+	// runner records the step's inputs hash without marking it completed, so a
+	// later apply rechecks it and finishes the work.
+	Incomplete bool
 }
 
 // Runtime is what a step may use while it runs.

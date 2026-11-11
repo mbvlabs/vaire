@@ -47,6 +47,16 @@ func PruneForRestore(raw []byte, databases []AwaitingDatabase, now time.Time) ([
 		pruned = append(pruned, PrunedRecord{Kind: "undo", Database: db, Name: u.Aside})
 	}
 	r.Undoing = map[string]Undo{}
+	// An activation fence is local authority over files and registrations on
+	// the lost host. It must not travel to a rebuilt host and authorize (or
+	// block) a new database by name. Extension history, dropped stanzas,
+	// timelines and awaiting recovery stay: they describe data, not local
+	// authority.
+	for db, f := range r.Activation {
+		pruned = append(pruned, PrunedRecord{Kind: "activation_fence", Database: db, Name: f.OperationID})
+	}
+	r.Activation = map[string]ActivationFence{}
+	r.ExtensionGuardHandoffs = map[string]GuardHandoff{}
 	r.AwaitingRecovery = map[string]Awaiting{}
 	since := now.UTC().Format(time.RFC3339)
 	for _, d := range databases {

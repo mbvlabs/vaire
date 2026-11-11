@@ -776,6 +776,8 @@ var activityDryRunAware = map[string]bool{
 	"db.fork":        true,
 	"db.follow":      true,
 	"db.unfollow":    true,
+	"ext.add":        true,
+	"ext.remove":     true,
 	"queries.reset":  true,
 	"metrics.rotate": true,
 }
@@ -903,6 +905,11 @@ func activityStepOutcome(state, detail string) (string, string, string) {
 		return activity.OutcomeFailed, output.CodeStepFailed, ""
 	case "skipped":
 		return activity.OutcomeSkipped, "", safeActivityToken(detail)
+	case "incomplete":
+		// The step ran but deliberately left deferred work. It is neither a
+		// success nor a failure, and the stable reason keeps it distinct from
+		// a crash whose outcome is unknown.
+		return activity.OutcomeUnknown, "", "incomplete"
 	}
 	return activity.OutcomeUnknown, "", ""
 }
@@ -1038,7 +1045,24 @@ var activityKnownReason = map[string]bool{
 	"config_changed": true, "confirm_mismatch": true, "database_exists": true,
 	"database_not_found": true, "database_protected": true, "database_required": true,
 	"dump_not_found": true, "epoch_conflict": true, "extension_missing": true,
-	"final_dump_failed": true, "follower_not_running": true, "follows_follower": true,
+	"extension_not_found": true, "extension_not_managed": true, "extension_default": true,
+	"extension_definition_exists": true, "extension_safety_renewal_required": true,
+	"extension_in_use": true, "extension_not_installed": true, "extension_update_unsupported": true,
+	"extension_update_path_unknown": true, "extension_update_failed": true,
+	"extension_update_direction_unknown": true, "extension_downgrade_refused": true,
+	"extension_not_created":   true,
+	"extension_verify_failed": true, "extension_apply_failed": true,
+	"extension_pending_restart": true, "extension_sql_failed": true, "extension_roles_incomplete": true,
+	"extension_preload_unknown": true, "extension_facts_unavailable": true,
+	"extension_pending_unknown": true, "extension_config_unknown": true,
+	"extension_runtime_unknown": true, "extension_journal_unknown": true,
+	"extension_global_intent_conflict":    true,
+	"extension_dependency_preview_failed": true, "extension_intent_save_failed": true,
+	"extension_drop_failed": true, "extension_history_capture_failed": true,
+	"package_install_failed":           true,
+	"follower_propagation_unavailable": true, "cluster_not_running": true,
+	"unfollow_in_progress": true,
+	"final_dump_failed":    true, "follower_not_running": true, "follows_follower": true,
 	"has_followers": true, "heavy_io_lock_held": true, "host_phase_incomplete": true,
 	"immutable_key": true, "install_source_invalid": true, "is_follower": true,
 	"job_not_found": true,
@@ -1054,7 +1078,17 @@ var activityKnownReason = map[string]bool{
 	"os_unsupported": true, "outside_window": true, "postgres_present": true,
 	"protect_already_initialized": true, "protect_not_initialized": true,
 	"protect_not_pending": true, "protected_backend": true, "ram_too_small": true,
-	"repack_unavailable": true, "repo_in_use": true, "restore_in_progress": true,
+	"repack_unavailable": true, "repack_needs_key": true, "repack_version_mismatch": true,
+	"repack_client_missing": true, "repack_failed": true, "protected_repack_unsupported": true,
+	"unsupported_relation": true, "unsupported_partition_parent": true, "unsupported_foreign_table": true,
+	"unsupported_relation_persistence": true, "unsupported_access_method": true, "extension_storage": true,
+	"system_relation": true, "relation_not_found": true, "window_ended": true,
+	"heavy_io_busy": true, "cluster_lock_busy": true, "exact_bloat_failed": true,
+	"activation_fence_active": true, "insufficient_space": true,
+	"unsupported_tablespace": true, "unsupported_default_tablespace": true, "space_unknown": true,
+	"repack_lock_timeout": true, "repack_invalid_index": true, "repack_unsafe_ddl": true,
+	"completion_unknown": true,
+	"repo_in_use":        true, "restore_in_progress": true,
 	"restore_promoted": true, "restore_running": true, "restore_swapped_in": true,
 	"restore_undone": true, "restoring_exists": true, "root_required": true,
 	"run_log_unavailable": true, "runs_on_server": true, "selfcheck_failed": true,
@@ -1069,6 +1103,7 @@ var activityKnownReason = map[string]bool{
 	"cancelled": true, "deadline_exceeded": true, "panic": true,
 	"request_rejected": true, "unknown_method": true, "unknown_job": true,
 	"version_mismatch": true, "config_error": true, "stopped": true, "unchanged": true,
+	"incomplete": true,
 }
 
 // The patterns below are the only shapes that may enter metadata fields.

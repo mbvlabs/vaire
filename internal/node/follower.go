@@ -206,6 +206,8 @@ var followerRefused = map[string]followerRefusal{
 	"db.fork":         {action: "a fork", field: "source"},
 	"maint.run":       {action: "maintenance", field: "db"},
 	"db.credentials":  {action: "rotating its credentials", field: "name", applies: func(p map[string]any) bool { r, _ := p["rotate"].(bool); return r }},
+	"ext.add":         {action: "an extension change", field: "db"},
+	"ext.remove":      {action: "an extension change", field: "db"},
 }
 
 // refuseFollower refuses req when its method needs a stanza or a writable
@@ -639,7 +641,7 @@ var followBeforePrepareLock = func() {}
 // followerPreviewEntry is the exact proposed entry for a dry run or preflight:
 // placed on a copy of cfg, so the target appears exactly once without writing.
 func followerPreviewEntry(cfg config.Cluster, src config.ClusterSpec, p dbFollowParams) (config.Cluster, config.ClusterSpec, error) {
-	preview := cfg
+	preview := cfg.Clone()
 	spec := followerSpec(src, p.Name, p.Size)
 	if err := placeCluster(preview, &spec); err != nil {
 		return config.Cluster{}, config.ClusterSpec{}, err
@@ -1172,7 +1174,7 @@ func markAdopted(db string) error {
 // metrics and the other databases' changed configuration. A follower has no
 // stanza and no timers.
 func followRuns(name string, others []string) []engine.Options {
-	runs := []engine.Options{{Only: steps.KernelStepIDs()}, {DB: name}, {Only: steps.PoolerStepIDs()}, {Only: steps.MetricsStepIDs()}}
+	runs := []engine.Options{{Only: steps.KernelStepIDs()}, {Only: steps.PackagesStepIDs()}, {DB: name}, {Only: steps.PoolerStepIDs()}, {Only: steps.MetricsStepIDs()}}
 	if len(others) > 0 {
 		runs = append(runs, engine.Options{Only: others})
 	}
@@ -1231,15 +1233,24 @@ func materialiseFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, s
 				WithDetails(map[string]any{"reason": "not_awaiting_recovery", "database": spec.Name})
 		}
 	}
+	opts := backup.RestoreOptions{Kind: backup.TargetLatest}
+	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
+		Intent: src, Stanza: src.Stanza, CopyDB: src.Name, Options: opts,
+		Historical: from == followFromStanza, Standby: true, IncludeRetained: true,
+		Declaration: src.RecoveryExtensions,
+	})
+	if err != nil {
+		return err
+	}
 	decision, err := decideFollowerBuild(ctx, cfg, src, spec, recover, false)
 	if err != nil {
 		return err
 	}
 	if decision.StartOnly {
-		return nil
+		return ensureAdoptedGuardAt(ctx, env, cfg, spec, plan)
 	}
 	if decision.Resume {
-		return resumeFollowerAdoption(ctx, env, cfg, src, spec)
+		return resumeFollowerAdoption(ctx, env, cfg, src, spec, plan)
 	}
 	owner := followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec, Awaiting: awaiting}
 	if !decision.Copy {
@@ -1270,6 +1281,9 @@ func materialiseFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, s
 		return err
 	}
 	m, err := newFollowerCopy(cfg.Server.DataRoot, spec.Name, src.Name, src.Port, env.shell(), env.Job, env.Report)
+	if err == nil {
+		prestartFollowerCopy(m, env, cfg, src, plan)
+	}
 	if err != nil {
 		err = errors.Join(err, dropFreshFollowerSlot(ctx, src, slot))
 		if recover {
@@ -1422,8 +1436,20 @@ func forgetPreparedFollow(p dbFollowParams) error {
 // resumeFollowerAdoption finishes an owned copy whose registration a previous
 // attempt completed. Adopt stops the temporary cluster and rewrites the same
 // files, so it is safe on a partial registration or an already adopted one.
-func resumeFollowerAdoption(ctx context.Context, env *jobEnv, cfg config.Cluster, src, spec config.ClusterSpec) error {
+func resumeFollowerAdoption(ctx context.Context, env *jobEnv, cfg config.Cluster, src, spec config.ClusterSpec, plan *extensionCopyPlan) error {
 	m := resumeFollowerCopy(cfg.Server.DataRoot, spec.Name, src.Name, src.Port, env.shell(), env.Job, env.Report)
+	if mm, ok := m.(*backup.Materialised); ok {
+		if plan != nil {
+			mm.Plan = plan.Plan
+		}
+		if err := backup.DropRecoverySettings(mm.DataDir()); err != nil {
+			return err
+		}
+		if err := mm.InstallCopyPlan(); err != nil {
+			return err
+		}
+		return mm.Adopt(ctx, spec.Port)
+	}
 	if err := backup.DropRecoverySettings(m.DataDir()); err != nil {
 		return err
 	}
@@ -1451,9 +1477,15 @@ func startFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, src, sp
 	others := otherConfigs(ctx, steps.Catalog(), cfg, rt, spec.Name, "")
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, followRuns(spec.Name, others)...))
 	logLine(env.Report, env.Job, "starting "+spec.Name+" as a standby of "+src.Name)
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Recovering: keep, Restarter: steps.Restarter(cfg), Report: env.Report})
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Recovering: keep, Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report})
+	if err == nil {
+		_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.PackagesStepIDs(), Recovering: keep, Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report})
+	}
 	if err == nil {
 		err = applyNewCluster(ctx, cfg, rt, spec.Name, keep, env.Report)
+	}
+	if err == nil {
+		err = verifyStartedGuardAt(ctx, env, cfg, spec)
 	}
 	if err != nil {
 		return nil, followerReading{}, withHint(err, finishNewCluster(spec.Name))
@@ -1467,7 +1499,7 @@ func startFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, src, sp
 		warnings = append(warnings, *w)
 	}
 	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
-		engine.Options{Recovering: keep, Restarter: steps.Restarter(cfg), Report: env.Report})...)
+		engine.Options{Recovering: keep, Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report})...)
 	logLine(env.Report, env.Job, "waiting for "+spec.Name+" to stream from "+src.Name)
 	st := waitStreaming(ctx, spec, src, streamWait)
 	if !st.Streaming {
@@ -1619,15 +1651,65 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	if resuming {
 		src = unfinished.Source
 	}
+	srcSpec, err := clusterOf(cfg, src)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
+		Intent: srcSpec, Stanza: srcSpec.Stanza, CopyDB: src, Options: backup.RestoreOptions{Kind: backup.TargetLatest},
+		Standby: true, IncludeRetained: true, Declaration: srcSpec.RecoveryExtensions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Owned unfollow/retry: after its target and locks are resolved, before
+	// its first record update, restart, pause, promotion or swap.
+	if err := prepareTargetExtensions(ctx, cfg, spec, jobRuntime(env), env.Report); err != nil {
+		return nil, err
+	}
+	if err := prepareCopyExtensions(ctx, plan, jobRuntime(env), env.Report); err != nil {
+		return nil, fmt.Errorf("extension prerequisites before unfollowing %s: %w", p.Name, err)
+	}
+	if _, err := ensureCopyGuardAt(ctx, cfg.Server.DataDirectory(p.Name), plan, liveCopyGuardEndpoint(spec), func() error {
+		return followerServerOps.restart(ctx, env, cfg, spec)
+	}); err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
 	local := steps.ClusterPG(spec)
 	// A settled retry still clears a pause an earlier attempt left before the
 	// alias is exposed again; the fence below replaces this with its own
 	// resume while the transition is unsettled.
 	resume := func() { followerServerOps.resume(ctx, p.Name) }
 
-	unfinished, err = beginUnfollow(p.Name, src)
+	unfinished, err = beginUnfollow(p.Name, src, env.ID)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := writeActivationFence(cfg, activationFenceIdentity{
+		Database: p.Name, Kind: "unfollow", OperationID: unfinished.OperationID, Spec: spec,
+		TargetStanza: unfinished.Stanza, OldStanza: srcSpec.Stanza, NewStanza: unfinished.Stanza,
+		Registration: activationRegistration(spec), Ownership: spec.FollowGeneration,
+		Port: spec.Port, Renames: unfollowRenames(src, p.Name),
+		Requirements: plan.Plan.Requirements,
+	}); err != nil {
+		return nil, err
+	}
+	if plan.Plan.Cron && unfinished.Cron == nil {
+		id, err := cronIdentity(ctx, local)
+		if err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+		recorded := &backup.UnfollowCron{MetadataDB: id.MetadataDB, MetadataOID: id.MetadataOID, OldDB: src, NewDB: p.Name}
+		if err := updateUnfollowCron(p.Name, func(c *backup.UnfollowCron) { *c = *recorded }); err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+		unfinished.Cron = recorded
+	}
+	if err := recordCopyRequirements(unfinished.Stanza, p.Name, plan.Plan); err != nil {
+		return nil, output.NewError(output.CodePrecondition,
+			"recording the unfollow's extension requirements failed: "+err.Error(),
+			output.ExitPrecondition, "Nothing irreversible ran. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.Name})
 	}
 	if resuming && !clusterRunning(spec) {
 		// The earlier attempt stopped at its restart, which leaves the
@@ -1655,6 +1737,27 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	if _, err := followerServerOps.promote(ctx, local, cfg.Server.DataDirectory(p.Name)); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
+	if err := advanceActivationFence(cfg, p.Name, unfinished.OperationID, "unfollow", fencePhasePrepared, fencePhasePromoted, spec, func(f *backup.ActivationFence) {
+		f.Registration = activationRegistration(spec)
+		f.Ownership = spec.FollowGeneration
+		f.Port = spec.Port
+		f.DataDir = cfg.Server.DataDirectory(spec.Name)
+		f.ConfDir = steps.PGConfDir(spec.Name)
+	}); err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
+	var cron cronSettlement
+	if plan.Plan.Cron {
+		cron, err = deactivateCopyCronAt(ctx, local, unfinished.Cron)
+		if err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+		if err := updateUnfollowCron(p.Name, func(c *backup.UnfollowCron) {
+			c.MetadataDB, c.MetadataOID, c.Deactivated = cron.MetadataDB, cron.MetadataOID, true
+		}); err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+	}
 	// The promoted cluster still holds the source's database and owner names.
 	// Settle the protected admin policy against those exact names before the
 	// renames expose a primary that an inherited owner membership can write.
@@ -1664,11 +1767,29 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	if err := followerServerOps.rename(ctx, local, src, p.Name, env.Secrets, env.Report, env.Job); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
+	if plan.Plan.Cron {
+		current, err := cronCurrentName(ctx, local, cron)
+		if err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+		cron.MetadataDB = current
+		if _, err := retargetCopyCron(ctx, local, cron, src, p.Name); err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+		if err := updateUnfollowCron(p.Name, func(c *backup.UnfollowCron) { c.Retargeted = true }); err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+	}
 	// A rename can stop part way, so settle again against whichever database
 	// and owner names the cluster actually holds now.
 	if err := followerServerOps.settle(ctx, local, spec, src, p.Name); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
+	cfg, settingsWarnings, err := persistCopySettings(p.Name, plan.Plan, p.Name)
+	if err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
+	env.Cluster = cfg
 	cfg, err = independent(p.Name, unfinished.Stanza)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
@@ -1685,25 +1806,68 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	if err := followerServerOps.restart(ctx, env, cfg, spec); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	// The renames carry the new passwords, the protection policy is settled
-	// and the cluster runs its own configuration: only now may the poolers'
-	// rendered configuration expose the alias again.
-	if err := markUnfollowSettled(p.Name); err != nil {
-		return nil, mayHaveChangedPasswords(err)
+	if err := applyUnfollowedConfig(ctx, cfg, jobRuntime(env), p.Name, env.Report); err != nil {
+		return nil, mayHaveChangedPasswords(withHint(err, finishNewCluster(p.Name)))
 	}
 	var warnings []output.Warning
+	warnings = append(warnings, settingsWarnings...)
+	if _, err := reconcileCopySQL(ctx, cfg, spec, local, p.Name); err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
+	more, err := checkCopyExtensions(ctx, cfg, spec, plan.Plan, local, p.Name)
+	if err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
+	warnings = append(warnings, more...)
+	if plan.Plan.Cron {
+		if err := checkCopyCronSetting(ctx, local, src, p.Name); err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+	}
+	more, err = pruneCopyGuard(ctx, cfg, spec, cfg.Server.DataDirectory(p.Name), plan.Plan, true, p.Name, func() error {
+		return followerServerOps.restart(ctx, env, cfg, spec)
+	})
+	if err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
+	warnings = append(warnings, more...)
+	// The renames carry the new passwords, the protection policy is settled
+	// and the cluster runs its own configuration: safety is complete. The
+	// unfollow record's settled flag and the fence's routing eligibility are
+	// one records update, so a failed write cannot leave an orphan routing
+	// fence or a settled unfollow with no continuation.
+	fence, _, err := verifyActivationFence(cfg, p.Name, unfinished.OperationID, "unfollow", fencePhasePromoted, fencePhaseRouting)
+	if err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
+	if fence.OldStanza != srcSpec.Stanza || fence.NewStanza != unfinished.Stanza {
+		return nil, mayHaveChangedPasswords(activationIdentityError(p.Name, fence, "stanza transition", fence.OldStanza+"->"+fence.NewStanza, srcSpec.Stanza+"->"+unfinished.Stanza))
+	}
+	if err := completeUnfollowSafety(cfg, spec, unfinished, fence); err != nil {
+		return nil, mayHaveChangedPasswords(err)
+	}
 	if w := followerServerOps.dropSlot(ctx, cfg, src, p.Name); w != nil {
 		warnings = append(warnings, *w)
 	}
-	more, err := followerServerOps.finish(ctx, env, cfg, spec, src, sync.OnceFunc(resume))
+	more, err = followerServerOps.finish(ctx, env, cfg, spec, src, sync.OnceFunc(resume))
 	warnings = append(warnings, more...)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
+	}
+	if err := verifyRoutingFence(ctx, cfg, spec, unfinished.OperationID, "unfollow"); err != nil {
+		return nil, mayHaveChangedPasswords(withHint(err, "The unfollow is settled, but its route is not verified. Run vaire apply to finish the routing."))
 	}
 	if err := endUnfollow(p.Name); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	return map[string]any{"name": p.Name, "source": src, "stanza": spec.Stanza, "port": spec.Port, "warnings": warnings}, nil
+}
+
+// applyUnfollowedConfig renders an unfollowed cluster's new configuration
+// before extension settlement. It is a variable so lifecycle tests that model
+// server effects can run the production path without a real engine.
+var applyUnfollowedConfig = func(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name string, report engine.Reporter) error {
+	return applyNewCluster(ctx, cfg, rt, name, "", report)
 }
 
 // finishUnfollow makes the promoted follower independent: its own steps (the
@@ -1820,23 +1984,11 @@ func currentUnfollowName(ctx context.Context, local sqlRunner, kind, column, cat
 // markUnfollowSettled records that the unfollow has finished its privilege
 // transition. Until then both poolers withhold the alias and node SQL refuses
 // a protected database being unfollowed.
-func markUnfollowSettled(name string) error {
-	return backup.UpdateRecords(func(s *backup.Records) error {
-		u, ok := s.Unfollowing[name]
-		if !ok {
-			return fmt.Errorf("the unfollow record for %s is missing", name)
-		}
-		if u.Settled {
-			return nil
-		}
-		u.Settled = true
-		s.Unfollowing[name] = u
-		return nil
-	})
-}
-
 // restartFollower starts the unfollowed cluster with its own configuration.
 func restartFollower(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec) error {
+	if err := prepareTargetExtensions(ctx, cfg, spec, jobRuntime(env), env.Report); err != nil {
+		return err
+	}
 	return backup.RestartCluster(ctx, env.shell(), env.Job, env.Report, spec.Name, cfg.Server.DataDirectory(spec.Name), spec.Port)
 }
 
@@ -1870,14 +2022,37 @@ func mayHaveChangedPasswords(err error) error {
 	return &copied
 }
 
+// updateUnfollowCron durably records one unfollow's cron progress.
+func updateUnfollowCron(name string, fn func(*backup.UnfollowCron)) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		u, ok := s.Unfollowing[name]
+		if !ok {
+			return output.NewError(output.CodePrecondition,
+				"the unfollow record of "+name+" disappeared while recording cron progress",
+				output.ExitPrecondition, "Retry the owning operation; vaire will not guess another operation's state.").
+				WithDetails(map[string]any{"reason": "unfollow_state_unknown", "database": name})
+		}
+		if u.Cron == nil {
+			u.Cron = &backup.UnfollowCron{}
+		}
+		fn(u.Cron)
+		s.Unfollowing[name] = u
+		return nil
+	})
+}
+
 // beginUnfollow records name's unfollow before its first irreversible step,
 // with the source it leaves and the stanza it keeps: a resumed unfollow uses
 // those two and never generates another stanza. An existing record is returned
 // unchanged, so a continuation always finishes the unfollow it started.
-func beginUnfollow(name, source string) (backup.Unfollow, error) {
+func beginUnfollow(name, source, opID string) (backup.Unfollow, error) {
 	var unfinished backup.Unfollow
 	err := backup.UpdateRecords(func(s *backup.Records) error {
 		if old, ok := s.Unfollowing[name]; ok {
+			if old.OperationID == "" {
+				old.OperationID = opID
+				s.Unfollowing[name] = old
+			}
 			unfinished = old
 			return nil
 		}
@@ -1885,7 +2060,7 @@ func beginUnfollow(name, source string) (backup.Unfollow, error) {
 		if err != nil {
 			return err
 		}
-		unfinished = backup.Unfollow{Source: source, Stanza: stanza, StartedAt: stamp()}
+		unfinished = backup.Unfollow{Source: source, Stanza: stanza, StartedAt: stamp(), OperationID: opID}
 		s.Unfollowing[name] = unfinished
 		return nil
 	})

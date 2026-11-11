@@ -292,10 +292,20 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 			restart = RestartNone
 		}
 		entry := j.Steps[id]
+		state := "completed"
 		entry.Status = StatusCompleted
 		entry.CompletedAt = now()
 		entry.Restart = string(restart)
 		entry.Error = ""
+		if res.Incomplete {
+			// The step did what it safely could but left deferred work. It is
+			// not completed, so the next apply rechecks it; no error is
+			// recorded and the run continues to later steps and any authorized
+			// end-of-run restart.
+			state = "incomplete"
+			entry.Status = StatusIncomplete
+			entry.CompletedAt = ""
+		}
 		if err := j.update(path, func(j *Journal) {
 			j.Steps[id] = entry
 			if restart == RestartRestart {
@@ -304,9 +314,9 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		}); err != nil {
 			return data, nil, err
 		}
-		report.emit(output.Event{Type: "step", Step: id, State: "completed", Index: intPtr(at), Total: intPtr(shown), Detail: strings.Join(res.Notes, "; ")})
+		report.emit(output.Event{Type: "step", Step: id, State: state, Index: intPtr(at), Total: intPtr(shown), Detail: strings.Join(res.Notes, "; ")})
 		warnings = append(warnings, res.Warnings...)
-		data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "completed", Restart: string(restart)})
+		data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: state, Restart: string(restart)})
 		data.Applied++
 	}
 

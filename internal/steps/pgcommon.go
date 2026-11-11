@@ -93,8 +93,29 @@ const (
 // postgresql-common's terms (RFC 5), so its paths and units are functions of
 // the cluster's name.
 
+// pgConfRoot is PostgreSQL 18's cluster configuration root. It is a variable
+// so tests can use a temporary tree without touching the host.
+var pgConfRoot = "/etc/postgresql/18"
+
+// ExtensionDirsForTest sets PostgreSQL 18's extension control and library
+// directories for a test in another package and returns the restore function.
+func ExtensionDirsForTest(control, lib string) func() {
+	oldControl, oldLib := extensionControlDir, extensionLibDir
+	extensionControlDir, extensionLibDir = control, lib
+	return func() { extensionControlDir, extensionLibDir = oldControl, oldLib }
+}
+
 // PGConfDir is the cluster's configuration directory.
-func PGConfDir(cluster string) string { return "/etc/postgresql/18/" + cluster }
+func PGConfDir(cluster string) string { return pgConfRoot + "/" + cluster }
+
+// PGConfRootForTest sets the postgresql-common configuration root for a test
+// in another package and returns the restore function. It is not a production
+// fault hook: the step's own tests use the same variable directly.
+func PGConfRootForTest(dir string) func() {
+	old := pgConfRoot
+	pgConfRoot = dir
+	return func() { pgConfRoot = old }
+}
 
 // PGConfD is the cluster's conf.d directory, which vaire manages.
 func PGConfD(cluster string) string { return PGConfDir(cluster) + "/conf.d" }

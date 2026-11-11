@@ -4,7 +4,7 @@ One CLI that turns a fresh VPS into a hardened PostgreSQL 18 server, and then st
 
 From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubuntu 26.04 server, locks it down, installs PostgreSQL 18 with PgBouncer and nginx, issues its TLS certificate, and connects you to it over WireGuard. Each database you create gets its own tuned PostgreSQL cluster with a size and resource limits, the way a managed provider gives each database its own instance. Every later operation goes through the same binary, over SSH, inside WireGuard. There is no server control daemon, web UI or open control API port; an operator-side shared tunnel daemon keeps concurrent CLI commands on one WireGuard connection per context.
 
-> **Status (2026-10-19):** preparing the first v1 alpha; not yet tagged or published. Phases 0–5 have live qualification evidence, including backups, disaster recovery, protected writes, observability, local bootstrap and automatic SSH-lockdown revert. Known coverage limits are recorded in [manual testing](docs/MANUAL-TESTING.md). Followers (Phase 6) are built and await live qualification; extensions and multi-node remain future work. See [the roadmap](docs/MASTER.md#7-roadmap-and-status) and [draft alpha notes](docs/RELEASE-v1.0.0-alpha.1.md). Alpha formats are not frozen; a later alpha may require a rebuild and restore.
+> **Status (2026-11-11):** preparing the first v1 alpha; not yet tagged or published. Phases 0–5 have live qualification evidence, including backups, disaster recovery, protected writes, observability, local bootstrap and automatic SSH-lockdown revert. Known coverage limits are recorded in [manual testing](docs/MANUAL-TESTING.md). Followers (Phase 6) are published to edge but not deployed or live-qualified. Phase 7 extensions are implemented locally: source acceptance through E7-05 is complete, E7-06 awaits final targeted source closure, and the two whole-change reviews, fresh final checks, publication and live qualification have not run. Multi-node remains future work. See [the roadmap](docs/MASTER.md#7-roadmap-and-status), [the Phase 7 record](docs/PHASE-7-WORK-UNITS.md) and the [draft beta notes](docs/RELEASE-v1.0.0-beta.1.md). Alpha formats are not frozen; a later alpha may require a rebuild and restore.
 
 ## What works today
 
@@ -24,11 +24,12 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Health | `vaire status [--watch]`, `vaire doctor [--only security]`, `vaire top`, `vaire queries` |
 | Evidence | `vaire activity list\|show\|health`, `vaire diagnostics collect\|inspect` (local metadata-only history and portable incident files) |
 | Metrics | `vaire metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
-| Maintenance | `vaire maint vacuum\|analyze\|reindex\|report\|kill` (`repack` waits for Phase 7), nightly and weekly maintenance timers |
+| Extensions | `vaire ext list\|add\|remove` (built-in and explicit custom definitions; APT or preinstalled) |
+| Maintenance | `vaire maint vacuum\|analyze\|reindex\|repack\|report\|kill` (including one-table `--exact`), nightly and weekly maintenance timers |
 | Operations | `vaire logs`, `vaire secrets export`, `vaire upgrade` |
 | Agents | `vaire commands --json`, `vaire guide agents`, `vaire skill install` |
 
-Commands from later phases are already in the tree and return `not implemented yet`.
+Unimplemented later-phase commands are already in the tree and return `not implemented yet`; the extension and maintenance commands above are implemented locally but not yet finally reviewed, published or live-qualified.
 
 **New in this checkout, awaiting live qualification:** `vaire activity list|show|health` and `vaire diagnostics collect|inspect` provide local, metadata-only operation history and portable incident evidence. No logging database, external collector or raw-log export is required. See [activity and diagnostics](docs/ACTIVITY.md).
 
@@ -314,6 +315,27 @@ The example rewinds `app` to just before a bad `DELETE` at 14:03 UTC. Every conf
 `vaire restore app --time … --promote --confirm app/restore` does steps 2 and 4 in one go, skipping the check. Use it only when you're sure of the target. When only some rows are needed, `vaire db fork app --name app_restored --at <time>` gives you a separate database at that point instead, without touching the live one.
 
 A restore from a dump (`--dump <id>`) builds the copy from the dump instead, with the database's roles and passwords. On promote the database gets a new stanza, because its data has a new system identity; the old stanza stays in `backup list` as dropped for the rest of its window.
+
+## Extensions and maintenance
+
+`vaire ext` manages PostgreSQL extensions per database. The built-in catalogue is a convenience, not an allowlist: a custom `[extensions.<name>]` definition can select any compatible PostgreSQL 18 extension from an explicit APT package in an already configured trusted repository, or from files the operator preinstalled. vaire does not add extension-specific repositories or keys, build from source, upgrade packages automatically or uninstall them on removal. Native extensions are trusted server code, not a sandbox.
+
+```sh
+vaire ext list [--db app]
+vaire ext add vector --db app
+vaire ext add pg_cron --db app --confirm app/restart
+vaire ext add pg_stat_kcache --db app \
+  --package postgresql-18-pg-stat-kcache --preload pg_stat_kcache \
+  --setting pg_stat_kcache.track=all --copy-safety safe --standby-safe \
+  --confirm app/restart
+vaire ext remove vector --db app --confirm app
+```
+
+The package install is server-wide and held; a preload change restarts only the named database's cluster, with its exact `--confirm <db>/restart` token. A source with followers requires every affected cluster's token, configures followers first and runs SQL only on the primary; a direct change on a follower is refused. A protected database may take an addition without weakening its access policy, but its removal is refused. A custom extension whose copy/standby safety is unknown still works on a standalone primary; copies, followers and historical restores refuse it until the operator declares `safe` or `disabled` with suppressing settings.
+
+Backups retain the resolved extension requirements they observed, bound to the immutable stanza. Restore points older than that coverage need an explicit `recovery_extensions` declaration: absent means unknown, `[]` asserts none, and a populated list names the complete requirement. Descriptor details and examples are in [extension definitions](docs/EXTENSION-DEFINITIONS.md).
+
+For bloat, `vaire maint repack` rewrites one eligible table online with `pg_repack`, and opt-in `auto_repack` does so for estimated candidates at or above 64 MiB. Repack refuses protected databases and unsupported storage, never kills another backend, and reports a table whose rewrite completion cannot be attributed as `unknown`, not as repacked. `vaire maint report bloat --db app --table events --exact` measures one table with the full `pgstattuple` scan under the report's read lock and timeouts; it is not an instantaneous or reclaimable-space guarantee, and default reports remain estimates.
 
 ## Tools used and installed
 

@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
@@ -209,9 +210,11 @@ func writtenAfterFence(newest, fence time.Time) bool {
 }
 
 // scaffoldSteps build the database's empty cluster with its own
-// configuration; its roles and database come with the recovered data.
+// configuration; its roles and database come with the recovered data. The
+// package step runs first, so every extension package the effective
+// selections need is installed and held before the cluster starts.
 func scaffoldSteps(db string) []string {
-	return []string{steps.KernelStepIDs()[0], engine.InstanceID("postgres-cluster-v1", db), steps.ConfigStepID(db)}
+	return []string{steps.KernelStepIDs()[0], steps.PackagesStepIDs()[0], engine.InstanceID("postgres-cluster-v1", db), steps.ConfigStepID(db)}
 }
 
 // jobRecover recovers one database (D8).
@@ -256,7 +259,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	scaffold := cfg
 	scaffold.Backup.Provider = ""
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), scaffold, rt, engine.Options{
-		Only: scaffoldSteps(db), Recovering: db, Restarter: steps.Restarter(scaffold), Report: env.Report,
+		Only: scaffoldSteps(db), Recovering: db, Restarter: steps.RestarterFor(scaffold, rt, env.Report), Report: env.Report,
 	}); err != nil {
 		return nil, err
 	}
@@ -281,6 +284,23 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	// and when restore promote finishes a --no-promote run. Stop the empty
 	// scaffold first, so no reload can make it archive into the stanza.
 	if err := armArchiving(ctx, env, cfg, spec, rt); err != nil {
+		return nil, err
+	}
+	// The ordinary entry is published by clearAwaiting below; write the
+	// activation fence first so an apply can never initdb the empty scaffold
+	// while the copy is still only materialised.
+	bs, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
+	r := bs.Restores[db]
+	if _, err := writeActivationFence(cfg, activationFenceIdentity{
+		Database: db, Kind: "restore-promote", OperationID: r.ID, Spec: spec,
+		TargetStanza: spec.Stanza, OldStanza: spec.Stanza, NewStanza: spec.Stanza,
+		Registration: fmt.Sprintf("%s:%d:", backup.RestoringName(db), port),
+		Port:         port, DataDir: cfg.Server.DataDirectory(backup.RestoringName(db)),
+		ConfDir: steps.PGConfDir(backup.RestoringName(db)),
+	}); err != nil {
 		return nil, err
 	}
 
@@ -342,10 +362,10 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	// only reconciles and writes the service password files a rebuilt master
 	// lacks), then metrics. The data is back either way; a failure here is
 	// reported as what is left, with the command that finishes it.
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: db, Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{DB: db, Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report}); err != nil {
 		res["steps_warning"] = "the data is recovered, but its configuration did not finish: " + err.Error() + "; vaire apply finishes it"
 	}
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.MetricsStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.MetricsStepIDs(), Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report}); err != nil {
 		res["metrics_warning"] = "the data is recovered, but its metrics did not finish: " + err.Error() + "; vaire apply finishes them"
 	}
 	if t := recoveredTo(ctx, spec); t != "" {
@@ -371,7 +391,7 @@ func clearAwaiting(db string) (backup.Awaiting, error) {
 
 // applyRecoveredTimers brings back the recovered database's timers.
 func applyRecoveredTimers(ctx context.Context, cfg config.Cluster, rt engine.Runtime, env *jobEnv, res map[string]any) {
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.TimersStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.TimersStepIDs(), Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report}); err != nil {
 		res["timers_warning"] = err.Error()
 	}
 }
@@ -388,7 +408,7 @@ func armArchiving(ctx context.Context, env *jobEnv, cfg config.Cluster, spec con
 	if err := env.shell().Exec(ctx, env.Job, engine.Command{Name: "systemctl", Args: []string{"stop", "postgresql@18-" + spec.Name}}, env.Report); err != nil {
 		return err
 	}
-	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, stanzaConfOptions(cfg, spec.Name, env.Report)); err != nil {
+	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, stanzaConfOptions(cfg, spec.Name, rt, env.Report)); err != nil {
 		return err
 	}
 	return steps.WriteBackupConf(cfg, spec)
@@ -398,8 +418,8 @@ func armArchiving(ctx context.Context, env *jobEnv, cfg config.Cluster, spec con
 // awaiting recovery, its section in pgbackrest.conf (pg1-path, pg1-port,
 // retention) beside the databases recovered before it. Its stanza holds a
 // full backup (stanzaHasBackup), so the step only renders the file.
-func stanzaConfOptions(cfg config.Cluster, db string, report engine.Reporter) engine.Options {
-	return engine.Options{Only: steps.PgBackRestStepIDs(), Recovering: db, Restarter: steps.Restarter(cfg), Report: report}
+func stanzaConfOptions(cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter) engine.Options {
+	return engine.Options{Only: steps.PgBackRestStepIDs(), Recovering: db, Restarter: steps.RestarterFor(cfg, rt, report), Report: report}
 }
 
 // dropScaffold drops the empty cluster promote set aside and its leftover

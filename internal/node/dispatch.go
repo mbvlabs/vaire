@@ -31,6 +31,11 @@ type Env struct {
 	Cluster config.Cluster
 	Log     *engine.RunLog
 	Report  engine.Reporter
+	// LockMode is the global lock mode the dispatcher actually acquired from
+	// its pre-lock configuration/records snapshot. A handler that reloads
+	// configuration after the lock compares against this decision instead of
+	// reconstructing it from current state.
+	LockMode engine.LockMode
 }
 
 // Result is a successful method outcome.
@@ -44,9 +49,14 @@ type method struct {
 	name string
 	// lock returns the lock mode for the request. Nil means no lock.
 	lock func(req rpc.Request) engine.LockMode
+	// lockWithConfig is lock with the loaded configuration, for a method
+	// whose global envelope depends on which cluster it affects.
+	lockWithConfig func(cfg config.Cluster, req rpc.Request) engine.LockMode
 	// clusterLock names the cluster whose lock the request takes after the
 	// global one, and the mode. An empty name takes none.
 	clusterLock func(req rpc.Request) (string, engine.LockMode)
+	// clusterLockWithConfig is clusterLock with the loaded configuration.
+	clusterLockWithConfig func(cfg config.Cluster, req rpc.Request) (string, engine.LockMode)
 	// cluster loads cluster.toml before the confirm check.
 	cluster bool
 	// confirm returns the token the request must carry. Nil means none.
@@ -218,28 +228,41 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	defer stop()
 
 	// 7. Lock.
-	if m.lock != nil {
-		release, err := engine.Acquire(ctx, m.lock(req), req.Method, req.RequestID, req.LockTimeout())
+	mode := engine.LockNone
+	switch {
+	case m.lockWithConfig != nil && m.cluster:
+		mode = m.lockWithConfig(env.Cluster, req)
+	case m.lock != nil:
+		mode = m.lock(req)
+	}
+	if mode != engine.LockNone {
+		release, err := engine.Acquire(ctx, mode, req.Method, req.RequestID, req.LockTimeout())
 		if err != nil {
 			recordActivityRefusal(rec, req, req.Method, err, "")
 			return out.fail(command, err)
 		}
 		defer release()
 	}
-	if m.clusterLock != nil {
-		if cluster, mode := m.clusterLock(req); cluster != "" {
-			if _, ok := env.Cluster.ClusterByName(cluster); !ok {
-				err := databaseNotFound(cluster)
-				recordActivityRefusal(rec, req, req.Method, err, "database_not_found")
-				return out.fail(command, err)
-			}
-			release, err := engine.AcquireCluster(ctx, cluster, mode, req.Method, req.RequestID, req.LockTimeout())
-			if err != nil {
-				recordActivityRefusal(rec, req, req.Method, err, "")
-				return out.fail(command, err)
-			}
-			defer release()
+	env.LockMode = mode
+	cluster, clusterMode := "", engine.LockNone
+	switch {
+	case m.clusterLockWithConfig != nil && m.cluster:
+		cluster, clusterMode = m.clusterLockWithConfig(env.Cluster, req)
+	case m.clusterLock != nil:
+		cluster, clusterMode = m.clusterLock(req)
+	}
+	if cluster != "" && clusterMode != engine.LockNone {
+		if _, ok := env.Cluster.ClusterByName(cluster); !ok {
+			err := databaseNotFound(cluster)
+			recordActivityRefusal(rec, req, req.Method, err, "database_not_found")
+			return out.fail(command, err)
 		}
+		release, err := engine.AcquireCluster(ctx, cluster, clusterMode, req.Method, req.RequestID, req.LockTimeout())
+		if err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "")
+			return out.fail(command, err)
+		}
+		defer release()
 	}
 
 	// 8. Checked local start, run log, handler, result.

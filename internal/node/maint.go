@@ -26,21 +26,25 @@ import (
 // totals) for vaire-maint.prom. Regenerable; not part of the master backup.
 const MaintStatePath = "/var/lib/vaire/maint.json"
 
+// maintStatePath is MaintStatePath for tests; production keeps the fixed path.
+var maintStatePath = MaintStatePath
+
 // maintRunTimeout bounds one vacuum, analyze or reindex statement.
 const maintRunTimeout = 24 * time.Hour
 
 // maintState is maint.json.
 type maintState struct {
-	LastDaily  string                      `json:"last_daily,omitempty"`
-	LastWeekly string                      `json:"last_weekly,omitempty"`
-	Wraparound map[string]map[string]int64 `json:"wraparound,omitempty"`
-	Bloat      map[string]map[string]int64 `json:"bloat,omitempty"`
-	Analyzed   map[string]int              `json:"analyzed,omitempty"`
+	LastDaily  string                        `json:"last_daily,omitempty"`
+	LastWeekly string                        `json:"last_weekly,omitempty"`
+	Wraparound map[string]map[string]int64   `json:"wraparound,omitempty"`
+	Bloat      map[string]map[string]int64   `json:"bloat,omitempty"`
+	Analyzed   map[string]int                `json:"analyzed,omitempty"`
+	Repack     map[string]maint.RepackCounts `json:"repack,omitempty"`
 }
 
 func loadMaintState() maintState {
 	st := maintState{}
-	if raw, err := os.ReadFile(MaintStatePath); err == nil {
+	if raw, err := os.ReadFile(maintStatePath); err == nil {
 		_ = json.Unmarshal(raw, &st)
 	}
 	if st.Wraparound == nil {
@@ -51,6 +55,9 @@ func loadMaintState() maintState {
 	}
 	if st.Analyzed == nil {
 		st.Analyzed = map[string]int{}
+	}
+	if st.Repack == nil {
+		st.Repack = map[string]maint.RepackCounts{}
 	}
 	return st
 }
@@ -65,8 +72,13 @@ func saveMaintState(cfg config.Cluster, st maintState) {
 			}
 		}
 	}
+	for db := range st.Repack {
+		if _, ok := cfg.ClusterByName(db); !ok {
+			delete(st.Repack, db)
+		}
+	}
 	if raw, err := json.MarshalIndent(st, "", "  "); err == nil {
-		_ = engine.WriteFileAtomic(MaintStatePath, append(raw, '\n'), 0o600)
+		_ = engine.WriteFileAtomic(maintStatePath, append(raw, '\n'), 0o600)
 	}
 	_ = promfile.Write(promfile.Maint, maintFamilies(st))
 }
@@ -89,6 +101,22 @@ func maintFamilies(st maintState) []*promfile.Family {
 	for _, db := range promfile.SortedKeys(st.Analyzed) {
 		analyzed.Add(float64(st.Analyzed[db]), promfile.L("db", db)...)
 	}
+	repacked := promfile.Gauge("vaire_maint_repack_tables", "Tables auto-repack considered per database on maint-weekly's last run, by outcome.")
+	for _, db := range promfile.SortedKeys(st.Repack) {
+		counts := st.Repack[db]
+		for _, outcome := range []struct {
+			name string
+			n    int
+		}{
+			{maint.RepackOutcomeRepacked, counts.Repacked},
+			{maint.RepackOutcomeFailed, counts.Failed},
+			{maint.RepackOutcomeUnknown, counts.Unknown},
+			{maint.RepackOutcomeSkipped, counts.Skipped},
+			{maint.RepackOutcomeBusy, counts.Busy},
+		} {
+			repacked.Add(float64(outcome.n), promfile.L("db", db, "outcome", outcome.name)...)
+		}
+	}
 	last := promfile.Gauge("vaire_maint_last_run_timestamp_seconds", "Last run of each maintenance timer job.")
 	for job, at := range map[string]string{"maint-daily": st.LastDaily, "maint-weekly": st.LastWeekly} {
 		if t, err := time.Parse(time.RFC3339, at); err == nil {
@@ -96,7 +124,7 @@ func maintFamilies(st maintState) []*promfile.Family {
 		}
 	}
 	sort.SliceStable(last.Samples, func(i, j int) bool { return last.Samples[i].Labels[0].Value < last.Samples[j].Labels[0].Value })
-	return []*promfile.Family{xid, mxid, bloat, analyzed, last}
+	return []*promfile.Family{xid, mxid, bloat, analyzed, repacked, last}
 }
 
 // --- reports ---
@@ -106,6 +134,8 @@ type maintReportParams struct {
 	DB        string `json:"db,omitempty"`
 	OlderThan string `json:"older_than,omitempty"`
 	MinBytes  int64  `json:"min_bytes,omitempty"`
+	Table     string `json:"table,omitempty"`
+	Exact     bool   `json:"exact,omitempty"`
 }
 
 // maintReportDB is one database's report.
@@ -113,8 +143,18 @@ type maintReportDB struct {
 	DB    string              `json:"db"`
 	Rows  []map[string]string `json:"rows,omitempty"`
 	Bloat *maint.BloatReport  `json:"bloat,omitempty"`
+	Exact *maint.TableStats   `json:"exact,omitempty"`
 	Error string              `json:"error,omitempty"`
 }
+
+// maintReportAdminPG is the default read-only maintenance report connection:
+// vaire_admin over the cluster socket, with pg_monitor and no superuser.
+func maintReportAdminPG(spec config.ClusterSpec) sqlRunner { return steps.AdminPG(spec) }
+
+// maintReportPG is the read-only connection a maintenance report uses. It is
+// a seam so tests can prove the exact report's source database and read-only
+// SQL without a PostgreSQL host.
+var maintReportPG = maintReportAdminPG
 
 // handleMaintReport runs a read-only report in one or every database as
 // vaire_admin (Phase 4 D8). No lock: reports only read.
@@ -126,6 +166,12 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 	if !maint.ValidReport(p.Kind) {
 		return Result{}, output.NewError(output.CodeUsage, "unknown report "+p.Kind, output.ExitUsage,
 			"Use one of "+strings.Join(maint.ReportKinds, ", ")+".")
+	}
+	if p.Exact {
+		return exactMaintReport(ctx, env, p)
+	}
+	if p.Table != "" {
+		return Result{}, output.NewError(output.CodeUsage, "--table is only for maint report bloat --exact", output.ExitUsage, "")
 	}
 	older := 300
 	if p.OlderThan != "" {
@@ -148,7 +194,7 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 			out = append(out, r)
 			continue
 		}
-		rows, err := steps.AdminPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
+		rows, err := maintReportPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
 		switch {
 		case err != nil:
 			r.Error = err.Error()
@@ -166,6 +212,92 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 		out = append(out, r)
 	}
 	return Result{Data: map[string]any{"kind": p.Kind, "databases": out}}, nil
+}
+
+// exactMaintReport measures exactly one ordinary table with the full
+// pgstattuple scan. It is read-only, uses the existing report permissions and
+// timeouts, and never falls back to pgstattuple_approx or the superuser.
+func exactMaintReport(ctx context.Context, env *Env, p maintReportParams) (Result, error) {
+	if p.Kind != maint.ReportBloat || p.DB == "" || p.Table == "" {
+		return Result{}, output.NewError(output.CodeUsage,
+			"--exact is for the bloat report of one table: --db and --table", output.ExitUsage, "")
+	}
+	spec, err := clusterOf(env.Cluster, p.DB)
+	if err != nil {
+		return Result{}, err
+	}
+	if !clusterRunning(spec) {
+		return Result{}, repackNotRunning(spec.Name)
+	}
+	stats, err := exactTableStats(ctx, spec, p.Table)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Data: map[string]any{"kind": p.Kind, "databases": []maintReportDB{{DB: spec.Name, Exact: &stats}}}}, nil
+}
+
+func exactTableStats(ctx context.Context, spec config.ClusterSpec, table string) (maint.TableStats, error) {
+	q, err := maint.QuoteRelation(table)
+	if err != nil {
+		return maint.TableStats{}, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
+	}
+	local := maintReportPG(spec)
+	rows, err := local.Query(ctx, spec.DatabaseName(), maint.PgstattupleInstalledSQL, nil)
+	if err != nil {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "read pgstattuple's catalog facts", err)
+	}
+	if len(rows) != 1 {
+		return maint.TableStats{}, repackExtensionMissing(spec.Name, "pgstattuple",
+			"--exact measures the table with pgstattuple, which needs its extension in the database")
+	}
+	installed := rows[0]["extversion"]
+	rows, err = local.Query(ctx, spec.DatabaseName(), maint.PgstattupleSchemaSQL, nil)
+	if err != nil {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "read pgstattuple's function schema", err)
+	}
+	if len(rows) != 1 || rows[0]["schema"] == "" {
+		return maint.TableStats{}, output.NewError(output.CodePrecondition,
+			"pgstattuple is installed in "+spec.Name+" at "+installed+", but its function schema is unavailable", output.ExitPrecondition,
+			"Recreate the extension from the matching PostgreSQL 18 package; vaire does not guess a function schema.").
+			WithDetails(map[string]any{"reason": maint.RepackReasonExactFailed, "database": spec.Name, "table": table, "extension_version": installed})
+	}
+	schema := rows[0]["schema"]
+	rows, err = local.Query(ctx, spec.DatabaseName(), maint.RelationFactsSQL(q), nil)
+	if err != nil {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "read the relation's kind and storage", err)
+	}
+	if len(rows) == 0 {
+		return maint.TableStats{}, output.NewError(output.CodePrecondition,
+			table+" does not exist in "+spec.Name, output.ExitPrecondition,
+			"Check the table name with vaire sql --db "+spec.Name+" '\\dt'.").
+			WithDetails(map[string]any{"reason": maint.RepackReasonRelationNotFound, "database": spec.Name, "table": table})
+	}
+	facts := maint.ParseRelationFacts(rows[0])
+	if reason, message, unsupported := facts.UnsupportedOrdinaryTable(); unsupported {
+		return maint.TableStats{}, output.NewError(output.CodePrecondition, message, output.ExitPrecondition,
+			"Measure one ordinary permanent heap table; partition leaves and inheritance children are supported.").
+			WithDetails(map[string]any{"reason": reason, "database": spec.Name, "table": table})
+	}
+	sql, err := maint.ExactBloatSQL(table, schema)
+	if err != nil {
+		return maint.TableStats{}, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
+	}
+	rows, err = local.Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
+	if err != nil {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "run the full pgstattuple scan", err)
+	}
+	stats, err := maint.ParseTableStats(spec.Name, facts.Schema, facts.Table, rows)
+	if err != nil {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "read the pgstattuple result", err)
+	}
+	return stats, nil
+}
+
+func exactBloatFailed(db, table, what string, cause error) error {
+	return output.NewError(output.CodePrecondition,
+		"measuring "+table+" in "+db+" failed: "+cause.Error(), output.ExitPrecondition,
+		"The full pgstattuple scan needs vaire_admin's pg_monitor (pg_stat_scan_tables) and must finish within the report's 60s statement timeout and 5s lock timeout; vaire does not escalate to the superuser.").
+		WithDetails(map[string]any{"reason": maint.RepackReasonExactFailed, "database": db, "table": table, "step": what, "error": cause.Error()})
 }
 
 func atoi64(s string) int64 {
@@ -186,12 +318,45 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 	if err := p.Validate(); err != nil {
 		return Result{}, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 	}
-	spec, err := clusterOf(env.Cluster, p.DB)
+	cfg := env.Cluster
+	if p.Kind == maint.Repack {
+		fresh, err := reloadJobCluster()
+		if err != nil {
+			return Result{}, err
+		}
+		cfg = fresh
+	}
+	spec, err := clusterOf(cfg, p.DB)
 	if err != nil {
 		return Result{}, err
 	}
 	if p.Kind == maint.Repack {
-		return Result{}, repackRefusal(ctx, spec)
+		if !env.Req.DryRun {
+			if err := refuseAnyActivationFence(cfg, spec.Name); err != nil {
+				return Result{}, err
+			}
+		}
+		plan, err := planRepack(ctx, cfg, spec, &p, time.Now(), false)
+		if err != nil {
+			return Result{}, err
+		}
+		if env.Req.DryRun {
+			return Result{Data: map[string]any{
+				"db": p.DB, "kind": p.Kind, "tables": plan.Tables, "skipped": plan.Skipped,
+				"versions": plan.Versions, "version_check": plan.VersionCheck, "space": plan.Space,
+				"dry_run": true, "heavy_io": true,
+			}}, nil
+		}
+		if env.Req.Confirm == "" {
+			return Result{}, confirmRequired("a repack rewrites "+p.DB+"'s tables and their indexes", p.DB)
+		}
+		env.Cluster = cfg
+		return runJobRPC(ctx, env, "maint", p, nil)
+	}
+	if !env.Req.DryRun {
+		if err := refuseAnyActivationFence(env.Cluster, spec.Name); err != nil {
+			return Result{}, err
+		}
 	}
 	statements, _ := p.Statements()
 	if env.Req.DryRun {
@@ -202,19 +367,6 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 		return Result{Data: data}, nil
 	}
 	return runJobRPC(ctx, env, "maint", p, nil)
-}
-
-// repackRefusal is maint repack until Phase 7 brings pg_repack (Phase 4).
-func repackRefusal(ctx context.Context, spec config.ClusterSpec) error {
-	rows, err := steps.AdminPG(spec).Query(ctx, spec.DatabaseName(), maint.HasRepackSQL, nil)
-	installed := err == nil && len(rows) == 1 && rows[0]["n"] != "0"
-	reason, msg := "extension_missing", "pg_repack is not installed in "+spec.Name
-	if installed {
-		reason, msg = "repack_unavailable", "vaire runs pg_repack from Phase 7 on"
-	}
-	return output.NewError(output.CodePrecondition, msg, output.ExitPrecondition,
-		"pg_repack arrives with extensions in Phase 7: vaire ext add pg_repack --db "+spec.Name+". Until then, vaire maint vacuum reclaims space for reuse without shrinking the table.").
-		WithDetails(map[string]any{"reason": reason, "extension": "pg_repack", "database": spec.Name})
 }
 
 // vacuumJobs is vacuumdb's --jobs: the cluster's CPU share, at most 4.
@@ -290,6 +442,26 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	spec, err := clusterOf(env.Cluster, p.DB)
 	if err != nil {
+		return nil, err
+	}
+	if p.Kind == maint.Repack {
+		freshCfg, freshSpec, err := reloadRepackTarget(spec)
+		if err != nil {
+			return nil, err
+		}
+		env.Cluster = freshCfg
+		if err := refuseAnyActivationFence(freshCfg, freshSpec.Name); err != nil {
+			return nil, err
+		}
+		if freshSpec.Protected {
+			return nil, ProtectedRepackError(freshSpec.Name)
+		}
+		if freshSpec.IsFollower() {
+			return nil, followerError(freshSpec, "maintenance")
+		}
+		return jobRepack(ctx, env, p, freshSpec)
+	}
+	if err := refuseAnyActivationFence(env.Cluster, spec.Name); err != nil {
 		return nil, err
 	}
 	res := map[string]any{"db": p.DB, "kind": p.Kind}
@@ -417,6 +589,11 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if !env.Req.DryRun {
+		if err := refuseAnyActivationFence(env.Cluster, spec.Name); err != nil {
+			return Result{}, err
+		}
+	}
 	opts := maint.KillOptions{PID: p.PID, IdleInTx: p.IdleInTx}
 	if p.OlderThan != "" {
 		d, err := time.ParseDuration(p.OlderThan)
@@ -497,6 +674,10 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 		if !clusterRunning(spec) || spec.IsFollower() {
 			continue
 		}
+		if err := refuseAnyActivationFence(cfg, spec.Name); err != nil {
+			logLine(env.Report, env.Job, "skipping maintenance of "+spec.Name+": "+err.Error())
+			continue
+		}
 		local, setup := maintPG(spec)
 		if rows, err := local.Query(ctx, spec.Name, "SELECT max(age(datfrozenxid))::bigint AS xid, max(mxid_age(datminmxid))::bigint AS mxid FROM pg_database", nil); err == nil && len(rows) == 1 {
 			st.Wraparound[spec.Name] = map[string]int64{"xid": atoi64(rows[0]["xid"]), "mxid": atoi64(rows[0]["mxid"])}
@@ -532,11 +713,21 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 	return res, nil
 }
 
+// Deferred-restart host seams. Production uses the node's state file and the
+// real engine; a test can prove a refused narrow transition never reaches
+// configuration, restart or deferred-state clearing.
+var (
+	deferredLoadState      = engine.LoadState
+	deferredApply          = engine.Apply
+	deferredClear          = clearDeferred
+	deferredAcquireCluster = engine.AcquireCluster
+)
+
 // runDeferredRestarts restarts the clusters db resize --defer-restart left
 // for the window, one at a time with the pooler paused, under each
 // cluster's lock exclusive. A busy cluster waits for the next night.
 func runDeferredRestarts(ctx context.Context, env *jobEnv) ([]string, map[string]string) {
-	st, err := engine.LoadState(engine.StatePath)
+	st, err := deferredLoadState(engine.StatePath)
 	if err != nil || len(st.DeferredRestarts) == 0 {
 		return nil, nil
 	}
@@ -546,17 +737,28 @@ func runDeferredRestarts(ctx context.Context, env *jobEnv) ([]string, map[string
 	failed := map[string]string{}
 	for _, db := range promfile.SortedKeys(st.DeferredRestarts) {
 		if _, ok := cfg.ClusterByName(db); !ok {
-			clearDeferred(db)
+			deferredClear(db)
 			continue
 		}
-		release, err := engine.AcquireCluster(ctx, db, engine.LockExclusive, env.Job, rpc.NewRequestID(), 0)
+		if err := refuseAnyActivationFence(cfg, db); err != nil {
+			failed[db] = err.Error()
+			logLine(env.Report, env.Job, db+": the restart waits: "+failed[db])
+			continue
+		}
+		release, err := deferredAcquireCluster(ctx, db, engine.LockExclusive, env.Job, rpc.NewRequestID(), 0)
 		if err != nil {
 			failed[db] = "its lock is busy; the restart waits for tomorrow's window"
 			logLine(env.Report, env.Job, db+": "+failed[db])
 			continue
 		}
-		data, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
-			DB: db, Confirm: engine.Confirmation{Clusters: []string{db}}, Restarter: steps.Restarter(cfg), Report: env.Report,
+		if err := refuseNarrowExtensionTransition(ctx, cfg, db); err != nil {
+			release()
+			failed[db] = err.Error()
+			logLine(env.Report, env.Job, db+": the restart waits: "+failed[db])
+			continue
+		}
+		data, _, err := deferredApply(ctx, steps.Catalog(), cfg, rt, engine.Options{
+			DB: db, Confirm: engine.Confirmation{Clusters: []string{db}}, Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report,
 		})
 		release()
 		if err != nil {
@@ -567,7 +769,7 @@ func runDeferredRestarts(ctx context.Context, env *jobEnv) ([]string, map[string
 		for _, r := range data.Restarts {
 			logLine(env.Report, env.Job, fmt.Sprintf("restarted %s (%d ms down)", r.Cluster, r.DowntimeMS))
 		}
-		clearDeferred(db)
+		deferredClear(db)
 		done = append(done, db)
 	}
 	return done, failed
@@ -594,10 +796,14 @@ func clearDeferred(dbs ...string) {
 	})
 }
 
-// jobMaintWeekly estimates every database's bloat for vaire-maint.prom.
-// auto_repack waits for pg_repack (Phase 7).
+// jobMaintWeekly estimates every database's bloat for vaire-maint.prom and,
+// when auto_repack is enabled, repacks eligible tables one at a time.
 func jobMaintWeekly(ctx context.Context, env *jobEnv) (any, error) {
-	cfg := env.Cluster
+	cfg, err := reloadJobCluster()
+	if err != nil {
+		return nil, err
+	}
+	env.Cluster = cfg
 	st := loadMaintState()
 	reports := map[string]maint.BloatReport{}
 	var errs []error
@@ -606,7 +812,7 @@ func jobMaintWeekly(ctx context.Context, env *jobEnv) (any, error) {
 		if !clusterRunning(spec) || spec.IsFollower() {
 			continue
 		}
-		rows, err := steps.AdminPG(spec).Query(ctx, spec.Name, maint.ReportSetup+maint.BloatSQL(), nil)
+		rows, err := maintReportPG(spec).Query(ctx, spec.Name, maint.ReportSetup+maint.BloatSQL(), nil)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", spec.Name, err))
 			continue
@@ -615,11 +821,18 @@ func jobMaintWeekly(ctx context.Context, env *jobEnv) (any, error) {
 		reports[spec.Name] = r
 		st.Bloat[spec.Name] = maint.TotalBloat(r)
 	}
+	res := map[string]any{"bloat": reports}
 	if cfg.Maintenance.AutoRepack {
-		logLine(env.Report, env.Job, "auto_repack is set, but pg_repack arrives with extensions in Phase 7; nothing was repacked")
+		runs := autoRepack(ctx, env, reports, autoRepackNow())
+		st.Repack = make(map[string]maint.RepackCounts, len(runs))
+		for db, run := range runs {
+			st.Repack[db] = run.Counts
+		}
+		res["repack"] = runs
+	} else {
+		st.Repack = nil
 	}
 	st.LastWeekly = stamp()
 	saveMaintState(cfg, st)
-	res := map[string]any{"bloat": reports}
 	return res, errors.Join(errs...)
 }

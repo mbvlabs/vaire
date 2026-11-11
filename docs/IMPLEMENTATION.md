@@ -9,7 +9,7 @@
 ## 0. How to use this document
 
 1. Read `MASTER.md` in full first. This spec assumes its decisions (§3 there) and doesn't re-argue them.
-2. Build the phases in MASTER §7 **in order**. From Phase 2 on, each phase ends with a manual test on a real VPS that must pass before you move on.
+2. Build phases in the approved roadmap order. The approved follower/extension exception permits building and publishing Phase 7 before follower live qualification, then qualifying both on one signed edge candidate. Activity qualification or explicit acceptance of its named gaps still gates deployment. Other manual-testing and release-authorization rules remain unchanged.
 3. Where this spec says **MUST**, it's fixed. Where it says **SHOULD** or **choose** and you decide something, change this document so it describes what was built. If the decision matters beyond implementation detail, also add it to the decisions table in `MASTER.md`. There's no separate deviations log.
 4. Pin every external version and checksum when you implement (§23.3). Versions in this document are the floor known at writing time. Use the latest stable release at implementation time and record it in `internal/versions/versions.go`.
 5. Re-read the reference code paths named here before copying patterns:
@@ -167,7 +167,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `vaire db list` / `create <name>` / `resize <name>` / `drop <name>` / `credentials <name>` | `create`: `--size`, `--memory`, `--profile`, `--statement-timeout`, `--extensions`; `resize`: `--size`, `--memory`, `--defer-restart`; `drop`: `--no-final-dump`; `credentials`: `--rotate`, `--role` | create/resize/drop/rotate | drop, rotate | ✓ | | `<db>` (drop, rotate); `<db>/restart` (resize) |
 | `vaire db protect <db>…\|--all` / `unprotect <db>…` | `protect`: `--all` | ✓ | | ✓ | unprotect (TOTP code) | |
 | `vaire protect init\|status` | `init`: `--rotate`, `--db <db>` (repeatable), `--all` | init | | | init | |
-| `vaire ext list` / `add <name>` / `remove <name>` | `--db` | add/remove | remove | ✓ | | `<db>/restart` if restart; `<db>` for remove |
+| `vaire ext list` / `add <name>` / `remove <name>` | list: `--db`; add: `--db`, `--package`, `--preinstalled`, `--preload`, `--setting`, `--schema`, `--copy-safety`, `--copy-setting`, `--standby-safe`; remove: `--db`, `--cascade` | add/remove | remove | ✓ | | `<db>/restart` if restart; `<db>` for remove |
 | `vaire tune show\|explain\|apply` | `show`, `explain`: `--db` | apply | | ✓ | | `<db>/restart` if restart |
 | `vaire backup setup` | `--provider`, `--endpoint`, `--region`, `--bucket`, `--prefix`, `--uri-style`, `--key-id`, `--secret-stdin\|--secret-file`, `--full-schedule`, `--diff-schedule`, `--incr-schedule`, `--retention-full` | ✓ | | ✓ | ✓ | |
 | `vaire backup now` | `--db`, `--type full\|diff\|incr` (a job per database) | ✓ | | ✓ | | |
@@ -199,7 +199,7 @@ Legend: **M** = mutating, **D** = destructive (needs `--confirm <token>`), **DR*
 | `vaire node upgrade` | `--version`, `--rollback` | ✓ | rollback | ✓ | | `<server>/rollback` |
 | `vaire pg update` | `--now` | ✓ | | ✓ | | `<server>/restart` |
 
-Phase 5 added `server backup now|list|verify|export`, `server init --restore`, `db recover` and `context set-address`, and removed `vps backup|restore` (the master backup section below); Phase 6 adds `db follow` and `db unfollow`, both detachable jobs, and `db recover` of a follower runs the `db-follow` job again (§13.12); Phase 10 adds `node add|list|remove`, `db move` and `server takeover`. Their design is in the RFC.
+Phase 5 added `server backup now|list|verify|export`, `server init --restore`, `db recover` and `context set-address`, and removed `vps backup|restore` (the master backup section below); Phase 6 adds `db follow` and `db unfollow`, both detachable jobs, and `db recover` of a follower runs the `db-follow` job again (§13.12); Phase 7 adds `ext list|add|remove`, `maint repack` and the one-table exact bloat report (§16–17); Phase 10 adds `node add|list|remove`, `db move` and `server takeover`. Their design is in the RFC.
 
 `vaire node upgrade` is an **operator** command even though it lives under `vaire node`. Audience is set per command in `CommandMeta`, not per subtree. Its node-side counterpart is the RPC method `upgrade.install`, so there's no name collision.
 
@@ -390,6 +390,17 @@ client_allowlist = []               # CIDRs allowed to reach 6432 (and 5432 if e
 expose_pgbouncer = true             # the transaction pooler (and 443's direct TLS) to the allowlist
 expose_postgres = false             # the session pooler to the allowlist
 
+[extensions.pg_stat_kcache]         # optional custom definition or explicit built-in provider override
+source = "apt"                      # apt | preinstalled; required for a new entry
+package = "postgresql-18-pg-stat-kcache"  # required for apt; absent for preinstalled
+preload = "pg_stat_kcache"          # optional shared_preload_libraries value
+settings = { "pg_stat_kcache.track" = "all" }  # optional; {db} is the database inside the cluster
+schema = ""                         # optional; created before CREATE EXTENSION
+note = ""                           # human documentation only
+copy_safety = "safe"                # unknown | safe | disabled
+# copy_settings = { "key" = "value" } # required when copy_safety = "disabled"
+standby_safe = true                 # explicit; false/absent blocks follow
+
 [[clusters]]                        # one database in its own PostgreSQL cluster; written by db create
 name = "app"                        # database, cluster, pooler entry and URL path: [a-z_][a-z0-9_]{0,62}
 node = "db1"                        # placement; Phase 3 accepts only the master
@@ -404,6 +415,7 @@ io_weight = 100
 profile = "oltp"                    # optional; empty = [postgres] profile
 statement_timeout = "60s"
 extensions = ["pg_stat_statements"]
+recovery_extensions = ["pg_stat_statements"]  # optional complete declaration for points older than recorded coverage
 pool_size = 0                       # transaction pooler; 0 = max_connections - session_pool_size - 3
 session_pool_size = 10              # session pooler
 [clusters.settings]                 # this cluster's overrides, after [postgres.settings]
@@ -470,7 +482,7 @@ Explicit values win: `size = "small"` with `memory = "768MiB"` is a small with m
 - CIDRs parse. `0.0.0.0/0` in `client_allowlist` is allowed but produces a doctor `warn`.
 - `retention_full ≥ 1`, `keep_weekly ≥ 1`; `[master_backup]` needs `retention_days` and `local_keep` ≥ 1.
 - Exactly one node with `role = "master"`; any other role is rejected with "workers arrive in Phase 10".
-- `[[clusters]]`: names unique and valid database names (`postgres`, `template0` and `template1` are refused; `<name>_migrate` etc. fit in 63 characters); `node` is the master; ports unique in 5433–5479; stanzas unique and `<name>-<6 hex>`; `profile ∈ {oltp, mixed, analytics}`; `statement_timeout` is `0` or matches `^\d+(ms|s|min|h)$`; extensions are catalog entries (§17; until Phase 7 only the contrib entries exist); weights 1–10000 (0 = default); `cpu_quota` a percentage; `memory_max` not below `memory`; `pool_size + session_pool_size + 3 ≤ max_connections`; `[clusters.backup].dump_schedule` needs `[backup]` and `dump_retention ≥ 1`.
+- `[[clusters]]`: names unique and valid database names (`postgres`, `template0` and `template1` are refused; `<name>_migrate` etc. fit in 63 characters); `node` is the master; ports unique in 5433–5479; stanzas unique and `<name>-<6 hex>`; `profile ∈ {oltp, mixed, analytics}`; `statement_timeout` is `0` or matches `^\d+(ms|s|min|h)$`; `extensions` and `recovery_extensions` names resolve through the config-aware catalogue/custom resolver (§17), unknown names and conflicting providers/settings are refused, and absent, explicitly empty and populated `recovery_extensions` remain distinct; weights 1–10000 (0 = default); `cpu_quota` a percentage; `memory_max` not below `memory`; `pool_size + session_pool_size + 3 ≤ max_connections`; `[clusters.backup].dump_schedule` needs `[backup]` and `dump_retention ≥ 1`.
 
 - **Strict decode.** `ParseCluster` refuses unknown keys with `config_error` naming them. There's no compatibility for the shared-cluster layout (`[[databases]]`, `data_directory`): a server from before Phase 3 is rebuilt. `schema` stays `1`.
 - A table's fields are validated only when its feature is in use: `[backup]` only when `provider != ""` (empty means not configured). Then `provider` is a preset, `endpoint` an `https://` URL with only a host (pgBackRest talks to S3 over TLS only), `bucket` an S3 bucket name, `prefix` non-empty without leading or trailing slash, `region` set, `uri_style ∈ {path, host}`, `full_schedule` set, and every schedule (the database's own too) passes a coarse character filter; `config.set` (and so `config edit` and `backup setup`) then runs `systemd-analyze calendar` on each on the node, which has the final say.
@@ -1511,15 +1523,15 @@ From Phase 4 the textfiles are split by owner (`internal/promfile`, `/var/lib/no
 
 ## 16. Maintenance (`internal/maint`)
 
-Every maintenance session sets `SET lock_timeout = '5s'; SET statement_timeout = 0;` (vacuum and reindex can be long); reports run read-only with `statement_timeout = '60s'`. On an unprotected database everything runs on the node over the database's socket as `vaire_admin` (psql as root, which `pg_ident` maps to `vaire_admin` only): `pg_maintain` covers vacuum, analyze and reindex, `pg_monitor` the reports, `pg_signal_backend` kill (never a superuser's backend). On a protected database `vaire_admin` holds only `pg_monitor` there, so reports are unchanged, while vacuum, analyze, reindex, the reindex leftover cleanup and the daily ANALYZE run as the superuser with `SET ROLE pg_maintain` (as `<db>_owner` for a leftover index only the owner may drop), and kill needs a TOTP code and terminates as `postgres` with `SET ROLE pg_signal_backend`. RPCs: `maint.report`, `maint.run` (vacuum, analyze, reindex as the detachable job `maint`; a whole-database vacuum and every reindex take the heavy-I/O lock; repack refuses until Phase 7), `maint.kill` (token `<db>/kill`). Without `--db` the CLI runs one job per database, one after another. The bloat queries are vendored from ioguix/pgsql-bloat-estimation at 8fde3c9 (BSD-2-Clause, `internal/maint/sql`, notice in `vaire version --licenses`).
+Every maintenance session sets `SET lock_timeout = '5s'; SET statement_timeout = 0;` (vacuum, reindex and repack can be long); reports run read-only with `statement_timeout = '60s'`. On an unprotected database everything runs on the node over the database's socket as `vaire_admin` (psql as root, which `pg_ident` maps to `vaire_admin` only): `pg_maintain` covers vacuum, analyze and reindex, `pg_monitor` the reports, `pg_signal_backend` kill (never a superuser's backend). On a protected database `vaire_admin` holds only `pg_monitor` there, so reports are unchanged, while vacuum, analyze, reindex, the reindex leftover cleanup and the daily ANALYZE run as the superuser with `SET ROLE pg_maintain` (as `<db>_owner` for a leftover index only the owner may drop), and kill needs a TOTP code and terminates as `postgres` with `SET ROLE pg_signal_backend`. Repack is refused on a protected database on every path; no code or grant path makes unrestricted `postgres` repack acceptable there. RPCs: `maint.report`, `maint.run` (vacuum, analyze, reindex and repack as the detachable job `maint`; a whole-database vacuum, every reindex and every repack take the heavy-I/O lock), `maint.kill` (token `<db>/kill`). Without `--db` the CLI runs one job per database, one after another. The bloat queries are vendored from ioguix/pgsql-bloat-estimation at 8fde3c9 (BSD-2-Clause, `internal/maint/sql`, notice in `vaire version --licenses`).
 
 | Command | Flags | Implementation |
 | --- | --- | --- |
 | `maint vacuum` | `--db` (default all), `--table`, `--analyze`, `--freeze`, `--parallel N` | `VACUUM (VERBOSE false, ANALYZE x, FREEZE y, PARALLEL n) <table>`, or `vacuumdb --all --jobs=min(4,C)` via node RPC when there's no table |
 | `maint analyze` | `--db`, `--table` | `ANALYZE` / `vacuumdb --analyze-only` |
 | `maint reindex` | `--db`, `--table`/`--index`, `--concurrently` (required while single-node) | `REINDEX (CONCURRENTLY) …`; on failure, reports leftover `_ccnew` invalid indexes and offers `--cleanup-invalid` |
-| `maint repack` | `--db`, `--table`, `--confirm <db>` | Requires the `pg_repack` extension in the db (otherwise `precondition_failed` with the hint `vaire ext add pg_repack --db <db>`). Runs `pg_repack --no-superuser-check` as postgres over the socket. Respects `maintenance.window` unless `--now` |
-| `maint report bloat` | `--db`, `--min-bytes` | Estimation query (the ioguix table + btree estimates, vendored with attribution) → `{table, est_bloat_bytes, ratio}` |
+| `maint repack` | `--db`, `--table`, `--now`, `--confirm <db>` | Detachable job. Requires the `pg_repack` extension and a matching PostgreSQL 18 client (missing extension/client is reported before the destructive token). Only an ordinary permanent heap table with a primary key or valid unique index on NOT NULL key columns is supported; partition leaves and inheritance children are ordinary targets, while partition parents, foreign tables, non-heap AMs and extension-managed storage are refused. The table, TOAST, indexes, database default and postgres session default tablespace must all be `pg_default`, with free space for twice the table/index/TOAST footprint plus the host reserve (unknown space refuses). Runs as `postgres` over the socket only on an unprotected database, with `--no-kill-backend --wait-timeout=60`; respects `maintenance.window` unless `--now`. Every table is revalidated under the job's locks immediately before it starts. A dry run discloses that the full client/extension/library/SQL version match is deferred to the job; the full probe uses the existing postgres peer connection only after the current target has been revalidated as unprotected under those locks. Completion that cannot be attributed is `unknown`/`completion_unknown`, never `repacked`; a skip is recorded only for a known client diagnostic with identical valid before/after storage facts |
+| `maint report bloat` | `--db`, `--min-bytes`; `--exact` with `--db` and `--table` | Default: estimation query (the ioguix table + btree estimates, vendored with attribution) → `{table, est_bloat_bytes, ratio}`. `--exact`: one supported ordinary table measured by the full-scan `pgstattuple` function (never `pgstattuple_approx`) as `vaire_admin` with `pg_monitor`, under the report's 5-second lock and 60-second statement timeouts; returns measured table/live/dead/free bytes and percentages plus the method, not a reclaimable-bloat or instantaneous result. No database-wide exact scan or exact index measurement |
 | `maint report wraparound` | | `datname, age(datfrozenxid), mxid_age(datminmxid)` + top-20 tables by `age(relfrozenxid)`. `warn` above 1.0e9, `fail` above 1.6e9 |
 | `maint report unused-indexes` | `--db` | `pg_stat_user_indexes` with `idx_scan = 0`, not unique/PK/constraint-backing, size > 1 MiB, stats reset > 7 days ago |
 | `maint report missing-indexes` | `--db` | `pg_stat_user_tables`: `seq_scan > 1000 AND seq_tup_read / greatest(seq_scan,1) > 10000 AND n_live_tup > 100000` |
@@ -1530,50 +1542,31 @@ Every maintenance session sets `SET lock_timeout = '5s'; SET statement_timeout =
 **Timer jobs:**
 
 - `maint-daily`: wraparound report → metrics + doctor state, then `ANALYZE` on tables with `n_mod_since_analyze > 0.1 * n_live_tup`, within the window.
-- `maint-weekly`: bloat report → state. If `auto_repack` is set, repack tables above `repack_bloat_threshold` that have `pg_repack` installed, one table at a time, stopping at the window end.
+- `maint-weekly`: bloat report → state. `auto_repack` defaults to false; when enabled it considers estimated candidates at or above `repack_bloat_threshold` and at least 64 MiB, biggest first, one table at a time. Each table takes the heavy-I/O and cluster locks, is revalidated immediately before execution, and starts no new table once the window has ended. A running rewrite is not cancelled. Per-run counts, busy/skipped/failed/unknown outcomes and `vaire_maint_repack_tables` carry the same truth as manual repack.
 
 ---
 
-## 17. Extension catalog v1 (`internal/catalog`)
+## 17. Extension definitions and runtime requirements
 
-```go
-type Extension struct {
-    Name, ExtName, Package, Repo string // Repo: "pgdg" | "contrib" | "timescale"
-    Preload    string              // value added to shared_preload_libraries ("" if none)
-    Settings   map[string]string   // rendered into 30-vaire-extensions.conf
-    Restart    bool                // derived: Preload != ""
-    PerCluster bool                // e.g. pg_cron: lives in one database
-    Default    bool                // enabled on init
-    Note       string
-}
-```
+The built-in catalogue is a convenience list, not an allowlist. One config-aware resolver combines built-ins and explicit custom definitions. [EXTENSION-DEFINITIONS.md](EXTENSION-DEFINITIONS.md) specifies the descriptor fields, representation rules and command examples. Canonical selection names are distinct from SQL/control names; preload-only defaults such as auto_explain never receive CREATE EXTENSION.
 
-| Name | Package | Preload | Notes |
-| --- | --- | --- | --- |
-| pg_stat_statements | contrib | `pg_stat_statements` | Default; `pg_stat_statements.max=10000`, `track=top` |
-| auto_explain | contrib | `auto_explain` | Default; not a CREATE EXTENSION. `log_min_duration` = 2× `log_min_duration_statement`, `sample_rate=0.1`, `log_analyze=off` |
-| pg_trgm, citext, btree_gin, btree_gist, pgstattuple, pg_buffercache, amcheck | contrib | | |
-| vector | `postgresql-18-pgvector` | | |
-| postgis | `postgresql-18-postgis-3` | | Large install |
-| pg_cron | `postgresql-18-cron` | `pg_cron` | `cron.database_name` = the cluster's database; PerCluster |
-| pgaudit | `postgresql-18-pgaudit` | `pgaudit` | `pgaudit.log='ddl,role'` default |
-| pg_repack | `postgresql-18-repack` | | Required for `maint repack` |
-| pg_partman | `postgresql-18-partman` | `pg_partman_bgw` (optional) | |
-| hypopg | `postgresql-18-hypopg` | | |
-| timescaledb | `timescaledb-2-postgresql-18` (Timescale apt repo) | `timescaledb` | Timescale licence; adds a repo; mark `Note` |
+Providers are explicit APT packages from already configured trusted repositories or operator-preinstalled files. No automatic extension repository/key configuration, source builds, package upgrade or uninstall is performed. Native extensions are trusted code, not sandboxed. Alternate provider identities require renewed safety declarations; unknown copy safety can be valid on an independent primary but blocks affected copy, drill, fork and follower operations.
 
-At implementation time, verify each package exists for PG18 on every supported OS/arch. Drop any that don't and remove them from this list.
+**Direct commands:** add/remove resolve and authorize the complete affected source/follower set before any persistence, history, package, configuration or SQL mutation. Required exact cluster restart tokens are repeatable; a source token does not authorize a follower restart. Dry-run has no mutation. Protected addition preserves existing grants and policy; protected removal refuses. Direct follower edits refuse. Global-definition edits affecting unrelated databases are not silently widened from a named target.
 
-**`ext add <name> [--db <d>]`:**
+Addition prepares prerequisites, configures/verifies followers before the primary, then reconciles primary SQL. Re-add examines current journal hashes and effective requirements rather than treating matching intent as completion. Explicit SQL updates require a supported path and proven non-downgrade direction; actual resulting versions are reported. CREATE and UPDATE verify effective required libraries/settings, including supported global/database overrides. Descriptor settings are configuration literals; global/database settings are raw values. Runtime expectations decode literals before merging raw overrides, and compare decoded actual values directly.
 
-1. Install the package (adding the repo if needed).
-2. If there's a preload, re-render that database's `30-vaire-extensions.conf`. That restarts only its cluster, so `--confirm <db>/restart` is needed; without it, stop after the package install and report `restart_required`. (The command's metadata still says `{server}/restart` until Phase 7 builds it.)
-3. Run `CREATE EXTENSION IF NOT EXISTS <ext>` in `--db`.
-4. Persist to the database's `[[clusters]].extensions`.
+Removal previews bounded dependencies and owned data, requires the database token plus affected restart tokens, and performs primary DROP while libraries remain loaded before reducing configuration. CASCADE is explicit only; protected databases refuse removal. Followers retain outgoing obligations until their actual catalog establishes replayed SQL absence. Partial failures report completed/pending targets, retained packages and supported retries; a later retry does not repeat an already completed DROP. Installed packages are never uninstalled by removal or intent change.
 
-**`ext remove`**: `DROP EXTENSION` (no CASCADE unless `--cascade`; confirm `<db>`), then remove it from preload if no database uses it any more.
+Ordinary configuration/apply retains deferred restart behavior. Safe follower staging may proceed without all restart tokens, but unmet follower runtime requirements withhold dependent primary configuration/runtime work and SQL. Settings-only readiness matters as well as preloads; unrelated pending settings do not block all role/grant work. Scoped selectors cannot bypass these dependencies.
 
-**`ext list`**: catalog × installed (`pg_available_extensions` and per-db `pg_extension`) → `{name, available, installed_in[], version, default_version, update_available}`.
+**Historical copies and activation:** records retain self-contained resolved requirements by immutable stanza, with observed UTC coverage. Coverage is checked against the selected base-backup chain, not just restore target time. Unknown history requires a presence-aware recovery declaration: absent refuses, explicitly empty asserts completeness, populated supplements unknown requirements. An unbound dump is never associated by a reused database name. Known incompatible historical requirements refuse rather than arbitrating providers or deleting history.
+
+Before copied first/retry starts, the complete preload/settings union must have resolved copy safety and physical-standby certification where applicable, with packages/files verified. Winning copy-owned guards survive adoption, swap, promotion, rename and later apply. Mandatory suppression remains until proven permanent handoff; unknown prior guard provenance refuses. Copied cron jobs are suppressed, deactivated and retargeted only within the owned copy using authoritative metadata identity. Desired SQL is reconciled only after writable availability, before activation; historical extras are not automatically created, upgraded or dropped.
+
+Durable installation/stanza/operation-bound activation checkpoints prevent ordinary convergence, public SQL and both poolers from exposing unsettled data. Supported owner retries and adopted-fork apply continue the non-secret work. Safety completion precedes verified routing finalization and exact checkpoint retirement; irreversible failures never imply rollback or unconditional client resume. Rebuild pruning retires lost-host local activation authority while retaining historical requirements and awaiting-recovery protection.
+
+**Diagnostics:** list combines built-ins/custom definitions, actual per-database versions, control/provider availability, preload/restart state, unused retained packages and unmanaged extensions excluding plpgsql. Unknown or inaccessible facts remain unavailable, not absent or version zero. Doctor reports package/file prerequisites, SQL/update and pending-restart facts separately. Activity retains method/target/outcome metadata, not descriptor settings, package lists or SQL payloads.
 
 ---
 
@@ -1725,6 +1718,9 @@ When the current process isn't root and an operation needs root:
 | `pg.ssl` | fail: `ssl = off` |
 | `pg.checksums` | warn: off |
 | `pg.wraparound` | warn > 1.0e9, fail > 1.6e9 |
+| `ext.packages` | fail: a selected extension's APT package or preinstalled control/library file is missing; warn: package state cannot be read |
+| `ext.state` | warn: a configured extension is missing from the database, a preload waits for its restart, a library is not loaded with no restart pending, the database has an unconfigured or unmanaged extension, or its extension facts cannot be read |
+| `ext.updates` | warn: the installed package default is plausibly newer than the extension, or the default version cannot be read |
 | `pg.connections` | warn > 80% of `max_connections` |
 | `tls.expiry` | warn < 21 days, fail < 7 days |
 | `tls.dns` | warn: A/AAAA of the node's hostname ≠ node public address |

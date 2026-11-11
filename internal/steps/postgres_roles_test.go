@@ -13,6 +13,10 @@ import (
 
 // An old completed journal entry must not hide an access-policy upgrade.
 func TestRolesAccessPolicyUpgrade(t *testing.T) {
+	fake := completeRolesPG()
+	fake.adminOwner, fake.signalBack, fake.maintain = "f", "f", "f"
+	fake.extensions = []string{"pg_stat_statements"}
+	useFakeRolesPG(t, fake)
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app", Protected: true}}}
 	step := postgresRoles{}.Instance("app")
 	inputs, err := step.Inputs(cfg, engine.Runtime{})

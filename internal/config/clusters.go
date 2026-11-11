@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/mbvlabs/vaire/internal/catalog"
 )
 
 // Cluster ports (RFC 8.2). A cluster listens on its Unix socket only, and
@@ -27,23 +25,29 @@ const (
 // cluster, with the same name. node, port and stanza are assigned at create;
 // port and stanza never change while the cluster exists.
 type ClusterSpec struct {
-	Name             string            `toml:"name"`
-	Node             string            `toml:"node"`
-	Port             int               `toml:"port"`
-	Stanza           string            `toml:"stanza"`
-	Size             string            `toml:"size"`
-	Memory           string            `toml:"memory"`
-	MemoryMax        string            `toml:"memory_max"`
-	CPUWeight        int               `toml:"cpu_weight"`
-	CPUQuota         string            `toml:"cpu_quota"`
-	IOWeight         int               `toml:"io_weight"`
-	Profile          string            `toml:"profile,omitempty"`
-	StatementTimeout string            `toml:"statement_timeout"`
-	Extensions       []string          `toml:"extensions"`
-	PoolSize         int               `toml:"pool_size"`
-	SessionPoolSize  int               `toml:"session_pool_size"`
-	Settings         map[string]string `toml:"settings,omitempty"`
-	Backup           ClusterBackup     `toml:"backup,omitempty"`
+	Name             string   `toml:"name"`
+	Node             string   `toml:"node"`
+	Port             int      `toml:"port"`
+	Stanza           string   `toml:"stanza"`
+	Size             string   `toml:"size"`
+	Memory           string   `toml:"memory"`
+	MemoryMax        string   `toml:"memory_max"`
+	CPUWeight        int      `toml:"cpu_weight"`
+	CPUQuota         string   `toml:"cpu_quota"`
+	IOWeight         int      `toml:"io_weight"`
+	Profile          string   `toml:"profile,omitempty"`
+	StatementTimeout string   `toml:"statement_timeout"`
+	Extensions       []string `toml:"extensions"`
+	// RecoveryExtensions is the operator's explicit, complete extension
+	// requirement declaration for restore points older than vaire's
+	// recorded coverage. nil means absent (unknown, not "none"); a pointer
+	// to an empty list means the operator asserts the point used no
+	// extensions. It is resolved through the same [extensions] definitions.
+	RecoveryExtensions *[]string         `toml:"recovery_extensions,omitempty" json:"recovery_extensions,omitempty"`
+	PoolSize           int               `toml:"pool_size"`
+	SessionPoolSize    int               `toml:"session_pool_size"`
+	Settings           map[string]string `toml:"settings,omitempty"`
+	Backup             ClusterBackup     `toml:"backup,omitempty"`
 	// Protected refuses db drop, a shrinking db resize, credential
 	// rotation and restore promote/undo, even with a confirm token. Lifting
 	// it takes a current code from the TOTP authenticator that vaire protect
@@ -102,9 +106,10 @@ func (c Cluster) ClusterByName(name string) (ClusterSpec, bool) {
 // the view. It is a pure transformation of the caller's snapshot: the step
 // engine and the direct unfollow pooler fence apply the same eligibility.
 func (c Cluster) RoutingView(isAwaiting func(string) bool, keep string) Cluster {
-	out := c
+	out := c.Clone()
 	out.Clusters, out.Awaiting = nil, nil
 	for _, spec := range c.Clusters {
+		spec = spec.Clone()
 		switch {
 		case spec.Name == keep:
 			out.Clusters = append(out.Clusters, spec)
@@ -215,11 +220,7 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 		if !durationPattern.MatchString(s.StatementTimeout) {
 			add("%s.statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", at, s.StatementTimeout)
 		}
-		for _, ext := range s.Extensions {
-			if _, ok := catalog.Lookup(ext); !ok {
-				add("%s.extensions %q is not in the catalog (it arrives with vaire ext in Phase 7)", at, ext)
-			}
-		}
+		c.validateExtensionSelection(add, at, s)
 		for key := range s.Settings {
 			if !SettingKeyPattern.MatchString(key) {
 				add("%s.settings key %q must match %s", at, key, SettingKeyPattern)

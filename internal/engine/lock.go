@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
+	"sort"
 	"syscall"
 	"time"
 
@@ -28,6 +30,18 @@ func ClusterLockPath(cluster string) string { return "/run/lock/vaire-" + cluste
 // cluster's, so at most one full, diff, verify, drill or dump reads the disk
 // at a time. Database names have no hyphen, so no cluster lock shares it.
 const HeavyIOLockPath = "/run/lock/vaire-heavy-io.lock"
+
+// lockPath is the node's global lock path. It is a variable so a test in
+// another package can serialize against a temporary lock.
+var lockPath = LockPath
+
+// LockPathForTest points the global lock at path and returns the restore
+// function. It is not a production fault hook.
+func LockPathForTest(path string) func() {
+	old := lockPath
+	lockPath = path
+	return func() { lockPath = old }
+}
 
 // LockMode is shared or exclusive.
 type LockMode string
@@ -58,13 +72,41 @@ type Release func()
 // A timeout of 0 tries once. On timeout it returns precondition_failed with
 // reason lock_held and the holder, or a null holder when its PID is gone.
 func Acquire(ctx context.Context, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
-	return acquire(ctx, LockPath, "", "", mode, method, requestID, timeout)
+	return acquire(ctx, lockPath, "", "", mode, method, requestID, timeout)
 }
 
 // AcquireCluster takes cluster's lock in mode, as Acquire does the global
 // one. The caller holds the global lock already.
 func AcquireCluster(ctx context.Context, cluster string, mode LockMode, method, requestID string, timeout time.Duration) (Release, error) {
 	return acquire(ctx, ClusterLockPath(cluster), cluster, "", mode, method, requestID, timeout)
+}
+
+// AcquireClusters takes several clusters' locks exclusive in sorted order and
+// returns one release. The caller must not already hold any of them: this is
+// the multi-target extension transition's only acquisition, after the global
+// lock. A failure releases what it took and names the cluster that blocked.
+func AcquireClusters(ctx context.Context, clusters []string, method, requestID string, timeout time.Duration) (Release, error) {
+	names := append([]string(nil), clusters...)
+	sort.Strings(names)
+	names = slices.Compact(names)
+	var releases []Release
+	releaseAll := func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		release, err := AcquireCluster(ctx, name, LockExclusive, method, requestID, timeout)
+		if err != nil {
+			releaseAll()
+			return nil, err
+		}
+		releases = append(releases, release)
+	}
+	return releaseAll, nil
 }
 
 // AcquireHeavyIO takes the heavy-I/O lock exclusive, once: a busy lock is

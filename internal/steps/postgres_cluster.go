@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -160,6 +161,11 @@ func (s postgresCluster) Apply(ctx context.Context, cfg config.Cluster, rt engin
 			"existing": map[string]any{"data_directory": row.DataDir, "port": row.Port},
 			"wanted":   map[string]any{"data_directory": dataDir, "port": spec.Port},
 		})
+	}
+	// After the mismatch precondition and before the drop-in write or the
+	// script that may create or start the cluster.
+	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
+		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
 	}
 	if err := writeFile(PGServiceDropIn(spec.Name), dropin, 0o644); err != nil {
 		return engine.ApplyResult{}, err

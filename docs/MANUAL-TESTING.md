@@ -28,6 +28,7 @@ Live qualification evidence and original checklists. Dated failures, fixes and t
 - Full-snapshot master-bundle verification may say `behind` after backup telemetry updates that deliberately do not mark durable state dirty. Cryptographic verification and recovery passed; privileged per-file freshness comparison was not done.
 - Self-revert's journal and supported resume are now proven. Final DNS/TLS completion of that last resumed init was not supplied; the operator anticipated DNS mismatch, but no actual TLS failure output was recorded. Earlier completed remote/local bootstrap evidence remains valid.
 - Stable tag ancestry/signing/upload/channel promotion and stable install/upgrade await the first authorized alpha publication. Local release-promotion tests are not stable workflow evidence. macOS live testing was excluded by the operator.
+- **Phase 7 (extensions, repack and the exact report) has no live evidence.** Its source implementation has stage acceptance through E7-06; the two whole-change reviews and fresh final checks have not run. Every Phase 7 live case below is **NOT RUN**; the coordinated map is [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
 - Historical detailed fault-injection and cosmetic follow-ups below remain qualified by their individual evidence; this summary does not blanket-check them or expand the agreed scope.
 
 ### Test-resource accounting and release boundary
@@ -503,6 +504,43 @@ Run on the context chosen for the live test, after upgrading the server to the b
     - **A fresh floor refusal is executable.** Before a fresh follow has an entry, a `source_floors_above_follower` refusal names `vaire config set clusters.<source>.settings.<setting> <running value>`; running that command on the node's persisted configuration makes the retry safe. A retry of an existing unfinished follower names `clusters.<follower>.settings.<setting>` instead. No command targets a follower that does not exist, and no command restarts anything.
     - **Unread transition records fail closed at the poolers.** **Blocked** for live execution: making `records.json` unreadable or corrupt is not approved, even on a disposable node. Do not `chmod`, truncate, replace or hand-edit it. The fail-closed rendering and direct-fence behavior are covered by source regressions; see [RUN-phase-6-live.md](RUN-phase-6-live.md).
 
+
+## Phase 7: Extensions and maintenance (implemented locally, all live cases NOT RUN)
+
+Source implementation through E7-05 is accepted by both independent cumulative source lanes; E7-06 is at final targeted source closure. The two whole-change reviews and fresh final verification have not run, and nothing is published, deployed or live-qualified. **Every item in this section is unchecked and NOT RUN.** The command templates in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md) are preparation only: resolve the candidate, context, fixtures, budgets and permissions before executing anything. Do not force failures with hooks, corrupted records, `ALTER SYSTEM`, timing-only kills or repository edits.
+
+- [ ] **X1 — built-in extension and alias**
+    - On a disposable independent primary, `vaire ext list --db <db>`, `vaire ext add pgvector --db <db>`, `vaire ext list --db <db>`, then `vaire ext remove vector --db <db> --confirm <db>`.
+    - Expected: the alias is persisted as `vector`; package/control/installed/default facts are factual; no unrelated restart; removal keeps the package. Details in [EXTENSION-DEFINITIONS.md](EXTENSION-DEFINITIONS.md).
+- [ ] **X2 — real non-built-in custom definition (BLOCKED on fixture)**
+    - No safe real package or preinstalled fixture is selected; pgvector is built-in and does not prove general support. Do not execute the `pg_stat_kcache` template until its package availability and runtime behavior are verified on the target OS/architecture.
+    - Expected when a fixture exists: durable `[extensions.<name>]`, package/control/library facts, the same resolver in follower and rebuild paths, and honest rebuild prerequisites.
+- [ ] **X3 — missing repository or preinstalled prerequisite**
+    - Use a safely verified absent package or preinstalled file. Expected: an actionable prerequisite before effects, unknown facts not reported as absent, awaiting-recovery state preserved, and no automatic repository/key setup.
+- [ ] **X4 — dependent objects and explicit cascade**
+    - Use a fixture with a dependent object. Expected: bounded preview with count/truncation, no implicit cascade, protected removal refused, and a retry after SQL-absent reconciliation that does not repeat a completed DROP.
+- [ ] **X5 — isolated preload restart**
+    - Add a preload extension without its token, then with `--confirm <db>/restart`; remove with the database and restart tokens.
+    - Expected: missing token has zero effects; only that cluster restarts; effective preload precedes CREATE; pending roles work is retried without false completion.
+- [ ] **X6 — source/follower propagation and token isolation**
+    - Add and remove on a source with followers, omitting each follower token in turn and then supplying every exact token. Attempt a direct follower change and an ordinary apply with missing follower runtime readiness.
+    - Expected: zero effects on a missing token; followers configured/restarted first; primary SQL only; direct follower edits refused; ordinary apply cannot bypass; current membership is reloaded under lock.
+- [ ] **X7 — copied cron suppression through independence**
+    - With a safe bounded cron fixture, add `pg_cron`, fork, drill and unfollow. Observe the copy from first start through promotion/rename/settlement.
+    - Expected: no copied launch, jobs inactive and retargeted by actual metadata identity, source jobs untouched, independent disabling settings durable. Do not run unsafe jobs or claim timing-only crash safety.
+- [ ] **X8 — partial failure and retry (partly BLOCKED)**
+    - Re-add pending work and retry a remove after a successful DROP where a supported deterministic boundary exists. Expected exact completed/pending targets, no false rollback or “nothing changed”, packages retained. Where no supported boundary exists, record BLOCKED; do not add hooks or corrupt files.
+- [ ] **X9 — historical requirements across removal and rebuild**
+    - Take an extension-bearing backup, remove the extension, verify the stanza-bound requirement survives a separately authorized rebuild/recover, and test absent, explicit `[]` and populated `recovery_extensions`.
+    - Expected: absent refuses the unknown older point, empty asserts completeness, populated resolves and checks; incompatible requirements fail before start; an unbound dump is never attached by a reused name.
+- [ ] **X10 — manual and automatic repack**
+    - Add `pg_repack`; dry-run; repack one eligible ordinary permanent heap table with `--now --confirm <db>`; attempt a protected database; enable `auto_repack` with an approved threshold and run the weekly job.
+    - Expected: protected refusal on every path; missing extension/client before the destructive token; only `pg_default` table/TOAST/index/database/session defaults; twice the footprint plus host reserve; no backend kill; 60-second lock wait; busy/window outcomes accurate; one table at a time; window end starts nothing new. Every unattributable completion is `completion_unknown`, never confirmed `repacked`; a skip requires a known diagnostic with identical valid storage facts.
+- [ ] **X11 — one-table exact bloat report**
+    - Add `pgstattuple`; run `vaire maint report bloat --db <db> --table <table> --exact`.
+    - Expected: full `pgstattuple`, not `pgstattuple_approx`; measured table/live/dead/free bytes and percentages plus method; `vaire_admin` with `pg_monitor`; 5-second lock and 60-second statement timeouts; permission/timeout failures honest; no instantaneous, reclaimable, index or database-wide claim.
+
+The Phase 4 entries below that say `maint repack` “refuses until Phase 7” are historical evidence from that qualification; Phase 7 now implements repack locally, but it has not been live-tested.
 
 ## Historical v1 fix checklist (written 2026-10-16 before deployment)
 

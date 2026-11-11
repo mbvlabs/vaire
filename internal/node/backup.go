@@ -138,6 +138,12 @@ func jobBackup(ctx context.Context, env *jobEnv, kind string) (any, error) {
 		logLine(env.Report, env.Job, "the repository has no full backup yet; taking a full backup instead")
 		kind = backup.TypeFull
 	}
+	if err := captureStanzaRequirements(env.Cluster, env.spec()); err != nil {
+		return nil, output.NewError(output.CodePrecondition,
+			"recording "+env.DB+"'s extension requirements before the backup failed: "+err.Error(),
+			output.ExitPrecondition, "Nothing was backed up. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": env.DB})
+	}
 	set, err := d.Backup(ctx, kind)
 	if err != nil {
 		steps.RecordBackupFailure(env.Cluster, env.DB, kind)
@@ -637,9 +643,27 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	if err := dropKilledDrill(env, rs, db); err != nil {
 		return nil, err
 	}
-	m, err := backup.NewMaterialised(cfg.Server.DataRoot, name, db, spec.Port, env.shell(), env.Job, env.Report)
+	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
+		Intent: spec, Stanza: spec.Stanza, CopyDB: db, Options: opts,
+		Historical: true, Standby: true, Declaration: spec.RecoveryExtensions,
+	})
+	if err != nil {
+		drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "extensions", OK: false, Detail: secrets.Redact(err.Error())})
+		drill.Result = backup.DrillFail
+		record()
+		return drill, output.WrapError(output.CodePrecondition, fmt.Errorf("the restore drill of %s was refused before its copy: %w", db, err), output.ExitPrecondition,
+			"Fix the extension declaration or prerequisite; no copy was started.")
+	}
+	m, err := newPrestartMaterialised(cfg.Server.DataRoot, name, db, spec.Port, env, cfg, spec, plan)
 	if err != nil {
 		return nil, err
+	}
+	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
+		_ = m.Drop()
+		return nil, output.NewError(output.CodePrecondition,
+			"recording the drill's extension requirements failed: "+err.Error(),
+			output.ExitPrecondition, "The copy was not started. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
 	}
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		s.Drilling[db] = name
@@ -671,6 +695,14 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 			logLine(env.Report, env.Job, name+": "+line)
 		}
 		return fail("restore", err)
+	}
+	if plan.Plan.Cron {
+		if _, err := deactivateCopyCron(ctx, m.PG()); err != nil {
+			return fail("extensions", err)
+		}
+	}
+	if _, err := checkCopyExtensions(ctx, cfg, spec, plan.Plan, m.PG(), db); err != nil {
+		return fail("extensions", err)
 	}
 	drill.RecoveredTo = m.RecoveredTo(ctx)
 	if drill.RecoveredTo == "" {
@@ -901,6 +933,16 @@ func dumpToBucket(ctx context.Context, cfg config.Cluster, sh engine.Shell, step
 		return backup.Dump{}, err
 	}
 	logLine(report, stepID, "dumping "+db+" to the bucket")
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return backup.Dump{}, databaseNotFound(db)
+	}
+	if err := captureStanzaRequirements(cfg, spec); err != nil {
+		return backup.Dump{}, output.NewError(output.CodePrecondition,
+			"recording "+db+"'s extension requirements before the dump failed: "+err.Error(),
+			output.ExitPrecondition, "Nothing was dumped. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
+	}
 	dump, err := backup.DumpToBucket(ctx, sh, stepID, report, target, local, db, recipient, final)
 	if err != nil {
 		return dump, err
@@ -926,6 +968,16 @@ func DumpStream(ctx context.Context, db string, w io.Writer) error {
 	local, err := clusterPG(cfg, db)
 	if err != nil {
 		return err
+	}
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return databaseNotFound(db)
+	}
+	if err := captureStanzaRequirements(cfg, spec); err != nil {
+		return output.NewError(output.CodePrecondition,
+			"recording "+db+"'s extension requirements before the dump failed: "+err.Error(),
+			output.ExitPrecondition, "Nothing was dumped. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
 	}
 	return backup.PgDump(ctx, engine.Shell{Secrets: secrets.Default}, "dump", nil, local, db, w)
 }

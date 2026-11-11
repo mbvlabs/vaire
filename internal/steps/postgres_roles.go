@@ -23,6 +23,75 @@ const postgresRolesID = "postgres-roles-v1"
 // write role made from it is visible there too.
 const AuthDB = "postgres"
 
+// The roles step's host effects are seams so tests can drive the real
+// Check/Apply pipeline with a modeled PostgreSQL state. Production uses the
+// real functions.
+var (
+	rolesQueryColumn = queryColumn
+	rolesExec        = func(ctx context.Context, local pg.Local, db, sql string, vars map[string]string) error {
+		return local.Exec(ctx, db, sql, vars)
+	}
+	rolesLoadedPreloads    = LoadedPreloads
+	rolesPendingRestart    = pendingRestartSettings
+	rolesRuntimeDir        = RuntimeDir
+	rolesWriteRuntimePass  = writeRuntimePass
+	rolesExtensionSettings = func(ctx context.Context, local pg.Local, db string, keys []string) (map[string]ExtensionSettingFact, error) {
+		out := map[string]ExtensionSettingFact{}
+		for _, key := range keys {
+			rows, err := local.Query(ctx, db, ExtensionSettingFactSQL(key), nil)
+			if err != nil {
+				return nil, err
+			}
+			fact := ExtensionSettingFact{}
+			if len(rows) > 0 {
+				fact = ParseExtensionSettingFact(rows[0])
+			}
+			out[key] = fact
+		}
+		return out, nil
+	}
+)
+
+// RolesTestHooks replaces the roles step's host effects for a test in another
+// package. It does not replace the step or engine.
+type RolesTestHooks struct {
+	QueryColumn       func(ctx context.Context, local pg.Local, db, sql string) ([]string, error)
+	Exec              func(ctx context.Context, local pg.Local, db, sql string, vars map[string]string) error
+	LoadedPreloads    func(ctx context.Context, local pg.Local) (map[string]bool, error)
+	PendingRestart    func(ctx context.Context, local pg.Local) ([]string, error)
+	ExtensionSettings func(ctx context.Context, local pg.Local, db string, keys []string) (map[string]ExtensionSettingFact, error)
+	WriteRuntimePass  func(rt engine.Runtime, role, secret string) error
+}
+
+// SetRolesTestHooks installs roles host-effect hooks and returns the restore
+// function.
+func SetRolesTestHooks(h RolesTestHooks) func() {
+	oldQuery, oldExec := rolesQueryColumn, rolesExec
+	oldLoaded, oldPending, oldSettings, oldWrite := rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings, rolesWriteRuntimePass
+	if h.QueryColumn != nil {
+		rolesQueryColumn = h.QueryColumn
+	}
+	if h.Exec != nil {
+		rolesExec = h.Exec
+	}
+	if h.LoadedPreloads != nil {
+		rolesLoadedPreloads = h.LoadedPreloads
+	}
+	if h.PendingRestart != nil {
+		rolesPendingRestart = h.PendingRestart
+	}
+	if h.ExtensionSettings != nil {
+		rolesExtensionSettings = h.ExtensionSettings
+	}
+	if h.WriteRuntimePass != nil {
+		rolesWriteRuntimePass = h.WriteRuntimePass
+	}
+	return func() {
+		rolesQueryColumn, rolesExec = oldQuery, oldExec
+		rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings, rolesWriteRuntimePass = oldLoaded, oldPending, oldSettings, oldWrite
+	}
+}
+
 // systemDatabases are never reported as orphaned.
 var systemDatabases = map[string]bool{"postgres": true, "template0": true, "template1": true}
 
@@ -32,6 +101,11 @@ var systemDatabases = map[string]bool{"postgres": true, "template0": true, "temp
 type postgresRoles struct{ clusterStep }
 
 func (s postgresRoles) ID() string { return s.id(postgresRolesID) }
+
+// Recheck makes a journal-completed roles step re-examine the host before it
+// is skipped. A matching hash must not hide missing SQL, missing files or a
+// preload library that still waits for its restart.
+func (postgresRoles) Recheck() bool { return true }
 
 func (postgresRoles) Instance(cluster string) engine.Step {
 	return postgresRoles{clusterStep{cluster: cluster}}
@@ -69,6 +143,11 @@ type databaseInputs struct {
 	Name             string   `json:"name"`
 	StatementTimeout string   `json:"statement_timeout"`
 	Extensions       []string `json:"extensions"`
+	// ExtensionIdentity carries the semantic descriptor of an enabled
+	// extension only when it differs from its built-in default. It is
+	// omitted for ordinary built-in use, preserving the previous inputs
+	// hash, and a note-only or unused definition change adds nothing.
+	ExtensionIdentity []catalog.SemanticIdentity `json:"extension_identity,omitempty"`
 	// Protected takes vaire_admin's write access away (AdminAccessSQL), so
 	// protecting or lifting a protection re-runs the step.
 	Protected bool `json:"protected,omitempty"`
@@ -79,10 +158,39 @@ func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
+	identity, err := extensionIdentities(cfg, spec)
+	if err != nil {
+		return nil, err
+	}
 	return canonical(roleInputs{
 		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL, AccessSQL: AdminRoleSQL(spec), MonitorSQL: monitorSQL,
-		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions, Protected: spec.Protected},
+		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions, ExtensionIdentity: identity, Protected: spec.Protected},
 	})
+}
+
+// extensionIdentities is the enabled extensions whose resolved descriptor
+// differs from its built-in default. A custom provider, schema, setting or
+// copy/standby declaration therefore re-runs the roles step, while an ordinary
+// built-in or a note-only override leaves the inputs bytes unchanged.
+func extensionIdentities(cfg config.Cluster, spec config.ClusterSpec) ([]catalog.SemanticIdentity, error) {
+	resolver := cfg.ExtensionResolver()
+	effective, err := resolver.EffectiveNames(spec.Extensions)
+	if err != nil {
+		return nil, err
+	}
+	var out []catalog.SemanticIdentity
+	for _, name := range effective {
+		ext, err := resolver.Resolve(name)
+		if err != nil {
+			return nil, err
+		}
+		if builtin, ok := catalog.Lookup(ext.Name); ok && builtin.SemanticEqual(ext) {
+			continue
+		}
+		out = append(out, ext.SemanticIdentity())
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
@@ -91,7 +199,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		return engine.CheckResult{}, err
 	}
 	local := ClusterPG(spec)
-	roles, err := queryColumn(ctx, local, "postgres", "SELECT rolname FROM pg_roles")
+	roles, err := rolesQueryColumn(ctx, local, "postgres", "SELECT rolname FROM pg_roles")
 	if err != nil {
 		return incomplete("cannot read pg_roles"), nil
 	}
@@ -101,7 +209,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 			return incomplete("role " + role + " is missing"), nil
 		}
 	}
-	dbs, err := queryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
+	dbs, err := rolesQueryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
 	if err != nil {
 		return incomplete("cannot read pg_database"), nil
 	}
@@ -112,7 +220,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		{"pgbouncer_get_auth", RoleDirectOnly},
 		{"pgbouncer_get_auth_session", "operator connections"},
 	} {
-		src, err := queryColumn(ctx, local, AuthDB, "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
+		src, err := rolesQueryColumn(ctx, local, AuthDB, "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
 		if err != nil || len(src) == 0 {
 			return incomplete("vaire." + fn.name + " is missing"), nil
 		}
@@ -120,7 +228,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 			return incomplete("vaire." + fn.name + " is out of date"), nil
 		}
 	}
-	member, err := queryColumn(ctx, local, "postgres", adminOwnerMemberSQL(spec.Name))
+	member, err := rolesQueryColumn(ctx, local, "postgres", adminOwnerMemberSQL(spec.Name))
 	if err != nil || len(member) != 1 {
 		return incomplete("cannot read vaire_admin's membership in " + spec.Name + "_owner"), nil
 	}
@@ -134,7 +242,7 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		{"pg_signal_backend", "vaire_admin can still terminate sessions of protected " + spec.Name},
 		{"pg_maintain", "vaire_admin can still lock the tables of protected " + spec.Name},
 	} {
-		held, err := queryColumn(ctx, local, "postgres", adminMemberSQL(r.role))
+		held, err := rolesQueryColumn(ctx, local, "postgres", adminMemberSQL(r.role))
 		if err != nil || len(held) != 1 {
 			return incomplete("cannot read vaire_admin's membership in " + r.role), nil
 		}
@@ -145,51 +253,85 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 			return incomplete("vaire_admin is not a member of " + r.role), nil
 		}
 	}
-	direct, err := queryColumn(ctx, local, "postgres", directOnlyMembersSQL)
+	direct, err := rolesQueryColumn(ctx, local, "postgres", directOnlyMembersSQL)
 	if err != nil {
 		return incomplete("cannot read " + RoleDirectOnly + " members"), nil
 	}
 	if !stringSet(direct)[spec.Name+"_"+RoleMigrate] {
 		return incomplete("role " + spec.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly), nil
 	}
-	installed, err := queryColumn(ctx, local, spec.Name, "SELECT extname FROM pg_extension")
+	installed, err := rolesQueryColumn(ctx, local, spec.Name, "SELECT extname FROM pg_extension")
 	if err != nil {
 		return incomplete("cannot read extensions in " + spec.Name), nil
 	}
-	have := stringSet(installed)
-	for _, ext := range spec.Extensions {
-		entry, ok := catalog.Lookup(ext)
-		if !ok || entry.ExtName == "" {
-			continue
-		}
-		if !have[entry.ExtName] {
-			return incomplete("extension " + entry.ExtName + " is missing in " + spec.Name), nil
+	missing, err := missingExtensionNames(cfg, spec, stringSet(installed))
+	if err != nil {
+		return engine.CheckResult{}, err
+	}
+	if len(missing) == 1 {
+		return incomplete("extension " + missing[0] + " is missing in " + spec.Name), nil
+	}
+	if len(missing) > 1 {
+		return incomplete("extensions " + strings.Join(missing, ", ") + " are missing in " + spec.Name), nil
+	}
+	reqs, err := extensionRuntimeRequirementsForSpec(cfg, spec)
+	if err != nil {
+		return engine.CheckResult{}, err
+	}
+	if missingFiles := missingExtensionFiles(reqs); len(missingFiles) > 0 {
+		return incomplete(strings.Join(missingFiles, "; ")), nil
+	}
+	loaded, err := rolesLoadedPreloads(ctx, local)
+	if err != nil {
+		return incomplete("cannot read shared_preload_libraries in " + spec.Name), nil
+	}
+	for _, req := range reqs {
+		if req.Preload != "" && !loaded[req.Preload] {
+			return incomplete("library " + req.Preload + " is not preloaded in " + spec.Name), nil
 		}
 	}
 	for _, name := range []string{"pgbouncer_auth", "monitor"} {
-		if _, err := os.Stat(RuntimeDir + "/" + name + ".pass"); err != nil {
-			return incomplete(RuntimeDir + "/" + name + ".pass is missing"), nil
+		if _, err := os.Stat(rolesRuntimeDir + "/" + name + ".pass"); err != nil {
+			return incomplete(rolesRuntimeDir + "/" + name + ".pass is missing"), nil
 		}
 	}
 	return complete(), nil
 }
 
-func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, _ engine.Reporter) (engine.ApplyResult, error) {
+func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	spec, err := s.spec(cfg)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
 	local := ClusterPG(spec)
-	roles, err := queryColumn(ctx, local, "postgres", "SELECT rolname FROM pg_roles")
+	// Install/hold and verify this target's extension prerequisites before
+	// any SQL or password file write. The effective SQL selection itself is
+	// unchanged.
+	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
+		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
+	}
+	loaded, err := rolesLoadedPreloads(ctx, local)
+	if err != nil {
+		return engine.ApplyResult{}, err
+	}
+	pending, err := rolesPendingRestart(ctx, local)
+	if err != nil {
+		return engine.ApplyResult{}, err
+	}
+	// Read the cluster-wide roles and databases from the postgres system
+	// database first. A new application database does not exist yet, so its
+	// catalog cannot be queried until the CREATE DATABASE below really ran.
+	roles, err := rolesQueryColumn(ctx, local, "postgres", "SELECT rolname FROM pg_roles")
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
 	roleSet := stringSet(roles)
-	dbs, err := queryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
+	dbs, err := rolesQueryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
 	dbSet := stringSet(dbs)
+	databaseMissing := !dbSet[spec.Name]
 
 	var cluster strings.Builder
 	cluster.WriteString("-- managed by vaire - do not edit; use cluster.toml\n")
@@ -223,21 +365,104 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 		return engine.ApplyResult{}, err
 	}
 	cluster.WriteString(sql)
-	if err := local.Exec(ctx, AuthDB, cluster.String(), nil); err != nil {
+	// Establish a missing database before querying its catalog or deciding
+	// whether a dependent extension may be created. The roles and the database
+	// itself are prerequisites, not extension SQL: no CREATE EXTENSION or
+	// extension grant is in this block, and all of it runs only after the
+	// package/library preflight above.
+	if databaseMissing {
+		if err := rolesExec(ctx, local, AuthDB, cluster.String(), nil); err != nil {
+			return engine.ApplyResult{}, err
+		}
+	}
+	installedNames, err := rolesQueryColumn(ctx, local, spec.Name, "SELECT extname FROM pg_extension")
+	if err != nil {
+		return engine.ApplyResult{}, fmt.Errorf("reading %s's installed extensions before its dependent SQL: %w", spec.Name, err)
+	}
+	installed := stringSet(installedNames)
+	requiredKeys := map[string]bool{}
+	if sqlExtensions, err := extensionSQLSelection(cfg, spec); err != nil {
+		return engine.ApplyResult{}, err
+	} else {
+		for _, ext := range sqlExtensions {
+			if ext.ExtName == "" || installed[ext.ExtName] {
+				continue
+			}
+			if ext.Preload != "" && !loaded[ext.Preload] {
+				// The library is not loaded yet; its custom GUCs may not be
+				// visible until the preload restart, so the preload check in
+				// the SQL builder is the readiness decision.
+				continue
+			}
+			for key := range PrimaryExtensionExpectedSettings(cfg, spec, ext) {
+				requiredKeys[key] = true
+			}
+		}
+	}
+	var actualSettings map[string]ExtensionSettingFact
+	if len(requiredKeys) > 0 {
+		actualSettings, err = rolesExtensionSettings(ctx, local, spec.Name, sortedKeys(requiredKeys))
+		if err != nil {
+			return engine.ApplyResult{}, fmt.Errorf("reading %s's required extension settings before dependent SQL: %w", spec.Name, err)
+		}
+		for key := range requiredKeys {
+			if _, ok := actualSettings[key]; !ok {
+				return engine.ApplyResult{}, fmt.Errorf("%s did not report the effective value of %s; no dependent SQL was run", spec.Name, key)
+			}
+		}
+	}
+	extensionSQL, deferred, err := extensionCreationSQLWithReadiness(cfg, spec, loaded, stringSet(pending), installed, actualSettings)
+	if err != nil {
 		return engine.ApplyResult{}, err
 	}
-	if err := local.Exec(ctx, spec.Name, databaseGrantsSQL(spec), nil); err != nil {
+	grants := databaseBaseGrantsSQL(spec) + extensionSQL
+	if !databaseMissing {
+		if err := rolesExec(ctx, local, AuthDB, cluster.String(), nil); err != nil {
+			return engine.ApplyResult{}, err
+		}
+	}
+	if err := rolesExec(ctx, local, spec.Name, grants, nil); err != nil {
 		return engine.ApplyResult{}, err
 	}
 
-	if err := writeRuntimePass(rt, "pgbouncer_auth", SecretPgbouncerAuth); err != nil {
+	if err := rolesWriteRuntimePass(rt, "pgbouncer_auth", SecretPgbouncerAuth); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	if err := writeRuntimePass(rt, "monitor", SecretMonitor); err != nil {
+	if err := rolesWriteRuntimePass(rt, "monitor", SecretMonitor); err != nil {
 		return engine.ApplyResult{}, err
 	}
 
-	return engine.ApplyResult{Restart: engine.RestartNone, Warnings: orphanedWarnings(spec, dbs, roleSet)}, nil
+	result := engine.ApplyResult{Restart: engine.RestartNone, Warnings: orphanedWarnings(spec, dbs, roleSet)}
+	if len(deferred) > 0 {
+		result.Incomplete = true
+		var restartNames []string
+		var settingDetails []string
+		for _, item := range deferred {
+			if item.RestartPending {
+				restartNames = append(restartNames, item.Name)
+				continue
+			}
+			settingDetails = append(settingDetails, item.Name+": "+item.Detail)
+		}
+		if len(restartNames) > 0 {
+			message := extensionPendingMessage(spec.Name, restartNames)
+			result.Notes = append(result.Notes, message)
+			result.Warnings = append(result.Warnings, output.Warning{
+				Code:    "extension_pending_restart",
+				Message: message,
+			})
+		}
+		if len(settingDetails) > 0 {
+			message := strings.Join(settingDetails, "; ") + " in " + spec.Name +
+				" before its dependent SQL; fix the required setting and re-run apply (no restart token is needed for a reload-only change)"
+			result.Notes = append(result.Notes, message)
+			result.Warnings = append(result.Warnings, output.Warning{
+				Code:    "extension_settings_pending",
+				Message: message,
+			})
+		}
+	}
+	return result, nil
 }
 
 // monitorSQL sets vaire_monitor up for the exporters (Phase 4 D4): a
@@ -424,11 +649,27 @@ func DatabaseConnectSQL(target, roleDB string) string {
 
 // DatabaseGrantsSQL is postgres-roles-v1's schema, default-privilege and
 // extension SQL for db, run inside the database it is for. A restore from a
-// dump and vaire db fork run it in the databases they load.
-func DatabaseGrantsSQL(db config.ClusterSpec) string { return databaseGrantsSQL(db) }
+// dump and vaire db fork run it in the databases they load. It resolves the
+// cluster's definitions so a custom extension is created too.
+func DatabaseGrantsSQL(cfg config.Cluster, db config.ClusterSpec) (string, error) {
+	return databaseGrantsSQL(cfg, db)
+}
 
-// databaseGrantsSQL is the schema and default-privilege SQL run inside db.
-func databaseGrantsSQL(db config.ClusterSpec) string {
+// databaseGrantsSQL is the schema, default-privilege and extension SQL run
+// inside db. It is used by dump restore after the copy is running with its
+// preloads; the roles step uses extensionCreationSQL so it can defer a
+// preload-dependent CREATE instead.
+func databaseGrantsSQL(cfg config.Cluster, db config.ClusterSpec) (string, error) {
+	extensions, err := allExtensionsSQL(cfg, db)
+	if err != nil {
+		return "", err
+	}
+	return databaseBaseGrantsSQL(db) + extensions, nil
+}
+
+// databaseBaseGrantsSQL is the schema and default-privilege SQL for db's
+// application roles. It grants nothing to vaire_admin.
+func databaseBaseGrantsSQL(db config.ClusterSpec) string {
 	owner := pg.Quote(db.Name + "_owner")
 	app := pg.Quote(db.Name + "_app")
 	ro := pg.Quote(db.Name + "_ro")
@@ -438,14 +679,40 @@ func databaseGrantsSQL(db config.ClusterSpec) string {
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT ON TABLES TO %s;\n", owner, ro)
-	for _, ext := range db.Extensions {
-		entry, ok := catalog.Lookup(ext)
-		if !ok || entry.ExtName == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "CREATE EXTENSION IF NOT EXISTS %s;\n", pg.Quote(entry.ExtName))
-	}
 	return b.String()
+}
+
+// allExtensionsSQL creates every effective SQL extension of db, including the
+// implicit default modules. auto_explain has no CREATE EXTENSION name and is
+// skipped. The caller is responsible for the cluster running with any
+// declared preload library.
+func allExtensionsSQL(cfg config.Cluster, db config.ClusterSpec) (string, error) {
+	entries, err := extensionSQLSelection(cfg, db)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, entry := range entries {
+		b.WriteString(ExtensionSQL(entry, db.Name))
+	}
+	return b.String(), nil
+}
+
+// missingExtensionNames lists effective SQL extensions that are absent from
+// installed. auto_explain is preload-only and never appears.
+func missingExtensionNames(cfg config.Cluster, spec config.ClusterSpec, installed map[string]bool) ([]string, error) {
+	entries, err := extensionSQLSelection(cfg, spec)
+	if err != nil {
+		return nil, err
+	}
+	var missing []string
+	for _, entry := range entries {
+		if !installed[entry.ExtName] {
+			missing = append(missing, entry.ExtName)
+		}
+	}
+	sort.Strings(missing)
+	return missing, nil
 }
 
 // RoleDirectOnly marks login roles that must connect to PostgreSQL directly:

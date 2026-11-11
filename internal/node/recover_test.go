@@ -8,6 +8,7 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/render"
 	"github.com/mbvlabs/vaire/internal/steps"
@@ -52,7 +53,7 @@ func TestRecoverRendersTheStanzaBeforeArming(t *testing.T) {
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-abc123", Port: 5433}, {Name: "other", Stanza: "other-def456", Port: 5434}}
 	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"app": {}, "other": {}}}
 
-	opts := stanzaConfOptions(cfg, "app", nil)
+	opts := stanzaConfOptions(cfg, "app", engine.Runtime{}, nil)
 	if !slices.Equal(opts.Only, steps.PgBackRestStepIDs()) || opts.Recovering != "app" || opts.Restarter == nil {
 		t.Errorf("options %+v", opts)
 	}

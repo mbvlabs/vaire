@@ -10,6 +10,7 @@ import (
 	"os/user"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -101,6 +102,51 @@ func TestRestoreFiles(t *testing.T) {
 	}
 }
 
+func TestRestoreFilesReplacesWithExtensionIntent(t *testing.T) {
+	cfg := config.DefaultCluster()
+	cfg.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-abc123"}}
+	replacement := config.DefaultCluster()
+	replacement.ClusterName = "prod"
+	replacement.Extensions = map[string]config.ExtensionDefinition{
+		"custom": {Source: "preinstalled", Settings: map[string]string{"custom.mode": "on"}},
+	}
+	empty := []string{}
+	replacement.Clusters = []config.ClusterSpec{{
+		Name: "app", Stanza: "app-abc123", Extensions: []string{"custom", "pg_stat_statements"},
+		RecoveryExtensions: &empty,
+	}}
+	raw, err := replacement.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := masterbackup.Bundle{Files: []masterbackup.File{
+		masterbackup.NewFile(masterbackup.ClusterPath, "root", "root", 0o640, []byte("old\n")),
+	}}
+	files, _, err := restoreFiles(b, cfg, string(raw), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var placed []byte
+	for _, f := range files {
+		if f.Path == masterbackup.ClusterPath {
+			placed = f.Data
+		}
+	}
+	if string(placed) != string(raw) {
+		t.Fatalf("restore did not place the encoded configuration:\n%s", placed)
+	}
+	got, err := config.ParseCluster(placed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Extensions["custom"].Settings["custom.mode"] != "on" {
+		t.Fatalf("custom definition lost: %+v", got.Extensions)
+	}
+	if got.Clusters[0].RecoveryExtensions == nil || len(*got.Clusters[0].RecoveryExtensions) != 0 {
+		t.Fatalf("explicit empty declaration lost: %v", got.Clusters[0].RecoveryExtensions)
+	}
+}
+
 func TestRestoreFilesWithoutRecords(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-abc123"}}
@@ -161,8 +207,10 @@ func TestRecoverTokenAndSplitBrain(t *testing.T) {
 	if !writtenAfterFence(fence.Add(5*time.Minute), fence) {
 		t.Error("a new segment wasn't caught")
 	}
-	if scaffoldSteps("app")[1] != "postgres-cluster-v1@app" {
-		t.Errorf("scaffold steps %v", scaffoldSteps("app"))
+	if got := scaffoldSteps("app"); !slices.Equal(got, []string{
+		"kernel-tuning-v1", "postgres-packages-v1", "postgres-cluster-v1@app", "postgres-config-v1@app",
+	}) {
+		t.Errorf("scaffold steps %v", got)
 	}
 }
 

@@ -43,10 +43,11 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 		// bypasses its protection.
 		return Result{}, followerError(spec, "writing to it")
 	}
-	if spec.Protected {
-		if err := refuseUnsettledSQL(spec.Name); err != nil {
-			return Result{}, err
-		}
+	// Every public SQL path checks the durable activation fence, protected or
+	// not, before it opens a connection: a swapped or adopted copy whose
+	// safety settlement is incomplete must not be reachable even by a read.
+	if err := refuseUnsettledSQL(spec.Name); err != nil {
+		return Result{}, err
 	}
 	local := steps.ClusterPG(spec)
 	// A follower's cluster holds its source's database and roles (Phase 6).
@@ -97,7 +98,7 @@ func refuseUnsettledSQL(db string) error {
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		return output.NewError(output.CodePrecondition,
-			"the node's unfollow records could not be read, so no SQL runs on protected "+db, output.ExitPrecondition,
+			"the node's activation records could not be read, so no SQL runs on "+db, output.ExitPrecondition,
 			"Inspect the node's records file and fix it; vaire never resets it on its own.").
 			WithDetails(map[string]any{"reason": "unfollow_state_unknown", "database": db})
 	}
@@ -106,6 +107,9 @@ func refuseUnsettledSQL(db string) error {
 			db+"'s unfollow has not settled its protection, so no SQL runs on it", output.ExitPrecondition,
 			"Finish the unfollow with vaire db unfollow "+db+" --confirm "+db+"/unfollow, then retry.").
 			WithDetails(map[string]any{"reason": "unfollow_unsettled", "database": db})
+	}
+	if f, ok := recs.ActivationFenceFor(db); ok && f.Active() {
+		return activationFenceRefusal(f, db)
 	}
 	return nil
 }

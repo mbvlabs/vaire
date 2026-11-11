@@ -3,6 +3,7 @@ package steps
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -318,6 +319,9 @@ func setupStanza(ctx context.Context, cfg config.Cluster, c config.ClusterSpec, 
 	}
 	if info.HasFull() {
 		return "stanza " + d.Stanza + " (" + c.Name + ") checked", nil
+	}
+	if err := CaptureStanzaRequirements(cfg, c); err != nil {
+		return "", fmt.Errorf("recording %s's extension requirements before its first full backup: %w", c.Name, err)
 	}
 	set, err := d.Backup(ctx, backup.TypeFull)
 	if err != nil {

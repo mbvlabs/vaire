@@ -26,8 +26,19 @@ const cmdOutputTail = 2048
 // failing. The session pooler isn't paused: in session mode PAUSE waits for
 // every client to disconnect.
 type postgresRestarter struct {
-	cfg config.Cluster
+	cfg     config.Cluster
+	rt      engine.Runtime
+	report  engine.Reporter
+	guarded bool
 }
+
+// Restart host effects are seams for the real engine/step tests.
+var (
+	restarterPoolerAdmin  = poolerAdmin
+	restarterRunCmd       = runCmd
+	restarterWaitReady    = waitReady
+	restarterPendingCheck = pendingRestartSettings
+)
 
 // restartCommand is the restart of cluster: its systemd unit, which is what
 // runs the cluster. The unit's ExecStop is pg_ctlcluster's -m fast stop.
@@ -43,22 +54,29 @@ func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Du
 	if !ok {
 		return 0, fmt.Errorf("cluster %s is not in cluster.toml", cluster)
 	}
+	if r.guarded {
+		// Before PAUSE, the deferred RESUME, downtime timing or the restart
+		// command. Only the named, already-confirmed target is checked.
+		if err := PrepareExtensionStart(ctx, r.cfg, spec, nil, r.rt, r.report); err != nil {
+			return 0, fmt.Errorf("extension prerequisites before restarting %s: %w", cluster, err)
+		}
+	}
 	start := time.Now()
 	// A PAUSE that fails or times out (PgBouncer down, a long transaction)
 	// doesn't stop the restart: -m fast ends the transaction anyway, and
 	// RESUME below clears a pause still in progress.
-	_ = poolerAdmin(ctx, PgbouncerPort, "PAUSE "+cluster)
-	defer func() { _ = poolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+cluster) }()
+	_ = restarterPoolerAdmin(ctx, PgbouncerPort, "PAUSE "+cluster)
+	defer func() { _ = restarterPoolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+cluster) }()
 	name, args := restartCommand(cluster)
-	if err := runCmd(ctx, name, args...); err != nil {
+	if err := restarterRunCmd(ctx, name, args...); err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: %w%s", PGServiceName(cluster), err, unitDiagnosis(ctx, PGServiceName(cluster)))
 	}
-	if err := waitReady(ctx, spec.Port); err != nil {
+	if err := restarterWaitReady(ctx, spec.Port); err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: %w%s", PGServiceName(cluster), err, unitDiagnosis(ctx, PGServiceName(cluster)))
 	}
 	// The restart is done when PostgreSQL runs with every setting it was
 	// restarted for.
-	pending, err := pendingRestartSettings(ctx, ClusterPG(spec))
+	pending, err := restarterPendingCheck(ctx, ClusterPG(spec))
 	if err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: reading pending_restart: %w", PGServiceName(cluster), err)
 	}
@@ -150,9 +168,16 @@ func (t *tailBuffer) String() string {
 	return string(t.buf)
 }
 
-// Restarter returns the cluster restarter the runner calls for each cluster
-// with a confirmed pending restart.
+// Restarter returns an unguarded restarter, for callers that only need the
+// read-only NeedsRestart check. Production applies use RestarterFor.
 func Restarter(cfg config.Cluster) engine.Restarter { return postgresRestarter{cfg: cfg} }
+
+// RestarterFor returns the guarded restarter used for confirmed pending
+// restarts. It has the runtime and reporter needed to install/hold and verify
+// the target's extension prerequisites before the first PAUSE or restart.
+func RestarterFor(cfg config.Cluster, rt engine.Runtime, report engine.Reporter) engine.Restarter {
+	return postgresRestarter{cfg: cfg, rt: rt, report: report, guarded: true}
+}
 
 // PauseDatabase pauses db on the transaction pooler, so its clients wait
 // through a restore's cut-over instead of failing, and returns the RESUME.
@@ -170,7 +195,7 @@ func (r postgresRestarter) NeedsRestart(ctx context.Context, cluster string) (bo
 	if !ok {
 		return false, fmt.Errorf("cluster %s is not in cluster.toml", cluster)
 	}
-	pending, err := pendingRestartSettings(ctx, ClusterPG(spec))
+	pending, err := restarterPendingCheck(ctx, ClusterPG(spec))
 	if err != nil {
 		return false, err
 	}

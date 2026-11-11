@@ -12,6 +12,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/render"
 	"github.com/mbvlabs/vaire/internal/secrets"
 )
@@ -89,6 +90,15 @@ func fencedPoolerAliases(recs backup.Records) map[string]bool {
 		}
 		out[name] = true
 	}
+	for name, f := range recs.Activation {
+		if !f.Active() {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[name] = true
+	}
 	return out
 }
 
@@ -117,6 +127,11 @@ func restoreEntries(cfg config.Cluster, recs backup.Records) []render.PoolerData
 	var out []render.PoolerDatabase
 	for db, r := range recs.Restores {
 		if _, ok := cfg.ClusterByName(db); !ok || r.Phase != backup.PhaseReady || r.Port == 0 {
+			continue
+		}
+		// A restore whose promotion has begun must not keep an inspection
+		// route to the copy that is being swapped or is still unsettled.
+		if f, ok := recs.ActivationFenceFor(db); ok && f.Active() {
 			continue
 		}
 		out = append(out, render.PoolerDatabase{Name: backup.RestoringName(db), DBName: db, Port: r.Port, MaxConnections: restoreEntryPool})
@@ -154,6 +169,9 @@ var poolerFilePaths = struct {
 func pgbouncerFiles(cfg config.Cluster, rt engine.Runtime) ([]pgbouncerFile, error) {
 	recs, err := poolerRecords()
 	if err != nil {
+		return nil, err
+	}
+	if err := validateRoutingEligibility(cfg, recs); err != nil {
 		return nil, err
 	}
 	return pgbouncerFilesFrom(cfg, rt, recs), nil
@@ -261,6 +279,91 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
 
+// poolerInstance is this install's real instance identity for routing
+// eligibility. It is a variable so a test can model a rebuilt node.
+var poolerInstance = func() (string, error) { return masterbackup.ReadInstance("") }
+
+// validateRoutingEligibility proves every routing fence before any exposing
+// render or reload: the actual instance, current stanza/port/paths,
+// registration and recorded transition must all still match. An invalid or
+// stale record refuses instead of publishing an alias the poolers cannot
+// safely route.
+func validateRoutingEligibility(cfg config.Cluster, recs backup.Records) error {
+	routing := false
+	for _, f := range recs.Activation {
+		if f.OperationID != "" && f.Phase == "routing" {
+			routing = true
+			break
+		}
+	}
+	if !routing {
+		return nil
+	}
+	instance, err := poolerInstance()
+	if err != nil {
+		return output.NewError(output.CodePrecondition,
+			"the node instance identity could not be read, so pooler routing eligibility is unknown: "+err.Error(),
+			output.ExitPrecondition, "Repair the node's instance file deliberately; no pooler file was written.").
+			WithDetails(map[string]any{"reason": "routing_instance_unknown"})
+	}
+	instance = strings.TrimSpace(instance)
+	if instance == "" {
+		return output.NewError(output.CodePrecondition,
+			"the node instance identity is missing, so pooler routing eligibility is unknown",
+			output.ExitPrecondition, "Repair the node's instance file deliberately; no pooler file was written.").
+			WithDetails(map[string]any{"reason": "routing_instance_unknown"})
+	}
+	for db, f := range recs.Activation {
+		if f.OperationID == "" || f.Phase != "routing" {
+			continue
+		}
+		fail := func(detail string) error {
+			return output.NewError(output.CodePrecondition,
+				db+"'s routing fence is not eligible: "+detail,
+				output.ExitPrecondition, "Finish or repair the owning operation; no pooler file was written.").
+				WithDetails(map[string]any{"reason": "routing_eligibility", "database": db, "detail": detail})
+		}
+		spec, ok := cfg.ClusterByName(db)
+		if !ok {
+			return fail("its database entry is missing")
+		}
+		if f.Instance == "" || f.Instance != instance {
+			return fail("its installation instance does not match this node")
+		}
+		if f.Kind != "fork" && f.Kind != "unfollow" && f.Kind != "restore-promote" {
+			return fail("its operation kind is unknown")
+		}
+		if f.TargetStanza == "" || f.TargetStanza != spec.Stanza {
+			return fail("its target stanza does not match cluster.toml")
+		}
+		if f.OldStanza == "" || f.NewStanza == "" || f.NewStanza != f.TargetStanza {
+			return fail("its recorded old/new stanza transition is incomplete")
+		}
+		if f.Port != spec.Port {
+			return fail("its recorded port does not match cluster.toml")
+		}
+		if f.DataDir != cfg.Server.DataDirectory(db) || f.ConfDir != PGConfDir(db) {
+			return fail("its recorded data/configuration directory does not match the database")
+		}
+		name, rest, ok := strings.Cut(f.Registration, ":")
+		portText, _, _ := strings.Cut(rest, ":")
+		if !ok || name != db || portText != strconv.Itoa(f.Port) {
+			return fail("its recorded registration does not match the database")
+		}
+		if !backup.ClusterRegistered(db) {
+			return fail("no postgresql-common registration exists")
+		}
+		data, err := backup.ClusterDataDirectory(db)
+		if err != nil {
+			return fail("its registration cannot be read: " + err.Error())
+		}
+		if data == "" || data != f.DataDir {
+			return fail("its registration points at a different data directory")
+		}
+	}
+	return nil
+}
+
 // ApplyPoolerFence writes both poolers' rendered configuration and reloads
 // them, without touching userlist.txt: db unfollow uses it to withhold an
 // unsettled alias durably, and the service roles (and their verifiers) do not
@@ -279,6 +382,9 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) error {
 	recs, err := poolerRecords()
 	if err != nil {
+		return err
+	}
+	if err := validateRoutingEligibility(cfg, recs); err != nil {
 		return err
 	}
 	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs)
@@ -318,6 +424,39 @@ func roleVerifiers(ctx context.Context, cfg config.Cluster) (map[string]string, 
 
 // pgbouncerResponds proves a pooler's admin console answers on its socket,
 // using the monitor password the node keeps for the exporters.
+// PoolerRoute is one alias a running pooler serves: its backend host, port and
+// database mapping and whether a transition PAUSE still holds it.
+type PoolerRoute struct {
+	Name     string
+	Host     string
+	Port     int
+	Database string
+	Paused   bool
+}
+
+// PoolerRoutes reads the actual [databases] routes a running pooler serves
+// from SHOW DATABASES. The backend mapping and pause state are verified, not
+// only the rendered file. A pooler that does not answer returns its error.
+func PoolerRoutes(ctx context.Context, dir string, port int) (map[string]PoolerRoute, error) {
+	rows, err := PoolerAdminPG(dir, port).Query(ctx, "pgbouncer", "SHOW DATABASES;", nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]PoolerRoute, len(rows))
+	for _, row := range rows {
+		name := row["name"]
+		if name == "" {
+			continue
+		}
+		backendPort, _ := strconv.Atoi(row["port"])
+		out[name] = PoolerRoute{
+			Name: name, Host: row["host"], Port: backendPort,
+			Database: row["database"], Paused: row["paused"] == "1" || row["paused"] == "true",
+		}
+	}
+	return out, nil
+}
+
 func pgbouncerResponds(ctx context.Context, socketDir string, port int) error {
 	password, err := os.ReadFile(RuntimeDir + "/monitor.pass")
 	if err != nil {

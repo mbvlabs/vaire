@@ -80,6 +80,14 @@ func Confirm(cmd *cobra.Command, token string) error {
 			"re-run with --confirm "+token,
 		).WithDetails(details)
 	}
+	return promptConfirm(cmd, token)
+}
+
+// promptConfirm asks a human for token without considering tokens already on
+// the command. Confirm uses it after its token checks; commands that need
+// several tokens use it for each one that is still missing.
+func promptConfirm(cmd *cobra.Command, token string) error {
+	details := map[string]any{"confirm_token": token}
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return output.NewError(
 			output.CodeUnsafeAction,

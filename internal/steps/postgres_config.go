@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
@@ -17,6 +19,39 @@ import (
 )
 
 const postgresConfigID = "postgres-config-v1"
+
+// configWriteFileOwned is the config step's first file effect, injectable so
+// tests can prove the extension preflight runs before any generated write.
+var configWriteFileOwned = writeFileOwned
+
+var configValidate = validateConfig
+var configScriptRun = func(ctx context.Context, rt engine.Runtime, stepID, script string, env map[string]string, report engine.Reporter) error {
+	return rt.Shell.Run(ctx, stepID, script, env, report)
+}
+
+// ConfigTestHooks replaces the config step's host effects for a test in
+// another package. It does not replace the step or engine.
+type ConfigTestHooks struct {
+	Write    func(path, content string, mode os.FileMode, owner, group string) error
+	Validate func(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) error
+	Script   func(ctx context.Context, rt engine.Runtime, stepID, script string, env map[string]string, report engine.Reporter) error
+}
+
+// SetConfigTestHooks installs config host-effect hooks and returns the restore
+// function.
+func SetConfigTestHooks(h ConfigTestHooks) func() {
+	oldWrite, oldValidate, oldScript := configWriteFileOwned, configValidate, configScriptRun
+	if h.Write != nil {
+		configWriteFileOwned = h.Write
+	}
+	if h.Validate != nil {
+		configValidate = h.Validate
+	}
+	if h.Script != nil {
+		configScriptRun = h.Script
+	}
+	return func() { configWriteFileOwned, configValidate, configScriptRun = oldWrite, oldValidate, oldScript }
+}
 
 // managedFile is one rendered file with its owner mode.
 type managedFile struct {
@@ -37,10 +72,14 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) (
 	conf := func(path string, content []byte, mode os.FileMode) managedFile {
 		return managedFile{Path: path, Content: string(content), Mode: mode, Owner: pgFileOwner, Group: pgFileGroup}
 	}
+	extensions, err := render.ExtensionsConf(cfg, spec, res)
+	if err != nil {
+		return nil, err
+	}
 	files := []managedFile{
 		conf(confD+"/10-vaire-tuning.conf", render.TuningConf(res), 0o644),
 		conf(confD+"/20-vaire-security.conf", render.SecurityConf(spec.Port), 0o644),
-		conf(confD+"/30-vaire-extensions.conf", render.ExtensionsConf(spec, res), 0o644),
+		conf(managedExtensionsConfPath(spec.Name), extensions, 0o644),
 		conf(confD+"/40-vaire-backup.conf", render.BackupConf(cfg, spec), 0o644),
 		conf(confD+"/50-vaire-settings.conf", render.SettingsConf(cfg, spec), 0o644),
 		conf(dir+"/pg_hba.conf", render.HBA(), 0o640),
@@ -106,10 +145,18 @@ func (s postgresConfig) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, e
 	for _, f := range files {
 		payload = append(payload, map[string]string{"path": f.Path, "content": f.Content})
 	}
-	return canonical(map[string]any{"files": payload, "overrides": string(render.OverridesHeader())})
+	data := map[string]any{"files": payload, "overrides": string(render.OverridesHeader())}
+	identity, err := extensionIdentities(cfg, spec)
+	if err != nil {
+		return nil, err
+	}
+	if len(identity) > 0 {
+		data["extension_identity"] = identity
+	}
+	return canonical(data)
 }
 
-func (s postgresConfig) Check(_ context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
+func (s postgresConfig) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtime) (engine.CheckResult, error) {
 	spec, err := s.spec(cfg)
 	if err != nil {
 		return engine.CheckResult{}, err
@@ -121,6 +168,30 @@ func (s postgresConfig) Check(_ context.Context, cfg config.Cluster, rt engine.R
 	for _, f := range files {
 		if !fileIsOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group) {
 			return incomplete(f.Path + " differs"), nil
+		}
+	}
+	if spec.IsFollower() {
+		id, err := FollowerRuntimeIdentity(cfg, spec, FollowerRuntimeOperation(ctx))
+		if err != nil {
+			return engine.CheckResult{}, err
+		}
+		snapshot, ok := FollowerRuntimePlanFor(ctx, id)
+		req := FollowerRuntimeRequest{
+			Class: FollowerRuntimeLive, Outgoing: FollowerRuntimeOutgoing(ctx), RetireAbsent: true,
+		}
+		if ok {
+			req.Snapshot = &snapshot
+		}
+		plan, err := PlanFollowerRuntime(ctx, cfg, spec, req)
+		if err != nil {
+			return engine.CheckResult{}, err
+		}
+		guard, present, err := backup.ReadCopyGuard(cfg.Server.DataDirectory(spec.Name))
+		if err != nil {
+			return engine.CheckResult{}, err
+		}
+		if FollowerGuardDrifted(guard, present, plan) {
+			return incomplete("the follower copy guard differs"), nil
 		}
 	}
 	if _, err := os.Stat(PGConfD(spec.Name) + "/90-overrides.conf"); err != nil {
@@ -150,13 +221,29 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		raw, err := os.ReadFile(f.Path) //nolint:gosec // G304: managed file paths from the catalogue.
 		if err == nil {
 			backups[f.Path] = string(raw)
-			if strings.HasPrefix(f.Path, PGConfD(spec.Name)+"/") {
-				first = false
-			}
+		}
+		switch base := filepath.Base(f.Path); {
+		case base == "pg_hba.conf" || base == "pg_ident.conf":
+			// pg_createcluster writes its own.
+		case err == nil || !os.IsNotExist(err):
+			// Present (readable or not): this cluster already has managed
+			// configuration, so unreadable evidence must refuse, not guess.
+			first = false
 		}
 	}
+	// Refuse an unprovable unload before any package, file, start, stop or SQL
+	// effect. The check reads live catalog facts, or the last managed
+	// extension file when the cluster is stopped/unreadable.
+	if err := RefuseExtensionUnload(ctx, cfg, spec, first); err != nil {
+		return engine.ApplyResult{}, err
+	}
+	// Install/hold and verify this target's extension prerequisites after the
+	// render is valid but before any generated write, reload, stop or start.
+	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
+		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
+	}
 	for _, f := range files {
-		if err := writeFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
+		if err := configWriteFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
 			return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
 		}
 	}
@@ -169,11 +256,15 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err := ensureIncludeDir(spec.Name); err != nil {
 		return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
 	}
-	if err := validateConfig(ctx, cfg, spec); err != nil {
+	if err := configValidate(ctx, cfg, spec); err != nil {
 		restoreFiles(files, backups)
 		return engine.ApplyResult{}, err
 	}
-	if err := rt.Shell.Run(ctx, s.ID(), Script("postgres-config"), map[string]string{"CLUSTER": spec.Name}, report); err != nil {
+	if err := ReconcileCopyGuard(ctx, cfg, spec); err != nil {
+		restoreFiles(files, backups)
+		return engine.ApplyResult{}, err
+	}
+	if err := configScriptRun(ctx, rt, s.ID(), Script("postgres-config"), map[string]string{"CLUSTER": spec.Name}, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
 

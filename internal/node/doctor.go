@@ -144,6 +144,7 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	}
 	for _, s := range readClusters(ctx, cfg, "", false) {
 		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}
+		c.Ext = extensionFactsForCluster(ctx, cfg, s.Spec, s.State, f.Records.IsAwaiting(s.Spec.Name))
 		if st, ok := followers[s.Spec.Name]; ok {
 			c.Follower = &st
 		}

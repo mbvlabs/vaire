@@ -22,6 +22,9 @@ func (c Cluster) Get(key string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !v.IsValid() {
+		return nil, nil
+	}
 	return v.Interface(), nil
 }
 
@@ -122,7 +125,10 @@ func ImmutableChanges(old, updated Cluster) []string {
 
 func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 	for len(segs) > 0 {
-		v = reflect.Indirect(v)
+		v = derefValue(v)
+		if !v.IsValid() {
+			return reflect.Value{}, nil
+		}
 		switch v.Kind() {
 		case reflect.Struct:
 			f, ok := fieldByTag(v, segs[0])
@@ -139,21 +145,50 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 			v = v.Index(idx)
 			segs = segs[1:]
 		case reflect.Map:
-			mv := v.MapIndex(reflect.ValueOf(strings.Join(segs, ".")))
+			if v.Type().Elem().Kind() == reflect.String {
+				// Setting maps such as [postgres.settings] keep their
+				// dotted key: everything left is the map key.
+				mv := v.MapIndex(reflect.ValueOf(strings.Join(segs, ".")))
+				if !mv.IsValid() {
+					return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
+				}
+				return mv, nil
+			}
+			mv := v.MapIndex(reflect.ValueOf(segs[0]))
 			if !mv.IsValid() {
 				return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
 			}
-			return mv, nil
+			v = mv
+			segs = segs[1:]
 		default:
 			return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
 		}
 	}
+	v = derefValue(v)
+	if !v.IsValid() {
+		return reflect.Value{}, nil
+	}
 	return v, nil
+}
+
+// derefValue follows pointers. A nil pointer yields an invalid Value, which
+// Get reports as an absent value.
+func derefValue(v reflect.Value) reflect.Value {
+	for v.IsValid() && v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return reflect.Value{}
+		}
+		v = v.Elem()
+	}
+	return v
 }
 
 func setIn(v reflect.Value, segs []string, value string) error {
 	for len(segs) > 1 {
-		v = reflect.Indirect(v)
+		v = derefValue(v)
+		if !v.IsValid() {
+			return unknownKeyError(strings.Join(segs, "."))
+		}
 		switch v.Kind() {
 		case reflect.Struct:
 			f, ok := fieldByTag(v, segs[0])
@@ -170,12 +205,41 @@ func setIn(v reflect.Value, segs []string, value string) error {
 			v = v.Index(idx)
 			segs = segs[1:]
 		case reflect.Map:
-			return setMapEntry(v, strings.Join(segs, "."), value)
+			if v.Type().Elem().Kind() == reflect.String {
+				return setMapEntry(v, strings.Join(segs, "."), value)
+			}
+			if v.Type().Elem().Kind() != reflect.Struct {
+				return unknownKeyError(strings.Join(segs, "."))
+			}
+			// A map of structs (such as [extensions]) cannot be edited
+			// in place: copy the value, change the copy, then replace it.
+			// A nil map is built on the side and assigned only on success.
+			m := v
+			if v.IsNil() {
+				m = reflect.MakeMap(v.Type())
+			}
+			key := reflect.ValueOf(segs[0])
+			current := m.MapIndex(key)
+			elem := reflect.New(v.Type().Elem()).Elem()
+			if current.IsValid() {
+				elem.Set(current)
+			}
+			if err := setIn(elem, segs[1:], value); err != nil {
+				return err
+			}
+			m.SetMapIndex(key, elem)
+			if v.IsNil() {
+				v.Set(m)
+			}
+			return nil
 		default:
 			return unknownKeyError(strings.Join(segs, "."))
 		}
 	}
-	v = reflect.Indirect(v)
+	v = derefValue(v)
+	if !v.IsValid() {
+		return unknownKeyError(strings.Join(segs, "."))
+	}
 	switch v.Kind() {
 	case reflect.Struct:
 		f, ok := fieldByTag(v, segs[0])
@@ -184,7 +248,11 @@ func setIn(v reflect.Value, segs []string, value string) error {
 		}
 		return setScalar(f, value)
 	case reflect.Map:
-		return setMapEntry(v, segs[0], value)
+		if v.Type().Elem().Kind() == reflect.String {
+			return setMapEntry(v, segs[0], value)
+		}
+		return output.NewError(output.CodeValidation, "this key cannot be set from the command line", output.ExitConfig,
+			"Edit cluster.toml with vaire config edit instead.")
 	default:
 		return unknownKeyError(segs[0])
 	}
@@ -227,8 +295,18 @@ func setMapEntry(v reflect.Value, key, value string) error {
 	return nil
 }
 
-// setScalar parses value into field by its kind.
+// setScalar parses value into field by its kind. A pointer is allocated and
+// parsed into a fresh value, then assigned only when parsing succeeds, so a
+// bad value never leaves a half-built pointer behind.
 func setScalar(field reflect.Value, value string) error {
+	if field.Kind() == reflect.Pointer {
+		elem := reflect.New(field.Type().Elem())
+		if err := setScalar(elem.Elem(), value); err != nil {
+			return err
+		}
+		field.Set(elem)
+		return nil
+	}
 	switch field.Kind() {
 	case reflect.String:
 		field.SetString(value)

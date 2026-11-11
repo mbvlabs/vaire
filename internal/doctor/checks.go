@@ -55,7 +55,8 @@ func NodeChecks() []Check {
 	}
 	checks = append(checks, ActivityChecks()...)
 	checks = append(checks, MasterChecks()...)
-	return append(checks, FollowerChecks()...)
+	checks = append(checks, FollowerChecks()...)
+	return append(checks, ExtensionChecks()...)
 }
 
 func osSupported(f Facts) []Result {

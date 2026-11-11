@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,55 @@ func TestInWindow(t *testing.T) {
 	}
 	if in, _ := InWindow(at(12, 0), s, e); in {
 		t.Error("noon")
+	}
+}
+
+func TestRepackBloatThreshold(t *testing.T) {
+	for _, valid := range []float64{0.0001, 0.4, 1} {
+		if err := CheckRepackBloatThreshold(valid); err != nil {
+			t.Errorf("%v: %v", valid, err)
+		}
+	}
+	for _, invalid := range []float64{0, -0.1, 1.0001, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if err := CheckRepackBloatThreshold(invalid); err == nil {
+			t.Errorf("%v passed", invalid)
+		}
+	}
+	if got := DefaultCluster().Maintenance.RepackBloatThreshold; got != 0.40 {
+		t.Errorf("default threshold %v, want 0.40", got)
+	}
+	parsed, err := ParseCluster([]byte("[maintenance]\nwindow = '02:00-05:00'\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Maintenance.RepackBloatThreshold; got != 0.40 {
+		t.Errorf("omitted threshold %v, want 0.40", got)
+	}
+}
+
+func TestRepackBloatThresholdValidation(t *testing.T) {
+	validCfg := func() Cluster {
+		cfg := DefaultCluster()
+		cfg.ClusterName = "prod"
+		cfg.Domain = "example.com"
+		cfg.Nodes = []NodeSpec{{Name: "db1", Role: RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
+		return cfg
+	}
+	if err := validCfg().ValidateFor(ScopeFull); err != nil {
+		t.Fatalf("default config: %v", err)
+	}
+	for _, invalid := range []float64{0, -1, 1.01, math.NaN(), math.Inf(1)} {
+		cfg := validCfg()
+		cfg.Maintenance.RepackBloatThreshold = invalid
+		err := cfg.ValidateFor(ScopeFull)
+		if err == nil || !strings.Contains(err.Error(), "maintenance.repack_bloat_threshold") {
+			t.Errorf("%v: %v", invalid, err)
+		}
+	}
+	cfg := validCfg()
+	cfg.Maintenance.RepackBloatThreshold = 1
+	if err := cfg.ValidateFor(ScopeFull); err != nil {
+		t.Errorf("threshold 1: %v", err)
 	}
 }
 

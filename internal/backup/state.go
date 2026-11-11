@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
@@ -76,6 +77,82 @@ type Records struct {
 	// from the same source and stanza, which cluster.toml no longer holds
 	// once follows is cleared. The job clears an entry when it finishes.
 	Unfollowing map[string]Unfollow `json:"unfollowing,omitempty"`
+	// ExtensionRequirements are the resolved extension descriptors each
+	// immutable primary stanza has needed, with the UTC start of observed
+	// coverage (Phase 7). They outlive a database's name and current intent so
+	// a rebuild or a restore can reproduce historical preloads and copy
+	// settings. The map key is the stanza, never a database name.
+	ExtensionRequirements map[string]ExtensionRequirements `json:"extension_requirements,omitempty"`
+	// ExtensionGuardHandoffs records the mandatory copy settings a database's
+	// guard has released to verified equivalent permanent configuration, by
+	// database. The record is scoped to the real installation instance and
+	// immutable stanza: a fresh copy or a reused name must re-establish its
+	// suppression instead of inheriting another data identity's handoff.
+	ExtensionGuardHandoffs map[string]GuardHandoff `json:"extension_guard_handoffs,omitempty"`
+	// Activation are the durable activation fences of a restore, unfollow or
+	// fork/adoption under way, by database. A fence binds the installation
+	// instance, the immutable target/old/new stanza identities, the operation,
+	// the actual registration/port/directory and the selected requirements.
+	// Ordinary apply, SQL and pooler rendering refuse an active fence; only
+	// the owning operation may continue it.
+	Activation map[string]ActivationFence `json:"activation_fences,omitempty"`
+}
+
+// GuardHandoff is one database's released mandatory copy settings. Instance
+// and Stanza bind the provenance to the real installation and immutable data
+// identity; a different instance, stanza or a fresh pending copy ignores it.
+type GuardHandoff struct {
+	Instance string            `json:"instance"`
+	Stanza   string            `json:"stanza"`
+	Values   map[string]string `json:"values,omitempty"`
+}
+
+// ActivationFence is one durable activation checkpoint. It never stores
+// credentials or physical system identifiers; those are not proof of
+// ownership.
+type ActivationFence struct {
+	OperationID string `json:"operation_id"`
+	Kind        string `json:"kind"`
+	Database    string `json:"database"`
+	// Instance is the actual installation identity from the master backup's
+	// instance file, never a host name derived from configuration text.
+	Instance string `json:"instance"`
+	// TargetStanza is the stanza the activated data belongs to. OldStanza and
+	// NewStanza are a promote's fixed identities (equal for a non-dump copy).
+	TargetStanza string `json:"target_stanza,omitempty"`
+	OldStanza    string `json:"old_stanza,omitempty"`
+	NewStanza    string `json:"new_stanza,omitempty"`
+	Aside        string `json:"aside,omitempty"`
+	// Registration is the actual cluster registration/ownership evidence:
+	// the cluster name, port and follow generation or awaiting state.
+	Registration string `json:"registration,omitempty"`
+	Ownership    string `json:"ownership,omitempty"`
+	// Port, DataDir and ConfDir are the actual paths the fence's phase owns.
+	// A phase advance refreshes them when the cluster's registration changes
+	// (a fork adopts 18/<name>, a swap moves the data directory).
+	Port         int                 `json:"port,omitempty"`
+	DataDir      string              `json:"data_dir,omitempty"`
+	ConfDir      string              `json:"conf_dir,omitempty"`
+	Requirements []catalog.Extension `json:"requirements,omitempty"`
+	Renames      map[string]string   `json:"renames,omitempty"`
+	// Phase is prepared, adopting, adopted, swapped, promoted or routing.
+	// adopting/adopted are a fork's non-secret continuation checkpoints;
+	// swapped/promoted are a restore's. Unknown or malformed phases fail
+	// closed. A routing fence has durably completed its data and safety
+	// transition; only verified route publication and pause release remain.
+	Phase     string `json:"phase"`
+	CreatedAt string `json:"created_at"`
+}
+
+// Active reports whether the fence still withholds ordinary activation.
+func (f ActivationFence) Active() bool {
+	return f.OperationID != "" && f.Phase != "routing"
+}
+
+// ActivationFenceFor returns db's fence.
+func (s Records) ActivationFenceFor(db string) (ActivationFence, bool) {
+	f, ok := s.Activation[db]
+	return f, ok && f.OperationID != ""
 }
 
 // Awaiting is one database awaiting recovery after a rebuild.
@@ -97,12 +174,30 @@ type Unfollow struct {
 	Source    string `json:"source"`
 	Stanza    string `json:"stanza"`
 	StartedAt string `json:"started_at"`
+	// OperationID binds the durable unfollow to one invocation. A retry
+	// reuses the same record and never takes over another operation's fence.
+	OperationID string `json:"operation_id,omitempty"`
+	// Cron is the durable pg_cron settlement checkpoint: the metadata
+	// database's actual identity before the rename and what was already
+	// suppressed or retargeted.
+	Cron *UnfollowCron `json:"cron,omitempty"`
 	// Settled records that the unfollow finished its privilege transition:
 	// the renames carry the operator's new passwords and, on a protected
 	// database, vaire_admin's access follows the protection policy. Until then
 	// the poolers' rendered configuration withholds the alias, and node SQL
 	// refuses a protected database being unfollowed.
 	Settled bool `json:"settled,omitempty"`
+}
+
+// UnfollowCron is one unfollow's durable pg_cron progress. MetadataOID is the
+// authoritative identity across a rename; names alone are not proof.
+type UnfollowCron struct {
+	MetadataDB  string `json:"metadata_db"`
+	MetadataOID string `json:"metadata_oid,omitempty"`
+	OldDB       string `json:"old_db"`
+	NewDB       string `json:"new_db"`
+	Deactivated bool   `json:"deactivated,omitempty"`
+	Retargeted  bool   `json:"retargeted,omitempty"`
 }
 
 // IsAwaiting reports whether db awaits recovery.
@@ -117,11 +212,13 @@ func (s Records) IsAwaiting(db string) bool {
 // backup and ride along in the next bundle.
 func (s Records) durableHash() string {
 	raw, _ := json.Marshal(struct {
-		Dropped     []DroppedStanza           `json:"d"`
-		Timelines   map[string]TimelineSwitch `json:"t"`
-		Awaiting    map[string]Awaiting       `json:"a"`
-		Unfollowing map[string]Unfollow       `json:"u"`
-	}{s.DroppedStanzas, s.Timelines, s.AwaitingRecovery, s.Unfollowing})
+		Dropped     []DroppedStanza                  `json:"d"`
+		Timelines   map[string]TimelineSwitch        `json:"t"`
+		Awaiting    map[string]Awaiting              `json:"a"`
+		Unfollowing map[string]Unfollow              `json:"u"`
+		Extensions  map[string]ExtensionRequirements `json:"e"`
+		Activation  map[string]ActivationFence       `json:"f"`
+	}{s.DroppedStanzas, s.Timelines, s.AwaitingRecovery, s.Unfollowing, s.ExtensionRequirements, s.Activation})
 	return masterbackup.SHA256(raw)
 }
 
@@ -229,6 +326,11 @@ type Restore struct {
 	// NoFull skips the full backup promote starts (db recover --all takes
 	// the fulls once every database is back).
 	NoFull bool `json:"no_full,omitempty"`
+	// OldStanza and NewStanza are a restore-from-dump promote's fixed
+	// identities: recorded before the stanza switch, so a retry never creates
+	// another new stanza or records the wrong one as replaced.
+	OldStanza string `json:"old_stanza,omitempty"`
+	NewStanza string `json:"new_stanza,omitempty"`
 }
 
 // Leftover is a cluster a promote or undo put aside, stopped: the
@@ -423,11 +525,103 @@ func decode(raw []byte) (Records, error) {
 	if s.Unfollowing == nil {
 		s.Unfollowing = map[string]Unfollow{}
 	}
+	if s.ExtensionRequirements == nil {
+		s.ExtensionRequirements = map[string]ExtensionRequirements{}
+	}
+	if s.ExtensionGuardHandoffs == nil {
+		s.ExtensionGuardHandoffs = map[string]GuardHandoff{}
+	}
+	if s.Activation == nil {
+		s.Activation = map[string]ActivationFence{}
+	}
 	return s, nil
+}
+
+// GuardHandoffFor returns db's released mandatory settings only when the
+// record belongs to the current real instance and immutable stanza. A missing
+// or foreign record is no proof, never inherited authority.
+func (s Records) GuardHandoffFor(db, instance, stanza string) map[string]string {
+	h, ok := s.ExtensionGuardHandoffs[db]
+	if !ok || h.Instance == "" || h.Stanza == "" || instance == "" || stanza == "" {
+		return nil
+	}
+	if h.Instance != instance || h.Stanza != stanza {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range h.Values {
+		out[k] = v
+	}
+	return out
+}
+
+// SetGuardHandoff records db's released mandatory settings for the current
+// instance and stanza. A nil or empty map, or an unknown identity, removes the
+// entry rather than storing unscoped authority.
+func (s *Records) SetGuardHandoff(db, instance, stanza string, handoff map[string]string) {
+	if len(handoff) == 0 || instance == "" || stanza == "" {
+		delete(s.ExtensionGuardHandoffs, db)
+		return
+	}
+	next := make(map[string]string, len(handoff))
+	for k, v := range handoff {
+		next[k] = v
+	}
+	s.ExtensionGuardHandoffs[db] = GuardHandoff{Instance: instance, Stanza: stanza, Values: next}
 }
 
 // UpdateRecords applies fn to records.json under its lock. fn returning an
 // error leaves the file unchanged.
+// SetActivationFence durably writes db's fence. The caller writes it before
+// the first irreversible step and before publishing an ordinary desired entry.
+func SetActivationFence(f ActivationFence) error {
+	return UpdateRecords(func(s *Records) error {
+		if s.Activation == nil {
+			s.Activation = map[string]ActivationFence{}
+		}
+		s.Activation[f.Database] = f
+		return nil
+	})
+}
+
+// UpdateActivationFence changes an existing fence only when the operation and
+// database still match. A changed operation is unknown state, not a fence the
+// caller may take over.
+func UpdateActivationFence(db, operationID string, fn func(*ActivationFence) error) error {
+	return UpdateRecords(func(s *Records) error {
+		f, ok := s.Activation[db]
+		if !ok || f.OperationID != operationID {
+			return output.NewError(output.CodePrecondition,
+				"the activation fence of "+db+" changed while the operation was continuing",
+				output.ExitPrecondition, "Retry the owning operation; vaire will not guess another operation's state.").
+				WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
+		}
+		if err := fn(&f); err != nil {
+			return err
+		}
+		s.Activation[db] = f
+		return nil
+	})
+}
+
+// ClearActivationFence removes db's fence only when operationID owns it.
+func ClearActivationFence(db, operationID string) error {
+	return UpdateRecords(func(s *Records) error {
+		f, ok := s.Activation[db]
+		if !ok {
+			return nil
+		}
+		if operationID != "" && f.OperationID != operationID {
+			return output.NewError(output.CodePrecondition,
+				"the activation fence of "+db+" belongs to another operation",
+				output.ExitPrecondition, "Retry the owning operation; vaire will not clear another operation's fence.").
+				WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
+		}
+		delete(s.Activation, db)
+		return nil
+	})
+}
+
 func UpdateRecords(fn func(*Records) error) error {
 	return engine.WithFileLock(recordsLockPath(), func() error {
 		s, err := LoadRecords()

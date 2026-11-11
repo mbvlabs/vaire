@@ -3,10 +3,14 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/maint"
+	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 )
@@ -86,20 +90,25 @@ func maintCommands() cmdSpec {
 				run: runMaintRepack,
 				flags: []fl{
 					flagString("db", "", "Database name"),
-					flagString("table", "", "Table to repack"),
+					flagString("table", "", "Table to repack (name or schema.name); without it, tables above repack_bloat_threshold"),
 					flagBool("now", "Run outside the maintenance window"),
 				},
 				meta: CommandMeta{
-					Summary: "Repack a bloated table with pg_repack (Phase 7)",
-					WhenToUse: []string{"Rewrite a table online. pg_repack arrives with extensions in Phase 7; until then this fails with " +
-						"precondition_failed (extension_missing)."},
-					Examples:       []string{"vaire maint repack --db app --table events --confirm app"},
+					Summary: "Rewrite bloated tables online with pg_repack, as a detachable job",
+					WhenToUse: []string{"Shrink a bloated table and its indexes without blocking reads and writes. " +
+						"Needs the pg_repack extension, a matching PostgreSQL 18 client, a primary key or unique index on NOT NULL key columns, " +
+						"free space for twice the table, index and TOAST footprint plus the host reserve, and the maintenance window unless --now. " +
+						"Without --table it repacks eligible tables above repack_bloat_threshold, biggest first. " +
+						"It takes the heavy-I/O lock, never terminates another backend, and is refused on a protected database. " +
+						"pg_repack's exit status and relation storage changes cannot prove a completed rewrite: a table whose rewrite completion is not attributable is reported as unknown (completion_unknown), never as repacked or failed."},
+					Examples:       []string{"vaire maint repack --db app --table events --now --confirm app", "vaire maint repack --db app --dry-run"},
 					Mutating:       true,
 					Destructive:    true,
 					SupportsDryRun: true,
 					Remote:         true,
 					ConfirmToken:   "{db}",
-					ErrorCodes:     []string{"precondition_failed"},
+					ErrorCodes:     []string{"precondition_failed", "unsafe_action_requires_confirmation", "external_command_failed"},
+					Next:           []string{"vaire job list"},
 				},
 			},
 			{
@@ -110,13 +119,16 @@ func maintCommands() cmdSpec {
 					flagString("db", "", "Database; every database when omitted"),
 					flagInt("min-bytes", 0, "Minimum estimated bloat to include"),
 					flagString("older-than", "5m", "Age threshold for long-query reports"),
+					flagString("table", "", "With --exact: the one table to measure"),
+					flagBool("exact", "Bloat of one table measured with the full pgstattuple scan instead of estimated"),
 				},
 				meta: CommandMeta{
 					Summary: "Report bloat, wraparound, indexes, long queries, or locks",
 					WhenToUse: []string{"Read a maintenance report. kind is bloat, wraparound, unused-indexes, missing-indexes, long-queries, or locks. " +
-						"Bloat is an estimate from statistics (the ioguix queries)."},
-					Examples: []string{"vaire maint report bloat --db app", "vaire maint report wraparound", "vaire maint report long-queries --older-than 10m"},
-					Remote:   true,
+						"Bloat is an estimate from statistics (the ioguix queries). bloat --exact requires --db and --table, needs pgstattuple, and performs a full table scan under a read lock; concurrent updates make the result non-instantaneous and free space is not guaranteed reclaimable."},
+					Examples:   []string{"vaire maint report bloat --db app", "vaire maint report bloat --db app --table events --exact", "vaire maint report wraparound", "vaire maint report long-queries --older-than 10m"},
+					Remote:     true,
+					ErrorCodes: []string{"precondition_failed", "input_required"},
 				},
 			},
 			{
@@ -238,12 +250,20 @@ func runMaint(cmd *cobra.Command, kind string) error {
 		Warnings: append(s.warnings, warnings...)})
 }
 
-// runMaintRepack refuses until pg_repack arrives with extensions (Phase 7).
-// The node's precondition check runs before the confirm token is asked for.
+// runMaintRepack repacks one table, or the tables above the bloat threshold,
+// as a detachable job. The node's preflight runs before the confirm token is
+// asked for, so a missing extension/version/key/space/protection failure costs
+// no destructive confirmation.
 func runMaintRepack(cmd *cobra.Command, _ []string) error {
 	db := stringFlag(cmd, "db")
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "maint repack needs --db", output.ExitInput, "").WithDetails(map[string]any{"flag": "--db"})
+	}
+	o := maintOptions(cmd, maint.Repack)
+	o.DB = db
+	o.Now = flagTrue(cmd, "now")
+	if err := o.Validate(); err != nil {
+		return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -251,30 +271,123 @@ func runMaintRepack(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	o := maintOptions(cmd, maint.Repack)
-	o.DB = db
-	// The node checks pg_repack's preconditions on a dry run too: ask it
-	// first, so a repack that cannot run fails before the confirm token is
-	// asked for.
+	cfg, _, err := remoteConfig(cmd, s, p)
+	if err != nil {
+		return err
+	}
+	if err := repackPreflight(cfg, db); err != nil {
+		return err
+	}
 	plan, err := p.call(commandContext(cmd), s.node, "maint.run", o, remote.CallOptions{DryRun: true, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+	var planned struct {
+		Tables       []string           `json:"tables"`
+		Skipped      []maint.RepackSkip `json:"skipped"`
+		VersionCheck string             `json:"version_check"`
+	}
+	_ = plan.Decode(&planned)
 	if dryRun(cmd) {
 		var data map[string]any
 		_ = plan.Decode(&data)
-		return output.Success(cmd, output.Result{Data: data, Message: "dry run: repack " + db, Warnings: append(s.warnings, plan.Warnings...)})
+		message := "dry run: nothing in " + db + " is above the repack threshold"
+		if len(planned.Tables) > 0 {
+			message = "dry run: would repack " + strings.Join(planned.Tables, ", ") + " in " + db
+		} else if len(planned.Skipped) > 0 {
+			message = "dry run: no eligible table in " + db + "; skipped: " + repackSkips(planned.Skipped)
+		}
+		if planned.VersionCheck == "deferred_to_job" {
+			message += repackVersionDisclosure(planned.VersionCheck)
+		}
+		return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: append(s.warnings, plan.Warnings...)})
 	}
 	if err := Confirm(cmd, db); err != nil {
 		return err
 	}
-	reply, err := p.call(commandContext(cmd), s.node, "maint.run", o, remote.CallOptions{Confirm: db, OnEvent: p.event})
+	reply, jobID, detached, err := callJob(cmd, s, p, "maint.run", o, remote.CallOptions{Confirm: db})
 	if err != nil {
 		return err
 	}
-	var data map[string]any
-	_ = reply.Decode(&data)
-	return output.Success(cmd, output.Result{Data: data, Message: "repacked", Warnings: append(s.warnings, reply.Warnings...)})
+	if detached {
+		return detachedResult(cmd, s, jobID, "the repack")
+	}
+	var run maint.RepackRun
+	jr, err := decodeJob(reply, &run)
+	if err != nil {
+		return err
+	}
+	message, unknownWarnings := repackResultMessage(db, run)
+	return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jr.JobID, "result": run},
+		Message: message, Warnings: append(append(s.warnings, reply.Warnings...), unknownWarnings...)})
+}
+
+// repackResultMessage reports confirmed rewrites separately from attempts
+// whose completion could not be attributed. Unknown is never called a
+// successful or a failed repack, and each unknown table gets a structured
+// completion_unknown warning.
+func repackResultMessage(db string, run maint.RepackRun) (string, []output.Warning) {
+	var parts []string
+	var warnings []output.Warning
+	if len(run.Repacked) > 0 {
+		parts = append(parts, "repacked in "+db+": "+strings.Join(run.Repacked, ", "))
+	}
+	for _, table := range slices.Sorted(maps.Keys(run.Unknown)) {
+		detail := run.Unknown[table]
+		lead := "rewrite completion could not be confirmed"
+		switch {
+		case strings.HasPrefix(detail, "completion_unknown/process_error:"):
+			lead = "the pg_repack process failed; rewrite completion could not be confirmed"
+		case strings.HasPrefix(detail, "completion_unknown/not_started:"):
+			lead = "the pg_repack command was not started; rewrite completion could not be confirmed"
+		case strings.HasPrefix(detail, "completion_unknown/clean_exit:"):
+			lead = "command exited successfully; rewrite completion could not be confirmed"
+		}
+		parts = append(parts, lead+" for "+table+" ("+maint.RepackReasonCompletionUnknown+")")
+		warnings = append(warnings, output.Warning{
+			Code:    maint.RepackReasonCompletionUnknown,
+			Message: table + " in " + db + ": rewrite completion could not be confirmed; the installed table state is unchanged or unknown",
+		})
+	}
+	if len(run.Failed) > 0 {
+		parts = append(parts, "failed: "+strings.Join(slices.Sorted(maps.Keys(run.Failed)), ", "))
+	}
+	if len(run.Skipped) > 0 {
+		parts = append(parts, "skipped: "+repackSkips(run.Skipped))
+	}
+	if len(parts) == 0 {
+		return "nothing in " + db + " is eligible for repack; nothing was repacked", nil
+	}
+	if len(run.Repacked) == 0 && len(run.Unknown) == 0 && len(run.Failed) == 0 {
+		return "nothing in " + db + " was repacked; " + strings.Join(parts, "; "), nil
+	}
+	return strings.Join(parts, "; "), warnings
+}
+
+func repackVersionDisclosure(versionCheck string) string {
+	if versionCheck != "deferred_to_job" {
+		return ""
+	}
+	return "; version check is deferred to the job: library/SQL version match is checked under the job's locks before any rewrite"
+}
+
+func repackPreflight(cfg config.Cluster, db string) error {
+	if err := node.RefuseFollowerMethod(cfg, "maint.run", map[string]any{"db": db}); err != nil {
+		return err
+	}
+	if spec, ok := cfg.ClusterByName(db); ok && spec.Protected {
+		return node.ProtectedRepackError(db)
+	}
+	return nil
+}
+
+func repackSkips(skips []maint.RepackSkip) string {
+	parts := make([]string, 0, len(skips))
+	for _, skip := range skips {
+		part := skip.Table + " (" + skip.Reason + ")"
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // maintReportDB is one database's report from the node.
@@ -282,13 +395,38 @@ type maintReportDB struct {
 	DB    string              `json:"db"`
 	Rows  []map[string]string `json:"rows,omitempty"`
 	Bloat *maint.BloatReport  `json:"bloat,omitempty"`
+	Exact *maint.TableStats   `json:"exact,omitempty"`
 	Error string              `json:"error,omitempty"`
+}
+
+func validateMaintReportFlags(kind string, exact bool, db, table string) error {
+	if exact {
+		if kind != maint.ReportBloat {
+			return output.NewError(output.CodeUsage, "--exact is only for the bloat report", output.ExitUsage, "")
+		}
+		if db == "" {
+			return output.NewError(output.CodeInputRequired, "maint report bloat --exact needs --db", output.ExitInput, "").WithDetails(map[string]any{"flag": "--db"})
+		}
+		if table == "" {
+			return output.NewError(output.CodeInputRequired, "maint report bloat --exact needs --table", output.ExitInput, "").WithDetails(map[string]any{"flag": "--table"})
+		}
+		return nil
+	}
+	if table != "" {
+		return output.NewError(output.CodeUsage, "--table is only for maint report bloat --exact", output.ExitUsage, "")
+	}
+	return nil
 }
 
 func runMaintReport(cmd *cobra.Command, args []string) error {
 	kind := args[0]
 	if !maint.ValidReport(kind) {
 		return output.NewError(output.CodeUsage, "unknown report "+kind, output.ExitUsage, "Use one of "+strings.Join(maint.ReportKinds, ", ")+".")
+	}
+	db, table := stringFlag(cmd, "db"), stringFlag(cmd, "table")
+	exact := flagTrue(cmd, "exact")
+	if err := validateMaintReportFlags(kind, exact, db, table); err != nil {
+		return err
 	}
 	minBytes, _ := cmd.Flags().GetInt("min-bytes")
 	p := newProgress(cmd)
@@ -298,8 +436,11 @@ func runMaintReport(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 	params := map[string]any{"kind": kind, "older_than": stringFlag(cmd, "older-than"), "min_bytes": minBytes}
-	if db := stringFlag(cmd, "db"); db != "" {
+	if db != "" {
 		params["db"] = db
+	}
+	if exact {
+		params["exact"], params["table"] = true, table
 	}
 	reply, err := p.call(commandContext(cmd), s.node, "maint.report", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
@@ -331,6 +472,13 @@ func reportMessage(kind string, dbs []maintReportDB) string {
 		switch {
 		case db.Error != "":
 			lines = append(lines, "  "+db.Error)
+		case db.Exact != nil:
+			e := db.Exact
+			lines = append(lines, fmt.Sprintf("  %s.%s measured by %s (full table scan)", e.Schema, e.Table, e.Method))
+			lines = append(lines, fmt.Sprintf("  table %s; live tuples %d (%s, %.1f%%); dead tuples %d (%s, %.1f%%); free %s (%.1f%%)",
+				humanBytes(e.TableBytes), e.TupleCount, humanBytes(e.TupleBytes), e.TuplePercent,
+				e.DeadTupleCount, humanBytes(e.DeadTupleBytes), e.DeadTuplePercent, humanBytes(e.FreeBytes), e.FreePercent))
+			lines = append(lines, "  full scan under a read lock; concurrent writes make the result non-instantaneous; page overhead means the components need not add up to the table length; free space is not guaranteed reclaimable; this is one physical table, not its indexes")
 		case db.Bloat != nil:
 			if len(db.Bloat.Rows) == 0 {
 				lines = append(lines, "  no estimated bloat")
@@ -359,8 +507,15 @@ func reportMessage(kind string, dbs []maintReportDB) string {
 			}
 		}
 	}
-	if kind == maint.ReportBloat {
-		lines = append(lines, "an estimate from statistics (ioguix/pgsql-bloat-estimation); a plain vacuum makes the space reusable, repack (Phase 7) shrinks it")
+	estimated := false
+	for _, db := range dbs {
+		if db.Bloat != nil {
+			estimated = true
+			break
+		}
+	}
+	if kind == maint.ReportBloat && estimated {
+		lines = append(lines, "an estimate from statistics (ioguix/pgsql-bloat-estimation); a plain vacuum makes the space reusable, repack shrinks it")
 	}
 	return strings.Join(lines, "\n")
 }

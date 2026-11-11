@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
+	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/state"
 	"github.com/mbvlabs/vaire/internal/steps"
 )
 
@@ -29,22 +32,15 @@ func methods() map[string]method {
 			name: "apply",
 			// apply --db changes one cluster: the global lock shared and that
 			// cluster's exclusive, so applies to other clusters run beside it.
-			lock: func(req rpc.Request) engine.LockMode {
-				if req.DryRun || paramDB(req.Params) != "" {
-					return engine.LockShared
-				}
-				return engine.LockExclusive
-			},
-			clusterLock: func(req rpc.Request) (string, engine.LockMode) {
-				if req.DryRun {
-					return "", engine.LockNone
-				}
-				return paramDB(req.Params), engine.LockExclusive
-			},
-			cluster:    true,
-			confirmAny: restartTokens,
-			runLog:     func(req rpc.Request) bool { return !req.DryRun },
-			handler:    handleApply,
+			// A source with followers whose selected steps can execute an
+			// extension dependency transition takes the global exclusive
+			// envelope and lets the handler take the sorted target locks.
+			lockWithConfig:        applyLockWithConfig,
+			clusterLockWithConfig: applyClusterLockWithConfig,
+			cluster:               true,
+			confirmAny:            restartTokens,
+			runLog:                func(req rpc.Request) bool { return !req.DryRun },
+			handler:               handleApply,
 		},
 		{
 			name:    "selfcheck",
@@ -199,6 +195,30 @@ func methods() map[string]method {
 			handler:    handleTuneApply,
 		},
 		{
+			name:    "ext.list",
+			lock:    fixedLock(engine.LockShared),
+			cluster: true,
+			handler: handleExtList,
+		},
+		{
+			name:        "ext.add",
+			lock:        extensionMutationLock,
+			clusterLock: extensionClusterLock,
+			cluster:     true,
+			confirmAny:  extensionAddTokens,
+			runLog:      func(req rpc.Request) bool { return !req.DryRun },
+			handler:     handleExtAdd,
+		},
+		{
+			name:        "ext.remove",
+			lock:        extensionMutationLock,
+			clusterLock: extensionClusterLock,
+			cluster:     true,
+			confirmAny:  extensionRemoveTokens,
+			runLog:      func(req rpc.Request) bool { return !req.DryRun },
+			handler:     handleExtRemove,
+		},
+		{
 			name:    "logs",
 			cluster: true,
 			handler: handleLogs,
@@ -251,8 +271,9 @@ func methods() map[string]method {
 		{name: "doctor.run", cluster: true, handler: handleDoctorRun},
 		{name: "queries.top", cluster: true, handler: handleQueriesTop},
 		{name: "maint.report", cluster: true, handler: handleMaintReport},
-		// maint.run starts a job, which takes its own locks.
-		{name: "maint.run", cluster: true, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintRun},
+		// maint.run starts a job, which takes its own locks. Only a repack
+		// needs the <db> token; vacuum, analyze and reindex keep no token.
+		{name: "maint.run", cluster: true, confirm: maintRunToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintRun},
 		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: defaultProtectGuard.requireWriteCode("terminating its sessions", "db", nil, handleMaintKill)},
 		{name: "queries.reset", cluster: true, confirm: statsToken, runLog: always, handler: handleQueriesReset},
 		{name: "metrics.rotate", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: metricsToken, runLog: always, handler: handleMetricsRotate},
@@ -310,6 +331,64 @@ func restartTokens(cfg config.Cluster, _ json.RawMessage) []string {
 		out = append(out, c.Name+"/restart")
 	}
 	return out
+}
+
+// applySelectionMayTransition reports whether the selected steps can execute
+// an extension dependency transition (configuration, roles or packages), or
+// the request selects everything.
+func applySelectionMayTransition(req rpc.Request) bool {
+	var p stepParams
+	if json.Unmarshal(req.Params, &p) != nil || len(p.Steps) == 0 {
+		return true
+	}
+	for _, id := range p.Steps {
+		base, _ := engine.SplitID(id)
+		switch base {
+		case "postgres-config-v1", "postgres-roles-v1":
+			return true
+		}
+	}
+	return false
+}
+
+func applyLockWithConfig(cfg config.Cluster, req rpc.Request) engine.LockMode {
+	if req.DryRun {
+		return engine.LockShared
+	}
+	db := paramDB(req.Params)
+	if db == "" {
+		return engine.LockExclusive
+	}
+	// A fork/adoption/restore continuation saves settings and finalizes
+	// routing. Its global envelope is exclusive from the pre-lock
+	// configuration and activation-records snapshot; unreadable records are
+	// unknown state and never fall back to shared.
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return engine.LockExclusive
+	}
+	if len(recs.Activation) > 0 {
+		return engine.LockExclusive
+	}
+	if _, ok := cfg.ClusterByName(db); ok && len(cfg.FollowerNames(db)) > 0 && applySelectionMayTransition(req) {
+		return engine.LockExclusive
+	}
+	return engine.LockShared
+}
+
+func applyClusterLockWithConfig(cfg config.Cluster, req rpc.Request) (string, engine.LockMode) {
+	if req.DryRun {
+		return "", engine.LockNone
+	}
+	db := paramDB(req.Params)
+	if db == "" {
+		return "", engine.LockNone
+	}
+	if _, ok := cfg.ClusterByName(db); ok && len(cfg.FollowerNames(db)) > 0 && applySelectionMayTransition(req) {
+		// The handler takes the complete source/follower set once, sorted.
+		return "", engine.LockNone
+	}
+	return db, engine.LockExclusive
 }
 
 // restartConfirmation turns the request's checked restart tokens into what
@@ -414,13 +493,70 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: data, Warnings: oversubscriptionWarnings(env.Cluster, rt.Host)}, nil
 }
 
+// applyReloadCluster reads cluster.toml again after the global lock is held.
+// It is a variable so tests can model a concurrent membership change.
+var applyReloadCluster = func() (config.Cluster, error) {
+	cfg, _, err := (state.FileStore{}).Load()
+	return cfg, err
+}
+
 func handleApply(ctx context.Context, env *Env) (Result, error) {
 	var p stepParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if !env.Req.DryRun {
+		reloaded, err := applyReloadCluster()
+		if err != nil {
+			return Result{}, err
+		}
+		actualMode := env.LockMode
+		if actualMode == engine.LockNone {
+			// A direct handler test did not come through the dispatcher; use
+			// the same pre-lock classification it would have retained.
+			actualMode = applyLockWithConfig(env.Cluster, env.Req)
+		}
+		newMode := applyLockWithConfig(reloaded, env.Req)
+		oldCluster, oldClusterMode := applyClusterLockWithConfig(env.Cluster, env.Req)
+		newCluster, newClusterMode := applyClusterLockWithConfig(reloaded, env.Req)
+		if actualMode != newMode || oldCluster != newCluster || oldClusterMode != newClusterMode {
+			return Result{}, output.NewError(output.CodePrecondition,
+				"cluster.toml changed while apply waited for its lock, so the locked target set is stale",
+				output.ExitPrecondition, "Retry vaire apply; it will take the current envelope and target locks.").
+				WithDetails(map[string]any{"reason": "apply_lock_class_changed", "database": p.DB})
+		}
+		env.Cluster = reloaded
+	}
+	if !env.Req.DryRun && p.DB != "" && len(p.Steps) == 0 {
+		if f, ok, err := forkFenceFor(env.Cluster, p.DB); err != nil {
+			return Result{}, err
+		} else if ok {
+			return resumeForkSettlementAt(ctx, env, f)
+		}
+	}
+	if err := refuseActiveActivationFences(env.Cluster, p); err != nil {
+		return Result{}, err
+	}
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
+	}
+	var transitionWarnings []output.Warning
+	if !env.Req.DryRun {
+		warnings, release, err := applyExtensionTransitions(ctx, env, p)
+		if err != nil {
+			var pending *extensionApplyPending
+			if errors.As(err, &pending) {
+				if release != nil {
+					release()
+				}
+				return Result{Data: pending.Data, Warnings: append(pending.Warnings, NoOffsiteWarning(env.Cluster)...)}, nil
+			}
+			return Result{}, err
+		}
+		if release != nil {
+			defer release()
+		}
+		transitionWarnings = warnings
 	}
 	if env.Req.DryRun {
 		rt := runtimeFor(env, true)
@@ -437,7 +573,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		DB:   p.DB,
 		// The tokens were already checked against restartTokens.
 		Confirm:   restartConfirmation(env.Cluster, env.Req),
-		Restarter: steps.Restarter(env.Cluster),
+		Restarter: steps.RestarterFor(env.Cluster, rt, env.Report),
 		Report:    env.Report,
 	})
 	if err != nil {
@@ -449,8 +585,10 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if len(data.RestartsSettled) > 0 {
 		clearDeferred(data.RestartsSettled...)
 	}
+	warnings = append(warnings, finalizeRoutingFences(ctx, env, routingFencesFor(p))...)
 	warnings = append(warnings, NoOffsiteWarning(env.Cluster)...)
 	warnings = append(warnings, oversubscriptionWarnings(env.Cluster, rt.Host)...)
+	warnings = append(transitionWarnings, warnings...)
 	out := applyResult{ApplyData: data}
 	// Step 18 (Phase 4 D10): a full apply ends with the doctor checks; a
 	// failing one is a warning, since blocking apply would block its fix.

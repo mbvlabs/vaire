@@ -4,6 +4,7 @@
 
 - [MASTER.md](MASTER.md): decisions, architecture and current roadmap/status.
 - [IMPLEMENTATION.md](IMPLEMENTATION.md): implementation details; `AGENTS.md` at the repository root defines working rules.
+- [EXTENSION-DEFINITIONS.md](EXTENSION-DEFINITIONS.md): extension descriptor fields, resolution rules, custom provider examples, copy/recovery safety and command behavior.
 - [WIREGUARD-OVERVIEW.md](WIREGUARD-OVERVIEW.md): illustrated walkthrough of private networking, managed credential files and the encrypted handoff, grounded in the code.
 - [ACTIVITY.md](ACTIVITY.md): local activity history, evidence coverage and metadata-only incident files; qualification status remains in `MASTER.md`.
 - [FINDINGS-activity-review.md](FINDINGS-activity-review.md): findings from the activity-history review, their fixes and decisions.
@@ -11,6 +12,9 @@
 - [PLAN-v1-release.md](PLAN-v1-release.md): remaining release gates and authorized-release procedure.
 - [RELEASE-v1.0.0-alpha.1.md](RELEASE-v1.0.0-alpha.1.md): draft alpha notes, kept as the qualification record.
 - [RELEASE-v1.0.0-beta.1.md](RELEASE-v1.0.0-beta.1.md): draft beta notes; Phase 7 and the beta qualification are pending.
+- [PHASE-7-WORK-UNITS.md](PHASE-7-WORK-UNITS.md): Phase 7 implementation evidence, accepted source boundaries and remaining review/publication/live gates.
+- [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md): preparation-only combined follower/extension run sheet; not execution-ready.
+- [FINDINGS-phase-7-review.md](FINDINGS-phase-7-review.md): Phase 7 findings and dispositions; current open/closed status is recorded there.
 
 ## Followers (Phase 6)
 

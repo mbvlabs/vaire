@@ -19,9 +19,10 @@ const JournalSchema = 1
 
 // Step states recorded in the journal.
 const (
-	StatusRunning   = "running"
-	StatusCompleted = "completed"
-	StatusFailed    = "failed"
+	StatusRunning    = "running"
+	StatusCompleted  = "completed"
+	StatusFailed     = "failed"
+	StatusIncomplete = "incomplete"
 )
 
 // Journal records what ran on this node. Steps is keyed by step ID, and a

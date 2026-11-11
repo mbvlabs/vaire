@@ -293,8 +293,11 @@ func syncProtectedAccess(ctx context.Context, env *Env, old, updated config.Clus
 		if recs.IsAwaiting(name) {
 			continue
 		}
+		if err := refuseActiveActivationFence(updated, name); err != nil {
+			return warnings, err
+		}
 		_, w, err := engine.Apply(ctx, steps.Catalog(), updated, rt, engine.Options{
-			Only: []string{steps.RolesStepID(name)}, DB: name, Restarter: steps.Restarter(updated), Report: env.Report,
+			Only: []string{steps.RolesStepID(name)}, DB: name, Restarter: steps.RestarterFor(updated, rt, env.Report), Report: env.Report,
 		})
 		if err != nil {
 			return warnings, withHint(err, "The protection of "+name+" was not changed: vaire_admin's access to it could not be set. Check that its cluster runs (vaire status) and retry.")

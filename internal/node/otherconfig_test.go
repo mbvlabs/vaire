@@ -109,10 +109,12 @@ func TestOtherConfigsCreateAndDrop(t *testing.T) {
 func TestCreateRunsNumbering(t *testing.T) {
 	cfg := budgetCluster(config.ClusterSpec{Name: "app2"}, config.ClusterSpec{Name: "big"})
 	runs := createRuns(cfg, "big", []string{"postgres-config-v1@app2"})
-	if len(runs) != 5 {
-		t.Fatalf("runs = %d, want kernel, big, poolers, metrics and app2's config (no backups)", len(runs))
+	if len(runs) != 6 {
+		t.Fatalf("runs = %d, want kernel, packages, big, poolers, metrics and app2's config (no backups)", len(runs))
 	}
-	if !slices.Equal(runs[3].Only, []string{"metrics-v1"}) || !slices.Equal(runs[4].Only, []string{"postgres-config-v1@app2"}) || runs[1].DB != "big" {
+	if !slices.Equal(runs[0].Only, []string{"kernel-tuning-v1"}) || !slices.Equal(runs[1].Only, []string{"postgres-packages-v1"}) ||
+		runs[2].DB != "big" || !slices.Equal(runs[3].Only, []string{"pgbouncer-v1"}) ||
+		!slices.Equal(runs[4].Only, []string{"metrics-v1"}) || !slices.Equal(runs[5].Only, []string{"postgres-config-v1@app2"}) {
 		t.Errorf("runs = %+v", runs)
 	}
 	if got := dropRuns(budgetCluster(), nil); len(got) != 2 {

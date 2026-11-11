@@ -61,10 +61,11 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	}
 	env.Cluster = cfg
 
-	data, warnings, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
+	rt := runtimeFor(env, false)
+	data, warnings, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		Only:        steps.DatabaseStepIDs(),
 		Report:      env.Report,
-		Restarter:   steps.Restarter(env.Cluster),
+		Restarter:   steps.RestarterFor(env.Cluster, rt, env.Report),
 		FailureHint: initFailureHint(cfg.ClusterName, p.Local),
 	})
 	if err != nil {

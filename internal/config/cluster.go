@@ -71,7 +71,11 @@ type Cluster struct {
 	Postgres    Postgres      `toml:"postgres"`
 	Network     Network       `toml:"network"`
 	Clusters    []ClusterSpec `toml:"clusters"`
-	Backup      Backup        `toml:"backup"`
+	// Extensions holds operator-supplied extension descriptors keyed by
+	// canonical name: new extensions outside the built-in catalogue and
+	// explicit provider overrides of built-in entries.
+	Extensions map[string]ExtensionDefinition `toml:"extensions,omitempty"`
+	Backup     Backup                         `toml:"backup"`
 	// MasterBackup is decoded and validated now; the master backup that
 	// uses it arrives in Phase 5.
 	MasterBackup MasterBackup `toml:"master_backup"`
@@ -454,9 +458,18 @@ var (
 )
 
 // reservedSettings are the settings vaire owns; a user override is rejected.
+// The logging and TLS keys are the complete set rendered by
+// 20-vaire-security.conf; TestSecurityTemplateSettingsAreReserved keeps this
+// list in step with that template. The auto_explain keys are rendered by
+// 30-vaire-extensions.conf itself.
 var reservedSettings = []string{
 	"allow_alter_system", "listen_addresses", "port", "password_encryption",
 	"shared_preload_libraries", "data_directory", "hba_file", "ident_file",
+	// 20-vaire-security.conf.
+	"log_line_prefix", "log_connections", "log_disconnections", "log_lock_waits",
+	"log_temp_files", "log_checkpoints", "log_autovacuum_min_duration",
+	// 30-vaire-extensions.conf's auto_explain block.
+	"auto_explain.log_min_duration", "auto_explain.sample_rate", "auto_explain.log_analyze",
 	// A follower's replication settings (Phase 6).
 	"hot_standby", "restore_command",
 }
@@ -478,6 +491,10 @@ func isReservedSetting(key string) bool {
 	}
 	return false
 }
+
+// IsReservedSetting reports whether key is a setting vaire writes itself and
+// a copy setting may not persist into [clusters.settings].
+func IsReservedSetting(key string) bool { return isReservedSetting(key) }
 
 // Validate checks the full schema (scope full).
 func (c Cluster) Validate() error { return c.ValidateFor(ScopeFull) }
@@ -541,6 +558,9 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if _, _, err := ParseWindow(c.Maintenance.Window); err != nil {
 		add("maintenance.window %q %v", c.Maintenance.Window, err)
 	}
+	if err := CheckRepackBloatThreshold(c.Maintenance.RepackBloatThreshold); err != nil {
+		add("maintenance.repack_bloat_threshold %v", err)
+	}
 	masters := 0
 	names := map[string]bool{}
 	for i, n := range c.Nodes {
@@ -577,6 +597,14 @@ func (c Cluster) ValidateFor(scope Scope) error {
 // validatePhase2 checks the tables that only matter once the database runs.
 func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	if scope == ScopeHost {
+		// Extension intent is desired state, not a field that becomes
+		// meaningful only when the database runs: reject an invalid
+		// descriptor or selection before a Phase 1 file can be saved.
+		c.validateExtensionDefinitions(add)
+		for i, spec := range c.Clusters {
+			c.validateExtensionSelection(add, fmt.Sprintf("clusters[%d]", i), spec)
+		}
+		c.validateExtensionHost(add)
 		return
 	}
 	if c.Domain == "" {
@@ -629,7 +657,9 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 			add("postgres.settings key %q is managed by vaire and cannot be overridden", key)
 		}
 	}
+	c.validateExtensionDefinitions(add)
 	c.validateClusters(add)
+	c.validateExtensionHost(add)
 	if c.Backup.Provider != "" {
 		if err := CheckProvider(c.Backup.Provider); err != nil {
 			add("backup.provider %q %v", c.Backup.Provider, err)

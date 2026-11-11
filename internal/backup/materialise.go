@@ -57,6 +57,16 @@ type Materialised struct {
 	Shell  engine.Shell
 	StepID string
 	Report engine.Reporter
+	// BeforeStart runs after the copy is registered and before its first
+	// start. It lets the caller install and verify prerequisites that must
+	// exist before PostgreSQL loads the copied configuration. A nil callback
+	// starts immediately.
+	BeforeStart func(context.Context) error
+	// Plan is the historical/copy-safety plan for this copy. Its guard is
+	// installed after BeforeStart and before the first start, so the copy
+	// never loads a copied configuration without the libraries its data needs
+	// and the settings that keep copied background work idle.
+	Plan *CopyPlan
 }
 
 // NewMaterialised reserves a temporary port for cluster name under
@@ -100,6 +110,14 @@ func (m *Materialised) DataDir() string { return m.Data }
 
 // ConfDir is the temporary cluster's configuration directory.
 func (m *Materialised) ConfDir() string { return filepath.Join(pgConfRoot, m.Name) }
+
+// PGConfRootForTest sets postgresql-common's configuration root for a test in
+// another package and returns the restore function.
+func PGConfRootForTest(dir string) func() {
+	old := pgConfRoot
+	pgConfRoot = dir
+	return func() { pgConfRoot = old }
+}
 
 // ClusterRegistered reports whether postgresql-common has a registration file
 // for cluster name.
@@ -387,6 +405,14 @@ const (
 // UntilPaused, recovery has paused at the target, or for UntilPromoted, it
 // has left recovery.
 func (m *Materialised) start(ctx context.Context, until string) error {
+	if m.BeforeStart != nil {
+		if err := m.BeforeStart(ctx); err != nil {
+			return err
+		}
+	}
+	if err := m.InstallCopyPlan(); err != nil {
+		return err
+	}
 	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "pg_ctlcluster", Args: []string{"18", m.Name, "start"}}, m.Report); err != nil {
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("start the temporary cluster %s: %w", m.Name, err), output.ExitExternal,
 			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": m.LogTail(20)})
@@ -724,6 +750,9 @@ func SwapState(dataRoot, live, from, aside string) string {
 // directory's postgresql.auto.conf to the new one: pgBackRest's
 // restore_command carries --pg1-path, and archive-get reads pg_control
 // there.
+// writeAutoConf is repointAutoConf's atomic writer; a test can use temp files.
+var writeAutoConf = engine.WriteFileAtomicOwned
+
 func repointAutoConf(data, oldData string) error {
 	path := filepath.Join(data, "postgresql.auto.conf")
 	raw, err := os.ReadFile(path) //nolint:gosec // G304: a data directory vaire moved.
@@ -736,7 +765,7 @@ func repointAutoConf(data, oldData string) error {
 	if !bytes.Contains(raw, []byte(oldData)) {
 		return nil
 	}
-	return engine.WriteFileAtomicOwned(path, bytes.ReplaceAll(raw, []byte(oldData), []byte(data)), 0o600, "postgres", "postgres")
+	return writeAutoConf(path, bytes.ReplaceAll(raw, []byte(oldData), []byte(data)), 0o600, "postgres", "postgres")
 }
 
 // StartCluster starts live cluster name through its systemd unit, so it

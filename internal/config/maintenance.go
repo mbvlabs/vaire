@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -30,6 +31,16 @@ func ParseWindow(window string) (start, end time.Duration, err error) {
 		return 0, 0, fmt.Errorf("must not start and end at the same time")
 	}
 	return start, end, nil
+}
+
+// CheckRepackBloatThreshold checks maintenance.repack_bloat_threshold: a
+// finite fraction greater than zero and at most one. The default 0.40 is
+// valid; an explicit zero, negative, non-finite or over-one value is not.
+func CheckRepackBloatThreshold(v float64) error {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > 1 {
+		return fmt.Errorf("must be greater than 0 and at most 1")
+	}
+	return nil
 }
 
 // WindowLength is the window's length; one across midnight wraps.

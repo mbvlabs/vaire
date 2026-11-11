@@ -2,6 +2,8 @@
 
 Status, 2026-10-19: main live qualification for Phases 0–5 is complete, with explicit coverage limits in [MANUAL-TESTING.md](MANUAL-TESTING.md). No alpha has been tagged or published by this qualification. This is the release procedure, not authorization to execute it.
 
+Phase 7 checkpoint, 2026-11-11: the local source implementation is accepted through E7-05; E7-06 is at final targeted source closure. The two whole-change reviews (E7-08A/B) and fresh final verification (E7-09) have not run, and no Phase 7 commit, publication, deployment or live qualification is authorized or claimed.
+
 ## Release strategy (updated 2026-10-19)
 
 - **Branch model (Laravel-style, merge up):**
@@ -13,7 +15,7 @@ Status, 2026-10-19: main live qualification for Phases 0–5 is complete, with e
 - **Version names:** v1 is an alpha, so `1.x` is tagged `v1.0.0-alpha.1`, `v1.0.0-alpha.2`, …, then `v1.0.0-beta.1`, … once Phases 6 and 7 and activity history are on the line, then `v1.0.0` when the formats freeze.
 - **Release gate:** review the documented evidence limits and draft notes, commit the documentation with authorization, then separately authorize the v1 branch/tag and publication.
 - **Secrets export gets a gate:** `vaire secrets export` needs the master password or a TOTP code. If the secrets document is lost, it's lost; there's no bypass.
-- **v1.0.0 scope (decided 2026-10-28):** `v1.0.0` is Phases 0–7 plus local activity history. The published alphas (`v1.0.0-alpha.1`, `v1.0.0-alpha.2`) are Phases 0–5. Activity history, then Phase 6 and Phase 7, merge into master one at a time, each live-tested on edge. Master is then merged into `1.x` with a merge-commit pull request and tagged `v1.0.0-beta.1`. Betas replace the alphas from then on; `v1.0.0` final follows qualification of the betas. This supersedes the earlier plan to ship followers and extensions after final as `v1.1.0`.
+- **v1.0.0 scope (decided 2026-10-28; qualification order updated 2026-11-10):** `v1.0.0` is Phases 0–7 plus local activity history. The published alphas (`v1.0.0-alpha.1`, `v1.0.0-alpha.2`) are Phases 0–5. Phase 7 may be built and published before follower live qualification; followers and extensions are then qualified on the same signed edge candidate. Activity qualification or explicit acceptance of its named gaps still gates deployment. Master is then merged into `1.x` with a merge-commit pull request and tagged `v1.0.0-beta.1`, with separate authorization. Betas replace the alphas from then on; `v1.0.0` final follows qualification of the betas. This supersedes the earlier plan to ship followers and extensions after final as `v1.1.0`.
 
 ### Version numbers and branches
 
@@ -52,14 +54,14 @@ What an upgrade may and may not require within the line:
 - **Main live scenarios completed:** genuine existing-protected-policy upgrade, SQL/results/rollback, protected maintenance and interactive writes, secrets factor/refusal matrix, query/top filtering, CLI UX, idle tunnel and peer timeout, fresh bucket-backed init and database-free doctor, first database/full/verify, protected dump copy/promotion, genuine awaiting-recovery refusal, rebuild/recovery, local init and automatic lockdown revert with journal evidence.
 - **Live-discovered fixes published and retested:** `eaa1a73` (administrative query/top filtering) and `65c4f91` (backup service templates available before first recovery full). Latest code qualification: `edge-65c4f9157253`, edge workflow `39234654792` succeeded.
 - **Not claimed:** every historical fault-injection/checklist variant. Exact limitations, including imported-password authorization, forced handshake branches, handoff completion, telemetry freshness and final resumed DNS/TLS output, remain in the testing log and [draft release notes](RELEASE-v1.0.0-alpha.1.md).
-- **Excluded/deferred:** macOS live tests were excluded by the operator; cross-build passed. Major-upgrade design is not part of this preparation. Phases 6–7 and activity history were outside the alpha qualification; they are qualified for the beta.
+- **Excluded/deferred:** macOS live tests were excluded by the operator; cross-build passed. Major-upgrade design is not part of this preparation. Phases 6–7 and activity history were outside the alpha qualification; they are planned for the beta and have not been live-qualified.
 
 No unresolved reproducible code blocker remains from the main qualification run. Publication readiness still requires reviewing the stated limits and completing the cut checklist, not silently treating missing evidence as passed.
 
 ## Toward the beta
 
-1. Live-test activity history on edge (committed as `4df4665`).
-2. Merge Phase 6 into master (rebase, conflict resolution, its manual test), then Phase 7. Expect conflicts in node/methods.go, db.go, restore.go, recover.go, steps/postgres_roles.go, restarter.go and doctor.
+1. Qualify activity history on edge, or explicitly accept its named evidence gaps before deployment.
+2. Followers were published through PR #14 at `0d8e1fcc493c`; that is not deployment or live qualification. Phase 7's local source implementation is accepted through E7-05; E7-06 is at final targeted source closure, and the two whole-change reviews and fresh final checks have not run. After that closure, separately authorize its pull request/publication and signed-artifact verification. Separately authorize deployment and the combined follower/extension qualification in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md); preserve all follower cases and blocked fault-boundary cases. The run sheet is preparation only and is not execution-ready.
 3. Open a pull request from `master` into `1.x` and merge it with a merge commit; tag `v1.0.0-beta.1` on `1.x` (with authorization) and qualify it as in the cut checklist.
 
 - Until then, v1 fixes still target `1.x` and are merged up into master.

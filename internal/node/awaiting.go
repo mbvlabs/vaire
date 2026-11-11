@@ -58,7 +58,7 @@ func diagnosticsView(cfg config.Cluster) config.Cluster {
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		// The awaiting entries are unknown, so they cannot narrow the view.
-		return cfg
+		return cfg.Clone()
 	}
 	return diagnosticsViewWith(cfg, recs)
 }
@@ -67,9 +67,10 @@ func diagnosticsView(cfg config.Cluster) config.Cluster {
 // snapshot, so status and doctor do not read the file twice while building the
 // same report.
 func diagnosticsViewWith(cfg config.Cluster, recs backup.Records) config.Cluster {
-	out := cfg
+	out := cfg.Clone()
 	out.Clusters, out.Awaiting = nil, nil
 	for _, c := range cfg.Clusters {
+		c = c.Clone()
 		if recs.IsAwaiting(c.Name) {
 			out.Awaiting = append(out.Awaiting, c)
 		} else {
@@ -98,6 +99,7 @@ var awaitingRefused = map[string]string{ //nolint:gosec // G101: method names an
 	"maint.report": "a maintenance report", "queries.reset": "a statistics reset", "apply": "apply --db",
 	"sql": "sql", "db.write-access": "writing to it",
 	"db.follow": "a follow", "db.unfollow": "an unfollow",
+	"ext.add": "an extension change", "ext.remove": "an extension change",
 }
 
 // awaitingParamFields are the params that name a database.
