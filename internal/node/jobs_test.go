@@ -1,12 +1,62 @@
 package node
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/engine"
 )
+
+// R2-5: an attached job whose unit ended without recording a result keeps its
+// JobOutcomeUnknown detail through the finished record, the job outcome and the
+// RPC failure envelope the CLI parses. The passwords an unfollow may have
+// installed stay out of all of it; the CLI adds them only to its handoff.
+func TestCrashedJobKeepsOutcomeUnknownAcrossRPC(t *testing.T) {
+	rec := engine.JobRecord{ID: "01J0000000000000000000TEST", Job: "db-unfollow", DB: "app_follower",
+		State: engine.JobRunning, Unit: "vaire-job-01J0000000000000000000TEST.service"}
+	done := crashedJobRecord(rec)
+	if done.State != engine.JobFailed {
+		t.Fatalf("the synthesized crash is recorded as %q", done.State)
+	}
+	if done.Error == nil || done.Error.Details == nil {
+		t.Fatalf("the crash lost its structured error: %+v", done.Error)
+	}
+	_, err := jobOutcome(done)
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("not a CLI error: %v", err)
+	}
+	details, _ := cliErr.Details.(map[string]any)
+	if details["reason"] != JobOutcomeUnknown {
+		t.Fatalf("jobOutcome lost the reason: %v", cliErr.Details)
+	}
+
+	// This is the failure body the node puts on the RPC wire; the CLI's result
+	// parser turns it back into a CLI error with the same details.
+	raw, marshalErr := json.Marshal(output.Fail(nil, err))
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	var env struct {
+		Error output.ErrorBody `json:"error"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &env); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	serialized, _ := env.Error.Details.(map[string]any)
+	if serialized["reason"] != JobOutcomeUnknown {
+		t.Fatalf("RPC serialization lost the reason: %s", raw)
+	}
+	for _, secret := range []string{"app_follower-owner-pw", "app_follower-app-pw"} {
+		if strings.Contains(string(raw), secret) || strings.Contains(cliErr.Error(), secret) {
+			t.Fatal("the job failure carries a password")
+		}
+	}
+}
 
 func TestJournalNoise(t *testing.T) {
 	for line, want := range map[string]bool{
@@ -46,7 +96,7 @@ func TestJournalFilterDropsEnvelope(t *testing.T) {
 			got = append(got, ev)
 		}
 	}
-	if len(got) != 3 || got[0].Type != "step" || got[0].TS != "" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after" {
+	if len(got) != 3 || got[0].Type != "step" || got[0].TS != "2026-10-14T12:00:00Z" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after" {
 		t.Fatalf("events = %+v", got)
 	}
 }

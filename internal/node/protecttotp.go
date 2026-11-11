@@ -344,6 +344,9 @@ type protectStatus struct {
 type ProtectedDatabase struct {
 	Name      string `json:"name"`
 	Protected bool   `json:"protected"`
+	// Follows is set for a follower: it has no writable path, so the
+	// write-code gate never asks for a code for it (Phase 6).
+	Follows string `json:"follows,omitempty"`
 }
 
 func handleProtectStatus(_ context.Context, _ *Env) (Result, error) {
@@ -427,7 +430,7 @@ func copiesOf(cfg config.Cluster, recs backup.Records) []string {
 func protectionOf(cfg config.Cluster) ([]string, []ProtectedDatabase) {
 	protected, all := []string{}, make([]ProtectedDatabase, 0, len(cfg.Clusters))
 	for _, c := range cfg.Clusters {
-		all = append(all, ProtectedDatabase{Name: c.Name, Protected: c.Protected})
+		all = append(all, ProtectedDatabase{Name: c.Name, Protected: c.Protected, Follows: c.Follows})
 		if c.Protected {
 			protected = append(protected, c.Name)
 		}

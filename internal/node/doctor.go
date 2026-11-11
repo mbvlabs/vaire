@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -12,8 +13,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/activity"
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
@@ -121,11 +124,29 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	}
 	f.Records, _ = backup.LoadRecords()
 	f.Master = masterFacts(cfg)
+	f.ActivityHealthChecked = true
+	f.ActivityHealth, f.ActivityHealthKnown = gatherActivityHealth(ctx)
 
 	prev, havePrev := loadDoctorState()
 	created := clusterCreated()
+	// Awaiting recovery entries have no cluster, but an unfinished ordinary
+	// follow that materialised before its completion save failed still has
+	// measurable replication and source-slot facts (Q3). The convergence view
+	// is not used here: it would hide them from diagnostics.
+	view := diagnosticsViewWith(cfg, f.Records)
+	followers := readFollowers(ctx, view, "")
+	slots, slotFailures := orphanSlots(ctx, view)
+	for _, o := range slots {
+		f.OrphanSlots = append(f.OrphanSlots, doctor.OrphanSlot{Source: o.Source, Port: o.Port, Slot: o.Slot})
+	}
+	for _, e := range slotFailures {
+		f.OrphanSlotErrors = append(f.OrphanSlotErrors, doctor.OrphanSlotError{Source: e.Source, Port: e.Port, Error: e.Error})
+	}
 	for _, s := range readClusters(ctx, cfg, "", false) {
-		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample}
+		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}
+		if st, ok := followers[s.Spec.Name]; ok {
+			c.Follower = &st
+		}
 		if f.Records.IsAwaiting(s.Spec.Name) {
 			c.AwaitingRecovery = true
 			f.Clusters = append(f.Clusters, c)
@@ -157,6 +178,94 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 		f.Clusters = append(f.Clusters, c)
 	}
 	return f
+}
+
+// activityHealthWait bounds how long doctor waits for the activity store's
+// health read. Tests shorten it. It bounds the caller, not the read: doctor
+// runs under the node lock (the quiet doctor job takes it shared, a full apply
+// holds it exclusive through the end-of-apply gate), so a filesystem call that
+// ignores its context must never keep that lock. The read's own context is
+// bounded by the same wait, so a read that honors cancellation stops when the
+// caller does.
+var activityHealthWait = 3 * time.Second
+
+// activityHealthInFlight is the one background health read this process may
+// have. A store call that ignores cancellation pins its goroutine for as long
+// as the filesystem stalls it; starting another on every doctor run would grow
+// without bound. While one is stuck, doctor reports the history as unknown
+// instead of paying the stall again.
+var activityHealthInFlight atomic.Bool
+
+// errActivityHealthPanic reports a store that panicked while reporting its
+// health. The read is unknown; the process keeps running.
+var errActivityHealthPanic = errors.New("activity: the health read failed")
+
+// activityHealthRead is one background health read's outcome.
+type activityHealthRead struct {
+	health activity.Health
+	err    error
+}
+
+// gatherActivityHealth reads the node's activity-store health without creating
+// or changing the store. A read that fails, panics or outlives its bound leaves
+// the facts unknown; it is never reported as a healthy history.
+func gatherActivityHealth(ctx context.Context) (activity.Health, bool) {
+	store, err := activityStoreFactory()
+	if err != nil || store == nil {
+		return activity.Health{}, false
+	}
+	return activityStoreHealth(ctx, store)
+}
+
+// activityStoreHealth reads store's health and reports whether the read
+// produced a truthful reading. The read runs on its own goroutine, so the
+// caller returns within activityHealthWait even when the store does not return
+// at all. An unknown reading is not a healthy one: real health failures still
+// arrive as a typed Health with its loss, permission and budget fields set.
+func activityStoreHealth(ctx context.Context, store activityStore) (activity.Health, bool) {
+	if store == nil {
+		return activity.Health{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !activityHealthInFlight.CompareAndSwap(false, true) {
+		// An earlier read is still pinned on the store. Adding another one
+		// would let a stalled filesystem grow goroutines without bound.
+		return activity.Health{}, false
+	}
+	read := make(chan activityHealthRead, 1) // buffered: an abandoned read must not block on delivery
+	go func() {
+		r := readActivityHealth(ctx, store)
+		activityHealthInFlight.Store(false)
+		read <- r
+	}()
+	timer := time.NewTimer(activityHealthWait)
+	defer timer.Stop()
+	select {
+	case r := <-read:
+		if r.err != nil {
+			return activity.Health{}, false
+		}
+		return r.health, true
+	case <-timer.C:
+		return activity.Health{}, false
+	}
+}
+
+// readActivityHealth is the bounded background read. A panicking store is
+// reported as an unknown read instead of ending the process: this goroutine
+// runs outside the request's recover.
+func readActivityHealth(ctx context.Context, store activityStore) (r activityHealthRead) {
+	defer func() {
+		if recover() != nil {
+			r = activityHealthRead{err: errActivityHealthPanic}
+		}
+	}()
+	readCtx, cancel := context.WithTimeout(ctx, activityHealthWait)
+	defer cancel()
+	r.health, r.err = store.Health(readCtx)
+	return r
 }
 
 // driftOf is a step's check detail, "" when the host matches it.

@@ -19,9 +19,17 @@ import (
 
 // Layout of the clusters postgresql-common manages, as the materialised
 // cluster needs it. steps keeps the same paths for the live clusters.
-const (
+var (
 	pgConfRoot  = "/etc/postgresql/18"
 	pgSocketDir = "/var/run/postgresql"
+)
+
+// resolveClusterIDs and writeClusterFile are the ownership and file effects of
+// registration and adoption. They are variables so a test can stop between the
+// files an adoption writes and run it again on the partial registration.
+var (
+	resolveClusterIDs = engine.ResolveIDs
+	writeClusterFile  = engine.WriteFileAtomicOwned
 )
 
 // MaterialiseOverrides is the conf.d file that turns a copy of the source's
@@ -75,8 +83,67 @@ func NewMaterialised(dataRoot, name, source string, sourcePort int, sh engine.Sh
 	return m, nil
 }
 
+// ResumeMaterialised returns the temporary cluster an interrupted build left:
+// unlike NewMaterialised it neither reserves a port nor refuses an existing
+// registration. The caller establishes that the exact deterministic paths are
+// its own before adopting them; Adopt completes the registration idempotently.
+func ResumeMaterialised(dataRoot, name, source string, sourcePort int, sh engine.Shell, stepID string, report engine.Reporter) *Materialised {
+	return &Materialised{
+		Name: name, Source: source, SourcePort: sourcePort,
+		Data:  filepath.Join(dataRoot, name),
+		Shell: sh, StepID: stepID, Report: report,
+	}
+}
+
+// DataDir is the copy's data directory.
+func (m *Materialised) DataDir() string { return m.Data }
+
 // ConfDir is the temporary cluster's configuration directory.
 func (m *Materialised) ConfDir() string { return filepath.Join(pgConfRoot, m.Name) }
+
+// ClusterRegistered reports whether postgresql-common has a registration file
+// for cluster name.
+func ClusterRegistered(name string) bool {
+	_, err := os.Stat(filepath.Join(pgConfRoot, name, "postgresql.conf"))
+	return err == nil
+}
+
+// ClusterConfigDirectory reports whether postgresql-common has any
+// configuration directory for cluster name, even one whose registration never
+// reached postgresql.conf. Such a directory is an interrupted registration, not
+// a cluster: NewMaterialised refuses it, and only an operation that owns it may
+// remove it.
+func ClusterConfigDirectory(name string) (bool, error) {
+	_, err := os.Stat(filepath.Join(pgConfRoot, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ClusterDataDirectory is the data_directory of cluster name's
+// postgresql-common registration, or empty when it has none. It is how a
+// resumed operation proves that the deterministic cluster path is its own and
+// not some other cluster's registration.
+func ClusterDataDirectory(name string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(pgConfRoot, name, "postgresql.conf")) //nolint:gosec // G304: postgresql-common's fixed configuration path.
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(key) == "data_directory" {
+			return strings.Trim(strings.TrimSpace(value), "'"), nil
+		}
+	}
+	return "", nil
+}
 
 // PG is a SQL runner for the temporary cluster.
 func (m *Materialised) PG() pg.Local { return pg.Local{Host: pgSocketDir, Port: m.Port} }
@@ -200,7 +267,7 @@ func (m *Materialised) register() error {
 		if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // G301: postgresql-common's configuration directories are world-readable.
 			return err
 		}
-		uid, gid, err := engine.ResolveIDs("postgres", "postgres")
+		uid, gid, err := resolveClusterIDs("postgres", "postgres")
 		if err != nil {
 			return err
 		}
@@ -209,7 +276,7 @@ func (m *Materialised) register() error {
 		}
 	}
 	for name, content := range files {
-		if err := engine.WriteFileAtomicOwned(filepath.Join(dir, name), []byte(content), confMode(name), "postgres", "postgres"); err != nil {
+		if err := writeClusterFile(filepath.Join(dir, name), []byte(content), confMode(name), "postgres", "postgres"); err != nil {
 			return err
 		}
 	}
@@ -261,10 +328,10 @@ func (m *Materialised) Adopt(ctx context.Context, port int) error {
 		{"port", strconv.Itoa(port)},
 		{"cluster_name", "'18/" + m.Name + "'"},
 	})
-	if err := engine.WriteFileAtomicOwned(filepath.Join(dir, "postgresql.conf"), []byte(conf), 0o644, "postgres", "postgres"); err != nil {
+	if err := writeClusterFile(filepath.Join(dir, "postgresql.conf"), []byte(conf), 0o644, "postgres", "postgres"); err != nil {
 		return err
 	}
-	if err := engine.WriteFileAtomicOwned(filepath.Join(dir, "start.conf"), []byte("auto\n"), 0o644, "postgres", "postgres"); err != nil {
+	if err := writeClusterFile(filepath.Join(dir, "start.conf"), []byte("auto\n"), 0o644, "postgres", "postgres"); err != nil {
 		return err
 	}
 	confD := filepath.Join(dir, "conf.d")

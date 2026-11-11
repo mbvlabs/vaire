@@ -97,14 +97,23 @@ func runNodeRun(cmd *cobra.Command, args []string) error {
 		// vaire job follow replays.
 		report = jobReporter(cmd)
 	}
-	data, skipped, err := node.RunJob(commandContext(cmd), job, opts, report)
+	var evidence jobEvidenceWarnings
+	data, skipped, err := node.RunJob(commandContext(cmd), job, opts, evidence.reporter(report))
 	if err != nil {
-		return err
+		return withEvidenceWarnings(err, evidence.warnings())
 	}
 	if skipped != "" {
-		return output.OK(cmd, data, "skipped "+job+": "+skipped)
+		return output.Success(cmd, output.Result{Data: data, Message: "skipped " + job + ": " + skipped, Warnings: evidence.warnings()})
 	}
-	return output.OK(cmd, data, "ran "+job)
+	return output.Success(cmd, output.Result{Data: data, Message: "ran " + job, Warnings: evidence.warnings()})
+}
+
+// withEvidenceWarnings attaches a bounded evidence notice to a failed node
+// run, so a structured failure does not hide that its history is incomplete.
+// It also works for an untyped job error, whose original text and identity are
+// preserved.
+func withEvidenceWarnings(err error, warnings []output.Warning) error {
+	return output.WithWarnings(err, warnings...)
 }
 
 // jobReporter writes each event as one redacted NDJSON line on stdout.

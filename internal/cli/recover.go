@@ -51,8 +51,9 @@ func dbRecoverCommand() cmdSpec {
 	}
 }
 
-// recoverOrder is --all's order (D8): the named databases first, then the
-// protected ones, then smallest first.
+// recoverOrder is --all's order (D8): followers after every other database,
+// as they follow their recovered source (Phase 6, D14); then the named
+// databases first, then the protected ones, then smallest first.
 func recoverOrder(dbs []databaseInfo, named []string) []string {
 	var awaiting []databaseInfo
 	for _, d := range dbs {
@@ -64,6 +65,8 @@ func recoverOrder(dbs []databaseInfo, named []string) []string {
 		a, b := awaiting[i], awaiting[j]
 		ai, bi := slices.Index(named, a.Name), slices.Index(named, b.Name)
 		switch {
+		case (a.Follows != "") != (b.Follows != ""):
+			return a.Follows == ""
 		case ai >= 0 && bi >= 0:
 			return ai < bi
 		case ai >= 0 || bi >= 0:
@@ -118,7 +121,7 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 		}
 		dbs = recoverOrder(data.Databases, args)
 		if len(dbs) == 0 {
-			return output.Success(cmd, output.Result{Data: map[string]any{"recovered": []string{}}, Message: "no database awaits recovery", Warnings: s.warnings})
+			return output.Success(cmd, output.Result{Data: map[string]any{"recovered": []string{}}, Message: "no database awaits recovery", Warnings: append(s.warnings, reply.Warnings...)})
 		}
 		p.note("recovering, in order: " + strings.Join(dbs, ", "))
 	}
@@ -179,9 +182,10 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 		return output.Success(cmd, output.Result{Data: map[string]any{"databases": outcomes, "dry_run": true}, Message: strings.Join(lines, "\n"), Warnings: warnings})
 	}
 	recovered := recoveredNames(outcomes)
-	if len(dbs) > 1 && !flagTrue(cmd, "no-full") && !flagTrue(cmd, "no-promote") && len(recovered) > 0 {
+	toBackUp := withStanza(outcomes)
+	if len(dbs) > 1 && !flagTrue(cmd, "no-full") && !flagTrue(cmd, "no-promote") && len(toBackUp) > 0 {
 		p.note("taking a full backup of each recovered database")
-		fulls, fullLines, fullWarnings, detached := eachDatabase(cmd, s, p, recovered, "backup.now",
+		fulls, fullLines, fullWarnings, detached := eachDatabase(cmd, s, p, toBackUp, "backup.now",
 			func(db string) any { return recoverFullParams(db) },
 			func(raw []byte) (any, string, error) { return json.RawMessage(raw), "full backup done", nil })
 		if detached != nil {
@@ -235,6 +239,19 @@ func errorBody(err error) *output.ErrorBody {
 	return &body
 }
 
+// withStanza are the recovered databases that get a full backup: not the
+// followers, whose result names the source they follow again (Phase 6).
+func withStanza(outcomes []dbJobOutcome) []string {
+	var out []string
+	for _, o := range outcomes {
+		res, _ := o.Result.(map[string]any)
+		if f, _ := res["follows"].(string); o.Error == nil && f == "" {
+			out = append(out, o.Database)
+		}
+	}
+	return out
+}
+
 func recoveredNames(outcomes []dbJobOutcome) []string {
 	var out []string
 	for _, o := range outcomes {
@@ -246,6 +263,13 @@ func recoveredNames(outcomes []dbJobOutcome) []string {
 }
 
 func recoverLine(db string, res map[string]any) string {
+	if f, _ := res["follows"].(string); f != "" {
+		line := db + ": following " + f + " again (" + fmt.Sprint(res["from"]) + ")"
+		if n := len(recoverWarnings(db, res)); n > 0 {
+			line += fmt.Sprintf(", but %d part(s) of finishing it failed (see the warnings)", n)
+		}
+		return line
+	}
 	line := db + ": recovered"
 	if res["phase"] == "ready" {
 		line = db + ": ready to inspect as " + fmt.Sprint(res["restoring"]) + "; vaire restore promote " + db + " finishes it"
@@ -266,8 +290,9 @@ func recoverLine(db string, res map[string]any) string {
 }
 
 // recoverWarnings are what failed after db's data was recovered: the job's
-// own *_warning results and the warning of the promote (the poolers or the
-// full backup after the cut-over), nested in its promoted result.
+// own *_warning results, the structured warning of the promote (the poolers or
+// the full backup after the cut-over), nested in its promoted result, and a
+// follower recovery's warnings, which keep their codes and messages.
 func recoverWarnings(db string, res map[string]any) []output.Warning {
 	var out []output.Warning
 	if promoted, ok := res["promoted"].(map[string]any); ok {
@@ -286,6 +311,32 @@ func recoverWarnings(db string, res map[string]any) []output.Warning {
 		if v, _ := res[key].(string); v != "" {
 			out = append(out, output.Warning{Code: "recover_" + strings.TrimSuffix(key, "_warning"), Message: db + ": " + v})
 		}
+	}
+	out = append(out, followerRecoverWarnings(res)...)
+	return out
+}
+
+// followerRecoverWarnings flattens the warnings of a recovered follower's job
+// result, which are structured like the node's other warnings, so they reach
+// the standard warning list with their own codes instead of staying nested in
+// the job result (Phase 6).
+func followerRecoverWarnings(res map[string]any) []output.Warning {
+	raw, ok := res["warnings"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []output.Warning
+	for _, item := range raw {
+		w, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		code, _ := w["code"].(string)
+		message, _ := w["message"].(string)
+		if message == "" {
+			continue
+		}
+		out = append(out, output.Warning{Code: code, Message: message})
 	}
 	return out
 }

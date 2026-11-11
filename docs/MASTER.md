@@ -75,7 +75,7 @@ The first goal is the **master node**: one VPS that hosts every database and own
 | pgBackRest floor | 2.59.3 from PGDG, held; WAL-G stays a fallback behind `backup.Driver` (not built) |
 | DNS and certificates | One certificate per node, for its one hostname. In `acme` mode, `server init` shows the DNS record to create, waits for the operator to confirm it, and checks it against public resolvers. TLS never blocks on ACME: a placeholder certificate lets the poolers and nginx start, and a certificate that's still pending after 120 s is a warning, not a failure |
 | Master backup (Phase 5) | Replaces the restic VPS backup: a small age-encrypted bundle of what's born on the master (desired state, registries, `records.json`, the TOTP secret, WireGuard and host keys, the certificate and ACME account), built after every change (a dirty flag and a path unit) and uploaded to `<prefix>/master/` with a sidecar, kept locally too. An epoch in the bucket fences an old master: it stops its timers and poolers, and every cluster's `archive_command` (`vaire node archive-push`) refuses. `server init --restore` rebuilds on a new VPS with the old identity; databases come back `awaiting_recovery` and `db recover` brings each back from its stanza. Decided in [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md) |
-| Followers (Phase 6) | Physical standbys of one database's cluster, with `wal_level = replica`; `db unfollow` promotes one into an independent database |
+| Followers (Phase 6) | Physical standbys of one database's cluster, with `wal_level = replica`; `db unfollow` promotes one into an independent database. Built 2026-10-29, live test pending. Protection is not inherited: a follower and an unfollowed copy are unprotected unless the operator protects them |
 | HA (Phase 11, last) | Patroni per cluster with one shared etcd. Until then vaire runs plain `postgresql-common`, with a designed and tested adoption step into Patroni |
 
 **Still to decide** (when the phase that needs it starts):
@@ -236,6 +236,8 @@ internal/release/            release manifest fetch, sigstore verification, down
 internal/rpc/                vaire-rpc/v1 request types
 internal/node/               node-side RPC dispatcher, selfcheck, upgrade.install
 internal/secrets/            secret registry and redaction
+internal/activity/           bounded metadata-only activity history
+internal/diagnostics/        portable incident evidence, validated offline
 internal/versions/           pinned external versions and checksums
 internal/buildinfo/          version, commit, channel, release base URL
 internal/guide/              embedded agent guide
@@ -272,19 +274,22 @@ schema/vaire-v1.json           agent JSON contract
 | `/var/lib/vaire/instance` | root 0600 | This install's random id, which the bucket's epoch names (Phase 5); never in the bundle |
 | `/var/lib/vaire/journal.json` | root 0600 | Applied step IDs and instances (`postgres-config-v1@app`), input hashes, pending restarts |
 | `/var/lib/vaire/state.json` | root 0600 | Ephemeral: jobs and lockdown flags |
-| `/var/lib/vaire/records.json` | root 0600 | Durable records: open restores and leftovers, timeline switches after `restore undo`, dropped stanzas and their expiry, drills, last backup, verify and dump per database |
+| `/var/lib/vaire/records.json` | root 0600 | Durable records: open restores and leftovers, timeline switches after `restore undo`, dropped stanzas and their expiry, drills, last backup, verify and dump per database; an unfinished unfollow and the adopted marker of a follower recovery (Phase 6) |
+| `/var/lib/vaire/follow-<db>.json` | root 0600 | Node-local record of a follower copy a `db recover` owns, written before its first local mutation so a job killed during the copy or adoption can be resumed; never in the master bundle (Phase 6) |
 | `<data_root>/<db>` | postgres 0700 | Each database's data directory; `data_root` defaults to `/var/lib/postgresql/18` |
 | `/etc/postgresql/18/<db>/conf.d/10-vaire-tuning.conf` | managed | Tuning from the database's size |
 | `/etc/postgresql/18/<db>/conf.d/20-vaire-security.conf` | managed | Socket only, its port, auth, logging |
 | `/etc/postgresql/18/<db>/conf.d/30-vaire-extensions.conf` | managed | `shared_preload_libraries` and extension settings |
 | `/etc/postgresql/18/<db>/conf.d/40-vaire-backup.conf` | managed | `archive_mode = on`; `vaire node archive-push` (which refuses on a fenced node, then runs pgBackRest's) to the database's stanza, or `/bin/true` without backups |
 | `/etc/postgresql/18/<db>/conf.d/50-vaire-settings.conf` | managed | `[postgres.settings]` and the database's own `[clusters.settings]` |
+| `/etc/postgresql/18/<db>/conf.d/60-vaire-follower.conf` | managed | A follower's hot-standby floors, `hot_standby = on`, `primary_conninfo`, `primary_slot_name`, and with backups its `restore_command`; only for a follower (Phase 6) |
 | `/etc/postgresql/18/<db>/conf.d/90-overrides.conf` | user | The only hand-edited file; `vaire doctor` lists what it overrides |
 | `/etc/systemd/system/postgresql@18-<db>.service.d/` | managed | The database's cgroup limits and `OOMScoreAdjust` |
 | `/etc/pgbouncer/pgbouncer.ini`, `session.ini` | managed | The transaction and session poolers, a `[databases]` entry per database |
 | `/etc/pgbackrest/pgbackrest.conf` | postgres 0600 | One repository, a section per stanza |
 | `/run/vaire-ports/` | | Port reservations of temporary clusters (5480–5499) |
 | `/var/log/vaire/` | | Per-run logs for apply, backup, maintenance and restore drills |
+| `/var/log/vaire/activity/` | root 0700 | Bounded metadata-only operation history; files `0600`, no PostgreSQL dependency; query commands do not create it |
 
 ### 5.8 Databases as clusters
 
@@ -365,7 +370,7 @@ vaire takes the same unit to the user's own VPS. The VPS plays the provider's ho
 - Memory budget: the server keeps a reserve of `max(512 MiB, 25% of RAM)` (or `[server] memory_reserve`), and the clusters share the rest. Each cluster's `memory` (from its size) is the RAM it tunes for.
 - Memory: `shared_buffers` ≈ 25% of the cluster's memory, `effective_cache_size` ≈ 70–75%, `work_mem` from (memory − shared_buffers) / (connections × profile factor), `maintenance_work_mem` / `autovacuum_work_mem` capped, `huge_pages = try` from 2 GiB with the OS pre-sized to the sum.
 - Connections: `max_connections` comes from the size (20 for `nano` up to 200 for `xlarge`), and both pools plus 3 reserved slots must fit in it.
-- WAL / checkpoints: `wal_compression = zstd`, `min_wal_size` / `max_wal_size` from the cluster's share of the disk (in proportion to its memory), `checkpoint_timeout = 15min`, `checkpoint_completion_target = 0.9`.
+- WAL / checkpoints: `wal_level = replica` (physical followers need no logical decoding), `max_slot_wal_keep_size` caps every replication slot at 10% of the cluster's share of the data disk (2–64 GiB, the same share `max_wal_size` uses), `wal_compression = zstd`, `min_wal_size` / `max_wal_size` from the cluster's share of the disk (in proportion to its memory), `checkpoint_timeout = 15min`, `checkpoint_completion_target = 0.9`.
 - I/O (PG18): `io_method` (`worker` by default, `io_uring` when the kernel and build support it), `effective_io_concurrency` / `maintenance_io_concurrency` for SSD/NVMe, `random_page_cost = 1.1`.
 - Parallelism: `max_worker_processes`, `max_parallel_workers(_per_gather)` from the cluster's CPU share (`vCPU / clusters`, at least 2) and profile. JIT is off for OLTP.
 - Autovacuum: more aggressive scale factors, `autovacuum_vacuum_max_threshold` (new in 18), `autovacuum_worker_slots`, cost limits sized to the disk.
@@ -510,10 +515,13 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 
 ### 7.1 Current state (2026-10-19)
 
+- **Phase 6 is built (2026-10-29, not released or live-tested):** per-database physical followers with `db follow`, `db unfollow` and recovery after a rebuild, plus their doctor, status, metrics and guard integration. Its manual test in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md) is pending; the design, the review findings and the decisions that changed it are in [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md) and [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md).
+- **Activity history implementation is committed (2026-10-28, not released):** the operator authorized and selected the local, metadata-only activity history and on-demand incident bundles in [`RFC-activity-and-diagnostics.md`](./RFC-activity-and-diagnostics.md). It adds the activity store, `activity list|show|health`, `diagnostics collect|inspect`, job/step correlation, doctor health checks and typed schemas. Local tests/build/vet/lint pass (including the macOS cross-build); review findings are fixed (see [`FINDINGS-activity-review.md`](./FINDINGS-activity-review.md)); the work is committed but has **not** been released, deployed or live-qualified. Off-node collection, continuous runtime-log search, separate agent identities and credential-vault encryption remain outside this work.
+- **Activity review fixes (2026-10-27, local only):** regression tests cover preserving streamed evidence warnings in final structured results even when callers discard RPC replies, retaining fresh evidence before a backdated segment tail, underscore-prefixed database correlation/filtering through incident export, and frozen cursor windows after the clock advances. Build, vet, tests, Go/repository lint and the macOS cross-build pass; race tests remain unavailable because this machine has no C compiler. No commit, release, deployment or live qualification was performed.
 - **Phases 0–5 are live-qualified for the first alpha, not released.** Main scenarios completed, including genuine protected-policy upgrade, protected SQL/maintenance/dump-copy writes, metrics/query filtering, fresh bucket-backed init, rebuild/recovery with automatic full backup, local init and journal-proven lockdown self-revert. Detailed checklist variants and coverage limits remain in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md); this is not a claim that every historical checkbox passed.
 - **Latest qualified code:** `65c4f91`, published as `edge-65c4f9157253` after successful edge workflow `39234654792`. The recovered fixture had doctor 44 pass / 0 warn / 0 fail and plan 0 pending / 17 steps. It was subsequently replaced during operator-run bootstrap tests; these numbers are qualification evidence, not current VPS health.
 - **Publication still needs authorization.** No v1 branch/tag or stable publication was performed in this qualification. Linux install/upgrade passed; macOS live testing was excluded by the operator (cross-build only). See [`PLAN-v1-release.md`](./PLAN-v1-release.md), the [draft alpha notes](./RELEASE-v1.0.0-alpha.1.md) and the [document index](./README.md).
-- **Current command inventory:** `vaire commands --json`; the README summarizes implemented operations. Phases 6–7 and major-upgrade work remain outside this alpha qualification.
+- **Current command inventory:** `vaire commands --json`; the README summarizes implemented operations. Phases 6–7 and major-upgrade work remain outside this alpha qualification; Phases 6–7 are qualified for the beta.
 
 #### Historical implementation milestones (through 2026-10-15)
 
@@ -538,18 +546,18 @@ The dated notes below preserve the implementation sequence. Their then-pending t
 | 3 | Databases as clusters, backups & native restore | Each database its own cluster with a size and limits, two poolers, one hostname per node; a stanza per database, native PITR restore with an in-place cut-over, native `db fork`, drills per database | ✅ |
 | 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ✅ alpha-qualified; coverage limits logged |
 | 5 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | ✅ alpha-qualified; coverage limits logged |
-| 6 | Followers | Per-database physical standby followers; unfollow one to rehearse a risky migration on current data | ⬜ |
+| 6 | Followers | Per-database physical standby followers; unfollow one to rehearse a risky migration on current data | 🟡 built, live test pending |
 | 7 | Extensions | Extension catalog and `vaire ext` | ⬜ |
 | 8 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
 | 9 | Operators & agents | Teammate and agent identities, read-only agents, full agent guide, alerting | ⬜ |
 | 10 | Multi-node & replicas | Worker nodes driven from the master, a node for one database, `db move`, followers and replicas on other nodes | ⬜ |
 | 11 | High availability | Patroni per cluster + etcd, automatic failover; the master stops being a single point | ⬜ last |
 
-**v1.0.0 (every alpha and the final) is Phases 0–5**, with observability and the master backup (disaster recovery) as release requirements. Followers (Phase 6), extensions (Phase 7), upgrades, operators and agents, multi-node and HA come after `v1.0.0` final. Followers and extensions are intended for later compatible v1 minor releases (from `v1.1.0`), not automatically a new major. `master` remains development/edge; v1 fixes land on `1.x` by pull request and `1.x` is merged up into `master` (Laravel-style, no cherry-picks). Minor numbers advance sequentially by release, independently of roadmap phases. See [the release strategy](PLAN-v1-release.md).
+**v1.0.0 is Phases 0–7 plus local activity history** (decided 2026-10-28), with observability and the master backup (disaster recovery) as release requirements. The published alphas (`v1.0.0-alpha.1`, `v1.0.0-alpha.2`) are Phases 0–5; followers (Phase 6), extensions (Phase 7) and activity history enter the line as `v1.0.0-beta.1`, before final. Upgrades, operators and agents, multi-node and HA come after `v1.0.0` final. `master` remains development/edge; v1 fixes land on `1.x` by pull request and `1.x` is merged up into `master` (Laravel-style, no cherry-picks). Minor numbers advance sequentially by release, independently of roadmap phases. See [the release strategy](PLAN-v1-release.md).
 
 **v1 is an alpha: nothing is frozen.** `cluster.toml`, the secrets document (`vaire-secrets/v1`), the bundle format (`vaire-master-bundle/v1`), the `vaire/v1` JSON and the step IDs may change between alpha releases, and a later alpha release may require rebuilding a server with a fresh `server init` and restoring its databases. Compatibility promises start after the alpha.
 
-[`IMPLEMENTATION.md`](./IMPLEMENTATION.md) specifies Phases 0–5, 7 and 8 in detail, plus the agent guide (Phase 9). Phases 6 and 9–11 get their own design before they start.
+[`IMPLEMENTATION.md`](./IMPLEMENTATION.md) specifies Phases 0–8 in detail, plus the agent guide (Phase 9). Phases 9–11 get their own design before they start.
 
 ### 7.3 Phase 0 — Foundations ✅
 
@@ -646,18 +654,21 @@ Built in the units of [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md); main a
 
 **Manual evidence:** bucket-backed rebuild with preserved identity, records/protection and database recovery; exported-bundle rebuild without a bucket and honest no-offsite-data refusal; genuine awaiting-recovery write-access refusal; automatic full after corrected recovery. Small-fixture recovery timings and remaining detailed coverage limits are in [MANUAL-TESTING.md](MANUAL-TESTING.md), not production RTO guarantees.
 
-### 7.9 Phase 6 — Followers ⬜
+### 7.9 Phase 6 — Followers 🟡
 
-Heroku-style followers for rehearsing risky migrations on production data. **Decided: physical standbys.** A follower is a cluster of its own that streams from one source database's cluster; `wal_level` drops from `logical` to `replica`. Logical replication stays possible later as an opt-in.
+Heroku-style followers for rehearsing risky migrations on production data. **Decided: physical standbys.** A follower is a cluster of its own that streams from one source database's cluster; `wal_level` is `replica`. Logical replication stays possible later as an opt-in.
+
+Built in the units of [`PHASE-6-WORK-UNITS.md`](./PHASE-6-WORK-UNITS.md); findings and decisions are in [`FINDINGS-phase-6-review.md`](./FINDINGS-phase-6-review.md). The initial build is committed on `phase-6-followers`; final-gate corrections remain uncommitted. On 2026-11-10 both independent cumulative source reviews accepted with no remaining actionable findings, and independent full local verification plus uncached tests passed; see [`REVIEW-phase-6-final.md`](./REVIEW-phase-6-final.md). Not merged, published or live-qualified. Activity qualification must precede follower deployment, and publication/live operations remain separately gated.
 
 | Module | What it does | Status |
 | --- | --- | --- |
-| Followers | `db follow <db> --name <new> [--size]` materialises from the source's stanza (or `pg_basebackup` without backups), sets `primary_conninfo` and keeps streaming with `hot_standby = on`, through a physical slot capped by `max_slot_wal_keep_size`. A pooler alias (`<new> = … dbname=<db>`) makes it `db1.<domain>/<new>`, read-only with the source's credentials. `db unfollow <follower>` promotes it into an independent database: the fork's renames, a new stanza and a first full | ⬜ |
-| Checks | `db list`, `status` and `doctor` show the source, the lag in bytes and seconds, and a slot holding WAL; dropping a source with followers is refused | ⬜ |
-| Commands | `db follow`, `db unfollow` | ⬜ |
-| Recovery | `server init --restore` and `db recover` bring a follower back as a follower of its source (the master backup came first, in Phase 5) | ⬜ |
+| Followers | `db follow <db> [--name <new>] [--size] [--allow-overcommit]` materialises from the source's stanza (or `pg_basebackup` without backups), sets `primary_conninfo` and keeps streaming with `hot_standby = on`, through a physical slot capped by `max_slot_wal_keep_size`. A pooler alias (`<new> = … dbname=<db>`) makes it `db1.<domain>/<new>`, read-only with the source's credentials. `db unfollow <follower>` promotes it into an independent database: the fork's renames, a new stanza and a first full | 🟡 built, live test pending |
+| Checks | `db list`, `status` and `doctor` show the source, the streaming state, PostgreSQL's replay delay and the byte backlog, and the slot holding WAL; unknown measurements are omitted, not shown as zero; dropping a source with followers is refused | 🟡 built, live test pending |
+| Commands | `db follow`, `db unfollow`; `db recover` brings a follower back after a rebuild | 🟡 built, live test pending |
+| Recovery | `server init --restore` and `db recover` bring a follower back as a follower of its source (the master backup came first, in Phase 5), resuming an interrupted copy where it can | 🟡 built, live test pending |
+| Resize and protection | A source's resize updates its followers first and refuses a shrink that would lower their floors; protection is not inherited by a follower or an unfollowed copy | 🟡 built, live test pending |
 
-**Manual test:** follow a database under write load and watch the lag reach zero. Unfollow it, check row counts and sequence values against the source, run a migration on the copy, then drop it.
+**Manual test:** follow a database under write load and watch the lag reach zero. Unfollow it, check row counts and sequence values against the source, run a migration on the copy, then drop it. The full checklist, including interrupted recovery and a refused shrink, is in [`MANUAL-TESTING.md`](./MANUAL-TESTING.md).
 
 ### 7.10 Phase 7 — Extensions ⬜
 

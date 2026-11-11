@@ -457,10 +457,12 @@ var (
 var reservedSettings = []string{
 	"allow_alter_system", "listen_addresses", "port", "password_encryption",
 	"shared_preload_libraries", "data_directory", "hba_file", "ident_file",
+	// A follower's replication settings (Phase 6).
+	"hot_standby", "restore_command",
 }
 
 // reservedSettingPrefixes are the setting families vaire owns.
-var reservedSettingPrefixes = []string{"ssl", "archive_", "include"}
+var reservedSettingPrefixes = []string{"ssl", "archive_", "include", "primary_", "recovery_target"}
 
 // isReservedSetting reports whether key is one vaire writes itself.
 func isReservedSetting(key string) bool {

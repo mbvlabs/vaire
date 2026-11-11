@@ -4,7 +4,7 @@ One CLI that turns a fresh VPS into a hardened PostgreSQL 18 server, and then st
 
 From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubuntu 26.04 server, locks it down, installs PostgreSQL 18 with PgBouncer and nginx, issues its TLS certificate, and connects you to it over WireGuard. Each database you create gets its own tuned PostgreSQL cluster with a size and resource limits, the way a managed provider gives each database its own instance. Every later operation goes through the same binary, over SSH, inside WireGuard. There is no server control daemon, web UI or open control API port; an operator-side shared tunnel daemon keeps concurrent CLI commands on one WireGuard connection per context.
 
-> **Status (2026-10-19):** preparing the first v1 alpha; not yet tagged or published. Phases 0–5 have live qualification evidence, including backups, disaster recovery, protected writes, observability, local bootstrap and automatic SSH-lockdown revert. Known coverage limits are recorded in [manual testing](docs/MANUAL-TESTING.md). Followers, extensions and multi-node remain future work. See [the roadmap](docs/MASTER.md#7-roadmap-and-status) and [draft alpha notes](docs/RELEASE-v1.0.0-alpha.1.md). Alpha formats are not frozen; a later alpha may require a rebuild and restore.
+> **Status (2026-10-19):** preparing the first v1 alpha; not yet tagged or published. Phases 0–5 have live qualification evidence, including backups, disaster recovery, protected writes, observability, local bootstrap and automatic SSH-lockdown revert. Known coverage limits are recorded in [manual testing](docs/MANUAL-TESTING.md). Followers (Phase 6) are built and await live qualification; extensions and multi-node remain future work. See [the roadmap](docs/MASTER.md#7-roadmap-and-status) and [draft alpha notes](docs/RELEASE-v1.0.0-alpha.1.md). Alpha formats are not frozen; a later alpha may require a rebuild and restore.
 
 ## What works today
 
@@ -13,7 +13,7 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Setup | `vaire server init` (remote over SSH, or `--local` on the server), `--resume` |
 | Access | `vaire login`, `vaire context list\|show\|use\|remove\|set-address`, `vaire ssh`, `vaire tunnel` |
 | Desired state | `vaire plan`, `vaire apply`, `vaire config show\|get\|set\|edit\|validate` |
-| Databases | `vaire db list\|create\|resize\|drop\|credentials\|fork\|protect\|unprotect` |
+| Databases | `vaire db list\|create\|resize\|drop\|credentials\|fork\|follow\|unfollow\|protect\|unprotect` |
 | Protection | `vaire protect init\|status` (two-factor code), `vaire db protect\|unprotect` |
 | SQL | `vaire sql` (multiple statements and ordered results, JSON-friendly), `vaire psql`, `vaire console` (usql) |
 | Tuning | `vaire tune show\|explain\|apply` |
@@ -22,12 +22,15 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Disaster recovery | `vaire server backup now\|list\|verify\|export` (the master bundle), `vaire server init --restore`, `vaire db recover <db>\|--all` |
 | Jobs | `vaire job list\|follow` |
 | Health | `vaire status [--watch]`, `vaire doctor [--only security]`, `vaire top`, `vaire queries` |
+| Evidence | `vaire activity list\|show\|health`, `vaire diagnostics collect\|inspect` (local metadata-only history and portable incident files) |
 | Metrics | `vaire metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
 | Maintenance | `vaire maint vacuum\|analyze\|reindex\|report\|kill` (`repack` waits for Phase 7), nightly and weekly maintenance timers |
 | Operations | `vaire logs`, `vaire secrets export`, `vaire upgrade` |
 | Agents | `vaire commands --json`, `vaire guide agents`, `vaire skill install` |
 
 Commands from later phases are already in the tree and return `not implemented yet`.
+
+**New in this checkout, awaiting live qualification:** `vaire activity list|show|health` and `vaire diagnostics collect|inspect` provide local, metadata-only operation history and portable incident evidence. No logging database, external collector or raw-log export is required. See [activity and diagnostics](docs/ACTIVITY.md).
 
 ## Quick start
 
@@ -261,6 +264,7 @@ Protecting a database is refused until `vaire protect init` has run. A code work
 - **Staggered.** Each database's timers run at their own offset inside the maintenance window, and only one full, diff, verify, drill or dump runs at a time on a server.
 - **Dropped databases stay restorable for their window.** `db drop` keeps the stanza; `vaire backup list` shows it until a daily timer deletes it once the window has passed.
 - **Restoring one database doesn't touch the others.** A restore builds a new cluster from the database's stanza beside the live one, you check it, and only `promote` swaps it in. It needs free space for one copy of the database.
+- **`vaire db follow <db> [--name <new>] [--size <size>]`** makes a read-only physical standby of one database on the same server, copied from the source's stanza (or with `pg_basebackup` when it has none) and streaming through a replication slot capped by `max_slot_wal_keep_size`. Clients read it at the node's host with the follower's name in the path (`db1.<domain>:6432/<new>`) as the source's `_ro` or `_app` role; writes fail. `vaire db unfollow <new> --confirm <new>/unfollow` promotes it into an independent database with its own roles (new passwords, printed once), its own stanza and a first full backup, for a migration rehearsal; the source is not touched. A follower and an unfollowed copy do not inherit the source's protection: protect the copy with `vaire db protect` if it needs it.
 - **`vaire db fork <db> [--name <new>] [--at <time>]`** makes a separate database: a physical copy of the source (from its stanza at a point in time, or from the live cluster), renamed, with its own roles and new passwords, the source's size and settings (`90-overrides.conf` included), its own stanza and a first full backup. It works without backups when there's no `--at`.
 - **Long-retention dumps.** A database that must be kept longer than the window gets scheduled `pg_dump` archives (`clusters.<db>.backup.dump_schedule` and `dump_retention`), encrypted with age and streamed to the bucket. `vaire dump get` decrypts one, `vaire restore <db> --dump <id>` loads it, and `vaire db drop` takes a final dump first.
 - **Long work runs as detachable jobs.** Backups, verify, restores, drills and forks run as systemd units on the node. Ctrl-C detaches, and `vaire job list` / `vaire job follow <id>` re-attach.

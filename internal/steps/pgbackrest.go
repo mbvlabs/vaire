@@ -239,14 +239,14 @@ func (pgbackrestStep) Check(ctx context.Context, cfg config.Cluster, rt engine.R
 	if _, err := os.Stat(BackupEnvPath); err != nil {
 		return incomplete(BackupEnvPath + " is missing"), nil
 	}
-	if len(cfg.Clusters) == 0 {
+	if len(cfg.StanzaClusters()) == 0 {
 		return complete(), nil
 	}
 	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
 	if err != nil {
 		return incomplete("pgbackrest info failed: " + err.Error()), nil
 	}
-	for _, c := range cfg.Clusters {
+	for _, c := range cfg.StanzaClusters() {
 		if !all[c.Stanza].HasFull() {
 			return incomplete("stanza " + c.Stanza + " (" + c.Name + ") has no full backup"), nil
 		}
@@ -280,7 +280,7 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err := writeFileOwned(backup.ConfPath, string(render.PgBackRestConf(cfg, rt.Host, v.BackupSecrets)), 0o600, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	if len(cfg.Clusters) == 0 {
+	if len(cfg.StanzaClusters()) == 0 {
 		return engine.ApplyResult{Restart: engine.RestartNone, Notes: []string{noDatabasesNote}}, nil
 	}
 	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
@@ -288,7 +288,7 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		return engine.ApplyResult{}, err
 	}
 	var notes []string
-	for _, c := range cfg.Clusters {
+	for _, c := range cfg.StanzaClusters() {
 		// A stanza with a full backup is done; rotated keys check every
 		// stanza again, so a key that cannot push WAL shows up now.
 		if all[c.Stanza].HasFull() && !rt.RotateSecrets {

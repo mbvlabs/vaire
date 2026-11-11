@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +199,146 @@ func TestWriteAccess(t *testing.T) {
 	wantReason(t, err, output.CodeProtectCodeRejected, "code_reused")
 	if len(granted) != 1 {
 		t.Fatalf("granted %d roles", len(granted))
+	}
+}
+
+// A follower takes no writes, so db.write-access refuses it before the
+// authenticator code is checked and makes no role, protected or not (D9).
+func TestWriteAccessRefusesAFollower(t *testing.T) {
+	for _, protected := range []bool{false, true} {
+		cfg := followerCfg()
+		for i := range cfg.Clusters {
+			if cfg.Clusters[i].Name == "app_follower" {
+				cfg.Clusters[i].Protected = protected
+			}
+		}
+		g, _ := newTestGuard(t)
+		granted := 0
+		grant := func(context.Context, config.ClusterSpec, writeRole) error {
+			granted++
+			return nil
+		}
+		env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"db":"app_follower"}`)}}
+		env.Req.Secrets = map[string]string{WritePasswordSecret: strings.Repeat("p", writeRolePasswordMin)}
+		_, err := g.writeAccess(context.Background(), env, grant)
+		wantReason(t, err, output.CodePrecondition, "is_follower")
+		if granted != 0 {
+			t.Fatalf("protected=%v: granted %d roles on a follower", protected, granted)
+		}
+	}
+}
+
+// The write-code gate skips a follower: a code can never make the read-only
+// cluster writable, so the handler runs and refuses (or serves maint kill)
+// on its own. A protected primary is still gated (Phase 6).
+func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
+	g, clock := newTestGuard(t)
+	secret := setUp(t, g, clock)
+	clock.t = clock.t.Add(totp.Period)
+	cfg := followerCfg()
+	for i := range cfg.Clusters {
+		cfg.Clusters[i].Protected = true
+	}
+	called := func(context.Context, *Env) (Result, error) { return Result{}, nil }
+	run := func(params, code string) (bool, error) {
+		env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(params)}}
+		if code != "" {
+			env.Req.Secrets = map[string]string{ProtectCodeSecret: code}
+		}
+		handlerRan := false
+		wrapped := g.requireWriteCode("writing to it", "db", sqlWrites, func(ctx context.Context, env *Env) (Result, error) {
+			handlerRan = true
+			return called(ctx, env)
+		})
+		_, err := wrapped(context.Background(), env)
+		return handlerRan, err
+	}
+
+	// The protected source still needs a code.
+	if ran, err := run(`{"db":"app","write":true}`, ""); ran {
+		t.Fatalf("the protected source ran without a code: %v", err)
+	} else {
+		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+	}
+	if ran, err := run(`{"db":"app","write":true}`, codeFor(t, secret, clock.t, 0)); err != nil || !ran {
+		t.Fatalf("the protected source: err %v, ran %v", err, ran)
+	}
+
+	// The protected follower runs without one: it cannot be written.
+	if ran, err := run(`{"db":"app_follower","write":true}`, ""); err != nil || !ran {
+		t.Fatalf("the protected follower: err %v, ran %v", err, ran)
+	}
+	// maint kill's gate is the same guard; a follower's sessions may be
+	// terminated without a code (D9).
+	wrappedKill := g.requireWriteCode("terminating its sessions", "db", nil, called)
+	env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"db":"app_follower","idle_in_tx":true}`)}}
+	if _, err := wrappedKill(context.Background(), env); err != nil {
+		t.Fatalf("maint kill on the protected follower: %v", err)
+	}
+}
+
+// A promoted follower whose unfollow stopped before cluster.toml stopped
+// saying it follows is writable in PostgreSQL but still a configured
+// follower. A write SQL request must be refused at the node boundary before
+// psql runs, protected or not, so it cannot bypass copy protection; a
+// protected primary still needs its code and runs once it has one. The
+// fake runuser records any psql invocation, so the test exercises the real
+// registry wrapper and the real pg.Local command path, not a handler stub.
+func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "psql-ran")
+	bin := t.TempDir()
+	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$*\" >> \"" + marker + "\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "runuser"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: the fake runuser must be executable for exec.CommandContext.
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	ran := func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}
+
+	g, clock := newTestGuard(t)
+	old := defaultProtectGuard
+	t.Cleanup(func() { defaultProtectGuard = old })
+	defaultProtectGuard = g
+	secret := setUp(t, g, clock)
+	clock.t = clock.t.Add(totp.Period)
+	sqlWrite := methods()["sql"].handler
+	write := func(cfg config.Cluster, db, code string) (Result, error) {
+		req := request("sql", map[string]any{"db": db, "query": "delete from t", "write": true})
+		if code != "" {
+			req.Secrets = map[string]string{ProtectCodeSecret: code}
+		}
+		return sqlWrite(context.Background(), &Env{Cluster: cfg, Req: req})
+	}
+
+	for _, protected := range []bool{false, true} {
+		cfg := followerCfg()
+		cfg.Clusters[1].Protected = protected
+		res, err := write(cfg, "app_follower", "")
+		wantReason(t, err, output.CodePrecondition, "is_follower")
+		if ran() {
+			t.Fatalf("protected %v: psql ran for a write to a configured follower", protected)
+		}
+		if res.Data != nil {
+			t.Fatalf("protected %v: a refused write returned data: %+v", protected, res.Data)
+		}
+	}
+
+	// The protected primary keeps its gate: no psql without a code.
+	cfg := protectedCluster()
+	if _, err := write(cfg, "app", ""); err != nil {
+		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+	}
+	if ran() {
+		t.Fatal("psql ran for a protected primary without a code")
+	}
+	// With the code, the primary path runs normally.
+	if _, err := write(cfg, "app", codeFor(t, secret, clock.t, 0)); err != nil {
+		t.Fatalf("the protected primary with a code: %v", err)
+	}
+	if !ran() {
+		t.Fatal("the protected primary's write did not reach psql with a code")
 	}
 }
 

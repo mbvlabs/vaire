@@ -674,7 +674,7 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 	}
 	awaiting := "The databases await recovery: " + strings.Join(res.AwaitingRecovery, ", ") + "."
 	if !r.cfg.BackupConfigured() {
-		awaiting = "With no bucket the databases' data is lost with the old server: drop and create " + strings.Join(res.AwaitingRecovery, ", ") + " again."
+		awaiting = "With no bucket the databases' data is lost with the old server: drop them, create the sources again, then re-follow the followers."
 	}
 	msg := []string{
 		fmt.Sprintf("Server %s is rebuilt on %s from master bundle %s.", r.name, rr.state.NewAddress, rr.state.Bundle),
@@ -737,9 +737,29 @@ func (r *initRun) restoreResultData() restoreResult {
 	case r.cfg.BackupConfigured():
 		res.Next = append(res.Next, "vaire db recover --all")
 	default:
-		// Without a bucket there is no stanza to recover from.
-		for _, db := range res.AwaitingRecovery {
-			res.Next = append(res.Next, "vaire db drop "+db+" --confirm "+db, "vaire db create "+db)
+		// Without a bucket there is no stanza to recover from. Followers go
+		// first: a source with followers can't be dropped, and a follower comes
+		// back with db follow once its source exists again, not with db create
+		// as a database of its own.
+		var followers, sources []config.ClusterSpec
+		for _, c := range r.cfg.Clusters {
+			if c.IsFollower() {
+				followers = append(followers, c)
+			} else {
+				sources = append(sources, c)
+			}
+		}
+		for _, c := range followers {
+			res.Next = append(res.Next, "vaire db drop "+c.Name+" --confirm "+c.Name)
+		}
+		for _, c := range sources {
+			res.Next = append(res.Next, "vaire db drop "+c.Name+" --confirm "+c.Name)
+		}
+		for _, c := range sources {
+			res.Next = append(res.Next, "vaire db create "+c.Name)
+		}
+		for _, c := range followers {
+			res.Next = append(res.Next, "vaire db follow "+c.Follows+" --name "+c.Name)
 		}
 	}
 	res.Next = append(res.Next, "vaire doctor", "vaire server backup list")

@@ -458,6 +458,8 @@ func phase1Commands() []cmdSpec {
 		restoreCommands(),
 		dumpCommands(),
 		jobCommands(),
+		activityCommands(),
+		diagnosticsCommands(),
 
 		maintCommands(),
 		metricsCommands(),
@@ -925,6 +927,8 @@ func dbCommands() cmdSpec {
 		},
 		children: []cmdSpec{
 			dbRecoverCommand(),
+			dbFollowCommand(),
+			dbUnfollowCommand(),
 			{
 				use: "list",
 				run: runDBList,

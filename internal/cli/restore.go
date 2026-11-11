@@ -48,6 +48,41 @@ func kitTarget(k *contexts.BackupCreds) backup.Target {
 	return backup.Target{Endpoint: k.Endpoint, Region: k.Region, Bucket: k.Bucket, Prefix: k.Prefix, URIStyle: k.URIStyle, KeyID: k.AccessKeyID, Secret: k.SecretAccessKey}
 }
 
+// restoreJobResult is the restore.start job's result, as the restore command
+// reads it back.
+type restoreJobResult struct {
+	Phase     string   `json:"phase"`
+	Restoring string   `json:"restoring"`
+	Warnings  []string `json:"warnings"`
+	// FollowerWarnings are a combined --promote's structured warnings, such
+	// as followers_diverged (D12): they keep their code.
+	FollowerWarnings []output.Warning `json:"follower_warnings"`
+	PoolerWarning    string           `json:"pooler_warning"`
+	Promoted         struct {
+		Warning *output.Warning `json:"warning"`
+		Stanza  string          `json:"stanza"`
+	} `json:"promoted"`
+}
+
+// restoreWarnings is the restore command's warning list: the run's own and
+// the reply's, the job's dump warnings (sentences, so labelled
+// restore_dump_errors) and the job's structured warnings, which keep the code
+// the node gave them.
+func restoreWarnings(own, reply []output.Warning, res restoreJobResult) []output.Warning {
+	warnings := append(own, reply...)
+	for _, w := range res.Warnings {
+		warnings = append(warnings, output.Warning{Code: "restore_dump_errors", Message: w})
+	}
+	warnings = append(warnings, res.FollowerWarnings...)
+	if res.PoolerWarning != "" {
+		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: res.PoolerWarning})
+	}
+	if res.Promoted.Warning != nil {
+		warnings = append(warnings, *res.Promoted.Warning)
+	}
+	return warnings
+}
+
 func runRestore(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return parentRun(cmd, args)
@@ -92,8 +127,9 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if flagTrue(cmd, "promote") {
-		// The node refuses it too; this saves asking for the token first.
-		if err := node.CheckNotProtected(cfg, db, "restore promote"); err != nil {
+		// The node refuses it too; this saves asking for the token, loading
+		// the dump identity or reporting a dry run first.
+		if err := combinedRestorePreflight(cfg, db); err != nil {
 			return err
 		}
 	}
@@ -132,32 +168,14 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		if tl, _ := data["timeline"].(string); tl != "" {
 			msg += ", with --target-timeline=" + tl
 		}
-		return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: s.warnings})
+		return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
 	}
-	var res struct {
-		Phase         string   `json:"phase"`
-		Restoring     string   `json:"restoring"`
-		Warnings      []string `json:"warnings"`
-		PoolerWarning string   `json:"pooler_warning"`
-		Promoted      struct {
-			Warning *output.Warning `json:"warning"`
-			Stanza  string          `json:"stanza"`
-		} `json:"promoted"`
-	}
+	res := restoreJobResult{}
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
-	warnings := append(s.warnings, reply.Warnings...)
-	for _, w := range res.Warnings {
-		warnings = append(warnings, output.Warning{Code: "restore_dump_errors", Message: w})
-	}
-	if res.PoolerWarning != "" {
-		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: res.PoolerWarning})
-	}
-	if res.Promoted.Warning != nil {
-		warnings = append(warnings, *res.Promoted.Warning)
-	}
+	warnings := restoreWarnings(s.warnings, reply.Warnings, res)
 	if res.Phase == "promoted" {
 		return output.Success(cmd, output.Result{
 			Data:     map[string]any{"job_id": jr.JobID, "result": res},
@@ -241,7 +259,7 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	if len(lines) == 0 {
 		lines = []string{"no restore is open"}
 	}
-	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: s.warnings})
+	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
 }
 
 func rowCount(n *int64) string {
@@ -279,7 +297,7 @@ func restoreAction(cmd *cobra.Command, db, method, token, action string, done fu
 		if err != nil {
 			return err
 		}
-		if err := node.CheckNotProtected(cfg, db, action); err != nil {
+		if err := restorePreflight(cfg, db, method, action); err != nil {
 			return err
 		}
 	}
@@ -302,6 +320,22 @@ func restoreAction(cmd *cobra.Command, db, method, token, action string, done fu
 		msg = "dry run: " + method + " " + db + " would run"
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
+}
+
+// restorePreflight is what restoreAction refuses before it asks for the
+// token: a follower first, with the node's is_follower error, then a
+// protected database.
+func restorePreflight(cfg config.Cluster, db, method, action string) error {
+	if err := node.RefuseFollowerMethod(cfg, method, map[string]string{"database": db}); err != nil {
+		return err
+	}
+	return node.CheckNotProtected(cfg, db, action)
+}
+
+// combinedRestorePreflight is what restore --promote refuses, in the same
+// order as the node: a follower first, then a protected database.
+func combinedRestorePreflight(cfg config.Cluster, db string) error {
+	return restorePreflight(cfg, db, "restore.start", "restore promote")
 }
 
 func runRestorePromote(cmd *cobra.Command, args []string) error {
@@ -361,10 +395,10 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	}
 	lines := alignColumns(rows)
 	if len(lines) == 0 {
-		return output.Success(cmd, output.Result{Data: data, Message: "no restore leftovers", Warnings: s.warnings})
+		return output.Success(cmd, output.Result{Data: data, Message: "no restore leftovers", Warnings: append(s.warnings, reply.Warnings...)})
 	}
 	if db == "" || dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: data, Message: "restore leftovers:\n" + strings.Join(lines, "\n"), Warnings: s.warnings,
+		return output.Success(cmd, output.Result{Data: data, Message: "restore leftovers:\n" + strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...),
 			Next: []string{"vaire restore cleanup <db> --confirm <db>/cleanup"}})
 	}
 	p.panel("Leftovers of "+db, lines)
@@ -378,7 +412,7 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	}
 	var res map[string]any
 	_ = reply.Decode(&res)
-	return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dropped %d leftover cluster(s) of %s", len(lines), db), Warnings: s.warnings})
+	return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dropped %d leftover cluster(s) of %s", len(lines), db), Warnings: append(s.warnings, reply.Warnings...)})
 }
 
 func runRestoreDrill(cmd *cobra.Command, _ []string) error {
@@ -524,7 +558,7 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
 		message, human := credentialsMessage(cmd, "fork detached; credentials shown only now", "fork detached; credentials shown only now", name, secret)
 		return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
-			Message: message, Human: human, Next: []string{"vaire job follow " + jobID}})
+			Message: message, Human: human, Warnings: s.warnings, Next: []string{"vaire job follow " + jobID}})
 	}
 	var res struct {
 		Warnings []output.Warning `json:"warnings"`
@@ -579,7 +613,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 		if _, err := decodeJob(reply, &res); err != nil {
 			return err
 		}
-		return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, db, humanBytes(res.Dump.Size)), Warnings: s.warnings})
+		return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, db, humanBytes(res.Dump.Size)), Warnings: append(s.warnings, reply.Warnings...)})
 	}
 	out := stringFlag(cmd, "out")
 	if out == "" {

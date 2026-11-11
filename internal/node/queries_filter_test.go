@@ -60,3 +60,26 @@ func TestParseStatementsAdministrativeRoles(t *testing.T) {
 		t.Fatalf("--all-sessions must retain higher-ranked administrative work: %+v", got)
 	}
 }
+
+// A follower's replication work is administrative. On the source the walsender
+// runs as postgres, which vaire queries filters out before ranking (and
+// --all-sessions keeps); vaire top reads client backends only, so the
+// source's walsender and the follower's startup and walreceiver processes
+// never appear there. Replication is shown in status and db list instead.
+func TestFollowerReplicationIsAdministrative(t *testing.T) {
+	if !pg.IsVaireSession("postgres", "app_follower") {
+		t.Fatal("the source's walsender (postgres, the follower's application_name) is not administrative")
+	}
+	rows := []map[string]string{
+		{"role": "postgres", "query": "START_REPLICATION SLOT vaire_app_follower", "total_ms": "1"},
+	}
+	if got := parseStatements("app", rows, false); len(got) != 0 {
+		t.Fatalf("the walsender's statement survived the filter: %+v", got)
+	}
+	if got := parseStatements("app", rows, true); len(got) != 1 {
+		t.Fatalf("--all-sessions lost the walsender's statement: %+v", got)
+	}
+	if !strings.Contains(top.ActivitySQL, "backend_type = 'client backend'") {
+		t.Fatalf("top no longer reads client backends only, so startup and walreceiver processes could appear: %s", top.ActivitySQL)
+	}
+}

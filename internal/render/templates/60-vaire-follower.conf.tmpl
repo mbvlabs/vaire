@@ -1,0 +1,10 @@
+# managed by vaire - do not edit; use cluster.toml
+# {{ .Name }} is a read-only physical standby of {{ .Source }} (vaire db follow).
+# The hot-standby floors: each is at least {{ .Source }}'s, or replay pauses.
+{{ range .Floors }}{{ .Name }} = {{ .Value }}  # {{ .Reason }}
+{{ end }}hot_standby = on
+primary_conninfo = '{{ .Conninfo }}'
+primary_slot_name = '{{ .Slot }}'
+{{ if .RestoreCommand }}restore_command = '{{ .RestoreCommand }}'
+{{ end }}{{ if .Timeline }}recovery_target_timeline = '{{ .Timeline }}'
+{{ end }}
