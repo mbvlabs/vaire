@@ -291,6 +291,7 @@ func TestJobDrillRetriesOnlyOrdinaryStoppedAttempt(t *testing.T) {
 
 func runJobDrillRetry(t *testing.T, mode string) {
 	t.Helper()
+	useExtensionFileFixture(t)
 	typed := mode == "typed-retained"
 	oldEnv, root, oldAttempt := stoppedDrillFixture(t, false, typed)
 	stubDrillRetryReap(t, mode, oldAttempt)
@@ -304,6 +305,8 @@ func runJobDrillRetry(t *testing.T, mode string) {
 	cfg := oldEnv.Cluster
 	cfg.Backup.Provider = "r2"
 	cfg.Clusters[0].Size = "small"
+	noExtensions := []string{}
+	cfg.Clusters[0].RecoveryExtensions = &noExtensions
 	env := &jobEnv{ID: "job-2", OperationID: "operation-2", installID: oldEnv.installID, Job: "restore-drill", DB: "app", Cluster: cfg}
 	env.lease = newLockedJobLease(env, []jobLockRequest{{name: "app", mode: engine.LockShared}, {name: "app__drill", mode: engine.LockExclusive}}, nil, func() {})
 	t.Cleanup(env.lease.finish)

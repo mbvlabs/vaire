@@ -174,6 +174,7 @@ func gatherOrphanSlots(ctx context.Context, view config.Cluster, f *doctor.Facts
 
 func gatherClusterFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, s clusterSnapshot, followers map[string]followerReading, prev doctorState, havePrev bool, created map[string]time.Time, records backup.Records) doctor.ClusterFacts {
 	c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}
+	c.Ext = extensionFactsForCluster(ctx, cfg, s.Spec, s.State, records.IsAwaiting(s.Spec.Name))
 	if st, ok := followers[s.Spec.Name]; ok {
 		c.Follower = &st
 	}

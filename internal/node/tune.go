@@ -60,21 +60,42 @@ func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
+// tuneJournalPath is the journal tune.apply uses. Empty means the node's
+// default journal; a test can point it at a temporary file so the command
+// boundary can be traced without touching the node journal.
+var tuneJournalPath string
+
+// tuneApply is engine.Apply for the tune command. A test can replace it to
+// prove a refused narrow transition never reaches configuration or restart.
+var tuneApply = engine.Apply
+
 func handleTuneApply(ctx context.Context, env *Env) (Result, error) {
+	if err := refuseActiveActivationFences(env.Cluster, stepParams{}); err != nil {
+		return Result{}, err
+	}
 	if env.Req.DryRun {
 		rt := runtimeFor(env, true)
-		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: steps.TuneStepIDs()})
+		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: steps.TuneStepIDs(), JournalPath: tuneJournalPath})
 		if err != nil {
 			return Result{}, err
 		}
 		return Result{Data: data, Warnings: oversubscriptionWarnings(env.Cluster, rt.Host)}, nil
 	}
+	// tune.apply is a narrow kernel/configuration envelope: it has no complete
+	// source/follower graph and no follower restart tokens. Never let it write
+	// or restart a source past a pending extension dependency transition.
+	for _, source := range env.Cluster.Sources() {
+		if err := refuseNarrowExtensionTransition(ctx, env.Cluster, source); err != nil {
+			return Result{}, err
+		}
+	}
 	rt := runtimeFor(env, false)
-	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
-		Only:      steps.TuneStepIDs(),
-		Confirm:   restartConfirmation(env.Cluster, env.Req),
-		Restarter: steps.Restarter(env.Cluster),
-		Report:    env.Report,
+	data, warnings, err := tuneApply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
+		Only:        steps.TuneStepIDs(),
+		Confirm:     restartConfirmation(env.Cluster, env.Req),
+		Restarter:   steps.RestarterFor(env.Cluster, rt, env.Report),
+		Report:      env.Report,
+		JournalPath: tuneJournalPath,
 	})
 	if err != nil {
 		return Result{}, err

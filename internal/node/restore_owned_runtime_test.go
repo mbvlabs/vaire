@@ -50,6 +50,7 @@ type restoreOwnedAbort struct {
 // newRestoreOwnedAbort lays down the fixture, installs the restore driver and
 // leaves the record in its materialising state.
 func newRestoreOwnedAbort(t *testing.T, mode string) *restoreOwnedAbort {
+	useExtensionFileFixture(t)
 	t.Helper()
 	f := &restoreOwnedAbort{
 		mode: mode,
@@ -83,6 +84,8 @@ func newRestoreOwnedAbort(t *testing.T, mode string) *restoreOwnedAbort {
 	backup.RecordsPath = filepath.Join(materialisationStateDir, "records.json")
 	f.cfg.Server.DataRoot = dataRoot
 	f.cfg.Clusters = []config.ClusterSpec{{Name: "app", Port: 5432, Stanza: "app-abcdef", Size: "small"}}
+	noExtensions := []string{}
+	f.cfg.Clusters[0].RecoveryExtensions = &noExtensions
 	f.env = &jobEnv{ID: "job", OperationID: "operation", installID: "install", Job: "restore", DB: "app", Cluster: f.cfg,
 		Params: json.RawMessage(`{"database":"app","kind":"latest"}`)}
 	f.env.lease = newLockedJobLease(f.env, []jobLockRequest{{name: "app", mode: engine.LockShared}, {name: "app__restoring", mode: engine.LockExclusive}}, nil, func() {})

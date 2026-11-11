@@ -11,6 +11,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 func TestRecoveredAccessRequiresExactOwnedRestore(t *testing.T) {
@@ -47,6 +48,7 @@ func TestRecoveredAccessRequiresExactOwnedRestore(t *testing.T) {
 }
 
 func TestRecoverPromotionAccessFailureKeepsPublicationFenced(t *testing.T) {
+	useTestInstance(t)
 	oldPath := backup.RecordsPath
 	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
 	oldFence, oldPause, oldSwap := promotePoolerFence, promotePause, promoteSwap
@@ -103,10 +105,29 @@ func TestRecoverPromotionAccessFailureKeepsPublicationFenced(t *testing.T) {
 		calls = append(calls, "backup")
 		return nil
 	}
+	oldGuard, oldStrictFence, oldRender := ensureCopyGuardAt, fenceRestorePoolers, applyPoolerFence
+	oldRoutes := poolerRuntimeRoutes
+	oldPhysicalSwap, oldPhysicalStart, oldPhysicalPromote, oldPhysicalSettle := swapCluster, startCluster, promoteCluster, settlePromoted
+	ensureCopyGuardAt = func(context.Context, string, *extensionCopyPlan, copyGuardEndpoint, func() error) ([]string, error) {
+		return nil, nil
+	}
+	fenceRestorePoolers = func(context.Context, string) error { calls = append(calls, "fence"); return nil }
+	applyPoolerFence = func(context.Context, config.Cluster, engine.Runtime, engine.Reporter) error { return nil }
+	poolerRuntimeRoutes = func(context.Context, string, int) (map[string]steps.PoolerRoute, error) {
+		return map[string]steps.PoolerRoute{}, nil
+	}
+	swapCluster, startCluster, promoteCluster, settlePromoted = promoteSwap, promoteStartCluster, promoteDatabase, promoteSettle
+	t.Cleanup(func() {
+		ensureCopyGuardAt, fenceRestorePoolers, applyPoolerFence = oldGuard, oldStrictFence, oldRender
+		poolerRuntimeRoutes = oldRoutes
+		swapCluster, startCluster, promoteCluster, settlePromoted = oldPhysicalSwap, oldPhysicalStart, oldPhysicalPromote, oldPhysicalSettle
+	})
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app", Port: 5433, Stanza: "app-abcdef"}}}
+	noExtensions := []string{}
+	cfg.Clusters[0].RecoveryExtensions = &noExtensions
 	cfg.Server.DataRoot = t.TempDir()
 	result, err := promote(context.Background(), cfg, "app", engine.Runtime{}, nil, func() {})
-	rejectf(t, err == nil || result != nil || !slices.Equal(calls, []string{"fence", "pause", "swap", "start", "writable", "settle", "access", "resume"}), "unsafe promotion sequence %v, result %v, error %v", calls, result, err)
+	rejectf(t, err == nil || result != nil || !slices.Equal(calls, []string{"fence", "swap", "start", "writable", "settle", "access"}), "unsafe promotion sequence %v, result %v, error %v", calls, result, err)
 	recs, err := backup.LoadRecords()
 	rejectf(t, err != nil || !recs.IsAwaiting("app") || !recs.Restores["app"].Recover, "failure lost durable recovery fence: %+v, %v", recs, err)
 }

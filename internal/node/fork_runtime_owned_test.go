@@ -64,6 +64,8 @@ func activeJobLeases() int {
 }
 
 func newOwnedForkFixture(t *testing.T, mode string) *ownedForkState {
+	useTempRecords(t)
+	useExtensionFileFixture(t)
 	t.Helper()
 	owner, root := materialisationFixture(t)
 	if err := os.Mkdir(root, 0o700); err != nil {
@@ -106,6 +108,8 @@ func newOwnedForkFixture(t *testing.T, mode string) *ownedForkState {
 	s.cfg = config.DefaultCluster()
 	s.cfg.Server.DataRoot = root
 	s.cfg.Clusters = []config.ClusterSpec{{Name: "source", Stanza: owner.Stanza, Port: 5432, Size: "small"}, {Name: "target", Stanza: "target-abcdef", Port: 5433, Size: "medium"}}
+	noExtensions := []string{}
+	s.cfg.Clusters[0].RecoveryExtensions = &noExtensions
 	return s
 }
 
@@ -147,6 +151,28 @@ func (s *ownedForkState) stubJobRuntime(t *testing.T) {
 
 func (s *ownedForkState) stubForkHooks(t *testing.T) {
 	t.Helper()
+	oldRegistered, oldData := followConfRegistered, followRegisteredData
+	followConfRegistered = func(name string) bool {
+		_, err := os.Stat(filepath.Join(materialisationConfigRoot, name, "postgresql.conf"))
+		return err == nil
+	}
+	followRegisteredData = func(name string) (string, error) {
+		data := s.cfg.Server.DataDirectory(name)
+		raw, err := os.ReadFile(filepath.Join(materialisationConfigRoot, name, "postgresql.conf"))
+		if err != nil {
+			return "", err
+		}
+		if !strings.Contains(string(raw), data) {
+			return "", errors.New("registration data directory mismatch")
+		}
+		return data, nil
+	}
+	t.Cleanup(func() { followConfRegistered, followRegisteredData = oldRegistered, oldData })
+	oldComplete := forkCompleteActivation
+	forkCompleteActivation = func(context.Context, config.ClusterSpec, backup.ActivationFence, *extensionCopyPlan, engine.Runtime, engine.Reporter) (config.Cluster, []output.Warning, error) {
+		return s.cfg, nil, nil
+	}
+	t.Cleanup(func() { forkCompleteActivation = oldComplete })
 	oldNew, oldBase, oldRestore, oldPromote, oldRename := forkNewMaterialised, forkBaseBackup, forkRestore, forkPromote, forkRename
 	oldDrop, oldForget := forkDrop, forkForgetDatabase
 	oldKernel, oldProvision, oldVerify, oldPool := forkApplyKernel, forkProvisionOwned, forkVerifyProvision, forkApplyPoolers

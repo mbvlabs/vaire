@@ -118,6 +118,7 @@ func runFollowerOwnedScenario(t *testing.T, mode string) {
 func (r *followerOwnedRun) setup() {
 	t := r.t
 	t.Helper()
+	useExtensionFileFixture(t)
 	r.recovering = strings.HasPrefix(r.mode, "cleanup-")
 	r.runJob = strings.HasPrefix(r.mode, "job-")
 	r.forceRecoveryFailure = r.recovering
@@ -143,6 +144,8 @@ func (r *followerOwnedRun) setup() {
 	}
 	r.owner.Spec = r.spec
 	r.src = config.ClusterSpec{Name: "source", Port: 5433, Stanza: r.key.SourceStanza, Size: "small"}
+	noExtensions := []string{}
+	r.src.RecoveryExtensions = &noExtensions
 	r.cfg = config.DefaultCluster()
 	r.cfg.Server.DataRoot, r.cfg.Clusters = r.dataRoot, []config.ClusterSpec{r.src, r.spec}
 	if r.recovering {

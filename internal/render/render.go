@@ -12,7 +12,6 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/tune"
@@ -67,31 +66,39 @@ func SecurityConf(port int) []byte {
 }
 
 // ExtensionsConf renders a cluster's conf.d/30-vaire-extensions.conf:
-// shared_preload_libraries and the catalog settings of its database's
-// extensions. auto_explain.log_min_duration is twice the tuned
-// log_min_duration_statement.
-func ExtensionsConf(spec config.ClusterSpec, res tune.Result) []byte {
+// shared_preload_libraries and the resolved settings of its database's
+// extensions. It uses the one config-aware resolver, so an unknown or invalid
+// entry is an error, never silently skipped. The database inside a follower's
+// cluster is the source's name, so {db} substitutions use DatabaseName.
+// auto_explain.log_min_duration is twice the tuned log_min_duration_statement.
+func ExtensionsConf(cfg config.Cluster, spec config.ClusterSpec, res tune.Result) ([]byte, error) {
 	enabled := append([]string(nil), spec.Extensions...)
 	sort.Strings(enabled)
+	resolver := cfg.ExtensionResolver()
 	items := make([]setting, 0)
-	if preloads := catalog.Preloads(enabled); len(preloads) > 0 {
+	preloads, err := resolver.Preloads(enabled)
+	if err != nil {
+		return nil, err
+	}
+	if len(preloads) > 0 {
 		items = append(items, setting{Name: "shared_preload_libraries", Value: "'" + strings.Join(preloads, ",") + "'"})
 	}
 	for _, name := range enabled {
-		ext, ok := catalog.Lookup(name)
-		if !ok {
-			continue
+		ext, err := resolver.Resolve(name)
+		if err != nil {
+			return nil, err
 		}
-		keys := make([]string, 0, len(ext.Settings))
-		for k := range ext.Settings {
+		settings := ext.ResolvedSettings(spec.DatabaseName())
+		keys := make([]string, 0, len(settings))
+		for k := range settings {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			items = append(items, setting{Name: k, Value: ext.Settings[k]})
+			items = append(items, setting{Name: k, Value: settings[k]})
 		}
 	}
-	if _, ok := catalog.Lookup("auto_explain"); ok {
+	if _, ok := resolver.Lookup("auto_explain"); ok {
 		base := baseLogDuration(res)
 		items = append(items,
 			setting{Name: "auto_explain.log_min_duration", Value: "'" + doubleDuration(base) + "'"},
@@ -99,7 +106,7 @@ func ExtensionsConf(spec config.ClusterSpec, res tune.Result) []byte {
 			setting{Name: "auto_explain.log_analyze", Value: "off"},
 		)
 	}
-	return execute("30-vaire-extensions.conf.tmpl", map[string]any{"Settings": items})
+	return execute("30-vaire-extensions.conf.tmpl", map[string]any{"Settings": items}), nil
 }
 
 // baseLogDuration is the tuned log_min_duration_statement, defaulting to 1s.

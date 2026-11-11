@@ -29,6 +29,7 @@ var configSetStore = func() state.FileStore { return state.FileStore{} }
 var configSetSchedules = checkSchedules
 var configSetHostname = syncNodeHostname
 var configSetPlan = engine.Plan
+var nodeConfigStore = func() state.Store { return configSetStore() }
 
 func handleConfigGet(context.Context, *Env) (Result, error) {
 	store := state.FileStore{}
@@ -47,11 +48,12 @@ func handleConfigGet(context.Context, *Env) (Result, error) {
 }
 
 func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
+	ctx = steps.WithFollowerRuntimeOperation(ctx, env.Req.RequestID)
 	var p configSetParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	store := configSetStore()
+	store := nodeConfigStore()
 	current, err := store.Revision()
 	if err != nil {
 		return Result{}, err
@@ -72,10 +74,23 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	old, _, oldErr := store.Load()
+	if oldErr == nil {
+		propagated, changed, err := propagateFollowerExtensions(old, cfg)
+		if err != nil {
+			return Result{}, err
+		}
+		if changed {
+			cfg = propagated
+			if raw, err = cfg.Encode(); err != nil {
+				return Result{}, err
+			}
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
-	old, _, oldErr := store.Load()
+	old, _, oldErr = store.Load()
 	if oldErr != nil {
 		return Result{}, oldErr
 	}
@@ -91,6 +106,10 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	if err := configSetSafetyChecks(ctx, env, old, cfg); err != nil {
 		return Result{}, err
 	}
+	if err := checkExtensionConfigChange(ctx, env, old, cfg); err != nil {
+		return Result{}, err
+	}
+	extensionWarnings := extensionIntentWarnings(old, cfg)
 	// A dry run previews the plan for the new file without saving it.
 	revision, synced, err := saveConfigSet(ctx, env, store, raw, old, cfg, p, current)
 	if err != nil {
@@ -100,7 +119,7 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	rt := runtimeFor(env, true)
 	plan, planErr := configSetPlan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
 	data := map[string]any{"revision": revision, "plan": plan, "saved": !env.Req.DryRun}
-	warnings := append(synced, oversubscriptionWarnings(cfg, rt.Host)...)
+	warnings := append(append(synced, extensionWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
 	if planErr != nil {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}
@@ -119,7 +138,7 @@ func configSetSafetyChecks(ctx context.Context, env *Env, old, cfg config.Cluste
 	return checkRepoMove(ctx, old, cfg)
 }
 
-func saveConfigSet(ctx context.Context, env *Env, store state.FileStore, raw []byte, old, cfg config.Cluster, p configSetParams, current string) (string, []output.Warning, error) {
+func saveConfigSet(ctx context.Context, env *Env, store state.Store, raw []byte, old, cfg config.Cluster, p configSetParams, current string) (string, []output.Warning, error) {
 	if env.Req.DryRun {
 		return current, nil, nil
 	}
@@ -146,9 +165,53 @@ func saveConfigSet(ctx context.Context, env *Env, store state.FileStore, raw []b
 	return revision, synced, nil
 }
 
+func checkExtensionConfigChange(ctx context.Context, env *Env, old, cfg config.Cluster) error {
+	if err := refuseUnsafeExtensionConfigRemoval(ctx, old, cfg); err != nil {
+		return err
+	}
+	if err := refusePendingConfigChanges(old, cfg); err != nil {
+		return err
+	}
+	var followers []config.ClusterSpec
+	for _, spec := range cfg.Clusters {
+		if spec.IsFollower() {
+			followers = append(followers, spec)
+		}
+	}
+	recs, err := extensionRecords()
+	if err != nil {
+		return err
+	}
+	if err := preflightFollowerRuntime(ctx, cfg, recs, followers, nil); err != nil {
+		return err
+	}
+	for _, spec := range cfg.Clusters {
+		if spec.IsFollower() {
+			continue
+		}
+		if err := validateTargetExtensionDescriptors(cfg, spec); err != nil {
+			return err
+		}
+		if sourceHasFollowers(cfg, spec.Name) {
+			if err := validateTargetExtensionCopySafety(cfg, spec, false); err != nil {
+				return err
+			}
+		}
+	}
+	if !env.Req.DryRun {
+		if err := captureExtensionChange(old, cfg); err != nil {
+			return output.NewError(output.CodePrecondition,
+				"recording extension requirements before the configuration change failed: "+err.Error(),
+				output.ExitPrecondition, "Nothing was saved. Retry after fixing the requirement history store.").
+				WithDetails(map[string]any{"reason": "extension_history_capture_failed"})
+		}
+	}
+	return nil
+}
+
 // newConfigBytes returns the desired-state bytes for a config.set request,
 // either the supplied TOML or the current file with the dotted keys applied.
-func newConfigBytes(store state.FileStore, p configSetParams) ([]byte, error) {
+func newConfigBytes(store state.Store, p configSetParams) ([]byte, error) {
 	if p.TOML != "" && len(p.Set) > 0 {
 		return nil, output.NewError(output.CodeUsage, "pass either toml or set, not both", output.ExitUsage, "")
 	}
@@ -175,9 +238,6 @@ func newConfigBytes(store state.FileStore, p configSetParams) ([]byte, error) {
 		if err := cfg.Set(key, value); err != nil {
 			return nil, err
 		}
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, config.ValidationError(err)
 	}
 	return cfg.Encode()
 }
@@ -209,6 +269,20 @@ func validateProblems(raw []byte) []string {
 		return []string{err.Error()}
 	}
 	return nil
+}
+
+// extensionIntentWarnings is the transition preflight for descriptor edits
+// that affect an enabled database or recovery declaration. It is advisory:
+// apply still decides from step inputs, while E7-05 owns follower ordering.
+func extensionIntentWarnings(old, updated config.Cluster) []output.Warning {
+	changes := config.ExtensionIntentChanges(old, updated)
+	if len(changes) == 0 {
+		return nil
+	}
+	return []output.Warning{{
+		Code:    "extension_intent_changed",
+		Message: "extension intent changed for " + strings.Join(changes, ", ") + "; review the plan before applying",
+	}}
 }
 
 // checkSchedules runs systemd-analyze calendar on every backup schedule, so

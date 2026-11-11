@@ -400,6 +400,9 @@ func addDatabaseFrom(ctx context.Context, env *Env, build func(config.Cluster) (
 	if _, ok := cfg.ClusterByName(db.Name); ok {
 		return cfg, nil, db, existingDatabase(db.Name)
 	}
+	if err := refuseAnyActivationFence(cfg, db.Name); err != nil {
+		return cfg, nil, db, err
+	}
 	if createClusterExists(ctx, db.Name) {
 		return cfg, nil, db, existingDatabase(db.Name)
 	}
@@ -517,7 +520,7 @@ func forgetDatabase(name string) error {
 // huge pages, its own steps, the poolers, the other databases' changed
 // configuration (others) and, with backups on, its stanza and timers.
 func createRuns(cfg config.Cluster, name string, others []string) []engine.Options {
-	runs := []engine.Options{{Only: steps.KernelStepIDs()}, {DB: name}, {Only: steps.PoolerStepIDs()}, {Only: steps.MetricsStepIDs()}}
+	runs := []engine.Options{{Only: steps.KernelStepIDs()}, {Only: steps.PackagesStepIDs()}, {DB: name}, {Only: steps.PoolerStepIDs()}, {Only: steps.MetricsStepIDs()}}
 	if len(others) > 0 {
 		runs = append(runs, engine.Options{Only: others})
 	}
@@ -598,9 +601,10 @@ func finishNewCluster(name string) string {
 // reloadPoolers runs pgbouncer-v1, which renders an entry per database and
 // reloads the poolers (RFC 8.1). It skips itself once no database is left.
 func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
+	rt := runtimeFor(env, false)
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		Only:      steps.PoolerStepIDs(),
-		Restarter: steps.Restarter(cfg),
+		Restarter: steps.RestarterFor(cfg, rt, env.Report),
 		Report:    env.Report,
 	})
 	return err
@@ -610,11 +614,19 @@ func reloadPoolers(ctx context.Context, env *Env, cfg config.Cluster) error {
 // dropped, so its /metrics path and targets.json entry follow (Phase 4). The
 // database already works, so a failure is the warning metrics_reload_failed.
 // recovering keeps a database that awaits recovery in the steps' view.
+func applyNewCluster(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name, recovering string, report engine.Reporter) error {
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
+		DB: name, Confirm: engine.Confirmation{Clusters: []string{name}},
+		Recovering: recovering, Restarter: steps.RestarterFor(cfg, rt, report), Report: report,
+	})
+	return err
+}
+
 func applyMetrics(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter, db, recovering string) *output.Warning {
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		Only:       steps.MetricsStepIDs(),
 		Recovering: recovering,
-		Restarter:  steps.Restarter(cfg),
+		Restarter:  steps.RestarterFor(cfg, rt, report),
 		Report:     report,
 	})
 	if err == nil {
@@ -636,7 +648,7 @@ func firstBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime, rep
 	}
 	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		Only:      append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...),
-		Restarter: steps.Restarter(cfg),
+		Restarter: steps.RestarterFor(cfg, rt, report),
 		Report:    report,
 	})
 	if err == nil {
@@ -723,6 +735,14 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 
 	if err := dropPreflight(ctx, env, cfg, p.Name, forkCleanup, followCleanup); err != nil {
 		return Result{}, err
+	}
+	if inConfig {
+		if err := captureStanzaRequirements(cfg, spec); err != nil {
+			return Result{}, output.NewError(output.CodePrecondition,
+				"recording "+p.Name+"'s extension requirements before the drop failed: "+err.Error(),
+				output.ExitPrecondition, "Nothing was dropped. Retry after fixing the requirement history store.").
+				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.Name})
+		}
 	}
 	local := steps.ClusterPG(spec)
 	exists := false
@@ -845,6 +865,11 @@ func retireDropCleanup(ctx context.Context, forkCleanup *materialisationArtifact
 }
 
 func dropPreflight(ctx context.Context, env *Env, cfg config.Cluster, name string, forkCleanup *materialisationArtifacts, followCleanup *followCleanup) error {
+	if forkCleanup == nil && followCleanup == nil {
+		if err := refuseAnyActivationFence(cfg, name); err != nil {
+			return err
+		}
+	}
 	if err := restoreInProgress(name, "db drop"); err != nil {
 		return err
 	}
@@ -1080,9 +1105,10 @@ func dropRouting(ctx context.Context, env *Env, cfg config.Cluster) error {
 	} else if err := reloadPoolers(ctx, env, cfg); err != nil {
 		return err
 	}
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
+	rt := runtimeFor(env, false)
+	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		Only:      steps.TimersStepIDs(),
-		Restarter: steps.Restarter(cfg),
+		Restarter: steps.RestarterFor(cfg, rt, env.Report),
 		Report:    env.Report,
 	})
 	return err
@@ -1179,6 +1205,9 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if err := refuseActiveActivationFence(cfg, p.Name); err != nil {
+		return Result{}, err
+	}
 	resized, err := resizedCluster(cfg, old, p)
 	if err != nil {
 		return Result{}, err
@@ -1215,7 +1244,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	// The huge-page pool follows the new sum before the cluster restarts.
-	if _, _, err := applyResizeStep(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
+	if _, _, err := applyResizeStep(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report}); err != nil {
 		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
 	return applyFullResize(ctx, env, cfg, rt, p, resized, warnings)
@@ -1240,7 +1269,7 @@ func applyFullResize(ctx context.Context, env *Env, cfg config.Cluster, rt engin
 	// Resize never lowers a follower's floors (Q1a), so the followers always
 	// take the source's new values first, even on a retry after a follower
 	// update failed (Phase 6, Q1, D6).
-	base := engine.Options{Confirm: confirm, Restarter: steps.Restarter(cfg), Report: env.Report}
+	base := engine.Options{Confirm: confirm, Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report}
 	followers, err := applyFollowerConfigs(ctx, cfg, rt, p.Name, base)
 	if err != nil {
 		return Result{}, withHint(err, "The new size is saved and "+p.Name+" is not updated yet. Fix "+followers.Failed+", then run the same db resize again.")
@@ -1248,7 +1277,7 @@ func applyFullResize(ctx context.Context, env *Env, cfg config.Cluster, rt engin
 	data, applyWarnings, err := applyResizeStep(ctx, steps.Catalog(), cfg, rt, engine.Options{
 		DB:        p.Name,
 		Confirm:   confirm,
-		Restarter: steps.Restarter(cfg),
+		Restarter: steps.RestarterFor(cfg, rt, env.Report),
 		Report:    env.Report,
 	})
 	if err != nil {
@@ -1527,15 +1556,20 @@ func placeCluster(cfg config.Cluster, db *config.ClusterSpec) error {
 		return output.NewError(output.CodeConfig, "cluster.toml has no master node", output.ExitConfig, "")
 	}
 	db.Node = master.Name
-	port, err := cfg.FreeClusterPort()
-	if err != nil {
-		return output.NewError(output.CodePrecondition, err.Error(), output.ExitPrecondition,
-			"Drop a database you no longer need, or put the next one on its own node (Phase 10).").
-			WithDetails(map[string]any{"reason": "no_cluster_port"})
+	if db.Port == 0 {
+		port, err := cfg.FreeClusterPort()
+		if err != nil {
+			return output.NewError(output.CodePrecondition, err.Error(), output.ExitPrecondition,
+				"Drop a database you no longer need, or put the next one on its own node (Phase 10).").
+				WithDetails(map[string]any{"reason": "no_cluster_port"})
+		}
+		db.Port = port
 	}
-	db.Port = port
-	// A follower has no stanza while it follows (Phase 6).
-	if !db.IsFollower() {
+	// A follower has no stanza while it follows (Phase 6). A caller that
+	// already allocated the destination stanza (db fork, before its prepared
+	// fence) keeps it.
+	if !db.IsFollower() && db.Stanza == "" {
+		var err error
 		if db.Stanza, err = config.NewStanza(db.Name); err != nil {
 			return err
 		}

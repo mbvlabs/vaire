@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -438,6 +439,9 @@ func (s postgresCluster) Apply(ctx context.Context, cfg config.Cluster, rt engin
 			"existing": map[string]any{"data_directory": row.DataDir, "port": row.Port},
 			"wanted":   map[string]any{"data_directory": dataDir, "port": spec.Port},
 		})
+	}
+	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
+		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
 	}
 	err = applyCPUChecked(ctx, spec.Name, res, hostinfo.CPUServiceScreen, func() error {
 		if err := prepareFullCPUDropin(PGServiceDropInDir(spec.Name), func() error {

@@ -60,8 +60,9 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 			return bootstrapCompleteTarget(&owner, cfg, p.NodeName, env.Req.OperationID, target)
 		}
 	}
-	data, warnings, err := bootstrapDatabaseSteps(ctx, cfg, runtimeFor(env, false), env.Report,
-		steps.Catalog(), engine.Apply, steps.Restarter(env.Cluster), initFailureHint(cfg.ClusterName, p.Local), ownerPtr, complete)
+	rt := runtimeFor(env, false)
+	data, warnings, err := bootstrapDatabaseSteps(ctx, cfg, rt, env.Report,
+		steps.Catalog(), engine.Apply, steps.RestarterFor(cfg, rt, env.Report), initFailureHint(cfg.ClusterName, p.Local), ownerPtr, complete)
 	if err != nil {
 		return Result{}, err
 	}

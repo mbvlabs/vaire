@@ -198,6 +198,8 @@ type ClusterFacts struct {
 	// replication, nil when it wasn't read (Phase 6).
 	Follows  string
 	Follower *health.FollowerState
+	// Ext is its extension facts (Phase 7).
+	Ext ExtensionFacts
 }
 
 // Thresholds.

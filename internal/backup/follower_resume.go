@@ -221,6 +221,9 @@ func (m *Materialised) adoptResumedFollower(ctx context.Context, final int, e Fo
 	if err := DropRecoverySettings(m.Data); err != nil {
 		return result, err
 	}
+	if err := m.InstallCopyPlan(); err != nil {
+		return result, err
+	}
 	if err := m.stopAndAdoptFollower(ctx, final); err != nil {
 		return result, err
 	}

@@ -67,11 +67,14 @@ func followerLifecycleCfg(t *testing.T, names ...string) config.Cluster {
 
 func newFollowerNode(t *testing.T, cfg config.Cluster) *followerNode {
 	t.Helper()
+	useExtensionFileFixture(t)
 	dir := t.TempDir()
 	n := &followerNode{t: t, dir: dir, store: state.FileStore{Path: filepath.Join(dir, "cluster.toml")}, instance: "test-instance", registered: map[string]string{}, confDirRoot: filepath.Join(dir, "postgresql", "18")}
 	oldRecords, oldState, oldServer, oldRunning := backup.RecordsPath, followerState, followerServerOps, clusterRunning
 	oldInstance, oldRegistered, oldConf := followHostInstance, followRegisteredData, followConfRegistered
 	oldConfDir, oldFloors := followConfDirectory, followerEffectiveFloors
+	oldReload := applyReloadCluster
+	applyReloadCluster = func() (config.Cluster, error) { return n.config(), nil }
 	oldFinalRegistration := followFinalRegistration
 	backup.RecordsPath = filepath.Join(dir, "records.json")
 	followerState = func() state.Store { return n.store }
@@ -102,6 +105,7 @@ func newFollowerNode(t *testing.T, cfg config.Cluster) *followerNode {
 		backup.RecordsPath, followerState, followerServerOps, clusterRunning = oldRecords, oldState, oldServer, oldRunning
 		followHostInstance, followRegisteredData, followConfRegistered = oldInstance, oldRegistered, oldConf
 		followConfDirectory, followerEffectiveFloors = oldConfDir, oldFloors
+		applyReloadCluster = oldReload
 		followFinalRegistration = oldFinalRegistration
 	})
 	raw, err := cfg.Encode()
@@ -238,7 +242,45 @@ type followerStub struct {
 func (s *followerStub) install(t *testing.T) *followerStub {
 	t.Helper()
 	old := followerServerOps
-	t.Cleanup(func() { followerServerOps = old })
+	oldEnsureGuard, oldAdoptGuard, oldVerifyGuard := ensureCopyGuardAt, ensureAdoptedGuardAt, verifyStartedGuardAt
+	oldRoutes, oldResumePooler := poolerRuntimeRoutes, poolerResumeDatabase
+	poolerRuntimeRoutes = func(_ context.Context, _ string, _ int) (map[string]steps.PoolerRoute, error) {
+		recs, err := backup.LoadRecords()
+		if err != nil {
+			return nil, err
+		}
+		cfg, _, err := followerState().Load()
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]steps.PoolerRoute{}
+		for db, f := range recs.Activation {
+			if f.OperationID == "" {
+				continue
+			}
+			spec, ok := cfg.ClusterByName(db)
+			if !ok {
+				continue
+			}
+			out[db] = steps.PoolerRoute{Name: db, Host: steps.PGSocketDir, Port: spec.Port, Database: spec.DatabaseName()}
+		}
+		return out, nil
+	}
+	poolerResumeDatabase = func(context.Context, string) {}
+	ensureCopyGuardAt = func(context.Context, string, *extensionCopyPlan, copyGuardEndpoint, func() error) ([]string, error) {
+		return nil, nil
+	}
+	ensureAdoptedGuardAt = func(context.Context, *jobEnv, config.Cluster, config.ClusterSpec, *extensionCopyPlan) error {
+		return nil
+	}
+	verifyStartedGuardAt = func(context.Context, *jobEnv, config.Cluster, config.ClusterSpec) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		followerServerOps = old
+		ensureCopyGuardAt, ensureAdoptedGuardAt, verifyStartedGuardAt = oldEnsureGuard, oldAdoptGuard, oldVerifyGuard
+		poolerRuntimeRoutes, poolerResumeDatabase = oldRoutes, oldResumePooler
+	})
 	followerServerOps = followerServer{
 		build: func(context.Context, *jobEnv, config.Cluster, config.ClusterSpec, config.ClusterSpec, string, bool) error {
 			return s.stage("build")

@@ -468,9 +468,13 @@ func (r *applyRun) execute(index int, step Step, id, cluster string, at int, d d
 	if err != nil {
 		return err
 	}
-	r.report.emit(output.Event{Type: "step", Step: id, State: "completed", Index: intPtr(at), Total: intPtr(r.shown), Detail: strings.Join(res.Notes, "; ")})
+	state := "completed"
+	if res.Incomplete {
+		state = "incomplete"
+	}
+	r.report.emit(output.Event{Type: "step", Step: id, State: state, Index: intPtr(at), Total: intPtr(r.shown), Detail: strings.Join(res.Notes, "; ")})
 	r.warnings = append(r.warnings, res.Warnings...)
-	r.data.Steps = append(r.data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "completed", Restart: string(restart)})
+	r.data.Steps = append(r.data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: state, Restart: string(restart)})
 	r.data.Applied++
 	return nil
 }
@@ -487,6 +491,10 @@ func (r *applyRun) complete(id string, res ApplyResult) (RestartNeed, error) {
 	entry.CompletedAt = now()
 	entry.Restart = string(restart)
 	entry.Error = ""
+	if res.Incomplete {
+		entry.Status = StatusIncomplete
+		entry.CompletedAt = ""
+	}
 	err := r.j.update(r.path, func(j *Journal) {
 		j.Steps[id] = entry
 		if restart == RestartRestart {

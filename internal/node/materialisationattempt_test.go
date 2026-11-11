@@ -19,6 +19,7 @@ import (
 
 func attemptFixture(t *testing.T) (*jobEnv, string) {
 	t.Helper()
+	useExtensionFileFixture(t)
 	_, dir := materialisationFixture(t)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -39,6 +40,8 @@ func attemptFixture(t *testing.T) (*jobEnv, string) {
 		Server:   config.Server{DataRoot: dir},
 		Clusters: []config.ClusterSpec{{Name: "app", Port: 5432, Stanza: "app-stanza"}},
 	}
+	noExtensions := []string{}
+	cfg.Clusters[0].RecoveryExtensions = &noExtensions
 	env := &jobEnv{ID: "job-1", OperationID: "operation-1", installID: "install-test", Job: "restore", DB: "app", Cluster: cfg,
 		Params: json.RawMessage(`{"database":"app","kind":"latest"}`)}
 	env.lease = newLockedJobLease(env, []jobLockRequest{{name: "app", mode: engine.LockShared}, {name: "app__restoring", mode: engine.LockExclusive}}, nil, func() {})
@@ -68,6 +71,7 @@ func drillAttemptFixture(t *testing.T) (*jobEnv, string, *backup.Materialised) {
 	env, dir := attemptFixture(t)
 	env.lease.finish()
 	env.Job = "restore-drill"
+	env.Cluster.Clusters[0].RecoveryExtensions = nil
 	env.Params = nil
 	env.lease = newLockedJobLease(env, []jobLockRequest{{name: "app", mode: engine.LockShared}, {name: "app__drill", mode: engine.LockExclusive}}, nil, func() {})
 	t.Cleanup(env.lease.finish)

@@ -32,6 +32,8 @@ type Options struct {
 	CleanupInvalid bool   `json:"cleanup_invalid,omitempty"`
 	// NotConcurrently is reindex --concurrently=false, which vaire refuses.
 	NotConcurrently bool `json:"not_concurrently,omitempty"`
+	// Now is repack --now: run outside the maintenance window.
+	Now bool `json:"now,omitempty"`
 }
 
 // Validate checks o before anything runs.
@@ -64,11 +66,11 @@ func (o Options) Validate() error {
 	return nil
 }
 
-// Heavy reports whether the run reads a whole database's worth of data and
-// so takes the server's heavy-I/O lock, never running beside a full backup
-// or a drill: a vacuum of the database, and every reindex.
+// Heavy reports whether the run reads or rewrites a whole database's worth of
+// data and so takes the server's heavy-I/O lock, never running beside a full
+// backup or a drill: a vacuum of the database, every reindex, and every repack.
 func (o Options) Heavy() bool {
-	return (o.Kind == Vacuum && o.Table == "") || o.Kind == Reindex
+	return (o.Kind == Vacuum && o.Table == "") || o.Kind == Reindex || o.Kind == Repack
 }
 
 // Statements are the SQL statements of a run on one table or index, or of
