@@ -968,7 +968,7 @@ func activityDatabaseFor(method string, params json.RawMessage) string {
 // activityNameIsDatabase lists the methods whose name param is a database.
 var activityNameIsDatabase = map[string]bool{
 	"db.create": true, "db.drop": true, "db.resize": true, "db.credentials": true, "db.fork": true,
-	"db.follow": true, "db.unfollow": true,
+	"db.follow": true, "db.unfollow": true, "db.copy": true, "db.copy.preflight": true,
 }
 
 // activityNodeInfoLoader reads the node's optional identity files. Tests
@@ -1065,6 +1065,28 @@ var activityKnownReason = map[string]bool{
 	"undo_in_progress": true, "write_requires_human": true,
 	// Protection code outcomes.
 	"code_invalid": true, "code_required": true, "code_reused": true, "locked": true,
+	// External database copy outcomes.
+	"copy_preflight_failed": true, "copy_export_failed": true, "copy_provision_failed": true,
+	"copy_import_failed": true, "copy_finalize_failed": true, "copy_verify_failed": true,
+	"copy_extension_verify_failed": true, "copy_grants_failed": true, "copy_analyze_failed": true,
+	"copy_policy_failed":  true,
+	"copy_cleanup_failed": true, "copy_workspace_failed": true, "copy_workspace_unsafe": true,
+	"workspace_cleanup_failed": true, "source_required": true, "invalid_source_input": true,
+	"source_auth_failed": true, "source_unreachable": true, "source_tls_failed": true,
+	"source_version_unsupported": true, "source_preflight_failed": true, "source_database_mismatch": true,
+	"source_export_failed": true, "source_tls_weak": true, "source_tls_ca_unavailable": true,
+	"invalid_source_url": true, "invalid_source_host": true, "invalid_source_password": true,
+	"invalid_source_tls": true, "invalid_source_ca": true, "copy_workspace_exists": true,
+	"missing_pg18_tool": true, "copy_lease_tool_missing": true, "copy_workspace_lease_failed": true,
+	"copy_job_spec_cleanup_failed": true, "copy_job_start_failed": true,
+	"copy_job_spec_unlink_failed": true, "copy_job_spec_invalid": true,
+	"memory_overcommitted": true, "would_not_start": true,
+	"archive_invalid": true, "archive_unreadable": true,
+	"archive_database_mismatch": true, "archive_ambiguous": true, "archive_unexpected_extension": true,
+	"extension_incompatible": true, "extension_version_incompatible": true,
+	"extension_schema_incompatible": true, "restore_failed": true, "target_cluster_exists": true,
+	"target_path_exists": true, "target_reserved": true, "target_unreadable": true,
+	"target_config_changed": true, "input_required": true, "copy_failed": true, "insufficient_space": true,
 	// Process and correlation outcomes.
 	"cancelled": true, "deadline_exceeded": true, "panic": true,
 	"request_rejected": true, "unknown_method": true, "unknown_job": true,
