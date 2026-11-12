@@ -89,11 +89,22 @@ func Input(title, description, def string) (string, error) {
 
 // Secret asks for a value without echoing it.
 func Secret(title string) (string, error) {
+	value, err := SecretExact(title)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
+// SecretExact asks for a value without echoing it and returns it exactly as
+// entered. It is for values whose surrounding spaces are significant, such as
+// a PostgreSQL password; other prompts keep Secret's trimming behavior.
+func SecretExact(title string) (string, error) {
 	var value string
 	if err := run(title, func() string { return secretMask }, huh.NewInput().Title(title).EchoMode(huh.EchoModePassword).Value(&value)); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(value), nil
+	return value, nil
 }
 
 // YesNo asks a yes/no question, defaulting to no.

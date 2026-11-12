@@ -32,6 +32,8 @@ Commands from later phases are already in the tree and return `not implemented y
 
 **New in this checkout, awaiting live qualification:** `vaire activity list|show|health` and `vaire diagnostics collect|inspect` provide local, metadata-only operation history and portable incident evidence. No logging database, external collector or raw-log export is required. See [activity and diagnostics](docs/ACTIVITY.md).
 
+**External copy in this checkout, awaiting live qualification:** `vaire db copy` imports a trusted external PostgreSQL snapshot into a new ordinary vaire database. It prompts for masked connection details and sizing; unattended input uses `--source-url-stdin`, never a password-bearing argument, and requires `--confirm` with the new name. Export runs on the destination node, so that server must reach the source. Default TLS verifies identity; custom source CA content can be supplied with `--source-ca-file`. No existing target is overwritten or resumed, source roles/settings are not imported, and a failed target is retained. Save the one-time credentials even after detach or uncertain startup; job history cannot recover them. See [copy behavior](docs/IMPLEMENTATION.md#external-postgresql-database-copy), [review status](docs/REVIEW-external-database-copy.md) and [qualification cases](docs/RUN-external-database-copy.md).
+
 ## Quick start
 
 ```sh

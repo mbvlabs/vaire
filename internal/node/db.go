@@ -243,6 +243,15 @@ func createCommand(p dbCreateParams) func(size string) string {
 	}
 }
 
+// createOptions are the narrowly scoped differences between an ordinary
+// database creation and a copy's provisioning.
+type createOptions struct {
+	// deferInitialBackup leaves the new cluster's stanza, first full backup
+	// and timers to the caller. vaire db copy runs them after the import so
+	// the backup reflects the copied data, not an empty database.
+	deferInitialBackup bool
+}
+
 // createDatabase adds db to cluster.toml and creates its cluster: the
 // kernel's huge pages, the cluster's own step instances with the role
 // passwords from the request's secrets, both poolers, and the other
@@ -252,11 +261,23 @@ func createCommand(p dbCreateParams) func(size string) string {
 // The warnings are the server's oversubscription and any restart the other
 // databases' configuration left pending.
 func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string) (config.ClusterSpec, []output.Warning, error) {
-	store := state.FileStore{}
+	return createDatabaseWithOptions(ctx, env, db, allowOvercommit, suggest, createOptions{})
+}
+
+// createDatabaseWithOptions is createDatabase with explicit copy-only
+// provisioning options.
+func createDatabaseWithOptions(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string, opts createOptions) (config.ClusterSpec, []output.Warning, error) {
 	cfg, previous, db, err := addDatabase(ctx, env, db, allowOvercommit, suggest)
 	if err != nil {
 		return db, nil, err
 	}
+	return provisionDatabase(ctx, env, cfg, previous, db, opts)
+}
+
+// provisionDatabase creates the cluster of a database whose entry is already
+// saved in cfg. previous is the file before the entry was added, for the
+// rollback of a cluster that was never created.
+func provisionDatabase(ctx context.Context, env *Env, cfg config.Cluster, previous []byte, db config.ClusterSpec, opts createOptions) (config.ClusterSpec, []output.Warning, error) {
 	var warnings []output.Warning
 	env.Cluster = cfg
 	rt := runtimeFor(env, false)
@@ -265,34 +286,49 @@ func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowO
 	// The kernel's huge-page pool grows first when the new cluster uses
 	// huge pages, then the cluster's own step instances: create it,
 	// configure it, then its roles and database (RFC 11.2).
-	_, _, err = engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
+	_, _, err := createApplyKernel(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		err = applyNewCluster(ctx, cfg, rt, db.Name, "", env.Report)
+		err = createApplyNewCluster(ctx, cfg, rt, db.Name, "", env.Report)
 	}
 	if err != nil {
 		// Keep cluster.toml in step with the server: an entry whose cluster
 		// was never created would make the retry refuse the name. Once the
 		// cluster exists, vaire apply --db finishes it.
-		if !steps.ClusterExists(ctx, db.Name) {
-			_ = store.Save(previous)
+		if !createClusterExists(ctx, db.Name) {
+			_ = followerState().Save(previous)
 			return db, nil, errors.Join(err, forgetNewCluster(cfg, db.Name))
 		}
 		return db, nil, withHint(err, finishNewCluster(db.Name))
 	}
-	if err := reloadPoolers(ctx, env, cfg); err != nil {
+	if err := createReloadPoolers(ctx, env, cfg); err != nil {
 		return db, nil, withHint(err, "Finish it with vaire apply.")
 	}
-	if w := applyMetrics(ctx, cfg, rt, env.Report, db.Name, ""); w != nil {
+	if w := createApplyMetrics(ctx, cfg, rt, env.Report, db.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
-	warnings = append(warnings, applyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
+	warnings = append(warnings, createApplyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
-	if w := firstBackup(ctx, cfg, rt, env.Report, db.Name); w != nil {
-		warnings = append(warnings, *w)
+	if !opts.deferInitialBackup {
+		if w := createFirstBackup(ctx, cfg, rt, env.Report, db.Name); w != nil {
+			warnings = append(warnings, *w)
+		}
 	}
 	created, _ := cfg.ClusterByName(db.Name)
 	return created, append(warnings, oversubscriptionWarnings(cfg, rt.Host)...), nil
 }
+
+// The provisioning seams keep ordinary create behavior unchanged while
+// letting a copy's tests stop at each boundary without a live node.
+var (
+	createClusterExists     = steps.ClusterExists
+	createConfDir           = steps.PGConfDir
+	createApplyKernel       = engine.Apply
+	createApplyNewCluster   = applyNewCluster
+	createReloadPoolers     = reloadPoolers
+	createApplyMetrics      = applyMetrics
+	createApplyOtherConfigs = applyOtherConfigs
+	createFirstBackup       = firstBackup
+)
 
 // addDatabase checks db's name and role passwords, places it (node, port,
 // stanza, the default size), refuses a cluster that could not start or
@@ -326,7 +362,7 @@ func addDatabaseFrom(ctx context.Context, env *Env, build func(config.Cluster) (
 	if _, ok := cfg.ClusterByName(db.Name); ok {
 		return cfg, nil, db, existingDatabase(db.Name)
 	}
-	if steps.ClusterExists(ctx, db.Name) {
+	if createClusterExists(ctx, db.Name) {
 		return cfg, nil, db, existingDatabase(db.Name)
 	}
 	for _, role := range steps.DatabaseRoles {
@@ -374,7 +410,7 @@ func addDatabaseFrom(ctx context.Context, env *Env, build func(config.Cluster) (
 // configuration then.
 func forgetNewCluster(cfg config.Cluster, name string) error {
 	if _, err := os.Stat(cfg.Server.DataDirectory(name)); errors.Is(err, fs.ErrNotExist) {
-		if err := os.RemoveAll(steps.PGConfDir(name)); err != nil {
+		if err := os.RemoveAll(createConfDir(name)); err != nil {
 			return err
 		}
 	}

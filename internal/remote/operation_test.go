@@ -74,6 +74,25 @@ func TestOperationFallsBackToRequestID(t *testing.T) {
 	}
 }
 
+// db copy names its detachable job after the RPC request id, so it must be
+// able to choose that id before sending: a lost reply still leaves the
+// operator the job id.
+func TestPreselectedRequestIDIsUsed(t *testing.T) {
+	want := rpc.NewRequestID()
+	req := requestFor(t, WithNewOperation(context.Background()), CallOptions{RequestID: want})
+	if req.RequestID != want {
+		t.Fatalf("request id = %s, want the preselected %s", req.RequestID, want)
+	}
+	if req.OperationID == want {
+		t.Fatal("the command's operation id was replaced by the preselected request id")
+	}
+	// Without a context operation the request id remains the operation id.
+	req = requestFor(t, context.Background(), CallOptions{RequestID: want})
+	if req.OperationID != want {
+		t.Fatalf("operation id = %s, want the preselected request id %s", req.OperationID, want)
+	}
+}
+
 func TestWithNewOperationPreservesContext(t *testing.T) {
 	type valueKey struct{}
 	deadline := time.Now().Add(time.Hour)

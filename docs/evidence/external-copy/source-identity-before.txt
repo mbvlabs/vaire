@@ -1,0 +1,9 @@
+captured_at_utc=2026-11-12T14:21:02Z
+worktree=/home/mbv/.local/share/opencode/worktree/0283f0/feat/external-database-copy
+branch=feat/external-database-copy
+head=0d8e1fcc493cd30ca4afb89b54d6bd050302f552
+base=0d8e1fcc493cd30ca4afb89b54d6bd050302f552
+identity_command:
+  ( git diff --binary -- . ':!docs/REVIEW-external-database-copy.md' ':!docs/STATE-external-database-copy.md'; git ls-files --others --exclude-standard | grep -v -E '^docs/(REVIEW-external-database-copy\.md|STATE-external-database-copy\.md|evidence/)' | while IFS= read -r file; do git diff --no-index --binary -- /dev/null "$file" || test "$?" -eq 1; done ) | sha256sum
+note=full piped diff stream omitted from this capture to limit repository size; the sha256 below is of that exact stream.
+c5cf7e0b9eff817825e5b24853d77df83fed2ac449eb66b473706d9791f377a7  -

@@ -2,6 +2,10 @@
 
 Live qualification evidence and original checklists. Dated failures, fixes and then-pending items below are chronological history; later outcomes supersede them. Do not infer that an old "open" entry is still a release blocker, or that every subcheck passed just because its main scenario did. Current roadmap status lives in [MASTER.md](MASTER.md).
 
+## External database copy — live qualification pending
+
+The external-copy feature branch has no published/deployed candidate or authorized external-source fixture. **COPY-01 through COPY-09: NOT RUN.** See [the runtime run sheet](RUN-external-database-copy.md) for prerequisites, acceptance evidence and cleanup boundaries. Rootless mocked tests and historical managed-restore passes below do not qualify external copying, real ownership/access, TLS/provider compatibility, abrupt systemd death, disk faults or detach/credential handoff. No live fixtures were created or changed for this work.
+
 ## Qualification summary — 2026-10-19
 
 **Main v1 alpha live scenarios complete; alpha not published.** The original fixes and six review follow-ups have regression tests and main live evidence. Two additional live-discovered bugs were fixed, published and retested: administrative query/top filtering (`eaa1a73`) and missing backup service templates before the first recovery full (`65c4f91`). Latest qualified code is `edge-65c4f9157253`; edge workflow `39234654792` succeeded. No unresolved reproducible code blocker remains from this main qualification run.

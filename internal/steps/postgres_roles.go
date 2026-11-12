@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/catalog"
@@ -446,6 +449,513 @@ func databaseGrantsSQL(db config.ClusterSpec) string {
 		fmt.Fprintf(&b, "CREATE EXTENSION IF NOT EXISTS %s;\n", pg.Quote(entry.ExtName))
 	}
 	return b.String()
+}
+
+// ExtensionState is one pg_extension row (or one row a fresh database will
+// install): the extension name, its installed version and its schema.
+type ExtensionState struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Schema  string `json:"schema"`
+}
+
+// defaultCopyExtension is the instrumentation every vaire database installs,
+// which a copy destination must keep in addition to the source's extensions.
+const defaultCopyExtension = "pg_stat_statements"
+
+// pgExtensionControlDir is PostgreSQL 18's installed extension control
+// directory. It is a variable so rootless tests supply their own files.
+var pgExtensionControlDir = filepath.Join("/usr/share/postgresql", strconv.Itoa(PGVersion), "extension")
+
+// CopyExtensionPlan resolves the source's extensions against vaire's catalog
+// and the destination's installed PostgreSQL 18 extension metadata. It
+// returns the pg_extension rows a fresh vaire database will have, and the
+// config extension names in dependency order. A source extension that vaire
+// does not support, whose control metadata is missing, or whose version or
+// schema differs from what CREATE EXTENSION will install fails before any
+// destination is provisioned.
+func CopyExtensionPlan(source []ExtensionState) ([]ExtensionState, []string, error) {
+	seen := map[string]bool{}
+	for _, ext := range source {
+		if err := validateExtensionState(ext); err != nil {
+			return nil, nil, err
+		}
+		if seen[ext.Name] {
+			return nil, nil, copyExtensionError("extension_incompatible",
+				"the source reports extension "+safeExtensionName(ext.Name)+" more than once",
+				"Do not copy from this source until its extension catalog is consistent.")
+		}
+		seen[ext.Name] = true
+	}
+
+	plan := map[string]ExtensionState{}
+	configured := map[string]bool{defaultCopyExtension: true}
+	for _, ext := range source {
+		if ext.Name != "plpgsql" {
+			entry, ok := catalog.Lookup(ext.Name)
+			if !ok || entry.ExtName == "" {
+				return nil, nil, copyExtensionError("extension_missing",
+					"the source extension "+safeExtensionName(ext.Name)+" is not supported by vaire",
+					"Remove the extension from the source, or install a compatible vaire support for it.")
+			}
+			configured[entry.ExtName] = true
+		}
+	}
+	// Add dependencies named by control metadata, so CREATE EXTENSION can
+	// create them in order. A dependency outside the catalog is unsupported.
+	var addRequirements func(string, map[string]bool) error
+	addRequirements = func(name string, visiting map[string]bool) error {
+		if name == "plpgsql" {
+			return nil
+		}
+		if visiting[name] {
+			return copyExtensionError("extension_incompatible",
+				"the destination extension metadata has a dependency cycle at "+safeExtensionName(name),
+				"Report this as a vaire bug; do not retry the copy.")
+		}
+		control, err := readExtensionControl(name)
+		if err != nil {
+			return err
+		}
+		visiting[name] = true
+		for _, req := range control.requires {
+			if req == "plpgsql" {
+				continue
+			}
+			entry, ok := catalog.Lookup(req)
+			if !ok || entry.ExtName == "" {
+				return copyExtensionError("extension_missing",
+					"extension "+safeExtensionName(name)+" requires "+safeExtensionName(req)+", which vaire does not support",
+					"Remove "+safeExtensionName(name)+" from the source, or install compatible vaire support for "+safeExtensionName(req)+".")
+			}
+			configured[entry.ExtName] = true
+			if err := addRequirements(entry.ExtName, visiting); err != nil {
+				return err
+			}
+		}
+		delete(visiting, name)
+		return nil
+	}
+	for name := range configured {
+		if err := addRequirements(name, map[string]bool{}); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Resolve every source extension's exact version and schema, and the
+	// default instrumentation's, from PG18's installed control metadata.
+	for _, ext := range source {
+		control, err := readExtensionControl(ext.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ext.Version != control.version {
+			return nil, nil, copyExtensionError("extension_version_incompatible",
+				"extension "+safeExtensionName(ext.Name)+" is version "+safeExtensionName(ext.Version)+" on the source but version "+safeExtensionName(control.version)+" on the destination",
+				"Align the extension versions before copying; vaire does not convert extension versions automatically.")
+		}
+		if ext.Schema != control.schema {
+			return nil, nil, copyExtensionError("extension_schema_incompatible",
+				"extension "+safeExtensionName(ext.Name)+" is in schema "+safeExtensionName(ext.Schema)+" on the source but in schema "+safeExtensionName(control.schema)+" on the destination",
+				"Install the destination extension in the same schema; vaire does not rewrite extension schemas.")
+		}
+		plan[ext.Name] = ext
+	}
+	// plpgsql is installed in every database and is not in db.Extensions, but
+	// a fresh destination still has this exact pg_extension row.
+	if _, ok := plan["plpgsql"]; !ok {
+		control, err := readExtensionControl("plpgsql")
+		if err != nil {
+			return nil, nil, err
+		}
+		plan["plpgsql"] = ExtensionState{Name: "plpgsql", Version: control.version, Schema: control.schema}
+	}
+	for name := range configured {
+		if name == "plpgsql" {
+			continue
+		}
+		if _, ok := plan[name]; ok {
+			continue
+		}
+		control, err := readExtensionControl(name)
+		if err != nil {
+			return nil, nil, err
+		}
+		plan[name] = ExtensionState{Name: name, Version: control.version, Schema: control.schema}
+	}
+
+	ordered, err := extensionDependencyOrder(configured)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]ExtensionState, 0, len(plan))
+	for _, ext := range plan {
+		out = append(out, ext)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, ordered, nil
+}
+
+func extensionDependencyOrder(configured map[string]bool) ([]string, error) {
+	var out []string
+	state := map[string]int{}
+	var visit func(string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case 1:
+			return copyExtensionError("extension_incompatible",
+				"the destination extension metadata has a dependency cycle at "+safeExtensionName(name),
+				"Report this as a vaire bug; do not retry the copy.")
+		case 2:
+			return nil
+		}
+		state[name] = 1
+		control, err := readExtensionControl(name)
+		if err != nil {
+			return err
+		}
+		for _, req := range control.requires {
+			if req == "plpgsql" || !configured[req] {
+				continue
+			}
+			if err := visit(req); err != nil {
+				return err
+			}
+		}
+		state[name] = 2
+		out = append(out, name)
+		return nil
+	}
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// extensionControl is the subset of one PG18 .control file a copy needs.
+type extensionControl struct {
+	version  string
+	schema   string
+	requires []string
+}
+
+var extensionControlNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,62}$`)
+
+// readExtensionControl reads <name>.control from the destination's installed
+// PG18 extension directory. Only a fixed key/value shape is accepted; a
+// malformed or missing file fails closed.
+func readExtensionControl(name string) (extensionControl, error) {
+	if !extensionControlNamePattern.MatchString(name) {
+		return extensionControl{}, copyExtensionError("extension_incompatible",
+			"the extension name is not a safe control-file name",
+			"Do not copy from this source until its extension catalog is consistent.")
+	}
+	path := filepath.Join(pgExtensionControlDir, name+".control")
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: name is validated and the directory is fixed.
+	if err != nil {
+		return extensionControl{}, copyExtensionError("extension_missing",
+			"extension "+safeExtensionName(name)+" is not installed on the destination",
+			"Install the extension package on the node before copying, or remove it from the source.")
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return extensionControl{}, copyExtensionError("extension_incompatible",
+				"the destination extension metadata for "+safeExtensionName(name)+" is malformed",
+				"Do not copy until the node's extension package is repaired.")
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, "'\"")
+		values[key] = value
+	}
+	control := extensionControl{version: values["default_version"], schema: values["schema"]}
+	if control.version == "" {
+		return extensionControl{}, copyExtensionError("extension_incompatible",
+			"the destination extension metadata for "+safeExtensionName(name)+" has no default version",
+			"Do not copy until the node's extension package is repaired.")
+	}
+	if control.schema == "" {
+		control.schema = "public"
+	}
+	for _, req := range strings.FieldsFunc(values["requires"], func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	}) {
+		if req != "" {
+			control.requires = append(control.requires, req)
+		}
+	}
+	available, err := extensionInstallPath(name, control.version)
+	if err != nil {
+		return extensionControl{}, err
+	}
+	if !available {
+		return extensionControl{}, copyExtensionError("extension_version_incompatible",
+			"the destination has no installation path for extension "+safeExtensionName(name)+" version "+safeExtensionName(control.version),
+			"Align the extension versions before copying; vaire does not convert extension versions automatically.")
+	}
+	return control, nil
+}
+
+// extensionInstallPath reports whether PostgreSQL 18 can install version from
+// a direct base script or from a base script plus update scripts. It does not
+// assume a direct <extension>--<version>.sql file exists.
+func extensionInstallPath(name, target string) (bool, error) {
+	entries, err := os.ReadDir(pgExtensionControlDir)
+	if err != nil {
+		return false, copyExtensionError("extension_missing",
+			"the destination extension directory could not be read",
+			"Do not copy until the node's PostgreSQL extension directory is readable.")
+	}
+	prefix := name + "--"
+	bases := map[string]bool{}
+	updates := map[string][]string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		file := entry.Name()
+		if !strings.HasPrefix(file, prefix) || !strings.HasSuffix(file, ".sql") {
+			continue
+		}
+		rest := strings.TrimSuffix(strings.TrimPrefix(file, prefix), ".sql")
+		if rest == "" {
+			continue
+		}
+		if from, to, ok := strings.Cut(rest, "--"); ok {
+			if from == "" || to == "" {
+				continue
+			}
+			updates[from] = append(updates[from], to)
+			continue
+		}
+		bases[rest] = true
+	}
+	if bases[target] {
+		return true, nil
+	}
+	seen := map[string]bool{}
+	queue := make([]string, 0, len(bases))
+	for version := range bases {
+		seen[version] = true
+		queue = append(queue, version)
+	}
+	for len(queue) > 0 {
+		version := queue[0]
+		queue = queue[1:]
+		for _, next := range updates[version] {
+			if seen[next] {
+				continue
+			}
+			if next == target {
+				return true, nil
+			}
+			seen[next] = true
+			queue = append(queue, next)
+		}
+	}
+	return false, nil
+}
+
+func validateExtensionState(ext ExtensionState) error {
+	if !extensionControlNamePattern.MatchString(ext.Name) || ext.Version == "" || ext.Schema == "" ||
+		strings.ContainsAny(ext.Version+ext.Schema, "\x00\r\n") {
+		return copyExtensionError("extension_incompatible",
+			"the extension inventory has an invalid name, version or schema",
+			"Do not copy from this source until its extension catalog is complete.")
+	}
+	return nil
+}
+
+func safeExtensionName(value string) string {
+	if len(value) > 120 {
+		value = value[:120] + "..."
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, value)
+}
+
+func copyExtensionError(reason, message, hint string) error {
+	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).
+		WithDetails(map[string]any{"reason": reason})
+}
+
+// copyObjectGrantsTemplate grants app and ro the same ordinary access the
+// existing public-schema defaults give them, to objects already in every
+// imported application schema, and installs the matching future-owner
+// defaults there. Extension-owned schemas and objects are left alone.
+const copyObjectGrantsTemplate = `DO $vaire$
+DECLARE
+  s name;
+  r record;
+BEGIN
+  FOR s IN
+    SELECT n.nspname
+    FROM pg_namespace n
+    WHERE n.nspname <> 'information_schema'
+      AND n.nspname <> 'vaire'
+      AND n.nspname NOT LIKE 'pg\_%'
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend d
+        WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'
+      )
+  LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO {{APP}}, {{RO}}', s);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE {{OWNER}} IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{APP}}', s);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE {{OWNER}} IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO {{APP}}', s);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE {{OWNER}} IN SCHEMA %I GRANT EXECUTE ON FUNCTIONS TO {{APP}}', s);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE {{OWNER}} IN SCHEMA %I GRANT SELECT ON TABLES TO {{RO}}', s);
+    FOR r IN
+      SELECT c.relname, c.relkind
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = s
+        AND c.relowner = {{OWNER_LITERAL}}::regrole
+        AND c.relkind IN ('r','p','v','m','f','S')
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_depend d
+          WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+        )
+    LOOP
+      IF r.relkind = 'S' THEN
+        EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %I.%I TO {{APP}}', s, r.relname);
+      ELSE
+        EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO {{APP}}', s, r.relname);
+        EXECUTE format('GRANT SELECT ON TABLE %I.%I TO {{RO}}', s, r.relname);
+      END IF;
+    END LOOP;
+    FOR r IN
+      SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = s
+        AND p.proowner = {{OWNER_LITERAL}}::regrole
+        AND p.prokind = 'f'
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_depend d
+          WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+        )
+    LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%I(%s) TO {{APP}}', s, r.proname, r.args);
+    END LOOP;
+  END LOOP;
+END $vaire$;
+`
+
+// CopyObjectGrantsSQL applies vaire's ordinary existing-object access policy
+// to every imported application schema in database: schema USAGE for app and
+// ro, table DML for app, table SELECT for ro, sequence USAGE/SELECT for app,
+// ordinary function EXECUTE for app, and the matching future-owner defaults.
+// It skips system and vaire schemas and extension-owned objects, and never
+// grants owner or global privileges.
+func CopyObjectGrantsSQL(database string) string {
+	owner := pg.Quote(database + "_owner")
+	app := pg.Quote(database + "_app")
+	ro := pg.Quote(database + "_ro")
+	return strings.NewReplacer(
+		"{{OWNER}}", owner,
+		"{{OWNER_LITERAL}}", literal(database+"_owner"),
+		"{{APP}}", app,
+		"{{RO}}", ro,
+	).Replace(copyObjectGrantsTemplate)
+}
+
+// copyObjectVerifyTemplate counts imported objects outside vaire's policy.
+// app_schemas is exactly the schemas the grant helper touches.
+const copyObjectVerifyTemplate = `WITH app_schemas AS (
+  SELECT n.oid, n.nspname
+  FROM pg_namespace n
+  WHERE n.nspname <> 'information_schema'
+    AND n.nspname <> 'vaire'
+    AND n.nspname NOT LIKE 'pg\_%'
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend d
+      WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'
+    )
+), owned_class AS (
+  SELECT c.oid, c.relkind, c.relnamespace
+  FROM pg_class c
+  WHERE c.relowner = {{OWNER_LITERAL}}::regrole
+    AND c.relkind IN ('r','p','v','m','f','S')
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend d
+      WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+    )
+)
+SELECT
+  (SELECT count(*) FROM pg_database WHERE datname = current_database() AND pg_get_userbyid(datdba) <> {{OWNER_LITERAL}}) AS database_owner_mismatch,
+  (SELECT count(*) FROM pg_database
+   WHERE datname = current_database()
+     AND (NOT has_database_privilege({{APP_LITERAL}}, datname, 'CONNECT')
+       OR NOT has_database_privilege({{RO_LITERAL}}, datname, 'CONNECT')
+       OR NOT has_database_privilege({{MIGRATE_LITERAL}}, datname, 'CONNECT'))) AS database_connect_missing,
+  (SELECT count(*) FROM pg_roles WHERE rolname = 'vaire_admin'
+   AND NOT pg_has_role('vaire_admin', {{OWNER_LITERAL}}::regrole, 'MEMBER')) AS admin_policy_missing,
+  (SELECT count(*) FROM pg_roles WHERE rolname = {{MIGRATE_LITERAL}}
+   AND NOT pg_has_role({{MIGRATE_LITERAL}}, {{OWNER_LITERAL}}::regrole, 'MEMBER')) AS migrate_owner_missing,
+  (SELECT count(*) FROM (
+    SELECT c.oid FROM pg_class c JOIN app_schemas s ON s.oid = c.relnamespace
+    WHERE c.relkind IN ('r','p','v','m','f','S') AND c.relowner <> {{OWNER_LITERAL}}::regrole
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+    UNION ALL
+    SELECT p.oid FROM pg_proc p JOIN app_schemas s ON s.oid = p.pronamespace
+    WHERE p.prokind = 'f' AND p.proowner <> {{OWNER_LITERAL}}::regrole
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+    UNION ALL
+    SELECT t.oid FROM pg_type t JOIN app_schemas s ON s.oid = t.typnamespace
+    WHERE t.typtype IN ('d','e') AND t.typowner <> {{OWNER_LITERAL}}::regrole
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  ) bad) AS object_owner_mismatch,
+  (SELECT count(*) FROM app_schemas s
+   WHERE NOT has_schema_privilege({{APP_LITERAL}}, s.oid, 'USAGE')
+      OR NOT has_schema_privilege({{RO_LITERAL}}, s.oid, 'USAGE')) AS schema_usage_missing,
+  (SELECT count(*) FROM owned_class c JOIN app_schemas s ON s.oid = c.relnamespace
+   WHERE c.relkind IN ('r','p','v','m')
+     AND (NOT has_table_privilege({{APP_LITERAL}}, c.oid, 'SELECT,INSERT,UPDATE,DELETE')
+       OR NOT has_table_privilege({{RO_LITERAL}}, c.oid, 'SELECT'))) AS table_privilege_missing,
+  (SELECT count(*) FROM owned_class c JOIN app_schemas s ON s.oid = c.relnamespace
+   WHERE c.relkind = 'f'
+     AND (NOT has_table_privilege({{APP_LITERAL}}, c.oid, 'SELECT,INSERT,UPDATE,DELETE')
+       OR NOT has_table_privilege({{RO_LITERAL}}, c.oid, 'SELECT'))) AS foreign_table_privilege_missing,
+  (SELECT count(*) FROM owned_class c JOIN app_schemas s ON s.oid = c.relnamespace
+   WHERE c.relkind = 'S'
+     AND (NOT has_sequence_privilege({{APP_LITERAL}}, c.oid, 'USAGE')
+       OR NOT has_sequence_privilege({{APP_LITERAL}}, c.oid, 'SELECT'))) AS sequence_privilege_missing,
+  (SELECT count(*) FROM pg_proc p JOIN app_schemas s ON s.oid = p.pronamespace
+   WHERE p.prokind = 'f' AND p.proowner = {{OWNER_LITERAL}}::regrole
+     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+     AND NOT has_function_privilege({{APP_LITERAL}}, p.oid, 'EXECUTE')) AS function_privilege_missing
+`
+
+// CopyObjectVerifySQL returns one row of counts of policy violations in
+// database. Every count must be zero for a copy to succeed.
+func CopyObjectVerifySQL(database string) string {
+	return strings.NewReplacer(
+		"{{OWNER_LITERAL}}", literal(database+"_owner"),
+		"{{APP_LITERAL}}", literal(database+"_app"),
+		"{{RO_LITERAL}}", literal(database+"_ro"),
+		"{{MIGRATE_LITERAL}}", literal(database+"_migrate"),
+	).Replace(copyObjectVerifyTemplate)
+}
+
+// CopyAnalyzeSQL runs ANALYZE as the database's owner, not as the postgres
+// superuser.
+func CopyAnalyzeSQL(database string) string {
+	return "SET ROLE " + pg.Quote(database+"_owner") + ";\nANALYZE;\nRESET ROLE;\n"
 }
 
 // RoleDirectOnly marks login roles that must connect to PostgreSQL directly:
