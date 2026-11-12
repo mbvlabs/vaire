@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 
@@ -111,6 +112,32 @@ func ClusterNames(ctx context.Context) map[string]string {
 func ClusterExists(ctx context.Context, name string) bool {
 	_, ok := lsCluster(ctx, name)
 	return ok
+}
+
+// AllClusterNames lists every PostgreSQL cluster pg_lsclusters knows, across
+// all major versions, mapped to its major-version number. Unlike ClusterNames,
+// a missing or unreadable inventory is an error: a copy target name must fail
+// closed when the full cluster inventory cannot be read.
+func AllClusterNames(ctx context.Context) (map[string]string, error) {
+	out, err := Probe(ctx, "pg_lsclusters", "-h")
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return nil, errors.New("pg_lsclusters returned an incomplete line")
+		}
+		if _, err := strconv.Atoi(fields[0]); err != nil {
+			return nil, errors.New("pg_lsclusters returned an invalid major version")
+		}
+		names[fields[1]] = fields[0]
+	}
+	return names, nil
 }
 
 func (s postgresCluster) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {

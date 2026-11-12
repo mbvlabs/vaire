@@ -962,6 +962,43 @@ func dbCommands() cmdSpec {
 				},
 			},
 			{
+				use:  "copy [name]",
+				args: cobra.MaximumNArgs(1),
+				run:  runDBCopy,
+				flags: []fl{
+					flagBool("source-url-stdin", "Read one newline-terminated source PostgreSQL URL from stdin (never from argv)"),
+					flagString("source-ca-file", "", "Read a PEM CA certificate for the source from this local file; only its content is sent, as a secret"),
+					flagString("size", "", "Size of the new database's cluster: nano, small, medium, large, xlarge or custom (default [postgres] default_size)"),
+					flagString("memory", "", "Memory for the cluster, such as 768MiB or 2GiB; overrides the size's (custom needs it)"),
+					flagString("profile", "", "Workload profile for its tuning: oltp, mixed or analytics (default [postgres] profile)"),
+					flagBool("allow-overcommit", "Copy even when the new size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
+				},
+				meta: CommandMeta{
+					Summary: "Copy an external PostgreSQL database into a new vaire database",
+					WhenToUse: []string{
+						"Import one external PostgreSQL database as a brand-new vaire database with its own size, roles, passwords, ownership and normal app/read-only access. The source is one consistent read-only snapshot: it is not replicated or cut over, and it is not modified apart from normal read/export load and locks. The destination node runs pg_dump and pg_restore, so the source must be reachable from that server (provider/firewall allowlists). Size means memory, CPU and connections, never a storage quota. Ask interactively for a masked URL or the individual host, port, database, user, password and TLS fields; without a terminal pass one newline-terminated URL on stdin with --source-url-stdin (there is no URL argument or password flag). --source-ca-file supplies certificate content for the node, not a remote path. The summary is redacted and confirmed with --confirm <name>; --yes never confirms it. Source roles, passwords, grants, tablespaces and cluster settings are not imported. A database dump can contain executable SQL, so only copy a trusted source. An existing database or cluster name is never an import target: choose a new name or drop the old one explicitly first. A failed copy may leave a partial target that is retained, never replayed or automatically dropped. The new role passwords are printed once; if the connection is lost, the job starts ambiguously or its outcome is unknown, vaire keeps and prints them with the job id because they may already be in use. job follow shows progress and outcomes only, never passwords.",
+					},
+					WhenNotToUse: []string{"To replace, overwrite or resume into an existing database; for continuous replication or application cutover; for a source reachable only from the operator machine; or for non-PostgreSQL sources. Use vaire restore for a vaire backup, and vaire db fork for a copy of a vaire-managed database."},
+					Examples: []string{
+						"vaire db copy app --source-url-stdin --size small --confirm app < source-url.txt",
+						"printf '%s\\n' \"$SOURCE_URL\" | vaire db copy app --source-url-stdin --size small --confirm app",
+						"vaire db copy app --source-url-stdin --source-ca-file provider-ca.pem --size small --confirm app < source-url.txt",
+						"vaire db copy app --dry-run",
+					},
+					Mutating:         true,
+					SupportsDryRun:   true,
+					Remote:           true,
+					Prompts:          true,
+					InteractiveFlags: []string{"--source-url-stdin", "--source-ca-file"},
+					ConfirmToken:     "{name}",
+					ErrorCodes: []string{
+						"input_required", "validation_failed", "unsafe_action_requires_confirmation",
+						"precondition_failed", "transport_failed", "missing_tool", "step_failed", "error",
+					},
+					Next: []string{"vaire db list", "vaire job follow <job-id>"},
+				},
+			},
+			{
 				use:  "drop <name>",
 				args: cobra.ExactArgs(1),
 				run:  runDBDrop,

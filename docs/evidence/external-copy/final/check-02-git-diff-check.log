@@ -1,0 +1,4 @@
+command: git diff --check
+utc_start=2026-11-12T14:40:27Z
+utc_end=2026-11-12T14:40:27Z
+exit_code=0

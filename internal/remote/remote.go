@@ -36,6 +36,11 @@ type CallOptions struct {
 	// ParentRequestID names the request that caused this one, when this call
 	// is itself part of another request.
 	ParentRequestID string
+	// RequestID is the request's ULID when the caller preselects it. db copy
+	// preselects it because the node names the copy job after the request,
+	// so the operator knows the job id before the request can be lost.
+	// Empty generates a new one.
+	RequestID string
 	// OnEvent receives every event before the result: step, log, progress,
 	// warning.
 	OnEvent func(output.Event)
@@ -73,9 +78,13 @@ func newRequest(method string, params any, operator string, opts CallOptions) ([
 	for _, v := range opts.Secrets {
 		secrets.Add(v)
 	}
+	requestID := opts.RequestID
+	if requestID == "" {
+		requestID = rpc.NewRequestID()
+	}
 	req := rpc.Request{
 		Schema:          rpc.Schema,
-		RequestID:       rpc.NewRequestID(),
+		RequestID:       requestID,
 		Method:          method,
 		Params:          rawParams,
 		Secrets:         opts.Secrets,
