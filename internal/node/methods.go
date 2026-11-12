@@ -143,6 +143,24 @@ func methods() map[string]method {
 			handler: handleDBCreate,
 		},
 		{
+			// A read-only source/destination check: no lock, no run log and
+			// no target reservation.
+			name:    "db.copy.preflight",
+			cluster: true,
+			handler: handleDBCopyPreflight,
+		},
+		{
+			// The copy job takes the node, heavy-I/O and target locks. This
+			// RPC only validates and starts it. A supplied confirmation must
+			// be the new target's name; the CLI prompts for it after the
+			// summary, and --yes is not that token.
+			name:    "db.copy",
+			cluster: true,
+			confirm: dbToken,
+			runLog:  func(req rpc.Request) bool { return !req.DryRun },
+			handler: handleDBCopy,
+		},
+		{
 			name:    "db.drop",
 			lock:    fixedLock(engine.LockExclusive),
 			cluster: true,

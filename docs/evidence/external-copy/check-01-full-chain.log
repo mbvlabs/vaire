@@ -1,0 +1,70 @@
+command: go build ./... && go vet ./... && go test ./... && golangci-lint run ./... && GOOS=darwin GOARCH=arm64 go build ./... && just lint
+worktree=/home/mbv/.local/share/opencode/worktree/0283f0/feat/external-database-copy
+branch=feat/external-database-copy head=0d8e1fcc493cd30ca4afb89b54d6bd050302f552
+tool_versions: go version go1.27.1 linux/amd64 | golangci-lint has version 2.14.0 built with go1.27.1 from (unknown, modified: ?, mod sum: "h1:ot8QffRa4LzAAEgtvNYrVs9esxQ7xoTwoAv6uhp4ngA=") on (unknown) | just 1.58.0 | git version 2.53.0
+utc_start=2026-11-12T14:21:26Z
++ go build ./...
++ go vet ./...
++ go test ./...
+?   	github.com/mbvlabs/vaire/cmd/vaire	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/activity	(cached)
+ok  	github.com/mbvlabs/vaire/internal/backup	(cached)
+?   	github.com/mbvlabs/vaire/internal/buildinfo	[no test files]
+?   	github.com/mbvlabs/vaire/internal/catalog	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/cli	(cached)
+?   	github.com/mbvlabs/vaire/internal/cli/output	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/cli/top	(cached)
+ok  	github.com/mbvlabs/vaire/internal/cli/ui	(cached)
+ok  	github.com/mbvlabs/vaire/internal/config	(cached)
+ok  	github.com/mbvlabs/vaire/internal/contexts	(cached)
+ok  	github.com/mbvlabs/vaire/internal/diagnostics	(cached)
+ok  	github.com/mbvlabs/vaire/internal/doctor	(cached)
+ok  	github.com/mbvlabs/vaire/internal/engine	(cached)
+ok  	github.com/mbvlabs/vaire/internal/exporters	(cached)
+?   	github.com/mbvlabs/vaire/internal/guide	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/health	(cached)
+ok  	github.com/mbvlabs/vaire/internal/hostinfo	(cached)
+?   	github.com/mbvlabs/vaire/internal/localenv	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/maint	(cached)
+ok  	github.com/mbvlabs/vaire/internal/masterbackup	(cached)
+ok  	github.com/mbvlabs/vaire/internal/node	(cached)
+ok  	github.com/mbvlabs/vaire/internal/password	(cached)
+ok  	github.com/mbvlabs/vaire/internal/pg	(cached)
+ok  	github.com/mbvlabs/vaire/internal/promfile	(cached)
+ok  	github.com/mbvlabs/vaire/internal/release	(cached)
+ok  	github.com/mbvlabs/vaire/internal/release/cmd/promote	(cached)
+ok  	github.com/mbvlabs/vaire/internal/remote	(cached)
+?   	github.com/mbvlabs/vaire/internal/render	[no test files]
+?   	github.com/mbvlabs/vaire/internal/rpc	[no test files]
+?   	github.com/mbvlabs/vaire/internal/secrets	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/secretsdoc	(cached)
+?   	github.com/mbvlabs/vaire/internal/state	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/steps	(cached)
+ok  	github.com/mbvlabs/vaire/internal/totp	(cached)
+ok  	github.com/mbvlabs/vaire/internal/transport	(cached)
+ok  	github.com/mbvlabs/vaire/internal/tune	(cached)
+ok  	github.com/mbvlabs/vaire/internal/upgrade	(cached)
+?   	github.com/mbvlabs/vaire/internal/versions	[no test files]
+?   	github.com/mbvlabs/vaire/internal/versions/cmd/print	[no test files]
+ok  	github.com/mbvlabs/vaire/schema	(cached)
++ golangci-lint run ./...
+0 issues.
++ GOOS=darwin
++ GOARCH=arm64
++ go build ./...
++ just lint
+golangci-lint run ./...
+0 issues.
+just build
+mkdir -p bin
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/mbvlabs/vaire/internal/buildinfo.Version=dev -X github.com/mbvlabs/vaire/internal/buildinfo.Commit=0d8e1fcc493c -X github.com/mbvlabs/vaire/internal/buildinfo.Channel=dev" -o bin/vaire ./cmd/vaire
+bin/vaire commands --check-meta
+Command metadata is complete
+bin/vaire commands --check-steps
+17 steps
+bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); if ((${#files[@]})); then shellcheck -x "${files[@]}"; fi'
+actionlint
+bash -eu -o pipefail -c 'while IFS="=" read -r key value; do grep -Fq "$value" scripts/install.sh || { echo "scripts/install.sh is missing $key=$value" >&2; exit 1; }; done < <(go run ./internal/versions/cmd/print)'
+utc_end=2026-11-12T14:21:39Z
+exit_code=0
+duration_seconds=13

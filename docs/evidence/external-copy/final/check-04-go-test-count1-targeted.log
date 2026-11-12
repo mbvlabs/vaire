@@ -1,0 +1,13 @@
+command: go test -count=1 ./internal/backup ./internal/node ./internal/steps ./internal/cli ./internal/config ./internal/remote ./internal/transport
+tool_versions: go version go1.27.1 linux/amd64
+utc_start=2026-11-12T14:40:58Z
+ok  	github.com/mbvlabs/vaire/internal/backup	2.792s
+ok  	github.com/mbvlabs/vaire/internal/node	5.845s
+ok  	github.com/mbvlabs/vaire/internal/steps	0.088s
+ok  	github.com/mbvlabs/vaire/internal/cli	1.454s
+ok  	github.com/mbvlabs/vaire/internal/config	0.006s
+ok  	github.com/mbvlabs/vaire/internal/remote	0.024s
+ok  	github.com/mbvlabs/vaire/internal/transport	1.735s
+utc_end=2026-11-12T14:41:05Z
+exit_code=0
+duration_seconds=7
