@@ -39,10 +39,18 @@ func PruneForRestore(raw []byte, databases []AwaitingDatabase, now time.Time) ([
 		pruned = append(pruned, PrunedRecord{Kind: "open_restore", Database: db, Name: RestoringName(rs.Database)})
 	}
 	r.Restores = map[string]Restore{}
+	drills := make(map[PrunedRecord]struct{})
 	for db, name := range r.Drilling {
-		pruned = append(pruned, PrunedRecord{Kind: "drill", Database: db, Name: name})
+		drills[PrunedRecord{Kind: "drill", Database: db, Name: name}] = struct{}{}
+	}
+	for db, attempt := range r.DrillAttempts {
+		drills[PrunedRecord{Kind: "drill", Database: db, Name: attempt.Target}] = struct{}{}
+	}
+	for record := range drills {
+		pruned = append(pruned, record)
 	}
 	r.Drilling = map[string]string{}
+	r.DrillAttempts = nil
 	for db, u := range r.Undoing {
 		pruned = append(pruned, PrunedRecord{Kind: "undo", Database: db, Name: u.Aside})
 	}
@@ -56,7 +64,10 @@ func PruneForRestore(raw []byte, databases []AwaitingDatabase, now time.Time) ([
 		if pruned[i].Database != pruned[j].Database {
 			return pruned[i].Database < pruned[j].Database
 		}
-		return pruned[i].Kind < pruned[j].Kind
+		if pruned[i].Kind != pruned[j].Kind {
+			return pruned[i].Kind < pruned[j].Kind
+		}
+		return pruned[i].Name < pruned[j].Name
 	})
 	out, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {

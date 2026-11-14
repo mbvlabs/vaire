@@ -397,7 +397,7 @@ func TestDBCopyTakesExclusiveLocksInOrder(t *testing.T) {
 	if err != nil || busy != nil {
 		t.Fatalf("locks: %v %v", err, busy)
 	}
-	release()
+	release.finish()
 	want := []string{"node", "heavy", "cluster copyapp"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("lock order = %v, want %v", got, want)
@@ -419,7 +419,7 @@ func TestDBCopySameTargetIsExclusive(t *testing.T) {
 	if err != nil || busy != nil {
 		t.Fatalf("the first copy's locks: %v %v", err, busy)
 	}
-	defer release()
+	defer release.finish()
 	if _, busy, err = takeJobLocks(context.Background(), env(), locks); err != nil {
 		t.Fatalf("the second copy's locks: %v", err)
 	}
@@ -818,6 +818,32 @@ func TestPruneCopyWorkspacesCleansSpecsWithoutRoot(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("cleanup failure warning missing: %v", warnings)
+	}
+}
+
+func TestCopyWorkspaceAccessFailureKeepsSafeDetailsAndCleanup(t *testing.T) {
+	access := output.NewError(output.CodePrecondition, "workspace inaccessible", output.ExitPrecondition, "").
+		WithDetails(map[string]any{"reason": "copy_workspace_access_denied", "stage": "source-access", "file": "source-ca.pem"})
+	cleanup := output.NewError(output.CodeSecrets, "cleanup failed", output.ExitSecrets, "").
+		WithDetails(map[string]any{"reason": "secret_cleanup_failed"})
+	err := copyJobFailure(context.Background(), config.Cluster{}, &copyProgress{}, errors.Join(access, cleanup))
+	details := copyErrorDetails(t, err)
+	if details["reason"] != "copy_workspace_access_denied" || details["stage"] != "source-access" ||
+		details["file"] != "source-ca.pem" || details["cleanup_failed"] != true || details["workspace_cleanup"] != "failed" {
+		t.Fatalf("details = %v", details)
+	}
+	if got := copySafeDetails(map[string]any{"reason": "copy_workspace_access_denied", "stage": "secret", "file": "/secret/path"}); got["file"] != nil || got["stage"] != nil {
+		t.Fatalf("unsafe detail accepted: %v", got)
+	}
+	system := copySafeDetails(map[string]any{"reason": "copy_workspace_access_denied", "stage": "source-access", "file": "system-ca-bundle"})
+	if system["file"] != "system-ca-bundle" {
+		t.Fatalf("system CA label lost: %v", system)
+	}
+	if got := safeActivityToken("copy_workspace_access_denied"); got != "copy_workspace_access_denied" {
+		t.Fatalf("activity reason lost: %q", got)
+	}
+	if got := safeActivityToken("copy_workspace_probe_failed"); got != "copy_workspace_probe_failed" {
+		t.Fatalf("probe activity reason lost: %q", got)
 	}
 }
 

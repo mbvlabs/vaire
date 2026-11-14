@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -62,6 +63,16 @@ var rpcOnlyJobs = map[string]bool{"restore": true, "db-fork": true, "db-copy": t
 // shared and skip at once when it is busy (Phase 4).
 var quietJobs = map[string]bool{"metrics-refresh": true, "doctor": true}
 
+// Host I/O boundaries for the detachable runner.
+var (
+	jobNodeStat     = os.Stat
+	jobEffectiveUID = os.Geteuid
+	jobReadSpec     = readJobSpec
+	jobLoadCluster  = config.LoadCluster
+	jobUpdateState  = engine.UpdateState
+	jobFenceCheck   = requireNotFenced
+)
+
 // databaseJobs are the template-unit jobs: each runs for one database, named
 // by --db on a timer run (vaire-<job>@<db>) or by the RPC's params.
 var databaseJobs = map[string]bool{
@@ -108,15 +119,18 @@ type jobSpec struct {
 
 // jobEnv is what a job function gets.
 type jobEnv struct {
-	ID              string
-	Job             string
-	Cluster         config.Cluster
-	Params          json.RawMessage
-	Secrets         map[string]string
-	Report          engine.Reporter
-	DB              string
-	OperationID     string
-	ParentRequestID string
+	ID                          string
+	Job                         string
+	Cluster                     config.Cluster
+	Params                      json.RawMessage
+	Secrets                     map[string]string
+	Report                      engine.Reporter
+	DB                          string
+	OperationID                 string
+	ParentRequestID             string
+	lease                       *lockedJobLease
+	installID                   string
+	retainedFollowerReservation bool
 }
 
 func (j *jobEnv) shell() engine.Shell {
@@ -153,7 +167,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		recordJobRefusal(act, job, opts.ID, err, "unknown_job", timerRun(opts))
 		return nil, "", err
 	}
-	if _, err := os.Stat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
+	if _, err := jobNodeStat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
 		err := output.NewError(
 			output.CodePrecondition,
 			"this machine is not an vaire node: "+config.ClusterPath+" does not exist",
@@ -163,7 +177,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		recordJobRefusal(act, job, opts.ID, err, "not_a_node", timerRun(opts))
 		return nil, "", err
 	}
-	if os.Geteuid() != 0 {
+	if jobEffectiveUID() != 0 {
 		err := rootRequired("vaire node run")
 		recordJobRefusal(act, job, opts.ID, err, "root_required", timerRun(opts))
 		return nil, "", err
@@ -249,7 +263,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		if job == "db-copy" {
 			spec, err = readCopyJobSpec(env.ID)
 		} else {
-			spec, err = readJobSpec(env.ID)
+			spec, err = jobReadSpec(env.ID)
 		}
 		if err != nil {
 			reason := jobSpecErrorReason(err)
@@ -275,12 +289,15 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 		env.Params, env.Secrets = spec.Params, spec.Secrets
 		env.OperationID, env.ParentRequestID = spec.OperationID, spec.ParentRequestID
 	}
-	cfg, err := config.LoadCluster(config.ClusterPath)
+	cfg, err := jobLoadCluster(config.ClusterPath)
 	if err != nil {
 		recordJobRefusal(act, job, env.ID, err, "config_error", timerRun(opts))
 		return nil, "", err
 	}
 	env.Cluster = cfg
+	if env.OperationID == "" {
+		env.OperationID = env.ID
+	}
 	if databaseJobs[job] {
 		env.DB = jobDatabase(env)
 		if env.DB == "" {
@@ -318,7 +335,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	if rec.DB == "" {
 		rec.DB = rpcJobDatabase(job, env.Params)
 	}
-	_ = engine.UpdateState(func(st *engine.State) error {
+	stateErr := jobUpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(env.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
 		}
@@ -326,10 +343,27 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 			rec.CreatedAt = rec.StartedAt
 		}
 		st.PutJob(rec)
+		if job == "restore" || job == "recover" || job == "restore-drill" {
+			st.RetainJob(rec.ID)
+		}
 		return nil
 	})
+	if stateErr != nil && (job == "restore" || job == "recover" || job == "restore-drill") {
+		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, stateErr)
+		return nil, "", stateErr
+	}
 
-	release, busy, err := acquireJobLocks(ctx, env, &rec, timerRun(opts))
+	if leaseJob(job) {
+		env.installID, err = currentFollowInstance()
+		if err != nil {
+			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+			if job == "restore" || job == "recover" {
+				failRestore(env, err)
+			}
+			return nil, "", err
+		}
+	}
+	lease, busy, err := acquireJobLocks(ctx, env, &rec, timerRun(opts))
 	if busy != nil {
 		res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy"}
 		for k, v := range busy.fields {
@@ -351,12 +385,67 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	}
 	if err != nil {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+		if job == "restore" || job == "recover" {
+			failRestore(env, err)
+		}
 		return nil, "", err
 	}
-	defer release()
+	defer lease.finish()
+	env.lease = lease
+	{
+		fresh, loadErr := jobLoadCluster(config.ClusterPath)
+		if loadErr != nil {
+			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, loadErr)
+			if job == "restore" || job == "recover" {
+				failRestore(env, loadErr)
+			}
+			return nil, "", loadErr
+		}
+		check := *env
+		check.Cluster = fresh
+		invalid := validateJobLockParams(&check) != nil || !slices.Equal(jobLockRequests(env), jobLockRequests(&check))
+		if leaseJob(job) {
+			instance, instanceErr := currentFollowInstance()
+			invalid = invalid || instanceErr != nil || instance != env.installID
+		}
+		if invalid {
+			err = fmt.Errorf("job lock scope changed while waiting")
+			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+			// Without a verified current install and lock scope, the old
+			// invocation has no authority to change a restore record.
+			return nil, "", err
+		}
+		env.Cluster = fresh
+	}
+
+	if err := validateRestoreInvocation(env); err != nil {
+		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+		return nil, "", err
+	}
+
+	// Lifecycle jobs carry their own exact-target authority. Ordinary jobs
+	// must never dispatch against a retained target, including timer runs.
+	switch job {
+	case "backup-full", "backup-diff", "backup-incr", "backup-verify", "db-dump", "restore-drill", "maint":
+		target := env.DB
+		if target == "" {
+			target = rpcJobDatabase(job, env.Params)
+		}
+		if target != "" {
+			if err := guardPublicMaterialisation(env.Cluster, target); err != nil {
+				finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+				return nil, "", err
+			}
+		}
+	case "maint-daily", "maint-weekly":
+		if err := guardMaterialisationApply(env.Cluster, ""); err != nil {
+			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+			return nil, "", err
+		}
+	}
 
 	if bucketWriteJobs[job] {
-		if err := requireNotFenced(ctx, cfg, env.Report); err != nil {
+		if err := jobFenceCheck(ctx, env.Cluster, env.Report); err != nil {
 			code, reason := activityErrorTokens(err)
 			if reason == "" {
 				reason = "node_fenced"
@@ -418,39 +507,38 @@ type jobLockBusy struct {
 // nodeLockers holds the node's own, and a test passes ones that record the
 // modes asked for and hold them, so the node's /run/lock files aren't needed.
 type jobLockers struct {
-	node    func(ctx context.Context, mode engine.LockMode, method, requestID string, timeout time.Duration) (engine.Release, error)
-	heavyIO func(ctx context.Context, method, requestID string) (engine.Release, error)
-	cluster func(ctx context.Context, cluster string, mode engine.LockMode, method, requestID string, timeout time.Duration) (engine.Release, error)
+	node      func(ctx context.Context, mode engine.LockMode, method, requestID string, timeout time.Duration) (engine.Release, error)
+	heavyIO   func(ctx context.Context, method, requestID string) (engine.Release, error)
+	heavyWait func(ctx context.Context, method, requestID string, timeout time.Duration) (engine.Release, error)
+	cluster   func(ctx context.Context, cluster string, mode engine.LockMode, method, requestID string, timeout time.Duration) (engine.Release, error)
 }
 
-var nodeLockers = jobLockers{node: engine.Acquire, heavyIO: engine.AcquireHeavyIO, cluster: engine.AcquireCluster}
+var nodeLockers = jobLockers{node: engine.Acquire, heavyIO: engine.AcquireHeavyIO, heavyWait: engine.AcquireHeavyIOWait, cluster: engine.AcquireCluster}
 
-// jobLockMode is the mode a job takes the node lock and its clusters' locks in:
-// shared for the common jobs, exclusive for the ones that change the desired
-// state and a cluster's identity (exclusiveJobs). A follower follow or recovery
-// records ownership of the deterministic data and configuration paths and may
-// remove them, and a failed plain follow rolls back its cluster.toml entry, so
-// both take the locks exclusive: no competing follow, drop or apply may race
-// their record, their rebuild or the desired-state rollback.
+// jobLockMode selects the node lock. Individual cluster requests can require
+// stronger or weaker modes, independently of the node lock.
 func jobLockMode(env *jobEnv) engine.LockMode {
-	if exclusiveJobs[env.Job] || env.Job == "db-follow" {
+	if exclusiveJobs[env.Job] || env.Job == "db-follow" || env.Job == "db-fork" {
 		return engine.LockExclusive
 	}
 	return engine.LockShared
 }
 
 // tryJobLocks takes a job's locks once each, in order: the node lock, the
-// heavy-I/O lock for heavy jobs, then its clusters' locks, in the job's mode
-// (shared, or exclusive for exclusiveJobs). On a busy lock it releases what it
-// took and returns which one was busy.
-func tryJobLocks(ctx context.Context, env *jobEnv) (engine.Release, *jobLockBusy, error) {
+// heavy-I/O lock for heavy jobs, then its sorted cluster locks in their
+// individual modes. On a busy lock it releases what it took.
+func tryJobLocks(ctx context.Context, env *jobEnv) (*lockedJobLease, *jobLockBusy, error) {
 	return takeJobLocks(ctx, env, nodeLockers)
 }
 
 // takeJobLocks is tryJobLocks with the lock acquisitions given, so a test runs
 // the real order and modes against its own locks.
-func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Release, *jobLockBusy, error) {
+func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (*lockedJobLease, *jobLockBusy, error) {
+	if err := validateJobLockParams(env); err != nil {
+		return nil, nil, err
+	}
 	var held []engine.Release
+	var heavy engine.Release
 	releaseAll := func() {
 		for i := len(held) - 1; i >= 0; i-- {
 			held[i]()
@@ -465,8 +553,18 @@ func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Re
 		return nil, nil, err
 	}
 	held = append(held, release)
-	if heavyIOJobs[env.Job] || maintHeavy(env) {
-		release, err := locks.heavyIO(ctx, env.Job, env.ID)
+	if heavyIOJobs[env.Job] || maintHeavy(env) || env.Job == "recover" {
+		var release engine.Release
+		var err error
+		if env.Job == "recover" && locks.heavyWait != nil {
+			release, err = locks.heavyWait(ctx, env.Job, env.ID, recoverHeavyIOWait)
+		} else {
+			release, err = locks.heavyIO(ctx, env.Job, env.ID)
+		}
+		if env.Job == "recover" && err != nil {
+			releaseAll()
+			return nil, nil, err
+		}
 		if engine.IsLockHeld(err) {
 			releaseAll()
 			return nil, &jobLockBusy{what: "the heavy-I/O lock", log: "another backup job holds the heavy-I/O lock",
@@ -476,10 +574,13 @@ func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Re
 			releaseAll()
 			return nil, nil, err
 		}
-		held = append(held, release)
+		heavy = sync.OnceFunc(release)
+		held = append(held, heavy)
 	}
-	for _, cluster := range jobClusters(env) {
-		release, err := locks.cluster(ctx, cluster, mode, env.Job, env.ID, 0)
+	requests := jobLockRequests(env)
+	for _, request := range requests {
+		cluster := request.name
+		release, err := locks.cluster(ctx, cluster, request.mode, env.Job, env.ID, 0)
 		if engine.IsLockHeld(err) {
 			releaseAll()
 			return nil, &jobLockBusy{what: "the lock of " + cluster, log: "the lock of " + cluster + " is busy",
@@ -491,7 +592,7 @@ func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Re
 		}
 		held = append(held, release)
 	}
-	return releaseAll, nil, nil
+	return newLockedJobLease(env, requests, heavy, releaseAll), nil, nil
 }
 
 // acquireJobLocks takes a job's locks. Without wait a busy lock is returned
@@ -500,7 +601,7 @@ func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Re
 // lock between tries, so it never keeps an apply waiting for the node lock
 // while it waits for the heavy-I/O lock. SIGTERM (systemctl stop) or SIGINT
 // ends the wait: the busy lock comes back with the context's error.
-func acquireJobLocks(ctx context.Context, env *jobEnv, rec *engine.JobRecord, wait bool) (engine.Release, *jobLockBusy, error) {
+func acquireJobLocks(ctx context.Context, env *jobEnv, rec *engine.JobRecord, wait bool) (*lockedJobLease, *jobLockBusy, error) {
 	release, busy, err := tryJobLocks(ctx, env)
 	if busy == nil || err != nil || !wait {
 		return release, busy, err
@@ -540,7 +641,7 @@ func acquireJobLocks(ctx context.Context, env *jobEnv, rec *engine.JobRecord, wa
 
 // putJob writes rec to state.json, keeping what the RPC recorded.
 func putJob(rec engine.JobRecord) {
-	_ = engine.UpdateState(func(st *engine.State) error {
+	_ = jobUpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(rec.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
 		}
@@ -630,6 +731,7 @@ func runQuietJob(ctx context.Context, job string, cfg config.Cluster, report eng
 // finishJob records a job's outcome.
 func finishJob(rec engine.JobRecord, state, detail string, res any, cause error) {
 	putFinishedJob(finishedJobRecord(rec, state, detail, res, cause))
+	releaseResolvedMaterialisationJob(rec.ID, rec.Job)
 }
 
 // finishJobWithActivity publishes a terminal state and, while the job's
@@ -753,9 +855,12 @@ func activityRefusedJobRecord(existing bool, id, job, db string, cause error) (e
 // putFinishedJob writes a terminal record, keeping the timestamps and unit
 // the starting RPC recorded.
 func putFinishedJob(rec engine.JobRecord) {
-	_ = engine.UpdateState(func(st *engine.State) error {
+	_ = jobUpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(rec.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
+			if rec.DB == "" {
+				rec.DB = old.DB
+			}
 		}
 		st.PutJob(rec)
 		return nil
@@ -888,6 +993,9 @@ func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets 
 	unit := jobUnit(id)
 	if err := engine.UpdateState(func(st *engine.State) error {
 		st.PutJob(engine.JobRecord{ID: id, Job: job, DB: rpcJobDatabase(job, spec.Params), Unit: unit, State: engine.JobQueued, CreatedAt: stamp()})
+		if job == "restore" || job == "recover" || job == "restore-drill" {
+			st.RetainJob(id)
+		}
 		return nil
 	}); err != nil {
 		return "", err
@@ -1322,22 +1430,43 @@ func handleJobList(ctx context.Context, _ *Env) (Result, error) {
 // records the job before systemd-run starts its unit.
 const queuedGrace = time.Minute
 
+var reapJobState = engine.UpdateState
+var reapJobGone = jobGone
+
 // reapJobs records as failed each unfinished job (only id, when given) whose
 // process or unit is gone, such as one stopped with systemctl stop: it would
 // otherwise show as running forever. The check runs under the state lock, and
 // a job records its outcome before its process exits, so a job that is
 // finishing is never reaped.
 func reapJobs(ctx context.Context, id string) error {
-	return engine.UpdateState(func(st *engine.State) error {
-		for i, rec := range st.Jobs {
+	return reapJobState(func(st *engine.State) error {
+		jobs := append([]engine.JobRecord(nil), st.Jobs...)
+		for key, rec := range st.RetainedJobs {
+			found := false
+			for _, j := range jobs {
+				if j.ID == key {
+					found = true
+					break
+				}
+			}
+			if !found {
+				jobs = append(jobs, rec)
+			}
+		}
+		for _, rec := range jobs {
 			if rec.Final() || id != "" && rec.ID != id {
 				continue
+			}
+			if _, pinned := st.RetainedJobs[rec.ID]; pinned {
+				if _, err := materialisationJob(*st, rec.ID); err != nil {
+					continue
+				}
 			}
 			gone := false
 			if rec.Job == "db-copy" {
 				gone = copyWorkspaceInactive(ctx, rec)
 			} else {
-				gone = jobGone(ctx, rec)
+				gone = reapJobGone(ctx, rec)
 			}
 			if !gone {
 				continue
@@ -1345,7 +1474,7 @@ func reapJobs(ctx context.Context, id string) error {
 			rec.State, rec.Detail, rec.FinishedAt = engine.JobFailed, "ended without a result", stamp()
 			rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result", Hint: jobLogHint(rec),
 				Details: map[string]any{"reason": JobOutcomeUnknown}}
-			st.Jobs[i] = rec
+			st.PutJob(rec)
 		}
 		return nil
 	})
@@ -1485,6 +1614,8 @@ func rpcJobDatabase(job string, params json.RawMessage) string {
 	}
 	switch job {
 	case "restore", "recover":
+		return p.Database
+	case "restore-drill":
 		return p.Database
 	case "db-fork", "db-follow", "db-unfollow", "db-copy":
 		return p.Name

@@ -53,6 +53,12 @@ type Rechecker interface {
 	Recheck() bool
 }
 
+// AccessTransition marks an exact database's access-widening step. It must be
+// checked on every plan and apply, independently of the journal.
+type AccessTransition interface {
+	AccessTarget() string
+}
+
 // Skipper is implemented by steps that only apply to some configurations,
 // such as pgbackrest-v1 without [backup]. A non-empty SkipReason skips the
 // step without a journal entry, so it runs as soon as the configuration
@@ -65,6 +71,10 @@ type Skipper interface {
 type CheckResult struct {
 	Complete bool
 	Detail   string
+	// Inconclusive means the check cannot establish whether the host matches.
+	// It is not evidence of completion. A matching completed journal entry
+	// may be left untouched, but an unverified new or changed step must run.
+	Inconclusive bool
 }
 
 // RestartNeed is what a step needs after Apply.

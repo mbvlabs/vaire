@@ -307,9 +307,27 @@ func PGServiceDropin(r config.Resources) []byte {
 	return execute("postgresql-service.conf.tmpl", map[string]any{
 		"MemoryHigh": MemoryHighMiB(r),
 		"MemoryMax":  r.MemoryMaxMiB,
-		"CPUWeight":  r.CPUWeight,
+		"CPUWeight":  PGCPUWeight(r),
 		"CPUQuota":   r.CPUQuota,
 		"IOWeight":   r.IOWeight,
+	})
+}
+
+// PGCPUWeight is the derived systemd value; the stored numeric weight is
+// retained unchanged when idle scheduling is selected.
+func PGCPUWeight(r config.Resources) string {
+	if r.CPUMode == "spare" {
+		return "idle"
+	}
+	return strconv.Itoa(r.CPUWeight)
+}
+
+// PGCPUOnlyDropin overlays only CPU controls, including an explicit quota
+// reset when no ceiling is requested.
+func PGCPUOnlyDropin(r config.Resources) []byte {
+	return execute("postgresql-cpu-only.conf.tmpl", map[string]any{
+		"CPUWeight": PGCPUWeight(r),
+		"CPUQuota":  r.CPUQuota,
 	})
 }
 

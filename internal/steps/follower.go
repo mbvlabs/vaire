@@ -346,6 +346,39 @@ func FollowerFloors(cfg config.Cluster, spec, src config.ClusterSpec, host hosti
 	return out, nil
 }
 
+// OwnFloors returns the effective configured values before follower floor
+// rendering. It uses the same precedence and PostgreSQL parser as rendering.
+func OwnFloors(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) (map[string]int, error) {
+	result := make(map[string]int, len(FloorSettings))
+	tuning := tuningFor(cfg, spec, host)
+	for _, name := range FloorSettings {
+		value, err := effectiveSetting(spec.Name, spec, cfg.Postgres.Settings, tuning, name)
+		if err != nil {
+			return nil, err
+		}
+		result[name] = value
+	}
+	return result, nil
+}
+
+// EffectiveFollowerFloors returns the rendered numeric floors for a follower
+// in one complete topology snapshot.
+func EffectiveFollowerFloors(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) (map[string]int, error) {
+	src, ok := cfg.ClusterByName(spec.Follows)
+	if !ok {
+		return nil, fmt.Errorf("%s: follower source not found", spec.Name)
+	}
+	pairs, err := followerFloorPairs(cfg, spec, src, host)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]int, len(pairs))
+	for _, p := range pairs {
+		result[p.name] = floorOf(p)
+	}
+	return result, nil
+}
+
 // RunningFloors reads the source's currently effective hot-standby floor
 // values from its running PostgreSQL. A setting the server does not report is
 // an error: admission must fail closed rather than assume a value.

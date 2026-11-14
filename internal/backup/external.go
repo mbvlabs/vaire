@@ -65,7 +65,7 @@ const (
 // OpenCopyWorkspace creates it mode 0711 so the postgres account can traverse
 // to a job directory, while each job directory itself is 0700 and owned by
 // postgres.
-const CopyRoot = "/var/lib/vaire/copies"
+const CopyRoot = "/var/lib/vaire-copies"
 
 // CopyWorkspaceMarkerName is the private operation-ownership marker in every
 // C03 copy workspace. It is written before any source access or archive work.
@@ -83,12 +83,13 @@ var ErrCopyWorkspaceBusy = errors.New("copy workspace is still in use")
 
 // Fixed names inside a copy workspace.
 const (
-	copyArchiveName  = "source.dump"
-	copyPassfileName = "source.pgpass"
-	copyCAName       = "source-ca.pem"
-	copyUseListName  = "restore.list"
-	copyInspectName  = "inspect.list"
-	copyHomeName     = "home"
+	copyArchiveName   = "source.dump"
+	copyPassfileName  = "source.pgpass"
+	copyCAName        = "source-ca.pem"
+	copyUseListName   = "restore.list"
+	copyInspectName   = "inspect.list"
+	copyHomeName      = "home"
+	copySystemCALabel = "system-ca-bundle"
 )
 
 const (
@@ -587,6 +588,9 @@ func PreflightSource(ctx context.Context, exec CopyExecutor, stepID string, repo
 		return SourcePreflight{}, err
 	}
 	defer func() { err = joinCleanupError(err, access.remove()) }()
+	if err := probeSourceAccess(ctx, exec, stepID, access, src); err != nil {
+		return SourcePreflight{}, err
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, sourcePreflightLimit)
 	defer cancel()
@@ -762,6 +766,9 @@ func ExportSource(ctx context.Context, exec CopyExecutor, stepID string, report 
 		return SourceArchive{}, err
 	}
 	defer func() { err = joinCleanupError(err, access.remove()) }()
+	if err := probeSourceAccess(ctx, exec, stepID, access, src); err != nil {
+		return SourceArchive{}, err
+	}
 
 	f, err := ws.Create(copyArchiveName)
 	if err != nil {
@@ -1773,7 +1780,7 @@ func workspaceFileOwner(info fs.FileInfo) (uid, gid int, ok bool) {
 // accepted once its owner is trusted; its write bits then only let unrelated
 // users create their own entries. A non-sticky directory must not be
 // other-writable, and group-writable only to the process's own group.
-func verifyCopyAncestors(rootDir string) error {
+func verifyCopyAncestors(rootDir string, owner WorkspaceOwner) error {
 	euid, egid := copyEffectiveUID(), copyEffectiveGID()
 	for parent := filepath.Dir(rootDir); ; {
 		info, err := os.Lstat(parent)
@@ -1801,6 +1808,9 @@ func verifyCopyAncestors(rootDir string) error {
 		case perm&0o020 != 0 && (uid != euid || gid != egid):
 			return copyWorkspaceUnsafe("a copy root ancestor is writable by another group")
 		}
+		if !workspaceModeAllows(perm, uid, gid, owner, 0o100) {
+			return copyWorkspaceAccessDenied("ancestor", "directory")
+		}
 		next := filepath.Dir(parent)
 		if next == parent {
 			return nil
@@ -1823,7 +1833,7 @@ func openCopyRoot(rootDir string, owner WorkspaceOwner, create bool) (root *os.R
 	if name == "." || name == string(filepath.Separator) {
 		return nil, false, copyWorkspaceUnsafe("the copy root is not a named directory")
 	}
-	if err := verifyCopyAncestors(rootDir); err != nil {
+	if err := verifyCopyAncestors(rootDir, owner); err != nil {
 		return nil, false, err
 	}
 	parentInfo, err := os.Lstat(parentDir)
@@ -1883,6 +1893,11 @@ func openCopyRoot(rootDir string, owner WorkspaceOwner, create bool) (root *os.R
 			cleanup()
 			return nil, false, copyWorkspaceError("the copy root permissions could not be set")
 		}
+		opened, err = root.Stat(".")
+		if err != nil {
+			cleanup()
+			return nil, false, copyWorkspaceUnsafe("the copy root could not be inspected after setting permissions")
+		}
 	}
 	if uid, _, ok := copyWorkspaceOwnerOf(opened); !ok || uid != copyEffectiveUID() {
 		cleanup()
@@ -1893,9 +1908,13 @@ func openCopyRoot(rootDir string, owner WorkspaceOwner, create bool) (root *os.R
 		cleanup()
 		return nil, false, copyWorkspaceUnsafe("the copy root is writable by group or others")
 	}
-	if owner != CurrentWorkspaceOwner() && perm&0o011 != 0o011 {
+	if rootDir == CopyRoot && perm != 0o711 {
 		cleanup()
-		return nil, false, copyWorkspaceUnsafe("the copy root is not traversable by the postgres account")
+		return nil, false, copyWorkspaceUnsafe("the copy root does not have mode 0711")
+	}
+	if !workspaceModeAllows(perm, copyEffectiveUID(), copyEffectiveGID(), owner, 0o100) {
+		cleanup()
+		return nil, false, copyWorkspaceAccessDenied("ancestor", "copy-root")
 	}
 	return root, true, nil
 }
@@ -2101,7 +2120,35 @@ func openVerifiedCopyWorkspace(rootDir, jobID string, owner WorkspaceOwner) (roo
 
 func copyWorkspaceUnsafe(message string) error {
 	return copyPreconditionError("copy_workspace_unsafe", message,
-		"Leave the copy workspace untouched; inspect /var/lib/vaire/copies as root before retrying.", nil)
+		"Leave the copy workspace untouched; inspect /var/lib/vaire-copies as root before retrying.", nil)
+}
+
+// workspaceModeAllows models the owner and primary group; the runtime probe
+// additionally checks the actual postgres credentials and filesystem ACLs.
+func workspaceModeAllows(mode fs.FileMode, uid, gid int, owner WorkspaceOwner, bit fs.FileMode) bool {
+	if owner.UID == 0 {
+		return true
+	}
+	if owner.UID == uid {
+		return mode&bit != 0
+	}
+	if owner.GID == gid {
+		return mode&(bit>>3) != 0
+	}
+	return mode&(bit>>6) != 0
+}
+
+func copyWorkspaceAccessDenied(stage, label string) error {
+	if label == copySystemCALabel {
+		return copyPreconditionError("copy_workspace_access_denied",
+			"the PostgreSQL service account cannot read the system CA bundle",
+			"Inspect the system CA bundle permissions before retrying.",
+			map[string]any{"stage": stage, "file": label})
+	}
+	return copyPreconditionError("copy_workspace_access_denied",
+		"the PostgreSQL service account cannot access the copy workspace",
+		"Inspect the copy workspace ownership and permissions before retrying.",
+		map[string]any{"stage": stage, "file": label})
 }
 
 // NewCopyWorkspace creates root/jobID with mode 0700. root is created mode
@@ -2224,7 +2271,7 @@ func removeCreatedCopyJob(parent *os.Root, jobID string, created fs.FileInfo) er
 
 func copyWorkspaceError(message string) error {
 	return copyPreconditionError("copy_workspace_failed", message,
-		"Check /var/lib/vaire/copies and its ownership and permissions, then retry with a new job.", nil)
+		"Check /var/lib/vaire-copies and its ownership and permissions, then retry with a new job.", nil)
 }
 
 func copyMissingToolError(path string) error {
@@ -2412,7 +2459,7 @@ func (ws *CopyWorkspace) RemoveFile(name string) error {
 	if err := ws.root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return copyPreconditionError("workspace_cleanup_failed",
 			"a temporary copy file could not be removed",
-			"Check /var/lib/vaire/copies and retry after the copy job has stopped.", nil)
+			"Check /var/lib/vaire-copies and retry after the copy job has stopped.", nil)
 	}
 	return nil
 }
@@ -2432,7 +2479,7 @@ func (ws *CopyWorkspace) Cleanup() error {
 	if err := ws.root.RemoveAll(copyHomeName); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, copyPreconditionError("workspace_cleanup_failed",
 			"the temporary copy home directory could not be removed",
-			"Check /var/lib/vaire/copies and retry after the copy job has stopped.", nil))
+			"Check /var/lib/vaire-copies and retry after the copy job has stopped.", nil))
 	}
 	return errors.Join(errs...)
 }
@@ -2583,8 +2630,55 @@ func (a *sourceAccess) remove() error {
 	}
 	if len(errs) > 0 {
 		return output.NewError(output.CodeSecrets, "the temporary source access file could not be removed", output.ExitSecrets,
-			"Check /var/lib/vaire/copies before retrying; the copy job must not continue with source secrets on disk.").
+			"Check /var/lib/vaire-copies before retrying; the copy job must not continue with source secrets on disk.").
 			WithDetails(map[string]any{"reason": "secret_cleanup_failed"})
+	}
+	return nil
+}
+
+// The marker is emitted by a shell running as postgres, only after test has
+// actually run. A runuser or lease-wrapper failure cannot impersonate a
+// negative test merely by returning the same exit status.
+const sourceAccessProbeScript = `if /usr/bin/test -r "$1"; then printf readable; else status=$?; if [ "$status" -eq 1 ]; then printf denied; else exit "$status"; fi; fi`
+
+// Probe as the same service identity used by libpq without reading contents.
+func probeSourceAccess(ctx context.Context, exec CopyExecutor, step string, a *sourceAccess, src Source) error {
+	type probe struct{ label, path string }
+	probes := []probe{{copyPassfileName, a.ws.FilePath(copyPassfileName)}}
+	if len(src.caPEM) > 0 {
+		probes = append(probes, probe{copyCAName, a.ws.FilePath(copyCAName)})
+	} else if src.TLSMode == SourceTLSVerifyCA {
+		probes = append(probes, probe{copySystemCALabel, systemCABundlePath})
+	}
+	for _, p := range probes {
+		probeCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
+		var out limitedBuffer
+		out.limit = 32
+		err := exec.Exec(probeCtx, step+"-workspace-probe", engine.Command{
+			Name: "runuser", Args: []string{"-u", "postgres", "--", "/bin/sh", "-c", sourceAccessProbeScript, "vaire-copy-probe", p.path},
+			Stdout: &out,
+		}, copyReporter(nil))
+		cancel()
+		if err != nil {
+			if errors.Is(err, engine.ErrInterrupted) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			var cliErr *output.CLIError
+			if errors.As(err, &cliErr) {
+				return cliErr
+			}
+			return output.NewError(output.CodeExternalCommand, "the copy workspace access probe failed", output.ExitExternal,
+				"Check the node's copy process prerequisites before retrying.").
+				WithDetails(map[string]any{"reason": "copy_workspace_probe_failed"})
+		}
+		if !out.overflow && out.String() == "denied" {
+			return copyWorkspaceAccessDenied("source-access", p.label)
+		}
+		if out.overflow || out.String() != "readable" {
+			return output.NewError(output.CodeExternalCommand, "the copy workspace access probe returned an invalid result", output.ExitExternal,
+				"Check the node's copy process prerequisites before retrying.").
+				WithDetails(map[string]any{"reason": "copy_workspace_probe_failed"})
+		}
 	}
 	return nil
 }
@@ -2625,6 +2719,9 @@ func sourcePreflightError(err error) error {
 	}
 	var scriptErr *engine.ScriptError
 	if errors.As(err, &scriptErr) {
+		if label := localSourceFileLabel(boundedDiagnosticText(scriptErr.Tail)); label != "" {
+			return copyWorkspaceAccessDenied("source-access", label)
+		}
 		reason, message, hint := classifySourceFailure(scriptErr.Tail)
 		return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).
 			WithDetails(map[string]any{"reason": reason, "exit_status": scriptErr.Status})
@@ -2645,6 +2742,9 @@ func sourceExportError(err error) error {
 			"the source export command could not be started", output.ExitExternal,
 			"Check that the PostgreSQL 18 client tools are installed and the copy workspace is writable.").
 			WithDetails(map[string]any{"reason": "source_export_failed"})
+	}
+	if label := localSourceFileLabel(boundedDiagnosticText(scriptErr.Tail)); label != "" {
+		return copyWorkspaceAccessDenied("source-access", label)
 	}
 	if reason, message, hint, ok := classifySourceFailureStrict(scriptErr.Tail); ok {
 		return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).
@@ -2689,7 +2789,14 @@ func boundedDiagnosticText(tail []string) string {
 
 func classifySourceFailureStrict(tail []string) (reason, message, hint string, ok bool) {
 	text := boundedDiagnosticText(tail)
+	if sourceSQLFailure(text) {
+		return "", "", "", false
+	}
 	switch {
+	case localSourceFileLabel(text) != "":
+		return "copy_workspace_access_denied",
+			"the PostgreSQL service account cannot access the copy workspace",
+			"Inspect the copy workspace ownership and permissions before retrying.", true
 	case strings.Contains(text, "password authentication failed"),
 		strings.Contains(text, "no password supplied"),
 		strings.Contains(text, "authentication failed"),
@@ -2722,6 +2829,42 @@ func classifySourceFailureStrict(tail []string) (reason, message, hint string, o
 	default:
 		return "", "", "", false
 	}
+}
+
+var sourcePSQLSQLFailure = regexp.MustCompile(`^(?:psql:[^:\n]*:[0-9]+: )?error:`)
+
+func sourceSQLFailure(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "pg_dump: error: query failed:") || sourcePSQLSQLFailure.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func localSourceFileLabel(text string) string {
+	if sourceSQLFailure(text) {
+		return ""
+	}
+	root := regexp.QuoteMeta(strings.ToLower(CopyRoot))
+	systemCA := regexp.QuoteMeta(strings.ToLower(systemCABundlePath))
+	privatePath := root + `/[a-z0-9][a-z0-9._-]{0,127}/`
+	clientPrefix := `^(?:psql|pg_dump): (?:error|warning): (?:connection to server at [^\n]* failed: )?`
+	ca := regexp.MustCompile(clientPrefix + `could not (?:open|read) root certificate file "(` + privatePath + regexp.QuoteMeta(copyCAName) + `|` + systemCA + `)": permission denied\.?$`)
+	pass := regexp.MustCompile(clientPrefix + `could not (?:open|read) password file "(` + privatePath + regexp.QuoteMeta(copyPassfileName) + `)": permission denied\.?$`)
+	for _, line := range strings.Split(text, "\n") {
+		if match := ca.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
+			if match[1] == strings.ToLower(systemCABundlePath) {
+				return copySystemCALabel
+			}
+			return copyCAName
+		}
+		if pass.MatchString(strings.TrimSpace(line)) {
+			return copyPassfileName
+		}
+	}
+	return ""
 }
 
 func archiveToolError(message string, err error) error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/doctor"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/health"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/promfile"
 	"github.com/mbvlabs/vaire/internal/steps"
@@ -139,9 +141,42 @@ func (diagnosticsClusterPG) Exec(context.Context, string, string, map[string]str
 // plan/apply still excludes the unfinished followers from every step.
 func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	oldRecords, oldRunning, oldPG, oldSnapshotPG, oldProm := backup.RecordsPath, clusterRunning, followerPG, snapshotPG, writeFollowerProm
+	oldCPU := statusCPURead
+	oldPools := statusPoolRead
+	oldHost := statusHostRead
+	oldServices, oldProbe, oldDrift, oldOverrides, oldHBA := doctorServiceRead, doctorProbeRead, doctorDriftRead, doctorOverridesRead, doctorWeakHBARead
+	oldActivity := activityStoreFactory
 	t.Cleanup(func() {
 		backup.RecordsPath, clusterRunning, followerPG, snapshotPG, writeFollowerProm = oldRecords, oldRunning, oldPG, oldSnapshotPG, oldProm
+		statusCPURead = oldCPU
+		statusPoolRead = oldPools
+		statusHostRead = oldHost
+		doctorServiceRead, doctorProbeRead, doctorDriftRead, doctorOverridesRead, doctorWeakHBARead = oldServices, oldProbe, oldDrift, oldOverrides, oldHBA
+		activityStoreFactory = oldActivity
 	})
+	poolReads := 0
+	statusPoolRead = func(context.Context) map[string]health.Pools {
+		poolReads++
+		return map[string]health.Pools{"transaction": {}}
+	}
+	statusHostRead = func(string) (hostinfo.Info, error) {
+		return hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}, nil
+	}
+	statusCPURead = func(context.Context, config.ClusterSpec) (hostinfo.CPUObservation, string, *int64) {
+		return hostinfo.CPUObservation{Reason: "test_unavailable"}, "", nil
+	}
+	doctorServiceRead = func(context.Context, string) bool { return false }
+	doctorProbeRead = func(context.Context, string, ...string) (string, error) {
+		return "", errors.New("test probe unavailable")
+	}
+	doctorDriftRead = func(context.Context, config.Cluster, engine.Runtime, string) string { return "" }
+	doctorOverridesRead = func(string) []string { return nil }
+	var hbaReads []string
+	doctorWeakHBARead = func(_ context.Context, spec config.ClusterSpec) []string {
+		hbaReads = append(hbaReads, spec.Name)
+		return nil
+	}
+	activityStoreFactory = func() (activityStore, error) { return &fakeActivityStore{}, nil }
 	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
 
 	cfg := followerLifecycleCfg(t, "app_stopped", "app_paused")
@@ -192,6 +227,9 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 	data := res.Data.(statusData)
+	if poolReads != 1 || len(data.Poolers) != 1 {
+		t.Fatalf("status did not use the fake pooler snapshot: reads=%d pools=%v", poolReads, data.Poolers)
+	}
 	rows := map[string]statusDatabase{}
 	for _, row := range data.Databases {
 		rows[row.Name] = row
@@ -230,6 +268,9 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	facts := gatherFacts(context.Background(), cfg, engine.Runtime{Host: hostinfo.Info{
 		VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100},
 	}}, false)
+	if !slices.Equal(hbaReads, []string{"app", "app_paused"}) {
+		t.Fatalf("doctor did not use the fake HBA reader for running clusters: %v", hbaReads)
+	}
 	clusters := map[string]doctor.ClusterFacts{}
 	for _, c := range facts.Clusters {
 		clusters[c.Name] = c
@@ -360,7 +401,9 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	if err := j.Save(journal); err != nil {
 		t.Fatal(err)
 	}
-	applied, _, err := engine.Apply(context.Background(), steps.Catalog(), cfg, rt, engine.Options{Only: only, JournalPath: journal})
+	// Keep the real cluster step in the plan, but do not run its host drift
+	// recheck in a fixture without a mocked systemd directory.
+	applied, _, err := engine.Apply(context.Background(), steps.Catalog(), cfg, rt, engine.Options{Only: []string{"postgres-config-v1", "pgbouncer-v1", "timers-v1"}, JournalPath: journal})
 	if err != nil {
 		t.Fatalf("general apply: %v", err)
 	}
@@ -375,7 +418,14 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 // leaving stale healthy samples behind.
 func TestFollowerMetricWriteFailureFailsRefresh(t *testing.T) {
 	old := writeFollowerProm
-	t.Cleanup(func() { writeFollowerProm = old })
+	oldBackup, oldHost, oldWrite := refreshBackupMetrics, refreshHostRead, refreshHostWrite
+	t.Cleanup(func() {
+		writeFollowerProm = old
+		refreshBackupMetrics, refreshHostRead, refreshHostWrite = oldBackup, oldHost, oldWrite
+	})
+	refreshBackupMetrics = func(config.Cluster) {}
+	refreshHostRead = func(string) (hostinfo.Info, error) { return hostinfo.Info{}, nil }
+	refreshHostWrite = func(string, []*promfile.Family) error { return nil }
 	want := errors.New("textfile directory is not writable")
 	writeFollowerProm = func(string, []*promfile.Family) error { return want }
 

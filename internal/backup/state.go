@@ -40,6 +40,9 @@ type Records struct {
 	// drill that was killed leaves its entry, so the next drill of the
 	// database knows the <db>__drill cluster is its own and drops it.
 	Drilling map[string]string `json:"drilling,omitempty"`
+	// DrillAttempts records new materialisations before they touch disk. An
+	// incomplete attempt is never proof that a path can safely be deleted.
+	DrillAttempts map[string]MaterialisationAttempt `json:"drill_attempts,omitempty"`
 	// LastBackup is the last successful backup per database, then per type.
 	LastBackup map[string]map[string]BackupResult `json:"last_backups,omitempty"`
 	// LastVerify is the last verify run of each database's stanza.
@@ -199,6 +202,9 @@ const (
 type Restore struct {
 	ID       string `json:"id"`
 	Database string `json:"database"`
+	// Invocation provenance is established before the detachable job is queued.
+	InstanceID  string `json:"instance_id,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
 	// Target describes the recovery target: latest, a time, a set label or
 	// a dump id.
 	Target    string   `json:"target"`
@@ -229,6 +235,45 @@ type Restore struct {
 	// NoFull skips the full backup promote starts (db recover --all takes
 	// the fulls once every database is back).
 	NoFull bool `json:"no_full,omitempty"`
+	// Attempt records an in-progress or retained physical materialisation.
+	Attempt *MaterialisationAttempt `json:"materialisation_attempt,omitempty"`
+	// MaterialisationPending blocks cleanup even when recording the attempt
+	// failed. It is established before reserving or creating the copy.
+	MaterialisationPending bool `json:"materialisation_pending,omitempty"`
+	// MaterialisationCleaned distinguishes a completed ordinary failure
+	// cleanup from a failure to record a not-yet-started attempt.
+	MaterialisationCleaned bool `json:"materialisation_cleaned,omitempty"`
+}
+
+// MaterialisationAttempt identifies an operation, not ownership of an inode.
+// Artifact birth and replacement proof are supplied by the node-local
+// ownership adapter; this record alone never authorizes deletion.
+type MaterialisationAttempt struct {
+	JobID               string              `json:"job_id"`
+	OperationID         string              `json:"operation_id"`
+	InstanceID          string              `json:"instance_id"`
+	Kind                string              `json:"kind"`
+	Source              string              `json:"source"`
+	Target              string              `json:"target"`
+	Stanza              string              `json:"stanza"`
+	SourcePort          int                 `json:"source_port"`
+	TemporaryPort       int                 `json:"temporary_port"`
+	DataPath            string              `json:"data_path"`
+	ConfigPath          string              `json:"config_path"`
+	Reason              string              `json:"reason,omitempty"`
+	RecordDigest        string              `json:"record_digest,omitempty"`
+	ArtifactStage       string              `json:"artifact_stage,omitempty"`
+	DataIdentity        ArtifactIdentity    `json:"data_identity,omitempty"`
+	ConfigIdentity      ArtifactIdentity    `json:"config_identity,omitempty"`
+	ReservationIdentity ReservationIdentity `json:"reservation_identity,omitempty"`
+}
+
+// ArtifactIdentity is the immutable identity of an exclusively created
+// materialisation directory. It is meaningful only with the owning operation.
+type ArtifactIdentity struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+	UID    uint32 `json:"uid"`
 }
 
 // Leftover is a cluster a promote or undo put aside, stopped: the

@@ -224,9 +224,12 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	var data struct {
 		Restores []struct {
 			backup.Restore
-			Restoring string `json:"restoring_database"`
-			OnPromote string `json:"on_promote"`
-			Tables    []struct {
+			Restoring        string `json:"restoring_database"`
+			OnPromote        string `json:"on_promote"`
+			ApplicationReady *bool  `json:"application_ready,omitempty"`
+			AccessCoverage   string `json:"access_coverage,omitempty"`
+			AccessNotice     string `json:"access_notice,omitempty"`
+			Tables           []struct {
 				Table     string `json:"table"`
 				Live      *int64 `json:"live_rows"`
 				Restoring *int64 `json:"restoring_rows"`
@@ -242,6 +245,9 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 		lines = append(lines, fmt.Sprintf("%s: %s, target %s, started %s", r.Database, r.Phase, r.Target, r.StartedAt))
 		if r.Error != "" {
 			lines = append(lines, "  error: "+r.Error)
+		}
+		if r.AccessNotice != "" {
+			lines = append(lines, "  "+r.AccessNotice)
 		}
 		if len(r.Tables) > 0 {
 			lines = append(lines, fmt.Sprintf("  %-40s %14s %14s", "TABLE (estimated rows)", "LIVE", "RESTORED"))

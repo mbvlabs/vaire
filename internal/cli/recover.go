@@ -273,6 +273,9 @@ func recoverLine(db string, res map[string]any) string {
 	line := db + ": recovered"
 	if res["phase"] == "ready" {
 		line = db + ": ready to inspect as " + fmt.Sprint(res["restoring"]) + "; vaire restore promote " + db + " finishes it"
+		if notice, _ := res["access_notice"].(string); notice != "" {
+			line += "; " + notice
+		}
 	} else {
 		if t, _ := res["recovered_to"].(string); t != "" {
 			line += " to " + t
