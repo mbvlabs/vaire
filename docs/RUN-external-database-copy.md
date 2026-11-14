@@ -10,6 +10,8 @@ Use normal signed distribution after separately authorized publication. No devel
 
 Destination prerequisites include installed PostgreSQL 18 tools, supported extension scripts/control metadata, sufficient archive/data filesystem headroom and the supported node's util-linux/coreutils/shell tools used by workspace leases (`flock`, `stat`, `cat`, `sh`). Missing prerequisites fail closed; do not install arbitrary repositories/packages as a workaround. Source PostgreSQL 9.2–18 is a tool-supported candidate range, not a guarantee for every schema or provider. Sources requiring client private keys are unsupported.
 
+New workspaces use root-owned `/var/lib/vaire-copies` (0711), postgres-owned operation directories (0700), and private source files (0600). Vaire probes required private files and the system CA bundle when used by `verify-ca` as postgres before source access; it does not change `/var/lib/vaire` permissions. Legacy `/var/lib/vaire/copies` workspaces, if present, are retained, not migrated or automatically deleted; cleanup needs separately authorized exact ownership inspection. Real service-account traversal and verified-TLS import remain live qualification requirements.
+
 Record UTC time, candidate identity, context/server, source version and sanitized identity, destination name, exact sanitized command, job ID, expected/actual outcome, evidence reference, transient cleanup and remaining fixtures for every case. Record PASS, FAIL, BLOCKED or NOT RUN, never infer a live pass from unit tests. Stop on any unsafe observation.
 
 ## Implemented invocation forms

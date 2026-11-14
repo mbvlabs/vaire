@@ -38,6 +38,16 @@ func TestRecoverFullParamsDecode(t *testing.T) {
 	}
 }
 
+func TestRecoverInspectionLineShowsApplicationNotReady(t *testing.T) {
+	line := recoverLine("app", map[string]any{
+		"phase": "ready", "restoring": "app__restoring",
+		"access_notice": "The read-only restore is ready for inspection; application access is not ready.",
+	})
+	if !strings.Contains(line, "ready to inspect as app__restoring") || !strings.Contains(line, "application access is not ready") {
+		t.Fatalf("inspection readiness was not explicit: %s", line)
+	}
+}
+
 // db.recover carries what an apply carries: the recovered database's steps
 // run in the job, and a rebuilt master has no service password files.
 func TestRecoverSecrets(t *testing.T) {

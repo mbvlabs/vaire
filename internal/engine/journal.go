@@ -2,12 +2,15 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/secrets"
 )
 
@@ -93,6 +96,33 @@ func ForgetSteps(path string, ids ...string) error {
 		drop[id] = true
 	}
 	return forget(path, func(id string) bool { return drop[id] })
+}
+
+// InvalidateStepCompletion durably invalidates only the exact completed step
+// entry. It preserves every pending restart and other entry, so an interrupted
+// caller leaves a later apply responsible for verifying the step again.
+// The caller must hold the appropriate node/cluster operation lock and must
+// not call this during a dry run.
+func InvalidateStepCompletion(path, id string) error {
+	template, cluster, instance := strings.Cut(id, "@")
+	if !IDPattern.MatchString(template) || (instance && !config.DatabasePattern.MatchString(cluster)) {
+		return fmt.Errorf("invalid step instance ID %q", id)
+	}
+	if path == "" {
+		path = JournalPath
+	}
+	return WithFileLock(path+".lock", func() error {
+		j, err := LoadJournal(path)
+		if err != nil {
+			return err
+		}
+		entry, ok := j.Steps[id]
+		if !ok || entry.Status != StatusCompleted {
+			return nil
+		}
+		delete(j.Steps, id)
+		return j.Save(path)
+	})
 }
 
 // forget removes every entry and pending restart whose ID matches, under the

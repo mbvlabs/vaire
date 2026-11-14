@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -792,6 +793,9 @@ func copyPreviewTarget(env *Env, cfg config.Cluster, p dbCopyParams, extensions 
 		return config.ClusterSpec{}, config.Resources{}, nil, config.ValidationError(err)
 	}
 	host := runtimeFor(env, false).Host
+	if err := guardRecoveryFloorChanges(cfg, preview, host); err != nil {
+		return config.ClusterSpec{}, config.Resources{}, nil, err
+	}
 	if err := addDatabaseCheckStarts(preview, spec, host, 0); err != nil {
 		return config.ClusterSpec{}, config.Resources{}, nil, err
 	}
@@ -803,6 +807,11 @@ func copyPreviewTarget(env *Env, cfg config.Cluster, p dbCopyParams, extensions 
 		return config.ClusterSpec{}, config.Resources{}, nil, err
 	}
 	return spec, res, oversubscriptionWarnings(preview, host), nil
+}
+
+func copyFloorAdmission(env *Env, cfg config.Cluster, p dbCopyParams) error {
+	spec := config.ClusterSpec{Name: p.Name, Size: p.Size, Memory: p.Memory, Profile: p.Profile}
+	return guardRecoveryFloorAddition(cfg, spec, runtimeFor(env, true).Host)
 }
 
 // copyCommand is the db copy command at another size: what the
@@ -829,6 +838,9 @@ func handleDBCopyPreflight(ctx context.Context, env *Env) (res Result, err error
 		return Result{}, err
 	}
 	cfg := env.Cluster
+	if err := copyFloorAdmission(env, cfg, p); err != nil {
+		return Result{}, err
+	}
 	if err := checkCopyTargetAbsent(ctx, cfg, p.Name, false); err != nil {
 		return Result{}, copyJobFailure(ctx, cfg, &copyProgress{phase: copyPhasePreflight, database: p.Name}, err)
 	}
@@ -909,6 +921,9 @@ func handleDBCopy(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	cfg := env.Cluster
+	if err := copyFloorAdmission(env, cfg, p); err != nil {
+		return Result{}, err
+	}
 	if err := checkCopyTargetAbsent(ctx, cfg, p.Name, false); err != nil {
 		return Result{}, err
 	}
@@ -1081,6 +1096,9 @@ func jobCopy(ctx context.Context, env *jobEnv) (res any, err error) {
 		return nil, copyJobFailure(ctx, config.Cluster{}, prog, err)
 	}
 	env.Cluster = cfg
+	if err := copyFloorAdmission(copyCreateEnv(env, cfg), cfg, p); err != nil {
+		return nil, copyJobFailure(ctx, cfg, prog, err)
+	}
 	if err := checkCopyTargetAbsent(ctx, cfg, p.Name, false); err != nil {
 		return nil, copyJobFailure(ctx, cfg, prog, err)
 	}
@@ -1363,7 +1381,7 @@ func copyCleanupWorkspace(ws *backup.CopyWorkspace, lease *copyLease) error {
 	if err := errors.Join(closeErr, pruneErr); err != nil {
 		return copyFinalizeError("copy_cleanup_failed",
 			"the copy workspace cleanup did not complete",
-			"Inspect /var/lib/vaire/copies as root; no database was changed.")
+			"Inspect /var/lib/vaire-copies as root; no database was changed.")
 	}
 	return nil
 }
@@ -1626,12 +1644,22 @@ func copyJobFailure(ctx context.Context, cfg config.Cluster, prog *copyProgress,
 			details[key] = value
 		}
 	}
+	if copyHasSourceCleanupFailure(cause) {
+		details["cleanup_failed"] = true
+		details["workspace_cleanup"] = "failed"
+	}
 	phase, database, importRan := copyPhasePreflight, "", false
 	imported, cleanupFailed := false, false
 	var backup copyBackupState
 	if prog != nil {
 		phase, database, importRan = prog.phase, prog.database, prog.importRan
 		imported, cleanupFailed, backup = prog.imported, prog.cleanupFailed, prog.backup
+	}
+	if details["reason"] == "has_followers" {
+		details["source_database"] = details["database"]
+	}
+	if details["reason"] == "follower_recovery_floor_decrease" {
+		details["follower_database"] = details["database"]
 	}
 	target := copyTargetState{Name: database}
 	if database != "" {
@@ -1715,7 +1743,62 @@ func copySafeDetails(details any) map[string]any {
 		}
 		out[key] = value
 	}
+	// Retain only validated local names and allowlisted numeric floor facts.
+	if values["reason"] == "has_followers" || values["reason"] == "follower_recovery_floor_decrease" {
+		if source, ok := values["source"].(string); ok && config.DatabasePattern.MatchString(source) {
+			out["source"] = source
+		}
+		if names, ok := values["followers"].([]string); ok {
+			safe := make([]string, 0, len(names))
+			for _, name := range names {
+				if config.DatabasePattern.MatchString(name) {
+					safe = append(safe, name)
+				}
+			}
+			out["followers"] = safe
+		}
+		if drops, ok := values["settings"].([]recoveryFloorDecrease); ok {
+			safe := make([]recoveryFloorDecrease, 0, len(drops))
+			for _, drop := range drops {
+				if slices.Contains(steps.FloorSettings, drop.Setting) {
+					safe = append(safe, drop)
+				}
+			}
+			out["settings"] = safe
+		}
+	}
+	if values["reason"] == "copy_workspace_access_denied" {
+		if stage, ok := values["stage"].(string); ok && (stage == "ancestor" || stage == "source-access") {
+			out["stage"] = stage
+		}
+		if file, ok := values["file"].(string); ok && (file == "directory" || file == "copy-root" || file == "source.pgpass" || file == "source-ca.pem" || file == "system-ca-bundle") {
+			out["file"] = file
+		}
+	}
 	return out
+}
+
+func copyHasSourceCleanupFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	// This walk intentionally inspects each direct node of a joined error.
+	if cliErr, ok := err.(*output.CLIError); ok { //nolint:errorlint // errors.As would skip later joined cleanup errors
+		details, _ := cliErr.Details.(map[string]any)
+		return details["reason"] == "secret_cleanup_failed" || details["reason"] == "workspace_cleanup_failed"
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if copyHasSourceCleanupFailure(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return copyHasSourceCleanupFailure(wrapped.Unwrap())
+	}
+	return false
 }
 
 var copyReasonPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)

@@ -8,7 +8,58 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/remote"
 )
+
+func TestDBCreateDryRunNodePreview(t *testing.T) {
+	db := config.ClusterSpec{Name: "app", Size: "small", Memory: "768MiB", Profile: "oltp", StatementTimeout: "30s", Extensions: []string{"pg_stat_statements"}, Protected: true}
+	calls := 0
+	planned, warnings, err := previewDBCreate(db, true, func(method string, params map[string]any, opts remote.CallOptions) (remote.Reply, error) {
+		calls++
+		if method != "db.create" || !opts.DryRun || len(opts.Secrets) != 0 {
+			t.Fatalf("method %q opts %+v", method, opts)
+		}
+		for key, want := range map[string]any{
+			"name": "app", "size": "small", "memory": "768MiB", "profile": "oltp", "statement_timeout": "30s",
+			"protected": true, "allow_overcommit": true,
+		} {
+			if params[key] != want {
+				t.Errorf("%s = %v, want %v", key, params[key], want)
+			}
+		}
+		extensions, ok := params["extensions"].([]string)
+		if !ok || len(extensions) != 1 || extensions[0] != "pg_stat_statements" {
+			t.Errorf("extensions: %v", params["extensions"])
+		}
+		return remote.Reply{
+			Data:     []byte(`{"database":{"name":"app","size":"medium","statement_timeout":"30s"}}`),
+			Warnings: []output.Warning{{Code: "memory_overcommitted"}},
+		}, nil
+	})
+	if err != nil || calls != 1 || planned.Size != "medium" || len(warnings) != 1 || warnings[0].Code != "memory_overcommitted" {
+		t.Fatalf("preview %+v warnings %+v calls %d err %v", planned, warnings, calls, err)
+	}
+}
+
+func TestDBCreateDryRunRefusalAndInvalidReply(t *testing.T) {
+	refusal := output.NewError(output.CodePrecondition, "unsafe topology", output.ExitPrecondition, "").
+		WithDetails(map[string]any{"reason": "follower_recovery_floor_decrease"})
+	_, _, err := previewDBCreate(config.ClusterSpec{Name: "app"}, false, func(_ string, _ map[string]any, opts remote.CallOptions) (remote.Reply, error) {
+		if !opts.DryRun || len(opts.Secrets) != 0 {
+			t.Fatal("preview sent secrets or was not dry run")
+		}
+		return remote.Reply{}, refusal
+	})
+	if !errors.Is(err, refusal) {
+		t.Fatalf("refusal lost: %v", err)
+	}
+	_, _, err = previewDBCreate(config.ClusterSpec{Name: "app"}, false, func(_ string, _ map[string]any, _ remote.CallOptions) (remote.Reply, error) {
+		return remote.Reply{Data: []byte(`{}`)}, nil
+	})
+	if err == nil {
+		t.Fatal("missing planned database reported success")
+	}
+}
 
 // db credentials --rotate refuses a follower before protection, the token
 // and the new secret, for both a dry run and a real rotation: the preflight

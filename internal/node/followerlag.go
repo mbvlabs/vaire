@@ -167,5 +167,13 @@ var writeFollowerProm = promfile.Write
 // followers). Its write error is returned: a stale follower file must fail
 // refresh, not keep publishing healthy samples.
 func writeFollowerMetrics(ctx context.Context, cfg config.Cluster) error {
-	return writeFollowerProm(FollowersProm, followerFamilies(readFollowers(ctx, diagnosticsView(cfg), "")))
+	safe, records, err := incompleteDiagnosticsView(cfg)
+	if err != nil {
+		return err
+	}
+	families := followerFamilies(readFollowers(ctx, diagnosticsView(safe), ""))
+	if err := unchangedMaterialisationReports(cfg, records); err != nil {
+		return err
+	}
+	return writeFollowerProm(FollowersProm, families)
 }

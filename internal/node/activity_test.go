@@ -330,7 +330,7 @@ func TestActivityImportantClassifications(t *testing.T) {
 		{"metrics.rotate", rpc.Request{DryRun: true}, false},
 		// These handlers ignore dry_run and still mutate, so a direct RPC must
 		// not use the flag to skip its checked start.
-		{"db.create", rpc.Request{DryRun: true}, true},
+		{"db.create", rpc.Request{DryRun: true}, false},
 		{"db.drop", rpc.Request{DryRun: true}, true},
 		{"protect.init", rpc.Request{DryRun: true}, true},
 		{"cluster.bootstrap", rpc.Request{DryRun: true}, true},
@@ -778,7 +778,7 @@ func TestFollowerRefusalReasonsReachActivity(t *testing.T) {
 	rec, _ := testRecorder(t, store)
 	req := testRPCRequest()
 	req.Params = json.RawMessage(`{"source":"app","name":"app_follower"}`)
-	reasons := []string{"follower_not_running", "follows_follower", "has_followers", "is_follower", "not_a_follower", "source_awaiting_recovery", "source_not_running"}
+	reasons := []string{"follower_not_running", "follower_recovery_floor_decrease", "follows_follower", "has_followers", "is_follower", "not_a_follower", "source_awaiting_recovery", "source_not_running"}
 	for _, reason := range reasons {
 		err := output.NewError(output.CodePrecondition, "refused", output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": reason, "database": "app_follower"})

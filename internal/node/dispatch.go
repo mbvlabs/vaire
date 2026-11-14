@@ -88,6 +88,24 @@ func fixedLock(mode engine.LockMode) func(rpc.Request) engine.LockMode {
 // production process always checks the real effective uid.
 var serveRunsAsRoot = func() bool { return os.Geteuid() == 0 }
 
+// loadGuardCluster is also used after acquiring locks so the guard and
+// handler do not act on a configuration captured before a concurrent drop.
+var loadGuardCluster = func() (config.Cluster, error) {
+	return config.LoadCluster(config.ClusterPath)
+}
+
+// Called for the initial read and again with the operation locks held.
+func reloadMaterialisationConfig(req rpc.Request) (config.Cluster, error) {
+	cfg, err := loadGuardCluster()
+	if err != nil {
+		return config.Cluster{}, err
+	}
+	if err := refuseMaterialisationRequest(cfg, req); err != nil {
+		return config.Cluster{}, err
+	}
+	return cfg, nil
+}
+
 // Serve runs `vaire node rpc`: read one request from stdin, run it, and stream
 // redacted NDJSON events ending in exactly one result. It returns the exit
 // status, which equals the result envelope's exit code.
@@ -181,19 +199,21 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		recordActivityRefusal(rec, req, req.Method, err, "node_fenced")
 		return out.fail(command, err)
 	}
+	env := &Env{Req: req, Report: out.emit}
+	if m.cluster {
+		cfg, err := reloadMaterialisationConfig(req)
+		if err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "")
+			return out.fail(command, err)
+		}
+		env.Cluster = cfg
+	}
 	if err := refuseAwaiting(req); err != nil {
 		recordActivityRefusal(rec, req, req.Method, err, "awaiting_recovery")
 		return out.fail(command, err)
 	}
-
-	env := &Env{Req: req, Report: out.emit}
 	if m.cluster {
-		cfg, err := config.LoadCluster(config.ClusterPath)
-		if err != nil {
-			recordActivityRefusal(rec, req, req.Method, err, "config_error")
-			return out.fail(command, err)
-		}
-		env.Cluster = cfg
+		cfg := env.Cluster
 		// A follower refuses what needs a stanza or a writable database
 		// (Phase 6). Record it like the other refusals that happen before a
 		// handler runs.
@@ -239,6 +259,28 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 				return out.fail(command, err)
 			}
 			defer release()
+		}
+	}
+
+	if m.cluster && (req.Method == "apply" || materialisationRefused[req.Method]) &&
+		(m.lock != nil || m.clusterLock != nil) {
+		cfg, err := reloadMaterialisationConfig(req)
+		if err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "")
+			return out.fail(command, err)
+		}
+		env.Cluster = cfg
+		if err := refuseAwaiting(req); err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "awaiting_recovery")
+			return out.fail(command, err)
+		}
+		if err := refuseFollower(req, cfg); err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "is_follower")
+			return out.fail(command, err)
+		}
+		if err := checkConfirm(m, cfg, req); err != nil {
+			recordActivityRefusal(rec, req, req.Method, err, "confirm_mismatch")
+			return out.fail(command, err)
 		}
 	}
 

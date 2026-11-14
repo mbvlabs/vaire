@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,14 +39,15 @@ const (
 
 // followOwnership is follow-<database>.json.
 type followOwnership struct {
-	Database   string `json:"database"`
-	Source     string `json:"source"`
-	Instance   string `json:"instance"`
-	Operation  string `json:"operation"`
-	Generation string `json:"generation,omitempty"`
-	Stanza     string `json:"stanza,omitempty"`
-	Since      string `json:"since,omitempty"`
-	Phase      string `json:"phase"`
+	Database   string                  `json:"database"`
+	Source     string                  `json:"source"`
+	Instance   string                  `json:"instance"`
+	Operation  string                  `json:"operation"`
+	Generation string                  `json:"generation,omitempty"`
+	Stanza     string                  `json:"stanza,omitempty"`
+	Since      string                  `json:"since,omitempty"`
+	Phase      string                  `json:"phase"`
+	Attempt    *followRetentionAttempt `json:"attempt,omitempty"`
 }
 
 // followOwner identifies one follow operation: the follower name, its source,
@@ -151,6 +153,13 @@ func writeFollowOwnership(owner followOwner, phase string) error {
 	if err != nil {
 		return err
 	}
+	previous, _, err := readFollowOwnership(owner)
+	if err != nil {
+		return err
+	}
+	if err := refuseIncompleteFollowAttempt(previous); err != nil {
+		return err
+	}
 	if owner.Source == "" {
 		return fmt.Errorf("follow ownership of %s names no source", owner.Name)
 	}
@@ -199,8 +208,8 @@ func readFollowOwnership(owner followOwner) (followOwnership, bool, error) {
 	if err != nil {
 		return followOwnership{}, false, fmt.Errorf("read the interrupted follow of %s: %w", owner.Name, err)
 	}
-	var own followOwnership
-	if err := json.Unmarshal(raw, &own); err != nil {
+	own, err := decodeFollowOwnership(raw)
+	if err != nil {
 		return followOwnership{}, false, fmt.Errorf("the interrupted follow record of %s is corrupt: %w", owner.Name, err)
 	}
 	instance, err := currentFollowInstance()
@@ -228,12 +237,78 @@ func readFollowOwnership(owner followOwner) (followOwnership, bool, error) {
 	return own, true, nil
 }
 
+// decodeFollowOwnership uses the same case folding as encoding/json for the
+// attempt field, while rejecting null and duplicate equivalent keys. A
+// genuinely absent field is the only legacy/no-attempt representation.
+func decodeFollowOwnership(raw []byte) (followOwnership, error) {
+	var own followOwnership
+	if err := json.Unmarshal(raw, &own); err != nil {
+		return own, err
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	start, err := d.Token()
+	if err != nil || start != json.Delim('{') {
+		return followOwnership{}, errors.New("follow ownership is not an object")
+	}
+	present := false
+	for d.More() {
+		token, err := d.Token()
+		if err != nil {
+			return followOwnership{}, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return followOwnership{}, errors.New("invalid follow ownership key")
+		}
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return followOwnership{}, err
+		}
+		if strings.EqualFold(key, "attempt") {
+			if present {
+				return followOwnership{}, errors.New("duplicate follower attempt fields")
+			}
+			present = true
+			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return followOwnership{}, errors.New("null follower attempt")
+			}
+		}
+	}
+	if _, err := d.Token(); err != nil {
+		return followOwnership{}, err
+	}
+	if present {
+		if err := validateFollowRetentionAttempt(own); err != nil {
+			return followOwnership{}, err
+		}
+	} else if own.Attempt != nil {
+		return followOwnership{}, errors.New("ambiguous follower attempt")
+	}
+	return own, nil
+}
+
 // clearFollowOwnership removes the record after the operation no longer owns
 // the paths. A missing record is already clear.
 func clearFollowOwnership(name string) error {
 	path, err := followOwnershipPath(name)
 	if err != nil {
 		return err
+	}
+	// Old completed follows retain their existing cleanup semantics. A new
+	// pending/retained attempt must not be erased by a legacy cleanup path;
+	// exact-target cleanup needs its own separately checked adapter.
+	raw, err := os.ReadFile(path) //nolint:gosec // validated name under node state
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		own, err := decodeFollowOwnership(raw)
+		if err != nil {
+			return fmt.Errorf("the interrupted follow record of %s is corrupt: %w", name, err)
+		}
+		if err := refuseIncompleteFollowAttempt(own); err != nil {
+			return err
+		}
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove the interrupted follow record of %s: %w", name, err)
@@ -258,9 +333,12 @@ func retireFollowOwnershipAfterDrop(name, source, generation string) error {
 	if err != nil {
 		return err
 	}
-	var own followOwnership
-	if err := json.Unmarshal(raw, &own); err != nil {
+	own, err := decodeFollowOwnership(raw)
+	if err != nil {
 		return fmt.Errorf("the interrupted follow record of %s is corrupt: %w", name, err)
+	}
+	if err := refuseIncompleteFollowAttempt(own); err != nil {
+		return err
 	}
 	instance, err := currentFollowInstance()
 	if err != nil {

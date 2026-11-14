@@ -22,6 +22,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/password"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/steps"
@@ -587,6 +588,9 @@ func (r *initRun) savePending() error {
 	if err := contexts.SaveAnswers(r.name, raw, r.boot); err != nil {
 		return err
 	}
+	if r.prog.SetupOperationID == "" {
+		r.prog.SetupOperationID = rpc.NewRequestID()
+	}
 	return contexts.SaveProgress(r.name, r.prog)
 }
 
@@ -684,9 +688,10 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 		"operator":     op,
 		"local":        r.local,
 	}, remote.CallOptions{
-		Secrets: map[string]string{steps.SecretSudoPassword: r.sec.SudoPassword},
-		Confirm: r.name,
-		OnEvent: r.p.event,
+		Secrets:     map[string]string{steps.SecretSudoPassword: r.sec.SudoPassword},
+		Confirm:     r.name,
+		OperationID: r.prog.SetupOperationID,
+		OnEvent:     r.p.event,
 	})
 	if err != nil {
 		return node.BootstrapResult{}, err
