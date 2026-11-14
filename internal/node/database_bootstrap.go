@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 )
 
 // bootstrapDatabase runs cluster.bootstrap phase=database: steps 7-13 (§11).
+var bootstrapLoadNode = config.LoadNode
+
 func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result, error) {
 	cfg, err := config.ParseCluster([]byte(p.ClusterTOML))
 	if err != nil {
@@ -23,7 +26,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	if err := cfg.Validate(); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
-	nodeCfg, err := config.LoadNode(config.NodePath)
+	nodeCfg, err := bootstrapLoadNode(config.NodePath)
 	if err != nil {
 		return Result{}, output.NewError(
 			output.CodePrecondition,
@@ -39,6 +42,40 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 			output.ExitPrecondition,
 			"Use that server's own secrets document.",
 		).WithDetails(map[string]any{"reason": "node_belongs_to_other_server", "server": nodeCfg.Server})
+	}
+	if nodeCfg.NodeName != p.NodeName {
+		return Result{}, output.NewError(output.CodePrecondition, "bootstrap node identity does not match", output.ExitPrecondition, "").
+			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+	}
+	if err := bootstrapDir(false); err != nil {
+		return Result{}, err
+	}
+	owner, err := bootstrapReadOwnership()
+	owned := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Result{}, output.NewError(output.CodePrecondition, "bootstrap ownership is unavailable", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+	}
+	if owned {
+		if err := bootstrapValidateOwnership(owner, cfg, p.NodeName, env.Req.OperationID); err != nil {
+			return Result{}, output.NewError(output.CodePrecondition, "bootstrap ownership does not match this setup", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+				WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+		}
+	} else {
+		visible := cfg
+		if engine.ClusterView != nil {
+			visible = engine.ClusterView(cfg, "")
+		}
+		for _, spec := range visible.Clusters {
+			if !spec.IsFollower() {
+				return Result{}, output.NewError(output.CodePrecondition, "bootstrap has no authority over existing database "+spec.Name, output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+					WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable", "database": spec.Name})
+			}
+		}
+	}
+	if err := bootstrapExistingConfigMatches(cfg, p.NodeName); err != nil {
+		return Result{}, output.NewError(output.CodePrecondition, "bootstrap configuration changed since ownership was established", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
 	}
 	if !hostPhaseComplete() {
 		return Result{}, output.NewError(
@@ -61,12 +98,16 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	}
 	env.Cluster = cfg
 
-	data, warnings, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
-		Only:        steps.DatabaseStepIDs(),
-		Report:      env.Report,
-		Restarter:   steps.Restarter(env.Cluster),
-		FailureHint: initFailureHint(cfg.ClusterName, p.Local),
-	})
+	var ownerPtr *bootstrapOwnership
+	var complete func(string) error
+	if owned {
+		ownerPtr = &owner
+		complete = func(target string) error {
+			return bootstrapCompleteTarget(&owner, cfg, p.NodeName, env.Req.OperationID, target)
+		}
+	}
+	data, warnings, err := bootstrapDatabaseSteps(ctx, cfg, runtimeFor(env, false), env.Report,
+		steps.Catalog(), engine.Apply, steps.Restarter(env.Cluster), initFailureHint(cfg.ClusterName, p.Local), ownerPtr, complete)
 	if err != nil {
 		return Result{}, err
 	}

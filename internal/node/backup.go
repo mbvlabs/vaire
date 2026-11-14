@@ -3,10 +3,10 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -465,15 +465,6 @@ func inWindow(w Window, t time.Time) error {
 	return nil
 }
 
-func containsString(list []string, v string) bool {
-	for _, s := range list {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
-
 func humanSize(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -573,12 +564,25 @@ func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 	return runJobRPC(ctx, env, "restore-drill", p, nil)
 }
 
+var drillReadInfo = func(ctx context.Context, spec config.ClusterSpec, job string, report engine.Reporter) (backup.Info, error) {
+	return driver(spec, job, report).Info(ctx, "")
+}
+
+var drillCheckSpace = func(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) error {
+	live := steps.ClusterPG(spec)
+	_, err := backup.CheckSpace([]backup.SpaceNeed{{Path: cfg.Server.DataDirectory(spec.Name), Need: backup.CopyNeed(databaseSize(ctx, live, spec.Name)),
+		Purpose: "the drill's copy of " + spec.Name}})
+	return err
+}
+
+var drillWriteMetrics = steps.WriteMetrics
+
 // jobDrill materialises the job's database at the latest point, or at
 // params.time, into the temporary cluster <db>__drill (RFC 9.4): restored
 // from its stanza on the timeline restore undo recorded, promoted there, and
 // never archiving. It opens the database, runs pg_amcheck on it, compares
 // its tables with the live cluster's and drops the copy.
-func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
+func jobDrill(ctx context.Context, env *jobEnv) (result any, jobErr error) {
 	var p drillParams
 	if len(env.Params) > 0 {
 		if err := json.Unmarshal(env.Params, &p); err != nil {
@@ -591,6 +595,9 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	spec := env.spec()
 	db := spec.Name
+	if err := checkDrillTargetName(db); err != nil {
+		return nil, err
+	}
 	rs, err := backup.LoadRecords()
 	if err != nil {
 		return nil, err
@@ -611,10 +618,10 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 			s.Drills = append(s.Drills, drill)
 			return nil
 		})
-		steps.WriteMetrics(cfg)
+		drillWriteMetrics(cfg)
 	}
 	d := driver(spec, env.Job, env.Report)
-	info, err := d.Info(ctx, "")
+	info, err := drillReadInfo(ctx, spec, env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}
@@ -626,37 +633,45 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	drill.BackupLabel = latest.Label
 	live := steps.ClusterPG(spec)
-	if _, err := backup.CheckSpace([]backup.SpaceNeed{{Path: cfg.Server.DataDirectory(db), Need: backup.CopyNeed(databaseSize(ctx, live, db)),
-		Purpose: "the drill's copy of " + db}}); err != nil {
+	if err := drillCheckSpace(ctx, cfg, spec); err != nil {
 		drill.Result, drill.Reason = backup.DrillSkipped, "insufficient_space"
 		record()
 		logLine(env.Report, env.Job, err.Error())
 		return drill, fmt.Errorf("%w: %s", errSkipped, err.Error())
 	}
 	name := backup.DrillName(db)
-	if err := dropKilledDrill(env, rs, db); err != nil {
+	if err := dropKilledDrill(ctx, env, rs, db); err != nil {
 		return nil, err
 	}
-	m, err := backup.NewMaterialised(cfg.Server.DataRoot, name, db, spec.Port, env.shell(), env.Job, env.Report)
+	destinationConfig, err := prepareMaterialisationConfig(cfg, spec)
 	if err != nil {
 		return nil, err
 	}
-	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		s.Drilling[db] = name
-		return nil
-	}); err != nil {
-		_ = m.Drop()
+	var m *backup.Materialised
+	err = withLockedJobTarget(env, name, func() error {
+		var err error
+		m, err = callerNewDrillOwned(cfg.Server.DataRoot, name, db, spec.Port, env.shell(), env.Job, env.Report)
+		return err
+	})
+	if err != nil {
 		return nil, err
 	}
+	defer m.ReleaseForkReservationAuthority()
+	m.DestinationConfig = destinationConfig
+	attempt, started, retain, restoreErr := materialiseDrill(ctx, env, m, d, opts, spec.Stanza)
 	defer func() {
-		if err := m.Drop(); err != nil {
-			logLine(env.Report, env.Job, "dropping "+name+" failed, the next drill of "+db+" drops it: "+err.Error())
+		birth, _ := m.Ownership.(*restoreBirth)
+		if birth != nil {
+			defer birth.close()
+		}
+		if !started || retain {
 			return
 		}
-		_ = backup.UpdateRecords(func(s *backup.Records) error {
-			delete(s.Drilling, db)
-			return nil
-		})
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := finishDrill(cleanupCtx, birth, attempt, db, name); err != nil {
+			jobErr = errors.Join(jobErr, err)
+		}
 	}()
 	fail := func(check string, err error) (any, error) {
 		drill.Checks = append(drill.Checks, backup.DrillCheck{Name: check, OK: false, Detail: secrets.Redact(err.Error())})
@@ -665,12 +680,25 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 		return drill, output.WrapError(output.CodeExternalCommand, fmt.Errorf("the restore drill of %s failed at %s: %w", db, check, err), output.ExitExternal,
 			"Read the job log with vaire job follow "+env.ID+".")
 	}
-	if err := m.Restore(ctx, d, opts); err != nil {
+	if restoreErr != nil {
+		if retain && backup.RetainRecoveryFailure(restoreErr) {
+			reason := recoveryFailureReason(restoreErr)
+			drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "restore", OK: false, Detail: "recovery parameter requirements were not met"})
+			drill.Result, drill.Reason = backup.DrillFail, reason
+			record()
+			return drill, restoreErr
+		}
+		if retain {
+			return nil, restoreErr
+		}
+		if !started {
+			return nil, restoreErr
+		}
 		// pg_dropcluster removes the copy's log with it.
 		for _, line := range m.LogTail(20) {
 			logLine(env.Report, env.Job, name+": "+line)
 		}
-		return fail("restore", err)
+		return fail("restore", restoreErr)
 	}
 	drill.RecoveredTo = m.RecoveredTo(ctx)
 	if drill.RecoveredTo == "" {
@@ -709,22 +737,51 @@ func jobDrill(ctx context.Context, env *jobEnv) (any, error) {
 	return drill, nil
 }
 
+func finishDrill(ctx context.Context, birth *restoreBirth, attempt *backup.MaterialisationAttempt, db, name string) error {
+	if attempt == nil || birth == nil || attempt.Reason != "" {
+		return incompleteMaterialisation(name)
+	}
+	if err := verifyDrillAttempt(db, name, *attempt); err != nil {
+		return err
+	}
+	if err := birth.discard(ctx); err != nil {
+		return err
+	}
+	return birth.retireDrill(ctx)
+}
+
+// A generated drill name must remain addressable by the existing exact-target
+// drop flow. Do not create an overlength target until that flow is approved.
+func checkDrillTargetName(db string) error {
+	name := backup.DrillName(db)
+	if !config.DatabasePattern.MatchString(name) {
+		return output.NewError(output.CodePrecondition, "the generated drill target name is too long or invalid", output.ExitPrecondition,
+			"Use a database name of at most 56 characters for a restore drill.").
+			WithDetails(map[string]any{"reason": "drill_target_name_invalid", "database": db, "target": name})
+	}
+	return nil
+}
+
 // dropKilledDrill drops the <db>__drill cluster a killed drill left behind:
 // records.json still names it as db's running drill, and the heavy-I/O lock
 // this job holds means no other drill runs. A <db>__drill the records don't
 // name is not the drill's, and NewMaterialised refuses it.
-func dropKilledDrill(env *jobEnv, rs backup.Records, db string) error {
-	name, ok := rs.Drilling[db]
-	if !ok {
+func dropKilledDrill(ctx context.Context, env *jobEnv, rs backup.Records, db string) error {
+	name := backup.DrillName(db)
+	attempt, exists := rs.DrillAttempts[db]
+	if !exists && rs.Drilling[db] == "" {
 		return nil
 	}
-	logLine(env.Report, env.Job, "dropping "+name+", left by a drill that did not finish")
-	if err := backup.DropTemporaryCluster(env.shell(), env.Job, env.Report, name, filepath.Join(env.Cluster.Server.DataRoot, name)); err != nil {
-		return err
+	if !exists || rs.Drilling[db] != name || attempt.Source != db || attempt.Target != name || attempt.Reason != "" {
+		return incompleteMaterialisation(name)
 	}
-	return backup.UpdateRecords(func(s *backup.Records) error {
-		delete(s.Drilling, db)
-		return nil
+	return withLockedJobTarget(env, name, func() error {
+		cleanup, err := openDrillCleanup(ctx, env.Cluster, attempt)
+		if err != nil {
+			return err
+		}
+		defer cleanup.close()
+		return cleanup.remove(ctx, &Env{Cluster: env.Cluster, Report: env.Report})
 	})
 }
 

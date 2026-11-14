@@ -18,6 +18,7 @@ import (
 
 func init() {
 	engine.ClusterView = engineView
+	engine.GuardView = materialisationGuardView
 }
 
 // stepsView is cluster.toml without the databases that have no cluster yet,
@@ -118,7 +119,18 @@ func refuseAwaiting(req rpc.Request) error {
 	if err != nil || len(recs.AwaitingRecovery) == 0 {
 		return nil
 	}
+	if req.Method == "restore.promote" {
+		name, _ := params["database"].(string)
+		if awaitingRecoverPromotable(name, recs) {
+			return nil
+		}
+	}
 	return refuseAwaitingIn(params, recs, action)
+}
+
+func awaitingRecoverPromotable(name string, recs backup.Records) bool {
+	r, ok := recs.OpenRestore(name)
+	return ok && r.Recover && r.ID != "" && r.Database == name && r.Phase == backup.PhaseReady
 }
 
 func refuseAwaitingIn(params map[string]any, recs backup.Records, action string) error {

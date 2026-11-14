@@ -42,7 +42,7 @@ func methods() map[string]method {
 				return paramDB(req.Params), engine.LockExclusive
 			},
 			cluster:    true,
-			confirmAny: restartTokens,
+			confirmAny: applyTokens,
 			runLog:     func(req rpc.Request) bool { return !req.DryRun },
 			handler:    handleApply,
 		},
@@ -136,10 +136,21 @@ func methods() map[string]method {
 			handler: handleDBList,
 		},
 		{
-			name:    "db.create",
-			lock:    fixedLock(engine.LockExclusive),
+			name:    "db.access.show",
+			lock:    fixedLock(engine.LockShared),
 			cluster: true,
-			runLog:  always,
+			handler: handleDBAccessShow,
+		},
+		{
+			name: "db.create",
+			lock: func(req rpc.Request) engine.LockMode {
+				if req.DryRun {
+					return engine.LockShared
+				}
+				return engine.LockExclusive
+			},
+			cluster: true,
+			runLog:  func(req rpc.Request) bool { return !req.DryRun },
 			handler: handleDBCreate,
 		},
 		{
@@ -330,12 +341,39 @@ func restartTokens(cfg config.Cluster, _ json.RawMessage) []string {
 	return out
 }
 
+func applyTokens(cfg config.Cluster, params json.RawMessage) []string {
+	out := restartTokens(cfg, params)
+	for _, c := range cfg.Clusters {
+		if !c.IsFollower() {
+			out = append(out, c.Name+"/access")
+		}
+	}
+	return out
+}
+
+func accessConfirmation(cfg config.Cluster, req rpc.Request) map[string]bool {
+	confirmed := make(map[string]bool)
+	for _, token := range req.ConfirmTokens() {
+		name, ok := strings.CutSuffix(token, "/access")
+		if !ok {
+			continue
+		}
+		if spec, exists := cfg.ClusterByName(name); exists && !spec.IsFollower() {
+			confirmed[name] = true
+		}
+	}
+	return confirmed
+}
+
 // restartConfirmation turns the request's checked restart tokens into what
 // they allow.
 func restartConfirmation(cfg config.Cluster, req rpc.Request) engine.Confirmation {
 	var c engine.Confirmation
 	for _, token := range req.ConfirmTokens() {
-		name, _ := strings.CutSuffix(token, "/restart")
+		name, ok := strings.CutSuffix(token, "/restart")
+		if !ok {
+			continue
+		}
 		if token == cfg.Name()+"/restart" {
 			c.Server = true
 			continue
@@ -421,6 +459,9 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if err := guardMaterialisationApply(env.Cluster, p.DB); err != nil {
+		return Result{}, err
+	}
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
@@ -435,6 +476,9 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 func handleApply(ctx context.Context, env *Env) (Result, error) {
 	var p stepParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
+		return Result{}, err
+	}
+	if err := guardMaterialisationApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
@@ -453,10 +497,11 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
 		Only: p.Steps,
 		DB:   p.DB,
-		// The tokens were already checked against restartTokens.
-		Confirm:   restartConfirmation(env.Cluster, env.Req),
-		Restarter: steps.Restarter(env.Cluster),
-		Report:    env.Report,
+		// The tokens were already checked against applyTokens.
+		Confirm:       restartConfirmation(env.Cluster, env.Req),
+		AccessConfirm: accessConfirmation(env.Cluster, env.Req),
+		Restarter:     steps.Restarter(env.Cluster),
+		Report:        env.Report,
 	})
 	if err != nil {
 		return Result{}, err

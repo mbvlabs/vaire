@@ -456,10 +456,16 @@ func resizeFixture(t *testing.T, cfg config.Cluster, size string, dryRun bool) (
 	t.Helper()
 	dir := t.TempDir()
 	store := state.FileStore{Path: filepath.Join(dir, "cluster.toml")}
-	oldState, oldRecords := followerState, backup.RecordsPath
+	oldState, oldRecords, oldJournal, oldDetect := followerState, backup.RecordsPath, cpuJournalPath, detectHost
 	followerState = func() state.Store { return store }
 	backup.RecordsPath = filepath.Join(dir, "records.json")
-	t.Cleanup(func() { followerState, backup.RecordsPath = oldState, oldRecords })
+	cpuJournalPath = func() string { return filepath.Join(dir, "journal.json") }
+	detectHost = func(string) (hostinfo.Info, error) {
+		return hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}, nil
+	}
+	t.Cleanup(func() {
+		followerState, backup.RecordsPath, cpuJournalPath, detectHost = oldState, oldRecords, oldJournal, oldDetect
+	})
 	raw, err := cfg.Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -486,8 +492,8 @@ func TestDBListStoppedFollowerDoesNotReadReplication(t *testing.T) {
 		backup.RecordsPath = oldRecords
 		databaseListClusterNames, databaseListPG, followerPG = oldNames, oldPG, oldFollowerPG
 	})
-	databaseListClusterNames = func(context.Context) map[string]string {
-		return map[string]string{"app": "online", "app_follower": "down"}
+	databaseListClusterNames = func(context.Context) (map[string]string, error) {
+		return map[string]string{"app": "online", "app_follower": "down"}, nil
 	}
 	databaseListPG = func(config.ClusterSpec) sqlRunner { return &followerQueryPG{} }
 	followerReads := 0
@@ -583,17 +589,17 @@ func TestResizeRefusesADecreasedFollowerFloor(t *testing.T) {
 		if !slices.Contains(followers, "app_follower") {
 			t.Errorf("details followers %v", followers)
 		}
-		settings, _ := details["settings"].([]steps.FollowerFloorDrop)
+		settings, _ := details["settings"].([]recoveryFloorDecrease)
 		found := false
 		for _, s := range settings {
-			if s.Follower == "app_follower" && s.Setting == "max_connections" && s.From == 100 && s.To == 30 {
+			if s.Setting == "max_connections" && s.Before == 100 && s.After == 30 {
 				found = true
 			}
 		}
 		if !found {
 			t.Errorf("details settings %v lack app_follower max_connections 100 -> 30", settings)
 		}
-		if !strings.Contains(cliErr.Message, "hot-standby floors would fall") || !strings.Contains(cliErr.Hint, "vaire db follow app again") {
+		if !strings.Contains(cliErr.Message, "recovery floors would decrease") || !strings.Contains(cliErr.Hint, "Unfollow or drop") {
 			t.Errorf("message %q, hint %q", cliErr.Message, cliErr.Hint)
 		}
 		if applies != 0 {
@@ -609,28 +615,186 @@ func TestResizeRefusesADecreasedFollowerFloor(t *testing.T) {
 	}
 }
 
-// Growth and a database without followers pass the floor-drop refusal; a mixed
-// change still falls on the setting that would drop (Q1a).
-func TestRefuseFollowerFloorDrop(t *testing.T) {
-	cfg := followerCfg()
+func TestRecoveryFloorSnapshotGuard(t *testing.T) {
 	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192}
-	large := cfg.Clusters[0] // app at large
-	small := large
-	small.Size = "small"
-	if err := refuseFollowerFloorDrop(cfg, "app", small, large, host); err != nil {
-		t.Fatalf("growth: %v", err)
+	for _, setting := range steps.FloorSettings {
+		t.Run(setting, func(t *testing.T) {
+			old := followerCfg()
+			old.Clusters[0].Settings = map[string]string{setting: "100"}
+			old.Clusters[1].Settings = map[string]string{setting: "200"}
+			next := old
+			next.Clusters = append([]config.ClusterSpec(nil), old.Clusters...)
+			next.Clusters[0].Settings = map[string]string{setting: "50"}
+			err := guardRecoveryFloorChanges(old, next, host)
+			if err == nil || reason(t, err) != "has_followers" {
+				t.Fatalf("masked source decrease: %v", err)
+			}
+			next.Clusters[0] = old.Clusters[0]
+			next.Clusters[1].Settings = map[string]string{setting: "150"}
+			err = guardRecoveryFloorChanges(old, next, host)
+			if err == nil || reason(t, err) != "follower_recovery_floor_decrease" {
+				t.Fatalf("follower decrease: %v", err)
+			}
+			next.Clusters[1].Settings = map[string]string{setting: "0x100"}
+			if err := guardRecoveryFloorChanges(old, next, host); err != nil {
+				t.Fatalf("hex growth: %v", err)
+			}
+			next.Clusters[1].Settings = map[string]string{setting: "not-a-number"}
+			if err := guardRecoveryFloorChanges(old, next, host); err == nil {
+				t.Fatal("invalid floor accepted")
+			}
+		})
 	}
-	if err := refuseFollowerFloorDrop(cfg, "app_follower", large, small, host); err != nil {
-		t.Fatalf("a database without followers: %v", err)
+}
+
+func TestConfigSetRefusesRecoveryFloorDecrease(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		for _, dry := range []bool{false, true} {
+			cfg := followerLifecycleCfg(t, "app_follower")
+			cfg.Clusters[0].Size, cfg.Clusters[1].Size = "medium", "medium"
+			env, store := resizeFixture(t, cfg, "small", dry)
+			oldFactory := configSetStore
+			configSetStore = func() state.FileStore { return store }
+			t.Cleanup(func() { configSetStore = oldFactory })
+			revision, err := store.Revision()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, before, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			params := map[string]any{"base_revision": revision}
+			if full {
+				cfg.Clusters[0].Size = "small"
+				raw, err := cfg.Encode()
+				if err != nil {
+					t.Fatal(err)
+				}
+				params["toml"] = string(raw)
+			} else {
+				params["set"] = map[string]string{"clusters.app.size": "small"}
+			}
+			env.Req = request("config.set", params)
+			env.Req.DryRun = dry
+			_, err = handleConfigSet(context.Background(), env)
+			if err == nil || reason(t, err) != "has_followers" {
+				t.Fatalf("full=%v dry=%v: %v", full, dry, err)
+			}
+			_, after, err := store.Load()
+			if err != nil || string(before) != string(after) {
+				t.Fatalf("full=%v dry=%v: saved on refusal: %v", full, dry, err)
+			}
+		}
 	}
-	if err := refuseFollowerFloorDrop(cfg, "app", large, small, host); err == nil || reason(t, err) != "has_followers" {
-		t.Fatalf("shrink: %v, want has_followers", err)
+}
+
+func TestConfigSetRefusesFollowerDecrease(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		cfg.Clusters[0].Size, cfg.Clusters[1].Size = "small", "medium"
+		env, store := resizeFixture(t, cfg, "small", false)
+		oldFactory := configSetStore
+		configSetStore = func() state.FileStore { return store }
+		t.Cleanup(func() { configSetStore = oldFactory })
+		revision, err := store.Revision()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, before, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		params := map[string]any{"base_revision": revision}
+		if full {
+			cfg.Clusters[1].Size = "small"
+			raw, err := cfg.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			params["toml"] = string(raw)
+		} else {
+			params["set"] = map[string]string{"clusters.app_follower.size": "small"}
+		}
+		env.Req = request("config.set", params)
+		_, err = handleConfigSet(context.Background(), env)
+		if err == nil || reason(t, err) != "follower_recovery_floor_decrease" {
+			t.Fatalf("full=%v: %v", full, err)
+		}
+		_, after, err := store.Load()
+		if err != nil || string(before) != string(after) {
+			t.Fatalf("full=%v: saved on refusal: %v", full, err)
+		}
 	}
-	was, now := large, large
-	was.Settings = map[string]string{"max_connections": "200"}
-	now.Settings = map[string]string{"max_connections": "100", "max_locks_per_transaction": "512"}
-	if err := refuseFollowerFloorDrop(cfg, "app", was, now, host); err == nil || reason(t, err) != "has_followers" {
-		t.Fatalf("mixed change: %v, want has_followers", err)
+}
+
+func TestResizeFollowerFloorRefusedBeforeApply(t *testing.T) {
+	for _, dry := range []bool{false, true} {
+		cfg := followerLifecycleCfg(t, "app_follower")
+		cfg.Clusters[0].Size, cfg.Clusters[1].Size = "small", "medium"
+		env, store := resizeFixture(t, cfg, "small", dry)
+		env.Req = request("db.resize", map[string]any{"name": "app_follower", "size": "small"})
+		env.Req.DryRun = dry
+		_, before, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		oldResize, oldFollower := applyResizeStep, applyFollowerStep
+		applyResizeStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
+			calls++
+			return engine.ApplyData{}, nil, nil
+		}
+		applyFollowerStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
+			calls++
+			return engine.ApplyData{}, nil, nil
+		}
+		_, err = handleDBResize(context.Background(), env)
+		applyResizeStep, applyFollowerStep = oldResize, oldFollower
+		if err == nil || reason(t, err) != "follower_recovery_floor_decrease" {
+			t.Fatalf("dry=%v: %v", dry, err)
+		}
+		_, after, err := store.Load()
+		if err != nil || string(before) != string(after) || calls != 0 {
+			t.Fatalf("dry=%v: saved or applied on refusal, calls=%d err=%v", dry, calls, err)
+		}
+	}
+}
+
+func TestRecoveryFloorTopologyChanges(t *testing.T) {
+	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192}
+	old := followerCfg()
+	old.Postgres.Settings = map[string]string{"max_connections": "200"}
+	old.Clusters[0].Settings = nil
+	old.Clusters[1].Settings = map[string]string{"max_connections": "300"}
+	next := old
+	next.Clusters = append([]config.ClusterSpec(nil), old.Clusters...)
+	next.Postgres.Settings = map[string]string{"max_connections": "100"}
+	next.Clusters[0].Settings = map[string]string{"max_connections": "200"}
+	next.Clusters[1].Settings = map[string]string{"max_connections": "250"}
+	if err := guardRecoveryFloorChanges(old, next, host); err == nil || reason(t, err) != "follower_recovery_floor_decrease" {
+		t.Fatalf("simultaneous global/source/follower edit: %v", err)
+	}
+	next.Clusters[1].Settings = map[string]string{"max_connections": "300"}
+	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
+		t.Fatalf("unchanged effective values: %v", err)
+	}
+	next.Clusters[1].CPUQuota = "50%"
+	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
+		t.Fatalf("CPU-only edit: %v", err)
+	}
+	next = old
+	next.Clusters = append([]config.ClusterSpec(nil), old.Clusters...)
+	next.Clusters[1].Follows = ""
+	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
+		t.Fatalf("unfollow: %v", err)
+	}
+	next.Clusters = next.Clusters[:1]
+	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if err := guardRecoveryFloorChanges(next, old, host); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 }
 

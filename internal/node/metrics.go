@@ -162,9 +162,15 @@ func pendingFor(pending map[string]bool, db string) bool { return pending[db] ||
 
 // refreshMetrics rewrites vaire.prom and vaire-host.prom. It is the
 // metrics-refresh job (every minute) and runs after the backup jobs too.
+var (
+	refreshBackupMetrics = steps.WriteMetrics
+	refreshHostRead      = hostinfo.Detect
+	refreshHostWrite     = promfile.Write
+)
+
 func refreshMetrics(ctx context.Context, cfg config.Cluster) error {
-	steps.WriteMetrics(cfg)
+	refreshBackupMetrics(cfg)
 	followerErr := writeFollowerMetrics(ctx, cfg)
-	host, _ := hostinfo.Detect(cfg.Server.DataRoot)
-	return errors.Join(followerErr, promfile.Write(promfile.Host, hostFamilies(readHost(cfg, host))))
+	host, _ := refreshHostRead(cfg.Server.DataRoot)
+	return errors.Join(followerErr, refreshHostWrite(promfile.Host, hostFamilies(readHost(cfg, host))))
 }

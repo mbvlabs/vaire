@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -130,6 +131,10 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	osInfo, err := bootstrapPreflight(cfg)
 	if err != nil {
 		return Result{}, err
+	}
+	if err := prepareBootstrapOwnership(cfg, spec.Name, env.Req.OperationID); err != nil && !errors.Is(err, errUnownedBootstrap) {
+		return Result{}, output.NewError(output.CodePrecondition, "bootstrap ownership cannot be established: "+err.Error(), output.ExitPrecondition, "Use the original unfinished setup or create a fresh node.").
+			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
 	}
 	if err := writeBootstrapFiles(cfg, spec, p.Operator); err != nil {
 		return Result{}, err

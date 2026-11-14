@@ -17,12 +17,13 @@ import (
 
 // Plan and skip reasons (§5.3).
 const (
-	ReasonNew             = "new"
-	ReasonInputsChanged   = "inputs_changed"
-	ReasonCheckIncomplete = "check_incomplete"
-	ReasonPreviousFailure = "previous_failure"
-	ReasonJournal         = "journal"
-	ReasonCheck           = "check"
+	ReasonNew               = "new"
+	ReasonInputsChanged     = "inputs_changed"
+	ReasonCheckIncomplete   = "check_incomplete"
+	ReasonPreviousFailure   = "previous_failure"
+	ReasonJournal           = "journal"
+	ReasonCheck             = "check"
+	ReasonCheckInconclusive = "check_inconclusive"
 )
 
 // Options steer one Plan or Apply.
@@ -37,8 +38,16 @@ type Options struct {
 	JournalPath string
 	// Confirm is what the request's restart tokens allow.
 	Confirm Confirmation
+	// AccessConfirm contains exact database names authorized by access tokens.
+	// InternalAccess is populated only by trusted lifecycle callers that own
+	// and provision that exact new target. Neither authorizes restarts.
+	AccessConfirm  map[string]bool
+	InternalAccess map[string]bool
 	// Restarter restarts one cluster for its pending restarts.
 	Restarter Restarter
+	// LeaveRestartsPending reports pending restarts without checking,
+	// settling, or performing them, regardless of confirmations.
+	LeaveRestartsPending bool
 	// Report receives step and log events.
 	Report Reporter
 	// FailureHint replaces the step_failed hint, for callers that resume
@@ -124,6 +133,8 @@ type PlanData struct {
 	RestartPending []string   `json:"restart_pending,omitempty"`
 	// ConfirmTokens are the tokens that perform the pending restarts.
 	ConfirmTokens []string `json:"confirm_tokens,omitempty"`
+	// AccessConfirmTokens are the exact tokens for selected access transitions.
+	AccessConfirmTokens []string `json:"access_confirm_tokens,omitempty"`
 }
 
 // ApplyStep is one step's outcome in an apply.
@@ -133,6 +144,7 @@ type ApplyStep struct {
 	Index   int    `json:"index"`
 	State   string `json:"state"`
 	Reason  string `json:"reason,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 	Restart string `json:"restart,omitempty"`
 }
 
@@ -176,16 +188,37 @@ type decision struct {
 // start its timers. What's saved is never narrowed.
 var ClusterView func(cfg config.Cluster, keep string) config.Cluster
 
-func view(cfg config.Cluster, keep string) config.Cluster {
-	if ClusterView == nil {
-		return cfg
+// GuardView is an optional fail-closed view applied before step expansion.
+// It receives the selection so a private lifecycle operation can retain its
+// target only for an exact per-database run, never for shared rendering.
+var GuardView func(context.Context, config.Cluster, Options) (config.Cluster, error)
+
+func view(ctx context.Context, cfg config.Cluster, opts Options) (config.Cluster, error) {
+	if ClusterView != nil {
+		cfg = ClusterView(cfg, opts.Recovering)
 	}
-	return ClusterView(cfg, keep)
+	if GuardView != nil {
+		return GuardView(ctx, cfg, opts)
+	}
+	return cfg, nil
 }
 
 // Plan runs the runner's decision for every selected step and writes nothing.
 func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opts Options) (PlanData, error) {
-	cfg = view(cfg, opts.Recovering)
+	return planWithInvalidatedCompletions(ctx, steps, cfg, rt, opts, nil)
+}
+
+// PlanAfterInvalidatingCompletions previews invalidation of completed entries
+// without changing the journal or its pending restarts.
+func PlanAfterInvalidatingCompletions(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opts Options, ids []string) (PlanData, error) {
+	return planWithInvalidatedCompletions(ctx, steps, cfg, rt, opts, ids)
+}
+
+func planWithInvalidatedCompletions(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opts Options, ids []string) (PlanData, error) {
+	cfg, err := view(ctx, cfg, opts)
+	if err != nil {
+		return PlanData{}, err
+	}
 	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return PlanData{}, err
@@ -193,6 +226,11 @@ func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opt
 	j, err := LoadJournal(opts.journalPath())
 	if err != nil {
 		return PlanData{}, err
+	}
+	for _, id := range ids {
+		if entry, ok := j.Steps[id]; ok && entry.Status == StatusCompleted {
+			delete(j.Steps, id)
+		}
 	}
 	data := PlanData{Steps: make([]PlanStep, 0, len(selected)), Total: len(selected)}
 	for i, step := range selected {
@@ -204,6 +242,9 @@ func Plan(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, opt
 		if d.apply {
 			action = "apply"
 			data.WouldApply++
+			if access, ok := step.(AccessTransition); ok {
+				data.AccessConfirmTokens = append(data.AccessConfirmTokens, access.AccessTarget()+"/access")
+			}
 		}
 		_, cluster := SplitID(step.ID())
 		ps := PlanStep{ID: step.ID(), Cluster: cluster, Index: i + 1, Action: action, Reason: d.reason, Detail: d.detail}
@@ -228,7 +269,10 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	if rt.DryRun {
 		return ApplyData{}, nil, errors.New("engine.Apply called with DryRun; use Plan")
 	}
-	cfg = view(cfg, opts.Recovering)
+	cfg, err := view(ctx, cfg, opts)
+	if err != nil {
+		return ApplyData{}, nil, err
+	}
 	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return ApplyData{}, nil, err
@@ -248,11 +292,43 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		offset, shown = n.span(total)
 	}
 	var warnings []output.Warning
+	// Inspect all selected transitions before any of them writes. A missing
+	// token or unknown inspection blocks every access write, but not unrelated
+	// selected steps (including protection changes).
+	var accessErr error
+	var missing []string
+	for i, step := range selected {
+		access, ok := step.(AccessTransition)
+		if !ok {
+			continue
+		}
+		d, checkErr := decide(ctx, step, cfg, rt, j)
+		if checkErr != nil {
+			if accessErr == nil {
+				accessErr = stepFailed(step.ID(), i+1, checkErr)
+			}
+			continue
+		}
+		target := access.AccessTarget()
+		if d.apply && !opts.AccessConfirm[target] && !opts.InternalAccess[target] {
+			missing = append(missing, target+"/access")
+		}
+	}
+	if accessErr == nil && len(missing) > 0 {
+		accessErr = output.NewError(output.CodeUnsafeAction, "access changes require confirmation", output.ExitUnsafe,
+			"Re-run apply with the exact access confirmation tokens.").
+			WithDetails(map[string]any{"confirm_tokens": missing})
+	}
 	for i, step := range selected {
 		id := step.ID()
 		_, cluster := SplitID(id)
 		index := i + 1
 		at := offset + index
+		if _, ok := step.(AccessTransition); ok && accessErr != nil {
+			data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: "access_preflight"})
+			data.Skipped++
+			continue
+		}
 		d, err := decide(ctx, step, cfg, rt, j)
 		if err != nil {
 			return data, nil, failStep(j, path, opts, id, index, at, shown, decision{}, err)
@@ -268,10 +344,20 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 					return data, nil, err
 				}
 			}
-			report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(at), Total: intPtr(shown), Detail: d.reason})
-			data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: d.reason})
+			detail := d.reason
+			if d.reason == ReasonCheckInconclusive {
+				detail = d.detail
+				warnings = append(warnings, output.Warning{Code: "step_check_inconclusive", Message: id + ": " + d.detail})
+			}
+			report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(at), Total: intPtr(shown), Detail: detail})
+			data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: d.reason, Detail: d.detail})
 			data.Skipped++
 			continue
+		}
+		if access, ok := step.(AccessTransition); ok && !opts.AccessConfirm[access.AccessTarget()] && !opts.InternalAccess[access.AccessTarget()] {
+			return data, warnings, output.NewError(output.CodeUnsafeAction, "access changes require confirmation", output.ExitUnsafe,
+				"Re-run apply with the exact access confirmation token.").
+				WithDetails(map[string]any{"confirm_tokens": []string{access.AccessTarget() + "/access"}})
 		}
 		report.emit(output.Event{Type: "step", Step: id, State: "started", Index: intPtr(at), Total: intPtr(shown), Detail: step.Describe(cfg)})
 		if err := j.setEntry(path, id, JournalEntry{Status: StatusRunning, InputsHash: d.hash, StartedAt: now()}); err != nil {
@@ -309,9 +395,18 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 		data.Steps = append(data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "completed", Restart: string(restart)})
 		data.Applied++
 	}
+	if accessErr != nil {
+		return data, warnings, accessErr
+	}
 
 	pending := pendingIn(j, all, opts.DB)
 	if len(pending) == 0 {
+		return data, warnings, nil
+	}
+	if opts.LeaveRestartsPending {
+		data.RestartPending = pending
+		data.ConfirmTokens = RestartTokens(cfg.Name(), pending)
+		warnings = append(warnings, pendingRestartWarning(pending, data.ConfirmTokens))
 		return data, warnings, nil
 	}
 	settled, err := settlePending(ctx, j, path, opts, pending)
@@ -338,13 +433,15 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	if left := pendingIn(j, all, opts.DB); len(left) > 0 {
 		data.RestartPending = left
 		data.ConfirmTokens = RestartTokens(cfg.Name(), left)
-		warnings = append(warnings, output.Warning{
-			Code: "restart_pending",
-			Message: "a restart is pending for " + strings.Join(left, ", ") + "; re-run apply with --confirm " +
-				strings.Join(data.ConfirmTokens, " --confirm "),
-		})
+		warnings = append(warnings, pendingRestartWarning(left, data.ConfirmTokens))
 	}
 	return data, warnings, nil
+}
+
+func pendingRestartWarning(pending, tokens []string) output.Warning {
+	return output.Warning{Code: "restart_pending",
+		Message: "a restart is pending for " + strings.Join(pending, ", ") + "; re-run apply with --confirm " +
+			strings.Join(tokens, " --confirm ")}
 }
 
 // settlePending clears the pending restarts of every cluster that no longer
@@ -442,6 +539,16 @@ func decide(ctx context.Context, step Step, cfg config.Cluster, rt Runtime, j *J
 			return decision{reason: reason, hash: hash}, nil
 		}
 	}
+	if _, ok := step.(AccessTransition); ok {
+		check, err := step.Check(ctx, cfg, rt)
+		if err != nil {
+			return decision{}, fmt.Errorf("check: %w", err)
+		}
+		if check.Complete && !check.Inconclusive {
+			return decision{reason: "access_installed", hash: hash, detail: check.Detail}, nil
+		}
+		return decision{apply: true, reason: ReasonCheckIncomplete, hash: hash, detail: check.Detail}, nil
+	}
 	if f, ok := step.(Forcer); ok {
 		if reason := f.Force(cfg, rt); reason != "" {
 			return decision{apply: true, reason: reason, hash: hash}, nil
@@ -457,17 +564,24 @@ func decide(ctx context.Context, step Step, cfg config.Cluster, rt Runtime, j *J
 		if err != nil {
 			return decision{}, fmt.Errorf("check: %w", err)
 		}
+		if check.Inconclusive {
+			detail := "effective state is unknown"
+			if check.Detail != "" {
+				detail += ": " + secrets.Redact(check.Detail)
+			}
+			return decision{reason: ReasonCheckInconclusive, hash: hash, detail: detail}, nil
+		}
 		if check.Complete {
 			return decision{reason: ReasonJournal, hash: hash}, nil
 		}
 		return decision{apply: true, reason: ReasonCheckIncomplete, hash: hash, detail: check.Detail}, nil
 	}
-	if ok && entry.InputsHash == hash {
+	if ok && entry.InputsHash == hash && entry.Status != StatusFailed && entry.Status != StatusRunning {
 		check, err := step.Check(ctx, cfg, rt)
 		if err != nil {
 			return decision{}, fmt.Errorf("check: %w", err)
 		}
-		if check.Complete {
+		if check.Complete && !check.Inconclusive {
 			return decision{reason: ReasonCheck, hash: hash, detail: check.Detail}, nil
 		}
 	}
@@ -534,7 +648,7 @@ func stepFailed(id string, index int, cause error) *output.CLIError {
 	// A step that refuses for a reason the operator has to act on keeps its
 	// code, hint and reason, so agents can tell it from a failed script.
 	var cliErr *output.CLIError
-	if errors.As(cause, &cliErr) && (cliErr.Code == output.CodePrecondition || cliErr.Code == output.CodeInputRequired) {
+	if errors.As(cause, &cliErr) && (cliErr.Code == output.CodePrecondition || cliErr.Code == output.CodeInputRequired || cliErr.Code == output.CodeStepFailed) {
 		out.Code, out.ExitCode = cliErr.Code, cliErr.ExitCode
 		if cliErr.Hint != "" {
 			out.Hint = cliErr.Hint

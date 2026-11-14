@@ -46,14 +46,15 @@ type PendingSecrets struct {
 
 // Progress records the completed init phases and what was learned on the way.
 type Progress struct {
-	Local       bool              `json:"local"`
-	Phases      map[string]string `json:"phases"`
-	OS          string            `json:"os,omitempty"`
-	Arch        string            `json:"arch,omitempty"`
-	WGPublicKey string            `json:"wg_public_key,omitempty"`
-	SSHHostKeys []string          `json:"ssh_host_keys,omitempty"`
-	SecretsOut  string            `json:"secrets_out,omitempty"`
-	PublicIPv6  string            `json:"public_ipv6,omitempty"`
+	Local            bool              `json:"local"`
+	SetupOperationID string            `json:"setup_operation_id,omitempty"`
+	Phases           map[string]string `json:"phases"`
+	OS               string            `json:"os,omitempty"`
+	Arch             string            `json:"arch,omitempty"`
+	WGPublicKey      string            `json:"wg_public_key,omitempty"`
+	SSHHostKeys      []string          `json:"ssh_host_keys,omitempty"`
+	SecretsOut       string            `json:"secrets_out,omitempty"`
+	PublicIPv6       string            `json:"public_ipv6,omitempty"`
 	// Restore is set for server init --restore (Phase 5).
 	Restore *RestoreProgress `json:"restore,omitempty"`
 }

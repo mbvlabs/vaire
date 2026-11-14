@@ -95,6 +95,10 @@ type fakeExecutor struct {
 }
 
 func (f *fakeExecutor) Exec(_ context.Context, stepID string, c engine.Command, report engine.Reporter) error {
+	if strings.HasSuffix(stepID, "-workspace-probe") {
+		_, _ = io.WriteString(c.Stdout, "readable")
+		return nil
+	}
 	call := &recordedCall{step: stepID, cmd: c, stdout: c.Stdout}
 	if c.Stdin != nil {
 		call.stdin, _ = io.ReadAll(c.Stdin)
@@ -453,6 +457,189 @@ func TestSourceAccessTLSFiles(t *testing.T) {
 	}
 	if err := access.remove(); err != nil {
 		t.Fatalf("remove source access: %v", err)
+	}
+}
+
+type accessProbeExecutor struct {
+	denied  string
+	calls   []string
+	failure error
+	result  string
+}
+
+func (e *accessProbeExecutor) Exec(_ context.Context, step string, cmd engine.Command, _ engine.Reporter) error {
+	if !strings.HasSuffix(step, "-workspace-probe") {
+		e.calls = append(e.calls, "source")
+		return errors.New("unexpected source callback")
+	}
+	if cmd.Name != "runuser" || len(cmd.Args) != 8 || cmd.Args[5] != sourceAccessProbeScript {
+		return errors.New("invalid probe")
+	}
+	label := filepath.Base(cmd.Args[7])
+	if cmd.Args[7] == systemCABundlePath {
+		label = copySystemCALabel
+	}
+	e.calls = append(e.calls, label)
+	if e.failure != nil {
+		return e.failure
+	}
+	if label == e.denied {
+		_, _ = io.WriteString(cmd.Stdout, "denied")
+	} else if e.result != "" {
+		_, _ = io.WriteString(cmd.Stdout, e.result)
+	} else {
+		_, _ = io.WriteString(cmd.Stdout, "readable")
+	}
+	return nil
+}
+
+func TestSourceAccessProbeRefusesBeforeSource(t *testing.T) {
+	for _, operation := range []string{"preflight", "export"} {
+		for _, denied := range []string{copyPassfileName, copyCAName} {
+			t.Run(operation+"/"+denied, func(t *testing.T) {
+				ws := newTestWorkspace(t)
+				src, err := testSource(t, "sensitive-password").WithCACert(testCertificatePEM(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				exec := &accessProbeExecutor{denied: denied}
+				if operation == "preflight" {
+					_, err = PreflightSource(context.Background(), exec, "copy", nil, src, ws)
+				} else {
+					_, err = ExportSource(context.Background(), exec, "copy", nil, src, ws)
+				}
+				if errorReason(t, err) != "copy_workspace_access_denied" {
+					t.Fatalf("unexpected failure: %v", err)
+				}
+				details := errorDetails(t, err)
+				if details["stage"] != "source-access" || details["file"] != denied {
+					t.Fatalf("unexpected details: %v", details)
+				}
+				if strings.Contains(fmt.Sprint(err, details), "sensitive-password") || strings.Contains(fmt.Sprint(err, details), ws.Dir) {
+					t.Fatal("private information escaped")
+				}
+				for _, call := range exec.calls {
+					if call == "source" {
+						t.Fatal("source callback ran")
+					}
+				}
+				for _, name := range []string{copyPassfileName, copyCAName, copyArchiveName} {
+					if _, err := ws.Stat(name); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("%s survived: %v", name, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestLocalSourceFileClassification(t *testing.T) {
+	for _, tc := range []struct {
+		line, reason string
+	}{
+		{`psql: error: connection to server at "db.example.com", port 5432 failed: could not open root certificate file "/var/lib/vaire-copies/job-1/source-ca.pem": Permission denied`, "copy_workspace_access_denied"},
+		{`pg_dump: warning: could not open password file "/var/lib/vaire-copies/job-1/source.pgpass": Permission denied`, "copy_workspace_access_denied"},
+		{`psql: error: could not read root certificate file "/etc/ssl/certs/ca-certificates.crt": Permission denied`, "copy_workspace_access_denied"},
+		{`SSL error: certificate verify failed`, "source_tls_failed"},
+		{`password authentication failed for user`, "source_auth_failed"},
+		{`ERROR: permission denied for table source_ca`, "source_preflight_failed"},
+		{`pg_dump: error: query failed: ERROR: permission denied for table "could not open root certificate file source-ca.pem"`, "source_preflight_failed"},
+		{`psql:<stdin>:2: ERROR: permission denied for table "could not open root certificate file source-ca.pem"`, "source_preflight_failed"},
+		{`pg_dump: error: query failed: ERROR: permission denied for table "could not open root certificate file ""/var/lib/vaire-copies/job-1/source-ca.pem"": Permission denied"`, "source_preflight_failed"},
+	} {
+		for _, classifier := range []struct {
+			classify func(error) error
+			fallback string
+		}{{sourcePreflightError, "source_preflight_failed"}, {sourceExportError, "source_export_failed"}} {
+			want := tc.reason
+			if want == "source_preflight_failed" {
+				want = classifier.fallback
+			}
+			err := classifier.classify(&engine.ScriptError{Status: 2, Tail: []string{tc.line}})
+			if got := errorReason(t, err); got != want {
+				t.Errorf("%q: got %q, want %q", tc.line, got, want)
+			}
+			if strings.Contains(err.Error(), "/var/lib/") || strings.Contains(err.Error(), "/etc/ssl/") {
+				t.Fatal("raw diagnostic leaked")
+			}
+		}
+	}
+}
+
+func TestSourceAccessProbeSystemCAAndFailures(t *testing.T) {
+	oldBundle := systemCABundlePath
+	systemCABundlePath = filepath.Join(t.TempDir(), "system-ca.crt")
+	if err := os.WriteFile(systemCABundlePath, []byte("not read by this test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { systemCABundlePath = oldBundle })
+	for _, operation := range []string{"preflight", "export"} {
+		for _, tc := range []struct {
+			name        string
+			exec        accessProbeExecutor
+			reason      string
+			interrupted bool
+		}{
+			{"system-ca-denied", accessProbeExecutor{denied: copySystemCALabel}, "copy_workspace_access_denied", false},
+			{"runuser-start", accessProbeExecutor{failure: errors.New("private start failure")}, "copy_workspace_probe_failed", false},
+			{"wrapper-failure", accessProbeExecutor{failure: &engine.ScriptError{Status: 125, Tail: []string{"private lease failure"}}}, "copy_workspace_probe_failed", false},
+			{"runuser-exit-one", accessProbeExecutor{failure: &engine.ScriptError{Status: 1}}, "copy_workspace_probe_failed", false},
+			{"typed-lease", accessProbeExecutor{failure: output.NewError(output.CodePrecondition, "lease failed", output.ExitPrecondition, "").WithDetails(map[string]any{"reason": "copy_workspace_lease_failed"})}, "copy_workspace_lease_failed", false},
+			{"invalid-marker", accessProbeExecutor{result: "unexpected"}, "copy_workspace_probe_failed", false},
+			{"interrupted", accessProbeExecutor{failure: engine.ErrInterrupted}, "", true},
+		} {
+			t.Run(operation+"/"+tc.name, func(t *testing.T) {
+				ws := newTestWorkspace(t)
+				src, err := NewSource(SourceSpec{Host: "db.example.com", Database: "app", User: "u", TLSMode: SourceTLSVerifyCA})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if operation == "preflight" {
+					_, err = PreflightSource(context.Background(), &tc.exec, "copy", nil, src, ws)
+				} else {
+					_, err = ExportSource(context.Background(), &tc.exec, "copy", nil, src, ws)
+				}
+				if tc.interrupted {
+					if !errors.Is(err, engine.ErrInterrupted) {
+						t.Fatalf("interruption lost: %v", err)
+					}
+				} else if errorReason(t, err) != tc.reason {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if tc.reason == "copy_workspace_probe_failed" {
+					var cliErr *output.CLIError
+					if !errors.As(err, &cliErr) || cliErr.Code != output.CodeExternalCommand {
+						t.Fatalf("probe failure was not external: %v", err)
+					}
+				}
+				if tc.name == "system-ca-denied" && errorDetails(t, err)["file"] != copySystemCALabel {
+					t.Fatalf("system CA label missing: %v", err)
+				}
+				if strings.Contains(fmt.Sprint(err), "private") || strings.Contains(fmt.Sprint(err), systemCABundlePath) {
+					t.Fatal("probe diagnostic leaked")
+				}
+				for _, call := range tc.exec.calls {
+					if call == "source" {
+						t.Fatal("source callback ran")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCopyAncestorRequiresServiceTraversal(t *testing.T) {
+	parent := t.TempDir()
+	originalOwner, originalUID, originalGID := copyWorkspaceOwnerOf, copyEffectiveUID, copyEffectiveGID
+	copyWorkspaceOwnerOf = func(fs.FileInfo) (int, int, bool) { return 0, 0, true }
+	copyEffectiveUID = func() int { return 0 }
+	copyEffectiveGID = func() int { return 0 }
+	t.Cleanup(func() {
+		copyWorkspaceOwnerOf, copyEffectiveUID, copyEffectiveGID = originalOwner, originalUID, originalGID
+	})
+	err := verifyCopyAncestors(filepath.Join(parent, "copies"), WorkspaceOwner{UID: 12345, GID: 12345})
+	if errorReason(t, err) != "copy_workspace_access_denied" {
+		t.Fatalf("root-only ancestor accepted: %v", err)
 	}
 }
 
@@ -1714,7 +1901,7 @@ func TestNewCopyWorkspaceRejectsUntrustedAncestorAsRoot(t *testing.T) {
 		return stickyOwner(info)
 	}
 	t.Cleanup(func() { copyWorkspaceOwnerOf = stickyOwner })
-	if err := verifyCopyAncestors(filepath.Join(sticky, "copies")); err != nil {
+	if err := verifyCopyAncestors(filepath.Join(sticky, "copies"), CurrentWorkspaceOwner()); err != nil {
 		t.Fatalf("a root-owned sticky ancestor was refused: %v", err)
 	}
 }
@@ -2000,7 +2187,7 @@ func TestNewCopyWorkspaceOwnershipFailureLeavesNoWorkspace(t *testing.T) {
 	}
 	root := t.TempDir()
 	owner := CurrentWorkspaceOwner()
-	owner.UID++
+	owner.GID = 1 << 30
 	_, err := NewCopyWorkspace(root, "job-1", owner, nil)
 	if err == nil || errorReason(t, err) != "copy_workspace_failed" {
 		t.Fatalf("foreign ownership: %v", err)

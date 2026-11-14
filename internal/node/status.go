@@ -2,6 +2,9 @@ package node
 
 import (
 	"context"
+	"encoding/json"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -36,6 +39,13 @@ const snapshotTimeout = 10 * time.Second
 // replace it to supply deterministic running samples without a server; the
 // follower's own replication queries use followerPG instead.
 var snapshotPG = func(spec config.ClusterSpec) sqlRunner { return steps.ClusterPG(spec) }
+var statusHostRead = hostinfo.Detect
+var statusTLSRead = inspectTLS
+var statusMasterRead = masterStatusRow
+var statusStateRead = func() (engine.State, error) { return engine.LoadState(engine.StatePath) }
+var statusPendingRead = pendingRestarts
+var statusBudgetRead = serverBudget
+var statusBudgetWarnings = oversubscriptionWarnings
 
 // readClusters reads every cluster of cfg (only db when set) concurrently
 // over its socket. With tps it samples the transaction counter twice, a
@@ -48,6 +58,9 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 		}
 	}
 	out := make([]clusterSnapshot, len(specs))
+	if len(specs) == 0 {
+		return out
+	}
 	started := time.Now()
 	var wg sync.WaitGroup
 	for i, spec := range specs {
@@ -128,6 +141,9 @@ func readPools(ctx context.Context) map[string]health.Pools {
 	return out
 }
 
+// statusPoolRead permits status fixtures to avoid connecting to host poolers.
+var statusPoolRead = readPools
+
 type statusParams struct {
 	DB string `json:"db,omitempty"`
 }
@@ -178,8 +194,21 @@ type statusDatabase struct {
 	RestoreInProgress bool              `json:"restore_in_progress"`
 	Protected         bool              `json:"protected,omitempty"`
 	// Follows and Follower are a follower's source and replication (Phase 6).
-	Follows  string           `json:"follows,omitempty"`
-	Follower *followerReading `json:"follower,omitempty"`
+	Follows          string                 `json:"follows,omitempty"`
+	Follower         *followerReading       `json:"follower,omitempty"`
+	CPU              *statusCPU             `json:"cpu,omitempty"`
+	DataFreeBytes    *uint64                `json:"data_free_bytes,omitempty"`
+	ApplicationReady *bool                  `json:"application_ready,omitempty"`
+	Materialisation  *materialisationReport `json:"materialisation,omitempty"`
+}
+
+func (s statusDatabase) MarshalJSON() ([]byte, error) {
+	type plain statusDatabase
+	raw, err := json.Marshal(plain(s))
+	if err != nil || s.State != stateMaterialisationIncomplete {
+		return raw, err
+	}
+	return omitIncompleteMeasurements(raw)
 }
 
 // statusData is vaire status's result (Phase 4).
@@ -231,21 +260,35 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	cfg := env.Cluster
+	reports, markerSnapshot, err := materialisationReports(ctx, cfg)
+	if err != nil {
+		return Result{}, err
+	}
 	if p.DB != "" {
-		if _, err := clusterOf(cfg, p.DB); err != nil {
+		if _, err := clusterOf(cfg, p.DB); err != nil && reports[p.DB].Phase == "" {
 			return Result{}, err
 		}
 	}
-	host, _ := hostinfo.Detect(cfg.Server.DataRoot)
+	host, _ := statusHostRead(cfg.Server.DataRoot)
 	data := statusData{
 		Server:       cfg.Name(),
 		Role:         config.RoleMaster,
 		VaireVersion: buildinfo.Version,
-		Budget:       serverBudget(cfg, host),
+		Budget:       statusBudgetRead(cfg, host),
 		Poolers:      map[string]health.Pools{},
-		TLS:          inspectTLS(cfg),
+		TLS:          statusTLSRead(cfg),
 		Backups:      cfg.BackupConfigured(),
 		Databases:    []statusDatabase{},
+	}
+	// Budget allocations remain counted, but service/cgroup observations for
+	// a partially materialised target do not establish application state.
+	if clusters, ok := data.Budget["clusters"].([]map[string]any); ok {
+		for _, cluster := range clusters {
+			if name, _ := cluster["name"].(string); reports[name].Phase != "" {
+				delete(cluster, "running")
+				delete(cluster, "memory_current_mib")
+			}
+		}
 	}
 	if n, ok := cfg.Master(); ok {
 		data.Node = n.Name
@@ -253,17 +296,49 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	if total, free, ok := hostinfo.DiskUsage(cfg.Server.DataRoot); ok {
 		data.Disk = map[string]any{"path": cfg.Server.DataRoot, "total_bytes": total, "free_bytes": free, "free_pct": freePct(total, free)}
 	}
-	data.Master = masterStatusRow(cfg)
-	snaps := readClusters(ctx, cfg, p.DB, true)
+	data.Master = statusMasterRead(cfg)
+	// Never sample an incomplete target as an application database.
+	active := cfg
+	active.Clusters = nil
+	for _, spec := range cfg.Clusters {
+		if _, incomplete := reports[spec.Name]; !incomplete {
+			active.Clusters = append(active.Clusters, spec)
+		}
+	}
+	snaps := readClusters(ctx, active, p.DB, true)
 	if len(cfg.Clusters) > 0 {
-		data.Poolers = readPools(ctx)
+		data.Poolers = statusPoolRead(ctx)
 	}
 	rs, _ := backup.LoadRecords()
-	st, _ := engine.LoadState(engine.StatePath)
-	pending := pendingRestarts()
-	followers := readFollowers(ctx, diagnosticsViewWith(cfg, rs), p.DB)
-	for _, s := range snaps {
+	st, _ := statusStateRead()
+	pending := statusPendingRead()
+	followers := readFollowers(ctx, diagnosticsViewWith(active, rs), p.DB)
+	type statusMeasurements struct {
+		cpu  *statusCPU
+		free *uint64
+	}
+	measurements := make([]statusMeasurements, len(snaps))
+	var wg sync.WaitGroup
+	for i, s := range snaps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+			defer cancel()
+			res, err := cfg.Resources(s.Spec)
+			if err == nil {
+				obs, generation, monotonic := statusCPURead(qctx, s.Spec)
+				measurements[i].cpu = cpuStatus(res, obs, generation, monotonic)
+			}
+			if s.Spec.IsFollower() && s.State == "running" {
+				measurements[i].free = statusDataFree(qctx, cfg, s.Spec, snapshotPG(s.Spec).Query, hostinfo.FreeBytes)
+			}
+		}()
+	}
+	wg.Wait()
+	for i, s := range snaps {
 		row := statusRow(cfg, s, rs, st, pending)
+		row.CPU, row.DataFreeBytes = measurements[i].cpu, measurements[i].free
 		if rs.IsAwaiting(s.Spec.Name) {
 			row.State, row.Error = stateAwaiting, "vaire db recover "+s.Spec.Name
 		}
@@ -275,9 +350,45 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 		}
 		data.Databases = append(data.Databases, row)
 	}
-	warnings := append(oversubscriptionWarnings(cfg, host), NoOffsiteWarning(cfg)...)
+	for name, report := range reports {
+		if p.DB != "" && p.DB != name {
+			continue
+		}
+		data.Databases = append(data.Databases, incompleteStatusRow(cfg, name, report))
+	}
+	if len(reports) > 0 {
+		sort.Slice(data.Databases, func(i, j int) bool { return data.Databases[i].Name < data.Databases[j].Name })
+	}
+	if err := unchangedMaterialisationReports(cfg, markerSnapshot); err != nil {
+		return Result{}, err
+	}
+	warnings := append(statusBudgetWarnings(cfg, host), NoOffsiteWarning(cfg)...)
 	warnings = append(warnings, statusWarnings(data)...)
 	return Result{Data: data, Warnings: warnings}, nil
+}
+
+// statusDataFree uses only a running instance's confirmed managed data
+// directory. A failed query or missing directory remains unknown.
+func statusDataFree(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec,
+	query func(context.Context, string, string, map[string]string) ([]map[string]string, error),
+	free func(string) (uint64, bool),
+) *uint64 {
+	if config.CheckDatabaseName(spec.Name) != nil {
+		return nil
+	}
+	expected := cfg.Server.DataDirectory(spec.Name)
+	if !filepath.IsAbs(expected) || filepath.Clean(expected) != expected {
+		return nil
+	}
+	rows, err := query(ctx, spec.DatabaseName(), "SHOW data_directory", nil)
+	if err != nil || len(rows) != 1 || rows[0]["data_directory"] != expected {
+		return nil
+	}
+	value, ok := free(expected)
+	if !ok {
+		return nil
+	}
+	return &value
 }
 
 func freePct(total, free uint64) float64 {

@@ -16,6 +16,19 @@ set -euo pipefail
 : "${IO_WEIGHT:?IO_WEIGHT is required}"
 CPU_QUOTA="${CPU_QUOTA:-}"
 
+if [[ "${CPU_WEIGHT}" != "idle" && ! "${CPU_WEIGHT}" =~ ^[1-9][0-9]{0,4}$ ]]; then
+  printf 'invalid CPU weight\n' >&2
+  exit 1
+fi
+if [[ "${CPU_WEIGHT}" != "idle" ]] && (( CPU_WEIGHT > 10000 )); then
+  printf 'invalid CPU weight\n' >&2
+  exit 1
+fi
+if [[ -n "${CPU_QUOTA}" && ! "${CPU_QUOTA}" =~ ^[1-9][0-9]{0,4}%$ ]]; then
+  printf 'invalid CPU quota\n' >&2
+  exit 1
+fi
+
 unit="postgresql@18-${CLUSTER}.service"
 
 cluster_exists() {
@@ -47,10 +60,30 @@ if systemctl is-active --quiet "${unit}"; then
   # The drop-in holds the limits across reboots; --runtime applies them to
   # the running cgroup without writing a second copy.
   systemctl set-property --runtime "${unit}" \
-    "MemoryHigh=${MEMORY_HIGH}" "MemoryMax=${MEMORY_MAX}" \
-    "CPUWeight=${CPU_WEIGHT}" "CPUQuota=${CPU_QUOTA}" "IOWeight=${IO_WEIGHT}"
+    "MemoryHigh=${MEMORY_HIGH}" "MemoryMax=${MEMORY_MAX}" "IOWeight=${IO_WEIGHT}"
+  if ! systemctl set-property --runtime "${unit}" \
+    "CPUWeight=${CPU_WEIGHT}" "CPUQuota=${CPU_QUOTA}"; then
+    printf 'vaire_cpu_policy_set_failed\n' >&2
+    exit 1
+  fi
 else
-  systemctl start "${unit}"
+  # Only current-start PID 1 diagnostics for this unit can identify a CPU
+  # cgroup write failure. If the journal is unavailable, retain the ordinary
+  # startup error rather than guessing from an absent cgroup.
+  cursor="$(timeout 2 journalctl --system -n 0 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p' || true)"
+  if systemctl start "${unit}"; then
+    :
+  else
+    start_status=$?
+    cursor_pattern='^[a-zA-Z0-9=;]+$'
+    if [[ "${cursor}" =~ ${cursor_pattern} ]] &&
+       timeout 2 journalctl --system --after-cursor="${cursor}" -n 200 --no-pager -o cat \
+         _PID=1 "UNIT=${unit}" 2>/dev/null |
+         grep -E "^([^ :]+: )?Failed to set '(cpu[.]idle|cpu[.]weight|cpu[.]max)' attribute on " >/dev/null; then
+      printf 'vaire_cpu_start_failed\n' >&2
+    fi
+    exit "${start_status}"
+  fi
 fi
 
 checksums="$(runuser -u postgres -- psql -X -q -h /var/run/postgresql -p "${PORT}" -tAc 'SHOW data_checksums')"

@@ -3,6 +3,94 @@
   "$id": "https://get.vaire.sh/schema/vaire-v1.json",
   "title": "vaire command envelope",
   "$defs": {
+    "materialisationReport": {
+      "type": "object",
+      "required": ["phase", "physical_state"],
+      "properties": {
+        "owning_job": { "type": "string" },
+        "phase": { "enum": ["prepared", "copying", "provisioning", "failed"] },
+        "reason": { "enum": ["recovery_requirements_unmet", "recovery_parameter_mismatch"] },
+        "physical_state": { "enum": ["unknown", "online", "down"] },
+        "in_recovery": { "type": "boolean" },
+        "replay_paused": { "type": "boolean" }
+      },
+      "description": "Physical observations are not application availability; omitted observations are unknown."
+    },
+    "cpuStatus": {
+      "type": "object",
+      "required": ["requested", "effective_known"],
+      "properties": {
+        "requested": {
+          "type": "object",
+          "required": ["mode", "quota"],
+          "properties": {
+            "mode": { "enum": ["normal", "spare"] },
+            "quota": { "type": "string", "description": "Empty means no requested ceiling." }
+          }
+        },
+        "effective_known": { "type": "boolean" },
+        "effective": {
+          "type": "object",
+          "properties": {
+            "idle": { "type": "boolean" },
+            "weight": { "type": "integer", "minimum": 1 },
+            "quota_period_usec": { "type": "integer", "minimum": 1 },
+            "quota_usec": { "type": "integer", "minimum": 1 },
+            "unlimited": { "type": "boolean" }
+          }
+        },
+        "usage_usec": { "type": "integer", "minimum": 0 },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string" },
+        "sample_generation": { "type": "string", "description": "Opaque service/cgroup generation for adjacent watch samples." },
+        "sample_monotonic_ns": { "type": "integer", "minimum": 1 },
+        "usage_percent": { "type": "number", "minimum": 0, "description": "Watch-only usage relative to one CPU." }
+      }
+    },
+    "statusDatabase": {
+      "type": "object",
+      "properties": {
+        "application_ready": { "type": "boolean" },
+        "materialisation": { "$ref": "#/$defs/materialisationReport" },
+        "cpu": { "$ref": "#/$defs/cpuStatus" },
+        "data_free_bytes": { "type": "integer", "minimum": 0 },
+        "follower": {
+          "type": "object",
+          "properties": {
+            "receive_backlog_bytes": { "type": "integer", "minimum": 0 },
+            "replay_backlog_bytes": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "databaseAccess": {
+      "type": "object",
+      "required": ["database", "desired", "owner", "app", "ro", "coverage", "notice"],
+      "properties": {
+        "database": { "type": "string" },
+        "desired": { "const": "automatic" },
+        "state": { "type": "string" },
+        "source": { "type": "string" },
+        "owner": { "type": "string" },
+        "app": { "type": "string" },
+        "ro": { "type": "string" },
+        "notice": { "type": "string" },
+        "coverage": {
+          "type": "object",
+          "required": ["status", "default_missing", "schema_missing", "table_missing", "sequence_missing", "routine_missing", "uncovered_creators"],
+          "properties": {
+            "status": { "enum": ["installed", "pending", "unknown"] },
+            "default_missing": { "type": "integer", "minimum": 0 },
+            "schema_missing": { "type": "integer", "minimum": 0 },
+            "table_missing": { "type": "integer", "minimum": 0 },
+            "sequence_missing": { "type": "integer", "minimum": 0 },
+            "routine_missing": { "type": "integer", "minimum": 0 },
+            "uncovered_creators": { "oneOf": [{ "type": "array", "items": { "type": "string" } }, { "type": "null" }] }
+          },
+          "description": "Counts are meaningful only when status is not unknown."
+        }
+      }
+    },
     "errorCode": {
       "type": "string",
       "enum": [
@@ -78,6 +166,16 @@
     {
       "type": "object",
       "required": ["schema", "ok", "command"],
+      "allOf": [{
+        "if": { "properties": { "command": { "const": "status" } }, "required": ["command"] },
+        "then": { "properties": { "data": { "type": "object", "properties": { "databases": { "type": "array", "items": { "$ref": "#/$defs/statusDatabase" } } } } } }
+      }, {
+        "if": { "properties": { "command": { "const": "db list" } }, "required": ["command"] },
+        "then": { "properties": { "data": { "type": "object", "properties": { "databases": { "type": "array", "items": { "type": "object", "properties": {
+          "application_ready": { "type": "boolean" },
+          "materialisation": { "$ref": "#/$defs/materialisationReport" }
+        } } } } } } }
+      }],
       "properties": {
         "schema": { "const": "vaire/v1" },
         "ok": { "const": true },

@@ -35,6 +35,9 @@ type State struct {
 	LockedDownAt string `json:"locked_down_at,omitempty"`
 	// Jobs are the detachable jobs and timer runs, newest last.
 	Jobs []JobRecord `json:"jobs,omitempty"`
+	// RetainedJobs holds provenance for unresolved materialisations, separate
+	// from the bounded display history. Only node lifecycle code pins jobs.
+	RetainedJobs map[string]JobRecord `json:"retained_jobs,omitempty"`
 	// DeferredRestarts are the clusters db resize --defer-restart left for
 	// the maintenance window, with when it was asked (Phase 4). maint-daily
 	// restarts them at the window's start and removes them.
@@ -88,11 +91,17 @@ func (s State) Job(id string) (JobRecord, bool) {
 			return r, true
 		}
 	}
+	if r, ok := s.RetainedJobs[id]; ok {
+		return r, true
+	}
 	return JobRecord{}, false
 }
 
 // PutJob adds or replaces a job record, keeping the newest maxJobs.
 func (s *State) PutJob(rec JobRecord) {
+	if _, ok := s.RetainedJobs[rec.ID]; ok {
+		s.RetainedJobs[rec.ID] = rec
+	}
 	for i, r := range s.Jobs {
 		if r.ID == rec.ID {
 			s.Jobs[i] = rec
@@ -102,6 +111,16 @@ func (s *State) PutJob(rec JobRecord) {
 	s.Jobs = append(s.Jobs, rec)
 	if over := len(s.Jobs) - maxJobs; over > 0 {
 		s.Jobs = append([]JobRecord(nil), s.Jobs[over:]...)
+	}
+}
+
+// RetainJob pins an existing job before its history entry can be pruned.
+func (s *State) RetainJob(id string) {
+	if rec, ok := s.Job(id); ok {
+		if s.RetainedJobs == nil {
+			s.RetainedJobs = make(map[string]JobRecord)
+		}
+		s.RetainedJobs[id] = rec
 	}
 }
 

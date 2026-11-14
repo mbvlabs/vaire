@@ -72,11 +72,15 @@ func newFollowerNode(t *testing.T, cfg config.Cluster) *followerNode {
 	oldRecords, oldState, oldServer, oldRunning := backup.RecordsPath, followerState, followerServerOps, clusterRunning
 	oldInstance, oldRegistered, oldConf := followHostInstance, followRegisteredData, followConfRegistered
 	oldConfDir, oldFloors := followConfDirectory, followerEffectiveFloors
+	oldFinalRegistration := followFinalRegistration
 	backup.RecordsPath = filepath.Join(dir, "records.json")
 	followerState = func() state.Store { return n.store }
 	clusterRunning = func(spec config.ClusterSpec) bool { return !spec.IsFollower() }
 	followHostInstance = func() (string, error) { return n.instance, nil }
 	followRegisteredData = func(name string) (string, error) { return n.registered[name], nil }
+	followFinalRegistration = func(cfg config.Cluster, src, spec config.ClusterSpec) error {
+		return backup.ResumeMaterialisedWithHost(cfg.Server.DataRoot, spec.Name, src.Name, src.Port, engine.Shell{}, "", nil, n.confDirRoot, nil).VerifyFollowerRegistration(spec.Port)
+	}
 	followConfRegistered = func(name string) bool { _, ok := n.registered[name]; return ok }
 	followConfDirectory = func(name string) (bool, error) {
 		_, err := os.Stat(n.confDir(name))
@@ -98,6 +102,7 @@ func newFollowerNode(t *testing.T, cfg config.Cluster) *followerNode {
 		backup.RecordsPath, followerState, followerServerOps, clusterRunning = oldRecords, oldState, oldServer, oldRunning
 		followHostInstance, followRegisteredData, followConfRegistered = oldInstance, oldRegistered, oldConf
 		followConfDirectory, followerEffectiveFloors = oldConfDir, oldFloors
+		followFinalRegistration = oldFinalRegistration
 	})
 	raw, err := cfg.Encode()
 	if err != nil {
@@ -144,7 +149,11 @@ func (n *followerNode) copyReady(cfg config.Cluster, db string) {
 	if err := os.MkdirAll(n.confDir(db), 0o700); err != nil {
 		n.t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(n.confDir(db), "postgresql.conf"), []byte("data_directory = '"+data+"'\n"), 0o600); err != nil {
+	if err := os.Chmod(n.confDir(db), 0o755); err != nil { //nolint:gosec // postgresql-common registration fixture
+		n.t.Fatal(err)
+	}
+	spec, _ := cfg.ClusterByName(db)
+	if err := os.WriteFile(filepath.Join(n.confDir(db), "postgresql.conf"), []byte(fmt.Sprintf("data_directory = '%s'\ncluster_name = '18/%s'\nport = %d\n", data, db, spec.Port)), 0o600); err != nil {
 		n.t.Fatal(err)
 	}
 	n.registered[db] = data
@@ -509,51 +518,29 @@ type followCopyPlan struct {
 	onDropOwned func(name, data string) error
 }
 
-type followCopyStub struct {
-	plan *followCopyPlan
-	data string
-}
-
-func (c *followCopyStub) DataDir() string { return c.data }
-
-func (c *followCopyStub) copy() error {
-	c.plan.calls = append(c.plan.calls, "copy")
-	if c.plan.restoreErr != nil {
-		return c.plan.restoreErr
-	}
-	if c.plan.onRestore != nil {
-		c.plan.onRestore()
-	}
-	return nil
-}
-
-func (c *followCopyStub) Restore(context.Context, backup.Driver, backup.RestoreOptions) error {
-	return c.copy()
-}
-
-func (c *followCopyStub) StandbyBaseBackup(context.Context, string) error { return c.copy() }
-
-func (c *followCopyStub) Adopt(context.Context, int) error {
-	c.plan.calls = append(c.plan.calls, "adopt")
-	if c.plan.adoptErr != nil {
-		return c.plan.adoptErr
-	}
-	if c.plan.onAdopt != nil {
-		c.plan.onAdopt()
-	}
-	return nil
-}
-
-func (c *followCopyStub) Drop() error {
-	c.plan.calls = append(c.plan.calls, "drop-copy")
-	return os.RemoveAll(c.data)
-}
-
 func installFollowCopy(t *testing.T, plan *followCopyPlan) {
 	t.Helper()
 	oldNew, oldResume, oldDrop, oldSlots := newFollowerCopy, resumeFollowerCopy, dropOwnedFollowerCopy, followerSlotOps
+	oldStandby, oldRestore := followerStandbyCopy, followerRestoreCopy
+	oldBase, oldConfRoot, oldUID, oldPG := materialisationAncestorBase, materialisationConfigRoot, materialisationRecordUID, materialisationPostgresUID
+	oldReservation, oldAbsent, oldRegister, oldCleanup := followCleanupReservation, followCleanupAbsent, followCleanupRegistration, followCleanupDrop
+	materialisationAncestorBase = filepath.Dir(plan.node.dir)
+	materialisationConfigRoot = plan.node.confDirRoot
+	materialisationRecordUID = uint32(os.Geteuid()) //nolint:gosec // local test UID
+	materialisationPostgresUID = func() (uint32, error) { return materialisationRecordUID, nil }
+	if err := os.MkdirAll(materialisationConfigRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ports := filepath.Join(plan.node.dir, "ports")
+	if err := os.Mkdir(ports, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	uid := materialisationRecordUID
 	t.Cleanup(func() {
 		newFollowerCopy, resumeFollowerCopy, dropOwnedFollowerCopy, followerSlotOps = oldNew, oldResume, oldDrop, oldSlots
+		followerStandbyCopy, followerRestoreCopy = oldStandby, oldRestore
+		materialisationAncestorBase, materialisationConfigRoot, materialisationRecordUID, materialisationPostgresUID = oldBase, oldConfRoot, oldUID, oldPG
+		followCleanupReservation, followCleanupAbsent, followCleanupRegistration, followCleanupDrop = oldReservation, oldAbsent, oldRegister, oldCleanup
 	})
 	followerSlotOps.inspect = func(context.Context, config.ClusterSpec, string) (followerSlotState, error) {
 		plan.calls = append(plan.calls, "inspect-slot")
@@ -586,17 +573,77 @@ func installFollowCopy(t *testing.T, plan *followCopyPlan) {
 		plan.slot, plan.slotLSN = followerSlotState{}, ""
 		return nil
 	}
-	fake := func(dataRoot, name string) followerCopy {
-		return &followCopyStub{plan: plan, data: filepath.Join(dataRoot, name)}
-	}
-	newFollowerCopy = func(dataRoot, name, _ string, _ int, _ engine.Shell, _ string, _ engine.Reporter) (followerCopy, error) {
+	newFollowerCopy = func(dataRoot, name, source string, sourcePort int, sh engine.Shell, step string, report engine.Reporter) (followerCopy, error) {
 		if plan.newErr != nil {
 			return nil, plan.newErr
 		}
-		return fake(dataRoot, name), nil
+		return backup.NewForkMaterialisedWithHost(dataRoot, name, source, sourcePort, sh, step, report, backup.ForkMaterialisationHost{
+			ReservationDir: ports, ConfigRoot: plan.node.confDirRoot, UID: uid,
+			ClusterPorts: func() map[int]bool { return map[int]bool{} }, SocketTaken: func(int) bool { return false },
+		})
 	}
-	resumeFollowerCopy = func(dataRoot, name, _ string, _ int, _ engine.Shell, _ string, _ engine.Reporter) followerCopy {
-		return fake(dataRoot, name)
+	resumeFollowerCopy = func(dataRoot, name, source string, sourcePort int, sh engine.Shell, step string, report engine.Reporter) followerCopy {
+		host := &ownedFollowerHost{dir: plan.node.confDir(name), data: filepath.Join(dataRoot, name), ports: ports, name: name, uid: uid}
+		host.after = func() error {
+			plan.calls = append(plan.calls, "adopt")
+			if plan.adoptErr != nil {
+				return plan.adoptErr
+			}
+			if plan.onAdopt != nil {
+				plan.onAdopt()
+			}
+			return nil
+		}
+		return backup.ResumeMaterialisedWithHost(dataRoot, name, source, sourcePort, sh, step, report, plan.node.confDirRoot, host)
+	}
+	populate := func(ctx context.Context, m *backup.Materialised) error {
+		plan.calls = append(plan.calls, "copy")
+		if plan.restoreErr != nil {
+			return plan.restoreErr
+		}
+		p := m.OwnershipPaths()
+		if err := m.Ownership.CreateData(ctx, p); err != nil {
+			return err
+		}
+		if err := m.GuardOwnership(ctx, backup.MaterialisationBaseBackup, func() error { return nil }); err != nil {
+			return err
+		}
+		if err := m.Ownership.CreateConfig(ctx, p); err != nil {
+			return err
+		}
+		if plan.onRestore != nil {
+			plan.onRestore()
+		}
+		raw := fmt.Sprintf("data_directory = '%s'\ncluster_name = '18/%s'\nport = %d\n", p.DataDir, p.Name, p.Port)
+		if err := os.WriteFile(filepath.Join(p.ConfigDir, "postgresql.conf"), []byte(raw), 0o600); err != nil {
+			return err
+		}
+		plan.node.registered[p.Name] = p.DataDir
+		if err := m.GuardOwnership(ctx, backup.MaterialisationRegister, func() error { return nil }); err != nil {
+			return err
+		}
+		return m.GuardOwnership(ctx, backup.MaterialisationStart, func() error { return nil })
+	}
+	followerStandbyCopy = func(m *backup.Materialised, ctx context.Context, _ string) error { return populate(ctx, m) }
+	followerRestoreCopy = func(m *backup.Materialised, ctx context.Context, _ backup.Driver, _ backup.RestoreOptions) error {
+		return populate(ctx, m)
+	}
+	followCleanupReservation = func(ctx context.Context, name string, port int, id backup.ReservationIdentity, effect func() error) error {
+		return backup.CleanupFollowerReservationWithHost(ctx, ports, uid, name, port, id, effect)
+	}
+	followCleanupAbsent = func(ctx context.Context, name string, port int, present bool) (func(), error) {
+		return backup.LockForkReservationWithHost(ctx, ports, uid, name, port, present)
+	}
+	followCleanupRegistration = func(name, source, root string, sourcePort, port int) error {
+		return backup.ResumeMaterialisedWithHost(root, name, source, sourcePort, engine.Shell{}, "", nil, plan.node.confDirRoot, nil).VerifyFollowerRegistration(port)
+	}
+	followCleanupDrop = func(_ context.Context, _ *Env, name string) error {
+		plan.calls = append(plan.calls, "drop-owned")
+		if plan.onDropOwned != nil {
+			return plan.onDropOwned(name, plan.cfg.Server.DataDirectory(name))
+		}
+		delete(plan.node.registered, name)
+		return nil
 	}
 	dropOwnedFollowerCopy = func(_ engine.Shell, _ string, _ engine.Reporter, name, data string) error {
 		plan.calls = append(plan.calls, "drop-owned")
@@ -613,7 +660,25 @@ func installFollowCopy(t *testing.T, plan *followCopyPlan) {
 func installFollowBuildJob(t *testing.T) *followerStub {
 	t.Helper()
 	stub := (&followerStub{}).install(t)
-	followerServerOps.build = materialiseFollower
+	followerServerOps.build = func(ctx context.Context, env *jobEnv, cfg config.Cluster, src, spec config.ClusterSpec, from string, recover bool) error {
+		env.OperationID = env.ID
+		env.installID, _ = currentFollowInstance()
+		locks := jobLockers{
+			node: func(context.Context, engine.LockMode, string, string, time.Duration) (engine.Release, error) {
+				return func() {}, nil
+			},
+			cluster: func(context.Context, string, engine.LockMode, string, string, time.Duration) (engine.Release, error) {
+				return func() {}, nil
+			},
+		}
+		lease, _, err := takeJobLocks(ctx, env, locks)
+		if err != nil {
+			return err
+		}
+		env.lease = lease
+		defer lease.finish()
+		return materialiseFollower(ctx, env, cfg, src, spec, from, recover)
+	}
 	return stub
 }
 
@@ -657,9 +722,8 @@ func TestRecoverFollowTakesExclusiveLocks(t *testing.T) {
 	}
 }
 
-// R2-1: a job that died while copying owns the partial data/configuration it
-// left. A retry admitted by the public handler removes exactly those owned
-// paths and builds again; no manual pg_dropcluster is involved.
+// A legacy name-only record is not birth evidence. A separately bound copy
+// can be explicitly cleaned and rebuilt without touching a foreign path.
 func TestRecoverRebuildsAnOwnedInterruptedCopy(t *testing.T) {
 	ctx := context.Background()
 	cfg := followerLifecycleCfg(t, "app_follower")
@@ -677,28 +741,16 @@ func TestRecoverRebuildsAnOwnedInterruptedCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg})
-	if err != nil {
-		t.Fatalf("the retry is refused: %v", err)
+	if _, err := handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg}); err == nil {
+		t.Fatal("unbound legacy copy was accepted")
 	}
-	if res.Data.(map[string]any)["resume"] != false {
-		t.Fatalf("an incomplete copy is resumed: %v", res.Data)
+	if plan.has("drop-owned") || plan.has("copy") || plan.has("adopt") {
+		t.Fatalf("unbound copy triggered effects: %v", plan.calls)
 	}
-	if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err != nil {
-		t.Fatalf("the retry failed: %v", err)
+	if _, err := os.Stat(cfg.Server.DataDirectory("app_follower")); err != nil {
+		t.Fatalf("unbound copy removed: %v", err)
 	}
-	if !plan.has("drop-owned") {
-		t.Fatalf("the owned partial copy was not removed: %v", plan.calls)
-	}
-	if plan.count("copy") != 1 || plan.count("adopt") != 1 {
-		t.Fatalf("the retry did not rebuild once: %v", plan.calls)
-	}
-	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
-		t.Fatalf("the ownership record survived a completed recovery: %v", err)
-	}
-	if recs := node.records(); recs.IsAwaiting("app_follower") {
-		t.Fatal("the recovered follower still awaits recovery")
-	}
+	t.Run("bound cleanup and rebuild", func(t *testing.T) { runFollowerOwnedScenario(t, "cleanup-recover") })
 }
 
 // R2-1: once the copy is complete and registered, an adoption that died in any
@@ -1021,10 +1073,9 @@ func TestRecoverResumeSlotInspectionFailureKeepsTheCopy(t *testing.T) {
 	}
 }
 
-// R2-1: a registration that died before postgresql.conf leaves an owned
-// configuration directory with no postgresql.conf and no data. An interruption
-// after the data cleanup, before the directory cleanup, keeps ownership and the
-// next retry through public admission finishes the cleanup and builds.
+// A name-only partial registration cannot authorize deletion. A separately
+// bound cleanup failure retains its record, and a bound complete copy can be
+// cleaned and rebuilt.
 func TestRecoverCleansAnOwnedPartialConfigDirectory(t *testing.T) {
 	ctx := context.Background()
 	cfg := followerLifecycleCfg(t, "app_follower")
@@ -1042,7 +1093,7 @@ func TestRecoverCleansAnOwnedPartialConfigDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The first cleanup removes the data, then stops before the directory.
+	// The legacy fixture has no birth evidence; its cleanup must not run.
 	plan.onDropOwned = func(_, data string) error {
 		return errors.Join(os.RemoveAll(data), errors.New("the process died before removing the configuration directory"))
 	}
@@ -1052,8 +1103,8 @@ func TestRecoverCleansAnOwnedPartialConfigDirectory(t *testing.T) {
 	if _, err := os.Stat(node.confDir("app_follower")); err != nil {
 		t.Fatalf("the test did not leave the configuration directory: %v", err)
 	}
-	if _, err := os.Stat(cfg.Server.DataDirectory("app_follower")); !os.IsNotExist(err) {
-		t.Fatalf("the interrupted cleanup did not remove the data: %v", err)
+	if _, err := os.Stat(cfg.Server.DataDirectory("app_follower")); err != nil {
+		t.Fatalf("the unbound data was removed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(node.confDir("app_follower"), "postgresql.conf")); !os.IsNotExist(err) {
 		t.Fatalf("the partial registration has a postgresql.conf: %v", err)
@@ -1062,23 +1113,11 @@ func TestRecoverCleansAnOwnedPartialConfigDirectory(t *testing.T) {
 		t.Fatalf("the interrupted cleanup lost ownership: %+v %v %v", own, ok, err)
 	}
 
-	if _, err := handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg}); err != nil {
-		t.Fatalf("the retry is refused: %v", err)
+	if plan.has("drop-owned") || plan.has("copy") {
+		t.Fatalf("unbound cleanup ran: %v", plan.calls)
 	}
-	plan.onDropOwned = nil
-	plan.calls = nil
-	if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err != nil {
-		t.Fatalf("the retry failed: %v", err)
-	}
-	if !plan.has("drop-owned") || plan.count("copy") != 1 || plan.count("adopt") != 1 {
-		t.Fatalf("the retry did not finish the cleanup and build: %v", plan.calls)
-	}
-	if _, err := os.Stat(filepath.Join(node.confDir("app_follower"), "postgresql.conf")); err != nil {
-		t.Fatalf("the rebuilt registration is not complete: %v", err)
-	}
-	if _, err := os.Stat(followOwnershipPathForTest(t, "app_follower")); !os.IsNotExist(err) {
-		t.Fatalf("the ownership record survived recovery: %v", err)
-	}
+	t.Run("bound partial cleanup retains record", func(t *testing.T) { runFollowerOwnedScenario(t, "cleanup-partial-effect") })
+	t.Run("bound cleanup and rebuild", func(t *testing.T) { runFollowerOwnedScenario(t, "cleanup-recover") })
 }
 
 // R2-1: a configuration directory with no ownership is foreign. Public
@@ -1131,17 +1170,10 @@ func TestRecoverKeepsOwnershipWhileAnOwnedDirectoryRemains(t *testing.T) {
 		t.Fatalf("ownership was cleared while the owned directory remains: %v %v", ok, err)
 	}
 
-	plan.onDropOwned, plan.newErr = nil, nil
-	plan.calls = nil
-	if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err != nil {
-		t.Fatalf("the retry failed: %v", err)
+	if plan.has("drop-owned") || plan.has("copy") {
+		t.Fatalf("unbound cleanup ran: %v", plan.calls)
 	}
-	if !plan.has("drop-owned") || plan.count("copy") != 1 {
-		t.Fatalf("the retry did not remove the directory and build: %v", plan.calls)
-	}
-	if _, err := os.Stat(filepath.Join(node.confDir("app_follower"), "postgresql.conf")); err != nil {
-		t.Fatalf("the rebuilt registration is not complete: %v", err)
-	}
+	t.Run("bound cleanup failure", func(t *testing.T) { runFollowerOwnedScenario(t, "cleanup-dropfail") })
 }
 
 // R2-6: a fresh build reserves the source slot before it constructs its copy.
@@ -1772,7 +1804,7 @@ func TestUnfollowTakesExclusiveLocks(t *testing.T) {
 	if err != nil || busy != nil {
 		t.Fatalf("locks: %v %v", err, busy)
 	}
-	release()
+	release.finish()
 	if mods["node"] != engine.LockExclusive {
 		t.Errorf("the node lock is %q, and db create, config set and db drop take it exclusive", mods["node"])
 	}
@@ -1797,7 +1829,7 @@ func TestUnfollowSameTargetIsExclusive(t *testing.T) {
 	if err != nil || busy != nil {
 		t.Fatalf("the first unfollow's locks: %v %v", err, busy)
 	}
-	defer release()
+	defer release.finish()
 	if _, busy, err = takeJobLocks(context.Background(), env(), locks); err != nil {
 		t.Fatalf("the second unfollow's locks: %v", err)
 	}
@@ -1827,7 +1859,7 @@ func TestUnfollowLocksSerializeTheDesiredState(t *testing.T) {
 			env := unfollowEnv(cfg, name)
 			// A second unfollow that finds the node lock busy is skipped and
 			// retried by the operator; here the goroutine is that retry.
-			var release engine.Release
+			var release *lockedJobLease
 			for range 5000 {
 				var busy *jobLockBusy
 				var err error
@@ -1844,7 +1876,7 @@ func TestUnfollowLocksSerializeTheDesiredState(t *testing.T) {
 				t.Errorf("%s: never took its locks", name)
 				return
 			}
-			defer release()
+			defer release.finish()
 			// A competing writer (db create, config set and db drop take the
 			// node lock exclusive) can't enter while this unfollow holds it.
 			if _, err := locks.node(ctx, engine.LockExclusive, "db.create", "competing", 0); err == nil {
@@ -2198,10 +2230,13 @@ func followDryRunRequest(source, name string) (req rpc.Request) {
 // whether a cluster runs and how much space the copy needs.
 func installFollowAdmission(t *testing.T, running func(config.ClusterSpec) bool) {
 	t.Helper()
-	oldRunning, oldSpace := clusterRunning, followSpace
+	oldRunning, oldSpace, oldExists := clusterRunning, followSpace, followClusterExists
 	clusterRunning = running
 	followSpace = func(context.Context, config.Cluster, string) ([]backup.SpaceNeed, error) { return nil, nil }
-	t.Cleanup(func() { clusterRunning, followSpace = oldRunning, oldSpace })
+	followClusterExists = func(_ context.Context, name string) bool { return followConfRegistered(name) }
+	t.Cleanup(func() {
+		clusterRunning, followSpace, followClusterExists = oldRunning, oldSpace, oldExists
+	})
 }
 
 // markAdoptedForTest writes a recovery's adopted marker without the build.
@@ -2260,14 +2295,20 @@ func TestRecoverAdoptedCopyRequiresRetainedSlot(t *testing.T) {
 				return errors.Join(os.RemoveAll(data), os.RemoveAll(node.confDir(name)))
 			}
 			installFollowCopy(t, plan)
-			node.copyReady(cfg, "app_follower")
-			markAdoptedForTest(t, "app_follower")
 			if test.owned {
-				if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), followPhaseCopied); err != nil {
-					t.Fatal(err)
+				// Build the copy through the actual birth binding path before
+				// simulating a crash at adoption.
+				plan.adoptErr = errors.New("simulated adoption interruption")
+				if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil {
+					t.Fatal("interrupted adoption returned success")
 				}
+				plan.adoptErr = nil
+			} else {
+				node.copyReady(cfg, "app_follower")
 			}
+			markAdoptedForTest(t, "app_follower")
 			plan.slot, plan.slotLSN, plan.inspectErr = test.slot, "", test.inspectErr
+			plan.calls = nil
 
 			res, err := handleDBRecover(ctx, &Env{Req: recoverDryRun("app_follower"), Cluster: cfg})
 			if test.refused {
@@ -2356,8 +2397,9 @@ func TestOrdinaryFollowRetryResumesOwnedProgress(t *testing.T) {
 		recopy     bool
 		wantResume bool
 		wantReason bool
+		refused    bool
 	}{
-		"partial copy":   {phase: followPhaseCopying, recopy: true},
+		"partial copy":   {phase: followPhaseCopying, refused: true},
 		"completed copy": {ready: true, phase: followPhaseCopied, slot: followerSlotState{Exists: true, Usable: true}, wantResume: true},
 		"unsafe slot":    {ready: true, phase: followPhaseCopied, recopy: true, wantReason: true},
 	} {
@@ -2369,17 +2411,38 @@ func TestOrdinaryFollowRetryResumesOwnedProgress(t *testing.T) {
 			installFollowBuildJob(t)
 			plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
 			installFollowCopy(t, plan)
-			if test.ready {
+			if name == "unsafe slot" {
+				plan.adoptErr = errors.New("simulated adoption interruption")
+				if _, err := jobFollow(ctx, ordinaryFollowEnv(node.config(), "app_follower")); err == nil {
+					t.Fatal("adoption interruption returned success")
+				}
+				plan.adoptErr = nil
+			} else if test.ready {
 				node.copyReady(cfg, "app_follower")
 			} else if err := os.MkdirAll(cfg.Server.DataDirectory("app_follower"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), test.phase); err != nil {
-				t.Fatal(err)
+			if name != "unsafe slot" {
+				if err := writeFollowOwnership(ordinaryOwner(node, cfg, "app_follower"), test.phase); err != nil {
+					t.Fatal(err)
+				}
 			}
 			plan.slot, plan.slotLSN = test.slot, "0/1000"
+			plan.calls = nil
 
 			res, err := handleDBFollow(ctx, &Env{Req: followDryRunRequest("app", "app_follower"), Cluster: node.config()})
+			if test.refused {
+				if err == nil {
+					t.Fatal("unbound partial copy was accepted")
+				}
+				if plan.has("drop-owned") || plan.has("copy") || plan.has("create-slot") {
+					t.Fatalf("unbound preview mutated state: %v", plan.calls)
+				}
+				if _, err := os.Stat(cfg.Server.DataDirectory("app_follower")); err != nil {
+					t.Fatal("unbound data removed")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("the public retry is refused: %v", err)
 			}
@@ -2648,7 +2711,7 @@ func TestFailedFollowsSerializeDesiredStateRollback(t *testing.T) {
 			first <- errors.Join(err, errors.New("the first follow could not take its locks"))
 			return
 		}
-		defer release()
+		defer release.finish()
 		_, err = jobFollow(ctx, env)
 		first <- err
 	}()
@@ -2660,7 +2723,7 @@ func TestFailedFollowsSerializeDesiredStateRollback(t *testing.T) {
 	secondEnv := preparedFollowEnv(cfg, "app_follower_2")
 	if release, busy, err := takeJobLocks(ctx, secondEnv, locks); err != nil || busy == nil {
 		if release != nil {
-			release()
+			release.finish()
 		}
 		t.Fatalf("the second follow took the node lock beside the first: %v %v", err, busy)
 	}
@@ -3004,7 +3067,9 @@ func TestApplyDoesNotInitialisePreparedFollower(t *testing.T) {
 	if err := j.Save(journal); err != nil {
 		t.Fatal(err)
 	}
-	applied, _, err := engine.Apply(ctx, steps.Catalog(), node.config(), rt, engine.Options{Only: only, JournalPath: journal})
+	// The real cluster step rechecks host drift; its host writes are outside
+	// this fixture. The plan above still checks its lifecycle selection.
+	applied, _, err := engine.Apply(ctx, steps.Catalog(), node.config(), rt, engine.Options{Only: []string{"postgres-config-v1", "pgbouncer-v1"}, JournalPath: journal})
 	if err != nil {
 		t.Fatalf("the general apply failed: %v", err)
 	}
@@ -3483,8 +3548,13 @@ func TestRecoveryAcceptsRealEmptyFollowerAwaitingStanza(t *testing.T) {
 			installFollowBuildJob(t)
 			plan := &followCopyPlan{node: node, cfg: cfg, onRestore: func() { node.copyReady(cfg, "app_follower") }}
 			installFollowCopy(t, plan)
-			plan.slot, plan.slotLSN = test.slot, "0/1000"
-			if test.ready {
+			if test.recopy {
+				plan.adoptErr = errors.New("simulated adoption interruption")
+				if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err == nil {
+					t.Fatal("interrupted adoption returned success")
+				}
+				plan.adoptErr = nil
+			} else if test.ready {
 				node.copyReady(cfg, "app_follower")
 				if err := writeFollowOwnership(recoveryOwner(node, cfg, "app_follower"), test.phase); err != nil {
 					t.Fatal(err)
@@ -3493,6 +3563,8 @@ func TestRecoveryAcceptsRealEmptyFollowerAwaitingStanza(t *testing.T) {
 			if test.adopt {
 				markAdoptedForTest(t, "app_follower")
 			}
+			plan.slot, plan.slotLSN = test.slot, "0/1000"
+			plan.calls = nil
 			if _, err := jobFollow(ctx, followEnv(cfg, "app_follower", true)); err != nil {
 				t.Fatalf("the recovery failed: %v", err)
 			}

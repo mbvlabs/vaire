@@ -26,13 +26,15 @@ func dbFollowCommand() cmdSpec {
 		flags: []fl{
 			flagString("name", "", "The follower's name (default <db>_follower)"),
 			flagString("size", "", "Size of the follower's cluster: nano, small, medium, large, xlarge or custom (default the source's size and memory)"),
+			flagString("cpu-mode", "", "CPU scheduling: normal or spare"),
+			flagString("cpu-quota", "", "CPU ceiling as a percentage of one CPU, or none"),
 			flagBool("allow-overcommit", "Follow even when the follower's size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
 		},
 		meta: CommandMeta{
 			Summary:        "Make a read-only follower of a database: a physical standby that keeps streaming from it",
 			WhenToUse:      []string{"Rehearse a risky migration on current production data, or read production data without load on it. The follower is a cluster of its own on the same server, with its own size and limits (the source's unless --size), copied from the source's stanza when it has a backup, else with pg_basebackup of the live source (works without backups), then streaming from the source through a replication slot (vaire_<name>) capped by max_slot_wal_keep_size. It is reachable at the same host as <name>, read-only, with the source's credentials (db1.<domain>:6432/<name> as <db>_ro or <db>_app); writes fail. It has no stanza and no backups of its own. Its connection limits are at least the source's (the hot-standby floors). Like db create, a size that overcommits the server is refused (memory_overcommitted) with the size that fits as a complete command; --allow-overcommit follows anyway. db list, status and doctor show its lag. It does not inherit the source's protection: a follower is unprotected unless you protect it (vaire db protect). When the rehearsal starts, vaire db unfollow makes it an independent database."},
 			WhenNotToUse:   []string{"For a copy at a past time, or one to write to at once: vaire db fork."},
-			Examples:       []string{"vaire db follow app", "vaire db follow app --name app_rehearsal --size small", "vaire db follow app --dry-run"},
+			Examples:       []string{"vaire db follow app", "vaire db follow app --name app_rehearsal --cpu-mode spare --cpu-quota 150%", "vaire db follow app --dry-run"},
 			Mutating:       true,
 			SupportsDryRun: true,
 			Remote:         true,
@@ -72,6 +74,7 @@ func runDBFollow(cmd *cobra.Command, args []string) error {
 		return output.NewError(output.CodeValidation, "database name "+name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
 	}
 	params := map[string]any{"source": src, "name": name}
+	addCPUFlags(cmd, params)
 	size := stringFlag(cmd, "size")
 	if size != "" {
 		params["size"] = size
@@ -140,6 +143,15 @@ func runDBFollow(cmd *cobra.Command, args []string) error {
 	})
 }
 
+func addCPUFlags(cmd *cobra.Command, params map[string]any) {
+	if cmd.Flags().Changed("cpu-mode") {
+		params["cpu_mode"] = stringFlag(cmd, "cpu-mode")
+	}
+	if cmd.Flags().Changed("cpu-quota") {
+		params["cpu_quota"] = stringFlag(cmd, "cpu-quota")
+	}
+}
+
 func runDBUnfollow(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	p := newProgress(cmd)
@@ -188,28 +200,39 @@ func runDBUnfollow(cmd *cobra.Command, args []string) error {
 		var data map[string]any
 		_ = reply.Decode(&data)
 		return output.Success(cmd, output.Result{Data: data, Warnings: s.warnings,
-			Message: fmt.Sprintf("dry run: would promote %s, stop it following %v, rename %v's database and roles to its own with new passwords, and give it its own stanza", name, data["source"], data["source"])})
+			Message: fmt.Sprintf("dry run: would promote %s, stop it following %v, rename %v's database and roles to its own with new passwords, and give it its own stanza; CPU priority and quota continue", name, data["source"], data["source"])})
 	}
 	if detached {
 		p.warn("detached: the unfollow keeps running. These credentials work once it is done and are shown only now:")
-		message, human := credentialsMessage(cmd, "unfollow detached; credentials shown only now", "unfollow detached; credentials shown only now", name, secret)
-		return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
+		message, human := credentialsMessage(cmd, "unfollow detached; CPU priority and quota continue; credentials shown only now", "unfollow detached; CPU priority and quota continue; credentials shown only now", name, secret)
+		data := map[string]any{"job_id": jobID, "detached": true, "database": secret, "cpu_policy_continues": true}
+		if spec, ok := cfg.ClusterByName(name); ok {
+			if res, err := cfg.Resources(spec); err == nil {
+				data["cpu_policy_at_request"] = map[string]string{"mode": res.CPUMode, "quota": res.CPUQuota}
+			}
+		}
+		return output.Success(cmd, output.Result{Data: data,
 			Message: message, Human: human, Next: []string{"vaire job follow " + jobID}})
 	}
 	var res struct {
-		Source   string           `json:"source"`
-		Stanza   string           `json:"stanza"`
-		Warnings []output.Warning `json:"warnings"`
+		Source    string            `json:"source"`
+		Stanza    string            `json:"stanza"`
+		Warnings  []output.Warning  `json:"warnings"`
+		CPUPolicy map[string]string `json:"cpu_policy"`
 	}
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
 	warnings := append(append(s.warnings, reply.Warnings...), res.Warnings...)
-	headline := name + " no longer follows " + res.Source + ": it is an independent database with its own roles"
+	quota := res.CPUPolicy["quota"]
+	if quota == "" {
+		quota = "none"
+	}
+	headline := name + " no longer follows " + res.Source + ": it is an independent database with its own roles; CPU mode " + res.CPUPolicy["mode"] + " and quota " + quota + " continue"
 	message, human := credentialsMessage(cmd, headline, headline, name, secret)
 	return output.Success(cmd, output.Result{
-		Data:     map[string]any{"job_id": jr.JobID, "source": res.Source, "stanza": res.Stanza, "database": secret},
+		Data:     map[string]any{"job_id": jr.JobID, "source": res.Source, "stanza": res.Stanza, "database": secret, "cpu_policy": res.CPUPolicy},
 		Message:  message,
 		Human:    human,
 		Warnings: warnings,

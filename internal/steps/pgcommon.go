@@ -181,10 +181,11 @@ func diskShareGiB(cfg config.Cluster, memoryMiB, diskGiB int) int {
 }
 
 // hugePagesFor is the huge pages the server reserves (RFC 7.3): the sum of
-// the estimates of every cluster whose tuning has huge_pages = try.
+// the estimates of every cluster whose tuning has huge_pages = try. Awaiting
+// entries retain their resource budget even though they are not routed.
 func hugePagesFor(cfg config.Cluster, host hostinfo.Info) int {
 	total := 0
-	for _, c := range cfg.Clusters {
+	for _, c := range slices.Concat(cfg.Clusters, cfg.Awaiting) {
 		total += tuningFor(cfg, c, host).HugePages
 	}
 	return total

@@ -72,6 +72,7 @@ type Resources struct {
 	MemoryMiB       int
 	MemoryMaxMiB    int
 	CPUWeight       int
+	CPUMode         string
 	CPUQuota        string
 	IOWeight        int
 	MaxConnections  int
@@ -88,11 +89,20 @@ type Resources struct {
 // pool_size 0 is what is left of max_connections after the session pool
 // and the reserved slots.
 func ResolveResources(spec ClusterSpec, defaultSize string) (Resources, error) {
+	if spec.CPUMode != "" && spec.CPUMode != "normal" && spec.CPUMode != "spare" {
+		return Resources{}, fmt.Errorf("cpu_mode %q must be normal or spare", spec.CPUMode)
+	}
+	if spec.CPUQuota != "" && !cpuQuotaPattern.MatchString(spec.CPUQuota) {
+		return Resources{}, fmt.Errorf("cpu_quota %q must be a percentage such as 150%%", spec.CPUQuota)
+	}
 	name := spec.Size
 	if name == "" {
 		name = defaultSize
 	}
-	r := Resources{Size: name, CPUQuota: spec.CPUQuota, IOWeight: DefaultIOWeight, SessionPoolSize: DefaultSessionPoolSize}
+	r := Resources{Size: name, CPUMode: spec.CPUMode, CPUQuota: spec.CPUQuota, IOWeight: DefaultIOWeight, SessionPoolSize: DefaultSessionPoolSize}
+	if r.CPUMode == "" {
+		r.CPUMode = "normal"
+	}
 	if name == SizeCustom {
 		if spec.Memory == "" {
 			return Resources{}, errors.New("size custom needs memory")

@@ -54,7 +54,7 @@ type tuneServerCluster struct {
 	MaxConnections   int    `json:"max_connections"`
 	SharedMemoryMiB  int    `json:"shared_memory_mib"`
 	HugePages        int    `json:"huge_pages"`
-	Running          bool   `json:"running"`
+	Running          *bool  `json:"running,omitempty"`
 }
 
 // sheetLines prints the budget sheet the way RFC 7.5 shows it.
@@ -62,8 +62,10 @@ func sheetLines(name string, sv tuneServer) []string {
 	lines := []string{fmt.Sprintf("server %s   %s RAM · %d vCPU · reserve %s · budget %s",
 		name, tune.FormatMiB(sv.RAMMiB), sv.VCPU, tune.FormatMiB(sv.ReserveMiB), tune.FormatMiB(sv.ClusterBudgetMiB))}
 	for _, c := range sv.Clusters {
-		state := "stopped"
-		if c.Running {
+		state := "unknown"
+		if c.Running != nil && !*c.Running {
+			state = "stopped"
+		} else if c.Running != nil && *c.Running {
 			state = "running"
 		}
 		limits := fmt.Sprintf("cpu %3d  io %3d  conns %3d", c.CPUWeight, c.IOWeight, c.MaxConnections)

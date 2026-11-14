@@ -35,6 +35,7 @@ type ClusterSpec struct {
 	Memory           string            `toml:"memory"`
 	MemoryMax        string            `toml:"memory_max"`
 	CPUWeight        int               `toml:"cpu_weight"`
+	CPUMode          string            `toml:"cpu_mode,omitempty"`
 	CPUQuota         string            `toml:"cpu_quota"`
 	IOWeight         int               `toml:"io_weight"`
 	Profile          string            `toml:"profile,omitempty"`
@@ -240,9 +241,6 @@ func (c Cluster) validateClusterResources(add func(string, ...any), at string, s
 	}
 	if s.IOWeight < 0 || s.IOWeight > 10000 {
 		add("%s.io_weight %d must be 0 (the default 100) or 1-10000", at, s.IOWeight)
-	}
-	if s.CPUQuota != "" && !cpuQuotaPattern.MatchString(s.CPUQuota) {
-		add("%s.cpu_quota %q must be a percentage such as 150%%", at, s.CPUQuota)
 	}
 	if s.PoolSize < 0 {
 		add("%s.pool_size must not be negative", at)

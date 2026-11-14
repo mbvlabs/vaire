@@ -198,13 +198,14 @@ func phase1Commands() []cmdSpec {
 				flagStrings("step", "Run only these step ids: <step> for every database, <step>@<db> for one"),
 				flagString("db", "", "Only this database's cluster steps"),
 				flagBool("skip-doctor", "Skip the doctor checks after a full apply"),
-				flagStringArray("confirm", "Confirm restarts: <db>/restart for one database, {server}/restart for every one; repeatable. --yes never satisfies this check"),
+				flagStringArray("confirm", "Confirm <db>/access or restarts: <db>/restart, {server}/restart; repeatable. --yes never satisfies this check"),
 			},
 			meta: CommandMeta{
 				Summary: "Converge the node to cluster.toml",
 				WhenToUse: []string{
 					"Apply pending steps after plan, a config change, or an upgrade.",
 					"A restart a step needs waits for --confirm <db>/restart, or --confirm {server}/restart, which restarts every database one at a time.",
+					"An existing database's access expansion needs its own --confirm <db>/access. Coordinate migration DDL quiescence before applying it.",
 				},
 				Examples: []string{
 					"vaire apply", "vaire apply --dry-run", "vaire apply --db app",
@@ -930,6 +931,24 @@ func dbCommands() cmdSpec {
 			dbFollowCommand(),
 			dbUnfollowCommand(),
 			{
+				use: "access",
+				run: parentRun,
+				meta: CommandMeta{
+					Summary:   "Inspect automatic application access",
+					WhenToUse: []string{"Inspect access coverage without changing grants."},
+					Examples:  []string{"vaire db access show app"},
+					Remote:    true,
+				},
+				children: []cmdSpec{{
+					use: "show <name>", args: cobra.ExactArgs(1), run: runDBAccessShow,
+					meta: CommandMeta{
+						Summary:   "Show observed automatic access coverage",
+						WhenToUse: []string{"Inspect owner defaults, existing-object coverage and uncovered creators without changing grants. Unknown coverage is not installed coverage."},
+						Examples:  []string{"vaire db access show app"}, Remote: true,
+					},
+				}},
+			},
+			{
 				use: "list",
 				run: runDBList,
 				meta: CommandMeta{
@@ -1024,14 +1043,16 @@ func dbCommands() cmdSpec {
 				flags: []fl{
 					flagString("size", "", "New size: nano, small, medium, large, xlarge or custom; drops a memory override unless --memory is given"),
 					flagString("memory", "", "New memory for the cluster, such as 768MiB or 2GiB"),
+					flagString("cpu-mode", "", "CPU scheduling: normal or spare"),
+					flagString("cpu-quota", "", "CPU ceiling as a percentage of one CPU, or none"),
 					flagBool("defer-restart", "Apply what changes live now and leave the restart pending"),
 					flagStringArray("confirm", "Confirm the restart: <db>/restart. --yes never satisfies this check"),
 					flagBool("allow-overcommit", "Grow it even when the new size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
 				},
 				meta: CommandMeta{
-					Summary:        "Change a database's size or memory",
+					Summary:        "Change a database's size, memory or CPU policy",
 					WhenToUse:      []string{"Give a database more or less memory, CPU weight and connections. The cgroup limits and reload-only settings change live; shared_buffers, max_connections and huge_pages need a restart of that database only, confirmed with --confirm <db>/restart, or left pending with --defer-restart (finish later with vaire apply --db <db> --confirm <db>/restart). A size that couldn't start is refused (would_not_start). A larger size that pushes the databases' sizes past the server's memory budget is refused (precondition_failed, reason memory_overcommitted) with the numbers and the largest larger size that still fits, as a complete command, or says none does; --allow-overcommit grows it anyway with the warning memory_overcommitted. Shrinking is never refused for the budget; shrinking below current use warns (shrink_below_use). vaire config set clusters.<db>.size does the same change without applying it. Shrinking a protected database is refused (database_protected)."},
-					Examples:       []string{"vaire db resize app --size large --confirm app/restart", "vaire db resize app --memory 768MiB --defer-restart", "vaire db resize app --size xlarge --confirm app/restart --allow-overcommit", "vaire db resize app --size small --dry-run"},
+					Examples:       []string{"vaire db resize app --size large --confirm app/restart", "vaire db resize app --cpu-mode spare --cpu-quota 150%", "vaire db resize app --memory 768MiB --defer-restart", "vaire db resize app --size small --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,

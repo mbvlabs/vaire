@@ -3,12 +3,47 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestRetainedJobSurvivesHistoryPruningAndUpdates(t *testing.T) {
+	var st State
+	rec := JobRecord{ID: "owner", Job: "restore", DB: "app", State: JobRunning}
+	st.PutJob(rec)
+	st.RetainJob(rec.ID)
+	for i := range 60 {
+		st.PutJob(JobRecord{ID: fmt.Sprintf("job-%d", i), State: JobSucceeded})
+	}
+	if len(st.Jobs) != maxJobs {
+		t.Fatalf("history length %d", len(st.Jobs))
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := st.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.State = JobFailed
+	st.PutJob(rec)
+	got, ok := st.Job(rec.ID)
+	if !ok || !got.Final() || st.RetainedJobs[rec.ID].State != JobFailed {
+		t.Fatalf("retained owner not updated: %+v", got)
+	}
+	delete(st.RetainedJobs, rec.ID)
+	for i := range 60 {
+		st.PutJob(JobRecord{ID: fmt.Sprintf("later-%d", i), State: JobSucceeded})
+	}
+	if _, ok := st.Job(rec.ID); ok {
+		t.Fatal("released owner remained pinned")
+	}
+}
 
 // TestWithFileLockContextBoundsLockWait proves a busy state lock cannot hold a
 // caller past its context. Settlement uses this so diagnostic bookkeeping

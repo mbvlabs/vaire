@@ -2,6 +2,7 @@ package health
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -33,8 +34,10 @@ type FollowerState struct {
 	// LagBytes is how much WAL the source wrote that the follower hasn't
 	// replayed; LagSeconds is PostgreSQL's replay delay. Either is nil when
 	// it couldn't be measured: an unknown lag is not zero.
-	LagBytes   *int64   `json:"lag_bytes,omitempty"`
-	LagSeconds *float64 `json:"lag_seconds,omitempty"`
+	LagBytes            *int64   `json:"lag_bytes,omitempty"`
+	LagSeconds          *float64 `json:"lag_seconds,omitempty"`
+	ReceiveBacklogBytes *uint64  `json:"receive_backlog_bytes,omitempty"`
+	ReplayBacklogBytes  *uint64  `json:"replay_backlog_bytes,omitempty"`
 	// The slot on the source: whether it exists and is active, its
 	// wal_status (reserved, extended, unreserved, lost), the WAL it holds,
 	// and how much more may be written before it is lost. SlotSafeBytes is
@@ -86,6 +89,7 @@ func FollowerSourceSQL(follower, slot string) string {
 	rep := "FROM pg_stat_replication WHERE application_name = " + app + " ORDER BY backend_start DESC LIMIT 1"
 	sl := "FROM pg_replication_slots WHERE slot_name = " + s
 	return `SELECT
+  pg_current_wal_lsn()::text AS source_lsn,
   coalesce((SELECT state ` + rep + `), '') AS sender_state,
   coalesce((SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint ` + rep + `)::text, '') AS lag_bytes,
   coalesce((SELECT extract(epoch FROM replay_lag)::float8 ` + rep + `)::text, '') AS replay_lag,
@@ -99,7 +103,9 @@ func FollowerSourceSQL(follower, slot string) string {
 // FollowerSelfSQL reads a follower's own side: recovery and a paused replay.
 const FollowerSelfSQL = `SELECT
   pg_is_in_recovery()::text AS in_recovery,
-  CASE WHEN pg_is_in_recovery() THEN pg_get_wal_replay_pause_state() ELSE '' END AS pause_state`
+  CASE WHEN pg_is_in_recovery() THEN pg_get_wal_replay_pause_state() ELSE '' END AS pause_state,
+  coalesce(pg_last_wal_receive_lsn()::text, '') AS receive_lsn,
+  coalesce(pg_last_wal_replay_lsn()::text, '') AS replay_lsn`
 
 // SlotsSQL lists a cluster's vaire follower slots (vaire_*).
 const SlotsSQL = `SELECT slot_name FROM pg_replication_slots WHERE left(slot_name, 6) = 'vaire_' ORDER BY slot_name`
@@ -117,6 +123,10 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 	}
 	st.SenderState = src["sender_state"]
 	st.Streaming = st.SenderState == "streaming"
+	if st.SelfKnown && st.InRecovery {
+		st.ReceiveBacklogBytes = lsnBacklog(src["source_lsn"], self["receive_lsn"])
+		st.ReplayBacklogBytes = lsnBacklog(src["source_lsn"], self["replay_lsn"])
+	}
 	st.SlotExists = src["slot_active"] != ""
 	if st.SlotExists {
 		st.SlotActive = src["slot_active"] == "true"
@@ -149,6 +159,29 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 		st.LagSeconds = &seconds
 	}
 	return st
+}
+
+func parseLSN(s string) (uint64, bool) {
+	hi, lo, ok := strings.Cut(s, "/")
+	if !ok || hi == "" || lo == "" || len(hi) > 8 || len(lo) > 8 {
+		return 0, false
+	}
+	h, e1 := strconv.ParseUint(hi, 16, 32)
+	l, e2 := strconv.ParseUint(lo, 16, 32)
+	if e1 != nil || e2 != nil {
+		return 0, false
+	}
+	return h<<32 | l, true
+}
+
+func lsnBacklog(source, follower string) *uint64 {
+	s, ok := parseLSN(source)
+	f, ok2 := parseLSN(follower)
+	if !ok || !ok2 || f > s || s-f > math.MaxInt64 {
+		return nil
+	}
+	n := s - f
+	return &n
 }
 
 // SlotHalfUsed reports whether the slot holds more WAL than it may still

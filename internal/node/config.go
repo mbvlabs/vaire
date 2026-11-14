@@ -25,6 +25,11 @@ type configValidateParams struct {
 	TOML string `json:"toml"`
 }
 
+var configSetStore = func() state.FileStore { return state.FileStore{} }
+var configSetSchedules = checkSchedules
+var configSetHostname = syncNodeHostname
+var configSetPlan = engine.Plan
+
 func handleConfigGet(context.Context, *Env) (Result, error) {
 	store := state.FileStore{}
 	raw, err := os.ReadFile(state.Path)
@@ -46,7 +51,7 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	store := state.FileStore{}
+	store := configSetStore()
 	current, err := store.Revision()
 	if err != nil {
 		return Result{}, err
@@ -70,10 +75,19 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	if err := cfg.Validate(); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
-	if err := checkSchedules(ctx, cfg); err != nil {
+	old, _, oldErr := store.Load()
+	if oldErr != nil {
+		return Result{}, oldErr
+	}
+	if err := guardRecoveryFloorChanges(old, cfg, runtimeFor(env, true).Host); err != nil {
 		return Result{}, err
 	}
-	old, _, oldErr := store.Load()
+	if err := checkCPUProposalWithRequests(ctx, old, cfg, p.Set); err != nil {
+		return Result{}, err
+	}
+	if err := configSetSchedules(ctx, cfg); err != nil {
+		return Result{}, err
+	}
 	if oldErr == nil {
 		if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
 			return Result{}, err
@@ -91,6 +105,9 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	revision := current
 	var synced []output.Warning
 	if !env.Req.DryRun {
+		if err := invalidateCPUProofs(cpuProofTargets(old, cfg, p.Set)); err != nil {
+			return Result{}, err
+		}
 		// vaire_admin's write access follows the protection before the file
 		// says so: a protection is never saved while vaire_admin can still
 		// write to the database.
@@ -102,7 +119,7 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		if err := store.Save(raw); err != nil {
 			return Result{}, err
 		}
-		if err := syncNodeHostname(cfg); err != nil {
+		if err := configSetHostname(cfg); err != nil {
 			return Result{}, err
 		}
 		if revision, err = store.Revision(); err != nil {
@@ -111,7 +128,7 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	}
 	env.Cluster = cfg
 	rt := runtimeFor(env, true)
-	plan, planErr := engine.Plan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
+	plan, planErr := configSetPlan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
 	data := map[string]any{"revision": revision, "plan": plan, "saved": !env.Req.DryRun}
 	warnings := append(synced, oversubscriptionWarnings(cfg, rt.Host)...)
 	if planErr != nil {

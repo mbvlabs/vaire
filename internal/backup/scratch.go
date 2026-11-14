@@ -37,6 +37,9 @@ const TemporaryPortDir = "/run/vaire-ports"
 func reserveTemporaryPort(owner string) (int, error) {
 	var port int
 	err := engine.WithFileLock(filepath.Join(TemporaryPortDir, "ports.lock"), func() error {
+		if _, err := os.Lstat(filepath.Join(TemporaryPortDir, owner)); !errors.Is(err, os.ErrNotExist) {
+			return errors.Join(err, errors.New("reservation owner already exists or is unverifiable"))
+		}
 		taken := clusterPorts()
 		files, _ := os.ReadDir(TemporaryPortDir)
 		for _, f := range files {
@@ -56,7 +59,12 @@ func reserveTemporaryPort(owner string) (int, error) {
 				continue
 			}
 			port = n
-			return os.WriteFile(filepath.Join(TemporaryPortDir, owner), []byte(strconv.Itoa(n)+"\n"), 0o600)
+			f, err := os.OpenFile(filepath.Join(TemporaryPortDir, owner), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // allocator-owned path under lock
+			if err != nil {
+				return err
+			}
+			_, writeErr := fmt.Fprintln(f, n)
+			return errors.Join(writeErr, f.Close())
 		}
 		return output.NewError(output.CodePrecondition,
 			fmt.Sprintf("every temporary port (%d-%d) is in use", config.TemporaryPortMin, config.TemporaryPortMax), output.ExitPrecondition,

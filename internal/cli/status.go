@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -20,6 +21,27 @@ type statusPools struct {
 	ServersActive  int64 `json:"sv_active"`
 	ServersIdle    int64 `json:"sv_idle"`
 	MaxWaitS       int64 `json:"maxwait_s"`
+}
+
+type statusCPU struct {
+	Requested struct {
+		Mode  string `json:"mode"`
+		Quota string `json:"quota"`
+	} `json:"requested"`
+	EffectiveKnown bool `json:"effective_known"`
+	Effective      *struct {
+		Idle            *bool   `json:"idle,omitempty"`
+		QuotaPeriodUsec *uint64 `json:"quota_period_usec,omitempty"`
+		QuotaUsec       *uint64 `json:"quota_usec,omitempty"`
+		Unlimited       *bool   `json:"unlimited,omitempty"`
+		Weight          *uint64 `json:"weight,omitempty"`
+	} `json:"effective,omitempty"`
+	UsageUsec         *uint64    `json:"usage_usec,omitempty"`
+	ObservedAt        *time.Time `json:"observed_at,omitempty"`
+	Reason            string     `json:"reason,omitempty"`
+	SampleGeneration  string     `json:"sample_generation,omitempty"`
+	SampleMonotonicNS *int64     `json:"sample_monotonic_ns,omitempty"`
+	UsagePercent      *float64   `json:"usage_percent,omitempty"`
 }
 
 type statusDB struct {
@@ -61,8 +83,21 @@ type statusDB struct {
 	RestoreInProgress bool              `json:"restore_in_progress"`
 	Protected         bool              `json:"protected,omitempty"`
 	// Follows and Follower are a follower's source and replication (Phase 6).
-	Follows  string                `json:"follows,omitempty"`
-	Follower *health.FollowerState `json:"follower,omitempty"`
+	Follows          string                 `json:"follows,omitempty"`
+	Follower         *health.FollowerState  `json:"follower,omitempty"`
+	CPU              *statusCPU             `json:"cpu,omitempty"`
+	DataFreeBytes    *uint64                `json:"data_free_bytes,omitempty"`
+	ApplicationReady *bool                  `json:"application_ready,omitempty"`
+	Materialisation  *materialisationReport `json:"materialisation,omitempty"`
+}
+
+func (db statusDB) MarshalJSON() ([]byte, error) {
+	type plain statusDB
+	raw, err := json.Marshal(plain(db))
+	if err != nil || db.State != "incomplete" {
+		return raw, err
+	}
+	return omitIncompleteFields(raw, "uptime_s", "connections", "db_size", "wal_bytes", "longest_xact_s", "backup", "restart_pending", "restore_in_progress")
 }
 
 type statusData struct {
@@ -146,7 +181,33 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 			}
 			return err
 		}
+		statusWatchCPU(data, &next)
 		data, warnings = next, w
+	}
+}
+
+// statusWatchCPU uses consecutive same-generation node monotonic samples.
+// Missing or invalid samples are never bridged across a refresh.
+func statusWatchCPU(previous statusData, next *statusData) {
+	old := make(map[string]*statusCPU, len(previous.Databases))
+	for _, db := range previous.Databases {
+		old[db.Name] = db.CPU
+	}
+	for i := range next.Databases {
+		cpu := next.Databases[i].CPU
+		prior := old[next.Databases[i].Name]
+		if cpu == nil {
+			continue
+		}
+		cpu.UsagePercent = nil
+		if prior == nil || prior.SampleGeneration == "" || cpu.SampleGeneration != prior.SampleGeneration ||
+			prior.SampleMonotonicNS == nil || cpu.SampleMonotonicNS == nil || prior.UsageUsec == nil || cpu.UsageUsec == nil ||
+			*cpu.UsageUsec < *prior.UsageUsec || *prior.SampleMonotonicNS <= 0 || *cpu.SampleMonotonicNS <= *prior.SampleMonotonicNS {
+			continue
+		}
+		elapsed := *cpu.SampleMonotonicNS - *prior.SampleMonotonicNS
+		rate := float64(*cpu.UsageUsec-*prior.UsageUsec) * 100000 / float64(elapsed)
+		cpu.UsagePercent = &rate
 	}
 }
 
@@ -231,6 +292,11 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 		if db.MemoryCurrentMiB != nil {
 			mem = tune.FormatMiB(int(*db.MemoryCurrentMiB)) + "/" + tune.FormatMiB(db.MemoryMiB)
 		}
+		if db.State == "incomplete" {
+			lines = append(lines, fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
+				db.Name, db.State, db.Size, mem, "-", "-", "-", "-", "-"))
+			continue
+		}
 		cache, tps := "-", "-"
 		if db.CacheHitRatio != nil {
 			cache = fmt.Sprintf("%.1f%%", *db.CacheHitRatio*100)
@@ -247,13 +313,54 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 			db.Name, state, db.Size, mem, fmt.Sprintf("%d/%d", db.Connections.Used, db.Connections.Max), cache, tps, last, health.Uptime(db.UptimeS)))
 	}
 	for _, db := range d.Databases {
+		if db.State == "incomplete" {
+			lines = append(lines, "  "+db.Name+": "+incompleteReportText(db.Materialisation))
+			continue
+		}
 		if db.Backup.WindowStart != "" {
 			lines = append(lines, fmt.Sprintf("  %s: restorable from %s", db.Name, db.Backup.WindowStart))
 		}
 	}
 	for _, db := range d.Databases {
+		if db.State == "incomplete" {
+			continue
+		}
 		if line := followerLine(db); line != "" {
 			lines = append(lines, line)
+		}
+		if db.CPU != nil {
+			cpu := db.CPU
+			quota := cpu.Requested.Quota
+			if quota == "" {
+				quota = "none"
+			}
+			line := fmt.Sprintf("  %s: CPU %s, requested quota %s", db.Name, cpu.Requested.Mode, quota)
+			if !cpu.EffectiveKnown {
+				line += ", effective unknown"
+				if cpu.Reason != "" {
+					line += " (" + cpu.Reason + ")"
+				}
+			} else if cpu.Effective != nil {
+				if cpu.Effective.Idle != nil && *cpu.Effective.Idle {
+					line += ", idle priority"
+				} else if cpu.Effective.Weight != nil {
+					line += fmt.Sprintf(", weight %d", *cpu.Effective.Weight)
+				}
+				if cpu.Effective.Unlimited != nil && *cpu.Effective.Unlimited {
+					line += ", effective quota unlimited"
+				} else if cpu.Effective.QuotaUsec != nil && cpu.Effective.QuotaPeriodUsec != nil {
+					line += fmt.Sprintf(", effective quota %d/%d usec", *cpu.Effective.QuotaUsec, *cpu.Effective.QuotaPeriodUsec)
+				}
+			}
+			if cpu.UsagePercent != nil {
+				line += fmt.Sprintf(", usage %.1f%% of one CPU", *cpu.UsagePercent)
+			} else if cpu.UsageUsec != nil {
+				line += fmt.Sprintf(", cumulative usage %d usec", *cpu.UsageUsec)
+			}
+			lines = append(lines, line)
+		}
+		if db.Follows != "" && db.DataFreeBytes != nil {
+			lines = append(lines, fmt.Sprintf("  %s: data filesystem %d bytes free", db.Name, *db.DataFreeBytes))
 		}
 	}
 	for _, db := range d.Databases {
@@ -313,6 +420,12 @@ func followerLine(db statusDB) string {
 	}
 	if !f.SourceKnown {
 		return line
+	}
+	if f.ReceiveBacklogBytes != nil {
+		line += fmt.Sprintf(" · receive backlog %d bytes", *f.ReceiveBacklogBytes)
+	}
+	if f.ReplayBacklogBytes != nil {
+		line += fmt.Sprintf(" · replay backlog %d bytes", *f.ReplayBacklogBytes)
 	}
 	switch {
 	case !f.SlotExists:

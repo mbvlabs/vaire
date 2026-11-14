@@ -18,6 +18,10 @@ import (
 // copy. The real registration and adoption files are written here; only their
 // owner lookup and the writer's owner argument are neutralised for the test.
 func TestAdoptFinishesAPartialRegistration(t *testing.T) {
+	oldReservation, oldRunning := legacyReservationDir, materialisedDataRunning
+	legacyReservationDir = t.TempDir()
+	materialisedDataRunning = func(context.Context, string) bool { return false }
+	t.Cleanup(func() { legacyReservationDir, materialisedDataRunning = oldReservation, oldRunning })
 	oldConf, oldIDs, oldWrite := pgConfRoot, resolveClusterIDs, writeClusterFile
 	pgConfRoot = t.TempDir()
 	// Tests write as their own user; production chowns to postgres.
@@ -133,6 +137,9 @@ func TestClusterDataDirectory(t *testing.T) {
 // postgresql.conf is a partial directory, not a cluster. The operation-owned
 // cleanup removes it with the data.
 func TestDropTemporaryClusterRemovesAPartialRegistration(t *testing.T) {
+	oldReservation := legacyReservationDir
+	legacyReservationDir = t.TempDir()
+	t.Cleanup(func() { legacyReservationDir = oldReservation })
 	oldConf := pgConfRoot
 	pgConfRoot = t.TempDir()
 	t.Cleanup(func() { pgConfRoot = oldConf })

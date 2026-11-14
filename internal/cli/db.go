@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -51,8 +52,19 @@ type databaseInfo struct {
 	Protected      bool     `json:"protected"`
 	State          string   `json:"state"`
 	// Follows and Follower are a follower's source and replication (Phase 6).
-	Follows  string                `json:"follows,omitempty"`
-	Follower *health.FollowerState `json:"follower,omitempty"`
+	Follows          string                 `json:"follows,omitempty"`
+	Follower         *health.FollowerState  `json:"follower,omitempty"`
+	ApplicationReady *bool                  `json:"application_ready,omitempty"`
+	Materialisation  *materialisationReport `json:"materialisation,omitempty"`
+}
+
+func (db databaseInfo) MarshalJSON() ([]byte, error) {
+	type plain databaseInfo
+	raw, err := json.Marshal(plain(db))
+	if err != nil || db.State != "incomplete" {
+		return raw, err
+	}
+	return omitIncompleteFields(raw, "exists", "size_bytes", "roles", "extensions")
 }
 
 // limits is the database's limits in one column: cpu and io weights,
@@ -111,7 +123,11 @@ func dbListLines(dbs []databaseInfo) []string {
 		if db.Follows != "" {
 			stanza = "follows " + db.Follows
 		}
-		lines = append(lines, fmt.Sprintf(row, db.Name, nodeName, host, size, memory, db.limits(), stanza, protected, db.State+followerSuffix(db.Follower)))
+		state := db.State + followerSuffix(db.Follower)
+		if db.State == "incomplete" {
+			state = db.State + " (" + incompleteReportText(db.Materialisation) + ")"
+		}
+		lines = append(lines, fmt.Sprintf(row, db.Name, nodeName, host, size, memory, db.limits(), stanza, protected, state))
 	}
 	return lines
 }
@@ -150,7 +166,14 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		db.Extensions = []string{"pg_stat_statements"}
 	}
 	if dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: map[string]any{"database": db}, Message: "dry run: would create database " + name, Warnings: s.warnings})
+		planned, warnings, err := previewDBCreate(db, flagTrue(cmd, "allow-overcommit"), func(method string, params map[string]any, opts remote.CallOptions) (remote.Reply, error) {
+			opts.OnEvent = p.event
+			return p.call(commandContext(cmd), s.node, method, params, opts)
+		})
+		if err != nil {
+			return err
+		}
+		return output.Success(cmd, output.Result{Data: map[string]any{"database": planned}, Message: "dry run: would create database " + name, Warnings: append(s.warnings, warnings...)})
 	}
 	secret, rpc, err := newDatabaseSecret(cfg, name, steps.DatabaseRoles)
 	if err != nil {
@@ -206,6 +229,35 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 	})
 }
 
+// previewDBCreate asks the node to apply its complete topology and host
+// admission checks without generating or sending any credentials.
+func previewDBCreate(db config.ClusterSpec, allowOvercommit bool, call func(string, map[string]any, remote.CallOptions) (remote.Reply, error)) (config.ClusterSpec, []output.Warning, error) {
+	params := map[string]any{
+		"name": db.Name, "statement_timeout": db.StatementTimeout, "extensions": db.Extensions,
+		"size": db.Size, "memory": db.Memory, "profile": db.Profile,
+	}
+	if db.Protected {
+		params["protected"] = true
+	}
+	if allowOvercommit {
+		params["allow_overcommit"] = true
+	}
+	reply, err := call("db.create", params, remote.CallOptions{DryRun: true})
+	if err != nil {
+		return config.ClusterSpec{}, nil, err
+	}
+	var data struct {
+		Database *config.ClusterSpec `json:"database"`
+	}
+	if err := reply.Decode(&data); err != nil {
+		return config.ClusterSpec{}, nil, err
+	}
+	if data.Database == nil || data.Database.Name != db.Name {
+		return config.ClusterSpec{}, nil, fmt.Errorf("node returned an invalid database creation preview")
+	}
+	return *data.Database, reply.Warnings, nil
+}
+
 // checkSizeFlags refuses a --size, --memory or --profile the node would
 // refuse anyway, before any password is generated.
 func checkSizeFlags(cfg config.Cluster, db config.ClusterSpec) error {
@@ -231,9 +283,9 @@ func sizeSummary(cfg config.Cluster, spec config.ClusterSpec) string {
 func runDBResize(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	size, memory := stringFlag(cmd, "size"), stringFlag(cmd, "memory")
-	if size == "" && memory == "" {
-		return output.NewError(output.CodeUsage, "db resize needs --size or --memory", output.ExitUsage,
-			"Sizes are "+strings.Join(config.SizeNames(), ", ")+"; --memory takes an amount such as 768MiB or 2GiB.")
+	if size == "" && memory == "" && !cmd.Flags().Changed("cpu-mode") && !cmd.Flags().Changed("cpu-quota") {
+		return output.NewError(output.CodeUsage, "db resize needs a resource change", output.ExitUsage,
+			"Pass --size, --memory, --cpu-mode or --cpu-quota.")
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -265,6 +317,7 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	deferRestart := flagTrue(cmd, "defer-restart")
 	confirm, confirms := confirmOptions(cmd)
 	params := map[string]any{"name": name, "size": size, "memory": memory, "defer_restart": deferRestart}
+	addCPUFlags(cmd, params)
 	// Sent only when set, so an older node still takes the request.
 	if flagTrue(cmd, "allow-overcommit") {
 		params["allow_overcommit"] = true
@@ -284,6 +337,15 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	summary := sizeSummary(cfg, data.Database)
+	if cmd.Flags().Changed("cpu-mode") || cmd.Flags().Changed("cpu-quota") {
+		if res, err := cfg.Resources(data.Database); err == nil {
+			quota := res.CPUQuota
+			if quota == "" {
+				quota = "none"
+			}
+			summary += ", CPU " + res.CPUMode + ", quota " + quota
+		}
+	}
 	if data.Plan != nil {
 		return output.Success(cmd, output.Result{Data: data, Warnings: warnings,
 			Message: resizePreviewMessage(name, summary, *data.Plan, data.Followers)})

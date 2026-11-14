@@ -67,6 +67,16 @@ func pathExists(p string) bool {
 	return err == nil
 }
 
+// Doctor read seams allow diagnostics fixtures to avoid host service probes
+// and PostgreSQL sockets while exercising the actual fact-gathering logic.
+var (
+	doctorServiceRead   = steps.ServiceActive
+	doctorProbeRead     = steps.Probe
+	doctorDriftRead     = driftOf
+	doctorOverridesRead = overriddenSettings
+	doctorWeakHBARead   = weakHBA
+)
+
 // gatherFacts reads everything doctor's checks need from the node.
 func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init bool) doctor.Facts {
 	f := doctor.Facts{Now: time.Now().UTC(), Init: init, DataRoot: cfg.Server.DataRoot}
@@ -77,8 +87,8 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	f.RebootRequired = err == nil
 	f.DiskPath = nearestExisting(cfg.Server.DataRoot, pathExists)
 	f.DiskTotal, f.DiskFree, f.DiskKnown = hostinfo.DiskUsage(f.DiskPath)
-	f.UnattendedActive = steps.ServiceActive(ctx, "unattended-upgrades")
-	if out, err := steps.Probe(ctx, "timedatectl", "show", "-p", "NTPSynchronized", "--value"); err == nil {
+	f.UnattendedActive = doctorServiceRead(ctx, "unattended-upgrades")
+	if out, err := doctorProbeRead(ctx, "timedatectl", "show", "-p", "NTPSynchronized", "--value"); err == nil {
 		f.TimeKnown, f.TimeSynced = true, out == "yes"
 	}
 	if st, err := engine.LoadState(engine.StatePath); err == nil {
@@ -86,9 +96,9 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	}
 	_, err = os.Stat(steps.BreakGlassPath)
 	f.BreakGlassOpen = err == nil
-	f.SSHConfigDrift = driftOf(ctx, cfg, rt, steps.SSHDStepID)
-	f.FirewallDrift = driftOf(ctx, cfg, rt, steps.FirewallStepID)
-	if out, err := steps.Probe(ctx, "ufw", "status"); err == nil {
+	f.SSHConfigDrift = doctorDriftRead(ctx, cfg, rt, steps.SSHDStepID)
+	f.FirewallDrift = doctorDriftRead(ctx, cfg, rt, steps.FirewallStepID)
+	if out, err := doctorProbeRead(ctx, "ufw", "status"); err == nil {
 		f.UFWActive = strings.HasPrefix(out, "Status: active")
 	}
 	f.OpenAllowlists = openAllowlists(cfg)
@@ -108,14 +118,14 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 		f.EndpointStatus, f.EndpointError = endpointStatus(ctx, f.Hostname, cfg.Metrics.PathPrefix)
 		f.PGProbes, f.PGExporterLog = postgresProbes(ctx, stepsView(cfg))
 	}
-	f.NginxActive = steps.ServiceActive(ctx, steps.NginxService)
+	f.NginxActive = doctorServiceRead(ctx, steps.NginxService)
 	// Databases awaiting recovery have no cluster and no pooler entry yet
 	// (Phase 5), so the poolers run only once one is recovered.
 	f.HasDatabases = len(stepsView(cfg).Clusters) > 0
 	if f.HasDatabases {
 		f.PoolersActive = map[string]bool{
-			steps.PgbouncerService:     steps.ServiceActive(ctx, steps.PgbouncerService),
-			steps.SessionPoolerService: steps.ServiceActive(ctx, steps.SessionPoolerService),
+			steps.PgbouncerService:     doctorServiceRead(ctx, steps.PgbouncerService),
+			steps.SessionPoolerService: doctorServiceRead(ctx, steps.SessionPoolerService),
 		}
 	}
 	f.BackupConfigured = cfg.BackupConfigured()
@@ -152,10 +162,10 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 			f.Clusters = append(f.Clusters, c)
 			continue
 		}
-		c.ConfigDrift = driftOf(ctx, cfg, rt, steps.ConfigStepID(s.Spec.Name))
-		c.Overrides = overriddenSettings(filepath.Join(steps.PGConfD(s.Spec.Name), "90-overrides.conf"))
+		c.ConfigDrift = doctorDriftRead(ctx, cfg, rt, steps.ConfigStepID(s.Spec.Name))
+		c.Overrides = doctorOverridesRead(filepath.Join(steps.PGConfD(s.Spec.Name), "90-overrides.conf"))
 		if s.State == "running" {
-			c.HBAWeak = weakHBA(ctx, s.Spec)
+			c.HBAWeak = doctorWeakHBARead(ctx, s.Spec)
 		}
 		if s.CgroupOK {
 			if p, ok := s.Cgroup.Pressure["memory"]; ok {
@@ -490,6 +500,9 @@ func handleDoctorRun(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if err := guardMaterialisationApply(env.Cluster, ""); err != nil {
+		return Result{}, err
+	}
 	if !doctor.ValidOnly(p.Only) {
 		return Result{}, output.NewError(output.CodeUsage, "unknown --only "+p.Only, output.ExitUsage,
 			"Use one of "+strings.Join(doctor.Categories, ", ")+".")
@@ -552,6 +565,10 @@ func doctorFamilies(at time.Time, results []doctor.Result) []*promfile.Family {
 // stops init with doctor_failed (checks that can't pass yet are left out);
 // after apply each failing check is the warning doctor_check_failed.
 func doctorGate(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init bool) (*doctorData, []output.Warning, error) {
+	if err := guardMaterialisationApply(cfg, ""); err != nil {
+		return nil, []output.Warning{{Code: "materialisation_incomplete",
+			Message: "doctor could not check incomplete or unverifiable materialisation state"}}, err
+	}
 	results := runDoctor(ctx, cfg, rt, init, "", "")
 	data := &doctorData{Results: results, Summary: doctor.Summary(results)}
 	failed := doctor.Failed(results)

@@ -470,6 +470,12 @@ func planMessage(header string, data engine.PlanData) string {
 	lines := []string{header}
 	for _, step := range data.Steps {
 		lines = append(lines, fmt.Sprintf("  %-5s %s (%s)", step.Action, step.ID, step.Reason))
+		if step.Detail != "" {
+			lines = append(lines, "        "+step.Detail)
+		}
+	}
+	if len(data.AccessConfirmTokens) > 0 {
+		lines = append(lines, "", "access expansion requires: "+confirmFlags(data.AccessConfirmTokens))
 	}
 	for _, step := range data.Steps {
 		for _, d := range step.Diffs {

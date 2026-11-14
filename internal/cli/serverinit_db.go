@@ -31,7 +31,7 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 		"node_name":    r.master().Name,
 		"local":        r.local,
 		"skip_doctor":  flagTrue(r.cmd, "skip-doctor"),
-	}, remote.CallOptions{Secrets: r.dbSecrets, Confirm: r.name, OnEvent: r.p.event})
+	}, remote.CallOptions{Secrets: r.dbSecrets, Confirm: r.name, OperationID: r.prog.SetupOperationID, OnEvent: r.p.event})
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
