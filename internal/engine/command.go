@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-	"time"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 )
@@ -39,7 +38,10 @@ func (s Shell) Exec(ctx context.Context, stepID string, c Command, report Report
 	if s.DryRun {
 		return errDryRun
 	}
-	cmd := exec.Command(c.Name, c.Args...) //nolint:gosec // G204: fixed backup tools; arguments carry no secrets.
+	// Command, not CommandContext: Exec cancels by signalling the whole
+	// process group and escalating to SIGKILL after killGrace, which
+	// CommandContext cannot do (see supervise).
+	cmd := exec.Command(c.Name, c.Args...) //nolint:gosec,noctx // G204: fixed backup tools; noctx: process-group cancellation below.
 	cmd.Env = []string{"PATH=" + scriptPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=/root"}
 	for key, value := range c.Env {
 		if !envKeyPattern.MatchString(key) {
@@ -68,19 +70,7 @@ func (s Shell) Exec(ctx context.Context, stepID string, c Command, report Report
 
 	done := make(chan struct{})
 	interrupted := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			close(interrupted)
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			select {
-			case <-done:
-			case <-time.After(killGrace):
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-		case <-done:
-		}
-	}()
+	go supervise(ctx, cmd, done, interrupted)
 
 	lineReport := report
 	if c.OnLine != nil {
@@ -115,7 +105,7 @@ func (s Shell) Exec(ctx context.Context, stepID string, c Command, report Report
 // RunQuiet runs a read-only probe with the fixed environment and reports only
 // whether it exited zero.
 func RunQuiet(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed probe commands.
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{"PATH=" + scriptPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=/root"}
 	return cmd.Run()
 }

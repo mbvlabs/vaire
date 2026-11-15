@@ -1,6 +1,7 @@
 package hostinfo
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"os"
@@ -45,7 +46,7 @@ func Detect(dataDirectory string) (Info, error) {
 	info.Kernel = kernelRelease()
 	info.VCPU = vcpuCount()
 	info.PublicIPv4 = publicIPv4()
-	info.PublicIPv6 = PublicIPv6()
+	info.PublicIPv6 = PublicIPv6(context.Background())
 	info.DataDisk = detectDisk(dataDirectory)
 	return info, nil
 }
@@ -126,7 +127,8 @@ func cpuinfoVCPU() int {
 // publicIPv4 is the source address the default route would use, or "" when
 // there is none.
 func publicIPv4() string {
-	conn, err := net.Dial("udp4", "192.0.2.1:9")
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(context.Background(), "udp4", "192.0.2.1:9")
 	if err != nil {
 		return ""
 	}
@@ -143,8 +145,9 @@ func publicIPv4() string {
 }
 
 // PublicIPv6 is the source address the IPv6 default route would use, or "".
-func PublicIPv6() string {
-	conn, err := net.Dial("udp6", "[2606:4700:4700::1111]:9")
+func PublicIPv6(ctx context.Context) string {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "udp6", "[2606:4700:4700::1111]:9")
 	if err != nil {
 		return ""
 	}
@@ -228,7 +231,7 @@ func nearestExisting(path string) string {
 // findmnt runs findmnt -no SOURCE,TARGET -T <path> and returns the block
 // device and mount point.
 func findmnt(path string) (source, target string, ok bool) {
-	out, err := exec.Command("findmnt", "-no", "SOURCE,TARGET", "-T", path).Output() //nolint:gosec // G204: fixed findmnt invocation with an operator-supplied path.
+	out, err := exec.CommandContext(context.Background(), "findmnt", "-no", "SOURCE,TARGET", "-T", path).Output()
 	if err != nil {
 		return "", "", false
 	}

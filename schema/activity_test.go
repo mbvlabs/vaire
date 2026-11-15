@@ -32,7 +32,7 @@ type contractSchema struct {
 
 func readContractSchema(t *testing.T, path string) contractSchema {
 	t.Helper()
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: callers supply fixed schema filenames in this package.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

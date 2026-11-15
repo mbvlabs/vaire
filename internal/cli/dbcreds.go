@@ -193,7 +193,7 @@ func (d databaseSecret) styled(headline, title, note string, width int) string {
 			rows = append(rows, ui.CredentialRow{Role: role, User: r.User, Password: r.Password})
 		}
 	}
-	var urls []ui.URLRow
+	urls := make([]ui.URLRow, 0, len(d.URLs))
 	for _, k := range sortedStrings(d.URLs) {
 		urls = append(urls, ui.URLRow{Label: k + " URL", URL: d.URLs[k]})
 	}
@@ -208,7 +208,7 @@ func styledStdout(cmd *cobra.Command) (int, bool) {
 		return 0, false
 	}
 	width := 80
-	if cols, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && cols > 0 { //nolint:gosec // G115: file descriptors fit in int.
+	if cols, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && cols > 0 {
 		width = cols
 	}
 	return width, true

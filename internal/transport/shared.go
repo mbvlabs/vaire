@@ -519,11 +519,11 @@ func (d *SharedDialer) Close() {
 
 // lockFile takes an exclusive flock on path, waiting until ctx ends.
 func lockFile(ctx context.Context, path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: a lock file in the context directory.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(f.Fd())
 	for {
 		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {

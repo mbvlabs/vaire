@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,44 +26,69 @@ type upgradeData struct {
 	Nodes        string          `json:"nodes,omitempty"`
 }
 
-func runUpgrade(cmd *cobra.Command, _ []string) error {
+// upgradeOptions are the flags of one vaire upgrade run.
+type upgradeOptions struct {
+	version   string
+	channel   string
+	skipNodes bool
+	dry       bool
+	yes       bool
+}
+
+// upgradeFlags reads the command's flags.
+func upgradeFlags(cmd *cobra.Command) (upgradeOptions, error) {
+	var opts upgradeOptions
 	version, err := cmd.Flags().GetString("version")
 	if err != nil {
-		return err
+		return opts, err
 	}
-	channelFlag, err := cmd.Flags().GetString("channel")
+	channel, err := cmd.Flags().GetString("channel")
 	if err != nil {
-		return err
+		return opts, err
 	}
 	skipNodes, err := cmd.Flags().GetBool("skip-nodes")
 	if err != nil {
+		return opts, err
+	}
+	opts.version = version
+	opts.channel = channel
+	opts.skipNodes = skipNodes
+	opts.dry = dryRun(cmd)
+	opts.yes = flagTrue(cmd, "yes")
+	return opts, nil
+}
+
+func runUpgrade(cmd *cobra.Command, _ []string) error {
+	opts, err := upgradeFlags(cmd)
+	if err != nil {
 		return err
 	}
-	dry := dryRun(cmd)
-	yes := flagTrue(cmd, "yes")
+	manifest, plan, data, warnings, err := planUpgrade(cmd, opts)
+	if err != nil {
+		return err
+	}
+	return applyUpgrade(cmd, opts, manifest, plan, data, warnings)
+}
 
+// planUpgrade resolves the release and decides what vaire upgrade changes.
+func planUpgrade(cmd *cobra.Command, opts upgradeOptions) (release.Manifest, upgrade.Plan, upgradeData, []output.Warning, error) {
 	target, err := upgrade.ResolveSelf()
 	if err != nil {
-		return err
+		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}
-	channel, err := upgrade.SelectChannel(channelFlag)
+	channel, err := upgrade.SelectChannel(opts.channel)
 	if err != nil {
-		return err
+		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}
-
 	client := &release.Client{}
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	stop := waitOn(cmd, "checking for an vaire release on "+channel)
-	manifest, err := client.Resolve(ctx, channel, version)
+	manifest, err := client.Resolve(commandContext(cmd), channel, opts.version)
 	stop()
 	if err != nil {
-		return err
+		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}
 	from := upgrade.Version{Version: buildinfo.Version, Channel: buildinfo.Channel}
-	plan := upgrade.Decide(from, manifest, strings.TrimSpace(version) != "")
+	plan := upgrade.Decide(from, manifest, strings.TrimSpace(opts.version) != "")
 	plan.Target = target
 
 	data := upgradeData{
@@ -72,11 +96,16 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		To:        plan.To,
 		Path:      target,
 		Changed:   plan.Changed,
-		DryRun:    dry,
+		DryRun:    opts.dry,
 		Escalated: flagTrue(cmd, "escalated"),
 	}
-	warnings := append([]output.Warning(nil), plan.Warnings...)
+	return manifest, plan, data, append([]output.Warning(nil), plan.Warnings...), nil
+}
 
+// applyUpgrade installs the planned release and renders the result. A child
+// re-executed under sudo renders its own result, so when one ran the parent
+// stops with its error and prints nothing.
+func applyUpgrade(cmd *cobra.Command, opts upgradeOptions, manifest release.Manifest, plan upgrade.Plan, data upgradeData, warnings []output.Warning) error {
 	if !plan.Changed {
 		return output.Success(cmd, output.Result{
 			Data:     data,
@@ -85,75 +114,25 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 			Next:     []string{"vaire version"},
 		})
 	}
-	if dry {
-		if !skipNodes {
-			warnings = append(warnings, nodesWarning())
-			data.Nodes = "skipped"
-		} else {
-			data.Nodes = "skipped"
-		}
-		return output.Success(cmd, output.Result{
-			Data:     data,
-			Warnings: warnings,
-			Message:  fmt.Sprintf("Would upgrade vaire %s → %s (%s) at %s", plan.From.Version, plan.To.Version, plan.To.Channel, target),
-			Next:     []string{"vaire version"},
-		})
+	if opts.dry {
+		return upgradeDryRun(cmd, data, warnings, plan, opts.skipNodes)
 	}
-
-	if !yes && !MustNotPrompt(cmd) {
-		ok, err := PromptYes(cmd, fmt.Sprintf("Upgrade vaire %s → %s (%s) at %s?", plan.From.Version, plan.To.Version, plan.To.Channel, target))
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return output.NewError(
-				output.CodePrecondition,
-				"upgrade was not confirmed",
-				output.ExitPrecondition,
-				"Re-run with --yes to skip the prompt.",
-			)
-		}
-	}
-
-	if !dirWritable(filepath.Dir(target)) {
-		handled, err := localenv.Escalate(cmd, "replace "+target, "--version", manifest.Version, "--channel", manifest.Channel, "--yes")
-		if handled {
-			return err
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	stop = waitOn(cmd, "downloading vaire "+manifest.Version)
-	cached, err := client.Fetch(ctx, manifest, runtime.GOOS, runtime.GOARCH)
-	stop()
-	if err != nil {
+	if err := confirmUpgrade(cmd, plan, opts); err != nil {
 		return err
 	}
-	stop = waitOn(cmd, "verifying vaire "+manifest.Version)
-	err = upgrade.Preflight(ctx, cached, manifest)
-	stop()
-	if err != nil {
+	if handled, err := escalateUpgrade(cmd, manifest, plan.Target); handled || err != nil {
 		return err
 	}
-	stop = waitOn(cmd, "replacing "+target)
-	previous, swapWarnings, err := upgrade.Swap(target, cached)
-	stop()
+	previous, swapWarnings, err := installUpgrade(cmd, manifest, plan.Target)
 	if err != nil {
 		return err
 	}
 	warnings = append(warnings, swapWarnings...)
-	// Idle tunnel daemons still run the old binary; busy ones are replaced
-	// by the next command once they go idle.
-	stopIdleTunnelDaemons()
 	data.PreviousPath = previous
 	data.Changed = true
-	if !skipNodes {
+	data.Nodes = "skipped"
+	if !opts.skipNodes {
 		warnings = append(warnings, nodesWarning())
-		data.Nodes = "skipped"
-	} else {
-		data.Nodes = "skipped"
 	}
 
 	lines := []string{
@@ -168,6 +147,80 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		Message:  strings.Join(lines, "\n"),
 		Next:     []string{"vaire version"},
 	})
+}
+
+// upgradeDryRun reports what would change without touching the binary.
+func upgradeDryRun(cmd *cobra.Command, data upgradeData, warnings []output.Warning, plan upgrade.Plan, skipNodes bool) error {
+	data.Nodes = "skipped"
+	if !skipNodes {
+		warnings = append(warnings, nodesWarning())
+	}
+	return output.Success(cmd, output.Result{
+		Data:     data,
+		Warnings: warnings,
+		Message:  fmt.Sprintf("Would upgrade vaire %s → %s (%s) at %s", plan.From.Version, plan.To.Version, plan.To.Channel, plan.Target),
+		Next:     []string{"vaire version"},
+	})
+}
+
+// confirmUpgrade asks before the binary is replaced, unless --yes or a run
+// that must not prompt.
+func confirmUpgrade(cmd *cobra.Command, plan upgrade.Plan, opts upgradeOptions) error {
+	if opts.yes || MustNotPrompt(cmd) {
+		return nil
+	}
+	ok, err := PromptYes(cmd, fmt.Sprintf("Upgrade vaire %s → %s (%s) at %s?", plan.From.Version, plan.To.Version, plan.To.Channel, plan.Target))
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	return output.NewError(
+		output.CodePrecondition,
+		"upgrade was not confirmed",
+		output.ExitPrecondition,
+		"Re-run with --yes to skip the prompt.",
+	)
+}
+
+// escalateUpgrade re-executes the upgrade under sudo when the binary's
+// directory is not writable. handled is true when a child ran: the parent
+// must exit with err and render nothing, because the child did.
+func escalateUpgrade(cmd *cobra.Command, manifest release.Manifest, target string) (bool, error) {
+	if dirWritable(filepath.Dir(target)) {
+		return false, nil
+	}
+	return localenv.Escalate(cmd, "replace "+target, "--version", manifest.Version, "--channel", manifest.Channel, "--yes")
+}
+
+// installUpgrade downloads, verifies and swaps in the new binary, returning
+// the previous binary's path.
+func installUpgrade(cmd *cobra.Command, manifest release.Manifest, target string) (string, []output.Warning, error) {
+	ctx := commandContext(cmd)
+	client := &release.Client{}
+	stop := waitOn(cmd, "downloading vaire "+manifest.Version)
+	cached, err := client.Fetch(ctx, manifest, runtime.GOOS, runtime.GOARCH)
+	stop()
+	if err != nil {
+		return "", nil, err
+	}
+	stop = waitOn(cmd, "verifying vaire "+manifest.Version)
+	err = upgrade.Preflight(ctx, cached, manifest)
+	stop()
+	if err != nil {
+		return "", nil, err
+	}
+	stop = waitOn(cmd, "replacing "+target)
+	previous, swapWarnings, err := upgrade.Swap(target, cached)
+	stop()
+	if err != nil {
+		return "", nil, err
+	}
+	// Idle tunnel daemons still run the old binary; busy ones are replaced
+	// by the next command once they go idle.
+	stopIdleTunnelDaemons()
+	return previous, swapWarnings, nil
 }
 
 func nodesWarning() output.Warning {

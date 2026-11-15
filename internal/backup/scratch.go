@@ -40,42 +40,68 @@ func reserveTemporaryPort(owner string) (int, error) {
 		if _, err := os.Lstat(filepath.Join(TemporaryPortDir, owner)); !errors.Is(err, os.ErrNotExist) {
 			return errors.Join(err, errors.New("reservation owner already exists or is unverifiable"))
 		}
-		taken := clusterPorts()
-		files, _ := os.ReadDir(TemporaryPortDir)
-		for _, f := range files {
-			raw, err := os.ReadFile(filepath.Join(TemporaryPortDir, f.Name())) //nolint:gosec // G304: vaire's own reservations.
-			if err != nil {
-				continue
-			}
-			if n, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
-				taken[n] = true
-			}
-		}
+		taken := reservedPorts()
 		for n := config.TemporaryPortMin; n <= config.TemporaryPortMax; n++ {
-			if taken[n] {
-				continue
-			}
-			if _, err := os.Stat(fmt.Sprintf("%s/.s.PGSQL.%d.lock", pgSocketDir, n)); err == nil {
+			if taken[n] || socketLocked(n) {
 				continue
 			}
 			port = n
-			f, err := os.OpenFile(filepath.Join(TemporaryPortDir, owner), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // allocator-owned path under lock
-			if err != nil {
-				return err
-			}
-			_, writeErr := fmt.Fprintln(f, n)
-			return errors.Join(writeErr, f.Close())
+			return recordReservedPort(owner, n)
 		}
-		return output.NewError(output.CodePrecondition,
-			fmt.Sprintf("every temporary port (%d-%d) is in use", config.TemporaryPortMin, config.TemporaryPortMax), output.ExitPrecondition,
-			"Wait for running restores, forks or drills to finish, then retry.").WithDetails(map[string]any{"reason": "no_temporary_port"})
+		return noTemporaryPortError()
 	})
 	return port, err
 }
 
-// clusterPorts are the ports pg_lsclusters lists.
+// reservedPorts are the ports pg_lsclusters lists and the ones other owners
+// reserved in TemporaryPortDir.
+func reservedPorts() map[int]bool {
+	taken := clusterPorts()
+	files, _ := os.ReadDir(TemporaryPortDir)
+	for _, f := range files {
+		raw, err := os.ReadFile(filepath.Join(TemporaryPortDir, f.Name()))
+		if err != nil {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+			taken[n] = true
+		}
+	}
+	return taken
+}
+
+// socketLocked reports whether a socket lock file in the shared socket
+// directory claims port.
+func socketLocked(port int) bool {
+	_, err := os.Stat(fmt.Sprintf("%s/.s.PGSQL.%d.lock", pgSocketDir, port))
+	return err == nil
+}
+
+// recordReservedPort writes owner's reservation of port, exclusively so a
+// second allocation for the same owner fails instead of replacing it.
+func recordReservedPort(owner string, port int) error {
+	f, err := os.OpenFile(filepath.Join(TemporaryPortDir, owner), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := fmt.Fprintln(f, port)
+	return errors.Join(writeErr, f.Close())
+}
+
+// noTemporaryPortError reports that every temporary port is taken.
+func noTemporaryPortError() error {
+	return output.NewError(output.CodePrecondition,
+		fmt.Sprintf("every temporary port (%d-%d) is in use", config.TemporaryPortMin, config.TemporaryPortMax), output.ExitPrecondition,
+		"Wait for running restores, forks or drills to finish, then retry.").WithDetails(map[string]any{"reason": "no_temporary_port"})
+}
+
+// clusterPorts are the ports pg_lsclusters lists. The port allocator has no
+// caller context to cancel a probe of the local host, so it bounds the probe
+// itself rather than leaving a hung pg_lsclusters behind.
 func clusterPorts() map[int]bool {
-	out, err := exec.Command("pg_lsclusters", "--no-header").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pg_lsclusters", "--no-header").Output()
 	ports := map[int]bool{}
 	if err != nil {
 		return ports
@@ -118,8 +144,10 @@ func LoadDump(ctx context.Context, sh engine.Shell, stepID string, report engine
 		if f.errors > 0 && f.errors == f.harmless {
 			return nil, nil
 		}
-		warnings := []string{fmt.Sprintf("pg_restore into %s reported errors (exit status %d); inspect it before relying on it", target, scriptErr.Status)}
-		return append(warnings, f.kept(scriptErr.Tail)...), nil
+		kept := f.kept(scriptErr.Tail)
+		warnings := make([]string, 0, 1+len(kept))
+		warnings = append(warnings, fmt.Sprintf("pg_restore into %s reported errors (exit status %d); inspect it before relying on it", target, scriptErr.Status))
+		return append(warnings, kept...), nil
 	default:
 		return nil, wrapTool("pg_restore into "+target, err)
 	}

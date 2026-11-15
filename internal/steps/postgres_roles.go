@@ -94,44 +94,78 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 		return engine.CheckResult{}, err
 	}
 	local := ClusterPG(spec)
+	if reason := checkRolesAndDatabase(ctx, local, spec); reason != "" {
+		return incomplete(reason), nil
+	}
+	if reason := checkAuthFunctions(ctx, local); reason != "" {
+		return incomplete(reason), nil
+	}
+	if reason := checkAdminMembership(ctx, local, spec); reason != "" {
+		return incomplete(reason), nil
+	}
+	if reason := checkDirectOnlyAndExtensions(ctx, local, spec); reason != "" {
+		return incomplete(reason), nil
+	}
+	if reason := checkRuntimePasswords(); reason != "" {
+		return incomplete(reason), nil
+	}
+	return complete(), nil
+}
+
+// checkRolesAndDatabase reports the first required role or the database that
+// is missing, or "" when all of them exist.
+func checkRolesAndDatabase(ctx context.Context, local pg.Local, spec config.ClusterSpec) string {
 	roles, err := queryColumn(ctx, local, "postgres", "SELECT rolname FROM pg_roles")
 	if err != nil {
-		return incomplete("cannot read pg_roles"), nil
+		return "cannot read pg_roles"
 	}
 	roleSet := stringSet(roles)
 	for _, role := range append([]string{"vaire_admin", "vaire_monitor", "pgbouncer_auth", RoleDirectOnly, spec.Name + "_owner"}, prefixed(spec.Name, DatabaseRoles)...) {
 		if !roleSet[role] {
-			return incomplete("role " + role + " is missing"), nil
+			return "role " + role + " is missing"
 		}
 	}
 	dbs, err := queryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
 	if err != nil {
-		return incomplete("cannot read pg_database"), nil
+		return "cannot read pg_database"
 	}
 	if !stringSet(dbs)[spec.Name] {
-		return incomplete("database " + spec.Name + " is missing"), nil
+		return "database " + spec.Name + " is missing"
 	}
+	return ""
+}
+
+// checkAuthFunctions reports the authenticator function that is missing or
+// out of date, or "".
+func checkAuthFunctions(ctx context.Context, local pg.Local) string {
 	for _, fn := range []struct{ name, needs string }{
 		{"pgbouncer_get_auth", RoleDirectOnly},
 		{"pgbouncer_get_auth_session", "operator connections"},
 	} {
 		src, err := queryColumn(ctx, local, AuthDB, "SELECT prosrc FROM pg_proc WHERE proname = '"+fn.name+"'")
 		if err != nil || len(src) == 0 {
-			return incomplete("vaire." + fn.name + " is missing"), nil
+			return "vaire." + fn.name + " is missing"
 		}
 		if !strings.Contains(src[0], fn.needs) {
-			return incomplete("vaire." + fn.name + " is out of date"), nil
+			return "vaire." + fn.name + " is out of date"
 		}
 	}
+	return ""
+}
+
+// checkAdminMembership reports vaire_admin's membership in the owner role and
+// the predefined roles that protection takes away, or "" when it matches
+// spec.
+func checkAdminMembership(ctx context.Context, local pg.Local, spec config.ClusterSpec) string {
 	member, err := queryColumn(ctx, local, "postgres", adminOwnerMemberSQL(spec.Name))
 	if err != nil || len(member) != 1 {
-		return incomplete("cannot read vaire_admin's membership in " + spec.Name + "_owner"), nil
+		return "cannot read vaire_admin's membership in " + spec.Name + "_owner"
 	}
 	if (member[0] == "t") == spec.Protected {
 		if spec.Protected {
-			return incomplete("vaire_admin can still write to protected " + spec.Name), nil
+			return "vaire_admin can still write to protected " + spec.Name
 		}
-		return incomplete("vaire_admin is not a member of " + spec.Name + "_owner"), nil
+		return "vaire_admin is not a member of " + spec.Name + "_owner"
 	}
 	for _, r := range []struct{ role, protectedGap string }{
 		{"pg_signal_backend", "vaire_admin can still terminate sessions of protected " + spec.Name},
@@ -139,25 +173,31 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 	} {
 		held, err := queryColumn(ctx, local, "postgres", adminMemberSQL(r.role))
 		if err != nil || len(held) != 1 {
-			return incomplete("cannot read vaire_admin's membership in " + r.role), nil
+			return "cannot read vaire_admin's membership in " + r.role
 		}
 		if (held[0] == "t") == spec.Protected {
 			if spec.Protected {
-				return incomplete(r.protectedGap), nil
+				return r.protectedGap
 			}
-			return incomplete("vaire_admin is not a member of " + r.role), nil
+			return "vaire_admin is not a member of " + r.role
 		}
 	}
+	return ""
+}
+
+// checkDirectOnlyAndExtensions reports the direct-only migration role or an
+// extension that is missing, or "".
+func checkDirectOnlyAndExtensions(ctx context.Context, local pg.Local, spec config.ClusterSpec) string {
 	direct, err := queryColumn(ctx, local, "postgres", directOnlyMembersSQL)
 	if err != nil {
-		return incomplete("cannot read " + RoleDirectOnly + " members"), nil
+		return "cannot read " + RoleDirectOnly + " members"
 	}
 	if !stringSet(direct)[spec.Name+"_"+RoleMigrate] {
-		return incomplete("role " + spec.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly), nil
+		return "role " + spec.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly
 	}
 	installed, err := queryColumn(ctx, local, spec.Name, "SELECT extname FROM pg_extension")
 	if err != nil {
-		return incomplete("cannot read extensions in " + spec.Name), nil
+		return "cannot read extensions in " + spec.Name
 	}
 	have := stringSet(installed)
 	for _, ext := range spec.Extensions {
@@ -166,15 +206,21 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 			continue
 		}
 		if !have[entry.ExtName] {
-			return incomplete("extension " + entry.ExtName + " is missing in " + spec.Name), nil
+			return "extension " + entry.ExtName + " is missing in " + spec.Name
 		}
 	}
+	return ""
+}
+
+// checkRuntimePasswords reports the service password file that is missing, or
+// "".
+func checkRuntimePasswords() string {
 	for _, name := range []string{"pgbouncer_auth", "monitor"} {
 		if _, err := os.Stat(RuntimeDir + "/" + name + ".pass"); err != nil {
-			return incomplete(RuntimeDir + "/" + name + ".pass is missing"), nil
+			return RuntimeDir + "/" + name + ".pass is missing"
 		}
 	}
-	return complete(), nil
+	return ""
 }
 
 func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, _ engine.Reporter) (engine.ApplyResult, error) {
@@ -221,7 +267,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	cluster.WriteString(monitorSQL)
 	cluster.WriteString(pgbouncerAuthSQL)
 
-	sql, err := databaseSQL(ctx, rt, spec, roleSet, dbSet)
+	sql, err := databaseSQL(rt, spec, roleSet, dbSet)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
@@ -276,7 +322,7 @@ func serviceVerifier(ctx context.Context, cfg config.Cluster, spec config.Cluste
 }
 
 // databaseSQL creates the roles and the database, cluster-wide, in postgres.
-func databaseSQL(ctx context.Context, rt engine.Runtime, db config.ClusterSpec, roleSet, dbSet map[string]bool) (string, error) {
+func databaseSQL(rt engine.Runtime, db config.ClusterSpec, roleSet, dbSet map[string]bool) (string, error) {
 	var b strings.Builder
 	owner := db.Name + "_owner"
 	if !roleSet[owner] {
@@ -475,98 +521,138 @@ var pgExtensionControlDir = filepath.Join("/usr/share/postgresql", strconv.Itoa(
 // schema differs from what CREATE EXTENSION will install fails before any
 // destination is provisioned.
 func CopyExtensionPlan(source []ExtensionState) ([]ExtensionState, []string, error) {
+	configured, err := configuredCopyExtensions(source)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Add dependencies named by control metadata, so CREATE EXTENSION can
+	// create them in order. A dependency outside the catalog is unsupported.
+	for name := range configured {
+		if err := addExtensionRequirements(name, configured, map[string]bool{}); err != nil {
+			return nil, nil, err
+		}
+	}
+	plan, err := resolveCopyExtensions(source, configured)
+	if err != nil {
+		return nil, nil, err
+	}
+	ordered, err := extensionDependencyOrder(configured)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]ExtensionState, 0, len(plan))
+	for _, ext := range plan {
+		out = append(out, ext)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, ordered, nil
+}
+
+// configuredCopyExtensions validates the source inventory and resolves its
+// extensions against vaire's catalog, starting with the default
+// instrumentation.
+func configuredCopyExtensions(source []ExtensionState) (map[string]bool, error) {
 	seen := map[string]bool{}
 	for _, ext := range source {
 		if err := validateExtensionState(ext); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if seen[ext.Name] {
-			return nil, nil, copyExtensionError("extension_incompatible",
+			return nil, copyExtensionError("extension_incompatible",
 				"the source reports extension "+safeExtensionName(ext.Name)+" more than once",
 				"Do not copy from this source until its extension catalog is consistent.")
 		}
 		seen[ext.Name] = true
 	}
 
-	plan := map[string]ExtensionState{}
 	configured := map[string]bool{defaultCopyExtension: true}
 	for _, ext := range source {
-		if ext.Name != "plpgsql" {
-			entry, ok := catalog.Lookup(ext.Name)
-			if !ok || entry.ExtName == "" {
-				return nil, nil, copyExtensionError("extension_missing",
-					"the source extension "+safeExtensionName(ext.Name)+" is not supported by vaire",
-					"Remove the extension from the source, or install a compatible vaire support for it.")
-			}
-			configured[entry.ExtName] = true
+		if ext.Name == "plpgsql" {
+			continue
 		}
+		entry, ok := catalog.Lookup(ext.Name)
+		if !ok || entry.ExtName == "" {
+			return nil, copyExtensionError("extension_missing",
+				"the source extension "+safeExtensionName(ext.Name)+" is not supported by vaire",
+				"Remove the extension from the source, or install a compatible vaire support for it.")
+		}
+		configured[entry.ExtName] = true
 	}
-	// Add dependencies named by control metadata, so CREATE EXTENSION can
-	// create them in order. A dependency outside the catalog is unsupported.
-	var addRequirements func(string, map[string]bool) error
-	addRequirements = func(name string, visiting map[string]bool) error {
-		if name == "plpgsql" {
-			return nil
-		}
-		if visiting[name] {
-			return copyExtensionError("extension_incompatible",
-				"the destination extension metadata has a dependency cycle at "+safeExtensionName(name),
-				"Report this as a vaire bug; do not retry the copy.")
-		}
-		control, err := readExtensionControl(name)
-		if err != nil {
-			return err
-		}
-		visiting[name] = true
-		for _, req := range control.requires {
-			if req == "plpgsql" {
-				continue
-			}
-			entry, ok := catalog.Lookup(req)
-			if !ok || entry.ExtName == "" {
-				return copyExtensionError("extension_missing",
-					"extension "+safeExtensionName(name)+" requires "+safeExtensionName(req)+", which vaire does not support",
-					"Remove "+safeExtensionName(name)+" from the source, or install compatible vaire support for "+safeExtensionName(req)+".")
-			}
-			configured[entry.ExtName] = true
-			if err := addRequirements(entry.ExtName, visiting); err != nil {
-				return err
-			}
-		}
-		delete(visiting, name)
+	return configured, nil
+}
+
+// addExtensionRequirements adds the dependencies control metadata names to
+// configured, so CREATE EXTENSION can create them in order. A dependency
+// outside the catalog is unsupported.
+func addExtensionRequirements(name string, configured, visiting map[string]bool) error {
+	if name == "plpgsql" {
 		return nil
 	}
-	for name := range configured {
-		if err := addRequirements(name, map[string]bool{}); err != nil {
-			return nil, nil, err
+	if visiting[name] {
+		return copyExtensionError("extension_incompatible",
+			"the destination extension metadata has a dependency cycle at "+safeExtensionName(name),
+			"Report this as a vaire bug; do not retry the copy.")
+	}
+	control, err := readExtensionControl(name)
+	if err != nil {
+		return err
+	}
+	visiting[name] = true
+	for _, req := range control.requires {
+		if req == "plpgsql" {
+			continue
+		}
+		entry, ok := catalog.Lookup(req)
+		if !ok || entry.ExtName == "" {
+			return copyExtensionError("extension_missing",
+				"extension "+safeExtensionName(name)+" requires "+safeExtensionName(req)+", which vaire does not support",
+				"Remove "+safeExtensionName(name)+" from the source, or install compatible vaire support for "+safeExtensionName(req)+".")
+		}
+		configured[entry.ExtName] = true
+		if err := addExtensionRequirements(entry.ExtName, configured, visiting); err != nil {
+			return err
 		}
 	}
+	delete(visiting, name)
+	return nil
+}
 
-	// Resolve every source extension's exact version and schema, and the
-	// default instrumentation's, from PG18's installed control metadata.
+// resolveCopyExtensions resolves every source extension's exact version and
+// schema, and the dependencies', from PG18's installed control metadata.
+func resolveCopyExtensions(source []ExtensionState, configured map[string]bool) (map[string]ExtensionState, error) {
+	plan := map[string]ExtensionState{}
 	for _, ext := range source {
 		control, err := readExtensionControl(ext.Name)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if ext.Version != control.version {
-			return nil, nil, copyExtensionError("extension_version_incompatible",
+			return nil, copyExtensionError("extension_version_incompatible",
 				"extension "+safeExtensionName(ext.Name)+" is version "+safeExtensionName(ext.Version)+" on the source but version "+safeExtensionName(control.version)+" on the destination",
 				"Align the extension versions before copying; vaire does not convert extension versions automatically.")
 		}
 		if ext.Schema != control.schema {
-			return nil, nil, copyExtensionError("extension_schema_incompatible",
+			return nil, copyExtensionError("extension_schema_incompatible",
 				"extension "+safeExtensionName(ext.Name)+" is in schema "+safeExtensionName(ext.Schema)+" on the source but in schema "+safeExtensionName(control.schema)+" on the destination",
 				"Install the destination extension in the same schema; vaire does not rewrite extension schemas.")
 		}
 		plan[ext.Name] = ext
 	}
+	if err := addConfiguredExtensions(plan, configured); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+// addConfiguredExtensions adds plpgsql and every configured extension the
+// source did not report, at the version and schema the destination installs.
+func addConfiguredExtensions(plan map[string]ExtensionState, configured map[string]bool) error {
 	// plpgsql is installed in every database and is not in db.Extensions, but
 	// a fresh destination still has this exact pg_extension row.
 	if _, ok := plan["plpgsql"]; !ok {
 		control, err := readExtensionControl("plpgsql")
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		plan["plpgsql"] = ExtensionState{Name: "plpgsql", Version: control.version, Schema: control.schema}
 	}
@@ -579,21 +665,11 @@ func CopyExtensionPlan(source []ExtensionState) ([]ExtensionState, []string, err
 		}
 		control, err := readExtensionControl(name)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		plan[name] = ExtensionState{Name: name, Version: control.version, Schema: control.schema}
 	}
-
-	ordered, err := extensionDependencyOrder(configured)
-	if err != nil {
-		return nil, nil, err
-	}
-	out := make([]ExtensionState, 0, len(plan))
-	for _, ext := range plan {
-		out = append(out, ext)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, ordered, nil
+	return nil
 }
 
 func extensionDependencyOrder(configured map[string]bool) ([]string, error) {
@@ -658,7 +734,7 @@ func readExtensionControl(name string) (extensionControl, error) {
 			"Do not copy from this source until its extension catalog is consistent.")
 	}
 	path := filepath.Join(pgExtensionControlDir, name+".control")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: name is validated and the directory is fixed.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return extensionControl{}, copyExtensionError("extension_missing",
 			"extension "+safeExtensionName(name)+" is not installed on the destination",
@@ -713,15 +789,28 @@ func readExtensionControl(name string) (extensionControl, error) {
 // a direct base script or from a base script plus update scripts. It does not
 // assume a direct <extension>--<version>.sql file exists.
 func extensionInstallPath(name, target string) (bool, error) {
+	bases, updates, err := extensionScripts(name)
+	if err != nil {
+		return false, err
+	}
+	if bases[target] {
+		return true, nil
+	}
+	return extensionReachable(bases, updates, target), nil
+}
+
+// extensionScripts classifies name's installed SQL scripts as direct base
+// versions and update edges.
+func extensionScripts(name string) (bases map[string]bool, updates map[string][]string, err error) {
 	entries, err := os.ReadDir(pgExtensionControlDir)
 	if err != nil {
-		return false, copyExtensionError("extension_missing",
+		return nil, nil, copyExtensionError("extension_missing",
 			"the destination extension directory could not be read",
 			"Do not copy until the node's PostgreSQL extension directory is readable.")
 	}
 	prefix := name + "--"
-	bases := map[string]bool{}
-	updates := map[string][]string{}
+	bases = map[string]bool{}
+	updates = map[string][]string{}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -743,10 +832,13 @@ func extensionInstallPath(name, target string) (bool, error) {
 		}
 		bases[rest] = true
 	}
-	if bases[target] {
-		return true, nil
-	}
-	seen := map[string]bool{}
+	return bases, updates, nil
+}
+
+// extensionReachable reports whether the update scripts reach target from
+// one of the base versions.
+func extensionReachable(bases map[string]bool, updates map[string][]string, target string) bool {
+	seen := make(map[string]bool, len(bases))
 	queue := make([]string, 0, len(bases))
 	for version := range bases {
 		seen[version] = true
@@ -760,13 +852,13 @@ func extensionInstallPath(name, target string) (bool, error) {
 				continue
 			}
 			if next == target {
-				return true, nil
+				return true
 			}
 			seen[next] = true
 			queue = append(queue, next)
 		}
 	}
-	return false, nil
+	return false
 }
 
 func validateExtensionState(ext ExtensionState) error {

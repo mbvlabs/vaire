@@ -81,24 +81,46 @@ func ImmutableChanges(old, updated Cluster) []string {
 	if !reflect.DeepEqual(old.Transport, updated.Transport) {
 		changed = append(changed, "transport")
 	}
+	changed = append(changed, changedNodeAddresses(old, updated)...)
+	changed = append(changed, addedClusterKeys(old, updated)...)
+	return append(changed, changedClusterKeys(old, updated)...)
+}
+
+// changedNodeAddresses lists the nodes whose wg_address differs.
+func changedNodeAddresses(old, updated Cluster) []string {
+	var changed []string
 	for _, n := range old.Nodes {
 		if u, ok := updated.Node(n.Name); ok && u.WGAddress != n.WGAddress {
 			changed = append(changed, "nodes."+n.Name+".wg_address")
 		}
 	}
+	return changed
+}
+
+// addedClusterKeys lists the immutable keys carried by a [[clusters]] entry
+// that is new in updated: a follower is made by db follow only, because apply
+// would initdb an empty cluster for an entry it never copied (Phase 6).
+// follow_generation is likewise written only by that preparation.
+func addedClusterKeys(old, updated Cluster) []string {
+	var changed []string
 	for _, u := range updated.Clusters {
-		// A follower is made by db follow only: apply would initdb an empty
-		// cluster for an entry it never copied (Phase 6). follow_generation
-		// is likewise written only by that preparation.
-		if _, existed := old.ClusterByName(u.Name); !existed {
-			if u.Follows != "" {
-				changed = append(changed, "clusters."+u.Name+".follows")
-			}
-			if u.FollowGeneration != "" {
-				changed = append(changed, "clusters."+u.Name+".follow_generation")
-			}
+		if _, existed := old.ClusterByName(u.Name); existed {
+			continue
+		}
+		if u.Follows != "" {
+			changed = append(changed, "clusters."+u.Name+".follows")
+		}
+		if u.FollowGeneration != "" {
+			changed = append(changed, "clusters."+u.Name+".follow_generation")
 		}
 	}
+	return changed
+}
+
+// changedClusterKeys lists the immutable keys that differ on an entry both
+// files have.
+func changedClusterKeys(old, updated Cluster) []string {
+	var changed []string
 	for _, cl := range old.Clusters {
 		u, ok := updated.ClusterByName(cl.Name)
 		if !ok {
@@ -123,6 +145,9 @@ func ImmutableChanges(old, updated Cluster) []string {
 func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 	for len(segs) > 0 {
 		v = reflect.Indirect(v)
+		// A config tree holds only structs, slices, maps and scalars; every
+		// other kind is an unknown key.
+		//exhaustive:ignore
 		switch v.Kind() {
 		case reflect.Struct:
 			f, ok := fieldByTag(v, segs[0])
@@ -154,6 +179,9 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 func setIn(v reflect.Value, segs []string, value string) error {
 	for len(segs) > 1 {
 		v = reflect.Indirect(v)
+		// A config tree holds only structs, slices, maps and scalars; every
+		// other kind is an unknown key.
+		//exhaustive:ignore
 		switch v.Kind() {
 		case reflect.Struct:
 			f, ok := fieldByTag(v, segs[0])
@@ -176,6 +204,9 @@ func setIn(v reflect.Value, segs []string, value string) error {
 		}
 	}
 	v = reflect.Indirect(v)
+	// The last segment names a field or a map entry; a scalar key cannot be
+	// set any other way.
+	//exhaustive:ignore
 	switch v.Kind() {
 	case reflect.Struct:
 		f, ok := fieldByTag(v, segs[0])
@@ -229,6 +260,9 @@ func setMapEntry(v reflect.Value, key, value string) error {
 
 // setScalar parses value into field by its kind.
 func setScalar(field reflect.Value, value string) error {
+	// Only the scalar kinds a config key can name are settable from the
+	// command line; every other kind is refused below.
+	//exhaustive:ignore
 	switch field.Kind() {
 	case reflect.String:
 		field.SetString(value)

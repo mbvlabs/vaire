@@ -135,7 +135,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("mode = %o, want 600", got)
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a test bundle path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestBundleQueryRoundTrip(t *testing.T) {
 	if err := Write(path, want); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a test bundle path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestOldBundleWithoutQuery(t *testing.T) {
 	if err := Write(path, b); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a test bundle path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,11 @@ func TestReadRejectsUnknownQueryField(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	m["query"].(map[string]any)["raw_sql"] = "select * from users"
+	query, ok := m["query"].(map[string]any)
+	if !ok {
+		t.Fatal("query is not an object")
+	}
+	query["raw_sql"] = "select * from users"
 	data, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
@@ -388,7 +392,7 @@ func TestWriteRefusesToOverwrite(t *testing.T) {
 	if err := Write(path, validBundle()); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(path) //nolint:gosec // G304: a test bundle path.
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +402,7 @@ func TestWriteRefusesToOverwrite(t *testing.T) {
 	if codeOf(t, err) != output.CodePrecondition || reasonOf(t, err) != "output_exists" {
 		t.Fatalf("err = %v", err)
 	}
-	after, err := os.ReadFile(path) //nolint:gosec // G304: a test bundle path.
+	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +417,7 @@ func TestWriteRefusesSymlink(t *testing.T) {
 	if err := Write(target, validBundle()); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(target) //nolint:gosec // G304: a test bundle path.
+	before, _ := os.ReadFile(target)
 	link := filepath.Join(dir, "link.json")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
@@ -422,7 +426,7 @@ func TestWriteRefusesSymlink(t *testing.T) {
 	if codeOf(t, err) != output.CodeValidation || reasonOf(t, err) != "symlink" {
 		t.Fatalf("err = %v", err)
 	}
-	after, _ := os.ReadFile(target) //nolint:gosec // G304: a test bundle path.
+	after, _ := os.ReadFile(target)
 	if !bytes.Equal(before, after) {
 		t.Fatal("writing through a symlink changed its target")
 	}
@@ -457,16 +461,28 @@ func TestReadRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 	for name, edit := range map[string]func(map[string]any){
 		"top": func(m map[string]any) { m["raw_config"] = "secret" },
 		"metadata": func(m map[string]any) {
-			m["metadata"].(map[string]any)["client_commit"] = "abc"
+			metadata, ok := m["metadata"].(map[string]any)
+			if !ok {
+				t.Fatal("metadata is not an object")
+			}
+			metadata["client_commit"] = "abc"
 		},
 		"activity": func(m map[string]any) {
-			m["activity"].(map[string]any)["raw_logs"] = []any{"from users"}
+			events, ok := m["activity"].(map[string]any)
+			if !ok {
+				t.Fatal("activity is not an object")
+			}
+			events["raw_logs"] = []any{"from users"}
 		},
 		"coverage": func(m map[string]any) {
-			m["activity"].(map[string]any)["coverage"].(map[string]any)["error"] = "cannot read /etc/vaire"
+			a := requireBundleValue[map[string]any](t, m["activity"])
+			coverage := requireBundleValue[map[string]any](t, a["coverage"])
+			coverage["error"] = "cannot read /etc/vaire"
 		},
 		"event": func(m map[string]any) {
-			event := m["activity"].(map[string]any)["events"].([]any)[0].(map[string]any)
+			a := requireBundleValue[map[string]any](t, m["activity"])
+			events := requireBundleValue[[]any](t, a["events"])
+			event := requireBundleValue[map[string]any](t, events[0])
 			event["details"] = map[string]any{"password": "hunter2"}
 		},
 	} {
@@ -491,6 +507,15 @@ func TestReadRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func requireBundleValue[T any](t *testing.T, value any) T {
+	t.Helper()
+	result, ok := value.(T)
+	if !ok {
+		t.Fatalf("unexpected bundle value type: %T", value)
+	}
+	return result
 }
 
 func TestReadRejectsCanariesInKnownFields(t *testing.T) {
@@ -662,7 +687,7 @@ func TestReadRejectsSymlinkAndNonOwnerOnly(t *testing.T) {
 	if _, err := Read(link); codeOf(t, err) != output.CodeValidation || reasonOf(t, err) != "symlink" {
 		t.Fatalf("symlink: %v", err)
 	}
-	if err := os.Chmod(target, 0o644); err != nil { //nolint:gosec // G302: deliberately tests a non-owner-only bundle.
+	if err := os.Chmod(target, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Read(target); codeOf(t, err) != output.CodePrecondition || reasonOf(t, err) != "not_owner_only" {

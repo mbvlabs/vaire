@@ -55,43 +55,50 @@ func TestStatusBudgetRunningPresenceIndependentOfDatabaseFilter(t *testing.T) {
 		{"one incomplete selected", `[{"name":"partial_a","state":"incomplete"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := `{"budget":{"clusters":[` +
-				`{"name":"partial_a","memory_mib":128},` +
-				`{"name":"partial_b","memory_mib":256},` +
-				`{"name":"stopped","running":false},` +
-				`{"name":"running","running":true}` +
-				`]},"databases":` + tc.databases + `}`
-			var data statusData
-			if err := json.Unmarshal([]byte(payload), &data); err != nil {
-				t.Fatal(err)
-			}
-			raw, err := json.Marshal(data)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var got struct {
-				Budget struct {
-					Clusters []map[string]json.RawMessage `json:"clusters"`
-				} `json:"budget"`
-			}
-			if err := json.Unmarshal(raw, &got); err != nil {
-				t.Fatal(err)
-			}
-			if len(got.Budget.Clusters) != 4 {
-				t.Fatalf("budget allocations lost: %s", raw)
-			}
-			for i, expected := range []string{"", "", "false", "true"} {
-				value, present := got.Budget.Clusters[i]["running"]
-				if present != (expected != "") || present && string(value) != expected {
-					t.Errorf("cluster %d running = %s, present %v; want %s", i, value, present, expected)
-				}
-			}
-			sheet := strings.Join(sheetLines("test", data.Budget), "\n")
-			for _, want := range []string{"partial_a", "partial_b", "unknown", "stopped", "running"} {
-				if !strings.Contains(sheet, want) {
-					t.Errorf("budget rendering missing %q: %s", want, sheet)
-				}
-			}
+			assertBudgetRunningPresence(t, tc.databases)
 		})
+	}
+}
+
+// assertBudgetRunningPresence checks that the budget keeps each cluster's
+// running flag and renders it, whatever databases the status carries.
+func assertBudgetRunningPresence(t *testing.T, databases string) {
+	t.Helper()
+	payload := `{"budget":{"clusters":[` +
+		`{"name":"partial_a","memory_mib":128},` +
+		`{"name":"partial_b","memory_mib":256},` +
+		`{"name":"stopped","running":false},` +
+		`{"name":"running","running":true}` +
+		`]},"databases":` + databases + `}`
+	var data statusData
+	if err := json.Unmarshal([]byte(payload), &data); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Budget struct {
+			Clusters []map[string]json.RawMessage `json:"clusters"`
+		} `json:"budget"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Budget.Clusters) != 4 {
+		t.Fatalf("budget allocations lost: %s", raw)
+	}
+	for i, expected := range []string{"", "", "false", "true"} {
+		value, present := got.Budget.Clusters[i]["running"]
+		if present != (expected != "") || present && string(value) != expected {
+			t.Errorf("cluster %d running = %s, present %v; want %s", i, value, present, expected)
+		}
+	}
+	sheet := strings.Join(sheetLines("test", data.Budget), "\n")
+	for _, want := range []string{"partial_a", "partial_b", "unknown", "stopped", "running"} {
+		if !strings.Contains(sheet, want) {
+			t.Errorf("budget rendering missing %q: %s", want, sheet)
+		}
 	}
 }

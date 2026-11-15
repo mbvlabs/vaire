@@ -23,7 +23,7 @@ const preflightTimeout = 10 * time.Second
 func Preflight(ctx context.Context, cached string, m release.Manifest) error {
 	ctx, cancel := context.WithTimeout(ctx, preflightTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cached, "version", "--output", "json") //nolint:gosec // G204: path is a verified cached release.
+	cmd := exec.CommandContext(ctx, cached, "version", "--output", "json")
 	out, err := cmd.Output()
 	if err != nil {
 		return output.WrapError(
@@ -114,12 +114,12 @@ func Swap(target, cached string) (previous string, warnings []output.Warning, er
 }
 
 func copyFile(dst, src string, perm os.FileMode) error {
-	in, err := os.Open(src) //nolint:gosec // G304: src is the verified cache path.
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm) //nolint:gosec // G304: dst is in the target directory.
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func copyOwner(dst, src string) error {
 }
 
 func fsync(path string) error {
-	f, err := os.Open(path) //nolint:gosec // G304: path is the upgrade target or its directory.
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}

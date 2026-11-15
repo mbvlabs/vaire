@@ -61,10 +61,11 @@ func TestDBCreateDryRunRefusalAndInvalidReply(t *testing.T) {
 	}
 }
 
-// db credentials --rotate refuses a follower before protection, the token
-// and the new secret, for both a dry run and a real rotation: the preflight
-// runs before either path branches (Phase 6, B-04).
-func TestCredentialsPreflightRefusesAFollower(t *testing.T) {
+// assertFollowerPreflightRefusal runs preflight for a follower and for its
+// source, protected and unprotected: the follower is refused with is_follower
+// naming the source, and the source passes.
+func assertFollowerPreflightRefusal(t *testing.T, label string, preflight func(config.Cluster, string) error) {
+	t.Helper()
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{
 		{Name: "app", Port: 5433, Stanza: "app-3f9a1c", Size: "large", StatementTimeout: "60s"},
@@ -72,19 +73,26 @@ func TestCredentialsPreflightRefusesAFollower(t *testing.T) {
 	}
 	for _, protected := range []bool{false, true} {
 		cfg.Clusters[1].Protected = protected
-		err := credentialsPreflight(cfg, "app_follower")
+		err := preflight(cfg, "app_follower")
 		var ce *output.CLIError
 		if !errors.As(err, &ce) {
-			t.Fatalf("credentials on a follower (protected %v): %v, want is_follower", protected, err)
+			t.Fatalf("%s on a follower (protected %v): %v, want is_follower", label, protected, err)
 		}
 		d, _ := ce.Details.(map[string]any)
 		if ce.Code != output.CodePrecondition || d["reason"] != "is_follower" || d["source"] != "app" {
-			t.Errorf("credentials on a follower (protected %v): %s %v, want is_follower from app", protected, ce.Code, d)
+			t.Errorf("%s on a follower (protected %v): %s %v, want is_follower from app", label, protected, ce.Code, d)
 		}
-		if err := credentialsPreflight(cfg, "app"); err != nil {
-			t.Errorf("credentials on the source (protected %v): %v", protected, err)
+		if err := preflight(cfg, "app"); err != nil {
+			t.Errorf("%s on the source (protected %v): %v", label, protected, err)
 		}
 	}
+}
+
+// db credentials --rotate refuses a follower before protection, the token
+// and the new secret, for both a dry run and a real rotation: the preflight
+// runs before either path branches (Phase 6, B-04).
+func TestCredentialsPreflightRefusesAFollower(t *testing.T) {
+	assertFollowerPreflightRefusal(t, "credentials", credentialsPreflight)
 }
 
 // A resize preview names the followers first, whether their floors change or

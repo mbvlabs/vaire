@@ -27,7 +27,7 @@ func TestMetricsLocations(t *testing.T) {
 		t.Fatalf("no databases: %d locations, want targets.json and node", len(none))
 	}
 	locs := MetricsLocations(metricsCluster("app", "other", "third"))
-	var paths []string
+	paths := make([]string, 0, len(locs))
 	for _, l := range locs {
 		paths = append(paths, l.Path)
 	}

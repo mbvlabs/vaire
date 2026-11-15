@@ -200,7 +200,7 @@ func phase1Commands() []cmdSpec {
 				flagBool("skip-doctor", "Skip the doctor checks after a full apply"),
 				flagStringArray("confirm", "Confirm <db>/access or restarts: <db>/restart, {server}/restart; repeatable. --yes never satisfies this check"),
 			},
-			meta: CommandMeta{
+			meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 				Summary: "Converge the node to cluster.toml",
 				WhenToUse: []string{
 					"Apply pending steps after plan, a config change, or an upgrade.",
@@ -287,7 +287,7 @@ func phase1Commands() []cmdSpec {
 				flagBool("reset", "Reset pg_stat_statements. Requires --confirm"),
 				flagBool("all-sessions", "Include statements run by internal/administrative roles, including postgres and maintenance roles"),
 			},
-			meta: CommandMeta{
+			meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 				Summary:          "Show statement statistics, or reset them",
 				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements: --confirm <db>/stats with --db, <server>/stats for every database. Statements run by internal/administrative roles (vaire sql, node setup, maintenance, the exporters) are hidden by default, including postgres and maintenance roles even for manually issued work; --all-sessions shows them. Application owner, migrate, app and read-only roles remain visible."},
 				Examples:         []string{"vaire queries --db app --limit 20", "vaire queries --order mean", "vaire queries --all-sessions", "vaire queries --db app --reset --confirm app/stats"},
@@ -1049,7 +1049,7 @@ func dbCommands() cmdSpec {
 					flagStringArray("confirm", "Confirm the restart: <db>/restart. --yes never satisfies this check"),
 					flagBool("allow-overcommit", "Grow it even when the new size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
 				},
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Change a database's size, memory or CPU policy",
 					WhenToUse:      []string{"Give a database more or less memory, CPU weight and connections. The cgroup limits and reload-only settings change live; shared_buffers, max_connections and huge_pages need a restart of that database only, confirmed with --confirm <db>/restart, or left pending with --defer-restart (finish later with vaire apply --db <db> --confirm <db>/restart). A size that couldn't start is refused (would_not_start). A larger size that pushes the databases' sizes past the server's memory budget is refused (precondition_failed, reason memory_overcommitted) with the numbers and the largest larger size that still fits, as a complete command, or says none does; --allow-overcommit grows it anyway with the warning memory_overcommitted. Shrinking is never refused for the budget; shrinking below current use warns (shrink_below_use). vaire config set clusters.<db>.size does the same change without applying it. Shrinking a protected database is refused (database_protected)."},
 					Examples:       []string{"vaire db resize app --size large --confirm app/restart", "vaire db resize app --cpu-mode spare --cpu-quota 150%", "vaire db resize app --memory 768MiB --defer-restart", "vaire db resize app --size small --dry-run"},
@@ -1244,7 +1244,7 @@ func tuneCommands() cmdSpec {
 				flags: []fl{
 					flagStringArray("confirm", "Confirm restarts: <db>/restart for one database, {server}/restart for every one; repeatable. --yes never satisfies this check"),
 				},
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Write calculated settings and restart when required",
 					WhenToUse:      []string{"Install tuning after a resize. A restart needs --confirm <db>/restart, or {server}/restart for every database."},
 					Examples:       []string{"vaire tune apply --dry-run", "vaire tune apply --confirm app/restart"},
@@ -1414,7 +1414,7 @@ func restoreCommands() cmdSpec {
 			flagString("dump", "", "Long-retention dump id, for points older than the restore window"),
 			flagBool("promote", "Cut over to the restored copy as soon as it is ready"),
 		},
-		meta: CommandMeta{
+		meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 			Summary: "Rewind one database while the others keep serving",
 			WhenToUse: []string{
 				"Restore one database to a time, the latest WAL, a backup set or a dump. A physical restore of its stanza becomes the temporary cluster <db>__restoring, paused at the target, beside the live database, which keeps serving; inspect it with vaire sql --db <db>__restoring, then promote (a cut-over in place, a few seconds plus the replay to the target) or abort. It needs free space for one copy of the database. A dump (for points older than the window) loads into a new cluster instead, which gets a new stanza on promote.",
@@ -1451,7 +1451,7 @@ func restoreCommands() cmdSpec {
 				use:  "promote <db>",
 				args: cobra.ExactArgs(1),
 				run:  runRestorePromote,
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Cut the live database over to its restored copy",
 					WhenToUse:      []string{"After inspecting <db>__restoring: PgBouncer pauses the database, its cluster stops, the restored data directory takes the live one's place, and the cluster starts, reaches the target and opens on a new timeline, archiving to the same stanza; then a full backup starts. The URL and credentials don't change; the old data is kept as the stopped cluster <db>__pre_restore_<time> for undo."},
 					Examples:       []string{"vaire restore promote app --confirm app/restore"},
@@ -1467,7 +1467,7 @@ func restoreCommands() cmdSpec {
 				use:  "undo <db>",
 				args: cobra.ExactArgs(1),
 				run:  runRestoreUndo,
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Swap the data from before the last promote back in",
 					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists. The old cluster resumes on its old timeline, vaire records it so later restores follow it, and a full backup starts. After a restore from a dump it also takes the old stanza back."},
 					Examples:       []string{"vaire restore undo app --confirm app/restore"},
@@ -1495,7 +1495,7 @@ func restoreCommands() cmdSpec {
 				use:  "cleanup [db]",
 				args: cobra.MaximumNArgs(1),
 				run:  runRestoreCleanup,
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:          "List restore leftovers, or drop those of one database",
 					WhenToUse:        []string{"Free the space of the stopped <db>__pre_restore_* clusters once the restore is good. Without a database it only lists."},
 					Examples:         []string{"vaire restore cleanup", "vaire restore cleanup app --confirm app/cleanup"},
@@ -1603,7 +1603,7 @@ func nodeCommands() cmdSpec {
 					flagString("version", "", "Version to install on the node"),
 					flagBool("rollback", "Restore the previous binary"),
 				},
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:          "Upgrade or roll back the node binary from the operator",
 					WhenToUse:        []string{"Install a node release, or roll back with --rollback and a confirm token."},
 					Examples:         []string{"vaire node upgrade", "vaire node upgrade --rollback --confirm prod/rollback"},
@@ -1724,7 +1724,7 @@ func nodeCommands() cmdSpec {
 				flags: []fl{
 					flagBool("reclaim", "Also write a newer epoch naming this node, fencing the instance that took over (an abandoned rebuild only)"),
 				},
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Lift the epoch fence on this node",
 					WhenToUse:      []string{"Only when the server init --restore that fenced this server was a mistake or was abandoned. Run on the node over break-glass SSH, then vaire apply from your machine. A server that was really replaced is destroyed instead."},
 					Examples:       []string{"sudo vaire node unfence --confirm prod/unfence --dry-run", "sudo vaire node unfence --confirm prod/unfence --reclaim"},

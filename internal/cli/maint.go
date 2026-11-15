@@ -328,41 +328,53 @@ func reportMessage(kind string, dbs []maintReportDB) string {
 	var lines []string
 	for _, db := range dbs {
 		lines = append(lines, db.DB+":")
-		switch {
-		case db.Error != "":
-			lines = append(lines, "  "+db.Error)
-		case db.Bloat != nil:
-			if len(db.Bloat.Rows) == 0 {
-				lines = append(lines, "  no estimated bloat")
-			}
-			for _, r := range db.Bloat.Rows {
-				name := r.Schema + "." + r.Table
-				if r.Index != "" {
-					name += " (index " + r.Index + ")"
-				}
-				lines = append(lines, fmt.Sprintf("  %-50s %10s of %10s  %5.1f%%", name, humanBytes(r.BloatBytes), humanBytes(r.RealSize), r.Ratio*100))
-			}
-			if len(db.Bloat.Unestimated) > 0 {
-				lines = append(lines, "  not estimated (no statistics): "+strings.Join(db.Bloat.Unestimated, ", "))
-			}
-		case len(db.Rows) == 0:
-			lines = append(lines, "  nothing to report")
-		default:
-			cols := reportColumns[kind]
-			lines = append(lines, "  "+strings.Join(cols, "  "))
-			for _, r := range db.Rows {
-				vals := make([]string, 0, len(cols))
-				for _, c := range cols {
-					vals = append(vals, r[c])
-				}
-				lines = append(lines, "  "+strings.Join(vals, "  "))
-			}
-		}
+		lines = append(lines, reportDatabaseLines(kind, db)...)
 	}
 	if kind == maint.ReportBloat {
 		lines = append(lines, "an estimate from statistics (ioguix/pgsql-bloat-estimation); a plain vacuum makes the space reusable, repack (Phase 7) shrinks it")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// reportDatabaseLines renders one database's section of a report.
+func reportDatabaseLines(kind string, db maintReportDB) []string {
+	switch {
+	case db.Error != "":
+		return []string{"  " + db.Error}
+	case db.Bloat != nil:
+		return bloatLines(db.Bloat)
+	case len(db.Rows) == 0:
+		return []string{"  nothing to report"}
+	}
+	cols := reportColumns[kind]
+	lines := []string{"  " + strings.Join(cols, "  ")}
+	for _, r := range db.Rows {
+		vals := make([]string, 0, len(cols))
+		for _, c := range cols {
+			vals = append(vals, r[c])
+		}
+		lines = append(lines, "  "+strings.Join(vals, "  "))
+	}
+	return lines
+}
+
+// bloatLines renders one database's estimated bloat.
+func bloatLines(b *maint.BloatReport) []string {
+	var lines []string
+	if len(b.Rows) == 0 {
+		lines = append(lines, "  no estimated bloat")
+	}
+	for _, r := range b.Rows {
+		name := r.Schema + "." + r.Table
+		if r.Index != "" {
+			name += " (index " + r.Index + ")"
+		}
+		lines = append(lines, fmt.Sprintf("  %-50s %10s of %10s  %5.1f%%", name, humanBytes(r.BloatBytes), humanBytes(r.RealSize), r.Ratio*100))
+	}
+	if len(b.Unestimated) > 0 {
+		lines = append(lines, "  not estimated (no statistics): "+strings.Join(b.Unestimated, ", "))
+	}
+	return lines
 }
 
 func runMaintKill(cmd *cobra.Command, _ []string) error {

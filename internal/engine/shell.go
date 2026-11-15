@@ -62,15 +62,14 @@ func (s Shell) Run(ctx context.Context, stepID, script string, env map[string]st
 	if s.DryRun {
 		return errDryRun
 	}
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		if !envKeyPattern.MatchString(key) {
-			return fmt.Errorf("script env key %q is not an upper-case identifier", key)
-		}
-		keys = append(keys, key)
+	keys, err := scriptEnvKeys(env)
+	if err != nil {
+		return err
 	}
-	sort.Strings(keys)
-	cmd := exec.Command("/bin/bash", "-s") //nolint:gosec // G204: fixed interpreter; the script comes from go:embed.
+	// Command, not CommandContext: cancellation signals the script's whole
+	// process group and escalates to SIGKILL after killGrace, which
+	// CommandContext cannot do (see supervise).
+	cmd := exec.Command("/bin/bash", "-s") //nolint:noctx // cancellation is process-group aware below.
 	cmd.Stdin = strings.NewReader(script)
 	cmd.Env = []string{"PATH=" + scriptPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=/root", "DEBIAN_FRONTEND=noninteractive"}
 	for _, key := range keys {
@@ -92,19 +91,7 @@ func (s Shell) Run(ctx context.Context, stepID, script string, env map[string]st
 
 	done := make(chan struct{})
 	interrupted := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			close(interrupted)
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			select {
-			case <-done:
-			case <-time.After(killGrace):
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-		case <-done:
-		}
-	}()
+	go supervise(ctx, cmd, done, interrupted)
 
 	tail := s.stream(pr, stepID, report)
 	_ = pr.Close()
@@ -148,5 +135,37 @@ func (s Shell) stream(r io.Reader, stepID string, report Reporter) []string {
 		if err != nil {
 			return tail
 		}
+	}
+}
+
+// scriptEnvKeys validates env's keys and returns them sorted, so every script
+// environment has a deterministic order.
+func scriptEnvKeys(env map[string]string) ([]string, error) {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		if !envKeyPattern.MatchString(key) {
+			return nil, fmt.Errorf("script env key %q is not an upper-case identifier", key)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// supervise stops cmd's whole process group when ctx is cancelled: SIGTERM
+// first, then SIGKILL killGrace later if the group has not exited. It closes
+// interrupted when it cancels and is done when the caller closes done after
+// cmd.Wait returns.
+func supervise(ctx context.Context, cmd *exec.Cmd, done, interrupted chan struct{}) {
+	select {
+	case <-ctx.Done():
+		close(interrupted)
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(killGrace):
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	case <-done:
 	}
 }

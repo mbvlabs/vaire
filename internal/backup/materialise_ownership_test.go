@@ -43,7 +43,7 @@ func (o *fakeMaterialisationOwner) CreateConfig(_ context.Context, p Materialisa
 	if err := o.check(p); err != nil {
 		return err
 	}
-	if err := os.Mkdir(p.ConfigDir, 0o755); err != nil { //nolint:gosec // G301: model postgresql-common configuration mode.
+	if err := os.Mkdir(p.ConfigDir, 0o755); err != nil {
 		return err
 	}
 	var err error
@@ -154,15 +154,20 @@ func TestOwnedRestoreSequence(t *testing.T) {
 	}
 }
 
+// denyOwnershipStage makes the guard refuse one create or action stage.
+func denyOwnershipStage(owner *fakeMaterialisationOwner, stage string) {
+	if stage == "data" || stage == "config" {
+		owner.denyCreate = stage
+		return
+	}
+	owner.denyAction = MaterialisationAction(stage)
+}
+
 func TestOwnedCreateAndGuardFailuresDoNotRunEffects(t *testing.T) {
 	for _, stage := range []string{"data", "config", "restore", "register", "inspect", "start"} {
 		t.Run(stage, func(t *testing.T) {
 			m, owner := ownershipMaterialised(t)
-			if stage == "data" || stage == "config" {
-				owner.denyCreate = stage
-			} else {
-				owner.denyAction = MaterialisationAction(stage)
-			}
+			denyOwnershipStage(owner, stage)
 			restored := false
 			err := m.Restore(context.Background(), ownershipDriver{run: func(RestoreOptions) error {
 				restored = true

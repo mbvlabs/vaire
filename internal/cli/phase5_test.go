@@ -136,16 +136,24 @@ func TestOpenFetched(t *testing.T) {
 	// An exported file under any name: the message names the file, doesn't
 	// repeat "the bundle is corrupt", and the hint offers another file.
 	for name, cipher := range map[string][]byte{"flipped": bad, "truncated": sealed[:len(sealed)/2]} {
-		_, err := openFetched(fetchedBundle{Cipher: cipher, From: "/tmp/prod-master.tar.age"}, id.String(), "prod")
-		if !errors.As(err, &ce) || ce.Code != output.CodeBundleCorrupt {
-			t.Fatalf("%s file: %v", name, err)
-		}
-		if !strings.HasPrefix(ce.Message, "master bundle /tmp/prod-master.tar.age is corrupt: ") {
-			t.Errorf("%s file: message %q", name, ce.Message)
-		}
-		if strings.Contains(ce.Message, "the bundle is corrupt") || !strings.Contains(ce.Hint, "--bundle-file") {
-			t.Errorf("%s file: message %q, hint %q", name, ce.Message, ce.Hint)
-		}
+		assertCorruptExport(t, id.String(), name, cipher)
+	}
+}
+
+// assertCorruptExport checks the error of an exported bundle that doesn't
+// open.
+func assertCorruptExport(t *testing.T, identity, name string, cipher []byte) {
+	t.Helper()
+	var ce *output.CLIError
+	_, err := openFetched(fetchedBundle{Cipher: cipher, From: "/tmp/prod-master.tar.age"}, identity, "prod")
+	if !errors.As(err, &ce) || ce.Code != output.CodeBundleCorrupt {
+		t.Fatalf("%s file: %v", name, err)
+	}
+	if !strings.HasPrefix(ce.Message, "master bundle /tmp/prod-master.tar.age is corrupt: ") {
+		t.Errorf("%s file: message %q", name, ce.Message)
+	}
+	if strings.Contains(ce.Message, "the bundle is corrupt") || !strings.Contains(ce.Hint, "--bundle-file") {
+		t.Errorf("%s file: message %q, hint %q", name, ce.Message, ce.Hint)
 	}
 }
 

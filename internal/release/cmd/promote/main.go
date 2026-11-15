@@ -22,7 +22,7 @@ func main() {
 }
 
 func awsOutput(ctx context.Context, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, "aws", args...).Output() //nolint:gosec // G204: fixed executable; bucket/key/endpoint are separate arguments, never shell input.
+	return exec.CommandContext(ctx, "aws", args...).Output()
 }
 
 // With bucket flags, discover the current pointer fail-closed. The positional

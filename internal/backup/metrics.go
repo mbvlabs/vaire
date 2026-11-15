@@ -36,6 +36,18 @@ func BackupFamilies(server, node, version string, rs Records, jobs []engine.JobR
 	info := promfile.Gauge("vaire_info", "vaire build on this node.")
 	info.Add(1, promfile.L("version", version, "server", server, "node", node)...)
 
+	families := lastBackupFamilies(rs)
+	families = append(families, lastFailureFamily(rs))
+	families = append(families, stanzaFamilies(rs)...)
+	families = append(families, verifyFamily(rs))
+	families = append(families, drillFamilies(rs)...)
+	families = append(families, restoreInProgressFamily(rs), skippedJobs(jobs))
+	return append([]*promfile.Family{info}, families...)
+}
+
+// lastBackupFamilies are the last backup's timestamp, dump size, repository
+// size and duration per database and type.
+func lastBackupFamilies(rs Records) []*promfile.Family {
 	last := promfile.Gauge("vaire_backup_last_success_timestamp_seconds", "Last successful pgBackRest backup per database and type.")
 	size := promfile.Gauge("vaire_backup_last_size_bytes", "Database size of the last successful backup per database and type.")
 	repoSize := promfile.Gauge("vaire_backup_last_repo_size_bytes", "Repository size of the last successful backup per database and type.")
@@ -57,14 +69,23 @@ func BackupFamilies(server, node, version string, rs Records, jobs []engine.JobR
 			}
 		}
 	}
+	return []*promfile.Family{last, size, repoSize, duration}
+}
 
+// lastFailureFamily is the last failed backup per database and type.
+func lastFailureFamily(rs Records) *promfile.Family {
 	failed := promfile.Gauge("vaire_backup_last_failure_timestamp_seconds", "Last failed backup per database and type, until a success of that type.")
 	for _, db := range promfile.SortedKeys(rs.LastFailure) {
 		for _, kind := range promfile.SortedKeys(rs.LastFailure[db]) {
 			failed.Add(float64(unix(rs.LastFailure[db][kind])), promfile.L("db", db, "type", kind)...)
 		}
 	}
+	return failed
+}
 
+// stanzaFamilies are each database's earliest restorable point, complete
+// backup sets and repository size.
+func stanzaFamilies(rs Records) []*promfile.Family {
 	windowStart := promfile.Gauge("vaire_backup_window_start_timestamp_seconds", "Start of the oldest complete backup in each database's stanza: the earliest restorable point.")
 	sets := promfile.Gauge("vaire_backup_sets", "Complete backup sets in each database's stanza.")
 	stanzaSize := promfile.Gauge("vaire_backup_repo_size_bytes", "Repository size of every backup set in each database's stanza.")
@@ -76,34 +97,51 @@ func BackupFamilies(server, node, version string, rs Records, jobs []engine.JobR
 		sets.Add(float64(f.Sets), promfile.L("db", db)...)
 		stanzaSize.Add(float64(f.RepoSize), promfile.L("db", db)...)
 	}
+	return []*promfile.Family{windowStart, sets, stanzaSize}
+}
 
+// verifyFamily is the last passing pgbackrest verify per database.
+func verifyFamily(rs Records) *promfile.Family {
 	verified := promfile.Gauge("vaire_backup_verify_last_success_timestamp_seconds", "Last pgbackrest verify of a database's stanza that passed.")
 	for _, db := range promfile.SortedKeys(rs.LastVerify) {
 		if v := rs.LastVerify[db]; v.OK {
 			verified.Add(float64(unix(v.FinishedAt)), promfile.L("db", db)...)
 		}
 	}
+	return verified
+}
 
+// lastDrills are the last restore drill per database, keyed by database.
+func lastDrills(rs Records) map[string]Drill {
 	drills := map[string]Drill{}
 	for _, d := range rs.Drills {
 		drills[d.Database] = d
 	}
+	return drills
+}
+
+// drillFamilies are the last restore drill's finish time and result per
+// database.
+func drillFamilies(rs Records) []*promfile.Family {
+	drills := lastDrills(rs)
 	drillRun := promfile.Gauge("vaire_restore_drill_last_run_timestamp_seconds", "Last restore drill per database.")
 	drillResult := promfile.Gauge("vaire_restore_drill_last_result", "Result of the last restore drill per database.")
 	for _, db := range promfile.SortedKeys(drills) {
 		drillRun.Add(float64(unix(drills[db].FinishedAt)), promfile.L("db", db)...)
 		drillResult.Add(1, promfile.L("db", db, "result", drills[db].Result)...)
 	}
+	return []*promfile.Family{drillRun, drillResult}
+}
 
+// restoreInProgressFamily reports whether any restore is open.
+func restoreInProgressFamily(rs Records) *promfile.Family {
 	inProgress := promfile.Gauge("vaire_restore_in_progress", "Whether a restore of any database is open.")
 	open := 0.0
 	if len(rs.Restores) > 0 {
 		open = 1
 	}
 	inProgress.Add(open)
-
-	return []*promfile.Family{info, last, size, repoSize, duration, failed, windowStart, sets, stanzaSize,
-		verified, drillRun, drillResult, inProgress, skippedJobs(jobs)}
+	return inProgress
 }
 
 // skippedJobs is the last time each timer job was skipped on a busy lock.

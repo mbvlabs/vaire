@@ -97,7 +97,11 @@ func TestUnrealizedServiceScreensActualSystemdSlice(t *testing.T) {
 		testUnit + "/Slice":         "system.slice",
 		"system.slice/ControlGroup": "/system.slice",
 	}
+	fail := false
 	property := func(_ context.Context, unit, name string) (string, error) {
+		if fail {
+			return "", errors.New("systemctl show failed")
+		}
 		return properties[unit+"/"+name], nil
 	}
 	check := func() CPUScreen { return screenCPUService(context.Background(), dir, testUnit, property) }
@@ -122,6 +126,11 @@ func TestUnrealizedServiceScreensActualSystemdSlice(t *testing.T) {
 	if got := check(); got.Capability != CPUUnknown || got.Reason != "service_slice_unrealized" {
 		t.Fatal(got)
 	}
+	// A systemd property read that fails leaves the screen unknown.
+	fail = true
+	if got := check(); got.Capability != CPUUnknown || got.Reason != "control_group_unavailable" {
+		t.Fatal(got)
+	}
 }
 
 func TestCPUObservationAndValidation(t *testing.T) {
@@ -136,7 +145,7 @@ func TestCPUObservationAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pct = 151
-	var mismatch *CPUPolicyMismatch
+	var mismatch *CPUPolicyMismatchError
 	if err := ValidateCPUPolicy(CPUPolicy{Idle: true, QuotaPercent: &pct}, got); !errors.As(err, &mismatch) || mismatch.Reason != "quota_mismatch" {
 		t.Fatal(err)
 	}

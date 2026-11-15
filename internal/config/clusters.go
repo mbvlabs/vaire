@@ -178,58 +178,76 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 	names, ports, stanzas := map[string]bool{}, map[int]string{}, map[string]bool{}
 	for i, s := range c.Clusters {
 		at := fmt.Sprintf("clusters[%d]", i)
-		if err := CheckDatabaseName(s.Name); err != nil {
-			add("%s.name %q %v", at, s.Name, err)
-		}
-		if names[s.Name] {
-			add("%s.name %q is a duplicate", at, s.Name)
-		}
-		names[s.Name] = true
-		if s.Node != master.Name {
-			add("%s.node %q must be the master %q: workers arrive in Phase 10", at, s.Node, master.Name)
-		}
-		if !s.IsFollower() && s.FollowGeneration != "" {
-			add("%s.follow_generation is managed by vaire and only a follower may have one", at)
-		}
-		if s.Port < ClusterPortMin || s.Port > ClusterPortMax {
-			add("%s.port %d must be %d-%d", at, s.Port, ClusterPortMin, ClusterPortMax)
-		} else if other, taken := ports[s.Port]; taken {
-			add("%s.port %d is already used by %s", at, s.Port, other)
-		}
-		ports[s.Port] = s.Name
-		switch {
-		case s.IsFollower():
-			c.validateFollower(add, at, s)
-		case !stanzaPattern.MatchString(s.Stanza) || !strings.HasPrefix(s.Stanza, s.Name+"-"):
-			add("%s.stanza %q must be %s-<6 hex>", at, s.Stanza, s.Name)
-		}
-		if s.Stanza != "" && stanzas[s.Stanza] {
-			add("%s.stanza %q is a duplicate", at, s.Stanza)
-		}
-		stanzas[s.Stanza] = true
+		c.validateClusterIdentity(add, at, s, master.Name, names)
+		c.validateClusterPlacement(add, at, s, ports, stanzas)
 		c.validateClusterResources(add, at, s)
-		if s.Profile != "" {
-			if err := checkProfile(s.Profile); err != nil {
-				add("%s.profile %q %v", at, s.Profile, err)
-			}
-		}
-		if !durationPattern.MatchString(s.StatementTimeout) {
-			add("%s.statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", at, s.StatementTimeout)
-		}
-		for _, ext := range s.Extensions {
-			if _, ok := catalog.Lookup(ext); !ok {
-				add("%s.extensions %q is not in the catalog (it arrives with vaire ext in Phase 7)", at, ext)
-			}
-		}
-		for key := range s.Settings {
-			if !SettingKeyPattern.MatchString(key) {
-				add("%s.settings key %q must match %s", at, key, SettingKeyPattern)
-			}
-			if isReservedSetting(key) {
-				add("%s.settings key %q is managed by vaire and cannot be overridden", at, key)
-			}
-		}
+		c.validateClusterRuntime(add, at, s)
 		c.validateClusterBackup(add, at, s.Name, s.Backup)
+	}
+}
+
+// validateClusterIdentity checks the entry's name, its node and the keys only
+// db follow may write.
+func (c Cluster) validateClusterIdentity(add func(string, ...any), at string, s ClusterSpec, master string, names map[string]bool) {
+	if err := CheckDatabaseName(s.Name); err != nil {
+		add("%s.name %q %v", at, s.Name, err)
+	}
+	if names[s.Name] {
+		add("%s.name %q is a duplicate", at, s.Name)
+	}
+	names[s.Name] = true
+	if s.Node != master {
+		add("%s.node %q must be the master %q: workers arrive in Phase 10", at, s.Node, master)
+	}
+	if !s.IsFollower() && s.FollowGeneration != "" {
+		add("%s.follow_generation is managed by vaire and only a follower may have one", at)
+	}
+}
+
+// validateClusterPlacement checks the entry's port and stanza, including the
+// uniqueness the maps track across entries.
+func (c Cluster) validateClusterPlacement(add func(string, ...any), at string, s ClusterSpec, ports map[int]string, stanzas map[string]bool) {
+	if s.Port < ClusterPortMin || s.Port > ClusterPortMax {
+		add("%s.port %d must be %d-%d", at, s.Port, ClusterPortMin, ClusterPortMax)
+	} else if other, taken := ports[s.Port]; taken {
+		add("%s.port %d is already used by %s", at, s.Port, other)
+	}
+	ports[s.Port] = s.Name
+	switch {
+	case s.IsFollower():
+		c.validateFollower(add, at, s)
+	case !stanzaPattern.MatchString(s.Stanza) || !strings.HasPrefix(s.Stanza, s.Name+"-"):
+		add("%s.stanza %q must be %s-<6 hex>", at, s.Stanza, s.Name)
+	}
+	if s.Stanza != "" && stanzas[s.Stanza] {
+		add("%s.stanza %q is a duplicate", at, s.Stanza)
+	}
+	stanzas[s.Stanza] = true
+}
+
+// validateClusterRuntime checks the entry's profile, statement timeout,
+// extensions and settings keys.
+func (c Cluster) validateClusterRuntime(add func(string, ...any), at string, s ClusterSpec) {
+	if s.Profile != "" {
+		if err := checkProfile(s.Profile); err != nil {
+			add("%s.profile %q %v", at, s.Profile, err)
+		}
+	}
+	if !durationPattern.MatchString(s.StatementTimeout) {
+		add("%s.statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", at, s.StatementTimeout)
+	}
+	for _, ext := range s.Extensions {
+		if _, ok := catalog.Lookup(ext); !ok {
+			add("%s.extensions %q is not in the catalog (it arrives with vaire ext in Phase 7)", at, ext)
+		}
+	}
+	for key := range s.Settings {
+		if !SettingKeyPattern.MatchString(key) {
+			add("%s.settings key %q must match %s", at, key, SettingKeyPattern)
+		}
+		if isReservedSetting(key) {
+			add("%s.settings key %q is managed by vaire and cannot be overridden", at, key)
+		}
 	}
 }
 

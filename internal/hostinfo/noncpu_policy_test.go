@@ -48,7 +48,7 @@ func TestNonCPUObservationLoadedActual(t *testing.T) {
 func TestPartialCPUDisagreementBeforeUnknown(t *testing.T) {
 	idle := false
 	err := ValidateCPUPolicy(CPUPolicy{Idle: true}, CPUObservation{Idle: &idle})
-	var mismatch *CPUPolicyMismatch
+	var mismatch *CPUPolicyMismatchError
 	if !errors.As(err, &mismatch) || mismatch.Reason != "idle_mismatch" {
 		t.Fatal(err)
 	}

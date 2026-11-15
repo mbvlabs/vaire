@@ -21,7 +21,7 @@ func Main() int {
 	if err == nil {
 		return 0
 	}
-	var silent *localenv.SilentExit
+	var silent *localenv.SilentExitError
 	if errors.As(err, &silent) && silent != nil {
 		return silent.Code
 	}

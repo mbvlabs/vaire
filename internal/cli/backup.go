@@ -139,7 +139,7 @@ func fillPreset(s *backupSettings) {
 
 // requireBackupSettings fails with input_required naming the first missing
 // value when vaire must not prompt.
-func requireBackupSettings(cmd *cobra.Command, names backupFlagNames, s backupSettings, action string) error {
+func requireBackupSettings(names backupFlagNames, s backupSettings, action string) error {
 	checks := []struct {
 		ok   bool
 		flag string
@@ -434,7 +434,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	ctx := commandContext(cmd)
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -447,11 +447,8 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	wasConfigured := cfg.BackupConfigured()
-	if wasConfigured && (settings.Bucket != cfg.Backup.Bucket || settings.Prefix != cfg.Backup.Prefix || strings.TrimSuffix(settings.Endpoint, "/") != cfg.Backup.Endpoint) {
-		return output.NewError(output.CodePrecondition,
-			"backups already go to "+cfg.Backup.Bucket+"/"+cfg.Backup.Prefix+"; moving them would lose the restore window",
-			output.ExitPrecondition, "Keep the bucket and prefix. Re-running setup with them rotates the keys.").
-			WithDetails(map[string]any{"reason": "repo_in_use"})
+	if err := checkSameBackupRepo(cfg, settings, wasConfigured); err != nil {
+		return err
 	}
 	if !MustNotPrompt(cmd) {
 		if err := askBackupSettings(&settings); err != nil {
@@ -459,15 +456,11 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	fillPreset(&settings)
-	if err := requireBackupSettings(cmd, setupFlags, settings, "backup setup"); err != nil {
+	if err := requireBackupSettings(setupFlags, settings, "backup setup"); err != nil {
 		return err
 	}
 	if dryRun(cmd) {
-		return output.Success(cmd, output.Result{
-			Data:     map[string]any{"config": settings.configKeys(), "steps": steps.BackupStepIDs(), "dry_run": true},
-			Message:  "dry run: would probe " + settings.Bucket + ", write [backup] and run " + strings.Join(steps.BackupStepIDs(), ", "),
-			Warnings: s.warnings,
-		})
+		return backupSetupDryRun(cmd, settings, s.warnings)
 	}
 	owner := setupPrefixOwner(ctx, p, s.node, cfg, wasConfigured)
 	p.note("checking the bucket " + settings.Bucket + " at " + settings.Endpoint)
@@ -498,23 +491,9 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	// A changed kit is shown in a new handoff right here when there is a
 	// terminal; the warning and the export step remain only when the
 	// operator didn't store it during this command.
-	stored := false
-	if generated && !MustNotPrompt(cmd) {
-		if ok, _ := PromptYes(cmd, "Show the secrets handoff with the recovery kit now?"); ok {
-			// Revealing the whole document needs a human factor.
-			hash, err := masterPasswordHash(s.ctx.Name)
-			if err != nil {
-				return err
-			}
-			if err := secretGateUnlock(cmd, s.ctx, hash, s, p, "showing the secrets handoff"); err != nil {
-				return err
-			}
-			// show returns nil only once the operator typed 'stored'.
-			if _, err := showContextHandoff(cmd, s.ctx); err != nil {
-				return err
-			}
-			stored = true
-		}
+	stored, err := offerSetupHandoff(cmd, s, p, generated)
+	if err != nil {
+		return err
 	}
 	next := []string{"vaire backup list"}
 	if generated && !stored {
@@ -526,22 +505,10 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	if !stored {
 		next = append([]string{"vaire secrets export"}, next...)
 	}
-	message := []string{fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total)}
-	if list, err := p.call(ctx, s.node, "backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
-		var bl backupRowsData
-		if list.Decode(&bl) == nil {
-			for _, r := range bl.Databases {
-				if r.DroppedAt != "" {
-					continue
-				}
-				line := r.Database + ": restore window " + r.Window.describe()
-				if r.Latest != nil {
-					line = r.Database + ": latest backup " + r.Latest.Label + " (" + humanBytes(r.Latest.Size) + "), restore window " + r.Window.describe()
-				}
-				message = append(message, line)
-			}
-		}
-	}
+	list := backupListSummary(ctx, p, s)
+	message := make([]string, 0, 1+len(list))
+	message = append(message, fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total))
+	message = append(message, list...)
 	res := output.Result{
 		Data:     map[string]any{"apply": data, "bucket": settings.Bucket, "prefix": settings.Prefix},
 		Message:  strings.Join(message, "\n"),
@@ -549,6 +516,81 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		Next:     next,
 	}
 	return output.Success(cmd, res)
+}
+
+// checkSameBackupRepo refuses a setup that would move an existing
+// repository to another bucket or prefix: that loses its restore window.
+func checkSameBackupRepo(cfg config.Cluster, settings backupSettings, wasConfigured bool) error {
+	if !wasConfigured {
+		return nil
+	}
+	if settings.Bucket == cfg.Backup.Bucket && settings.Prefix == cfg.Backup.Prefix &&
+		strings.TrimSuffix(settings.Endpoint, "/") == cfg.Backup.Endpoint {
+		return nil
+	}
+	return output.NewError(output.CodePrecondition,
+		"backups already go to "+cfg.Backup.Bucket+"/"+cfg.Backup.Prefix+"; moving them would lose the restore window",
+		output.ExitPrecondition, "Keep the bucket and prefix. Re-running setup with them rotates the keys.").
+		WithDetails(map[string]any{"reason": "repo_in_use"})
+}
+
+// backupSetupDryRun reports what setup would write and run.
+func backupSetupDryRun(cmd *cobra.Command, settings backupSettings, warnings []output.Warning) error {
+	return output.Success(cmd, output.Result{
+		Data:     map[string]any{"config": settings.configKeys(), "steps": steps.BackupStepIDs(), "dry_run": true},
+		Message:  "dry run: would probe " + settings.Bucket + ", write [backup] and run " + strings.Join(steps.BackupStepIDs(), ", "),
+		Warnings: warnings,
+	})
+}
+
+// offerSetupHandoff shows the new handoff when the recovery kit changed, and
+// reports whether the operator stored it.
+func offerSetupHandoff(cmd *cobra.Command, s *session, p *progress, generated bool) (bool, error) {
+	if !generated || MustNotPrompt(cmd) {
+		return false, nil
+	}
+	ok, _ := PromptYes(cmd, "Show the secrets handoff with the recovery kit now?")
+	if !ok {
+		return false, nil
+	}
+	// Revealing the whole document needs a human factor.
+	hash, err := masterPasswordHash(s.ctx.Name)
+	if err != nil {
+		return false, err
+	}
+	if err := secretGateUnlock(cmd, hash, s, p, "showing the secrets handoff"); err != nil {
+		return false, err
+	}
+	// show returns nil only once the operator typed 'stored'.
+	if err := showContextHandoff(cmd, s.ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// backupListSummary is one line per database with a restore window, after
+// setup configured the bucket.
+func backupListSummary(ctx context.Context, p *progress, s *session) []string {
+	reply, err := p.call(ctx, s.node, "backup.list", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return nil
+	}
+	var bl backupRowsData
+	if reply.Decode(&bl) != nil {
+		return nil
+	}
+	lines := make([]string, 0, len(bl.Databases))
+	for _, r := range bl.Databases {
+		if r.DroppedAt != "" {
+			continue
+		}
+		line := r.Database + ": restore window " + r.Window.describe()
+		if r.Latest != nil {
+			line = r.Database + ": latest backup " + r.Latest.Label + " (" + humanBytes(r.Latest.Size) + "), restore window " + r.Window.describe()
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // backupListData is backup.list's result for one database (--db) as the
@@ -703,7 +745,7 @@ func eachDatabase(cmd *cobra.Command, s *session, p *progress, dbs []string, met
 		if len(dbs) > 1 {
 			p.note(db + ":")
 		}
-		reply, jobID, wasDetached, callErr := callJob(cmd, s, p, method, params(db), remote.CallOptions{})
+		reply, jobID, wasDetached, callErr := callJob(commandContext(cmd), s, p, method, params(db), remote.CallOptions{})
 		if wasDetached {
 			return outcomes, lines, warnings, &jobID
 		}
@@ -840,7 +882,8 @@ func detachedEach(cmd *cobra.Command, s *session, jobID, what string, rest []str
 		commands[i] = command(db)
 	}
 	message := "Detached; " + what + " keeps running on the node."
-	next := []string{"vaire job list"}
+	next := make([]string, 1, 1+len(commands))
+	next[0] = "vaire job list"
 	if jobID != "" {
 		message += " Re-attach with vaire job follow " + jobID + "."
 		next = []string{"vaire job follow " + jobID}

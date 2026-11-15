@@ -113,48 +113,16 @@ func TestStateRecheckRelistsSegments(t *testing.T) {
 		beforeStateRecheckHook = oldBefore
 	})
 
-	check := func(t *testing.T, s *Store, read func() (Coverage, int, error)) {
-		if err := os.MkdirAll(s.Dir, dirMode); err != nil {
-			t.Fatal(err)
-		}
-		first := true
-		second := true
-		afterStateReadHook = func() {
-			if !first {
-				return
-			}
-			first = false
-			mustAppend(t, s, baseEvent())
-		}
-		beforeStateRecheckHook = func() {
-			if !second {
-				return
-			}
-			second = false
-			mustAppend(t, s, Event{Source: SourceJob, Action: "backup.verify", Outcome: OutcomeSucceeded})
-		}
-		cov, events, err := read()
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		if events != 2 {
-			t.Fatalf("events = %d, want 2", events)
-		}
-		if cov.LossDetected || cov.Partial {
-			t.Fatalf("recheck re-list invented loss: %+v", cov)
-		}
-	}
-
 	t.Run("query", func(t *testing.T) {
 		s := testStore(t)
-		check(t, s, func() (Coverage, int, error) {
+		assertRecheckRelists(t, s, func() (Coverage, int, error) {
 			page, err := s.Query(context.Background(), Query{})
 			return page.Coverage, len(page.Events), err
 		})
 	})
 	t.Run("health", func(t *testing.T) {
 		s := testStore(t)
-		check(t, s, func() (Coverage, int, error) {
+		assertRecheckRelists(t, s, func() (Coverage, int, error) {
 			health, err := s.Health(context.Background())
 			if err != nil {
 				return Coverage{}, 0, err
@@ -167,6 +135,40 @@ func TestStateRecheckRelistsSegments(t *testing.T) {
 	})
 }
 
+// assertRecheckRelists checks that a state recheck lands before a fresh
+// listing, so the restored state is not paired with a stale one.
+func assertRecheckRelists(t *testing.T, s *Store, read func() (Coverage, int, error)) {
+	t.Helper()
+	if err := os.MkdirAll(s.Dir, dirMode); err != nil {
+		t.Fatal(err)
+	}
+	first, second := true, true
+	afterStateReadHook = func() {
+		if !first {
+			return
+		}
+		first = false
+		mustAppend(t, s, baseEvent())
+	}
+	beforeStateRecheckHook = func() {
+		if !second {
+			return
+		}
+		second = false
+		mustAppend(t, s, Event{Source: SourceJob, Action: "backup.verify", Outcome: OutcomeSucceeded})
+	}
+	cov, events, err := read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if events != 2 {
+		t.Fatalf("events = %d, want 2", events)
+	}
+	if cov.LossDetected || cov.Partial {
+		t.Fatalf("recheck re-list invented loss: %+v", cov)
+	}
+}
+
 // TestConcurrentReadsNeverInventLoss runs real writers and readers with no
 // retention. Any LossDetected verdict must be backed by a concrete counter.
 func TestConcurrentReadsNeverInventLoss(t *testing.T) {
@@ -174,7 +176,29 @@ func TestConcurrentReadsNeverInventLoss(t *testing.T) {
 	ctx := context.Background()
 	const writers = 2
 	const each = 150
+	done, writerErr := startLossWriters(ctx, s, writers, each)
+	var readers sync.WaitGroup
+	violations := make(chan string, 8)
+	for r := 0; r < 4; r++ {
+		readers.Add(1)
+		go lossReader(ctx, s, r, done, &readers, violations)
+	}
+	readers.Wait()
+	if err := <-writerErr; err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	select {
+	case violation := <-violations:
+		t.Fatal(violation)
+	default:
+	}
+	assertNoFinalLoss(t, s, writers*each)
+}
+
+// startLossWriters appends baseEvent and closes done when all writers finish.
+func startLossWriters(ctx context.Context, s *Store, writers, each int) (<-chan struct{}, <-chan error) {
 	var wg sync.WaitGroup
+	done := make(chan struct{})
 	writerErr := make(chan error, writers)
 	for w := 0; w < writers; w++ {
 		wg.Add(1)
@@ -188,65 +212,70 @@ func TestConcurrentReadsNeverInventLoss(t *testing.T) {
 			}
 		}()
 	}
-	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 		close(writerErr)
 	}()
-	var readers sync.WaitGroup
-	violations := make(chan string, 8)
-	for r := 0; r < 4; r++ {
-		readers.Add(1)
-		go func(r int) {
-			defer readers.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
-				}
-				page, err := s.Query(ctx, Query{Limit: 40})
-				if err != nil {
-					violations <- fmt.Sprintf("reader %d Query: %v", r, err)
-					return
-				}
-				cov := page.Coverage
-				if cov.LossDetected && !cov.CursorExpired &&
-					cov.MalformedSegments == 0 && cov.MalformedEvents == 0 &&
-					cov.SequenceGaps == 0 && cov.DroppedEvents == 0 {
-					violations <- fmt.Sprintf("reader %d false Query loss: %+v", r, cov)
-					return
-				}
-				health, err := s.Health(ctx)
-				if err != nil {
-					violations <- fmt.Sprintf("reader %d Health: %v", r, err)
-					return
-				}
-				if health.LossDetected && health.MalformedSegments == 0 &&
-					health.MalformedEvents == 0 && health.SequenceGaps == 0 &&
-					health.DroppedEvents == 0 && health.OwnerOnly && !health.OverBudget {
-					violations <- fmt.Sprintf("reader %d false Health loss: %+v", r, health)
-					return
-				}
-			}
-		}(r)
+	return done, writerErr
+}
+
+// lossReader reads until the writers finish, reporting the first fabricated
+// loss verdict.
+func lossReader(ctx context.Context, s *Store, reader int, done <-chan struct{}, wg *sync.WaitGroup, violations chan<- string) {
+	defer wg.Done()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if violation := queryViolation(ctx, s, reader); violation != "" {
+			violations <- violation
+			return
+		}
+		if violation := healthViolation(ctx, s, reader); violation != "" {
+			violations <- violation
+			return
+		}
 	}
-	readers.Wait()
-	if err := <-writerErr; err != nil {
-		t.Fatalf("writer: %v", err)
-	}
-	select {
-	case violation := <-violations:
-		t.Fatal(violation)
-	default:
-	}
-	page, err := s.Query(ctx, Query{Limit: MaxLimit})
+}
+
+// queryViolation reports a Query loss verdict that no counter backs.
+func queryViolation(ctx context.Context, s *Store, reader int) string {
+	page, err := s.Query(ctx, Query{Limit: 40})
 	if err != nil {
-		t.Fatalf("final Query: %v", err)
+		return fmt.Sprintf("reader %d Query: %v", reader, err)
 	}
-	if len(page.Events) != writers*each {
-		t.Fatalf("final events = %d, want %d", len(page.Events), writers*each)
+	cov := page.Coverage
+	if cov.LossDetected && !cov.CursorExpired &&
+		cov.MalformedSegments == 0 && cov.MalformedEvents == 0 &&
+		cov.SequenceGaps == 0 && cov.DroppedEvents == 0 {
+		return fmt.Sprintf("reader %d false Query loss: %+v", reader, cov)
+	}
+	return ""
+}
+
+// healthViolation reports a Health loss verdict that no counter backs.
+func healthViolation(ctx context.Context, s *Store, reader int) string {
+	health, err := s.Health(ctx)
+	if err != nil {
+		return fmt.Sprintf("reader %d Health: %v", reader, err)
+	}
+	if health.LossDetected && health.MalformedSegments == 0 &&
+		health.MalformedEvents == 0 && health.SequenceGaps == 0 &&
+		health.DroppedEvents == 0 && health.OwnerOnly && !health.OverBudget {
+		return fmt.Sprintf("reader %d false Health loss: %+v", reader, health)
+	}
+	return ""
+}
+
+// assertNoFinalLoss checks the final store reports a complete healthy history.
+func assertNoFinalLoss(t *testing.T, s *Store, want int) {
+	t.Helper()
+	page := mustQuery(t, s, Query{Limit: MaxLimit})
+	if len(page.Events) != want {
+		t.Fatalf("final events = %d, want %d", len(page.Events), want)
 	}
 	if page.Coverage.LossDetected || page.Coverage.Partial {
 		t.Fatalf("final coverage reports loss: %+v", page.Coverage)
@@ -275,10 +304,7 @@ func TestOversizeSegmentPagesEventuallyProgress(t *testing.T) {
 	// The old reader scanned only its 16 KiB budget, returned a cursor at the
 	// cut, and then re-read the same budget prefix forever. One whole segment
 	// per page must expose every event.
-	page, err := reader.Query(context.Background(), Query{Limit: MaxLimit})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
+	page := mustQuery(t, reader, Query{Limit: MaxLimit})
 	if len(page.Events) != total {
 		t.Fatalf("whole-segment page returned %d events, want %d", len(page.Events), total)
 	}
@@ -288,18 +314,17 @@ func TestOversizeSegmentPagesEventuallyProgress(t *testing.T) {
 	if page.Coverage.BytesScanned != segments[0].size {
 		t.Fatalf("first page bytes scanned = %d, want whole segment %d", page.Coverage.BytesScanned, segments[0].size)
 	}
+	assertPagedThroughOversizeSegment(t, reader, total)
+}
 
-	// A small limit must still page through the same oversize segment without
-	// repeating a cursor.
+// assertPagedThroughOversizeSegment walks small pages and checks every event is
+// reachable exactly once without a repeated cursor.
+func assertPagedThroughOversizeSegment(t *testing.T, reader *Store, total int) {
+	t.Helper()
 	seen := map[uint64]bool{}
 	cursors := map[string]bool{}
-	page, err = reader.Query(context.Background(), Query{Limit: 20})
-	if err != nil {
-		t.Fatalf("paged Query: %v", err)
-	}
-	pages := 0
-	for {
-		pages++
+	page := mustQuery(t, reader, Query{Limit: 20})
+	for pages := 1; ; pages++ {
 		if pages > 2*total {
 			t.Fatalf("pagination did not terminate after %d pages", pages)
 		}
@@ -316,15 +341,12 @@ func TestOversizeSegmentPagesEventuallyProgress(t *testing.T) {
 			t.Fatalf("cursor repeated: %q", page.NextCursor)
 		}
 		cursors[page.NextCursor] = true
-		page, err = reader.Query(context.Background(), Query{Limit: 20, Cursor: page.NextCursor})
-		if err != nil {
-			t.Fatalf("cursor Query: %v", err)
-		}
+		page = mustQuery(t, reader, Query{Limit: 20, Cursor: page.NextCursor})
 	}
 	if len(seen) != total {
 		t.Fatalf("pages exposed %d events, want %d", len(seen), total)
 	}
-	for seq := uint64(1); seq <= total; seq++ {
+	for seq := uint64(1); seq <= uint64(total); seq++ {
 		if !seen[seq] {
 			t.Fatalf("sequence %d unreachable", seq)
 		}
@@ -465,12 +487,14 @@ func TestClassifyQueryError(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, corruptStateErr := corrupt.Append(context.Background(), baseEvent())
-	cases := []struct {
+	type queryErrorCase struct {
 		name   string
 		err    error
 		reason string
 		ok     bool
-	}{
+	}
+	cases := make([]queryErrorCase, 0, 14)
+	cases = append(cases, []queryErrorCase{
 		{"invalid query", ValidateQuery(Query{Action: "bad action"}), QueryReasonInvalid, true},
 		{"out of range", ValidateQuery(Query{Limit: -1}), QueryReasonOutOfRange, true},
 		{"tampered cursor", ValidateQuery(Query{Cursor: "c1.bm90LWpzb24"}), QueryReasonInvalidCursor, true},
@@ -483,7 +507,7 @@ func TestClassifyQueryError(t *testing.T) {
 		{"invalid append", appendErr, "", false},
 		{"missing state", missingStateErr, "", false},
 		{"corrupt state", corruptStateErr, "", false},
-	}
+	}...)
 	first, err := s.Query(context.Background(), Query{Limit: 2})
 	if err != nil || first.NextCursor == "" {
 		t.Fatalf("first page: %v cursor=%q", err, first.NextCursor)
@@ -504,7 +528,7 @@ func TestClassifyQueryError(t *testing.T) {
 	}{"limit mismatch", limitErr, QueryReasonCursorMismatch, true})
 	// Unsafe store reads are not caller query errors.
 	segments := segmentsOf(t, s)
-	if err := os.Chmod(segments[0].path, 0o644); err != nil { //nolint:gosec // G302: the test needs an unsafe mode.
+	if err := os.Chmod(segments[0].path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, unsafeErr := s.Query(context.Background(), Query{})

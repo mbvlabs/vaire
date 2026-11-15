@@ -14,7 +14,7 @@ func TestConcurrentAppends(t *testing.T) {
 	errs := make(chan error, writers*each)
 	for w := 0; w < writers; w++ {
 		wg.Add(1)
-		go func(w int) {
+		go func() {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
 				if _, err := s.Append(context.Background(), Event{
@@ -28,7 +28,7 @@ func TestConcurrentAppends(t *testing.T) {
 					return
 				}
 			}
-		}(w)
+		}()
 	}
 	wg.Wait()
 	close(errs)
@@ -59,14 +59,29 @@ func TestConcurrentAppends(t *testing.T) {
 
 func TestConcurrentAppendAndQuery(t *testing.T) {
 	s := testStore(t)
+	done, errs := startAppendWriters(s, 4, 20)
+	for {
+		select {
+		case <-done:
+			requireNoWriterError(t, errs)
+			return
+		default:
+			assertConcurrentPage(t, s)
+		}
+	}
+}
+
+// startAppendWriters runs appenders of baseEvent and closes the returned done
+// channel when all of them finish. errs carries one error per writer.
+func startAppendWriters(s *Store, writers, each int) (<-chan struct{}, <-chan error) {
 	var wg sync.WaitGroup
 	done := make(chan struct{})
-	errs := make(chan error, 256)
-	for w := 0; w < 4; w++ {
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < 20; i++ {
+			for j := 0; j < each; j++ {
 				if _, err := s.Append(context.Background(), baseEvent()); err != nil {
 					errs <- err
 					return
@@ -78,38 +93,42 @@ func TestConcurrentAppendAndQuery(t *testing.T) {
 		wg.Wait()
 		close(done)
 	}()
-	for {
-		select {
-		case <-done:
-			close(errs)
-			for err := range errs {
-				t.Fatalf("writer error: %v", err)
-			}
-			return
-		default:
-			page, err := s.Query(context.Background(), Query{Limit: 5})
-			if err != nil {
-				t.Fatalf("Query: %v", err)
-			}
-			var prev uint64
-			for _, ev := range page.Events {
-				if ev.Sequence <= prev {
-					t.Fatalf("page is not ascending: %d after %d", ev.Sequence, prev)
-				}
-				prev = ev.Sequence
-			}
-			if page.NextCursor != "" {
-				q := Query{Limit: 5, Cursor: page.NextCursor}
-				next, err := s.Query(context.Background(), q)
-				if err != nil {
-					t.Fatalf("cursor Query: %v", err)
-				}
-				for _, ev := range next.Events {
-					if ev.Sequence <= page.Events[len(page.Events)-1].Sequence {
-						t.Fatalf("cursor page repeated sequence %d", ev.Sequence)
-					}
-				}
-			}
+	return done, errs
+}
+
+// requireNoWriterError fails the test when a finished writer reported an error.
+func requireNoWriterError(t *testing.T, errs <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errs:
+		t.Fatalf("writer error: %v", err)
+	default:
+	}
+}
+
+// assertConcurrentPage checks one page for ascending order and a cursor page
+// that never repeats a sequence.
+func assertConcurrentPage(t *testing.T, s *Store) {
+	t.Helper()
+	page := mustQuery(t, s, Query{Limit: 5})
+	var prev uint64
+	for _, ev := range page.Events {
+		if ev.Sequence <= prev {
+			t.Fatalf("page is not ascending: %d after %d", ev.Sequence, prev)
+		}
+		prev = ev.Sequence
+	}
+	if page.NextCursor == "" {
+		return
+	}
+	next := mustQuery(t, s, Query{Limit: 5, Cursor: page.NextCursor})
+	if len(page.Events) == 0 {
+		return
+	}
+	last := page.Events[len(page.Events)-1].Sequence
+	for _, ev := range next.Events {
+		if ev.Sequence <= last {
+			t.Fatalf("cursor page repeated sequence %d", ev.Sequence)
 		}
 	}
 }

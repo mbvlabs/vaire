@@ -25,9 +25,9 @@ func followerFactsState(state string, st health.FollowerState) Facts {
 
 func followerFacts(st health.FollowerState) Facts { return followerFactsState("running", st) }
 
-func statusOf(results []Result, db string) Status {
+func statusOf(results []Result) Status {
 	for _, r := range results {
-		if r.DB == db {
+		if r.DB == "app_follower" {
 			return r.Status
 		}
 	}
@@ -55,35 +55,35 @@ func TestFollowerChecksWithoutFollowers(t *testing.T) {
 
 func TestFollowerStreamingAndLag(t *testing.T) {
 	ok := followerState()
-	if s := statusOf(followerStreaming(followerFacts(ok)), "app_follower"); s != Pass {
+	if s := statusOf(followerStreaming(followerFacts(ok))); s != Pass {
 		t.Fatalf("streaming: %s", s)
 	}
 	paused := ok
 	paused.ReplayPaused = true
-	if s := statusOf(followerStreaming(followerFacts(paused)), "app_follower"); s != Fail {
+	if s := statusOf(followerStreaming(followerFacts(paused))); s != Fail {
 		t.Fatalf("paused: %s", s)
 	}
 	stopped := ok
 	stopped.Streaming = false
-	if s := statusOf(followerStreaming(followerFacts(stopped)), "app_follower"); s != Fail {
+	if s := statusOf(followerStreaming(followerFacts(stopped))); s != Fail {
 		t.Fatalf("not streaming: %s", s)
 	}
 	promoted := ok
 	promoted.InRecovery = false
-	if s := statusOf(followerStreaming(followerFacts(promoted)), "app_follower"); s != Fail {
+	if s := statusOf(followerStreaming(followerFacts(promoted))); s != Fail {
 		t.Fatalf("out of recovery: %s", s)
 	}
 	for lag, want := range map[float64]Status{0: Pass, 400: Warn, 4000: Fail} {
 		st := ok
 		st.LagSeconds = float64p(lag)
-		if s := statusOf(followerLag(followerFacts(st)), "app_follower"); s != want {
+		if s := statusOf(followerLag(followerFacts(st))); s != want {
 			t.Errorf("lag %vs: %s, want %s", lag, s, want)
 		}
 	}
 	for bytes, want := range map[int64]Status{1 << 20: Pass, 2 << 30: Warn, 20 << 30: Fail} {
 		st := ok
 		st.LagBytes = int64p(bytes)
-		if s := statusOf(followerLag(followerFacts(st)), "app_follower"); s != want {
+		if s := statusOf(followerLag(followerFacts(st))); s != want {
 			t.Errorf("lag %d B: %s, want %s", bytes, s, want)
 		}
 	}
@@ -94,7 +94,7 @@ func TestFollowerPartialReadings(t *testing.T) {
 	sourceOnly := followerState()
 	sourceOnly.SelfKnown = false
 	sourceOnly.InRecovery = false
-	if s := statusOf(followerStreaming(followerFacts(sourceOnly)), "app_follower"); s != Warn {
+	if s := statusOf(followerStreaming(followerFacts(sourceOnly))); s != Warn {
 		t.Fatalf("self unknown: %s", s)
 	}
 	if detail := detailOf(followerStreaming(followerFacts(sourceOnly)), "app_follower"); strings.Contains(detail, "out of recovery") {
@@ -104,16 +104,16 @@ func TestFollowerPartialReadings(t *testing.T) {
 	selfOnly := followerState()
 	selfOnly.SourceKnown = false
 	selfOnly.Streaming = false
-	if s := statusOf(followerStreaming(followerFacts(selfOnly)), "app_follower"); s != Warn {
+	if s := statusOf(followerStreaming(followerFacts(selfOnly))); s != Warn {
 		t.Fatalf("source unknown: %s", s)
 	}
-	if s := statusOf(followerSlot(followerFacts(selfOnly)), "app_follower"); s != Warn {
+	if s := statusOf(followerSlot(followerFacts(selfOnly))); s != Warn {
 		t.Fatalf("source unknown diagnosed as a missing slot: %s", s)
 	}
 
 	unknownLag := followerState()
 	unknownLag.LagBytes, unknownLag.LagSeconds = nil, nil
-	if s := statusOf(followerLag(followerFacts(unknownLag)), "app_follower"); s != Warn {
+	if s := statusOf(followerLag(followerFacts(unknownLag))); s != Warn {
 		t.Fatalf("unknown lag must not pass as zero: %s", s)
 	}
 	bytesOnly := followerState()
@@ -121,7 +121,7 @@ func TestFollowerPartialReadings(t *testing.T) {
 	if detail := detailOf(followerLag(followerFacts(bytesOnly)), "app_follower"); !strings.Contains(detail, "replay delay unknown") {
 		t.Fatalf("a missing seconds sample is shown as zero: %s", detail)
 	}
-	if s := statusOf(followerLag(followerFacts(bytesOnly)), "app_follower"); s != Warn {
+	if s := statusOf(followerLag(followerFacts(bytesOnly))); s != Warn {
 		t.Fatalf("an unknown seconds sample must not pass as zero: %s", s)
 	}
 }
@@ -145,7 +145,7 @@ func TestFollowerSlot(t *testing.T) {
 	for name, tc := range cases {
 		st := base
 		tc.edit(&st)
-		if s := statusOf(followerSlot(followerFacts(st)), "app_follower"); s != tc.want {
+		if s := statusOf(followerSlot(followerFacts(st))); s != tc.want {
 			t.Errorf("%s: %s, want %s", name, s, tc.want)
 		}
 	}
@@ -153,7 +153,7 @@ func TestFollowerSlot(t *testing.T) {
 	// measured cap.
 	unknown := base
 	unknown.SlotRetainedBytes, unknown.SlotSafeBytes, unknown.SlotUncapped = int64p(1<<30), nil, false
-	if s := statusOf(followerSlot(followerFacts(unknown)), "app_follower"); s != Pass {
+	if s := statusOf(followerSlot(followerFacts(unknown))); s != Pass {
 		t.Errorf("unknown allowance: %s, want %s", s, Pass)
 	}
 }
@@ -176,24 +176,24 @@ func TestFollowerSlotForAStoppedFollower(t *testing.T) {
 	} {
 		st := base
 		tc.edit(&st)
-		if s := statusOf(followerSlot(followerFactsState("stopped", st)), "app_follower"); s != tc.want {
+		if s := statusOf(followerSlot(followerFactsState("stopped", st))); s != tc.want {
 			t.Errorf("stopped, %s: %s, want %s", name, s, tc.want)
 		}
 	}
-	if s := statusOf(followerStreaming(followerFactsState("stopped", base)), "app_follower"); s != Skip {
+	if s := statusOf(followerStreaming(followerFactsState("stopped", base))); s != Skip {
 		t.Errorf("stopped streaming check: %s, want %s", s, Skip)
 	}
 
 	unreadable := base
 	unreadable.SourceKnown = false
-	if s := statusOf(followerSlot(followerFactsState("stopped", unreadable)), "app_follower"); s != Warn {
+	if s := statusOf(followerSlot(followerFactsState("stopped", unreadable))); s != Warn {
 		t.Errorf("stopped with an unreadable source: %s, want %s", s, Warn)
 	}
 }
 
 func TestFollowerUnreadableAndOrphans(t *testing.T) {
 	f := followerFacts(health.FollowerState{})
-	if s := statusOf(followerStreaming(f), "app_follower"); s != Warn {
+	if s := statusOf(followerStreaming(f)); s != Warn {
 		t.Fatalf("unreadable: %s", s)
 	}
 	f.OrphanSlots = []OrphanSlot{{Source: "app", Port: 5433, Slot: "vaire_gone"}}
@@ -216,7 +216,7 @@ func TestFollowerOrphanSlotQueryFailure(t *testing.T) {
 func TestBackupChecksSkipFollowers(t *testing.T) {
 	f := followerFacts(health.FollowerState{})
 	for _, run := range []func(Facts) []Result{backupArchiving, backupFullAge, backupVerify, backupDrill} {
-		if s := statusOf(run(f), "app_follower"); s != Skip {
+		if s := statusOf(run(f)); s != Skip {
 			t.Errorf("a backup check on a follower: %s", s)
 		}
 	}
@@ -250,7 +250,7 @@ func TestFollowerStreamingOneSideUnknown(t *testing.T) {
 		{"source-only streaming", sourceOnly(func(*health.FollowerState) {}), Warn},
 	}
 	for _, tc := range cases {
-		if s := statusOf(followerStreaming(followerFacts(tc.st)), "app_follower"); s != tc.want {
+		if s := statusOf(followerStreaming(followerFacts(tc.st))); s != tc.want {
 			t.Errorf("%s: %s, want %s", tc.name, s, tc.want)
 		}
 	}

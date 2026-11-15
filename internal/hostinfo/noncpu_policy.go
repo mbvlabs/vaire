@@ -79,17 +79,18 @@ func parseIOWeight(s string, loaded bool) (uint64, error) {
 	return n, nil
 }
 
-func observeNonCPU(ctx context.Context, dir, unit string, property func(context.Context, string, string) (string, error)) NonCPUObservation {
+// propertyFunc reads one systemd unit property.
+type propertyFunc func(context.Context, string, string) (string, error)
+
+func observeNonCPU(ctx context.Context, dir, unit string, property propertyFunc) NonCPUObservation {
 	unknown := func(reason string) NonCPUObservation { return NonCPUObservation{Reason: reason} }
 	if !pgUnitPattern.MatchString(unit) {
 		return unknown("invalid_service")
 	}
 	unit = canonicalUnit(unit)
-	before, e := property(ctx, unit, "InvocationID")
-	active, e2 := property(ctx, unit, "ActiveState")
-	group, e3 := property(ctx, unit, "ControlGroup")
-	if e != nil || e2 != nil || e3 != nil || !invocationPattern.MatchString(before) || before == strings.Repeat("0", 32) || active != "active" {
-		return unknown("service_identity_unavailable")
+	before, group, reason := nonCPUIdentity(ctx, unit, property)
+	if reason != "" {
+		return unknown(reason)
 	}
 	rel, err := groupPath(group, unit)
 	if err != nil {
@@ -100,17 +101,50 @@ func observeNonCPU(ctx context.Context, dir, unit string, property func(context.
 		return unknown("cgroup_unavailable")
 	}
 	defer func() { _ = root.Close() }()
+	identity, reason := realizedServiceCgroup(root, rel)
+	if reason != "" {
+		return unknown(reason)
+	}
+	loaded, actual, ok := readNonCPUControls(ctx, root, rel, unit, before, group, identity, property)
+	if !ok {
+		return unknown("non_cpu_facts_unavailable")
+	}
+	return NonCPUObservation{Known: true, Loaded: loaded, Actual: actual, invocation: before, identity: identity}
+}
+
+// nonCPUIdentity reads the service's invocation and control group. reason is
+// "" only for an active service with a stable, realized invocation.
+func nonCPUIdentity(ctx context.Context, unit string, property propertyFunc) (invocation, group, reason string) {
+	before, e := property(ctx, unit, "InvocationID")
+	active, e2 := property(ctx, unit, "ActiveState")
+	group, e3 := property(ctx, unit, "ControlGroup")
+	if e != nil || e2 != nil || e3 != nil || !invocationPattern.MatchString(before) || before == strings.Repeat("0", 32) || active != "active" {
+		return "", "", "service_identity_unavailable"
+	}
+	return before, group, ""
+}
+
+// realizedServiceCgroup checks the service cgroup is realized under root and
+// returns its identity, or the reason it is unavailable.
+func realizedServiceCgroup(root *os.Root, rel string) (os.FileInfo, string) {
 	if _, err := readCPUFile(root, "cgroup.controllers"); err != nil {
-		return unknown("cgroup_v2_unavailable")
+		return nil, "cgroup_v2_unavailable"
 	}
 	if !validGroupDirectories(root, rel) {
-		return unknown("service_cgroup_unavailable")
+		return nil, "service_cgroup_unavailable"
 	}
 	identity, err := root.Stat(rel)
 	if err != nil || !identity.IsDir() {
-		return unknown("service_cgroup_unavailable")
+		return nil, "service_cgroup_unavailable"
 	}
-	var result NonCPUObservation
+	return identity, ""
+}
+
+// readNonCPUControls reads the loaded and actual controls and verifies the
+// service and its cgroup stayed the same. ok is false when any read failed or
+// the identity changed.
+func readNonCPUControls(ctx context.Context, root *os.Root, rel, unit, before, group string,
+	identity os.FileInfo, property propertyFunc) (loaded, actual NonCPUControls, ok bool) {
 	high, e1 := property(ctx, unit, "MemoryHigh")
 	maximum, e2 := property(ctx, unit, "MemoryMax")
 	weight, e3 := property(ctx, unit, "IOWeight")
@@ -126,22 +160,21 @@ func observeNonCPU(ctx context.Context, dir, unit string, property func(context.
 	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || e8 != nil || e9 != nil || e10 != nil || e11 != nil || e12 != nil ||
 		before != after || before != finalID || group != groupAfter || activeAfter != "active" ||
 		!os.SameFile(identity, identityAfter) || !os.SameFile(identity, finalIdentity) {
-		return unknown("non_cpu_facts_unavailable")
+		return NonCPUControls{}, NonCPUControls{}, false
 	}
 	var errs [6]error
-	result.Loaded.MemoryHigh, errs[0] = parseControlLimit(high)
-	result.Loaded.MemoryMax, errs[1] = parseControlLimit(maximum)
-	result.Loaded.IOWeight, errs[2] = parseIOWeight(weight, true)
-	result.Actual.MemoryHigh, errs[3] = parseControlLimit(actualHigh)
-	result.Actual.MemoryMax, errs[4] = parseControlLimit(actualMax)
-	result.Actual.IOWeight, errs[5] = parseIOWeight(actualWeight, false)
+	loaded.MemoryHigh, errs[0] = parseControlLimit(high)
+	loaded.MemoryMax, errs[1] = parseControlLimit(maximum)
+	loaded.IOWeight, errs[2] = parseIOWeight(weight, true)
+	actual.MemoryHigh, errs[3] = parseControlLimit(actualHigh)
+	actual.MemoryMax, errs[4] = parseControlLimit(actualMax)
+	actual.IOWeight, errs[5] = parseIOWeight(actualWeight, false)
 	for _, e := range errs {
 		if e != nil {
-			return unknown("non_cpu_facts_unavailable")
+			return NonCPUControls{}, NonCPUControls{}, false
 		}
 	}
-	result.Known, result.invocation, result.identity = true, before, identity
-	return result
+	return loaded, actual, true
 }
 
 // ValidateNonCPUControls refuses unknown or differing loaded/actual controls.

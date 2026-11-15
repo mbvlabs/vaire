@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -33,10 +34,10 @@ type dbEndpoint struct {
 // master once; one still unknown (a restore copy, a typo) goes to the master,
 // whose session pooler refuses a database it has no entry for. With db
 // empty, it is the master.
-func databaseEndpoint(cmd *cobra.Command, s *session, p *progress, db string) dbEndpoint {
+func databaseEndpoint(ctx context.Context, s *session, p *progress, db string) dbEndpoint {
 	n, ok := s.ctx.DatabaseNode(db)
 	if !ok && db != "" {
-		s.warnings = append(s.warnings, syncContextFromNode(cmd, s, p)...)
+		s.warnings = append(s.warnings, syncContextFromNode(ctx, s, p)...)
 		n, _ = s.ctx.DatabaseNode(db)
 	}
 	return dbEndpoint{WGAddress: n.WGAddress, Hostname: n.Hostname}
@@ -85,7 +86,7 @@ func sqlQuery(cmd *cobra.Command, args []string) (string, error) {
 		return args[0], nil
 	}
 	if path := stringFlag(cmd, "file"); path != "" {
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this file.
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return "", output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
@@ -126,7 +127,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	ctx := commandContext(cmd)
-	at := databaseEndpoint(cmd, s, p, db)
+	at := databaseEndpoint(ctx, s, p, db)
 	// Connecting through the tunnel and running the statement send no
 	// events; the waiting line shows them. It ends before the result prints.
 	stopWait := p.wait("connecting to " + db)

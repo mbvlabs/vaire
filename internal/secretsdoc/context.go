@@ -95,6 +95,19 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 			ListenPort:    n.ListenPort,
 		})
 	}
+	if err := saveInstalledContext(doc, ctx, known); err != nil {
+		return nil, err
+	}
+	if current, _ := contexts.Current(); current == "" || !contexts.Exists(current) {
+		if err := contexts.SetCurrent(name); err != nil {
+			return ctx, err
+		}
+	}
+	return ctx, nil
+}
+
+func saveInstalledContext(doc Document, ctx *contexts.Context, known *transport.KnownHosts) error {
+	name := ctx.Name
 	ok := false
 	defer func() {
 		if !ok {
@@ -102,27 +115,22 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 		}
 	}()
 	if err := contexts.WriteFile(name, contexts.WGKeyFile, []byte(doc.Operator.WGPrivateKey+"\n")); err != nil {
-		return nil, err
+		return err
 	}
 	if err := contexts.WriteFile(name, contexts.SSHKeyFile, []byte(doc.Operator.SSHPrivateKey)); err != nil {
-		return nil, err
+		return err
 	}
 	if err := known.Save(); err != nil {
-		return nil, err
+		return err
 	}
 	if err := contexts.SaveCredentials(name, contexts.Credentials{SudoPassword: doc.Operator.SudoPassword, Database: doc.Database, Backup: doc.Backup, Metrics: doc.Metrics.creds(), MasterPasswordHash: doc.MasterPassword}); err != nil {
-		return nil, err
+		return err
 	}
 	if err := contexts.Save(ctx); err != nil {
-		return nil, err
+		return err
 	}
 	ok = true
-	if current, _ := contexts.Current(); current == "" || !contexts.Exists(current) {
-		if err := contexts.SetCurrent(name); err != nil {
-			return ctx, err
-		}
-	}
-	return ctx, nil
+	return nil
 }
 
 // Summary is the public part of a document, safe to print.

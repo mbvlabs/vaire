@@ -38,8 +38,7 @@ func TestApplyCPUChecked(t *testing.T) {
 	}{{hostinfo.CPUUnsupported, "spare_cpu_unsupported"}, {hostinfo.CPUUnknown, "spare_cpu_capability_unknown"}} {
 		screenFact.Capability = tc.capability
 		err := applyCPUChecked(ctx, "app", res, screen, run, observe)
-		var cli *output.CLIError
-		if !errors.As(err, &cli) || cli.Details.(map[string]any)["reason"] != tc.reason || runs != 0 {
+		if details := cliDetails(t, err); details["reason"] != tc.reason || runs != 0 {
 			t.Fatalf("%v, runs %d", err, runs)
 		}
 	}
@@ -51,7 +50,7 @@ func TestApplyCPUChecked(t *testing.T) {
 	idle = false
 	err := applyCPUChecked(ctx, "app", res, screen, run, observe)
 	var cli *output.CLIError
-	if !errors.As(err, &cli) || cli.ExitCode != output.ExitStep || cli.Details.(map[string]any)["reason"] != "cpu_policy_not_enforced" {
+	if !errors.As(err, &cli) || cli.ExitCode != output.ExitStep || cliDetails(t, err)["reason"] != "cpu_policy_not_enforced" {
 		t.Fatal(err)
 	}
 	res.CPUMode = "normal"
@@ -63,25 +62,39 @@ func TestApplyCPUChecked(t *testing.T) {
 		t.Fatal("normal weight mismatch accepted")
 	}
 	facts.Idle = nil
-	if err := applyCPUChecked(ctx, "app", res, screen, run, observe); !errors.As(err, &cli) || cli.Details.(map[string]any)["effective_known"] != false {
+	if err := applyCPUChecked(ctx, "app", res, screen, run, observe); cliDetails(t, err)["effective_known"] != false {
 		t.Fatal(err)
 	}
 	failed := func() error {
 		return &engine.ScriptError{Tail: []string{"vaire_cpu_policy_set_failed"}}
 	}
-	if err := applyCPUChecked(ctx, "app", res, screen, failed, observe); !errors.As(err, &cli) ||
-		cli.Details.(map[string]any)["mismatch"] != "runtime_property_update_failed" {
+	if err := applyCPUChecked(ctx, "app", res, screen, failed, observe); cliDetails(t, err)["mismatch"] != "runtime_property_update_failed" {
 		t.Fatal(err)
 	}
 	startErr := &engine.ScriptError{Status: 1, Tail: []string{"vaire_cpu_start_failed"}}
 	err = applyCPUChecked(ctx, "app", res, screen, func() error { return startErr }, observe)
-	if !errors.As(err, &cli) || cli.Details.(map[string]any)["mismatch"] != "startup_cpu_attribute_failed" || !errors.Is(err, startErr) {
+	if cliDetails(t, err)["mismatch"] != "startup_cpu_attribute_failed" || !errors.Is(err, startErr) {
 		t.Fatal(err)
 	}
 	unrelated := &engine.ScriptError{Status: 1, Tail: []string{"postgres failed to start"}}
 	if err := applyCPUChecked(ctx, "app", res, screen, func() error { return unrelated }, observe); !errors.Is(err, unrelated) {
 		t.Fatalf("unrelated start error changed: %v", err)
 	}
+}
+
+// cliDetails returns err's error details, failing the test when err is not an
+// output.CLIError carrying a details map.
+func cliDetails(t *testing.T, err error) map[string]any {
+	t.Helper()
+	var cli *output.CLIError
+	if !errors.As(err, &cli) {
+		t.Fatalf("err = %v, want a CLIError", err)
+	}
+	details, ok := cli.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("details = %#v, want map[string]any", cli.Details)
+	}
+	return details
 }
 
 func TestCPUInactiveStartDiagnostic(t *testing.T) {
@@ -93,7 +106,7 @@ func TestCPUInactiveStartDiagnostic(t *testing.T) {
 		"timeout":       "#!/bin/sh\nshift\nexec \"$@\"\n",
 	}
 	for name, script := range commands {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil { //nolint:gosec // Executable test-only command mocks in a private temp directory.
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -102,7 +115,7 @@ func TestCPUInactiveStartDiagnostic(t *testing.T) {
 		marker        bool
 	}{{"cpu", "yes", true}, {"postgres", "no", false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command("/bin/bash", "-s") //nolint:gosec // fixed interpreter, mocked commands.
+			cmd := exec.Command("/bin/bash", "-s")
 			cmd.Stdin = strings.NewReader(Script("postgres-cluster"))
 			cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "CLUSTER=app", "PORT=5433", "DATA_DIR=/data/app",
 				"LOCALE_PROVIDER=builtin", "LOCALE=C", "MEMORY_HIGH=640M", "MEMORY_MAX=infinity",

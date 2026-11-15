@@ -47,7 +47,7 @@ func HostID(addr string) string {
 // LoadKnownHosts reads path. A missing file is empty.
 func LoadKnownHosts(path string) (*KnownHosts, error) {
 	k := &KnownHosts{path: path, hosts: map[string][]ssh.PublicKey{}}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: known_hosts under the vaire config directory.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return k, nil

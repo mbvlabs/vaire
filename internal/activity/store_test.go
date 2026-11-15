@@ -62,6 +62,24 @@ func mustAppend(t *testing.T, s *Store, ev Event) Event {
 	return assigned
 }
 
+func mustQuery(t *testing.T, s *Store, q Query) Page {
+	t.Helper()
+	page, err := s.Query(context.Background(), q)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	return page
+}
+
+func mustHealth(t *testing.T, s *Store) Health {
+	t.Helper()
+	health, err := s.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	return health
+}
+
 func segmentsOf(t *testing.T, s *Store) []segmentInfo {
 	t.Helper()
 	segs, _, _, err := listSegments(s.Dir)
@@ -196,6 +214,42 @@ func TestAppendUniqueEventIDs(t *testing.T) {
 	}
 }
 
+// filterCase is one expected filter result over the seeded event set.
+type filterCase struct {
+	name  string
+	query Query
+	want  []uint64
+}
+
+// filterCases is the filter table for TestQueryFiltersAndOrder.
+func filterCases() []filterCase {
+	return []filterCase{
+		{"action", Query{Action: "backup.full"}, []uint64{1, 2, 3}},
+		{"outcome", Query{Outcome: OutcomeSucceeded}, []uint64{2, 5, 6}},
+		{"database", Query{Database: "app"}, []uint64{1, 2, 3}},
+		{"operation", Query{OperationID: "op-1"}, []uint64{1, 2}},
+		{"request", Query{RequestID: "req-1"}, []uint64{1}},
+		{"job", Query{JobID: "job-1"}, []uint64{3}},
+		{"limit", Query{Limit: 2}, []uint64{1, 2}},
+		{"none", Query{Action: "nothing.here"}, nil},
+	}
+}
+
+// assertFilterPage checks one filter returns exactly the expected sequences.
+func assertFilterPage(t *testing.T, s *Store, tc filterCase) {
+	t.Helper()
+	page := mustQuery(t, s, tc.query)
+	if !page.Coverage.Available {
+		t.Fatal("coverage unavailable")
+	}
+	if got := sequences(page.Events); !equalSeq(got, tc.want) {
+		t.Fatalf("sequences = %v, want %v", got, tc.want)
+	}
+	if page.Coverage.EventsReturned != len(page.Events) {
+		t.Fatalf("events_returned = %d", page.Coverage.EventsReturned)
+	}
+}
+
 func TestQueryFiltersAndOrder(t *testing.T) {
 	s := testStore(t)
 	events := []Event{
@@ -209,57 +263,16 @@ func TestQueryFiltersAndOrder(t *testing.T) {
 	for _, ev := range events {
 		mustAppend(t, s, ev)
 	}
-	tests := []struct {
-		name  string
-		query Query
-		want  []uint64
-	}{
-		{"action", Query{Action: "backup.full"}, []uint64{1, 2, 3}},
-		{"outcome", Query{Outcome: OutcomeSucceeded}, []uint64{2, 5, 6}},
-		{"database", Query{Database: "app"}, []uint64{1, 2, 3}},
-		{"operation", Query{OperationID: "op-1"}, []uint64{1, 2}},
-		{"request", Query{RequestID: "req-1"}, []uint64{1}},
-		{"job", Query{JobID: "job-1"}, []uint64{3}},
-		{"limit", Query{Limit: 2}, []uint64{1, 2}},
-		{"none", Query{Action: "nothing.here"}, nil},
-	}
-	for _, tc := range tests {
+	for _, tc := range filterCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			page, err := s.Query(context.Background(), tc.query)
-			if err != nil {
-				t.Fatalf("Query: %v", err)
-			}
-			if !page.Coverage.Available {
-				t.Fatal("coverage unavailable")
-			}
-			var got []uint64
-			for _, ev := range page.Events {
-				got = append(got, ev.Sequence)
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("sequences = %v, want %v", got, tc.want)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("sequences = %v, want %v", got, tc.want)
-				}
-			}
-			if page.Coverage.EventsReturned != len(page.Events) {
-				t.Fatalf("events_returned = %d", page.Coverage.EventsReturned)
-			}
+			assertFilterPage(t, s, tc)
 		})
 	}
-	page, err := s.Query(context.Background(), Query{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	page := mustQuery(t, s, Query{})
 	if len(page.Events) != len(events) {
 		t.Fatalf("default query returned %d events", len(page.Events))
 	}
-	capped, err := s.Query(context.Background(), Query{Limit: MaxLimit + 1000})
-	if err != nil {
-		t.Fatalf("capped limit query: %v", err)
-	}
+	capped := mustQuery(t, s, Query{Limit: MaxLimit + 1000})
 	if len(capped.Events) != len(events) || capped.Coverage.LimitReached {
 		t.Fatalf("capped limit page = %d events, limitReached %v", len(capped.Events), capped.Coverage.LimitReached)
 	}
@@ -589,11 +602,11 @@ func TestUnsafeStateRefused(t *testing.T) {
 	mustAppend(t, s, baseEvent())
 	statePath := filepath.Join(s.Dir, stateName)
 	target := filepath.Join(t.TempDir(), "state-target")
-	raw, err := os.ReadFile(statePath) //nolint:gosec // G304: the test store's own state file.
+	raw, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(target, raw, fileMode); err != nil { //nolint:gosec // G703: a path inside the test's own temporary directory.
+	if err := os.WriteFile(target, raw, fileMode); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(statePath); err != nil {
@@ -618,7 +631,7 @@ func TestUnsafeStateRefused(t *testing.T) {
 	if err := os.Remove(statePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(statePath, raw, 0o644); err != nil { //nolint:gosec // G306: the test needs an unsafe state mode.
+	if err := os.WriteFile(statePath, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Append(context.Background(), baseEvent()); !errors.Is(err, errUnsafeState) {

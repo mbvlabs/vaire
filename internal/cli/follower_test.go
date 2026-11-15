@@ -102,11 +102,7 @@ func TestUnfollowCredentialsOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, test := range map[string]struct {
-		err      error
-		dryRun   bool
-		handover bool
-	}{
+	for name, test := range map[string]unfollowCase{
 		"node marked it": {
 			err:      output.NewError(output.CodeError, "job 01J failed", output.ExitGeneric, "").WithDetails(map[string]any{node.UnfollowPasswordsDetail: true}),
 			handover: true,
@@ -129,51 +125,65 @@ func TestUnfollowCredentialsOnFailure(t *testing.T) {
 		},
 		"refused before it started": {
 			err: output.NewError(output.CodeInputRequired, "the password for app_follower_app was not supplied", output.ExitInput, "").
-				WithDetails(map[string]any{"secret": "app_follower_app"}), //nolint:gosec // G101: a secret's name, not its value.
+				WithDetails(map[string]any{"secret": "app_follower_app"}),
 		},
 		"dry run": {
 			err: output.NewError(output.CodePrecondition, "app_follower follows nothing, so there is nothing to unfollow", output.ExitPrecondition, "").
 				WithDetails(map[string]any{"reason": "not_a_follower", "database": "app_follower"}),
 		},
 	} {
-		note, out := unfollowCredentials(test.err, "app_follower", secret, test.dryRun)
-		if (note != "") != test.handover {
-			t.Errorf("%s: note %q, want a handover %v", name, note, test.handover)
-			continue
+		assertUnfollowCredentials(t, name, test, secret)
+	}
+}
+
+// unfollowCase is one db unfollow failure and whether it hands credentials
+// over.
+type unfollowCase struct {
+	err      error
+	dryRun   bool
+	handover bool
+}
+
+// assertUnfollowCredentials checks one unfollow failure's handover.
+func assertUnfollowCredentials(t *testing.T, name string, test unfollowCase, secret databaseSecret) {
+	t.Helper()
+	note, out := unfollowCredentials(test.err, "app_follower", secret, test.dryRun)
+	if (note != "") != test.handover {
+		t.Errorf("%s: note %q, want a handover %v", name, note, test.handover)
+		return
+	}
+	raw, marshalErr := json.Marshal(out)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if !test.handover {
+		if string(raw) != mustJSON(t, test.err) {
+			t.Errorf("%s: a failure without a handover changed the error: %s", name, raw)
 		}
-		raw, marshalErr := json.Marshal(out)
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
-		}
-		if !test.handover {
-			if string(raw) != mustJSON(t, test.err) {
-				t.Errorf("%s: a failure without a handover changed the error: %s", name, raw)
-			}
-			continue
-		}
-		if !strings.Contains(note, "may have changed app_follower's roles and passwords") {
-			t.Errorf("%s: note %q", name, note)
-		}
-		var cliErr *output.CLIError
-		if !errors.As(out, &cliErr) {
-			t.Fatalf("%s: not a CLI error: %v", name, out)
-		}
-		details, _ := cliErr.Details.(map[string]any)
-		shown, _ := details["database"].(databaseSecret)
-		if shown.Roles["app"].Password != secret.Roles["app"].Password {
-			t.Errorf("%s: the handover carries %v", name, details["database"])
-		}
-		if cliErr.Error() != test.err.Error() {
-			t.Errorf("%s: the failure's message changed: %q", name, cliErr.Error())
-		}
-		var want *output.CLIError
-		if errors.As(test.err, &want) && cliErr.Code != want.Code {
-			t.Errorf("%s: the failure's code changed to %q", name, cliErr.Code)
-		}
-		for _, role := range secret.Roles {
-			if strings.Contains(cliErr.Error(), role.Password) {
-				t.Errorf("%s: the failure's message carries a password", name)
-			}
+		return
+	}
+	if !strings.Contains(note, "may have changed app_follower's roles and passwords") {
+		t.Errorf("%s: note %q", name, note)
+	}
+	var cliErr *output.CLIError
+	if !errors.As(out, &cliErr) {
+		t.Fatalf("%s: not a CLI error: %v", name, out)
+	}
+	details, _ := cliErr.Details.(map[string]any)
+	shown, _ := details["database"].(databaseSecret)
+	if shown.Roles["app"].Password != secret.Roles["app"].Password {
+		t.Errorf("%s: the handover carries %v", name, details["database"])
+	}
+	if cliErr.Error() != test.err.Error() {
+		t.Errorf("%s: the failure's message changed: %q", name, cliErr.Error())
+	}
+	var want *output.CLIError
+	if errors.As(test.err, &want) && cliErr.Code != want.Code {
+		t.Errorf("%s: the failure's code changed to %q", name, cliErr.Code)
+	}
+	for _, role := range secret.Roles {
+		if strings.Contains(cliErr.Error(), role.Password) {
+			t.Errorf("%s: the failure's message carries a password", name)
 		}
 	}
 }
@@ -231,11 +241,7 @@ func mustJSON(t *testing.T, v any) string {
 func TestFollowerJSONOmitsUnreadSides(t *testing.T) {
 	int64p := func(v int64) *int64 { return &v }
 	float64p := func(v float64) *float64 { return &v }
-	cases := map[string]struct {
-		state   health.FollowerState
-		present []string
-		absent  []string
-	}{
+	cases := map[string]followerCase{
 		"both sides known": {
 			state: health.FollowerState{Source: "app", Slot: "vaire_f", SourceKnown: true, SelfKnown: true,
 				Streaming: true, SenderState: "streaming", InRecovery: true,
@@ -297,23 +303,7 @@ func TestFollowerJSONOmitsUnreadSides(t *testing.T) {
 		t.Run(rowName, func(t *testing.T) {
 			for name, tc := range cases {
 				st := tc.state
-				f := followerField(t, encode(&st))
-				if got, _ := f["source_known"].(bool); got != st.SourceKnown {
-					t.Errorf("%s: source_known %v, want %v", name, f["source_known"], st.SourceKnown)
-				}
-				if got, _ := f["self_known"].(bool); got != st.SelfKnown {
-					t.Errorf("%s: self_known %v, want %v", name, f["self_known"], st.SelfKnown)
-				}
-				for _, key := range tc.present {
-					if _, ok := f[key]; !ok {
-						t.Errorf("%s: %s is missing from %v", name, key, f)
-					}
-				}
-				for _, key := range tc.absent {
-					if _, ok := f[key]; ok {
-						t.Errorf("%s: %s is in JSON though its side is unread: %v", name, key, f)
-					}
-				}
+				assertFollowerFields(t, name, tc, followerField(t, encode(&st)))
 			}
 			// A measured zero is not an unknown: both sides answered, so the
 			// caught-up follower keeps its zeros.
@@ -325,6 +315,36 @@ func TestFollowerJSONOmitsUnreadSides(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// followerCase is one follower state and the fields its JSON must carry and
+// leave out.
+type followerCase struct {
+	state   health.FollowerState
+	present []string
+	absent  []string
+}
+
+// assertFollowerFields checks the fields one follower state encodes.
+func assertFollowerFields(t *testing.T, name string, tc followerCase, f map[string]any) {
+	t.Helper()
+	st := tc.state
+	if got, _ := f["source_known"].(bool); got != st.SourceKnown {
+		t.Errorf("%s: source_known %v, want %v", name, f["source_known"], st.SourceKnown)
+	}
+	if got, _ := f["self_known"].(bool); got != st.SelfKnown {
+		t.Errorf("%s: self_known %v, want %v", name, f["self_known"], st.SelfKnown)
+	}
+	for _, key := range tc.present {
+		if _, ok := f[key]; !ok {
+			t.Errorf("%s: %s is missing from %v", name, key, f)
+		}
+	}
+	for _, key := range tc.absent {
+		if _, ok := f[key]; ok {
+			t.Errorf("%s: %s is in JSON though its side is unread: %v", name, key, f)
+		}
 	}
 }
 

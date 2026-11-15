@@ -25,7 +25,7 @@ const (
 	SecretBackupAgeRecipient = "backup.age_recipient" //nolint:gosec // G101: a key name, not a value.
 	// SecretBackupAgeIdentity opens long-retention dumps. Only a restore from
 	// a dump sends it, and the node keeps it in memory for that job.
-	SecretBackupAgeIdentity = "backup.age_identity" //nolint:gosec // G101: a key name, not a value.
+	SecretBackupAgeIdentity = "backup.age_identity"
 )
 
 // StepSecrets are the request secrets steps read (engine.Runtime.SecretValues):
@@ -41,7 +41,7 @@ var StepSecrets = []string{
 // SecretMasterBundle is the decrypted master bundle (a tar, base64) that
 // server init --restore places on a new server (Phase 5). The operator
 // decrypts it; the node never sees the recovery identity.
-const SecretMasterBundle = "master.bundle" //nolint:gosec // G101: a key name, not a value.
+const SecretMasterBundle = "master.bundle"
 
 // Database roles with a login and a password.
 const (

@@ -92,7 +92,7 @@ func readState(dir string) (storeState, bool, error) {
 	if info.Size() > maxStateBytes {
 		return storeState{}, false, errCorruptState
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|noFollowFlag, 0) //nolint:gosec // G304: the store's own state file.
+	f, err := os.OpenFile(path, os.O_RDONLY|noFollowFlag, 0)
 	if err != nil {
 		if isNotExist(err) {
 			return storeState{}, false, nil
@@ -170,7 +170,7 @@ func writeState(dir string, st storeState) (err error) {
 
 // syncDir fsyncs a directory so a created, renamed or removed entry is durable.
 func syncDir(dir string) error {
-	f, err := os.Open(dir) //nolint:gosec // G304: the store directory.
+	f, err := os.Open(dir)
 	if err != nil {
 		return err
 	}

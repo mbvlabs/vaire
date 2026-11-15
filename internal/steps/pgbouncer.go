@@ -407,12 +407,12 @@ func pgbouncerResponds(ctx context.Context, socketDir string, port int) error {
 // database's running queries to finish, so it gets the longest.
 const poolerAdminTimeout = 15 * time.Second
 
-// poolerAdmin runs one admin console command on the pooler at port. It logs
-// in as pgbouncer over the socket as the postgres OS user, which PgBouncer
-// lets in without a password because it runs as that user.
-func poolerAdmin(ctx context.Context, port int, command string) error {
+// poolerAdmin runs one admin console command on the pooler. It logs in as
+// pgbouncer over the socket as the postgres OS user, which PgBouncer lets in
+// without a password because it runs as that user.
+func poolerAdmin(ctx context.Context, command string) error {
 	ctx, cancel := context.WithTimeout(ctx, poolerAdminTimeout)
 	defer cancel()
 	return runCmd(ctx, "runuser", "-u", "postgres", "--", "psql", "-X", "-q",
-		"-h", PGSocketDir, "-p", strconv.Itoa(port), "-U", "pgbouncer", "-d", "pgbouncer", "-c", command)
+		"-h", PGSocketDir, "-p", strconv.Itoa(PgbouncerPort), "-U", "pgbouncer", "-d", "pgbouncer", "-c", command)
 }

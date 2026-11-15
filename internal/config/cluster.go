@@ -291,7 +291,7 @@ func (c Cluster) WGPrefixLen() int {
 // LoadCluster reads path. A missing file returns cluster_not_initialized. A
 // file that does not parse or validate returns config_error.
 func LoadCluster(path string) (Cluster, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed cluster config path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if IsNotExist(err) {
 			return Cluster{}, output.NewError(
@@ -487,6 +487,20 @@ func (c Cluster) Validate() error { return c.ValidateFor(ScopeFull) }
 func (c Cluster) ValidateFor(scope Scope) error {
 	var problems []string
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	c.validateHeader(add)
+	subnet := c.validateTransport(add)
+	c.validateServer(add)
+	c.validateExposure(add)
+	c.validateNodes(add, subnet)
+	c.validatePhase2(add, scope)
+	if len(problems) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(problems, "; "))
+}
+
+// validateHeader checks the identity keys.
+func (c Cluster) validateHeader(add func(string, ...any)) {
 	if c.Schema != ClusterSchema {
 		add("schema must be %d", ClusterSchema)
 	}
@@ -506,6 +520,12 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if err := CheckTimezone(c.Timezone); err != nil {
 		add("timezone %q %v", c.Timezone, err)
 	}
+}
+
+// validateTransport checks [transport] and returns the subnet the nodes'
+// wireguard addresses must fall in. The subnet is invalid when it did not
+// parse, and the nodes are then not held to it.
+func (c Cluster) validateTransport(add func(string, ...any)) netip.Prefix {
 	if c.Transport.Kind != "wireguard" {
 		add("transport.kind must be wireguard until Phase 10")
 	}
@@ -516,6 +536,11 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if c.Transport.ListenPort < 1 || c.Transport.ListenPort > 65535 {
 		add("transport.listen_port must be 1-65535")
 	}
+	return subnet
+}
+
+// validateServer checks the host-level [server] limits.
+func (c Cluster) validateServer(add func(string, ...any)) {
 	if err := CheckAdminUser(c.Server.AdminUser); err != nil {
 		add("server.admin_user %q %v", c.Server.AdminUser, err)
 	}
@@ -525,6 +550,10 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if err := CheckDataRoot(c.Server.DataRoot); err != nil {
 		add("server.data_root %v", err)
 	}
+}
+
+// validateExposure checks the client and metrics exposure keys.
+func (c Cluster) validateExposure(add func(string, ...any)) {
 	for _, cidr := range c.Network.ClientAllowlist {
 		if err := CheckAllowlistEntry(cidr); err != nil {
 			add("network.client_allowlist entry %q %v", cidr, err)
@@ -541,6 +570,11 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if _, _, err := ParseWindow(c.Maintenance.Window); err != nil {
 		add("maintenance.window %q %v", c.Maintenance.Window, err)
 	}
+}
+
+// validateNodes checks the [[nodes]] entries, holding their wireguard
+// addresses to subnet.
+func (c Cluster) validateNodes(add func(string, ...any), subnet netip.Prefix) {
 	masters := 0
 	names := map[string]bool{}
 	for i, n := range c.Nodes {
@@ -567,11 +601,6 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	if masters != 1 {
 		add("exactly one node with role master is required (workers arrive in Phase 10)")
 	}
-	c.validatePhase2(add, scope)
-	if len(problems) == 0 {
-		return nil
-	}
-	return errors.New(strings.Join(problems, "; "))
 }
 
 // validatePhase2 checks the tables that only matter once the database runs.
@@ -579,6 +608,23 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	if scope == ScopeHost {
 		return
 	}
+	c.validateTLS(add)
+	c.validatePostgres(add)
+	if c.Server.MemoryReserve != "" {
+		if _, err := ParseMemoryMiB(c.Server.MemoryReserve); err != nil {
+			add("server.memory_reserve %q %v", c.Server.MemoryReserve, err)
+		}
+	}
+	if c.MasterBackup.RetentionDays < 1 || c.MasterBackup.RetentionWeeks < 0 || c.MasterBackup.LocalKeep < 1 {
+		add("master_backup needs retention_days and local_keep of at least 1, and retention_weeks of at least 0")
+	}
+	c.validateLocale(add)
+	c.validateClusters(add)
+	c.validateBackup(add)
+}
+
+// validateTLS checks the domain and [tls] keys.
+func (c Cluster) validateTLS(add func(string, ...any)) {
 	if c.Domain == "" {
 		add("domain is required (set it with vaire config set domain <fqdn>)")
 	}
@@ -590,6 +636,10 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	if c.TLS.ACMECA != "" && !strings.HasPrefix(c.TLS.ACMECA, "https://") {
 		add("tls.acme_ca %q must be an https:// URL", c.TLS.ACMECA)
 	}
+}
+
+// validatePostgres checks the [postgres] limits.
+func (c Cluster) validatePostgres(add func(string, ...any)) {
 	if c.Postgres.Version != 18 {
 		add("postgres.version must be 18")
 	}
@@ -605,14 +655,10 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 	if _, ok := LookupSize(c.Postgres.DefaultSize); !ok {
 		add("postgres.default_size %q must be one of nano, small, medium, large, xlarge", c.Postgres.DefaultSize)
 	}
-	if c.Server.MemoryReserve != "" {
-		if _, err := ParseMemoryMiB(c.Server.MemoryReserve); err != nil {
-			add("server.memory_reserve %q %v", c.Server.MemoryReserve, err)
-		}
-	}
-	if c.MasterBackup.RetentionDays < 1 || c.MasterBackup.RetentionWeeks < 0 || c.MasterBackup.LocalKeep < 1 {
-		add("master_backup needs retention_days and local_keep of at least 1, and retention_weeks of at least 0")
-	}
+}
+
+// validateLocale checks the locale and the [postgres.settings] keys.
+func (c Cluster) validateLocale(add func(string, ...any)) {
 	switch c.Postgres.LocaleProvider {
 	case "builtin", "icu", "libc":
 	default:
@@ -629,39 +675,43 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 			add("postgres.settings key %q is managed by vaire and cannot be overridden", key)
 		}
 	}
-	c.validateClusters(add)
-	if c.Backup.Provider != "" {
-		if err := CheckProvider(c.Backup.Provider); err != nil {
-			add("backup.provider %q %v", c.Backup.Provider, err)
+}
+
+// validateBackup checks [backup] when it names a provider.
+func (c Cluster) validateBackup(add func(string, ...any)) {
+	if c.Backup.Provider == "" {
+		return
+	}
+	if err := CheckProvider(c.Backup.Provider); err != nil {
+		add("backup.provider %q %v", c.Backup.Provider, err)
+	}
+	if err := CheckEndpoint(c.Backup.Endpoint); err != nil {
+		add("backup.endpoint %q %v", c.Backup.Endpoint, err)
+	}
+	if err := CheckBucket(c.Backup.Bucket); err != nil {
+		add("backup.bucket %q %v", c.Backup.Bucket, err)
+	}
+	if err := CheckPrefix(c.Backup.Prefix); err != nil {
+		add("backup.prefix %q %v", c.Backup.Prefix, err)
+	}
+	if c.Backup.Region == "" {
+		add("backup.region is required")
+	}
+	switch c.Backup.URIStyle {
+	case "path", "host":
+	default:
+		add("backup.uri_style %q must be path or host", c.Backup.URIStyle)
+	}
+	if c.Backup.Database.FullSchedule == "" {
+		add("backup.database.full_schedule is required")
+	}
+	for key, value := range c.ScheduleValues() {
+		if !schedulePattern.MatchString(value) {
+			add("%s %q is not a systemd OnCalendar expression", key, value)
 		}
-		if err := CheckEndpoint(c.Backup.Endpoint); err != nil {
-			add("backup.endpoint %q %v", c.Backup.Endpoint, err)
-		}
-		if err := CheckBucket(c.Backup.Bucket); err != nil {
-			add("backup.bucket %q %v", c.Backup.Bucket, err)
-		}
-		if err := CheckPrefix(c.Backup.Prefix); err != nil {
-			add("backup.prefix %q %v", c.Backup.Prefix, err)
-		}
-		if c.Backup.Region == "" {
-			add("backup.region is required")
-		}
-		switch c.Backup.URIStyle {
-		case "path", "host":
-		default:
-			add("backup.uri_style %q must be path or host", c.Backup.URIStyle)
-		}
-		if c.Backup.Database.FullSchedule == "" {
-			add("backup.database.full_schedule is required")
-		}
-		for key, value := range c.ScheduleValues() {
-			if !schedulePattern.MatchString(value) {
-				add("%s %q is not a systemd OnCalendar expression", key, value)
-			}
-		}
-		if c.Backup.Database.RetentionFull < 1 {
-			add("backup.database.retention_full must be at least 1")
-		}
+	}
+	if c.Backup.Database.RetentionFull < 1 {
+		add("backup.database.retention_full must be at least 1")
 	}
 }
 

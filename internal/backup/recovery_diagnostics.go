@@ -37,7 +37,7 @@ func newRecoveryLogCursor(path string) (*recoveryLogCursor, error) {
 	}
 	c.initial, c.offset = info, info.Size()
 	if c.offset > 0 {
-		f, err := os.Open(path) //nolint:gosec // G304: fixed cluster log path.
+		f, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
@@ -58,7 +58,7 @@ func (c *recoveryLogCursor) read() (string, error) {
 }
 
 func (c *recoveryLogCursor) readLimit(limit int) (string, error) {
-	f, err := os.Open(c.path) //nolint:gosec // G304: caller supplies the fixed cluster log path.
+	f, err := os.Open(c.path)
 	if err != nil {
 		if c.initial == nil && errors.Is(err, os.ErrNotExist) {
 			return "", nil

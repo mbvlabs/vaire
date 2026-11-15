@@ -469,6 +469,8 @@ func renderSuccess(cmd *cobra.Command, opts Options, env Envelope, message strin
 		return writeJSON(out, env)
 	case ModeMarkdown:
 		return writeMarkdown(out, opts, message, env.Data, env.Next)
+	case ModeHuman:
+		return writeHuman(out, opts, message, unshownWarnings(cmd, env.Warnings), env.Next)
 	default:
 		return writeHuman(out, opts, message, unshownWarnings(cmd, env.Warnings), env.Next)
 	}

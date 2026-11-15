@@ -86,7 +86,7 @@ func healEndpoint(ctx context.Context, c *contexts.Context, err error) (bool, ou
 	if addr == "" {
 		return false, output.Warning{}
 	}
-	stopTunnelDaemonQuietly(c.Name, true)
+	stopTunnelDaemonQuietly(ctx, c.Name)
 	old, serr := setMasterAddress(c, addr, 0)
 	if serr != nil {
 		return false, output.Warning{}
@@ -141,7 +141,7 @@ func runContextSetAddress(cmd *cobra.Command, args []string) error {
 		return output.Success(cmd, output.Result{Data: map[string]any{"context": c.Name, "public_address": addr, "dry_run": true},
 			Message: "dry run: would point context " + c.Name + " at " + addr})
 	}
-	stopTunnelDaemonQuietly(c.Name, true)
+	stopTunnelDaemonQuietly(commandContext(cmd), c.Name)
 	old, err := setMasterAddress(c, addr, port)
 	if err != nil {
 		return err

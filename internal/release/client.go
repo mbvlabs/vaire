@@ -144,33 +144,8 @@ func (c *Client) Fetch(ctx context.Context, m Manifest, goos, goarch string) (st
 		return "", fmt.Errorf("protect release download: %w", err)
 	}
 
-	resp, err := openHTTPS(ctx, c.httpClient(), art.URL)
-	if err != nil {
+	if err := c.downloadArtifact(ctx, tmp, art); err != nil {
 		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return "", unreachable(art.URL, fmt.Errorf("status %d", resp.StatusCode))
-	}
-
-	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(tmp, hash), io.LimitReader(resp.Body, maxArtifact+1))
-	if err != nil {
-		return "", unreachable(art.URL, err)
-	}
-	if written > maxArtifact {
-		return "", verificationFailed("release artifact exceeds the size limit")
-	}
-	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("close release download: %w", err)
-	}
-	want, err := hex.DecodeString(art.SHA256)
-	if err != nil || len(want) != sha256.Size {
-		return "", verificationFailed("release artifact sha256 is invalid")
-	}
-	got := hash.Sum(nil)
-	if subtle.ConstantTimeCompare(got, want) != 1 {
-		return "", verificationFailed("release artifact sha256 mismatch")
 	}
 	if err := persistManifest(dir, m); err != nil {
 		return "", err
@@ -180,6 +155,38 @@ func (c *Client) Fetch(ctx context.Context, m Manifest, goos, goarch string) (st
 	}
 	cleanup = false
 	return dest, nil
+}
+
+func (c *Client) downloadArtifact(ctx context.Context, tmp *os.File, art Artifact) error {
+	resp, err := openHTTPS(ctx, c.httpClient(), art.URL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return unreachable(art.URL, fmt.Errorf("status %d", resp.StatusCode))
+	}
+
+	hash := sha256.New()
+	written, err := io.Copy(io.MultiWriter(tmp, hash), io.LimitReader(resp.Body, maxArtifact+1))
+	if err != nil {
+		return unreachable(art.URL, err)
+	}
+	if written > maxArtifact {
+		return verificationFailed("release artifact exceeds the size limit")
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close release download: %w", err)
+	}
+	want, err := hex.DecodeString(art.SHA256)
+	if err != nil || len(want) != sha256.Size {
+		return verificationFailed("release artifact sha256 is invalid")
+	}
+	got := hash.Sum(nil)
+	if subtle.ConstantTimeCompare(got, want) != 1 {
+		return verificationFailed("release artifact sha256 mismatch")
+	}
+	return nil
 }
 
 func persistManifest(dir string, m Manifest) error {
@@ -208,7 +215,7 @@ func fileHasSHA256(path, wantHex string) (bool, error) {
 	if !info.Mode().IsRegular() {
 		return false, fmt.Errorf("cached release is not a regular file")
 	}
-	f, err := os.Open(path) //nolint:gosec // G304: path is under the local release cache.
+	f, err := os.Open(path)
 	if err != nil {
 		return false, err
 	}

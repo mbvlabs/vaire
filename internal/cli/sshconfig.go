@@ -34,7 +34,7 @@ func applySSHConfig(boot *contexts.Bootstrap, userGiven, portGiven, identityGive
 	if err != nil || boot.Host == "" {
 		return ""
 	}
-	f, err := os.Open(filepath.Join(home, ".ssh", "config")) //nolint:gosec // G304: the operator's own ssh config.
+	f, err := os.Open(filepath.Join(home, ".ssh", "config"))
 	if err != nil {
 		return ""
 	}
@@ -83,7 +83,7 @@ func checkIdentity(path string) error {
 		return nil
 	}
 	full := expandHome(path)
-	raw, err := os.ReadFile(full) //nolint:gosec // G304: the operator chose this identity file.
+	raw, err := os.ReadFile(full)
 	if err != nil {
 		return output.NewError(output.CodeUsage, "the --identity file "+full+" can't be read: "+unwrapPathError(err), output.ExitUsage,
 			"Pass the path of a readable private key with --identity.").WithDetails(map[string]any{"flag": "--identity", "path": full})

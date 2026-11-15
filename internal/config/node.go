@@ -29,7 +29,7 @@ type Node struct {
 // LoadNode reads path. A missing file returns an error matching fs.ErrNotExist.
 // A file that does not parse returns config_error.
 func LoadNode(path string) (Node, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed node config path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Node{}, err
 	}

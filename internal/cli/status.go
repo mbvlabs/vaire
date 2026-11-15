@@ -161,7 +161,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if !flagTrue(cmd, "watch") || MustNotPrompt(cmd) || !term.IsTerminal(int(os.Stdout.Fd())) { //nolint:gosec // G115: a file descriptor fits in int.
+	if !flagTrue(cmd, "watch") || MustNotPrompt(cmd) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return output.Success(cmd, output.Result{Data: data, Message: statusMessage(data, warnings), Warnings: append(s.warnings, warnings...),
 			Next: statusNext(data)})
 	}
@@ -223,6 +223,25 @@ func statusNext(d statusData) []string {
 
 // statusMessage renders the server card and a row per database.
 func statusMessage(d statusData, warnings []output.Warning) string {
+	lines := statusHeaderLines(d)
+	if len(d.Databases) == 0 {
+		lines = append(lines, "", "no databases yet (vaire db create <name>)")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, statusDatabaseRows(d)...)
+	lines = append(lines, statusDatabaseDetails(d)...)
+	for _, db := range d.Databases {
+		if db.RestartPending {
+			lines = append(lines, "  * restart pending")
+			break
+		}
+	}
+	_ = warnings
+	return strings.Join(lines, "\n")
+}
+
+// statusHeaderLines renders the server card above the database table.
+func statusHeaderLines(d statusData) []string {
 	var lines []string
 	head := fmt.Sprintf("server %s · node %s · vaire %s", d.Server, d.Node, d.VaireVersion)
 	if d.PGVersion != "" {
@@ -255,63 +274,83 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 	if !d.Backups {
 		lines = append(lines, "  backups none off the server (vaire backup setup)")
 	}
-	if m := d.Master; m != nil {
-		line := "  master  "
-		switch {
-		case m.Fenced:
-			line += "FENCED: a newer master took over this server's bucket"
-		case m.Last == "":
-			line += "no bundle yet"
-		default:
-			line += "last bundle " + m.CreatedAt
-			switch {
-			case m.Uploaded:
-				line += fmt.Sprintf(", in the bucket (epoch %d)", m.Epoch)
-			case m.Bucket:
-				line += ", not uploaded yet"
-			default:
-				line += ", on the server only (vaire server backup export)"
-			}
-			if m.Pending {
-				line += "; a change is being bundled"
-			}
-			if m.LastFailed != "" {
-				line += "; last failure: " + m.LastFailed
-			}
-		}
+	if line := statusMasterLine(d); line != "" {
 		lines = append(lines, line)
 	}
-	if len(d.Databases) == 0 {
-		lines = append(lines, "", "no databases yet (vaire db create <name>)")
-		return strings.Join(lines, "\n")
+	return lines
+}
+
+// statusMasterLine is the bucket bundle's state (Phase 5). It returns "" when
+// no master bundle exists.
+func statusMasterLine(d statusData) string {
+	m := d.Master
+	if m == nil {
+		return ""
 	}
+	line := "  master  "
+	switch {
+	case m.Fenced:
+		return line + "FENCED: a newer master took over this server's bucket"
+	case m.Last == "":
+		return line + "no bundle yet"
+	}
+	line += "last bundle " + m.CreatedAt
+	switch {
+	case m.Uploaded:
+		line += fmt.Sprintf(", in the bucket (epoch %d)", m.Epoch)
+	case m.Bucket:
+		line += ", not uploaded yet"
+	default:
+		line += ", on the server only (vaire server backup export)"
+	}
+	if m.Pending {
+		line += "; a change is being bundled"
+	}
+	if m.LastFailed != "" {
+		line += "; last failure: " + m.LastFailed
+	}
+	return line
+}
+
+// statusDatabaseRows renders the table header and one row per database.
+func statusDatabaseRows(d statusData) []string {
+	lines := make([]string, 0, 2+len(d.Databases))
 	lines = append(lines, "", fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
 		"DATABASE", "STATE", "SIZE", "MEMORY", "CONNS", "CACHE", "TPS", "LAST BACKUP", "UP"))
 	for _, db := range d.Databases {
-		mem := tune.FormatMiB(db.MemoryMiB)
-		if db.MemoryCurrentMiB != nil {
-			mem = tune.FormatMiB(int(*db.MemoryCurrentMiB)) + "/" + tune.FormatMiB(db.MemoryMiB)
-		}
-		if db.State == "incomplete" {
-			lines = append(lines, fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
-				db.Name, db.State, db.Size, mem, "-", "-", "-", "-", "-"))
-			continue
-		}
-		cache, tps := "-", "-"
-		if db.CacheHitRatio != nil {
-			cache = fmt.Sprintf("%.1f%%", *db.CacheHitRatio*100)
-		}
-		if db.TPS != nil {
-			tps = fmt.Sprintf("%.1f", *db.TPS)
-		}
-		state := db.State
-		if db.RestartPending {
-			state += "*"
-		}
-		last := latestBackup(db)
-		lines = append(lines, fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
-			db.Name, state, db.Size, mem, fmt.Sprintf("%d/%d", db.Connections.Used, db.Connections.Max), cache, tps, last, health.Uptime(db.UptimeS)))
+		lines = append(lines, statusDatabaseRow(db))
 	}
+	return lines
+}
+
+// statusDatabaseRow renders one database's table row.
+func statusDatabaseRow(db statusDB) string {
+	mem := tune.FormatMiB(db.MemoryMiB)
+	if db.MemoryCurrentMiB != nil {
+		mem = tune.FormatMiB(int(*db.MemoryCurrentMiB)) + "/" + tune.FormatMiB(db.MemoryMiB)
+	}
+	if db.State == "incomplete" {
+		return fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
+			db.Name, db.State, db.Size, mem, "-", "-", "-", "-", "-")
+	}
+	cache, tps := "-", "-"
+	if db.CacheHitRatio != nil {
+		cache = fmt.Sprintf("%.1f%%", *db.CacheHitRatio*100)
+	}
+	if db.TPS != nil {
+		tps = fmt.Sprintf("%.1f", *db.TPS)
+	}
+	state := db.State
+	if db.RestartPending {
+		state += "*"
+	}
+	return fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
+		db.Name, state, db.Size, mem, fmt.Sprintf("%d/%d", db.Connections.Used, db.Connections.Max), cache, tps, latestBackup(db), health.Uptime(db.UptimeS))
+}
+
+// statusDatabaseDetails renders the notes under the table.
+func statusDatabaseDetails(d statusData) []string {
+	var lines []string
 	for _, db := range d.Databases {
 		if db.State == "incomplete" {
 			lines = append(lines, "  "+db.Name+": "+incompleteReportText(db.Materialisation))
@@ -328,49 +367,62 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 		if line := followerLine(db); line != "" {
 			lines = append(lines, line)
 		}
-		if db.CPU != nil {
-			cpu := db.CPU
-			quota := cpu.Requested.Quota
-			if quota == "" {
-				quota = "none"
-			}
-			line := fmt.Sprintf("  %s: CPU %s, requested quota %s", db.Name, cpu.Requested.Mode, quota)
-			if !cpu.EffectiveKnown {
-				line += ", effective unknown"
-				if cpu.Reason != "" {
-					line += " (" + cpu.Reason + ")"
-				}
-			} else if cpu.Effective != nil {
-				if cpu.Effective.Idle != nil && *cpu.Effective.Idle {
-					line += ", idle priority"
-				} else if cpu.Effective.Weight != nil {
-					line += fmt.Sprintf(", weight %d", *cpu.Effective.Weight)
-				}
-				if cpu.Effective.Unlimited != nil && *cpu.Effective.Unlimited {
-					line += ", effective quota unlimited"
-				} else if cpu.Effective.QuotaUsec != nil && cpu.Effective.QuotaPeriodUsec != nil {
-					line += fmt.Sprintf(", effective quota %d/%d usec", *cpu.Effective.QuotaUsec, *cpu.Effective.QuotaPeriodUsec)
-				}
-			}
-			if cpu.UsagePercent != nil {
-				line += fmt.Sprintf(", usage %.1f%% of one CPU", *cpu.UsagePercent)
-			} else if cpu.UsageUsec != nil {
-				line += fmt.Sprintf(", cumulative usage %d usec", *cpu.UsageUsec)
-			}
+		if line := statusCPULine(db); line != "" {
 			lines = append(lines, line)
 		}
 		if db.Follows != "" && db.DataFreeBytes != nil {
 			lines = append(lines, fmt.Sprintf("  %s: data filesystem %d bytes free", db.Name, *db.DataFreeBytes))
 		}
 	}
-	for _, db := range d.Databases {
-		if db.RestartPending {
-			lines = append(lines, "  * restart pending")
-			break
-		}
+	return lines
+}
+
+// statusCPULine renders a database's CPU policy and usage. It returns "" when
+// the node reported no sample.
+func statusCPULine(db statusDB) string {
+	cpu := db.CPU
+	if cpu == nil {
+		return ""
 	}
-	_ = warnings
-	return strings.Join(lines, "\n")
+	quota := cpu.Requested.Quota
+	if quota == "" {
+		quota = "none"
+	}
+	line := fmt.Sprintf("  %s: CPU %s, requested quota %s", db.Name, cpu.Requested.Mode, quota)
+	if !cpu.EffectiveKnown {
+		line += ", effective unknown"
+		if cpu.Reason != "" {
+			line += " (" + cpu.Reason + ")"
+		}
+	} else {
+		line += statusEffectiveCPUText(cpu)
+	}
+	if cpu.UsagePercent != nil {
+		line += fmt.Sprintf(", usage %.1f%% of one CPU", *cpu.UsagePercent)
+	} else if cpu.UsageUsec != nil {
+		line += fmt.Sprintf(", cumulative usage %d usec", *cpu.UsageUsec)
+	}
+	return line
+}
+
+// statusEffectiveCPUText is the effective part of a CPU sample.
+func statusEffectiveCPUText(cpu *statusCPU) string {
+	e := cpu.Effective
+	if e == nil {
+		return ""
+	}
+	text := ""
+	if e.Idle != nil && *e.Idle {
+		text += ", idle priority"
+	} else if e.Weight != nil {
+		text += fmt.Sprintf(", weight %d", *e.Weight)
+	}
+	if e.Unlimited != nil && *e.Unlimited {
+		text += ", effective quota unlimited"
+	} else if e.QuotaUsec != nil && e.QuotaPeriodUsec != nil {
+		text += fmt.Sprintf(", effective quota %d/%d usec", *e.QuotaUsec, *e.QuotaPeriodUsec)
+	}
+	return text
 }
 
 func poolerLabel(name string) string {

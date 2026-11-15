@@ -53,7 +53,7 @@ func OpenRunLog(method, requestID string) (*RunLog, error) {
 // OpenRunLogFile creates a run log at path, for tests that cannot write to
 // LogDir.
 func OpenRunLogFile(path string) (*RunLog, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600) //nolint:gosec // G304: the caller's own path.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
