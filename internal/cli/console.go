@@ -99,13 +99,13 @@ func runConsole(cmd *cobra.Command, args []string) error {
 
 // consolePrompt is usql's PROMPT1 variable: its default (%S%N%m%/%R%# ) with
 // the literal node name in place of %m, so pg:user@<node>/<db>=>, with the node's
-// hostname cut at its first dot (db1.example.com is db1), or the context name
+// hostname cut at its first dot (db1.example.com is db1), or the workspace name
 // when the hostname is unknown. % is usql's escape, so it is dropped from the
 // literal.
-func consolePrompt(hostname, contextName string) string {
+func consolePrompt(hostname, workspaceName string) string {
 	node, _, _ := strings.Cut(hostname, ".")
 	if node == "" {
-		node = contextName
+		node = workspaceName
 	}
 	node = strings.ReplaceAll(node, "%", "")
 	return "PROMPT1=%S%N" + node + "%/%R%# "

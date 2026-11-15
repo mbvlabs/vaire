@@ -15,12 +15,12 @@ import (
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -603,25 +603,25 @@ func TestCopyCredentialHandoffAfterReattachObservationFailure(t *testing.T) {
 	}
 }
 
-// saveCopyTestCredentials stores the prod context's service and recovery
+// saveCopyTestCredentials stores the prod workspace's service and recovery
 // secrets so executeDBCopy can top them up without touching the real home.
 func saveCopyTestCredentials(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	creds := contexts.Credentials{
-		Database: &contexts.DatabaseCreds{
-			Admin:    contexts.Role{User: "vaire_admin", Password: "admin-password"},
-			Services: map[string]contexts.Role{},
+	creds := workspaces.Credentials{
+		Database: &workspaces.DatabaseCreds{
+			Admin:    workspaces.Role{User: "vaire_admin", Password: "admin-password"},
+			Services: map[string]workspaces.Role{},
 		},
-		Backup: &contexts.BackupCreds{
+		Backup: &workspaces.BackupCreds{
 			AccessKeyID: "backup-key", SecretAccessKey: "backup-secret", Bucket: "bucket",
 		},
 	}
 	creds.Backup.PgBackRest.CipherPass = "cipher-pass"
 	for _, role := range steps.ServiceRoles {
-		creds.Database.Services[role] = contexts.Role{User: role, Password: role + "-password"}
+		creds.Database.Services[role] = workspaces.Role{User: role, Password: role + "-password"}
 	}
-	if err := contexts.SaveCredentials("prod", creds); err != nil {
+	if err := workspaces.SaveCredentials("prod", creds); err != nil {
 		t.Fatal(err)
 	}
 }

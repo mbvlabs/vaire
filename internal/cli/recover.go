@@ -298,8 +298,8 @@ func fullBackupResults(fulls []dbJobOutcome, fullLines []string) ([]string, []ou
 // from these, and metrics-v1 and pgbackrest-v1 take the /metrics hash and
 // the recovery kit where the node lacks them. It also returns what the
 // top-up generated, for the secrets_document_stale warning.
-func recoverSecrets(contextName string) (map[string]string, []string, error) {
-	values, creds, generated, err := serviceSecrets(contextName)
+func recoverSecrets(workspaceName string) (map[string]string, []string, error) {
+	values, creds, generated, err := serviceSecrets(workspaceName)
 	if err != nil {
 		return nil, nil, err
 	}

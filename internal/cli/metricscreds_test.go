@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"golang.org/x/crypto/bcrypt"
 )
 
 func TestMetricsSecretTopsUpOnce(t *testing.T) {
-	var creds *contexts.MetricsCreds
+	var creds *workspaces.MetricsCreds
 	rpc := map[string]string{}
 	generated, err := addMetricsSecret(&creds, rpc)
 	if err != nil || !generated {
@@ -42,7 +42,7 @@ func TestMetricsDocument(t *testing.T) {
 	if metricsDocument(nil, "db1.example.com", "") != nil {
 		t.Error("no credential, no section")
 	}
-	m := metricsDocument(&contexts.MetricsCreds{Username: "metrics", Password: "pw"}, "db1.example.com", "")
+	m := metricsDocument(&workspaces.MetricsCreds{Username: "metrics", Password: "pw"}, "db1.example.com", "")
 	if m.BaseURL != "https://db1.example.com/metrics" || m.Password != "pw" {
 		t.Errorf("section %+v", m)
 	}
@@ -52,17 +52,17 @@ func TestMetricsDocument(t *testing.T) {
 }
 
 // An upgrade that only tops up the /metrics credential says so, and the next
-// apply generates nothing: the credential is saved in the context.
+// apply generates nothing: the credential is saved in the workspace.
 func TestServiceSecretsNameWhatWasGenerated(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	creds := contexts.Credentials{Database: &contexts.DatabaseCreds{
-		Admin:    contexts.Role{User: "vaire_admin", Password: "admin-pw"},
-		Services: map[string]contexts.Role{},
+	creds := workspaces.Credentials{Database: &workspaces.DatabaseCreds{
+		Admin:    workspaces.Role{User: "vaire_admin", Password: "admin-pw"},
+		Services: map[string]workspaces.Role{},
 	}}
 	for _, role := range steps.ServiceRoles {
-		creds.Database.Services[role] = contexts.Role{User: role, Password: role + "-pw"}
+		creds.Database.Services[role] = workspaces.Role{User: role, Password: role + "-pw"}
 	}
-	if err := contexts.SaveCredentials("phase3", creds); err != nil {
+	if err := workspaces.SaveCredentials("phase3", creds); err != nil {
 		t.Fatal(err)
 	}
 	_, _, generated, err := serviceSecrets("phase3")

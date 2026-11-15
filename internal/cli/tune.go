@@ -12,11 +12,11 @@ import (
 )
 
 type tuneSetting struct {
-	Name    string `json:"name"`
-	Value   string `json:"value"`
-	Unit    string `json:"unit,omitempty"`
-	Reason  string `json:"reason"`
-	Context string `json:"context"`
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	Unit      string `json:"unit,omitempty"`
+	Reason    string `json:"reason"`
+	Workspace string `json:"workspace"`
 }
 
 // tuneServer is the server's budget sheet (RFC 7.5).

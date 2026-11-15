@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/password"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 func TestInstallMasterPasswordHash(t *testing.T) {
@@ -24,19 +24,26 @@ func TestInstallMasterPasswordHash(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := Document{
-		Server:         Server{Name: "prod"},
-		Operator:       Operator{WGPrivateKey: private, SSHPrivateKey: string(sshPrivate)},
-		Nodes:          []Node{{Name: "db1", Role: contexts.RoleMaster, WGAddress: "10.42.0.1", SSHHostKeys: []string{sshPublic}}},
+		Server:   Server{Name: "prod"},
+		Operator: Operator{WGPrivateKey: private, SSHPrivateKey: string(sshPrivate)},
+		Nodes: []Node{
+			{Name: "db1", Role: workspaces.RoleMaster, WGAddress: "10.42.0.1", SSHHostKeys: []string{sshPublic}},
+			{Name: "db2", Role: "worker", WGAddress: "10.42.0.2", SSHHostKeys: []string{sshPublic}},
+		},
 		MasterPassword: hash,
 	}
 	for _, tc := range []struct{ name, hash string }{
 		{"with-password", hash}, {"legacy", ""},
 	} {
 		doc.MasterPassword = tc.hash
-		if _, err := Install(doc, tc.name, ""); err != nil {
+		workspace, err := Install(doc, tc.name, "")
+		if err != nil {
 			t.Fatal(err)
 		}
-		creds, err := contexts.LoadCredentials(tc.name)
+		if workspace.Name != tc.name || workspace.Server != "prod" || len(workspace.Nodes) != 2 || workspace.Nodes[0].Name != "db1" || workspace.Nodes[1].Name != "db2" {
+			t.Fatalf("workspace/node identities were conflated: %+v", workspace)
+		}
+		creds, err := workspaces.LoadCredentials(tc.name)
 		if err != nil || creds.MasterPasswordHash != tc.hash {
 			t.Fatalf("installed hash differs: %v", err)
 		}
@@ -45,7 +52,7 @@ func TestInstallMasterPasswordHash(t *testing.T) {
 	if _, err := Install(doc, "invalid", ""); err == nil {
 		t.Fatal("imported a zero-round verifier")
 	}
-	if contexts.Exists("invalid") {
-		t.Fatal("invalid import left a context behind")
+	if workspaces.Exists("invalid") {
+		t.Fatal("invalid import left a workspace behind")
 	}
 }

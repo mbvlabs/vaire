@@ -515,7 +515,7 @@ func readCopyCAFile(cmd *cobra.Command) (string, error) {
 // executeDBCopy is the node-independent orchestration: dry run, real
 // read-only preflight, confirmation, one-time credentials and the detached
 // job. Tests drive it through copyRPC; production's copyRPC uses the session.
-func executeDBCopy(cmd *cobra.Command, p *progress, contextName string, cfg config.Cluster, dest copyDestination, source *copySourceInput, ownWarnings []output.Warning, calls copyRPC) error {
+func executeDBCopy(cmd *cobra.Command, p *progress, workspaceName string, cfg config.Cluster, dest copyDestination, source *copySourceInput, ownWarnings []output.Warning, calls copyRPC) error {
 	if dryRun(cmd) {
 		return executeDBCopyDryRun(cmd, cfg, dest, ownWarnings, calls)
 	}
@@ -526,11 +526,11 @@ func executeDBCopy(cmd *cobra.Command, p *progress, contextName string, cfg conf
 	if err != nil {
 		return err
 	}
-	pre, warnings, err := copyPreflight(cmd, p, contextName, cfg, dest, sourceSecrets, ownWarnings, calls)
+	pre, warnings, err := copyPreflight(cmd, p, workspaceName, cfg, dest, sourceSecrets, ownWarnings, calls)
 	if err != nil {
 		return err
 	}
-	secret, roleSecrets, err := copyCredentials(cfg, contextName, dest, sourceSecrets, &warnings)
+	secret, roleSecrets, err := copyCredentials(cfg, workspaceName, dest, sourceSecrets, &warnings)
 	if err != nil {
 		return err
 	}
@@ -601,7 +601,7 @@ func executeDBCopyDryRun(cmd *cobra.Command, cfg config.Cluster, dest copyDestin
 
 // copyPreflight shows what the copy would do and asks for the confirmation,
 // before any password or role exists.
-func copyPreflight(cmd *cobra.Command, p *progress, contextName string, cfg config.Cluster, dest copyDestination,
+func copyPreflight(cmd *cobra.Command, p *progress, workspaceName string, cfg config.Cluster, dest copyDestination,
 	sourceSecrets map[string]string, ownWarnings []output.Warning, calls copyRPC,
 ) (copyPreflightData, []output.Warning, error) {
 	// Refuse an impossible confirmation before touching the source; an
@@ -626,7 +626,7 @@ func copyPreflight(cmd *cobra.Command, p *progress, contextName string, cfg conf
 			p.warn(warning.Message)
 		}
 	}
-	p.panel("Copy summary", copySummaryLines(contextName, cfg, dest, pre))
+	p.panel("Copy summary", copySummaryLines(workspaceName, cfg, dest, pre))
 	if err := Confirm(cmd, dest.Name); err != nil {
 		return copyPreflightData{}, nil, err
 	}
@@ -635,12 +635,12 @@ func copyPreflight(cmd *cobra.Command, p *progress, contextName string, cfg conf
 
 // copyCredentials makes the new database's one-time credentials and the
 // secrets its creation needs.
-func copyCredentials(cfg config.Cluster, contextName string, dest copyDestination, sourceSecrets map[string]string, warnings *[]output.Warning) (databaseSecret, map[string]string, error) {
+func copyCredentials(cfg config.Cluster, workspaceName string, dest copyDestination, sourceSecrets map[string]string, warnings *[]output.Warning) (databaseSecret, map[string]string, error) {
 	secret, roleSecrets, err := newDatabaseSecret(cfg, dest.Name, steps.DatabaseRoles)
 	if err != nil {
 		return databaseSecret{}, nil, err
 	}
-	service, creds, generated, err := serviceSecrets(contextName)
+	service, creds, generated, err := serviceSecrets(workspaceName)
 	if err != nil {
 		return databaseSecret{}, nil, err
 	}
@@ -680,7 +680,7 @@ func copyResolvedSummary(res config.Resources) string {
 
 // copySummaryLines is the redacted confirmation summary. It names only the
 // node's sanitized source facts: never a URL password, raw URI or CA content.
-func copySummaryLines(contextName string, cfg config.Cluster, dest copyDestination, pre copyPreflightData) []string {
+func copySummaryLines(workspaceName string, cfg config.Cluster, dest copyDestination, pre copyPreflightData) []string {
 	source := pre.Source.Endpoint
 	if source == "" {
 		source = pre.Source.URL
@@ -710,7 +710,7 @@ func copySummaryLines(contextName string, cfg config.Cluster, dest copyDestinati
 	lines := []string{
 		"Source: " + source,
 		fmt.Sprintf("Source server: PostgreSQL %s%s, %s, %d extension(s)", version, size, tls, len(pre.Source.Extensions)),
-		"Destination: context " + contextName + ", new database " + dest.Name + " (" + resources + ")",
+		"Destination: workspace " + workspaceName + ", new database " + dest.Name + " (" + resources + ")",
 		"Size means memory, CPU and connections, not a storage quota; the source data may need more disk than the estimate.",
 		"Reachability: the destination node runs the export, so the source must accept connections from that server; check its provider or firewall allowlist. The operator machine is not used for the transfer.",
 		"Snapshot: one consistent read-only snapshot is taken when the export starts. Later source changes are not copied, and the source is not modified apart from normal read/export load and locks.",

@@ -154,24 +154,24 @@ func phase1Commands() []cmdSpec {
 			args: cobra.MaximumNArgs(1),
 			run:  runLogin,
 			flags: []fl{
-				flagString("name", "", "Context name (default: the server name in the document)"),
+				flagString("name", "", "Workspace name (default: the server name in the document)"),
 				flagBool("passphrase-stdin", "Read the passphrase from stdin"),
 				flagString("passphrase-file", "", "Read the passphrase from a file"),
 			},
 			meta: CommandMeta{
-				Summary:          "Create a local context from a transfer bundle",
+				Summary:          "Create a local workspace from a transfer bundle",
 				WhenToUse:        []string{"Open a server on a machine that has the transfer bundle and its passphrase from the secrets handoff.", "The file or stdin may hold the bundle alone or the whole copied handoff; vaire uses the armored block inside it. The passphrase is never read from the file."},
 				Examples:         []string{"vaire login", "vaire login bundle.txt --passphrase-file pass.txt", "vaire login handoff.md --passphrase-file pass.txt", "vaire login - --passphrase-file pass.txt < bundle.txt"},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
-				SkipDryRunReason: "login writes a local context from a secrets document and has no host change to preview",
+				SkipDryRunReason: "login writes a local workspace from a secrets document and has no host change to preview",
 				Prompts:          true,
 				InteractiveFlags: []string{"--passphrase-stdin", "--passphrase-file"},
 				ErrorCodes:       []string{"secrets_error", "precondition_failed", "input_required", "validation_failed"},
-				Next:             []string{"vaire plan", "vaire context show"},
+				Next:             []string{"vaire plan", "vaire workspace show"},
 			},
 		},
-		contextCommands(),
+		workspaceCommands(),
 		serverCommands(),
 		{
 			use: "plan",
@@ -185,7 +185,7 @@ func phase1Commands() []cmdSpec {
 				Examples:  []string{"vaire plan", "vaire plan --db app", "vaire plan --output json"},
 				Remote:    true,
 				ErrorCodes: []string{
-					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+					"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 					"node_version_mismatch", "precondition_failed",
 				},
 				Next: []string{"vaire apply"},
@@ -219,7 +219,7 @@ func phase1Commands() []cmdSpec {
 				ConfirmToken:     "{db}/restart",
 				NeedsRestart:     "maybe",
 				ErrorCodes: []string{
-					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+					"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 					"node_version_mismatch", "precondition_failed", "step_failed", "unsafe_action_requires_confirmation",
 					"validation_failed",
 				},
@@ -350,7 +350,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary: "Open psql as vaire_admin through the WireGuard tunnel, read-only unless --write",
-				WhenToUse: []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; -c before -- is vaire's --context.",
+				WhenToUse: []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; use -- before psql's -c and other flags.",
 					"On a protected database --write asks once, when it starts and before psql connects, for the current 6-digit code from the authenticator app; the session stays writable for its whole length. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). Reads need no code."},
 				Prerequisites: []string{"psql 16 or newer on PATH"},
 				Examples:      []string{"vaire psql --db app", "vaire psql --db app --write", `vaire psql --db app -- -c "select 1"`},
@@ -396,10 +396,10 @@ func phase1Commands() []cmdSpec {
 					use: "status",
 					run: runTunnelStatus,
 					meta: CommandMeta{
-						Summary:    "Show the context's shared tunnel daemon",
+						Summary:    "Show the workspace's shared tunnel daemon",
 						WhenToUse:  []string{"See whether the tunnel daemon runs, which vaire commands use it, its last WireGuard handshake, and when it exits idle."},
 						Examples:   []string{"vaire tunnel status", "vaire tunnel status --output json"},
-						ErrorCodes: []string{"transport_failed", "context_not_found"},
+						ErrorCodes: []string{"transport_failed", "workspace_not_found"},
 					},
 				},
 				{
@@ -409,7 +409,7 @@ func phase1Commands() []cmdSpec {
 						flagBool("force", "Close the tunnel now, dropping the streams of running commands (they re-attach)"),
 					},
 					meta: CommandMeta{
-						Summary: "Stop the context's shared tunnel daemon",
+						Summary: "Stop the workspace's shared tunnel daemon",
 						WhenToUse: []string{
 							"Restart the tunnel: without --force the daemon takes no new commands and exits once the running ones finish; the next command starts a new one.",
 							"--force closes it now. Node work keeps running either way; job commands re-attach and other commands report stream_lost.",
@@ -419,7 +419,7 @@ func phase1Commands() []cmdSpec {
 						Mutating:         true,
 						SkipDryRunCheck:  true,
 						SkipDryRunReason: "stopping the local tunnel daemon changes nothing on the node",
-						ErrorCodes:       []string{"transport_failed", "context_not_found"},
+						ErrorCodes:       []string{"transport_failed", "workspace_not_found"},
 					},
 				},
 				{
@@ -427,14 +427,14 @@ func phase1Commands() []cmdSpec {
 					hidden: true,
 					run:    runTunnelServe,
 					meta: CommandMeta{
-						Summary:          "Run the context's shared tunnel daemon",
-						WhenToUse:        []string{"vaire commands spawn this themselves; it owns the context's only WireGuard device and serves tunnel.sock."},
+						Summary:          "Run the workspace's shared tunnel daemon",
+						WhenToUse:        []string{"vaire commands spawn this themselves; it owns the workspace's only WireGuard device and serves tunnel.sock."},
 						WhenNotToUse:     []string{"Do not run it by hand; any remote command starts it."},
-						Examples:         []string{"vaire tunnel serve --context prod"},
+						Examples:         []string{"vaire tunnel serve --workspace prod"},
 						Mutating:         true,
 						SkipDryRunCheck:  true,
 						SkipDryRunReason: "the daemon only proxies connections into the tunnel",
-						ErrorCodes:       []string{"transport_failed", "context_not_found"},
+						ErrorCodes:       []string{"transport_failed", "workspace_not_found"},
 					},
 				},
 			},
@@ -480,7 +480,7 @@ func phase1Commands() []cmdSpec {
 					flagBool("reveal-passphrase", "Put the bundle passphrase in structured output (required without a terminal)"),
 				},
 				meta: CommandMeta{
-					Summary: "Rebuild the secrets handoff from the local context",
+					Summary: "Rebuild the secrets handoff from the local workspace",
 					WhenToUse: []string{"Replace the stored secrets after a password rotation.",
 						"The whole document is shown, so a human factor is required: the master password set with vaire secrets password set, or a current code from the authenticator app that the node verifies. There is no flag or environment variable for either, so with --json, --no-input or no terminal it is refused (secret_gate_required) and an agent cannot export."},
 					Examples:         []string{"vaire secrets export", "vaire secrets export --out bundle.txt --reveal-passphrase --output json"},
@@ -496,7 +496,7 @@ func phase1Commands() []cmdSpec {
 				run: parentRun,
 				meta: CommandMeta{
 					Summary:   "Set the master password that gates secrets export",
-					WhenToUse: []string{"Guard vaire secrets export and a new handoff with a password that lives only in the context as an argon2id hash."},
+					WhenToUse: []string{"Guard vaire secrets export and a new handoff with a password that lives only in the workspace as an argon2id hash."},
 					Examples:  []string{"vaire secrets password set"},
 				},
 				children: []cmdSpec{{
@@ -598,74 +598,74 @@ func phase1Commands() []cmdSpec {
 	}
 }
 
-func contextCommands() cmdSpec {
+func workspaceCommands() cmdSpec {
 	return cmdSpec{
-		use: "context",
+		use: "workspace",
 		run: parentRun,
 		meta: CommandMeta{
-			Summary:   "List and switch local server contexts",
-			WhenToUse: []string{"Choose which server later commands talk to."},
-			Examples:  []string{"vaire context list", "vaire context use prod"},
+			Summary:   "List and switch local workspaces",
+			WhenToUse: []string{"Choose the workspace whose nodes and databases later commands operate."},
+			Examples:  []string{"vaire workspace list", "vaire workspace use prod"},
 		},
 		children: []cmdSpec{
 			{
 				use: "list",
-				run: runContextList,
+				run: runWorkspaceList,
 				meta: CommandMeta{
-					Summary:   "List local contexts",
+					Summary:   "List local workspaces",
 					WhenToUse: []string{"See which servers this machine can operate."},
-					Examples:  []string{"vaire context list"},
+					Examples:  []string{"vaire workspace list"},
 				},
 			},
 			{
 				use:  "show [name]",
 				args: cobra.MaximumNArgs(1),
-				run:  runContextShow,
+				run:  runWorkspaceShow,
 				meta: CommandMeta{
-					Summary:   "Show one context, or the current context",
-					WhenToUse: []string{"Read addresses, keys' public parts, and the operator name for a context."},
-					Examples:  []string{"vaire context show", "vaire context show prod"},
+					Summary:   "Show one workspace, or the current workspace",
+					WhenToUse: []string{"Read addresses, keys' public parts, node names and the operator name for a workspace."},
+					Examples:  []string{"vaire workspace show", "vaire workspace show prod"},
 				},
 			},
 			{
 				use:  "use <name>",
 				args: cobra.ExactArgs(1),
-				run:  runContextUse,
+				run:  runWorkspaceUse,
 				meta: CommandMeta{
-					Summary:          "Select the current context",
+					Summary:          "Select the current workspace",
 					WhenToUse:        []string{"Point later commands at a different server."},
-					Examples:         []string{"vaire context use prod"},
+					Examples:         []string{"vaire workspace use prod"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
-					SkipDryRunReason: "use switches the local current-context pointer",
+					SkipDryRunReason: "use switches the local current-workspace pointer",
 				},
 			},
 			{
 				use:  "remove <name>",
 				args: cobra.ExactArgs(1),
-				run:  runContextRemove,
+				run:  runWorkspaceRemove,
 				meta: CommandMeta{
-					Summary:          "Delete a local context",
+					Summary:          "Delete a local workspace",
 					WhenToUse:        []string{"Remove operator credentials for a server from this machine."},
-					Examples:         []string{"vaire context remove prod --confirm prod"},
+					Examples:         []string{"vaire workspace remove prod --confirm prod"},
 					Mutating:         true,
 					Destructive:      true,
 					ConfirmToken:     "{name}",
 					SkipDryRunCheck:  true,
-					SkipDryRunReason: "remove deletes a local context and is guarded by the confirm token",
+					SkipDryRunReason: "remove deletes a local workspace and is guarded by the confirm token",
 				},
 			},
 			{
 				use:  "set-address <ip[:port]>",
 				args: cobra.ExactArgs(1),
-				run:  runContextSetAddress,
+				run:  runWorkspaceSetAddress,
 				flags: []fl{
-					flagString("name", "", "The context (default: the current one)"),
+					flagString("name", "", "The workspace (default: the current one)"),
 				},
 				meta: CommandMeta{
-					Summary:        "Point a context at the server's new public address",
+					Summary:        "Point a workspace at the server's new public address",
 					WhenToUse:      []string{"After the server was rebuilt on a new IP (server init --restore on another machine). In acme mode vaire finds the new address in DNS by itself."},
-					Examples:       []string{"vaire context set-address 198.51.100.7", "vaire context set-address '[2001:db8::7]:51820' --name prod"},
+					Examples:       []string{"vaire workspace set-address 198.51.100.7", "vaire workspace set-address '[2001:db8::7]:51820' --name prod"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Next:           []string{"vaire status"},
@@ -695,7 +695,7 @@ func serverCommands() cmdSpec {
 				flagString("host-key-fingerprint", "", "Expected SHA256 host key fingerprint"),
 				flagBool("accept-new-host-key", "Trust the server host key on first contact"),
 				flagString("answers", "", "Answers file in cluster.toml shape plus bootstrap credentials"),
-				flagString("name", "", "Server name"),
+				flagString("name", "", "Workspace name (independent of --node-name)"),
 				flagString("node-name", "", "The master's node name; its hostname is <node-name>.<domain> (default db1)"),
 				flagString("domain", "", "Base domain: each node is <node>.<domain>"),
 				flagString("admin-user", "", "Admin login user created on the server (default vaire)"),
@@ -718,7 +718,7 @@ func serverCommands() cmdSpec {
 				flagString("db-diff-schedule", "", "systemd OnCalendar for differential database backups"),
 				flagString("tls-mode", "", "acme or self-signed"),
 				flagBool("local", "Initialise this machine as the server"),
-				flagBool("restore", "Rebuild this context's server on a new VPS from its master bundle (Phase 5)"),
+				flagBool("restore", "Rebuild this workspace's server on a new VPS from its master bundle (Phase 5)"),
 				flagString("bundle", "", "With --restore: a bundle name or a time (default: the newest in the bucket)"),
 				flagString("bundle-file", "", "With --restore: rebuild from an exported bundle file (- for stdin) instead of the bucket"),
 				flagBool("old-master-unreachable", "With --restore: skip the check that the old master no longer answers"),
@@ -1261,7 +1261,7 @@ func tuneCommands() cmdSpec {
 
 // backupErrorCodes are the codes the backup commands can return.
 var backupErrorCodes = []string{
-	"context_not_found", "remote_unreachable", "transport_failed", "node_version_mismatch",
+	"workspace_not_found", "remote_unreachable", "transport_failed", "node_version_mismatch",
 	"precondition_failed", "external_command_failed", "input_required",
 }
 

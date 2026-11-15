@@ -7,9 +7,9 @@ import (
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 )
@@ -115,7 +115,7 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 	if created {
 		r.sec.Backup = kit
 		registerPending(r.sec)
-		if err := contexts.SaveSecrets(r.name, r.sec); err != nil {
+		if err := workspaces.SaveSecrets(r.name, r.sec); err != nil {
 			return err
 		}
 	}
@@ -137,7 +137,7 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 	}
 	r.sec.Backup = kit
 	registerPending(r.sec)
-	return contexts.SaveSecrets(r.name, r.sec)
+	return workspaces.SaveSecrets(r.name, r.sec)
 }
 
 // initPrefixOwner is a fresh server as the bucket probe sees it: no node and

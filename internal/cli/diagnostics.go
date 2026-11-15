@@ -37,7 +37,7 @@ func diagnosticsCommands() cmdSpec {
 		meta: CommandMeta{
 			Summary: "Collect and inspect portable incident evidence",
 			WhenToUse: []string{
-				"Share typed activity and allowlisted metadata with an agent without handing over an operator context, server credentials or raw diagnostic logs.",
+				"Share typed activity and allowlisted metadata with an agent without handing over an operator workspace, server credentials or raw diagnostic logs.",
 				"Collection uses the existing SSH transport and reads one bounded activity page; inspection is fully offline.",
 			},
 			Examples: []string{
@@ -46,7 +46,7 @@ func diagnosticsCommands() cmdSpec {
 			},
 			Remote: true,
 			ErrorCodes: []string{
-				"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+				"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 				"node_version_mismatch", "validation_failed", "precondition_failed",
 			},
 		},
@@ -59,10 +59,10 @@ func diagnosticsCommands() cmdSpec {
 					"Events to include, 1-500 (default 500)"), flagString("out", "",
 					"Write the incident bundle here (required; never overwritten)")),
 				meta: CommandMeta{
-					Summary: "Write one bounded incident bundle from the context's master",
+					Summary: "Write one bounded incident bundle from the workspace's master",
 					WhenToUse: []string{
 						"Capture typed activity events and fixed metadata for one incident window. The bundle carries the page's coverage, truncation and next cursor, so incomplete evidence stays explicit.",
-						"Only the context's master node is queried today. The file is owner-only, at most 8 MiB, and never overwrites an existing path.",
+						"Only the workspace's master node is queried today. The file is owner-only, at most 8 MiB, and never overwrites an existing path.",
 					},
 					Examples: []string{
 						"vaire diagnostics collect --since 24h --out incident.json",
@@ -74,7 +74,7 @@ func diagnosticsCommands() cmdSpec {
 					SupportsDryRun: true,
 					Remote:         true,
 					ErrorCodes: []string{
-						"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+						"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 						"node_version_mismatch", "validation_failed", "precondition_failed",
 					},
 					Next: []string{"vaire diagnostics inspect <bundle-file>"},
@@ -87,7 +87,7 @@ func diagnosticsCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary: "Read and validate an incident bundle offline",
 					WhenToUse: []string{
-						"Work from a collected bundle without a vaire context, server credentials or network access. The reader rejects unknown fields at every level, trailing JSON, symlinks, oversized files and bundles other users can read.",
+						"Work from a collected bundle without a vaire workspace, server credentials or network access. The reader rejects unknown fields at every level, trailing JSON, symlinks, oversized files and bundles other users can read.",
 						"JSON output is the parsed, validated bundle itself; no raw JSON is passed through.",
 					},
 					Examples: []string{
@@ -169,7 +169,7 @@ func runDiagnosticsCollect(cmd *cobra.Command, _ []string) error {
 	if bundle.Activity.NextCursor != "" {
 		warnings = append(warnings, output.Warning{
 			Code:    "activity_continues",
-			Message: "more matching activity may be available; collect the next page from context " + s.ctx.Name + " with --cursor, the same filters and limit, and a new --out",
+			Message: "more matching activity may be available; collect the next page from workspace " + s.ctx.Name + " with --cursor, the same filters and limit, and a new --out",
 		})
 	}
 	message := fmt.Sprintf("wrote incident bundle %s: %d events from %s\n%s",
@@ -191,7 +191,7 @@ func runDiagnosticsInspect(cmd *cobra.Command, args []string) error {
 		return activityUsageError("bundle", "required", "an incident bundle file is required",
 			"Use vaire diagnostics inspect <bundle-file>.")
 	}
-	// Offline by construction: no context resolution, tunnel or session.
+	// Offline by construction: no workspace resolution, tunnel or session.
 	bundle, err := diagnostics.Read(args[0])
 	if err != nil {
 		return err

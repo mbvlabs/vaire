@@ -16,7 +16,6 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/localenv"
 	"github.com/mbvlabs/vaire/internal/node"
@@ -27,6 +26,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -68,9 +68,9 @@ type initRun struct {
 	local    bool
 	name     string
 	cfg      config.Cluster
-	boot     contexts.Bootstrap
-	prog     *contexts.Progress
-	sec      contexts.PendingSecrets
+	boot     workspaces.Bootstrap
+	prog     *workspaces.Progress
+	sec      workspaces.PendingSecrets
 	warnings []output.Warning
 	// dbSecrets is the RPC secret map for the database phase (D7).
 	dbSecrets map[string]string
@@ -94,7 +94,7 @@ type initRun struct {
 	// restore is set for server init --restore (Phase 5).
 	restore *restoreRun
 	// masterHash is the argon2id hash of the master password asked for
-	// during init, if any; it goes in the document and the local context.
+	// during init, if any; it goes in the document and the local workspace.
 	masterHash string
 }
 
@@ -118,7 +118,7 @@ type initResult struct {
 	PublicAddress    string   `json:"public_address"`
 	WGAddress        string   `json:"wg_address"`
 	AdminUser        string   `json:"admin_user"`
-	Context          string   `json:"context,omitempty"`
+	Workspace        string   `json:"workspace,omitempty"`
 	SecretsDocument  string   `json:"secrets_document,omitempty"`
 	Passphrase       string   `json:"passphrase,omitempty"`
 	PublicSSHClosed  bool     `json:"public_ssh_closed"`
@@ -165,21 +165,21 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 		return nil, config.ValidationError(err)
 	}
 	if !resume {
-		if contexts.Exists(r.name) && !local {
+		if workspaces.Exists(r.name) && !local {
 			return nil, output.NewError(
 				output.CodePrecondition,
-				"a context named "+r.name+" already exists on this machine",
+				"a workspace named "+r.name+" already exists on this machine",
 				output.ExitPrecondition,
-				"Pick another --name, or remove the context with vaire context remove "+r.name+".",
-			).WithDetails(map[string]any{"reason": "context_exists", "context": r.name})
+				"Pick another --name, or remove the workspace with vaire workspace remove "+r.name+".",
+			).WithDetails(map[string]any{"reason": "workspace_exists", "workspace": r.name})
 		}
-		if contexts.PendingExists(r.name) {
+		if workspaces.PendingExists(r.name) {
 			return nil, output.NewError(
 				output.CodePrecondition,
 				"an unfinished init for "+r.name+" exists",
 				output.ExitPrecondition,
 				"Continue it with vaire server init --resume --name "+r.name+", or drop it with vaire server init --discard --name "+r.name+".",
-			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": contexts.PendingDir(r.name)})
+			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": workspaces.PendingDir(r.name)})
 		}
 	}
 	if dryRun(cmd) {
@@ -249,7 +249,7 @@ func (r *initRun) collect() error {
 		return err
 	}
 	r.cfg = cfg
-	r.prog = &contexts.Progress{Local: r.local, Phases: map[string]string{}}
+	r.prog = &workspaces.Progress{Local: r.local, Phases: map[string]string{}}
 	return nil
 }
 
@@ -383,21 +383,21 @@ func (r *initRun) resolveName(cmd *cobra.Command, cfg *config.Cluster) error {
 		if err := RequireFlag(cmd, false, "--name", "server init"); err != nil {
 			return err
 		}
-		v, err := promptLine(cmd, "Server name", "prod")
+		v, err := promptLine(cmd, "Workspace name", "prod")
 		if err != nil {
 			return err
 		}
 		cfg.ClusterName = v
 	}
 	if !config.NamePattern.MatchString(cfg.ClusterName) {
-		return output.NewError(output.CodeValidation, "server name "+cfg.ClusterName+" must match "+config.NamePattern.String(), output.ExitConfig, "")
+		return output.NewError(output.CodeValidation, "workspace name "+cfg.ClusterName+" must match "+config.NamePattern.String(), output.ExitConfig, "")
 	}
 	r.name = cfg.ClusterName
 	return nil
 }
 
 // resolveNode fills the master node's name and address, resolving the public
-// address when neither the answers nor the context has one.
+// address when neither the answers nor the workspace has one.
 func (r *initRun) resolveNode(cmd *cobra.Command, cfg *config.Cluster) error {
 	public := ""
 	if len(cfg.Nodes) > 0 {
@@ -430,12 +430,12 @@ func (r *initRun) resolveNode(cmd *cobra.Command, cfg *config.Cluster) error {
 	return nil
 }
 
-func decodeBootstrap(raw []byte) ([]byte, contexts.Bootstrap, error) {
+func decodeBootstrap(raw []byte) ([]byte, workspaces.Bootstrap, error) {
 	var wrap struct {
-		Bootstrap contexts.Bootstrap `toml:"bootstrap"`
+		Bootstrap workspaces.Bootstrap `toml:"bootstrap"`
 	}
 	if err := toml.Unmarshal(raw, &wrap); err != nil {
-		return nil, contexts.Bootstrap{}, err
+		return nil, workspaces.Bootstrap{}, err
 	}
 	return raw, wrap.Bootstrap, nil
 }
@@ -519,7 +519,7 @@ func parseHostFlag(v string) (user, host string, port int, err error) {
 func (r *initRun) loadPending() error {
 	name := stringFlag(r.cmd, "name")
 	if name == "" {
-		pending := contexts.PendingNames()
+		pending := workspaces.PendingNames()
 		switch len(pending) {
 		case 0:
 			return output.NewError(output.CodePrecondition, "there is no unfinished init to resume", output.ExitPrecondition,
@@ -531,11 +531,11 @@ func (r *initRun) loadPending() error {
 				"Pass --name with one of details.pending.").WithDetails(map[string]any{"pending": pending})
 		}
 	}
-	if !contexts.PendingExists(name) {
+	if !workspaces.PendingExists(name) {
 		return output.NewError(output.CodePrecondition, "there is no unfinished init for "+name, output.ExitPrecondition,
 			"Start one with vaire server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 	}
-	raw, boot, err := contexts.LoadAnswers(name)
+	raw, boot, err := workspaces.LoadAnswers(name)
 	if err != nil {
 		return err
 	}
@@ -543,7 +543,7 @@ func (r *initRun) loadPending() error {
 	if err != nil {
 		return output.NewError(output.CodeConfig, "the pending answers do not parse: "+err.Error(), output.ExitConfig, "")
 	}
-	prog, err := contexts.LoadProgress(name)
+	prog, err := workspaces.LoadProgress(name)
 	if err != nil {
 		return err
 	}
@@ -564,7 +564,7 @@ func (r *initRun) loadPending() error {
 	}
 	r.name, r.cfg, r.boot, r.prog = name, cfg, boot, prog
 	if prog.Done(phaseSecrets) {
-		sec, err := contexts.LoadSecrets(name)
+		sec, err := workspaces.LoadSecrets(name)
 		if err != nil {
 			return err
 		}
@@ -574,7 +574,7 @@ func (r *initRun) loadPending() error {
 	return nil
 }
 
-func registerPending(sec contexts.PendingSecrets) {
+func registerPending(sec workspaces.PendingSecrets) {
 	secrets.Add(sec.WGPrivateKey)
 	secrets.Add(sec.SSHPrivateKey)
 	secrets.Add(sec.SudoPassword)
@@ -637,18 +637,18 @@ func (r *initRun) savePending() error {
 	if err != nil {
 		return err
 	}
-	if err := contexts.SaveAnswers(r.name, raw, r.boot); err != nil {
+	if err := workspaces.SaveAnswers(r.name, raw, r.boot); err != nil {
 		return err
 	}
 	if r.prog.SetupOperationID == "" {
 		r.prog.SetupOperationID = rpc.NewRequestID()
 	}
-	return contexts.SaveProgress(r.name, r.prog)
+	return workspaces.SaveProgress(r.name, r.prog)
 }
 
 func (r *initRun) mark(phase string) error {
 	r.prog.Mark(phase)
-	return contexts.SaveProgress(r.name, r.prog)
+	return workspaces.SaveProgress(r.name, r.prog)
 }
 
 // generateSecrets creates the operator identity and sudo password (§8.2 step 3).
@@ -669,14 +669,14 @@ func (r *initRun) generateSecrets() error {
 	if err != nil {
 		return err
 	}
-	r.sec = contexts.PendingSecrets{
+	r.sec = workspaces.PendingSecrets{
 		OperatorName:  firstOperatorName,
 		WGPrivateKey:  wgPriv,
 		SSHPrivateKey: string(sshPriv),
 		SudoPassword:  sudo,
 	}
 	registerPending(r.sec)
-	if err := contexts.SaveSecrets(r.name, r.sec); err != nil {
+	if err := workspaces.SaveSecrets(r.name, r.sec); err != nil {
 		return err
 	}
 	r.p.phase("init.secrets", "completed", "")
@@ -687,7 +687,7 @@ func (r *initRun) generateSecrets() error {
 // credentials and records the RPC secret map (D7). Init creates no
 // application databases.
 func (r *initRun) ensureDatabaseSecrets() error {
-	creds := contexts.DatabaseCreds{}
+	creds := workspaces.DatabaseCreds{}
 	if r.sec.Database != nil {
 		creds = *r.sec.Database
 	}
@@ -702,7 +702,7 @@ func (r *initRun) ensureDatabaseSecrets() error {
 	r.sec.Database = &creds
 	r.dbSecrets = rpc
 	registerPending(r.sec)
-	return contexts.SaveSecrets(r.name, r.sec)
+	return workspaces.SaveSecrets(r.name, r.sec)
 }
 
 func (r *initRun) operator() (config.Operator, error) {
@@ -790,7 +790,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.ensureBackupKit(ctx); err != nil {
 		return err
 	}
-	known, err := transport.LoadKnownHosts(contexts.PendingKnownHosts(r.name))
+	known, err := transport.LoadKnownHosts(workspaces.PendingKnownHosts(r.name))
 	if err != nil {
 		return err
 	}
@@ -849,8 +849,8 @@ func runInitRemote(cmd *cobra.Command) error {
 	// The first master bundle, uploaded with epoch 1 when there is a bucket.
 	r.firstMasterBundle(ctx, rt.node)
 
-	// 13. Local context, then drop the pending state.
-	return r.initInstallContext(doc, lockedAt, &res, n)
+	// 13. Local workspace, then drop the pending state.
+	return r.initInstallWorkspace(doc, lockedAt, &res, n)
 }
 
 // initTransport is the SSH connection to a node over WireGuard, and the
@@ -888,7 +888,7 @@ func (r *initRun) remoteFirstContact(ctx context.Context, known *transport.Known
 // remoteTransport opens WireGuard and SSH as the admin user.
 func (r *initRun) remoteTransport(ctx context.Context, n config.NodeSpec, known *transport.KnownHosts, opAuth ssh.AuthMethod) (*initTransport, error) {
 	r.p.phase("init.transport", "started", "connect over WireGuard to "+n.WGAddress)
-	// Init runs its own tunnel; a daemon left from an earlier context of
+	// Init runs its own tunnel; a daemon left from an earlier workspace of
 	// this name would hold the tunnel lock and the node's peer.
 	stopTunnelDaemonQuietly(ctx, r.name)
 	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, config.DefaultFirstOperatorWG, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
@@ -981,29 +981,29 @@ func (r *initRun) confirmSecrets(ctx context.Context, caller remote.Caller) erro
 	return r.mark(phaseSecretsDone)
 }
 
-// initInstallContext writes the local context and drops the pending state.
-func (r *initRun) initInstallContext(doc secretsdoc.Document, lockedAt string, res *initResult, n config.NodeSpec) error {
-	if contexts.Exists(r.name) {
-		return output.NewError(output.CodePrecondition, "a context named "+r.name+" appeared during init", output.ExitPrecondition,
+// initInstallWorkspace writes the local workspace and drops the pending state.
+func (r *initRun) initInstallWorkspace(doc secretsdoc.Document, lockedAt string, res *initResult, n config.NodeSpec) error {
+	if workspaces.Exists(r.name) {
+		return output.NewError(output.CodePrecondition, "a workspace named "+r.name+" appeared during init", output.ExitPrecondition,
 			"Remove it, then run vaire login and paste the transfer bundle.")
 	}
 	if _, err := secretsdoc.Install(doc, r.name, lockedAt); err != nil {
 		return err
 	}
-	if err := contexts.SetCurrent(r.name); err != nil {
+	if err := workspaces.SetCurrent(r.name); err != nil {
 		return err
 	}
-	if err := contexts.RemovePending(r.name); err != nil {
+	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
-	res.Context = r.name
+	res.Workspace = r.name
 	res.PublicSSHClosed = true
 	r.fillResult(res)
 	message := strings.Join([]string{
 		fmt.Sprintf("Server %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.MasterHostname()),
 		"TLS: " + r.tlsSummary() + r.healthSuffix(),
 		"No application databases yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents).",
-		"Context " + r.name + " is the current context on this machine. On another machine run vaire login and paste the transfer bundle.",
+		"Workspace " + r.name + " is the current workspace on this machine. On another machine run vaire login and paste the transfer bundle.",
 	}, "\n")
 	r.warnings = append(r.warnings, node.NoOffsiteWarning(r.cfg)...)
 	return r.finish(*res, message, res.Next, fmt.Sprintf("Server %s is ready", r.name), nil)
@@ -1249,7 +1249,7 @@ func (r *initRun) trustHostKey(key ssh.PublicKey) error {
 // because x/crypto/ssh tries only the first method of each kind. An encrypted
 // default key that the agent doesn't hold is unlocked with a passphrase prompt
 // in a terminal, and named in the error otherwise.
-func firstContactAuth(ctx context.Context, cmd *cobra.Command, boot contexts.Bootstrap) ([]ssh.AuthMethod, func(), error) {
+func firstContactAuth(ctx context.Context, cmd *cobra.Command, boot workspaces.Bootstrap) ([]ssh.AuthMethod, func(), error) {
 	noop := func() {}
 	if flagTrue(cmd, "password-stdin") {
 		pw, err := readFirstLine(cmd.InOrStdin())
@@ -1615,7 +1615,7 @@ func runInitLocal(cmd *cobra.Command) error {
 		return err
 	}
 	r.firstMasterBundle(ctx, caller)
-	if err := contexts.RemovePending(r.name); err != nil {
+	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
 	res.LockdownPending = true

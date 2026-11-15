@@ -23,14 +23,14 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
-// The context's tunnel daemon: vaire tunnel serve owns the only WireGuard
-// device for the context and every vaire process dials through its unix socket
+// The workspace's tunnel daemon: vaire tunnel serve owns the only WireGuard
+// device for the workspace and every vaire process dials through its unix socket
 // (internal/transport/shared.go). The first command that needs the node
 // spawns it; it exits after DefaultTunnelPersist with no command using it.
 
@@ -38,7 +38,7 @@ const (
 	// tunnelDaemonCommand is how the daemon names itself in tunnel.lock.
 	tunnelDaemonCommand = "vaire tunnel serve"
 	// TunnelSocketFile, TunnelSpawnLockFile and TunnelLogFile live in the
-	// context directory.
+	// workspace directory.
 	TunnelSocketFile    = "tunnel.sock"
 	TunnelSpawnLockFile = "tunnel.spawn.lock"
 	TunnelLogFile       = "tunnel.log"
@@ -55,7 +55,7 @@ const (
 	maxSocketPath = 100
 )
 
-// openDialer connects the session to the tunnel: the context's shared
+// openDialer connects the session to the tunnel: the workspace's shared
 // daemon, or an in-process tunnel with VAIRE_TUNNEL=inprocess.
 func (s *session) openDialer(ctx context.Context, cmd *cobra.Command, cfg transport.WireGuardConfig, p *progress) error {
 	if os.Getenv(envTunnel) == "inprocess" {
@@ -75,13 +75,13 @@ func (s *session) openDialer(ctx context.Context, cmd *cobra.Command, cfg transp
 		return err
 	}
 	if p != nil && p.opts.Verbose {
-		p.note(fmt.Sprintf("tunnel daemon pid %d; its log is %s", d.DaemonPID(), contexts.Path(s.ctx.Name, TunnelLogFile)))
+		p.note(fmt.Sprintf("tunnel daemon pid %d; its log is %s", d.DaemonPID(), workspaces.Path(s.ctx.Name, TunnelLogFile)))
 	}
 	s.dialer, s.closeDialer = d, d.Close
 	return nil
 }
 
-// sharedDialer is a client of the context's tunnel daemon.
+// sharedDialer is a client of the workspace's tunnel daemon.
 func sharedDialer(name string, cfg transport.WireGuardConfig, command string) (*transport.SharedDialer, error) {
 	socket, err := tunnelSocketPath(name)
 	if err != nil {
@@ -89,7 +89,7 @@ func sharedDialer(name string, cfg transport.WireGuardConfig, command string) (*
 	}
 	return transport.NewSharedDialer(transport.SharedDialerConfig{
 		Socket:      socket,
-		SpawnLock:   contexts.Path(name, TunnelSpawnLockFile),
+		SpawnLock:   workspaces.Path(name, TunnelSpawnLockFile),
 		Fingerprint: transport.TunnelFingerprint(cfg),
 		Build:       tunnelBuild(),
 		PID:         os.Getpid(),
@@ -111,22 +111,22 @@ func tunnelBuild() string {
 	return build
 }
 
-// tunnelSocketPath is the daemon's socket: tunnel.sock in the context
+// tunnelSocketPath is the daemon's socket: tunnel.sock in the workspace
 // directory, or, when that path is too long for a unix socket, a file named
-// by a hash of the context directory in a private runtime directory.
+// by a hash of the workspace directory in a private runtime directory.
 func tunnelSocketPath(name string) (string, error) {
-	path := contexts.Path(name, TunnelSocketFile)
+	path := workspaces.Path(name, TunnelSocketFile)
 	if len(path) <= maxSocketPath {
 		return path, nil
 	}
-	sum := sha256.Sum256([]byte(contexts.Dir(name)))
+	sum := sha256.Sum256([]byte(workspaces.Dir(name)))
 	dir := filepath.Join(os.TempDir(), "vaire-"+strconv.Itoa(os.Getuid()))
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); runtime.GOOS == "linux" && xdg != "" {
 		dir = filepath.Join(xdg, "vaire")
 	}
 	if err := privateDir(dir); err != nil {
 		return "", output.WrapError(output.CodePrecondition, err, output.ExitPrecondition,
-			"The context directory's path is too long for a unix socket, and the fallback directory is unsafe; use a shorter XDG_CONFIG_HOME.")
+			"The workspace directory's path is too long for a unix socket, and the fallback directory is unsafe; use a shorter XDG_CONFIG_HOME.")
 	}
 	path = filepath.Join(dir, hex.EncodeToString(sum[:8])+".sock")
 	if len(path) > maxSocketPath {
@@ -162,8 +162,8 @@ func privateDir(dir string) error {
 }
 
 // tunnelPersist is how long an unused daemon stays up: VAIRE_TUNNEL_PERSIST,
-// else the context's tunnel_persist, else DefaultTunnelPersist.
-func tunnelPersist(c *contexts.Context) (time.Duration, error) {
+// else the workspace's tunnel_persist, else DefaultTunnelPersist.
+func tunnelPersist(c *workspaces.Workspace) (time.Duration, error) {
 	for _, v := range []string{os.Getenv(envTunnelPersist), c.TunnelPersist} {
 		v = strings.TrimSpace(v)
 		if v == "" {
@@ -186,7 +186,7 @@ type daemonReady struct {
 	Hint    string `json:"hint,omitempty"`
 }
 
-// spawnTunnelDaemon starts vaire tunnel serve for the context, detached in
+// spawnTunnelDaemon starts vaire tunnel serve for the workspace, detached in
 // its own session, and waits for it to report on the readiness pipe.
 func spawnTunnelDaemon(ctx context.Context, name string) error {
 	exe, err := os.Executable()
@@ -195,7 +195,7 @@ func spawnTunnelDaemon(ctx context.Context, name string) error {
 	}
 	// The daemon truncates the log once it holds the singleton lock, so a
 	// spawn that loses the race doesn't wipe a running daemon's log.
-	logPath := contexts.Path(name, TunnelLogFile)
+	logPath := workspaces.Path(name, TunnelLogFile)
 	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -213,7 +213,7 @@ func spawnTunnelDaemon(ctx context.Context, name string) error {
 	defer func() { _ = r.Close() }()
 	// The daemon outlives this process, so it must not be killed when the
 	// caller's context is cancelled.
-	cmd := exec.CommandContext(context.WithoutCancel(ctx), exe, "tunnel", "serve", "--context", name)
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), exe, "tunnel", "serve", "--workspace", name)
 	cmd.Dir = "/"
 	cmd.Env = append(os.Environ(), envTunnelReadyFD+"=3")
 	cmd.Stdin = devNull
@@ -265,7 +265,7 @@ func spawnTunnelDaemon(ctx context.Context, name string) error {
 	return output.NewError(code, ready.Message, output.ExitFor(code), ready.Hint)
 }
 
-// runTunnelServe is the daemon: it takes the context's tunnel lock, brings
+// runTunnelServe is the daemon: it takes the workspace's tunnel lock, brings
 // up the tunnel, serves the socket until idle or stopped, then tears down.
 func runTunnelServe(cmd *cobra.Command, _ []string) error {
 	ready := func(daemonReady) {}
@@ -289,7 +289,7 @@ func runTunnelServe(cmd *cobra.Command, _ []string) error {
 		logLine("startup failed: %s", r.Message)
 		return err
 	}
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return fail(err)
 	}
@@ -302,14 +302,14 @@ func runTunnelServe(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	defer release()
-	_ = os.Truncate(contexts.Path(c.Name, TunnelLogFile), 0)
+	_ = os.Truncate(workspaces.Path(c.Name, TunnelLogFile), 0)
 	logLine("tunnel daemon for %s starting (pid %d, build %s)", c.Name, os.Getpid(), tunnelBuild())
 
 	node, ok := c.Master()
 	if !ok {
-		return fail(output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with vaire login."))
+		return fail(output.NewError(output.CodeConfig, "workspace "+c.Name+" lists no node", output.ExitConfig, "Recreate it with vaire login."))
 	}
-	cfg, err := contextTunnelConfig(c, node)
+	cfg, err := workspaceTunnelConfig(c, node)
 	if err != nil {
 		return fail(err)
 	}
@@ -371,15 +371,15 @@ func logLine(format string, args ...any) {
 
 // tunnelStatusData is vaire tunnel status's result.
 type tunnelStatusData struct {
-	Context string `json:"context"`
-	Running bool   `json:"running"`
-	Socket  string `json:"socket"`
-	Log     string `json:"log"`
+	Workspace string `json:"workspace"`
+	Running   bool   `json:"running"`
+	Socket    string `json:"socket"`
+	Log       string `json:"log"`
 	*transport.SharedStatus
 }
 
 func runTunnelStatus(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -387,7 +387,7 @@ func runTunnelStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	data := tunnelStatusData{Context: c.Name, Socket: socket, Log: contexts.Path(c.Name, TunnelLogFile)}
+	data := tunnelStatusData{Workspace: c.Name, Socket: socket, Log: workspaces.Path(c.Name, TunnelLogFile)}
 	ctx, cancel := context.WithTimeout(commandContext(cmd), timeoutFlag(cmd))
 	defer cancel()
 	st, err := transport.SharedHello(ctx, socket)
@@ -405,7 +405,7 @@ func runTunnelStatus(cmd *cobra.Command, _ []string) error {
 
 func tunnelStatusMessage(d tunnelStatusData) string {
 	st := d.SharedStatus
-	lines := []string{fmt.Sprintf("tunnel daemon for %s: pid %d, up since %s", d.Context, st.PID, st.StartedAt)}
+	lines := []string{fmt.Sprintf("tunnel daemon for %s: pid %d, up since %s", d.Workspace, st.PID, st.StartedAt)}
 	if st.LastHandshake != "" {
 		lines = append(lines, "last WireGuard handshake: "+st.LastHandshake)
 	} else {
@@ -426,7 +426,7 @@ func tunnelStatusMessage(d tunnelStatusData) string {
 }
 
 func runTunnelStop(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -436,9 +436,9 @@ func runTunnelStop(cmd *cobra.Command, _ []string) error {
 	pid, draining, err := stopTunnelDaemon(ctx, c.Name, force)
 	if err != nil {
 		return output.WrapError(output.CodeTransportFailed, fmt.Errorf("stop the tunnel daemon of %s: %w", c.Name, err), output.ExitTransport,
-			"See "+contexts.Path(c.Name, TunnelLogFile)+".")
+			"See "+workspaces.Path(c.Name, TunnelLogFile)+".")
 	}
-	data := map[string]any{"context": c.Name, "pid": pid, "stopped": pid != 0 && !draining, "draining": draining}
+	data := map[string]any{"workspace": c.Name, "pid": pid, "stopped": pid != 0 && !draining, "draining": draining}
 	switch {
 	case pid == 0:
 		return output.Success(cmd, output.Result{Data: data, Message: "no tunnel daemon runs for " + c.Name})
@@ -450,7 +450,7 @@ func runTunnelStop(cmd *cobra.Command, _ []string) error {
 	return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("stopped the tunnel daemon of %s (pid %d)", c.Name, pid)})
 }
 
-// stopTunnelDaemon asks the context's daemon to exit and, unless it drains,
+// stopTunnelDaemon asks the workspace's daemon to exit and, unless it drains,
 // waits for it to go. pid is 0 when none ran.
 func stopTunnelDaemon(ctx context.Context, name string, force bool) (pid int, draining bool, err error) {
 	socket, err := tunnelSocketPath(name)
@@ -477,8 +477,8 @@ func stopTunnelDaemon(ctx context.Context, name string, force bool) (pid int, dr
 	return st.PID, draining, nil
 }
 
-// stopTunnelDaemonQuietly stops a context's daemon before something that
-// would leave it stale (removing the context, an in-process tunnel), and
+// stopTunnelDaemonQuietly stops a workspace's daemon before something that
+// would leave it stale (removing the workspace, an in-process tunnel), and
 // ignores a failure: the daemon then exits on its own once idle. A cancelled
 // ctx still stops it.
 func stopTunnelDaemonQuietly(ctx context.Context, name string) {
@@ -487,10 +487,10 @@ func stopTunnelDaemonQuietly(ctx context.Context, name string) {
 	_, _, _ = stopTunnelDaemon(ctx, name, true)
 }
 
-// stopIdleTunnelDaemons stops every context's daemon that no command uses,
+// stopIdleTunnelDaemons stops every workspace's daemon that no command uses,
 // after the vaire binary changed.
 func stopIdleTunnelDaemons() {
-	names, err := contexts.List()
+	names, err := workspaces.List()
 	if err != nil {
 		return
 	}

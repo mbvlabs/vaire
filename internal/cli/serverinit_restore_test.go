@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 // A no-bucket rebuild's next commands drop followers before their sources,
@@ -25,7 +25,7 @@ func TestRestoreResultDataNoBucketOrdersFollowersFirst(t *testing.T) {
 	for _, clusters := range [][]config.ClusterSpec{{source, follower}, {follower, source}} {
 		cfg := config.DefaultCluster()
 		cfg.Clusters = clusters
-		r := &initRun{cfg: cfg, restore: &restoreRun{state: &contexts.RestoreProgress{}}}
+		r := &initRun{cfg: cfg, restore: &restoreRun{state: &workspaces.RestoreProgress{}}}
 		if got := r.restoreResultData().Next; !slices.Equal(got, want) {
 			t.Fatalf("configuration %v:\n got %v\nwant %v", clusters, got, want)
 		}

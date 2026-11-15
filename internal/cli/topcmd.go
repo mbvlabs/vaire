@@ -206,11 +206,11 @@ func withoutVaireSessions(sessions []top.Session) []top.Session {
 	return out
 }
 
-// topDatabases are the databases in the context's placement cache, refreshed
+// topDatabases are the databases in the workspace's placement cache, refreshed
 // from the master when it is empty.
 func topDatabases(ctx context.Context, s *session, p *progress) []string {
 	if len(s.ctx.Databases) == 0 {
-		s.warnings = append(s.warnings, syncContextFromNode(ctx, s, p)...)
+		s.warnings = append(s.warnings, syncWorkspaceFromNode(ctx, s, p)...)
 	}
 	out := make([]string, 0, len(s.ctx.Databases))
 	for db := range s.ctx.Databases {

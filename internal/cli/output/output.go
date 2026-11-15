@@ -45,14 +45,14 @@ type Warning struct {
 
 // Envelope is the success body for json and agent output.
 type Envelope struct {
-	Schema   string    `json:"schema"`
-	OK       bool      `json:"ok"`
-	Command  string    `json:"command,omitempty"`
-	Context  string    `json:"context,omitempty"`
-	Data     any       `json:"data,omitempty"`
-	Warnings []Warning `json:"warnings,omitempty"`
-	Next     []string  `json:"next,omitempty"`
-	Message  string    `json:"message,omitempty"`
+	Schema    string    `json:"schema"`
+	OK        bool      `json:"ok"`
+	Command   string    `json:"command,omitempty"`
+	Workspace string    `json:"workspace,omitempty"`
+	Data      any       `json:"data,omitempty"`
+	Warnings  []Warning `json:"warnings,omitempty"`
+	Next      []string  `json:"next,omitempty"`
+	Message   string    `json:"message,omitempty"`
 }
 
 // ErrorBody is the failure object inside a failure envelope.
@@ -67,12 +67,12 @@ type ErrorBody struct {
 // evidence notices observed before the failure; they qualify the error but do
 // not change it.
 type Failure struct {
-	Schema   string    `json:"schema"`
-	OK       bool      `json:"ok"`
-	Command  string    `json:"command,omitempty"`
-	Context  string    `json:"context,omitempty"`
-	Error    ErrorBody `json:"error"`
-	Warnings []Warning `json:"warnings,omitempty"`
+	Schema    string    `json:"schema"`
+	OK        bool      `json:"ok"`
+	Command   string    `json:"command,omitempty"`
+	Workspace string    `json:"workspace,omitempty"`
+	Error     ErrorBody `json:"error"`
+	Warnings  []Warning `json:"warnings,omitempty"`
 }
 
 // Event is one NDJSON line on the RPC wire and for --stream.
@@ -331,13 +331,13 @@ func Success(cmd *cobra.Command, result Result) error {
 		return err
 	}
 	env := Envelope{
-		Schema:   Schema,
-		OK:       true,
-		Command:  commandID(cmd),
-		Context:  contextName(cmd),
-		Data:     result.Data,
-		Warnings: resultWarnings(cmd, result.Warnings),
-		Next:     result.Next,
+		Schema:    Schema,
+		OK:        true,
+		Command:   commandID(cmd),
+		Workspace: workspaceName(cmd),
+		Data:      result.Data,
+		Warnings:  resultWarnings(cmd, result.Warnings),
+		Next:      result.Next,
 	}
 	if opts.Mode == ModeAgent {
 		if CommandNext != nil {
@@ -380,10 +380,10 @@ func Fail(cmd *cobra.Command, err error) Failure {
 		cliErr.ExitCode = ExitGeneric
 	}
 	return Failure{
-		Schema:  Schema,
-		OK:      false,
-		Command: commandID(cmd),
-		Context: contextName(cmd),
+		Schema:    Schema,
+		OK:        false,
+		Command:   commandID(cmd),
+		Workspace: workspaceName(cmd),
 		Error: ErrorBody{
 			Code:    cliErr.Code,
 			Message: cliErr.Error(),
@@ -913,11 +913,11 @@ func commandID(cmd *cobra.Command) string {
 	return strings.Join(fields[1:], " ")
 }
 
-func contextName(cmd *cobra.Command) string {
+func workspaceName(cmd *cobra.Command) string {
 	if cmd == nil || cmd.Flags() == nil {
 		return ""
 	}
-	flag := cmd.Flags().Lookup("context")
+	flag := cmd.Flags().Lookup("workspace")
 	if flag == nil {
 		return ""
 	}
