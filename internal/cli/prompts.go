@@ -139,7 +139,7 @@ func dryRun(cmd *cobra.Command) bool {
 
 func stdinIsTTY() bool {
 	// A character-device check is not enough: /dev/null is one too.
-	return term.IsTerminal(int(os.Stdin.Fd())) //nolint:gosec // G115: file descriptors fit in int.
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // PromptYes asks a [y/N] question. It never prompts in structured mode.

@@ -21,7 +21,7 @@ func Main() int {
 	if err == nil {
 		return 0
 	}
-	var silent *localenv.SilentExit
+	var silent *localenv.SilentExitError
 	if errors.As(err, &silent) && silent != nil {
 		return silent.Code
 	}
@@ -68,7 +68,7 @@ func NewRoot() *cobra.Command {
 		),
 	}
 	flags := root.PersistentFlags()
-	flags.StringP("context", "c", "", "Cluster context name")
+	flags.StringP("workspace", "w", "", "Workspace name (VAIRE_WORKSPACE, then the saved current workspace)")
 	output.RegisterPersistentFlags(root)
 	flags.Bool("no-input", false, "Never prompt. Implied when stdin is not a terminal")
 	flags.Bool("sudo", false, "Pre-approve local sudo escalation")

@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/backup"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 // The full backup after db recover --all decodes as backup.now's params,
@@ -38,21 +38,31 @@ func TestRecoverFullParamsDecode(t *testing.T) {
 	}
 }
 
+func TestRecoverInspectionLineShowsApplicationNotReady(t *testing.T) {
+	line := recoverLine("app", map[string]any{
+		"phase": "ready", "restoring": "app__restoring",
+		"access_notice": "The read-only restore is ready for inspection; application access is not ready.",
+	})
+	if !strings.Contains(line, "ready to inspect as app__restoring") || !strings.Contains(line, "application access is not ready") {
+		t.Fatalf("inspection readiness was not explicit: %s", line)
+	}
+}
+
 // db.recover carries what an apply carries: the recovered database's steps
 // run in the job, and a rebuilt master has no service password files.
 func TestRecoverSecrets(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	creds := contexts.Credentials{
-		Database: &contexts.DatabaseCreds{Admin: contexts.Role{User: "vaire_admin", Password: "admin-pw"}, Services: map[string]contexts.Role{}},
-		Metrics:  &contexts.MetricsCreds{Username: "metrics", Password: "metrics-pw"},
-		Backup:   &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"},
+	creds := workspaces.Credentials{
+		Database: &workspaces.DatabaseCreds{Admin: workspaces.Role{User: "vaire_admin", Password: "admin-pw"}, Services: map[string]workspaces.Role{}},
+		Metrics:  &workspaces.MetricsCreds{Username: "metrics", Password: "metrics-pw"},
+		Backup:   &workspaces.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"},
 	}
 	creds.Backup.PgBackRest.CipherPass = "cipher"
 	creds.Backup.Dumps.AgeIdentity, creds.Backup.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
 	for _, role := range steps.ServiceRoles {
-		creds.Database.Services[role] = contexts.Role{User: role, Password: role + "-pw"}
+		creds.Database.Services[role] = workspaces.Role{User: role, Password: role + "-pw"}
 	}
-	if err := contexts.SaveCredentials("dr", creds); err != nil {
+	if err := workspaces.SaveCredentials("dr", creds); err != nil {
 		t.Fatal(err)
 	}
 	values, generated, err := recoverSecrets("dr")
@@ -60,7 +70,7 @@ func TestRecoverSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(generated) != 0 {
-		t.Errorf("generated %v from a complete context", generated)
+		t.Errorf("generated %v from a complete workspace", generated)
 	}
 	want := map[string]string{
 		steps.SecretPgbouncerAuth: "pgbouncer_auth-pw", steps.SecretMonitor: "vaire_monitor-pw", steps.SecretAdminPassword: "admin-pw",

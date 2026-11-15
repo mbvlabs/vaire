@@ -32,6 +32,51 @@ type hostReadings struct {
 	Deferred    map[string]string
 }
 
+type hostClusterMetrics struct {
+	memCur, memHigh, memMax, events, pressure, cpu, io, up, pending *promfile.Family
+}
+
+func (m hostClusterMetrics) add(c clusterReading) {
+	db := promfile.L("db", c.Name)
+	running := 0.0
+	if c.OK {
+		running = 1
+	}
+	m.up.Add(running, db...)
+	restart := 0.0
+	if c.RestartPending {
+		restart = 1
+	}
+	m.pending.Add(restart, db...)
+	if !c.OK {
+		return
+	}
+	g := c.Cgroup
+	m.memCur.Add(float64(g.MemoryCurrent), db...)
+	if g.MemoryHigh > 0 {
+		m.memHigh.Add(float64(g.MemoryHigh), db...)
+	}
+	if g.MemoryMax > 0 {
+		m.memMax.Add(float64(g.MemoryMax), db...)
+	}
+	for _, ev := range []string{"high", "max", "oom", "oom_kill"} {
+		m.events.Add(float64(g.MemoryEvents[ev]), promfile.L("db", c.Name, "event", ev)...)
+	}
+	for _, res := range []string{"cpu", "memory", "io"} {
+		p, ok := g.Pressure[res]
+		if !ok {
+			continue
+		}
+		m.pressure.Add(p.Some.TotalSec, promfile.L("db", c.Name, "resource", res, "kind", "some")...)
+		if p.HasFull {
+			m.pressure.Add(p.Full.TotalSec, promfile.L("db", c.Name, "resource", res, "kind", "full")...)
+		}
+	}
+	m.cpu.Add(g.CPUUsageSec, db...)
+	m.io.Add(float64(g.IOReadBytes), promfile.L("db", c.Name, "direction", "read")...)
+	m.io.Add(float64(g.IOWriteByte), promfile.L("db", c.Name, "direction", "write")...)
+}
+
 // hostFamilies are vaire-host.prom's families (Phase 4): each cluster's
 // cgroup memory against its limits, memory events, PSI, CPU and I/O
 // counters and a pending restart; the server's memory budget, commit limit,
@@ -46,45 +91,10 @@ func hostFamilies(r hostReadings) []*promfile.Family {
 	io := promfile.Counter("vaire_cluster_io_bytes_total", "Bytes read and written by each database's cluster.")
 	up := promfile.Gauge("vaire_cluster_running", "Whether each database's cluster has a running cgroup.")
 	pending := promfile.Gauge("vaire_cluster_restart_pending", "Whether each database's cluster waits for a restart to apply settings.")
+	metrics := hostClusterMetrics{memCur: memCur, memHigh: memHigh, memMax: memMax, events: events,
+		pressure: pressure, cpu: cpu, io: io, up: up, pending: pending}
 	for _, c := range r.Clusters {
-		db := promfile.L("db", c.Name)
-		running := 0.0
-		if c.OK {
-			running = 1
-		}
-		up.Add(running, db...)
-		restart := 0.0
-		if c.RestartPending {
-			restart = 1
-		}
-		pending.Add(restart, db...)
-		if !c.OK {
-			continue
-		}
-		g := c.Cgroup
-		memCur.Add(float64(g.MemoryCurrent), db...)
-		if g.MemoryHigh > 0 {
-			memHigh.Add(float64(g.MemoryHigh), db...)
-		}
-		if g.MemoryMax > 0 {
-			memMax.Add(float64(g.MemoryMax), db...)
-		}
-		for _, ev := range []string{"high", "max", "oom", "oom_kill"} {
-			events.Add(float64(g.MemoryEvents[ev]), promfile.L("db", c.Name, "event", ev)...)
-		}
-		for _, res := range []string{"cpu", "memory", "io"} {
-			p, ok := g.Pressure[res]
-			if !ok {
-				continue
-			}
-			pressure.Add(p.Some.TotalSec, promfile.L("db", c.Name, "resource", res, "kind", "some")...)
-			if p.HasFull {
-				pressure.Add(p.Full.TotalSec, promfile.L("db", c.Name, "resource", res, "kind", "full")...)
-			}
-		}
-		cpu.Add(g.CPUUsageSec, db...)
-		io.Add(float64(g.IOReadBytes), promfile.L("db", c.Name, "direction", "read")...)
-		io.Add(float64(g.IOWriteByte), promfile.L("db", c.Name, "direction", "write")...)
+		metrics.add(c)
 	}
 
 	const mib = 1 << 20
@@ -162,9 +172,15 @@ func pendingFor(pending map[string]bool, db string) bool { return pending[db] ||
 
 // refreshMetrics rewrites vaire.prom and vaire-host.prom. It is the
 // metrics-refresh job (every minute) and runs after the backup jobs too.
+var (
+	refreshBackupMetrics = steps.WriteMetrics
+	refreshHostRead      = hostinfo.Detect
+	refreshHostWrite     = promfile.Write
+)
+
 func refreshMetrics(ctx context.Context, cfg config.Cluster) error {
-	steps.WriteMetrics(cfg)
+	refreshBackupMetrics(cfg)
 	followerErr := writeFollowerMetrics(ctx, cfg)
-	host, _ := hostinfo.Detect(cfg.Server.DataRoot)
-	return errors.Join(followerErr, promfile.Write(promfile.Host, hostFamilies(readHost(cfg, host))))
+	host, _ := refreshHostRead(cfg.Server.DataRoot)
+	return errors.Join(followerErr, refreshHostWrite(promfile.Host, hostFamilies(readHost(cfg, host))))
 }

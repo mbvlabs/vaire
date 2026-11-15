@@ -19,6 +19,13 @@ import (
 // postgres-roles-v1 in a recover job found no service password, and a
 // rebuilt master has no service password files to fall back on.
 func TestJobStepsGetTheRequestSecrets(t *testing.T) {
+	oldHostRead := jobRuntimeHostRead
+	t.Cleanup(func() { jobRuntimeHostRead = oldHostRead })
+	hostReads := 0
+	jobRuntimeHostRead = func(string) (hostinfo.Info, error) {
+		hostReads++
+		return hostinfo.Info{VCPU: 4, RAMMiB: 8192}, nil
+	}
 	req := map[string]string{
 		steps.SecretAdminPassword: "admin", steps.SecretPgbouncerAuth: "auth", steps.SecretMonitor: "mon",
 		steps.SecretMetricsHash: "$2a$hash", steps.SecretBackupKeyID: "AKID", steps.SecretBackupKeySecret: "s3cret",
@@ -37,6 +44,7 @@ func TestJobStepsGetTheRequestSecrets(t *testing.T) {
 		t.Errorf("no request secrets: %v", got)
 	}
 	rt := jobRuntime(&jobEnv{Secrets: got})
+	rejectf(t, hostReads != 1 || rt.Host.VCPU != 4, "job runtime did not use the fake host reader: reads=%d host=%+v", hostReads, rt.Host)
 	if rt.SecretValues[steps.SecretPgbouncerAuth] != "auth" || rt.SecretValues[steps.SecretMonitor] != "mon" {
 		t.Errorf("the job's steps don't see the request secrets: %v", rt.SecretValues)
 	}
@@ -59,9 +67,7 @@ func TestRecoverRendersTheStanzaBeforeArming(t *testing.T) {
 	}
 	host := hostinfo.Info{VCPU: 2}
 	before := string(render.PgBackRestConf(withoutUnfinished(cfg, recs, ""), host, render.BackupSecrets{}))
-	if strings.Contains(before, "[app-abc123]") {
-		t.Fatal("the init view already has the section; the test proves nothing")
-	}
+	reject(t, strings.Contains(before, "[app-abc123]"), "the init view already has the section; the test proves nothing")
 	conf := string(render.PgBackRestConf(withoutUnfinished(cfg, recs, opts.Recovering), host, render.BackupSecrets{}))
 	for _, line := range []string{"[app-abc123]", "pg1-path=" + cfg.Server.DataDirectory("app"), "pg1-port=5433", "repo1-retention-full="} {
 		if !strings.Contains(conf, line) {
@@ -104,9 +110,7 @@ func TestStepsViewKeepsTheAwaitingAside(t *testing.T) {
 func TestDropForgetsAwaitingRecovery(t *testing.T) {
 	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"app": {Stanza: "app-b2593e"}, "other": {}}}
 	forgetDropped(&recs, "app")
-	if recs.IsAwaiting("app") || !recs.IsAwaiting("other") {
-		t.Fatalf("awaiting after the drop: %v", recs.AwaitingRecovery)
-	}
+	rejectf(t, recs.IsAwaiting("app") || !recs.IsAwaiting("other"), "awaiting after the drop: %v", recs.AwaitingRecovery)
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app"}}
 	if got := withoutUnfinished(cfg, recs, ""); len(got.Clusters) != 1 || got.Clusters[0].Name != "app" {

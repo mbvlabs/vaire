@@ -33,7 +33,7 @@ func TestTailCompletedBetweenSizeAndLockChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendBytes := func(b []byte) {
-		f, err := os.OpenFile(segs[0].path, os.O_WRONLY|os.O_APPEND, fileMode) //nolint:gosec // G304: a test store segment.
+		f, err := os.OpenFile(segs[0].path, os.O_WRONLY|os.O_APPEND, fileMode)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +92,7 @@ func TestTailStillTornWhenNoWriterHoldsTheLock(t *testing.T) {
 	s := testStore(t)
 	mustAppend(t, s, baseEvent())
 	segs := segmentsOf(t, s)
-	f, err := os.OpenFile(segs[0].path, os.O_WRONLY|os.O_APPEND, fileMode) //nolint:gosec // G304: a test store segment.
+	f, err := os.OpenFile(segs[0].path, os.O_WRONLY|os.O_APPEND, fileMode)
 	if err != nil {
 		t.Fatal(err)
 	}

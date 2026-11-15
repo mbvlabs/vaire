@@ -32,7 +32,7 @@ func WriteFileAtomicOwned(path string, data []byte, perm os.FileMode, owner, gro
 		return err
 	}
 	tmp := filepath.Join(dir, "."+filepath.Base(path)+"."+hex.EncodeToString(suffix))
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm) //nolint:gosec // G304: tmp is beside a fixed node path.
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
@@ -94,7 +94,7 @@ func ResolveIDs(owner, group string) (uid, gid int, err error) {
 }
 
 func syncDir(dir string) error {
-	d, err := os.Open(dir) //nolint:gosec // G304: directory of a fixed node path.
+	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}

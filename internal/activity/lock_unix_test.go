@@ -23,7 +23,7 @@ func TestAppendLockContention(t *testing.T) {
 	lockWait, lockPoll = 100*time.Millisecond, 2*time.Millisecond
 	t.Cleanup(func() { lockWait, lockPoll = oldWait, oldPoll })
 	lockPath := filepath.Join(s.Dir, lockName)
-	f, err := os.OpenFile(lockPath, os.O_RDWR, fileMode) //nolint:gosec // G304: a lock file in the test store.
+	f, err := os.OpenFile(lockPath, os.O_RDWR, fileMode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestAppendLockFileSafety(t *testing.T) {
 	if err := os.Remove(lockPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(lockPath, nil, 0o644); err != nil { //nolint:gosec // G306: the test needs an unsafe lock mode.
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Append(context.Background(), baseEvent()); !errors.Is(err, errUnsafeLock) {
@@ -118,7 +118,7 @@ func TestCrossProcessAppends(t *testing.T) {
 		wg.Add(1)
 		go func(p int) {
 			defer wg.Done()
-			cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessAppend") //nolint:gosec // G204: the test binary's own path.
+			cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessAppend")
 			cmd.Env = append(os.Environ(),
 				"VAIRE_ACTIVITY_HELPER=1",
 				"VAIRE_ACTIVITY_DIR="+s.Dir,

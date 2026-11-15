@@ -10,7 +10,7 @@ import (
 
 	"github.com/kevinburke/ssh_config"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -29,12 +29,12 @@ func hostFlagExplicit(v string) (user, port bool) {
 // matching Host block in ~/.ssh/config for first contact. Values the operator
 // gave explicitly win. It returns a short description of what was used, or ""
 // when nothing matched.
-func applySSHConfig(boot *contexts.Bootstrap, userGiven, portGiven, identityGiven bool) string {
+func applySSHConfig(boot *workspaces.Bootstrap, userGiven, portGiven, identityGiven bool) string {
 	home, err := os.UserHomeDir()
 	if err != nil || boot.Host == "" {
 		return ""
 	}
-	f, err := os.Open(filepath.Join(home, ".ssh", "config")) //nolint:gosec // G304: the operator's own ssh config.
+	f, err := os.Open(filepath.Join(home, ".ssh", "config"))
 	if err != nil {
 		return ""
 	}
@@ -83,7 +83,7 @@ func checkIdentity(path string) error {
 		return nil
 	}
 	full := expandHome(path)
-	raw, err := os.ReadFile(full) //nolint:gosec // G304: the operator chose this identity file.
+	raw, err := os.ReadFile(full)
 	if err != nil {
 		return output.NewError(output.CodeUsage, "the --identity file "+full+" can't be read: "+unwrapPathError(err), output.ExitUsage,
 			"Pass the path of a readable private key with --identity.").WithDetails(map[string]any{"flag": "--identity", "path": full})

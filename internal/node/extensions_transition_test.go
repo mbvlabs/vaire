@@ -713,7 +713,7 @@ func TestUnfollowCronSettlementOrder(t *testing.T) {
 	cfg.Clusters[0].Extensions = []string{"pg_cron"}
 	cfg.Clusters[1].Extensions = []string{"pg_cron"}
 	node := newFollowerNode(t, cfg)
-	node.copyReady(cfg, "app_follower")
+	node.copyReady(cfg)
 	oldGuardWriter := backup.CopyGuardWriterForTest()
 	backup.RestoreCopyGuardWriterForTest(func(path string, data []byte, perm os.FileMode) error {
 		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
@@ -1117,7 +1117,7 @@ func TestUnfollowCronRetryResumesFromRecordedIdentity(t *testing.T) {
 	cfg.Clusters[0].Extensions = []string{"pg_cron"}
 	cfg.Clusters[1].Extensions = []string{"pg_cron"}
 	node := newFollowerNode(t, cfg)
-	node.copyReady(cfg, "app_follower")
+	node.copyReady(cfg)
 	stub := (&followerStub{}).install(t)
 	oldIdentity, oldDeactivate, oldCurrent, oldRetarget := cronIdentity, deactivateCopyCronAt, cronCurrentName, retargetCopyCron
 	oldReconcile, oldCheck, oldPrune, oldCronSetting := reconcileCopySQL, checkCopyExtensions, pruneCopyGuard, checkCopyCronSetting

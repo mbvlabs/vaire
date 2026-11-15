@@ -23,23 +23,25 @@ import (
 // own. It registers the cluster and starts it until it is open: it has
 // replayed the WAL the backup streamed and is consistent.
 func (m *Materialised) StandbyBaseBackup(ctx context.Context, slot string) error {
-	if err := m.makeData(); err != nil {
+	if err := m.createOwnedData(ctx); err != nil {
 		return err
 	}
 	m.log("copying the live " + m.Source + " into " + m.Data + " through the slot " + slot)
-	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: []string{
-		"-u", "postgres", "--", pgBin + "/pg_basebackup", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "-U", "postgres",
-		"-D", m.Data, "-X", "stream", "-S", slot, "-c", "fast", "--no-password",
-	}}, m.Report); err != nil {
-		return wrapTool("pg_basebackup of "+m.Source, err)
-	}
-	if err := engine.WriteFileAtomicOwned(filepath.Join(m.Data, "standby.signal"), nil, 0o600, "postgres", "postgres"); err != nil {
+	if err := m.GuardOwnership(ctx, MaterialisationBaseBackup, func() error {
+		if err := runMaterialisedCommand(ctx, m, engine.Command{Name: "runuser", Args: []string{
+			"-u", "postgres", "--", pgBin + "/pg_basebackup", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "-U", "postgres",
+			"-D", m.Data, "-X", "stream", "-S", slot, "-c", "fast", "--no-password",
+		}}); err != nil {
+			return wrapTool("pg_basebackup of "+m.Source, err)
+		}
+		return engine.WriteFileAtomicOwned(filepath.Join(m.Data, "standby.signal"), nil, 0o600, "postgres", "postgres")
+	}); err != nil {
 		return err
 	}
-	if err := m.register(); err != nil {
+	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
-	return m.start(ctx, UntilOpen)
+	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx, UntilOpen) })
 }
 
 // DropRecoverySettings removes pgBackRest's recovery settings

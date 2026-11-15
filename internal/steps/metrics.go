@@ -244,42 +244,26 @@ func (metricsStep) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) 
 
 func (metricsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {
 	if !cfg.Metrics.Enabled {
-		if _, err := os.Stat(MetricsConfPath); err == nil {
-			return incomplete(MetricsConfPath + " is still there"), nil
-		}
-		for _, unit := range allExporterUnits {
-			if serviceActive(ctx, unit) {
-				return incomplete(unit + " is still running"), nil
-			}
+		if reason := metricsDisabledReason(ctx); reason != "" {
+			return incomplete(reason), nil
 		}
 		return complete(), nil
 	}
-	for _, name := range versions.Exporters {
-		a, err := exporters.ArtifactFor(name, runtime.GOARCH)
-		if err != nil {
-			return engine.CheckResult{}, err
-		}
-		if !exporters.Installed(a) {
-			return incomplete(name + " " + a.Version + " is not installed"), nil
-		}
+	reason, err := exportersInstalledReason()
+	if err != nil {
+		return engine.CheckResult{}, err
 	}
-	for _, f := range metricsFiles(cfg) {
-		if !fileIsOwned(f.path, f.content, f.mode, f.owner, f.group) {
-			return incomplete(f.path + " differs"), nil
-		}
+	if reason != "" {
+		return incomplete(reason), nil
+	}
+	if reason := metricsFilesReason(cfg); reason != "" {
+		return incomplete(reason), nil
 	}
 	if _, err := os.Stat(MetricsHtpasswdPath); err != nil {
 		return incomplete(MetricsHtpasswdPath + " is missing"), nil
 	}
-	units := exporterUnits(cfg)
-	for _, unit := range allExporterUnits {
-		_, want := units[unit]
-		if want && !serviceActive(ctx, unit) {
-			return incomplete(unit + " is not active"), nil
-		}
-		if !want && serviceActive(ctx, unit) {
-			return incomplete(unit + " runs without a database"), nil
-		}
+	if reason := metricsUnitsReason(ctx, cfg); reason != "" {
+		return incomplete(reason), nil
 	}
 	if err := httpOK(ctx, "http://"+NodeExporterAddr+"/metrics"); err != nil {
 		return incomplete("node_exporter does not answer: " + err.Error()), nil
@@ -287,15 +271,64 @@ func (metricsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runti
 	return complete(), nil
 }
 
+// metricsDisabledReason is why a disabled [metrics] section is not complete.
+func metricsDisabledReason(ctx context.Context) string {
+	if _, err := os.Stat(MetricsConfPath); err == nil {
+		return MetricsConfPath + " is still there"
+	}
+	for _, unit := range allExporterUnits {
+		if serviceActive(ctx, unit) {
+			return unit + " is still running"
+		}
+	}
+	return ""
+}
+
+// exportersInstalledReason names the first pinned exporter that is not
+// installed, or "" when all of them are.
+func exportersInstalledReason() (string, error) {
+	for _, name := range versions.Exporters {
+		a, err := exporters.ArtifactFor(name, runtime.GOARCH)
+		if err != nil {
+			return "", err
+		}
+		if !exporters.Installed(a) {
+			return name + " " + a.Version + " is not installed", nil
+		}
+	}
+	return "", nil
+}
+
+// metricsFilesReason names the first rendered metrics file that differs, or
+// "".
+func metricsFilesReason(cfg config.Cluster) string {
+	for _, f := range metricsFiles(cfg) {
+		if !fileIsOwned(f.path, f.content, f.mode, f.owner, f.group) {
+			return f.path + " differs"
+		}
+	}
+	return ""
+}
+
+// metricsUnitsReason is why the exporter units do not match the databases, or
+// "".
+func metricsUnitsReason(ctx context.Context, cfg config.Cluster) string {
+	units := exporterUnits(cfg)
+	for _, unit := range allExporterUnits {
+		_, want := units[unit]
+		if want && !serviceActive(ctx, unit) {
+			return unit + " is not active"
+		}
+		if !want && serviceActive(ctx, unit) {
+			return unit + " runs without a database"
+		}
+	}
+	return ""
+}
+
 func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	if !cfg.Metrics.Enabled {
-		for _, path := range []string{MetricsConfPath, MetricsTargetsPath, PostgresExporterConfPath} {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return engine.ApplyResult{}, err
-			}
-		}
-		err := rt.Shell.Run(ctx, s.ID(), Script("metrics"), map[string]string{"PHASE": "disable", "ALL_UNITS": strings.Join(allExporterUnits, " ")}, report)
-		return engine.ApplyResult{Restart: engine.RestartNone}, err
+		return applyMetricsDisabled(ctx, rt, s.ID(), report)
 	}
 	if err := rt.Shell.Run(ctx, s.ID(), Script("metrics"), map[string]string{
 		"PHASE":          "users",
@@ -304,47 +337,21 @@ func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Ru
 	}, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	for _, name := range versions.Exporters {
-		a, err := exporters.ArtifactFor(name, runtime.GOARCH)
-		if err != nil {
-			return engine.ApplyResult{}, err
-		}
-		if !exporters.Installed(a) {
-			if report != nil {
-				report(output.Event{Type: "log", Step: s.ID(), Line: "downloading " + a.Tarball})
-			}
-		}
-		if err := exporters.Fetch(ctx, a); err != nil {
-			return engine.ApplyResult{}, err
-		}
+	if err := fetchMetricsExporters(ctx, s.ID(), report); err != nil {
+		return engine.ApplyResult{}, err
 	}
 	if err := writeHtpasswd(rt, false); err != nil {
 		return engine.ApplyResult{}, err
 	}
 	previous, hadPrevious := readMaybe(MetricsConfPath)
-	for _, f := range metricsFiles(cfg) {
-		if err := writeFileOwned(f.path, f.content, f.mode, f.owner, f.group); err != nil {
-			return engine.ApplyResult{}, err
-		}
-	}
-	if len(cfg.Clusters) > 0 {
-		if err := writePgbouncerExporterEnv(); err != nil {
-			return engine.ApplyResult{}, err
-		}
+	if err := writeMetricsConfigFiles(cfg); err != nil {
+		return engine.ApplyResult{}, err
 	}
 	if _, err := Probe(ctx, "nginx", "-t"); err != nil {
 		restoreFile(MetricsConfPath, previous, hadPrevious)
 		return engine.ApplyResult{}, fmt.Errorf("nginx refused the metrics configuration; the previous one is back: %w", err)
 	}
-	units := exporterUnits(cfg)
-	var start, stop []string
-	for _, unit := range allExporterUnits {
-		if _, ok := units[unit]; ok {
-			start = append(start, unit)
-		} else if _, err := os.Stat(SystemdSystemDir + "/" + unit); err == nil {
-			stop = append(stop, unit)
-		}
-	}
+	start, stop := exporterUnitChanges(cfg)
 	if err := rt.Shell.Run(ctx, s.ID(), Script("metrics"), map[string]string{
 		"PHASE":       "start",
 		"START_UNITS": strings.Join(start, " "),
@@ -352,15 +359,83 @@ func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Ru
 	}, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
-	for _, unit := range stop {
+	removeStoppedExporterUnits(stop)
+	pruneOldExporterArtifacts()
+	return engine.ApplyResult{Restart: engine.RestartNone}, nil
+}
+
+// applyMetricsDisabled stops the exporters and removes the /metrics endpoint.
+func applyMetricsDisabled(ctx context.Context, rt engine.Runtime, stepID string, report engine.Reporter) (engine.ApplyResult, error) {
+	for _, path := range []string{MetricsConfPath, MetricsTargetsPath, PostgresExporterConfPath} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return engine.ApplyResult{}, err
+		}
+	}
+	err := rt.Shell.Run(ctx, stepID, Script("metrics"), map[string]string{"PHASE": "disable", "ALL_UNITS": strings.Join(allExporterUnits, " ")}, report)
+	return engine.ApplyResult{Restart: engine.RestartNone}, err
+}
+
+// fetchMetricsExporters installs every pinned exporter, reporting each
+// download.
+func fetchMetricsExporters(ctx context.Context, stepID string, report engine.Reporter) error {
+	for _, name := range versions.Exporters {
+		a, err := exporters.ArtifactFor(name, runtime.GOARCH)
+		if err != nil {
+			return err
+		}
+		if !exporters.Installed(a) && report != nil {
+			report(output.Event{Type: "log", Step: stepID, Line: "downloading " + a.Tarball})
+		}
+		if err := exporters.Fetch(ctx, a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeMetricsConfigFiles writes the rendered files and, when the host has
+// databases, the pgbouncer_exporters' environment files.
+func writeMetricsConfigFiles(cfg config.Cluster) error {
+	for _, f := range metricsFiles(cfg) {
+		if err := writeFileOwned(f.path, f.content, f.mode, f.owner, f.group); err != nil {
+			return err
+		}
+	}
+	if len(cfg.Clusters) > 0 {
+		return writePgbouncerExporterEnv()
+	}
+	return nil
+}
+
+// exporterUnitChanges lists the units to start for the databases and the
+// installed units to stop because no database needs them.
+func exporterUnitChanges(cfg config.Cluster) (start, stop []string) {
+	units := exporterUnits(cfg)
+	for _, unit := range allExporterUnits {
+		if _, ok := units[unit]; ok {
+			start = append(start, unit)
+		} else if _, err := os.Stat(SystemdSystemDir + "/" + unit); err == nil {
+			stop = append(stop, unit)
+		}
+	}
+	return start, stop
+}
+
+// removeStoppedExporterUnits removes the unit files of the exporters a
+// database no longer needs.
+func removeStoppedExporterUnits(units []string) {
+	for _, unit := range units {
 		_ = os.Remove(SystemdSystemDir + "/" + unit)
 	}
+}
+
+// pruneOldExporterArtifacts removes the exporters' superseded versions.
+func pruneOldExporterArtifacts() {
 	for _, name := range versions.Exporters {
 		if a, err := exporters.ArtifactFor(name, runtime.GOARCH); err == nil {
 			_ = exporters.RemoveOld(name, a.Dir())
 		}
 	}
-	return engine.ApplyResult{Restart: engine.RestartNone}, nil
 }
 
 // writePgbouncerExporterEnv writes both pgbouncer_exporters' environment
@@ -388,7 +463,7 @@ func writeHtpasswd(rt engine.Runtime, rotate bool) error {
 	hash := rt.SecretValues[SecretMetricsHash]
 	if hash == "" {
 		return output.NewError(output.CodeInputRequired, "the /metrics credential is missing on the node and the request carries none", output.ExitInput,
-			"Run vaire apply from a machine whose context has the metrics credential (vaire login with a current transfer bundle).").
+			"Run vaire apply from a machine whose workspace has the metrics credential (vaire login with a current transfer bundle).").
 			WithDetails(map[string]any{"secret": SecretMetricsHash})
 	}
 	if !strings.HasPrefix(hash, "$2") {
@@ -404,7 +479,7 @@ func WriteHtpasswd(rt engine.Runtime) error { return writeHtpasswd(rt, true) }
 func HtpasswdLine(hash string) string { return "metrics:" + hash + "\n" }
 
 func readMaybe(path string) (string, bool) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: managed file paths from the step catalogue.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", false
 	}

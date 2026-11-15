@@ -8,21 +8,21 @@ import (
 	"strconv"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
-// The context's WireGuard endpoint after a rebuild (Phase 5, D6). A context
+// The workspace's WireGuard endpoint after a rebuild (Phase 5, D6). A workspace
 // dials the master's public address. After server init --restore on a new
 // IP, the machine that ran it has the new address; another machine heals
 // itself in acme mode by asking the public resolvers for the master's
-// hostname, and anywhere else vaire context set-address sets it. WireGuard
+// hostname, and anywhere else vaire workspace set-address sets it. WireGuard
 // authenticates the peer by its pinned key, so a wrong DNS answer can't
 // impersonate the server.
 
 // newEndpoint returns the address the public resolvers give for the
 // master's hostname when it differs from the stored one, or "".
-func newEndpoint(ctx context.Context, c *contexts.Context, stored string) string {
+func newEndpoint(ctx context.Context, c *workspaces.Workspace, stored string) string {
 	if c.TLSMode != "acme" {
 		return ""
 	}
@@ -57,10 +57,10 @@ func pickEndpoint(stored string, answers ...[]string) string {
 }
 
 // setMasterAddress stores addr (and port, when set) as c's master endpoint.
-func setMasterAddress(c *contexts.Context, addr string, port int) (string, error) {
+func setMasterAddress(c *workspaces.Workspace, addr string, port int) (string, error) {
 	old := ""
 	for i := range c.Nodes {
-		if c.Nodes[i].Role == contexts.RoleMaster || len(c.Nodes) == 1 {
+		if c.Nodes[i].Role == workspaces.RoleMaster || len(c.Nodes) == 1 {
 			old = c.Nodes[i].PublicAddress
 			c.Nodes[i].PublicAddress = addr
 			if port > 0 {
@@ -68,12 +68,12 @@ func setMasterAddress(c *contexts.Context, addr string, port int) (string, error
 			}
 		}
 	}
-	return old, contexts.Save(c)
+	return old, workspaces.Save(c)
 }
 
 // healEndpoint is openSession's retry after the tunnel failed: true when it
 // stored a new address and the session should be opened again.
-func healEndpoint(ctx context.Context, c *contexts.Context, err error) (bool, output.Warning) {
+func healEndpoint(ctx context.Context, c *workspaces.Workspace, err error) (bool, output.Warning) {
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) || (cliErr.Code != output.CodeTransportFailed && cliErr.Code != output.CodeRemoteUnreachable) {
 		return false, output.Warning{}
@@ -86,13 +86,13 @@ func healEndpoint(ctx context.Context, c *contexts.Context, err error) (bool, ou
 	if addr == "" {
 		return false, output.Warning{}
 	}
-	stopTunnelDaemonQuietly(c.Name, true)
+	stopTunnelDaemonQuietly(ctx, c.Name)
 	old, serr := setMasterAddress(c, addr, 0)
 	if serr != nil {
 		return false, output.Warning{}
 	}
-	return true, output.Warning{Code: "context_endpoint_updated",
-		Message: c.MasterHostname() + " now resolves to " + addr + " (was " + old + "): context " + c.Name + " was updated; the server was likely rebuilt"}
+	return true, output.Warning{Code: "workspace_endpoint_updated",
+		Message: c.MasterHostname() + " now resolves to " + addr + " (was " + old + "): workspace " + c.Name + " was updated; the server was likely rebuilt"}
 }
 
 // endpointHealedKey marks a command that already healed its endpoint once,
@@ -128,8 +128,12 @@ func parseEndpoint(v string) (string, int, error) {
 	return ip.Unmap().String(), port, nil
 }
 
-func runContextSetAddress(cmd *cobra.Command, args []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "name"))
+func runWorkspaceSetAddress(cmd *cobra.Command, args []string) error {
+	name := stringFlag(cmd, "name")
+	if name == "" {
+		name = stringFlag(cmd, "workspace")
+	}
+	c, err := workspaces.Resolve(name)
 	if err != nil {
 		return err
 	}
@@ -138,14 +142,14 @@ func runContextSetAddress(cmd *cobra.Command, args []string) error {
 		return output.NewError(output.CodeUsage, args[0]+" is not an IP address (ip, ip:port or [ipv6]:port): "+err.Error(), output.ExitUsage, "")
 	}
 	if dryRun(cmd) {
-		return output.Success(cmd, output.Result{Data: map[string]any{"context": c.Name, "public_address": addr, "dry_run": true},
-			Message: "dry run: would point context " + c.Name + " at " + addr})
+		return output.Success(cmd, output.Result{Data: map[string]any{"workspace": c.Name, "public_address": addr, "dry_run": true},
+			Message: "dry run: would point workspace " + c.Name + " at " + addr})
 	}
-	stopTunnelDaemonQuietly(c.Name, true)
+	stopTunnelDaemonQuietly(commandContext(cmd), c.Name)
 	old, err := setMasterAddress(c, addr, port)
 	if err != nil {
 		return err
 	}
-	return output.Success(cmd, output.Result{Data: map[string]any{"context": c.Name, "public_address": addr, "old_address": old},
-		Message: "context " + c.Name + " now reaches the server's WireGuard at " + addr + " (was " + old + ")"})
+	return output.Success(cmd, output.Result{Data: map[string]any{"workspace": c.Name, "public_address": addr, "old_address": old},
+		Message: "workspace " + c.Name + " now reaches the server's WireGuard at " + addr + " (was " + old + ")"})
 }

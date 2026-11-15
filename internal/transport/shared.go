@@ -20,7 +20,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 )
 
-// The shared tunnel: one daemon per context owns the only WireGuard device
+// The shared tunnel: one daemon per workspace owns the only WireGuard device
 // for the operator key and proxies TCP dials into it over a unix socket.
 // Every vaire process, the one that spawned the daemon included, dials through
 // it, so two commands no longer steal the node's single peer from each other.
@@ -102,7 +102,7 @@ type sharedReply struct {
 }
 
 // ErrDaemonRunning is what a spawn returns when another daemon (or an
-// in-process tunnel) holds the context's singleton lock.
+// in-process tunnel) holds the workspace's singleton lock.
 var ErrDaemonRunning = errors.New("a tunnel daemon is already running")
 
 // errRestart asks ensure to look again after it stopped a stale daemon.
@@ -115,7 +115,7 @@ func IsNoDaemon(err error) bool {
 }
 
 // TunnelFingerprint identifies a tunnel configuration: a daemon serves only
-// clients whose context computes the same value. The private key enters
+// clients whose workspace computes the same value. The private key enters
 // only through its public half.
 func TunnelFingerprint(cfg WireGuardConfig) string {
 	pub, _ := WGPublicKey(cfg.PrivateKey)
@@ -269,7 +269,7 @@ type SharedDialerConfig struct {
 	// SpawnLock is a file locked while a client checks for and spawns the
 	// daemon, so concurrent clients start exactly one.
 	SpawnLock string
-	// Fingerprint is TunnelFingerprint of this client's context.
+	// Fingerprint is TunnelFingerprint of this client's workspace.
 	Fingerprint string
 	// Build is this client's vaire build. An idle daemon of another build is
 	// replaced; a busy one is used as it is.
@@ -285,7 +285,7 @@ type SharedDialerConfig struct {
 	Retry time.Duration
 }
 
-// SharedDialer dials through the context's tunnel daemon, starting it when
+// SharedDialer dials through the workspace's tunnel daemon, starting it when
 // none runs. It holds a lease for its lifetime, which keeps the daemon up.
 // When the daemon dies, the next dial starts a new one.
 type SharedDialer struct {
@@ -428,7 +428,7 @@ func (d *SharedDialer) check(ctx context.Context, st SharedStatus) (SharedStatus
 		return st, nil
 	}
 	return st, output.NewError(output.CodeTransportFailed,
-		"the running tunnel daemon serves another configuration of this context", output.ExitTransport,
+		"the running tunnel daemon serves another configuration of this workspace", output.ExitTransport,
 		"Another vaire command ("+describeClients(st.Clients)+") is using the old tunnel; wait for it, or run vaire tunnel stop --force.").
 		WithDetails(map[string]any{"reason": "tunnel_config_changed", "daemon_pid": st.PID})
 }
@@ -456,7 +456,7 @@ func sharedError(err error) error {
 		return err
 	}
 	return output.WrapError(output.CodeTransportFailed, fmt.Errorf("shared tunnel: %w", err), output.ExitTransport,
-		"See tunnel.log in the context directory; vaire tunnel stop --force restarts the tunnel daemon.")
+		"See tunnel.log in the workspace directory; vaire tunnel stop --force restarts the tunnel daemon.")
 }
 
 // DialBudget is how long a dial the daemon makes may take, including the
@@ -519,11 +519,11 @@ func (d *SharedDialer) Close() {
 
 // lockFile takes an exclusive flock on path, waiting until ctx ends.
 func lockFile(ctx context.Context, path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: a lock file in the context directory.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(f.Fd())
 	for {
 		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {

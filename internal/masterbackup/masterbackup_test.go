@@ -52,7 +52,7 @@ func TestSnapshotPicksTheBundleSetOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var paths []string
+	paths := make([]string, 0, len(files))
 	for _, f := range files {
 		paths = append(paths, f.Path)
 	}

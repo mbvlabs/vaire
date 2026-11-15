@@ -16,16 +16,17 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/localenv"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/password"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -67,9 +68,9 @@ type initRun struct {
 	local    bool
 	name     string
 	cfg      config.Cluster
-	boot     contexts.Bootstrap
-	prog     *contexts.Progress
-	sec      contexts.PendingSecrets
+	boot     workspaces.Bootstrap
+	prog     *workspaces.Progress
+	sec      workspaces.PendingSecrets
 	warnings []output.Warning
 	// dbSecrets is the RPC secret map for the database phase (D7).
 	dbSecrets map[string]string
@@ -93,7 +94,7 @@ type initRun struct {
 	// restore is set for server init --restore (Phase 5).
 	restore *restoreRun
 	// masterHash is the argon2id hash of the master password asked for
-	// during init, if any; it goes in the document and the local context.
+	// during init, if any; it goes in the document and the local workspace.
 	masterHash string
 }
 
@@ -117,7 +118,7 @@ type initResult struct {
 	PublicAddress    string   `json:"public_address"`
 	WGAddress        string   `json:"wg_address"`
 	AdminUser        string   `json:"admin_user"`
-	Context          string   `json:"context,omitempty"`
+	Workspace        string   `json:"workspace,omitempty"`
 	SecretsDocument  string   `json:"secrets_document,omitempty"`
 	Passphrase       string   `json:"passphrase,omitempty"`
 	PublicSSHClosed  bool     `json:"public_ssh_closed"`
@@ -164,21 +165,21 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 		return nil, config.ValidationError(err)
 	}
 	if !resume {
-		if contexts.Exists(r.name) && !local {
+		if workspaces.Exists(r.name) && !local {
 			return nil, output.NewError(
 				output.CodePrecondition,
-				"a context named "+r.name+" already exists on this machine",
+				"a workspace named "+r.name+" already exists on this machine",
 				output.ExitPrecondition,
-				"Pick another --name, or remove the context with vaire context remove "+r.name+".",
-			).WithDetails(map[string]any{"reason": "context_exists", "context": r.name})
+				"Pick another --name, or remove the workspace with vaire workspace remove "+r.name+".",
+			).WithDetails(map[string]any{"reason": "workspace_exists", "workspace": r.name})
 		}
-		if contexts.PendingExists(r.name) {
+		if workspaces.PendingExists(r.name) {
 			return nil, output.NewError(
 				output.CodePrecondition,
 				"an unfinished init for "+r.name+" exists",
 				output.ExitPrecondition,
 				"Continue it with vaire server init --resume --name "+r.name+", or drop it with vaire server init --discard --name "+r.name+".",
-			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": contexts.PendingDir(r.name)})
+			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": workspaces.PendingDir(r.name)})
 		}
 	}
 	if dryRun(cmd) {
@@ -219,26 +220,67 @@ func (r *initRun) confirm() error {
 // collect builds the answers from --answers, flags and prompts.
 func (r *initRun) collect() error {
 	cmd := r.cmd
-	cfg := config.DefaultCluster()
-	var answersRaw []byte
-	if path := stringFlag(cmd, "answers"); path != "" {
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this answers file.
-		answersRaw = raw
-		if err != nil {
-			return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
-		}
-		if cfg, err = config.ParseAnswers(raw); err != nil {
-			return output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
-		}
-		if len(cfg.Clusters) > 0 {
-			return output.NewError(output.CodeValidation, path+" declares [[clusters]]: server init creates no databases", output.ExitConfig,
-				"Remove [[clusters]] from the answers file and add each database after init with vaire db create <name>.")
-		}
-		_, r.boot, err = decodeBootstrap(raw)
-		if err != nil {
-			return output.NewError(output.CodeConfig, path+" [bootstrap] does not parse: "+err.Error(), output.ExitConfig, "")
+	cfg, answersRaw, err := r.initAnswers(cmd)
+	if err != nil {
+		return err
+	}
+	r.applyConfigFlags(cmd, &cfg)
+	userGiven, portGiven, err := r.applyBootFlags(cmd)
+	if err != nil {
+		return err
+	}
+	if err := r.resolveHost(cmd, &userGiven, &portGiven); err != nil {
+		return err
+	}
+	if err := r.resolveName(cmd, &cfg); err != nil {
+		return err
+	}
+	if err := r.resolveNode(cmd, &cfg); err != nil {
+		return err
+	}
+	supplied := suppliedAnswers(cmd, cfg, stringFlag(cmd, "answers") != "")
+	// The huh interview asks the Phase 2 question set in a TTY (D13).
+	if !MustNotPrompt(cmd) {
+		if err := runInterview(cmd, &cfg, supplied); err != nil {
+			return err
 		}
 	}
+	if err := r.collectBackups(&cfg, answersRaw); err != nil {
+		return err
+	}
+	r.cfg = cfg
+	r.prog = &workspaces.Progress{Local: r.local, Phases: map[string]string{}}
+	return nil
+}
+
+// initAnswers is the answers file's cluster, or a default one, and the raw
+// bytes the backups page reads.
+func (r *initRun) initAnswers(cmd *cobra.Command) (config.Cluster, []byte, error) {
+	cfg := config.DefaultCluster()
+	path := stringFlag(cmd, "answers")
+	if path == "" {
+		return cfg, nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, raw, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
+	}
+	parsed, err := config.ParseAnswers(raw)
+	if err != nil {
+		return cfg, raw, output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
+	}
+	if len(parsed.Clusters) > 0 {
+		return cfg, raw, output.NewError(output.CodeValidation, path+" declares [[clusters]]: server init creates no databases", output.ExitConfig,
+			"Remove [[clusters]] from the answers file and add each database after init with vaire db create <name>.")
+	}
+	if _, r.boot, err = decodeBootstrap(raw); err != nil {
+		return cfg, raw, output.NewError(output.CodeConfig, path+" [bootstrap] does not parse: "+err.Error(), output.ExitConfig, "")
+	}
+	return parsed, raw, nil
+}
+
+// applyConfigFlags applies cluster.toml's flags.
+func (r *initRun) applyConfigFlags(cmd *cobra.Command, cfg *config.Cluster) {
 	if v := stringFlag(cmd, "name"); v != "" {
 		cfg.ClusterName = v
 	}
@@ -275,12 +317,17 @@ func (r *initRun) collect() error {
 	if v := stringFlag(cmd, "tls-mode"); v != "" {
 		cfg.TLS.Mode = v
 	}
+}
+
+// applyBootFlags applies the first-contact flags and reports whether the
+// user and the port were given explicitly.
+func (r *initRun) applyBootFlags(cmd *cobra.Command) (userGiven, portGiven bool, err error) {
 	// An answers file's [bootstrap] user and port count as explicit.
-	userGiven, portGiven := r.boot.User != "", r.boot.Port != 0
+	userGiven, portGiven = r.boot.User != "", r.boot.Port != 0
 	if v := stringFlag(cmd, "host"); v != "" {
 		user, host, port, err := parseHostFlag(v)
 		if err != nil {
-			return err
+			return false, false, err
 		}
 		r.boot.User, r.boot.Host, r.boot.Port = user, host, port
 		userGiven, portGiven = hostFlagExplicit(v)
@@ -292,9 +339,14 @@ func (r *initRun) collect() error {
 		r.boot.HostKeyFingerprint = v
 	}
 	if err := checkIdentity(r.boot.Identity); err != nil {
-		return err
+		return false, false, err
 	}
+	return userGiven, portGiven, nil
+}
 
+// resolveHost asks for the server to bootstrap when nothing named one, then
+// fills the user and port from ~/.ssh/config and the defaults.
+func (r *initRun) resolveHost(cmd *cobra.Command, userGiven, portGiven *bool) error {
 	if !r.local && r.boot.Host == "" {
 		if err := RequireFlag(cmd, false, "--host", "server init"); err != nil {
 			return err
@@ -308,10 +360,10 @@ func (r *initRun) collect() error {
 			return err
 		}
 		r.boot.User, r.boot.Host, r.boot.Port = user, host, port
-		userGiven, portGiven = hostFlagExplicit(v)
+		*userGiven, *portGiven = hostFlagExplicit(v)
 	}
 	if !r.local {
-		if src := applySSHConfig(&r.boot, userGiven, portGiven, r.boot.Identity != ""); src != "" {
+		if src := applySSHConfig(&r.boot, *userGiven, *portGiven, r.boot.Identity != ""); src != "" {
 			r.p.note("Using " + src + " for first contact.")
 		}
 	}
@@ -321,21 +373,32 @@ func (r *initRun) collect() error {
 	if r.boot.Port == 0 {
 		r.boot.Port = 22
 	}
+	return nil
+}
+
+// resolveName asks for the server's name when the flags and answers leave it
+// empty, and checks it.
+func (r *initRun) resolveName(cmd *cobra.Command, cfg *config.Cluster) error {
 	if cfg.ClusterName == "" {
 		if err := RequireFlag(cmd, false, "--name", "server init"); err != nil {
 			return err
 		}
-		v, err := promptLine(cmd, "Server name", "prod")
+		v, err := promptLine(cmd, "Workspace name", "prod")
 		if err != nil {
 			return err
 		}
 		cfg.ClusterName = v
 	}
 	if !config.NamePattern.MatchString(cfg.ClusterName) {
-		return output.NewError(output.CodeValidation, "server name "+cfg.ClusterName+" must match "+config.NamePattern.String(), output.ExitConfig, "")
+		return output.NewError(output.CodeValidation, "workspace name "+cfg.ClusterName+" must match "+config.NamePattern.String(), output.ExitConfig, "")
 	}
 	r.name = cfg.ClusterName
+	return nil
+}
 
+// resolveNode fills the master node's name and address, resolving the public
+// address when neither the answers nor the workspace has one.
+func (r *initRun) resolveNode(cmd *cobra.Command, cfg *config.Cluster) error {
 	public := ""
 	if len(cfg.Nodes) > 0 {
 		public = cfg.Nodes[0].PublicAddress
@@ -350,40 +413,29 @@ func (r *initRun) collect() error {
 	if len(cfg.Nodes) == 0 {
 		cfg.Nodes = []config.NodeSpec{{Role: config.RoleMaster, WGAddress: config.DefaultCentralWG}}
 	}
-	cfg.Nodes[0].PublicAddress = public
+	node := &cfg.Nodes[0]
+	node.PublicAddress = public
 	if v := stringFlag(cmd, "node-name"); v != "" {
-		cfg.Nodes[0].Name = v
+		node.Name = v
 	}
-	if cfg.Nodes[0].Name == "" {
-		cfg.Nodes[0].Name = config.DefaultNodeName
+	if node.Name == "" {
+		node.Name = config.DefaultNodeName
 	}
-	if cfg.Nodes[0].WGAddress == "" {
-		cfg.Nodes[0].WGAddress = config.DefaultCentralWG
+	if node.WGAddress == "" {
+		node.WGAddress = config.DefaultCentralWG
 	}
-	if cfg.Nodes[0].Role == "" {
-		cfg.Nodes[0].Role = config.RoleMaster
+	if node.Role == "" {
+		node.Role = config.RoleMaster
 	}
-	supplied := suppliedAnswers(cmd, cfg, stringFlag(cmd, "answers") != "")
-	// The huh interview asks the Phase 2 question set in a TTY (D13).
-	if !MustNotPrompt(cmd) {
-		if err := runInterview(cmd, &cfg, supplied); err != nil {
-			return err
-		}
-	}
-	if err := r.collectBackups(&cfg, answersRaw); err != nil {
-		return err
-	}
-	r.cfg = cfg
-	r.prog = &contexts.Progress{Local: r.local, Phases: map[string]string{}}
 	return nil
 }
 
-func decodeBootstrap(raw []byte) ([]byte, contexts.Bootstrap, error) {
+func decodeBootstrap(raw []byte) ([]byte, workspaces.Bootstrap, error) {
 	var wrap struct {
-		Bootstrap contexts.Bootstrap `toml:"bootstrap"`
+		Bootstrap workspaces.Bootstrap `toml:"bootstrap"`
 	}
 	if err := toml.Unmarshal(raw, &wrap); err != nil {
-		return nil, contexts.Bootstrap{}, err
+		return nil, workspaces.Bootstrap{}, err
 	}
 	return raw, wrap.Bootstrap, nil
 }
@@ -393,7 +445,7 @@ func decodeBootstrap(raw []byte) ([]byte, contexts.Bootstrap, error) {
 func (r *initRun) publicAddress() (string, error) {
 	host := r.boot.Host
 	if r.local && host == "" {
-		addr, err := defaultRouteAddress()
+		addr, err := defaultRouteAddress(r.cmd.Context())
 		if err != nil {
 			return "", output.NewError(output.CodeInputRequired, "could not detect this server's public address", output.ExitInput,
 				"Pass it with --host <public-ip>.").WithDetails(map[string]any{"flag": "--host"})
@@ -423,8 +475,9 @@ func (r *initRun) publicAddress() (string, error) {
 	return ips[0].String(), nil
 }
 
-func defaultRouteAddress() (netip.Addr, error) {
-	conn, err := net.Dial("udp", "192.0.2.1:9")
+func defaultRouteAddress(ctx context.Context) (netip.Addr, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "udp", "192.0.2.1:9")
 	if err != nil {
 		return netip.Addr{}, err
 	}
@@ -466,7 +519,7 @@ func parseHostFlag(v string) (user, host string, port int, err error) {
 func (r *initRun) loadPending() error {
 	name := stringFlag(r.cmd, "name")
 	if name == "" {
-		pending := contexts.PendingNames()
+		pending := workspaces.PendingNames()
 		switch len(pending) {
 		case 0:
 			return output.NewError(output.CodePrecondition, "there is no unfinished init to resume", output.ExitPrecondition,
@@ -478,11 +531,11 @@ func (r *initRun) loadPending() error {
 				"Pass --name with one of details.pending.").WithDetails(map[string]any{"pending": pending})
 		}
 	}
-	if !contexts.PendingExists(name) {
+	if !workspaces.PendingExists(name) {
 		return output.NewError(output.CodePrecondition, "there is no unfinished init for "+name, output.ExitPrecondition,
 			"Start one with vaire server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 	}
-	raw, boot, err := contexts.LoadAnswers(name)
+	raw, boot, err := workspaces.LoadAnswers(name)
 	if err != nil {
 		return err
 	}
@@ -490,7 +543,7 @@ func (r *initRun) loadPending() error {
 	if err != nil {
 		return output.NewError(output.CodeConfig, "the pending answers do not parse: "+err.Error(), output.ExitConfig, "")
 	}
-	prog, err := contexts.LoadProgress(name)
+	prog, err := workspaces.LoadProgress(name)
 	if err != nil {
 		return err
 	}
@@ -511,7 +564,7 @@ func (r *initRun) loadPending() error {
 	}
 	r.name, r.cfg, r.boot, r.prog = name, cfg, boot, prog
 	if prog.Done(phaseSecrets) {
-		sec, err := contexts.LoadSecrets(name)
+		sec, err := workspaces.LoadSecrets(name)
 		if err != nil {
 			return err
 		}
@@ -521,7 +574,7 @@ func (r *initRun) loadPending() error {
 	return nil
 }
 
-func registerPending(sec contexts.PendingSecrets) {
+func registerPending(sec workspaces.PendingSecrets) {
 	secrets.Add(sec.WGPrivateKey)
 	secrets.Add(sec.SSHPrivateKey)
 	secrets.Add(sec.SudoPassword)
@@ -584,15 +637,18 @@ func (r *initRun) savePending() error {
 	if err != nil {
 		return err
 	}
-	if err := contexts.SaveAnswers(r.name, raw, r.boot); err != nil {
+	if err := workspaces.SaveAnswers(r.name, raw, r.boot); err != nil {
 		return err
 	}
-	return contexts.SaveProgress(r.name, r.prog)
+	if r.prog.SetupOperationID == "" {
+		r.prog.SetupOperationID = rpc.NewRequestID()
+	}
+	return workspaces.SaveProgress(r.name, r.prog)
 }
 
 func (r *initRun) mark(phase string) error {
 	r.prog.Mark(phase)
-	return contexts.SaveProgress(r.name, r.prog)
+	return workspaces.SaveProgress(r.name, r.prog)
 }
 
 // generateSecrets creates the operator identity and sudo password (§8.2 step 3).
@@ -613,14 +669,14 @@ func (r *initRun) generateSecrets() error {
 	if err != nil {
 		return err
 	}
-	r.sec = contexts.PendingSecrets{
+	r.sec = workspaces.PendingSecrets{
 		OperatorName:  firstOperatorName,
 		WGPrivateKey:  wgPriv,
 		SSHPrivateKey: string(sshPriv),
 		SudoPassword:  sudo,
 	}
 	registerPending(r.sec)
-	if err := contexts.SaveSecrets(r.name, r.sec); err != nil {
+	if err := workspaces.SaveSecrets(r.name, r.sec); err != nil {
 		return err
 	}
 	r.p.phase("init.secrets", "completed", "")
@@ -631,7 +687,7 @@ func (r *initRun) generateSecrets() error {
 // credentials and records the RPC secret map (D7). Init creates no
 // application databases.
 func (r *initRun) ensureDatabaseSecrets() error {
-	creds := contexts.DatabaseCreds{}
+	creds := workspaces.DatabaseCreds{}
 	if r.sec.Database != nil {
 		creds = *r.sec.Database
 	}
@@ -646,7 +702,7 @@ func (r *initRun) ensureDatabaseSecrets() error {
 	r.sec.Database = &creds
 	r.dbSecrets = rpc
 	registerPending(r.sec)
-	return contexts.SaveSecrets(r.name, r.sec)
+	return workspaces.SaveSecrets(r.name, r.sec)
 }
 
 func (r *initRun) operator() (config.Operator, error) {
@@ -684,9 +740,10 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 		"operator":     op,
 		"local":        r.local,
 	}, remote.CallOptions{
-		Secrets: map[string]string{steps.SecretSudoPassword: r.sec.SudoPassword},
-		Confirm: r.name,
-		OnEvent: r.p.event,
+		Secrets:     map[string]string{steps.SecretSudoPassword: r.sec.SudoPassword},
+		Confirm:     r.name,
+		OperationID: r.prog.SetupOperationID,
+		OnEvent:     r.p.event,
 	})
 	if err != nil {
 		return node.BootstrapResult{}, err
@@ -720,10 +777,8 @@ func runInitRemote(cmd *cobra.Command) error {
 	}
 
 	// 1. Local preflight: the target answers on SSH (§20.1).
-	if !r.prog.Done(phaseHost) {
-		if err := r.p.during("checking that "+publicSSH+" answers", func() error { return localenv.CheckReachable(ctx, publicSSH, timeout) }); err != nil {
-			return err
-		}
+	if err := r.remotePreflight(ctx, publicSSH, timeout); err != nil {
+		return err
 	}
 	// 3. Secrets.
 	if err := r.generateSecrets(); err != nil {
@@ -732,10 +787,10 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
-	if err := r.ensureBackupKit(commandContext(cmd)); err != nil {
+	if err := r.ensureBackupKit(ctx); err != nil {
 		return err
 	}
-	known, err := transport.LoadKnownHosts(contexts.PendingKnownHosts(r.name))
+	known, err := transport.LoadKnownHosts(workspaces.PendingKnownHosts(r.name))
 	if err != nil {
 		return err
 	}
@@ -745,89 +800,38 @@ func runInitRemote(cmd *cobra.Command) error {
 	}
 
 	// 5-6. First contact, binary push, host bootstrap over public SSH.
-	if !r.prog.Done(phaseHost) {
-		if err := r.firstContact(ctx, known, publicSSH, timeout); err != nil {
-			return err
-		}
+	if err := r.remoteFirstContact(ctx, known, publicSSH, timeout); err != nil {
+		return err
 	}
 
 	// 7. Switch transport to WireGuard as the admin user.
-	r.p.phase("init.transport", "started", "connect over WireGuard to "+n.WGAddress)
-	// Init runs its own tunnel; a daemon left from an earlier context of
-	// this name would hold the tunnel lock and the node's peer.
-	stopTunnelDaemonQuietly(r.name, true)
-	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, config.DefaultFirstOperatorWG, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
+	rt, err := r.remoteTransport(ctx, n, known, opAuth)
 	if err != nil {
 		return err
 	}
-	defer tun.Close()
-	adminTarget := transport.SSHTarget{User: r.cfg.Server.AdminUser, Addr: net.JoinHostPort(n.WGAddress, "22")}
-	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{opAuth}, HostKeys: known, Timeout: 15 * time.Second}
-	wgClient, err := dialRetryReport(ctx, tun, adminTarget, sshOpts, confirmWithin, r.attemptReporter("init.transport", "SSH over WireGuard to "+adminTarget.Addr))
-	if err != nil {
-		return tunnelHint(err, n.PublicAddress, r.cfg.Transport.ListenPort)
-	}
-	defer wgClient.Close()
-	wgNode := &remote.Node{SSH: wgClient, Operator: r.sec.OperatorName}
-	if err := wgNode.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: flagTrue(cmd, "auto-upgrade-nodes"), Progress: r.p.note}); err != nil {
-		return err
-	}
-	r.p.phase("init.transport", "completed", "")
-	if err := r.mark(phaseTransport); err != nil {
-		return err
-	}
+	defer rt.close()
 
 	// 8. Commit-confirm lockdown.
-	lockedAt := ""
-	if !r.prog.Done(phaseLockdown) {
-		// A revert reopens public 22/tcp, whatever port first contact used.
-		at, err := r.lockdown(ctx, wgNode, tun, adminTarget, sshOpts, net.JoinHostPort(n.PublicAddress, "22"))
-		if err != nil {
-			return err
-		}
-		lockedAt = at
-		if err := r.mark(phaseLockdown); err != nil {
-			return err
-		}
-	}
-	if lockedAt == "" {
-		lockedAt = r.prog.Phases[phaseLockdown]
+	lockedAt, err := r.remoteLockdown(ctx, rt, n)
+	if err != nil {
+		return err
 	}
 
 	// 9. DNS (acme mode only).
-	if r.cfg.TLS.Mode == "acme" && !r.prog.Done(phaseDNS) {
-		if err := r.dnsStep(ctx); err != nil {
-			return err
-		}
-		if err := r.mark(phaseDNS); err != nil {
-			return err
-		}
+	if err := r.remoteDNSPhase(ctx); err != nil {
+		return err
 	}
 
 	// 10. Database phase: steps 7-13.
-	if !r.prog.Done(phaseDatabase) {
-		r.p.phase("init.database", "started", "run database steps 7-13 on the node")
-		res, err := r.callDatabasePhase(ctx, wgNode)
-		if err != nil {
-			return err
-		}
-		r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
-		r.p.phase("init.database", "completed", "")
-		if err := r.mark(phaseDatabase); err != nil {
-			return err
-		}
+	if err := r.remoteDatabasePhase(ctx, rt.node); err != nil {
+		return err
 	}
 	// 11. Wait for the certificate.
-	if !r.prog.Done(phaseTLS) {
-		if err := r.waitForTLS(ctx, wgNode); err != nil {
-			return err
-		}
-		if err := r.mark(phaseTLS); err != nil {
-			return err
-		}
+	if err := r.remoteTLSPhase(ctx, rt.node); err != nil {
+		return err
 	}
 	// Backups, between the database and the handoff.
-	if err := r.configureInitBackups(ctx, wgNode); err != nil {
+	if err := r.configureInitBackups(ctx, rt.node); err != nil {
 		return err
 	}
 
@@ -839,40 +843,170 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if _, err := r.p.call(ctx, wgNode, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
-		return err
-	}
-	if err := r.mark(phaseSecretsDone); err != nil {
+	if err := r.confirmSecrets(ctx, rt.node); err != nil {
 		return err
 	}
 	// The first master bundle, uploaded with epoch 1 when there is a bucket.
-	r.firstMasterBundle(ctx, wgNode)
+	r.firstMasterBundle(ctx, rt.node)
 
-	// 13. Local context, then drop the pending state.
-	if contexts.Exists(r.name) {
-		return output.NewError(output.CodePrecondition, "a context named "+r.name+" appeared during init", output.ExitPrecondition,
+	// 13. Local workspace, then drop the pending state.
+	return r.initInstallWorkspace(doc, lockedAt, &res, n)
+}
+
+// initTransport is the SSH connection to a node over WireGuard, and the
+// tunnel it runs over.
+type initTransport struct {
+	node   *remote.Node
+	client *transport.SSHClient
+	tunnel *transport.Tunnel
+	target transport.SSHTarget
+	opts   transport.SSHOptions
+}
+
+// close ends the SSH connection and the tunnel.
+func (t *initTransport) close() {
+	t.client.Close()
+	t.tunnel.Close()
+}
+
+// remotePreflight checks that the target answers on public SSH.
+func (r *initRun) remotePreflight(ctx context.Context, publicSSH string, timeout time.Duration) error {
+	if r.prog.Done(phaseHost) {
+		return nil
+	}
+	return r.p.during("checking that "+publicSSH+" answers", func() error { return localenv.CheckReachable(ctx, publicSSH, timeout) })
+}
+
+// remoteFirstContact runs first contact unless an earlier run did.
+func (r *initRun) remoteFirstContact(ctx context.Context, known *transport.KnownHosts, publicSSH string, timeout time.Duration) error {
+	if r.prog.Done(phaseHost) {
+		return nil
+	}
+	return r.firstContact(ctx, known, publicSSH, timeout)
+}
+
+// remoteTransport opens WireGuard and SSH as the admin user.
+func (r *initRun) remoteTransport(ctx context.Context, n config.NodeSpec, known *transport.KnownHosts, opAuth ssh.AuthMethod) (*initTransport, error) {
+	r.p.phase("init.transport", "started", "connect over WireGuard to "+n.WGAddress)
+	// Init runs its own tunnel; a daemon left from an earlier workspace of
+	// this name would hold the tunnel lock and the node's peer.
+	stopTunnelDaemonQuietly(ctx, r.name)
+	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, config.DefaultFirstOperatorWG, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
+	if err != nil {
+		return nil, err
+	}
+	adminTarget := transport.SSHTarget{User: r.cfg.Server.AdminUser, Addr: net.JoinHostPort(n.WGAddress, "22")}
+	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{opAuth}, HostKeys: known, Timeout: 15 * time.Second}
+	wgClient, err := dialRetryReport(ctx, tun, adminTarget, sshOpts, confirmWithin, r.attemptReporter("init.transport", "SSH over WireGuard to "+adminTarget.Addr))
+	if err != nil {
+		tun.Close()
+		return nil, tunnelHint(err, n.PublicAddress, r.cfg.Transport.ListenPort)
+	}
+	wgNode := &remote.Node{SSH: wgClient, Operator: r.sec.OperatorName}
+	if err := wgNode.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: flagTrue(r.cmd, "auto-upgrade-nodes"), Progress: r.p.note}); err != nil {
+		wgClient.Close()
+		tun.Close()
+		return nil, err
+	}
+	r.p.phase("init.transport", "completed", "")
+	if err := r.mark(phaseTransport); err != nil {
+		wgClient.Close()
+		tun.Close()
+		return nil, err
+	}
+	return &initTransport{node: wgNode, client: wgClient, tunnel: tun, target: adminTarget, opts: sshOpts}, nil
+}
+
+// remoteLockdown closes public SSH once and returns when it was armed.
+func (r *initRun) remoteLockdown(ctx context.Context, rt *initTransport, n config.NodeSpec) (string, error) {
+	if r.prog.Done(phaseLockdown) {
+		return r.prog.Phases[phaseLockdown], nil
+	}
+	// A revert reopens public 22/tcp, whatever port first contact used.
+	at, err := r.lockdown(ctx, rt.node, rt.tunnel, rt.target, rt.opts, net.JoinHostPort(n.PublicAddress, "22"))
+	if err != nil {
+		return "", err
+	}
+	if err := r.mark(phaseLockdown); err != nil {
+		return "", err
+	}
+	if at == "" {
+		at = r.prog.Phases[phaseLockdown]
+	}
+	return at, nil
+}
+
+// remoteDNSPhase points the name at the node when ACME needs it.
+func (r *initRun) remoteDNSPhase(ctx context.Context) error {
+	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) {
+		return nil
+	}
+	if err := r.dnsStep(ctx); err != nil {
+		return err
+	}
+	return r.mark(phaseDNS)
+}
+
+// remoteDatabasePhase runs database steps 7-13 on the node once.
+func (r *initRun) remoteDatabasePhase(ctx context.Context, caller remote.Caller) error {
+	if r.prog.Done(phaseDatabase) {
+		return nil
+	}
+	r.p.phase("init.database", "started", "run database steps 7-13 on the node")
+	res, err := r.callDatabasePhase(ctx, caller)
+	if err != nil {
+		return err
+	}
+	r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
+	r.p.phase("init.database", "completed", "")
+	return r.mark(phaseDatabase)
+}
+
+// remoteTLSPhase waits for the certificate once.
+func (r *initRun) remoteTLSPhase(ctx context.Context, caller remote.Caller) error {
+	if r.prog.Done(phaseTLS) {
+		return nil
+	}
+	if err := r.waitForTLS(ctx, caller); err != nil {
+		return err
+	}
+	return r.mark(phaseTLS)
+}
+
+// confirmSecrets has the node record that it holds the new secrets.
+func (r *initRun) confirmSecrets(ctx context.Context, caller remote.Caller) error {
+	if _, err := r.p.call(ctx, caller, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
+		return err
+	}
+	return r.mark(phaseSecretsDone)
+}
+
+// initInstallWorkspace writes the local workspace and drops the pending state.
+func (r *initRun) initInstallWorkspace(doc secretsdoc.Document, lockedAt string, res *initResult, n config.NodeSpec) error {
+	if workspaces.Exists(r.name) {
+		return output.NewError(output.CodePrecondition, "a workspace named "+r.name+" appeared during init", output.ExitPrecondition,
 			"Remove it, then run vaire login and paste the transfer bundle.")
 	}
 	if _, err := secretsdoc.Install(doc, r.name, lockedAt); err != nil {
 		return err
 	}
-	if err := contexts.SetCurrent(r.name); err != nil {
+	if err := workspaces.SetCurrent(r.name); err != nil {
 		return err
 	}
-	if err := contexts.RemovePending(r.name); err != nil {
+	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
-	res.Context = r.name
+	res.Workspace = r.name
 	res.PublicSSHClosed = true
-	r.fillResult(&res)
+	r.fillResult(res)
 	message := strings.Join([]string{
 		fmt.Sprintf("Server %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.MasterHostname()),
 		"TLS: " + r.tlsSummary() + r.healthSuffix(),
 		"No application databases yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents).",
-		"Context " + r.name + " is the current context on this machine. On another machine run vaire login and paste the transfer bundle.",
+		"Workspace " + r.name + " is the current workspace on this machine. On another machine run vaire login and paste the transfer bundle.",
 	}, "\n")
 	r.warnings = append(r.warnings, node.NoOffsiteWarning(r.cfg)...)
-	return r.finish(res, message, res.Next, fmt.Sprintf("Server %s is ready", r.name), nil)
+	return r.finish(*res, message, res.Next, fmt.Sprintf("Server %s is ready", r.name), nil)
 }
 
 // finish renders the init result. On a terminal it draws the summary card;
@@ -933,22 +1067,11 @@ func (r *initRun) tlsSummary() string {
 // firstContact pins the host key, pushes the binary and runs the host phase
 // over public SSH.
 func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts, publicSSH string, timeout time.Duration) error {
-	cmd := r.cmd
 	r.p.phase("init.first-contact", "started", r.boot.User+"@"+publicSSH)
-	if len(known.Keys(publicSSH)) == 0 {
-		key, err := transport.ProbeHostKey(ctx, transport.Direct{Timeout: timeout}, publicSSH, timeout)
-		if err != nil {
-			return err
-		}
-		if err := r.trustHostKey(key); err != nil {
-			return err
-		}
-		known.Pin(publicSSH, key)
-		if err := known.Save(); err != nil {
-			return err
-		}
+	if err := r.pinFirstContactKey(ctx, known, publicSSH, timeout); err != nil {
+		return err
 	}
-	auth, closeAuth, err := firstContactAuth(cmd, r.boot)
+	auth, closeAuth, err := firstContactAuth(ctx, r.cmd, r.boot)
 	if err != nil {
 		return err
 	}
@@ -982,7 +1105,49 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 	if err := r.confirmDNSEarly(); err != nil {
 		return err
 	}
+	if err := r.installNodeBinary(ctx, n, arch); err != nil {
+		return err
+	}
+	r.p.phase("init.binary", "completed", "")
+	if err := r.mark(phaseBinary); err != nil {
+		return err
+	}
 
+	// A rebuild places the master bundle before any step runs (Phase 5):
+	// from here on the server presents the old server's host keys.
+	if err := r.placeRestoreKeys(ctx, n, known, publicSSH); err != nil {
+		return err
+	}
+
+	res, err := r.bootstrapHost(ctx, n)
+	if err != nil {
+		return err
+	}
+	r.prog.PublicIPv6 = res.PublicIPv6
+	if err := verifyHostKeys(known, publicSSH, res, r.master()); err != nil {
+		return err
+	}
+	return r.mark(phaseHost)
+}
+
+// pinFirstContactKey trusts the server's host key on first contact.
+func (r *initRun) pinFirstContactKey(ctx context.Context, known *transport.KnownHosts, publicSSH string, timeout time.Duration) error {
+	if len(known.Keys(publicSSH)) > 0 {
+		return nil
+	}
+	key, err := transport.ProbeHostKey(ctx, transport.Direct{Timeout: timeout}, publicSSH, timeout)
+	if err != nil {
+		return err
+	}
+	if err := r.trustHostKey(key); err != nil {
+		return err
+	}
+	known.Pin(publicSSH, key)
+	return known.Save()
+}
+
+// installNodeBinary installs vaire on the node unless its build matches.
+func (r *initRun) installNodeBinary(ctx context.Context, n *remote.Node, arch string) error {
 	r.p.phase("init.binary", "started", "install vaire "+buildinfo.Version+" on the node")
 	got, installed, err := n.Version(ctx)
 	if err != nil {
@@ -993,63 +1158,55 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 			t.Progress(float64(sent)/float64(max(total, 1)), fmt.Sprintf("%.1f / %.1f MB", float64(sent)/1e6, float64(total)/1e6))
 		}
 	}
-	if !installed || !remote.SameBuild(got, remote.LocalBuild()) {
-		art, err := remote.NodeArtifact(ctx, arch)
-		if err != nil {
-			return err
-		}
-		if installed {
-			if _, err := n.InstallUpgrade(ctx, art, remote.CallOptions{OnEvent: r.p.event}); err != nil {
-				return err
-			}
-		} else if err := n.InstallBootstrap(ctx, art); err != nil {
-			return err
-		}
-		if err := n.Handshake(ctx, remote.HandshakeOptions{}); err != nil {
-			return err
-		}
+	if installed && remote.SameBuild(got, remote.LocalBuild()) {
+		return nil
 	}
-	r.p.phase("init.binary", "completed", "")
-	if err := r.mark(phaseBinary); err != nil {
-		return err
-	}
-
-	// A rebuild places the master bundle before any step runs (Phase 5):
-	// from here on the server presents the old server's host keys.
-	if r.restore != nil {
-		keys, err := r.restore.place(ctx, r, n)
-		if err != nil {
-			return err
-		}
-		known.Replace(publicSSH, keys...)
-		if err := known.Save(); err != nil {
-			return err
-		}
-	}
-
-	res, err := r.bootstrapHost(ctx, n)
+	art, err := remote.NodeArtifact(ctx, arch)
 	if err != nil {
 		return err
 	}
-	r.prog.PublicIPv6 = res.PublicIPv6
-	hostKeys, err := transport.ParseHostKeys(res.SSHHostKeys)
+	if installed {
+		if _, err := n.InstallUpgrade(ctx, art, remote.CallOptions{OnEvent: r.p.event}); err != nil {
+			return err
+		}
+	} else if err := n.InstallBootstrap(ctx, art); err != nil {
+		return err
+	}
+	return n.Handshake(ctx, remote.HandshakeOptions{})
+}
+
+// placeRestoreKeys loads a rebuild's master bundle and pins the old
+// server's host keys before any step runs.
+func (r *initRun) placeRestoreKeys(ctx context.Context, n *remote.Node, known *transport.KnownHosts, publicSSH string) error {
+	if r.restore == nil {
+		return nil
+	}
+	keys, err := r.restore.place(ctx, r, n)
+	if err != nil {
+		return err
+	}
+	known.Replace(publicSSH, keys...)
+	return known.Save()
+}
+
+// verifyHostKeys refuses host keys that don't include the pinned ones, then
+// pins the node's keys for its public and WireGuard addresses.
+func verifyHostKeys(known *transport.KnownHosts, publicSSH string, res node.BootstrapResult, n config.NodeSpec) error {
+	resKeys, err := transport.ParseHostKeys(res.SSHHostKeys)
 	if err != nil {
 		return err
 	}
 	for _, pinned := range known.Keys(publicSSH) {
-		if !transport.ContainsKey(hostKeys, pinned) {
+		if !transport.ContainsKey(resKeys, pinned) {
 			return output.NewError(output.CodeHostKeyMismatch, "the node reported host keys that do not include the key pinned on first contact",
 				output.ExitTransport, "Do not continue until a human checks the server.").
 				WithDetails(map[string]any{"pinned": ssh.FingerprintSHA256(pinned)})
 		}
 	}
-	known.Pin(publicSSH, hostKeys...)
-	known.Pin(net.JoinHostPort(r.master().PublicAddress, "22"), hostKeys...)
-	known.Pin(net.JoinHostPort(r.master().WGAddress, "22"), hostKeys...)
-	if err := known.Save(); err != nil {
-		return err
-	}
-	return r.mark(phaseHost)
+	known.Pin(publicSSH, resKeys...)
+	known.Pin(net.JoinHostPort(n.PublicAddress, "22"), resKeys...)
+	known.Pin(net.JoinHostPort(n.WGAddress, "22"), resKeys...)
+	return known.Save()
 }
 
 // trustHostKey is TOFU on first contact (§7.3): a matching
@@ -1092,7 +1249,7 @@ func (r *initRun) trustHostKey(key ssh.PublicKey) error {
 // because x/crypto/ssh tries only the first method of each kind. An encrypted
 // default key that the agent doesn't hold is unlocked with a passphrase prompt
 // in a terminal, and named in the error otherwise.
-func firstContactAuth(cmd *cobra.Command, boot contexts.Bootstrap) ([]ssh.AuthMethod, func(), error) {
+func firstContactAuth(ctx context.Context, cmd *cobra.Command, boot workspaces.Bootstrap) ([]ssh.AuthMethod, func(), error) {
 	noop := func() {}
 	if flagTrue(cmd, "password-stdin") {
 		pw, err := readFirstLine(cmd.InOrStdin())
@@ -1117,52 +1274,74 @@ func firstContactAuth(cmd *cobra.Command, boot contexts.Bootstrap) ([]ssh.AuthMe
 		}
 		return []ssh.AuthMethod{auth}, noop, nil
 	}
+	signers, closeAgent, skipped := defaultSSHKeys(ctx, cmd)
+	if len(signers) == 0 {
+		return nil, closeAgent, noFirstContactCredential(skipped)
+	}
+	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, closeAgent, nil
+}
+
+// defaultSSHKeys are the agent's keys and the default ~/.ssh keys, with the
+// ones a passphrase blocked. The caller closes the agent, if one was used.
+func defaultSSHKeys(ctx context.Context, cmd *cobra.Command) ([]ssh.Signer, func(), []string) {
+	closeAgent := func() {}
 	var signers []ssh.Signer
-	closeAgent := noop
-	agentSigners, closer, ok := transport.AgentSigners()
+	agentSigners, closer, ok := transport.AgentSigners(ctx)
 	if ok {
 		signers = append(signers, agentSigners...)
 		closeAgent = closer
 	}
+	skipped := defaultKeySigners(cmd, agentSigners, &signers)
+	return signers, closeAgent, skipped
+}
+
+// defaultKeySigners adds the default ~/.ssh keys that open without a
+// passphrase, or with one typed at a terminal. It returns the ones skipped
+// because a passphrase blocked them.
+func defaultKeySigners(cmd *cobra.Command, agentSigners []ssh.Signer, signers *[]ssh.Signer) []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
 	var skipped []string
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
-			path := filepath.Join(home, ".ssh", name)
-			signer, encrypted, err := transport.KeyFileSigner(path, nil)
-			switch {
-			case err == nil:
-				signers = append(signers, signer)
-			case encrypted && transport.AgentHolds(agentSigners, path+".pub"):
-				// The agent already offers this key.
-			case encrypted && !MustNotPrompt(cmd):
-				signer, _, err = transport.KeyFileSigner(path, func() ([]byte, error) {
-					pw, err := readSecretTTY(cmd, "Passphrase for "+path+" (empty to skip)")
-					if err == nil && pw == "" {
-						err = errors.New("skipped")
-					}
-					return []byte(pw), err
-				})
-				if err != nil {
-					skipped = append(skipped, path)
-					continue
+	for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+		path := filepath.Join(home, ".ssh", name)
+		signer, encrypted, err := transport.KeyFileSigner(path, nil)
+		switch {
+		case err == nil:
+			*signers = append(*signers, signer)
+		case encrypted && transport.AgentHolds(agentSigners, path+".pub"):
+			// The agent already offers this key.
+		case encrypted && !MustNotPrompt(cmd):
+			signer, _, err = transport.KeyFileSigner(path, func() ([]byte, error) {
+				pw, err := readSecretTTY(cmd, "Passphrase for "+path+" (empty to skip)")
+				if err == nil && pw == "" {
+					err = errors.New("skipped")
 				}
-				signers = append(signers, signer)
-			case encrypted:
+				return []byte(pw), err
+			})
+			if err != nil {
 				skipped = append(skipped, path)
+				continue
 			}
+			*signers = append(*signers, signer)
+		case encrypted:
+			skipped = append(skipped, path)
 		}
 	}
-	if len(signers) == 0 {
-		hint := "Pass --identity <key>, load a key into ssh-agent, or pipe the password with --password-stdin."
-		details := map[string]any{"flag": "--identity"}
-		if len(skipped) > 0 {
-			hint = "These keys have a passphrase and were skipped: " + strings.Join(skipped, ", ") + ". Load one with ssh-add, or pass it with --identity in a terminal."
-			details["skipped_keys"] = skipped
-		}
-		return nil, closeAgent, output.NewError(output.CodeInputRequired, "first contact needs an SSH credential", output.ExitInput, hint).
-			WithDetails(details)
+	return skipped
+}
+
+// noFirstContactCredential is the refusal when no SSH credential works.
+func noFirstContactCredential(skipped []string) error {
+	hint := "Pass --identity <key>, load a key into ssh-agent, or pipe the password with --password-stdin."
+	details := map[string]any{"flag": "--identity"}
+	if len(skipped) > 0 {
+		hint = "These keys have a passphrase and were skipped: " + strings.Join(skipped, ", ") + ". Load one with ssh-add, or pass it with --identity in a terminal."
+		details["skipped_keys"] = skipped
 	}
-	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, closeAgent, nil
+	return output.NewError(output.CodeInputRequired, "first contact needs an SSH credential", output.ExitInput, hint).
+		WithDetails(details)
 }
 
 func expandHome(path string) string {
@@ -1378,25 +1557,8 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 }
 
 func runInitLocal(cmd *cobra.Command) error {
-	if handled, err := localenv.Escalate(cmd, "initialise this server"); handled || err != nil {
+	if handled, err := checkInitLocal(cmd); handled || err != nil {
 		return err
-	}
-	osInfo, err := hostinfo.ReadOS()
-	if err != nil || !osInfo.Supported() {
-		return output.NewError(output.CodePrecondition, "this server runs "+osInfo.Pretty+", which vaire does not support", output.ExitPrecondition,
-			"Use "+hostinfo.SupportedList+".").WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
-	}
-	if self, err := os.Executable(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(self); err == nil && resolved != node.BinaryPath {
-			return output.NewError(output.CodePrecondition, "server init --local must run as "+node.BinaryPath, output.ExitPrecondition,
-				"Install vaire with the install script as root (curl -fsSL <base>/install.sh | sudo bash), then run "+node.BinaryPath+" server init --local.").
-				WithDetails(map[string]any{"reason": "binary_not_installed", "running": resolved})
-		}
-	}
-	if _, err := os.Stat(config.NodePath); err == nil && !flagTrue(cmd, "resume") {
-		return output.NewError(output.CodePrecondition, "this server is already an vaire node ("+config.NodePath+" exists)", output.ExitPrecondition,
-			"Operate it from your machine with vaire login, or continue an unfinished init with --resume.").
-			WithDetails(map[string]any{"reason": "already_a_node"})
 	}
 	r, err := prepareInit(cmd, true)
 	if err != nil {
@@ -1415,70 +1577,29 @@ func runInitLocal(cmd *cobra.Command) error {
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
-	if err := r.ensureBackupKit(commandContext(cmd)); err != nil {
+	if err := r.ensureBackupKit(ctx); err != nil {
 		return err
 	}
 	caller := remote.Local{Operator: firstOperatorName}
-	if !r.prog.Done(phaseHost) {
-		r.prog.PublicIPv6 = hostinfo.PublicIPv6()
-		if err := r.confirmDNSEarly(); err != nil {
-			return err
-		}
-		hostRes, err := r.bootstrapHost(ctx, caller)
-		if err != nil {
-			return err
-		}
-		r.prog.PublicIPv6 = hostRes.PublicIPv6
-		if err := r.mark(phaseHost); err != nil {
-			return err
-		}
+	if err := r.localHostPhase(ctx, caller); err != nil {
+		return err
 	}
 	// --local cannot prove the tunnel from here, so public SSH stays open and
 	// the first operator command over WireGuard confirms (§8.5).
-	deadline := ""
-	if !r.prog.Done(phaseLockdown) {
-		r.p.phase("init.lockdown", "started", "arm the lockdown; public SSH stays open until an operator confirms over WireGuard")
-		if _, err := r.p.call(ctx, caller, "ssh.lockdown", map[string]any{
-			"timeout_s":   int(localLockdownTimeout.Seconds()),
-			"keep_public": true,
-		}, remote.CallOptions{OnEvent: r.p.event}); err != nil {
-			return err
-		}
-		deadline = time.Now().Add(localLockdownTimeout).UTC().Format(time.RFC3339)
-		r.p.phase("init.lockdown", "completed", "pending until "+deadline)
-		if err := r.mark(phaseLockdown); err != nil {
-			return err
-		}
+	deadline, err := r.localLockdownPhase(ctx, caller)
+	if err != nil {
+		return err
 	}
 	// DNS (acme mode only).
-	if r.cfg.TLS.Mode == "acme" && !r.prog.Done(phaseDNS) {
-		if err := r.dnsStep(ctx); err != nil {
-			return err
-		}
-		if err := r.mark(phaseDNS); err != nil {
-			return err
-		}
+	if err := r.remoteDNSPhase(ctx); err != nil {
+		return err
 	}
 	// Database phase: steps 7-13 on this server.
-	if !r.prog.Done(phaseDatabase) {
-		r.p.phase("init.database", "started", "run database steps 7-13 on this server")
-		res, err := r.callDatabasePhase(ctx, caller)
-		if err != nil {
-			return err
-		}
-		r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
-		r.p.phase("init.database", "completed", "")
-		if err := r.mark(phaseDatabase); err != nil {
-			return err
-		}
+	if err := r.localDatabasePhase(ctx, caller); err != nil {
+		return err
 	}
-	if !r.prog.Done(phaseTLS) {
-		if err := r.waitForTLS(ctx, caller); err != nil {
-			return err
-		}
-		if err := r.mark(phaseTLS); err != nil {
-			return err
-		}
+	if err := r.remoteTLSPhase(ctx, caller); err != nil {
+		return err
 	}
 	if err := r.configureInitBackups(ctx, caller); err != nil {
 		return err
@@ -1490,11 +1611,11 @@ func runInitLocal(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if _, err := r.p.call(ctx, caller, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
+	if err := r.confirmSecrets(ctx, caller); err != nil {
 		return err
 	}
 	r.firstMasterBundle(ctx, caller)
-	if err := contexts.RemovePending(r.name); err != nil {
+	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
 	res.LockdownPending = true
@@ -1513,4 +1634,85 @@ func runInitLocal(cmd *cobra.Command) error {
 		"On your machine run vaire login and paste the transfer bundle,",
 		"then any remote command within 30 minutes. That closes public SSH; otherwise the SSH change reverts.",
 	})
+}
+
+// checkInitLocal refuses a local init that cannot work: no root, an
+// unsupported OS, a binary outside its installed path, or an existing node.
+// handled is true when a child re-executed under sudo ran: the parent then
+// exits with err and does nothing else, because the child does the init.
+func checkInitLocal(cmd *cobra.Command) (bool, error) {
+	if handled, err := localenv.Escalate(cmd, "initialise this server"); handled || err != nil {
+		return handled, err
+	}
+	osInfo, err := hostinfo.ReadOS()
+	if err != nil || !osInfo.Supported() {
+		return false, output.NewError(output.CodePrecondition, "this server runs "+osInfo.Pretty+", which vaire does not support", output.ExitPrecondition,
+			"Use "+hostinfo.SupportedList+".").WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
+	}
+	if self, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(self); err == nil && resolved != node.BinaryPath {
+			return false, output.NewError(output.CodePrecondition, "server init --local must run as "+node.BinaryPath, output.ExitPrecondition,
+				"Install vaire with the install script as root (curl -fsSL <base>/install.sh | sudo bash), then run "+node.BinaryPath+" server init --local.").
+				WithDetails(map[string]any{"reason": "binary_not_installed", "running": resolved})
+		}
+	}
+	if _, err := os.Stat(config.NodePath); err == nil && !flagTrue(cmd, "resume") {
+		return false, output.NewError(output.CodePrecondition, "this server is already an vaire node ("+config.NodePath+" exists)", output.ExitPrecondition,
+			"Operate it from your machine with vaire login, or continue an unfinished init with --resume.").
+			WithDetails(map[string]any{"reason": "already_a_node"})
+	}
+	return false, nil
+}
+
+// localHostPhase runs the host phase on this server once.
+func (r *initRun) localHostPhase(ctx context.Context, caller remote.Caller) error {
+	if r.prog.Done(phaseHost) {
+		return nil
+	}
+	r.prog.PublicIPv6 = hostinfo.PublicIPv6(ctx)
+	if err := r.confirmDNSEarly(); err != nil {
+		return err
+	}
+	hostRes, err := r.bootstrapHost(ctx, caller)
+	if err != nil {
+		return err
+	}
+	r.prog.PublicIPv6 = hostRes.PublicIPv6
+	return r.mark(phaseHost)
+}
+
+// localLockdownPhase arms the lockdown without closing public SSH, and
+// returns the deadline by which an operator must confirm.
+func (r *initRun) localLockdownPhase(ctx context.Context, caller remote.Caller) (string, error) {
+	if r.prog.Done(phaseLockdown) {
+		return "", nil
+	}
+	r.p.phase("init.lockdown", "started", "arm the lockdown; public SSH stays open until an operator confirms over WireGuard")
+	if _, err := r.p.call(ctx, caller, "ssh.lockdown", map[string]any{
+		"timeout_s":   int(localLockdownTimeout.Seconds()),
+		"keep_public": true,
+	}, remote.CallOptions{OnEvent: r.p.event}); err != nil {
+		return "", err
+	}
+	deadline := time.Now().Add(localLockdownTimeout).UTC().Format(time.RFC3339)
+	r.p.phase("init.lockdown", "completed", "pending until "+deadline)
+	if err := r.mark(phaseLockdown); err != nil {
+		return "", err
+	}
+	return deadline, nil
+}
+
+// localDatabasePhase runs database steps 7-13 on this server once.
+func (r *initRun) localDatabasePhase(ctx context.Context, caller remote.Caller) error {
+	if r.prog.Done(phaseDatabase) {
+		return nil
+	}
+	r.p.phase("init.database", "started", "run database steps 7-13 on this server")
+	res, err := r.callDatabasePhase(ctx, caller)
+	if err != nil {
+		return err
+	}
+	r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
+	r.p.phase("init.database", "completed", "")
+	return r.mark(phaseDatabase)
 }

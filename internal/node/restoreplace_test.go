@@ -26,17 +26,11 @@ import (
 func hostKeyPair(t *testing.T) (priv, pub []byte) {
 	t.Helper()
 	pk, sk, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	block, err := ssh.MarshalPrivateKey(sk, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	sshPub, err := ssh.NewPublicKey(pk)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	return pem.EncodeToMemory(block), ssh.MarshalAuthorizedKey(sshPub)
 }
 
@@ -52,7 +46,7 @@ func TestRestoreFiles(t *testing.T) {
 		Timelines:      map[string]backup.TimelineSwitch{"app": {Stanza: "app-abc123", Timeline: "3"}},
 	}
 	recRaw, _ := json.Marshal(records)
-	protect, _ := json.Marshal(protectState{Secret: "JBSWY3DP", LastStep: 1234, Failures: 4, LockedUntil: time.Now().Add(time.Hour)}) //nolint:gosec // G117: a test secret.
+	protect, _ := json.Marshal(protectState{Secret: "JBSWY3DP", LastStep: 1234, Failures: 4, LockedUntil: time.Now().Add(time.Hour)})
 	priv, pub := hostKeyPair(t)
 	b := masterbackup.Bundle{Files: []masterbackup.File{
 		masterbackup.NewFile(masterbackup.ClusterPath, "root", "root", 0o640, []byte("old\n")),
@@ -62,9 +56,7 @@ func TestRestoreFiles(t *testing.T) {
 		masterbackup.NewFile("/etc/ssh/ssh_host_ed25519_key.pub", "root", "root", 0o644, pub),
 	}}
 	files, pruned, err := restoreFiles(b, cfg, "new\n", time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	byPath := map[string]masterbackup.File{}
 	for _, f := range files {
 		byPath[f.Path] = f
@@ -151,12 +143,8 @@ func TestRestoreFilesWithoutRecords(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-abc123"}}
 	files, _, err := restoreFiles(masterbackup.Bundle{}, cfg, "x", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 1 || files[0].Path != masterbackup.RecordsPath || !strings.Contains(string(files[0].Data), "awaiting_recovery") {
-		t.Fatalf("files %+v", files)
-	}
+	reject(t, err != nil, err)
+	rejectf(t, len(files) != 1 || files[0].Path != masterbackup.RecordsPath || !strings.Contains(string(files[0].Data), "awaiting_recovery"), "files %+v", files)
 }
 
 func TestStepsViewKeepsTheRecovering(t *testing.T) {
@@ -248,6 +236,13 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 	if len(specs) != len(want) {
 		t.Fatalf("%d bundle specs, %d expected placements: add the new path here and to placements", len(specs), len(want))
 	}
+	assertBundlePlacements(t, specs, want)
+	assertPlacementScripts(t)
+	assertPlacementDirectories(t, specs)
+}
+
+func assertBundlePlacements(t *testing.T, specs []masterbackup.Spec, want map[string]placement) {
+	t.Helper()
 	for _, s := range specs {
 		p := samplePath(s)
 		got, ok := placementOf(p)
@@ -262,7 +257,10 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 	if _, ok := placementOf("/etc/vaire/runtime/backup.env"); ok {
 		t.Error("a path outside the bundle has a placement")
 	}
+}
 
+func assertPlacementScripts(t *testing.T) {
+	t.Helper()
 	// The writers in Go use the same constants placements does; the steps'
 	// scripts spell them out.
 	if steps.TLSKeyOwner != "root" || steps.TLSKeyGroup != "ssl-cert" || steps.TLSCertOwner != "root" || steps.TLSCertGroup != "root" {
@@ -290,7 +288,10 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 			t.Errorf("wireguard-key.sh lacks %q", line)
 		}
 	}
+}
 
+func assertPlacementDirectories(t *testing.T, specs []masterbackup.Spec) {
+	t.Helper()
 	// The directories as their owners create them.
 	if placeDirs[config.Dir] != 0o755 || placeDirs[steps.TLSDir] != 0o755 {
 		t.Error("/etc/vaire and /etc/vaire/tls must be 0755: postgres reads the certificate through them")
@@ -307,18 +308,13 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 		}
 	}
 }
-
-// TestPlacedAsResolvesNames: placement uses the table's names, never the
-// manifest's, and a group this host lacks is root until its step makes it.
 func TestPlacedAsResolvesNames(t *testing.T) {
 	owner, group, mode, err := placedAs(masterbackup.ClusterPath)
 	if err != nil || owner != "root" || group != "root" || mode != config.FileMode {
 		t.Errorf("cluster.toml placed as %s:%s %04o, %v", owner, group, mode, err)
 	}
 	_, group, mode, err = placedAs(masterbackup.TLSKeyPath)
-	if err != nil || mode != steps.TLSKeyMode {
-		t.Fatalf("server.key placed %04o, %v", mode, err)
-	}
+	rejectf(t, err != nil || mode != steps.TLSKeyMode, "server.key placed %04o, %v", mode, err)
 	if _, lookErr := user.LookupGroup(steps.TLSKeyGroup); lookErr == nil && group != steps.TLSKeyGroup {
 		t.Errorf("server.key's group is %s on a host with %s", group, steps.TLSKeyGroup)
 	} else if lookErr != nil && group != "root" {
@@ -342,9 +338,7 @@ func TestPlaceDirGivesEachDirectoryItsMode(t *testing.T) {
 	}
 	for dir, want := range placeDirs {
 		info, err := os.Stat(filepath.Join(root, dir))
-		if err != nil {
-			t.Fatal(err)
-		}
+		reject(t, err != nil, err)
 		if got := info.Mode().Perm(); got != want {
 			t.Errorf("%s is %04o, want %04o", dir, got, want)
 		}

@@ -150,58 +150,65 @@ func TestRetentionRotationDoesNotReportLoss(t *testing.T) {
 	for _, policy := range policies {
 		for _, races := range []int{1, 3} {
 			t.Run(policy.name+"/races="+strconv.Itoa(races), func(t *testing.T) {
-				t.Run("query", func(t *testing.T) {
-					s := policy.store(t)
-					policy.seed(t, s)
-					churn := installRetentionChurn(t, s, policy.churn, races)
-
-					page, err := s.Query(context.Background(), Query{Limit: MaxLimit})
-					if err != nil {
-						t.Fatalf("Query: %v", err)
-					}
-					if !churn.exhausted() {
-						t.Fatalf("%d injected rotations never reached the read", churn.remaining)
-					}
-					if page.Coverage.LossDetected {
-						t.Fatalf("retention rotation reported loss: %+v", page.Coverage)
-					}
-					if page.Coverage.Truncated {
-						t.Fatalf("retention rotation left a truncated snapshot: %+v", page.Coverage)
-					}
-					if len(page.Events) != 1 {
-						t.Fatalf("events = %d, want the single event retained by rotation", len(page.Events))
-					}
-					if page.Coverage.LastRetainedAt == "" {
-						t.Fatalf("retained last timestamp missing: %+v", page.Coverage)
-					}
-				})
-				t.Run("health", func(t *testing.T) {
-					s := policy.store(t)
-					policy.seed(t, s)
-					churn := installRetentionChurn(t, s, policy.churn, races)
-
-					health, err := s.Health(context.Background())
-					if err != nil {
-						t.Fatalf("Health: %v", err)
-					}
-					if !churn.exhausted() {
-						t.Fatalf("%d injected rotations never reached the read", churn.remaining)
-					}
-					if health.LossDetected {
-						t.Fatalf("retention rotation reported loss by Health: %+v", health)
-					}
-					if health.Segments != 1 {
-						t.Fatalf("segments = %d, want the single segment retained by rotation", health.Segments)
-					}
-					if health.MalformedEvents != 0 || health.MalformedSegments != 0 || health.SequenceGaps != 0 {
-						t.Fatalf("retention rotation fabricated corruption: %+v", health)
-					}
-					if health.FirstRetainedAt == "" || health.LastRetainedAt == "" {
-						t.Fatalf("retained window missing: %+v", health)
-					}
-				})
+				runRetentionRotation(t, policy, races)
 			})
 		}
+	}
+}
+
+// runRetentionRotation checks both reads after the injected rotations.
+func runRetentionRotation(t *testing.T, policy retentionRacePolicy, races int) {
+	t.Run("query", func(t *testing.T) {
+		assertRotationQueryClean(t, policy, races)
+	})
+	t.Run("health", func(t *testing.T) {
+		assertRotationHealthClean(t, policy, races)
+	})
+}
+
+// assertRotationQueryClean checks Query verdicts after a retention rotation.
+func assertRotationQueryClean(t *testing.T, policy retentionRacePolicy, races int) {
+	s := policy.store(t)
+	policy.seed(t, s)
+	churn := installRetentionChurn(t, s, policy.churn, races)
+	page := mustQuery(t, s, Query{Limit: MaxLimit})
+	if !churn.exhausted() {
+		t.Fatalf("%d injected rotations never reached the read", churn.remaining)
+	}
+	if page.Coverage.LossDetected {
+		t.Fatalf("retention rotation reported loss: %+v", page.Coverage)
+	}
+	if page.Coverage.Truncated {
+		t.Fatalf("retention rotation left a truncated snapshot: %+v", page.Coverage)
+	}
+	if len(page.Events) != 1 {
+		t.Fatalf("events = %d, want the single event retained by rotation", len(page.Events))
+	}
+	if page.Coverage.LastRetainedAt == "" {
+		t.Fatalf("retained last timestamp missing: %+v", page.Coverage)
+	}
+}
+
+// assertRotationHealthClean checks Health verdicts after a retention rotation.
+func assertRotationHealthClean(t *testing.T, policy retentionRacePolicy, races int) {
+	s := policy.store(t)
+	policy.seed(t, s)
+	churn := installRetentionChurn(t, s, policy.churn, races)
+	health := mustHealth(t, s)
+	if !churn.exhausted() {
+		t.Fatalf("%d injected rotations never reached the read", churn.remaining)
+	}
+	if health.LossDetected {
+		t.Fatalf("retention rotation reported loss by Health: %+v", health)
+	}
+	if health.Segments != 1 {
+		t.Fatalf("segments = %d, want the single segment retained by rotation", health.Segments)
+	}
+	if health.MalformedEvents != 0 || health.MalformedSegments != 0 || health.SequenceGaps != 0 {
+		t.Fatalf("retention rotation fabricated corruption: %+v", health)
+	}
+	if health.FirstRetainedAt == "" || health.LastRetainedAt == "" {
+		t.Fatalf("retained window missing: %+v", health)
 	}
 }
 
@@ -255,51 +262,10 @@ func TestRetentionRaceRetryIsBounded(t *testing.T) {
 // counts the deleted event. The read must report loss, not excuse it as
 // retention.
 func TestRetentionRetryStillReportsMissingNewestSegment(t *testing.T) {
-	setup := func(t *testing.T) (*Store, string) {
-		t.Helper()
-		s := &Store{
-			Dir:          filepath.Join(t.TempDir(), "activity"),
-			MaxBytes:     256 << 10,
-			SegmentBytes: maxEventBytes,
-			Retention:    24 * time.Hour,
-		}
-		ev := labelledEvent(strings.Repeat("g", 100))
-		for i := 0; i < 200; i++ {
-			mustAppend(t, s, ev)
-			if len(segmentsOf(t, s)) >= 2 {
-				break
-			}
-		}
-		segments := segmentsOf(t, s)
-		if len(segments) < 2 {
-			t.Fatalf("setup segments = %d, want at least 2", len(segments))
-		}
-		return s, segments[len(segments)-1].path
-	}
-	installDeleteNewest := func(t *testing.T, newest string) *int {
-		t.Helper()
-		old := afterListSegmentsHook
-		calls := 0
-		afterListSegmentsHook = func() {
-			calls++
-			if calls > 1 {
-				return
-			}
-			if err := os.Remove(newest); err != nil {
-				t.Fatal(err)
-			}
-		}
-		t.Cleanup(func() { afterListSegmentsHook = old })
-		return &calls
-	}
-
 	t.Run("query", func(t *testing.T) {
-		s, newest := setup(t)
+		s, newest := retentionRetryStore(t)
 		calls := installDeleteNewest(t, newest)
-		page, err := s.Query(context.Background(), Query{Limit: MaxLimit})
-		if err != nil {
-			t.Fatalf("Query: %v", err)
-		}
+		page := mustQuery(t, s, Query{Limit: MaxLimit})
 		if *calls < 2 {
 			t.Fatalf("the vanished segment did not trigger a fresh observation (%d calls)", *calls)
 		}
@@ -308,12 +274,9 @@ func TestRetentionRetryStillReportsMissingNewestSegment(t *testing.T) {
 		}
 	})
 	t.Run("health", func(t *testing.T) {
-		s, newest := setup(t)
+		s, newest := retentionRetryStore(t)
 		calls := installDeleteNewest(t, newest)
-		health, err := s.Health(context.Background())
-		if err != nil {
-			t.Fatalf("Health: %v", err)
-		}
+		health := mustHealth(t, s)
 		if *calls < 2 {
 			t.Fatalf("the vanished segment did not trigger a fresh observation (%d calls)", *calls)
 		}
@@ -321,4 +284,47 @@ func TestRetentionRetryStillReportsMissingNewestSegment(t *testing.T) {
 			t.Fatalf("missing newest segment reported as healthy: %+v", health)
 		}
 	})
+}
+
+// retentionRetryStore builds a store with at least two small segments and
+// returns it with the newest segment path.
+func retentionRetryStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	s := &Store{
+		Dir:          filepath.Join(t.TempDir(), "activity"),
+		MaxBytes:     256 << 10,
+		SegmentBytes: maxEventBytes,
+		Retention:    24 * time.Hour,
+	}
+	ev := labelledEvent(strings.Repeat("g", 100))
+	for i := 0; i < 200; i++ {
+		mustAppend(t, s, ev)
+		if len(segmentsOf(t, s)) >= 2 {
+			break
+		}
+	}
+	segments := segmentsOf(t, s)
+	if len(segments) < 2 {
+		t.Fatalf("setup segments = %d, want at least 2", len(segments))
+	}
+	return s, segments[len(segments)-1].path
+}
+
+// installDeleteNewest removes newest after the first listing and returns the
+// number of listings observed.
+func installDeleteNewest(t *testing.T, newest string) *int {
+	t.Helper()
+	old := afterListSegmentsHook
+	calls := 0
+	afterListSegmentsHook = func() {
+		calls++
+		if calls > 1 {
+			return
+		}
+		if err := os.Remove(newest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { afterListSegmentsHook = old })
+	return &calls
 }

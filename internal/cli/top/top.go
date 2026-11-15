@@ -242,29 +242,10 @@ func Build(prev, cur map[string]Sample, pools []Pool, dbFilter string, at time.T
 	sort.Strings(names)
 	for _, name := range names {
 		s := cur[name]
-		row := DBRow{DB: name, Max: s.Counters.MaxConnections, Error: s.Error}
-		for _, se := range s.Sessions {
-			row.Connections++
-			switch {
-			case se.State == "active":
-				row.Active++
-			case strings.HasPrefix(se.State, "idle in transaction"):
-				row.IdleInTx++
-			}
-			if se.State != "idle" && se.Seconds > row.LongestXact {
-				row.LongestXact = se.Seconds
-			}
-		}
+		row := dbRow(name, s)
 		if p, ok := prev[name]; ok && s.Error == "" && p.Error == "" {
-			if dt := s.At.Sub(p.At).Seconds(); dt > 0 && s.Counters.Xacts >= p.Counters.Xacts {
-				tps := float64(s.Counters.Xacts-p.Counters.Xacts) / dt
-				row.TPS = &tps
-			}
-			hit, read := s.Counters.BlksHit-p.Counters.BlksHit, s.Counters.BlksRead-p.Counters.BlksRead
-			if hit+read > 0 && hit >= 0 && read >= 0 {
-				ratio := float64(hit) / float64(hit+read)
-				row.CacheHit = &ratio
-			}
+			rates := ratesBetween(p, s)
+			row.TPS, row.CacheHit = rates.tps, rates.cacheHit
 			if dbFilter == "" || dbFilter == name {
 				snap.Statements = append(snap.Statements, StatementDeltas(name, p.Statements, s.Statements, 10)...)
 			}
@@ -280,6 +261,46 @@ func Build(prev, cur map[string]Sample, pools []Pool, dbFilter string, at time.T
 		snap.Statements = snap.Statements[:10]
 	}
 	return snap
+}
+
+// dbRow is one database's row from this round's sample.
+func dbRow(name string, s Sample) DBRow {
+	row := DBRow{DB: name, Max: s.Counters.MaxConnections, Error: s.Error}
+	for _, se := range s.Sessions {
+		row.Connections++
+		switch {
+		case se.State == "active":
+			row.Active++
+		case strings.HasPrefix(se.State, "idle in transaction"):
+			row.IdleInTx++
+		}
+		if se.State != "idle" && se.Seconds > row.LongestXact {
+			row.LongestXact = se.Seconds
+		}
+	}
+	return row
+}
+
+// sampleRates are the rates between two rounds.
+type sampleRates struct {
+	tps      *float64
+	cacheHit *float64
+}
+
+// ratesBetween is the transactions per second and the cache hit ratio
+// between p and s.
+func ratesBetween(p, s Sample) sampleRates {
+	var rates sampleRates
+	if dt := s.At.Sub(p.At).Seconds(); dt > 0 && s.Counters.Xacts >= p.Counters.Xacts {
+		tps := float64(s.Counters.Xacts-p.Counters.Xacts) / dt
+		rates.tps = &tps
+	}
+	hit, read := s.Counters.BlksHit-p.Counters.BlksHit, s.Counters.BlksRead-p.Counters.BlksRead
+	if hit+read > 0 && hit >= 0 && read >= 0 {
+		ratio := float64(hit) / float64(hit+read)
+		rates.cacheHit = &ratio
+	}
+	return rates
 }
 
 // SortSessions orders sessions by key: "time" (longest first), "state" or
@@ -310,8 +331,20 @@ func Render(s Snapshot, filter, sortKey string, width, height int) string {
 		title += " · " + filter
 	}
 	b.WriteString(title + " · q quit · d database · s sort (" + sortKey + ")\n\n")
+	b.WriteString(renderDatabases(s.Databases, width))
+	b.WriteString(renderPools(s.Pools, width))
+	b.WriteString(renderBlocking(s.Blocking, width))
+	b.WriteString(renderStatements(s.Statements, width))
+	b.WriteString("\nSESSIONS\n")
+	b.WriteString(renderSessions(s.Sessions, sortKey, width, height-strings.Count(b.String(), "\n")-1))
+	return b.String()
+}
+
+// renderDatabases draws the database rows.
+func renderDatabases(dbs []DBRow, width int) string {
+	var b strings.Builder
 	fmt.Fprintf(&b, "%-16s %7s %7s %7s %8s %7s %8s\n", "DATABASE", "CONNS", "ACTIVE", "IDLE-TX", "TPS", "CACHE", "LONGEST")
-	for _, d := range s.Databases {
+	for _, d := range dbs {
 		tps, cache := "-", "-"
 		if d.TPS != nil {
 			tps = fmt.Sprintf("%.1f", *d.TPS)
@@ -325,41 +358,65 @@ func Render(s Snapshot, filter, sortKey string, width, height int) string {
 		}
 		b.WriteString(clip(line, width) + "\n")
 	}
-	if len(s.Pools) > 0 {
-		b.WriteString("\nPOOLS\n")
-		for _, p := range s.Pools {
-			b.WriteString(clip(fmt.Sprintf("  %-11s %-16s clients %d active %d waiting · servers %d active %d idle · maxwait %ds",
-				p.Pooler, p.Database, p.ClActive, p.ClWaiting, p.SvActive, p.SvIdle, p.MaxWait), width) + "\n")
-		}
+	return b.String()
+}
+
+// renderPools draws the pooler rows, if any.
+func renderPools(pools []Pool, width int) string {
+	if len(pools) == 0 {
+		return ""
 	}
-	if len(s.Blocking) > 0 {
-		b.WriteString("\nBLOCKING\n")
-		for _, l := range s.Blocking {
-			b.WriteString(clip("  "+l, width) + "\n")
-		}
+	var b strings.Builder
+	b.WriteString("\nPOOLS\n")
+	for _, p := range pools {
+		b.WriteString(clip(fmt.Sprintf("  %-11s %-16s clients %d active %d waiting · servers %d active %d idle · maxwait %ds",
+			p.Pooler, p.Database, p.ClActive, p.ClWaiting, p.SvActive, p.SvIdle, p.MaxWait), width) + "\n")
 	}
-	if len(s.Statements) > 0 {
-		b.WriteString("\nBUSIEST STATEMENTS SINCE THE LAST REFRESH\n")
-		for _, st := range s.Statements {
-			b.WriteString(clip(fmt.Sprintf("  %-12s %6d calls %10.1f ms  %s", st.DB, st.Calls, st.TotalMS, st.Query), width) + "\n")
-		}
+	return b.String()
+}
+
+// renderBlocking draws the blocking chains, if any.
+func renderBlocking(blocking []string, width int) string {
+	if len(blocking) == 0 {
+		return ""
 	}
-	sessions := append([]Session(nil), s.Sessions...)
-	SortSessions(sessions, sortKey)
-	b.WriteString("\nSESSIONS\n")
-	used := strings.Count(b.String(), "\n")
-	room := height - used - 1
+	var b strings.Builder
+	b.WriteString("\nBLOCKING\n")
+	for _, l := range blocking {
+		b.WriteString(clip("  "+l, width) + "\n")
+	}
+	return b.String()
+}
+
+// renderStatements draws the busiest statements, if any.
+func renderStatements(statements []Busy, width int) string {
+	if len(statements) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nBUSIEST STATEMENTS SINCE THE LAST REFRESH\n")
+	for _, st := range statements {
+		b.WriteString(clip(fmt.Sprintf("  %-12s %6d calls %10.1f ms  %s", st.DB, st.Calls, st.TotalMS, st.Query), width) + "\n")
+	}
+	return b.String()
+}
+
+// renderSessions draws the sessions that fit in room lines.
+func renderSessions(sessions []Session, sortKey string, width, room int) string {
 	if room < 3 {
 		room = 3
 	}
-	for i, se := range sessions {
+	ordered := append([]Session(nil), sessions...)
+	SortSessions(ordered, sortKey)
+	var b strings.Builder
+	for i, se := range ordered {
 		if i >= room {
-			fmt.Fprintf(&b, "  … %d more\n", len(sessions)-i)
+			fmt.Fprintf(&b, "  … %d more\n", len(ordered)-i)
 			break
 		}
 		b.WriteString(clip(fmt.Sprintf("  %-12s %7d %-16s %-20s %-18s %6ds  %s", se.DB, se.PID, se.Role, se.State, se.Wait, se.Seconds, se.Query), width) + "\n")
 	}
-	if len(sessions) == 0 {
+	if len(ordered) == 0 {
 		b.WriteString("  no client sessions\n")
 	}
 	return b.String()

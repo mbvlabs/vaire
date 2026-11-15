@@ -98,7 +98,7 @@ func TestExtractOnlyTheMember(t *testing.T) {
 	if err := Extract(bytes.NewReader(raw), "x-1.0.linux-amd64/x", dest); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(dest) //nolint:gosec // G304: a test temp file.
+	got, err := os.ReadFile(dest)
 	if err != nil || string(got) != "binary" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -147,8 +147,8 @@ func TestRemoveOldKeepsOtherNames(t *testing.T) {
 	if err := removeOldIn(root, "pgbouncer_exporter", filepath.Join(root, "pgbouncer_exporter-0.12.1")); err != nil {
 		t.Fatal(err)
 	}
-	var left []string
 	entries, _ := os.ReadDir(root)
+	left := make([]string, 0, len(entries))
 	for _, e := range entries {
 		left = append(left, e.Name())
 	}

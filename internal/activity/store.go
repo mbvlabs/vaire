@@ -102,9 +102,7 @@ func (s *Store) config() (storeConfig, error) {
 // exists, recorded history disappeared while the state still counts its
 // events, or the write itself fails.
 func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = requestContext(ctx)
 	cfg, err := s.config()
 	if err != nil {
 		return Event{}, err
@@ -112,18 +110,7 @@ func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 	if err := ctx.Err(); err != nil {
 		return Event{}, err
 	}
-	ev = sanitizeEvent(ev)
-	if err := ValidateEvent(ev); err != nil {
-		return Event{}, err
-	}
-	// Validate the occurrence time against the local clock before touching the
-	// filesystem, so a rejected event creates no store.
-	preflightNow := time.Now().UTC()
-	preflightOccurred, err := normalizeEventTime(ev.OccurredAt, preflightNow)
-	if err != nil {
-		return Event{}, err
-	}
-	if err := checkOccurrenceSkew(preflightOccurred, preflightNow); err != nil {
+	if ev, err = preflightEvent(ev, time.Now().UTC()); err != nil {
 		return Event{}, err
 	}
 	if err := ensureStoreDir(cfg.dir); err != nil {
@@ -137,62 +124,147 @@ func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 	if err := ctx.Err(); err != nil {
 		return Event{}, err
 	}
-	dirInfo, err := os.Lstat(cfg.dir) //nolint:gosec // G304: the store directory.
+	segments, state, stateExists, err := inspectStore(cfg.dir)
 	if err != nil {
-		return Event{}, fmt.Errorf("activity: inspect store directory: %w", err)
+		return Event{}, err
+	}
+	now := time.Now().UTC()
+	base, err := appendBase(ctx, cfg, segments, state, stateExists)
+	if err != nil {
+		return Event{}, err
+	}
+	assigned, line, err := buildAssignedEvent(ev, base.next, now)
+	if err != nil {
+		return Event{}, err
+	}
+	plan, err := planAppend(ctx, cfg, segments, base, int64(len(line)), now)
+	if err != nil {
+		return Event{}, err
+	}
+	// A cancelled append must not persist an event: recovery could not prove
+	// the next sequence, and pruning would only observe the cancellation after
+	// the line was already durable.
+	if err := ctx.Err(); err != nil {
+		return Event{}, err
+	}
+	if !stateExists {
+		// Publish the store identity and an empty counter document before the
+		// first segment.
+		if err := publishInitialState(cfg.dir, base.state); err != nil {
+			return Event{}, err
+		}
+	}
+	if err := writeSegmentLine(plan.path, line, plan.create); err != nil {
+		_ = recordDropped(cfg.dir, base.state, true)
+		return Event{}, fmt.Errorf("activity: append event: %w", err)
+	}
+	// The event is durable before anything is pruned. A failed or interrupted
+	// append therefore never discards preexisting history.
+	remaining, _, deleted, err := pruneRetention(ctx, cfg, plan.segments, plan.index, plan.cutoff, now)
+	if err != nil {
+		// The event is durable; only retention is incomplete. The next append
+		// retries the budget.
+		return Event{}, fmt.Errorf("activity: apply retention: %w", err)
+	}
+	if err := syncWrittenDir(cfg.dir, plan.create || deleted); err != nil {
+		return Event{}, err
+	}
+	updated, err := updatedState(cfg, base, remaining, plan, assigned, now)
+	if err != nil {
+		return Event{}, err
+	}
+	if err := writeState(cfg.dir, updated); err != nil {
+		// The event and the pruned history are durable but the counters are
+		// not. Report the uncertainty; the next append rebuilds from the tail.
+		return Event{}, fmt.Errorf("activity: record event state: %w", err)
+	}
+	return assigned, nil
+}
+
+// preflightEvent validates an event before the store is touched, so a rejected
+// event creates no store.
+func preflightEvent(ev Event, now time.Time) (Event, error) {
+	ev = sanitizeEvent(ev)
+	if err := ValidateEvent(ev); err != nil {
+		return Event{}, err
+	}
+	occurred, err := normalizeEventTime(ev.OccurredAt, now)
+	if err != nil {
+		return Event{}, err
+	}
+	if err := checkOccurrenceSkew(occurred, now); err != nil {
+		return Event{}, err
+	}
+	return ev, nil
+}
+
+// inspectStore lists and safety-checks the segments and reads the state under
+// the append lock. A store whose history and counters disagree is refused
+// rather than rebaselined.
+func inspectStore(dir string) ([]segmentInfo, storeState, bool, error) {
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return nil, storeState{}, false, fmt.Errorf("activity: inspect store directory: %w", err)
 	}
 	if err := dirSafe(dirInfo); err != nil {
-		return Event{}, err
+		return nil, storeState{}, false, err
 	}
-	segments, more, raced, err := listSegments(cfg.dir)
+	segments, more, raced, err := listSegments(dir)
 	if err != nil {
-		return Event{}, err
+		return nil, storeState{}, false, err
 	}
 	if raced {
 		// An external delete raced the enumeration. Re-list once for a
 		// consistent view; the append lock already excludes our own writers.
-		segments, more, _, err = listSegments(cfg.dir)
+		segments, more, _, err = listSegments(dir)
 		if err != nil {
-			return Event{}, err
+			return nil, storeState{}, false, err
 		}
 	}
 	if more {
-		return Event{}, errTooManySegments
+		return nil, storeState{}, false, errTooManySegments
 	}
 	if err := segmentSafeCheck(segments); err != nil {
-		return Event{}, err
+		return nil, storeState{}, false, err
 	}
-	state, stateExists, err := readState(cfg.dir)
+	state, stateExists, err := readState(dir)
 	if err != nil {
-		return Event{}, err
+		return nil, storeState{}, false, err
 	}
-	hasHistory := false
-	for _, seg := range segments {
-		if seg.size > 0 {
-			hasHistory = true
-			break
-		}
-	}
-	if !stateExists && hasHistory {
+	if !stateExists && hasSegmentHistory(segments) {
 		// The counters, including dropped-event history, cannot be rebuilt
 		// from segments. Refuse rather than silently rebaseline them.
-		return Event{}, errStateMissing
+		return nil, storeState{}, false, errStateMissing
 	}
-	if stateExists && state.LastSequence > 0 && !hasHistory {
+	if stateExists && state.LastSequence > 0 && !hasSegmentHistory(segments) {
 		// The state counts events but every segment holding them is gone.
 		// Appending would rebaseline the counters and hide that loss from
 		// reads, so the store refuses until a human inspects it.
-		return Event{}, errHistoryMissing
+		return nil, storeState{}, false, errHistoryMissing
 	}
-	now := time.Now().UTC()
-	active, hasActive := segmentInfo{}, false
-	if len(segments) > 0 {
-		active, hasActive = segments[len(segments)-1], true
+	return segments, state, stateExists, nil
+}
+
+// appendBasis is the resolved sequence basis for one append.
+type appendBasis struct {
+	state    storeState
+	next     uint64
+	tailAt   time.Time
+	tailRead bool
+}
+
+// appendBase resolves the sequence of the next event. It trusts the state's
+// sequence only when the active segment still has the size recorded with it.
+// Otherwise the derived counters are rebuilt from the segment tail; a crash
+// between the event write and the state write is thereby harmless and never
+// reuses a sequence. A recovery that cannot prove the tail fails the append
+// instead of falling back to a possibly stale state counter.
+func appendBase(ctx context.Context, cfg storeConfig, segments []segmentInfo, state storeState, stateExists bool) (appendBasis, error) {
+	var active segmentInfo
+	hasActive := len(segments) > 0
+	if hasActive {
+		active = segments[len(segments)-1]
 	}
-	// Trust the state's sequence only when the active segment still has the
-	// size recorded with it. Otherwise rebuild the derived counters from the
-	// segment tail; a crash between the event write and the state write is
-	// thereby harmless and never reuses a sequence.
 	needTail := !stateExists
 	if hasActive && stateExists && (state.ActiveSegment != active.index || state.ActiveBytes != active.size) {
 		needTail = true
@@ -203,7 +275,14 @@ func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 		tailRead bool
 	)
 	if hasActive && needTail {
-		if last, ok := segmentLastEvent(active, cfg.segmentBytes+maxEventBytes); ok {
+		last, ok, err := segmentLastEventErr(ctx, active, cfg.segmentBytes+maxEventBytes)
+		if err != nil {
+			// An interrupted recovery cannot prove the tail sequence. Treating
+			// it as an absent tail would let this append reuse a sequence that
+			// is already durable.
+			return appendBasis{}, err
+		}
+		if ok {
 			tailSeq = last.Sequence
 			if t := eventTime(last); !t.IsZero() {
 				tailAt = t
@@ -212,176 +291,237 @@ func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 		tailRead = true
 	}
 	if tailSeq == ^uint64(0) {
-		return Event{}, errSequenceExhausted
+		return appendBasis{}, errSequenceExhausted
 	}
 	if !stateExists {
-		id, idErr := newStoreID()
-		if idErr != nil {
-			return Event{}, idErr
+		id, err := newStoreID()
+		if err != nil {
+			return appendBasis{}, err
 		}
 		state = storeState{Version: stateVersion, StoreID: id, NextSequence: 1}
 	}
 	next := state.NextSequence
 	if tailSeq >= next {
-		if tailSeq == ^uint64(0) {
-			return Event{}, errSequenceExhausted
-		}
 		next = tailSeq + 1
 	}
 	if next == 0 {
 		next = 1
 	}
 	if next == ^uint64(0) {
-		return Event{}, errSequenceExhausted
+		return appendBasis{}, errSequenceExhausted
 	}
+	return appendBasis{state: state, next: next, tailAt: tailAt, tailRead: tailRead}, nil
+}
+
+// buildAssignedEvent applies the store's identity to ev and encodes its
+// canonical line.
+func buildAssignedEvent(ev Event, sequence uint64, now time.Time) (Event, []byte, error) {
 	assigned := ev
 	assigned.Schema = Schema
-	assigned.EventID, err = newEventID()
+	id, err := newEventID()
 	if err != nil {
-		return Event{}, err
+		return Event{}, nil, err
 	}
+	assigned.EventID = id
 	assigned.OccurredAt, err = normalizeEventTime(ev.OccurredAt, now)
 	if err != nil {
-		return Event{}, err
+		return Event{}, nil, err
 	}
 	if err := checkOccurrenceSkew(assigned.OccurredAt, now); err != nil {
-		return Event{}, err
+		return Event{}, nil, err
 	}
-	assigned.Sequence = next
+	assigned.Sequence = sequence
 	if err := validateStoredEvent(assigned); err != nil {
-		return Event{}, err
+		return Event{}, nil, err
 	}
 	line, err := encodeEvent(assigned)
 	if err != nil {
-		return Event{}, err
+		return Event{}, nil, err
+	}
+	return assigned, line, nil
+}
+
+// appendPlan is where one durable event line is written and what that write
+// means for the segment set and the retained window.
+type appendPlan struct {
+	path     string
+	index    uint64
+	create   bool
+	latest   string
+	cutoff   time.Time
+	segments []segmentInfo
+}
+
+// planAppend decides whether the append starts a new segment and folds the
+// pending write into the listed segments.
+func planAppend(ctx context.Context, cfg storeConfig, segments []segmentInfo, base appendBasis, lineBytes int64, now time.Time) (appendPlan, error) {
+	var active segmentInfo
+	hasActive := len(segments) > 0
+	if hasActive {
+		active = segments[len(segments)-1]
 	}
 	cleanEnd, err := segmentEndsWithNewline(active)
 	if err != nil {
-		return Event{}, fmt.Errorf("activity: inspect active segment: %w", err)
+		return appendPlan{}, fmt.Errorf("activity: inspect active segment: %w", err)
 	}
-	latest := state.LastEventAt
-	if tailRead {
-		latest = laterString(latest, formatTime(tailAt))
+	latest := base.state.LastEventAt
+	if base.tailRead {
+		latest = laterString(latest, formatTime(base.tailAt))
 	}
 	cutoff := now.Add(-cfg.retention)
 	rotate := !hasActive || !cleanEnd
-	if hasActive && active.size > 0 && !rotate {
-		if active.size+int64(len(line)) > cfg.segmentBytes {
-			rotate = true
-		} else if latest != "" {
-			if t, parseErr := time.Parse(time.RFC3339Nano, latest); parseErr == nil &&
-				!t.After(now.Add(maxFutureSkew)) && t.Before(cutoff) {
-				// A stale state or an out-of-order tail may hide newer
-				// occurrences earlier in the active segment.
-				rotate = segmentExpired(ctx, active, cfg.segmentBytes+maxEventBytes, cutoff, now)
-			}
-		}
+	if !rotate && active.size > 0 {
+		rotate = active.size+lineBytes > cfg.segmentBytes ||
+			staleActive(ctx, cfg, active, latest, cutoff, now)
 	}
-	writeIndex := uint64(1)
-	create := true
-	if hasActive {
-		writeIndex = active.index
-		create = false
-		if rotate {
-			if active.index == ^uint64(0) {
-				return Event{}, errTooManySegments
-			}
-			writeIndex = active.index + 1
-			create = true
-		}
+	index, create, err := writeTarget(active, hasActive, rotate)
+	if err != nil {
+		return appendPlan{}, err
 	}
-	writePath := filepath.Join(cfg.dir, segmentFileName(writeIndex))
-	if !stateExists {
-		// Publish the store identity and an empty counter document before the
-		// first segment. Readers then always see state before history and
-		// cannot mistake an in-flight first append for lost evidence.
-		if err := writeState(cfg.dir, state); err != nil {
-			return Event{}, fmt.Errorf("activity: initialize event state: %w", err)
-		}
-		stateExists = true
+	remaining, err := withWrittenSegment(cfg.dir, segments, index, create, lineBytes, now)
+	if err != nil {
+		return appendPlan{}, err
 	}
-	if err := writeSegmentLine(writePath, line, create); err != nil {
-		_ = recordDropped(cfg.dir, state, stateExists)
-		return Event{}, fmt.Errorf("activity: append event: %w", err)
+	return appendPlan{
+		path:     filepath.Join(cfg.dir, segmentFileName(index)),
+		index:    index,
+		create:   create,
+		latest:   latest,
+		cutoff:   cutoff,
+		segments: remaining,
+	}, nil
+}
+
+// staleActive reports whether the active segment is old enough that the append
+// must start a new one. A stale state or an out-of-order tail may hide newer
+// occurrences earlier in the active segment, so age-based rotation is proven by
+// a bounded scan instead of trusting the tail alone.
+func staleActive(ctx context.Context, cfg storeConfig, active segmentInfo, latest string, cutoff, now time.Time) bool {
+	if latest == "" {
+		return false
 	}
-	// The event is durable before anything is pruned. A failed or interrupted
-	// append therefore never discards preexisting history.
+	t, err := time.Parse(time.RFC3339Nano, latest)
+	if err != nil || t.After(now.Add(maxFutureSkew)) || !t.Before(cutoff) {
+		return false
+	}
+	return segmentExpired(ctx, active, cfg.segmentBytes+maxEventBytes, cutoff, now)
+}
+
+// writeTarget is the segment index an append writes to and whether it must be
+// created exclusively.
+func writeTarget(active segmentInfo, hasActive, rotate bool) (uint64, bool, error) {
+	if !hasActive {
+		return 1, true, nil
+	}
+	if !rotate {
+		return active.index, false, nil
+	}
+	if active.index == ^uint64(0) {
+		return 0, false, errTooManySegments
+	}
+	return active.index + 1, true, nil
+}
+
+// withWrittenSegment is the segment listing after the planned write. It returns
+// errCorruptState when an in-place write names a segment the listing lost.
+func withWrittenSegment(dir string, segments []segmentInfo, index uint64, create bool, lineBytes int64, now time.Time) ([]segmentInfo, error) {
 	remaining := append([]segmentInfo(nil), segments...)
 	if create {
-		remaining = append(remaining, segmentInfo{
-			index:   writeIndex,
-			name:    segmentFileName(writeIndex),
-			path:    writePath,
-			size:    int64(len(line)),
+		name := segmentFileName(index)
+		return append(remaining, segmentInfo{
+			index:   index,
+			name:    name,
+			path:    filepath.Join(dir, name),
+			size:    lineBytes,
 			mode:    fileMode,
 			modTime: now,
 			ownerOK: true,
 			regular: true,
-		})
-	} else {
-		found := false
-		for i := range remaining {
-			if remaining[i].index == writeIndex {
-				remaining[i].size += int64(len(line))
-				remaining[i].modTime = now
-				found = true
-				break
-			}
-		}
-		if !found {
-			return Event{}, errCorruptState
+		}), nil
+	}
+	for i := range remaining {
+		if remaining[i].index == index {
+			remaining[i].size += lineBytes
+			remaining[i].modTime = now
+			return remaining, nil
 		}
 	}
-	remaining, _, deleted, err := pruneRetention(ctx, cfg, remaining, writeIndex, cutoff, now)
-	if err != nil {
-		// The event is durable; only retention is incomplete. The next append
-		// retries the budget.
-		return Event{}, fmt.Errorf("activity: apply retention: %w", err)
-	}
-	if create || deleted {
-		if err := syncDir(cfg.dir); err != nil {
-			return Event{}, fmt.Errorf("activity: sync store directory: %w", err)
-		}
-	}
+	return nil, errCorruptState
+}
+
+// updatedState is the counter document describing the store after the append
+// and its retention pass.
+func updatedState(cfg storeConfig, base appendBasis, remaining []segmentInfo, plan appendPlan, assigned Event, now time.Time) (storeState, error) {
 	firstSeq, firstAt, firstOK := firstRetained(remaining, cfg)
 	if !firstOK {
-		firstSeq, firstAt = next, assigned.OccurredAt
+		firstSeq, firstAt = base.next, assigned.OccurredAt
 	}
 	lastAt := assigned.OccurredAt
-	if !create {
+	if !plan.create {
 		// Keep the active segment's newest occurrence, not just its last
 		// appended occurrence. Backdated events must not age fresh evidence.
-		lastAt = laterString(latest, lastAt)
+		lastAt = laterString(plan.latest, lastAt)
 	}
-	writeSize := int64(-1)
-	for _, seg := range remaining {
-		if seg.index == writeIndex {
-			writeSize = seg.size
-			break
-		}
+	writeSize, ok := segmentSize(remaining, plan.index)
+	if !ok {
+		return storeState{}, errCorruptState
 	}
-	if writeSize < 0 {
-		return Event{}, errCorruptState
-	}
-	updated := state
+	updated := base.state
 	updated.Version = stateVersion
-	updated.NextSequence = next + 1
-	updated.LastSequence = next
+	updated.NextSequence = base.next + 1
+	updated.LastSequence = base.next
 	updated.LastWriteAt = formatTime(now)
 	updated.FirstSequence = firstSeq
 	updated.FirstEventAt = firstAt
 	updated.LastEventAt = lastAt
-	updated.ActiveSegment = writeIndex
+	updated.ActiveSegment = plan.index
 	updated.ActiveBytes = writeSize
 	if !updated.valid() {
-		return Event{}, errCorruptState
+		return storeState{}, errCorruptState
 	}
-	if err := writeState(cfg.dir, updated); err != nil {
-		// The event and the pruned history are durable but the counters are
-		// not. Report the uncertainty; the next append rebuilds from the tail.
-		return Event{}, fmt.Errorf("activity: record event state: %w", err)
+	return updated, nil
+}
+
+// segmentSize is the recorded size of one segment in a listing.
+func segmentSize(segments []segmentInfo, index uint64) (int64, bool) {
+	for _, seg := range segments {
+		if seg.index == index {
+			return seg.size, true
+		}
 	}
-	return assigned, nil
+	return 0, false
+}
+
+// publishInitialState writes the store identity and an empty counter document
+// before the first segment. Readers then always see state before history and
+// cannot mistake an in-flight first append for lost evidence.
+func publishInitialState(dir string, state storeState) error {
+	if err := writeState(dir, state); err != nil {
+		return fmt.Errorf("activity: initialize event state: %w", err)
+	}
+	return nil
+}
+
+// syncWrittenDir flushes the directory entry when a segment was created or
+// removed.
+func syncWrittenDir(dir string, changed bool) error {
+	if !changed {
+		return nil
+	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("activity: sync store directory: %w", err)
+	}
+	return nil
+}
+
+// requestContext is the nil-safe context a public entry point runs under. A nil
+// context carries no cancellation or deadline, so Background is its documented
+// equivalent.
+func requestContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // pruneRetention removes the oldest segments after a successful append until
@@ -408,7 +548,7 @@ func pruneRetention(ctx context.Context, cfg storeConfig, segments []segmentInfo
 		if !overBytes && !overCount && !expired {
 			break
 		}
-		if err := os.Remove(candidate.path); err != nil { //nolint:gosec // G304: a listed store segment.
+		if err := os.Remove(candidate.path); err != nil {
 			return nil, total, deleted, fmt.Errorf("activity: remove expired segment: %w", err)
 		}
 		total -= candidate.size
@@ -421,7 +561,7 @@ func pruneRetention(ctx context.Context, cfg storeConfig, segments []segmentInfo
 // segmentExpired uses the tail as a cheap proof that a segment is still fresh.
 // An old tail is not proof of expiry: occurrence times need not be monotonic.
 func segmentExpired(ctx context.Context, seg segmentInfo, budget int64, cutoff, now time.Time) bool {
-	if last, ok := segmentLastEvent(seg, budget); ok {
+	if last, ok := segmentLastEvent(ctx, seg, budget); ok {
 		t := eventTime(last)
 		if !t.IsZero() && !t.After(now.Add(maxFutureSkew)) && !t.Before(cutoff) {
 			return false
@@ -476,7 +616,7 @@ func appendSegmentLine(path string, line []byte, create bool) (err error) {
 	} else {
 		flags |= os.O_APPEND
 	}
-	f, err := os.OpenFile(path, flags, fileMode) //nolint:gosec // G304: a path inside the store directory.
+	f, err := os.OpenFile(path, flags, fileMode)
 	if err != nil {
 		return err
 	}
@@ -558,7 +698,7 @@ func ensureStoreDir(dir string) error {
 	if err := os.Mkdir(dir, dirMode); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("activity: create store directory: %w", err)
 	}
-	info, err := os.Lstat(dir) //nolint:gosec // G304: the store directory.
+	info, err := os.Lstat(dir)
 	if err != nil {
 		return fmt.Errorf("activity: inspect store directory: %w", err)
 	}

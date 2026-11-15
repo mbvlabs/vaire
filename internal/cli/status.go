@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -20,6 +21,27 @@ type statusPools struct {
 	ServersActive  int64 `json:"sv_active"`
 	ServersIdle    int64 `json:"sv_idle"`
 	MaxWaitS       int64 `json:"maxwait_s"`
+}
+
+type statusCPU struct {
+	Requested struct {
+		Mode  string `json:"mode"`
+		Quota string `json:"quota"`
+	} `json:"requested"`
+	EffectiveKnown bool `json:"effective_known"`
+	Effective      *struct {
+		Idle            *bool   `json:"idle,omitempty"`
+		QuotaPeriodUsec *uint64 `json:"quota_period_usec,omitempty"`
+		QuotaUsec       *uint64 `json:"quota_usec,omitempty"`
+		Unlimited       *bool   `json:"unlimited,omitempty"`
+		Weight          *uint64 `json:"weight,omitempty"`
+	} `json:"effective,omitempty"`
+	UsageUsec         *uint64    `json:"usage_usec,omitempty"`
+	ObservedAt        *time.Time `json:"observed_at,omitempty"`
+	Reason            string     `json:"reason,omitempty"`
+	SampleGeneration  string     `json:"sample_generation,omitempty"`
+	SampleMonotonicNS *int64     `json:"sample_monotonic_ns,omitempty"`
+	UsagePercent      *float64   `json:"usage_percent,omitempty"`
 }
 
 type statusDB struct {
@@ -61,8 +83,21 @@ type statusDB struct {
 	RestoreInProgress bool              `json:"restore_in_progress"`
 	Protected         bool              `json:"protected,omitempty"`
 	// Follows and Follower are a follower's source and replication (Phase 6).
-	Follows  string                `json:"follows,omitempty"`
-	Follower *health.FollowerState `json:"follower,omitempty"`
+	Follows          string                 `json:"follows,omitempty"`
+	Follower         *health.FollowerState  `json:"follower,omitempty"`
+	CPU              *statusCPU             `json:"cpu,omitempty"`
+	DataFreeBytes    *uint64                `json:"data_free_bytes,omitempty"`
+	ApplicationReady *bool                  `json:"application_ready,omitempty"`
+	Materialisation  *materialisationReport `json:"materialisation,omitempty"`
+}
+
+func (db statusDB) MarshalJSON() ([]byte, error) {
+	type plain statusDB
+	raw, err := json.Marshal(plain(db))
+	if err != nil || db.State != "incomplete" {
+		return raw, err
+	}
+	return omitIncompleteFields(raw, "uptime_s", "connections", "db_size", "wal_bytes", "longest_xact_s", "backup", "restart_pending", "restore_in_progress")
 }
 
 type statusData struct {
@@ -126,7 +161,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if !flagTrue(cmd, "watch") || MustNotPrompt(cmd) || !term.IsTerminal(int(os.Stdout.Fd())) { //nolint:gosec // G115: a file descriptor fits in int.
+	if !flagTrue(cmd, "watch") || MustNotPrompt(cmd) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return output.Success(cmd, output.Result{Data: data, Message: statusMessage(data, warnings), Warnings: append(s.warnings, warnings...),
 			Next: statusNext(data)})
 	}
@@ -146,7 +181,33 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 			}
 			return err
 		}
+		statusWatchCPU(data, &next)
 		data, warnings = next, w
+	}
+}
+
+// statusWatchCPU uses consecutive same-generation node monotonic samples.
+// Missing or invalid samples are never bridged across a refresh.
+func statusWatchCPU(previous statusData, next *statusData) {
+	old := make(map[string]*statusCPU, len(previous.Databases))
+	for _, db := range previous.Databases {
+		old[db.Name] = db.CPU
+	}
+	for i := range next.Databases {
+		cpu := next.Databases[i].CPU
+		prior := old[next.Databases[i].Name]
+		if cpu == nil {
+			continue
+		}
+		cpu.UsagePercent = nil
+		if prior == nil || prior.SampleGeneration == "" || cpu.SampleGeneration != prior.SampleGeneration ||
+			prior.SampleMonotonicNS == nil || cpu.SampleMonotonicNS == nil || prior.UsageUsec == nil || cpu.UsageUsec == nil ||
+			*cpu.UsageUsec < *prior.UsageUsec || *prior.SampleMonotonicNS <= 0 || *cpu.SampleMonotonicNS <= *prior.SampleMonotonicNS {
+			continue
+		}
+		elapsed := *cpu.SampleMonotonicNS - *prior.SampleMonotonicNS
+		rate := float64(*cpu.UsageUsec-*prior.UsageUsec) * 100000 / float64(elapsed)
+		cpu.UsagePercent = &rate
 	}
 }
 
@@ -162,6 +223,25 @@ func statusNext(d statusData) []string {
 
 // statusMessage renders the server card and a row per database.
 func statusMessage(d statusData, warnings []output.Warning) string {
+	lines := statusHeaderLines(d)
+	if len(d.Databases) == 0 {
+		lines = append(lines, "", "no databases yet (vaire db create <name>)")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, statusDatabaseRows(d)...)
+	lines = append(lines, statusDatabaseDetails(d)...)
+	for _, db := range d.Databases {
+		if db.RestartPending {
+			lines = append(lines, "  * restart pending")
+			break
+		}
+	}
+	_ = warnings
+	return strings.Join(lines, "\n")
+}
+
+// statusHeaderLines renders the server card above the database table.
+func statusHeaderLines(d statusData) []string {
 	var lines []string
 	head := fmt.Sprintf("server %s · node %s · vaire %s", d.Server, d.Node, d.VaireVersion)
 	if d.PGVersion != "" {
@@ -194,76 +274,155 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 	if !d.Backups {
 		lines = append(lines, "  backups none off the server (vaire backup setup)")
 	}
-	if m := d.Master; m != nil {
-		line := "  master  "
-		switch {
-		case m.Fenced:
-			line += "FENCED: a newer master took over this server's bucket"
-		case m.Last == "":
-			line += "no bundle yet"
-		default:
-			line += "last bundle " + m.CreatedAt
-			switch {
-			case m.Uploaded:
-				line += fmt.Sprintf(", in the bucket (epoch %d)", m.Epoch)
-			case m.Bucket:
-				line += ", not uploaded yet"
-			default:
-				line += ", on the server only (vaire server backup export)"
-			}
-			if m.Pending {
-				line += "; a change is being bundled"
-			}
-			if m.LastFailed != "" {
-				line += "; last failure: " + m.LastFailed
-			}
-		}
+	if line := statusMasterLine(d); line != "" {
 		lines = append(lines, line)
 	}
-	if len(d.Databases) == 0 {
-		lines = append(lines, "", "no databases yet (vaire db create <name>)")
-		return strings.Join(lines, "\n")
+	return lines
+}
+
+// statusMasterLine is the bucket bundle's state (Phase 5). It returns "" when
+// no master bundle exists.
+func statusMasterLine(d statusData) string {
+	m := d.Master
+	if m == nil {
+		return ""
 	}
+	line := "  master  "
+	switch {
+	case m.Fenced:
+		return line + "FENCED: a newer master took over this server's bucket"
+	case m.Last == "":
+		return line + "no bundle yet"
+	}
+	line += "last bundle " + m.CreatedAt
+	switch {
+	case m.Uploaded:
+		line += fmt.Sprintf(", in the bucket (epoch %d)", m.Epoch)
+	case m.Bucket:
+		line += ", not uploaded yet"
+	default:
+		line += ", on the server only (vaire server backup export)"
+	}
+	if m.Pending {
+		line += "; a change is being bundled"
+	}
+	if m.LastFailed != "" {
+		line += "; last failure: " + m.LastFailed
+	}
+	return line
+}
+
+// statusDatabaseRows renders the table header and one row per database.
+func statusDatabaseRows(d statusData) []string {
+	lines := make([]string, 0, 2+len(d.Databases))
 	lines = append(lines, "", fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
 		"DATABASE", "STATE", "SIZE", "MEMORY", "CONNS", "CACHE", "TPS", "LAST BACKUP", "UP"))
 	for _, db := range d.Databases {
-		mem := tune.FormatMiB(db.MemoryMiB)
-		if db.MemoryCurrentMiB != nil {
-			mem = tune.FormatMiB(int(*db.MemoryCurrentMiB)) + "/" + tune.FormatMiB(db.MemoryMiB)
-		}
-		cache, tps := "-", "-"
-		if db.CacheHitRatio != nil {
-			cache = fmt.Sprintf("%.1f%%", *db.CacheHitRatio*100)
-		}
-		if db.TPS != nil {
-			tps = fmt.Sprintf("%.1f", *db.TPS)
-		}
-		state := db.State
-		if db.RestartPending {
-			state += "*"
-		}
-		last := latestBackup(db)
-		lines = append(lines, fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
-			db.Name, state, db.Size, mem, fmt.Sprintf("%d/%d", db.Connections.Used, db.Connections.Max), cache, tps, last, health.Uptime(db.UptimeS)))
+		lines = append(lines, statusDatabaseRow(db))
 	}
+	return lines
+}
+
+// statusDatabaseRow renders one database's table row.
+func statusDatabaseRow(db statusDB) string {
+	mem := tune.FormatMiB(db.MemoryMiB)
+	if db.MemoryCurrentMiB != nil {
+		mem = tune.FormatMiB(int(*db.MemoryCurrentMiB)) + "/" + tune.FormatMiB(db.MemoryMiB)
+	}
+	if db.State == "incomplete" {
+		return fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
+			db.Name, db.State, db.Size, mem, "-", "-", "-", "-", "-")
+	}
+	cache, tps := "-", "-"
+	if db.CacheHitRatio != nil {
+		cache = fmt.Sprintf("%.1f%%", *db.CacheHitRatio*100)
+	}
+	if db.TPS != nil {
+		tps = fmt.Sprintf("%.1f", *db.TPS)
+	}
+	state := db.State
+	if db.RestartPending {
+		state += "*"
+	}
+	return fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
+		db.Name, state, db.Size, mem, fmt.Sprintf("%d/%d", db.Connections.Used, db.Connections.Max), cache, tps, latestBackup(db), health.Uptime(db.UptimeS))
+}
+
+// statusDatabaseDetails renders the notes under the table.
+func statusDatabaseDetails(d statusData) []string {
+	var lines []string
 	for _, db := range d.Databases {
+		if db.State == "incomplete" {
+			lines = append(lines, "  "+db.Name+": "+incompleteReportText(db.Materialisation))
+			continue
+		}
 		if db.Backup.WindowStart != "" {
 			lines = append(lines, fmt.Sprintf("  %s: restorable from %s", db.Name, db.Backup.WindowStart))
 		}
 	}
 	for _, db := range d.Databases {
+		if db.State == "incomplete" {
+			continue
+		}
 		if line := followerLine(db); line != "" {
 			lines = append(lines, line)
 		}
-	}
-	for _, db := range d.Databases {
-		if db.RestartPending {
-			lines = append(lines, "  * restart pending")
-			break
+		if line := statusCPULine(db); line != "" {
+			lines = append(lines, line)
+		}
+		if db.Follows != "" && db.DataFreeBytes != nil {
+			lines = append(lines, fmt.Sprintf("  %s: data filesystem %d bytes free", db.Name, *db.DataFreeBytes))
 		}
 	}
-	_ = warnings
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+// statusCPULine renders a database's CPU policy and usage. It returns "" when
+// the node reported no sample.
+func statusCPULine(db statusDB) string {
+	cpu := db.CPU
+	if cpu == nil {
+		return ""
+	}
+	quota := cpu.Requested.Quota
+	if quota == "" {
+		quota = "none"
+	}
+	line := fmt.Sprintf("  %s: CPU %s, requested quota %s", db.Name, cpu.Requested.Mode, quota)
+	if !cpu.EffectiveKnown {
+		line += ", effective unknown"
+		if cpu.Reason != "" {
+			line += " (" + cpu.Reason + ")"
+		}
+	} else {
+		line += statusEffectiveCPUText(cpu)
+	}
+	if cpu.UsagePercent != nil {
+		line += fmt.Sprintf(", usage %.1f%% of one CPU", *cpu.UsagePercent)
+	} else if cpu.UsageUsec != nil {
+		line += fmt.Sprintf(", cumulative usage %d usec", *cpu.UsageUsec)
+	}
+	return line
+}
+
+// statusEffectiveCPUText is the effective part of a CPU sample.
+func statusEffectiveCPUText(cpu *statusCPU) string {
+	e := cpu.Effective
+	if e == nil {
+		return ""
+	}
+	text := ""
+	if e.Idle != nil && *e.Idle {
+		text += ", idle priority"
+	} else if e.Weight != nil {
+		text += fmt.Sprintf(", weight %d", *e.Weight)
+	}
+	if e.Unlimited != nil && *e.Unlimited {
+		text += ", effective quota unlimited"
+	} else if e.QuotaUsec != nil && e.QuotaPeriodUsec != nil {
+		text += fmt.Sprintf(", effective quota %d/%d usec", *e.QuotaUsec, *e.QuotaPeriodUsec)
+	}
+	return text
 }
 
 func poolerLabel(name string) string {
@@ -313,6 +472,12 @@ func followerLine(db statusDB) string {
 	}
 	if !f.SourceKnown {
 		return line
+	}
+	if f.ReceiveBacklogBytes != nil {
+		line += fmt.Sprintf(" · receive backlog %d bytes", *f.ReceiveBacklogBytes)
+	}
+	if f.ReplayBacklogBytes != nil {
+		line += fmt.Sprintf(" · replay backlog %d bytes", *f.ReplayBacklogBytes)
 	}
 	switch {
 	case !f.SlotExists:

@@ -10,7 +10,16 @@ import (
 
 func TestMasterBackupUnits(t *testing.T) {
 	cfg := metricsCluster("app")
-	files := timerFiles(cfg)
+	assertMasterBackupFiles(t, timerFiles(cfg))
+
+	cfg.Backup = config.Backup{Provider: "r2", Endpoint: "https://x.r2.cloudflarestorage.com", Region: "auto", Bucket: "b", Prefix: "prod", URIStyle: "path", Database: cfg.Backup.Database}
+	assertFenceFiles(t, timerFiles(cfg))
+}
+
+// assertMasterBackupFiles checks a host without a bucket renders only the
+// dirty marker's path unit, the job service and the daily timer.
+func assertMasterBackupFiles(t *testing.T, files map[string][]byte) {
+	t.Helper()
 	path := string(files[MasterBackupPath])
 	if !strings.Contains(path, "PathExists=/var/lib/vaire/master-backup/dirty") || !strings.Contains(path, "Unit=vaire-master-backup.service") {
 		t.Errorf("path unit:\n%s", path)
@@ -24,9 +33,12 @@ func TestMasterBackupUnits(t *testing.T) {
 	if _, ok := files[FenceService]; ok {
 		t.Error("no bucket, but the fence check")
 	}
+}
 
-	cfg.Backup = config.Backup{Provider: "r2", Endpoint: "https://x.r2.cloudflarestorage.com", Region: "auto", Bucket: "b", Prefix: "prod", URIStyle: "path", Database: cfg.Backup.Database}
-	files = timerFiles(cfg)
+// assertFenceFiles checks a bucket renders the fence check and only its timer
+// and the master-backup path and timer are enabled.
+func assertFenceFiles(t *testing.T, files map[string][]byte) {
+	t.Helper()
 	fence := string(files[FenceService])
 	for _, want := range []string{"Before=pgbouncer.service vaire-pgbouncer-session.service", "vaire node run fence-check", "WantedBy=multi-user.target", "TimeoutStartSec=30"} {
 		if !strings.Contains(fence, want) {

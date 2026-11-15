@@ -51,38 +51,12 @@ func TestSettingsAreValidForPostgres18(t *testing.T) {
 
 func checkSettings(t *testing.T, in Input, res Result) {
 	t.Helper()
-	v := map[string]string{}
-	for _, s := range res.Settings {
-		if _, dup := v[s.Name]; dup {
-			t.Fatalf("%+v: %s set twice", in, s.Name)
-		}
-		v[s.Name] = s.Value
-		switch s.Context {
-		case "postmaster", "sighup", "user":
-		default:
-			t.Fatalf("%s: context %q", s.Name, s.Context)
-		}
-	}
+	v := settingsValues(t, in, res)
 	num := func(name string) int {
-		n, err := strconv.Atoi(v[name])
-		if err != nil {
-			t.Fatalf("%+v: %s = %q is not an integer", in, name, v[name])
-		}
-		return n
+		return settingInteger(t, in, name, v[name])
 	}
 	mib := func(name string) int {
-		raw := v[name]
-		for suffix, factor := range map[string]int{"MB": 1, "GB": 1024} {
-			if n, ok := strings.CutSuffix(raw, suffix); ok {
-				x, err := strconv.Atoi(n)
-				if err != nil {
-					t.Fatalf("%+v: %s = %q", in, name, raw)
-				}
-				return x * factor
-			}
-		}
-		t.Fatalf("%+v: %s = %q has no MB or GB unit", in, name, raw)
-		return 0
+		return settingMiB(t, in, name, v[name])
 	}
 	maxConn := num("max_connections")
 	// PostgreSQL refuses to start unless both reserved sets together are
@@ -127,6 +101,47 @@ func checkSettings(t *testing.T, in Input, res Result) {
 			t.Errorf("%+v: %s = %q", in, name, v[name])
 		}
 	}
+}
+
+func settingInteger(t *testing.T, in Input, name, raw string) int {
+	t.Helper()
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("%+v: %s = %q is not an integer", in, name, raw)
+	}
+	return n
+}
+
+func settingsValues(t *testing.T, in Input, res Result) map[string]string {
+	t.Helper()
+	values := make(map[string]string, len(res.Settings))
+	for _, s := range res.Settings {
+		if _, dup := values[s.Name]; dup {
+			t.Fatalf("%+v: %s set twice", in, s.Name)
+		}
+		values[s.Name] = s.Value
+		switch s.Context {
+		case "postmaster", "sighup", "user":
+		default:
+			t.Fatalf("%s: context %q", s.Name, s.Context)
+		}
+	}
+	return values
+}
+
+func settingMiB(t *testing.T, in Input, name, raw string) int {
+	t.Helper()
+	for suffix, factor := range map[string]int{"MB": 1, "GB": 1024} {
+		if n, ok := strings.CutSuffix(raw, suffix); ok {
+			x, err := strconv.Atoi(n)
+			if err != nil {
+				t.Fatalf("%+v: %s = %q", in, name, raw)
+			}
+			return x * factor
+		}
+	}
+	t.Fatalf("%+v: %s = %q has no MB or GB unit", in, name, raw)
+	return 0
 }
 
 func contains(list []string, s string) bool {

@@ -229,6 +229,14 @@ var (
 	extensionStat       = os.Stat
 )
 
+// SetExtensionDirectoriesForTest supplies a rootless file tree to cross-package
+// lifecycle tests. Call the returned function to restore the host paths.
+func SetExtensionDirectoriesForTest(control, libraries string) func() {
+	oldControl, oldLibraries := extensionControlDir, extensionLibDir
+	extensionControlDir, extensionLibDir = control, libraries
+	return func() { extensionControlDir, extensionLibDir = oldControl, oldLibraries }
+}
+
 // VerifyExtensionRequirements fails when a resolved extension's control file
 // or declared preload library is absent. Package-name inference is never used:
 // the actual PG18 files are checked.

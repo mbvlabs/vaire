@@ -201,7 +201,7 @@ func runExtAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -293,7 +293,7 @@ func runExtRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}

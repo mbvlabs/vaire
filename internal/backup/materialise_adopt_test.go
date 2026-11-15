@@ -17,16 +17,28 @@ import (
 // a resumed operation finishes the partial registration instead of dropping the
 // copy. The real registration and adoption files are written here; only their
 // owner lookup and the writer's owner argument are neutralised for the test.
-func TestAdoptFinishesAPartialRegistration(t *testing.T) {
+// isolateAdoptRegistration neutralises the owner lookup and the writer's owner
+// argument, so the test writes the real registration and adoption files as its
+// own user.
+func isolateAdoptRegistration(t *testing.T) {
+	t.Helper()
+	oldReservation, oldRunning := legacyReservationDir, materialisedDataRunning
+	legacyReservationDir = t.TempDir()
+	materialisedDataRunning = func(context.Context, string) bool { return false }
+	t.Cleanup(func() { legacyReservationDir, materialisedDataRunning = oldReservation, oldRunning })
 	oldConf, oldIDs, oldWrite := pgConfRoot, resolveClusterIDs, writeClusterFile
 	pgConfRoot = t.TempDir()
 	// Tests write as their own user; production chowns to postgres.
 	resolveClusterIDs = func(_, _ string) (int, int, error) { return -1, -1, nil }
-	t.Cleanup(func() { pgConfRoot, resolveClusterIDs, writeClusterFile = oldConf, oldIDs, oldWrite })
 	writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
 		return engine.WriteFileAtomicOwned(path, data, perm, "", "")
 	}
+	t.Cleanup(func() { pgConfRoot, resolveClusterIDs, writeClusterFile = oldConf, oldIDs, oldWrite })
+}
 
+// writeAdoptSource writes the source registration a partial adoption copies.
+func writeAdoptSource(t *testing.T) {
+	t.Helper()
 	source := filepath.Join(pgConfRoot, "app")
 	if err := os.MkdirAll(filepath.Join(source, "conf.d"), 0o700); err != nil {
 		t.Fatal(err)
@@ -43,6 +55,57 @@ func TestAdoptFinishesAPartialRegistration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "conf.d", UserOverrides), []byte("# operator\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// requireAdoptionInterrupted requires an adoption that dies writing file to
+// leave the registration unfinished but unchanged.
+func requireAdoptionInterrupted(t *testing.T, m *Materialised, confDir, file string) {
+	t.Helper()
+	writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
+		if filepath.Base(path) == file {
+			return errors.New("the process died writing " + file)
+		}
+		return engine.WriteFileAtomicOwned(path, data, perm, "", "")
+	}
+	defer func() {
+		writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
+			return engine.WriteFileAtomicOwned(path, data, perm, "", "")
+		}
+	}()
+	if err := m.Adopt(context.Background(), 5439); err == nil {
+		t.Fatalf("the interrupted adoption wrote %s without failing", file)
+	}
+	start, _ := os.ReadFile(filepath.Join(confDir, "start.conf"))
+	if string(start) != "manual\n" {
+		t.Fatalf("the interrupted adoption already finished start.conf: %q", start)
+	}
+}
+
+// requireAdoptedRegistration requires a completed adoption's registration.
+func requireAdoptedRegistration(t *testing.T, confDir, data string) {
+	t.Helper()
+	conf, err := os.ReadFile(filepath.Join(confDir, "postgresql.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(conf), "port = 5439") || !strings.Contains(string(conf), "data_directory = '"+data+"'") {
+		t.Fatalf("the resumed adoption did not finish postgresql.conf:\n%s", conf)
+	}
+	start, err := os.ReadFile(filepath.Join(confDir, "start.conf"))
+	if err != nil || string(start) != "auto\n" {
+		t.Fatalf("the resumed adoption left start.conf %q (%v)", start, err)
+	}
+	if _, err := os.Stat(filepath.Join(confDir, "conf.d", MaterialiseOverrides)); !os.IsNotExist(err) {
+		t.Fatalf("the temporary override survived adoption: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(confDir, "conf.d", UserOverrides)); err != nil {
+		t.Fatalf("the operator's override was removed: %v", err)
+	}
+}
+
+func TestAdoptFinishesAPartialRegistration(t *testing.T) {
+	isolateAdoptRegistration(t)
+	writeAdoptSource(t)
 	data := filepath.Join(t.TempDir(), "app_follower")
 	if err := os.MkdirAll(data, 0o700); err != nil {
 		t.Fatal(err)
@@ -52,7 +115,7 @@ func TestAdoptFinishesAPartialRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	confDir := m.ConfDir()
-	start, _ := os.ReadFile(filepath.Join(confDir, "start.conf")) //nolint:gosec // G304: the test's own registration.
+	start, _ := os.ReadFile(filepath.Join(confDir, "start.conf"))
 	if string(start) != "manual\n" {
 		t.Fatalf("registration start.conf %q", start)
 	}
@@ -62,43 +125,11 @@ func TestAdoptFinishesAPartialRegistration(t *testing.T) {
 			if err := m.register(); err != nil {
 				t.Fatal(err)
 			}
-			writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
-				if filepath.Base(path) == file {
-					return errors.New("the process died writing " + file)
-				}
-				return engine.WriteFileAtomicOwned(path, data, perm, "", "")
-			}
-			if err := m.Adopt(context.Background(), 5439); err == nil {
-				t.Fatalf("the interrupted adoption wrote %s without failing", file)
-			}
-			start, _ := os.ReadFile(filepath.Join(confDir, "start.conf")) //nolint:gosec // G304: the test's own registration.
-			if string(start) != "manual\n" {
-				t.Fatalf("the interrupted adoption already finished start.conf: %q", start)
-			}
-			writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
-				return engine.WriteFileAtomicOwned(path, data, perm, "", "")
-			}
+			requireAdoptionInterrupted(t, m, confDir, file)
 			if err := m.Adopt(context.Background(), 5439); err != nil {
 				t.Fatalf("the resumed adoption failed: %v", err)
 			}
-			conf, err := os.ReadFile(filepath.Join(confDir, "postgresql.conf")) //nolint:gosec // G304: the test's own registration.
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(conf), "port = 5439") || !strings.Contains(string(conf), "data_directory = '"+data+"'") {
-				t.Fatalf("the resumed adoption did not finish postgresql.conf:\n%s", conf)
-			}
-			start, _ = os.ReadFile(filepath.Join(confDir, "start.conf")) //nolint:gosec // G304: the test's own registration.
-			if string(start) != "auto\n" {
-				t.Fatalf("the resumed adoption left start.conf %q", start)
-			}
-			if _, err := os.Stat(filepath.Join(confDir, "conf.d", MaterialiseOverrides)); !os.IsNotExist(err) {
-				t.Fatalf("the temporary override survived adoption: %v", err)
-			}
-			if _, err := os.Stat(filepath.Join(confDir, "conf.d", UserOverrides)); err != nil {
-				t.Fatalf("the operator's override was removed: %v", err)
-			}
-
+			requireAdoptedRegistration(t, confDir, data)
 			// A crash after a complete adoption, before the caller's marker,
 			// runs the same adoption again on an already adopted registration.
 			if err := m.Adopt(context.Background(), 5439); err != nil {
@@ -133,6 +164,9 @@ func TestClusterDataDirectory(t *testing.T) {
 // postgresql.conf is a partial directory, not a cluster. The operation-owned
 // cleanup removes it with the data.
 func TestDropTemporaryClusterRemovesAPartialRegistration(t *testing.T) {
+	oldReservation := legacyReservationDir
+	legacyReservationDir = t.TempDir()
+	t.Cleanup(func() { legacyReservationDir = oldReservation })
 	oldConf := pgConfRoot
 	pgConfRoot = t.TempDir()
 	t.Cleanup(func() { pgConfRoot = oldConf })

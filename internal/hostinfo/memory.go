@@ -67,12 +67,12 @@ func IOWeight(device string) (enforced bool, reason string) {
 		return false, "the data disk's device is unknown"
 	}
 	name := filepath.Base(device)
-	if raw, err := os.ReadFile(filepath.Join("/sys/block", name, "queue", "scheduler")); err == nil { //nolint:gosec // G304: a sysfs path under /sys/block.
+	if raw, err := os.ReadFile(filepath.Join("/sys/block", name, "queue", "scheduler")); err == nil {
 		if strings.Contains(string(raw), "[bfq]") {
 			return true, name + " uses the bfq scheduler"
 		}
 	}
-	if devno, err := os.ReadFile(filepath.Join("/sys/block", name, "dev")); err == nil { //nolint:gosec // G304: a sysfs path under /sys/block.
+	if devno, err := os.ReadFile(filepath.Join("/sys/block", name, "dev")); err == nil {
 		if qos, err := os.ReadFile("/sys/fs/cgroup/io.cost.qos"); err == nil {
 			for _, line := range strings.Split(string(qos), "\n") {
 				fields := strings.Fields(line)

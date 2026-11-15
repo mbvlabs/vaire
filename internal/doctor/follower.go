@@ -170,7 +170,7 @@ func slotHeld(st *health.FollowerState) string {
 }
 
 func followerOrphanSlots(f Facts) []Result {
-	var out []Result
+	out := make([]Result, 0, len(f.OrphanSlotErrors)+len(f.OrphanSlots))
 	for _, e := range f.OrphanSlotErrors {
 		out = append(out, Result{DB: e.Source, Status: Warn,
 			Detail: "cannot list the replication slots on " + e.Source + ": " + e.Error,

@@ -32,13 +32,10 @@ func methods() map[string]method {
 			name: "apply",
 			// apply --db changes one cluster: the global lock shared and that
 			// cluster's exclusive, so applies to other clusters run beside it.
-			// A source with followers whose selected steps can execute an
-			// extension dependency transition takes the global exclusive
-			// envelope and lets the handler take the sorted target locks.
 			lockWithConfig:        applyLockWithConfig,
 			clusterLockWithConfig: applyClusterLockWithConfig,
 			cluster:               true,
-			confirmAny:            restartTokens,
+			confirmAny:            applyTokens,
 			runLog:                func(req rpc.Request) bool { return !req.DryRun },
 			handler:               handleApply,
 		},
@@ -132,11 +129,40 @@ func methods() map[string]method {
 			handler: handleDBList,
 		},
 		{
-			name:    "db.create",
-			lock:    fixedLock(engine.LockExclusive),
+			name:    "db.access.show",
+			lock:    fixedLock(engine.LockShared),
 			cluster: true,
-			runLog:  always,
+			handler: handleDBAccessShow,
+		},
+		{
+			name: "db.create",
+			lock: func(req rpc.Request) engine.LockMode {
+				if req.DryRun {
+					return engine.LockShared
+				}
+				return engine.LockExclusive
+			},
+			cluster: true,
+			runLog:  func(req rpc.Request) bool { return !req.DryRun },
 			handler: handleDBCreate,
+		},
+		{
+			// A read-only source/destination check: no lock, no run log and
+			// no target reservation.
+			name:    "db.copy.preflight",
+			cluster: true,
+			handler: handleDBCopyPreflight,
+		},
+		{
+			// The copy job takes the node, heavy-I/O and target locks. This
+			// RPC only validates and starts it. A supplied confirmation must
+			// be the new target's name; the CLI prompts for it after the
+			// summary, and --yes is not that token.
+			name:    "db.copy",
+			cluster: true,
+			confirm: dbToken,
+			runLog:  func(req rpc.Request) bool { return !req.DryRun },
+			handler: handleDBCopy,
 		},
 		{
 			name:    "db.drop",
@@ -250,7 +276,7 @@ func methods() map[string]method {
 			name:    "sql",
 			lock:    fixedLock(engine.LockShared),
 			cluster: true,
-			handler: defaultProtectGuard.requireWriteCode("writing to it", "db", sqlWrites, handleSQL),
+			handler: defaultProtectGuard.requireWriteCode("writing to it", sqlWrites, handleSQL),
 		},
 		{
 			// No run log, like sql, whose writes it serves.
@@ -271,10 +297,9 @@ func methods() map[string]method {
 		{name: "doctor.run", cluster: true, handler: handleDoctorRun},
 		{name: "queries.top", cluster: true, handler: handleQueriesTop},
 		{name: "maint.report", cluster: true, handler: handleMaintReport},
-		// maint.run starts a job, which takes its own locks. Only a repack
-		// needs the <db> token; vacuum, analyze and reindex keep no token.
+		// maint.run starts a job, which takes its own locks.
 		{name: "maint.run", cluster: true, confirm: maintRunToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintRun},
-		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: defaultProtectGuard.requireWriteCode("terminating its sessions", "db", nil, handleMaintKill)},
+		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: defaultProtectGuard.requireWriteCode("terminating its sessions", nil, handleMaintKill)},
 		{name: "queries.reset", cluster: true, confirm: statsToken, runLog: always, handler: handleQueriesReset},
 		{name: "metrics.rotate", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: metricsToken, runLog: always, handler: handleMetricsRotate},
 		// Phase 5. The master backup takes no node lock (D3): it has its own.
@@ -326,16 +351,24 @@ func dbClusterLock(req rpc.Request) (string, engine.LockMode) {
 // restartTokens are {server}/restart, which restarts every cluster one at a
 // time, and <cluster>/restart for each cluster (RFC 11.2).
 func restartTokens(cfg config.Cluster, _ json.RawMessage) []string {
-	out := []string{cfg.Name() + "/restart"}
+	out := make([]string, 1, 1+len(cfg.Clusters))
+	out[0] = cfg.Name() + "/restart"
 	for _, c := range cfg.Clusters {
 		out = append(out, c.Name+"/restart")
 	}
 	return out
 }
 
-// applySelectionMayTransition reports whether the selected steps can execute
-// an extension dependency transition (configuration, roles or packages), or
-// the request selects everything.
+func applyTokens(cfg config.Cluster, params json.RawMessage) []string {
+	out := restartTokens(cfg, params)
+	for _, c := range cfg.Clusters {
+		if !c.IsFollower() {
+			out = append(out, c.Name+"/access")
+		}
+	}
+	return out
+}
+
 func applySelectionMayTransition(req rpc.Request) bool {
 	var p stepParams
 	if json.Unmarshal(req.Params, &p) != nil || len(p.Steps) == 0 {
@@ -359,15 +392,8 @@ func applyLockWithConfig(cfg config.Cluster, req rpc.Request) engine.LockMode {
 	if db == "" {
 		return engine.LockExclusive
 	}
-	// A fork/adoption/restore continuation saves settings and finalizes
-	// routing. Its global envelope is exclusive from the pre-lock
-	// configuration and activation-records snapshot; unreadable records are
-	// unknown state and never fall back to shared.
 	recs, err := backup.LoadRecords()
-	if err != nil {
-		return engine.LockExclusive
-	}
-	if len(recs.Activation) > 0 {
+	if err != nil || len(recs.Activation) > 0 {
 		return engine.LockExclusive
 	}
 	if _, ok := cfg.ClusterByName(db); ok && len(cfg.FollowerNames(db)) > 0 && applySelectionMayTransition(req) {
@@ -385,10 +411,23 @@ func applyClusterLockWithConfig(cfg config.Cluster, req rpc.Request) (string, en
 		return "", engine.LockNone
 	}
 	if _, ok := cfg.ClusterByName(db); ok && len(cfg.FollowerNames(db)) > 0 && applySelectionMayTransition(req) {
-		// The handler takes the complete source/follower set once, sorted.
 		return "", engine.LockNone
 	}
 	return db, engine.LockExclusive
+}
+
+func accessConfirmation(cfg config.Cluster, req rpc.Request) map[string]bool {
+	confirmed := make(map[string]bool)
+	for _, token := range req.ConfirmTokens() {
+		name, ok := strings.CutSuffix(token, "/access")
+		if !ok {
+			continue
+		}
+		if spec, exists := cfg.ClusterByName(name); exists && !spec.IsFollower() {
+			confirmed[name] = true
+		}
+	}
+	return confirmed
 }
 
 // restartConfirmation turns the request's checked restart tokens into what
@@ -396,7 +435,10 @@ func applyClusterLockWithConfig(cfg config.Cluster, req rpc.Request) (string, en
 func restartConfirmation(cfg config.Cluster, req rpc.Request) engine.Confirmation {
 	var c engine.Confirmation
 	for _, token := range req.ConfirmTokens() {
-		name, _ := strings.CutSuffix(token, "/restart")
+		name, ok := strings.CutSuffix(token, "/restart")
+		if !ok {
+			continue
+		}
 		if token == cfg.Name()+"/restart" {
 			c.Server = true
 			continue
@@ -482,6 +524,9 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
+		return Result{}, err
+	}
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
@@ -505,6 +550,9 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
+		return Result{}, err
+	}
 	if !env.Req.DryRun {
 		reloaded, err := applyReloadCluster()
 		if err != nil {
@@ -512,14 +560,11 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		}
 		actualMode := env.LockMode
 		if actualMode == engine.LockNone {
-			// A direct handler test did not come through the dispatcher; use
-			// the same pre-lock classification it would have retained.
 			actualMode = applyLockWithConfig(env.Cluster, env.Req)
 		}
-		newMode := applyLockWithConfig(reloaded, env.Req)
 		oldCluster, oldClusterMode := applyClusterLockWithConfig(env.Cluster, env.Req)
 		newCluster, newClusterMode := applyClusterLockWithConfig(reloaded, env.Req)
-		if actualMode != newMode || oldCluster != newCluster || oldClusterMode != newClusterMode {
+		if actualMode != applyLockWithConfig(reloaded, env.Req) || oldCluster != newCluster || oldClusterMode != newClusterMode {
 			return Result{}, output.NewError(output.CodePrecondition,
 				"cluster.toml changed while apply waited for its lock, so the locked target set is stale",
 				output.ExitPrecondition, "Retry vaire apply; it will take the current envelope and target locks.").
@@ -527,11 +572,14 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		}
 		env.Cluster = reloaded
 	}
+	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
+		return Result{}, err
+	}
 	if !env.Req.DryRun && p.DB != "" && len(p.Steps) == 0 {
-		if f, ok, err := forkFenceFor(env.Cluster, p.DB); err != nil {
+		if fence, ok, err := forkFenceFor(env.Cluster, p.DB); err != nil {
 			return Result{}, err
 		} else if ok {
-			return resumeForkSettlementAt(ctx, env, f)
+			return resumeForkSettlementAt(ctx, env, fence)
 		}
 	}
 	if err := refuseActiveActivationFences(env.Cluster, p); err != nil {
@@ -571,10 +619,11 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
 		Only: p.Steps,
 		DB:   p.DB,
-		// The tokens were already checked against restartTokens.
-		Confirm:   restartConfirmation(env.Cluster, env.Req),
-		Restarter: steps.RestarterFor(env.Cluster, rt, env.Report),
-		Report:    env.Report,
+		// The tokens were already checked against applyTokens.
+		Confirm:       restartConfirmation(env.Cluster, env.Req),
+		AccessConfirm: accessConfirmation(env.Cluster, env.Req),
+		Restarter:     steps.RestarterFor(env.Cluster, rt, env.Report),
+		Report:        env.Report,
 	})
 	if err != nil {
 		return Result{}, err

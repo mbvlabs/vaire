@@ -9,10 +9,10 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -160,55 +160,84 @@ type masterStatusData struct {
 }
 
 func runServerBackupList(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
-	ctx := commandContext(cmd)
 	var data masterListData
 	var warnings []output.Warning
 	wantBucket, wantLocal := !flagTrue(cmd, "local"), !flagTrue(cmd, "bucket")
 	if wantBucket {
-		if kit, err := recoveryKit(c.Name); err == nil {
-			stop := waitOn(cmd, "listing the master bundles in "+kit.Bucket)
-			data.Bucket, err = backup.MasterList(ctx, kitTarget(kit))
-			if err == nil {
-				data.Epoch, err = backup.ReadEpoch(ctx, kitTarget(kit))
-			}
-			stop()
-			if err != nil && !wantLocal {
-				return err
-			}
-			if err != nil {
-				warnings = append(warnings, output.Warning{Code: "bucket_unreachable", Message: "the bucket can't be listed: " + err.Error()})
-			}
-		} else if !wantLocal {
+		bucket, w, err := listMasterBucket(cmd, c.Name, wantLocal)
+		if err != nil {
 			return err
 		}
+		data.Bucket, data.Epoch = bucket.Bucket, bucket.Epoch
+		warnings = append(warnings, w...)
 	}
 	if wantLocal {
-		p := newProgress(cmd)
-		s, err := openSession(cmd, p)
+		st, w, err := listMasterLocal(cmd, wantBucket)
 		if err != nil {
-			if !wantBucket {
-				return err
-			}
-			warnings = append(warnings, output.Warning{Code: "server_unreachable", Message: "the server's own bundles can't be listed: " + err.Error()})
-		} else {
-			defer s.Close()
-			reply, err := p.call(ctx, s.node, "master-backup.list", nil, remote.CallOptions{OnEvent: p.event})
-			if err != nil {
-				return err
-			}
-			var st masterStatusData
-			if err := reply.Decode(&st); err != nil {
-				return err
-			}
-			data.Status, data.Local = &st, st.Local
-			warnings = append(warnings, s.warnings...)
+			return err
 		}
+		if st != nil {
+			data.Status, data.Local = st, st.Local
+		}
+		warnings = append(warnings, w...)
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: masterListMessage(data), Warnings: warnings})
+}
+
+// listMasterBucket lists the master bundles in the bucket and the epoch. A
+// bucket that can't be reached is only an error when nothing else was asked
+// for.
+func listMasterBucket(cmd *cobra.Command, name string, wantLocal bool) (masterListData, []output.Warning, error) {
+	var data masterListData
+	ctx := commandContext(cmd)
+	kit, err := recoveryKit(name)
+	if err != nil {
+		if !wantLocal {
+			return data, nil, err
+		}
+		return data, nil, nil
+	}
+	stop := waitOn(cmd, "listing the master bundles in "+kit.Bucket)
+	data.Bucket, err = backup.MasterList(ctx, kitTarget(kit))
+	if err == nil {
+		data.Epoch, err = backup.ReadEpoch(ctx, kitTarget(kit))
+	}
+	stop()
+	if err == nil {
+		return data, nil, nil
+	}
+	if !wantLocal {
+		return data, nil, err
+	}
+	return data, []output.Warning{{Code: "bucket_unreachable", Message: "the bucket can't be listed: " + err.Error()}}, nil
+}
+
+// listMasterLocal lists the bundles on the server itself. An unreachable
+// server is only an error when the bucket wasn't asked for.
+func listMasterLocal(cmd *cobra.Command, wantBucket bool) (*masterStatusData, []output.Warning, error) {
+	ctx := commandContext(cmd)
+	p := newProgress(cmd)
+	s, err := openSession(cmd, p)
+	if err != nil {
+		if !wantBucket {
+			return nil, nil, err
+		}
+		return nil, []output.Warning{{Code: "server_unreachable", Message: "the server's own bundles can't be listed: " + err.Error()}}, nil
+	}
+	defer s.Close()
+	reply, err := p.call(ctx, s.node, "master-backup.list", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return nil, nil, err
+	}
+	var st masterStatusData
+	if err := reply.Decode(&st); err != nil {
+		return nil, nil, err
+	}
+	return &st, s.warnings, nil
 }
 
 func masterListMessage(d masterListData) string {
@@ -220,7 +249,8 @@ func masterListMessage(d masterListData) string {
 		lines = append(lines, "this server is FENCED: a newer master took over its bucket")
 	}
 	if len(d.Bucket) > 0 {
-		rows := [][]string{{"BUCKET", "EPOCH", "SIZE", "COMPLETE"}}
+		rows := make([][]string, 1, 1+len(d.Bucket))
+		rows[0] = []string{"BUCKET", "EPOCH", "SIZE", "COMPLETE"}
 		for _, b := range d.Bucket {
 			complete := "yes"
 			if !b.Complete {
@@ -235,7 +265,8 @@ func masterListMessage(d masterListData) string {
 		if d.Status != nil {
 			uploaded = d.Status.Last.UploadedName
 		}
-		rows := [][]string{{"ON THE SERVER", "EPOCH", "SIZE", "UPLOADED"}}
+		rows := make([][]string, 1, 1+len(d.Local))
+		rows[0] = []string{"ON THE SERVER", "EPOCH", "SIZE", "UPLOADED"}
 		for _, b := range d.Local {
 			up := ""
 			if b.Name == uploaded {
@@ -252,7 +283,7 @@ func masterListMessage(d masterListData) string {
 }
 
 func runServerBackupVerify(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -282,31 +313,49 @@ func runServerBackupVerify(cmd *cobra.Command, _ []string) error {
 	}
 	data := map[string]any{"bundle": f.Name, "from": f.From, "manifest": manifestSummary(b.Manifest), "state": "unknown"}
 	message := fmt.Sprintf("master bundle %s opens and checks out: %d files, created %s, epoch %d", f.label(), len(b.Files), b.Manifest.CreatedAt, b.Manifest.Epoch)
-	var warnings []output.Warning
 	p := newProgress(cmd)
-	if s, err := openSession(cmd, p); err == nil {
-		defer s.Close()
-		if reply, err := p.call(ctx, s.node, "master-backup.list", nil, remote.CallOptions{OnEvent: p.event}); err == nil {
-			var st masterStatusData
-			if reply.Decode(&st) == nil && st.ContentHash != "" {
-				if st.ContentHash == b.Manifest.Content {
-					data["state"] = "current"
-					message += "\nit matches the server's live state (current)"
-				} else {
-					data["state"] = "behind"
-					message += "\nthe server has changed since (behind): vaire server backup now"
-				}
-			}
-		}
-	} else {
-		warnings = append(warnings, output.Warning{Code: "server_unreachable", Message: "couldn't compare with the server: " + err.Error()})
+	state, warnings := bundleServerState(cmd, p, b.Manifest.Content)
+	if state != "" {
+		data["state"] = state
+		message += "\n" + bundleStateText(state)
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings})
 }
 
+// bundleServerState compares a bundle's content hash with the server's live
+// state: current, behind, or empty when the server can't say.
+func bundleServerState(cmd *cobra.Command, p *progress, content string) (string, []output.Warning) {
+	ctx := commandContext(cmd)
+	s, err := openSession(cmd, p)
+	if err != nil {
+		return "", []output.Warning{{Code: "server_unreachable", Message: "couldn't compare with the server: " + err.Error()}}
+	}
+	defer s.Close()
+	reply, err := p.call(ctx, s.node, "master-backup.list", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return "", nil
+	}
+	var st masterStatusData
+	if reply.Decode(&st) != nil || st.ContentHash == "" {
+		return "", nil
+	}
+	if st.ContentHash == content {
+		return "current", nil
+	}
+	return "behind", nil
+}
+
+// bundleStateText explains a bundle's state against the server.
+func bundleStateText(state string) string {
+	if state == "current" {
+		return "it matches the server's live state (current)"
+	}
+	return "the server has changed since (behind): vaire server backup now"
+}
+
 // manifestSummary is a manifest without file hashes, for output.
 func manifestSummary(m masterbackup.Manifest) map[string]any {
-	var files []string
+	files := make([]string, 0, len(m.Files))
 	for _, f := range m.Files {
 		files = append(files, f.Path)
 	}
@@ -356,7 +405,7 @@ func runServerBackupExport(cmd *cobra.Command, _ []string) error {
 // writeNewFile writes data to path with mode 0600, refusing an existing
 // file.
 func writeNewFile(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator names the output.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
 			return output.NewError(output.CodePrecondition, path+" already exists", output.ExitPrecondition, "Pass --out with another path.").

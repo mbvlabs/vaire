@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/node"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 func statusOf(protected ...string) func() (protectStatusData, error) {
@@ -86,12 +86,12 @@ func TestProtectedWriteFollowerNeedsNoCode(t *testing.T) {
 // the node about protection: reads need no code.
 func TestSessionLoginReadNeedsNoCode(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	creds := contexts.Credentials{Database: &contexts.DatabaseCreds{Admin: contexts.Role{User: "vaire_admin", Password: "admin-pw"}}}
-	if err := contexts.SaveCredentials("prod", creds); err != nil {
+	creds := workspaces.Credentials{Database: &workspaces.DatabaseCreds{Admin: workspaces.Role{User: "vaire_admin", Password: "admin-pw"}}}
+	if err := workspaces.SaveCredentials("prod", creds); err != nil {
 		t.Fatal(err)
 	}
 	// No node and no progress: a read that reached for either would panic.
-	s := &session{ctx: &contexts.Context{Name: "prod"}}
+	s := &session{ctx: &workspaces.Workspace{Name: "prod"}}
 	user, password, err := sessionLogin(commandAt(t, "sql", "--output", "json"), s, nil, "app", false)
 	if err != nil || user != "vaire_admin" || password != "admin-pw" {
 		t.Fatalf("read login: %s %s %v", user, password, err)

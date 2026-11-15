@@ -25,17 +25,18 @@ type configValidateParams struct {
 	TOML string `json:"toml"`
 }
 
-// nodeConfigStore is the desired-state store seam. Production uses the node's
-// /etc/vaire/cluster.toml; tests use a temporary file to exercise the real
-// config.set policy without touching the host.
-var nodeConfigStore = func() state.Store { return state.FileStore{} }
+var configSetStore = func() state.FileStore { return state.FileStore{} }
+var configSetSchedules = checkSchedules
+var configSetHostname = syncNodeHostname
+var configSetPlan = engine.Plan
+var nodeConfigStore = func() state.Store { return configSetStore() }
 
 func handleConfigGet(context.Context, *Env) (Result, error) {
 	store := state.FileStore{}
 	raw, err := os.ReadFile(state.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run vaire server init first.")
+			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitWorkspace, "Run vaire server init first.")
 		}
 		return Result{}, err
 	}
@@ -89,96 +90,123 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	if err := cfg.Validate(); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
-	if err := checkSchedules(ctx, cfg); err != nil {
+	old, _, oldErr = store.Load()
+	if oldErr != nil {
+		return Result{}, oldErr
+	}
+	if err := guardRecoveryFloorChanges(old, cfg, runtimeFor(env, true).Host); err != nil {
 		return Result{}, err
 	}
-	var extensionWarnings []output.Warning
-	if oldErr == nil {
-		if err := refuseUnsafeExtensionConfigRemoval(ctx, old, cfg); err != nil {
-			return Result{}, err
-		}
-		if err := refusePendingConfigChanges(old, cfg); err != nil {
-			return Result{}, err
-		}
-		var followers []config.ClusterSpec
-		for _, spec := range cfg.Clusters {
-			if spec.IsFollower() {
-				followers = append(followers, spec)
-			}
-		}
-		recs, err := extensionRecords()
-		if err != nil {
-			return Result{}, err
-		}
-		if err := preflightFollowerRuntime(ctx, cfg, recs, followers, nil); err != nil {
-			return Result{}, err
-		}
-		for _, spec := range cfg.Clusters {
-			if spec.IsFollower() {
-				continue
-			}
-			if err := validateTargetExtensionDescriptors(cfg, spec); err != nil {
-				return Result{}, err
-			}
-			if sourceHasFollowers(cfg, spec.Name) {
-				if err := validateTargetExtensionCopySafety(cfg, spec, false); err != nil {
-					return Result{}, err
-				}
-			}
-		}
-		if !env.Req.DryRun {
-			if err := captureExtensionChange(old, cfg); err != nil {
-				return Result{}, output.NewError(output.CodePrecondition,
-					"recording extension requirements before the configuration change failed: "+err.Error(),
-					output.ExitPrecondition,
-					"Nothing was saved. Retry after fixing the requirement history store.").
-					WithDetails(map[string]any{"reason": "extension_history_capture_failed"})
-			}
-		}
-		extensionWarnings = extensionIntentWarnings(old, cfg)
-		if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
-			return Result{}, err
-		}
-		if !env.Req.DryRun {
-			if err := defaultProtectGuard.checkUnprotect(old, cfg, env.Req.Secrets[ProtectCodeSecret]); err != nil {
-				return Result{}, err
-			}
-		}
-		if err := checkRepoMove(ctx, old, cfg); err != nil {
-			return Result{}, err
-		}
+	if err := checkCPUProposalWithRequests(ctx, old, cfg, p.Set); err != nil {
+		return Result{}, err
 	}
+	if err := configSetSchedules(ctx, cfg); err != nil {
+		return Result{}, err
+	}
+	if err := configSetSafetyChecks(ctx, env, old, cfg); err != nil {
+		return Result{}, err
+	}
+	if err := checkExtensionConfigChange(ctx, env, old, cfg); err != nil {
+		return Result{}, err
+	}
+	extensionWarnings := extensionIntentWarnings(old, cfg)
 	// A dry run previews the plan for the new file without saving it.
-	revision := current
-	var synced []output.Warning
-	if !env.Req.DryRun {
-		// vaire_admin's write access follows the protection before the file
-		// says so: a protection is never saved while vaire_admin can still
-		// write to the database.
-		if oldErr == nil {
-			if synced, err = syncProtectedAccess(ctx, env, old, cfg); err != nil {
-				return Result{}, err
-			}
-		}
-		if err := store.Save(raw); err != nil {
-			return Result{}, err
-		}
-		if err := syncNodeHostname(cfg); err != nil {
-			return Result{}, err
-		}
-		if revision, err = store.Revision(); err != nil {
-			return Result{}, err
-		}
+	revision, synced, err := saveConfigSet(ctx, env, store, raw, old, cfg, p, current)
+	if err != nil {
+		return Result{}, err
 	}
 	env.Cluster = cfg
 	rt := runtimeFor(env, true)
-	plan, planErr := engine.Plan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
+	plan, planErr := configSetPlan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
 	data := map[string]any{"revision": revision, "plan": plan, "saved": !env.Req.DryRun}
 	warnings := append(append(synced, extensionWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
 	if planErr != nil {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}
 	return Result{Data: data, Warnings: warnings}, nil
+}
+
+func configSetSafetyChecks(ctx context.Context, env *Env, old, cfg config.Cluster) error {
+	if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
+		return err
+	}
+	if !env.Req.DryRun {
+		if err := defaultProtectGuard.checkUnprotect(old, cfg, env.Req.Secrets[ProtectCodeSecret]); err != nil {
+			return err
+		}
+	}
+	return checkRepoMove(ctx, old, cfg)
+}
+
+func saveConfigSet(ctx context.Context, env *Env, store state.Store, raw []byte, old, cfg config.Cluster, p configSetParams, current string) (string, []output.Warning, error) {
+	if env.Req.DryRun {
+		return current, nil, nil
+	}
+	if err := invalidateCPUProofs(cpuProofTargets(old, cfg, p.Set)); err != nil {
+		return "", nil, err
+	}
+	// vaire_admin's write access follows the protection before the file says
+	// so: a protection is never saved while vaire_admin can still write to
+	// the database.
+	synced, err := syncProtectedAccess(ctx, env, old, cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := store.Save(raw); err != nil {
+		return "", nil, err
+	}
+	if err := configSetHostname(cfg); err != nil {
+		return "", nil, err
+	}
+	revision, err := store.Revision()
+	if err != nil {
+		return "", nil, err
+	}
+	return revision, synced, nil
+}
+
+func checkExtensionConfigChange(ctx context.Context, env *Env, old, cfg config.Cluster) error {
+	if err := refuseUnsafeExtensionConfigRemoval(ctx, old, cfg); err != nil {
+		return err
+	}
+	if err := refusePendingConfigChanges(old, cfg); err != nil {
+		return err
+	}
+	var followers []config.ClusterSpec
+	for _, spec := range cfg.Clusters {
+		if spec.IsFollower() {
+			followers = append(followers, spec)
+		}
+	}
+	recs, err := extensionRecords()
+	if err != nil {
+		return err
+	}
+	if err := preflightFollowerRuntime(ctx, cfg, recs, followers, nil); err != nil {
+		return err
+	}
+	for _, spec := range cfg.Clusters {
+		if spec.IsFollower() {
+			continue
+		}
+		if err := validateTargetExtensionDescriptors(cfg, spec); err != nil {
+			return err
+		}
+		if sourceHasFollowers(cfg, spec.Name) {
+			if err := validateTargetExtensionCopySafety(cfg, spec, false); err != nil {
+				return err
+			}
+		}
+	}
+	if !env.Req.DryRun {
+		if err := captureExtensionChange(old, cfg); err != nil {
+			return output.NewError(output.CodePrecondition,
+				"recording extension requirements before the configuration change failed: "+err.Error(),
+				output.ExitPrecondition, "Nothing was saved. Retry after fixing the requirement history store.").
+				WithDetails(map[string]any{"reason": "extension_history_capture_failed"})
+		}
+	}
+	return nil
 }
 
 // newConfigBytes returns the desired-state bytes for a config.set request,
@@ -223,7 +251,7 @@ func handleConfigValidate(_ context.Context, env *Env) (Result, error) {
 	if p.TOML == "" {
 		file, err := os.ReadFile(state.Path)
 		if err != nil {
-			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitContext, "Run vaire server init first.")
+			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitWorkspace, "Run vaire server init first.")
 		}
 		raw = file
 	}

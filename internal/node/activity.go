@@ -298,7 +298,7 @@ func (w *activityWriter) closeAbandoned(rec *activityRecorder, start activity.Ev
 // The caller waits at most activityWriteWait and treats a timeout as a lost
 // event, which the checked-start policy turns into a refusal.
 func (r *activityRecorder) append(_ context.Context, ev activity.Event) error {
-	return r.submitEvent(ev, false)
+	return r.submitEvent(ev, false) //nolint:contextcheck // best-effort history writes deliberately outlive the caller.
 }
 
 // appendChecked hands over the start event of an operation that must not run
@@ -497,7 +497,7 @@ func (s *activityScope) beginEvent(ctx context.Context, checked bool) error {
 	ev := s.event(activity.OutcomeStarted, "", "", 0)
 	var err error
 	if checked {
-		err = s.rec.appendChecked(ev)
+		err = s.rec.appendChecked(ev) //nolint:contextcheck // a checked start is recorded independently of the caller's context.
 	} else {
 		err = s.rec.append(ctx, ev)
 	}
@@ -600,13 +600,13 @@ func finishActivitySuccess(ctx context.Context, scope *activityScope, res *Resul
 // recorder wraps next so only typed step events are added to history. Raw
 // log, progress and warning payloads are ignored: they stay in the run log
 // and stream, not in the agent-shareable history.
-func (s *activityScope) recorder(next engine.Reporter) engine.Reporter {
+func (s *activityScope) recorder(ctx context.Context, next engine.Reporter) engine.Reporter {
 	if s == nil {
 		return next
 	}
 	return func(ev output.Event) {
 		if ev.Type == "step" {
-			s.recordStep(ev, next)
+			s.recordStep(ctx, ev, next)
 		}
 		if next != nil {
 			next(ev)
@@ -618,7 +618,7 @@ func (s *activityScope) recorder(next engine.Reporter) engine.Reporter {
 // as a reason when it is one of the engine's stable tokens. A step replayed
 // from a job's journal carries its original timestamp; it was recorded where
 // it actually ran, so the follower must not duplicate it.
-func (s *activityScope) recordStep(ev output.Event, next engine.Reporter) {
+func (s *activityScope) recordStep(ctx context.Context, ev output.Event, next engine.Reporter) {
 	if ev.TS != "" {
 		return
 	}
@@ -649,7 +649,7 @@ func (s *activityScope) recordStep(ev output.Event, next engine.Reporter) {
 	if cluster := stepCluster(step); cluster != "" {
 		e.Database = cluster
 	}
-	if err := s.rec.append(context.Background(), e); err != nil {
+	if err := s.rec.append(ctx, e); err != nil {
 		s.markLost()
 		s.warn(next)
 	}
@@ -706,7 +706,7 @@ func beginActivityScope(ctx context.Context, scope *activityScope, important boo
 // recordActivityRefusal records a request the node refused before its
 // handler ran. It is best effort: the refusal itself is the answer even when
 // history cannot be written.
-func recordActivityRefusal(rec *activityRecorder, req rpc.Request, action string, err error, defaultReason string) {
+func recordActivityRefusal(ctx context.Context, rec *activityRecorder, req rpc.Request, action string, err error, defaultReason string) {
 	if rec == nil {
 		return
 	}
@@ -732,13 +732,13 @@ func recordActivityRefusal(rec *activityRecorder, req rpc.Request, action string
 		ActorLabel:      activityActorLabel(req.Operator),
 		ActorVerified:   false,
 	}
-	_ = rec.append(context.Background(), ev)
+	_ = rec.append(ctx, ev)
 }
 
 // recordJobRefusal records a job invocation refused before its runner began.
 // timer says the invocation came from a systemd timer, so history does not
 // attribute it to an operator who was not there.
-func recordJobRefusal(rec *activityRecorder, job, id string, err error, defaultReason string, timer bool) {
+func recordJobRefusal(ctx context.Context, rec *activityRecorder, job, id string, err error, defaultReason string, timer bool) {
 	if rec == nil {
 		return
 	}
@@ -761,7 +761,7 @@ func recordJobRefusal(rec *activityRecorder, job, id string, err error, defaultR
 		ActorKind:     actor,
 		ActorVerified: false,
 	}
-	_ = rec.append(context.Background(), ev)
+	_ = rec.append(ctx, ev)
 }
 
 // activityDryRunAware lists the methods whose handler honours req.DryRun and
@@ -975,7 +975,7 @@ func activityDatabaseFor(method string, params json.RawMessage) string {
 // activityNameIsDatabase lists the methods whose name param is a database.
 var activityNameIsDatabase = map[string]bool{
 	"db.create": true, "db.drop": true, "db.resize": true, "db.credentials": true, "db.fork": true,
-	"db.follow": true, "db.unfollow": true,
+	"db.follow": true, "db.unfollow": true, "db.copy": true, "db.copy.preflight": true,
 }
 
 // activityNodeInfoLoader reads the node's optional identity files. Tests
@@ -1003,10 +1003,10 @@ func loadActivityNodeInfo(paths activityPaths, cluster config.Cluster) activityN
 			info.Node = safeActivityResource(master.Name)
 		}
 	}
-	if raw, err := os.ReadFile(paths.Instance); err == nil { //nolint:gosec // G304: a fixed node path supplied by the caller.
+	if raw, err := os.ReadFile(paths.Instance); err == nil {
 		info.NodeInstanceID = safeActivityResource(strings.TrimSpace(string(raw)))
 	}
-	if raw, err := os.ReadFile(paths.BootID); err == nil { //nolint:gosec // G304: a fixed node path supplied by the caller.
+	if raw, err := os.ReadFile(paths.BootID); err == nil {
 		info.BootID = safeActivityResource(strings.TrimSpace(string(raw)))
 	}
 	info.NodeVersion = activityNodeVersion()
@@ -1063,7 +1063,8 @@ var activityKnownReason = map[string]bool{
 	"follower_propagation_unavailable": true, "cluster_not_running": true,
 	"unfollow_in_progress": true,
 	"final_dump_failed":    true, "follower_not_running": true, "follows_follower": true,
-	"has_followers": true, "heavy_io_lock_held": true, "host_phase_incomplete": true,
+	"follower_recovery_floor_decrease": true,
+	"has_followers":                    true, "heavy_io_lock_held": true, "host_phase_incomplete": true,
 	"immutable_key": true, "install_source_invalid": true, "is_follower": true,
 	"job_not_found": true,
 	"job_skipped":   true, "job_spec_missing": true, "job_spec_mismatch": true,
@@ -1084,8 +1085,8 @@ var activityKnownReason = map[string]bool{
 	"unsupported_relation_persistence": true, "unsupported_access_method": true, "extension_storage": true,
 	"system_relation": true, "relation_not_found": true, "window_ended": true,
 	"heavy_io_busy": true, "cluster_lock_busy": true, "exact_bloat_failed": true,
-	"activation_fence_active": true, "insufficient_space": true,
-	"unsupported_tablespace": true, "unsupported_default_tablespace": true, "space_unknown": true,
+	"activation_fence_active": true,
+	"unsupported_tablespace":  true, "unsupported_default_tablespace": true, "space_unknown": true,
 	"repack_lock_timeout": true, "repack_invalid_index": true, "repack_unsafe_ddl": true,
 	"completion_unknown": true,
 	"repo_in_use":        true, "restore_in_progress": true,
@@ -1099,6 +1100,29 @@ var activityKnownReason = map[string]bool{
 	"undo_in_progress": true, "write_requires_human": true,
 	// Protection code outcomes.
 	"code_invalid": true, "code_required": true, "code_reused": true, "locked": true,
+	// External database copy outcomes.
+	"copy_preflight_failed": true, "copy_export_failed": true, "copy_provision_failed": true,
+	"copy_import_failed": true, "copy_finalize_failed": true, "copy_verify_failed": true,
+	"copy_extension_verify_failed": true, "copy_grants_failed": true, "copy_analyze_failed": true,
+	"copy_policy_failed":  true,
+	"copy_cleanup_failed": true, "copy_workspace_failed": true, "copy_workspace_unsafe": true,
+	"copy_workspace_access_denied": true, "copy_workspace_probe_failed": true,
+	"workspace_cleanup_failed": true, "source_required": true, "invalid_source_input": true,
+	"source_auth_failed": true, "source_unreachable": true, "source_tls_failed": true,
+	"source_version_unsupported": true, "source_preflight_failed": true, "source_database_mismatch": true,
+	"source_export_failed": true, "source_tls_weak": true, "source_tls_ca_unavailable": true,
+	"invalid_source_url": true, "invalid_source_host": true, "invalid_source_password": true,
+	"invalid_source_tls": true, "invalid_source_ca": true, "copy_workspace_exists": true,
+	"missing_pg18_tool": true, "copy_lease_tool_missing": true, "copy_workspace_lease_failed": true,
+	"copy_job_spec_cleanup_failed": true, "copy_job_start_failed": true,
+	"copy_job_spec_unlink_failed": true, "copy_job_spec_invalid": true,
+	"memory_overcommitted": true, "would_not_start": true,
+	"archive_invalid": true, "archive_unreadable": true,
+	"archive_database_mismatch": true, "archive_ambiguous": true, "archive_unexpected_extension": true,
+	"extension_incompatible": true, "extension_version_incompatible": true,
+	"extension_schema_incompatible": true, "restore_failed": true, "target_cluster_exists": true,
+	"target_path_exists": true, "target_reserved": true, "target_unreadable": true,
+	"target_config_changed": true, "input_required": true, "copy_failed": true, "insufficient_space": true,
 	// Process and correlation outcomes.
 	"cancelled": true, "deadline_exceeded": true, "panic": true,
 	"request_rejected": true, "unknown_method": true, "unknown_job": true,

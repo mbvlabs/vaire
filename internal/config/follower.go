@@ -43,8 +43,9 @@ func (c Cluster) FollowersOf(name string) []ClusterSpec {
 
 // FollowerNames lists the names of the entries that follow name.
 func (c Cluster) FollowerNames(name string) []string {
-	var out []string
-	for _, s := range c.FollowersOf(name) {
+	followers := c.FollowersOf(name)
+	out := make([]string, 0, len(followers))
+	for _, s := range followers {
 		out = append(out, s.Name)
 	}
 	return out

@@ -1183,6 +1183,11 @@ func completeForkActivation(ctx context.Context, spec config.ClusterSpec, f back
 	if _, _, err := verifyActivationFence(cfg, spec.Name, f.OperationID, "fork", fencePhaseRouting); err != nil {
 		return cfg, warnings, err
 	}
+	// The physical owner must verify and retire before either pooler can
+	// publish the target. Its caller completes routing after retirement.
+	if hasForkMaterialisationView(ctx, spec.Name) {
+		return cfg, warnings, nil
+	}
 	if err := publishRouting(ctx, cfg, rt, report); err != nil {
 		warnings = append(warnings, output.Warning{Code: "activation_routing_incomplete",
 			Message: spec.Name + " is settled but its route was not published: " + err.Error()})

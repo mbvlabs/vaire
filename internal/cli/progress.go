@@ -89,44 +89,53 @@ func (p *progress) event(ev output.Event) {
 		output.RecordWarning(p.cmd, output.Warning{Code: secrets.Redact(ev.Code), Message: secrets.Redact(ev.Message)})
 	}
 	if p.opts.Stream {
-		ev.Schema = output.EventSchema
-		if ev.TS == "" {
-			ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
-		}
-		raw, err := json.Marshal(secrets.RedactValue(ev))
-		if err == nil {
-			_, _ = fmt.Fprintln(p.stdout, string(raw))
-		}
+		p.streamEvent(ev)
 		return
 	}
 	if !p.human() {
 		return
 	}
 	p.track(ev)
-	if ev.Type == "warning" && ev.Code != "" && p.hidden[ev.Code] {
-		p.shown(ev.Message)
-		return
-	}
-	if ev.Type == "warning" && !p.claimWarning(ev) {
+	if p.warningHidden(ev) {
 		return
 	}
 	if p.live != nil {
 		p.liveEvent(ev)
 		return
 	}
+	p.plainEvent(ev)
+}
+
+// streamEvent writes one event as a JSON line.
+func (p *progress) streamEvent(ev output.Event) {
+	ev.Schema = output.EventSchema
+	if ev.TS == "" {
+		ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	raw, err := json.Marshal(secrets.RedactValue(ev))
+	if err == nil {
+		_, _ = fmt.Fprintln(p.stdout, string(raw))
+	}
+}
+
+// warningHidden reports whether a warning event must not be printed again:
+// either its code is already hidden, or another command claimed it.
+func (p *progress) warningHidden(ev output.Event) bool {
+	if ev.Type != "warning" {
+		return false
+	}
+	if ev.Code != "" && p.hidden[ev.Code] {
+		p.shown(ev.Message)
+		return true
+	}
+	return !p.claimWarning(ev)
+}
+
+// plainEvent prints one event in plain human mode.
+func (p *progress) plainEvent(ev output.Event) {
 	switch ev.Type {
 	case "step":
-		prefix := "  "
-		if ev.Index != nil && ev.Total != nil {
-			prefix = fmt.Sprintf("  [%d/%d] ", *ev.Index, *ev.Total)
-		}
-		line := prefix + ev.Step + " " + ev.State
-		if ev.Detail != "" && ev.State != "skipped" {
-			line += ": " + ev.Detail
-		} else if ev.State == "skipped" && ev.Detail != "" {
-			line += " (" + ev.Detail + ")"
-		}
-		_, _ = fmt.Fprintln(p.stderr, secrets.Redact(line))
+		_, _ = fmt.Fprintln(p.stderr, secrets.Redact(stepLine(ev)))
 	case "log":
 		if p.opts.Verbose {
 			_, _ = fmt.Fprintln(p.stderr, "      "+secrets.Redact(ev.Line))
@@ -137,6 +146,22 @@ func (p *progress) event(ev output.Event) {
 	case "progress":
 		_, _ = fmt.Fprintf(p.stderr, "  %s %s\n", ev.Phase, ev.Detail)
 	}
+}
+
+// stepLine is a step event's line, with its position and detail.
+func stepLine(ev output.Event) string {
+	prefix := "  "
+	if ev.Index != nil && ev.Total != nil {
+		prefix = fmt.Sprintf("  [%d/%d] ", *ev.Index, *ev.Total)
+	}
+	line := prefix + ev.Step + " " + ev.State
+	switch {
+	case ev.Detail != "" && ev.State != "skipped":
+		line += ": " + ev.Detail
+	case ev.State == "skipped" && ev.Detail != "":
+		line += " (" + ev.Detail + ")"
+	}
+	return line
 }
 
 // heartbeatEvery is how long plain output may stay silent while waiting
@@ -320,97 +345,91 @@ func (h *heartbeat) line(now time.Time) string {
 	return "… still " + what + " (" + took + ")"
 }
 
+// waitLabelParams is what a method's params name, for the waiting line.
+type waitLabelParams struct {
+	Database string `json:"database"`
+	Name     string `json:"name"`
+	Source   string `json:"source"`
+	ID       string `json:"id"`
+}
+
+// waitLabelStatic are the methods whose waiting line names nothing.
+var waitLabelStatic = map[string]string{
+	"apply":                   "applying",
+	"plan":                    "planning",
+	"db.list":                 "listing the databases",
+	"backup.list":             "listing the backups",
+	"job.list":                "listing the jobs",
+	"tune.show":               "reading the tuning",
+	"restore.status":          "reading the restore status",
+	"cluster.bootstrap":       "running the setup steps",
+	"cluster.confirm-secrets": "confirming the secrets handoff",
+	"ssh.lockdown":            "closing public SSH",
+	"ssh.confirm":             "confirming the SSH lockdown",
+	"ssh.status":              "reading the SSH state",
+	"tls.status":              "checking the certificate",
+	"config.get":              "reading the config",
+	"config.set":              "updating the config",
+	"tune.apply":              "applying the tuning",
+}
+
+// waitLabelVerbs are the methods whose waiting line names an object.
+var waitLabelVerbs = map[string]string{
+	"db.credentials":  "rotating the credentials of",
+	"restore.cleanup": "cleaning up the restore of",
+	"db.create":       "creating",
+	"db.resize":       "resizing",
+	"db.drop":         "dropping",
+	"db.fork":         "forking",
+	"db.follow":       "following",
+	"db.unfollow":     "unfollowing",
+	"dump.create":     "dumping",
+	"restore.start":   "restoring",
+	"restore.promote": "promoting the restore of",
+	"restore.abort":   "aborting the restore of",
+	"restore.undo":    "undoing the restore of",
+	"restore.drill":   "running a restore drill of",
+	"backup.now":      "backing up",
+	"backup.verify":   "verifying the backups of",
+	"job.follow":      "following job",
+}
+
 // waitLabel is what the waiting line says for an RPC method: "restoring
 // app2", "backing up app2", or "waiting for <method>".
 func waitLabel(method string, params any) string {
-	var named struct {
-		Database string `json:"database"`
-		Name     string `json:"name"`
-		Source   string `json:"source"`
-		ID       string `json:"id"`
-	}
+	var named waitLabelParams
 	if raw, err := json.Marshal(params); err == nil {
 		_ = json.Unmarshal(raw, &named)
 	}
-	db := named.Database
-	if db == "" {
-		db = named.Name
+	if label, ok := waitLabelStatic[method]; ok {
+		return label
 	}
-	with := func(verb, obj string) string {
-		if obj == "" {
-			return verb
-		}
-		return verb + " " + obj
-	}
-	switch method {
-	case "apply":
-		return "applying"
-	case "plan":
-		return "planning"
-	case "db.list":
-		return "listing the databases"
-	case "db.credentials":
-		return with("rotating the credentials of", db)
-	case "backup.list":
-		return "listing the backups"
-	case "job.list":
-		return "listing the jobs"
-	case "tune.show":
-		return "reading the tuning"
-	case "restore.status":
-		return "reading the restore status"
-	case "restore.cleanup":
-		return with("cleaning up the restore of", db)
-	case "cluster.bootstrap":
-		return "running the setup steps"
-	case "cluster.confirm-secrets":
-		return "confirming the secrets handoff"
-	case "ssh.lockdown":
-		return "closing public SSH"
-	case "ssh.confirm":
-		return "confirming the SSH lockdown"
-	case "ssh.status":
-		return "reading the SSH state"
-	case "tls.status":
-		return "checking the certificate"
-	case "config.get":
-		return "reading the config"
-	case "config.set":
-		return "updating the config"
-	case "tune.apply":
-		return "applying the tuning"
-	case "db.create":
-		return with("creating", db)
-	case "db.resize":
-		return with("resizing", db)
-	case "db.drop":
-		return with("dropping", db)
-	case "db.fork":
-		return with("forking", named.Source)
-	case "db.follow":
-		return with("following", named.Source)
-	case "db.unfollow":
-		return with("unfollowing", db)
-	case "dump.create":
-		return with("dumping", db)
-	case "restore.start":
-		return with("restoring", db)
-	case "restore.promote":
-		return with("promoting the restore of", db)
-	case "restore.abort":
-		return with("aborting the restore of", db)
-	case "restore.undo":
-		return with("undoing the restore of", db)
-	case "restore.drill":
-		return with("running a restore drill of", db)
-	case "backup.now":
-		return with("backing up", db)
-	case "backup.verify":
-		return with("verifying the backups of", db)
-	case "job.follow":
-		return with("following job", named.ID)
+	if verb, ok := waitLabelVerbs[method]; ok {
+		return waitLabelWith(verb, waitLabelObject(method, named))
 	}
 	return "waiting for " + method
+}
+
+// waitLabelObject is the object a waiting line names for a method.
+func waitLabelObject(method string, named waitLabelParams) string {
+	switch method {
+	case "db.fork", "db.follow":
+		return named.Source
+	case "job.follow":
+		return named.ID
+	}
+	if named.Database != "" {
+		return named.Database
+	}
+	return named.Name
+}
+
+// waitLabelWith joins a verb and its object, dropping an empty object.
+func waitLabelWith(verb, obj string) string {
+	if obj == "" {
+		return verb
+	}
+	return verb + " " + obj
 }
 
 // liveEvent draws one event in the terminal UI.
@@ -648,7 +667,7 @@ func readSecretTTY(cmd *cobra.Command, label string) (string, error) {
 	if _, err := fmt.Fprint(cmd.ErrOrStderr(), label+": "); err != nil {
 		return "", err
 	}
-	raw, err := term.ReadPassword(int(os.Stdin.Fd())) //nolint:gosec // G115: file descriptors fit in int.
+	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr())
 	if err != nil {
 		return "", output.WrapError(output.CodeInputRequired, err, output.ExitInput, "")
@@ -725,7 +744,7 @@ func renderRichError(w io.Writer, failure output.Failure) bool {
 		}
 	}
 	width := 80
-	if cols, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && cols > 0 { //nolint:gosec // G115: file descriptors fit in int.
+	if cols, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && cols > 0 {
 		width = cols
 	}
 	_, err := fmt.Fprintln(ui.Writer(w), "\n"+block.Render(width))

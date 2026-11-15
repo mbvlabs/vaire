@@ -20,7 +20,7 @@ func ownerMatches(info fs.FileInfo) bool {
 	if !ok {
 		return false
 	}
-	return int(st.Uid) == os.Geteuid() //nolint:gosec // G115: a uid fits in int.
+	return int(st.Uid) == os.Geteuid()
 }
 
 // isReadable checks access without opening or modifying the path.

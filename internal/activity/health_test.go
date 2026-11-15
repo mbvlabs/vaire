@@ -14,10 +14,15 @@ func TestHealthHealthyStore(t *testing.T) {
 	s := testStore(t)
 	mustAppend(t, s, baseEvent())
 	mustAppend(t, s, baseEvent())
-	health, err := s.Health(context.Background())
-	if err != nil {
-		t.Fatalf("Health: %v", err)
-	}
+	health := mustHealth(t, s)
+	assertHealthyHealthConfig(t, health, s)
+	assertHealthyHealthEvidence(t, health, s)
+}
+
+// assertHealthyHealthConfig checks the reported configuration and directory
+// facts of a fresh healthy store.
+func assertHealthyHealthConfig(t *testing.T, health Health, s *Store) {
+	t.Helper()
 	if !health.Exists || !health.IsDir {
 		t.Fatalf("health = %+v", health)
 	}
@@ -39,6 +44,12 @@ func TestHealthHealthyStore(t *testing.T) {
 	if health.RetentionS != int64(s.Retention/time.Second) {
 		t.Fatalf("retention = %d", health.RetentionS)
 	}
+}
+
+// assertHealthyHealthEvidence checks the usage, retained window and loss verdict
+// of a fresh healthy store.
+func assertHealthyHealthEvidence(t *testing.T, health Health, s *Store) {
+	t.Helper()
 	if health.UsedBytes <= 0 || health.Segments != 1 {
 		t.Fatalf("usage = %d bytes, %d segments", health.UsedBytes, health.Segments)
 	}
@@ -81,7 +92,7 @@ func TestHealthMissingStore(t *testing.T) {
 func TestHealthUnsafeModesAndSymlinks(t *testing.T) {
 	s := testStore(t)
 	mustAppend(t, s, baseEvent())
-	if err := os.Chmod(s.Dir, 0o755); err != nil { //nolint:gosec // G302: the test needs an unsafe directory mode.
+	if err := os.Chmod(s.Dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	health, err := s.Health(context.Background())
@@ -104,7 +115,7 @@ func TestHealthUnsafeModesAndSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	segs := segmentsOf(t, s)
-	if err := os.Chmod(segs[0].path, 0o644); err != nil { //nolint:gosec // G302: the test needs an unsafe segment mode.
+	if err := os.Chmod(segs[0].path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	health, err = s.Health(context.Background())

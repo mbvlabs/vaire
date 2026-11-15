@@ -27,7 +27,7 @@ type Operator struct {
 
 // LoadOperators reads path. A missing file is an empty registry.
 func LoadOperators(path string) (Operators, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed operator registry path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if IsNotExist(err) {
 			return Operators{}, nil

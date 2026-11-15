@@ -17,35 +17,42 @@ func TestProgressPreservesEvidenceWarningsInResult(t *testing.T) {
 	warning := output.Warning{Code: "activity_not_recorded", Message: "activity completion could not be recorded"}
 	for _, mode := range []string{"json", "agent", "human"} {
 		t.Run(mode, func(t *testing.T) {
-			cmd := commandAt(t, "db credentials", "--output", mode)
-			var stdout, stderr bytes.Buffer
-			cmd.SetOut(&stdout)
-			cmd.SetErr(&stderr)
-			p := newProgress(cmd)
-			// Some callers intentionally ignore the RPC reply. The event still
-			// has to survive in the final structured result, not just stderr.
-			p.event(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
-			p.event(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
-			if err := output.OK(cmd, map[string]bool{"rotated": true}, "rotated"); err != nil {
-				t.Fatal(err)
-			}
-			if mode == "human" {
-				if count := strings.Count(stderr.String(), warning.Message); count != 1 || strings.Contains(stdout.String(), warning.Message) {
-					t.Fatalf("warning printed %d times in the result: stdout=%q stderr=%q", count, stdout.String(), stderr.String())
-				}
-				return
-			}
-			var env output.Envelope
-			if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-				t.Fatal(err)
-			}
-			if len(env.Warnings) != 1 || env.Warnings[0] != warning {
-				t.Fatalf("warnings = %+v, want exactly %+v", env.Warnings, warning)
-			}
-			if stderr.Len() != 0 {
-				t.Fatalf("structured output wrote stderr: %q", stderr.String())
-			}
+			assertEvidenceWarningInMode(t, mode, warning)
 		})
+	}
+}
+
+// assertEvidenceWarningInMode checks that a warning delivered twice survives
+// once in mode's output.
+func assertEvidenceWarningInMode(t *testing.T, mode string, warning output.Warning) {
+	t.Helper()
+	cmd := commandAt(t, "db credentials", "--output", mode)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	p := newProgress(cmd)
+	// Some callers intentionally ignore the RPC reply. The event still
+	// has to survive in the final structured result, not just stderr.
+	p.event(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
+	p.event(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
+	if err := output.OK(cmd, map[string]bool{"rotated": true}, "rotated"); err != nil {
+		t.Fatal(err)
+	}
+	if mode == "human" {
+		if count := strings.Count(stderr.String(), warning.Message); count != 1 || strings.Contains(stdout.String(), warning.Message) {
+			t.Fatalf("warning printed %d times in the result: stdout=%q stderr=%q", count, stdout.String(), stderr.String())
+		}
+		return
+	}
+	var env output.Envelope
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Warnings) != 1 || env.Warnings[0] != warning {
+		t.Fatalf("warnings = %+v, want exactly %+v", env.Warnings, warning)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("structured output wrote stderr: %q", stderr.String())
 	}
 }
 
@@ -54,46 +61,58 @@ func TestProgressHumanPrintsEachWarningOnce(t *testing.T) {
 	second := output.Warning{Code: "doctor_check_failed", Message: "the doctor check failed"}
 	for _, mode := range []string{"plain", "rich"} {
 		t.Run(mode, func(t *testing.T) {
-			cmd := commandAt(t, "db credentials")
-			var stdout bytes.Buffer
-			p := &progress{opts: output.Options{Mode: output.ModeHuman}, cmd: cmd, stdout: &stdout}
-			var rendered func() string
-			if mode == "rich" {
-				file, err := os.CreateTemp(t.TempDir(), "live")
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() {
-					ui.Close()
-					_ = file.Close()
-				})
-				p.live = ui.Start(file)
-				p.stderr = file
-				rendered = func() string {
-					raw, err := os.ReadFile(file.Name())
-					if err != nil {
-						t.Fatal(err)
-					}
-					return string(raw)
-				}
-			} else {
-				var stderr bytes.Buffer
-				p.stderr = &stderr
-				rendered = func() string { return stderr.String() }
-			}
-			// The node can deliver the same notice twice; both distinct notices
-			// must still appear.
-			for _, warning := range []output.Warning{first, second, first, first, second} {
-				p.event(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
-			}
-			out := rendered()
-			if count := strings.Count(out, first.Message); count != 1 {
-				t.Fatalf("first warning printed %d times: %q", count, out)
-			}
-			if count := strings.Count(out, second.Message); count != 1 {
-				t.Fatalf("second warning printed %d times: %q", count, out)
-			}
+			p, rendered := warningProgress(t, mode)
+			assertEachWarningOnce(t, p, rendered, first, second)
 		})
+	}
+}
+
+// warningProgress is a human progress writing to mode's stderr: "plain" to a
+// buffer, "rich" to a live terminal file.
+func warningProgress(t *testing.T, mode string) (*progress, func() string) {
+	t.Helper()
+	cmd := commandAt(t, "db credentials")
+	var stdout bytes.Buffer
+	p := &progress{opts: output.Options{Mode: output.ModeHuman}, cmd: cmd, stdout: &stdout}
+	if mode != "rich" {
+		var stderr bytes.Buffer
+		p.stderr = &stderr
+		return p, func() string { return stderr.String() }
+	}
+	file, err := os.CreateTemp(t.TempDir(), "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ui.Close()
+		_ = file.Close()
+	})
+	p.live = ui.Start(file)
+	p.stderr = file
+	return p, func() string {
+		raw, err := os.ReadFile(file.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+}
+
+// assertEachWarningOnce prints repeated warnings and checks each distinct
+// message appears once.
+func assertEachWarningOnce(t *testing.T, p *progress, rendered func() string, first, second output.Warning) {
+	t.Helper()
+	// The node can deliver the same notice twice; both distinct notices
+	// must still appear.
+	for _, warning := range []output.Warning{first, second, first, first, second} {
+		p.event(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
+	}
+	out := rendered()
+	if count := strings.Count(out, first.Message); count != 1 {
+		t.Fatalf("first warning printed %d times: %q", count, out)
+	}
+	if count := strings.Count(out, second.Message); count != 1 {
+		t.Fatalf("second warning printed %d times: %q", count, out)
 	}
 }
 
@@ -492,39 +511,51 @@ func TestNodeRunUntypedFailureCarriesEvidenceWarning(t *testing.T) {
 
 	for _, mode := range []string{"json", "agent"} {
 		t.Run(mode, func(t *testing.T) {
-			cmd := commandAt(t, "node run", "--output", mode)
-			var stdout, stderr bytes.Buffer
-			cmd.SetOut(&stdout)
-			cmd.SetErr(&stderr)
-			if err := output.RenderError(cmd, wrapped); err != nil {
-				t.Fatal(err)
-			}
-			failure := failureEnvelope(t, &stdout)
-			if failure.OK || failure.Error.Code != output.CodeError || failure.Error.Message != untyped.Error() {
-				t.Fatalf("untyped failure classification changed: %+v", failure.Error)
-			}
-			if len(failure.Warnings) != 1 || failure.Warnings[0] != warning {
-				t.Fatalf("warnings = %+v, want %+v", failure.Warnings, warning)
-			}
-			if stderr.Len() != 0 {
-				t.Fatalf("structured output wrote stderr: %q", stderr.String())
-			}
+			assertUntypedFailureStructured(t, mode, wrapped, untyped, warning)
 		})
 	}
 
 	t.Run("human", func(t *testing.T) {
-		cmd := commandAt(t, "node run")
-		var stdout, stderr bytes.Buffer
-		cmd.SetOut(&stdout)
-		cmd.SetErr(&stderr)
-		if err := output.RenderError(cmd, wrapped); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(stderr.String(), "Error: "+untyped.Error()) {
-			t.Fatalf("human output lost the original error: %q", stderr.String())
-		}
-		if !strings.Contains(stderr.String(), "warning: "+warning.Message) {
-			t.Fatalf("human output lost the evidence warning: %q", stderr.String())
-		}
+		assertUntypedFailureHuman(t, wrapped, untyped, warning)
 	})
+}
+
+// assertUntypedFailureStructured checks an untyped failure's envelope.
+func assertUntypedFailureStructured(t *testing.T, mode string, wrapped, untyped error, warning output.Warning) {
+	t.Helper()
+	cmd := commandAt(t, "node run", "--output", mode)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := output.RenderError(cmd, wrapped); err != nil {
+		t.Fatal(err)
+	}
+	failure := failureEnvelope(t, &stdout)
+	if failure.OK || failure.Error.Code != output.CodeError || failure.Error.Message != untyped.Error() {
+		t.Fatalf("untyped failure classification changed: %+v", failure.Error)
+	}
+	if len(failure.Warnings) != 1 || failure.Warnings[0] != warning {
+		t.Fatalf("warnings = %+v, want %+v", failure.Warnings, warning)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("structured output wrote stderr: %q", stderr.String())
+	}
+}
+
+// assertUntypedFailureHuman checks the human rendering of an untyped failure.
+func assertUntypedFailureHuman(t *testing.T, wrapped, untyped error, warning output.Warning) {
+	t.Helper()
+	cmd := commandAt(t, "node run")
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := output.RenderError(cmd, wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "Error: "+untyped.Error()) {
+		t.Fatalf("human output lost the original error: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: "+warning.Message) {
+		t.Fatalf("human output lost the evidence warning: %q", stderr.String())
+	}
 }

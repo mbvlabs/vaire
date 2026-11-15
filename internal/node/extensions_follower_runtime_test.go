@@ -148,9 +148,9 @@ func TestVerifyFollowerRuntimeBooleanSettingFacts(t *testing.T) {
 			cfg.Extensions = map[string]config.ExtensionDefinition{
 				"custom": {
 					Source: catalog.SourcePreinstalled, ExtName: "custom_ext",
-					Settings:     map[string]string{"custom.worker": "true"},
-					CopySafety:   stringPtr(catalog.CopySafetySafe),
-					StandbySafe:  boolPtr(true),
+					Settings:    map[string]string{"custom.worker": "true"},
+					CopySafety:  stringPtr(catalog.CopySafetySafe),
+					StandbySafe: boolPtr(true),
 				},
 			}
 			for i := range cfg.Clusters {

@@ -118,7 +118,7 @@ func RequireTool(cmd *cobra.Command, tool Tool) error {
 		if args[0] == "sudo" && !canPrompt(cmd) {
 			args = append([]string{"sudo", "-n"}, args[1:]...)
 		}
-		child := exec.Command(args[0], args[1:]...) //nolint:gosec // G204: fixed package-manager command for a known tool.
+		child := exec.CommandContext(cmd.Context(), args[0], args[1:]...) //nolint:gosec // G204: fixed package-manager command for a known tool.
 		child.Stdin = os.Stdin
 		child.Stdout = os.Stderr
 		child.Stderr = os.Stderr

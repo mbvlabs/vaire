@@ -49,14 +49,14 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ln, port, err := listenLocal(defaultPostgresPort)
+	ln, port, err := listenLocal(cmd.Context(), defaultPostgresPort)
 	if err != nil {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "No free local port.")
 	}
 	defer func() { _ = ln.Close() }()
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGTERM)
 	defer stop()
-	at := databaseEndpoint(cmd, s, p, db)
+	at := databaseEndpoint(ctx, s, p, db)
 	tlsCfg := pg.TLSConfig(pg.Params{ServerName: at.Hostname, TLSMode: s.ctx.TLSMode})
 	go pg.ServeTLSProxy(ctx, ln, s.dialer, at.addr(pgPort), tlsCfg)
 
@@ -80,7 +80,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	defer signal.Reset(syscall.SIGINT)
 	// usql's default prompt shows the host up to its first dot, which for the
 	// loopback listener is "127"; name the node instead.
-	child := exec.CommandContext(ctx, usql, "--set", consolePrompt(at.Hostname, s.ctx.Name), dsn.String()) //nolint:gosec // G204: usql from PATH or vaire's pinned copy.
+	child := exec.CommandContext(ctx, usql, "--set", consolePrompt(at.Hostname, s.ctx.Name), dsn.String())
 	child.Env = append(os.Environ(), "PGPASSWORD="+password)
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
@@ -90,7 +90,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	if err := child.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return &localenv.SilentExit{Code: exitErr.ExitCode()}
+			return &localenv.SilentExitError{Code: exitErr.ExitCode()}
 		}
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
@@ -99,13 +99,13 @@ func runConsole(cmd *cobra.Command, args []string) error {
 
 // consolePrompt is usql's PROMPT1 variable: its default (%S%N%m%/%R%# ) with
 // the literal node name in place of %m, so pg:user@<node>/<db>=>, with the node's
-// hostname cut at its first dot (db1.example.com is db1), or the context name
+// hostname cut at its first dot (db1.example.com is db1), or the workspace name
 // when the hostname is unknown. % is usql's escape, so it is dropped from the
 // literal.
-func consolePrompt(hostname, contextName string) string {
+func consolePrompt(hostname, workspaceName string) string {
 	node, _, _ := strings.Cut(hostname, ".")
 	if node == "" {
-		node = contextName
+		node = workspaceName
 	}
 	node = strings.ReplaceAll(node, "%", "")
 	return "PROMPT1=%S%N" + node + "%/%R%# "

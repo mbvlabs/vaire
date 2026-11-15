@@ -98,7 +98,7 @@ func assertNoCanary(t *testing.T, dir string, canaries ...string) {
 		if entry.IsDir() || !entry.Type().IsRegular() {
 			return nil
 		}
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: a file inside the test store.
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}

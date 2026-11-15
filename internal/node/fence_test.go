@@ -30,9 +30,7 @@ func fenceForTest(t *testing.T) {
 func TestFencedRefusals(t *testing.T) {
 	table := methods()
 	req := func(name string) rpc.Request { return rpc.Request{Method: name} }
-	if fencedRefuses(table["apply"], req("apply")) {
-		t.Fatal("a node that isn't fenced refuses apply")
-	}
+	reject(t, fencedRefuses(table["apply"], req("apply")), "a node that isn't fenced refuses apply")
 	fenceForTest(t)
 	for _, name := range []string{"apply", "db.create", "config.set", "backup.now", "restore.start", "db.drop"} {
 		if !fencedRefuses(table[name], req(name)) {
@@ -61,12 +59,8 @@ func TestArchivePushRefusesWhenFenced(t *testing.T) {
 	fenceForTest(t)
 	err := ArchivePush("", "app-3f9a1c", "pg_wal/000000010000000000000001")
 	var cli *output.CLIError
-	if !errors.As(err, &cli) || cli.Code != output.CodeNodeFenced {
-		t.Fatalf("fenced archive-push: %v", err)
-	}
-	if !strings.Contains(logged.String(), "fenced by a newer master") {
-		t.Fatalf("no reason on stderr: %q", logged.String())
-	}
+	rejectf(t, !errors.As(err, &cli) || cli.Code != output.CodeNodeFenced, "fenced archive-push: %v", err)
+	rejectf(t, !strings.Contains(logged.String(), "fenced by a newer master"), "no reason on stderr: %q", logged.String())
 }
 
 // Every refusal leaves its reason on stderr, which PostgreSQL's archiver
@@ -103,9 +97,7 @@ func TestArchivePushLogsEveryRefusal(t *testing.T) {
 				t.Fatal("archive-push accepted")
 			}
 			line := logged.String()
-			if !strings.HasPrefix(line, "vaire archive-push: not archiving") || !strings.Contains(line, c.reason) {
-				t.Fatalf("stderr %q lacks %q", line, c.reason)
-			}
+			rejectf(t, !strings.HasPrefix(line, "vaire archive-push: not archiving") || !strings.Contains(line, c.reason), "stderr %q lacks %q", line, c.reason)
 		})
 	}
 }
@@ -127,17 +119,11 @@ func TestArchiveCommandUsesTheWrapper(t *testing.T) {
 	cfg.Backup.Provider = "r2"
 	spec := config.ClusterSpec{Name: "app", Stanza: "app-3f9a1c"}
 	cmd := archiveCommand(t, string(render.BackupConf(cfg, spec)))
-	if cmd != "/usr/local/bin/vaire node archive-push --pgbackrest=/usr/bin/pgbackrest --stanza=app-3f9a1c %p" {
-		t.Fatalf("archive_command: %s", cmd)
-	}
+	rejectf(t, cmd != "/usr/local/bin/vaire node archive-push --pgbackrest=/usr/bin/pgbackrest --stanza=app-3f9a1c %p", "archive_command: %s", cmd)
 	// Regression: pgBackRest's check and backup refuse an archive_command
 	// without "pgbackrest" in it (error 068, archive-command-invalid), so a
 	// new stanza never got its first full backup.
-	if !strings.Contains(cmd, "pgbackrest") {
-		t.Fatalf("pgBackRest rejects archive_command %q: it must contain pgbackrest", cmd)
-	}
+	rejectf(t, !strings.Contains(cmd, "pgbackrest"), "pgBackRest rejects archive_command %q: it must contain pgbackrest", cmd)
 	cfg.Backup.Provider = ""
-	if archiveCommand(t, string(render.BackupConf(cfg, spec))) != "/bin/true" {
-		t.Fatal("no bucket: archive_command isn't /bin/true")
-	}
+	reject(t, archiveCommand(t, string(render.BackupConf(cfg, spec))) != "/bin/true", "no bucket: archive_command isn't /bin/true")
 }

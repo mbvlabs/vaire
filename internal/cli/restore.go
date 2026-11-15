@@ -12,21 +12,21 @@ import (
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
-// recoveryKit returns the context's recovery kit.
-func recoveryKit(name string) (*contexts.BackupCreds, error) {
-	creds, err := contexts.LoadCredentials(name)
+// recoveryKit returns the workspace's recovery kit.
+func recoveryKit(name string) (*workspaces.BackupCreds, error) {
+	creds, err := workspaces.LoadCredentials(name)
 	if err != nil {
 		return nil, err
 	}
 	if creds.Backup == nil || creds.Backup.AccessKeyID == "" {
-		return nil, output.NewError(output.CodeInputRequired, "this context has no recovery kit", output.ExitInput,
+		return nil, output.NewError(output.CodeInputRequired, "this workspace has no recovery kit", output.ExitInput,
 			"Run vaire backup setup, or log in from a transfer bundle that carries the recovery kit (vaire login).").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
@@ -35,16 +35,16 @@ func recoveryKit(name string) (*contexts.BackupCreds, error) {
 
 // dumpIdentity returns the kit's age identity for opening dumps, or an
 // operator-side error when this machine's kit doesn't carry one.
-func dumpIdentity(k *contexts.BackupCreds) (string, error) {
+func dumpIdentity(k *workspaces.BackupCreds) (string, error) {
 	if k.Dumps.AgeIdentity == "" {
-		return "", output.NewError(output.CodeInputRequired, "this context's recovery kit has no dump age identity", output.ExitInput,
+		return "", output.NewError(output.CodeInputRequired, "this workspace's recovery kit has no dump age identity", output.ExitInput,
 			"Dumps open with the age identity from the recovery kit. Run vaire secrets export on the machine that ran vaire backup setup, then vaire login with that bundle here.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing", "secret": steps.SecretBackupAgeIdentity})
 	}
 	return k.Dumps.AgeIdentity, nil
 }
 
-func kitTarget(k *contexts.BackupCreds) backup.Target {
+func kitTarget(k *workspaces.BackupCreds) backup.Target {
 	return backup.Target{Endpoint: k.Endpoint, Region: k.Region, Bucket: k.Bucket, Prefix: k.Prefix, URIStyle: k.URIStyle, KeyID: k.AccessKeyID, Secret: k.SecretAccessKey}
 }
 
@@ -88,33 +88,9 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return parentRun(cmd, args)
 	}
 	db := args[0]
-	kinds := 0
-	params := map[string]any{"database": db, "promote": flagTrue(cmd, "promote")}
-	if flagTrue(cmd, "latest") {
-		kinds++
-		params["kind"] = backup.TargetLatest
-	}
-	if v := stringFlag(cmd, "set"); v != "" {
-		kinds++
-		params["kind"], params["set"] = backup.TargetSet, v
-	}
-	if v := stringFlag(cmd, "dump"); v != "" {
-		kinds++
-		params["kind"], params["dump"] = "dump", v
-	}
-	var target time.Time
-	if v := stringFlag(cmd, "time"); v != "" {
-		kinds++
-		t, err := parseTarget(v, time.Now())
-		if err != nil {
-			return err
-		}
-		target = t
-		params["kind"], params["time"] = backup.TargetTime, t.Format(time.RFC3339)
-	}
-	if kinds != 1 {
-		return output.NewError(output.CodeUsage, "pass exactly one of --time, --latest, --set or --dump", output.ExitUsage,
-			"For example vaire restore "+db+" --time -15m.")
+	params, target, err := restoreParams(cmd, db)
+	if err != nil {
+		return err
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -122,7 +98,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -136,17 +112,9 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if !target.IsZero() {
 		p.note("restore target: " + echoTime(target, cfg.Timezone))
 	}
-	sec := map[string]string{}
-	if params["kind"] == "dump" {
-		kit, err := recoveryKit(s.ctx.Name)
-		if err != nil {
-			return err
-		}
-		ident, err := dumpIdentity(kit)
-		if err != nil {
-			return err
-		}
-		sec[steps.SecretBackupAgeIdentity] = ident
+	sec, err := restoreSecrets(s.ctx.Name, params)
+	if err != nil {
+		return err
 	}
 	token := db + "/restore"
 	if !dryRun(cmd) {
@@ -154,7 +122,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	reply, jobID, detached, err := callJob(cmd, s, p, "restore.start", params, remote.CallOptions{Secrets: sec, Confirm: token, DryRun: dryRun(cmd)})
+	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "restore.start", params, remote.CallOptions{Secrets: sec, Confirm: token, DryRun: dryRun(cmd)})
 	if err != nil {
 		return err
 	}
@@ -162,13 +130,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return detachedResult(cmd, s, jobID, "the restore")
 	}
 	if dryRun(cmd) {
-		var data map[string]any
-		_ = reply.Decode(&data)
-		msg := fmt.Sprintf("dry run: would restore %s to %v beside the live database", db, data["target"])
-		if tl, _ := data["timeline"].(string); tl != "" {
-			msg += ", with --target-timeline=" + tl
-		}
-		return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
+		return restoreDryRunResult(cmd, db, s, reply)
 	}
 	res := restoreJobResult{}
 	jr, err := decodeJob(reply, &res)
@@ -177,20 +139,95 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	}
 	warnings := restoreWarnings(s.warnings, reply.Warnings, res)
 	if res.Phase == "promoted" {
-		return output.Success(cmd, output.Result{
-			Data:     map[string]any{"job_id": jr.JobID, "result": res},
-			Message:  db + " is restored and promoted, " + promotedWhere(res.Promoted.Stanza) + " The replaced data is kept as a stopped cluster until vaire restore cleanup " + db + "; vaire restore undo " + db + " swaps it back.",
-			Warnings: warnings,
-			Next:     []string{"vaire restore undo " + db, "vaire restore cleanup " + db},
-		})
+		return restorePromotedResult(cmd, db, jr, res, warnings)
 	}
+	return restoreReadyResult(cmd, db, params, jr, res, warnings, token)
+}
+
+// restoreParams are the restore.start parameters for the target the flags
+// name, and that target for the note.
+func restoreParams(cmd *cobra.Command, db string) (map[string]any, time.Time, error) {
+	kinds := 0
+	params := map[string]any{"database": db, "promote": flagTrue(cmd, "promote")}
+	var target time.Time
+	if flagTrue(cmd, "latest") {
+		kinds++
+		params["kind"] = backup.TargetLatest
+	}
+	if v := stringFlag(cmd, "set"); v != "" {
+		kinds++
+		params["kind"], params["set"] = backup.TargetSet, v
+	}
+	if v := stringFlag(cmd, "dump"); v != "" {
+		kinds++
+		params["kind"], params["dump"] = "dump", v
+	}
+	if v := stringFlag(cmd, "time"); v != "" {
+		kinds++
+		t, err := parseTarget(v, time.Now())
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		target = t
+		params["kind"], params["time"] = backup.TargetTime, t.Format(time.RFC3339)
+	}
+	if kinds != 1 {
+		return nil, time.Time{}, output.NewError(output.CodeUsage, "pass exactly one of --time, --latest, --set or --dump", output.ExitUsage,
+			"For example vaire restore "+db+" --time -15m.")
+	}
+	return params, target, nil
+}
+
+// restoreSecrets are the secrets a dump restore sends: the age identity that
+// opens the dump.
+func restoreSecrets(workspaceName string, params map[string]any) (map[string]string, error) {
+	sec := map[string]string{}
+	if params["kind"] != "dump" {
+		return sec, nil
+	}
+	kit, err := recoveryKit(workspaceName)
+	if err != nil {
+		return nil, err
+	}
+	ident, err := dumpIdentity(kit)
+	if err != nil {
+		return nil, err
+	}
+	sec[steps.SecretBackupAgeIdentity] = ident
+	return sec, nil
+}
+
+// restoreDryRunResult reports what a dry run would do.
+func restoreDryRunResult(cmd *cobra.Command, db string, s *session, reply remote.Reply) error {
+	var data map[string]any
+	_ = reply.Decode(&data)
+	msg := fmt.Sprintf("dry run: would restore %s to %v beside the live database", db, data["target"])
+	if tl, _ := data["timeline"].(string); tl != "" {
+		msg += ", with --target-timeline=" + tl
+	}
+	return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
+}
+
+// restorePromotedResult reports a restore that cut over to the new copy.
+func restorePromotedResult(cmd *cobra.Command, db string, jr jobReply, res restoreJobResult, warnings []output.Warning) error {
+	return output.Success(cmd, output.Result{
+		Data:     map[string]any{"job_id": jr.JobID, "result": res},
+		Message:  db + " is restored and promoted, " + promotedWhere(res.Promoted.Stanza) + " The replaced data is kept as a stopped cluster until vaire restore cleanup " + db + "; vaire restore undo " + db + " swaps it back.",
+		Warnings: warnings,
+		Next:     []string{"vaire restore undo " + db, "vaire restore cleanup " + db},
+	})
+}
+
+// restoreReadyResult reports the temporary cluster waiting beside the live
+// database.
+func restoreReadyResult(cmd *cobra.Command, db string, params map[string]any, jr jobReply, res restoreJobResult, warnings []output.Warning, token string) error {
 	ready := "the temporary cluster " + res.Restoring + " is ready, paused at the target, beside the live " + db + ", which kept serving."
-	if params["kind"] == backup.TargetLatest {
+	switch params["kind"] {
+	case backup.TargetLatest:
 		// --latest has no target to pause at: the copy keeps replaying the
 		// archived WAL until it is promoted or aborted.
 		ready = "the temporary cluster " + res.Restoring + " is ready, still replaying the latest archived WAL, beside the live " + db + ", which kept serving."
-	}
-	if params["kind"] == "dump" {
+	case "dump":
 		// A dump is loaded as it is: there is no WAL to replay and no target
 		// to pause at.
 		ready = "the temporary cluster " + res.Restoring + " is ready and holds the data of dump " + stringFlag(cmd, "dump") + " (a dump has no WAL to replay), beside the live " + db + ", which kept serving."
@@ -224,9 +261,12 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	var data struct {
 		Restores []struct {
 			backup.Restore
-			Restoring string `json:"restoring_database"`
-			OnPromote string `json:"on_promote"`
-			Tables    []struct {
+			Restoring        string `json:"restoring_database"`
+			OnPromote        string `json:"on_promote"`
+			ApplicationReady *bool  `json:"application_ready,omitempty"`
+			AccessCoverage   string `json:"access_coverage,omitempty"`
+			AccessNotice     string `json:"access_notice,omitempty"`
+			Tables           []struct {
 				Table     string `json:"table"`
 				Live      *int64 `json:"live_rows"`
 				Restoring *int64 `json:"restoring_rows"`
@@ -242,6 +282,9 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 		lines = append(lines, fmt.Sprintf("%s: %s, target %s, started %s", r.Database, r.Phase, r.Target, r.StartedAt))
 		if r.Error != "" {
 			lines = append(lines, "  error: "+r.Error)
+		}
+		if r.AccessNotice != "" {
+			lines = append(lines, "  "+r.AccessNotice)
 		}
 		if len(r.Tables) > 0 {
 			lines = append(lines, fmt.Sprintf("  %-40s %14s %14s", "TABLE (estimated rows)", "LIVE", "RESTORED"))
@@ -293,7 +336,7 @@ func restoreAction(cmd *cobra.Command, db, method, token, action string, done fu
 	}
 	defer s.Close()
 	if action != "" {
-		cfg, _, err := remoteConfig(cmd, s, p)
+		cfg, err := remoteConfig(cmd, s, p)
 		if err != nil {
 			return err
 		}
@@ -487,30 +530,13 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 
 func runDBFork(cmd *cobra.Command, args []string) error {
 	src := args[0]
-	name := stringFlag(cmd, "name")
-	if name == "" {
-		name = src + "_fork_" + time.Now().UTC().Format("200601021504")
+	name, err := forkName(cmd, src)
+	if err != nil {
+		return err
 	}
-	if err := config.CheckDatabaseName(name); err != nil {
-		return output.NewError(output.CodeValidation, "database name "+name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
-	}
-	params := map[string]any{"source": src, "name": name}
-	var at time.Time
-	if v := stringFlag(cmd, "at"); v != "" {
-		t, err := parseTarget(v, time.Now())
-		if err != nil {
-			return err
-		}
-		at = t
-		params["at"] = t.Format(time.RFC3339)
-	}
-	// Sent only when set, so an older node still takes the request.
-	size := stringFlag(cmd, "size")
-	if size != "" {
-		params["size"] = size
-	}
-	if flagTrue(cmd, "allow-overcommit") {
-		params["allow_overcommit"] = true
+	params, at, err := forkParams(cmd, src, name)
+	if err != nil {
+		return err
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -518,34 +544,21 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
-	if size != "" {
-		if spec, ok := cfg.ClusterByName(src); ok {
-			spec.Size, spec.Memory = size, ""
-			if err := checkSizeFlags(cfg, spec); err != nil {
-				return err
-			}
-		}
+	if err := checkForkSize(cfg, src, stringFlag(cmd, "size")); err != nil {
+		return err
 	}
 	if !at.IsZero() {
 		p.note("fork point: " + echoTime(at, cfg.Timezone))
 	}
-	secret, rpc, err := newDatabaseSecret(cfg, name, steps.DatabaseRoles)
+	rpc, secret, err := forkSecrets(cfg, s, name)
 	if err != nil {
 		return err
 	}
-	service, _, generated, err := serviceSecrets(s.ctx.Name)
-	if err != nil {
-		return err
-	}
-	for k, v := range service {
-		rpc[k] = v
-	}
-	s.warnings = append(s.warnings, staleWarning(generated)...)
-	reply, jobID, detached, err := callJob(cmd, s, p, "db.fork", params, remote.CallOptions{Secrets: rpc, DryRun: dryRun(cmd)})
+	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "db.fork", params, remote.CallOptions{Secrets: rpc, DryRun: dryRun(cmd)})
 	if err != nil {
 		return err
 	}
@@ -553,13 +566,89 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		return output.Success(cmd, output.Result{Data: params, Message: "dry run: would fork " + src + " into " + name, Warnings: s.warnings})
 	}
 	if detached {
-		// The passwords are set in the copy before the job ends; they are
-		// only shown here.
-		p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
-		message, human := credentialsMessage(cmd, "fork detached; credentials shown only now", "fork detached; credentials shown only now", name, secret)
-		return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
-			Message: message, Human: human, Warnings: s.warnings, Next: []string{"vaire job follow " + jobID}})
+		return forkDetachedResult(cmd, p, name, jobID, secret, s.warnings)
 	}
+	return forkResult(cmd, reply, src, name, at, secret, s.warnings)
+}
+
+// forkName is the new database's name: --name or one derived from src.
+func forkName(cmd *cobra.Command, src string) (string, error) {
+	name := stringFlag(cmd, "name")
+	if name == "" {
+		name = src + "_fork_" + time.Now().UTC().Format("200601021504")
+	}
+	if err := config.CheckDatabaseName(name); err != nil {
+		return "", output.NewError(output.CodeValidation, "database name "+name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
+	}
+	return name, nil
+}
+
+// forkParams are db.fork's parameters, and the fork point for the note.
+func forkParams(cmd *cobra.Command, src, name string) (map[string]any, time.Time, error) {
+	params := map[string]any{"source": src, "name": name}
+	var at time.Time
+	if v := stringFlag(cmd, "at"); v != "" {
+		t, err := parseTarget(v, time.Now())
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		at = t
+		params["at"] = t.Format(time.RFC3339)
+	}
+	// Sent only when set, so an older node still takes the request.
+	if size := stringFlag(cmd, "size"); size != "" {
+		params["size"] = size
+	}
+	if flagTrue(cmd, "allow-overcommit") {
+		params["allow_overcommit"] = true
+	}
+	return params, at, nil
+}
+
+// checkForkSize refuses a --size the node would refuse anyway.
+func checkForkSize(cfg config.Cluster, src, size string) error {
+	if size == "" {
+		return nil
+	}
+	spec, ok := cfg.ClusterByName(src)
+	if !ok {
+		return nil
+	}
+	spec.Size, spec.Memory = size, ""
+	return checkSizeFlags(cfg, spec)
+}
+
+// forkSecrets are the one-time credentials of the copy and the secrets the
+// job needs.
+func forkSecrets(cfg config.Cluster, s *session, name string) (map[string]string, databaseSecret, error) {
+	secret, rpc, err := newDatabaseSecret(cfg, name, steps.DatabaseRoles)
+	if err != nil {
+		return nil, databaseSecret{}, err
+	}
+	service, _, generated, err := serviceSecrets(s.ctx.Name)
+	if err != nil {
+		return nil, databaseSecret{}, err
+	}
+	for k, v := range service {
+		rpc[k] = v
+	}
+	s.warnings = append(s.warnings, staleWarning(generated)...)
+	return rpc, secret, nil
+}
+
+// forkDetachedResult hands over the credentials of a fork that keeps
+// running.
+func forkDetachedResult(cmd *cobra.Command, p *progress, name, jobID string, secret databaseSecret, warnings []output.Warning) error {
+	// The passwords are set in the copy before the job ends; they are
+	// only shown here.
+	p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
+	message, human := credentialsMessage(cmd, "fork detached; credentials shown only now", "fork detached; credentials shown only now", name, secret)
+	return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
+		Message: message, Human: human, Warnings: warnings, Next: []string{"vaire job follow " + jobID}})
+}
+
+// forkResult reports a finished fork.
+func forkResult(cmd *cobra.Command, reply remote.Reply, src, name string, at time.Time, secret databaseSecret, warnings []output.Warning) error {
 	var res struct {
 		Warnings []output.Warning `json:"warnings"`
 	}
@@ -567,7 +656,7 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	warnings := append(append(s.warnings, reply.Warnings...), res.Warnings...)
+	all := append(append(warnings, reply.Warnings...), res.Warnings...)
 	from := "the live " + src
 	if !at.IsZero() {
 		from = src + " as of " + at.Format(time.RFC3339)
@@ -577,7 +666,7 @@ func runDBFork(cmd *cobra.Command, args []string) error {
 		Data:     map[string]any{"job_id": jr.JobID, "database": secret},
 		Message:  message,
 		Human:    human,
-		Warnings: warnings,
+		Warnings: all,
 	})
 }
 
@@ -600,7 +689,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 	if to == "bucket" {
-		reply, jobID, detached, err := callJob(cmd, s, p, "dump.create", map[string]string{"database": db}, remote.CallOptions{})
+		reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "dump.create", map[string]string{"database": db}, remote.CallOptions{})
 		if err != nil {
 			return err
 		}
@@ -622,7 +711,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	if abs, err := filepath.Abs(out); err == nil {
 		out = abs
 	}
-	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator chose the output path.
+	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Pick a path that does not exist yet with --out.")
 	}
@@ -647,7 +736,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 }
 
 func runDumpList(cmd *cobra.Command, args []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -683,7 +772,7 @@ func dumpListMessage(dumps []backup.Dump) string {
 
 func runDumpGet(cmd *cobra.Command, args []string) error {
 	db, id := args[0], args[1]
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -726,7 +815,8 @@ func drillLines(drill backup.Drill) string {
 	if !restoreChecked && drill.RecoveredTo != "" {
 		header += " recovered to " + drill.DescribeRecoveredTo()
 	}
-	out := []string{header}
+	out := make([]string, 1, 1+len(drill.Checks))
+	out[0] = header
 	for _, c := range drill.Checks {
 		mark := "ok"
 		if !c.OK {

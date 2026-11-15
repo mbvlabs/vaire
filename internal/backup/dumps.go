@@ -231,7 +231,7 @@ func DownloadDump(ctx context.Context, t Target, db, id, identity, out string) (
 		return 0, err
 	}
 	defer func() { _ = r.Close() }()
-	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator chose the output path.
+	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return 0, output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Pick a path that does not exist yet.")
 	}

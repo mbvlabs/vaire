@@ -154,24 +154,24 @@ func phase1Commands() []cmdSpec {
 			args: cobra.MaximumNArgs(1),
 			run:  runLogin,
 			flags: []fl{
-				flagString("name", "", "Context name (default: the server name in the document)"),
+				flagString("name", "", "Workspace name (default: the server name in the document)"),
 				flagBool("passphrase-stdin", "Read the passphrase from stdin"),
 				flagString("passphrase-file", "", "Read the passphrase from a file"),
 			},
 			meta: CommandMeta{
-				Summary:          "Create a local context from a transfer bundle",
+				Summary:          "Create a local workspace from a transfer bundle",
 				WhenToUse:        []string{"Open a server on a machine that has the transfer bundle and its passphrase from the secrets handoff.", "The file or stdin may hold the bundle alone or the whole copied handoff; vaire uses the armored block inside it. The passphrase is never read from the file."},
 				Examples:         []string{"vaire login", "vaire login bundle.txt --passphrase-file pass.txt", "vaire login handoff.md --passphrase-file pass.txt", "vaire login - --passphrase-file pass.txt < bundle.txt"},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
-				SkipDryRunReason: "login writes a local context from a secrets document and has no host change to preview",
+				SkipDryRunReason: "login writes a local workspace from a secrets document and has no host change to preview",
 				Prompts:          true,
 				InteractiveFlags: []string{"--passphrase-stdin", "--passphrase-file"},
 				ErrorCodes:       []string{"secrets_error", "precondition_failed", "input_required", "validation_failed"},
-				Next:             []string{"vaire plan", "vaire context show"},
+				Next:             []string{"vaire plan", "vaire workspace show"},
 			},
 		},
-		contextCommands(),
+		workspaceCommands(),
 		serverCommands(),
 		{
 			use: "plan",
@@ -185,7 +185,7 @@ func phase1Commands() []cmdSpec {
 				Examples:  []string{"vaire plan", "vaire plan --db app", "vaire plan --output json"},
 				Remote:    true,
 				ErrorCodes: []string{
-					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+					"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 					"node_version_mismatch", "precondition_failed",
 				},
 				Next: []string{"vaire apply"},
@@ -198,13 +198,14 @@ func phase1Commands() []cmdSpec {
 				flagStrings("step", "Run only these step ids: <step> for every database, <step>@<db> for one"),
 				flagString("db", "", "Only this database's cluster steps"),
 				flagBool("skip-doctor", "Skip the doctor checks after a full apply"),
-				flagStringArray("confirm", "Confirm restarts: <db>/restart for one database, {server}/restart for every one; repeatable. --yes never satisfies this check"),
+				flagStringArray("confirm", "Confirm <db>/access or restarts: <db>/restart, {server}/restart; repeatable. --yes never satisfies this check"),
 			},
-			meta: CommandMeta{
+			meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 				Summary: "Converge the node to cluster.toml",
 				WhenToUse: []string{
 					"Apply pending steps after plan, a config change, or an upgrade.",
 					"A restart a step needs waits for --confirm <db>/restart, or --confirm {server}/restart, which restarts every database one at a time.",
+					"An existing database's access expansion needs its own --confirm <db>/access. Coordinate migration DDL quiescence before applying it.",
 				},
 				Examples: []string{
 					"vaire apply", "vaire apply --dry-run", "vaire apply --db app",
@@ -218,7 +219,7 @@ func phase1Commands() []cmdSpec {
 				ConfirmToken:     "{db}/restart",
 				NeedsRestart:     "maybe",
 				ErrorCodes: []string{
-					"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+					"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 					"node_version_mismatch", "precondition_failed", "step_failed", "unsafe_action_requires_confirmation",
 					"validation_failed",
 				},
@@ -286,7 +287,7 @@ func phase1Commands() []cmdSpec {
 				flagBool("reset", "Reset pg_stat_statements. Requires --confirm"),
 				flagBool("all-sessions", "Include statements run by internal/administrative roles, including postgres and maintenance roles"),
 			},
-			meta: CommandMeta{
+			meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 				Summary:          "Show statement statistics, or reset them",
 				WhenToUse:        []string{"Find expensive statements. Pass --reset only to clear pg_stat_statements: --confirm <db>/stats with --db, <server>/stats for every database. Statements run by internal/administrative roles (vaire sql, node setup, maintenance, the exporters) are hidden by default, including postgres and maintenance roles even for manually issued work; --all-sessions shows them. Application owner, migrate, app and read-only roles remain visible."},
 				Examples:         []string{"vaire queries --db app --limit 20", "vaire queries --order mean", "vaire queries --all-sessions", "vaire queries --db app --reset --confirm app/stats"},
@@ -349,7 +350,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary: "Open psql as vaire_admin through the WireGuard tunnel, read-only unless --write",
-				WhenToUse: []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; -c before -- is vaire's --context.",
+				WhenToUse: []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; use -- before psql's -c and other flags.",
 					"On a protected database --write asks once, when it starts and before psql connects, for the current 6-digit code from the authenticator app; the session stays writable for its whole length. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). Reads need no code."},
 				Prerequisites: []string{"psql 16 or newer on PATH"},
 				Examples:      []string{"vaire psql --db app", "vaire psql --db app --write", `vaire psql --db app -- -c "select 1"`},
@@ -395,10 +396,10 @@ func phase1Commands() []cmdSpec {
 					use: "status",
 					run: runTunnelStatus,
 					meta: CommandMeta{
-						Summary:    "Show the context's shared tunnel daemon",
+						Summary:    "Show the workspace's shared tunnel daemon",
 						WhenToUse:  []string{"See whether the tunnel daemon runs, which vaire commands use it, its last WireGuard handshake, and when it exits idle."},
 						Examples:   []string{"vaire tunnel status", "vaire tunnel status --output json"},
-						ErrorCodes: []string{"transport_failed", "context_not_found"},
+						ErrorCodes: []string{"transport_failed", "workspace_not_found"},
 					},
 				},
 				{
@@ -408,7 +409,7 @@ func phase1Commands() []cmdSpec {
 						flagBool("force", "Close the tunnel now, dropping the streams of running commands (they re-attach)"),
 					},
 					meta: CommandMeta{
-						Summary: "Stop the context's shared tunnel daemon",
+						Summary: "Stop the workspace's shared tunnel daemon",
 						WhenToUse: []string{
 							"Restart the tunnel: without --force the daemon takes no new commands and exits once the running ones finish; the next command starts a new one.",
 							"--force closes it now. Node work keeps running either way; job commands re-attach and other commands report stream_lost.",
@@ -418,7 +419,7 @@ func phase1Commands() []cmdSpec {
 						Mutating:         true,
 						SkipDryRunCheck:  true,
 						SkipDryRunReason: "stopping the local tunnel daemon changes nothing on the node",
-						ErrorCodes:       []string{"transport_failed", "context_not_found"},
+						ErrorCodes:       []string{"transport_failed", "workspace_not_found"},
 					},
 				},
 				{
@@ -426,14 +427,14 @@ func phase1Commands() []cmdSpec {
 					hidden: true,
 					run:    runTunnelServe,
 					meta: CommandMeta{
-						Summary:          "Run the context's shared tunnel daemon",
-						WhenToUse:        []string{"vaire commands spawn this themselves; it owns the context's only WireGuard device and serves tunnel.sock."},
+						Summary:          "Run the workspace's shared tunnel daemon",
+						WhenToUse:        []string{"vaire commands spawn this themselves; it owns the workspace's only WireGuard device and serves tunnel.sock."},
 						WhenNotToUse:     []string{"Do not run it by hand; any remote command starts it."},
-						Examples:         []string{"vaire tunnel serve --context prod"},
+						Examples:         []string{"vaire tunnel serve --workspace prod"},
 						Mutating:         true,
 						SkipDryRunCheck:  true,
 						SkipDryRunReason: "the daemon only proxies connections into the tunnel",
-						ErrorCodes:       []string{"transport_failed", "context_not_found"},
+						ErrorCodes:       []string{"transport_failed", "workspace_not_found"},
 					},
 				},
 			},
@@ -479,7 +480,7 @@ func phase1Commands() []cmdSpec {
 					flagBool("reveal-passphrase", "Put the bundle passphrase in structured output (required without a terminal)"),
 				},
 				meta: CommandMeta{
-					Summary: "Rebuild the secrets handoff from the local context",
+					Summary: "Rebuild the secrets handoff from the local workspace",
 					WhenToUse: []string{"Replace the stored secrets after a password rotation.",
 						"The whole document is shown, so a human factor is required: the master password set with vaire secrets password set, or a current code from the authenticator app that the node verifies. There is no flag or environment variable for either, so with --json, --no-input or no terminal it is refused (secret_gate_required) and an agent cannot export."},
 					Examples:         []string{"vaire secrets export", "vaire secrets export --out bundle.txt --reveal-passphrase --output json"},
@@ -495,7 +496,7 @@ func phase1Commands() []cmdSpec {
 				run: parentRun,
 				meta: CommandMeta{
 					Summary:   "Set the master password that gates secrets export",
-					WhenToUse: []string{"Guard vaire secrets export and a new handoff with a password that lives only in the context as an argon2id hash."},
+					WhenToUse: []string{"Guard vaire secrets export and a new handoff with a password that lives only in the workspace as an argon2id hash."},
 					Examples:  []string{"vaire secrets password set"},
 				},
 				children: []cmdSpec{{
@@ -597,74 +598,74 @@ func phase1Commands() []cmdSpec {
 	}
 }
 
-func contextCommands() cmdSpec {
+func workspaceCommands() cmdSpec {
 	return cmdSpec{
-		use: "context",
+		use: "workspace",
 		run: parentRun,
 		meta: CommandMeta{
-			Summary:   "List and switch local server contexts",
-			WhenToUse: []string{"Choose which server later commands talk to."},
-			Examples:  []string{"vaire context list", "vaire context use prod"},
+			Summary:   "List and switch local workspaces",
+			WhenToUse: []string{"Choose the workspace whose nodes and databases later commands operate."},
+			Examples:  []string{"vaire workspace list", "vaire workspace use prod"},
 		},
 		children: []cmdSpec{
 			{
 				use: "list",
-				run: runContextList,
+				run: runWorkspaceList,
 				meta: CommandMeta{
-					Summary:   "List local contexts",
+					Summary:   "List local workspaces",
 					WhenToUse: []string{"See which servers this machine can operate."},
-					Examples:  []string{"vaire context list"},
+					Examples:  []string{"vaire workspace list"},
 				},
 			},
 			{
 				use:  "show [name]",
 				args: cobra.MaximumNArgs(1),
-				run:  runContextShow,
+				run:  runWorkspaceShow,
 				meta: CommandMeta{
-					Summary:   "Show one context, or the current context",
-					WhenToUse: []string{"Read addresses, keys' public parts, and the operator name for a context."},
-					Examples:  []string{"vaire context show", "vaire context show prod"},
+					Summary:   "Show one workspace, or the current workspace",
+					WhenToUse: []string{"Read addresses, keys' public parts, node names and the operator name for a workspace."},
+					Examples:  []string{"vaire workspace show", "vaire workspace show prod"},
 				},
 			},
 			{
 				use:  "use <name>",
 				args: cobra.ExactArgs(1),
-				run:  runContextUse,
+				run:  runWorkspaceUse,
 				meta: CommandMeta{
-					Summary:          "Select the current context",
+					Summary:          "Select the current workspace",
 					WhenToUse:        []string{"Point later commands at a different server."},
-					Examples:         []string{"vaire context use prod"},
+					Examples:         []string{"vaire workspace use prod"},
 					Mutating:         true,
 					SkipDryRunCheck:  true,
-					SkipDryRunReason: "use switches the local current-context pointer",
+					SkipDryRunReason: "use switches the local current-workspace pointer",
 				},
 			},
 			{
 				use:  "remove <name>",
 				args: cobra.ExactArgs(1),
-				run:  runContextRemove,
+				run:  runWorkspaceRemove,
 				meta: CommandMeta{
-					Summary:          "Delete a local context",
+					Summary:          "Delete a local workspace",
 					WhenToUse:        []string{"Remove operator credentials for a server from this machine."},
-					Examples:         []string{"vaire context remove prod --confirm prod"},
+					Examples:         []string{"vaire workspace remove prod --confirm prod"},
 					Mutating:         true,
 					Destructive:      true,
 					ConfirmToken:     "{name}",
 					SkipDryRunCheck:  true,
-					SkipDryRunReason: "remove deletes a local context and is guarded by the confirm token",
+					SkipDryRunReason: "remove deletes a local workspace and is guarded by the confirm token",
 				},
 			},
 			{
 				use:  "set-address <ip[:port]>",
 				args: cobra.ExactArgs(1),
-				run:  runContextSetAddress,
+				run:  runWorkspaceSetAddress,
 				flags: []fl{
-					flagString("name", "", "The context (default: the current one)"),
+					flagString("name", "", "The workspace (default: the current one)"),
 				},
 				meta: CommandMeta{
-					Summary:        "Point a context at the server's new public address",
+					Summary:        "Point a workspace at the server's new public address",
 					WhenToUse:      []string{"After the server was rebuilt on a new IP (server init --restore on another machine). In acme mode vaire finds the new address in DNS by itself."},
-					Examples:       []string{"vaire context set-address 198.51.100.7", "vaire context set-address '[2001:db8::7]:51820' --name prod"},
+					Examples:       []string{"vaire workspace set-address 198.51.100.7", "vaire workspace set-address '[2001:db8::7]:51820' --name prod"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Next:           []string{"vaire status"},
@@ -694,7 +695,7 @@ func serverCommands() cmdSpec {
 				flagString("host-key-fingerprint", "", "Expected SHA256 host key fingerprint"),
 				flagBool("accept-new-host-key", "Trust the server host key on first contact"),
 				flagString("answers", "", "Answers file in cluster.toml shape plus bootstrap credentials"),
-				flagString("name", "", "Server name"),
+				flagString("name", "", "Workspace name (independent of --node-name)"),
 				flagString("node-name", "", "The master's node name; its hostname is <node-name>.<domain> (default db1)"),
 				flagString("domain", "", "Base domain: each node is <node>.<domain>"),
 				flagString("admin-user", "", "Admin login user created on the server (default vaire)"),
@@ -717,7 +718,7 @@ func serverCommands() cmdSpec {
 				flagString("db-diff-schedule", "", "systemd OnCalendar for differential database backups"),
 				flagString("tls-mode", "", "acme or self-signed"),
 				flagBool("local", "Initialise this machine as the server"),
-				flagBool("restore", "Rebuild this context's server on a new VPS from its master bundle (Phase 5)"),
+				flagBool("restore", "Rebuild this workspace's server on a new VPS from its master bundle (Phase 5)"),
 				flagString("bundle", "", "With --restore: a bundle name or a time (default: the newest in the bucket)"),
 				flagString("bundle-file", "", "With --restore: rebuild from an exported bundle file (- for stdin) instead of the bucket"),
 				flagBool("old-master-unreachable", "With --restore: skip the check that the old master no longer answers"),
@@ -930,6 +931,24 @@ func dbCommands() cmdSpec {
 			dbFollowCommand(),
 			dbUnfollowCommand(),
 			{
+				use: "access",
+				run: parentRun,
+				meta: CommandMeta{
+					Summary:   "Inspect automatic application access",
+					WhenToUse: []string{"Inspect access coverage without changing grants."},
+					Examples:  []string{"vaire db access show app"},
+					Remote:    true,
+				},
+				children: []cmdSpec{{
+					use: "show <name>", args: cobra.ExactArgs(1), run: runDBAccessShow,
+					meta: CommandMeta{
+						Summary:   "Show observed automatic access coverage",
+						WhenToUse: []string{"Inspect owner defaults, existing-object coverage and uncovered creators without changing grants. Unknown coverage is not installed coverage."},
+						Examples:  []string{"vaire db access show app"}, Remote: true,
+					},
+				}},
+			},
+			{
 				use: "list",
 				run: runDBList,
 				meta: CommandMeta{
@@ -962,6 +981,43 @@ func dbCommands() cmdSpec {
 				},
 			},
 			{
+				use:  "copy [name]",
+				args: cobra.MaximumNArgs(1),
+				run:  runDBCopy,
+				flags: []fl{
+					flagBool("source-url-stdin", "Read one newline-terminated source PostgreSQL URL from stdin (never from argv)"),
+					flagString("source-ca-file", "", "Read a PEM CA certificate for the source from this local file; only its content is sent, as a secret"),
+					flagString("size", "", "Size of the new database's cluster: nano, small, medium, large, xlarge or custom (default [postgres] default_size)"),
+					flagString("memory", "", "Memory for the cluster, such as 768MiB or 2GiB; overrides the size's (custom needs it)"),
+					flagString("profile", "", "Workload profile for its tuning: oltp, mixed or analytics (default [postgres] profile)"),
+					flagBool("allow-overcommit", "Copy even when the new size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
+				},
+				meta: CommandMeta{
+					Summary: "Copy an external PostgreSQL database into a new vaire database",
+					WhenToUse: []string{
+						"Import one external PostgreSQL database as a brand-new vaire database with its own size, roles, passwords, ownership and normal app/read-only access. The source is one consistent read-only snapshot: it is not replicated or cut over, and it is not modified apart from normal read/export load and locks. The destination node runs pg_dump and pg_restore, so the source must be reachable from that server (provider/firewall allowlists). Size means memory, CPU and connections, never a storage quota. Ask interactively for a masked URL or the individual host, port, database, user, password and TLS fields; without a terminal pass one newline-terminated URL on stdin with --source-url-stdin (there is no URL argument or password flag). --source-ca-file supplies certificate content for the node, not a remote path. The summary is redacted and confirmed with --confirm <name>; --yes never confirms it. Source roles, passwords, grants, tablespaces and cluster settings are not imported. A database dump can contain executable SQL, so only copy a trusted source. An existing database or cluster name is never an import target: choose a new name or drop the old one explicitly first. A failed copy may leave a partial target that is retained, never replayed or automatically dropped. The new role passwords are printed once; if the connection is lost, the job starts ambiguously or its outcome is unknown, vaire keeps and prints them with the job id because they may already be in use. job follow shows progress and outcomes only, never passwords.",
+					},
+					WhenNotToUse: []string{"To replace, overwrite or resume into an existing database; for continuous replication or application cutover; for a source reachable only from the operator machine; or for non-PostgreSQL sources. Use vaire restore for a vaire backup, and vaire db fork for a copy of a vaire-managed database."},
+					Examples: []string{
+						"vaire db copy app --source-url-stdin --size small --confirm app < source-url.txt",
+						"printf '%s\\n' \"$SOURCE_URL\" | vaire db copy app --source-url-stdin --size small --confirm app",
+						"vaire db copy app --source-url-stdin --source-ca-file provider-ca.pem --size small --confirm app < source-url.txt",
+						"vaire db copy app --dry-run",
+					},
+					Mutating:         true,
+					SupportsDryRun:   true,
+					Remote:           true,
+					Prompts:          true,
+					InteractiveFlags: []string{"--source-url-stdin", "--source-ca-file"},
+					ConfirmToken:     "{name}",
+					ErrorCodes: []string{
+						"input_required", "validation_failed", "unsafe_action_requires_confirmation",
+						"precondition_failed", "transport_failed", "missing_tool", "step_failed", "error",
+					},
+					Next: []string{"vaire db list", "vaire job follow <job-id>"},
+				},
+			},
+			{
 				use:  "drop <name>",
 				args: cobra.ExactArgs(1),
 				run:  runDBDrop,
@@ -987,14 +1043,16 @@ func dbCommands() cmdSpec {
 				flags: []fl{
 					flagString("size", "", "New size: nano, small, medium, large, xlarge or custom; drops a memory override unless --memory is given"),
 					flagString("memory", "", "New memory for the cluster, such as 768MiB or 2GiB"),
+					flagString("cpu-mode", "", "CPU scheduling: normal or spare"),
+					flagString("cpu-quota", "", "CPU ceiling as a percentage of one CPU, or none"),
 					flagBool("defer-restart", "Apply what changes live now and leave the restart pending"),
 					flagStringArray("confirm", "Confirm the restart: <db>/restart. --yes never satisfies this check"),
 					flagBool("allow-overcommit", "Grow it even when the new size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
 				},
-				meta: CommandMeta{
-					Summary:        "Change a database's size or memory",
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
+					Summary:        "Change a database's size, memory or CPU policy",
 					WhenToUse:      []string{"Give a database more or less memory, CPU weight and connections. The cgroup limits and reload-only settings change live; shared_buffers, max_connections and huge_pages need a restart of that database only, confirmed with --confirm <db>/restart, or left pending with --defer-restart (finish later with vaire apply --db <db> --confirm <db>/restart). A size that couldn't start is refused (would_not_start). A larger size that pushes the databases' sizes past the server's memory budget is refused (precondition_failed, reason memory_overcommitted) with the numbers and the largest larger size that still fits, as a complete command, or says none does; --allow-overcommit grows it anyway with the warning memory_overcommitted. Shrinking is never refused for the budget; shrinking below current use warns (shrink_below_use). vaire config set clusters.<db>.size does the same change without applying it. Shrinking a protected database is refused (database_protected)."},
-					Examples:       []string{"vaire db resize app --size large --confirm app/restart", "vaire db resize app --memory 768MiB --defer-restart", "vaire db resize app --size xlarge --confirm app/restart --allow-overcommit", "vaire db resize app --size small --dry-run"},
+					Examples:       []string{"vaire db resize app --size large --confirm app/restart", "vaire db resize app --cpu-mode spare --cpu-quota 150%", "vaire db resize app --memory 768MiB --defer-restart", "vaire db resize app --size small --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
@@ -1212,7 +1270,7 @@ func tuneCommands() cmdSpec {
 				flags: []fl{
 					flagStringArray("confirm", "Confirm restarts: <db>/restart for one database, {server}/restart for every one; repeatable. --yes never satisfies this check"),
 				},
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Write calculated settings and restart when required",
 					WhenToUse:      []string{"Install tuning after a resize. A restart needs --confirm <db>/restart, or {server}/restart for every database."},
 					Examples:       []string{"vaire tune apply --dry-run", "vaire tune apply --confirm app/restart"},
@@ -1229,7 +1287,7 @@ func tuneCommands() cmdSpec {
 
 // backupErrorCodes are the codes the backup commands can return.
 var backupErrorCodes = []string{
-	"context_not_found", "remote_unreachable", "transport_failed", "node_version_mismatch",
+	"workspace_not_found", "remote_unreachable", "transport_failed", "node_version_mismatch",
 	"precondition_failed", "external_command_failed", "input_required",
 }
 
@@ -1382,7 +1440,7 @@ func restoreCommands() cmdSpec {
 			flagString("dump", "", "Long-retention dump id, for points older than the restore window"),
 			flagBool("promote", "Cut over to the restored copy as soon as it is ready"),
 		},
-		meta: CommandMeta{
+		meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 			Summary: "Rewind one database while the others keep serving",
 			WhenToUse: []string{
 				"Restore one database to a time, the latest WAL, a backup set or a dump. A physical restore of its stanza becomes the temporary cluster <db>__restoring, paused at the target, beside the live database, which keeps serving; inspect it with vaire sql --db <db>__restoring, then promote (a cut-over in place, a few seconds plus the replay to the target) or abort. It needs free space for one copy of the database. A dump (for points older than the window) loads into a new cluster instead, which gets a new stanza on promote.",
@@ -1419,7 +1477,7 @@ func restoreCommands() cmdSpec {
 				use:  "promote <db>",
 				args: cobra.ExactArgs(1),
 				run:  runRestorePromote,
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Cut the live database over to its restored copy",
 					WhenToUse:      []string{"After inspecting <db>__restoring: PgBouncer pauses the database, its cluster stops, the restored data directory takes the live one's place, and the cluster starts, reaches the target and opens on a new timeline, archiving to the same stanza; then a full backup starts. The URL and credentials don't change; the old data is kept as the stopped cluster <db>__pre_restore_<time> for undo."},
 					Examples:       []string{"vaire restore promote app --confirm app/restore"},
@@ -1435,7 +1493,7 @@ func restoreCommands() cmdSpec {
 				use:  "undo <db>",
 				args: cobra.ExactArgs(1),
 				run:  runRestoreUndo,
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Swap the data from before the last promote back in",
 					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists. The old cluster resumes on its old timeline, vaire records it so later restores follow it, and a full backup starts. After a restore from a dump it also takes the old stanza back."},
 					Examples:       []string{"vaire restore undo app --confirm app/restore"},
@@ -1463,7 +1521,7 @@ func restoreCommands() cmdSpec {
 				use:  "cleanup [db]",
 				args: cobra.MaximumNArgs(1),
 				run:  runRestoreCleanup,
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:          "List restore leftovers, or drop those of one database",
 					WhenToUse:        []string{"Free the space of the stopped <db>__pre_restore_* clusters once the restore is good. Without a database it only lists."},
 					Examples:         []string{"vaire restore cleanup", "vaire restore cleanup app --confirm app/cleanup"},
@@ -1571,7 +1629,7 @@ func nodeCommands() cmdSpec {
 					flagString("version", "", "Version to install on the node"),
 					flagBool("rollback", "Restore the previous binary"),
 				},
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:          "Upgrade or roll back the node binary from the operator",
 					WhenToUse:        []string{"Install a node release, or roll back with --rollback and a confirm token."},
 					Examples:         []string{"vaire node upgrade", "vaire node upgrade --rollback --confirm prod/rollback"},
@@ -1692,7 +1750,7 @@ func nodeCommands() cmdSpec {
 				flags: []fl{
 					flagBool("reclaim", "Also write a newer epoch naming this node, fencing the instance that took over (an abandoned rebuild only)"),
 				},
-				meta: CommandMeta{
+				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Lift the epoch fence on this node",
 					WhenToUse:      []string{"Only when the server init --restore that fenced this server was a mistake or was abandoned. Run on the node over break-glass SSH, then vaire apply from your machine. A server that was really replaced is destroyed instead."},
 					Examples:       []string{"sudo vaire node unfence --confirm prod/unfence --dry-run", "sudo vaire node unfence --confirm prod/unfence --reclaim"},

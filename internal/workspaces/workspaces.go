@@ -1,0 +1,409 @@
+// Package workspaces manages the operator's files under $XDG_CONFIG_HOME/vaire
+// (§6.3): the current workspace, its node inventory and credentials, and
+// the pending state of an unfinished server init.
+package workspaces
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/pelletier/go-toml/v2"
+)
+
+// Workspace file names inside workspaces/<name>/.
+const (
+	WorkspaceFile   = "workspace.toml"
+	WGKeyFile       = "wg.key"
+	SSHKeyFile      = "id_ed25519"
+	KnownHostsFile  = "known_hosts"
+	CredentialsFile = "credentials.json"
+)
+
+// EnvWorkspace overrides the current workspace.
+const EnvWorkspace = "VAIRE_WORKSPACE"
+
+// NamePattern is a workspace name. Server names always match it.
+var NamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
+// Workspace is workspaces/<name>/workspace.toml. It points at the master by its
+// hostname. Nodes and Databases are a cache of the master's view, refreshed
+// from it.
+type Workspace struct {
+	Name    string `toml:"-" json:"name"`
+	Server  string `toml:"server" json:"server"`
+	Domain  string `toml:"domain,omitempty" json:"domain,omitempty"`
+	TLSMode string `toml:"tls_mode,omitempty" json:"tls_mode,omitempty"`
+	Nodes   []Node `toml:"nodes" json:"nodes"`
+	// Databases is the placement map: database name to node name.
+	Databases map[string]string `toml:"databases" json:"databases"`
+	Operator  Operator          `toml:"operator" json:"operator"`
+	// AutoUpgradeNodes installs the operator's build on a node that runs a
+	// different one instead of failing with node_version_mismatch.
+	AutoUpgradeNodes bool `toml:"auto_upgrade_nodes" json:"auto_upgrade_nodes"`
+	// LockdownConfirmedAt is set once this machine has confirmed the SSH
+	// lockdown over WireGuard (§8.5). Until then the first remote command
+	// calls ssh.confirm.
+	LockdownConfirmedAt string `toml:"lockdown_confirmed_at,omitempty" json:"lockdown_confirmed_at,omitempty"`
+	// TunnelPersist is how long the workspace's tunnel daemon stays up with
+	// no vaire command using it, as a Go duration ("10m", "0" exits with the
+	// last command). VAIRE_TUNNEL_PERSIST overrides it.
+	TunnelPersist string `toml:"tunnel_persist,omitempty" json:"tunnel_persist,omitempty"`
+	CreatedAt     string `toml:"created_at" json:"created_at"`
+	VaireVersion  string `toml:"vaire_version" json:"vaire_version"`
+}
+
+// Node is one node the workspace can reach: its name, hostname and WireGuard
+// address. The WireGuard endpoint (public address, port and key) is what the
+// tunnel to the master needs.
+type Node struct {
+	Name          string `toml:"name" json:"name"`
+	Role          string `toml:"role" json:"role"`
+	Hostname      string `toml:"hostname" json:"hostname"`
+	PublicAddress string `toml:"public_address" json:"public_address"`
+	WGAddress     string `toml:"wg_address" json:"wg_address"`
+	WGPublicKey   string `toml:"wg_public_key" json:"wg_public_key"`
+	ListenPort    int    `toml:"listen_port" json:"listen_port"`
+}
+
+// Operator is this machine's identity on the server.
+type Operator struct {
+	Name      string `toml:"name" json:"name"`
+	WGAddress string `toml:"wg_address" json:"wg_address"`
+	SSHUser   string `toml:"ssh_user" json:"ssh_user"`
+}
+
+// Credentials is workspaces/<name>/credentials.json: the secrets document's
+// values that are not key files.
+type Credentials struct {
+	SudoPassword string         `json:"sudo_password,omitempty"`
+	Database     *DatabaseCreds `json:"database,omitempty"`
+	Backup       *BackupCreds   `json:"backup,omitempty"`
+	// Metrics is the /metrics endpoint credential (Phase 4). The node keeps
+	// only its bcrypt hash.
+	Metrics *MetricsCreds `json:"metrics,omitempty"`
+	// MasterPasswordHash gates vaire secrets export: an argon2id hash of the
+	// master password, never the password. It travels in the secrets
+	// document so vaire login carries it to another machine.
+	MasterPasswordHash string `json:"master_password_hash,omitempty"`
+}
+
+// RoleMaster is the master node's role.
+const RoleMaster = "master"
+
+// Master returns the master node.
+func (c *Workspace) Master() (Node, bool) {
+	for _, n := range c.Nodes {
+		if n.Role == RoleMaster {
+			return n, true
+		}
+	}
+	if len(c.Nodes) > 0 {
+		return c.Nodes[0], true
+	}
+	return Node{}, false
+}
+
+// DatabaseNode returns the node the placement cache puts database db on, and
+// whether the cache knows db at all. An unknown database gets the master.
+func (c *Workspace) DatabaseNode(db string) (Node, bool) {
+	if name, ok := c.Databases[db]; ok {
+		for _, n := range c.Nodes {
+			if n.Name == name {
+				return n, true
+			}
+		}
+	}
+	n, _ := c.Master()
+	return n, false
+}
+
+// MasterHostname is the master's hostname, which its certificate carries.
+func (c *Workspace) MasterHostname() string {
+	n, _ := c.Master()
+	return n.Hostname
+}
+
+// Root is $XDG_CONFIG_HOME/vaire, default ~/.config/vaire.
+func Root() string {
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return filepath.Join(v, "vaire")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "vaire-config", "vaire")
+	}
+	return filepath.Join(home, ".config", "vaire")
+}
+
+// Dir is workspaces/<name>.
+func Dir(name string) string { return filepath.Join(Root(), "workspaces", name) }
+
+// Path is a file inside workspaces/<name>.
+func Path(name, file string) string { return filepath.Join(Dir(name), file) }
+
+func ensureRoot() error {
+	root := Root()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(root, 0o700) //nolint:gosec // G302: §6.3 sets the config directory to 0700.
+}
+
+// ValidateName checks a workspace name.
+func ValidateName(name string) error {
+	if NamePattern.MatchString(name) {
+		return nil
+	}
+	hint := "Use lower-case letters, digits, '.', '_' and '-'."
+	return output.NewError(
+		output.CodeValidation,
+		"workspace name "+name+" is invalid",
+		output.ExitConfig,
+		hint,
+	).WithDetails(map[string]any{"name": name})
+}
+
+// Exists reports whether workspaces/<name>/workspace.toml exists.
+func Exists(name string) bool {
+	_, err := os.Stat(Path(name, WorkspaceFile))
+	return err == nil
+}
+
+// List returns the workspace names, sorted.
+func List() ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(Root(), "workspaces"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && Exists(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// Load reads workspaces/<name>/workspace.toml.
+func Load(name string) (*Workspace, error) {
+	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(Path(name, WorkspaceFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, notFound(name)
+		}
+		return nil, err
+	}
+	var c Workspace
+	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&c); err != nil {
+		return nil, output.NewError(output.CodeConfig, Path(name, WorkspaceFile)+" does not parse: "+err.Error(), output.ExitConfig,
+			"Recreate the workspace with vaire login.")
+	}
+	c.Name = name
+	return &c, nil
+}
+
+func notFound(name string) *output.CLIError {
+	return output.NewError(
+		output.CodeWorkspaceNotFound,
+		"workspace "+name+" does not exist",
+		output.ExitWorkspace,
+		workspaceHint("List workspaces with vaire workspace list, or create one with vaire login <secrets.age>."),
+	).WithDetails(map[string]any{"workspace": name})
+}
+
+// nodeMarker is the file whose presence makes this machine an vaire node.
+var nodeMarker = config.ClusterPath
+
+// workspaceHint returns hint, or on an vaire node (which holds no workspaces) a
+// hint to run the command from the operator machine instead.
+func workspaceHint(hint string) string {
+	if _, err := os.Stat(nodeMarker); err == nil {
+		return "This machine is an vaire node (" + nodeMarker + " exists) and holds no workspaces. " +
+			"Run this command from your own machine; on the node, use sudo vaire node run or sudo vaire node selfcheck."
+	}
+	return hint
+}
+
+// Save writes workspace.toml.
+func Save(c *Workspace) error {
+	if err := ValidateName(c.Name); err != nil {
+		return err
+	}
+	if err := ensureRoot(); err != nil {
+		return err
+	}
+	raw, err := toml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return transport.WriteSecretFile(Path(c.Name, WorkspaceFile), raw)
+}
+
+// WriteFile writes a 0600 file inside workspaces/<name>.
+func WriteFile(name, file string, data []byte) error {
+	if err := ensureRoot(); err != nil {
+		return err
+	}
+	return transport.WriteSecretFile(Path(name, file), data)
+}
+
+// ReadFile reads a file inside workspaces/<name>.
+func ReadFile(name, file string) ([]byte, error) {
+	return os.ReadFile(Path(name, file))
+}
+
+// SaveCredentials writes credentials.json.
+func SaveCredentials(name string, creds Credentials) error {
+	raw, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return err
+	}
+	return WriteFile(name, CredentialsFile, append(raw, '\n'))
+}
+
+// LoadCredentials reads credentials.json.
+func LoadCredentials(name string) (Credentials, error) {
+	raw, err := ReadFile(name, CredentialsFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Credentials{}, nil
+		}
+		return Credentials{}, err
+	}
+	var creds Credentials
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		return Credentials{}, err
+	}
+	return creds, nil
+}
+
+// SetMasterPasswordHash stores the master password hash for a workspace.
+func SetMasterPasswordHash(name, hash string) error {
+	creds, err := LoadCredentials(name)
+	if err != nil {
+		return err
+	}
+	creds.MasterPasswordHash = hash
+	return SaveCredentials(name, creds)
+}
+
+// Remove deletes workspaces/<name> and clears the current workspace if it was
+// this one.
+func Remove(name string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if !Exists(name) {
+		return notFound(name)
+	}
+	if err := os.RemoveAll(Dir(name)); err != nil {
+		return err
+	}
+	if current, _ := Current(); current == name {
+		return SetCurrent("")
+	}
+	return nil
+}
+
+type rootConfig struct {
+	CurrentWorkspace string `toml:"current_workspace"`
+}
+
+// Current returns config.toml current_workspace.
+func Current() (string, error) {
+	raw, err := os.ReadFile(filepath.Join(Root(), "config.toml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var cfg rootConfig
+	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&cfg); err != nil {
+		return "", output.NewError(output.CodeConfig, "config.toml does not parse: "+err.Error(), output.ExitConfig, "")
+	}
+	return cfg.CurrentWorkspace, nil
+}
+
+// SetCurrent writes config.toml current_workspace.
+func SetCurrent(name string) error {
+	if name != "" && !Exists(name) {
+		return notFound(name)
+	}
+	if err := ensureRoot(); err != nil {
+		return err
+	}
+	raw, err := toml.Marshal(rootConfig{CurrentWorkspace: name})
+	if err != nil {
+		return err
+	}
+	return transport.WriteSecretFile(filepath.Join(Root(), "config.toml"), raw)
+}
+
+// Resolve picks the workspace: the --workspace flag, then VAIRE_WORKSPACE, then the
+// current workspace.
+func Resolve(flag string) (*Workspace, error) {
+	name := strings.TrimSpace(flag)
+	if name == "" {
+		name = strings.TrimSpace(os.Getenv(EnvWorkspace))
+	}
+	if name == "" {
+		current, err := Current()
+		if err != nil {
+			return nil, err
+		}
+		name = current
+	}
+	if name == "" {
+		return nil, output.NewError(
+			output.CodeWorkspaceNotFound,
+			"no workspace is selected",
+			output.ExitWorkspace,
+			workspaceHint("Run vaire login <secrets.age>, or pick one with vaire workspace use <name>."),
+		)
+	}
+	return Load(name)
+}
+
+// FixModes tightens any file in workspaces/<name> that is looser than 0600, and
+// the directory to 0700. It returns a warning per fixed path.
+func FixModes(name string) []output.Warning {
+	var warnings []output.Warning
+	dir := Dir(name)
+	if info, err := os.Stat(dir); err == nil && info.Mode().Perm() != 0o700 {
+		if os.Chmod(dir, 0o700) == nil { //nolint:gosec // G302: §6.3 workspace directories are 0700.
+			warnings = append(warnings, output.Warning{Code: "workspace_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0700", dir, info.Mode().Perm())})
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return warnings
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 == 0 {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if os.Chmod(path, 0o600) == nil {
+			warnings = append(warnings, output.Warning{Code: "workspace_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0600", path, info.Mode().Perm())})
+		}
+	}
+	return warnings
+}

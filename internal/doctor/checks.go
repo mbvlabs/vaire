@@ -258,7 +258,7 @@ func poolerRunning(f Facts) []Result {
 // perCluster runs fn for every cluster, skipping those a rebuilt master
 // hasn't recovered and those not running when needsRunning.
 func perCluster(f Facts, needsRunning bool, fn func(c ClusterFacts) (Status, string, string)) []Result {
-	var out []Result
+	out := make([]Result, 0, len(f.Clusters))
 	for _, c := range f.Clusters {
 		r := Result{DB: c.Name}
 		switch {
@@ -485,7 +485,7 @@ func backupOffsite(f Facts) []Result {
 // backupCluster runs fn for clusters when backups are on.
 func backupCluster(f Facts, fn func(c ClusterFacts) (Status, string, string)) []Result {
 	if !f.BackupConfigured {
-		var out []Result
+		out := make([]Result, 0, len(f.Clusters))
 		for _, c := range f.Clusters {
 			out = append(out, Result{DB: c.Name, Status: Skip, Detail: "backups are not configured"})
 		}
@@ -585,17 +585,23 @@ func backupDrill(f Facts) []Result {
 		if last.Result == backup.DrillFail {
 			return Fail, "the last restore drill failed: " + last.Reason, "vaire restore drill --db " + c.Name
 		}
-		var lastPass time.Time
-		for _, d := range f.Records.Drills {
-			if d.Database == c.Name && d.Result == backup.DrillPass {
-				if t, err := time.Parse(time.RFC3339, d.FinishedAt); err == nil && t.After(lastPass) {
-					lastPass = t
-				}
-			}
-		}
+		lastPass := lastPassingDrill(f.Records, c.Name)
 		if lastPass.IsZero() || f.Now.Sub(lastPass) > DrillMaxAge {
 			return Warn, "no passing drill in 40 days", "vaire restore drill --db " + c.Name
 		}
 		return Pass, "last drill passed " + lastPass.UTC().Format(time.RFC3339), ""
 	})
+}
+
+func lastPassingDrill(records backup.Records, database string) time.Time {
+	var latest time.Time
+	for _, drill := range records.Drills {
+		if drill.Database != database || drill.Result != backup.DrillPass {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339, drill.FinishedAt); err == nil && at.After(latest) {
+			latest = at
+		}
+	}
+	return latest
 }

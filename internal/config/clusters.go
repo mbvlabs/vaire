@@ -33,16 +33,14 @@ type ClusterSpec struct {
 	Memory           string   `toml:"memory"`
 	MemoryMax        string   `toml:"memory_max"`
 	CPUWeight        int      `toml:"cpu_weight"`
+	CPUMode          string   `toml:"cpu_mode,omitempty"`
 	CPUQuota         string   `toml:"cpu_quota"`
 	IOWeight         int      `toml:"io_weight"`
 	Profile          string   `toml:"profile,omitempty"`
 	StatementTimeout string   `toml:"statement_timeout"`
 	Extensions       []string `toml:"extensions"`
-	// RecoveryExtensions is the operator's explicit, complete extension
-	// requirement declaration for restore points older than vaire's
-	// recorded coverage. nil means absent (unknown, not "none"); a pointer
-	// to an empty list means the operator asserts the point used no
-	// extensions. It is resolved through the same [extensions] definitions.
+	// RecoveryExtensions declares requirements outside recorded coverage.
+	// Nil means unknown, rather than an explicit empty declaration.
 	RecoveryExtensions *[]string         `toml:"recovery_extensions,omitempty" json:"recovery_extensions,omitempty"`
 	PoolSize           int               `toml:"pool_size"`
 	SessionPoolSize    int               `toml:"session_pool_size"`
@@ -182,54 +180,72 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 	names, ports, stanzas := map[string]bool{}, map[int]string{}, map[string]bool{}
 	for i, s := range c.Clusters {
 		at := fmt.Sprintf("clusters[%d]", i)
-		if err := CheckDatabaseName(s.Name); err != nil {
-			add("%s.name %q %v", at, s.Name, err)
-		}
-		if names[s.Name] {
-			add("%s.name %q is a duplicate", at, s.Name)
-		}
-		names[s.Name] = true
-		if s.Node != master.Name {
-			add("%s.node %q must be the master %q: workers arrive in Phase 10", at, s.Node, master.Name)
-		}
-		if !s.IsFollower() && s.FollowGeneration != "" {
-			add("%s.follow_generation is managed by vaire and only a follower may have one", at)
-		}
-		if s.Port < ClusterPortMin || s.Port > ClusterPortMax {
-			add("%s.port %d must be %d-%d", at, s.Port, ClusterPortMin, ClusterPortMax)
-		} else if other, taken := ports[s.Port]; taken {
-			add("%s.port %d is already used by %s", at, s.Port, other)
-		}
-		ports[s.Port] = s.Name
-		switch {
-		case s.IsFollower():
-			c.validateFollower(add, at, s)
-		case !stanzaPattern.MatchString(s.Stanza) || !strings.HasPrefix(s.Stanza, s.Name+"-"):
-			add("%s.stanza %q must be %s-<6 hex>", at, s.Stanza, s.Name)
-		}
-		if s.Stanza != "" && stanzas[s.Stanza] {
-			add("%s.stanza %q is a duplicate", at, s.Stanza)
-		}
-		stanzas[s.Stanza] = true
+		c.validateClusterIdentity(add, at, s, master.Name, names)
+		c.validateClusterPlacement(add, at, s, ports, stanzas)
 		c.validateClusterResources(add, at, s)
-		if s.Profile != "" {
-			if err := checkProfile(s.Profile); err != nil {
-				add("%s.profile %q %v", at, s.Profile, err)
-			}
-		}
-		if !durationPattern.MatchString(s.StatementTimeout) {
-			add("%s.statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", at, s.StatementTimeout)
-		}
-		c.validateExtensionSelection(add, at, s)
-		for key := range s.Settings {
-			if !SettingKeyPattern.MatchString(key) {
-				add("%s.settings key %q must match %s", at, key, SettingKeyPattern)
-			}
-			if isReservedSetting(key) {
-				add("%s.settings key %q is managed by vaire and cannot be overridden", at, key)
-			}
-		}
+		c.validateClusterRuntime(add, at, s)
 		c.validateClusterBackup(add, at, s.Name, s.Backup)
+	}
+}
+
+// validateClusterIdentity checks the entry's name, its node and the keys only
+// db follow may write.
+func (c Cluster) validateClusterIdentity(add func(string, ...any), at string, s ClusterSpec, master string, names map[string]bool) {
+	if err := CheckDatabaseName(s.Name); err != nil {
+		add("%s.name %q %v", at, s.Name, err)
+	}
+	if names[s.Name] {
+		add("%s.name %q is a duplicate", at, s.Name)
+	}
+	names[s.Name] = true
+	if s.Node != master {
+		add("%s.node %q must be the master %q: workers arrive in Phase 10", at, s.Node, master)
+	}
+	if !s.IsFollower() && s.FollowGeneration != "" {
+		add("%s.follow_generation is managed by vaire and only a follower may have one", at)
+	}
+}
+
+// validateClusterPlacement checks the entry's port and stanza, including the
+// uniqueness the maps track across entries.
+func (c Cluster) validateClusterPlacement(add func(string, ...any), at string, s ClusterSpec, ports map[int]string, stanzas map[string]bool) {
+	if s.Port < ClusterPortMin || s.Port > ClusterPortMax {
+		add("%s.port %d must be %d-%d", at, s.Port, ClusterPortMin, ClusterPortMax)
+	} else if other, taken := ports[s.Port]; taken {
+		add("%s.port %d is already used by %s", at, s.Port, other)
+	}
+	ports[s.Port] = s.Name
+	switch {
+	case s.IsFollower():
+		c.validateFollower(add, at, s)
+	case !stanzaPattern.MatchString(s.Stanza) || !strings.HasPrefix(s.Stanza, s.Name+"-"):
+		add("%s.stanza %q must be %s-<6 hex>", at, s.Stanza, s.Name)
+	}
+	if s.Stanza != "" && stanzas[s.Stanza] {
+		add("%s.stanza %q is a duplicate", at, s.Stanza)
+	}
+	stanzas[s.Stanza] = true
+}
+
+// validateClusterRuntime checks the entry's profile, statement timeout,
+// extensions and settings keys.
+func (c Cluster) validateClusterRuntime(add func(string, ...any), at string, s ClusterSpec) {
+	if s.Profile != "" {
+		if err := checkProfile(s.Profile); err != nil {
+			add("%s.profile %q %v", at, s.Profile, err)
+		}
+	}
+	if !durationPattern.MatchString(s.StatementTimeout) {
+		add("%s.statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", at, s.StatementTimeout)
+	}
+	c.validateExtensionSelection(add, at, s)
+	for key := range s.Settings {
+		if !SettingKeyPattern.MatchString(key) {
+			add("%s.settings key %q must match %s", at, key, SettingKeyPattern)
+		}
+		if isReservedSetting(key) {
+			add("%s.settings key %q is managed by vaire and cannot be overridden", at, key)
+		}
 	}
 }
 
@@ -241,9 +257,6 @@ func (c Cluster) validateClusterResources(add func(string, ...any), at string, s
 	}
 	if s.IOWeight < 0 || s.IOWeight > 10000 {
 		add("%s.io_weight %d must be 0 (the default 100) or 1-10000", at, s.IOWeight)
-	}
-	if s.CPUQuota != "" && !cpuQuotaPattern.MatchString(s.CPUQuota) {
-		add("%s.cpu_quota %q must be a percentage such as 150%%", at, s.CPUQuota)
 	}
 	if s.PoolSize < 0 {
 		add("%s.pool_size must not be negative", at)

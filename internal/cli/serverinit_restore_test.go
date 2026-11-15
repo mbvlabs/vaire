@@ -7,8 +7,8 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 // The real master bundle path must keep global descriptors and all three
@@ -60,8 +60,8 @@ func TestRestoreConfigKeepsExtensionIntent(t *testing.T) {
 				name: "prod",
 				restore: &restoreRun{
 					bundle: bundle,
-					ctx:    &contexts.Context{Server: "prod"},
-					state:  &contexts.RestoreProgress{NewAddress: "203.0.113.20"},
+					ctx:    &workspaces.Workspace{Server: "prod"},
+					state:  &workspaces.RestoreProgress{NewAddress: "203.0.113.20"},
 				},
 			}
 			if err := r.restoreConfig(); err != nil {
@@ -111,7 +111,7 @@ func TestRestoreResultDataNoBucketOrdersFollowersFirst(t *testing.T) {
 	for _, clusters := range [][]config.ClusterSpec{{source, follower}, {follower, source}} {
 		cfg := config.DefaultCluster()
 		cfg.Clusters = clusters
-		r := &initRun{cfg: cfg, restore: &restoreRun{state: &contexts.RestoreProgress{}}}
+		r := &initRun{cfg: cfg, restore: &restoreRun{state: &workspaces.RestoreProgress{}}}
 		if got := r.restoreResultData().Next; !slices.Equal(got, want) {
 			t.Fatalf("configuration %v:\n got %v\nwant %v", clusters, got, want)
 		}

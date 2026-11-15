@@ -31,12 +31,8 @@ func TestPruneBundles(t *testing.T) {
 	var deleted []string
 	n, err := pruneBundles(context.Background(), list, now, config.MasterBackup{RetentionDays: 30, RetentionWeeks: 52, LocalKeep: 10},
 		func(name string) error { deleted = append(deleted, name); return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != len(deleted) {
-		t.Fatalf("n %d, deleted %v", n, deleted)
-	}
+	reject(t, err != nil, err)
+	rejectf(t, n != len(deleted), "n %d, deleted %v", n, deleted)
 	for _, keep := range []string{at(0, 2), at(1, 2), list[5].Name} {
 		if slices.Contains(deleted, keep) {
 			t.Errorf("deleted %s", keep)
@@ -57,9 +53,7 @@ func TestPruneKeepsTheNewestThreeWhateverTheirAge(t *testing.T) {
 	}
 	n, err := pruneBundles(context.Background(), list, now, config.MasterBackup{RetentionDays: 30, RetentionWeeks: 52},
 		func(string) error { return nil })
-	if err != nil || n != 0 {
-		t.Fatalf("pruned %d of three old bundles (%v)", n, err)
-	}
+	rejectf(t, err != nil || n != 0, "pruned %d of three old bundles (%v)", n, err)
 }
 
 // A run builds a new bundle when the content changed, there is none, the last

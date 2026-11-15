@@ -11,12 +11,8 @@ import (
 func reasonOf(t *testing.T, err error) string {
 	t.Helper()
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) {
-		t.Fatalf("error %v is not a CLIError", err)
-	}
-	if cliErr.Code != output.CodePrecondition {
-		t.Fatalf("code = %s, want %s", cliErr.Code, output.CodePrecondition)
-	}
+	rejectf(t, !errors.As(err, &cliErr), "error %v is not a CLIError", err)
+	rejectf(t, cliErr.Code != output.CodePrecondition, "code = %s, want %s", cliErr.Code, output.CodePrecondition)
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
 	return reason
@@ -37,21 +33,15 @@ var (
 
 func TestPlanUndoAfterPromote(t *testing.T) {
 	u, resuming, err := planUndo(records([]backup.Leftover{promoted}, nil), "app2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resuming || u.From.Name != promoted.Name {
-		t.Fatalf("got resuming=%v from=%s, want a fresh undo from %s", resuming, u.From.Name, promoted.Name)
-	}
+	reject(t, err != nil, err)
+	rejectf(t, resuming || u.From.Name != promoted.Name, "got resuming=%v from=%s, want a fresh undo from %s", resuming, u.From.Name, promoted.Name)
 }
 
 func TestPlanUndoRefusesCompletedUndo(t *testing.T) {
 	// A completed undo removes the promote's leftover and records the
 	// restored data as an undo leftover; a second undo must not swap it in.
 	_, _, err := planUndo(records([]backup.Leftover{undone}, nil), "app2")
-	if err == nil {
-		t.Fatal("a second undo was allowed")
-	}
+	reject(t, err == nil, "a second undo was allowed")
 	if r := reasonOf(t, err); r != "already_undone" {
 		t.Fatalf("reason = %s, want already_undone", r)
 	}
@@ -68,23 +58,15 @@ func TestPlanUndoResumesInterruptedUndo(t *testing.T) {
 	rec := backup.Undo{From: promoted, Aside: "app2__pre_restore_20261014T110000", StartedAt: "2026-10-14T11:00:00Z"}
 	for _, leftovers := range [][]backup.Leftover{{promoted}, nil, {undone}} {
 		u, resuming, err := planUndo(records(leftovers, map[string]backup.Undo{"app2": rec}), "app2")
-		if err != nil {
-			t.Fatalf("leftovers %v: %v", leftovers, err)
-		}
-		if !resuming || u.From.Name != promoted.Name || u.Aside != rec.Aside {
-			t.Fatalf("leftovers %v: got resuming=%v from=%s aside=%s, want the recorded undo", leftovers, resuming, u.From.Name, u.Aside)
-		}
+		rejectf(t, err != nil, "leftovers %v: %v", leftovers, err)
+		rejectf(t, !resuming || u.From.Name != promoted.Name || u.Aside != rec.Aside, "leftovers %v: got resuming=%v from=%s aside=%s, want the recorded undo", leftovers, resuming, u.From.Name, u.Aside)
 	}
 }
 
 func TestPlanUndoAfterUndoThenNewPromote(t *testing.T) {
 	u, resuming, err := planUndo(records([]backup.Leftover{undone, promoted2}, nil), "app2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resuming || u.From.Name != promoted2.Name {
-		t.Fatalf("got from=%s, want %s", u.From.Name, promoted2.Name)
-	}
+	reject(t, err != nil, err)
+	rejectf(t, resuming || u.From.Name != promoted2.Name, "got from=%s, want %s", u.From.Name, promoted2.Name)
 }
 
 func TestPlanUndoNoLeftover(t *testing.T) {

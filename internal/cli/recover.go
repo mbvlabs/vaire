@@ -90,16 +90,9 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 	if !all && len(args) == 0 {
 		return output.NewError(output.CodeUsage, "name the databases to recover, or pass --all", output.ExitUsage, "For example vaire db recover --all.")
 	}
-	var at string
-	if v := stringFlag(cmd, "time"); v != "" {
-		t, err := parseTarget(v, time.Now())
-		if err != nil {
-			return err
-		}
-		at = t.UTC().Format(time.RFC3339)
-		if all || len(args) != 1 {
-			return output.NewError(output.CodeUsage, "--time recovers one database", output.ExitUsage, "Name one database with --time.")
-		}
+	at, err := recoverTarget(cmd, args, all)
+	if err != nil {
+		return err
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -109,21 +102,14 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 	defer s.Close()
 	dbs := args
 	if all {
-		reply, err := p.call(commandContext(cmd), s.node, "db.list", nil, remote.CallOptions{OnEvent: p.event})
+		var warnings []output.Warning
+		dbs, warnings, err = recoverAwaiting(cmd, p, s, args)
 		if err != nil {
 			return err
 		}
-		var data struct {
-			Databases []databaseInfo `json:"databases"`
-		}
-		if err := reply.Decode(&data); err != nil {
-			return err
-		}
-		dbs = recoverOrder(data.Databases, args)
 		if len(dbs) == 0 {
-			return output.Success(cmd, output.Result{Data: map[string]any{"recovered": []string{}}, Message: "no database awaits recovery", Warnings: append(s.warnings, reply.Warnings...)})
+			return output.Success(cmd, output.Result{Data: map[string]any{"recovered": []string{}}, Message: "no database awaits recovery", Warnings: warnings})
 		}
-		p.note("recovering, in order: " + strings.Join(dbs, ", "))
 	}
 	secretValues, generated, err := recoverSecrets(s.ctx.Name)
 	if err != nil {
@@ -141,71 +127,169 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 	// next recovery doesn't wait for the heavy-I/O lock.
 	noFull := flagTrue(cmd, "no-full") || len(dbs) > 1
 	start := time.Now()
-	var outcomes []dbJobOutcome
-	var lines []string
 	warnings := append(append([]output.Warning(nil), s.warnings...), staleWarning(generated)...)
-	for _, db := range dbs {
-		if len(dbs) > 1 {
-			p.note(db + ":")
-		}
-		params := map[string]any{"database": db, "time": at, "no_promote": flagTrue(cmd, "no-promote"), "no_full": noFull}
-		reply, jobID, detached, err := callJob(cmd, s, p, "db.recover", params, opts)
-		if detached {
-			return detachedResult(cmd, s, jobID, "the recovery of "+db)
-		}
-		o := dbJobOutcome{Database: db, JobID: jobID}
-		if err == nil && dryRun(cmd) {
-			var data map[string]any
-			_ = reply.Decode(&data)
-			o.Result = data
-			lines = append(lines, fmt.Sprintf("%s: would recover from %v to %v", db, data["stanza"], data["target"]))
-			outcomes = append(outcomes, o)
-			continue
-		}
-		if err == nil {
-			var res map[string]any
-			var jr jobReply
-			if jr, err = decodeJob(reply, &res); err == nil {
-				o.JobID, o.Result = jr.JobID, res
-				lines = append(lines, recoverLine(db, res))
-				warnings = append(warnings, reply.Warnings...)
-				warnings = append(warnings, recoverWarnings(db, res)...)
-			}
-		}
-		if err != nil {
-			o.Error = errorBody(err)
-			lines = append(lines, db+": "+o.Error.Message)
-		}
-		outcomes = append(outcomes, o)
+	got := recoverEvery(cmd, s, p, dbs, at, noFull, opts, warnings)
+	if got.detached {
+		return detachedResult(cmd, s, got.detachID, "the recovery of "+got.detachDB)
 	}
+	outcomes, lines, warnings := got.outcomes, got.lines, got.warnings
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]any{"databases": outcomes, "dry_run": true}, Message: strings.Join(lines, "\n"), Warnings: warnings})
 	}
 	recovered := recoveredNames(outcomes)
 	toBackUp := withStanza(outcomes)
-	if len(dbs) > 1 && !flagTrue(cmd, "no-full") && !flagTrue(cmd, "no-promote") && len(toBackUp) > 0 {
-		p.note("taking a full backup of each recovered database")
-		fulls, fullLines, fullWarnings, detached := eachDatabase(cmd, s, p, toBackUp, "backup.now",
-			func(db string) any { return recoverFullParams(db) },
-			func(raw []byte) (any, string, error) { return json.RawMessage(raw), "full backup done", nil })
-		if detached != nil {
-			return detachedResult(cmd, s, *detached, "the full backups")
-		}
-		for i, f := range fulls {
-			if f.Error != nil {
-				warnings = append(warnings, output.Warning{Code: "full_backup_failed", Message: f.Database + ": " + f.Error.Message + "; run vaire backup now --db " + f.Database + " --type full"})
-			} else if i < len(fullLines) {
-				lines = append(lines, f.Database+": "+fullLines[i])
-			}
-		}
-		warnings = append(warnings, fullWarnings...)
+	lines, warnings, detachID, detached := recoverFulls(cmd, s, p, dbs, toBackUp, lines, warnings)
+	if detached {
+		return detachedResult(cmd, s, detachID, "the full backups")
 	}
+	if len(recovered) == len(dbs) {
+		return recoverSuccess(cmd, outcomes, lines, warnings, start)
+	}
+	return failedOutcomes("recover", "databases", outcomes)
+}
+
+// recoverOutcomes are the results of one run's per-database recovery jobs.
+type recoverOutcomes struct {
+	outcomes []dbJobOutcome
+	lines    []string
+	warnings []output.Warning
+	detachID string
+	detachDB string
+	detached bool
+}
+
+// recoverEvery recovers every database in order.
+func recoverEvery(cmd *cobra.Command, s *session, p *progress, dbs []string, at string, noFull bool, opts remote.CallOptions, warnings []output.Warning) recoverOutcomes {
+	var got recoverOutcomes
+	got.warnings = warnings
+	for _, db := range dbs {
+		if len(dbs) > 1 {
+			p.note(db + ":")
+		}
+		o, moreLines, moreWarnings, detachID, detached := recoverOne(cmd, s, p, db, at, noFull, opts)
+		if detached {
+			got.detachID, got.detachDB, got.detached = detachID, db, true
+			return got
+		}
+		got.outcomes = append(got.outcomes, o)
+		got.lines = append(got.lines, moreLines...)
+		got.warnings = append(got.warnings, moreWarnings...)
+	}
+	return got
+}
+
+// recoverFulls takes a full backup of every recovered database with a stanza,
+// reporting the lines, warnings and a detached job id.
+func recoverFulls(cmd *cobra.Command, s *session, p *progress, dbs, toBackUp, lines []string, warnings []output.Warning) ([]string, []output.Warning, string, bool) {
+	if len(dbs) <= 1 || flagTrue(cmd, "no-full") || flagTrue(cmd, "no-promote") || len(toBackUp) == 0 {
+		return lines, warnings, "", false
+	}
+	p.note("taking a full backup of each recovered database")
+	fulls, fullLines, fullWarnings, detached := eachDatabase(cmd, s, p, toBackUp, "backup.now",
+		func(db string) any { return recoverFullParams(db) },
+		func(raw []byte) (any, string, error) { return json.RawMessage(raw), "full backup done", nil })
+	if detached != nil {
+		return lines, warnings, *detached, true
+	}
+	moreLines, moreWarnings := fullBackupResults(fulls, fullLines)
+	lines = append(lines, moreLines...)
+	warnings = append(warnings, moreWarnings...)
+	warnings = append(warnings, fullWarnings...)
+	return lines, warnings, "", false
+}
+
+// recoverSuccess is the run's result once every database is back.
+func recoverSuccess(cmd *cobra.Command, outcomes []dbJobOutcome, lines []string, warnings []output.Warning, start time.Time) error {
 	data := map[string]any{"databases": outcomes, "duration_s": int64(time.Since(start).Seconds())}
 	message := strings.Join(append(lines, fmt.Sprintf("took %s", time.Since(start).Round(time.Second))), "\n")
-	if failed := len(dbs) - len(recovered); failed > 0 {
-		return failedOutcomes("recover", "databases", outcomes)
-	}
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: []string{"vaire db list", "vaire doctor"}})
+}
+
+// recoverTarget is --time as the UTC RFC 3339 the node takes, or "".
+func recoverTarget(cmd *cobra.Command, args []string, all bool) (string, error) {
+	v := stringFlag(cmd, "time")
+	if v == "" {
+		return "", nil
+	}
+	t, err := parseTarget(v, time.Now())
+	if err != nil {
+		return "", err
+	}
+	if all || len(args) != 1 {
+		return "", output.NewError(output.CodeUsage, "--time recovers one database", output.ExitUsage, "Name one database with --time.")
+	}
+	return t.UTC().Format(time.RFC3339), nil
+}
+
+// recoverAwaiting lists the databases that await recovery, in order. Its
+// warnings are the run's own when there is nothing to do.
+func recoverAwaiting(cmd *cobra.Command, p *progress, s *session, args []string) ([]string, []output.Warning, error) {
+	reply, err := p.call(commandContext(cmd), s.node, "db.list", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return nil, nil, err
+	}
+	var data struct {
+		Databases []databaseInfo `json:"databases"`
+	}
+	if err := reply.Decode(&data); err != nil {
+		return nil, nil, err
+	}
+	dbs := recoverOrder(data.Databases, args)
+	if len(dbs) == 0 {
+		return nil, append(s.warnings, reply.Warnings...), nil
+	}
+	p.note("recovering, in order: " + strings.Join(dbs, ", "))
+	return dbs, nil, nil
+}
+
+// recoverOne recovers one database, returning its outcome, its line and the
+// warnings of its job. detached reports the Ctrl-C case.
+func recoverOne(cmd *cobra.Command, s *session, p *progress, db, at string, noFull bool, opts remote.CallOptions) (dbJobOutcome, []string, []output.Warning, string, bool) {
+	params := map[string]any{"database": db, "time": at, "no_promote": flagTrue(cmd, "no-promote"), "no_full": noFull}
+	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "db.recover", params, opts)
+	if detached {
+		return dbJobOutcome{}, nil, nil, jobID, true
+	}
+	o := dbJobOutcome{Database: db, JobID: jobID}
+	var lines []string
+	var warnings []output.Warning
+	if err == nil && dryRun(cmd) {
+		var data map[string]any
+		_ = reply.Decode(&data)
+		o.Result = data
+		return o, []string{fmt.Sprintf("%s: would recover from %v to %v", db, data["stanza"], data["target"])}, nil, "", false
+	}
+	if err == nil {
+		var res map[string]any
+		var jr jobReply
+		if jr, err = decodeJob(reply, &res); err == nil {
+			o.JobID, o.Result = jr.JobID, res
+			lines = append(lines, recoverLine(db, res))
+			warnings = append(warnings, reply.Warnings...)
+			warnings = append(warnings, recoverWarnings(db, res)...)
+		}
+	}
+	if err != nil {
+		o.Error = errorBody(err)
+		lines = append(lines, db+": "+o.Error.Message)
+	}
+	return o, lines, warnings, "", false
+}
+
+// fullBackupResults are the lines and warnings of the full backups taken
+// after a multi-database recovery.
+func fullBackupResults(fulls []dbJobOutcome, fullLines []string) ([]string, []output.Warning) {
+	var lines []string
+	var warnings []output.Warning
+	for i, f := range fulls {
+		switch {
+		case f.Error != nil:
+			warnings = append(warnings, output.Warning{Code: "full_backup_failed", Message: f.Database + ": " + f.Error.Message + "; run vaire backup now --db " + f.Database + " --type full"})
+		case i < len(fullLines):
+			lines = append(lines, f.Database+": "+fullLines[i])
+		}
+	}
+	return lines, warnings
 }
 
 // recoverSecrets are the secrets db.recover sends: what an apply sends,
@@ -214,8 +298,8 @@ func runDBRecover(cmd *cobra.Command, args []string) error {
 // from these, and metrics-v1 and pgbackrest-v1 take the /metrics hash and
 // the recovery kit where the node lacks them. It also returns what the
 // top-up generated, for the secrets_document_stale warning.
-func recoverSecrets(contextName string) (map[string]string, []string, error) {
-	values, creds, generated, err := serviceSecrets(contextName)
+func recoverSecrets(workspaceName string) (map[string]string, []string, error) {
+	values, creds, generated, err := serviceSecrets(workspaceName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -273,6 +357,9 @@ func recoverLine(db string, res map[string]any) string {
 	line := db + ": recovered"
 	if res["phase"] == "ready" {
 		line = db + ": ready to inspect as " + fmt.Sprint(res["restoring"]) + "; vaire restore promote " + db + " finishes it"
+		if notice, _ := res["access_notice"].(string); notice != "" {
+			line += "; " + notice
+		}
 	} else {
 		if t, _ := res["recovered_to"].(string); t != "" {
 			line += " to " + t
@@ -294,19 +381,7 @@ func recoverLine(db string, res map[string]any) string {
 // the full backup after the cut-over), nested in its promoted result, and a
 // follower recovery's warnings, which keep their codes and messages.
 func recoverWarnings(db string, res map[string]any) []output.Warning {
-	var out []output.Warning
-	if promoted, ok := res["promoted"].(map[string]any); ok {
-		if w, ok := promoted["warning"].(map[string]any); ok {
-			code, _ := w["code"].(string)
-			message, _ := w["message"].(string)
-			if message != "" {
-				if code == "" {
-					code = "after_cutover_failed"
-				}
-				out = append(out, output.Warning{Code: code, Message: message})
-			}
-		}
-	}
+	out := promotedRecoverWarnings(res)
 	for _, key := range []string{"timers_warning", "pooler_warning", "scaffold_warning", "steps_warning", "metrics_warning"} {
 		if v, _ := res[key].(string); v != "" {
 			out = append(out, output.Warning{Code: "recover_" + strings.TrimSuffix(key, "_warning"), Message: db + ": " + v})
@@ -314,6 +389,28 @@ func recoverWarnings(db string, res map[string]any) []output.Warning {
 	}
 	out = append(out, followerRecoverWarnings(res)...)
 	return out
+}
+
+// promotedRecoverWarnings is the structured warning of a recovery's promote,
+// nested in the job's promoted result.
+func promotedRecoverWarnings(res map[string]any) []output.Warning {
+	promoted, ok := res["promoted"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	w, ok := promoted["warning"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	message, _ := w["message"].(string)
+	if message == "" {
+		return nil
+	}
+	code, _ := w["code"].(string)
+	if code == "" {
+		code = "after_cutover_failed"
+	}
+	return []output.Warning{{Code: code, Message: message}}
 }
 
 // followerRecoverWarnings flattens the warnings of a recovered follower's job

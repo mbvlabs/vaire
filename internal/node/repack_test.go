@@ -726,7 +726,7 @@ func TestRepackJobTakesHeavyAndClusterLocks(t *testing.T) {
 	if err != nil || busy != nil {
 		t.Fatalf("%v %v", busy, err)
 	}
-	release()
+	release.finish()
 	if strings.Join(got, ",") != "node,heavy,cluster:app" {
 		t.Fatalf("locks %v", got)
 	}

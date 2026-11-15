@@ -8,12 +8,14 @@ import (
 	"testing"
 )
 
+type promotionCase struct {
+	name, listing, manifest, candidate, want string
+	listErr, readErr                         bool
+}
+
 func TestBucketPromotion(t *testing.T) {
 	for _, key := range []string{"manifest.json", "1.x/manifest.json"} {
-		for _, tc := range []struct {
-			name, listing, manifest, candidate, want string
-			listErr, readErr                         bool
-		}{
+		for _, tc := range []promotionCase{
 			{name: "absent", listing: `{"KeyCount":0}`, candidate: "1.0.0-alpha.1", want: "yes\n"},
 			{name: "only sidecar exists", listing: `{"KeyCount":1,"Contents":[{"Key":"` + key + `.sigstore.json"}]}`, candidate: "1.0.0", want: "yes\n"},
 			{name: "older tag", manifest: `{"version":"1.1.0"}`, candidate: "1.0.1", want: "no\n"},
@@ -33,29 +35,7 @@ func TestBucketPromotion(t *testing.T) {
 			{name: "invalid candidate", manifest: `{"version":"1.0.0"}`, candidate: "garbage"},
 		} {
 			t.Run(key+"/"+tc.name, func(t *testing.T) {
-				calls := 0
-				aws := func(_ context.Context, args ...string) ([]byte, error) {
-					calls++
-					if calls == 1 {
-						if args[0] != "s3api" || !strings.Contains(strings.Join(args, " "), "--prefix "+key) {
-							t.Fatalf("wrong list call: %v", args)
-						}
-						if tc.listErr {
-							return nil, errors.New("AccessDenied")
-						}
-						if tc.listing != "" {
-							return []byte(tc.listing), nil
-						}
-						return []byte(`{"KeyCount":1,"Contents":[{"Key":"` + key + `"}]}`), nil
-					}
-					if calls != 2 || args[0] != "s3" || args[2] != "s3://releases/"+key {
-						t.Fatalf("wrong read call: %v", args)
-					}
-					if tc.readErr {
-						return nil, errors.New("network failure")
-					}
-					return []byte(tc.manifest), nil
-				}
+				aws := promotionAWS(t, key, tc)
 				var out bytes.Buffer
 				err := run(context.Background(), []string{"--bucket", "releases", "--key", key, "--endpoint", "https://bucket.example", tc.candidate}, &out, aws)
 				if (err == nil) != (tc.want != "") || out.String() != tc.want {
@@ -63,6 +43,33 @@ func TestBucketPromotion(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func promotionAWS(t *testing.T, key string, tc promotionCase) func(context.Context, ...string) ([]byte, error) {
+	t.Helper()
+	calls := 0
+	return func(_ context.Context, args ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			if args[0] != "s3api" || !strings.Contains(strings.Join(args, " "), "--prefix "+key) {
+				t.Fatalf("wrong list call: %v", args)
+			}
+			if tc.listErr {
+				return nil, errors.New("AccessDenied")
+			}
+			if tc.listing != "" {
+				return []byte(tc.listing), nil
+			}
+			return []byte(`{"KeyCount":1,"Contents":[{"Key":"` + key + `"}]}`), nil
+		}
+		if calls != 2 || args[0] != "s3" || args[2] != "s3://releases/"+key {
+			t.Fatalf("wrong read call: %v", args)
+		}
+		if tc.readErr {
+			return nil, errors.New("network failure")
+		}
+		return []byte(tc.manifest), nil
 	}
 }
 

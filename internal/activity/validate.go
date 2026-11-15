@@ -116,6 +116,20 @@ func ValidateEvent(ev Event) error {
 	if ev.DurationMS < 0 || ev.DurationMS > maxDurationMS {
 		return eventError("duration_ms", "is out of range")
 	}
+	if err := validateActor(ev); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return eventError("event", "cannot be encoded")
+	}
+	if len(raw)+1 > maxEventBytes {
+		return eventError("event", "is too large")
+	}
+	return nil
+}
+
+func validateActor(ev Event) error {
 	if ev.ActorKind != "" {
 		if err := checkEnum("actor_kind", ev.ActorKind, ActorKinds); err != nil {
 			return err
@@ -133,13 +147,6 @@ func ValidateEvent(ev Event) error {
 		case ActorOperator, "":
 			return eventError("actor_verified", "cannot be claimed for an operator")
 		}
-	}
-	raw, err := json.Marshal(ev)
-	if err != nil {
-		return eventError("event", "cannot be encoded")
-	}
-	if len(raw)+1 > maxEventBytes {
-		return eventError("event", "is too large")
 	}
 	return nil
 }
@@ -223,40 +230,41 @@ func normalizeQuery(q Query, now time.Time) (normalizedQuery, error) {
 	if q.Cursor == "" && !nq.since.IsZero() && !nq.until.IsZero() && !nq.since.Before(nq.until) {
 		return nq, errInvalidQuery
 	}
-	if q.Cursor != "" {
-		cur, err := decodeCursor(q.Cursor)
+	if q.Cursor == "" {
+		return nq, nil
+	}
+	return normalizeCursorQuery(nq)
+}
+
+func normalizeCursorQuery(nq normalizedQuery) (normalizedQuery, error) {
+	q := nq.filter
+	cur, err := decodeCursor(q.Cursor)
+	if err != nil {
+		return nq, err
+	}
+	if cur.SinceRaw != q.Since || cur.UntilRaw != q.Until ||
+		cur.OperationID != q.OperationID || cur.RequestID != q.RequestID ||
+		cur.JobID != q.JobID || cur.Database != q.Database ||
+		cur.Action != q.Action || cur.Outcome != q.Outcome ||
+		cur.Limit != nq.limit {
+		return nq, errCursorMismatch
+	}
+	nq.cur = &cur
+	nq.since, nq.until = time.Time{}, time.Time{}
+	if cur.SinceAt != "" {
+		nq.since, err = parseStoredTime(cur.SinceAt)
 		if err != nil {
-			return nq, err
-		}
-		if cur.SinceRaw != q.Since || cur.UntilRaw != q.Until ||
-			cur.OperationID != q.OperationID || cur.RequestID != q.RequestID ||
-			cur.JobID != q.JobID || cur.Database != q.Database ||
-			cur.Action != q.Action || cur.Outcome != q.Outcome ||
-			cur.Limit != nq.limit {
-			return nq, errCursorMismatch
-		}
-		nq.cur = &cur
-		if cur.SinceAt != "" {
-			t, err := parseStoredTime(cur.SinceAt)
-			if err != nil {
-				return nq, errInvalidCursor
-			}
-			nq.since = t
-		} else {
-			nq.since = time.Time{}
-		}
-		if cur.UntilAt != "" {
-			t, err := parseStoredTime(cur.UntilAt)
-			if err != nil {
-				return nq, errInvalidCursor
-			}
-			nq.until = t
-		} else {
-			nq.until = time.Time{}
-		}
-		if !nq.since.IsZero() && !nq.until.IsZero() && !nq.since.Before(nq.until) {
 			return nq, errInvalidCursor
 		}
+	}
+	if cur.UntilAt != "" {
+		nq.until, err = parseStoredTime(cur.UntilAt)
+		if err != nil {
+			return nq, errInvalidCursor
+		}
+	}
+	if !nq.since.IsZero() && !nq.until.IsZero() && !nq.since.Before(nq.until) {
+		return nq, errInvalidCursor
 	}
 	return nq, nil
 }

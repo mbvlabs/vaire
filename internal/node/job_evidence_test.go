@@ -34,9 +34,7 @@ func captureSettlement(t *testing.T) func() (id string, lost bool) {
 	return func() (string, bool) {
 		mu.Lock()
 		defer mu.Unlock()
-		if !last.set {
-			t.Fatal("the finalizer did not settle the job record")
-		}
+		reject(t, !last.set, "the finalizer did not settle the job record")
 		return last.id, last.lost
 	}
 }
@@ -65,9 +63,7 @@ func waitJobSettlers(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for jobSettlesLive.Load() > 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("%d job settlements still alive", jobSettlesLive.Load())
-		}
+		rejectf(t, time.Now().After(deadline), "%d job settlements still alive", jobSettlesLive.Load())
 		time.Sleep(2 * time.Millisecond)
 	}
 }
@@ -85,7 +81,7 @@ func TestJobFinalizerSettlesActivityEvidence(t *testing.T) {
 	if _, err := ja.begin(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	finishRunJobActivity(ja, nil, "", nil)
+	finishRunJobActivity(context.Background(), ja, nil, "", nil)
 	if id, lost := settled(); id != testJobID || lost {
 		t.Fatalf("settled %q lost=%v, want %q lost=false", id, lost, testJobID)
 	}
@@ -94,7 +90,7 @@ func TestJobFinalizerSettlesActivityEvidence(t *testing.T) {
 	rec, _ = testRecorder(t, failing)
 	ja = newJobActivity(rec, "backup-full", testJobID, testOperationID, "", "app", true, false, false)
 	ja.recorded = true
-	finishRunJobActivity(ja, nil, "", nil)
+	finishRunJobActivity(context.Background(), ja, nil, "", nil)
 	if id, lost := settled(); id != testJobID || !lost {
 		t.Fatalf("settled %q lost=%v, want %q lost=true", id, lost, testJobID)
 	}
@@ -125,18 +121,12 @@ func TestFollowJobWaitsForCompletionEvidence(t *testing.T) {
 	}, 5*time.Second)
 
 	res, err := followJob(context.Background(), &Env{}, testJobID)
-	if err != nil {
-		t.Fatalf("followJob: %v", err)
-	}
+	rejectf(t, err != nil, "followJob: %v", err)
 	mu.Lock()
 	gotPolls := polls
 	mu.Unlock()
-	if gotPolls < 3 {
-		t.Fatalf("follower read %d times, want it to wait for settlement", gotPolls)
-	}
-	if len(res.Warnings) != 1 || res.Warnings[0].Code != activityWarningCode {
-		t.Fatalf("warnings = %+v, want the settled evidence warning", res.Warnings)
-	}
+	rejectf(t, gotPolls < 3, "follower read %d times, want it to wait for settlement", gotPolls)
+	rejectf(t, len(res.Warnings) != 1 || res.Warnings[0].Code != activityWarningCode, "warnings = %+v, want the settled evidence warning", res.Warnings)
 }
 
 // TestFollowJobFlagsUnsettledEvidence keeps a job that died before settling
@@ -150,15 +140,11 @@ func TestFollowJobFlagsUnsettledEvidence(t *testing.T) {
 
 	started := time.Now()
 	res, err := followJob(context.Background(), &Env{}, testJobID)
-	if err != nil {
-		t.Fatalf("followJob: %v", err)
-	}
+	rejectf(t, err != nil, "followJob: %v", err)
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("unsettled evidence held the follower for %s", elapsed)
 	}
-	if len(res.Warnings) != 1 || res.Warnings[0].Code != activityWarningCode {
-		t.Fatalf("warnings = %+v, want one missing-evidence warning", res.Warnings)
-	}
+	rejectf(t, len(res.Warnings) != 1 || res.Warnings[0].Code != activityWarningCode, "warnings = %+v, want one missing-evidence warning", res.Warnings)
 }
 
 // TestFollowJobFailureCarriesEvidenceWarning keeps a warning visible on a
@@ -174,12 +160,8 @@ func TestFollowJobFailureCarriesEvidenceWarning(t *testing.T) {
 
 	_, err := followJob(context.Background(), &Env{}, testJobID)
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) {
-		t.Fatalf("followJob error = %v, want a typed failure", err)
-	}
-	if len(cliErr.Warnings) != 1 || cliErr.Warnings[0].Code != activityWarningCode {
-		t.Fatalf("failure warnings = %#v, want the evidence warning", cliErr.Warnings)
-	}
+	rejectf(t, !errors.As(err, &cliErr), "followJob error = %v, want a typed failure", err)
+	rejectf(t, len(cliErr.Warnings) != 1 || cliErr.Warnings[0].Code != activityWarningCode, "failure warnings = %#v, want the evidence warning", cliErr.Warnings)
 	if details, ok := cliErr.Details.(map[string]any); ok {
 		if _, exists := details["warnings"]; exists {
 			t.Fatalf("warnings stayed an untyped detail: %#v", details)
@@ -220,7 +202,7 @@ func TestJobSettlementIsBoundedWhenStateStalls(t *testing.T) {
 	}
 
 	started := time.Now()
-	finishRunJobActivity(ja, nil, "", nil)
+	finishRunJobActivity(context.Background(), ja, nil, "", nil)
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("stalled settlement held the job for %s", elapsed)
 	}
@@ -229,12 +211,8 @@ func TestJobSettlementIsBoundedWhenStateStalls(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("settlement never reached the state update")
 	}
-	if len(warnings) != 1 || warnings[0].Code != activityWarningCode {
-		t.Fatalf("warnings = %+v, want one missing-evidence warning", warnings)
-	}
-	if jobSettlesLive.Load() != 1 {
-		t.Fatalf("live settlements = %d, want one pinned writer", jobSettlesLive.Load())
-	}
+	rejectf(t, len(warnings) != 1 || warnings[0].Code != activityWarningCode, "warnings = %+v, want one missing-evidence warning", warnings)
+	rejectf(t, jobSettlesLive.Load() != 1, "live settlements = %d, want one pinned writer", jobSettlesLive.Load())
 	closeOnce.Do(func() { close(blocked) })
 	waitJobSettlers(t)
 }
@@ -264,7 +242,7 @@ func TestJobSettlementCapBoundsAbandonedSettlers(t *testing.T) {
 
 	first := newJobActivity(recorderForSettlementTest(t), "backup-full", testJobID, testOperationID, "", "app", true, false, false)
 	first.recorded = true
-	finishRunJobActivity(first, nil, "", nil)
+	finishRunJobActivity(context.Background(), first, nil, "", nil)
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
@@ -280,16 +258,14 @@ func TestJobSettlementCapBoundsAbandonedSettlers(t *testing.T) {
 		}
 	}
 	started := time.Now()
-	finishRunJobActivity(second, nil, "", nil)
+	finishRunJobActivity(context.Background(), second, nil, "", nil)
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("capped settlement took %s", elapsed)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("settlement calls = %d, want the one pinned writer", got)
 	}
-	if len(warnings) != 1 || warnings[0].Code != activityWarningCode {
-		t.Fatalf("warnings = %+v, want one missing-evidence warning", warnings)
-	}
+	rejectf(t, len(warnings) != 1 || warnings[0].Code != activityWarningCode, "warnings = %+v, want one missing-evidence warning", warnings)
 	closeOnce.Do(func() { close(blocked) })
 	waitJobSettlers(t)
 }
@@ -310,11 +286,9 @@ func TestJobSettlementFailureLeavesEvidenceIncomplete(t *testing.T) {
 			warnings = append(warnings, ev)
 		}
 	}
-	finishRunJobActivity(ja, nil, "", nil)
+	finishRunJobActivity(context.Background(), ja, nil, "", nil)
 	waitJobSettlers(t)
-	if len(warnings) != 1 || warnings[0].Code != activityWarningCode {
-		t.Fatalf("warnings = %+v, want one missing-evidence warning", warnings)
-	}
+	rejectf(t, len(warnings) != 1 || warnings[0].Code != activityWarningCode, "warnings = %+v, want one missing-evidence warning", warnings)
 }
 
 // recorderForSettlementTest builds a recorder over a fast fake store.
@@ -327,9 +301,7 @@ func recorderForSettlementTest(t *testing.T) *activityRecorder {
 func TestMergeJobWarningsDeduplicates(t *testing.T) {
 	warning := activityWarning()
 	merged := mergeJobWarnings([]output.Warning{warning, {Code: "other", Message: "x"}}, []output.Warning{warning, {}})
-	if len(merged) != 2 || merged[0] != warning || merged[1].Code != "other" {
-		t.Fatalf("merged = %+v", merged)
-	}
+	rejectf(t, len(merged) != 2 || merged[0] != warning || merged[1].Code != "other", "merged = %+v", merged)
 	if merged := mergeJobWarnings(nil, nil); merged != nil {
 		t.Fatalf("empty merge = %+v", merged)
 	}

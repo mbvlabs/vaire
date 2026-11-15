@@ -67,65 +67,22 @@ func pathExists(p string) bool {
 	return err == nil
 }
 
+// Doctor read seams allow diagnostics fixtures to avoid host service probes
+// and PostgreSQL sockets while exercising the actual fact-gathering logic.
+var (
+	doctorServiceRead   = steps.ServiceActive
+	doctorProbeRead     = steps.Probe
+	doctorDriftRead     = driftOf
+	doctorOverridesRead = overriddenSettings
+	doctorWeakHBARead   = weakHBA
+)
+
 // gatherFacts reads everything doctor's checks need from the node.
 func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init bool) doctor.Facts {
 	f := doctor.Facts{Now: time.Now().UTC(), Init: init, DataRoot: cfg.Server.DataRoot}
-	if o, err := hostinfo.ReadOS(); err == nil {
-		f.OSSupported, f.OSName = o.Supported(), osName(o)
-	}
-	_, err := os.Stat("/var/run/reboot-required")
-	f.RebootRequired = err == nil
-	f.DiskPath = nearestExisting(cfg.Server.DataRoot, pathExists)
-	f.DiskTotal, f.DiskFree, f.DiskKnown = hostinfo.DiskUsage(f.DiskPath)
-	f.UnattendedActive = steps.ServiceActive(ctx, "unattended-upgrades")
-	if out, err := steps.Probe(ctx, "timedatectl", "show", "-p", "NTPSynchronized", "--value"); err == nil {
-		f.TimeKnown, f.TimeSynced = true, out == "yes"
-	}
-	if st, err := engine.LoadState(engine.StatePath); err == nil {
-		f.LockedDownAt, f.LockdownPending, f.SecretsAtTime, f.Jobs = st.LockedDownAt, st.LockdownPending, st.SecretsConfirmedAt, st.Jobs
-	}
-	_, err = os.Stat(steps.BreakGlassPath)
-	f.BreakGlassOpen = err == nil
-	f.SSHConfigDrift = driftOf(ctx, cfg, rt, steps.SSHDStepID)
-	f.FirewallDrift = driftOf(ctx, cfg, rt, steps.FirewallStepID)
-	if out, err := steps.Probe(ctx, "ufw", "status"); err == nil {
-		f.UFWActive = strings.HasPrefix(out, "Status: active")
-	}
-	f.OpenAllowlists = openAllowlists(cfg)
-
-	f.TLSMode = cfg.TLS.Mode
-	if cert := readCert(steps.TLSCertPath); cert != nil {
-		f.CertKnown, f.CertNotAfter, f.CertSelfSign = true, cert.NotAfter, isSelfSignedCert(cert)
-	}
-	f.Hostname = steps.NodeHostname(cfg)
-	if f.Hostname != "" {
-		f.DNSChecked, f.DNSMatches, f.DNSDetail = checkDNS(ctx, cfg, f.Hostname)
-	}
-
-	f.MetricsEnabled = cfg.Metrics.Enabled
-	if f.MetricsEnabled {
-		f.Exporters = exporterHealth(ctx, len(stepsView(cfg).Clusters) > 0)
-		f.EndpointStatus, f.EndpointError = endpointStatus(ctx, f.Hostname, cfg.Metrics.PathPrefix)
-		f.PGProbes, f.PGExporterLog = postgresProbes(ctx, stepsView(cfg))
-	}
-	f.NginxActive = steps.ServiceActive(ctx, steps.NginxService)
-	// Databases awaiting recovery have no cluster and no pooler entry yet
-	// (Phase 5), so the poolers run only once one is recovered.
-	f.HasDatabases = len(stepsView(cfg).Clusters) > 0
-	if f.HasDatabases {
-		f.PoolersActive = map[string]bool{
-			steps.PgbouncerService:     steps.ServiceActive(ctx, steps.PgbouncerService),
-			steps.SessionPoolerService: steps.ServiceActive(ctx, steps.SessionPoolerService),
-		}
-	}
-	f.BackupConfigured = cfg.BackupConfigured()
-	for _, w := range oversubscriptionWarnings(cfg, rt.Host) {
-		f.BudgetWarnings = append(f.BudgetWarnings, doctor.Warning{Code: w.Code, Message: w.Message})
-	}
-	f.Records, _ = backup.LoadRecords()
-	f.Master = masterFacts(cfg)
-	f.ActivityHealthChecked = true
-	f.ActivityHealth, f.ActivityHealthKnown = gatherActivityHealth(ctx)
+	gatherHostFacts(ctx, cfg, rt, &f)
+	gatherServiceFacts(ctx, cfg, &f)
+	gatherRuntimeFacts(ctx, cfg, rt, &f)
 
 	prev, havePrev := loadDoctorState()
 	created := clusterCreated()
@@ -135,6 +92,77 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	// is not used here: it would hide them from diagnostics.
 	view := diagnosticsViewWith(cfg, f.Records)
 	followers := readFollowers(ctx, view, "")
+	gatherOrphanSlots(ctx, view, &f)
+	for _, s := range readClusters(ctx, cfg, "", false) {
+		f.Clusters = append(f.Clusters, gatherClusterFacts(ctx, cfg, rt, s, followers, prev, havePrev, created, f.Records))
+	}
+	return f
+}
+
+func gatherHostFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, f *doctor.Facts) {
+	if o, err := hostinfo.ReadOS(); err == nil {
+		f.OSSupported, f.OSName = o.Supported(), osName(o)
+	}
+	_, err := os.Stat("/var/run/reboot-required")
+	f.RebootRequired = err == nil
+	f.DiskPath = nearestExisting(cfg.Server.DataRoot, pathExists)
+	f.DiskTotal, f.DiskFree, f.DiskKnown = hostinfo.DiskUsage(f.DiskPath)
+	f.UnattendedActive = doctorServiceRead(ctx, "unattended-upgrades")
+	if out, err := doctorProbeRead(ctx, "timedatectl", "show", "-p", "NTPSynchronized", "--value"); err == nil {
+		f.TimeKnown, f.TimeSynced = true, out == "yes"
+	}
+	if st, err := engine.LoadState(engine.StatePath); err == nil {
+		f.LockedDownAt, f.LockdownPending, f.SecretsAtTime, f.Jobs = st.LockedDownAt, st.LockdownPending, st.SecretsConfirmedAt, st.Jobs
+	}
+	_, err = os.Stat(steps.BreakGlassPath)
+	f.BreakGlassOpen = err == nil
+	f.SSHConfigDrift = doctorDriftRead(ctx, cfg, rt, steps.SSHDStepID)
+	f.FirewallDrift = doctorDriftRead(ctx, cfg, rt, steps.FirewallStepID)
+	if out, err := doctorProbeRead(ctx, "ufw", "status"); err == nil {
+		f.UFWActive = strings.HasPrefix(out, "Status: active")
+	}
+	f.OpenAllowlists = openAllowlists(cfg)
+	f.TLSMode = cfg.TLS.Mode
+	if cert := readCert(steps.TLSCertPath); cert != nil {
+		f.CertKnown, f.CertNotAfter, f.CertSelfSign = true, cert.NotAfter, isSelfSignedCert(cert)
+	}
+	f.Hostname = steps.NodeHostname(cfg)
+	if f.Hostname != "" {
+		f.DNSChecked, f.DNSMatches, f.DNSDetail = checkDNS(ctx, cfg, f.Hostname)
+	}
+}
+
+func gatherServiceFacts(ctx context.Context, cfg config.Cluster, f *doctor.Facts) {
+	f.MetricsEnabled = cfg.Metrics.Enabled
+	if f.MetricsEnabled {
+		f.Exporters = exporterHealth(ctx, len(stepsView(cfg).Clusters) > 0)
+		f.EndpointStatus, f.EndpointError = endpointStatus(ctx, f.Hostname, cfg.Metrics.PathPrefix)
+		f.PGProbes, f.PGExporterLog = postgresProbes(ctx, stepsView(cfg))
+	}
+	f.NginxActive = doctorServiceRead(ctx, steps.NginxService)
+	// Databases awaiting recovery have no cluster and no pooler entry yet
+	// (Phase 5), so the poolers run only once one is recovered.
+	f.HasDatabases = len(stepsView(cfg).Clusters) > 0
+	if f.HasDatabases {
+		f.PoolersActive = map[string]bool{
+			steps.PgbouncerService:     doctorServiceRead(ctx, steps.PgbouncerService),
+			steps.SessionPoolerService: doctorServiceRead(ctx, steps.SessionPoolerService),
+		}
+	}
+}
+
+func gatherRuntimeFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, f *doctor.Facts) {
+	f.BackupConfigured = cfg.BackupConfigured()
+	for _, w := range oversubscriptionWarnings(cfg, rt.Host) {
+		f.BudgetWarnings = append(f.BudgetWarnings, doctor.Warning{Code: w.Code, Message: w.Message})
+	}
+	f.Records, _ = backup.LoadRecords()
+	f.Master = masterFacts(cfg)
+	f.ActivityHealthChecked = true
+	f.ActivityHealth, f.ActivityHealthKnown = gatherActivityHealth(ctx)
+}
+
+func gatherOrphanSlots(ctx context.Context, view config.Cluster, f *doctor.Facts) {
 	slots, slotFailures := orphanSlots(ctx, view)
 	for _, o := range slots {
 		f.OrphanSlots = append(f.OrphanSlots, doctor.OrphanSlot{Source: o.Source, Port: o.Port, Slot: o.Slot})
@@ -142,43 +170,42 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	for _, e := range slotFailures {
 		f.OrphanSlotErrors = append(f.OrphanSlotErrors, doctor.OrphanSlotError{Source: e.Source, Port: e.Port, Error: e.Error})
 	}
-	for _, s := range readClusters(ctx, cfg, "", false) {
-		c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}
-		c.Ext = extensionFactsForCluster(ctx, cfg, s.Spec, s.State, f.Records.IsAwaiting(s.Spec.Name))
-		if st, ok := followers[s.Spec.Name]; ok {
-			c.Follower = &st
-		}
-		if f.Records.IsAwaiting(s.Spec.Name) {
-			c.AwaitingRecovery = true
-			f.Clusters = append(f.Clusters, c)
-			continue
-		}
-		c.ConfigDrift = driftOf(ctx, cfg, rt, steps.ConfigStepID(s.Spec.Name))
-		c.Overrides = overriddenSettings(filepath.Join(steps.PGConfD(s.Spec.Name), "90-overrides.conf"))
-		if s.State == "running" {
-			c.HBAWeak = weakHBA(ctx, s.Spec)
-		}
-		if s.CgroupOK {
-			if p, ok := s.Cgroup.Pressure["memory"]; ok {
-				c.PressureKnown, c.PressureAvg300 = true, p.Some.Avg300
-			}
-			c.HighEvents = s.Cgroup.MemoryEvents["high"]
-			if havePrev {
-				c.PrevHighEvents, c.PrevKnown = prev.HighEvents[s.Spec.Name]
-			}
-		}
-		if s.State == "stopped" {
-			if err := checkStarts(cfg, s.Spec, rt.Host, 0); err != nil {
-				c.WouldNotStart = err.Error()
-			}
-		}
-		c.CreatedAt = created[s.Spec.Name]
-		if cfg.BackupConfigured() {
-			c.FullInterval, c.FullIntervalErr = fullInterval(ctx, cfg, s.Spec)
-		}
-		f.Clusters = append(f.Clusters, c)
+}
+
+func gatherClusterFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, s clusterSnapshot, followers map[string]followerReading, prev doctorState, havePrev bool, created map[string]time.Time, records backup.Records) doctor.ClusterFacts {
+	c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}
+	c.Ext = extensionFactsForCluster(ctx, cfg, s.Spec, s.State, records.IsAwaiting(s.Spec.Name))
+	if st, ok := followers[s.Spec.Name]; ok {
+		c.Follower = &st
 	}
-	return f
+	if records.IsAwaiting(s.Spec.Name) {
+		c.AwaitingRecovery = true
+		return c
+	}
+	c.ConfigDrift = doctorDriftRead(ctx, cfg, rt, steps.ConfigStepID(s.Spec.Name))
+	c.Overrides = doctorOverridesRead(filepath.Join(steps.PGConfD(s.Spec.Name), "90-overrides.conf"))
+	if s.State == "running" {
+		c.HBAWeak = doctorWeakHBARead(ctx, s.Spec)
+	}
+	if s.CgroupOK {
+		if p, ok := s.Cgroup.Pressure["memory"]; ok {
+			c.PressureKnown, c.PressureAvg300 = true, p.Some.Avg300
+		}
+		c.HighEvents = s.Cgroup.MemoryEvents["high"]
+		if havePrev {
+			c.PrevHighEvents, c.PrevKnown = prev.HighEvents[s.Spec.Name]
+		}
+	}
+	if s.State == "stopped" {
+		if err := checkStarts(cfg, s.Spec, rt.Host, 0); err != nil {
+			c.WouldNotStart = err.Error()
+		}
+	}
+	c.CreatedAt = created[s.Spec.Name]
+	if cfg.BackupConfigured() {
+		c.FullInterval, c.FullIntervalErr = fullInterval(ctx, cfg, s.Spec)
+	}
+	return c
 }
 
 // activityHealthWait bounds how long doctor waits for the activity store's
@@ -228,7 +255,7 @@ func activityStoreHealth(ctx context.Context, store activityStore) (activity.Hea
 		return activity.Health{}, false
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.Background() //nolint:contextcheck // the detached health read still needs a context to observe cancellation.
 	}
 	if !activityHealthInFlight.CompareAndSwap(false, true) {
 		// An earlier read is still pinned on the store. Adding another one
@@ -345,16 +372,16 @@ func exporterHealth(ctx context.Context, databases bool) map[string]error {
 	for name, url := range targets {
 		code, err := steps.HTTPStatus(ctx, url)
 		if err == nil && code != http.StatusOK {
-			err = errHTTP(code)
+			err = httpStatusError(code)
 		}
 		out[name] = err
 	}
 	return out
 }
 
-type errHTTP int
+type httpStatusError int
 
-func (e errHTTP) Error() string { return "HTTP " + http.StatusText(int(e)) }
+func (e httpStatusError) Error() string { return "HTTP " + http.StatusText(int(e)) }
 
 // endpointStatus asks nginx for /metrics/node without a credential, through
 // 443 on loopback as a scraper would (8443 wants the PROXY protocol header
@@ -403,7 +430,7 @@ func weakHBA(ctx context.Context, spec config.ClusterSpec) []string {
 
 // overriddenSettings are the setting names a postgresql.conf-style file sets.
 func overriddenSettings(path string) []string {
-	f, err := os.Open(path) //nolint:gosec // G304: the cluster's own override file.
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
@@ -491,6 +518,9 @@ func handleDoctorRun(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if err := guardMaterialisationApply(ctx, env.Cluster, ""); err != nil {
+		return Result{}, err
+	}
 	if !doctor.ValidOnly(p.Only) {
 		return Result{}, output.NewError(output.CodeUsage, "unknown --only "+p.Only, output.ExitUsage,
 			"Use one of "+strings.Join(doctor.Categories, ", ")+".")
@@ -553,6 +583,10 @@ func doctorFamilies(at time.Time, results []doctor.Result) []*promfile.Family {
 // stops init with doctor_failed (checks that can't pass yet are left out);
 // after apply each failing check is the warning doctor_check_failed.
 func doctorGate(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init bool) (*doctorData, []output.Warning, error) {
+	if err := guardMaterialisationApply(ctx, cfg, ""); err != nil {
+		return nil, []output.Warning{{Code: "materialisation_incomplete",
+			Message: "doctor could not check incomplete or unverifiable materialisation state"}}, err
+	}
 	results := runDoctor(ctx, cfg, rt, init, "", "")
 	data := &doctorData{Results: results, Summary: doctor.Summary(results)}
 	failed := doctor.Failed(results)

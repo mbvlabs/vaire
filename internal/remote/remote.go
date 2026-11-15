@@ -36,6 +36,11 @@ type CallOptions struct {
 	// ParentRequestID names the request that caused this one, when this call
 	// is itself part of another request.
 	ParentRequestID string
+	// RequestID is the request's ULID when the caller preselects it. db copy
+	// preselects it because the node names the copy job after the request,
+	// so the operator knows the job id before the request can be lost.
+	// Empty generates a new one.
+	RequestID string
 	// OnEvent receives every event before the result: step, log, progress,
 	// warning.
 	OnEvent func(output.Event)
@@ -73,9 +78,13 @@ func newRequest(method string, params any, operator string, opts CallOptions) ([
 	for _, v := range opts.Secrets {
 		secrets.Add(v)
 	}
+	requestID := opts.RequestID
+	if requestID == "" {
+		requestID = rpc.NewRequestID()
+	}
 	req := rpc.Request{
 		Schema:          rpc.Schema,
-		RequestID:       rpc.NewRequestID(),
+		RequestID:       requestID,
 		Method:          method,
 		Params:          rawParams,
 		Secrets:         opts.Secrets,
@@ -105,28 +114,39 @@ func readEvents(r io.Reader, onEvent func(output.Event)) (Reply, bool, error) {
 	reader := bufio.NewReaderSize(r, 256*1024)
 	for {
 		line, err := reader.ReadBytes('\n')
-		if len(bytes.TrimSpace(line)) > 0 {
-			var ev struct {
-				output.Event
-				Envelope json.RawMessage `json:"envelope"`
-			}
-			if jerr := json.Unmarshal(line, &ev); jerr == nil {
-				if ev.Type == "result" {
-					reply, rerr := parseResult(ev.Envelope)
-					_, _ = io.Copy(io.Discard, reader)
-					return reply, true, rerr
-				}
-				if onEvent != nil {
-					e := ev.Event
-					e.Envelope = nil
-					onEvent(e)
-				}
-			}
+		if reply, got, perr := readEventLine(line, onEvent); got {
+			_, _ = io.Copy(io.Discard, reader)
+			return reply, true, perr
 		}
 		if err != nil {
 			return Reply{}, false, nil
 		}
 	}
+}
+
+// readEventLine handles one NDJSON line: got reports that it was the result,
+// and otherwise a well-formed event goes to onEvent.
+func readEventLine(line []byte, onEvent func(output.Event)) (Reply, bool, error) {
+	if len(bytes.TrimSpace(line)) == 0 {
+		return Reply{}, false, nil
+	}
+	var ev struct {
+		output.Event
+		Envelope json.RawMessage `json:"envelope"`
+	}
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return Reply{}, false, nil
+	}
+	if ev.Type == "result" {
+		reply, perr := parseResult(ev.Envelope)
+		return reply, true, perr
+	}
+	if onEvent != nil {
+		e := ev.Event
+		e.Envelope = nil
+		onEvent(e)
+	}
+	return Reply{}, false, nil
 }
 
 type resultEnvelope struct {
@@ -261,7 +281,9 @@ func (l Local) Call(ctx context.Context, method string, params any, opts CallOpt
 	}
 	operationID := effectiveOperationID(opts.OperationID, requestID)
 	pr, pw := io.Pipe()
-	go func() {
+	// node.Serve takes no context: the in-process dispatcher installs its own
+	// signal-scoped context, deliberately independent of this request's.
+	go func() { //nolint:contextcheck // node.Serve owns its own signal-scoped context.
 		node.Serve(bytes.NewReader(payload), pw)
 		_ = pw.Close()
 	}()

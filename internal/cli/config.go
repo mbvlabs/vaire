@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -12,12 +13,12 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/render"
 	"github.com/mbvlabs/vaire/internal/totp"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 )
@@ -28,8 +29,8 @@ type configData struct {
 	Revision string `json:"revision"`
 }
 
-func fetchConfig(cmd *cobra.Command, s *session, p *progress) (configData, error) {
-	reply, err := p.call(commandContext(cmd), s.node, "config.get", nil, remote.CallOptions{OnEvent: p.event})
+func fetchConfig(ctx context.Context, s *session, p *progress) (configData, error) {
+	reply, err := p.call(ctx, s.node, "config.get", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return configData{}, err
 	}
@@ -47,7 +48,7 @@ func runConfigShow(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	data, err := fetchConfig(cmd, s, p)
+	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
@@ -69,7 +70,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	data, err := fetchConfig(cmd, s, p)
+	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
@@ -160,6 +161,10 @@ func configScalar(value any) (any, bool) {
 		return v.Interface(), true
 	case reflect.Invalid:
 		return nil, true
+	case reflect.Uintptr, reflect.Complex64, reflect.Complex128, reflect.Array, reflect.Chan, reflect.Func,
+		reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.Struct, reflect.UnsafePointer:
+		// A table, an array of tables, or a value TOML cannot decode.
+		return nil, false
 	}
 	return nil, false
 }
@@ -192,7 +197,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	data, err := fetchConfig(cmd, s, p)
+	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
@@ -238,7 +243,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	if flagTrue(cmd, "apply") {
 		return runApply(cmd, nil)
 	}
-	warnings := append(append(s.warnings, reply.Warnings...), syncContextFromNode(cmd, s, p)...)
+	warnings := append(append(s.warnings, reply.Warnings...), syncWorkspaceFromNode(commandContext(cmd), s, p)...)
 	return output.Success(cmd, output.Result{
 		Data:     res,
 		Message:  fmt.Sprintf("set %s = %s; ", key, value) + pendingSteps(res.Plan),
@@ -249,7 +254,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 
 func runConfigValidate(cmd *cobra.Command, _ []string) error {
 	if path := stringFlag(cmd, "file"); path != "" {
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this file.
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
@@ -296,48 +301,20 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	data, err := fetchConfig(cmd, s, p)
+	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp("", "vaire-cluster-*.toml")
-	if err != nil {
-		return err
-	}
-	path := tmp.Name()
-	defer func() { _ = os.Remove(path) }()
-	if err := os.Chmod(path, 0o600); err != nil {
-		return err
-	}
-	if _, err := tmp.WriteString(data.TOML); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	edited, err := editUntilValid(cmd, path)
+	edited, err := editConfigInEditor(cmd, data.TOML)
 	if err != nil {
 		return err
 	}
 	if string(edited) == data.TOML {
 		return output.Success(cmd, output.Result{Data: map[string]any{"changed": false}, Message: "no changes", Warnings: s.warnings})
 	}
-	preview, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
-		"toml":          string(edited),
-		"base_revision": data.Revision,
-	}, remote.CallOptions{DryRun: true, OnEvent: p.event})
-	if err != nil {
+	if err := previewConfigSet(cmd, s, p, data, edited); err != nil {
 		return err
 	}
-	var planned struct {
-		Plan engine.PlanData `json:"plan"`
-	}
-	if err := preview.Decode(&planned); err != nil {
-		return err
-	}
-	p.note(render.DiffBytes("cluster.toml", []byte(data.TOML), edited) +
-		fmt.Sprintf("%d of %d steps would apply on the next vaire apply.", planned.Plan.WouldApply, planned.Plan.Total))
 	ok, err := PromptYes(cmd, "Push this configuration?")
 	if err != nil {
 		return err
@@ -345,13 +322,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if !ok {
 		return output.NewError(output.CodeUnsafeAction, "the edit was discarded", output.ExitUnsafe, "")
 	}
-	var lifted []string
-	if old, oerr := config.ParseCluster([]byte(data.TOML)); oerr == nil {
-		if updated, uerr := config.ParseCluster(edited); uerr == nil {
-			lifted = node.Unprotected(old, updated)
-		}
-	}
-	code, err := unprotectCode(cmd, s, p, lifted)
+	code, err := unprotectCode(cmd, s, p, liftedProtections(data.TOML, edited))
 	if err != nil {
 		return err
 	}
@@ -374,9 +345,9 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	if cfg, err := config.ParseCluster(edited); err == nil {
-		synced, err := syncContext(s, cfg)
+		synced, err := syncWorkspace(s, cfg)
 		if err != nil {
-			synced = contextSyncFailed(s, err)
+			synced = workspaceSyncFailed(s, err)
 		}
 		warnings = append(warnings, synced...)
 	}
@@ -386,6 +357,62 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		Warnings: warnings,
 		Next:     applyNext(res.Plan),
 	})
+}
+
+// editConfigInEditor writes the TOML to a private temporary file and opens
+// the operator's editor on it until it validates.
+func editConfigInEditor(cmd *cobra.Command, toml string) ([]byte, error) {
+	tmp, err := os.CreateTemp("", "vaire-cluster-*.toml")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	defer func() { _ = os.Remove(path) }()
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, err
+	}
+	if _, err := tmp.WriteString(toml); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	return editUntilValid(cmd, path)
+}
+
+// previewConfigSet shows the change and the steps it would schedule, without
+// saving it.
+func previewConfigSet(cmd *cobra.Command, s *session, p *progress, data configData, edited []byte) error {
+	preview, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
+		"toml":          string(edited),
+		"base_revision": data.Revision,
+	}, remote.CallOptions{DryRun: true, OnEvent: p.event})
+	if err != nil {
+		return err
+	}
+	var planned struct {
+		Plan engine.PlanData `json:"plan"`
+	}
+	if err := preview.Decode(&planned); err != nil {
+		return err
+	}
+	p.note(render.DiffBytes("cluster.toml", []byte(data.TOML), edited) +
+		fmt.Sprintf("%d of %d steps would apply on the next vaire apply.", planned.Plan.WouldApply, planned.Plan.Total))
+	return nil
+}
+
+// liftedProtections are the databases whose protection this edit removes.
+func liftedProtections(oldTOML string, edited []byte) []string {
+	old, err := config.ParseCluster([]byte(oldTOML))
+	if err != nil {
+		return nil
+	}
+	updated, err := config.ParseCluster(edited)
+	if err != nil {
+		return nil
+	}
+	return node.Unprotected(old, updated)
 }
 
 // unprotectCode asks for a current code from the authenticator app that
@@ -453,7 +480,7 @@ func editUntilValid(cmd *cobra.Command, path string) ([]byte, error) {
 		if err := runEditor(cmd, path); err != nil {
 			return nil, err
 		}
-		edited, err := os.ReadFile(path) //nolint:gosec // G304: our own temp file.
+		edited, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
@@ -508,12 +535,12 @@ func runEditor(cmd *cobra.Command, path string) error {
 	return nil
 }
 
-// syncContext refreshes the local context from cfg: the domain and TLS mode,
+// syncWorkspace refreshes the local workspace from cfg: the domain and TLS mode,
 // each cached node's hostname, and the database placement map. vaire sql,
 // psql, console, tunnel and secrets export verify the server certificate
 // against the master's hostname, so it has to follow a domain change made
 // with config set, config edit, or by another operator.
-func syncContext(s *session, cfg config.Cluster) ([]output.Warning, error) {
+func syncWorkspace(s *session, cfg config.Cluster) ([]output.Warning, error) {
 	previous, previousMode := s.ctx.MasterHostname(), s.ctx.TLSMode
 	changed := s.ctx.Domain != cfg.Domain || s.ctx.TLSMode != cfg.TLS.Mode
 	s.ctx.Domain, s.ctx.TLSMode = cfg.Domain, cfg.TLS.Mode
@@ -530,19 +557,19 @@ func syncContext(s *session, cfg config.Cluster) ([]output.Warning, error) {
 	if !changed {
 		return nil, nil
 	}
-	if err := contexts.Save(s.ctx); err != nil {
+	if err := workspaces.Save(s.ctx); err != nil {
 		return nil, err
 	}
 	hostname := s.ctx.MasterHostname()
 	if hostname == previous && cfg.TLS.Mode == previousMode {
 		return nil, nil
 	}
-	message := fmt.Sprintf("context %s now verifies the server as %s (tls.mode %s)", s.ctx.Name, hostname, cfg.TLS.Mode)
+	message := fmt.Sprintf("workspace %s now verifies the server as %s (tls.mode %s)", s.ctx.Name, hostname, cfg.TLS.Mode)
 	if previous != hostname {
 		message += "; until the node holds a certificate for " + hostname +
 			", connections from vaire fail with a hostname mismatch. vaire-certs.timer issues it within the hour, or now with: vaire ssh --command 'sudo vaire node run certs-renew'"
 	}
-	return []output.Warning{{Code: "context_tls_updated", Message: message}}, nil
+	return []output.Warning{{Code: "workspace_tls_updated", Message: message}}, nil
 }
 
 // placementOf is the database placement map of cfg: database name to node.
@@ -554,28 +581,28 @@ func placementOf(cfg config.Cluster) map[string]string {
 	return out
 }
 
-// syncContextFromNode fetches cluster.toml and runs syncContext on it.
+// syncWorkspaceFromNode fetches cluster.toml and runs syncWorkspace on it.
 // The command it follows already succeeded, so a failure here is a warning.
-func syncContextFromNode(cmd *cobra.Command, s *session, p *progress) []output.Warning {
-	data, err := fetchConfig(cmd, s, p)
+func syncWorkspaceFromNode(ctx context.Context, s *session, p *progress) []output.Warning {
+	data, err := fetchConfig(ctx, s, p)
 	if err != nil {
-		return contextSyncFailed(s, err)
+		return workspaceSyncFailed(s, err)
 	}
 	cfg, err := config.ParseCluster([]byte(data.TOML))
 	if err != nil {
-		return contextSyncFailed(s, err)
+		return workspaceSyncFailed(s, err)
 	}
-	warnings, err := syncContext(s, cfg)
+	warnings, err := syncWorkspace(s, cfg)
 	if err != nil {
-		return contextSyncFailed(s, err)
+		return workspaceSyncFailed(s, err)
 	}
 	return warnings
 }
 
-func contextSyncFailed(s *session, err error) []output.Warning {
+func workspaceSyncFailed(s *session, err error) []output.Warning {
 	return []output.Warning{{
-		Code:    "context_sync_failed",
-		Message: "could not update the domain and TLS mode of context " + s.ctx.Name + ": " + err.Error() + ". Run vaire apply to retry.",
+		Code:    "workspace_sync_failed",
+		Message: "could not update the domain and TLS mode of workspace " + s.ctx.Name + ": " + err.Error() + ". Run vaire apply to retry.",
 	}}
 }
 

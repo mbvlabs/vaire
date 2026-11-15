@@ -90,6 +90,14 @@ func TestPostgresExporterUnitReachesSocket(t *testing.T) {
 	if !strings.Contains(unit, "\nUser=postgres_exporter\n") {
 		t.Errorf("postgres_exporter runs as another user:\n%s", unit)
 	}
+	assertExporterSandboxReachesSocket(t, unit)
+	assertExporterPeerAuth(t)
+}
+
+// assertExporterSandboxReachesSocket checks the unit's sandbox leaves the
+// PostgreSQL socket and AF_UNIX reachable.
+func assertExporterSandboxReachesSocket(t *testing.T, unit string) {
+	t.Helper()
 	for _, line := range strings.Split(unit, "\n") {
 		key, value, _ := strings.Cut(line, "=")
 		switch key {
@@ -98,12 +106,7 @@ func TestPostgresExporterUnitReachesSocket(t *testing.T) {
 				t.Errorf("%s blocks the PostgreSQL socket", line)
 			}
 		case "InaccessiblePaths", "TemporaryFileSystem", "BindPaths", "BindReadOnlyPaths":
-			for _, p := range strings.Fields(value) {
-				p = strings.TrimLeft(p, "-+")
-				if strings.HasPrefix(PGSocketDir, p) || strings.HasPrefix("/run/postgresql", p) {
-					t.Errorf("%s hides %s", line, PGSocketDir)
-				}
-			}
+			assertSocketDirNotHidden(t, line, value)
 		case "ProtectSystem":
 			// strict makes /run read-only, which still lets the exporter
 			// connect to a socket there; nothing stricter exists.
@@ -116,6 +119,24 @@ func TestPostgresExporterUnitReachesSocket(t *testing.T) {
 			}
 		}
 	}
+}
+
+// assertSocketDirNotHidden checks a path sandbox directive does not cover the
+// PostgreSQL socket directory.
+func assertSocketDirNotHidden(t *testing.T, line, value string) {
+	t.Helper()
+	for _, p := range strings.Fields(value) {
+		p = strings.TrimLeft(p, "-+")
+		if strings.HasPrefix(PGSocketDir, p) || strings.HasPrefix("/run/postgresql", p) {
+			t.Errorf("%s hides %s", line, PGSocketDir)
+		}
+	}
+}
+
+// assertExporterPeerAuth checks pg_ident maps postgres_exporter to
+// vaire_monitor and pg_hba accepts its peer connection.
+func assertExporterPeerAuth(t *testing.T) {
+	t.Helper()
 	ident := string(render.Ident(metricsCluster("app")))
 	if !regexp.MustCompile(`(?m)^vaire\s+postgres_exporter\s+vaire_monitor$`).MatchString(ident) {
 		t.Errorf("pg_ident lacks postgres_exporter -> vaire_monitor:\n%s", ident)

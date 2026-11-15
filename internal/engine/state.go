@@ -35,6 +35,9 @@ type State struct {
 	LockedDownAt string `json:"locked_down_at,omitempty"`
 	// Jobs are the detachable jobs and timer runs, newest last.
 	Jobs []JobRecord `json:"jobs,omitempty"`
+	// RetainedJobs holds provenance for unresolved materialisations, separate
+	// from the bounded display history. Only node lifecycle code pins jobs.
+	RetainedJobs map[string]JobRecord `json:"retained_jobs,omitempty"`
 	// DeferredRestarts are the clusters db resize --defer-restart left for
 	// the maintenance window, with when it was asked (Phase 4). maint-daily
 	// restarts them at the window's start and removes them.
@@ -88,11 +91,17 @@ func (s State) Job(id string) (JobRecord, bool) {
 			return r, true
 		}
 	}
+	if r, ok := s.RetainedJobs[id]; ok {
+		return r, true
+	}
 	return JobRecord{}, false
 }
 
 // PutJob adds or replaces a job record, keeping the newest maxJobs.
 func (s *State) PutJob(rec JobRecord) {
+	if _, ok := s.RetainedJobs[rec.ID]; ok {
+		s.RetainedJobs[rec.ID] = rec
+	}
 	for i, r := range s.Jobs {
 		if r.ID == rec.ID {
 			s.Jobs[i] = rec
@@ -102,6 +111,16 @@ func (s *State) PutJob(rec JobRecord) {
 	s.Jobs = append(s.Jobs, rec)
 	if over := len(s.Jobs) - maxJobs; over > 0 {
 		s.Jobs = append([]JobRecord(nil), s.Jobs[over:]...)
+	}
+}
+
+// RetainJob pins an existing job before its history entry can be pruned.
+func (s *State) RetainJob(id string) {
+	if rec, ok := s.Job(id); ok {
+		if s.RetainedJobs == nil {
+			s.RetainedJobs = make(map[string]JobRecord)
+		}
+		s.RetainedJobs[id] = rec
 	}
 }
 
@@ -148,12 +167,12 @@ func WithFileLock(lockPath string, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: fixed node lock paths.
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(f.Fd())
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		return err
 	}
@@ -163,22 +182,24 @@ func WithFileLock(lockPath string, fn func() error) error {
 
 // withFileLockContext is WithFileLock with a bounded wait for the lock. Once
 // the lock is acquired it is held for the whole call, including fn's writes.
+// A nil ctx waits like WithFileLock: it has no deadline.
 func withFileLockContext(ctx context.Context, lockPath string, fn func() error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
+	var done <-chan struct{}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		done = ctx.Done()
 	}
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: fixed node lock paths.
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(f.Fd())
 	ticker := time.NewTicker(stateLockPoll)
 	defer ticker.Stop()
 	for {
@@ -190,7 +211,7 @@ func withFileLockContext(ctx context.Context, lockPath string, fn func() error) 
 			return err
 		}
 		select {
-		case <-ctx.Done():
+		case <-done:
 			return ctx.Err()
 		case <-ticker.C:
 		}
@@ -207,7 +228,7 @@ func (s State) PublicSSHOpen() bool {
 // LoadState reads path. A missing file is an empty state. A file that does not
 // decode returns precondition_failed; it is never reset silently.
 func LoadState(path string) (State, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed state path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return State{}, nil

@@ -95,65 +95,19 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	if MustNotPrompt(cmd) {
 		return nil
 	}
-	rich := richOutput(cmd)
 	resume := ui.Suspend()
 	defer resume()
-	w := cmd.ErrOrStderr()
-	note := func(s string) {
-		if rich {
-			s = ui.Note(s)
-		}
-		_, _ = fmt.Fprintln(w, s)
-	}
-
-	if rich {
-		_, _ = fmt.Fprintln(w, "\n"+ui.Header("Secrets handoff", 72))
-	} else {
-		_, _ = fmt.Fprintln(w, "\n== Secrets handoff ==")
-	}
-	_, _ = fmt.Fprintln(w, "The cluster's master record: the operator's keys, the sudo password and the database passwords.")
-	_, _ = fmt.Fprintln(w, "vaire keeps no copy and doesn't show it again. Store it in your password manager.")
-	_, _ = fmt.Fprintln(w)
-	label := "Bundle passphrase"
-	if rich {
-		label = ui.Dim(label)
-	}
-	_, _ = fmt.Fprintln(w, label+"  "+h.passphrase)
-	if h.path != "" {
-		note("The transfer bundle was saved to " + h.path + ". Keep the passphrase apart from it.")
-	}
-	_, _ = fmt.Fprintln(w)
-
+	term := handoffTerminal{w: cmd.ErrOrStderr(), rich: richOutput(cmd)}
+	h.showHeader(term)
 	for {
-		options := [][2]string{{"Copy everything to the clipboard", "copy"}}
-		if canSave && h.saved == "" {
-			options = append(options, [2]string{"Save everything to a file", "save"})
-		}
-		options = append(options, [2]string{"Show everything on screen", "print"}, [2]string{"Done", "done"})
-		choice, err := chooseOption(cmd, "Secrets handoff", options)
+		choice, err := chooseOption(cmd, "Secrets handoff", handoffOptions(canSave, h.saved))
 		if err != nil {
 			return err
 		}
 		if choice == "done" {
 			break
 		}
-		switch choice {
-		case "copy":
-			_, _ = fmt.Fprint(w, osc52(h.record()))
-			note("Copied to your clipboard: every value, the transfer bundle and its passphrase. Paste it into your password manager. Nothing pasted? Pick Show everything on screen.")
-		case "print":
-			// For terminals that block OSC 52, such as tmux without
-			// set-clipboard on.
-			_, _ = fmt.Fprintln(w)
-			_, _ = fmt.Fprint(w, h.record())
-			_, _ = fmt.Fprintln(w)
-		case "save":
-			if err := h.save(cmd); err != nil {
-				note(err.Error())
-				continue
-			}
-			note("Saved everything to " + h.saved + " (plain text, readable only by you): every value, the transfer bundle and its passphrase.")
-		}
+		h.showChoice(cmd, term, choice)
 	}
 
 	if skipStored {
@@ -165,9 +119,81 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 			WithDetails(map[string]any{"flag": "--confirm-secrets-stored"})
 	}
 	if clear, err := yesNoDefaultYes(cmd, "Clear the screen now?"); err == nil && clear {
-		_, _ = fmt.Fprint(w, clearScreen)
+		_, _ = fmt.Fprint(term.w, clearScreen)
 	}
 	return nil
+}
+
+// handoffTerminal is the terminal a handoff is presented on.
+type handoffTerminal struct {
+	w    io.Writer
+	rich bool
+}
+
+// line writes one line as it is.
+func (t handoffTerminal) line(s string) {
+	_, _ = fmt.Fprintln(t.w, s)
+}
+
+// note writes one line, dimmed on a rich terminal.
+func (t handoffTerminal) note(s string) {
+	if t.rich {
+		s = ui.Note(s)
+	}
+	t.line(s)
+}
+
+// showHeader prints what the record is, its passphrase and where the
+// transfer bundle was saved.
+func (h *handoff) showHeader(term handoffTerminal) {
+	if term.rich {
+		term.line("\n" + ui.Header("Secrets handoff", 72))
+	} else {
+		term.line("\n== Secrets handoff ==")
+	}
+	term.line("The cluster's master record: the operator's keys, the sudo password and the database passwords.")
+	term.line("vaire keeps no copy and doesn't show it again. Store it in your password manager.")
+	term.line("")
+	label := "Bundle passphrase"
+	if term.rich {
+		label = ui.Dim(label)
+	}
+	term.line(label + "  " + h.passphrase)
+	if h.path != "" {
+		term.note("The transfer bundle was saved to " + h.path + ". Keep the passphrase apart from it.")
+	}
+	term.line("")
+}
+
+// handoffOptions are the actions offered, depending on whether a record was
+// saved already.
+func handoffOptions(canSave bool, saved string) [][2]string {
+	options := [][2]string{{"Copy everything to the clipboard", "copy"}}
+	if canSave && saved == "" {
+		options = append(options, [2]string{"Save everything to a file", "save"})
+	}
+	return append(options, [2]string{"Show everything on screen", "print"}, [2]string{"Done", "done"})
+}
+
+// showChoice performs one action of the handoff.
+func (h *handoff) showChoice(cmd *cobra.Command, term handoffTerminal, choice string) {
+	switch choice {
+	case "copy":
+		_, _ = fmt.Fprint(term.w, osc52(h.record()))
+		term.note("Copied to your clipboard: every value, the transfer bundle and its passphrase. Paste it into your password manager. Nothing pasted? Pick Show everything on screen.")
+	case "print":
+		// For terminals that block OSC 52, such as tmux without
+		// set-clipboard on.
+		term.line("")
+		_, _ = fmt.Fprint(term.w, h.record())
+		term.line("")
+	case "save":
+		if err := h.save(cmd); err != nil {
+			term.note(err.Error())
+			return
+		}
+		term.note("Saved everything to " + h.saved + " (plain text, readable only by you): every value, the transfer bundle and its passphrase.")
+	}
 }
 
 // save asks for a path, relative to the current directory, and writes the

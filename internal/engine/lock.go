@@ -131,11 +131,11 @@ func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, met
 		how = syscall.LOCK_SH
 	}
 	infoPath := path + ".info"
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: the fixed global lock or a cluster's, named from config.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(f.Fd())
 	deadline := time.Now().Add(timeout)
 	for {
 		err := syscall.Flock(fd, how|syscall.LOCK_NB)
@@ -179,7 +179,7 @@ func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, met
 
 func lockHeld(infoPath, cluster, lock string) *output.CLIError {
 	var holder *Holder
-	if raw, err := os.ReadFile(infoPath); err == nil { //nolint:gosec // G304: the lock's own info file.
+	if raw, err := os.ReadFile(infoPath); err == nil {
 		var h Holder
 		if json.Unmarshal(raw, &h) == nil && processAlive(h.PID) {
 			holder = &h

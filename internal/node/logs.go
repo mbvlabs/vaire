@@ -123,7 +123,7 @@ func streamLog(ctx context.Context, source, since string, lines int, follow bool
 		return fmt.Errorf("unknown log source %q", source)
 	}
 
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed readers with a validated target.
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

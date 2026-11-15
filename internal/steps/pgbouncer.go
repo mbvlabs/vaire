@@ -31,6 +31,13 @@ func (pgbouncer) Describe(config.Cluster) string {
 // whose verifiers fill userlist.txt live in each database's cluster.
 func (pgbouncer) SkipReason(cfg config.Cluster) string {
 	if len(cfg.Clusters) == 0 {
+		recs, err := poolerRecords()
+		if err != nil {
+			return "" // Inputs reports unknown state rather than silently skipping.
+		}
+		if _, _, ok := recoverInspectionSource(cfg, recs); ok {
+			return ""
+		}
 		return "no_databases"
 	}
 	return ""
@@ -54,7 +61,7 @@ func poolerDatabases(cfg config.Cluster, recs backup.Records, session bool) []re
 	fenced := fencedPoolerAliases(recs)
 	out := make([]render.PoolerDatabase, 0, len(cfg.Clusters))
 	for _, c := range cfg.Clusters {
-		if fenced[c.Name] {
+		if fenced[c.Name] || recs.IsAwaiting(c.Name) {
 			continue
 		}
 		db := render.PoolerDatabase{Name: c.Name, Port: c.Port}
@@ -90,14 +97,25 @@ func fencedPoolerAliases(recs backup.Records) map[string]bool {
 		}
 		out[name] = true
 	}
-	for name, f := range recs.Activation {
-		if !f.Active() {
+	// A recovered target is not an application target until access has been
+	// installed and the owned restore record has been retired. This also
+	// fences older deferred recoveries that cleared AwaitingRecovery early.
+	for name, r := range recs.Restores {
+		if !r.Recover {
 			continue
 		}
 		if out == nil {
 			out = map[string]bool{}
 		}
 		out[name] = true
+	}
+	for name, fence := range recs.Activation {
+		if fence.Active() {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[name] = true
+		}
 	}
 	return out
 }
@@ -126,7 +144,16 @@ func poolerRecords() (backup.Records, error) {
 func restoreEntries(cfg config.Cluster, recs backup.Records) []render.PoolerDatabase {
 	var out []render.PoolerDatabase
 	for db, r := range recs.Restores {
-		if _, ok := cfg.ClusterByName(db); !ok || r.Phase != backup.PhaseReady || r.Port == 0 {
+		_, visible := cfg.ClusterByName(db)
+		if !visible && r.Recover && r.ID != "" && r.Database == db && recs.IsAwaiting(db) {
+			for _, spec := range cfg.Awaiting {
+				if spec.Name == db {
+					visible = true
+					break
+				}
+			}
+		}
+		if !visible || r.Phase != backup.PhaseReady || r.Port == 0 {
 			continue
 		}
 		// A restore whose promotion has begun must not keep an inspection
@@ -137,6 +164,17 @@ func restoreEntries(cfg config.Cluster, recs backup.Records) []render.PoolerData
 		out = append(out, render.PoolerDatabase{Name: backup.RestoringName(db), DBName: db, Port: r.Port, MaxConnections: restoreEntryPool})
 	}
 	return out
+}
+
+func recoverInspectionSource(cfg config.Cluster, recs backup.Records) (config.ClusterSpec, backup.Restore, bool) {
+	for _, spec := range cfg.Awaiting {
+		r, ok := recs.Restores[spec.Name]
+		if ok && recs.IsAwaiting(spec.Name) && r.Recover && r.ID != "" &&
+			r.Database == spec.Name && r.Phase == backup.PhaseReady && r.Port != 0 {
+			return spec, r, true
+		}
+	}
+	return config.ClusterSpec{}, backup.Restore{}, false
 }
 
 // restoreEntryPool caps the session pooler's connections to a restore's copy:
@@ -402,10 +440,30 @@ func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime
 // roleVerifiers reads the SCRAM verifiers of the service roles from the
 // first cluster. They are the same in every cluster (RFC 12).
 func roleVerifiers(ctx context.Context, cfg config.Cluster) (map[string]string, error) {
-	if len(cfg.Clusters) == 0 {
+	recs, err := poolerRecords()
+	if err != nil {
+		return nil, err
+	}
+	var spec config.ClusterSpec
+	var inspection *backup.Restore
+	if len(cfg.Clusters) != 0 {
+		spec = cfg.Clusters[0]
+	} else if ready, r, ok := recoverInspectionSource(cfg, recs); ok {
+		spec, inspection = ready, &r
+	} else {
 		return nil, fmt.Errorf("there is no cluster to read the service roles from")
 	}
-	rows, err := ClusterPG(cfg.Clusters[0]).Query(ctx, "postgres",
+	local := ClusterPG(spec)
+	if inspection != nil {
+		local.Port = inspection.Port
+	} else if recs.IsAwaiting(spec.Name) {
+		r, ok := recs.Restores[spec.Name]
+		if !ok || !r.Recover || r.ID == "" || r.Database != spec.Name || r.Phase != backup.PhaseReady || r.Port == 0 {
+			return nil, fmt.Errorf("service role source for %s is not ready for inspection", spec.Name)
+		}
+		local.Port = r.Port
+	}
+	rows, err := local.Query(ctx, "postgres",
 		"SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('pgbouncer_auth','vaire_monitor')", nil)
 	if err != nil {
 		return nil, err
@@ -487,12 +545,12 @@ func pgbouncerResponds(ctx context.Context, socketDir string, port int) error {
 // database's running queries to finish, so it gets the longest.
 const poolerAdminTimeout = 15 * time.Second
 
-// poolerAdmin runs one admin console command on the pooler at port. It logs
-// in as pgbouncer over the socket as the postgres OS user, which PgBouncer
-// lets in without a password because it runs as that user.
-func poolerAdmin(ctx context.Context, port int, command string) error {
+// poolerAdmin runs one admin console command on the pooler. It logs in as
+// pgbouncer over the socket as the postgres OS user, which PgBouncer lets in
+// without a password because it runs as that user.
+func poolerAdmin(ctx context.Context, command string) error {
 	ctx, cancel := context.WithTimeout(ctx, poolerAdminTimeout)
 	defer cancel()
 	return runCmd(ctx, "runuser", "-u", "postgres", "--", "psql", "-X", "-q",
-		"-h", PGSocketDir, "-p", strconv.Itoa(port), "-U", "pgbouncer", "-d", "pgbouncer", "-c", command)
+		"-h", PGSocketDir, "-p", strconv.Itoa(PgbouncerPort), "-U", "pgbouncer", "-d", "pgbouncer", "-c", command)
 }

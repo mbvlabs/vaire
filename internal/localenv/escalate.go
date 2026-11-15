@@ -1,6 +1,7 @@
 package localenv
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,13 +12,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// SilentExit is a child process exit that the parent must propagate without
+// SilentExitError is a child process exit that the parent must propagate without
 // printing a second envelope.
-type SilentExit struct {
+type SilentExitError struct {
 	Code int
 }
 
-func (e *SilentExit) Error() string {
+func (e *SilentExitError) Error() string {
 	if e == nil {
 		return ""
 	}
@@ -59,8 +60,8 @@ func Escalate(cmd *cobra.Command, reason string, extraArgs ...string) (bool, err
 	if os.Geteuid() == 0 || flagBool(cmd, "escalated") {
 		return false, nil
 	}
-	if err := exec.Command("sudo", "-n", "true").Run(); err == nil { //nolint:gosec // G204: fixed sudo probe.
-		return reexec(true, extraArgs)
+	if err := exec.CommandContext(cmd.Context(), "sudo", "-n", "true").Run(); err == nil {
+		return reexec(cmd.Context(), true, extraArgs)
 	}
 	if canPrompt(cmd) {
 		ok, err := ask(cmd, "vaire needs root to "+reason+". Escalate with sudo?")
@@ -70,7 +71,7 @@ func Escalate(cmd *cobra.Command, reason string, extraArgs ...string) (bool, err
 		if !ok {
 			return false, rootRequired(extraArgs)
 		}
-		return reexec(false, extraArgs)
+		return reexec(cmd.Context(), false, extraArgs)
 	}
 	if flagBool(cmd, "sudo") {
 		return false, output.NewError(
@@ -110,7 +111,7 @@ func ask(cmd *cobra.Command, question string) (bool, error) {
 	return prompter.YesNo(cmd, question)
 }
 
-func reexec(noninteractive bool, extraArgs []string) (bool, error) {
+func reexec(ctx context.Context, noninteractive bool, extraArgs []string) (bool, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return false, err
@@ -123,7 +124,7 @@ func reexec(noninteractive bool, extraArgs []string) (bool, error) {
 	sudoArgs = append(sudoArgs, filteredArgs()...)
 	sudoArgs = append(sudoArgs, "--escalated")
 	sudoArgs = append(sudoArgs, extraArgs...)
-	child := exec.Command("sudo", sudoArgs...) //nolint:gosec // G204: re-exec of this binary under sudo.
+	child := exec.CommandContext(ctx, "sudo", sudoArgs...)
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
@@ -133,7 +134,7 @@ func reexec(noninteractive bool, extraArgs []string) (bool, error) {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return true, &SilentExit{Code: exitErr.ExitCode()}
+		return true, &SilentExitError{Code: exitErr.ExitCode()}
 	}
 	return true, err
 }
@@ -154,8 +155,10 @@ func sudoLine(extraArgs []string) string {
 	if err != nil {
 		self = "vaire"
 	}
-	parts := []string{"sudo", self}
-	parts = append(parts, filteredArgs()...)
+	filtered := filteredArgs()
+	parts := make([]string, 0, 2+len(filtered)+len(extraArgs))
+	parts = append(parts, "sudo", self)
+	parts = append(parts, filtered...)
 	parts = append(parts, extraArgs...)
 	quoted := make([]string, 0, len(parts))
 	for _, part := range parts {

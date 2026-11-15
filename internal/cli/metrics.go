@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +49,7 @@ func metricsCommands() cmdSpec {
 				use: "show",
 				run: runMetricsShow,
 				flags: []fl{
-					flagBool("reveal", "Print the endpoint's password from this machine's context"),
+					flagBool("reveal", "Print the endpoint's password from this machine's workspace"),
 				},
 				meta: CommandMeta{
 					Summary:   "Show the /metrics paths, the service-discovery URL and scrape configs",
@@ -97,7 +97,7 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	creds, err := contexts.LoadCredentials(s.ctx.Name)
+	creds, err := workspaces.LoadCredentials(s.ctx.Name)
 	if err != nil {
 		return err
 	}
@@ -105,7 +105,7 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 	if data.Hostname != "" {
 		data.TargetsURL = "https://" + data.Hostname + data.TargetsPath
 	}
-	user, password := contexts.MetricsUser, "<password from the secrets handoff>"
+	user, password := workspaces.MetricsUser, "<password from the secrets handoff>"
 	if creds.Metrics != nil {
 		data.Username = creds.Metrics.Username
 		user = creds.Metrics.Username
@@ -133,7 +133,7 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 	warnings := append(s.warnings, reply.Warnings...)
 	if creds.Metrics == nil {
 		warnings = append(warnings, output.Warning{Code: "metrics_credential_missing",
-			Message: "this machine's context has no /metrics credential; run vaire apply, then vaire secrets export"})
+			Message: "this machine's workspace has no /metrics credential; run vaire apply, then vaire secrets export"})
 	}
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: warnings})
 }
@@ -213,7 +213,7 @@ func runMetricsRotate(cmd *cobra.Command, _ []string) error {
 	if err := Confirm(cmd, token); err != nil {
 		return err
 	}
-	creds, err := contexts.LoadCredentials(s.ctx.Name)
+	creds, err := workspaces.LoadCredentials(s.ctx.Name)
 	if err != nil {
 		return err
 	}
@@ -225,13 +225,13 @@ func runMetricsRotate(cmd *cobra.Command, _ []string) error {
 	}
 	// Save before sending: a node holding a hash of a password the operator
 	// lost would lock every scraper out until the next rotate.
-	if err := contexts.SaveCredentials(s.ctx.Name, creds); err != nil {
+	if err := workspaces.SaveCredentials(s.ctx.Name, creds); err != nil {
 		return err
 	}
 	reply, err := p.call(commandContext(cmd), s.node, "metrics.rotate", nil, remote.CallOptions{Secrets: values, Confirm: token, OnEvent: p.event})
 	if err != nil {
 		creds.Metrics = old
-		_ = contexts.SaveCredentials(s.ctx.Name, creds)
+		_ = workspaces.SaveCredentials(s.ctx.Name, creds)
 		return err
 	}
 	warnings := append(s.warnings, reply.Warnings...)

@@ -343,7 +343,7 @@ func TestRetireRestoreAndRouteIsAtomic(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	r := backup.Restore{ID: "op-retire", Database: "app", Aside: "app__pre", Kind: backup.TargetLatest, Port: spec.Port}
+	r := backup.Restore{ID: "op-retire", Database: "app", Aside: "app__pre", Kind: backup.TargetLatest, Port: spec.Port, Phase: backup.PhaseReady}
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		s.Restores["app"] = r
 		s.Timelines["app"] = backup.TimelineSwitch{Stanza: spec.Stanza, Timeline: "2"}

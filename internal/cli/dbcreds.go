@@ -10,10 +10,10 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -24,7 +24,7 @@ import (
 // the secrets_document_stale warning. Application database passwords are
 // never generated here: only vaire db create and vaire db credentials --rotate
 // make them.
-func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, []string, error) {
+func ensureClusterSecrets(creds *workspaces.DatabaseCreds) (map[string]string, []string, error) {
 	if creds.Admin.User == "" {
 		creds.Admin.User = "vaire_admin"
 	}
@@ -42,7 +42,7 @@ func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, []s
 	rpc[steps.SecretAdminPassword] = creds.Admin.Password
 
 	if creds.Services == nil {
-		creds.Services = map[string]contexts.Role{}
+		creds.Services = map[string]workspaces.Role{}
 	}
 	for _, role := range steps.ServiceRoles {
 		r := creds.Services[role]
@@ -66,23 +66,23 @@ func ensureClusterSecrets(creds *contexts.DatabaseCreds) (map[string]string, []s
 // databaseSecret is one application database's roles and connection URLs.
 // vaire shows it once and never stores it.
 type databaseSecret struct {
-	Name  string                   `json:"name"`
-	Roles map[string]contexts.Role `json:"roles"`
-	URLs  map[string]string        `json:"urls"`
-	Notes string                   `json:"notes"`
+	Name  string                     `json:"name"`
+	Roles map[string]workspaces.Role `json:"roles"`
+	URLs  map[string]string          `json:"urls"`
+	Notes string                     `json:"notes"`
 }
 
 // newDatabaseSecret generates passwords for roles of database name and
 // returns them with the RPC secret map.
 func newDatabaseSecret(cfg config.Cluster, name string, roles []string) (databaseSecret, map[string]string, error) {
-	out := databaseSecret{Name: name, Roles: map[string]contexts.Role{}, Notes: secretsdoc.ConnectionNotes}
+	out := databaseSecret{Name: name, Roles: map[string]workspaces.Role{}, Notes: secretsdoc.ConnectionNotes}
 	rpc := map[string]string{}
 	for _, role := range roles {
 		pw, err := secrets.Base62(32)
 		if err != nil {
 			return databaseSecret{}, nil, err
 		}
-		out.Roles[role] = contexts.Role{User: name + "_" + role, Password: pw}
+		out.Roles[role] = workspaces.Role{User: name + "_" + role, Password: pw}
 		rpc[steps.SecretDatabaseRole(name, role)] = pw
 	}
 	out.URLs = secretsdoc.DatabaseURLs(cfg.DatabaseHostname(name), cfg.TLS.Mode, name, out.Roles)
@@ -137,17 +137,17 @@ func joinAnd(items []string) string {
 	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
-// serviceSecrets tops up the context's vaire_admin and service passwords (D7)
+// serviceSecrets tops up the workspace's vaire_admin and service passwords (D7)
 // and returns them as the RPC secret map, with the loaded credentials and
 // whether anything was generated. Every command that may create a cluster
 // sends them: the first cluster computes its service verifiers from them.
-func serviceSecrets(contextName string) (map[string]string, contexts.Credentials, []string, error) {
-	creds, err := contexts.LoadCredentials(contextName)
+func serviceSecrets(workspaceName string) (map[string]string, workspaces.Credentials, []string, error) {
+	creds, err := workspaces.LoadCredentials(workspaceName)
 	if err != nil {
 		return nil, creds, nil, err
 	}
 	if creds.Database == nil {
-		creds.Database = &contexts.DatabaseCreds{}
+		creds.Database = &workspaces.DatabaseCreds{}
 	}
 	values, generated, err := ensureClusterSecrets(creds.Database)
 	if err != nil {
@@ -164,7 +164,7 @@ func serviceSecrets(contextName string) (map[string]string, contexts.Credentials
 		generated = append(generated, "a /metrics credential")
 	}
 	if len(generated) > 0 {
-		if err := contexts.SaveCredentials(contextName, creds); err != nil {
+		if err := workspaces.SaveCredentials(workspaceName, creds); err != nil {
 			return nil, creds, nil, err
 		}
 	}
@@ -193,7 +193,7 @@ func (d databaseSecret) styled(headline, title, note string, width int) string {
 			rows = append(rows, ui.CredentialRow{Role: role, User: r.User, Password: r.Password})
 		}
 	}
-	var urls []ui.URLRow
+	urls := make([]ui.URLRow, 0, len(d.URLs))
 	for _, k := range sortedStrings(d.URLs) {
 		urls = append(urls, ui.URLRow{Label: k + " URL", URL: d.URLs[k]})
 	}
@@ -208,7 +208,7 @@ func styledStdout(cmd *cobra.Command) (int, bool) {
 		return 0, false
 	}
 	width := 80
-	if cols, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && cols > 0 { //nolint:gosec // G115: file descriptors fit in int.
+	if cols, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && cols > 0 {
 		width = cols
 	}
 	return width, true

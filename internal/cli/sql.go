@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -28,15 +29,15 @@ type dbEndpoint struct {
 	Hostname  string
 }
 
-// databaseEndpoint looks database db up in the context's placement cache
+// databaseEndpoint looks database db up in the workspace's placement cache
 // (RFC 6.3). A database the cache doesn't know refreshes the cache from the
 // master once; one still unknown (a restore copy, a typo) goes to the master,
 // whose session pooler refuses a database it has no entry for. With db
 // empty, it is the master.
-func databaseEndpoint(cmd *cobra.Command, s *session, p *progress, db string) dbEndpoint {
+func databaseEndpoint(ctx context.Context, s *session, p *progress, db string) dbEndpoint {
 	n, ok := s.ctx.DatabaseNode(db)
 	if !ok && db != "" {
-		s.warnings = append(s.warnings, syncContextFromNode(cmd, s, p)...)
+		s.warnings = append(s.warnings, syncWorkspaceFromNode(ctx, s, p)...)
 		n, _ = s.ctx.DatabaseNode(db)
 	}
 	return dbEndpoint{WGAddress: n.WGAddress, Hostname: n.Hostname}
@@ -51,13 +52,13 @@ func (e dbEndpoint) addr(port int) string {
 // application database passwords, so vaire sql, psql and console connect as
 // vaire_admin, read-only unless --write. A write to a protected database
 // connects as a short-lived role instead (sessionLogin).
-func adminCredentials(c *contexts.Context) (user, password string, err error) {
-	creds, err := contexts.LoadCredentials(c.Name)
+func adminCredentials(c *workspaces.Workspace) (user, password string, err error) {
+	creds, err := workspaces.LoadCredentials(c.Name)
 	if err != nil {
 		return "", "", err
 	}
 	if creds.Database == nil || creds.Database.Admin.Password == "" {
-		return "", "", output.NewError(output.CodePrecondition, "this context has no vaire_admin password", output.ExitPrecondition,
+		return "", "", output.NewError(output.CodePrecondition, "this workspace has no vaire_admin password", output.ExitPrecondition,
 			"Re-run vaire login with a newer secrets document.")
 	}
 	return creds.Database.Admin.User, creds.Database.Admin.Password, nil
@@ -85,7 +86,7 @@ func sqlQuery(cmd *cobra.Command, args []string) (string, error) {
 		return args[0], nil
 	}
 	if path := stringFlag(cmd, "file"); path != "" {
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this file.
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return "", output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
@@ -126,7 +127,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	ctx := commandContext(cmd)
-	at := databaseEndpoint(cmd, s, p, db)
+	at := databaseEndpoint(ctx, s, p, db)
 	// Connecting through the tunnel and running the statement send no
 	// events; the waiting line shows them. It ends before the result prints.
 	stopWait := p.wait("connecting to " + db)

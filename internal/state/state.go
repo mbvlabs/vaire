@@ -42,7 +42,7 @@ func (s FileStore) path() string {
 
 // Load reads and validates cluster.toml.
 func (s FileStore) Load() (config.Cluster, []byte, error) {
-	raw, err := os.ReadFile(s.path()) //nolint:gosec // G304: fixed desired-state path.
+	raw, err := os.ReadFile(s.path())
 	if err != nil {
 		return config.Cluster{}, nil, err
 	}
@@ -76,7 +76,7 @@ func (s FileStore) Save(raw []byte) error {
 
 // Revision returns the sha256 of the file.
 func (s FileStore) Revision() (string, error) {
-	raw, err := os.ReadFile(s.path()) //nolint:gosec // G304: fixed desired-state path.
+	raw, err := os.ReadFile(s.path())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil

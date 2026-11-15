@@ -165,7 +165,7 @@ const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 // bits in Crockford base32.
 func NewRequestID() string {
 	var id [16]byte
-	ms := uint64(time.Now().UnixMilli()) //nolint:gosec // G115: wall-clock milliseconds are positive.
+	ms := uint64(time.Now().UnixMilli())
 	var ts [8]byte
 	binary.BigEndian.PutUint64(ts[:], ms)
 	copy(id[:6], ts[2:])

@@ -28,8 +28,16 @@ var (
 // registration and adoption. They are variables so a test can stop between the
 // files an adoption writes and run it again on the partial registration.
 var (
-	resolveClusterIDs = engine.ResolveIDs
-	writeClusterFile  = engine.WriteFileAtomicOwned
+	resolveClusterIDs         = engine.ResolveIDs
+	writeClusterFile          = engine.WriteFileAtomicOwned
+	startMaterialisedRecovery = func(ctx context.Context, m *Materialised, until, kind string) error {
+		return m.startRecovery(ctx, until, kind)
+	}
+	runMaterialisedCommand = func(ctx context.Context, m *Materialised, command engine.Command) error {
+		return m.Shell.Exec(ctx, m.StepID, command, m.Report)
+	}
+	materialisedDataRunning = dataRunning
+	legacyReservationDir    = TemporaryPortDir
 )
 
 // MaterialiseOverrides is the conf.d file that turns a copy of the source's
@@ -40,10 +48,9 @@ const MaterialiseOverrides = "99-materialise.conf"
 // cluster's stanza at a point in time or from the live cluster itself (RFC
 // 10): registered with postgresql-common under <data_root>/<name>, on a
 // port of the temporary range, with archiving off and hot_standby on. Its
-// configuration is a copy of the source's, so the hot-standby floors
-// (max_connections, max_worker_processes, max_wal_senders,
-// max_prepared_transactions, max_locks_per_transaction) are the source's,
-// and only the memory settings are made small.
+// configuration is copied from the source, with optional destination managed
+// layers and temporary overrides. Recovery floors are inspected before a
+// restored copy starts; they are never automatically increased.
 type Materialised struct {
 	// Name is the temporary cluster's name, for example app__restoring.
 	Name string
@@ -67,6 +74,30 @@ type Materialised struct {
 	// never loads a copied configuration without the libraries its data needs
 	// and the settings that keep copied background work idle.
 	Plan *CopyPlan
+	// DestinationConfig replaces the source's managed tuning and settings
+	// layers for this temporary cluster. Nil preserves the source fallback.
+	DestinationConfig *MaterialiseConfig
+	// Ownership binds and guards paths for an exact node operation. Nil keeps
+	// the existing caller-managed lifecycle.
+	Ownership MaterialisationOwnership
+	// FollowerResumeHost is trusted internal host integration, not RPC input.
+	FollowerResumeHost FollowerResumeHost
+	reservation        *ownedReservation
+	forkConfigRoot     string
+	forkRunning        func(context.Context, string) bool
+	forkWriteFile      func(string, []byte, os.FileMode, string, string) error
+}
+
+// MaterialiseConfig contains already-rendered destination configuration.
+// Tuning and Settings replace the corresponding managed files. Follower
+// replaces the follower layer, or removes the source layer when nil.
+// Overrides, when non-nil, replaces 90-overrides.conf; nil retains the
+// source's operator overrides, as adoption does.
+type MaterialiseConfig struct {
+	Tuning    string
+	Settings  string
+	Follower  *string
+	Overrides *string
 }
 
 // NewMaterialised reserves a temporary port for cluster name under
@@ -109,7 +140,12 @@ func ResumeMaterialised(dataRoot, name, source string, sourcePort int, sh engine
 func (m *Materialised) DataDir() string { return m.Data }
 
 // ConfDir is the temporary cluster's configuration directory.
-func (m *Materialised) ConfDir() string { return filepath.Join(pgConfRoot, m.Name) }
+func (m *Materialised) ConfDir() string {
+	if m.forkConfigRoot != "" {
+		return filepath.Join(m.forkConfigRoot, m.Name)
+	}
+	return filepath.Join(pgConfRoot, m.Name)
+}
 
 // PGConfRootForTest sets postgresql-common's configuration root for a test in
 // another package and returns the restore function.
@@ -147,7 +183,7 @@ func ClusterConfigDirectory(name string) (bool, error) {
 // resumed operation proves that the deterministic cluster path is its own and
 // not some other cluster's registration.
 func ClusterDataDirectory(name string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(pgConfRoot, name, "postgresql.conf")) //nolint:gosec // G304: postgresql-common's fixed configuration path.
+	raw, err := os.ReadFile(filepath.Join(pgConfRoot, name, "postgresql.conf"))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
@@ -170,45 +206,68 @@ func (m *Materialised) PG() pg.Local { return pg.Local{Host: pgSocketDir, Port: 
 // registers the cluster and starts it, then waits until recovery has paused
 // at the target (opts.Pause), or has promoted there.
 func (m *Materialised) Restore(ctx context.Context, d Driver, opts RestoreOptions) error {
-	if err := m.makeData(); err != nil {
+	if err := m.createOwnedData(ctx); err != nil {
 		return err
 	}
 	opts.Path = m.Data
 	m.log("restoring " + m.Source + "'s stanza into " + m.Data)
-	if err := d.Materialise(ctx, opts); err != nil {
+	if err := m.GuardOwnership(ctx, MaterialisationRestore, func() error {
+		return d.Materialise(ctx, opts)
+	}); err != nil {
 		return err
 	}
-	if err := m.register(); err != nil {
+	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
+	return m.restoreRegistered(ctx, opts, func(ctx context.Context, until string) error {
+		return startMaterialisedRecovery(ctx, m, until, opts.Kind)
+	})
+}
+
+func (m *Materialised) restoreRegistered(ctx context.Context, opts RestoreOptions, start func(context.Context, string) error) error {
+	if err := m.GuardOwnership(ctx, MaterialisationPrepare, func() error {
+		if err := m.prepareRecoveryDiagnostics(); err != nil {
+			return err
+		}
+		return m.reconcileRecoveryFloors()
+	}); err != nil {
+		return err
+	}
+	if err := m.GuardOwnership(ctx, MaterialisationInspect, func() error {
+		return m.inspectRecoveryRequirements(ctx)
+	}); err != nil {
+		return err
+	}
+	until := UntilPaused
 	switch {
 	case !opts.Pause:
-		return m.start(ctx, UntilPromoted)
+		until = UntilPromoted
 	case opts.Kind == TargetLatest || opts.Kind == "":
-		return m.start(ctx, UntilOpen)
-	default:
-		return m.start(ctx, UntilPaused)
+		until = UntilOpen
 	}
+	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return start(ctx, until) })
 }
 
 // BaseBackup copies the live source with pg_basebackup over its socket,
 // registers the cluster and starts it. The copy is consistent and writable:
 // it starts as a primary of its own, with archiving off.
 func (m *Materialised) BaseBackup(ctx context.Context) error {
-	if err := m.makeData(); err != nil {
+	if err := m.createOwnedData(ctx); err != nil {
 		return err
 	}
 	m.log("copying the live " + m.Source + " into " + m.Data)
-	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: []string{
-		"-u", "postgres", "--", pgBin + "/pg_basebackup", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "-U", "postgres",
-		"-D", m.Data, "-X", "stream", "-c", "fast", "--no-password",
-	}}, m.Report); err != nil {
-		return wrapTool("pg_basebackup of "+m.Source, err)
-	}
-	if err := m.register(); err != nil {
+	if err := m.GuardOwnership(ctx, MaterialisationBaseBackup, func() error {
+		return wrapTool("pg_basebackup of "+m.Source, runMaterialisedCommand(ctx, m, engine.Command{Name: "runuser", Args: []string{
+			"-u", "postgres", "--", pgBin + "/pg_basebackup", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "-U", "postgres",
+			"-D", m.Data, "-X", "stream", "-c", "fast", "--no-password",
+		}}))
+	}); err != nil {
 		return err
 	}
-	return m.start(ctx, UntilOpen)
+	if err := m.registerOwned(ctx); err != nil {
+		return err
+	}
+	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx, UntilOpen) })
 }
 
 // makeData creates the empty data directory, owned by postgres.
@@ -233,7 +292,33 @@ func (m *Materialised) makeData() error {
 func (m *Materialised) register() error {
 	src := filepath.Join(pgConfRoot, m.Source)
 	dir := m.ConfDir()
-	files := map[string]string{
+	files := m.baseRegistrationFiles(dir)
+	if err := copySourceConfigFiles(files, src); err != nil {
+		return err
+	}
+	if err := copySourceConfD(files, src); err != nil {
+		return err
+	}
+	if c := m.DestinationConfig; c != nil {
+		applyDestinationConfig(files, c)
+	}
+	files[filepath.Join("conf.d", MaterialiseOverrides)] = materialiseOverrideConf(m.Port)
+	for _, d := range []string{dir, filepath.Join(dir, "conf.d")} {
+		if err := createRegistrationDir(d); err != nil {
+			return err
+		}
+	}
+	if err := m.removeStaleRegistrationLayers(dir); err != nil {
+		return err
+	}
+	return writeRegistrationFiles(dir, files)
+}
+
+// baseRegistrationFiles are the registration's own postgresql.conf, which
+// points at the data directory and the temporary port, and start.conf, which
+// keeps the cluster from starting on its own at boot.
+func (m *Materialised) baseRegistrationFiles(dir string) map[string]string {
+	return map[string]string{
 		"postgresql.conf": strings.Join([]string{
 			"# vaire temporary cluster " + m.Name + ", materialised from " + m.Source + "; dropped when vaire is done with it",
 			"data_directory = '" + m.Data + "'",
@@ -248,13 +333,24 @@ func (m *Materialised) register() error {
 		}, "\n"),
 		"start.conf": "manual\n",
 	}
+}
+
+// copySourceConfigFiles copies the source's authentication, identification and
+// pg_ctlcluster environment files, which the temporary cluster must keep.
+func copySourceConfigFiles(files map[string]string, src string) error {
 	for _, name := range []string{"pg_hba.conf", "pg_ident.conf", "pg_ctl.conf", "environment"} {
-		raw, err := os.ReadFile(filepath.Join(src, name)) //nolint:gosec // G304: the source cluster's own configuration.
+		raw, err := os.ReadFile(filepath.Join(src, name))
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		files[name] = string(raw)
 	}
+	return nil
+}
+
+// copySourceConfD copies the source's conf.d files, except the overrides the
+// materialisation writes itself.
+func copySourceConfD(files map[string]string, src string) error {
 	confD, err := os.ReadDir(filepath.Join(src, "conf.d"))
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -263,15 +359,37 @@ func (m *Materialised) register() error {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") || e.Name() == MaterialiseOverrides {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(src, "conf.d", e.Name())) //nolint:gosec // G304: the source cluster's own configuration.
+		raw, err := os.ReadFile(filepath.Join(src, "conf.d", e.Name()))
 		if err != nil {
 			return err
 		}
 		files[filepath.Join("conf.d", e.Name())] = string(raw)
 	}
-	files[filepath.Join("conf.d", MaterialiseOverrides)] = strings.Join([]string{
+	return nil
+}
+
+// applyDestinationConfig replaces the source's managed tuning, settings and
+// follower layers with the destination's, and keeps the operator's overrides
+// when the destination carries its own.
+func applyDestinationConfig(files map[string]string, c *MaterialiseConfig) {
+	files[filepath.Join("conf.d", "10-vaire-tuning.conf")] = c.Tuning
+	files[filepath.Join("conf.d", "50-vaire-settings.conf")] = c.Settings
+	follower := filepath.Join("conf.d", "60-vaire-follower.conf")
+	delete(files, follower)
+	if c.Follower != nil {
+		files[follower] = *c.Follower
+	}
+	if c.Overrides != nil {
+		files[filepath.Join("conf.d", UserOverrides)] = *c.Overrides
+	}
+}
+
+// materialiseOverrideConf is the conf.d file that makes the registration a
+// temporary cluster: no archiving, read-only recovery, small memory.
+func materialiseOverrideConf(port int) string {
+	return strings.Join([]string{
 		"# vaire temporary cluster: no archiving, read-only recovery, small memory",
-		"port = " + strconv.Itoa(m.Port),
+		"port = " + strconv.Itoa(port),
 		"listen_addresses = ''",
 		"archive_mode = off",
 		"hot_standby = on",
@@ -281,18 +399,36 @@ func (m *Materialised) register() error {
 		"huge_pages = off",
 		"",
 	}, "\n")
-	for _, d := range []string{dir, filepath.Join(dir, "conf.d")} {
-		if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // G301: postgresql-common's configuration directories are world-readable.
-			return err
-		}
-		uid, gid, err := resolveClusterIDs("postgres", "postgres")
-		if err != nil {
-			return err
-		}
-		if err := os.Chown(d, uid, gid); err != nil {
-			return err
-		}
+}
+
+// createRegistrationDir creates one of postgresql-common's configuration
+// directories, owned by postgres.
+func createRegistrationDir(d string) error {
+	if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // G301: postgresql-common's configuration directories are world-readable.
+		return err
 	}
+	uid, gid, err := resolveClusterIDs("postgres", "postgres")
+	if err != nil {
+		return err
+	}
+	return os.Chown(d, uid, gid)
+}
+
+// removeStaleRegistrationLayers removes the source's follower layer when the
+// destination's configuration has none.
+func (m *Materialised) removeStaleRegistrationLayers(dir string) error {
+	if m.DestinationConfig == nil || m.DestinationConfig.Follower != nil {
+		return nil
+	}
+	if err := os.Remove(filepath.Join(dir, "conf.d", "60-vaire-follower.conf")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// writeRegistrationFiles writes the registration, each file with the mode
+// postgresql-common gives a live cluster's.
+func writeRegistrationFiles(dir string, files map[string]string) error {
 	for name, content := range files {
 		if err := writeClusterFile(filepath.Join(dir, name), []byte(content), confMode(name), "postgres", "postgres"); err != nil {
 			return err
@@ -330,10 +466,43 @@ const UserOverrides = "90-overrides.conf"
 // cluster's, keeps 90-overrides.conf and restarts it. The port reservation
 // is freed.
 func (m *Materialised) Adopt(ctx context.Context, port int) error {
+	if m.reservation != nil && (m.Ownership == nil || m.reservation.owner != m) {
+		return errors.New("fork ownership guard required")
+	}
+	if m.reservation != nil {
+		if err := m.reservation.validate(ctx, m); err != nil {
+			return err
+		}
+	}
 	if err := m.Stop(ctx); err != nil {
 		return err
 	}
-	raw, err := os.ReadFile(filepath.Join(pgConfRoot, m.Source, "postgresql.conf")) //nolint:gosec // G304: the source cluster's own configuration.
+	return m.GuardOwnership(ctx, MaterialisationAdopt, func() error {
+		return m.adopt(ctx, port)
+	})
+}
+
+func (m *Materialised) adopt(ctx context.Context, port int) error {
+	if m.reservation != nil {
+		return m.reservation.perform(ctx, m, func() error { return m.adoptRegistration(port) }, func() { m.Port = port })
+	}
+	if err := m.adoptRegistration(port); err != nil {
+		return err
+	}
+	m.Port = port
+	_ = os.Remove(filepath.Join(legacyReservationDir, m.Name))
+	return nil
+}
+
+func (m *Materialised) adoptRegistration(port int) error {
+	if err := m.restoreRecoveryDiagnostics(); err != nil {
+		return err
+	}
+	sourceRoot := pgConfRoot
+	if m.forkConfigRoot != "" {
+		sourceRoot = m.forkConfigRoot
+	}
+	raw, err := os.ReadFile(filepath.Join(sourceRoot, m.Source, "postgresql.conf"))
 	if err != nil {
 		return err
 	}
@@ -346,10 +515,14 @@ func (m *Materialised) Adopt(ctx context.Context, port int) error {
 		{"port", strconv.Itoa(port)},
 		{"cluster_name", "'18/" + m.Name + "'"},
 	})
-	if err := writeClusterFile(filepath.Join(dir, "postgresql.conf"), []byte(conf), 0o644, "postgres", "postgres"); err != nil {
+	write := writeClusterFile
+	if m.forkWriteFile != nil {
+		write = m.forkWriteFile
+	}
+	if err := write(filepath.Join(dir, "postgresql.conf"), []byte(conf), 0o644, "postgres", "postgres"); err != nil {
 		return err
 	}
-	if err := writeClusterFile(filepath.Join(dir, "start.conf"), []byte("auto\n"), 0o644, "postgres", "postgres"); err != nil {
+	if err := write(filepath.Join(dir, "start.conf"), []byte("auto\n"), 0o644, "postgres", "postgres"); err != nil {
 		return err
 	}
 	confD := filepath.Join(dir, "conf.d")
@@ -369,8 +542,6 @@ func (m *Materialised) Adopt(ctx context.Context, port int) error {
 			return err
 		}
 	}
-	m.Port = port
-	_ = os.Remove(filepath.Join(TemporaryPortDir, m.Name))
 	return nil
 }
 
@@ -473,7 +644,12 @@ func reached(ctx context.Context, port int, until string) bool {
 }
 
 // Running reports whether the temporary cluster's postmaster is alive.
-func (m *Materialised) Running(ctx context.Context) bool { return dataRunning(ctx, m.Data) }
+func (m *Materialised) Running(ctx context.Context) bool {
+	if m.forkRunning != nil {
+		return m.forkRunning(ctx, m.Data)
+	}
+	return materialisedDataRunning(ctx, m.Data)
+}
 
 // dataRunning reports whether a postmaster runs on the data directory.
 func dataRunning(ctx context.Context, data string) bool {
@@ -492,7 +668,7 @@ func (m *Materialised) LogTail(n int) []string { return clusterLogTail(m.Name, n
 // clusterLogTail returns the last n lines of cluster name's
 // postgresql-common log.
 func clusterLogTail(name string, n int) []string {
-	raw, err := os.ReadFile("/var/log/postgresql/postgresql-18-" + name + ".log") //nolint:gosec // G304: a cluster vaire named.
+	raw, err := os.ReadFile("/var/log/postgresql/postgresql-18-" + name + ".log")
 	if err != nil {
 		return nil
 	}
@@ -515,6 +691,10 @@ func (m *Materialised) RecoveredTo(ctx context.Context) string {
 
 // Stop stops the temporary cluster if it runs.
 func (m *Materialised) Stop(ctx context.Context) error {
+	return m.GuardOwnership(ctx, MaterialisationStop, func() error { return m.stop(ctx) })
+}
+
+func (m *Materialised) stop(ctx context.Context) error {
 	if !m.Running(ctx) {
 		return nil
 	}
@@ -526,7 +706,23 @@ func (m *Materialised) Stop(ctx context.Context) error {
 // Drop tears the temporary cluster down. It runs with a context of its own,
 // so a cancelled job still cleans up.
 func (m *Materialised) Drop() error {
-	return DropTemporaryCluster(m.Shell, m.StepID, m.Report, m.Name, m.Data)
+	if m.reservation != nil && (m.Ownership == nil || m.reservation.owner != m) {
+		return errors.New("fork ownership guard required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	drop := func() error {
+		if m.reservation != nil {
+			return m.reservation.perform(ctx, m, func() error {
+				return dropTemporaryClusterFiles(ctx, m.Shell, m.StepID, m.Report, m.Name, m.Data)
+			}, nil)
+		}
+		return dropTemporaryCluster(ctx, m.Shell, m.StepID, m.Report, m.Name, m.Data)
+	}
+	if m.Ownership == nil && m.reservation == nil {
+		return drop()
+	}
+	return m.GuardOwnership(ctx, MaterialisationDrop, drop)
 }
 
 // DropTemporaryCluster stops and removes cluster name with pg_dropcluster,
@@ -538,6 +734,17 @@ func (m *Materialised) Drop() error {
 func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	return dropTemporaryCluster(ctx, sh, stepID, report, name, data)
+}
+
+// dropTemporaryCluster is DropTemporaryCluster under a ctx the caller owns.
+func dropTemporaryCluster(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
+	err := dropTemporaryClusterFiles(ctx, sh, stepID, report, name, data)
+	_ = os.Remove(filepath.Join(legacyReservationDir, name))
+	return err
+}
+
+func dropTemporaryClusterFiles(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	var err error
 	_, confErr := os.Stat(filepath.Join(pgConfRoot, name, "postgresql.conf"))
 	_, dataErr := os.Stat(data)
@@ -547,7 +754,6 @@ func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter
 	if err == nil {
 		err = errors.Join(os.RemoveAll(data), os.RemoveAll(filepath.Join(pgConfRoot, name)))
 	}
-	_ = os.Remove(filepath.Join(TemporaryPortDir, name))
 	return err
 }
 
@@ -587,7 +793,7 @@ func LiveDatabase(name string) string {
 // the locale and its provider), registers it and starts it: the target of
 // a restore from a dump.
 func (m *Materialised) Initdb(ctx context.Context, provider, locale string) error {
-	if err := m.makeData(); err != nil {
+	if err := m.createOwnedData(ctx); err != nil {
 		return err
 	}
 	args := []string{"-u", "postgres", "--", pgBin + "/initdb", "-D", m.Data, "--data-checksums",
@@ -599,20 +805,24 @@ func (m *Materialised) Initdb(ctx context.Context, provider, locale string) erro
 		args = append(args, "--icu-locale="+locale)
 	}
 	m.log("creating an empty cluster in " + m.Data)
-	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: args}, m.Report); err != nil {
-		return wrapTool("initdb of "+m.Name, err)
-	}
-	// The registration in /etc/postgresql holds the configuration, as
-	// pg_createcluster leaves it.
-	for _, name := range []string{"postgresql.conf", "pg_hba.conf", "pg_ident.conf"} {
-		if err := os.Remove(filepath.Join(m.Data, name)); err != nil && !os.IsNotExist(err) {
-			return err
+	if err := m.GuardOwnership(ctx, MaterialisationInitdb, func() error {
+		if err := runMaterialisedCommand(ctx, m, engine.Command{Name: "runuser", Args: args}); err != nil {
+			return wrapTool("initdb of "+m.Name, err)
 		}
-	}
-	if err := m.register(); err != nil {
+		// The registration in /etc/postgresql holds the configuration.
+		for _, name := range []string{"postgresql.conf", "pg_hba.conf", "pg_ident.conf"} {
+			if err := os.Remove(filepath.Join(m.Data, name)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	return m.start(ctx, UntilOpen)
+	if err := m.registerOwned(ctx); err != nil {
+		return err
+	}
+	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx, UntilOpen) })
 }
 
 // CopyRoles copies every role of the live source into the temporary
@@ -620,6 +830,10 @@ func (m *Materialised) Initdb(ctx context.Context, provider, locale string) erro
 // per-role settings included, so credentials don't change. The output never
 // reaches the log: it carries the verifiers.
 func (m *Materialised) CopyRoles(ctx context.Context) error {
+	return m.GuardOwnership(ctx, MaterialisationCopyRoles, func() error { return m.copyRoles(ctx) })
+}
+
+func (m *Materialised) copyRoles(ctx context.Context) error {
 	var buf bytes.Buffer
 	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: []string{
 		"-u", "postgres", "--", pgBin + "/pg_dumpall", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "--roles-only", "--no-password",
@@ -755,7 +969,7 @@ var writeAutoConf = engine.WriteFileAtomicOwned
 
 func repointAutoConf(data, oldData string) error {
 	path := filepath.Join(data, "postgresql.auto.conf")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a data directory vaire moved.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -797,6 +1011,17 @@ var recoverySettings = []string{
 // recoveryHeader starts the comment pgBackRest writes above its recovery
 // settings; it goes with them.
 const recoveryHeader = "# Recovery settings generated by pgBackRest"
+
+// Promote ends recovery under the materialisation ownership guard.
+func (m *Materialised) Promote(ctx context.Context) ([]string, error) {
+	var dropped []string
+	err := m.GuardOwnership(ctx, MaterialisationPromote, func() error {
+		var err error
+		dropped, err = Promote(ctx, m.PG(), m.Data)
+		return err
+	})
+	return dropped, err
+}
 
 // Promote ends recovery on the cluster at local, whose data directory is
 // data, with pg_promote(), which opens it on a new timeline, then removes
@@ -922,7 +1147,7 @@ func column(rows []map[string]string, name string) []string {
 // directory's postgresql.auto.conf and returns the ones it removed.
 func dropRecoverySettings(data string) ([]string, error) {
 	path := filepath.Join(data, "postgresql.auto.conf")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a data directory vaire manages.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

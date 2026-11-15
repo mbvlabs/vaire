@@ -34,7 +34,9 @@ type postgresRestarter struct {
 
 // Restart host effects are seams for the real engine/step tests.
 var (
-	restarterPoolerAdmin  = poolerAdmin
+	restarterPoolerAdmin = func(ctx context.Context, _ int, command string) error {
+		return poolerAdmin(ctx, command)
+	}
 	restarterRunCmd       = runCmd
 	restarterWaitReady    = waitReady
 	restarterPendingCheck = pendingRestartSettings
@@ -126,7 +128,7 @@ func waitReady(ctx context.Context, port int) error {
 // runCmd runs a fixed command with the probe environment. A failure carries
 // the end of the command's combined output.
 func runCmd(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed restart commands.
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = probeEnv
 	out := &tailBuffer{max: cmdOutputTail}
 	cmd.Stdout = out
@@ -183,8 +185,8 @@ func RestarterFor(cfg config.Cluster, rt engine.Runtime, report engine.Reporter)
 // through a restore's cut-over instead of failing, and returns the RESUME.
 // A PAUSE that fails or times out doesn't stop the caller.
 func PauseDatabase(ctx context.Context, db string) (resume func()) {
-	_ = poolerAdmin(ctx, PgbouncerPort, "PAUSE "+db)
-	return func() { _ = poolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+db) }
+	_ = poolerAdmin(ctx, "PAUSE "+db)
+	return func() { _ = poolerAdmin(context.WithoutCancel(ctx), "RESUME "+db) }
 }
 
 // NeedsRestart reports whether cluster still has a setting waiting for a

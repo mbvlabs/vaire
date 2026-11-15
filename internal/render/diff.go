@@ -19,7 +19,7 @@ type op struct {
 // Diff returns a unified diff between the file at path and want. A missing
 // file is treated as empty. Secrets are redacted by the caller.
 func Diff(path string, want []byte) string {
-	have, err := os.ReadFile(path) //nolint:gosec // G304: managed file path from the step catalogue.
+	have, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return ""
 	}

@@ -98,6 +98,24 @@ func fixedLock(mode engine.LockMode) func(rpc.Request) engine.LockMode {
 // production process always checks the real effective uid.
 var serveRunsAsRoot = func() bool { return os.Geteuid() == 0 }
 
+// loadGuardCluster is also used after acquiring locks so the guard and
+// handler do not act on a configuration captured before a concurrent drop.
+var loadGuardCluster = func() (config.Cluster, error) {
+	return config.LoadCluster(config.ClusterPath)
+}
+
+// Called for the initial read and again with the operation locks held.
+func reloadMaterialisationConfig(ctx context.Context, req rpc.Request) (config.Cluster, error) {
+	cfg, err := loadGuardCluster()
+	if err != nil {
+		return config.Cluster{}, err
+	}
+	if err := refuseMaterialisationRequest(ctx, cfg, req); err != nil {
+		return config.Cluster{}, err
+	}
+	return cfg, nil
+}
+
 // Serve runs `vaire node rpc`: read one request from stdin, run it, and stream
 // redacted NDJSON events ending in exactly one result. It returns the exit
 // status, which equals the result envelope's exit code.
@@ -120,7 +138,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 				if action == "" {
 					action = "node.rpc"
 				}
-				recordActivityRefusal(rec, req, action, panicError(), "panic")
+				recordActivityRefusal(context.Background(), rec, req, action, panicError(), "panic")
 			}
 			code = out.fail(command, panicError())
 		}
@@ -141,7 +159,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	req, err = rpc.DecodeRequest(stdin)
 	if err != nil {
 		rec = activityRecorderFactory()
-		recordActivityRefusal(rec, rpc.Request{}, "node.rpc", err, "request_rejected")
+		recordActivityRefusal(context.Background(), rec, rpc.Request{}, "node.rpc", err, "request_rejected")
 		return out.fail(command, err)
 	}
 	command = req.Method
@@ -157,146 +175,220 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 		rec = activityRecorderFactory()
 	}
 
-	// 4. Version check. upgrade.install is the only exempt method.
+	// 4-6. Version, method lookup, fence, cluster facts and confirm tokens.
 	table := methods()
 	m, known := table[req.Method]
-	if !known || !m.versionExempt {
-		if err := checkVersion(req); err != nil {
-			recordActivityRefusal(rec, req, req.Method, err, "version_mismatch")
-			return out.fail(command, err)
-		}
-	}
-
-	// 5. Method lookup.
-	if !known {
-		names := make([]string, 0, len(table))
-		for name := range table {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		err := output.NewError(
-			output.CodeUsage,
-			"unknown method "+req.Method,
-			output.ExitUsage,
-			"Use one of details.methods.",
-		).WithDetails(map[string]any{"methods": names})
-		recordActivityRefusal(rec, req, req.Method, err, "unknown_method")
-		return out.fail(command, err)
-	}
-
-	// A fenced node (a newer master took over its bucket) refuses every
-	// method that changes something; reads still answer (Phase 5, D5).
-	if fencedRefuses(m, req) {
-		err := fencedError()
-		recordActivityRefusal(rec, req, req.Method, err, "node_fenced")
-		return out.fail(command, err)
-	}
-	if err := refuseAwaiting(req); err != nil {
-		recordActivityRefusal(rec, req, req.Method, err, "awaiting_recovery")
-		return out.fail(command, err)
-	}
-
-	env := &Env{Req: req, Report: out.emit}
-	if m.cluster {
-		cfg, err := config.LoadCluster(config.ClusterPath)
-		if err != nil {
-			recordActivityRefusal(rec, req, req.Method, err, "config_error")
-			return out.fail(command, err)
-		}
-		env.Cluster = cfg
-		// A follower refuses what needs a stanza or a writable database
-		// (Phase 6). Record it like the other refusals that happen before a
-		// handler runs.
-		if err := refuseFollower(req, cfg); err != nil {
-			recordActivityRefusal(rec, req, req.Method, err, "is_follower")
-			return out.fail(command, err)
-		}
-		if raw, err := os.ReadFile(config.ClusterPath); err == nil && config.HasLegacyVPS(raw) {
-			out.emit(output.Event{Type: "warning", Code: "legacy_config_ignored",
-				Message: "cluster.toml still has [backup.vps] from before Phase 5 (restic is gone); it is ignored, and the next config change drops it"})
-		}
-	}
-
-	// 6. Confirm tokens, recomputed on the node. A wrong token is refused
-	// before any step runs.
-	if err := checkConfirm(m, env.Cluster, req); err != nil {
-		recordActivityRefusal(rec, req, req.Method, err, "confirm_mismatch")
-		return out.fail(command, err)
+	env, code, ok := serveCheckMethod(req, m, known, table, out, rec)
+	if !ok {
+		return code
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
 	// 7. Lock.
-	mode := engine.LockNone
-	switch {
-	case m.lockWithConfig != nil && m.cluster:
-		mode = m.lockWithConfig(env.Cluster, req)
-	case m.lock != nil:
-		mode = m.lock(req)
-	}
-	if mode != engine.LockNone {
-		release, err := engine.Acquire(ctx, mode, req.Method, req.RequestID, req.LockTimeout())
-		if err != nil {
-			recordActivityRefusal(rec, req, req.Method, err, "")
-			return out.fail(command, err)
-		}
+	releases, code, ok := acquireServeLocks(ctx, m, req, env, rec, out)
+	for _, release := range releases {
 		defer release()
 	}
-	env.LockMode = mode
-	cluster, clusterMode := "", engine.LockNone
-	switch {
-	case m.clusterLockWithConfig != nil && m.cluster:
-		cluster, clusterMode = m.clusterLockWithConfig(env.Cluster, req)
-	case m.clusterLock != nil:
-		cluster, clusterMode = m.clusterLock(req)
+	if !ok {
+		return code
 	}
-	if cluster != "" && clusterMode != engine.LockNone {
-		if _, ok := env.Cluster.ClusterByName(cluster); !ok {
-			err := databaseNotFound(cluster)
-			recordActivityRefusal(rec, req, req.Method, err, "database_not_found")
-			return out.fail(command, err)
-		}
-		release, err := engine.AcquireCluster(ctx, cluster, clusterMode, req.Method, req.RequestID, req.LockTimeout())
-		if err != nil {
-			recordActivityRefusal(rec, req, req.Method, err, "")
-			return out.fail(command, err)
-		}
-		defer release()
+
+	if code, ok := serveRecheck(ctx, m, req, env, rec, out); !ok {
+		return code
 	}
 
 	// 8. Checked local start, run log, handler, result.
+	scope, code, ok = serveHandler(ctx, m, req, env, rec, out)
+	if !ok {
+		return code
+	}
+	return code
+}
+
+func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]method, out *eventWriter, rec *activityRecorder) (*Env, int, bool) {
+	if !known || !m.versionExempt {
+		if err := checkVersion(req); err != nil {
+			recordActivityRefusal(context.Background(), rec, req, req.Method, err, "version_mismatch")
+			return nil, out.fail(req.Method, err), false
+		}
+	}
+	if !known {
+		if code, ok := serveUnknownMethod(req, table, out, rec); !ok {
+			return nil, code, false
+		}
+	}
+	// A fenced node (a newer master took over its bucket) refuses every
+	// method that changes something; reads still answer (Phase 5, D5).
+	if fencedRefuses(m, req) {
+		err := fencedError()
+		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "node_fenced")
+		return nil, out.fail(req.Method, err), false
+	}
+	env := &Env{Req: req, Report: out.emit}
+	if code, ok := serveClusterCheck(req, m, env, out, rec); !ok {
+		return nil, code, false
+	}
+	// Confirm tokens are recomputed on the node. A wrong token is refused
+	// before any step runs.
+	if err := checkConfirm(m, env.Cluster, req); err != nil {
+		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "confirm_mismatch")
+		return nil, out.fail(req.Method, err), false
+	}
+	return env, 0, true
+}
+
+func serveUnknownMethod(req rpc.Request, table map[string]method, out *eventWriter, rec *activityRecorder) (int, bool) {
+	names := make([]string, 0, len(table))
+	for name := range table {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	err := output.NewError(
+		output.CodeUsage,
+		"unknown method "+req.Method,
+		output.ExitUsage,
+		"Use one of details.methods.",
+	).WithDetails(map[string]any{"methods": names})
+	recordActivityRefusal(context.Background(), rec, req, req.Method, err, "unknown_method")
+	return out.fail(req.Method, err), false
+}
+
+func serveClusterCheck(req rpc.Request, m method, env *Env, out *eventWriter, rec *activityRecorder) (int, bool) {
+	if m.cluster {
+		cfg, err := reloadMaterialisationConfig(context.Background(), req)
+		if err != nil {
+			recordActivityRefusal(context.Background(), rec, req, req.Method, err, "")
+			return out.fail(req.Method, err), false
+		}
+		env.Cluster = cfg
+	}
+	if err := refuseAwaiting(req); err != nil {
+		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "awaiting_recovery")
+		return out.fail(req.Method, err), false
+	}
+	if !m.cluster {
+		return 0, true
+	}
+	// A follower refuses what needs a stanza or a writable database (Phase 6).
+	if err := refuseFollower(req, env.Cluster); err != nil {
+		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "is_follower")
+		return out.fail(req.Method, err), false
+	}
+	if raw, err := os.ReadFile(config.ClusterPath); err == nil && config.HasLegacyVPS(raw) {
+		out.emit(output.Event{Type: "warning", Code: "legacy_config_ignored",
+			Message: "cluster.toml still has [backup.vps] from before Phase 5 (restic is gone); it is ignored, and the next config change drops it"})
+	}
+	return 0, true
+}
+
+func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env, rec *activityRecorder, out *eventWriter) ([]func(), int, bool) {
+	var releases []func()
+	mode := engine.LockNone
+	if m.lockWithConfig != nil && m.cluster {
+		mode = m.lockWithConfig(env.Cluster, req)
+	} else if m.lock != nil {
+		mode = m.lock(req)
+	}
+	env.LockMode = mode
+	if mode != engine.LockNone {
+		release, err := engine.Acquire(ctx, mode, req.Method, req.RequestID, req.LockTimeout())
+		if err != nil {
+			recordActivityRefusal(ctx, rec, req, req.Method, err, "")
+			return releases, out.fail(req.Method, err), false
+		}
+		releases = append(releases, release)
+	}
+	cluster, clusterMode := "", engine.LockNone
+	if m.clusterLockWithConfig != nil && m.cluster {
+		cluster, clusterMode = m.clusterLockWithConfig(env.Cluster, req)
+	} else if m.clusterLock != nil {
+		cluster, clusterMode = m.clusterLock(req)
+	}
+	if cluster == "" || clusterMode == engine.LockNone {
+		return releases, 0, true
+	}
+	if _, ok := env.Cluster.ClusterByName(cluster); !ok {
+		err := databaseNotFound(cluster)
+		recordActivityRefusal(ctx, rec, req, req.Method, err, "database_not_found")
+		return releases, out.fail(req.Method, err), false
+	}
+	release, err := engine.AcquireCluster(ctx, cluster, clusterMode, req.Method, req.RequestID, req.LockTimeout())
+	if err != nil {
+		recordActivityRefusal(ctx, rec, req, req.Method, err, "")
+		return releases, out.fail(req.Method, err), false
+	}
+	return append(releases, release), 0, true
+}
+
+func serveRecheck(ctx context.Context, m method, req rpc.Request, env *Env, rec *activityRecorder, out *eventWriter) (int, bool) {
+	if !m.cluster || (req.Method != "apply" && !materialisationRefused[req.Method]) ||
+		(m.lock == nil && m.clusterLock == nil && m.lockWithConfig == nil && m.clusterLockWithConfig == nil) {
+		return 0, true
+	}
+	cfg, err := reloadMaterialisationConfig(ctx, req)
+	if err != nil {
+		recordActivityRefusal(ctx, rec, req, req.Method, err, "")
+		return out.fail(req.Method, err), false
+	}
+	env.Cluster = cfg
+	if err := refuseAwaiting(req); err != nil {
+		recordActivityRefusal(ctx, rec, req, req.Method, err, "awaiting_recovery")
+		return out.fail(req.Method, err), false
+	}
+	if err := refuseFollower(req, cfg); err != nil {
+		recordActivityRefusal(ctx, rec, req, req.Method, err, "is_follower")
+		return out.fail(req.Method, err), false
+	}
+	if err := checkConfirm(m, cfg, req); err != nil {
+		recordActivityRefusal(ctx, rec, req, req.Method, err, "confirm_mismatch")
+		return out.fail(req.Method, err), false
+	}
+	return 0, true
+}
+
+func serveHandler(ctx context.Context, m method, req rpc.Request, env *Env, rec *activityRecorder, out *eventWriter) (*activityScope, int, bool) {
+	var scope *activityScope
 	important := activityImportant(m, req)
 	if rec != nil {
 		scope = newRPCScope(rec, m.name, req)
 		if err := beginActivityScope(ctx, scope, important, out.emit); err != nil {
-			return out.fail(command, err)
+			return scope, out.fail(req.Method, err), false
 		}
-		env.Report = scope.recorder(out.emit)
+		env.Report = scope.recorder(ctx, out.emit)
 	}
-	if m.runLog != nil && m.runLog(req) {
-		log, err := engine.OpenRunLog(req.Method, req.RequestID)
-		if err != nil {
-			_ = scope.finishWarn(ctx, activity.OutcomeFailed, output.CodePrecondition, "run_log_unavailable", out.emit)
-			return out.fail(command, output.WrapError(output.CodePrecondition, err, output.ExitPrecondition,
-				"Check that "+engine.LogDir+" is writable by root.").WithDetails(map[string]any{"reason": "run_log_unavailable"}))
-		}
-		out.setLog(log)
-		env.Log = log
-		log.JSON("request", req.Loggable())
+	if err := serveRunLog(ctx, m, req, env, scope, out); err != nil {
+		return scope, out.fail(req.Method, err), false
 	}
 	res, err, panicked := runHandler(ctx, m, env, out)
 	if err != nil {
 		if panicked {
-			_ = scope.finishWarn(context.Background(), activity.OutcomeUnknown, output.CodeError, "panic", out.emit)
+			_ = scope.finishWarn(ctx, activity.OutcomeUnknown, output.CodeError, "panic", out.emit)
 		} else {
 			code, reason := activityErrorTokens(err)
-			_ = scope.finishWarn(context.Background(), activity.OutcomeFailed, code, reason, out.emit)
+			_ = scope.finishWarn(ctx, activity.OutcomeFailed, code, reason, out.emit)
 		}
-		return out.fail(command, err)
+		return scope, out.fail(req.Method, err), false
 	}
-	finishActivitySuccess(context.Background(), scope, &res, out.emit)
-	return out.ok(command, res)
+	finishActivitySuccess(ctx, scope, &res, out.emit)
+	return scope, out.ok(req.Method, res), true
+}
+
+func serveRunLog(ctx context.Context, m method, req rpc.Request, env *Env, scope *activityScope, out *eventWriter) error {
+	if m.runLog == nil || !m.runLog(req) {
+		return nil
+	}
+	log, err := engine.OpenRunLog(req.Method, req.RequestID)
+	if err != nil {
+		_ = scope.finishWarn(ctx, activity.OutcomeFailed, output.CodePrecondition, "run_log_unavailable", out.emit)
+		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition,
+			"Check that "+engine.LogDir+" is writable by root.").WithDetails(map[string]any{"reason": "run_log_unavailable"})
+	}
+	out.setLog(log)
+	env.Log = log
+	log.JSON("request", req.Loggable())
+	return nil
 }
 
 // checkConfirm refuses a request whose confirm tokens the method does not

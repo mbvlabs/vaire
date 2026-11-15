@@ -38,34 +38,9 @@ var safeVersion = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // linux/<arch>.
 func NodeArtifact(ctx context.Context, arch string) (Artifact, error) {
 	build := LocalBuild()
-	var path string
-	if buildinfo.Channel == "dev" {
-		path = os.Getenv(EnvNodeBinary)
-		if path == "" {
-			if runtime.GOOS != "linux" || runtime.GOARCH != arch {
-				return Artifact{}, output.NewError(
-					output.CodeInputRequired,
-					"a dev build needs "+EnvNodeBinary+" to push a linux/"+arch+" binary",
-					output.ExitInput,
-					"Build one with GOOS=linux GOARCH="+arch+" from the same commit and set "+EnvNodeBinary+" to its path.",
-				).WithDetails(map[string]any{"env": EnvNodeBinary, "arch": arch})
-			}
-			self, err := os.Executable()
-			if err != nil {
-				return Artifact{}, err
-			}
-			path = self
-		}
-	} else {
-		client := &release.Client{}
-		m, err := client.Resolve(ctx, buildinfo.Channel, buildinfo.Version)
-		if err != nil {
-			return Artifact{}, err
-		}
-		path, err = client.Fetch(ctx, m, "linux", arch)
-		if err != nil {
-			return Artifact{}, err
-		}
+	path, err := nodeBinaryPath(ctx, arch)
+	if err != nil {
+		return Artifact{}, err
 	}
 	sum, err := fileSHA256(path)
 	if err != nil {
@@ -74,8 +49,39 @@ func NodeArtifact(ctx context.Context, arch string) (Artifact, error) {
 	return Artifact{Path: path, SHA256: sum, Build: build}, nil
 }
 
+// nodeBinaryPath is the node binary for arch: the release artifact for a
+// release build, VAIRE_NODE_BINARY or the running binary for a dev build.
+func nodeBinaryPath(ctx context.Context, arch string) (string, error) {
+	if buildinfo.Channel != "dev" {
+		return fetchReleaseNode(ctx, arch)
+	}
+	if path := os.Getenv(EnvNodeBinary); path != "" {
+		return path, nil
+	}
+	if runtime.GOOS != "linux" || runtime.GOARCH != arch {
+		return "", output.NewError(
+			output.CodeInputRequired,
+			"a dev build needs "+EnvNodeBinary+" to push a linux/"+arch+" binary",
+			output.ExitInput,
+			"Build one with GOOS=linux GOARCH="+arch+" from the same commit and set "+EnvNodeBinary+" to its path.",
+		).WithDetails(map[string]any{"env": EnvNodeBinary, "arch": arch})
+	}
+	return os.Executable()
+}
+
+// fetchReleaseNode downloads and verifies the release's linux/arch node
+// binary into the release cache.
+func fetchReleaseNode(ctx context.Context, arch string) (string, error) {
+	client := &release.Client{}
+	m, err := client.Resolve(ctx, buildinfo.Channel, buildinfo.Version)
+	if err != nil {
+		return "", err
+	}
+	return client.Fetch(ctx, m, "linux", arch)
+}
+
 func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path) //nolint:gosec // G304: the release cache or the operator's chosen dev binary.
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}

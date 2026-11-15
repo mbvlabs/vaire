@@ -321,7 +321,7 @@ func readLocalBundle(name string) ([]byte, masterbackup.Sidecar, error) {
 	if _, ok := masterbackup.ParseName(name); !ok {
 		return nil, side, output.NewError(output.CodeUsage, name+" is not a bundle name", output.ExitUsage, "Use a name from vaire server backup list.")
 	}
-	raw, err := os.ReadFile(filepath.Join(masterbackup.Dir, name+masterbackup.BundleSuffix)) //nolint:gosec // G304: a parsed bundle name in the fixed directory.
+	raw, err := os.ReadFile(filepath.Join(masterbackup.Dir, name+masterbackup.BundleSuffix))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, side, output.NewError(output.CodeBundleNotFound, "bundle "+name+" is not on the server", output.ExitPrecondition,
 			"List the bundles with vaire server backup list.").WithDetails(map[string]any{"bundle": name})
@@ -329,7 +329,7 @@ func readLocalBundle(name string) ([]byte, masterbackup.Sidecar, error) {
 	if err != nil {
 		return nil, side, err
 	}
-	if sideRaw, err := os.ReadFile(filepath.Join(masterbackup.Dir, name+masterbackup.SidecarSuffix)); err == nil { //nolint:gosec // G304: as above.
+	if sideRaw, err := os.ReadFile(filepath.Join(masterbackup.Dir, name+masterbackup.SidecarSuffix)); err == nil {
 		_ = json.Unmarshal(sideRaw, &side)
 	}
 	return raw, side, nil
@@ -493,7 +493,7 @@ func writeFirstEpoch(ctx context.Context, cfg config.Cluster, t backup.Target) e
 			return saveLocalEpoch(*existing)
 		case masterbackup.FenceFenced:
 			return applyFence(ctx, *existing)
-		default:
+		case masterbackup.FenceUnknown, masterbackup.FenceAbsent:
 			return epochConflict()
 		}
 	}
@@ -533,6 +533,7 @@ func checkFence(ctx context.Context, cfg config.Cluster, t backup.Target, report
 		} else if e != nil {
 			logLine(report, "fence", fmt.Sprintf("the bucket's epoch (server %q, epoch %d, instance %q) is no proof of a newer master: not fencing", e.Server, e.Epoch, e.InstanceID))
 		}
+	case masterbackup.FenceOK, masterbackup.FenceAbsent:
 	}
 	return state, e, nil
 }
@@ -576,7 +577,7 @@ func applyFence(ctx context.Context, e masterbackup.Epoch) error {
 	}
 	units = append(units, fenceUnits...)
 	for _, u := range units {
-		_ = exec.CommandContext(ctx, "systemctl", "disable", "--now", u).Run() //nolint:gosec // G204: fixed unit names from the systemd directory.
+		_ = exec.CommandContext(ctx, "systemctl", "disable", "--now", u).Run()
 	}
 	return fencedError()
 }

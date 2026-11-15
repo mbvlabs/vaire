@@ -18,14 +18,14 @@ import (
 )
 
 type fakeRolesPG struct {
-	roles      []string
-	databases  []string
-	extensions []string
-	auth       map[string]string
-	adminOwner string
-	signalBack string
-	maintain   string
-	direct     []string
+	roles        []string
+	databases    []string
+	extensions   []string
+	auth         map[string]string
+	adminOwner   string
+	signalBack   string
+	maintain     string
+	direct       []string
 	loaded       map[string]bool
 	pending      []string
 	settings     map[string]string

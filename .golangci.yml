@@ -1,16 +1,126 @@
 version: "2"
-
-run:
-  timeout: 10m
-
+output:
+  formats:
+    format: colored-line-number
 linters:
+  default: standard
   enable:
-    - errorlint
-    - gosec
+    - bodyclose       # unclosed HTTP response bodies
+    - contextcheck    # context.Context misuse
+    - errname         # error type naming (ErrFoo)
+    - errorlint       # unwrapped errors break errors.Is/As
+    - exhaustive      # missing switch/map cases
+    - whitespace
+    - gocognit        # cognitive complexity
+    - gosec           # security issues
+    - wastedassign
+    - dupl
+    - nakedret
+    - nestif          # deeply nested ifs
+    - noctx           # HTTP requests without context
+    - prealloc        # slice preallocation hints
+    - unconvert       # unnecessary type conversions
+    - nolintlint
+    - unparam         # unused function parameters
+    - gocyclo
+    - unused
+  settings:
+    gocognit:
+      min-complexity: 20
+    errcheck:
+      check-type-assertions: true
   exclusions:
+    presets:
+      - comments
+      - common-false-positives
     rules:
-      # ConfirmToken values are public templates such as "{cluster}/restart", not secrets.
-      - path: internal/cli/tree\.go
-        linters:
-          - gosec
-        text: G101
+      - linters: [funlen, goconst, gosec, noctx]
+        path: _test\.go
+
+# .golangci.yml - AI on a Leash for Go
+# version: "2"
+# run:
+#   timeout: 5m
+#   modules-download-mode: readonly
+
+# linters:
+#   enable:
+#     - bodyclose
+#     - copyloopvar
+#     - depguard
+#     - dogsled
+#     - errcheck
+#     - errorlint
+#     - exhaustive
+#     - funlen
+#     - gochecknoinits
+#     - goconst
+#     - gocritic
+#     - godot
+#     # - gofmt
+#     # - goimports
+#     - gosec
+#     # - gosimple
+#     - govet
+#     - ineffassign
+#     - misspell
+#     - nestif
+#     - nilerr
+#     - noctx
+#     - prealloc
+#     - predeclared
+#     - revive
+#     - rowserrcheck
+#     - sqlclosecheck
+#     - staticcheck
+#     # - stylecheck
+#     - thelper
+#     - tparallel
+#     # - typecheck
+#     - unconvert
+#     - unparam
+#     - wrapcheck
+#     - wsl_v5
+#
+# linters-settings:
+#   funlen:
+#     lines: 80
+#     statements: 50
+#   gocyclo:
+#     min-complexity: 10
+#   dupl:
+#     threshold: 100
+#   goconst:
+#     min-len: 3
+#     min-occurrences: 3
+#   gocritic:
+#     enabled-tags:
+#       - diagnostic
+#       - experimental
+#       - opinionated
+#       - performance
+#       - style
+#   nestif:
+#     min-complexity: 5
+#   gosec:
+#     excludes:
+#       - G104  # Unhandled errors (errcheck handles this better)
+#   revive:
+#     config-file: revive.toml
+#   depguard:
+#     rules:
+#       main:
+#         deny:
+#           - pkg: "io/ioutil"
+#             desc: "Deprecated: use io and os packages instead"
+#           - pkg: "github.com/pkg/errors"
+#             desc: "Use fmt.Errorf with %w instead"
+#
+# issues:
+#   max-issues-per-linter: 0
+#   max-same-issues: 0
+#   exclude-rules:
+#     - path: _test\.go
+#       linters:
+#         - funlen
+#         - dupl

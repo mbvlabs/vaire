@@ -70,7 +70,7 @@ func Write(path string, b Bundle) error {
 	if int64(len(data)) > MaxBundleBytes {
 		return tooLargeError()
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator chose the bundle path.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return output.NewError(output.CodePrecondition, "the output file already exists", output.ExitPrecondition,
@@ -163,7 +163,7 @@ func Read(path string) (Bundle, error) {
 	if before.Mode().Perm()&0o077 != 0 {
 		return b, notOwnerOnly()
 	}
-	f, err := os.Open(path) //nolint:gosec // G304: the operator chose the bundle path.
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return b, bundleNotFound()
@@ -275,7 +275,7 @@ func hasControl(value string) bool {
 }
 
 func syncDir(dir string) error {
-	d, err := os.Open(dir) //nolint:gosec // G304: the parent of the bundle path.
+	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
@@ -353,6 +353,24 @@ func validateQuery(q *activity.Query, collectedAt time.Time) error {
 }
 
 func validatePage(p activity.Page) error {
+	if err := validatePageCounters(p); err != nil {
+		return err
+	}
+	if err := validatePageTimes(p); err != nil {
+		return err
+	}
+	if err := validateCursor("activity.next_cursor", p.NextCursor); err != nil {
+		return err
+	}
+	for i, ev := range p.Events {
+		if err := validateEvent(fmt.Sprintf("activity.events[%d]", i), ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePageCounters(p activity.Page) error {
 	if p.Schema != activity.Schema {
 		return invalid("activity.schema", "unsupported")
 	}
@@ -379,19 +397,22 @@ func validatePage(p activity.Page) error {
 		c.MalformedSegments < 0 || c.MalformedEvents < 0 {
 		return invalid("activity.coverage.counters", "negative")
 	}
-	if c.MalformedSegments > 0 || c.MalformedEvents > 0 || c.DroppedEvents > 0 || c.SequenceGaps > 0 {
-		if !c.LossDetected {
-			return invalid("activity.coverage.loss_detected", "required")
-		}
+	hasLoss := c.MalformedSegments > 0 || c.MalformedEvents > 0 || c.DroppedEvents > 0 || c.SequenceGaps > 0
+	if hasLoss && !c.LossDetected {
+		return invalid("activity.coverage.loss_detected", "required")
 	}
-	if !c.Available || c.CursorExpired || c.LossDetected {
-		if !c.Partial {
-			return invalid("activity.coverage.partial", "required")
-		}
+	incomplete := !c.Available || c.CursorExpired || c.LossDetected
+	if incomplete && !c.Partial {
+		return invalid("activity.coverage.partial", "required")
 	}
 	if c.LimitReached && c.EventsReturned == 0 {
 		return invalid("activity.coverage.limit_reached", "without_events")
 	}
+	return nil
+}
+
+func validatePageTimes(p activity.Page) error {
+	c := p.Coverage
 	if err := optionalTimestamp("activity.coverage.first_retained_at", c.FirstRetainedAt); err != nil {
 		return err
 	}
@@ -427,28 +448,20 @@ func validatePage(p activity.Page) error {
 		if c.FirstReturnedAt != "" || c.LastReturnedAt != "" {
 			return invalid("activity.coverage.first_returned_at", "without_events")
 		}
-	} else {
-		minimum, maximum, err := eventBounds(p.Events)
-		if err != nil {
-			return err
-		}
-		if c.FirstReturnedAt == "" || c.LastReturnedAt == "" {
-			return invalid("activity.coverage.first_returned_at", "missing")
-		}
-		if !firstReturned.Equal(minimum) {
-			return invalid("activity.coverage.first_returned_at", "does_not_match_events")
-		}
-		if !lastReturned.Equal(maximum) {
-			return invalid("activity.coverage.last_returned_at", "does_not_match_events")
-		}
+		return nil
 	}
-	if err := validateCursor("activity.next_cursor", p.NextCursor); err != nil {
+	minimum, maximum, err := eventBounds(p.Events)
+	if err != nil {
 		return err
 	}
-	for i, ev := range p.Events {
-		if err := validateEvent(fmt.Sprintf("activity.events[%d]", i), ev); err != nil {
-			return err
-		}
+	if c.FirstReturnedAt == "" || c.LastReturnedAt == "" {
+		return invalid("activity.coverage.first_returned_at", "missing")
+	}
+	if !firstReturned.Equal(minimum) {
+		return invalid("activity.coverage.first_returned_at", "does_not_match_events")
+	}
+	if !lastReturned.Equal(maximum) {
+		return invalid("activity.coverage.last_returned_at", "does_not_match_events")
 	}
 	return nil
 }
@@ -495,42 +508,31 @@ func validateEvent(field string, ev activity.Event) error {
 	if err := requirePattern(field+".action", ev.Action, actionPattern); err != nil {
 		return err
 	}
-	if err := optionalPattern(field+".server", ev.Server, tokenPattern); err != nil {
-		return err
+	for _, f := range []struct {
+		name, value string
+		pattern     *regexp.Regexp
+	}{
+		{"server", ev.Server, tokenPattern},
+		{"node", ev.Node, tokenPattern},
+		{"node_instance_id", ev.NodeInstanceID, idPattern},
+		{"boot_id", ev.BootID, idPattern},
+		{"operation_id", ev.OperationID, idPattern},
+		{"request_id", ev.RequestID, idPattern},
+		{"parent_request_id", ev.ParentRequestID, idPattern},
+		{"job_id", ev.JobID, idPattern},
+		{"step", ev.Step, actionPattern},
+		{"database", ev.Database, databasePattern},
+		{"error_code", ev.ErrorCode, tokenPattern},
+		{"reason_code", ev.ReasonCode, tokenPattern},
+	} {
+		if err := optionalPattern(field+"."+f.name, f.value, f.pattern); err != nil {
+			return err
+		}
 	}
-	if err := optionalPattern(field+".node", ev.Node, tokenPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".node_instance_id", ev.NodeInstanceID, idPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".boot_id", ev.BootID, idPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".operation_id", ev.OperationID, idPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".request_id", ev.RequestID, idPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".parent_request_id", ev.ParentRequestID, idPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".job_id", ev.JobID, idPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".step", ev.Step, actionPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".database", ev.Database, databasePattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".error_code", ev.ErrorCode, tokenPattern); err != nil {
-		return err
-	}
-	if err := optionalPattern(field+".reason_code", ev.ReasonCode, tokenPattern); err != nil {
-		return err
-	}
+	return validateEventActor(field, ev)
+}
+
+func validateEventActor(field string, ev activity.Event) error {
 	if ev.DurationMS < 0 {
 		return invalid(field+".duration_ms", "negative")
 	}

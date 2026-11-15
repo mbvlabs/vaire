@@ -98,7 +98,7 @@ func TestDiagnosticsCollectRefusesBadTargetsBeforeRemote(t *testing.T) {
 		})
 	}
 	// The existing file is untouched.
-	if data, err := os.ReadFile(existing); err != nil || string(data) != "keep me" { //nolint:gosec // G304: a test path.
+	if data, err := os.ReadFile(existing); err != nil || string(data) != "keep me" {
 		t.Fatalf("existing file changed: %q %v", data, err)
 	}
 }
@@ -131,7 +131,7 @@ func TestDiagnosticsCollectDryRunDoesNoNetworkOrWrite(t *testing.T) {
 }
 
 func TestDiagnosticsInspectIsOfflineAndTyped(t *testing.T) {
-	// An empty configuration root: inspect must never resolve a context.
+	// An empty configuration root: inspect must never resolve a workspace.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "incident.json")

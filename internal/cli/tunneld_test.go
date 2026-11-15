@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 func TestTunnelSocketPathShort(t *testing.T) {
@@ -23,7 +23,7 @@ func TestTunnelSocketPathShort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := contexts.Path("prod", TunnelSocketFile); got != want {
+	if want := workspaces.Path("prod", TunnelSocketFile); got != want {
 		t.Fatalf("socket = %s, want %s", got, want)
 	}
 }
@@ -51,7 +51,7 @@ func TestTunnelSocketPathFallsBackWhenTooLong(t *testing.T) {
 	}
 	other, _ := tunnelSocketPath("staging")
 	if other == got {
-		t.Fatal("two contexts share a fallback socket")
+		t.Fatal("two workspaces share a fallback socket")
 	}
 	info, err := os.Stat(filepath.Dir(got))
 	if err != nil || info.Mode().Perm() != 0o700 {
@@ -61,10 +61,10 @@ func TestTunnelSocketPathFallsBackWhenTooLong(t *testing.T) {
 
 func TestPrivateDirRefusesLooseMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vaire")
-	if err := os.Mkdir(dir, 0o755); err != nil { //nolint:gosec // G301: the test needs a loose mode.
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the test needs a loose mode.
+	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := privateDir(dir); err == nil {
@@ -80,14 +80,14 @@ func TestPrivateDirRefusesLooseMode(t *testing.T) {
 }
 
 func TestTunnelPersist(t *testing.T) {
-	c := &contexts.Context{}
+	c := &workspaces.Workspace{}
 	t.Setenv(envTunnelPersist, "")
 	if d, err := tunnelPersist(c); err != nil || d != DefaultTunnelPersist {
 		t.Fatalf("default = %s, %v", d, err)
 	}
 	c.TunnelPersist = "2m"
 	if d, _ := tunnelPersist(c); d != 2*time.Minute {
-		t.Fatalf("context = %s, want 2m", d)
+		t.Fatalf("workspace = %s, want 2m", d)
 	}
 	t.Setenv(envTunnelPersist, "0")
 	if d, _ := tunnelPersist(c); d != 0 {
