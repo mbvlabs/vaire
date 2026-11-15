@@ -19,8 +19,8 @@ const (
 	maxStartupLen     = 10000
 )
 
-// TLSConfig is the client TLS config for p: verify-full against system roots
-// with ServerName, or encryption without verification for "require".
+// TLSConfig is the client TLS config for p: verification against system roots
+// with ServerName, or encryption without verification for "require"/"self-signed".
 func TLSConfig(p Params) *tls.Config { return tlsConfig(p) }
 
 // ServeTLSProxy accepts plaintext PostgreSQL connections on ln and forwards

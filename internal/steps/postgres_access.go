@@ -285,7 +285,9 @@ func AccessInspectionSQL(database string) string {
  UNION SELECT typowner FROM application_types WHERE typowner <> {{OWNER}}::regrole
 )
 SELECT json_build_object(
- 'identities', json_build_array({{OWNER}}::regrole::oid, {{APP_ROLE}}::regrole::oid, {{RO_ROLE}}::regrole::oid),
+ -- PostgreSQL encodes oid as a JSON string; bigint gives the numeric IDs the
+ -- inspection decoder expects, including the full unsigned 32-bit OID range.
+ 'identities', json_build_array({{OWNER}}::regrole::oid::bigint, {{APP_ROLE}}::regrole::oid::bigint, {{RO_ROLE}}::regrole::oid::bigint),
  'default_missing', (SELECT count(*) FROM missing_defaults),
  'schema_missing', (SELECT count(*) FROM eligible_schemas s
    WHERE NOT has_schema_privilege({{APP}}, s.oid, 'USAGE')
