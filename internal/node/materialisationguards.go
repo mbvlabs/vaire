@@ -31,8 +31,8 @@ func materialisationIncomplete(db string, o *materialisationOwnership) error {
 		output.ExitPrecondition, "Inspect the incomplete database before continuing.").WithDetails(details)
 }
 
-func guardPublicMaterialisation(cfg config.Cluster, db string) error {
-	return guardMaterialisation(context.Background(), cfg, db, false)
+func guardPublicMaterialisation(ctx context.Context, cfg config.Cluster, db string) error {
+	return guardMaterialisation(ctx, cfg, db, false)
 }
 
 func guardedMaterialisations(dataRoot string) ([]materialisationOwnership, error) {
@@ -63,10 +63,10 @@ func guardMaterialisation(ctx context.Context, cfg config.Cluster, db string, al
 	return nil
 }
 
-func guardMaterialisationApply(cfg config.Cluster, db string) error {
+func guardMaterialisationApply(ctx context.Context, cfg config.Cluster, db string) error {
 	if db != "" {
 		// Public requests have no lifecycle authority.
-		return guardPublicMaterialisation(cfg, db)
+		return guardPublicMaterialisation(ctx, cfg, db)
 	}
 	records, err := guardedMaterialisations(cfg.Server.DataRoot)
 	if err != nil {
@@ -110,7 +110,7 @@ var materialisationRefused = map[string]bool{
 	"maint.kill": true, "queries.reset": true, "sql": true,
 }
 
-func refuseMaterialisationRequest(cfg config.Cluster, req rpc.Request) error {
+func refuseMaterialisationRequest(ctx context.Context, cfg config.Cluster, req rpc.Request) error {
 	if req.Method != "apply" && !materialisationRefused[req.Method] {
 		return nil
 	}
@@ -120,11 +120,11 @@ func refuseMaterialisationRequest(cfg config.Cluster, req rpc.Request) error {
 	}
 	if req.Method == "apply" {
 		db, _ := params["db"].(string)
-		return guardMaterialisationApply(cfg, db)
+		return guardMaterialisationApply(ctx, cfg, db)
 	}
 	for _, field := range awaitingParamFields {
 		if name, _ := params[field].(string); name != "" {
-			if err := guardPublicMaterialisation(cfg, name); err != nil {
+			if err := guardPublicMaterialisation(ctx, cfg, name); err != nil {
 				return err
 			}
 		}

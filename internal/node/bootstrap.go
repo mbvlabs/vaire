@@ -128,7 +128,7 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	if err := validateOperator(p.Operator); err != nil {
 		return Result{}, err
 	}
-	osInfo, err := bootstrapPreflight(cfg)
+	osInfo, err := bootstrapPreflight(ctx, cfg)
 	if err != nil {
 		return Result{}, err
 	}
@@ -157,7 +157,7 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	host, _ := hostinfo.Detect(cfg.Server.DataRoot)
+	host, _ := hostinfo.Detect(cfg.Server.DataRoot) //nolint:contextcheck // local host facts; hostinfo owns its bounded probes.
 	return Result{Data: BootstrapResult{
 		Phase:       p.Phase,
 		Node:        spec.Name,
@@ -196,7 +196,7 @@ func validateOperator(op config.Operator) error {
 
 // bootstrapPreflight is the node-side preflight (MASTER §6.1): a supported OS,
 // enough RAM, and either no vaire node yet or a node of the same cluster.
-func bootstrapPreflight(cfg config.Cluster) (hostinfo.OS, error) {
+func bootstrapPreflight(ctx context.Context, cfg config.Cluster) (hostinfo.OS, error) {
 	osInfo, err := hostinfo.ReadOS()
 	if err != nil || !osInfo.Supported() {
 		return osInfo, output.NewError(
@@ -214,7 +214,7 @@ func bootstrapPreflight(cfg config.Cluster) (hostinfo.OS, error) {
 			"Resize the VPS and retry.",
 		).WithDetails(map[string]any{"reason": "ram_too_small", "ram_mib": mib})
 	}
-	if err := sshdOnPort22(); err != nil {
+	if err := sshdOnPort22(ctx); err != nil {
 		return osInfo, err
 	}
 	existing, err := config.LoadNode(config.NodePath)
@@ -246,8 +246,8 @@ func bootstrapPreflight(cfg config.Cluster) (hostinfo.OS, error) {
 
 // sshdOnPort22 checks that sshd serves port 22: the lockdown moves SSH to
 // <wg_address>:22, and a revert reopens public 22/tcp.
-func sshdOnPort22() error {
-	out, err := steps.Probe(context.Background(), "sshd", "-T")
+func sshdOnPort22(ctx context.Context) error {
+	out, err := steps.Probe(ctx, "sshd", "-T")
 	if err != nil {
 		// sshd -T needs /run/sshd on some releases; the hardening step creates
 		// it, so an unreadable config is not a reason to refuse here.
@@ -331,7 +331,7 @@ func sshHostKeys() ([]string, error) {
 	sort.Strings(paths)
 	var keys []string
 	for _, path := range paths {
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed host key glob.
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}

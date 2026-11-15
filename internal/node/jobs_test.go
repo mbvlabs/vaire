@@ -19,28 +19,18 @@ func TestCrashedJobKeepsOutcomeUnknownAcrossRPC(t *testing.T) {
 	rec := engine.JobRecord{ID: "01J0000000000000000000TEST", Job: "db-unfollow", DB: "app_follower",
 		State: engine.JobRunning, Unit: "vaire-job-01J0000000000000000000TEST.service"}
 	done := crashedJobRecord(rec)
-	if done.State != engine.JobFailed {
-		t.Fatalf("the synthesized crash is recorded as %q", done.State)
-	}
-	if done.Error == nil || done.Error.Details == nil {
-		t.Fatalf("the crash lost its structured error: %+v", done.Error)
-	}
+	rejectf(t, done.State != engine.JobFailed, "the synthesized crash is recorded as %q", done.State)
+	rejectf(t, done.Error == nil || done.Error.Details == nil, "the crash lost its structured error: %+v", done.Error)
 	_, err := jobOutcome(done)
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) {
-		t.Fatalf("not a CLI error: %v", err)
-	}
+	rejectf(t, !errors.As(err, &cliErr), "not a CLI error: %v", err)
 	details, _ := cliErr.Details.(map[string]any)
-	if details["reason"] != JobOutcomeUnknown {
-		t.Fatalf("jobOutcome lost the reason: %v", cliErr.Details)
-	}
+	rejectf(t, details["reason"] != JobOutcomeUnknown, "jobOutcome lost the reason: %v", cliErr.Details)
 
 	// This is the failure body the node puts on the RPC wire; the CLI's result
 	// parser turns it back into a CLI error with the same details.
 	raw, marshalErr := json.Marshal(output.Fail(nil, err))
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
-	}
+	reject(t, marshalErr != nil, marshalErr)
 	var env struct {
 		Error output.ErrorBody `json:"error"`
 	}
@@ -48,13 +38,9 @@ func TestCrashedJobKeepsOutcomeUnknownAcrossRPC(t *testing.T) {
 		t.Fatal(unmarshalErr)
 	}
 	serialized, _ := env.Error.Details.(map[string]any)
-	if serialized["reason"] != JobOutcomeUnknown {
-		t.Fatalf("RPC serialization lost the reason: %s", raw)
-	}
+	rejectf(t, serialized["reason"] != JobOutcomeUnknown, "RPC serialization lost the reason: %s", raw)
 	for _, secret := range []string{"app_follower-owner-pw", "app_follower-app-pw"} {
-		if strings.Contains(string(raw), secret) || strings.Contains(cliErr.Error(), secret) {
-			t.Fatal("the job failure carries a password")
-		}
+		reject(t, strings.Contains(string(raw), secret) || strings.Contains(cliErr.Error(), secret), "the job failure carries a password")
 	}
 }
 
@@ -96,17 +82,13 @@ func TestJournalFilterDropsEnvelope(t *testing.T) {
 			got = append(got, ev)
 		}
 	}
-	if len(got) != 3 || got[0].Type != "step" || got[0].TS != "2026-10-14T12:00:00Z" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after" {
-		t.Fatalf("events = %+v", got)
-	}
+	rejectf(t, len(got) != 3 || got[0].Type != "step" || got[0].TS != "2026-10-14T12:00:00Z" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after", "events = %+v", got)
 }
 
 func TestJobErrorDetailsFlattens(t *testing.T) {
 	rec := engine.JobRecord{ID: "01M4X0ME0NBQ95HNNDT213BGH9", Job: "backup-full"}
 	got := jobErrorDetails(rec, map[string]any{"output_tail": []any{"ERROR: x"}, "step": "backup"})
-	if got["job_id"] != rec.ID || got["job"] != rec.Job || got["step"] != "backup" {
-		t.Fatalf("details = %v", got)
-	}
+	rejectf(t, got["job_id"] != rec.ID || got["job"] != rec.Job || got["step"] != "backup", "details = %v", got)
 	if tail, ok := got["output_tail"].([]any); !ok || len(tail) != 1 {
 		t.Fatalf("output_tail = %v", got["output_tail"])
 	}
@@ -137,17 +119,11 @@ func TestJobProcessAlive(t *testing.T) {
 	if _, err := os.Stat("/proc/self/cmdline"); err == nil && jobProcessAlive(os.Getpid(), "backup-full") {
 		t.Fatal("the test process counted as vaire node run backup-full")
 	}
-	if jobProcessAlive(1<<22+12345, "backup-full") {
-		t.Fatal("a PID that doesn't exist counted as alive")
-	}
+	reject(t, jobProcessAlive(1<<22+12345, "backup-full"), "a PID that doesn't exist counted as alive")
 }
 
 func TestJobGoneByPID(t *testing.T) {
 	rec := engine.JobRecord{ID: "01M4WZQ5RT0RCBPE36DAJ2E9MJ", Job: "restore-drill", State: engine.JobRunning, PID: 1<<22 + 12345}
-	if !jobGone(t.Context(), rec) {
-		t.Fatal("a running job whose process is gone isn't reported gone")
-	}
-	if jobGone(t.Context(), engine.JobRecord{Job: "restore-drill", State: engine.JobRunning}) {
-		t.Fatal("a record with nothing to check was reported gone")
-	}
+	reject(t, !jobGone(t.Context(), rec), "a running job whose process is gone isn't reported gone")
+	reject(t, jobGone(t.Context(), engine.JobRecord{Job: "restore-drill", State: engine.JobRunning}), "a record with nothing to check was reported gone")
 }

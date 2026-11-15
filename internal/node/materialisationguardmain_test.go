@@ -28,7 +28,7 @@ func TestMain(m *testing.M) {
 	}
 	materialisationAncestorBase = base
 	materialisationStateDir = state
-	materialisationRecordUID = uint32(os.Geteuid()) //nolint:gosec // test process identity
+	materialisationRecordUID = uint32(os.Geteuid())
 	backup.RecordsPath = filepath.Join(state, "records.json")
 	// Job runtime tests must not use Detect's external route probes.
 	oldJobHostRead, oldMaterialisationHost, oldDetectHost := jobRuntimeHostRead, materialisationHostInfo, detectHost

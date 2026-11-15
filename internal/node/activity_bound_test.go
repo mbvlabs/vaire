@@ -92,9 +92,7 @@ func waitActivityWriters(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for activityWritersLive.Load() > 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("%d activity writers still alive", activityWritersLive.Load())
-		}
+		rejectf(t, time.Now().After(deadline), "%d activity writers still alive", activityWritersLive.Load())
 		time.Sleep(2 * time.Millisecond)
 	}
 }
@@ -118,9 +116,7 @@ func TestActivityStartIsBoundedWhenTheStoreStalls(t *testing.T) {
 
 	started := time.Now()
 	err := scope.begin(context.Background())
-	if err == nil {
-		t.Fatal("begin succeeded although the store never returned")
-	}
+	reject(t, err == nil, "begin succeeded although the store never returned")
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("begin took %s with a stalled store", elapsed)
 	}
@@ -128,13 +124,9 @@ func TestActivityStartIsBoundedWhenTheStoreStalls(t *testing.T) {
 	important := newRPCScope(rec, "db.create", testRPCRequest())
 	refused := beginActivityScope(context.Background(), important, true, nil)
 	var cliErr *output.CLIError
-	if !errors.As(refused, &cliErr) {
-		t.Fatalf("checked start error = %v, want a typed refusal", refused)
-	}
+	rejectf(t, !errors.As(refused, &cliErr), "checked start error = %v, want a typed refusal", refused)
 	details, _ := cliErr.Details.(map[string]any)
-	if details["reason"] != "activity_unavailable" {
-		t.Fatalf("refusal details = %v", cliErr.Details)
-	}
+	rejectf(t, details["reason"] != "activity_unavailable", "refusal details = %v", cliErr.Details)
 }
 
 // TestActivityAbandonedStartIsClosedWhenItArrivesLate keeps history honest: a
@@ -153,19 +145,13 @@ func TestActivityAbandonedStartIsClosedWhenItArrivesLate(t *testing.T) {
 	waitActivityWriters(t)
 	deadline := time.Now().Add(5 * time.Second)
 	for len(store.recorded()) < 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("abandoned start was not closed: %+v", store.recorded())
-		}
+		rejectf(t, time.Now().After(deadline), "abandoned start was not closed: %+v", store.recorded())
 		time.Sleep(5 * time.Millisecond)
 	}
 	events := store.recorded()
-	if events[0].Outcome != activity.OutcomeStarted {
-		t.Fatalf("first event = %+v, want started", events[0])
-	}
+	rejectf(t, events[0].Outcome != activity.OutcomeStarted, "first event = %+v, want started", events[0])
 	last := events[1]
-	if last.Outcome != activity.OutcomeUnknown || last.ReasonCode != "activity_unavailable" {
-		t.Fatalf("abandoned start was not closed as unknown: %+v", last)
-	}
+	rejectf(t, last.Outcome != activity.OutcomeUnknown || last.ReasonCode != "activity_unavailable", "abandoned start was not closed as unknown: %+v", last)
 }
 
 // TestActivityStalledStoreKeepsOneWriter bounds the cost of a broken store: one
@@ -182,9 +168,7 @@ func TestActivityStalledStoreKeepsOneWriter(t *testing.T) {
 	if err := scope.begin(context.Background()); err == nil {
 		t.Fatal("begin succeeded with a stalled store")
 	}
-	if !rec.degraded.Load() {
-		t.Fatal("recorder did not stop writing after a timeout")
-	}
+	reject(t, !rec.degraded.Load(), "recorder did not stop writing after a timeout")
 
 	started := time.Now()
 	for i := 0; i < 50; i++ {
@@ -215,12 +199,8 @@ func TestActivityLateBestEffortStartIsLeftAlone(t *testing.T) {
 	}
 	releaseAndDrain(t, store)
 	events := store.recorded()
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want only the started record", events)
-	}
-	if events[0].Outcome != activity.OutcomeStarted {
-		t.Fatalf("late best-effort start was rewritten: %+v", events[0])
-	}
+	rejectf(t, len(events) != 1, "events = %+v, want only the started record", events)
+	rejectf(t, events[0].Outcome != activity.OutcomeStarted, "late best-effort start was rewritten: %+v", events[0])
 }
 
 // TestActivityLateJobStartIsLeftAlone covers a safety job, which keeps running
@@ -236,12 +216,8 @@ func TestActivityLateJobStartIsLeftAlone(t *testing.T) {
 	}
 	releaseAndDrain(t, store)
 	events := store.recorded()
-	if len(events) != 1 || events[0].Outcome != activity.OutcomeStarted {
-		t.Fatalf("events = %+v, want only the started record", events)
-	}
-	if events[0].Source != activity.SourceJob {
-		t.Fatalf("job event source = %q", events[0].Source)
-	}
+	rejectf(t, len(events) != 1 || events[0].Outcome != activity.OutcomeStarted, "events = %+v, want only the started record", events)
+	rejectf(t, events[0].Source != activity.SourceJob, "job event source = %q", events[0].Source)
 }
 
 // TestActivityLateTerminalIsRecordedAsItself proves a slow completion is never
@@ -261,9 +237,7 @@ func TestActivityLateTerminalIsRecordedAsItself(t *testing.T) {
 	}
 	releaseAndDrain(t, store)
 	events := store.recorded()
-	if len(events) != 2 {
-		t.Fatalf("events = %+v, want the start and its real outcome", events)
-	}
+	rejectf(t, len(events) != 2, "events = %+v, want the start and its real outcome", events)
 	if last := events[1]; last.Outcome != activity.OutcomeSucceeded || last.ReasonCode != "" {
 		t.Fatalf("late terminal was rewritten: %+v", last)
 	}
@@ -293,9 +267,7 @@ func TestActivityMetadataStallIsBounded(t *testing.T) {
 	rec := newActivityRecorder(activityPaths{Node: "/nonexistent/node.toml"})
 	started := time.Now()
 	err := rec.append(context.Background(), boundTestEvent())
-	if !errors.Is(err, errActivityWriteTimeout) {
-		t.Fatalf("append = %v, want errActivityWriteTimeout", err)
-	}
+	rejectf(t, !errors.Is(err, errActivityWriteTimeout), "append = %v, want errActivityWriteTimeout", err)
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("metadata stall held the caller for %s", elapsed)
 	}
@@ -334,9 +306,7 @@ func TestActivityWriterSlotsAreProcessWide(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("capped append took %s", elapsed)
 	}
-	if len(fast.recorded()) != 0 {
-		t.Fatal("a capped append still reached the store")
-	}
+	reject(t, len(fast.recorded()) != 0, "a capped append still reached the store")
 
 	releaseAndDrain(t, stalled)
 	if err := fastRec.append(context.Background(), boundTestEvent()); err != nil {

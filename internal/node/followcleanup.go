@@ -41,7 +41,7 @@ var followCleanupRegistration = func(name, source, dataRoot string, sourcePort, 
 	// main file. Refuse cleanup unless its effective data directory agrees.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", "data_directory") //nolint:gosec // validated cluster name
+	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", "data_directory")
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != filepath.Join(dataRoot, name) {
@@ -69,12 +69,20 @@ func (a *followCleanup) close() {
 }
 
 func openFollowCleanup(cfg config.Cluster, spec config.ClusterSpec) (*followCleanup, error) {
+	owner, record, info, source, ok, err := followCleanupEvidence(cfg, spec)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return openFollowCleanupArtifacts(cfg, spec, owner, record, info, source)
+}
+
+func followCleanupEvidence(cfg config.Cluster, spec config.ClusterSpec) (followOwner, followOwnership, os.FileInfo, config.ClusterSpec, bool, error) {
 	if !spec.IsFollower() {
-		return nil, errors.New("follower configuration required")
+		return followOwner{}, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower configuration required")
 	}
 	records, err := backup.LoadRecords()
 	if err != nil {
-		return nil, err
+		return followOwner{}, followOwnership{}, nil, config.ClusterSpec{}, false, err
 	}
 	owner := followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec}
 	if aw, ok := records.AwaitingRecovery[spec.Name]; ok {
@@ -82,29 +90,33 @@ func openFollowCleanup(cfg config.Cluster, spec config.ClusterSpec) (*followClea
 	}
 	info, err := trustedFollowRecord(spec.Name)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, err
 	}
 	o, owned, err := readFollowOwnership(owner)
 	if err != nil {
-		return nil, err
+		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, err
 	}
 	if o.Attempt == nil {
 		if !owned || o.Phase != followPhaseStarted {
-			return nil, errors.New("follower cleanup has no bound birth evidence")
+			return owner, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower cleanup has no bound birth evidence")
 		}
-		return nil, nil
+		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, nil
 	}
 	if !owned || (o.Attempt.State != followAttemptRetained && o.Attempt.State != followAttemptCompleted) || o.Attempt.ArtifactStage != materialisationRegistered ||
 		o.Attempt.ReservationIdentity.Inode == 0 || o.Attempt.ReservationIdentity.Digest == "" {
-		return nil, errors.New("follower cleanup birth or ownership is unverifiable")
+		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower cleanup birth or ownership is unverifiable")
 	}
 	source, ok := cfg.ClusterByName(spec.Follows)
 	if !ok || source.Stanza != o.Attempt.SourceStanza {
-		return nil, errors.New("follower source identity changed")
+		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower source identity changed")
 	}
+	return owner, o, info, source, true, nil
+}
+
+func openFollowCleanupArtifacts(cfg config.Cluster, spec config.ClusterSpec, owner followOwner, o followOwnership, info os.FileInfo, source config.ClusterSpec) (*followCleanup, error) {
 	uid, err := materialisationPostgresUID()
 	if err != nil {
 		return nil, err
@@ -114,7 +126,7 @@ func openFollowCleanup(cfg config.Cluster, spec config.ClusterSpec) (*followClea
 	if err != nil {
 		return nil, err
 	}
-	a.confParent, a.confParentInfo, a.confAncestors, err = openMaterialisationParent(materialisationConfigRoot, materialisationRecordUID, false)
+	a.confParent, a.confParentInfo, a.confAncestors, err = openMaterialisationConfigParent(uid)
 	if err != nil {
 		a.close()
 		return nil, err

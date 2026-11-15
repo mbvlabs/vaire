@@ -64,9 +64,7 @@ func copyRoleSecrets(name string) map[string]string {
 func copyTestCA(t *testing.T) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "vaire copy test CA"},
@@ -77,9 +75,7 @@ func copyTestCA(t *testing.T) []byte {
 		KeyUsage:              x509.KeyUsageCertSign,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
@@ -89,41 +85,31 @@ func copyTestCA(t *testing.T) []byte {
 // allowlisted secrets so the detached job can reach the source.
 func TestCopySourceSecretsConvergeWithSeparateCA(t *testing.T) {
 	ca := string(copyTestCA(t))
-	url := "postgresql://source_user:source-password@db.example.com:5433/app?sslmode=verify-full" //nolint:gosec // G101: a test fixture, not a credential.
+	url := "postgresql://source_user:source-password@db.example.com:5433/app?sslmode=verify-full"
 	fromURL, err := copySourceFromSecrets(map[string]string{
 		CopySourceURLSecret: url,
 		CopySourceCASecret:  ca,
 	})
-	if err != nil {
-		t.Fatalf("URL source: %v", err)
-	}
+	rejectf(t, err != nil, "URL source: %v", err)
 	spec := CopySourceSecret{
 		Host: "db.example.com", Port: 5433, Database: "app", User: "source_user",
 		Password: "source-password", TLSMode: backup.SourceTLSVerifyFull,
 	}
-	raw, err := json.Marshal(spec) //nolint:gosec // G117: the password is this test's source secret.
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw, err := json.Marshal(spec)
+	reject(t, err != nil, err)
 	fromFields, err := copySourceFromSecrets(map[string]string{
 		CopySourceSpecSecret: string(raw),
 		CopySourceCASecret:   ca,
 	})
-	if err != nil {
-		t.Fatalf("field source: %v", err)
-	}
+	rejectf(t, err != nil, "field source: %v", err)
 	for name, src := range map[string]backup.Source{"url": fromURL, "fields": fromFields} {
 		if src.Host != "db.example.com" || src.Port != 5433 || src.Database != "app" ||
 			src.User != "source_user" || src.TLSMode != backup.SourceTLSVerifyFull {
 			t.Fatalf("%s source = %+v", name, src)
 		}
-		if string(src.CACert()) != ca {
-			t.Fatalf("%s source did not carry the CA", name)
-		}
+		rejectf(t, string(src.CACert()) != ca, "%s source did not carry the CA", name)
 	}
-	if fromURL.RedactedURL() != fromFields.RedactedURL() {
-		t.Fatalf("the forms do not converge: %s vs %s", fromURL.RedactedURL(), fromFields.RedactedURL())
-	}
+	rejectf(t, fromURL.RedactedURL() != fromFields.RedactedURL(), "the forms do not converge: %s vs %s", fromURL.RedactedURL(), fromFields.RedactedURL())
 
 	if _, err := copySourceFromSecrets(map[string]string{
 		CopySourceSpecSecret: string(raw),
@@ -133,7 +119,7 @@ func TestCopySourceSecretsConvergeWithSeparateCA(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec.CACertPEM = ca
-	withBoth, _ := json.Marshal(spec) //nolint:gosec // G117: the password is this test's source secret.
+	withBoth, _ := json.Marshal(spec)
 	if _, err := copySourceFromSecrets(map[string]string{
 		CopySourceSpecSecret: string(withBoth),
 		CopySourceCASecret:   ca,
@@ -148,15 +134,9 @@ func TestCopySourceSecretsConvergeWithSeparateCA(t *testing.T) {
 		steps.SecretDatabaseRole("app", "app"):     "a",
 		steps.SecretDatabaseRole("app", "ro"):      "r",
 	}, "app")
-	if err != nil {
-		t.Fatalf("copyJobSecrets: %v", err)
-	}
-	if out[CopySourceCASecret] != ca {
-		t.Fatal("the job spec lost the source CA")
-	}
-	if out[CopySourceURLSecret] != url {
-		t.Fatal("the job spec lost the source URL")
-	}
+	rejectf(t, err != nil, "copyJobSecrets: %v", err)
+	reject(t, out[CopySourceCASecret] != ca, "the job spec lost the source CA")
+	reject(t, out[CopySourceURLSecret] != url, "the job spec lost the source URL")
 }
 
 func (n *copyTestNode) saved() config.Cluster {
@@ -178,9 +158,7 @@ func newCopyTestNode(t *testing.T) *copyTestNode {
 	dir := t.TempDir()
 	n := &copyTestNode{t: t, cfg: cfg, store: state.FileStore{Path: filepath.Join(dir, "cluster.toml")}, dir: dir}
 	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := n.store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +186,7 @@ func newCopyTestNode(t *testing.T) *copyTestNode {
 	copyWorkspaceOwner = func() (backup.WorkspaceOwner, error) { return backup.CurrentWorkspaceOwner(), nil }
 	copyRootDir = n.workspaceRoot()
 	copyOpenWorkspace = func(id string) (*backup.CopyWorkspace, error) {
-		if err := os.MkdirAll(n.workspaceRoot(), 0o711); err != nil { //nolint:gosec // G301: the copy root needs postgres traverse permission; job dirs stay private.
+		if err := os.MkdirAll(n.workspaceRoot(), 0o711); err != nil {
 			return nil, err
 		}
 		return backup.NewCopyWorkspace(n.workspaceRoot(), id, backup.CurrentWorkspaceOwner(), nil)
@@ -297,26 +275,20 @@ func newCopyTestNode(t *testing.T) *copyTestNode {
 // pg under a name the production file already uses.
 type pgLocal = pg.Local
 
-func newCopyLeaseWorkspace(t *testing.T, root, id, kind string, hold bool) (string, *copyLease) {
+func newCopyLeaseWorkspace(t *testing.T, root, id string, hold bool) (string, *copyLease) {
 	t.Helper()
 	ws, err := backup.NewCopyWorkspace(root, id, backup.CurrentWorkspaceOwner(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	leaseFile, err := ws.Create(backup.CopyWorkspaceLeaseName)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	token := "token-" + id
 	if _, err := leaseFile.WriteString(token + "\n"); err != nil {
 		t.Fatal(err)
 	}
 	identity, err := backup.CopyWorkspaceLeaseIdentity(leaseFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := ws.WriteFile(backup.CopyWorkspaceMarkerName,
-		[]byte(kind+"\n"+id+"\n"+identity+"\n"+token+"\n")); err != nil {
+		[]byte("db-copy"+"\n"+id+"\n"+identity+"\n"+token+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	lease := &copyLease{file: leaseFile, path: ws.FilePath(backup.CopyWorkspaceLeaseName), identity: identity, token: token}
@@ -336,9 +308,7 @@ func newCopyLeaseWorkspace(t *testing.T, root, id, kind string, hold bool) (stri
 func copyTestJobEnv(t *testing.T, p dbCopyParams, secrets map[string]string) *jobEnv {
 	t.Helper()
 	raw, err := json.Marshal(p)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	return &jobEnv{ID: copyTestJobID, Job: "db-copy", Params: raw, Secrets: secrets,
 		Report: func(output.Event) {}}
 }
@@ -352,16 +322,14 @@ func copyTestSecrets(name string) map[string]string {
 func copyErrorDetails(t *testing.T, err error) map[string]any {
 	t.Helper()
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) {
-		t.Fatalf("not a CLI error: %v", err)
-	}
+	rejectf(t, !errors.As(err, &cliErr), "not a CLI error: %v", err)
 	details, _ := cliErr.Details.(map[string]any)
 	return details
 }
 
-func copyWorkspaceGone(t *testing.T, n *copyTestNode, id string) {
+func copyWorkspaceGone(t *testing.T, n *copyTestNode) {
 	t.Helper()
-	path := filepath.Join(n.workspaceRoot(), id)
+	path := filepath.Join(n.workspaceRoot(), copyTestJobID)
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("workspace %s still exists: %v", path, err)
 	}
@@ -394,14 +362,10 @@ func TestDBCopyTakesExclusiveLocksInOrder(t *testing.T) {
 	}
 	env := &jobEnv{ID: copyTestJobID, Job: "db-copy", Cluster: cfg, Params: json.RawMessage(`{"name":"copyapp"}`)}
 	release, busy, err := takeJobLocks(context.Background(), env, locks)
-	if err != nil || busy != nil {
-		t.Fatalf("locks: %v %v", err, busy)
-	}
+	rejectf(t, err != nil || busy != nil, "locks: %v %v", err, busy)
 	release.finish()
 	want := []string{"node", "heavy", "cluster copyapp"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("lock order = %v, want %v", got, want)
-	}
+	rejectf(t, strings.Join(got, ",") != strings.Join(want, ","), "lock order = %v, want %v", got, want)
 	for _, key := range want {
 		if modes[key] != engine.LockExclusive {
 			t.Errorf("%s mode = %q, want exclusive", key, modes[key])
@@ -416,38 +380,28 @@ func TestDBCopySameTargetIsExclusive(t *testing.T) {
 		return &jobEnv{ID: copyTestJobID, Job: "db-copy", Cluster: cfg, Params: json.RawMessage(`{"name":"copyapp"}`)}
 	}
 	release, busy, err := takeJobLocks(context.Background(), env(), locks)
-	if err != nil || busy != nil {
-		t.Fatalf("the first copy's locks: %v %v", err, busy)
-	}
+	rejectf(t, err != nil || busy != nil, "the first copy's locks: %v %v", err, busy)
 	defer release.finish()
 	if _, busy, err = takeJobLocks(context.Background(), env(), locks); err != nil {
 		t.Fatalf("the second copy's locks: %v", err)
 	}
-	if busy == nil {
-		t.Fatal("a second copy of the same unconfigured target took its locks")
-	}
+	reject(t, busy == nil, "a second copy of the same unconfigured target took its locks")
 }
 
 func TestDBCopySkippedResultSaysNoImportRan(t *testing.T) {
 	res := map[string]any{"job": "db-copy", "skipped": "lock_busy"}
 	copySkippedFields("db-copy", res)
-	if res["phase"] != copyPhasePreflight || res["import_ran"] != false {
-		t.Fatalf("skipped result = %v", res)
-	}
+	rejectf(t, res["phase"] != copyPhasePreflight || res["import_ran"] != false, "skipped result = %v", res)
 	other := map[string]any{}
 	copySkippedFields("db-fork", other)
-	if len(other) != 0 {
-		t.Fatalf("a non-copy job was changed: %v", other)
-	}
+	rejectf(t, len(other) != 0, "a non-copy job was changed: %v", other)
 }
 
 func TestDBCopyUnconfiguredTargetStillTakesClusterLock(t *testing.T) {
 	cfg := copyTestConfig(t)
 	env := &jobEnv{Job: "db-copy", Cluster: cfg, Params: json.RawMessage(`{"name":"not_configured"}`)}
 	got := jobClusters(env)
-	if len(got) != 1 || got[0] != "not_configured" {
-		t.Fatalf("jobClusters = %v", got)
-	}
+	rejectf(t, len(got) != 1 || got[0] != "not_configured", "jobClusters = %v", got)
 }
 
 func TestDBCopyPreflightDoesNotReserve(t *testing.T) {
@@ -456,15 +410,11 @@ func TestDBCopyPreflightDoesNotReserve(t *testing.T) {
 	env := &Env{Cluster: n.cfg, Req: rpc.Request{RequestID: copyTestJobID, Params: params, Secrets: copyTestSecrets("copyapp")},
 		Report: func(output.Event) {}}
 	res, err := handleDBCopyPreflight(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	data, _ := res.Data.(map[string]any)
 	target, _ := data["target"].(map[string]any)
 	spec, _ := target["database"].(config.ClusterSpec)
-	if spec.Name != "copyapp" {
-		t.Fatalf("target = %+v", spec)
-	}
+	rejectf(t, spec.Name != "copyapp", "target = %+v", spec)
 	if _, ok := n.saved().ClusterByName("copyapp"); ok {
 		t.Fatal("preflight reserved the target in cluster.toml")
 	}
@@ -472,13 +422,9 @@ func TestDBCopyPreflightDoesNotReserve(t *testing.T) {
 		t.Fatalf("preflight created a data directory: %v", err)
 	}
 	raw, err := json.Marshal(res)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "source-password") {
-		t.Fatal("the preflight result carries the source password")
-	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	reject(t, err != nil, err)
+	reject(t, strings.Contains(string(raw), "source-password"), "the preflight result carries the source password")
+	copyWorkspaceGone(t, n)
 }
 
 func TestDBCopyPreflightRequiresSource(t *testing.T) {
@@ -486,9 +432,7 @@ func TestDBCopyPreflightRequiresSource(t *testing.T) {
 	params, _ := json.Marshal(dbCopyParams{Name: "copyapp", Size: "small"})
 	env := &Env{Cluster: n.cfg, Req: rpc.Request{RequestID: copyTestJobID, Params: params, Secrets: copyRoleSecrets("copyapp")}, Report: func(output.Event) {}}
 	_, err := handleDBCopyPreflight(context.Background(), env)
-	if err == nil {
-		t.Fatal("a preflight without a source succeeded")
-	}
+	reject(t, err == nil, "a preflight without a source succeeded")
 	if details := copyErrorDetails(t, err); details["reason"] != "source_required" {
 		t.Fatalf("details = %v", details)
 	}
@@ -508,18 +452,14 @@ func TestDBCopyRejectsTargetCollisions(t *testing.T) {
 	copyClusterInventory = func(context.Context) (map[string]string, error) { return map[string]string{"copyapp": "17"}, nil }
 	t.Cleanup(func() { copyClusterInventory = oldInventory })
 	err := checkCopyTargetAbsent(ctx, n.cfg, "copyapp", false)
-	if err == nil || copyErrorDetails(t, err)["reason"] != "target_cluster_exists" {
-		t.Fatalf("other-major cluster: %v", err)
-	}
+	rejectf(t, err == nil || copyErrorDetails(t, err)["reason"] != "target_cluster_exists", "other-major cluster: %v", err)
 	copyClusterInventory = oldInventory
 
 	if err := os.Symlink(filepath.Join(n.dir, "elsewhere"), filepath.Join(n.cfg.Server.DataRoot, "copyapp")); err != nil {
 		t.Fatal(err)
 	}
 	err = checkCopyTargetAbsent(ctx, n.cfg, "copyapp", false)
-	if err == nil || copyErrorDetails(t, err)["reason"] != "target_path_exists" {
-		t.Fatalf("dangling data symlink: %v details=%v", err, copyErrorDetails(t, err))
-	}
+	rejectf(t, err == nil || copyErrorDetails(t, err)["reason"] != "target_path_exists", "dangling data symlink: %v details=%v", err, copyErrorDetails(t, err))
 	if err := os.Remove(filepath.Join(n.cfg.Server.DataRoot, "copyapp")); err != nil {
 		t.Fatal(err)
 	}
@@ -528,9 +468,7 @@ func TestDBCopyRejectsTargetCollisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = checkCopyTargetAbsent(ctx, n.cfg, "copyapp", false)
-	if err == nil || copyErrorDetails(t, err)["reason"] != "target_path_exists" {
-		t.Fatalf("configuration directory: %v", err)
-	}
+	rejectf(t, err == nil || copyErrorDetails(t, err)["reason"] != "target_path_exists", "configuration directory: %v", err)
 
 	if err := os.RemoveAll(copyConfDir("copyapp")); err != nil {
 		t.Fatal(err)
@@ -541,9 +479,7 @@ func TestDBCopyRejectsTargetCollisions(t *testing.T) {
 	}
 	t.Cleanup(func() { copyLoadRecords = oldRecords })
 	err = checkCopyTargetAbsent(ctx, n.cfg, "copyapp", false)
-	if err == nil || copyErrorDetails(t, err)["reason"] != "target_reserved" {
-		t.Fatalf("reserved target: %v", err)
-	}
+	rejectf(t, err == nil || copyErrorDetails(t, err)["reason"] != "target_reserved", "reserved target: %v", err)
 	copyLoadRecords = oldRecords
 }
 
@@ -555,20 +491,16 @@ func TestDBCopyExportFailureLeavesNoTarget(t *testing.T) {
 	}
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	_, err := jobCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the job succeeded")
-	}
+	reject(t, err == nil, "the job succeeded")
 	details := copyErrorDetails(t, err)
-	if details["phase"] != copyPhaseExporting || details["target_present"] != false || details["import_ran"] != false {
-		t.Fatalf("details = %v", details)
-	}
+	rejectf(t, details["phase"] != copyPhaseExporting || details["target_present"] != false || details["import_ran"] != false, "details = %v", details)
 	if _, ok := details["output_tail"]; ok {
 		t.Fatal("raw subprocess output reached the job outcome")
 	}
 	if _, ok := n.saved().ClusterByName("copyapp"); ok {
 		t.Fatal("the failed export added the target to cluster.toml")
 	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	copyWorkspaceGone(t, n)
 }
 
 func TestDBCopyLateCollisionRechecked(t *testing.T) {
@@ -581,17 +513,13 @@ func TestDBCopyLateCollisionRechecked(t *testing.T) {
 	}
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	_, err := jobCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the job succeeded despite the late collision")
-	}
+	reject(t, err == nil, "the job succeeded despite the late collision")
 	details := copyErrorDetails(t, err)
-	if details["phase"] != copyPhaseExporting || details["target_present"] != true {
-		t.Fatalf("details = %v", details)
-	}
+	rejectf(t, details["phase"] != copyPhaseExporting || details["target_present"] != true, "details = %v", details)
 	if _, ok := n.saved().ClusterByName("copyapp"); ok {
 		t.Fatal("the late collision was still provisioned")
 	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	copyWorkspaceGone(t, n)
 }
 
 func TestDBCopyCollisionBeforeConfigInsertion(t *testing.T) {
@@ -604,21 +532,15 @@ func TestDBCopyCollisionBeforeConfigInsertion(t *testing.T) {
 	}
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	_, err := jobCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the job succeeded despite the collision before the config insertion")
-	}
+	reject(t, err == nil, "the job succeeded despite the collision before the config insertion")
 	details := copyErrorDetails(t, err)
-	if details["phase"] != copyPhaseProvisioning || details["target_present"] != true {
-		t.Fatalf("details = %v", details)
-	}
+	rejectf(t, details["phase"] != copyPhaseProvisioning || details["target_present"] != true, "details = %v", details)
 	target, _ := details["target"].(copyTargetState)
-	if target.InConfig || !target.DataDirectory || !target.Known {
-		t.Fatalf("target state = %+v", target)
-	}
+	rejectf(t, target.InConfig || !target.DataDirectory || !target.Known, "target state = %+v", target)
 	if _, ok := n.saved().ClusterByName("copyapp"); ok {
 		t.Fatal("the collision still saved the target in cluster.toml")
 	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	copyWorkspaceGone(t, n)
 }
 
 func TestDBCopyImportFailureLeavesTruthfulPartialTarget(t *testing.T) {
@@ -629,20 +551,16 @@ func TestDBCopyImportFailureLeavesTruthfulPartialTarget(t *testing.T) {
 	}
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	_, err := jobCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the job succeeded")
-	}
+	reject(t, err == nil, "the job succeeded")
 	details := copyErrorDetails(t, err)
-	if details["phase"] != copyPhaseImporting || details["target_present"] != true || details["import_ran"] != true {
-		t.Fatalf("details = %v", details)
-	}
+	rejectf(t, details["phase"] != copyPhaseImporting || details["target_present"] != true || details["import_ran"] != true, "details = %v", details)
 	if _, ok := details["output_tail"]; ok {
 		t.Fatal("raw restore output reached the job outcome")
 	}
 	if _, ok := n.saved().ClusterByName("copyapp"); !ok {
 		t.Fatal("the partial target was removed")
 	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	copyWorkspaceGone(t, n)
 
 	// A repeated copy is refused, never replayed into the partial target.
 	if err := checkCopyTargetAbsent(context.Background(), n.saved(), "copyapp", false); err == nil || copyErrorDetails(t, err)["reason"] != "database_exists" {
@@ -677,17 +595,13 @@ func TestDBCopyFinalizeFailuresLeavePartialTarget(t *testing.T) {
 			tc.setup()
 			env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 			_, err := jobCopy(context.Background(), env)
-			if err == nil {
-				t.Fatal("the job succeeded")
-			}
+			reject(t, err == nil, "the job succeeded")
 			details := copyErrorDetails(t, err)
-			if details["phase"] != tc.phase || details["target_present"] != true || details["import_ran"] != true {
-				t.Fatalf("details = %v", details)
-			}
+			rejectf(t, details["phase"] != tc.phase || details["target_present"] != true || details["import_ran"] != true, "details = %v", details)
 			if _, ok := n.saved().ClusterByName("copyapp"); !ok {
 				t.Fatal("the partial target was removed")
 			}
-			copyWorkspaceGone(t, n, copyTestJobID)
+			copyWorkspaceGone(t, n)
 		})
 	}
 }
@@ -696,35 +610,25 @@ func TestReadCopyJobSpecUnlinkFailureIsFailClosed(t *testing.T) {
 	oldDir := copyJobDir
 	copyJobDir = t.TempDir()
 	t.Cleanup(func() { copyJobDir = oldDir })
-	const password = "unlink-secret-password" //nolint:gosec // G101: a test credential, never a real secret.
+	const password = "unlink-secret-password"
 	spec := jobSpec{Job: "db-copy", Params: json.RawMessage(`{"name":"copyapp"}`), Secrets: map[string]string{"db.copyapp.app": password}}
 	raw, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	path := filepath.Join(copyJobDir, copyTestJobID+".json")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(copyJobDir, 0o500); err != nil { //nolint:gosec // G302: a deliberately unwritable directory for the test.
+	if err := os.Chmod(copyJobDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(copyJobDir, 0o700) }) //nolint:gosec // G302: restore the test directory.
+	t.Cleanup(func() { _ = os.Chmod(copyJobDir, 0o700) })
 	got, err := readCopyJobSpec(copyTestJobID)
-	if err == nil {
-		t.Fatal("readCopyJobSpec accepted a spec it could not unlink")
-	}
+	reject(t, err == nil, "readCopyJobSpec accepted a spec it could not unlink")
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) {
-		t.Fatalf("not a typed error: %v", err)
-	}
+	rejectf(t, !errors.As(err, &cliErr), "not a typed error: %v", err)
 	details, _ := cliErr.Details.(map[string]any)
-	if details["reason"] != "copy_job_spec_unlink_failed" || details["job_id"] != copyTestJobID {
-		t.Fatalf("details = %v", details)
-	}
-	if got.Secrets["db.copyapp.app"] != password {
-		t.Fatalf("the parsed spec was lost: %+v", got)
-	}
+	rejectf(t, details["reason"] != "copy_job_spec_unlink_failed" || details["job_id"] != copyTestJobID, "details = %v", details)
+	rejectf(t, got.Secrets["db.copyapp.app"] != password, "the parsed spec was lost: %+v", got)
 	if _, statErr := os.Stat(path); statErr != nil {
 		t.Fatalf("the retained spec disappeared: %v", statErr)
 	}
@@ -762,9 +666,7 @@ func TestPruneCopyWorkspacesCleansSpecsWithoutRoot(t *testing.T) {
 	if _, err := os.Lstat(activeSpec); err != nil {
 		t.Fatalf("the active spec was removed: %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("absent root generated warnings: %v", warnings)
-	}
+	rejectf(t, len(warnings) != 0, "absent root generated warnings: %v", warnings)
 
 	// An unsafe root must not suppress spec cleanup either.
 	rootPath := filepath.Join(t.TempDir(), "copies-file")
@@ -779,9 +681,7 @@ func TestPruneCopyWorkspacesCleansSpecsWithoutRoot(t *testing.T) {
 	if _, err := os.Lstat(inactiveSpec); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the inactive spec was not removed with an unsafe root: %v", err)
 	}
-	if len(warnings) == 0 {
-		t.Fatal("the unsafe root was not reported")
-	}
+	reject(t, len(warnings) == 0, "the unsafe root was not reported")
 
 	// An unreadable root must not suppress spec cleanup either.
 	copyRootDir = t.TempDir()
@@ -797,9 +697,7 @@ func TestPruneCopyWorkspacesCleansSpecsWithoutRoot(t *testing.T) {
 	for _, warning := range warnings {
 		foundRootWarning = foundRootWarning || warning.Code == "copy_workspace_prune_failed"
 	}
-	if !foundRootWarning {
-		t.Fatalf("the unreadable root was not reported: %v", warnings)
-	}
+	rejectf(t, !foundRootWarning, "the unreadable root was not reported: %v", warnings)
 
 	// Cleanup failure is retained and reported.
 	copyReadDir = oldRead
@@ -816,9 +714,7 @@ func TestPruneCopyWorkspacesCleansSpecsWithoutRoot(t *testing.T) {
 	for _, warning := range warnings {
 		found = found || warning.Code == "copy_job_spec_cleanup_failed"
 	}
-	if !found {
-		t.Fatalf("cleanup failure warning missing: %v", warnings)
-	}
+	rejectf(t, !found, "cleanup failure warning missing: %v", warnings)
 }
 
 func TestCopyWorkspaceAccessFailureKeepsSafeDetailsAndCleanup(t *testing.T) {
@@ -836,9 +732,7 @@ func TestCopyWorkspaceAccessFailureKeepsSafeDetailsAndCleanup(t *testing.T) {
 		t.Fatalf("unsafe detail accepted: %v", got)
 	}
 	system := copySafeDetails(map[string]any{"reason": "copy_workspace_access_denied", "stage": "source-access", "file": "system-ca-bundle"})
-	if system["file"] != "system-ca-bundle" {
-		t.Fatalf("system CA label lost: %v", system)
-	}
+	rejectf(t, system["file"] != "system-ca-bundle", "system CA label lost: %v", system)
 	if got := safeActivityToken("copy_workspace_access_denied"); got != "copy_workspace_access_denied" {
 		t.Fatalf("activity reason lost: %q", got)
 	}
@@ -858,9 +752,7 @@ func TestDBCopyCleanupFailureIsFatalAfterImport(t *testing.T) {
 	t.Cleanup(func() { copyWorkspaceOwner = oldOwner })
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	_, err := jobCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("a cleanup failure after import was reported as success")
-	}
+	reject(t, err == nil, "a cleanup failure after import was reported as success")
 	details := copyErrorDetails(t, err)
 	if details["reason"] != "copy_cleanup_failed" || details["imported"] != true ||
 		details["target_present"] != true || details["workspace_cleanup"] != "failed" ||
@@ -879,9 +771,7 @@ func TestDBCopyBackupWarningIsSeparateFromImportSuccess(t *testing.T) {
 	cfg.Backup.Bucket, cfg.Backup.Endpoint, cfg.Backup.Prefix = "bucket", "https://example.invalid", "prod"
 	cfg.Backup.Region, cfg.Backup.URIStyle = "auto", "path"
 	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := n.store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -890,29 +780,21 @@ func TestDBCopyBackupWarningIsSeparateFromImportSuccess(t *testing.T) {
 	}
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	res, err := jobCopy(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	data, _ := res.(map[string]any)
-	if data["imported"] != true || data["phase"] != copyPhaseSucceeded {
-		t.Fatalf("result = %v", data)
-	}
+	rejectf(t, data["imported"] != true || data["phase"] != copyPhaseSucceeded, "result = %v", data)
 	backupState, _ := data["backup"].(copyBackupState)
-	if !backupState.Configured || backupState.Ready || backupState.Warning == nil {
-		t.Fatalf("backup state = %+v", backupState)
-	}
+	rejectf(t, !backupState.Configured || backupState.Ready || backupState.Warning == nil, "backup state = %+v", backupState)
 	warnings, _ := data["warnings"].([]output.Warning)
 	found := false
 	for _, warning := range warnings {
 		found = found || warning.Code == "first_backup_failed"
 	}
-	if !found {
-		t.Fatalf("warnings = %v", warnings)
-	}
+	rejectf(t, !found, "warnings = %v", warnings)
 	if _, ok := n.saved().ClusterByName("copyapp"); !ok {
 		t.Fatal("the successful copy is not in cluster.toml")
 	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	copyWorkspaceGone(t, n)
 }
 
 func TestDBCopySuccess(t *testing.T) {
@@ -929,37 +811,23 @@ func TestDBCopySuccess(t *testing.T) {
 	}
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	res, err := jobCopy(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	data, _ := res.(map[string]any)
-	if data["imported"] != true || data["phase"] != copyPhaseSucceeded {
-		t.Fatalf("result = %v", data)
-	}
+	rejectf(t, data["imported"] != true || data["phase"] != copyPhaseSucceeded, "result = %v", data)
 	if _, ok := n.saved().ClusterByName("copyapp"); !ok {
 		t.Fatal("the target is not in cluster.toml")
 	}
-	if selection.SourceDatabase != "app" {
-		t.Fatalf("selection source = %q", selection.SourceDatabase)
-	}
+	rejectf(t, selection.SourceDatabase != "app", "selection source = %q", selection.SourceDatabase)
 	names := make([]string, 0, len(selection.Extensions))
 	for _, ext := range selection.Extensions {
 		names = append(names, ext.Name)
 	}
-	if strings.Join(names, ",") != "pg_trgm,plpgsql" {
-		t.Fatalf("selection extensions = %v", names)
-	}
-	if restore.Target != "copyapp" || restore.Owner != "copyapp_owner" {
-		t.Fatalf("restore options = %+v", restore)
-	}
+	rejectf(t, strings.Join(names, ",") != "pg_trgm,plpgsql", "selection extensions = %v", names)
+	rejectf(t, restore.Target != "copyapp" || restore.Owner != "copyapp_owner", "restore options = %+v", restore)
 	raw, err := json.Marshal(res)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "source-password") || strings.Contains(string(raw), "deploy:source") {
-		t.Fatalf("the job result carries the source password: %s", raw)
-	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	reject(t, err != nil, err)
+	rejectf(t, strings.Contains(string(raw), "source-password") || strings.Contains(string(raw), "deploy:source"), "the job result carries the source password: %s", raw)
+	copyWorkspaceGone(t, n)
 }
 
 func TestDBCopyExtensionFailureDoesNotProvision(t *testing.T) {
@@ -970,16 +838,14 @@ func TestDBCopyExtensionFailureDoesNotProvision(t *testing.T) {
 	}
 	env := copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp"))
 	_, err := jobCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the job succeeded")
-	}
+	reject(t, err == nil, "the job succeeded")
 	if details := copyErrorDetails(t, err); details["phase"] != copyPhasePreflight || details["target_present"] != false {
 		t.Fatalf("details = %v", details)
 	}
 	if _, ok := n.saved().ClusterByName("copyapp"); ok {
 		t.Fatal("an incompatible extension still provisioned the target")
 	}
-	copyWorkspaceGone(t, n, copyTestJobID)
+	copyWorkspaceGone(t, n)
 }
 
 func TestDBCopyDryRunStartsNothing(t *testing.T) {
@@ -992,16 +858,10 @@ func TestDBCopyDryRunStartsNothing(t *testing.T) {
 	params, _ := json.Marshal(dbCopyParams{Name: "copyapp", Size: "small"})
 	env := &Env{Cluster: n.cfg, Req: rpc.Request{DryRun: true, Params: params, Secrets: map[string]string{}}, Report: func(output.Event) {}}
 	res, err := handleDBCopy(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if started {
-		t.Fatal("a dry run started a job")
-	}
+	reject(t, err != nil, err)
+	reject(t, started, "a dry run started a job")
 	data, _ := res.Data.(map[string]any)
-	if data["dry_run"] != true || data["source_checked"] != false {
-		t.Fatalf("result = %v", data)
-	}
+	rejectf(t, data["dry_run"] != true || data["source_checked"] != false, "result = %v", data)
 	if _, ok := n.saved().ClusterByName("copyapp"); ok {
 		t.Fatal("a dry run added the target")
 	}
@@ -1016,9 +876,7 @@ func TestDBCopyAmbiguousStartReturnsJobIDAndUnknown(t *testing.T) {
 	env := &Env{Cluster: n.cfg, Req: rpc.Request{RequestID: copyTestJobID, Params: params, Secrets: copyTestSecrets("copyapp")},
 		Report: func(output.Event) {}}
 	_, err := handleDBCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the ambiguous start was reported as success")
-	}
+	reject(t, err == nil, "the ambiguous start was reported as success")
 	details := copyErrorDetails(t, err)
 	if details["reason"] != JobOutcomeUnknown || details["job_id"] != copyTestJobID ||
 		details["credentials_may_be_used"] != true || details["phase"] != "unknown" {
@@ -1040,17 +898,11 @@ func TestDBCopyFollowObservationFailureIsUnknown(t *testing.T) {
 			details["import_outcome"] != "unknown" {
 			t.Fatalf("details = %v", details)
 		}
-		if details["target_present"] != false {
-			t.Fatalf("an unobserved copy claimed a target: %v", details)
-		}
+		rejectf(t, details["target_present"] != false, "an unobserved copy claimed a target: %v", details)
 		raw, marshalErr := json.Marshal(err)
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
-		}
+		reject(t, marshalErr != nil, marshalErr)
 		for _, secret := range []string{"source-password", "deploy:source"} {
-			if strings.Contains(string(raw), secret) || strings.Contains(err.Error(), secret) {
-				t.Fatalf("the observation error carries a source secret")
-			}
+			rejectf(t, strings.Contains(string(raw), secret) || strings.Contains(err.Error(), secret), "the observation error carries a source secret")
 		}
 	}
 
@@ -1066,9 +918,7 @@ func TestDBCopyFollowObservationFailureIsUnknown(t *testing.T) {
 		env := &Env{Cluster: n.cfg, Req: rpc.Request{RequestID: copyTestJobID, Params: params, Secrets: copyTestSecrets("copyapp")},
 			Report: func(output.Event) {}}
 		_, err := handleDBCopy(context.Background(), env)
-		if err == nil {
-			t.Fatal("the observation failure was reported as success")
-		}
+		reject(t, err == nil, "the observation failure was reported as success")
 		assertUnknown(t, err)
 	})
 
@@ -1096,13 +946,9 @@ func TestDBCopyFollowObservationFailureIsUnknown(t *testing.T) {
 		env := &Env{Cluster: n.cfg, Req: rpc.Request{RequestID: copyTestJobID, Params: params, Secrets: copyTestSecrets("copyapp")},
 			Report: func(output.Event) {}}
 		_, err := handleDBCopy(context.Background(), env)
-		if err == nil {
-			t.Fatal("the poll observation failure was reported as success")
-		}
+		reject(t, err == nil, "the poll observation failure was reported as success")
 		assertUnknown(t, err)
-		if reads < 3 {
-			t.Fatalf("the follower read state %d times, want an initial and a poll read", reads)
-		}
+		rejectf(t, reads < 3, "the follower read state %d times, want an initial and a poll read", reads)
 	})
 
 	t.Run("observer cancellation while running", func(t *testing.T) {
@@ -1121,9 +967,7 @@ func TestDBCopyFollowObservationFailureIsUnknown(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_, err := handleDBCopy(ctx, env)
-		if err == nil {
-			t.Fatal("the observer cancellation was reported as success")
-		}
+		reject(t, err == nil, "the observer cancellation was reported as success")
 		assertUnknown(t, err)
 	})
 }
@@ -1153,9 +997,7 @@ func TestDBCopyRecordedTerminalCancellationStaysDefinite(t *testing.T) {
 	env := &Env{Cluster: n.cfg, Req: rpc.Request{RequestID: copyTestJobID, Params: params, Secrets: copyTestSecrets("copyapp")},
 		Report: func(output.Event) {}}
 	_, err := handleDBCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the terminal cancellation was reported as success")
-	}
+	reject(t, err == nil, "the terminal cancellation was reported as success")
 	details := copyErrorDetails(t, err)
 	if details["reason"] != "cancelled" || details["phase"] != "exporting" ||
 		details["target_present"] != false || details["imported"] != false {
@@ -1177,9 +1019,7 @@ func TestJobFollowObservationFailureIsTyped(t *testing.T) {
 		params, _ := json.Marshal(map[string]string{"id": copyTestJobID})
 		_, err := handleJobFollow(context.Background(), &Env{Req: rpc.Request{Params: params}})
 		details := copyErrorDetails(t, err)
-		if details["reason"] != JobObservationFailed || details["job_id"] != copyTestJobID || details["observation_failed"] != true {
-			t.Fatalf("details = %v", details)
-		}
+		rejectf(t, details["reason"] != JobObservationFailed || details["job_id"] != copyTestJobID || details["observation_failed"] != true, "details = %v", details)
 	})
 
 	t.Run("observer cancellation while running", func(t *testing.T) {
@@ -1193,9 +1033,7 @@ func TestJobFollowObservationFailureIsTyped(t *testing.T) {
 		cancel()
 		_, err := handleJobFollow(ctx, &Env{Req: rpc.Request{Params: params}})
 		details := copyErrorDetails(t, err)
-		if details["reason"] != JobObservationFailed || details["job_id"] != copyTestJobID || details["observation_failed"] != true {
-			t.Fatalf("details = %v", details)
-		}
+		rejectf(t, details["reason"] != JobObservationFailed || details["job_id"] != copyTestJobID || details["observation_failed"] != true, "details = %v", details)
 	})
 }
 
@@ -1207,9 +1045,7 @@ func TestDBCopyStartFailureLeavesNoTarget(t *testing.T) {
 	params, _ := json.Marshal(dbCopyParams{Name: "copyapp", Size: "small"})
 	env := &Env{Cluster: n.cfg, Req: rpc.Request{RequestID: copyTestJobID, Params: params, Secrets: copyTestSecrets("copyapp")}, Report: func(output.Event) {}}
 	_, err := handleDBCopy(context.Background(), env)
-	if err == nil {
-		t.Fatal("the start failure was ignored")
-	}
+	reject(t, err == nil, "the start failure was ignored")
 	if _, ok := n.saved().ClusterByName("copyapp"); ok {
 		t.Fatal("a failed job start added the target")
 	}
@@ -1218,7 +1054,7 @@ func TestDBCopyStartFailureLeavesNoTarget(t *testing.T) {
 func TestDBCopyPreflightCleanupFailureIsReported(t *testing.T) {
 	n := newCopyTestNode(t)
 	copyOpenWorkspace = func(id string) (*backup.CopyWorkspace, error) {
-		if err := os.MkdirAll(n.workspaceRoot(), 0o711); err != nil { //nolint:gosec // G301: the copy root needs postgres traverse permission; job dirs stay private.
+		if err := os.MkdirAll(n.workspaceRoot(), 0o711); err != nil {
 			return nil, err
 		}
 		return backup.NewCopyWorkspace(n.workspaceRoot(), id, backup.CurrentWorkspaceOwner(), nil)
@@ -1239,16 +1075,12 @@ func TestProvisionDatabaseRollsBackBeforeClusterExists(t *testing.T) {
 	n := newCopyTestNode(t)
 	cfg := n.saved()
 	previous, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	spec := config.ClusterSpec{Name: "copyapp", Node: "db1", Port: 5434, Stanza: "copyapp-abcdef", Size: "small", StatementTimeout: "60s", Extensions: []string{"pg_stat_statements"}}
 	proposed := cfg
 	proposed.Clusters = append(proposed.Clusters, spec)
 	raw, err := proposed.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := n.store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -1272,16 +1104,12 @@ func TestProvisionDatabaseKeepsConfigAfterClusterExists(t *testing.T) {
 	n := newCopyTestNode(t)
 	cfg := n.saved()
 	previous, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	spec := config.ClusterSpec{Name: "copyapp", Node: "db1", Port: 5434, Stanza: "copyapp-abcdef", Size: "small", StatementTimeout: "60s", Extensions: []string{"pg_stat_statements"}}
 	proposed := cfg
 	proposed.Clusters = append(proposed.Clusters, spec)
 	raw, err := proposed.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := n.store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -1294,13 +1122,9 @@ func TestProvisionDatabaseKeepsConfigAfterClusterExists(t *testing.T) {
 
 	env := &Env{Cluster: proposed, Req: rpc.Request{Secrets: copyRoleSecrets("copyapp")}}
 	_, _, err = provisionDatabase(context.Background(), env, proposed, previous, spec, createOptions{deferInitialBackup: true})
-	if err == nil {
-		t.Fatal("the provisioning failure was ignored")
-	}
+	reject(t, err == nil, "the provisioning failure was ignored")
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) || !strings.Contains(cliErr.Hint, "vaire apply --db copyapp") {
-		t.Fatalf("the partial-cluster hint is missing: %v", err)
-	}
+	rejectf(t, !errors.As(err, &cliErr) || !strings.Contains(cliErr.Hint, "vaire apply --db copyapp"), "the partial-cluster hint is missing: %v", err)
 	if _, ok := n.saved().ClusterByName("copyapp"); !ok {
 		t.Fatal("a cluster that exists lost its config entry")
 	}
@@ -1310,16 +1134,12 @@ func TestProvisionDatabaseDefersFirstBackup(t *testing.T) {
 	n := newCopyTestNode(t)
 	cfg := n.saved()
 	previous, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	spec := config.ClusterSpec{Name: "copyapp", Node: "db1", Port: 5434, Stanza: "copyapp-abcdef", Size: "small", StatementTimeout: "60s", Extensions: []string{"pg_stat_statements"}}
 	proposed := cfg
 	proposed.Clusters = append(proposed.Clusters, spec)
 	raw, err := proposed.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := n.store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -1351,15 +1171,11 @@ func TestProvisionDatabaseDefersFirstBackup(t *testing.T) {
 	if _, _, err := provisionDatabase(context.Background(), env, proposed, previous, spec, createOptions{deferInitialBackup: true}); err != nil {
 		t.Fatal(err)
 	}
-	if backups != 0 {
-		t.Fatalf("the deferred backup ran %d times", backups)
-	}
+	rejectf(t, backups != 0, "the deferred backup ran %d times", backups)
 	if _, _, err := provisionDatabase(context.Background(), env, proposed, previous, spec, createOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if backups != 1 {
-		t.Fatalf("ordinary provisioning ran %d backups, want 1", backups)
-	}
+	rejectf(t, backups != 1, "ordinary provisioning ran %d backups, want 1", backups)
 }
 
 func TestCopyPreviewBudgetAndOvercommit(t *testing.T) {
@@ -1391,26 +1207,18 @@ func TestCopyTargetStateReportsActualArtefacts(t *testing.T) {
 	t.Cleanup(func() { copyClusterInventory = oldInventory })
 
 	st := copyTargetStateOf(context.Background(), cfg, "copyapp")
-	if !st.InConfig || !st.Known || st.Cluster || st.Database || !st.Present() {
-		t.Fatalf("state = %+v", st)
-	}
+	rejectf(t, !st.InConfig || !st.Known || st.Cluster || st.Database || !st.Present(), "state = %+v", st)
 	if err := os.MkdirAll(cfg.Server.DataDirectory("copyapp"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	st = copyTargetStateOf(context.Background(), cfg, "copyapp")
-	if !st.DataDirectory || !st.Present() {
-		t.Fatalf("data-directory state = %+v", st)
-	}
+	rejectf(t, !st.DataDirectory || !st.Present(), "data-directory state = %+v", st)
 	copyClusterInventory = func(context.Context) (map[string]string, error) {
 		return nil, errors.New("pg_lsclusters is unavailable")
 	}
 	st = copyTargetStateOf(context.Background(), cfg, "copyapp")
-	if st.Known {
-		t.Fatalf("an unreadable inventory was reported as known: %+v", st)
-	}
-	if !st.Present() {
-		t.Fatalf("known artefacts were lost: %+v", st)
-	}
+	rejectf(t, st.Known, "an unreadable inventory was reported as known: %+v", st)
+	rejectf(t, !st.Present(), "known artefacts were lost: %+v", st)
 }
 
 func TestCopyJobLivenessIsConservative(t *testing.T) {
@@ -1495,16 +1303,12 @@ func TestCopyJobLivenessIsConservative(t *testing.T) {
 	}
 	terminal := rec
 	terminal.State = engine.JobSucceeded
-	if copyWorkspaceInactive(context.Background(), terminal) {
-		t.Fatal("a terminal record with an active unit was treated as inactive")
-	}
+	reject(t, copyWorkspaceInactive(context.Background(), terminal), "a terminal record with an active unit was treated as inactive")
 	copyReadUnitFacts = func(context.Context, string) (copyUnitFactsValue, error) {
 		return copyUnitFactsValue{LoadState: "loaded", ActiveState: "inactive"}, nil
 	}
 	copyScanWorker = func(string) (bool, bool) { return false, true }
-	if !copyWorkspaceInactive(context.Background(), terminal) {
-		t.Fatal("an inactive terminal record was not treated as inactive")
-	}
+	reject(t, !copyWorkspaceInactive(context.Background(), terminal), "an inactive terminal record was not treated as inactive")
 }
 
 func TestCopySyntheticCrashDoesNotOverwriteWorkerTerminal(t *testing.T) {
@@ -1521,15 +1325,11 @@ func TestCopySyntheticCrashDoesNotOverwriteWorkerTerminal(t *testing.T) {
 		return err
 	}
 	got, updated := putCrashedJobIfUnfinished(rec)
-	if updated || got.State != engine.JobSucceeded {
-		t.Fatalf("a worker terminal record was overwritten: %+v updated=%v", got, updated)
-	}
+	rejectf(t, updated || got.State != engine.JobSucceeded, "a worker terminal record was overwritten: %+v updated=%v", got, updated)
 
 	current = rec
 	got, updated = putCrashedJobIfUnfinished(rec)
-	if !updated || got.State != engine.JobFailed {
-		t.Fatalf("a non-terminal copy was not crashed: %+v updated=%v", got, updated)
-	}
+	rejectf(t, !updated || got.State != engine.JobFailed, "a non-terminal copy was not crashed: %+v updated=%v", got, updated)
 	if details, _ := got.Error.Details.(map[string]any); details["reason"] != JobOutcomeUnknown {
 		t.Fatalf("crash details = %v", got.Error.Details)
 	}
@@ -1554,20 +1354,14 @@ func TestStartCopyJobAmbiguousKeepsIDAndRemovesSpec(t *testing.T) {
 	}
 	env := &Env{Req: rpc.Request{RequestID: copyTestJobID}, Report: func(output.Event) {}}
 	id, err := startCopyJob(context.Background(), env, "db-copy", dbCopyParams{Name: "copyapp"}, map[string]string{"db.copyapp.app": "secret"})
-	if err == nil || id != copyTestJobID {
-		t.Fatalf("id=%q err=%v", id, err)
-	}
+	rejectf(t, err == nil || id != copyTestJobID, "id=%q err=%v", id, err)
 	var ambiguous *copyJobStartAmbiguousError
-	if !errors.As(err, &ambiguous) || ambiguous.SpecErr != nil {
-		t.Fatalf("ambiguous error = %#v", err)
-	}
+	rejectf(t, !errors.As(err, &ambiguous) || ambiguous.SpecErr != nil, "ambiguous error = %#v", err)
 	if _, err := os.Lstat(filepath.Join(copyJobDir, id+".json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the unread spec was not removed: %v", err)
 	}
 	rec, ok := state.Job(id)
-	if !ok || rec.Final() || rec.State != engine.JobQueued {
-		t.Fatalf("ambiguous launch wrote a terminal/absent record: %+v ok=%v", rec, ok)
-	}
+	rejectf(t, !ok || rec.Final() || rec.State != engine.JobQueued, "ambiguous launch wrote a terminal/absent record: %+v ok=%v", rec, ok)
 }
 
 func TestStartCopyJobPrelaunchRefusalIsDefinite(t *testing.T) {
@@ -1589,9 +1383,7 @@ func TestStartCopyJobPrelaunchRefusalIsDefinite(t *testing.T) {
 	}
 	env := &Env{Req: rpc.Request{RequestID: copyTestJobID}, Report: func(output.Event) {}}
 	id, err := startCopyJob(context.Background(), env, "db-copy", dbCopyParams{Name: "copyapp"}, nil)
-	if err == nil || id != "" || launched {
-		t.Fatalf("id=%q launched=%v err=%v", id, launched, err)
-	}
+	rejectf(t, err == nil || id != "" || launched, "id=%q launched=%v err=%v", id, launched, err)
 	if _, err := os.Lstat(filepath.Join(copyJobDir, copyTestJobID+".json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a prelaunch refusal left its spec: %v", err)
 	}
@@ -1614,152 +1406,154 @@ func TestStartCopyJobAmbiguousReportsSpecCleanupFailure(t *testing.T) {
 	env := &Env{Req: rpc.Request{RequestID: copyTestJobID}, Report: func(output.Event) {}}
 	id, err := startCopyJob(context.Background(), env, "db-copy", dbCopyParams{Name: "copyapp"}, nil)
 	var ambiguous *copyJobStartAmbiguousError
-	if !errors.As(err, &ambiguous) || id != copyTestJobID {
-		t.Fatalf("id=%q err=%v", id, err)
-	}
-	if ambiguous.SpecErr == nil {
-		t.Fatal("the spec cleanup failure was hidden")
-	}
+	rejectf(t, !errors.As(err, &ambiguous) || id != copyTestJobID, "id=%q err=%v", id, err)
+	reject(t, ambiguous.SpecErr == nil, "the spec cleanup failure was hidden")
+}
+
+type pruneCopyFixture struct {
+	terminal, abrupt, crashed, active, unknown, otherJob, unsafe string
+	preflightIdle, preflightActive, outside, copyJobDir          string
 }
 
 func TestPruneCopyWorkspaces(t *testing.T) {
+	f := setupPruneCopyFixture(t)
+	warnings := pruneCopyWorkspaces(context.Background())
+	assertPruneCopyWorkspaces(t, f, warnings)
+}
+
+func createPruneWorkspace(t *testing.T, root, id, kind string, hold bool) (string, *os.File) {
+	t.Helper()
+	ws, err := backup.NewCopyWorkspace(root, id, backup.CurrentWorkspaceOwner(), nil)
+	reject(t, err != nil, err)
+	lease, err := ws.Create(backup.CopyWorkspaceLeaseName)
+	reject(t, err != nil, err)
+	token := "token-" + id
+	_, err = lease.WriteString(token + "\n")
+	reject(t, err != nil, err)
+	identity, err := backup.CopyWorkspaceLeaseIdentity(lease)
+	reject(t, err != nil, err)
+	err = ws.WriteFile(backup.CopyWorkspaceMarkerName, []byte(kind+"\n"+id+"\n"+identity+"\n"+token+"\n"))
+	reject(t, err != nil, err)
+	if hold {
+		reject(t, syscall.Flock(int(lease.Fd()), syscall.LOCK_SH) != nil, "hold lease")
+	} else {
+		reject(t, lease.Close() != nil, "close lease")
+	}
+	reject(t, ws.Close() != nil, "close workspace")
+	return ws.Dir, lease
+}
+
+func setupPruneCopyFixture(t *testing.T) pruneCopyFixture {
+	t.Helper()
 	n := newCopyTestNode(t)
 	root := n.workspaceRoot()
-	if err := os.MkdirAll(root, 0o711); err != nil { //nolint:gosec // G301: the copy root needs postgres traverse permission; job dirs stay private.
+	if err := os.MkdirAll(root, 0o711); err != nil {
 		t.Fatal(err)
 	}
 	copyRootDir = root
 	copyWorkspaceOwner = func() (backup.WorkspaceOwner, error) { return backup.CurrentWorkspaceOwner(), nil }
-
-	makeWorkspaceKind := func(id, kind string, hold bool) (string, *os.File) {
-		t.Helper()
-		ws, err := backup.NewCopyWorkspace(root, id, backup.CurrentWorkspaceOwner(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		lease, err := ws.Create(backup.CopyWorkspaceLeaseName)
-		if err != nil {
-			t.Fatal(err)
-		}
-		token := "token-" + id
-		if _, err := lease.WriteString(token + "\n"); err != nil {
-			t.Fatal(err)
-		}
-		identity, err := backup.CopyWorkspaceLeaseIdentity(lease)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := ws.WriteFile(backup.CopyWorkspaceMarkerName,
-			[]byte(kind+"\n"+id+"\n"+identity+"\n"+token+"\n")); err != nil {
-			t.Fatal(err)
-		}
-		if hold {
-			if err := syscall.Flock(int(lease.Fd()), syscall.LOCK_SH); err != nil {
-				t.Fatal(err)
-			}
-		} else if err := lease.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := ws.Close(); err != nil {
-			t.Fatal(err)
-		}
-		return ws.Dir, lease
+	makeWorkspace := func(id, kind string, hold bool) (string, *os.File) {
+		return createPruneWorkspace(t, root, id, kind, hold)
 	}
 	newWorkspace := func(id string) string {
 		t.Helper()
-		path, _ := makeWorkspaceKind(id, "db-copy", false)
+		path, _ := makeWorkspace(id, "db-copy", false)
 		t.Cleanup(func() { _ = os.RemoveAll(path) })
 		return path
 	}
-
-	terminal := newWorkspace("01J0000000000000000000TERM")
-	abrupt := newWorkspace("01J0000000000000000000ABRT")
-	crashed := newWorkspace("01J0000000000000000000CRSH")
-	active := newWorkspace("01J0000000000000000000ACTV")
-	unknown := newWorkspace("01J0000000000000000000UNKN")
-	otherJob := newWorkspace("01J0000000000000000000OTHR")
-	unsafe := newWorkspace("01J0000000000000000000UNSF")
-	preflightIdle, preflightIdleLease := makeWorkspaceKind("01J0000000000000000000POLD", "db-copy-preflight", false)
-	preflightActive, preflightActiveLease := makeWorkspaceKind("01J0000000000000000000PNEW", "db-copy-preflight", true)
-	_ = preflightIdleLease.Close()
+	f := pruneCopyFixture{
+		terminal:   newWorkspace("01J0000000000000000000TERM"),
+		abrupt:     newWorkspace("01J0000000000000000000ABRT"),
+		crashed:    newWorkspace("01J0000000000000000000CRSH"),
+		active:     newWorkspace("01J0000000000000000000ACTV"),
+		unknown:    newWorkspace("01J0000000000000000000UNKN"),
+		otherJob:   newWorkspace("01J0000000000000000000OTHR"),
+		unsafe:     newWorkspace("01J0000000000000000000UNSF"),
+		copyJobDir: t.TempDir(),
+		outside:    filepath.Join(n.cfg.Server.DataRoot, "database-data"),
+	}
+	f.preflightIdle, _ = makeWorkspace("01J0000000000000000000POLD", "db-copy-preflight", false)
+	preflightActive, activeLease := makeWorkspace("01J0000000000000000000PNEW", "db-copy-preflight", true)
+	f.preflightActive = preflightActive
 	oldTime := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(preflightIdle, oldTime, oldTime); err != nil {
+	if err := os.Chtimes(f.preflightIdle, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(preflightActive, oldTime, oldTime); err != nil {
+	if err := os.Chtimes(f.preflightActive, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = preflightActiveLease.Close()
-		_ = os.RemoveAll(preflightIdle)
-		_ = os.RemoveAll(preflightActive)
+		_ = activeLease.Close()
+		_ = os.RemoveAll(f.preflightIdle)
+		_ = os.RemoveAll(f.preflightActive)
 	})
-	if err := os.Chmod(unsafe, 0o755); err != nil { //nolint:gosec // G302: a deliberately unsafe fixture permission.
+	if err := os.Chmod(f.unsafe, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	outside := filepath.Join(n.cfg.Server.DataRoot, "database-data")
-	if err := os.MkdirAll(outside, 0o700); err != nil {
+	if err := os.MkdirAll(f.outside, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	installPruneCopyState(t, f)
+	return f
+}
 
+func installPruneCopyState(t *testing.T, f pruneCopyFixture) {
+	t.Helper()
 	oldJobDir := copyJobDir
-	copyJobDir = t.TempDir()
+	copyJobDir = f.copyJobDir
 	t.Cleanup(func() { copyJobDir = oldJobDir })
-	if err := os.WriteFile(filepath.Join(copyJobDir, filepath.Base(terminal)+".json"), []byte("spec"), 0o600); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{f.terminal, f.active} {
+		mustNoErr(t, os.WriteFile(filepath.Join(f.copyJobDir, filepath.Base(path)+".json"), []byte("spec"), 0o600))
 	}
-	if err := os.WriteFile(filepath.Join(copyJobDir, filepath.Base(active)+".json"), []byte("spec"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	oldState, oldInactive := loadJobState, copyWorkspaceInactive
 	loadJobState = func() (engine.State, error) {
 		return engine.State{Jobs: []engine.JobRecord{
-			{ID: filepath.Base(terminal), Job: "db-copy", State: engine.JobSucceeded},
-			{ID: filepath.Base(abrupt), Job: "db-copy", State: engine.JobRunning, PID: 1 << 22},
-			{ID: filepath.Base(crashed), Job: "db-copy", State: engine.JobFailed, Error: &output.ErrorBody{Details: map[string]any{"reason": JobOutcomeUnknown}}},
-			{ID: filepath.Base(active), Job: "db-copy", State: engine.JobRunning},
-			{ID: filepath.Base(otherJob), Job: "db-fork", State: engine.JobSucceeded},
-			{ID: filepath.Base(unsafe), Job: "db-copy", State: engine.JobSucceeded},
+			{ID: filepath.Base(f.terminal), Job: "db-copy", State: engine.JobSucceeded},
+			{ID: filepath.Base(f.abrupt), Job: "db-copy", State: engine.JobRunning, PID: 1 << 22},
+			{ID: filepath.Base(f.crashed), Job: "db-copy", State: engine.JobFailed, Error: &output.ErrorBody{Details: map[string]any{"reason": JobOutcomeUnknown}}},
+			{ID: filepath.Base(f.active), Job: "db-copy", State: engine.JobRunning, PID: os.Getpid()},
+			{ID: filepath.Base(f.unknown), Job: "db-copy", State: engine.JobRunning},
+			{ID: filepath.Base(f.otherJob), Job: "db-fork", State: engine.JobSucceeded},
+			{ID: filepath.Base(f.unsafe), Job: "db-copy", State: engine.JobSucceeded},
 		}}, nil
 	}
 	copyWorkspaceInactive = func(_ context.Context, rec engine.JobRecord) bool {
-		return rec.State == engine.JobSucceeded || rec.ID == filepath.Base(abrupt) || rec.State == engine.JobFailed
+		return rec.State == engine.JobSucceeded || rec.ID == filepath.Base(f.abrupt) || rec.State == engine.JobFailed
 	}
 	t.Cleanup(func() { loadJobState, copyWorkspaceInactive = oldState, oldInactive })
+}
 
-	warnings := pruneCopyWorkspaces(context.Background())
-	for _, path := range []string{terminal, abrupt, crashed, preflightIdle} {
+func assertPruneCopyWorkspaces(t *testing.T, f pruneCopyFixture, warnings []output.Warning) {
+	t.Helper()
+	for _, path := range []string{f.terminal, f.abrupt, f.crashed, f.preflightIdle} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("terminal or inactive workspace %s was not removed: %v", path, err)
 		}
 	}
-	for _, path := range []string{active, unknown, otherJob, preflightActive} {
+	for _, path := range []string{f.active, f.unknown, f.otherJob, f.preflightActive} {
 		if _, err := os.Lstat(path); err != nil {
 			t.Fatalf("workspace %s was removed: %v", path, err)
 		}
 	}
-	if _, err := os.Lstat(unsafe); err != nil {
-		t.Fatalf("unsafe workspace was removed: %v", err)
+	for _, path := range []string{f.unsafe, f.outside} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("workspace %s was removed: %v", path, err)
+		}
 	}
-	if _, err := os.Lstat(outside); err != nil {
-		t.Fatalf("a database directory was touched: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(copyJobDir, filepath.Base(terminal)+".json")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(f.copyJobDir, filepath.Base(f.terminal)+".json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the inactive copy job spec was not removed: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(copyJobDir, filepath.Base(active)+".json")); err != nil {
+	if _, err := os.Lstat(filepath.Join(f.copyJobDir, filepath.Base(f.active)+".json")); err != nil {
 		t.Fatalf("the active copy job spec was removed: %v", err)
 	}
 	if len(warnings) == 0 {
 		t.Fatal("the unsafe workspace was not reported")
 	}
 }
-
 func TestCopyLeasePruneBusyAndIdentity(t *testing.T) {
 	root := t.TempDir()
 	const id = "01J0000000000000000000LEAS"
-	path, lease := newCopyLeaseWorkspace(t, root, id, "db-copy", true)
+	path, lease := newCopyLeaseWorkspace(t, root, id, true)
 	t.Cleanup(func() {
 		_ = lease.Close()
 		_ = os.RemoveAll(path)
@@ -1776,7 +1570,7 @@ func TestCopyLeasePruneBusyAndIdentity(t *testing.T) {
 	}
 
 	// A replacement lease inode is not a lock identity handoff.
-	path, lease = newCopyLeaseWorkspace(t, root, id, "db-copy", false)
+	path, lease = newCopyLeaseWorkspace(t, root, id, false)
 	leasePath := filepath.Join(path, backup.CopyWorkspaceLeaseName)
 	if err := os.Remove(leasePath); err != nil {
 		t.Fatal(err)
@@ -1793,7 +1587,7 @@ func TestCopyLeasePruneBusyAndIdentity(t *testing.T) {
 	_ = os.RemoveAll(path)
 
 	// A same-inode token change is not a lock handoff.
-	path, lease = newCopyLeaseWorkspace(t, root, id, "db-copy", false)
+	path, lease = newCopyLeaseWorkspace(t, root, id, false)
 	leasePath = filepath.Join(path, backup.CopyWorkspaceLeaseName)
 	if err := os.WriteFile(leasePath, []byte("different-token\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1811,7 +1605,7 @@ func TestCopyLeasePruneBusyAndIdentity(t *testing.T) {
 func TestCopyLeaseExecutorFailsClosedOnReplacement(t *testing.T) {
 	root := t.TempDir()
 	const id = "01J0000000000000000000EXEC"
-	path, lease := newCopyLeaseWorkspace(t, root, id, "db-copy", true)
+	path, lease := newCopyLeaseWorkspace(t, root, id, true)
 	t.Cleanup(func() {
 		_ = lease.Close()
 		_ = os.RemoveAll(path)
@@ -1838,7 +1632,7 @@ func TestCopyLeaseExecutorFailsClosedOnReplacement(t *testing.T) {
 func TestCopyLeaseSurvivesParentUntilDescendantExit(t *testing.T) {
 	root := t.TempDir()
 	const id = "01J0000000000000000000DESC"
-	path, lease := newCopyLeaseWorkspace(t, root, id, "db-copy", true)
+	path, lease := newCopyLeaseWorkspace(t, root, id, true)
 	t.Cleanup(func() {
 		_ = lease.Close()
 		_ = os.RemoveAll(path)
@@ -1856,9 +1650,7 @@ func TestCopyLeaseSurvivesParentUntilDescendantExit(t *testing.T) {
 		if _, err := os.Stat(ready); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the lease descendant did not start")
-		}
+		reject(t, time.Now().After(deadline), "the lease descendant did not start")
 		time.Sleep(10 * time.Millisecond)
 	}
 	if err := lease.Close(); err != nil {
@@ -1882,7 +1674,7 @@ func TestCopyLeaseInterleavedAcquisitionGapFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	gateDir := t.TempDir()
 	const id = "01J0000000000000000000GAPP"
-	path, lease := newCopyLeaseWorkspace(t, root, id, "db-copy", true)
+	path, lease := newCopyLeaseWorkspace(t, root, id, true)
 	t.Cleanup(func() {
 		_ = lease.Close()
 		_ = os.RemoveAll(path)
@@ -1893,7 +1685,7 @@ func TestCopyLeaseInterleavedAcquisitionGapFailsClosed(t *testing.T) {
 	ready := filepath.Join(gateDir, "ready")
 	proceed := filepath.Join(gateDir, "proceed")
 	script := "#!/bin/sh\nprintf ready > " + ready + "\nwhile [ ! -f " + proceed + " ]; do sleep 0.01; done\nexec " + oldTool + " \"$@\"\n"
-	if err := os.WriteFile(fakeFlock, []byte(script), 0o700); err != nil { //nolint:gosec // G302: an executable test fixture.
+	if err := os.WriteFile(fakeFlock, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	copyLeaseTool = fakeFlock
@@ -1910,9 +1702,7 @@ func TestCopyLeaseInterleavedAcquisitionGapFailsClosed(t *testing.T) {
 		if _, err := os.Stat(ready); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the lease wrapper did not reach the acquisition gap")
-		}
+		reject(t, time.Now().After(deadline), "the lease wrapper did not reach the acquisition gap")
 		time.Sleep(10 * time.Millisecond)
 	}
 	// Release the parent after the wrapper opened/verified the lease but
@@ -1939,7 +1729,7 @@ func TestCopyLeaseInterleavedAcquisitionGapFailsClosed(t *testing.T) {
 func TestPruneCopyWorkspaceRefusesSymlinkAndWrongOwner(t *testing.T) {
 	n := newCopyTestNode(t)
 	root := n.workspaceRoot()
-	if err := os.MkdirAll(root, 0o711); err != nil { //nolint:gosec // G301: the copy root needs postgres traverse permission; job dirs stay private.
+	if err := os.MkdirAll(root, 0o711); err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(n.dir, "do-not-delete")

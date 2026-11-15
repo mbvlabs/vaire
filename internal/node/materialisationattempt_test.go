@@ -72,9 +72,7 @@ func drillAttemptFixture(t *testing.T) (*jobEnv, string, *backup.Materialised) {
 	env.lease = newLockedJobLease(env, []jobLockRequest{{name: "app", mode: engine.LockShared}, {name: "app__drill", mode: engine.LockExclusive}}, nil, func() {})
 	t.Cleanup(env.lease.finish)
 	m, err := callerNewRestoreOwned(dir, backup.DrillName("app"), "app", 5432, engine.Shell{}, env.Job, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	t.Cleanup(m.ReleaseForkReservationAuthority)
 	t.Cleanup(func() {
 		if birth, ok := m.Ownership.(*restoreBirth); ok {
@@ -109,13 +107,9 @@ func TestMaterialiseRestoreRejectsReplacedInvocationBeforeConstructor(t *testing
 				return nil, errors.New("unexpected constructor")
 			}
 			_, _, _, err := materialiseRestore(context.Background(), env, restoreParams{Database: "app", Kind: backup.TargetLatest})
-			if err == nil || called {
-				t.Fatalf("replaced invocation: err=%v constructor called=%v", err, called)
-			}
+			rejectf(t, err == nil || called, "replaced invocation: err=%v constructor called=%v", err, called)
 			records, err := backup.LoadRecords()
-			if err != nil || !reflect.DeepEqual(records.Restores["app"], r) {
-				t.Fatalf("replaced record changed: %+v, %v", records.Restores["app"], err)
-			}
+			rejectf(t, err != nil || !reflect.DeepEqual(records.Restores["app"], r), "replaced record changed: %+v, %v", records.Restores["app"], err)
 		})
 	}
 }
@@ -123,95 +117,81 @@ func TestMaterialiseRestoreRejectsReplacedInvocationBeforeConstructor(t *testing
 func TestRestoreRetainsTypedFailureAndBlocksCleanup(t *testing.T) {
 	for _, reason := range []string{"recovery_requirements_unmet", "recovery_parameter_mismatch"} {
 		t.Run(reason, func(t *testing.T) {
-			env, dir := attemptFixture(t)
-			env.Cluster.Clusters[0].Size = "medium"
-			if err := backup.UpdateRecords(func(s *backup.Records) error {
-				s.Restores["app"] = backup.Restore{ID: env.ID, Database: "app", Kind: backup.TargetLatest, InstanceID: env.installID, OperationID: env.OperationID,
-					Phase: backup.PhaseRestoring, MaterialisationPending: true}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			failure := attemptFailure(reason)
-			callerRestoreMaterialised = func(_ context.Context, m *backup.Materialised, _ backup.Driver, _ backup.RestoreOptions) error {
-				if m.DestinationConfig == nil || !strings.Contains(m.DestinationConfig.Tuning, "max_connections = 50") {
-					t.Fatalf("intended destination was not rendered: %+v", m.DestinationConfig)
-				}
-				recs, err := backup.LoadRecords()
-				if err != nil || recs.Restores["app"].Attempt == nil || recs.Restores["app"].Attempt.JobID != env.ID {
-					t.Fatalf("attempt missing before restore: %+v %v", recs.Restores["app"], err)
-				}
-				if err := os.Mkdir(m.Data, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(m.Data, "sentinel"), []byte("keep"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				return failure
-			}
-			_, err := jobRestore(context.Background(), env)
-			if !errors.Is(err, failure) || !backup.RetainRecoveryFailure(err) {
-				t.Fatalf("job error lost type: %v", err)
-			}
-			recs, err := backup.LoadRecords()
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := recs.Restores["app"]
-			if r.Phase != backup.PhaseFailed || r.Attempt == nil || r.Attempt.Reason != reason ||
-				r.Attempt.InstanceID != "install-test" || r.Attempt.OperationID != "operation-1" ||
-				r.Attempt.Target != "app__restoring" || r.Attempt.Stanza != "app-stanza" || r.Attempt.TemporaryPort != config.TemporaryPortMin {
-				t.Fatalf("failed restore record: %+v", r)
-			}
-			if err := clearFailedRestore(env.Cluster, "app"); err == nil {
-				t.Fatal("retry silently cleaned retained target")
-			}
-			req := rpc.Request{Params: json.RawMessage(`{"database":"app"}`), Confirm: "app/restore"}
-			nodeEnv := &Env{Req: req, Cluster: env.Cluster}
-			if _, err := handleRestoreAbort(context.Background(), nodeEnv); err == nil {
-				t.Fatal("abort deleted without ownership proof")
-			}
-			if _, err := handleRestorePromote(context.Background(), nodeEnv); err == nil {
-				t.Fatal("failed restore promoted")
-			}
-			if _, err := os.Stat(filepath.Join(dir, "app__restoring", "sentinel")); err != nil {
-				t.Fatalf("retained target removed: %v", err)
-			}
+			runRestoreRetainsFailure(t, reason)
 		})
 	}
+}
+
+func runRestoreRetainsFailure(t *testing.T, reason string) {
+	t.Helper()
+	env, dir := attemptFixture(t)
+	env.Cluster.Clusters[0].Size = "medium"
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		s.Restores["app"] = backup.Restore{ID: env.ID, Database: "app", Kind: backup.TargetLatest, InstanceID: env.installID, OperationID: env.OperationID,
+			Phase: backup.PhaseRestoring, MaterialisationPending: true}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failure := attemptFailure(reason)
+	callerRestoreMaterialised = func(_ context.Context, m *backup.Materialised, _ backup.Driver, _ backup.RestoreOptions) error {
+		rejectf(t, m.DestinationConfig == nil || !strings.Contains(m.DestinationConfig.Tuning, "max_connections = 50"), "intended destination was not rendered: %+v", m.DestinationConfig)
+		recs, err := backup.LoadRecords()
+		rejectf(t, err != nil || recs.Restores["app"].Attempt == nil || recs.Restores["app"].Attempt.JobID != env.ID, "attempt missing before restore: %+v %v", recs.Restores["app"], err)
+		if err := os.Mkdir(m.Data, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(m.Data, "sentinel"), []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return failure
+	}
+	_, err := jobRestore(context.Background(), env)
+	rejectf(t, !errors.Is(err, failure) || !backup.RetainRecoveryFailure(err), "job error lost type: %v", err)
+	recs, err := backup.LoadRecords()
+	reject(t, err != nil, err)
+	r := recs.Restores["app"]
+	rejectf(t, r.Phase != backup.PhaseFailed || r.Attempt == nil || r.Attempt.Reason != reason ||
+		r.Attempt.InstanceID != "install-test" || r.Attempt.OperationID != "operation-1" ||
+		r.Attempt.Target != "app__restoring" || r.Attempt.Stanza != "app-stanza" || r.Attempt.TemporaryPort != config.TemporaryPortMin, "failed restore record: %+v", r)
+	rejectf(t, clearFailedRestore(context.Background(), env.Cluster, "app") == nil, "retry silently cleaned retained target")
+	req := rpc.Request{Params: json.RawMessage(`{"database":"app"}`), Confirm: "app/restore"}
+	nodeEnv := &Env{Req: req, Cluster: env.Cluster}
+	_, abortErr := handleRestoreAbort(context.Background(), nodeEnv)
+	reject(t, abortErr == nil, "abort deleted without ownership proof")
+	_, promoteErr := handleRestorePromote(context.Background(), nodeEnv)
+	reject(t, promoteErr == nil, "failed restore promoted")
+	_, statErr := os.Stat(filepath.Join(dir, "app__restoring", "sentinel"))
+	rejectf(t, statErr != nil, "retained target removed: %v", statErr)
 }
 
 func TestDrillAttemptRetainsTypedFailureAndBlocksNextCleanup(t *testing.T) {
 	for _, reason := range []string{"recovery_requirements_unmet", "recovery_parameter_mismatch"} {
 		t.Run(reason, func(t *testing.T) {
-			env, _, m := drillAttemptFixture(t)
-			failure := attemptFailure(reason)
-			callerRestoreMaterialised = func(_ context.Context, _ *backup.Materialised, _ backup.Driver, _ backup.RestoreOptions) error {
-				recs, err := backup.LoadRecords()
-				if err != nil || recs.DrillAttempts["app"].JobID != env.ID || recs.Drilling["app"] != m.Name {
-					t.Fatalf("attempt missing before drill: %+v %v", recs, err)
-				}
-				if err := m.Ownership.CreateData(context.Background(), m.OwnershipPaths()); err != nil {
-					t.Fatal(err)
-				}
-				return failure
-			}
-			_, started, retained, err := materialiseDrill(context.Background(), env, m, nil, backup.RestoreOptions{}, "app-stanza")
-			if !started || !retained || !errors.Is(err, failure) || !backup.RetainRecoveryFailure(err) {
-				t.Fatalf("drill result: %v %v %v", started, retained, err)
-			}
-			recs, err := backup.LoadRecords()
-			if err != nil || recs.DrillAttempts["app"].Reason != reason {
-				t.Fatalf("drill record: %+v %v", recs.DrillAttempts, err)
-			}
-			if err := dropKilledDrill(context.Background(), env, recs, "app"); err == nil {
-				t.Fatal("next drill deleted retained target")
-			}
-			if _, err := os.Stat(m.Data); err != nil {
-				t.Fatalf("retained drill removed: %v", err)
-			}
+			runDrillRetainsFailure(t, reason)
 		})
 	}
+}
+
+func runDrillRetainsFailure(t *testing.T, reason string) {
+	t.Helper()
+	env, _, m := drillAttemptFixture(t)
+	failure := attemptFailure(reason)
+	callerRestoreMaterialised = func(ctx context.Context, _ *backup.Materialised, _ backup.Driver, _ backup.RestoreOptions) error {
+		recs, err := backup.LoadRecords()
+		rejectf(t, err != nil || recs.DrillAttempts["app"].JobID != env.ID || recs.Drilling["app"] != m.Name, "attempt missing before drill: %+v %v", recs, err)
+		if err := m.Ownership.CreateData(ctx, m.OwnershipPaths()); err != nil {
+			t.Fatal(err)
+		}
+		return failure
+	}
+	_, started, retained, err := materialiseDrill(context.Background(), env, m, nil, backup.RestoreOptions{}, "app-stanza")
+	rejectf(t, !started || !retained || !errors.Is(err, failure) || !backup.RetainRecoveryFailure(err), "drill result: %v %v %v", started, retained, err)
+	recs, err := backup.LoadRecords()
+	rejectf(t, err != nil || recs.DrillAttempts["app"].Reason != reason, "drill record: %+v %v", recs.DrillAttempts, err)
+	rejectf(t, dropKilledDrill(context.Background(), env, recs, "app") == nil, "next drill deleted retained target")
+	_, statErr := os.Stat(m.Data)
+	rejectf(t, statErr != nil, "retained drill removed: %v", statErr)
 }
 
 func TestAttemptMetadataFailureDoesNotStartDrill(t *testing.T) {
@@ -226,9 +206,7 @@ func TestAttemptMetadataFailureDoesNotStartDrill(t *testing.T) {
 		return nil
 	}
 	_, started, retain, err := materialiseDrill(context.Background(), env, m, nil, backup.RestoreOptions{}, "app-stanza")
-	if err == nil || started || retain || called {
-		t.Fatalf("metadata failure started restore: %v %v %v %v", started, retain, called, err)
-	}
+	rejectf(t, err == nil || started || retain || called, "metadata failure started restore: %v %v %v %v", started, retain, called, err)
 }
 
 func TestPendingRestoreBlocksUnverifiedAbortAndRetry(t *testing.T) {
@@ -239,7 +217,7 @@ func TestPendingRestoreBlocksUnverifiedAbortAndRetry(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := clearFailedRestore(env.Cluster, "app"); err == nil {
+	if err := clearFailedRestore(context.Background(), env.Cluster, "app"); err == nil {
 		t.Fatal("pending unknown attempt cleared")
 	}
 	nodeEnv := &Env{Cluster: env.Cluster, Req: rpc.Request{Params: json.RawMessage(`{"database":"app"}`)}}
@@ -274,7 +252,7 @@ func TestRecoverFailureKeepsMatchingAttempt(t *testing.T) {
 				recs.Restores["app"].Attempt == nil || recs.Restores["app"].Attempt.Reason != reason {
 				t.Fatalf("recover state: %+v %v", recs.Restores["app"], err)
 			}
-			if err := clearFailedRestore(env.Cluster, "app"); err == nil {
+			if err := clearFailedRestore(context.Background(), env.Cluster, "app"); err == nil {
 				t.Fatal("recover retry cleared retained attempt")
 			}
 		})
@@ -293,9 +271,7 @@ func TestFailRestoreRefusesDifferentAttempt(t *testing.T) {
 		t.Fatal("another job's record was changed")
 	}
 	recs, err := backup.LoadRecords()
-	if err != nil || recs.Restores["app"].Phase != backup.PhaseRestoring || recs.Restores["app"].ID != "other-job" {
-		t.Fatalf("foreign record changed: %+v %v", recs.Restores["app"], err)
-	}
+	rejectf(t, err != nil || recs.Restores["app"].Phase != backup.PhaseRestoring || recs.Restores["app"].ID != "other-job", "foreign record changed: %+v %v", recs.Restores["app"], err)
 }
 
 func TestTypedFailureRecordWriteFailureRemainsBlocked(t *testing.T) {
@@ -322,15 +298,13 @@ func TestTypedFailureRecordWriteFailureRemainsBlocked(t *testing.T) {
 	}
 	_, err := jobRestore(context.Background(), env)
 	backup.RecordsPath = realPath
-	if !errors.Is(err, failure) || !backup.RetainRecoveryFailure(err) {
-		t.Fatalf("lost failure identity: %v", err)
-	}
+	rejectf(t, !errors.Is(err, failure) || !backup.RetainRecoveryFailure(err), "lost failure identity: %v", err)
 	recs, err := backup.LoadRecords()
 	if err != nil || recs.Restores["app"].Phase != backup.PhaseRestoring ||
 		!recs.Restores["app"].MaterialisationPending || recs.Restores["app"].Attempt == nil {
 		t.Fatalf("intent not preserved: %+v %v", recs.Restores["app"], err)
 	}
-	if err := clearFailedRestore(env.Cluster, "app"); err == nil {
+	if err := clearFailedRestore(context.Background(), env.Cluster, "app"); err == nil {
 		t.Fatal("unwritten failure record permitted automatic cleanup")
 	}
 }
@@ -339,56 +313,50 @@ func TestRestoreForeignSameJobAttemptIsNotChangedOrDropped(t *testing.T) {
 	for _, field := range []string{"operation", "instance", "target"} {
 		for _, outcome := range []string{"typed", "other", "success"} {
 			t.Run(field+"/"+outcome, func(t *testing.T) {
-				env, dir := attemptFixture(t)
-				if err := backup.UpdateRecords(func(s *backup.Records) error {
-					s.Restores["app"] = backup.Restore{ID: env.ID, Database: "app", Kind: backup.TargetLatest, InstanceID: env.installID, OperationID: env.OperationID, Phase: backup.PhaseRestoring, MaterialisationPending: true}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-				callerRestoreMaterialised = func(_ context.Context, m *backup.Materialised, _ backup.Driver, _ backup.RestoreOptions) error {
-					if err := os.Mkdir(m.Data, 0o700); err != nil {
-						t.Fatal(err)
-					}
-					if err := backup.UpdateRecords(func(s *backup.Records) error {
-						r := s.Restores["app"]
-						switch field {
-						case "operation":
-							r.Attempt.OperationID = "foreign-op"
-						case "instance":
-							r.Attempt.InstanceID = "foreign-install"
-						case "target":
-							r.Attempt.Target = "foreign-target"
-						}
-						s.Restores["app"] = r
-						return nil
-					}); err != nil {
-						t.Fatal(err)
-					}
-					switch outcome {
-					case "typed":
-						return attemptFailure("recovery_parameter_mismatch")
-					case "other":
-						return errors.New("ordinary tool failure")
-					default:
-						return nil
-					}
-				}
-				_, err := jobRestore(context.Background(), env)
-				if err == nil {
-					t.Fatal("foreign attempt accepted")
-				}
-				recs, err := backup.LoadRecords()
-				if err != nil || recs.Restores["app"].Phase != backup.PhaseRestoring ||
-					recs.Restores["app"].Attempt == nil || recs.Restores["app"].Attempt.Reason != "" {
-					t.Fatalf("foreign attempt changed: %+v %v", recs.Restores["app"], err)
-				}
-				if _, err := os.Stat(filepath.Join(dir, "app__restoring")); err != nil {
-					t.Fatalf("foreign target deleted: %v", err)
-				}
+				runForeignRestoreAttempt(t, field, outcome)
 			})
 		}
 	}
+}
+
+func runForeignRestoreAttempt(t *testing.T, field, outcome string) {
+	t.Helper()
+	env, dir := attemptFixture(t)
+	mustNoErr(t, backup.UpdateRecords(func(s *backup.Records) error {
+		s.Restores["app"] = backup.Restore{ID: env.ID, Database: "app", Kind: backup.TargetLatest, InstanceID: env.installID, OperationID: env.OperationID, Phase: backup.PhaseRestoring, MaterialisationPending: true}
+		return nil
+	}))
+	callerRestoreMaterialised = func(_ context.Context, m *backup.Materialised, _ backup.Driver, _ backup.RestoreOptions) error {
+		mustNoErr(t, os.Mkdir(m.Data, 0o700))
+		mustNoErr(t, backup.UpdateRecords(func(s *backup.Records) error {
+			r := s.Restores["app"]
+			switch field {
+			case "operation":
+				r.Attempt.OperationID = "foreign-op"
+			case "instance":
+				r.Attempt.InstanceID = "foreign-install"
+			case "target":
+				r.Attempt.Target = "foreign-target"
+			}
+			s.Restores["app"] = r
+			return nil
+		}))
+		switch outcome {
+		case "typed":
+			return attemptFailure("recovery_parameter_mismatch")
+		case "other":
+			return errors.New("ordinary tool failure")
+		default:
+			return nil
+		}
+	}
+	_, err := jobRestore(context.Background(), env)
+	reject(t, err == nil, "foreign attempt accepted")
+	recs, err := backup.LoadRecords()
+	rejectf(t, err != nil || recs.Restores["app"].Phase != backup.PhaseRestoring ||
+		recs.Restores["app"].Attempt == nil || recs.Restores["app"].Attempt.Reason != "", "foreign attempt changed: %+v %v", recs.Restores["app"], err)
+	_, statErr := os.Stat(filepath.Join(dir, "app__restoring"))
+	rejectf(t, statErr != nil, "foreign target deleted: %v", statErr)
 }
 
 func TestDrillForeignSameJobAttemptIsNotChanged(t *testing.T) {
@@ -414,13 +382,9 @@ func TestDrillForeignSameJobAttemptIsNotChanged(t *testing.T) {
 				return attemptFailure("recovery_parameter_mismatch")
 			}
 			_, started, retained, err := materialiseDrill(context.Background(), env, m, nil, backup.RestoreOptions{}, "app-stanza")
-			if !started || !retained || err == nil || !backup.RetainRecoveryFailure(err) {
-				t.Fatalf("foreign drill: %v %v %v", started, retained, err)
-			}
+			rejectf(t, !started || !retained || err == nil || !backup.RetainRecoveryFailure(err), "foreign drill: %v %v %v", started, retained, err)
 			recs, err := backup.LoadRecords()
-			if err != nil || recs.DrillAttempts["app"].Reason != "" {
-				t.Fatalf("foreign reason changed: %+v %v", recs.DrillAttempts["app"], err)
-			}
+			rejectf(t, err != nil || recs.DrillAttempts["app"].Reason != "", "foreign reason changed: %+v %v", recs.DrillAttempts["app"], err)
 		})
 	}
 }
@@ -445,13 +409,9 @@ func TestAttemptIdentityCoversEveryImmutableField(t *testing.T) {
 	for i, mutate := range mutations {
 		changed := base
 		mutate(&changed)
-		if sameAttemptIdentity(changed, base) {
-			t.Fatalf("identity mutation %d accepted", i)
-		}
+		rejectf(t, sameAttemptIdentity(changed, base), "identity mutation %d accepted", i)
 	}
 	changed := base
 	changed.Reason = "recovery_parameter_mismatch"
-	if !sameAttemptIdentity(changed, base) {
-		t.Fatal("outcome reason was treated as immutable identity")
-	}
+	reject(t, !sameAttemptIdentity(changed, base), "outcome reason was treated as immutable identity")
 }

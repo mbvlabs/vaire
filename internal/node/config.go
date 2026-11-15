@@ -88,43 +88,13 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	if err := configSetSchedules(ctx, cfg); err != nil {
 		return Result{}, err
 	}
-	if oldErr == nil {
-		if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
-			return Result{}, err
-		}
-		if !env.Req.DryRun {
-			if err := defaultProtectGuard.checkUnprotect(old, cfg, env.Req.Secrets[ProtectCodeSecret]); err != nil {
-				return Result{}, err
-			}
-		}
-		if err := checkRepoMove(ctx, old, cfg); err != nil {
-			return Result{}, err
-		}
+	if err := configSetSafetyChecks(ctx, env, old, cfg); err != nil {
+		return Result{}, err
 	}
 	// A dry run previews the plan for the new file without saving it.
-	revision := current
-	var synced []output.Warning
-	if !env.Req.DryRun {
-		if err := invalidateCPUProofs(cpuProofTargets(old, cfg, p.Set)); err != nil {
-			return Result{}, err
-		}
-		// vaire_admin's write access follows the protection before the file
-		// says so: a protection is never saved while vaire_admin can still
-		// write to the database.
-		if oldErr == nil {
-			if synced, err = syncProtectedAccess(ctx, env, old, cfg); err != nil {
-				return Result{}, err
-			}
-		}
-		if err := store.Save(raw); err != nil {
-			return Result{}, err
-		}
-		if err := configSetHostname(cfg); err != nil {
-			return Result{}, err
-		}
-		if revision, err = store.Revision(); err != nil {
-			return Result{}, err
-		}
+	revision, synced, err := saveConfigSet(ctx, env, store, raw, old, cfg, p, current)
+	if err != nil {
+		return Result{}, err
 	}
 	env.Cluster = cfg
 	rt := runtimeFor(env, true)
@@ -135,6 +105,45 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}
 	return Result{Data: data, Warnings: warnings}, nil
+}
+
+func configSetSafetyChecks(ctx context.Context, env *Env, old, cfg config.Cluster) error {
+	if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
+		return err
+	}
+	if !env.Req.DryRun {
+		if err := defaultProtectGuard.checkUnprotect(old, cfg, env.Req.Secrets[ProtectCodeSecret]); err != nil {
+			return err
+		}
+	}
+	return checkRepoMove(ctx, old, cfg)
+}
+
+func saveConfigSet(ctx context.Context, env *Env, store state.FileStore, raw []byte, old, cfg config.Cluster, p configSetParams, current string) (string, []output.Warning, error) {
+	if env.Req.DryRun {
+		return current, nil, nil
+	}
+	if err := invalidateCPUProofs(cpuProofTargets(old, cfg, p.Set)); err != nil {
+		return "", nil, err
+	}
+	// vaire_admin's write access follows the protection before the file says
+	// so: a protection is never saved while vaire_admin can still write to
+	// the database.
+	synced, err := syncProtectedAccess(ctx, env, old, cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := store.Save(raw); err != nil {
+		return "", nil, err
+	}
+	if err := configSetHostname(cfg); err != nil {
+		return "", nil, err
+	}
+	revision, err := store.Revision()
+	if err != nil {
+		return "", nil, err
+	}
+	return revision, synced, nil
 }
 
 // newConfigBytes returns the desired-state bytes for a config.set request,

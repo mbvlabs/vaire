@@ -47,6 +47,39 @@ var statusPendingRead = pendingRestarts
 var statusBudgetRead = serverBudget
 var statusBudgetWarnings = oversubscriptionWarnings
 
+func readClusterSnapshot(ctx context.Context, spec config.ClusterSpec) clusterSnapshot {
+	s := clusterSnapshot{Spec: spec}
+	s.Cgroup, s.CgroupOK = hostinfo.ReadCgroup(hostinfo.ServiceCgroup(steps.PGServiceName(spec.Name)))
+	if !clusterRunning(spec) {
+		s.State = "stopped"
+		return s
+	}
+	qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+	defer cancel()
+	rows, err := snapshotPG(spec).Query(qctx, spec.DatabaseName(), health.SampleSQL, nil)
+	if err != nil || len(rows) == 0 {
+		s.State = "unreachable"
+		if err != nil {
+			s.Error = err.Error()
+		}
+		return s
+	}
+	s.State = "running"
+	s.Sample = health.ParseSample(rows[0])
+	return s
+}
+
+func readClusterTPS(ctx context.Context, spec config.ClusterSpec, before int64, elapsed time.Duration) (float64, bool) {
+	qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+	defer cancel()
+	rows, err := snapshotPG(spec).Query(qctx, spec.DatabaseName(), health.XactsSQL, nil)
+	if err != nil || len(rows) == 0 {
+		return 0, false
+	}
+	after := health.ParseSample(rows[0]).Xacts
+	return health.TPS(before, after, elapsed), true
+}
+
 // readClusters reads every cluster of cfg (only db when set) concurrently
 // over its socket. With tps it samples the transaction counter twice, a
 // second apart.
@@ -67,27 +100,7 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s := clusterSnapshot{Spec: spec}
-			s.Cgroup, s.CgroupOK = hostinfo.ReadCgroup(hostinfo.ServiceCgroup(steps.PGServiceName(spec.Name)))
-			if !clusterRunning(spec) {
-				s.State = "stopped"
-				out[i] = s
-				return
-			}
-			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
-			defer cancel()
-			rows, err := snapshotPG(spec).Query(qctx, spec.DatabaseName(), health.SampleSQL, nil)
-			if err != nil || len(rows) == 0 {
-				s.State = "unreachable"
-				if err != nil {
-					s.Error = err.Error()
-				}
-				out[i] = s
-				return
-			}
-			s.State = "running"
-			s.Sample = health.ParseSample(rows[0])
-			out[i] = s
+			out[i] = readClusterSnapshot(ctx, spec)
 		}()
 	}
 	wg.Wait()
@@ -109,14 +122,7 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
-			defer cancel()
-			rows, err := snapshotPG(out[i].Spec).Query(qctx, out[i].Spec.DatabaseName(), health.XactsSQL, nil)
-			if err != nil || len(rows) == 0 {
-				return
-			}
-			after := health.ParseSample(rows[0]).Xacts
-			out[i].TPS, out[i].HasTPS = health.TPS(out[i].Sample.Xacts, after, elapsed), true
+			out[i].TPS, out[i].HasTPS = readClusterTPS(ctx, out[i].Spec, out[i].Sample.Xacts, elapsed)
 		}()
 	}
 	wg.Wait()
@@ -251,25 +257,76 @@ func masterStatusRow(cfg config.Cluster) *statusMaster {
 		Bucket: f.Bucket, Epoch: e.Epoch, Pending: f.PendingSince != "" || f.Dirty, Fenced: f.Fenced, LastFailed: last.LastFailure}
 }
 
-// handleStatus is vaire status: the server's summary and a row per database
-// (Phase 4). It takes no lock, so it answers while an apply runs; a cluster
-// that can't be read is shown as unreachable, never a failed RPC.
-func handleStatus(ctx context.Context, env *Env) (Result, error) {
-	var p statusParams
-	if err := decodeParams(env.Req.Params, &p); err != nil {
-		return Result{}, err
+type statusMeasurements struct {
+	cpu  *statusCPU
+	free *uint64
+}
+
+func measureStatusClusters(ctx context.Context, cfg config.Cluster, snaps []clusterSnapshot) []statusMeasurements {
+	measurements := make([]statusMeasurements, len(snaps))
+	var wg sync.WaitGroup
+	for i, s := range snaps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+			defer cancel()
+			res, err := cfg.Resources(s.Spec)
+			if err == nil {
+				obs, generation, monotonic := statusCPURead(qctx, s.Spec)
+				measurements[i].cpu = cpuStatus(res, obs, generation, monotonic)
+			}
+			if s.Spec.IsFollower() && s.State == "running" {
+				measurements[i].free = statusDataFree(qctx, cfg, s.Spec, snapshotPG(s.Spec).Query, hostinfo.FreeBytes)
+			}
+		}()
 	}
-	cfg := env.Cluster
-	reports, markerSnapshot, err := materialisationReports(ctx, cfg)
-	if err != nil {
-		return Result{}, err
-	}
-	if p.DB != "" {
-		if _, err := clusterOf(cfg, p.DB); err != nil && reports[p.DB].Phase == "" {
-			return Result{}, err
+	wg.Wait()
+	return measurements
+}
+
+func statusActiveCluster(cfg config.Cluster, reports map[string]materialisationReport) config.Cluster {
+	active := cfg
+	active.Clusters = nil
+	for _, spec := range cfg.Clusters {
+		if _, incomplete := reports[spec.Name]; !incomplete {
+			active.Clusters = append(active.Clusters, spec)
 		}
 	}
-	host, _ := statusHostRead(cfg.Server.DataRoot)
+	return active
+}
+
+func statusDatabaseRows(cfg config.Cluster, snaps []clusterSnapshot, measurements []statusMeasurements, rs backup.Records, st engine.State, pending map[string]bool, followers map[string]followerReading) ([]statusDatabase, string) {
+	rows := make([]statusDatabase, 0, len(snaps))
+	pgVersion := ""
+	for i, s := range snaps {
+		row := statusRow(cfg, s, rs, st, pending)
+		row.CPU, row.DataFreeBytes = measurements[i].cpu, measurements[i].free
+		if rs.IsAwaiting(s.Spec.Name) {
+			row.State, row.Error = stateAwaiting, "vaire db recover "+s.Spec.Name
+		}
+		if f, ok := followers[s.Spec.Name]; ok {
+			row.Follower = &f
+		}
+		if pgVersion == "" {
+			pgVersion = s.Sample.ServerVersion
+		}
+		rows = append(rows, row)
+	}
+	return rows, pgVersion
+}
+
+func appendIncompleteStatusRows(rows []statusDatabase, cfg config.Cluster, reports map[string]materialisationReport, db string) []statusDatabase {
+	for name, report := range reports {
+		if db != "" && db != name {
+			continue
+		}
+		rows = append(rows, incompleteStatusRow(cfg, name, report))
+	}
+	return rows
+}
+
+func statusBase(cfg config.Cluster, host hostinfo.Info, reports map[string]materialisationReport) statusData {
 	data := statusData{
 		Server:       cfg.Name(),
 		Role:         config.RoleMaster,
@@ -296,15 +353,32 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	if total, free, ok := hostinfo.DiskUsage(cfg.Server.DataRoot); ok {
 		data.Disk = map[string]any{"path": cfg.Server.DataRoot, "total_bytes": total, "free_bytes": free, "free_pct": freePct(total, free)}
 	}
-	data.Master = statusMasterRead(cfg)
-	// Never sample an incomplete target as an application database.
-	active := cfg
-	active.Clusters = nil
-	for _, spec := range cfg.Clusters {
-		if _, incomplete := reports[spec.Name]; !incomplete {
-			active.Clusters = append(active.Clusters, spec)
+	return data
+}
+
+// handleStatus is vaire status: the server's summary and a row per database
+// (Phase 4). It takes no lock, so it answers while an apply runs; a cluster
+// that can't be read is shown as unreachable, never a failed RPC.
+func handleStatus(ctx context.Context, env *Env) (Result, error) {
+	var p statusParams
+	if err := decodeParams(env.Req.Params, &p); err != nil {
+		return Result{}, err
+	}
+	cfg := env.Cluster
+	reports, markerSnapshot, err := materialisationReports(ctx, cfg)
+	if err != nil {
+		return Result{}, err
+	}
+	if p.DB != "" {
+		if _, err := clusterOf(cfg, p.DB); err != nil && reports[p.DB].Phase == "" {
+			return Result{}, err
 		}
 	}
+	host, _ := statusHostRead(cfg.Server.DataRoot)
+	data := statusBase(cfg, host, reports)
+	data.Master = statusMasterRead(cfg)
+	// Never sample an incomplete target as an application database.
+	active := statusActiveCluster(cfg, reports)
 	snaps := readClusters(ctx, active, p.DB, true)
 	if len(cfg.Clusters) > 0 {
 		data.Poolers = statusPoolRead(ctx)
@@ -313,49 +387,9 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	st, _ := statusStateRead()
 	pending := statusPendingRead()
 	followers := readFollowers(ctx, diagnosticsViewWith(active, rs), p.DB)
-	type statusMeasurements struct {
-		cpu  *statusCPU
-		free *uint64
-	}
-	measurements := make([]statusMeasurements, len(snaps))
-	var wg sync.WaitGroup
-	for i, s := range snaps {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
-			defer cancel()
-			res, err := cfg.Resources(s.Spec)
-			if err == nil {
-				obs, generation, monotonic := statusCPURead(qctx, s.Spec)
-				measurements[i].cpu = cpuStatus(res, obs, generation, monotonic)
-			}
-			if s.Spec.IsFollower() && s.State == "running" {
-				measurements[i].free = statusDataFree(qctx, cfg, s.Spec, snapshotPG(s.Spec).Query, hostinfo.FreeBytes)
-			}
-		}()
-	}
-	wg.Wait()
-	for i, s := range snaps {
-		row := statusRow(cfg, s, rs, st, pending)
-		row.CPU, row.DataFreeBytes = measurements[i].cpu, measurements[i].free
-		if rs.IsAwaiting(s.Spec.Name) {
-			row.State, row.Error = stateAwaiting, "vaire db recover "+s.Spec.Name
-		}
-		if f, ok := followers[s.Spec.Name]; ok {
-			row.Follower = &f
-		}
-		if data.PGVersion == "" {
-			data.PGVersion = s.Sample.ServerVersion
-		}
-		data.Databases = append(data.Databases, row)
-	}
-	for name, report := range reports {
-		if p.DB != "" && p.DB != name {
-			continue
-		}
-		data.Databases = append(data.Databases, incompleteStatusRow(cfg, name, report))
-	}
+	measurements := measureStatusClusters(ctx, cfg, snaps)
+	data.Databases, data.PGVersion = statusDatabaseRows(cfg, snaps, measurements, rs, st, pending, followers)
+	data.Databases = appendIncompleteStatusRows(data.Databases, cfg, reports, p.DB)
 	if len(reports) > 0 {
 		sort.Slice(data.Databases, func(i, j int) bool { return data.Databases[i].Name < data.Databases[j].Name })
 	}

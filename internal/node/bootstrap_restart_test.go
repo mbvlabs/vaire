@@ -56,32 +56,22 @@ func TestBootstrapCompletedTargetPreservesRestartConfirmation(t *testing.T) {
 			}
 			owner := &bootstrapOwnership{Targets: map[string]bool{"app": completed}}
 			_, warnings, err := bootstrapDatabaseSteps(context.Background(), cfg, engine.Runtime{}, nil, catalog, run, spy, "", owner, func(target string) error {
-				if completed {
-					t.Fatal("completed ownership was reused")
-				}
+				reject(t, completed, "completed ownership was reused")
 				owner.Targets[target] = true
 				return nil
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			got, err := engine.LoadJournal(path)
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			if completed {
 				if spy.calls != 0 || !slices.Equal(got.RestartPending, []string{pending}) {
 					t.Fatalf("completed replay restarted or cleared pending work: calls=%d pending=%v", spy.calls, got.RestartPending)
 				}
-				if !slices.ContainsFunc(warnings, func(w output.Warning) bool { return w.Code == "restart_pending" }) {
-					t.Fatal("completed replay did not report the pending restart")
-				}
+				reject(t, !slices.ContainsFunc(warnings, func(w output.Warning) bool { return w.Code == "restart_pending" }), "completed replay did not report the pending restart")
 			} else if spy.calls != 1 || len(got.RestartPending) != 0 {
 				t.Fatalf("unfinished target lost provisioning authority: calls=%d pending=%v", spy.calls, got.RestartPending)
 			}
-			if slices.Contains(state.events, "grant") {
-				t.Fatal("installed access was widened")
-			}
+			reject(t, slices.Contains(state.events, "grant"), "installed access was widened")
 		})
 	}
 }

@@ -25,7 +25,7 @@ func bootstrapOwnershipFixture(t *testing.T) config.Cluster {
 	bootstrapStateDir = filepath.Join(root, "state")
 	bootstrapNodePath = filepath.Join(root, "node.toml")
 	bootstrapClusterPath = filepath.Join(root, "cluster.toml")
-	bootstrapExpectedUID = uint32(os.Geteuid()) //nolint:gosec // test fixture uses current owner
+	bootstrapExpectedUID = uint32(os.Geteuid())
 	bootstrapConfDir = func(name string) string { return filepath.Join(root, "postgres", name) }
 	bootstrapInstance = func() (string, error) {
 		raw, err := os.ReadFile(filepath.Join(bootstrapStateDir, "instance"))
@@ -46,9 +46,7 @@ func TestCompletedServerBootstrapRPCDoesNotAcquireAccessAuthority(t *testing.T) 
 	_ = bootstrapOwnershipFixture(t)
 	cfg := copyTestConfig(t)
 	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := bootstrapDir(true); err != nil {
 		t.Fatal(err)
 	}
@@ -58,19 +56,13 @@ func TestCompletedServerBootstrapRPCDoesNotAcquireAccessAuthority(t *testing.T) 
 	}
 	t.Cleanup(func() { bootstrapLoadNode = oldLoadNode })
 	params, err := json.Marshal(bootstrapParams{Phase: PhaseDatabase, ClusterTOML: string(raw), NodeName: "db1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	env := &Env{Req: rpc.Request{Method: "cluster.bootstrap", Confirm: cfg.Name(), OperationID: "new-request", Params: params}}
 	_, err = handleClusterBootstrap(context.Background(), env)
 	var cli *output.CLIError
-	if !errors.As(err, &cli) || cli.Code != output.CodePrecondition {
-		t.Fatalf("completed server acquired bootstrap access authority: %v", err)
-	}
+	rejectf(t, !errors.As(err, &cli) || cli.Code != output.CodePrecondition, "completed server acquired bootstrap access authority: %v", err)
 	details, _ := cli.Details.(map[string]any)
-	if details["reason"] != "bootstrap_ownership_unavailable" {
-		t.Fatalf("wrong refusal: %+v", cli)
-	}
+	rejectf(t, details["reason"] != "bootstrap_ownership_unavailable", "wrong refusal: %+v", cli)
 }
 
 func TestBootstrapOwnershipFreshResumeAndCompletion(t *testing.T) {
@@ -78,13 +70,9 @@ func TestBootstrapOwnershipFreshResumeAndCompletion(t *testing.T) {
 	if err := prepareBootstrapOwnership(cfg, "db1", "setup-1"); err != nil {
 		t.Fatal(err)
 	}
-	if masterbackup.Allowed("/var/lib/vaire/" + bootstrapManifestName) {
-		t.Fatal("node-local bootstrap authority entered master backup allowlist")
-	}
+	reject(t, masterbackup.Allowed("/var/lib/vaire/"+bootstrapManifestName), "node-local bootstrap authority entered master backup allowlist")
 	owner, err := bootstrapReadOwnership()
-	if err != nil || owner.Targets["app"] {
-		t.Fatalf("fresh manifest %+v: %v", owner, err)
-	}
+	rejectf(t, err != nil || owner.Targets["app"], "fresh manifest %+v: %v", owner, err)
 	if err := prepareBootstrapOwnership(cfg, "db1", "setup-1"); err != nil {
 		t.Fatalf("original setup cannot resume: %v", err)
 	}
@@ -96,21 +84,15 @@ func TestBootstrapOwnershipFreshResumeAndCompletion(t *testing.T) {
 	changed := cfg
 	changed.Clusters = slices.Clone(cfg.Clusters)
 	changed.Clusters[0].Size = "large"
-	if bootstrapValidateOwnership(owner, changed, "db1", "setup-1") == nil {
-		t.Fatal("changed target specification accepted")
-	}
+	reject(t, bootstrapValidateOwnership(owner, changed, "db1", "setup-1") == nil, "changed target specification accepted")
 	if err := bootstrapCompleteTarget(&owner, cfg, "db1", "setup-1", "app"); err != nil {
 		t.Fatal(err)
 	}
-	if !owner.Targets["app"] || bootstrapCompleteTarget(&owner, cfg, "db1", "setup-1", "app") == nil {
-		t.Fatal("completed target retained one-time ownership")
-	}
+	reject(t, !owner.Targets["app"] || bootstrapCompleteTarget(&owner, cfg, "db1", "setup-1", "app") == nil, "completed target retained one-time ownership")
 	if err := os.WriteFile(filepath.Join(bootstrapStateDir, "instance"), []byte("foreign"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if bootstrapValidateOwnership(owner, cfg, "db1", "setup-1") == nil {
-		t.Fatal("foreign instance accepted")
-	}
+	reject(t, bootstrapValidateOwnership(owner, cfg, "db1", "setup-1") == nil, "foreign instance accepted")
 }
 
 func TestBootstrapOwnershipRefusesExistingAndCorrupt(t *testing.T) {
@@ -154,9 +136,7 @@ func TestBootstrapOwnershipRejectsForeignTargetAndResumesOriginalInstance(t *tes
 		t.Fatal(err)
 	}
 	owner, err := bootstrapReadOwnership()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := os.Remove(filepath.Join(bootstrapStateDir, "instance")); err != nil {
 		t.Fatal(err)
 	}
@@ -167,9 +147,7 @@ func TestBootstrapOwnershipRejectsForeignTargetAndResumesOriginalInstance(t *tes
 		t.Fatalf("original pre-exposure setup did not resume: %v", err)
 	}
 	instance, err := bootstrapInstance()
-	if err != nil || instance != owner.Instance {
-		t.Fatalf("resume changed original instance: %q %v", instance, err)
-	}
+	rejectf(t, err != nil || instance != owner.Instance, "resume changed original instance: %q %v", instance, err)
 	if err := bootstrapCompleteTarget(&owner, cfg, "db1", "setup-1", "app"); err != nil {
 		t.Fatal(err)
 	}
@@ -183,16 +161,14 @@ func TestBootstrapOwnershipRejectsForeignTargetAndResumesOriginalInstance(t *tes
 
 func TestBootstrapStateDirectoryIsNotRepaired(t *testing.T) {
 	cfg := bootstrapOwnershipFixture(t)
-	if err := os.Mkdir(bootstrapStateDir, 0o755); err != nil { //nolint:gosec // Test the refusal of an unsafe directory.
+	if err := os.Mkdir(bootstrapStateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := prepareBootstrapOwnership(cfg, "db1", "setup-1"); err == nil {
 		t.Fatal("unsafe state directory accepted")
 	}
 	info, err := os.Stat(bootstrapStateDir)
-	if err != nil || info.Mode().Perm() != 0o755 {
-		t.Fatalf("existing state directory was modified: %v %v", info, err)
-	}
+	rejectf(t, err != nil || info.Mode().Perm() != 0o755, "existing state directory was modified: %v %v", info, err)
 }
 
 func TestCompletedBootstrapTargetCannotReauthorizeDrift(t *testing.T) {
@@ -209,9 +185,7 @@ func TestCompletedBootstrapTargetCannotReauthorizeDrift(t *testing.T) {
 	t.Cleanup(func() { engine.ClusterView = oldView })
 	path := filepath.Join(t.TempDir(), "journal")
 	runner := func(ctx context.Context, steps []engine.Step, cfg config.Cluster, rt engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
-		if len(opts.InternalAccess) != 0 {
-			t.Fatalf("completed target received internal access: %+v", opts.InternalAccess)
-		}
+		rejectf(t, len(opts.InternalAccess) != 0, "completed target received internal access: %+v", opts.InternalAccess)
 		opts.JournalPath = path
 		return engine.Apply(ctx, steps, cfg, rt, opts)
 	}
@@ -219,9 +193,7 @@ func TestCompletedBootstrapTargetCannotReauthorizeDrift(t *testing.T) {
 		t.Fatal("completed target was marked again")
 		return nil
 	})
-	if err == nil || slices.Contains(state.events, "grant") {
-		t.Fatalf("completed server widened drift: events %v, err %v", state.events, err)
-	}
+	rejectf(t, err == nil || slices.Contains(state.events, "grant"), "completed server widened drift: events %v, err %v", state.events, err)
 }
 
 func TestBootstrapCompletionFailurePreventsSharedRouting(t *testing.T) {
@@ -243,7 +215,5 @@ func TestBootstrapCompletionFailurePreventsSharedRouting(t *testing.T) {
 	}
 	_, _, err := bootstrapDatabaseSteps(context.Background(), cfg, engine.Runtime{}, nil, catalog, runner, nil, "", owner,
 		func(string) error { return errors.New("cannot persist completion") })
-	if err == nil || slices.Contains(selected, "pgbouncer-v1") {
-		t.Fatalf("shared routing ran after failed completion: %v, %v", selected, err)
-	}
+	rejectf(t, err == nil || slices.Contains(selected, "pgbouncer-v1"), "shared routing ran after failed completion: %v, %v", selected, err)
 }

@@ -102,30 +102,22 @@ func TestCPUOnlyRealEnginePreservesPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := handleDBResize(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := result.Data.(map[string]any)["apply"].(engine.ApplyData)
+	reject(t, err != nil, err)
+	got := mustAs[engine.ApplyData](t, mustAs[map[string]any](t, result.Data)["apply"])
 	if runs != 1 || !slices.Equal(got.RestartPending, pending[:1]) || !slices.Equal(got.ConfirmTokens, []string{"app/restart"}) ||
 		len(result.Warnings) != 1 || result.Warnings[0].Code != "restart_pending" {
 		t.Fatalf("runs %d result %+v warnings %+v", runs, got, result.Warnings)
 	}
 	current, err := engine.LoadJournal(path)
-	if err != nil || !slices.Equal(current.RestartPending, pending) {
-		t.Fatalf("pending %+v error %v", current.RestartPending, err)
-	}
+	rejectf(t, err != nil || !slices.Equal(current.RestartPending, pending), "pending %+v error %v", current.RestartPending, err)
 	if len(commands) != 1 || strings.Contains(commands[0], "Memory") || strings.Contains(commands[0], "IOWeight") ||
 		strings.Contains(commands[0], "daemon-reload") || strings.Contains(commands[0], " start ") {
 		t.Fatal(commands)
 	}
-	gotFull, err := os.ReadFile(full) //nolint:gosec // Test-owned temporary file.
-	if err != nil || !reflect.DeepEqual(gotFull, fullBytes) {
-		t.Fatal("full resource file changed", err)
-	}
+	gotFull, err := os.ReadFile(full)
+	reject(t, err != nil || !reflect.DeepEqual(gotFull, fullBytes), "full resource file changed", err)
 	saved, _, err := store.Load()
-	if err != nil || saved.Clusters[0].CPUMode != "normal" || saved.Clusters[0].CPUQuota != "" {
-		t.Fatal(saved.Clusters, err)
-	}
+	reject(t, err != nil || saved.Clusters[0].CPUMode != "normal" || saved.Clusters[0].CPUQuota != "", saved.Clusters, err)
 }
 
 func TestCPUOnlyAdmissionFailureNoWrites(t *testing.T) {
@@ -155,16 +147,12 @@ func testCPUOnlyAdmissionFailure(t *testing.T, reason string) {
 		return engine.ApplyData{}, nil, nil
 	}
 	_, before, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if _, err := handleDBResize(context.Background(), env); err == nil || reasonOfCPUError(err) != reason {
 		t.Fatal("preflight accepted or lost reason", err)
 	}
 	_, after, err := store.Load()
-	if err != nil || !reflect.DeepEqual(before, after) || invalidates != 0 || applies != 0 {
-		t.Fatal("mutation before admission", err, invalidates, applies)
-	}
+	reject(t, err != nil || !reflect.DeepEqual(before, after) || invalidates != 0 || applies != 0, "mutation before admission", err, invalidates, applies)
 }
 
 func reasonOfCPUError(err error) string {
@@ -201,27 +189,19 @@ func TestCPUOnlyInvalidationSurvivesSaveFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, before, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if _, err := handleDBResize(context.Background(), env); err == nil || !strings.Contains(err.Error(), "simulated crash") {
 		t.Fatal(err)
 	}
 	_, after, err := store.Load()
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatal("failed save changed config", err)
-	}
+	reject(t, err != nil || !reflect.DeepEqual(before, after), "failed save changed config", err)
 	got, err := engine.LoadJournal(path)
-	if err != nil || !slices.Equal(got.RestartPending, pending) {
-		t.Fatal(got, err)
-	}
+	reject(t, err != nil || !slices.Equal(got.RestartPending, pending), got, err)
 	if _, exists := got.Steps[id]; exists {
 		t.Fatal("completed proof survived the save gap")
 	}
 	data, _, err := engine.Apply(context.Background(), []engine.Step{step}, cfg, engine.Runtime{}, engine.Options{JournalPath: path, LeaveRestartsPending: true})
-	if err != nil || data.Applied != 1 || stepRuns != 1 {
-		t.Fatalf("retry incorrectly skipped: %+v %v", data, err)
-	}
+	rejectf(t, err != nil || data.Applied != 1 || stepRuns != 1, "retry incorrectly skipped: %+v %v", data, err)
 }
 
 func TestCPUOnlySameValueDryRunIsForcedAndReadOnly(t *testing.T) {
@@ -240,14 +220,10 @@ func TestCPUOnlySameValueDryRunIsForcedAndReadOnly(t *testing.T) {
 	invalidates := 0
 	invalidateCPUCompletion = func(string, string) error { invalidates++; return nil }
 	_, before, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	result, err := handleDBResize(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := result.Data.(map[string]any)["plan"].(engine.PlanData)
+	reject(t, err != nil, err)
+	plan := mustAs[engine.PlanData](t, mustAs[map[string]any](t, result.Data)["plan"])
 	_, after, err := store.Load()
 	if err != nil || !reflect.DeepEqual(before, after) || invalidates != 0 || plan.WouldApply != 1 ||
 		len(plan.Steps) != 1 || plan.Steps[0].Reason != "cpu_only_explicit" {
@@ -297,31 +273,21 @@ func TestFullResizeSameCPUPreviewMatchesExecution(t *testing.T) {
 			if err := journal.Save(path); err != nil {
 				t.Fatal(err)
 			}
-			before, err := os.ReadFile(path) //nolint:gosec // Test-owned journal.
-			if err != nil {
-				t.Fatal(err)
-			}
+			before, err := os.ReadFile(path)
+			reject(t, err != nil, err)
 			loadedBefore, configBefore, err := store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			preview, err := handleDBResize(context.Background(), env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			plan := preview.Data.(map[string]any)["plan"].(engine.PlanData)
+			reject(t, err != nil, err)
+			plan := mustAs[engine.PlanData](t, mustAs[map[string]any](t, preview.Data)["plan"])
 			want := "skip"
 			if tc.forced {
 				want = "apply"
 			}
-			if len(plan.Steps) != 1 || plan.Steps[0].Action != want {
-				t.Fatalf("preview = %+v, want %s", plan, want)
-			}
-			after, err := os.ReadFile(path) //nolint:gosec // Test-owned journal.
+			rejectf(t, len(plan.Steps) != 1 || plan.Steps[0].Action != want, "preview = %+v, want %s", plan, want)
+			after, err := os.ReadFile(path)
 			_, configAfter, loadErr := store.Load()
-			if err != nil || loadErr != nil || !reflect.DeepEqual(before, after) || !reflect.DeepEqual(configBefore, configAfter) {
-				t.Fatalf("preview changed journal or configuration: %v %v", err, loadErr)
-			}
+			rejectf(t, err != nil || loadErr != nil || !reflect.DeepEqual(before, after) || !reflect.DeepEqual(configBefore, configAfter), "preview changed journal or configuration: %v %v", err, loadErr)
 			applyResizeStep = func(ctx context.Context, _ []engine.Step, cfg config.Cluster, rt engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 				if opts.DB == "" {
 					return engine.ApplyData{}, nil, nil
@@ -331,23 +297,15 @@ func TestFullResizeSameCPUPreviewMatchesExecution(t *testing.T) {
 			}
 			env.Req.DryRun = false
 			result, err := handleDBResize(context.Background(), env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			applied := result.Data.(map[string]any)["apply"].(engine.ApplyData)
-			if len(applied.Steps) != 1 || (runs == 1) != tc.forced {
-				t.Fatalf("execution runs=%d result=%+v", runs, applied)
-			}
+			reject(t, err != nil, err)
+			applied := mustAs[engine.ApplyData](t, mustAs[map[string]any](t, result.Data)["apply"])
+			rejectf(t, len(applied.Steps) != 1 || (runs == 1) != tc.forced, "execution runs=%d result=%+v", runs, applied)
 			saved, _, err := store.Load()
 			expected := loadedBefore.Clusters[0]
 			expected.Size = tc.size
-			if err != nil || !reflect.DeepEqual(saved.Clusters[0], expected) {
-				t.Fatalf("unrelated fields or size changed: %+v %v", saved.Clusters, err)
-			}
+			rejectf(t, err != nil || !reflect.DeepEqual(saved.Clusters[0], expected), "unrelated fields or size changed: %+v %v", saved.Clusters, err)
 			current, err := engine.LoadJournal(path)
-			if err != nil || !slices.Equal(current.RestartPending, journal.RestartPending) {
-				t.Fatalf("pending restarts changed: %+v %v", current, err)
-			}
+			rejectf(t, err != nil || !slices.Equal(current.RestartPending, journal.RestartPending), "pending restarts changed: %+v %v", current, err)
 		})
 	}
 }
@@ -381,20 +339,14 @@ func TestConfigCPUProofInvalidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			revision, err := store.Revision()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			_, before, err := store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			params := map[string]any{"base_revision": revision}
 			if tc.full {
 				cfg.Clusters[0].CPUQuota = ""
 				raw, err := cfg.Encode()
-				if err != nil {
-					t.Fatal(err)
-				}
+				reject(t, err != nil, err)
 				params["toml"] = string(raw)
 			} else {
 				params["set"] = map[string]string{"clusters.app.cpu_quota": "150%"}
@@ -405,13 +357,9 @@ func TestConfigCPUProofInvalidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			after, err := engine.LoadJournal(path)
-			if err != nil || !slices.Equal(after.RestartPending, pending) {
-				t.Fatal(after, err)
-			}
+			reject(t, err != nil || !slices.Equal(after.RestartPending, pending), after, err)
 			_, exists := after.Steps[id]
-			if exists != tc.dry {
-				t.Fatalf("proof exists=%v for dry=%v", exists, tc.dry)
-			}
+			rejectf(t, exists != tc.dry, "proof exists=%v for dry=%v", exists, tc.dry)
 			if tc.dry {
 				_, raw, err := store.Load()
 				if err != nil || !reflect.DeepEqual(before, raw) {

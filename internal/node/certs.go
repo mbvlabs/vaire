@@ -68,7 +68,7 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	selfSigned := cfg.TLS.Mode == "self-signed"
 	reason := renewReason(readCert(steps.TLSCertPath), hostname, selfSigned)
 	if reason == "" {
-		notAfter := certNotAfter(steps.TLSCertPath)
+		notAfter := certNotAfter()
 		logLine(report, "certs-renew", "the certificate for "+hostname+" is current until "+notAfter+"; nothing to renew")
 		return map[string]any{"changed": false, "hostname": hostname, "not_after": notAfter}, nil
 	}
@@ -104,7 +104,7 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	for _, c := range cfg.Clusters {
 		_ = runQuiet(ctx, "pg_ctlcluster", "18", c.Name, "reload")
 	}
-	return map[string]any{"changed": true, "hostname": hostname, "not_after": certNotAfter(steps.TLSCertPath)}, nil
+	return map[string]any{"changed": true, "hostname": hostname, "not_after": certNotAfter()}, nil
 }
 
 // renewReason says why cert needs replacing, or "" when it is current.
@@ -262,7 +262,7 @@ func probeHTTP(ctx context.Context, domain string) (reached bool, err error) {
 		return false, err
 	}
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req) //nolint:gosec // G704: the configured domain, probed for our own token.
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("%s does not reach this server over HTTP: %w", domain, err)
 	}
@@ -313,7 +313,7 @@ func selfSignedCert(domain string) (chainPEM, keyPEM []byte, err error) {
 
 // loadOrCreateKey reads a PEM EC key, or creates one (0600).
 func loadOrCreateKey(path string) (crypto.Signer, error) {
-	if raw, err := os.ReadFile(path); err == nil { //nolint:gosec // G304: fixed key path.
+	if raw, err := os.ReadFile(path); err == nil {
 		block, _ := pem.Decode(raw)
 		if block == nil {
 			return nil, fmt.Errorf("%s is not PEM", path)
@@ -347,7 +347,7 @@ func encodeKey(key *ecdsa.PrivateKey) ([]byte, error) {
 }
 
 func runQuiet(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed reload commands.
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 	return cmd.Run()
 }

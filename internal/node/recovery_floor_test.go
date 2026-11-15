@@ -24,56 +24,84 @@ func TestConfigSetFollowerAllRecoveryFloors(t *testing.T) {
 		for _, full := range []bool{false, true} {
 			for _, dry := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/full=%v/dry=%v", setting, full, dry), func(t *testing.T) {
-					cfg := followerLifecycleCfg(t, "app_follower")
-					cfg.Clusters[0].Settings = map[string]string{setting: "100"}
-					cfg.Clusters[1].Settings = map[string]string{setting: "200"}
-					env, store := resizeFixture(t, cfg, "small", dry)
-					oldStore := configSetStore
-					configSetStore = func() state.FileStore { return store }
-					t.Cleanup(func() { configSetStore = oldStore })
-					rev, err := store.Revision()
-					if err != nil {
-						t.Fatal(err)
-					}
-					_, before, err := store.Load()
-					if err != nil {
-						t.Fatal(err)
-					}
-					params := map[string]any{"base_revision": rev}
-					if full {
-						cfg.Clusters[1].Settings = map[string]string{setting: "150"}
-						raw, err := cfg.Encode()
-						if err != nil {
-							t.Fatal(err)
-						}
-						params["toml"] = string(raw)
-					} else {
-						params["set"] = map[string]string{"clusters.app_follower.settings." + setting: "150"}
-					}
-					env.Req = request("config.set", params)
-					env.Req.DryRun = dry
-					_, err = handleConfigSet(context.Background(), env)
-					if err == nil || reason(t, err) != "follower_recovery_floor_decrease" {
-						t.Fatalf("got %v", err)
-					}
-					var cli *output.CLIError
-					if !errors.As(err, &cli) || cli.Code != output.CodePrecondition || cli.ExitCode != output.ExitPrecondition {
-						t.Fatalf("wrong error type: %v", err)
-					}
-					details, _ := cli.Details.(map[string]any)
-					drops, _ := details["settings"].([]recoveryFloorDecrease)
-					if details["database"] != "app_follower" || details["source"] != "app" ||
-						!slices.Contains(drops, recoveryFloorDecrease{Setting: setting, Before: 200, After: 150}) {
-						t.Fatalf("wrong details: %+v", details)
-					}
-					_, after, err := store.Load()
-					if err != nil || string(before) != string(after) {
-						t.Fatalf("saved on refusal: %v", err)
-					}
+					runFollowerFloorCase(t, setting, full, dry)
 				})
 			}
 		}
 	}
+}
+
+func runSourceFloorCase(t *testing.T, setting string, full, dry bool) {
+	t.Helper()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	cfg.Clusters[0].Settings = map[string]string{setting: "200"}
+	cfg.Clusters[1].Settings = map[string]string{setting: "300"}
+	env, store := resizeFixture(t, cfg, "small", dry)
+	oldStore := configSetStore
+	configSetStore = func() state.FileStore { return store }
+	t.Cleanup(func() { configSetStore = oldStore })
+	rev, err := store.Revision()
+	reject(t, err != nil, err)
+	_, before, err := store.Load()
+	reject(t, err != nil, err)
+	params := map[string]any{"base_revision": rev}
+	if full {
+		cfg.Clusters[0].Settings = map[string]string{setting: "150"}
+		raw, err := cfg.Encode()
+		reject(t, err != nil, err)
+		params["toml"] = string(raw)
+	} else {
+		params["set"] = map[string]string{"clusters.app.settings." + setting: "150"}
+	}
+	env.Req = request("config.set", params)
+	env.Req.DryRun = dry
+	_, err = handleConfigSet(context.Background(), env)
+	rejectf(t, err == nil || reason(t, err) != "has_followers", "got %v", err)
+	var cli *output.CLIError
+	rejectf(t, !errors.As(err, &cli) || cli.Code != output.CodePrecondition || cli.ExitCode != output.ExitPrecondition, "wrong error type: %v", err)
+	details, _ := cli.Details.(map[string]any)
+	drops, _ := details["settings"].([]recoveryFloorDecrease)
+	names, _ := details["followers"].([]string)
+	rejectf(t, details["database"] != "app" || !slices.Contains(names, "app_follower") ||
+		!slices.Contains(drops, recoveryFloorDecrease{Setting: setting, Before: 200, After: 150}), "wrong details: %+v", details)
+	_, after, err := store.Load()
+	rejectf(t, err != nil || string(before) != string(after), "saved on refusal: %v", err)
+}
+
+func runFollowerFloorCase(t *testing.T, setting string, full, dry bool) {
+	t.Helper()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	cfg.Clusters[0].Settings = map[string]string{setting: "100"}
+	cfg.Clusters[1].Settings = map[string]string{setting: "200"}
+	env, store := resizeFixture(t, cfg, "small", dry)
+	oldStore := configSetStore
+	configSetStore = func() state.FileStore { return store }
+	t.Cleanup(func() { configSetStore = oldStore })
+	rev, err := store.Revision()
+	reject(t, err != nil, err)
+	_, before, err := store.Load()
+	reject(t, err != nil, err)
+	params := map[string]any{"base_revision": rev}
+	if full {
+		cfg.Clusters[1].Settings = map[string]string{setting: "150"}
+		raw, err := cfg.Encode()
+		reject(t, err != nil, err)
+		params["toml"] = string(raw)
+	} else {
+		params["set"] = map[string]string{"clusters.app_follower.settings." + setting: "150"}
+	}
+	env.Req = request("config.set", params)
+	env.Req.DryRun = dry
+	_, err = handleConfigSet(context.Background(), env)
+	rejectf(t, err == nil || reason(t, err) != "follower_recovery_floor_decrease", "got %v", err)
+	var cli *output.CLIError
+	rejectf(t, !errors.As(err, &cli) || cli.Code != output.CodePrecondition || cli.ExitCode != output.ExitPrecondition, "wrong error type: %v", err)
+	details, _ := cli.Details.(map[string]any)
+	drops, _ := details["settings"].([]recoveryFloorDecrease)
+	rejectf(t, details["database"] != "app_follower" || details["source"] != "app" ||
+		!slices.Contains(drops, recoveryFloorDecrease{Setting: setting, Before: 200, After: 150}), "wrong details: %+v", details)
+	_, after, err := store.Load()
+	rejectf(t, err != nil || string(before) != string(after), "saved on refusal: %v", err)
 }
 
 func TestConfigSetSourceAllRecoveryFloorsMasked(t *testing.T) {
@@ -81,53 +109,7 @@ func TestConfigSetSourceAllRecoveryFloorsMasked(t *testing.T) {
 		for _, full := range []bool{false, true} {
 			for _, dry := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/full=%v/dry=%v", setting, full, dry), func(t *testing.T) {
-					cfg := followerLifecycleCfg(t, "app_follower")
-					cfg.Clusters[0].Settings = map[string]string{setting: "200"}
-					cfg.Clusters[1].Settings = map[string]string{setting: "300"}
-					env, store := resizeFixture(t, cfg, "small", dry)
-					oldStore := configSetStore
-					configSetStore = func() state.FileStore { return store }
-					t.Cleanup(func() { configSetStore = oldStore })
-					rev, err := store.Revision()
-					if err != nil {
-						t.Fatal(err)
-					}
-					_, before, err := store.Load()
-					if err != nil {
-						t.Fatal(err)
-					}
-					params := map[string]any{"base_revision": rev}
-					if full {
-						cfg.Clusters[0].Settings = map[string]string{setting: "150"}
-						raw, err := cfg.Encode()
-						if err != nil {
-							t.Fatal(err)
-						}
-						params["toml"] = string(raw)
-					} else {
-						params["set"] = map[string]string{"clusters.app.settings." + setting: "150"}
-					}
-					env.Req = request("config.set", params)
-					env.Req.DryRun = dry
-					_, err = handleConfigSet(context.Background(), env)
-					if err == nil || reason(t, err) != "has_followers" {
-						t.Fatalf("got %v", err)
-					}
-					var cli *output.CLIError
-					if !errors.As(err, &cli) || cli.Code != output.CodePrecondition || cli.ExitCode != output.ExitPrecondition {
-						t.Fatalf("wrong error type: %v", err)
-					}
-					details, _ := cli.Details.(map[string]any)
-					drops, _ := details["settings"].([]recoveryFloorDecrease)
-					names, _ := details["followers"].([]string)
-					if details["database"] != "app" || !slices.Contains(names, "app_follower") ||
-						!slices.Contains(drops, recoveryFloorDecrease{Setting: setting, Before: 200, After: 150}) {
-						t.Fatalf("wrong details: %+v", details)
-					}
-					_, after, err := store.Load()
-					if err != nil || string(before) != string(after) {
-						t.Fatalf("saved on refusal: %v", err)
-					}
+					runSourceFloorCase(t, setting, full, dry)
 				})
 			}
 		}
@@ -153,13 +135,9 @@ func TestConfigSetUsesPostgresFloorParsing(t *testing.T) {
 			configSetStore = func() state.FileStore { return store }
 			t.Cleanup(func() { configSetStore = oldStore })
 			revision, err := store.Revision()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			_, before, err := store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			env.Req = request("config.set", map[string]any{
 				"base_revision": revision,
 				"set":           map[string]string{"postgres.settings.max_worker_processes": tc.after},
@@ -168,18 +146,12 @@ func TestConfigSetUsesPostgresFloorParsing(t *testing.T) {
 			_, err = handleConfigSet(context.Background(), env)
 			switch tc.want {
 			case "parse":
-				if err == nil || !strings.Contains(err.Error(), "max_worker_processes") {
-					t.Fatalf("expected invalid floor error, got %v", err)
-				}
+				rejectf(t, err == nil || !strings.Contains(err.Error(), "max_worker_processes"), "expected invalid floor error, got %v", err)
 			default:
-				if err == nil || reason(t, err) != tc.want {
-					t.Fatalf("got %v, want %s", err, tc.want)
-				}
+				rejectf(t, err == nil || reason(t, err) != tc.want, "got %v, want %s", err, tc.want)
 			}
 			_, after, err := store.Load()
-			if err != nil || string(before) != string(after) {
-				t.Fatalf("dry run saved configuration: %v", err)
-			}
+			rejectf(t, err != nil || string(before) != string(after), "dry run saved configuration: %v", err)
 		})
 	}
 	old := followerCfg()
@@ -215,24 +187,22 @@ func TestRecoveryFloorMemoryAndOverrides(t *testing.T) {
 			next.Clusters = append([]config.ClusterSpec(nil), old.Clusters...)
 			next.Clusters[0] = tc.after
 			err := guardRecoveryFloorChanges(old, next, host)
-			if tc.want == "" && err != nil {
-				t.Fatalf("unexpected refusal: %v", err)
-			}
-			if tc.want != "" && (err == nil || reason(t, err) != tc.want) {
-				t.Fatalf("got %v, want %s", err, tc.want)
-			}
+			rejectf(t, tc.want == "" && err != nil, "unexpected refusal: %v", err)
+			rejectf(t, tc.want != "" && (err == nil || reason(t, err) != tc.want), "got %v, want %s", err, tc.want)
 		})
 	}
 }
 
+type resizeConfirmCase struct {
+	name              string
+	tokens            []string
+	deferRestart      bool
+	source, follower  bool
+	failFollowerFirst bool
+}
+
 func TestResizeConfirmationIsolationAndRetry(t *testing.T) {
-	for _, tc := range []struct {
-		name              string
-		tokens            []string
-		deferRestart      bool
-		source, follower  bool
-		failFollowerFirst bool
-	}{
+	for _, tc := range []resizeConfirmCase{
 		{"source-only", []string{"app/restart"}, false, true, false, false},
 		{"follower-only", []string{"app_follower/restart"}, false, false, true, false},
 		{"both", []string{"app/restart", "app_follower/restart"}, false, true, true, false},
@@ -240,58 +210,54 @@ func TestResizeConfirmationIsolationAndRetry(t *testing.T) {
 		{"failed-follower-write-retry", []string{"app/restart", "app_follower/restart"}, false, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := followerLifecycleCfg(t, "app_follower")
-			cfg.Clusters[0].Size = "small"
-			env, _ := resizeFixture(t, cfg, "medium", false)
-			env.Req.Confirms = tc.tokens
-			if tc.deferRestart {
-				env.Req = request("db.resize", map[string]any{"name": "app", "size": "medium", "defer_restart": true})
-				env.Req.Confirms = tc.tokens
-			}
-			fixedResizeHost(t, hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
-				hostinfo.Memory{CommitLimitMiB: 16384, CommittedMiB: 1024, AvailableMiB: 8192, HugePageSizeKiB: 2048}, true)
-			oldResize, oldFollower := applyResizeStep, applyFollowerStep
-			t.Cleanup(func() { applyResizeStep, applyFollowerStep = oldResize, oldFollower })
-			var calls []string
-			fail := tc.failFollowerFirst
-			applyResizeStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
-				if opts.DB == "" {
-					calls = append(calls, "kernel")
-				} else {
-					calls = append(calls, "source")
-					if opts.Confirm.Covers("app") != tc.source || opts.Confirm.Covers("app_follower") != tc.follower {
-						t.Errorf("source confirmation: %+v", opts.Confirm)
-					}
-				}
-				return engine.ApplyData{}, nil, nil
-			}
-			applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
-				calls = append(calls, "follower")
-				if opts.DB != "app_follower" || !slices.Equal(opts.Only, []string{steps.ConfigStepID("app_follower")}) ||
-					opts.Confirm.Covers("app") != tc.source || opts.Confirm.Covers("app_follower") != tc.follower {
-					t.Errorf("follower options: %+v", opts)
-				}
-				if fail {
-					fail = false
-					return engine.ApplyData{}, nil, errors.New("follower configuration write failed")
-				}
-				return engine.ApplyData{}, nil, nil
-			}
-			_, err := handleDBResize(context.Background(), env)
-			if tc.failFollowerFirst {
-				if err == nil || !slices.Equal(calls, []string{"kernel", "follower"}) {
-					t.Fatalf("first attempt: calls %v, err %v", calls, err)
-				}
-				calls = nil
-				_, err = handleDBResize(context.Background(), env)
-			}
-			if err != nil || !slices.Equal(calls, []string{"kernel", "follower", "source"}) {
-				t.Fatalf("final attempt: calls %v, err %v", calls, err)
-			}
+			runResizeConfirmCase(t, tc)
 		})
 	}
 }
 
+func runResizeConfirmCase(t *testing.T, tc resizeConfirmCase) {
+	t.Helper()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	cfg.Clusters[0].Size = "small"
+	env, _ := resizeFixture(t, cfg, "medium", false)
+	env.Req.Confirms = tc.tokens
+	if tc.deferRestart {
+		env.Req = request("db.resize", map[string]any{"name": "app", "size": "medium", "defer_restart": true})
+		env.Req.Confirms = tc.tokens
+	}
+	fixedResizeHost(t, hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
+		hostinfo.Memory{CommitLimitMiB: 16384, CommittedMiB: 1024, AvailableMiB: 8192, HugePageSizeKiB: 2048}, true)
+	oldResize, oldFollower := applyResizeStep, applyFollowerStep
+	t.Cleanup(func() { applyResizeStep, applyFollowerStep = oldResize, oldFollower })
+	var calls []string
+	fail := tc.failFollowerFirst
+	applyResizeStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+		if opts.DB == "" {
+			calls = append(calls, "kernel")
+		} else {
+			calls = append(calls, "source")
+			rejectf(t, opts.Confirm.Covers("app") != tc.source || opts.Confirm.Covers("app_follower") != tc.follower, "source confirmation: %+v", opts.Confirm)
+		}
+		return engine.ApplyData{}, nil, nil
+	}
+	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+		calls = append(calls, "follower")
+		rejectf(t, opts.DB != "app_follower" || !slices.Equal(opts.Only, []string{steps.ConfigStepID("app_follower")}) ||
+			opts.Confirm.Covers("app") != tc.source || opts.Confirm.Covers("app_follower") != tc.follower, "follower options: %+v", opts)
+		if fail {
+			fail = false
+			return engine.ApplyData{}, nil, errors.New("follower configuration write failed")
+		}
+		return engine.ApplyData{}, nil, nil
+	}
+	_, err := handleDBResize(context.Background(), env)
+	if tc.failFollowerFirst {
+		rejectf(t, err == nil || !slices.Equal(calls, []string{"kernel", "follower"}), "first attempt: calls %v, err %v", calls, err)
+		calls = nil
+		_, err = handleDBResize(context.Background(), env)
+	}
+	rejectf(t, err != nil || !slices.Equal(calls, []string{"kernel", "follower", "source"}), "final attempt: calls %v, err %v", calls, err)
+}
 func TestConfigSetBatchFloorOverrides(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -314,22 +280,16 @@ func TestConfigSetBatchFloorOverrides(t *testing.T) {
 					configSetStore = func() state.FileStore { return store }
 					t.Cleanup(func() { configSetStore = oldStore })
 					rev, err := store.Revision()
-					if err != nil {
-						t.Fatal(err)
-					}
+					reject(t, err != nil, err)
 					_, before, err := store.Load()
-					if err != nil {
-						t.Fatal(err)
-					}
+					reject(t, err != nil, err)
 					params := map[string]any{"base_revision": rev}
 					if full {
 						cfg.Postgres.Settings = map[string]string{"max_worker_processes": "100"}
 						cfg.Clusters[0].Settings = map[string]string{"max_worker_processes": tc.sourceAfter}
 						cfg.Clusters[1].Settings = map[string]string{"max_worker_processes": tc.followAfter}
 						raw, err := cfg.Encode()
-						if err != nil {
-							t.Fatal(err)
-						}
+						reject(t, err != nil, err)
 						params["toml"] = string(raw)
 					} else {
 						params["set"] = map[string]string{
@@ -341,13 +301,9 @@ func TestConfigSetBatchFloorOverrides(t *testing.T) {
 					env.Req = request("config.set", params)
 					env.Req.DryRun = dry
 					_, err = handleConfigSet(context.Background(), env)
-					if err == nil || reason(t, err) != tc.want {
-						t.Fatalf("full=%v dry=%v: %v, want %s", full, dry, err, tc.want)
-					}
+					rejectf(t, err == nil || reason(t, err) != tc.want, "full=%v dry=%v: %v, want %s", full, dry, err, tc.want)
 					_, after, err := store.Load()
-					if err != nil || string(before) != string(after) {
-						t.Fatalf("saved on refusal, err %v", err)
-					}
+					rejectf(t, err != nil || string(before) != string(after), "saved on refusal, err %v", err)
 				})
 			}
 		}
@@ -379,28 +335,18 @@ func TestFullConfigRemovalDoesNotPermitSourceShrink(t *testing.T) {
 	configSetStore = func() state.FileStore { return store }
 	t.Cleanup(func() { configSetStore = oldStore })
 	rev, err := store.Revision()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	_, before, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	cfg.Clusters = append([]config.ClusterSpec(nil), cfg.Clusters[:1]...)
 	cfg.Clusters[0].Size = "small"
 	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	env.Req = request("config.set", map[string]any{"base_revision": rev, "toml": string(raw)})
 	_, err = handleConfigSet(context.Background(), env)
-	if err == nil || reason(t, err) != "has_followers" {
-		t.Fatalf("removed follower masked source shrink: %v", err)
-	}
+	rejectf(t, err == nil || reason(t, err) != "has_followers", "removed follower masked source shrink: %v", err)
 	_, after, err := store.Load()
-	if err != nil || string(before) != string(after) {
-		t.Fatalf("saved on refusal: %v", err)
-	}
+	rejectf(t, err != nil || string(before) != string(after), "saved on refusal: %v", err)
 }
 
 func TestGlobalDefaultSizeChangesSourceFloor(t *testing.T) {
@@ -412,9 +358,7 @@ func TestGlobalDefaultSizeChangesSourceFloor(t *testing.T) {
 	next := old
 	next.Postgres.DefaultSize = "small"
 	err := guardRecoveryFloorChanges(old, next, host)
-	if err == nil || reason(t, err) != "has_followers" {
-		t.Fatalf("global default shrink masked by follower: %v", err)
-	}
+	rejectf(t, err == nil || reason(t, err) != "has_followers", "global default shrink masked by follower: %v", err)
 	next.Postgres.DefaultSize = "large"
 	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
 		t.Fatalf("global default growth: %v", err)
@@ -433,20 +377,14 @@ func TestConfigSetGlobalDefaultSizeRefused(t *testing.T) {
 				configSetStore = func() state.FileStore { return store }
 				t.Cleanup(func() { configSetStore = oldStore })
 				revision, err := store.Revision()
-				if err != nil {
-					t.Fatal(err)
-				}
+				reject(t, err != nil, err)
 				_, before, err := store.Load()
-				if err != nil {
-					t.Fatal(err)
-				}
+				reject(t, err != nil, err)
 				params := map[string]any{"base_revision": revision}
 				if full {
 					cfg.Postgres.DefaultSize = "small"
 					raw, err := cfg.Encode()
-					if err != nil {
-						t.Fatal(err)
-					}
+					reject(t, err != nil, err)
 					params["toml"] = string(raw)
 				} else {
 					params["set"] = map[string]string{"postgres.default_size": "small"}
@@ -454,13 +392,9 @@ func TestConfigSetGlobalDefaultSizeRefused(t *testing.T) {
 				env.Req = request("config.set", params)
 				env.Req.DryRun = dry
 				_, err = handleConfigSet(context.Background(), env)
-				if err == nil || reason(t, err) != "has_followers" {
-					t.Fatalf("got %v", err)
-				}
+				rejectf(t, err == nil || reason(t, err) != "has_followers", "got %v", err)
 				_, after, err := store.Load()
-				if err != nil || string(before) != string(after) {
-					t.Fatalf("saved on refusal: %v", err)
-				}
+				rejectf(t, err != nil || string(before) != string(after), "saved on refusal: %v", err)
 			})
 		}
 	}
@@ -482,9 +416,7 @@ func TestResizeCustomMemoryDecreaseRefusesBeforeMutation(t *testing.T) {
 			env.Req = request("db.resize", map[string]any{"name": name, "memory": "512MiB"})
 			env.Req.DryRun = dry
 			_, before, err := store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			oldResize, oldFollower := applyResizeStep, applyFollowerStep
 			var calls int
 			applyResizeStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
@@ -494,13 +426,9 @@ func TestResizeCustomMemoryDecreaseRefusesBeforeMutation(t *testing.T) {
 			applyFollowerStep = applyResizeStep
 			_, err = handleDBResize(context.Background(), env)
 			applyResizeStep, applyFollowerStep = oldResize, oldFollower
-			if err == nil || reason(t, err) != want {
-				t.Fatalf("follower=%v dry=%v: %v", follower, dry, err)
-			}
+			rejectf(t, err == nil || reason(t, err) != want, "follower=%v dry=%v: %v", follower, dry, err)
 			_, after, err := store.Load()
-			if err != nil || string(before) != string(after) || calls != 0 {
-				t.Fatalf("follower=%v dry=%v: changed file or ran %d apply calls: %v", follower, dry, calls, err)
-			}
+			rejectf(t, err != nil || string(before) != string(after) || calls != 0, "follower=%v dry=%v: changed file or ran %d apply calls: %v", follower, dry, calls, err)
 		}
 	}
 }
@@ -514,16 +442,10 @@ func TestAddingClusterChangesExistingRecoveryFloors(t *testing.T) {
 	next := old
 	next.Clusters = append(append([]config.ClusterSpec(nil), old.Clusters...), config.ClusterSpec{Name: "other", Size: "small"})
 	before, err := steps.OwnFloors(old, old.Clusters[0], host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	after, err := steps.OwnFloors(next, next.Clusters[0], host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before["max_worker_processes"] != 12 || after["max_worker_processes"] != 10 {
-		t.Fatalf("source floors before=%v after=%v", before, after)
-	}
+	reject(t, err != nil, err)
+	rejectf(t, before["max_worker_processes"] != 12 || after["max_worker_processes"] != 10, "source floors before=%v after=%v", before, after)
 	if err := guardRecoveryFloorChanges(old, next, host); err == nil || reason(t, err) != "has_followers" {
 		t.Fatalf("config-set guard did not observe changed source tuning: %v", err)
 	}
@@ -567,9 +489,7 @@ func TestUnsafeAdditionRefusedAcrossCreateForkAndFollow(t *testing.T) {
 					return func() {}, nil
 				}
 				_, before, err := node.store.Load()
-				if err != nil {
-					t.Fatal(err)
-				}
+				reject(t, err != nil, err)
 				env := &Env{Cluster: cfg}
 				switch op {
 				case "create":
@@ -581,17 +501,13 @@ func TestUnsafeAdditionRefusedAcrossCreateForkAndFollow(t *testing.T) {
 					env.Req.DryRun = dry
 					_, err = handleDBFork(context.Background(), env)
 				case "follow":
-					env.Req = followRequest("app", "newdb", "small")
+					env.Req = followRequest("newdb")
 					env.Req.DryRun = dry
 					_, err = handleDBFollow(context.Background(), env)
 				}
-				if err == nil || reason(t, err) != "has_followers" {
-					t.Fatalf("got %v", err)
-				}
+				rejectf(t, err == nil || reason(t, err) != "has_followers", "got %v", err)
 				_, after, err := node.store.Load()
-				if err != nil || string(before) != string(after) || calls != 0 {
-					t.Fatalf("file changed or %d mutations/probes reached: %v", calls, err)
-				}
+				rejectf(t, err != nil || string(before) != string(after) || calls != 0, "file changed or %d mutations/probes reached: %v", calls, err)
 			})
 		}
 	}
@@ -604,9 +520,7 @@ func TestUnsafeCopyRefusedBeforeTargetOrJob(t *testing.T) {
 			cfg := n.cfg
 			cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: "existing_follower", Node: "db1", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app"})
 			raw, err := cfg.Encode()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			if err := n.store.Save(raw); err != nil {
 				t.Fatal(err)
 			}
@@ -614,9 +528,7 @@ func TestUnsafeCopyRefusedBeforeTargetOrJob(t *testing.T) {
 				return hostinfo.Info{VCPU: 8, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}, nil
 			}
 			_, before, err := n.store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			calls := 0
 			copyClusterInventory = func(context.Context) (map[string]string, error) {
 				calls++
@@ -644,9 +556,7 @@ func TestUnsafeCopyRefusedBeforeTargetOrJob(t *testing.T) {
 			case "locked-job":
 				_, err = jobCopy(context.Background(), copyTestJobEnv(t, p, copyTestSecrets(p.Name)))
 			}
-			if err == nil || reason(t, err) != "has_followers" {
-				t.Fatalf("%s: %v", mode, err)
-			}
+			rejectf(t, err == nil || reason(t, err) != "has_followers", "%s: %v", mode, err)
 			if mode == "locked-job" {
 				details := copyErrorDetails(t, err)
 				drops, _ := details["settings"].([]recoveryFloorDecrease)
@@ -657,9 +567,7 @@ func TestUnsafeCopyRefusedBeforeTargetOrJob(t *testing.T) {
 				}
 			}
 			_, after, err := n.store.Load()
-			if err != nil || string(before) != string(after) || calls != 0 {
-				t.Fatalf("file changed or %d target/job/workspace callbacks: %v", calls, err)
-			}
+			rejectf(t, err != nil || string(before) != string(after) || calls != 0, "file changed or %d target/job/workspace callbacks: %v", calls, err)
 		})
 	}
 }
@@ -686,11 +594,9 @@ func TestFollowAdditionRechecksFreshTopologyUnderLock(t *testing.T) {
 		})
 		node.save(changed)
 	}
-	env := &Env{Cluster: cfg, Req: followRequest("app", "newdb", "small")}
+	env := &Env{Cluster: cfg, Req: followRequest("newdb")}
 	_, err := handleDBFollow(context.Background(), env)
-	if err == nil || reason(t, err) != "has_followers" {
-		t.Fatalf("stale preview admitted: %v", err)
-	}
+	rejectf(t, err == nil || reason(t, err) != "has_followers", "stale preview admitted: %v", err)
 	if _, ok := node.config().ClusterByName("newdb"); ok || started {
 		t.Fatal("unsafe locked proposal was saved or started")
 	}
@@ -704,9 +610,7 @@ func TestCopyJobReportsAffectedFollowerFloor(t *testing.T) {
 		Name: "existing_follower", Node: "db1", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app",
 	})
 	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := n.store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -714,9 +618,7 @@ func TestCopyJobReportsAffectedFollowerFloor(t *testing.T) {
 		return hostinfo.Info{VCPU: 8, RAMMiB: 8192}, nil
 	}
 	_, err = jobCopy(context.Background(), copyTestJobEnv(t, dbCopyParams{Name: "copyapp", Size: "small"}, copyTestSecrets("copyapp")))
-	if err == nil || reason(t, err) != "follower_recovery_floor_decrease" {
-		t.Fatalf("got %v", err)
-	}
+	rejectf(t, err == nil || reason(t, err) != "follower_recovery_floor_decrease", "got %v", err)
 	details := copyErrorDetails(t, err)
 	drops, _ := details["settings"].([]recoveryFloorDecrease)
 	if details["database"] != "copyapp" || details["follower_database"] != "existing_follower" || details["source"] != "app" ||
@@ -758,13 +660,9 @@ func TestSafeAdditionStillSaves(t *testing.T) {
 				calls++
 				return nil
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			saved, _, err := store.Load()
-			if err != nil || calls != 1 {
-				t.Fatalf("save/callback failed: %d, %v", calls, err)
-			}
+			rejectf(t, err != nil || calls != 1, "save/callback failed: %d, %v", calls, err)
 			if _, ok := saved.ClusterByName("newdb"); !ok {
 				t.Fatal("safe addition was not saved")
 			}
@@ -782,30 +680,20 @@ func TestFullConfigAdditionRefusesChangedCPUFloor(t *testing.T) {
 		configSetStore = func() state.FileStore { return store }
 		t.Cleanup(func() { configSetStore = oldStore })
 		revision, err := store.Revision()
-		if err != nil {
-			t.Fatal(err)
-		}
+		reject(t, err != nil, err)
 		_, before, err := store.Load()
-		if err != nil {
-			t.Fatal(err)
-		}
+		reject(t, err != nil, err)
 		cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{
 			Name: "newdb", Node: "db1", Port: 5435, Stanza: "newdb-3f9a1c", Size: "small", StatementTimeout: "60s",
 		})
 		raw, err := cfg.Encode()
-		if err != nil {
-			t.Fatal(err)
-		}
+		reject(t, err != nil, err)
 		env.Req = request("config.set", map[string]any{"base_revision": revision, "toml": string(raw)})
 		env.Req.DryRun = dry
 		_, err = handleConfigSet(context.Background(), env)
-		if err == nil || reason(t, err) != "has_followers" {
-			t.Fatalf("dry=%v: %v", dry, err)
-		}
+		rejectf(t, err == nil || reason(t, err) != "has_followers", "dry=%v: %v", dry, err)
 		_, after, err := store.Load()
-		if err != nil || string(before) != string(after) {
-			t.Fatalf("saved on refusal: %v", err)
-		}
+		rejectf(t, err != nil || string(before) != string(after), "saved on refusal: %v", err)
 	}
 }
 
@@ -857,28 +745,20 @@ func TestDBCreateDryRunFloorAdmissionAndNoProvision(t *testing.T) {
 				return engine.ApplyData{}, nil, errors.New("unexpected kernel apply")
 			}
 			_, before, err := store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			res, err := handleDBCreate(context.Background(), env)
 			if tc.reason != "" {
 				if err == nil || reason(t, err) != tc.reason || starts != 0 {
 					t.Fatalf("unsafe preview: err=%v starts=%d", err, starts)
 				}
 			} else {
-				if err != nil || starts != 1 {
-					t.Fatalf("safe preview: err=%v starts=%d", err, starts)
-				}
+				rejectf(t, err != nil || starts != 1, "safe preview: err=%v starts=%d", err, starts)
 				data, _ := res.Data.(map[string]any)
 				db, ok := data["database"].(config.ClusterSpec)
-				if !ok || db.Name != "newdb" || db.Size != "small" || db.Node != "db1" || db.Port != 5435 || db.Stanza == "" {
-					t.Fatalf("planned database: %+v", data["database"])
-				}
+				rejectf(t, !ok || db.Name != "newdb" || db.Size != "small" || db.Node != "db1" || db.Port != 5435 || db.Stanza == "", "planned database: %+v", data["database"])
 			}
 			_, after, err := store.Load()
-			if err != nil || string(before) != string(after) || applies != 0 {
-				t.Fatalf("dry run saved or applied: err=%v applies=%d", err, applies)
-			}
+			rejectf(t, err != nil || string(before) != string(after) || applies != 0, "dry run saved or applied: err=%v applies=%d", err, applies)
 			if _, ok := env.Cluster.ClusterByName("newdb"); ok {
 				t.Fatal("dry run mutated the input cluster snapshot")
 			}
@@ -900,25 +780,19 @@ func TestDBCreateDryRunRetainsAdmissionChecks(t *testing.T) {
 	createClusterExists = func(context.Context, string) bool { return false }
 	addDatabaseCheckStarts = func(config.Cluster, config.ClusterSpec, hostinfo.Info, int) error { return nil }
 	_, before, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if _, err := handleDBCreate(context.Background(), env); err == nil || reason(t, err) != "memory_overcommitted" {
 		t.Fatalf("missing budget refusal: %v", err)
 	}
 	env.Req = request("db.create", map[string]any{"name": "newdb", "size": "small", "allow_overcommit": true})
 	env.Req.DryRun = true
 	res, err := handleDBCreate(context.Background(), env)
-	if err != nil {
-		t.Fatalf("overcommit preview: %v", err)
-	}
+	rejectf(t, err != nil, "overcommit preview: %v", err)
 	found := false
 	for _, w := range res.Warnings {
 		found = found || w.Code == "memory_overcommitted"
 	}
-	if !found {
-		t.Fatalf("missing overcommit warning: %+v", res.Warnings)
-	}
+	rejectf(t, !found, "missing overcommit warning: %+v", res.Warnings)
 	env.Req = request("db.create", map[string]any{"name": "app", "size": "small"})
 	env.Req.DryRun = true
 	if _, err := handleDBCreate(context.Background(), env); err == nil || reason(t, err) != "database_exists" {
@@ -945,9 +819,7 @@ func TestDBCreateDryRunRetainsAdmissionChecks(t *testing.T) {
 		t.Fatalf("preview bypassed protection check: %v", err)
 	}
 	_, after, err := store.Load()
-	if err != nil || string(before) != string(after) {
-		t.Fatalf("preview saved configuration: %v", err)
-	}
+	rejectf(t, err != nil || string(before) != string(after), "preview saved configuration: %v", err)
 }
 
 func TestAddDatabaseDryRunSkipsBeforeSaveCallback(t *testing.T) {
@@ -967,16 +839,12 @@ func TestAddDatabaseDryRunSkipsBeforeSaveCallback(t *testing.T) {
 		called = true
 		return errors.New("unexpected before-save callback")
 	})
-	if err != nil || called || db.Name != "newdb" {
-		t.Fatalf("preview: db=%+v callback=%v err=%v", db, called, err)
-	}
+	rejectf(t, err != nil || called || db.Name != "newdb", "preview: db=%+v callback=%v err=%v", db, called, err)
 	if _, ok := proposed.ClusterByName("newdb"); !ok {
 		t.Fatal("proposed topology lacks newdb")
 	}
 	saved, _, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if _, ok := saved.ClusterByName("newdb"); ok {
 		t.Fatal("preview saved newdb")
 	}
@@ -988,16 +856,12 @@ func TestDBCreateDryRunReadsFreshTopology(t *testing.T) {
 	updated := followerLifecycleCfg(t, "existing_follower")
 	updated.Server.DataRoot = cfg.Server.DataRoot
 	raw, err := updated.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
 	_, before, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	fixedResizeHost(t, hostinfo.Info{VCPU: 8, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
 		hostinfo.Memory{CommitLimitMiB: 16384, AvailableMiB: 8192}, false)
 	oldExists := createClusterExists
@@ -1009,9 +873,7 @@ func TestDBCreateDryRunReadsFreshTopology(t *testing.T) {
 		t.Fatalf("stale env masked fresh follower: %v", err)
 	}
 	_, after, err := store.Load()
-	if err != nil || string(before) != string(after) {
-		t.Fatalf("dry run saved configuration: %v", err)
-	}
+	rejectf(t, err != nil || string(before) != string(after), "dry run saved configuration: %v", err)
 }
 
 func TestDBCreateRealRunStillRequiresRoleSecrets(t *testing.T) {
@@ -1022,16 +884,10 @@ func TestDBCreateRealRunStillRequiresRoleSecrets(t *testing.T) {
 	createClusterExists = func(context.Context, string) bool { return false }
 	t.Cleanup(func() { createClusterExists = oldExists })
 	_, before, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	_, err = handleDBCreate(context.Background(), env)
 	var cli *output.CLIError
-	if !errors.As(err, &cli) || cli.Code != output.CodeInputRequired {
-		t.Fatalf("real create accepted missing role secrets: %v", err)
-	}
+	rejectf(t, !errors.As(err, &cli) || cli.Code != output.CodeInputRequired, "real create accepted missing role secrets: %v", err)
 	_, after, err := store.Load()
-	if err != nil || string(before) != string(after) {
-		t.Fatalf("real create saved without role secrets: %v", err)
-	}
+	rejectf(t, err != nil || string(before) != string(after), "real create saved without role secrets: %v", err)
 }

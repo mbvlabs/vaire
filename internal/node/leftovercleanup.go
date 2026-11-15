@@ -26,7 +26,7 @@ var legacyLeftoverPort = func(root, name, source string) (int, error) {
 var legacyLeftoverEffectiveSetting = func(name, setting string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", setting) //nolint:gosec // validated managed cluster and fixed settings
+	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", setting)
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
@@ -97,6 +97,16 @@ func validGeneratedLeftoverName(db, name string) bool {
 }
 
 func validateLegacyLeftover(s *backup.Records, cfg config.Cluster, l backup.Leftover) error {
+	if err := validateLeftoverIdentity(s, cfg, l); err != nil {
+		return err
+	}
+	if err := validateLeftoverOperations(s, l); err != nil {
+		return err
+	}
+	return validateLeftoverMarkers(l)
+}
+
+func validateLeftoverIdentity(s *backup.Records, cfg config.Cluster, l backup.Leftover) error {
 	if !validGeneratedLeftoverName(l.Database, l.Name) || l.RestoreID == "" {
 		return errors.New("invalid leftover identity")
 	}
@@ -123,6 +133,10 @@ func validateLegacyLeftover(s *backup.Records, cfg config.Cluster, l backup.Left
 			return errors.New("leftover conflicts with restore")
 		}
 	}
+	return nil
+}
+
+func validateLeftoverOperations(s *backup.Records, l backup.Leftover) error {
 	for db, u := range s.Undoing {
 		if db == l.Database || u.Aside == l.Name || u.From.Name == l.Name {
 			return errors.New("leftover participates in undo")
@@ -144,6 +158,10 @@ func validateLegacyLeftover(s *backup.Records, cfg config.Cluster, l backup.Left
 	if _, ok := s.Unfollowing[l.Name]; ok {
 		return errors.New("leftover conflicts with unfollow")
 	}
+	return nil
+}
+
+func validateLeftoverMarkers(l backup.Leftover) error {
 	// An existing ownership marker, including a corrupt one, is never
 	// downgraded to the legacy current-registration trust model.
 	for _, dir := range []string{materialisationStateDir, filepath.Dir(backup.RecordsPath)} {
@@ -179,7 +197,7 @@ func openLegacyLeftover(cfg config.Cluster, l backup.Leftover) (*legacyLeftoverC
 	if err != nil {
 		return nil, err
 	}
-	a.confParent, a.confInfo, a.confAncestors, err = openMaterialisationParent(materialisationConfigRoot, materialisationRecordUID, false)
+	a.confParent, a.confInfo, a.confAncestors, err = openMaterialisationConfigParent(uid)
 	if err != nil {
 		a.close()
 		return nil, err
@@ -277,32 +295,41 @@ func (a *legacyLeftoverCleanup) remove(ctx context.Context, env *Env) error {
 		if err := errors.Join(dropErr, a.validateAfterDrop(env.Cluster)); err != nil {
 			return err
 		}
-		for _, item := range []struct {
-			root *os.Root
-			file *os.File
-			id   materialisationFileID
-			mode os.FileMode
-		}{{a.dataParent, a.data, a.dataID, 0o700}, {a.confParent, a.conf, a.confID, 0o755}} {
-			if _, err := item.root.Lstat(a.record.Name); errors.Is(err, os.ErrNotExist) {
-				continue
-			} else if err != nil {
-				return err
-			}
-			if err := a.validateRecordAndParents(env.Cluster); err != nil {
-				return err
-			}
-			if err := validateMaterialisationDir(item.root, a.record.Name, item.id, item.file, item.mode); err != nil {
-				return err
-			}
-			if err := item.root.RemoveAll(a.record.Name); err != nil {
-				return err
-			}
+		if err := a.removeArtifacts(env.Cluster); err != nil {
+			return err
 		}
 		if err := a.validate(env.Cluster, true); err != nil {
 			return err
 		}
 		return errors.Join(materialisationSyncArtifactParent(a.dataParent), materialisationSyncArtifactParent(a.confParent))
 	})
+}
+
+func (a *legacyLeftoverCleanup) removeArtifacts(cfg config.Cluster) error {
+	for _, item := range []struct {
+		root *os.Root
+		file *os.File
+		id   materialisationFileID
+		mode os.FileMode
+	}{{a.dataParent, a.data, a.dataID, 0o700}, {a.confParent, a.conf, a.confID, 0o755}} {
+		_, err := item.root.Lstat(a.record.Name)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := a.validateRecordAndParents(cfg); err != nil {
+			return err
+		}
+		if err := validateMaterialisationDir(item.root, a.record.Name, item.id, item.file, item.mode); err != nil {
+			return err
+		}
+		if err := item.root.RemoveAll(a.record.Name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *legacyLeftoverCleanup) validateAfterDrop(cfg config.Cluster) error {

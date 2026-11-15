@@ -178,6 +178,25 @@ func activityQueryError(err error) error {
 // normalizeActivityQuery validates and normalizes filters before the store
 // sees them. Unknown JSON fields were already rejected by decodeParams.
 func normalizeActivityQuery(q *activity.Query) error {
+	if err := normalizeActivityIDs(q); err != nil {
+		return err
+	}
+	if err := normalizeActivityFilters(q); err != nil {
+		return err
+	}
+	if q.Limit < 0 {
+		return activityQueryUsage("limit must not be negative")
+	}
+	if q.Limit > activity.MaxLimit {
+		q.Limit = activity.MaxLimit
+	}
+	if err := activity.ValidateQuery(*q); err != nil {
+		return activityQueryUsage("the activity query is not valid")
+	}
+	return nil
+}
+
+func normalizeActivityIDs(q *activity.Query) error {
 	q.OperationID = strings.ToUpper(strings.TrimSpace(q.OperationID))
 	if q.OperationID != "" && safeActivityID(q.OperationID) == "" {
 		return activityQueryUsage("operation_id must be a ULID")
@@ -190,7 +209,10 @@ func normalizeActivityQuery(q *activity.Query) error {
 	if q.JobID != "" && safeActivityID(q.JobID) == "" {
 		return activityQueryUsage("job_id must be a ULID")
 	}
+	return nil
+}
 
+func normalizeActivityFilters(q *activity.Query) error {
 	q.Database = strings.TrimSpace(q.Database)
 	if q.Database != "" && safeActivityResource(q.Database) == "" {
 		return activityQueryUsage("database is not a bounded resource name")
@@ -216,15 +238,6 @@ func normalizeActivityQuery(q *activity.Query) error {
 		if err := validateActivityTime(q.Until); err != nil {
 			return err
 		}
-	}
-	if q.Limit < 0 {
-		return activityQueryUsage("limit must not be negative")
-	}
-	if q.Limit > activity.MaxLimit {
-		q.Limit = activity.MaxLimit
-	}
-	if err := activity.ValidateQuery(*q); err != nil {
-		return activityQueryUsage("the activity query is not valid")
 	}
 	return nil
 }

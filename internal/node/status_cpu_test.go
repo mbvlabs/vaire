@@ -15,9 +15,7 @@ import (
 
 func TestStatusCPUProbeExcludesFinalInvocationLatency(t *testing.T) {
 	info, err := os.Stat(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	usage := uint64(10)
 	obs := hostinfo.CPUObservation{Identity: info, UsageUsec: &usage, ObservedAt: time.Now()}
 	elapsed := 10 * time.Millisecond
@@ -33,9 +31,7 @@ func TestStatusCPUProbeExcludesFinalInvocationLatency(t *testing.T) {
 	_, generation, stamp := statusCPUProbeWith(invocation, func() hostinfo.CPUObservation { return obs },
 		func() (int64, bool) { return int64(5 * time.Second), true },
 		func(time.Time) time.Duration { return elapsed })
-	if generation == "" || stamp == nil || *stamp != int64(4990*time.Millisecond) {
-		t.Fatalf("generation %q timestamp %v", generation, stamp)
-	}
+	rejectf(t, generation == "" || stamp == nil || *stamp != int64(4990*time.Millisecond), "generation %q timestamp %v", generation, stamp)
 	first := *stamp
 	calls, elapsed = 0, 10*time.Millisecond
 	finalDelay = 4 * time.Second
@@ -43,9 +39,7 @@ func TestStatusCPUProbeExcludesFinalInvocationLatency(t *testing.T) {
 	_, generation2, stamp2 := statusCPUProbeWith(invocation, func() hostinfo.CPUObservation { return obs },
 		func() (int64, bool) { return int64(6 * time.Second), true },
 		func(time.Time) time.Duration { return elapsed })
-	if stamp2 == nil || generation != generation2 || float64(500000)*100000/float64(*stamp2-first) != 50 {
-		t.Fatalf("generation %q timestamp %v", generation2, stamp2)
-	}
+	rejectf(t, stamp2 == nil || generation != generation2 || float64(500000)*100000/float64(*stamp2-first) != 50, "generation %q timestamp %v", generation2, stamp2)
 }
 
 func TestStatusCPUFacts(t *testing.T) {
@@ -55,22 +49,14 @@ func TestStatusCPUFacts(t *testing.T) {
 		Idle: &idle, Weight: &weight, UsageUsec: &usage, ObservedAt: now,
 		Quota: &hostinfo.CPUQuota{Unlimited: true, PeriodUsec: 100000}}
 	cpu := cpuStatus(config.Resources{CPUMode: "spare", CPUQuota: ""}, obs, "generation", &stamp)
-	if !cpu.EffectiveKnown || cpu.Effective == nil || cpu.Effective.QuotaUsec != nil || !*cpu.Effective.Unlimited || cpu.UsageUsec == nil {
-		t.Fatalf("%+v", cpu)
-	}
+	rejectf(t, !cpu.EffectiveKnown || cpu.Effective == nil || cpu.Effective.QuotaUsec != nil || !*cpu.Effective.Unlimited || cpu.UsageUsec == nil, "%+v", cpu)
 	raw, err := json.Marshal(cpu)
-	if err != nil || !strings.Contains(string(raw), `"unlimited":true`) || strings.Contains(string(raw), `"quota_usec":`) {
-		t.Fatalf("%s %v", raw, err)
-	}
+	rejectf(t, err != nil || !strings.Contains(string(raw), `"unlimited":true`) || strings.Contains(string(raw), `"quota_usec":`), "%s %v", raw, err)
 	obs.Reason = "service_identity_unverified"
 	cpu = cpuStatus(config.Resources{}, obs, "generation", &stamp)
-	if cpu.EffectiveKnown || cpu.UsageUsec != nil || cpu.SampleGeneration != "" || cpu.Effective != nil {
-		t.Fatalf("%+v", cpu)
-	}
+	rejectf(t, cpu.EffectiveKnown || cpu.UsageUsec != nil || cpu.SampleGeneration != "" || cpu.Effective != nil, "%+v", cpu)
 	cpu = cpuStatus(config.Resources{}, hostinfo.CPUObservation{}, "", nil)
-	if cpu.EffectiveKnown || cpu.Requested.Mode != "normal" || cpu.Reason == "" {
-		t.Fatalf("%+v", cpu)
-	}
+	rejectf(t, cpu.EffectiveKnown || cpu.Requested.Mode != "normal" || cpu.Reason == "", "%+v", cpu)
 }
 
 func TestStatusDataFreeRequiresActualManagedPath(t *testing.T) {
@@ -80,9 +66,7 @@ func TestStatusDataFreeRequiresActualManagedPath(t *testing.T) {
 	freeCalls := 0
 	free := func(path string) (uint64, bool) {
 		freeCalls++
-		if path != want {
-			t.Fatalf("unexpected path %s", path)
-		}
+		rejectf(t, path != want, "unexpected path %s", path)
 		return 0, true
 	}
 	path := want
@@ -90,17 +74,11 @@ func TestStatusDataFreeRequiresActualManagedPath(t *testing.T) {
 		return []map[string]string{{"data_directory": path}}, nil
 	}
 	got := statusDataFree(context.Background(), cfg, spec, query, free)
-	if got == nil || *got != 0 || freeCalls != 1 {
-		t.Fatal(got, freeCalls)
-	}
+	reject(t, got == nil || *got != 0 || freeCalls != 1, got, freeCalls)
 	path = "/"
-	if statusDataFree(context.Background(), cfg, spec, query, free) != nil || freeCalls != 1 {
-		t.Fatal("mismatched path accepted")
-	}
+	reject(t, statusDataFree(context.Background(), cfg, spec, query, free) != nil || freeCalls != 1, "mismatched path accepted")
 	fail := func(context.Context, string, string, map[string]string) ([]map[string]string, error) {
 		return nil, errors.New("unavailable")
 	}
-	if statusDataFree(context.Background(), cfg, spec, fail, free) != nil || freeCalls != 1 {
-		t.Fatal("unavailable directory accepted")
-	}
+	reject(t, statusDataFree(context.Background(), cfg, spec, fail, free) != nil || freeCalls != 1, "unavailable directory accepted")
 }

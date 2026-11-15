@@ -269,6 +269,8 @@ func (a *forkMaterialisationAuthority) actionReady(action backup.Materialisation
 		return a.renamed
 	case backup.MaterialisationStop, backup.MaterialisationCopyRoles:
 		return a.started
+	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup, backup.MaterialisationInitdb, backup.MaterialisationDrop:
+		return true
 	}
 	return true
 }
@@ -278,10 +280,8 @@ func (a *forkMaterialisationAuthority) Guard(ctx context.Context, p backup.Mater
 		return errors.New("missing fork action")
 	}
 	return a.run(ctx, func() error {
-		if !a.pathsMatch(p) || a.adopted || a.dropped || a.artifacts.owner.Phase != materialisationCopying ||
-			!forkActionAllowed(action, a.artifacts.owner.ArtifactStage) || !a.actionReady(action) ||
-			a.populated && (action == backup.MaterialisationRestore || action == backup.MaterialisationBaseBackup || action == backup.MaterialisationInitdb) {
-			return errors.New("fork action not authorized")
+		if err := a.guardAllowed(p, action); err != nil {
+			return err
 		}
 		if err := a.artifacts.validate(); err != nil {
 			return err
@@ -297,31 +297,50 @@ func (a *forkMaterialisationAuthority) Guard(ctx context.Context, p backup.Mater
 			}
 			return post
 		}
-		post := a.artifacts.validate()
-		if action == backup.MaterialisationAdopt && err == nil {
-			post = errors.Join(post, a.reservation(ctx, false))
-			if post == nil {
-				a.adopted = true
-			}
-		} else {
-			post = errors.Join(post, a.reservation(ctx, true))
-		}
+		post := a.guardPost(ctx, action)
 		if err == nil && post == nil {
-			switch action {
-			case backup.MaterialisationRestore, backup.MaterialisationBaseBackup, backup.MaterialisationInitdb:
-				a.populated = true
-			case backup.MaterialisationRegister:
-				a.registered = true
-			case backup.MaterialisationStart:
-				a.started = true
-			case backup.MaterialisationPromote:
-				a.promoted = true
-			case backup.MaterialisationRename:
-				a.renamed = true
-			}
+			a.recordAction(action)
 		}
 		return errors.Join(err, post)
 	})
+}
+
+func (a *forkMaterialisationAuthority) guardAllowed(p backup.MaterialisationPaths, action backup.MaterialisationAction) error {
+	if !a.pathsMatch(p) || a.adopted || a.dropped || a.artifacts.owner.Phase != materialisationCopying ||
+		!forkActionAllowed(action, a.artifacts.owner.ArtifactStage) || !a.actionReady(action) ||
+		a.populated && (action == backup.MaterialisationRestore || action == backup.MaterialisationBaseBackup || action == backup.MaterialisationInitdb) {
+		return errors.New("fork action not authorized")
+	}
+	return nil
+}
+
+func (a *forkMaterialisationAuthority) guardPost(ctx context.Context, action backup.MaterialisationAction) error {
+	post := a.artifacts.validate()
+	if action != backup.MaterialisationAdopt {
+		return errors.Join(post, a.reservation(ctx, true))
+	}
+	post = errors.Join(post, a.reservation(ctx, false))
+	if post == nil {
+		a.adopted = true
+	}
+	return post
+}
+
+func (a *forkMaterialisationAuthority) recordAction(action backup.MaterialisationAction) {
+	switch action {
+	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup, backup.MaterialisationInitdb:
+		a.populated = true
+	case backup.MaterialisationRegister:
+		a.registered = true
+	case backup.MaterialisationStart:
+		a.started = true
+	case backup.MaterialisationPromote:
+		a.promoted = true
+	case backup.MaterialisationRename:
+		a.renamed = true
+	case backup.MaterialisationPrepare, backup.MaterialisationInspect, backup.MaterialisationStop,
+		backup.MaterialisationAdopt, backup.MaterialisationDrop, backup.MaterialisationCopyRoles:
+	}
 }
 
 func (a *forkMaterialisationAuthority) advance(ctx context.Context, phase, reason string) error {

@@ -33,9 +33,7 @@ func newTestWriter(t *testing.T, w interface{ Write([]byte) (int, error) }) (*ev
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "run.log")
 	log, err := engine.OpenRunLogFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	out := &eventWriter{w: w}
 	out.setLog(log)
 	return out, path
@@ -46,10 +44,8 @@ func readLog(t *testing.T, out *eventWriter, path string) string {
 	if err := out.log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: test temp file.
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw, err := os.ReadFile(path)
+	reject(t, err != nil, err)
 	return string(raw)
 }
 
@@ -97,18 +93,14 @@ func TestEventWriterBlockedStdout(t *testing.T) {
 	out.qmu.Unlock()
 	// One line is stuck in Write; the queue holds at most the cap plus the
 	// kept step, warnings and result.
-	if queued > streamQueueMax+4 {
-		t.Fatalf("queue holds %d lines, want at most %d", queued, streamQueueMax+4)
-	}
+	rejectf(t, queued > streamQueueMax+4, "queue holds %d lines, want at most %d", queued, streamQueueMax+4)
 
 	log := readLog(t, out, path)
 	if got := strings.Count(log, `"type":"log"`); got != n {
 		t.Fatalf("run log has %d log events, want %d", got, n)
 	}
 	for _, want := range []string{`"step":"after-flood"`, `"code":"w1"`, `"code":"events_dropped"`, `"type":"result"`, "did not drain"} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("run log lacks %s", want)
-		}
+		rejectf(t, !strings.Contains(log, want), "run log lacks %s", want)
 	}
 }
 
@@ -119,23 +111,17 @@ func TestEventWriterBrokenStdout(t *testing.T) {
 
 	start := time.Now()
 	code := out.fail("test", output.NewError(output.CodeError, "boom", output.ExitGeneric, ""))
-	if code != output.ExitGeneric {
-		t.Fatalf("fail = %d", code)
-	}
+	rejectf(t, code != output.ExitGeneric, "fail = %d", code)
 	if took := time.Since(start); took > time.Second {
 		t.Fatalf("fail took %s with a dead stdout", took)
 	}
-	if w.writes != 1 {
-		t.Fatalf("stdout got %d writes after EPIPE, want 1", w.writes)
-	}
+	rejectf(t, w.writes != 1, "stdout got %d writes after EPIPE, want 1", w.writes)
 
 	log := readLog(t, out, path)
 	if got := strings.Count(log, `"type":"log"`); got != 100 {
 		t.Fatalf("run log has %d log events, want 100", got)
 	}
 	for _, want := range []string{`"step":"after-flood"`, `"type":"result"`, `"message":"boom"`, "broken pipe"} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("run log lacks %s", want)
-		}
+		rejectf(t, !strings.Contains(log, want), "run log lacks %s", want)
 	}
 }

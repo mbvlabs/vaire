@@ -123,7 +123,7 @@ func TestStatusWarnings(t *testing.T) {
 		{Name: "app", State: "stopped"},
 		{Name: "other", State: "running", RestartPending: true, DeferredRestart: "x", RestoreInProgress: true},
 	}})
-	codes := []string{}
+	codes := make([]string, 0, len(w))
 	for _, x := range w {
 		codes = append(codes, x.Code)
 	}

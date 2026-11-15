@@ -81,29 +81,7 @@ func materialisationReportsFrom(ctx context.Context, cfg config.Cluster, records
 		}
 		registered := o.ArtifactStage == materialisationRegistered || o.ArtifactStage == materialisationProvisioned
 		if registered && materialisationReportArtifactsVerified(o, cfg.Server.DataRoot) {
-			switch inventory[o.Target] {
-			case "down":
-				report.PhysicalState = "down"
-			case "online":
-				if o.Phase != materialisationCopying && o.Phase != materialisationProvisioning && o.Phase != materialisationFailed {
-					break
-				}
-				port := o.TemporaryPort
-				if o.Phase == materialisationProvisioning {
-					port = o.IntendedPort
-				}
-				qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				rows, queryErr := materialisationReportQuery(qctx, port)
-				cancel()
-				if queryErr == nil && len(rows) == 1 && rows[0]["data_directory"] == o.DataPath &&
-					rows[0]["port"] == strconv.Itoa(port) {
-					report.PhysicalState = "online"
-					report.InRecovery = reportBool(rows[0]["in_recovery"])
-					if report.InRecovery != nil && *report.InRecovery {
-						report.ReplayPaused = reportBool(rows[0]["replay_paused"])
-					}
-				}
-			}
+			applyMaterialisationPhysicalState(ctx, o, inventory[o.Target], &report)
 		}
 		// A phase, port or identity transition during observation invalidates
 		// the physical sample. Never publish raw metadata errors.
@@ -115,6 +93,36 @@ func materialisationReportsFrom(ctx context.Context, cfg config.Cluster, records
 		reports[o.Target] = report
 	}
 	return reports
+}
+
+func applyMaterialisationPhysicalState(ctx context.Context, o materialisationOwnership, inventory string, report *materialisationReport) {
+	switch inventory {
+	case "down":
+		report.PhysicalState = "down"
+	case "online":
+		if o.Phase != materialisationCopying && o.Phase != materialisationProvisioning && o.Phase != materialisationFailed {
+			return
+		}
+		port := o.TemporaryPort
+		if o.Phase == materialisationProvisioning {
+			port = o.IntendedPort
+		}
+		queryMaterialisationPort(ctx, o, port, report)
+	}
+}
+
+func queryMaterialisationPort(ctx context.Context, o materialisationOwnership, port int, report *materialisationReport) {
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	rows, queryErr := materialisationReportQuery(qctx, port)
+	cancel()
+	if queryErr != nil || len(rows) != 1 || rows[0]["data_directory"] != o.DataPath || rows[0]["port"] != strconv.Itoa(port) {
+		return
+	}
+	report.PhysicalState = "online"
+	report.InRecovery = reportBool(rows[0]["in_recovery"])
+	if report.InRecovery != nil && *report.InRecovery {
+		report.ReplayPaused = reportBool(rows[0]["replay_paused"])
+	}
 }
 
 func unchangedMaterialisationReports(cfg config.Cluster, before []materialisationOwnership) error {

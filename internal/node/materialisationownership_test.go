@@ -14,24 +14,26 @@ func materialisationFixture(t *testing.T) (materialisationOwnership, string) {
 	t.Helper()
 	oldDir, oldInstance := materialisationStateDir, followHostInstance
 	oldUID := materialisationRecordUID
-	oldConfigRoot := materialisationConfigRoot
+	oldConfigRoot, oldConfigBase := materialisationConfigRoot, materialisationConfigBase
 	oldBase := materialisationAncestorBase
 	oldPostgresUID := materialisationPostgresUID
 	base := t.TempDir()
 	materialisationAncestorBase = base
 	materialisationStateDir = filepath.Join(base, "state")
 	materialisationConfigRoot = filepath.Join(base, "config")
+	materialisationConfigBase = base
 	if err := os.Mkdir(materialisationStateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(materialisationConfigRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	materialisationRecordUID = uint32(os.Geteuid()) //nolint:gosec // test runs with its own effective user
+	materialisationRecordUID = uint32(os.Geteuid())
 	materialisationPostgresUID = func() (uint32, error) { return materialisationRecordUID, nil }
 	followHostInstance = func() (string, error) { return "install", nil }
 	t.Cleanup(func() {
 		materialisationStateDir, followHostInstance, materialisationRecordUID, materialisationConfigRoot = oldDir, oldInstance, oldUID, oldConfigRoot
+		materialisationConfigBase = oldConfigBase
 		materialisationAncestorBase = oldBase
 		materialisationPostgresUID = oldPostgresUID
 	})
@@ -50,42 +52,30 @@ func reserveTestMaterialisation(t *testing.T, a *materialisationArtifacts) {
 	err := a.bindMaterialisationReservation(config.TemporaryPortMin, func(_ materialisationOwnership, _ int, finish func() error) error {
 		return finish()
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 }
 
 func TestMaterialisationOwnershipRecord(t *testing.T) {
 	o, root := materialisationFixture(t)
 	c, err := createMaterialisation(o, root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	path, _ := materialisationPath(o.Target)
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("record mode: %v %v", info, err)
-	}
+	rejectf(t, err != nil || info.Mode().Perm() != 0o600, "record mode: %v %v", info, err)
 	if _, err := createMaterialisation(o, root); err == nil {
 		t.Fatal("replaced existing record")
 	}
 	got, found, err := readMaterialisation(o.Target, root)
-	if err != nil || !found || got != o {
-		t.Fatalf("read: %+v %v %v", got, found, err)
-	}
+	rejectf(t, err != nil || !found || got != o, "read: %+v %v %v", got, found, err)
 	list, err := listMaterialisations(root)
-	if err != nil || len(list) != 1 || list[0] != o {
-		t.Fatalf("list: %+v %v", list, err)
-	}
+	rejectf(t, err != nil || len(list) != 1 || list[0] != o, "list: %+v %v", list, err)
 	if c != nil || ownsMaterialisation(context.Background(), o) ||
 		ownsMaterialisation(materialisationContext(context.Background(), &materialisationCapability{owner: o}), o) {
 		t.Fatal("issued authority without a locked active job")
 	}
 	other := o
 	other.Job = "another-job"
-	if ownsMaterialisation(materialisationContext(context.Background(), c), other) {
-		t.Fatal("another job obtained authority")
-	}
+	reject(t, ownsMaterialisation(materialisationContext(context.Background(), c), other), "another job obtained authority")
 	if err := advanceMaterialisation(&materialisationCapability{owner: o}, root, materialisationCopying, ""); err == nil {
 		t.Fatal("accepted forged authority")
 	}
@@ -97,7 +87,7 @@ func TestMaterialisationRecordRejectsUnsafeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := materialisationPath(o.Target)
-	if err := os.Chmod(p, 0o644); err != nil { //nolint:gosec // intentionally unsafe mode
+	if err := os.Chmod(p, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := readMaterialisation(o.Target, root); err == nil {
@@ -144,9 +134,7 @@ func TestMaterialisationArtifactBindingAndReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	defer a.close()
 	reserveTestMaterialisation(t, a)
 	if err := a.bindCreated(false); err != nil {
@@ -211,9 +199,7 @@ func TestMaterialisationConfigUsesServiceOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := openMaterialisationArtifacts(o.Target, root, serviceUID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	defer a.close()
 	reserveTestMaterialisation(t, a)
 	if err := a.bindCreated(false); err != nil {
@@ -227,17 +213,13 @@ func TestMaterialisationConfigUsesServiceOwnership(t *testing.T) {
 		t.Fatal("artifact owner does not match distinct postgres identity")
 	}
 	data, err := os.Stat(o.DataPath)
-	if err != nil || data.Mode().Perm() != 0o700 {
-		t.Fatalf("data permissions: %v %v", data, err)
-	}
+	rejectf(t, err != nil || data.Mode().Perm() != 0o700, "data permissions: %v %v", data, err)
 	conf, err := os.Stat(o.RegisteredPath)
-	if err != nil || conf.Mode().Perm() != 0o755 {
-		t.Fatalf("config permissions: %v %v", conf, err)
-	}
+	rejectf(t, err != nil || conf.Mode().Perm() != 0o755, "config permissions: %v %v", conf, err)
 	if err := a.withOwnedArtifacts(func() error {
 		// Registration leaves the root-created config directory owned by
 		// postgres and world-readable, as the backup implementation requires.
-		return os.Chmod(o.RegisteredPath, 0o755) //nolint:gosec // postgres-common config directory
+		return os.Chmod(o.RegisteredPath, 0o755)
 	}); err != nil {
 		t.Fatalf("legitimate registration invalidated binding: %v", err)
 	}
@@ -271,9 +253,7 @@ func TestMaterialisationArtifactExistingAndParentReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	defer a.close()
 	reserveTestMaterialisation(t, a)
 	if err := os.Rename(root, root+"-old"); err != nil {
@@ -290,50 +270,34 @@ func TestMaterialisationArtifactExistingAndParentReplacement(t *testing.T) {
 func TestMaterialisationArtifactConfigAndRecordReplacement(t *testing.T) {
 	for _, replace := range []string{"config", "record"} {
 		t.Run(replace, func(t *testing.T) {
-			o, root := materialisationFixture(t)
-			if err := os.Mkdir(root, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := createMaterialisation(o, root); err != nil {
-				t.Fatal(err)
-			}
-			a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer a.close()
-			reserveTestMaterialisation(t, a)
-			if err := a.bindCreated(false); err != nil {
-				t.Fatal(err)
-			}
-			if err := a.bindCreated(true); err != nil {
-				t.Fatal(err)
-			}
-			if replace == "config" {
-				if err := os.Rename(o.RegisteredPath, o.RegisteredPath+"-old"); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Mkdir(o.RegisteredPath, 0o700); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				p, _ := materialisationPath(o.Target)
-				raw, err := os.ReadFile(p) //nolint:gosec // test-owned temporary record
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Rename(p, p+"-old"); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(p, raw, 0o600); err != nil { //nolint:gosec // test-owned temporary record
-					t.Fatal(err)
-				}
-			}
-			if err := a.withOwnedArtifacts(func() error { return nil }); err == nil {
-				t.Fatal("replacement accepted")
-			}
+			runArtifactReplacementCase(t, replace)
 		})
 	}
+}
+
+func runArtifactReplacementCase(t *testing.T, replace string) {
+	t.Helper()
+	o, root := materialisationFixture(t)
+	mustNoErr(t, os.Mkdir(root, 0o700))
+	_, createErr := createMaterialisation(o, root)
+	reject(t, createErr != nil, createErr)
+	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
+	reject(t, err != nil, err)
+	defer a.close()
+	reserveTestMaterialisation(t, a)
+	mustNoErr(t, a.bindCreated(false))
+	mustNoErr(t, a.bindCreated(true))
+	if replace == "config" {
+		mustNoErr(t, os.Rename(o.RegisteredPath, o.RegisteredPath+"-old"))
+		mustNoErr(t, os.Mkdir(o.RegisteredPath, 0o700))
+	} else {
+		p, _ := materialisationPath(o.Target)
+		raw, err := os.ReadFile(p)
+		reject(t, err != nil, err)
+		mustNoErr(t, os.Rename(p, p+"-old"))
+		mustNoErr(t, os.WriteFile(p, raw, 0o600))
+	}
+	rejectf(t, a.withOwnedArtifacts(func() error { return nil }) == nil, "replacement accepted")
 }
 
 func TestMaterialisationPartialRegistrationRetainsDataBinding(t *testing.T) {
@@ -345,9 +309,7 @@ func TestMaterialisationPartialRegistrationRetainsDataBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	defer a.close()
 	reserveTestMaterialisation(t, a)
 	if err := a.bindCreated(false); err != nil {
@@ -360,71 +322,55 @@ func TestMaterialisationPartialRegistrationRetainsDataBinding(t *testing.T) {
 		t.Fatal("existing registration accepted")
 	}
 	got, found, err := readMaterialisation(o.Target, root)
-	if err != nil || !found || got.ArtifactStage != materialisationDataCreated || got.DataIdentity.Inode == 0 {
-		t.Fatalf("data binding lost: %+v %v %v", got, found, err)
-	}
+	rejectf(t, err != nil || !found || got.ArtifactStage != materialisationDataCreated || got.DataIdentity.Inode == 0, "data binding lost: %+v %v %v", got, found, err)
 }
 
 func TestMaterialisationRetirement(t *testing.T) {
 	for _, mode := range []string{"cleanup", "provisioned", "unverified-reservation", "cleanup-leaves-artifact"} {
 		t.Run(mode, func(t *testing.T) {
-			o, root := materialisationFixture(t)
-			if err := os.Mkdir(root, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := createMaterialisation(o, root); err != nil {
-				t.Fatal(err)
-			}
-			a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer a.close()
-			reserveTestMaterialisation(t, a)
-			if err := a.bindCreated(false); err != nil {
-				t.Fatal(err)
-			}
-			if err := a.bindCreated(true); err != nil {
-				t.Fatal(err)
-			}
-			guard := func(got materialisationOwnership) (func(), error) {
-				if got != a.owner {
-					t.Fatal("wrong reservation tuple")
-				}
-				return func() {}, nil
-			}
-			switch mode {
-			case "provisioned":
-				if err := a.markMaterialisationProvisioned(func() error { return nil }); err != nil {
-					t.Fatal(err)
-				}
-				err = a.retireProvisioned(guard)
-			case "unverified-reservation":
-				if err := a.markMaterialisationProvisioned(func() error { return nil }); err != nil {
-					t.Fatal(err)
-				}
-				err = a.retireProvisioned(func(materialisationOwnership) (func(), error) { return nil, nil })
-			default:
-				err = a.retireCleaned(func() error {
-					if err := os.Remove(o.DataPath); err != nil {
-						return err
-					}
-					if mode == "cleanup-leaves-artifact" {
-						return nil
-					}
-					return os.Remove(o.RegisteredPath)
-				}, guard)
-			}
-			wantError := mode == "unverified-reservation" || mode == "cleanup-leaves-artifact"
-			if (err != nil) != wantError {
-				t.Fatalf("retirement: %v", err)
-			}
-			_, found, readErr := readMaterialisation(o.Target, root)
-			if readErr != nil || found != wantError {
-				t.Fatalf("record found=%v err=%v", found, readErr)
-			}
+			runRetirementCase(t, mode)
 		})
 	}
+}
+
+func runRetirementCase(t *testing.T, mode string) {
+	t.Helper()
+	o, root := materialisationFixture(t)
+	mustNoErr(t, os.Mkdir(root, 0o700))
+	_, createErr := createMaterialisation(o, root)
+	reject(t, createErr != nil, createErr)
+	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
+	reject(t, err != nil, err)
+	defer a.close()
+	reserveTestMaterialisation(t, a)
+	mustNoErr(t, a.bindCreated(false))
+	mustNoErr(t, a.bindCreated(true))
+	guard := func(got materialisationOwnership) (func(), error) {
+		reject(t, got != a.owner, "wrong reservation tuple")
+		return func() {}, nil
+	}
+	switch mode {
+	case "provisioned":
+		mustNoErr(t, a.markMaterialisationProvisioned(func() error { return nil }))
+		err = a.retireProvisioned(guard)
+	case "unverified-reservation":
+		mustNoErr(t, a.markMaterialisationProvisioned(func() error { return nil }))
+		err = a.retireProvisioned(func(materialisationOwnership) (func(), error) { return nil, nil })
+	default:
+		err = a.retireCleaned(func() error {
+			if err := os.Remove(o.DataPath); err != nil {
+				return err
+			}
+			if mode == "cleanup-leaves-artifact" {
+				return nil
+			}
+			return os.Remove(o.RegisteredPath)
+		}, guard)
+	}
+	wantError := mode == "unverified-reservation" || mode == "cleanup-leaves-artifact"
+	rejectf(t, (err != nil) != wantError, "retirement: %v", err)
+	_, found, readErr := readMaterialisation(o.Target, root)
+	rejectf(t, readErr != nil || found != wantError, "record found=%v err=%v", found, readErr)
 }
 
 func TestMaterialisationReservationBinding(t *testing.T) {
@@ -437,9 +383,7 @@ func TestMaterialisationReservationBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	defer a.close()
 	if err := a.bindCreated(false); err == nil {
 		t.Fatal("created without reservation")
@@ -448,14 +392,10 @@ func TestMaterialisationReservationBinding(t *testing.T) {
 		t.Fatal("accepted unverified reservation")
 	}
 	err = a.bindMaterialisationReservation(config.TemporaryPortMin, func(got materialisationOwnership, port int, finish func() error) error {
-		if got != o || port != config.TemporaryPortMin {
-			t.Fatal("wrong reservation tuple")
-		}
+		reject(t, got != o || port != config.TemporaryPortMin, "wrong reservation tuple")
 		return finish()
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if err := a.bindCreated(false); err != nil {
 		t.Fatal(err)
 	}
@@ -464,97 +404,84 @@ func TestMaterialisationReservationBinding(t *testing.T) {
 func TestMaterialisationRetirementCommitPoint(t *testing.T) {
 	for _, mode := range []string{"prevalidation", "parentsync", "unlink", "success"} {
 		t.Run(mode, func(t *testing.T) {
-			o, root := materialisationFixture(t)
-			if err := os.Mkdir(root, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := createMaterialisation(o, root); err != nil {
-				t.Fatal(err)
-			}
-			a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer a.close()
-			reserveTestMaterialisation(t, a)
-			if err := a.bindCreated(false); err != nil {
-				t.Fatal(err)
-			}
-			if err := a.bindCreated(true); err != nil {
-				t.Fatal(err)
-			}
-			p, _ := materialisationPath(o.Target)
-			raw, err := os.ReadFile(p) //nolint:gosec // test-owned record
-			if err != nil {
-				t.Fatal(err)
-			}
-			oldRemove, oldSync := materialisationRemoveRecord, materialisationSyncArtifactParent
-			t.Cleanup(func() { materialisationRemoveRecord, materialisationSyncArtifactParent = oldRemove, oldSync })
-			synced, removed, unlocked, cleanupCalled := 0, false, false, false
-			materialisationRemoveRecord = func(path string) error {
-				removed = true
-				if mode == "unlink" {
-					return errors.New("injected unlink failure")
-				}
-				return os.Remove(path)
-			}
-			materialisationSyncArtifactParent = func(parent *os.Root) error {
-				if removed {
-					t.Fatal("fallible parent sync after commit")
-				}
-				synced++
-				if mode == "parentsync" {
-					return errors.New("injected parent sync failure")
-				}
-				return oldSync(parent)
-			}
-			guard := func(materialisationOwnership) (func(), error) {
-				if mode == "prevalidation" {
-					return nil, errors.New("reservation mismatch")
-				}
-				return func() { unlocked = true }, nil
-			}
-			err = a.retireCleaned(func() error {
-				cleanupCalled = true
-				if err := os.Remove(o.DataPath); err != nil {
-					return err
-				}
-				return os.Remove(o.RegisteredPath)
-			}, guard)
-			if mode == "success" {
-				if err != nil || !removed || !unlocked || synced != 2 {
-					t.Fatalf("success: %v removed=%v unlock=%v sync=%d", err, removed, unlocked, synced)
-				}
-				// A crash can restore the un-fsynced marker. Its original
-				// artifacts are gone, so it remains visible but unusable.
-				if err := os.WriteFile(p, raw, 0o600); err != nil { //nolint:gosec // test-owned record
-					t.Fatal(err)
-				}
-				if _, found, err := readMaterialisation(o.Target, root); err != nil || !found {
-					t.Fatalf("resurrected marker: %v %v", found, err)
-				}
-				if _, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID); err == nil {
-					t.Fatal("resurrected marker adopted")
-				}
-			} else {
-				if err == nil {
-					t.Fatal("expected failure")
-				}
-				if mode == "prevalidation" && cleanupCalled {
-					t.Fatal("cleanup before reservation validation")
-				}
-				if mode == "parentsync" && removed {
-					t.Fatal("unlinked before artifact-parent sync")
-				}
-				if mode != "prevalidation" && !unlocked {
-					t.Fatal("lock not released")
-				}
-				if _, found, err := readMaterialisation(o.Target, root); err != nil || !found {
-					t.Fatalf("marker missing: %v %v", found, err)
-				}
-			}
+			runRetirementCommitCase(t, mode)
 		})
 	}
+}
+
+func runRetirementCommitCase(t *testing.T, mode string) {
+	t.Helper()
+	o, root := materialisationFixture(t)
+	mustNoErr(t, os.Mkdir(root, 0o700))
+	_, createErr := createMaterialisation(o, root)
+	reject(t, createErr != nil, createErr)
+	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
+	reject(t, err != nil, err)
+	defer a.close()
+	reserveTestMaterialisation(t, a)
+	mustNoErr(t, a.bindCreated(false))
+	mustNoErr(t, a.bindCreated(true))
+	p, _ := materialisationPath(o.Target)
+	raw, err := os.ReadFile(p)
+	reject(t, err != nil, err)
+	oldRemove, oldSync := materialisationRemoveRecord, materialisationSyncArtifactParent
+	t.Cleanup(func() { materialisationRemoveRecord, materialisationSyncArtifactParent = oldRemove, oldSync })
+	synced, removed, unlocked, cleanupCalled := 0, false, false, false
+	materialisationRemoveRecord = func(path string) error {
+		removed = true
+		if mode == "unlink" {
+			return errors.New("injected unlink failure")
+		}
+		return os.Remove(path)
+	}
+	materialisationSyncArtifactParent = func(parent *os.Root) error {
+		reject(t, removed, "fallible parent sync after commit")
+		synced++
+		if mode == "parentsync" {
+			return errors.New("injected parent sync failure")
+		}
+		return oldSync(parent)
+	}
+	guard := func(materialisationOwnership) (func(), error) {
+		if mode == "prevalidation" {
+			return nil, errors.New("reservation mismatch")
+		}
+		return func() { unlocked = true }, nil
+	}
+	err = a.retireCleaned(func() error {
+		cleanupCalled = true
+		if err := os.Remove(o.DataPath); err != nil {
+			return err
+		}
+		return os.Remove(o.RegisteredPath)
+	}, guard)
+	if mode == "success" {
+		assertRetirementCommitSuccess(t, o, root, p, raw, err, removed, unlocked, synced)
+		return
+	}
+	assertRetirementCommitFailure(t, o, root, mode, err, removed, unlocked, cleanupCalled)
+}
+
+func assertRetirementCommitSuccess(t *testing.T, o materialisationOwnership, root, p string, raw []byte, err error, removed, unlocked bool, synced int) {
+	t.Helper()
+	rejectf(t, err != nil || !removed || !unlocked || synced != 2, "success: %v removed=%v unlock=%v sync=%d", err, removed, unlocked, synced)
+	// A crash can restore the un-fsynced marker. Its original artifacts are
+	// gone, so it remains visible but unusable.
+	mustNoErr(t, os.WriteFile(p, raw, 0o600))
+	_, found, readErr := readMaterialisation(o.Target, root)
+	rejectf(t, readErr != nil || !found, "resurrected marker: %v %v", found, readErr)
+	_, openErr := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
+	reject(t, openErr == nil, "resurrected marker adopted")
+}
+
+func assertRetirementCommitFailure(t *testing.T, o materialisationOwnership, root, mode string, err error, removed, unlocked, cleanupCalled bool) {
+	t.Helper()
+	reject(t, err == nil, "expected failure")
+	reject(t, mode == "prevalidation" && cleanupCalled, "cleanup before reservation validation")
+	reject(t, mode == "parentsync" && removed, "unlinked before artifact-parent sync")
+	reject(t, mode != "prevalidation" && !unlocked, "lock not released")
+	_, found, readErr := readMaterialisation(o.Target, root)
+	rejectf(t, readErr != nil || !found, "marker missing: %v %v", found, readErr)
 }
 
 func TestMaterialisationUnsafeAncestorAndReservationRefusal(t *testing.T) {
@@ -565,28 +492,24 @@ func TestMaterialisationUnsafeAncestorAndReservationRefusal(t *testing.T) {
 	if _, err := createMaterialisation(o, root); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(root, 0o777); err != nil { //nolint:gosec // intentionally unsafe parent
+	if err := os.Chmod(root, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID); err == nil {
 		t.Fatal("accepted writable parent")
 	}
-	if err := os.Chmod(root, 0o700); err != nil { //nolint:gosec // restore private directory mode
+	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	defer a.close()
 	called := false
 	err = a.retireCleaned(func() error {
 		called = true
 		return nil
 	}, func(materialisationOwnership) (func(), error) { return nil, nil })
-	if err == nil || called {
-		t.Fatal("cleanup ran without a verified reservation")
-	}
+	reject(t, err == nil || called, "cleanup ran without a verified reservation")
 }
 
 func TestMaterialisationDataAncestryServiceOwner(t *testing.T) {
@@ -609,9 +532,7 @@ func TestMaterialisationDataAncestryServiceOwner(t *testing.T) {
 		return info, id, err
 	}
 	ancestors, err := materialisationAncestry(leaf, serviceUID, true)
-	if err != nil {
-		t.Fatalf("protected service data ancestry: %v", err)
-	}
+	rejectf(t, err != nil, "protected service data ancestry: %v", err)
 	if _, err := materialisationAncestry(leaf, serviceUID, false); err == nil {
 		t.Fatal("service-owned registration/state ancestry accepted")
 	}
@@ -623,13 +544,13 @@ func TestMaterialisationDataAncestryServiceOwner(t *testing.T) {
 		t.Fatal("foreign owner accepted")
 	}
 	owners[mid] = serviceUID
-	if err := os.Chmod(mid, 0o720); err != nil { //nolint:gosec // intentionally writable test directory
+	if err := os.Chmod(mid, 0o720); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateMaterialisationAncestry(ancestors); err == nil {
 		t.Fatal("group-writable ancestor accepted")
 	}
-	if err := os.Chmod(mid, 0o700); err != nil { //nolint:gosec // private test directory
+	if err := os.Chmod(mid, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(mid, mid+"-old"); err != nil {
@@ -671,9 +592,7 @@ func TestMaterialisationPersistImmutableIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := openMaterialisationArtifacts(o.Target, root, materialisationRecordUID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	defer a.close()
 	reserveTestMaterialisation(t, a)
 	if err := a.bindCreated(false); err != nil {
@@ -683,10 +602,8 @@ func TestMaterialisationPersistImmutableIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	foreignPath, _ := materialisationPath(foreign.Target)
-	before, err := os.ReadFile(foreignPath) //nolint:gosec // test-owned record
-	if err != nil {
-		t.Fatal(err)
-	}
+	before, err := os.ReadFile(foreignPath)
+	reject(t, err != nil, err)
 	for name, mutate := range map[string]func(*materialisationOwnership){
 		"operation":     func(n *materialisationOwnership) { n.Operation = "other" },
 		"job":           func(n *materialisationOwnership) { n.Job = "other" },
@@ -712,10 +629,8 @@ func TestMaterialisationPersistImmutableIdentity(t *testing.T) {
 			}
 		})
 	}
-	after, err := os.ReadFile(foreignPath) //nolint:gosec // test-owned record
-	if err != nil || string(after) != string(before) {
-		t.Fatal("foreign marker changed")
-	}
+	after, err := os.ReadFile(foreignPath)
+	reject(t, err != nil || string(after) != string(before), "foreign marker changed")
 }
 
 func TestMaterialisationOwnershipRefusesUntrusted(t *testing.T) {

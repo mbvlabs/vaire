@@ -56,20 +56,42 @@ func validateFollowRetentionAttempt(o followOwnership) error {
 	if a == nil {
 		return errors.New("missing or invalid follower attempt identity")
 	}
+	if err := validateFollowAttemptKey(o); err != nil {
+		return err
+	}
+	if err := validateFollowReservation(a); err != nil {
+		return err
+	}
+	if err := validateFollowArtifactStage(a); err != nil {
+		return err
+	}
+	return validateFollowAttemptState(o)
+}
+
+func validateFollowAttemptKey(o followOwnership) error {
+	a := o.Attempt
 	key := followAttemptKey{a.Job, a.Operation, a.SourceStanza, a.TemporaryPort}
 	if a.State == followAttemptCompleted && key.TemporaryPort == 0 {
-		// Some historical records lack a port; birth identities still must
-		// be verified before any adoption and the mapping must be retained.
+		// Some historical records lack a port; birth identities still must be
+		// verified before any adoption and the mapping must be retained.
 		key.TemporaryPort = config.TemporaryPortMin
 	}
 	if !validFollowAttemptKey(key) {
 		return errors.New("missing or invalid follower attempt identity")
 	}
+	return nil
+}
+
+func validateFollowReservation(a *followRetentionAttempt) error {
 	if (a.ReservationIdentity.Inode == 0 && a.ReservationIdentity != (backup.ReservationIdentity{})) ||
 		(a.ReservationIdentity.Inode != 0 && a.ReservationIdentity.UID != materialisationRecordUID) ||
 		(a.ReservationIdentity.Digest != "" && !followReservationDigest.MatchString(a.ReservationIdentity.Digest)) {
 		return errors.New("invalid follower reservation identity")
 	}
+	return nil
+}
+
+func validateFollowArtifactStage(a *followRetentionAttempt) error {
 	switch a.ArtifactStage {
 	case "":
 		if a.DataIdentity != (materialisationFileID{}) || a.ConfigIdentity != (materialisationFileID{}) {
@@ -89,6 +111,11 @@ func validateFollowRetentionAttempt(o followOwnership) error {
 	default:
 		return errors.New("invalid follower artifact stage")
 	}
+	return nil
+}
+
+func validateFollowAttemptState(o followOwnership) error {
+	a := o.Attempt
 	switch a.State {
 	case followAttemptPending:
 		if o.Phase != followPhaseCopying || a.Reason != "" {

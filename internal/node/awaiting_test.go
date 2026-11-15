@@ -25,9 +25,7 @@ func isAwaitingErr(err error) bool {
 // otherwise build on a cluster the server doesn't have.
 func TestAwaitingRefusedMethods(t *testing.T) {
 	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"app": {}}}
-	if !isAwaitingErr(refuseAwaitingIn(map[string]any{"db": "app"}, recs, "writing to it")) {
-		t.Fatal("db.write-access must refuse a database awaiting recovery")
-	}
+	reject(t, !isAwaitingErr(refuseAwaitingIn(map[string]any{"db": "app"}, recs, "writing to it")), "db.write-access must refuse a database awaiting recovery")
 	for method, action := range awaitingRefused {
 		// refuseAwaitingIn checks every name field, so fill them all.
 		param := map[string]any{"db": "app", "database": "app", "name": "app", "source": "app"}

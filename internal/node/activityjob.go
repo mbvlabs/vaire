@@ -59,7 +59,7 @@ func (a *jobActivity) begin(ctx context.Context, report engine.Reporter) (engine
 			return report, activityUnavailableError()
 		}
 	}
-	return a.scope.recorder(report), nil
+	return a.scope.recorder(ctx, report), nil
 }
 
 // pending asks the deferred finalizer to record outcome instead of inferring
@@ -143,13 +143,13 @@ func (c *jobWarningCollector) list() []output.Warning {
 // re-raises the panic after this returns. The final activity write runs after
 // every lock is released, then the persisted record is settled within a bound
 // so a follower knows the evidence is complete.
-func finishRunJobActivity(ja *jobActivity, err error, skipped string, recovered any) {
+func finishRunJobActivity(ctx context.Context, ja *jobActivity, err error, skipped string, recovered any) {
 	if ja == nil {
 		return
 	}
 	if !ja.finished {
 		if recovered != nil {
-			ja.finish(context.Background(), activity.OutcomeUnknown, output.CodeError, "panic")
+			ja.finish(ctx, activity.OutcomeUnknown, output.CodeError, "panic")
 		} else {
 			outcome, code, reason := ja.pendingOutcome, ja.pendingCode, ja.pendingReason
 			if outcome == "" {
@@ -165,7 +165,7 @@ func finishRunJobActivity(ja *jobActivity, err error, skipped string, recovered 
 					outcome = activity.OutcomeSucceeded
 				}
 			}
-			ja.finish(context.Background(), outcome, code, reason)
+			ja.finish(ctx, outcome, code, reason)
 		}
 	}
 	if !ja.settle() {

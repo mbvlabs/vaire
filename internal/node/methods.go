@@ -259,7 +259,7 @@ func methods() map[string]method {
 			name:    "sql",
 			lock:    fixedLock(engine.LockShared),
 			cluster: true,
-			handler: defaultProtectGuard.requireWriteCode("writing to it", "db", sqlWrites, handleSQL),
+			handler: defaultProtectGuard.requireWriteCode("writing to it", sqlWrites, handleSQL),
 		},
 		{
 			// No run log, like sql, whose writes it serves.
@@ -282,7 +282,7 @@ func methods() map[string]method {
 		{name: "maint.report", cluster: true, handler: handleMaintReport},
 		// maint.run starts a job, which takes its own locks.
 		{name: "maint.run", cluster: true, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintRun},
-		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: defaultProtectGuard.requireWriteCode("terminating its sessions", "db", nil, handleMaintKill)},
+		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: defaultProtectGuard.requireWriteCode("terminating its sessions", nil, handleMaintKill)},
 		{name: "queries.reset", cluster: true, confirm: statsToken, runLog: always, handler: handleQueriesReset},
 		{name: "metrics.rotate", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: metricsToken, runLog: always, handler: handleMetricsRotate},
 		// Phase 5. The master backup takes no node lock (D3): it has its own.
@@ -334,7 +334,8 @@ func dbClusterLock(req rpc.Request) (string, engine.LockMode) {
 // restartTokens are {server}/restart, which restarts every cluster one at a
 // time, and <cluster>/restart for each cluster (RFC 11.2).
 func restartTokens(cfg config.Cluster, _ json.RawMessage) []string {
-	out := []string{cfg.Name() + "/restart"}
+	out := make([]string, 1, 1+len(cfg.Clusters))
+	out[0] = cfg.Name() + "/restart"
 	for _, c := range cfg.Clusters {
 		out = append(out, c.Name+"/restart")
 	}
@@ -459,7 +460,7 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	if err := guardMaterialisationApply(env.Cluster, p.DB); err != nil {
+	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
@@ -478,7 +479,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
-	if err := guardMaterialisationApply(env.Cluster, p.DB); err != nil {
+	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {

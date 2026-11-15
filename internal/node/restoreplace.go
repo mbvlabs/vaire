@@ -97,7 +97,7 @@ func bootstrapRestore(ctx context.Context, env *Env, p bootstrapParams) (Result,
 	if err := cfg.ValidateFor(config.ScopeHost); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
-	if _, err := bootstrapPreflight(cfg); err != nil {
+	if _, err := bootstrapPreflight(ctx, cfg); err != nil {
 		return Result{}, err
 	}
 	if err := placementFresh(p.InstanceID); err != nil {
@@ -137,7 +137,7 @@ func bootstrapRestore(ctx context.Context, env *Env, p bootstrapParams) (Result,
 		res.Awaiting = append(res.Awaiting, c.Name)
 	}
 	// New SSH connections get the restored host keys; this one stays up.
-	_ = exec.CommandContext(ctx, "systemctl", "try-reload-or-restart", "ssh.service").Run() //nolint:gosec // G204: fixed arguments.
+	_ = exec.CommandContext(ctx, "systemctl", "try-reload-or-restart", "ssh.service").Run()
 	return Result{Data: res}, nil
 }
 

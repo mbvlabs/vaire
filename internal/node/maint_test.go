@@ -43,18 +43,12 @@ func TestMaintKillUsesTheClusterDatabaseName(t *testing.T) {
 		req := request("maint.kill", map[string]any{"db": "app_follower", "pid": 4242})
 		req.Confirm = "app_follower/kill"
 		res, err := handleMaintKill(context.Background(), &Env{Cluster: cfg, Req: req})
-		if err != nil {
-			t.Fatalf("protected %v: %v", protected, err)
-		}
+		rejectf(t, err != nil, "protected %v: %v", protected, err)
 		if queried := append(append([]string{}, admin.queried...), cluster.queried...); !slices.Equal(queried, []string{"app", "app"}) {
 			t.Fatalf("protected %v: the queries connected to %v, want app for selection and termination", protected, queried)
 		}
-		if protected && !slices.Equal(cluster.queried, []string{"app"}) {
-			t.Fatalf("the protected follower's terminate query named %v, want app", cluster.queried)
-		}
-		if !protected && len(cluster.queried) != 0 {
-			t.Fatalf("an unprotected follower's terminate query ran as the source's superuser: %v", cluster.queried)
-		}
+		rejectf(t, protected && !slices.Equal(cluster.queried, []string{"app"}), "the protected follower's terminate query named %v, want app", cluster.queried)
+		rejectf(t, !protected && len(cluster.queried) != 0, "an unprotected follower's terminate query ran as the source's superuser: %v", cluster.queried)
 		data, _ := res.Data.(map[string]any)
 		if data["db"] != "app_follower" {
 			t.Errorf("protected %v: the output names %v, want the follower", protected, data["db"])

@@ -22,16 +22,10 @@ func budgetCluster(specs ...config.ClusterSpec) config.Cluster {
 func overcommitDetails(t *testing.T, err error) (*output.CLIError, map[string]any) {
 	t.Helper()
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) {
-		t.Fatalf("got %v, want a CLIError", err)
-	}
-	if cliErr.Code != output.CodePrecondition || cliErr.ExitCode != output.ExitPrecondition {
-		t.Fatalf("code %s exit %d, want precondition_failed", cliErr.Code, cliErr.ExitCode)
-	}
+	rejectf(t, !errors.As(err, &cliErr), "got %v, want a CLIError", err)
+	rejectf(t, cliErr.Code != output.CodePrecondition || cliErr.ExitCode != output.ExitPrecondition, "code %s exit %d, want precondition_failed", cliErr.Code, cliErr.ExitCode)
 	details, _ := cliErr.Details.(map[string]any)
-	if details["reason"] != tune.ReasonMemoryOvercommitted {
-		t.Fatalf("reason %v, want memory_overcommitted", details["reason"])
-	}
+	rejectf(t, details["reason"] != tune.ReasonMemoryOvercommitted, "reason %v, want memory_overcommitted", details["reason"])
 	return cliErr, details
 }
 
@@ -151,7 +145,7 @@ func TestForkCommand(t *testing.T) {
 }
 
 func TestLargestThatFits(t *testing.T) {
-	var candidates []tune.Demand
+	candidates := make([]tune.Demand, 0, len(config.Sizes))
 	for _, s := range config.Sizes {
 		candidates = append(candidates, tune.Demand{Size: s.Name, MemoryMiB: s.MemoryMiB})
 	}
