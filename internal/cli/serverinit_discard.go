@@ -2,7 +2,7 @@ package cli
 
 import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +19,7 @@ type discardResult struct {
 func runInitDiscard(cmd *cobra.Command) error {
 	name := stringFlag(cmd, "name")
 	if name == "" {
-		pending := contexts.PendingNames()
+		pending := workspaces.PendingNames()
 		if len(pending) != 1 {
 			return output.NewError(output.CodeInputRequired, "--discard needs --name", output.ExitInput,
 				"Pass --name with the server whose unfinished init to discard.").
@@ -27,16 +27,16 @@ func runInitDiscard(cmd *cobra.Command) error {
 		}
 		name = pending[0]
 	}
-	if !contexts.PendingExists(name) {
+	if !workspaces.PendingExists(name) {
 		return output.NewError(output.CodePrecondition, "there is no unfinished init for "+name, output.ExitPrecondition, "").
-			WithDetails(map[string]any{"reason": "nothing_to_discard", "pending": contexts.PendingNames()})
+			WithDetails(map[string]any{"reason": "nothing_to_discard", "pending": workspaces.PendingNames()})
 	}
-	res := discardResult{Server: name, PendingPath: contexts.PendingDir(name)}
-	prog, err := contexts.LoadProgress(name)
+	res := discardResult{Server: name, PendingPath: workspaces.PendingDir(name)}
+	prog, err := workspaces.LoadProgress(name)
 	if err != nil {
 		return err
 	}
-	_, boot, _ := contexts.LoadAnswers(name)
+	_, boot, _ := workspaces.LoadAnswers(name)
 	res.Host = boot.Host
 	res.HostBootstrapped = prog.Done(phaseHost)
 	var warnings []output.Warning
@@ -61,7 +61,7 @@ func runInitDiscard(cmd *cobra.Command) error {
 	if err := Confirm(cmd, "discard"); err != nil {
 		return err
 	}
-	if err := contexts.RemovePending(name); err != nil {
+	if err := workspaces.RemovePending(name); err != nil {
 		return err
 	}
 	return output.Success(cmd, output.Result{Data: res, Message: "Discarded the unfinished init of " + name + " (" + res.PendingPath + ").", Warnings: warnings})

@@ -7,7 +7,7 @@ const EventSchema = "vaire-event/v1"
 const (
 	CodeUsage                 = "usage_error"
 	CodeOutputMode            = "invalid_output_mode"
-	CodeContextNotFound       = "context_not_found"
+	CodeWorkspaceNotFound     = "workspace_not_found"
 	CodeClusterNotInitialized = "cluster_not_initialized"
 	CodeMissingTool           = "missing_tool"
 	CodeUnsafeAction          = "unsafe_action_requires_confirmation"
@@ -43,7 +43,7 @@ const (
 const (
 	ExitOK                  = 0
 	ExitUsage               = 1
-	ExitContext             = 2
+	ExitWorkspace           = 2
 	ExitMissingTool         = 3
 	ExitUnsafe              = 4
 	ExitStep                = 5
@@ -62,8 +62,8 @@ const (
 var exitByCode = map[string]int{
 	CodeUsage:                 ExitUsage,
 	CodeOutputMode:            ExitUsage,
-	CodeContextNotFound:       ExitContext,
-	CodeClusterNotInitialized: ExitContext,
+	CodeWorkspaceNotFound:     ExitWorkspace,
+	CodeClusterNotInitialized: ExitWorkspace,
 	CodeMissingTool:           ExitMissingTool,
 	CodeUnsafeAction:          ExitUnsafe,
 	CodeStepFailed:            ExitStep,

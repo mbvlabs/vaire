@@ -11,8 +11,8 @@ import (
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 // Operator-side master bundles (Phase 5): list, pick, download, check and
@@ -65,7 +65,7 @@ func pickBundleName(list []backup.MasterBundle, want string) (masterbackup.Parse
 }
 
 // fetchBundleFromBucket lists <prefix>/master/ and downloads one bundle.
-func fetchBundleFromBucket(ctx context.Context, kit *contexts.BackupCreds, want string) (fetchedBundle, error) {
+func fetchBundleFromBucket(ctx context.Context, kit *workspaces.BackupCreds, want string) (fetchedBundle, error) {
 	t := kitTarget(kit)
 	list, err := backup.MasterList(ctx, t)
 	if err != nil {
@@ -148,7 +148,7 @@ func openFetched(f fetchedBundle, identity, server string) (masterbackup.Bundle,
 	}
 	if server != "" && b.Manifest.Server != server {
 		return b, output.NewError(output.CodePrecondition, "master bundle "+f.label()+" belongs to server "+b.Manifest.Server+", not "+server, output.ExitPrecondition,
-			"Use the context of the server the bundle came from.").WithDetails(map[string]any{"reason": "bundle_server_mismatch", "bundle_server": b.Manifest.Server})
+			"Use the workspace of the server the bundle came from.").WithDetails(map[string]any{"reason": "bundle_server_mismatch", "bundle_server": b.Manifest.Server})
 	}
 	if newerThanBuild(b.Manifest.VaireVersion) {
 		return b, output.NewError(output.CodeUpdateRequired, "master bundle "+f.label()+" was written by vaire "+b.Manifest.VaireVersion+", newer than this "+buildinfo.Version,
@@ -196,13 +196,13 @@ func semverParts(v string) ([3]int, bool) {
 }
 
 // recoveryIdentity is the kit's age identity, which opens master bundles.
-func recoveryIdentity(name string) (*contexts.BackupCreds, string, error) {
-	creds, err := contexts.LoadCredentials(name)
+func recoveryIdentity(name string) (*workspaces.BackupCreds, string, error) {
+	creds, err := workspaces.LoadCredentials(name)
 	if err != nil {
 		return nil, "", err
 	}
 	if creds.Backup == nil || creds.Backup.Dumps.AgeIdentity == "" {
-		return creds.Backup, "", output.NewError(output.CodeInputRequired, "this context's recovery kit has no age identity", output.ExitInput,
+		return creds.Backup, "", output.NewError(output.CodeInputRequired, "this workspace's recovery kit has no age identity", output.ExitInput,
 			"Master bundles open with the recovery identity. vaire login with a current secrets document (vaire secrets export).").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}

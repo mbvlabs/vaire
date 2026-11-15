@@ -5,18 +5,18 @@ import (
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/password"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/totp"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
 // The secrets export gate. vaire secrets export rebuilds the whole secrets
 // document, and commands that show a new handoff (vaire backup setup) reveal the
 // same. They need a human factor: the master password (an argon2id hash in the
-// context, set with vaire secrets password set or at server init), or a current
+// workspace, set with vaire secrets password set or at server init), or a current
 // code from the authenticator app the node verifies. There is no flag or
 // environment variable for either, so an agent cannot export: structured
 // output, --no-input and a missing terminal all refuse with
@@ -35,10 +35,10 @@ func secretGateRequired(masterPasswordSet bool) *output.CLIError {
 		WithDetails(map[string]any{"reason": "secret_gate_required", "master_password_set": masterPasswordSet})
 }
 
-// masterPasswordHash returns the context's master password hash, "" when none
+// masterPasswordHash returns the workspace's master password hash, "" when none
 // is set.
 func masterPasswordHash(name string) (string, error) {
-	creds, err := contexts.LoadCredentials(name)
+	creds, err := workspaces.LoadCredentials(name)
 	if err != nil {
 		return "", err
 	}
@@ -58,7 +58,7 @@ func openSecretGateSession(cmd *cobra.Command) (*session, *progress, func()) {
 }
 
 // secretGateUnlock requires a human factor before action. hash is the
-// context's master password hash ("" when none); s and p, when set, let the
+// workspace's master password hash ("" when none); s and p, when set, let the
 // node verify a code. It refuses with secret_gate_required when no factor can
 // be checked.
 func secretGateUnlock(cmd *cobra.Command, hash string, s *session, p *progress, action string) error {
@@ -147,11 +147,11 @@ func secretGatePassword(cmd *cobra.Command, hash, action string) error {
 		WithDetails(map[string]any{"reason": "secret_gate_required"})
 }
 
-// runSecretsPasswordSet sets or changes the context's master password. It
+// runSecretsPasswordSet sets or changes the workspace's master password. It
 // never takes the password from a flag: replacing it needs the current
 // password, or a code when two-factor protection is set up.
 func runSecretsPasswordSet(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -192,11 +192,11 @@ func runSecretsPasswordSet(cmd *cobra.Command, _ []string) error {
 			fmt.Sprintf("Use at least %d characters.", password.MinLength)).
 			WithDetails(map[string]any{"reason": "password_too_short", "min_length": password.MinLength})
 	}
-	if err := contexts.SetMasterPasswordHash(c.Name, encoded); err != nil {
+	if err := workspaces.SetMasterPasswordHash(c.Name, encoded); err != nil {
 		return err
 	}
 	return output.Success(cmd, output.Result{
-		Data:    map[string]any{"context": c.Name, "master_password_set": true},
-		Message: "master password set for context " + c.Name + "; vaire secrets export and a new handoff now need it, or a code from the authenticator app",
+		Data:    map[string]any{"workspace": c.Name, "master_password_set": true},
+		Message: "master password set for workspace " + c.Name + "; vaire secrets export and a new handoff now need it, or a code from the authenticator app",
 	})
 }

@@ -11,19 +11,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
-// One WireGuard device per context: the node keeps one peer per operator
+// One WireGuard device per workspace: the node keeps one peer per operator
 // key, and a second device with the same key moves that peer's endpoint and
 // session to itself, so the first one's streams hang. tunnel.lock in the
-// context directory guards that. The context's tunnel daemon (tunneld.go)
+// workspace directory guards that. The workspace's tunnel daemon (tunneld.go)
 // holds it for its lifetime and every other vaire process dials through the
 // daemon. The in-process tunnels (vaire server init, VAIRE_TUNNEL=inprocess)
 // take it too, so they wait while a daemon or another in-process tunnel
 // runs.
 
-// TunnelLockFile is the per-context tunnel lock.
+// TunnelLockFile is the per-workspace tunnel lock.
 const TunnelLockFile = "tunnel.lock"
 
 const tunnelLockPoll = 250 * time.Millisecond
@@ -35,8 +35,8 @@ type tunnelHolder struct {
 	StartedAt string `json:"started_at"`
 }
 
-// tunnelLocks counts this process's holds per context, so a process that
-// opens a second tunnel to the same context doesn't wait on itself.
+// tunnelLocks counts this process's holds per workspace, so a process that
+// opens a second tunnel to the same workspace doesn't wait on itself.
 var tunnelLocks = struct {
 	sync.Mutex
 	held map[string]*heldTunnelLock
@@ -47,7 +47,7 @@ type heldTunnelLock struct {
 	refs int
 }
 
-// lockTunnel takes the context's tunnel lock, waiting while another vaire
+// lockTunnel takes the workspace's tunnel lock, waiting while another vaire
 // process holds it. It reports the wait once through p and gives up when
 // ctx ends. The returned func releases the lock.
 func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
@@ -57,10 +57,10 @@ func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
 		h.refs++
 		return func() { releaseTunnelLock(name) }, nil
 	}
-	if err := os.MkdirAll(contexts.Dir(name), 0o700); err != nil {
+	if err := os.MkdirAll(workspaces.Dir(name), 0o700); err != nil {
 		return nil, err
 	}
-	path := contexts.Path(name, TunnelLockFile)
+	path := workspaces.Path(name, TunnelLockFile)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
@@ -118,11 +118,11 @@ func writeTunnelHolder(f *os.File, p *progress) {
 	}
 }
 
-// tryTunnelLock takes the context's tunnel lock without waiting, for the
+// tryTunnelLock takes the workspace's tunnel lock without waiting, for the
 // tunnel daemon. held is false when another process has it. The returned
 // func releases it.
 func tryTunnelLock(name, command string) (release func(), held bool, err error) {
-	path := contexts.Path(name, TunnelLockFile)
+	path := workspaces.Path(name, TunnelLockFile)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, false, err

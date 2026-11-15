@@ -463,7 +463,7 @@ func writeHtpasswd(rt engine.Runtime, rotate bool) error {
 	hash := rt.SecretValues[SecretMetricsHash]
 	if hash == "" {
 		return output.NewError(output.CodeInputRequired, "the /metrics credential is missing on the node and the request carries none", output.ExitInput,
-			"Run vaire apply from a machine whose context has the metrics credential (vaire login with a current transfer bundle).").
+			"Run vaire apply from a machine whose workspace has the metrics credential (vaire login with a current transfer bundle).").
 			WithDetails(map[string]any{"secret": SecretMetricsHash})
 	}
 	if !strings.HasPrefix(hash, "$2") {

@@ -1,7 +1,7 @@
-// Package contexts manages the operator's files under $XDG_CONFIG_HOME/vaire
-// (§6.3): the current context, one directory of credentials per server, and
+// Package workspaces manages the operator's files under $XDG_CONFIG_HOME/vaire
+// (§6.3): the current workspace, its node inventory and credentials, and
 // the pending state of an unfinished server init.
-package contexts
+package workspaces
 
 import (
 	"bytes"
@@ -19,25 +19,25 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-// Context file names inside contexts/<name>/.
+// Workspace file names inside workspaces/<name>/.
 const (
-	ContextFile     = "context.toml"
+	WorkspaceFile   = "workspace.toml"
 	WGKeyFile       = "wg.key"
 	SSHKeyFile      = "id_ed25519"
 	KnownHostsFile  = "known_hosts"
 	CredentialsFile = "credentials.json"
 )
 
-// EnvContext overrides the current context.
-const EnvContext = "VAIRE_CONTEXT"
+// EnvWorkspace overrides the current workspace.
+const EnvWorkspace = "VAIRE_WORKSPACE"
 
-// NamePattern is a context name. Server names always match it.
+// NamePattern is a workspace name. Server names always match it.
 var NamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
-// Context is contexts/<name>/context.toml. It points at the master by its
+// Workspace is workspaces/<name>/workspace.toml. It points at the master by its
 // hostname. Nodes and Databases are a cache of the master's view, refreshed
 // from it.
-type Context struct {
+type Workspace struct {
 	Name    string `toml:"-" json:"name"`
 	Server  string `toml:"server" json:"server"`
 	Domain  string `toml:"domain,omitempty" json:"domain,omitempty"`
@@ -53,7 +53,7 @@ type Context struct {
 	// lockdown over WireGuard (§8.5). Until then the first remote command
 	// calls ssh.confirm.
 	LockdownConfirmedAt string `toml:"lockdown_confirmed_at,omitempty" json:"lockdown_confirmed_at,omitempty"`
-	// TunnelPersist is how long the context's tunnel daemon stays up with
+	// TunnelPersist is how long the workspace's tunnel daemon stays up with
 	// no vaire command using it, as a Go duration ("10m", "0" exits with the
 	// last command). VAIRE_TUNNEL_PERSIST overrides it.
 	TunnelPersist string `toml:"tunnel_persist,omitempty" json:"tunnel_persist,omitempty"`
@@ -61,7 +61,7 @@ type Context struct {
 	VaireVersion  string `toml:"vaire_version" json:"vaire_version"`
 }
 
-// Node is one node the context can reach: its name, hostname and WireGuard
+// Node is one node the workspace can reach: its name, hostname and WireGuard
 // address. The WireGuard endpoint (public address, port and key) is what the
 // tunnel to the master needs.
 type Node struct {
@@ -81,7 +81,7 @@ type Operator struct {
 	SSHUser   string `toml:"ssh_user" json:"ssh_user"`
 }
 
-// Credentials is contexts/<name>/credentials.json: the secrets document's
+// Credentials is workspaces/<name>/credentials.json: the secrets document's
 // values that are not key files.
 type Credentials struct {
 	SudoPassword string         `json:"sudo_password,omitempty"`
@@ -100,7 +100,7 @@ type Credentials struct {
 const RoleMaster = "master"
 
 // Master returns the master node.
-func (c *Context) Master() (Node, bool) {
+func (c *Workspace) Master() (Node, bool) {
 	for _, n := range c.Nodes {
 		if n.Role == RoleMaster {
 			return n, true
@@ -114,7 +114,7 @@ func (c *Context) Master() (Node, bool) {
 
 // DatabaseNode returns the node the placement cache puts database db on, and
 // whether the cache knows db at all. An unknown database gets the master.
-func (c *Context) DatabaseNode(db string) (Node, bool) {
+func (c *Workspace) DatabaseNode(db string) (Node, bool) {
 	if name, ok := c.Databases[db]; ok {
 		for _, n := range c.Nodes {
 			if n.Name == name {
@@ -127,7 +127,7 @@ func (c *Context) DatabaseNode(db string) (Node, bool) {
 }
 
 // MasterHostname is the master's hostname, which its certificate carries.
-func (c *Context) MasterHostname() string {
+func (c *Workspace) MasterHostname() string {
 	n, _ := c.Master()
 	return n.Hostname
 }
@@ -144,10 +144,10 @@ func Root() string {
 	return filepath.Join(home, ".config", "vaire")
 }
 
-// Dir is contexts/<name>.
-func Dir(name string) string { return filepath.Join(Root(), "contexts", name) }
+// Dir is workspaces/<name>.
+func Dir(name string) string { return filepath.Join(Root(), "workspaces", name) }
 
-// Path is a file inside contexts/<name>.
+// Path is a file inside workspaces/<name>.
 func Path(name, file string) string { return filepath.Join(Dir(name), file) }
 
 func ensureRoot() error {
@@ -158,34 +158,29 @@ func ensureRoot() error {
 	return os.Chmod(root, 0o700) //nolint:gosec // G302: §6.3 sets the config directory to 0700.
 }
 
-// ValidateName checks a context name.
+// ValidateName checks a workspace name.
 func ValidateName(name string) error {
 	if NamePattern.MatchString(name) {
 		return nil
 	}
 	hint := "Use lower-case letters, digits, '.', '_' and '-'."
-	if strings.ContainsAny(name, " \t") {
-		// Most likely psql's -c landing on vaire's global -c (--context).
-		hint = "-c is vaire's --context. To pass arguments to psql, put them after --: " +
-			"vaire psql --db <db> -- -c \"select 1\"."
-	}
 	return output.NewError(
 		output.CodeValidation,
-		"context name "+name+" is invalid",
+		"workspace name "+name+" is invalid",
 		output.ExitConfig,
 		hint,
 	).WithDetails(map[string]any{"name": name})
 }
 
-// Exists reports whether contexts/<name>/context.toml exists.
+// Exists reports whether workspaces/<name>/workspace.toml exists.
 func Exists(name string) bool {
-	_, err := os.Stat(Path(name, ContextFile))
+	_, err := os.Stat(Path(name, WorkspaceFile))
 	return err == nil
 }
 
-// List returns the context names, sorted.
+// List returns the workspace names, sorted.
 func List() ([]string, error) {
-	entries, err := os.ReadDir(filepath.Join(Root(), "contexts"))
+	entries, err := os.ReadDir(filepath.Join(Root(), "workspaces"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -202,22 +197,22 @@ func List() ([]string, error) {
 	return names, nil
 }
 
-// Load reads contexts/<name>/context.toml.
-func Load(name string) (*Context, error) {
+// Load reads workspaces/<name>/workspace.toml.
+func Load(name string) (*Workspace, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(Path(name, ContextFile))
+	raw, err := os.ReadFile(Path(name, WorkspaceFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, notFound(name)
 		}
 		return nil, err
 	}
-	var c Context
+	var c Workspace
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&c); err != nil {
-		return nil, output.NewError(output.CodeConfig, Path(name, ContextFile)+" does not parse: "+err.Error(), output.ExitConfig,
-			"Recreate the context with vaire login.")
+		return nil, output.NewError(output.CodeConfig, Path(name, WorkspaceFile)+" does not parse: "+err.Error(), output.ExitConfig,
+			"Recreate the workspace with vaire login.")
 	}
 	c.Name = name
 	return &c, nil
@@ -225,28 +220,28 @@ func Load(name string) (*Context, error) {
 
 func notFound(name string) *output.CLIError {
 	return output.NewError(
-		output.CodeContextNotFound,
-		"context "+name+" does not exist",
-		output.ExitContext,
-		contextHint("List contexts with vaire context list, or create one with vaire login <secrets.age>."),
-	).WithDetails(map[string]any{"context": name})
+		output.CodeWorkspaceNotFound,
+		"workspace "+name+" does not exist",
+		output.ExitWorkspace,
+		workspaceHint("List workspaces with vaire workspace list, or create one with vaire login <secrets.age>."),
+	).WithDetails(map[string]any{"workspace": name})
 }
 
 // nodeMarker is the file whose presence makes this machine an vaire node.
 var nodeMarker = config.ClusterPath
 
-// contextHint returns hint, or on an vaire node (which holds no contexts) a
+// workspaceHint returns hint, or on an vaire node (which holds no workspaces) a
 // hint to run the command from the operator machine instead.
-func contextHint(hint string) string {
+func workspaceHint(hint string) string {
 	if _, err := os.Stat(nodeMarker); err == nil {
-		return "This machine is an vaire node (" + nodeMarker + " exists) and holds no contexts. " +
+		return "This machine is an vaire node (" + nodeMarker + " exists) and holds no workspaces. " +
 			"Run this command from your own machine; on the node, use sudo vaire node run or sudo vaire node selfcheck."
 	}
 	return hint
 }
 
-// Save writes context.toml.
-func Save(c *Context) error {
+// Save writes workspace.toml.
+func Save(c *Workspace) error {
 	if err := ValidateName(c.Name); err != nil {
 		return err
 	}
@@ -257,10 +252,10 @@ func Save(c *Context) error {
 	if err != nil {
 		return err
 	}
-	return transport.WriteSecretFile(Path(c.Name, ContextFile), raw)
+	return transport.WriteSecretFile(Path(c.Name, WorkspaceFile), raw)
 }
 
-// WriteFile writes a 0600 file inside contexts/<name>.
+// WriteFile writes a 0600 file inside workspaces/<name>.
 func WriteFile(name, file string, data []byte) error {
 	if err := ensureRoot(); err != nil {
 		return err
@@ -268,7 +263,7 @@ func WriteFile(name, file string, data []byte) error {
 	return transport.WriteSecretFile(Path(name, file), data)
 }
 
-// ReadFile reads a file inside contexts/<name>.
+// ReadFile reads a file inside workspaces/<name>.
 func ReadFile(name, file string) ([]byte, error) {
 	return os.ReadFile(Path(name, file))
 }
@@ -298,7 +293,7 @@ func LoadCredentials(name string) (Credentials, error) {
 	return creds, nil
 }
 
-// SetMasterPasswordHash stores the master password hash for a context.
+// SetMasterPasswordHash stores the master password hash for a workspace.
 func SetMasterPasswordHash(name, hash string) error {
 	creds, err := LoadCredentials(name)
 	if err != nil {
@@ -308,7 +303,7 @@ func SetMasterPasswordHash(name, hash string) error {
 	return SaveCredentials(name, creds)
 }
 
-// Remove deletes contexts/<name> and clears the current context if it was
+// Remove deletes workspaces/<name> and clears the current workspace if it was
 // this one.
 func Remove(name string) error {
 	if err := ValidateName(name); err != nil {
@@ -327,10 +322,10 @@ func Remove(name string) error {
 }
 
 type rootConfig struct {
-	CurrentContext string `toml:"current_context"`
+	CurrentWorkspace string `toml:"current_workspace"`
 }
 
-// Current returns config.toml current_context.
+// Current returns config.toml current_workspace.
 func Current() (string, error) {
 	raw, err := os.ReadFile(filepath.Join(Root(), "config.toml"))
 	if err != nil {
@@ -343,10 +338,10 @@ func Current() (string, error) {
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&cfg); err != nil {
 		return "", output.NewError(output.CodeConfig, "config.toml does not parse: "+err.Error(), output.ExitConfig, "")
 	}
-	return cfg.CurrentContext, nil
+	return cfg.CurrentWorkspace, nil
 }
 
-// SetCurrent writes config.toml current_context.
+// SetCurrent writes config.toml current_workspace.
 func SetCurrent(name string) error {
 	if name != "" && !Exists(name) {
 		return notFound(name)
@@ -354,19 +349,19 @@ func SetCurrent(name string) error {
 	if err := ensureRoot(); err != nil {
 		return err
 	}
-	raw, err := toml.Marshal(rootConfig{CurrentContext: name})
+	raw, err := toml.Marshal(rootConfig{CurrentWorkspace: name})
 	if err != nil {
 		return err
 	}
 	return transport.WriteSecretFile(filepath.Join(Root(), "config.toml"), raw)
 }
 
-// Resolve picks the context: the --context flag, then VAIRE_CONTEXT, then the
-// current context.
-func Resolve(flag string) (*Context, error) {
+// Resolve picks the workspace: the --workspace flag, then VAIRE_WORKSPACE, then the
+// current workspace.
+func Resolve(flag string) (*Workspace, error) {
 	name := strings.TrimSpace(flag)
 	if name == "" {
-		name = strings.TrimSpace(os.Getenv(EnvContext))
+		name = strings.TrimSpace(os.Getenv(EnvWorkspace))
 	}
 	if name == "" {
 		current, err := Current()
@@ -377,23 +372,23 @@ func Resolve(flag string) (*Context, error) {
 	}
 	if name == "" {
 		return nil, output.NewError(
-			output.CodeContextNotFound,
-			"no context is selected",
-			output.ExitContext,
-			contextHint("Run vaire login <secrets.age>, or pick one with vaire context use <name>."),
+			output.CodeWorkspaceNotFound,
+			"no workspace is selected",
+			output.ExitWorkspace,
+			workspaceHint("Run vaire login <secrets.age>, or pick one with vaire workspace use <name>."),
 		)
 	}
 	return Load(name)
 }
 
-// FixModes tightens any file in contexts/<name> that is looser than 0600, and
+// FixModes tightens any file in workspaces/<name> that is looser than 0600, and
 // the directory to 0700. It returns a warning per fixed path.
 func FixModes(name string) []output.Warning {
 	var warnings []output.Warning
 	dir := Dir(name)
 	if info, err := os.Stat(dir); err == nil && info.Mode().Perm() != 0o700 {
-		if os.Chmod(dir, 0o700) == nil { //nolint:gosec // G302: §6.3 context directories are 0700.
-			warnings = append(warnings, output.Warning{Code: "context_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0700", dir, info.Mode().Perm())})
+		if os.Chmod(dir, 0o700) == nil { //nolint:gosec // G302: §6.3 workspace directories are 0700.
+			warnings = append(warnings, output.Warning{Code: "workspace_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0700", dir, info.Mode().Perm())})
 		}
 	}
 	entries, err := os.ReadDir(dir)
@@ -407,7 +402,7 @@ func FixModes(name string) []output.Warning {
 		}
 		path := filepath.Join(dir, e.Name())
 		if os.Chmod(path, 0o600) == nil {
-			warnings = append(warnings, output.Warning{Code: "context_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0600", path, info.Mode().Perm())})
+			warnings = append(warnings, output.Warning{Code: "workspace_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0600", path, info.Mode().Perm())})
 		}
 	}
 	return warnings

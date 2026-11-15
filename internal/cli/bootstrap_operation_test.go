@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -27,14 +27,14 @@ func TestSetupOperationPersistsAndDiffersAcrossSetups(t *testing.T) {
 	makeRun := func(name string) *initRun {
 		cfg := config.DefaultCluster()
 		cfg.ClusterName = name
-		return &initRun{name: name, cfg: cfg, prog: &contexts.Progress{}}
+		return &initRun{name: name, cfg: cfg, prog: &workspaces.Progress{}}
 	}
 	first := makeRun("first")
 	if err := first.savePending(); err != nil {
 		t.Fatal(err)
 	}
 	id := first.prog.SetupOperationID
-	saved, err := contexts.LoadProgress("first")
+	saved, err := workspaces.LoadProgress("first")
 	if err != nil || id == "" || saved.SetupOperationID != id {
 		t.Fatalf("operation id was not durable: %q %+v %v", id, saved, err)
 	}
@@ -68,8 +68,8 @@ func TestBootstrapPhasesCarrySavedOperation(t *testing.T) {
 	cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: "master"}}
 	r := &initRun{
 		cmd: cmd, p: newProgress(cmd), name: "test", cfg: cfg,
-		prog: &contexts.Progress{SetupOperationID: "original-setup"},
-		sec:  contexts.PendingSecrets{OperatorName: "test", WGPrivateKey: wg, SSHPrivateKey: string(ssh)},
+		prog: &workspaces.Progress{SetupOperationID: "original-setup"},
+		sec:  workspaces.PendingSecrets{OperatorName: "test", WGPrivateKey: wg, SSHPrivateKey: string(ssh)},
 	}
 	caller := &bootstrapOperationCaller{}
 	if _, err := r.bootstrapHost(context.Background(), caller); err != nil {

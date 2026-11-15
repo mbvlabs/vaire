@@ -50,7 +50,7 @@ type daemon struct {
 	done   chan string
 }
 
-// daemons spawns fake daemons for one context.
+// daemons spawns fake daemons for one workspace.
 type daemons struct {
 	t           *testing.T
 	socket      string
@@ -404,7 +404,7 @@ func TestSharedReplacesIdleStaleDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := f.last()
-	f.fingerprint = "fp-2" // a re-login changed the context
+	f.fingerprint = "fp-2" // a re-login changed the workspace
 	d := f.dialer("vaire test")
 	defer d.Close()
 	if err := d.Attach(ctxT(t)); err != nil {

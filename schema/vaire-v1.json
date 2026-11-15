@@ -96,7 +96,7 @@
       "enum": [
         "usage_error",
         "invalid_output_mode",
-        "context_not_found",
+        "workspace_not_found",
         "cluster_not_initialized",
         "missing_tool",
         "unsafe_action_requires_confirmation",
@@ -180,7 +180,7 @@
         "schema": { "const": "vaire/v1" },
         "ok": { "const": true },
         "command": { "type": "string" },
-        "context": { "type": "string" },
+        "workspace": { "type": "string" },
         "data": {},
         "warnings": {
           "type": "array",
@@ -204,7 +204,7 @@
         "schema": { "const": "vaire/v1" },
         "ok": { "const": false },
         "command": { "type": "string" },
-        "context": { "type": "string" },
+        "workspace": { "type": "string" },
         "error": {
           "type": "object",
           "required": ["code", "message"],

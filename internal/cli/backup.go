@@ -15,12 +15,12 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -62,7 +62,7 @@ var initBackupFlags = backupFlagNames{
 
 // settingsFromConfig starts the answers from cluster.toml and the recovery
 // kit, so a re-run keeps the bucket and only asks for what changes.
-func settingsFromConfig(cfg config.Cluster, kit *contexts.BackupCreds) backupSettings {
+func settingsFromConfig(cfg config.Cluster, kit *workspaces.BackupCreds) backupSettings {
 	b := cfg.Backup
 	s := backupSettings{
 		Provider: b.Provider, Endpoint: b.Endpoint, Region: b.Region, Bucket: b.Bucket, Prefix: b.Prefix, URIStyle: b.URIStyle,
@@ -253,8 +253,8 @@ func (s backupSettings) configKeys() map[string]string {
 // ensureRecoveryIdentity returns kit with the age recovery identity, creating
 // the kit or the identity when missing. server init calls it whether or not a
 // bucket is configured; backup setup keeps the identity it finds.
-func ensureRecoveryIdentity(kit *contexts.BackupCreds) (*contexts.BackupCreds, bool, error) {
-	out := &contexts.BackupCreds{}
+func ensureRecoveryIdentity(kit *workspaces.BackupCreds) (*workspaces.BackupCreds, bool, error) {
+	out := &workspaces.BackupCreds{}
 	if kit != nil {
 		*out = *kit
 	}
@@ -274,17 +274,17 @@ func ensureRecoveryIdentity(kit *contexts.BackupCreds) (*contexts.BackupCreds, b
 // pass when this bucket has none yet and the recovery identity when the kit
 // has none. A cluster whose backups are already on (wasConfigured) never gets
 // a new cipher: that would orphan the repository.
-func prepareKit(kit *contexts.BackupCreds, s backupSettings, wasConfigured bool) (*contexts.BackupCreds, bool, error) {
+func prepareKit(kit *workspaces.BackupCreds, s backupSettings, wasConfigured bool) (*workspaces.BackupCreds, bool, error) {
 	sameRepo := kit != nil && kit.Bucket == s.Bucket && kit.Prefix == s.Prefix && kit.PgBackRest.CipherPass != ""
 	if wasConfigured && !sameRepo {
 		return nil, false, output.NewError(output.CodeInputRequired,
-			"backups are on, but this machine's context has no recovery kit for "+s.Bucket+"/"+s.Prefix,
+			"backups are on, but this machine's workspace has no recovery kit for "+s.Bucket+"/"+s.Prefix,
 			output.ExitInput,
 			"vaire never makes a new cipher for an existing repository. Log in from a current transfer bundle (vaire login), then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 	generated := false
-	out := &contexts.BackupCreds{}
+	out := &workspaces.BackupCreds{}
 	if sameRepo {
 		*out = *kit
 	} else {
@@ -315,7 +315,7 @@ func prepareKit(kit *contexts.BackupCreds, s backupSettings, wasConfigured bool)
 }
 
 // backupSecrets is the RPC secret map for the recovery kit.
-func backupSecrets(kit *contexts.BackupCreds) map[string]string {
+func backupSecrets(kit *workspaces.BackupCreds) map[string]string {
 	if kit == nil {
 		return nil
 	}
@@ -336,7 +336,7 @@ func backupSecrets(kit *contexts.BackupCreds) map[string]string {
 // The age recipient travels whenever the kit has the recovery identity, with
 // or without a bucket: master-backup-v1 encrypts the master bundles to it
 // (Phase 5).
-func addRecoveryKit(secretValues map[string]string, kit *contexts.BackupCreds) {
+func addRecoveryKit(secretValues map[string]string, kit *workspaces.BackupCreds) {
 	if kit == nil {
 		return
 	}
@@ -379,7 +379,7 @@ func requirePackagesCurrent(ctx context.Context, caller remote.Caller, p *progre
 // steps: every cluster's archive_command (a reload), the repository with a
 // stanza and first full backup per cluster, and the timers. kit must already
 // be saved on the operator.
-func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s backupSettings, kit *contexts.BackupCreds) (engine.ApplyData, []output.Warning, error) {
+func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s backupSettings, kit *workspaces.BackupCreds) (engine.ApplyData, []output.Warning, error) {
 	if err := requirePackagesCurrent(ctx, caller, p); err != nil {
 		return engine.ApplyData{}, nil, err
 	}
@@ -438,7 +438,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	creds, err := contexts.LoadCredentials(s.ctx.Name)
+	creds, err := workspaces.LoadCredentials(s.ctx.Name)
 	if err != nil {
 		return err
 	}
@@ -474,7 +474,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	// The kit is saved before anything reaches the node: a repository
 	// encrypted with a cipher the operator then lost would be unreadable.
 	creds.Backup = kit
-	if err := contexts.SaveCredentials(s.ctx.Name, creds); err != nil {
+	if err := workspaces.SaveCredentials(s.ctx.Name, creds); err != nil {
 		return err
 	}
 	data, warnings, err := configureBackups(ctx, s.node, p, settings, kit)
@@ -562,7 +562,7 @@ func offerSetupHandoff(cmd *cobra.Command, s *session, p *progress, generated bo
 		return false, err
 	}
 	// show returns nil only once the operator typed 'stored'.
-	if err := showContextHandoff(cmd, s.ctx); err != nil {
+	if err := showWorkspaceHandoff(cmd, s.ctx); err != nil {
 		return false, err
 	}
 	return true, nil

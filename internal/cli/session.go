@@ -12,21 +12,21 @@ import (
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
 
 // session is one operator command's connection to the primary: a dialer
-// into the WireGuard tunnel (the context's shared tunnel daemon, or an
+// into the WireGuard tunnel (the workspace's shared tunnel daemon, or an
 // in-process tunnel with VAIRE_TUNNEL=inprocess), SSH over it, and a checked
 // node version (§3).
 type session struct {
-	ctx *contexts.Context
+	ctx *workspaces.Workspace
 	// dialer reaches addresses inside the tunnel; closeDialer releases it
 	// (the daemon lease, or the in-process tunnel).
 	dialer      transport.Dialer
@@ -82,32 +82,32 @@ func timeoutFlag(cmd *cobra.Command) time.Duration {
 	return 30 * time.Second
 }
 
-// openSession resolves the context, brings up the tunnel, connects SSH over
+// openSession resolves the workspace, brings up the tunnel, connects SSH over
 // it, runs the version handshake, and confirms a pending SSH lockdown the
-// first time this context reaches the node (§8.5).
+// first time this workspace reaches the node (§8.5).
 func openSession(cmd *cobra.Command, p *progress) (*session, error) {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return nil, err
 	}
-	s := &session{ctx: c, warnings: contexts.FixModes(c.Name)}
+	s := &session{ctx: c, warnings: workspaces.FixModes(c.Name)}
 	nodeSpec, ok := c.Master()
 	if !ok {
-		return nil, output.NewError(output.CodeConfig, "context "+c.Name+" lists no node", output.ExitConfig, "Recreate it with vaire login.")
+		return nil, output.NewError(output.CodeConfig, "workspace "+c.Name+" lists no node", output.ExitConfig, "Recreate it with vaire login.")
 	}
-	wgCfg, err := contextTunnelConfig(c, nodeSpec)
+	wgCfg, err := workspaceTunnelConfig(c, nodeSpec)
 	if err != nil {
 		return nil, err
 	}
-	sshKey, err := contexts.ReadFile(c.Name, contexts.SSHKeyFile)
+	sshKey, err := workspaces.ReadFile(c.Name, workspaces.SSHKeyFile)
 	if err != nil {
-		return nil, contextFileError(c.Name, contexts.SSHKeyFile, err)
+		return nil, workspaceFileError(c.Name, workspaces.SSHKeyFile, err)
 	}
 	auth, err := transport.KeyAuth(sshKey)
 	if err != nil {
-		return nil, contextFileError(c.Name, contexts.SSHKeyFile, err)
+		return nil, workspaceFileError(c.Name, workspaces.SSHKeyFile, err)
 	}
-	known, err := transport.LoadKnownHosts(contexts.Path(c.Name, contexts.KnownHostsFile))
+	known, err := transport.LoadKnownHosts(workspaces.Path(c.Name, workspaces.KnownHostsFile))
 	if err != nil {
 		return nil, err
 	}
@@ -149,10 +149,10 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	return s, nil
 }
 
-// retryHealedSession heals a context whose master moved to a new address and
+// retryHealedSession heals a workspace whose master moved to a new address and
 // opens the session again, once. healed is false when no retry happened.
-func retryHealedSession(cmd *cobra.Command, p *progress, c *contexts.Context, nodeSpec contexts.Node, dialErr error) (*session, bool, error) {
-	// A rebuilt master on a new address (Phase 5): heal the context from
+func retryHealedSession(cmd *cobra.Command, p *progress, c *workspaces.Workspace, nodeSpec workspaces.Node, dialErr error) (*session, bool, error) {
+	// A rebuilt master on a new address (Phase 5): heal the workspace from
 	// DNS once and try again.
 	if endpointHealed(cmd) {
 		return nil, false, nil
@@ -172,8 +172,8 @@ func retryHealedSession(cmd *cobra.Command, p *progress, c *contexts.Context, no
 }
 
 // handshake runs the node's version handshake, upgrading the node's binary
-// when the command or the context asks for it.
-func (s *session) handshake(ctx context.Context, cmd *cobra.Command, c *contexts.Context, nodeSpec contexts.Node, p *progress) error {
+// when the command or the workspace asks for it.
+func (s *session) handshake(ctx context.Context, cmd *cobra.Command, c *workspaces.Workspace, nodeSpec workspaces.Node, p *progress) error {
 	auto := flagTrue(cmd, "auto-upgrade-nodes") || c.AutoUpgradeNodes
 	upgrading := func(line string) {
 		p.note(line)
@@ -183,8 +183,8 @@ func (s *session) handshake(ctx context.Context, cmd *cobra.Command, c *contexts
 }
 
 // nodeLabel names a node for the waiting line: its name, else its hostname,
-// else the context's name.
-func nodeLabel(c *contexts.Context, n contexts.Node) string {
+// else the workspace's name.
+func nodeLabel(c *workspaces.Workspace, n workspaces.Node) string {
 	for _, name := range []string{n.Name, n.Hostname} {
 		if name != "" {
 			return name
@@ -193,9 +193,9 @@ func nodeLabel(c *contexts.Context, n contexts.Node) string {
 	return c.Name
 }
 
-func contextFileError(name, file string, err error) error {
-	return output.WrapError(output.CodeConfig, fmt.Errorf("read %s: %w", contexts.Path(name, file), err), output.ExitConfig,
-		"Recreate the context with vaire login <secrets.age>.")
+func workspaceFileError(name, file string, err error) error {
+	return output.WrapError(output.CodeConfig, fmt.Errorf("read %s: %w", workspaces.Path(name, file), err), output.ExitConfig,
+		"Recreate the workspace with vaire login <secrets.age>.")
 }
 
 func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
@@ -218,7 +218,7 @@ func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
 	if s.ctx.LockdownConfirmedAt == "" {
 		s.ctx.LockdownConfirmedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	return contexts.Save(s.ctx)
+	return workspaces.Save(s.ctx)
 }
 
 // tunnelConfig is the userspace tunnel to a node. Only the node /24 routes
@@ -248,23 +248,23 @@ func tunnelConfig(privateKey, operatorAddr, nodePub, publicAddr string, port int
 	}, nil
 }
 
-// contextTunnelConfig is the tunnel to a context's node, with the operator
-// key read from the context directory.
-func contextTunnelConfig(c *contexts.Context, n contexts.Node) (transport.WireGuardConfig, error) {
-	wgKey, err := contexts.ReadFile(c.Name, contexts.WGKeyFile)
+// workspaceTunnelConfig is the tunnel to a workspace's node, with the operator
+// key read from the workspace directory.
+func workspaceTunnelConfig(c *workspaces.Workspace, n workspaces.Node) (transport.WireGuardConfig, error) {
+	wgKey, err := workspaces.ReadFile(c.Name, workspaces.WGKeyFile)
 	if err != nil {
-		return transport.WireGuardConfig{}, contextFileError(c.Name, contexts.WGKeyFile, err)
+		return transport.WireGuardConfig{}, workspaceFileError(c.Name, workspaces.WGKeyFile, err)
 	}
 	secrets.Add(strings.TrimSpace(string(wgKey)))
 	return tunnelConfig(string(wgKey), c.Operator.WGAddress, n.WGPublicKey, n.PublicAddress, n.ListenPort, n.WGAddress)
 }
 
 // upTunnel starts an in-process userspace tunnel to a node, for vaire server
-// init and VAIRE_TUNNEL=inprocess. It first takes the context's tunnel lock
-// (see tunnellock.go), waiting while another vaire process or the context's
+// init and VAIRE_TUNNEL=inprocess. It first takes the workspace's tunnel lock
+// (see tunnellock.go), waiting while another vaire process or the workspace's
 // tunnel daemon holds it, and holds it until the tunnel closes: two devices
 // with one operator key would steal the node's peer from each other.
-func upTunnel(ctx context.Context, contextName, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
+func upTunnel(ctx context.Context, workspaceName, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
 	cfg, err := tunnelConfig(privateKey, operatorAddr, nodePub, publicAddr, port, nodeWG)
 	if err != nil {
 		return nil, err
@@ -272,7 +272,7 @@ func upTunnel(ctx context.Context, contextName, privateKey, operatorAddr, nodePu
 	if p != nil && p.opts.Verbose {
 		cfg.Logf = func(format string, args ...any) { p.note("wireguard: " + fmt.Sprintf(format, args...)) }
 	}
-	release, err := lockTunnel(ctx, contextName, p)
+	release, err := lockTunnel(ctx, workspaceName, p)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +304,7 @@ func tunnelHint(err error, publicAddr string, port int) error {
 		cliErr.Hint = "WireGuard to " + target + " did not answer within the tunnel's dial timeout. Check that UDP " +
 			strconv.Itoa(port) + " reaches the server and that wg0 runs there, then retry. If it keeps failing, use break-glass from the provider console: vaire node unlock-ssh."
 	case errors.Is(err, transport.ErrDaemonNoAnswer):
-		cliErr.Hint = "The tunnel daemon did not reply. Run vaire tunnel status, and see tunnel.log in the context directory; " +
+		cliErr.Hint = "The tunnel daemon did not reply. Run vaire tunnel status, and see tunnel.log in the workspace directory; " +
 			"vaire tunnel stop --force restarts it. A WireGuard re-handshake after idling can take a few seconds, so retry once first."
 	default:
 		cliErr.Hint = "WireGuard to " + target + " did not answer. Check that UDP " +
@@ -432,7 +432,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	warnings = append(warnings, syncContextFromNode(commandContext(cmd), s, p)...)
+	warnings = append(warnings, syncWorkspaceFromNode(commandContext(cmd), s, p)...)
 	message := fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total)
 	if data.Restarted() {
 		message += "; restarted " + restartSummary(data.Restarts)
@@ -478,13 +478,13 @@ func applyStepIDs(cmd *cobra.Command) ([]string, error) {
 // receives, and refuses when backups are on without one. The node writes the
 // kit only when its copy is missing (D7); vaire never makes a new cipher for
 // an existing repository.
-func applyRecoveryKit(cmd *cobra.Command, s *session, p *progress, secretValues map[string]string, creds contexts.Credentials) error {
+func applyRecoveryKit(cmd *cobra.Command, s *session, p *progress, secretValues map[string]string, creds workspaces.Credentials) error {
 	if creds.Backup != nil && creds.Backup.HasBucket() {
 		addRecoveryKit(secretValues, creds.Backup)
 		return nil
 	}
 	if cfg, err := remoteConfig(cmd, s, p); err == nil && cfg.BackupConfigured() {
-		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's context has no recovery kit", output.ExitInput,
+		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's workspace has no recovery kit", output.ExitInput,
 			"Log in from a current transfer bundle (vaire login), which carries the recovery kit, then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}

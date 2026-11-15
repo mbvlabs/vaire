@@ -10,7 +10,7 @@ import (
 
 	"github.com/kevinburke/ssh_config"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -29,7 +29,7 @@ func hostFlagExplicit(v string) (user, port bool) {
 // matching Host block in ~/.ssh/config for first contact. Values the operator
 // gave explicitly win. It returns a short description of what was used, or ""
 // when nothing matched.
-func applySSHConfig(boot *contexts.Bootstrap, userGiven, portGiven, identityGiven bool) string {
+func applySSHConfig(boot *workspaces.Bootstrap, userGiven, portGiven, identityGiven bool) string {
 	home, err := os.UserHomeDir()
 	if err != nil || boot.Host == "" {
 		return ""

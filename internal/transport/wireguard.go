@@ -45,7 +45,7 @@ type WireGuardConfig struct {
 }
 
 // Tunnel is an embedded userspace WireGuard device with a netstack. It needs
-// no root, no kernel interface and no system configuration. The context's
+// no root, no kernel interface and no system configuration. The workspace's
 // tunnel daemon (vaire tunnel serve) owns one for all vaire processes; vaire server
 // init and VAIRE_TUNNEL=inprocess run one for a single command.
 type Tunnel struct {
@@ -144,7 +144,7 @@ func wgError(message string, cause error) *output.CLIError {
 		output.CodeTransportFailed,
 		message+": "+cause.Error(),
 		output.ExitTransport,
-		"Check the context's WireGuard keys.",
+		"Check the workspace's WireGuard keys.",
 	)
 }
 

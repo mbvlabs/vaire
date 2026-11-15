@@ -1,6 +1,6 @@
 // Package secretsdoc is the age-encrypted secrets document (§10.1): its
 // schema, encryption with a generated EFF-wordlist passphrase, the
-// break-glass text, and turning a document into a local context. The document holds server access
+// break-glass text, and turning a document into a local workspace. The document holds server access
 // credentials only; application database passwords are never in it.
 package secretsdoc
 
@@ -15,7 +15,7 @@ import (
 	"filippo.io/age"
 	"filippo.io/age/armor"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 // Schema is the plaintext document schema.
@@ -88,18 +88,18 @@ type Operator struct {
 }
 
 // Database holds the cluster-wide database credentials (D4): vaire_admin and the
-// service roles. It is the same shape the operator context stores.
-type Database = contexts.DatabaseCreds
+// service roles. It is the same shape the operator workspace stores.
+type Database = workspaces.DatabaseCreds
 
 // Role is a user and password.
-type Role = contexts.Role
+type Role = workspaces.Role
 
 // DatabaseURLs builds the connection strings for one database (§10.1). The app
 // role uses the transaction pooler on 6432, and also on 443 with direct TLS
 // through nginx; the migrate role uses the session pooler on 5432, reachable
 // only over WireGuard or when expose_postgres is set. Both route by the
 // database name (RFC 8.1).
-func DatabaseURLs(host, tlsMode, db string, roles map[string]contexts.Role) map[string]string {
+func DatabaseURLs(host, tlsMode, db string, roles map[string]workspaces.Role) map[string]string {
 	query := "sslmode=verify-full&sslrootcert=system"
 	if tlsMode == "self-signed" {
 		query = "sslmode=require"
@@ -116,8 +116,8 @@ func DatabaseURLs(host, tlsMode, db string, roles map[string]contexts.Role) map[
 }
 
 // Backup is the recovery kit (Phases 3 and 5). It is the same shape the
-// operator context stores.
-type Backup = contexts.BackupCreds
+// operator workspace stores.
+type Backup = workspaces.BackupCreds
 
 // Metrics is the metrics endpoint credential (Phase 4).
 type Metrics struct {
@@ -126,16 +126,16 @@ type Metrics struct {
 	Password string `json:"password"`
 }
 
-// creds is the context credential the section carries, nil without one.
-func (m *Metrics) creds() *contexts.MetricsCreds {
+// creds is the workspace credential the section carries, nil without one.
+func (m *Metrics) creds() *workspaces.MetricsCreds {
 	if m == nil || m.Password == "" {
 		return nil
 	}
 	user := m.Username
 	if user == "" {
-		user = contexts.MetricsUser
+		user = workspaces.MetricsUser
 	}
-	return &contexts.MetricsCreds{Username: user, Password: m.Password}
+	return &workspaces.MetricsCreds{Username: user, Password: m.Password}
 }
 
 // SecretValues returns every secret in the document, for the redaction

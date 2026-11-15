@@ -131,7 +131,7 @@ func TestDiagnosticsCollectDryRunDoesNoNetworkOrWrite(t *testing.T) {
 }
 
 func TestDiagnosticsInspectIsOfflineAndTyped(t *testing.T) {
-	// An empty configuration root: inspect must never resolve a context.
+	// An empty configuration root: inspect must never resolve a workspace.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "incident.json")

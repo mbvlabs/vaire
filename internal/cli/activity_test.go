@@ -149,7 +149,7 @@ func TestActivityNextKeepsCursorFilters(t *testing.T) {
 	if len(next) != 1 {
 		t.Fatalf("next = %v", next)
 	}
-	for _, want := range []string{"--context prod", "--since 24h", "--db app", "--limit 250", "--outcome failed", "--cursor " + cursor} {
+	for _, want := range []string{"--workspace prod", "--since 24h", "--db app", "--limit 250", "--outcome failed", "--cursor " + cursor} {
 		if !strings.Contains(next[0], want) {
 			t.Errorf("next command %q lacks %q", next[0], want)
 		}

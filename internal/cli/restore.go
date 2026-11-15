@@ -12,21 +12,21 @@ import (
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
-// recoveryKit returns the context's recovery kit.
-func recoveryKit(name string) (*contexts.BackupCreds, error) {
-	creds, err := contexts.LoadCredentials(name)
+// recoveryKit returns the workspace's recovery kit.
+func recoveryKit(name string) (*workspaces.BackupCreds, error) {
+	creds, err := workspaces.LoadCredentials(name)
 	if err != nil {
 		return nil, err
 	}
 	if creds.Backup == nil || creds.Backup.AccessKeyID == "" {
-		return nil, output.NewError(output.CodeInputRequired, "this context has no recovery kit", output.ExitInput,
+		return nil, output.NewError(output.CodeInputRequired, "this workspace has no recovery kit", output.ExitInput,
 			"Run vaire backup setup, or log in from a transfer bundle that carries the recovery kit (vaire login).").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
@@ -35,16 +35,16 @@ func recoveryKit(name string) (*contexts.BackupCreds, error) {
 
 // dumpIdentity returns the kit's age identity for opening dumps, or an
 // operator-side error when this machine's kit doesn't carry one.
-func dumpIdentity(k *contexts.BackupCreds) (string, error) {
+func dumpIdentity(k *workspaces.BackupCreds) (string, error) {
 	if k.Dumps.AgeIdentity == "" {
-		return "", output.NewError(output.CodeInputRequired, "this context's recovery kit has no dump age identity", output.ExitInput,
+		return "", output.NewError(output.CodeInputRequired, "this workspace's recovery kit has no dump age identity", output.ExitInput,
 			"Dumps open with the age identity from the recovery kit. Run vaire secrets export on the machine that ran vaire backup setup, then vaire login with that bundle here.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing", "secret": steps.SecretBackupAgeIdentity})
 	}
 	return k.Dumps.AgeIdentity, nil
 }
 
-func kitTarget(k *contexts.BackupCreds) backup.Target {
+func kitTarget(k *workspaces.BackupCreds) backup.Target {
 	return backup.Target{Endpoint: k.Endpoint, Region: k.Region, Bucket: k.Bucket, Prefix: k.Prefix, URIStyle: k.URIStyle, KeyID: k.AccessKeyID, Secret: k.SecretAccessKey}
 }
 
@@ -180,12 +180,12 @@ func restoreParams(cmd *cobra.Command, db string) (map[string]any, time.Time, er
 
 // restoreSecrets are the secrets a dump restore sends: the age identity that
 // opens the dump.
-func restoreSecrets(contextName string, params map[string]any) (map[string]string, error) {
+func restoreSecrets(workspaceName string, params map[string]any) (map[string]string, error) {
 	sec := map[string]string{}
 	if params["kind"] != "dump" {
 		return sec, nil
 	}
-	kit, err := recoveryKit(contextName)
+	kit, err := recoveryKit(workspaceName)
 	if err != nil {
 		return nil, err
 	}
@@ -736,7 +736,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 }
 
 func runDumpList(cmd *cobra.Command, args []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -772,7 +772,7 @@ func dumpListMessage(dumps []backup.Dump) string {
 
 func runDumpGet(cmd *cobra.Command, args []string) error {
 	db, id := args[0], args[1]
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}

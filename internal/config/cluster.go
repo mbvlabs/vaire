@@ -249,7 +249,7 @@ func (c Cluster) Hostname(node string) string {
 }
 
 // MasterHostname is the master's hostname: what clients, the certificate
-// and the operator's context name.
+// and the operator's workspace name.
 func (c Cluster) MasterHostname() string {
 	n, ok := c.Master()
 	if !ok {
@@ -297,7 +297,7 @@ func LoadCluster(path string) (Cluster, error) {
 			return Cluster{}, output.NewError(
 				output.CodeClusterNotInitialized,
 				"this node has no cluster.toml",
-				output.ExitContext,
+				output.ExitWorkspace,
 				"Initialise the cluster first with vaire server init.",
 			).WithDetails(map[string]any{"path": path})
 		}

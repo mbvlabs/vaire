@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/doctor"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -109,7 +109,7 @@ func doctorMessage(results []doctor.Result) string {
 	return strings.Join(lines, "\n")
 }
 
-// operatorChecks are the checks only the operator can run: its context's
+// operatorChecks are the checks only the operator can run: its workspace's
 // file modes, the node's vaire version against this one, and an authenticated
 // scrape of /metrics through the tunnel.
 func operatorChecks(ctx context.Context, s *session, only string) []doctor.Result {
@@ -120,10 +120,10 @@ func operatorChecks(ctx context.Context, s *session, only string) []doctor.Resul
 		}
 		out = append(out, doctor.Result{ID: id, Category: category, Security: security, Status: status, Detail: detail, Fix: fix})
 	}
-	if loose := looseContextFiles(s.ctx.Name); len(loose) > 0 {
-		add("ctx.file_modes", doctor.CatHost, true, doctor.Warn, "readable by others: "+strings.Join(loose, ", "), "chmod 600 those files")
+	if loose := looseWorkspaceFiles(s.ctx.Name); len(loose) > 0 {
+		add("workspace.file_modes", doctor.CatHost, true, doctor.Warn, "readable by others: "+strings.Join(loose, ", "), "chmod 600 those files")
 	} else {
-		add("ctx.file_modes", doctor.CatHost, true, doctor.Pass, "the context's files are private", "")
+		add("workspace.file_modes", doctor.CatHost, true, doctor.Pass, "the workspace's files are private", "")
 	}
 	add("vaire.version_skew", doctor.CatHost, false, doctor.Pass, "the node runs this CLI's build (checked when the session opened)", "")
 	status, detail, fix := metricsAuth(ctx, s)
@@ -131,11 +131,11 @@ func operatorChecks(ctx context.Context, s *session, only string) []doctor.Resul
 	return out
 }
 
-// looseContextFiles lists files in the context directory readable by group
+// looseWorkspaceFiles lists files in the workspace directory readable by group
 // or others.
-func looseContextFiles(name string) []string {
+func looseWorkspaceFiles(name string) []string {
 	var out []string
-	entries, err := os.ReadDir(contexts.Dir(name))
+	entries, err := os.ReadDir(workspaces.Dir(name))
 	if err != nil {
 		return nil
 	}
@@ -145,18 +145,18 @@ func looseContextFiles(name string) []string {
 			continue
 		}
 		if info.Mode().Perm()&0o077 != 0 {
-			out = append(out, filepath.Join(contexts.Dir(name), e.Name()))
+			out = append(out, filepath.Join(workspaces.Dir(name), e.Name()))
 		}
 	}
 	return out
 }
 
-// metricsAuth scrapes /metrics/node with the context's credential over the
+// metricsAuth scrapes /metrics/node with the workspace's credential over the
 // tunnel, verifying the node's certificate as a scraper would.
 func metricsAuth(ctx context.Context, s *session) (doctor.Status, string, string) {
-	creds, err := contexts.LoadCredentials(s.ctx.Name)
+	creds, err := workspaces.LoadCredentials(s.ctx.Name)
 	if err != nil || creds.Metrics == nil {
-		return doctor.Warn, "this context has no /metrics credential", "vaire apply, then vaire secrets export"
+		return doctor.Warn, "this workspace has no /metrics credential", "vaire apply, then vaire secrets export"
 	}
 	n, ok := s.ctx.Master()
 	if !ok || n.Hostname == "" {
@@ -169,14 +169,14 @@ func metricsAuth(ctx context.Context, s *session) (doctor.Status, string, string
 	case code == http.StatusOK:
 		return doctor.Pass, "the credential scrapes https://" + n.Hostname + "/metrics/node", ""
 	case code == http.StatusUnauthorized:
-		return doctor.Fail, "the node refuses this context's credential", "vaire metrics rotate --confirm " + s.ctx.Server + "/metrics"
+		return doctor.Fail, "the node refuses this workspace's credential", "vaire metrics rotate --confirm " + s.ctx.Server + "/metrics"
 	case code == http.StatusNotFound:
 		return doctor.Skip, "/metrics is off on the node", ""
 	}
 	return doctor.Warn, fmt.Sprintf("/metrics/node answered %d", code), ""
 }
 
-func scrapeMetrics(ctx context.Context, dialer transport.Dialer, wgAddr, hostname, tlsMode string, creds *contexts.MetricsCreds) (int, error) {
+func scrapeMetrics(ctx context.Context, dialer transport.Dialer, wgAddr, hostname, tlsMode string, creds *workspaces.MetricsCreds) (int, error) {
 	if dialer == nil {
 		return 0, fmt.Errorf("no tunnel")
 	}

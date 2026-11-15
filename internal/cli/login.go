@@ -12,23 +12,23 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
 
 type loginData struct {
-	Context  string             `json:"context"`
-	Current  bool               `json:"current"`
-	Path     string             `json:"path"`
-	Document secretsdoc.Summary `json:"document"`
+	Workspace string             `json:"workspace"`
+	Current   bool               `json:"current"`
+	Path      string             `json:"path"`
+	Document  secretsdoc.Summary `json:"document"`
 }
 
 // runLogin decrypts a transfer bundle (armored or binary age) and creates a
-// local context (§10.1). The bundle comes from a file, from stdin with -, or
+// local workspace (§10.1). The bundle comes from a file, from stdin with -, or
 // is pasted at a prompt when no argument is given. A file, stdin or paste may
 // hold the whole copied handoff; only its armored block is used. The bundle is
 // read and checked before the passphrase is asked for.
@@ -60,16 +60,16 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	current, _ := contexts.Current()
+	current, _ := workspaces.Current()
 	summary := secretsdoc.Summarize(doc)
-	message := fmt.Sprintf("Created context %s for %s.", ctx.Name, summary)
+	message := fmt.Sprintf("Created workspace %s for %s.", ctx.Name, summary)
 	if current == ctx.Name {
-		message += " It is the current context."
+		message += " It is the current workspace."
 	} else {
-		message += " Switch to it with vaire context use " + ctx.Name + "."
+		message += " Switch to it with vaire workspace use " + ctx.Name + "."
 	}
 	return output.Success(cmd, output.Result{
-		Data:    loginData{Context: ctx.Name, Current: current == ctx.Name, Path: contexts.Dir(ctx.Name), Document: summary},
+		Data:    loginData{Workspace: ctx.Name, Current: current == ctx.Name, Path: workspaces.Dir(ctx.Name), Document: summary},
 		Message: message,
 		Next:    []string{"vaire plan"},
 	})
@@ -158,42 +158,50 @@ func loginPassphrase(cmd *cobra.Command) (string, error) {
 	return readSecretTTY(cmd, "Passphrase")
 }
 
-type contextRow struct {
-	Name    string `json:"name"`
-	Server  string `json:"server"`
-	Current bool   `json:"current"`
-	Nodes   int    `json:"nodes"`
+type workspaceRow struct {
+	Name      string   `json:"name"`
+	Server    string   `json:"server"`
+	Current   bool     `json:"current"`
+	Nodes     int      `json:"nodes"`
+	NodeNames []string `json:"node_names"`
 }
 
-func runContextList(cmd *cobra.Command, _ []string) error {
-	names, err := contexts.List()
+func runWorkspaceList(cmd *cobra.Command, _ []string) error {
+	names, err := workspaces.List()
 	if err != nil {
 		return err
 	}
-	current, _ := contexts.Current()
-	rows := make([]contextRow, 0, len(names))
+	current, err := workspaces.Current()
+	if err != nil {
+		return err
+	}
+	rows := make([]workspaceRow, 0, len(names))
 	lines := make([]string, 0, len(names))
 	for _, name := range names {
-		c, err := contexts.Load(name)
+		c, err := workspaces.Load(name)
 		if err != nil {
 			return err
 		}
-		rows = append(rows, contextRow{Name: name, Server: c.Server, Current: name == current, Nodes: len(c.Nodes)})
+		nodeNames := make([]string, 0, len(c.Nodes))
+		for _, node := range c.Nodes {
+			nodeNames = append(nodeNames, node.Name)
+		}
+		rows = append(rows, workspaceRow{Name: name, Server: c.Server, Current: name == current, Nodes: len(c.Nodes), NodeNames: nodeNames})
 		mark := "  "
 		if name == current {
 			mark = "* "
 		}
-		lines = append(lines, mark+name+" (server "+c.Server+")")
+		lines = append(lines, mark+name+" (nodes: "+strings.Join(nodeNames, ", ")+")")
 	}
 	message := strings.Join(lines, "\n")
 	if len(rows) == 0 {
-		message = "No contexts. Create one with vaire login and the transfer bundle."
+		message = "No workspaces. Create one with vaire login and the transfer bundle."
 	}
 	return output.Success(cmd, output.Result{Data: rows, Message: message})
 }
 
-type contextShow struct {
-	*contexts.Context
+type workspaceShow struct {
+	*workspaces.Workspace
 	Current              bool              `json:"current"`
 	Path                 string            `json:"path"`
 	OperatorWGPublicKey  string            `json:"operator_wg_public_key"`
@@ -201,26 +209,26 @@ type contextShow struct {
 	HostKeyFingerprints  map[string]string `json:"host_key_fingerprints"`
 }
 
-func runContextShow(cmd *cobra.Command, args []string) error {
-	flag := stringFlag(cmd, "context")
+func runWorkspaceShow(cmd *cobra.Command, args []string) error {
+	flag := stringFlag(cmd, "workspace")
 	if len(args) == 1 {
 		flag = args[0]
 	}
-	c, err := contexts.Resolve(flag)
+	c, err := workspaces.Resolve(flag)
 	if err != nil {
 		return err
 	}
-	warnings := contexts.FixModes(c.Name)
-	current, _ := contexts.Current()
-	show := contextShow{Context: c, Current: current == c.Name, Path: contexts.Dir(c.Name), HostKeyFingerprints: map[string]string{}}
-	if raw, err := contexts.ReadFile(c.Name, contexts.WGKeyFile); err == nil {
+	warnings := workspaces.FixModes(c.Name)
+	current, _ := workspaces.Current()
+	show := workspaceShow{Workspace: c, Current: current == c.Name, Path: workspaces.Dir(c.Name), HostKeyFingerprints: map[string]string{}}
+	if raw, err := workspaces.ReadFile(c.Name, workspaces.WGKeyFile); err == nil {
 		secrets.Add(strings.TrimSpace(string(raw)))
 		show.OperatorWGPublicKey, _ = transport.WGPublicKey(string(raw))
 	}
-	if raw, err := contexts.ReadFile(c.Name, contexts.SSHKeyFile); err == nil {
+	if raw, err := workspaces.ReadFile(c.Name, workspaces.SSHKeyFile); err == nil {
 		show.OperatorSSHPublicKey, _ = transport.AuthorizedKey(raw, "")
 	}
-	if known, err := transport.LoadKnownHosts(contexts.Path(c.Name, contexts.KnownHostsFile)); err == nil {
+	if known, err := transport.LoadKnownHosts(workspaces.Path(c.Name, workspaces.KnownHostsFile)); err == nil {
 		for _, n := range c.Nodes {
 			addr := net.JoinHostPort(n.WGAddress, "22")
 			for _, key := range known.Keys(addr) {
@@ -229,7 +237,7 @@ func runContextShow(cmd *cobra.Command, args []string) error {
 		}
 	}
 	lines := []string{
-		"context   " + c.Name,
+		"workspace " + c.Name,
 		"server    " + c.Server,
 		"operator  " + c.Operator.Name + " (" + c.Operator.WGAddress + ", ssh user " + c.Operator.SSHUser + ")",
 	}
@@ -242,32 +250,32 @@ func runContextShow(cmd *cobra.Command, args []string) error {
 	return output.Success(cmd, output.Result{Data: show, Message: strings.Join(lines, "\n"), Warnings: warnings})
 }
 
-func runContextUse(cmd *cobra.Command, args []string) error {
-	if err := contexts.ValidateName(args[0]); err != nil {
+func runWorkspaceUse(cmd *cobra.Command, args []string) error {
+	if err := workspaces.ValidateName(args[0]); err != nil {
 		return err
 	}
-	if err := contexts.SetCurrent(args[0]); err != nil {
+	if err := workspaces.SetCurrent(args[0]); err != nil {
 		return err
 	}
-	return output.OK(cmd, map[string]string{"current": args[0]}, "Current context is now "+args[0]+".")
+	return output.OK(cmd, map[string]string{"current": args[0]}, "Current workspace is now "+args[0]+".")
 }
 
-func runContextRemove(cmd *cobra.Command, args []string) error {
+func runWorkspaceRemove(cmd *cobra.Command, args []string) error {
 	name := args[0]
-	if err := contexts.ValidateName(name); err != nil {
+	if err := workspaces.ValidateName(name); err != nil {
 		return err
 	}
-	if !contexts.Exists(name) {
-		_, err := contexts.Load(name)
+	if !workspaces.Exists(name) {
+		_, err := workspaces.Load(name)
 		return err
 	}
 	if err := Confirm(cmd, name); err != nil {
 		return err
 	}
-	// The tunnel daemon would keep the removed context's tunnel up.
+	// The tunnel daemon would keep the removed workspace's tunnel up.
 	stopTunnelDaemonQuietly(commandContext(cmd), name)
-	if err := contexts.Remove(name); err != nil {
+	if err := workspaces.Remove(name); err != nil {
 		return err
 	}
-	return output.OK(cmd, map[string]any{"removed": name}, "Removed context "+name+". Its transfer bundle still opens the server.")
+	return output.OK(cmd, map[string]any{"removed": name}, "Removed workspace "+name+". Its transfer bundle still opens the server.")
 }

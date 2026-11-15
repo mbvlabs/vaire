@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/backup"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 func TestAgo(t *testing.T) {
@@ -154,13 +154,13 @@ func TestAddRecoveryKit(t *testing.T) {
 	}
 	// server init creates the recovery identity without a bucket: no keys to
 	// send, but the recipient, which the master bundles are encrypted to.
-	identityOnly := &contexts.BackupCreds{}
+	identityOnly := &workspaces.BackupCreds{}
 	identityOnly.Dumps.AgeIdentity, identityOnly.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, identityOnly)
 	if len(values) != 2 || values[steps.SecretBackupAgeRecipient] != "age1xyz" {
 		t.Errorf("identity only: secrets = %v", values)
 	}
-	kit := &contexts.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"}
+	kit := &workspaces.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"}
 	kit.PgBackRest.CipherPass = "cipher"
 	kit.Dumps.AgeIdentity, kit.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, kit)

@@ -1,4 +1,4 @@
-package contexts
+package workspaces
 
 // Role is a database user and its password.
 type Role struct {

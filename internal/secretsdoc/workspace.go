@@ -10,9 +10,9 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/password"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 )
 
 // BreakGlass is the break-glass text stored in the document (§8.4).
@@ -33,20 +33,20 @@ func BreakGlass(server, adminUser, publicAddress string) string {
 	}, "\n")
 }
 
-// Install creates the local context name from doc (§10.1 vaire login). It
-// refuses to replace an existing context. lockdownConfirmedAt is set when the
+// Install creates the local workspace name from doc (§10.1 vaire login). It
+// refuses to replace an existing workspace. lockdownConfirmedAt is set when the
 // caller already confirmed the SSH lockdown over WireGuard.
-func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context, error) {
-	if err := contexts.ValidateName(name); err != nil {
+func Install(doc Document, name, lockdownConfirmedAt string) (*workspaces.Workspace, error) {
+	if err := workspaces.ValidateName(name); err != nil {
 		return nil, err
 	}
-	if contexts.Exists(name) {
+	if workspaces.Exists(name) {
 		return nil, output.NewError(
 			output.CodePrecondition,
-			"context "+name+" already exists",
+			"workspace "+name+" already exists",
 			output.ExitPrecondition,
-			"Pick another name with --name, or remove it first with vaire context remove "+name+".",
-		).WithDetails(map[string]any{"reason": "context_exists", "context": name})
+			"Pick another name with --name, or remove it first with vaire workspace remove "+name+".",
+		).WithDetails(map[string]any{"reason": "workspace_exists", "workspace": name})
 	}
 	if len(doc.Nodes) == 0 {
 		return nil, secretsError("the secrets document lists no node", nil)
@@ -54,13 +54,13 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 	if doc.MasterPassword != "" && !password.Valid(doc.MasterPassword) {
 		return nil, secretsError("the master password verifier in the document is invalid or has unsupported costs", nil)
 	}
-	ctx := &contexts.Context{
+	ctx := &workspaces.Workspace{
 		Name:      name,
 		Server:    doc.Server.Name,
 		Domain:    doc.Server.Domain,
 		TLSMode:   doc.Server.TLSMode,
 		Databases: map[string]string{},
-		Operator: contexts.Operator{
+		Operator: workspaces.Operator{
 			Name:      doc.Operator.Name,
 			WGAddress: doc.Operator.WGAddress,
 			SSHUser:   doc.Operator.SSHUser,
@@ -75,7 +75,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 	if _, err := transport.KeyAuth([]byte(doc.Operator.SSHPrivateKey)); err != nil {
 		return nil, secretsError("the operator SSH key in the document is invalid", err)
 	}
-	known, err := transport.LoadKnownHosts(contexts.Path(name, contexts.KnownHostsFile))
+	known, err := transport.LoadKnownHosts(workspaces.Path(name, workspaces.KnownHostsFile))
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 			return nil, secretsError("the host keys of node "+n.Name+" are invalid", err)
 		}
 		known.Pin(net.JoinHostPort(n.WGAddress, "22"), keys...)
-		ctx.Nodes = append(ctx.Nodes, contexts.Node{
+		ctx.Nodes = append(ctx.Nodes, workspaces.Node{
 			Name:          n.Name,
 			Role:          n.Role,
 			Hostname:      n.Hostname,
@@ -95,38 +95,38 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*contexts.Context,
 			ListenPort:    n.ListenPort,
 		})
 	}
-	if err := saveInstalledContext(doc, ctx, known); err != nil {
+	if err := saveInstalledWorkspace(doc, ctx, known); err != nil {
 		return nil, err
 	}
-	if current, _ := contexts.Current(); current == "" || !contexts.Exists(current) {
-		if err := contexts.SetCurrent(name); err != nil {
+	if current, _ := workspaces.Current(); current == "" || !workspaces.Exists(current) {
+		if err := workspaces.SetCurrent(name); err != nil {
 			return ctx, err
 		}
 	}
 	return ctx, nil
 }
 
-func saveInstalledContext(doc Document, ctx *contexts.Context, known *transport.KnownHosts) error {
+func saveInstalledWorkspace(doc Document, ctx *workspaces.Workspace, known *transport.KnownHosts) error {
 	name := ctx.Name
 	ok := false
 	defer func() {
 		if !ok {
-			_ = os.RemoveAll(contexts.Dir(name))
+			_ = os.RemoveAll(workspaces.Dir(name))
 		}
 	}()
-	if err := contexts.WriteFile(name, contexts.WGKeyFile, []byte(doc.Operator.WGPrivateKey+"\n")); err != nil {
+	if err := workspaces.WriteFile(name, workspaces.WGKeyFile, []byte(doc.Operator.WGPrivateKey+"\n")); err != nil {
 		return err
 	}
-	if err := contexts.WriteFile(name, contexts.SSHKeyFile, []byte(doc.Operator.SSHPrivateKey)); err != nil {
+	if err := workspaces.WriteFile(name, workspaces.SSHKeyFile, []byte(doc.Operator.SSHPrivateKey)); err != nil {
 		return err
 	}
 	if err := known.Save(); err != nil {
 		return err
 	}
-	if err := contexts.SaveCredentials(name, contexts.Credentials{SudoPassword: doc.Operator.SudoPassword, Database: doc.Database, Backup: doc.Backup, Metrics: doc.Metrics.creds(), MasterPasswordHash: doc.MasterPassword}); err != nil {
+	if err := workspaces.SaveCredentials(name, workspaces.Credentials{SudoPassword: doc.Operator.SudoPassword, Database: doc.Database, Backup: doc.Backup, Metrics: doc.Metrics.creds(), MasterPasswordHash: doc.MasterPassword}); err != nil {
 		return err
 	}
-	if err := contexts.Save(ctx); err != nil {
+	if err := workspaces.Save(ctx); err != nil {
 		return err
 	}
 	ok = true

@@ -1,8 +1,8 @@
 // Package diagnostics defines the incident-bundle contract: one portable JSON
 // document holding typed activity events and allowlisted metadata, small enough
-// for an agent to inspect without an operator context or server credentials.
+// for an agent to inspect without an operator workspace or server credentials.
 //
-// A bundle never carries contexts, credentials, private keys, TOTP state,
+// A bundle never carries workspaces, credentials, private keys, TOTP state,
 // database dumps, configuration trees, raw service logs or free-form request,
 // result and error bodies. Metadata is a fixed struct, not a map, Query is an
 // optional typed activity.Query carrying only the filters used to select the

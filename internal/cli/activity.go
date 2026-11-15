@@ -55,12 +55,12 @@ func activityCommands() cmdSpec {
 			Summary: "Search the node's bounded activity history",
 			WhenToUse: []string{
 				"Ask what happened to one operation without reading raw logs. Events carry typed actions, outcomes, correlation IDs, times and stable codes only.",
-				"Only the context's master node is queried today; worker fan-out waits for fleet transport.",
+				"Only the workspace's master node is queried today; worker fan-out waits for fleet transport.",
 			},
 			Examples: []string{"vaire activity list --since 1h", "vaire activity show <operation-id>"},
 			Remote:   true,
 			ErrorCodes: []string{
-				"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+				"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 				"node_version_mismatch", "validation_failed", "precondition_failed",
 			},
 		},
@@ -85,7 +85,7 @@ func activityCommands() cmdSpec {
 					},
 					Remote: true,
 					ErrorCodes: []string{
-						"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+						"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 						"node_version_mismatch", "validation_failed", "precondition_failed",
 					},
 					Next: []string{"vaire activity show <operation-id>"},
@@ -114,7 +114,7 @@ func activityCommands() cmdSpec {
 					},
 					Remote: true,
 					ErrorCodes: []string{
-						"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+						"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 						"node_version_mismatch", "validation_failed", "precondition_failed",
 					},
 					Next: []string{"vaire activity list --operation <operation-id>"},
@@ -132,7 +132,7 @@ func activityCommands() cmdSpec {
 					Examples: []string{"vaire activity health", "vaire activity health --output json"},
 					Remote:   true,
 					ErrorCodes: []string{
-						"context_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
+						"workspace_not_found", "remote_unreachable", "transport_failed", "host_key_mismatch",
 						"node_version_mismatch", "precondition_failed", "validation_failed",
 					},
 					Next: []string{"vaire activity list --since 1h"},
@@ -584,13 +584,13 @@ func activityNode(c activity.Coverage) string {
 // activityNext keeps the filters a cursor is bound to. The store refuses a
 // cursor presented with different filters, so the continuation command must
 // repeat them.
-func activityNext(page activity.Page, q activity.Query, contextName string) []string {
+func activityNext(page activity.Page, q activity.Query, workspaceName string) []string {
 	if page.NextCursor == "" {
 		return nil
 	}
 	parts := []string{"vaire"}
-	if contextName != "" {
-		parts = append(parts, "--context", activityCell(contextName))
+	if workspaceName != "" {
+		parts = append(parts, "--workspace", activityCell(workspaceName))
 	}
 	parts = append(parts, "activity", "list")
 	for _, filter := range []struct {

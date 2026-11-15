@@ -1,10 +1,10 @@
 package cli
 
 import (
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/steps"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -17,10 +17,10 @@ const metricsBcryptCost = 8
 // ensureMetricsCreds fills creds with the /metrics credential when it has
 // none, and returns whether it generated one. The operator generates it like
 // every vaire secret (Phase 4 D5).
-func ensureMetricsCreds(creds **contexts.MetricsCreds) (bool, error) {
+func ensureMetricsCreds(creds **workspaces.MetricsCreds) (bool, error) {
 	if *creds != nil && (*creds).Password != "" {
 		if (*creds).Username == "" {
-			(*creds).Username = contexts.MetricsUser
+			(*creds).Username = workspaces.MetricsUser
 		}
 		secrets.Add((*creds).Password)
 		return false, nil
@@ -29,7 +29,7 @@ func ensureMetricsCreds(creds **contexts.MetricsCreds) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	*creds = &contexts.MetricsCreds{Username: contexts.MetricsUser, Password: pw}
+	*creds = &workspaces.MetricsCreds{Username: workspaces.MetricsUser, Password: pw}
 	secrets.Add(pw)
 	return true, nil
 }
@@ -37,7 +37,7 @@ func ensureMetricsCreds(creds **contexts.MetricsCreds) (bool, error) {
 // metricsHash is the htpasswd line's hash of the credential. The node never
 // sees the password: only this hash travels, as the request secret
 // metrics.htpasswd, and nginx checks it with crypt(3).
-func metricsHash(creds *contexts.MetricsCreds) (string, error) {
+func metricsHash(creds *workspaces.MetricsCreds) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(creds.Password), metricsBcryptCost)
 	if err != nil {
 		return "", err
@@ -48,7 +48,7 @@ func metricsHash(creds *contexts.MetricsCreds) (string, error) {
 
 // addMetricsSecret tops up the credential in creds and puts its hash in
 // rpc. It returns whether a new credential was generated.
-func addMetricsSecret(creds **contexts.MetricsCreds, rpc map[string]string) (bool, error) {
+func addMetricsSecret(creds **workspaces.MetricsCreds, rpc map[string]string) (bool, error) {
 	generated, err := ensureMetricsCreds(creds)
 	if err != nil {
 		return false, err
@@ -63,7 +63,7 @@ func addMetricsSecret(creds **contexts.MetricsCreds, rpc map[string]string) (boo
 
 // metricsDocument is the secrets document's metrics section for creds at
 // the node hostname, or nil without a credential.
-func metricsDocument(creds *contexts.MetricsCreds, hostname, pathPrefix string) *secretsdoc.Metrics {
+func metricsDocument(creds *workspaces.MetricsCreds, hostname, pathPrefix string) *secretsdoc.Metrics {
 	if creds == nil || creds.Password == "" {
 		return nil
 	}

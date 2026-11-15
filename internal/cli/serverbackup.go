@@ -9,10 +9,10 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
 
@@ -160,7 +160,7 @@ type masterStatusData struct {
 }
 
 func runServerBackupList(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -283,7 +283,7 @@ func masterListMessage(d masterListData) string {
 }
 
 func runServerBackupVerify(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}

@@ -6,21 +6,21 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
-	"github.com/mbvlabs/vaire/internal/contexts"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
 
-// runSecretsExport rebuilds the secrets handoff from the local context
+// runSecretsExport rebuilds the secrets handoff from the local workspace
 // (§10.1). It generates a fresh bundle passphrase and offers a node-verified
 // code, with the local master password as an offline fallback.
 // The whole document is revealed, so a human master password or a code from
 // the authenticator app is required (secretGateUnlock).
 func runSecretsExport(cmd *cobra.Command, _ []string) error {
-	c, err := contexts.Resolve(stringFlag(cmd, "context"))
+	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return err
 	}
@@ -31,7 +31,7 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	if err := secretGateUnlock(cmd, hash, nil, nil, "vaire secrets export"); err != nil {
 		return err
 	}
-	doc, err := contextDocument(c)
+	doc, err := workspaceDocument(c)
 	if err != nil {
 		return err
 	}
@@ -64,10 +64,10 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	return output.Success(cmd, output.Result{Data: res, Message: "New secrets handoff shown. The previous bundle still opens with its own passphrase."})
 }
 
-// showContextHandoff shows a new handoff for c in a terminal, for commands
+// showWorkspaceHandoff shows a new handoff for c in a terminal, for commands
 // that change the recovery kit (vaire backup setup).
-func showContextHandoff(cmd *cobra.Command, c *contexts.Context) error {
-	doc, err := contextDocument(c)
+func showWorkspaceHandoff(cmd *cobra.Command, c *workspaces.Workspace) error {
+	doc, err := workspaceDocument(c)
 	if err != nil {
 		return err
 	}
@@ -78,21 +78,21 @@ func showContextHandoff(cmd *cobra.Command, c *contexts.Context) error {
 	return h.show(cmd, false, true)
 }
 
-// contextDocument rebuilds the secrets document from a context.
-func contextDocument(c *contexts.Context) (secretsdoc.Document, error) {
-	wgKey, err := contexts.ReadFile(c.Name, contexts.WGKeyFile)
+// workspaceDocument rebuilds the secrets document from a workspace.
+func workspaceDocument(c *workspaces.Workspace) (secretsdoc.Document, error) {
+	wgKey, err := workspaces.ReadFile(c.Name, workspaces.WGKeyFile)
 	if err != nil {
-		return secretsdoc.Document{}, contextFileError(c.Name, contexts.WGKeyFile, err)
+		return secretsdoc.Document{}, workspaceFileError(c.Name, workspaces.WGKeyFile, err)
 	}
-	sshKey, err := contexts.ReadFile(c.Name, contexts.SSHKeyFile)
+	sshKey, err := workspaces.ReadFile(c.Name, workspaces.SSHKeyFile)
 	if err != nil {
-		return secretsdoc.Document{}, contextFileError(c.Name, contexts.SSHKeyFile, err)
+		return secretsdoc.Document{}, workspaceFileError(c.Name, workspaces.SSHKeyFile, err)
 	}
-	creds, err := contexts.LoadCredentials(c.Name)
+	creds, err := workspaces.LoadCredentials(c.Name)
 	if err != nil {
 		return secretsdoc.Document{}, err
 	}
-	known, err := transport.LoadKnownHosts(contexts.Path(c.Name, contexts.KnownHostsFile))
+	known, err := transport.LoadKnownHosts(workspaces.Path(c.Name, workspaces.KnownHostsFile))
 	if err != nil {
 		return secretsdoc.Document{}, err
 	}
@@ -114,8 +114,8 @@ func contextDocument(c *contexts.Context) (secretsdoc.Document, error) {
 	return doc, nil
 }
 
-// rebuildDocument builds a document from the context and credentials.
-func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.Credentials, known *transport.KnownHosts) (secretsdoc.Document, error) {
+// rebuildDocument builds a document from the workspace and credentials.
+func rebuildDocument(c *workspaces.Workspace, wgKey, sshKey string, creds workspaces.Credentials, known *transport.KnownHosts) (secretsdoc.Document, error) {
 	doc := secretsdoc.Document{
 		Schema:       secretsdoc.Schema,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
@@ -151,7 +151,7 @@ func rebuildDocument(c *contexts.Context, wgKey, sshKey string, creds contexts.C
 			WGPublicKey:   n.WGPublicKey,
 			SSHHostKeys:   hostKeys,
 		})
-		if n.Role == contexts.RoleMaster || master == "" {
+		if n.Role == workspaces.RoleMaster || master == "" {
 			master = n.PublicAddress
 		}
 	}
