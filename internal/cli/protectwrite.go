@@ -57,26 +57,67 @@ func protectedWriteCode(cmd *cobra.Command, db, what string, status func() (prot
 // isFollowerStatus reports whether db is a follower in a protect.status
 // result. A follower's protection, if any, has no writable path (Phase 6).
 func isFollowerStatus(dbs []node.ProtectedDatabase, db string) bool {
+	_, follower := followerSource(dbs, db)
+	return follower
+}
+
+// followerSource is the source db follows in a protect.status result, and
+// whether db is a follower at all.
+func followerSource(dbs []node.ProtectedDatabase, db string) (string, bool) {
 	for _, d := range dbs {
-		if d.Name == db {
-			return d.Follows != ""
+		if d.Name == db && d.Follows != "" {
+			return d.Follows, true
 		}
 	}
-	return false
+	return "", false
 }
+
+// refuseFollowerWrite wraps a protect.status reader so a writing session on a
+// follower is refused before protectedWriteCode decides anything: a follower
+// is a read-only standby, it takes no writes, and no code from the
+// authenticator app could make it writable (Phase 6). It refuses an
+// unprotected follower too, which protectedWriteCode would pass over.
+func refuseFollowerWrite(status func() (protectStatusData, error), db string) func() (protectStatusData, error) {
+	return func() (protectStatusData, error) {
+		st, err := status()
+		if err != nil {
+			return protectStatusData{}, err
+		}
+		source, follower := followerSource(st.Databases, db)
+		if follower {
+			return protectStatusData{}, followerWriteError(db, source)
+		}
+		return st, nil
+	}
+}
+
+// followerWriteError is the refusal a write meets on follower db: writes go to
+// its source, or the follower can be made independent first.
+func followerWriteError(db, source string) error {
+	return output.NewError(output.CodePrecondition,
+		db+" is a follower of "+source+", so writing to it is refused", output.ExitPrecondition,
+		"Write to "+source+" instead, or make "+db+" independent first: vaire db unfollow "+db+" --confirm "+db+"/unfollow. Reads need no --write.").
+		WithDetails(map[string]any{"reason": "is_follower", "database": db, "source": source})
+}
+
+// fetchWriteProtectStatus reads protect.status for a writing session. Tests
+// replace it to stand in for the node's answer.
+var fetchWriteProtectStatus = fetchProtectStatus
 
 // sessionLogin is the login vaire sql, psql and console use on db: vaire_admin,
 // or for a write to a protected database a short-lived role in <db>_owner
 // that the node creates once the code from the authenticator app checks out
 // (db.write-access). vaire_admin cannot write to a protected database, so the
-// node enforces it whatever the client does.
+// node enforces it whatever the client does. A write to a follower is refused
+// here, before it asks for a code or acts as an owner role: a follower takes
+// no writes.
 func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write bool) (user, password string, err error) {
 	user, password, err = adminCredentials(s.ctx)
 	if err != nil || !write {
 		return user, password, err
 	}
-	code, err := protectedWriteCode(cmd, db, "writing to it",
-		func() (protectStatusData, error) { return fetchProtectStatus(cmd, s, p) }, p.note)
+	status := func() (protectStatusData, error) { return fetchWriteProtectStatus(cmd, s, p) }
+	code, err := protectedWriteCode(cmd, db, "writing to it", refuseFollowerWrite(status, db), p.note)
 	if err != nil || code == nil {
 		return user, password, err
 	}
