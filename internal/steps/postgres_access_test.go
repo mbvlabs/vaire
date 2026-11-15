@@ -80,6 +80,9 @@ func TestAccessInspectionSQL(t *testing.T) {
 		`has_sequence_privilege`,
 		`has_function_privilege`,
 		`uncovered_creators`,
+		`E'"a.""b_owner"'::regrole::oid::bigint`,
+		`E'"a.""b_app"'::regrole::oid::bigint`,
+		`E'"a.""b_ro"'::regrole::oid::bigint`,
 	} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("missing %q", want)
@@ -107,6 +110,8 @@ func TestInspectAccess(t *testing.T) {
 		{"malformed", "{", "unknown", nil, true},
 		{"missing", `{}`, "unknown", nil, true},
 		{"missing role", strings.Replace(good, `[1,2,3]`, `[1,0,3]`, 1), "unknown", nil, true},
+		{"maximum oid", strings.Replace(good, `[1,2,3]`, `[4294967295,2,3]`, 1), "installed", nil, false},
+		{"overflowing oid", strings.Replace(good, `[1,2,3]`, `[4294967296,2,3]`, 1), "unknown", nil, true},
 		{"negative", strings.Replace(good, `"table_missing":0`, `"table_missing":-1`, 1), "unknown", nil, true},
 		{"null creators", strings.Replace(good, `["other"]`, `null`, 1), "unknown", nil, true},
 	}

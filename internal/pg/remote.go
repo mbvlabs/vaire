@@ -19,7 +19,7 @@ type Params struct {
 	Host       string
 	Port       int
 	ServerName string
-	TLSMode    string // verify-full | require
+	TLSMode    string // acme/verify-full verify; self-signed/require encrypt without verification
 	User       string
 	Password   string
 	Database   string
@@ -43,9 +43,9 @@ type Result struct {
 	RowCount   int         `json:"row_count"`
 }
 
-// Connect dials PostgreSQL through dialer. TLSMode "verify-full" verifies the
-// server certificate against system roots using ServerName; "require"
-// encrypts without verifying.
+// Connect dials PostgreSQL through dialer. TLSMode "acme" or "verify-full"
+// verifies the server certificate against system roots using ServerName;
+// "self-signed" or "require" encrypts without verifying.
 func Connect(ctx context.Context, dialer transport.Dialer, p Params) (*Remote, error) {
 	cfg, err := pgx.ParseConfig("")
 	if err != nil {
@@ -75,7 +75,7 @@ func Connect(ctx context.Context, dialer transport.Dialer, p Params) (*Remote, e
 }
 
 func tlsConfig(p Params) *tls.Config {
-	if p.TLSMode == "require" {
+	if p.TLSMode == "require" || p.TLSMode == "self-signed" {
 		return &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // G402: self-signed mode cannot verify.
 	}
 	return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: p.ServerName}
