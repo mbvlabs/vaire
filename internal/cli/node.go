@@ -27,7 +27,7 @@ func runNodeRPC(cmd *cobra.Command, _ []string) error {
 	signal.Ignore(syscall.SIGPIPE)
 	code := node.Serve(os.Stdin, cmd.OutOrStdout())
 	if code != output.ExitOK {
-		return &localenv.SilentExit{Code: code}
+		return &localenv.SilentExitError{Code: code}
 	}
 	return nil
 }

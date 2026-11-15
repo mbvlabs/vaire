@@ -38,14 +38,14 @@ type topCollector struct {
 	includeVaire bool
 }
 
-func openTop(ctx context.Context, cmd *cobra.Command, s *session, p *progress, dbs []string) (*topCollector, error) {
+func openTop(ctx context.Context, s *session, p *progress, dbs []string) (*topCollector, error) {
 	user, password, err := adminCredentials(s.ctx)
 	if err != nil {
 		return nil, err
 	}
 	c := &topCollector{pools: map[string]*pg.Remote{}}
 	for _, db := range dbs {
-		at := databaseEndpoint(cmd, s, p, db)
+		at := databaseEndpoint(ctx, s, p, db)
 		tc := &topConn{db: db}
 		conn, err := pg.Connect(ctx, s.dialer, pg.Params{Host: at.WGAddress, Port: pgPort, ServerName: at.Hostname, TLSMode: s.ctx.TLSMode,
 			User: user, Password: password, Database: db, ApplicationName: "vaire top"})
@@ -61,7 +61,7 @@ func openTop(ctx context.Context, cmd *cobra.Command, s *session, p *progress, d
 		}
 		c.conns = append(c.conns, tc)
 	}
-	master := databaseEndpoint(cmd, s, p, "")
+	master := databaseEndpoint(ctx, s, p, "")
 	for name, port := range map[string]int{"transaction": 6432, "session": pgPort} {
 		conn, err := pg.Connect(ctx, s.dialer, pg.Params{Host: master.WGAddress, Port: port, ServerName: master.Hostname, TLSMode: s.ctx.TLSMode,
 			User: user, Password: password, Database: "pgbouncer", SimpleProtocol: true})
@@ -86,30 +86,41 @@ func (c *topCollector) close(ctx context.Context) {
 func (c *topCollector) sample(ctx context.Context, filter string) top.Snapshot {
 	cur := map[string]top.Sample{}
 	for _, tc := range c.conns {
-		s := top.Sample{DB: tc.db, At: time.Now()}
-		if tc.conn == nil {
-			s.Error = tc.err
-			cur[tc.db] = s
-			continue
-		}
-		if res, err := tc.conn.Query(ctx, top.DatabaseSQL); err == nil && len(res.Maps()) == 1 {
-			s.Counters = top.ParseCounters(res.Maps()[0])
-		} else if err != nil {
-			s.Error = err.Error()
-		}
-		if res, err := tc.conn.Query(ctx, top.ActivitySQL); err == nil {
-			s.Sessions = top.ParseSessions(tc.db, res.Maps())
-			if !c.includeVaire {
-				s.Sessions = withoutVaireSessions(s.Sessions)
-			}
-		}
-		if tc.statements {
-			if res, err := tc.conn.Query(ctx, top.StatementsSQL(c.includeVaire)); err == nil {
-				s.Statements = top.ParseStatements(res.Maps())
-			}
-		}
-		cur[tc.db] = s
+		cur[tc.db] = c.sampleConn(ctx, tc)
 	}
+	snap := top.Build(c.prev, cur, c.samplePools(ctx), filter, time.Now())
+	c.prev = cur
+	return snap
+}
+
+// sampleConn reads one database's counters, sessions and statements.
+func (c *topCollector) sampleConn(ctx context.Context, tc *topConn) top.Sample {
+	s := top.Sample{DB: tc.db, At: time.Now()}
+	if tc.conn == nil {
+		s.Error = tc.err
+		return s
+	}
+	if res, err := tc.conn.Query(ctx, top.DatabaseSQL); err == nil && len(res.Maps()) == 1 {
+		s.Counters = top.ParseCounters(res.Maps()[0])
+	} else if err != nil {
+		s.Error = err.Error()
+	}
+	if res, err := tc.conn.Query(ctx, top.ActivitySQL); err == nil {
+		s.Sessions = top.ParseSessions(tc.db, res.Maps())
+		if !c.includeVaire {
+			s.Sessions = withoutVaireSessions(s.Sessions)
+		}
+	}
+	if tc.statements {
+		if res, err := tc.conn.Query(ctx, top.StatementsSQL(c.includeVaire)); err == nil {
+			s.Statements = top.ParseStatements(res.Maps())
+		}
+	}
+	return s
+}
+
+// samplePools reads both poolers' pools.
+func (c *topCollector) samplePools(ctx context.Context) []top.Pool {
 	var pools []top.Pool
 	for _, name := range []string{"transaction", "session"} {
 		if conn, ok := c.pools[name]; ok {
@@ -118,9 +129,7 @@ func (c *topCollector) sample(ctx context.Context, filter string) top.Snapshot {
 			}
 		}
 	}
-	snap := top.Build(c.prev, cur, pools, filter, time.Now())
-	c.prev = cur
-	return snap
+	return pools
 }
 
 func runTop(cmd *cobra.Command, _ []string) error {
@@ -131,7 +140,7 @@ func runTop(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	ctx := commandContext(cmd)
-	dbs := topDatabases(cmd, s, p)
+	dbs := topDatabases(ctx, s, p)
 	filter := stringFlag(cmd, "db")
 	if filter != "" {
 		found := false
@@ -146,14 +155,14 @@ func runTop(cmd *cobra.Command, _ []string) error {
 		return output.Success(cmd, output.Result{Data: top.Snapshot{At: time.Now()}, Message: "no databases yet (vaire db create <name>)", Warnings: s.warnings})
 	}
 	stopWait := p.wait("connecting to " + strconv.Itoa(len(dbs)) + " databases")
-	c, err := openTop(ctx, cmd, s, p, dbs)
+	c, err := openTop(ctx, s, p, dbs)
 	stopWait()
 	if err != nil {
 		return err
 	}
 	c.includeVaire = flagTrue(cmd, "all-sessions")
 	defer c.close(context.Background())
-	interactive := !flagTrue(cmd, "once") && !MustNotPrompt(cmd) && term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // G115: a file descriptor fits in int.
+	interactive := !flagTrue(cmd, "once") && !MustNotPrompt(cmd) && term.IsTerminal(int(os.Stdout.Fd()))
 	if !interactive {
 		// Two rounds a refresh apart, so the snapshot has rates.
 		c.sample(ctx, filter)
@@ -199,9 +208,9 @@ func withoutVaireSessions(sessions []top.Session) []top.Session {
 
 // topDatabases are the databases in the context's placement cache, refreshed
 // from the master when it is empty.
-func topDatabases(cmd *cobra.Command, s *session, p *progress) []string {
+func topDatabases(ctx context.Context, s *session, p *progress) []string {
 	if len(s.ctx.Databases) == 0 {
-		s.warnings = append(s.warnings, syncContextFromNode(cmd, s, p)...)
+		s.warnings = append(s.warnings, syncContextFromNode(ctx, s, p)...)
 	}
 	out := make([]string, 0, len(s.ctx.Databases))
 	for db := range s.ctx.Databases {

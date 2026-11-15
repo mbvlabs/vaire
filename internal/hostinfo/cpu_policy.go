@@ -58,14 +58,14 @@ type CPUPolicy struct {
 	QuotaPercent *float64
 }
 
-// CPUPolicyMismatch indicates an unknown or disagreeing effective policy.
+// CPUPolicyMismatchError indicates an unknown or disagreeing effective policy.
 // Facts remain available in Observation; no raw systemd output is exposed.
-type CPUPolicyMismatch struct {
+type CPUPolicyMismatchError struct {
 	Reason      string
 	Observation CPUObservation
 }
 
-func (e *CPUPolicyMismatch) Error() string { return "cpu policy not enforced: " + e.Reason }
+func (e *CPUPolicyMismatchError) Error() string { return "cpu policy not enforced: " + e.Reason }
 
 var pgUnitPattern = regexp.MustCompile(`^postgresql@18-[a-zA-Z0-9_]+(?:\.service)?$`)
 var sliceUnitPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+\.slice$`)
@@ -385,7 +385,7 @@ func cpuUsage(s string) (uint64, bool) {
 // ValidateCPUPolicy checks measured service settings, not ancestor caps or
 // contention behavior. Quota comparison allows one microsecond rounding.
 func ValidateCPUPolicy(want CPUPolicy, got CPUObservation) error {
-	fail := func(reason string) error { return &CPUPolicyMismatch{reason, got} }
+	fail := func(reason string) error { return &CPUPolicyMismatchError{reason, got} }
 	if got.Reason == "service_identity_unverified" {
 		return fail("effective_policy_unknown")
 	}
@@ -395,25 +395,34 @@ func ValidateCPUPolicy(want CPUPolicy, got CPUObservation) error {
 	if !want.Idle && (want.Weight < 1 || want.Weight > 10000 || (got.Weight != nil && *got.Weight != want.Weight)) {
 		return fail("weight_mismatch")
 	}
-	if got.Quota != nil && want.QuotaPercent == nil {
-		if !got.Quota.Unlimited {
-			return fail("quota_mismatch")
-		}
-	}
-	if want.QuotaPercent != nil {
-		pct := *want.QuotaPercent
-		if math.IsNaN(pct) || math.IsInf(pct, 0) || pct <= 0 {
-			return fail("invalid_requested_quota")
-		}
-		if got.Quota != nil && (got.Quota.Unlimited || got.Quota.PeriodUsec == 0 ||
-			math.Abs(float64(got.Quota.QuotaUsec)-pct*float64(got.Quota.PeriodUsec)/100) > 1) {
-			return fail("quota_mismatch")
-		}
+	if reason := cpuQuotaMismatch(want.QuotaPercent, got.Quota); reason != "" {
+		return fail(reason)
 	}
 	if got.Screen.Capability != CPUCapable || got.Idle == nil || got.Quota == nil || (!want.Idle && got.Weight == nil) {
 		return fail("effective_policy_unknown")
 	}
 	return nil
+}
+
+// cpuQuotaMismatch is the reason the realized quota disagrees with the
+// requested percentage, or "" when it agrees. One microsecond of rounding is
+// allowed.
+func cpuQuotaMismatch(want *float64, got *CPUQuota) string {
+	if got != nil && want == nil && !got.Unlimited {
+		return "quota_mismatch"
+	}
+	if want == nil {
+		return ""
+	}
+	pct := *want
+	if math.IsNaN(pct) || math.IsInf(pct, 0) || pct <= 0 {
+		return "invalid_requested_quota"
+	}
+	if got != nil && (got.Unlimited || got.PeriodUsec == 0 ||
+		math.Abs(float64(got.QuotaUsec)-pct*float64(got.PeriodUsec)/100) > 1) {
+		return "quota_mismatch"
+	}
+	return ""
 }
 
 // CPUUsagePercent returns the average percentage of one CPU between two

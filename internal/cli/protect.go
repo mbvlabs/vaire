@@ -52,16 +52,9 @@ const protectCodeAttempts = 3
 // the operator picks, in the same run. Only a person at a terminal can do
 // this.
 func runProtectInit(cmd *cobra.Command, _ []string) error {
-	rotate, all := flagTrue(cmd, "rotate"), flagTrue(cmd, "all")
-	dbFlags, _ := cmd.Flags().GetStringArray("db")
-	if all && len(dbFlags) > 0 {
-		return output.NewError(output.CodeUsage, "pass --db or --all, not both", output.ExitUsage,
-			"--all protects every database; --db names one and can be repeated.")
-	}
-	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
-		return output.NewError(output.CodeInputRequired, "vaire protect init needs a human at an interactive terminal", output.ExitInput,
-			"Run it yourself in a terminal, without --yes, --no-input or structured output: it shows a QR code to scan with an authenticator app and asks for a code from it.").
-			WithDetails(map[string]any{"reason": "protect_requires_human"})
+	rotate, all, dbFlags, err := protectInitFlags(cmd)
+	if err != nil {
+		return err
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -70,7 +63,7 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 	// Check the names before the QR code, so a typo costs nothing.
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -80,51 +73,9 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
-	var initSecrets map[string]string
-	if rotate {
-		code, err := readProtectCode(cmd, "Current code from the existing vaire entry in the authenticator app")
-		if err != nil {
-			return err
-		}
-		initSecrets = map[string]string{node.ProtectCodeSecret: code}
-	}
-	reply, err := p.call(commandContext(cmd), s.node, "protect.init", map[string]any{"rotate": rotate, "label": s.ctx.Name},
-		remote.CallOptions{Secrets: initSecrets, OnEvent: p.event})
+	message, rotated, err := protectSetup(cmd, p, s, rotate)
 	if err != nil {
 		return err
-	}
-	var setup struct {
-		Secret string `json:"secret"`
-		URI    string `json:"uri"`
-	}
-	if err := reply.Decode(&setup); err != nil {
-		return err
-	}
-	if err := showProtectSecret(cmd, setup.URI, setup.Secret); err != nil {
-		return err
-	}
-	for attempt := 1; ; attempt++ {
-		code, err := readProtectCode(cmd, "Code the authenticator app now shows for vaire:"+s.ctx.Name)
-		if err != nil {
-			return err
-		}
-		reply, err = p.call(commandContext(cmd), s.node, "protect.confirm", nil,
-			remote.CallOptions{Secrets: map[string]string{node.ProtectCodeSecret: code}, OnEvent: p.event})
-		if err == nil {
-			break
-		}
-		if attempt >= protectCodeAttempts || !retryableCode(err) {
-			return err
-		}
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "That code was not accepted ("+err.Error()+"). Check the device's clock and try the next code.")
-	}
-	var done struct {
-		Rotated bool `json:"rotated"`
-	}
-	_ = reply.Decode(&done)
-	message := "two-factor protection is set up: lifting a database's protection now asks for a code from vaire:" + s.ctx.Name + " in the authenticator app"
-	if done.Rotated {
-		message = "the two-factor secret was rotated: remove the old vaire:" + s.ctx.Name + " entry from the authenticator app and keep the new one"
 	}
 
 	// The secret works now, so protecting can no longer be refused for the
@@ -135,29 +86,115 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
-	warnings := s.warnings
-	_, todo := splitProtected(cfg, chosen)
-	var newly []string
-	if len(todo) > 0 {
-		if err := setProtected(cmd, s, p, todo, true, nil); err != nil {
-			warnings = append(warnings, output.Warning{Code: "protect_failed",
-				Message: "two-factor protection is set up, but protecting " + strings.Join(todo, ", ") + " failed: " + err.Error() + ". Run vaire db protect " + strings.Join(todo, " ") + " to retry"})
-		} else {
-			newly = todo
-			for _, name := range todo {
-				_ = cfg.Set("clusters."+name+".protected", "true")
-			}
-		}
-	}
+	warnings, newly := protectChosen(cmd, s, p, &cfg, chosen, s.warnings)
 	protected, rest := splitProtected(cfg, databaseNames(cfg))
 	tail, next := protectInitOutcome(protected, rest)
 	return output.Success(cmd, output.Result{
-		Data: map[string]any{"configured": true, "rotated": done.Rotated,
+		Data: map[string]any{"configured": true, "rotated": rotated,
 			"protected_databases": nonNil(protected), "newly_protected": nonNil(newly), "unprotected_databases": nonNil(rest)},
 		Message:  message + "; " + tail,
 		Warnings: warnings,
 		Next:     next,
 	})
+}
+
+// protectInitFlags reads the flags of protect init and refuses --db with
+// --all or a run no human can confirm.
+func protectInitFlags(cmd *cobra.Command) (rotate, all bool, dbFlags []string, err error) {
+	rotate, all = flagTrue(cmd, "rotate"), flagTrue(cmd, "all")
+	dbFlags, _ = cmd.Flags().GetStringArray("db")
+	if all && len(dbFlags) > 0 {
+		return false, false, nil, output.NewError(output.CodeUsage, "pass --db or --all, not both", output.ExitUsage,
+			"--all protects every database; --db names one and can be repeated.")
+	}
+	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
+		return false, false, nil, output.NewError(output.CodeInputRequired, "vaire protect init needs a human at an interactive terminal", output.ExitInput,
+			"Run it yourself in a terminal, without --yes, --no-input or structured output: it shows a QR code to scan with an authenticator app and asks for a code from it.").
+			WithDetails(map[string]any{"reason": "protect_requires_human"})
+	}
+	return rotate, all, dbFlags, nil
+}
+
+// protectDone is protect.confirm's result.
+type protectDone struct {
+	Rotated bool `json:"rotated"`
+}
+
+// protectSetup makes the node's TOTP secret, shows it once and confirms a
+// code from the authenticator app. It returns the message to print.
+func protectSetup(cmd *cobra.Command, p *progress, s *session, rotate bool) (string, bool, error) {
+	var initSecrets map[string]string
+	if rotate {
+		code, err := readProtectCode(cmd, "Current code from the existing vaire entry in the authenticator app")
+		if err != nil {
+			return "", false, err
+		}
+		initSecrets = map[string]string{node.ProtectCodeSecret: code}
+	}
+	reply, err := p.call(commandContext(cmd), s.node, "protect.init", map[string]any{"rotate": rotate, "label": s.ctx.Name},
+		remote.CallOptions{Secrets: initSecrets, OnEvent: p.event})
+	if err != nil {
+		return "", false, err
+	}
+	var setup struct {
+		Secret string `json:"secret"`
+		URI    string `json:"uri"`
+	}
+	if err := reply.Decode(&setup); err != nil {
+		return "", false, err
+	}
+	if err := showProtectSecret(cmd, setup.URI, setup.Secret); err != nil {
+		return "", false, err
+	}
+	done, err := confirmProtectCode(cmd, p, s)
+	if err != nil {
+		return "", false, err
+	}
+	message := "two-factor protection is set up: lifting a database's protection now asks for a code from vaire:" + s.ctx.Name + " in the authenticator app"
+	if done.Rotated {
+		message = "the two-factor secret was rotated: remove the old vaire:" + s.ctx.Name + " entry from the authenticator app and keep the new one"
+	}
+	return message, done.Rotated, nil
+}
+
+// confirmProtectCode asks for the code the authenticator app now shows and
+// has the node confirm it, with a few attempts.
+func confirmProtectCode(cmd *cobra.Command, p *progress, s *session) (protectDone, error) {
+	for attempt := 1; ; attempt++ {
+		code, err := readProtectCode(cmd, "Code the authenticator app now shows for vaire:"+s.ctx.Name)
+		if err != nil {
+			return protectDone{}, err
+		}
+		reply, err := p.call(commandContext(cmd), s.node, "protect.confirm", nil,
+			remote.CallOptions{Secrets: map[string]string{node.ProtectCodeSecret: code}, OnEvent: p.event})
+		if err == nil {
+			var done protectDone
+			_ = reply.Decode(&done)
+			return done, nil
+		}
+		if attempt >= protectCodeAttempts || !retryableCode(err) {
+			return protectDone{}, err
+		}
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "That code was not accepted ("+err.Error()+"). Check the device's clock and try the next code.")
+	}
+}
+
+// protectChosen protects the databases the operator picked after the secret
+// was set up, and returns the warnings and the newly protected ones.
+func protectChosen(cmd *cobra.Command, s *session, p *progress, cfg *config.Cluster, chosen []string, warnings []output.Warning) ([]output.Warning, []string) {
+	_, todo := splitProtected(*cfg, chosen)
+	if len(todo) == 0 {
+		return warnings, nil
+	}
+	if err := setProtected(cmd, s, p, todo, true, nil); err != nil {
+		warnings = append(warnings, output.Warning{Code: "protect_failed",
+			Message: "two-factor protection is set up, but protecting " + strings.Join(todo, ", ") + " failed: " + err.Error() + ". Run vaire db protect " + strings.Join(todo, " ") + " to retry"})
+		return warnings, nil
+	}
+	for _, name := range todo {
+		_ = cfg.Set("clusters."+name+".protected", "true")
+	}
+	return warnings, todo
 }
 
 // protectInitOutcome is the end of protect init's message and its next
@@ -308,7 +345,7 @@ func protectSet(names []string, value bool) map[string]string {
 // on a freshly read cluster.toml. code is the protect_code secret a lift
 // needs. The node checks the flag live, so nothing is applied after.
 func setProtected(cmd *cobra.Command, s *session, p *progress, names []string, value bool, code map[string]string) error {
-	data, err := fetchConfig(cmd, s, p)
+	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
@@ -340,7 +377,7 @@ func runDBProtect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -381,7 +418,7 @@ func runDBUnprotect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}

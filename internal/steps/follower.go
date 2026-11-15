@@ -132,7 +132,30 @@ func strtodWhole(value string) (f float64, end int, ok, overflow bool) {
 	if i < len(value) && (value[i] == '+' || value[i] == '-') {
 		negative, i = value[i] == '-', i+1
 	}
-	lower := strings.ToLower(value[i:])
+	if f, n, ok := parseSpecialFloat(value[i:], negative); ok {
+		return f, i + n, true, false
+	}
+	if hasHexPrefix(value, i) {
+		if end, digits := hexFloatEnd(value, i+2); digits > 0 {
+			literal := value[start:end]
+			if !strings.ContainsAny(literal, "pP") {
+				literal += "p0"
+			}
+			return parseFloat(literal, end)
+		}
+	}
+	return parseDecimalFloat(value, start, i)
+}
+
+// hasHexPrefix reports whether the number at i starts with 0x or 0X.
+func hasHexPrefix(value string, i int) bool {
+	return i+1 < len(value) && value[i] == '0' && (value[i+1] == 'x' || value[i+1] == 'X')
+}
+
+// parseSpecialFloat reads inf, infinity or nan at the start of value. n is
+// how much of value the literal used.
+func parseSpecialFloat(value string, negative bool) (f float64, n int, ok bool) {
+	lower := strings.ToLower(value)
 	for _, special := range []struct {
 		text string
 		val  float64
@@ -142,35 +165,41 @@ func strtodWhole(value string) (f float64, end int, ok, overflow bool) {
 			if negative {
 				f = -f
 			}
-			return f, i + len(special.text), true, false
+			return f, len(special.text), true
 		}
 	}
-	if i+1 < len(value) && value[i] == '0' && (value[i+1] == 'x' || value[i+1] == 'X') {
-		j := i + 2
-		digits := 0
+	return 0, 0, false
+}
+
+// hexFloatEnd is the first byte after a hexadecimal float's digits and
+// exponent, beginning at i (after the 0x prefix). digits is 0 when there is
+// none.
+func hexFloatEnd(value string, i int) (end, digits int) {
+	j := i
+	for j < len(value) && hexDigit(value[j]) {
+		j, digits = j+1, digits+1
+	}
+	if j < len(value) && value[j] == '.' {
+		j++
 		for j < len(value) && hexDigit(value[j]) {
 			j, digits = j+1, digits+1
 		}
-		if j < len(value) && value[j] == '.' {
-			j++
-			for j < len(value) && hexDigit(value[j]) {
-				j, digits = j+1, digits+1
-			}
-		}
-		if digits > 0 {
-			end = j
-			if j < len(value) && (value[j] == 'p' || value[j] == 'P') {
-				if k, ok := exponentEnd(value, j+1); ok {
-					end = k
-				}
-			}
-			literal := value[start:end]
-			if !strings.ContainsAny(literal, "pP") {
-				literal += "p0"
-			}
-			return parseFloat(literal, end)
+	}
+	if digits == 0 {
+		return 0, 0
+	}
+	end = j
+	if j < len(value) && (value[j] == 'p' || value[j] == 'P') {
+		if k, ok := exponentEnd(value, j+1); ok {
+			end = k
 		}
 	}
+	return end, digits
+}
+
+// parseDecimalFloat reads the decimal number at i (after any sign), whose
+// literal begins at start.
+func parseDecimalFloat(value string, start, i int) (float64, int, bool, bool) {
 	j, digits := i, 0
 	for j < len(value) && decimalDigit(value[j]) {
 		j, digits = j+1, digits+1
@@ -184,7 +213,7 @@ func strtodWhole(value string) (f float64, end int, ok, overflow bool) {
 	if digits == 0 {
 		return 0, 0, false, false
 	}
-	end = j
+	end := j
 	if end < len(value) && (value[end] == 'e' || value[end] == 'E') {
 		if k, ok := exponentEnd(value, end+1); ok {
 			end = k

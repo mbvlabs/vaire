@@ -448,7 +448,7 @@ func KeyFileAuth(path string, passphrase func() ([]byte, error)) (ssh.AuthMethod
 // KeyFileSigner parses the key file at path. encrypted reports whether the
 // key needs a passphrase; with a nil passphrase func an encrypted key fails.
 func KeyFileSigner(path string, passphrase func() ([]byte, error)) (signer ssh.Signer, encrypted bool, err error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this identity file.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false, err
 	}
@@ -473,12 +473,13 @@ func KeyFileSigner(path string, passphrase func() ([]byte, error)) (signer ssh.S
 
 // AgentSigners returns the ssh-agent's signers when SSH_AUTH_SOCK is set and
 // the agent holds at least one key.
-func AgentSigners() ([]ssh.Signer, func(), bool) {
+func AgentSigners(ctx context.Context) ([]ssh.Signer, func(), bool) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
 		return nil, func() {}, false
 	}
-	conn, err := net.Dial("unix", sock) //nolint:gosec // G704: SSH_AUTH_SOCK is the operator's own agent socket.
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", sock)
 	if err != nil {
 		return nil, func() {}, false
 	}
@@ -492,7 +493,7 @@ func AgentSigners() ([]ssh.Signer, func(), bool) {
 
 // AgentHolds reports whether one of signers has the public key in pubPath.
 func AgentHolds(signers []ssh.Signer, pubPath string) bool {
-	raw, err := os.ReadFile(pubPath) //nolint:gosec // G304: the .pub next to a default key.
+	raw, err := os.ReadFile(pubPath)
 	if err != nil {
 		return false
 	}

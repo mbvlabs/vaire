@@ -97,9 +97,7 @@ func toolsDir() string {
 // downloadUsql fetches the archive, checks it against wantSHA, and extracts
 // the usql binary to dest.
 func downloadUsql(ctx context.Context, url, wantSHA, dest string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = usqlDownloadContext(ctx)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return err
 	}
@@ -136,6 +134,13 @@ func downloadUsql(ctx context.Context, url, wantSHA, dest string) error {
 		return err
 	}
 	return extractUsql(archive, dest)
+}
+
+func usqlDownloadContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 func extractUsql(r io.Reader, dest string) error {

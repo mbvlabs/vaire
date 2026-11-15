@@ -63,7 +63,7 @@ func TestDestinationRecoveryLayers(t *testing.T) {
 		"50-vaire-settings.conf": "max_connections = 52\n",
 		"90-overrides.conf":      override,
 	} {
-		got, err := os.ReadFile(filepath.Join(m.ConfDir(), "conf.d", name)) //nolint:gosec // G304: test files.
+		got, err := os.ReadFile(filepath.Join(m.ConfDir(), "conf.d", name))
 		if err != nil || string(got) != want {
 			t.Fatalf("%s: %q %v", name, got, err)
 		}
@@ -85,92 +85,145 @@ func TestDestinationRecoveryLayers(t *testing.T) {
 	}
 }
 
-func TestRecoveryPrestartInspections(t *testing.T) {
-	m := recoveryRegistration(t, &MaterialiseConfig{Tuning: "max_connections = 50\n"})
+// prestartRun drives restoreRegistered against a stubbed recovery probe and
+// records what the prestart inspections did.
+type prestartRun struct {
+	t           *testing.T
+	m           *Materialised
+	calls       [][]string
+	base        map[string]string
+	control     string
+	failSetting string
+	stderr      string
+	starts      int
+}
+
+func newPrestartRun(t *testing.T, m *Materialised) *prestartRun {
+	t.Helper()
+	r := &prestartRun{t: t, m: m, control: controlExcerpt}
 	old := recoveryProbe
 	t.Cleanup(func() { recoveryProbe = old })
-	base := map[string]string{
-		"max_connections": "50", "max_worker_processes": "8", "max_wal_senders": "10",
-		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
+	recoveryProbe = r.probe
+	return r
+}
+
+func (r *prestartRun) probe(_ context.Context, args ...string) (string, string, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if args[0] == pgBin+"/pg_controldata" {
+		return r.control, r.stderr, nil
 	}
-	var calls [][]string
-	control := controlExcerpt
-	failSetting := ""
-	stderr := ""
-	recoveryProbe = func(_ context.Context, args ...string) (string, string, error) {
-		calls = append(calls, append([]string(nil), args...))
-		if args[0] == pgBin+"/pg_controldata" {
-			return control, stderr, nil
-		}
-		if args[len(args)-1] == failSetting {
-			return "sensitive diagnostic", "", errors.New("sensitive diagnostic")
-		}
-		return base[args[len(args)-1]] + "\n", "", nil
+	if args[len(args)-1] == r.failSetting {
+		return "sensitive diagnostic", "", errors.New("sensitive diagnostic")
 	}
-	starts := 0
-	start := func(_ context.Context, until string) error {
-		starts++
-		if until != UntilPromoted {
-			t.Fatalf("until=%s", until)
-		}
-		return nil
+	return r.base[args[len(args)-1]] + "\n", "", nil
+}
+
+func (r *prestartRun) start(_ context.Context, until string) error {
+	r.starts++
+	if until != UntilPromoted {
+		r.t.Fatalf("until=%s", until)
 	}
-	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, start); err != nil || starts != 1 {
-		t.Fatalf("sufficient: %v, starts=%d", err, starts)
+	return nil
+}
+
+func (r *prestartRun) restore() error {
+	return r.m.restoreRegistered(context.Background(), RestoreOptions{}, r.start)
+}
+
+// requireInspectionFailure requires the run to refuse start with one unmet
+// requirement for setting.
+func (r *prestartRun) requireInspectionFailure(setting string) {
+	r.t.Helper()
+	err := r.restore()
+	var cli *output.CLIError
+	if !errors.As(err, &cli) || cli.Code != output.CodePrecondition || !RetainRecoveryFailure(err) || r.starts != 1 {
+		r.t.Fatalf("%s: err=%v starts=%d", setting, err, r.starts)
 	}
-	if len(calls) != 6 || !reflect.DeepEqual(calls[0], []string{pgBin + "/pg_controldata", "-D", m.Data}) {
-		t.Fatalf("control call: %v", calls)
+	details, ok := cli.Details.(map[string]any)
+	if !ok {
+		r.t.Fatalf("%s: details %T", setting, cli.Details)
+	}
+	unmet, ok := details["settings"].([]RecoveryRequirement)
+	if !ok || len(unmet) != 1 || unmet[0].Setting != setting || unmet[0].Configured >= unmet[0].Required {
+		r.t.Fatalf("%s: incorrect details %v", setting, details)
+	}
+}
+
+// requireStartRefused requires the run to refuse start for a reason other than
+// the target floor, without starting the cluster.
+func (r *prestartRun) requireStartRefused(what string) {
+	r.t.Helper()
+	if err := r.restore(); err == nil || RetainRecoveryFailure(err) || r.starts != 1 {
+		r.t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// requireCalls requires the prestart inspection calls: pg_controldata, then one
+// postgres -C per floor with the temporary cluster's configuration.
+func (r *prestartRun) requireCalls() {
+	r.t.Helper()
+	if len(r.calls) != 6 || !reflect.DeepEqual(r.calls[0], []string{pgBin + "/pg_controldata", "-D", r.m.Data}) {
+		r.t.Fatalf("control call: %v", r.calls)
 	}
 	for i, floor := range recoveryFloors {
-		want := []string{pgBin + "/postgres", "-D", m.Data}
+		want := make([]string, 0, 7+2*len(recoveryStartupSettings))
+		want = append(want, pgBin+"/postgres", "-D", r.m.Data)
 		for _, setting := range recoveryStartupSettings {
 			want = append(want, "-c", setting)
 		}
-		want = append(want, "-c", "config_file="+filepath.Join(m.ConfDir(), "postgresql.conf"), "-C", floor.setting)
-		if !reflect.DeepEqual(calls[i+1], want) {
-			t.Fatalf("setting call: got %v want %v", calls[i+1], want)
+		want = append(want, "-c", "config_file="+filepath.Join(r.m.ConfDir(), "postgresql.conf"), "-C", floor.setting)
+		if !reflect.DeepEqual(r.calls[i+1], want) {
+			r.t.Fatalf("setting call: got %v want %v", r.calls[i+1], want)
 		}
 	}
+}
+
+// requireFloorFailure requires an inspection that finds floor configured below
+// its requirement to refuse start with exactly that unmet requirement.
+func (r *prestartRun) requireFloorFailure(floor recoveryFloor) {
+	r.t.Helper()
+	orig, origControl := r.base[floor.setting], r.control
+	defer func() { r.base[floor.setting], r.control = orig, origControl }()
+	// Each selected value is a valid configured value below its requirement.
+	switch floor.setting {
+	case "max_prepared_transactions":
+		r.control = strings.Replace(controlExcerpt, "max_prepared_xacts setting:            0", "max_prepared_xacts setting:            1", 1)
+		r.base[floor.setting] = "0"
+	case "max_locks_per_transaction":
+		r.base[floor.setting] = "10"
+	case "max_connections":
+		r.control = strings.Replace(controlExcerpt, "30", "50", 1)
+		r.base[floor.setting] = "30"
+	default:
+		r.base[floor.setting] = "0"
+	}
+	r.requireInspectionFailure(floor.setting)
+}
+
+func TestRecoveryPrestartInspections(t *testing.T) {
+	m := recoveryRegistration(t, &MaterialiseConfig{Tuning: "max_connections = 50\n"})
+	run := newPrestartRun(t, m)
+	run.base = map[string]string{
+		"max_connections": "50", "max_worker_processes": "8", "max_wal_senders": "10",
+		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
+	}
+	if err := run.restore(); err != nil || run.starts != 1 {
+		t.Fatalf("sufficient: %v, starts=%d", err, run.starts)
+	}
+	run.requireCalls()
 	for _, floor := range recoveryFloors {
-		orig := base[floor.setting]
-		// Each selected value is a valid configured value below its requirement.
-		switch floor.setting {
-		case "max_prepared_transactions":
-			control = strings.Replace(controlExcerpt, "max_prepared_xacts setting:            0", "max_prepared_xacts setting:            1", 1)
-			base[floor.setting] = "0"
-		case "max_locks_per_transaction":
-			base[floor.setting] = "10"
-		case "max_connections":
-			control = strings.Replace(controlExcerpt, "30", "50", 1)
-			base[floor.setting] = "30"
-		default:
-			base[floor.setting] = "0"
-		}
-		err := m.restoreRegistered(context.Background(), RestoreOptions{}, start)
-		var cli *output.CLIError
-		if !errors.As(err, &cli) || cli.Code != output.CodePrecondition || !RetainRecoveryFailure(err) || starts != 1 {
-			t.Fatalf("%s: err=%v starts=%d", floor.setting, err, starts)
-		}
-		details := cli.Details.(map[string]any)
-		unmet := details["settings"].([]RecoveryRequirement)
-		if len(unmet) != 1 || unmet[0].Setting != floor.setting || unmet[0].Configured >= unmet[0].Required {
-			t.Fatalf("%s: incorrect details %v", floor.setting, details)
-		}
-		base[floor.setting] = orig
-		control = controlExcerpt
+		run.requireFloorFailure(floor)
 	}
-	stderr = "CRC warning with sensitive diagnostic"
-	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, start); err == nil || RetainRecoveryFailure(err) || strings.Contains(err.Error(), "sensitive") || starts != 1 {
+	run.stderr = "CRC warning with sensitive diagnostic"
+	if err := run.restore(); err == nil || RetainRecoveryFailure(err) || strings.Contains(err.Error(), "sensitive") || run.starts != 1 {
 		t.Fatalf("bad control: %v", err)
 	}
-	stderr = ""
-	control = strings.Replace(controlExcerpt, "max_connections setting:", "unknown label:", 1)
-	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, start); err == nil || RetainRecoveryFailure(err) || starts != 1 {
-		t.Fatalf("missing control field: %v", err)
-	}
-	control = controlExcerpt
-	failSetting = "max_connections"
-	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, start); err == nil || strings.Contains(err.Error(), "sensitive") || starts != 1 {
+	run.stderr = ""
+	run.control = strings.Replace(controlExcerpt, "max_connections setting:", "unknown label:", 1)
+	run.requireStartRefused("missing control field")
+	run.control = controlExcerpt
+	run.failSetting = "max_connections"
+	if err := run.restore(); err == nil || strings.Contains(err.Error(), "sensitive") || run.starts != 1 {
 		t.Fatalf("bad setting inspection: %v", err)
 	}
 }
@@ -216,7 +269,7 @@ func TestStockPgCtlPreparationInspectionStartAndRestoration(t *testing.T) {
 	started := false
 	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, func(context.Context, string) error {
 		started = true
-		current, err := os.ReadFile(ctl) //nolint:gosec // G304: test file.
+		current, err := os.ReadFile(ctl)
 		if err != nil || string(current) != recoveryCtlOptions {
 			t.Fatalf("startup options: %q %v", current, err)
 		}
@@ -227,7 +280,7 @@ func TestStockPgCtlPreparationInspectionStartAndRestoration(t *testing.T) {
 	if err := m.restoreRecoveryDiagnostics(); err != nil {
 		t.Fatal(err)
 	}
-	actual, err := os.ReadFile(ctl) //nolint:gosec // G304: test file.
+	actual, err := os.ReadFile(ctl)
 	if err != nil || string(actual) != stockPgCtlConf {
 		t.Fatalf("stock config not restored: %q %v", actual, err)
 	}
@@ -258,7 +311,7 @@ func TestExplicitDestinationReconcilesAutoFloors(t *testing.T) {
 		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
 	}
 	recoveryProbe = func(_ context.Context, args ...string) (string, string, error) {
-		current, err := os.ReadFile(path) //nolint:gosec // G304: test file.
+		current, err := os.ReadFile(path)
 		if err != nil || string(current) != kept {
 			t.Fatalf("auto config at inspection: %q %v", current, err)
 		}
@@ -272,7 +325,7 @@ func TestExplicitDestinationReconcilesAutoFloors(t *testing.T) {
 	started := false
 	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, func(context.Context, string) error {
 		started = true
-		actual, err := os.ReadFile(path) //nolint:gosec // G304: test file.
+		actual, err := os.ReadFile(path)
 		if err != nil || string(actual) != kept {
 			t.Fatalf("startup auto config: %q %v", actual, err)
 		}
@@ -295,7 +348,7 @@ func TestAutoFloorReconciliationFallbackAndMalformed(t *testing.T) {
 	if err := m.reconcileRecoveryFloors(); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: test file.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +380,7 @@ func TestExplicitTarget50OverridesRestoredAuto30(t *testing.T) {
 		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
 	}
 	recoveryProbe = func(_ context.Context, args ...string) (string, string, error) {
-		auto, err := os.ReadFile(path) //nolint:gosec // G304: test file.
+		auto, err := os.ReadFile(path)
 		if err != nil || string(auto) != "restore_command = 'retained'\n" {
 			t.Fatalf("restored auto overrides still affect target: %q %v", auto, err)
 		}

@@ -163,7 +163,7 @@ func (m *Materialised) reconcileRecoveryFloors() error {
 		return nil
 	}
 	path := filepath.Join(m.Data, "postgresql.auto.conf")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: restored data directory.
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -197,7 +197,7 @@ func (m *Materialised) reconcileRecoveryFloors() error {
 
 func (m *Materialised) prepareRecoveryDiagnostics() error {
 	path := filepath.Join(m.ConfDir(), "pg_ctl.conf")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: temporary cluster registration.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
@@ -229,9 +229,9 @@ func (m *Materialised) prepareRecoveryDiagnostics() error {
 // before adoption. The backup permits an interrupted adoption to be retried.
 func (m *Materialised) restoreRecoveryDiagnostics() error {
 	original := filepath.Join(m.ConfDir(), recoveryOriginalCtl)
-	raw, err := os.ReadFile(original) //nolint:gosec // G304: temporary cluster registration.
+	raw, err := os.ReadFile(original)
 	if errors.Is(err, os.ErrNotExist) {
-		current, readErr := os.ReadFile(filepath.Join(m.ConfDir(), "pg_ctl.conf")) //nolint:gosec // G304: temporary cluster registration.
+		current, readErr := os.ReadFile(filepath.Join(m.ConfDir(), "pg_ctl.conf"))
 		if readErr != nil {
 			return readErr
 		}
@@ -254,7 +254,7 @@ func (m *Materialised) restoreRecoveryDiagnostics() error {
 // would otherwise miss. Until those can be reproduced exactly, fail closed
 // when that file contains active directives.
 func (m *Materialised) inspectRecoveryRequirements(ctx context.Context) error {
-	raw, err := os.ReadFile(filepath.Join(m.ConfDir(), "pg_ctl.conf")) //nolint:gosec // G304: temporary cluster registration.
+	raw, err := os.ReadFile(filepath.Join(m.ConfDir(), "pg_ctl.conf"))
 	if err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}

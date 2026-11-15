@@ -89,7 +89,7 @@ func readBundleFile(path string, stdin io.Reader) (fetchedBundle, error) {
 	if path == "-" {
 		raw, err = io.ReadAll(io.LimitReader(stdin, 64<<20))
 	} else {
-		raw, err = os.ReadFile(path) //nolint:gosec // G304: the operator names the bundle file.
+		raw, err = os.ReadFile(path)
 	}
 	if err != nil {
 		return fetchedBundle{}, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")

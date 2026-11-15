@@ -60,7 +60,7 @@ var (
 
 // Enabled reports whether f is a terminal that can show the live UI.
 func Enabled(f *os.File) bool {
-	if f == nil || !term.IsTerminal(int(f.Fd())) { //nolint:gosec // G115: file descriptors fit in int.
+	if f == nil || !term.IsTerminal(int(f.Fd())) {
 		return false
 	}
 	return os.Getenv("TERM") != "dumb"
@@ -79,7 +79,7 @@ func Start(f *os.File) *Live {
 	if active == nil {
 		active = &Live{
 			out:     Writer(f),
-			fd:      int(f.Fd()), //nolint:gosec // G115: file descriptors fit in int.
+			fd:      int(f.Fd()),
 			spinner: spinner.MiniDot,
 			bar: progress.New(
 				progress.WithWidth(28),

@@ -35,7 +35,7 @@ func TestInconclusiveMatchingCompletedDoesNotMutate(t *testing.T) {
 	if err := j.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(path) //nolint:gosec // Test-owned temporary journal.
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestInconclusiveMatchingCompletedDoesNotMutate(t *testing.T) {
 		!strings.Contains(result.Steps[0].Detail, "unknown") || len(warnings) != 1 || warnings[0].Code != "step_check_inconclusive" {
 		t.Fatalf("apply %+v warnings %+v error %v", result, warnings, err)
 	}
-	after, err := os.ReadFile(path) //nolint:gosec // Test-owned temporary journal.
+	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("journal changed: %v", err)
 	}
@@ -59,39 +59,46 @@ func TestInconclusiveMatchingCompletedDoesNotMutate(t *testing.T) {
 func TestPlanAfterInvalidatingCompletionsMatchesJournalInvalidation(t *testing.T) {
 	for _, status := range []string{StatusCompleted, StatusFailed, StatusRunning} {
 		t.Run(status, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "journal.json")
-			id := "cpu-v1"
-			j := &Journal{Steps: map[string]JournalEntry{
-				id: {Status: status, InputsHash: InputsHash(id, []byte(id))},
-			}, RestartPending: []string{id}}
-			if err := j.Save(path); err != nil {
-				t.Fatal(err)
-			}
-			before, err := os.ReadFile(path) //nolint:gosec // Test-owned journal.
-			if err != nil {
-				t.Fatal(err)
-			}
-			applied := 0
-			step := inconclusiveStep{countedStep: countedStep{id}, result: CheckResult{Inconclusive: true}, applied: &applied}
-			opts := Options{JournalPath: path}
-			preview, err := PlanAfterInvalidatingCompletions(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, opts, []string{id})
-			if err != nil {
-				t.Fatal(err)
-			}
-			after, err := os.ReadFile(path) //nolint:gosec // Test-owned journal.
-			if err != nil || !bytes.Equal(before, after) {
-				t.Fatalf("preview mutated journal: %v", err)
-			}
-			if err := InvalidateStepCompletion(path, id); err != nil {
-				t.Fatal(err)
-			}
-			actual, err := Plan(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, opts)
-			if err != nil || !slices.Equal(preview.RestartPending, actual.RestartPending) ||
-				len(preview.Steps) != 1 || len(actual.Steps) != 1 ||
-				preview.Steps[0].Action != actual.Steps[0].Action || preview.Steps[0].Reason != actual.Steps[0].Reason {
-				t.Fatalf("preview %+v actual %+v error %v", preview, actual, err)
-			}
+			checkInvalidatedPlanPreview(t, status)
 		})
+	}
+}
+
+// checkInvalidatedPlanPreview previews invalidating id's status and compares
+// it with a plan after InvalidateStepCompletion, without mutating the journal.
+func checkInvalidatedPlanPreview(t *testing.T, status string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "journal.json")
+	id := "cpu-v1"
+	j := &Journal{Steps: map[string]JournalEntry{
+		id: {Status: status, InputsHash: InputsHash(id, []byte(id))},
+	}, RestartPending: []string{id}}
+	if err := j.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := 0
+	step := inconclusiveStep{countedStep: countedStep{id}, result: CheckResult{Inconclusive: true}, applied: &applied}
+	opts := Options{JournalPath: path}
+	preview, err := PlanAfterInvalidatingCompletions(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, opts, []string{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("preview mutated journal: %v", err)
+	}
+	if err := InvalidateStepCompletion(path, id); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := Plan(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, opts)
+	if err != nil || !slices.Equal(preview.RestartPending, actual.RestartPending) ||
+		len(preview.Steps) != 1 || len(actual.Steps) != 1 ||
+		preview.Steps[0].Action != actual.Steps[0].Action || preview.Steps[0].Reason != actual.Steps[0].Reason {
+		t.Fatalf("preview %+v actual %+v error %v", preview, actual, err)
 	}
 }
 
@@ -226,7 +233,7 @@ func TestInvalidateOnlyCompletedExactStep(t *testing.T) {
 	if err := j.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(path) //nolint:gosec // Test-owned temporary journal.
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +245,7 @@ func TestInvalidateOnlyCompletedExactStep(t *testing.T) {
 	if err := InvalidateStepCompletion(path, "cpu-v1@app@other"); err == nil {
 		t.Fatal("invalid instance ID accepted")
 	}
-	after, err := os.ReadFile(path) //nolint:gosec // Test-owned temporary journal.
+	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("journal unexpectedly changed: %v", err)
 	}

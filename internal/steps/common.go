@@ -50,7 +50,7 @@ func Probe(ctx context.Context, name string, args ...string) (string, error) {
 func ProbeWithEnv(ctx context.Context, extraEnv []string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeLimit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed probe commands from the step catalogue.
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(append([]string(nil), probeEnv...), extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -81,7 +81,7 @@ func fileIsOwned(path, content string, perm os.FileMode, owner, group string) bo
 	if !ownedAs(path, perm, owner, group) {
 		return false
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: managed file paths from the step catalogue.
+	raw, err := os.ReadFile(path)
 	return err == nil && string(raw) == content
 }
 

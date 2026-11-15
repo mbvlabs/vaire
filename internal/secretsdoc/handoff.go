@@ -61,7 +61,7 @@ func (d Document) Groups() []Group {
 	if db := d.Database; db != nil {
 		groups = append(groups, Group{Title: "Admin (all databases)", Fields: roleFields("", db.Admin)})
 		if len(db.Services) > 0 {
-			var fields []Field
+			fields := make([]Field, 0, 2*len(db.Services))
 			for _, name := range sortedKeys(db.Services) {
 				fields = append(fields, roleFields(name+" ", db.Services[name])...)
 			}

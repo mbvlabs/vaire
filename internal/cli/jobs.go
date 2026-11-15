@@ -32,8 +32,10 @@ type jobReply struct {
 // reconnects and re-attaches by itself a few times before giving up.
 // detached reports the Ctrl-C case, with the job ID when the node had
 // already announced it.
-func callJob(cmd *cobra.Command, s *session, p *progress, method string, params any, opts remote.CallOptions) (reply remote.Reply, jobID string, detached bool, err error) {
-	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGINT, syscall.SIGTERM)
+func callJob(ctx context.Context, s *session, p *progress, method string, params any, opts remote.CallOptions) (reply remote.Reply, jobID string, detached bool, err error) {
+	// jobCtx ends on Ctrl-C, which detaches; ctx is the command's own
+	// context, so a cancelled command doesn't look like a detach.
+	jobCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	defer p.wait(waitLabel(method, params))()
 	if m, ok := params.(map[string]string); ok && method == "job.follow" {
@@ -54,14 +56,14 @@ func callJob(cmd *cobra.Command, s *session, p *progress, method string, params 
 		}
 		p.event(ev)
 	}
-	reply, err = s.node.Call(ctx, method, params, opts)
+	reply, err = s.node.Call(jobCtx, method, params, opts)
 	if err != nil && jobID != "" && isStreamLost(err) {
 		follow := func(ctx context.Context, onEvent func(output.Event)) (remote.Reply, error) {
 			return s.node.Call(ctx, "job.follow", map[string]string{"id": jobID}, remote.CallOptions{OnEvent: onEvent})
 		}
-		reply, err = reattachJob(ctx, jobID, err, &seen, s.reconnect, follow, p.event, p.note, jobReattachBackoff)
+		reply, err = reattachJob(jobCtx, jobID, err, &seen, s.reconnect, follow, p.event, p.note, jobReattachBackoff)
 	}
-	if err != nil && ctx.Err() != nil && commandContext(cmd).Err() == nil {
+	if err != nil && jobCtx.Err() != nil && ctx.Err() == nil {
 		return reply, jobID, true, nil
 	}
 	return reply, jobID, false, err
@@ -193,7 +195,7 @@ func runJobFollow(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	reply, _, detached, err := callJob(cmd, s, p, "job.follow", map[string]string{"id": id}, remote.CallOptions{})
+	reply, _, detached, err := callJob(commandContext(cmd), s, p, "job.follow", map[string]string{"id": id}, remote.CallOptions{})
 	if err != nil {
 		return err
 	}
@@ -225,76 +227,114 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 	}
 	switch job {
 	case "backup-full", "backup-diff", "backup-incr":
-		var res struct {
-			DB  string     `json:"db"`
-			Set backup.Set `json:"set"`
-		}
-		if json.Unmarshal(raw, &res) != nil || res.Set.Label == "" {
-			return ""
-		}
-		return fmt.Sprintf("%s: backup %s (%s) finished: %s", res.DB, res.Set.Label, res.Set.Type, humanBytes(res.Set.Size))
+		return backupJobMessage(raw)
 	case "backup-verify":
-		var res backup.VerifyResult
-		if json.Unmarshal(raw, &res) != nil || res.FinishedAt == "" {
-			return ""
-		}
-		return "pgbackrest verify " + verifyState(&res) + " at " + res.FinishedAt
+		return verifyJobMessage(raw)
 	case "restore-drill":
-		var drill backup.Drill
-		if json.Unmarshal(raw, &drill) != nil || drill.Result == "" {
-			return ""
-		}
-		return drillLines(drill)
+		return drillJobMessage(raw)
 	case "db-dump":
-		var res struct {
-			Dump backup.Dump `json:"dump"`
-		}
-		if json.Unmarshal(raw, &res) != nil || res.Dump.ID == "" {
-			return ""
-		}
-		return fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, res.Dump.Database, humanBytes(res.Dump.Size))
+		return dumpJobMessage(raw)
 	case "restore":
-		var res struct {
-			Database  string `json:"database"`
-			Restoring string `json:"restoring"`
-			Phase     string `json:"phase"`
-		}
-		if json.Unmarshal(raw, &res) != nil || res.Database == "" {
-			return ""
-		}
-		if res.Phase == "promoted" {
-			return res.Database + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until vaire restore cleanup " + res.Database + "; vaire restore undo " + res.Database + " swaps it back."
-		}
-		return "the temporary cluster " + res.Restoring + " is ready beside the live " + res.Database + "; inspect it with vaire sql --db " + res.Restoring + ", then vaire restore promote " + res.Database + " or vaire restore abort " + res.Database + "."
+		return restoreJobMessage(raw)
 	case "db-fork":
-		var res struct {
-			Source string `json:"source"`
-			Name   string `json:"name"`
-		}
-		if json.Unmarshal(raw, &res) != nil || res.Name == "" {
-			return ""
-		}
-		return "forked " + res.Source + " into " + res.Name + " with its own roles (the credentials were shown only by vaire db fork)"
+		return forkJobMessage(raw)
 	case "db-follow":
-		var res struct {
-			Source string `json:"source"`
-			Name   string `json:"name"`
-		}
-		if json.Unmarshal(raw, &res) != nil || res.Name == "" {
-			return ""
-		}
-		return res.Name + " follows " + res.Source + " (vaire status --db " + res.Name + " shows its lag)"
+		return followJobMessage(raw)
 	case "db-unfollow":
-		var res struct {
-			Source string `json:"source"`
-			Name   string `json:"name"`
-		}
-		if json.Unmarshal(raw, &res) != nil || res.Name == "" {
-			return ""
-		}
-		return res.Name + " no longer follows " + res.Source + " and is independent (the credentials were shown only by vaire db unfollow)"
+		return unfollowJobMessage(raw)
 	}
 	return ""
+}
+
+// jobPair is a job result that names a source database and its new name.
+type jobPair struct {
+	Source string `json:"source"`
+	Name   string `json:"name"`
+}
+
+// backupJobMessage renders the result of a backup job.
+func backupJobMessage(raw json.RawMessage) string {
+	var res struct {
+		DB  string     `json:"db"`
+		Set backup.Set `json:"set"`
+	}
+	if json.Unmarshal(raw, &res) != nil || res.Set.Label == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s: backup %s (%s) finished: %s", res.DB, res.Set.Label, res.Set.Type, humanBytes(res.Set.Size))
+}
+
+// verifyJobMessage renders the result of a backup verify job.
+func verifyJobMessage(raw json.RawMessage) string {
+	var res backup.VerifyResult
+	if json.Unmarshal(raw, &res) != nil || res.FinishedAt == "" {
+		return ""
+	}
+	return "pgbackrest verify " + verifyState(&res) + " at " + res.FinishedAt
+}
+
+// drillJobMessage renders the result of a restore drill job.
+func drillJobMessage(raw json.RawMessage) string {
+	var drill backup.Drill
+	if json.Unmarshal(raw, &drill) != nil || drill.Result == "" {
+		return ""
+	}
+	return drillLines(drill)
+}
+
+// dumpJobMessage renders the result of a dump job.
+func dumpJobMessage(raw json.RawMessage) string {
+	var res struct {
+		Dump backup.Dump `json:"dump"`
+	}
+	if json.Unmarshal(raw, &res) != nil || res.Dump.ID == "" {
+		return ""
+	}
+	return fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, res.Dump.Database, humanBytes(res.Dump.Size))
+}
+
+// restoreJobMessage renders the result of a restore job: the promoted
+// database, or the temporary cluster waiting beside the live one.
+func restoreJobMessage(raw json.RawMessage) string {
+	var res struct {
+		Database  string `json:"database"`
+		Restoring string `json:"restoring"`
+		Phase     string `json:"phase"`
+	}
+	if json.Unmarshal(raw, &res) != nil || res.Database == "" {
+		return ""
+	}
+	if res.Phase == "promoted" {
+		return res.Database + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until vaire restore cleanup " + res.Database + "; vaire restore undo " + res.Database + " swaps it back."
+	}
+	return "the temporary cluster " + res.Restoring + " is ready beside the live " + res.Database + "; inspect it with vaire sql --db " + res.Restoring + ", then vaire restore promote " + res.Database + " or vaire restore abort " + res.Database + "."
+}
+
+// forkJobMessage renders the result of a fork job.
+func forkJobMessage(raw json.RawMessage) string {
+	var res jobPair
+	if json.Unmarshal(raw, &res) != nil || res.Name == "" {
+		return ""
+	}
+	return "forked " + res.Source + " into " + res.Name + " with its own roles (the credentials were shown only by vaire db fork)"
+}
+
+// followJobMessage renders the result of a follow job.
+func followJobMessage(raw json.RawMessage) string {
+	var res jobPair
+	if json.Unmarshal(raw, &res) != nil || res.Name == "" {
+		return ""
+	}
+	return res.Name + " follows " + res.Source + " (vaire status --db " + res.Name + " shows its lag)"
+}
+
+// unfollowJobMessage renders the result of an unfollow job.
+func unfollowJobMessage(raw json.RawMessage) string {
+	var res jobPair
+	if json.Unmarshal(raw, &res) != nil || res.Name == "" {
+		return ""
+	}
+	return res.Name + " no longer follows " + res.Source + " and is independent (the credentials were shown only by vaire db unfollow)"
 }
 
 // jobListDB is a job's DB column: its database, else what its result names

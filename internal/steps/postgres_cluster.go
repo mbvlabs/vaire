@@ -133,38 +133,55 @@ func parseClusterNamesStrict(out string) (map[string]string, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 7 {
-			return nil, errors.New("pg_lsclusters returned an incomplete line")
-		}
-		// Older PostgreSQL major versions can have a dotted version number.
-		version := strings.Split(fields[0], ".")
-		if len(version) > 2 {
-			return nil, errors.New("pg_lsclusters returned an invalid version")
-		}
-		for _, part := range version {
-			if part == "" || strings.Trim(part, "0123456789") != "" {
-				return nil, errors.New("pg_lsclusters returned an invalid version")
-			}
-		}
-		port, err := strconv.Atoi(fields[2])
-		if err != nil || port < 1 || port > 65535 || fields[4] == "<unknown>" || fields[5] == "<unknown>" || fields[6] == "<unknown>" {
-			return nil, errors.New("pg_lsclusters returned incomplete cluster information")
-		}
-		status, err := clusterPrimaryStatus(fields[3])
+		version, name, status, err := parseClusterLine(line)
 		if err != nil {
 			return nil, err
 		}
-		key := fields[0] + "/" + fields[1]
+		key := version + "/" + name
 		if seen[key] {
 			return nil, errors.New("pg_lsclusters returned a duplicate cluster")
 		}
 		seen[key] = true
-		if fields[0] == strconv.Itoa(PGVersion) {
-			names[fields[1]] = status
+		if version == strconv.Itoa(PGVersion) {
+			names[name] = status
 		}
 	}
 	return names, nil
+}
+
+// parseClusterLine splits one pg_lsclusters -h line into its version, cluster
+// name and primary status.
+func parseClusterLine(line string) (version, name, status string, err error) {
+	fields := strings.Fields(line)
+	if len(fields) < 7 {
+		return "", "", "", errors.New("pg_lsclusters returned an incomplete line")
+	}
+	if err := validateClusterVersion(fields[0]); err != nil {
+		return "", "", "", err
+	}
+	port, err := strconv.Atoi(fields[2])
+	if err != nil || port < 1 || port > 65535 || fields[4] == "<unknown>" || fields[5] == "<unknown>" || fields[6] == "<unknown>" {
+		return "", "", "", errors.New("pg_lsclusters returned incomplete cluster information")
+	}
+	status, err = clusterPrimaryStatus(fields[3])
+	if err != nil {
+		return "", "", "", err
+	}
+	return fields[0], fields[1], status, nil
+}
+
+// validateClusterVersion accepts a major version, dotted in older releases.
+func validateClusterVersion(version string) error {
+	parts := strings.Split(version, ".")
+	if len(parts) > 2 {
+		return errors.New("pg_lsclusters returned an invalid version")
+	}
+	for _, part := range parts {
+		if part == "" || strings.Trim(part, "0123456789") != "" {
+			return errors.New("pg_lsclusters returned an invalid version")
+		}
+	}
+	return nil
 }
 
 // clusterPrimaryStatus accepts the modifiers emitted by pg_lsclusters without
@@ -270,7 +287,7 @@ func checkCPUObserved(name string, res config.Resources, facts hostinfo.CPUObser
 	if err == nil {
 		return complete()
 	}
-	var mismatch *hostinfo.CPUPolicyMismatch
+	var mismatch *hostinfo.CPUPolicyMismatchError
 	if errors.As(err, &mismatch) && mismatch.Reason == "effective_policy_unknown" {
 		return engine.CheckResult{Inconclusive: true, Detail: name + " CPU policy is unknown"}
 	}
@@ -347,7 +364,7 @@ func applyCPUChecked(ctx context.Context, cluster string, res config.Resources,
 	}
 	facts := observe(ctx, PGServiceName(cluster))
 	if err := hostinfo.ValidateCPUPolicy(cpuPolicy(res), facts); err != nil {
-		var mismatch *hostinfo.CPUPolicyMismatch
+		var mismatch *hostinfo.CPUPolicyMismatchError
 		_ = errors.As(err, &mismatch)
 		reason := "effective_policy_unknown"
 		if mismatch != nil {
@@ -359,12 +376,20 @@ func applyCPUChecked(ctx context.Context, cluster string, res config.Resources,
 }
 
 func cpuPolicyError(cluster string, res config.Resources, facts hostinfo.CPUObservation, mismatch string) *output.CLIError {
+	return cpuPolicyErrorWithDetails(cluster, res, facts, mismatch, nil)
+}
+
+// cpuPolicyErrorWithDetails is cpuPolicyError with extra failure details.
+func cpuPolicyErrorWithDetails(cluster string, res config.Resources, facts hostinfo.CPUObservation, mismatch string, extra map[string]any) *output.CLIError {
 	details := map[string]any{
 		"reason": "cpu_policy_not_enforced", "cluster": cluster,
 		"desired":       map[string]any{"mode": res.CPUMode, "weight": res.CPUWeight, "quota": res.CPUQuota},
 		"desired_saved": nil, "effective_known": facts.Screen.Capability == hostinfo.CPUCapable && facts.Idle != nil && facts.Quota != nil && (res.CPUMode == "spare" || facts.Weight != nil),
 		"effective":          map[string]any{"idle": facts.Idle, "weight": facts.Weight, "quota": facts.Quota},
 		"observation_reason": facts.Reason, "capability_reason": facts.Screen.Reason, "mismatch": mismatch,
+	}
+	for key, value := range extra {
+		details[key] = value
 	}
 	return output.NewError(output.CodeStepFailed, "CPU policy was not verified for "+cluster, output.ExitStep,
 		"Inspect the native service cgroup and re-run apply; unrelated settings are not rolled back.").WithDetails(details)

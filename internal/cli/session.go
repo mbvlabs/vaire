@@ -126,19 +126,9 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	client, err := s.dial(ctx)
 	if err != nil {
 		s.Close()
-		err = tunnelHint(err, nodeSpec.PublicAddress, nodeSpec.ListenPort)
-		// A rebuilt master on a new address (Phase 5): heal the context
-		// from DNS once and try again.
-		if !endpointHealed(cmd) {
-			if healed, w := healEndpoint(ctx, c, err); healed {
-				markEndpointHealed(cmd)
-				again, err := openSession(cmd, p)
-				if err != nil {
-					return nil, err
-				}
-				again.warnings = append(again.warnings, w)
-				return again, nil
-			}
+		again, healed, retryErr := retryHealedSession(cmd, p, c, nodeSpec, err)
+		if healed {
+			return again, retryErr
 		}
 		return nil, err
 	}
@@ -146,12 +136,7 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	if p.opts.Verbose {
 		s.node.Stderr = os.Stderr
 	}
-	auto := flagTrue(cmd, "auto-upgrade-nodes") || c.AutoUpgradeNodes
-	upgrading := func(line string) {
-		p.note(line)
-		p.setPhase("upgrading vaire on " + nodeLabel(c, nodeSpec))
-	}
-	if err := s.node.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: auto, Progress: upgrading}); err != nil {
+	if err := s.handshake(ctx, cmd, c, nodeSpec, p); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -162,6 +147,39 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 		}
 	}
 	return s, nil
+}
+
+// retryHealedSession heals a context whose master moved to a new address and
+// opens the session again, once. healed is false when no retry happened.
+func retryHealedSession(cmd *cobra.Command, p *progress, c *contexts.Context, nodeSpec contexts.Node, dialErr error) (*session, bool, error) {
+	// A rebuilt master on a new address (Phase 5): heal the context from
+	// DNS once and try again.
+	if endpointHealed(cmd) {
+		return nil, false, nil
+	}
+	err := tunnelHint(dialErr, nodeSpec.PublicAddress, nodeSpec.ListenPort)
+	healed, w := healEndpoint(commandContext(cmd), c, err)
+	if !healed {
+		return nil, false, nil
+	}
+	markEndpointHealed(cmd)
+	again, err := openSession(cmd, p)
+	if err != nil {
+		return nil, true, err
+	}
+	again.warnings = append(again.warnings, w)
+	return again, true, nil
+}
+
+// handshake runs the node's version handshake, upgrading the node's binary
+// when the command or the context asks for it.
+func (s *session) handshake(ctx context.Context, cmd *cobra.Command, c *contexts.Context, nodeSpec contexts.Node, p *progress) error {
+	auto := flagTrue(cmd, "auto-upgrade-nodes") || c.AutoUpgradeNodes
+	upgrading := func(line string) {
+		p.note(line)
+		p.setPhase("upgrading vaire on " + nodeLabel(c, nodeSpec))
+	}
+	return s.node.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: auto, Progress: upgrading})
 }
 
 // nodeLabel names a node for the waiting line: its name, else its hostname,
@@ -225,7 +243,7 @@ func tunnelConfig(privateKey, operatorAddr, nodePub, publicAddr string, port int
 		PrivateKey:    strings.TrimSpace(privateKey),
 		Address:       opAddr,
 		PeerPublicKey: nodePub,
-		Endpoint:      netip.AddrPortFrom(pub, uint16(port)), //nolint:gosec // G115: listen_port is validated as 1-65535.
+		Endpoint:      netip.AddrPortFrom(pub, uint16(port)),
 		AllowedIPs:    []netip.Prefix{netip.PrefixFrom(wg, 24).Masked()},
 	}, nil
 }
@@ -364,13 +382,9 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 }
 
 func runApply(cmd *cobra.Command, _ []string) error {
-	// config set/edit --apply run this too, without a --step flag.
-	var stepIDs []string
-	if cmd.Flags().Lookup("step") != nil {
-		var err error
-		if stepIDs, err = cmd.Flags().GetStringSlice("step"); err != nil {
-			return err
-		}
+	stepIDs, err := applyStepIDs(cmd)
+	if err != nil {
+		return err
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -383,27 +397,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	// The recovery kit rides along so a node that lost its copy gets it
-	// back; the node writes it only when missing (D7). Backups that are on
-	// without a kit here is input_required: vaire never makes a new cipher for
-	// an existing repository.
-	if creds.Backup != nil && creds.Backup.HasBucket() {
-		addRecoveryKit(secretValues, creds.Backup)
-	} else if cfg, _, err := remoteConfig(cmd, s, p); err == nil && cfg.BackupConfigured() {
-		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's context has no recovery kit", output.ExitInput,
-			"Log in from a current transfer bundle (vaire login), which carries the recovery kit, then retry.").
-			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
+	if err := applyRecoveryKit(cmd, s, p, secretValues, creds); err != nil {
+		return err
 	}
-	params := map[string]any{}
-	if len(stepIDs) > 0 {
-		params["steps"] = stepIDs
-	}
-	if db := stringFlag(cmd, "db"); db != "" {
-		params["db"] = db
-	}
-	if flagTrue(cmd, "skip-doctor") {
-		params["skip_doctor"] = true
-	}
+	params := applyParams(cmd, stepIDs)
 	confirm, confirms := confirmOptions(cmd)
 	// The summary names the pending restarts and next steps carry the
 	// command, so the human output leaves out the node's restart_pending
@@ -435,7 +432,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	warnings = append(warnings, syncContextFromNode(cmd, s, p)...)
+	warnings = append(warnings, syncContextFromNode(commandContext(cmd), s, p)...)
 	message := fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total)
 	if data.Restarted() {
 		message += "; restarted " + restartSummary(data.Restarts)
@@ -462,6 +459,51 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		Warnings: warnings,
 		Next:     next,
 	})
+}
+
+// applyStepIDs are the --step values, which config set/edit --apply doesn't
+// define.
+func applyStepIDs(cmd *cobra.Command) ([]string, error) {
+	if cmd.Flags().Lookup("step") == nil {
+		return nil, nil
+	}
+	stepIDs, err := cmd.Flags().GetStringSlice("step")
+	if err != nil {
+		return nil, err
+	}
+	return stepIDs, nil
+}
+
+// applyRecoveryKit adds this machine's recovery kit to the secrets the node
+// receives, and refuses when backups are on without one. The node writes the
+// kit only when its copy is missing (D7); vaire never makes a new cipher for
+// an existing repository.
+func applyRecoveryKit(cmd *cobra.Command, s *session, p *progress, secretValues map[string]string, creds contexts.Credentials) error {
+	if creds.Backup != nil && creds.Backup.HasBucket() {
+		addRecoveryKit(secretValues, creds.Backup)
+		return nil
+	}
+	if cfg, err := remoteConfig(cmd, s, p); err == nil && cfg.BackupConfigured() {
+		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's context has no recovery kit", output.ExitInput,
+			"Log in from a current transfer bundle (vaire login), which carries the recovery kit, then retry.").
+			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
+	}
+	return nil
+}
+
+// applyParams are the RPC parameters of vaire apply.
+func applyParams(cmd *cobra.Command, stepIDs []string) map[string]any {
+	params := map[string]any{}
+	if len(stepIDs) > 0 {
+		params["steps"] = stepIDs
+	}
+	if db := stringFlag(cmd, "db"); db != "" {
+		params["db"] = db
+	}
+	if flagTrue(cmd, "skip-doctor") {
+		params["skip_doctor"] = true
+	}
+	return params
 }
 
 // planMessage renders a plan for humans: one line per step, the file diffs of

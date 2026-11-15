@@ -25,9 +25,10 @@ const (
 )
 
 // listenLocal binds 127.0.0.1 on the first free port at or above start.
-func listenLocal(start int) (net.Listener, int, error) {
+func listenLocal(ctx context.Context, start int) (net.Listener, int, error) {
+	var lc net.ListenConfig
 	for port := start; port < start+50; port++ {
-		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		ln, err := lc.Listen(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err == nil {
 			return ln, port, nil
 		}
@@ -83,7 +84,7 @@ func runTunnel(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	ln, port, err := listenLocal(localPort)
+	ln, port, err := listenLocal(cmd.Context(), localPort)
 	if err != nil {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Pass --local-port with a free port.")
 	}
@@ -93,7 +94,7 @@ func runTunnel(cmd *cobra.Command, _ []string) error {
 	// --db picks the node the database runs on (RFC 6.3); without it, the
 	// master. Both poolers route by the database name in the DSN.
 	db := stringFlag(cmd, "db")
-	at := databaseEndpoint(cmd, s, p, db)
+	at := databaseEndpoint(ctx, s, p, db)
 	remote := at.addr(remotePort)
 	go proxy(ctx, ln, s.dialer, remote)
 

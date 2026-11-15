@@ -196,7 +196,7 @@ func spawnTunnelDaemon(ctx context.Context, name string) error {
 	// The daemon truncates the log once it holds the singleton lock, so a
 	// spawn that loses the race doesn't wipe a running daemon's log.
 	logPath := contexts.Path(name, TunnelLogFile)
-	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // G304: the context's own log.
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,9 @@ func spawnTunnelDaemon(ctx context.Context, name string) error {
 		return err
 	}
 	defer func() { _ = r.Close() }()
-	cmd := exec.Command(exe, "tunnel", "serve", "--context", name) //nolint:gosec // G204: re-runs this binary.
+	// The daemon outlives this process, so it must not be killed when the
+	// caller's context is cancelled.
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), exe, "tunnel", "serve", "--context", name)
 	cmd.Dir = "/"
 	cmd.Env = append(os.Environ(), envTunnelReadyFD+"=3")
 	cmd.Stdin = devNull
@@ -323,7 +325,8 @@ func runTunnelServe(cmd *cobra.Command, _ []string) error {
 	// died is stale.
 	_ = os.Remove(socket)
 	old := syscall.Umask(0o077)
-	ln, err := net.Listen("unix", socket)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(cmd.Context(), "unix", socket)
 	syscall.Umask(old)
 	if err != nil {
 		return fail(output.WrapError(output.CodeTransportFailed, fmt.Errorf("listen on %s: %w", socket, err), output.ExitTransport, ""))
@@ -476,11 +479,12 @@ func stopTunnelDaemon(ctx context.Context, name string, force bool) (pid int, dr
 
 // stopTunnelDaemonQuietly stops a context's daemon before something that
 // would leave it stale (removing the context, an in-process tunnel), and
-// ignores a failure: the daemon then exits on its own once idle.
-func stopTunnelDaemonQuietly(name string, force bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+// ignores a failure: the daemon then exits on its own once idle. A cancelled
+// ctx still stops it.
+func stopTunnelDaemonQuietly(ctx context.Context, name string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
-	_, _, _ = stopTunnelDaemon(ctx, name, force)
+	_, _, _ = stopTunnelDaemon(ctx, name, true)
 }
 
 // stopIdleTunnelDaemons stops every context's daemon that no command uses,

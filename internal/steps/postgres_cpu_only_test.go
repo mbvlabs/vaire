@@ -26,26 +26,53 @@ func TestCPUOnlyOverlayAndCommand(t *testing.T) {
 	if err := writeCPUOverlay(dir, render.PGCPUOnlyDropin(res)); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "10-vaire.conf")) //nolint:gosec // Test-owned temporary file.
-	if err != nil || !bytes.Equal(raw, base) {
-		t.Fatal("full drop-in changed", err)
-	}
-	exists, err := cpuOverlayExists(dir)
-	if err != nil || !exists {
+	assertFileContent(t, filepath.Join(dir, "10-vaire.conf"), base)
+	if exists, err := cpuOverlayExists(dir); err != nil || !exists {
 		t.Fatal(exists, err)
 	}
 	res.CPUMode, res.CPUQuota = "normal", ""
 	if err := writeCPUOverlay(dir, render.PGCPUOnlyDropin(res)); err != nil {
 		t.Fatal(err)
 	}
-	raw, err = os.ReadFile(filepath.Join(dir, cpuOverlayName)) //nolint:gosec // Test-owned temporary file.
+	assertCPUOverlayHasOnlyCPUSettings(t, dir)
+	assertCPUOnlyCommand(t, res)
+	assertFullDropinReplacesOverlay(t, dir)
+	assertForeignOverlayRefused(t, dir, res)
+}
+
+// assertFileContent checks path still holds want.
+func assertFileContent(t *testing.T, path string, want []byte) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(raw, want) {
+		t.Fatal("file changed", err)
+	}
+}
+
+// assertCPUOverlayHasOnlyCPUSettings checks the CPU-only overlay has the
+// requested CPU settings and no non-CPU ones.
+func assertCPUOverlayHasOnlyCPUSettings(t *testing.T, dir string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, cpuOverlayName))
 	if err != nil || !strings.Contains(string(raw), "CPUWeight=73\nCPUQuota=\n") || strings.Contains(string(raw), "Memory") {
 		t.Fatal(string(raw), err)
 	}
+}
+
+// assertCPUOnlyCommand checks the runtime systemctl command carries the
+// requested CPU settings.
+func assertCPUOnlyCommand(t *testing.T, res config.Resources) {
+	t.Helper()
 	cmd := cpuOnlyCommand(config.ClusterSpec{Name: "app"}, res)
 	if cmd.Name != "systemctl" || !slices.Equal(cmd.Args, []string{"set-property", "--runtime", "postgresql@18-app.service", "CPUWeight=73", "CPUQuota="}) {
 		t.Fatal(cmd)
 	}
+}
+
+// assertFullDropinReplacesOverlay checks the full drop-in write removes the
+// CPU-only overlay only after its callback has written the replacement.
+func assertFullDropinReplacesOverlay(t *testing.T, dir string) {
+	t.Helper()
 	wrote := false
 	if err := prepareFullCPUDropin(dir, func() error {
 		wrote = true
@@ -59,6 +86,12 @@ func TestCPUOnlyOverlayAndCommand(t *testing.T) {
 	if exists, err := cpuOverlayExists(dir); err != nil || exists {
 		t.Fatal(exists, err)
 	}
+}
+
+// assertForeignOverlayRefused checks a CPU-only overlay vaire did not write is
+// neither removed nor overwritten.
+func assertForeignOverlayRefused(t *testing.T, dir string, res config.Resources) {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, cpuOverlayName), []byte("foreign"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +127,7 @@ func TestCPUOverlayInterruptedTempDoesNotBlockUpdate(t *testing.T) {
 		oldRandom:       []byte("other interrupted write"),
 		cpuOverlayName:  content,
 	} {
-		got, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // Test-owned temporary file.
+		got, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("%s: %q, %v", name, got, err)
 		}
@@ -190,14 +223,14 @@ func TestCPUUnknownCompletedEngineSkipsWithoutMutation(t *testing.T) {
 	if err := j.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(path) //nolint:gosec // Test-owned journal.
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	applied := false
 	step := cpuObservedStep{result: checkCPUObserved("app", config.Resources{CPUMode: "normal", CPUWeight: 100}, hostinfo.CPUObservation{}), applied: &applied}
 	data, warnings, err := engine.Apply(context.Background(), []engine.Step{step}, config.Cluster{}, engine.Runtime{}, engine.Options{JournalPath: path})
-	after, readErr := os.ReadFile(path) //nolint:gosec // Test-owned journal.
+	after, readErr := os.ReadFile(path)
 	if err != nil || readErr != nil || applied || !bytes.Equal(before, after) || data.Skipped != 1 || len(warnings) != 1 {
 		t.Fatal(data, warnings, err, readErr)
 	}
@@ -291,7 +324,11 @@ func TestCPUOnlyForcesDistinctInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	normal := postgresCluster{clusterStep{cluster: "app"}}
-	only := catalog[0].(engine.Template).Instance("app")
+	first, ok := catalog[0].(engine.Template)
+	if !ok {
+		t.Fatal("the catalog's first step is not a template")
+	}
+	only := first.Instance("app")
 	a, err := normal.Inputs(cfg, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)

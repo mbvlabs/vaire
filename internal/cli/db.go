@@ -19,16 +19,16 @@ import (
 )
 
 // remoteConfig fetches cluster.toml from the node and parses it.
-func remoteConfig(cmd *cobra.Command, s *session, p *progress) (config.Cluster, configData, error) {
-	data, err := fetchConfig(cmd, s, p)
+func remoteConfig(cmd *cobra.Command, s *session, p *progress) (config.Cluster, error) {
+	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
-		return config.Cluster{}, configData{}, err
+		return config.Cluster{}, err
 	}
 	cfg, err := config.ParseCluster([]byte(data.TOML))
 	if err != nil {
-		return config.Cluster{}, data, err
+		return config.Cluster{}, err
 	}
-	return cfg, data, nil
+	return cfg, nil
 }
 
 type databaseInfo struct {
@@ -148,7 +148,7 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -293,7 +293,7 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -336,32 +336,49 @@ func runDBResize(cmd *cobra.Command, args []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
-	summary := sizeSummary(cfg, data.Database)
-	if cmd.Flags().Changed("cpu-mode") || cmd.Flags().Changed("cpu-quota") {
-		if res, err := cfg.Resources(data.Database); err == nil {
-			quota := res.CPUQuota
-			if quota == "" {
-				quota = "none"
-			}
-			summary += ", CPU " + res.CPUMode + ", quota " + quota
-		}
-	}
+	summary := resizeSummary(cmd, cfg, data.Database)
 	if data.Plan != nil {
 		return output.Success(cmd, output.Result{Data: data, Warnings: warnings,
 			Message: resizePreviewMessage(name, summary, *data.Plan, data.Followers)})
 	}
-	message := fmt.Sprintf("resized %s to %s", name, summary)
-	var next []string
-	if a := data.Apply; a != nil {
-		if a.Restarted() {
-			message += "; restarted " + restartSummary(a.Restarts)
-		}
-		if len(a.RestartPending) > 0 {
-			message += "; restart pending: " + strings.Join(a.RestartPending, ", ")
-			next = []string{"vaire apply --db " + name + " " + confirmFlags(a.ConfirmTokens)}
-		}
-	}
+	message, next := resizeAppliedMessage(name, summary, data.Apply)
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
+}
+
+// resizeSummary is the human summary of a database's resources after a
+// resize, naming the CPU policy when the command changed it.
+func resizeSummary(cmd *cobra.Command, cfg config.Cluster, spec config.ClusterSpec) string {
+	summary := sizeSummary(cfg, spec)
+	if !cmd.Flags().Changed("cpu-mode") && !cmd.Flags().Changed("cpu-quota") {
+		return summary
+	}
+	res, err := cfg.Resources(spec)
+	if err != nil {
+		return summary
+	}
+	quota := res.CPUQuota
+	if quota == "" {
+		quota = "none"
+	}
+	return summary + ", CPU " + res.CPUMode + ", quota " + quota
+}
+
+// resizeAppliedMessage is the human message of a completed resize and the
+// command that finishes a pending restart.
+func resizeAppliedMessage(name, summary string, apply *engine.ApplyData) (string, []string) {
+	message := fmt.Sprintf("resized %s to %s", name, summary)
+	if apply == nil {
+		return message, nil
+	}
+	var next []string
+	if apply.Restarted() {
+		message += "; restarted " + restartSummary(apply.Restarts)
+	}
+	if len(apply.RestartPending) > 0 {
+		message += "; restart pending: " + strings.Join(apply.RestartPending, ", ")
+		next = []string{"vaire apply --db " + name + " " + confirmFlags(apply.ConfirmTokens)}
+	}
+	return message, next
 }
 
 // resizeFollowerPlan is one of the resized database's followers in a resize
@@ -406,7 +423,7 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	defer s.Close()
 	// Refuse a protected database before asking for the token; the node
 	// refuses it too.
-	if cfg, _, err := remoteConfig(cmd, s, p); err == nil {
+	if cfg, err := remoteConfig(cmd, s, p); err == nil {
 		if err := node.CheckNotProtected(cfg, name, "db drop"); err != nil {
 			return err
 		}
@@ -471,7 +488,7 @@ func runDBCredentials(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}

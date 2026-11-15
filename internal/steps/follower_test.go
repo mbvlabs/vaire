@@ -170,6 +170,15 @@ func TestPgbouncerWithholdsAnUnsettledUnfollowsAlias(t *testing.T) {
 	}
 
 	setRecord(false)
+	assertUnsettledAliasWithheld(t, entries, rendered)
+	setRecord(true)
+	assertSettledAliasRouted(t, entries, rendered)
+}
+
+// assertUnsettledAliasWithheld checks both poolers withhold the alias of an
+// unfinished unfollow and still route its source.
+func assertUnsettledAliasWithheld(t *testing.T, entries func(bool) map[string]render.PoolerDatabase, rendered func(bool) string) {
+	t.Helper()
 	for _, session := range []bool{false, true} {
 		got := entries(session)
 		if _, ok := got["app_follower"]; ok {
@@ -182,8 +191,12 @@ func TestPgbouncerWithholdsAnUnsettledUnfollowsAlias(t *testing.T) {
 			t.Errorf("session=%v: the rendered configuration names the unsettled alias:\n%s", session, ini)
 		}
 	}
+}
 
-	setRecord(true)
+// assertSettledAliasRouted checks both poolers route the alias of a finished
+// unfollow to the follower.
+func assertSettledAliasRouted(t *testing.T, entries func(bool) map[string]render.PoolerDatabase, rendered func(bool) string) {
+	t.Helper()
 	for _, session := range []bool{false, true} {
 		got := entries(session)
 		db, ok := got["app_follower"]
@@ -286,6 +299,46 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 	t.Cleanup(func() { backup.RecordsPath = oldPath })
 	cfg := followerConfig()
 	rt := engine.Runtime{Host: followerHost}
+	safe := withPoolerFiles(t)
+
+	// No records file: initial bootstrap, so a follower alias renders normally.
+	files, err := pgbouncerFiles(cfg, rt)
+	if err != nil {
+		t.Fatalf("missing records are refused: %v", err)
+	}
+	assertPoolerAlias(t, files, "app_follower", true)
+	assertPoolerAlias(t, files, "app", true)
+
+	// A readable unsettled unfollow withholds the alias and its auth alias from
+	// both poolers, on both the ordinary render and the direct fence path.
+	writeUnsettledUnfollow(t)
+	files, err = pgbouncerFiles(cfg, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPoolerAlias(t, files, "app_follower", false)
+	assertPoolerAlias(t, files, "app", true)
+	assertPoolerFenceWithholdsAlias(t, cfg)
+
+	// Corrupt records are unknown, never "no unfinished unfollow".
+	if err := os.WriteFile(backup.RecordsPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if files := (pgbouncer{}).RenderedFiles(cfg, rt); files != nil {
+		t.Fatalf("the plan render exposed files from unreadable records: %v", files)
+	}
+	assertUnreadableRecordsRefused(t, cfg, rt)
+	// No file was touched by any failing path: the previous safe files stay.
+	if err := ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil); err == nil || refusalReason(err) != "unfollow_state_unknown" {
+		t.Fatalf("the direct fence accepted unreadable unfollow records: %v", err)
+	}
+	assertPoolerFilesUnchanged(t, safe)
+}
+
+// withPoolerFiles points the pooler file paths at a temp directory, writes
+// safe contents and returns them by path.
+func withPoolerFiles(t *testing.T) map[string]string {
+	t.Helper()
 	oldPaths := poolerFilePaths
 	dir := t.TempDir()
 	poolerFilePaths = struct {
@@ -302,21 +355,16 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 		poolerFilePaths.sessionUnit: "safe unit\n",
 	}
 	for path, content := range safe {
-		if err := os.WriteFile(path, []byte(content), 0o640); err != nil { //nolint:gosec // G306: test-managed file.
+		if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
 			t.Fatal(err)
 		}
 	}
+	return safe
+}
 
-	// No records file: initial bootstrap, so a follower alias renders normally.
-	files, err := pgbouncerFiles(cfg, rt)
-	if err != nil {
-		t.Fatalf("missing records are refused: %v", err)
-	}
-	assertPoolerAlias(t, files, "app_follower", true)
-	assertPoolerAlias(t, files, "app", true)
-
-	// A readable unsettled unfollow withholds the alias and its auth alias from
-	// both poolers, on both the ordinary render and the direct fence path.
+// writeUnsettledUnfollow records an unfollow that has not settled.
+func writeUnsettledUnfollow(t *testing.T) {
+	t.Helper()
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		s.Unfollowing["app_follower"] = backup.Unfollow{
 			Source: "app", Stanza: "app_follower-abc123", StartedAt: "2026-11-10T00:00:00Z", Settled: false,
@@ -325,15 +373,13 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	files, err = pgbouncerFiles(cfg, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertPoolerAlias(t, files, "app_follower", false)
-	assertPoolerAlias(t, files, "app", true)
+}
 
+// assertPoolerFenceWithholdsAlias runs the direct fence with a capturing
+// writer and checks it withheld the unsettled alias from both poolers.
+func assertPoolerFenceWithholdsAlias(t *testing.T, cfg config.Cluster) {
+	t.Helper()
 	oldWrite := writePoolerFile
-	t.Cleanup(func() { writePoolerFile = oldWrite })
 	var written map[string]string
 	writePoolerFile = func(path, content string, _ os.FileMode, _, _ string) error {
 		if written == nil {
@@ -345,6 +391,7 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 	// The shell is dry, so the call stops after the writes; the rendered files
 	// are what this boundary protects.
 	_ = ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+	writePoolerFile = oldWrite
 	for _, path := range []string{poolerFilePaths.ini, poolerFilePaths.sessionIni} {
 		content, ok := written[path]
 		if !ok {
@@ -354,14 +401,12 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 			t.Fatalf("the fence exposed the unsettled alias in %s:\n%s", path, content)
 		}
 	}
+}
 
-	// Corrupt records are unknown, never "no unfinished unfollow".
-	if err := os.WriteFile(backup.RecordsPath, []byte("{"), 0o600); err != nil { //nolint:gosec // G306: test records file.
-		t.Fatal(err)
-	}
-	if files := (pgbouncer{}).RenderedFiles(cfg, rt); files != nil {
-		t.Fatalf("the plan render exposed files from unreadable records: %v", files)
-	}
+// assertUnreadableRecordsRefused checks every rendering entry point refuses
+// unreadable unfollow records instead of treating them as empty.
+func assertUnreadableRecordsRefused(t *testing.T, cfg config.Cluster, rt engine.Runtime) {
+	t.Helper()
 	for name, call := range map[string]func() error{
 		"render": func() error { _, err := pgbouncerFiles(cfg, rt); return err },
 		"inputs": func() error { _, err := (pgbouncer{}).Inputs(cfg, rt); return err },
@@ -386,14 +431,13 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 			t.Fatalf("%s error is not a fail-closed transition refusal: %v", name, err)
 		}
 	}
+}
 
-	// No file was touched by any failing path: the previous safe files stay.
-	writePoolerFile = oldWrite
-	if err := ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil); err == nil || refusalReason(err) != "unfollow_state_unknown" {
-		t.Fatalf("the direct fence accepted unreadable unfollow records: %v", err)
-	}
+// assertPoolerFilesUnchanged checks no failing path touched the safe files.
+func assertPoolerFilesUnchanged(t *testing.T, safe map[string]string) {
+	t.Helper()
 	for path, want := range safe {
-		got, err := os.ReadFile(path) //nolint:gosec // G304: test-managed path.
+		got, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("safe file %s is gone: %v", path, err)
 		}

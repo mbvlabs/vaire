@@ -165,7 +165,7 @@ func ClusterConfigDirectory(name string) (bool, error) {
 // resumed operation proves that the deterministic cluster path is its own and
 // not some other cluster's registration.
 func ClusterDataDirectory(name string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(pgConfRoot, name, "postgresql.conf")) //nolint:gosec // G304: postgresql-common's fixed configuration path.
+	raw, err := os.ReadFile(filepath.Join(pgConfRoot, name, "postgresql.conf"))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
@@ -274,7 +274,33 @@ func (m *Materialised) makeData() error {
 func (m *Materialised) register() error {
 	src := filepath.Join(pgConfRoot, m.Source)
 	dir := m.ConfDir()
-	files := map[string]string{
+	files := m.baseRegistrationFiles(dir)
+	if err := copySourceConfigFiles(files, src); err != nil {
+		return err
+	}
+	if err := copySourceConfD(files, src); err != nil {
+		return err
+	}
+	if c := m.DestinationConfig; c != nil {
+		applyDestinationConfig(files, c)
+	}
+	files[filepath.Join("conf.d", MaterialiseOverrides)] = materialiseOverrideConf(m.Port)
+	for _, d := range []string{dir, filepath.Join(dir, "conf.d")} {
+		if err := createRegistrationDir(d); err != nil {
+			return err
+		}
+	}
+	if err := m.removeStaleRegistrationLayers(dir); err != nil {
+		return err
+	}
+	return writeRegistrationFiles(dir, files)
+}
+
+// baseRegistrationFiles are the registration's own postgresql.conf, which
+// points at the data directory and the temporary port, and start.conf, which
+// keeps the cluster from starting on its own at boot.
+func (m *Materialised) baseRegistrationFiles(dir string) map[string]string {
+	return map[string]string{
 		"postgresql.conf": strings.Join([]string{
 			"# vaire temporary cluster " + m.Name + ", materialised from " + m.Source + "; dropped when vaire is done with it",
 			"data_directory = '" + m.Data + "'",
@@ -289,13 +315,24 @@ func (m *Materialised) register() error {
 		}, "\n"),
 		"start.conf": "manual\n",
 	}
+}
+
+// copySourceConfigFiles copies the source's authentication, identification and
+// pg_ctlcluster environment files, which the temporary cluster must keep.
+func copySourceConfigFiles(files map[string]string, src string) error {
 	for _, name := range []string{"pg_hba.conf", "pg_ident.conf", "pg_ctl.conf", "environment"} {
-		raw, err := os.ReadFile(filepath.Join(src, name)) //nolint:gosec // G304: the source cluster's own configuration.
+		raw, err := os.ReadFile(filepath.Join(src, name))
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		files[name] = string(raw)
 	}
+	return nil
+}
+
+// copySourceConfD copies the source's conf.d files, except the overrides the
+// materialisation writes itself.
+func copySourceConfD(files map[string]string, src string) error {
 	confD, err := os.ReadDir(filepath.Join(src, "conf.d"))
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -304,27 +341,37 @@ func (m *Materialised) register() error {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") || e.Name() == MaterialiseOverrides {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(src, "conf.d", e.Name())) //nolint:gosec // G304: the source cluster's own configuration.
+		raw, err := os.ReadFile(filepath.Join(src, "conf.d", e.Name()))
 		if err != nil {
 			return err
 		}
 		files[filepath.Join("conf.d", e.Name())] = string(raw)
 	}
-	if c := m.DestinationConfig; c != nil {
-		files[filepath.Join("conf.d", "10-vaire-tuning.conf")] = c.Tuning
-		files[filepath.Join("conf.d", "50-vaire-settings.conf")] = c.Settings
-		follower := filepath.Join("conf.d", "60-vaire-follower.conf")
-		delete(files, follower)
-		if c.Follower != nil {
-			files[follower] = *c.Follower
-		}
-		if c.Overrides != nil {
-			files[filepath.Join("conf.d", UserOverrides)] = *c.Overrides
-		}
+	return nil
+}
+
+// applyDestinationConfig replaces the source's managed tuning, settings and
+// follower layers with the destination's, and keeps the operator's overrides
+// when the destination carries its own.
+func applyDestinationConfig(files map[string]string, c *MaterialiseConfig) {
+	files[filepath.Join("conf.d", "10-vaire-tuning.conf")] = c.Tuning
+	files[filepath.Join("conf.d", "50-vaire-settings.conf")] = c.Settings
+	follower := filepath.Join("conf.d", "60-vaire-follower.conf")
+	delete(files, follower)
+	if c.Follower != nil {
+		files[follower] = *c.Follower
 	}
-	files[filepath.Join("conf.d", MaterialiseOverrides)] = strings.Join([]string{
+	if c.Overrides != nil {
+		files[filepath.Join("conf.d", UserOverrides)] = *c.Overrides
+	}
+}
+
+// materialiseOverrideConf is the conf.d file that makes the registration a
+// temporary cluster: no archiving, read-only recovery, small memory.
+func materialiseOverrideConf(port int) string {
+	return strings.Join([]string{
 		"# vaire temporary cluster: no archiving, read-only recovery, small memory",
-		"port = " + strconv.Itoa(m.Port),
+		"port = " + strconv.Itoa(port),
 		"listen_addresses = ''",
 		"archive_mode = off",
 		"hot_standby = on",
@@ -334,23 +381,36 @@ func (m *Materialised) register() error {
 		"huge_pages = off",
 		"",
 	}, "\n")
-	for _, d := range []string{dir, filepath.Join(dir, "conf.d")} {
-		if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // G301: postgresql-common's configuration directories are world-readable.
-			return err
-		}
-		uid, gid, err := resolveClusterIDs("postgres", "postgres")
-		if err != nil {
-			return err
-		}
-		if err := os.Chown(d, uid, gid); err != nil {
-			return err
-		}
+}
+
+// createRegistrationDir creates one of postgresql-common's configuration
+// directories, owned by postgres.
+func createRegistrationDir(d string) error {
+	if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // G301: postgresql-common's configuration directories are world-readable.
+		return err
 	}
-	if m.DestinationConfig != nil && m.DestinationConfig.Follower == nil {
-		if err := os.Remove(filepath.Join(dir, "conf.d", "60-vaire-follower.conf")); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	uid, gid, err := resolveClusterIDs("postgres", "postgres")
+	if err != nil {
+		return err
 	}
+	return os.Chown(d, uid, gid)
+}
+
+// removeStaleRegistrationLayers removes the source's follower layer when the
+// destination's configuration has none.
+func (m *Materialised) removeStaleRegistrationLayers(dir string) error {
+	if m.DestinationConfig == nil || m.DestinationConfig.Follower != nil {
+		return nil
+	}
+	if err := os.Remove(filepath.Join(dir, "conf.d", "60-vaire-follower.conf")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// writeRegistrationFiles writes the registration, each file with the mode
+// postgresql-common gives a live cluster's.
+func writeRegistrationFiles(dir string, files map[string]string) error {
 	for name, content := range files {
 		if err := writeClusterFile(filepath.Join(dir, name), []byte(content), confMode(name), "postgres", "postgres"); err != nil {
 			return err
@@ -400,13 +460,13 @@ func (m *Materialised) Adopt(ctx context.Context, port int) error {
 		return err
 	}
 	return m.GuardOwnership(ctx, MaterialisationAdopt, func() error {
-		return m.adopt(port)
+		return m.adopt(ctx, port)
 	})
 }
 
-func (m *Materialised) adopt(port int) error {
+func (m *Materialised) adopt(ctx context.Context, port int) error {
 	if m.reservation != nil {
-		return m.reservation.perform(context.Background(), m, func() error { return m.adoptRegistration(port) }, func() { m.Port = port })
+		return m.reservation.perform(ctx, m, func() error { return m.adoptRegistration(port) }, func() { m.Port = port })
 	}
 	if err := m.adoptRegistration(port); err != nil {
 		return err
@@ -424,7 +484,7 @@ func (m *Materialised) adoptRegistration(port int) error {
 	if m.forkConfigRoot != "" {
 		sourceRoot = m.forkConfigRoot
 	}
-	raw, err := os.ReadFile(filepath.Join(sourceRoot, m.Source, "postgresql.conf")) //nolint:gosec // G304: the source cluster's own configuration.
+	raw, err := os.ReadFile(filepath.Join(sourceRoot, m.Source, "postgresql.conf"))
 	if err != nil {
 		return err
 	}
@@ -582,7 +642,7 @@ func (m *Materialised) LogTail(n int) []string { return clusterLogTail(m.Name, n
 // clusterLogTail returns the last n lines of cluster name's
 // postgresql-common log.
 func clusterLogTail(name string, n int) []string {
-	raw, err := os.ReadFile("/var/log/postgresql/postgresql-18-" + name + ".log") //nolint:gosec // G304: a cluster vaire named.
+	raw, err := os.ReadFile("/var/log/postgresql/postgresql-18-" + name + ".log")
 	if err != nil {
 		return nil
 	}
@@ -623,19 +683,20 @@ func (m *Materialised) Drop() error {
 	if m.reservation != nil && (m.Ownership == nil || m.reservation.owner != m) {
 		return errors.New("fork ownership guard required")
 	}
-	if m.Ownership == nil && m.reservation == nil {
-		return DropTemporaryCluster(m.Shell, m.StepID, m.Report, m.Name, m.Data)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	return m.GuardOwnership(ctx, MaterialisationDrop, func() error {
+	drop := func() error {
 		if m.reservation != nil {
 			return m.reservation.perform(ctx, m, func() error {
 				return dropTemporaryClusterFiles(ctx, m.Shell, m.StepID, m.Report, m.Name, m.Data)
 			}, nil)
 		}
-		return DropTemporaryCluster(m.Shell, m.StepID, m.Report, m.Name, m.Data)
-	})
+		return dropTemporaryCluster(ctx, m.Shell, m.StepID, m.Report, m.Name, m.Data)
+	}
+	if m.Ownership == nil && m.reservation == nil {
+		return drop()
+	}
+	return m.GuardOwnership(ctx, MaterialisationDrop, drop)
 }
 
 // DropTemporaryCluster stops and removes cluster name with pg_dropcluster,
@@ -647,6 +708,11 @@ func (m *Materialised) Drop() error {
 func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	return dropTemporaryCluster(ctx, sh, stepID, report, name, data)
+}
+
+// dropTemporaryCluster is DropTemporaryCluster under a ctx the caller owns.
+func dropTemporaryCluster(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	err := dropTemporaryClusterFiles(ctx, sh, stepID, report, name, data)
 	_ = os.Remove(filepath.Join(legacyReservationDir, name))
 	return err
@@ -874,7 +940,7 @@ func SwapState(dataRoot, live, from, aside string) string {
 // there.
 func repointAutoConf(data, oldData string) error {
 	path := filepath.Join(data, "postgresql.auto.conf")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a data directory vaire moved.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -1052,7 +1118,7 @@ func column(rows []map[string]string, name string) []string {
 // directory's postgresql.auto.conf and returns the ones it removed.
 func dropRecoverySettings(data string) ([]string, error) {
 	path := filepath.Join(data, "postgresql.auto.conf")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a data directory vaire manages.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

@@ -47,8 +47,8 @@ func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Du
 	// A PAUSE that fails or times out (PgBouncer down, a long transaction)
 	// doesn't stop the restart: -m fast ends the transaction anyway, and
 	// RESUME below clears a pause still in progress.
-	_ = poolerAdmin(ctx, PgbouncerPort, "PAUSE "+cluster)
-	defer func() { _ = poolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+cluster) }()
+	_ = poolerAdmin(ctx, "PAUSE "+cluster)
+	defer func() { _ = poolerAdmin(context.WithoutCancel(ctx), "RESUME "+cluster) }()
 	name, args := restartCommand(cluster)
 	if err := runCmd(ctx, name, args...); err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: %w%s", PGServiceName(cluster), err, unitDiagnosis(ctx, PGServiceName(cluster)))
@@ -108,7 +108,7 @@ func waitReady(ctx context.Context, port int) error {
 // runCmd runs a fixed command with the probe environment. A failure carries
 // the end of the command's combined output.
 func runCmd(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed restart commands.
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = probeEnv
 	out := &tailBuffer{max: cmdOutputTail}
 	cmd.Stdout = out
@@ -158,8 +158,8 @@ func Restarter(cfg config.Cluster) engine.Restarter { return postgresRestarter{c
 // through a restore's cut-over instead of failing, and returns the RESUME.
 // A PAUSE that fails or times out doesn't stop the caller.
 func PauseDatabase(ctx context.Context, db string) (resume func()) {
-	_ = poolerAdmin(ctx, PgbouncerPort, "PAUSE "+db)
-	return func() { _ = poolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+db) }
+	_ = poolerAdmin(ctx, "PAUSE "+db)
+	return func() { _ = poolerAdmin(context.WithoutCancel(ctx), "RESUME "+db) }
 }
 
 // NeedsRestart reports whether cluster still has a setting waiting for a

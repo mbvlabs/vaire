@@ -90,65 +90,14 @@ func parseSegmentName(name string) (uint64, bool) {
 // turning a healthy read into an error. Unknown files are ignored so a future
 // store version or an operator's note cannot break reads.
 func listSegments(dir string) ([]segmentInfo, bool, bool, error) {
-	f, err := os.Open(dir) //nolint:gosec // G304: the store directory.
+	f, err := os.Open(dir)
 	if err != nil {
 		return nil, false, false, fmt.Errorf("activity: read store directory: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	var (
-		segments []segmentInfo
-		entries  int
-		more     bool
-		raced    bool
-	)
-	for {
-		batch, readErr := f.ReadDir(dirReadBatch)
-		for _, entry := range batch {
-			entries++
-			if entries > maxDirEntries {
-				more = true
-				break
-			}
-			name := entry.Name()
-			if name == stateName || name == lockName || strings.HasPrefix(name, ".") {
-				continue
-			}
-			index, ok := parseSegmentName(name)
-			if !ok {
-				continue
-			}
-			if dirEntryHook != nil {
-				dirEntryHook(name)
-			}
-			info, infoErr := entry.Info()
-			if infoErr != nil {
-				if errors.Is(infoErr, fs.ErrNotExist) {
-					// Retention removed the segment after ReadDir. The
-					// evidence set changed under us; skip it and let callers
-					// qualify the scan.
-					raced = true
-					continue
-				}
-				return nil, false, raced, fmt.Errorf("activity: read segment entry: %w", infoErr)
-			}
-			uidOK := ownerMatches(info)
-			segments = append(segments, segmentInfo{
-				index:   index,
-				name:    name,
-				path:    filepath.Join(dir, name),
-				size:    info.Size(),
-				mode:    info.Mode().Perm(),
-				modTime: info.ModTime(),
-				ownerOK: uidOK,
-				regular: info.Mode().IsRegular(),
-			})
-		}
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return nil, false, raced, fmt.Errorf("activity: read store directory: %w", readErr)
-		}
-		if more || readErr != nil {
-			break
-		}
+	segments, more, raced, err := readSegmentEntries(f, dir)
+	if err != nil {
+		return nil, false, raced, err
 	}
 	sort.Slice(segments, func(i, j int) bool { return segments[i].index < segments[j].index })
 	for i := 1; i < len(segments); i++ {
@@ -159,10 +108,95 @@ func listSegments(dir string) ([]segmentInfo, bool, bool, error) {
 	return segments, more, raced, nil
 }
 
+// readSegmentEntries reads the bounded directory stream and keeps only
+// well-formed segment entries. more reports that maxDirEntries was reached and
+// raced reports that a listed entry vanished before its metadata was read.
+func readSegmentEntries(f *os.File, dir string) ([]segmentInfo, bool, bool, error) {
+	var listing segmentListing
+	for {
+		batch, readErr := f.ReadDir(dirReadBatch)
+		if err := listing.add(dir, batch); err != nil {
+			return nil, false, listing.raced, err
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, false, listing.raced, fmt.Errorf("activity: read store directory: %w", readErr)
+		}
+		if listing.more || readErr != nil {
+			break
+		}
+	}
+	return listing.segments, listing.more, listing.raced, nil
+}
+
+// segmentListing accumulates one bounded directory read.
+type segmentListing struct {
+	segments []segmentInfo
+	entries  int
+	more     bool
+	raced    bool
+}
+
+// add folds one directory batch into the listing. It sets more when the entry
+// bound is reached.
+func (l *segmentListing) add(dir string, batch []os.DirEntry) error {
+	for _, entry := range batch {
+		l.entries++
+		if l.entries > maxDirEntries {
+			l.more = true
+			return nil
+		}
+		seg, kept, vanished, err := readSegmentEntry(dir, entry)
+		if err != nil {
+			return err
+		}
+		if vanished {
+			l.raced = true
+		}
+		if kept {
+			l.segments = append(l.segments, seg)
+		}
+	}
+	return nil
+}
+
+// readSegmentEntry inspects one directory entry. vanished reports an entry
+// that retention removed between ReadDir and its metadata read: the evidence
+// set changed under us, so callers qualify the scan rather than fail it.
+func readSegmentEntry(dir string, entry os.DirEntry) (seg segmentInfo, kept, vanished bool, err error) {
+	name := entry.Name()
+	if name == stateName || name == lockName || strings.HasPrefix(name, ".") {
+		return segmentInfo{}, false, false, nil
+	}
+	index, ok := parseSegmentName(name)
+	if !ok {
+		return segmentInfo{}, false, false, nil
+	}
+	if dirEntryHook != nil {
+		dirEntryHook(name)
+	}
+	info, infoErr := entry.Info()
+	if infoErr != nil {
+		if errors.Is(infoErr, fs.ErrNotExist) {
+			return segmentInfo{}, false, true, nil
+		}
+		return segmentInfo{}, false, false, fmt.Errorf("activity: read segment entry: %w", infoErr)
+	}
+	return segmentInfo{
+		index:   index,
+		name:    name,
+		path:    filepath.Join(dir, name),
+		size:    info.Size(),
+		mode:    info.Mode().Perm(),
+		modTime: info.ModTime(),
+		ownerOK: ownerMatches(info),
+		regular: info.Mode().IsRegular(),
+	}, true, false, nil
+}
+
 // openSegmentRead opens a segment read-only without following symlinks and
 // re-checks the safety properties observed during enumeration.
 func openSegmentRead(seg segmentInfo) (*os.File, error) {
-	f, err := os.OpenFile(seg.path, os.O_RDONLY|noFollowFlag, 0) //nolint:gosec // G304: a listed store segment.
+	f, err := os.OpenFile(seg.path, os.O_RDONLY|noFollowFlag, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -229,16 +263,21 @@ func segmentFirstEventErr(seg segmentInfo, budget int64) (Event, bool, error) {
 
 // segmentLastEvent returns the last decodable event of a segment. It reads only
 // the tail that can contain the last line, because a stored line is bounded by
-// maxEventBytes.
-func segmentLastEvent(seg segmentInfo, budget int64) (Event, bool) {
-	ev, ok, _ := segmentLastEventErr(seg, budget)
+// maxEventBytes. It discards an interrupted fallback scan, so it is only for
+// callers that tolerate an unprovable tail; sequence recovery uses
+// segmentLastEventErr.
+func segmentLastEvent(ctx context.Context, seg segmentInfo, budget int64) (Event, bool) {
+	ev, ok, _ := segmentLastEventErr(ctx, seg, budget)
 	return ev, ok
 }
 
-// segmentLastEventErr is segmentLastEvent that also reports an open failure,
-// so a caller comparing retained bounds with state can tell a segment removed
-// by retention from one with no decodable event.
-func segmentLastEventErr(seg segmentInfo, budget int64) (Event, bool, error) {
+// segmentLastEventErr is segmentLastEvent that also reports an open failure or
+// an interrupted fallback scan, so a caller comparing retained bounds with
+// state can tell a segment removed by retention, a segment with no decodable
+// event, and a recovery that could not prove its tail apart. Callers that must
+// never treat an interrupted scan as an absent tail (append sequence recovery)
+// use this form.
+func segmentLastEventErr(ctx context.Context, seg segmentInfo, budget int64) (Event, bool, error) {
 	if seg.size <= 0 {
 		return Event{}, false, nil
 	}
@@ -262,12 +301,26 @@ func segmentLastEventErr(seg segmentInfo, budget int64) (Event, bool, error) {
 	// The tail may begin in the middle of a line; only complete trailing lines
 	// are considered.
 	if start > 0 {
-		if idx := bytes.IndexByte(raw, '\n'); idx >= 0 {
-			raw = raw[idx+1:]
-		} else {
+		idx := bytes.IndexByte(raw, '\n')
+		if idx < 0 {
 			return Event{}, false, nil
 		}
+		raw = raw[idx+1:]
 	}
+	if ev, ok := lastDecodableLine(raw); ok {
+		return ev, true, nil
+	}
+	if start == 0 {
+		return Event{}, false, nil
+	}
+	// A run of malformed tail data larger than the tail window can hide the
+	// last valid event. Fall back to one bounded full scan rather than
+	// reporting no tail at all.
+	return segmentLastEventScan(ctx, f, budget, budget < seg.size)
+}
+
+// lastDecodableLine returns the newest complete, decodable line in raw.
+func lastDecodableLine(raw []byte) (Event, bool) {
 	lines := bytes.Split(raw, []byte("\n"))
 	if len(lines) > 0 && len(lines[len(lines)-1]) > 0 {
 		// The file does not end with a newline. The final fragment is a torn
@@ -276,34 +329,36 @@ func segmentLastEventErr(seg segmentInfo, budget int64) (Event, bool, error) {
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]
-		if len(line) == 0 {
-			continue
-		}
-		if len(line) > maxEventBytes {
+		if len(line) == 0 || len(line) > maxEventBytes {
 			continue
 		}
 		if ev, decErr := decodeStoredEvent(line); decErr == nil {
-			return ev, true, nil
+			return ev, true
 		}
 	}
-	if start > 0 {
-		// A run of malformed tail data larger than the tail window can hide
-		// the last valid event. Fall back to one bounded full scan rather
-		// than reporting no tail at all.
-		ev, ok := segmentLastEventScan(f, budget, budget < seg.size)
-		return ev, ok, nil
-	}
-	return Event{}, false, nil
+	return Event{}, false
 }
 
+// beforeSegmentLastEventScanHook, when set by a test, runs immediately before
+// the bounded fallback scan of a segment tail. It reproduces a tail recovery
+// that is cancelled before the scan can prove the last sequence.
+var beforeSegmentLastEventScanHook func()
+
 // segmentLastEventScan walks a whole bounded segment to find its last valid
-// event. It is only used when the tail window cannot be decoded.
-func segmentLastEventScan(f *os.File, budget int64, cutAtLimit bool) (Event, bool) {
-	walk, err := walkSegment(context.Background(), f, budget, cutAtLimit, false, 0, func(Event) bool { return true })
-	if err != nil || !walk.hasLast {
-		return Event{}, false
+// event. It is only used when the tail window cannot be decoded, and it reports
+// an interrupted or failed walk so callers never mistake it for an absent tail.
+func segmentLastEventScan(ctx context.Context, f *os.File, budget int64, cutAtLimit bool) (Event, bool, error) {
+	if beforeSegmentLastEventScanHook != nil {
+		beforeSegmentLastEventScanHook()
 	}
-	return walk.last, true
+	walk, err := walkSegment(ctx, f, budget, cutAtLimit, false, 0, func(Event) bool { return true })
+	if err != nil {
+		return Event{}, false, err
+	}
+	if !walk.hasLast {
+		return Event{}, false, nil
+	}
+	return walk.last, true, nil
 }
 
 // segmentEndsWithNewline reports whether the last byte is a newline, so a
@@ -447,61 +502,84 @@ func walkSegment(ctx context.Context, f *os.File, maxBytes int64, cutAtLimit, ne
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return walk, fmt.Errorf("activity: read segment: %w", readErr)
 		}
-		if !terminated && cutAtLimit {
-			// A budget boundary in the middle of a line is a clean scan cut.
-			// The caller reports Truncated; nothing is corruption.
-			break
-		}
-		switch {
-		case !terminated:
-			// A real torn tail: the file ended without the newline that every
-			// stored record carries. A reader may also have caught a live
-			// append of the newest segment, and only that one can still grow.
-			if newestSegment && tailInFlight(f, counter.n) {
-				walk.inFlightTail = true
-				return walk, nil
-			}
-			walk.malformedEvents++
-		case oversize:
-			walk.malformedEvents++
-		case len(line) > 0:
-			ev, decErr := decodeStoredEvent(line)
-			if decErr != nil {
-				walk.malformedEvents++
-			} else {
-				walk.events++
-				if walk.prevSeq != 0 && walk.prevSeq != ^uint64(0) && ev.Sequence > walk.prevSeq+1 {
-					walk.gaps += ev.Sequence - walk.prevSeq - 1
-				}
-				if ev.Sequence > walk.prevSeq {
-					walk.prevSeq = ev.Sequence
-				}
-				if ev.Sequence > walk.lastScannedSeq {
-					walk.lastScannedSeq = ev.Sequence
-				}
-				if t := eventTime(ev); !t.IsZero() {
-					if !walk.hasFirst || t.Before(walk.earliest) {
-						walk.earliest = t
-					}
-					if !walk.hasLast || t.After(walk.latest) {
-						walk.latest = t
-					}
-				}
-				if !walk.hasFirst {
-					walk.first, walk.hasFirst = ev, true
-				}
-				walk.last, walk.hasLast = ev, true
-				if !visit(ev) {
-					walk.stoppedByVisit = true
-					return walk, nil
-				}
-			}
+		if walk.consumeLine(f, counter.n, line, terminated, oversize, cutAtLimit, newestSegment, visit) {
+			return walk, nil
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
 	}
 	return walk, nil
+}
+
+// consumeLine folds one read line into the walk and reports whether the walk
+// stops. cutAtLimit says an unterminated line is a clean budget cut rather than
+// a torn tail; newestSegment says f may still be appended to.
+func (w *segmentWalk) consumeLine(f *os.File, consumed int64, line []byte, terminated, oversize, cutAtLimit, newestSegment bool, visit func(Event) bool) bool {
+	switch {
+	case !terminated && cutAtLimit:
+		// A budget boundary in the middle of a line is a clean scan cut. The
+		// caller reports Truncated; nothing is corruption.
+		return true
+	case !terminated:
+		// A real torn tail: the file ended without the newline that every
+		// stored record carries. A reader may also have caught a live append
+		// of the newest segment, and only that one can still grow.
+		if newestSegment && tailInFlight(f, consumed) {
+			w.inFlightTail = true
+			return true
+		}
+		w.malformedEvents++
+		return false
+	case oversize:
+		w.malformedEvents++
+		return false
+	case len(line) == 0:
+		return false
+	}
+	ev, decErr := decodeStoredEvent(line)
+	if decErr != nil {
+		w.malformedEvents++
+		return false
+	}
+	w.applyEvent(ev)
+	if visit(ev) {
+		return false
+	}
+	w.stoppedByVisit = true
+	return true
+}
+
+// applyEvent folds one decoded event into the walk's sequence and time bounds.
+func (w *segmentWalk) applyEvent(ev Event) {
+	w.events++
+	if w.prevSeq != 0 && w.prevSeq != ^uint64(0) && ev.Sequence > w.prevSeq+1 {
+		w.gaps += ev.Sequence - w.prevSeq - 1
+	}
+	if ev.Sequence > w.prevSeq {
+		w.prevSeq = ev.Sequence
+	}
+	if ev.Sequence > w.lastScannedSeq {
+		w.lastScannedSeq = ev.Sequence
+	}
+	w.observeTime(eventTime(ev))
+	if !w.hasFirst {
+		w.first, w.hasFirst = ev, true
+	}
+	w.last, w.hasLast = ev, true
+}
+
+// observeTime widens the walk's occurrence-time bounds by t.
+func (w *segmentWalk) observeTime(t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	if !w.hasFirst || t.Before(w.earliest) {
+		w.earliest = t
+	}
+	if !w.hasLast || t.After(w.latest) {
+		w.latest = t
+	}
 }
 
 // afterTailStatHook, when set by a test, runs between the first size check and

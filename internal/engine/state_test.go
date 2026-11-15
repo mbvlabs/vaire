@@ -50,12 +50,12 @@ func TestRetainedJobSurvivesHistoryPruningAndUpdates(t *testing.T) {
 // cannot hang a finished job behind another process's state write.
 func TestWithFileLockContextBoundsLockWait(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "state.json.lock")
-	held, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: a test lock path.
+	held, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = held.Close() }()
-	fd := int(held.Fd()) //nolint:gosec // G115: a file descriptor fits in int.
+	fd := int(held.Fd())
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}

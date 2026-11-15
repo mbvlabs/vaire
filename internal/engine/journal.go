@@ -170,7 +170,7 @@ type JournalEntry struct {
 // decode returns precondition_failed with reason journal_corrupt; it is never
 // reset silently.
 func LoadJournal(path string) (*Journal, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed journal path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &Journal{Schema: JournalSchema, Steps: map[string]JournalEntry{}}, nil

@@ -81,7 +81,7 @@ func (l Local) run(ctx context.Context, db, sql string, vars map[string]string, 
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: fixed runuser/psql invocation; db is validated by the caller.
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(sql)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

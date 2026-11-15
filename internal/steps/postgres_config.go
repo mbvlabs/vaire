@@ -37,7 +37,13 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) (
 	conf := func(path string, content []byte, mode os.FileMode) managedFile {
 		return managedFile{Path: path, Content: string(content), Mode: mode, Owner: pgFileOwner, Group: pgFileGroup}
 	}
-	files := []managedFile{
+	// A follower's floors and replication settings (Phase 6).
+	follower, err := followerFiles(cfg, spec, rt)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]managedFile, 0, 7+len(follower))
+	files = append(files,
 		conf(confD+"/10-vaire-tuning.conf", render.TuningConf(res), 0o644),
 		conf(confD+"/20-vaire-security.conf", render.SecurityConf(spec.Port), 0o644),
 		conf(confD+"/30-vaire-extensions.conf", render.ExtensionsConf(spec, res), 0o644),
@@ -45,12 +51,7 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) (
 		conf(confD+"/50-vaire-settings.conf", render.SettingsConf(cfg, spec), 0o644),
 		conf(dir+"/pg_hba.conf", render.HBA(), 0o640),
 		conf(dir+"/pg_ident.conf", render.Ident(cfg), 0o640),
-	}
-	// A follower's floors and replication settings (Phase 6).
-	follower, err := followerFiles(cfg, spec, rt)
-	if err != nil {
-		return nil, err
-	}
+	)
 	return append(files, follower...), nil
 }
 
@@ -139,35 +140,9 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
-	// Keep the previous contents so a validation failure can be rolled back.
-	// None of the conf.d files exist yet: this is the cluster's first
-	// configuration. pg_hba.conf and pg_ident.conf don't count, because
-	// pg_createcluster writes its own. The journal cannot tell, because the
-	// runner marks the step running before Apply.
-	backups := make(map[string]string, len(files))
-	first := true
-	for _, f := range files {
-		raw, err := os.ReadFile(f.Path) //nolint:gosec // G304: managed file paths from the catalogue.
-		if err == nil {
-			backups[f.Path] = string(raw)
-			if strings.HasPrefix(f.Path, PGConfD(spec.Name)+"/") {
-				first = false
-			}
-		}
-	}
-	for _, f := range files {
-		if err := writeFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
-			return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
-		}
-	}
-	overrides := PGConfD(spec.Name) + "/90-overrides.conf"
-	if _, err := os.Stat(overrides); err != nil {
-		if err := writeFileOwned(overrides, string(render.OverridesHeader()), 0o644, pgFileOwner, pgFileGroup); err != nil {
-			return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
-		}
-	}
-	if err := ensureIncludeDir(spec.Name); err != nil {
-		return engine.ApplyResult{}, fmt.Errorf("writing the rendered configuration: %w", err)
+	backups, first := configBackups(spec, files)
+	if err := installConfigFiles(spec, files); err != nil {
+		return engine.ApplyResult{}, err
 	}
 	if err := validateConfig(ctx, cfg, spec); err != nil {
 		restoreFiles(files, backups)
@@ -183,14 +158,57 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		}
 		return engine.ApplyResult{Restart: engine.RestartNone, Notes: []string{"restarted after the first configuration"}}, nil
 	}
+	return pendingRestartResult(ctx, local, spec), nil
+}
+
+// configBackups reads the files' previous contents for a rollback and reports
+// whether none of the cluster's conf.d files existed yet, so this is the
+// cluster's first configuration. pg_hba.conf and pg_ident.conf don't count,
+// because pg_createcluster writes its own. The journal cannot tell, because
+// the runner marks the step running before Apply.
+func configBackups(spec config.ClusterSpec, files []managedFile) (backups map[string]string, first bool) {
+	backups = make(map[string]string, len(files))
+	first = true
+	for _, f := range files {
+		raw, err := os.ReadFile(f.Path)
+		if err != nil {
+			continue
+		}
+		backups[f.Path] = string(raw)
+		if strings.HasPrefix(f.Path, PGConfD(spec.Name)+"/") {
+			first = false
+		}
+	}
+	return backups, first
+}
+
+// installConfigFiles writes the rendered files, the overrides file when the
+// cluster has none, and the conf.d include.
+func installConfigFiles(spec config.ClusterSpec, files []managedFile) error {
+	for _, f := range files {
+		if err := writeFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
+			return fmt.Errorf("writing the rendered configuration: %w", err)
+		}
+	}
+	overrides := PGConfD(spec.Name) + "/90-overrides.conf"
+	if _, err := os.Stat(overrides); err != nil {
+		if err := writeFileOwned(overrides, string(render.OverridesHeader()), 0o644, pgFileOwner, pgFileGroup); err != nil {
+			return fmt.Errorf("writing the rendered configuration: %w", err)
+		}
+	}
+	if err := ensureIncludeDir(spec.Name); err != nil {
+		return fmt.Errorf("writing the rendered configuration: %w", err)
+	}
+	return nil
+}
+
+// pendingRestartResult reports the restart a configured cluster needs.
+func pendingRestartResult(ctx context.Context, local pg.Local, spec config.ClusterSpec) engine.ApplyResult {
 	pending, err := pendingRestartSettings(ctx, local)
-	if err != nil {
-		return engine.ApplyResult{Restart: engine.RestartReload}, nil
+	if err != nil || len(pending) == 0 {
+		return engine.ApplyResult{Restart: engine.RestartReload}
 	}
-	if len(pending) > 0 {
-		return engine.ApplyResult{Restart: engine.RestartRestart, Notes: []string{"restart of " + spec.Name + " needed for " + strings.Join(pending, ", ")}}, nil
-	}
-	return engine.ApplyResult{Restart: engine.RestartReload}, nil
+	return engine.ApplyResult{Restart: engine.RestartRestart, Notes: []string{"restart of " + spec.Name + " needed for " + strings.Join(pending, ", ")}}
 }
 
 // ensureIncludeDir appends include_dir = 'conf.d' to the cluster's
@@ -198,7 +216,7 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 // file is otherwise kept.
 func ensureIncludeDir(cluster string) error {
 	path := PGConfDir(cluster) + "/postgresql.conf"
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed cluster config path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -305,23 +323,30 @@ func restartPostgres(ctx context.Context, cfg config.Cluster, spec config.Cluste
 		return err
 	}
 	if hugePagesEnabled(tuningFor(cfg, spec, rt.Host)) {
-		hp, err := hugePagesFromKernel(ctx, spec.Name, cfg.Server.DataDirectory(spec.Name))
-		if err == nil && hp > 0 {
-			hp = hp + hp/20
-			for _, other := range cfg.Clusters {
-				if other.Name != spec.Name {
-					hp += tuningFor(cfg, other, rt.Host).HugePages
-				}
-			}
-			if err := writeFile(SysctlPath, string(render.SysctlConf(rt.Host, hp)), 0o644); err != nil {
-				return err
-			}
-			if err := rt.Shell.Run(ctx, stepID, Script("sysctl-apply"), nil, report); err != nil {
-				return err
-			}
+		if err := sizeHugePages(ctx, cfg, spec, rt, stepID, report); err != nil {
+			return err
 		}
 	}
 	return rt.Shell.Run(ctx, stepID, Script("pg-start"), env, report)
+}
+
+// sizeHugePages writes and applies the kernel's huge page pool for a stopped
+// cluster. An unreadable requirement leaves the pool alone.
+func sizeHugePages(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime, stepID string, report engine.Reporter) error {
+	hp, err := hugePagesFromKernel(ctx, spec.Name, cfg.Server.DataDirectory(spec.Name))
+	if err != nil || hp <= 0 {
+		return nil
+	}
+	hp += hp / 20
+	for _, other := range cfg.Clusters {
+		if other.Name != spec.Name {
+			hp += tuningFor(cfg, other, rt.Host).HugePages
+		}
+	}
+	if err := writeFile(SysctlPath, string(render.SysctlConf(rt.Host, hp)), 0o644); err != nil {
+		return err
+	}
+	return rt.Shell.Run(ctx, stepID, Script("sysctl-apply"), nil, report)
 }
 
 // hugePagesEnabled reports whether the tuning result asks for huge pages.

@@ -217,16 +217,16 @@ func runCPUOnly(ctx context.Context, _ config.Cluster, spec config.ClusterSpec, 
 	after := ops.nonCPU(ctx)
 	nonCPUErr := ops.unchanged(before, after)
 	if setErr != nil || nonCPUErr != nil {
-		failure := cpuPolicyError(spec.Name, res, cpu, "cpu_only_runtime_failure")
-		details := failure.Details.(map[string]any)
+		extra := map[string]any{}
 		if nonCPUErr != nil {
-			details["non_cpu_reason"] = nonCPUErr.Error()
+			extra["non_cpu_reason"] = nonCPUErr.Error()
 		}
+		failure := cpuPolicyErrorWithDetails(spec.Name, res, cpu, "cpu_only_runtime_failure", extra)
 		failure.Cause = setErr
 		return failure
 	}
 	if err := hostinfo.ValidateCPUPolicy(cpuPolicy(res), cpu); err != nil {
-		var mismatch *hostinfo.CPUPolicyMismatch
+		var mismatch *hostinfo.CPUPolicyMismatchError
 		reason := "effective_policy_unknown"
 		if errors.As(err, &mismatch) {
 			reason = mismatch.Reason

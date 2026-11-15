@@ -26,7 +26,7 @@ func testRecoveryCursor(t *testing.T, stale string) (*recoveryLogCursor, string)
 
 func appendRecoveryLog(t *testing.T, path, text string) {
 	t.Helper()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0) //nolint:gosec // G304: test file.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,58 +115,99 @@ func TestWaitRecoveryTargetStates(t *testing.T) {
 	}
 }
 
+// waitRecoveryEvidenceCase is one unknown-evidence scenario: how the log or
+// service behaves and what the wait must report.
+type waitRecoveryEvidenceCase struct {
+	name        string
+	setup       func(*testing.T, string)
+	service     recoveryServiceState
+	observation recoveryObservation
+	check       func(*testing.T, error)
+}
+
+// evidenceCase is a case whose probes report a healthy cluster waiting at its
+// target, so only setup turns the evidence unknown.
+func evidenceCase(name string) waitRecoveryEvidenceCase {
+	return waitRecoveryEvidenceCase{name: name, service: serviceActive, observation: recoveryPaused}
+}
+
+// waitRecoveryEvidenceCases are the unknown-evidence scenarios the wait must
+// survive without trust and without claiming readiness.
+func waitRecoveryEvidenceCases() []waitRecoveryEvidenceCase {
+	rotation := evidenceCase("rotation")
+	rotation.setup = func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.Rename(path, path+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("new\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rotation.check = func(t *testing.T, err error) {
+		t.Helper()
+		if !strings.Contains(err.Error(), "diagnostics") {
+			t.Fatalf("wrong rotation result: %v", err)
+		}
+	}
+	truncated := evidenceCase("truncated")
+	truncated.setup = func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.Truncate(path, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unreadable := evidenceCase("unreadable")
+	unreadable.setup = func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := evidenceCase("stale")
+	stale.check = func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stale evidence: %v", err)
+		}
+	}
+	partial := evidenceCase("partial")
+	partial.setup = func(t *testing.T, path string) {
+		t.Helper()
+		appendRecoveryLog(t, path, "123:LOG:  incomplete")
+	}
+	serviceFailedCase := evidenceCase("service-failed")
+	serviceFailedCase.service = serviceFailed
+	serviceFailedCase.check = func(t *testing.T, err error) {
+		t.Helper()
+		if !strings.Contains(err.Error(), "stopped") {
+			t.Fatalf("wrong service result: %v", err)
+		}
+	}
+	sqlRefused := evidenceCase("sql-refused")
+	sqlRefused.observation = recoveryUnknown
+	return []waitRecoveryEvidenceCase{rotation, truncated, unreadable, stale, partial, serviceFailedCase, sqlRefused}
+}
+
 func TestWaitRecoveryUnknownEvidenceAndFailure(t *testing.T) {
-	for _, mode := range []string{"rotation", "truncated", "unreadable", "stale", "partial", "service-failed", "sql-refused"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, tc := range waitRecoveryEvidenceCases() {
+		t.Run(tc.name, func(t *testing.T) {
 			cursor, path := testRecoveryCursor(t, mismatchLog)
-			service := serviceActive
-			if mode == "rotation" {
-				if err := os.Rename(path, path+".old"); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte("new\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if mode == "partial" {
-				appendRecoveryLog(t, path, "123:LOG:  incomplete")
-			}
-			if mode == "truncated" {
-				if err := os.Truncate(path, 0); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if mode == "unreadable" {
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if mode == "service-failed" {
-				service = serviceFailed
+			if tc.setup != nil {
+				tc.setup(t, path)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
 			err := waitRecovery(ctx, "target", "data", 5555, UntilPaused, TargetTime, cursor, recoveryWaitProbes{
-				service: func(context.Context, string) recoveryServiceState { return service },
+				service: func(context.Context, string) recoveryServiceState { return tc.service },
 				process: func(context.Context, string) recoveryObservation { return recoveryRecovering },
-				sql: func(context.Context, int) recoveryObservation {
-					if mode == "sql-refused" {
-						return recoveryUnknown
-					}
-					return recoveryPaused
-				},
+				sql:     func(context.Context, int) recoveryObservation { return tc.observation },
 			}, func(string) {})
 			if err == nil || RetainRecoveryFailure(err) {
 				t.Fatalf("unexpected result: %v", err)
 			}
-			if mode == "rotation" && !strings.Contains(err.Error(), "diagnostics") {
-				t.Fatalf("wrong rotation result: %v", err)
-			}
-			if mode == "service-failed" && !strings.Contains(err.Error(), "stopped") {
-				t.Fatalf("wrong service result: %v", err)
-			}
-			if mode == "stale" && !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("stale evidence: %v", err)
+			if tc.check != nil {
+				tc.check(t, err)
 			}
 		})
 	}
@@ -223,7 +264,7 @@ func TestRecoveryDiagnosticOverridesAreTemporary(t *testing.T) {
 	if err := m.restoreRecoveryDiagnostics(); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(ctl) //nolint:gosec // G304: test file.
+	raw, err := os.ReadFile(ctl)
 	if err != nil || string(raw) != original {
 		t.Fatalf("original pg_ctl.conf: %q, %v", raw, err)
 	}

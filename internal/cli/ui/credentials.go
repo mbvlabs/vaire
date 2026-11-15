@@ -32,11 +32,12 @@ func Credentials(headline, title string, rows []CredentialRow, urls []URLRow, no
 		userW = max(userW, lipgloss.Width(r.User))
 	}
 	pad := func(s string, w int) string { return s + strings.Repeat(" ", max(w-lipgloss.Width(s), 0)) }
-	lines := []string{
+	lines := make([]string, 0, 3+len(rows))
+	lines = append(lines,
 		styleTitle.Render(title),
 		"",
-		styleDim.Render(pad("ROLE", roleW) + "  " + pad("USER", userW) + "  PASSWORD"),
-	}
+		styleDim.Render(pad("ROLE", roleW)+"  "+pad("USER", userW)+"  PASSWORD"),
+	)
 	for _, r := range rows {
 		lines = append(lines, styleAccent.Render(pad(r.Role, roleW))+"  "+pad(r.User, userW)+"  "+r.Password)
 	}

@@ -10,7 +10,7 @@ import (
 
 func TestSwapReservationMoveAndRetry(t *testing.T) {
 	m, dir := forkReservationFixture(t)
-	uid := uint32(os.Getuid()) //nolint:gosec // test UID
+	uid := uint32(os.Getuid())
 	var saved ReservationIdentity
 	id, err := moveSwapReservation(context.Background(), dir, uid, m.Name, "aside", m.Port, saved, func(id ReservationIdentity) error {
 		saved = id
@@ -36,14 +36,14 @@ func TestSwapReservationInterruptedLink(t *testing.T) {
 	if err := os.Link(filepath.Join(dir, m.Name), filepath.Join(dir, "aside")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := moveSwapReservation(context.Background(), dir, uint32(os.Getuid()), m.Name, "aside", m.Port, id, nil); err != nil { //nolint:gosec // test UID
+	if _, err := moveSwapReservation(context.Background(), dir, uint32(os.Getuid()), m.Name, "aside", m.Port, id, nil); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSwapReservationRefusesCollisionAndUnboundRetry(t *testing.T) {
 	m, dir := forkReservationFixture(t)
-	uid := uint32(os.Getuid()) //nolint:gosec // test UID
+	uid := uint32(os.Getuid())
 	path := filepath.Join(dir, "aside")
 	if err := os.WriteFile(path, []byte("other"), 0o600); err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestSwapReservationRefusesCollisionAndUnboundRetry(t *testing.T) {
 	if _, err := moveSwapReservation(context.Background(), dir, uid, m.Name, "aside", m.Port, ReservationIdentity{}, func(ReservationIdentity) error { return nil }); err == nil {
 		t.Fatal("accepted collision")
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // test fixture
+	raw, err := os.ReadFile(path)
 	if err != nil || string(raw) != "other" {
 		t.Fatalf("destination changed: %q %v", raw, err)
 	}
@@ -65,7 +65,7 @@ func TestSwapReservationRefusesCollisionAndUnboundRetry(t *testing.T) {
 
 func TestSwapReservationPrepareFailureLeavesSource(t *testing.T) {
 	m, dir := forkReservationFixture(t)
-	_, err := moveSwapReservation(context.Background(), dir, uint32(os.Getuid()), m.Name, "aside", m.Port, ReservationIdentity{}, func(ReservationIdentity) error { return errors.New("persist failed") }) //nolint:gosec // test UID
+	_, err := moveSwapReservation(context.Background(), dir, uint32(os.Getuid()), m.Name, "aside", m.Port, ReservationIdentity{}, func(ReservationIdentity) error { return errors.New("persist failed") })
 	if err == nil {
 		t.Fatal("accepted failed preparation")
 	}
@@ -80,7 +80,7 @@ func TestSwapReservationPrepareFailureLeavesSource(t *testing.T) {
 func TestSwapReservationRefusesReplacementDuringPrepare(t *testing.T) {
 	m, dir := forkReservationFixture(t)
 	path := filepath.Join(dir, m.Name)
-	_, err := moveSwapReservation(context.Background(), dir, uint32(os.Getuid()), m.Name, "aside", m.Port, ReservationIdentity{}, func(ReservationIdentity) error { //nolint:gosec // test UID
+	_, err := moveSwapReservation(context.Background(), dir, uint32(os.Getuid()), m.Name, "aside", m.Port, ReservationIdentity{}, func(ReservationIdentity) error {
 		if err := os.Remove(path); err != nil {
 			return err
 		}

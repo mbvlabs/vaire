@@ -60,7 +60,7 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 		return sshExit(err)
 	}
 
-	fd := int(os.Stdin.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(os.Stdin.Fd())
 	width, height, err := term.GetSize(fd)
 	if err != nil {
 		width, height = 80, 24
@@ -96,7 +96,7 @@ func sshExit(err error) error {
 	}
 	var exitErr *ssh.ExitError
 	if errors.As(err, &exitErr) {
-		return &localenv.SilentExit{Code: exitErr.ExitStatus()}
+		return &localenv.SilentExitError{Code: exitErr.ExitStatus()}
 	}
 	return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 }
@@ -113,7 +113,7 @@ func forwardWindowSize(fd int, sess *ssh.Session) {
 
 // stdoutIsTTY reports whether stdout is a terminal.
 func stdoutIsTTY() bool {
-	return term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // G115: file descriptors fit in int.
+	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // sudoPasswordWatch passes the remote stderr through and notes whether sudo

@@ -98,7 +98,7 @@ func TestDiagnosticsCollectRefusesBadTargetsBeforeRemote(t *testing.T) {
 		})
 	}
 	// The existing file is untouched.
-	if data, err := os.ReadFile(existing); err != nil || string(data) != "keep me" { //nolint:gosec // G304: a test path.
+	if data, err := os.ReadFile(existing); err != nil || string(data) != "keep me" {
 		t.Fatalf("existing file changed: %q %v", data, err)
 	}
 }

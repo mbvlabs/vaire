@@ -99,6 +99,24 @@ func ResolveResources(spec ClusterSpec, defaultSize string) (Resources, error) {
 	if name == "" {
 		name = defaultSize
 	}
+	r, err := sizedResources(name, spec)
+	if err != nil {
+		return Resources{}, err
+	}
+	if err := r.applyExplicit(spec); err != nil {
+		return Resources{}, err
+	}
+	r.PoolSize = spec.PoolSize
+	if r.PoolSize == 0 {
+		r.PoolSize = r.MaxConnections - r.SessionPoolSize - ReservedConnections
+	}
+	return r, nil
+}
+
+// sizedResources returns name's size applied to spec, or the custom-size
+// defaults when name is SizeCustom. A custom size takes memory from its
+// explicit keys only.
+func sizedResources(name string, spec ClusterSpec) (Resources, error) {
 	r := Resources{Size: name, CPUMode: spec.CPUMode, CPUQuota: spec.CPUQuota, IOWeight: DefaultIOWeight, SessionPoolSize: DefaultSessionPoolSize}
 	if r.CPUMode == "" {
 		r.CPUMode = "normal"
@@ -108,27 +126,32 @@ func ResolveResources(spec ClusterSpec, defaultSize string) (Resources, error) {
 			return Resources{}, errors.New("size custom needs memory")
 		}
 		r.CPUWeight = DefaultCPUWeight
-	} else {
-		size, ok := LookupSize(name)
-		if !ok {
-			return Resources{}, fmt.Errorf("size %q must be one of %s", name, strings.Join(SizeNames(), ", "))
-		}
-		r.MemoryMiB, r.CPUWeight, r.MaxConnections = size.MemoryMiB, size.CPUWeight, size.MaxConnections
+		return r, nil
 	}
+	size, ok := LookupSize(name)
+	if !ok {
+		return Resources{}, fmt.Errorf("size %q must be one of %s", name, strings.Join(SizeNames(), ", "))
+	}
+	r.MemoryMiB, r.CPUWeight, r.MaxConnections = size.MemoryMiB, size.CPUWeight, size.MaxConnections
+	return r, nil
+}
+
+// applyExplicit replaces the size's parts with spec's explicit keys.
+func (r *Resources) applyExplicit(spec ClusterSpec) error {
 	if spec.Memory != "" {
 		mib, err := ParseMemoryMiB(spec.Memory)
 		if err != nil {
-			return Resources{}, fmt.Errorf("memory %q %w", spec.Memory, err)
+			return fmt.Errorf("memory %q %w", spec.Memory, err)
 		}
 		r.MemoryMiB = mib
 	}
-	if name == SizeCustom {
+	if r.Size == SizeCustom {
 		r.MaxConnections = connectionsFor(r.MemoryMiB)
 	}
 	if spec.MemoryMax != "" {
 		mib, err := ParseMemoryMiB(spec.MemoryMax)
 		if err != nil {
-			return Resources{}, fmt.Errorf("memory_max %q %w", spec.MemoryMax, err)
+			return fmt.Errorf("memory_max %q %w", spec.MemoryMax, err)
 		}
 		r.MemoryMaxMiB = mib
 	}
@@ -141,18 +164,14 @@ func ResolveResources(spec ClusterSpec, defaultSize string) (Resources, error) {
 	if v, ok := spec.Settings["max_connections"]; ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil || n < 1 {
-			return Resources{}, fmt.Errorf("settings.max_connections %q is not a positive integer", v)
+			return fmt.Errorf("settings.max_connections %q is not a positive integer", v)
 		}
 		r.MaxConnections = n
 	}
 	if spec.SessionPoolSize != 0 {
 		r.SessionPoolSize = spec.SessionPoolSize
 	}
-	r.PoolSize = spec.PoolSize
-	if r.PoolSize == 0 {
-		r.PoolSize = r.MaxConnections - r.SessionPoolSize - ReservedConnections
-	}
-	return r, nil
+	return nil
 }
 
 // connectionsFor is max_connections for a custom size: that of the largest

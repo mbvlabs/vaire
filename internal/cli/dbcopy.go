@@ -185,7 +185,7 @@ func runDBCopy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,7 @@ func runDBCopy(cmd *cobra.Command, args []string) error {
 				reply, err := p.call(ctx, s.node, "db.copy", params, opts)
 				return reply, "", false, err
 			}
-			return callJob(cmd, s, p, "db.copy", params, opts)
+			return callJob(ctx, s, p, "db.copy", params, opts)
 		},
 	}
 	return executeDBCopy(cmd, p, s.ctx.Name, cfg, dest, source, s.warnings, calls)
@@ -418,7 +418,7 @@ func promptCopySourceFields(cmd *cobra.Command) (*node.CopySourceSecret, error) 
 // prompts, which keep their established trimming policy.
 var (
 	copyPasswordRead = func() (string, error) {
-		raw, err := term.ReadPassword(int(os.Stdin.Fd())) //nolint:gosec // G115: file descriptors fit in int.
+		raw, err := term.ReadPassword(int(os.Stdin.Fd()))
 		return string(raw), err
 	}
 	copyPasswordFromUI = ui.SecretExact
@@ -498,7 +498,7 @@ func readCopyCAFile(cmd *cobra.Command) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this CA file.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", output.WrapError(output.CodeUsage, err, output.ExitUsage,
 			"Pass a readable PEM CA certificate with --source-ca-file.")
@@ -517,19 +517,7 @@ func readCopyCAFile(cmd *cobra.Command) (string, error) {
 // job. Tests drive it through copyRPC; production's copyRPC uses the session.
 func executeDBCopy(cmd *cobra.Command, p *progress, contextName string, cfg config.Cluster, dest copyDestination, source *copySourceInput, ownWarnings []output.Warning, calls copyRPC) error {
 	if dryRun(cmd) {
-		reply, _, _, err := calls.Start(commandContext(cmd), dest.params(), nil, "", "", true)
-		if err != nil {
-			return err
-		}
-		var data map[string]any
-		_ = reply.Decode(&data)
-		summary := copyDestinationSummary(cfg, dest)
-		return output.Success(cmd, output.Result{
-			Data: data,
-			Message: fmt.Sprintf("dry run: would copy into a new database %s (%s); no source connection was made, so source compatibility and reachability are not checked",
-				dest.Name, summary),
-			Warnings: append(ownWarnings, reply.Warnings...),
-		})
+		return executeDBCopyDryRun(cmd, cfg, dest, ownWarnings, calls)
 	}
 	if source == nil {
 		return copyInputRequired("source", "Pass a newline-terminated PostgreSQL URL on stdin with --source-url-stdin.")
@@ -538,49 +526,14 @@ func executeDBCopy(cmd *cobra.Command, p *progress, contextName string, cfg conf
 	if err != nil {
 		return err
 	}
-	// Refuse an impossible confirmation before touching the source; an
-	// actual confirmation still comes after the preflight summary below.
-	if (MustNotPrompt(cmd) || flagTrue(cmd, "yes")) && len(confirmTokens(cmd)) == 0 {
-		if err := Confirm(cmd, dest.Name); err != nil {
-			return err
-		}
-	}
-	reply, err := calls.Preflight(commandContext(cmd), dest.params(), sourceSecrets)
+	pre, warnings, err := copyPreflight(cmd, p, contextName, cfg, dest, sourceSecrets, ownWarnings, calls)
 	if err != nil {
 		return err
 	}
-	var pre copyPreflightData
-	if err := reply.Decode(&pre); err != nil {
-		return err
-	}
-	warnings := append(append([]output.Warning{}, ownWarnings...), reply.Warnings...)
-	warnings = append(warnings, pre.Source.Warnings...)
-	for _, warning := range warnings {
-		if warning.Message != "" {
-			p.warn(warning.Message)
-		}
-	}
-	p.panel("Copy summary", copySummaryLines(contextName, cfg, dest, pre))
-	if err := Confirm(cmd, dest.Name); err != nil {
-		return err
-	}
-
-	secret, roleSecrets, err := newDatabaseSecret(cfg, dest.Name, steps.DatabaseRoles)
+	secret, roleSecrets, err := copyCredentials(cfg, contextName, dest, sourceSecrets, &warnings)
 	if err != nil {
 		return err
 	}
-	service, creds, generated, err := serviceSecrets(contextName)
-	if err != nil {
-		return err
-	}
-	for k, v := range service {
-		roleSecrets[k] = v
-	}
-	addRecoveryKit(roleSecrets, creds.Backup)
-	for k, v := range sourceSecrets {
-		roleSecrets[k] = v
-	}
-	warnings = append(warnings, staleWarning(generated)...)
 
 	// The node names the db-copy job after this request id. Selecting it
 	// before the call is what lets a detached or lost reply still hand over
@@ -626,6 +579,80 @@ func executeDBCopy(cmd *cobra.Command, p *progress, contextName string, cfg conf
 		Warnings: warnings,
 		Next:     []string{"vaire db list", "vaire status --db " + dest.Name},
 	})
+}
+
+// executeDBCopyDryRun reports what a copy would create, without reading the
+// source or generating a password.
+func executeDBCopyDryRun(cmd *cobra.Command, cfg config.Cluster, dest copyDestination, ownWarnings []output.Warning, calls copyRPC) error {
+	reply, _, _, err := calls.Start(commandContext(cmd), dest.params(), nil, "", "", true)
+	if err != nil {
+		return err
+	}
+	var data map[string]any
+	_ = reply.Decode(&data)
+	summary := copyDestinationSummary(cfg, dest)
+	return output.Success(cmd, output.Result{
+		Data: data,
+		Message: fmt.Sprintf("dry run: would copy into a new database %s (%s); no source connection was made, so source compatibility and reachability are not checked",
+			dest.Name, summary),
+		Warnings: append(ownWarnings, reply.Warnings...),
+	})
+}
+
+// copyPreflight shows what the copy would do and asks for the confirmation,
+// before any password or role exists.
+func copyPreflight(cmd *cobra.Command, p *progress, contextName string, cfg config.Cluster, dest copyDestination,
+	sourceSecrets map[string]string, ownWarnings []output.Warning, calls copyRPC,
+) (copyPreflightData, []output.Warning, error) {
+	// Refuse an impossible confirmation before touching the source; an
+	// actual confirmation still comes after the preflight summary below.
+	if (MustNotPrompt(cmd) || flagTrue(cmd, "yes")) && len(confirmTokens(cmd)) == 0 {
+		if err := Confirm(cmd, dest.Name); err != nil {
+			return copyPreflightData{}, nil, err
+		}
+	}
+	reply, err := calls.Preflight(commandContext(cmd), dest.params(), sourceSecrets)
+	if err != nil {
+		return copyPreflightData{}, nil, err
+	}
+	var pre copyPreflightData
+	if err := reply.Decode(&pre); err != nil {
+		return copyPreflightData{}, nil, err
+	}
+	warnings := append(append([]output.Warning{}, ownWarnings...), reply.Warnings...)
+	warnings = append(warnings, pre.Source.Warnings...)
+	for _, warning := range warnings {
+		if warning.Message != "" {
+			p.warn(warning.Message)
+		}
+	}
+	p.panel("Copy summary", copySummaryLines(contextName, cfg, dest, pre))
+	if err := Confirm(cmd, dest.Name); err != nil {
+		return copyPreflightData{}, nil, err
+	}
+	return pre, warnings, nil
+}
+
+// copyCredentials makes the new database's one-time credentials and the
+// secrets its creation needs.
+func copyCredentials(cfg config.Cluster, contextName string, dest copyDestination, sourceSecrets map[string]string, warnings *[]output.Warning) (databaseSecret, map[string]string, error) {
+	secret, roleSecrets, err := newDatabaseSecret(cfg, dest.Name, steps.DatabaseRoles)
+	if err != nil {
+		return databaseSecret{}, nil, err
+	}
+	service, creds, generated, err := serviceSecrets(contextName)
+	if err != nil {
+		return databaseSecret{}, nil, err
+	}
+	for k, v := range service {
+		roleSecrets[k] = v
+	}
+	addRecoveryKit(roleSecrets, creds.Backup)
+	for k, v := range sourceSecrets {
+		roleSecrets[k] = v
+	}
+	*warnings = append(*warnings, staleWarning(generated)...)
+	return secret, roleSecrets, nil
 }
 
 // copyDestinationSummary is the effective resource summary shown before

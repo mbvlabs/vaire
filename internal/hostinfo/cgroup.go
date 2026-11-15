@@ -57,18 +57,18 @@ func ReadCgroup(dir string) (Cgroup, bool) {
 	c := Cgroup{MemoryCurrent: cur, MemoryEvents: map[string]int64{}, Pressure: map[string]Pressure{}}
 	c.MemoryHigh, _ = readInt(filepath.Join(dir, "memory.high"))
 	c.MemoryMax, _ = readInt(filepath.Join(dir, "memory.max"))
-	if raw, err := os.ReadFile(filepath.Join(dir, "memory.events")); err == nil { //nolint:gosec // G304: a cgroup file.
+	if raw, err := os.ReadFile(filepath.Join(dir, "memory.events")); err == nil {
 		c.MemoryEvents = ParseKeyValues(string(raw))
 	}
 	for _, res := range []string{"cpu", "memory", "io"} {
-		if raw, err := os.ReadFile(filepath.Join(dir, res+".pressure")); err == nil { //nolint:gosec // G304: a cgroup file.
+		if raw, err := os.ReadFile(filepath.Join(dir, res+".pressure")); err == nil {
 			c.Pressure[res] = ParsePressure(string(raw))
 		}
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "cpu.stat")); err == nil { //nolint:gosec // G304: a cgroup file.
+	if raw, err := os.ReadFile(filepath.Join(dir, "cpu.stat")); err == nil {
 		c.CPUUsageSec = float64(ParseKeyValues(string(raw))["usage_usec"]) / 1e6
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "io.stat")); err == nil { //nolint:gosec // G304: a cgroup file.
+	if raw, err := os.ReadFile(filepath.Join(dir, "io.stat")); err == nil {
 		c.IOReadBytes, c.IOWriteByte = ParseIOStat(string(raw))
 	}
 	return c, true
@@ -76,7 +76,7 @@ func ReadCgroup(dir string) (Cgroup, bool) {
 
 // readInt reads a cgroup file holding one integer; "max" reads as 0.
 func readInt(path string) (int64, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a cgroup file.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
 	}

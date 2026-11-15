@@ -61,7 +61,7 @@ func openSecretGateSession(cmd *cobra.Command) (*session, *progress, func()) {
 // context's master password hash ("" when none); s and p, when set, let the
 // node verify a code. It refuses with secret_gate_required when no factor can
 // be checked.
-func secretGateUnlock(cmd *cobra.Command, c *contexts.Context, hash string, s *session, p *progress, action string) error {
+func secretGateUnlock(cmd *cobra.Command, hash string, s *session, p *progress, action string) error {
 	return unlockSecretFactors(!MustNotPrompt(cmd) && !flagTrue(cmd, "yes"), hash != "", func() (func() error, func()) {
 		closeFn := func() {}
 		if s == nil || p == nil {
@@ -171,7 +171,7 @@ func runSecretsPasswordSet(cmd *cobra.Command, _ []string) error {
 		if !stdinIsTTY() {
 			return secretGateRequired(true)
 		}
-		if err := secretGateUnlock(cmd, c, hash, nil, nil, "changing the master password"); err != nil {
+		if err := secretGateUnlock(cmd, hash, nil, nil, "changing the master password"); err != nil {
 			return err
 		}
 	}

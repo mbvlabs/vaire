@@ -89,7 +89,7 @@ func runDBFollow(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 	if size != "" {
-		cfg, _, err := remoteConfig(cmd, s, p)
+		cfg, err := remoteConfig(cmd, s, p)
 		if err != nil {
 			return err
 		}
@@ -107,7 +107,7 @@ func runDBFollow(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	s.warnings = append(s.warnings, staleWarning(generated)...)
-	reply, jobID, detached, err := callJob(cmd, s, p, "db.follow", params, remote.CallOptions{DryRun: dryRun(cmd), Secrets: service})
+	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "db.follow", params, remote.CallOptions{DryRun: dryRun(cmd), Secrets: service})
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func runDBUnfollow(cmd *cobra.Command, args []string) error {
 		}
 		opts.Confirm = token
 	}
-	cfg, _, err := remoteConfig(cmd, s, p)
+	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
@@ -185,7 +185,7 @@ func runDBUnfollow(cmd *cobra.Command, args []string) error {
 	}
 	s.warnings = append(s.warnings, staleWarning(generated)...)
 	opts.Secrets = rpcSecrets
-	reply, jobID, detached, err := callJob(cmd, s, p, "db.unfollow", map[string]any{"name": name}, opts)
+	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "db.unfollow", map[string]any{"name": name}, opts)
 	if err != nil {
 		// The node marks every failure of an unfollow that started, and a lost
 		// connection leaves its outcome unknown: the passwords may be on the

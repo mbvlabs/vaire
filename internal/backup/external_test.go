@@ -145,7 +145,7 @@ func (f *fakeExecutor) callContaining(t *testing.T, needle string) *recordedCall
 }
 
 func (f *fakeExecutor) describe() []string {
-	var out []string
+	out := make([]string, 0, len(f.calls))
 	for _, call := range f.calls {
 		out = append(out, call.cmd.Name+" "+strings.Join(call.cmd.Args, " "))
 	}
@@ -413,7 +413,7 @@ func TestSourceCommandUsesIsolatedEnvironment(t *testing.T) {
 	if passInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("passfile mode %o", passInfo.Mode().Perm())
 	}
-	pass, err := os.ReadFile(env["PGPASSFILE"]) //nolint:gosec // the test just created the private passfile.
+	pass, err := os.ReadFile(env["PGPASSFILE"])
 	if err != nil {
 		t.Fatalf("read passfile: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestSourceAccessTLSFiles(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("CA file stat %v mode %v", err, info)
 	}
-	got, err := os.ReadFile(caPath) //nolint:gosec // the test just created the private CA file.
+	got, err := os.ReadFile(caPath)
 	if err != nil || !bytes.Equal(got, ca) {
 		t.Fatalf("CA content mismatch: %v", err)
 	}
@@ -493,41 +493,69 @@ func (e *accessProbeExecutor) Exec(_ context.Context, step string, cmd engine.Co
 	return nil
 }
 
+// runSourceProbe runs the source-access probe through the operation's real
+// entry point.
+func runSourceProbe(t *testing.T, operation string, exec *accessProbeExecutor, src Source, ws *CopyWorkspace) error {
+	t.Helper()
+	if operation == "preflight" {
+		_, err := PreflightSource(context.Background(), exec, "copy", nil, src, ws)
+		return err
+	}
+	_, err := ExportSource(context.Background(), exec, "copy", nil, src, ws)
+	return err
+}
+
+// requireNoSourceCallback requires that no source command ran.
+func requireNoSourceCallback(t *testing.T, exec *accessProbeExecutor) {
+	t.Helper()
+	for _, call := range exec.calls {
+		if call == "source" {
+			t.Fatal("source callback ran")
+		}
+	}
+}
+
+// requireProbeFilesGone requires the source access files and the archive to be
+// removed from the workspace.
+func requireProbeFilesGone(t *testing.T, ws *CopyWorkspace) {
+	t.Helper()
+	for _, name := range []string{copyPassfileName, copyCAName, copyArchiveName} {
+		if _, err := ws.Stat(name); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived: %v", name, err)
+		}
+	}
+}
+
+// requireProbeRefusal requires a source-access probe to refuse an unreadable
+// access file before any source command, without leaking private information.
+func requireProbeRefusal(t *testing.T, operation, denied string) {
+	t.Helper()
+	ws := newTestWorkspace(t)
+	src, err := testSource(t, "sensitive-password").WithCACert(testCertificatePEM(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &accessProbeExecutor{denied: denied}
+	err = runSourceProbe(t, operation, exec, src, ws)
+	if errorReason(t, err) != "copy_workspace_access_denied" {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+	details := errorDetails(t, err)
+	if details["stage"] != "source-access" || details["file"] != denied {
+		t.Fatalf("unexpected details: %v", details)
+	}
+	if strings.Contains(fmt.Sprint(err, details), "sensitive-password") || strings.Contains(fmt.Sprint(err, details), ws.Dir) {
+		t.Fatal("private information escaped")
+	}
+	requireNoSourceCallback(t, exec)
+	requireProbeFilesGone(t, ws)
+}
+
 func TestSourceAccessProbeRefusesBeforeSource(t *testing.T) {
 	for _, operation := range []string{"preflight", "export"} {
 		for _, denied := range []string{copyPassfileName, copyCAName} {
 			t.Run(operation+"/"+denied, func(t *testing.T) {
-				ws := newTestWorkspace(t)
-				src, err := testSource(t, "sensitive-password").WithCACert(testCertificatePEM(t))
-				if err != nil {
-					t.Fatal(err)
-				}
-				exec := &accessProbeExecutor{denied: denied}
-				if operation == "preflight" {
-					_, err = PreflightSource(context.Background(), exec, "copy", nil, src, ws)
-				} else {
-					_, err = ExportSource(context.Background(), exec, "copy", nil, src, ws)
-				}
-				if errorReason(t, err) != "copy_workspace_access_denied" {
-					t.Fatalf("unexpected failure: %v", err)
-				}
-				details := errorDetails(t, err)
-				if details["stage"] != "source-access" || details["file"] != denied {
-					t.Fatalf("unexpected details: %v", details)
-				}
-				if strings.Contains(fmt.Sprint(err, details), "sensitive-password") || strings.Contains(fmt.Sprint(err, details), ws.Dir) {
-					t.Fatal("private information escaped")
-				}
-				for _, call := range exec.calls {
-					if call == "source" {
-						t.Fatal("source callback ran")
-					}
-				}
-				for _, name := range []string{copyPassfileName, copyCAName, copyArchiveName} {
-					if _, err := ws.Stat(name); !errors.Is(err, os.ErrNotExist) {
-						t.Fatalf("%s survived: %v", name, err)
-					}
-				}
+				requireProbeRefusal(t, operation, denied)
 			})
 		}
 	}
@@ -566,63 +594,76 @@ func TestLocalSourceFileClassification(t *testing.T) {
 	}
 }
 
-func TestSourceAccessProbeSystemCAAndFailures(t *testing.T) {
+// sourceProbeCase is one source-access probe failure.
+type sourceProbeCase struct {
+	name        string
+	exec        accessProbeExecutor
+	reason      string
+	interrupted bool
+}
+
+func sourceProbeCases() []sourceProbeCase {
+	return []sourceProbeCase{
+		{"system-ca-denied", accessProbeExecutor{denied: copySystemCALabel}, "copy_workspace_access_denied", false},
+		{"runuser-start", accessProbeExecutor{failure: errors.New("private start failure")}, "copy_workspace_probe_failed", false},
+		{"wrapper-failure", accessProbeExecutor{failure: &engine.ScriptError{Status: 125, Tail: []string{"private lease failure"}}}, "copy_workspace_probe_failed", false},
+		{"runuser-exit-one", accessProbeExecutor{failure: &engine.ScriptError{Status: 1}}, "copy_workspace_probe_failed", false},
+		{"typed-lease", accessProbeExecutor{failure: output.NewError(output.CodePrecondition, "lease failed", output.ExitPrecondition, "").WithDetails(map[string]any{"reason": "copy_workspace_lease_failed"})}, "copy_workspace_lease_failed", false},
+		{"invalid-marker", accessProbeExecutor{result: "unexpected"}, "copy_workspace_probe_failed", false},
+		{"interrupted", accessProbeExecutor{failure: engine.ErrInterrupted}, "", true},
+	}
+}
+
+// isolateSystemCABundle points the system CA bundle at a temporary file, so a
+// probe reports the file's label instead of reading the host's bundle.
+func isolateSystemCABundle(t *testing.T, content string) {
+	t.Helper()
 	oldBundle := systemCABundlePath
 	systemCABundlePath = filepath.Join(t.TempDir(), "system-ca.crt")
-	if err := os.WriteFile(systemCABundlePath, []byte("not read by this test"), 0o600); err != nil {
+	if err := os.WriteFile(systemCABundlePath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { systemCABundlePath = oldBundle })
+}
+
+// requireSourceProbeFailure requires one probe case's failure shape, its typed
+// detail and that no private diagnostic escaped.
+func requireSourceProbeFailure(t *testing.T, operation string, tc sourceProbeCase) {
+	t.Helper()
+	ws := newTestWorkspace(t)
+	src, err := NewSource(SourceSpec{Host: "db.example.com", Database: "app", User: "u", TLSMode: SourceTLSVerifyCA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runSourceProbe(t, operation, &tc.exec, src, ws)
+	if tc.interrupted {
+		if !errors.Is(err, engine.ErrInterrupted) {
+			t.Fatalf("interruption lost: %v", err)
+		}
+	} else if errorReason(t, err) != tc.reason {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.reason == "copy_workspace_probe_failed" {
+		var cliErr *output.CLIError
+		if !errors.As(err, &cliErr) || cliErr.Code != output.CodeExternalCommand {
+			t.Fatalf("probe failure was not external: %v", err)
+		}
+	}
+	if tc.name == "system-ca-denied" && errorDetails(t, err)["file"] != copySystemCALabel {
+		t.Fatalf("system CA label missing: %v", err)
+	}
+	if strings.Contains(fmt.Sprint(err), "private") || strings.Contains(fmt.Sprint(err), systemCABundlePath) {
+		t.Fatal("probe diagnostic leaked")
+	}
+	requireNoSourceCallback(t, &tc.exec)
+}
+
+func TestSourceAccessProbeSystemCAAndFailures(t *testing.T) {
+	isolateSystemCABundle(t, "not read by this test")
 	for _, operation := range []string{"preflight", "export"} {
-		for _, tc := range []struct {
-			name        string
-			exec        accessProbeExecutor
-			reason      string
-			interrupted bool
-		}{
-			{"system-ca-denied", accessProbeExecutor{denied: copySystemCALabel}, "copy_workspace_access_denied", false},
-			{"runuser-start", accessProbeExecutor{failure: errors.New("private start failure")}, "copy_workspace_probe_failed", false},
-			{"wrapper-failure", accessProbeExecutor{failure: &engine.ScriptError{Status: 125, Tail: []string{"private lease failure"}}}, "copy_workspace_probe_failed", false},
-			{"runuser-exit-one", accessProbeExecutor{failure: &engine.ScriptError{Status: 1}}, "copy_workspace_probe_failed", false},
-			{"typed-lease", accessProbeExecutor{failure: output.NewError(output.CodePrecondition, "lease failed", output.ExitPrecondition, "").WithDetails(map[string]any{"reason": "copy_workspace_lease_failed"})}, "copy_workspace_lease_failed", false},
-			{"invalid-marker", accessProbeExecutor{result: "unexpected"}, "copy_workspace_probe_failed", false},
-			{"interrupted", accessProbeExecutor{failure: engine.ErrInterrupted}, "", true},
-		} {
+		for _, tc := range sourceProbeCases() {
 			t.Run(operation+"/"+tc.name, func(t *testing.T) {
-				ws := newTestWorkspace(t)
-				src, err := NewSource(SourceSpec{Host: "db.example.com", Database: "app", User: "u", TLSMode: SourceTLSVerifyCA})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if operation == "preflight" {
-					_, err = PreflightSource(context.Background(), &tc.exec, "copy", nil, src, ws)
-				} else {
-					_, err = ExportSource(context.Background(), &tc.exec, "copy", nil, src, ws)
-				}
-				if tc.interrupted {
-					if !errors.Is(err, engine.ErrInterrupted) {
-						t.Fatalf("interruption lost: %v", err)
-					}
-				} else if errorReason(t, err) != tc.reason {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if tc.reason == "copy_workspace_probe_failed" {
-					var cliErr *output.CLIError
-					if !errors.As(err, &cliErr) || cliErr.Code != output.CodeExternalCommand {
-						t.Fatalf("probe failure was not external: %v", err)
-					}
-				}
-				if tc.name == "system-ca-denied" && errorDetails(t, err)["file"] != copySystemCALabel {
-					t.Fatalf("system CA label missing: %v", err)
-				}
-				if strings.Contains(fmt.Sprint(err), "private") || strings.Contains(fmt.Sprint(err), systemCABundlePath) {
-					t.Fatal("probe diagnostic leaked")
-				}
-				for _, call := range tc.exec.calls {
-					if call == "source" {
-						t.Fatal("source callback ran")
-					}
-				}
+				requireSourceProbeFailure(t, operation, tc)
 			})
 		}
 	}
@@ -1021,7 +1062,7 @@ func selectionFixture(t *testing.T, tocText string, sql map[int]string) (*CopyWo
 				listPath = strings.TrimPrefix(arg, "--use-list=")
 			}
 		}
-		data, err := os.ReadFile(listPath) //nolint:gosec // the test just created the private list.
+		data, err := os.ReadFile(listPath)
 		if err != nil {
 			t.Fatalf("read inspection list: %v", err)
 		}
@@ -1080,7 +1121,7 @@ func TestSelectArchiveTOC(t *testing.T) {
 	if got, want := strings.Join(sel.Lines, " "), "7; 8; 9; 10; 11; 13;"; got != want {
 		t.Fatalf("selected lines %q, want %q", got, want)
 	}
-	var omittedIDs []int
+	omittedIDs := make([]int, 0, len(sel.Omitted))
 	for _, o := range sel.Omitted {
 		omittedIDs = append(omittedIDs, o.ID)
 	}
@@ -1260,7 +1301,7 @@ func TestRestoreStrictArgumentsAndStdin(t *testing.T) {
 				listPath = strings.TrimPrefix(arg, "--use-list=")
 			}
 		}
-		data, err := os.ReadFile(listPath) //nolint:gosec // the test just created the private list.
+		data, err := os.ReadFile(listPath)
 		if err != nil {
 			t.Fatalf("read use-list: %v", err)
 		}
@@ -1448,7 +1489,7 @@ func TestCopyWorkspaceRefusesReuseAndSymlink(t *testing.T) {
 	if err := ws.WriteFile("link", []byte("overwritten")); err == nil {
 		t.Fatal("symlink target was accepted for exclusive creation")
 	}
-	got, err := os.ReadFile(outside) //nolint:gosec // the test created this file.
+	got, err := os.ReadFile(outside)
 	if err != nil || string(got) != "original" {
 		t.Fatalf("outside file changed: %q %v", got, err)
 	}
@@ -1480,7 +1521,7 @@ func TestCheckCopySpaceUsesBothFilesystems(t *testing.T) {
 func TestCheckPG18ToolsAt(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"pg_dump", "pg_restore", "psql"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // G306: fake tool binaries must be executable.
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1736,31 +1777,44 @@ func TestCopyDiagnosticsBoundOversizedOutput(t *testing.T) {
 	assertFixed("export", err, "source_export_failed")
 }
 
-func TestNewCopyWorkspaceRejectsUnsafeRoot(t *testing.T) {
-	owner := CurrentWorkspaceOwner()
-	noChown := func(string, int, int) error { return nil }
+// requireUnsafeCopyRoot requires NewCopyWorkspace to refuse root as unsafe.
+func requireUnsafeCopyRoot(t *testing.T, what, root string) {
+	t.Helper()
+	_, err := NewCopyWorkspace(root, "job-1", CurrentWorkspaceOwner(), func(string, int, int) error { return nil })
+	if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
 
+// fakeCopyOwnerNamed reports the named entry as owned by another user, and
+// returns a function that restores the real owner lookup.
+func fakeCopyOwnerNamed(t *testing.T, name string) func() {
+	t.Helper()
+	realOwner := copyWorkspaceOwnerOf
+	copyWorkspaceOwnerOf = func(info fs.FileInfo) (int, int, bool) {
+		if info.Name() == name {
+			return os.Geteuid() + 1, os.Getegid(), true
+		}
+		return realOwner(info)
+	}
+	return func() { copyWorkspaceOwnerOf = realOwner }
+}
+
+func TestNewCopyWorkspaceRejectsUnsafeRoot(t *testing.T) {
 	t.Run("writable root", func(t *testing.T) {
 		root := t.TempDir()
-		if err := os.Chmod(root, 0o777); err != nil { //nolint:gosec // G302: deliberately unsafe fixture.
+		if err := os.Chmod(root, 0o777); err != nil {
 			t.Fatal(err)
 		}
-		_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("writable root: %v", err)
-		}
+		requireUnsafeCopyRoot(t, "writable root", root)
 	})
 
 	t.Run("symlink root", func(t *testing.T) {
-		target := t.TempDir()
 		root := filepath.Join(t.TempDir(), "copies")
-		if err := os.Symlink(target, root); err != nil {
+		if err := os.Symlink(t.TempDir(), root); err != nil {
 			t.Fatal(err)
 		}
-		_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("symlink root: %v", err)
-		}
+		requireUnsafeCopyRoot(t, "symlink root", root)
 	})
 
 	t.Run("symlink ancestor", func(t *testing.T) {
@@ -1773,53 +1827,26 @@ func TestNewCopyWorkspaceRejectsUnsafeRoot(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Fatal(err)
 		}
-		_, err := NewCopyWorkspace(filepath.Join(link, "copies"), "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("symlink ancestor: %v", err)
-		}
+		requireUnsafeCopyRoot(t, "symlink ancestor", filepath.Join(link, "copies"))
 	})
 
 	t.Run("other-writable ancestor", func(t *testing.T) {
 		base := t.TempDir()
-		if err := os.Chmod(base, 0o777); err != nil { //nolint:gosec // G302: deliberately unsafe fixture.
+		if err := os.Chmod(base, 0o777); err != nil {
 			t.Fatal(err)
 		}
-		_, err := NewCopyWorkspace(filepath.Join(base, "copies"), "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("other-writable ancestor: %v", err)
-		}
+		requireUnsafeCopyRoot(t, "other-writable ancestor", filepath.Join(base, "copies"))
 	})
 
 	t.Run("foreign ancestor owner", func(t *testing.T) {
 		base := t.TempDir()
-		realOwner := copyWorkspaceOwnerOf
-		copyWorkspaceOwnerOf = func(info fs.FileInfo) (int, int, bool) {
-			if info.Name() == filepath.Base(base) {
-				return os.Geteuid() + 1, os.Getegid(), true
-			}
-			return realOwner(info)
-		}
-		defer func() { copyWorkspaceOwnerOf = realOwner }()
-		_, err := NewCopyWorkspace(filepath.Join(base, "copies"), "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("foreign ancestor owner: %v", err)
-		}
+		defer fakeCopyOwnerNamed(t, filepath.Base(base))()
+		requireUnsafeCopyRoot(t, "foreign ancestor owner", filepath.Join(base, "copies"))
 	})
 
 	t.Run("foreign root owner", func(t *testing.T) {
-		realOwner := copyWorkspaceOwnerOf
-		copyWorkspaceOwnerOf = func(info fs.FileInfo) (int, int, bool) {
-			if info.Name() == "." {
-				return os.Geteuid() + 1, os.Getegid(), true
-			}
-			return realOwner(info)
-		}
-		defer func() { copyWorkspaceOwnerOf = realOwner }()
-		root := filepath.Join(t.TempDir(), "copies")
-		_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("foreign root owner: %v", err)
-		}
+		defer fakeCopyOwnerNamed(t, ".")()
+		requireUnsafeCopyRoot(t, "foreign root owner", filepath.Join(t.TempDir(), "copies"))
 	})
 }
 
@@ -1827,70 +1854,82 @@ func TestNewCopyWorkspaceRejectsUnsafeRoot(t *testing.T) {
 // check may not be skipped just because the effective uid is 0. A foreign
 // ancestor can replace the copy root entry whether or not the directory is
 // sticky; only a root- or process-owned sticky directory is trusted.
-func TestNewCopyWorkspaceRejectsUntrustedAncestorAsRoot(t *testing.T) {
-	owner := CurrentWorkspaceOwner()
-	noChown := func(string, int, int) error { return nil }
+// runAsRootForCopySeams makes the copy ownership checks see root, as the
+// production process does.
+func runAsRootForCopySeams(t *testing.T) {
+	t.Helper()
 	realUID, realGID := copyEffectiveUID, copyEffectiveGID
-	realGIDValue := copyEffectiveGID()
 	copyEffectiveUID = func() int { return 0 }
 	copyEffectiveGID = func() int { return 0 }
-	t.Cleanup(func() {
-		copyEffectiveUID, copyEffectiveGID = realUID, realGID
-	})
+	t.Cleanup(func() { copyEffectiveUID, copyEffectiveGID = realUID, realGID })
+}
 
-	for name, mode := range map[string]os.FileMode{
+// untrustedAncestorModes are the ancestor modes a foreign owner could use to
+// replace the copy root entry.
+func untrustedAncestorModes() map[string]os.FileMode {
+	return map[string]os.FileMode{
 		"foreign-owned non-sticky":     0o700,
 		"foreign-owned group-writable": 0o770,
 		"foreign-owned sticky":         0o777 | os.ModeSticky,
-	} {
-		t.Run(name, func(t *testing.T) {
-			base := t.TempDir()
-			if err := os.Chmod(base, mode); err != nil {
-				t.Fatal(err)
-			}
-			root := filepath.Join(base, "copies")
-			_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-			if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-				t.Fatalf("%s: %v", name, err)
-			}
-			if _, statErr := os.Lstat(root); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("%s: an untrusted ancestor still created %s: %v", name, root, statErr)
-			}
-		})
 	}
+}
 
-	// A trusted owner is not enough for a non-sticky directory writable by
-	// another group: those group members could replace the entry.
+// requireUntrustedAncestorRefused requires an untrusted ancestor to be refused
+// without creating the copy root.
+func requireUntrustedAncestorRefused(t *testing.T, name string, mode os.FileMode) {
+	t.Helper()
+	base := t.TempDir()
+	if err := os.Chmod(base, mode); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "copies")
+	_, err := NewCopyWorkspace(root, "job-1", CurrentWorkspaceOwner(), func(string, int, int) error { return nil })
+	if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
+		t.Fatalf("%s: %v", name, err)
+	}
+	if _, statErr := os.Lstat(root); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("%s: an untrusted ancestor still created %s: %v", name, root, statErr)
+	}
+}
+
+// requireForeignGroupAncestorRefused requires a non-sticky ancestor writable by
+// another group to be refused even when its owner is trusted: those group
+// members could replace the entry.
+func requireForeignGroupAncestorRefused(t *testing.T, realGID int) {
+	t.Helper()
 	groupWritable := t.TempDir()
-	if err := os.Chmod(groupWritable, 0o770); err != nil { //nolint:gosec // G302: deliberately group-writable fixture.
+	if err := os.Chmod(groupWritable, 0o770); err != nil {
 		t.Fatal(err)
 	}
 	realOwner := copyWorkspaceOwnerOf
 	copyWorkspaceOwnerOf = func(info fs.FileInfo) (int, int, bool) {
 		if info.Name() == filepath.Base(groupWritable) {
-			return 0, realGIDValue + 1, true
+			return 0, realGID + 1, true
 		}
 		return realOwner(info)
 	}
+	defer func() { copyWorkspaceOwnerOf = realOwner }()
 	root := filepath.Join(groupWritable, "copies")
-	_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-	copyWorkspaceOwnerOf = realOwner
+	_, err := NewCopyWorkspace(root, "job-1", CurrentWorkspaceOwner(), func(string, int, int) error { return nil })
 	if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
 		t.Fatalf("trusted owner with a foreign group-writable ancestor: %v", err)
 	}
 	if _, statErr := os.Lstat(root); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("a foreign-group-writable ancestor still created %s: %v", root, statErr)
 	}
+}
 
-	// A root-owned sticky directory such as /tmp is the one shared ancestor
-	// a root process may traverse: other users can only create their own
-	// entries there.
+// requireRootOwnedStickyAncestorAccepted requires a root-owned sticky
+// directory, the one shared ancestor a root process may traverse, to be
+// accepted: other users can only create their own entries there.
+func requireRootOwnedStickyAncestorAccepted(t *testing.T) {
+	t.Helper()
 	base := t.TempDir()
 	sticky := filepath.Join(base, "shared")
 	if err := os.Mkdir(sticky, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(sticky, 0o777|os.ModeSticky); err != nil { //nolint:gosec // G302: deliberately sticky and world-writable.
+	if err := os.Chmod(sticky, 0o777|os.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
 	stickyOwner := copyWorkspaceOwnerOf
@@ -1906,148 +1945,178 @@ func TestNewCopyWorkspaceRejectsUntrustedAncestorAsRoot(t *testing.T) {
 	}
 }
 
-func TestNewCopyWorkspaceCreationReplacementLeavesOutsideAlone(t *testing.T) {
-	owner := CurrentWorkspaceOwner()
-	noChown := func(string, int, int) error { return nil }
+func TestNewCopyWorkspaceRejectsUntrustedAncestorAsRoot(t *testing.T) {
+	realGID := copyEffectiveGID()
+	runAsRootForCopySeams(t)
+	for name, mode := range untrustedAncestorModes() {
+		t.Run(name, func(t *testing.T) {
+			requireUntrustedAncestorRefused(t, name, mode)
+		})
+	}
+	t.Run("foreign group-writable", func(t *testing.T) {
+		requireForeignGroupAncestorRefused(t, realGID)
+	})
+	t.Run("root-owned sticky", func(t *testing.T) {
+		requireRootOwnedStickyAncestorAccepted(t)
+	})
+}
 
+// copyJobReplacement records where a replaced copy job directory and its
+// outside directory went.
+type copyJobReplacement struct {
+	outside  string
+	original string
+}
+
+// replaceCreatedCopyJob renames the just-created job directory aside and
+// replaces its path with a directory holding a replacement file, or with a
+// symlink to a new outside directory.
+func replaceCreatedCopyJob(t *testing.T, dir string, symlink bool) copyJobReplacement {
+	t.Helper()
+	replacement := copyJobReplacement{original: dir + ".original", outside: t.TempDir()}
+	if err := os.Rename(dir, replacement.original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(replacement.outside, "sentinel"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if symlink {
+		if err := os.Symlink(replacement.outside, dir); err != nil {
+			t.Fatal(err)
+		}
+		return replacement
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "replacement"), []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return replacement
+}
+
+// setCopySeam installs one workspace-creation seam and returns a function that
+// restores the previous one.
+func setCopySeam(seam *func(string), replacement func(string)) func() {
+	old := *seam
+	*seam = replacement
+	return func() { *seam = old }
+}
+
+// requireReplacementRefused requires NewCopyWorkspace to refuse a replaced job
+// directory as unsafe.
+func requireReplacementRefused(t *testing.T, root string) {
+	t.Helper()
+	_, err := NewCopyWorkspace(root, "job-1", CurrentWorkspaceOwner(), func(string, int, int) error { return nil })
+	if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
+		t.Fatalf("replacement after creation: %v", err)
+	}
+}
+
+// requireReplacementLeftAlone requires the outside directory and the original
+// created job directory to survive untouched.
+func requireReplacementLeftAlone(t *testing.T, replacement copyJobReplacement) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(replacement.outside, "sentinel"))
+	if err != nil || string(got) != "outside" {
+		t.Fatalf("outside file changed: %q %v", got, err)
+	}
+	if _, err := os.Stat(replacement.original); err != nil {
+		t.Fatalf("original created directory was removed: %v", err)
+	}
+}
+
+// requireReplacementDirectoryKept requires the replacement directory to survive
+// with its content.
+func requireReplacementDirectoryKept(t *testing.T, root string) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(root, "job-1", "replacement"))
+	if err != nil || string(got) != "replacement" {
+		t.Fatalf("replacement directory was removed or changed: %q %v", got, err)
+	}
+}
+
+func TestNewCopyWorkspaceCreationReplacementLeavesOutsideAlone(t *testing.T) {
 	t.Run("directory replaced after mkdir", func(t *testing.T) {
 		root := t.TempDir()
-		var outside, original string
-		old := copyAfterJobMkdir
-		copyAfterJobMkdir = func(dir string) {
-			original = dir + ".original"
-			if err := os.Rename(dir, original); err != nil {
-				t.Fatal(err)
-			}
-			outside = t.TempDir()
-			if err := os.WriteFile(filepath.Join(outside, "sentinel"), []byte("outside"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "replacement"), []byte("replacement"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		defer func() { copyAfterJobMkdir = old }()
-		_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("replacement after mkdir: %v", err)
-		}
-		got, err := os.ReadFile(filepath.Join(outside, "sentinel")) //nolint:gosec // G304: the test reads its own fixture.
-		if err != nil || string(got) != "outside" {
-			t.Fatalf("outside file changed: %q %v", got, err)
-		}
-		if _, err := os.Stat(original); err != nil {
-			t.Fatalf("original created directory was removed: %v", err)
-		}
-		got, err = os.ReadFile(filepath.Join(root, "job-1", "replacement")) //nolint:gosec // G304: the test reads its own fixture.
-		if err != nil || string(got) != "replacement" {
-			t.Fatalf("replacement directory was removed or changed: %q %v", got, err)
-		}
+		var replacement copyJobReplacement
+		defer setCopySeam(&copyAfterJobMkdir, func(dir string) {
+			replacement = replaceCreatedCopyJob(t, dir, false)
+		})()
+		requireReplacementRefused(t, root)
+		requireReplacementLeftAlone(t, replacement)
+		requireReplacementDirectoryKept(t, root)
 	})
 
 	t.Run("symlink replaced after mkdir", func(t *testing.T) {
 		root := t.TempDir()
-		var outside, original string
-		old := copyAfterJobMkdir
-		copyAfterJobMkdir = func(dir string) {
-			original = dir + ".original"
-			if err := os.Rename(dir, original); err != nil {
-				t.Fatal(err)
-			}
-			outside = t.TempDir()
-			if err := os.WriteFile(filepath.Join(outside, "sentinel"), []byte("outside"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(outside, dir); err != nil {
-				t.Fatal(err)
-			}
-		}
-		defer func() { copyAfterJobMkdir = old }()
-		_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("symlink replacement after mkdir: %v", err)
-		}
-		got, err := os.ReadFile(filepath.Join(outside, "sentinel")) //nolint:gosec // G304: the test reads its own fixture.
-		if err != nil || string(got) != "outside" {
-			t.Fatalf("outside file changed: %q %v", got, err)
-		}
-		if _, err := os.Stat(original); err != nil {
-			t.Fatalf("original created directory was removed: %v", err)
-		}
+		var replacement copyJobReplacement
+		defer setCopySeam(&copyAfterJobMkdir, func(dir string) {
+			replacement = replaceCreatedCopyJob(t, dir, true)
+		})()
+		requireReplacementRefused(t, root)
+		requireReplacementLeftAlone(t, replacement)
 	})
 
 	t.Run("replaced after root open", func(t *testing.T) {
 		root := t.TempDir()
-		var outside, original string
-		old := copyAfterJobRootOpen
-		copyAfterJobRootOpen = func(dir string) {
-			original = dir + ".original"
-			if err := os.Rename(dir, original); err != nil {
-				t.Fatal(err)
-			}
-			outside = t.TempDir()
-			if err := os.WriteFile(filepath.Join(outside, "sentinel"), []byte("outside"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "replacement"), []byte("replacement"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		defer func() { copyAfterJobRootOpen = old }()
-		_, err := NewCopyWorkspace(root, "job-1", owner, noChown)
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("replacement after root open: %v", err)
-		}
-		got, err := os.ReadFile(filepath.Join(outside, "sentinel")) //nolint:gosec // G304: the test reads its own fixture.
-		if err != nil || string(got) != "outside" {
-			t.Fatalf("outside file changed: %q %v", got, err)
-		}
-		got, err = os.ReadFile(filepath.Join(root, "job-1", "replacement")) //nolint:gosec // G304: the test reads its own fixture.
-		if err != nil || string(got) != "replacement" {
-			t.Fatalf("replacement directory was removed or changed: %q %v", got, err)
-		}
-		if _, err := os.Stat(original); err != nil {
-			t.Fatalf("original created directory was removed: %v", err)
-		}
+		var replacement copyJobReplacement
+		defer setCopySeam(&copyAfterJobRootOpen, func(dir string) {
+			replacement = replaceCreatedCopyJob(t, dir, false)
+		})()
+		requireReplacementRefused(t, root)
+		requireReplacementLeftAlone(t, replacement)
+		requireReplacementDirectoryKept(t, root)
 	})
+}
+
+// renameWorkspaceAside renames the workspace directory aside, leaving ws.Dir
+// missing for a replacement.
+func renameWorkspaceAside(t *testing.T, ws *CopyWorkspace) string {
+	t.Helper()
+	saved := ws.Dir + ".saved"
+	if err := os.Rename(ws.Dir, saved); err != nil {
+		t.Fatal(err)
+	}
+	return saved
+}
+
+// requireWorkspaceRemoveRefused requires Remove to refuse a replaced workspace
+// as unsafe.
+func requireWorkspaceRemoveRefused(t *testing.T, ws *CopyWorkspace, what string) {
+	t.Helper()
+	if err := ws.Remove(); err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
+		t.Fatalf("%s removal: %v", what, err)
+	}
+}
+
+// requireSavedWorkspace requires the original workspace directory to survive.
+func requireSavedWorkspace(t *testing.T, saved string) {
+	t.Helper()
+	if _, err := os.Stat(saved); err != nil {
+		t.Fatalf("original workspace was removed: %v", err)
+	}
 }
 
 func TestCopyWorkspaceRemoveRefusesReplacement(t *testing.T) {
 	t.Run("directory replacement", func(t *testing.T) {
 		ws := newTestWorkspace(t)
-		saved := ws.Dir + ".saved"
-		if err := os.Rename(ws.Dir, saved); err != nil {
-			t.Fatal(err)
-		}
+		saved := renameWorkspaceAside(t, ws)
 		if err := os.Mkdir(ws.Dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(ws.Dir, "sentinel"), []byte("replacement"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		err := ws.Remove()
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("directory replacement removal: %v", err)
-		}
+		requireWorkspaceRemoveRefused(t, ws, "directory replacement")
 		if got, err := os.ReadFile(filepath.Join(ws.Dir, "sentinel")); err != nil || string(got) != "replacement" {
 			t.Fatalf("replacement directory was removed: %q %v", got, err)
 		}
-		if _, err := os.Stat(saved); err != nil {
-			t.Fatalf("original workspace was removed: %v", err)
-		}
+		requireSavedWorkspace(t, saved)
 	})
 	t.Run("symlink replacement", func(t *testing.T) {
 		ws := newTestWorkspace(t)
-		saved := ws.Dir + ".saved"
-		if err := os.Rename(ws.Dir, saved); err != nil {
-			t.Fatal(err)
-		}
+		saved := renameWorkspaceAside(t, ws)
 		outside := t.TempDir()
 		if err := os.WriteFile(filepath.Join(outside, "sentinel"), []byte("outside"), 0o600); err != nil {
 			t.Fatal(err)
@@ -2055,20 +2124,15 @@ func TestCopyWorkspaceRemoveRefusesReplacement(t *testing.T) {
 		if err := os.Symlink(outside, ws.Dir); err != nil {
 			t.Fatal(err)
 		}
-		err := ws.Remove()
-		if err == nil || errorReason(t, err) != "copy_workspace_unsafe" {
-			t.Fatalf("symlink replacement removal: %v", err)
-		}
-		got, err := os.ReadFile(filepath.Join(outside, "sentinel")) //nolint:gosec // G304: the test reads its own fixture.
+		requireWorkspaceRemoveRefused(t, ws, "symlink replacement")
+		got, err := os.ReadFile(filepath.Join(outside, "sentinel"))
 		if err != nil || string(got) != "outside" {
 			t.Fatalf("outside file changed or was removed: %q %v", got, err)
 		}
 		if _, err := os.Lstat(ws.Dir); err != nil {
 			t.Fatalf("replacement symlink was removed: %v", err)
 		}
-		if _, err := os.Stat(saved); err != nil {
-			t.Fatalf("original workspace was removed: %v", err)
-		}
+		requireSavedWorkspace(t, saved)
 	})
 }
 
@@ -2203,7 +2267,7 @@ func TestNewCopyWorkspaceAllowsStickySharedAncestor(t *testing.T) {
 	if err := os.Mkdir(sticky, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(sticky, 0o777|os.ModeSticky); err != nil { //nolint:gosec // G302: deliberately world-writable but sticky.
+	if err := os.Chmod(sticky, 0o777|os.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
 	ws, err := NewCopyWorkspace(filepath.Join(sticky, "copies"), "job-1", CurrentWorkspaceOwner(), nil)

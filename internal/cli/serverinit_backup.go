@@ -11,6 +11,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/pelletier/go-toml/v2"
+	"github.com/spf13/cobra"
 )
 
 // phaseBackups is recorded once init has configured backups (Phase 3). It
@@ -45,7 +46,32 @@ func (r *initRun) collectBackups(cfg *config.Cluster, answersRaw []byte) error {
 	if err := applyBackupFlags(cmd, initBackupFlags, &s); err != nil {
 		return err
 	}
-	if s.Provider == "" && !MustNotPrompt(cmd) {
+	if err := collectBackupAnswers(cmd, &s); err != nil {
+		return err
+	}
+	if s.Provider == "" {
+		return nil
+	}
+	fillPreset(&s)
+	if err := requireBackupSettings(initBackupFlags, s, "server init"); err != nil {
+		return err
+	}
+	for key, value := range s.configKeys() {
+		if err := cfg.Set(key, value); err != nil {
+			return err
+		}
+	}
+	r.backup = &s
+	return nil
+}
+
+// collectBackupAnswers asks the questions the flags left unanswered, and
+// skips the bucket entirely when the operator says so.
+func collectBackupAnswers(cmd *cobra.Command, s *backupSettings) error {
+	if s.Provider == "" {
+		if MustNotPrompt(cmd) {
+			return nil
+		}
 		choice, err := chooseOption(cmd, "Backups", [][2]string{
 			{"Configure an S3-compatible bucket now", "configure"},
 			{"Skip for now (vaire backup setup later)", "skip"},
@@ -56,27 +82,11 @@ func (r *initRun) collectBackups(cfg *config.Cluster, answersRaw []byte) error {
 		if choice == "skip" {
 			return nil
 		}
-		if err := askBackupSettings(&s); err != nil {
-			return err
-		}
-	} else if s.Provider != "" && !MustNotPrompt(cmd) && (s.Bucket == "" || s.KeyID == "" || s.Secret == "") {
-		if err := askBackupSettings(&s); err != nil {
-			return err
-		}
+		return askBackupSettings(s)
 	}
-	if s.Provider == "" {
-		return nil
+	if !MustNotPrompt(cmd) && (s.Bucket == "" || s.KeyID == "" || s.Secret == "") {
+		return askBackupSettings(s)
 	}
-	fillPreset(&s)
-	if err := requireBackupSettings(cmd, initBackupFlags, s, "server init"); err != nil {
-		return err
-	}
-	for key, value := range s.configKeys() {
-		if err := cfg.Set(key, value); err != nil {
-			return err
-		}
-	}
-	r.backup = &s
 	return nil
 }
 

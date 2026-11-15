@@ -61,10 +61,10 @@ func TestTunnelSocketPathFallsBackWhenTooLong(t *testing.T) {
 
 func TestPrivateDirRefusesLooseMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vaire")
-	if err := os.Mkdir(dir, 0o755); err != nil { //nolint:gosec // G301: the test needs a loose mode.
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the test needs a loose mode.
+	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := privateDir(dir); err == nil {

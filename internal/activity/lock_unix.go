@@ -20,7 +20,7 @@ type fileLock struct {
 // acquireLock takes the store's short append lock with non-blocking flock
 // attempts, polling until ctx expires or lockWait passes.
 func acquireLock(ctx context.Context, path string) (*fileLock, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|noFollowFlag, fileMode) //nolint:gosec // G304: the store's own lock file.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|noFollowFlag, fileMode)
 	if err != nil {
 		return nil, fmt.Errorf("activity: open lock file: %w", err)
 	}
@@ -33,7 +33,7 @@ func acquireLock(ctx context.Context, path string) (*fileLock, error) {
 	ticker := time.NewTicker(lockPoll)
 	defer ticker.Stop()
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // G115: file descriptors fit in int.
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return &fileLock{f: f}, nil
 		}
@@ -70,7 +70,7 @@ func (l *fileLock) release() {
 	if l == nil || l.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN) //nolint:gosec // G115: file descriptors fit in int.
+	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	_ = l.f.Close()
 }
 
@@ -79,7 +79,7 @@ func (l *fileLock) release() {
 // never creates or changes anything; a missing or unusable lock reports false,
 // so a reader never mistakes it for an active writer.
 func appendLockHeld(dir string) bool {
-	f, err := os.OpenFile(filepath.Join(dir, lockName), os.O_RDONLY|noFollowFlag, 0) //nolint:gosec // G304: the store's own lock file.
+	f, err := os.OpenFile(filepath.Join(dir, lockName), os.O_RDONLY|noFollowFlag, 0)
 	if err != nil {
 		return false
 	}
@@ -87,10 +87,10 @@ func appendLockHeld(dir string) bool {
 	if err := verifyLockFile(f); err != nil {
 		return false
 	}
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) //nolint:gosec // G115: file descriptors fit in int.
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
 	if err != nil {
 		return errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR)
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:gosec // G115: file descriptors fit in int.
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return false
 }

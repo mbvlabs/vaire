@@ -56,7 +56,7 @@ func observeStore(ctx context.Context, dir string, cfg storeConfig, checkSafe bo
 		if err := ctx.Err(); err != nil {
 			return storeSnapshot{}, err
 		}
-		observed, err := observeStoreOnce(dir, cfg, checkSafe)
+		observed, err := observeStoreOnce(ctx, dir, cfg, checkSafe)
 		if err != nil {
 			return storeSnapshot{}, err
 		}
@@ -70,59 +70,90 @@ func observeStore(ctx context.Context, dir string, cfg storeConfig, checkSafe bo
 
 // observeStoreOnce is one state-then-listing observation, including the
 // recheck that distinguishes a first append from a genuinely missing state.
-func observeStoreOnce(dir string, cfg storeConfig, checkSafe bool) (storeSnapshot, error) {
+func observeStoreOnce(ctx context.Context, dir string, cfg storeConfig, checkSafe bool) (storeSnapshot, error) {
 	state, stateExists, stateErr := readState(dir)
 	if afterStateReadHook != nil {
 		afterStateReadHook()
 	}
-	segments, moreEntries, racedEntries, err := listSegments(dir)
+	listing, err := readListing(dir, checkSafe)
 	if err != nil {
 		return storeSnapshot{}, err
 	}
 	if afterListSegmentsHook != nil {
 		afterListSegmentsHook()
 	}
-	if checkSafe {
-		if err := segmentSafeCheck(segments); err != nil {
+	if !stateExists && hasSegmentHistory(listing.segments) {
+		recheck, err := restoreMissingState(dir, checkSafe, stateErr, listing)
+		if err != nil {
 			return storeSnapshot{}, err
 		}
+		state, stateExists, stateErr, listing = recheck.state, recheck.stateExists, recheck.stateErr, recheck.listing
 	}
-	if !stateExists && hasSegmentHistory(segments) {
-		if beforeStateRecheckHook != nil {
-			beforeStateRecheckHook()
-		}
-		restored, restoredOK, recheckErr := readState(dir)
-		switch {
-		case recheckErr == nil && restoredOK:
-			state, stateExists = restored, true
-			// Re-list after the recheck so the same state-before-listing
-			// ordering still holds; otherwise a newer append could make the
-			// rechecked state look ahead of the first listing.
-			segments, moreEntries, racedEntries, err = listSegments(dir)
-			if err != nil {
-				return storeSnapshot{}, err
-			}
-			if checkSafe {
-				if err := segmentSafeCheck(segments); err != nil {
-					return storeSnapshot{}, err
-				}
-			}
-		case recheckErr == nil:
-		default:
-			stateErr = recheckErr
-		}
-	}
-	ret, vanished := readRetainedBounds(segments, cfg)
+	ret, vanished := readRetainedBounds(ctx, listing.segments, cfg)
 	return storeSnapshot{
 		state:        state,
 		stateExists:  stateExists,
 		stateErr:     stateErr,
-		segments:     segments,
-		moreEntries:  moreEntries,
-		racedEntries: racedEntries,
+		segments:     listing.segments,
+		moreEntries:  listing.moreEntries,
+		racedEntries: listing.racedEntries,
 		ret:          ret,
 		vanished:     vanished,
 	}, nil
+}
+
+// storeListing is one directory listing plus the safety and bound verdicts that
+// travel with it.
+type storeListing struct {
+	segments     []segmentInfo
+	moreEntries  bool
+	racedEntries bool
+}
+
+// readListing lists the segments and applies the optional safety refusal.
+func readListing(dir string, checkSafe bool) (storeListing, error) {
+	segments, more, raced, err := listSegments(dir)
+	if err != nil {
+		return storeListing{}, err
+	}
+	if checkSafe {
+		if err := segmentSafeCheck(segments); err != nil {
+			return storeListing{}, err
+		}
+	}
+	return storeListing{segments: segments, moreEntries: more, racedEntries: raced}, nil
+}
+
+// stateRecheck is the outcome of re-reading state that the first observation
+// found missing while history existed.
+type stateRecheck struct {
+	state       storeState
+	stateExists bool
+	stateErr    error
+	listing     storeListing
+}
+
+// restoreMissingState distinguishes a first append from genuinely missing
+// state. State is re-read once; a state that appeared is paired with a fresh
+// listing so the same state-before-listing ordering still holds, otherwise a
+// newer append could make the rechecked state look ahead of the first listing.
+func restoreMissingState(dir string, checkSafe bool, stateErr error, listing storeListing) (stateRecheck, error) {
+	if beforeStateRecheckHook != nil {
+		beforeStateRecheckHook()
+	}
+	restored, restoredOK, recheckErr := readState(dir)
+	switch {
+	case recheckErr == nil && restoredOK:
+		fresh, err := readListing(dir, checkSafe)
+		if err != nil {
+			return stateRecheck{}, err
+		}
+		return stateRecheck{state: restored, stateExists: true, listing: fresh}, nil
+	case recheckErr == nil:
+		return stateRecheck{stateErr: stateErr, listing: listing}, nil
+	default:
+		return stateRecheck{stateErr: recheckErr, listing: listing}, nil
+	}
 }
 
 // Query returns one bounded page of retained events in ascending sequence
@@ -151,9 +182,7 @@ func observeStoreOnce(dir string, cfg storeConfig, checkSafe bool) (storeSnapsho
 // and no NextCursor. Recovering the missing state is an operator action; this
 // package never rebuilds or heals it.
 func (s *Store) Query(ctx context.Context, q Query) (Page, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = requestContext(ctx)
 	cfg, err := s.config()
 	if err != nil {
 		return Page{}, err
@@ -166,247 +195,399 @@ func (s *Store) Query(ctx context.Context, q Query) (Page, error) {
 		return Page{}, err
 	}
 	page := Page{Schema: Schema, Events: []Event{}}
-	var cov Coverage
-	info, err := os.Lstat(cfg.dir) //nolint:gosec // G304: the store directory.
+	snap, available, err := loadSnapshot(ctx, cfg)
 	if err != nil {
-		if isNotExist(err) {
-			cov.Available = false
-			cov.Partial = true
-			page.Coverage = cov
-			return page, nil
-		}
-		return Page{}, fmt.Errorf("activity: inspect store directory: %w", err)
-	}
-	if err := dirSafe(info); err != nil {
 		return Page{}, err
 	}
-	cov.Available = true
+	if !available {
+		page.Coverage = Coverage{Available: false, Partial: true}
+		return page, nil
+	}
+	facts, err := deriveFacts(snap)
+	if err != nil {
+		return Page{}, err
+	}
+	cov := baseCoverage(facts)
+	after, snapshot, expired, err := cursorPosition(nq, facts, cov)
+	if err != nil {
+		return Page{}, err
+	}
+	if expired != nil {
+		page.Coverage = *expired
+		return page, nil
+	}
+	ret := facts.ret
+	scan := &pageScan{
+		nq:        nq,
+		cfg:       cfg,
+		budget:    scanBudget(cfg),
+		after:     after,
+		snapshot:  snapshot,
+		segments:  facts.segments,
+		truncated: snap.moreEntries || snap.racedEntries || snap.vanished,
+	}
+	if err := scan.run(ctx); err != nil {
+		return Page{}, err
+	}
+	if !scan.truncated && !scan.walk.stoppedByVisit && scan.walk.hasFirst {
+		// A complete scan gives exact retained time bounds even when supplied
+		// occurrence timestamps are not monotonic with sequence order.
+		ret = exactRetainedBounds(scan.walk)
+		cov.FirstRetainedAt = retainedFirstString(ret)
+		cov.LastRetainedAt = retainedLastString(ret)
+	}
+	sort.Slice(scan.matches, func(i, j int) bool { return scan.matches[i].Sequence < scan.matches[j].Sequence })
+	returnedAll := len(scan.matches) <= nq.limit
+	more := scan.walk.stoppedByVisit || !returnedAll
+	if !returnedAll {
+		scan.matches = scan.matches[:nq.limit]
+	}
+	page.Events = scan.matches
+	coverageFromScan(&cov, nq, scan)
+	next, stalled := continuation(nq, scan, after, snapshot, facts.storeID, more, returnedAll)
+	page.NextCursor = next
+	finishVerdict(&cov, nq, snap, ret, stalled, len(facts.segments), facts.stateLost)
+	page.Coverage = cov
+	return page, nil
+}
+
+// loadSnapshot reads one consistent observation of the store. available is
+// false when the store directory does not exist, which is unavailable evidence
+// rather than an empty healthy history.
+func loadSnapshot(ctx context.Context, cfg storeConfig) (snap storeSnapshot, available bool, err error) {
+	info, err := os.Lstat(cfg.dir)
+	if err != nil {
+		if isNotExist(err) {
+			return storeSnapshot{}, false, nil
+		}
+		return storeSnapshot{}, false, fmt.Errorf("activity: inspect store directory: %w", err)
+	}
+	if err := dirSafe(info); err != nil {
+		return storeSnapshot{}, false, err
+	}
 	// Read state before listing segments. A writer persists a segment before
 	// writing its state, so a state observed first can never claim an event
 	// that the later listing does not contain; the reverse order produced
 	// false "evidence missing" verdicts on healthy concurrent appends. A
 	// segment that retention removes while its bound is read restarts the
 	// whole observation; see observeStore.
-	snap, err := observeStore(ctx, cfg.dir, cfg, true)
+	snap, err = observeStore(ctx, cfg.dir, cfg, true)
 	if err != nil {
-		return Page{}, err
+		return storeSnapshot{}, false, err
 	}
-	state, stateExists := snap.state, snap.stateExists
-	segments, moreEntries, racedEntries := snap.segments, snap.moreEntries, snap.racedEntries
+	return snap, true, nil
+}
+
+// snapshotFacts is the evidence verdict derived from one store snapshot.
+type snapshotFacts struct {
+	state       storeState
+	stateExists bool
+	segments    []segmentInfo
+	storeID     string
+	stateLost   bool
+	ret         retainedBounds
+	high        uint64
+}
+
+// deriveFacts turns a snapshot into the verdict every read phase uses.
+func deriveFacts(snap storeSnapshot) (snapshotFacts, error) {
 	stateCorrupt := errors.Is(snap.stateErr, errCorruptState)
 	if snap.stateErr != nil && !stateCorrupt {
-		return Page{}, snap.stateErr
+		return snapshotFacts{}, snap.stateErr
 	}
-	ret := snap.ret
-	// A listed segment that vanished during the bound read means state and
-	// bounds come from different snapshots. The state may still name an event
-	// that the fresh listing holds, so the stale bound is not proof that
-	// evidence is missing. observeStore has already retried; a remaining
-	// inconsistency makes the read incomplete, never a loss verdict.
-	evidenceMissing := !snap.vanished && stateExists && state.LastSequence > 0 &&
-		(!ret.hasLast || ret.lastSeq < state.LastSequence)
-	stateLost := stateCorrupt || evidenceMissing
-	if !stateExists && hasSegmentHistory(segments) {
-		stateLost = true
+	facts := snapshotFacts{
+		state:       snap.state,
+		stateExists: snap.stateExists,
+		segments:    snap.segments,
+		ret:         snap.ret,
+		stateLost:   stateCorrupt || evidenceMissing(snap, snap.stateExists),
 	}
-	storeID := ""
-	if stateExists {
-		storeID = state.StoreID
+	if !snap.stateExists && hasSegmentHistory(snap.segments) {
+		facts.stateLost = true
 	}
-	high := highwater(state, stateExists, ret)
-	cov.FirstRetainedAt = retainedFirstString(ret)
-	cov.LastRetainedAt = retainedLastString(ret)
-	if stateExists {
-		cov.DroppedEvents = state.DroppedEvents
+	if snap.stateExists {
+		facts.storeID = snap.state.StoreID
 	}
-	after := uint64(0)
-	snapshot := high
-	if nq.cur != nil {
-		after = nq.cur.After
-		snapshot = nq.cur.Snapshot
-		if !stateExists {
-			// Without state the store instance and the loss counters cannot be
-			// verified, and the cursor cannot be trusted to continue safely.
-			cov.CursorExpired = true
-			cov.Partial = true
-			cov.LossDetected = true
-			page.Coverage = cov
-			return page, nil
-		}
-		if nq.cur.StoreID != storeID {
-			return Page{}, errCursorMismatch
-		}
-		if cursorExpired(nq.cur, ret, high, len(segments)) {
-			cov.CursorExpired = true
-			cov.Partial = true
-			cov.LossDetected = stateLost || cov.DroppedEvents > 0
-			page.Coverage = cov
-			return page, nil
-		}
+	facts.high = highwater(snap.state, snap.stateExists, snap.ret)
+	return facts, nil
+}
+
+// evidenceMissing reports whether state counts events the retained segments
+// cannot account for. A listed segment that vanished during the bound read
+// means state and bounds come from different snapshots, so the stale bound is
+// not proof that evidence is missing.
+func evidenceMissing(snap storeSnapshot, stateOK bool) bool {
+	return !snap.vanished && stateOK && snap.state.LastSequence > 0 &&
+		(!snap.ret.hasLast || snap.ret.lastSeq < snap.state.LastSequence)
+}
+
+// baseCoverage is the coverage every page starts from.
+func baseCoverage(facts snapshotFacts) Coverage {
+	cov := Coverage{
+		Available:       true,
+		FirstRetainedAt: retainedFirstString(facts.ret),
+		LastRetainedAt:  retainedLastString(facts.ret),
 	}
-	budget := scanBudget(cfg)
-	var (
-		matches    []Event
-		scanned    segmentWalk
-		truncated  = moreEntries || racedEntries || snap.vanished
-		guaranteed bool
-	)
-	for i, seg := range segments {
+	if facts.stateExists {
+		cov.DroppedEvents = facts.state.DroppedEvents
+	}
+	return cov
+}
+
+// cursorPosition resolves the scan window a cursor requests. A cursor whose
+// store instance or retained prefix cannot be verified ends the page instead of
+// silently restarting.
+func cursorPosition(nq normalizedQuery, facts snapshotFacts, cov Coverage) (after, snapshot uint64, expired *Coverage, err error) {
+	after, snapshot = 0, facts.high
+	if nq.cur == nil {
+		return after, snapshot, nil, nil
+	}
+	after, snapshot = nq.cur.After, nq.cur.Snapshot
+	if !facts.stateExists {
+		// Without state the store instance and the loss counters cannot be
+		// verified, and the cursor cannot be trusted to continue safely.
+		gone := cov
+		gone.CursorExpired = true
+		gone.Partial = true
+		gone.LossDetected = true
+		return 0, 0, &gone, nil
+	}
+	if nq.cur.StoreID != facts.storeID {
+		return 0, 0, nil, errCursorMismatch
+	}
+	if cursorExpired(nq.cur, facts.ret, facts.high, len(facts.segments)) {
+		gone := cov
+		gone.CursorExpired = true
+		gone.Partial = true
+		gone.LossDetected = facts.stateLost || cov.DroppedEvents > 0
+		return 0, 0, &gone, nil
+	}
+	return after, snapshot, nil, nil
+}
+
+// pageScan accumulates the evidence one page returns while walking segments.
+type pageScan struct {
+	nq         normalizedQuery
+	cfg        storeConfig
+	budget     int64
+	after      uint64
+	snapshot   uint64
+	segments   []segmentInfo
+	matches    []Event
+	walk       segmentWalk
+	truncated  bool
+	guaranteed bool
+}
+
+// run walks the listed segments under the page budget and collects matches.
+func (ps *pageScan) run(ctx context.Context) error {
+	for i, seg := range ps.segments {
 		if err := ctx.Err(); err != nil {
-			return Page{}, err
+			return err
 		}
-		if seg.size == 0 {
-			continue
+		stop, err := ps.scanSegment(ctx, i, seg)
+		if err != nil {
+			return err
 		}
-		if guaranteed && scanned.bytes >= budget {
-			truncated = true
-			break
-		}
-		if after > 0 {
-			// A segment whose last sequence is at or before the cursor cannot
-			// contribute a returned event. Skip its content without decoding
-			// it, but keep the sequence baseline so later gap counts stay
-			// honest for the scanned range.
-			if last, ok := segmentLastEvent(seg, cfg.segmentBytes+maxEventBytes); ok && last.Sequence <= after {
-				if last.Sequence > scanned.prevSeq {
-					scanned.prevSeq = last.Sequence
-				}
-				continue
-			}
-		}
-		limit := seg.size
-		cutAtLimit := false
-		if !guaranteed {
-			// Read one whole segment (up to the absolute page cap) so a page
-			// always makes progress instead of re-reading the same budget
-			// prefix behind the cursor forever.
-			if limit > maxPageBytes {
-				limit = maxPageBytes
-				cutAtLimit = true
-				truncated = true
-			}
-			guaranteed = true
-		} else {
-			remaining := budget - scanned.bytes
-			if remaining <= 0 {
-				truncated = true
-				break
-			}
-			if remaining < limit {
-				limit = remaining
-				cutAtLimit = true
-				truncated = true
-			}
-		}
-		f, openErr := openSegmentRead(seg)
-		if openErr != nil {
-			if errors.Is(openErr, errUnsafeSegment) {
-				return Page{}, openErr
-			}
-			if errors.Is(openErr, fs.ErrNotExist) {
-				// Retention removed the segment after it was listed.
-				truncated = true
-				continue
-			}
-			scanned.malformedSegments++
-			if cutAtLimit {
-				truncated = true
-				break
-			}
-			continue
-		}
-		walk, walkErr := walkSegment(ctx, f, limit, cutAtLimit, i == len(segments)-1, scanned.prevSeq, func(ev Event) bool {
-			if ev.Sequence <= after || ev.Sequence > snapshot {
-				return true
-			}
-			if !matchesQuery(nq, ev) {
-				return true
-			}
-			matches = append(matches, ev)
-			return len(matches) <= nq.limit
-		})
-		_ = f.Close()
-		if walkErr != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return Page{}, ctxErr
-			}
-			scanned.malformedSegments++
-			if cutAtLimit {
-				truncated = true
-				break
-			}
-			continue
-		}
-		walk.merge(&scanned)
-		scanned.segments++
-		if walk.inFlightTail {
-			// A writer is still appending the newest record: this page is a
-			// prefix of the retained evidence, not a complete scan of it.
-			truncated = true
-		}
-		if walk.stoppedByVisit {
-			break
-		}
-		if cutAtLimit {
+		if stop {
 			break
 		}
 	}
-	if !truncated && !scanned.stoppedByVisit && scanned.hasFirst {
-		// A complete scan gives exact retained time bounds even when supplied
-		// occurrence timestamps are not monotonic with sequence order.
-		ret.firstSeq, ret.firstAt, ret.hasFirst = scanned.first.Sequence, scanned.earliest, true
-		ret.lastSeq, ret.lastAt, ret.hasLast = scanned.last.Sequence, scanned.latest, true
-		cov.FirstRetainedAt = retainedFirstString(ret)
-		cov.LastRetainedAt = retainedLastString(ret)
+	return nil
+}
+
+// scanSegment reads at most its budget share of one segment.
+func (ps *pageScan) scanSegment(ctx context.Context, i int, seg segmentInfo) (bool, error) {
+	if seg.size == 0 {
+		return false, nil
 	}
-	sort.Slice(matches, func(i, j int) bool { return matches[i].Sequence < matches[j].Sequence })
-	more := scanned.stoppedByVisit || len(matches) > nq.limit
-	returnedAll := len(matches) <= nq.limit
-	if len(matches) > nq.limit {
-		matches = matches[:nq.limit]
+	if ps.guaranteed && ps.walk.bytes >= ps.budget {
+		ps.truncated = true
+		return true, nil
 	}
-	page.Events = matches
-	cov.EventsReturned = len(matches)
-	cov.EventsScanned = scanned.events
-	cov.SegmentsScanned = scanned.segments
-	cov.BytesScanned = scanned.bytes
-	cov.MalformedSegments = scanned.malformedSegments
-	cov.MalformedEvents = scanned.malformedEvents
-	cov.SequenceGaps = scanned.gaps
-	cov.Truncated = truncated
-	cov.LimitReached = len(matches) == nq.limit && nq.limit > 0
-	if len(matches) > 0 {
-		first, last := matches[0].OccurredAt, matches[0].OccurredAt
-		for _, ev := range matches[1:] {
-			first = earlierString(first, ev.OccurredAt)
-			last = laterString(last, ev.OccurredAt)
-		}
-		cov.FirstReturnedAt = first
-		cov.LastReturnedAt = last
+	if ps.after > 0 && ps.skipBeforeCursor(ctx, seg) {
+		return false, nil
 	}
-	boundedWithoutProgress := false
-	if more || truncated {
-		afterSeq := uint64(0)
-		if len(matches) > 0 {
-			afterSeq = matches[len(matches)-1].Sequence
-		}
-		if truncated && returnedAll && scanned.lastScannedSeq > afterSeq {
-			afterSeq = scanned.lastScannedSeq
-		}
-		if afterSeq > after {
-			page.NextCursor = cursorFor(nq, afterSeq, snapshot, storeID)
-		} else {
-			// The page could not advance past the cursor. Never repeat it:
-			// report a bounded, incomplete read with no continuation.
-			boundedWithoutProgress = true
-		}
+	limit, cutAtLimit, done := ps.segmentLimit(seg)
+	if done {
+		return true, nil
 	}
+	f, openErr := openSegmentRead(seg)
+	if openErr != nil {
+		return ps.failedOpen(openErr, cutAtLimit)
+	}
+	walk, walkErr := walkSegment(ctx, f, limit, cutAtLimit, i == len(ps.segments)-1, ps.walk.prevSeq, ps.collector())
+	_ = f.Close()
+	if walkErr != nil {
+		return ps.failedWalk(ctx, cutAtLimit)
+	}
+	ps.mergeWalk(walk)
+	return cutAtLimit || ps.walk.stoppedByVisit, nil
+}
+
+// skipBeforeCursor reports whether seg cannot contribute an event after the
+// cursor. It skips the content without decoding it, but keeps the sequence
+// baseline so later gap counts stay honest for the scanned range.
+func (ps *pageScan) skipBeforeCursor(ctx context.Context, seg segmentInfo) bool {
+	last, ok := segmentLastEvent(ctx, seg, ps.cfg.segmentBytes+maxEventBytes)
+	if !ok || last.Sequence > ps.after {
+		return false
+	}
+	if last.Sequence > ps.walk.prevSeq {
+		ps.walk.prevSeq = last.Sequence
+	}
+	return true
+}
+
+// segmentLimit is how many bytes of seg this page may read. The first segment
+// of a page is read whole (up to the absolute cap) so a page always makes
+// progress instead of re-reading the same budget prefix behind the cursor
+// forever; later segments share the remaining budget. done reports that no
+// budget remains.
+func (ps *pageScan) segmentLimit(seg segmentInfo) (limit int64, cutAtLimit, done bool) {
+	limit = seg.size
+	if !ps.guaranteed {
+		ps.guaranteed = true
+		if limit > maxPageBytes {
+			ps.truncated = true
+			return maxPageBytes, true, false
+		}
+		return limit, false, false
+	}
+	remaining := ps.budget - ps.walk.bytes
+	if remaining <= 0 {
+		ps.truncated = true
+		return 0, false, true
+	}
+	if remaining < limit {
+		ps.truncated = true
+		return remaining, true, false
+	}
+	return limit, false, false
+}
+
+// failedOpen classifies an open failure for the page scan.
+func (ps *pageScan) failedOpen(openErr error, cutAtLimit bool) (bool, error) {
+	if errors.Is(openErr, errUnsafeSegment) {
+		return false, openErr
+	}
+	if errors.Is(openErr, fs.ErrNotExist) {
+		// Retention removed the segment after it was listed.
+		ps.truncated = true
+		return false, nil
+	}
+	ps.walk.malformedSegments++
+	if cutAtLimit {
+		ps.truncated = true
+		return true, nil
+	}
+	return false, nil
+}
+
+// failedWalk classifies a walk failure for the page scan.
+func (ps *pageScan) failedWalk(ctx context.Context, cutAtLimit bool) (bool, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	ps.walk.malformedSegments++
+	if cutAtLimit {
+		ps.truncated = true
+		return true, nil
+	}
+	return false, nil
+}
+
+// collector records matching events and stops the walk once the page holds one
+// more than the limit.
+func (ps *pageScan) collector() func(Event) bool {
+	return func(ev Event) bool {
+		if ev.Sequence <= ps.after || ev.Sequence > ps.snapshot {
+			return true
+		}
+		if !matchesQuery(ps.nq, ev) {
+			return true
+		}
+		ps.matches = append(ps.matches, ev)
+		return len(ps.matches) <= ps.nq.limit
+	}
+}
+
+// mergeWalk folds one walked segment into the page scan.
+func (ps *pageScan) mergeWalk(walk segmentWalk) {
+	walk.merge(&ps.walk)
+	ps.walk.segments++
+	if walk.inFlightTail {
+		// A writer is still appending the newest record: this page is a prefix
+		// of the retained evidence, not a complete scan of it.
+		ps.truncated = true
+	}
+}
+
+// exactRetainedBounds is the retained window proven by a complete scan.
+func exactRetainedBounds(walk segmentWalk) retainedBounds {
+	return retainedBounds{
+		firstSeq: walk.first.Sequence,
+		firstAt:  walk.earliest,
+		hasFirst: true,
+		lastSeq:  walk.last.Sequence,
+		lastAt:   walk.latest,
+		hasLast:  true,
+	}
+}
+
+// coverageFromScan fills the counters derived from one page scan. matches is
+// already trimmed to the page limit.
+func coverageFromScan(cov *Coverage, nq normalizedQuery, ps *pageScan) {
+	cov.EventsReturned = len(ps.matches)
+	cov.EventsScanned = ps.walk.events
+	cov.SegmentsScanned = ps.walk.segments
+	cov.BytesScanned = ps.walk.bytes
+	cov.MalformedSegments = ps.walk.malformedSegments
+	cov.MalformedEvents = ps.walk.malformedEvents
+	cov.SequenceGaps = ps.walk.gaps
+	cov.Truncated = ps.truncated
+	cov.LimitReached = len(ps.matches) == nq.limit && nq.limit > 0
+	if len(ps.matches) > 0 {
+		cov.FirstReturnedAt, cov.LastReturnedAt = returnedWindow(ps.matches)
+	}
+}
+
+// returnedWindow is the earliest and latest occurrence actually returned.
+func returnedWindow(matches []Event) (first, last string) {
+	first, last = matches[0].OccurredAt, matches[0].OccurredAt
+	for _, ev := range matches[1:] {
+		first = earlierString(first, ev.OccurredAt)
+		last = laterString(last, ev.OccurredAt)
+	}
+	return first, last
+}
+
+// continuation is the cursor a bounded page exposes. A page that could not
+// advance past its cursor never repeats it: it reports a bounded, incomplete
+// read with no continuation through stalled.
+func continuation(nq normalizedQuery, ps *pageScan, after, snapshot uint64, storeID string, more, returnedAll bool) (next string, stalled bool) {
+	if !more && !ps.truncated {
+		return "", false
+	}
+	afterSeq := uint64(0)
+	if len(ps.matches) > 0 {
+		afterSeq = ps.matches[len(ps.matches)-1].Sequence
+	}
+	if ps.truncated && returnedAll && ps.walk.lastScannedSeq > afterSeq {
+		afterSeq = ps.walk.lastScannedSeq
+	}
+	if afterSeq <= after {
+		return "", true
+	}
+	return cursorFor(nq, afterSeq, snapshot, storeID), false
+}
+
+// finishVerdict marks evidence loss and partial reads from the final scan state.
+func finishVerdict(cov *Coverage, nq normalizedQuery, snap storeSnapshot, ret retainedBounds, stalled bool, segmentCount int, stateLost bool) {
 	cov.LossDetected = stateLost || cov.DroppedEvents > 0 ||
 		cov.MalformedSegments > 0 || cov.MalformedEvents > 0 || cov.SequenceGaps > 0
-	cov.Partial = cov.LossDetected || snap.vanished || boundedWithoutProgress ||
-		windowBeforeRetained(nq, ret, len(segments))
-	page.Coverage = cov
-	return page, nil
+	cov.Partial = cov.LossDetected || snap.vanished || stalled ||
+		windowBeforeRetained(nq, ret, segmentCount)
 }
 
 // hasSegmentHistory reports whether any segment carries bytes, which means the
@@ -438,9 +619,21 @@ type retainedBounds struct {
 // reports that a listed segment was removed before its edge could be read: the
 // listing and the bounds then belong to different snapshots and a missing last
 // sequence cannot be inferred from them.
-func readRetainedBounds(segments []segmentInfo, cfg storeConfig) (retainedBounds, bool) {
+func readRetainedBounds(ctx context.Context, segments []segmentInfo, cfg storeConfig) (retainedBounds, bool) {
 	var ret retainedBounds
-	vanished := false
+	var vanished bool
+	ret.firstSeq, ret.firstAt, ret.hasFirst, vanished = firstRetainedEdge(segments, cfg)
+	var lastVanished bool
+	ret.lastSeq, ret.lastAt, ret.hasLast, lastVanished = lastRetainedEdge(ctx, segments, cfg)
+	vanished = vanished || lastVanished
+	if ret.hasFirst && ret.hasLast && ret.lastAt.Before(ret.firstAt) {
+		ret.lastAt = ret.firstAt
+	}
+	return ret, vanished
+}
+
+// firstRetainedEdge is the oldest decodable event within the retained window.
+func firstRetainedEdge(segments []segmentInfo, cfg storeConfig) (seq uint64, at time.Time, ok, vanished bool) {
 	edge := cfg.segmentBytes + maxEventBytes
 	budget := scanBudget(cfg)
 	for _, seg := range segments {
@@ -451,20 +644,25 @@ func readRetainedBounds(segments []segmentInfo, cfg storeConfig) (retainedBounds
 			break
 		}
 		segmentBudget := edge
-		if segmentBudget > budget {
+		if budget < segmentBudget {
 			segmentBudget = budget
 		}
-		ev, ok, err := segmentFirstEventErr(seg, segmentBudget)
+		ev, found, err := segmentFirstEventErr(seg, segmentBudget)
 		if isNotExist(err) {
 			vanished = true
 		}
-		if ok {
-			ret.firstSeq, ret.firstAt, ret.hasFirst = ev.Sequence, eventTime(ev), true
-			break
+		if found {
+			return ev.Sequence, eventTime(ev), true, vanished
 		}
 		budget -= seg.size
 	}
-	budget = scanBudget(cfg)
+	return 0, time.Time{}, false, vanished
+}
+
+// lastRetainedEdge is the newest decodable event within the retained window.
+func lastRetainedEdge(ctx context.Context, segments []segmentInfo, cfg storeConfig) (seq uint64, at time.Time, ok, vanished bool) {
+	edge := cfg.segmentBytes + maxEventBytes
+	budget := scanBudget(cfg)
 	for i := len(segments) - 1; i >= 0; i-- {
 		seg := segments[i]
 		if seg.size <= 0 {
@@ -474,23 +672,19 @@ func readRetainedBounds(segments []segmentInfo, cfg storeConfig) (retainedBounds
 			break
 		}
 		segmentBudget := edge
-		if segmentBudget > budget {
+		if budget < segmentBudget {
 			segmentBudget = budget
 		}
-		ev, ok, err := segmentLastEventErr(seg, segmentBudget)
+		ev, found, err := segmentLastEventErr(ctx, seg, segmentBudget)
 		if isNotExist(err) {
 			vanished = true
 		}
-		if ok {
-			ret.lastSeq, ret.lastAt, ret.hasLast = ev.Sequence, eventTime(ev), true
-			break
+		if found {
+			return ev.Sequence, eventTime(ev), true, vanished
 		}
 		budget -= seg.size
 	}
-	if ret.hasFirst && ret.hasLast && ret.lastAt.Before(ret.firstAt) {
-		ret.lastAt = ret.firstAt
-	}
-	return ret, vanished
+	return 0, time.Time{}, false, vanished
 }
 
 // highwater is the newest sequence the store may have retained.

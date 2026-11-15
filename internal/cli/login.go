@@ -109,7 +109,7 @@ func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 		}
 		return raw, nil
 	default:
-		raw, err := os.ReadFile(src) //nolint:gosec // G304: the operator chose this bundle file.
+		raw, err := os.ReadFile(src)
 		if err != nil {
 			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass the path of a transfer bundle, - for stdin, or nothing to paste it.")
 		}
@@ -141,7 +141,7 @@ func extractBundle(raw []byte, where string) ([]byte, error) {
 
 func loginPassphrase(cmd *cobra.Command) (string, error) {
 	if path := stringFlag(cmd, "passphrase-file"); path != "" {
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator chose this passphrase file.
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return "", output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
@@ -265,7 +265,7 @@ func runContextRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// The tunnel daemon would keep the removed context's tunnel up.
-	stopTunnelDaemonQuietly(name, true)
+	stopTunnelDaemonQuietly(commandContext(cmd), name)
 	if err := contexts.Remove(name); err != nil {
 		return err
 	}

@@ -18,7 +18,7 @@ func appendRawLine(t *testing.T, dir, line string) {
 	if err != nil || len(segments) == 0 {
 		t.Fatalf("listSegments: %v (%d segments)", err, len(segments))
 	}
-	f, err := os.OpenFile(segments[len(segments)-1].path, os.O_WRONLY|os.O_APPEND, fileMode) //nolint:gosec // G304: a test store segment.
+	f, err := os.OpenFile(segments[len(segments)-1].path, os.O_WRONLY|os.O_APPEND, fileMode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,10 +54,15 @@ func TestBudgetCutIsTruncationNotCorruption(t *testing.T) {
 	}
 	// A lower budget than the stored segment size is a supported read.
 	reader := &Store{Dir: writer.Dir, MaxBytes: maxEventBytes, SegmentBytes: maxEventBytes, Retention: 24 * time.Hour}
-	page, err := reader.Query(context.Background(), Query{Limit: MaxLimit})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
+	assertWholeSegmentPage(t, reader)
+	assertHardCapIsTruncation(t, reader)
+	assertTornTailIsCorruption(t, writer)
+}
+
+// assertWholeSegmentPage checks one whole oversize segment is a complete page.
+func assertWholeSegmentPage(t *testing.T, reader *Store) {
+	t.Helper()
+	page := mustQuery(t, reader, Query{Limit: MaxLimit})
 	// One whole segment is read to make progress even though the configured
 	// budget is lower. That is a complete page, not corruption.
 	if page.Coverage.Truncated || page.Coverage.LossDetected || page.Coverage.Partial {
@@ -69,13 +74,16 @@ func TestBudgetCutIsTruncationNotCorruption(t *testing.T) {
 	if len(page.Events) != 80 {
 		t.Fatalf("oversize-segment page returned %d events, want 80", len(page.Events))
 	}
+}
+
+// assertHardCapIsTruncation checks the absolute page cap is reported as
+// truncation, not corruption.
+func assertHardCapIsTruncation(t *testing.T, reader *Store) {
+	t.Helper()
 	oldCap := maxPageBytes
 	maxPageBytes = 4096
-	capped, err := reader.Query(context.Background(), Query{Limit: MaxLimit})
-	maxPageBytes = oldCap
-	if err != nil {
-		t.Fatalf("capped Query: %v", err)
-	}
+	defer func() { maxPageBytes = oldCap }()
+	capped := mustQuery(t, reader, Query{Limit: MaxLimit})
 	if !capped.Coverage.Truncated {
 		t.Fatalf("hard page cap not reported as truncated: %+v", capped.Coverage)
 	}
@@ -85,23 +93,21 @@ func TestBudgetCutIsTruncationNotCorruption(t *testing.T) {
 	if len(capped.Events) == 0 {
 		t.Fatal("hard page cap returned no evidence")
 	}
-	health, err := reader.Health(context.Background())
-	if err != nil {
-		t.Fatalf("Health: %v", err)
-	}
+	health := mustHealth(t, reader)
 	if health.MalformedEvents != 0 || health.MalformedSegments != 0 {
 		t.Fatalf("health fabricated corruption: %+v", health)
 	}
 	if health.LossDetected {
 		t.Fatalf("health fabricated loss: %+v", health)
 	}
+}
 
-	// A genuine torn tail is still corruption and remains visible.
+// assertTornTailIsCorruption injects a torn tail and checks it is still visible
+// as corruption.
+func assertTornTailIsCorruption(t *testing.T, writer *Store) {
+	t.Helper()
 	appendRawLine(t, writer.Dir, `{"schema":"vaire-activity/v1","event_id":"torn`)
-	page, err = writer.Query(context.Background(), Query{Limit: MaxLimit})
-	if err != nil {
-		t.Fatalf("Query with torn tail: %v", err)
-	}
+	page := mustQuery(t, writer, Query{Limit: MaxLimit})
 	if page.Coverage.MalformedEvents != 1 {
 		t.Fatalf("torn tail malformed events = %d, want 1", page.Coverage.MalformedEvents)
 	}
@@ -210,7 +216,7 @@ func TestHealthReportsUnusableLock(t *testing.T) {
 	s := testStore(t)
 	mustAppend(t, s, baseEvent())
 	lockPath := filepath.Join(s.Dir, lockName)
-	if err := os.Chmod(lockPath, 0o644); err != nil { //nolint:gosec // G302: the test needs an unsafe lock mode.
+	if err := os.Chmod(lockPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	health, err := s.Health(context.Background())
@@ -263,12 +269,16 @@ func TestFailedAppendKeepsHistoryAndRealRetainedBounds(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		mustAppend(t, s, labelledEvent(strings.Repeat("r", 100)))
 	}
-	beforeSegments := segmentsOf(t, s)
-	beforeNames := segmentNames(beforeSegments)
-	beforePage, err := s.Query(context.Background(), Query{Limit: MaxLimit})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assertFailedAppendKeepsHistory(t, s)
+	assertStaleStateDoesNotWidenCoverage(t, s)
+}
+
+// assertFailedAppendKeepsHistory checks a failed write neither changes the
+// segment set nor discards durable history.
+func assertFailedAppendKeepsHistory(t *testing.T, s *Store) {
+	t.Helper()
+	beforeNames := segmentNames(segmentsOf(t, s))
+	beforePage := mustQuery(t, s, Query{Limit: MaxLimit})
 	if beforePage.Coverage.FirstRetainedAt == "" {
 		t.Fatal("setup has no retained window")
 	}
@@ -279,20 +289,20 @@ func TestFailedAppendKeepsHistoryAndRealRetainedBounds(t *testing.T) {
 	if appendErr == nil {
 		t.Fatal("Append swallowed the injected failure")
 	}
-	afterSegments := segmentsOf(t, s)
-	if segmentNames(afterSegments) != beforeNames {
-		t.Fatalf("failed append changed segments:\n before %s\n after  %s", beforeNames, segmentNames(afterSegments))
+	afterNames := segmentNames(segmentsOf(t, s))
+	if afterNames != beforeNames {
+		t.Fatalf("failed append changed segments:\n before %s\n after  %s", beforeNames, afterNames)
 	}
-	afterPage, err := s.Query(context.Background(), Query{Limit: MaxLimit})
-	if err != nil {
-		t.Fatal(err)
-	}
+	afterPage := mustQuery(t, s, Query{Limit: MaxLimit})
 	if len(afterPage.Events) != len(beforePage.Events) {
 		t.Fatalf("failed append discarded history: %d -> %d events", len(beforePage.Events), len(afterPage.Events))
 	}
+}
 
-	// A stale state that claims an ancient first event must not widen
-	// coverage beyond the actual oldest segment.
+// assertStaleStateDoesNotWidenCoverage checks retained bounds come from the
+// segments, never from a stale state document.
+func assertStaleStateDoesNotWidenCoverage(t *testing.T, s *Store) {
+	t.Helper()
 	state, ok, err := readState(s.Dir)
 	if err != nil || !ok {
 		t.Fatalf("readState: %v ok=%v", err, ok)
@@ -302,10 +312,7 @@ func TestFailedAppendKeepsHistoryAndRealRetainedBounds(t *testing.T) {
 	if err := writeState(s.Dir, state); err != nil {
 		t.Fatal(err)
 	}
-	page, err := s.Query(context.Background(), Query{Since: "2020-01-01T00:00:00Z", Limit: 2})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
+	page := mustQuery(t, s, Query{Since: "2020-01-01T00:00:00Z", Limit: 2})
 	first, err := time.Parse(time.RFC3339Nano, page.Coverage.FirstRetainedAt)
 	if err != nil {
 		t.Fatalf("first retained: %v", err)
@@ -322,10 +329,7 @@ func TestFailedAppendKeepsHistoryAndRealRetainedBounds(t *testing.T) {
 	if len(page.Events) != 2 || !page.Coverage.LimitReached || page.NextCursor == "" {
 		t.Fatalf("limit-2 page = %d events, limitReached=%v cursor=%q", len(page.Events), page.Coverage.LimitReached, page.NextCursor)
 	}
-	health, err := s.Health(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	health := mustHealth(t, s)
 	healthFirst, err := time.Parse(time.RFC3339Nano, health.FirstRetainedAt)
 	if err != nil || healthFirst.Year() < 2026 {
 		t.Fatalf("health widened retained coverage: %q (%v)", health.FirstRetainedAt, err)
@@ -401,11 +405,10 @@ func TestRetentionTimeIgnoresFutureTimestamp(t *testing.T) {
 	if err := os.Mkdir(dir, dirMode); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
 	ev := Event{
 		Schema:     Schema,
 		EventID:    "evt-0123456789abcdef0123456789abcdef",
-		OccurredAt: formatTime(now.Add(365 * 24 * time.Hour)),
+		OccurredAt: formatTime(time.Now().UTC().Add(365 * 24 * time.Hour)),
 		Sequence:   1,
 		Source:     SourceRPC,
 		Action:     "backup.full",
@@ -422,6 +425,9 @@ func TestRetentionTimeIgnoresFutureTimestamp(t *testing.T) {
 	if err != nil || len(segments) != 1 {
 		t.Fatalf("listSegments: %v (%d)", err, len(segments))
 	}
+	// The policy clock is taken after the write so the segment's own file time
+	// can never look like a future timestamp.
+	now := time.Now().UTC()
 	got, ok := retentionTime(context.Background(), segments[0], maxEventBytes, now)
 	if !ok {
 		t.Fatal("retentionTime gave no time")
@@ -440,7 +446,7 @@ func TestMalformedLineInsideLimitScanIsCounted(t *testing.T) {
 		mustAppend(t, s, baseEvent())
 	}
 	segments := segmentsOf(t, s)
-	raw, err := os.ReadFile(segments[0].path) //nolint:gosec // G304: a test store segment.
+	raw, err := os.ReadFile(segments[0].path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +455,7 @@ func TestMalformedLineInsideLimitScanIsCounted(t *testing.T) {
 		t.Fatalf("setup lines = %d, want 3", len(lines))
 	}
 	corrupt := lines[0] + "\n{broken\n" + strings.Join(lines[1:], "\n") + "\n"
-	if err := os.WriteFile(segments[0].path, []byte(corrupt), fileMode); err != nil { //nolint:gosec // G703: a path inside the test store.
+	if err := os.WriteFile(segments[0].path, []byte(corrupt), fileMode); err != nil {
 		t.Fatal(err)
 	}
 	page, err := s.Query(context.Background(), Query{Limit: 2})
@@ -476,10 +482,15 @@ func TestQueryLimitStopsScanningAndSkipsOldSegments(t *testing.T) {
 	if len(segments) < 4 {
 		t.Fatalf("setup has %d segments, want several", len(segments))
 	}
-	page, err := s.Query(context.Background(), Query{Limit: 5})
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
+	assertLimitPageStopsScanning(t, s)
+	assertCursorTailIsCheap(t, s)
+	assertSparseFilterScansAll(t, s)
+}
+
+// assertLimitPageStopsScanning checks a small limit stops within one segment.
+func assertLimitPageStopsScanning(t *testing.T, s *Store) {
+	t.Helper()
+	page := mustQuery(t, s, Query{Limit: 5})
 	if len(page.Events) != 5 || page.NextCursor == "" || !page.Coverage.LimitReached {
 		t.Fatalf("limit page = %d events cursor=%q limitReached=%v", len(page.Events), page.NextCursor, page.Coverage.LimitReached)
 	}
@@ -492,18 +503,16 @@ func TestQueryLimitStopsScanningAndSkipsOldSegments(t *testing.T) {
 	if page.Coverage.BytesScanned <= 0 || page.Coverage.BytesScanned > 4096 {
 		t.Fatalf("early-return bytes = %d, want >0 and small", page.Coverage.BytesScanned)
 	}
+}
 
-	bigPage, err := s.Query(context.Background(), Query{Limit: MaxLimit})
-	if err != nil {
-		t.Fatalf("big Query: %v", err)
-	}
+// assertCursorTailIsCheap checks a cursor page skips segments it cannot use.
+func assertCursorTailIsCheap(t *testing.T, s *Store) {
+	t.Helper()
+	bigPage := mustQuery(t, s, Query{Limit: MaxLimit})
 	if len(bigPage.Events) != MaxLimit || bigPage.NextCursor == "" {
 		t.Fatalf("big page = %d events cursor=%q", len(bigPage.Events), bigPage.NextCursor)
 	}
-	next, err := s.Query(context.Background(), Query{Limit: MaxLimit, Cursor: bigPage.NextCursor})
-	if err != nil {
-		t.Fatalf("cursor Query: %v", err)
-	}
+	next := mustQuery(t, s, Query{Limit: MaxLimit, Cursor: bigPage.NextCursor})
 	if len(next.Events) != 20 || next.Events[0].Sequence != 501 || next.Events[19].Sequence != 520 {
 		t.Fatalf("tail page sequences = %v", sequences(next.Events))
 	}
@@ -513,12 +522,13 @@ func TestQueryLimitStopsScanningAndSkipsOldSegments(t *testing.T) {
 	if next.Coverage.SegmentsScanned > 2 {
 		t.Fatalf("cursor page scanned %d segments, want at most 2", next.Coverage.SegmentsScanned)
 	}
+}
 
+// assertSparseFilterScansAll checks a sparse filter scans the whole store.
+func assertSparseFilterScansAll(t *testing.T, s *Store) {
+	t.Helper()
 	rare := mustAppend(t, s, Event{Source: SourceJob, Action: "rare.action", Outcome: OutcomeSucceeded})
-	sparse, err := s.Query(context.Background(), Query{Action: "rare.action", Limit: 5})
-	if err != nil {
-		t.Fatalf("sparse Query: %v", err)
-	}
+	sparse := mustQuery(t, s, Query{Action: "rare.action", Limit: 5})
 	if len(sparse.Events) != 1 || sparse.Events[0].Sequence != rare.Sequence {
 		t.Fatalf("sparse events = %v", sequences(sparse.Events))
 	}

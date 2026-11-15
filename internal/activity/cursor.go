@@ -84,11 +84,18 @@ func decodeCursor(raw string) (cursorState, error) {
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return cursorState{}, errInvalidCursor
 	}
+	if err := c.validate(); err != nil {
+		return cursorState{}, err
+	}
+	return c, nil
+}
+
+func (c cursorState) validate() error {
 	if c.Version != cursorVersion || c.After == 0 || c.Snapshot < c.After || !validStoreID(c.StoreID) {
-		return cursorState{}, errInvalidCursor
+		return errInvalidCursor
 	}
 	if c.Limit < 1 || c.Limit > MaxLimit {
-		return cursorState{}, errInvalidCursor
+		return errInvalidCursor
 	}
 	for _, field := range []struct {
 		name  string
@@ -102,12 +109,16 @@ func decodeCursor(raw string) (cursorState, error) {
 		{"action", c.Action, maxActionLen},
 	} {
 		if checkToken(field.name, field.value, field.max, false) != nil {
-			return cursorState{}, errInvalidCursor
+			return errInvalidCursor
 		}
 	}
 	if c.Outcome != "" && !contains(Outcomes, c.Outcome) {
-		return cursorState{}, errInvalidCursor
+		return errInvalidCursor
 	}
+	return c.validateWindow()
+}
+
+func (c cursorState) validateWindow() error {
 	for _, field := range []struct {
 		name  string
 		value string
@@ -119,23 +130,23 @@ func decodeCursor(raw string) (cursorState, error) {
 			continue
 		}
 		if _, err := parseStoredTime(field.value); err != nil {
-			return cursorState{}, errInvalidCursor
+			return errInvalidCursor
 		}
 	}
 	if c.SinceAt != "" && c.UntilAt != "" {
 		since, err := parseStoredTime(c.SinceAt)
 		if err != nil {
-			return cursorState{}, errInvalidCursor
+			return errInvalidCursor
 		}
 		until, err := parseStoredTime(c.UntilAt)
 		if err != nil || !since.Before(until) {
-			return cursorState{}, errInvalidCursor
+			return errInvalidCursor
 		}
 	}
 	if len(c.SinceRaw) > cursorWindowBytes || len(c.UntilRaw) > cursorWindowBytes {
-		return cursorState{}, errInvalidCursor
+		return errInvalidCursor
 	}
-	return c, nil
+	return nil
 }
 
 // cursorFor builds the cursor for the next page of nq, resuming after event

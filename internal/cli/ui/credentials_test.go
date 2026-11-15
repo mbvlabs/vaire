@@ -11,7 +11,7 @@ import (
 func credentialsFixture(width int) string {
 	return Credentials("created database app2 and its roles", "app2 (medium, 1 GiB)",
 		[]CredentialRow{{Role: "migrate", User: "app2_migrate", Password: "Abc123"}, {Role: "app", User: "app2_app", Password: "Def456"}},
-		[]URLRow{{Label: "app URL", URL: "postgres://app2_app:Def456@db1.example.com:6432/app2?sslmode=verify-full"}}, //nolint:gosec // G101: a test fixture.
+		[]URLRow{{Label: "app URL", URL: "postgres://app2_app:Def456@db1.example.com:6432/app2?sslmode=verify-full"}},
 		"Store these now: vaire does not keep database passwords. If they are lost, run vaire db credentials <db> --rotate --role <role>.", width)
 }
 
@@ -49,7 +49,7 @@ func TestCredentialsNarrowDropsFrame(t *testing.T) {
 }
 
 func TestURLFrame(t *testing.T) {
-	long := "postgres://app2_migrate:Abc123@db1.example.com:5432/app2?sslmode=verify-full&application_name=x" //nolint:gosec // G101: a test fixture.
+	long := "postgres://app2_migrate:Abc123@db1.example.com:5432/app2?sslmode=verify-full&application_name=x"
 	out := ansi.Strip(urlFrame([]URLRow{{Label: "app URL", URL: "postgres://a@h/app2"}, {Label: "migrate URL", URL: long}}, 60))
 	lines := strings.Split(out, "\n")
 	if !strings.HasPrefix(lines[0], "── Connection URLs ─") || !strings.HasPrefix(lines[len(lines)-1], "────") {

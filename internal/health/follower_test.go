@@ -107,26 +107,7 @@ func TestParseFollowerSlotSafetyUnknown(t *testing.T) {
 	}
 	for name, tc := range cases {
 		st := ParseFollower("app", "vaire_f", tc.src, nil)
-		switch {
-		case tc.want == nil && st.SlotSafeBytes != nil:
-			t.Errorf("%s: allowance %d, want unknown", name, *st.SlotSafeBytes)
-		case tc.want != nil && (st.SlotSafeBytes == nil || *st.SlotSafeBytes != *tc.want):
-			t.Errorf("%s: allowance %v, want %d", name, st.SlotSafeBytes, *tc.want)
-		}
-		if st.SlotUncapped != tc.uncapped {
-			t.Errorf("%s: uncapped %v, want %v", name, st.SlotUncapped, tc.uncapped)
-		}
-		raw, err := json.Marshal(st)
-		if err != nil {
-			t.Fatal(err)
-		}
-		doc := jsonObject(t, raw)
-		if _, present := doc["slot_safe_bytes"]; present != (tc.want != nil) {
-			t.Errorf("%s: slot_safe_bytes present %v, want %v: %s", name, present, tc.want != nil, raw)
-		}
-		if _, present := doc["slot_uncapped"]; present != tc.uncapped {
-			t.Errorf("%s: slot_uncapped present %v, want %v: %s", name, present, tc.uncapped, raw)
-		}
+		assertSlotAllowance(t, name, st, tc.want, tc.uncapped)
 	}
 
 	// An unknown allowance cannot prove a slot is past half of a cap; a
@@ -152,6 +133,30 @@ func TestParseFollowerSlotSafetyUnknown(t *testing.T) {
 	minusOne := ParseFollower("app", "vaire_f", row(map[string]string{"slot_safe": "-1"}), nil)
 	if minusOne.SlotUncapped || !minusOne.SlotHalfUsed() {
 		t.Errorf("a measured -1 was taken as uncapped: %+v", minusOne)
+	}
+}
+
+func assertSlotAllowance(t *testing.T, name string, st FollowerState, want *int64, uncapped bool) {
+	t.Helper()
+	switch {
+	case want == nil && st.SlotSafeBytes != nil:
+		t.Errorf("%s: allowance %d, want unknown", name, *st.SlotSafeBytes)
+	case want != nil && (st.SlotSafeBytes == nil || *st.SlotSafeBytes != *want):
+		t.Errorf("%s: allowance %v, want %d", name, st.SlotSafeBytes, *want)
+	}
+	if st.SlotUncapped != uncapped {
+		t.Errorf("%s: uncapped %v, want %v", name, st.SlotUncapped, uncapped)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := jsonObject(t, raw)
+	if _, present := doc["slot_safe_bytes"]; present != (want != nil) {
+		t.Errorf("%s: slot_safe_bytes present %v, want %v: %s", name, present, want != nil, raw)
+	}
+	if _, present := doc["slot_uncapped"]; present != uncapped {
+		t.Errorf("%s: slot_uncapped present %v, want %v: %s", name, present, uncapped, raw)
 	}
 }
 

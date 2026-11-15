@@ -65,6 +65,10 @@ func validateHealth(h activity.Health) error {
 	if !first.IsZero() && !last.IsZero() && first.After(last) {
 		return invalid("first_retained_at", "after_last_retained_at")
 	}
+	return validateHealthCounters(h)
+}
+
+func validateHealthCounters(h activity.Health) error {
 	if h.MaxBytes < 0 || h.UsedBytes < 0 || h.SegmentBytes < 0 || h.RetentionS < 0 {
 		return invalid("bytes", "negative")
 	}
@@ -85,19 +89,24 @@ func validateHealth(h activity.Health) error {
 	if (h.UsedBytes > h.MaxBytes) != h.OverBudget {
 		return invalid("over_budget", "does_not_match_used_bytes")
 	}
-	if h.OwnerOnly {
-		if !h.Exists {
-			return invalid("owner_only", "without_store")
-		}
-		if h.NonOwnerOnlySegments != 0 {
-			return invalid("owner_only", "with_non_owner_only_segments")
-		}
-		if h.DirMode != "" && !ownerOnlyMode(h.DirMode) {
-			return invalid("dir_mode", "not_owner_only")
-		}
-		if h.SegmentMode != "" && !ownerOnlyMode(h.SegmentMode) {
-			return invalid("segment_mode", "not_owner_only")
-		}
+	return validateHealthOwnership(h)
+}
+
+func validateHealthOwnership(h activity.Health) error {
+	if !h.OwnerOnly {
+		return nil
+	}
+	if !h.Exists {
+		return invalid("owner_only", "without_store")
+	}
+	if h.NonOwnerOnlySegments != 0 {
+		return invalid("owner_only", "with_non_owner_only_segments")
+	}
+	if h.DirMode != "" && !ownerOnlyMode(h.DirMode) {
+		return invalid("dir_mode", "not_owner_only")
+	}
+	if h.SegmentMode != "" && !ownerOnlyMode(h.SegmentMode) {
+		return invalid("segment_mode", "not_owner_only")
 	}
 	return nil
 }

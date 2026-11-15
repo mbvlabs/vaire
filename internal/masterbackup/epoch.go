@@ -105,7 +105,7 @@ func NewInstanceID() (string, error) {
 
 // ReadInstance reads InstancePath under root. A missing file is "".
 func ReadInstance(root string) (string, error) {
-	raw, err := os.ReadFile(root + InstancePath) //nolint:gosec // G304: fixed node path.
+	raw, err := os.ReadFile(root + InstancePath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
@@ -114,7 +114,7 @@ func ReadInstance(root string) (string, error) {
 
 // ReadLocalEpoch reads EpochPath under root. A missing file is a zero Epoch.
 func ReadLocalEpoch(root string) (Epoch, error) {
-	raw, err := os.ReadFile(root + EpochPath) //nolint:gosec // G304: fixed node path.
+	raw, err := os.ReadFile(root + EpochPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Epoch{}, nil
 	}
@@ -135,7 +135,7 @@ type Fenced struct {
 // ReadFenced reads FencedPath under root; ok is false when the node isn't
 // fenced.
 func ReadFenced(root string) (Fenced, bool) {
-	raw, err := os.ReadFile(root + FencedPath) //nolint:gosec // G304: fixed node path.
+	raw, err := os.ReadFile(root + FencedPath)
 	if err != nil {
 		return Fenced{}, false
 	}

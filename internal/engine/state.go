@@ -167,12 +167,12 @@ func WithFileLock(lockPath string, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: fixed node lock paths.
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(f.Fd())
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		return err
 	}
@@ -182,22 +182,24 @@ func WithFileLock(lockPath string, fn func() error) error {
 
 // withFileLockContext is WithFileLock with a bounded wait for the lock. Once
 // the lock is acquired it is held for the whole call, including fn's writes.
+// A nil ctx waits like WithFileLock: it has no deadline.
 func withFileLockContext(ctx context.Context, lockPath string, fn func() error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
+	var done <-chan struct{}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		done = ctx.Done()
 	}
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: fixed node lock paths.
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	fd := int(f.Fd()) //nolint:gosec // G115: file descriptors fit in int.
+	fd := int(f.Fd())
 	ticker := time.NewTicker(stateLockPoll)
 	defer ticker.Stop()
 	for {
@@ -209,7 +211,7 @@ func withFileLockContext(ctx context.Context, lockPath string, fn func() error) 
 			return err
 		}
 		select {
-		case <-ctx.Done():
+		case <-done:
 			return ctx.Err()
 		case <-ticker.C:
 		}
@@ -226,7 +228,7 @@ func (s State) PublicSSHOpen() bool {
 // LoadState reads path. A missing file is an empty state. A file that does not
 // decode returns precondition_failed; it is never reset silently.
 func LoadState(path string) (State, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed state path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return State{}, nil

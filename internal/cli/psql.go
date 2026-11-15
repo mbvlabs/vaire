@@ -42,14 +42,14 @@ func runPsql(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ln, port, err := listenLocal(defaultPostgresPort)
+	ln, port, err := listenLocal(cmd.Context(), defaultPostgresPort)
 	if err != nil {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "No free local port.")
 	}
 	defer func() { _ = ln.Close() }()
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	at := databaseEndpoint(cmd, s, p, db)
+	at := databaseEndpoint(ctx, s, p, db)
 	go proxy(ctx, ln, s.dialer, at.addr(pgPort))
 
 	psqlPath, err := exec.LookPath("psql")
@@ -75,7 +75,7 @@ func runPsql(cmd *cobra.Command, args []string) error {
 	env = append(env, "PGOPTIONS="+sessionOptions(db, flagTrue(cmd, "write")))
 	// Arguments after -- go to psql as they are; the connection comes from
 	// the PG* environment.
-	child := exec.CommandContext(ctx, psqlPath, args...) //nolint:gosec // G204: fixed psql path; args are the operator's own.
+	child := exec.CommandContext(ctx, psqlPath, args...)
 	child.Env = append(os.Environ(), env...)
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
@@ -85,7 +85,7 @@ func runPsql(cmd *cobra.Command, args []string) error {
 	if err := child.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return &localenv.SilentExit{Code: exitErr.ExitCode()}
+			return &localenv.SilentExitError{Code: exitErr.ExitCode()}
 		}
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}

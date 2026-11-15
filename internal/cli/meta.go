@@ -157,12 +157,26 @@ func commandHidden(cmd *cobra.Command) bool {
 }
 
 func checkCommandMetadata(root *cobra.Command) commandMetaCheckReport {
-	failures := make([]string, 0)
-	for _, cmd := range walkCommands(root) {
+	commands := walkCommands(root)
+	failures := make([]string, 0, len(commands))
+	for _, cmd := range commands {
 		failures = append(failures, checkOneCommand(cmd)...)
 	}
 	sort.Strings(failures)
 	return commandMetaCheckReport{OK: len(failures) == 0, Failures: failures}
+}
+
+// commandMetaCheck collects the metadata failures of one command.
+type commandMetaCheck struct {
+	cmd      *cobra.Command
+	meta     CommandMeta
+	path     string
+	failures []string
+}
+
+// fail records one failure, prefixed with the command's path.
+func (c *commandMetaCheck) fail(msg string) {
+	c.failures = append(c.failures, c.path+": "+msg)
 }
 
 func checkOneCommand(cmd *cobra.Command) []string {
@@ -171,92 +185,126 @@ func checkOneCommand(cmd *cobra.Command) []string {
 	if !ok {
 		return []string{path + ": missing CommandMeta"}
 	}
-	failures := make([]string, 0)
-	if strings.TrimSpace(meta.Summary) == "" {
-		failures = append(failures, path+": missing summary")
+	c := &commandMetaCheck{cmd: cmd, meta: meta, path: path}
+	c.checkDocs()
+	c.checkDryRun()
+	c.checkPrompts()
+	c.checkDestructive()
+	c.checkFlags()
+	c.checkAudience()
+	c.checkErrorCodes()
+	return c.failures
+}
+
+// checkDocs checks the text every command documents.
+func (c *commandMetaCheck) checkDocs() {
+	if strings.TrimSpace(c.meta.Summary) == "" {
+		c.fail("missing summary")
 	}
-	if len(meta.WhenToUse) == 0 {
-		failures = append(failures, path+": missing when_to_use")
+	if len(c.meta.WhenToUse) == 0 {
+		c.fail("missing when_to_use")
 	}
-	if len(meta.Examples) == 0 {
-		failures = append(failures, path+": missing examples")
+	if len(c.meta.Examples) == 0 {
+		c.fail("missing examples")
 	}
-	mutating := meta.Mutating || len(meta.MutatingFlags) > 0
-	if mutating && !meta.SupportsDryRun && !meta.SkipDryRunCheck {
-		failures = append(failures, path+": mutating command must support dry-run or skip the check")
+}
+
+// checkDryRun checks that a mutation can be previewed or explains why not.
+func (c *commandMetaCheck) checkDryRun() {
+	if (c.meta.Mutating || len(c.meta.MutatingFlags) > 0) && !c.meta.SupportsDryRun && !c.meta.SkipDryRunCheck {
+		c.fail("mutating command must support dry-run or skip the check")
 	}
-	if meta.SkipDryRunCheck && strings.TrimSpace(meta.SkipDryRunReason) == "" {
-		failures = append(failures, path+": SkipDryRunCheck requires a reason")
+	if c.meta.SkipDryRunCheck && strings.TrimSpace(c.meta.SkipDryRunReason) == "" {
+		c.fail("SkipDryRunCheck requires a reason")
 	}
-	if meta.Prompts && len(meta.InteractiveFlags) == 0 {
-		failures = append(failures, path+": prompts without interactive_flags")
+}
+
+// checkPrompts checks that the prompts a command asks are declared.
+func (c *commandMetaCheck) checkPrompts() {
+	if c.meta.Prompts && len(c.meta.InteractiveFlags) == 0 {
+		c.fail("prompts without interactive_flags")
 	}
-	for _, name := range meta.InteractiveFlags {
-		if !flagDefined(cmd, name) {
-			failures = append(failures, path+": interactive flag "+name+" is not defined")
+	for _, name := range c.meta.InteractiveFlags {
+		if !flagDefined(c.cmd, name) {
+			c.fail("interactive flag " + name + " is not defined")
 		}
 	}
-	if meta.Destructive && meta.ConfirmToken == "" {
-		failures = append(failures, path+": destructive command requires confirm_token")
+}
+
+// checkDestructive checks the confirmation a destructive command needs.
+func (c *commandMetaCheck) checkDestructive() {
+	if c.meta.Destructive && c.meta.ConfirmToken == "" {
+		c.fail("destructive command requires confirm_token")
 	}
-	if meta.Destructive && len(meta.DestructiveFlags) > 0 {
-		failures = append(failures, path+": set destructive or destructive_flags, not both")
+	if c.meta.Destructive && len(c.meta.DestructiveFlags) > 0 {
+		c.fail("set destructive or destructive_flags, not both")
 	}
-	if len(meta.DestructiveFlags) > 0 && meta.ConfirmToken == "" {
-		failures = append(failures, path+": destructive_flags requires confirm_token")
+	if len(c.meta.DestructiveFlags) > 0 && c.meta.ConfirmToken == "" {
+		c.fail("destructive_flags requires confirm_token")
 	}
-	for _, name := range meta.MutatingFlags {
-		if !flagDefined(cmd, name) {
-			failures = append(failures, path+": mutating flag "+name+" is not defined")
+	if c.meta.ConfirmToken != "" && c.cmd.Flags().Lookup("confirm") == nil {
+		c.fail("confirm_token set without --confirm flag")
+	}
+}
+
+// checkFlags checks every flag a command's metadata names.
+func (c *commandMetaCheck) checkFlags() {
+	for _, name := range c.meta.MutatingFlags {
+		if !flagDefined(c.cmd, name) {
+			c.fail("mutating flag " + name + " is not defined")
 		}
 	}
-	for _, name := range meta.DestructiveFlags {
-		if !flagDefined(cmd, name) {
-			failures = append(failures, path+": destructive flag "+name+" is not defined")
+	for _, name := range c.meta.DestructiveFlags {
+		if !flagDefined(c.cmd, name) {
+			c.fail("destructive flag " + name + " is not defined")
 		}
-		if !meta.Mutating && !containsFlag(meta.MutatingFlags, name) {
-			failures = append(failures, path+": destructive flag "+name+" must also be mutating")
-		}
-	}
-	for _, name := range meta.LinuxOnlyFlags {
-		if !flagDefined(cmd, name) {
-			failures = append(failures, path+": linux-only flag "+name+" is not defined")
+		if !c.meta.Mutating && !containsFlag(c.meta.MutatingFlags, name) {
+			c.fail("destructive flag " + name + " must also be mutating")
 		}
 	}
-	if meta.Audience == "node" && !meta.LinuxOnly {
-		failures = append(failures, path+": node audience requires linuxOnly")
+	for _, name := range c.meta.LinuxOnlyFlags {
+		if !flagDefined(c.cmd, name) {
+			c.fail("linux-only flag " + name + " is not defined")
+		}
 	}
-	if meta.ConfirmToken != "" && cmd.Flags().Lookup("confirm") == nil {
-		failures = append(failures, path+": confirm_token set without --confirm flag")
+	if c.meta.SupportsDryRun && c.cmd.Flags().Lookup("dry-run") == nil {
+		c.fail("supports_dry_run set without --dry-run flag")
 	}
-	if meta.SupportsDryRun && cmd.Flags().Lookup("dry-run") == nil {
-		failures = append(failures, path+": supports_dry_run set without --dry-run flag")
+}
+
+// checkAudience checks where a command is exposed and when it restarts.
+func (c *commandMetaCheck) checkAudience() {
+	if c.meta.Audience == "node" && !c.meta.LinuxOnly {
+		c.fail("node audience requires linuxOnly")
 	}
-	switch meta.Audience {
+	switch c.meta.Audience {
 	case "operator", "node":
 	default:
-		failures = append(failures, path+": audience must be operator or node")
+		c.fail("audience must be operator or node")
 	}
-	switch meta.NeedsRestart {
+	switch c.meta.NeedsRestart {
 	case "never", "maybe", "always":
 	default:
-		failures = append(failures, path+": needs_restart must be never, maybe, or always")
+		c.fail("needs_restart must be never, maybe, or always")
 	}
-	if meta.Group != groupFromCommand(cmd) {
-		failures = append(failures, fmt.Sprintf("%s: group %q does not match cobra parent %q", path, meta.Group, groupFromCommand(cmd)))
+	if group := groupFromCommand(c.cmd); c.meta.Group != group {
+		c.fail(fmt.Sprintf("group %q does not match cobra parent %q", c.meta.Group, group))
 	}
-	if meta.Audience == "node" && !strings.HasPrefix(path, "vaire node") {
-		failures = append(failures, path+": node audience is only valid under vaire node")
+	if c.meta.Audience == "node" && !strings.HasPrefix(c.path, "vaire node") {
+		c.fail("node audience is only valid under vaire node")
 	}
-	if strings.HasPrefix(path, "vaire node") && path != "vaire node upgrade" && meta.Audience != "node" {
-		failures = append(failures, path+": command under vaire node must have node audience")
+	if strings.HasPrefix(c.path, "vaire node") && c.path != "vaire node upgrade" && c.meta.Audience != "node" {
+		c.fail("command under vaire node must have node audience")
 	}
-	for _, code := range meta.ErrorCodes {
+}
+
+// checkErrorCodes checks the error codes a command documents.
+func (c *commandMetaCheck) checkErrorCodes() {
+	for _, code := range c.meta.ErrorCodes {
 		if !output.IsKnownCode(code) {
-			failures = append(failures, path+": unknown error code "+code)
+			c.fail("unknown error code " + code)
 		}
 	}
-	return failures
 }
 
 func containsFlag(names []string, name string) bool {

@@ -28,7 +28,7 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := secretGateUnlock(cmd, c, hash, nil, nil, "vaire secrets export"); err != nil {
+	if err := secretGateUnlock(cmd, hash, nil, nil, "vaire secrets export"); err != nil {
 		return err
 	}
 	doc, err := contextDocument(c)
@@ -66,16 +66,16 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 
 // showContextHandoff shows a new handoff for c in a terminal, for commands
 // that change the recovery kit (vaire backup setup).
-func showContextHandoff(cmd *cobra.Command, c *contexts.Context) (string, error) {
+func showContextHandoff(cmd *cobra.Command, c *contexts.Context) error {
 	doc, err := contextDocument(c)
 	if err != nil {
-		return "", err
+		return err
 	}
 	h, err := newHandoff(cmd, doc, "")
 	if err != nil {
-		return "", err
+		return err
 	}
-	return h.saved, h.show(cmd, false, true)
+	return h.show(cmd, false, true)
 }
 
 // contextDocument rebuilds the secrets document from a context.

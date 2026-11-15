@@ -93,7 +93,7 @@ func newDaemons(t *testing.T) *daemons {
 	return f
 }
 
-func (f *daemons) spawn(context.Context) error {
+func (f *daemons) spawn(ctx context.Context) error {
 	f.spawns.Add(1)
 	lock, err := os.OpenFile(f.singleton, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
@@ -118,10 +118,18 @@ func (f *daemons) spawn(context.Context) error {
 		Persist:     f.persist,
 		StartGrace:  f.persist,
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	d := &daemon{srv: srv, ln: ln.(*net.UnixListener), cancel: cancel, done: make(chan string, 1)}
+	unixLn, ok := ln.(*net.UnixListener)
+	if !ok {
+		_ = ln.Close()
+		_ = lock.Close()
+		return errors.New("the daemon socket is not a unix listener")
+	}
+	// The fake daemon outlives the spawn call, as the setsid'd process does,
+	// so it inherits the caller's values but not its cancellation.
+	serveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	d := &daemon{srv: srv, ln: unixLn, cancel: cancel, done: make(chan string, 1)}
 	go func() {
-		reason := srv.Serve(ctx)
+		reason := srv.Serve(serveCtx)
 		_ = lock.Close() // releases the singleton lock, as process exit does
 		d.done <- reason
 		close(d.done)
@@ -189,15 +197,30 @@ func echoOnce(t *testing.T, d Dialer, addr, msg string) {
 	}
 }
 
-func waitDone(t *testing.T, d *daemon, within time.Duration) string {
+func waitDone(t *testing.T, d *daemon) string {
 	t.Helper()
 	select {
 	case reason := <-d.done:
 		return reason
-	case <-time.After(within):
-		t.Fatalf("the daemon did not exit within %s", within)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the daemon did not exit within 2s")
 		return ""
 	}
+}
+
+// cliDetails returns a CLIError and its details map, failing the test rather
+// than asserting unchecked.
+func cliDetails(t *testing.T, err error) (*output.CLIError, map[string]any) {
+	t.Helper()
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("err = %v, want a CLIError", err)
+	}
+	details, ok := cliErr.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("details = %#v, want map[string]any", cliErr.Details)
+	}
+	return cliErr, details
 }
 
 func TestSharedStartsDaemonAndDials(t *testing.T) {
@@ -261,7 +284,7 @@ func TestSharedIdleExit(t *testing.T) {
 	d := f.dialer("vaire test")
 	echoOnce(t, d, addr, "x")
 	d.Close()
-	if reason := waitDone(t, f.last(), 2*time.Second); reason != "idle" {
+	if reason := waitDone(t, f.last()); reason != "idle" {
 		t.Fatalf("exit reason = %q, want idle", reason)
 	}
 	if _, err := os.Stat(f.socket); !os.IsNotExist(err) {
@@ -282,7 +305,7 @@ func TestSharedLeaseKeepsDaemonAlive(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 	d.Close()
-	waitDone(t, f.last(), 2*time.Second)
+	waitDone(t, f.last())
 }
 
 func TestSharedOpenStreamKeepsDaemonAlive(t *testing.T) {
@@ -301,7 +324,7 @@ func TestSharedOpenStreamKeepsDaemonAlive(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 	_ = conn.Close()
-	waitDone(t, f.last(), 2*time.Second)
+	waitDone(t, f.last())
 }
 
 func TestSharedRecoversFromStaleSocket(t *testing.T) {
@@ -387,7 +410,7 @@ func TestSharedReplacesIdleStaleDaemon(t *testing.T) {
 	if err := d.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
-	if reason := waitDone(t, old, 2*time.Second); reason != "stopped" {
+	if reason := waitDone(t, old); reason != "stopped" {
 		t.Fatalf("old daemon exit = %q, want stopped", reason)
 	}
 	st, err := SharedHello(ctxT(t), f.socket)
@@ -410,8 +433,8 @@ func TestSharedBusyStaleDaemonIsNotKilled(t *testing.T) {
 	d := f.dialer("vaire plan")
 	defer d.Close()
 	err := d.Attach(ctxT(t))
-	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) || cliErr.Details.(map[string]any)["reason"] != "tunnel_config_changed" {
+	cliErr, details := cliDetails(t, err)
+	if details["reason"] != "tunnel_config_changed" {
 		t.Fatalf("err = %v, want tunnel_config_changed", err)
 	}
 	if !strings.Contains(cliErr.Hint, "vaire restore") {
@@ -442,12 +465,12 @@ func TestSharedStopDrainsThenExits(t *testing.T) {
 	late := f.dialer("vaire plan")
 	defer late.Close()
 	err = late.Attach(ctxT(t))
-	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) || cliErr.Details.(map[string]any)["reason"] != "tunnel_stopping" {
+	_, details := cliDetails(t, err)
+	if details["reason"] != "tunnel_stopping" {
 		t.Fatalf("err = %v, want tunnel_stopping", err)
 	}
 	d.Close()
-	if reason := waitDone(t, f.last(), 2*time.Second); reason != "stopped" {
+	if reason := waitDone(t, f.last()); reason != "stopped" {
 		t.Fatalf("exit = %q, want stopped", reason)
 	}
 }
@@ -465,7 +488,7 @@ func TestSharedForceStopDropsStreams(t *testing.T) {
 	if _, err := SharedStop(ctxT(t), f.socket, true); err != nil {
 		t.Fatal(err)
 	}
-	waitDone(t, f.last(), 2*time.Second)
+	waitDone(t, f.last())
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("a stream survived a forced stop")

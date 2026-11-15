@@ -124,25 +124,9 @@ func Snapshot(root string) ([]File, error) {
 	var out []File
 	seen := map[string]bool{}
 	for _, s := range Specs() {
-		paths := []string{s.Path}
-		if s.Glob {
-			matches, err := filepath.Glob(filepath.Join(root, s.Path))
-			if err != nil {
-				return nil, err
-			}
-			paths = paths[:0]
-			for _, m := range matches {
-				if info, err := os.Lstat(m); err != nil || !info.Mode().IsRegular() {
-					// A directory or link beside the keys isn't bundled.
-					continue
-				}
-				rel, err := filepath.Rel(rootDir(root), m)
-				if err != nil {
-					return nil, err
-				}
-				paths = append(paths, "/"+filepath.ToSlash(rel))
-			}
-			sort.Strings(paths)
+		paths, err := snapshotPaths(root, s.Path, s.Glob)
+		if err != nil {
+			return nil, err
 		}
 		for _, p := range paths {
 			if seen[p] {
@@ -165,6 +149,30 @@ func Snapshot(root string) ([]File, error) {
 	return out, nil
 }
 
+func snapshotPaths(root, pattern string, glob bool) ([]string, error) {
+	if !glob {
+		return []string{pattern}, nil
+	}
+	matches, err := filepath.Glob(filepath.Join(root, pattern))
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if info, err := os.Lstat(m); err != nil || !info.Mode().IsRegular() {
+			// A directory or link beside the keys isn't bundled.
+			continue
+		}
+		rel, err := filepath.Rel(rootDir(root), m)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, "/"+filepath.ToSlash(rel))
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 func rootDir(root string) string {
 	if root == "" {
 		return "/"
@@ -184,7 +192,7 @@ func readFile(root, p string) (File, error) {
 	if info.Size() > MaxFileSize {
 		return File{}, fmt.Errorf("%s is larger than %d bytes", p, MaxFileSize)
 	}
-	data, err := os.ReadFile(full) //nolint:gosec // G304: a fixed bundle path under root.
+	data, err := os.ReadFile(full)
 	if err != nil {
 		return File{}, err
 	}

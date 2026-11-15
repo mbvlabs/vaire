@@ -168,41 +168,17 @@ func ReadTar(raw []byte) (Bundle, error) {
 	byPath := map[string]File{}
 	var got []File
 	for {
-		hdr, err := tr.Next()
+		hdr, data, err := readTarEntry(tr)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return Bundle{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			return Bundle{}, fmt.Errorf("%w: %s is not a regular file", ErrCorrupt, hdr.Name)
-		}
-		if hdr.Size > MaxFileSize && hdr.Name != ManifestName || hdr.Size > maxBundleSize {
-			return Bundle{}, fmt.Errorf("%w: %s is too large", ErrCorrupt, hdr.Name)
-		}
-		data, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
-		if err != nil {
-			return Bundle{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
+			return Bundle{}, err
 		}
 		if first {
-			if hdr.Name != ManifestName {
-				return Bundle{}, fmt.Errorf("%w: the first entry is %s, not %s", ErrCorrupt, hdr.Name, ManifestName)
-			}
-			if err := json.Unmarshal(data, &b.Manifest); err != nil {
-				return Bundle{}, fmt.Errorf("%w: manifest.json: %w", ErrCorrupt, err)
-			}
-			if b.Manifest.Schema != Schema {
-				return Bundle{}, fmt.Errorf("%w: schema %q, want %q", ErrCorrupt, b.Manifest.Schema, Schema)
-			}
-			for _, f := range b.Manifest.Files {
-				if !Allowed(f.Path) {
-					return Bundle{}, fmt.Errorf("%w: the manifest names %s, which a bundle never holds", ErrCorrupt, f.Path)
-				}
-				if _, dup := byPath[f.Path]; dup {
-					return Bundle{}, fmt.Errorf("%w: the manifest names %s twice", ErrCorrupt, f.Path)
-				}
-				byPath[f.Path] = f
+			b.Manifest, byPath, err = readTarManifest(hdr.Name, data)
+			if err != nil {
+				return Bundle{}, err
 			}
 			first = false
 			continue
@@ -223,16 +199,56 @@ func ReadTar(raw []byte) (Bundle, error) {
 	if first {
 		return Bundle{}, fmt.Errorf("%w: the tar is empty", ErrCorrupt)
 	}
-	if len(byPath) > 0 {
-		for p := range byPath {
-			return Bundle{}, fmt.Errorf("%w: %s is in the manifest but not in the tar", ErrCorrupt, p)
-		}
+	for p := range byPath {
+		return Bundle{}, fmt.Errorf("%w: %s is in the manifest but not in the tar", ErrCorrupt, p)
 	}
 	b.Files = got
 	if ContentHash(got) != b.Manifest.Content {
 		return Bundle{}, fmt.Errorf("%w: the content hash does not match", ErrCorrupt)
 	}
 	return b, nil
+}
+
+func readTarEntry(tr *tar.Reader) (*tar.Header, []byte, error) {
+	hdr, err := tr.Next()
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
+	}
+	if hdr.Typeflag != tar.TypeReg {
+		return nil, nil, fmt.Errorf("%w: %s is not a regular file", ErrCorrupt, hdr.Name)
+	}
+	if hdr.Size > MaxFileSize && hdr.Name != ManifestName || hdr.Size > maxBundleSize {
+		return nil, nil, fmt.Errorf("%w: %s is too large", ErrCorrupt, hdr.Name)
+	}
+	data, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
+	}
+	return hdr, data, nil
+}
+
+func readTarManifest(name string, data []byte) (Manifest, map[string]File, error) {
+	var manifest Manifest
+	if name != ManifestName {
+		return manifest, nil, fmt.Errorf("%w: the first entry is %s, not %s", ErrCorrupt, name, ManifestName)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return manifest, nil, fmt.Errorf("%w: manifest.json: %w", ErrCorrupt, err)
+	}
+	if manifest.Schema != Schema {
+		return manifest, nil, fmt.Errorf("%w: schema %q, want %q", ErrCorrupt, manifest.Schema, Schema)
+	}
+	byPath := make(map[string]File, len(manifest.Files))
+	for _, f := range manifest.Files {
+		if !Allowed(f.Path) {
+			return manifest, nil, fmt.Errorf("%w: the manifest names %s, which a bundle never holds", ErrCorrupt, f.Path)
+		}
+		if _, dup := byPath[f.Path]; dup {
+			return manifest, nil, fmt.Errorf("%w: the manifest names %s twice", ErrCorrupt, f.Path)
+		}
+		byPath[f.Path] = f
+	}
+	return manifest, byPath, nil
 }
 
 // SHA256 is the hex sha256 of b, the sidecar's ciphertext hash.
