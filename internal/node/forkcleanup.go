@@ -38,55 +38,78 @@ func removeFailedFork(ctx context.Context, env *Env, a *materialisationArtifacts
 		if err := a.validate(); err != nil {
 			return err
 		}
-		if o.ConfigIdentity.Inode != 0 {
-			_, err := a.configParent.Lstat(filepath.Join(o.Target, "postgresql.conf"))
-			if err == nil {
-				// Registration validation uses the target path, name and port;
-				// the former source port is not part of that registration.
-				if err := restoreCleanupRegistration(o.Target, o.Source, a.dataRoot, 0, o.TemporaryPort); err != nil {
-					return err
-				}
-				if err := a.validate(); err != nil {
-					return err
-				}
-				if err := restoreCleanupDrop(ctx, env, o.Target); err != nil {
-					return err
-				}
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+		if err := dropFailedForkRegistration(ctx, env, a); err != nil {
+			return err
 		}
-		for _, item := range []struct {
-			root *os.Root
-			file *os.File
-			id   materialisationFileID
-			mode os.FileMode
-		}{{a.dataParent, a.data, o.DataIdentity, 0o700}, {a.configParent, a.conf, o.ConfigIdentity, 0o755}} {
-			if err := a.validateRecord(); err != nil {
-				return err
-			}
-			if err := errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.configAncestors),
-				validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.configParentInfo)); err != nil {
-				return err
-			}
-			if _, err := item.root.Lstat(o.Target); errors.Is(err, os.ErrNotExist) {
-				continue
-			} else if err != nil {
-				return err
-			}
-			if item.id.Inode == 0 {
-				return materialisationIncomplete(o.Target, &o)
-			}
-			if err := validateMaterialisationDir(item.root, o.Target, item.id, item.file, item.mode); err != nil {
-				return err
-			}
-			if err := item.root.RemoveAll(o.Target); err != nil {
-				return err
-			}
+		if err := removeFailedForkArtifacts(a); err != nil {
+			return err
 		}
 		if err := a.validateCleanupCompleted(); err != nil {
 			return err
 		}
 		return errors.Join(materialisationSyncArtifactParent(a.dataParent), materialisationSyncArtifactParent(a.configParent))
 	})
+}
+
+func dropFailedForkRegistration(ctx context.Context, env *Env, a *materialisationArtifacts) error {
+	o := a.owner
+	if o.ConfigIdentity.Inode == 0 {
+		return nil
+	}
+	_, err := a.configParent.Lstat(filepath.Join(o.Target, "postgresql.conf"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Registration validation uses the target path, name and port; the former
+	// source port is not part of that registration.
+	if err := restoreCleanupRegistration(o.Target, o.Source, a.dataRoot, 0, o.TemporaryPort); err != nil {
+		return err
+	}
+	if err := a.validate(); err != nil {
+		return err
+	}
+	return restoreCleanupDrop(ctx, env, o.Target)
+}
+
+type forkCleanupArtifact struct {
+	root *os.Root
+	file *os.File
+	id   materialisationFileID
+	mode os.FileMode
+}
+
+func removeFailedForkArtifacts(a *materialisationArtifacts) error {
+	o := a.owner
+	for _, item := range []forkCleanupArtifact{
+		{a.dataParent, a.data, o.DataIdentity, 0o700},
+		{a.configParent, a.conf, o.ConfigIdentity, 0o755},
+	} {
+		if err := a.validateRecord(); err != nil {
+			return err
+		}
+		if err := errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.configAncestors),
+			validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.configParentInfo)); err != nil {
+			return err
+		}
+		_, err := item.root.Lstat(o.Target)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if item.id.Inode == 0 {
+			return materialisationIncomplete(o.Target, &o)
+		}
+		if err := validateMaterialisationDir(item.root, o.Target, item.id, item.file, item.mode); err != nil {
+			return err
+		}
+		if err := item.root.RemoveAll(o.Target); err != nil {
+			return err
+		}
+	}
+	return nil
 }

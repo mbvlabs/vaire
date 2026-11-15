@@ -24,9 +24,7 @@ func TestCPUOnlyResizePreservesFields(t *testing.T) {
 	cfg.Clusters[1] = old
 	env, store := resizeFixture(t, cfg, "", false)
 	before, _, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	old, _ = before.ClusterByName(old.Name)
 	env.Req = request("db.resize", map[string]any{"name": old.Name, "cpu_mode": "spare", "cpu_quota": "none"})
 	fixedResizeHost(t, hostinfo.Info{VCPU: 4, RAMMiB: 8192}, hostinfo.Memory{}, true)
@@ -38,30 +36,22 @@ func TestCPUOnlyResizePreservesFields(t *testing.T) {
 	checks, calls := 0, 0
 	checkSpareCPU = func(_ context.Context, name, mode string) error {
 		checks++
-		if name != old.Name || mode != "spare" {
-			t.Fatal(name, mode)
-		}
+		reject(t, name != old.Name || mode != "spare", name, mode)
 		return nil
 	}
 	applyResizeStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		calls++
-		if opts.DB != old.Name || !opts.LeaveRestartsPending || !slices.Equal(opts.Only, []string{"postgres-cluster-v1@" + old.Name}) {
-			t.Fatalf("%+v", opts)
-		}
+		rejectf(t, opts.DB != old.Name || !opts.LeaveRestartsPending || !slices.Equal(opts.Only, []string{"postgres-cluster-v1@" + old.Name}), "%+v", opts)
 		return engine.ApplyData{}, nil, nil
 	}
 	if _, err := handleDBResize(context.Background(), env); err != nil {
 		t.Fatal(err)
 	}
 	saved, _, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	got, _ := saved.ClusterByName(old.Name)
 	old.CPUMode, old.CPUQuota = "spare", ""
-	if !reflect.DeepEqual(got, old) || checks != 1 || calls != 1 {
-		t.Fatalf("got %+v want %+v checks %d calls %d", got, old, checks, calls)
-	}
+	rejectf(t, !reflect.DeepEqual(got, old) || checks != 1 || calls != 1, "got %+v want %+v checks %d calls %d", got, old, checks, calls)
 }
 
 func TestCPUOnlyResizeDryRunAndRefusal(t *testing.T) {
@@ -83,23 +73,15 @@ func TestCPUOnlyResizeDryRunAndRefusal(t *testing.T) {
 		plans := 0
 		planCPUResize = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.PlanData, error) {
 			plans++
-			if !opts.LeaveRestartsPending || !slices.Equal(opts.Only, []string{"postgres-cluster-v1@app_follower"}) {
-				t.Fatal(opts.Only)
-			}
+			reject(t, !opts.LeaveRestartsPending || !slices.Equal(opts.Only, []string{"postgres-cluster-v1@app_follower"}), opts.Only)
 			return engine.PlanData{}, nil
 		}
 		_, before, err := store.Load()
-		if err != nil {
-			t.Fatal(err)
-		}
+		reject(t, err != nil, err)
 		_, err = handleDBResize(context.Background(), env)
-		if (err != nil) != refused || plans != map[bool]int{true: 0, false: 1}[refused] {
-			t.Fatal(err, plans)
-		}
+		reject(t, (err != nil) != refused || plans != map[bool]int{true: 0, false: 1}[refused], err, plans)
 		_, after, err := store.Load()
-		if err != nil || !reflect.DeepEqual(before, after) {
-			t.Fatal("dry run saved", err)
-		}
+		reject(t, err != nil || !reflect.DeepEqual(before, after), "dry run saved", err)
 	}
 }
 
@@ -113,20 +95,14 @@ func TestCPUProposalRefusesBeforeSave(t *testing.T) {
 			configSetStore = func() state.FileStore { return store }
 			checkSpareCPU = func(context.Context, string, string) error { return errors.New("screen refused") }
 			revision, err := store.Revision()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			_, before, err := store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			reject(t, err != nil, err)
 			params := map[string]any{"base_revision": revision}
 			if full {
 				cfg.Clusters[1].CPUMode = "spare"
 				raw, err := cfg.Encode()
-				if err != nil {
-					t.Fatal(err)
-				}
+				reject(t, err != nil, err)
 				params["toml"] = string(raw)
 			} else {
 				params["set"] = map[string]string{"clusters.app_follower.cpu_mode": "spare"}
@@ -136,9 +112,7 @@ func TestCPUProposalRefusesBeforeSave(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, after, err := store.Load()
-			if err != nil || !reflect.DeepEqual(before, after) {
-				t.Fatal("configuration changed", err)
-			}
+			reject(t, err != nil || !reflect.DeepEqual(before, after), "configuration changed", err)
 		})
 	}
 }
@@ -153,9 +127,7 @@ func TestCPUProposalScreensResolvedWeightChange(t *testing.T) {
 	calls := 0
 	checkSpareCPU = func(_ context.Context, name, mode string) error {
 		calls++
-		if name != "app_follower" || mode != "spare" {
-			t.Fatal(name, mode)
-		}
+		reject(t, name != "app_follower" || mode != "spare", name, mode)
 		return nil
 	}
 	if err := checkCPUProposal(context.Background(), cfg, next); err != nil || calls != 1 {
@@ -181,27 +153,21 @@ func TestCPUFailureReportsSavedState(t *testing.T) {
 	original := output.NewError(output.CodeStepFailed, "not enforced", output.ExitStep, "").
 		WithDetails(map[string]any{"reason": "cpu_policy_not_enforced", "desired_saved": nil})
 	var result *output.CLIError
-	if !errors.As(cpuPolicySaved(original), &result) || result.Details.(map[string]any)["desired_saved"] != true ||
-		original.Details.(map[string]any)["desired_saved"] != nil {
+	if !errors.As(cpuPolicySaved(original), &result) || mustAs[map[string]any](t, result.Details)["desired_saved"] != true ||
+		mustAs[map[string]any](t, original.Details)["desired_saved"] != nil {
 		t.Fatal(result)
 	}
 }
 
 func TestFollowCPUOptionsAndForkRetention(t *testing.T) {
 	src := config.ClusterSpec{Name: "source", CPUMode: "spare", CPUQuota: "120%", CPUWeight: 71}
-	if forkSpec(src, "fork").CPUMode != "spare" {
-		t.Fatal("fork lost CPU mode")
-	}
+	reject(t, forkSpec(src, "fork").CPUMode != "spare", "fork lost CPU mode")
 	spec := followerSpec(src, "follower", "")
-	if spec.CPUMode != "" || spec.CPUQuota != "120%" || spec.CPUWeight != 71 {
-		t.Fatal(spec)
-	}
+	reject(t, spec.CPUMode != "" || spec.CPUQuota != "120%" || spec.CPUWeight != 71, spec)
 	mode, quota := "spare", "none"
 	p := dbFollowParams{Source: "source", CPUMode: &mode, CPUQuota: &quota}
 	raw, err := json.Marshal(p)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	var round dbFollowParams
 	if err := json.Unmarshal(raw, &round); err != nil {
 		t.Fatal(err)
@@ -225,19 +191,13 @@ func TestFollowSpareRefusedBeforeSave(t *testing.T) {
 		followClusterExists = func(context.Context, string) bool { return false }
 		checkSpareCPU = func(context.Context, string, string) error { return errors.New("unavailable") }
 		_, before, err := node.store.Load()
-		if err != nil {
-			t.Fatal(err)
-		}
+		reject(t, err != nil, err)
 		req := request("db.follow", map[string]any{"source": "app", "name": "app_follower", "cpu_mode": "spare"})
 		req.DryRun = dry
 		_, err = handleDBFollow(context.Background(), &Env{Cluster: cfg, Req: req})
-		if err == nil || err.Error() != "unavailable" {
-			t.Fatal(err)
-		}
+		reject(t, err == nil || err.Error() != "unavailable", err)
 		_, after, err := node.store.Load()
-		if err != nil || !reflect.DeepEqual(before, after) {
-			t.Fatal("follow saved despite refusal", err)
-		}
+		reject(t, err != nil || !reflect.DeepEqual(before, after), "follow saved despite refusal", err)
 	}
 }
 
@@ -249,11 +209,7 @@ func TestUnfollowPreservesCPUPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved, _, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	spec, ok := saved.ClusterByName("app_follower")
-	if !ok || spec.Follows != "" || spec.CPUMode != "spare" || spec.CPUQuota != "150%" {
-		t.Fatal(spec)
-	}
+	reject(t, !ok || spec.Follows != "" || spec.CPUMode != "spare" || spec.CPUQuota != "150%", spec)
 }

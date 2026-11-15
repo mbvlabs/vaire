@@ -20,17 +20,13 @@ func TestRecoveredAccessRequiresExactOwnedRestore(t *testing.T) {
 	fail := errors.New("access transaction failed")
 	recoverProvisionOwned = func(_ context.Context, _ config.Cluster, _ engine.Runtime, name, recovering string, _ engine.Reporter) error {
 		calls++
-		if name != "app" || recovering != "app" {
-			t.Fatalf("authorization crossed target: %q %q", name, recovering)
-		}
+		rejectf(t, name != "app" || recovering != "app", "authorization crossed target: %q %q", name, recovering)
 		return fail
 	}
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app"}, {Name: "standby", Follows: "app"}}}
 	r := backup.Restore{ID: "restore", Database: "app", Phase: backup.PhaseReady, Recover: true}
 	err := provisionRecoveredAccess(context.Background(), cfg, "app", r, engine.Runtime{}, nil)
-	if !errors.Is(err, fail) || calls != 1 {
-		t.Fatalf("owned access failure: %v, calls %d", err, calls)
-	}
+	rejectf(t, !errors.Is(err, fail) || calls != 1, "owned access failure: %v, calls %d", err, calls)
 	for _, invalid := range []backup.Restore{
 		{ID: "restore", Database: "other", Phase: backup.PhaseReady, Recover: true},
 		{Database: "app", Phase: backup.PhaseReady, Recover: true},
@@ -96,9 +92,7 @@ func TestRecoverPromotionAccessFailureKeepsPublicationFenced(t *testing.T) {
 	}
 	recoverProvisionOwned = func(_ context.Context, _ config.Cluster, _ engine.Runtime, name, recovering string, _ engine.Reporter) error {
 		calls = append(calls, "access")
-		if name != "app" || recovering != "app" {
-			t.Fatalf("wrong target: %s %s", name, recovering)
-		}
+		rejectf(t, name != "app" || recovering != "app", "wrong target: %s %s", name, recovering)
 		return errors.New("grant failed")
 	}
 	promoteApplyPoolers = func(context.Context, config.Cluster, engine.Runtime, string, engine.Reporter) error {
@@ -112,13 +106,9 @@ func TestRecoverPromotionAccessFailureKeepsPublicationFenced(t *testing.T) {
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app", Port: 5433, Stanza: "app-abcdef"}}}
 	cfg.Server.DataRoot = t.TempDir()
 	result, err := promote(context.Background(), cfg, "app", engine.Runtime{}, nil, func() {})
-	if err == nil || result != nil || !slices.Equal(calls, []string{"fence", "pause", "swap", "start", "writable", "settle", "access", "resume"}) {
-		t.Fatalf("unsafe promotion sequence %v, result %v, error %v", calls, result, err)
-	}
+	rejectf(t, err == nil || result != nil || !slices.Equal(calls, []string{"fence", "pause", "swap", "start", "writable", "settle", "access", "resume"}), "unsafe promotion sequence %v, result %v, error %v", calls, result, err)
 	recs, err := backup.LoadRecords()
-	if err != nil || !recs.IsAwaiting("app") || !recs.Restores["app"].Recover {
-		t.Fatalf("failure lost durable recovery fence: %+v, %v", recs, err)
-	}
+	rejectf(t, err != nil || !recs.IsAwaiting("app") || !recs.Restores["app"].Recover, "failure lost durable recovery fence: %+v, %v", recs, err)
 }
 
 func TestRecoverInspectionReadyDoesNotClaimApplicationReadiness(t *testing.T) {
@@ -127,15 +117,11 @@ func TestRecoverInspectionReadyDoesNotClaimApplicationReadiness(t *testing.T) {
 	calls := 0
 	recoverInspectionPoolers = func(_ context.Context, _ config.Cluster, _ engine.Runtime, recovering string, _ engine.Reporter) error {
 		calls++
-		if recovering != "app" {
-			t.Fatalf("inspection did not retain exact recovery target: %q", recovering)
-		}
+		rejectf(t, recovering != "app", "inspection did not retain exact recovery target: %q", recovering)
 		return nil
 	}
 	got := recoverInspectionReady(context.Background(), config.Cluster{}, engine.Runtime{}, "app", nil, map[string]any{})
-	if calls != 1 || got["phase"] != backup.PhaseReady || got["application_ready"] != false || got["access_coverage"] != "unknown" {
-		t.Fatalf("inspection state: %+v", got)
-	}
+	rejectf(t, calls != 1 || got["phase"] != backup.PhaseReady || got["application_ready"] != false || got["access_coverage"] != "unknown", "inspection state: %+v", got)
 }
 
 func TestAwaitingPromoteRequiresReadyRecoverRecord(t *testing.T) {
@@ -145,18 +131,12 @@ func TestAwaitingPromoteRequiresReadyRecoverRecord(t *testing.T) {
 			"app": {ID: "id", Database: "app", Phase: backup.PhaseReady, Recover: true},
 		},
 	}
-	if !awaitingRecoverPromotable("app", recs) || awaitingRecoverPromotable("other", recs) {
-		t.Fatal("ready recover ownership not scoped to its target")
-	}
+	reject(t, !awaitingRecoverPromotable("app", recs) || awaitingRecoverPromotable("other", recs), "ready recover ownership not scoped to its target")
 	r := recs.Restores["app"]
 	r.Recover = false
 	recs.Restores["app"] = r
-	if awaitingRecoverPromotable("app", recs) {
-		t.Fatal("ordinary restore authorized recovery bypass")
-	}
+	reject(t, awaitingRecoverPromotable("app", recs), "ordinary restore authorized recovery bypass")
 	r.Recover, r.Phase = true, backup.PhaseFailed
 	recs.Restores["app"] = r
-	if awaitingRecoverPromotable("app", recs) {
-		t.Fatal("failed recovery authorized promotion")
-	}
+	reject(t, awaitingRecoverPromotable("app", recs), "failed recovery authorized promotion")
 }

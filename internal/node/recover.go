@@ -87,69 +87,7 @@ func handleDBRecover(ctx context.Context, env *Env) (Result, error) {
 	}
 	var target, timeline string
 	err = withRestorePreparation(ctx, env, p.Database, "db.recover", func() error {
-		cfg = env.Cluster
-		spec, err = clusterOf(cfg, p.Database)
-		if err != nil {
-			return err
-		}
-		recs, err = backup.LoadRecords()
-		if err != nil {
-			return err
-		}
-		if spec.IsFollower() || !recs.IsAwaiting(p.Database) {
-			return incompleteMaterialisation(backup.RestoringName(p.Database))
-		}
-		if !cfg.BackupConfigured() {
-			return output.NewError(output.CodePrecondition, "there is no bucket, so there is no stanza to recover "+p.Database+" from", output.ExitPrecondition,
-				"The data is lost with the old server. Create the database again: vaire db drop "+p.Database+" --confirm "+p.Database+", then vaire db create "+p.Database+".").
-				WithDetails(map[string]any{"reason": "no_offsite_backup", "database": p.Database})
-		}
-		if p.Time != "" && env.Req.Confirm == "" && !env.Req.DryRun {
-			return confirmRequired("a recovery to a time leaves out everything "+p.Database+" wrote after it", p.Database+"/recover")
-		}
-		if err := recoverCheckFence(ctx, cfg, env.Report); err != nil {
-			return err
-		}
-		if err := recoverCheckBackup(ctx, spec, recs); err != nil {
-			return err
-		}
-		if err := recoverCheckWritten(ctx, cfg, spec); err != nil {
-			return err
-		}
-		rp := p.restore()
-		target, err = restoreCheckTarget(ctx, cfg, rp, env.Req.Secrets)
-		if err != nil {
-			return err
-		}
-		timeline = recs.TargetTimeline(p.Database, spec.Stanza)
-		if env.Req.DryRun {
-			return nil
-		}
-		if err := clearFailedRestore(cfg, p.Database); err != nil {
-			return err
-		}
-		if err := restoreInProgress(p.Database, "a recovery"); err != nil {
-			return err
-		}
-		if err := restoreCheckNamespace(ctx, cfg, p.Database); err != nil {
-			return err
-		}
-		instance, operation, err := restoreInvocationProvenance(env)
-		if err != nil {
-			return err
-		}
-		return restorePublish(func(s *backup.Records) error {
-			if _, exists := s.Restores[p.Database]; exists || !s.IsAwaiting(p.Database) {
-				return incompleteMaterialisation(backup.RestoringName(p.Database))
-			}
-			s.Restores[p.Database] = backup.Restore{
-				ID: env.Req.RequestID, Database: p.Database, Kind: rp.Kind, Target: target,
-				InstanceID: instance, OperationID: operation,
-				Phase: backup.PhaseRestoring, StartedAt: stamp(), Promote: !p.NoPromote, Timeline: timeline,
-				Recover: true, NoFull: p.NoFull, MaterialisationPending: true,
-			}
-			return nil
-		})
+		return prepareRecovery(ctx, env, p, &target, &timeline)
 	})
 	if err != nil {
 		return Result{}, err
@@ -161,6 +99,80 @@ func handleDBRecover(ctx context.Context, env *Env) (Result, error) {
 	// pgbackrest-v1) run inside the job: a rebuilt master has no service
 	// password files until they write them from these.
 	return restoreLaunch(ctx, env, "recover", p, stepSecrets(env.Req.Secrets))
+}
+
+func prepareRecovery(ctx context.Context, env *Env, p recoverParams, target, timeline *string) error {
+	cfg := env.Cluster
+	spec, err := clusterOf(cfg, p.Database)
+	if err != nil {
+		return err
+	}
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+	if spec.IsFollower() || !recs.IsAwaiting(p.Database) {
+		return incompleteMaterialisation(backup.RestoringName(p.Database))
+	}
+	if !cfg.BackupConfigured() {
+		return output.NewError(output.CodePrecondition, "there is no bucket, so there is no stanza to recover "+p.Database+" from", output.ExitPrecondition,
+			"The data is lost with the old server. Create the database again: vaire db drop "+p.Database+" --confirm "+p.Database+", then vaire db create "+p.Database+".").
+			WithDetails(map[string]any{"reason": "no_offsite_backup", "database": p.Database})
+	}
+	if p.Time != "" && env.Req.Confirm == "" && !env.Req.DryRun {
+		return confirmRequired("a recovery to a time leaves out everything "+p.Database+" wrote after it", p.Database+"/recover")
+	}
+	if err := recoverChecks(ctx, cfg, spec, recs, env.Report); err != nil {
+		return err
+	}
+	rp := p.restore()
+	*target, err = restoreCheckTarget(ctx, cfg, rp, env.Req.Secrets)
+	if err != nil {
+		return err
+	}
+	*timeline = recs.TargetTimeline(p.Database, spec.Stanza)
+	if env.Req.DryRun {
+		return nil
+	}
+	if err := restorePreconditions(ctx, cfg, p.Database, "a recovery"); err != nil {
+		return err
+	}
+	instance, operation, err := restoreInvocationProvenance(env)
+	if err != nil {
+		return err
+	}
+	return restorePublish(func(s *backup.Records) error {
+		if _, exists := s.Restores[p.Database]; exists || !s.IsAwaiting(p.Database) {
+			return incompleteMaterialisation(backup.RestoringName(p.Database))
+		}
+		s.Restores[p.Database] = backup.Restore{
+			ID: env.Req.RequestID, Database: p.Database, Kind: rp.Kind, Target: *target,
+			InstanceID: instance, OperationID: operation,
+			Phase: backup.PhaseRestoring, StartedAt: stamp(), Promote: !p.NoPromote, Timeline: *timeline,
+			Recover: true, NoFull: p.NoFull, MaterialisationPending: true,
+		}
+		return nil
+	})
+}
+
+func recoverChecks(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, recs backup.Records, report engine.Reporter) error {
+	if err := recoverCheckFence(ctx, cfg, report); err != nil {
+		return err
+	}
+	if err := recoverCheckBackup(ctx, spec, recs); err != nil {
+		return err
+	}
+	return recoverCheckWritten(ctx, cfg, spec)
+}
+
+func restorePreconditions(ctx context.Context, cfg config.Cluster, db, what string) error {
+	if err := clearFailedRestore(ctx, cfg, db); err != nil {
+		return err
+	}
+	if err := restoreInProgress(db, what); err != nil {
+		return err
+	}
+	return restoreCheckNamespace(ctx, cfg, db)
 }
 
 // stanzaHasBackup refuses a stanza without a backup set: a database created
@@ -426,40 +438,55 @@ func stanzaConfOptions(cfg config.Cluster, db string, report engine.Reporter) en
 	return engine.Options{Only: steps.PgBackRestStepIDs(), Recovering: db, Restarter: steps.Restarter(cfg), Report: report}
 }
 
+func validateRecoverScaffold(env *jobEnv, cfg config.Cluster, db string, port int, stanza string) error {
+	var p recoverParams
+	if env.Job != "recover" || json.Unmarshal(env.Params, &p) != nil || p.Database != db || p.NoPromote ||
+		(env.lease.targets[db] != engine.LockShared && env.lease.targets[db] != engine.LockExclusive) {
+		return errors.New("recover scaffold lease does not match")
+	}
+	instance, err := currentFollowInstance()
+	if err != nil || instance != env.installID {
+		return errors.New("recover scaffold install changed")
+	}
+	spec, ok := cfg.ClusterByName(db)
+	current, currentOK := env.Cluster.ClusterByName(db)
+	if !ok || !currentOK || cfg.Server.DataRoot != env.Cluster.Server.DataRoot ||
+		spec.Stanza != stanza || current.Stanza != stanza || spec.Port != current.Port ||
+		port < config.TemporaryPortMin || port > config.TemporaryPortMax {
+		return errors.New("recover scaffold target changed")
+	}
+	return nil
+}
+
+func recoverScaffoldLeftover(records backup.Records, env *jobEnv, db, aside string, port int, stanza string) (backup.Leftover, error) {
+	var l backup.Leftover
+	matches := 0
+	for _, candidate := range records.Leftovers {
+		if candidate.Name == aside {
+			matches++
+			l = candidate
+		}
+	}
+	if matches != 1 || strings.HasSuffix(aside, "b") || l.Database != db || l.RestoreID != env.ID || l.Port != port || l.Stanza != stanza {
+		return l, errors.New("recover scaffold leftover mismatch")
+	}
+	return l, nil
+}
+
 // dropScaffold drops the empty cluster promote set aside and its leftover
 // record: it never held data.
 func dropScaffold(ctx context.Context, env *jobEnv, cfg config.Cluster, db, aside string, port int, stanza string) error {
 	return withLockedJobTarget(env, backup.RestoringName(db), func() error {
-		var p recoverParams
-		if env.Job != "recover" || json.Unmarshal(env.Params, &p) != nil || p.Database != db || p.NoPromote ||
-			(env.lease.targets[db] != engine.LockShared && env.lease.targets[db] != engine.LockExclusive) {
-			return errors.New("recover scaffold lease does not match")
-		}
-		instance, err := currentFollowInstance()
-		if err != nil || instance != env.installID {
-			return errors.New("recover scaffold install changed")
-		}
-		spec, ok := cfg.ClusterByName(db)
-		current, currentOK := env.Cluster.ClusterByName(db)
-		if !ok || !currentOK || cfg.Server.DataRoot != env.Cluster.Server.DataRoot ||
-			spec.Stanza != stanza || current.Stanza != stanza || spec.Port != current.Port ||
-			port < config.TemporaryPortMin || port > config.TemporaryPortMax {
-			return errors.New("recover scaffold target changed")
+		if err := validateRecoverScaffold(env, cfg, db, port, stanza); err != nil {
+			return err
 		}
 		records, err := backup.LoadRecords()
 		if err != nil {
 			return err
 		}
-		var l backup.Leftover
-		matches := 0
-		for _, candidate := range records.Leftovers {
-			if candidate.Name == aside {
-				matches++
-				l = candidate
-			}
-		}
-		if matches != 1 || strings.HasSuffix(aside, "b") || l.Database != db || l.RestoreID != env.ID || l.Port != port || l.Stanza != stanza {
-			return errors.New("recover scaffold leftover mismatch")
+		l, err := recoverScaffoldLeftover(records, env, db, aside, port, stanza)
+		if err != nil {
+			return err
 		}
 		a, err := openLegacyLeftover(cfg, l)
 		if err != nil {

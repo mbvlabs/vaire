@@ -295,19 +295,7 @@ func RevertSSH(ctx context.Context, lockdownOnly bool, report engine.Reporter) (
 	}
 
 	if lockdownOnly {
-		res.Mode = "lockdown-only"
-		_ = disarmTimer(ctx, sh, revertStepID, unlockUnit, report)
-		if err := runScript(ctx, sh, revertStepID, "sshd-dropin", steps.SSHDropInEnv(steps.BreakGlassPath, "", false), report); err != nil {
-			return res, err
-		}
-		if st.LockedDownAt != "" && !st.LockdownPending {
-			if err := ufwChange(ctx, sh, revertStepID, []string{steps.RuleWGSSH}, []string{steps.RulePublicSSH}, report); err != nil {
-				return res, err
-			}
-		} else {
-			res.Skipped = "the node was never locked down; public 22/tcp stays open"
-		}
-		return res, nil
+		return revertLockdownOnly(ctx, sh, st, res, report)
 	}
 
 	if !st.LockdownPending {
@@ -325,6 +313,22 @@ func RevertSSH(ctx context.Context, lockdownOnly bool, report engine.Reporter) (
 		revertErr = err
 	}
 	return res, revertErr
+}
+
+func revertLockdownOnly(ctx context.Context, sh engine.Shell, st engine.State, res RevertResult, report engine.Reporter) (RevertResult, error) {
+	res.Mode = "lockdown-only"
+	_ = disarmTimer(ctx, sh, revertStepID, unlockUnit, report)
+	if err := runScript(ctx, sh, revertStepID, "sshd-dropin", steps.SSHDropInEnv(steps.BreakGlassPath, "", false), report); err != nil {
+		return res, err
+	}
+	if st.LockedDownAt == "" || st.LockdownPending {
+		res.Skipped = "the node was never locked down; public 22/tcp stays open"
+		return res, nil
+	}
+	if err := ufwChange(ctx, sh, revertStepID, []string{steps.RuleWGSSH}, []string{steps.RulePublicSSH}, report); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 func restoreSnapshot(ctx context.Context, sh engine.Shell, res *RevertResult, report engine.Reporter) error {

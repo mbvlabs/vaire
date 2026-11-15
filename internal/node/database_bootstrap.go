@@ -19,63 +19,17 @@ import (
 var bootstrapLoadNode = config.LoadNode
 
 func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result, error) {
-	cfg, err := config.ParseCluster([]byte(p.ClusterTOML))
+	cfg, err := bootstrapDatabaseConfig(p)
 	if err != nil {
-		return Result{}, output.NewError(output.CodeConfig, "cluster_toml does not parse: "+err.Error(), output.ExitConfig, "")
-	}
-	if err := cfg.Validate(); err != nil {
-		return Result{}, config.ValidationError(err)
-	}
-	nodeCfg, err := bootstrapLoadNode(config.NodePath)
-	if err != nil {
-		return Result{}, output.NewError(
-			output.CodePrecondition,
-			"this server is not an vaire node yet",
-			output.ExitPrecondition,
-			"Run the host phase first with vaire server init.",
-		).WithDetails(map[string]any{"reason": "not_a_node"})
-	}
-	if nodeCfg.Server != cfg.Name() {
-		return Result{}, output.NewError(
-			output.CodePrecondition,
-			"this node belongs to server "+nodeCfg.Server,
-			output.ExitPrecondition,
-			"Use that server's own secrets document.",
-		).WithDetails(map[string]any{"reason": "node_belongs_to_other_server", "server": nodeCfg.Server})
-	}
-	if nodeCfg.NodeName != p.NodeName {
-		return Result{}, output.NewError(output.CodePrecondition, "bootstrap node identity does not match", output.ExitPrecondition, "").
-			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
-	}
-	if err := bootstrapDir(false); err != nil {
 		return Result{}, err
 	}
-	owner, err := bootstrapReadOwnership()
-	owned := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return Result{}, output.NewError(output.CodePrecondition, "bootstrap ownership is unavailable", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
-			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+	nodeCfg, err := bootstrapDatabaseNode(cfg, p)
+	if err != nil {
+		return Result{}, err
 	}
-	if owned {
-		if err := bootstrapValidateOwnership(owner, cfg, p.NodeName, env.Req.OperationID); err != nil {
-			return Result{}, output.NewError(output.CodePrecondition, "bootstrap ownership does not match this setup", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
-				WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
-		}
-	} else {
-		visible := cfg
-		if engine.ClusterView != nil {
-			visible = engine.ClusterView(cfg, "")
-		}
-		for _, spec := range visible.Clusters {
-			if !spec.IsFollower() {
-				return Result{}, output.NewError(output.CodePrecondition, "bootstrap has no authority over existing database "+spec.Name, output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
-					WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable", "database": spec.Name})
-			}
-		}
-	}
-	if err := bootstrapExistingConfigMatches(cfg, p.NodeName); err != nil {
-		return Result{}, output.NewError(output.CodePrecondition, "bootstrap configuration changed since ownership was established", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
-			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+	owner, owned, err := bootstrapDatabaseAuthority(cfg, p, env)
+	if err != nil {
+		return Result{}, err
 	}
 	if !hostPhaseComplete() {
 		return Result{}, output.NewError(
@@ -129,6 +83,81 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	return Result{Data: res, Warnings: warnings}, nil
 }
 
+func bootstrapDatabaseConfig(p bootstrapParams) (config.Cluster, error) {
+	cfg, err := config.ParseCluster([]byte(p.ClusterTOML))
+	if err != nil {
+		return config.Cluster{}, output.NewError(output.CodeConfig, "cluster_toml does not parse: "+err.Error(), output.ExitConfig, "")
+	}
+	if err := cfg.Validate(); err != nil {
+		return config.Cluster{}, config.ValidationError(err)
+	}
+	return cfg, nil
+}
+
+func bootstrapDatabaseNode(cfg config.Cluster, p bootstrapParams) (config.Node, error) {
+	nodeCfg, err := bootstrapLoadNode(config.NodePath)
+	if err != nil {
+		return config.Node{}, output.NewError(
+			output.CodePrecondition,
+			"this server is not an vaire node yet",
+			output.ExitPrecondition,
+			"Run the host phase first with vaire server init.",
+		).WithDetails(map[string]any{"reason": "not_a_node"})
+	}
+	if nodeCfg.Server != cfg.Name() {
+		return config.Node{}, output.NewError(
+			output.CodePrecondition,
+			"this node belongs to server "+nodeCfg.Server,
+			output.ExitPrecondition,
+			"Use that server's own secrets document.",
+		).WithDetails(map[string]any{"reason": "node_belongs_to_other_server", "server": nodeCfg.Server})
+	}
+	if nodeCfg.NodeName != p.NodeName {
+		return config.Node{}, output.NewError(output.CodePrecondition, "bootstrap node identity does not match", output.ExitPrecondition, "").
+			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+	}
+	return nodeCfg, nil
+}
+
+func bootstrapDatabaseAuthority(cfg config.Cluster, p bootstrapParams, env *Env) (bootstrapOwnership, bool, error) {
+	if err := bootstrapDir(false); err != nil {
+		return bootstrapOwnership{}, false, err
+	}
+	owner, err := bootstrapReadOwnership()
+	owned := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return bootstrapOwnership{}, false, output.NewError(output.CodePrecondition, "bootstrap ownership is unavailable", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+	}
+	if owned {
+		if err := bootstrapValidateOwnership(owner, cfg, p.NodeName, env.Req.OperationID); err != nil {
+			return bootstrapOwnership{}, false, output.NewError(output.CodePrecondition, "bootstrap ownership does not match this setup", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+				WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+		}
+	} else if err := bootstrapDatabaseNoAuthority(cfg); err != nil {
+		return bootstrapOwnership{}, false, err
+	}
+	if err := bootstrapExistingConfigMatches(cfg, p.NodeName); err != nil {
+		return bootstrapOwnership{}, false, output.NewError(output.CodePrecondition, "bootstrap configuration changed since ownership was established", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
+	}
+	return owner, owned, nil
+}
+
+func bootstrapDatabaseNoAuthority(cfg config.Cluster) error {
+	visible := cfg
+	if engine.ClusterView != nil {
+		visible = engine.ClusterView(cfg, "")
+	}
+	for _, spec := range visible.Clusters {
+		if !spec.IsFollower() {
+			return output.NewError(output.CodePrecondition, "bootstrap has no authority over existing database "+spec.Name, output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
+				WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable", "database": spec.Name})
+		}
+	}
+	return nil
+}
+
 // handleTLSStatus reports the served certificate's state, so init can wait for
 // the real certificate without re-running the database phase.
 func handleTLSStatus(_ context.Context, env *Env) (Result, error) {
@@ -153,12 +182,12 @@ func hostPhaseComplete() bool {
 // inspectTLS reports the certificate state after the database phase (D10).
 func inspectTLS(cfg config.Cluster) *TLSState {
 	if cfg.TLS.Mode == "self-signed" {
-		return &TLSState{State: "self-signed", NotAfter: certNotAfter(steps.TLSCertPath)}
+		return &TLSState{State: "self-signed", NotAfter: certNotAfter()}
 	}
 	if isSelfSigned(steps.TLSCertPath) {
 		return &TLSState{State: "pending"}
 	}
-	return &TLSState{State: "acme", NotAfter: certNotAfter(steps.TLSCertPath)}
+	return &TLSState{State: "acme", NotAfter: certNotAfter()}
 }
 
 // isSelfSigned reports whether the certificate at path is self-signed, which
@@ -175,8 +204,8 @@ func isSelfSignedCert(cert *x509.Certificate) bool {
 	return cert.Issuer.String() == cert.Subject.String()
 }
 
-func certNotAfter(path string) string {
-	cert := readCert(path)
+func certNotAfter() string {
+	cert := readCert(steps.TLSCertPath)
 	if cert == nil {
 		return ""
 	}
@@ -184,7 +213,7 @@ func certNotAfter(path string) string {
 }
 
 func readCert(path string) *x509.Certificate {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed certificate path.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}

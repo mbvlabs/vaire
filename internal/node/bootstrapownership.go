@@ -79,7 +79,7 @@ func bootstrapDir(create bool) error {
 func bootstrapReadOwnership() (bootstrapOwnership, error) {
 	var owner bootstrapOwnership
 	path := filepath.Join(bootstrapStateDir, bootstrapManifestName)
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // fixed file within private state directory
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return owner, err
 	}
@@ -144,7 +144,7 @@ func bootstrapValidateOwnership(owner bootstrapOwnership, cfg config.Cluster, no
 }
 
 func bootstrapWriteNew(path string, raw []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600) //nolint:gosec // fixed path under validated private directory
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func bootstrapWriteNew(path string, raw []byte) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	dir, err := os.Open(bootstrapStateDir) //nolint:gosec // validated fixed state directory
+	dir, err := os.Open(bootstrapStateDir)
 	if err != nil {
 		return err
 	}
@@ -193,12 +193,8 @@ func bootstrapExistingConfigMatches(cfg config.Cluster, node string) error {
 // A previously created manifest is the only source of resume authority.
 func prepareBootstrapOwnership(cfg config.Cluster, node, operation string) error {
 	if _, err := os.Lstat(bootstrapStateDir); errors.Is(err, os.ErrNotExist) {
-		for _, path := range []string{bootstrapNodePath, bootstrapClusterPath} {
-			if _, err := os.Lstat(path); err == nil {
-				return errUnownedBootstrap
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+		if err := bootstrapEnsureUnowned(); err != nil {
+			return err
 		}
 	} else if err != nil {
 		return err
@@ -208,56 +204,80 @@ func prepareBootstrapOwnership(cfg config.Cluster, node, operation string) error
 	}
 	owner, err := bootstrapReadOwnership()
 	if err == nil {
-		if err := bootstrapExistingConfigMatches(cfg, node); err != nil {
-			return err
-		}
-		// The first host attempt may have durably created its manifest but
-		// crashed before writing the instance file. Only that original,
-		// unexposed manifest may finish creating its own recorded instance.
-		instancePath := filepath.Join(bootstrapStateDir, "instance")
-		if _, statErr := os.Lstat(instancePath); errors.Is(statErr, os.ErrNotExist) {
-			hash, hashErr := bootstrapHash(cfg)
-			_, nodeErr := os.Lstat(bootstrapNodePath)
-			_, clusterErr := os.Lstat(bootstrapClusterPath)
-			if hashErr != nil || operation == "" || owner.Server != cfg.Name() || owner.Node != node ||
-				owner.Operation != operation || owner.ConfigHash != hash ||
-				!errors.Is(nodeErr, os.ErrNotExist) || !errors.Is(clusterErr, os.ErrNotExist) {
-				return errors.New("incomplete bootstrap ownership cannot be resumed")
-			}
-			for _, spec := range cfg.Clusters {
-				if owner.Targets[spec.Name] {
-					return errors.New("completed bootstrap ownership cannot recreate its instance")
-				}
-				for _, path := range []string{bootstrapConfDir(spec.Name), cfg.Server.DataDirectory(spec.Name)} {
-					if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-						return errors.New("bootstrap instance is missing after a target appeared")
-					}
-				}
-			}
-			if err := bootstrapWriteNew(instancePath, []byte(owner.Instance+"\n")); err != nil {
-				return err
-			}
-		} else if statErr != nil {
-			return statErr
-		}
-		return bootstrapValidateOwnership(owner, cfg, node, operation)
+		return resumeBootstrapOwnership(owner, cfg, node, operation)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	return claimBootstrapOwnership(cfg, node, operation)
+}
+
+func bootstrapEnsureUnowned() error {
 	for _, path := range []string{bootstrapNodePath, bootstrapClusterPath} {
-		if _, err := os.Lstat(path); err == nil {
+		_, err := os.Lstat(path)
+		if err == nil {
 			return errUnownedBootstrap
-		} else if !errors.Is(err, os.ErrNotExist) {
+		}
+		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+	}
+	return nil
+}
+
+func resumeBootstrapOwnership(owner bootstrapOwnership, cfg config.Cluster, node, operation string) error {
+	if err := bootstrapExistingConfigMatches(cfg, node); err != nil {
+		return err
+	}
+	instancePath := filepath.Join(bootstrapStateDir, "instance")
+	_, statErr := os.Lstat(instancePath)
+	if errors.Is(statErr, os.ErrNotExist) {
+		if err := bootstrapRestoreMissingInstance(owner, cfg, node, operation, instancePath); err != nil {
+			return err
+		}
+	} else if statErr != nil {
+		return statErr
+	}
+	return bootstrapValidateOwnership(owner, cfg, node, operation)
+}
+
+// bootstrapRestoreMissingInstance handles the first host attempt: it may have
+// durably created its manifest but crashed before writing the instance file.
+// Only that original, unexposed manifest may finish creating its own recorded
+// instance.
+func bootstrapRestoreMissingInstance(owner bootstrapOwnership, cfg config.Cluster, node, operation, instancePath string) error {
+	hash, hashErr := bootstrapHash(cfg)
+	_, nodeErr := os.Lstat(bootstrapNodePath)
+	_, clusterErr := os.Lstat(bootstrapClusterPath)
+	if hashErr != nil || operation == "" || owner.Server != cfg.Name() || owner.Node != node ||
+		owner.Operation != operation || owner.ConfigHash != hash ||
+		!errors.Is(nodeErr, os.ErrNotExist) || !errors.Is(clusterErr, os.ErrNotExist) {
+		return errors.New("incomplete bootstrap ownership cannot be resumed")
+	}
+	for _, spec := range cfg.Clusters {
+		if owner.Targets[spec.Name] {
+			return errors.New("completed bootstrap ownership cannot recreate its instance")
+		}
+		for _, path := range []string{bootstrapConfDir(spec.Name), cfg.Server.DataDirectory(spec.Name)} {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				return errors.New("bootstrap instance is missing after a target appeared")
+			}
+		}
+	}
+	return bootstrapWriteNew(instancePath, []byte(owner.Instance+"\n"))
+}
+
+func claimBootstrapOwnership(cfg config.Cluster, node, operation string) error {
+	if err := bootstrapEnsureUnowned(); err != nil {
+		return err
 	}
 	paths := []string{bootstrapNodePath, bootstrapClusterPath, filepath.Join(bootstrapStateDir, "instance")}
 	for _, spec := range cfg.Clusters {
 		paths = append(paths, bootstrapConfDir(spec.Name), cfg.Server.DataDirectory(spec.Name))
 	}
 	for _, path := range paths {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		_, err := os.Lstat(path)
+		if !errors.Is(err, os.ErrNotExist) {
 			if err == nil {
 				return fmt.Errorf("bootstrap ownership cannot claim existing artifact %s", path)
 			}
@@ -275,7 +295,7 @@ func prepareBootstrapOwnership(cfg config.Cluster, node, operation string) error
 	if err != nil {
 		return err
 	}
-	owner = bootstrapOwnership{Version: 1, Server: cfg.Name(), Node: node, Operation: operation, Instance: instance, ConfigHash: hash, Targets: map[string]bool{}}
+	owner := bootstrapOwnership{Version: 1, Server: cfg.Name(), Node: node, Operation: operation, Instance: instance, ConfigHash: hash, Targets: map[string]bool{}}
 	for _, spec := range cfg.Clusters {
 		if !spec.IsFollower() {
 			owner.Targets[spec.Name] = false

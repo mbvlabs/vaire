@@ -28,9 +28,7 @@ func newTestGuard(t *testing.T) (protectGuard, *testClock) {
 func errReason(t *testing.T, err error) (string, string) {
 	t.Helper()
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) {
-		t.Fatalf("got %v, want a CLIError", err)
-	}
+	rejectf(t, !errors.As(err, &cliErr), "got %v, want a CLIError", err)
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
 	return cliErr.Code, reason
@@ -39,9 +37,7 @@ func errReason(t *testing.T, err error) (string, string) {
 func wantReason(t *testing.T, err error, code, reason string) {
 	t.Helper()
 	gotCode, gotReason := errReason(t, err)
-	if gotCode != code || gotReason != reason {
-		t.Fatalf("got %s/%s (%v), want %s/%s", gotCode, gotReason, err, code, reason)
-	}
+	rejectf(t, gotCode != code || gotReason != reason, "got %s/%s (%v), want %s/%s", gotCode, gotReason, err, code, reason)
 }
 
 // codeFor returns the current code for secret at the guard's time plus
@@ -49,9 +45,7 @@ func wantReason(t *testing.T, err error, code, reason string) {
 func codeFor(t *testing.T, secret string, at time.Time, offset int64) string {
 	t.Helper()
 	key, err := totp.DecodeSecret(secret)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	return totp.HOTP(key, totp.Step(at)+offset, totp.Digits)
 }
 
@@ -67,10 +61,8 @@ func codeEnv(params, code string) *Env {
 func setUp(t *testing.T, g protectGuard, clock *testClock) string {
 	t.Helper()
 	res, err := g.init(codeEnv(`{"label":"prod"}`, ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	secret := res.Data.(map[string]any)["secret"].(string)
+	reject(t, err != nil, err)
+	secret := mustAs[string](t, mustAs[map[string]any](t, res.Data)["secret"])
 	if _, err := g.confirm(codeEnv("", codeFor(t, secret, clock.t, 0))); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
@@ -88,12 +80,10 @@ func TestProtectInitConfirm(t *testing.T) {
 		wantReason(t, err, output.CodePrecondition, "protect_not_pending")
 	}
 	res, err := g.init(codeEnv(`{"label":"prod"}`, ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := res.Data.(map[string]any)
-	secret := data["secret"].(string)
-	if uri := data["uri"].(string); uri != totp.URI("vaire", "prod", secret) {
+	reject(t, err != nil, err)
+	data := mustAs[map[string]any](t, res.Data)
+	secret := mustAs[string](t, data["secret"])
+	if uri := mustAs[string](t, data["uri"]); uri != totp.URI("vaire", "prod", secret) {
 		t.Fatalf("uri %s", uri)
 	}
 	if ok, _ := g.configured(); ok {
@@ -112,16 +102,12 @@ func TestProtectInitConfirm(t *testing.T) {
 		t.Fatal("not configured after confirm")
 	}
 	info, err := os.Stat(g.path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("state file mode %o, want 600", perm)
 	}
 	st, _ := g.load()
-	if st.Failures != 0 || st.Pending != "" || st.Secret != secret {
-		t.Fatalf("state after confirm: %+v", st)
-	}
+	rejectf(t, st.Failures != 0 || st.Pending != "" || st.Secret != secret, "state after confirm: %+v", st)
 
 	// A second init needs --rotate.
 	_, err = g.init(codeEnv(`{}`, ""))
@@ -140,10 +126,8 @@ func TestProtectRotate(t *testing.T) {
 	wantReason(t, err, output.CodeProtectCodeRejected, "code_required")
 
 	res, err := g.init(codeEnv(`{"rotate":true}`, codeFor(t, old, clock.t, 0)))
-	if err != nil {
-		t.Fatalf("rotate: %v", err)
-	}
-	fresh := res.Data.(map[string]any)["secret"].(string)
+	rejectf(t, err != nil, "rotate: %v", err)
+	fresh := mustAs[string](t, mustAs[map[string]any](t, res.Data)["secret"])
 	// Until the new secret is confirmed, the old one still lifts a
 	// protection.
 	if st, _ := g.load(); st.Secret != old || st.Pending != fresh {
@@ -234,10 +218,8 @@ func TestProtectLockout(t *testing.T) {
 	// survives a reload: it is on disk.
 	wantReason(t, g.checkUnprotect(old, lifted, codeFor(t, secret, clock.t, 0)), output.CodeProtectCodeRejected, "locked")
 	res, err := g.status(filepath.Join(t.TempDir(), "missing.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st := res.Data.(protectStatus); st.LockedUntil == "" || !st.Configured {
+	reject(t, err != nil, err)
+	if st := mustAs[protectStatus](t, res.Data); st.LockedUntil == "" || !st.Configured {
 		t.Fatalf("status while locked: %+v", st)
 	}
 
@@ -249,7 +231,7 @@ func TestProtectLockout(t *testing.T) {
 		t.Fatalf("failures after success: %d", st.Failures)
 	}
 	res, _ = g.status(filepath.Join(t.TempDir(), "missing.toml"))
-	if st := res.Data.(protectStatus); st.LockedUntil != "" {
+	if st := mustAs[protectStatus](t, res.Data); st.LockedUntil != "" {
 		t.Fatalf("status after the lockout: %+v", st)
 	}
 }
@@ -259,9 +241,7 @@ func TestCheckProtect(t *testing.T) {
 	before := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app", Size: "medium"}}}
 	after := protectedCluster()
 	names := newlyProtected(before, after)
-	if len(names) != 1 || names[0] != "app" {
-		t.Fatalf("newlyProtected = %v", names)
-	}
+	rejectf(t, len(names) != 1 || names[0] != "app", "newlyProtected = %v", names)
 	if got := newlyProtected(after, after); len(got) != 0 {
 		t.Fatalf("unchanged: %v", got)
 	}

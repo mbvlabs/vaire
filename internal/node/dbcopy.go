@@ -40,11 +40,11 @@ const (
 	// CopySourceURLSecret is the raw postgres:// or postgresql:// URL.
 	CopySourceURLSecret = "copy.source_url" //nolint:gosec // G101: a secret key name, not a value.
 	// CopySourceSpecSecret is a JSON CopySourceSecret.
-	CopySourceSpecSecret = "copy.source_spec" //nolint:gosec // G101: a secret key name, not a value.
+	CopySourceSpecSecret = "copy.source_spec"
 	// CopySourceCASecret is a separately supplied PEM CA certificate, used
 	// by a URL source (whose URL has no CA form) or alongside individual
 	// fields. It is certificate content, never a path.
-	CopySourceCASecret = "copy.source_ca" //nolint:gosec // G101: a secret key name, not a value.
+	CopySourceCASecret = "copy.source_ca"
 )
 
 // CopySourceSecret is the individual-field source representation carried in
@@ -218,7 +218,7 @@ var (
 )
 
 func readCopyUnitFacts(ctx context.Context, unit string) (copyUnitFactsValue, error) {
-	out, err := exec.CommandContext(ctx, "systemctl", "show", //nolint:gosec // G204: a validated vaire unit name.
+	out, err := exec.CommandContext(ctx, "systemctl", "show",
 		"--property=LoadState,ActiveState,SubState,MainPID,ControlPID,InvocationID", unit).Output()
 	if err != nil {
 		return copyUnitFactsValue{}, err
@@ -352,19 +352,25 @@ func scanCopyWorkerProcesses(id string) (present bool, ok bool) {
 			}
 			return false, false
 		}
-		fields := strings.Split(string(raw), "\x00")
-		for i := 0; i+2 < len(fields); i++ {
-			if fields[i] != "node" || fields[i+1] != "run" || fields[i+2] != "db-copy" {
-				continue
-			}
-			for j := i + 3; j+1 < len(fields); j++ {
-				if fields[j] == "--job-id" && fields[j+1] == id {
-					return true, true
-				}
-			}
+		if copyWorkerCommandMatches(strings.Split(string(raw), "\x00"), id) {
+			return true, true
 		}
 	}
 	return false, true
+}
+
+func copyWorkerCommandMatches(fields []string, id string) bool {
+	for i := 0; i+2 < len(fields); i++ {
+		if fields[i] != "node" || fields[i+1] != "run" || fields[i+2] != "db-copy" {
+			continue
+		}
+		for j := i + 3; j+1 < len(fields); j++ {
+			if fields[j] == "--job-id" && fields[j+1] == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isDecimal(value string) bool {
@@ -928,17 +934,7 @@ func handleDBCopy(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if env.Req.DryRun {
-		spec, resources, warnings, err := copyPreviewTarget(env, cfg, p, []string{"pg_stat_statements"})
-		if err != nil {
-			return Result{}, err
-		}
-		return Result{Data: map[string]any{
-			"database":       spec,
-			"resources":      resources,
-			"dry_run":        true,
-			"source_checked": false,
-			"advisory":       true,
-		}, Warnings: warnings}, nil
+		return copyTargetPreview(env, cfg, p, true)
 	}
 	if _, err := copySourceFromSecrets(env.Req.Secrets); err != nil {
 		return Result{}, err
@@ -964,24 +960,44 @@ func handleDBCopy(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return res, attachJobWarnings(copyFollowFailure(ctx, cfg, p.Name, id, err), append(warnings, pruned...))
 	}
-	if m, ok := res.Data.(map[string]any); ok {
-		if raw, ok := m["result"].(json.RawMessage); ok {
-			var jobData struct {
-				Database config.ClusterSpec `json:"database"`
-			}
-			if json.Unmarshal(raw, &jobData) == nil && jobData.Database.Name != "" {
-				m["database"] = jobData.Database
-			}
-		}
-		if _, exists := m["database"]; !exists {
-			m["database"] = spec
-		}
-		if _, exists := m["resources"]; !exists {
-			m["resources"] = resources
-		}
-	}
+	mergeCopyFollowData(res.Data, spec, resources)
 	res.Warnings = mergeJobWarnings(res.Warnings, append(warnings, pruned...))
 	return res, nil
+}
+
+func copyTargetPreview(env *Env, cfg config.Cluster, p dbCopyParams, dryRun bool) (Result, error) {
+	spec, resources, warnings, err := copyPreviewTarget(env, cfg, p, []string{"pg_stat_statements"})
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Data: map[string]any{
+		"database":       spec,
+		"resources":      resources,
+		"dry_run":        dryRun,
+		"source_checked": false,
+		"advisory":       true,
+	}, Warnings: warnings}, nil
+}
+
+func mergeCopyFollowData(data any, spec config.ClusterSpec, resources any) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return
+	}
+	if raw, ok := m["result"].(json.RawMessage); ok {
+		var jobData struct {
+			Database config.ClusterSpec `json:"database"`
+		}
+		if json.Unmarshal(raw, &jobData) == nil && jobData.Database.Name != "" {
+			m["database"] = jobData.Database
+		}
+	}
+	if _, exists := m["database"]; !exists {
+		m["database"] = spec
+	}
+	if _, exists := m["resources"]; !exists {
+		m["resources"] = resources
+	}
 }
 
 func copyAmbiguousStartError(ctx context.Context, cfg config.Cluster, name string, ambiguous *copyJobStartAmbiguousError) error {
@@ -1078,210 +1094,288 @@ func checkCopyName(name string) error {
 // config read through the export and import: for this version, serializing
 // ordinary desired-state changes is safer than inventing a lock-release and
 // reacquire state machine around a detachable, potentially long export.
+type copyJob struct {
+	ctx     context.Context
+	env     *jobEnv
+	p       dbCopyParams
+	prog    *copyProgress
+	cfg     config.Cluster
+	src     backup.Source
+	ws      *backup.CopyWorkspace
+	lease   *copyLease
+	pre     backup.SourcePreflight
+	archive backup.SourceArchive
+
+	extensions []string
+	matches    []backup.ExtensionMatch
+	selection  *backup.TOCSelection
+	created    config.ClusterSpec
+	saved      config.Cluster
+	warnings   []output.Warning
+	backup     copyBackupState
+	cleanup    bool
+}
+
 func jobCopy(ctx context.Context, env *jobEnv) (res any, err error) {
 	var p dbCopyParams
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
-	prog := &copyProgress{phase: copyPhasePreflight, database: p.Name}
-	if err := checkCopyName(p.Name); err != nil {
-		return nil, copyJobFailure(ctx, config.Cluster{}, prog, err)
-	}
-	src, err := copySourceFromSecrets(env.Secrets)
+	j := &copyJob{ctx: ctx, env: env, p: p, prog: &copyProgress{phase: copyPhasePreflight, database: p.Name}}
+	err = j.setup()
 	if err != nil {
-		return nil, copyJobFailure(ctx, config.Cluster{}, prog, err)
+		return nil, err
 	}
+	defer j.cleanupWorkspace(&err)
+	if err := j.inspect(); err != nil {
+		return nil, err
+	}
+	if err := j.provision(); err != nil {
+		return nil, err
+	}
+	if err := j.importAndFinalize(); err != nil {
+		return nil, err
+	}
+	return j.result(), nil
+}
+
+func (j *copyJob) fail(cfg config.Cluster, err error) error {
+	return copyJobFailure(j.ctx, cfg, j.prog, err)
+}
+
+func (j *copyJob) setup() error {
+	if err := checkCopyName(j.p.Name); err != nil {
+		return j.fail(config.Cluster{}, err)
+	}
+	src, err := copySourceFromSecrets(j.env.Secrets)
+	if err != nil {
+		return j.fail(config.Cluster{}, err)
+	}
+	j.src = src
 	cfg, _, err := copyState().Load()
 	if err != nil {
-		return nil, copyJobFailure(ctx, config.Cluster{}, prog, err)
+		return j.fail(config.Cluster{}, err)
 	}
-	env.Cluster = cfg
-	if err := copyFloorAdmission(copyCreateEnv(env, cfg), cfg, p); err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+	j.cfg = cfg
+	j.env.Cluster = cfg
+	if err := copyFloorAdmission(copyCreateEnv(j.env, cfg), cfg, j.p); err != nil {
+		return j.fail(cfg, err)
 	}
-	if err := checkCopyTargetAbsent(ctx, cfg, p.Name, false); err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+	if err := checkCopyTargetAbsent(j.ctx, cfg, j.p.Name, false); err != nil {
+		return j.fail(cfg, err)
 	}
 	if err := copyCheckTools(); err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+		return j.fail(cfg, err)
 	}
-	ws, err := copyOpenWorkspace(env.ID)
+	ws, err := copyOpenWorkspace(j.env.ID)
 	if err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+		return j.fail(cfg, err)
 	}
 	lease, err := openCopyLease(ws)
 	if err != nil {
-		remErr := copyRemoveOwnWorkspace(ws, nil)
-		return nil, copyJobFailure(ctx, cfg, prog, errors.Join(err, remErr))
+		return j.fail(cfg, errors.Join(err, copyRemoveOwnWorkspace(ws, nil)))
 	}
-	cleanupDone := false
-	defer func() {
-		if cleanupDone {
-			return
-		}
-		if cerr := copyCleanupWorkspace(ws, lease); cerr != nil {
-			env.Report(output.Event{Type: "warning", Code: "copy_cleanup_failed", Message: copyCleanupMessage(cerr)})
-			if err != nil {
-				err = addCopyCleanupDetail(err, cerr)
-			}
-		}
-	}()
+	j.ws, j.lease = ws, lease
 	if err := markCopyWorkspace(ws, copyOperationJob, lease); err != nil {
 		remErr := copyRemoveOwnWorkspace(ws, lease)
-		ws, lease = nil, nil
-		cleanupDone = true
-		return nil, copyJobFailure(ctx, cfg, prog, errors.Join(err, remErr))
+		j.ws, j.lease = nil, nil
+		j.cleanup = true
+		return j.fail(cfg, errors.Join(err, remErr))
 	}
+	return nil
+}
 
-	prog.enter(env.Report, copyPhasePreflight)
-	shell := engine.Shell{Secrets: secrets.Default}
-	exec := copyLeaseExecutor{inner: shell, lease: lease}
-	pre, err := copyPreflightSource(ctx, exec, env.ID+"-preflight", copySafeReporter(env.Report), src, ws)
-	if err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+func (j *copyJob) cleanupWorkspace(jobErr *error) {
+	if j.cleanup {
+		return
 	}
+	if cerr := copyCleanupWorkspace(j.ws, j.lease); cerr != nil {
+		j.env.Report(output.Event{Type: "warning", Code: "copy_cleanup_failed", Message: copyCleanupMessage(cerr)})
+		if *jobErr != nil {
+			*jobErr = addCopyCleanupDetail(*jobErr, cerr)
+		}
+	}
+}
+
+func (j *copyJob) inspect() error {
+	j.prog.enter(j.env.Report, copyPhasePreflight)
+	shell := engine.Shell{Secrets: secrets.Default}
+	exec := copyLeaseExecutor{inner: shell, lease: j.lease}
+	pre, err := copyPreflightSource(j.ctx, exec, j.env.ID+"-preflight", copySafeReporter(j.env.Report), j.src, j.ws)
+	if err != nil {
+		return j.fail(j.cfg, err)
+	}
+	j.pre = pre
 	for _, warning := range pre.Warnings {
-		env.Report(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
+		j.env.Report(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
 	}
 	_, extensions, matches, err := copyExtensionPlan(pre.Extensions)
 	if err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+		return j.fail(j.cfg, err)
 	}
-	createEnv := copyCreateEnv(env, cfg)
-	if _, _, _, err := copyPreviewTarget(createEnv, cfg, p, extensions); err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+	j.extensions, j.matches = extensions, matches
+	createEnv := copyCreateEnv(j.env, j.cfg)
+	if _, _, _, err := copyPreviewTarget(createEnv, j.cfg, j.p, extensions); err != nil {
+		return j.fail(j.cfg, err)
 	}
-	if _, err := copyCheckCopySpace(ws, cfg.Server.DataDirectory(p.Name), pre.SizeBytes); err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
-	}
-
-	prog.enter(env.Report, copyPhaseExporting)
-	archive, err := copyExportSource(ctx, exec, env.ID+"-export", copySafeReporter(env.Report), src, ws)
-	if err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
-	}
-	selection, err := copySelectArchiveTOC(ctx, exec, env.ID+"-select", copySafeReporter(env.Report), ws, archive,
-		backup.SelectionOptions{SourceDatabase: src.Database, Extensions: pre.Extensions})
-	if err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+	if _, err := copyCheckCopySpace(j.ws, j.cfg.Server.DataDirectory(j.p.Name), pre.SizeBytes); err != nil {
+		return j.fail(j.cfg, err)
 	}
 
+	j.prog.enter(j.env.Report, copyPhaseExporting)
+	archive, err := copyExportSource(j.ctx, exec, j.env.ID+"-export", copySafeReporter(j.env.Report), j.src, j.ws)
+	if err != nil {
+		return j.fail(j.cfg, err)
+	}
+	j.archive = archive
+	selection, err := copySelectArchiveTOC(j.ctx, exec, j.env.ID+"-select", copySafeReporter(j.env.Report), j.ws, archive,
+		backup.SelectionOptions{SourceDatabase: j.src.Database, Extensions: pre.Extensions})
+	if err != nil {
+		return j.fail(j.cfg, err)
+	}
+	j.selection = selection
+	return nil
+}
+
+func (j *copyJob) provision() error {
 	// The target may have been taken while the export ran, and it must be
 	// rechecked again under the save lock immediately before insertion.
 	copyBeforeProvision()
-	if err := checkCopyTargetAbsent(ctx, cfg, p.Name, false); err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+	if err := checkCopyTargetAbsent(j.ctx, j.cfg, j.p.Name, false); err != nil {
+		return j.fail(j.cfg, err)
 	}
-	if _, err := copyCheckCopySpace(ws, cfg.Server.DataDirectory(p.Name), pre.SizeBytes); err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+	if _, err := copyCheckCopySpace(j.ws, j.cfg.Server.DataDirectory(j.p.Name), j.pre.SizeBytes); err != nil {
+		return j.fail(j.cfg, err)
 	}
 
-	prog.enter(env.Report, copyPhaseProvisioning)
+	j.prog.enter(j.env.Report, copyPhaseProvisioning)
+	createEnv := copyCreateEnv(j.env, j.cfg)
 	build := func(config.Cluster) (config.ClusterSpec, error) {
-		spec := config.ClusterSpec{
-			Name:             p.Name,
-			Size:             p.Size,
-			Memory:           p.Memory,
-			Profile:          p.Profile,
+		return config.ClusterSpec{
+			Name:             j.p.Name,
+			Size:             j.p.Size,
+			Memory:           j.p.Memory,
+			Profile:          j.p.Profile,
 			StatementTimeout: "60s",
-			Extensions:       append([]string(nil), extensions...),
-		}
-		return spec, nil
+			Extensions:       append([]string(nil), j.extensions...),
+		}, nil
 	}
 	beforeSave := func(cfgWithTarget config.Cluster, _ config.ClusterSpec) error {
 		copyBeforeSave()
-		return checkCopyTargetAbsent(ctx, cfgWithTarget, p.Name, true)
+		return checkCopyTargetAbsent(j.ctx, cfgWithTarget, j.p.Name, true)
 	}
-	saved, previous, created, err := copyAddDatabase(ctx, createEnv, build, p.AllowOvercommit, copyCommand(p), beforeSave)
+	saved, previous, created, err := copyAddDatabase(j.ctx, createEnv, build, j.p.AllowOvercommit, copyCommand(j.p), beforeSave)
 	if err != nil {
-		return nil, copyJobFailure(ctx, cfg, prog, err)
+		return j.fail(j.cfg, err)
 	}
-	created, warnings, err := copyProvision(ctx, createEnv, saved, previous, created)
+	j.saved = saved
+	created, warnings, err := copyProvision(j.ctx, createEnv, saved, previous, created)
 	if err != nil {
 		fresh, _, loadErr := copyState().Load()
 		if loadErr != nil {
 			fresh = saved
 		}
-		return nil, copyJobFailure(ctx, fresh, prog, err)
+		return j.fail(fresh, err)
 	}
-	env.Cluster = saved
-	actual, err := copyTargetExtensions(ctx, steps.ClusterPG(created), p.Name)
+	j.created, j.warnings = created, warnings
+	j.env.Cluster = saved
+	actual, err := copyTargetExtensions(j.ctx, steps.ClusterPG(created), j.p.Name)
 	if err != nil {
-		return nil, copyJobFailure(ctx, saved, prog, err)
+		return j.fail(saved, err)
 	}
-	if _, err := backup.MatchSourceExtensions(pre.Extensions, actual); err != nil {
-		return nil, copyJobFailure(ctx, saved, prog, err)
+	if _, err := backup.MatchSourceExtensions(j.pre.Extensions, actual); err != nil {
+		return j.fail(saved, err)
 	}
+	return nil
+}
 
-	prog.enter(env.Report, copyPhaseImporting)
-	prog.importRan = true
-	local := steps.ClusterPG(created)
-	if err := copyRestoreStrict(ctx, exec, env.ID+"-restore", copySafeReporter(env.Report), ws, backup.StrictRestoreOptions{
+func (j *copyJob) importAndFinalize() error {
+	j.prog.enter(j.env.Report, copyPhaseImporting)
+	j.prog.importRan = true
+	exec := copyLeaseExecutor{inner: engine.Shell{Secrets: secrets.Default}, lease: j.lease}
+	local := steps.ClusterPG(j.created)
+	if err := copyRestoreStrict(j.ctx, exec, j.env.ID+"-restore", copySafeReporter(j.env.Report), j.ws, backup.StrictRestoreOptions{
 		Local:     local,
-		Target:    p.Name,
-		Owner:     p.Name + "_owner",
-		Selection: selection,
+		Target:    j.p.Name,
+		Owner:     j.p.Name + "_owner",
+		Selection: j.selection,
 	}); err != nil {
-		return nil, copyJobFailure(ctx, saved, prog, err)
+		return j.fail(j.saved, err)
 	}
-	prog.imported = true
+	j.prog.imported = true
 
-	prog.enter(env.Report, copyPhaseFinalizing)
-	if err := copyRestorePolicy(ctx, local, created); err != nil {
-		return nil, copyJobFailure(ctx, saved, prog, copyFinalizeError("copy_policy_failed",
-			"vaire could not restore the copied database's connect and admin policy",
-			"Inspect the partial database; do not retry the import into the same database."))
+	j.prog.enter(j.env.Report, copyPhaseFinalizing)
+	if err := j.finalizeDatabase(local); err != nil {
+		return err
 	}
-	if err := copyRunGrants(ctx, local, p.Name); err != nil {
-		return nil, copyJobFailure(ctx, saved, prog, copyFinalizeError("copy_grants_failed",
-			"vaire could not apply the copied objects' access policy",
-			"Inspect the partial database; do not retry the import into the same database."))
-	}
-	if err := copyVerifyObjects(ctx, local, p.Name); err != nil {
-		return nil, copyJobFailure(ctx, saved, prog, err)
-	}
-	if err := copyAnalyze(ctx, local, p.Name); err != nil {
-		return nil, copyJobFailure(ctx, saved, prog, copyFinalizeError("copy_analyze_failed",
-			"ANALYZE of the copied database failed",
-			"Inspect the partial database; do not retry the import into the same database."))
-	}
-
-	backupState := copyBackupState{Configured: saved.BackupConfigured()}
-	if backupState.Configured {
-		rt := jobRuntime(env)
-		if w := copyFirstBackup(ctx, saved, rt, env.Report, p.Name); w != nil {
-			warning := *w
-			backupState.Warning = &warning
-			warnings = append(warnings, warning)
-		} else {
-			backupState.Ready = true
-		}
-	}
-	prog.backup = backupState
+	j.backup = j.finishBackup()
+	j.prog.backup = j.backup
 
 	// Cleanup is part of success, not a warning: the archive and source
 	// access files may not survive as an apparently successful copy.
-	if cerr := copyCleanupWorkspace(ws, lease); cerr != nil {
-		cleanupDone = true
-		prog.cleanupFailed = true
-		return nil, copyJobFailure(ctx, saved, prog, cerr)
+	if cerr := copyCleanupWorkspace(j.ws, j.lease); cerr != nil {
+		j.cleanup = true
+		j.prog.cleanupFailed = true
+		return j.fail(j.saved, cerr)
 	}
-	cleanupDone = true
-	ws, lease = nil, nil
+	j.cleanup = true
+	j.ws, j.lease = nil, nil
+	return nil
+}
 
-	target := copyTargetState{Name: p.Name, InConfig: true, Cluster: true, Database: true,
+func (j *copyJob) finalizeDatabase(local pg.Local) error {
+	if err := copyRestorePolicy(j.ctx, local, j.created); err != nil {
+		return j.fail(j.saved, copyFinalizeError("copy_policy_failed",
+			"vaire could not restore the copied database's connect and admin policy",
+			"Inspect the partial database; do not retry the import into the same database."))
+	}
+	if err := copyRunGrants(j.ctx, local, j.p.Name); err != nil {
+		return j.fail(j.saved, copyFinalizeError("copy_grants_failed",
+			"vaire could not apply the copied objects' access policy",
+			"Inspect the partial database; do not retry the import into the same database."))
+	}
+	if err := copyVerifyObjects(j.ctx, local, j.p.Name); err != nil {
+		return j.fail(j.saved, err)
+	}
+	if err := copyAnalyze(j.ctx, local, j.p.Name); err != nil {
+		return j.fail(j.saved, copyFinalizeError("copy_analyze_failed",
+			"ANALYZE of the copied database failed",
+			"Inspect the partial database; do not retry the import into the same database."))
+	}
+	return nil
+}
+
+func (j *copyJob) finishBackup() copyBackupState {
+	backupState := copyBackupState{Configured: j.saved.BackupConfigured()}
+	if !backupState.Configured {
+		return backupState
+	}
+	rt := jobRuntime(j.env)
+	w := copyFirstBackup(j.ctx, j.saved, rt, j.env.Report, j.p.Name)
+	if w == nil {
+		backupState.Ready = true
+		return backupState
+	}
+	warning := *w
+	backupState.Warning = &warning
+	j.warnings = append(j.warnings, warning)
+	return backupState
+}
+
+func (j *copyJob) result() map[string]any {
+	target := copyTargetState{Name: j.p.Name, InConfig: true, Cluster: true, Database: true,
 		DataDirectory: true, ConfigDirectory: true, Known: true}
-	prog.enter(env.Report, copyPhaseSucceeded)
+	j.prog.enter(j.env.Report, copyPhaseSucceeded)
 	return map[string]any{
-		"database":   created,
-		"source":     copySourceInfo(src, pre),
-		"extensions": matches,
+		"database":   j.created,
+		"source":     copySourceInfo(j.src, j.pre),
+		"extensions": j.matches,
 		"target":     target,
 		"phase":      copyPhaseSucceeded,
 		"imported":   true,
-		"backup":     backupState,
-		"warnings":   warnings,
-	}, nil
+		"backup":     j.backup,
+		"warnings":   j.warnings,
+	}
 }
 
 func copyCreateEnv(env *jobEnv, cfg config.Cluster) *Env {
@@ -1402,86 +1496,96 @@ func pruneCopyWorkspaces(ctx context.Context) []output.Warning {
 		return []output.Warning{{Code: "copy_workspace_prune_failed",
 			Message: "the job records could not be read, so no stale copy workspace or private spec was removed"}}
 	}
-	var warnings []output.Warning
-
-	// Workspace pruning needs the root and its listing. Spec cleanup does not:
-	// an absent, unsafe or unreadable root must not retain a verified-inactive
-	// copy spec carrying source credentials.
-	var entries []os.DirEntry
-	var owner backup.WorkspaceOwner
-	rootUsable := false
-	info, rootErr := copyLstat(copyRootDir)
-	switch {
-	case errors.Is(rootErr, fs.ErrNotExist):
-		// A missing root is normal; spec cleanup still runs.
-	case rootErr != nil || info.Mode()&fs.ModeSymlink != 0 || !info.IsDir():
-		warnings = append(warnings, output.Warning{Code: "copy_workspace_prune_failed",
-			Message: "the copy workspace root is not a plain directory, so no stale workspace was removed"})
-	default:
-		entries, err = copyReadDir(copyRootDir)
-		if err != nil {
-			warnings = append(warnings, output.Warning{Code: "copy_workspace_prune_failed",
-				Message: "the copy workspace root could not be listed, so no stale workspace was removed"})
-			break
-		}
-		owner, err = copyWorkspaceOwner()
-		if err != nil {
-			warnings = append(warnings, output.Warning{Code: "copy_workspace_prune_failed",
-				Message: "the postgres workspace owner could not be determined, so no stale workspace was removed"})
-			break
-		}
-		rootUsable = true
-	}
-	if rootUsable {
+	warnings := make([]output.Warning, 0, 1)
+	entries, owner, usable, rootWarnings := copyWorkspaceRoot()
+	warnings = append(warnings, rootWarnings...)
+	if usable {
 		for _, entry := range entries {
-			name := entry.Name()
-			if !backup.CopyWorkspaceJobID(name) {
-				continue
+			if warning := pruneCopyWorkspaceEntry(ctx, st, entry.Name(), owner); warning != nil {
+				warnings = append(warnings, *warning)
 			}
-			rec, ok := st.Job(name)
-			if !ok {
-				// A preflight workspace has no job record. Only a verified
-				// preflight marker with a free lifetime lease may be removed;
-				// age is not inactivity. Any other unrecorded directory is
-				// unknown and is left alone.
-				kind, err := backup.CopyWorkspaceOperation(copyRootDir, name, owner)
-				if err != nil {
-					warnings = append(warnings, output.Warning{Code: "copy_workspace_prune_blocked",
-						Message: "unrecorded copy workspace " + name + " was left untouched: " + secrets.Redact(err.Error())})
-					continue
-				}
-				if kind != copyOperationPreflight {
-					warnings = append(warnings, output.Warning{Code: "copy_workspace_prune_blocked",
-						Message: "unrecorded copy workspace " + name + " has no matching job record and was left untouched"})
-					continue
-				}
-			} else {
-				if rec.Job != "db-copy" {
-					continue
-				}
-				if !copyWorkspaceInactive(ctx, rec) {
-					if rec.Final() {
-						warnings = append(warnings, output.Warning{Code: "copy_workspace_prune_blocked",
-							Message: "copy workspace " + name + " was retained because its terminal job is not positively inactive"})
-					}
-					continue
-				}
-			}
-			removed, err := backup.PruneCopyWorkspace(copyRootDir, name, owner)
-			if err != nil {
-				code := "copy_workspace_prune_failed"
-				if errors.Is(err, backup.ErrCopyWorkspaceBusy) {
-					code = "copy_workspace_prune_blocked"
-				}
-				warnings = append(warnings, output.Warning{Code: code,
-					Message: "copy workspace " + name + " was left untouched: " + secrets.Redact(err.Error())})
-				continue
-			}
-			_ = removed
 		}
 	}
 	warnings = append(warnings, cleanupCopyJobSpecs(ctx, st)...)
 	return warnings
+}
+
+// copyWorkspaceRoot reads the copy root and its listing. Spec cleanup does
+// not depend on it: an absent, unsafe or unreadable root must not retain a
+// verified-inactive copy spec carrying source credentials.
+func copyWorkspaceRoot() ([]os.DirEntry, backup.WorkspaceOwner, bool, []output.Warning) {
+	info, rootErr := copyLstat(copyRootDir)
+	switch {
+	case errors.Is(rootErr, fs.ErrNotExist):
+		// A missing root is normal; spec cleanup still runs.
+		return nil, backup.WorkspaceOwner{}, false, nil
+	case rootErr != nil || info.Mode()&fs.ModeSymlink != 0 || !info.IsDir():
+		return nil, backup.WorkspaceOwner{}, false, []output.Warning{{Code: "copy_workspace_prune_failed",
+			Message: "the copy workspace root is not a plain directory, so no stale workspace was removed"}}
+	}
+	entries, err := copyReadDir(copyRootDir)
+	if err != nil {
+		return nil, backup.WorkspaceOwner{}, false, []output.Warning{{Code: "copy_workspace_prune_failed",
+			Message: "the copy workspace root could not be listed, so no stale workspace was removed"}}
+	}
+	owner, err := copyWorkspaceOwner()
+	if err != nil {
+		return nil, backup.WorkspaceOwner{}, false, []output.Warning{{Code: "copy_workspace_prune_failed",
+			Message: "the postgres workspace owner could not be determined, so no stale workspace was removed"}}
+	}
+	return entries, owner, true, nil
+}
+
+func pruneCopyWorkspaceEntry(ctx context.Context, st engine.State, name string, owner backup.WorkspaceOwner) *output.Warning {
+	if !backup.CopyWorkspaceJobID(name) {
+		return nil
+	}
+	rec, ok := st.Job(name)
+	if !ok {
+		// Unrecorded: only a verified preflight marker with a free lifetime
+		// lease may be removed; age is not inactivity.
+		if warning := pruneUnrecordedCopyWorkspace(name, owner); warning != nil {
+			return warning
+		}
+	} else if warning, remove := pruneRecordedCopyWorkspace(ctx, rec); warning != nil || !remove {
+		return warning
+	}
+	if _, err := backup.PruneCopyWorkspace(copyRootDir, name, owner); err != nil {
+		code := "copy_workspace_prune_failed"
+		if errors.Is(err, backup.ErrCopyWorkspaceBusy) {
+			code = "copy_workspace_prune_blocked"
+		}
+		return &output.Warning{Code: code,
+			Message: "copy workspace " + name + " was left untouched: " + secrets.Redact(err.Error())}
+	}
+	return nil
+}
+
+func pruneRecordedCopyWorkspace(ctx context.Context, rec engine.JobRecord) (*output.Warning, bool) {
+	if rec.Job != "db-copy" {
+		return nil, false
+	}
+	if !copyWorkspaceInactive(ctx, rec) {
+		if rec.Final() {
+			return &output.Warning{Code: "copy_workspace_prune_blocked",
+				Message: "copy workspace " + rec.ID + " was retained because its terminal job is not positively inactive"}, false
+		}
+		return nil, false
+	}
+	return nil, true
+}
+
+func pruneUnrecordedCopyWorkspace(name string, owner backup.WorkspaceOwner) *output.Warning {
+	kind, err := backup.CopyWorkspaceOperation(copyRootDir, name, owner)
+	if err != nil {
+		return &output.Warning{Code: "copy_workspace_prune_blocked",
+			Message: "unrecorded copy workspace " + name + " was left untouched: " + secrets.Redact(err.Error())}
+	}
+	if kind != copyOperationPreflight {
+		return &output.Warning{Code: "copy_workspace_prune_blocked",
+			Message: "unrecorded copy workspace " + name + " has no matching job record and was left untouched"}
+	}
+	return nil
 }
 
 // cleanupCopyJobSpecs removes a private spec only after the copy job has
@@ -1729,6 +1833,18 @@ func copySafeDetails(details any) map[string]any {
 	default:
 		return out
 	}
+	copySimpleDetails(values, out)
+	// Retain only validated local names and allowlisted numeric floor facts.
+	if values["reason"] == "has_followers" || values["reason"] == "follower_recovery_floor_decrease" {
+		copyFollowDetails(values, out)
+	}
+	if values["reason"] == "copy_workspace_access_denied" {
+		copyWorkspaceAccessDetails(values, out)
+	}
+	return out
+}
+
+func copySimpleDetails(values, out map[string]any) {
 	for _, key := range []string{"reason", "secret", "secret_key", "secrets", "database", "cluster", "exit_status",
 		"largest_size", "suggested_command", "version", "source_version", "space", "counts",
 		"path", "postgres_version"} {
@@ -1743,39 +1859,39 @@ func copySafeDetails(details any) map[string]any {
 		}
 		out[key] = value
 	}
-	// Retain only validated local names and allowlisted numeric floor facts.
-	if values["reason"] == "has_followers" || values["reason"] == "follower_recovery_floor_decrease" {
-		if source, ok := values["source"].(string); ok && config.DatabasePattern.MatchString(source) {
-			out["source"] = source
-		}
-		if names, ok := values["followers"].([]string); ok {
-			safe := make([]string, 0, len(names))
-			for _, name := range names {
-				if config.DatabasePattern.MatchString(name) {
-					safe = append(safe, name)
-				}
-			}
-			out["followers"] = safe
-		}
-		if drops, ok := values["settings"].([]recoveryFloorDecrease); ok {
-			safe := make([]recoveryFloorDecrease, 0, len(drops))
-			for _, drop := range drops {
-				if slices.Contains(steps.FloorSettings, drop.Setting) {
-					safe = append(safe, drop)
-				}
-			}
-			out["settings"] = safe
-		}
+}
+
+func copyFollowDetails(values, out map[string]any) {
+	if source, ok := values["source"].(string); ok && config.DatabasePattern.MatchString(source) {
+		out["source"] = source
 	}
-	if values["reason"] == "copy_workspace_access_denied" {
-		if stage, ok := values["stage"].(string); ok && (stage == "ancestor" || stage == "source-access") {
-			out["stage"] = stage
+	if names, ok := values["followers"].([]string); ok {
+		safe := make([]string, 0, len(names))
+		for _, name := range names {
+			if config.DatabasePattern.MatchString(name) {
+				safe = append(safe, name)
+			}
 		}
-		if file, ok := values["file"].(string); ok && (file == "directory" || file == "copy-root" || file == "source.pgpass" || file == "source-ca.pem" || file == "system-ca-bundle") {
-			out["file"] = file
-		}
+		out["followers"] = safe
 	}
-	return out
+	if drops, ok := values["settings"].([]recoveryFloorDecrease); ok {
+		safe := make([]recoveryFloorDecrease, 0, len(drops))
+		for _, drop := range drops {
+			if slices.Contains(steps.FloorSettings, drop.Setting) {
+				safe = append(safe, drop)
+			}
+		}
+		out["settings"] = safe
+	}
+}
+
+func copyWorkspaceAccessDetails(values, out map[string]any) {
+	if stage, ok := values["stage"].(string); ok && (stage == "ancestor" || stage == "source-access") {
+		out["stage"] = stage
+	}
+	if file, ok := values["file"].(string); ok && (file == "directory" || file == "copy-root" || file == "source.pgpass" || file == "source-ca.pem" || file == "system-ca-bundle") {
+		out["file"] = file
+	}
 }
 
 func copyHasSourceCleanupFailure(err error) bool {

@@ -43,9 +43,7 @@ func TestMaterialisationActualStatusSkipsApplicationProbes(t *testing.T) {
 	statusStateRead = func() (engine.State, error) { return engine.State{}, nil }
 	statusPendingRead = func() map[string]bool { return nil }
 	statusBudgetRead = func(got config.Cluster, _ hostinfo.Info) map[string]any {
-		if len(got.Clusters) != 1 || got.Clusters[0].Name != o.Target {
-			t.Fatal("incomplete target omitted from budget")
-		}
+		reject(t, len(got.Clusters) != 1 || got.Clusters[0].Name != o.Target, "incomplete target omitted from budget")
 		return map[string]any{"clusters": []map[string]any{{"name": o.Target, "running": false, "memory_current_mib": 0}}}
 	}
 	statusBudgetWarnings = func(config.Cluster, hostinfo.Info) []output.Warning { return nil }
@@ -60,11 +58,9 @@ func TestMaterialisationActualStatusSkipsApplicationProbes(t *testing.T) {
 		return hostinfo.CPUObservation{}, "", nil
 	}
 	result, err := handleStatus(context.Background(), &Env{Cluster: cfg})
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := result.Data.(statusData)
-	budget := data.Budget["clusters"].([]map[string]any)[0]
+	reject(t, err != nil, err)
+	data := mustAs[statusData](t, result.Data)
+	budget := mustAs[[]map[string]any](t, data.Budget["clusters"])[0]
 	if _, ok := budget["running"]; ok {
 		t.Fatal("partial target reported as stopped in budget")
 	}
@@ -76,9 +72,7 @@ func TestMaterialisationActualStatusSkipsApplicationProbes(t *testing.T) {
 		t.Fatalf("incorrect status: %+v", data.Databases)
 	}
 	raw, err := json.Marshal(data.Databases[0])
-	if err != nil || strings.Contains(string(raw), `"connections"`) || strings.Contains(string(raw), `"cpu"`) {
-		t.Fatalf("status fabricated application facts: %s %v", raw, err)
-	}
+	rejectf(t, err != nil || strings.Contains(string(raw), `"connections"`) || strings.Contains(string(raw), `"cpu"`), "status fabricated application facts: %s %v", raw, err)
 }
 
 func TestMaterialisationActualListingBeforeApplicationQueries(t *testing.T) {
@@ -113,10 +107,8 @@ func TestMaterialisationActualListingBeforeApplicationQueries(t *testing.T) {
 		return nil, nil
 	}
 	result, err := handleDBList(context.Background(), &Env{Cluster: cfg})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows := result.Data.(map[string]any)["databases"].([]databaseInfo)
+	reject(t, err != nil, err)
+	rows := mustAs[[]databaseInfo](t, mustAs[map[string]any](t, result.Data)["databases"])
 	if len(rows) != 2 || rows[0].Name != "orphan" || rows[0].State != stateOrphaned ||
 		rows[1].Name != o.Target || rows[1].State != stateMaterialisationIncomplete ||
 		rows[1].ApplicationReady == nil || *rows[1].ApplicationReady {
@@ -133,20 +125,20 @@ func TestMaterialisationActualListingBeforeApplicationQueries(t *testing.T) {
 	}
 	_, err = handleDBList(context.Background(), &Env{Cluster: cfg})
 	var cliErr *output.CLIError
-	if !errors.As(err, &cliErr) || cliErr.Details.(map[string]any)["reason"] != "cluster_inventory_unavailable" {
-		t.Fatalf("inventory failure: %v", err)
-	}
+	rejectf(t, !errors.As(err, &cliErr) || mustAs[map[string]any](t, cliErr.Details)["reason"] != "cluster_inventory_unavailable", "inventory failure: %v", err)
+}
+
+type reportPhysicalCase struct {
+	name, phase, artifact, inventory, reason string
+	queryResult                              []map[string]string
+	queryErr                                 error
+	port, calls                              int
+	physical                                 string
+	recovery, paused                         *bool
 }
 
 func TestMaterialisationReportingPhysicalFacts(t *testing.T) {
-	for _, tc := range []struct {
-		name, phase, artifact, inventory, reason string
-		queryResult                              []map[string]string
-		queryErr                                 error
-		port, calls                              int
-		physical                                 string
-		recovery, paused                         *bool
-	}{
+	for _, tc := range []reportPhysicalCase{
 		{name: "prepared", phase: materialisationPrepared, physical: "unknown"},
 		{name: "failed", phase: materialisationFailed, reason: "recovery_parameter_mismatch", physical: "unknown"},
 		{name: "failed paused", phase: materialisationFailed, reason: "recovery_parameter_mismatch", artifact: materialisationRegistered, inventory: "online",
@@ -166,72 +158,81 @@ func TestMaterialisationReportingPhysicalFacts(t *testing.T) {
 			queryResult: []map[string]string{{"in_recovery": "maybe", "replay_paused": "f"}}, port: config.TemporaryPortMin, calls: 1, physical: "online"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			o, root := materialisationFixture(t)
-			o.Job = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-			if _, err := createMaterialisation(o, root); err != nil {
-				t.Fatal(err)
-			}
-			o.Phase, o.ArtifactStage, o.Reason = tc.phase, tc.artifact, tc.reason
-			if tc.artifact != "" {
-				o.TemporaryPort = config.TemporaryPortMin
-				o.DataIdentity = materialisationFileID{Inode: 1, UID: materialisationRecordUID}
-				o.ConfigIdentity = materialisationFileID{Inode: 2, UID: materialisationRecordUID}
-			}
-			raw, _ := json.Marshal(o)
-			path, _ := materialisationPath(o.Target)
-			if err := os.WriteFile(path, raw, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			oldInventory, oldQuery, oldVerify := materialisationReportInventory, materialisationReportQuery, materialisationReportArtifactsVerified
-			t.Cleanup(func() {
-				materialisationReportInventory, materialisationReportQuery, materialisationReportArtifactsVerified = oldInventory, oldQuery, oldVerify
-			})
-			materialisationReportInventory = func(context.Context) (map[string]string, error) {
-				return map[string]string{o.Target: tc.inventory}, nil
-			}
-			materialisationReportArtifactsVerified = func(materialisationOwnership, string) bool { return true }
-			calls := 0
-			materialisationReportQuery = func(_ context.Context, port int) ([]map[string]string, error) {
-				calls++
-				if port != tc.port {
-					t.Errorf("port %d want %d", port, tc.port)
-				}
-				if len(tc.queryResult) == 1 {
-					tc.queryResult[0]["data_directory"] = o.DataPath
-					tc.queryResult[0]["port"] = fmt.Sprint(port)
-				}
-				return tc.queryResult, tc.queryErr
-			}
-			cfg := config.DefaultCluster()
-			cfg.Server.DataRoot = root
-			cfg.Clusters = []config.ClusterSpec{{Name: o.Target, Size: "small"}}
-			reports, snapshot, err := materialisationReports(context.Background(), cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := reports[o.Target]
-			if calls != tc.calls || r.Reason != tc.reason || r.PhysicalState != tc.physical || !equalReportBool(r.InRecovery, tc.recovery) ||
-				!equalReportBool(r.ReplayPaused, tc.paused) || r.Job != o.Job {
-				t.Fatalf("report %+v calls %d", r, calls)
-			}
-			if err := unchangedMaterialisationReports(cfg, snapshot); err != nil {
-				t.Fatal(err)
-			}
-			row := incompleteStatusRow(cfg, o.Target, r)
-			encoded, err := json.Marshal(row)
-			if err != nil || row.State != "incomplete" || row.ApplicationReady == nil || *row.ApplicationReady ||
-				strings.Contains(string(encoded), `"connections"`) || strings.Contains(string(encoded), "private raw log") {
-				t.Fatalf("unsafe row %s %v", encoded, err)
-			}
-			list := incompleteDatabaseListRow(databaseInfo{Name: o.Target, State: "following", Exists: true}, r)
-			encoded, err = json.Marshal(list)
-			if err != nil || list.State != "incomplete" || strings.Contains(string(encoded), `"exists"`) {
-				t.Fatalf("unsafe list row %s %v", encoded, err)
-			}
+			runReportPhysicalCase(t, tc)
 		})
 	}
 }
 
+func runReportPhysicalCase(t *testing.T, tc reportPhysicalCase) {
+	t.Helper()
+	o, root := materialisationFixture(t)
+	o.Job = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	if _, err := createMaterialisation(o, root); err != nil {
+		t.Fatal(err)
+	}
+	o.Phase, o.ArtifactStage, o.Reason = tc.phase, tc.artifact, tc.reason
+	if tc.artifact != "" {
+		o.TemporaryPort = config.TemporaryPortMin
+		o.DataIdentity = materialisationFileID{Inode: 1, UID: materialisationRecordUID}
+		o.ConfigIdentity = materialisationFileID{Inode: 2, UID: materialisationRecordUID}
+	}
+	raw, _ := json.Marshal(o)
+	path, _ := materialisationPath(o.Target)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldInventory, oldQuery, oldVerify := materialisationReportInventory, materialisationReportQuery, materialisationReportArtifactsVerified
+	t.Cleanup(func() {
+		materialisationReportInventory, materialisationReportQuery, materialisationReportArtifactsVerified = oldInventory, oldQuery, oldVerify
+	})
+	materialisationReportInventory = func(context.Context) (map[string]string, error) {
+		return map[string]string{o.Target: tc.inventory}, nil
+	}
+	materialisationReportArtifactsVerified = func(materialisationOwnership, string) bool { return true }
+	calls := 0
+	materialisationReportQuery = func(_ context.Context, port int) ([]map[string]string, error) {
+		calls++
+		if port != tc.port {
+			t.Errorf("port %d want %d", port, tc.port)
+		}
+		if len(tc.queryResult) == 1 {
+			tc.queryResult[0]["data_directory"] = o.DataPath
+			tc.queryResult[0]["port"] = fmt.Sprint(port)
+		}
+		return tc.queryResult, tc.queryErr
+	}
+	cfg := config.DefaultCluster()
+	cfg.Server.DataRoot = root
+	cfg.Clusters = []config.ClusterSpec{{Name: o.Target, Size: "small"}}
+	reports, snapshot, err := materialisationReports(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := reports[o.Target]
+	if calls != tc.calls || r.Reason != tc.reason || r.PhysicalState != tc.physical || !equalReportBool(r.InRecovery, tc.recovery) ||
+		!equalReportBool(r.ReplayPaused, tc.paused) || r.Job != o.Job {
+		t.Fatalf("report %+v calls %d", r, calls)
+	}
+	if err := unchangedMaterialisationReports(cfg, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	assertIncompleteReportRows(t, cfg, o.Target, r)
+}
+
+func assertIncompleteReportRows(t *testing.T, cfg config.Cluster, target string, r materialisationReport) {
+	t.Helper()
+	row := incompleteStatusRow(cfg, target, r)
+	encoded, err := json.Marshal(row)
+	if err != nil || row.State != "incomplete" || row.ApplicationReady == nil || *row.ApplicationReady ||
+		strings.Contains(string(encoded), `"connections"`) || strings.Contains(string(encoded), "private raw log") {
+		t.Fatalf("unsafe row %s %v", encoded, err)
+	}
+	list := incompleteDatabaseListRow(databaseInfo{Name: target, State: "following", Exists: true}, r)
+	encoded, err = json.Marshal(list)
+	if err != nil || list.State != "incomplete" || strings.Contains(string(encoded), `"exists"`) {
+		t.Fatalf("unsafe list row %s %v", encoded, err)
+	}
+}
 func boolPointer(v bool) *bool { return &v }
 func equalReportBool(a, b *bool) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
@@ -248,9 +249,7 @@ func TestMaterialisationReportingRejectsUntrustedAndChanged(t *testing.T) {
 	materialisationReportInventory = func(context.Context) (map[string]string, error) { return nil, nil }
 	t.Cleanup(func() { materialisationReportInventory = oldInventory })
 	_, snapshot, err := materialisationReports(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	path, _ := materialisationPath(o.Target)
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
@@ -277,13 +276,9 @@ func TestMaterialisationReportingForeignAndUnsafeJob(t *testing.T) {
 	materialisationReportInventory = func(context.Context) (map[string]string, error) { return nil, nil }
 	t.Cleanup(func() { materialisationReportInventory = oldInventory })
 	reports, _, err := materialisationReports(context.Background(), cfg)
-	if err != nil || reports[o.Target].Job != "" {
-		t.Fatalf("unsafe job label: %+v %v", reports, err)
-	}
+	rejectf(t, err != nil || reports[o.Target].Job != "", "unsafe job label: %+v %v", reports, err)
 	view, _, err := incompleteDiagnosticsView(cfg)
-	if err != nil || len(view.Clusters) != 1 || view.Clusters[0].Name != "other" {
-		t.Fatalf("diagnostic view: %+v %v", view, err)
-	}
+	rejectf(t, err != nil || len(view.Clusters) != 1 || view.Clusters[0].Name != "other", "diagnostic view: %+v %v", view, err)
 	followHostInstance = func() (string, error) { return "foreign", nil }
 	if _, _, err := materialisationReports(context.Background(), cfg); output.ExitCode(err) != output.ExitPrecondition {
 		t.Fatalf("foreign record: %v", err)
@@ -322,13 +317,9 @@ func TestMaterialisationReportingChangesDuringSample(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Server.DataRoot = root
 	reports, before, err := materialisationReports(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	r := reports[o.Target]
-	if r.PhysicalState != "unknown" || r.InRecovery != nil || r.ReplayPaused != nil {
-		t.Fatalf("accepted stale physical sample: %+v", r)
-	}
+	rejectf(t, r.PhysicalState != "unknown" || r.InRecovery != nil || r.ReplayPaused != nil, "accepted stale physical sample: %+v", r)
 	if err := unchangedMaterialisationReports(cfg, before); output.ExitCode(err) != output.ExitPrecondition {
 		t.Fatalf("changed metadata: %v", err)
 	}
@@ -340,7 +331,7 @@ func TestMaterialisationReportingUnsafeRecordMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	path, _ := materialisationPath(o.Target)
-	if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // intentionally unsafe record
+	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.DefaultCluster()

@@ -53,6 +53,76 @@ type BuildID struct {
 	Channel string `json:"channel"`
 }
 
+func parseInstallParams(env *Env) (installParams, error) {
+	var p installParams
+	// Lenient decode: a newer operator may add optional fields.
+	if len(bytes.TrimSpace(env.Req.Params)) > 0 {
+		if err := json.Unmarshal(env.Req.Params, &p); err != nil {
+			return p, output.NewError(output.CodeUsage, "params do not decode: "+err.Error(), output.ExitUsage, "")
+		}
+	}
+	p.SHA256 = strings.ToLower(strings.TrimSpace(p.SHA256))
+	if err := validateInstallParams(p); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+func stageAndVerifyInstall(ctx context.Context, p installParams, progress func(string)) error {
+	sum, err := stageBinary(p.Path)
+	if err != nil {
+		_ = os.Remove(installStaging)
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(sum), []byte(p.SHA256)) != 1 {
+		_ = os.Remove(installStaging)
+		return verificationFailed("the pushed binary does not match the expected sha256", map[string]any{"reason": "sha256_mismatch"})
+	}
+	progress("sha256 verified")
+
+	// The staged binary must report the expected build.
+	got, err := binaryVersion(ctx, installStaging)
+	if err != nil {
+		_ = os.Remove(installStaging)
+		return verificationFailed("the pushed binary failed its version preflight", map[string]any{"reason": "preflight_failed"})
+	}
+	want := BuildID{Version: p.Version, Commit: p.Commit, Channel: p.Channel}
+	if got != want {
+		_ = os.Remove(installStaging)
+		return verificationFailed(
+			fmt.Sprintf("the pushed binary reports %s (%s, %s), expected %s (%s, %s)", got.Version, got.Commit, got.Channel, want.Version, want.Commit, want.Channel),
+			map[string]any{"reason": "version_mismatch", "got": got, "want": want},
+		)
+	}
+	progress("version preflight passed")
+	return nil
+}
+
+func swapInstalledBinary(ctx context.Context) (*BuildID, bool, error) {
+	var previous *BuildID
+	hadPrevious := false
+	if _, err := os.Lstat(BinaryPath); err == nil {
+		if prev, err := binaryVersion(ctx, BinaryPath); err == nil {
+			previous = &prev
+		}
+		_ = os.Remove(installPrevious)
+		if err := os.Link(BinaryPath, installPrevious); err != nil {
+			_ = os.Remove(installStaging)
+			return nil, false, err
+		}
+		hadPrevious = true
+	}
+	if err := os.Chmod(installStaging, 0o755); err != nil { //nolint:gosec // G302: §6.2 binary mode.
+		_ = os.Remove(installStaging)
+		return nil, false, err
+	}
+	if err := os.Rename(installStaging, BinaryPath); err != nil {
+		_ = os.Remove(installStaging)
+		return nil, false, err
+	}
+	return previous, hadPrevious, nil
+}
+
 // InstallResult is the upgrade.install result.
 type InstallResult struct {
 	Previous   *BuildID `json:"previous"`
@@ -61,17 +131,11 @@ type InstallResult struct {
 }
 
 func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
-	var p installParams
-	// Lenient decode: a newer operator may add optional fields.
-	if len(bytes.TrimSpace(env.Req.Params)) > 0 {
-		if err := json.Unmarshal(env.Req.Params, &p); err != nil {
-			return Result{}, output.NewError(output.CodeUsage, "params do not decode: "+err.Error(), output.ExitUsage, "")
-		}
-	}
-	p.SHA256 = strings.ToLower(strings.TrimSpace(p.SHA256))
-	if err := validateInstallParams(p); err != nil {
+	p, err := parseInstallParams(env)
+	if err != nil {
 		return Result{}, err
 	}
+	want := BuildID{Version: p.Version, Commit: p.Commit, Channel: p.Channel}
 	progress := func(line string) {
 		env.Report(output.Event{Type: "log", Step: "upgrade.install", Line: line})
 	}
@@ -84,53 +148,13 @@ func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
 
 	// 2. Copy into a root-only staging file while hashing, so the verified
 	// bytes are the installed bytes.
-	sum, err := stageBinary(p.Path)
-	if err != nil {
-		_ = os.Remove(installStaging)
+	if err := stageAndVerifyInstall(ctx, p, progress); err != nil {
 		return Result{}, err
 	}
-	if subtle.ConstantTimeCompare([]byte(sum), []byte(p.SHA256)) != 1 {
-		_ = os.Remove(installStaging)
-		return Result{}, verificationFailed("the pushed binary does not match the expected sha256", map[string]any{"reason": "sha256_mismatch"})
-	}
-	progress("sha256 verified")
-
-	// 3. The staged binary must report the expected build.
-	got, err := binaryVersion(ctx, installStaging)
-	if err != nil {
-		_ = os.Remove(installStaging)
-		return Result{}, verificationFailed("the pushed binary failed its version preflight", map[string]any{"reason": "preflight_failed"})
-	}
-	want := BuildID{Version: p.Version, Commit: p.Commit, Channel: p.Channel}
-	if got != want {
-		_ = os.Remove(installStaging)
-		return Result{}, verificationFailed(
-			fmt.Sprintf("the pushed binary reports %s (%s, %s), expected %s (%s, %s)", got.Version, got.Commit, got.Channel, want.Version, want.Commit, want.Channel),
-			map[string]any{"reason": "version_mismatch", "got": got, "want": want},
-		)
-	}
-	progress("version preflight passed")
 
 	// 4. Swap: vaire -> vaire.prev (hard link), vaire.new -> vaire.
-	var previous *BuildID
-	hadPrevious := false
-	if _, err := os.Lstat(BinaryPath); err == nil {
-		if prev, err := binaryVersion(ctx, BinaryPath); err == nil {
-			previous = &prev
-		}
-		_ = os.Remove(installPrevious)
-		if err := os.Link(BinaryPath, installPrevious); err != nil {
-			_ = os.Remove(installStaging)
-			return Result{}, err
-		}
-		hadPrevious = true
-	}
-	if err := os.Chmod(installStaging, 0o755); err != nil { //nolint:gosec // G302: §6.2 binary mode.
-		_ = os.Remove(installStaging)
-		return Result{}, err
-	}
-	if err := os.Rename(installStaging, BinaryPath); err != nil {
-		_ = os.Remove(installStaging)
+	previous, hadPrevious, err := swapInstalledBinary(ctx)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := syncDir(filepath.Dir(BinaryPath)); err != nil {
@@ -228,7 +252,7 @@ func installSourceInvalid(path, why string) error {
 // stageBinary copies src to installStaging (root, 0700) and returns the
 // sha256 of the copied bytes.
 func stageBinary(src string) (string, error) {
-	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: path matched /tmp/vaire-* and was checked.
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return "", err
 	}
@@ -264,7 +288,7 @@ func stageBinary(src string) (string, error) {
 func binaryVersion(ctx context.Context, path string) (BuildID, error) {
 	ctx, cancel := context.WithTimeout(ctx, installVersionLimit)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, path, "version", "--output", "json").Output() //nolint:gosec // G204: verified staged or installed binary.
+	raw, err := exec.CommandContext(ctx, path, "version", "--output", "json").Output()
 	if err != nil {
 		return BuildID{}, err
 	}
@@ -286,7 +310,7 @@ func binaryVersion(ctx context.Context, path string) (BuildID, error) {
 func newBinarySelfcheck(ctx context.Context) (any, bool) {
 	ctx, cancel := context.WithTimeout(ctx, installCheckLimit)
 	defer cancel()
-	raw, runErr := exec.CommandContext(ctx, BinaryPath, "node", "selfcheck", "--output", "json").Output() //nolint:gosec // G204: fixed node binary path.
+	raw, runErr := exec.CommandContext(ctx, BinaryPath, "node", "selfcheck", "--output", "json").Output()
 	var env struct {
 		OK   bool `json:"ok"`
 		Data struct {
@@ -320,7 +344,7 @@ func verificationFailed(message string, details map[string]any) error {
 }
 
 func syncDir(dir string) error {
-	d, err := os.Open(dir) //nolint:gosec // G304: fixed binary directory.
+	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}

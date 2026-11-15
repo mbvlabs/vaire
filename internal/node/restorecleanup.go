@@ -24,7 +24,7 @@ var restoreCleanupRegistration = func(name, source, dataRoot string, sourcePort,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", "port") //nolint:gosec // exact validated managed cluster name
+	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", "port")
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.Output()
 	effective, parseErr := strconv.Atoi(strings.TrimSpace(string(out)))
@@ -61,46 +61,81 @@ func (a *restoreCleanup) close() {
 }
 
 func openRestoreCleanup(cfg config.Cluster, r backup.Restore) (*restoreCleanup, error) {
+	if err := validateRestoreCleanupRecord(cfg, r); err != nil {
+		return nil, err
+	}
+	return openRestoreCleanupArtifacts(cfg, r)
+}
+
+func validateRestoreCleanupRecord(cfg config.Cluster, r backup.Restore) error {
 	t := r.Attempt
-	if t == nil || r.ID == "" || r.InstanceID == "" || r.OperationID == "" ||
+	if t == nil {
+		return incompleteMaterialisation(backup.RestoringName(r.Database))
+	}
+	if err := validateRestoreCleanupPair(r, t); err != nil {
+		return err
+	}
+	if err := validateRestoreCleanupAttempt(cfg, t); err != nil {
+		return err
+	}
+	instance, err := currentFollowInstance()
+	if err != nil || instance != r.InstanceID {
+		return incompleteMaterialisation(t.Target)
+	}
+	spec, ok := cfg.ClusterByName(r.Database)
+	if !ok || spec.Port != t.SourcePort || spec.Stanza != t.Stanza {
+		return incompleteMaterialisation(t.Target)
+	}
+	state, err := restoreAbsenceState()
+	if err != nil {
+		return err
+	}
+	job, err := materialisationJob(state, r.ID)
+	if err != nil || job.Job != t.Kind || job.DB != r.Database || !job.Final() {
+		return incompleteMaterialisation(t.Target)
+	}
+	uid, err := materialisationPostgresUID()
+	if err != nil || t.DataIdentity.UID != uid || t.ConfigIdentity.UID != uid {
+		return incompleteMaterialisation(t.Target)
+	}
+	return nil
+}
+
+func validateRestoreCleanupPair(r backup.Restore, t *backup.MaterialisationAttempt) error {
+	if r.ID == "" || r.InstanceID == "" || r.OperationID == "" ||
 		r.Phase != backup.PhaseFailed || !r.MaterialisationPending || r.MaterialisationCleaned ||
 		r.Aside != "" || r.Database != t.Source || r.ID != t.JobID || r.InstanceID != t.InstanceID ||
 		r.OperationID != t.OperationID || t.Target != backup.RestoringName(r.Database) ||
-		(t.Kind != "restore" && t.Kind != "recover") || (t.Kind == "recover") != r.Recover ||
-		t.RecordDigest == "" || t.TemporaryPort < config.TemporaryPortMin || t.TemporaryPort > config.TemporaryPortMax ||
+		(t.Kind != "restore" && t.Kind != "recover") || (t.Kind == "recover") != r.Recover {
+		return incompleteMaterialisation(backup.RestoringName(r.Database))
+	}
+	return nil
+}
+
+func validateRestoreCleanupAttempt(cfg config.Cluster, t *backup.MaterialisationAttempt) error {
+	if t.RecordDigest == "" || t.TemporaryPort < config.TemporaryPortMin || t.TemporaryPort > config.TemporaryPortMax ||
 		t.ArtifactStage != materialisationRegistered || t.DataIdentity.Inode == 0 ||
 		t.ConfigIdentity.Inode == 0 || t.ReservationIdentity.Inode == 0 || t.ReservationIdentity.Digest == "" ||
 		(t.Reason != "recovery_requirements_unmet" && t.Reason != "recovery_parameter_mismatch") ||
 		t.DataPath != filepath.Join(cfg.Server.DataRoot, t.Target) ||
 		t.ConfigPath != filepath.Join(materialisationConfigRoot, t.Target) {
-		return nil, incompleteMaterialisation(backup.RestoringName(r.Database))
+		return incompleteMaterialisation(t.Target)
 	}
-	instance, err := currentFollowInstance()
-	if err != nil || instance != r.InstanceID {
-		return nil, incompleteMaterialisation(t.Target)
-	}
-	spec, ok := cfg.ClusterByName(r.Database)
-	if !ok || spec.Port != t.SourcePort || spec.Stanza != t.Stanza {
-		return nil, incompleteMaterialisation(t.Target)
-	}
-	state, err := restoreAbsenceState()
+	return nil
+}
+
+func openRestoreCleanupArtifacts(cfg config.Cluster, r backup.Restore) (*restoreCleanup, error) {
+	t := r.Attempt
+	uid, err := materialisationPostgresUID()
 	if err != nil {
 		return nil, err
-	}
-	job, err := materialisationJob(state, r.ID)
-	if err != nil || job.Job != t.Kind || job.DB != r.Database || !job.Final() {
-		return nil, incompleteMaterialisation(t.Target)
-	}
-	uid, err := materialisationPostgresUID()
-	if err != nil || t.DataIdentity.UID != uid || t.ConfigIdentity.UID != uid {
-		return nil, incompleteMaterialisation(t.Target)
 	}
 	a := &restoreCleanup{record: r, dataRoot: cfg.Server.DataRoot}
 	a.dataParent, a.dataInfo, a.dataAncestors, err = openMaterialisationParent(a.dataRoot, uid, true)
 	if err != nil {
 		return nil, err
 	}
-	a.confParent, a.confInfo, a.confAncestors, err = openMaterialisationParent(materialisationConfigRoot, materialisationRecordUID, false)
+	a.confParent, a.confInfo, a.confAncestors, err = openMaterialisationConfigParent(uid)
 	if err != nil {
 		a.close()
 		return nil, err

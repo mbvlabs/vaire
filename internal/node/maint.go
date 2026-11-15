@@ -197,7 +197,8 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
 		data := map[string]any{"db": p.DB, "kind": p.Kind, "statements": statements, "dry_run": true, "heavy_io": p.Heavy()}
 		if len(statements) == 0 {
-			data["command"] = "vacuumdb " + strings.Join(vacuumdbArgs(spec, p, vacuumJobs(env.Cluster)), " ")
+			jobs := vacuumJobs(env.Cluster) //nolint:contextcheck // hostinfo.Detect reads local host facts and bounds its own probes.
+			data["command"] = "vacuumdb " + strings.Join(vacuumdbArgs(spec, p, jobs), " ")
 		}
 		return Result{Data: data}, nil
 	}
@@ -298,7 +299,8 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	local.Timeout = maintRunTimeout
 	var runErr error
 	if len(statements) == 0 {
-		args := vacuumdbArgs(spec, p, vacuumJobs(env.Cluster))
+		jobs := vacuumJobs(env.Cluster) //nolint:contextcheck // hostinfo.Detect reads local host facts and bounds its own probes.
+		args := vacuumdbArgs(spec, p, jobs)
 		res["command"] = "vacuumdb " + strings.Join(args, " ")
 		logLine(env.Report, env.Job, "vacuumdb "+strings.Join(args, " "))
 		runErr = env.shell().Exec(ctx, env.Job, vacuumdbCommand(spec, args), env.Report)

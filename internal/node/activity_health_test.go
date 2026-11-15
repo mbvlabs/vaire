@@ -26,9 +26,7 @@ func TestActivityHealthDoesNotCreateStore(t *testing.T) {
 		Retention:    time.Hour,
 	}
 	h, ok := activityStoreHealth(context.Background(), store)
-	if !ok {
-		t.Fatal("health of an absent store is unknown, want an absent reading")
-	}
+	reject(t, !ok, "health of an absent store is unknown, want an absent reading")
 	if h.Exists {
 		t.Error("an absent store is reported as existing")
 	}
@@ -67,7 +65,7 @@ func TestActivityHealthUnsafeDirectory(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the test needs an unsafe mode for the check.
+	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	store := &activity.Store{
@@ -77,9 +75,7 @@ func TestActivityHealthUnsafeDirectory(t *testing.T) {
 		Retention:    time.Hour,
 	}
 	h, ok := activityStoreHealth(context.Background(), store)
-	if !ok {
-		t.Fatal("health of an unsafe directory is unknown, want a typed reading")
-	}
+	reject(t, !ok, "health of an unsafe directory is unknown, want a typed reading")
 	if !h.Exists || !h.IsDir {
 		t.Errorf("unsafe directory: exists %t, is_dir %t", h.Exists, h.IsDir)
 	}
@@ -106,12 +102,8 @@ func TestActivityHealthKeepsTypedFailureVisible(t *testing.T) {
 		LossDetected: true, MalformedEvents: 1,
 	}}
 	h, ok := activityStoreHealth(context.Background(), store)
-	if !ok {
-		t.Fatal("a typed health reading was reported as unknown")
-	}
-	if !h.LossDetected || h.MalformedEvents != 1 || h.Writable {
-		t.Fatalf("health = %+v", h)
-	}
+	reject(t, !ok, "a typed health reading was reported as unknown")
+	rejectf(t, !h.LossDetected || h.MalformedEvents != 1 || h.Writable, "health = %+v", h)
 }
 
 // panicHealthStore panics from Health, as a broken store implementation could.
@@ -129,9 +121,7 @@ func TestActivityHealthPanicIsUnknown(t *testing.T) {
 	if _, ok := activityStoreHealth(context.Background(), &panicHealthStore{}); ok {
 		t.Fatal("a panicking store reported known health")
 	}
-	if activityHealthInFlight.Load() {
-		t.Fatal("a panicking store left the health read latched")
-	}
+	reject(t, activityHealthInFlight.Load(), "a panicking store left the health read latched")
 	if _, ok := activityStoreHealth(context.Background(), &fakeActivityStore{health: activity.Health{Exists: true}}); !ok {
 		t.Fatal("health stays unknown after a store panic")
 	}
@@ -192,9 +182,7 @@ func waitActivityHealthReads(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for activityHealthInFlight.Load() {
-		if time.Now().After(deadline) {
-			t.Fatal("an activity health read is still in flight")
-		}
+		reject(t, time.Now().After(deadline), "an activity health read is still in flight")
 		time.Sleep(time.Millisecond)
 	}
 }
@@ -229,9 +217,7 @@ func TestActivityHealthStallIsBounded(t *testing.T) {
 	waitActivityHealthReads(t)
 
 	h, ok := gatherActivityHealth(context.Background())
-	if !ok || !h.Exists || h.Segments != 1 {
-		t.Fatalf("health after the stall = %+v, known %t", h, ok)
-	}
+	rejectf(t, !ok || !h.Exists || h.Segments != 1, "health after the stall = %+v, known %t", h, ok)
 }
 
 // TestActivityHealthKeepsOneReadInFlight is the background bound: repeated
@@ -280,10 +266,8 @@ func TestActivityHealthStallReleasesTheNodeLock(t *testing.T) {
 	store := stalledActivityHealth(t)
 
 	path := filepath.Join(t.TempDir(), "vaire.lock")
-	lock, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: a lock file in the test's temp directory.
-	if err != nil {
-		t.Fatal(err)
-	}
+	lock, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	reject(t, err != nil, err)
 	defer func() { _ = lock.Close() }()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
@@ -298,10 +282,8 @@ func TestActivityHealthStallReleasesTheNodeLock(t *testing.T) {
 
 	// The read is still blocked on the store, yet another operation can take
 	// the lock exclusive: the caller returned and its deferred release ran.
-	other, err := os.OpenFile(path, os.O_RDWR, 0o600) //nolint:gosec // G304: the test's own lock file.
-	if err != nil {
-		t.Fatal(err)
-	}
+	other, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	reject(t, err != nil, err)
 	defer func() { _ = other.Close() }()
 	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatalf("the node lock is still held while the health read stalls: %v", err)

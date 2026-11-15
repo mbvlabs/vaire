@@ -62,31 +62,19 @@ func TestResizeShrinks(t *testing.T) {
 	medium := cfg.Clusters[0]
 	small, large := medium, medium
 	small.Size, large.Size = "small", "large"
-	if !ResizeShrinks(cfg, medium, small) {
-		t.Fatal("medium to small should shrink")
-	}
-	if ResizeShrinks(cfg, medium, large) || ResizeShrinks(cfg, medium, medium) {
-		t.Fatal("growing or keeping the size should not shrink")
-	}
+	reject(t, !ResizeShrinks(cfg, medium, small), "medium to small should shrink")
+	reject(t, ResizeShrinks(cfg, medium, large) || ResizeShrinks(cfg, medium, medium), "growing or keeping the size should not shrink")
 }
 
 func TestProtectionOf(t *testing.T) {
 	protected, all := protectionOf(protectedCluster())
-	if len(protected) != 1 || protected[0] != "app" {
-		t.Fatalf("protected = %v", protected)
-	}
+	rejectf(t, len(protected) != 1 || protected[0] != "app", "protected = %v", protected)
 	want := []ProtectedDatabase{{Name: "app", Protected: true}, {Name: "other"}}
-	if len(all) != len(want) || all[0] != want[0] || all[1] != want[1] {
-		t.Fatalf("databases = %+v, want %+v", all, want)
-	}
+	rejectf(t, len(all) != len(want) || all[0] != want[0] || all[1] != want[1], "databases = %+v, want %+v", all, want)
 	protected, all = protectionOf(config.Cluster{})
-	if protected == nil || all == nil || len(protected)+len(all) != 0 {
-		t.Fatalf("empty cluster: %v %v, want empty, non-nil lists", protected, all)
-	}
+	rejectf(t, protected == nil || all == nil || len(protected)+len(all) != 0, "empty cluster: %v %v, want empty, non-nil lists", protected, all)
 	// A follower's protection carries its source, so the write-code gate can
 	// tell it has no writable path (Phase 6).
 	protected, all = protectionOf(followerCfg())
-	if len(all) != 2 || all[1].Name != "app_follower" || all[1].Follows != "app" || len(protected) != 0 {
-		t.Fatalf("followers = %+v, protected = %v", all, protected)
-	}
+	rejectf(t, len(all) != 2 || all[1].Name != "app_follower" || all[1].Follows != "app" || len(protected) != 0, "followers = %+v, protected = %v", all, protected)
 }

@@ -168,11 +168,11 @@ func (g protectGuard) checkWrite(name, action, code string) error {
 }
 
 // requireWriteCode wraps a method handler so that, when the database it
-// names (params[field]) is protected and applies says the request writes,
+// names (params["db"]) is protected and applies says the request writes,
 // it runs only with a current code from the authenticator app in the
 // request's protect_code secret. A nil applies covers every request that is
 // not a dry run.
-func (g protectGuard) requireWriteCode(action, field string, applies func(rpc.Request) bool,
+func (g protectGuard) requireWriteCode(action string, applies func(rpc.Request) bool,
 	handler func(context.Context, *Env) (Result, error)) func(context.Context, *Env) (Result, error) {
 	return func(ctx context.Context, env *Env) (Result, error) {
 		writes := !env.Req.DryRun
@@ -180,21 +180,29 @@ func (g protectGuard) requireWriteCode(action, field string, applies func(rpc.Re
 			writes = applies(env.Req)
 		}
 		if writes {
-			var params map[string]any
-			_ = json.Unmarshal(env.Req.Params, &params)
-			if name, _ := params[field].(string); name != "" {
-				if spec, ok := env.Cluster.ClusterByName(name); ok && spec.Protected && !spec.IsFollower() {
-					// A follower takes no writes, so a code from the
-					// authenticator app can never authorise one: its handler
-					// or PostgreSQL refuses the write instead (Phase 6).
-					if err := g.checkWrite(name, action, env.Req.Secrets[ProtectCodeSecret]); err != nil {
-						return Result{}, err
-					}
-				}
+			if err := g.checkRequestedWrite(action, env); err != nil {
+				return Result{}, err
 			}
 		}
 		return handler(ctx, env)
 	}
+}
+
+func (g protectGuard) checkRequestedWrite(action string, env *Env) error {
+	var params map[string]any
+	_ = json.Unmarshal(env.Req.Params, &params)
+	name, _ := params["db"].(string)
+	if name == "" {
+		return nil
+	}
+	spec, ok := env.Cluster.ClusterByName(name)
+	if !ok || !spec.Protected || spec.IsFollower() {
+		return nil
+	}
+	// A follower takes no writes, so a code from the authenticator app can
+	// never authorise one: its handler or PostgreSQL refuses the write instead
+	// (Phase 6).
+	return g.checkWrite(name, action, env.Req.Secrets[ProtectCodeSecret])
 }
 
 // sqlWrites reports whether a sql request writes.

@@ -201,7 +201,7 @@ func readFollowOwnership(owner followOwner) (followOwnership, bool, error) {
 	if err != nil {
 		return followOwnership{}, false, err
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a validated database name under the node state directory.
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return followOwnership{}, false, nil
 	}
@@ -245,36 +245,8 @@ func decodeFollowOwnership(raw []byte) (followOwnership, error) {
 	if err := json.Unmarshal(raw, &own); err != nil {
 		return own, err
 	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	start, err := d.Token()
-	if err != nil || start != json.Delim('{') {
-		return followOwnership{}, errors.New("follow ownership is not an object")
-	}
-	present := false
-	for d.More() {
-		token, err := d.Token()
-		if err != nil {
-			return followOwnership{}, err
-		}
-		key, ok := token.(string)
-		if !ok {
-			return followOwnership{}, errors.New("invalid follow ownership key")
-		}
-		var value json.RawMessage
-		if err := d.Decode(&value); err != nil {
-			return followOwnership{}, err
-		}
-		if strings.EqualFold(key, "attempt") {
-			if present {
-				return followOwnership{}, errors.New("duplicate follower attempt fields")
-			}
-			present = true
-			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-				return followOwnership{}, errors.New("null follower attempt")
-			}
-		}
-	}
-	if _, err := d.Token(); err != nil {
+	present, err := followAttemptField(raw)
+	if err != nil {
 		return followOwnership{}, err
 	}
 	if present {
@@ -287,6 +259,45 @@ func decodeFollowOwnership(raw []byte) (followOwnership, error) {
 	return own, nil
 }
 
+// followAttemptField reports whether the raw object has exactly one
+// non-null attempt field, using JSON's case folding for the key.
+func followAttemptField(raw []byte) (bool, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	start, err := d.Token()
+	if err != nil || start != json.Delim('{') {
+		return false, errors.New("follow ownership is not an object")
+	}
+	present := false
+	for d.More() {
+		token, err := d.Token()
+		if err != nil {
+			return false, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return false, errors.New("invalid follow ownership key")
+		}
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return false, err
+		}
+		if !strings.EqualFold(key, "attempt") {
+			continue
+		}
+		if present {
+			return false, errors.New("duplicate follower attempt fields")
+		}
+		present = true
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return false, errors.New("null follower attempt")
+		}
+	}
+	if _, err := d.Token(); err != nil {
+		return false, err
+	}
+	return present, nil
+}
+
 // clearFollowOwnership removes the record after the operation no longer owns
 // the paths. A missing record is already clear.
 func clearFollowOwnership(name string) error {
@@ -297,7 +308,7 @@ func clearFollowOwnership(name string) error {
 	// Old completed follows retain their existing cleanup semantics. A new
 	// pending/retained attempt must not be erased by a legacy cleanup path;
 	// exact-target cleanup needs its own separately checked adapter.
-	raw, err := os.ReadFile(path) //nolint:gosec // validated name under node state
+	raw, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -326,7 +337,7 @@ func retireFollowOwnershipAfterDrop(name, source, generation string) error {
 	if err != nil {
 		return err
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a validated database name under the node state directory.
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

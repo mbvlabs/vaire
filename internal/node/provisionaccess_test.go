@@ -26,9 +26,7 @@ func TestCreateAndCopyAccessFailurePreventsPoolerExposure(t *testing.T) {
 	spec := config.ClusterSpec{Name: "copyapp", Node: "db1", Port: 5434, Stanza: "copyapp-abcdef", Size: "small", StatementTimeout: "60s"}
 	cfg.Clusters = append(cfg.Clusters, spec)
 	previous, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	oldKernel, oldNew, oldPooler, oldExists := createApplyKernel, createApplyNewCluster, createReloadPoolers, createClusterExists
 	t.Cleanup(func() {
 		createApplyKernel, createApplyNewCluster, createReloadPoolers, createClusterExists = oldKernel, oldNew, oldPooler, oldExists
@@ -50,9 +48,7 @@ func TestCreateAndCopyAccessFailurePreventsPoolerExposure(t *testing.T) {
 	for _, copyMode := range []bool{false, true} {
 		env := &Env{Cluster: cfg, Req: rpc.Request{}}
 		_, _, err := provisionDatabase(context.Background(), env, cfg, previous, spec, createOptions{deferInitialBackup: copyMode})
-		if err == nil || target != spec.Name || exposed != 0 {
-			t.Fatalf("copy=%v target=%q exposure=%d err=%v", copyMode, target, exposed, err)
-		}
+		rejectf(t, err == nil || target != spec.Name || exposed != 0, "copy=%v target=%q exposure=%d err=%v", copyMode, target, exposed, err)
 	}
 }
 
@@ -120,15 +116,11 @@ func TestExistingSettlementExcludesAccessAndOtherTargets(t *testing.T) {
 	}
 	got := existingSettlementSteps(catalog, cfg, "app")
 	want := []string{"postgres-roles-v1@app", "after-v1@app"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("existing target settlement = %v, want %v", got, want)
-	}
+	rejectf(t, !slices.Equal(got, want), "existing target settlement = %v, want %v", got, want)
 	_, _, err := engine.Apply(context.Background(), catalog, cfg, engine.Runtime{}, engine.Options{
 		Only: got, DB: "app", JournalPath: filepath.Join(t.TempDir(), "journal.json"),
 	})
-	if err != nil || !slices.Equal(state.events, []string{"postgres-roles-v1", "after-v1"}) {
-		t.Fatalf("existing settlement inspected or widened access: %v, %v", state.events, err)
-	}
+	rejectf(t, err != nil || !slices.Equal(state.events, []string{"postgres-roles-v1", "after-v1"}), "existing settlement inspected or widened access: %v, %v", state.events, err)
 }
 
 func TestOwnedProvisionStagesAndExactAuthorization(t *testing.T) {
@@ -144,31 +136,21 @@ func TestOwnedProvisionStagesAndExactAuthorization(t *testing.T) {
 	var stages [][]string
 	apply := func(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		stages = append(stages, slices.Clone(opts.Only))
-		if opts.DB != "app" || opts.Confirm.Server || !opts.Confirm.Covers("app") || opts.Confirm.Covers("other") {
-			t.Fatalf("scope: %+v", opts)
-		}
+		rejectf(t, opts.DB != "app" || opts.Confirm.Server || !opts.Confirm.Covers("app") || opts.Confirm.Covers("other"), "scope: %+v", opts)
 		for target, allowed := range opts.InternalAccess {
-			if !allowed || target != "app" || len(opts.InternalAccess) != 1 {
-				t.Fatalf("internal authorization crossed targets: %v", opts.InternalAccess)
-			}
+			rejectf(t, !allowed || target != "app" || len(opts.InternalAccess) != 1, "internal authorization crossed targets: %v", opts.InternalAccess)
 		}
-		if len(stages) == 2 && !opts.InternalAccess["app"] {
-			t.Fatal("access stage not internally authorized")
-		}
+		reject(t, len(stages) == 2 && !opts.InternalAccess["app"], "access stage not internally authorized")
 		opts.JournalPath = path
 		return engine.Apply(ctx, catalog, cfg, rt, opts)
 	}
 	err := provisionOwnedTargetWith(context.Background(), cfg, engine.Runtime{}, "app", "", nil, catalog, apply, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	if len(stages) != 3 || !slices.Equal(stages[0], []string{"postgres-config-v1@app", "postgres-roles-v1@app"}) ||
 		!slices.Equal(stages[1], []string{"postgres-access-v1@app"}) || !slices.Equal(stages[2], []string{"after-v1@app"}) {
 		t.Fatalf("stages: %v", stages)
 	}
-	if !state.installed || !slices.Equal(state.events, []string{"postgres-config-v1", "postgres-roles-v1", "inspect", "inspect", "grant", "after-v1"}) {
-		t.Fatalf("events: %v", state.events)
-	}
+	rejectf(t, !state.installed || !slices.Equal(state.events, []string{"postgres-config-v1", "postgres-roles-v1", "inspect", "inspect", "grant", "after-v1"}), "events: %v", state.events)
 }
 
 func TestOwnedProvisionFailureStopsBeforeExposure(t *testing.T) {
@@ -189,13 +171,9 @@ func TestOwnedProvisionFailureStopsBeforeExposure(t *testing.T) {
 	if err == nil {
 		exposed = true // callers expose only on success
 	}
-	if err == nil || exposed || state.installed || slices.Contains(state.events, "after-v1") {
-		t.Fatalf("failure exposed target: %v, %v", state.events, err)
-	}
+	rejectf(t, err == nil || exposed || state.installed || slices.Contains(state.events, "after-v1"), "failure exposed target: %v, %v", state.events, err)
 	j, err := engine.LoadJournal(path)
-	if err != nil || j.Steps["postgres-access-v1@app"].Status == engine.StatusCompleted {
-		t.Fatalf("failed grant journal: %+v, %v", j, err)
-	}
+	rejectf(t, err != nil || j.Steps["postgres-access-v1@app"].Status == engine.StatusCompleted, "failed grant journal: %+v, %v", j, err)
 	if err := provisionOwnedTargetWith(context.Background(), cfg, engine.Runtime{}, "standby", "", nil, catalog, apply, nil); err == nil {
 		t.Fatal("physical follower accepted for local access writes")
 	}
@@ -231,22 +209,21 @@ func TestBootstrapStagesOwnedTargetsBeforeSharedExposure(t *testing.T) {
 	engine.ClusterView = nil
 	t.Cleanup(func() { engine.ClusterView = oldView })
 	var runs []string
+	var applied engine.ApplyData
+	var warnings []output.Warning
+	var runErr error
 	runner := func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		runs = append(runs, strings.Join(opts.Only, ","))
 		for name := range opts.InternalAccess {
-			if name != opts.DB || len(opts.InternalAccess) != 1 {
-				t.Fatalf("internal access crosses target: %+v", opts)
-			}
+			rejectf(t, name != opts.DB || len(opts.InternalAccess) != 1, "internal access crosses target: %+v", opts)
 		}
-		return engine.ApplyData{}, nil, nil
+		return applied, warnings, runErr
 	}
 	owner := &bootstrapOwnership{Targets: map[string]bool{"app": false, "other": false}}
 	complete := func(target string) error { owner.Targets[target] = true; return nil }
 	_, _, err := bootstrapDatabaseSteps(context.Background(), cfg, engine.Runtime{}, nil, catalog, runner, nil, "", owner, complete)
 	want := []string{"kernel-tuning-v1", "postgres-roles-v1@app", "postgres-access-v1@app", "postgres-roles-v1@other", "postgres-access-v1@other", "pgbouncer-v1"}
-	if err != nil || !slices.Equal(runs, want) {
-		t.Fatalf("bootstrap stages %v, err %v", runs, err)
-	}
+	rejectf(t, err != nil || !slices.Equal(runs, want), "bootstrap stages %v, err %v", runs, err)
 	runs = nil
 	owner.Targets["app"], owner.Targets["other"] = false, false
 	fail := func(ctx context.Context, c []engine.Step, cfg config.Cluster, rt engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
@@ -256,7 +233,5 @@ func TestBootstrapStagesOwnedTargetsBeforeSharedExposure(t *testing.T) {
 		return runner(ctx, c, cfg, rt, opts)
 	}
 	_, _, err = bootstrapDatabaseSteps(context.Background(), cfg, engine.Runtime{}, nil, catalog, fail, nil, "", owner, complete)
-	if err == nil || slices.Contains(runs, "pgbouncer-v1") {
-		t.Fatalf("bootstrap exposed a failed target: %v, %v", runs, err)
-	}
+	rejectf(t, err == nil || slices.Contains(runs, "pgbouncer-v1"), "bootstrap exposed a failed target: %v, %v", runs, err)
 }

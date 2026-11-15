@@ -298,7 +298,7 @@ func (w *activityWriter) closeAbandoned(rec *activityRecorder, start activity.Ev
 // The caller waits at most activityWriteWait and treats a timeout as a lost
 // event, which the checked-start policy turns into a refusal.
 func (r *activityRecorder) append(_ context.Context, ev activity.Event) error {
-	return r.submitEvent(ev, false)
+	return r.submitEvent(ev, false) //nolint:contextcheck // best-effort history writes deliberately outlive the caller.
 }
 
 // appendChecked hands over the start event of an operation that must not run
@@ -497,7 +497,7 @@ func (s *activityScope) beginEvent(ctx context.Context, checked bool) error {
 	ev := s.event(activity.OutcomeStarted, "", "", 0)
 	var err error
 	if checked {
-		err = s.rec.appendChecked(ev)
+		err = s.rec.appendChecked(ev) //nolint:contextcheck // a checked start is recorded independently of the caller's context.
 	} else {
 		err = s.rec.append(ctx, ev)
 	}
@@ -600,13 +600,13 @@ func finishActivitySuccess(ctx context.Context, scope *activityScope, res *Resul
 // recorder wraps next so only typed step events are added to history. Raw
 // log, progress and warning payloads are ignored: they stay in the run log
 // and stream, not in the agent-shareable history.
-func (s *activityScope) recorder(next engine.Reporter) engine.Reporter {
+func (s *activityScope) recorder(ctx context.Context, next engine.Reporter) engine.Reporter {
 	if s == nil {
 		return next
 	}
 	return func(ev output.Event) {
 		if ev.Type == "step" {
-			s.recordStep(ev, next)
+			s.recordStep(ctx, ev, next)
 		}
 		if next != nil {
 			next(ev)
@@ -618,7 +618,7 @@ func (s *activityScope) recorder(next engine.Reporter) engine.Reporter {
 // as a reason when it is one of the engine's stable tokens. A step replayed
 // from a job's journal carries its original timestamp; it was recorded where
 // it actually ran, so the follower must not duplicate it.
-func (s *activityScope) recordStep(ev output.Event, next engine.Reporter) {
+func (s *activityScope) recordStep(ctx context.Context, ev output.Event, next engine.Reporter) {
 	if ev.TS != "" {
 		return
 	}
@@ -649,7 +649,7 @@ func (s *activityScope) recordStep(ev output.Event, next engine.Reporter) {
 	if cluster := stepCluster(step); cluster != "" {
 		e.Database = cluster
 	}
-	if err := s.rec.append(context.Background(), e); err != nil {
+	if err := s.rec.append(ctx, e); err != nil {
 		s.markLost()
 		s.warn(next)
 	}
@@ -706,7 +706,7 @@ func beginActivityScope(ctx context.Context, scope *activityScope, important boo
 // recordActivityRefusal records a request the node refused before its
 // handler ran. It is best effort: the refusal itself is the answer even when
 // history cannot be written.
-func recordActivityRefusal(rec *activityRecorder, req rpc.Request, action string, err error, defaultReason string) {
+func recordActivityRefusal(ctx context.Context, rec *activityRecorder, req rpc.Request, action string, err error, defaultReason string) {
 	if rec == nil {
 		return
 	}
@@ -732,13 +732,13 @@ func recordActivityRefusal(rec *activityRecorder, req rpc.Request, action string
 		ActorLabel:      activityActorLabel(req.Operator),
 		ActorVerified:   false,
 	}
-	_ = rec.append(context.Background(), ev)
+	_ = rec.append(ctx, ev)
 }
 
 // recordJobRefusal records a job invocation refused before its runner began.
 // timer says the invocation came from a systemd timer, so history does not
 // attribute it to an operator who was not there.
-func recordJobRefusal(rec *activityRecorder, job, id string, err error, defaultReason string, timer bool) {
+func recordJobRefusal(ctx context.Context, rec *activityRecorder, job, id string, err error, defaultReason string, timer bool) {
 	if rec == nil {
 		return
 	}
@@ -761,7 +761,7 @@ func recordJobRefusal(rec *activityRecorder, job, id string, err error, defaultR
 		ActorKind:     actor,
 		ActorVerified: false,
 	}
-	_ = rec.append(context.Background(), ev)
+	_ = rec.append(ctx, ev)
 }
 
 // activityDryRunAware lists the methods whose handler honours req.DryRun and
@@ -996,10 +996,10 @@ func loadActivityNodeInfo(paths activityPaths, cluster config.Cluster) activityN
 			info.Node = safeActivityResource(master.Name)
 		}
 	}
-	if raw, err := os.ReadFile(paths.Instance); err == nil { //nolint:gosec // G304: a fixed node path supplied by the caller.
+	if raw, err := os.ReadFile(paths.Instance); err == nil {
 		info.NodeInstanceID = safeActivityResource(strings.TrimSpace(string(raw)))
 	}
-	if raw, err := os.ReadFile(paths.BootID); err == nil { //nolint:gosec // G304: a fixed node path supplied by the caller.
+	if raw, err := os.ReadFile(paths.BootID); err == nil {
 		info.BootID = safeActivityResource(strings.TrimSpace(string(raw)))
 	}
 	info.NodeVersion = activityNodeVersion()

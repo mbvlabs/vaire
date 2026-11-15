@@ -82,14 +82,14 @@ func restoreInProgress(db, action string) error {
 // clearFailedRestore drops what a failed restore of db left behind, so the
 // next restore can start without an abort first. Only a failed restore whose
 // job has finished is cleared; a ready one holds the operator's copy.
-func clearFailedRestore(cfg config.Cluster, db string) error {
+func clearFailedRestore(ctx context.Context, cfg config.Cluster, db string) error {
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
 	r, ok := bs.OpenRestore(db)
 	if ok && r.Phase == backup.PhaseFailed && r.MaterialisationPending && r.Attempt == nil {
-		return retireNeverStartedRestore(context.Background(), cfg, db, r)
+		return retireNeverStartedRestore(ctx, cfg, db, r)
 	}
 	if ok && (r.Attempt != nil || r.MaterialisationPending) {
 		return incompleteMaterialisation(backup.RestoringName(db))
@@ -104,7 +104,7 @@ func clearFailedRestore(cfg config.Cluster, db string) error {
 	if job, ok := st.Job(r.ID); ok && !job.Final() {
 		return nil
 	}
-	if err := dropRestoring(cfg, db, nil); err != nil {
+	if err := dropRestoring(ctx, cfg, db, nil); err != nil {
 		return err
 	}
 	return backup.UpdateRecords(func(s *backup.Records) error {
@@ -118,9 +118,10 @@ func clearFailedRestore(cfg config.Cluster, db string) error {
 }
 
 // dropRestoring drops the temporary cluster <db>__restoring, if any.
-func dropRestoring(cfg config.Cluster, db string, report engine.Reporter) error {
+func dropRestoring(ctx context.Context, cfg config.Cluster, db string, report engine.Reporter) error {
+	_ = ctx // cleanup deliberately ignores cancellation; DropTemporaryCluster bounds itself.
 	name := backup.RestoringName(db)
-	return backup.DropTemporaryCluster(engine.Shell{Secrets: secrets.Default}, "restore.abort", report, name, filepath.Join(cfg.Server.DataRoot, name))
+	return backup.DropTemporaryCluster(engine.Shell{Secrets: secrets.Default}, "restore.abort", report, name, filepath.Join(cfg.Server.DataRoot, name)) //nolint:contextcheck // DropTemporaryCluster bounds its own cleanup.
 }
 
 // checkRestorable checks db is a configured database.
@@ -166,53 +167,7 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 	var target, timeline string
 	var space []backup.SpaceNeed
 	err := withRestorePreparation(ctx, env, p.Database, "restore.start", func() error {
-		cfg = env.Cluster
-		if err := requireBackups(cfg); err != nil {
-			return err
-		}
-		if err := checkRestorable(cfg, p.Database); err != nil {
-			return err
-		}
-		var err error
-		target, err = restoreCheckTarget(ctx, cfg, p, env.Req.Secrets)
-		if err != nil {
-			return err
-		}
-		if !env.Req.DryRun {
-			if err := clearFailedRestore(cfg, p.Database); err != nil {
-				return err
-			}
-		}
-		if err := restoreInProgress(p.Database, "a new restore"); err != nil {
-			return err
-		}
-		if err := restoreCheckNamespace(ctx, cfg, p.Database); err != nil {
-			return err
-		}
-		space, err = restoreCheckSpace(ctx, cfg, p.Database)
-		if err != nil {
-			return err
-		}
-		timeline, err = restoreTimeline(cfg, p)
-		if err != nil || env.Req.DryRun {
-			return err
-		}
-		instance, operation, err := restoreInvocationProvenance(env)
-		if err != nil {
-			return err
-		}
-		return restorePublish(func(s *backup.Records) error {
-			if _, open := s.Restores[p.Database]; open {
-				return incompleteMaterialisation(backup.RestoringName(p.Database))
-			}
-			s.Restores[p.Database] = backup.Restore{
-				ID: env.Req.RequestID, Database: p.Database, Kind: p.Kind, Target: target,
-				InstanceID: instance, OperationID: operation,
-				Phase: backup.PhaseRestoring, StartedAt: stamp(), Promote: p.Promote, Timeline: timeline,
-				MaterialisationPending: p.Kind != targetDump,
-			}
-			return nil
-		})
+		return prepareRestoreStart(ctx, env, p, &target, &timeline, &space)
 	})
 	if err != nil {
 		return Result{}, err
@@ -226,6 +181,56 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 		jobSecrets[steps.SecretBackupAgeIdentity] = v
 	}
 	return restoreLaunch(ctx, env, "restore", p, jobSecrets)
+}
+
+func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target, timeline *string, space *[]backup.SpaceNeed) error {
+	cfg := env.Cluster
+	if err := requireBackups(cfg); err != nil {
+		return err
+	}
+	if err := checkRestorable(cfg, p.Database); err != nil {
+		return err
+	}
+	var err error
+	*target, err = restoreCheckTarget(ctx, cfg, p, env.Req.Secrets)
+	if err != nil {
+		return err
+	}
+	if !env.Req.DryRun {
+		if err := clearFailedRestore(ctx, cfg, p.Database); err != nil {
+			return err
+		}
+	}
+	if err := restoreInProgress(p.Database, "a new restore"); err != nil {
+		return err
+	}
+	if err := restoreCheckNamespace(ctx, cfg, p.Database); err != nil {
+		return err
+	}
+	*space, err = restoreCheckSpace(ctx, cfg, p.Database)
+	if err != nil {
+		return err
+	}
+	*timeline, err = restoreTimeline(cfg, p)
+	if err != nil || env.Req.DryRun {
+		return err
+	}
+	instance, operation, err := restoreInvocationProvenance(env)
+	if err != nil {
+		return err
+	}
+	return restorePublish(func(s *backup.Records) error {
+		if _, open := s.Restores[p.Database]; open {
+			return incompleteMaterialisation(backup.RestoringName(p.Database))
+		}
+		s.Restores[p.Database] = backup.Restore{
+			ID: env.Req.RequestID, Database: p.Database, Kind: p.Kind, Target: *target,
+			InstanceID: instance, OperationID: operation,
+			Phase: backup.PhaseRestoring, StartedAt: stamp(), Promote: p.Promote, Timeline: *timeline,
+			MaterialisationPending: p.Kind != targetDump,
+		}
+		return nil
+	})
 }
 
 // restoreTimeline is the timeline a restore of p's database follows: the one
@@ -255,64 +260,80 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 	d := driver(spec, "restore", nil)
 	switch p.Kind {
 	case backup.TargetLatest:
-		info, err := d.Info(ctx, "")
-		if err != nil {
-			return "", err
-		}
-		if _, ok := info.Latest(); !ok {
-			return "", output.NewError(output.CodePrecondition, "the repository has no backup", output.ExitPrecondition,
-				"Take one with vaire backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
-		}
-		return "latest", nil
+		return restoreLatestTarget(ctx, d)
 	case backup.TargetTime:
-		t, err := time.Parse(time.RFC3339, p.Time)
-		if err != nil {
-			return "", output.NewError(output.CodeUsage, "time must be RFC 3339", output.ExitUsage, "")
-		}
-		info, err := d.Info(ctx, "")
-		if err != nil {
-			return "", err
-		}
-		archive, err := d.ArchiveStatus(ctx)
-		if err != nil {
-			return "", err
-		}
-		if err := inWindow(restoreWindow(info, archive), t); err != nil {
-			return "", olderStanzaHint(err, p.Database, spec.Stanza)
-		}
-		return t.UTC().Format(time.RFC3339), nil
+		return restoreTimeTarget(ctx, d, spec, p)
 	case backup.TargetSet:
-		info, err := d.Info(ctx, "")
-		if err != nil {
-			return "", err
-		}
-		if _, ok := info.Find(p.Set); !ok {
-			return "", output.NewError(output.CodePrecondition, "there is no backup set "+p.Set, output.ExitPrecondition,
-				"List the sets with vaire backup list.").WithDetails(map[string]any{"reason": "set_not_found"})
-		}
-		return "set " + p.Set, nil
+		return restoreSetTarget(ctx, d, p)
 	case targetDump:
-		if sec[steps.SecretBackupAgeIdentity] == "" {
-			return "", output.NewError(output.CodeInputRequired, "a restore from a dump needs the age identity from the recovery kit", output.ExitInput,
-				"Run the restore with an vaire that has the recovery kit (vaire login from a transfer bundle made with vaire secrets export); it sends the identity with the request.").WithDetails(map[string]any{"secret": steps.SecretBackupAgeIdentity})
-		}
-		target, _, err := steps.BackupTarget(cfg)
-		if err != nil {
-			return "", err
-		}
-		dumps, err := backup.ListDumps(ctx, target, p.Database)
-		if err != nil {
-			return "", err
-		}
-		for _, dump := range dumps {
-			if dump.ID == p.Dump {
-				return "dump " + p.Dump, nil
-			}
-		}
-		return "", output.NewError(output.CodePrecondition, "there is no dump "+p.Dump+" of "+p.Database, output.ExitPrecondition,
-			"List the dumps with vaire dump list "+p.Database+".").WithDetails(map[string]any{"reason": "dump_not_found"})
+		return restoreDumpTarget(ctx, cfg, p, sec)
 	}
 	return "", output.NewError(output.CodeUsage, "kind must be latest, time, set or dump", output.ExitUsage, "")
+}
+
+func restoreLatestTarget(ctx context.Context, d backup.Driver) (string, error) {
+	info, err := d.Info(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	if _, ok := info.Latest(); !ok {
+		return "", output.NewError(output.CodePrecondition, "the repository has no backup", output.ExitPrecondition,
+			"Take one with vaire backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
+	}
+	return "latest", nil
+}
+
+func restoreTimeTarget(ctx context.Context, d backup.Driver, spec config.ClusterSpec, p restoreParams) (string, error) {
+	t, err := time.Parse(time.RFC3339, p.Time)
+	if err != nil {
+		return "", output.NewError(output.CodeUsage, "time must be RFC 3339", output.ExitUsage, "")
+	}
+	info, err := d.Info(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	archive, err := d.ArchiveStatus(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := inWindow(restoreWindow(info, archive), t); err != nil {
+		return "", olderStanzaHint(err, p.Database, spec.Stanza)
+	}
+	return t.UTC().Format(time.RFC3339), nil
+}
+
+func restoreSetTarget(ctx context.Context, d backup.Driver, p restoreParams) (string, error) {
+	info, err := d.Info(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	if _, ok := info.Find(p.Set); !ok {
+		return "", output.NewError(output.CodePrecondition, "there is no backup set "+p.Set, output.ExitPrecondition,
+			"List the sets with vaire backup list.").WithDetails(map[string]any{"reason": "set_not_found"})
+	}
+	return "set " + p.Set, nil
+}
+
+func restoreDumpTarget(ctx context.Context, cfg config.Cluster, p restoreParams, sec map[string]string) (string, error) {
+	if sec[steps.SecretBackupAgeIdentity] == "" {
+		return "", output.NewError(output.CodeInputRequired, "a restore from a dump needs the age identity from the recovery kit", output.ExitInput,
+			"Run the restore with an vaire that has the recovery kit (vaire login from a transfer bundle made with vaire secrets export); it sends the identity with the request.").WithDetails(map[string]any{"secret": steps.SecretBackupAgeIdentity})
+	}
+	target, _, err := steps.BackupTarget(cfg)
+	if err != nil {
+		return "", err
+	}
+	dumps, err := backup.ListDumps(ctx, target, p.Database)
+	if err != nil {
+		return "", err
+	}
+	for _, dump := range dumps {
+		if dump.ID == p.Dump {
+			return "dump " + p.Dump, nil
+		}
+	}
+	return "", output.NewError(output.CodePrecondition, "there is no dump "+p.Dump+" of "+p.Database, output.ExitPrecondition,
+		"List the dumps with vaire dump list "+p.Database+".").WithDetails(map[string]any{"reason": "dump_not_found"})
 }
 
 // olderStanzaHint names db's dropped stanza in a target-outside-the-window
@@ -427,30 +448,44 @@ func failRestoreChecked(env *jobEnv, cause error, expected *backup.Materialisati
 	return withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
 		return backup.UpdateRecords(func(s *backup.Records) error {
 			r, ok := s.Restores[p.Database]
-			if !ok || (r.Phase != backup.PhaseRestoring && r.Phase != backup.PhaseReady) ||
-				!matchesRestoreInvocation(r, env, p.Database) || (expected == nil && r.Attempt != nil) ||
-				(expected != nil && (r.Attempt == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected))) {
-				return incompleteMaterialisation(backup.RestoringName(p.Database))
+			if err := validateFailedRestoreRecord(r, ok, env, p, expected); err != nil {
+				return err
 			}
-			r.Phase, r.Error = backup.PhaseFailed, cause.Error()
-			if p.Kind != targetDump && r.Attempt == nil && !r.MaterialisationCleaned {
-				r.MaterialisationPending = true
-				r.MaterialisationCleaned = false
-			}
-			if reason := recoveryFailureReason(cause); reason != "" {
-				r.Error = "recovery could not meet parameter requirements"
-				if expected == nil || r.Attempt == nil {
-					return incompleteMaterialisation(backup.RestoringName(p.Database))
-				}
-				r.Attempt.Reason = reason
-			} else if r.MaterialisationCleaned && expected != nil {
-				r.Attempt = nil
-				r.MaterialisationPending = false
+			if err := applyFailedRestore(&r, p, cause, expected); err != nil {
+				return err
 			}
 			s.Restores[p.Database] = r
 			return nil
 		})
 	})
+}
+
+func validateFailedRestoreRecord(r backup.Restore, ok bool, env *jobEnv, p restoreParams, expected *backup.MaterialisationAttempt) error {
+	if !ok || (r.Phase != backup.PhaseRestoring && r.Phase != backup.PhaseReady) ||
+		!matchesRestoreInvocation(r, env, p.Database) || (expected == nil && r.Attempt != nil) ||
+		(expected != nil && (r.Attempt == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected))) {
+		return incompleteMaterialisation(backup.RestoringName(p.Database))
+	}
+	return nil
+}
+
+func applyFailedRestore(r *backup.Restore, p restoreParams, cause error, expected *backup.MaterialisationAttempt) error {
+	r.Phase, r.Error = backup.PhaseFailed, cause.Error()
+	if p.Kind != targetDump && r.Attempt == nil && !r.MaterialisationCleaned {
+		r.MaterialisationPending = true
+		r.MaterialisationCleaned = false
+	}
+	if reason := recoveryFailureReason(cause); reason != "" {
+		r.Error = "recovery could not meet parameter requirements"
+		if expected == nil || r.Attempt == nil {
+			return incompleteMaterialisation(backup.RestoringName(p.Database))
+		}
+		r.Attempt.Reason = reason
+	} else if r.MaterialisationCleaned && expected != nil {
+		r.Attempt = nil
+		r.MaterialisationPending = false
+	}
+	return nil
 }
 
 // materialiseRestore builds the temporary cluster <db>__restoring: a
@@ -468,38 +503,59 @@ func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int,
 		return 0, nil, nil, err
 	}
 	if p.Kind != targetDump {
-		if err := validateRestoreInvocation(env); err != nil {
+		if err := prepareRestoreRecord(env, p, bs); err != nil {
 			return 0, nil, nil, err
 		}
-		if err := withLockedJobTarget(env, backup.RestoringName(p.Database), func() error { return nil }); err != nil {
-			return 0, nil, nil, err
-		}
-		initial, found := bs.Restores[p.Database]
-		if !found {
-			return 0, nil, nil, incompleteMaterialisation(backup.RestoringName(p.Database))
-		}
-		if err := withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
-			return backup.UpdateRecords(func(s *backup.Records) error {
-				r, ok := s.Restores[p.Database]
-				if !ok || !reflect.DeepEqual(r, initial) || !matchesRestoreInvocation(r, env, p.Database) || r.Phase != backup.PhaseRestoring ||
-					r.Kind != p.Kind || env.Job == "restore" && r.Promote != p.Promote || r.Attempt != nil {
-					return incompleteMaterialisation(backup.RestoringName(p.Database))
-				}
-				r.MaterialisationPending = true
-				s.Restores[p.Database] = r
-				return nil
-			})
-		}); err != nil {
-			return 0, nil, nil, err
-		}
-		initial.MaterialisationPending = true
-		bs.Restores[p.Database] = initial
 	}
+	m, err := constructRestoreMaterialised(env, p, spec, cfg)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if p.Kind != targetDump {
+		defer m.ReleaseForkReservationAuthority()
+	}
+	warnings, expected, birth, err := buildRestoreMaterialisation(ctx, env, p, spec, bs, m)
+	if err != nil {
+		return cleanupFailedRestore(ctx, env, p, m, expected, birth, warnings, err)
+	}
+	if birth != nil {
+		defer birth.close()
+	}
+	return m.Port, warnings, expected, nil
+}
+
+func prepareRestoreRecord(env *jobEnv, p restoreParams, bs backup.Records) error {
+	if err := validateRestoreInvocation(env); err != nil {
+		return err
+	}
+	if err := withLockedJobTarget(env, backup.RestoringName(p.Database), func() error { return nil }); err != nil {
+		return err
+	}
+	initial, found := bs.Restores[p.Database]
+	if !found {
+		return incompleteMaterialisation(backup.RestoringName(p.Database))
+	}
+	return withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
+		return backup.UpdateRecords(func(s *backup.Records) error {
+			r, ok := s.Restores[p.Database]
+			if !ok || !reflect.DeepEqual(r, initial) || !matchesRestoreInvocation(r, env, p.Database) || r.Phase != backup.PhaseRestoring ||
+				r.Kind != p.Kind || env.Job == "restore" && r.Promote != p.Promote || r.Attempt != nil {
+				return incompleteMaterialisation(backup.RestoringName(p.Database))
+			}
+			r.MaterialisationPending = true
+			s.Restores[p.Database] = r
+			return nil
+		})
+	})
+}
+
+func constructRestoreMaterialised(env *jobEnv, p restoreParams, spec config.ClusterSpec, cfg config.Cluster) (*backup.Materialised, error) {
 	constructor := callerNewMaterialised
 	if p.Kind != targetDump {
 		constructor = callerNewRestoreOwned
 	}
 	var m *backup.Materialised
+	var err error
 	if p.Kind == targetDump {
 		m, err = constructor(cfg.Server.DataRoot, backup.RestoringName(p.Database), p.Database, spec.Port, env.shell(), env.Job, env.Report)
 	} else {
@@ -509,104 +565,114 @@ func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int,
 			return err
 		})
 	}
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	if p.Kind != targetDump {
-		defer m.ReleaseForkReservationAuthority()
-	}
-	var warnings []string
-	var expected *backup.MaterialisationAttempt
-	var birth *restoreBirth
+	return m, err
+}
+
+func buildRestoreMaterialisation(ctx context.Context, env *jobEnv, p restoreParams, spec config.ClusterSpec, bs backup.Records, m *backup.Materialised) ([]string, *backup.MaterialisationAttempt, *restoreBirth, error) {
 	if p.Kind == targetDump {
-		warnings, err = loadFromDump(ctx, env, p, spec, m)
-	} else {
-		m.DestinationConfig, err = prepareMaterialisationConfig(cfg, spec)
-		if err != nil {
-			return 0, nil, nil, err
-		}
-		kind := "restore"
-		if bs.Restores[p.Database].Recover {
-			kind = "recover"
-		}
-		attempt, aerr := newMaterialisationAttempt(env, m, spec.Stanza, kind)
-		if aerr != nil {
-			return 0, nil, nil, aerr
-		}
-		attempt.ReservationIdentity, aerr = m.ForkReservationIdentity()
-		if aerr != nil {
-			return 0, nil, nil, aerr
-		}
-		expected = &attempt
-		if err := withLockedJobTarget(env, m.Name, func() error {
-			return m.WithForkReservation(ctx, func() error {
-				return backup.UpdateRecords(func(s *backup.Records) error {
-					r, ok := s.Restores[p.Database]
-					if !ok || !reflect.DeepEqual(r, bs.Restores[p.Database]) || !matchesRestoreInvocation(r, env, p.Database) || r.Phase != backup.PhaseRestoring ||
-						r.Kind != p.Kind || env.Job == "restore" && r.Promote != p.Promote || r.Attempt != nil {
-						return incompleteMaterialisation(m.Name)
-					}
-					attempt.RecordDigest = restoreRecordDigest(r)
-					r.Attempt = &attempt
-					s.Restores[p.Database] = r
-					return nil
-				})
-			})
-		}); err != nil {
-			return 0, nil, nil, err
-		}
-		birth, aerr = newRestoreBirth(env, m, expected)
-		if aerr != nil {
-			return 0, nil, expected, aerr
-		}
-		defer birth.close()
-		m.Ownership = birth
-		opts := backup.RestoreOptions{Kind: p.Kind, Set: p.Set, Pause: true, Timeline: bs.Restores[p.Database].Timeline}
-		if p.Kind == backup.TargetTime {
-			opts.Time, _ = time.Parse(time.RFC3339, p.Time)
-		}
-		err = callerRestoreMaterialised(ctx, m, driver(spec, env.Job, env.Report), opts)
-		if err == nil {
-			if err := verifyRestoreAttempt(p.Database, env.ID, expected); err != nil {
-				return 0, warnings, expected, err
-			}
-			if t := callerRecoveredTo(ctx, m); t != "" {
-				logLine(env.Report, env.Job, "recovered to "+t)
-			}
-		}
+		warnings, err := loadFromDump(ctx, env, p, spec, m)
+		return warnings, nil, nil, err
 	}
+	destination, err := prepareMaterialisationConfig(env.Cluster, spec)
 	if err != nil {
-		if !backup.RetainRecoveryFailure(err) {
-			if expected != nil {
-				if checkErr := verifyRestoreAttempt(p.Database, env.ID, expected); checkErr != nil {
-					return 0, warnings, expected, errors.Join(err, checkErr)
-				}
-			}
-			dropErr := error(nil)
-			if birth != nil {
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				dropErr = birth.discard(cleanupCtx)
-				cancel()
-			} else {
-				dropErr = m.Drop()
-			}
-			if dropErr == nil && p.Kind != targetDump {
-				_ = backup.UpdateRecords(func(s *backup.Records) error {
-					r, ok := s.Restores[p.Database]
-					if !ok || !matchesRestoreInvocation(r, env, p.Database) || r.Attempt == nil || expected == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected) {
-						return incompleteMaterialisation(m.Name)
-					}
-					r.MaterialisationCleaned = true
-					r.Attempt.RecordDigest = restoreRecordDigest(r)
-					expected.RecordDigest = r.Attempt.RecordDigest
-					s.Restores[p.Database] = r
-					return nil
-				})
-			}
-		}
-		return 0, warnings, expected, err
+		return nil, nil, nil, err
 	}
-	return m.Port, warnings, expected, nil
+	m.DestinationConfig = destination
+	kind := "restore"
+	if bs.Restores[p.Database].Recover {
+		kind = "recover"
+	}
+	attempt, err := newMaterialisationAttempt(env, m, spec.Stanza, kind)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	attempt.ReservationIdentity, err = m.ForkReservationIdentity()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	expected := &attempt
+	if err := bindRestoreAttempt(ctx, env, p, bs, m, &attempt); err != nil {
+		return nil, nil, nil, err
+	}
+	birth, err := newRestoreBirth(ctx, env, m, expected)
+	if err != nil {
+		return nil, expected, nil, err
+	}
+	m.Ownership = birth
+	err = runRestoreMaterialised(ctx, env, p, spec, bs, m, expected)
+	if err != nil {
+		return nil, expected, birth, err
+	}
+	return nil, expected, birth, nil
+}
+
+func bindRestoreAttempt(ctx context.Context, env *jobEnv, p restoreParams, bs backup.Records, m *backup.Materialised, attempt *backup.MaterialisationAttempt) error {
+	return withLockedJobTarget(env, m.Name, func() error {
+		return m.WithForkReservation(ctx, func() error {
+			return backup.UpdateRecords(func(s *backup.Records) error {
+				r, ok := s.Restores[p.Database]
+				if !ok || !reflect.DeepEqual(r, bs.Restores[p.Database]) || !matchesRestoreInvocation(r, env, p.Database) || r.Phase != backup.PhaseRestoring ||
+					r.Kind != p.Kind || env.Job == "restore" && r.Promote != p.Promote || r.Attempt != nil {
+					return incompleteMaterialisation(m.Name)
+				}
+				attempt.RecordDigest = restoreRecordDigest(r)
+				r.Attempt = attempt
+				s.Restores[p.Database] = r
+				return nil
+			})
+		})
+	})
+}
+
+func runRestoreMaterialised(ctx context.Context, env *jobEnv, p restoreParams, spec config.ClusterSpec, bs backup.Records, m *backup.Materialised, expected *backup.MaterialisationAttempt) error {
+	opts := backup.RestoreOptions{Kind: p.Kind, Set: p.Set, Pause: true, Timeline: bs.Restores[p.Database].Timeline}
+	if p.Kind == backup.TargetTime {
+		opts.Time, _ = time.Parse(time.RFC3339, p.Time)
+	}
+	if err := callerRestoreMaterialised(ctx, m, driver(spec, env.Job, env.Report), opts); err != nil {
+		return err
+	}
+	if err := verifyRestoreAttempt(p.Database, env.ID, expected); err != nil {
+		return err
+	}
+	if t := callerRecoveredTo(ctx, m); t != "" {
+		logLine(env.Report, env.Job, "recovered to "+t)
+	}
+	return nil
+}
+
+func cleanupFailedRestore(ctx context.Context, env *jobEnv, p restoreParams, m *backup.Materialised, expected *backup.MaterialisationAttempt, birth *restoreBirth, warnings []string, cause error) (int, []string, *backup.MaterialisationAttempt, error) {
+	if backup.RetainRecoveryFailure(cause) {
+		return 0, warnings, expected, cause
+	}
+	if expected != nil {
+		if checkErr := verifyRestoreAttempt(p.Database, env.ID, expected); checkErr != nil {
+			return 0, warnings, expected, errors.Join(cause, checkErr)
+		}
+	}
+	var dropErr error
+	if birth != nil {
+		defer birth.close()
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		dropErr = birth.discard(cleanupCtx)
+		cancel()
+	} else {
+		dropErr = m.Drop() //nolint:contextcheck // cleanup runs after the caller's operation and bounds itself.
+	}
+	if dropErr == nil && p.Kind != targetDump {
+		_ = backup.UpdateRecords(func(s *backup.Records) error {
+			r, ok := s.Restores[p.Database]
+			if !ok || !matchesRestoreInvocation(r, env, p.Database) || r.Attempt == nil || expected == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected) {
+				return incompleteMaterialisation(m.Name)
+			}
+			r.MaterialisationCleaned = true
+			r.Attempt.RecordDigest = restoreRecordDigest(r)
+			expected.RecordDigest = r.Attempt.RecordDigest
+			s.Restores[p.Database] = r
+			return nil
+		})
+	}
+	return 0, warnings, expected, cause
 }
 
 // loadFromDump creates the empty cluster m, copies the live cluster's roles
@@ -744,26 +810,7 @@ var (
 	promoteStartFull    = startFullBackup
 )
 
-func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter, unlock func()) (map[string]any, error) {
-	bs, err := backup.LoadRecords()
-	if err != nil {
-		return nil, err
-	}
-	r, exists := bs.Restores[db]
-	if !exists || r.ID == "" || r.Database != db || r.Phase != backup.PhaseReady {
-		return nil, fmt.Errorf("restore record for %s is missing or not ready", db)
-	}
-	spec, err := clusterOf(cfg, db)
-	if err != nil {
-		return nil, err
-	}
-	if r.Recover {
-		// Existing deferred recoveries may predate the retained-awaiting
-		// fence. Remove any stale application alias before swapping data.
-		if err := promotePoolerFence(ctx, cfg, rt, report); err != nil {
-			return nil, err
-		}
-	}
+func preparePromoteAside(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, bs backup.Records, spec config.ClusterSpec, report engine.Reporter) (string, string, error) {
 	const step = "restore.promote"
 	aside := r.Aside
 	if aside == "" {
@@ -789,7 +836,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 			s.Restores[db] = cur
 			return nil
 		}); err != nil {
-			return nil, err
+			return "", "", err
 		}
 		logLine(report, step, "cutting "+db+" over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
 	case backup.SwapState(cfg.Server.DataRoot, db, backup.RestoringName(db), aside) == backup.SwapNotStarted:
@@ -797,9 +844,13 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	default:
 		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
 	}
-	start := time.Now()
+	return aside, oldArchived, nil
+}
+
+func executePromote(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, r backup.Restore, rt engine.Runtime, report engine.Reporter, aside string) error {
+	const step = "restore.promote"
 	resume := promotePause(ctx, db)
-	err = promoteSwap(ctx, rt.Shell, step, report, cfg.Server.DataRoot, db, backup.RestoringName(db), aside, r.Port)
+	err := promoteSwap(ctx, rt.Shell, step, report, cfg.Server.DataRoot, db, backup.RestoringName(db), aside, r.Port)
 	if err == nil {
 		until := backup.UntilPaused
 		if r.Kind == backup.TargetLatest || r.Kind == targetDump {
@@ -810,8 +861,8 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	if err == nil {
 		var dropped []string
 		if dropped, err = promoteDatabase(ctx, steps.ClusterPG(spec), cfg.Server.DataDirectory(db)); err == nil {
-			// Still paused: a recovery target dropped above leaves only with
-			// a restart, which postgres-config-v1 would otherwise refuse.
+			// Still paused: a recovery target dropped above leaves only with a
+			// restart, which postgres-config-v1 would otherwise refuse.
 			err = promoteSettle(ctx, rt.Shell, step, report, steps.ClusterPG(spec), db, cfg.Server.DataDirectory(db), spec.Port, dropped)
 		}
 	}
@@ -819,17 +870,11 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		err = provisionRecoveredAccess(ctx, cfg, db, r, rt, report)
 	}
 	resume()
-	if err != nil {
-		return nil, withHint(err, "Read vaire logs postgres --db "+db+" and vaire restore status "+db+"; the old data is in the cluster "+aside+".")
-	}
-	took := time.Since(start)
-	newStanza := ""
-	if r.Kind == targetDump {
-		if cfg, newStanza, err = switchStanza(cfg, db, ""); err != nil {
-			return nil, err
-		}
-	}
-	if err := backup.UpdateRecords(func(s *backup.Records) error {
+	return err
+}
+
+func recordPromotedRestore(cfg config.Cluster, db string, r backup.Restore, aside string, spec config.ClusterSpec, oldArchived, newStanza string) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
 		current, ok := s.Restores[db]
 		if !ok || current.ID != r.ID || current.Database != db || current.Recover != r.Recover || current.Phase != backup.PhaseReady {
 			return fmt.Errorf("the restore of %s changed while promoting it", db)
@@ -846,19 +891,62 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 			delete(s.LastVerify, db)
 		}
 		return nil
-	}); err != nil {
+	})
+}
+
+func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter, unlock func()) (map[string]any, error) {
+	bs, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
+	r, exists := bs.Restores[db]
+	if !exists || r.ID == "" || r.Database != db || r.Phase != backup.PhaseReady {
+		return nil, fmt.Errorf("restore record for %s is missing or not ready", db)
+	}
+	spec, err := clusterOf(cfg, db)
+	if err != nil {
+		return nil, err
+	}
+	if r.Recover {
+		// Existing deferred recoveries may predate the retained-awaiting
+		// fence. Remove any stale application alias before swapping data.
+		if err := promotePoolerFence(ctx, cfg, rt, report); err != nil {
+			return nil, err
+		}
+	}
+	aside, oldArchived, err := preparePromoteAside(ctx, cfg, db, r, bs, spec, report)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	err = executePromote(ctx, cfg, db, spec, r, rt, report, aside)
+	if err != nil {
+		return nil, withHint(err, "Read vaire logs postgres --db "+db+" and vaire restore status "+db+"; the old data is in the cluster "+aside+".")
+	}
+	took := time.Since(start)
+	newStanza := ""
+	if r.Kind == targetDump {
+		if cfg, newStanza, err = switchStanza(cfg, db, ""); err != nil {
+			return nil, err
+		}
+	}
+	if err := recordPromotedRestore(cfg, db, r, aside, spec, oldArchived, newStanza); err != nil {
 		return nil, err
 	}
 	data := map[string]any{"database": db, "pre_restore": aside, "target": r.Target, "swap_ms": took.Milliseconds()}
-	var warn error
+	finishPromoteCutover(ctx, cfg, db, r, rt, report, unlock, newStanza, data)
+	steps.WriteMetrics(cfg)
+	return data, nil
+}
+
+func finishPromoteCutover(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, rt engine.Runtime, report engine.Reporter, unlock func(), newStanza string, data map[string]any) {
+	const step = "restore.promote"
 	runs := []engine.Options{{Only: steps.PoolerStepIDs()}}
 	if newStanza != "" {
 		runs = append(runs, stanzaRuns(db)...)
 	}
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, runs...))
-	if err := promoteApplyPoolers(ctx, cfg, rt, "", report); err != nil {
-		warn = err
-	}
+	warn := promoteApplyPoolers(ctx, cfg, rt, "", report)
 	if newStanza != "" {
 		data["stanza"] = newStanza
 		if err := applyStanza(ctx, cfg, db, rt, report); err != nil {
@@ -873,8 +961,6 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	if warn != nil {
 		data["warning"] = output.Warning{Code: "after_cutover_failed", Message: db + " is restored, but " + warn.Error() + "; run vaire apply, then vaire backup now --db " + db + " --type full"}
 	}
-	steps.WriteMetrics(cfg)
-	return data, nil
 }
 
 var recoverProvisionOwned = provisionOwnedTarget
@@ -1013,6 +1099,72 @@ func startFullBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime,
 	return rt.Shell.Exec(ctx, step, engine.Command{Name: "systemctl", Args: []string{"start", "--no-block", "vaire-backup-full@" + db + ".service"}}, report)
 }
 
+func prepareUndoStart(ctx context.Context, env *Env, p restoreDBParams, spec config.ClusterSpec, u *backup.Undo, back backup.Leftover, resuming bool) error {
+	const step = "restore.undo"
+	if resuming {
+		logLine(env.Report, step, "resuming the undo of "+p.Database+": swapping it back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
+		return nil
+	}
+	local := steps.ClusterPG(spec)
+	u.Abandoned, _ = backup.Timeline(ctx, local)
+	u.Aside = backup.PreRestoreName(p.Database, time.Now())
+	if u.Aside == back.Name {
+		u.Aside += "b"
+	}
+	if back.Stanza != "" && back.Stanza != spec.Stanza {
+		// The restored data's stanza is dropped below; its window ends at its
+		// last WAL.
+		u.LastArchivedAt = lastArchivedTime(ctx, spec)
+	}
+	u.Stanza, u.StartedAt = spec.Stanza, stamp()
+	// Recorded before any rename, so an undo that fails part way resumes with
+	// the same names, and the aside is never lost.
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		s.Undoing[p.Database] = *u
+		return nil
+	}); err != nil {
+		return err
+	}
+	logLine(env.Report, step, "swapping "+p.Database+" back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
+	return nil
+}
+
+func swapUndo(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, back backup.Leftover, aside string, rt engine.Runtime, env *Env) error {
+	const step = "restore.undo"
+	resume := steps.PauseDatabase(ctx, db)
+	err := backup.Swap(ctx, rt.Shell, step, env.Report, cfg.Server.DataRoot, db, back.Name, aside, back.Port)
+	if err == nil {
+		err = backup.StartCluster(ctx, rt.Shell, step, env.Report, db, cfg.Server.DataDirectory(db), spec.Port, backup.UntilOpen)
+	}
+	resume()
+	return err
+}
+
+func recordUndo(cfg config.Cluster, db string, spec config.ClusterSpec, back backup.Leftover, aside, abandoned, oldArchived, timeline, stanza string) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		kept := s.Leftovers[:0]
+		for _, l := range s.Leftovers {
+			if l.Name != back.Name {
+				kept = append(kept, l)
+			}
+		}
+		s.Leftovers = append(kept, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: undoRestoreID(back.RestoreID), Port: back.Port, Stanza: spec.Stanza})
+		if stanza != spec.Stanza {
+			dropped := s.DroppedStanzas[:0]
+			for _, d := range s.DroppedStanzas {
+				if d.Stanza != stanza {
+					dropped = append(dropped, d)
+				}
+			}
+			s.DroppedStanzas = append(dropped, replacedStanza(cfg, spec, oldArchived))
+			delete(s.LastVerify, db)
+		}
+		s.Timelines[db] = backup.TimelineSwitch{Stanza: stanza, Timeline: timeline, SwitchedAt: stamp(), Abandoned: abandoned}
+		delete(s.Undoing, db)
+		return nil
+	})
+}
+
 func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	var p restoreDBParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -1049,29 +1201,8 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	const step = "restore.undo"
 	rt := runtimeFor(env, false)
 	local := steps.ClusterPG(spec)
-	if resuming {
-		logLine(env.Report, step, "resuming the undo of "+p.Database+": swapping it back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
-	} else {
-		u.Abandoned, _ = backup.Timeline(ctx, local)
-		u.Aside = backup.PreRestoreName(p.Database, time.Now())
-		if u.Aside == back.Name {
-			u.Aside += "b"
-		}
-		if back.Stanza != "" && back.Stanza != spec.Stanza {
-			// The restored data's stanza is dropped below; its window ends
-			// at its last WAL.
-			u.LastArchivedAt = lastArchivedTime(ctx, spec)
-		}
-		u.Stanza, u.StartedAt = spec.Stanza, stamp()
-		// Recorded before any rename, so an undo that fails part way
-		// resumes with the same names, and the aside is never lost.
-		if err := backup.UpdateRecords(func(s *backup.Records) error {
-			s.Undoing[p.Database] = u
-			return nil
-		}); err != nil {
-			return Result{}, err
-		}
-		logLine(env.Report, step, "swapping "+p.Database+" back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
+	if err := prepareUndoStart(ctx, env, p, spec, &u, back, resuming); err != nil {
+		return Result{}, err
 	}
 	aside, abandoned, oldArchived := u.Aside, u.Abandoned, u.LastArchivedAt
 	if u.Stanza != "" {
@@ -1079,13 +1210,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 		// the restored data's stanza is the one recorded at the start.
 		spec.Stanza = u.Stanza
 	}
-	resume := steps.PauseDatabase(ctx, p.Database)
-	err = backup.Swap(ctx, rt.Shell, step, env.Report, cfg.Server.DataRoot, p.Database, back.Name, aside, back.Port)
-	if err == nil {
-		err = backup.StartCluster(ctx, rt.Shell, step, env.Report, p.Database, cfg.Server.DataDirectory(p.Database), spec.Port, backup.UntilOpen)
-	}
-	resume()
-	if err != nil {
+	if err := swapUndo(ctx, cfg, p.Database, spec, back, aside, rt, env); err != nil {
 		return Result{}, withHint(err, "Read vaire logs postgres --db "+p.Database+", then run vaire restore undo "+p.Database+" again: it resumes; the restored data is in the cluster "+aside+".")
 	}
 	timeline, err := backup.Timeline(ctx, local)
@@ -1100,48 +1225,33 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 			return Result{}, err
 		}
 	}
-	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		kept := s.Leftovers[:0]
-		for _, l := range s.Leftovers {
-			if l.Name != back.Name {
-				kept = append(kept, l)
-			}
-		}
-		s.Leftovers = append(kept, backup.Leftover{Database: p.Database, Name: aside, CreatedAt: stamp(), RestoreID: undoRestoreID(back.RestoreID), Port: back.Port, Stanza: spec.Stanza})
-		if stanza != spec.Stanza {
-			dropped := s.DroppedStanzas[:0]
-			for _, d := range s.DroppedStanzas {
-				if d.Stanza != stanza {
-					dropped = append(dropped, d)
-				}
-			}
-			s.DroppedStanzas = append(dropped, replacedStanza(cfg, spec, oldArchived))
-			delete(s.LastVerify, p.Database)
-		}
-		s.Timelines[p.Database] = backup.TimelineSwitch{Stanza: stanza, Timeline: timeline, SwitchedAt: stamp(), Abandoned: abandoned}
-		delete(s.Undoing, p.Database)
-		return nil
-	}); err != nil {
+	if err := recordUndo(cfg, p.Database, spec, back, aside, abandoned, oldArchived, timeline, stanza); err != nil {
 		return Result{}, err
 	}
 	data := map[string]any{"database": p.Database, "restored_from": back.Name, "pre_undo": aside, "timeline": timeline, "stanza": stanza}
+	warnings := finishUndo(ctx, cfg, p.Database, spec, stanza, rt, env, release, step, err)
+	steps.WriteMetrics(cfg)
+	warnings = append(warnings, followersDiverged(cfg, p.Database)...)
+	return Result{Data: data, Warnings: warnings}, nil
+}
+
+func finishUndo(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, stanza string, rt engine.Runtime, env *Env, release func(), step string, cause error) []output.Warning {
 	var warnings []output.Warning
+	err := cause
 	if stanza != spec.Stanza {
-		ctx := engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, stanzaRuns(p.Database)...))
-		err = applyStanza(ctx, cfg, p.Database, rt, env.Report)
+		ctx := engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, stanzaRuns(db)...))
+		err = applyStanza(ctx, cfg, db, rt, env.Report)
 	}
 	if err == nil {
 		// The full backup's job takes the cluster lock, so let it go.
 		release()
-		err = startFullBackup(ctx, cfg, rt, p.Database, step, env.Report)
+		err = startFullBackup(ctx, cfg, rt, db, step, env.Report)
 	}
 	if err != nil {
 		warnings = append(warnings, output.Warning{Code: "after_cutover_failed",
-			Message: p.Database + " is back, but " + err.Error() + "; run vaire apply, then vaire backup now --db " + p.Database + " --type full"})
+			Message: db + " is back, but " + err.Error() + "; run vaire apply, then vaire backup now --db " + db + " --type full"})
 	}
-	steps.WriteMetrics(cfg)
-	warnings = append(warnings, followersDiverged(cfg, p.Database)...)
-	return Result{Data: data, Warnings: warnings}, nil
+	return warnings
 }
 
 // undoPrefix marks the RestoreID of the leftover a completed undo leaves:
@@ -1210,44 +1320,66 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	if !ok {
 		return Result{}, noOpenRestore(bs, p.Database)
 	}
-	if r.Phase == backup.PhaseRestoring {
-		st, err := restoreAbsenceState()
-		if err != nil {
-			return Result{}, err
-		}
-		if job, ok := st.Job(r.ID); ok && !job.Final() {
-			return Result{}, output.NewError(output.CodePrecondition, "the restore of "+p.Database+" is still materialising", output.ExitPrecondition,
-				"Wait for it (vaire job follow "+r.ID+"), then abort.").WithDetails(map[string]any{"reason": "restore_running", "job_id": r.ID})
-		}
+	if err := ensureRestoreNotRunning(r, p.Database); err != nil {
+		return Result{}, err
 	}
-	if r.Attempt != nil || r.MaterialisationPending {
-		if r.Attempt == nil && r.MaterialisationPending && !env.Req.DryRun {
-			if err := retireNeverStartedRestore(ctx, env.Cluster, p.Database, r); err != nil {
-				return Result{}, err
-			}
-			return Result{Data: map[string]any{"database": p.Database, "dropped": "", "never_started": true, "live_untouched": true}}, nil
-		}
-		if r.Attempt != nil && !env.Req.DryRun {
-			cleanup, err := openRestoreCleanup(env.Cluster, r)
-			if err != nil {
-				return Result{}, err
-			}
-			defer cleanup.close()
-			if err := cleanup.remove(ctx, env); err != nil {
-				return Result{}, err
-			}
-			if err := cleanup.retire(ctx); err != nil {
-				return Result{}, err
-			}
-			var warnings []output.Warning
-			if err := restoreAbortReload(ctx, env, env.Cluster); err != nil {
-				warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: "the session pooler still lists " + backup.RestoringName(p.Database) + " until vaire apply: " + err.Error()})
-			}
-			restoreWriteMetrics(env.Cluster)
-			return Result{Data: map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}, Warnings: warnings}, nil
-		}
-		return Result{}, incompleteMaterialisation(backup.RestoringName(p.Database))
+	if res, handled, err := abortMaterialisedRestore(ctx, env, p, r); handled {
+		return res, err
 	}
+	return abortRestoredCopy(ctx, env, p, r, bs)
+}
+
+func ensureRestoreNotRunning(r backup.Restore, db string) error {
+	if r.Phase != backup.PhaseRestoring {
+		return nil
+	}
+	st, err := restoreAbsenceState()
+	if err != nil {
+		return err
+	}
+	if job, ok := st.Job(r.ID); ok && !job.Final() {
+		return output.NewError(output.CodePrecondition, "the restore of "+db+" is still materialising", output.ExitPrecondition,
+			"Wait for it (vaire job follow "+r.ID+"), then abort.").WithDetails(map[string]any{"reason": "restore_running", "job_id": r.ID})
+	}
+	return nil
+}
+
+func abortMaterialisedRestore(ctx context.Context, env *Env, p restoreDBParams, r backup.Restore) (Result, bool, error) {
+	if r.Attempt == nil && r.MaterialisationPending {
+		if env.Req.DryRun {
+			return Result{}, true, incompleteMaterialisation(backup.RestoringName(p.Database))
+		}
+		if err := retireNeverStartedRestore(ctx, env.Cluster, p.Database, r); err != nil {
+			return Result{}, true, err
+		}
+		return Result{Data: map[string]any{"database": p.Database, "dropped": "", "never_started": true, "live_untouched": true}}, true, nil
+	}
+	if r.Attempt == nil {
+		return Result{}, false, nil
+	}
+	if env.Req.DryRun {
+		return Result{}, true, incompleteMaterialisation(backup.RestoringName(p.Database))
+	}
+	cleanup, err := openRestoreCleanup(env.Cluster, r)
+	if err != nil {
+		return Result{}, true, err
+	}
+	defer cleanup.close()
+	if err := cleanup.remove(ctx, env); err != nil {
+		return Result{}, true, err
+	}
+	if err := cleanup.retire(ctx); err != nil {
+		return Result{}, true, err
+	}
+	var warnings []output.Warning
+	if err := restoreAbortReload(ctx, env, env.Cluster); err != nil {
+		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: "the session pooler still lists " + backup.RestoringName(p.Database) + " until vaire apply: " + err.Error()})
+	}
+	restoreWriteMetrics(env.Cluster)
+	return Result{Data: map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}, Warnings: warnings}, true, nil
+}
+
+func abortRestoredCopy(ctx context.Context, env *Env, p restoreDBParams, r backup.Restore, bs backup.Records) (Result, error) {
 	aside := r.Aside
 	if aside == "" {
 		aside = swappedAside(env.Cluster, p.Database, bs, r)
@@ -1263,7 +1395,7 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "drop": backup.RestoringName(p.Database), "dry_run": true}}, nil
 	}
-	if err := dropRestoring(env.Cluster, p.Database, env.Report); err != nil {
+	if err := dropRestoring(ctx, env.Cluster, p.Database, env.Report); err != nil {
 		return Result{}, err
 	}
 	if r.Aside != "" {
@@ -1440,7 +1572,7 @@ func compareRows(ctx context.Context, live, restoring pg.Local, db string) []tab
 	for k := range b {
 		names[k] = true
 	}
-	var out []tableRows
+	out := make([]tableRows, 0, len(names))
 	for name := range names {
 		row := tableRows{Table: name}
 		if v, ok := a[name]; ok {
@@ -1487,41 +1619,61 @@ type dbForkParams struct {
 // oversubscription warnings otherwise) without creating its cluster. The detachable job
 // db-fork makes the cluster from the source (RFC 10.2) with the role
 // passwords from the request.
-func handleDBFork(ctx context.Context, env *Env) (Result, error) {
-	var p dbForkParams
-	if err := decodeParams(env.Req.Params, &p); err != nil {
-		return Result{}, err
-	}
-	cfg := env.Cluster
+func validateFork(ctx context.Context, env *Env, p dbForkParams, cfg config.Cluster) error {
 	src, ok := cfg.ClusterByName(p.Source)
 	if !ok {
-		return Result{}, databaseNotFound(p.Source)
+		return databaseNotFound(p.Source)
 	}
 	if err := config.CheckDatabaseName(p.Name); err != nil {
-		return Result{}, output.NewError(output.CodeValidation, "database name "+p.Name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
+		return output.NewError(output.CodeValidation, "database name "+p.Name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
 	}
 	if err := restoreInProgress(p.Source, "db fork"); err != nil {
-		return Result{}, err
+		return err
 	}
 	spec := forkSpec(src, p.Name)
 	if p.Size != "" {
 		spec.Size, spec.Memory = p.Size, ""
 	}
 	if err := checkSpareCPU(ctx, spec.Name, spec.CPUMode); err != nil {
-		return Result{}, err
+		return err
 	}
 	if err := guardRecoveryFloorAddition(cfg, spec, runtimeFor(env, true).Host); err != nil {
-		return Result{}, err
+		return err
 	}
 	if p.At != "" {
 		if err := requireBackups(cfg); err != nil {
-			return Result{}, err
+			return err
 		}
 		if _, err := checkRestoreTarget(ctx, cfg, restoreParams{Database: p.Source, Kind: backup.TargetTime, Time: p.At}, nil); err != nil {
-			return Result{}, err
+			return err
 		}
 	}
-	if _, err := forkSpace(ctx, cfg, p.Source); err != nil {
+	_, err := forkSpace(ctx, cfg, p.Source)
+	return err
+}
+
+func forkBuild(ctx context.Context, cfg config.Cluster, p dbForkParams) (config.ClusterSpec, error) {
+	src, ok := cfg.ClusterByName(p.Source)
+	if !ok {
+		return config.ClusterSpec{}, databaseNotFound(p.Source)
+	}
+	spec := forkSpec(src, p.Name)
+	if p.Size != "" {
+		spec.Size, spec.Memory = p.Size, ""
+	}
+	if err := checkSpareCPU(ctx, spec.Name, spec.CPUMode); err != nil {
+		return config.ClusterSpec{}, err
+	}
+	return spec, nil
+}
+
+func handleDBFork(ctx context.Context, env *Env) (Result, error) {
+	var p dbForkParams
+	if err := decodeParams(env.Req.Params, &p); err != nil {
+		return Result{}, err
+	}
+	cfg := env.Cluster
+	if err := validateFork(ctx, env, p, cfg); err != nil {
 		return Result{}, err
 	}
 	var release engine.Release
@@ -1532,26 +1684,16 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 			return Result{}, err
 		}
 	}
-	saved, _, created, err := addDatabaseFrom(ctx, env, func(cfg config.Cluster) (config.ClusterSpec, error) {
-		src, ok := cfg.ClusterByName(p.Source)
-		if !ok {
-			return config.ClusterSpec{}, databaseNotFound(p.Source)
-		}
-		spec := forkSpec(src, p.Name)
-		if p.Size != "" {
-			spec.Size, spec.Memory = p.Size, ""
-		}
-		if err := checkSpareCPU(ctx, spec.Name, spec.CPUMode); err != nil {
-			return config.ClusterSpec{}, err
-		}
-		return spec, nil
-	}, p.AllowOvercommit, forkCommand(p), func(cfg config.Cluster, placed config.ClusterSpec) error {
-		source, ok := cfg.ClusterByName(p.Source)
-		if !ok {
-			return databaseNotFound(p.Source)
-		}
-		return forkPrepareOwnership(env, cfg, source, placed)
-	})
+	saved, _, created, err := addDatabaseFrom(ctx, env,
+		func(cfg config.Cluster) (config.ClusterSpec, error) { return forkBuild(ctx, cfg, p) },
+		p.AllowOvercommit, forkCommand(p),
+		func(cfg config.Cluster, placed config.ClusterSpec) error {
+			source, ok := cfg.ClusterByName(p.Source)
+			if !ok {
+				return databaseNotFound(p.Source)
+			}
+			return forkPrepareOwnership(env, cfg, source, placed)
+		})
 	if release != nil {
 		release()
 	}

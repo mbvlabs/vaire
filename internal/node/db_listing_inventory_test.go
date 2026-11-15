@@ -61,24 +61,16 @@ func TestDBListStrictInventoryStates(t *testing.T) {
 		}
 	}
 	res, err := handleDBList(context.Background(), &Env{Cluster: cfg})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows := res.Data.(map[string]any)["databases"].([]databaseInfo)
+	reject(t, err != nil, err)
+	rows := mustAs[[]databaseInfo](t, mustAs[map[string]any](t, res.Data)["databases"])
 	byName := make(map[string]databaseInfo)
 	for _, row := range rows {
 		byName[row.Name] = row
 	}
-	if len(byName) != 6 || byName["app"].State != stateRunning || byName["orphan"].State != stateOrphaned {
-		t.Fatalf("unexpected independent/orphan rows: %+v", rows)
-	}
+	rejectf(t, len(byName) != 6 || byName["app"].State != stateRunning || byName["orphan"].State != stateOrphaned, "unexpected independent/orphan rows: %+v", rows)
 	f := byName["app_follower"]
-	if f.State != stateFollowing || f.Follows != "app" || f.Follower == nil || !f.Follower.SourceKnown || !f.Follower.SelfKnown || !f.Follower.InRecovery || !f.Follower.Streaming {
-		t.Fatalf("running follower: %+v, facts %+v", f, f.Follower)
-	}
-	if f.SizeBytes != 123 || !f.Exists {
-		t.Fatalf("follower database not read: %+v", f)
-	}
+	rejectf(t, f.State != stateFollowing || f.Follows != "app" || f.Follower == nil || !f.Follower.SourceKnown || !f.Follower.SelfKnown || !f.Follower.InRecovery || !f.Follower.Streaming, "running follower: %+v, facts %+v", f, f.Follower)
+	rejectf(t, f.SizeBytes != 123 || !f.Exists, "follower database not read: %+v", f)
 	if s := byName["stopped_follower"]; s.State != stateStopped || s.Follower != nil || s.Follows != "app" {
 		t.Fatalf("stopped follower: %+v", s)
 	}
@@ -88,9 +80,7 @@ func TestDBListStrictInventoryStates(t *testing.T) {
 	if a := byName["awaiting_follower"]; a.State != stateAwaiting || a.Follower != nil {
 		t.Fatalf("awaiting follower: %+v", a)
 	}
-	if followerCalls != 2 {
-		t.Fatalf("got %d replication probes, want 2", followerCalls)
-	}
+	rejectf(t, followerCalls != 2, "got %d replication probes, want 2", followerCalls)
 	allQueries := strings.Join(queries, "\n")
 	if !strings.Contains(allQueries, "app_follower|postgres|SELECT pg_database_size(datname) AS size FROM pg_database WHERE datname = 'app'") ||
 		!strings.Contains(allQueries, "app_follower|app|SELECT extname") ||
@@ -115,7 +105,7 @@ func TestDBListInventoryFailureReturnsNoRows(t *testing.T) {
 			result, err := handleDBList(context.Background(), &Env{Cluster: cfg})
 			var cliErr *output.CLIError
 			if !errors.As(err, &cliErr) || cliErr.Code != output.CodePrecondition || cliErr.ExitCode != output.ExitPrecondition ||
-				cliErr.Details.(map[string]any)["reason"] != "cluster_inventory_unavailable" || result.Data != nil || len(result.Warnings) != 0 {
+				mustAs[map[string]any](t, cliErr.Details)["reason"] != "cluster_inventory_unavailable" || result.Data != nil || len(result.Warnings) != 0 {
 				t.Fatalf("got result %+v, error %+v", result, err)
 			}
 		})

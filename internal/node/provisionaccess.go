@@ -54,28 +54,24 @@ func provisionOwnedTarget(ctx context.Context, cfg config.Cluster, rt engine.Run
 	return provisionOwnedTargetWith(ctx, cfg, rt, name, recovering, report, steps.Catalog(), engine.Apply, steps.Restarter(cfg))
 }
 
-// provisionOwnedTargetWith splits target-scoped steps around the access step:
-// roles and its prerequisites first, exact-target authorization second, then
-// any later per-database steps. Global routing and timers are never selected.
-func provisionOwnedTargetWith(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name, recovering string,
-	report engine.Reporter, catalog []engine.Step, apply ownedProvisionApply, restarter engine.Restarter,
-) error {
+func validateOwnedTarget(cfg config.Cluster, rt engine.Runtime, name, recovering string, apply ownedProvisionApply) (config.ClusterSpec, error) {
 	spec, ok := cfg.ClusterByName(name)
 	if !ok || name == "" {
-		return fmt.Errorf("owned access target %q is not configured", name)
+		return spec, fmt.Errorf("owned access target %q is not configured", name)
 	}
 	if spec.IsFollower() {
-		return fmt.Errorf("owned access target %q is a physical follower", name)
+		return spec, fmt.Errorf("owned access target %q is a physical follower", name)
 	}
 	if recovering != "" && recovering != name {
-		return fmt.Errorf("recovery target does not match owned access target")
+		return spec, fmt.Errorf("recovery target does not match owned access target")
 	}
 	if rt.DryRun || apply == nil {
-		return fmt.Errorf("owned target provisioning requires an apply runner")
+		return spec, fmt.Errorf("owned target provisioning requires an apply runner")
 	}
-	if err := engine.ValidateIDs(catalog); err != nil {
-		return err
-	}
+	return spec, nil
+}
+
+func splitOwnedAccessSteps(catalog []engine.Step, cfg config.Cluster, name string) ([]string, []string, error) {
 	rolesID := steps.RolesStepID(name)
 	accessID := engine.InstanceID("postgres-access-v1", name)
 	var before, after []string
@@ -90,10 +86,10 @@ func provisionOwnedTargetWith(ctx context.Context, cfg config.Cluster, rt engine
 			rolesSeen = true
 		case accessID:
 			if accessSeen || !rolesSeen {
-				return fmt.Errorf("owned access step must follow roles exactly once")
+				return nil, nil, fmt.Errorf("owned access step must follow roles exactly once")
 			}
 			if access, ok := step.(engine.AccessTransition); !ok || access.AccessTarget() != name {
-				return fmt.Errorf("owned access step does not name the exact target")
+				return nil, nil, fmt.Errorf("owned access step does not name the exact target")
 			}
 			accessSeen = true
 			continue
@@ -105,7 +101,26 @@ func provisionOwnedTargetWith(ctx context.Context, cfg config.Cluster, rt engine
 		}
 	}
 	if !rolesSeen || !accessSeen {
-		return fmt.Errorf("owned target catalog lacks roles or access step")
+		return nil, nil, fmt.Errorf("owned target catalog lacks roles or access step")
+	}
+	return before, after, nil
+}
+
+// provisionOwnedTargetWith splits target-scoped steps around the access step:
+// roles and its prerequisites first, exact-target authorization second, then
+// any later per-database steps. Global routing and timers are never selected.
+func provisionOwnedTargetWith(ctx context.Context, cfg config.Cluster, rt engine.Runtime, name, recovering string,
+	report engine.Reporter, catalog []engine.Step, apply ownedProvisionApply, restarter engine.Restarter,
+) error {
+	if _, err := validateOwnedTarget(cfg, rt, name, recovering, apply); err != nil {
+		return err
+	}
+	if err := engine.ValidateIDs(catalog); err != nil {
+		return err
+	}
+	before, after, err := splitOwnedAccessSteps(catalog, cfg, name)
+	if err != nil {
+		return err
 	}
 	base := engine.Options{
 		DB: name, Recovering: recovering, Confirm: engine.Confirmation{Clusters: []string{name}},
@@ -123,6 +138,7 @@ func provisionOwnedTargetWith(ctx context.Context, cfg config.Cluster, rt engine
 		_, _, err := apply(ctx, catalog, cfg, rt, opts)
 		return err
 	}
+	accessID := engine.InstanceID("postgres-access-v1", name)
 	if err := run(before, false); err != nil {
 		return err
 	}
@@ -132,16 +148,44 @@ func provisionOwnedTargetWith(ctx context.Context, cfg config.Cluster, rt engine
 	return run(after, false)
 }
 
-// bootstrapDatabaseSteps stages global prerequisites, each visible database,
-// and finally shared routing/backup steps. No shared consumer can expose a new
-// target until every owned target's access policy has succeeded.
-func bootstrapDatabaseSteps(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter,
-	catalog []engine.Step, apply ownedProvisionApply, restarter engine.Restarter, failureHint string,
+func publishBootstrapTarget(ctx context.Context, spec config.ClusterSpec, cfg config.Cluster, rt engine.Runtime, report engine.Reporter,
+	catalog []engine.Step, restarter engine.Restarter,
+	collect func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error),
 	owner *bootstrapOwnership, complete func(string) error,
-) (engine.ApplyData, []output.Warning, error) {
-	if owner != nil && complete == nil {
-		return engine.ApplyData{}, nil, fmt.Errorf("bootstrap ownership is unavailable")
+) error {
+	if spec.IsFollower() {
+		ids := existingSettlementSteps(catalog, cfg, spec.Name)
+		if len(ids) == 0 {
+			return fmt.Errorf("no settlement steps for %q", spec.Name)
+		}
+		_, _, err := collect(ctx, catalog, cfg, rt, engine.Options{DB: spec.Name, Only: ids, Report: report, Restarter: restarter})
+		return err
 	}
+	if owner == nil {
+		return fmt.Errorf("bootstrap target %s is not owned", spec.Name)
+	}
+	done, owned := owner.Targets[spec.Name]
+	if !owned {
+		return fmt.Errorf("bootstrap target %s is not owned", spec.Name)
+	}
+	runTarget := collect
+	if done {
+		runTarget = func(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
+			opts.InternalAccess = nil
+			opts.Confirm = engine.Confirmation{}
+			return collect(ctx, catalog, cfg, rt, opts)
+		}
+	}
+	if err := provisionOwnedTargetWith(ctx, cfg, rt, spec.Name, "", report, catalog, runTarget, restarter); err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	return complete(spec.Name)
+}
+
+func bootstrapSharedSteps(catalog []engine.Step) ([]string, []string, error) {
 	selected := map[string]bool{}
 	for _, id := range steps.DatabaseStepIDs() {
 		selected[id] = true
@@ -165,7 +209,24 @@ func bootstrapDatabaseSteps(ctx context.Context, cfg config.Cluster, rt engine.R
 		}
 	}
 	if !pastAccess {
-		return engine.ApplyData{}, nil, fmt.Errorf("bootstrap catalog has no access step")
+		return nil, nil, fmt.Errorf("bootstrap catalog has no access step")
+	}
+	return before, after, nil
+}
+
+// bootstrapDatabaseSteps stages global prerequisites, each visible database,
+// and finally shared routing/backup steps. No shared consumer can expose a new
+// target until every owned target's access policy has succeeded.
+func bootstrapDatabaseSteps(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter,
+	catalog []engine.Step, apply ownedProvisionApply, restarter engine.Restarter, failureHint string,
+	owner *bootstrapOwnership, complete func(string) error,
+) (engine.ApplyData, []output.Warning, error) {
+	if owner != nil && complete == nil {
+		return engine.ApplyData{}, nil, fmt.Errorf("bootstrap ownership is unavailable")
+	}
+	before, after, err := bootstrapSharedSteps(catalog)
+	if err != nil {
+		return engine.ApplyData{}, nil, err
 	}
 	var data engine.ApplyData
 	var warnings []output.Warning
@@ -198,39 +259,8 @@ func bootstrapDatabaseSteps(ctx context.Context, cfg config.Cluster, rt engine.R
 		visible = engine.ClusterView(cfg, "")
 	}
 	for _, spec := range visible.Clusters {
-		if spec.IsFollower() {
-			ids := existingSettlementSteps(catalog, cfg, spec.Name)
-			if len(ids) == 0 {
-				return data, warnings, fmt.Errorf("no settlement steps for %q", spec.Name)
-			}
-			_, _, err := collect(ctx, catalog, cfg, rt, engine.Options{DB: spec.Name, Only: ids, Report: report, Restarter: restarter})
-			if err != nil {
-				return data, warnings, err
-			}
-		} else {
-			if owner == nil {
-				return data, warnings, fmt.Errorf("bootstrap target %s is not owned", spec.Name)
-			}
-			done, owned := owner.Targets[spec.Name]
-			if !owned {
-				return data, warnings, fmt.Errorf("bootstrap target %s is not owned", spec.Name)
-			}
-			runTarget := collect
-			if done {
-				runTarget = func(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
-					opts.InternalAccess = nil
-					opts.Confirm = engine.Confirmation{}
-					return collect(ctx, catalog, cfg, rt, opts)
-				}
-			}
-			if err := provisionOwnedTargetWith(ctx, cfg, rt, spec.Name, "", report, catalog, runTarget, restarter); err != nil {
-				return data, warnings, err
-			}
-			if !done {
-				if err := complete(spec.Name); err != nil {
-					return data, warnings, err
-				}
-			}
+		if err := publishBootstrapTarget(ctx, spec, cfg, rt, report, catalog, restarter, collect, owner, complete); err != nil {
+			return data, warnings, err
 		}
 	}
 	if err := shared(after); err != nil {

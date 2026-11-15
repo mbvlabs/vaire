@@ -34,9 +34,7 @@ func TestRunDrillRequiresPersistedJobEvidence(t *testing.T) {
 		return nil, nil
 	}
 	_, _, err := RunJob(context.Background(), "restore-drill", JobOptions{DB: "app"}, nil)
-	if !errors.Is(err, failure) {
-		t.Fatalf("state failure lost: %v", err)
-	}
+	rejectf(t, !errors.Is(err, failure), "state failure lost: %v", err)
 }
 
 func TestMaterialisationJobRejectsConflictingHistory(t *testing.T) {

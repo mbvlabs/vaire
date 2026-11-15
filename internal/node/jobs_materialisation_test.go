@@ -44,9 +44,7 @@ func TestRunJobDumpRetainedGuardAndRelease(t *testing.T) {
 	run := func(name string, wantFence int) error {
 		t.Helper()
 		_, _, err := RunJob(context.Background(), "db-dump", JobOptions{DB: name}, nil)
-		if acquired != released || fences != wantFence {
-			t.Fatalf("locks %d/%d fence %d", acquired, released, fences)
-		}
+		rejectf(t, acquired != released || fences != wantFence, "locks %d/%d fence %d", acquired, released, fences)
 		return err
 	}
 	if err := run(o.Target, 0); output.ExitCode(err) != output.ExitPrecondition {

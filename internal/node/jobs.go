@@ -155,186 +155,188 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	// and is re-raised: history must not turn an interrupted job into success.
 	defer func() {
 		r := recover()
-		finishRunJobActivity(ja, err, skipped, r)
+		finishRunJobActivity(ctx, ja, err, skipped, r)
 		if r != nil {
 			panic(r)
 		}
 	}()
 
-	if !knownJob(job) {
-		err := output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
-			WithDetails(map[string]any{"jobs": jobNames})
-		recordJobRefusal(act, job, opts.ID, err, "unknown_job", timerRun(opts))
+	if err := validateJobInvocation(ctx, job, opts, act); err != nil {
 		return nil, "", err
 	}
-	if _, err := jobNodeStat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
-		err := output.NewError(
-			output.CodePrecondition,
-			"this machine is not an vaire node: "+config.ClusterPath+" does not exist",
-			output.ExitPrecondition,
-			"vaire node run runs on the server. From your machine: vaire ssh --command 'sudo vaire node run "+job+"'",
-		).WithDetails(map[string]any{"reason": "not_a_node"})
-		recordJobRefusal(act, job, opts.ID, err, "not_a_node", timerRun(opts))
-		return nil, "", err
-	}
-	if jobEffectiveUID() != 0 {
-		err := rootRequired("vaire node run")
-		recordJobRefusal(act, job, opts.ID, err, "root_required", timerRun(opts))
-		return nil, "", err
-	}
-	if job == "certs-renew" {
-		id := activityJobID(opts.ID)
-		ja = newJobActivity(act, job, id, id, "", "", timerRun(opts), opts.ID != "", false)
-		rep, berr := ja.begin(ctx, report)
-		if berr != nil {
-			return nil, "", berr
-		}
-		release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), certsLockWait)
-		if engine.IsLockHeld(err) {
-			ja.pending(activity.OutcomeSkipped, output.CodePrecondition, "lock_held")
-			logLine(rep, job, "the node lock is busy; skipping "+job)
-			return map[string]any{"job": job, "skipped": "lock_busy"}, "the node lock was busy", nil
-		}
-		if err != nil {
-			return nil, "", err
-		}
-		defer release()
-		res, err := certsRenew(ctx, rep)
-		return res, "", err
-	}
-	if locklessJobs[job] {
-		id := activityJobID(opts.ID)
-		ja = newJobActivity(act, job, id, id, "", "", timerRun(opts), opts.ID != "", false)
-		rep, berr := ja.begin(ctx, report)
-		if berr != nil {
-			return nil, "", berr
-		}
-		cfg, err := config.LoadCluster(config.ClusterPath)
-		if err != nil {
-			return nil, "", err
-		}
-		if job == "fence-check" {
-			res, err := runFenceCheck(ctx, cfg, rep)
-			return res, "", err
-		}
-		res, err := runMasterBackup(ctx, cfg, rep, masterBackupOptions{debounce: true})
-		if err == nil && res.Skipped != "" {
-			ja.pending(activity.OutcomeSkipped, "", safeActivityToken(res.Skipped))
-		}
-		return res, "", err
-	}
-	if quietJobs[job] {
-		id := activityJobID(opts.ID)
-		ja = newJobActivity(act, job, id, id, "", "", timerRun(opts), opts.ID != "", false)
-		rep, berr := ja.begin(ctx, report)
-		if berr != nil {
-			return nil, "", berr
-		}
-		release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), 0)
-		if engine.IsLockHeld(err) {
-			ja.pending(activity.OutcomeSkipped, output.CodePrecondition, "lock_held")
-			logLine(rep, job, "the node lock is busy; skipping "+job)
-			return map[string]any{"job": job, "skipped": "lock_busy"}, "the node lock was busy", nil
-		}
-		if err != nil {
-			return nil, "", err
-		}
-		defer release()
-		cfg, err := config.LoadCluster(config.ClusterPath)
-		if err != nil {
-			return nil, "", err
-		}
-		res, err := runQuietJob(ctx, job, cfg, rep)
-		return res, "", err
+	if res, skipped, handled, err := runSpecialJob(ctx, job, opts, report, act, &ja); handled {
+		return res, skipped, err
 	}
 	if rpcOnlyJobs[job] && opts.ID == "" {
 		err := output.NewError(output.CodeUsage, "job "+job+" is started by its operator command, not by hand", output.ExitUsage,
 			"Use vaire restore, vaire db fork or vaire db copy from your machine.")
-		recordJobRefusal(act, job, opts.ID, err, "job_spec_required", timerRun(opts))
+		recordJobRefusal(ctx, act, job, opts.ID, err, "job_spec_required", timerRun(opts))
 		return nil, "", err
 	}
 
-	env := &jobEnv{ID: opts.ID, Job: job, Report: report, DB: opts.DB}
-	if env.ID == "" {
-		env.ID = rpc.NewRequestID()
-	} else {
-		var spec jobSpec
-		var err error
-		if job == "db-copy" {
-			spec, err = readCopyJobSpec(env.ID)
-		} else {
-			spec, err = jobReadSpec(env.ID)
-		}
-		if err != nil {
-			reason := jobSpecErrorReason(err)
-			if reason == "" {
-				reason = "job_spec_missing"
-			}
-			recordJobRefusal(act, job, env.ID, err, reason, timerRun(opts))
-			if job == "db-copy" {
-				// Consumption of the private spec is a definite pre-execution
-				// refusal, not an ambiguous launch: no job function, config
-				// load, source preflight or provisioning has run.
-				rec := finishedJobRecord(engine.JobRecord{ID: env.ID, Job: job, DB: rpcJobDatabase(job, spec.Params)},
-					engine.JobFailed, "private copy spec was not consumed", nil, err)
-				putFinishedJob(rec)
-			}
-			return nil, "", err
-		}
-		if spec.Job != job {
-			err := output.NewError(output.CodeUsage, "job "+env.ID+" is a "+spec.Job+" job, not "+job, output.ExitUsage, "")
-			recordJobRefusal(act, job, env.ID, err, "job_spec_mismatch", timerRun(opts))
-			return nil, "", err
-		}
-		env.Params, env.Secrets = spec.Params, spec.Secrets
-		env.OperationID, env.ParentRequestID = spec.OperationID, spec.ParentRequestID
-	}
-	cfg, err := jobLoadCluster(config.ClusterPath)
+	env, err := prepareJobEnv(ctx, job, opts, report, act)
 	if err != nil {
-		recordJobRefusal(act, job, env.ID, err, "config_error", timerRun(opts))
 		return nil, "", err
 	}
-	env.Cluster = cfg
-	if env.OperationID == "" {
-		env.OperationID = env.ID
-	}
-	if databaseJobs[job] {
-		env.DB = jobDatabase(env)
-		if env.DB == "" {
-			err := output.NewError(output.CodeUsage, "job "+job+" runs for one database", output.ExitUsage,
-				"Pass --db <database>, as the vaire-"+job+"@<database> timer does.")
-			recordJobRefusal(act, job, env.ID, err, "database_required", timerRun(opts))
-			return nil, "", err
-		}
-		if _, ok := cfg.ClusterByName(env.DB); !ok {
-			err := databaseNotFound(env.DB)
-			recordJobRefusal(act, job, env.ID, err, "database_not_found", timerRun(opts))
-			return nil, "", err
-		}
-	}
 
+	var rec engine.JobRecord
+	rec, err = beginJobRun(ctx, env, act, opts, &ja)
+	if err != nil {
+		return nil, "", err
+	}
+	lease, busy, err := acquireJobLocks(ctx, env, &rec, timerRun(opts))
+	if busy != nil {
+		return jobBusyOutcome(ctx, env, ja, rec, job, busy, err)
+	}
+	if err != nil {
+		return jobFailure(env, ja, rec, err)
+	}
+	defer lease.finish()
+	env.lease = lease
+	if err := reloadJobAfterLocks(env, ja, rec); err != nil {
+		return nil, "", err
+	}
+	if err := validateRestoreInvocation(env); err != nil {
+		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+		return nil, "", err
+	}
+	if err := jobAuthorityCheck(ctx, env, ja); err != nil {
+		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+		return nil, "", err
+	}
+	return dispatchJob(ctx, env, ja, rec)
+}
+
+func jobBusyOutcome(ctx context.Context, env *jobEnv, ja *jobActivity, rec engine.JobRecord, job string, busy *jobLockBusy, cause error) (any, string, error) {
+	res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy"}
+	for k, v := range busy.fields {
+		res[k] = v
+	}
+	copySkippedFields(job, res)
+	detail := busy.what + " was busy"
+	if cause != nil {
+		// systemctl stop while the run waited for the lock.
+		detail = "stopped while waiting for " + busy.what
+		res["skipped"] = "stopped"
+	} else {
+		logLine(env.Report, job, busy.log+"; skipping "+job)
+	}
+	ja.pending(activity.OutcomeSkipped, output.CodePrecondition, jobSkipReason(busy, cause))
+	finishJobWithActivity(rec, ja, engine.JobSkipped, detail, res, nil)
+	notRun(ctx, env, errors.New(detail))
+	return res, detail, nil
+}
+
+func jobFailure(env *jobEnv, ja *jobActivity, rec engine.JobRecord, err error) (any, string, error) {
+	finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+	if env.Job == "restore" || env.Job == "recover" {
+		failRestore(env, err)
+	}
+	return nil, "", err
+}
+
+func reloadJobAfterLocks(env *jobEnv, ja *jobActivity, rec engine.JobRecord) error {
+	fresh, err := jobLoadCluster(config.ClusterPath)
+	if err != nil {
+		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+		if env.Job == "restore" || env.Job == "recover" {
+			failRestore(env, err)
+		}
+		return err
+	}
+	check := *env
+	check.Cluster = fresh
+	invalid := validateJobLockParams(&check) != nil || !slices.Equal(jobLockRequests(env), jobLockRequests(&check))
+	if leaseJob(env.Job) {
+		instance, instanceErr := currentFollowInstance()
+		invalid = invalid || instanceErr != nil || instance != env.installID
+	}
+	if invalid {
+		err = fmt.Errorf("job lock scope changed while waiting")
+		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+		// Without a verified current install and lock scope, the old
+		// invocation has no authority to change a restore record.
+		return err
+	}
+	env.Cluster = fresh
+	return nil
+}
+
+func jobAuthorityCheck(ctx context.Context, env *jobEnv, ja *jobActivity) error {
+	// Lifecycle jobs carry their own exact-target authority. Ordinary jobs
+	// must never dispatch against a retained target, including timer runs.
+	switch env.Job {
+	case "backup-full", "backup-diff", "backup-incr", "backup-verify", "db-dump", "restore-drill", "maint":
+		target := env.DB
+		if target == "" {
+			target = rpcJobDatabase(env.Job, env.Params)
+		}
+		if target != "" {
+			if err := guardPublicMaterialisation(ctx, env.Cluster, target); err != nil {
+				return err
+			}
+		}
+	case "maint-daily", "maint-weekly":
+		if err := guardMaterialisationApply(ctx, env.Cluster, ""); err != nil {
+			return err
+		}
+	}
+	if !bucketWriteJobs[env.Job] {
+		return nil
+	}
+	if err := jobFenceCheck(ctx, env.Cluster, env.Report); err != nil {
+		code, reason := activityErrorTokens(err)
+		if reason == "" {
+			reason = "node_fenced"
+		}
+		ja.pending(activity.OutcomeRefused, code, reason)
+		return err
+	}
+	return nil
+}
+
+func dispatchJob(ctx context.Context, env *jobEnv, ja *jobActivity, rec engine.JobRecord) (any, string, error) {
+	res, err := runJobFunc(ctx, env)
+	if err == nil {
+		finishJobWithActivity(rec, ja, engine.JobSucceeded, "", res, nil)
+		return res, "", nil
+	}
+	if errors.Is(err, errSkipped) {
+		ja.pending(activity.OutcomeSkipped, "", "job_skipped")
+		finishJobWithActivity(rec, ja, engine.JobSkipped, err.Error(), res, nil)
+		return res, strings.TrimPrefix(err.Error(), errSkipped.Error()+": "), nil
+	}
+	finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+	return nil, "", err
+}
+
+func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts JobOptions, jaOut **jobActivity) (engine.JobRecord, error) {
 	db := env.DB
 	if db == "" {
-		db = rpcJobDatabase(job, env.Params)
+		db = rpcJobDatabase(env.Job, env.Params)
 	}
-	ja = newJobActivity(act, job, env.ID, env.OperationID, env.ParentRequestID, db, timerRun(opts), opts.ID != "", !jobSafetyJob(job))
+	ja := newJobActivity(act, env.Job, env.ID, env.OperationID, env.ParentRequestID, db, timerRun(opts), opts.ID != "", !jobSafetyJob(env.Job))
+	// Publish before begin so a panic in the checked start still reaches
+	// RunJob's finalizer as an unknown outcome.
+	*jaOut = ja
 	rep, berr := ja.begin(ctx, env.Report)
 	if berr != nil {
-		// The RPC already wrote a queued record and its spec has been read
-		// and removed. A refused checked start must leave that record failed,
-		// not queued until a follower synthesizes a generic crash; the spec is
+		// The RPC already wrote a queued record and its spec has been read and
+		// removed. A refused checked start must leave that record failed, not
+		// queued until a follower synthesizes a generic crash; the spec is
 		// never recreated or replayed.
-		if rec, ok := activityRefusedJobRecord(opts.ID != "", env.ID, job, db, berr); ok {
+		if rec, ok := activityRefusedJobRecord(opts.ID != "", env.ID, env.Job, db, berr); ok {
 			putFinishedJob(rec)
 		}
-		return nil, "", berr
+		return engine.JobRecord{}, berr
 	}
 	env.Report = rep
 
-	rec := engine.JobRecord{ID: env.ID, Job: job, DB: env.DB, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID"), PID: os.Getpid()}
+	rec := engine.JobRecord{ID: env.ID, Job: env.Job, DB: env.DB, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID"), PID: os.Getpid()}
 	if rec.DB == "" {
-		rec.DB = rpcJobDatabase(job, env.Params)
+		rec.DB = rpcJobDatabase(env.Job, env.Params)
 	}
+	retain := env.Job == "restore" || env.Job == "recover" || env.Job == "restore-drill"
 	stateErr := jobUpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(env.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
@@ -343,130 +345,214 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 			rec.CreatedAt = rec.StartedAt
 		}
 		st.PutJob(rec)
-		if job == "restore" || job == "recover" || job == "restore-drill" {
+		if retain {
 			st.RetainJob(rec.ID)
 		}
 		return nil
 	})
-	if stateErr != nil && (job == "restore" || job == "recover" || job == "restore-drill") {
+	if stateErr != nil && retain {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, stateErr)
-		return nil, "", stateErr
+		return rec, stateErr
 	}
-
-	if leaseJob(job) {
-		env.installID, err = currentFollowInstance()
-		if err != nil {
-			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-			if job == "restore" || job == "recover" {
-				failRestore(env, err)
-			}
-			return nil, "", err
-		}
+	if !leaseJob(env.Job) {
+		return rec, nil
 	}
-	lease, busy, err := acquireJobLocks(ctx, env, &rec, timerRun(opts))
-	if busy != nil {
-		res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy"}
-		for k, v := range busy.fields {
-			res[k] = v
-		}
-		copySkippedFields(job, res)
-		detail := busy.what + " was busy"
-		if err != nil {
-			// systemctl stop while the run waited for the lock.
-			detail = "stopped while waiting for " + busy.what
-			res["skipped"] = "stopped"
-		} else {
-			logLine(env.Report, job, busy.log+"; skipping "+job)
-		}
-		ja.pending(activity.OutcomeSkipped, output.CodePrecondition, jobSkipReason(busy, err))
-		finishJobWithActivity(rec, ja, engine.JobSkipped, detail, res, nil)
-		notRun(ctx, env, errors.New(detail))
-		return res, detail, nil
-	}
+	installID, err := currentFollowInstance()
 	if err != nil {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-		if job == "restore" || job == "recover" {
+		if env.Job == "restore" || env.Job == "recover" {
 			failRestore(env, err)
 		}
-		return nil, "", err
+		return rec, err
 	}
-	defer lease.finish()
-	env.lease = lease
-	{
-		fresh, loadErr := jobLoadCluster(config.ClusterPath)
-		if loadErr != nil {
-			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, loadErr)
-			if job == "restore" || job == "recover" {
-				failRestore(env, loadErr)
-			}
-			return nil, "", loadErr
-		}
-		check := *env
-		check.Cluster = fresh
-		invalid := validateJobLockParams(&check) != nil || !slices.Equal(jobLockRequests(env), jobLockRequests(&check))
-		if leaseJob(job) {
-			instance, instanceErr := currentFollowInstance()
-			invalid = invalid || instanceErr != nil || instance != env.installID
-		}
-		if invalid {
-			err = fmt.Errorf("job lock scope changed while waiting")
-			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-			// Without a verified current install and lock scope, the old
-			// invocation has no authority to change a restore record.
-			return nil, "", err
-		}
-		env.Cluster = fresh
-	}
+	env.installID = installID
+	return rec, nil
+}
 
-	if err := validateRestoreInvocation(env); err != nil {
-		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-		return nil, "", err
+func runSpecialJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter, act *activityRecorder, jaOut **jobActivity) (any, string, bool, error) {
+	switch {
+	case job == "certs-renew":
+		return runCertsRenewJob(ctx, job, opts, report, act, jaOut)
+	case locklessJobs[job]:
+		return runLocklessJob(ctx, job, opts, report, act, jaOut)
+	case quietJobs[job]:
+		return runQuietLockJob(ctx, job, opts, report, act, jaOut)
 	}
+	return nil, "", false, nil
+}
 
-	// Lifecycle jobs carry their own exact-target authority. Ordinary jobs
-	// must never dispatch against a retained target, including timer runs.
-	switch job {
-	case "backup-full", "backup-diff", "backup-incr", "backup-verify", "db-dump", "restore-drill", "maint":
-		target := env.DB
-		if target == "" {
-			target = rpcJobDatabase(job, env.Params)
-		}
-		if target != "" {
-			if err := guardPublicMaterialisation(env.Cluster, target); err != nil {
-				finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-				return nil, "", err
-			}
-		}
-	case "maint-daily", "maint-weekly":
-		if err := guardMaterialisationApply(env.Cluster, ""); err != nil {
-			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-			return nil, "", err
-		}
-	}
-
-	if bucketWriteJobs[job] {
-		if err := jobFenceCheck(ctx, env.Cluster, env.Report); err != nil {
-			code, reason := activityErrorTokens(err)
-			if reason == "" {
-				reason = "node_fenced"
-			}
-			ja.pending(activity.OutcomeRefused, code, reason)
-			finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-			return nil, "", err
-		}
-	}
-	res, err = runJobFunc(ctx, env)
+func runCertsRenewJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter, act *activityRecorder, jaOut **jobActivity) (any, string, bool, error) {
+	ja, rep, err := beginSpecialActivity(ctx, job, opts, report, act, jaOut)
 	if err != nil {
-		if errors.Is(err, errSkipped) {
-			ja.pending(activity.OutcomeSkipped, "", "job_skipped")
-			finishJobWithActivity(rec, ja, engine.JobSkipped, err.Error(), res, nil)
-			return res, strings.TrimPrefix(err.Error(), errSkipped.Error()+": "), nil
-		}
-		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
-		return nil, "", err
+		return nil, "", true, err
 	}
-	finishJobWithActivity(rec, ja, engine.JobSucceeded, "", res, nil)
-	return res, "", nil
+	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), certsLockWait)
+	if engine.IsLockHeld(err) {
+		return skippedJob(ja, job, rep)
+	}
+	if err != nil {
+		return nil, "", true, err
+	}
+	defer release()
+	res, err := certsRenew(ctx, rep)
+	return res, "", true, err
+}
+
+func runLocklessJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter, act *activityRecorder, jaOut **jobActivity) (any, string, bool, error) {
+	ja, rep, err := beginSpecialActivity(ctx, job, opts, report, act, jaOut)
+	if err != nil {
+		return nil, "", true, err
+	}
+	cfg, err := config.LoadCluster(config.ClusterPath)
+	if err != nil {
+		return nil, "", true, err
+	}
+	if job == "fence-check" {
+		res, err := runFenceCheck(ctx, cfg, rep)
+		return res, "", true, err
+	}
+	res, err := runMasterBackup(ctx, cfg, rep, masterBackupOptions{debounce: true})
+	if err == nil && res.Skipped != "" {
+		ja.pending(activity.OutcomeSkipped, "", safeActivityToken(res.Skipped))
+	}
+	return res, "", true, err
+}
+
+func runQuietLockJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter, act *activityRecorder, jaOut **jobActivity) (any, string, bool, error) {
+	ja, rep, err := beginSpecialActivity(ctx, job, opts, report, act, jaOut)
+	if err != nil {
+		return nil, "", true, err
+	}
+	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), 0)
+	if engine.IsLockHeld(err) {
+		return skippedJob(ja, job, rep)
+	}
+	if err != nil {
+		return nil, "", true, err
+	}
+	defer release()
+	cfg, err := config.LoadCluster(config.ClusterPath)
+	if err != nil {
+		return nil, "", true, err
+	}
+	res, err := runQuietJob(ctx, job, cfg, rep)
+	return res, "", true, err
+}
+
+func beginSpecialActivity(ctx context.Context, job string, opts JobOptions, report engine.Reporter, act *activityRecorder, jaOut **jobActivity) (*jobActivity, engine.Reporter, error) {
+	id := activityJobID(opts.ID)
+	ja := newJobActivity(act, job, id, id, "", "", timerRun(opts), opts.ID != "", false)
+	// Publish before begin: a panic inside the checked start must still reach
+	// RunJob's finalizer as unknown, not vanish behind a nil activity.
+	*jaOut = ja
+	rep, err := ja.begin(ctx, report)
+	return ja, rep, err
+}
+
+func skippedJob(ja *jobActivity, job string, rep engine.Reporter) (any, string, bool, error) {
+	ja.pending(activity.OutcomeSkipped, output.CodePrecondition, "lock_held")
+	logLine(rep, job, "the node lock is busy; skipping "+job)
+	return map[string]any{"job": job, "skipped": "lock_busy"}, "the node lock was busy", true, nil
+}
+
+func prepareJobEnv(ctx context.Context, job string, opts JobOptions, report engine.Reporter, act *activityRecorder) (*jobEnv, error) {
+	env := &jobEnv{ID: opts.ID, Job: job, Report: report, DB: opts.DB}
+	if env.ID == "" {
+		env.ID = rpc.NewRequestID()
+	} else if err := loadJobSpec(ctx, env, opts, act); err != nil {
+		return nil, err
+	}
+	cfg, err := jobLoadCluster(config.ClusterPath)
+	if err != nil {
+		recordJobRefusal(ctx, act, job, env.ID, err, "config_error", timerRun(opts))
+		return nil, err
+	}
+	env.Cluster = cfg
+	if env.OperationID == "" {
+		env.OperationID = env.ID
+	}
+	if err := validateJobDatabase(ctx, env, opts, act); err != nil {
+		return nil, err
+	}
+	return env, nil
+}
+
+func loadJobSpec(ctx context.Context, env *jobEnv, opts JobOptions, act *activityRecorder) error {
+	var spec jobSpec
+	var err error
+	if env.Job == "db-copy" {
+		spec, err = readCopyJobSpec(env.ID)
+	} else {
+		spec, err = jobReadSpec(env.ID)
+	}
+	if err != nil {
+		reason := jobSpecErrorReason(err)
+		if reason == "" {
+			reason = "job_spec_missing"
+		}
+		recordJobRefusal(ctx, act, env.Job, env.ID, err, reason, timerRun(opts))
+		if env.Job == "db-copy" {
+			// Consumption of the private spec is a definite pre-execution
+			// refusal, not an ambiguous launch: no job function, config load,
+			// source preflight or provisioning has run.
+			rec := finishedJobRecord(engine.JobRecord{ID: env.ID, Job: env.Job, DB: rpcJobDatabase(env.Job, spec.Params)},
+				engine.JobFailed, "private copy spec was not consumed", nil, err)
+			putFinishedJob(rec)
+		}
+		return err
+	}
+	if spec.Job != env.Job {
+		err := output.NewError(output.CodeUsage, "job "+env.ID+" is a "+spec.Job+" job, not "+env.Job, output.ExitUsage, "")
+		recordJobRefusal(ctx, act, env.Job, env.ID, err, "job_spec_mismatch", timerRun(opts))
+		return err
+	}
+	env.Params, env.Secrets = spec.Params, spec.Secrets
+	env.OperationID, env.ParentRequestID = spec.OperationID, spec.ParentRequestID
+	return nil
+}
+
+func validateJobDatabase(ctx context.Context, env *jobEnv, opts JobOptions, act *activityRecorder) error {
+	if !databaseJobs[env.Job] {
+		return nil
+	}
+	env.DB = jobDatabase(env)
+	if env.DB == "" {
+		err := output.NewError(output.CodeUsage, "job "+env.Job+" runs for one database", output.ExitUsage,
+			"Pass --db <database>, as the vaire-"+env.Job+"@<database> timer does.")
+		recordJobRefusal(ctx, act, env.Job, env.ID, err, "database_required", timerRun(opts))
+		return err
+	}
+	if _, ok := env.Cluster.ClusterByName(env.DB); !ok {
+		err := databaseNotFound(env.DB)
+		recordJobRefusal(ctx, act, env.Job, env.ID, err, "database_not_found", timerRun(opts))
+		return err
+	}
+	return nil
+}
+
+func validateJobInvocation(ctx context.Context, job string, opts JobOptions, act *activityRecorder) error {
+	if !knownJob(job) {
+		err := output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
+			WithDetails(map[string]any{"jobs": jobNames})
+		recordJobRefusal(ctx, act, job, opts.ID, err, "unknown_job", timerRun(opts))
+		return err
+	}
+	if _, err := jobNodeStat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
+		err := output.NewError(
+			output.CodePrecondition,
+			"this machine is not an vaire node: "+config.ClusterPath+" does not exist",
+			output.ExitPrecondition,
+			"vaire node run runs on the server. From your machine: vaire ssh --command 'sudo vaire node run "+job+"'",
+		).WithDetails(map[string]any{"reason": "not_a_node"})
+		recordJobRefusal(ctx, act, job, opts.ID, err, "not_a_node", timerRun(opts))
+		return err
+	}
+	if jobEffectiveUID() != 0 {
+		err := rootRequired("vaire node run")
+		recordJobRefusal(ctx, act, job, opts.ID, err, "root_required", timerRun(opts))
+		return err
+	}
+	return nil
 }
 
 // activityJobID gives a job invocation an id for its events even when it is a
@@ -554,45 +640,58 @@ func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (*lockedJo
 	}
 	held = append(held, release)
 	if heavyIOJobs[env.Job] || maintHeavy(env) || env.Job == "recover" {
-		var release engine.Release
-		var err error
-		if env.Job == "recover" && locks.heavyWait != nil {
-			release, err = locks.heavyWait(ctx, env.Job, env.ID, recoverHeavyIOWait)
-		} else {
-			release, err = locks.heavyIO(ctx, env.Job, env.ID)
-		}
-		if env.Job == "recover" && err != nil {
+		heavyRelease, busy, err := acquireHeavyJobLock(ctx, env, locks)
+		if err != nil || busy != nil {
 			releaseAll()
-			return nil, nil, err
+			return nil, busy, err
 		}
-		if engine.IsLockHeld(err) {
-			releaseAll()
-			return nil, &jobLockBusy{what: "the heavy-I/O lock", log: "another backup job holds the heavy-I/O lock",
-				fields: map[string]any{"lock": "heavy_io", "db": env.DB}}, nil
-		}
-		if err != nil {
-			releaseAll()
-			return nil, nil, err
-		}
-		heavy = sync.OnceFunc(release)
+		heavy = sync.OnceFunc(heavyRelease)
 		held = append(held, heavy)
 	}
 	requests := jobLockRequests(env)
 	for _, request := range requests {
-		cluster := request.name
-		release, err := locks.cluster(ctx, cluster, request.mode, env.Job, env.ID, 0)
-		if engine.IsLockHeld(err) {
+		release, busy, err := acquireClusterJobLock(ctx, env, locks, request)
+		if err != nil || busy != nil {
 			releaseAll()
-			return nil, &jobLockBusy{what: "the lock of " + cluster, log: "the lock of " + cluster + " is busy",
-				fields: map[string]any{"cluster": cluster}}, nil
-		}
-		if err != nil {
-			releaseAll()
-			return nil, nil, err
+			return nil, busy, err
 		}
 		held = append(held, release)
 	}
 	return newLockedJobLease(env, requests, heavy, releaseAll), nil, nil
+}
+
+func acquireHeavyJobLock(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Release, *jobLockBusy, error) {
+	var release engine.Release
+	var err error
+	if env.Job == "recover" && locks.heavyWait != nil {
+		release, err = locks.heavyWait(ctx, env.Job, env.ID, recoverHeavyIOWait)
+	} else {
+		release, err = locks.heavyIO(ctx, env.Job, env.ID)
+	}
+	if env.Job == "recover" && err != nil {
+		return nil, nil, err
+	}
+	if engine.IsLockHeld(err) {
+		return nil, &jobLockBusy{what: "the heavy-I/O lock", log: "another backup job holds the heavy-I/O lock",
+			fields: map[string]any{"lock": "heavy_io", "db": env.DB}}, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return release, nil, nil
+}
+
+func acquireClusterJobLock(ctx context.Context, env *jobEnv, locks jobLockers, request jobLockRequest) (engine.Release, *jobLockBusy, error) {
+	cluster := request.name
+	release, err := locks.cluster(ctx, cluster, request.mode, env.Job, env.ID, 0)
+	if engine.IsLockHeld(err) {
+		return nil, &jobLockBusy{what: "the lock of " + cluster, log: "the lock of " + cluster + " is busy",
+			fields: map[string]any{"cluster": cluster}}, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return release, nil, nil
 }
 
 // acquireJobLocks takes a job's locks. Without wait a busy lock is returned
@@ -886,7 +985,7 @@ func readJobSpecAt(dir, id string, requireUnlink bool) (jobSpec, error) {
 		return jobSpec{}, output.NewError(output.CodeUsage, "job id "+id+" is not a ULID", output.ExitUsage, "")
 	}
 	path := filepath.Join(dir, id+".json")
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a validated id under the fixed job directory.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return jobSpec{}, output.NewError(output.CodePrecondition, "job "+id+" has no spec", output.ExitPrecondition,
 			"Start jobs from their operator command.").WithDetails(map[string]any{"reason": "job_not_found", "job_id": id})
@@ -1104,6 +1203,114 @@ func waitJobEvidence(ctx context.Context, rec engine.JobRecord) (engine.JobRecor
 	}
 }
 
+func awaitJobRecord(ctx context.Context, id string, rec engine.JobRecord) (engine.JobRecord, error) {
+	inactiveSince := time.Time{}
+	for !rec.Final() {
+		select {
+		case <-ctx.Done():
+			// The observer was interrupted while the job may still be
+			// running. A terminal record that already exists is the real
+			// outcome and must stay definite; otherwise this is an observation
+			// failure, not a job failure.
+			if final, ok := finalJobRecord(id); ok {
+				rec = final
+				continue
+			}
+			return rec, jobObservation(ctx.Err())
+		case <-time.After(jobFollowPoll):
+		}
+		var err error
+		rec, err = refreshFollowedJob(ctx, id, rec, &inactiveSince)
+		if err != nil {
+			return rec, err
+		}
+	}
+	return rec, nil
+}
+
+func refreshFollowedJob(ctx context.Context, id string, rec engine.JobRecord, inactiveSince *time.Time) (engine.JobRecord, error) {
+	st, err := loadJobState()
+	if err != nil {
+		return rec, jobObservation(err)
+	}
+	if r, ok := st.Job(id); ok {
+		rec = r
+	}
+	if rec.Final() {
+		return rec, nil
+	}
+	if rec.Job == "db-copy" {
+		return refreshCopyJob(ctx, rec, inactiveSince), nil
+	}
+	if rec.Unit == "" {
+		return refreshLocalJob(ctx, id, rec), nil
+	}
+	return refreshUnitJob(ctx, rec, inactiveSince), nil
+}
+
+func refreshCopyJob(ctx context.Context, rec engine.JobRecord, inactiveSince *time.Time) engine.JobRecord {
+	switch copyJobLiveness(ctx, rec) {
+	case copyLivenessActive, copyLivenessUnknown:
+		*inactiveSince = time.Time{}
+	case copyLivenessInactive:
+		if inactiveSince.IsZero() {
+			*inactiveSince = time.Now()
+			return rec
+		}
+		grace := 15 * time.Second
+		if rec.State == engine.JobQueued {
+			grace *= 4
+		}
+		if time.Since(*inactiveSince) <= grace {
+			return rec
+		}
+		next, updated := putCrashedJobIfUnfinished(rec)
+		if !updated {
+			*inactiveSince = time.Time{}
+		}
+		return next
+	}
+	return rec
+}
+
+func refreshLocalJob(ctx context.Context, id string, rec engine.JobRecord) engine.JobRecord {
+	// A timer run or a run by hand: its PID or invocation tells.
+	if reapJobs(ctx, id) != nil {
+		return rec
+	}
+	st, err := loadJobState()
+	if err != nil {
+		return rec
+	}
+	if r, ok := st.Job(id); ok {
+		return r
+	}
+	return rec
+}
+
+func refreshUnitJob(ctx context.Context, rec engine.JobRecord, inactiveSince *time.Time) engine.JobRecord {
+	// A unit that ended without recording a result crashed.
+	out, _ := exec.CommandContext(ctx, "systemctl", "is-active", rec.Unit).Output() //nolint:gosec // G204: the unit name is vaire-job-<validated id>.
+	state := strings.TrimSpace(string(out))
+	if state == "active" || state == "activating" {
+		return rec
+	}
+	if inactiveSince.IsZero() {
+		*inactiveSince = time.Now()
+		return rec
+	}
+	grace := 15 * time.Second
+	if rec.State == engine.JobQueued {
+		grace *= 4
+	}
+	if time.Since(*inactiveSince) <= grace {
+		return rec
+	}
+	rec = crashedJobRecord(rec)
+	putFinishedJob(rec)
+	return rec
+}
+
 // followJob streams a job's events from the journal until the job is
 // recorded as finished, then returns its outcome as the RPC result.
 func followJob(ctx context.Context, env *Env, id string) (Result, error) {
@@ -1140,75 +1347,9 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 	} else {
 		close(done)
 	}
-	inactiveSince := time.Time{}
-	for !rec.Final() {
-		select {
-		case <-ctx.Done():
-			// The observer was interrupted while the job may still be
-			// running. A terminal record that already exists is the real
-			// outcome and must stay definite; otherwise this is an
-			// observation failure, not a job failure.
-			if final, ok := finalJobRecord(id); ok {
-				rec = final
-				continue
-			}
-			return Result{}, jobObservation(ctx.Err())
-		case <-time.After(jobFollowPoll):
-		}
-		st, err := loadJobState()
-		if err != nil {
-			return Result{}, jobObservation(err)
-		}
-		if r, ok := st.Job(id); ok {
-			rec = r
-		}
-		if rec.Final() {
-			continue
-		}
-		if rec.Job == "db-copy" {
-			switch copyJobLiveness(ctx, rec) {
-			case copyLivenessActive, copyLivenessUnknown:
-				inactiveSince = time.Time{}
-			case copyLivenessInactive:
-				if inactiveSince.IsZero() {
-					inactiveSince = time.Now()
-				} else {
-					grace := 15 * time.Second
-					if rec.State == engine.JobQueued {
-						grace *= 4
-					}
-					if time.Since(inactiveSince) > grace {
-						next, updated := putCrashedJobIfUnfinished(rec)
-						rec = next
-						if !updated {
-							inactiveSince = time.Time{}
-						}
-					}
-				}
-			}
-			continue
-		}
-		if rec.Unit == "" {
-			// A timer run or a run by hand: its PID or invocation tells.
-			if reapJobs(ctx, id) == nil {
-				if st, err := loadJobState(); err == nil {
-					if r, ok := st.Job(id); ok {
-						rec = r
-					}
-				}
-			}
-			continue
-		}
-		// A unit that ended without recording a result crashed.
-		out, _ := exec.CommandContext(ctx, "systemctl", "is-active", rec.Unit).Output() //nolint:gosec // G204: the unit name is vaire-job-<validated id>.
-		if state := strings.TrimSpace(string(out)); state != "active" && state != "activating" {
-			if inactiveSince.IsZero() {
-				inactiveSince = time.Now()
-			} else if grace := 15 * time.Second; rec.State == engine.JobQueued && time.Since(inactiveSince) > 4*grace || rec.State != engine.JobQueued && time.Since(inactiveSince) > grace {
-				rec = crashedJobRecord(rec)
-				putFinishedJob(rec)
-			}
-		}
+	rec, err = awaitJobRecord(ctx, id, rec)
+	if err != nil {
+		return Result{}, err
 	}
 	// Wait for the final activity write before reading the result: the job
 	// publishes its terminal state first, and a follower that stopped on that
@@ -1237,7 +1378,7 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	for _, warning := range cleanupCopyJobSpecs(cleanupCtx, engine.State{Jobs: []engine.JobRecord{rec}}) {
 		env.Report(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
 	}
@@ -1311,7 +1452,7 @@ func jobErrorDetails(rec engine.JobRecord, details any) map[string]any {
 // streamJournal runs journalctl and re-emits the job's events: lines that
 // are vaire events pass through, other lines become log events.
 func streamJournal(ctx context.Context, args []string, report engine.Reporter) {
-	cmd := exec.CommandContext(ctx, "journalctl", args...) //nolint:gosec // G204: fixed journalctl with a validated unit or invocation id.
+	cmd := exec.CommandContext(ctx, "journalctl", args...)
 	cmd.WaitDelay = time.Second
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1440,44 +1581,56 @@ var reapJobGone = jobGone
 // finishing is never reaped.
 func reapJobs(ctx context.Context, id string) error {
 	return reapJobState(func(st *engine.State) error {
-		jobs := append([]engine.JobRecord(nil), st.Jobs...)
-		for key, rec := range st.RetainedJobs {
-			found := false
-			for _, j := range jobs {
-				if j.ID == key {
-					found = true
-					break
-				}
-			}
-			if !found {
-				jobs = append(jobs, rec)
-			}
-		}
+		jobs := jobsAndRetained(*st)
 		for _, rec := range jobs {
 			if rec.Final() || id != "" && rec.ID != id {
 				continue
 			}
-			if _, pinned := st.RetainedJobs[rec.ID]; pinned {
-				if _, err := materialisationJob(*st, rec.ID); err != nil {
-					continue
-				}
+			rec, ok := reapJobRecord(ctx, st, rec)
+			if ok {
+				st.PutJob(rec)
 			}
-			gone := false
-			if rec.Job == "db-copy" {
-				gone = copyWorkspaceInactive(ctx, rec)
-			} else {
-				gone = reapJobGone(ctx, rec)
-			}
-			if !gone {
-				continue
-			}
-			rec.State, rec.Detail, rec.FinishedAt = engine.JobFailed, "ended without a result", stamp()
-			rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result", Hint: jobLogHint(rec),
-				Details: map[string]any{"reason": JobOutcomeUnknown}}
-			st.PutJob(rec)
 		}
 		return nil
 	})
+}
+
+func jobsAndRetained(st engine.State) []engine.JobRecord {
+	jobs := append([]engine.JobRecord(nil), st.Jobs...)
+	for key, rec := range st.RetainedJobs {
+		found := false
+		for _, j := range jobs {
+			if j.ID == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			jobs = append(jobs, rec)
+		}
+	}
+	return jobs
+}
+
+func reapJobRecord(ctx context.Context, st *engine.State, rec engine.JobRecord) (engine.JobRecord, bool) {
+	if _, pinned := st.RetainedJobs[rec.ID]; pinned {
+		if _, err := materialisationJob(*st, rec.ID); err != nil {
+			return rec, false
+		}
+	}
+	var gone bool
+	if rec.Job == "db-copy" {
+		gone = copyWorkspaceInactive(ctx, rec)
+	} else {
+		gone = reapJobGone(ctx, rec)
+	}
+	if !gone {
+		return rec, false
+	}
+	rec.State, rec.Detail, rec.FinishedAt = engine.JobFailed, "ended without a result", stamp()
+	rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result", Hint: jobLogHint(rec),
+		Details: map[string]any{"reason": JobOutcomeUnknown}}
+	return rec, true
 }
 
 // jobGone reports whether an unfinished job's process or unit has ended: its
@@ -1534,7 +1687,7 @@ func timerUnit(rec engine.JobRecord) string {
 // unitState is whether unit is active (or activating) and its current
 // invocation id. ok is false when systemctl can't be asked.
 func unitState(ctx context.Context, unit string) (active bool, invocation string, ok bool) {
-	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveState,InvocationID", unit).Output() //nolint:gosec // G204: an vaire unit name built from a validated id or a configured database.
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveState,InvocationID", unit).Output()
 	if err != nil {
 		return false, "", false
 	}

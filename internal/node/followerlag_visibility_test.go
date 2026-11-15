@@ -57,17 +57,13 @@ func TestReadFollowerTracksSidesIndependently(t *testing.T) {
 		return &followerQueryPG{sourceRows: []map[string]string{srcRow}, selfErr: errors.New("connection reset")}
 	}
 	st := readFollower(context.Background(), follower, src)
-	if !st.SourceKnown || st.SelfKnown || !st.Streaming || st.SelfError == "" || st.SourceError != "" {
-		t.Fatalf("source read, self failed: %+v", st)
-	}
+	rejectf(t, !st.SourceKnown || st.SelfKnown || !st.Streaming || st.SelfError == "" || st.SourceError != "", "source read, self failed: %+v", st)
 
 	followerPG = func(config.ClusterSpec) sqlRunner {
 		return &followerQueryPG{sourceErr: errors.New("statement timeout"), selfRows: []map[string]string{selfRow}}
 	}
 	st = readFollower(context.Background(), follower, src)
-	if st.SourceKnown || !st.SelfKnown || !st.InRecovery || st.SourceError == "" || st.SelfError != "" {
-		t.Fatalf("source failed, self read: %+v", st)
-	}
+	rejectf(t, st.SourceKnown || !st.SelfKnown || !st.InRecovery || st.SourceError == "" || st.SelfError != "", "source failed, self read: %+v", st)
 }
 
 // R4-5: a failed slot enumeration is returned, not silently read as no
@@ -140,6 +136,25 @@ func (diagnosticsClusterPG) Exec(context.Context, string, string, map[string]str
 // self side is omitted, and an awaiting-recovery database stays out. General
 // plan/apply still excludes the unfinished followers from every step.
 func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
+	cfg, probe := setupUnfinishedFollowerDiagnostics(t)
+	assertUnfinishedFollowerStatus(t, cfg, probe)
+	assertUnfinishedFollowerDoctor(t, cfg, probe)
+	assertUnfinishedFollowerMetrics(t, cfg)
+	assertUnfinishedFollowersExcludedFromPlan(t, cfg)
+}
+
+// unfinishedFollowerDiagnostics counts the fake reads the diagnostics
+// assertions inspect: status pooler snapshots and doctor HBA lookups.
+type unfinishedFollowerDiagnostics struct {
+	poolReads int
+	hbaReads  []string
+}
+
+// setupUnfinishedFollowerDiagnostics replaces the host-facing reads of the
+// status, doctor and metrics paths, and returns a cluster with two unfinished
+// followers and an awaiting-recovery database.
+func setupUnfinishedFollowerDiagnostics(t *testing.T) (config.Cluster, *unfinishedFollowerDiagnostics) {
+	t.Helper()
 	oldRecords, oldRunning, oldPG, oldSnapshotPG, oldProm := backup.RecordsPath, clusterRunning, followerPG, snapshotPG, writeFollowerProm
 	oldCPU := statusCPURead
 	oldPools := statusPoolRead
@@ -154,9 +169,9 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 		doctorServiceRead, doctorProbeRead, doctorDriftRead, doctorOverridesRead, doctorWeakHBARead = oldServices, oldProbe, oldDrift, oldOverrides, oldHBA
 		activityStoreFactory = oldActivity
 	})
-	poolReads := 0
+	probe := &unfinishedFollowerDiagnostics{}
 	statusPoolRead = func(context.Context) map[string]health.Pools {
-		poolReads++
+		probe.poolReads++
 		return map[string]health.Pools{"transaction": {}}
 	}
 	statusHostRead = func(string) (hostinfo.Info, error) {
@@ -171,9 +186,8 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	}
 	doctorDriftRead = func(context.Context, config.Cluster, engine.Runtime, string) string { return "" }
 	doctorOverridesRead = func(string) []string { return nil }
-	var hbaReads []string
 	doctorWeakHBARead = func(_ context.Context, spec config.ClusterSpec) []string {
-		hbaReads = append(hbaReads, spec.Name)
+		probe.hbaReads = append(probe.hbaReads, spec.Name)
 		return nil
 	}
 	activityStoreFactory = func() (activityStore, error) { return &fakeActivityStore{}, nil }
@@ -221,35 +235,31 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	clusterRunning = func(spec config.ClusterSpec) bool {
 		return spec.Name == "app" || spec.Name == "app_paused"
 	}
+	return cfg, probe
+}
 
+// assertUnfinishedFollowerStatus checks that status publishes both unfinished
+// followers' facts and omits the awaiting-recovery database.
+func assertUnfinishedFollowerStatus(t *testing.T, cfg config.Cluster, probe *unfinishedFollowerDiagnostics) {
+	t.Helper()
 	res, err := handleStatus(context.Background(), &Env{Req: request("status", nil), Cluster: cfg})
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	data := res.Data.(statusData)
-	if poolReads != 1 || len(data.Poolers) != 1 {
-		t.Fatalf("status did not use the fake pooler snapshot: reads=%d pools=%v", poolReads, data.Poolers)
-	}
+	rejectf(t, err != nil, "status: %v", err)
+	data := mustAs[statusData](t, res.Data)
+	rejectf(t, probe.poolReads != 1 || len(data.Poolers) != 1, "status did not use the fake pooler snapshot: reads=%d pools=%v", probe.poolReads, data.Poolers)
 	rows := map[string]statusDatabase{}
 	for _, row := range data.Databases {
 		rows[row.Name] = row
 	}
 	stopped := rows["app_stopped"]
-	if stopped.Follower == nil {
-		t.Fatal("status dropped the stopped unfinished follower's diagnostics")
-	}
-	if !stopped.Follower.SourceKnown || stopped.Follower.SelfKnown {
-		t.Fatalf("stopped follower sides: %+v", stopped.Follower)
-	}
+	reject(t, stopped.Follower == nil, "status dropped the stopped unfinished follower's diagnostics")
+	rejectf(t, !stopped.Follower.SourceKnown || stopped.Follower.SelfKnown, "stopped follower sides: %+v", stopped.Follower)
 	if stopped.Follower.SlotWALStatus != "extended" || stopped.Follower.SlotRetainedBytes == nil ||
 		*stopped.Follower.SlotRetainedBytes != 104857600 || stopped.Follower.SlotSafeBytes == nil ||
 		*stopped.Follower.SlotSafeBytes != 20971520 {
 		t.Fatalf("stopped follower lost its source slot pressure: %+v", stopped.Follower)
 	}
 	raw, err := json.Marshal(stopped.Follower)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reject(t, err != nil, err)
 	for _, omitted := range []string{`"in_recovery"`, `"replay_paused"`} {
 		if strings.Contains(string(raw), omitted) {
 			t.Errorf("unknown self side published %s: %s", omitted, raw)
@@ -261,30 +271,27 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 		t.Fatalf("running paused/lost follower diagnostics: %+v", paused.Follower)
 	}
 	awaiting := rows["app_awaiting"]
-	if awaiting.State != stateAwaiting || awaiting.Follower != nil {
-		t.Fatalf("awaiting recovery row %+v", awaiting)
-	}
+	rejectf(t, awaiting.State != stateAwaiting || awaiting.Follower != nil, "awaiting recovery row %+v", awaiting)
+}
 
+// assertUnfinishedFollowerDoctor checks that doctor keeps the same facts and
+// reports the slot and streaming findings from them.
+func assertUnfinishedFollowerDoctor(t *testing.T, cfg config.Cluster, probe *unfinishedFollowerDiagnostics) {
+	t.Helper()
 	facts := gatherFacts(context.Background(), cfg, engine.Runtime{Host: hostinfo.Info{
 		VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100},
 	}}, false)
-	if !slices.Equal(hbaReads, []string{"app", "app_paused"}) {
-		t.Fatalf("doctor did not use the fake HBA reader for running clusters: %v", hbaReads)
-	}
+	rejectf(t, !slices.Equal(probe.hbaReads, []string{"app", "app_paused"}), "doctor did not use the fake HBA reader for running clusters: %v", probe.hbaReads)
 	clusters := map[string]doctor.ClusterFacts{}
 	for _, c := range facts.Clusters {
 		clusters[c.Name] = c
 	}
-	if clusters["app_stopped"].Follower == nil {
-		t.Fatal("doctor dropped the stopped unfinished follower's diagnostics")
-	}
+	reject(t, clusters["app_stopped"].Follower == nil, "doctor dropped the stopped unfinished follower's diagnostics")
 	if clusters["app_paused"].Follower == nil || !clusters["app_paused"].Follower.ReplayPaused ||
 		clusters["app_paused"].Follower.SlotWALStatus != "lost" {
 		t.Fatalf("doctor's running paused/lost facts: %+v", clusters["app_paused"].Follower)
 	}
-	if !clusters["app_awaiting"].AwaitingRecovery {
-		t.Fatal("doctor lost the awaiting recovery marker")
-	}
+	reject(t, !clusters["app_awaiting"].AwaitingRecovery, "doctor lost the awaiting recovery marker")
 	results := doctor.Run(doctor.FollowerChecks(), facts, "")
 	find := func(id, db string) doctor.Result {
 		t.Helper()
@@ -306,7 +313,39 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	if got := find("follower.streaming", "app_paused"); got.Status != doctor.Fail || !strings.Contains(got.Detail, "paused") {
 		t.Errorf("running follower streaming check: %+v", got)
 	}
+}
 
+// assertUnfinishedFollowerMetrics checks that the metrics refresh publishes
+// both unfinished followers' samples and skips the awaiting database.
+func assertUnfinishedFollowerMetrics(t *testing.T, cfg config.Cluster) {
+	t.Helper()
+	families := collectFollowerMetricFamilies(t, cfg)
+	if v, ok := followerMetricSample(families, "vaire_follower_streaming", "app_stopped"); !ok || v != 0 {
+		t.Errorf("stopped follower streaming sample = %v, %v", v, ok)
+	}
+	if v, ok := followerMetricSample(families, "vaire_follower_streaming", "app_paused"); !ok || v != 1 {
+		t.Errorf("paused follower streaming sample = %v, %v", v, ok)
+	}
+	if v, ok := followerMetricSample(families, "vaire_follower_slot_lost", "app_paused"); !ok || v != 1 {
+		t.Errorf("paused follower lost sample = %v, %v", v, ok)
+	}
+	if v, ok := followerMetricSample(families, "vaire_follower_slot_retained_bytes", "app_stopped"); !ok || v != 104857600 {
+		t.Errorf("stopped follower retained sample = %v, %v", v, ok)
+	}
+	if v, ok := followerMetricSample(families, "vaire_follower_lag_seconds", "app_paused"); !ok || v != 120 {
+		t.Errorf("paused follower lag seconds = %v, %v", v, ok)
+	}
+	for _, family := range families {
+		if _, ok := followerMetricSample(families, family.Name, "app_awaiting"); ok {
+			t.Errorf("%s published the awaiting database", family.Name)
+		}
+	}
+}
+
+// collectFollowerMetricFamilies runs the real refresh against the fake writer
+// and returns the families it published.
+func collectFollowerMetricFamilies(t *testing.T, cfg config.Cluster) []*promfile.Family {
+	t.Helper()
 	var families []*promfile.Family
 	writeFollowerProm = func(name string, got []*promfile.Family) error {
 		if name != FollowersProm {
@@ -318,14 +357,14 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	if err := writeFollowerMetrics(context.Background(), cfg); err != nil {
 		t.Fatalf("metrics: %v", err)
 	}
-	byName := map[string]*promfile.Family{}
+	return families
+}
+
+// followerMetricSample returns the sample of family labelled with db.
+func followerMetricSample(families []*promfile.Family, family, db string) (float64, bool) {
 	for _, f := range families {
-		byName[f.Name] = f
-	}
-	sample := func(family, db string) (float64, bool) {
-		f := byName[family]
-		if f == nil {
-			return 0, false
+		if f.Name != family {
+			continue
 		}
 		for _, s := range f.Samples {
 			for _, l := range s.Labels {
@@ -334,39 +373,30 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 				}
 			}
 		}
-		return 0, false
 	}
-	if v, ok := sample("vaire_follower_streaming", "app_stopped"); !ok || v != 0 {
-		t.Errorf("stopped follower streaming sample = %v, %v", v, ok)
-	}
-	if v, ok := sample("vaire_follower_streaming", "app_paused"); !ok || v != 1 {
-		t.Errorf("paused follower streaming sample = %v, %v", v, ok)
-	}
-	if v, ok := sample("vaire_follower_slot_lost", "app_paused"); !ok || v != 1 {
-		t.Errorf("paused follower lost sample = %v, %v", v, ok)
-	}
-	if v, ok := sample("vaire_follower_slot_retained_bytes", "app_stopped"); !ok || v != 104857600 {
-		t.Errorf("stopped follower retained sample = %v, %v", v, ok)
-	}
-	if v, ok := sample("vaire_follower_lag_seconds", "app_paused"); !ok || v != 120 {
-		t.Errorf("paused follower lag seconds = %v, %v", v, ok)
-	}
-	for _, family := range families {
-		if _, ok := sample(family.Name, "app_awaiting"); ok {
-			t.Errorf("%s published the awaiting database", family.Name)
-		}
-	}
+	return 0, false
+}
 
-	// Convergence still excludes every unfinished entry from creation, start,
-	// routing and timers, including the poolers' rendered configuration.
+// assertUnfinishedFollowersExcludedFromPlan checks that convergence still
+// excludes every unfinished entry from creation, start, routing and timers,
+// including the poolers' rendered configuration.
+func assertUnfinishedFollowersExcludedFromPlan(t *testing.T, cfg config.Cluster) {
+	t.Helper()
 	only := []string{"postgres-cluster-v1", "postgres-config-v1", "pgbouncer-v1", "timers-v1"}
 	rt := engine.Runtime{Host: hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}}
 	journal := filepath.Join(t.TempDir(), "journal.json")
 	plan, err := engine.Plan(context.Background(), steps.Catalog(), cfg, rt, engine.Options{Only: only, JournalPath: journal})
-	if err != nil {
-		t.Fatalf("general plan: %v", err)
-	}
+	rejectf(t, err != nil, "general plan: %v", err)
 	unfinished := map[string]bool{"app_stopped": true, "app_paused": true, "app_awaiting": true}
+	assertPlanSkipsUnfinished(t, plan, unfinished)
+	seedPlanJournal(t, plan, cfg, rt, journal)
+	assertApplySkipsUnfinished(t, cfg, rt, journal, unfinished)
+}
+
+// assertPlanSkipsUnfinished checks no planned step or pooler route names an
+// unfinished follower.
+func assertPlanSkipsUnfinished(t *testing.T, plan engine.PlanData, unfinished map[string]bool) {
+	t.Helper()
 	for _, s := range plan.Steps {
 		if unfinished[s.Cluster] {
 			t.Errorf("general plan selected %s for unfinished %s", s.ID, s.Cluster)
@@ -381,6 +411,12 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 			}
 		}
 	}
+}
+
+// seedPlanJournal marks every planned step completed so the apply below only
+// proves what it selects.
+func seedPlanJournal(t *testing.T, plan engine.PlanData, cfg config.Cluster, rt engine.Runtime, journal string) {
+	t.Helper()
 	viewed := engineView(cfg, "")
 	expanded := map[string]engine.Step{}
 	for _, s := range engine.Expand(steps.Catalog(), viewed) {
@@ -389,24 +425,23 @@ func TestUnfinishedMaterialisedFollowerRetainsDiagnostics(t *testing.T) {
 	j := &engine.Journal{Schema: engine.JournalSchema, Steps: map[string]engine.JournalEntry{}}
 	for _, s := range plan.Steps {
 		step, ok := expanded[s.ID]
-		if !ok {
-			t.Fatalf("plan step %s is not in the viewed catalogue", s.ID)
-		}
+		rejectf(t, !ok, "plan step %s is not in the viewed catalogue", s.ID)
 		inputs, err := step.Inputs(viewed, rt)
-		if err != nil {
-			t.Fatalf("inputs for %s: %v", s.ID, err)
-		}
+		rejectf(t, err != nil, "inputs for %s: %v", s.ID, err)
 		j.Steps[s.ID] = engine.JournalEntry{Status: engine.StatusCompleted, InputsHash: engine.InputsHash(s.ID, inputs)}
 	}
 	if err := j.Save(journal); err != nil {
 		t.Fatal(err)
 	}
-	// Keep the real cluster step in the plan, but do not run its host drift
-	// recheck in a fixture without a mocked systemd directory.
+}
+
+// assertApplySkipsUnfinished checks the real apply runs no step for an
+// unfinished follower. Keep the real cluster step in the plan, but do not run
+// its host drift recheck in a fixture without a mocked systemd directory.
+func assertApplySkipsUnfinished(t *testing.T, cfg config.Cluster, rt engine.Runtime, journal string, unfinished map[string]bool) {
+	t.Helper()
 	applied, _, err := engine.Apply(context.Background(), steps.Catalog(), cfg, rt, engine.Options{Only: []string{"postgres-config-v1", "pgbouncer-v1", "timers-v1"}, JournalPath: journal})
-	if err != nil {
-		t.Fatalf("general apply: %v", err)
-	}
+	rejectf(t, err != nil, "general apply: %v", err)
 	for _, s := range applied.Steps {
 		if unfinished[s.Cluster] {
 			t.Errorf("general apply ran %s for unfinished %s", s.ID, s.Cluster)
