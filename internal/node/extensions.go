@@ -2137,17 +2137,86 @@ WHERE source = ` + extensionLiteral(from) + ` AND target = ` + extensionLiteral(
 }
 
 func extensionDependentsBody(extname string) string {
-	return `WITH ext AS (SELECT oid FROM pg_extension WHERE extname = ` + extensionLiteral(extname) + `),
-members AS (
-  SELECT classid, objid FROM pg_depend
-  WHERE refclassid = 'pg_extension'::regclass AND refobjid = (SELECT oid FROM ext) AND deptype = 'e'
+	// DROP EXTENSION RESTRICT drops extension members plus every object
+	// PostgreSQL reaches through incoming extension, internal, automatic,
+	// auto-extension, or partition dependencies; only normal dependents
+	// outside that closure need CASCADE. Follow those incoming edges over
+	// full object addresses, where a whole-object address (objsubid 0)
+	// covers its subobjects. An object that would first have to redirect to
+	// an owner outside the closure, or whose partition dependency is not
+	// satisfied by the closure, is reported conservatively instead of being
+	// assumed automatic. PostgreSQL remains authoritative for the actual
+	// DROP.
+	return `WITH RECURSIVE ext AS (
+  SELECT oid FROM pg_extension WHERE extname = ` + extensionLiteral(extname) + `
+),
+auto_closure(classid, objid, objsubid) AS (
+  SELECT 'pg_extension'::regclass, oid, 0 FROM ext
+  UNION
+  SELECT d.classid, d.objid, d.objsubid
+  FROM pg_depend d
+  JOIN auto_closure a
+    ON d.refclassid = a.classid
+   AND d.refobjid = a.objid
+   AND (a.objsubid = 0 OR d.refobjsubid = a.objsubid)
+  WHERE d.deptype IN ('e', 'a', 'i', 'x', 'P', 'S')
+),
+unsafe_auto AS (
+  SELECT a.classid, a.objid, a.objsubid
+  FROM auto_closure a
+  WHERE EXISTS (
+    SELECT 1
+    FROM pg_depend owner
+    WHERE owner.classid = a.classid
+      AND owner.objid = a.objid
+      AND (a.objsubid = 0 OR owner.objsubid = a.objsubid)
+      AND owner.deptype IN ('i', 'e')
+      AND NOT EXISTS (
+        SELECT 1 FROM auto_closure o
+        WHERE o.classid = owner.refclassid
+          AND o.objid = owner.refobjid
+          AND (o.objsubid = 0 OR owner.refobjsubid = o.objsubid)
+      )
+  )
+  OR (
+    EXISTS (
+      SELECT 1
+      FROM pg_depend part
+      WHERE part.classid = a.classid
+        AND part.objid = a.objid
+        AND (a.objsubid = 0 OR part.objsubid = a.objsubid)
+        AND part.deptype IN ('P', 'S')
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pg_depend part
+      JOIN auto_closure o
+        ON o.classid = part.refclassid
+       AND o.objid = part.refobjid
+       AND (o.objsubid = 0 OR part.refobjsubid = o.objsubid)
+      WHERE part.classid = a.classid
+        AND part.objid = a.objid
+        AND (a.objsubid = 0 OR part.objsubid = a.objsubid)
+        AND part.deptype IN ('P', 'S')
+    )
+  )
 )
 SELECT DISTINCT pg_describe_object(d.classid, d.objid, d.objsubid) AS object
 FROM pg_depend d
+JOIN auto_closure a
+  ON d.refclassid = a.classid
+ AND d.refobjid = a.objid
+ AND (a.objsubid = 0 OR d.refobjsubid = a.objsubid)
 WHERE d.deptype = 'n'
-  AND ((d.refclassid = 'pg_extension'::regclass AND d.refobjid = (SELECT oid FROM ext))
-    OR (d.refclassid, d.refobjid) IN (SELECT classid, objid FROM members))
-  AND (d.classid, d.objid) NOT IN (SELECT classid, objid FROM members)`
+  AND NOT EXISTS (
+    SELECT 1 FROM auto_closure covered
+    WHERE covered.classid = d.classid
+      AND covered.objid = d.objid
+      AND (covered.objsubid = 0 OR covered.objsubid = d.objsubid)
+  )
+UNION
+SELECT DISTINCT pg_describe_object(u.classid, u.objid, u.objsubid) AS object
+FROM unsafe_auto u`
 }
 
 func extensionOwnedTablesBody(extname string) string {

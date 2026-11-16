@@ -773,6 +773,148 @@ func TestExtRemoveDependentsPreviewAndCascade(t *testing.T) {
 	}
 }
 
+func TestExtensionDependentsBodyUsesAutomaticClosure(t *testing.T) {
+	body := extensionDependentsBody(`pg_catalog's "hstore"`)
+	for _, want := range []string{
+		"WITH RECURSIVE ext AS",
+		"auto_closure(classid, objid, objsubid) AS",
+		"SELECT 'pg_extension'::regclass, oid, 0 FROM ext",
+		"WHERE d.deptype IN ('e', 'a', 'i', 'x', 'P', 'S')",
+		"WHERE d.deptype = 'n'",
+		"AND (a.objsubid = 0 OR d.refobjsubid = a.objsubid)",
+		"AND (covered.objsubid = 0 OR covered.objsubid = d.objsubid)",
+		"FROM unsafe_auto u",
+		"owner.deptype IN ('i', 'e')",
+		"part.deptype IN ('P', 'S')",
+		`extname = 'pg_catalog''s "hstore"'`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dependency preview SQL is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"NOT IN (SELECT classid, objid FROM members)",
+		"d.refclassid = 'pg_extension'::regclass AND d.refobjid = (SELECT oid FROM ext)",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("dependency preview SQL still has the direct-member filter %q", forbidden)
+		}
+	}
+}
+
+// PostgreSQL drops the internal/automatic dependents of an extension's own
+// members even with RESTRICT. These names model the clean hstore, pg_repack,
+// and pg_cron catalogs that used to be previewed as user dependencies.
+func TestExtRemoveAutomaticOnlyDependenciesDoNotBlock(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  func() config.Cluster
+	}{
+		{name: "hstore", cfg: func() config.Cluster {
+			cfg := extTestCfg("hstore")
+			cfg.Extensions = map[string]config.ExtensionDefinition{
+				"hstore": {Source: catalog.SourcePreinstalled},
+			}
+			return cfg
+		}},
+		{name: "pg_repack", cfg: func() config.Cluster { return extTestCfg("pg_repack") }},
+		{name: "pg_cron", cfg: func() config.Cluster { return extTestCfg("pg_cron") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg()
+			h := newExtHarness(t, cfg)
+			ext, err := cfg.ExtensionResolver().Resolve(tt.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installed := map[string]extensionInstalledVersion{
+				ext.ExtName: {Name: ext.ExtName, Version: "1.0", Default: "1.0"},
+			}
+			installedCalls := 0
+			h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
+				installedCalls++
+				if installedCalls == 1 {
+					return installed, nil
+				}
+				return map[string]extensionInstalledVersion{}, nil
+			}
+			h.pg.queryFn = func(sql string) ([]map[string]string, error) {
+				if strings.Contains(sql, "count(*)") {
+					return []map[string]string{{"n": "0"}}, nil
+				}
+				return nil, nil
+			}
+			env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": tt.name, "db": "app"}, "app", "app/restart")}
+			res, err := handleExtRemove(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertAutomaticOnlyExtensionDrop(t, res.Data, h.pg.execs)
+		})
+	}
+}
+
+func assertAutomaticOnlyExtensionDrop(t *testing.T, result any, execs []string) {
+	t.Helper()
+	data, ok := result.(extRemoveResult)
+	if !ok {
+		t.Fatalf("remove result has unexpected type %T", result)
+	}
+	if data.DependentsTotal != 0 || data.DependentsTruncated {
+		t.Fatalf("automatic-only dependents were reported: %+v", data)
+	}
+	if len(execs) != 1 || !strings.Contains(execs[0], "DROP EXTENSION IF EXISTS") || strings.Contains(execs[0], "CASCADE") {
+		t.Fatalf("drop execs = %v", execs)
+	}
+}
+
+// A normal dependent of an extension member still needs CASCADE: the closure
+// must not hide a user table column, function, or index.
+func TestExtRemoveUserVectorDependenciesStayBlocking(t *testing.T) {
+	h := newExtHarness(t, extTestCfg("vector"))
+	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
+		return map[string]extensionInstalledVersion{
+			"vector": {Name: "vector", Version: "0.8.0", Default: "0.8.0"},
+		}, nil
+	}
+	objects := []string{
+		"column embedding of table docs",
+		"function nearest_doc(vector)",
+		"index docs_embedding_idx",
+	}
+	h.pg.queryFn = func(sql string) ([]map[string]string, error) {
+		switch {
+		case strings.Contains(sql, "count(*)"):
+			return []map[string]string{{"n": "3"}}, nil
+		case strings.Contains(sql, "pg_describe_object"):
+			rows := make([]map[string]string, len(objects))
+			for i, object := range objects {
+				rows[i] = map[string]string{"object": object}
+			}
+			return rows, nil
+		default:
+			return nil, nil
+		}
+	}
+	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "vector", "db": "app"})}
+	_, err := handleExtRemove(context.Background(), env)
+	if err == nil || extReason(t, err) != "extension_in_use" {
+		t.Fatalf("user vector dependencies: %v", err)
+	}
+	details := extDetails(t, err)
+	dependents, ok := details["dependents"].([]string)
+	if !ok {
+		t.Fatalf("dependents have unexpected type %T", details["dependents"])
+	}
+	if details["dependents_total"] != 3 || !slices.Equal(dependents, objects) {
+		t.Fatalf("preview details = %+v", details)
+	}
+	if len(h.pg.execs) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 0 {
+		t.Fatalf("dependency refusal had effects: exec=%v saves=%d apply=%d", h.pg.execs, len(h.saves), len(h.applyCalls))
+	}
+}
+
 func TestExtRemoveSQLAbsentReconcilesIntent(t *testing.T) {
 	h := newExtHarness(t, extTestCfg("pg_stat_statements", "pg_trgm"))
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
