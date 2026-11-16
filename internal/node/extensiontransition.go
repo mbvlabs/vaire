@@ -355,9 +355,10 @@ func extensionAddWithFollowers(ctx context.Context, env *Env, old config.Cluster
 			WithDetails(map[string]any{"reason": "extension_config_unknown", "database": spec.Name})
 	}
 	for _, token := range planTokens {
-		if !tokenSet[token] {
+		name := strings.TrimSuffix(token, "/restart")
+		if !tokenSet[name] {
 			tokens = append(tokens, token)
-			tokenSet[token] = true
+			tokenSet[name] = true
 		}
 	}
 	for _, target := range live {
@@ -709,6 +710,9 @@ func verifyExtensionSettings(ctx context.Context, cfg config.Cluster, spec confi
 	return nil
 }
 
+// extensionConfirmFor authorizes one target's configuration apply. tokenSet
+// is keyed by bare target name; the full "<target>/restart" text is kept in
+// the tokens list used to validate the request and advertise retries.
 func extensionConfirmFor(name string, tokenSet map[string]bool) engine.Confirmation {
 	if tokenSet[name] {
 		return engine.Confirmation{Clusters: []string{name}}
