@@ -13,7 +13,12 @@ if command -v cloud-init >/dev/null 2>&1; then
 fi
 
 installed() {
-  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+  local status
+  # ${Status} is "<selection> <flag> <state>". Apply holds what it installs, so
+  # a held package reads "hold ok installed": only the state decides whether it
+  # is installed. Partial, removed and broken states are not.
+  status="$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" || return 1
+  [[ "${status}" =~ ^[^[:space:]]+[[:space:]]+ok[[:space:]]+installed$ ]]
 }
 
 apt_get() {

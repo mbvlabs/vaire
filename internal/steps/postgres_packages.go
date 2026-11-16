@@ -78,7 +78,7 @@ func (postgresPackages) Check(ctx context.Context, cfg config.Cluster, _ engine.
 	var missing []string
 	for _, pkg := range append(append([]string(nil), pgPackages...), extensionPackages...) {
 		out, _ := packageProbe(ctx, "dpkg-query", "-W", "-f=${Status}", pkg)
-		if out != "install ok installed" {
+		if !PackageInstalled(out) {
 			missing = append(missing, pkg)
 		}
 	}
