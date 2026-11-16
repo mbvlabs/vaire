@@ -1,0 +1,79 @@
+# V3 FINAL GATE SUMMARY — vaire
+Freeze declared: 2026-11-16T18:01:49Z
+Repo: /home/mbv/work/vaire-phase-7
+Verification window: 2026-11-16T18:02:27Z .. 18:04:26Z
+
+## Target / source fingerprint
+HEAD: 84f71bbaa1804fb9b7d581ca8a109192dc6375a9 + approved dirty corrections
+Tracked modified/deleted: 47 entries; untracked: 22 entries
+Staged changes: none (git diff --cached empty)
+justfile sha256: d08ce2a0fe56b58c38791067cfdeec2d7983476c77b6555ad3254dbf2fc42155
+
+Exact source delta vs V2 manifest (687 vs 686 entries):
+  content changed: internal/node/extensions.go, internal/node/extensiontransition.go
+  added: internal/node/extensions_removedropclaim_test.go
+  removed: none
+  (matches the declared V3 change set)
+
+Manifest: specs/evidence/extensions/final-source-manifest.sha256
+  expected sha256: 66ae70f96f88f0577dac3388b9da6f26add06a897ad047950e762ab8c27ff7ea
+  actual   sha256: 66ae70f96f88f0577dac3388b9da6f26add06a897ad047950e762ab8c27ff7ea
+  687 entries: sha256sum -c OK before and after the gate (687 each)
+  V1 manifest preserved: source-manifest-v1-superseded.sha256
+  V2 manifest preserved: source-manifest-v2-superseded.sha256
+  git_status_sha256 pre=post: e1553494f35ab8dbf544ad8cdec36f5a223cdf98508701c6c1cef331a5a58d26
+  git_diff_sha256   pre=post: 82918738e0ca3f42bfbaf6008918dc74e6dedc7cce5b291c888eb73db19b7d91
+  git_diff_cached_sha256:      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 (empty)
+=> No source drift. Not blocked.
+
+## Tool versions
+ go 1.27.1 linux/amd64
+ golangci-lint 2.14.0
+ just 1.58.0 (PATH latest; mise.toml pins 1.43.0)
+ shellcheck 0.11.0
+ actionlint 1.7.12
+ git 2.53.0
+
+## Checks (V3 logs)
+ PASS 18:02:42Z go build ./...                                   V3-...-01-go-build.log
+ PASS 18:02:42Z go vet ./...                                     V3-...-02-go-vet.log
+ PASS 18:02:48Z go test -count=1 ./... (full, no -short)         V3-...-03-go-test-full.log
+                32 packages ok, 9 no-test-file packages, 0 FAIL, 0 cached results
+ PASS 18:03:42Z new V3 drop-claim tests (9 top-level)            V3-...-04-new-test-focused.log
+                29 RUN incl. subtests, 29 PASS, 0 FAIL, 0 SKIP
+ PASS 18:03:47Z gofmt -l ALL tracked+untracked Go (615 files)    V3-...-05-gofmt-all-go.log
+                615 = 594 tracked + 21 untracked non-ignored; none listed
+ PASS 18:03:47Z git diff --check (+ --cached)                    V3-...-06-git-diff-check.log
+ PASS 18:03:50Z just build -> bin/vaire 43,298,976 B             V3-...-07-just-build.log
+ PASS 18:03:59Z bin/vaire commands --check-meta                  V3-...-08-check-meta.log
+ PASS 18:03:59Z bin/vaire commands --check-steps (18)            V3-...-09-check-steps.log
+ PASS 18:04:02Z shellcheck -x (26 scripts)                       V3-...-10-shellcheck.log
+ PASS 18:04:02Z actionlint                                       V3-...-11-actionlint.log
+ PASS 18:04:06Z install.sh cosign pins                           V3-...-12-install-pins.log
+ FAIL 18:04:09Z golangci-lint run ./... (142 issues, red)        V3-...-13-golangci-lint.log
+ SKIP darwin/arm64: user-deferred; not run
+ SKIP VM/LAB/e-region/live: no access used at all
+
+## Strict-lint delta (red by design; accepted debt)
+V3: 142 issues. V2: 142. Pre-freeze baseline: 131.
+Categories (V3):
+ errcheck 3, errname 1, exhaustive 4, gocognit 50, gosec 1, ineffassign 3,
+ nestif 22, nolintlint 24, prealloc 16, staticcheck 1, unparam 14, wastedassign 3.
+V3 vs V2: no added or removed findings in the normalized file+message set.
+V3 vs baseline: +11 net, same category profile as V1/V2.
+Correctness-adjacent findings unchanged and previously inspected:
+ - staticcheck SA4006 internal/node/forkcontinuation.go:486 unused first Lstat info;
+   dead store only, info re-read after lock and validated; no behavior change.
+ - ineffassign x3 (test-only dead follower assignment); wastedassign x3;
+   errcheck 3 (two commands tests, one schema test); unparam 14 test helpers.
+No new functional correctness warning. Delta detail: V3-...-14-lint-delta.log.
+
+## Verdict
+PASS — independent Linux functional/static gate on exact V3 frozen source, zero drift.
+Lanes kept separate:
+ - functional/static (Linux): PASS (build, vet, full uncached/unskipped tests, formatting,
+   diff, metadata/steps, shellcheck, actionlint, pins).
+ - strict lint: RED, accepted debt (142; delta 131 baseline / 142 V2), no green-lint claim.
+ - macOS: DEFERRED, not run.
+ - publication/live: NOT COVERED (no VM/LAB, guest, or e-region access; local evidence only).
+No source/doc edits; only logs added. bin/vaire is ignored build output.

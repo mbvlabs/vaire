@@ -1,0 +1,7 @@
+# start 2026-11-16T14:23:19Z
+ShellCheck - shell script analysis tool
+version: 0.11.0
+$ bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); shellcheck -x "${files[@]}"'
+files=26: internal/steps/scripts/admin-user.sh internal/steps/scripts/base-packages.sh internal/steps/scripts/firewall.sh internal/steps/scripts/host-baseline.sh internal/steps/scripts/kernel-tuning.sh internal/steps/scripts/metrics.sh internal/steps/scripts/pgbackrest.sh internal/steps/scripts/pgbouncer.sh internal/steps/scripts/pg-start.sh internal/steps/scripts/pg-stop.sh internal/steps/scripts/postgres-cluster.sh internal/steps/scripts/postgres-config.sh internal/steps/scripts/postgres-packages.sh internal/steps/scripts/revert-timer.sh internal/steps/scripts/sshd-dropin.sh internal/steps/scripts/sysctl-apply.sh internal/steps/scripts/timers.sh internal/steps/scripts/tls.sh internal/steps/scripts/ufw-change.sh internal/steps/scripts/wireguard-key.sh internal/steps/scripts/wireguard-up.sh scripts/backfill-installer.sh scripts/build-release.sh scripts/install.sh scripts/sign-release.sh scripts/upload-release.sh
+exit_code=0
+# end 2026-11-16T14:23:19Z

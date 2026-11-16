@@ -22,9 +22,11 @@ type AwaitingDatabase struct {
 
 // PruneForRestore prepares a bundle's records.json for a rebuilt master
 // (Phase 5, D9): restore leftovers, open restores, drills and undos under
-// way are dropped (their clusters were on the lost disk); dropped and
-// replaced stanzas, timeline switches and the backup history are kept; and
-// every database is marked awaiting recovery.
+// way are dropped (their clusters were on the lost disk); activation fences
+// and interrupted unfollows are local operational authority and are dropped
+// with them; dropped and replaced stanzas, timeline switches, extension
+// history and the backup history are kept; and every database is marked
+// awaiting recovery.
 func PruneForRestore(raw []byte, databases []AwaitingDatabase, now time.Time) ([]byte, []PrunedRecord, error) {
 	r, err := decode(raw)
 	if err != nil {
@@ -55,15 +57,20 @@ func PruneForRestore(raw []byte, databases []AwaitingDatabase, now time.Time) ([
 		pruned = append(pruned, PrunedRecord{Kind: "undo", Database: db, Name: u.Aside})
 	}
 	r.Undoing = map[string]Undo{}
-	// An activation fence is local authority over files and registrations on
-	// the lost host. It must not travel to a rebuilt host and authorize (or
-	// block) a new database by name. Extension history, dropped stanzas,
-	// timelines and awaiting recovery stay: they describe data, not local
-	// authority.
+	// An activation fence and an interrupted unfollow are local authority over
+	// files, registrations, routing and pg_cron on the lost host. They must not
+	// travel to a rebuilt host and authorize (or block) a new database by name,
+	// nor let a new operation resume the lost one's operation ID, source,
+	// stanza or cron checkpoint. Extension history, dropped stanzas, timelines
+	// and awaiting recovery stay: they describe data, not local authority.
 	for db, f := range r.Activation {
 		pruned = append(pruned, PrunedRecord{Kind: "activation_fence", Database: db, Name: f.OperationID})
 	}
 	r.Activation = map[string]ActivationFence{}
+	for db, u := range r.Unfollowing {
+		pruned = append(pruned, PrunedRecord{Kind: "unfollow", Database: db, Name: u.OperationID})
+	}
+	r.Unfollowing = map[string]Unfollow{}
 	r.ExtensionGuardHandoffs = map[string]GuardHandoff{}
 	r.AwaitingRecovery = map[string]Awaiting{}
 	since := now.UTC().Format(time.RFC3339)

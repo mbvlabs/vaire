@@ -1,0 +1,12 @@
+# Coordination status — no rerun performed
+Recorded: 2026-11-16T14:35Z (approx), HEAD=84f71bbaa1804fb9b7d581ca8a109192dc6375a9 (unchanged)
+
+Dispositions communicated by orchestrator after initial evidence (00-15):
+- macOS/darwin work: explicitly DEFERRED. 04-darwin-arm64-build.log remains a known failure, not a final-gate criterion.
+- golangci-lint strict findings (131 issues): ACCEPTED DEBT. No lint settings weakened; no fully-green-gate claim. 03/07 logs remain known failures.
+- Concurrent docs/README modifications at 14:24-14:26Z: orchestrator-approved move from main to feature worktree; no unexplained code drift.
+- Parent refactored TestExtAddDryRunShowsUpdate for checked assertions; focused test passes (parent evidence).
+- Independent review found 3 Linux functional blockers; source workers correcting follower.go and backup restoreprune. Fork-continuation correction forthcoming.
+- Final rerun: only after explicit freeze notification. Not started as of this record.
+
+Initial evidence logs 01-15 are preserved unmodified.

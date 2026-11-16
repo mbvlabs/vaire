@@ -1,0 +1,7 @@
+# V2 FINAL GATE 2026-11-16T17:47:16Z
+$ just build
+mkdir -p bin
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/mbvlabs/vaire/internal/buildinfo.Version=dev -X github.com/mbvlabs/vaire/internal/buildinfo.Commit=84f71bbaa180 -X github.com/mbvlabs/vaire/internal/buildinfo.Channel=dev" -o bin/vaire ./cmd/vaire
+exit_code=0
+-rwxr-xr-x 1 mbv mbv 43294880 Nov 16 17:47 bin/vaire
+# end 2026-11-16T17:47:22Z

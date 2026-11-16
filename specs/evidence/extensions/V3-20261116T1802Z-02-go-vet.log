@@ -1,0 +1,4 @@
+# V3 FINAL GATE 2026-11-16T18:02:42Z
+$ go vet ./...
+exit_code=0
+# end 2026-11-16T18:02:43Z

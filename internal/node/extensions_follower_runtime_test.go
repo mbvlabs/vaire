@@ -614,7 +614,7 @@ func TestRolesOnlyPolicyChangeDoesNotQueryFollowerExtensionState(t *testing.T) {
 
 	// A stopped follower must not block a roles-only change either: the source
 	// gate decides before the target set exists.
-	h.runningFn = func(config.ClusterSpec) bool { return false }
+	h.runningFn = func(spec config.ClusterSpec) bool { return spec.Name == "app" }
 	if _, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"}); err != nil {
 		t.Fatalf("roles-only change with a stopped follower = %v", err)
 	} else if release != nil {

@@ -1,0 +1,73 @@
+# V2 FINAL GATE SUMMARY — vaire
+Freeze declared: 2026-11-16T17:45:20Z
+Repo: /home/mbv/work/vaire-phase-7
+Verification window: 2026-11-16T17:46:00Z .. 17:48:53Z
+
+## Target / source fingerprint
+HEAD: 84f71bbaa1804fb9b7d581ca8a109192dc6375a9 + approved dirty corrections
+Tracked modified/deleted: 47 entries; untracked: 21 entries
+Staged changes: none (git diff --cached empty; user staged state preserved)
+justfile sha256: d08ce2a0fe56b58c38791067cfdeec2d7983476c77b6555ad3254dbf2fc42155
+
+Manifest: specs/evidence/extensions/final-source-manifest.sha256
+  expected sha256: 63d2208e405678e32781331c199134ab7ca33d9a0a269a3d7042014b7dbd58ef
+  actual   sha256: 63d2208e405678e32781331c199134ab7ca33d9a0a269a3d7042014b7dbd58ef
+  686 entries: sha256sum -c OK before, after checks, and after skip-check (686 each time)
+  V1 manifest preserved: specs/evidence/extensions/source-manifest-v1-superseded.sha256
+  git_status_sha256 pre=post: 14e8b6bf5608a0c9c3cd0d80ce871ca2dfaa027d102443b283f8a3f1f50f2049
+  git_diff_sha256   pre=post: bf9343ea0eab4158522c83dbcaf65225dcfd120d11efb0045caa456236613917
+  git_diff_cached_sha256:      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 (empty)
+=> No source drift. Not blocked.
+
+## Tool versions
+ go 1.27.1 linux/amd64
+ golangci-lint 2.14.0
+ just 1.58.0 (PATH latest; mise.toml pins 1.43.0)
+ shellcheck 0.11.0
+ actionlint 1.7.12
+ git 2.53.0
+
+## Checks (V2 logs)
+ PASS 17:46:13Z go build ./...                                  V2-...-01-go-build.log
+ PASS 17:46:13Z go vet ./...                                    V2-...-02-go-vet.log
+ PASS 17:46:24Z go test -count=1 ./...                          V2-...-03-go-test-full.log
+                32 packages ok, 9 no-test-file packages, 0 FAIL, no cached results
+ PASS 17:47:13Z gofmt -l ALL tracked+untracked Go (614 files)   V2-...-04-gofmt-all-go.log
+                614 = 594 tracked + 20 untracked non-ignored; none listed
+ PASS 17:47:13Z git diff --check (+ --cached)                   V2-...-05-git-diff-check.log
+ PASS 17:47:16Z just build -> bin/vaire 43,294,880 B            V2-...-06-just-build.log
+ PASS 17:47:25Z bin/vaire commands --check-meta                 V2-...-07-check-meta.log
+ PASS 17:47:25Z bin/vaire commands --check-steps (18)           V2-...-08-check-steps.log
+ PASS 17:47:29Z shellcheck -x (26 scripts)                      V2-...-09-shellcheck.log
+ PASS 17:47:29Z actionlint                                      V2-...-10-actionlint.log
+ PASS 17:47:33Z install.sh cosign pins                          V2-...-11-install-pins.log
+ FAIL 17:47:37Z golangci-lint run ./... (142 issues, red)       V2-...-12-golangci-lint.log
+ PASS 17:48:48Z skip check: 4 t.Skip sites, 0 skipped, 835 pass V2-...-14-skipcheck.log
+ SKIP darwin/arm64: user-deferred; not run
+ SKIP VPS/LAB/live/guest/e-region: no access used at all
+
+## Strict-lint delta (red by design; accepted debt)
+V2: 142 issues. V1: 142. Pre-freeze baseline: 131.
+Categories (V2, identical totals to V1):
+ errcheck 3, errname 1, exhaustive 4, gocognit 50, gosec 1, ineffassign 3,
+ nestif 22, nolintlint 24, prealloc 16, staticcheck 1, unparam 14, wastedassign 3.
+Vs V1: +5 new / -4 old membership, net 0: four gocognit function swaps
+ (+ PrimaryExtensionExpectedSettings, TestPlanFollowerRuntimeCompleteWinningGuard,
+  TestPostgresRolesFreshBootstrapImplicitStatementsNativeDefaults,
+  TestPrimaryExtensionExpectedSettingsFollowRenderedSelection;
+  - verifyActivationFence, writeActivationFence, handleExtList, stubForkHooks)
+ and +1 nolintlint in new internal/backup/extensions_preload_order_test.go.
+Known correctness-adjacent warnings unchanged from V1 inspection:
+ - staticcheck SA4006 internal/node/forkcontinuation.go:486 unused first Lstat info;
+   dead store only, info re-read after lock and validated; no behavior change.
+ - ineffassign x3 and wastedassign x3: test-only dead follower assignments; intended
+   post-mutation value is used.
+ - errcheck 3 (incl. test file extension_schemas_test.go:37); unparam 14 test helpers.
+No new functional correctness warning. Delta detail: V2-...-13-lint-delta.log.
+
+## Verdict
+PASS — Linux functional/static gate on the V2 frozen tree, with zero source drift.
+Separately: strict lint is RED (142; accepted debt, no green-lint claim); macOS is
+DEFERRED and was not run; publication/live qualification is NOT covered (no VPS/LAB,
+guest, or e-region access; local evidence only).
+No source or doc edits by verification; only logs added. bin/vaire is ignored build output.

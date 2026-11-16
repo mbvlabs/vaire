@@ -121,6 +121,10 @@ func refuseUnsafeExtensionConfigRemoval(ctx context.Context, old, updated config
 		for _, name := range newNames {
 			newSet[name] = true
 		}
+		oldSet := map[string]bool{}
+		for _, name := range oldNames {
+			oldSet[name] = true
+		}
 		for _, name := range oldNames {
 			if newSet[name] {
 				continue
@@ -140,16 +144,37 @@ func refuseUnsafeExtensionConfigRemoval(ctx context.Context, old, updated config
 				return extensionRemoveRequired(spec.Name, ext.Name, "removed from cluster.toml")
 			}
 		}
-		// A provider or schema change under an installed SQL extension is
-		// equally unsafe: the old extension's objects remain.
+		// A selected definition may not silently point at another SQL
+		// extension, even when the old SQL is absent. Its copy/standby safety
+		// declarations describe the old control identity until an explicit
+		// remove/re-add workflow recreates or adopts the new one.
 		for _, name := range newNames {
+			if !oldSet[name] {
+				continue
+			}
+			oldExt, oldOK := old.ExtensionResolver().Lookup(name)
+			newExt, newOK := updated.ExtensionResolver().Lookup(name)
+			if !oldOK || !newOK || oldExt.ExtName == newExt.ExtName {
+				continue
+			}
+			return extensionSelectedIdentityRequired(spec.Name, name, oldExt.ExtName, newExt.ExtName)
+		}
+		// A provider or schema change under an already selected installed SQL
+		// extension is unsafe: the old extension's objects remain. A definition
+		// that was not selected is edited/selected normally; the actual-schema
+		// guard below still protects an installed unmanaged SQL identity.
+		for _, name := range newNames {
+			if !oldSet[name] {
+				continue
+			}
 			oldExt, oldOK := old.ExtensionResolver().Lookup(name)
 			newExt, newOK := updated.ExtensionResolver().Lookup(name)
 			if !oldOK || !newOK || oldExt.ExtName == "" {
 				continue
 			}
 			if oldExt.Source == newExt.Source && oldExt.Package == newExt.Package &&
-				oldExt.Preload == newExt.Preload && oldExt.Schema == newExt.Schema {
+				oldExt.Preload == newExt.Preload && oldExt.Schema == newExt.Schema &&
+				oldExt.ExtName == newExt.ExtName {
 				continue
 			}
 			installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, oldExt.ExtName)
@@ -157,7 +182,23 @@ func refuseUnsafeExtensionConfigRemoval(ctx context.Context, old, updated config
 				return err
 			}
 			if installed {
+				if oldExt.ExtName != newExt.ExtName {
+					return extensionInstalledIdentityRequired(spec.Name, oldExt.Name,
+						"SQL extension "+oldExt.ExtName+" is installed, but the descriptor now names "+newExt.ExtName,
+						map[string]any{"ext_name": oldExt.ExtName, "requested_ext_name": newExt.ExtName})
+				}
 				return extensionRemoveRequired(spec.Name, oldExt.Name, "provider or schema changed")
+			}
+		}
+		if err := refuseInstalledExtensionSchemas(ctx, updated, spec); err != nil {
+			return err
+		}
+		for _, follower := range updated.FollowersOf(spec.Name) {
+			if follower.FollowGeneration != "" || recs.IsAwaiting(follower.Name) {
+				continue
+			}
+			if err := refuseInstalledExtensionSchemas(ctx, updated, follower); err != nil {
+				return err
 			}
 		}
 	}
@@ -165,21 +206,29 @@ func refuseUnsafeExtensionConfigRemoval(ctx context.Context, old, updated config
 }
 
 func extensionSQLInstalled(ctx context.Context, recs backup.Records, recErr error, spec config.ClusterSpec, extName string) (bool, error) {
+	_, ok, err := extensionInstalledFact(ctx, recs, recErr, spec, extName)
+	return ok, err
+}
+
+// extensionInstalledFact returns one installed SQL extension's actual catalog
+// identity, or false when the catalog proves it absent. It fails closed when
+// the records, recovery state, cluster or catalog cannot be read.
+func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr error, spec config.ClusterSpec, extName string) (extensionInstalledVersion, bool, error) {
 	if recErr != nil {
-		return false, output.NewError(output.CodePrecondition,
+		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			"cannot read the node records to decide whether "+extName+" is still installed in "+spec.Name+": "+recErr.Error(),
 			output.ExitPrecondition, "Fix records.json first; nothing was saved.").
 			WithDetails(map[string]any{"reason": "records_unavailable", "database": spec.Name})
 	}
 	if recs.IsAwaiting(spec.Name) {
-		return false, output.NewError(output.CodePrecondition,
+		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			spec.Name+" awaits recovery, so vaire cannot prove that "+extName+"'s SQL is absent",
 			output.ExitPrecondition,
 			"Recover it first, then use vaire ext remove "+extName+" --db "+spec.Name+" before changing cluster.toml.").
 			WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name})
 	}
 	if !extensionClusterRunning(spec) {
-		return false, output.NewError(output.CodePrecondition,
+		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			spec.Name+" is not running, so vaire cannot prove that "+extName+"'s SQL is absent",
 			output.ExitPrecondition,
 			"Start it, then use vaire ext remove "+extName+" --db "+spec.Name+" before changing cluster.toml.").
@@ -187,14 +236,14 @@ func extensionSQLInstalled(ctx context.Context, recs backup.Records, recErr erro
 	}
 	have, err := extensionInstalled(ctx, spec)
 	if err != nil {
-		return false, output.NewError(output.CodePrecondition,
+		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			"cannot read "+spec.Name+"'s installed extensions: "+err.Error(),
 			output.ExitPrecondition,
 			"Nothing was saved. Retry when the cluster answers; use vaire ext remove "+extName+" --db "+spec.Name+" to remove it safely.").
 			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name})
 	}
-	_, ok := have[extName]
-	return ok, nil
+	got, ok := have[extName]
+	return got, ok, nil
 }
 
 func extensionRemoveRequired(db, name, why string) error {
@@ -203,4 +252,38 @@ func extensionRemoveRequired(db, name, why string) error {
 		output.ExitPrecondition,
 		"Remove it with vaire ext remove "+name+" --db "+db+" --confirm "+db+"; the DROP runs while the library is loaded, then the reduced configuration is applied.").
 		WithDetails(map[string]any{"reason": "extension_remove_required", "database": db, "extension": name})
+}
+
+// extensionInstalledIdentityRequired refuses a change to an installed SQL
+// extension's control identity or resolved schema. The operator must drop the
+// known extension explicitly and add it again under the new descriptor; a
+// configuration save cannot leave the old SQL installed but unmanaged.
+func extensionInstalledIdentityRequired(db, name, detail string, fields map[string]any) error {
+	details := map[string]any{
+		"reason": "extension_remove_required", "database": db, "extension": name,
+	}
+	for key, value := range fields {
+		details[key] = value
+	}
+	return output.NewError(output.CodePrecondition,
+		name+"'s installed SQL extension identity cannot change in "+db+": "+detail,
+		output.ExitPrecondition,
+		"Remove it with vaire ext remove "+name+" --db "+db+" --confirm "+db+", then add it again with the new descriptor; nothing was changed.").
+		WithDetails(details)
+}
+
+// extensionSelectedIdentityRequired refuses a SQL-extension identity change
+// while the definition stays selected, even when the old SQL is absent. The
+// existing safety declarations describe the selected control identity, so an
+// explicit remove/re-add must establish the new one instead of silently
+// carrying the old assertions across.
+func extensionSelectedIdentityRequired(db, name, oldExtName, newExtName string) error {
+	return output.NewError(output.CodePrecondition,
+		name+" is selected in "+db+", so its SQL extension identity cannot change from "+oldExtName+" to "+newExtName,
+		output.ExitPrecondition,
+		"Remove it with vaire ext remove "+name+" --db "+db+" --confirm "+db+", then edit the definition and add it again; nothing was saved.").
+		WithDetails(map[string]any{
+			"reason": "extension_remove_required", "database": db, "extension": name,
+			"ext_name": oldExtName, "requested_ext_name": newExtName,
+		})
 }

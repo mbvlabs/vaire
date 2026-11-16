@@ -34,11 +34,12 @@ var (
 	rolesExec        = func(ctx context.Context, local pg.Local, db, sql string, vars map[string]string) error {
 		return local.Exec(ctx, db, sql, vars)
 	}
-	rolesLoadedPreloads    = LoadedPreloads
-	rolesPendingRestart    = pendingRestartSettings
-	rolesRuntimeDir        = RuntimeDir
-	rolesWriteRuntimePass  = writeRuntimePass
-	rolesExtensionSettings = func(ctx context.Context, local pg.Local, db string, keys []string) (map[string]ExtensionSettingFact, error) {
+	rolesLoadedPreloads            = LoadedPreloads
+	rolesPendingRestart            = pendingRestartSettings
+	rolesRuntimeDir                = RuntimeDir
+	rolesWriteRuntimePass          = writeRuntimePass
+	rolesInstalledExtensionSchemas = queryInstalledExtensionSchemasColumn
+	rolesExtensionSettings         = func(ctx context.Context, local pg.Local, db string, keys []string) (map[string]ExtensionSettingFact, error) {
 		out := map[string]ExtensionSettingFact{}
 		for _, key := range keys {
 			rows, err := local.Query(ctx, db, ExtensionSettingFactSQL(key), nil)
@@ -58,12 +59,13 @@ var (
 // RolesTestHooks replaces the roles step's host effects for a test in another
 // package. It does not replace the step or engine.
 type RolesTestHooks struct {
-	QueryColumn       func(ctx context.Context, local pg.Local, db, sql string) ([]string, error)
-	Exec              func(ctx context.Context, local pg.Local, db, sql string, vars map[string]string) error
-	LoadedPreloads    func(ctx context.Context, local pg.Local) (map[string]bool, error)
-	PendingRestart    func(ctx context.Context, local pg.Local) ([]string, error)
-	ExtensionSettings func(ctx context.Context, local pg.Local, db string, keys []string) (map[string]ExtensionSettingFact, error)
-	WriteRuntimePass  func(rt engine.Runtime, role, secret string) error
+	QueryColumn               func(ctx context.Context, local pg.Local, db, sql string) ([]string, error)
+	Exec                      func(ctx context.Context, local pg.Local, db, sql string, vars map[string]string) error
+	LoadedPreloads            func(ctx context.Context, local pg.Local) (map[string]bool, error)
+	PendingRestart            func(ctx context.Context, local pg.Local) ([]string, error)
+	InstalledExtensionSchemas func(ctx context.Context, local pg.Local, db string) (map[string]string, error)
+	ExtensionSettings         func(ctx context.Context, local pg.Local, db string, keys []string) (map[string]ExtensionSettingFact, error)
+	WriteRuntimePass          func(rt engine.Runtime, role, secret string) error
 }
 
 // SetRolesTestHooks installs roles host-effect hooks and returns the restore
@@ -71,6 +73,7 @@ type RolesTestHooks struct {
 func SetRolesTestHooks(h RolesTestHooks) func() {
 	oldQuery, oldExec := rolesQueryColumn, rolesExec
 	oldLoaded, oldPending, oldSettings, oldWrite := rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings, rolesWriteRuntimePass
+	oldSchemas := rolesInstalledExtensionSchemas
 	if h.QueryColumn != nil {
 		rolesQueryColumn = h.QueryColumn
 	}
@@ -83,6 +86,9 @@ func SetRolesTestHooks(h RolesTestHooks) func() {
 	if h.PendingRestart != nil {
 		rolesPendingRestart = h.PendingRestart
 	}
+	if h.InstalledExtensionSchemas != nil {
+		rolesInstalledExtensionSchemas = h.InstalledExtensionSchemas
+	}
 	if h.ExtensionSettings != nil {
 		rolesExtensionSettings = h.ExtensionSettings
 	}
@@ -92,6 +98,7 @@ func SetRolesTestHooks(h RolesTestHooks) func() {
 	return func() {
 		rolesQueryColumn, rolesExec = oldQuery, oldExec
 		rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings, rolesWriteRuntimePass = oldLoaded, oldPending, oldSettings, oldWrite
+		rolesInstalledExtensionSchemas = oldSchemas
 	}
 }
 
@@ -383,23 +390,30 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 		return engine.ApplyResult{}, fmt.Errorf("reading %s's installed extensions before its dependent SQL: %w", spec.Name, err)
 	}
 	installed := stringSet(installedNames)
-	requiredKeys := map[string]bool{}
-	if sqlExtensions, err := extensionSQLSelection(cfg, spec); err != nil {
+	sqlExtensions, err := extensionSQLSelection(cfg, spec)
+	if err != nil {
 		return engine.ApplyResult{}, err
-	} else {
-		for _, ext := range sqlExtensions {
-			if ext.ExtName == "" || installed[ext.ExtName] {
-				continue
-			}
-			if ext.Preload != "" && !loaded[ext.Preload] {
-				// The library is not loaded yet; its custom GUCs may not be
-				// visible until the preload restart, so the preload check in
-				// the SQL builder is the readiness decision.
-				continue
-			}
-			for key := range PrimaryExtensionExpectedSettings(cfg, spec, ext) {
-				requiredKeys[key] = true
-			}
+	}
+	installedSchemas, err := rolesInstalledExtensionSchemas(ctx, local, spec.Name)
+	if err != nil {
+		return engine.ApplyResult{}, fmt.Errorf("reading %s's installed extension schemas before its dependent SQL: %w", spec.Name, err)
+	}
+	if err := ValidateInstalledExtensionSchemas(spec.Name, sqlExtensions, installedSchemas); err != nil {
+		return engine.ApplyResult{}, err
+	}
+	requiredKeys := map[string]bool{}
+	for _, ext := range sqlExtensions {
+		if ext.ExtName == "" || installed[ext.ExtName] {
+			continue
+		}
+		if ext.Preload != "" && !loaded[ext.Preload] {
+			// The library is not loaded yet; its custom GUCs may not be
+			// visible until the preload restart, so the preload check in
+			// the SQL builder is the readiness decision.
+			continue
+		}
+		for key := range PrimaryExtensionExpectedSettings(cfg, spec, ext) {
+			requiredKeys[key] = true
 		}
 	}
 	var actualSettings map[string]ExtensionSettingFact

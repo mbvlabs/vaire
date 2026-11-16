@@ -1,0 +1,9 @@
+# V2 gate skip check 2026-11-16T17:48:48Z
+Reason: full run does not print per-test SKIP lines; only 4 t.Skip sites exist (cli/escalate, steps/pgbackrest, backup/fork_reservation, backup/external).
+$ go test -count=1 -v ./internal/cli ./internal/steps ./internal/backup
+exit_code=0
+--- SKIP lines ---
+skip_count=0
+pass_count=835
+fail_count=0
+# end 2026-11-16T17:48:48Z

@@ -1,0 +1,61 @@
+# FINAL GATE SUMMARY — vaire
+Freeze declared: 2026-11-16T16:39:17Z
+Repo: /home/mbv/work/vaire-phase-7
+Verification window: 2026-11-16T16:40:28Z .. 16:43:11Z
+
+## Target / source fingerprint
+HEAD: 84f71bbaa1804fb9b7d581ca8a109192dc6375a9 + approved dirty corrections
+Tracked modified: 43 entries; untracked: 15 entries (includes specs/ evidence)
+Manifest: specs/evidence/extensions/final-source-manifest.sha256
+  expected sha256: 0cf11932fee499fb15748e43c6af9d14a9a62d7e04dccb8c488adfd0069fa272
+  actual   sha256: 0cf11932fee499fb15748e43c6af9d14a9a62d7e04dccb8c488adfd0069fa272
+  sha256sum -c: 680/680 OK before AND after checks (exit 0 both)
+  git_status_sha256 pre/post: ce5429bbdf3d85a3758650938d1bde8e304b176426252ae2c1ced20299d41362
+  git_diff_sha256   pre/post: 0f85926852019ff5b008e57692ff036c51b3768765f67623b64c469cb30672c6
+=> No source drift during the gate. Not blocked.
+
+## Tool versions
+ go 1.27.1 linux/amd64
+ golangci-lint 2.14.0
+ just 1.58.0 (PATH latest; mise.toml pins 1.43.0; unchanged from initial round)
+ shellcheck 0.11.0
+ actionlint 1.7.12
+ git 2.53.0
+
+## Checks (fresh final logs)
+ PASS 16:40:38Z go build ./...                          FINAL-...-01-go-build.log
+ PASS 16:40:42Z go vet ./...                            FINAL-...-02-go-vet.log
+ PASS 16:40:48Z go test -count=1 ./... (32 pkgs ok, 0 cached) FINAL-...-03-go-test-full.log
+ PASS 16:41:30Z gofmt -l over 594 tracked .go files     FINAL-...-04-gofmt-check.log
+ PASS 16:41:30Z git diff --check (+ --cached)           FINAL-...-05-git-diff-check.log
+ PASS 16:41:33Z just build -> bin/vaire 43,274,400 B     FINAL-...-06-just-build.log
+ PASS 16:41:38Z bin/vaire commands --check-meta         FINAL-...-07-check-meta.log
+ PASS 16:41:38Z bin/vaire commands --check-steps (18)   FINAL-...-08-check-steps.log
+ PASS 16:41:41Z shellcheck -x (26 scripts)              FINAL-...-09-shellcheck.log
+ PASS 16:41:41Z actionlint                              FINAL-...-10-actionlint.log
+ PASS 16:41:45Z install.sh cosign pins                 FINAL-...-11-install-pins.log
+ FAIL 16:41:49Z golangci-lint run ./... (142 issues)    FINAL-...-12-golangci-lint.log
+ FAIL 16:42:43Z just lint aborts at line 16 (same lint) FINAL-...-14-just-lint.log
+ SKIP darwin/arm64 cross-build: explicitly deferred by user; not run.
+ SKIP live VM/server: out of scope; parent tests VM independently.
+
+## Strict-lint disposition (accepted debt; no settings weakened)
+142 issues vs 131 at 84f71bb baseline. Categories:
+ errcheck 3, errname 1, exhaustive 4, gocognit 50, gosec 1, ineffassign 3,
+ nestif 22, nolintlint 24, prealloc 16, staticcheck 1, unparam 14, wastedassign 3.
+Delta: +3 ineffassign (new linter, test-only dead follower assignment),
+ +1 staticcheck (SA4006 forkcontinuation.go:486 unused first Lstat info; benign
+ dead store, value re-read after lock and validated), +4 unparam (test helpers),
+ +1 nestif, +1 prealloc, +1 wastedassign; gocognit total unchanged (50) with
+ membership shifted by corrections; errcheck total unchanged (one now in
+ extension_schemas_test.go:37); nolintlint total unchanged.
+Inspected in FINAL-...-13b-new-correctness-findings-inspected.log; full delta in
+FINAL-...-13-lint-delta-vs-initial.log.
+No new functional correctness warning beyond the benign SA4006.
+
+## Verdict
+PASS — Linux functional/static gate, excluding the explicitly deferred strict-lint
+(accepted debt; run remains red by design) and macOS/darwin (deferred, not run).
+No claim of a fully green just lint and no publication claim. No source or doc
+edits by verification; only these evidence logs added under specs/evidence/extensions/.
+bin/vaire regenerated as ignored build output; lab builds distinct bin/vaire-extension-final.

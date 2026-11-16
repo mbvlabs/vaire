@@ -1,0 +1,5 @@
+# start 2026-11-16T14:22:51Z commit=84f71bbaa1804fb9b7d581ca8a109192dc6375a9
+$ git diff --check
+exit_code=0
+cached_exit_code=0
+# end 2026-11-16T14:22:51Z

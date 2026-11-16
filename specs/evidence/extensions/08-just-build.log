@@ -1,0 +1,7 @@
+# start 2026-11-16T14:23:04Z commit=84f71bbaa1804fb9b7d581ca8a109192dc6375a9
+$ just build
+mkdir -p bin
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/mbvlabs/vaire/internal/buildinfo.Version=dev -X github.com/mbvlabs/vaire/internal/buildinfo.Commit=84f71bbaa180 -X github.com/mbvlabs/vaire/internal/buildinfo.Channel=dev" -o bin/vaire ./cmd/vaire
+exit_code=0
+-rwxr-xr-x 1 mbv mbv 43098272 Nov 16 14:23 bin/vaire
+# end 2026-11-16T14:23:05Z
