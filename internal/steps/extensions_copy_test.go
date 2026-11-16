@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -36,6 +37,18 @@ func tempGuardRecords(t *testing.T) {
 	old := backup.RecordsPath
 	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
 	t.Cleanup(func() { backup.RecordsPath = old })
+}
+
+func testFileSnapshot(t *testing.T, path string) ([]byte, bool) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data, true
 }
 
 func TestDesiredExtensionSQLOnlyMissing(t *testing.T) {
@@ -99,6 +112,44 @@ func TestReconcileCopyGuardRemovesWhenCovered(t *testing.T) {
 	}
 	if _, present, _ := backup.ReadCopyGuard(dir); present {
 		t.Fatal("a covered guard stayed")
+	}
+}
+
+func TestReconcileCopyGuardAbsentGuardLeavesStandalonePrimaryNoOp(t *testing.T) {
+	testCopyGuardWriter(t)
+	extensionTestDirs(t)
+	tempGuardRecords(t)
+	oldRoot := pgConfRoot
+	pgConfRoot = t.TempDir()
+	t.Cleanup(func() { pgConfRoot = oldRoot })
+	touchExtensionControl(t, "pg_stat_statements")
+	touchExtensionLibrary(t, "pg_stat_statements")
+	touchExtensionLibrary(t, "auto_explain")
+	touchExtensionControl(t, "custom_ext")
+	touchExtensionLibrary(t, "custom_lib")
+	cfg := config.DefaultCluster()
+	cfg.Server.DataRoot = t.TempDir()
+	cfg.Extensions = map[string]config.ExtensionDefinition{
+		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext", Preload: "custom_lib"},
+	}
+	spec := config.ClusterSpec{Name: "app", Stanza: "app-abc123", Extensions: []string{"custom"}}
+	dir := cfg.Server.DataDirectory(spec.Name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if guard, present, err := backup.ReadCopyGuard(dir); err != nil || present {
+		t.Fatalf("test premise: guard = %+v, %v, %v", guard, present, err)
+	}
+	recordsBefore, recordsExisted := testFileSnapshot(t, backup.RecordsPath)
+	if err := ReconcileCopyGuard(context.Background(), cfg, spec); err != nil {
+		t.Fatalf("unguarded standalone primary with unknown custom copy safety = %v", err)
+	}
+	if guard, present, err := backup.ReadCopyGuard(dir); err != nil || present {
+		t.Fatalf("absent guard was created or changed: %+v, %v, %v", guard, present, err)
+	}
+	recordsAfter, recordsExistAfter := testFileSnapshot(t, backup.RecordsPath)
+	if recordsExisted != recordsExistAfter || !bytes.Equal(recordsBefore, recordsAfter) {
+		t.Fatalf("records changed with no guard: before=%q after=%q", recordsBefore, recordsAfter)
 	}
 }
 
@@ -457,7 +508,15 @@ func TestEffectivePermanentOverrideRetainsGuard(t *testing.T) {
 	}
 }
 
-func TestPlanFollowerRuntimeCompleteWinningGuard(t *testing.T) {
+type completeWinningGuardFixture struct {
+	cfg      config.Cluster
+	follower config.ClusterSpec
+	dataDir  string
+	want     []string
+}
+
+func newCompleteWinningGuardFixture(t *testing.T) completeWinningGuardFixture {
+	t.Helper()
 	testCopyGuardWriter(t)
 	extensionTestDirs(t)
 	tempGuardRecords(t)
@@ -495,22 +554,30 @@ func TestPlanFollowerRuntimeCompleteWinningGuard(t *testing.T) {
 	restoreSQL := SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return map[string]bool{}, nil
 	})
-	defer restoreSQL()
-	plan, err := PlanFollowerRuntime(context.Background(), cfg, follower, FollowerRuntimeRequest{Class: FollowerRuntimeLive})
+	t.Cleanup(restoreSQL)
+	return completeWinningGuardFixture{
+		cfg: cfg, follower: follower, dataDir: dataDir,
+		want: []string{"pg_stat_statements", "auto_explain", "pg_cron"},
+	}
+}
+
+func TestPlanFollowerRuntimeCompleteWinningGuard(t *testing.T) {
+	fx := newCompleteWinningGuardFixture(t)
+	plan, err := PlanFollowerRuntime(context.Background(), fx.cfg, fx.follower, FollowerRuntimeRequest{Class: FollowerRuntimeLive})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"pg_stat_statements", "auto_explain", "pg_cron"}
+	want := fx.want
 	if !slices.Equal(plan.Preloads, want) {
 		t.Fatalf("plan preloads = %v, want %v", plan.Preloads, want)
 	}
 	if plan.Settings["cron.launch_active_jobs"] != "off" {
 		t.Fatalf("plan lost the mandatory copy setting: %+v", plan.Settings)
 	}
-	if err := ReconcileCopyGuard(context.Background(), cfg, follower); err != nil {
+	if err := ReconcileCopyGuard(context.Background(), fx.cfg, fx.follower); err != nil {
 		t.Fatal(err)
 	}
-	guard, present, err := backup.ReadCopyGuard(dataDir)
+	guard, present, err := backup.ReadCopyGuard(fx.dataDir)
 	if err != nil || !present {
 		t.Fatalf("guard = %+v, %v, %v", guard, present, err)
 	}
@@ -525,13 +592,13 @@ func TestPlanFollowerRuntimeCompleteWinningGuard(t *testing.T) {
 	if !FollowerGuardDrifted(legacy, true, plan) {
 		t.Fatal("order-only guard drift was hidden")
 	}
-	if _, err := backup.InstallCopyGuard(dataDir, legacy); err != nil {
+	if _, err := backup.InstallCopyGuard(fx.dataDir, legacy); err != nil {
 		t.Fatal(err)
 	}
-	if err := ReconcileCopyGuard(context.Background(), cfg, follower); err != nil {
+	if err := ReconcileCopyGuard(context.Background(), fx.cfg, fx.follower); err != nil {
 		t.Fatal(err)
 	}
-	guard, _, err = backup.ReadCopyGuard(dataDir)
+	guard, _, err = backup.ReadCopyGuard(fx.dataDir)
 	if err != nil || !slices.Equal(guard.Preloads, want) {
 		t.Fatalf("legacy guard order was not reconciled: %+v, %v", guard, err)
 	}
@@ -541,13 +608,13 @@ func TestPlanFollowerRuntimeCompleteWinningGuard(t *testing.T) {
 	if !FollowerGuardDrifted(drifted, true, plan) {
 		t.Fatal("guard-only drift was not detected")
 	}
-	if _, err := backup.InstallCopyGuard(dataDir, drifted); err != nil {
+	if _, err := backup.InstallCopyGuard(fx.dataDir, drifted); err != nil {
 		t.Fatal(err)
 	}
-	if err := ReconcileCopyGuard(context.Background(), cfg, follower); err != nil {
+	if err := ReconcileCopyGuard(context.Background(), fx.cfg, fx.follower); err != nil {
 		t.Fatal(err)
 	}
-	guard, _, err = backup.ReadCopyGuard(dataDir)
+	guard, _, err = backup.ReadCopyGuard(fx.dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}

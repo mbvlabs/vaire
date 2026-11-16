@@ -267,7 +267,7 @@ func (m *Materialised) BaseBackup(ctx context.Context) error {
 	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
-	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx, UntilOpen) })
+	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx) })
 }
 
 // makeData creates the empty data directory, owned by postgres.
@@ -572,10 +572,8 @@ const (
 	UntilPromoted = "promoted"
 )
 
-// start starts the cluster and waits until it accepts connections and, for
-// UntilPaused, recovery has paused at the target, or for UntilPromoted, it
-// has left recovery.
-func (m *Materialised) start(ctx context.Context, until string) error {
+// start starts the cluster and waits until it accepts connections.
+func (m *Materialised) start(ctx context.Context) error {
 	if m.BeforeStart != nil {
 		if err := m.BeforeStart(ctx); err != nil {
 			return err
@@ -588,7 +586,7 @@ func (m *Materialised) start(ctx context.Context, until string) error {
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("start the temporary cluster %s: %w", m.Name, err), output.ExitExternal,
 			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": m.LogTail(20)})
 	}
-	return waitCluster(ctx, m.Name, m.Data, m.Port, until, m.log)
+	return waitCluster(ctx, m.Name, m.Data, m.Port, UntilOpen, m.log)
 }
 
 // waitCluster waits until cluster name, with its data directory at data,
@@ -822,7 +820,7 @@ func (m *Materialised) Initdb(ctx context.Context, provider, locale string) erro
 	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
-	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx, UntilOpen) })
+	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx) })
 }
 
 // CopyRoles copies every role of the live source into the temporary

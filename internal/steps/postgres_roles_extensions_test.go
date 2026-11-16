@@ -9,110 +9,127 @@ import (
 	"github.com/mbvlabs/vaire/internal/engine"
 )
 
-func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
-	base := config.Cluster{Clusters: []config.ClusterSpec{{
+type rolesInputsCase struct {
+	name          string
+	defs          map[string]config.ExtensionDefinition
+	clusters      []config.ClusterSpec
+	equalBaseline bool
+	contains      []string
+}
+
+func rolesIdentityBase() config.Cluster {
+	return config.Cluster{Clusters: []config.ClusterSpec{{
 		Name: "app", Extensions: []string{"pg_stat_statements"},
 	}}}
-	step := postgresRoles{}.Instance("app")
-	baseline, err := step.Inputs(base, engine.Runtime{})
+}
+
+func rolesInputsFor(t *testing.T, cfg config.Cluster) []byte {
+	t.Helper()
+	inputs, err := (postgresRoles{}).Instance("app").Inputs(cfg, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return inputs
+}
+
+func assertRolesInputsCase(t *testing.T, base config.Cluster, baseline []byte, tc rolesInputsCase) {
+	t.Helper()
+	cfg := base.Clone()
+	cfg.Extensions = tc.defs
+	if tc.clusters != nil {
+		cfg.Clusters = tc.clusters
+	}
+	got := rolesInputsFor(t, cfg)
+	if tc.equalBaseline {
+		if string(got) != string(baseline) {
+			t.Fatalf("%s changed roles inputs", tc.name)
+		}
+		return
+	}
+	for _, want := range tc.contains {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("%s missing from roles inputs:\n%s", want, got)
+		}
+	}
+}
+
+func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
+	base := rolesIdentityBase()
+	baseline := rolesInputsFor(t, base)
 	if strings.Contains(string(baseline), "extension_identity") {
 		t.Fatalf("baseline inputs gained an identity:\n%s", baseline)
 	}
-
-	note := base.Clone()
-	note.Extensions = map[string]config.ExtensionDefinition{
-		"pg_stat_statements": {Note: "human note"},
-	}
-	withNote, err := step.Inputs(note, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(withNote) != string(baseline) {
-		t.Fatal("a note-only built-in override changed roles inputs")
-	}
-
-	implicitNote := base.Clone()
-	implicitNote.Extensions = map[string]config.ExtensionDefinition{
-		"auto_explain": {Note: "human note"},
-	}
-	withImplicitNote, err := step.Inputs(implicitNote, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(withImplicitNote) != string(baseline) {
-		t.Fatal("a note-only implicit auto_explain override changed roles inputs")
-	}
-
-	implicit := base.Clone()
-	implicit.Extensions = map[string]config.ExtensionDefinition{
-		"auto_explain": {
-			Source: catalog.SourceAPT, Package: "postgresql-18-auto-explain",
-			CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true),
+	for _, tc := range []rolesInputsCase{
+		{
+			name:          "note-only built-in override",
+			defs:          map[string]config.ExtensionDefinition{"pg_stat_statements": {Note: "human note"}},
+			equalBaseline: true,
 		},
-	}
-	withImplicit, err := step.Inputs(implicit, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(withImplicit), `"name":"auto_explain"`) ||
-		!strings.Contains(string(withImplicit), "postgresql-18-auto-explain") {
-		t.Fatalf("implicit auto_explain provider change missing from roles inputs:\n%s", withImplicit)
-	}
-
-	implicitSafety := base.Clone()
-	implicitSafety.Extensions = map[string]config.ExtensionDefinition{
-		"auto_explain": {CopySafety: stringPtr(catalog.CopySafetyUnknown)},
-	}
-	withImplicitSafety, err := step.Inputs(implicitSafety, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(withImplicitSafety), `"name":"auto_explain"`) ||
-		!strings.Contains(string(withImplicitSafety), `"copy_safety":"unknown"`) {
-		t.Fatalf("implicit auto_explain safety change missing from roles inputs:\n%s", withImplicitSafety)
-	}
-
-	override := base.Clone()
-	override.Extensions = map[string]config.ExtensionDefinition{
-		"pg_stat_statements": {
-			Source: catalog.SourceAPT, Package: "postgresql-18-pg-stat-statements",
-			CopySafety: stringPtr("safe"), StandbySafe: boolPtr(true),
+		{
+			name:          "note-only implicit auto_explain override",
+			defs:          map[string]config.ExtensionDefinition{"auto_explain": {Note: "human note"}},
+			equalBaseline: true,
 		},
-	}
-	withProvider, err := step.Inputs(override, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(withProvider), "extension_identity") ||
-		!strings.Contains(string(withProvider), "postgresql-18-pg-stat-statements") {
-		t.Fatalf("provider change missing from roles inputs:\n%s", withProvider)
-	}
-
-	schema := base.Clone()
-	schema.Extensions = map[string]config.ExtensionDefinition{
-		"pg_stat_statements": {Schema: "custom"},
-	}
-	withSchema, err := step.Inputs(schema, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(withSchema), `"schema":"custom"`) {
-		t.Fatalf("schema change missing from roles inputs:\n%s", withSchema)
-	}
-
-	safety := base.Clone()
-	safety.Extensions = map[string]config.ExtensionDefinition{
-		"pg_stat_statements": {CopySafety: stringPtr(catalog.CopySafetyUnknown)},
-	}
-	withSafety, err := step.Inputs(safety, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(withSafety), `"copy_safety":"unknown"`) {
-		t.Fatalf("safety change missing from roles inputs:\n%s", withSafety)
+		{
+			name: "implicit auto_explain provider change",
+			defs: map[string]config.ExtensionDefinition{
+				"auto_explain": {
+					Source: catalog.SourceAPT, Package: "postgresql-18-auto-explain",
+					CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true),
+				},
+			},
+			contains: []string{`"name":"auto_explain"`, "postgresql-18-auto-explain"},
+		},
+		{
+			name: "implicit auto_explain safety change",
+			defs: map[string]config.ExtensionDefinition{
+				"auto_explain": {CopySafety: stringPtr(catalog.CopySafetyUnknown)},
+			},
+			contains: []string{`"name":"auto_explain"`, `"copy_safety":"unknown"`},
+		},
+		{
+			name: "provider change",
+			defs: map[string]config.ExtensionDefinition{
+				"pg_stat_statements": {
+					Source: catalog.SourceAPT, Package: "postgresql-18-pg-stat-statements",
+					CopySafety: stringPtr("safe"), StandbySafe: boolPtr(true),
+				},
+			},
+			contains: []string{"extension_identity", "postgresql-18-pg-stat-statements"},
+		},
+		{
+			name: "schema change",
+			defs: map[string]config.ExtensionDefinition{
+				"pg_stat_statements": {Schema: "custom"},
+			},
+			contains: []string{`"schema":"custom"`},
+		},
+		{
+			name: "safety change",
+			defs: map[string]config.ExtensionDefinition{
+				"pg_stat_statements": {CopySafety: stringPtr(catalog.CopySafetyUnknown)},
+			},
+			contains: []string{`"copy_safety":"unknown"`},
+		},
+		{
+			name:          "unused definition",
+			defs:          map[string]config.ExtensionDefinition{"unused": {Source: catalog.SourcePreinstalled}},
+			equalBaseline: true,
+		},
+		{
+			name: "custom identity",
+			clusters: []config.ClusterSpec{{
+				Name: "app", Extensions: []string{"custom"},
+			}},
+			defs: map[string]config.ExtensionDefinition{
+				"custom": {Source: catalog.SourcePreinstalled, Settings: map[string]string{"custom.mode": "on"}},
+			},
+			contains: []string{"extension_identity", "custom.mode"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertRolesInputsCase(t, base, baseline, tc)
+		})
 	}
 
 	custom := base.Clone()
@@ -120,38 +137,15 @@ func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
 	custom.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourcePreinstalled, Settings: map[string]string{"custom.mode": "on"}},
 	}
-	withCustom, err := step.Inputs(custom, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(withCustom), "extension_identity") || !strings.Contains(string(withCustom), "custom.mode") {
-		t.Fatalf("custom identity missing from roles inputs:\n%s", withCustom)
-	}
-
+	withCustom := rolesInputsFor(t, custom)
 	withCustomNote := custom.Clone()
 	withCustomNote.Extensions["custom"] = func() config.ExtensionDefinition {
 		d := withCustomNote.Extensions["custom"]
 		d.Note = "different note"
 		return d
 	}()
-	noteAgain, err := step.Inputs(withCustomNote, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(noteAgain) != string(withCustom) {
+	if noteAgain := rolesInputsFor(t, withCustomNote); string(noteAgain) != string(withCustom) {
 		t.Fatal("a custom note changed roles inputs")
-	}
-
-	unused := base.Clone()
-	unused.Extensions = map[string]config.ExtensionDefinition{
-		"unused": {Source: catalog.SourcePreinstalled},
-	}
-	withUnused, err := step.Inputs(unused, engine.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(withUnused) != string(baseline) {
-		t.Fatal("an unused definition changed roles inputs")
 	}
 }
 

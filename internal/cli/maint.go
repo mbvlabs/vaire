@@ -328,7 +328,7 @@ func runMaintRepack(cmd *cobra.Command, _ []string) error {
 // completion_unknown warning.
 func repackResultMessage(db string, run maint.RepackRun) (string, []output.Warning) {
 	var parts []string
-	var warnings []output.Warning
+	warnings := make([]output.Warning, 0, len(run.Unknown))
 	if len(run.Repacked) > 0 {
 		parts = append(parts, "repacked in "+db+": "+strings.Join(run.Repacked, ", "))
 	}

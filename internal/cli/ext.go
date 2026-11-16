@@ -151,48 +151,9 @@ func runExtList(cmd *cobra.Command, _ []string) error {
 }
 
 func runExtAdd(cmd *cobra.Command, args []string) error {
-	name := strings.TrimSpace(args[0])
-	if name == "" {
-		return output.NewError(output.CodeUsage, "ext add needs an extension name", output.ExitUsage, "")
-	}
-	settings, err := extFlagMap(cmd, "setting")
+	name, params, err := extAddRequest(cmd, args)
 	if err != nil {
 		return err
-	}
-	copySettings, err := extFlagMap(cmd, "copy-setting")
-	if err != nil {
-		return err
-	}
-	params := map[string]any{"name": name}
-	if db := stringFlag(cmd, "db"); db != "" {
-		params["db"] = db
-	}
-	if pkg := stringFlag(cmd, "package"); pkg != "" {
-		params["package"] = pkg
-	}
-	if flagTrue(cmd, "preinstalled") {
-		params["preinstalled"] = true
-	}
-	if preload := stringFlag(cmd, "preload"); preload != "" {
-		params["preload"] = preload
-	}
-	if len(settings) > 0 {
-		params["settings"] = settings
-	}
-	if schema := stringFlag(cmd, "schema"); schema != "" {
-		params["schema"] = schema
-	}
-	if copySafety := stringFlag(cmd, "copy-safety"); copySafety != "" {
-		params["copy_safety"] = copySafety
-	}
-	if len(copySettings) > 0 {
-		params["copy_settings"] = copySettings
-	}
-	if value, supplied := extStandbySafeParam(cmd); supplied {
-		params["standby_safe"] = value
-	}
-	if flagTrue(cmd, "preinstalled") && stringFlag(cmd, "package") != "" {
-		return output.NewError(output.CodeUsage, "--package and --preinstalled are mutually exclusive", output.ExitUsage, "")
 	}
 
 	p := newProgress(cmd)
@@ -231,50 +192,114 @@ func runExtAdd(cmd *cobra.Command, args []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	if dryRun(cmd) {
-		if res.AlreadyEnabled && !res.DescriptorSaved && !res.UpdateAvailable && !res.Downgrade && !res.RestartRequired && !res.PreloadMissing && res.Version != "" {
-			return output.Success(cmd, output.Result{
-				Data: res, Message: "dry run: " + res.Extension + " " + res.Version + " is already enabled in " + res.Database + "; no change",
-				Warnings: warnings,
-			})
-		}
-		msg := "dry run: would add " + res.Extension + " to " + res.Database
-		if res.Package != "" {
-			msg += ", installing " + res.Package
-		}
-		if res.DescriptorSaved {
-			msg += ", and save its [extensions] definition"
-		}
-		if res.RestartRequired {
-			msg += "; its configuration change needs a restart token (--confirm " + res.Database + "/restart)"
-		}
-		if res.Version != "" {
-			msg += "; installed version " + res.Version
-		}
-		if res.UpdateAvailable {
-			msg += "; the package's default is " + res.DefaultVersion + ", so the change would check a supported update path"
-		}
-		if res.Downgrade {
-			msg += "; the package's default " + res.DefaultVersion + " is older than the installed " + res.Version + ", so no downgrade would be performed"
-		}
-		if res.DirectionUnknown {
-			msg += "; vaire cannot establish a non-downgrade ordering from " + res.Version + " to " + res.DefaultVersion + ", so no automatic update would run"
-		}
-		if res.PreloadMissing {
-			msg += "; its preload library is not loaded and no restart is pending"
-		}
-		if len(res.RequiredConfirmTokens) > 0 {
-			msg += "; confirmation: --confirm " + strings.Join(res.RequiredConfirmTokens, " --confirm ")
-		}
-		if res.SQL != "" {
-			msg += "\n" + strings.TrimRight(res.SQL, "\n")
-		}
-		return output.Success(cmd, output.Result{Data: res, Message: msg, Warnings: warnings})
+		return extAddDryRun(cmd, res, warnings)
 	}
 	msg := extAddMessage(res)
 	return output.Success(cmd, output.Result{
 		Data: res, Message: msg, Warnings: warnings,
 		Next: []string{"vaire ext list --db " + res.Database},
 	})
+}
+
+// extAddRequest validates the positional name and builds the node request from
+// the flags.
+func extAddRequest(cmd *cobra.Command, args []string) (string, map[string]any, error) {
+	name := strings.TrimSpace(args[0])
+	if name == "" {
+		return "", nil, output.NewError(output.CodeUsage, "ext add needs an extension name", output.ExitUsage, "")
+	}
+	settings, err := extFlagMap(cmd, "setting")
+	if err != nil {
+		return "", nil, err
+	}
+	copySettings, err := extFlagMap(cmd, "copy-setting")
+	if err != nil {
+		return "", nil, err
+	}
+	params := map[string]any{"name": name}
+	if db := stringFlag(cmd, "db"); db != "" {
+		params["db"] = db
+	}
+	if pkg := stringFlag(cmd, "package"); pkg != "" {
+		params["package"] = pkg
+	}
+	if flagTrue(cmd, "preinstalled") {
+		params["preinstalled"] = true
+	}
+	if preload := stringFlag(cmd, "preload"); preload != "" {
+		params["preload"] = preload
+	}
+	if len(settings) > 0 {
+		params["settings"] = settings
+	}
+	if schema := stringFlag(cmd, "schema"); schema != "" {
+		params["schema"] = schema
+	}
+	if copySafety := stringFlag(cmd, "copy-safety"); copySafety != "" {
+		params["copy_safety"] = copySafety
+	}
+	if len(copySettings) > 0 {
+		params["copy_settings"] = copySettings
+	}
+	if value, supplied := extStandbySafeParam(cmd); supplied {
+		params["standby_safe"] = value
+	}
+	if flagTrue(cmd, "preinstalled") && stringFlag(cmd, "package") != "" {
+		return "", nil, output.NewError(output.CodeUsage, "--package and --preinstalled are mutually exclusive", output.ExitUsage, "")
+	}
+	return name, params, nil
+}
+
+// extAddDryRun renders the preview, keeping the already-enabled case distinct
+// from a change that would run.
+func extAddDryRun(cmd *cobra.Command, res extAddResult, warnings []output.Warning) error {
+	if extAddDryRunUnchanged(res) {
+		return output.Success(cmd, output.Result{
+			Data: res, Message: "dry run: " + res.Extension + " " + res.Version + " is already enabled in " + res.Database + "; no change",
+			Warnings: warnings,
+		})
+	}
+	return output.Success(cmd, output.Result{Data: res, Message: extAddDryRunMessage(res), Warnings: warnings})
+}
+
+func extAddDryRunUnchanged(res extAddResult) bool {
+	return res.AlreadyEnabled && !res.DescriptorSaved && !res.UpdateAvailable && !res.Downgrade &&
+		!res.RestartRequired && !res.PreloadMissing && res.Version != ""
+}
+
+func extAddDryRunMessage(res extAddResult) string {
+	msg := "dry run: would add " + res.Extension + " to " + res.Database
+	if res.Package != "" {
+		msg += ", installing " + res.Package
+	}
+	if res.DescriptorSaved {
+		msg += ", and save its [extensions] definition"
+	}
+	if res.RestartRequired {
+		msg += "; its configuration change needs a restart token (--confirm " + res.Database + "/restart)"
+	}
+	if res.Version != "" {
+		msg += "; installed version " + res.Version
+	}
+	if res.UpdateAvailable {
+		msg += "; the package's default is " + res.DefaultVersion + ", so the change would check a supported update path"
+	}
+	if res.Downgrade {
+		msg += "; the package's default " + res.DefaultVersion + " is older than the installed " + res.Version + ", so no downgrade would be performed"
+	}
+	if res.DirectionUnknown {
+		msg += "; vaire cannot establish a non-downgrade ordering from " + res.Version + " to " + res.DefaultVersion + ", so no automatic update would run"
+	}
+	if res.PreloadMissing {
+		msg += "; its preload library is not loaded and no restart is pending"
+	}
+	if len(res.RequiredConfirmTokens) > 0 {
+		msg += "; confirmation: --confirm " + strings.Join(res.RequiredConfirmTokens, " --confirm ")
+	}
+	if res.SQL != "" {
+		msg += "\n" + strings.TrimRight(res.SQL, "\n")
+	}
+	return msg
 }
 
 func runExtRemove(cmd *cobra.Command, args []string) error {
@@ -312,10 +337,7 @@ func runExtRemove(cmd *cobra.Command, args []string) error {
 		params["cascade"] = true
 	}
 	tokens := confirmTokens(cmd)
-	restart, err := extRemoveLikelyNeedsRestart(cfg, db, name)
-	if err != nil {
-		return err
-	}
+	restart := extRemoveLikelyNeedsRestart(cfg, db, name)
 	if !dryRun(cmd) {
 		if tokens, err = ensureConfirmToken(cmd, tokens, db); err != nil {
 			return err
@@ -338,25 +360,31 @@ func runExtRemove(cmd *cobra.Command, args []string) error {
 	}
 	warnings := append(s.warnings, reply.Warnings...)
 	if dryRun(cmd) {
-		lines := []string{"dry run: would remove " + res.Extension + " from " + res.Database}
-		if res.DependentsTotal > 0 {
-			lines = append(lines, "  used by "+extCountText(res.DependentsTotal, "object")+" (--cascade drops them): "+extPreviewText(res.Dependents, res.DependentsTruncated))
-		}
-		if res.OwnTablesTotal > 0 {
-			lines = append(lines, "  its own tables go with it: "+extPreviewText(res.OwnTables, res.OwnTablesTruncated))
-		}
-		if res.RestartRequired {
-			lines = append(lines, "  its removal changes preload or postmaster settings, so a restart token is required (--confirm "+res.Database+"/restart)")
-		}
-		if len(res.RequiredConfirmTokens) > 0 {
-			lines = append(lines, "  confirmation: --confirm "+strings.Join(res.RequiredConfirmTokens, " --confirm "))
-		}
-		return output.Success(cmd, output.Result{Data: res, Message: strings.Join(lines, "\n"), Warnings: warnings})
+		return extRemoveDryRun(cmd, res, warnings)
 	}
 	return output.Success(cmd, output.Result{
 		Data: res, Message: extRemoveMessage(res), Warnings: warnings,
 		Next: []string{"vaire ext list --db " + res.Database},
 	})
+}
+
+// extRemoveDryRun renders the preview of a removal and its confirmation
+// requirements.
+func extRemoveDryRun(cmd *cobra.Command, res extRemoveResult, warnings []output.Warning) error {
+	lines := []string{"dry run: would remove " + res.Extension + " from " + res.Database}
+	if res.DependentsTotal > 0 {
+		lines = append(lines, "  used by "+extCountText(res.DependentsTotal, "object")+" (--cascade drops them): "+extPreviewText(res.Dependents, res.DependentsTruncated))
+	}
+	if res.OwnTablesTotal > 0 {
+		lines = append(lines, "  its own tables go with it: "+extPreviewText(res.OwnTables, res.OwnTablesTruncated))
+	}
+	if res.RestartRequired {
+		lines = append(lines, "  its removal changes preload or postmaster settings, so a restart token is required (--confirm "+res.Database+"/restart)")
+	}
+	if len(res.RequiredConfirmTokens) > 0 {
+		lines = append(lines, "  confirmation: --confirm "+strings.Join(res.RequiredConfirmTokens, " --confirm "))
+	}
+	return output.Success(cmd, output.Result{Data: res, Message: strings.Join(lines, "\n"), Warnings: warnings})
 }
 
 func extDBForAdd(cfg config.Cluster, db string) (string, error) {
@@ -428,17 +456,17 @@ func extensionEnabledCLI(cfg config.Cluster, spec config.ClusterSpec, name strin
 	return slices.Contains(effective, canonical)
 }
 
-func extRemoveLikelyNeedsRestart(cfg config.Cluster, db, name string) (bool, error) {
+func extRemoveLikelyNeedsRestart(cfg config.Cluster, db, name string) bool {
 	spec, ok := cfg.ClusterByName(db)
 	if !ok {
-		return false, nil
+		return false
 	}
 	if ext, err := cfg.ExtensionResolver().Resolve(name); err == nil && extensionEnabledCLI(cfg, spec, name) && len(ext.Settings) > 0 {
-		return true, nil
+		return true
 	}
 	before, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
 	if err != nil {
-		return false, nil
+		return false
 	}
 	canonical, _ := cfg.ExtensionResolver().Canonical(name)
 	var afterNames []string
@@ -450,9 +478,9 @@ func extRemoveLikelyNeedsRestart(cfg config.Cluster, db, name string) (bool, err
 	}
 	after, err := cfg.ExtensionResolver().Preloads(afterNames)
 	if err != nil {
-		return false, nil
+		return false
 	}
-	return !slices.Equal(before, after), nil
+	return !slices.Equal(before, after)
 }
 
 // extStandbySafeParam reports the flag value only when the operator supplied
@@ -576,81 +604,103 @@ func extRemoveMessage(res extRemoveResult) string {
 	return msg
 }
 
+const extListRow = "  %-18s %-30s %-10s %-10s %-8s %-9s %-8s %s"
+
 func extListLines(data extListData) []string {
-	const row = "  %-18s %-30s %-10s %-10s %-8s %-9s %-8s %s"
-	lines := []string{fmt.Sprintf(row, "NAME", "PACKAGE", "SOURCE", "PRELOAD", "RESTART", "VERSION", "STATUS", "DATABASES")}
+	lines := make([]string, 0, 1+len(data.Extensions)+len(data.Databases))
+	lines = append(lines, fmt.Sprintf(extListRow, "NAME", "PACKAGE", "SOURCE", "PRELOAD", "RESTART", "VERSION", "STATUS", "DATABASES"))
 	for _, e := range data.Extensions {
-		pkg := "preinstalled"
-		if e.Package != "" {
-			pkg = e.Package
-			switch {
-			case !e.PackageKnown:
-				pkg += " (unknown)"
-			case !e.PackageInstalled:
-				pkg += " (missing)"
-			case e.Unused:
-				pkg += " (unused)"
-			default:
-				pkg += " (installed)"
-			}
-		}
-		preload := "-"
-		if e.Preload != "" {
-			preload = e.Preload
-		}
-		restart := "-"
-		if e.Restart {
-			restart = "yes"
-		}
-		version := e.DefaultVersion
-		if version == "" {
-			version = "-"
-		}
-		status := "ok"
-		switch {
-		case !e.AvailableKnown:
-			status = "unknown"
-		case !e.Available:
-			status = "missing"
-		}
-		var dbs []string
-		for _, d := range e.Databases {
-			label := d.DB
-			switch {
-			case !d.Available:
-				label += " (enabled, unavailable: " + d.State + ")"
-			case d.PendingRestart:
-				label += " (waits for restart)"
-			case e.ExtName == "" && d.Enabled:
-				label += " (preload-only)"
-			case d.Enabled && !d.Installed && e.ExtName != "":
-				label += " (missing)"
-			case !d.Enabled && d.Installed:
-				label += " (" + d.Version + ", not enabled)"
-			case d.UpdateAvailable:
-				label += " (" + d.Version + ", update to " + d.DefaultVersion + ")"
-			case d.Version != "":
-				label += " (" + d.Version + ")"
-			}
-			dbs = append(dbs, label)
-		}
-		where := "-"
-		if len(dbs) > 0 {
-			where = strings.Join(dbs, ", ")
-		}
-		lines = append(lines, fmt.Sprintf(row, e.Name, pkg, e.Source, preload, restart, version, status, where))
+		lines = append(lines, extListEntryLine(e))
 	}
 	for _, d := range data.Databases {
-		switch {
-		case !d.Available:
-			lines = append(lines, "  "+d.DB+": "+d.State+", installed extensions are unavailable"+
-				extErrorSuffix(d.Error))
-		case !d.PreloadKnown:
-			lines = append(lines, "  "+d.DB+": preload state is unavailable")
-		}
-		for _, u := range d.Unmanaged {
-			lines = append(lines, "  "+d.DB+" also has "+u.Name+" "+u.Version+" (unmanaged)")
-		}
+		lines = append(lines, extListDatabaseLines(d)...)
+	}
+	return lines
+}
+
+func extListEntryLine(e extListEntry) string {
+	preload := "-"
+	if e.Preload != "" {
+		preload = e.Preload
+	}
+	restart := "-"
+	if e.Restart {
+		restart = "yes"
+	}
+	version := e.DefaultVersion
+	if version == "" {
+		version = "-"
+	}
+	status := "ok"
+	switch {
+	case !e.AvailableKnown:
+		status = "unknown"
+	case !e.Available:
+		status = "missing"
+	}
+	return fmt.Sprintf(extListRow, e.Name, extListPackageText(e), e.Source, preload, restart, version, status, extListDatabasesText(e))
+}
+
+// extListPackageText describes the package and its availability.
+func extListPackageText(e extListEntry) string {
+	if e.Package == "" {
+		return "preinstalled"
+	}
+	switch {
+	case !e.PackageKnown:
+		return e.Package + " (unknown)"
+	case !e.PackageInstalled:
+		return e.Package + " (missing)"
+	case e.Unused:
+		return e.Package + " (unused)"
+	default:
+		return e.Package + " (installed)"
+	}
+}
+
+func extListDatabasesText(e extListEntry) string {
+	if len(e.Databases) == 0 {
+		return "-"
+	}
+	dbs := make([]string, 0, len(e.Databases))
+	for _, d := range e.Databases {
+		dbs = append(dbs, extListDatabaseLabel(e, d))
+	}
+	return strings.Join(dbs, ", ")
+}
+
+func extListDatabaseLabel(e extListEntry, d extDatabaseState) string {
+	label := d.DB
+	switch {
+	case !d.Available:
+		label += " (enabled, unavailable: " + d.State + ")"
+	case d.PendingRestart:
+		label += " (waits for restart)"
+	case e.ExtName == "" && d.Enabled:
+		label += " (preload-only)"
+	case d.Enabled && !d.Installed && e.ExtName != "":
+		label += " (missing)"
+	case !d.Enabled && d.Installed:
+		label += " (" + d.Version + ", not enabled)"
+	case d.UpdateAvailable:
+		label += " (" + d.Version + ", update to " + d.DefaultVersion + ")"
+	case d.Version != "":
+		label += " (" + d.Version + ")"
+	}
+	return label
+}
+
+func extListDatabaseLines(d extListDatabase) []string {
+	var lines []string
+	switch {
+	case !d.Available:
+		lines = append(lines, "  "+d.DB+": "+d.State+", installed extensions are unavailable"+
+			extErrorSuffix(d.Error))
+	case !d.PreloadKnown:
+		lines = append(lines, "  "+d.DB+": preload state is unavailable")
+	}
+	for _, u := range d.Unmanaged {
+		lines = append(lines, "  "+d.DB+" also has "+u.Name+" "+u.Version+" (unmanaged)")
 	}
 	return lines
 }

@@ -266,15 +266,7 @@ func openForkContinuation(ctx context.Context, cfg config.Cluster, env *Env, lea
 		return nil, materialisationIncomplete(leaseTarget(lease), nil)
 	}
 	db := lease.target
-	recs, err := backup.LoadRecords()
-	if err != nil {
-		return nil, materialisationIncomplete(db, nil)
-	}
-	fence, ok := recs.ActivationFenceFor(db)
-	if !ok || fence.Kind != "fork" || fence.OperationID == "" {
-		return nil, materialisationIncomplete(db, nil)
-	}
-	f, spec, err := verifyActivationFence(cfg, db, fence.OperationID, "fork", fencePhaseAdopting, fencePhaseAdopted, fencePhaseRouting)
+	f, spec, err := loadForkContinuationFence(cfg, db)
 	if err != nil {
 		return nil, err
 	}
@@ -283,44 +275,85 @@ func openForkContinuation(ctx context.Context, cfg config.Cluster, env *Env, lea
 		return nil, materialisationIncomplete(db, nil)
 	}
 	if !found {
-		if f.Phase != fencePhaseRouting {
-			return nil, materialisationIncomplete(db, nil)
-		}
-		if err := materialisationAbsentDurableForRoot(cfg.Server.DataRoot, db); err != nil {
-			return nil, err
-		}
-		return &forkContinuationScope{
-			lease: lease, env: env, target: db, operationID: f.OperationID,
-			fence: f, spec: spec,
-		}, nil
+		return openAbsentForkContinuation(cfg, env, lease, db, f, spec)
 	}
 	if err := forkContinuationOwnershipShape(cfg, f, spec, o); err != nil {
 		return nil, err
 	}
+	if err := verifyForkContinuationOwner(ctx, cfg, spec, o); err != nil {
+		return nil, err
+	}
+	src, err := forkContinuationAdoptionSource(cfg, f, o)
+	if err != nil {
+		return nil, err
+	}
+	artifacts, err := openForkContinuationArtifacts(cfg.Server.DataRoot, db, o)
+	if err != nil {
+		return nil, err
+	}
+	if err := forkContinuationReservationForPhase(ctx, o); err != nil {
+		artifacts.close()
+		return nil, materialisationIncomplete(db, &o)
+	}
+	s := &forkContinuationScope{
+		lease: lease, env: env, target: db, operationID: f.OperationID,
+		fence: f, spec: spec, owner: o, hasOwner: true, source: src, artifacts: artifacts,
+	}
+	s.self = s
+	return s, nil
+}
+
+func loadForkContinuationFence(cfg config.Cluster, db string) (backup.ActivationFence, config.ClusterSpec, error) {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(db, nil)
+	}
+	fence, ok := recs.ActivationFenceFor(db)
+	if !ok || fence.Kind != "fork" || fence.OperationID == "" {
+		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(db, nil)
+	}
+	return verifyActivationFence(cfg, db, fence.OperationID, "fork", fencePhaseAdopting, fencePhaseAdopted, fencePhaseRouting)
+}
+
+func openAbsentForkContinuation(cfg config.Cluster, env *Env, lease *materialisationContinuationLease, db string, f backup.ActivationFence, spec config.ClusterSpec) (*forkContinuationScope, error) {
+	if f.Phase != fencePhaseRouting {
+		return nil, materialisationIncomplete(db, nil)
+	}
+	if err := materialisationAbsentDurableForRoot(cfg.Server.DataRoot, db); err != nil {
+		return nil, err
+	}
+	return &forkContinuationScope{
+		lease: lease, env: env, target: db, operationID: f.OperationID,
+		fence: f, spec: spec,
+	}, nil
+}
+
+func verifyForkContinuationOwner(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, o materialisationOwnership) error {
 	if o.Phase == materialisationProvisioning {
 		// Already adopted: the actual registration must be final before any
 		// history, package, setting, guard, provisioning or publication effect.
 		// An unfinished adoption keeps the temporary/final distinction for
 		// AdoptResumedFollower itself.
 		if err := verifyForkTargetRegistration(cfg, spec); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	if err := verifyForkContinuationJob(ctx, o); err != nil {
-		return nil, err
+	return verifyForkContinuationJob(ctx, o)
+}
+
+func forkContinuationAdoptionSource(cfg config.Cluster, f backup.ActivationFence, o materialisationOwnership) (config.ClusterSpec, error) {
+	if o.Phase != materialisationCopying {
+		return config.ClusterSpec{}, nil
 	}
-	var src config.ClusterSpec
-	if o.Phase == materialisationCopying {
-		src, err = verifyForkAdoptionSource(cfg, f, o)
-		if err != nil {
-			return nil, err
-		}
-	}
+	return verifyForkAdoptionSource(cfg, f, o)
+}
+
+func openForkContinuationArtifacts(dataRoot, db string, o materialisationOwnership) (*materialisationArtifacts, error) {
 	uid, err := materialisationPostgresUID()
 	if err != nil {
 		return nil, materialisationIncomplete(db, &o)
 	}
-	artifacts, err := openMaterialisationArtifacts(db, cfg.Server.DataRoot, uid)
+	artifacts, err := openMaterialisationArtifacts(db, dataRoot, uid)
 	if err != nil {
 		return nil, materialisationIncomplete(db, &o)
 	}
@@ -332,23 +365,17 @@ func openForkContinuation(ctx context.Context, cfg config.Cluster, env *Env, lea
 		artifacts.close()
 		return nil, materialisationIncomplete(db, &o)
 	}
+	return artifacts, nil
+}
+
+// forkContinuationReservationForPhase admits a copying owner's exact
+// reservation and requires it absent after adoption.
+func forkContinuationReservationForPhase(ctx context.Context, o materialisationOwnership) error {
+	expect := forkReservationAbsent
 	if o.Phase == materialisationCopying {
-		// Adoption may still have its exact birth-bound reservation, or may
-		// have removed it after writing the registration before a crash.
-		if err := checkForkContinuationReservation(ctx, o, forkReservationAny); err != nil {
-			artifacts.close()
-			return nil, materialisationIncomplete(db, &o)
-		}
-	} else if err := checkForkContinuationReservation(ctx, o, forkReservationAbsent); err != nil {
-		artifacts.close()
-		return nil, materialisationIncomplete(db, &o)
+		expect = forkReservationAny
 	}
-	s := &forkContinuationScope{
-		lease: lease, env: env, target: db, operationID: f.OperationID,
-		fence: f, spec: spec, owner: o, hasOwner: true, source: src, artifacts: artifacts,
-	}
-	s.self = s
-	return s, nil
+	return checkForkContinuationReservation(ctx, o, expect)
 }
 
 func leaseTarget(l *materialisationContinuationLease) string {
@@ -483,17 +510,14 @@ func checkForkContinuationReservation(ctx context.Context, o materialisationOwne
 		return errors.New("invalid temporary reservation")
 	}
 	path := filepath.Join(forkContinuationReservationDir(), o.Target)
-	info, err := os.Lstat(path)
+	_, err := os.Lstat(path)
 	present := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if present {
-		if o.ReservationIdentity.Inode == 0 || len(o.ReservationIdentity.Digest) != 64 {
-			return errors.New("missing reservation birth evidence")
-		}
-		if _, err := hex.DecodeString(o.ReservationIdentity.Digest); err != nil {
-			return errors.New("invalid reservation birth evidence")
+		if err := reservationBirthEvidence(o.ReservationIdentity); err != nil {
+			return err
 		}
 	}
 	unlock, err := forkReservationLock(ctx, o.Target, o.TemporaryPort, present)
@@ -501,31 +525,48 @@ func checkForkContinuationReservation(ctx context.Context, o materialisationOwne
 		return errors.New("reservation is not exactly owned")
 	}
 	defer unlock()
-	info, err = os.Lstat(path)
+	info, err := os.Lstat(path)
 	if present {
 		if err != nil {
 			return errors.New("reservation disappeared")
 		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
-			info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || st.Nlink != 1 ||
-			st.Dev != o.ReservationIdentity.Device || st.Ino != o.ReservationIdentity.Inode ||
-			st.Uid != o.ReservationIdentity.UID || info.Size() > 256 {
-			return errors.New("reservation replaced")
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil || len(raw) > 256 {
-			return errors.New("reservation unreadable")
-		}
-		sum := sha256.Sum256(raw)
-		if hex.EncodeToString(sum[:]) != o.ReservationIdentity.Digest {
-			return errors.New("reservation content replaced")
+		if err := verifyReservationBirth(path, info, o.ReservationIdentity); err != nil {
+			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("reservation appeared")
 	}
 	if expect == forkReservationAbsent && present {
 		return errors.New("reservation must be absent")
+	}
+	return nil
+}
+
+func reservationBirthEvidence(id backup.ReservationIdentity) error {
+	if id.Inode == 0 || len(id.Digest) != 64 {
+		return errors.New("missing reservation birth evidence")
+	}
+	if _, err := hex.DecodeString(id.Digest); err != nil {
+		return errors.New("invalid reservation birth evidence")
+	}
+	return nil
+}
+
+func verifyReservationBirth(path string, info os.FileInfo, id backup.ReservationIdentity) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
+		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || st.Nlink != 1 ||
+		st.Dev != id.Device || st.Ino != id.Inode ||
+		st.Uid != id.UID || info.Size() > 256 {
+		return errors.New("reservation replaced")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) > 256 {
+		return errors.New("reservation unreadable")
+	}
+	sum := sha256.Sum256(raw)
+	if hex.EncodeToString(sum[:]) != id.Digest {
+		return errors.New("reservation content replaced")
 	}
 	return nil
 }

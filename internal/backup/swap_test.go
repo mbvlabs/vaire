@@ -41,11 +41,11 @@ func TestSwapHalfwayMovesDataAndKeepsGuard(t *testing.T) {
 	pgConfRoot = t.TempDir()
 	resolveClusterIDs = func(_, _ string) (int, int, error) { return -1, -1, nil }
 	writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	oldAuto := writeAutoConf
 	writeAutoConf = func(path string, data []byte, perm os.FileMode, _, _ string) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() {
 		pgConfRoot, resolveClusterIDs, writeClusterFile = oldRoot, oldIDs, oldWrite
@@ -67,19 +67,19 @@ func TestSwapHalfwayMovesDataAndKeepsGuard(t *testing.T) {
 	guard := CopyGuard{Preloads: []string{"retained_lib"}, Settings: map[string]string{"cron.launch_active_jobs": "off"}}
 	oldGuardWriter := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldGuardWriter })
 	if _, err := InstallCopyGuard(fromData, guard); err != nil {
 		t.Fatal(err)
 	}
 	autoConf := filepath.Join(fromData, "postgresql.auto.conf")
-	raw, err := os.ReadFile(autoConf) //nolint:gosec // test-owned path
+	raw, err := os.ReadFile(autoConf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw = append([]byte("restore_command = 'archive-get --pg1-path="+fromData+"'\n"), raw...)
-	if err := os.WriteFile(autoConf, raw, 0o600); err != nil { //nolint:gosec // test-owned path
+	if err := os.WriteFile(autoConf, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if state := SwapState(dataRoot, "app", "app__restoring", aside); state != SwapHalfway {
@@ -94,7 +94,7 @@ func TestSwapHalfwayMovesDataAndKeepsGuard(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(liveData, "postgresql.auto.conf")); err != nil {
 		t.Fatalf("the moved data lost its auto.conf: %v", err)
 	}
-	moved, err := os.ReadFile(filepath.Join(liveData, "postgresql.auto.conf")) //nolint:gosec // test-owned path
+	moved, err := os.ReadFile(filepath.Join(liveData, "postgresql.auto.conf"))
 	if err != nil {
 		t.Fatal(err)
 	}

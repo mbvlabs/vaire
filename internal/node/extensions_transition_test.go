@@ -44,6 +44,22 @@ func defaultExtensionSettingsFake(sql string) ([]map[string]string, error) {
 	return nil, nil
 }
 
+func extApplyIDs(calls []engine.Options) []string {
+	ids := make([]string, 0, len(calls))
+	for _, opts := range calls {
+		ids = append(ids, opts.DB+":"+opts.Only[0])
+	}
+	return ids
+}
+
+func extApplyDatabases(calls []engine.Options) []string {
+	dbs := make([]string, 0, len(calls))
+	for _, opts := range calls {
+		dbs = append(dbs, opts.DB)
+	}
+	return dbs
+}
+
 func cronSettingFake(h *extHarness) {
 	h.pg.queryFn = func(sql string) ([]map[string]string, error) {
 		for key, value := range map[string]string{
@@ -230,10 +246,7 @@ func TestExtAddWithFollowersOrdersFollowersFirst(t *testing.T) {
 	if len(h.saves) != 1 {
 		t.Fatalf("intent saves = %d", len(h.saves))
 	}
-	var order []string
-	for _, opts := range h.applyCalls {
-		order = append(order, opts.DB+":"+opts.Only[0])
-	}
+	order := extApplyIDs(h.applyCalls)
 	want := []string{
 		"app_follower_1:postgres-config-v1@app_follower_1",
 		"app_follower_2:postgres-config-v1@app_follower_2",
@@ -246,7 +259,7 @@ func TestExtAddWithFollowersOrdersFollowersFirst(t *testing.T) {
 	if h.prepareCalls != 3 {
 		t.Fatalf("package preflight calls = %d, want source and both followers", h.prepareCalls)
 	}
-	if res.Data.(extAddResult).RequiredConfirmTokens == nil {
+	if mustAs[extAddResult](t, res.Data).RequiredConfirmTokens == nil {
 		t.Fatal("the result lost its required tokens")
 	}
 }
@@ -332,10 +345,7 @@ func TestExtAddFollowerUnrenderedConfigDriftRequiresTokenBeforeEffects(t *testin
 	if _, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatal(err)
 	}
-	var order []string
-	for _, opts := range h.applyCalls {
-		order = append(order, opts.DB)
-	}
+	order := extApplyDatabases(h.applyCalls)
 	if len(order) < 2 || order[0] != "app_follower_1" || order[1] != "app_follower_2" {
 		t.Fatalf("add order = %v, want followers first", order)
 	}
@@ -409,10 +419,7 @@ func TestExtRemoveFollowerUnrenderedConfigDriftRequiresTokenBeforeEffects(t *tes
 	if len(h.pg.execs) == 0 || !strings.Contains(h.pg.execs[0], "DROP EXTENSION") {
 		t.Fatalf("DROP did not run first: execs=%v applies=%d saves=%d installedCalls=%d", h.pg.execs, len(h.applyCalls), len(h.saves), h.installedCalls)
 	}
-	var order []string
-	for _, opts := range h.applyCalls {
-		order = append(order, opts.DB)
-	}
+	order := extApplyDatabases(h.applyCalls)
 	if len(order) < 2 || order[0] != "app" {
 		t.Fatalf("remove order = %v, want primary first", order)
 	}
@@ -442,10 +449,7 @@ func TestExtRemoveWithFollowersDropsBeforeSavingAndPrimaryFirst(t *testing.T) {
 	if len(h.saves) != 1 {
 		t.Fatalf("intent saves = %d", len(h.saves))
 	}
-	var order []string
-	for _, opts := range h.applyCalls {
-		order = append(order, opts.DB)
-	}
+	order := extApplyDatabases(h.applyCalls)
 	want := []string{"app", "app_follower_1", "app_follower_2"}
 	if strings.Join(order, "|") != strings.Join(want, "|") {
 		t.Fatalf("remove order = %v, want primary then followers", order)
@@ -489,10 +493,7 @@ func TestApplyTransitionOrdersFollowersFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var order []string
-	for _, opts := range h.applyCalls {
-		order = append(order, opts.DB+":"+opts.Only[0])
-	}
+	order := extApplyIDs(h.applyCalls)
 	want := []string{
 		"app_follower_1:postgres-config-v1@app_follower_1",
 		"app_follower_2:postgres-config-v1@app_follower_2",
@@ -525,14 +526,11 @@ func TestApplyTransitionMissingFollowerRestartTokenStagesPendingWithoutPrimary(t
 	if release != nil {
 		defer release()
 	}
-	var pending *extensionApplyPending
+	var pending *extensionApplyPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("missing follower token = %v, want a pending staging result", err)
 	}
-	var applied []string
-	for _, opts := range h.applyCalls {
-		applied = append(applied, opts.DB+":"+opts.Only[0])
-	}
+	applied := extApplyIDs(h.applyCalls)
 	want := []string{
 		"app_follower_1:postgres-config-v1@app_follower_1",
 		"app_follower_2:postgres-config-v1@app_follower_2",
@@ -680,7 +678,7 @@ func TestExtAddDryRunWithFollowersHasNoEffects(t *testing.T) {
 	if len(h.saves) != 0 || len(h.applyCalls) != 0 || h.prepareCalls != 0 {
 		t.Fatal("a dry run mutated")
 	}
-	got := res.Data.(extAddResult)
+	got := mustAs[extAddResult](t, res.Data)
 	if !hasToken(got.RequiredConfirmTokens, "app_follower_1/restart") {
 		t.Fatalf("dry run tokens = %v", got.RequiredConfirmTokens)
 	}
@@ -751,7 +749,7 @@ func TestUnfollowCronSettlementOrder(t *testing.T) {
 	node.copyReady(cfg)
 	oldGuardWriter := backup.CopyGuardWriterForTest()
 	backup.RestoreCopyGuardWriterForTest(func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	})
 	t.Cleanup(func() { backup.RestoreCopyGuardWriterForTest(oldGuardWriter) })
 	stub := (&followerStub{}).install(t)
@@ -953,7 +951,7 @@ func TestExtAddWithFollowersUpdatesAfterFollowersAndPrimarySQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.Data.(extAddResult)
+	got := mustAs[extAddResult](t, res.Data)
 	if !got.Updated || got.Version != "1.6" || got.PreviousVersion != "1.5" {
 		t.Fatalf("update result = %+v", got)
 	}
@@ -979,7 +977,8 @@ func TestExtAddWithFollowersUpdatesAfterFollowersAndPrimarySQL(t *testing.T) {
 	}
 }
 
-func TestApplyFullMultipleSourcesStagesAvailableTargetsAndDefersUnconfirmedSource(t *testing.T) {
+func multiSourceApplyCluster(t *testing.T) config.Cluster {
+	t.Helper()
 	cfg := config.DefaultCluster()
 	cfg.ClusterName, cfg.Domain = "prod", "example.com"
 	cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
@@ -993,6 +992,11 @@ func TestApplyFullMultipleSourcesStagesAvailableTargetsAndDefersUnconfirmedSourc
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	return cfg
+}
+
+func newMultiSourceApplyHarness(t *testing.T, cfg config.Cluster) (*extHarness, *[]string) {
+	t.Helper()
 	h := newExtHarness(t, cfg)
 	oldPlan, oldAcquire := extensionPlan, extensionAcquireClusters
 	var acquired []string
@@ -1014,18 +1018,12 @@ func TestApplyFullMultipleSourcesStagesAvailableTargetsAndDefersUnconfirmedSourc
 		}
 		return engine.ApplyData{}, nil
 	}
-	req := request("apply", nil)
-	req.Confirm = "app/restart"
-	req.Confirms = []string{"app_follower/restart", "other/restart"} // other_follower/restart is missing
-	_, _, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{})
-	var pending *extensionApplyPending
-	if !errors.As(err, &pending) {
-		t.Fatalf("a missing token = %v, want pending staging", err)
-	}
-	var staged []string
-	for _, opts := range h.applyCalls {
-		staged = append(staged, opts.DB+":"+opts.Only[0])
-	}
+	return h, &acquired
+}
+
+func assertDeferredMultiSourceStaging(t *testing.T, h *extHarness, acquired []string, pending *extensionApplyPendingError) {
+	t.Helper()
+	staged := extApplyIDs(h.applyCalls)
 	wantStaged := []string{
 		"app_follower:postgres-config-v1@app_follower",
 		"app:postgres-config-v1@app",
@@ -1052,6 +1050,21 @@ func TestApplyFullMultipleSourcesStagesAvailableTargetsAndDefersUnconfirmedSourc
 	if !slices.Contains(pending.Pending, "other_follower") || !slices.Contains(pending.Tokens, "other_follower/restart") {
 		t.Fatalf("pending result = %+v", pending)
 	}
+}
+
+func TestApplyFullMultipleSourcesStagesAvailableTargetsAndDefersUnconfirmedSource(t *testing.T) {
+	cfg := multiSourceApplyCluster(t)
+	h, acquired := newMultiSourceApplyHarness(t, cfg)
+	req := request("apply", nil)
+	req.Confirm = "app/restart"
+	req.Confirms = []string{"app_follower/restart", "other/restart"} // other_follower/restart is missing
+	_, _, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{})
+	var pending *extensionApplyPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("a missing token = %v, want pending staging", err)
+	}
+	assertDeferredMultiSourceStaging(t, h, *acquired, pending)
+
 	// With every token, every selected source and follower is ordered, and the
 	// unrelated primary is never touched.
 	h.applyCalls = nil
@@ -1062,10 +1075,7 @@ func TestApplyFullMultipleSourcesStagesAvailableTargetsAndDefersUnconfirmedSourc
 	} else if release != nil {
 		defer release()
 	}
-	var order []string
-	for _, opts := range h.applyCalls {
-		order = append(order, opts.DB+":"+opts.Only[0])
-	}
+	order := extApplyIDs(h.applyCalls)
 	want := []string{
 		"app_follower:postgres-config-v1@app_follower",
 		"app:postgres-config-v1@app",
@@ -1145,10 +1155,7 @@ func TestExtRemoveRetryFinishesFollowersAfterPrimaryConverged(t *testing.T) {
 	if len(h.saves) != 0 {
 		t.Fatalf("the retry rewrote converged intent: %v", h.saves)
 	}
-	var applied []string
-	for _, opts := range h.applyCalls {
-		applied = append(applied, opts.DB)
-	}
+	applied := extApplyDatabases(h.applyCalls)
 	want := []string{"app", "app_follower_1", "app_follower_2"}
 	if strings.Join(applied, ",") != strings.Join(want, ",") {
 		t.Fatalf("retry applied %v, want %v", applied, want)

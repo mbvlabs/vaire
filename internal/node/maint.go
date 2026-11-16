@@ -173,13 +173,9 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 	if p.Table != "" {
 		return Result{}, output.NewError(output.CodeUsage, "--table is only for maint report bloat --exact", output.ExitUsage, "")
 	}
-	older := 300
-	if p.OlderThan != "" {
-		d, err := time.ParseDuration(p.OlderThan)
-		if err != nil || d < 0 {
-			return Result{}, output.NewError(output.CodeUsage, "--older-than must be a duration such as 5m", output.ExitUsage, "")
-		}
-		older = int(d.Seconds())
+	older, err := maintReportOlder(p.OlderThan)
+	if err != nil {
+		return Result{}, err
 	}
 	specs, err := targetClusters(env.Cluster, p.DB)
 	if err != nil {
@@ -188,30 +184,45 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 	sql, _ := maint.ReportSQL(p.Kind, older)
 	out := []maintReportDB{}
 	for _, spec := range specs {
-		r := maintReportDB{DB: spec.Name}
-		if !clusterRunning(spec) {
-			r.Error = "the cluster is not running"
-			out = append(out, r)
-			continue
-		}
-		rows, err := maintReportPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
-		switch {
-		case err != nil:
-			r.Error = err.Error()
-		case p.Kind == maint.ReportBloat:
-			b := maint.ParseBloat(spec.Name, rows, p.MinBytes)
-			r.Bloat = &b
-		default:
-			if p.Kind == maint.ReportWraparound {
-				for _, row := range rows {
-					row["status"] = maint.WraparoundStatus(atoi64(row["xid_age"]))
-				}
-			}
-			r.Rows = rows
-		}
-		out = append(out, r)
+		out = append(out, runMaintReport(ctx, spec, p, sql))
 	}
 	return Result{Data: map[string]any{"kind": p.Kind, "databases": out}}, nil
+}
+
+func maintReportOlder(value string) (int, error) {
+	older := 300
+	if value == "" {
+		return older, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return 0, output.NewError(output.CodeUsage, "--older-than must be a duration such as 5m", output.ExitUsage, "")
+	}
+	return int(d.Seconds()), nil
+}
+
+func runMaintReport(ctx context.Context, spec config.ClusterSpec, p maintReportParams, sql string) maintReportDB {
+	r := maintReportDB{DB: spec.Name}
+	if !clusterRunning(spec) {
+		r.Error = "the cluster is not running"
+		return r
+	}
+	rows, err := maintReportPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
+	switch {
+	case err != nil:
+		r.Error = err.Error()
+	case p.Kind == maint.ReportBloat:
+		b := maint.ParseBloat(spec.Name, rows, p.MinBytes)
+		r.Bloat = &b
+	default:
+		if p.Kind == maint.ReportWraparound {
+			for _, row := range rows {
+				row["status"] = maint.WraparoundStatus(atoi64(row["xid_age"]))
+			}
+		}
+		r.Rows = rows
+	}
+	return r
 }
 
 // exactMaintReport measures exactly one ordinary table with the full
@@ -341,32 +352,12 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 		}
 		cfg = fresh
 	}
+	if p.Kind == maint.Repack {
+		return handleMaintRepack(ctx, env, cfg, p)
+	}
 	spec, err := clusterOf(cfg, p.DB)
 	if err != nil {
 		return Result{}, err
-	}
-	if p.Kind == maint.Repack {
-		if !env.Req.DryRun {
-			if err := refuseAnyActivationFence(cfg, spec.Name); err != nil {
-				return Result{}, err
-			}
-		}
-		plan, err := planRepack(ctx, cfg, spec, &p, time.Now(), false)
-		if err != nil {
-			return Result{}, err
-		}
-		if env.Req.DryRun {
-			return Result{Data: map[string]any{
-				"db": p.DB, "kind": p.Kind, "tables": plan.Tables, "skipped": plan.Skipped,
-				"versions": plan.Versions, "version_check": plan.VersionCheck, "space": plan.Space,
-				"dry_run": true, "heavy_io": true,
-			}}, nil
-		}
-		if env.Req.Confirm == "" {
-			return Result{}, confirmRequired("a repack rewrites "+p.DB+"'s tables and their indexes", p.DB)
-		}
-		env.Cluster = cfg
-		return runJobRPC(ctx, env, "maint", p, nil)
 	}
 	if !env.Req.DryRun {
 		if err := refuseAnyActivationFence(env.Cluster, spec.Name); err != nil {
@@ -382,6 +373,36 @@ func handleMaintRun(ctx context.Context, env *Env) (Result, error) {
 		}
 		return Result{Data: data}, nil
 	}
+	return runJobRPC(ctx, env, "maint", p, nil)
+}
+
+// handleMaintRepack plans a repack against the freshest configuration and
+// starts it as a detachable job.
+func handleMaintRepack(ctx context.Context, env *Env, cfg config.Cluster, p maint.Options) (Result, error) {
+	spec, err := clusterOf(cfg, p.DB)
+	if err != nil {
+		return Result{}, err
+	}
+	if !env.Req.DryRun {
+		if err := refuseAnyActivationFence(cfg, spec.Name); err != nil {
+			return Result{}, err
+		}
+	}
+	plan, err := planRepack(ctx, cfg, spec, &p, time.Now(), false)
+	if err != nil {
+		return Result{}, err
+	}
+	if env.Req.DryRun {
+		return Result{Data: map[string]any{
+			"db": p.DB, "kind": p.Kind, "tables": plan.Tables, "skipped": plan.Skipped,
+			"versions": plan.Versions, "version_check": plan.VersionCheck, "space": plan.Space,
+			"dry_run": true, "heavy_io": true,
+		}}, nil
+	}
+	if env.Req.Confirm == "" {
+		return Result{}, confirmRequired("a repack rewrites "+p.DB+"'s tables and their indexes", p.DB)
+	}
+	env.Cluster = cfg
 	return runJobRPC(ctx, env, "maint", p, nil)
 }
 
@@ -461,21 +482,7 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 		return nil, err
 	}
 	if p.Kind == maint.Repack {
-		freshCfg, freshSpec, err := reloadRepackTarget(spec)
-		if err != nil {
-			return nil, err
-		}
-		env.Cluster = freshCfg
-		if err := refuseAnyActivationFence(freshCfg, freshSpec.Name); err != nil {
-			return nil, err
-		}
-		if freshSpec.Protected {
-			return nil, ProtectedRepackError(freshSpec.Name)
-		}
-		if freshSpec.IsFollower() {
-			return nil, followerError(freshSpec, "maintenance")
-		}
-		return jobRepack(ctx, env, p, freshSpec)
+		return jobMaintRepack(ctx, env, p, spec)
 	}
 	if err := refuseAnyActivationFence(env.Cluster, spec.Name); err != nil {
 		return nil, err
@@ -517,6 +524,26 @@ func jobMaint(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	logLine(env.Report, env.Job, p.Kind+" of "+p.DB+" finished")
 	return res, nil
+}
+
+// jobMaintRepack revalidates exactly the requested database under the job's
+// locks before running the repack.
+func jobMaintRepack(ctx context.Context, env *jobEnv, p maint.Options, spec config.ClusterSpec) (any, error) {
+	freshCfg, freshSpec, err := reloadRepackTarget(spec)
+	if err != nil {
+		return nil, err
+	}
+	env.Cluster = freshCfg
+	if err := refuseAnyActivationFence(freshCfg, freshSpec.Name); err != nil {
+		return nil, err
+	}
+	if freshSpec.Protected {
+		return nil, ProtectedRepackError(freshSpec.Name)
+	}
+	if freshSpec.IsFollower() {
+		return nil, followerError(freshSpec, "maintenance")
+	}
+	return jobRepack(ctx, env, p, freshSpec)
 }
 
 // leftoverDropSetup starts the session that drops a concurrent reindex's
@@ -626,15 +653,9 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
-	selected, refused := maint.SelectBackends(maint.ParseBackends(rows), opts)
-	if len(refused) > 0 {
-		return Result{}, output.NewError(output.CodePrecondition, fmt.Sprintf("backend %d is a superuser's; vaire maint kill never terminates it", refused[0].PID),
-			output.ExitPrecondition, "Terminate it from a superuser session if you must (vaire ssh).").
-			WithDetails(map[string]any{"reason": "protected_backend", "pid": refused[0].PID})
-	}
-	if p.PID != 0 && len(selected) == 0 {
-		return Result{}, output.NewError(output.CodePrecondition, fmt.Sprintf("no client backend %d in %s", p.PID, p.DB), output.ExitPrecondition, "vaire top --db "+p.DB).
-			WithDetails(map[string]any{"reason": "backend_not_found", "pid": p.PID})
+	selected, err := maintKillSelection(rows, opts, p)
+	if err != nil {
+		return Result{}, err
 	}
 	data := map[string]any{"db": p.DB, "targets": selected, "dry_run": env.Req.DryRun}
 	if env.Req.DryRun || len(selected) == 0 {
@@ -657,6 +678,20 @@ func handleMaintKill(ctx context.Context, env *Env) (Result, error) {
 	}
 	data["terminated"] = out
 	return Result{Data: data}, nil
+}
+
+func maintKillSelection(rows []map[string]string, opts maint.KillOptions, p maintKillParams) ([]maint.Backend, error) {
+	selected, refused := maint.SelectBackends(maint.ParseBackends(rows), opts)
+	if len(refused) > 0 {
+		return nil, output.NewError(output.CodePrecondition, fmt.Sprintf("backend %d is a superuser's; vaire maint kill never terminates it", refused[0].PID),
+			output.ExitPrecondition, "Terminate it from a superuser session if you must (vaire ssh).").
+			WithDetails(map[string]any{"reason": "protected_backend", "pid": refused[0].PID})
+	}
+	if p.PID != 0 && len(selected) == 0 {
+		return nil, output.NewError(output.CodePrecondition, fmt.Sprintf("no client backend %d in %s", p.PID, p.DB), output.ExitPrecondition, "vaire top --db "+p.DB).
+			WithDetails(map[string]any{"reason": "backend_not_found", "pid": p.PID})
+	}
+	return selected, nil
 }
 
 // --- timers ---
@@ -687,40 +722,8 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 	res := map[string]any{}
 	analyzed := map[string][]string{}
 	for _, spec := range cfg.Clusters {
-		// A follower is read-only: its source's ANALYZE replicates (Phase 6).
-		if !clusterRunning(spec) || spec.IsFollower() {
-			continue
-		}
-		if err := refuseAnyActivationFence(cfg, spec.Name); err != nil {
-			logLine(env.Report, env.Job, "skipping maintenance of "+spec.Name+": "+err.Error())
-			continue
-		}
-		local, setup := maintPG(spec)
-		if rows, err := local.Query(ctx, spec.Name, "SELECT max(age(datfrozenxid))::bigint AS xid, max(mxid_age(datminmxid))::bigint AS mxid FROM pg_database", nil); err == nil && len(rows) == 1 {
-			st.Wraparound[spec.Name] = map[string]int64{"xid": atoi64(rows[0]["xid"]), "mxid": atoi64(rows[0]["mxid"])}
-		}
-		rows, err := local.Query(ctx, spec.Name, maint.StaleTablesSQL, nil)
-		if err != nil {
-			logLine(env.Report, env.Job, "reading stale tables in "+spec.Name+" failed: "+err.Error())
-			continue
-		}
-		local.Timeout = time.Hour
-		st.Analyzed[spec.Name] = 0
-		for _, r := range rows {
-			if time.Now().After(deadline) {
-				logLine(env.Report, env.Job, "the maintenance window ended; the rest waits for tomorrow")
-				break
-			}
-			q, err := maint.QuoteRelation(r["name"])
-			if err != nil {
-				continue
-			}
-			if err := local.Exec(ctx, spec.Name, setup+maint.SessionSetup+"ANALYZE "+q+";\n", nil); err != nil {
-				logLine(env.Report, env.Job, "ANALYZE "+r["name"]+" in "+spec.Name+" failed: "+err.Error())
-				continue
-			}
-			analyzed[spec.Name] = append(analyzed[spec.Name], r["name"])
-			st.Analyzed[spec.Name]++
+		if names := analyzeMaintDatabase(ctx, env, cfg, spec, deadline, &st); len(names) > 0 {
+			analyzed[spec.Name] = names
 		}
 	}
 	res["analyzed"] = analyzed
@@ -728,6 +731,48 @@ func jobMaintDaily(ctx context.Context, env *jobEnv) (any, error) {
 	st.LastDaily = stamp()
 	saveMaintState(cfg, st)
 	return res, nil
+}
+
+// analyzeMaintDatabase records one database's wraparound ages and analyzes
+// its stale tables until the window ends.
+func analyzeMaintDatabase(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec, deadline time.Time, st *maintState) []string {
+	// A follower is read-only: its source's ANALYZE replicates (Phase 6).
+	if !clusterRunning(spec) || spec.IsFollower() {
+		return nil
+	}
+	if err := refuseAnyActivationFence(cfg, spec.Name); err != nil {
+		logLine(env.Report, env.Job, "skipping maintenance of "+spec.Name+": "+err.Error())
+		return nil
+	}
+	local, setup := maintPG(spec)
+	if rows, err := local.Query(ctx, spec.Name, "SELECT max(age(datfrozenxid))::bigint AS xid, max(mxid_age(datminmxid))::bigint AS mxid FROM pg_database", nil); err == nil && len(rows) == 1 {
+		st.Wraparound[spec.Name] = map[string]int64{"xid": atoi64(rows[0]["xid"]), "mxid": atoi64(rows[0]["mxid"])}
+	}
+	rows, err := local.Query(ctx, spec.Name, maint.StaleTablesSQL, nil)
+	if err != nil {
+		logLine(env.Report, env.Job, "reading stale tables in "+spec.Name+" failed: "+err.Error())
+		return nil
+	}
+	local.Timeout = time.Hour
+	st.Analyzed[spec.Name] = 0
+	var analyzed []string
+	for _, r := range rows {
+		if time.Now().After(deadline) {
+			logLine(env.Report, env.Job, "the maintenance window ended; the rest waits for tomorrow")
+			break
+		}
+		q, err := maint.QuoteRelation(r["name"])
+		if err != nil {
+			continue
+		}
+		if err := local.Exec(ctx, spec.Name, setup+maint.SessionSetup+"ANALYZE "+q+";\n", nil); err != nil {
+			logLine(env.Report, env.Job, "ANALYZE "+r["name"]+" in "+spec.Name+" failed: "+err.Error())
+			continue
+		}
+		analyzed = append(analyzed, r["name"])
+		st.Analyzed[spec.Name]++
+	}
+	return analyzed
 }
 
 // Deferred-restart host seams. Production uses the node's state file and the

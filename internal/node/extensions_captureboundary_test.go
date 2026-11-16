@@ -15,15 +15,15 @@ import (
 	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-func captureBoundaryHistory(t *testing.T, stanza string) backup.ExtensionRequirements {
+func captureBoundaryHistory(t *testing.T) backup.ExtensionRequirements {
 	t.Helper()
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
-	hist, ok := recs.ExtensionRequirementsFor(stanza)
+	hist, ok := recs.ExtensionRequirementsFor("app-abc123")
 	if !ok {
-		t.Fatalf("no requirement history for %s", stanza)
+		t.Fatalf("no requirement history for app-abc123")
 	}
 	return hist
 }
@@ -55,6 +55,66 @@ func captureBoundaryCLIError(t *testing.T, err error) *output.CLIError {
 // direct-add boundary: a missing file or a nonexistent APT package stops
 // before the proposed intent is saved, so the stanza keeps its valid outgoing
 // history and gains no speculative incoming provider.
+func assertCapturePrerequisiteFailure(t *testing.T, h *extHarness, err error) {
+	t.Helper()
+	if err == nil || extReason(t, err) != "package_install_failed" {
+		t.Fatalf("prerequisite failure = %v", err)
+	}
+	cliErr := captureBoundaryCLIError(t, err)
+	if cliErr.Code != output.CodePartialFailure || cliErr.ExitCode != output.ExitStep {
+		t.Fatalf("prerequisite failure code = %s/%d", cliErr.Code, cliErr.ExitCode)
+	}
+	if !strings.Contains(cliErr.Hint, "may have partially run") ||
+		!strings.Contains(cliErr.Hint, "packages are not removed") ||
+		!strings.Contains(cliErr.Hint, "did not request a restart or run extension SQL") ||
+		strings.Contains(cliErr.Hint, "restored") || strings.Contains(cliErr.Hint, "Nothing was changed") {
+		t.Fatalf("prerequisite hint = %q", cliErr.Hint)
+	}
+	details := extDetails(t, err)
+	if details["intent_saved"] != false || details["config_rollback"] != "not_needed" ||
+		details["packages_may_remain"] != true {
+		t.Fatalf("details = %+v", details)
+	}
+	if h.prepareCalls != 1 || len(h.saves) != 0 || len(h.applyCalls) != 0 ||
+		len(h.pg.execs) != 0 || h.restartCalls != 0 {
+		t.Fatalf("prerequisite failure effects: prepare=%d saves=%d apply=%d exec=%d restart=%d",
+			h.prepareCalls, len(h.saves), len(h.applyCalls), len(h.pg.execs), h.restartCalls)
+	}
+}
+
+func assertOutgoingRequirementsRetained(t *testing.T, reqs []backup.ExtensionRequirement, seededAt time.Time) {
+	t.Helper()
+	if got := captureBoundaryVariants(reqs, "hypopg"); len(got) != 0 {
+		t.Fatalf("failed add retained incoming providers: %+v", got)
+	}
+	for _, name := range []string{"pg_stat_statements", "auto_explain", "pg_trgm", "citext"} {
+		if !captureBoundaryHas(reqs, name) {
+			t.Fatalf("outgoing requirement %q was lost: %+v", name, reqs)
+		}
+	}
+	pgss := captureBoundaryVariants(reqs, "pg_stat_statements")
+	if len(pgss) != 1 || pgss[0].ExtName != "pg_stat_statements" {
+		t.Fatalf("SQL default requirement = %+v", pgss)
+	}
+	auto := captureBoundaryVariants(reqs, "auto_explain")
+	if len(auto) != 1 || auto[0].ExtName != "" || auto[0].Preload != "auto_explain" {
+		t.Fatalf("preload-only default requirement = %+v", auto)
+	}
+	pgtrgm := captureBoundaryVariants(reqs, "pg_trgm")
+	if len(pgtrgm) != 1 || pgtrgm[0].ExtName != "pg_trgm" {
+		t.Fatalf("outgoing SQL requirement = %+v", pgtrgm)
+	}
+	seeded := captureBoundaryVariants(reqs, "citext")
+	if len(seeded) != 1 {
+		t.Fatalf("seeded requirement = %+v", seeded)
+	}
+	for _, req := range reqs {
+		if req.Name == "citext" && req.Since != seededAt.Format(time.RFC3339) {
+			t.Fatalf("existing history timestamp changed: %+v", req)
+		}
+	}
+}
+
 func TestExtAddPrerequisiteFailureRetainsOnlyOutgoingRequirements(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -93,60 +153,8 @@ func TestExtAddPrerequisiteFailureRetainsOnlyOutgoingRequirements(t *testing.T) 
 			}
 
 			_, err = handleExtAdd(context.Background(), &Env{Cluster: cfg, Req: extReq(t, tc.params)})
-			if err == nil || extReason(t, err) != "package_install_failed" {
-				t.Fatalf("prerequisite failure = %v", err)
-			}
-			cliErr := captureBoundaryCLIError(t, err)
-			if cliErr.Code != output.CodePartialFailure || cliErr.ExitCode != output.ExitStep {
-				t.Fatalf("prerequisite failure code = %s/%d", cliErr.Code, cliErr.ExitCode)
-			}
-			if !strings.Contains(cliErr.Hint, "may have partially run") ||
-				!strings.Contains(cliErr.Hint, "packages are not removed") ||
-				!strings.Contains(cliErr.Hint, "did not request a restart or run extension SQL") ||
-				strings.Contains(cliErr.Hint, "restored") || strings.Contains(cliErr.Hint, "Nothing was changed") {
-				t.Fatalf("prerequisite hint = %q", cliErr.Hint)
-			}
-			details := extDetails(t, err)
-			if details["intent_saved"] != false || details["config_rollback"] != "not_needed" ||
-				details["packages_may_remain"] != true {
-				t.Fatalf("details = %+v", details)
-			}
-			if h.prepareCalls != 1 || len(h.saves) != 0 || len(h.applyCalls) != 0 ||
-				len(h.pg.execs) != 0 || h.restartCalls != 0 {
-				t.Fatalf("prerequisite failure effects: prepare=%d saves=%d apply=%d exec=%d restart=%d",
-					h.prepareCalls, len(h.saves), len(h.applyCalls), len(h.pg.execs), h.restartCalls)
-			}
-
-			reqs := captureBoundaryHistory(t, "app-abc123").Requirements
-			if got := captureBoundaryVariants(reqs, "hypopg"); len(got) != 0 {
-				t.Fatalf("failed add retained incoming providers: %+v", got)
-			}
-			for _, name := range []string{"pg_stat_statements", "auto_explain", "pg_trgm", "citext"} {
-				if !captureBoundaryHas(reqs, name) {
-					t.Fatalf("outgoing requirement %q was lost: %+v", name, reqs)
-				}
-			}
-			pgss := captureBoundaryVariants(reqs, "pg_stat_statements")
-			if len(pgss) != 1 || pgss[0].ExtName != "pg_stat_statements" {
-				t.Fatalf("SQL default requirement = %+v", pgss)
-			}
-			auto := captureBoundaryVariants(reqs, "auto_explain")
-			if len(auto) != 1 || auto[0].ExtName != "" || auto[0].Preload != "auto_explain" {
-				t.Fatalf("preload-only default requirement = %+v", auto)
-			}
-			pgtrgm := captureBoundaryVariants(reqs, "pg_trgm")
-			if len(pgtrgm) != 1 || pgtrgm[0].ExtName != "pg_trgm" {
-				t.Fatalf("outgoing SQL requirement = %+v", pgtrgm)
-			}
-			seeded := captureBoundaryVariants(reqs, "citext")
-			if len(seeded) != 1 {
-				t.Fatalf("seeded requirement = %+v", seeded)
-			}
-			for _, req := range reqs {
-				if req.Name == "citext" && req.Since != seededAt.Format(time.RFC3339) {
-					t.Fatalf("existing history timestamp changed: %+v", req)
-				}
-			}
+			assertCapturePrerequisiteFailure(t, h, err)
+			assertOutgoingRequirementsRetained(t, captureBoundaryHistory(t).Requirements, seededAt)
 		})
 	}
 }
@@ -176,7 +184,7 @@ func TestExtAddSequentialFailedProvidersLeaveNoIncomingConflict(t *testing.T) {
 		}
 	}
 
-	reqs := captureBoundaryHistory(t, "app-abc123").Requirements
+	reqs := captureBoundaryHistory(t).Requirements
 	if got := captureBoundaryVariants(reqs, "hypopg"); len(got) != 0 {
 		t.Fatalf("failed proposals retained incoming providers: %+v", got)
 	}
@@ -227,7 +235,7 @@ func TestExtAddFailedProposalKeepsExistingProviderHistory(t *testing.T) {
 		t.Fatalf("failed add = %v", err)
 	}
 
-	reqs := captureBoundaryHistory(t, "app-abc123").Requirements
+	reqs := captureBoundaryHistory(t).Requirements
 	got := captureBoundaryVariants(reqs, "hypopg")
 	if len(got) != 1 || got[0].Source != catalog.SourcePreinstalled || got[0].Package != "" {
 		t.Fatalf("existing provider history = %+v", got)
@@ -276,7 +284,7 @@ func TestExtAddOutgoingCaptureFailurePreventsPreparation(t *testing.T) {
 		t.Fatalf("outgoing capture failure effects: prepare=%d saves=%d apply=%d exec=%d restart=%d incoming=%d",
 			h.prepareCalls, len(h.saves), len(h.applyCalls), len(h.pg.execs), h.restartCalls, incomingCalls)
 	}
-	if reqs := captureBoundaryHistory(t, "app-abc123").Requirements; !captureBoundaryHas(reqs, "citext") {
+	if reqs := captureBoundaryHistory(t).Requirements; !captureBoundaryHas(reqs, "citext") {
 		t.Fatalf("outgoing capture failure erased existing history: %+v", reqs)
 	}
 }
@@ -313,7 +321,7 @@ func TestExtAddIncomingCaptureFailureStopsBeforeIntentAndRuntime(t *testing.T) {
 			h.prepareCalls, len(h.saves), len(h.applyCalls), len(h.pg.execs), h.restartCalls)
 	}
 
-	reqs := captureBoundaryHistory(t, "app-abc123").Requirements
+	reqs := captureBoundaryHistory(t).Requirements
 	if got := captureBoundaryVariants(reqs, "pg_trgm"); len(got) != 0 {
 		t.Fatalf("incoming capture failure retained the proposed provider: %+v", got)
 	}
@@ -382,7 +390,7 @@ func TestExtAddIncomingCapturePartialWriteIsDisclosed(t *testing.T) {
 		strings.Contains(cliErr.Hint, "Nothing was changed") {
 		t.Fatalf("partial capture hint = %q", cliErr.Hint)
 	}
-	if !captureBoundaryHas(captureBoundaryHistory(t, "app-abc123").Requirements, "pg_trgm") {
+	if !captureBoundaryHas(captureBoundaryHistory(t).Requirements, "pg_trgm") {
 		t.Fatal("valid partial incoming history was erased")
 	}
 	if h.prepareCalls != 1 || len(h.saves) != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 || h.restartCalls != 0 {
@@ -422,7 +430,7 @@ func TestExtAddIntentSaveFailureAfterPreparationIsPartial(t *testing.T) {
 		t.Fatalf("intent save failure effects: prepare=%d attempts=%d saves=%d apply=%d exec=%d restart=%d",
 			h.prepareCalls, len(h.saveAttempts), len(h.saves), len(h.applyCalls), len(h.pg.execs), h.restartCalls)
 	}
-	reqs := captureBoundaryHistory(t, "app-abc123").Requirements
+	reqs := captureBoundaryHistory(t).Requirements
 	if got := captureBoundaryVariants(reqs, "pg_trgm"); len(got) != 1 || got[0].ExtName != "pg_trgm" {
 		t.Fatalf("incoming requirement was not retained: %+v", got)
 	}
@@ -472,7 +480,7 @@ func TestExtAddLaterFailureRetainsIncomingHistory(t *testing.T) {
 			if len(h.saves) != 1 {
 				t.Fatalf("intent saves = %d, want 1", len(h.saves))
 			}
-			reqs := captureBoundaryHistory(t, "app-abc123").Requirements
+			reqs := captureBoundaryHistory(t).Requirements
 			if got := captureBoundaryVariants(reqs, "pg_trgm"); len(got) != 1 || got[0].ExtName != "pg_trgm" {
 				t.Fatalf("incoming requirement was not retained: %+v", got)
 			}

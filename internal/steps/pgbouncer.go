@@ -327,87 +327,133 @@ var poolerInstance = func() (string, error) { return masterbackup.ReadInstance("
 // stale record refuses instead of publishing an alias the poolers cannot
 // safely route.
 func validateRoutingEligibility(cfg config.Cluster, recs backup.Records) error {
-	routing := false
-	for _, f := range recs.Activation {
-		if f.OperationID != "" && f.Phase == "routing" {
-			routing = true
-			break
-		}
-	}
-	if !routing {
+	if !routingFenceActive(recs) {
 		return nil
 	}
+	instance, err := routingInstanceIdentity()
+	if err != nil {
+		return err
+	}
+	for db, f := range recs.Activation {
+		if f.OperationID == "" || f.Phase != "routing" {
+			continue
+		}
+		if err := validateRoutingFence(cfg, recs, instance, db, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func routingFenceActive(recs backup.Records) bool {
+	for _, f := range recs.Activation {
+		if f.OperationID != "" && f.Phase == "routing" {
+			return true
+		}
+	}
+	return false
+}
+
+func routingInstanceIdentity() (string, error) {
 	instance, err := poolerInstance()
 	if err != nil {
-		return output.NewError(output.CodePrecondition,
+		return "", output.NewError(output.CodePrecondition,
 			"the node instance identity could not be read, so pooler routing eligibility is unknown: "+err.Error(),
 			output.ExitPrecondition, "Repair the node's instance file deliberately; no pooler file was written.").
 			WithDetails(map[string]any{"reason": "routing_instance_unknown"})
 	}
 	instance = strings.TrimSpace(instance)
 	if instance == "" {
-		return output.NewError(output.CodePrecondition,
+		return "", output.NewError(output.CodePrecondition,
 			"the node instance identity is missing, so pooler routing eligibility is unknown",
 			output.ExitPrecondition, "Repair the node's instance file deliberately; no pooler file was written.").
 			WithDetails(map[string]any{"reason": "routing_instance_unknown"})
 	}
-	for db, f := range recs.Activation {
-		if f.OperationID == "" || f.Phase != "routing" {
-			continue
-		}
-		fail := func(detail string) error {
-			return output.NewError(output.CodePrecondition,
-				db+"'s routing fence is not eligible: "+detail,
-				output.ExitPrecondition, "Finish or repair the owning operation; no pooler file was written.").
-				WithDetails(map[string]any{"reason": "routing_eligibility", "database": db, "detail": detail})
-		}
-		spec, ok := cfg.ClusterByName(db)
-		if !ok {
-			return fail("its database entry is missing")
-		}
-		if f.Instance == "" || f.Instance != instance {
-			return fail("its installation instance does not match this node")
-		}
-		if f.Kind != "fork" && f.Kind != "unfollow" && f.Kind != "restore-promote" && f.Kind != "restore-abort" {
-			return fail("its operation kind is unknown")
-		}
-		if f.TargetStanza == "" || f.TargetStanza != spec.Stanza {
-			return fail("its target stanza does not match cluster.toml")
-		}
-		if f.OldStanza == "" || f.NewStanza == "" || f.NewStanza != f.TargetStanza {
-			return fail("its recorded old/new stanza transition is incomplete")
-		}
-		if f.Kind == "restore-abort" {
-			if _, ok := recs.Restores[db]; ok {
-				return fail("its database still has a restore record")
-			}
-			if f.OldStanza != f.TargetStanza || f.Aside == "" {
-				return fail("its abort checkpoint does not describe the untouched live cluster")
-			}
-		}
-		if f.Port != spec.Port {
-			return fail("its recorded port does not match cluster.toml")
-		}
-		if f.DataDir != cfg.Server.DataDirectory(db) || f.ConfDir != PGConfDir(db) {
-			return fail("its recorded data/configuration directory does not match the database")
-		}
-		name, rest, ok := strings.Cut(f.Registration, ":")
-		portText, _, _ := strings.Cut(rest, ":")
-		if !ok || name != db || portText != strconv.Itoa(f.Port) {
-			return fail("its recorded registration does not match the database")
-		}
-		if !backup.ClusterRegistered(db) {
-			return fail("no postgresql-common registration exists")
-		}
-		data, err := backup.ClusterDataDirectory(db)
-		if err != nil {
-			return fail("its registration cannot be read: " + err.Error())
-		}
-		if data == "" || data != f.DataDir {
-			return fail("its registration points at a different data directory")
-		}
+	return instance, nil
+}
+
+func validateRoutingFence(cfg config.Cluster, recs backup.Records, instance, db string, f backup.ActivationFence) error {
+	fail := func(detail string) error {
+		return output.NewError(output.CodePrecondition,
+			db+"'s routing fence is not eligible: "+detail,
+			output.ExitPrecondition, "Finish or repair the owning operation; no pooler file was written.").
+			WithDetails(map[string]any{"reason": "routing_eligibility", "database": db, "detail": detail})
+	}
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return fail("its database entry is missing")
+	}
+	if detail := routingFenceTargetGap(spec, f, instance); detail != "" {
+		return fail(detail)
+	}
+	if detail := routingFenceRestoreGap(recs, db, f); detail != "" {
+		return fail(detail)
+	}
+	if detail := routingFencePathGap(cfg, spec, db, f); detail != "" {
+		return fail(detail)
+	}
+	if detail := routingFenceRegistrationGap(db, f); detail != "" {
+		return fail(detail)
 	}
 	return nil
+}
+
+func routingFenceTargetGap(spec config.ClusterSpec, f backup.ActivationFence, instance string) string {
+	if f.Instance == "" || f.Instance != instance {
+		return "its installation instance does not match this node"
+	}
+	if f.Kind != "fork" && f.Kind != "unfollow" && f.Kind != "restore-promote" && f.Kind != "restore-abort" {
+		return "its operation kind is unknown"
+	}
+	if f.TargetStanza == "" || f.TargetStanza != spec.Stanza {
+		return "its target stanza does not match cluster.toml"
+	}
+	if f.OldStanza == "" || f.NewStanza == "" || f.NewStanza != f.TargetStanza {
+		return "its recorded old/new stanza transition is incomplete"
+	}
+	return ""
+}
+
+func routingFenceRestoreGap(recs backup.Records, db string, f backup.ActivationFence) string {
+	if f.Kind != "restore-abort" {
+		return ""
+	}
+	if _, ok := recs.Restores[db]; ok {
+		return "its database still has a restore record"
+	}
+	if f.OldStanza != f.TargetStanza || f.Aside == "" {
+		return "its abort checkpoint does not describe the untouched live cluster"
+	}
+	return ""
+}
+
+func routingFencePathGap(cfg config.Cluster, spec config.ClusterSpec, db string, f backup.ActivationFence) string {
+	if f.Port != spec.Port {
+		return "its recorded port does not match cluster.toml"
+	}
+	if f.DataDir != cfg.Server.DataDirectory(db) || f.ConfDir != PGConfDir(db) {
+		return "its recorded data/configuration directory does not match the database"
+	}
+	return ""
+}
+
+func routingFenceRegistrationGap(db string, f backup.ActivationFence) string {
+	name, rest, ok := strings.Cut(f.Registration, ":")
+	portText, _, _ := strings.Cut(rest, ":")
+	if !ok || name != db || portText != strconv.Itoa(f.Port) {
+		return "its recorded registration does not match the database"
+	}
+	if !backup.ClusterRegistered(db) {
+		return "no postgresql-common registration exists"
+	}
+	data, err := backup.ClusterDataDirectory(db)
+	if err != nil {
+		return "its registration cannot be read: " + err.Error()
+	}
+	if data == "" || data != f.DataDir {
+		return "its registration points at a different data directory"
+	}
+	return ""
 }
 
 // ApplyPoolerFence writes both poolers' rendered configuration and reloads

@@ -117,7 +117,7 @@ func TestUnfollowRenameQuiescesFollowerOIDAndRestoresOriginalFlag(t *testing.T) 
 	fake.addSession("42", "pg_cron launcher")
 	fake.addSession("42", "app")
 	fake.addSession("7", "pg_cron launcher")
-	fake.addPrepared("7", 1)
+	fake.addPrepared("7")
 
 	mustNoErr(t, renameFollower(context.Background(), fake.target(), "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"))
 	rejectf(t, fake.sessionCount("42") != 0, "captured database sessions remain: %d", fake.sessionCount("42"))
@@ -142,7 +142,7 @@ func checkUnfollowRenameTransaction(t *testing.T, fake *fakeUnfollowRenameSQL) {
 		"missing effect: attest=%d gate=%d terminate=%d transaction=%d", attestEvent, gateEvent, terminateEvent, transactionEvent)
 	rejectf(t, attestEvent >= gateEvent || gateEvent >= terminateEvent || terminateEvent >= transactionEvent,
 		"effect order: attest=%d gate=%d terminate=%d transaction=%d", attestEvent, gateEvent, terminateEvent, transactionEvent)
-	transaction := fake.indexOfExecPrefix("BEGIN;")
+	transaction := fake.indexOfBeginTransaction()
 	rejectf(t, transaction < 0, "no rename transaction: %v", fake.executed)
 	body := fake.executed[transaction]
 	for _, want := range []string{
@@ -248,7 +248,7 @@ func TestUnfollowRenameDrainBoundsReconnectingCronLauncher(t *testing.T) {
 	if got := strings.Count(strings.Join(fake.queries, "\n"), "pg_terminate_backend(pid, 2000)"); got != unfollowRenameDrainRounds {
 		t.Fatalf("termination rounds = %d, want the bound %d", got, unfollowRenameDrainRounds)
 	}
-	if fake.indexOfExecPrefix("BEGIN;") >= 0 {
+	if fake.indexOfBeginTransaction() >= 0 {
 		t.Fatal("the rename ran with unresolved sessions")
 	}
 	database := fake.dbByName("app")
@@ -332,7 +332,7 @@ func TestUnfollowRenamePreparesPasswordsBeforeGate(t *testing.T) {
 // EFIN-1: prepared transactions are refused before the gate, not guessed away.
 func TestUnfollowRenameRefusesPreparedTransactionBeforeGate(t *testing.T) {
 	fake := newFakeUnfollowRenameSQL()
-	fake.addPrepared("42", 1)
+	fake.addPrepared("42")
 	err := renameFollower(context.Background(), fake.target(), "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow")
 	if err == nil || !strings.Contains(err.Error(), "prepared transactions") {
 		t.Fatalf("prepared transaction = %v", err)
@@ -366,7 +366,7 @@ func TestUnfollowRenameRetryAfterRenameSkipsGate(t *testing.T) {
 	if got := fake.sessionCount("42"); got != 1 {
 		t.Fatalf("the retry terminated a session in the already-renamed database: %d", got)
 	}
-	if fake.indexOfExecPrefix("BEGIN;") >= 0 {
+	if fake.indexOfBeginTransaction() >= 0 {
 		t.Fatalf("the retry ran a database rename transaction: %v", fake.executed)
 	}
 	if sql := fake.last(); strings.Contains(sql, "ALTER DATABASE") {

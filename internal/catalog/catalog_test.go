@@ -9,47 +9,67 @@ import (
 func TestBuiltinsAreConsistent(t *testing.T) {
 	names := map[string]bool{}
 	for _, e := range List() {
-		for _, n := range append([]string{e.Name}, e.Aliases...) {
-			if names[n] {
-				t.Fatalf("%s is listed twice", n)
-			}
-			names[n] = true
-		}
-		if e.Restart != (e.Preload != "") {
-			t.Errorf("%s: Restart must be Preload != \"\"", e.Name)
-		}
-		if !e.BuiltIn {
-			t.Errorf("%s: a built-in entry is not marked BuiltIn", e.Name)
-		}
-		switch e.Source {
-		case SourcePreinstalled:
-			if e.Package != "" {
-				t.Errorf("%s: a preinstalled entry has package %q", e.Name, e.Package)
-			}
-		case SourceAPT:
-			if !strings.HasPrefix(e.Package, "postgresql-18-") {
-				t.Errorf("%s: APT package %q is not a PostgreSQL 18 package", e.Name, e.Package)
-			}
-		default:
-			t.Errorf("%s: unknown source %q", e.Name, e.Source)
-		}
-		switch e.CopySafety {
-		case CopySafetySafe, CopySafetyUnknown:
-			if len(e.CopySettings) != 0 {
-				t.Errorf("%s: %s has copy settings", e.Name, e.CopySafety)
-			}
-		case CopySafetyDisabled:
-			if len(e.CopySettings) == 0 {
-				t.Errorf("%s: disabled copy safety has no copy settings", e.Name)
-			}
-		default:
-			t.Errorf("%s: unknown copy safety %q", e.Name, e.CopySafety)
-		}
+		requireUniqueBuiltinNames(t, names, e)
+		requireConsistentBuiltin(t, e)
 	}
 	for _, want := range []string{"pg_stat_statements", "auto_explain", "vector", "postgis", "pg_cron", "pgaudit", "pg_repack", "pg_partman", "hypopg", "timescaledb"} {
 		if !names[want] {
 			t.Errorf("%s is missing from the catalogue", want)
 		}
+	}
+}
+
+func requireUniqueBuiltinNames(t *testing.T, names map[string]bool, e Extension) {
+	t.Helper()
+	for _, n := range append([]string{e.Name}, e.Aliases...) {
+		if names[n] {
+			t.Fatalf("%s is listed twice", n)
+		}
+		names[n] = true
+	}
+}
+
+func requireConsistentBuiltin(t *testing.T, e Extension) {
+	t.Helper()
+	if e.Restart != (e.Preload != "") {
+		t.Errorf("%s: Restart must be Preload != \"\"", e.Name)
+	}
+	if !e.BuiltIn {
+		t.Errorf("%s: a built-in entry is not marked BuiltIn", e.Name)
+	}
+	requireBuiltinSource(t, e)
+	requireBuiltinCopySafety(t, e)
+}
+
+func requireBuiltinSource(t *testing.T, e Extension) {
+	t.Helper()
+	switch e.Source {
+	case SourcePreinstalled:
+		if e.Package != "" {
+			t.Errorf("%s: a preinstalled entry has package %q", e.Name, e.Package)
+		}
+	case SourceAPT:
+		if !strings.HasPrefix(e.Package, "postgresql-18-") {
+			t.Errorf("%s: APT package %q is not a PostgreSQL 18 package", e.Name, e.Package)
+		}
+	default:
+		t.Errorf("%s: unknown source %q", e.Name, e.Source)
+	}
+}
+
+func requireBuiltinCopySafety(t *testing.T, e Extension) {
+	t.Helper()
+	switch e.CopySafety {
+	case CopySafetySafe, CopySafetyUnknown:
+		if len(e.CopySettings) != 0 {
+			t.Errorf("%s: %s has copy settings", e.Name, e.CopySafety)
+		}
+	case CopySafetyDisabled:
+		if len(e.CopySettings) == 0 {
+			t.Errorf("%s: disabled copy safety has no copy settings", e.Name)
+		}
+	default:
+		t.Errorf("%s: unknown copy safety %q", e.Name, e.CopySafety)
 	}
 }
 

@@ -167,22 +167,21 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 			v = v.Index(idx)
 			segs = segs[1:]
 		case reflect.Map:
-			if v.Type().Elem().Kind() == reflect.String {
-				// Setting maps such as [postgres.settings] keep their
-				// dotted key: everything left is the map key.
-				mv := v.MapIndex(reflect.ValueOf(strings.Join(segs, ".")))
-				if !mv.IsValid() {
-					return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
-				}
-				return mv, nil
+			var done bool
+			var err error
+			v, segs, done, err = getMapValue(v, segs)
+			if err != nil {
+				return reflect.Value{}, err
 			}
-			mv := v.MapIndex(reflect.ValueOf(segs[0]))
-			if !mv.IsValid() {
-				return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
+			if done {
+				return v, nil
 			}
-			v = mv
-			segs = segs[1:]
-		default:
+		case reflect.Invalid, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16,
+			reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16,
+			reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32,
+			reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.Array,
+			reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer,
+			reflect.String, reflect.UnsafePointer:
 			return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
 		}
 	}
@@ -191,6 +190,25 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 		return reflect.Value{}, nil
 	}
 	return v, nil
+}
+
+// getMapValue follows one map entry. A string-valued map such as
+// [postgres.settings] keeps its dotted key: everything left is the map key and
+// the lookup is complete.
+func getMapValue(v reflect.Value, segs []string) (reflect.Value, []string, bool, error) {
+	if v.Type().Elem().Kind() == reflect.String {
+		key := strings.Join(segs, ".")
+		mv := v.MapIndex(reflect.ValueOf(key))
+		if !mv.IsValid() {
+			return reflect.Value{}, nil, false, unknownKeyError(key)
+		}
+		return mv, nil, true, nil
+	}
+	mv := v.MapIndex(reflect.ValueOf(segs[0]))
+	if !mv.IsValid() {
+		return reflect.Value{}, nil, false, unknownKeyError(strings.Join(segs, "."))
+	}
+	return mv, segs[1:], false, nil
 }
 
 // derefValue follows pointers. A nil pointer yields an invalid Value, which
@@ -227,34 +245,13 @@ func setIn(v reflect.Value, segs []string, value string) error {
 			v = v.Index(idx)
 			segs = segs[1:]
 		case reflect.Map:
-			if v.Type().Elem().Kind() == reflect.String {
-				return setMapEntry(v, strings.Join(segs, "."), value)
-			}
-			if v.Type().Elem().Kind() != reflect.Struct {
-				return unknownKeyError(strings.Join(segs, "."))
-			}
-			// A map of structs (such as [extensions]) cannot be edited
-			// in place: copy the value, change the copy, then replace it.
-			// A nil map is built on the side and assigned only on success.
-			m := v
-			if v.IsNil() {
-				m = reflect.MakeMap(v.Type())
-			}
-			key := reflect.ValueOf(segs[0])
-			current := m.MapIndex(key)
-			elem := reflect.New(v.Type().Elem()).Elem()
-			if current.IsValid() {
-				elem.Set(current)
-			}
-			if err := setIn(elem, segs[1:], value); err != nil {
-				return err
-			}
-			m.SetMapIndex(key, elem)
-			if v.IsNil() {
-				v.Set(m)
-			}
-			return nil
-		default:
+			return setMapValue(v, segs, value)
+		case reflect.Invalid, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16,
+			reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16,
+			reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32,
+			reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.Array,
+			reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer,
+			reflect.String, reflect.UnsafePointer:
 			return unknownKeyError(strings.Join(segs, "."))
 		}
 	}
@@ -275,9 +272,47 @@ func setIn(v reflect.Value, segs []string, value string) error {
 		}
 		return output.NewError(output.CodeValidation, "this key cannot be set from the command line", output.ExitConfig,
 			"Edit cluster.toml with vaire config edit instead.")
+	case reflect.Invalid, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16,
+		reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16,
+		reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32,
+		reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.Array,
+		reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer, reflect.Slice,
+		reflect.String, reflect.UnsafePointer:
+		return unknownKeyError(segs[0])
 	default:
 		return unknownKeyError(segs[0])
 	}
+}
+
+// setMapValue handles a map encountered before the final segment. A map of
+// structs (such as [extensions]) cannot be edited in place: copy the value,
+// change the copy, then replace it. A nil map is built on the side and
+// assigned only on success.
+func setMapValue(v reflect.Value, segs []string, value string) error {
+	if v.Type().Elem().Kind() == reflect.String {
+		return setMapEntry(v, strings.Join(segs, "."), value)
+	}
+	if v.Type().Elem().Kind() != reflect.Struct {
+		return unknownKeyError(strings.Join(segs, "."))
+	}
+	m := v
+	if v.IsNil() {
+		m = reflect.MakeMap(v.Type())
+	}
+	key := reflect.ValueOf(segs[0])
+	current := m.MapIndex(key)
+	elem := reflect.New(v.Type().Elem()).Elem()
+	if current.IsValid() {
+		elem.Set(current)
+	}
+	if err := setIn(elem, segs[1:], value); err != nil {
+		return err
+	}
+	m.SetMapIndex(key, elem)
+	if v.IsNil() {
+		v.Set(m)
+	}
+	return nil
 }
 
 // fieldByTag returns the struct field whose toml tag is name.
@@ -356,6 +391,12 @@ func setScalar(field reflect.Value, value string) error {
 			return err
 		}
 		field.Set(reflect.ValueOf(list))
+	case reflect.Invalid, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
+		reflect.Uint64, reflect.Uintptr, reflect.Complex64, reflect.Complex128,
+		reflect.Array, reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Struct, reflect.UnsafePointer:
+		return output.NewError(output.CodeValidation, "this key cannot be set from the command line", output.ExitConfig,
+			"Edit cluster.toml with vaire config edit instead.")
 	default:
 		return output.NewError(output.CodeValidation, "this key cannot be set from the command line", output.ExitConfig,
 			"Edit cluster.toml with vaire config edit instead.")

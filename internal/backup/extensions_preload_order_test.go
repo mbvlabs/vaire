@@ -14,7 +14,7 @@ func localCopyGuardWriter(t *testing.T) {
 	t.Helper()
 	old := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = old })
 }

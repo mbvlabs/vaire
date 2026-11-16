@@ -173,26 +173,11 @@ func (s postgresConfig) Check(ctx context.Context, cfg config.Cluster, rt engine
 		}
 	}
 	if spec.IsFollower() {
-		id, err := FollowerRuntimeIdentity(cfg, spec, FollowerRuntimeOperation(ctx))
+		drifted, err := followerGuardDiffers(ctx, cfg, spec)
 		if err != nil {
 			return engine.CheckResult{}, err
 		}
-		snapshot, ok := FollowerRuntimePlanFor(ctx, id)
-		req := FollowerRuntimeRequest{
-			Class: FollowerRuntimeLive, Outgoing: FollowerRuntimeOutgoing(ctx), RetireAbsent: true,
-		}
-		if ok {
-			req.Snapshot = &snapshot
-		}
-		plan, err := PlanFollowerRuntime(ctx, cfg, spec, req)
-		if err != nil {
-			return engine.CheckResult{}, err
-		}
-		guard, present, err := backup.ReadCopyGuard(cfg.Server.DataDirectory(spec.Name))
-		if err != nil {
-			return engine.CheckResult{}, err
-		}
-		if FollowerGuardDrifted(guard, present, plan) {
+		if drifted {
 			return incomplete("the follower copy guard differs"), nil
 		}
 	}
@@ -200,6 +185,31 @@ func (s postgresConfig) Check(ctx context.Context, cfg config.Cluster, rt engine
 		return incomplete("90-overrides.conf is missing"), nil
 	}
 	return complete(), nil
+}
+
+// followerGuardDiffers plans the follower's complete runtime from the actual
+// catalog and compares the installed guard without writing anything.
+func followerGuardDiffers(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) (bool, error) {
+	id, err := FollowerRuntimeIdentity(cfg, spec, FollowerRuntimeOperation(ctx))
+	if err != nil {
+		return false, err
+	}
+	snapshot, ok := FollowerRuntimePlanFor(ctx, id)
+	req := FollowerRuntimeRequest{
+		Class: FollowerRuntimeLive, Outgoing: FollowerRuntimeOutgoing(ctx), RetireAbsent: true,
+	}
+	if ok {
+		req.Snapshot = &snapshot
+	}
+	plan, err := PlanFollowerRuntime(ctx, cfg, spec, req)
+	if err != nil {
+		return false, err
+	}
+	guard, present, err := backup.ReadCopyGuard(cfg.Server.DataDirectory(spec.Name))
+	if err != nil {
+		return false, err
+	}
+	return FollowerGuardDrifted(guard, present, plan), nil
 }
 
 // configRefusalState qualifies an extension-unload refusal at the config step

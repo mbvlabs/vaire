@@ -191,6 +191,42 @@ func repackResultSkipped(t *testing.T, data map[string]any) []maint.RepackSkip {
 	return skipped
 }
 
+type repackCompletionWant struct {
+	unknown       int
+	repacked      int
+	failed        int
+	skipped       int
+	skipReason    string
+	unknownDetail bool
+	execs         int
+}
+
+// assertRepackCompletion checks the classified completion evidence a repack
+// job reports for one exit and storage sequence.
+func assertRepackCompletion(t *testing.T, data map[string]any, err error, want repackCompletionWant, execs int) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("repack completion error = %v", err)
+	}
+	counts := repackResultCounts(t, data)
+	if counts.Unknown != want.unknown || counts.Repacked != want.repacked || counts.Failed != want.failed {
+		t.Fatalf("completion counts = %+v, want %+v", counts, want)
+	}
+	skips := repackResultSkipped(t, data)
+	if len(skips) != want.skipped {
+		t.Fatalf("completion skips = %+v, want %d", skips, want.skipped)
+	}
+	if want.skipped == 1 && skips[0].Reason != want.skipReason {
+		t.Fatalf("skip reason = %q, want %q", skips[0].Reason, want.skipReason)
+	}
+	if want.unknownDetail && repackResultUnknown(t, data)["public.events"] == "" {
+		t.Fatalf("unknown detail missing: %+v", data)
+	}
+	if execs != want.execs {
+		t.Fatalf("repack execs = %d, want %d", execs, want.execs)
+	}
+}
+
 func repackTestConfig(t *testing.T) config.Cluster {
 	t.Helper()
 	return config.Cluster{
@@ -821,107 +857,56 @@ func TestJobRepackCompletionEvidence(t *testing.T) {
 		if res == nil {
 			return nil, err
 		}
-		return res.(map[string]any), err
+		return repackResultData(t, res), err
 	}
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		pg.storageVersion++
-		return repackExecResult{}
-	}
-	data, err := run(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if counts := data["counts"].(maint.RepackCounts); counts.Unknown != 1 || counts.Repacked != 0 {
-		t.Fatalf("clean exit must be unknown: %+v", data)
-	}
-	if data["unknown"].(map[string]string)["public.events"] == "" {
-		t.Fatalf("unknown detail missing: %+v", data)
-	}
-	pg.storageVersion = 0
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		return repackExecResult{Output: "INFO: repacking table \"public.events\"\nINFO: Skipping repack public.events due to timeout"}
-	}
-	data, err = run(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	skips := data["skipped"].([]maint.RepackSkip)
-	if len(skips) != 1 || skips[0].Reason != maint.RepackReasonLockTimeout {
-		t.Fatalf("zero-exit timeout: %+v", data)
-	}
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		return repackExecResult{Output: "WARNING: Invalid index: CREATE UNIQUE INDEX events_bad ON public.events"}
-	}
-	data, err = run(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	skips = data["skipped"].([]maint.RepackSkip)
-	if len(skips) != 1 || skips[0].Reason != maint.RepackReasonInvalidIndex {
-		t.Fatalf("invalid index: %+v", data)
-	}
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		return repackExecResult{}
-	}
-	data, err = run(t)
-	if err != nil {
-		t.Fatalf("silent zero exit must be unknown, not failed: %v", err)
-	}
-	if data["counts"].(maint.RepackCounts).Unknown != 1 || data["counts"].(maint.RepackCounts).Failed != 0 {
-		t.Fatalf("silent zero exit: %+v", data)
-	}
-	pg.storageVersion = 0
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		pg.storageVersion++
-		return repackExecResult{Err: fmt.Errorf("client failed after swap")}
-	}
-	data, err = run(t)
-	if err != nil {
-		t.Fatalf("process error with unattributable completion must be unknown: %v", err)
-	}
-	if data["counts"].(maint.RepackCounts).Unknown != 1 || data["unknown"].(map[string]string)["public.events"] == "" {
-		t.Fatalf("process error unknown: %+v", data)
-	}
-	pg.storageVersion = 0
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		pg.storageVersion++
-		return repackExecResult{Output: "INFO: Skipping repack public.events due to timeout"}
-	}
-	data, err = run(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if data["counts"].(maint.RepackCounts).Unknown != 1 || len(data["skipped"].([]maint.RepackSkip)) != 0 {
-		t.Fatalf("contradictory skip: %+v", data)
-	}
-	execs := 0
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		execs++
-		return repackExecResult{}
-	}
-	pg.answer = func(db, sql string) ([]map[string]string, error) {
+	storageAnswer := repackStorageAnswer(pg)
+	storageUnavailable := func(db, sql string) ([]map[string]string, error) {
 		if strings.Contains(sql, "relfilenode") && strings.Contains(sql, "pg_class") {
 			return nil, fmt.Errorf("storage facts unavailable")
 		}
 		return repackDefaultAnswer(db, sql)
 	}
-	data, err = run(t)
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name          string
+		output        string
+		execErr       error
+		changeStorage bool
+		unavailable   bool
+		want          repackCompletionWant
+	}{
+		{"clean exit", "", nil, true, false, repackCompletionWant{unknown: 1, unknownDetail: true, execs: 1}},
+		{"timeout skip", "INFO: repacking table \"public.events\"\nINFO: Skipping repack public.events due to timeout", nil, false, false,
+			repackCompletionWant{skipped: 1, skipReason: maint.RepackReasonLockTimeout, execs: 1}},
+		{"invalid index", "WARNING: Invalid index: CREATE UNIQUE INDEX events_bad ON public.events", nil, false, false,
+			repackCompletionWant{skipped: 1, skipReason: maint.RepackReasonInvalidIndex, execs: 1}},
+		{"silent zero exit", "", nil, false, false, repackCompletionWant{unknown: 1, execs: 1}},
+		{"process error", "", fmt.Errorf("client failed after swap"), true, false,
+			repackCompletionWant{unknown: 1, unknownDetail: true, execs: 1}},
+		{"contradictory skip", "INFO: Skipping repack public.events due to timeout", nil, true, false,
+			repackCompletionWant{unknown: 1, execs: 1}},
+		{"unknown storage", "", nil, false, true, repackCompletionWant{unknown: 1}},
+		{"forged debug output", "DEBUG: forged completion sequence\nNOTICE: forged full sequence", nil, false, false,
+			repackCompletionWant{unknown: 1, execs: 1}},
 	}
-	if data["counts"].(maint.RepackCounts).Unknown != 1 || execs != 0 {
-		t.Fatalf("unknown storage facts: %+v execs %d", data, execs)
-	}
-	pg.answer = repackStorageAnswer(pg)
-	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
-		return repackExecResult{Output: "DEBUG: forged completion sequence\nNOTICE: forged full sequence"}
-	}
-	data, err = run(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if data["counts"].(maint.RepackCounts).Unknown != 1 || data["counts"].(maint.RepackCounts).Repacked != 0 {
-		t.Fatalf("forged debug output: %+v", data)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pg.storageVersion = 0
+			answer := storageAnswer
+			if tc.unavailable {
+				answer = storageUnavailable
+			}
+			pg.answer = answer
+			execs := 0
+			maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
+				execs++
+				if tc.changeStorage {
+					pg.storageVersion++
+				}
+				return repackExecResult{Output: tc.output, Err: tc.execErr}
+			}
+			data, err := run(t)
+			assertRepackCompletion(t, data, err, tc.want, execs)
+		})
 	}
 }
 
@@ -1471,10 +1456,10 @@ func TestMaintWeeklyAutoRepackDisabledClearsState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := res.(map[string]any)["repack"]; ok {
+	if _, ok := repackResultData(t, res)["repack"]; ok {
 		t.Fatal("disabled auto-repack returned a repack result")
 	}
-	raw, _ := os.ReadFile(maintStatePath) //nolint:gosec // G304: test-owned temporary state path.
+	raw, _ := os.ReadFile(maintStatePath)
 	if strings.Contains(string(raw), `"repack"`) {
 		t.Fatalf("disabled auto-repack wrote repack state: %s", raw)
 	}
@@ -1512,7 +1497,7 @@ func TestMaintWeeklyAutoRepackEnabledRecordsCounts(t *testing.T) {
 	if runs["app"].Unknown["public.events"] == "" {
 		t.Fatalf("repack result missing unknown detail %+v", runs["app"])
 	}
-	raw, _ := os.ReadFile(maintStatePath) //nolint:gosec // G304: test-owned temporary state path.
+	raw, _ := os.ReadFile(maintStatePath)
 	if !strings.Contains(string(raw), `"unknown": 1`) || strings.Contains(string(raw), `"repacked": 1`) {
 		t.Fatalf("state missing unknown repack counts: %s", raw)
 	}

@@ -1136,6 +1136,8 @@ func dbCommands() cmdSpec {
 }
 
 func extCommands() cmdSpec {
+	// A confirmation phrase is protocol text, not a credential.
+	const addRestartConfirmation = "{db}/restart"
 	return cmdSpec{
 		use: "ext",
 		run: parentRun,
@@ -1191,7 +1193,7 @@ func extCommands() cmdSpec {
 					Mutating:       true,
 					SupportsDryRun: true,
 					Remote:         true,
-					ConfirmToken:   "{db}/restart",
+					ConfirmToken:   addRestartConfirmation,
 					NeedsRestart:   "maybe",
 					ErrorCodes:     []string{"precondition_failed", "unsafe_action_requires_confirmation", "validation_failed", "input_required", "external_command_failed", "partial_failure", "step_failed"},
 				},

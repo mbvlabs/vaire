@@ -41,7 +41,7 @@ func (m *Materialised) StandbyBaseBackup(ctx context.Context, slot string) error
 	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
-	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx, UntilOpen) })
+	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx) })
 }
 
 // DropRecoverySettings removes pgBackRest's recovery settings

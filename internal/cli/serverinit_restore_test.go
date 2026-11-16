@@ -25,69 +25,74 @@ func TestRestoreConfigKeepsExtensionIntent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.DefaultCluster()
-			cfg.ClusterName = "prod"
-			cfg.Domain = "example.com"
-			cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
-			cfg.Clusters = []config.ClusterSpec{{
-				Name: "app", Node: "db1", Port: 5433, Stanza: "app-abc123", Size: "small",
-				StatementTimeout: "60s", Extensions: []string{"custom", "pg_stat_statements"},
-				RecoveryExtensions: tc.recovery,
-			}}
-			cfg.Extensions = map[string]config.ExtensionDefinition{
-				"custom": {
-					Source: catalog.SourcePreinstalled, Settings: map[string]string{"custom.mode": "on"},
-					CopySafety: stringPtr("safe"), StandbySafe: boolPtr(true),
-				},
-			}
-			raw, err := cfg.Encode()
-			if err != nil {
-				t.Fatal(err)
-			}
-			tarball, _, err := masterbackup.Build(masterbackup.Meta{
-				Server: "prod", Node: "db1", Epoch: 1, CreatedAt: time.Unix(0, 0).UTC(), VaireVersion: "test",
-			}, []masterbackup.File{
-				masterbackup.NewFile(masterbackup.ClusterPath, "root", "root", 0o640, raw),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			bundle, err := masterbackup.ReadTar(tarball)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := &initRun{
-				name: "prod",
-				restore: &restoreRun{
-					bundle: bundle,
-					ctx:    &workspaces.Workspace{Server: "prod"},
-					state:  &workspaces.RestoreProgress{NewAddress: "203.0.113.20"},
-				},
-			}
-			if err := r.restoreConfig(); err != nil {
-				t.Fatal(err)
-			}
-			if r.cfg.Nodes[0].PublicAddress != "203.0.113.20" {
-				t.Fatalf("public address was not rewritten: %+v", r.cfg.Nodes[0])
-			}
-			if got := r.cfg.Extensions["custom"]; got.Source != catalog.SourcePreinstalled || got.Settings["custom.mode"] != "on" {
-				t.Fatalf("custom definition lost: %+v", got)
-			}
-			switch {
-			case tc.recovery == nil:
-				if r.cfg.Clusters[0].RecoveryExtensions != nil {
-					t.Fatalf("absent declaration became %v", r.cfg.Clusters[0].RecoveryExtensions)
-				}
-			case len(*tc.recovery) == 0:
-				if r.cfg.Clusters[0].RecoveryExtensions == nil || len(*r.cfg.Clusters[0].RecoveryExtensions) != 0 {
-					t.Fatalf("explicit empty declaration became %v", r.cfg.Clusters[0].RecoveryExtensions)
-				}
-			default:
-				if r.cfg.Clusters[0].RecoveryExtensions == nil || !slices.Equal(*r.cfg.Clusters[0].RecoveryExtensions, *tc.recovery) {
-					t.Fatalf("populated declaration became %v", r.cfg.Clusters[0].RecoveryExtensions)
-				}
-			}
+			testRestoreConfigKeepsExtensionIntent(t, tc.recovery)
 		})
+	}
+}
+
+func testRestoreConfigKeepsExtensionIntent(t *testing.T, recovery *[]string) {
+	t.Helper()
+	cfg := config.DefaultCluster()
+	cfg.ClusterName = "prod"
+	cfg.Domain = "example.com"
+	cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
+	cfg.Clusters = []config.ClusterSpec{{
+		Name: "app", Node: "db1", Port: 5433, Stanza: "app-abc123", Size: "small",
+		StatementTimeout: "60s", Extensions: []string{"custom", "pg_stat_statements"},
+		RecoveryExtensions: recovery,
+	}}
+	cfg.Extensions = map[string]config.ExtensionDefinition{
+		"custom": {
+			Source: catalog.SourcePreinstalled, Settings: map[string]string{"custom.mode": "on"},
+			CopySafety: stringPtr("safe"), StandbySafe: boolPtr(true),
+		},
+	}
+	raw, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarball, _, err := masterbackup.Build(masterbackup.Meta{
+		Server: "prod", Node: "db1", Epoch: 1, CreatedAt: time.Unix(0, 0).UTC(), VaireVersion: "test",
+	}, []masterbackup.File{
+		masterbackup.NewFile(masterbackup.ClusterPath, "root", "root", 0o640, raw),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := masterbackup.ReadTar(tarball)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &initRun{
+		name: "prod",
+		restore: &restoreRun{
+			bundle: bundle,
+			ctx:    &workspaces.Workspace{Server: "prod"},
+			state:  &workspaces.RestoreProgress{NewAddress: "203.0.113.20"},
+		},
+	}
+	if err := r.restoreConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if r.cfg.Nodes[0].PublicAddress != "203.0.113.20" {
+		t.Fatalf("public address was not rewritten: %+v", r.cfg.Nodes[0])
+	}
+	if got := r.cfg.Extensions["custom"]; got.Source != catalog.SourcePreinstalled || got.Settings["custom.mode"] != "on" {
+		t.Fatalf("custom definition lost: %+v", got)
+	}
+	switch {
+	case recovery == nil:
+		if r.cfg.Clusters[0].RecoveryExtensions != nil {
+			t.Fatalf("absent declaration became %v", r.cfg.Clusters[0].RecoveryExtensions)
+		}
+	case len(*recovery) == 0:
+		if r.cfg.Clusters[0].RecoveryExtensions == nil || len(*r.cfg.Clusters[0].RecoveryExtensions) != 0 {
+			t.Fatalf("explicit empty declaration became %v", r.cfg.Clusters[0].RecoveryExtensions)
+		}
+	default:
+		if r.cfg.Clusters[0].RecoveryExtensions == nil || !slices.Equal(*r.cfg.Clusters[0].RecoveryExtensions, *recovery) {
+			t.Fatalf("populated declaration became %v", r.cfg.Clusters[0].RecoveryExtensions)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,81 +27,70 @@ func stoppedApplyCfg(t *testing.T) config.Cluster {
 	return cfg
 }
 
-func TestHandleApplyStartsStoppedSourceAndFollowersBeforeCatalog(t *testing.T) {
-	cfg := stoppedApplyCfg(t)
-	h := newExtHarness(t, cfg)
-	running := map[string]bool{}
-	h.runningFn = func(spec config.ClusterSpec) bool { return running[spec.Name] }
+// stoppedApplyRecorder models the engine's start, configuration and SQL effects
+// for stopped-target transitions, recording their order.
+type stoppedApplyRecorder struct {
+	running          map[string]bool
+	effects          []string
+	primaryPending   bool
+	failStart        string
+	failStartErr     error
+	afterStartEffect bool
+}
 
-	var effects []string
-	oldValidate, oldPlan, oldReload := extensionValidateStopped, extensionPlan, applyReloadCluster
-	extensionValidateStopped = func(_ context.Context, _ config.Cluster, spec config.ClusterSpec) error {
-		effects = append(effects, "guard:"+spec.Name)
-		return nil
-	}
-	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
-		return engine.PlanData{WouldApply: 1}, nil
-	}
-	applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
-	t.Cleanup(func() {
-		extensionValidateStopped, extensionPlan, applyReloadCluster = oldValidate, oldPlan, oldReload
-	})
-	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
-		for _, spec := range cfg.Clusters {
-			if !running[spec.Name] {
-				return nil, errors.New("catalog is down")
-			}
+func (r *stoppedApplyRecorder) apply(opts engine.Options) (engine.ApplyData, error) {
+	step := opts.Only[0]
+	if strings.HasPrefix(step, "postgres-cluster-v1") {
+		if opts.DB == r.failStart {
+			return engine.ApplyData{}, r.failStartErr
 		}
-		return map[string]extensionInstalledVersion{}, nil
+		r.effects = append(r.effects, "start:"+opts.DB)
+		r.running[opts.DB] = true
+		return engine.ApplyData{}, nil
 	}
-	h.preloadLoaded["pg_cron"] = true
-	cronSettingFake(h)
-	h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
-		switch {
-		case strings.HasPrefix(opts.Only[0], "postgres-cluster-v1"):
-			effects = append(effects, "start:"+opts.DB)
-			running[opts.DB] = true
-			return engine.ApplyData{}, nil
-		case strings.HasPrefix(opts.Only[0], "postgres-config-v1"):
-			effects = append(effects, "config:"+opts.DB)
-			if opts.DB == "app" {
-				// Keep the primary configuration pending so the test can prove
-				// no dependent primary SQL ran, while followers were verified.
-				return engine.ApplyData{RestartPending: []string{opts.Only[0]}}, nil
-			}
-			return engine.ApplyData{}, nil
-		default:
-			effects = append(effects, "other:"+opts.DB)
-			return engine.ApplyData{}, nil
+	if r.afterStartEffect {
+		r.effects = append(r.effects, "after-start:"+opts.DB+":"+step)
+		return engine.ApplyData{}, nil
+	}
+	if strings.HasPrefix(step, "postgres-config-v1") {
+		r.effects = append(r.effects, "config:"+opts.DB)
+		if r.primaryPending && opts.DB == "app" {
+			return engine.ApplyData{RestartPending: []string{step}}, nil
 		}
+		return engine.ApplyData{}, nil
 	}
+	r.effects = append(r.effects, "other:"+opts.DB)
+	return engine.ApplyData{}, nil
+}
 
-	res, err := handleApply(context.Background(), &Env{
-		Req: request("apply", map[string]any{"db": "app"}), Cluster: cfg, LockMode: engine.LockExclusive,
-	})
-	if err != nil {
-		t.Fatalf("stopped source/follower apply = %v; effects %v", err, effects)
+func TestStoppedApplyRecorderCatchesEveryPostStartStep(t *testing.T) {
+	for _, step := range []string{"postgres-config-v1@app", "postgres-roles-v1@app"} {
+		t.Run(step, func(t *testing.T) {
+			recorder := stoppedApplyRecorder{afterStartEffect: true}
+			if _, err := recorder.apply(engine.Options{DB: "app", Only: []string{step}}); err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{"after-start:app:" + step}; !slices.Equal(recorder.effects, want) {
+				t.Fatalf("post-start step escaped the failure-boundary recorder: got %v, want %v", recorder.effects, want)
+			}
+		})
 	}
-	data, ok := res.Data.(engine.ApplyData)
-	if !ok || len(data.RestartPending) == 0 {
-		t.Fatalf("staged result = %+v, want a pending primary restart after follower verification", res.Data)
-	}
+}
 
+func assertStoppedTargetEffects(t *testing.T, effects []string) {
+	t.Helper()
 	firstStart := slices.IndexFunc(effects, func(effect string) bool { return strings.HasPrefix(effect, "start:") })
 	if firstStart < 0 {
 		t.Fatalf("no engine-owned start was reached: %v", effects)
 	}
 	for _, guard := range []string{"guard:app_follower_1", "guard:app_follower_2"} {
 		i := slices.Index(effects, guard)
-		if i < 0 {
-			t.Fatalf("stopped follower guard %q was not established: %v", guard, effects)
-		}
-		if i > firstStart {
-			t.Fatalf("follower guard %q was written after a start: %v", guard, effects)
+		if i < 0 || i > firstStart {
+			t.Fatalf("follower guard %q was not established before a start: %v", guard, effects)
 		}
 	}
 	wantStarts := []string{"start:app", "start:app_follower_1", "start:app_follower_2"}
-	var starts []string
+	starts := make([]string, 0, len(effects))
 	for _, effect := range effects {
 		if strings.HasPrefix(effect, "start:") {
 			starts = append(starts, effect)
@@ -121,6 +111,80 @@ func TestHandleApplyStartsStoppedSourceAndFollowersBeforeCatalog(t *testing.T) {
 			}
 		}
 	}
+}
+
+func assertStoppedUnloadProof(t *testing.T, effects, proofs []string, stoppedStart string) {
+	t.Helper()
+	if slices.Index(effects, "start:"+stoppedStart) < 0 {
+		t.Fatalf("%s was never started: %v", stoppedStart, effects)
+	}
+	for _, proof := range proofs {
+		if proof == stoppedStart+":stopped" {
+			t.Fatalf("stopped target's unload proof ran before its start: %v (effects %v)", proofs, effects)
+		}
+	}
+	if !slices.Contains(proofs, stoppedStart+":running") {
+		t.Fatalf("stopped target was not unload-proven after start: %v (effects %v)", proofs, effects)
+	}
+}
+
+func assertFollowersVerifiedBeforePrimary(t *testing.T, effects []string) {
+	t.Helper()
+	for _, follower := range []string{"app_follower_1", "app_follower_2"} {
+		verified := slices.Index(effects, "config:"+follower)
+		if verified < 0 {
+			t.Fatalf("follower %s was not verified: %v", follower, effects)
+		}
+		if primary := slices.Index(effects, "config:app"); primary >= 0 && verified > primary {
+			t.Fatalf("follower %s was verified after primary configuration: %v", follower, effects)
+		}
+		if sql := slices.Index(effects, "other:app"); sql >= 0 && verified > sql {
+			t.Fatalf("follower %s was verified after primary SQL: %v", follower, effects)
+		}
+	}
+}
+
+func TestHandleApplyStartsStoppedSourceAndFollowersBeforeCatalog(t *testing.T) {
+	cfg := stoppedApplyCfg(t)
+	h := newExtHarness(t, cfg)
+	recorder := &stoppedApplyRecorder{running: map[string]bool{}, primaryPending: true}
+	h.runningFn = func(spec config.ClusterSpec) bool { return recorder.running[spec.Name] }
+
+	oldValidate, oldPlan, oldReload := extensionValidateStopped, extensionPlan, applyReloadCluster
+	extensionValidateStopped = func(_ context.Context, _ config.Cluster, spec config.ClusterSpec) error {
+		recorder.effects = append(recorder.effects, "guard:"+spec.Name)
+		return nil
+	}
+	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
+		return engine.PlanData{WouldApply: 1}, nil
+	}
+	applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
+	t.Cleanup(func() {
+		extensionValidateStopped, extensionPlan, applyReloadCluster = oldValidate, oldPlan, oldReload
+	})
+	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
+		for _, spec := range cfg.Clusters {
+			if !recorder.running[spec.Name] {
+				return nil, errors.New("catalog is down")
+			}
+		}
+		return map[string]extensionInstalledVersion{}, nil
+	}
+	h.preloadLoaded["pg_cron"] = true
+	cronSettingFake(h)
+	h.applyFn = recorder.apply
+
+	res, err := handleApply(context.Background(), &Env{
+		Req: request("apply", map[string]any{"db": "app"}), Cluster: cfg, LockMode: engine.LockExclusive,
+	})
+	if err != nil {
+		t.Fatalf("stopped source/follower apply = %v; effects %v", err, recorder.effects)
+	}
+	data, ok := res.Data.(engine.ApplyData)
+	if !ok || len(data.RestartPending) == 0 {
+		t.Fatalf("staged result = %+v, want a pending primary restart after follower verification", res.Data)
+	}
+	assertStoppedTargetEffects(t, recorder.effects)
 }
 
 func TestApplyStoppedFollowerPreflightDoesNotReadCatalog(t *testing.T) {
@@ -203,105 +267,73 @@ func writeStoppedManagedPreloads(t *testing.T, cluster string) {
 	}
 }
 
+type stoppedUnloadProofCase struct {
+	name         string
+	running      map[string]bool
+	stoppedStart string
+}
+
+func runStoppedUnloadProofCase(t *testing.T, tc stoppedUnloadProofCase) {
+	cfg := extFollowerCfg(t)
+	cfg.Server.DataRoot = t.TempDir()
+	restoreConf := steps.PGConfRootForTest(t.TempDir())
+	defer restoreConf()
+	writeStoppedManagedPreloads(t, "app")
+	writeStoppedManagedPreloads(t, "app_follower_1")
+	writeStoppedManagedPreloads(t, "app_follower_2")
+
+	recorder := &stoppedApplyRecorder{running: maps.Clone(tc.running), primaryPending: true}
+	h := newExtHarness(t, cfg)
+	h.runningFn = func(spec config.ClusterSpec) bool { return recorder.running[spec.Name] }
+
+	var unloadProofs []string
+	oldValidate, oldUnload, oldPlan, oldReload := extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster
+	applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
+	extensionValidateStopped = func(_ context.Context, _ config.Cluster, spec config.ClusterSpec) error {
+		recorder.effects = append(recorder.effects, "guard:"+spec.Name)
+		return nil
+	}
+	extensionRefuseUnload = func(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, first bool) error {
+		unloadProofs = append(unloadProofs, spec.Name+":"+map[bool]string{true: "running", false: "stopped"}[recorder.running[spec.Name]])
+		if recorder.running[spec.Name] {
+			return nil
+		}
+		// Prove the managed-file fallback really refuses a stopped
+		// preload removal in this fixture.
+		return steps.RefuseExtensionUnload(ctx, cfg, spec, first)
+	}
+	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
+		return engine.PlanData{WouldApply: 1}, nil
+	}
+	t.Cleanup(func() {
+		extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster = oldValidate, oldUnload, oldPlan, oldReload
+	})
+	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
+		for _, isRunning := range recorder.running {
+			if !isRunning {
+				return nil, errors.New("catalog is down")
+			}
+		}
+		return map[string]extensionInstalledVersion{}, nil
+	}
+	h.applyFn = recorder.apply
+
+	req := request("apply", map[string]any{"db": "app"})
+	_, err := handleApply(context.Background(), &Env{Req: req, Cluster: cfg, LockMode: engine.LockExclusive})
+	if err != nil {
+		t.Fatalf("stopped unload transition = %v; effects=%v proofs=%v", err, recorder.effects, unloadProofs)
+	}
+	assertStoppedUnloadProof(t, recorder.effects, unloadProofs, tc.stoppedStart)
+	assertFollowersVerifiedBeforePrimary(t, recorder.effects)
+}
+
 func TestStoppedApplyDefersUnloadProofUntilAfterStart(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		running      map[string]bool
-		stoppedStart string
-	}{
+	for _, tc := range []stoppedUnloadProofCase{
 		{name: "stopped source", running: map[string]bool{"app_follower_1": true, "app_follower_2": true}, stoppedStart: "app"},
 		{name: "stopped follower", running: map[string]bool{"app": true, "app_follower_2": true}, stoppedStart: "app_follower_1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := extFollowerCfg(t)
-			cfg.Server.DataRoot = t.TempDir()
-			restoreConf := steps.PGConfRootForTest(t.TempDir())
-			defer restoreConf()
-			writeStoppedManagedPreloads(t, "app")
-			writeStoppedManagedPreloads(t, "app_follower_1")
-			writeStoppedManagedPreloads(t, "app_follower_2")
-
-			h := newExtHarness(t, cfg)
-			running := tc.running
-			h.runningFn = func(spec config.ClusterSpec) bool { return running[spec.Name] }
-
-			var effects, unloadProofs []string
-			oldValidate, oldUnload, oldPlan, oldReload := extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster
-			applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
-			extensionValidateStopped = func(_ context.Context, _ config.Cluster, spec config.ClusterSpec) error {
-				effects = append(effects, "guard:"+spec.Name)
-				return nil
-			}
-			extensionRefuseUnload = func(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, first bool) error {
-				unloadProofs = append(unloadProofs, spec.Name+":"+map[bool]string{true: "running", false: "stopped"}[running[spec.Name]])
-				if running[spec.Name] {
-					return nil
-				}
-				// Prove the managed-file fallback really refuses a stopped
-				// preload removal in this fixture.
-				return steps.RefuseExtensionUnload(ctx, cfg, spec, first)
-			}
-			extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
-				return engine.PlanData{WouldApply: 1}, nil
-			}
-			t.Cleanup(func() {
-				extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster = oldValidate, oldUnload, oldPlan, oldReload
-			})
-			h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
-				for _, isRunning := range running {
-					if !isRunning {
-						return nil, errors.New("catalog is down")
-					}
-				}
-				return map[string]extensionInstalledVersion{}, nil
-			}
-			h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
-				switch {
-				case strings.HasPrefix(opts.Only[0], "postgres-cluster-v1"):
-					effects = append(effects, "start:"+opts.DB)
-					running[opts.DB] = true
-					return engine.ApplyData{}, nil
-				case strings.HasPrefix(opts.Only[0], "postgres-config-v1"):
-					effects = append(effects, "config:"+opts.DB)
-					if opts.DB == "app" {
-						return engine.ApplyData{RestartPending: []string{opts.Only[0]}}, nil
-					}
-					return engine.ApplyData{}, nil
-				default:
-					effects = append(effects, "other:"+opts.DB)
-					return engine.ApplyData{}, nil
-				}
-			}
-
-			req := request("apply", map[string]any{"db": "app"})
-			_, err := handleApply(context.Background(), &Env{Req: req, Cluster: cfg, LockMode: engine.LockExclusive})
-			if err != nil {
-				t.Fatalf("stopped unload transition = %v; effects=%v proofs=%v", err, effects, unloadProofs)
-			}
-			startIndex := slices.Index(effects, "start:"+tc.stoppedStart)
-			if startIndex < 0 {
-				t.Fatalf("%s was never started: %v", tc.stoppedStart, effects)
-			}
-			for _, proof := range unloadProofs {
-				if strings.HasPrefix(proof, tc.stoppedStart+":") && proof == tc.stoppedStart+":stopped" {
-					t.Fatalf("stopped target's unload proof ran before its start: %v (effects %v)", unloadProofs, effects)
-				}
-			}
-			if !slices.Contains(unloadProofs, tc.stoppedStart+":running") {
-				t.Fatalf("stopped target was not unload-proven after start: %v (effects %v)", unloadProofs, effects)
-			}
-			for _, follower := range []string{"app_follower_1", "app_follower_2"} {
-				verified := slices.Index(effects, "config:"+follower)
-				if verified < 0 {
-					t.Fatalf("follower %s was not verified: %v", follower, effects)
-				}
-				if primary := slices.Index(effects, "config:app"); primary >= 0 && verified > primary {
-					t.Fatalf("follower %s was verified after primary configuration: %v", follower, effects)
-				}
-				if sql := slices.Index(effects, "other:app"); sql >= 0 && verified > sql {
-					t.Fatalf("follower %s was verified after primary SQL: %v", follower, effects)
-				}
-			}
+			runStoppedUnloadProofCase(t, tc)
 		})
 	}
 }
@@ -502,19 +534,105 @@ func TestVerifyFollowerRuntimeImplicitDefaultsAreNotExpected(t *testing.T) {
 	}
 }
 
+type stoppedStartBoundaryCase struct {
+	name         string
+	running      map[string]bool
+	failProof    string
+	failStart    string
+	wantStarted  []string
+	wantPending  []string
+	failedTarget string
+	failedStage  string
+	wantReason   string
+	startUnknown bool
+}
+
+func assertStoppedStartBoundary(t *testing.T, err error, tc stoppedStartBoundaryCase, effects []string) {
+	t.Helper()
+	details := extDetails(t, err)
+	if details["started"] != (len(tc.wantStarted) > 0) ||
+		details["failed_target"] != tc.failedTarget ||
+		details["failed_stage"] != tc.failedStage ||
+		details["reason"] != tc.wantReason ||
+		details["start_unknown"] != tc.startUnknown ||
+		details["configuration_staged"] != false ||
+		details["sql_run"] != false ||
+		details["packages_may_remain"] != true {
+		t.Fatalf("partial details = %v", details)
+	}
+	if got, _ := details["started_targets"].([]string); !slices.Equal(got, tc.wantStarted) {
+		t.Fatalf("started_targets = %v, want %v (details %v)", got, tc.wantStarted, details)
+	}
+	if got, _ := details["pending_targets"].([]string); !slices.Equal(got, tc.wantPending) {
+		t.Fatalf("pending_targets = %v, want %v (details %v)", got, tc.wantPending, details)
+	}
+	for _, effect := range effects {
+		if strings.HasPrefix(effect, "after-start:") {
+			t.Fatalf("configuration/SQL ran after a start-boundary failure: %v", effects)
+		}
+	}
+	failure := output.Fail(nil, err)
+	if tc.failedStage == "unload_proof" {
+		if !strings.HasPrefix(failure.Error.Hint, tc.failedTarget+" was started on its old configuration;") ||
+			!strings.Contains(failure.Error.Hint, "--db app, then retry apply") {
+			t.Fatalf("post-start hint does not identify the started target and source retry: %+v", failure.Error)
+		}
+	}
+	if !slices.ContainsFunc(failure.Warnings, func(w output.Warning) bool { return w.Code == "start_warning" }) {
+		t.Fatalf("start warnings were discarded: %+v", failure.Warnings)
+	}
+}
+
+func runStoppedStartBoundaryCase(t *testing.T, tc stoppedStartBoundaryCase) {
+	cfg := extFollowerCfg(t)
+	cfg.Server.DataRoot = t.TempDir()
+	restoreConf := steps.PGConfRootForTest(t.TempDir())
+	defer restoreConf()
+	for _, cluster := range []string{"app", "app_follower_1", "app_follower_2"} {
+		writeStoppedManagedPreloads(t, cluster)
+	}
+	h := newExtHarness(t, cfg)
+	recorder := &stoppedApplyRecorder{
+		running:   maps.Clone(tc.running),
+		failStart: tc.failStart,
+		failStartErr: output.NewError(output.CodePartialFailure,
+			"installing extension packages failed before the cluster answered", output.ExitStep,
+			"packages may remain").
+			WithDetails(map[string]any{"reason": "package_install_failed", "database": tc.failStart}),
+		afterStartEffect: true,
+	}
+	h.runningFn = func(spec config.ClusterSpec) bool { return recorder.running[spec.Name] }
+
+	oldValidate, oldUnload, oldPlan, oldReload := extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster
+	extensionValidateStopped = func(context.Context, config.Cluster, config.ClusterSpec) error { return nil }
+	extensionRefuseUnload = func(_ context.Context, _ config.Cluster, spec config.ClusterSpec, _ bool) error {
+		if spec.Name == tc.failProof {
+			return output.NewError(output.CodePrecondition,
+				"installed extension still needs the old library", output.ExitPrecondition, "").
+				WithDetails(map[string]any{"reason": "extension_unload_unproven"})
+		}
+		return nil
+	}
+	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
+		return engine.PlanData{WouldApply: 1}, nil
+	}
+	applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
+	t.Cleanup(func() {
+		extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster = oldValidate, oldUnload, oldPlan, oldReload
+	})
+	h.applyWarnings = []output.Warning{{Code: "start_warning", Message: "start observed"}}
+	h.applyFn = recorder.apply
+
+	req := request("apply", map[string]any{"db": "app"})
+	_, err := handleApply(context.Background(), &Env{Req: req, Cluster: cfg, LockMode: engine.LockExclusive})
+	if err == nil {
+		t.Fatal("start-boundary failure was reported as success")
+	}
+	assertStoppedStartBoundary(t, err, tc, recorder.effects)
+}
+
 func TestStoppedApplyStartBoundaryFailureReturnsPartialState(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		running      map[string]bool
-		failProof    string
-		failStart    string
-		wantStarted  []string
-		wantPending  []string
-		failedTarget string
-		failedStage  string
-		wantReason   string
-		startUnknown bool
-	}{
+	for _, tc := range []stoppedStartBoundaryCase{
 		{
 			name: "source proof after start", running: map[string]bool{},
 			failProof: "app", wantStarted: []string{"app"}, wantPending: []string{"app_follower_1", "app_follower_2"},
@@ -532,92 +650,7 @@ func TestStoppedApplyStartBoundaryFailureReturnsPartialState(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := extFollowerCfg(t)
-			cfg.Server.DataRoot = t.TempDir()
-			restoreConf := steps.PGConfRootForTest(t.TempDir())
-			defer restoreConf()
-			for _, cluster := range []string{"app", "app_follower_1", "app_follower_2"} {
-				writeStoppedManagedPreloads(t, cluster)
-			}
-			h := newExtHarness(t, cfg)
-			running := map[string]bool{}
-			for name, value := range tc.running {
-				running[name] = value
-			}
-			h.runningFn = func(spec config.ClusterSpec) bool { return running[spec.Name] }
-
-			var effects []string
-			oldValidate, oldUnload, oldPlan, oldReload := extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster
-			extensionValidateStopped = func(context.Context, config.Cluster, config.ClusterSpec) error { return nil }
-			extensionRefuseUnload = func(_ context.Context, _ config.Cluster, spec config.ClusterSpec, _ bool) error {
-				if spec.Name == tc.failProof {
-					return output.NewError(output.CodePrecondition,
-						"installed extension still needs the old library", output.ExitPrecondition, "").
-						WithDetails(map[string]any{"reason": "extension_unload_unproven"})
-				}
-				return nil
-			}
-			extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
-				return engine.PlanData{WouldApply: 1}, nil
-			}
-			applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
-			t.Cleanup(func() {
-				extensionValidateStopped, extensionRefuseUnload, extensionPlan, applyReloadCluster = oldValidate, oldUnload, oldPlan, oldReload
-			})
-			h.applyWarnings = []output.Warning{{Code: "start_warning", Message: "start observed"}}
-			h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
-				if strings.HasPrefix(opts.Only[0], "postgres-cluster-v1") {
-					if opts.DB == tc.failStart {
-						return engine.ApplyData{}, output.NewError(output.CodePartialFailure,
-							"installing extension packages failed before the cluster answered", output.ExitStep,
-							"packages may remain").
-							WithDetails(map[string]any{"reason": "package_install_failed", "database": opts.DB})
-					}
-					effects = append(effects, "start:"+opts.DB)
-					running[opts.DB] = true
-					return engine.ApplyData{}, nil
-				}
-				effects = append(effects, "after-start:"+opts.DB+":"+opts.Only[0])
-				return engine.ApplyData{}, nil
-			}
-
-			req := request("apply", map[string]any{"db": "app"})
-			_, err := handleApply(context.Background(), &Env{Req: req, Cluster: cfg, LockMode: engine.LockExclusive})
-			if err == nil {
-				t.Fatal("start-boundary failure was reported as success")
-			}
-			details := extDetails(t, err)
-			if details["started"] != (len(tc.wantStarted) > 0) ||
-				details["failed_target"] != tc.failedTarget ||
-				details["failed_stage"] != tc.failedStage ||
-				details["reason"] != tc.wantReason ||
-				details["start_unknown"] != tc.startUnknown ||
-				details["configuration_staged"] != false ||
-				details["sql_run"] != false ||
-				details["packages_may_remain"] != true {
-				t.Fatalf("partial details = %v", details)
-			}
-			if got, _ := details["started_targets"].([]string); !slices.Equal(got, tc.wantStarted) {
-				t.Fatalf("started_targets = %v, want %v (details %v)", got, tc.wantStarted, details)
-			}
-			if got, _ := details["pending_targets"].([]string); !slices.Equal(got, tc.wantPending) {
-				t.Fatalf("pending_targets = %v, want %v (details %v)", got, tc.wantPending, details)
-			}
-			for _, effect := range effects {
-				if strings.HasPrefix(effect, "after-start:") {
-					t.Fatalf("configuration/SQL ran after a start-boundary failure: %v", effects)
-				}
-			}
-			failure := output.Fail(nil, err)
-			if tc.failedStage == "unload_proof" {
-				if !strings.HasPrefix(failure.Error.Hint, tc.failedTarget+" was started on its old configuration;") ||
-					!strings.Contains(failure.Error.Hint, "--db app, then retry apply") {
-					t.Fatalf("post-start hint does not identify the started target and source retry: %+v", failure.Error)
-				}
-			}
-			if !slices.ContainsFunc(failure.Warnings, func(w output.Warning) bool { return w.Code == "start_warning" }) {
-				t.Fatalf("start warnings were discarded: %+v", failure.Warnings)
-			}
+			runStoppedStartBoundaryCase(t, tc)
 		})
 	}
 }

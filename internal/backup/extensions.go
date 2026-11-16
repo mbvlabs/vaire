@@ -65,40 +65,47 @@ func (s *Records) RecordExtensionRequirements(stanza, database string, exts []ca
 		entry.CoverageSince = at.UTC().Format(time.RFC3339)
 		changed = true
 	}
+	since := at.UTC().Format(time.RFC3339)
 	for _, ext := range exts {
 		if ext.Name == "" {
 			continue
 		}
 		ext = ext.Clone()
-		found := false
-		for _, have := range entry.Requirements {
-			if have.Extension.SemanticEqual(ext) {
-				found = true
-				break
-			}
-		}
-		if found {
+		if requirementsContain(entry.Requirements, ext) {
 			continue
 		}
 		entry.Requirements = append(entry.Requirements, ExtensionRequirement{
-			Name: ext.Name, Since: at.UTC().Format(time.RFC3339), Extension: ext,
+			Name: ext.Name, Since: since, Extension: ext,
 		})
 		changed = true
 	}
 	if changed {
-		sort.SliceStable(entry.Requirements, func(i, j int) bool {
-			a, b := entry.Requirements[i], entry.Requirements[j]
-			if a.Name != b.Name {
-				return a.Name < b.Name
-			}
-			if a.Since != b.Since {
-				return a.Since < b.Since
-			}
-			return requirementKey(a.Extension) < requirementKey(b.Extension)
-		})
+		sortExtensionRequirements(entry.Requirements)
 		s.ExtensionRequirements[stanza] = entry
 	}
 	return changed
+}
+
+func requirementsContain(reqs []ExtensionRequirement, ext catalog.Extension) bool {
+	for _, have := range reqs {
+		if have.Extension.SemanticEqual(ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func sortExtensionRequirements(reqs []ExtensionRequirement) {
+	sort.SliceStable(reqs, func(i, j int) bool {
+		a, b := reqs[i], reqs[j]
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.Since != b.Since {
+			return a.Since < b.Since
+		}
+		return requirementKey(a.Extension) < requirementKey(b.Extension)
+	})
 }
 
 func requirementKey(ext catalog.Extension) string {
@@ -215,7 +222,7 @@ func autoConfPath(dataDir string) string { return filepath.Join(dataDir, "postgr
 // The guard is appended last, so PostgreSQL reads it after that line.
 func InstallCopyGuard(dataDir string, g CopyGuard) (bool, error) {
 	path := autoConfPath(dataDir)
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a copy's data directory.
+	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
@@ -263,7 +270,7 @@ func InstallCopyGuard(dataDir string, g CopyGuard) (bool, error) {
 // later operator change is not hidden by a guard that was already released.
 func RemoveCopyGuard(dataDir string) (bool, error) {
 	path := autoConfPath(dataDir)
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a copy's data directory.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -282,7 +289,7 @@ func RemoveCopyGuard(dataDir string) (bool, error) {
 
 // ReadCopyGuard returns the guard currently in dataDir.
 func ReadCopyGuard(dataDir string) (CopyGuard, bool, error) {
-	raw, err := os.ReadFile(autoConfPath(dataDir)) //nolint:gosec // G304: a copy's data directory.
+	raw, err := os.ReadFile(autoConfPath(dataDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return CopyGuard{}, false, nil
@@ -320,7 +327,7 @@ func CopyGuardCovered(g CopyGuard, preloads []string, settings map[string]string
 // rewrite may replace them. A missing file is an empty list; an unreadable one
 // is an error.
 func managedConfPreloads(confDir string) ([]string, error) {
-	raw, err := os.ReadFile(filepath.Join(confDir, "conf.d", "30-vaire-extensions.conf")) //nolint:gosec // G304: a cluster's own configuration.
+	raw, err := os.ReadFile(filepath.Join(confDir, "conf.d", "30-vaire-extensions.conf"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -346,7 +353,7 @@ func managedConfPreloads(confDir string) ([]string, error) {
 // guard is appended last, so it wins while present and this value applies again
 // once the guard is deliberately released.
 func PlainAutoPreloads(dataDir string) ([]string, error) {
-	raw, err := os.ReadFile(autoConfPath(dataDir)) //nolint:gosec // G304: a copy's data directory.
+	raw, err := os.ReadFile(autoConfPath(dataDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -448,78 +455,90 @@ func ComposeCopyGuardDropping(confDir, dataDir string, base CopyGuard, desired [
 	out := base.Clone()
 	out.Preloads = nil
 	out.Origins = nil
-	origins := map[string]string{}
-	seen := map[string]bool{}
+	preloads := copyGuardPreloadSet{origins: map[string]string{}, seen: map[string]bool{}}
 	// Origin precedence: retained evidence outranks current intent, which
 	// outranks the operator configuration. Desired preloads are inserted first
 	// to keep their load order; that insertion must not downgrade a library
 	// also backed by retained history, or a later rewrite could unload it
 	// while the data still needs it.
-	originRank := map[string]int{"operator": 0, "desired": 1, "retained": 2}
-	add := func(p, origin string) {
-		if p == "" {
-			return
-		}
-		if seen[p] {
-			if originRank[origin] > originRank[origins[p]] {
-				origins[p] = origin
-			}
-			return
-		}
-		seen[p] = true
-		out.Preloads = append(out.Preloads, p)
-		origins[p] = origin
-	}
 	for _, p := range desired {
-		add(p, "desired")
+		preloads.add(p, "desired")
 	}
 	for _, p := range base.Preloads {
-		add(p, "retained")
+		preloads.add(p, "retained")
 	}
 	for _, p := range confEffective {
 		if !oldCurrent[p] {
-			add(p, "operator")
+			preloads.add(p, "operator")
 		}
 	}
 	for _, p := range autoPlain {
 		if !oldCurrent[p] {
-			add(p, "operator")
+			preloads.add(p, "operator")
 		}
 	}
 	if present {
-		for _, p := range existing.Preloads {
-			if seen[p] {
-				continue
-			}
-			if dropped[p] {
-				continue
-			}
-			switch existing.Origins[p] {
-			case "operator", "desired":
-				// The previous guard recorded an operator or current-intent
-				// origin, and that source is now gone. The deliberate removal
-				// is proven and the entry is dropped.
-			default:
-				// A previous guard alone is not safety metadata. An
-				// unexplained requirement, including a valid pre-provenance
-				// guard, is never silently erased or loaded: refuse before
-				// any write or start.
-				return CopyGuard{}, output.NewError(output.CodePrecondition,
-					"the copy's existing guard contains "+p+", whose origin is not proven",
-					output.ExitPrecondition,
-					"Keep it in current intent, retained requirements or the operator's own configuration, or add explicit compatible metadata; the copy was not started.").
-					WithDetails(map[string]any{"reason": "extension_previous_guard_unknown", "library": p})
-			}
+		if err := rejectUnexplainedCopyGuardPreloads(existing, preloads.seen, dropped); err != nil {
+			return CopyGuard{}, err
 		}
 	}
+	out.Preloads = preloads.preloads
 	if len(out.Preloads) == 0 {
 		out.Preloads = nil
 	}
-	if len(origins) == 0 {
-		origins = nil
+	out.Origins = preloads.origins
+	if len(out.Origins) == 0 {
+		out.Origins = nil
 	}
-	out.Origins = origins
 	return out, nil
+}
+
+var copyGuardOriginRank = map[string]int{"operator": 0, "desired": 1, "retained": 2}
+
+type copyGuardPreloadSet struct {
+	preloads []string
+	origins  map[string]string
+	seen     map[string]bool
+}
+
+func (s *copyGuardPreloadSet) add(preload, origin string) {
+	if preload == "" {
+		return
+	}
+	if s.seen[preload] {
+		if copyGuardOriginRank[origin] > copyGuardOriginRank[s.origins[preload]] {
+			s.origins[preload] = origin
+		}
+		return
+	}
+	s.seen[preload] = true
+	s.preloads = append(s.preloads, preload)
+	s.origins[preload] = origin
+}
+
+func rejectUnexplainedCopyGuardPreloads(existing CopyGuard, seen, dropped map[string]bool) error {
+	for _, p := range existing.Preloads {
+		if seen[p] || dropped[p] {
+			continue
+		}
+		switch existing.Origins[p] {
+		case "operator", "desired":
+			// The previous guard recorded an operator or current-intent
+			// origin, and that source is now gone. The deliberate removal
+			// is proven and the entry is dropped.
+		default:
+			// A previous guard alone is not safety metadata. An
+			// unexplained requirement, including a valid pre-provenance
+			// guard, is never silently erased or loaded: refuse before
+			// any write or start.
+			return output.NewError(output.CodePrecondition,
+				"the copy's existing guard contains "+p+", whose origin is not proven",
+				output.ExitPrecondition,
+				"Keep it in current intent, retained requirements or the operator's own configuration, or add explicit compatible metadata; the copy was not started.").
+				WithDetails(map[string]any{"reason": "extension_previous_guard_unknown", "library": p})
+		}
+	}
+	return nil
 }
 
 // CopyGuardSettingsOptions is one guard settings decision. Known is the
@@ -571,13 +590,22 @@ func CopyGuardSettings(opts CopyGuardSettingsOptions) (CopyGuardSettingsDecision
 	if len(known) == 0 {
 		known = opts.Current
 	}
+	effective, owners, err := effectiveCopySettings(known, opts.CopyDB)
+	if err != nil {
+		return CopyGuardSettingsDecision{}, err
+	}
+	guard, handoff := copyGuardSettingDecisions(effective, owners, opts)
+	return CopyGuardSettingsDecision{Settings: guard, Handoff: handoff}, nil
+}
+
+func effectiveCopySettings(known []catalog.Extension, copyDB string) (map[string]string, map[string]copySettingOwner, error) {
 	effective := map[string]string{}
 	owners := map[string]copySettingOwner{}
 	for _, ext := range known {
-		ordinary := ext.ResolvedSettings(opts.CopyDB)
+		ordinary := ext.ResolvedSettings(copyDB)
 		mandatory := map[string]string{}
 		if ext.CopySafety == catalog.CopySafetyDisabled {
-			mandatory = ext.ResolvedCopySettings(opts.CopyDB)
+			mandatory = ext.ResolvedCopySettings(copyDB)
 		}
 		for k, v := range ordinary {
 			if _, own := mandatory[k]; own {
@@ -586,17 +614,21 @@ func CopyGuardSettings(opts CopyGuardSettingsOptions) (CopyGuardSettingsDecision
 				continue
 			}
 			if err := mergeEffective(effective, owners, k, v, copySettingOwner{name: ext.Name}); err != nil {
-				return CopyGuardSettingsDecision{}, err
+				return nil, nil, err
 			}
 		}
 		for k, v := range mandatory {
 			if err := mergeEffective(effective, owners, k, v, copySettingOwner{name: ext.Name, mandatory: true}); err != nil {
-				return CopyGuardSettingsDecision{}, err
+				return nil, nil, err
 			}
 		}
 	}
-	guard := map[string]string{}
-	handoff := map[string]string{}
+	return effective, owners, nil
+}
+
+func copyGuardSettingDecisions(effective map[string]string, owners map[string]copySettingOwner, opts CopyGuardSettingsOptions) (guard, handoff map[string]string) {
+	guard = map[string]string{}
+	handoff = map[string]string{}
 	for k, v := range effective {
 		owner := owners[k]
 		if !owner.mandatory {
@@ -606,24 +638,9 @@ func CopyGuardSettings(opts CopyGuardSettingsOptions) (CopyGuardSettingsDecision
 			guard[k] = v
 			continue
 		}
-		want := catalog.NormalizedSettingValue(v)
-		if !opts.Pending {
-			if prev, ok := opts.Handoff[k]; ok && prev == want {
-				// Already handed off to verified equivalent permanent
-				// configuration: a later deliberate change is respected.
-				handoff[k] = prev
-				continue
-			}
-		}
-		if !opts.Pending {
-			proof := opts.HandoffPermanent
-			if proof == nil {
-				proof = opts.Permanent
-			}
-			if permanent, supplied := proof[k]; supplied && permanent == want {
-				handoff[k] = want
-				continue
-			}
+		if value, ok := handedOffCopySetting(k, v, opts); ok {
+			handoff[k] = value
+			continue
 		}
 		guard[k] = v
 	}
@@ -633,7 +650,29 @@ func CopyGuardSettings(opts CopyGuardSettingsOptions) (CopyGuardSettingsDecision
 	if len(handoff) == 0 {
 		handoff = nil
 	}
-	return CopyGuardSettingsDecision{Settings: guard, Handoff: handoff}, nil
+	return guard, handoff
+}
+
+// handedOffCopySetting returns the recorded handoff value when a mandatory
+// setting is already supplied by verified equivalent permanent configuration.
+func handedOffCopySetting(key, value string, opts CopyGuardSettingsOptions) (string, bool) {
+	if opts.Pending {
+		return "", false
+	}
+	want := catalog.NormalizedSettingValue(value)
+	if prev, ok := opts.Handoff[key]; ok && prev == want {
+		// Already handed off to verified equivalent permanent
+		// configuration: a later deliberate change is respected.
+		return prev, true
+	}
+	proof := opts.HandoffPermanent
+	if proof == nil {
+		proof = opts.Permanent
+	}
+	if permanent, supplied := proof[key]; supplied && permanent == want {
+		return want, true
+	}
+	return "", false
 }
 
 func mergeEffective(effective map[string]string, owners map[string]copySettingOwner, key, value string, owner copySettingOwner) error {
@@ -656,48 +695,15 @@ func mergeEffective(effective map[string]string, owners map[string]copySettingOw
 }
 
 func parseCopyGuard(raw string) (CopyGuard, bool, error) {
-	lines := strings.Split(raw, "\n")
-	begin := -1
-	for i, line := range lines {
-		if strings.TrimSpace(line) == copyGuardBegin {
-			begin = i
-			break
-		}
-	}
-	if begin < 0 {
+	block, closed, present := copyGuardBlock(strings.Split(raw, "\n"))
+	if !present {
 		return CopyGuard{}, false, nil
 	}
 	g := CopyGuard{Settings: map[string]string{}}
-	closed := false
-	for _, line := range lines[begin+1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == copyGuardEnd {
-			closed = true
-			break
+	for _, line := range block {
+		if err := applyCopyGuardLine(&g, line); err != nil {
+			return CopyGuard{}, false, err
 		}
-		if strings.HasPrefix(trimmed, copyGuardOriginsPrefix) {
-			origins, err := parseCopyGuardOrigins(strings.TrimSpace(strings.TrimPrefix(trimmed, copyGuardOriginsPrefix)))
-			if err != nil {
-				return CopyGuard{}, false, err
-			}
-			g.Origins = origins
-			continue
-		}
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		tok, ok, err := lexConfigLine(trimmed)
-		if err != nil {
-			return CopyGuard{}, false, fmt.Errorf("the vaire copy guard line %q is not a setting: %w", trimmed, err)
-		}
-		if !ok {
-			continue
-		}
-		if tok.Name == "shared_preload_libraries" {
-			g.Preloads = splitSettingList(tok.Value)
-			continue
-		}
-		g.Settings[tok.Name] = tok.RawValue
 	}
 	if !closed {
 		return CopyGuard{}, false, fmt.Errorf("the vaire copy guard block has no end marker")
@@ -706,6 +712,55 @@ func parseCopyGuard(raw string) (CopyGuard, bool, error) {
 		g.Settings = nil
 	}
 	return g, true, nil
+}
+
+// copyGuardBlock returns the lines inside the first guard block. present is
+// false when there is no block; closed is false when the end marker is missing.
+func copyGuardBlock(lines []string) (block []string, closed, present bool) {
+	begin := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == copyGuardBegin {
+			begin = i
+			break
+		}
+	}
+	if begin < 0 {
+		return nil, false, false
+	}
+	for i := begin + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == copyGuardEnd {
+			return lines[begin+1 : i], true, true
+		}
+	}
+	return lines[begin+1:], false, true
+}
+
+func applyCopyGuardLine(g *CopyGuard, line string) error {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, copyGuardOriginsPrefix) {
+		origins, err := parseCopyGuardOrigins(strings.TrimSpace(strings.TrimPrefix(trimmed, copyGuardOriginsPrefix)))
+		if err != nil {
+			return err
+		}
+		g.Origins = origins
+		return nil
+	}
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return nil
+	}
+	tok, ok, err := lexConfigLine(trimmed)
+	if err != nil {
+		return fmt.Errorf("the vaire copy guard line %q is not a setting: %w", trimmed, err)
+	}
+	if !ok {
+		return nil
+	}
+	if tok.Name == "shared_preload_libraries" {
+		g.Preloads = splitSettingList(tok.Value)
+		return nil
+	}
+	g.Settings[tok.Name] = tok.RawValue
+	return nil
 }
 
 func parseCopyGuardOrigins(raw string) (map[string]string, error) {
@@ -731,7 +786,7 @@ func parseCopyGuardOrigins(raw string) (map[string]string, error) {
 // stripCopyGuard removes the block, leaving every other line in order.
 func stripCopyGuard(raw string) string {
 	lines := strings.SplitAfter(raw, "\n")
-	var out []string
+	out := make([]string, 0, len(lines))
 	in := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -780,28 +835,51 @@ func EffectiveConfPreloads(confDir string) ([]string, error) {
 
 func effectivePreloads(confDir string, withAuto bool, dataDir string) ([]string, error) {
 	value := ""
-	read := func(path string) error {
-		raw, err := os.ReadFile(path) //nolint:gosec // G304: a cluster's own configuration.
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		tokens, err := lexConfigLines(string(raw))
-		if err != nil {
-			return err
-		}
-		for _, tok := range tokens {
-			if tok.Name == "shared_preload_libraries" {
-				value = tok.Value
-			}
-		}
-		return nil
-	}
-	if err := read(filepath.Join(confDir, "postgresql.conf")); err != nil {
+	if err := readPreloadValue(filepath.Join(confDir, "postgresql.conf"), &value); err != nil {
 		return nil, err
 	}
+	names, err := confDConfigNames(confDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		if err := readPreloadValue(filepath.Join(confDir, "conf.d", name), &value); err != nil {
+			return nil, err
+		}
+	}
+	if withAuto {
+		if err := readPreloadValue(autoConfPath(dataDir), &value); err != nil {
+			return nil, err
+		}
+	}
+	return splitSettingList(value), nil
+}
+
+// readPreloadValue replaces value with the last shared_preload_libraries
+// assignment in path. A missing file leaves value unchanged.
+func readPreloadValue(path string, value *string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	tokens, err := lexConfigLines(string(raw))
+	if err != nil {
+		return err
+	}
+	for _, tok := range tokens {
+		if tok.Name == "shared_preload_libraries" {
+			*value = tok.Value
+		}
+	}
+	return nil
+}
+
+// confDConfigNames lists confDir/conf.d's named configuration files in the
+// order PostgreSQL reads them.
+func confDConfigNames(confDir string) ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(confDir, "conf.d"))
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -813,17 +891,7 @@ func effectivePreloads(confDir string, withAuto bool, dataDir string) ([]string,
 		}
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		if err := read(filepath.Join(confDir, "conf.d", name)); err != nil {
-			return nil, err
-		}
-	}
-	if withAuto {
-		if err := read(autoConfPath(dataDir)); err != nil {
-			return nil, err
-		}
-	}
-	return splitSettingList(value), nil
+	return names, nil
 }
 
 // EffectivePermanentSettings reads the underlying permanent configuration a
@@ -836,7 +904,7 @@ func EffectivePermanentSettings(confDir, dataDir string) (map[string]string, err
 	if err := readPermanentSettings(filepath.Join(confDir, "postgresql.conf"), out, confDir, true); err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(autoConfPath(dataDir)) //nolint:gosec // G304: a cluster's data directory.
+	raw, err := os.ReadFile(autoConfPath(dataDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return out, nil
@@ -850,7 +918,7 @@ func EffectivePermanentSettings(confDir, dataDir string) (map[string]string, err
 }
 
 func readPermanentSettings(path string, out map[string]string, confDir string, allowIncludeDir bool) error {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a cluster's own configuration.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -880,17 +948,10 @@ func readPermanentSettings(path string, out map[string]string, confDir string, a
 }
 
 func readConfDSettings(confDir string, out map[string]string) error {
-	entries, err := os.ReadDir(filepath.Join(confDir, "conf.d"))
-	if err != nil && !os.IsNotExist(err) {
+	names, err := confDConfigNames(confDir)
+	if err != nil {
 		return err
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".conf") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
 	for _, name := range names {
 		if err := readPermanentSettings(filepath.Join(confDir, "conf.d", name), out, "", false); err != nil {
 			return err
@@ -935,22 +996,13 @@ func lexConfigLine(line string) (configToken, bool, error) {
 	if s == "" || strings.HasPrefix(s, "#") {
 		return configToken{}, false, nil
 	}
-	i := 0
-	for i < len(s) && s[i] != '=' && !isConfigSpace(s[i]) {
-		i++
+	name, i, err := configLineName(s, line)
+	if err != nil {
+		return configToken{}, false, err
 	}
-	if i == 0 {
-		return configToken{}, false, fmt.Errorf("configuration line %q has no setting name", line)
-	}
-	name := asciiLower(s[:i])
-	for i < len(s) && isConfigSpace(s[i]) {
-		i++
-	}
+	i = skipConfigSpace(s, i)
 	if i < len(s) && s[i] == '=' {
-		i++
-		for i < len(s) && isConfigSpace(s[i]) {
-			i++
-		}
+		i = skipConfigSpace(s, i+1)
 	}
 	if i >= len(s) || s[i] == '#' {
 		return configToken{}, false, fmt.Errorf("configuration line %q has no value", line)
@@ -958,55 +1010,74 @@ func lexConfigLine(line string) (configToken, bool, error) {
 	rawStart := i
 	var value string
 	if s[i] == '\'' {
-		i++
-		var b strings.Builder
-		closed := false
-		for i < len(s) {
-			c := s[i]
-			switch {
-			case c == '\'' && i+1 < len(s) && s[i+1] == '\'':
-				b.WriteByte('\'')
-				i += 2
-			case c == '\'':
-				i++
-				closed = true
-			case c == '\\':
-				decoded, next, err := decodeConfigEscape(s, i)
-				if err != nil {
-					return configToken{}, false, fmt.Errorf("configuration line %q: %w", line, err)
-				}
-				b.WriteByte(decoded)
-				i = next
-			default:
-				b.WriteByte(c)
-				i++
-			}
-			if closed {
-				break
-			}
-		}
-		if !closed {
-			return configToken{}, false, fmt.Errorf("configuration line %q has an unterminated quoted value", line)
-		}
-		value = b.String()
+		value, i, err = decodeQuotedConfigValue(s, line, i)
 	} else {
-		start := i
-		for i < len(s) && !isConfigSpace(s[i]) && s[i] != '#' {
-			i++
-		}
-		if i == start {
-			return configToken{}, false, fmt.Errorf("configuration line %q has no value", line)
-		}
-		value = s[start:i]
+		value, i, err = decodeBareConfigValue(s, line, i)
+	}
+	if err != nil {
+		return configToken{}, false, err
 	}
 	rawEnd := i
-	for i < len(s) && isConfigSpace(s[i]) {
-		i++
-	}
+	i = skipConfigSpace(s, i)
 	if i < len(s) && s[i] != '#' {
 		return configToken{}, false, fmt.Errorf("configuration line %q has trailing text %q", line, s[i:])
 	}
 	return configToken{Name: name, Value: value, RawValue: s[rawStart:rawEnd]}, true, nil
+}
+
+func configLineName(s, line string) (string, int, error) {
+	i := 0
+	for i < len(s) && s[i] != '=' && !isConfigSpace(s[i]) {
+		i++
+	}
+	if i == 0 {
+		return "", 0, fmt.Errorf("configuration line %q has no setting name", line)
+	}
+	return asciiLower(s[:i]), i, nil
+}
+
+func skipConfigSpace(s string, i int) int {
+	for i < len(s) && isConfigSpace(s[i]) {
+		i++
+	}
+	return i
+}
+
+func decodeQuotedConfigValue(s, line string, i int) (string, int, error) {
+	i++
+	var b strings.Builder
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == '\'' && i+1 < len(s) && s[i+1] == '\'':
+			b.WriteByte('\'')
+			i += 2
+		case c == '\'':
+			return b.String(), i + 1, nil
+		case c == '\\':
+			decoded, next, err := decodeConfigEscape(s, i)
+			if err != nil {
+				return "", i, fmt.Errorf("configuration line %q: %w", line, err)
+			}
+			b.WriteByte(decoded)
+			i = next
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return "", i, fmt.Errorf("configuration line %q has an unterminated quoted value", line)
+}
+
+func decodeBareConfigValue(s, line string, i int) (string, int, error) {
+	start := i
+	for i < len(s) && !isConfigSpace(s[i]) && s[i] != '#' {
+		i++
+	}
+	if i == start {
+		return "", i, fmt.Errorf("configuration line %q has no value", line)
+	}
+	return s[start:i], i, nil
 }
 
 func isConfigSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\r' || c == '\n' }
@@ -1068,8 +1139,14 @@ func lexConfigLines(raw string) ([]configToken, error) {
 // data spans. ok is false when the selection or its prior chain is unknown;
 // callers then treat historical coverage as unproven.
 func SelectedBackupStart(info Info, opts RestoreOptions) (time.Time, bool) {
-	var selected Set
-	var ok bool
+	selected, ok := selectedBackupSet(info, opts)
+	if !ok {
+		return time.Time{}, false
+	}
+	return fullBackupStart(info, selected)
+}
+
+func selectedBackupSet(info Info, opts RestoreOptions) (Set, bool) {
 	switch opts.Kind {
 	case TargetTime:
 		for i := len(info.Sets) - 1; i >= 0; i-- {
@@ -1079,23 +1156,23 @@ func SelectedBackupStart(info Info, opts RestoreOptions) (time.Time, bool) {
 			}
 			start, err := time.Parse(time.RFC3339, set.Start)
 			if err != nil {
-				return time.Time{}, false
+				return Set{}, false
 			}
 			if !start.After(opts.Time) {
-				selected, ok = set, true
-				break
+				return set, true
 			}
 		}
+		return Set{}, false
 	case TargetSet:
-		selected, ok = info.Find(opts.Set)
+		return info.Find(opts.Set)
 	case TargetLatest, "":
-		selected, ok = info.Latest()
+		return info.Latest()
 	default:
-		return time.Time{}, false
+		return Set{}, false
 	}
-	if !ok {
-		return time.Time{}, false
-	}
+}
+
+func fullBackupStart(info Info, selected Set) (time.Time, bool) {
 	seen := map[string]bool{}
 	for depth := 0; depth < 100; depth++ {
 		if selected.Type == TypeFull {
@@ -1170,32 +1247,53 @@ func mergeOneRequirement(out []catalog.Extension, ext catalog.Extension, declare
 	ext = ext.Clone()
 	for i := range out {
 		have := out[i]
-		if ext.ExtName != "" && have.ExtName == ext.ExtName {
-			if have.Source != ext.Source || have.Package != ext.Package {
-				return nil, providerConflict(have, ext)
-			}
-			if have.Preload != "" && ext.Preload != "" && have.Preload != ext.Preload {
-				return nil, providerConflict(have, ext)
-			}
-			if have.Preload == "" {
-				out[i].Preload = ext.Preload
-			}
-			if !declared && have.SemanticEqual(ext) {
-				return out, nil
-			}
+		done, err := mergeSameExtName(out, i, ext, declared)
+		if err != nil {
+			return nil, err
 		}
-		if ext.Preload != "" && have.Preload == ext.Preload {
-			if have.Name != ext.Name || have.Source != ext.Source || have.Package != ext.Package {
-				return nil, providerConflict(have, ext)
-			}
-		}
-	}
-	for _, have := range out {
-		if have.SemanticEqual(ext) {
+		if done {
 			return out, nil
 		}
+		if ext.Preload != "" && have.Preload == ext.Preload && !sameProvider(have, ext) {
+			return nil, providerConflict(have, ext)
+		}
+	}
+	if containsSemanticExtension(out, ext) {
+		return out, nil
 	}
 	return append(out, ext), nil
+}
+
+// mergeSameExtName merges ext into the descriptor at out[i] when both name the
+// same extension. done says the existing descriptor already satisfies ext.
+func mergeSameExtName(out []catalog.Extension, i int, ext catalog.Extension, declared bool) (done bool, err error) {
+	have := out[i]
+	if ext.ExtName == "" || have.ExtName != ext.ExtName {
+		return false, nil
+	}
+	if have.Source != ext.Source || have.Package != ext.Package {
+		return false, providerConflict(have, ext)
+	}
+	if have.Preload != "" && ext.Preload != "" && have.Preload != ext.Preload {
+		return false, providerConflict(have, ext)
+	}
+	if have.Preload == "" {
+		out[i].Preload = ext.Preload
+	}
+	return !declared && have.SemanticEqual(ext), nil
+}
+
+func sameProvider(a, b catalog.Extension) bool {
+	return a.Name == b.Name && a.Source == b.Source && a.Package == b.Package
+}
+
+func containsSemanticExtension(out []catalog.Extension, ext catalog.Extension) bool {
+	for _, have := range out {
+		if have.SemanticEqual(ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func providerConflict(a, b catalog.Extension) error {
@@ -1228,33 +1326,8 @@ func copyGuardFor(exts []catalog.Extension, standby bool, copyDB string) (CopyGu
 			seenPreloads[ext.Preload] = true
 			guard.Preloads = append(guard.Preloads, ext.Preload)
 		}
-		switch ext.CopySafety {
-		case catalog.CopySafetySafe:
-		case catalog.CopySafetyDisabled:
-			settings := ext.ResolvedCopySettings(copyDB)
-			if len(settings) == 0 {
-				return CopyGuard{}, output.NewError(output.CodePrecondition,
-					"extension "+ext.Name+" declares copy_safety disabled without copy_settings",
-					output.ExitPrecondition,
-					"Add the settings that suppress its background work, or declare it safe.").
-					WithDetails(map[string]any{"reason": "extension_copy_safety_incomplete", "extension": ext.Name})
-			}
-			for k, v := range settings {
-				if prev, ok := guard.Settings[k]; ok && catalog.NormalizedSettingValue(prev) != catalog.NormalizedSettingValue(v) {
-					return CopyGuard{}, output.NewError(output.CodePrecondition,
-						"extension copy settings conflict on "+k+": "+prev+" and "+v,
-						output.ExitPrecondition,
-						"Two required extensions cannot suppress the same setting differently. Keep one provider or one safe definition.").
-						WithDetails(map[string]any{"reason": "extension_copy_setting_conflict", "setting": k, "extensions": []string{ext.Name}})
-				}
-				guard.Settings[k] = v
-			}
-		default:
-			return CopyGuard{}, output.NewError(output.CodePrecondition,
-				"extension "+ext.Name+" has no copy safety declaration",
-				output.ExitPrecondition,
-				"Declare copy_safety safe or disabled with copy_settings in its [extensions."+ext.Name+"] definition; an unknown native extension cannot be started in a copy.").
-				WithDetails(map[string]any{"reason": "extension_copy_safety_unknown", "extension": ext.Name})
+		if err := addCopySafetySettings(&guard, ext, copyDB); err != nil {
+			return CopyGuard{}, err
 		}
 		if standby && !ext.StandbySafe {
 			return CopyGuard{}, output.NewError(output.CodePrecondition,
@@ -1268,6 +1341,39 @@ func copyGuardFor(exts []catalog.Extension, standby bool, copyDB string) (CopyGu
 		guard.Settings = nil
 	}
 	return guard, nil
+}
+
+func addCopySafetySettings(guard *CopyGuard, ext catalog.Extension, copyDB string) error {
+	switch ext.CopySafety {
+	case catalog.CopySafetySafe:
+		return nil
+	case catalog.CopySafetyDisabled:
+		settings := ext.ResolvedCopySettings(copyDB)
+		if len(settings) == 0 {
+			return output.NewError(output.CodePrecondition,
+				"extension "+ext.Name+" declares copy_safety disabled without copy_settings",
+				output.ExitPrecondition,
+				"Add the settings that suppress its background work, or declare it safe.").
+				WithDetails(map[string]any{"reason": "extension_copy_safety_incomplete", "extension": ext.Name})
+		}
+		for k, v := range settings {
+			if prev, ok := guard.Settings[k]; ok && catalog.NormalizedSettingValue(prev) != catalog.NormalizedSettingValue(v) {
+				return output.NewError(output.CodePrecondition,
+					"extension copy settings conflict on "+k+": "+prev+" and "+v,
+					output.ExitPrecondition,
+					"Two required extensions cannot suppress the same setting differently. Keep one provider or one safe definition.").
+					WithDetails(map[string]any{"reason": "extension_copy_setting_conflict", "setting": k, "extensions": []string{ext.Name}})
+			}
+			guard.Settings[k] = v
+		}
+		return nil
+	default:
+		return output.NewError(output.CodePrecondition,
+			"extension "+ext.Name+" has no copy safety declaration",
+			output.ExitPrecondition,
+			"Declare copy_safety safe or disabled with copy_settings in its [extensions."+ext.Name+"] definition; an unknown native extension cannot be started in a copy.").
+			WithDetails(map[string]any{"reason": "extension_copy_safety_unknown", "extension": ext.Name})
+	}
 }
 
 // CopyPlan is the historical and copy-safety decision for one materialised

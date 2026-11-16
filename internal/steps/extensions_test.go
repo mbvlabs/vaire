@@ -153,6 +153,61 @@ func TestExtensionPrerequisitesVerifyFiles(t *testing.T) {
 }
 
 func TestExtensionLibraryNamingForms(t *testing.T) {
+	reqs, absLib := extensionLibraryNamingFixtures(t)
+	for _, tc := range []struct {
+		name, path, unwanted string
+		restore              func()
+	}{
+		{
+			name: "suffix-qualified preload", path: filepath.Join(extensionLibDir, "custom_lib.so"),
+			unwanted: "custom_lib.so.so",
+			restore:  func() { touchExtensionFile(t, filepath.Join(extensionLibDir, "custom_lib.so")) },
+		},
+		{
+			name: "bare preload", path: filepath.Join(extensionLibDir, "bare_lib.so"),
+			restore: func() { touchExtensionLibrary(t, "bare_lib") },
+		},
+		{
+			name: "absolute module", path: absLib + ".so",
+			restore: func() { touchExtensionFile(t, absLib+".so") },
+		},
+		{
+			name: "bare control module", path: filepath.Join(extensionLibDir, "bare_mod_lib.so"),
+			restore: func() { touchExtensionLibrary(t, "bare_mod_lib") },
+		},
+	} {
+		if err := os.Remove(tc.path); err != nil {
+			t.Fatal(err)
+		}
+		err := VerifyExtensionRequirements(reqs)
+		if err == nil || !strings.Contains(err.Error(), filepath.Base(tc.path)) ||
+			(tc.unwanted != "" && strings.Contains(err.Error(), tc.unwanted)) {
+			t.Fatalf("%s = %v", tc.name, err)
+		}
+		tc.restore()
+	}
+
+	unsupported := []ExtensionPrerequisite{{Name: "bad", Source: catalog.SourcePreinstalled, ExtName: "bad_ext"}}
+	if err := os.WriteFile(filepath.Join(extensionControlDir, "bad_ext.control"), []byte("module_pathname = '$libdir'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyExtensionRequirements(unsupported); err == nil || !strings.Contains(err.Error(), "unsupported module_pathname") {
+		t.Fatalf("unsupported module path = %v", err)
+	}
+
+	unreadable := []ExtensionPrerequisite{{Name: "unreadable", Source: catalog.SourcePreinstalled, ExtName: "unreadable"}}
+	if err := os.MkdirAll(filepath.Join(extensionControlDir, "unreadable.control"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyExtensionRequirements(unreadable); err == nil || !strings.Contains(err.Error(), "cannot read control file") {
+		t.Fatalf("unreadable control file = %v", err)
+	}
+}
+
+// extensionLibraryNamingFixtures file tree accepts every supported library
+// naming form before the test removes one file at a time.
+func extensionLibraryNamingFixtures(t *testing.T) ([]ExtensionPrerequisite, string) {
+	t.Helper()
 	extensionTestDirs(t)
 	absDir := t.TempDir()
 	absLib := filepath.Join(absDir, "abs_lib")
@@ -186,55 +241,7 @@ func TestExtensionLibraryNamingForms(t *testing.T) {
 	if err := VerifyExtensionRequirements(reqs); err != nil {
 		t.Fatalf("valid naming forms refused: %v", err)
 	}
-
-	if err := os.Remove(filepath.Join(extensionLibDir, "custom_lib.so")); err != nil {
-		t.Fatal(err)
-	}
-	err = VerifyExtensionRequirements(reqs)
-	if err == nil || !strings.Contains(err.Error(), "custom_lib.so") || strings.Contains(err.Error(), "custom_lib.so.so") {
-		t.Fatalf("suffix-qualified preload = %v", err)
-	}
-	touchExtensionFile(t, filepath.Join(extensionLibDir, "custom_lib.so"))
-
-	if err := os.Remove(filepath.Join(extensionLibDir, "bare_lib.so")); err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyExtensionRequirements(reqs); err == nil || !strings.Contains(err.Error(), "bare_lib.so") {
-		t.Fatalf("bare preload = %v", err)
-	}
-	touchExtensionLibrary(t, "bare_lib")
-
-	if err := os.Remove(absLib + ".so"); err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyExtensionRequirements(reqs); err == nil || !strings.Contains(err.Error(), "abs_lib.so") {
-		t.Fatalf("absolute module = %v", err)
-	}
-	touchExtensionFile(t, absLib+".so")
-
-	if err := os.Remove(filepath.Join(extensionLibDir, "bare_mod_lib.so")); err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyExtensionRequirements(reqs); err == nil || !strings.Contains(err.Error(), "bare_mod_lib.so") {
-		t.Fatalf("bare control module = %v", err)
-	}
-	touchExtensionLibrary(t, "bare_mod_lib")
-
-	unsupported := []ExtensionPrerequisite{{Name: "bad", Source: catalog.SourcePreinstalled, ExtName: "bad_ext"}}
-	if err := os.WriteFile(filepath.Join(extensionControlDir, "bad_ext.control"), []byte("module_pathname = '$libdir'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyExtensionRequirements(unsupported); err == nil || !strings.Contains(err.Error(), "unsupported module_pathname") {
-		t.Fatalf("unsupported module path = %v", err)
-	}
-
-	unreadable := []ExtensionPrerequisite{{Name: "unreadable", Source: catalog.SourcePreinstalled, ExtName: "unreadable"}}
-	if err := os.MkdirAll(filepath.Join(extensionControlDir, "unreadable.control"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyExtensionRequirements(unreadable); err == nil || !strings.Contains(err.Error(), "cannot read control file") {
-		t.Fatalf("unreadable control file = %v", err)
-	}
+	return reqs, absLib
 }
 
 func TestPostgresPackagesInputsPreserveBaseline(t *testing.T) {
@@ -490,6 +497,13 @@ func TestPrepareExtensionStartExtraAndPreinstalled(t *testing.T) {
 }
 
 func TestExtensionSQLSchemaGrantsAndDefaults(t *testing.T) {
+	t.Run("custom extension SQL", testExtensionSQLCustomSchema)
+	t.Run("built-in grants", testExtensionSQLBuiltinGrants)
+	t.Run("schema override", testExtensionSQLPartmanOverride)
+	t.Run("effective database grants", testExtensionSQLDatabaseGrants)
+}
+
+func testExtensionSQLCustomSchema(t *testing.T) {
 	custom := catalog.Extension{Name: "custom", ExtName: "my_ext", Schema: "myext"}
 	sql := ExtensionSQL(custom, "app")
 	for _, want := range []string{
@@ -503,7 +517,9 @@ func TestExtensionSQLSchemaGrantsAndDefaults(t *testing.T) {
 	if strings.Contains(sql, "GRANT") {
 		t.Fatalf("custom extension gained a grant:\n%s", sql)
 	}
+}
 
+func testExtensionSQLBuiltinGrants(t *testing.T) {
 	cron := ExtensionSQL(catalog.Extension{Name: "pg_cron", ExtName: "pg_cron"}, "app")
 	if !strings.Contains(cron, `GRANT USAGE ON SCHEMA "cron" TO "app_owner";`) {
 		t.Fatalf("pg_cron grant missing:\n%s", cron)
@@ -513,7 +529,9 @@ func TestExtensionSQLSchemaGrantsAndDefaults(t *testing.T) {
 		!strings.Contains(partman, `GRANT ALL ON SCHEMA "partman" TO "app_owner";`) {
 		t.Fatalf("pg_partman SQL:\n%s", partman)
 	}
+}
 
+func testExtensionSQLPartmanOverride(t *testing.T) {
 	// An accepted schema override grants the resolved schema, not the
 	// built-in default.
 	override := config.DefaultCluster()
@@ -549,7 +567,9 @@ func TestExtensionSQLSchemaGrantsAndDefaults(t *testing.T) {
 	if auto := ExtensionSQL(catalog.Extension{Name: "auto_explain", Preload: "auto_explain"}, "app"); auto != "" {
 		t.Fatalf("preload-only module produced SQL: %q", auto)
 	}
+}
 
+func testExtensionSQLDatabaseGrants(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext", Schema: "myext"},

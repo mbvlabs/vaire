@@ -741,19 +741,11 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err := dropPreflight(ctx, env, cfg, p.Name, forkCleanup, followCleanup); err != nil {
 		return Result{}, err
 	}
-	if inConfig {
-		if err := captureStanzaRequirements(cfg, spec); err != nil {
-			return Result{}, output.NewError(output.CodePrecondition,
-				"recording "+p.Name+"'s extension requirements before the drop failed: "+err.Error(),
-				output.ExitPrecondition, "Nothing was dropped. Retry after fixing the requirement history store.").
-				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.Name})
-		}
+	if err := captureDropRequirements(cfg, spec, inConfig); err != nil {
+		return Result{}, err
 	}
 	local := steps.ClusterPG(spec)
-	exists := false
-	if inConfig && clusterExists {
-		exists, _ = databaseIn(ctx, local, p.Name)
-	}
+	exists := dropDatabaseExists(ctx, local, p.Name, inConfig, clusterExists)
 	warnings, final, err := dropFinalDump(ctx, env, cfg, p, exists)
 	if err != nil {
 		return Result{}, err
@@ -785,6 +777,27 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	return dropResult(p.Name, spec, roles, stanzaKept, final, warnings), nil
+}
+
+func captureDropRequirements(cfg config.Cluster, spec config.ClusterSpec, inConfig bool) error {
+	if !inConfig {
+		return nil
+	}
+	if err := captureStanzaRequirements(cfg, spec); err != nil {
+		return output.NewError(output.CodePrecondition,
+			"recording "+spec.Name+"'s extension requirements before the drop failed: "+err.Error(),
+			output.ExitPrecondition, "Nothing was dropped. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": spec.Name})
+	}
+	return nil
+}
+
+func dropDatabaseExists(ctx context.Context, local pg.Local, name string, inConfig, clusterExists bool) bool {
+	if !inConfig || !clusterExists {
+		return false
+	}
+	exists, _ := databaseIn(ctx, local, name)
+	return exists
 }
 
 func cleanupDroppedRouting(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, inConfig bool, name string, warnings []output.Warning) ([]output.Warning, error) {
@@ -1223,11 +1236,7 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	cpuOnly := p.Size == "" && p.Memory == ""
-	if !cpuOnly && resized.CPUMode == "spare" && (p.CPUMode != nil || p.CPUQuota != nil) {
-		if err := checkSpareCPU(ctx, p.Name, resized.CPUMode); err != nil {
-			return Result{}, err
-		}
-	} else if err := checkCPUProposal(ctx, nextBeforeResize(cfg, old), cfg); err != nil {
+	if err := checkResizeCPU(ctx, p, resized, cfg, old, cpuOnly); err != nil {
 		return Result{}, err
 	}
 	if cpuOnly {
@@ -1253,6 +1262,13 @@ func handleDBResize(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, withHint(err, "The new size is saved. Finish it with vaire apply --db "+p.Name+".")
 	}
 	return applyFullResize(ctx, env, cfg, rt, p, resized, warnings)
+}
+
+func checkResizeCPU(ctx context.Context, p dbResizeParams, resized config.ClusterSpec, cfg config.Cluster, old config.ClusterSpec, cpuOnly bool) error {
+	if !cpuOnly && resized.CPUMode == "spare" && (p.CPUMode != nil || p.CPUQuota != nil) {
+		return checkSpareCPU(ctx, p.Name, resized.CPUMode)
+	}
+	return checkCPUProposal(ctx, nextBeforeResize(cfg, old), cfg)
 }
 
 func saveResizeConfig(store state.Store, cfg config.Cluster, targets []string) error {

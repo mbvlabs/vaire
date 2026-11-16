@@ -36,88 +36,124 @@ type cronFake struct {
 func (c *cronFake) Query(_ context.Context, db, sql string, vars map[string]string) ([]map[string]string, error) {
 	switch {
 	case strings.Contains(sql, "current_setting('cron.database_name')"):
-		return []map[string]string{{"db": c.metadataDB, "oid": c.metadataOID}}, nil
+		return c.metadataFact(), nil
 	case strings.Contains(sql, "pg_database WHERE oid"):
-		if vars["oid"] != c.metadataOID || c.metadataOID == "" {
-			return nil, nil
-		}
-		return []map[string]string{{"db": c.currentName}}, nil
+		return c.databaseNameFact(vars), nil
 	case strings.Contains(sql, "FROM pg_extension"):
-		c.installDB = db
-		if c.extensionErr != nil {
-			return nil, c.extensionErr
-		}
-		if c.extensionRows != nil {
-			return c.extensionRows, nil
-		}
-		return []map[string]string{{"installed": boolText(c.installed)}}, nil
+		return c.installedFact(db)
 	case strings.Contains(sql, "to_regclass('cron.job')"):
-		c.jobReads++
-		c.jobDB = db
-		if c.jobTableRows != nil {
-			return c.jobTableRows, nil
-		}
-		// psql --csv emits t/f for native booleans, but true/false for text.
-		value := "f"
-		if c.present {
-			value = "t"
-		}
-		if strings.Contains(sql, "::text AS present") {
-			value = boolText(c.present)
-		}
-		return []map[string]string{{"present": value}}, nil
+		return c.jobTableFact(db, sql), nil
 	case strings.Contains(sql, "information_schema.columns"):
-		c.jobReads++
-		c.jobDB = db
-		var rows []map[string]string
-		for name := range c.columns {
-			rows = append(rows, map[string]string{"name": name})
-		}
-		return rows, nil
+		return c.jobColumnFacts(db), nil
 	case strings.Contains(sql, "UPDATE cron.job SET active = false"):
-		c.jobReads++
-		c.jobDB = db
-		var rows []map[string]string
-		for _, job := range c.jobs {
-			if job["active"] == "true" {
-				job["active"] = "false"
-				rows = append(rows, map[string]string{"jobid": job["jobid"]})
-			}
-		}
-		return rows, nil
+		return c.deactivateJobsFact(db), nil
 	case strings.Contains(sql, "count(*)") && strings.Contains(sql, "WHERE active"):
-		c.jobReads++
-		c.jobDB = db
-		n := 0
-		for _, job := range c.jobs {
-			if job["active"] == "true" {
-				n++
-			}
-		}
-		return []map[string]string{{"n": cronItoa(n)}}, nil
+		return c.activeJobCountFact(db), nil
 	case strings.Contains(sql, "UPDATE cron.job SET database"):
-		c.jobReads++
-		c.jobDB = db
-		var rows []map[string]string
-		for _, job := range c.jobs {
-			if job["database"] == vars["old"] {
-				job["database"] = vars["new"]
-				rows = append(rows, map[string]string{"jobid": job["jobid"]})
-			}
-		}
-		return rows, nil
+		return c.retargetJobsFact(db, vars), nil
 	case strings.Contains(sql, "count(*)") && strings.Contains(sql, "WHERE database"):
-		c.jobReads++
-		c.jobDB = db
-		n := 0
-		for _, job := range c.jobs {
-			if job["database"] == vars["old"] {
-				n++
-			}
-		}
-		return []map[string]string{{"n": cronItoa(n)}}, nil
+		return c.databaseJobCountFact(db, vars), nil
 	}
 	return nil, nil
+}
+
+func (c *cronFake) metadataFact() []map[string]string {
+	return []map[string]string{{"db": c.metadataDB, "oid": c.metadataOID}}
+}
+
+func (c *cronFake) databaseNameFact(vars map[string]string) []map[string]string {
+	if vars["oid"] != c.metadataOID || c.metadataOID == "" {
+		return nil
+	}
+	return []map[string]string{{"db": c.currentName}}
+}
+
+func (c *cronFake) installedFact(db string) ([]map[string]string, error) {
+	c.installDB = db
+	if c.extensionErr != nil {
+		return nil, c.extensionErr
+	}
+	if c.extensionRows != nil {
+		return c.extensionRows, nil
+	}
+	return []map[string]string{{"installed": boolText(c.installed)}}, nil
+}
+
+func (c *cronFake) jobTableFact(db, sql string) []map[string]string {
+	c.jobReads++
+	c.jobDB = db
+	if c.jobTableRows != nil {
+		return c.jobTableRows
+	}
+	// psql --csv emits t/f for native booleans, but true/false for text.
+	value := "f"
+	if c.present {
+		value = "t"
+	}
+	if strings.Contains(sql, "::text AS present") {
+		value = boolText(c.present)
+	}
+	return []map[string]string{{"present": value}}
+}
+
+func (c *cronFake) jobColumnFacts(db string) []map[string]string {
+	c.jobReads++
+	c.jobDB = db
+	rows := make([]map[string]string, 0, len(c.columns))
+	for name := range c.columns {
+		rows = append(rows, map[string]string{"name": name})
+	}
+	return rows
+}
+
+func (c *cronFake) deactivateJobsFact(db string) []map[string]string {
+	c.jobReads++
+	c.jobDB = db
+	var rows []map[string]string
+	for _, job := range c.jobs {
+		if job["active"] == "true" {
+			job["active"] = "false"
+			rows = append(rows, map[string]string{"jobid": job["jobid"]})
+		}
+	}
+	return rows
+}
+
+func (c *cronFake) activeJobCountFact(db string) []map[string]string {
+	c.jobReads++
+	c.jobDB = db
+	n := 0
+	for _, job := range c.jobs {
+		if job["active"] == "true" {
+			n++
+		}
+	}
+	return []map[string]string{{"n": cronItoa(n)}}
+}
+
+func (c *cronFake) retargetJobsFact(db string, vars map[string]string) []map[string]string {
+	c.jobReads++
+	c.jobDB = db
+	var rows []map[string]string
+	for _, job := range c.jobs {
+		if job["database"] == vars["old"] {
+			job["database"] = vars["new"]
+			rows = append(rows, map[string]string{"jobid": job["jobid"]})
+		}
+	}
+	return rows
+}
+
+func (c *cronFake) databaseJobCountFact(db string, vars map[string]string) []map[string]string {
+	c.jobReads++
+	c.jobDB = db
+	n := 0
+	for _, job := range c.jobs {
+		if job["database"] == vars["old"] {
+			n++
+		}
+	}
+	return []map[string]string{{"n": cronItoa(n)}}
 }
 
 func (c *cronFake) Exec(_ context.Context, _, sql string, _ map[string]string) error {
@@ -709,8 +745,8 @@ func TestCheckRestoredExtensionsBlocksUnknownAndReportsRetained(t *testing.T) {
 
 type restoredFake struct{ installed []string }
 
-func (r *restoredFake) Query(_ context.Context, _, sql string, _ map[string]string) ([]map[string]string, error) {
-	var rows []map[string]string
+func (r *restoredFake) Query(_ context.Context, _, _ string, _ map[string]string) ([]map[string]string, error) {
+	rows := make([]map[string]string, 0, len(r.installed))
 	for _, name := range r.installed {
 		rows = append(rows, map[string]string{"name": name})
 	}
@@ -829,7 +865,7 @@ func useTempGuardWriter(t *testing.T) {
 	t.Helper()
 	old := backup.CopyGuardWriterForTest()
 	backup.RestoreCopyGuardWriterForTest(func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	})
 	t.Cleanup(func() { backup.RestoreCopyGuardWriterForTest(old) })
 }

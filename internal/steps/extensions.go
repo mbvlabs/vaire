@@ -77,45 +77,11 @@ func ExtensionPrerequisites(cfg config.Cluster) ([]ExtensionPrerequisite, error)
 	resolver := cfg.ExtensionResolver()
 	seen := map[ExtensionPrerequisite]bool{}
 	var out []ExtensionPrerequisite
-	add := func(spec config.ClusterSpec) error {
-		selections := [][]string{spec.Extensions}
-		if spec.RecoveryExtensions != nil {
-			selections = append(selections, *spec.RecoveryExtensions)
-		}
-		for _, declared := range selections {
-			effective, err := resolver.EffectiveNames(declared)
-			if err != nil {
-				return err
+	for _, specs := range [][]config.ClusterSpec{cfg.Clusters, cfg.Awaiting} {
+		for _, spec := range specs {
+			if err := addSpecExtensionPrerequisites(resolver, spec, seen, &out); err != nil {
+				return nil, err
 			}
-			for _, name := range effective {
-				ext, err := resolver.Resolve(name)
-				if err != nil {
-					return err
-				}
-				req := ExtensionPrerequisite{
-					Name: ext.Name, Source: ext.Source, Package: ext.Package,
-					ExtName: ext.ExtName, Preload: ext.Preload,
-				}
-				if req.ExtName == "" && req.Preload == "" {
-					continue
-				}
-				if seen[req] {
-					continue
-				}
-				seen[req] = true
-				out = append(out, req)
-			}
-		}
-		return nil
-	}
-	for _, spec := range cfg.Clusters {
-		if err := add(spec); err != nil {
-			return nil, err
-		}
-	}
-	for _, spec := range cfg.Awaiting {
-		if err := add(spec); err != nil {
-			return nil, err
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -135,6 +101,49 @@ func ExtensionPrerequisites(cfg config.Cluster) ([]ExtensionPrerequisite, error)
 		return a.Source < b.Source
 	})
 	return out, nil
+}
+
+// addSpecExtensionPrerequisites collects one cluster's declared and recovery
+// selections into the host-wide requirement set.
+func addSpecExtensionPrerequisites(resolver config.ExtensionResolver, spec config.ClusterSpec, seen map[ExtensionPrerequisite]bool, out *[]ExtensionPrerequisite) error {
+	selections := [][]string{spec.Extensions}
+	if spec.RecoveryExtensions != nil {
+		selections = append(selections, *spec.RecoveryExtensions)
+	}
+	for _, declared := range selections {
+		if err := addDeclaredExtensionPrerequisites(resolver, declared, seen, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addDeclaredExtensionPrerequisites resolves one declared selection and adds
+// only the entries that have a control file or preload library.
+func addDeclaredExtensionPrerequisites(resolver config.ExtensionResolver, declared []string, seen map[ExtensionPrerequisite]bool, out *[]ExtensionPrerequisite) error {
+	effective, err := resolver.EffectiveNames(declared)
+	if err != nil {
+		return err
+	}
+	for _, name := range effective {
+		ext, err := resolver.Resolve(name)
+		if err != nil {
+			return err
+		}
+		req := ExtensionPrerequisite{
+			Name: ext.Name, Source: ext.Source, Package: ext.Package,
+			ExtName: ext.ExtName, Preload: ext.Preload,
+		}
+		if req.ExtName == "" && req.Preload == "" {
+			continue
+		}
+		if seen[req] {
+			continue
+		}
+		seen[req] = true
+		*out = append(*out, req)
+	}
+	return nil
 }
 
 // ExtensionPackages is the sorted, deduplicated APT package union required by
@@ -343,7 +352,7 @@ func extensionLibraryPath(name string) (string, error) {
 // is false for a SQL-only extension. Unreadable files and unsupported module
 // forms are errors, never silently treated as "no library".
 func extensionControlModule(path string) (module string, found bool, err error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: fixed PostgreSQL 18 extension directory.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
@@ -411,6 +420,32 @@ func validateCopyGuardPreloads(cfg config.Cluster, spec config.ClusterSpec, copy
 	if len(g.Preloads) == 0 {
 		return nil
 	}
+	defs, err := copyGuardPreloadDefinitions(cfg, known)
+	if err != nil {
+		return err
+	}
+	transitionNames := extensionNameSet(transition)
+	reqs := make([]ExtensionPrerequisite, 0, len(g.Preloads))
+	for _, library := range g.Preloads {
+		req, err := validateCopyGuardPreload(spec, copyDB, library, defs[library], transitionNames, permanent, standby, released, g)
+		if err != nil {
+			return err
+		}
+		reqs = append(reqs, req)
+	}
+	if err := VerifyExtensionRequirements(reqs); err != nil {
+		return output.NewError(output.CodePrecondition,
+			"the copy's final preload union is missing a package or library: "+err.Error(),
+			output.ExitPrecondition,
+			"Install the required PostgreSQL 18 package or file; the copy was not started.").
+			WithDetails(map[string]any{"reason": "extension_preload_missing", "database": spec.Name})
+	}
+	return nil
+}
+
+// copyGuardPreloadDefinitions indexes every known and configured descriptor
+// that declares a library, keyed by that library.
+func copyGuardPreloadDefinitions(cfg config.Cluster, known []catalog.Extension) (map[string][]catalog.Extension, error) {
 	defs := map[string][]catalog.Extension{}
 	add := func(ext catalog.Extension) {
 		if ext.Preload == "" {
@@ -423,93 +458,112 @@ func validateCopyGuardPreloads(cfg config.Cluster, spec config.ClusterSpec, copy
 	}
 	list, err := cfg.ExtensionResolver().List()
 	if err != nil {
-		return config.ValidationError(err)
+		return nil, config.ValidationError(err)
 	}
 	for _, ext := range list {
 		add(ext)
 	}
-	transitionNames := map[string]bool{}
-	for _, ext := range transition {
-		transitionNames[ext.Name] = true
+	return defs, nil
+}
+
+func extensionNameSet(exts []catalog.Extension) map[string]bool {
+	out := make(map[string]bool, len(exts))
+	for _, ext := range exts {
+		out[ext.Name] = true
 	}
-	var reqs []ExtensionPrerequisite
-	for _, library := range g.Preloads {
-		allMatches := compatiblePreloadDefinitions(defs[library])
-		if len(allMatches) == 0 {
-			return output.NewError(output.CodePrecondition,
-				"the copy's final preload union contains "+library+", which no extension definition explains",
-				output.ExitPrecondition,
-				"Declare it in [extensions.<name>] with copy_safety and standby_safe, or remove it from the copied configuration; the copy was not started.").
-				WithDetails(map[string]any{"reason": "extension_preload_unknown", "library": library, "database": spec.Name})
-		}
-		var matches []catalog.Extension
-		for _, ext := range allMatches {
-			if !transitionNames[ext.Name] {
-				matches = append(matches, ext)
-			}
-		}
-		transitionOnly := false
-		if len(matches) == 0 {
-			matches, transitionOnly = allMatches, true
-		}
-		base := matches[0]
-		if len(matches) > 1 {
-			return output.NewError(output.CodePrecondition,
-				"the copy's preload library "+library+" matches definitions with contradictory safety metadata: "+preloadDefinitionNames(matches),
-				output.ExitPrecondition,
-				"Keep one compatible definition for that library; the copy was not started.").
-				WithDetails(map[string]any{"reason": "extension_preload_ambiguous", "library": library, "database": spec.Name})
-		}
-		if !transitionOnly {
-			switch base.CopySafety {
-			case catalog.CopySafetySafe:
-			case catalog.CopySafetyDisabled:
-				for k, v := range base.ResolvedCopySettings(copyDB) {
-					want := catalog.NormalizedSettingValue(v)
-					if prev, ok := released[k]; ok && prev == want {
-						// This key was released only after the permanent
-						// configuration was proven to supply the same value. The
-						// validator must not recreate the guard suppression.
-						continue
-					}
-					got, ok := g.Settings[k]
-					if !ok {
-						got, ok = permanent[k]
-					}
-					if !ok || catalog.NormalizedSettingValue(got) != want {
-						return output.NewError(output.CodePrecondition,
-							"the copy's library "+library+" requires "+k+" = "+v+" but the final guard does not enforce it",
-							output.ExitPrecondition,
-							"Keep the extension's copy_settings in the final guard, or declare it copy_safe; the copy was not started.").
-							WithDetails(map[string]any{"reason": "extension_preload_unsafe", "library": library, "setting": k, "database": spec.Name})
-					}
-				}
-			default:
-				return output.NewError(output.CodePrecondition,
-					"the copy's library "+library+" comes from "+base.Name+" without a copy safety declaration",
-					output.ExitPrecondition,
-					"Declare copy_safety safe or disabled in its definition; the copy was not started.").
-					WithDetails(map[string]any{"reason": "extension_preload_unsafe", "library": library, "database": spec.Name})
-			}
-			if standby && !base.StandbySafe {
-				return output.NewError(output.CodePrecondition,
-					"the copy's library "+library+" comes from "+base.Name+", which is not declared standby_safe",
-					output.ExitPrecondition,
-					"Declare standby_safe only when the native code is safe on a standby; the copy was not started.").
-					WithDetails(map[string]any{"reason": "extension_preload_standby_unsafe", "library": library, "database": spec.Name})
-			}
-		}
-		reqs = append(reqs, ExtensionPrerequisite{
-			Name: base.Name, Source: base.Source, Package: base.Package,
-			ExtName: base.ExtName, Preload: base.Preload,
-		})
+	return out
+}
+
+// validateCopyGuardPreload binds one final preload library to its single
+// compatible descriptor and its copy/standby obligations.
+func validateCopyGuardPreload(spec config.ClusterSpec, copyDB, library string, candidates []catalog.Extension, transitionNames map[string]bool, permanent map[string]string, standby bool, released map[string]string, g backup.CopyGuard) (ExtensionPrerequisite, error) {
+	base, transitionOnly, err := selectCopyGuardPreloadDefinition(spec, library, candidates, transitionNames)
+	if err != nil {
+		return ExtensionPrerequisite{}, err
 	}
-	if err := VerifyExtensionRequirements(reqs); err != nil {
-		return output.NewError(output.CodePrecondition,
-			"the copy's final preload union is missing a package or library: "+err.Error(),
+	if !transitionOnly {
+		if err := validateCopyGuardPreloadSafety(base, spec, copyDB, library, permanent, standby, released, g); err != nil {
+			return ExtensionPrerequisite{}, err
+		}
+	}
+	return ExtensionPrerequisite{
+		Name: base.Name, Source: base.Source, Package: base.Package,
+		ExtName: base.ExtName, Preload: base.Preload,
+	}, nil
+}
+
+// selectCopyGuardPreloadDefinition wins the non-transition descriptor for one
+// library. A library explained only by outgoing transition descriptors is
+// accepted as transition-only.
+func selectCopyGuardPreloadDefinition(spec config.ClusterSpec, library string, candidates []catalog.Extension, transitionNames map[string]bool) (catalog.Extension, bool, error) {
+	allMatches := compatiblePreloadDefinitions(candidates)
+	if len(allMatches) == 0 {
+		return catalog.Extension{}, false, output.NewError(output.CodePrecondition,
+			"the copy's final preload union contains "+library+", which no extension definition explains",
 			output.ExitPrecondition,
-			"Install the required PostgreSQL 18 package or file; the copy was not started.").
-			WithDetails(map[string]any{"reason": "extension_preload_missing", "database": spec.Name})
+			"Declare it in [extensions.<name>] with copy_safety and standby_safe, or remove it from the copied configuration; the copy was not started.").
+			WithDetails(map[string]any{"reason": "extension_preload_unknown", "library": library, "database": spec.Name})
+	}
+	var matches []catalog.Extension
+	for _, ext := range allMatches {
+		if !transitionNames[ext.Name] {
+			matches = append(matches, ext)
+		}
+	}
+	transitionOnly := false
+	if len(matches) == 0 {
+		matches, transitionOnly = allMatches, true
+	}
+	base := matches[0]
+	if len(matches) > 1 {
+		return catalog.Extension{}, false, output.NewError(output.CodePrecondition,
+			"the copy's preload library "+library+" matches definitions with contradictory safety metadata: "+preloadDefinitionNames(matches),
+			output.ExitPrecondition,
+			"Keep one compatible definition for that library; the copy was not started.").
+			WithDetails(map[string]any{"reason": "extension_preload_ambiguous", "library": library, "database": spec.Name})
+	}
+	return base, transitionOnly, nil
+}
+
+// validateCopyGuardPreloadSafety proves the winning descriptor's copy and
+// standby declarations against the final guard and permanent configuration.
+func validateCopyGuardPreloadSafety(base catalog.Extension, spec config.ClusterSpec, copyDB, library string, permanent map[string]string, standby bool, released map[string]string, g backup.CopyGuard) error {
+	switch base.CopySafety {
+	case catalog.CopySafetySafe:
+	case catalog.CopySafetyDisabled:
+		for k, v := range base.ResolvedCopySettings(copyDB) {
+			want := catalog.NormalizedSettingValue(v)
+			if prev, ok := released[k]; ok && prev == want {
+				// This key was released only after the permanent
+				// configuration was proven to supply the same value. The
+				// validator must not recreate the guard suppression.
+				continue
+			}
+			got, ok := g.Settings[k]
+			if !ok {
+				got, ok = permanent[k]
+			}
+			if !ok || catalog.NormalizedSettingValue(got) != want {
+				return output.NewError(output.CodePrecondition,
+					"the copy's library "+library+" requires "+k+" = "+v+" but the final guard does not enforce it",
+					output.ExitPrecondition,
+					"Keep the extension's copy_settings in the final guard, or declare it copy_safe; the copy was not started.").
+					WithDetails(map[string]any{"reason": "extension_preload_unsafe", "library": library, "setting": k, "database": spec.Name})
+			}
+		}
+	default:
+		return output.NewError(output.CodePrecondition,
+			"the copy's library "+library+" comes from "+base.Name+" without a copy safety declaration",
+			output.ExitPrecondition,
+			"Declare copy_safety safe or disabled in its definition; the copy was not started.").
+			WithDetails(map[string]any{"reason": "extension_preload_unsafe", "library": library, "database": spec.Name})
+	}
+	if standby && !base.StandbySafe {
+		return output.NewError(output.CodePrecondition,
+			"the copy's library "+library+" comes from "+base.Name+", which is not declared standby_safe",
+			output.ExitPrecondition,
+			"Declare standby_safe only when the native code is safe on a standby; the copy was not started.").
+			WithDetails(map[string]any{"reason": "extension_preload_standby_unsafe", "library": library, "database": spec.Name})
 	}
 	return nil
 }
@@ -564,61 +618,104 @@ func preloadDefinitionNames(defs []catalog.Extension) string {
 func ReconcileCopyGuard(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) error {
 	dataDir := cfg.Server.DataDirectory(spec.Name)
 	if spec.IsFollower() {
-		// Guard refresh happens after the preflight has proven the target. If
-		// the catalog becomes unreadable between that proof and this write,
-		// use the identity-bound complete preflight plan so no SQL-only or
-		// unguarded mandatory obligation is lost. Without that plan, stop
-		// before any guard write, reload, start or restart.
-		id, err := FollowerRuntimeIdentity(cfg, spec, FollowerRuntimeOperation(ctx))
-		if err != nil {
-			return err
-		}
-		snapshot, ok := FollowerRuntimePlanFor(ctx, id)
-		req := FollowerRuntimeRequest{
-			Class: FollowerRuntimeLive, Outgoing: FollowerRuntimeOutgoing(ctx),
-			RetireAbsent: true, AllowUnknownSQL: true,
-		}
-		if ok {
-			req.Snapshot = &snapshot
-		}
-		plan, err := PlanFollowerRuntime(ctx, cfg, spec, req)
-		if err != nil {
-			return err
-		}
-		_, _, err = backup.ReadCopyGuard(dataDir)
-		if err != nil {
-			return err
-		}
-		if err := ValidateCopyGuardPreloadsWithTransition(cfg, spec, spec.DatabaseName(), plan.Requirements, plan.Outgoing, plan.Permanent, true, nil, plan.Guard); err != nil {
-			return err
-		}
-		// The plan is the complete winning union. It keeps every retained,
-		// outgoing or operator obligation; when the actual catalog proves the
-		// last removed SQL absent, an empty plan deliberately removes the
-		// obsolete guard block rather than pinning it forever.
-		_, err = backup.InstallCopyGuard(dataDir, plan.Guard)
-		return err
+		return reconcileFollowerCopyGuard(ctx, cfg, spec)
 	}
-	_, present, err := backup.ReadCopyGuard(dataDir)
+	refresh, present, err := prepareCopyGuardRefresh(cfg, spec, dataDir)
 	if err != nil || !present {
 		return err
 	}
-	recs, err := backup.LoadRecords()
-	if err != nil {
-		return err
-	}
-	resolver := cfg.ExtensionResolver()
-	currentNames, err := resolver.EffectiveNames(spec.Extensions)
+	desiredPreloads, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
 	if err != nil {
 		return config.ValidationError(err)
 	}
-	current := make([]catalog.Extension, 0, len(currentNames))
-	for _, name := range currentNames {
-		ext, err := resolver.Resolve(name)
-		if err != nil {
-			return config.ValidationError(err)
-		}
-		current = append(current, ext)
+	plan := &backup.CopyPlan{
+		Guard: refresh.guard, DesiredPreloads: desiredPreloads,
+		ValidateGuard: func(g backup.CopyGuard) error {
+			return ValidateCopyGuardPreloads(cfg, spec, spec.DatabaseName(), refresh.known, refresh.permanent, false, refresh.handoff, g)
+		},
+	}
+	composed, _, err := backup.InstallCopyPlanGuard(PGConfDir(spec.Name), dataDir, plan)
+	if err != nil {
+		return err
+	}
+	confPreloads, err := backup.EffectiveConfPreloads(PGConfDir(spec.Name))
+	if err != nil {
+		return err
+	}
+	permanentPreloads := append([]string(nil), confPreloads...)
+	if backup.CopyGuardCovered(composed, permanentPreloads, refresh.actualPermanent) {
+		_, err = backup.RemoveCopyGuard(dataDir)
+		return err
+	}
+	_, err = backup.InstallCopyGuard(dataDir, composed)
+	return err
+}
+
+// reconcileFollowerCopyGuard refreshes a follower's guard from its complete
+// runtime plan. A post-effect preflight snapshot is used only when the live
+// catalog cannot be read; the plan is still the complete winning union.
+func reconcileFollowerCopyGuard(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) error {
+	dataDir := cfg.Server.DataDirectory(spec.Name)
+	// Guard refresh happens after the preflight has proven the target. If
+	// the catalog becomes unreadable between that proof and this write,
+	// use the identity-bound complete preflight plan so no SQL-only or
+	// unguarded mandatory obligation is lost. Without that plan, stop
+	// before any guard write, reload, start or restart.
+	id, err := FollowerRuntimeIdentity(cfg, spec, FollowerRuntimeOperation(ctx))
+	if err != nil {
+		return err
+	}
+	snapshot, ok := FollowerRuntimePlanFor(ctx, id)
+	req := FollowerRuntimeRequest{
+		Class: FollowerRuntimeLive, Outgoing: FollowerRuntimeOutgoing(ctx),
+		RetireAbsent: true, AllowUnknownSQL: true,
+	}
+	if ok {
+		req.Snapshot = &snapshot
+	}
+	plan, err := PlanFollowerRuntime(ctx, cfg, spec, req)
+	if err != nil {
+		return err
+	}
+	_, _, err = backup.ReadCopyGuard(dataDir)
+	if err != nil {
+		return err
+	}
+	if err := ValidateCopyGuardPreloadsWithTransition(cfg, spec, spec.DatabaseName(), plan.Requirements, plan.Outgoing, plan.Permanent, true, nil, plan.Guard); err != nil {
+		return err
+	}
+	// The plan is the complete winning union. It keeps every retained,
+	// outgoing or operator obligation; when the actual catalog proves the
+	// last removed SQL absent, an empty plan deliberately removes the
+	// obsolete guard block rather than pinning it forever.
+	_, err = backup.InstallCopyGuard(dataDir, plan.Guard)
+	return err
+}
+
+type copyGuardRefresh struct {
+	guard           backup.CopyGuard
+	handoff         map[string]string
+	known           []catalog.Extension
+	permanent       map[string]string
+	actualPermanent map[string]string
+}
+
+// prepareCopyGuardRefresh reads and updates the durable guard handoff for a
+// non-follower's permanent configuration. It writes only the handoff record;
+// the guard itself is installed by the caller after validation. An absent
+// guard is reported as not present so the caller no-ops, exactly as before.
+func prepareCopyGuardRefresh(cfg config.Cluster, spec config.ClusterSpec, dataDir string) (copyGuardRefresh, bool, error) {
+	_, present, err := backup.ReadCopyGuard(dataDir)
+	if err != nil || !present {
+		return copyGuardRefresh{}, false, err
+	}
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return copyGuardRefresh{}, false, err
+	}
+	current, err := ResolveExtensionSelection(cfg, spec)
+	if err != nil {
+		return copyGuardRefresh{}, false, err
 	}
 	desired := map[string]bool{}
 	for _, ext := range current {
@@ -632,8 +729,48 @@ func ReconcileCopyGuard(ctx context.Context, cfg config.Cluster, spec config.Clu
 	}
 	_, base, err := backup.MergeCopyRequirements(retained, nil, false, spec.DatabaseName())
 	if err != nil {
-		return err
+		return copyGuardRefresh{}, false, err
 	}
+	permanent := copyGuardPermanentSettings(cfg, spec, current)
+	actualPermanent, err := backup.EffectivePermanentSettings(PGConfDir(spec.Name), dataDir)
+	if err != nil {
+		return copyGuardRefresh{}, false, output.NewError(output.CodePrecondition,
+			"the permanent configuration's effective precedence for "+spec.Name+" cannot be proven: "+err.Error(),
+			output.ExitPrecondition,
+			"Fix the cluster's configuration files; vaire will not release a copy suppression without proof.").
+			WithDetails(map[string]any{"reason": "extension_permanent_unproven", "database": spec.Name})
+	}
+	instance, err := guardInstanceIdentity()
+	if err != nil {
+		return copyGuardRefresh{}, false, output.NewError(output.CodePrecondition,
+			"the node instance identity is missing, so "+spec.Name+"'s guard handoff cannot be scoped",
+			output.ExitPrecondition, "Repair the node's instance file deliberately; vaire will not inherit unscoped handoff authority.").
+			WithDetails(map[string]any{"reason": "guard_instance_unknown", "database": spec.Name})
+	}
+	known := append(append([]catalog.Extension(nil), current...), retained...)
+	decision, err := backup.CopyGuardSettings(backup.CopyGuardSettingsOptions{
+		Known: known, Current: current, Permanent: permanent,
+		Explicit: spec.Settings, CopyDB: spec.DatabaseName(),
+		Pending: copyGuardFenceActive(recs, spec), Handoff: recs.GuardHandoffFor(spec.Name, instance, spec.Stanza),
+		HandoffPermanent: actualPermanent,
+	})
+	if err != nil {
+		return copyGuardRefresh{}, false, err
+	}
+	base.Settings = decision.Settings
+	if err := backup.UpdateRecords(func(s *backup.Records) error {
+		s.SetGuardHandoff(spec.Name, instance, spec.Stanza, decision.Handoff)
+		return nil
+	}); err != nil {
+		return copyGuardRefresh{}, false, err
+	}
+	return copyGuardRefresh{
+		guard: base, handoff: decision.Handoff, known: known,
+		permanent: permanent, actualPermanent: actualPermanent,
+	}, true, nil
+}
+
+func copyGuardPermanentSettings(cfg config.Cluster, spec config.ClusterSpec, current []catalog.Extension) map[string]string {
 	permanent := map[string]string{}
 	for k, v := range cfg.Postgres.Settings {
 		permanent[k] = v
@@ -646,68 +783,12 @@ func ReconcileCopyGuard(ctx context.Context, cfg config.Cluster, spec config.Clu
 	for k, v := range spec.Settings {
 		permanent[k] = v
 	}
-	known := append(append([]catalog.Extension(nil), current...), retained...)
-	fenceActive := false
-	if f, ok := recs.ActivationFenceFor(spec.Name); ok && f.Active() {
-		fenceActive = true
-	}
-	actualPermanent, err := backup.EffectivePermanentSettings(PGConfDir(spec.Name), dataDir)
-	if err != nil {
-		return output.NewError(output.CodePrecondition,
-			"the permanent configuration's effective precedence for "+spec.Name+" cannot be proven: "+err.Error(),
-			output.ExitPrecondition,
-			"Fix the cluster's configuration files; vaire will not release a copy suppression without proof.").
-			WithDetails(map[string]any{"reason": "extension_permanent_unproven", "database": spec.Name})
-	}
-	instance, err := guardInstance()
-	if err != nil || strings.TrimSpace(instance) == "" {
-		return output.NewError(output.CodePrecondition,
-			"the node instance identity is missing, so "+spec.Name+"'s guard handoff cannot be scoped",
-			output.ExitPrecondition, "Repair the node's instance file deliberately; vaire will not inherit unscoped handoff authority.").
-			WithDetails(map[string]any{"reason": "guard_instance_unknown", "database": spec.Name})
-	}
-	instance = strings.TrimSpace(instance)
-	decision, err := backup.CopyGuardSettings(backup.CopyGuardSettingsOptions{
-		Known: known, Current: current, Permanent: permanent,
-		Explicit: spec.Settings, CopyDB: spec.DatabaseName(),
-		Pending: fenceActive, Handoff: recs.GuardHandoffFor(spec.Name, instance, spec.Stanza),
-		HandoffPermanent: actualPermanent,
-	})
-	if err != nil {
-		return err
-	}
-	base.Settings = decision.Settings
-	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		s.SetGuardHandoff(spec.Name, instance, spec.Stanza, decision.Handoff)
-		return nil
-	}); err != nil {
-		return err
-	}
-	desiredPreloads, err := resolver.Preloads(spec.Extensions)
-	if err != nil {
-		return config.ValidationError(err)
-	}
-	plan := &backup.CopyPlan{
-		Guard: base, DesiredPreloads: desiredPreloads,
-		ValidateGuard: func(g backup.CopyGuard) error {
-			return ValidateCopyGuardPreloads(cfg, spec, spec.DatabaseName(), known, permanent, false, decision.Handoff, g)
-		},
-	}
-	composed, _, err := backup.InstallCopyPlanGuard(PGConfDir(spec.Name), dataDir, plan)
-	if err != nil {
-		return err
-	}
-	confPreloads, err := backup.EffectiveConfPreloads(PGConfDir(spec.Name))
-	if err != nil {
-		return err
-	}
-	permanentPreloads := append([]string(nil), confPreloads...)
-	if backup.CopyGuardCovered(composed, permanentPreloads, actualPermanent) {
-		_, err = backup.RemoveCopyGuard(dataDir)
-		return err
-	}
-	_, err = backup.InstallCopyGuard(dataDir, composed)
-	return err
+	return permanent
+}
+
+func copyGuardFenceActive(recs backup.Records, spec config.ClusterSpec) bool {
+	f, ok := recs.ActivationFenceFor(spec.Name)
+	return ok && f.Active()
 }
 
 // ValidateExtensionDescriptorSafety checks ordinary descriptor/provider and
@@ -1027,14 +1108,81 @@ func SetFollowerInstalledExtensionSchemasForTest(f func(context.Context, config.
 // genuine retained extras keep strict historical ambiguity checks. Unknown or
 // unreadable required facts refuse before any effect.
 func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower config.ClusterSpec, req FollowerRuntimeRequest) (FollowerRuntimePlan, error) {
+	st, err := newFollowerRuntimeState(cfg, follower, req)
+	if err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	snapshot, err := st.loadRuntimeFacts(ctx)
+	if err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	if snapshot != nil {
+		return *snapshot, nil
+	}
+	st.indexCurrentDescriptors()
+	if err := st.indexOutgoingDescriptors(); err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	if err := st.collectRetainedDescriptors(); err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	kept, retired, err := st.keptExtensions()
+	if err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	baseKeys := st.baseKeys()
+	decision, permanent, actualPermanent, err := st.guardDecision(kept, baseKeys)
+	if err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	expected, err := st.expectedSettings(kept, baseKeys, actualPermanent)
+	if err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	return st.buildPlan(kept, retired, decision, permanent, expected)
+}
+
+// followerRuntimeState stages one follower plan. Its methods follow the
+// original fact order: current intent, outgoing transition, installed SQL,
+// guard history, then the winning runtime union.
+type followerRuntimeState struct {
+	cfg      config.Cluster
+	follower config.ClusterSpec
+	req      FollowerRuntimeRequest
+	source   config.ClusterSpec
+	class    FollowerRuntimeClass
+	db       string
+	resolver config.ExtensionResolver
+	current  []catalog.Extension
+
+	currentByName    map[string]catalog.Extension
+	currentBySQL     map[string]catalog.Extension
+	currentByPreload map[string]catalog.Extension
+	currentBySetting map[string]catalog.Extension
+
+	outgoingByName    map[string]catalog.Extension
+	outgoingBySQL     map[string]catalog.Extension
+	outgoingByPreload map[string]catalog.Extension
+	outgoingBySetting map[string]catalog.Extension
+
+	retained    map[string]catalog.Extension
+	recs        backup.Records
+	existing    backup.CopyGuard
+	present     bool
+	installed   map[string]bool
+	sqlComplete bool
+	dataDir     string
+}
+
+func newFollowerRuntimeState(cfg config.Cluster, follower config.ClusterSpec, req FollowerRuntimeRequest) (*followerRuntimeState, error) {
 	if !follower.IsFollower() {
-		return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
+		return nil, output.NewError(output.CodePrecondition,
 			follower.Name+" is not a follower, so it has no inherited runtime plan",
 			output.ExitPrecondition, "Use the ordinary database configuration path.")
 	}
 	source, ok := cfg.ClusterByName(follower.Follows)
 	if !ok {
-		return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
+		return nil, output.NewError(output.CodePrecondition,
 			follower.Follows+" is not in cluster.toml, so "+follower.Name+" has no inherited runtime",
 			output.ExitPrecondition, "Restore the source database's configuration before changing the follower.").
 			WithDetails(map[string]any{"reason": "database_not_found", "database": follower.Follows})
@@ -1048,7 +1196,7 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 	switch class {
 	case FollowerRuntimeLive, FollowerRuntimeAwaiting, FollowerRuntimeStopped:
 	default:
-		return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
+		return nil, output.NewError(output.CodePrecondition,
 			"unknown follower runtime evidence class "+string(class),
 			output.ExitPrecondition, "This is a vaire bug; report it with the run log.")
 	}
@@ -1056,11 +1204,48 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 	resolver := cfg.ExtensionResolver()
 	currentNames, err := resolver.EffectiveNames(source.Extensions)
 	if err != nil {
-		return FollowerRuntimePlan{}, config.ValidationError(err)
+		return nil, config.ValidationError(err)
 	}
 	current, err := resolveExtensionDescriptors(resolver, currentNames)
 	if err != nil {
-		return FollowerRuntimePlan{}, config.ValidationError(err)
+		return nil, config.ValidationError(err)
+	}
+	return &followerRuntimeState{
+		cfg: cfg, follower: follower, req: req, source: source,
+		class: class, db: db, resolver: resolver, current: current,
+		retained: map[string]catalog.Extension{},
+	}, nil
+}
+
+// loadRuntimeFacts collects the live catalog and persisted guard evidence. A
+// post-effect refresh without a readable catalog returns its complete preflight
+// snapshot; any other unknown state refuses before effects.
+func (st *followerRuntimeState) loadRuntimeFacts(ctx context.Context) (*FollowerRuntimePlan, error) {
+	if err := st.validateLiveSchemas(ctx); err != nil {
+		return nil, err
+	}
+	// Current inherited metadata safety is independent of the preload list and
+	// files: every selected descriptor, SQL-only included, must declare
+	// compatible copy/standby safety before history, save, package or DROP.
+	if _, _, err := backup.MergeCopyRequirements(st.current, nil, true, st.db); err != nil {
+		return nil, err
+	}
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
+	st.recs = recs
+	st.dataDir = st.cfg.Server.DataDirectory(st.follower.Name)
+	st.existing, st.present, err = backup.ReadCopyGuard(st.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	return st.loadInstalledFacts(ctx)
+}
+
+func (st *followerRuntimeState) validateLiveSchemas(ctx context.Context) error {
+	if st.class != FollowerRuntimeLive || st.req.AllowUnknownSQL {
+		return nil
 	}
 	// A live follower's actual metadata namespace must agree with every
 	// explicitly targeted descriptor schema before history, save,
@@ -1069,239 +1254,254 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 	// closed. A stopped/awaiting target has no readable catalog here and is
 	// rechecked before its own SQL; a post-effect refresh never claims a new
 	// preflight.
-	if class == FollowerRuntimeLive && !req.AllowUnknownSQL {
-		schemaEntries := make([]catalog.Extension, 0, len(current))
-		for _, ext := range current {
-			if ext.ExtName != "" && ext.Schema != "" {
-				schemaEntries = append(schemaEntries, ext)
-			}
-		}
-		if len(schemaEntries) > 0 {
-			schemas, err := followerInstalledExtensionSchemas(ctx, follower)
-			if err != nil {
-				return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
-					"cannot read "+follower.Name+"'s installed extension schemas: "+err.Error(),
-					output.ExitPrecondition, "Start the follower and retry when its catalog answers; nothing was changed.").
-					WithDetails(map[string]any{"reason": "follower_schema_unknown", "database": follower.Name})
-			}
-			if err := ValidateInstalledExtensionSchemas(follower.Name, schemaEntries, schemas); err != nil {
-				return FollowerRuntimePlan{}, err
-			}
+	schemaEntries := make([]catalog.Extension, 0, len(st.current))
+	for _, ext := range st.current {
+		if ext.ExtName != "" && ext.Schema != "" {
+			schemaEntries = append(schemaEntries, ext)
 		}
 	}
-	// Current inherited metadata safety is independent of the preload list and
-	// files: every selected descriptor, SQL-only included, must declare
-	// compatible copy/standby safety before history, save, package or DROP.
-	if _, _, err := backup.MergeCopyRequirements(current, nil, true, db); err != nil {
-		return FollowerRuntimePlan{}, err
+	if len(schemaEntries) == 0 {
+		return nil
 	}
-	recs, err := backup.LoadRecords()
+	schemas, err := followerInstalledExtensionSchemas(ctx, st.follower)
 	if err != nil {
-		return FollowerRuntimePlan{}, err
+		return output.NewError(output.CodePrecondition,
+			"cannot read "+st.follower.Name+"'s installed extension schemas: "+err.Error(),
+			output.ExitPrecondition, "Start the follower and retry when its catalog answers; nothing was changed.").
+			WithDetails(map[string]any{"reason": "follower_schema_unknown", "database": st.follower.Name})
 	}
-	dataDir := cfg.Server.DataDirectory(follower.Name)
-	existing, present, err := backup.ReadCopyGuard(dataDir)
-	if err != nil {
-		return FollowerRuntimePlan{}, err
+	return ValidateInstalledExtensionSchemas(st.follower.Name, schemaEntries, schemas)
+}
+
+func (st *followerRuntimeState) loadInstalledFacts(ctx context.Context) (*FollowerRuntimePlan, error) {
+	if st.class != FollowerRuntimeLive {
+		return nil, nil
 	}
 	// Actual installed SQL facts. A live catalog error is unknown state, not
 	// an empty set; only an explicit post-effect refresh may keep the existing
 	// obligations without claiming completeness. An awaiting target is
 	// metadata-only and never pretends the catalog was queried.
-	sqlComplete := false
-	var installed map[string]bool
-	if class == FollowerRuntimeLive {
-		var factsErr error
-		installed, factsErr = followerInstalledExtensions(ctx, follower)
-		if factsErr != nil {
-			if !req.AllowUnknownSQL {
-				return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
-					"cannot read "+follower.Name+"'s installed SQL extensions: "+factsErr.Error(),
-					output.ExitPrecondition, "Start the follower and retry when its catalog answers; nothing was changed.").
-					WithDetails(map[string]any{"reason": "follower_sql_unknown", "database": follower.Name})
-			}
-			if req.Snapshot == nil {
-				// Reconstructing from the preload guard alone would silently
-				// lose a SQL-only retained descriptor or an unguarded
-				// mandatory suppression found by preflight. Stop before any
-				// guard write, reload, start or restart.
-				return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
-					"cannot read "+follower.Name+"'s installed SQL extensions and no complete preflight runtime plan is available",
-					output.ExitPrecondition, "Start the follower and retry when its catalog answers; nothing was changed.").
-					WithDetails(map[string]any{"reason": "follower_runtime_snapshot_missing", "database": follower.Name})
-			}
-			return followerRuntimePlanFromSnapshot(*req.Snapshot), nil
-		}
-		sqlComplete = true
+	installed, factsErr := followerInstalledExtensions(ctx, st.follower)
+	if factsErr == nil {
+		st.installed = installed
+		st.sqlComplete = true
+		return nil, nil
 	}
-	currentByName := map[string]catalog.Extension{}
-	currentBySQL := map[string]catalog.Extension{}
-	currentByPreload := map[string]catalog.Extension{}
-	currentBySetting := map[string]catalog.Extension{}
-	for _, ext := range current {
-		currentByName[ext.Name] = ext
+	if !st.req.AllowUnknownSQL {
+		return nil, output.NewError(output.CodePrecondition,
+			"cannot read "+st.follower.Name+"'s installed SQL extensions: "+factsErr.Error(),
+			output.ExitPrecondition, "Start the follower and retry when its catalog answers; nothing was changed.").
+			WithDetails(map[string]any{"reason": "follower_sql_unknown", "database": st.follower.Name})
+	}
+	if st.req.Snapshot == nil {
+		// Reconstructing from the preload guard alone would silently
+		// lose a SQL-only retained descriptor or an unguarded
+		// mandatory suppression found by preflight. Stop before any
+		// guard write, reload, start or restart.
+		return nil, output.NewError(output.CodePrecondition,
+			"cannot read "+st.follower.Name+"'s installed SQL extensions and no complete preflight runtime plan is available",
+			output.ExitPrecondition, "Start the follower and retry when its catalog answers; nothing was changed.").
+			WithDetails(map[string]any{"reason": "follower_runtime_snapshot_missing", "database": st.follower.Name})
+	}
+	plan := followerRuntimePlanFromSnapshot(*st.req.Snapshot)
+	return &plan, nil
+}
+
+func (st *followerRuntimeState) indexCurrentDescriptors() {
+	st.currentByName = map[string]catalog.Extension{}
+	st.currentBySQL = map[string]catalog.Extension{}
+	st.currentByPreload = map[string]catalog.Extension{}
+	st.currentBySetting = map[string]catalog.Extension{}
+	for _, ext := range st.current {
+		st.currentByName[ext.Name] = ext
 		if ext.ExtName != "" {
-			currentBySQL[ext.ExtName] = ext
+			st.currentBySQL[ext.ExtName] = ext
 		}
 		if ext.Preload != "" {
-			currentByPreload[ext.Preload] = ext
+			st.currentByPreload[ext.Preload] = ext
 		}
-		for k := range ext.ResolvedSettings(db) {
-			currentBySetting[k] = ext
+		for k := range ext.ResolvedSettings(st.db) {
+			st.currentBySetting[k] = ext
 		}
-		for k := range ext.ResolvedCopySettings(db) {
-			currentBySetting[k] = ext
+		for k := range ext.ResolvedCopySettings(st.db) {
+			st.currentBySetting[k] = ext
 		}
 	}
-	// Outgoing descriptors are the immediate pre-change definitions a removal
-	// still needs to explain existing guard entries. Current intent always wins
-	// the same name, SQL extension or library; outgoing is not retained
-	// history and is retired only after actual SQL absence.
-	outgoingByName := map[string]catalog.Extension{}
-	outgoingBySQL := map[string]catalog.Extension{}
-	outgoingByPreload := map[string]catalog.Extension{}
-	outgoingBySetting := map[string]catalog.Extension{}
-	for _, ext := range req.Outgoing {
-		if ext.Name == "" {
+}
+
+// indexOutgoingDescriptors keeps the immediate pre-change definitions a
+// removal still needs to explain existing guard entries. Current intent always
+// wins the same name, SQL extension or library; outgoing is not retained
+// history and is retired only after actual SQL absence.
+func (st *followerRuntimeState) indexOutgoingDescriptors() error {
+	st.outgoingByName = map[string]catalog.Extension{}
+	st.outgoingBySQL = map[string]catalog.Extension{}
+	st.outgoingByPreload = map[string]catalog.Extension{}
+	st.outgoingBySetting = map[string]catalog.Extension{}
+	for _, ext := range st.req.Outgoing {
+		if ext.Name == "" || st.outgoingSuperseded(ext) {
 			continue
 		}
-		if _, ok := currentByName[ext.Name]; ok {
-			continue
-		}
-		if ext.ExtName != "" {
-			if _, ok := currentBySQL[ext.ExtName]; ok {
-				continue
-			}
-		}
-		if prev, ok := outgoingByName[ext.Name]; ok && !prev.SemanticEqual(ext) {
-			return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
+		if prev, ok := st.outgoingByName[ext.Name]; ok && !prev.SemanticEqual(ext) {
+			return output.NewError(output.CodePrecondition,
 				"the outgoing transition has ambiguous metadata for "+ext.Name,
 				output.ExitPrecondition, "Keep one compatible outgoing definition; the follower was not changed.").
-				WithDetails(map[string]any{"reason": "follower_outgoing_ambiguous", "database": follower.Name, "extension": ext.Name})
+				WithDetails(map[string]any{"reason": "follower_outgoing_ambiguous", "database": st.follower.Name, "extension": ext.Name})
 		}
 		ext = ext.Clone()
-		outgoingByName[ext.Name] = ext
+		st.outgoingByName[ext.Name] = ext
 		if ext.ExtName != "" {
-			outgoingBySQL[ext.ExtName] = ext
+			st.outgoingBySQL[ext.ExtName] = ext
 		}
 		if ext.Preload != "" {
-			outgoingByPreload[ext.Preload] = ext
+			st.outgoingByPreload[ext.Preload] = ext
 		}
-		for k := range ext.ResolvedSettings(db) {
-			outgoingBySetting[k] = ext
+		for k := range ext.ResolvedSettings(st.db) {
+			st.outgoingBySetting[k] = ext
 		}
-		for k := range ext.ResolvedCopySettings(db) {
-			outgoingBySetting[k] = ext
+		for k := range ext.ResolvedCopySettings(st.db) {
+			st.outgoingBySetting[k] = ext
 		}
 	}
-	retained := map[string]catalog.Extension{}
-	addRetained := func(ext catalog.Extension) error {
-		if ext.Name == "" {
-			return nil
-		}
-		if _, ok := currentByName[ext.Name]; ok {
-			return nil
-		}
-		if ext.ExtName != "" {
-			if _, ok := currentBySQL[ext.ExtName]; ok {
-				return nil
-			}
-		}
-		if _, ok := outgoingByName[ext.Name]; ok {
-			return nil
-		}
-		if ext.ExtName != "" {
-			if _, ok := outgoingBySQL[ext.ExtName]; ok {
-				return nil
-			}
-		}
-		if prev, ok := retained[ext.Name]; ok {
-			if !prev.SemanticEqual(ext) {
-				return output.NewError(output.CodePrecondition,
-					"follower "+follower.Name+" has ambiguous retained metadata for "+ext.Name,
-					output.ExitPrecondition, "Keep one compatible retained definition; the follower was not changed.").
-					WithDetails(map[string]any{"reason": "follower_retained_ambiguous", "database": follower.Name, "extension": ext.Name})
-			}
-			return nil
-		}
-		retained[ext.Name] = ext.Clone()
+	return nil
+}
+
+// outgoingSuperseded reports whether current intent already owns this
+// descriptor's name or SQL extension.
+func (st *followerRuntimeState) outgoingSuperseded(ext catalog.Extension) bool {
+	if _, ok := st.currentByName[ext.Name]; ok {
+		return true
+	}
+	if ext.ExtName == "" {
+		return false
+	}
+	_, ok := st.currentBySQL[ext.ExtName]
+	return ok
+}
+
+// collectRetainedDescriptors gathers obligations from actual installed SQL and
+// existing guard metadata. Current or outgoing evidence wins before history is
+// consulted, so an ordinary update cannot become permanently ambiguous.
+func (st *followerRuntimeState) collectRetainedDescriptors() error {
+	if err := st.retainInstalledSQL(); err != nil {
+		return err
+	}
+	return st.retainGuardObligations()
+}
+
+func (st *followerRuntimeState) retainInstalledSQL() error {
+	if !st.sqlComplete {
 		return nil
 	}
-	if sqlComplete {
-		for sqlName := range installed {
-			if sqlName == "plpgsql" {
-				continue
-			}
-			if _, ok := currentBySQL[sqlName]; ok {
-				continue
-			}
-			if _, ok := outgoingBySQL[sqlName]; ok {
-				continue
-			}
-			ext, err := retainedDescriptor(resolver, recs, source.Stanza, sqlName, "", "")
-			if err != nil {
-				return FollowerRuntimePlan{}, err
-			}
-			if err := addRetained(ext); err != nil {
-				return FollowerRuntimePlan{}, err
-			}
+	for sqlName := range st.installed {
+		if sqlName == "plpgsql" {
+			continue
+		}
+		if _, ok := st.currentBySQL[sqlName]; ok {
+			continue
+		}
+		if _, ok := st.outgoingBySQL[sqlName]; ok {
+			continue
+		}
+		ext, err := retainedDescriptor(st.resolver, st.recs, st.source.Stanza, sqlName, "", "")
+		if err != nil {
+			return err
+		}
+		if err := st.addRetained(ext); err != nil {
+			return err
 		}
 	}
-	// Existing guard metadata is the retained requirement evidence for a
-	// continuously following runtime. A current library or setting wins its
-	// old runtime variant before history is consulted, so an ordinary update
-	// cannot become permanently ambiguous.
-	if present {
-		for _, lib := range existing.Preloads {
-			if _, ok := currentByPreload[lib]; ok {
-				continue
-			}
-			if _, ok := outgoingByPreload[lib]; ok {
-				continue
-			}
-			ext, err := retainedDescriptor(resolver, recs, source.Stanza, "", lib, "")
-			if err != nil {
-				return FollowerRuntimePlan{}, err
-			}
-			if err := addRetained(ext); err != nil {
-				return FollowerRuntimePlan{}, err
-			}
+	return nil
+}
+
+func (st *followerRuntimeState) retainGuardObligations() error {
+	if !st.present {
+		return nil
+	}
+	for _, lib := range st.existing.Preloads {
+		if _, ok := st.currentByPreload[lib]; ok {
+			continue
 		}
-		for k := range existing.Settings {
-			if _, ok := currentBySetting[k]; ok {
-				continue
-			}
-			if _, ok := outgoingBySetting[k]; ok {
-				continue
-			}
-			ext, err := retainedDescriptor(resolver, recs, source.Stanza, "", "", k)
-			if err != nil {
-				return FollowerRuntimePlan{}, err
-			}
-			if err := addRetained(ext); err != nil {
-				return FollowerRuntimePlan{}, err
-			}
+		if _, ok := st.outgoingByPreload[lib]; ok {
+			continue
+		}
+		ext, err := retainedDescriptor(st.resolver, st.recs, st.source.Stanza, "", lib, "")
+		if err != nil {
+			return err
+		}
+		if err := st.addRetained(ext); err != nil {
+			return err
 		}
 	}
-	retainedList := valuesOf(retained)
-	outgoingList := valuesOf(outgoingByName)
-	all := append(append([]catalog.Extension(nil), current...), retainedList...)
-	all = append(all, outgoingList...)
+	for k := range st.existing.Settings {
+		if _, ok := st.currentBySetting[k]; ok {
+			continue
+		}
+		if _, ok := st.outgoingBySetting[k]; ok {
+			continue
+		}
+		ext, err := retainedDescriptor(st.resolver, st.recs, st.source.Stanza, "", "", k)
+		if err != nil {
+			return err
+		}
+		if err := st.addRetained(ext); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (st *followerRuntimeState) addRetained(ext catalog.Extension) error {
+	if ext.Name == "" {
+		return nil
+	}
+	if _, ok := st.currentByName[ext.Name]; ok {
+		return nil
+	}
+	if ext.ExtName != "" {
+		if _, ok := st.currentBySQL[ext.ExtName]; ok {
+			return nil
+		}
+	}
+	if _, ok := st.outgoingByName[ext.Name]; ok {
+		return nil
+	}
+	if ext.ExtName != "" {
+		if _, ok := st.outgoingBySQL[ext.ExtName]; ok {
+			return nil
+		}
+	}
+	if prev, ok := st.retained[ext.Name]; ok {
+		if !prev.SemanticEqual(ext) {
+			return output.NewError(output.CodePrecondition,
+				"follower "+st.follower.Name+" has ambiguous retained metadata for "+ext.Name,
+				output.ExitPrecondition, "Keep one compatible retained definition; the follower was not changed.").
+				WithDetails(map[string]any{"reason": "follower_retained_ambiguous", "database": st.follower.Name, "extension": ext.Name})
+		}
+		return nil
+	}
+	st.retained[ext.Name] = ext.Clone()
+	return nil
+}
+
+// keptExtensions retires a non-current SQL descriptor only when the actual
+// follower catalog proves its SQL absent. A preload-only descriptor has no SQL
+// absence proof and stays. Retired libraries/settings remain if another kept
+// descriptor still requires them.
+func (st *followerRuntimeState) keptExtensions() ([]catalog.Extension, map[string]catalog.Extension, error) {
+	all := append(append([]catalog.Extension(nil), st.current...), valuesOf(st.retained)...)
+	all = append(all, valuesOf(st.outgoingByName)...)
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].Name != all[j].Name {
 			return all[i].Name < all[j].Name
 		}
 		return all[i].ExtName < all[j].ExtName
 	})
-	// Retire a non-current SQL descriptor only when the actual follower
-	// catalog proves its SQL absent. A preload-only descriptor has no SQL
-	// absence proof and stays. A retired descriptor's library/settings remain
-	// if another kept descriptor still requires them.
 	kept := make([]catalog.Extension, 0, len(all))
 	retired := map[string]catalog.Extension{}
 	for _, ext := range all {
-		_, isCurrent := currentByName[ext.Name]
-		if req.RetireAbsent && sqlComplete && !isCurrent && ext.ExtName != "" && !installed[ext.ExtName] {
+		_, isCurrent := st.currentByName[ext.Name]
+		if st.req.RetireAbsent && st.sqlComplete && !isCurrent && ext.ExtName != "" && !st.installed[ext.ExtName] {
 			retired[ext.Name] = ext
 			continue
 		}
@@ -1312,144 +1512,101 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 	// Genuine retained extras still require complete, compatible safety.
 	safety := make([]catalog.Extension, 0, len(kept))
 	for _, ext := range kept {
-		if _, isOutgoing := outgoingByName[ext.Name]; isOutgoing {
+		if _, isOutgoing := st.outgoingByName[ext.Name]; isOutgoing {
 			continue
 		}
 		safety = append(safety, ext)
 	}
-	if _, _, err := backup.MergeCopyRequirements(safety, nil, true, db); err != nil {
-		return FollowerRuntimePlan{}, err
-	}
-	// Current and explicit operator settings win an outgoing descriptor's
-	// ordinary runtime variant. Mandatory copy suppression still overlays and
-	// still conflicts with another descriptor's contradictory suppression.
+	_, _, err := backup.MergeCopyRequirements(safety, nil, true, st.db)
+	return kept, retired, err
+}
+
+// baseKeys are the ordinary runtime keys current intent or an explicit
+// operator setting already owns.
+func (st *followerRuntimeState) baseKeys() map[string]bool {
 	baseKeys := map[string]bool{}
-	for k := range cfg.Postgres.Settings {
+	for k := range st.cfg.Postgres.Settings {
 		baseKeys[k] = true
 	}
-	for _, ext := range current {
-		for k := range ext.ResolvedSettings(db) {
+	for _, ext := range st.current {
+		for k := range ext.ResolvedSettings(st.db) {
 			baseKeys[k] = true
 		}
-		for k := range ext.ResolvedCopySettings(db) {
+		for k := range ext.ResolvedCopySettings(st.db) {
 			baseKeys[k] = true
 		}
 	}
-	for k := range follower.Settings {
+	for k := range st.follower.Settings {
 		baseKeys[k] = true
 	}
+	return baseKeys
+}
+
+// guardDecision overlays the kept descriptors and the actual permanent
+// configuration into one guard assignment set.
+func (st *followerRuntimeState) guardDecision(kept []catalog.Extension, baseKeys map[string]bool) (backup.CopyGuardSettingsDecision, map[string]string, map[string]string, error) {
 	guardKnown := make([]catalog.Extension, 0, len(kept))
 	for _, ext := range kept {
-		if _, isOutgoing := outgoingByName[ext.Name]; isOutgoing {
+		if _, isOutgoing := st.outgoingByName[ext.Name]; isOutgoing {
 			ext = filterTransitionOrdinary(ext, baseKeys)
 		}
 		guardKnown = append(guardKnown, ext)
 	}
-	actualPermanent, err := backup.EffectivePermanentSettings(PGConfDir(follower.Name), dataDir)
+	actualPermanent, err := backup.EffectivePermanentSettings(PGConfDir(st.follower.Name), st.dataDir)
 	if err != nil {
-		return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
-			"follower "+follower.Name+"'s permanent configuration cannot be proven: "+err.Error(),
+		return backup.CopyGuardSettingsDecision{}, nil, nil, output.NewError(output.CodePrecondition,
+			"follower "+st.follower.Name+"'s permanent configuration cannot be proven: "+err.Error(),
 			output.ExitPrecondition, "Fix its configuration; the follower was not changed.").
-			WithDetails(map[string]any{"reason": "follower_permanent_unproven", "database": follower.Name})
+			WithDetails(map[string]any{"reason": "follower_permanent_unproven", "database": st.follower.Name})
 	}
 	permanent := map[string]string{}
 	for k, v := range actualPermanent {
 		permanent[k] = v
 	}
-	for _, ext := range current {
-		for k, v := range ext.ResolvedSettings(db) {
+	for _, ext := range st.current {
+		for k, v := range ext.ResolvedSettings(st.db) {
 			if _, ok := permanent[k]; !ok {
 				permanent[k] = v
 			}
 		}
 	}
 	decision, err := backup.CopyGuardSettings(backup.CopyGuardSettingsOptions{
-		Known: guardKnown, Current: current, Permanent: permanent,
-		Explicit: follower.Settings, CopyDB: db, Pending: true,
+		Known: guardKnown, Current: st.current, Permanent: permanent,
+		Explicit: st.follower.Settings, CopyDB: st.db, Pending: true,
 	})
 	if err != nil {
-		return FollowerRuntimePlan{}, err
+		return backup.CopyGuardSettingsDecision{}, nil, nil, err
 	}
-	// Expected runtime: the ordinary settings the renderer actually writes for
-	// the follower, then retained/outgoing ordinary settings that no
-	// higher-precedence source supplies, then every own mandatory copy overlay.
-	// This is what verification checks, not just the guard assignments.
-	//
-	// Only explicitly declared descriptors write ordinary settings into
-	// 30-vaire-extensions.conf. The implicit default modules still contribute
-	// preloads and packages, but their descriptor settings are not rendered, so
-	// they must not become expectations here. Global and per-database settings
-	// are external precedence only for keys an extension obligation already
-	// owns; an unrelated random_page_cost or enum value is not an extension
-	// dependency.
-	//
-	// ExpectedSettings holds decoded runtime values. Descriptor settings and
-	// copy settings are PostgreSQL config literals and are decoded exactly
-	// once; [postgres.settings] and the follower's explicit settings are raw
-	// values the renderer quotes, so they are already decoded.
-	rendered, err := resolver.Enabled(follower.Extensions)
+	return decision, permanent, actualPermanent, nil
+}
+
+// expectedSettings is the complete ordinary-plus-mandatory-copy overlay the
+// follower must have effective. Only explicitly declared descriptors write
+// ordinary settings into 30-vaire-extensions.conf; retained/outgoing
+// obligations add their values after rendered current intent.
+func (st *followerRuntimeState) expectedSettings(kept []catalog.Extension, baseKeys map[string]bool, actualPermanent map[string]string) (map[string]string, error) {
+	rendered, err := st.resolver.Enabled(st.follower.Extensions)
 	if err != nil {
-		return FollowerRuntimePlan{}, config.ValidationError(err)
+		return nil, config.ValidationError(err)
 	}
 	expected := map[string]string{}
 	for _, ext := range rendered {
-		for k, literal := range ext.ResolvedSettings(db) {
+		for k, literal := range ext.ResolvedSettings(st.db) {
 			expected[k] = catalog.NormalizedSettingValue(literal)
 		}
 	}
-	// permanentDecoded is the same precedence in decoded runtime form. The
-	// guard's Permanent map may still carry literals for its own decisions.
-	permanentDecoded := map[string]string{}
-	for k, v := range actualPermanent {
-		permanentDecoded[k] = v
-	}
-	for _, ext := range current {
-		for k, literal := range ext.ResolvedSettings(db) {
-			if _, ok := permanentDecoded[k]; !ok {
-				permanentDecoded[k] = catalog.NormalizedSettingValue(literal)
-			}
-		}
-	}
-	for _, ext := range kept {
-		if _, isCurrent := currentByName[ext.Name]; isCurrent {
-			continue
-		}
-		view := ext
-		if _, isOutgoing := outgoingByName[ext.Name]; isOutgoing {
-			view = filterTransitionOrdinary(ext, baseKeys)
-		}
-		mandatory := map[string]string{}
-		if view.CopySafety == catalog.CopySafetyDisabled {
-			for k, literal := range view.ResolvedCopySettings(db) {
-				mandatory[k] = catalog.NormalizedSettingValue(literal)
-			}
-		}
-		for k, literal := range view.ResolvedSettings(db) {
-			if _, own := mandatory[k]; own {
-				continue
-			}
-			if _, ok := expected[k]; ok {
-				continue
-			}
-			if supplied, ok := permanentDecoded[k]; ok {
-				// The permanent configuration already supplies this retained
-				// key; the guard deliberately does not override it.
-				expected[k] = supplied
-				continue
-			}
-			expected[k] = catalog.NormalizedSettingValue(literal)
-		}
-	}
+	permanentDecoded := st.decodedPermanent(actualPermanent)
+	st.addRetainedExpectedSettings(expected, permanentDecoded, kept, baseKeys)
 	// Renderer order after 30-vaire-extensions.conf is 50-vaire-settings.conf:
 	// setup-wide settings followed by the database's explicit settings. Apply
 	// that precedence only to keys an extension obligation owns.
 	for k := range expected {
-		if raw, ok := cfg.Postgres.Settings[k]; ok {
+		if raw, ok := st.cfg.Postgres.Settings[k]; ok {
 			expected[k] = raw
 		}
 	}
 	for k := range expected {
-		if raw, ok := follower.Settings[k]; ok {
+		if raw, ok := st.follower.Settings[k]; ok {
 			expected[k] = raw
 		}
 	}
@@ -1459,79 +1616,158 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 		if ext.CopySafety != catalog.CopySafetyDisabled {
 			continue
 		}
-		for k, literal := range ext.ResolvedCopySettings(db) {
+		for k, literal := range ext.ResolvedCopySettings(st.db) {
 			expected[k] = catalog.NormalizedSettingValue(literal)
 		}
 	}
-	retainedPreloads := make([]string, 0, len(kept))
-	seenRetainedPreload := map[string]bool{}
-	for _, ext := range kept {
-		if _, isCurrent := currentByName[ext.Name]; isCurrent {
-			continue
-		}
-		if ext.Preload != "" && !seenRetainedPreload[ext.Preload] {
-			seenRetainedPreload[ext.Preload] = true
-			retainedPreloads = append(retainedPreloads, ext.Preload)
+	return expected, nil
+}
+
+// decodedPermanent is permanent precedence in decoded runtime form. The
+// guard's Permanent map may still carry literals for its own decisions.
+func (st *followerRuntimeState) decodedPermanent(actualPermanent map[string]string) map[string]string {
+	permanentDecoded := map[string]string{}
+	for k, v := range actualPermanent {
+		permanentDecoded[k] = v
+	}
+	for _, ext := range st.current {
+		for k, literal := range ext.ResolvedSettings(st.db) {
+			if _, ok := permanentDecoded[k]; !ok {
+				permanentDecoded[k] = catalog.NormalizedSettingValue(literal)
+			}
 		}
 	}
-	currentPreloads, err := resolver.Preloads(source.Extensions)
+	return permanentDecoded
+}
+
+func (st *followerRuntimeState) addRetainedExpectedSettings(expected, permanentDecoded map[string]string, kept []catalog.Extension, baseKeys map[string]bool) {
+	for _, ext := range kept {
+		if _, isCurrent := st.currentByName[ext.Name]; isCurrent {
+			continue
+		}
+		st.addRetainedExtensionSettings(expected, permanentDecoded, ext, baseKeys)
+	}
+}
+
+func (st *followerRuntimeState) addRetainedExtensionSettings(expected, permanentDecoded map[string]string, ext catalog.Extension, baseKeys map[string]bool) {
+	view := ext
+	if _, isOutgoing := st.outgoingByName[ext.Name]; isOutgoing {
+		view = filterTransitionOrdinary(ext, baseKeys)
+	}
+	mandatory := map[string]string{}
+	if view.CopySafety == catalog.CopySafetyDisabled {
+		for k, literal := range view.ResolvedCopySettings(st.db) {
+			mandatory[k] = catalog.NormalizedSettingValue(literal)
+		}
+	}
+	for k, literal := range view.ResolvedSettings(st.db) {
+		if _, own := mandatory[k]; own {
+			continue
+		}
+		if _, ok := expected[k]; ok {
+			continue
+		}
+		if supplied, ok := permanentDecoded[k]; ok {
+			// The permanent configuration already supplies this retained
+			// key; the guard deliberately does not override it.
+			expected[k] = supplied
+			continue
+		}
+		expected[k] = catalog.NormalizedSettingValue(literal)
+	}
+}
+
+func (st *followerRuntimeState) buildPlan(kept []catalog.Extension, retired map[string]catalog.Extension, decision backup.CopyGuardSettingsDecision, permanent, expected map[string]string) (FollowerRuntimePlan, error) {
+	currentPreloads, err := st.resolver.Preloads(st.source.Extensions)
 	if err != nil {
 		return FollowerRuntimePlan{}, config.ValidationError(err)
 	}
-	base := backup.CopyGuard{Preloads: retainedPreloads, Settings: decision.Settings}
+	base := backup.CopyGuard{Preloads: st.retainedPreloads(kept), Settings: decision.Settings}
+	composed, err := backup.ComposeCopyGuardDropping(PGConfDir(st.follower.Name), st.dataDir, base, currentPreloads, st.droppedPreloads(kept, retired))
+	if err != nil {
+		return FollowerRuntimePlan{}, err
+	}
+	keptNonCurrent, keptOutgoing := st.keptTransitions(kept)
+	return FollowerRuntimePlan{
+		Guard: composed, Requirements: kept, Preloads: composed.Preloads,
+		Settings: composed.Settings, ExpectedSettings: expected, Cron: hasExtensionCron(kept),
+		Retained: keptNonCurrent, Outgoing: keptOutgoing, Permanent: permanent,
+		SQLFactsComplete: st.sqlComplete, PendingSQL: sortedKeys(st.pendingSQL(kept)),
+	}, nil
+}
+
+func (st *followerRuntimeState) retainedPreloads(kept []catalog.Extension) []string {
+	retainedPreloads := make([]string, 0, len(kept))
+	seen := map[string]bool{}
+	for _, ext := range kept {
+		if _, isCurrent := st.currentByName[ext.Name]; isCurrent {
+			continue
+		}
+		if ext.Preload != "" && !seen[ext.Preload] {
+			seen[ext.Preload] = true
+			retainedPreloads = append(retainedPreloads, ext.Preload)
+		}
+	}
+	return retainedPreloads
+}
+
+func (st *followerRuntimeState) droppedPreloads(kept []catalog.Extension, retired map[string]catalog.Extension) map[string]bool {
 	keptPreloads := map[string]bool{}
 	for _, ext := range kept {
 		if ext.Preload != "" {
 			keptPreloads[ext.Preload] = true
 		}
 	}
-	droppedPreloads := map[string]bool{}
+	dropped := map[string]bool{}
 	for _, ext := range retired {
 		if ext.Preload != "" && !keptPreloads[ext.Preload] {
-			droppedPreloads[ext.Preload] = true
+			dropped[ext.Preload] = true
 		}
 	}
-	composed, err := backup.ComposeCopyGuardDropping(PGConfDir(follower.Name), dataDir, base, currentPreloads, droppedPreloads)
-	if err != nil {
-		return FollowerRuntimePlan{}, err
+	return dropped
+}
+
+func (st *followerRuntimeState) pendingSQL(kept []catalog.Extension) map[string]bool {
+	pending := map[string]bool{}
+	if !st.req.RetireAbsent || !st.sqlComplete {
+		return pending
 	}
-	pendingSQL := map[string]bool{}
-	if req.RetireAbsent && sqlComplete {
-		for _, ext := range kept {
-			if _, isOutgoing := outgoingByName[ext.Name]; !isOutgoing {
-				// A genuinely retained extra is not a pending removal. Only
-				// the explicitly outgoing descriptor may hold a transition
-				// open while its SQL still replays.
-				continue
-			}
-			if ext.ExtName != "" && installed[ext.ExtName] {
-				pendingSQL[ext.ExtName] = true
-			}
+	for _, ext := range kept {
+		if _, isOutgoing := st.outgoingByName[ext.Name]; !isOutgoing {
+			// A genuinely retained extra is not a pending removal. Only
+			// the explicitly outgoing descriptor may hold a transition
+			// open while its SQL still replays.
+			continue
+		}
+		if ext.ExtName != "" && st.installed[ext.ExtName] {
+			pending[ext.ExtName] = true
 		}
 	}
-	cron := false
+	return pending
+}
+
+func hasExtensionCron(kept []catalog.Extension) bool {
 	for _, ext := range kept {
 		if ext.Name == "pg_cron" || ext.ExtName == "pg_cron" {
-			cron = true
+			return true
 		}
 	}
+	return false
+}
+
+func (st *followerRuntimeState) keptTransitions(kept []catalog.Extension) ([]catalog.Extension, []catalog.Extension) {
 	keptNonCurrent := make([]catalog.Extension, 0, len(kept))
-	keptOutgoing := make([]catalog.Extension, 0, len(outgoingList))
+	keptOutgoing := make([]catalog.Extension, 0, len(st.outgoingByName))
 	for _, ext := range kept {
-		if _, isCurrent := currentByName[ext.Name]; isCurrent {
+		if _, isCurrent := st.currentByName[ext.Name]; isCurrent {
 			continue
 		}
 		keptNonCurrent = append(keptNonCurrent, ext)
-		if _, isOutgoing := outgoingByName[ext.Name]; isOutgoing {
+		if _, isOutgoing := st.outgoingByName[ext.Name]; isOutgoing {
 			keptOutgoing = append(keptOutgoing, ext)
 		}
 	}
-	return FollowerRuntimePlan{
-		Guard: composed, Requirements: kept, Preloads: composed.Preloads,
-		Settings: composed.Settings, ExpectedSettings: expected, Cron: cron,
-		Retained: keptNonCurrent, Outgoing: keptOutgoing, Permanent: permanent,
-		SQLFactsComplete: sqlComplete, PendingSQL: sortedKeys(pendingSQL),
-	}, nil
+	return keptNonCurrent, keptOutgoing
 }
 
 // followerRuntimePlanFromSnapshot preserves every preflight obligation when a
@@ -1634,33 +1870,13 @@ func resolveExtensionDescriptors(resolver config.ExtensionResolver, names []stri
 }
 
 func retainedDescriptor(resolver config.ExtensionResolver, recs backup.Records, stanza, sqlName, preload, setting string) (catalog.Extension, error) {
-	matches := func(exts []catalog.Extension) []catalog.Extension {
-		var out []catalog.Extension
-		for _, ext := range exts {
-			if sqlName != "" && ext.ExtName != sqlName {
-				continue
-			}
-			if preload != "" && ext.Preload != preload {
-				continue
-			}
-			if setting != "" {
-				if _, ok := ext.ResolvedSettings("")[setting]; !ok {
-					if _, ok := ext.ResolvedCopySettings("")[setting]; !ok {
-						continue
-					}
-				}
-			}
-			out = append(out, ext)
-		}
-		return out
-	}
-	found := matches(recs.RetainedExtensions(stanza))
+	found := retainedDescriptorMatches(recs.RetainedExtensions(stanza), sqlName, preload, setting)
 	if len(found) == 0 {
 		list, err := resolver.List()
 		if err != nil {
 			return catalog.Extension{}, config.ValidationError(err)
 		}
-		found = matches(list)
+		found = retainedDescriptorMatches(list, sqlName, preload, setting)
 	}
 	unique := map[string]catalog.Extension{}
 	for _, ext := range found {
@@ -1674,28 +1890,14 @@ func retainedDescriptor(resolver config.ExtensionResolver, recs backup.Records, 
 		unique[key] = ext
 	}
 	if len(unique) == 0 {
-		what := sqlName
-		if what == "" {
-			if preload != "" {
-				what = "library " + preload
-			} else {
-				what = "setting " + setting
-			}
-		}
+		what := retainedDescriptorName(sqlName, preload, setting)
 		return catalog.Extension{}, output.NewError(output.CodePrecondition,
 			"the follower's retained data requires "+what+", which no definition explains",
 			output.ExitPrecondition, "Declare it in [extensions.<name>] with copy_safety and standby_safe; the follower was not changed.").
 			WithDetails(map[string]any{"reason": "follower_retained_unknown", "extension": what})
 	}
 	if len(unique) > 1 {
-		what := sqlName
-		if what == "" {
-			if preload != "" {
-				what = "library " + preload
-			} else {
-				what = "setting " + setting
-			}
-		}
+		what := retainedDescriptorName(sqlName, preload, setting)
 		return catalog.Extension{}, output.NewError(output.CodePrecondition,
 			"the follower's retained data has ambiguous metadata for "+what,
 			output.ExitPrecondition, "Keep one compatible definition; the follower was not changed.").
@@ -1705,6 +1907,37 @@ func retainedDescriptor(resolver config.ExtensionResolver, recs backup.Records, 
 		return ext, nil
 	}
 	return catalog.Extension{}, nil
+}
+
+func retainedDescriptorMatches(exts []catalog.Extension, sqlName, preload, setting string) []catalog.Extension {
+	var out []catalog.Extension
+	for _, ext := range exts {
+		if sqlName != "" && ext.ExtName != sqlName {
+			continue
+		}
+		if preload != "" && ext.Preload != preload {
+			continue
+		}
+		if setting != "" {
+			if _, ok := ext.ResolvedSettings("")[setting]; !ok {
+				if _, ok := ext.ResolvedCopySettings("")[setting]; !ok {
+					continue
+				}
+			}
+		}
+		out = append(out, ext)
+	}
+	return out
+}
+
+func retainedDescriptorName(sqlName, preload, setting string) string {
+	if sqlName != "" {
+		return sqlName
+	}
+	if preload != "" {
+		return "library " + preload
+	}
+	return "setting " + setting
 }
 
 func valuesOf(m map[string]catalog.Extension) []catalog.Extension {
@@ -1743,6 +1976,20 @@ func FollowerGuardDrifted(installed backup.CopyGuard, present bool, plan Followe
 }
 
 var guardInstance = func() (string, error) { return masterbackup.ReadInstance("") }
+
+// guardInstanceIdentity reads the trimmed installation identity and refuses
+// an empty one.
+func guardInstanceIdentity() (string, error) {
+	instance, err := guardInstance()
+	if err != nil {
+		return "", err
+	}
+	instance = strings.TrimSpace(instance)
+	if instance == "" {
+		return "", errors.New("empty instance identity")
+	}
+	return instance, nil
+}
 
 // SetGuardInstanceForTest replaces the instance identity seam for a test in
 // another package and returns the restore function.
@@ -1793,37 +2040,52 @@ func FirstManagedConfig(spec config.ClusterSpec) bool {
 func RefuseExtensionUnload(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, firstConfig bool) error {
 	installedRows, queryErr := ClusterPG(spec).Query(ctx, spec.DatabaseName(), "SELECT extname AS name FROM pg_extension ORDER BY 1", nil)
 	if queryErr != nil {
-		if firstConfig {
-			// A cluster's first managed configuration has no previous managed
-			// extension file to unload; it is not blocked merely for being
-			// stopped or not yet reachable.
-			return nil
-		}
-		return refuseUnloadFromManagedFiles(cfg, spec)
+		return refuseUnloadWithoutCatalog(cfg, spec, firstConfig)
 	}
 	installed := map[string]bool{}
 	for _, row := range installedRows {
 		installed[row["name"]] = true
 	}
-	desired := map[string]bool{}
-	entries, err := extensionSQLSelection(cfg, spec)
+	desired, err := unloadDesiredExtensions(cfg, spec)
 	if err != nil {
 		return err
-	}
-	for _, ext := range entries {
-		desired[ext.ExtName] = true
 	}
 	loaded, err := LoadedPreloads(ctx, ClusterPG(spec))
 	if err != nil {
-		if firstConfig {
-			// No earlier managed configuration exists to unload from.
-			return nil
-		}
-		return refuseUnloadFromManagedFiles(cfg, spec)
+		return refuseUnloadWithoutCatalog(cfg, spec, firstConfig)
 	}
-	rendered, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
+	keep, defs, err := unloadRenderedDefinitions(cfg, spec)
 	if err != nil {
 		return err
+	}
+	return refuseLoadedExtensionUnload(spec, installed, desired, keep, loaded, defs)
+}
+
+// refuseUnloadWithoutCatalog allows a first managed configuration and otherwise
+// judges the stopped or unreadable cluster from its last managed files.
+func refuseUnloadWithoutCatalog(cfg config.Cluster, spec config.ClusterSpec, firstConfig bool) error {
+	if firstConfig {
+		return nil
+	}
+	return refuseUnloadFromManagedFiles(cfg, spec)
+}
+
+func unloadDesiredExtensions(cfg config.Cluster, spec config.ClusterSpec) (map[string]bool, error) {
+	entries, err := extensionSQLSelection(cfg, spec)
+	if err != nil {
+		return nil, err
+	}
+	desired := map[string]bool{}
+	for _, ext := range entries {
+		desired[ext.ExtName] = true
+	}
+	return desired, nil
+}
+
+func unloadRenderedDefinitions(cfg config.Cluster, spec config.ClusterSpec) (map[string]bool, map[string]catalog.Extension, error) {
+	rendered, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
+	if err != nil {
+		return nil, nil, err
 	}
 	keep := map[string]bool{}
 	for _, p := range rendered {
@@ -1832,13 +2094,19 @@ func RefuseExtensionUnload(ctx context.Context, cfg config.Cluster, spec config.
 	defs := map[string]catalog.Extension{}
 	list, err := cfg.ExtensionResolver().List()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	for _, ext := range list {
 		if ext.ExtName != "" {
 			defs[ext.ExtName] = ext
 		}
 	}
+	return keep, defs, nil
+}
+
+// refuseLoadedExtensionUnload refuses to unload a library that still backs an
+// installed SQL extension the new configuration no longer desires.
+func refuseLoadedExtensionUnload(spec config.ClusterSpec, installed, desired, keep, loaded map[string]bool, defs map[string]catalog.Extension) error {
 	for name := range installed {
 		if name == "plpgsql" {
 			continue
@@ -1914,7 +2182,7 @@ func refuseUnloadFromManagedFiles(cfg config.Cluster, spec config.ClusterSpec) e
 // managedPreloads reads the shared_preload_libraries value from a managed
 // 30-vaire-extensions.conf. A missing setting is an empty list.
 func managedPreloads(path string) ([]string, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: a cluster's own managed configuration.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -2161,13 +2429,7 @@ func PrimaryExtensionExpectedSettings(cfg config.Cluster, spec config.ClusterSpe
 		return nil
 	}
 	resolver := cfg.ExtensionResolver()
-	explicit := false
-	for _, name := range spec.Extensions {
-		if canonical, ok := resolver.Canonical(name); ok && canonical == ext.Name {
-			explicit = true
-			break
-		}
-	}
+	explicit := extensionExplicitlySelected(resolver, spec, ext.Name)
 	expected := make(map[string]string, len(ordinary))
 	if explicit {
 		for k, literal := range ordinary {
@@ -2197,6 +2459,18 @@ func PrimaryExtensionExpectedSettings(cfg config.Cluster, spec config.ClusterSpe
 		}
 	}
 	return expected
+}
+
+// extensionExplicitlySelected reports whether name is selected by canonical
+// name or built-in alias. Only an explicit selection renders descriptor
+// settings.
+func extensionExplicitlySelected(resolver config.ExtensionResolver, spec config.ClusterSpec, name string) bool {
+	for _, selected := range spec.Extensions {
+		if canonical, ok := resolver.Canonical(selected); ok && canonical == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ExtensionSettingFact is one effective PostgreSQL setting value together with

@@ -35,7 +35,7 @@ func TestInvalidExtensionSettingCannotPersist(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not a safe PostgreSQL setting literal") {
 		t.Fatalf("invalid setting persisted: %v", err)
 	}
-	after, err := os.ReadFile(path) //nolint:gosec // G304: a test temp file.
+	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

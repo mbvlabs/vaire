@@ -1953,11 +1953,49 @@ func unfollowRenames(source, name string) map[string]string {
 // is written before the first irreversible step and cleared only when the
 // database is independent: a job that stops anywhere between resumes with the
 // same source and stanza.
+// unfollowJob is one db-unfollow job's resolved state.
+type unfollowJob struct {
+	cfg        config.Cluster
+	spec       config.ClusterSpec
+	src        string
+	srcSpec    config.ClusterSpec
+	unfinished backup.Unfollow
+	resuming   bool
+	plan       *extensionCopyPlan
+	local      pg.Local
+	resume     func()
+	cron       cronSettlement
+}
+
 func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	var p dbUnfollowParams
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
+	j, err := startUnfollow(ctx, env, p)
+	if err != nil {
+		return nil, err
+	}
+	if err := beginUnfollowTransition(ctx, env, j); err != nil {
+		return nil, err
+	}
+	if err := promoteUnfollow(ctx, env, j); err != nil {
+		return nil, err
+	}
+	warnings, err := persistUnfollowConfig(ctx, env, j)
+	if err != nil {
+		return nil, err
+	}
+	warnings, err = retireUnfollow(ctx, env, j, warnings)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"name": j.spec.Name, "source": j.src, "stanza": j.spec.Stanza, "port": j.spec.Port, "warnings": warnings}, nil
+}
+
+// startUnfollow resolves the target, source, extension plan and guard before
+// the first record update, restart, pause, promotion or swap.
+func startUnfollow(ctx context.Context, env *jobEnv, p dbUnfollowParams) (*unfollowJob, error) {
 	cfg, _, err := followerState().Load()
 	if err != nil {
 		return nil, err
@@ -1986,8 +2024,6 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Owned unfollow/retry: after its target and locks are resolved, before
-	// its first record update, restart, pause, promotion or swap.
 	if err := prepareTargetExtensions(ctx, cfg, spec, jobRuntime(env), env.Report); err != nil {
 		return nil, err
 	}
@@ -1999,157 +2035,180 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	}); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	local := steps.ClusterPG(spec)
-	// A settled retry still clears a pause an earlier attempt left before the
-	// alias is exposed again; the fence below replaces this with its own
-	// resume while the transition is unsettled.
-	resume := func() { followerServerOps.resume(ctx, p.Name) }
+	return &unfollowJob{
+		cfg: cfg, spec: spec, src: src, srcSpec: srcSpec, unfinished: unfinished, resuming: resuming,
+		plan: plan, local: steps.ClusterPG(spec),
+		// A settled retry still clears a pause an earlier attempt left before
+		// the alias is exposed again; the fence replaces this with its own
+		// resume while the transition is unsettled.
+		resume: func() { followerServerOps.resume(ctx, p.Name) },
+	}, nil
+}
 
-	unfinished, err = beginUnfollow(p.Name, src, env.ID)
+// beginUnfollowTransition records the unfollow and its prepared fence, then
+// fences the poolers before the promotion while the transition is unsettled.
+func beginUnfollowTransition(ctx context.Context, env *jobEnv, j *unfollowJob) error {
+	unfinished, err := beginUnfollow(j.spec.Name, j.src, env.ID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if _, err := writeActivationFence(cfg, activationFenceIdentity{
-		Database: p.Name, Kind: "unfollow", OperationID: unfinished.OperationID, Spec: spec,
-		TargetStanza: unfinished.Stanza, OldStanza: srcSpec.Stanza, NewStanza: unfinished.Stanza,
-		Registration: activationRegistration(spec), Ownership: spec.FollowGeneration,
-		Port: spec.Port, Renames: unfollowRenames(src, p.Name),
-		Requirements: plan.Plan.Requirements,
+	j.unfinished = unfinished
+	if _, err := writeActivationFence(j.cfg, activationFenceIdentity{
+		Database: j.spec.Name, Kind: "unfollow", OperationID: j.unfinished.OperationID, Spec: j.spec,
+		TargetStanza: j.unfinished.Stanza, OldStanza: j.srcSpec.Stanza, NewStanza: j.unfinished.Stanza,
+		Registration: activationRegistration(j.spec), Ownership: j.spec.FollowGeneration,
+		Port: j.spec.Port, Renames: unfollowRenames(j.src, j.spec.Name),
+		Requirements: j.plan.Plan.Requirements,
 	}); err != nil {
-		return nil, err
+		return err
 	}
-	if plan.Plan.Cron && unfinished.Cron == nil {
-		id, err := cronIdentity(ctx, local)
+	if j.plan.Plan.Cron && j.unfinished.Cron == nil {
+		id, err := cronIdentity(ctx, j.local)
 		if err != nil {
-			return nil, mayHaveChangedPasswords(err)
+			return mayHaveChangedPasswords(err)
 		}
-		recorded := &backup.UnfollowCron{MetadataDB: id.MetadataDB, MetadataOID: id.MetadataOID, OldDB: src, NewDB: p.Name}
-		if err := updateUnfollowCron(p.Name, func(c *backup.UnfollowCron) { *c = *recorded }); err != nil {
-			return nil, mayHaveChangedPasswords(err)
+		recorded := &backup.UnfollowCron{MetadataDB: id.MetadataDB, MetadataOID: id.MetadataOID, OldDB: j.src, NewDB: j.spec.Name}
+		if err := updateUnfollowCron(j.spec.Name, func(c *backup.UnfollowCron) { *c = *recorded }); err != nil {
+			return mayHaveChangedPasswords(err)
 		}
-		unfinished.Cron = recorded
+		j.unfinished.Cron = recorded
 	}
-	if err := recordCopyRequirements(unfinished.Stanza, p.Name, plan.Plan); err != nil {
-		return nil, output.NewError(output.CodePrecondition,
+	if err := recordCopyRequirements(j.unfinished.Stanza, j.spec.Name, j.plan.Plan); err != nil {
+		return output.NewError(output.CodePrecondition,
 			"recording the unfollow's extension requirements failed: "+err.Error(),
 			output.ExitPrecondition, "Nothing irreversible ran. Retry after fixing the requirement history store.").
-			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.Name})
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": j.spec.Name})
 	}
-	if resuming && !clusterRunning(spec) {
+	if j.resuming && !clusterRunning(j.spec) {
 		// The earlier attempt stopped at its restart, which leaves the
 		// cluster down: it is started with its own configuration (that
 		// attempt removed 60-vaire-follower.conf already) so the promotion
 		// and the renames below have a cluster to run in.
-		if err := followerServerOps.restart(ctx, env, cfg, spec); err != nil {
-			return nil, mayHaveChangedPasswords(err)
+		if err := followerServerOps.restart(ctx, env, j.cfg, j.spec); err != nil {
+			return mayHaveChangedPasswords(err)
 		}
 	}
-	if !unfinished.Settled {
-		// The poolers' clients logged in as the source's roles. Fence them and
-		// render the alias out of both poolers before the promotion, so a
-		// client reconnecting or a pooler restart cannot reach the promoted
-		// database while its privilege transition is unsettled.
-		resume, err = followerServerOps.fence(ctx, env, cfg, p.Name)
-		if err != nil {
-			if resuming {
-				return nil, mayHaveChangedPasswords(err)
-			}
-			return nil, err
+	if j.unfinished.Settled {
+		return nil
+	}
+	// The poolers' clients logged in as the source's roles. Fence them and
+	// render the alias out of both poolers before the promotion, so a
+	// client reconnecting or a pooler restart cannot reach the promoted
+	// database while its privilege transition is unsettled.
+	resume, err := followerServerOps.fence(ctx, env, j.cfg, j.spec.Name)
+	if err != nil {
+		if j.resuming {
+			return mayHaveChangedPasswords(err)
 		}
+		return err
 	}
-	logLine(env.Report, env.Job, "promoting "+p.Name)
-	if _, err := followerServerOps.promote(ctx, local, cfg.Server.DataDirectory(p.Name)); err != nil {
-		return nil, mayHaveChangedPasswords(err)
+	j.resume = resume
+	return nil
+}
+
+// promoteUnfollow promotes the follower and renames the source's database,
+// owner and roles to the follower's own names.
+func promoteUnfollow(ctx context.Context, env *jobEnv, j *unfollowJob) error {
+	logLine(env.Report, env.Job, "promoting "+j.spec.Name)
+	if _, err := followerServerOps.promote(ctx, j.local, j.cfg.Server.DataDirectory(j.spec.Name)); err != nil {
+		return mayHaveChangedPasswords(err)
 	}
-	if err := advanceActivationFence(cfg, p.Name, unfinished.OperationID, "unfollow", fencePhasePrepared, fencePhasePromoted, spec, func(f *backup.ActivationFence) {
-		f.Registration = activationRegistration(spec)
-		f.Ownership = spec.FollowGeneration
-		f.Port = spec.Port
-		f.DataDir = cfg.Server.DataDirectory(spec.Name)
-		f.ConfDir = steps.PGConfDir(spec.Name)
+	if err := advanceActivationFence(j.cfg, j.spec.Name, j.unfinished.OperationID, "unfollow", fencePhasePrepared, fencePhasePromoted, j.spec, func(f *backup.ActivationFence) {
+		f.Registration = activationRegistration(j.spec)
+		f.Ownership = j.spec.FollowGeneration
+		f.Port = j.spec.Port
+		f.DataDir = j.cfg.Server.DataDirectory(j.spec.Name)
+		f.ConfDir = steps.PGConfDir(j.spec.Name)
 	}); err != nil {
-		return nil, mayHaveChangedPasswords(err)
+		return mayHaveChangedPasswords(err)
 	}
-	var cron cronSettlement
-	if plan.Plan.Cron {
-		cron, err = deactivateCopyCronAt(ctx, local, unfinished.Cron)
+	if j.plan.Plan.Cron {
+		cron, err := deactivateCopyCronAt(ctx, j.local, j.unfinished.Cron)
 		if err != nil {
-			return nil, mayHaveChangedPasswords(err)
+			return mayHaveChangedPasswords(err)
 		}
-		if err := updateUnfollowCron(p.Name, func(c *backup.UnfollowCron) {
+		j.cron = cron
+		if err := updateUnfollowCron(j.spec.Name, func(c *backup.UnfollowCron) {
 			c.MetadataDB, c.MetadataOID, c.Deactivated = cron.MetadataDB, cron.MetadataOID, true
 		}); err != nil {
-			return nil, mayHaveChangedPasswords(err)
+			return mayHaveChangedPasswords(err)
 		}
 	}
 	// The promoted cluster still holds the source's database and owner names.
 	// Settle the protected admin policy against those exact names before the
 	// renames expose a primary that an inherited owner membership can write.
-	if err := followerServerOps.settle(ctx, local, spec, src, p.Name); err != nil {
-		return nil, mayHaveChangedPasswords(err)
+	if err := followerServerOps.settle(ctx, j.local, j.spec, j.src, j.spec.Name); err != nil {
+		return mayHaveChangedPasswords(err)
 	}
 	// The rename is bound to the follower's own promoted cluster; the source
 	// endpoint is carried only so the helper can refuse it.
 	if err := followerServerOps.rename(ctx, unfollowRenameTarget{
-		local: local, cluster: p.Name, port: spec.Port, dataDir: cfg.Server.DataDirectory(p.Name),
-		sourcePort: srcSpec.Port, sourceDataDir: cfg.Server.DataDirectory(src),
-	}, src, p.Name, env.Secrets, env.Report, env.Job); err != nil {
-		return nil, mayHaveChangedPasswords(err)
+		local: j.local, cluster: j.spec.Name, port: j.spec.Port, dataDir: j.cfg.Server.DataDirectory(j.spec.Name),
+		sourcePort: j.srcSpec.Port, sourceDataDir: j.cfg.Server.DataDirectory(j.src),
+	}, j.src, j.spec.Name, env.Secrets, env.Report, env.Job); err != nil {
+		return mayHaveChangedPasswords(err)
 	}
-	if plan.Plan.Cron {
-		current, err := cronCurrentName(ctx, local, cron)
+	if j.plan.Plan.Cron {
+		current, err := cronCurrentName(ctx, j.local, j.cron)
 		if err != nil {
-			return nil, mayHaveChangedPasswords(err)
+			return mayHaveChangedPasswords(err)
 		}
-		cron.MetadataDB = current
-		if _, err := retargetCopyCron(ctx, local, cron, src, p.Name); err != nil {
-			return nil, mayHaveChangedPasswords(err)
+		j.cron.MetadataDB = current
+		if _, err := retargetCopyCron(ctx, j.local, j.cron, j.src, j.spec.Name); err != nil {
+			return mayHaveChangedPasswords(err)
 		}
-		if err := updateUnfollowCron(p.Name, func(c *backup.UnfollowCron) { c.Retargeted = true }); err != nil {
-			return nil, mayHaveChangedPasswords(err)
+		if err := updateUnfollowCron(j.spec.Name, func(c *backup.UnfollowCron) { c.Retargeted = true }); err != nil {
+			return mayHaveChangedPasswords(err)
 		}
 	}
 	// A rename can stop part way, so settle again against whichever database
 	// and owner names the cluster actually holds now.
-	if err := followerServerOps.settle(ctx, local, spec, src, p.Name); err != nil {
-		return nil, mayHaveChangedPasswords(err)
+	if err := followerServerOps.settle(ctx, j.local, j.spec, j.src, j.spec.Name); err != nil {
+		return mayHaveChangedPasswords(err)
 	}
-	cfg, settingsWarnings, err := persistCopySettings(p.Name, plan.Plan, p.Name)
+	return nil
+}
+
+// persistUnfollowConfig saves the independent configuration, restarts the
+// cluster, and settles its extensions and guard.
+func persistUnfollowConfig(ctx context.Context, env *jobEnv, j *unfollowJob) ([]output.Warning, error) {
+	cfg, settingsWarnings, err := persistCopySettings(j.spec.Name, j.plan.Plan, j.spec.Name)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	env.Cluster = cfg
-	cfg, err = independent(p.Name, unfinished.Stanza)
+	cfg, err = independent(j.spec.Name, j.unfinished.Stanza)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	env.Cluster = cfg
-	spec, _ = cfg.ClusterByName(p.Name)
+	j.cfg = cfg
+	j.spec, _ = cfg.ClusterByName(j.spec.Name)
 	// Without 60-vaire-follower.conf the floors and the replication settings
 	// go (postmaster ones among them, as a promote's recovery targets): a
 	// restart now, so its own steps find nothing waiting (Phase 5's
 	// SettlePromoted does the same for a restore).
-	if err := followerServerOps.removeConf(p.Name); err != nil {
+	if err := followerServerOps.removeConf(j.spec.Name); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	if err := followerServerOps.restart(ctx, env, cfg, spec); err != nil {
+	if err := followerServerOps.restart(ctx, env, cfg, j.spec); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	if err := applyUnfollowedConfig(ctx, cfg, jobRuntime(env), p.Name, env.Report); err != nil {
-		return nil, mayHaveChangedPasswords(withHint(err, finishNewCluster(p.Name)))
+	if err := applyUnfollowedConfig(ctx, cfg, jobRuntime(env), j.spec.Name, env.Report); err != nil {
+		return nil, mayHaveChangedPasswords(withHint(err, finishNewCluster(j.spec.Name)))
 	}
 	var warnings []output.Warning
 	warnings = append(warnings, settingsWarnings...)
-	if _, err := reconcileCopySQL(ctx, cfg, spec, local, p.Name); err != nil {
+	if _, err := reconcileCopySQL(ctx, cfg, j.spec, j.local, j.spec.Name); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	more, err := checkCopyExtensions(ctx, cfg, spec, plan.Plan, local, p.Name)
+	more, err := checkCopyExtensions(ctx, cfg, j.spec, j.plan.Plan, j.local, j.spec.Name)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	warnings = append(warnings, more...)
-	more, err = pruneCopyGuard(ctx, cfg, spec, cfg.Server.DataDirectory(p.Name), plan.Plan, true, p.Name, func() error {
-		return followerServerOps.restart(ctx, env, cfg, spec)
+	more, err = pruneCopyGuard(ctx, cfg, j.spec, cfg.Server.DataDirectory(j.spec.Name), j.plan.Plan, true, j.spec.Name, func() error {
+		return followerServerOps.restart(ctx, env, cfg, j.spec)
 	})
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
@@ -2158,41 +2217,46 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	// After prune: it rewrites cron.database_name for the independent name (or
 	// hands it back to the permanent configuration), so the check must see
 	// the final effective value rather than the pre-rename guard.
-	if plan.Plan.Cron {
-		if err := checkCopyCronSetting(ctx, local, src, p.Name); err != nil {
+	if j.plan.Plan.Cron {
+		if err := checkCopyCronSetting(ctx, j.local, j.src, j.spec.Name); err != nil {
 			return nil, mayHaveChangedPasswords(err)
 		}
 	}
+	return warnings, nil
+}
+
+// retireUnfollow completes safety and routes the now-independent cluster.
+func retireUnfollow(ctx context.Context, env *jobEnv, j *unfollowJob, warnings []output.Warning) ([]output.Warning, error) {
 	// The renames carry the new passwords, the protection policy is settled
 	// and the cluster runs its own configuration: safety is complete. The
 	// unfollow record's settled flag and the fence's routing eligibility are
 	// one records update, so a failed write cannot leave an orphan routing
 	// fence or a settled unfollow with no continuation.
-	fence, _, err := verifyActivationFence(cfg, p.Name, unfinished.OperationID, "unfollow", fencePhasePromoted, fencePhaseRouting)
+	fence, _, err := verifyActivationFence(j.cfg, j.spec.Name, j.unfinished.OperationID, "unfollow", fencePhasePromoted, fencePhaseRouting)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	if fence.OldStanza != srcSpec.Stanza || fence.NewStanza != unfinished.Stanza {
-		return nil, mayHaveChangedPasswords(activationIdentityError(p.Name, fence, "stanza transition", fence.OldStanza+"->"+fence.NewStanza, srcSpec.Stanza+"->"+unfinished.Stanza))
+	if fence.OldStanza != j.srcSpec.Stanza || fence.NewStanza != j.unfinished.Stanza {
+		return nil, mayHaveChangedPasswords(activationIdentityError(j.spec.Name, "stanza transition", fence.OldStanza+"->"+fence.NewStanza, j.srcSpec.Stanza+"->"+j.unfinished.Stanza))
 	}
-	if err := completeUnfollowSafety(cfg, spec, unfinished, fence); err != nil {
+	if err := completeUnfollowSafety(j.cfg, j.spec, j.unfinished, fence); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	if w := followerServerOps.dropSlot(ctx, cfg, src, p.Name); w != nil {
+	if w := followerServerOps.dropSlot(ctx, j.cfg, j.src, j.spec.Name); w != nil {
 		warnings = append(warnings, *w)
 	}
-	more, err = followerServerOps.finish(ctx, env, cfg, spec, src, sync.OnceFunc(resume))
+	more, err := followerServerOps.finish(ctx, env, j.cfg, j.spec, j.src, sync.OnceFunc(j.resume))
 	warnings = append(warnings, more...)
 	if err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	if err := verifyRoutingFence(ctx, cfg, spec, unfinished.OperationID, "unfollow"); err != nil {
+	if err := verifyRoutingFence(ctx, j.cfg, j.spec, j.unfinished.OperationID, "unfollow"); err != nil {
 		return nil, mayHaveChangedPasswords(withHint(err, "The unfollow is settled, but its route is not verified. Run vaire apply to finish the routing."))
 	}
-	if err := endUnfollow(p.Name); err != nil {
+	if err := endUnfollow(j.spec.Name); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	return map[string]any{"name": p.Name, "source": src, "stanza": spec.Stanza, "port": spec.Port, "warnings": warnings}, nil
+	return warnings, nil
 }
 
 // applyUnfollowedConfig renders an unfollowed cluster's new configuration

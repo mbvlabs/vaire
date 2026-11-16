@@ -66,33 +66,9 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 			"Re-read the configuration and retry.",
 		).WithDetails(map[string]any{"reason": "config_changed", "base_revision": p.BaseRevision, "revision": current})
 	}
-	raw, err := newConfigBytes(store, p)
+	raw, cfg, old, err := prepareConfigSet(store, p)
 	if err != nil {
 		return Result{}, err
-	}
-	cfg, err := config.ParseCluster(raw)
-	if err != nil {
-		return Result{}, err
-	}
-	old, _, oldErr := store.Load()
-	if oldErr == nil {
-		propagated, changed, err := propagateFollowerExtensions(old, cfg)
-		if err != nil {
-			return Result{}, err
-		}
-		if changed {
-			cfg = propagated
-			if raw, err = cfg.Encode(); err != nil {
-				return Result{}, err
-			}
-		}
-	}
-	if err := cfg.Validate(); err != nil {
-		return Result{}, config.ValidationError(err)
-	}
-	old, _, oldErr = store.Load()
-	if oldErr != nil {
-		return Result{}, oldErr
 	}
 	if err := guardRecoveryFloorChanges(old, cfg, runtimeFor(env, true).Host); err != nil {
 		return Result{}, err
@@ -124,6 +100,40 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}
 	return Result{Data: data, Warnings: warnings}, nil
+}
+
+// prepareConfigSet builds the desired configuration and propagates a
+// source's extension intent to its followers before validation.
+func prepareConfigSet(store state.Store, p configSetParams) ([]byte, config.Cluster, config.Cluster, error) {
+	raw, err := newConfigBytes(store, p)
+	if err != nil {
+		return nil, config.Cluster{}, config.Cluster{}, err
+	}
+	cfg, err := config.ParseCluster(raw)
+	if err != nil {
+		return nil, config.Cluster{}, config.Cluster{}, err
+	}
+	old, _, oldErr := store.Load()
+	if oldErr == nil {
+		propagated, changed, err := propagateFollowerExtensions(old, cfg)
+		if err != nil {
+			return nil, config.Cluster{}, config.Cluster{}, err
+		}
+		if changed {
+			cfg = propagated
+			if raw, err = cfg.Encode(); err != nil {
+				return nil, config.Cluster{}, config.Cluster{}, err
+			}
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, config.Cluster{}, config.Cluster{}, config.ValidationError(err)
+	}
+	old, _, err = store.Load()
+	if err != nil {
+		return nil, config.Cluster{}, config.Cluster{}, err
+	}
+	return raw, cfg, old, nil
 }
 
 func configSetSafetyChecks(ctx context.Context, env *Env, old, cfg config.Cluster) error {

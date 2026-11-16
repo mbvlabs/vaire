@@ -109,97 +109,127 @@ func refuseUnsafeExtensionConfigRemoval(ctx context.Context, old, updated config
 		if !ok {
 			continue
 		}
-		oldNames, err := old.ExtensionResolver().EffectiveNames(oldSpec.Extensions)
-		if err != nil {
-			return config.ValidationError(err)
-		}
-		newNames, err := updated.ExtensionResolver().EffectiveNames(spec.Extensions)
-		if err != nil {
-			return config.ValidationError(err)
-		}
-		newSet := map[string]bool{}
-		for _, name := range newNames {
-			newSet[name] = true
-		}
-		oldSet := map[string]bool{}
-		for _, name := range oldNames {
-			oldSet[name] = true
-		}
-		for _, name := range oldNames {
-			if newSet[name] {
-				continue
-			}
-			ext, err := old.ExtensionResolver().Resolve(name)
-			if err != nil {
-				return config.ValidationError(err)
-			}
-			if ext.ExtName == "" {
-				continue
-			}
-			installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, ext.ExtName)
-			if err != nil {
-				return err
-			}
-			if installed {
-				return extensionRemoveRequired(spec.Name, ext.Name, "removed from cluster.toml")
-			}
-		}
-		// A selected definition may not silently point at another SQL
-		// extension, even when the old SQL is absent. Its copy/standby safety
-		// declarations describe the old control identity until an explicit
-		// remove/re-add workflow recreates or adopts the new one.
-		for _, name := range newNames {
-			if !oldSet[name] {
-				continue
-			}
-			oldExt, oldOK := old.ExtensionResolver().Lookup(name)
-			newExt, newOK := updated.ExtensionResolver().Lookup(name)
-			if !oldOK || !newOK || oldExt.ExtName == newExt.ExtName {
-				continue
-			}
-			return extensionSelectedIdentityRequired(spec.Name, name, oldExt.ExtName, newExt.ExtName)
-		}
-		// A provider or schema change under an already selected installed SQL
-		// extension is unsafe: the old extension's objects remain. A definition
-		// that was not selected is edited/selected normally; the actual-schema
-		// guard below still protects an installed unmanaged SQL identity.
-		for _, name := range newNames {
-			if !oldSet[name] {
-				continue
-			}
-			oldExt, oldOK := old.ExtensionResolver().Lookup(name)
-			newExt, newOK := updated.ExtensionResolver().Lookup(name)
-			if !oldOK || !newOK || oldExt.ExtName == "" {
-				continue
-			}
-			if oldExt.Source == newExt.Source && oldExt.Package == newExt.Package &&
-				oldExt.Preload == newExt.Preload && oldExt.Schema == newExt.Schema &&
-				oldExt.ExtName == newExt.ExtName {
-				continue
-			}
-			installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, oldExt.ExtName)
-			if err != nil {
-				return err
-			}
-			if installed {
-				if oldExt.ExtName != newExt.ExtName {
-					return extensionInstalledIdentityRequired(spec.Name, oldExt.Name,
-						"SQL extension "+oldExt.ExtName+" is installed, but the descriptor now names "+newExt.ExtName,
-						map[string]any{"ext_name": oldExt.ExtName, "requested_ext_name": newExt.ExtName})
-				}
-				return extensionRemoveRequired(spec.Name, oldExt.Name, "provider or schema changed")
-			}
-		}
-		if err := refuseInstalledExtensionSchemas(ctx, updated, spec); err != nil {
+		if err := refuseUnsafeExtensionConfigChange(ctx, recs, recErr, old, updated, spec, oldSpec); err != nil {
 			return err
 		}
-		for _, follower := range updated.FollowersOf(spec.Name) {
-			if follower.FollowGeneration != "" || recs.IsAwaiting(follower.Name) {
-				continue
+	}
+	return nil
+}
+
+func refuseUnsafeExtensionConfigChange(ctx context.Context, recs backup.Records, recErr error, old, updated config.Cluster, spec, oldSpec config.ClusterSpec) error {
+	oldNames, err := old.ExtensionResolver().EffectiveNames(oldSpec.Extensions)
+	if err != nil {
+		return config.ValidationError(err)
+	}
+	newNames, err := updated.ExtensionResolver().EffectiveNames(spec.Extensions)
+	if err != nil {
+		return config.ValidationError(err)
+	}
+	newSet := extensionNameSet(newNames)
+	oldSet := extensionNameSet(oldNames)
+	if err := refuseRemovedExtensionSelection(ctx, recs, recErr, old, spec, oldNames, newSet); err != nil {
+		return err
+	}
+	if err := refuseSelectedExtensionIdentity(old, updated, spec.Name, newNames, oldSet); err != nil {
+		return err
+	}
+	if err := refuseInstalledExtensionDescriptorChange(ctx, recs, recErr, old, updated, spec, newNames, oldSet); err != nil {
+		return err
+	}
+	if err := refuseInstalledExtensionSchemas(ctx, updated, spec); err != nil {
+		return err
+	}
+	for _, follower := range updated.FollowersOf(spec.Name) {
+		if follower.FollowGeneration != "" || recs.IsAwaiting(follower.Name) {
+			continue
+		}
+		if err := refuseInstalledExtensionSchemas(ctx, updated, follower); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func extensionNameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+func refuseRemovedExtensionSelection(ctx context.Context, recs backup.Records, recErr error, old config.Cluster, spec config.ClusterSpec, oldNames []string, newSet map[string]bool) error {
+	for _, name := range oldNames {
+		if newSet[name] {
+			continue
+		}
+		ext, err := old.ExtensionResolver().Resolve(name)
+		if err != nil {
+			return config.ValidationError(err)
+		}
+		if ext.ExtName == "" {
+			continue
+		}
+		installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, ext.ExtName)
+		if err != nil {
+			return err
+		}
+		if installed {
+			return extensionRemoveRequired(spec.Name, ext.Name, "removed from cluster.toml")
+		}
+	}
+	return nil
+}
+
+func refuseSelectedExtensionIdentity(old, updated config.Cluster, db string, newNames []string, oldSet map[string]bool) error {
+	// A selected definition may not silently point at another SQL
+	// extension, even when the old SQL is absent. Its copy/standby safety
+	// declarations describe the old control identity until an explicit
+	// remove/re-add workflow recreates or adopts the new one.
+	for _, name := range newNames {
+		if !oldSet[name] {
+			continue
+		}
+		oldExt, oldOK := old.ExtensionResolver().Lookup(name)
+		newExt, newOK := updated.ExtensionResolver().Lookup(name)
+		if !oldOK || !newOK || oldExt.ExtName == newExt.ExtName {
+			continue
+		}
+		return extensionSelectedIdentityRequired(db, name, oldExt.ExtName, newExt.ExtName)
+	}
+	return nil
+}
+
+func refuseInstalledExtensionDescriptorChange(ctx context.Context, recs backup.Records, recErr error, old, updated config.Cluster, spec config.ClusterSpec, newNames []string, oldSet map[string]bool) error {
+	// A provider or schema change under an already selected installed SQL
+	// extension is unsafe: the old extension's objects remain. A definition
+	// that was not selected is edited/selected normally; the actual-schema
+	// guard below still protects an installed unmanaged SQL identity.
+	for _, name := range newNames {
+		if !oldSet[name] {
+			continue
+		}
+		oldExt, oldOK := old.ExtensionResolver().Lookup(name)
+		newExt, newOK := updated.ExtensionResolver().Lookup(name)
+		if !oldOK || !newOK || oldExt.ExtName == "" {
+			continue
+		}
+		if oldExt.Source == newExt.Source && oldExt.Package == newExt.Package &&
+			oldExt.Preload == newExt.Preload && oldExt.Schema == newExt.Schema &&
+			oldExt.ExtName == newExt.ExtName {
+			continue
+		}
+		installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, oldExt.ExtName)
+		if err != nil {
+			return err
+		}
+		if installed {
+			if oldExt.ExtName != newExt.ExtName {
+				return extensionInstalledIdentityRequired(spec.Name, oldExt.Name,
+					"SQL extension "+oldExt.ExtName+" is installed, but the descriptor now names "+newExt.ExtName,
+					map[string]any{"ext_name": oldExt.ExtName, "requested_ext_name": newExt.ExtName})
 			}
-			if err := refuseInstalledExtensionSchemas(ctx, updated, follower); err != nil {
-				return err
-			}
+			return extensionRemoveRequired(spec.Name, oldExt.Name, "provider or schema changed")
 		}
 	}
 	return nil

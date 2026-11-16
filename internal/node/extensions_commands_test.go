@@ -236,8 +236,8 @@ func extTestCfg(extensions ...string) config.Cluster {
 	return cfg
 }
 
-func extAddCluster(name string, port int, extensions ...string) config.ClusterSpec {
-	return config.ClusterSpec{Name: name, Node: "db1", Port: port, Stanza: name + "-abc123", Size: "small",
+func extAddCluster(name string, extensions ...string) config.ClusterSpec {
+	return config.ClusterSpec{Name: name, Node: "db1", Port: 5434, Stanza: name + "-abc123", Size: "small",
 		StatementTimeout: "60s", Extensions: extensions}
 }
 
@@ -366,7 +366,7 @@ func TestExtAddStandaloneCreatesSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if data.Version != "1.6" || data.AlreadyEnabled || data.DescriptorSaved || data.RestartRequired || !data.Created {
 		t.Fatalf("result = %+v", data)
 	}
@@ -391,7 +391,7 @@ func TestExtAddAliasStoresCanonicalName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data := res.Data.(extAddResult); data.Extension != "vector" || data.PackageKept != "postgresql-18-pgvector" {
+	if data := mustAs[extAddResult](t, res.Data); data.Extension != "vector" || data.PackageKept != "postgresql-18-pgvector" {
 		t.Fatalf("result = %+v", res.Data)
 	}
 	saved, err := config.ParseCluster(h.saves[0])
@@ -422,7 +422,7 @@ func TestExtAddCustomDescriptorPersistsOnlyAfterValidationAndAuthorization(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Data.(extAddResult).DescriptorSaved {
+	if !mustAs[extAddResult](t, res.Data).DescriptorSaved {
 		t.Fatal("custom descriptor was not reported as saved")
 	}
 	if len(h.saves) != 1 {
@@ -508,7 +508,7 @@ func TestExtAddDoesNotNoOpWhenPreloadIsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if !data.PreloadMissing || data.AlreadyEnabled != true {
 		t.Fatalf("result = %+v", data)
 	}
@@ -529,7 +529,7 @@ func TestExtAddDefaultModuleIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if !data.AlreadyEnabled || data.Version != "1.12" {
 		t.Fatalf("result = %+v", data)
 	}
@@ -563,7 +563,7 @@ func TestExtAddReAddPendingCreatesSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if !data.AlreadyEnabled || data.Version != "1.6" {
 		t.Fatalf("result = %+v", data)
 	}
@@ -588,7 +588,7 @@ func TestExtAddPendingPreloadRestartsExactTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if !data.Restarted || !data.PendingRestart {
 		t.Fatalf("result = %+v", data)
 	}
@@ -613,7 +613,7 @@ func TestExtAddSupportedUpdateReportsActualVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if !data.Updated || data.PreviousVersion != "1.5" || data.Version != "1.6" {
 		t.Fatalf("result = %+v", data)
 	}
@@ -705,8 +705,9 @@ func TestExtRemoveProtectedRefused(t *testing.T) {
 	}
 }
 
-func TestExtRemoveDependentsPreviewAndCascade(t *testing.T) {
-	h := newExtHarness(t, extTestCfg("pg_stat_statements", "pg_trgm"))
+func newExtDependentsHarness(t *testing.T, cfg config.Cluster) *extHarness {
+	t.Helper()
+	h := newExtHarness(t, cfg)
 	h.installedFn = func(call int) (map[string]extensionInstalledVersion, error) {
 		if call == 1 {
 			return installedVersion("1.6", "1.6"), nil
@@ -727,46 +728,37 @@ func TestExtRemoveDependentsPreviewAndCascade(t *testing.T) {
 			return nil, nil
 		}
 	}
+	return h
+}
+
+func TestExtRemoveDependentsPreviewAndCascade(t *testing.T) {
+	cfg := extTestCfg("pg_stat_statements", "pg_trgm")
+
+	h := newExtDependentsHarness(t, cfg)
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 	_, err := handleExtRemove(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_in_use" {
 		t.Fatalf("dependents without cascade: %v", err)
 	}
 	details := extDetails(t, err)
-	if details["dependents_total"] != 51 || details["truncated"] != true || len(details["dependents"].([]string)) != 50 {
+	dependents, ok := details["dependents"].([]string)
+	if !ok {
+		t.Fatalf("dependents have unexpected type %T", details["dependents"])
+	}
+	if details["dependents_total"] != 51 || details["truncated"] != true || len(dependents) != 50 {
 		t.Fatalf("preview details = %+v", details)
 	}
 	if len(h.pg.execs) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 0 {
 		t.Fatalf("dependency refusal had effects: exec=%v saves=%d apply=%d", h.pg.execs, len(h.saves), len(h.applyCalls))
 	}
 
-	h = newExtHarness(t, extTestCfg("pg_stat_statements", "pg_trgm"))
-	h.installedFn = func(call int) (map[string]extensionInstalledVersion, error) {
-		if call == 1 {
-			return installedVersion("1.6", "1.6"), nil
-		}
-		return map[string]extensionInstalledVersion{}, nil
-	}
-	h.pg.queryFn = func(sql string) ([]map[string]string, error) {
-		switch {
-		case strings.Contains(sql, "count(*)"):
-			return []map[string]string{{"n": "51"}}, nil
-		case strings.Contains(sql, "pg_describe_object"):
-			rows := make([]map[string]string, 51)
-			for i := range rows {
-				rows[i] = map[string]string{"object": "object_" + string(rune('a'+i%26))}
-			}
-			return rows, nil
-		default:
-			return nil, nil
-		}
-	}
+	h = newExtDependentsHarness(t, cfg)
 	env = &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app", "cascade": true}, "app")}
 	res, err := handleExtRemove(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extRemoveResult)
+	data := mustAs[extRemoveResult](t, res.Data)
 	if !data.Cascade || data.DependentsTotal != 51 {
 		t.Fatalf("result = %+v", data)
 	}
@@ -930,7 +922,7 @@ func TestExtRemoveSQLAbsentReconcilesIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extRemoveResult)
+	data := mustAs[extRemoveResult](t, res.Data)
 	if !data.Enabled || data.Installed {
 		t.Fatalf("result = %+v", data)
 	}
@@ -981,7 +973,11 @@ func TestExtRemoveApplyFailureAfterSaveIsPartial(t *testing.T) {
 		t.Fatalf("apply failure: %v", err)
 	}
 	details := extDetails(t, err)
-	if details["sql_dropped"] != true || details["intent_saved"] != true || !strings.Contains(details["retry"].(string), "vaire apply --db app") {
+	retry, ok := details["retry"].(string)
+	if !ok {
+		t.Fatalf("retry has unexpected type %T", details["retry"])
+	}
+	if details["sql_dropped"] != true || details["intent_saved"] != true || !strings.Contains(retry, "vaire apply --db app") {
 		t.Fatalf("details = %+v", details)
 	}
 	if len(h.saves) != 1 || len(h.applyCalls) != 1 {
@@ -1072,7 +1068,7 @@ func TestExtListFactsAndUnmanaged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extListData)
+	data := mustAs[extListData](t, res.Data)
 	if len(data.Databases) != 3 {
 		t.Fatalf("databases = %+v", data.Databases)
 	}
@@ -1206,7 +1202,7 @@ func assertNoExtEffects(t *testing.T, h *extHarness) {
 
 func TestExtAddSharedDefinitionChangeRefusedBeyondTarget(t *testing.T) {
 	cfg := extTestCfg("pg_stat_statements")
-	cfg.Clusters = append(cfg.Clusters, extAddCluster("other", 5434, "pg_stat_statements"))
+	cfg.Clusters = append(cfg.Clusters, extAddCluster("other", "pg_stat_statements"))
 	h := newExtHarness(t, cfg)
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{
 		"name": "pg_stat_statements", "db": "app",
@@ -1226,7 +1222,7 @@ func TestExtAddSharedDefinitionChangeRefusedBeyondTarget(t *testing.T) {
 func TestExtAddSharedDefinitionRefusedForSourceFollowers(t *testing.T) {
 	cfg := extTestCfg("pg_stat_statements")
 	cfg.Clusters = append(cfg.Clusters,
-		extAddCluster("source", 5434, "pg_stat_statements"),
+		extAddCluster("source", "pg_stat_statements"),
 		extFollowerCluster("source_follower", "source", 5435),
 	)
 	h := newExtHarness(t, cfg)
@@ -1271,7 +1267,7 @@ func TestExtAddSharedDefinitionRefusedForRecoveryDeclaration(t *testing.T) {
 
 func TestExtAddSharedDefinitionAllowedWhenOnlyTargetUsesIt(t *testing.T) {
 	cfg := extTestCfg("pg_stat_statements", "pg_trgm")
-	cfg.Clusters = append(cfg.Clusters, extAddCluster("other", 5434, "pg_stat_statements"))
+	cfg.Clusters = append(cfg.Clusters, extAddCluster("other", "pg_stat_statements"))
 	h := newExtHarness(t, cfg)
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		return installedVersion("1.6", "1.6"), nil
@@ -1342,12 +1338,12 @@ func TestExtAddOldJournalHashesDoNotNoOp(t *testing.T) {
 	if err != nil || prepared.Package != "postgresql-18-pgstat-new" || h.applyCfg.Extensions["pg_stat_statements"].Package != "postgresql-18-pgstat-new" {
 		t.Fatalf("new provider was not processed: prepared=%+v apply=%+v err=%v", prepared, h.applyCfg.Extensions["pg_stat_statements"], err)
 	}
-	if data := res.Data.(extAddResult); data.Version != "1.12" {
+	if data := mustAs[extAddResult](t, res.Data); data.Version != "1.12" {
 		t.Fatalf("result = %+v", data)
 	}
 }
 
-func TestExtAddProviderChangeRequiresFreshSafety(t *testing.T) {
+func providerChangeBaseConfig() config.Cluster {
 	copySafe, standby := "safe", true
 	base := extTestCfg()
 	base.Extensions = map[string]config.ExtensionDefinition{
@@ -1356,6 +1352,39 @@ func TestExtAddProviderChangeRequiresFreshSafety(t *testing.T) {
 			CopySafety: &copySafe, StandbySafe: &standby,
 		},
 	}
+	return base
+}
+
+func assertProviderChangeRefused(t *testing.T, cfg config.Cluster, params map[string]any, wantReason string, wantMissing []string) {
+	t.Helper()
+	before, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newExtHarness(t, cfg)
+	env := &Env{Cluster: cfg, Req: extReq(t, params, "app/restart")}
+	_, err = handleExtAdd(context.Background(), env)
+	if err == nil || extReason(t, err) != wantReason {
+		t.Fatalf("provider change: %v", err)
+	}
+	if wantMissing != nil {
+		missing, _ := extDetails(t, err)["missing"].([]string)
+		if !slices.Equal(missing, wantMissing) {
+			t.Fatalf("missing = %v, want %v", missing, wantMissing)
+		}
+	}
+	after, err := h.cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("refused provider change altered cluster.toml")
+	}
+	assertNoExtEffects(t, h)
+}
+
+func TestExtAddProviderChangeRequiresFreshSafety(t *testing.T) {
+	base := providerChangeBaseConfig()
 	cases := []struct {
 		name    string
 		params  map[string]any
@@ -1368,75 +1397,69 @@ func TestExtAddProviderChangeRequiresFreshSafety(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before, err := base.Encode()
-			if err != nil {
-				t.Fatal(err)
-			}
-			h := newExtHarness(t, base)
-			env := &Env{Cluster: base, Req: extReq(t, tc.params, "app/restart")}
-			_, err = handleExtAdd(context.Background(), env)
-			if err == nil || extReason(t, err) != "extension_safety_renewal_required" {
-				t.Fatalf("provider change: %v", err)
-			}
-			missing, _ := extDetails(t, err)["missing"].([]string)
-			if !slices.Equal(missing, tc.missing) {
-				t.Fatalf("missing = %v, want %v", missing, tc.missing)
-			}
-			after, err := h.cfg.Encode()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(before) != string(after) {
-				t.Fatal("refused provider change altered cluster.toml")
-			}
-			assertNoExtEffects(t, h)
+			assertProviderChangeRefused(t, base, tc.params, "extension_safety_renewal_required", tc.missing)
 		})
 	}
 
 	// A provider change on a new built-in override follows the same rule.
 	noOverride := extTestCfg()
-	before, err := noOverride.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := newExtHarness(t, noOverride)
-	env := &Env{Cluster: noOverride, Req: extReq(t, map[string]any{
+	assertProviderChangeRefused(t, noOverride, map[string]any{
 		"name": "pg_stat_statements", "db": "app", "package": "postgresql-18-pgstat-b",
-	}, "app/restart")}
-	_, err = handleExtAdd(context.Background(), env)
-	if err == nil || extReason(t, err) != "extension_safety_renewal_required" {
-		t.Fatalf("new override provider change: %v", err)
+	}, "extension_safety_renewal_required", nil)
+
+	// A preload provider change follows the same renewal rule.
+	standby := true
+	copyDisabled := "disabled"
+	preloadBase := extTestCfg("pg_stat_statements", "pg_cron")
+	preloadBase.Extensions = map[string]config.ExtensionDefinition{
+		"pg_cron": {Source: catalog.SourceAPT, Package: "postgresql-18-cron", Preload: "one", CopySafety: &copyDisabled, StandbySafe: &standby},
 	}
-	after, err := h.cfg.Encode()
+	assertProviderChangeRefused(t, preloadBase, map[string]any{
+		"name": "pg_cron", "db": "app", "preload": "two",
+	}, "extension_safety_renewal_required", nil)
+
+	// Existing custom definitions still refuse direct replacement rather than
+	// inheriting stale safety.
+	copySafe := "safe"
+	custom := extTestCfg()
+	custom.Extensions = map[string]config.ExtensionDefinition{
+		"custom": {Source: catalog.SourceAPT, Package: "postgresql-18-custom-a", CopySafety: &copySafe, StandbySafe: &standby},
+	}
+	assertProviderChangeRefused(t, custom, map[string]any{
+		"name": "custom", "db": "app", "package": "postgresql-18-custom-b",
+	}, "extension_definition_exists", nil)
+}
+
+func assertProviderChangeSaved(t *testing.T, raw []byte) {
+	t.Helper()
+	saved, err := config.ParseCluster(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(before) != string(after) {
-		t.Fatal("refused new override altered cluster.toml")
+	def := saved.Extensions["pg_stat_statements"]
+	if def.Package != "postgresql-18-pgstat-b" ||
+		def.CopySafety == nil || *def.CopySafety != "safe" ||
+		def.StandbySafe == nil || !*def.StandbySafe {
+		t.Fatalf("saved provider change = %+v", def)
 	}
-	assertNoExtEffects(t, h)
+}
 
-	// Both renewed declarations accept a target-only provider change.
-	h = newExtHarness(t, base)
+func TestExtAddProviderChangeRenewalAccepted(t *testing.T) {
+	base := providerChangeBaseConfig()
+	standby := true
+
+	h := newExtHarness(t, base)
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		return map[string]extensionInstalledVersion{"pg_stat_statements": {Name: "pg_stat_statements", Version: "1.12", Default: "1.12"}}, nil
 	}
-	env = &Env{Cluster: base, Req: extReq(t, map[string]any{
+	env := &Env{Cluster: base, Req: extReq(t, map[string]any{
 		"name": "pg_stat_statements", "db": "app", "package": "postgresql-18-pgstat-b",
 		"copy_safety": "safe", "standby_safe": true,
 	}, "app/restart")}
 	if _, err := handleExtAdd(context.Background(), env); err != nil {
 		t.Fatal(err)
 	}
-	saved, err := config.ParseCluster(h.saves[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if saved.Extensions["pg_stat_statements"].Package != "postgresql-18-pgstat-b" ||
-		saved.Extensions["pg_stat_statements"].CopySafety == nil || *saved.Extensions["pg_stat_statements"].CopySafety != "safe" ||
-		saved.Extensions["pg_stat_statements"].StandbySafe == nil || !*saved.Extensions["pg_stat_statements"].StandbySafe {
-		t.Fatalf("saved provider change = %+v", saved.Extensions["pg_stat_statements"])
-	}
+	assertProviderChangeSaved(t, h.saves[0])
 
 	// Explicit --standby-safe=false is a supplied declaration.
 	h = newExtHarness(t, base)
@@ -1450,7 +1473,7 @@ func TestExtAddProviderChangeRequiresFreshSafety(t *testing.T) {
 	if _, err := handleExtAdd(context.Background(), env); err != nil {
 		t.Fatal(err)
 	}
-	saved, err = config.ParseCluster(h.saves[0])
+	saved, err := config.ParseCluster(h.saves[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1458,22 +1481,12 @@ func TestExtAddProviderChangeRequiresFreshSafety(t *testing.T) {
 		t.Fatalf("explicit standby false lost: %+v", saved.Extensions["pg_stat_statements"])
 	}
 
-	// A preload provider change follows the same renewal rule.
+	// A preload renewal is accepted with both declarations explicit.
 	copyDisabled := "disabled"
 	preloadBase := extTestCfg("pg_stat_statements", "pg_cron")
 	preloadBase.Extensions = map[string]config.ExtensionDefinition{
 		"pg_cron": {Source: catalog.SourceAPT, Package: "postgresql-18-cron", Preload: "one", CopySafety: &copyDisabled, StandbySafe: &standby},
 	}
-	h = newExtHarness(t, preloadBase)
-	env = &Env{Cluster: preloadBase, Req: extReq(t, map[string]any{
-		"name": "pg_cron", "db": "app", "preload": "two",
-	}, "app/restart")}
-	_, err = handleExtAdd(context.Background(), env)
-	if err == nil || extReason(t, err) != "extension_safety_renewal_required" {
-		t.Fatalf("preload change: %v", err)
-	}
-	assertNoExtEffects(t, h)
-
 	h = newExtHarness(t, preloadBase)
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		return map[string]extensionInstalledVersion{"pg_cron": {Name: "pg_cron", Version: "1.6", Default: "1.6"}}, nil
@@ -1511,22 +1524,6 @@ func TestExtAddProviderChangeRequiresFreshSafety(t *testing.T) {
 	if saved.Extensions["pg_stat_statements"].Source != catalog.SourcePreinstalled || saved.Extensions["pg_stat_statements"].Package != "" {
 		t.Fatalf("renewed source change = %+v", saved.Extensions["pg_stat_statements"])
 	}
-
-	// Existing custom definitions still refuse direct replacement rather than
-	// inheriting stale safety.
-	custom := extTestCfg()
-	custom.Extensions = map[string]config.ExtensionDefinition{
-		"custom": {Source: catalog.SourceAPT, Package: "postgresql-18-custom-a", CopySafety: &copySafe, StandbySafe: &standby},
-	}
-	h = newExtHarness(t, custom)
-	env = &Env{Cluster: custom, Req: extReq(t, map[string]any{
-		"name": "custom", "db": "app", "package": "postgresql-18-custom-b",
-	}, "app/restart")}
-	_, err = handleExtAdd(context.Background(), env)
-	if err == nil || extReason(t, err) != "extension_definition_exists" {
-		t.Fatalf("existing custom replacement: %v", err)
-	}
-	assertNoExtEffects(t, h)
 }
 
 func TestExtAddPartialDirectFlagsPreserveExistingOverride(t *testing.T) {
@@ -1627,7 +1624,7 @@ func TestExtAddLoadedExtensionPendingSettingRequiresRestartToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if !data.Restarted || !data.PendingRestart {
 		t.Fatalf("result = %+v", data)
 	}
@@ -1677,7 +1674,7 @@ func TestExtAddStableSameIntentIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if !data.AlreadyEnabled || data.RestartRequired || data.PendingRestart {
 		t.Fatalf("result = %+v", data)
 	}
@@ -1739,7 +1736,7 @@ func TestExtAddRetryAfterConfigFailureFinishesSavedIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extAddResult)
+	data := mustAs[extAddResult](t, res.Data)
 	if data.Version != "1.6" || !data.Restarted {
 		t.Fatalf("result = %+v", data)
 	}
@@ -1808,7 +1805,7 @@ func TestExtRemoveSettingsRemovalRequiresRestartTokenBeforeEffects(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extRemoveResult)
+	data := mustAs[extRemoveResult](t, res.Data)
 	if !data.RestartRequired || !data.Restarted {
 		t.Fatalf("result = %+v", data)
 	}
@@ -1835,7 +1832,7 @@ func TestExtRemoveDryRunHasZeroEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extRemoveResult)
+	data := mustAs[extRemoveResult](t, res.Data)
 	if !data.RestartRequired || !slices.Contains(data.RequiredConfirmTokens, "app") || !slices.Contains(data.RequiredConfirmTokens, "app/restart") {
 		t.Fatalf("result = %+v", data)
 	}
@@ -1914,7 +1911,7 @@ func TestExtListOverrideShowsProviderAndActualVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extListData)
+	data := mustAs[extListData](t, res.Data)
 	var vector *extListEntry
 	for i := range data.Extensions {
 		if data.Extensions[i].Name == "vector" {
@@ -1949,7 +1946,7 @@ func TestExtRemovePackageKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := res.Data.(extRemoveResult).PackageKept; got != "postgresql-18-pgvector" {
+	if got := mustAs[extRemoveResult](t, res.Data).PackageKept; got != "postgresql-18-pgvector" {
 		t.Fatalf("package kept = %q", got)
 	}
 }
@@ -1984,7 +1981,7 @@ func TestExtRemoveSQLAbsentRetryAfterSaveFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := res.Data.(extRemoveResult)
+	data := mustAs[extRemoveResult](t, res.Data)
 	if !data.Enabled || data.Installed {
 		t.Fatalf("retry result = %+v", data)
 	}

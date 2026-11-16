@@ -126,18 +126,18 @@ func TestExtAddRemoveLikelyRestart(t *testing.T) {
 		t.Fatal("an already enabled preload extension was not predicted to need a restart")
 	}
 	cronCfg := cliExtCfg("pg_stat_statements", "pg_cron")
-	if restart, err := extRemoveLikelyNeedsRestart(cronCfg, "app", "pg_cron"); err != nil || !restart {
-		t.Fatalf("pg_cron remove restart = %v, %v", restart, err)
+	if !extRemoveLikelyNeedsRestart(cronCfg, "app", "pg_cron") {
+		t.Fatal("pg_cron remove was not predicted to need a restart")
 	}
-	if restart, err := extRemoveLikelyNeedsRestart(cfg, "app", "pg_trgm"); err != nil || restart {
-		t.Fatalf("pg_trgm remove restart = %v, %v", restart, err)
+	if extRemoveLikelyNeedsRestart(cfg, "app", "pg_trgm") {
+		t.Fatal("pg_trgm remove was predicted to need a restart")
 	}
 	settingsCfg := cliExtCfg("pg_stat_statements", "pg_trgm")
 	settingsCfg.Extensions = map[string]config.ExtensionDefinition{
 		"pg_trgm": {Settings: map[string]string{"max_files_per_process": "2000"}},
 	}
-	if restart, err := extRemoveLikelyNeedsRestart(settingsCfg, "app", "pg_trgm"); err != nil || !restart {
-		t.Fatalf("pg_trgm settings remove restart = %v, %v", restart, err)
+	if !extRemoveLikelyNeedsRestart(settingsCfg, "app", "pg_trgm") {
+		t.Fatal("pg_trgm settings remove was not predicted to need a restart")
 	}
 }
 

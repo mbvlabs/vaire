@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/mbvlabs/vaire/internal/maint"
 )
 
 func TestExactReportScansAdmittedOIDAndRechecksCanonicalName(t *testing.T) {
@@ -46,40 +48,53 @@ func TestExactReportDoesNotAttributeChangedOrUnprovenIdentity(t *testing.T) {
 	for _, state := range []string{"replaced", "renamed", "missing", "unreadable"} {
 		t.Run(state, func(t *testing.T) {
 			scanned := false
-			local := &fakeRepackPG{answer: func(db, sql string) ([]map[string]string, error) {
-				if strings.Contains(sql, "table_len") {
-					scanned = true
-				}
-				if !strings.Contains(sql, "relkind") {
-					return repackDefaultAnswer(db, sql)
-				}
-				facts := map[string]string{
-					"oid": "42", "schema": "public", "table": "events",
-					"kind": "r", "persistence": "p", "access_method": "heap",
-				}
-				if scanned {
-					switch state {
-					case "replaced":
-						facts["oid"] = "43"
-					case "renamed":
-						facts["table"] = "renamed"
-					case "missing":
-						return nil, nil
-					case "unreadable":
-						return nil, errors.New("catalog unavailable")
-					}
-				}
-				return []map[string]string{facts}, nil
-			}}
+			local := &fakeRepackPG{answer: exactIdentityAnswer(&scanned, state)}
 			installRepackSeams(t, local)
 			cfg := repackTestConfig(t)
 			stats, err := exactTableStats(context.Background(), cfg.Clusters[0], "events")
-			if err == nil || reason(t, err) != "exact_bloat_failed" || stats.Method != "" {
-				t.Fatalf("attributed an unproven measurement: stats=%+v err=%v", stats, err)
-			}
-			if !scanned {
-				t.Fatal("test did not cross the measurement boundary")
-			}
+			assertExactReportRefused(t, stats, err, scanned)
 		})
+	}
+}
+
+// exactIdentityAnswer changes the canonical facts once the measurement has
+// scanned the admitted OID, modelling a relation that is no longer the one the
+// report proved.
+func exactIdentityAnswer(scanned *bool, state string) func(db, sql string) ([]map[string]string, error) {
+	return func(db, sql string) ([]map[string]string, error) {
+		if strings.Contains(sql, "table_len") {
+			*scanned = true
+		}
+		if !strings.Contains(sql, "relkind") {
+			return repackDefaultAnswer(db, sql)
+		}
+		facts := map[string]string{
+			"oid": "42", "schema": "public", "table": "events",
+			"kind": "r", "persistence": "p", "access_method": "heap",
+		}
+		if !*scanned {
+			return []map[string]string{facts}, nil
+		}
+		switch state {
+		case "replaced":
+			facts["oid"] = "43"
+		case "renamed":
+			facts["table"] = "renamed"
+		case "missing":
+			return nil, nil
+		case "unreadable":
+			return nil, errors.New("catalog unavailable")
+		}
+		return []map[string]string{facts}, nil
+	}
+}
+
+func assertExactReportRefused(t *testing.T, stats maint.TableStats, err error, scanned bool) {
+	t.Helper()
+	if err == nil || reason(t, err) != "exact_bloat_failed" || stats.Method != "" {
+		t.Fatalf("attributed an unproven measurement: stats=%+v err=%v", stats, err)
+	}
+	if !scanned {
+		t.Fatal("test did not cross the measurement boundary")
 	}
 }

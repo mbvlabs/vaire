@@ -99,36 +99,8 @@ func extState(f Facts) []Result {
 		if !x.Available {
 			return Warn, "cannot read its extensions: " + x.Error, "vaire status --db " + c.Name + "; vaire logs postgres --db " + c.Name
 		}
-		enabled := map[string]bool{}
-		var waiting, notLoaded, missing, unconfigured, unmanaged []string
-		for _, e := range x.Enabled {
-			enabled[e.Name] = true
-			if e.Preload != "" && x.LoadedKnown && !x.Loaded[e.Preload] {
-				if x.PendingKnown && x.PendingRestart {
-					waiting = append(waiting, e.Name)
-				} else {
-					notLoaded = append(notLoaded, e.Name)
-				}
-			}
-			if e.ExtName != "" {
-				if _, ok := x.Installed[e.ExtName]; !ok {
-					missing = append(missing, e.Name)
-				}
-			}
-		}
-		for extname, v := range x.Installed {
-			if extname == "plpgsql" {
-				continue
-			}
-			info, ok := x.Known[extname]
-			if !ok {
-				unmanaged = append(unmanaged, extname+" "+v.Version)
-				continue
-			}
-			if !enabled[info.Name] {
-				unconfigured = append(unconfigured, info.Name)
-			}
-		}
+		enabled, waiting, notLoaded, missing := extStateIssues(x)
+		unconfigured, unmanaged := extStateUnmanaged(x, enabled)
 		sort.Strings(waiting)
 		sort.Strings(notLoaded)
 		sort.Strings(missing)
@@ -150,6 +122,47 @@ func extState(f Facts) []Result {
 		}
 		return Pass, "the extensions match cluster.toml: " + describeExtensionVersions(x), ""
 	})
+}
+
+// extStateIssues classifies the configured extensions against what the
+// database reports, keeping waiting, not loaded and missing separate.
+func extStateIssues(x ExtensionFacts) (enabled map[string]bool, waiting, notLoaded, missing []string) {
+	enabled = map[string]bool{}
+	for _, e := range x.Enabled {
+		enabled[e.Name] = true
+		preloadMissing := e.Preload != "" && x.LoadedKnown && !x.Loaded[e.Preload]
+		switch {
+		case preloadMissing && x.PendingKnown && x.PendingRestart:
+			waiting = append(waiting, e.Name)
+		case preloadMissing:
+			notLoaded = append(notLoaded, e.Name)
+		}
+		if e.ExtName != "" {
+			if _, ok := x.Installed[e.ExtName]; !ok {
+				missing = append(missing, e.Name)
+			}
+		}
+	}
+	return enabled, waiting, notLoaded, missing
+}
+
+// extStateUnmanaged classifies installed SQL extensions that the selection
+// does not configure. plpgsql is always installed and is not unmanaged.
+func extStateUnmanaged(x ExtensionFacts, enabled map[string]bool) (unconfigured, unmanaged []string) {
+	for extname, v := range x.Installed {
+		if extname == "plpgsql" {
+			continue
+		}
+		info, ok := x.Known[extname]
+		if !ok {
+			unmanaged = append(unmanaged, extname+" "+v.Version)
+			continue
+		}
+		if !enabled[info.Name] {
+			unconfigured = append(unconfigured, info.Name)
+		}
+	}
+	return unconfigured, unmanaged
 }
 
 func extUpdates(f Facts) []Result {

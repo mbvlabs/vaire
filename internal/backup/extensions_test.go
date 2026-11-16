@@ -95,7 +95,7 @@ func jsonMarshal(r Records) ([]byte, error) {
 func TestCopyGuardWinsAndSurvivesRecoveryCleanup(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	dir := t.TempDir()
@@ -118,7 +118,7 @@ func TestCopyGuardWinsAndSurvivesRecoveryCleanup(t *testing.T) {
 	if _, err := InstallCopyGuard(dir, guard); err != nil {
 		t.Fatal(err)
 	}
-	conf, _ := os.ReadFile(filepath.Join(dir, "postgresql.auto.conf")) //nolint:gosec // test file
+	conf, _ := os.ReadFile(filepath.Join(dir, "postgresql.auto.conf"))
 	if strings.Count(string(conf), copyGuardBegin) != 1 {
 		t.Fatalf("guard duplicated:\n%s", conf)
 	}
@@ -135,7 +135,7 @@ func TestCopyGuardWinsAndSurvivesRecoveryCleanup(t *testing.T) {
 	if _, err := RemoveCopyGuard(dir); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(filepath.Join(dir, "postgresql.auto.conf")) //nolint:gosec // test file
+	after, _ := os.ReadFile(filepath.Join(dir, "postgresql.auto.conf"))
 	if strings.Contains(string(after), copyGuardBegin) || strings.Contains(string(after), "cron.launch_active_jobs") {
 		t.Fatalf("guard removal left managed lines:\n%s", after)
 	}
@@ -181,7 +181,7 @@ func TestSelectedBackupStartWalksTheChain(t *testing.T) {
 func TestInstallCopyPlanUnionsCopiedPreloads(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	oldConf := pgConfRoot
@@ -249,7 +249,7 @@ func TestMergeCopyRequirementsRefusesUnsafeOrConflictingHistory(t *testing.T) {
 func TestAdoptKeepsCopyGuard(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	oldConf, oldIDs, oldWriteCluster := pgConfRoot, resolveClusterIDs, writeClusterFile
@@ -257,7 +257,7 @@ func TestAdoptKeepsCopyGuard(t *testing.T) {
 	resolveClusterIDs = func(_, _ string) (int, int, error) { return -1, -1, nil }
 	t.Cleanup(func() { pgConfRoot, resolveClusterIDs, writeClusterFile = oldConf, oldIDs, oldWriteCluster })
 	writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	source := filepath.Join(pgConfRoot, "app")
 	if err := os.MkdirAll(filepath.Join(source, "conf.d"), 0o700); err != nil {
@@ -286,7 +286,7 @@ func TestAdoptKeepsCopyGuard(t *testing.T) {
 func TestComposeCopyGuardKeepsCompleteUnionAndDropsObsoleteCurrent(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	confDir, dataDir := t.TempDir(), t.TempDir()
@@ -316,7 +316,7 @@ func TestComposeCopyGuardKeepsCompleteUnionAndDropsObsoleteCurrent(t *testing.T)
 func TestInstallCopyGuardRefusesMalformedExistingBlock(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	dataDir := t.TempDir()
@@ -423,7 +423,7 @@ func TestCopyGuardSettingsHistoricalOnlySurvivesAndHandsOff(t *testing.T) {
 func TestComposeCopyGuardDropsPriorGuardButKeepsPlainOperatorLine(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	confDir, dataDir := t.TempDir(), t.TempDir()
@@ -476,7 +476,7 @@ func TestCopyGuardSettingsCustomOwnMandatoryOverlaysOrdinary(t *testing.T) {
 func TestComposeCopyGuardDropsDeliberatelyRemovedOperatorLibrary(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	confDir, dataDir := t.TempDir(), t.TempDir()
@@ -515,7 +515,7 @@ func TestComposeCopyGuardDropsDeliberatelyRemovedOperatorLibrary(t *testing.T) {
 func TestComposeCopyGuardRefusesUnknownPriorGuard(t *testing.T) {
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
-		return os.WriteFile(path, data, perm) //nolint:gosec // G304: test-owned path
+		return os.WriteFile(path, data, perm)
 	}
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
 	confDir, dataDir := t.TempDir(), t.TempDir()
@@ -526,14 +526,14 @@ func TestComposeCopyGuardRefusesUnknownPriorGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dataDir, "postgresql.auto.conf")
-	before, err := os.ReadFile(path) //nolint:gosec // test-owned path
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ComposeCopyGuard(confDir, dataDir, CopyGuard{}, nil); err == nil {
 		t.Fatal("an unexplained prior guard library was silently erased")
 	}
-	after, err := os.ReadFile(path) //nolint:gosec // test-owned path
+	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

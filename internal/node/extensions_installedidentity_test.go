@@ -12,10 +12,10 @@ import (
 	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-func writeExtTestFence(t *testing.T, cfg config.Cluster, spec config.ClusterSpec, kind, opID, phase string) {
+func writeExtTestFence(t *testing.T, cfg config.Cluster, spec config.ClusterSpec, opID, phase string) {
 	t.Helper()
 	if _, err := writeActivationFence(cfg, activationFenceIdentity{
-		Database: spec.Name, Kind: kind, OperationID: opID, Spec: spec,
+		Database: spec.Name, Kind: "fork", OperationID: opID, Spec: spec,
 		TargetStanza: spec.Name + "-ancestor", OldStanza: spec.Name + "-old", NewStanza: spec.Name + "-new",
 		Aside: spec.Name + "__pre", Registration: activationRegistration(spec),
 		Port: spec.Port, DataDir: cfg.Server.DataDirectory(spec.Name), ConfDir: steps.PGConfDir(spec.Name),
@@ -154,7 +154,7 @@ func TestExtAddAliasUsesCanonicalInstalledSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data := res.Data.(extAddResult); data.Extension != "vector" || data.ExtName != "vector" || data.Schema != "public" {
+	if data := mustAs[extAddResult](t, res.Data); data.Extension != "vector" || data.ExtName != "vector" || data.Schema != "public" {
 		t.Fatalf("alias result = %+v", data)
 	}
 }
@@ -496,7 +496,7 @@ func TestExtMutationsRefuseActiveActivationFencesBeforeEffects(t *testing.T) {
 			cfg := extTestCfg("pg_stat_statements")
 			h := newExtHarness(t, cfg)
 			useTestInstance(t)
-			writeExtTestFence(t, cfg, cfg.Clusters[0], "fork", "add-"+phase, phase)
+			writeExtTestFence(t, cfg, cfg.Clusters[0], "add-"+phase, phase)
 			env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 			_, err := handleExtAdd(context.Background(), env)
 			if err == nil || extReason(t, err) != "activation_fence_active" {
@@ -515,7 +515,7 @@ func TestExtMutationsRefuseActiveActivationFencesBeforeEffects(t *testing.T) {
 			cfg := extTestCfg("pg_stat_statements", "pg_trgm")
 			h := newExtHarness(t, cfg)
 			useTestInstance(t)
-			writeExtTestFence(t, cfg, cfg.Clusters[0], "fork", "remove-"+phase, phase)
+			writeExtTestFence(t, cfg, cfg.Clusters[0], "remove-"+phase, phase)
 			env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 			_, err := handleExtRemove(context.Background(), env)
 			if err == nil || extReason(t, err) != "activation_fence_active" {
@@ -527,7 +527,7 @@ func TestExtMutationsRefuseActiveActivationFencesBeforeEffects(t *testing.T) {
 			cfg := extTestCfg("pg_stat_statements")
 			h := newExtHarness(t, cfg)
 			useTestInstance(t)
-			writeExtTestFence(t, cfg, cfg.Clusters[0], "fork", "dry-"+phase, phase)
+			writeExtTestFence(t, cfg, cfg.Clusters[0], "dry-"+phase, phase)
 			env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 			env.Req.DryRun = true
 			_, err := handleExtAdd(context.Background(), env)
@@ -545,7 +545,7 @@ func TestExtAddRefusesFollowerActivationFenceBeforeSourceEffects(t *testing.T) {
 	cfg.Clusters = append(cfg.Clusters, follower)
 	h := newExtHarness(t, cfg)
 	useTestInstance(t)
-	writeExtTestFence(t, cfg, follower, "fork", "follower-fork", fencePhaseAdopted)
+	writeExtTestFence(t, cfg, follower, "follower-fork", fencePhaseAdopted)
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 	_, err := handleExtAdd(context.Background(), env)
 	if err == nil || extReason(t, err) != "activation_fence_active" {
@@ -572,7 +572,7 @@ func TestExtMutationGuardOrderPrecedesActivationFence(t *testing.T) {
 			cfg := extTestCfg("pg_stat_statements")
 			newExtHarness(t, cfg)
 			useTestInstance(t)
-			writeExtTestFence(t, cfg, cfg.Clusters[0], "fork", "guard-"+tc.name, fencePhaseAdopted)
+			writeExtTestFence(t, cfg, cfg.Clusters[0], "guard-"+tc.name, fencePhaseAdopted)
 			err := extensionMutationRefusals(cfg, tc.recs, cfg.Clusters[0], "an extension change")
 			if err == nil || extReason(t, err) != tc.reason {
 				t.Fatalf("guard precedence = %v, want %s", err, tc.reason)
@@ -583,10 +583,10 @@ func TestExtMutationGuardOrderPrecedesActivationFence(t *testing.T) {
 
 func TestExtAddDoesNotBlockUnrelatedSafeDatabaseForFence(t *testing.T) {
 	cfg := extTestCfg("pg_stat_statements")
-	cfg.Clusters = append(cfg.Clusters, extAddCluster("safe", 5434, "pg_stat_statements"))
+	cfg.Clusters = append(cfg.Clusters, extAddCluster("safe", "pg_stat_statements"))
 	h := newExtHarness(t, cfg)
 	useTestInstance(t)
-	writeExtTestFence(t, cfg, cfg.Clusters[0], "fork", "other-db-fork", fencePhaseAdopted)
+	writeExtTestFence(t, cfg, cfg.Clusters[0], "other-db-fork", fencePhaseAdopted)
 	calls := 0
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		calls++
@@ -602,7 +602,7 @@ func TestExtAddDoesNotBlockUnrelatedSafeDatabaseForFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data := res.Data.(extAddResult); data.Database != "safe" || !data.Created {
+	if data := mustAs[extAddResult](t, res.Data); data.Database != "safe" || !data.Created {
 		t.Fatalf("safe add result = %+v", data)
 	}
 	if len(h.saves) != 1 {
