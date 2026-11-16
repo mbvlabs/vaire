@@ -785,9 +785,13 @@ func TestUnfollowCronSettlementOrder(t *testing.T) {
 		return nil, nil
 	}
 	pruneCopyGuard = func(context.Context, config.Cluster, config.ClusterSpec, string, *backup.CopyPlan, bool, string, func() error) ([]output.Warning, error) {
+		order = append(order, "cron_prune")
 		return nil, nil
 	}
-	checkCopyCronSetting = func(context.Context, sqlRunner, string, string) error { return nil }
+	checkCopyCronSetting = func(context.Context, sqlRunner, string, string) error {
+		order = append(order, "cron_setting")
+		return nil
+	}
 	t.Cleanup(func() {
 		deactivateCopyCron, retargetCopyCron = oldDeactivate, oldRetarget
 		deactivateCopyCronAt, cronIdentity = oldDeactivateAt, oldIdentity
@@ -807,11 +811,15 @@ func TestUnfollowCronSettlementOrder(t *testing.T) {
 		return -1
 	}
 	promote, deactivate, rename, retarget := index("promote"), index("cron_deactivate"), index("rename"), index("cron_retarget")
-	if promote < 0 || deactivate < 0 || rename < 0 || retarget < 0 {
+	prune, setting := index("cron_prune"), index("cron_setting")
+	if promote < 0 || deactivate < 0 || rename < 0 || retarget < 0 || prune < 0 || setting < 0 {
 		t.Fatalf("missing stage: %v", order)
 	}
 	if promote >= deactivate || deactivate >= rename || rename >= retarget {
 		t.Fatalf("cron settlement order = %v", order)
+	}
+	if retarget >= prune || prune >= setting {
+		t.Fatalf("cron setting was verified before the guard handoff: %v", order)
 	}
 }
 

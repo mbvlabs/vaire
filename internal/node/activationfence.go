@@ -1297,16 +1297,19 @@ func completeForkActivation(ctx context.Context, spec config.ClusterSpec, f back
 	for old := range f.Renames {
 		source = old
 	}
-	if plan.Plan.Cron {
-		if err := checkCopyCronSetting(ctx, local, source, spec.DatabaseName()); err != nil {
-			return cfg, warnings, err
-		}
-	}
 	more, err = pruneCopyGuard(ctx, cfg, spec, dataDir, plan.Plan, true, spec.DatabaseName(), restart)
 	if err != nil {
 		return cfg, warnings, err
 	}
 	warnings = append(warnings, more...)
+	// After prune: it rewrites cron.database_name for the adopted name (or
+	// hands it back to the permanent configuration), so the check must see
+	// the final effective value rather than the pre-rename guard.
+	if plan.Plan.Cron {
+		if err := checkCopyCronSetting(ctx, local, source, spec.DatabaseName()); err != nil {
+			return cfg, warnings, err
+		}
+	}
 	if err := advanceActivationFence(cfg, spec.Name, f.OperationID, "fork", fencePhaseAdopted, fencePhaseRouting, spec, func(nf *backup.ActivationFence) {
 		nf.Registration = activationRegistration(spec)
 		nf.Port = spec.Port

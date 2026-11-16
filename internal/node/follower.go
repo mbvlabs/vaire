@@ -2142,11 +2142,6 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	warnings = append(warnings, more...)
-	if plan.Plan.Cron {
-		if err := checkCopyCronSetting(ctx, local, src, p.Name); err != nil {
-			return nil, mayHaveChangedPasswords(err)
-		}
-	}
 	more, err = pruneCopyGuard(ctx, cfg, spec, cfg.Server.DataDirectory(p.Name), plan.Plan, true, p.Name, func() error {
 		return followerServerOps.restart(ctx, env, cfg, spec)
 	})
@@ -2154,6 +2149,14 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	warnings = append(warnings, more...)
+	// After prune: it rewrites cron.database_name for the independent name (or
+	// hands it back to the permanent configuration), so the check must see
+	// the final effective value rather than the pre-rename guard.
+	if plan.Plan.Cron {
+		if err := checkCopyCronSetting(ctx, local, src, p.Name); err != nil {
+			return nil, mayHaveChangedPasswords(err)
+		}
+	}
 	// The renames carry the new passwords, the protection policy is settled
 	// and the cluster runs its own configuration: safety is complete. The
 	// unfollow record's settled flag and the fence's routing eligibility are
