@@ -346,13 +346,14 @@ func mergeExtension(name string, def *ExtensionDefinition, builtin *catalog.Exte
 		if def.StandbySafe != nil {
 			out.StandbySafe = *def.StandbySafe
 		}
-		providerChanged := out.Source != builtin.Source || out.Package != builtin.Package || out.Preload != builtin.Preload
+		providerChanged := out.Source != builtin.Source || out.Package != builtin.Package ||
+			out.Preload != builtin.Preload || out.ExtName != builtin.ExtName
 		if providerChanged {
 			if def.CopySafety == nil {
-				add("extensions.%s.copy_safety must be renewed when source, package or preload changes", name)
+				add("extensions.%s.copy_safety must be renewed when source, package, preload or ext_name changes", name)
 			}
 			if def.StandbySafe == nil {
-				add("extensions.%s.standby_safe must be renewed when source, package or preload changes", name)
+				add("extensions.%s.standby_safe must be renewed when source, package, preload or ext_name changes", name)
 			}
 		}
 		if builtin.Default {

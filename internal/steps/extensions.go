@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -196,6 +197,11 @@ func extensionRuntimeRequirementsForSpec(cfg config.Cluster, spec config.Cluster
 	}
 	return out, nil
 }
+
+// ClusterStepID is cluster's postgres-cluster-v1 instance. The extension
+// transition uses it to let the engine start a stopped target before it reads
+// that target's pg_extension catalog.
+func ClusterStepID(cluster string) string { return engine.InstanceID(postgresClusterID, cluster) }
 
 // extensionSQLSelection resolves spec's effective selection to the
 // descriptors that create SQL. Preload-only modules are not SQL extensions and
@@ -776,6 +782,11 @@ const (
 	// FollowerRuntimeAwaiting means the target has no materialized data yet.
 	// Only metadata can be validated; no SQL absence is inferred.
 	FollowerRuntimeAwaiting FollowerRuntimeClass = "awaiting"
+	// FollowerRuntimeStopped means the target is materialized but stopped. Its
+	// pg_extension is unknown, not empty: only persisted guard/history and
+	// descriptor metadata are authoritative until the caller's engine-owned
+	// start makes the catalog readable. No SQL absence is inferred.
+	FollowerRuntimeStopped FollowerRuntimeClass = "stopped"
 )
 
 // FollowerRuntimeRequest is the explicit evidence and transition context for
@@ -906,10 +917,14 @@ type FollowerRuntimePlan struct {
 	// expected runtime; ExpectedSettings is.
 	Settings map[string]string
 	// ExpectedSettings is the complete ordinary-plus-mandatory-copy overlay the
-	// follower must have effective, as decoded runtime values (descriptor
-	// literals decoded once, raw global/spec/follower overrides unchanged).
-	// Verification checks every key before any primary configuration or SQL
-	// runs. The serialized Guard.Settings map remains config literals.
+	// follower must have effective: exactly the ordinary settings the renderer
+	// writes for the follower's declared extension selection, retained/outgoing
+	// obligations, and every mandatory copy overlay. Global/follower settings
+	// join only for a key one of those obligations owns. Values are decoded
+	// runtime values (descriptor literals decoded once, raw global/spec/
+	// follower overrides unchanged). Verification checks every key before any
+	// primary configuration or SQL runs. The serialized Guard.Settings map
+	// remains config literals.
 	ExpectedSettings map[string]string
 	Cron             bool
 	Retained         []catalog.Extension
@@ -981,12 +996,27 @@ var followerInstalledExtensions = func(ctx context.Context, spec config.ClusterS
 	return out, nil
 }
 
+// followerInstalledExtensionSchemas reads the follower's actual installed
+// namespaces. The shared LEFT JOIN keeps a known installed row with an
+// unreadable namespace visible as unknown instead of absent.
+var followerInstalledExtensionSchemas = func(ctx context.Context, spec config.ClusterSpec) (map[string]string, error) {
+	return QueryInstalledExtensionSchemas(ctx, ClusterPG(spec), spec.DatabaseName())
+}
+
 // SetFollowerInstalledExtensionsForTest replaces the live catalog reader for a
 // test in another package and returns the restore function.
 func SetFollowerInstalledExtensionsForTest(f func(context.Context, config.ClusterSpec) (map[string]bool, error)) func() {
 	old := followerInstalledExtensions
 	followerInstalledExtensions = f
 	return func() { followerInstalledExtensions = old }
+}
+
+// SetFollowerInstalledExtensionSchemasForTest replaces the live namespace
+// reader for a test in another package and returns the restore function.
+func SetFollowerInstalledExtensionSchemasForTest(f func(context.Context, config.ClusterSpec) (map[string]string, error)) func() {
+	old := followerInstalledExtensionSchemas
+	followerInstalledExtensionSchemas = f
+	return func() { followerInstalledExtensionSchemas = old }
 }
 
 // PlanFollowerRuntime resolves one continuously following runtime without
@@ -1016,7 +1046,7 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 		class = FollowerRuntimeLive
 	}
 	switch class {
-	case FollowerRuntimeLive, FollowerRuntimeAwaiting:
+	case FollowerRuntimeLive, FollowerRuntimeAwaiting, FollowerRuntimeStopped:
 	default:
 		return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
 			"unknown follower runtime evidence class "+string(class),
@@ -1031,6 +1061,33 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 	current, err := resolveExtensionDescriptors(resolver, currentNames)
 	if err != nil {
 		return FollowerRuntimePlan{}, config.ValidationError(err)
+	}
+	// A live follower's actual metadata namespace must agree with every
+	// explicitly targeted descriptor schema before history, save,
+	// configuration or package effects. Absent SQL may still arrive by primary
+	// WAL replay; a known installed row with no readable namespace fails
+	// closed. A stopped/awaiting target has no readable catalog here and is
+	// rechecked before its own SQL; a post-effect refresh never claims a new
+	// preflight.
+	if class == FollowerRuntimeLive && !req.AllowUnknownSQL {
+		schemaEntries := make([]catalog.Extension, 0, len(current))
+		for _, ext := range current {
+			if ext.ExtName != "" && ext.Schema != "" {
+				schemaEntries = append(schemaEntries, ext)
+			}
+		}
+		if len(schemaEntries) > 0 {
+			schemas, err := followerInstalledExtensionSchemas(ctx, follower)
+			if err != nil {
+				return FollowerRuntimePlan{}, output.NewError(output.CodePrecondition,
+					"cannot read "+follower.Name+"'s installed extension schemas: "+err.Error(),
+					output.ExitPrecondition, "Start the follower and retry when its catalog answers; nothing was changed.").
+					WithDetails(map[string]any{"reason": "follower_schema_unknown", "database": follower.Name})
+			}
+			if err := ValidateInstalledExtensionSchemas(follower.Name, schemaEntries, schemas); err != nil {
+				return FollowerRuntimePlan{}, err
+			}
+		}
 	}
 	// Current inherited metadata safety is independent of the preload list and
 	// files: every selected descriptor, SQL-only included, must declare
@@ -1313,29 +1370,32 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 	if err != nil {
 		return FollowerRuntimePlan{}, err
 	}
-	// Expected runtime: global settings, current ordinary settings, the
-	// follower's explicit settings, then retained/outgoing ordinary settings
-	// that no higher-precedence source supplies, and finally every own
-	// mandatory copy overlay. This is what verification checks, not just the
-	// guard assignments.
+	// Expected runtime: the ordinary settings the renderer actually writes for
+	// the follower, then retained/outgoing ordinary settings that no
+	// higher-precedence source supplies, then every own mandatory copy overlay.
+	// This is what verification checks, not just the guard assignments.
+	//
+	// Only explicitly declared descriptors write ordinary settings into
+	// 30-vaire-extensions.conf. The implicit default modules still contribute
+	// preloads and packages, but their descriptor settings are not rendered, so
+	// they must not become expectations here. Global and per-database settings
+	// are external precedence only for keys an extension obligation already
+	// owns; an unrelated random_page_cost or enum value is not an extension
+	// dependency.
 	//
 	// ExpectedSettings holds decoded runtime values. Descriptor settings and
 	// copy settings are PostgreSQL config literals and are decoded exactly
 	// once; [postgres.settings] and the follower's explicit settings are raw
 	// values the renderer quotes, so they are already decoded.
+	rendered, err := resolver.Enabled(follower.Extensions)
+	if err != nil {
+		return FollowerRuntimePlan{}, config.ValidationError(err)
+	}
 	expected := map[string]string{}
-	// Renderer order: 30-vaire-extensions.conf, then 50-vaire-settings.conf
-	// (setup-wide settings followed by the database's explicit settings).
-	for _, ext := range current {
+	for _, ext := range rendered {
 		for k, literal := range ext.ResolvedSettings(db) {
 			expected[k] = catalog.NormalizedSettingValue(literal)
 		}
-	}
-	for k, v := range cfg.Postgres.Settings {
-		expected[k] = v
-	}
-	for k, v := range follower.Settings {
-		expected[k] = v
 	}
 	// permanentDecoded is the same precedence in decoded runtime form. The
 	// guard's Permanent map may still carry literals for its own decisions.
@@ -1380,6 +1440,21 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 			expected[k] = catalog.NormalizedSettingValue(literal)
 		}
 	}
+	// Renderer order after 30-vaire-extensions.conf is 50-vaire-settings.conf:
+	// setup-wide settings followed by the database's explicit settings. Apply
+	// that precedence only to keys an extension obligation owns.
+	for k := range expected {
+		if raw, ok := cfg.Postgres.Settings[k]; ok {
+			expected[k] = raw
+		}
+	}
+	for k := range expected {
+		if raw, ok := follower.Settings[k]; ok {
+			expected[k] = raw
+		}
+	}
+	// Mandatory copy settings live in postgresql.auto.conf, after the managed
+	// configuration, so they overlay every ordinary or explicit value.
 	for _, ext := range kept {
 		if ext.CopySafety != catalog.CopySafetyDisabled {
 			continue
@@ -1389,16 +1464,16 @@ func PlanFollowerRuntime(ctx context.Context, cfg config.Cluster, follower confi
 		}
 	}
 	retainedPreloads := make([]string, 0, len(kept))
+	seenRetainedPreload := map[string]bool{}
 	for _, ext := range kept {
 		if _, isCurrent := currentByName[ext.Name]; isCurrent {
 			continue
 		}
-		if ext.Preload != "" {
+		if ext.Preload != "" && !seenRetainedPreload[ext.Preload] {
+			seenRetainedPreload[ext.Preload] = true
 			retainedPreloads = append(retainedPreloads, ext.Preload)
 		}
 	}
-	sort.Strings(retainedPreloads)
-	retainedPreloads = slices.Compact(retainedPreloads)
 	currentPreloads, err := resolver.Preloads(source.Extensions)
 	if err != nil {
 		return FollowerRuntimePlan{}, config.ValidationError(err)
@@ -1652,21 +1727,8 @@ func FollowerGuardDrifted(installed backup.CopyGuard, present bool, plan Followe
 	if !present {
 		return len(plan.Guard.Preloads) > 0 || len(plan.Guard.Settings) > 0
 	}
-	have := map[string]bool{}
-	for _, lib := range installed.Preloads {
-		have[lib] = true
-	}
-	want := map[string]bool{}
-	for _, lib := range plan.Guard.Preloads {
-		want[lib] = true
-		if !have[lib] {
-			return true
-		}
-	}
-	for lib := range have {
-		if !want[lib] {
-			return true
-		}
+	if !slices.Equal(installed.Preloads, plan.Guard.Preloads) {
+		return true
 	}
 	if len(installed.Settings) != len(plan.Guard.Settings) {
 		return true
@@ -1791,7 +1853,7 @@ func RefuseExtensionUnload(ctx context.Context, cfg config.Cluster, spec config.
 					return output.NewError(output.CodePrecondition,
 						"applying this configuration would unload "+p+" while unmanaged extension "+name+"'s SQL is still installed in "+spec.Name,
 						output.ExitPrecondition,
-						"Declare it in [extensions.<name>] with copy/standby safety, or remove it with vaire ext remove; nothing was applied.").
+						"Declare it in [extensions.<name>] with copy/standby safety, or remove it with vaire ext remove. This configuration was not applied; earlier steps may have run.").
 						WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name, "extension": name, "library": p})
 				}
 			}
@@ -1801,7 +1863,7 @@ func RefuseExtensionUnload(ctx context.Context, cfg config.Cluster, spec config.
 			return output.NewError(output.CodePrecondition,
 				"applying this configuration would unload "+ext.Preload+" while "+name+"'s SQL is still installed in "+spec.Name,
 				output.ExitPrecondition,
-				"Remove it with vaire ext remove "+ext.Name+" --db "+spec.Name+" --confirm "+spec.Name+", or add it to extensions; nothing was applied.").
+				"Remove it with vaire ext remove "+ext.Name+" --db "+spec.Name+" --confirm "+spec.Name+", or add it to extensions. This configuration was not applied; earlier steps may have run.").
 				WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name, "extension": ext.Name, "library": ext.Preload})
 		}
 	}
@@ -1816,7 +1878,7 @@ func refuseUnloadFromManagedFiles(cfg config.Cluster, spec config.ClusterSpec) e
 				return output.NewError(output.CodePrecondition,
 					spec.Name+" exists but its last managed extension configuration is missing, so vaire cannot prove its preloads safe",
 					output.ExitPrecondition,
-					"Restore "+managedExtensionsConfPath(spec.Name)+", or start the cluster so vaire can read pg_extension; nothing was applied.").
+					"Restore "+managedExtensionsConfPath(spec.Name)+", or start the cluster so vaire can read pg_extension. This configuration was not applied; earlier steps may have run.").
 					WithDetails(map[string]any{"reason": "extension_unload_unproven", "database": spec.Name})
 			}
 			// A new cluster has no last configuration to unload.
@@ -1825,7 +1887,7 @@ func refuseUnloadFromManagedFiles(cfg config.Cluster, spec config.ClusterSpec) e
 		return output.NewError(output.CodePrecondition,
 			"vaire cannot read "+spec.Name+"'s last managed extension configuration to prove its preloads safe: "+err.Error(),
 			output.ExitPrecondition,
-			"Fix access to "+managedExtensionsConfPath(spec.Name)+", or start the cluster so vaire can read pg_extension; nothing was applied.").
+			"Fix access to "+managedExtensionsConfPath(spec.Name)+", or start the cluster so vaire can read pg_extension. This configuration was not applied; earlier steps may have run.").
 			WithDetails(map[string]any{"reason": "extension_unload_unproven", "database": spec.Name})
 	}
 	newPreloads, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
@@ -1843,7 +1905,7 @@ func refuseUnloadFromManagedFiles(cfg config.Cluster, spec config.ClusterSpec) e
 		return output.NewError(output.CodePrecondition,
 			"applying this configuration would unload "+p+" from "+spec.Name+", but its cluster is stopped or unreadable so vaire cannot prove no installed extension still uses it",
 			output.ExitPrecondition,
-			"Start "+spec.Name+" and retry so vaire can read pg_extension, or remove the extension with vaire ext remove before changing its preload; nothing was applied.").
+			"Start "+spec.Name+" and retry so vaire can read pg_extension, or remove the extension with vaire ext remove before changing its preload. This configuration was not applied; earlier steps may have run.").
 			WithDetails(map[string]any{"reason": "extension_unload_unproven", "database": spec.Name, "library": p})
 	}
 	return nil
@@ -2075,10 +2137,18 @@ func extensionCreationSQL(cfg config.Cluster, spec config.ClusterSpec, loaded, p
 }
 
 // PrimaryExtensionExpectedSettings is the effective ordinary value for one
-// extension's own setting keys on a primary: the descriptor default, then the
-// setup-wide [postgres.settings], then the database's explicit
-// [clusters.settings], matching the renderer's load order. Copy overlays do
-// not apply to a primary.
+// extension's own setting keys on a primary, matching the renderer's load
+// order. An explicitly selected extension contributes its descriptor defaults
+// from 30-vaire-extensions.conf, then the setup-wide [postgres.settings], then
+// the database's explicit [clusters.settings] from 50-vaire-settings.conf.
+// Copy overlays do not apply to a primary.
+//
+// Only an extension explicitly selected for the database, by canonical name
+// or built-in alias, has its descriptor settings rendered. The implicit
+// default modules still contribute their preloads, packages and SQL, but their
+// unrendered descriptor defaults are not effective expectations. A setup-wide
+// or database setting is still rendered by 50-vaire-settings.conf, so it
+// overrides an extension-owned key even when the extension is only implicit.
 //
 // The returned map is decoded runtime values, not config literals. Descriptor
 // settings are PostgreSQL config literals, so each is decoded exactly once
@@ -2090,9 +2160,31 @@ func PrimaryExtensionExpectedSettings(cfg config.Cluster, spec config.ClusterSpe
 	if len(ordinary) == 0 {
 		return nil
 	}
+	resolver := cfg.ExtensionResolver()
+	explicit := false
+	for _, name := range spec.Extensions {
+		if canonical, ok := resolver.Canonical(name); ok && canonical == ext.Name {
+			explicit = true
+			break
+		}
+	}
 	expected := make(map[string]string, len(ordinary))
-	for k, literal := range ordinary {
-		expected[k] = catalog.NormalizedSettingValue(literal)
+	if explicit {
+		for k, literal := range ordinary {
+			expected[k] = catalog.NormalizedSettingValue(literal)
+		}
+	}
+	for k := range ordinary {
+		if _, ok := expected[k]; ok {
+			continue
+		}
+		if raw, ok := cfg.Postgres.Settings[k]; ok {
+			expected[k] = raw
+			continue
+		}
+		if raw, ok := spec.Settings[k]; ok {
+			expected[k] = raw
+		}
 	}
 	for k := range expected {
 		if raw, ok := cfg.Postgres.Settings[k]; ok {
@@ -2108,35 +2200,47 @@ func PrimaryExtensionExpectedSettings(cfg config.Cluster, spec config.ClusterSpe
 }
 
 // ExtensionSettingFact is one effective PostgreSQL setting value together with
-// its pg_settings vartype. An empty Type means PostgreSQL did not report a
-// type (a custom placeholder), so the value is compared exactly.
+// its pg_settings type and unit. An empty Type means PostgreSQL did not report
+// a type (a custom placeholder), so the value is compared exactly. An empty
+// Unit means the setting has no unit or the caller did not read it; integer
+// and real comparisons then use the plain value.
 type ExtensionSettingFact struct {
 	Value string
 	Type  string
+	Unit  string
 }
 
-// ExtensionSettingFactSQL reads one required setting's effective value and
-// type. current_setting is the authority for the value; pg_settings supplies
-// the type only when PostgreSQL knows the setting. A placeholder that is not
-// in pg_settings still reports its current_setting value with an empty type.
+// ExtensionSettingFactSQL reads one required setting's effective value, type
+// and unit. current_setting is the authority for the value; pg_settings
+// supplies the type and unit only when PostgreSQL knows the setting. A
+// placeholder that is not in pg_settings still reports its current_setting
+// value with empty type and unit.
 func ExtensionSettingFactSQL(key string) string {
 	k := literal(key)
-	return "SELECT current_setting(" + k + ", true) AS v, coalesce((SELECT vartype FROM pg_settings WHERE name = " + k + "), '') AS vartype"
+	return "SELECT current_setting(" + k + ", true) AS v, coalesce((SELECT vartype FROM pg_settings WHERE name = " + k + "), '') AS vartype, coalesce((SELECT unit FROM pg_settings WHERE name = " + k + "), '') AS unit"
 }
 
 // ParseExtensionSettingFact reads ExtensionSettingFactSQL's one row.
 func ParseExtensionSettingFact(row map[string]string) ExtensionSettingFact {
-	return ExtensionSettingFact{Value: row["v"], Type: row["vartype"]}
+	return ExtensionSettingFact{Value: row["v"], Type: row["vartype"], Unit: row["unit"]}
 }
 
 // ExtensionSettingMatches compares an expected decoded setting value with an
-// actual fact. PostgreSQL boolean GUCs canonicalize true/on/yes/1 and
-// false/off/no/0 to on/off; both sides of a boolean comparison therefore use
-// PostgreSQL's boolean input forms. Every other setting, including a custom
-// placeholder with no pg_settings type, is compared exactly, so quote content
-// and arbitrary text are never normalized.
+// actual fact. PostgreSQL's own type determines the comparison:
+//
+//   - bool uses PostgreSQL's boolean input forms and their unique prefixes;
+//   - enum is case-insensitive, because PostgreSQL canonicalises GUC enum
+//     values to lowercase;
+//   - integer and real compare numerically, including PostgreSQL unit
+//     suffixes (for example 1MB and 1024kB) when pg_settings reports the unit;
+//   - string, an unknown type and an unrecognised unit are compared exactly,
+//     so quote content and arbitrary text are never normalized.
+//
+// The expected value is already decoded once by the caller. This function
+// never strips another quote layer, trims whitespace or guesses a type.
 func ExtensionSettingMatches(want string, fact ExtensionSettingFact) bool {
-	if fact.Type == "bool" {
+	switch fact.Type {
+	case "bool":
 		w, ok := postgresBool(want)
 		if !ok {
 			return false
@@ -2146,8 +2250,152 @@ func ExtensionSettingMatches(want string, fact ExtensionSettingFact) bool {
 			return false
 		}
 		return w == got
+	case "enum":
+		return strings.EqualFold(want, fact.Value)
+	case "integer":
+		return extensionNumericMatches(want, fact, true)
+	case "real":
+		return extensionNumericMatches(want, fact, false)
 	}
 	return fact.Value == want
+}
+
+func extensionNumericMatches(want string, fact ExtensionSettingFact, integer bool) bool {
+	if fact.Unit != "" {
+		w, wantOK := postgresUnitValue(want, fact.Unit)
+		got, gotOK := postgresUnitValue(fact.Value, fact.Unit)
+		if wantOK && gotOK {
+			return w == got
+		}
+		// An unknown unit or an unparseable value is compared exactly rather
+		// than guessed.
+		return fact.Value == want
+	}
+	if integer {
+		w, wantErr := strconv.ParseInt(want, 10, 64)
+		got, gotErr := strconv.ParseInt(fact.Value, 10, 64)
+		if wantErr == nil && gotErr == nil {
+			return w == got
+		}
+		return fact.Value == want
+	}
+	w, wantErr := strconv.ParseFloat(want, 64)
+	got, gotErr := strconv.ParseFloat(fact.Value, 64)
+	if wantErr == nil && gotErr == nil {
+		return w == got
+	}
+	return fact.Value == want
+}
+
+// postgresUnitValue converts a PostgreSQL GUC value to the base unit named by
+// the pg_settings unit column. A bare number is in that base unit; a suffix
+// selects its own unit and must belong to the same category. Unknown units
+// return false instead of guessing.
+func postgresUnitValue(value, unit string) (float64, bool) {
+	base, category, ok := postgresUnitBase(unit)
+	if !ok {
+		return 0, false
+	}
+	number, suffix, ok := splitPostgresUnitValue(value)
+	if !ok {
+		return 0, false
+	}
+	if suffix == "" {
+		return number * base, true
+	}
+	factor, suffixCategory, ok := postgresUnitSuffix(suffix)
+	if !ok || suffixCategory != category {
+		return 0, false
+	}
+	return number * factor, true
+}
+
+func splitPostgresUnitValue(value string) (float64, string, bool) {
+	end := len(value)
+	for end > 0 {
+		c := value[end-1]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			end--
+			continue
+		}
+		break
+	}
+	number, err := strconv.ParseFloat(value[:end], 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return number, strings.ToLower(value[end:]), true
+}
+
+type postgresUnitCategory int
+
+const (
+	postgresUnitBytes postgresUnitCategory = iota + 1
+	postgresUnitTime
+)
+
+func postgresUnitBase(unit string) (float64, postgresUnitCategory, bool) {
+	switch strings.ToLower(unit) {
+	case "b":
+		return 1, postgresUnitBytes, true
+	case "kb":
+		return 1 << 10, postgresUnitBytes, true
+	case "mb":
+		return 1 << 20, postgresUnitBytes, true
+	case "gb":
+		return 1 << 30, postgresUnitBytes, true
+	case "tb":
+		return 1 << 40, postgresUnitBytes, true
+	case "8kb":
+		return 8 << 10, postgresUnitBytes, true
+	case "16kb":
+		return 16 << 10, postgresUnitBytes, true
+	case "32kb":
+		return 32 << 10, postgresUnitBytes, true
+	case "64kb":
+		return 64 << 10, postgresUnitBytes, true
+	case "us":
+		return 1, postgresUnitTime, true
+	case "ms":
+		return 1_000, postgresUnitTime, true
+	case "s":
+		return 1_000_000, postgresUnitTime, true
+	case "min":
+		return 60_000_000, postgresUnitTime, true
+	case "h":
+		return 3_600_000_000, postgresUnitTime, true
+	case "d":
+		return 86_400_000_000, postgresUnitTime, true
+	}
+	return 0, 0, false
+}
+
+func postgresUnitSuffix(suffix string) (float64, postgresUnitCategory, bool) {
+	switch suffix {
+	case "b":
+		return 1, postgresUnitBytes, true
+	case "kb":
+		return 1 << 10, postgresUnitBytes, true
+	case "mb":
+		return 1 << 20, postgresUnitBytes, true
+	case "gb":
+		return 1 << 30, postgresUnitBytes, true
+	case "tb":
+		return 1 << 40, postgresUnitBytes, true
+	case "us":
+		return 1, postgresUnitTime, true
+	case "ms":
+		return 1_000, postgresUnitTime, true
+	case "s":
+		return 1_000_000, postgresUnitTime, true
+	case "min":
+		return 60_000_000, postgresUnitTime, true
+	case "h":
+		return 3_600_000_000, postgresUnitTime, true
+	case "d":
+		return 86_400_000_000, postgresUnitTime, true
+	}
+	return 0, 0, false
 }
 
 // postgresBool accepts PostgreSQL's boolean input forms and their unique

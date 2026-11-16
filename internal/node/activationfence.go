@@ -1043,6 +1043,16 @@ func finalizeRoutingFences(ctx context.Context, env *Env, dbs []string) []output
 				Message: db + "'s routing fence has no current cluster.toml entry"})
 			continue
 		}
+		if f.Kind == "fork" {
+			// A normal engine pass may already have rendered shared poolers;
+			// the finalizer still refuses publication/resume/clear until the
+			// final actual registration and durable marker absence agree.
+			if err := verifyForkRoutingBoundary(env.Cluster, db, f.OperationID); err != nil {
+				warnings = append(warnings, output.Warning{Code: "activation_routing_incomplete",
+					Message: db + " is not durably routable yet: " + err.Error()})
+				continue
+			}
+		}
 		var routingErr error
 		if f.Kind == "restore-abort" {
 			// A normal pooler render can skip on an unchanged input hash, so
@@ -1060,103 +1070,25 @@ func finalizeRoutingFences(ctx context.Context, env *Env, dbs []string) []output
 }
 
 // resumeForkSettlement is the non-secret continuation of a fork whose data is
-// already copied. It never replays credential renames or stores passwords. An
-// adopting fence finishes the verified registration; an adopted fence runs the
-// owned guarded configuration/start, desired SQL, cron and effective handoff,
-// then the shared routing finalizer. A routing fence only finalizes routing.
+// already copied. It never replays credential renames or stores passwords. A
+// verified continuation scope finishes registration, provisioning and
+// settlement; a routing fence whose retained record is already durably absent
+// only finalizes routing. Anything else is refused.
 func resumeForkSettlement(ctx context.Context, env *Env, f backup.ActivationFence) (Result, error) {
 	cfg := env.Cluster
 	spec, ok := cfg.ClusterByName(f.Database)
 	if !ok {
 		return Result{}, databaseNotFound(f.Database)
 	}
-	if f.Phase == fencePhaseAdopting {
-		var err error
-		f, spec, err = verifyActivationFence(cfg, f.Database, f.OperationID, "fork", fencePhaseAdopting)
-		if err != nil {
-			return Result{}, err
-		}
-		source := ""
-		for old := range f.Renames {
-			source = old
-		}
-		if source == "" {
-			return Result{}, output.NewError(output.CodePrecondition,
-				f.Database+"'s adopting fence names no source for its registration",
-				output.ExitPrecondition, "Retry the owning db fork; vaire will not guess the copied cluster.").
-				WithDetails(map[string]any{"reason": "activation_fence_identity", "database": f.Database})
-		}
-		srcSpec, err := clusterOf(cfg, source)
-		if err != nil {
-			return Result{}, err
-		}
-		if f.OldStanza != srcSpec.Stanza || f.NewStanza != spec.Stanza {
-			return Result{}, activationIdentityError(spec.Name, f, "stanza transition", f.OldStanza+"->"+f.NewStanza, srcSpec.Stanza+"->"+spec.Stanza)
-		}
-		rt := runtimeFor(env, false)
-		m := backup.ResumeMaterialised(cfg.Server.DataRoot, spec.Name, source, srcSpec.Port, rt.Shell, "db-fork", env.Report)
-		m.Port = f.Port
-		if err := backup.DropRecoverySettings(m.DataDir()); err != nil {
-			return Result{}, err
-		}
-		if err := m.Adopt(ctx, spec.Port); err != nil {
-			return Result{}, err
-		}
-		if !followConfRegistered(spec.Name) {
-			return Result{}, output.NewError(output.CodePrecondition,
-				spec.Name+"'s adoption did not leave a verified postgresql-common registration",
-				output.ExitPrecondition, "Retry vaire apply --db "+spec.Name+"; the fork fence stays adopting.").
-				WithDetails(map[string]any{"reason": "activation_registration_missing", "database": spec.Name})
-		}
-		data, err := followRegisteredData(spec.Name)
-		if err != nil {
-			return Result{}, err
-		}
-		if data == "" || data != cfg.Server.DataDirectory(spec.Name) {
-			return Result{}, activationIdentityError(spec.Name, f, "registered data directory", data, cfg.Server.DataDirectory(spec.Name))
-		}
-		if err := advanceActivationFence(cfg, f.Database, f.OperationID, "fork", fencePhaseAdopting, fencePhaseAdopted, spec, func(nf *backup.ActivationFence) {
-			nf.Registration = activationRegistration(spec)
-			nf.Port = spec.Port
-			nf.DataDir = cfg.Server.DataDirectory(spec.Name)
-			nf.ConfDir = steps.PGConfDir(spec.Name)
-		}); err != nil {
-			return Result{}, err
-		}
-		f, _, err = verifyActivationFence(cfg, f.Database, f.OperationID, "fork", fencePhaseAdopted)
-		if err != nil {
-			return Result{}, err
-		}
+	if scope := forkContinuationScopeFrom(ctx); scope != nil && scope.hasOwner {
+		return resumeForkContinuation(ctx, env, scope)
 	}
-	if f.Phase == fencePhaseRouting {
-		if _, _, err := verifyActivationFence(cfg, spec.Name, f.OperationID, "fork", fencePhaseRouting); err != nil {
-			return Result{}, err
-		}
-		if err := publishRouting(ctx, cfg, runtimeFor(env, false), env.Report); err != nil {
-			return Result{Data: map[string]any{"database": spec.Name, "routing": "pending"},
-				Warnings: []output.Warning{{Code: "activation_routing_incomplete",
-					Message: spec.Name + "'s route is not published yet: " + err.Error()}}}, nil
-		}
-		if err := verifyRoutingFence(ctx, cfg, spec, f.OperationID, "fork"); err != nil {
-			return Result{Data: map[string]any{"database": spec.Name, "routing": "pending"},
-				Warnings: []output.Warning{{Code: "activation_routing_incomplete",
-					Message: spec.Name + " is not routed yet: " + err.Error()}}}, nil
-		}
-		return Result{Data: map[string]any{"database": spec.Name, "resumed": true}}, nil
+	if f.Phase != fencePhaseRouting {
+		// An adopting or adopted fence without a retained, verified
+		// materialisation record has no proven physical ownership.
+		return Result{}, materialisationIncomplete(f.Database, nil)
 	}
-	if f.Phase != fencePhaseAdopted {
-		return Result{}, activationFenceRefusal(f, spec.Name)
-	}
-	plan, err := copyPlanFromFence(cfg, spec, f)
-	if err != nil {
-		return Result{}, err
-	}
-	cfg, warnings, err := completeForkActivation(ctx, spec, f, plan, runtimeFor(env, false), env.Report)
-	if err != nil {
-		return Result{}, err
-	}
-	env.Cluster = cfg
-	return Result{Data: map[string]any{"database": spec.Name, "resumed": true}, Warnings: warnings}, nil
+	return resumeForkRoutingOnly(ctx, env, f, spec)
 }
 
 // copyPlanFromFence reconstructs the adopted fork's complete guard and
@@ -1172,8 +1104,18 @@ func copyPlanFromFence(cfg config.Cluster, spec config.ClusterSpec, f backup.Act
 	if err != nil {
 		return nil, config.ValidationError(err)
 	}
-	merged := append([]catalog.Extension(nil), f.Requirements...)
-	_, guard, err := backup.MergeCopyRequirements(merged, nil, false, spec.DatabaseName())
+	// The settled guard must cover the durable copy snapshot, any retained
+	// history of the destination's own stanza, and current destination intent.
+	// MergeCopyRequirements resolves provider/settings conflicts and never
+	// discards a conflicting historical variant by name.
+	records, err := backup.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
+	known := append([]catalog.Extension(nil), f.Requirements...)
+	known = append(known, records.RetainedExtensions(f.TargetStanza)...)
+	known = append(known, current...)
+	merged, guard, err := backup.MergeCopyRequirements(known, nil, false, spec.DatabaseName())
 	if err != nil {
 		return nil, err
 	}
@@ -1327,9 +1269,10 @@ func completeForkActivation(ctx context.Context, spec config.ClusterSpec, f back
 	if _, _, err := verifyActivationFence(cfg, spec.Name, f.OperationID, "fork", fencePhaseRouting); err != nil {
 		return cfg, warnings, err
 	}
-	// The physical owner must verify and retire before either pooler can
-	// publish the target. Its caller completes routing after retirement.
-	if hasForkMaterialisationView(ctx, spec.Name) {
+	// The physical owner (the job or the verified public continuation) must
+	// verify and retire before either pooler can publish the target. Its caller
+	// completes routing after retirement.
+	if materialisationWithholdsRoutes(ctx, spec.Name) {
 		return cfg, warnings, nil
 	}
 	if err := publishRouting(ctx, cfg, rt, report); err != nil {

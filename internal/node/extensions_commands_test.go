@@ -112,16 +112,24 @@ func newExtHarness(t *testing.T, cfg config.Cluster) *extHarness {
 	oldDetect := detectHost
 	oldRecordsPath := backup.RecordsPath
 	oldAcquire := extensionAcquireClusters
+	oldPresent := extensionTargetPresent
+	oldValidateStopped := extensionValidateStopped
+	oldRefuseUnload := extensionRefuseUnload
 	extensionAcquireClusters = func(context.Context, []string, string, string, time.Duration) (engine.Release, error) {
 		return func() {}, nil
 	}
+	// Node lifecycle tests model materialized targets without host directories.
+	// The production check is the data-directory presence.
+	extensionTargetPresent = func(config.Cluster, config.ClusterSpec) bool { return true }
+	extensionValidateStopped = func(context.Context, config.Cluster, config.ClusterSpec) error { return nil }
+	extensionRefuseUnload = func(context.Context, config.Cluster, config.ClusterSpec, bool) error { return nil }
 	// Node lifecycle tests model host/PG effects, not a real follower catalog.
 	// The planner's live class is still exercised; tests that need installed
 	// SQL extras or a catalog failure replace this seam themselves.
 	oldFollowerSQL := steps.SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return map[string]bool{}, nil
 	})
-	oldGuardInstance := steps.SetGuardInstanceForTest(func() (string, error) { return "test-instance", nil })
+	oldValidateInstance := steps.SetGuardInstanceForTest(func() (string, error) { return "test-instance", nil })
 	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
 	t.Cleanup(func() {
 		extensionLoad, extensionSave, extensionRecords = oldLoad, oldSave, oldRecords
@@ -134,8 +142,11 @@ func newExtHarness(t *testing.T, cfg config.Cluster) *extHarness {
 		extensionJournalConverged = oldJournal
 		detectHost = oldDetect
 		extensionAcquireClusters = oldAcquire
+		extensionTargetPresent = oldPresent
+		extensionValidateStopped = oldValidateStopped
+		extensionRefuseUnload = oldRefuseUnload
 		oldFollowerSQL()
-		oldGuardInstance()
+		oldValidateInstance()
 		backup.RecordsPath = oldRecordsPath
 	})
 
@@ -309,43 +320,36 @@ func TestExtAddDryRunHasZeroEffects(t *testing.T) {
 }
 
 func TestExtAddDryRunShowsUpdate(t *testing.T) {
-	h := newExtHarness(t, extTestCfg("pg_stat_statements", "pg_trgm"))
-	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) { return installedVersion("1.5", "1.6"), nil }
-	env := &Env{Cluster: h.cfg, Req: rpc.Request{Params: mustJSON(t, map[string]any{"name": "pg_trgm", "db": "app"}), DryRun: true}}
-	res, err := handleExtAdd(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := res.Data.(extAddResult)
-	if !data.UpdateAvailable || data.Version != "1.5" || data.DefaultVersion != "1.6" {
-		t.Fatalf("result = %+v", data)
-	}
-	if len(h.saves) != 0 || h.prepareCalls != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 {
-		t.Fatalf("dry run had effects: saves=%d prepare=%d apply=%d exec=%d", len(h.saves), h.prepareCalls, len(h.applyCalls), len(h.pg.execs))
-	}
-
-	h = newExtHarness(t, extTestCfg("pg_stat_statements", "pg_trgm"))
-	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) { return installedVersion("2.0", "1.0"), nil }
-	env = &Env{Cluster: h.cfg, Req: rpc.Request{Params: mustJSON(t, map[string]any{"name": "pg_trgm", "db": "app"}), DryRun: true}}
-	res, err = handleExtAdd(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data = res.Data.(extAddResult)
-	if !data.Downgrade || data.UpdateAvailable {
-		t.Fatalf("downgrade preview = %+v", data)
-	}
-
-	h = newExtHarness(t, extTestCfg("pg_stat_statements", "pg_trgm"))
-	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) { return installedVersion("v2", "v1"), nil }
-	env = &Env{Cluster: h.cfg, Req: rpc.Request{Params: mustJSON(t, map[string]any{"name": "pg_trgm", "db": "app"}), DryRun: true}}
-	res, err = handleExtAdd(context.Background(), env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data = res.Data.(extAddResult)
-	if !data.DirectionUnknown || data.Downgrade {
-		t.Fatalf("nonnumeric preview = %+v", data)
+	for _, tc := range []struct {
+		name, installed, available string
+		update, downgrade, unknown bool
+	}{
+		{name: "update", installed: "1.5", available: "1.6", update: true},
+		{name: "downgrade", installed: "2.0", available: "1.0", downgrade: true},
+		{name: "unknown direction", installed: "v2", available: "v1", update: true, unknown: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newExtHarness(t, extTestCfg("pg_stat_statements", "pg_trgm"))
+			h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
+				return installedVersion(tc.installed, tc.available), nil
+			}
+			env := &Env{Cluster: h.cfg, Req: rpc.Request{Params: mustJSON(t, map[string]any{"name": "pg_trgm", "db": "app"}), DryRun: true}}
+			res, err := handleExtAdd(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, ok := res.Data.(extAddResult)
+			if !ok {
+				t.Fatalf("dry run result type = %T", res.Data)
+			}
+			if data.Version != tc.installed || data.DefaultVersion != tc.available ||
+				data.UpdateAvailable != tc.update || data.Downgrade != tc.downgrade || data.DirectionUnknown != tc.unknown {
+				t.Fatalf("dry run result = %+v", data)
+			}
+			if len(h.saves) != 0 || h.prepareCalls != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 {
+				t.Fatalf("dry run had effects: saves=%d prepare=%d apply=%d exec=%d", len(h.saves), h.prepareCalls, len(h.applyCalls), len(h.pg.execs))
+			}
+		})
 	}
 }
 
@@ -450,7 +454,7 @@ func TestExtAddInvalidDescriptorHasZeroEffects(t *testing.T) {
 	}
 }
 
-func TestExtAddPackageFailureRollsBackIntent(t *testing.T) {
+func TestExtAddPackageFailureDoesNotSaveIntent(t *testing.T) {
 	h := newExtHarness(t, extTestCfg())
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		return map[string]extensionInstalledVersion{}, nil
@@ -462,32 +466,33 @@ func TestExtAddPackageFailureRollsBackIntent(t *testing.T) {
 		t.Fatalf("package failure: %v", err)
 	}
 	details := extDetails(t, err)
-	if details["intent_saved"] != false || details["config_rollback"] != "restored" || details["packages_may_remain"] != true {
+	if details["intent_saved"] != false || details["config_rollback"] != "not_needed" || details["packages_may_remain"] != true {
 		t.Fatalf("details = %+v", details)
 	}
-	if len(h.saveAttempts) != 2 || len(h.saves) != 2 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 {
-		t.Fatalf("rollback effects: attempts=%d saves=%d apply=%d exec=%d", len(h.saveAttempts), len(h.saves), len(h.applyCalls), len(h.pg.execs))
-	}
-	if string(h.saveAttempts[1]) != string(h.raw) {
-		t.Fatalf("rollback wrote %q, want %q", h.saveAttempts[1], h.raw)
+	if len(h.saveAttempts) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 || h.restartCalls != 0 {
+		t.Fatalf("failed prerequisite mutated intent/runtime: attempts=%d saves=%d apply=%d exec=%d restart=%d",
+			len(h.saveAttempts), len(h.saves), len(h.applyCalls), len(h.pg.execs), h.restartCalls)
 	}
 }
 
-func TestExtAddRollbackSaveFailureIsSurfaced(t *testing.T) {
+func TestExtAddPackageFailureDoesNotAttemptCompensatingSave(t *testing.T) {
 	h := newExtHarness(t, extTestCfg())
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		return map[string]extensionInstalledVersion{}, nil
 	}
 	h.prepareErr = errors.New("apt install failed")
-	h.saveErrAt[2] = errors.New("disk full")
+	h.saveErrAt[1] = errors.New("disk full")
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 	_, err := handleExtAdd(context.Background(), env)
-	if err == nil {
-		t.Fatal("rollback failure was not reported")
+	if err == nil || extReason(t, err) != "package_install_failed" || !strings.Contains(err.Error(), "apt install failed") {
+		t.Fatalf("original package failure was lost: %v", err)
 	}
 	details := extDetails(t, err)
-	if details["intent_saved"] != true || !strings.Contains(details["config_rollback"].(string), "failed") {
+	if details["intent_saved"] != false || details["config_rollback"] != "not_needed" {
 		t.Fatalf("details = %+v", details)
+	}
+	if len(h.saveAttempts) != 0 || h.prepareCalls != 1 {
+		t.Fatalf("unnecessary rollback save: attempts=%d prepare=%d", len(h.saveAttempts), h.prepareCalls)
 	}
 }
 
@@ -1537,7 +1542,7 @@ func TestExtAddPartialDirectFlagsPreserveExistingOverride(t *testing.T) {
 	}
 	h := newExtHarness(t, cfg)
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
-		return map[string]extensionInstalledVersion{"pg_stat_statements": {Name: "pg_stat_statements", Version: "1.12", Default: "1.12"}}, nil
+		return map[string]extensionInstalledVersion{"pg_stat_statements": {Name: "pg_stat_statements", Version: "1.12", Default: "1.12", Schema: "public"}}, nil
 	}
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{
 		"name": "pg_stat_statements", "db": "app",
@@ -1578,7 +1583,7 @@ func TestExtAddPartialFlagsPreservePreloadAndCopySettings(t *testing.T) {
 	}
 	h := newExtHarness(t, cfg)
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
-		return map[string]extensionInstalledVersion{"vector": {Name: "vector", Version: "0.9.0", Default: "0.9.0"}}, nil
+		return map[string]extensionInstalledVersion{"vector": {Name: "vector", Version: "0.9.0", Default: "0.9.0", Schema: "public"}}, nil
 	}
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{
 		"name": "vector", "db": "app", "settings": map[string]string{"vector.bar": "on"},

@@ -500,7 +500,7 @@ func TestPlanFollowerRuntimeCompleteWinningGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"auto_explain", "pg_cron", "pg_stat_statements"}
+	want := []string{"pg_stat_statements", "auto_explain", "pg_cron"}
 	if !slices.Equal(plan.Preloads, want) {
 		t.Fatalf("plan preloads = %v, want %v", plan.Preloads, want)
 	}
@@ -516,6 +516,24 @@ func TestPlanFollowerRuntimeCompleteWinningGuard(t *testing.T) {
 	}
 	if !slices.Equal(guard.Preloads, want) || guard.Settings["cron.launch_active_jobs"] != "off" {
 		t.Fatalf("follower guard = %+v", guard)
+	}
+	if FollowerGuardDrifted(guard, true, plan) {
+		t.Fatal("matching ordered guard was reported as drift")
+	}
+	legacy := guard.Clone()
+	legacy.Preloads = []string{"auto_explain", "pg_cron", "pg_stat_statements"}
+	if !FollowerGuardDrifted(legacy, true, plan) {
+		t.Fatal("order-only guard drift was hidden")
+	}
+	if _, err := backup.InstallCopyGuard(dataDir, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReconcileCopyGuard(context.Background(), cfg, follower); err != nil {
+		t.Fatal(err)
+	}
+	guard, _, err = backup.ReadCopyGuard(dataDir)
+	if err != nil || !slices.Equal(guard.Preloads, want) {
+		t.Fatalf("legacy guard order was not reconciled: %+v, %v", guard, err)
 	}
 	// Guard-only drift is visible to Check's readonly calculation.
 	drifted := guard.Clone()

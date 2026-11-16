@@ -1,0 +1,59 @@
+# Verification summary — vaire @ 84f71bb
+UTC date: 2026-11-16
+Target: 84f71bbaa1804fb9b7d581ca8a109192dc6375a9
+Branch: feat/phase-7-extensions
+Working tree at start: clean (git status --porcelain => 0 entries)
+Scope: verification only; no source/doc edits, no commits, no live/server access, no secrets.
+
+## Tool versions
+go              1.27.1 linux/amd64                  (mise.toml pin: 1.27.1) match
+golangci-lint   2.14.0 (built with go1.27.1)        (mise.toml pin: 2.14.0) match
+just            1.58.0  (PATH: ~/.local/share/mise/installs/just/latest/just)
+                        mise.toml pin: 1.43.0; `mise current just` reports 1.43.0,
+                        so PATH resolves an unpinned "latest" install. Note only;
+                        justfile parsed and ran.
+shellcheck      0.11.0                              (mise.toml pin: 0.11.0) match
+actionlint      1.7.12                              (mise.toml pin: 1.7.12) match
+git             2.53.0
+
+## Results (each command logged separately in this directory)
+PASS  14:21:32Z  go build ./...                          -> 01-go-build.log
+PASS  14:21:39Z  go vet ./...                            -> 02-go-vet.log
+FAIL  14:21:43Z  golangci-lint run ./...                 -> 03-golangci-lint.log  (131 issues)
+FAIL  14:22:36Z  GOOS=darwin GOARCH=arm64 go build ./... -> 04-darwin-arm64-build.log
+PASS  14:22:51Z  gofmt -l over 594 tracked .go files     -> 05-gofmt-check.log (no files listed)
+PASS  14:22:51Z  git diff --check (clean tree)           -> 06-git-diff-check.log
+FAIL  14:22:58Z  just lint                               -> 07-just-lint.log (first recipe golangci-lint, recipe line 16)
+PASS  14:23:04Z  just build (writes ignored bin/vaire)   -> 08-just-build.log
+PASS  14:23:12Z  bin/vaire commands --check-meta         -> 09-check-meta.log
+PASS  14:23:12Z  bin/vaire commands --check-steps (18)   -> 10-check-steps.log
+PASS  14:23:19Z  shellcheck -x (26 scripts)              -> 11-shellcheck.log
+PASS  14:23:19Z  actionlint                              -> 12-actionlint.log
+PASS  14:23:26Z  install.sh cosign pin check            -> 13-install-pins.log
+INFO  14:28:16Z  parent ce38a92 comparison               -> 14-parent-baseline-comparison.log
+INFO  14:28:50Z  concurrent worktree change observed     -> 15-worktree-concurrent-change.log
+
+## Failure 1 — golangci-lint (also blocks `just lint`)
+First failure: internal/node/extensions_commands_test.go:319:10: Error return value is not checked (errcheck)
+131 issues total: errcheck 3, errname 1, exhaustive 4, gocognit 50, gosec 1,
+nestif 21, nolintlint 24, prealloc 15, unparam 10, wastedassign 2.
+Pre-existing at parent ce38a92: same 131 issues and categories.
+Linters producing them were enabled by d08f4fc "ci: add proper golangci-lint file" (2026-11-15).
+
+## Failure 2 — darwin/arm64 cross-build
+internal/node/dropcluster_config.go:255 and :276: undefined: unix.Renameat2 / unix.RENAME_NOREPLACE
+internal/node/materialisationownership.go:375:39: cannot use st.Dev (int32) as uint64
+Files carry no build tags; Linux-only unix APIs used unconditionally.
+Pre-existing at parent ce38a92: identical errors.
+
+## Environment observation
+Working tree changed externally at 14:24:24Z-14:26:48Z (docs/README edits and phase-7 doc
+deletions) after all Go/build checks. HEAD unchanged; no .go/justfile/.golangci/go.mod/
+scripts/.github files modified. `git diff --check` re-ran and still passes.
+Not caused by this verification; not reverted.
+
+## Notes
+- Parent already ran full uncached `go test -count=1 ./...` (not repeated here).
+- bin/ is gitignored; build artifact bin/vaire left in place.
+- Temporary detached worktree at /tmp/opencode/vaire-parent-lint was removed; `git worktree list` has no leftover entry.
+- Evidence logs are the only untracked additions (under specs/evidence/extensions/).

@@ -517,7 +517,7 @@ Maintenance runs per database's cluster. It sets `lock_timeout` and refuses to r
 
 ## 7. Roadmap and status
 
-This section is the only place that tracks progress. Update it whenever a module or phase changes state.
+This section summarizes roadmap progress. Task-level extension evidence and remaining gates live in the [finishing checklist](../specs/extensions-finish.md); dated live results live in [MANUAL-TESTING.md](MANUAL-TESTING.md).
 
 **Rules**
 
@@ -530,13 +530,13 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 
 ### 7.1 Current state (2026-11-11)
 
-#### Phase 7 execution update (2026-11-11)
+#### Phase 7 execution update (2026-11-16)
 
 - Followers reached master and edge through [PR #14](https://github.com/mbvlabs/vaire/pull/14), at `0d8e1fcc493c`. Publication is historical evidence, not deployment or live qualification; the older implementation notes below predate that publication.
-- Extension foundations through source/follower, history, copy activation and maintenance are implemented locally. E7-02 through E7-04 passed targeted independent source acceptance. E7-05 is accepted by both independent cumulative source lanes, with fresh required checks and uncached tests passing on the stable manifest. E7-06 is at final targeted source closure: its unknown-outcome policy and final deadline ordering are accepted, and the small skip-classification correction has focused passing tests, but source-only targeted rereview is still active. No E7-06 final acceptance is claimed yet.
-- E7-08A/B (two whole-change reviews), E7-09 (fresh final-tree verification), publication and the combined live qualification are **not run**. Commit, push, PR, deployment and live actions are **not authorized**. The full change has therefore not passed its required final reviews or final checks, and no publication or live readiness is claimed.
-- The approved order is to finish and publish Phase 7, then separately authorize one combined follower/extension qualification candidate. Activity remains a deployment gate. The canonical documentation snapshot is prepared for that freeze but remains pending the final reviews.
-- Current local checkpoints and findings are in [STATE-phase-7-preserved-work.md](STATE-phase-7-preserved-work.md) and [FINDINGS-phase-7-review.md](FINDINGS-phase-7-review.md). The combined run sheet is preparation only, not execution-ready or passed evidence.
+- Extensions, source/follower propagation, history, copy activation and maintenance are implemented. Historical final reviews blocked; the finishing correction set now has two independent whole-change Linux source acceptances on the exact recorded manifest. Source integration is separate from signed publication and deployment.
+- V3 passed fresh full uncached tests, build, vet, formatting and Linux metadata/shell/workflow/pin checks with no source drift. Strict lint remains red (142 findings versus 131 baseline); macOS and broad lint cleanup are explicitly deferred. The existing edge publication workflow is still blocked separately.
+- The [current-candidate lab results](MANUAL-TESTING.md#current-candidate-clean-slate-linux-lab--2026-11-16) record clean-slate Debian Firecracker package/PostgreSQL/systemd and CLI/WireGuard passes, including corrected bootstrap/preload ordering, typed copy guards and cron-bearing fork/unfollow. Signed release, protected/TOTP, deterministic crash, bucket/rebuild and other-platform qualification remain incomplete.
+- The [finishing checklist](../specs/extensions-finish.md) is the task entry point. The [combined run sheet](RUN-phase-6-7-live.md) retains procedures and blocked cases, but unresolved admission values and old workspace terminology must be reconciled before execution. Activity remains a deployment gate; further Git/release/live actions require their own authorization.
 
 #### Earlier dated summary
 
@@ -572,7 +572,7 @@ The dated notes below preserve the implementation sequence. Their then-pending t
 | 4 | Observability & maintenance | `status`, `top`, `doctor`, metrics, maintenance commands and timers | ✅ alpha-qualified; coverage limits logged |
 | 5 | Master backup & disaster recovery | The master's state backed up on every change; rebuild a dead master on a fresh VPS, then recover each database from its stanza | ✅ alpha-qualified; coverage limits logged |
 | 6 | Followers | Per-database physical standby followers; unfollow one to rehearse a risky migration on current data | 🟡 built, live test pending |
-| 7 | Extensions | Built-in/custom extension definitions, `vaire ext`, safe copies/recovery and extension-dependent maintenance | 🟡 local implementation stage-reviewed through E7-06; final reviews, publication and live qualification not run |
+| 7 | Extensions | Built-in/custom extension definitions, `vaire ext`, safe copies/recovery and extension-dependent maintenance | 🟡 Linux source accepted by two reviewers, locally verified and bounded clean-slate lab cases passed; full matrix and publication pending |
 | 8 | Upgrades | Upgrade and roll back node binaries and Postgres minors from the laptop | ⬜ |
 | 9 | Operators & agents | Teammate and agent identities, read-only agents, full agent guide, alerting | ⬜ |
 | 10 | Multi-node & replicas | Worker nodes driven from the master, a node for one database, `db move`, followers and replicas on other nodes | ⬜ |
@@ -654,10 +654,10 @@ Re-scoped by [`RFC-cluster-per-database.md`](./RFC-cluster-per-database.md) and 
 | --- | --- | --- |
 | Step 16 | Exporters on loopback, authenticated `/metrics`, service discovery, metrics credentials and textfiles | ✅ alpha-qualified |
 | Status views | `status`, `top`, `queries`, `doctor`; internal work hidden by default, `--all-sessions` includes it | ✅ alpha-qualified |
-| `internal/maint` | Per-database vacuum/analyze/reindex/report/kill and scheduled maintenance; repack and auto-repack arrived in Phase 7 (local source; final review pending) | ✅ alpha-qualified for the Phase 4 commands |
+| `internal/maint` | Per-database vacuum/analyze/reindex/report/kill and scheduled maintenance; repack and auto-repack arrived in Phase 7 (Linux source accepted; bounded lab cases passed, full matrix incomplete) | ✅ alpha-qualified for the Phase 4 commands |
 | Step 18 and timers | Doctor gates and certificate, metrics, doctor and maintenance schedules | ✅ alpha-qualified; not every fault-injection variant exercised |
 
-`maint repack` and auto-repack need `pg_repack`, which `vaire ext add` provides. Phase 7 now implements them locally, together with the one-table full-scan `pgstattuple` report; their final source review and live qualification are pending.
+`maint repack` and auto-repack need `pg_repack`, which `vaire ext add` provides. Phase 7 implements them together with the one-table full-scan `pgstattuple` report. Linux source review is accepted; clean-slate lab runs passed with honest unknown completion for repack. The full protection/window/failure qualification matrix remains incomplete.
 
 Built in the units of [`PHASE-4-WORK-UNITS.md`](./PHASE-4-WORK-UNITS.md); main live qualification completed 2026-10-15–19. Evidence and detailed coverage limits remain in the testing log.
 
@@ -703,9 +703,9 @@ The catalogue is a convenience list, not an allowlist. Additions on a protected 
 
 It also brings what Phase 4 left waiting for `pg_repack`: detachable `maint repack`, opt-in auto-repack and a one-table full-scan `pgstattuple` report. Repack refuses protected databases and unsupported storage; completion that cannot be attributed is reported unknown, never as a confirmed rewrite. The exact report measures one table with `pgstattuple` under the report timeouts and does not claim reclaimable or instantaneous bloat.
 
-**Status:** local source implementation through E7-06 has stage acceptance. The two whole-change reviews and fresh final verification have not run, and nothing is published, deployed or live-qualified. See [PHASE-7-WORK-UNITS.md](PHASE-7-WORK-UNITS.md) and [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
+**Status:** implemented, with two independent acceptances of the exact corrected Linux source. Fresh full local verification and bounded clean-slate lab cases passed, including CLI/WireGuard. The full qualification matrix, source integration, publication and deployment are separate milestones. See the [finishing checklist](../specs/extensions-finish.md).
 
-**Manual test:** the full all-NOT-RUN procedure is in [MANUAL-TESTING.md](MANUAL-TESTING.md); the coordinated command map is in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
+**Manual test:** [MANUAL-TESTING.md](MANUAL-TESTING.md#current-candidate-clean-slate-linux-lab--2026-11-16) records the corrected-candidate Linux lab evidence and remaining limits. Signed-artifact qualification remains separate. The coordinated procedure is in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
 
 ### 7.11 Phase 8 — Upgrades ⬜
 

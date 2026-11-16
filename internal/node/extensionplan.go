@@ -2,8 +2,6 @@ package node
 
 import (
 	"context"
-	"slices"
-	"sort"
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/backup"
@@ -141,16 +139,14 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 	// guard only needs the libraries current intent does not name; the guard
 	// composer adds current and operator preloads on every install, so a later
 	// rewrite never accumulates obsolete current intent.
-	currentPreloads := map[string]bool{}
-	var desiredPreloads []string
-	for _, ext := range current {
-		if ext.Preload != "" {
-			currentPreloads[ext.Preload] = true
-			desiredPreloads = append(desiredPreloads, ext.Preload)
-		}
+	desiredPreloads, err := resolver.Preloads(req.Intent.Extensions)
+	if err != nil {
+		return nil, config.ValidationError(err)
 	}
-	sort.Strings(desiredPreloads)
-	desiredPreloads = slices.Compact(desiredPreloads)
+	currentPreloads := map[string]bool{}
+	for _, preload := range desiredPreloads {
+		currentPreloads[preload] = true
+	}
 	extraPreloads := guard.Preloads[:0]
 	for _, p := range guard.Preloads {
 		if !currentPreloads[p] {
@@ -324,6 +320,20 @@ func captureExtensionChange(old, updated config.Cluster) error {
 		return err
 	}
 	return captureExtensionIntent(updated, now)
+}
+
+// captureExtensionOutgoing records the requirements the current configuration
+// already needs. A direct add writes it before package/file preparation, so a
+// later prerequisite failure cannot lose the outgoing providers.
+func captureExtensionOutgoing(cfg config.Cluster) error {
+	return captureExtensionIntent(cfg, time.Now().UTC())
+}
+
+// captureExtensionIncoming records the proposed configuration's requirements.
+// A direct add writes it only after preparation succeeded and before the
+// proposed intent is saved or any configuration, restart or SQL effect runs.
+func captureExtensionIncoming(cfg config.Cluster) error {
+	return captureExtensionIntent(cfg, time.Now().UTC())
 }
 
 // captureStanzaRequirements is the producer-side capture: before a backup,

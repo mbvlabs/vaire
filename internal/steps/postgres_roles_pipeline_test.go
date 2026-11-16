@@ -21,6 +21,7 @@ type fakeRolesPG struct {
 	roles        []string
 	databases    []string
 	extensions   []string
+	schemas      map[string]string
 	auth         map[string]string
 	adminOwner   string
 	signalBack   string
@@ -102,6 +103,7 @@ func completeRolesPG() *fakeRolesPG {
 		},
 		databases:  []string{"postgres", "app"},
 		extensions: []string{"pg_stat_statements", "custom_ext"},
+		schemas:    map[string]string{"pg_stat_statements": "public", "custom_ext": "public"},
 		auth: map[string]string{
 			"auth":    "SELECT ... vaire_direct_only ...",
 			"session": "SELECT ... operator connections ...",
@@ -135,9 +137,17 @@ func useFakeRolesPG(t *testing.T, fake *fakeRolesPG) {
 	oldQuery, oldExec := rolesQueryColumn, rolesExec
 	oldLoaded, oldPending, oldSettings := rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings
 	oldRuntime, oldWrite := rolesRuntimeDir, rolesWriteRuntimePass
+	oldSchemas := rolesInstalledExtensionSchemas
 	rolesQueryColumn, rolesExec = fake.query, fake.exec
 	rolesLoadedPreloads = func(context.Context, pg.Local) (map[string]bool, error) { return fake.loaded, nil }
 	rolesPendingRestart = func(context.Context, pg.Local) ([]string, error) { return fake.pending, nil }
+	rolesInstalledExtensionSchemas = func(_ context.Context, _ pg.Local, _ string) (map[string]string, error) {
+		out := map[string]string{}
+		for _, name := range fake.extensions {
+			out[name] = fake.schemas[name]
+		}
+		return out, nil
+	}
 	rolesExtensionSettings = func(_ context.Context, _ pg.Local, _ string, keys []string) (map[string]ExtensionSettingFact, error) {
 		out := map[string]ExtensionSettingFact{}
 		for _, key := range keys {
@@ -153,6 +163,7 @@ func useFakeRolesPG(t *testing.T, fake *fakeRolesPG) {
 		rolesQueryColumn, rolesExec = oldQuery, oldExec
 		rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings = oldLoaded, oldPending, oldSettings
 		rolesRuntimeDir, rolesWriteRuntimePass = oldRuntime, oldWrite
+		rolesInstalledExtensionSchemas = oldSchemas
 	})
 	for _, name := range []string{"pgbouncer_auth", "monitor"} {
 		if err := os.WriteFile(filepath.Join(rolesRuntimeDir, name+".pass"), nil, 0o600); err != nil {
@@ -607,7 +618,7 @@ func TestPostgresRolesFreshDatabaseBootstrapOrder(t *testing.T) {
 	fake.extensions = nil
 	fake.loaded = map[string]bool{"pg_stat_statements": true, "auto_explain": true, "custom_lib": true}
 	fake.settings = map[string]string{
-		"custom.worker": "on", "pg_stat_statements.max": "10000", "pg_stat_statements.track": "top",
+		"custom.worker": "on", "pg_stat_statements.max": "5000", "pg_stat_statements.track": "top",
 	}
 	fake.settingTypes = map[string]string{"custom.worker": "bool"}
 	useFakeRolesPG(t, fake)

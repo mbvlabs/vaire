@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ import (
 type extensionTargetSet struct {
 	Source   config.ClusterSpec
 	Running  []config.ClusterSpec
+	Stopped  []config.ClusterSpec
 	Awaiting []config.ClusterSpec
 }
 
@@ -33,9 +35,23 @@ type extensionTargetSet struct {
 var (
 	extensionAcquireClusters = engine.AcquireClusters
 	extensionPlan            = engine.Plan
+	extensionValidateStopped = extensionValidateStoppedStart
+	extensionRefuseUnload    = steps.RefuseExtensionUnload
+	extensionTargetPresent   = func(cfg config.Cluster, spec config.ClusterSpec) bool {
+		_, err := os.Stat(cfg.Server.DataDirectory(spec.Name))
+		return err == nil
+	}
 )
 
 func extensionTargetSetFor(cfg config.Cluster, recs backup.Records, source string) (extensionTargetSet, error) {
+	return extensionTargetSetForMode(cfg, recs, source, false)
+}
+
+func extensionApplyTargetSetFor(cfg config.Cluster, recs backup.Records, source string) (extensionTargetSet, error) {
+	return extensionTargetSetForMode(cfg, recs, source, true)
+}
+
+func extensionTargetSetForMode(cfg config.Cluster, recs backup.Records, source string, allowStopped bool) (extensionTargetSet, error) {
 	src, ok := cfg.ClusterByName(source)
 	if !ok {
 		return extensionTargetSet{}, databaseNotFound(source)
@@ -53,14 +69,25 @@ func extensionTargetSetFor(cfg config.Cluster, recs backup.Records, source strin
 				WithDetails(map[string]any{"reason": "unfollow_in_progress", "database": source, "follower": f.Name})
 		}
 		if !extensionClusterRunning(f) {
-			return extensionTargetSet{}, output.NewError(output.CodePrecondition,
-				f.Name+" is a follower of "+source+" but its cluster is not running",
-				output.ExitPrecondition, "Start it first (vaire apply --db "+f.Name+"), then retry.").
-				WithDetails(map[string]any{"reason": "follower_not_running", "database": f.Name, "source": source})
+			if !allowStopped {
+				return extensionTargetSet{}, output.NewError(output.CodePrecondition,
+					f.Name+" is a follower of "+source+" but its cluster is not running",
+					output.ExitPrecondition, "Start it first (vaire apply --db "+f.Name+"), then retry.").
+					WithDetails(map[string]any{"reason": "follower_not_running", "database": f.Name, "source": source})
+			}
+			if !extensionTargetPresent(cfg, f) {
+				// Configured but never materialised: metadata only, exactly
+				// like an awaiting target. There is nothing to start yet.
+				out.Awaiting = append(out.Awaiting, f)
+				continue
+			}
+			out.Stopped = append(out.Stopped, f)
+			continue
 		}
 		out.Running = append(out.Running, f)
 	}
 	sort.Slice(out.Running, func(i, j int) bool { return out.Running[i].Name < out.Running[j].Name })
+	sort.Slice(out.Stopped, func(i, j int) bool { return out.Stopped[i].Name < out.Stopped[j].Name })
 	sort.Slice(out.Awaiting, func(i, j int) bool { return out.Awaiting[i].Name < out.Awaiting[j].Name })
 	return out, nil
 }
@@ -70,6 +97,9 @@ func (s extensionTargetSet) names() []string {
 	for _, f := range s.Running {
 		out = append(out, f.Name)
 	}
+	for _, f := range s.Stopped {
+		out = append(out, f.Name)
+	}
 	sort.Strings(out)
 	return out
 }
@@ -77,7 +107,16 @@ func (s extensionTargetSet) names() []string {
 func (s extensionTargetSet) all() []config.ClusterSpec {
 	out := []config.ClusterSpec{s.Source}
 	out = append(out, s.Running...)
+	out = append(out, s.Stopped...)
 	out = append(out, s.Awaiting...)
+	return out
+}
+
+// liveFollowers is the followers whose runtime can be verified: those already
+// running plus the stopped ones this transition starts first.
+func (s extensionTargetSet) liveFollowers() []config.ClusterSpec {
+	out := append(append([]config.ClusterSpec(nil), s.Running...), s.Stopped...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
@@ -252,8 +291,10 @@ func sourceHasFollowers(cfg config.Cluster, source string) bool {
 }
 
 // followerRuntimeClass classifies one follower's available runtime evidence.
-// An awaiting or not-yet-materialized target is metadata-only; a materialized
-// follower must answer its actual SQL catalog.
+// An awaiting or not-yet-materialized target is metadata-only; a stopped but
+// materialized follower is explicitly stopped (metadata-only until the
+// engine-owned start makes its catalog authoritative); a running follower must
+// answer its actual SQL catalog.
 func followerRuntimeClass(cfg config.Cluster, recs backup.Records, spec config.ClusterSpec) steps.FollowerRuntimeClass {
 	if spec.FollowGeneration != "" || recs.IsAwaiting(spec.Name) {
 		return steps.FollowerRuntimeAwaiting
@@ -262,6 +303,12 @@ func followerRuntimeClass(cfg config.Cluster, recs backup.Records, spec config.C
 		if awaiting.Name == spec.Name {
 			return steps.FollowerRuntimeAwaiting
 		}
+	}
+	if !extensionClusterRunning(spec) {
+		if !extensionTargetPresent(cfg, spec) {
+			return steps.FollowerRuntimeAwaiting
+		}
+		return steps.FollowerRuntimeStopped
 	}
 	return steps.FollowerRuntimeLive
 }
@@ -406,29 +453,90 @@ func extensionAddWithFollowers(ctx context.Context, env *Env, old config.Cluster
 		return Result{}, err
 	}
 	ctx = steps.WithFollowerRuntimePlans(ctx, plans)
-	if err := captureExtensionChange(old, updated); err != nil {
+	// Capture outgoing definitions exactly once before any package effect. A
+	// failure may already have written valid outgoing snapshots, so it must not
+	// claim that nothing changed; the snapshots are retained.
+	if err := extensionCaptureOutgoing(old); err != nil {
 		return Result{}, output.NewError(output.CodePrecondition,
-			"recording extension requirements before the change failed: "+err.Error(),
-			output.ExitPrecondition, "Nothing was changed. Retry after fixing the requirement history store.").
-			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": spec.Name})
+			"recording the outgoing extension requirements before the change failed: "+err.Error(),
+			output.ExitPrecondition, "No proposed extension intent was saved, and no package preparation, restart or extension SQL was requested; any outgoing requirement snapshots already written are retained. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": spec.Name, "extension": ext.Name})
+	}
+	saved := descriptorSaved || !alreadyEnabled
+	intentSaved := !saved
+	// Prepare the proposed packages and files for every affected target before
+	// recording the incoming definitions or saving the intent. Package effects
+	// are not rolled back, so a failure here must leave no incoming history,
+	// saved intent, restart or SQL behind.
+	for _, target := range targets.all() {
+		if err := extensionPrepareStart(ctx, updated, target, nil, rt, env.Report); err != nil {
+			hint := "Package installation may have partially run; installed packages are not removed. vaire did not request a restart or run extension SQL. "
+			if intentSaved {
+				hint += "cluster.toml already enables the extension; retry after fixing the package prerequisite."
+			} else {
+				hint += "cluster.toml was not changed; retry vaire ext add after fixing the package prerequisite."
+			}
+			return Result{}, output.NewError(output.CodePartialFailure,
+				"installing extension packages for "+ext.Name+" on "+target.Name+" failed: "+err.Error(),
+				output.ExitStep, hint).
+				WithDetails(map[string]any{
+					"reason": "package_install_failed", "database": spec.Name, "extension": ext.Name,
+					"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true, "failed_target": target.Name,
+					"retry": extensionAddRetry(spec.Name, ext.Name, tokens), "completed": []string{}, "pending": targets.names(),
+				})
+		}
+	}
+	// Only now record the incoming definitions. A failure here may follow
+	// package effects and may have appended part of the incoming history, so it
+	// neither claims untouched packages nor a clean history.
+	if err := extensionCaptureIncoming(updated); err != nil {
+		return Result{}, output.NewError(output.CodePartialFailure,
+			"preparing extension packages for "+ext.Name+" succeeded, but recording its incoming requirements failed: "+err.Error(),
+			output.ExitStep,
+			"Package files may already be installed and the incoming requirement snapshot may be partially written and retained. cluster.toml is unchanged, and vaire did not request a restart or run extension SQL. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{
+				"reason": "extension_history_capture_failed", "database": spec.Name, "extension": ext.Name,
+				"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true,
+				"incoming_history_may_remain": true,
+				"retry":                       extensionAddRetry(spec.Name, ext.Name, tokens), "completed": []string{}, "pending": targets.names(),
+			})
 	}
 	newRaw, err := updated.Encode()
 	if err != nil {
-		return Result{}, err
+		intentHint := "cluster.toml was not changed;"
+		if intentSaved {
+			intentHint = "cluster.toml already enables the extension;"
+		}
+		return Result{}, output.NewError(output.CodePartialFailure,
+			"preparing extension packages for "+ext.Name+" succeeded and its incoming requirements were recorded, but encoding the extension intent failed: "+err.Error(),
+			output.ExitStep,
+			"Package files may already be installed; "+intentHint+" vaire did not request a restart or run extension SQL. Retry after fixing the extension configuration.").
+			WithDetails(map[string]any{
+				"reason": "extension_intent_save_failed", "database": spec.Name, "extension": ext.Name,
+				"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true,
+				"incoming_history_retained": true,
+				"retry":                     extensionAddRetry(spec.Name, ext.Name, tokens), "completed": []string{}, "pending": targets.names(),
+			})
 	}
 	if string(newRaw) != string(raw) {
 		if err := extensionSave(newRaw); err != nil {
-			return Result{}, err
+			intentHint := "cluster.toml was not changed;"
+			if intentSaved {
+				intentHint = "cluster.toml already enables the extension;"
+			}
+			return Result{}, output.NewError(output.CodePartialFailure,
+				"preparing extension packages for "+ext.Name+" succeeded and its incoming requirements were recorded, but saving the extension intent failed: "+err.Error(),
+				output.ExitStep,
+				"Package files may already be installed; "+intentHint+" vaire did not request a restart or run extension SQL. Retry after fixing the configuration store.").
+				WithDetails(map[string]any{
+					"reason": "extension_intent_save_failed", "database": spec.Name, "extension": ext.Name,
+					"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true,
+					"incoming_history_retained": true,
+					"retry":                     extensionAddRetry(spec.Name, ext.Name, tokens), "completed": []string{}, "pending": targets.names(),
+				})
 		}
 	}
 	env.Cluster = updated
-	for _, target := range targets.all() {
-		if err := extensionPrepareStart(ctx, updated, target, nil, rt, env.Report); err != nil {
-			return Result{}, extensionPartialError("the extension intent is saved, but installing its packages failed: "+err.Error(),
-				"package_install_failed", spec.Name, ext.Name, len(tokens) > 0, false, engine.ApplyData{},
-				map[string]any{"retry": retry, "intent_saved": true, "completed": []string{}, "pending": targets.names(), "packages_may_remain": true})
-		}
-	}
 	var warnings []output.Warning
 	var completed []string
 	for _, follower := range targets.Running {
@@ -796,12 +904,24 @@ func extensionRemoveWithFollowers(ctx context.Context, env *Env, old config.Clus
 		return Result{}, err
 	}
 	ctx = steps.WithFollowerRuntimePlans(ctx, plans)
-	if err := captureExtensionChange(old, updated); err != nil {
-		return Result{}, output.NewError(output.CodePrecondition,
+	updatedSpec, _ := updated.ClusterByName(spec.Name)
+	// The reduced intent is a known subset of the old definitions (a removal
+	// never introduces a proposed provider), so both snapshots are recorded
+	// before the DROP. A capture failure can already have appended history; it
+	// truthfully retains it and does not claim that nothing happened.
+	if err := extensionCaptureRequirements(ctx, old, spec, updated, updatedSpec, "remove"); err != nil {
+		details := extensionRemovePartialDetails(spec, ext, retry, false, restartNeeded)
+		details["reason"] = "extension_history_capture_failed"
+		details["outgoing_history_may_remain"] = true
+		details["incoming_history_may_remain"] = true
+		details["pending"] = targets.names()
+		return Result{}, output.NewError(output.CodePartialFailure,
 			"recording extension requirements before the removal failed: "+err.Error(),
-			output.ExitPrecondition, "Nothing was changed. Retry after fixing the requirement history store.").
-			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": spec.Name})
+			output.ExitStep,
+			"The extension SQL was not dropped and no configuration, restart or SQL was applied. Outgoing or reduced requirement snapshots may already be written and retained; retry after fixing the requirement history store.").
+			WithDetails(details)
 	}
+	sqlDropped := false
 	if installed {
 		sql := "DROP EXTENSION IF EXISTS " + pg.Quote(ext.ExtName)
 		if cascade {
@@ -813,16 +933,15 @@ func extensionRemoveWithFollowers(ctx context.Context, env *Env, old config.Clus
 				"cluster.toml and every restart are unchanged; read vaire logs postgres --db "+spec.Name+".").
 				WithDetails(map[string]any{"reason": "extension_drop_failed", "database": spec.Name, "extension": ext.Name})
 		}
+		sqlDropped = true
 	}
 	newRaw, err := updated.Encode()
 	if err != nil {
-		return Result{}, err
+		return Result{}, extensionRemoveFollowerIntentFailure("encoding the reduced cluster.toml", err, spec, ext, retry, sqlDropped, restartNeeded, targets.names())
 	}
 	if enabled && string(newRaw) != string(raw) {
 		if err := extensionSave(newRaw); err != nil {
-			return Result{}, extensionPartialError("the extension SQL is dropped, but saving the reduced cluster.toml failed: "+err.Error(),
-				"extension_intent_save_failed", spec.Name, ext.Name, restartNeeded, false, engine.ApplyData{},
-				map[string]any{"retry": retry, "sql_dropped": true, "intent_saved": false, "completed": []string{}, "pending": targets.names()})
+			return Result{}, extensionRemoveFollowerIntentFailure("saving the reduced cluster.toml", err, spec, ext, retry, sqlDropped, restartNeeded, targets.names())
 		}
 	}
 	env.Cluster = updated
@@ -836,9 +955,9 @@ func extensionRemoveWithFollowers(ctx context.Context, env *Env, old config.Clus
 	warnings = append(warnings, w...)
 	clearExtensionDeferred(primary)
 	if err != nil || extensionApplyIncomplete(primary) || extensionRestartPending(primary, spec.Name) {
-		return Result{}, extensionPartialError("the extension SQL is dropped and cluster.toml is reduced, but applying the primary's configuration failed",
+		return Result{}, extensionPartialError("applying the primary's configuration failed",
 			"extension_apply_failed", spec.Name, ext.Name, restartNeeded, primary.Restarted(), primary,
-			map[string]any{"retry": retry, "sql_dropped": true, "intent_saved": true, "completed": completed, "pending": []string{spec.Name}})
+			map[string]any{"retry": retry, "sql_dropped": sqlDropped, "intent_saved": true, "completed": completed, "pending": []string{spec.Name}})
 	}
 	completed = append(completed, spec.Name)
 	var pendingFollowers []string
@@ -851,9 +970,9 @@ func extensionRemoveWithFollowers(ctx context.Context, env *Env, old config.Clus
 		warnings = append(warnings, w...)
 		clearExtensionDeferred(applied)
 		if err != nil || extensionApplyIncomplete(applied) || extensionRestartPending(applied, follower.Name) {
-			return Result{}, extensionPartialError("the extension SQL is dropped and the primary is configured, but follower "+follower.Name+" failed",
+			return Result{}, extensionPartialError("the primary is configured, but follower "+follower.Name+" failed",
 				"extension_apply_failed", spec.Name, ext.Name, restartNeeded, applied.Restarted(), applied,
-				map[string]any{"retry": retry, "sql_dropped": true, "intent_saved": true, "completed": completed, "pending": []string{follower.Name}})
+				map[string]any{"retry": retry, "sql_dropped": sqlDropped, "intent_saved": true, "completed": completed, "pending": []string{follower.Name}})
 		}
 		if err := verifyTargetPreloads(ctx, updated, follower); err != nil {
 			var pending *steps.FollowerRuntimePendingError
@@ -869,18 +988,18 @@ func extensionRemoveWithFollowers(ctx context.Context, env *Env, old config.Clus
 			}
 			return Result{}, extensionPartialError("follower "+follower.Name+" did not apply its complete runtime: "+err.Error(),
 				"extension_preload_missing", spec.Name, ext.Name, restartNeeded, applied.Restarted(), applied,
-				map[string]any{"retry": retry, "sql_dropped": true, "intent_saved": true, "completed": completed, "pending": []string{follower.Name}})
+				map[string]any{"retry": retry, "sql_dropped": sqlDropped, "intent_saved": true, "completed": completed, "pending": []string{follower.Name}})
 		}
 		completed = append(completed, follower.Name)
 	}
-	if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, true); err != nil {
+	if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, sqlDropped, true); err != nil {
 		return Result{}, err
 	}
 	if len(pendingFollowers) > 0 {
 		return Result{}, extensionPartialError(
-			"the extension SQL is dropped and the primary is configured, but followers still replay or cannot yet prove the removed extension absent: "+strings.Join(pendingDetail, "; "),
+			"the primary is configured, but followers still replay or cannot yet prove the removed extension absent: "+strings.Join(pendingDetail, "; "),
 			"extension_follower_replay_pending", spec.Name, ext.Name, restartNeeded, primary.Restarted(), primary,
-			map[string]any{"retry": retry, "sql_dropped": true, "intent_saved": true, "completed": completed, "pending": pendingFollowers})
+			map[string]any{"retry": retry, "sql_dropped": sqlDropped, "intent_saved": true, "completed": completed, "pending": pendingFollowers})
 	}
 	res.Restarted = primary.Restarted()
 	res.RestartRequired = restartNeeded
@@ -888,18 +1007,45 @@ func extensionRemoveWithFollowers(ctx context.Context, env *Env, old config.Clus
 	return Result{Data: res, Warnings: warnings}, nil
 }
 
+func extensionRemoveFollowerIntentFailure(stage string, cause error, spec config.ClusterSpec, ext catalog.Extension, retry string, sqlDropped, restartRequired bool, pending []string) error {
+	err := extensionRemoveIntentFailure(stage, cause, spec, ext, retry, sqlDropped, restartRequired)
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		return err
+	}
+	copied := *cliErr
+	details := map[string]any{}
+	if have, ok := cliErr.Details.(map[string]any); ok {
+		for k, v := range have {
+			details[k] = v
+		}
+	}
+	details["completed"] = []string{}
+	details["pending"] = append([]string{}, pending...)
+	copied.Details = details
+	return &copied
+}
+
 func refuseExtensionUnloadTargets(ctx context.Context, cfg config.Cluster, source string) error {
 	recs, err := extensionRecords()
 	if err != nil {
 		return err
 	}
-	targets, err := extensionTargetSetFor(cfg, recs, source)
+	targets, err := extensionApplyTargetSetFor(cfg, recs, source)
 	if err != nil {
 		return err
 	}
-	live := append([]config.ClusterSpec{targets.Source}, targets.Running...)
+	live := append([]config.ClusterSpec{targets.Source}, targets.liveFollowers()...)
 	for _, target := range live {
-		if err := steps.RefuseExtensionUnload(ctx, cfg, target, steps.FirstManagedConfig(target)); err != nil {
+		if !extensionClusterRunning(target) {
+			// A stopped target's catalog is unknown. Its managed-file fallback
+			// would refuse the supported preload removal before the engine has
+			// started it, so this pre-start guard covers only running targets.
+			// The stopped target is started on its still-old managed runtime
+			// and proven live after start, before any reduced configuration.
+			continue
+		}
+		if err := extensionRefuseUnload(ctx, cfg, target, steps.FirstManagedConfig(target)); err != nil {
 			return err
 		}
 	}
@@ -909,6 +1055,22 @@ func refuseExtensionUnloadTargets(ctx context.Context, cfg config.Cluster, sourc
 func extensionSourceTransitionNeeded(ctx context.Context, cfg config.Cluster, source string, configSelected, rolesSelected bool) (bool, error) {
 	// A scoped apply may not bypass a selected source/follower transition.
 	return extensionTransitionNeededFor(ctx, cfg, source, configSelected, rolesSelected)
+}
+
+// applySelectionStartsClusters reports whether the request explicitly selects
+// the engine's cluster step. Such a selection may start a stopped target but
+// cannot execute an extension configuration/roles transition; its primary SQL
+// still has to wait for the ordinary supported apply pass.
+func applySelectionStartsClusters(steps []string) bool {
+	if len(steps) == 0 {
+		return true
+	}
+	for _, id := range steps {
+		if base, _ := engine.SplitID(id); base == "postgres-cluster-v1" {
+			return true
+		}
+	}
+	return false
 }
 
 func selectedTransitionSources(cfg config.Cluster, steps []string) []string {
@@ -981,6 +1143,13 @@ func sourceExtensionTransitionNeeded(ctx context.Context, cfg config.Cluster, so
 	}
 	if !rolesSelected {
 		return false, nil
+	}
+	if !extensionClusterRunning(spec) {
+		// A stopped target's pg_extension is unknown, not empty. The apply
+		// transition starts the engine-owned cluster before it re-reads the
+		// catalog; a scoped start-only selection is allowed to proceed without
+		// this preflight. Never infer that installed SQL is absent.
+		return true, nil
 	}
 	installed, err := extensionInstalled(ctx, spec)
 	if err != nil {
@@ -1085,7 +1254,7 @@ func extensionTransitionNeededFor(ctx context.Context, cfg config.Cluster, sourc
 	if err != nil {
 		return false, err
 	}
-	targets, err := extensionTargetSetFor(cfg, recs, source)
+	targets, err := extensionApplyTargetSetFor(cfg, recs, source)
 	if err != nil {
 		return false, err
 	}
@@ -1113,6 +1282,13 @@ func applyExtensionTransitions(ctx context.Context, env *Env, p stepParams) ([]o
 		return nil, nil, err
 	}
 	if p.DB == "" && len(p.Steps) > 0 && !applySelectionMayTransition(env.Req) {
+		if applySelectionStartsClusters(p.Steps) {
+			// A selected start may bring a stopped cluster up, but it does not
+			// execute configuration, roles or extension SQL. The supported
+			// extension transition runs in a later apply that selects those
+			// steps (or a full apply).
+			return nil, nil, nil
+		}
 		for _, source := range cfg.Sources() {
 			needed, err := extensionSourceTransitionNeeded(ctx, cfg, source, true, true)
 			if err != nil {
@@ -1152,8 +1328,32 @@ func applyExtensionTransitions(ctx context.Context, env *Env, p stepParams) ([]o
 			if err != nil {
 				return nil, nil, err
 			}
-			if err := preflightFollowerRuntime(ctx, cfg, recs, []config.ClusterSpec{spec}, nil); err != nil {
+			plans, err := prepareFollowerRuntimePlans(ctx, cfg, recs, []config.ClusterSpec{spec}, nil)
+			if err != nil {
 				return nil, nil, err
+			}
+			ctx = steps.WithFollowerRuntimePlans(ctx, plans)
+			if err := refuseExtensionApplyTargets(ctx, cfg, extensionTargetSet{Source: spec}); err != nil {
+				return nil, nil, err
+			}
+			if !extensionClusterRunning(spec) && extensionTargetPresent(cfg, spec) &&
+				(applySelectionMayTransition(env.Req) || applySelectionStartsClusters(p.Steps)) {
+				if err := extensionValidateStopped(ctx, cfg, spec); err != nil {
+					return nil, nil, err
+				}
+				warnings, started, err := extensionStartStoppedTarget(ctx, env, cfg, spec)
+				if err != nil {
+					startedTargets := []string{}
+					if started {
+						startedTargets = append(startedTargets, spec.Name)
+					}
+					stage := extensionStartStageStart
+					if started {
+						stage = extensionStartStageUnload
+					}
+					return warnings, nil, extensionStartFailure(err, spec.Name, startedTargets, []string{}, spec.Name, stage, !started)
+				}
+				return warnings, nil, nil
 			}
 			return nil, nil, nil
 		}
@@ -1165,7 +1365,7 @@ func applyExtensionTransitions(ctx context.Context, env *Env, p stepParams) ([]o
 			if err != nil {
 				return nil, nil, err
 			}
-			if needed {
+			if needed && !applySelectionStartsClusters(p.Steps) {
 				return nil, nil, output.NewError(output.CodePrecondition,
 					"this scoped apply selects steps that cannot execute "+p.DB+"'s source/follower extension transition",
 					output.ExitPrecondition, "Run a full vaire apply, or select the configuration/roles steps for the transition.").
@@ -1188,7 +1388,7 @@ func applyExtensionTransitions(ctx context.Context, env *Env, p stepParams) ([]o
 		if err != nil {
 			return nil, nil, err
 		}
-		targets, err := extensionTargetSetFor(cfg, recs, p.DB)
+		targets, err := extensionApplyTargetSetFor(cfg, recs, p.DB)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1243,7 +1443,7 @@ func applyExtensionTransitions(ctx context.Context, env *Env, p stepParams) ([]o
 		if !needed {
 			continue
 		}
-		targets, err := extensionTargetSetFor(cfg, recs, source)
+		targets, err := extensionApplyTargetSetFor(cfg, recs, source)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1265,7 +1465,7 @@ func applyExtensionTransitions(ctx context.Context, env *Env, p stepParams) ([]o
 	}
 	plans := map[steps.FollowerRuntimePlanIdentity]steps.FollowerRuntimePlan{}
 	for _, source := range neededSources {
-		targets, err := extensionTargetSetFor(cfg, recs, source)
+		targets, err := extensionApplyTargetSetFor(cfg, recs, source)
 		if err != nil {
 			return nil, release, err
 		}
@@ -1367,6 +1567,210 @@ func extensionPendingResult(source string, data engine.ApplyData, completed, pen
 	}
 }
 
+// extensionValidateStoppedStart preserves a stopped follower's existing
+// persisted guard for the engine-owned start. The old managed configuration and
+// guard remain the runtime until the live catalog proves which preloads may be
+// removed; rewriting the proposed guard here would unload an old library before
+// that proof. A missing guard is valid: handoff may have proved the permanent
+// configuration already supplies every obligation.
+func extensionValidateStoppedStart(ctx context.Context, cfg config.Cluster, follower config.ClusterSpec) error {
+	id, err := steps.FollowerRuntimeIdentity(cfg, follower, steps.FollowerRuntimeOperation(ctx))
+	if err != nil {
+		return err
+	}
+	if _, ok := steps.FollowerRuntimePlanFor(ctx, id); !ok {
+		return output.NewError(output.CodePrecondition,
+			"no complete safe runtime plan is available for stopped follower "+follower.Name,
+			output.ExitPrecondition, "Nothing was started. Retry apply so vaire can rebuild the follower's guarded runtime.").
+			WithDetails(map[string]any{"reason": "follower_runtime_snapshot_missing", "database": follower.Name})
+	}
+	if _, _, err := backup.ReadCopyGuard(cfg.Server.DataDirectory(follower.Name)); err != nil {
+		return output.NewError(output.CodePrecondition,
+			"cannot read "+follower.Name+"'s persisted copy guard before starting it: "+err.Error(),
+			output.ExitPrecondition, "Nothing was started. Fix the follower's guard or configuration, then retry apply.").
+			WithDetails(map[string]any{"reason": "extension_guard_unproven", "database": follower.Name})
+	}
+	return nil
+}
+
+const (
+	extensionStartStageStart    = "start"
+	extensionStartStageUnload   = "unload_proof"
+	extensionStartErrorReason   = "extension_start_partial"
+	extensionStartUnknownReason = "extension_start_state_unknown"
+)
+
+// extensionStartFailure turns a start or post-start unload-proof failure into
+// the transition's public partial error. A start failure is explicitly
+// unknown rather than reported as stopped; a proof failure records the targets
+// already observed running. The old configuration remains in every case and no
+// reduced configuration or SQL was applied by this transition.
+func extensionStartFailure(err error, database string, started, pending []string, failed, stage string, startUnknown bool) error {
+	details := map[string]any{}
+	var base *output.CLIError
+	if errors.As(err, &base) {
+		switch have := base.Details.(type) {
+		case map[string]any:
+			for k, v := range have {
+				details[k] = v
+			}
+		case nil:
+		default:
+			details["cause_details"] = have
+		}
+	}
+	if _, ok := details["reason"]; !ok {
+		details["reason"] = extensionStartErrorReason
+	}
+	details["database"] = database
+	details["outcome"] = "partial"
+	details["partial_reason"] = extensionStartErrorReason
+	details["started"] = len(started) > 0
+	details["started_targets"] = append([]string{}, started...)
+	details["pending_targets"] = append([]string{}, pending...)
+	details["failed_target"] = failed
+	details["failed_stage"] = stage
+	details["start_attempted"] = true
+	details["start_unknown"] = startUnknown
+	details["configuration_staged"] = false
+	details["sql_run"] = false
+	details["packages_may_remain"] = true
+	var hint string
+	if stage == extensionStartStageUnload {
+		details["old_configuration_retained"] = true
+		hint = failed + " was started on its old configuration; the reduced configuration and SQL were not applied. Remove the extension that still needs the old library with vaire ext remove <name> --db " + database + ", then retry apply."
+	} else {
+		details["start_unknown_reason"] = extensionStartUnknownReason
+		hint = "The start of " + failed + " was attempted, but its final state is unknown. Configuration and SQL were not applied; package files may already be installed. Check vaire status --db " + failed + ", then retry apply."
+	}
+	if base != nil {
+		copied := *base
+		copied.Details = details
+		copied.Hint = hint
+		return &copied
+	}
+	return output.NewError(output.CodeStepFailed, err.Error(), output.ExitStep, hint).WithDetails(details)
+}
+
+// extensionStartStoppedTarget starts one stopped, materialized target through
+// the engine's own cluster step. started reports that the target was observed
+// answering after the start, not merely that a start was attempted.
+func extensionStartStoppedTarget(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec) ([]output.Warning, bool, error) {
+	if extensionClusterRunning(spec) || !extensionTargetPresent(cfg, spec) {
+		return nil, false, nil
+	}
+	rt := runtimeFor(env, false)
+	applied, warnings, err := extensionApply(ctx, cfg, rt, engine.Options{
+		Only: []string{steps.ClusterStepID(spec.Name)}, DB: spec.Name,
+		Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report,
+	})
+	clearExtensionDeferred(applied)
+	if err != nil {
+		return warnings, false, err
+	}
+	if !extensionClusterRunning(spec) {
+		return warnings, false, output.NewError(output.CodePrecondition,
+			spec.Name+" did not answer after its extension-preparation start",
+			output.ExitPrecondition, "Read vaire logs postgres --db "+spec.Name+", then retry apply.").
+			WithDetails(map[string]any{"reason": extensionStartUnknownReason, "database": spec.Name})
+	}
+	// The target is now answering on its old managed configuration. Prove the
+	// reduced intent's preload removal against the actual catalog before any
+	// configuration write can apply it. A stopped target's pre-start proof is
+	// deliberately deferred to this point.
+	if err := extensionRefuseUnload(ctx, cfg, spec, steps.FirstManagedConfig(spec)); err != nil {
+		return warnings, true, err
+	}
+	return warnings, true, nil
+}
+
+// refuseExtensionApplyTargets validates the complete transition target set
+// before any guard write, package effect or start. Ordinary apply has no
+// owning continuation for an activation fence, so every phase, routing
+// included, is refused. Materialisation and unfinished-follow guards use the
+// same contract as the ordinary apply entry points.
+func refuseExtensionApplyTargets(ctx context.Context, cfg config.Cluster, targets extensionTargetSet) error {
+	names := targets.names()
+	for _, name := range names {
+		if err := refuseAnyActivationFence(cfg, name); err != nil {
+			return err
+		}
+		if err := refuseUnfinishedFollowApply(cfg, name); err != nil {
+			return err
+		}
+		if err := guardMaterialisationApply(ctx, cfg, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// extensionStartStoppedTargets makes stopped, materialized source/follower
+// targets authoritative before any catalog-dependent decision. The existing
+// persisted guard and old managed runtime are validated and left in place,
+// then the engine starts the source and its followers. A stopped target is
+// unknown runtime, never evidence of absent installed extras; after this
+// returns the caller must re-read the real catalog and defer anything still
+// pending to the supported normal pass.
+func extensionStartStoppedTargets(ctx context.Context, env *Env, cfg config.Cluster, targets extensionTargetSet) ([]output.Warning, error) {
+	var warnings []output.Warning
+	if !extensionClusterRunning(targets.Source) && !extensionTargetPresent(cfg, targets.Source) {
+		return nil, nil
+	}
+	for _, follower := range targets.Stopped {
+		id, err := steps.FollowerRuntimeIdentity(cfg, follower, steps.FollowerRuntimeOperation(ctx))
+		if err != nil {
+			return warnings, err
+		}
+		if _, ok := steps.FollowerRuntimePlanFor(ctx, id); !ok {
+			// The apply caller normally prepared this plan under its locks.
+			// Keep the guard boundary self-contained for direct callers that
+			// reached the same transition without one.
+			recs, err := extensionRecords()
+			if err != nil {
+				return warnings, err
+			}
+			plans, err := prepareFollowerRuntimePlans(ctx, cfg, recs, []config.ClusterSpec{follower}, nil)
+			if err != nil {
+				return warnings, err
+			}
+			ctx = steps.WithFollowerRuntimePlans(ctx, plans)
+		}
+		if err := extensionValidateStopped(ctx, cfg, follower); err != nil {
+			return warnings, err
+		}
+	}
+	startTargets := make([]config.ClusterSpec, 0, 1+len(targets.Stopped))
+	if !extensionClusterRunning(targets.Source) {
+		startTargets = append(startTargets, targets.Source)
+	}
+	startTargets = append(startTargets, targets.Stopped...)
+	started := make([]string, 0, len(startTargets))
+	for i, target := range startTargets {
+		more, wasStarted, err := extensionStartStoppedTarget(ctx, env, cfg, target)
+		warnings = append(warnings, more...)
+		if wasStarted {
+			started = append(started, target.Name)
+		}
+		if err != nil {
+			stage, pending, unknown := extensionStartStageStart, targetNames(startTargets[i+1:]), true
+			if wasStarted {
+				stage, pending, unknown = extensionStartStageUnload, targetNames(startTargets[i+1:]), false
+			}
+			return warnings, extensionStartFailure(err, targets.Source.Name, started, pending, target.Name, stage, unknown)
+		}
+	}
+	return warnings, nil
+}
+
+func targetNames(specs []config.ClusterSpec) []string {
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		out = append(out, spec.Name)
+	}
+	return out
+}
+
 // extensionApplyTransitionForApply runs the safe staged transition for the
 // plain apply/config path. It stages followers first, without demanding their
 // restart tokens. Only when every follower is effective does it stage the
@@ -1380,14 +1784,15 @@ func extensionApplyTransitionForApply(ctx context.Context, env *Env, cfg config.
 	if err != nil {
 		return nil, err
 	}
-	targets, err := extensionTargetSetFor(cfg, recs, source)
+	targets, err := extensionApplyTargetSetFor(cfg, recs, source)
 	if err != nil {
 		return nil, err
 	}
-	if len(targets.Running) == 0 {
+	if len(targets.Running) == 0 && len(targets.Stopped) == 0 {
 		return nil, nil
 	}
-	for _, follower := range targets.Running {
+	followers := targets.liveFollowers()
+	for _, follower := range followers {
 		if !sameNames(cfg, follower.Extensions, targets.Source.Extensions) ||
 			!sameRecovery(cfg, follower.RecoveryExtensions, targets.Source.RecoveryExtensions) {
 			return nil, output.NewError(output.CodePrecondition,
@@ -1396,9 +1801,21 @@ func extensionApplyTransitionForApply(ctx context.Context, env *Env, cfg config.
 				WithDetails(map[string]any{"reason": "follower_extension_intent", "database": follower.Name, "source": source})
 		}
 	}
+	if err := refuseExtensionApplyTargets(ctx, cfg, targets); err != nil {
+		return nil, err
+	}
+	if !extensionTargetPresent(cfg, targets.Source) {
+		// A first bootstrap has no previous extension runtime to transition.
+		// The ordinary engine pass creates and starts the cluster.
+		return nil, nil
+	}
+	warnings, err := extensionStartStoppedTargets(ctx, env, cfg, targets)
+	if err != nil {
+		return warnings, err
+	}
 	rt := runtimeFor(env, false)
 	needed := false
-	live := append([]config.ClusterSpec{targets.Source}, targets.Running...)
+	live := append([]config.ClusterSpec{targets.Source}, followers...)
 	allTargetNames := make([]string, 0, len(live))
 	for _, target := range live {
 		allTargetNames = append(allTargetNames, target.Name)
@@ -1407,7 +1824,7 @@ func extensionApplyTransitionForApply(ctx context.Context, env *Env, cfg config.
 	for _, target := range live {
 		plan, err := extensionPlan(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: []string{steps.ConfigStepID(target.Name)}, DB: target.Name})
 		if err != nil {
-			return nil, err
+			return warnings, err
 		}
 		if plan.WouldApply > 0 || len(plan.RestartPending) > 0 {
 			needed = true
@@ -1418,14 +1835,14 @@ func extensionApplyTransitionForApply(ctx context.Context, env *Env, cfg config.
 	// create that extension before the follower's runtime is verified.
 	sourceInstalled, err := extensionInstalled(ctx, targets.Source)
 	if err != nil {
-		return nil, output.NewError(output.CodePrecondition,
+		return warnings, output.NewError(output.CodePrecondition,
 			"cannot read "+source+"'s installed extensions before its dependent SQL: "+err.Error(),
 			output.ExitPrecondition, "Nothing was changed. Retry when the cluster answers.").
 			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": source})
 	}
 	desiredSQL, err := steps.DesiredExtensionNames(cfg, targets.Source)
 	if err != nil {
-		return nil, err
+		return warnings, err
 	}
 	for _, ext := range desiredSQL {
 		if ext.ExtName != "" && !hasInstalled(sourceInstalled, ext.ExtName) {
@@ -1434,10 +1851,10 @@ func extensionApplyTransitionForApply(ctx context.Context, env *Env, cfg config.
 		}
 	}
 	if !needed {
-		return nil, nil
+		return warnings, nil
 	}
-	if err := steps.RefuseExtensionUnload(ctx, cfg, targets.Source, steps.FirstManagedConfig(targets.Source)); err != nil {
-		return nil, err
+	if err := extensionRefuseUnload(ctx, cfg, targets.Source, steps.FirstManagedConfig(targets.Source)); err != nil {
+		return warnings, err
 	}
 	serverToken := hasConfirmToken(env.Req, cfg.Name()+"/restart")
 	authorized := func(name string) bool {
@@ -1449,14 +1866,13 @@ func extensionApplyTransitionForApply(ctx context.Context, env *Env, cfg config.
 		}
 		return engine.Confirmation{}
 	}
-	var warnings []output.Warning
 	var data engine.ApplyData
 	var completed []string
 	var pending []string
 	var pendingTokens []string
 	// Followers first. Each may stage its configuration, guard and packages
 	// without its restart token; only an authorized target restarts.
-	for _, follower := range targets.Running {
+	for _, follower := range followers {
 		applied, w, err := extensionApply(ctx, cfg, rt, engine.Options{
 			Only: []string{steps.ConfigStepID(follower.Name)}, DB: follower.Name,
 			Confirm: confirmFor(follower.Name), Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report,

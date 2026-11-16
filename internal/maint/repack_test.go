@@ -209,12 +209,12 @@ func TestRepackSpaceNeed(t *testing.T) {
 }
 
 func TestExactBloatSQLUsesFullScan(t *testing.T) {
-	sql, err := ExactBloatSQL("public.events", "public")
+	sql, err := ExactBloatSQL(42, "public")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sql, `"public".pgstattuple('"public"."events"'::regclass)`) {
-		t.Errorf("not a schema-qualified full scan: %s", sql)
+	if !strings.Contains(sql, `"public".pgstattuple(42::oid::regclass)`) {
+		t.Errorf("not an OID-bound, schema-qualified full scan: %s", sql)
 	}
 	if strings.Contains(sql, "pgstattuple_approx") {
 		t.Error("approximate function used")
@@ -225,8 +225,13 @@ func TestExactBloatSQLUsesFullScan(t *testing.T) {
 			t.Errorf("missing %q", want)
 		}
 	}
-	if _, err := ExactBloatSQL("bad;name", "public"); err == nil {
-		t.Error("bad table accepted")
+	for _, oid := range []int64{-1, 0, 4294967296} {
+		if _, err := ExactBloatSQL(oid, "public"); err == nil {
+			t.Errorf("invalid table OID %d accepted", oid)
+		}
+	}
+	if _, err := ExactBloatSQL(42, ""); err == nil {
+		t.Error("empty function schema accepted")
 	}
 }
 

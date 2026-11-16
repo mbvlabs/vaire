@@ -80,6 +80,14 @@ var (
 	extensionCaptureRequirements = func(ctx context.Context, oldCfg config.Cluster, oldSpec config.ClusterSpec, newCfg config.Cluster, newSpec config.ClusterSpec, action string) error {
 		return captureExtensionChange(oldCfg, newCfg)
 	}
+	// extensionCaptureOutgoing and extensionCaptureIncoming are the direct
+	// add boundary: outgoing history is durable before package/file work, and
+	// incoming history only after that work succeeded. A failed prerequisite
+	// therefore cannot retain a proposed provider the configuration never had.
+	// The follower add transition can use the same two seams around its own
+	// preparation.
+	extensionCaptureOutgoing = captureExtensionOutgoing
+	extensionCaptureIncoming = captureExtensionIncoming
 )
 
 type extListParams struct {
@@ -109,6 +117,7 @@ type extensionInstalledVersion struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	Default string `json:"default_version,omitempty"`
+	Schema  string `json:"-"`
 }
 
 type extAddResult struct {
@@ -366,6 +375,9 @@ func handleExtAdd(ctx context.Context, env *Env) (Result, error) {
 	if !ok {
 		return Result{}, databaseNotFound(spec.Name)
 	}
+	if err := refuseInstalledExtensionSchemas(ctx, updated, updatedSpec); err != nil {
+		return Result{}, err
+	}
 	if err := validateTargetExtensionDescriptors(updated, updatedSpec); err != nil {
 		return Result{}, err
 	}
@@ -545,51 +557,74 @@ func handleExtAdd(ctx context.Context, env *Env) (Result, error) {
 		}
 	}
 
-	if err := extensionCaptureRequirements(ctx, cfg, spec, updated, updatedSpec, "add"); err != nil {
+	if err := extensionCaptureOutgoing(cfg); err != nil {
 		return Result{}, output.NewError(output.CodePrecondition,
 			"recording extension requirements before the change failed: "+err.Error(), output.ExitPrecondition,
-			"Nothing was changed. Retry after fixing the requirement history store.").
+			"No proposed extension intent was saved, and no package preparation, restart or extension SQL was requested; any outgoing requirement snapshots already written are retained. Retry after fixing the requirement history store.").
 			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": spec.Name, "extension": ext.Name})
 	}
 	saved := descriptorSaved || !alreadyEnabled
-	if saved {
-		newRaw, err := updated.Encode()
-		if err != nil {
-			return Result{}, err
-		}
-		if err := extensionSave(newRaw); err != nil {
-			return Result{}, err
-		}
-	}
+	intentSaved := !saved
 	env.Cluster = updated
 	rt := runtimeFor(env, false)
 
+	// Prepare the proposed packages and files before saving the proposed
+	// intent. A failed prerequisite must leave cluster.toml unchanged and
+	// record no incoming requirements.
 	if err := extensionPrepareStart(ctx, updated, updatedSpec, nil, rt, env.Report); err != nil {
-		intentSaved := !saved
-		rollback := ""
-		if saved {
-			if rbErr := extensionSave(raw); rbErr != nil {
-				intentSaved = true
-				rollback = "failed: " + rbErr.Error()
-			} else {
-				rollback = "restored"
-			}
-		}
-		hint := "No restart or SQL ran. Installed packages are not removed. "
-		switch rollback {
-		case "restored":
-			hint += "cluster.toml was restored; retry vaire ext add after fixing the package prerequisite."
-		case "":
-			hint += "cluster.toml already enabled the extension; retry after fixing the package prerequisite."
-		default:
-			hint += "cluster.toml still enables the extension because restoring it failed (" + rollback + "); fix it with vaire config edit."
+		hint := "Package installation may have partially run; installed packages are not removed. vaire did not request a restart or run extension SQL. "
+		if intentSaved {
+			hint += "cluster.toml already enables the extension; retry after fixing the package prerequisite."
+		} else {
+			hint += "cluster.toml was not changed; retry vaire ext add after fixing the package prerequisite."
 		}
 		return Result{}, output.NewError(output.CodePartialFailure,
 			"installing extension packages for "+ext.Name+" failed: "+err.Error(), output.ExitStep, hint).
 			WithDetails(map[string]any{
 				"reason": "package_install_failed", "database": updatedSpec.Name, "extension": ext.Name,
-				"intent_saved": intentSaved, "config_rollback": rollback, "packages_may_remain": true,
+				"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true,
 			})
+	}
+
+	// The incoming snapshot is safe only after preparation succeeded. Packages
+	// may already be installed when this fails, so it must not claim that
+	// nothing changed, and the invention of the proposed intent still waits.
+	if err := extensionCaptureIncoming(updated); err != nil {
+		return Result{}, output.NewError(output.CodePartialFailure,
+			"preparing extension packages for "+ext.Name+" succeeded, but recording its incoming requirements failed: "+err.Error(),
+			output.ExitStep,
+			"Incoming requirement snapshots for one or more stanzas may already be written and are retained; packages may already be installed, cluster.toml is unchanged, and vaire did not request a restart or run extension SQL. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{
+				"reason": "extension_history_capture_failed", "database": updatedSpec.Name, "extension": ext.Name,
+				"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true,
+				"incoming_history_may_remain": true,
+			})
+	}
+
+	if saved {
+		newRaw, err := updated.Encode()
+		if err != nil {
+			return Result{}, output.NewError(output.CodePartialFailure,
+				"preparing extension packages for "+ext.Name+" succeeded and its incoming requirements were recorded, but encoding the extension intent failed: "+err.Error(),
+				output.ExitStep,
+				"Package files may already be installed; cluster.toml is unchanged, and vaire did not request a restart or run extension SQL. Retry after fixing the extension configuration.").
+				WithDetails(map[string]any{
+					"reason": "extension_intent_save_failed", "database": updatedSpec.Name, "extension": ext.Name,
+					"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true,
+					"incoming_history_retained": true,
+				})
+		}
+		if err := extensionSave(newRaw); err != nil {
+			return Result{}, output.NewError(output.CodePartialFailure,
+				"preparing extension packages for "+ext.Name+" succeeded and its incoming requirements were recorded, but saving the extension intent failed: "+err.Error(),
+				output.ExitStep,
+				"Package files may already be installed; cluster.toml is unchanged, and vaire did not request a restart or run extension SQL. Retry after fixing the configuration store.").
+				WithDetails(map[string]any{
+					"reason": "extension_intent_save_failed", "database": updatedSpec.Name, "extension": ext.Name,
+					"intent_saved": intentSaved, "config_rollback": "not_needed", "packages_may_remain": true,
+					"incoming_history_retained": true,
+				})
+		}
 	}
 
 	applyOpts := engine.Options{
@@ -915,6 +950,7 @@ func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 		sort.Strings(tokens)
 		tokens = slices.Compact(tokens)
 	}
+	retry := extensionRemoveRetry(spec.Name, ext.Name, tokens)
 	res := extRemoveResult{
 		Database: spec.Name, Extension: ext.Name, ExtName: ext.ExtName,
 		Enabled: enabled, Installed: isInstalled, Dependents: dependents, DependentsTotal: dependentsTotal,
@@ -941,14 +977,19 @@ func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if err := extensionCaptureRequirements(ctx, cfg, spec, updated, updatedSpec, "remove"); err != nil {
-		return Result{}, output.NewError(output.CodePrecondition,
-			"recording extension requirements before the removal failed: "+err.Error(), output.ExitPrecondition,
-			"Nothing was changed. Retry after fixing the requirement history store.").
-			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": spec.Name, "extension": ext.Name})
+		details := extensionRemovePartialDetails(spec, ext, retry, false, restartRequired)
+		details["reason"] = "extension_history_capture_failed"
+		details["outgoing_history_may_remain"] = true
+		details["incoming_history_may_remain"] = true
+		return Result{}, output.NewError(output.CodePartialFailure,
+			"recording extension requirements before the removal failed: "+err.Error(), output.ExitStep,
+			"Valid extension history may already have been retained; no DROP, reduced intent save, configuration apply or restart ran. Retry "+retry+" after fixing the requirement history store.").
+			WithDetails(details)
 	}
 
 	// DROP while the library is still loaded; the reduced configuration and
 	// restart follow only after the SQL succeeded.
+	sqlDropped := false
 	if isInstalled {
 		sql := "DROP EXTENSION IF EXISTS " + pg.Quote(ext.ExtName)
 		if p.Cascade {
@@ -960,6 +1001,7 @@ func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 				"cluster.toml and the restart are unchanged. Nothing else was changed; read vaire logs postgres --db "+spec.Name+".").
 				WithDetails(map[string]any{"reason": "extension_drop_failed", "database": spec.Name, "extension": ext.Name})
 		}
+		sqlDropped = true
 	}
 
 	if retryConfig {
@@ -977,10 +1019,10 @@ func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 		if err != nil {
 			return Result{}, extensionPartialError("the extension is absent but applying the reduced configuration failed: "+err.Error(),
 				"extension_apply_failed", spec.Name, ext.Name, restartRequired, applied.Restarted(), applied,
-				map[string]any{"sql_dropped": true, "intent_saved": true})
+				map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 		}
 		res.Restarted = applied.Restarted()
-		if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, true); err != nil {
+		if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, sqlDropped, true); err != nil {
 			return Result{}, err
 		}
 		return Result{Data: res, Warnings: warnings}, nil
@@ -989,19 +1031,10 @@ func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 	if enabled {
 		newRaw, err := updated.Encode()
 		if err != nil {
-			return Result{}, err
+			return Result{}, extensionRemoveIntentFailure("encoding the reduced extension intent", err, spec, ext, retry, sqlDropped, restartRequired)
 		}
 		if err := extensionSave(newRaw); err != nil {
-			hint := "The extension's SQL is dropped, but cluster.toml still enables it. Retry vaire ext remove " + ext.Name + " --db " + spec.Name + " --confirm " + spec.Name + "."
-			if restartRequired {
-				hint += " Include --confirm " + spec.Name + "/restart."
-			}
-			return Result{}, output.NewError(output.CodePartialFailure,
-				"dropping "+ext.Name+"'s SQL succeeded, but saving the reduced cluster.toml failed: "+err.Error(), output.ExitStep, hint).
-				WithDetails(map[string]any{
-					"reason": "extension_intent_save_failed", "database": spec.Name, "extension": ext.Name,
-					"sql_dropped": true, "intent_saved": false, "restart_required": restartRequired,
-				})
+			return Result{}, extensionRemoveIntentFailure("saving the reduced cluster.toml", err, spec, ext, retry, sqlDropped, restartRequired)
 		}
 		env.Cluster = updated
 		rt := runtimeFor(env, false)
@@ -1014,38 +1047,69 @@ func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 		}
 		applied, warnings, err := extensionApply(ctx, updated, rt, opts)
 		if err != nil {
-			return Result{}, extensionPartialError("dropping "+ext.Name+"'s SQL and saving cluster.toml succeeded, but applying the reduced configuration failed: "+err.Error(),
+			return Result{}, extensionPartialError("saving the reduced cluster.toml succeeded, but applying the reduced configuration failed: "+err.Error(),
 				"extension_apply_failed", spec.Name, ext.Name, restartRequired, false, applied,
-				map[string]any{"sql_dropped": true, "intent_saved": true})
+				map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 		}
 		clearExtensionDeferred(applied)
 		if extensionApplyIncomplete(applied) || extensionRestartPending(applied, spec.Name) {
-			return Result{}, extensionPartialError("dropping "+ext.Name+"'s SQL and saving cluster.toml succeeded, but the configuration still waits for a restart",
+			return Result{}, extensionPartialError("saving the reduced cluster.toml succeeded, but the configuration still waits for a restart",
 				"extension_pending_restart", spec.Name, ext.Name, restartRequired, false, applied,
-				map[string]any{"sql_dropped": true, "intent_saved": true})
+				map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 		}
 		restarted := applied.Restarted()
 		if restartRequired {
 			again, err := extensionRestartIfPending(ctx, updated, updatedSpec, restartRequired, applied, rt, env.Report)
 			if err != nil {
-				return Result{}, extensionPartialError("dropping "+ext.Name+"'s SQL and saving cluster.toml succeeded, but restarting its cluster failed: "+err.Error(),
+				return Result{}, extensionPartialError("saving the reduced cluster.toml succeeded, but restarting its cluster failed: "+err.Error(),
 					"extension_apply_failed", spec.Name, ext.Name, restartRequired, restarted, applied,
-					map[string]any{"sql_dropped": true, "intent_saved": true})
+					map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 			}
 			restarted = restarted || again
 		}
 		res.Restarted = restarted
-		if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, true); err != nil {
+		if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, sqlDropped, true); err != nil {
 			return Result{}, err
 		}
 		return Result{Data: res, Warnings: warnings}, nil
 	}
 	// The SQL was installed outside cluster.toml: dropping it needs no
 	// configuration save or restart.
-	if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, false); err != nil {
+	if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, sqlDropped, false); err != nil {
 		return Result{}, err
 	}
 	return Result{Data: res}, nil
+}
+
+// extensionRemovePartialDetails is the shared direct-removal partial state.
+// sqlDropped reports the DROP that actually ran in this invocation;
+// configuration_applied and restarted stay false because every caller stopped
+// before those stages. pending names the target whose reduced intent still
+// needs the reported retry.
+func extensionRemovePartialDetails(spec config.ClusterSpec, ext catalog.Extension, retry string, sqlDropped, restartRequired bool) map[string]any {
+	return map[string]any{
+		"database": spec.Name, "extension": ext.Name,
+		"retry": retry, "sql_dropped": sqlDropped,
+		"intent_saved": false, "reduced_intent_saved": false,
+		"configuration_applied": false, "restart_required": restartRequired,
+		"restarted": false, "completed": []string{}, "pending": []string{spec.Name},
+	}
+}
+
+// extensionRemoveIntentFailure is the shared Encode/Save failure shape after
+// the DROP stage. The Encode path is defensive: a validated config.Cluster has
+// no public normal-state fixture that makes TOML encoding fail, so the
+// fault-injectable Save path exercises this contract.
+func extensionRemoveIntentFailure(stage string, err error, spec config.ClusterSpec, ext catalog.Extension, retry string, sqlDropped, restartRequired bool) error {
+	message := "the reduced extension intent for " + ext.Name + " was not written because " + stage + " failed: " + err.Error()
+	hint := "No SQL was dropped, and cluster.toml still enables " + ext.Name + ". Retry " + retry + "."
+	if sqlDropped {
+		message = "dropping " + ext.Name + "'s SQL succeeded, but " + stage + " failed: " + err.Error()
+		hint = "The extension's SQL is dropped, but cluster.toml still enables it. Retry " + retry + "."
+	}
+	details := extensionRemovePartialDetails(spec, ext, retry, sqlDropped, restartRequired)
+	details["reason"] = "extension_intent_save_failed"
+	return output.NewError(output.CodePartialFailure, message, output.ExitStep, hint).WithDetails(details)
 }
 
 func extensionRemoveRetryNeeded(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, ext catalog.Extension, env *Env) (bool, []string, string, error) {
@@ -1105,19 +1169,28 @@ func extensionRemoveRetryNeeded(ctx context.Context, cfg config.Cluster, spec co
 	return len(pendingAll) > 0 || len(detailAll) > 0, pendingAll, strings.Join(detailAll, "; "), nil
 }
 
-func extensionVerifyAbsent(ctx context.Context, spec config.ClusterSpec, extName string, intentSaved bool) error {
+func extensionVerifyAbsent(ctx context.Context, spec config.ClusterSpec, extName string, sqlDropped, intentSaved bool) error {
 	have, err := extensionInstalled(ctx, spec)
 	if err != nil {
-		return output.NewError(output.CodePartialFailure,
-			"the SQL drop ran, but verifying that "+extName+" is absent from "+spec.Name+" failed: "+err.Error(), output.ExitStep,
+		message := "verifying that " + extName + " is absent from " + spec.Name + " failed: " + err.Error()
+		if sqlDropped {
+			message = "the SQL drop ran, but " + message
+		}
+		return output.NewError(output.CodePartialFailure, message, output.ExitStep,
 			"Check vaire ext list --db "+spec.Name+" before retrying; do not drop the extension by hand.").
-			WithDetails(map[string]any{"reason": "extension_verify_failed", "database": spec.Name, "extension": extName, "sql_dropped": true, "intent_saved": intentSaved})
+			WithDetails(map[string]any{"reason": "extension_verify_failed", "database": spec.Name, "extension": extName, "sql_dropped": sqlDropped, "intent_saved": intentSaved})
 	}
 	if _, ok := have[extName]; ok {
+		message := extName + " is still installed in " + spec.Name
+		if sqlDropped {
+			message += " after DROP"
+		} else {
+			message += " even though this removal did not run a DROP"
+		}
 		return output.NewError(output.CodePartialFailure,
-			extName+" is still installed in "+spec.Name+" after DROP", output.ExitStep,
+			message, output.ExitStep,
 			"Read vaire logs postgres --db "+spec.Name+"; do not drop it by hand.").
-			WithDetails(map[string]any{"reason": "extension_drop_failed", "database": spec.Name, "extension": extName, "sql_dropped": false, "intent_saved": intentSaved})
+			WithDetails(map[string]any{"reason": "extension_drop_failed", "database": spec.Name, "extension": extName, "sql_dropped": sqlDropped, "intent_saved": intentSaved})
 	}
 	return nil
 }
@@ -1210,6 +1283,16 @@ func extensionMutationRefusals(cfg config.Cluster, recs backup.Records, spec con
 				output.ExitPrecondition,
 				"Finish it with vaire db unfollow "+follower+" --confirm "+follower+"/unfollow, then retry.").
 				WithDetails(map[string]any{"reason": "unfollow_in_progress", "database": spec.Name, "follower": follower})
+		}
+	}
+	// A direct extension change writes the shared descriptor and reconciles
+	// every live follower. An unsettled activation owns those targets until
+	// its continuation completes, even after a materialisation record is gone.
+	// Routing is included: only the owning continuation may publish and clear
+	// it, so no direct extension mutation may write through it.
+	for _, name := range append([]string{spec.Name}, cfg.FollowerNames(spec.Name)...) {
+		if err := refuseAnyActivationFence(cfg, name); err != nil {
+			return err
 		}
 	}
 	if followers := cfg.FollowerNames(spec.Name); len(followers) > 0 {
@@ -1321,7 +1404,8 @@ func extensionAddIntent(cfg config.Cluster, db string, p extAddParams) (config.C
 		return config.Cluster{}, catalog.Extension{}, false, config.ValidationError(err)
 	}
 	oldExt, oldOK := cfg.ExtensionResolver().Lookup(canonical)
-	if oldOK && (oldExt.Source != proposed.Source || oldExt.Package != proposed.Package || oldExt.Preload != proposed.Preload) {
+	if oldOK && (oldExt.Source != proposed.Source || oldExt.Package != proposed.Package ||
+		oldExt.Preload != proposed.Preload || oldExt.ExtName != proposed.ExtName) {
 		var missing []string
 		if p.CopySafety == "" {
 			missing = append(missing, "copy_safety")
@@ -1349,6 +1433,42 @@ func extensionAddIntent(cfg config.Cluster, db string, p extAddParams) (config.C
 		return config.Cluster{}, catalog.Extension{}, false, extensionNotManaged(ext.Name)
 	}
 	return updated, ext, true, nil
+}
+
+// refuseInstalledExtensionSchemas refuses any selected installed SQL
+// extension whose actual metadata namespace contradicts the descriptor's
+// explicit schema. It runs before a descriptor/config save and before roles
+// SQL or grants, so an unchanged descriptor and a newly selected definition
+// are guarded alike. A descriptor with no schema asserts no namespace: its
+// built-in grant/owned-object schema may legitimately differ from
+// pg_extension.extnamespace. A stopped cluster has no readable catalog here;
+// the roles step revalidates before its own effects after a start.
+func refuseInstalledExtensionSchemas(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) error {
+	entries, err := steps.ResolveExtensionSelection(cfg, spec)
+	if err != nil {
+		return err
+	}
+	guarded := make([]catalog.Extension, 0, len(entries))
+	for _, ext := range entries {
+		if ext.ExtName != "" && ext.Schema != "" {
+			guarded = append(guarded, ext)
+		}
+	}
+	if len(guarded) == 0 || !extensionClusterRunning(spec) {
+		return nil
+	}
+	installed, err := extensionInstalled(ctx, spec)
+	if err != nil {
+		return output.NewError(output.CodePrecondition,
+			"cannot read "+spec.Name+"'s installed extension schemas: "+err.Error(), output.ExitPrecondition,
+			"Nothing was changed. Retry when the cluster answers.").
+			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name})
+	}
+	schemas := make(map[string]string, len(installed))
+	for name, got := range installed {
+		schemas[name] = got.Schema
+	}
+	return steps.ValidateInstalledExtensionSchemas(spec.Name, guarded, schemas)
 }
 
 // extensionDefinitionImpact lists the databases other than target whose
@@ -1419,9 +1539,9 @@ func extensionGlobalIntentConflict(target, canonical string, affected []string) 
 // override. Removing a field still requires editing cluster.toml.
 func extensionSafetyRenewalError(db, canonical string, missing []string) error {
 	return output.NewError(output.CodePrecondition,
-		"changing the provider for "+canonical+" requires fresh safety declarations: missing "+strings.Join(missing, ", "),
+		"changing the provider or SQL extension name for "+canonical+" requires fresh safety declarations: missing "+strings.Join(missing, ", "),
 		output.ExitPrecondition,
-		"Pass --copy-safety unknown|safe|disabled and/or --standby-safe explicitly; an existing safety declaration is not inherited when source, package or preload changes.").
+		"Pass --copy-safety unknown|safe|disabled and/or --standby-safe explicitly; an existing safety declaration is not inherited when source, package, preload or ext_name changes.").
 		WithDetails(map[string]any{"reason": "extension_safety_renewal_required", "database": db, "extension": canonical, "missing": missing})
 }
 
@@ -2003,8 +2123,10 @@ func extensionPackageInstalledDefault(ctx context.Context, pkg string) (bool, bo
 
 // --- PostgreSQL facts and previews ---
 
-const extensionInstalledSQL = `SELECT e.extname AS name, e.extversion AS version, coalesce(a.default_version, '') AS default_version
-FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname ORDER BY 1`
+const extensionInstalledSQL = `SELECT e.extname AS name, e.extversion AS version, coalesce(a.default_version, '') AS default_version, coalesce(n.nspname, '') AS schema
+FROM pg_extension e
+LEFT JOIN pg_namespace n ON n.oid = e.extnamespace
+LEFT JOIN pg_available_extensions a ON a.name = e.extname ORDER BY 1`
 
 func extensionInstalledDefault(ctx context.Context, spec config.ClusterSpec) (map[string]extensionInstalledVersion, error) {
 	ctx, cancel := context.WithTimeout(ctx, extensionQueryTimeout)
@@ -2015,7 +2137,7 @@ func extensionInstalledDefault(ctx context.Context, spec config.ClusterSpec) (ma
 	}
 	out := map[string]extensionInstalledVersion{}
 	for _, row := range rows {
-		out[row["name"]] = extensionInstalledVersion{Name: row["name"], Version: row["version"], Default: row["default_version"]}
+		out[row["name"]] = extensionInstalledVersion{Name: row["name"], Version: row["version"], Default: row["default_version"], Schema: row["schema"]}
 	}
 	return out, nil
 }

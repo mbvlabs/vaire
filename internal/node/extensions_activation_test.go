@@ -25,6 +25,7 @@ type cronFake struct {
 	extensionRows []map[string]string
 	installDB     string
 	present       bool
+	jobTableRows  []map[string]string
 	columns       map[string]bool
 	jobs          []map[string]string
 	execs         []string
@@ -53,7 +54,18 @@ func (c *cronFake) Query(_ context.Context, db, sql string, vars map[string]stri
 	case strings.Contains(sql, "to_regclass('cron.job')"):
 		c.jobReads++
 		c.jobDB = db
-		return []map[string]string{{"present": boolText(c.present)}}, nil
+		if c.jobTableRows != nil {
+			return c.jobTableRows, nil
+		}
+		// psql --csv emits t/f for native booleans, but true/false for text.
+		value := "f"
+		if c.present {
+			value = "t"
+		}
+		if strings.Contains(sql, "::text AS present") {
+			value = boolText(c.present)
+		}
+		return []map[string]string{{"present": value}}, nil
 	case strings.Contains(sql, "information_schema.columns"):
 		c.jobReads++
 		c.jobDB = db
@@ -130,6 +142,33 @@ func cronItoa(n int) string {
 		n /= 10
 	}
 	return string(out)
+}
+
+func TestCronJobTableUsesPSQLBooleanWireFormat(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run(boolText(present), func(t *testing.T) {
+			fake := &cronFake{present: present}
+			got, err := cronJobTable(context.Background(), fake, "metadata")
+			if got != present || (err != nil) == present {
+				t.Fatalf("cron table present=%v: got %v, %v", present, got, err)
+			}
+			if fake.jobReads != 1 || fake.jobDB != "metadata" {
+				t.Fatalf("queried wrong metadata: %+v", fake)
+			}
+		})
+	}
+}
+
+func TestCronJobTableRefusesUnusableFacts(t *testing.T) {
+	for _, rows := range [][]map[string]string{
+		{},
+		{{"present": "unknown"}},
+		{{"present": "true"}, {"present": "true"}},
+	} {
+		if got, err := cronJobTable(context.Background(), &cronFake{jobTableRows: rows}, "metadata"); got || err == nil {
+			t.Fatalf("accepted unusable cron table facts %+v: %v, %v", rows, got, err)
+		}
+	}
 }
 
 func TestCronSettlementUsesActualMetadataDatabase(t *testing.T) {
@@ -425,6 +464,114 @@ func TestVerifyCopyGuardEffectiveAndPending(t *testing.T) {
 	if _, err := verifyCopyGuard(context.Background(), fake, dir); err == nil {
 		t.Fatal("an ineffective setting with no pending restart was accepted")
 	}
+}
+
+func TestVerifyCopyGuardUsesTypedSettingFacts(t *testing.T) {
+	useTempGuardWriter(t)
+	dir := t.TempDir()
+	if _, err := backup.InstallCopyGuard(dir, backup.CopyGuard{
+		Settings: map[string]string{"work_mem": "'1MB'"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fact := func(value string, pending bool) map[string]string {
+		return map[string]string{"v": value, "vartype": "integer", "unit": "kB", "p": boolText(pending)}
+	}
+
+	t.Run("unit equivalent", func(t *testing.T) {
+		fake := &guardFactFake{fact: fact("1024kB", false)}
+		pending, err := verifyCopyGuard(context.Background(), fake, dir)
+		if err != nil || len(pending) != 0 {
+			t.Fatalf("equivalent unit = %v, %v", pending, err)
+		}
+		if len(fake.queries) != 1 || !strings.Contains(fake.queries[0], "AS unit") {
+			t.Fatalf("the guard query did not request the setting unit: %v", fake.queries)
+		}
+		if strings.Contains(fake.queries[0], "current_setting('work_mem', true)") {
+			t.Fatalf("the guard query used missing_ok: %s", fake.queries[0])
+		}
+	})
+	t.Run("true mismatch", func(t *testing.T) {
+		fake := &guardFactFake{fact: fact("2MB", false)}
+		if _, err := verifyCopyGuard(context.Background(), fake, dir); err == nil || !strings.Contains(err.Error(), "work_mem") {
+			t.Fatalf("typed mismatch = %v", err)
+		}
+	})
+	t.Run("pending", func(t *testing.T) {
+		fake := &guardFactFake{fact: fact("2MB", true)}
+		pending, err := verifyCopyGuard(context.Background(), fake, dir)
+		if err != nil || len(pending) != 1 || pending[0] != "work_mem" {
+			t.Fatalf("pending typed mismatch = %v, %v", pending, err)
+		}
+	})
+}
+
+func TestVerifyCopyGuardKeepsCustomPlaceholderExact(t *testing.T) {
+	useTempGuardWriter(t)
+	dir := t.TempDir()
+	if _, err := backup.InstallCopyGuard(dir, backup.CopyGuard{
+		Settings: map[string]string{"custom.placeholder": "'Mixed Case'"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	effective := &guardFactFake{fact: map[string]string{"v": "Mixed Case", "p": "false"}}
+	if pending, err := verifyCopyGuard(context.Background(), effective, dir); err != nil || len(pending) != 0 {
+		t.Fatalf("an unknown-typed placeholder did not compare exactly: %v, %v", pending, err)
+	}
+	changed := &guardFactFake{fact: map[string]string{"v": "mixed case", "p": "false"}}
+	if _, err := verifyCopyGuard(context.Background(), changed, dir); err == nil {
+		t.Fatal("an unknown-typed placeholder was compared case-insensitively")
+	}
+}
+
+func TestVerifyCopyGuardRefusesMissingEmptyValuedSetting(t *testing.T) {
+	useTempGuardWriter(t)
+	dir := t.TempDir()
+	if _, err := backup.InstallCopyGuard(dir, backup.CopyGuard{
+		Settings: map[string]string{"custom.empty": "''"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &missingSettingFake{key: "custom.empty"}
+	if _, err := verifyCopyGuard(context.Background(), fake, dir); err == nil {
+		t.Fatal("a missing setting with an empty expected value was accepted")
+	}
+	if len(fake.queries) != 1 || !strings.Contains(fake.queries[0], "current_setting('custom.empty')") {
+		t.Fatalf("the guard did not query the setting strictly: %v", fake.queries)
+	}
+}
+
+// guardFactFake returns one setting fact regardless of the key: each test
+// installs one setting, so the single query it receives is unambiguous.
+type guardFactFake struct {
+	fact    map[string]string
+	queries []string
+}
+
+func (g *guardFactFake) Query(_ context.Context, _, sql string, _ map[string]string) ([]map[string]string, error) {
+	g.queries = append(g.queries, sql)
+	return []map[string]string{g.fact}, nil
+}
+
+func (g *guardFactFake) Exec(context.Context, string, string, map[string]string) error { return nil }
+
+// missingSettingFake models PostgreSQL for a setting that does not exist: the
+// missing_ok form would return an empty value, while the strict form errors.
+type missingSettingFake struct {
+	key     string
+	queries []string
+}
+
+func (m *missingSettingFake) Query(_ context.Context, _, sql string, _ map[string]string) ([]map[string]string, error) {
+	m.queries = append(m.queries, sql)
+	if strings.Contains(sql, "current_setting("+extensionLiteral(m.key)+", true)") {
+		return []map[string]string{{"v": "", "vartype": "", "unit": "", "p": "false"}}, nil
+	}
+	return nil, errors.New(`ERROR: unrecognized configuration parameter "` + m.key + `"`)
+}
+
+func (m *missingSettingFake) Exec(context.Context, string, string, map[string]string) error {
+	return nil
 }
 
 type guardFake struct {

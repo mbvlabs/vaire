@@ -5,40 +5,22 @@
 - [MASTER.md](MASTER.md): decisions, architecture and current roadmap/status.
 - [IMPLEMENTATION.md](IMPLEMENTATION.md): implementation details; `AGENTS.md` at the repository root defines working rules.
 - [EXTENSION-DEFINITIONS.md](EXTENSION-DEFINITIONS.md): extension descriptor fields, resolution rules, custom provider examples, copy/recovery safety and command behavior.
-- [WIREGUARD-OVERVIEW.md](WIREGUARD-OVERVIEW.md): illustrated walkthrough of private networking, managed credential files and the encrypted handoff, grounded in the code.
-- [ACTIVITY.md](ACTIVITY.md): local activity history, evidence coverage and metadata-only incident files; qualification status remains in `MASTER.md`.
-- [FINDINGS-activity-review.md](FINDINGS-activity-review.md): findings from the activity-history review, their fixes and decisions.
 - [MANUAL-TESTING.md](MANUAL-TESTING.md): qualification summary, coverage limits and chronological live evidence. Historical failures are retained, not current blockers unless explicitly listed as unresolved.
 - [PLAN-v1-release.md](PLAN-v1-release.md): remaining release gates and authorized-release procedure.
-- [RELEASE-v1.0.0-alpha.1.md](RELEASE-v1.0.0-alpha.1.md): draft alpha notes, kept as the qualification record.
 - [RELEASE-v1.0.0-beta.1.md](RELEASE-v1.0.0-beta.1.md): draft beta notes; Phase 7 and the beta qualification are pending.
-- [PHASE-7-WORK-UNITS.md](PHASE-7-WORK-UNITS.md): Phase 7 implementation evidence, accepted source boundaries and remaining review/publication/live gates.
-- [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md): preparation-only combined follower/extension run sheet; not execution-ready.
-- [FINDINGS-phase-7-review.md](FINDINGS-phase-7-review.md): Phase 7 findings and dispositions; current open/closed status is recorded there.
+- [Extensions finishing checklist](../specs/extensions-finish.md): current evidence, final findings, preserved requirements and remaining acceptance gates. Replaces the older Phase 7 plans, handoffs, notes and status ledgers, which remain in Git history.
+- [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md): combined follower/extension qualification procedure; admission and existing live evidence must be reconciled before execution.
 
 ## Followers (Phase 6)
 
 - `vaire db follow <db> [--name <new>] [--size <size>] [--allow-overcommit]` makes a read-only physical standby of one database on the same node, streaming through a slot capped by `max_slot_wal_keep_size`. It is read at the node's host with the follower's name in the path and the source's credentials; writes fail.
 - `vaire db unfollow <follower> --confirm <follower>/unfollow` promotes it into an independent database with its own roles (new passwords, printed once), stanza and first full.
 - A follower and an unfollowed copy do not inherit the source's protection; an unfollowed copy keeps only the protection the operator gave it (`vaire db protect`).
-- Details are in [IMPLEMENTATION.md](IMPLEMENTATION.md); the design and the implementation record are in [PHASE-6-WORK-UNITS.md](PHASE-6-WORK-UNITS.md).
+- Details are in [IMPLEMENTATION.md](IMPLEMENTATION.md); qualification cases are retained in the [combined run sheet](RUN-phase-6-7-live.md).
 
-## Design and implementation history
+## Historical records
 
-Selected design, implementation authorized: [RFC-activity-and-diagnostics.md](RFC-activity-and-diagnostics.md) records local activity history, on-demand incident bundles and metadata-first agent access. Off-node logging and continuous runtime-log search are deferred; current implementation/qualification status is in `MASTER.md`.
-
-Keep these as rationale and implementation references, not as parallel status trackers:
-
-- [RFC-cluster-per-database.md](RFC-cluster-per-database.md): accepted cluster-per-database model.
-- [PHASE-3-WORK-UNITS.md](PHASE-3-WORK-UNITS.md), [PHASE-4-WORK-UNITS.md](PHASE-4-WORK-UNITS.md), [PHASE-5-WORK-UNITS.md](PHASE-5-WORK-UNITS.md): implementation units and original exit procedures.
-- [PLAN-shared-tunnel.md](PLAN-shared-tunnel.md): shared operator tunnel design; current evidence is in the testing log.
-- [RFC-major-upgrades.md](RFC-major-upgrades.md): deferred design, not an alpha compatibility promise or current implementation task.
-
-## Archived work records
-
-Preserved for provenance; their commands and pending items are historical, not instructions to execute:
-
-- [Original v1 fixes handoff](archive/HANDOFF-v1-fixes.md).
-- [v1 fixes review and resolution](archive/REVIEW-v1-fixes.md).
-- [Executed alpha live-test procedure](archive/PLAN-v1-alpha-live-tests.md).
-- [Superseded shared-cluster Phase 3 plan](archive/PHASE-3-PLAN.md).
+Older plans, handoffs, review ledgers and archived procedures have been removed
+from the working tree. Their text remains in Git history; they are not current
+instructions. Dated observations in `MANUAL-TESTING.md` remain historical
+evidence, not authorization to rerun destructive procedures.

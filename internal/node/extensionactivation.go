@@ -181,8 +181,7 @@ func verifyCopyGuard(ctx context.Context, local sqlRunner, dataDir string) ([]st
 	}
 	for _, key := range guard.SettingKeys() {
 		want := catalog.NormalizedSettingValue(guard.Settings[key])
-		rows, err := local.Query(ctx, "postgres",
-			"SELECT current_setting("+extensionLiteral(key)+") AS v, coalesce((SELECT vartype FROM pg_settings WHERE name = "+extensionLiteral(key)+"), '') AS vartype, coalesce((SELECT pending_restart::text FROM pg_settings WHERE name = "+extensionLiteral(key)+"), 'false') AS p", nil)
+		rows, err := local.Query(ctx, "postgres", copyGuardSettingSQL(key), nil)
 		if err != nil {
 			return nil, output.NewError(output.CodePrecondition,
 				"the copy's guard setting "+key+" is not a valid PostgreSQL setting: "+err.Error(),
@@ -207,6 +206,21 @@ func verifyCopyGuard(ctx context.Context, local sqlRunner, dataDir string) ([]st
 	}
 	sort.Strings(pending)
 	return pending, nil
+}
+
+// copyGuardSettingSQL reads one guard setting's effective value, PostgreSQL
+// type and unit, plus pending_restart metadata. It intentionally omits
+// current_setting's missing_ok argument, unlike the shared projection: a
+// required setting that does not exist must fail instead of reading as an
+// empty value that an empty expectation could accept. A custom placeholder
+// still reports its value; PostgreSQL reports no type or unit for it, so the
+// value stays exact.
+func copyGuardSettingSQL(key string) string {
+	k := extensionLiteral(key)
+	return "SELECT current_setting(" + k + ") AS v, " +
+		"coalesce((SELECT vartype FROM pg_settings WHERE name = " + k + "), '') AS vartype, " +
+		"coalesce((SELECT unit FROM pg_settings WHERE name = " + k + "), '') AS unit, " +
+		"coalesce((SELECT pending_restart::text FROM pg_settings WHERE name = " + k + "), 'false') AS p"
 }
 
 // verifyStartedCopyGuard proves an installed guard effective after a copy's
@@ -306,11 +320,11 @@ func cronExtensionInstalled(ctx context.Context, local sqlRunner, metadataDB str
 }
 
 func cronJobTable(ctx context.Context, local sqlRunner, metadataDB string) (bool, error) {
-	rows, err := local.Query(ctx, metadataDB, "SELECT to_regclass('cron.job') IS NOT NULL AS present", nil)
+	rows, err := local.Query(ctx, metadataDB, "SELECT (to_regclass('cron.job') IS NOT NULL)::text AS present", nil)
 	if err != nil {
 		return false, cronUnknown("the copy's cron metadata database " + metadataDB + " cannot be read: " + err.Error())
 	}
-	if len(rows) == 0 || rows[0]["present"] != "true" {
+	if len(rows) != 1 || rows[0]["present"] != "true" {
 		return false, cronUnknown("the copy's cron metadata database " + metadataDB + " has no cron.job table")
 	}
 	return true, nil

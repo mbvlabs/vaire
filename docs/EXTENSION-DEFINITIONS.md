@@ -1,5 +1,8 @@
 # Extension definitions
 
+Feature reference. Current acceptance evidence and remaining work are tracked
+in the [extensions finishing checklist](../specs/extensions-finish.md).
+
 `internal/catalog` carries the built-in PostgreSQL extension descriptors. The
 built-in list is a convenience, not an allowlist: a database may select any
 PostgreSQL 18 extension through an explicit `[extensions.<name>]` definition,
@@ -278,8 +281,8 @@ change on a follower is always refused. Followers are configured and verified
 before the primary; SQL runs only on the primary. Ordinary configuration/apply
 may stage safe follower work without every restart token, but unmet follower
 runtime requirements withhold dependent primary configuration and SQL rather
-than bypassing them. This source behavior is accepted at the cumulative E7-05
-source boundary; it is not a live PostgreSQL/PgBouncer qualification.
+than bypassing them. Source-stage acceptance is historical evidence, not
+current whole-change acceptance or live PostgreSQL/PgBouncer qualification.
 
 Changing a definition's source, package or preload requires both
 `--copy-safety` and `--standby-safe` to be supplied again; an earlier safety

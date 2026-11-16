@@ -278,9 +278,9 @@ func exactTableStats(ctx context.Context, spec config.ClusterSpec, table string)
 			"Measure one ordinary permanent heap table; partition leaves and inheritance children are supported.").
 			WithDetails(map[string]any{"reason": reason, "database": spec.Name, "table": table})
 	}
-	sql, err := maint.ExactBloatSQL(table, schema)
+	sql, err := maint.ExactBloatSQL(facts.OID, schema)
 	if err != nil {
-		return maint.TableStats{}, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "validate the resolved table identity", err)
 	}
 	rows, err = local.Query(ctx, spec.DatabaseName(), maint.ReportSetup+sql, nil)
 	if err != nil {
@@ -289,6 +289,21 @@ func exactTableStats(ctx context.Context, spec config.ClusterSpec, table string)
 	stats, err := maint.ParseTableStats(spec.Name, facts.Schema, facts.Table, rows)
 	if err != nil {
 		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "read the pgstattuple result", err)
+	}
+	// The function scans the original OID. Recheck its canonical name before
+	// attributing the measurement: rename/drop/recreate must not relabel a
+	// different relation's statistics as this table.
+	canonical := pg.Quote(facts.Schema) + "." + pg.Quote(facts.Table)
+	rows, err = local.Query(ctx, spec.DatabaseName(), maint.RelationFactsSQL(canonical), nil)
+	if err != nil {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "verify the measured table identity", err)
+	}
+	if len(rows) != 1 {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "verify the measured table identity", errors.New("the resolved table disappeared during measurement"))
+	}
+	current := maint.ParseRelationFacts(rows[0])
+	if current.OID != facts.OID || current.Schema != facts.Schema || current.Table != facts.Table {
+		return maint.TableStats{}, exactBloatFailed(spec.Name, table, "verify the measured table identity", errors.New("the resolved table changed during measurement"))
 	}
 	return stats, nil
 }

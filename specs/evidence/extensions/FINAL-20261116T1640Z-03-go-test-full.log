@@ -1,0 +1,45 @@
+# FINAL GATE 2026-11-16T16:40:48Z
+$ go test -count=1 ./...
+?   	github.com/mbvlabs/vaire/cmd/vaire	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/activity	31.956s
+ok  	github.com/mbvlabs/vaire/internal/backup	10.183s
+?   	github.com/mbvlabs/vaire/internal/buildinfo	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/catalog	0.007s
+ok  	github.com/mbvlabs/vaire/internal/cli	1.638s
+?   	github.com/mbvlabs/vaire/internal/cli/output	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/cli/top	0.010s
+ok  	github.com/mbvlabs/vaire/internal/cli/ui	0.042s
+ok  	github.com/mbvlabs/vaire/internal/config	0.028s
+ok  	github.com/mbvlabs/vaire/internal/diagnostics	0.185s
+ok  	github.com/mbvlabs/vaire/internal/doctor	0.021s
+ok  	github.com/mbvlabs/vaire/internal/engine	1.105s
+ok  	github.com/mbvlabs/vaire/internal/exporters	0.013s
+?   	github.com/mbvlabs/vaire/internal/guide	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/health	0.018s
+ok  	github.com/mbvlabs/vaire/internal/hostinfo	0.039s
+ok  	github.com/mbvlabs/vaire/internal/localenv	0.021s
+ok  	github.com/mbvlabs/vaire/internal/maint	0.007s
+ok  	github.com/mbvlabs/vaire/internal/masterbackup	0.020s
+ok  	github.com/mbvlabs/vaire/internal/node	36.048s
+ok  	github.com/mbvlabs/vaire/internal/password	0.249s
+ok  	github.com/mbvlabs/vaire/internal/pg	0.018s
+ok  	github.com/mbvlabs/vaire/internal/promfile	0.021s
+ok  	github.com/mbvlabs/vaire/internal/release	0.018s
+ok  	github.com/mbvlabs/vaire/internal/release/cmd/promote	0.025s
+ok  	github.com/mbvlabs/vaire/internal/remote	0.021s
+ok  	github.com/mbvlabs/vaire/internal/render	0.007s
+?   	github.com/mbvlabs/vaire/internal/rpc	[no test files]
+?   	github.com/mbvlabs/vaire/internal/secrets	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/secretsdoc	0.066s
+?   	github.com/mbvlabs/vaire/internal/state	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/steps	1.026s
+ok  	github.com/mbvlabs/vaire/internal/totp	0.010s
+ok  	github.com/mbvlabs/vaire/internal/transport	1.612s
+ok  	github.com/mbvlabs/vaire/internal/tune	0.028s
+ok  	github.com/mbvlabs/vaire/internal/upgrade	0.011s
+?   	github.com/mbvlabs/vaire/internal/versions	[no test files]
+?   	github.com/mbvlabs/vaire/internal/versions/cmd/print	[no test files]
+ok  	github.com/mbvlabs/vaire/internal/workspaces	0.012s
+ok  	github.com/mbvlabs/vaire/schema	0.010s
+exit_code=0
+# end 2026-11-16T16:41:26Z
