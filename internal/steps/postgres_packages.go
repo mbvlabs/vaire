@@ -20,7 +20,11 @@ const pgdgScript = "/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh"
 
 // pgPackages are step 8's packages. pgbackrest comes from PGDG too and is
 // installed on every node, whether or not backups are configured yet.
-var pgPackages = []string{"postgresql-18", "postgresql-client-18", "postgresql-contrib", "pgbouncer", "pgbackrest"}
+// postgresql-18 ships the contrib control files and libraries and Provides
+// postgresql-contrib-18; PGDG publishes no postgresql-contrib binary for
+// PostgreSQL 18, so requiring that virtual name would never satisfy dpkg.
+// ExtensionPrerequisites still verifies the real control and library files.
+var pgPackages = []string{"postgresql-18", "postgresql-client-18", "pgbouncer", "pgbackrest"}
 
 // pgHold are the packages pinned with apt-mark hold: the major version and
 // pgBackRest, which moves only with vaire pg update.
