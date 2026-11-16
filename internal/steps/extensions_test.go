@@ -614,6 +614,54 @@ func TestExtensionCreationSQLPreloadDeferral(t *testing.T) {
 	}
 }
 
+func TestExtensionSettingMatchesBooleanInputForms(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		want  string
+		fact  ExtensionSettingFact
+		match bool
+	}{
+		{name: "true", want: "on", fact: ExtensionSettingFact{Value: "true", Type: "bool"}, match: true},
+		{name: "true prefix t", want: "on", fact: ExtensionSettingFact{Value: "t", Type: "bool"}, match: true},
+		{name: "true prefix tr", want: "on", fact: ExtensionSettingFact{Value: "tr", Type: "bool"}, match: true},
+		{name: "true prefix tru", want: "on", fact: ExtensionSettingFact{Value: "tru", Type: "bool"}, match: true},
+		{name: "yes prefix y", want: "on", fact: ExtensionSettingFact{Value: "y", Type: "bool"}, match: true},
+		{name: "yes prefix ye", want: "on", fact: ExtensionSettingFact{Value: "ye", Type: "bool"}, match: true},
+		{name: "on", want: "on", fact: ExtensionSettingFact{Value: "on", Type: "bool"}, match: true},
+		{name: "one", want: "on", fact: ExtensionSettingFact{Value: "1", Type: "bool"}, match: true},
+		{name: "false", want: "off", fact: ExtensionSettingFact{Value: "false", Type: "bool"}, match: true},
+		{name: "false prefix f", want: "off", fact: ExtensionSettingFact{Value: "f", Type: "bool"}, match: true},
+		{name: "false prefix fa", want: "off", fact: ExtensionSettingFact{Value: "fa", Type: "bool"}, match: true},
+		{name: "false prefix fal", want: "off", fact: ExtensionSettingFact{Value: "fal", Type: "bool"}, match: true},
+		{name: "false prefix fals", want: "off", fact: ExtensionSettingFact{Value: "fals", Type: "bool"}, match: true},
+		{name: "no", want: "off", fact: ExtensionSettingFact{Value: "n", Type: "bool"}, match: true},
+		{name: "no prefix", want: "off", fact: ExtensionSettingFact{Value: "no", Type: "bool"}, match: true},
+		{name: "off prefix of", want: "off", fact: ExtensionSettingFact{Value: "of", Type: "bool"}, match: true},
+		{name: "off", want: "off", fact: ExtensionSettingFact{Value: "off", Type: "bool"}, match: true},
+		{name: "zero", want: "off", fact: ExtensionSettingFact{Value: "0", Type: "bool"}, match: true},
+		{name: "case insensitive", want: "ON", fact: ExtensionSettingFact{Value: "TrUe", Type: "bool"}, match: true},
+		{name: "expected prefix", want: "tr", fact: ExtensionSettingFact{Value: "true", Type: "bool"}, match: true},
+		{name: "ambiguous o", want: "on", fact: ExtensionSettingFact{Value: "o", Type: "bool"}, match: false},
+		{name: "ambiguous expected o", want: "o", fact: ExtensionSettingFact{Value: "on", Type: "bool"}, match: false},
+		{name: "empty", want: "on", fact: ExtensionSettingFact{Value: "", Type: "bool"}, match: false},
+		{name: "trailing characters", want: "on", fact: ExtensionSettingFact{Value: "truex", Type: "bool"}, match: false},
+		{name: "trailing space", want: "on", fact: ExtensionSettingFact{Value: "on ", Type: "bool"}, match: false},
+		{name: "leading space", want: "on", fact: ExtensionSettingFact{Value: " true", Type: "bool"}, match: false},
+		{name: "numeric prefix", want: "on", fact: ExtensionSettingFact{Value: "10", Type: "bool"}, match: false},
+		{name: "quote content is not boolean", want: "on", fact: ExtensionSettingFact{Value: "'on'", Type: "bool"}, match: false},
+		{name: "nonboolean exact", want: "on", fact: ExtensionSettingFact{Value: "on", Type: "string"}, match: true},
+		{name: "nonboolean prefix", want: "on", fact: ExtensionSettingFact{Value: "t", Type: "string"}, match: false},
+		{name: "untyped exact", want: "on", fact: ExtensionSettingFact{Value: "on"}, match: true},
+		{name: "untyped quote content", want: "'on'", fact: ExtensionSettingFact{Value: "'on'"}, match: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExtensionSettingMatches(tc.want, tc.fact); got != tc.match {
+				t.Fatalf("ExtensionSettingMatches(%q, %+v) = %v, want %v", tc.want, tc.fact, got, tc.match)
+			}
+		})
+	}
+}
+
 func TestMissingExtensionNamesUsesEffectiveSelection(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Extensions = map[string]config.ExtensionDefinition{

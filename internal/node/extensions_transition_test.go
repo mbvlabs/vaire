@@ -341,6 +341,41 @@ func TestExtAddFollowerUnrenderedConfigDriftRequiresTokenBeforeEffects(t *testin
 	}
 }
 
+func TestExtAddConfigDriftForwardsPlannedRestartConfirmation(t *testing.T) {
+	cfg := extFollowerCfg(t)
+	h := newExtHarness(t, cfg)
+	oldPlan := extensionPlan
+	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
+		return engine.PlanData{WouldApply: 1}, nil
+	}
+	t.Cleanup(func() { extensionPlan = oldPlan })
+	h.installedFn = func(call int) (map[string]extensionInstalledVersion, error) {
+		if call == 1 {
+			return map[string]extensionInstalledVersion{}, nil
+		}
+		return map[string]extensionInstalledVersion{"pg_trgm": {Name: "pg_trgm", Version: "1.6"}}, nil
+	}
+	req := request("ext.add", map[string]any{"name": "pg_trgm", "db": "app"})
+	req.Confirm = "app/restart"
+	req.Confirms = []string{"app_follower_1/restart", "app_follower_2/restart"}
+	if _, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	var configured []string
+	for _, opts := range h.applyCalls {
+		if !strings.HasPrefix(opts.Only[0], "postgres-config-v1") {
+			continue
+		}
+		if !opts.Confirm.Covers(opts.DB) {
+			t.Fatalf("%s's configuration apply got Confirm %+v, want its confirmed restart", opts.DB, opts.Confirm)
+		}
+		configured = append(configured, opts.DB)
+	}
+	if strings.Join(configured, ",") != "app_follower_1,app_follower_2,app" {
+		t.Fatalf("configured targets = %v", configured)
+	}
+}
+
 func TestExtRemoveFollowerUnrenderedConfigDriftRequiresTokenBeforeEffects(t *testing.T) {
 	cfg := extFollowerCfg(t)
 	cfg.Clusters[0].Extensions = []string{"pg_trgm"}

@@ -2150,13 +2150,29 @@ func ExtensionSettingMatches(want string, fact ExtensionSettingFact) bool {
 	return fact.Value == want
 }
 
-// postgresBool accepts PostgreSQL's unambiguous boolean input forms. It does
-// not trim or strip quotes: malformed or quote-content values are not booleans.
+// postgresBool accepts PostgreSQL's boolean input forms and their unique
+// prefixes: true (t, tr, tru, true), yes (y, ye, yes), on, 1, false (f, fa,
+// fal, fals, false), no (n, no), off (of, off) and 0. "o" is not a boolean
+// because it prefixes both on and off. It does not trim or strip quotes: GUC
+// input does not tolerate surrounding whitespace, and malformed or
+// quote-content values are not booleans.
 func postgresBool(value string) (bool, bool) {
 	switch strings.ToLower(value) {
-	case "true", "on", "yes", "1":
+	case "t", "tr", "tru", "true":
 		return true, true
-	case "false", "off", "no", "0":
+	case "y", "ye", "yes":
+		return true, true
+	case "on":
+		return true, true
+	case "1":
+		return true, true
+	case "f", "fa", "fal", "fals", "false":
+		return false, true
+	case "n", "no":
+		return false, true
+	case "of", "off":
+		return false, true
+	case "0":
 		return false, true
 	}
 	return false, false
