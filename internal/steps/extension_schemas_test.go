@@ -34,7 +34,14 @@ func TestValidateInstalledExtensionSchemas(t *testing.T) {
 	if err == nil || schemaTestReason(t, err) != "extension_schema_mismatch" {
 		t.Fatalf("mismatch = %v", err)
 	}
-	details := err.(*output.CLIError).Details.(map[string]any)
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("mismatch error is not typed: %T %v", err, err)
+	}
+	details, ok := cliErr.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("mismatch details = %#v", cliErr.Details)
+	}
 	if details["actual_schema"] != "public" || details["requested_schema"] != "partman" {
 		t.Fatalf("mismatch details = %+v", details)
 	}

@@ -175,6 +175,21 @@ func (s *ownedForkState) stubJobRuntime(t *testing.T) {
 
 func (s *ownedForkState) stubForkHooks(t *testing.T) {
 	t.Helper()
+	s.stubFollowRegistration(t)
+	oldComplete := forkCompleteActivation
+	forkCompleteActivation = func(context.Context, config.ClusterSpec, backup.ActivationFence, *extensionCopyPlan, engine.Runtime, engine.Reporter) (config.Cluster, []output.Warning, error) {
+		return s.cfg, nil, nil
+	}
+	t.Cleanup(func() { forkCompleteActivation = oldComplete })
+	s.stubForkCreation(t)
+	s.stubForkCleanup(t)
+	s.stubForkRename(t)
+	s.stubForkPipeline(t)
+	s.stubForkHost(t)
+}
+
+func (s *ownedForkState) stubFollowRegistration(t *testing.T) {
+	t.Helper()
 	oldRegistered, oldData := followConfRegistered, followRegisteredData
 	followConfRegistered = func(name string) bool {
 		_, err := os.Stat(filepath.Join(materialisationConfigRoot, name, "postgresql.conf"))
@@ -192,25 +207,54 @@ func (s *ownedForkState) stubForkHooks(t *testing.T) {
 		return data, nil
 	}
 	t.Cleanup(func() { followConfRegistered, followRegisteredData = oldRegistered, oldData })
-	oldComplete := forkCompleteActivation
-	forkCompleteActivation = func(context.Context, config.ClusterSpec, backup.ActivationFence, *extensionCopyPlan, engine.Runtime, engine.Reporter) (config.Cluster, []output.Warning, error) {
-		return s.cfg, nil, nil
+}
+
+func (s *ownedForkState) stubForkCreation(t *testing.T) {
+	t.Helper()
+	oldNew := forkNewMaterialised
+	t.Cleanup(func() { forkNewMaterialised = oldNew })
+	forkNewMaterialised = func(root, name, source string, port int, sh engine.Shell, step string, report engine.Reporter) (*backup.Materialised, error) {
+		if err := s.newMaterialisedFailure(root, name); err != nil {
+			return nil, err
+		}
+		return backup.NewForkMaterialisedWithHost(root, name, source, port, sh, step, report, backup.ForkMaterialisationHost{
+			ReservationDir: s.registry, ConfigRoot: materialisationConfigRoot, UID: uint32(os.Geteuid()),
+			ClusterPorts: func() map[int]bool { return map[int]bool{} }, SocketTaken: func(int) bool { return false },
+			Running: func(context.Context, string) bool { return false },
+			WriteFile: func(path string, data []byte, perm os.FileMode, _, _ string) error {
+				return os.WriteFile(path, data, perm)
+			},
+		})
 	}
-	t.Cleanup(func() { forkCompleteActivation = oldComplete })
-	oldNew, oldBase, oldRestore, oldPromote, oldRename := forkNewMaterialised, forkBaseBackup, forkRestore, forkPromote, forkRename
+}
+
+// newMaterialisedFailure models the pre-physical fixture defects that the
+// constructor must refuse before it can own any target path.
+func (s *ownedForkState) newMaterialisedFailure(root, name string) error {
+	switch {
+	case s.mode == "prephysical":
+		return errors.New("constructor failed")
+	case s.mode == "prephysical-foreign":
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			return err
+		}
+		return errors.New("constructor found a foreign path")
+	case s.mode == "prephysical-reservation":
+		if err := os.WriteFile(filepath.Join(s.registry, name), []byte(fmt.Sprintf("%d\n", config.TemporaryPortMin)), 0o600); err != nil {
+			return err
+		}
+		return errors.New("constructor found a foreign reservation")
+	case strings.HasPrefix(s.mode, "prephysical-changed"):
+		s.changeTargetConfig(s.mode)
+		return errors.New("constructor found changed configuration")
+	}
+	return nil
+}
+
+func (s *ownedForkState) stubForkCleanup(t *testing.T) {
+	t.Helper()
 	oldDrop, oldForget := forkDrop, forkForgetDatabase
-	oldKernel, oldProvision, oldVerify, oldPool := forkApplyKernel, forkProvisionOwned, forkVerifyProvision, forkApplyPoolers
-	oldOther, oldApplyOther, oldMetrics, oldFirst, oldWrite := forkOtherConfigs, forkApplyOtherConfigs, forkApplyMetrics, forkFirstBackup, forkWriteMetrics
-	oldReservation, oldHost, oldJobHost := forkReservationLock, materialisationHostInfo, jobRuntimeHostRead
-	t.Cleanup(func() {
-		forkNewMaterialised, forkBaseBackup, forkRestore, forkPromote, forkRename = oldNew, oldBase, oldRestore, oldPromote, oldRename
-		forkDrop, forkForgetDatabase = oldDrop, oldForget
-		forkApplyKernel, forkProvisionOwned, forkVerifyProvision, forkApplyPoolers = oldKernel, oldProvision, oldVerify, oldPool
-		forkOtherConfigs, forkApplyOtherConfigs, forkApplyMetrics, forkFirstBackup, forkWriteMetrics = oldOther, oldApplyOther, oldMetrics, oldFirst, oldWrite
-		forkReservationLock, materialisationHostInfo, jobRuntimeHostRead = oldReservation, oldHost, oldJobHost
-	})
-	host := func(string) (hostinfo.Info, error) { return hostinfo.Info{RAMMiB: 8192, VCPU: 4}, nil }
-	materialisationHostInfo, jobRuntimeHostRead = host, host
+	t.Cleanup(func() { forkDrop, forkForgetDatabase = oldDrop, oldForget })
 	forkDrop = func(m *backup.Materialised) error {
 		s.dropCalls++
 		if !strings.HasPrefix(s.mode, "cleanup") {
@@ -242,72 +286,61 @@ func (s *ownedForkState) stubForkHooks(t *testing.T) {
 		s.cfg.Clusters = kept
 		return nil
 	}
-	uid := uint32(os.Geteuid())
-	forkReservationLock = func(ctx context.Context, name string, port int, present bool) (func(), error) {
-		if s.mode == "retire" && s.verified && !present {
-			return nil, errors.New("reservation check refused")
+}
+
+func (s *ownedForkState) stubForkRename(t *testing.T) {
+	t.Helper()
+	oldRename := forkRename
+	t.Cleanup(func() { forkRename = oldRename })
+	forkRename = func(context.Context, *backup.Materialised, string, string, map[string]string, int) error {
+		if err, failed := s.renameFailure(); failed {
+			return err
 		}
-		return backup.LockForkReservationWithHost(ctx, s.registry, uid, name, port, present)
+		return nil
 	}
-	forkNewMaterialised = func(root, name, source string, port int, sh engine.Shell, step string, report engine.Reporter) (*backup.Materialised, error) {
-		if s.mode == "prephysical" {
-			return nil, errors.New("constructor failed")
+}
+
+// renameFailure models the cleanup fixtures whose evidence must survive a
+// failed rename.
+func (s *ownedForkState) renameFailure() (error, bool) {
+	switch {
+	case s.mode == "cleanup":
+		return errors.New("rename failed"), true
+	case s.mode == "cleanup-foreign-fence":
+		if err := backup.UpdateRecords(func(r *backup.Records) error {
+			f := r.Activation[s.owner.Target]
+			f.OperationID = "foreign-operation"
+			r.Activation[s.owner.Target] = f
+			return nil
+		}); err != nil {
+			return err, true
 		}
-		if s.mode == "prephysical-foreign" {
-			if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
-				return nil, err
-			}
-			return nil, errors.New("constructor found a foreign path")
-		}
-		if s.mode == "prephysical-reservation" {
-			if err := os.WriteFile(filepath.Join(s.registry, name), []byte(fmt.Sprintf("%d\n", config.TemporaryPortMin)), 0o600); err != nil {
-				return nil, err
-			}
-			return nil, errors.New("constructor found a foreign reservation")
-		}
-		if strings.HasPrefix(s.mode, "prephysical-changed") {
-			s.changeTargetConfig(s.mode)
-			return nil, errors.New("constructor found changed configuration")
-		}
-		return backup.NewForkMaterialisedWithHost(root, name, source, port, sh, step, report, backup.ForkMaterialisationHost{
-			ReservationDir: s.registry, ConfigRoot: materialisationConfigRoot, UID: uid,
-			ClusterPorts: func() map[int]bool { return map[int]bool{} }, SocketTaken: func(int) bool { return false },
-			Running: func(context.Context, string) bool { return false },
-			WriteFile: func(path string, data []byte, perm os.FileMode, _, _ string) error {
-				return os.WriteFile(path, data, perm)
-			},
-		})
+		return errors.New("rename failed"), true
+	case strings.HasPrefix(s.mode, "cleanup-changed"):
+		s.changeTargetConfig(s.mode)
+		return errors.New("rename failed"), true
+	case strings.HasPrefix(s.mode, "cleanup-postphysical-changed"):
+		return errors.New("rename failed"), true
 	}
+	return nil, false
+}
+
+func (s *ownedForkState) stubForkPipeline(t *testing.T) {
+	t.Helper()
+	oldBase, oldRestore, oldPromote := forkBaseBackup, forkRestore, forkPromote
+	oldKernel, oldProvision, oldVerify, oldPool := forkApplyKernel, forkProvisionOwned, forkVerifyProvision, forkApplyPoolers
+	oldOther, oldApplyOther, oldMetrics, oldFirst, oldWrite := forkOtherConfigs, forkApplyOtherConfigs, forkApplyMetrics, forkFirstBackup, forkWriteMetrics
+	t.Cleanup(func() {
+		forkBaseBackup, forkRestore, forkPromote = oldBase, oldRestore, oldPromote
+		forkApplyKernel, forkProvisionOwned, forkVerifyProvision, forkApplyPoolers = oldKernel, oldProvision, oldVerify, oldPool
+		forkOtherConfigs, forkApplyOtherConfigs, forkApplyMetrics, forkFirstBackup, forkWriteMetrics = oldOther, oldApplyOther, oldMetrics, oldFirst, oldWrite
+	})
 	forkBaseBackup = func(m *backup.Materialised, ctx context.Context) error { return s.populate(t, ctx, m, false) }
 	forkRestore = func(ctx context.Context, _ *jobEnv, _ dbForkParams, _ config.ClusterSpec, m *backup.Materialised) error {
 		return s.populate(t, ctx, m, true)
 	}
 	forkPromote = func(m *backup.Materialised, ctx context.Context) ([]string, error) {
 		return nil, m.GuardOwnership(ctx, backup.MaterialisationPromote, func() error { return nil })
-	}
-	forkRename = func(context.Context, *backup.Materialised, string, string, map[string]string, int) error {
-		if s.mode == "cleanup" {
-			return errors.New("rename failed")
-		}
-		if s.mode == "cleanup-foreign-fence" {
-			if err := backup.UpdateRecords(func(r *backup.Records) error {
-				f := r.Activation[s.owner.Target]
-				f.OperationID = "foreign-operation"
-				r.Activation[s.owner.Target] = f
-				return nil
-			}); err != nil {
-				return err
-			}
-			return errors.New("rename failed")
-		}
-		if strings.HasPrefix(s.mode, "cleanup-changed") {
-			s.changeTargetConfig(s.mode)
-			return errors.New("rename failed")
-		}
-		if strings.HasPrefix(s.mode, "cleanup-postphysical-changed") {
-			return errors.New("rename failed")
-		}
-		return nil
 	}
 	forkOtherConfigs = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, string, string) []string {
 		return nil
@@ -350,6 +383,23 @@ func (s *ownedForkState) stubForkHooks(t *testing.T) {
 		return nil
 	}
 	forkWriteMetrics = func(config.Cluster) {}
+}
+
+func (s *ownedForkState) stubForkHost(t *testing.T) {
+	t.Helper()
+	oldReservation, oldHost, oldJobHost := forkReservationLock, materialisationHostInfo, jobRuntimeHostRead
+	t.Cleanup(func() {
+		forkReservationLock, materialisationHostInfo, jobRuntimeHostRead = oldReservation, oldHost, oldJobHost
+	})
+	host := func(string) (hostinfo.Info, error) { return hostinfo.Info{RAMMiB: 8192, VCPU: 4}, nil }
+	materialisationHostInfo, jobRuntimeHostRead = host, host
+	uid := uint32(os.Geteuid())
+	forkReservationLock = func(ctx context.Context, name string, port int, present bool) (func(), error) {
+		if s.mode == "retire" && s.verified && !present {
+			return nil, errors.New("reservation check refused")
+		}
+		return backup.LockForkReservationWithHost(ctx, s.registry, uid, name, port, present)
+	}
 }
 
 // assertForkAuthorityNotAmbient proves the fork capability is never ambient: a

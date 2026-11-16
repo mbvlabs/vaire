@@ -947,7 +947,27 @@ func restorePromoteFenceIdentity(cfg config.Cluster, r backup.Restore, aside str
 	}
 }
 
-func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter, unlock func()) (map[string]any, error) {
+// restorePromotion carries the state fixed before a promote's first
+// irreversible step.
+type restorePromotion struct {
+	cfg         config.Cluster
+	db          string
+	rt          engine.Runtime
+	report      engine.Reporter
+	spec        config.ClusterSpec
+	r           backup.Restore
+	aside       string
+	oldArchived string
+	plan        *extensionCopyPlan
+	liveData    string
+	fenceID     activationFenceIdentity
+	started     time.Time
+	elapsed     time.Duration
+}
+
+// preparePromotion resolves the restore record, aside, extension plan and
+// guard, records the aside, and writes the prepared fence.
+func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter) (*restorePromotion, error) {
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return nil, err
@@ -960,7 +980,6 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	if err != nil {
 		return nil, err
 	}
-	const step = "restore.promote"
 	aside := r.Aside
 	if aside == "" {
 		// A promote from before the aside was recorded.
@@ -992,9 +1011,41 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	if err := prepareCopyExtensions(ctx, plan, rt, report); err != nil {
 		return nil, fmt.Errorf("extension prerequisites before promoting %s: %w", db, err)
 	}
+	liveData, err := ensurePromoteGuard(ctx, cfg, db, r, aside, spec, plan, rt, report)
+	if err != nil {
+		return nil, err
+	}
+	if r.Kind != targetDump {
+		if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
+			return nil, output.NewError(output.CodePrecondition,
+				"recording the restore's extension requirements before promotion failed: "+err.Error(),
+				output.ExitPrecondition, "Nothing was promoted. Retry after fixing the requirement history store.").
+				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
+		}
+	}
+	aside, oldArchived, err = recordPromoteAside(ctx, cfg, db, r, spec, aside, oldArchived, report)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	fenceID := restorePromoteFenceIdentity(cfg, r, aside, spec)
+	fenceID.Requirements = plan.Plan.Requirements
+	if _, err := writeActivationFence(cfg, fenceID); err != nil {
+		return nil, err
+	}
+	return &restorePromotion{
+		cfg: cfg, db: db, rt: rt, report: report, spec: spec, r: r,
+		aside: aside, oldArchived: oldArchived, plan: plan, liveData: liveData,
+		fenceID: fenceID, started: start,
+	}, nil
+}
+
+// ensurePromoteGuard establishes the extension copy guard at the temporary
+// or already swapped live endpoint before the cut-over.
+func ensurePromoteGuard(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, aside string, spec config.ClusterSpec, plan *extensionCopyPlan, rt engine.Runtime, report engine.Reporter) (string, error) {
+	const step = "restore.promote"
 	liveData := cfg.Server.DataDirectory(db)
-	restoringData := cfg.Server.DataDirectory(backup.RestoringName(db))
-	guardData := restoringData
+	guardData := cfg.Server.DataDirectory(backup.RestoringName(db))
 	guardEndpoint := copyGuardEndpoint{
 		Name: backup.RestoringName(db), Port: r.Port,
 		ConfDir: steps.PGConfDir(backup.RestoringName(db)),
@@ -1007,16 +1058,15 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		return backup.RestartCluster(ctx, rt.Shell, step, report, guardEndpoint.Name, guardData, guardEndpoint.Port)
 	}
 	if _, err := ensureCopyGuardAt(ctx, guardData, plan, guardEndpoint, restartGuard); err != nil {
-		return nil, err
+		return "", err
 	}
-	if r.Kind != targetDump {
-		if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
-			return nil, output.NewError(output.CodePrecondition,
-				"recording the restore's extension requirements before promotion failed: "+err.Error(),
-				output.ExitPrecondition, "Nothing was promoted. Retry after fixing the requirement history store.").
-				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
-		}
-	}
+	return liveData, nil
+}
+
+// recordPromoteAside fixes the aside before any rename, so a promote that
+// fails part way resumes with the same aside and abort knows the copy is in.
+func recordPromoteAside(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, spec config.ClusterSpec, aside, oldArchived string, report engine.Reporter) (string, string, error) {
+	const step = "restore.promote"
 	switch {
 	case aside == "":
 		aside = backup.PreRestoreName(db, time.Now())
@@ -1024,8 +1074,6 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 			// The old stanza is dropped below; its window ends at its last WAL.
 			oldArchived = lastArchivedTime(ctx, spec)
 		}
-		// Recorded before any rename, so a promote that fails part way
-		// resumes with the same aside, and abort knows the copy is in.
 		if err := backup.UpdateRecords(func(s *backup.Records) error {
 			cur, ok := s.Restores[db]
 			if !ok || cur.ID != r.ID {
@@ -1035,7 +1083,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 			s.Restores[db] = cur
 			return nil
 		}); err != nil {
-			return nil, err
+			return "", "", err
 		}
 		logLine(report, step, "cutting "+db+" over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
 	case backup.SwapState(cfg.Server.DataRoot, db, backup.RestoringName(db), aside) == backup.SwapNotStarted:
@@ -1043,97 +1091,122 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	default:
 		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
 	}
-	start := time.Now()
-	fenceID := restorePromoteFenceIdentity(cfg, r, aside, spec)
-	fenceID.Requirements = plan.Plan.Requirements
-	if _, err := writeActivationFence(cfg, fenceID); err != nil {
-		return nil, err
-	}
+	return aside, oldArchived, nil
+}
+
+// cutoverPromotion fences the poolers and swaps, starts and promotes the
+// restored copy, advancing the prepared fence through swapped to promoted.
+func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
+	const step = "restore.promote"
 	// Before the swap, or a retry's start of already swapped data, withdraw
 	// both poolers' target and restore-inspection routes and cut their
 	// clients. A transaction PAUSE alone leaves a session-pooler route and
 	// existing backends alive. A failure leaves the durable fence in place;
 	// vaire never resumes here to expose data the next step may swap.
-	if err := fenceRestorePoolers(ctx, db); err != nil {
-		return nil, withHint(err, "The restore's poolers could not be fenced, so nothing was swapped. Retry vaire restore promote "+db+".")
+	if err := fenceRestorePoolers(ctx, p.db); err != nil {
+		return withHint(err, "The restore's poolers could not be fenced, so nothing was swapped. Retry vaire restore promote "+p.db+".")
 	}
-	if err := applyPoolerFence(ctx, cfg, rt, report); err != nil {
-		return nil, withHint(err, "The restore's poolers could not be rendered without the target, so nothing was swapped. Retry vaire restore promote "+db+".")
+	if err := applyPoolerFence(ctx, p.cfg, p.rt, p.report); err != nil {
+		return withHint(err, "The restore's poolers could not be rendered without the target, so nothing was swapped. Retry vaire restore promote "+p.db+".")
 	}
-	if err := verifyPoolerAliasAbsent(ctx, db); err != nil {
-		return nil, withHint(err, "The restore's poolers still serve the target or its restore-inspection alias, so nothing was swapped. Retry vaire restore promote "+db+".")
+	if err := verifyPoolerAliasAbsent(ctx, p.db); err != nil {
+		return withHint(err, "The restore's poolers still serve the target or its restore-inspection alias, so nothing was swapped. Retry vaire restore promote "+p.db+".")
 	}
-	err = swapCluster(ctx, rt.Shell, step, report, cfg.Server.DataRoot, db, backup.RestoringName(db), aside, r.Port)
+	err := swapCluster(ctx, p.rt.Shell, step, p.report, p.cfg.Server.DataRoot, p.db, backup.RestoringName(p.db), p.aside, p.r.Port)
 	if err == nil {
-		err = advanceActivationFence(cfg, db, r.ID, "restore-promote", fencePhasePrepared, fencePhaseSwapped, spec, func(f *backup.ActivationFence) {
-			f.Registration = activationRegistration(spec)
-			f.Port = spec.Port
-			f.DataDir = liveData
-			f.ConfDir = steps.PGConfDir(db)
+		err = advanceActivationFence(p.cfg, p.db, p.r.ID, "restore-promote", fencePhasePrepared, fencePhaseSwapped, p.spec, func(f *backup.ActivationFence) {
+			f.Registration = activationRegistration(p.spec)
+			f.Port = p.spec.Port
+			f.DataDir = p.liveData
+			f.ConfDir = steps.PGConfDir(p.db)
 		})
 	}
 	if err == nil {
 		until := backup.UntilPaused
-		if r.Kind == backup.TargetLatest || r.Kind == targetDump {
+		if p.r.Kind == backup.TargetLatest || p.r.Kind == targetDump {
 			until = backup.UntilOpen
 		}
-		err = startCluster(ctx, rt.Shell, step, report, db, cfg.Server.DataDirectory(db), spec.Port, until)
+		err = startCluster(ctx, p.rt.Shell, step, p.report, p.db, p.cfg.Server.DataDirectory(p.db), p.spec.Port, until)
 	}
 	if err == nil {
 		var dropped []string
-		if dropped, err = promoteCluster(ctx, steps.ClusterPG(spec), cfg.Server.DataDirectory(db)); err == nil {
+		if dropped, err = promoteCluster(ctx, steps.ClusterPG(p.spec), p.cfg.Server.DataDirectory(p.db)); err == nil {
 			// Still paused: a recovery target dropped above leaves only with
 			// a restart, which postgres-config-v1 would otherwise refuse.
-			err = settlePromoted(ctx, rt.Shell, step, report, steps.ClusterPG(spec), db, cfg.Server.DataDirectory(db), spec.Port, dropped)
+			err = settlePromoted(ctx, p.rt.Shell, step, p.report, steps.ClusterPG(p.spec), p.db, p.cfg.Server.DataDirectory(p.db), p.spec.Port, dropped)
 		}
 	}
 	if err == nil {
-		err = advanceActivationFence(cfg, db, r.ID, "restore-promote", fencePhaseSwapped, fencePhasePromoted, spec, func(f *backup.ActivationFence) {
-			f.Registration = activationRegistration(spec)
-			f.Port = spec.Port
-			f.DataDir = liveData
-			f.ConfDir = steps.PGConfDir(db)
+		err = advanceActivationFence(p.cfg, p.db, p.r.ID, "restore-promote", fencePhaseSwapped, fencePhasePromoted, p.spec, func(f *backup.ActivationFence) {
+			f.Registration = activationRegistration(p.spec)
+			f.Port = p.spec.Port
+			f.DataDir = p.liveData
+			f.ConfDir = steps.PGConfDir(p.db)
 		})
 	}
 	if err != nil {
-		return nil, withHint(err, "Read vaire logs postgres --db "+db+" and vaire restore status "+db+"; the old data is in the cluster "+aside+". Routing stays blocked while the activation fence is active; retry vaire restore promote "+db+".")
+		return withHint(err, "Read vaire logs postgres --db "+p.db+" and vaire restore status "+p.db+"; the old data is in the cluster "+p.aside+". Routing stays blocked while the activation fence is active; retry vaire restore promote "+p.db+".")
 	}
+	return nil
+}
+
+// finishPromotion switches a dump's stanza, settles the restored copy's
+// extensions, provisions recovered access, and atomically retires the
+// restore into routing.
+func finishPromotion(ctx context.Context, p *restorePromotion) (string, []output.Warning, error) {
+	const step = "restore.promote"
 	newStanza := ""
-	oldStanza := spec.Stanza
-	if r.Kind == targetDump {
-		cfg, r, newStanza, oldStanza, err = prepareDumpPromoteStanza(cfg, db, spec, r)
+	oldStanza := p.spec.Stanza
+	if p.r.Kind == targetDump {
+		cfg, r, fresh, old, err := prepareDumpPromoteStanza(p.cfg, p.db, p.spec, p.r)
 		if err != nil {
-			return nil, err
+			return "", nil, err
 		}
+		p.cfg, p.r, newStanza, oldStanza = cfg, r, fresh, old
 		// The stanza switch is already durable in cluster.toml. The
 		// destination spec is now the new stanza; oldStanza stays the
 		// separate fact for the leftover and replaced-stanza records.
-		spec, _ = cfg.ClusterByName(db)
-		if err := recordCopyRequirements(newStanza, db, plan.Plan); err != nil {
-			return nil, output.NewError(output.CodePrecondition,
+		p.spec, _ = p.cfg.ClusterByName(p.db)
+		if err := recordCopyRequirements(newStanza, p.db, p.plan.Plan); err != nil {
+			return "", nil, output.NewError(output.CodePrecondition,
 				"recording the restored stanza's extension requirements failed: "+err.Error(),
-				output.ExitPrecondition, "The data is promoted but routing stays blocked. Retry vaire restore promote "+db+".").
-				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
+				output.ExitPrecondition, "The data is promoted but routing stays blocked. Retry vaire restore promote "+p.db+".").
+				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.db})
 		}
 	}
-	warnings, err := settleRestoredCopy(ctx, cfg, spec, steps.ClusterPG(spec), liveData, plan.Plan, spec.DatabaseName(), func() error {
-		return backup.RestartCluster(ctx, rt.Shell, step, report, db, liveData, spec.Port)
+	warnings, err := settleRestoredCopy(ctx, p.cfg, p.spec, steps.ClusterPG(p.spec), p.liveData, p.plan.Plan, p.spec.DatabaseName(), func() error {
+		return backup.RestartCluster(ctx, p.rt.Shell, step, p.report, p.db, p.liveData, p.spec.Port)
 	})
 	if err != nil {
-		return nil, withHint(err, "The data is promoted but its extension settlement is incomplete, so routing stays blocked and the copy's suppression remains. Fix the prerequisite, then run vaire restore promote "+db+" again.")
+		return "", nil, withHint(err, "The data is promoted but its extension settlement is incomplete, so routing stays blocked and the copy's suppression remains. Fix the prerequisite, then run vaire restore promote "+p.db+" again.")
 	}
-	if err := provisionRecoveredAccess(ctx, cfg, db, r, rt, report); err != nil {
-		return nil, err
+	if err := provisionRecoveredAccess(ctx, p.cfg, p.db, p.r, p.rt, p.report); err != nil {
+		return "", nil, err
 	}
-	took := time.Since(start)
+	p.elapsed = time.Since(p.started)
 	// Retiring the open restore, its timeline/leftover/replaced-stanza facts
 	// and the fence's routing eligibility is one records update. A failed
 	// write leaves the old promoted continuation whole; no orphan routing
 	// fence can outlive the restore record.
-	if err := retireRestoreAndRoute(cfg, db, r, spec, aside, oldStanza, newStanza, fenceID.TargetStanza, fenceID.OldStanza, fenceID.NewStanza, oldArchived); err != nil {
+	if err := retireRestoreAndRoute(p.cfg, p.db, p.r, p.spec, p.aside, oldStanza, newStanza, p.fenceID.TargetStanza, p.fenceID.OldStanza, p.fenceID.NewStanza, p.oldArchived); err != nil {
+		return "", nil, err
+	}
+	return newStanza, warnings, nil
+}
+
+func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter, unlock func()) (map[string]any, error) {
+	p, err := preparePromotion(ctx, cfg, db, rt, report)
+	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{"database": db, "pre_restore": aside, "target": r.Target, "swap_ms": took.Milliseconds()}
+	if err := cutoverPromotion(ctx, p); err != nil {
+		return nil, err
+	}
+	newStanza, warnings, err := finishPromotion(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	data := map[string]any{"database": db, "pre_restore": p.aside, "target": p.r.Target, "swap_ms": p.elapsed.Milliseconds()}
 	if len(warnings) > 0 {
 		data["extension_warnings"] = warnings
 	}
@@ -1142,29 +1215,29 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	if newStanza != "" {
 		runs = append(runs, stanzaRuns(db)...)
 	}
-	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, runs...))
-	if _, _, err := verifyActivationFence(cfg, db, r.ID, "restore-promote", fencePhaseRouting); err != nil {
+	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), p.cfg, runs...))
+	if _, _, err := verifyActivationFence(p.cfg, db, p.r.ID, "restore-promote", fencePhaseRouting); err != nil {
 		warn = err
-	} else if err := publishRouting(ctx, cfg, rt, report); err != nil {
+	} else if err := publishRouting(ctx, p.cfg, rt, report); err != nil {
 		warn = err
-	} else if err := verifyRoutingFence(ctx, cfg, spec, r.ID, "restore-promote"); err != nil {
+	} else if err := verifyRoutingFence(ctx, p.cfg, p.spec, p.r.ID, "restore-promote"); err != nil {
 		warn = err
 	}
 	if newStanza != "" {
 		data["stanza"] = newStanza
-		if err := applyStanzaAt(ctx, cfg, db, rt, report); err != nil {
+		if err := applyStanzaAt(ctx, p.cfg, db, rt, report); err != nil {
 			warn = err
 		}
-	} else if !r.NoFull {
+	} else if !p.r.NoFull {
 		unlock()
-		if err := startFullBackup(ctx, cfg, rt, db, step, report); err != nil {
+		if err := startFullBackup(ctx, p.cfg, rt, db, "restore.promote", report); err != nil {
 			warn = err
 		}
 	}
 	if warn != nil {
 		data["warning"] = output.Warning{Code: "after_cutover_failed", Message: db + " is restored, but " + warn.Error() + "; run vaire apply, then vaire backup now --db " + db + " --type full"}
 	}
-	steps.WriteMetrics(cfg)
+	steps.WriteMetrics(p.cfg)
 	return data, nil
 }
 
@@ -1860,7 +1933,7 @@ func verifyPreSwapRestoreFence(cfg config.Cluster, f backup.ActivationFence, r b
 		return restoreAbortRefusal(db, "its cluster.toml entry is missing")
 	}
 	if !fenceTargetMatches(f, spec) {
-		return activationIdentityError(db, f, "target stanza", f.TargetStanza, spec.Stanza)
+		return activationIdentityError(db, "target stanza", f.TargetStanza, spec.Stanza)
 	}
 	if f.OldStanza == "" || f.NewStanza == "" {
 		return restoreAbortRefusal(db, "its activation fence has no recorded old/new stanza transition")
@@ -1888,14 +1961,14 @@ func verifyPreSwapRestoreFence(cfg config.Cluster, f backup.ActivationFence, r b
 		{"configuration directory", f.ConfDir, want.ConfDir},
 	} {
 		if field.have != field.want {
-			return activationIdentityError(db, f, field.name, field.have, field.want)
+			return activationIdentityError(db, field.name, field.have, field.want)
 		}
 	}
 	if f.Port != want.Port {
-		return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(want.Port))
+		return activationIdentityError(db, "port", strconv.Itoa(f.Port), strconv.Itoa(want.Port))
 	}
 	if spec.Stanza != want.OldStanza {
-		return activationIdentityError(db, f, "stanza", f.OldStanza, spec.Stanza)
+		return activationIdentityError(db, "stanza", f.OldStanza, spec.Stanza)
 	}
 	return nil
 }
@@ -2423,17 +2496,7 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	logLine(env.Report, env.Job, "starting "+p.Name+" with its own configuration")
 	_, _, err = forkApplyKernel(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
-		err = authority.withProvisionedForkTarget(ctx, func(owned context.Context) error {
-			if err := forkProvisionOwned(owned, cfg, rt, p.Name, "", env.Report); err != nil {
-				return err
-			}
-			fence, _, err := verifyActivationFence(cfg, p.Name, opID, "fork", fencePhaseAdopted)
-			if err != nil {
-				return err
-			}
-			cfg, warnings, err = forkCompleteActivation(owned, spec, fence, plan, rt, env.Report)
-			return err
-		})
+		cfg, warnings, err = provisionForkActivation(ctx, env, cfg, spec, plan, opID, rt, authority)
 	}
 	if err != nil {
 		return nil, withHint(err, "The incomplete fork remains blocked; inspect its job and retained state.")
@@ -2460,6 +2523,24 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	}
 	forkWriteMetrics(cfg)
 	return map[string]any{"source": p.Source, "name": p.Name, "at": p.At, "port": spec.Port, "stanza": spec.Stanza, "warnings": warnings}, nil
+}
+
+// provisionForkActivation provisions the copied cluster and completes its
+// activation under the retained materialisation authority.
+func provisionForkActivation(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec, plan *extensionCopyPlan, opID string, rt engine.Runtime, authority *forkMaterialisationAuthority) (config.Cluster, []output.Warning, error) {
+	var warnings []output.Warning
+	err := authority.withProvisionedForkTarget(ctx, func(owned context.Context) error {
+		if err := forkProvisionOwned(owned, cfg, rt, spec.Name, "", env.Report); err != nil {
+			return err
+		}
+		fence, _, err := verifyActivationFence(cfg, spec.Name, opID, "fork", fencePhaseAdopted)
+		if err != nil {
+			return err
+		}
+		cfg, warnings, err = forkCompleteActivation(owned, spec, fence, plan, rt, env.Report)
+		return err
+	})
+	return cfg, warnings, err
 }
 
 // prepareForkMaterialisation fixes the copy plan and destination

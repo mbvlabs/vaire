@@ -42,6 +42,187 @@ func writeTestFence(t *testing.T, cfg config.Cluster, kind, opID string) backup.
 	return f
 }
 
+// installActivationExtensionTree creates the test-owned extension control and
+// library files a real config or roles step inspects.
+func installActivationExtensionTree(t *testing.T, controlFiles, libFiles []string) {
+	t.Helper()
+	extRoot := t.TempDir()
+	controlDir, libDir := filepath.Join(extRoot, "extension"), filepath.Join(extRoot, "lib")
+	for _, dir := range []string{controlDir, libDir} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(steps.ExtensionDirsForTest(controlDir, libDir))
+	for _, name := range controlFiles {
+		if err := os.WriteFile(filepath.Join(controlDir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range libFiles {
+		if err := os.WriteFile(filepath.Join(libDir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// useEncodedFollowerStore persists cfg behind the follower state seam so the
+// real config and roles steps read the same cluster the fence describes.
+func useEncodedFollowerStore(t *testing.T, cfg config.Cluster) {
+	t.Helper()
+	store := state.FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
+	raw, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(raw); err != nil {
+		t.Fatal(err)
+	}
+	oldState := followerState
+	followerState = func() state.Store { return store }
+	t.Cleanup(func() { followerState = oldState })
+}
+
+// useFollowRegistrationHooks reports every name as registered at dataDir.
+func useFollowRegistrationHooks(t *testing.T, dataDir string) {
+	t.Helper()
+	oldConf, oldData := followConfRegistered, followRegisteredData
+	followConfRegistered = func(string) bool { return true }
+	followRegisteredData = func(string) (string, error) { return dataDir, nil }
+	t.Cleanup(func() { followConfRegistered, followRegisteredData = oldConf, oldData })
+}
+
+// writeActivationConfFixture writes the PostgreSQL configuration a real config
+// step reads, rewrites and verifies.
+func writeActivationConfFixture(t *testing.T, database string) {
+	t.Helper()
+	confDir := steps.PGConfDir(database)
+	for _, dir := range []string{confDir, filepath.Join(confDir, "conf.d")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		"postgresql.conf":                 "include_dir = 'conf.d'\n",
+		"conf.d/90-overrides.conf":        "",
+		"conf.d/10-vaire-tuning.conf":     "# existing\n",
+		"conf.d/30-vaire-extensions.conf": "shared_preload_libraries = 'pg_stat_statements,auto_explain'\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(confDir, filepath.FromSlash(name)), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// stubActivationPublication models route publication and resumes the database
+// once those routes exist.
+func stubActivationPublication(t *testing.T, spec config.ClusterSpec, published *bool) {
+	t.Helper()
+	oldPublish, oldRoutes, oldResume := publishRouting, poolerRuntimeRoutes, poolerResumeDatabase
+	publishRouting = func(context.Context, config.Cluster, engine.Runtime, engine.Reporter) error {
+		*published = true
+		return nil
+	}
+	poolerResumeDatabase = func(context.Context, string) {}
+	poolerRuntimeRoutes = func(context.Context, string, int) (map[string]steps.PoolerRoute, error) {
+		if !*published {
+			return map[string]steps.PoolerRoute{}, nil
+		}
+		return map[string]steps.PoolerRoute{
+			spec.Name: {Name: spec.Name, Host: steps.PGSocketDir, Port: spec.Port, Database: spec.DatabaseName()},
+		}, nil
+	}
+	t.Cleanup(func() { publishRouting, poolerRuntimeRoutes, poolerResumeDatabase = oldPublish, oldRoutes, oldResume })
+}
+
+// adoptForkFence records a fork fence, advances it to adopted and derives the
+// copy plan from the same durable identity.
+func adoptForkFence(t *testing.T, cfg config.Cluster, spec config.ClusterSpec, identity activationFenceIdentity) (backup.ActivationFence, *extensionCopyPlan) {
+	t.Helper()
+	f, err := writeActivationFence(cfg, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.UpdateActivationFence(spec.Name, f.OperationID, func(f *backup.ActivationFence) error {
+		f.Phase = fencePhaseAdopted
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := copyPlanFromFence(cfg, spec, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, plan
+}
+
+// assertActivationFencePhase checks the durable fence for database.
+func assertActivationFencePhase(t *testing.T, database, phase string) {
+	t.Helper()
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := recs.ActivationFenceFor(database); !ok || got.Phase != phase {
+		t.Fatalf("activation fence = %+v, present=%v", got, ok)
+	}
+}
+
+// assertCompleteForkActivationFails proves a continuation failure was reported
+// and left the adopted checkpoint intact.
+func assertCompleteForkActivationFails(t *testing.T, spec config.ClusterSpec, f backup.ActivationFence, plan *extensionCopyPlan, rt engine.Runtime, what string) {
+	t.Helper()
+	if _, _, err := completeForkActivation(context.Background(), spec, f, plan, rt, nil); err == nil {
+		t.Fatalf("%s was reported as success", what)
+	}
+	assertActivationFencePhase(t, spec.Name, fencePhaseAdopted)
+}
+
+// installActivationConfigSteps supplies the real config and roles step hooks
+// while configFail makes the next configuration write fail.
+func installActivationConfigSteps(t *testing.T, spec config.ClusterSpec, configFail *bool) {
+	t.Helper()
+	restoreConfig := steps.SetConfigTestHooks(steps.ConfigTestHooks{
+		Write: func(path, content string, mode os.FileMode, owner, group string) error {
+			if *configFail {
+				return errors.New("config write failed")
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(path, []byte(content), mode)
+		},
+		Validate: func(context.Context, config.Cluster, config.ClusterSpec) error { return nil },
+		Script: func(context.Context, engine.Runtime, string, string, map[string]string, engine.Reporter) error {
+			return nil
+		},
+	})
+	t.Cleanup(restoreConfig)
+	restoreRoles := steps.SetRolesTestHooks(steps.RolesTestHooks{
+		QueryColumn: func(_ context.Context, _ pg.Local, _, sql string) ([]string, error) {
+			switch {
+			case strings.Contains(sql, "pg_roles"):
+				return []string{"vaire_admin", "vaire_monitor", "postgres"}, nil
+			case strings.Contains(sql, "pg_database"):
+				return []string{"postgres", spec.DatabaseName()}, nil
+			case strings.Contains(sql, "pg_proc"):
+				return nil, nil
+			case strings.Contains(sql, "pg_extension"):
+				return []string{"pg_stat_statements"}, nil
+			}
+			return nil, nil
+		},
+		Exec: func(context.Context, pg.Local, string, string, map[string]string) error { return nil },
+		LoadedPreloads: func(context.Context, pg.Local) (map[string]bool, error) {
+			return map[string]bool{"pg_stat_statements": true, "auto_explain": true}, nil
+		},
+		PendingRestart:   func(context.Context, pg.Local) ([]string, error) { return nil, nil },
+		WriteRuntimePass: func(engine.Runtime, string, string) error { return nil },
+	})
+	t.Cleanup(restoreRoles)
+}
+
 func TestApplyRefusesActiveActivationFenceBeforeEffects(t *testing.T) {
 	useTempExtensionRecords(t)
 	useTestInstance(t)
@@ -204,26 +385,9 @@ func TestCompleteForkActivationRunsNonSecretHandoff(t *testing.T) {
 	useTempGuardWriter(t)
 	restoreRoot := steps.PGConfRootForTest(t.TempDir())
 	t.Cleanup(restoreRoot)
-	extRoot := t.TempDir()
-	controlDir, libDir := filepath.Join(extRoot, "extension"), filepath.Join(extRoot, "lib")
-	for _, dir := range []string{controlDir, libDir} {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			t.Fatal(err)
-		}
-	}
-	restoreExt := steps.ExtensionDirsForTest(controlDir, libDir)
-	t.Cleanup(restoreExt)
-	for _, path := range []string{
-		filepath.Join(controlDir, "custom.control"),
-		filepath.Join(controlDir, "pg_stat_statements.control"),
-		filepath.Join(libDir, "custom_lib.so"),
-		filepath.Join(libDir, "pg_stat_statements.so"),
-		filepath.Join(libDir, "auto_explain.so"),
-	} {
-		if err := os.WriteFile(path, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	installActivationExtensionTree(t,
+		[]string{"custom.control", "pg_stat_statements.control"},
+		[]string{"custom_lib.so", "pg_stat_statements.so", "auto_explain.so"})
 	cfg := planCfg(t)
 	cfg.Server.DataRoot = t.TempDir()
 	spec := cfg.Clusters[0]
@@ -236,52 +400,25 @@ func TestCompleteForkActivationRunsNonSecretHandoff(t *testing.T) {
 			CopySettings: map[string]string{"custom.worker": "off"},
 		},
 	}
-	store := state.FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
-	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Save(raw); err != nil {
-		t.Fatal(err)
-	}
-	oldState := followerState
-	followerState = func() state.Store { return store }
-	t.Cleanup(func() { followerState = oldState })
+	useEncodedFollowerStore(t, cfg)
 	oldPrune := pruneCopyGuard
 	pruneCopyGuard = pruneCopyGuardForSettlement
 	t.Cleanup(func() { pruneCopyGuard = oldPrune })
-	oldStart, oldPublish, oldRoutes, oldResume := forkStartCluster, publishRouting, poolerRuntimeRoutes, poolerResumeDatabase
-	t.Cleanup(func() {
-		forkStartCluster, publishRouting, poolerRuntimeRoutes, poolerResumeDatabase = oldStart, oldPublish, oldRoutes, oldResume
-	})
+	oldStart := forkStartCluster
+	t.Cleanup(func() { forkStartCluster = oldStart })
 	started := false
 	forkStartCluster = func(context.Context, config.Cluster, engine.Runtime, config.ClusterSpec, engine.Reporter) error {
 		started = true
 		return nil
 	}
 	published := false
-	publishRouting = func(context.Context, config.Cluster, engine.Runtime, engine.Reporter) error {
-		published = true
-		return nil
-	}
-	poolerResumeDatabase = func(context.Context, string) {}
-	poolerRuntimeRoutes = func(context.Context, string, int) (map[string]steps.PoolerRoute, error) {
-		if !published {
-			return map[string]steps.PoolerRoute{}, nil
-		}
-		return map[string]steps.PoolerRoute{
-			spec.Name: {Name: spec.Name, Host: steps.PGSocketDir, Port: spec.Port, Database: spec.DatabaseName()},
-		}, nil
-	}
+	stubActivationPublication(t, spec, &published)
 	dataDir := cfg.Server.DataDirectory(spec.Name)
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	oldConf, oldData := followConfRegistered, followRegisteredData
-	followConfRegistered = func(string) bool { return true }
-	followRegisteredData = func(string) (string, error) { return dataDir, nil }
-	t.Cleanup(func() { followConfRegistered, followRegisteredData = oldConf, oldData })
-	f, err := writeActivationFence(cfg, activationFenceIdentity{
+	useFollowRegistrationHooks(t, dataDir)
+	f, plan := adoptForkFence(t, cfg, spec, activationFenceIdentity{
 		Database: spec.Name, Kind: "fork", OperationID: "fork-full", Spec: spec,
 		TargetStanza: spec.Stanza, OldStanza: "source-abc123", NewStanza: spec.Stanza,
 		Registration: activationRegistration(spec), Port: spec.Port,
@@ -293,19 +430,6 @@ func TestCompleteForkActivationRunsNonSecretHandoff(t *testing.T) {
 		}},
 		Renames: map[string]string{"app_source": spec.Name},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := backup.UpdateActivationFence(spec.Name, f.OperationID, func(f *backup.ActivationFence) error {
-		f.Phase = fencePhaseAdopted
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := copyPlanFromFence(cfg, spec, f)
-	if err != nil {
-		t.Fatal(err)
-	}
 	updated, warnings, err := completeForkActivation(context.Background(), spec, f, plan, engine.Runtime{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +461,7 @@ func TestRetireRestoreAndRouteIsAtomic(t *testing.T) {
 	useTestInstance(t)
 	cfg := planCfg(t)
 	spec := cfg.Clusters[0]
-	f := writeTestFence(t, cfg, "restore-promote", "op-retire")
+	writeTestFence(t, cfg, "restore-promote", "op-retire")
 	if err := backup.UpdateActivationFence("app", "op-retire", func(f *backup.ActivationFence) error {
 		f.Phase = fencePhasePromoted
 		return nil
@@ -845,7 +969,7 @@ func TestInstallCopyPlanGuardRefusesUnknownPriorGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dataDir, "postgresql.auto.conf")
-	before, err := os.ReadFile(path) //nolint:gosec // test-owned path
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +979,7 @@ func TestInstallCopyPlanGuardRefusesUnknownPriorGuard(t *testing.T) {
 	if _, _, err := backup.InstallCopyPlanGuard(confDir, dataDir, plan); err == nil {
 		t.Fatal("an unexplained prior guard was overwritten")
 	}
-	after, err := os.ReadFile(path) //nolint:gosec // test-owned path
+	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1056,24 +1180,9 @@ func TestCompleteForkActivationRealEngineConfigRoles(t *testing.T) {
 	useTempExtensionRecords(t)
 	useTestInstance(t)
 	useTempGuardWriter(t)
-	extRoot := t.TempDir()
-	controlDir, libDir := filepath.Join(extRoot, "extension"), filepath.Join(extRoot, "lib")
-	for _, dir := range []string{controlDir, libDir} {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			t.Fatal(err)
-		}
-	}
-	restoreExt := steps.ExtensionDirsForTest(controlDir, libDir)
-	t.Cleanup(restoreExt)
-	for _, path := range []string{
-		filepath.Join(controlDir, "pg_stat_statements.control"),
-		filepath.Join(libDir, "pg_stat_statements.so"),
-		filepath.Join(libDir, "auto_explain.so"),
-	} {
-		if err := os.WriteFile(path, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	installActivationExtensionTree(t,
+		[]string{"pg_stat_statements.control"},
+		[]string{"pg_stat_statements.so", "auto_explain.so"})
 	restoreConf := steps.PGConfRootForTest(t.TempDir())
 	t.Cleanup(restoreConf)
 	restoreInstance := steps.SetGuardInstanceForTest(func() (string, error) { return "test-instance", nil })
@@ -1085,118 +1194,25 @@ func TestCompleteForkActivationRealEngineConfigRoles(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	confDir := steps.PGConfDir(spec.Name)
-	if err := os.MkdirAll(filepath.Join(confDir, "conf.d"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(confDir, "postgresql.conf"),
-		[]byte("include_dir = 'conf.d'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(confDir, "conf.d", "90-overrides.conf"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(confDir, "conf.d", "10-vaire-tuning.conf"), []byte("# existing\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(confDir, "conf.d", "30-vaire-extensions.conf"),
-		[]byte("shared_preload_libraries = 'pg_stat_statements,auto_explain'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store := state.FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
-	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Save(raw); err != nil {
-		t.Fatal(err)
-	}
-	oldState := followerState
-	followerState = func() state.Store { return store }
-	t.Cleanup(func() { followerState = oldState })
-	oldConf, oldData := followConfRegistered, followRegisteredData
-	followConfRegistered = func(string) bool { return true }
-	followRegisteredData = func(string) (string, error) { return dataDir, nil }
-	t.Cleanup(func() { followConfRegistered, followRegisteredData = oldConf, oldData })
+	writeActivationConfFixture(t, spec.Name)
+	useEncodedFollowerStore(t, cfg)
+	useFollowRegistrationHooks(t, dataDir)
 	configFail := false
-	restoreConfigHooks := steps.SetConfigTestHooks(steps.ConfigTestHooks{
-		Write: func(path, content string, mode os.FileMode, owner, group string) error {
-			if configFail {
-				return errors.New("config write failed")
-			}
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				return err
-			}
-			return os.WriteFile(path, []byte(content), mode) //nolint:gosec // test-owned path
-		},
-		Validate: func(context.Context, config.Cluster, config.ClusterSpec) error { return nil },
-		Script: func(context.Context, engine.Runtime, string, string, map[string]string, engine.Reporter) error {
-			return nil
-		},
-	})
-	t.Cleanup(restoreConfigHooks)
-	oldRoles := steps.SetRolesTestHooks(steps.RolesTestHooks{
-		QueryColumn: func(_ context.Context, _ pg.Local, _, sql string) ([]string, error) {
-			switch {
-			case strings.Contains(sql, "pg_roles"):
-				return []string{"vaire_admin", "vaire_monitor", "postgres"}, nil
-			case strings.Contains(sql, "pg_database"):
-				return []string{"postgres", spec.DatabaseName()}, nil
-			case strings.Contains(sql, "pg_proc"):
-				return nil, nil
-			case strings.Contains(sql, "pg_extension"):
-				return []string{"pg_stat_statements"}, nil
-			}
-			return nil, nil
-		},
-		Exec: func(context.Context, pg.Local, string, string, map[string]string) error { return nil },
-		LoadedPreloads: func(context.Context, pg.Local) (map[string]bool, error) {
-			return map[string]bool{"pg_stat_statements": true, "auto_explain": true}, nil
-		},
-		PendingRestart:   func(context.Context, pg.Local) ([]string, error) { return nil, nil },
-		WriteRuntimePass: func(engine.Runtime, string, string) error { return nil },
-	})
-	t.Cleanup(oldRoles)
+	installActivationConfigSteps(t, spec, &configFail)
 	oldOnly, oldJournal := forkStartOnly, forkStartJournal
 	forkStartOnly = []string{steps.ConfigStepID(spec.Name), steps.RolesStepID(spec.Name)}
-	forkStartJournal = filepath.Join(t.TempDir(), "journal.json")
+	journalPath := filepath.Join(t.TempDir(), "journal.json")
+	forkStartJournal = journalPath
 	t.Cleanup(func() { forkStartOnly, forkStartJournal = oldOnly, oldJournal })
-	oldPublish, oldRoutes, oldResume := publishRouting, poolerRuntimeRoutes, poolerResumeDatabase
 	published := false
-	publishRouting = func(context.Context, config.Cluster, engine.Runtime, engine.Reporter) error {
-		published = true
-		return nil
-	}
-	poolerResumeDatabase = func(context.Context, string) {}
-	poolerRuntimeRoutes = func(context.Context, string, int) (map[string]steps.PoolerRoute, error) {
-		if !published {
-			return map[string]steps.PoolerRoute{}, nil
-		}
-		return map[string]steps.PoolerRoute{
-			spec.Name: {Name: spec.Name, Host: steps.PGSocketDir, Port: spec.Port, Database: spec.DatabaseName()},
-		}, nil
-	}
-	t.Cleanup(func() { publishRouting, poolerRuntimeRoutes, poolerResumeDatabase = oldPublish, oldRoutes, oldResume })
-	f, err := writeActivationFence(cfg, activationFenceIdentity{
+	stubActivationPublication(t, spec, &published)
+	f, plan := adoptForkFence(t, cfg, spec, activationFenceIdentity{
 		Database: spec.Name, Kind: "fork", OperationID: "fork-engine", Spec: spec,
 		TargetStanza: spec.Stanza, OldStanza: "source-abc123", NewStanza: spec.Stanza,
 		Registration: activationRegistration(spec), Port: spec.Port,
 		DataDir: dataDir, ConfDir: steps.PGConfDir(spec.Name),
 		Renames: map[string]string{"app_source": spec.Name},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := backup.UpdateActivationFence(spec.Name, f.OperationID, func(f *backup.ActivationFence) error {
-		f.Phase = fencePhaseAdopted
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := copyPlanFromFence(cfg, spec, f)
-	if err != nil {
-		t.Fatal(err)
-	}
 	secretValues := map[string]string{
 		steps.SecretPgbouncerAuth: "test-pw",
 		steps.SecretMonitor:       "test-pw",
@@ -1206,16 +1222,7 @@ func TestCompleteForkActivationRealEngineConfigRoles(t *testing.T) {
 	}
 	rt := engine.Runtime{SecretValues: secretValues}
 	configFail = true
-	if _, _, err := completeForkActivation(context.Background(), spec, f, plan, rt, nil); err == nil {
-		t.Fatal("a config failure after adoption was reported as success")
-	}
-	recs, err := backup.LoadRecords()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, ok := recs.ActivationFenceFor(spec.Name); !ok || got.Phase != fencePhaseAdopted {
-		t.Fatalf("config failure did not preserve the adopted checkpoint: %+v", got)
-	}
+	assertCompleteForkActivationFails(t, spec, f, plan, rt, "a config failure after adoption")
 	configFail = false
 	oldSQL := reconcileCopySQL
 	sqlFail := true
@@ -1226,16 +1233,7 @@ func TestCompleteForkActivationRealEngineConfigRoles(t *testing.T) {
 		return nil, nil
 	}
 	t.Cleanup(func() { reconcileCopySQL = oldSQL })
-	if _, _, err := completeForkActivation(context.Background(), spec, f, plan, rt, nil); err == nil {
-		t.Fatal("an SQL failure after adoption was reported as success")
-	}
-	recs, err = backup.LoadRecords()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, ok := recs.ActivationFenceFor(spec.Name); !ok || got.Phase != fencePhaseAdopted {
-		t.Fatalf("SQL failure did not preserve the adopted checkpoint: %+v", got)
-	}
+	assertCompleteForkActivationFails(t, spec, f, plan, rt, "an SQL failure after adoption")
 	sqlFail = false
 	updated, warnings, err := completeForkActivation(context.Background(), spec, f, plan, rt, nil)
 	if err != nil {
@@ -1247,10 +1245,10 @@ func TestCompleteForkActivationRealEngineConfigRoles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(steps.PGConfD(spec.Name), "10-vaire-tuning.conf")); err != nil {
 		t.Fatalf("real config step did not write its files: %v", err)
 	}
-	if _, err := os.Stat(forkStartJournal); err != nil {
+	if _, err := os.Stat(journalPath); err != nil {
 		t.Fatalf("real engine did not write its journal: %v", err)
 	}
-	recs, err = backup.LoadRecords()
+	recs, err := backup.LoadRecords()
 	if err != nil {
 		t.Fatal(err)
 	}

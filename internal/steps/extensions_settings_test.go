@@ -26,7 +26,7 @@ func followerSettingsTestPlan(t *testing.T, cfg config.Cluster, follower config.
 }
 
 func TestPlanFollowerRuntimeExpectedSettingsOnlyExtensionOwnedKeys(t *testing.T) {
-	cfg, follower := followerRuntimeTestConfig(t)
+	cfg, _ := followerRuntimeTestConfig(t)
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
@@ -38,7 +38,7 @@ func TestPlanFollowerRuntimeExpectedSettingsOnlyExtensionOwnedKeys(t *testing.T)
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Extensions = []string{"addon"}
 	}
-	follower = cfg.Clusters[1]
+	follower := cfg.Clusters[1]
 	cfg.Postgres.Settings = map[string]string{
 		"addon.mode":          "off",
 		"random_page_cost":    "1.10",
@@ -141,10 +141,10 @@ func TestExtensionSettingMatchesPostgresTypes(t *testing.T) {
 }
 
 func TestPlanFollowerRuntimeStoppedClassSkipsCatalogButKeepsGuard(t *testing.T) {
-	cfg, follower := followerRuntimeTestConfig(t)
+	cfg, _ := followerRuntimeTestConfig(t)
 	cfg.Clusters[0].Extensions = []string{"pg_cron"}
 	cfg.Clusters[1].Extensions = []string{"pg_cron"}
-	follower = cfg.Clusters[1]
+	follower := cfg.Clusters[1]
 	installedCalls := 0
 	restore := SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		installedCalls++
@@ -174,7 +174,7 @@ func TestPlanFollowerRuntimeStoppedClassSkipsCatalogButKeepsGuard(t *testing.T) 
 }
 
 func TestPlanFollowerRuntimeExpectedSettingsExtensionOwnedTypes(t *testing.T) {
-	cfg, follower := followerRuntimeTestConfig(t)
+	cfg, _ := followerRuntimeTestConfig(t)
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"typed": {
 			Source: catalog.SourcePreinstalled, ExtName: "typed_ext",
@@ -190,7 +190,7 @@ func TestPlanFollowerRuntimeExpectedSettingsExtensionOwnedTypes(t *testing.T) {
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Extensions = []string{"typed"}
 	}
-	follower = cfg.Clusters[1]
+	follower := cfg.Clusters[1]
 
 	plan := followerSettingsTestPlan(t, cfg, follower)
 	for key, want := range map[string]string{"custom.ratio": "1.10", "custom.mode": "ON", "custom.size": "1MB"} {

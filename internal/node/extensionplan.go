@@ -90,37 +90,11 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 		return nil, config.ValidationError(err)
 	}
 
-	known := append([]catalog.Extension(nil), current...)
-	var declared []catalog.Extension
-	declaration := "known"
-	coverage := ""
-	historical := req.Historical || req.Dump
-
-	switch {
-	case req.Dump:
-		declaration, declared, err = declaredRequirements(resolver, req.Declaration, req.Intent.Name, "the dump")
-		if err != nil {
-			return nil, err
-		}
-	case req.Historical || req.IncludeRetained:
-		recs, err := backup.LoadRecords()
-		if err != nil {
-			return nil, err
-		}
-		hist, _ := recs.ExtensionRequirementsFor(req.Stanza)
-		coverage = hist.CoverageSince
-		known = append(known, recs.RetainedExtensions(req.Stanza)...)
-		if req.Historical {
-			root, ok := selectedBackupRoot(ctx, req)
-			covered := ok && coverage != "" && coverageAtOrBefore(coverage, root)
-			if !covered {
-				declaration, declared, err = declaredRequirements(resolver, req.Declaration, req.Intent.Name, "restore point "+req.Stanza)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
+	known, declared, declaration, coverage, err := extensionCopyHistory(ctx, req, resolver, current)
+	if err != nil {
+		return nil, err
 	}
+	historical := req.Historical || req.Dump
 
 	merged, guard, err := backup.MergeCopyRequirements(known, declared, req.Standby, req.CopyDB)
 	if err != nil {
@@ -143,17 +117,68 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 	if err != nil {
 		return nil, config.ValidationError(err)
 	}
-	currentPreloads := map[string]bool{}
-	for _, preload := range desiredPreloads {
-		currentPreloads[preload] = true
-	}
-	extraPreloads := guard.Preloads[:0]
-	for _, p := range guard.Preloads {
-		if !currentPreloads[p] {
-			extraPreloads = append(extraPreloads, p)
+	guard.Preloads = extensionGuardPreloads(guard.Preloads, desiredPreloads)
+	reqs, cron := extensionPlanPrerequisites(merged)
+	return &extensionCopyPlan{
+		Plan: &backup.CopyPlan{
+			Guard: guard, Requirements: merged, Stanza: req.Stanza,
+			CoverageSince: coverage, Historical: historical, Cron: cron, Declaration: declaration,
+			DesiredPreloads: desiredPreloads,
+			ValidateGuard:   finalPreloadValidator(cfg, req.Intent, req.CopyDB, merged, permanent, req.Standby, nil),
+		},
+		Reqs: reqs, Merged: merged,
+	}, nil
+}
+
+func extensionCopyHistory(ctx context.Context, req extensionCopyRequest, resolver config.ExtensionResolver, current []catalog.Extension) ([]catalog.Extension, []catalog.Extension, string, string, error) {
+	known := append([]catalog.Extension(nil), current...)
+	var declared []catalog.Extension
+	declaration := "known"
+	coverage := ""
+	switch {
+	case req.Dump:
+		var err error
+		declaration, declared, err = declaredRequirements(resolver, req.Declaration, req.Intent.Name, "the dump")
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+	case req.Historical || req.IncludeRetained:
+		recs, err := backup.LoadRecords()
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		hist, _ := recs.ExtensionRequirementsFor(req.Stanza)
+		coverage = hist.CoverageSince
+		known = append(known, recs.RetainedExtensions(req.Stanza)...)
+		if req.Historical {
+			root, ok := selectedBackupRoot(ctx, req)
+			covered := ok && coverage != "" && coverageAtOrBefore(coverage, root)
+			if !covered {
+				declaration, declared, err = declaredRequirements(resolver, req.Declaration, req.Intent.Name, "restore point "+req.Stanza)
+				if err != nil {
+					return nil, nil, "", "", err
+				}
+			}
 		}
 	}
-	guard.Preloads = extraPreloads
+	return known, declared, declaration, coverage, nil
+}
+
+func extensionGuardPreloads(guardPreloads, desiredPreloads []string) []string {
+	desired := map[string]bool{}
+	for _, preload := range desiredPreloads {
+		desired[preload] = true
+	}
+	out := guardPreloads[:0]
+	for _, preload := range guardPreloads {
+		if !desired[preload] {
+			out = append(out, preload)
+		}
+	}
+	return out
+}
+
+func extensionPlanPrerequisites(merged []catalog.Extension) ([]steps.ExtensionPrerequisite, bool) {
 	reqs := make([]steps.ExtensionPrerequisite, 0, len(merged))
 	cron := false
 	for _, ext := range merged {
@@ -168,15 +193,7 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 			ExtName: ext.ExtName, Preload: ext.Preload,
 		})
 	}
-	return &extensionCopyPlan{
-		Plan: &backup.CopyPlan{
-			Guard: guard, Requirements: merged, Stanza: req.Stanza,
-			CoverageSince: coverage, Historical: historical, Cron: cron, Declaration: declaration,
-			DesiredPreloads: desiredPreloads,
-			ValidateGuard:   finalPreloadValidator(cfg, req.Intent, req.CopyDB, merged, permanent, req.Standby, nil),
-		},
-		Reqs: reqs, Merged: merged,
-	}, nil
+	return reqs, cron
 }
 
 func resolveExtensions(resolver config.ExtensionResolver, names []string) ([]catalog.Extension, error) {
@@ -271,44 +288,45 @@ func coverageAtOrBefore(coverage string, root time.Time) bool {
 // follower has none and its data belongs to its source's stanza.
 func captureExtensionIntent(cfg config.Cluster, at time.Time) error {
 	seen := map[string]bool{}
-	add := func(spec config.ClusterSpec) error {
-		if spec.IsFollower() || spec.Stanza == "" || seen[spec.Stanza] {
-			return nil
-		}
-		seen[spec.Stanza] = true
-		resolver := cfg.ExtensionResolver()
-		names, err := resolver.EffectiveNames(spec.Extensions)
-		if err != nil {
-			return err
-		}
-		exts, err := resolveExtensions(resolver, names)
-		if err != nil {
-			return err
-		}
-		if spec.RecoveryExtensions != nil {
-			declared, err := resolver.EffectiveNames(*spec.RecoveryExtensions)
-			if err != nil {
-				return err
-			}
-			more, err := resolveExtensions(resolver, declared)
-			if err != nil {
-				return err
-			}
-			exts = append(exts, more...)
-		}
-		return backup.RecordExtensionRequirements(spec.Stanza, spec.Name, exts, at)
-	}
 	for _, spec := range cfg.Clusters {
-		if err := add(spec); err != nil {
+		if err := captureSpecExtensionIntent(cfg, spec, seen, at); err != nil {
 			return err
 		}
 	}
 	for _, spec := range cfg.Awaiting {
-		if err := add(spec); err != nil {
+		if err := captureSpecExtensionIntent(cfg, spec, seen, at); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func captureSpecExtensionIntent(cfg config.Cluster, spec config.ClusterSpec, seen map[string]bool, at time.Time) error {
+	if spec.IsFollower() || spec.Stanza == "" || seen[spec.Stanza] {
+		return nil
+	}
+	seen[spec.Stanza] = true
+	resolver := cfg.ExtensionResolver()
+	names, err := resolver.EffectiveNames(spec.Extensions)
+	if err != nil {
+		return err
+	}
+	exts, err := resolveExtensions(resolver, names)
+	if err != nil {
+		return err
+	}
+	if spec.RecoveryExtensions != nil {
+		declared, err := resolver.EffectiveNames(*spec.RecoveryExtensions)
+		if err != nil {
+			return err
+		}
+		more, err := resolveExtensions(resolver, declared)
+		if err != nil {
+			return err
+		}
+		exts = append(exts, more...)
+	}
+	return backup.RecordExtensionRequirements(spec.Stanza, spec.Name, exts, at)
 }
 
 // captureExtensionChange records the outgoing and incoming requirements before

@@ -622,65 +622,27 @@ func planRepack(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec
 	if !clusterRunning(spec) {
 		return repackPlan{}, repackNotRunning(spec.Name)
 	}
-	versionCheck := "deferred_to_job"
-	var versions maint.RepackVersions
-	if privilegedVersionProbe {
-		var err error
-		versions, err = checkRepackVersions(ctx, spec)
-		if err != nil {
-			return repackPlan{}, err
-		}
-		versionCheck = "matched"
-	} else {
-		facts, err := checkRepackFacts(ctx, spec)
-		if err != nil {
-			return repackPlan{}, err
-		}
-		versions = maint.RepackVersions{Client: facts.Client, Extension: facts.Installed}
+	versions, versionCheck, err := repackPlanVersions(ctx, spec, privilegedVersionProbe)
+	if err != nil {
+		return repackPlan{}, err
 	}
-	var deadline time.Time
-	if !o.Now {
-		in, left := windowLeft(cfg, now)
-		if !in {
-			return repackPlan{}, repackOutsideWindow(cfg, spec.Name)
-		}
-		deadline = now.Add(left)
+	deadline, err := repackPlanDeadline(cfg, spec, o, now)
+	if err != nil {
+		return repackPlan{}, err
 	}
-	var candidates []string
 	named := o.Table != ""
-	if named {
-		candidates = []string{o.Table}
-	} else {
-		rows, err := maintRepackPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+maint.BloatSQL(), nil)
-		if err != nil {
-			return repackPlan{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
-				"Read the bloat estimate to choose tables for repack.")
-		}
-		candidates = maint.RepackCandidates(maint.ParseBloat(spec.Name, rows, 0), cfg.Maintenance.RepackBloatThreshold, 1)
+	candidates, err := repackPlanCandidates(ctx, cfg, spec, o, named)
+	if err != nil {
+		return repackPlan{}, err
 	}
 	plan := repackPlan{Versions: versions, VersionCheck: versionCheck, Deadline: deadline}
 	for _, table := range candidates {
-		size, target, problem, err := inspectRepackTable(ctx, spec, table, 0)
+		target, space, skip, err := planRepackTable(ctx, cfg, spec, table, named)
 		if err != nil {
-			if named {
-				return repackPlan{}, err
-			}
-			plan.Skipped = append(plan.Skipped, maint.RepackSkip{Table: table, Reason: maint.RepackReasonFailed, Message: err.Error()})
-			continue
+			return repackPlan{}, err
 		}
-		if problem != nil {
-			if named {
-				return repackPlan{}, repackProblemError(spec.Name, table, *problem)
-			}
-			plan.Skipped = append(plan.Skipped, *problem)
-			continue
-		}
-		space, err := checkRepackSpace(cfg, spec, target.Name, size)
-		if err != nil {
-			if named {
-				return repackPlan{}, err
-			}
-			plan.Skipped = append(plan.Skipped, maint.RepackSkip{Table: target.Name, Reason: repackReason(err), Message: err.Error()})
+		if skip != nil {
+			plan.Skipped = append(plan.Skipped, *skip)
 			continue
 		}
 		plan.Tables = append(plan.Tables, target.Name)
@@ -688,6 +650,70 @@ func planRepack(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec
 		plan.Space = append(plan.Space, space...)
 	}
 	return plan, nil
+}
+
+func repackPlanVersions(ctx context.Context, spec config.ClusterSpec, privileged bool) (maint.RepackVersions, string, error) {
+	if privileged {
+		versions, err := checkRepackVersions(ctx, spec)
+		if err != nil {
+			return maint.RepackVersions{}, "", err
+		}
+		return versions, "matched", nil
+	}
+	facts, err := checkRepackFacts(ctx, spec)
+	if err != nil {
+		return maint.RepackVersions{}, "", err
+	}
+	return maint.RepackVersions{Client: facts.Client, Extension: facts.Installed}, "deferred_to_job", nil
+}
+
+func repackPlanDeadline(cfg config.Cluster, spec config.ClusterSpec, o *maint.Options, now time.Time) (time.Time, error) {
+	if o.Now {
+		return time.Time{}, nil
+	}
+	in, left := windowLeft(cfg, now)
+	if !in {
+		return time.Time{}, repackOutsideWindow(cfg, spec.Name)
+	}
+	return now.Add(left), nil
+}
+
+func repackPlanCandidates(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, o *maint.Options, named bool) ([]string, error) {
+	if named {
+		return []string{o.Table}, nil
+	}
+	rows, err := maintRepackPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+maint.BloatSQL(), nil)
+	if err != nil {
+		return nil, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
+			"Read the bloat estimate to choose tables for repack.")
+	}
+	return maint.RepackCandidates(maint.ParseBloat(spec.Name, rows, 0), cfg.Maintenance.RepackBloatThreshold, 1), nil
+}
+
+// planRepackTable inspects one candidate. A named table's refusal is an
+// error; an unnamed candidate's is a recorded skip.
+func planRepackTable(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, table string, named bool) (repackTarget, []backup.SpaceNeed, *maint.RepackSkip, error) {
+	size, target, problem, err := inspectRepackTable(ctx, spec, table, 0)
+	if err != nil {
+		if named {
+			return repackTarget{}, nil, nil, err
+		}
+		return repackTarget{}, nil, &maint.RepackSkip{Table: table, Reason: maint.RepackReasonFailed, Message: err.Error()}, nil
+	}
+	if problem != nil {
+		if named {
+			return repackTarget{}, nil, nil, repackProblemError(spec.Name, table, *problem)
+		}
+		return repackTarget{}, nil, problem, nil
+	}
+	space, err := checkRepackSpace(cfg, spec, target.Name, size)
+	if err != nil {
+		if named {
+			return repackTarget{}, nil, nil, err
+		}
+		return repackTarget{}, nil, &maint.RepackSkip{Table: target.Name, Reason: repackReason(err), Message: err.Error()}, nil
+	}
+	return target, space, nil, nil
 }
 
 // jobRepack revalidates and repacks the plan's tables one at a time. A named
@@ -707,95 +733,20 @@ func jobRepack(ctx context.Context, env *jobEnv, p maint.Options, spec config.Cl
 		run.Counts.AddSkipped(skip.Reason)
 	}
 	for i, target := range plan.Targets {
-		table := target.Name
-		// Reload and revalidate under the job's locks immediately before this
-		// table; the lock identity is the admission identity, not the config
-		// loaded before the locks.
-		freshCfg, freshSpec, err := reloadRepackTarget(spec)
+		prepared, decision, err := prepareRepackTarget(ctx, env, p, plan, spec, i, target, &run)
 		if err != nil {
-			if p.Table != "" {
-				return nil, err
-			}
-			run.Failed[table] = err.Error()
-			run.Counts.AddFailed()
-			continue
+			return nil, err
 		}
-		env.Cluster = freshCfg
-		size, freshTarget, problem, err := revalidateRepackTable(ctx, freshCfg, spec, freshSpec, target)
-		if err != nil {
-			if p.Table != "" {
-				return nil, err
-			}
-			run.Failed[table] = err.Error()
-			run.Counts.AddFailed()
-			continue
-		}
-		if problem != nil {
-			if p.Table != "" {
-				return nil, repackProblemError(freshSpec.Name, table, *problem)
-			}
-			run.Skipped = append(run.Skipped, *problem)
-			run.Counts.AddSkipped(problem.Reason)
-			continue
-		}
-		if _, err := checkRepackSpace(freshCfg, freshSpec, freshTarget.Name, size); err != nil {
-			if p.Table != "" {
-				return nil, err
-			}
-			run.Skipped = append(run.Skipped, maint.RepackSkip{Table: freshTarget.Name, Reason: repackReason(err), Message: err.Error()})
-			run.Counts.AddSkipped(repackReason(err))
-			continue
-		}
-		before, err := repackStorage(ctx, freshSpec, freshTarget)
-		if err != nil {
-			run.Unknown[table] = "completion_unknown/not_started: storage identity unavailable before execution: " + err.Error()
-			run.Counts.AddUnknown()
-			logLine(env.Report, env.Job, "pg_repack for "+table+" was not started; rewrite completion is unknown: "+err.Error())
-			continue
-		}
-		// Re-read the admitted canonical relation immediately before the
-		// write. This is not a DDL lock; it refuses a same-named relation in
-		// another schema or a replaced OID instead of writing the wrong one.
-		if err := verifyRepackTargetIdentity(ctx, freshSpec, freshTarget); err != nil {
-			if p.Table != "" {
-				return nil, err
-			}
-			run.Skipped = append(run.Skipped, maint.RepackSkip{Table: freshTarget.Name, Reason: repackReason(err), Message: err.Error()})
-			run.Counts.AddSkipped(repackReason(err))
-			continue
-		}
-		// The window is checked after every probe and immediately before
-		// execution. Expiry starts no new rewrite; the job returns so its
-		// caller releases the locks, and the running pg_repack is never killed.
-		if !p.Now && !plan.Deadline.IsZero() && repackNow().After(plan.Deadline) {
-			if p.Table != "" {
-				return nil, repackWindowEnded(freshSpec.Name)
-			}
-			repackSkipRemaining(&run, plan.Targets, i, maint.RepackReasonWindowEnded,
-				"the maintenance window ended while this table was being prepared")
+		if decision == repackStop {
 			break
 		}
-		execRes := maintRepackExec(ctx, env, freshSpec, freshTarget.Name)
-		after, afterErr := repackStorage(ctx, freshSpec, freshTarget)
-		outcome, reason, detail := classifyRepackCompletion(before, execRes, after, afterErr)
-		switch outcome {
-		case maint.RepackOutcomeRepacked:
-			run.Repacked = append(run.Repacked, table)
-			run.Counts.AddRepacked()
-			logLine(env.Report, env.Job, "repacked "+table+" in "+spec.Name)
-		case maint.RepackOutcomeSkipped:
-			run.Skipped = append(run.Skipped, maint.RepackSkip{Table: table, Reason: reason, Message: detail})
-			run.Counts.AddSkipped(reason)
-			logLine(env.Report, env.Job, "pg_repack skipped "+table+": "+reason)
-		case maint.RepackOutcomeUnknown:
-			run.Unknown[table] = detail
-			run.Counts.AddUnknown()
-			logLine(env.Report, env.Job, "pg_repack for "+table+": rewrite completion could not be confirmed: "+detail)
-		default:
-			run.Failed[table] = detail
-			run.Counts.AddFailed()
-			logLine(env.Report, env.Job, "pg_repack did not complete "+table+": "+detail)
+		if decision == repackNext {
+			continue
 		}
+		execRes := maintRepackExec(ctx, env, prepared.spec, prepared.target.Name)
+		after, afterErr := repackStorage(ctx, prepared.spec, prepared.target)
+		outcome, reason, detail := classifyRepackCompletion(prepared.before, execRes, after, afterErr)
+		recordRepackOutcome(&run, target.Name, spec.Name, env, outcome, reason, detail)
 	}
 	run.Counts.At = stamp()
 	res := map[string]any{
@@ -807,6 +758,113 @@ func jobRepack(ctx context.Context, env *jobEnv, p maint.Options, spec config.Cl
 		return res, repackFailed(run)
 	}
 	return res, nil
+}
+
+// repackStep says how the job's table loop proceeds after one preparation.
+type repackStep int
+
+const (
+	repackProceed repackStep = iota
+	repackNext
+	repackStop
+)
+
+type repackPrepared struct {
+	spec   config.ClusterSpec
+	target repackTarget
+	before maint.RepackStorage
+}
+
+// prepareRepackTarget reloads and revalidates one table under the job's
+// locks immediately before it starts. The lock identity is the admission
+// identity, not the config loaded before the locks.
+func prepareRepackTarget(ctx context.Context, env *jobEnv, p maint.Options, plan repackPlan, spec config.ClusterSpec, i int, target repackTarget, run *maint.RepackRun) (repackPrepared, repackStep, error) {
+	table := target.Name
+	freshCfg, freshSpec, err := reloadRepackTarget(spec)
+	if err != nil {
+		return repackPrepared{}, repackNext, repackTableFailure(run, table, p, err)
+	}
+	env.Cluster = freshCfg
+	size, freshTarget, problem, err := revalidateRepackTable(ctx, freshCfg, spec, freshSpec, target)
+	if err != nil {
+		return repackPrepared{}, repackNext, repackTableFailure(run, table, p, err)
+	}
+	if problem != nil {
+		if p.Table != "" {
+			return repackPrepared{}, repackNext, repackProblemError(freshSpec.Name, table, *problem)
+		}
+		run.Skipped = append(run.Skipped, *problem)
+		run.Counts.AddSkipped(problem.Reason)
+		return repackPrepared{}, repackNext, nil
+	}
+	if _, err := checkRepackSpace(freshCfg, freshSpec, freshTarget.Name, size); err != nil {
+		if p.Table != "" {
+			return repackPrepared{}, repackNext, err
+		}
+		run.Skipped = append(run.Skipped, maint.RepackSkip{Table: freshTarget.Name, Reason: repackReason(err), Message: err.Error()})
+		run.Counts.AddSkipped(repackReason(err))
+		return repackPrepared{}, repackNext, nil
+	}
+	before, err := repackStorage(ctx, freshSpec, freshTarget)
+	if err != nil {
+		run.Unknown[table] = "completion_unknown/not_started: storage identity unavailable before execution: " + err.Error()
+		run.Counts.AddUnknown()
+		logLine(env.Report, env.Job, "pg_repack for "+table+" was not started; rewrite completion is unknown: "+err.Error())
+		return repackPrepared{}, repackNext, nil
+	}
+	// Re-read the admitted canonical relation immediately before the
+	// write. This is not a DDL lock; it refuses a same-named relation in
+	// another schema or a replaced OID instead of writing the wrong one.
+	if err := verifyRepackTargetIdentity(ctx, freshSpec, freshTarget); err != nil {
+		if p.Table != "" {
+			return repackPrepared{}, repackNext, err
+		}
+		run.Skipped = append(run.Skipped, maint.RepackSkip{Table: freshTarget.Name, Reason: repackReason(err), Message: err.Error()})
+		run.Counts.AddSkipped(repackReason(err))
+		return repackPrepared{}, repackNext, nil
+	}
+	// The window is checked after every probe and immediately before
+	// execution. Expiry starts no new rewrite; the job returns so its
+	// caller releases the locks, and the running pg_repack is never killed.
+	if !p.Now && !plan.Deadline.IsZero() && repackNow().After(plan.Deadline) {
+		if p.Table != "" {
+			return repackPrepared{}, repackNext, repackWindowEnded(freshSpec.Name)
+		}
+		repackSkipRemaining(run, plan.Targets, i, maint.RepackReasonWindowEnded,
+			"the maintenance window ended while this table was being prepared")
+		return repackPrepared{}, repackStop, nil
+	}
+	return repackPrepared{spec: freshSpec, target: freshTarget, before: before}, repackProceed, nil
+}
+
+func repackTableFailure(run *maint.RepackRun, table string, p maint.Options, err error) error {
+	if p.Table != "" {
+		return err
+	}
+	run.Failed[table] = err.Error()
+	run.Counts.AddFailed()
+	return nil
+}
+
+func recordRepackOutcome(run *maint.RepackRun, table, db string, env *jobEnv, outcome string, reason, detail string) {
+	switch outcome {
+	case maint.RepackOutcomeRepacked:
+		run.Repacked = append(run.Repacked, table)
+		run.Counts.AddRepacked()
+		logLine(env.Report, env.Job, "repacked "+table+" in "+db)
+	case maint.RepackOutcomeSkipped:
+		run.Skipped = append(run.Skipped, maint.RepackSkip{Table: table, Reason: reason, Message: detail})
+		run.Counts.AddSkipped(reason)
+		logLine(env.Report, env.Job, "pg_repack skipped "+table+": "+reason)
+	case maint.RepackOutcomeUnknown:
+		run.Unknown[table] = detail
+		run.Counts.AddUnknown()
+		logLine(env.Report, env.Job, "pg_repack for "+table+": rewrite completion could not be confirmed: "+detail)
+	default:
+		run.Failed[table] = detail
+		run.Counts.AddFailed()
+		logLine(env.Report, env.Job, "pg_repack did not complete "+table+": "+detail)
+	}
 }
 
 // acquireAutoRepackLocks takes the heavy-I/O lock and the cluster lock shared
@@ -878,135 +936,149 @@ func autoRepack(ctx context.Context, env *jobEnv, reports map[string]maint.Bloat
 	for _, spec := range cfg.Clusters {
 		candidates := maint.RepackCandidates(reports[spec.Name], cfg.Maintenance.RepackBloatThreshold, maint.AutoRepackMinBytes)
 		run := maint.RepackRun{DB: spec.Name, Tables: candidates, Failed: map[string]string{}, Unknown: map[string]string{}}
-		finish := func() {
-			run.Counts.At = stamp()
-			out[spec.Name] = run
+		if reason, message := autoRepackUnavailable(spec, inWindow); reason != "" {
+			autoRepackSeed(&run, candidates, reason, message)
+		} else {
+			autoRepackTables(ctx, env, spec, candidates, deadline, &run)
 		}
-		switch {
-		case spec.IsFollower():
-			for _, table := range candidates {
-				autoRepackSkip(&run, table, "is_follower", spec.Name+" is a follower; its source's tables are maintained on the source")
-			}
-			finish()
-			continue
-		case !clusterRunning(spec):
-			for _, table := range candidates {
-				autoRepackSkip(&run, table, maint.RepackReasonClusterNotRunning, "the cluster is not running")
-			}
-			finish()
-			continue
-		case spec.Protected:
-			for _, table := range candidates {
-				autoRepackSkip(&run, table, maint.RepackReasonProtected, "repack is not supported on a protected database")
-			}
-			finish()
-			continue
-		case !inWindow:
-			for _, table := range candidates {
-				autoRepackSkip(&run, table, maint.RepackReasonOutsideWindow, "it is outside the maintenance window")
-			}
-			finish()
-			continue
-		}
-		for i, table := range candidates {
-			if autoRepackNow().After(deadline) {
-				autoRepackSkipRemaining(&run, candidates, i, maint.RepackReasonWindowEnded, "the maintenance window ended before this table started")
-				break
-			}
-			release, busy, err := autoRepackLocks(ctx, env, spec)
-			if busy != "" {
-				for _, rest := range candidates[i:] {
-					autoRepackBusy(&run, rest, busy)
-				}
-				break
-			}
-			if err != nil {
-				run.Failed[table] = err.Error()
-				run.Counts.AddFailed()
-				logLine(env.Report, env.Job, "auto-repack of "+table+" could not take its locks: "+err.Error())
-				continue
-			}
-			freshCfg, freshSpec, err := reloadRepackTarget(spec)
-			if err != nil {
-				release()
-				reason := repackReason(err)
-				autoRepackSkipRemaining(&run, candidates, i, reason, err.Error())
-				break
-			}
-			env.Cluster = freshCfg
-			size, freshTarget, problem, err := revalidateRepackTable(ctx, freshCfg, spec, freshSpec, repackTarget{Name: table})
-			if err != nil {
-				release()
-				run.Failed[table] = err.Error()
-				run.Counts.AddFailed()
-				logLine(env.Report, env.Job, "auto-repack of "+table+" failed validation: "+err.Error())
-				continue
-			}
-			if problem != nil {
-				release()
-				autoRepackSkip(&run, table, problem.Reason, problem.Message)
-				if repackDBWideReason(problem.Reason) {
-					autoRepackSkipRemaining(&run, candidates, i+1, problem.Reason, problem.Message)
-					break
-				}
-				continue
-			}
-			if _, err := checkRepackSpace(freshCfg, freshSpec, freshTarget.Name, size); err != nil {
-				release()
-				reason := repackReason(err)
-				autoRepackSkip(&run, table, reason, err.Error())
-				if repackDBWideReason(reason) {
-					autoRepackSkipRemaining(&run, candidates, i+1, reason, err.Error())
-					break
-				}
-				continue
-			}
-			before, err := repackStorage(ctx, freshSpec, freshTarget)
-			if err != nil {
-				release()
-				run.Unknown[table] = "completion_unknown/not_started: storage identity unavailable before execution: " + err.Error()
-				run.Counts.AddUnknown()
-				logLine(env.Report, env.Job, "auto-repack of "+table+" was not started; rewrite completion is unknown: "+err.Error())
-				continue
-			}
-			if err := verifyRepackTargetIdentity(ctx, freshSpec, freshTarget); err != nil {
-				release()
-				reason := repackReason(err)
-				autoRepackSkip(&run, table, reason, err.Error())
-				if repackDBWideReason(reason) {
-					autoRepackSkipRemaining(&run, candidates, i+1, reason, err.Error())
-					break
-				}
-				continue
-			}
-			if autoRepackNow().After(deadline) {
-				release()
-				autoRepackSkipRemaining(&run, candidates, i, maint.RepackReasonWindowEnded, "the maintenance window ended while this table was being prepared")
-				break
-			}
-			execRes := maintRepackExec(ctx, env, freshSpec, freshTarget.Name)
-			after, afterErr := repackStorage(ctx, freshSpec, freshTarget)
-			outcome, reason, detail := classifyRepackCompletion(before, execRes, after, afterErr)
-			release()
-			switch outcome {
-			case maint.RepackOutcomeRepacked:
-				run.Repacked = append(run.Repacked, table)
-				run.Counts.AddRepacked()
-				logLine(env.Report, env.Job, "auto-repacked "+table+" in "+freshSpec.Name)
-			case maint.RepackOutcomeSkipped:
-				autoRepackSkip(&run, table, reason, detail)
-				logLine(env.Report, env.Job, "auto-repack skipped "+table+": "+reason)
-			case maint.RepackOutcomeUnknown:
-				run.Unknown[table] = detail
-				run.Counts.AddUnknown()
-				logLine(env.Report, env.Job, "auto-repack for "+table+": rewrite completion could not be confirmed: "+detail)
-			default:
-				run.Failed[table] = detail
-				run.Counts.AddFailed()
-				logLine(env.Report, env.Job, "auto-repack did not complete "+table+": "+detail)
-			}
-		}
-		finish()
+		run.Counts.At = stamp()
+		out[spec.Name] = run
 	}
 	return out
+}
+
+// autoRepackUnavailable returns why a whole database cannot run now, or an
+// empty reason when it can.
+func autoRepackUnavailable(spec config.ClusterSpec, inWindow bool) (reason, message string) {
+	switch {
+	case spec.IsFollower():
+		return "is_follower", spec.Name + " is a follower; its source's tables are maintained on the source"
+	case !clusterRunning(spec):
+		return maint.RepackReasonClusterNotRunning, "the cluster is not running"
+	case spec.Protected:
+		return maint.RepackReasonProtected, "repack is not supported on a protected database"
+	case !inWindow:
+		return maint.RepackReasonOutsideWindow, "it is outside the maintenance window"
+	}
+	return "", ""
+}
+
+func autoRepackSeed(run *maint.RepackRun, candidates []string, reason, message string) {
+	for _, table := range candidates {
+		autoRepackSkip(run, table, reason, message)
+	}
+}
+
+// autoRepackDecision says how the per-table loop proceeds.
+type autoRepackDecision int
+
+const (
+	autoRepackProceed autoRepackDecision = iota
+	autoRepackNextTable
+	autoRepackStopDatabase
+)
+
+// autoRepackTables repacks one database's candidates under a per-table lock.
+func autoRepackTables(ctx context.Context, env *jobEnv, spec config.ClusterSpec, candidates []string, deadline time.Time, run *maint.RepackRun) {
+	for i, table := range candidates {
+		if autoRepackNow().After(deadline) {
+			autoRepackSkipRemaining(run, candidates, i, maint.RepackReasonWindowEnded, "the maintenance window ended before this table started")
+			break
+		}
+		release, busy, err := autoRepackLocks(ctx, env, spec)
+		if busy != "" {
+			for _, rest := range candidates[i:] {
+				autoRepackBusy(run, rest, busy)
+			}
+			break
+		}
+		if err != nil {
+			run.Failed[table] = err.Error()
+			run.Counts.AddFailed()
+			logLine(env.Report, env.Job, "auto-repack of "+table+" could not take its locks: "+err.Error())
+			continue
+		}
+		prepared, decision := prepareAutoRepack(ctx, env, spec, candidates, i, table, deadline, run)
+		if decision != autoRepackProceed {
+			release()
+			if decision == autoRepackStopDatabase {
+				break
+			}
+			continue
+		}
+		execRes := maintRepackExec(ctx, env, prepared.spec, prepared.target.Name)
+		after, afterErr := repackStorage(ctx, prepared.spec, prepared.target)
+		outcome, reason, detail := classifyRepackCompletion(prepared.before, execRes, after, afterErr)
+		release()
+		recordAutoRepackOutcome(run, table, prepared.spec.Name, env, outcome, reason, detail)
+	}
+}
+
+func prepareAutoRepack(ctx context.Context, env *jobEnv, spec config.ClusterSpec, candidates []string, i int, table string, deadline time.Time, run *maint.RepackRun) (repackPrepared, autoRepackDecision) {
+	freshCfg, freshSpec, err := reloadRepackTarget(spec)
+	if err != nil {
+		reason := repackReason(err)
+		autoRepackSkipRemaining(run, candidates, i, reason, err.Error())
+		return repackPrepared{}, autoRepackStopDatabase
+	}
+	env.Cluster = freshCfg
+	size, freshTarget, problem, err := revalidateRepackTable(ctx, freshCfg, spec, freshSpec, repackTarget{Name: table})
+	if err != nil {
+		run.Failed[table] = err.Error()
+		run.Counts.AddFailed()
+		logLine(env.Report, env.Job, "auto-repack of "+table+" failed validation: "+err.Error())
+		return repackPrepared{}, autoRepackNextTable
+	}
+	if problem != nil {
+		return repackPrepared{}, autoRepackSkipOrStop(run, table, candidates, i, problem.Reason, problem.Message)
+	}
+	if _, err := checkRepackSpace(freshCfg, freshSpec, freshTarget.Name, size); err != nil {
+		reason := repackReason(err)
+		return repackPrepared{}, autoRepackSkipOrStop(run, table, candidates, i, reason, err.Error())
+	}
+	before, err := repackStorage(ctx, freshSpec, freshTarget)
+	if err != nil {
+		run.Unknown[table] = "completion_unknown/not_started: storage identity unavailable before execution: " + err.Error()
+		run.Counts.AddUnknown()
+		logLine(env.Report, env.Job, "auto-repack of "+table+" was not started; rewrite completion is unknown: "+err.Error())
+		return repackPrepared{}, autoRepackNextTable
+	}
+	if err := verifyRepackTargetIdentity(ctx, freshSpec, freshTarget); err != nil {
+		reason := repackReason(err)
+		return repackPrepared{}, autoRepackSkipOrStop(run, table, candidates, i, reason, err.Error())
+	}
+	if autoRepackNow().After(deadline) {
+		autoRepackSkipRemaining(run, candidates, i, maint.RepackReasonWindowEnded, "the maintenance window ended while this table was being prepared")
+		return repackPrepared{}, autoRepackStopDatabase
+	}
+	return repackPrepared{spec: freshSpec, target: freshTarget, before: before}, autoRepackProceed
+}
+
+func autoRepackSkipOrStop(run *maint.RepackRun, table string, candidates []string, i int, reason, message string) autoRepackDecision {
+	autoRepackSkip(run, table, reason, message)
+	if repackDBWideReason(reason) {
+		autoRepackSkipRemaining(run, candidates, i+1, reason, message)
+		return autoRepackStopDatabase
+	}
+	return autoRepackNextTable
+}
+
+func recordAutoRepackOutcome(run *maint.RepackRun, table, db string, env *jobEnv, outcome string, reason, detail string) {
+	switch outcome {
+	case maint.RepackOutcomeRepacked:
+		run.Repacked = append(run.Repacked, table)
+		run.Counts.AddRepacked()
+		logLine(env.Report, env.Job, "auto-repacked "+table+" in "+db)
+	case maint.RepackOutcomeSkipped:
+		autoRepackSkip(run, table, reason, detail)
+		logLine(env.Report, env.Job, "auto-repack skipped "+table+": "+reason)
+	case maint.RepackOutcomeUnknown:
+		run.Unknown[table] = detail
+		run.Counts.AddUnknown()
+		logLine(env.Report, env.Job, "auto-repack for "+table+": rewrite completion could not be confirmed: "+detail)
+	default:
+		run.Failed[table] = detail
+		run.Counts.AddFailed()
+		logLine(env.Report, env.Job, "auto-repack did not complete "+table+": "+detail)
+	}
 }

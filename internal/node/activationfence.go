@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -255,7 +256,7 @@ func verifyFencePaths(cfg config.Cluster, f backup.ActivationFence, db string) e
 			WithDetails(map[string]any{"reason": "activation_fence_orphan", "database": db, "operation_id": f.OperationID})
 	}
 	if f.Port != 0 && f.Port != spec.Port && !fenceHasTemporaryPort(f) {
-		return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
+		return activationIdentityError(db, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
 	}
 	if err := verifyFenceDataDir(cfg, f, db); err != nil {
 		return err
@@ -290,7 +291,7 @@ func verifyFenceDataDir(cfg config.Cluster, f backup.ActivationFence, db string)
 	if fenceHasTemporaryPaths(f) && f.DataDir == cfg.Server.DataDirectory(backup.RestoringName(db)) {
 		return nil
 	}
-	return activationIdentityError(db, f, "data directory", f.DataDir, live)
+	return activationIdentityError(db, "data directory", f.DataDir, live)
 }
 
 func verifyFenceConfDir(f backup.ActivationFence, db string) error {
@@ -304,10 +305,10 @@ func verifyFenceConfDir(f backup.ActivationFence, db string) error {
 	if fenceHasTemporaryPaths(f) && f.ConfDir == steps.PGConfDir(backup.RestoringName(db)) {
 		return nil
 	}
-	return activationIdentityError(db, f, "configuration directory", f.ConfDir, live)
+	return activationIdentityError(db, "configuration directory", f.ConfDir, live)
 }
 
-func activationIdentityError(db string, f backup.ActivationFence, what, have, want string) error {
+func activationIdentityError(db, what, have, want string) error {
 	return output.NewError(output.CodePrecondition,
 		db+"'s activation fence does not match the database's current "+what+": "+have+" (recorded) and "+want+" (actual)",
 		output.ExitPrecondition,
@@ -333,63 +334,76 @@ func writeActivationFence(cfg config.Cluster, id activationFenceIdentity) (backu
 	if err != nil {
 		return backup.ActivationFence{}, err
 	}
-	if f, ok := recs.ActivationFenceFor(id.Database); ok {
-		if f.OperationID != id.OperationID {
-			return backup.ActivationFence{}, output.NewError(output.CodePrecondition,
-				id.Database+" has an activation fence from another operation",
-				output.ExitPrecondition, "Finish or repair that operation before starting another.").
-				WithDetails(map[string]any{"reason": "activation_fence_changed", "database": id.Database, "operation_id": f.OperationID})
-		}
-		if err := sameFenceImmutable(f, candidate); err != nil {
+	f, ok := recs.ActivationFenceFor(id.Database)
+	if !ok {
+		if err := backup.SetActivationFence(candidate); err != nil {
 			return backup.ActivationFence{}, err
 		}
-		if f.Phase != fencePhasePrepared {
-			// An interrupted operation already advanced: its recorded phase
-			// owns the endpoint (temporary before Adopt/swap, live after).
-			// Validate the existing checkpoint against the actual state
-			// instead of recreating prepared expectations.
-			if _, _, err := verifyActivationFence(cfg, id.Database, id.OperationID, id.Kind, f.Phase); err != nil {
-				return backup.ActivationFence{}, err
-			}
-			return f, nil
-		}
-		if err := sameFenceIdentity(f, candidate); err != nil {
+		return candidate, nil
+	}
+	return updateActivationFence(cfg, id, candidate, f)
+}
+
+// updateActivationFence reconciles a new fence identity with the existing
+// fence of the same database. A later phase keeps the recorded endpoint; a
+// prepared fence may only be enriched with facts fixed later.
+func updateActivationFence(cfg config.Cluster, id activationFenceIdentity, candidate, f backup.ActivationFence) (backup.ActivationFence, error) {
+	if f.OperationID != id.OperationID {
+		return backup.ActivationFence{}, output.NewError(output.CodePrecondition,
+			id.Database+" has an activation fence from another operation",
+			output.ExitPrecondition, "Finish or repair that operation before starting another.").
+			WithDetails(map[string]any{"reason": "activation_fence_changed", "database": id.Database, "operation_id": f.OperationID})
+	}
+	if err := sameFenceImmutable(f, candidate); err != nil {
+		return backup.ActivationFence{}, err
+	}
+	if f.Phase != fencePhasePrepared {
+		// An interrupted operation already advanced: its recorded phase
+		// owns the endpoint (temporary before Adopt/swap, live after).
+		// Validate the existing checkpoint against the actual state
+		// instead of recreating prepared expectations.
+		if _, _, err := verifyActivationFence(cfg, id.Database, id.OperationID, id.Kind, f.Phase); err != nil {
 			return backup.ActivationFence{}, err
-		}
-		// A prepared fence may be enriched with facts fixed later (an aside,
-		// the selected requirements, renames). Immutable identity never moves.
-		if f.Aside == "" && candidate.Aside != "" ||
-			(len(f.Requirements) == 0 && len(candidate.Requirements) > 0) ||
-			(len(f.Renames) == 0 && len(candidate.Renames) > 0) {
-			if err := backup.UpdateActivationFence(id.Database, id.OperationID, func(cur *backup.ActivationFence) error {
-				if err := sameFenceIdentity(*cur, candidate); err != nil {
-					return err
-				}
-				if cur.Aside == "" {
-					cur.Aside = candidate.Aside
-				}
-				if len(cur.Requirements) == 0 {
-					cur.Requirements = append([]catalog.Extension(nil), candidate.Requirements...)
-				}
-				if len(cur.Renames) == 0 {
-					cur.Renames = cloneRenames(candidate.Renames)
-				}
-				return nil
-			}); err != nil {
-				return backup.ActivationFence{}, err
-			}
-			recs, err := backup.LoadRecords()
-			if err != nil {
-				return backup.ActivationFence{}, err
-			}
-			f, _ = recs.ActivationFenceFor(id.Database)
 		}
 		return f, nil
 	}
-	if err := backup.SetActivationFence(candidate); err != nil {
+	if err := sameFenceIdentity(f, candidate); err != nil {
 		return backup.ActivationFence{}, err
 	}
-	return candidate, nil
+	if !fenceEnrichable(f, candidate) {
+		return f, nil
+	}
+	if err := backup.UpdateActivationFence(id.Database, id.OperationID, func(cur *backup.ActivationFence) error {
+		if err := sameFenceIdentity(*cur, candidate); err != nil {
+			return err
+		}
+		if cur.Aside == "" {
+			cur.Aside = candidate.Aside
+		}
+		if len(cur.Requirements) == 0 {
+			cur.Requirements = append([]catalog.Extension(nil), candidate.Requirements...)
+		}
+		if len(cur.Renames) == 0 {
+			cur.Renames = cloneRenames(candidate.Renames)
+		}
+		return nil
+	}); err != nil {
+		return backup.ActivationFence{}, err
+	}
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return backup.ActivationFence{}, err
+	}
+	f, _ = recs.ActivationFenceFor(id.Database)
+	return f, nil
+}
+
+// fenceEnrichable reports whether a prepared fence can record facts fixed
+// after it was written without moving its immutable identity.
+func fenceEnrichable(f, candidate backup.ActivationFence) bool {
+	return f.Aside == "" && candidate.Aside != "" ||
+		len(f.Requirements) == 0 && len(candidate.Requirements) > 0 ||
+		len(f.Renames) == 0 && len(candidate.Renames) > 0
 }
 
 func sameFenceIdentity(have, want backup.ActivationFence) error {
@@ -407,37 +421,44 @@ func sameFenceIdentity(have, want backup.ActivationFence) error {
 		{"ownership", have.Ownership, want.Ownership},
 	}
 	for _, f := range fields {
-		if f.name == "aside" && (f.a == "" || f.b == "") {
-			continue
-		}
-		if f.name == "registration" {
-			// The registration's name and port are immutable; the follow
-			// generation legitimately becomes empty when an unfollow makes the
-			// cluster independent. Ownership is checked separately.
-			if registrationNamePort(f.a) != registrationNamePort(f.b) {
-				return activationIdentityError(have.Database, have, f.name, f.a, f.b)
-			}
-			continue
-		}
-		if f.name == "ownership" && have.Phase != fencePhasePrepared && have.Phase != fencePhaseAdopting {
-			// Once a cluster is promoted/independent the prepared follow
-			// generation is no longer its current ownership.
-			continue
-		}
-		if f.a != f.b {
-			return activationIdentityError(have.Database, have, f.name, f.a, f.b)
+		if err := sameFenceIdentityField(have, f.name, f.a, f.b); err != nil {
+			return err
 		}
 	}
 	if have.Port != 0 && want.Port != 0 && have.Port != want.Port {
-		return activationIdentityError(have.Database, have, "port", strconv.Itoa(have.Port), strconv.Itoa(want.Port))
+		return activationIdentityError(have.Database, "port", strconv.Itoa(have.Port), strconv.Itoa(want.Port))
 	}
 	if have.DataDir != "" && want.DataDir != "" && have.DataDir != want.DataDir {
-		return activationIdentityError(have.Database, have, "data directory", have.DataDir, want.DataDir)
+		return activationIdentityError(have.Database, "data directory", have.DataDir, want.DataDir)
 	}
 	if have.ConfDir != "" && want.ConfDir != "" && have.ConfDir != want.ConfDir {
-		return activationIdentityError(have.Database, have, "configuration directory", have.ConfDir, want.ConfDir)
+		return activationIdentityError(have.Database, "configuration directory", have.ConfDir, want.ConfDir)
 	}
 	return nil
+}
+
+// sameFenceIdentityField compares one identity field under its phase-specific
+// exemption: an aside fixed later is optional, a registration's generation may
+// become empty, and prepared follow ownership is not current after promotion.
+func sameFenceIdentityField(have backup.ActivationFence, name, a, b string) error {
+	switch name {
+	case "aside":
+		if a == "" || b == "" {
+			return nil
+		}
+	case "registration":
+		if registrationNamePort(a) == registrationNamePort(b) {
+			return nil
+		}
+	case "ownership":
+		if have.Phase != fencePhasePrepared && have.Phase != fencePhaseAdopting {
+			return nil
+		}
+	}
+	if a == b {
+		return nil
+	}
+	return activationIdentityError(have.Database, name, a, b)
 }
 
 func registrationNamePort(registration string) string {
@@ -464,11 +485,11 @@ func sameFenceImmutable(have, want backup.ActivationFence) error {
 	}
 	for _, f := range fields {
 		if f.a != f.b {
-			return activationIdentityError(have.Database, have, f.name, f.a, f.b)
+			return activationIdentityError(have.Database, f.name, f.a, f.b)
 		}
 	}
 	if have.Aside != "" && want.Aside != "" && have.Aside != want.Aside {
-		return activationIdentityError(have.Database, have, "aside", have.Aside, want.Aside)
+		return activationIdentityError(have.Database, "aside", have.Aside, want.Aside)
 	}
 	return nil
 }
@@ -489,35 +510,8 @@ func verifyActivationFence(cfg config.Cluster, db, opID, kind string, phases ...
 			output.ExitPrecondition, "Retry the owning operation; vaire will not guess another operation's state.").
 			WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
 	}
-	if f.Kind != kind {
-		return backup.ActivationFence{}, config.ClusterSpec{}, activationIdentityError(db, f, "kind", f.Kind, kind)
-	}
-	if !validFenceKind(f.Kind) {
-		return backup.ActivationFence{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
-			db+"'s activation fence has an unknown kind "+f.Kind,
-			output.ExitPrecondition, "Repair the records file deliberately; vaire will not guess the operation.").
-			WithDetails(map[string]any{"reason": "activation_fence_kind", "database": db, "kind": f.Kind})
-	}
-	if !validFencePhase(f.Phase) || !validFencePhaseForKind(f.Kind, f.Phase) {
-		return backup.ActivationFence{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
-			db+"'s activation fence has an unknown phase "+f.Phase,
-			output.ExitPrecondition, "Repair the records file deliberately; vaire will not guess the checkpoint.").
-			WithDetails(map[string]any{"reason": "activation_fence_phase", "database": db, "phase": f.Phase})
-	}
-	if len(phases) > 0 {
-		ok := false
-		for _, phase := range phases {
-			if f.Phase == phase {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return backup.ActivationFence{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
-				db+"'s activation fence is in phase "+f.Phase+", not "+strings.Join(phases, " or "),
-				output.ExitPrecondition, "Finish the owning operation from its recorded checkpoint.").
-				WithDetails(map[string]any{"reason": "activation_fence_phase", "database": db, "phase": f.Phase})
-		}
+	if err := verifyFenceKindAndPhase(f, db, kind, phases); err != nil {
+		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
 	if err := verifyFenceInstance(f, db); err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, err
@@ -525,22 +519,13 @@ func verifyActivationFence(cfg config.Cluster, db, opID, kind string, phases ...
 	if err := verifyFencePaths(cfg, f, db); err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
-	spec, ok := cfg.ClusterByName(db)
-	if !ok {
-		return backup.ActivationFence{}, config.ClusterSpec{}, activationIdentityError(db, f, "cluster.toml entry", "present", "missing")
-	}
-	if !fenceTargetMatches(f, spec) {
-		return backup.ActivationFence{}, config.ClusterSpec{}, activationIdentityError(db, f, "target stanza", f.TargetStanza, spec.Stanza)
-	}
-	if f.OldStanza == "" || f.NewStanza == "" {
-		return backup.ActivationFence{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
-			db+"'s activation fence has no recorded old/new stanza transition",
-			output.ExitPrecondition, "Repair the records deliberately; vaire will not adopt a data identity it cannot prove.").
-			WithDetails(map[string]any{"reason": "activation_fence_identity", "database": db})
+	spec, err := verifyFenceTarget(cfg, f, db)
+	if err != nil {
+		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
 	if f.Kind == "unfollow" && (f.Phase == fencePhasePrepared || f.Phase == fencePhaseAdopting) &&
 		spec.IsFollower() && spec.FollowGeneration != "" && f.Ownership != spec.FollowGeneration {
-		return backup.ActivationFence{}, config.ClusterSpec{}, activationIdentityError(db, f, "follow generation", f.Ownership, spec.FollowGeneration)
+		return backup.ActivationFence{}, config.ClusterSpec{}, activationIdentityError(db, "follow generation", f.Ownership, spec.FollowGeneration)
 	}
 	if err := verifyFenceRegistration(f, db); err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, err
@@ -550,35 +535,91 @@ func verifyActivationFence(cfg config.Cluster, db, opID, kind string, phases ...
 			return backup.ActivationFence{}, config.ClusterSpec{}, err
 		}
 	}
-	if f.Kind == "fork" || f.Kind == "unfollow" {
-		check := f.Kind == "fork"
-		if !check {
-			// A real follower's data directory exists; verify its actual
-			// registration then. A lifecycle test that models only the
-			// records has no host tree to read.
-			if _, err := os.Stat(f.DataDir); err == nil {
-				check = true
-			} else if !os.IsNotExist(err) {
-				return backup.ActivationFence{}, config.ClusterSpec{}, err
-			}
-		}
-		if check && (f.Phase == fencePhaseAdopted || f.Phase == fencePhasePromoted || f.Phase == fencePhaseRouting) {
-			if !followConfRegistered(spec.Name) {
-				return backup.ActivationFence{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
-					db+"'s activation fence says its registration is verified, but no postgresql-common registration exists",
-					output.ExitPrecondition, "Finish the owning operation; vaire will not adopt an unregistered cluster.").
-					WithDetails(map[string]any{"reason": "activation_registration_missing", "database": db})
-			}
-			data, err := followRegisteredData(spec.Name)
-			if err != nil {
-				return backup.ActivationFence{}, config.ClusterSpec{}, err
-			}
-			if data == "" || data != f.DataDir {
-				return backup.ActivationFence{}, config.ClusterSpec{}, activationIdentityError(db, f, "registered data directory", data, f.DataDir)
-			}
-		}
+	if err := verifyFenceActualRegistration(f, spec, db); err != nil {
+		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
 	return f, spec, nil
+}
+
+// verifyFenceKindAndPhase checks the fence's declared kind, a valid phase for
+// that kind, and the caller's accepted phases.
+func verifyFenceKindAndPhase(f backup.ActivationFence, db, kind string, phases []string) error {
+	if f.Kind != kind {
+		return activationIdentityError(db, "kind", f.Kind, kind)
+	}
+	if !validFenceKind(f.Kind) {
+		return output.NewError(output.CodePrecondition,
+			db+"'s activation fence has an unknown kind "+f.Kind,
+			output.ExitPrecondition, "Repair the records file deliberately; vaire will not guess the operation.").
+			WithDetails(map[string]any{"reason": "activation_fence_kind", "database": db, "kind": f.Kind})
+	}
+	if !validFencePhase(f.Phase) || !validFencePhaseForKind(f.Kind, f.Phase) {
+		return output.NewError(output.CodePrecondition,
+			db+"'s activation fence has an unknown phase "+f.Phase,
+			output.ExitPrecondition, "Repair the records file deliberately; vaire will not guess the checkpoint.").
+			WithDetails(map[string]any{"reason": "activation_fence_phase", "database": db, "phase": f.Phase})
+	}
+	if len(phases) == 0 || slices.Contains(phases, f.Phase) {
+		return nil
+	}
+	return output.NewError(output.CodePrecondition,
+		db+"'s activation fence is in phase "+f.Phase+", not "+strings.Join(phases, " or "),
+		output.ExitPrecondition, "Finish the owning operation from its recorded checkpoint.").
+		WithDetails(map[string]any{"reason": "activation_fence_phase", "database": db, "phase": f.Phase})
+}
+
+// verifyFenceTarget proves the fence names a current cluster.toml entry, its
+// stanza transition, and a recorded old/new stanza pair.
+func verifyFenceTarget(cfg config.Cluster, f backup.ActivationFence, db string) (config.ClusterSpec, error) {
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return config.ClusterSpec{}, activationIdentityError(db, "cluster.toml entry", "present", "missing")
+	}
+	if !fenceTargetMatches(f, spec) {
+		return config.ClusterSpec{}, activationIdentityError(db, "target stanza", f.TargetStanza, spec.Stanza)
+	}
+	if f.OldStanza == "" || f.NewStanza == "" {
+		return config.ClusterSpec{}, output.NewError(output.CodePrecondition,
+			db+"'s activation fence has no recorded old/new stanza transition",
+			output.ExitPrecondition, "Repair the records deliberately; vaire will not adopt a data identity it cannot prove.").
+			WithDetails(map[string]any{"reason": "activation_fence_identity", "database": db})
+	}
+	return spec, nil
+}
+
+// verifyFenceActualRegistration checks a fork/unfollow fence's final phase
+// against the host's postgresql-common registration. A real follower's data
+// directory exists; a lifecycle test that models only the records has no host
+// tree to read.
+func verifyFenceActualRegistration(f backup.ActivationFence, spec config.ClusterSpec, db string) error {
+	if f.Kind != "fork" && f.Kind != "unfollow" {
+		return nil
+	}
+	check := f.Kind == "fork"
+	if !check {
+		if _, err := os.Stat(f.DataDir); err == nil {
+			check = true
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if !check || (f.Phase != fencePhaseAdopted && f.Phase != fencePhasePromoted && f.Phase != fencePhaseRouting) {
+		return nil
+	}
+	if !followConfRegistered(spec.Name) {
+		return output.NewError(output.CodePrecondition,
+			db+"'s activation fence says its registration is verified, but no postgresql-common registration exists",
+			output.ExitPrecondition, "Finish the owning operation; vaire will not adopt an unregistered cluster.").
+			WithDetails(map[string]any{"reason": "activation_registration_missing", "database": db})
+	}
+	data, err := followRegisteredData(spec.Name)
+	if err != nil {
+		return err
+	}
+	if data == "" || data != f.DataDir {
+		return activationIdentityError(db, "registered data directory", data, f.DataDir)
+	}
+	return nil
 }
 
 func fenceTargetMatches(f backup.ActivationFence, spec config.ClusterSpec) bool {
@@ -605,19 +646,19 @@ func verifyFenceRegistration(f backup.ActivationFence, db string) error {
 	}
 	name, rest, ok := strings.Cut(f.Registration, ":")
 	if !ok {
-		return activationIdentityError(db, f, "registration", f.Registration, db+":<port>:<generation>")
+		return activationIdentityError(db, "registration", f.Registration, db+":<port>:<generation>")
 	}
 	portText, _, _ := strings.Cut(rest, ":")
 	port, err := strconv.Atoi(portText)
 	if err != nil {
-		return activationIdentityError(db, f, "registration", f.Registration, db+":<port>:<generation>")
+		return activationIdentityError(db, "registration", f.Registration, db+":<port>:<generation>")
 	}
 	restoreInspection := f.Kind == "restore-promote" && name == backup.RestoringName(db)
 	if name != db && !restoreInspection {
-		return activationIdentityError(db, f, "registration name", name, db)
+		return activationIdentityError(db, "registration name", name, db)
 	}
 	if f.Port != 0 && port != f.Port {
-		return activationIdentityError(db, f, "registration port", strconv.Itoa(port), strconv.Itoa(f.Port))
+		return activationIdentityError(db, "registration port", strconv.Itoa(port), strconv.Itoa(f.Port))
 	}
 	return nil
 }
@@ -629,25 +670,25 @@ func verifyFenceRegistration(f backup.ActivationFence, db string) error {
 func verifyRestoreAbortFence(cfg config.Cluster, f backup.ActivationFence, spec config.ClusterSpec) error {
 	db := spec.Name
 	if f.Database != db {
-		return activationIdentityError(db, f, "database", f.Database, db)
+		return activationIdentityError(db, "database", f.Database, db)
 	}
 	if f.TargetStanza != spec.Stanza || f.OldStanza != spec.Stanza || f.NewStanza != spec.Stanza {
-		return activationIdentityError(db, f, "stanza", f.TargetStanza+"/"+f.OldStanza+"/"+f.NewStanza, spec.Stanza)
+		return activationIdentityError(db, "stanza", f.TargetStanza+"/"+f.OldStanza+"/"+f.NewStanza, spec.Stanza)
 	}
 	if f.Registration != activationRegistration(spec) {
-		return activationIdentityError(db, f, "registration", f.Registration, activationRegistration(spec))
+		return activationIdentityError(db, "registration", f.Registration, activationRegistration(spec))
 	}
 	if f.Ownership != spec.FollowGeneration {
-		return activationIdentityError(db, f, "follow generation", f.Ownership, spec.FollowGeneration)
+		return activationIdentityError(db, "follow generation", f.Ownership, spec.FollowGeneration)
 	}
 	if f.Port != spec.Port {
-		return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
+		return activationIdentityError(db, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
 	}
 	if f.DataDir != cfg.Server.DataDirectory(db) {
-		return activationIdentityError(db, f, "data directory", f.DataDir, cfg.Server.DataDirectory(db))
+		return activationIdentityError(db, "data directory", f.DataDir, cfg.Server.DataDirectory(db))
 	}
 	if f.ConfDir != steps.PGConfDir(db) {
-		return activationIdentityError(db, f, "configuration directory", f.ConfDir, steps.PGConfDir(db))
+		return activationIdentityError(db, "configuration directory", f.ConfDir, steps.PGConfDir(db))
 	}
 	if f.Aside == "" || f.CreatedAt == "" {
 		return output.NewError(output.CodePrecondition,
@@ -745,17 +786,17 @@ func clearActivationFenceVerified(cfg config.Cluster, db, opID, kind string) err
 				WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
 		}
 		if !reflect.DeepEqual(f, want) {
-			return activationIdentityError(db, f, "routing completion", f.OperationID+":"+f.Phase, want.OperationID+":"+want.Phase)
+			return activationIdentityError(db, "routing completion", f.OperationID+":"+f.Phase, want.OperationID+":"+want.Phase)
 		}
 		spec, ok := cfg.ClusterByName(db)
 		if !ok {
-			return activationIdentityError(db, f, "cluster.toml entry", "present", "missing")
+			return activationIdentityError(db, "cluster.toml entry", "present", "missing")
 		}
 		if f.TargetStanza != spec.Stanza {
-			return activationIdentityError(db, f, "target stanza", f.TargetStanza, spec.Stanza)
+			return activationIdentityError(db, "target stanza", f.TargetStanza, spec.Stanza)
 		}
 		if f.Port != spec.Port {
-			return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
+			return activationIdentityError(db, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
 		}
 		if _, ok := s.Restores[db]; ok {
 			return routingContinuationWithRestoreError(db)
@@ -872,7 +913,7 @@ func refusePendingConfigChanges(old, updated config.Cluster) error {
 
 // forkFenceFor returns the fork fences an ordinary apply may finish: the
 // non-secret adoption/configuration continuation and route finalization.
-func forkFenceFor(cfg config.Cluster, db string) (backup.ActivationFence, bool, error) {
+func forkFenceFor(db string) (backup.ActivationFence, bool, error) {
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		return backup.ActivationFence{}, false, err

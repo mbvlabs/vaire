@@ -282,6 +282,19 @@ func mergeExtension(name string, def *ExtensionDefinition, builtin *catalog.Exte
 	if !validExtensionKey(name) {
 		add("extensions.%s name must match %s without leading/trailing hyphen or --", name, extensionKeyPattern)
 	}
+	out := newExtensionDefinition(name, def)
+	if builtin != nil {
+		out = mergeBuiltinExtension(name, def, builtin, add)
+	}
+	validateExtensionProvider(add, name, out)
+	validateExtensionIdentity(add, name, out)
+	out.Restart = out.Preload != ""
+	validateExtensionSettings(add, name, out)
+	return out, problems
+}
+
+// newExtensionDefinition builds the descriptor a new custom definition states.
+func newExtensionDefinition(name string, def *ExtensionDefinition) catalog.Extension {
 	out := catalog.Extension{
 		Name:         name,
 		Source:       def.Source,
@@ -303,119 +316,156 @@ func mergeExtension(name string, def *ExtensionDefinition, builtin *catalog.Exte
 	if def.StandbySafe != nil {
 		out.StandbySafe = *def.StandbySafe
 	}
-	if builtin != nil {
-		out = builtin.Clone()
-		out.Settings = mergeStringMap(builtin.Settings, def.Settings)
-		out.CopySettings = cloneStringMap(builtin.CopySettings)
-		out.Note = builtin.Note
-		if def.ExtName != "" {
-			if def.ExtName != builtin.ExtName {
-				add("extensions.%s.ext_name %q cannot change built-in %q", name, def.ExtName, builtin.ExtName)
-			}
-			out.ExtName = builtin.ExtName
+	return out
+}
+
+// mergeBuiltinExtension applies an override over the built-in entry. Provider
+// metadata and the default modules keep the built-in contract; safety
+// declarations must be renewed when the provider changes.
+func mergeBuiltinExtension(name string, def *ExtensionDefinition, builtin *catalog.Extension, add func(string, ...any)) catalog.Extension {
+	out := builtin.Clone()
+	out.Settings = mergeStringMap(builtin.Settings, def.Settings)
+	out.CopySettings = cloneStringMap(builtin.CopySettings)
+	out.Note = builtin.Note
+	mergeBuiltinProvider(&out, name, def, builtin, add)
+	applyExtensionOverrides(&out, def)
+	validateRenewedSafety(&out, name, def, builtin, add)
+	applyBuiltinDefault(&out, name, def, builtin, add)
+	return out
+}
+
+// mergeBuiltinProvider applies the provider fields an override may change.
+func mergeBuiltinProvider(out *catalog.Extension, name string, def *ExtensionDefinition, builtin *catalog.Extension, add func(string, ...any)) {
+	if def.ExtName != "" {
+		if def.ExtName != builtin.ExtName {
+			add("extensions.%s.ext_name %q cannot change built-in %q", name, def.ExtName, builtin.ExtName)
 		}
-		if def.Source != "" {
-			out.Source = def.Source
-		}
-		switch out.Source {
-		case catalog.SourceAPT:
-			if def.Package != "" {
-				out.Package = def.Package
-			}
-		case catalog.SourcePreinstalled:
-			if def.Package != "" {
-				add("extensions.%s.package must be empty for source preinstalled", name)
-			}
-			out.Package = ""
-		}
-		if def.Preload != "" {
-			out.Preload = def.Preload
-		}
-		if def.Schema != "" {
-			out.Schema = def.Schema
-		}
-		if def.Note != "" {
-			out.Note = def.Note
-		}
-		if def.CopySafety != nil {
-			out.CopySafety = *def.CopySafety
-		}
-		if def.CopySettings != nil {
-			out.CopySettings = cloneStringMap(def.CopySettings)
-		}
-		if def.StandbySafe != nil {
-			out.StandbySafe = *def.StandbySafe
-		}
-		providerChanged := out.Source != builtin.Source || out.Package != builtin.Package ||
-			out.Preload != builtin.Preload || out.ExtName != builtin.ExtName
-		if providerChanged {
-			if def.CopySafety == nil {
-				add("extensions.%s.copy_safety must be renewed when source, package, preload or ext_name changes", name)
-			}
-			if def.StandbySafe == nil {
-				add("extensions.%s.standby_safe must be renewed when source, package, preload or ext_name changes", name)
-			}
-		}
-		if builtin.Default {
-			if def.Preload != "" && def.Preload != builtin.Preload {
-				add("extensions.%s.preload is managed by vaire for the default module %q", name, builtin.Name)
-			}
-			out.Preload = builtin.Preload
-			out.Default = true
-		}
+		out.ExtName = builtin.ExtName
 	}
-	if out.Source == "" {
-		add("extensions.%s.source is required: apt or preinstalled", name)
-	} else if out.Source != catalog.SourceAPT && out.Source != catalog.SourcePreinstalled {
-		add("extensions.%s.source %q must be apt or preinstalled", name, out.Source)
+	if def.Source != "" {
+		out.Source = def.Source
 	}
 	switch out.Source {
 	case catalog.SourceAPT:
-		if out.Package == "" {
+		if def.Package != "" {
+			out.Package = def.Package
+		}
+	case catalog.SourcePreinstalled:
+		if def.Package != "" {
+			add("extensions.%s.package must be empty for source preinstalled", name)
+		}
+		out.Package = ""
+	}
+}
+
+// applyExtensionOverrides applies the remaining scalar descriptor fields.
+func applyExtensionOverrides(out *catalog.Extension, def *ExtensionDefinition) {
+	if def.Preload != "" {
+		out.Preload = def.Preload
+	}
+	if def.Schema != "" {
+		out.Schema = def.Schema
+	}
+	if def.Note != "" {
+		out.Note = def.Note
+	}
+	if def.CopySafety != nil {
+		out.CopySafety = *def.CopySafety
+	}
+	if def.CopySettings != nil {
+		out.CopySettings = cloneStringMap(def.CopySettings)
+	}
+	if def.StandbySafe != nil {
+		out.StandbySafe = *def.StandbySafe
+	}
+}
+
+// validateRenewedSafety requires fresh safety declarations when an override
+// changes the provider contract.
+func validateRenewedSafety(out *catalog.Extension, name string, def *ExtensionDefinition, builtin *catalog.Extension, add func(string, ...any)) {
+	providerChanged := out.Source != builtin.Source || out.Package != builtin.Package ||
+		out.Preload != builtin.Preload || out.ExtName != builtin.ExtName
+	if !providerChanged {
+		return
+	}
+	if def.CopySafety == nil {
+		add("extensions.%s.copy_safety must be renewed when source, package, preload or ext_name changes", name)
+	}
+	if def.StandbySafe == nil {
+		add("extensions.%s.standby_safe must be renewed when source, package, preload or ext_name changes", name)
+	}
+}
+
+// applyBuiltinDefault keeps the implicit default modules' preload managed by
+// vaire.
+func applyBuiltinDefault(out *catalog.Extension, name string, def *ExtensionDefinition, builtin *catalog.Extension, add func(string, ...any)) {
+	if !builtin.Default {
+		return
+	}
+	if def.Preload != "" && def.Preload != builtin.Preload {
+		add("extensions.%s.preload is managed by vaire for the default module %q", name, builtin.Name)
+	}
+	out.Preload = builtin.Preload
+	out.Default = true
+}
+
+func validateExtensionProvider(add func(string, ...any), name string, ext catalog.Extension) {
+	if ext.Source == "" {
+		add("extensions.%s.source is required: apt or preinstalled", name)
+	} else if ext.Source != catalog.SourceAPT && ext.Source != catalog.SourcePreinstalled {
+		add("extensions.%s.source %q must be apt or preinstalled", name, ext.Source)
+	}
+	switch ext.Source {
+	case catalog.SourceAPT:
+		if ext.Package == "" {
 			add("extensions.%s.package is required for source apt", name)
 		}
 	case catalog.SourcePreinstalled:
-		if out.Package != "" {
+		if ext.Package != "" {
 			add("extensions.%s.package must be empty for source preinstalled", name)
 		}
 	}
-	if out.Package != "" && !debianPackagePattern.MatchString(out.Package) {
-		add("extensions.%s.package %q is not a Debian package name", name, out.Package)
+	if ext.Package != "" && !debianPackagePattern.MatchString(ext.Package) {
+		add("extensions.%s.package %q is not a Debian package name", name, ext.Package)
 	}
-	if out.ExtName != "" && !validSQLExtensionName(out.ExtName) {
-		add("extensions.%s.ext_name %q is not a safe PostgreSQL extension name", name, out.ExtName)
+}
+
+func validateExtensionIdentity(add func(string, ...any), name string, ext catalog.Extension) {
+	if ext.ExtName != "" && !validSQLExtensionName(ext.ExtName) {
+		add("extensions.%s.ext_name %q is not a safe PostgreSQL extension name", name, ext.ExtName)
 	}
-	if out.Preload != "" && !libraryPattern.MatchString(out.Preload) {
-		add("extensions.%s.preload %q is not a library name", name, out.Preload)
+	if ext.Preload != "" && !libraryPattern.MatchString(ext.Preload) {
+		add("extensions.%s.preload %q is not a library name", name, ext.Preload)
 	}
 	for _, defaultName := range catalog.Defaults() {
 		defaultExt, _ := catalog.Lookup(defaultName)
-		if defaultExt.Preload != "" && out.Preload == defaultExt.Preload && name != defaultExt.Name {
-			add("extensions.%s.preload %q is managed by vaire for the default module %q", name, out.Preload, defaultExt.Name)
+		if defaultExt.Preload != "" && ext.Preload == defaultExt.Preload && name != defaultExt.Name {
+			add("extensions.%s.preload %q is managed by vaire for the default module %q", name, ext.Preload, defaultExt.Name)
 		}
 	}
-	if out.Schema != "" && !schemaPattern.MatchString(out.Schema) {
-		add("extensions.%s.schema %q must match %s", name, out.Schema, schemaPattern)
+	if ext.Schema != "" && !schemaPattern.MatchString(ext.Schema) {
+		add("extensions.%s.schema %q must match %s", name, ext.Schema, schemaPattern)
 	}
-	out.Restart = out.Preload != ""
-	for key, value := range out.Settings {
+}
+
+func validateExtensionSettings(add func(string, ...any), name string, ext catalog.Extension) {
+	for key, value := range ext.Settings {
 		validateExtensionSetting(add, "extensions."+name+".settings", key, value)
 	}
-	for key, value := range out.CopySettings {
+	for key, value := range ext.CopySettings {
 		validateExtensionSetting(add, "extensions."+name+".copy_settings", key, value)
 	}
-	switch out.CopySafety {
+	switch ext.CopySafety {
 	case catalog.CopySafetyUnknown, catalog.CopySafetySafe, catalog.CopySafetyDisabled:
 	default:
-		add("extensions.%s.copy_safety %q must be unknown, safe or disabled", name, out.CopySafety)
+		add("extensions.%s.copy_safety %q must be unknown, safe or disabled", name, ext.CopySafety)
 	}
-	if out.CopySafety == catalog.CopySafetyDisabled && len(out.CopySettings) == 0 {
+	if ext.CopySafety == catalog.CopySafetyDisabled && len(ext.CopySettings) == 0 {
 		add("extensions.%s.copy_settings must suppress background effects when copy_safety is disabled", name)
 	}
-	if out.CopySafety != catalog.CopySafetyDisabled && len(out.CopySettings) > 0 {
+	if ext.CopySafety != catalog.CopySafetyDisabled && len(ext.CopySettings) > 0 {
 		add("extensions.%s.copy_settings requires copy_safety disabled", name)
 	}
-	return out, problems
 }
 
 // validateExtensionSetting applies the renderer's safety rules to one
@@ -493,44 +543,52 @@ func (c Cluster) validateExtensionSelection(add func(string, ...any), at string,
 	}
 }
 
+type extensionSettingUse struct {
+	value string
+	owner string
+}
+
 // validateExtensionSettingUnion rejects two extensions in one database that
 // assign the same setting different values. Render order must never silently
 // choose one. For the copy union a descriptor's own copy settings intentionally
 // override its normal value; all other descriptors must still agree.
 func (c Cluster) validateExtensionSettingUnion(add func(string, ...any), at string, names []string, db string, copyUnion bool) {
-	type use struct {
-		value string
-		owner string
+	seen := map[string]extensionSettingUse{}
+	mode := "normal"
+	if copyUnion {
+		mode = "copy"
 	}
-	seen := map[string]use{}
 	for _, name := range names {
 		ext, err := c.ExtensionResolver().Resolve(name)
 		if err != nil {
 			continue
 		}
-		settings := ext.Settings
-		if copyUnion {
-			settings = mergeStringMap(ext.Settings, ext.CopySettings)
+		addExtensionSettingConflicts(add, at, db, mode, seen, ext)
+	}
+}
+
+// addExtensionSettingConflicts records one extension's settings in the union
+// and reports a key two extensions assign different effective values.
+func addExtensionSettingConflicts(add func(string, ...any), at, db, mode string, seen map[string]extensionSettingUse, ext catalog.Extension) {
+	settings := ext.Settings
+	if mode == "copy" {
+		settings = mergeStringMap(ext.Settings, ext.CopySettings)
+	}
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := strings.ReplaceAll(normalizedSettingValue(settings[key]), catalog.DBPlaceholder, db)
+		prev, ok := seen[key]
+		if !ok {
+			seen[key] = extensionSettingUse{value: value, owner: ext.Name}
+			continue
 		}
-		keys := make([]string, 0, len(settings))
-		for key := range settings {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			value := strings.ReplaceAll(normalizedSettingValue(settings[key]), catalog.DBPlaceholder, db)
-			if prev, ok := seen[key]; ok {
-				if prev.value != value {
-					mode := "normal"
-					if copyUnion {
-						mode = "copy"
-					}
-					add("%s setting %q conflicts between %q and %q in the %s union (%q vs %q)",
-						at, key, prev.owner, ext.Name, mode, prev.value, value)
-				}
-				continue
-			}
-			seen[key] = use{value: value, owner: ext.Name}
+		if prev.value != value {
+			add("%s setting %q conflicts between %q and %q in the %s union (%q vs %q)",
+				at, key, prev.owner, ext.Name, mode, prev.value, value)
 		}
 	}
 }
@@ -665,72 +723,90 @@ func (r *hostRequirement) mergeLibrary(add func(string, ...any), library string,
 	}
 }
 
+// extensionHostSelection is one effective selection on the host and the names
+// its declaration stated explicitly.
+type extensionHostSelection struct {
+	label    string
+	names    []string
+	declared map[string]bool
+}
+
 // validateExtensionHost rejects conflicting providers and runtime metadata
 // for the same SQL extension or preload library across the host's databases.
 // It validates the effective selection, including implicit defaults, for both
 // current and present recovery declarations.
 func (c Cluster) validateExtensionHost(add func(string, ...any)) {
-	type selection struct {
-		label    string
-		names    []string
-		declared map[string]bool
-	}
 	resolver := c.ExtensionResolver()
 	byExt := map[string]hostRequirement{}
 	byPreload := map[string]hostRequirement{}
 	for _, spec := range c.Clusters {
-		var selections []selection
-		addSelection := func(label string, declaredNames []string) {
-			effective, err := resolver.EffectiveNames(declaredNames)
-			if err != nil {
-				return
-			}
-			declared := map[string]bool{}
-			for _, name := range declaredNames {
-				canonical, _ := resolver.Canonical(name)
-				declared[canonical] = true
-			}
-			selections = append(selections, selection{label: label, names: effective, declared: declared})
-		}
-		// The implicit default modules are part of every effective
-		// selection. Recovery declarations are only a selection when the
-		// key is present; an absent declaration is unknown, not empty.
-		addSelection("extensions", spec.Extensions)
-		if spec.RecoveryExtensions != nil {
-			addSelection("recovery_extensions", *spec.RecoveryExtensions)
-		}
-		for _, sel := range selections {
+		for _, sel := range extensionHostSelections(resolver, spec) {
 			for _, name := range sel.names {
 				ext, err := resolver.Resolve(name)
 				if err != nil {
 					continue
 				}
-				at := "clusters." + spec.Name + "." + sel.label
-				if sel.declared[name] {
-					at += " " + fmt.Sprintf("%q", name)
-				} else {
-					at += " implicit " + fmt.Sprintf("%q", name)
-				}
-				requirement := newHostRequirement(at, ext)
+				requirement := newHostRequirement(extensionHostSelectionLabel(spec.Name, sel, name), ext)
 				if ext.ExtName != "" {
-					if prev, ok := byExt[ext.ExtName]; ok {
-						prev.mergeSQL(add, ext.ExtName, requirement)
-						byExt[ext.ExtName] = prev
-					} else {
-						byExt[ext.ExtName] = requirement
-					}
+					addHostSQLRequirement(byExt, add, ext.ExtName, requirement)
 				}
 				if ext.Preload != "" {
-					if prev, ok := byPreload[ext.Preload]; ok {
-						prev.mergeLibrary(add, ext.Preload, requirement)
-						byPreload[ext.Preload] = prev
-					} else {
-						byPreload[ext.Preload] = requirement
-					}
+					addHostLibraryRequirement(byPreload, add, ext.Preload, requirement)
 				}
 			}
 		}
 	}
+}
+
+// extensionHostSelections returns the current selection and, when declared,
+// the recovery selection. An absent recovery declaration is unknown, not empty.
+func extensionHostSelections(resolver ExtensionResolver, spec ClusterSpec) []extensionHostSelection {
+	selections := []extensionHostSelection{newExtensionHostSelection(resolver, "extensions", spec.Extensions)}
+	if spec.RecoveryExtensions != nil {
+		selections = append(selections, newExtensionHostSelection(resolver, "recovery_extensions", *spec.RecoveryExtensions))
+	}
+	return selections
+}
+
+func newExtensionHostSelection(resolver ExtensionResolver, label string, declaredNames []string) extensionHostSelection {
+	effective, err := resolver.EffectiveNames(declaredNames)
+	if err != nil {
+		return extensionHostSelection{label: label, declared: map[string]bool{}}
+	}
+	declared := map[string]bool{}
+	for _, name := range declaredNames {
+		canonical, _ := resolver.Canonical(name)
+		declared[canonical] = true
+	}
+	return extensionHostSelection{label: label, names: effective, declared: declared}
+}
+
+func extensionHostSelectionLabel(specName string, sel extensionHostSelection, name string) string {
+	at := "clusters." + specName + "." + sel.label
+	if sel.declared[name] {
+		return at + " " + fmt.Sprintf("%q", name)
+	}
+	return at + " implicit " + fmt.Sprintf("%q", name)
+}
+
+func addHostSQLRequirement(by map[string]hostRequirement, add func(string, ...any), key string, requirement hostRequirement) {
+	prev, ok := by[key]
+	if !ok {
+		by[key] = requirement
+		return
+	}
+	prev.mergeSQL(add, key, requirement)
+	by[key] = prev
+}
+
+func addHostLibraryRequirement(by map[string]hostRequirement, add func(string, ...any), key string, requirement hostRequirement) {
+	prev, ok := by[key]
+	if !ok {
+		by[key] = requirement
+		return
+	}
+	prev.mergeLibrary(add, key, requirement)
+	by[key] = prev
 }
 
 // normalizedSettingValue removes one PostgreSQL string-literal quoting layer
@@ -758,27 +834,40 @@ func providerText(source, pkg, preload string) string {
 // a database or recovery declaration, and ignores human notes. An absent
 // recovery_extensions is different from an explicitly empty one.
 func ExtensionIntentChanges(old, updated Cluster) []string {
-	used := map[string]bool{}
+	used := extensionIntentUsed(old)
+	for name := range extensionIntentUsed(updated) {
+		used[name] = true
+	}
 	for _, name := range catalog.Defaults() {
 		used[name] = true
 	}
-	collect := func(c Cluster) {
-		for _, spec := range c.Clusters {
-			for _, name := range spec.Extensions {
+
+	changes := extensionDefinitionChanges(used, old, updated)
+	changes = append(changes, clusterExtensionIntentChanges(old, updated)...)
+	sort.Strings(changes)
+	return slices.Compact(changes)
+}
+
+// extensionIntentUsed collects the canonical names any database or recovery
+// declaration in c uses.
+func extensionIntentUsed(c Cluster) map[string]bool {
+	used := map[string]bool{}
+	for _, spec := range c.Clusters {
+		for _, name := range spec.Extensions {
+			canonical, _ := c.ExtensionResolver().Canonical(name)
+			used[canonical] = true
+		}
+		if spec.RecoveryExtensions != nil {
+			for _, name := range *spec.RecoveryExtensions {
 				canonical, _ := c.ExtensionResolver().Canonical(name)
 				used[canonical] = true
 			}
-			if spec.RecoveryExtensions != nil {
-				for _, name := range *spec.RecoveryExtensions {
-					canonical, _ := c.ExtensionResolver().Canonical(name)
-					used[canonical] = true
-				}
-			}
 		}
 	}
-	collect(old)
-	collect(updated)
+	return used
+}
 
+func extensionDefinitionChanges(used map[string]bool, old, updated Cluster) []string {
 	var changes []string
 	for name := range used {
 		before, beforeOK := old.ExtensionResolver().Lookup(name)
@@ -787,6 +876,11 @@ func ExtensionIntentChanges(old, updated Cluster) []string {
 			changes = append(changes, "extensions."+name)
 		}
 	}
+	return changes
+}
+
+func clusterExtensionIntentChanges(old, updated Cluster) []string {
+	var changes []string
 	for _, beforeSpec := range old.Clusters {
 		afterSpec, ok := updated.ClusterByName(beforeSpec.Name)
 		if !ok {
@@ -799,8 +893,7 @@ func ExtensionIntentChanges(old, updated Cluster) []string {
 			changes = append(changes, "clusters."+beforeSpec.Name+".recovery_extensions")
 		}
 	}
-	sort.Strings(changes)
-	return slices.Compact(changes)
+	return changes
 }
 
 func canonicalListFor(c Cluster, names []string) []string {

@@ -76,7 +76,7 @@ func (f *fakeForkRenameSQL) addSession(oid, app string) {
 	f.sessions = append(f.sessions, &fakeForkSession{pid: f.nextPID, oid: oid, app: app})
 }
 
-func (f *fakeForkRenameSQL) addPrepared(oid string, count int) { f.prepared[oid] = count }
+func (f *fakeForkRenameSQL) addPrepared(oid string) { f.prepared[oid] = 1 }
 
 func (f *fakeForkRenameSQL) dbByName(name string) *fakeForkDatabase {
 	for _, database := range f.databases {
@@ -331,9 +331,10 @@ func (f *fakeForkRenameSQL) indexOfExec(exact string) int {
 	return -1
 }
 
-func (f *fakeForkRenameSQL) indexOfExecPrefix(prefix string) int {
+// indexOfBeginTransaction reports where the rename transaction body starts.
+func (f *fakeForkRenameSQL) indexOfBeginTransaction() int {
 	for i, sql := range f.executed {
-		if strings.HasPrefix(sql, prefix) {
+		if strings.HasPrefix(sql, "BEGIN;") {
 			return i
 		}
 	}
@@ -354,7 +355,7 @@ func TestForkRenameQuiescesOnlyCapturedOIDAndRestoresOriginalFlag(t *testing.T) 
 	fake.addSession("42", "pg_cron scheduler")
 	fake.addSession("42", "app")
 	fake.addSession("7", "pg_cron scheduler")
-	fake.addPrepared("7", 1)
+	fake.addPrepared("7")
 
 	err := renameForkOnCopy(context.Background(), fakeForkRenameTarget(fake), "app", "target", rolePasswords("target"))
 	if err != nil {
@@ -383,7 +384,7 @@ func TestForkRenameQuiescesOnlyCapturedOIDAndRestoresOriginalFlag(t *testing.T) 
 	if attestEvent >= gateEvent || gateEvent >= terminateEvent || terminateEvent >= transactionEvent {
 		t.Fatalf("effect order: attest=%d gate=%d terminate=%d transaction=%d", attestEvent, gateEvent, terminateEvent, transactionEvent)
 	}
-	transaction := fake.indexOfExecPrefix("BEGIN;")
+	transaction := fake.indexOfBeginTransaction()
 	terminate := fake.indexOfQuery("pg_terminate_backend")
 	body := fake.executed[transaction]
 	for _, want := range []string{
@@ -552,7 +553,7 @@ func TestForkRenamePreparedXactSQLJoinsCatalogByCapturedOID(t *testing.T) {
 
 func TestForkRenameRefusesPreparedTransactionBeforeGate(t *testing.T) {
 	fake := newFakeForkRenameSQL()
-	fake.addPrepared("42", 1)
+	fake.addPrepared("42")
 	err := renameForkOnCopy(context.Background(), fakeForkRenameTarget(fake), "app", "target", rolePasswords("target"))
 	if err == nil || !strings.Contains(err.Error(), "prepared transactions") {
 		t.Fatalf("prepared transaction = %v", err)
@@ -564,7 +565,7 @@ func TestForkRenameRefusesPreparedTransactionBeforeGate(t *testing.T) {
 
 func TestForkRenamePreparesTransactionDuringDrainCompensates(t *testing.T) {
 	fake := newFakeForkRenameSQL()
-	fake.onGate = func(f *fakeForkRenameSQL) { f.addPrepared("42", 1) }
+	fake.onGate = func(f *fakeForkRenameSQL) { f.addPrepared("42") }
 	err := renameForkOnCopy(context.Background(), fakeForkRenameTarget(fake), "app", "target", rolePasswords("target"))
 	if err == nil || !strings.Contains(err.Error(), "prepared transactions") {
 		t.Fatalf("prepared transaction during drain = %v", err)
@@ -586,7 +587,7 @@ func TestForkRenameDrainBoundsReconnectingScheduler(t *testing.T) {
 	if got := strings.Count(strings.Join(fake.queries, "\n"), "pg_terminate_backend(pid, 2000)"); got != forkRenameDrainRounds {
 		t.Fatalf("termination rounds = %d, want the bound %d", got, forkRenameDrainRounds)
 	}
-	if fake.indexOfExecPrefix("BEGIN;") >= 0 {
+	if fake.indexOfBeginTransaction() >= 0 {
 		t.Fatal("the rename ran with unresolved sessions")
 	}
 	database := fake.dbByName("app")

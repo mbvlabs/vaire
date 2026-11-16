@@ -723,6 +723,12 @@ func jobDrill(ctx context.Context, env *jobEnv) (result any, jobErr error) {
 	if restoreErr != nil {
 		return drillRestoreFailure(env, m, &drill, record, fail, restoreErr, started, retain, name)
 	}
+	return verifyDrillCopy(ctx, env, &drill, m, plan, latest, live, cfg, spec, db, record, fail)
+}
+
+// verifyDrillCopy runs the restored copy's cron, extension, open, amcheck and
+// table checks, records the result, and returns the job's result.
+func verifyDrillCopy(ctx context.Context, env *jobEnv, drill *backup.Drill, m *backup.Materialised, plan *extensionCopyPlan, latest backup.Set, live pg.Local, cfg config.Cluster, spec config.ClusterSpec, db string, record func(), fail func(string, error) (any, error)) (any, error) {
 	if plan.Plan.Cron {
 		if _, err := deactivateCopyCron(ctx, m.PG()); err != nil {
 			return fail("extensions", err)
@@ -743,18 +749,8 @@ func jobDrill(ctx context.Context, env *jobEnv) (result any, jobErr error) {
 		return fail("open "+db, err)
 	}
 	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "open " + db, OK: true})
-	amctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	err = env.shell().Exec(amctx, env.Job, engine.Command{Name: "runuser", Args: []string{
-		"-u", "postgres", "--", "/usr/lib/postgresql/18/bin/pg_amcheck", "-h", copyPG.Host, "-p", strconv.Itoa(copyPG.Port),
-		"--install-missing", "--database=" + db,
-	}}, env.Report)
-	cancel()
-	ok := err == nil
-	check := backup.DrillCheck{Name: "amcheck " + db, OK: ok}
-	if err != nil {
-		check.Detail = secrets.Redact(err.Error())
-	}
-	drill.Checks = append(drill.Checks, check)
+	ok, detail := drillAmcheck(ctx, env, copyPG, db)
+	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "amcheck " + db, OK: ok, Detail: detail})
 	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "tables", OK: true, Detail: tableDiff(compareRows(ctx, live, copyPG, db))})
 	drill.Result = backup.DrillPass
 	if !ok {
@@ -766,6 +762,19 @@ func jobDrill(ctx context.Context, env *jobEnv) (result any, jobErr error) {
 			"Read the checks in the job result with vaire job follow "+env.ID+".").WithDetails(map[string]any{"drill": drill})
 	}
 	return drill, nil
+}
+
+func drillAmcheck(ctx context.Context, env *jobEnv, copyPG pg.Local, db string) (ok bool, detail string) {
+	amctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	err := env.shell().Exec(amctx, env.Job, engine.Command{Name: "runuser", Args: []string{
+		"-u", "postgres", "--", "/usr/lib/postgresql/18/bin/pg_amcheck", "-h", copyPG.Host, "-p", strconv.Itoa(copyPG.Port),
+		"--install-missing", "--database=" + db,
+	}}, env.Report)
+	if err != nil {
+		return false, secrets.Redact(err.Error())
+	}
+	return true, ""
 }
 
 func drillSetup(env *jobEnv) (drillParams, config.Cluster, config.ClusterSpec, string, backup.Records, error) {

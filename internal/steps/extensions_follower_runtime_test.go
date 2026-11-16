@@ -278,10 +278,10 @@ func TestPlanFollowerRuntimeCollectsGuardOnlyRetainedMetadata(t *testing.T) {
 }
 
 func TestPlanFollowerRuntimeCurrentDescriptorWinsHistory(t *testing.T) {
-	cfg, follower := followerRuntimeTestConfig(t)
+	cfg, _ := followerRuntimeTestConfig(t)
 	cfg.Clusters[0].Extensions = []string{"pg_cron"}
 	cfg.Clusters[1].Extensions = []string{"pg_cron"}
-	follower = cfg.Clusters[1]
+	follower := cfg.Clusters[1]
 	oldExt := catalog.Extension{
 		Name: "pg_cron", ExtName: "pg_cron", Source: catalog.SourcePreinstalled, Preload: "pg_cron",
 		Settings: map[string]string{"cron.database_name": "'old'"}, CopySafety: catalog.CopySafetyDisabled,
@@ -320,7 +320,7 @@ func TestPlanFollowerRuntimeCurrentDescriptorWinsHistory(t *testing.T) {
 }
 
 func TestPlanFollowerRuntimeExpectedOwnMandatoryOverlay(t *testing.T) {
-	cfg, follower := followerRuntimeTestConfig(t)
+	cfg, _ := followerRuntimeTestConfig(t)
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
@@ -332,7 +332,7 @@ func TestPlanFollowerRuntimeExpectedOwnMandatoryOverlay(t *testing.T) {
 	}
 	cfg.Clusters[0].Extensions = []string{"addon"}
 	cfg.Clusters[1].Extensions = []string{"addon"}
-	follower = cfg.Clusters[1]
+	follower := cfg.Clusters[1]
 	restore := SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return map[string]bool{"plpgsql": true, "addon_ext": true}, nil
 	})

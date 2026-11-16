@@ -105,25 +105,14 @@ func TestExtensionDefinitionsAndRecoveryRoundTrip(t *testing.T) {
 func TestRecoveryExtensionsPresence(t *testing.T) {
 	base := extensionCluster(t)
 	cases := []struct {
-		name  string
-		value *[]string
-		check func(*testing.T, *[]string)
+		name     string
+		value    *[]string
+		wantNil  bool
+		wantList []string
 	}{
-		{name: "absent", value: nil, check: func(t *testing.T, got *[]string) {
-			if got != nil {
-				t.Fatalf("absent became %v", got)
-			}
-		}},
-		{name: "explicit empty", value: &[]string{}, check: func(t *testing.T, got *[]string) {
-			if got == nil || len(*got) != 0 {
-				t.Fatalf("explicit empty became %v", got)
-			}
-		}},
-		{name: "populated", value: &[]string{"pg_trgm", "vector"}, check: func(t *testing.T, got *[]string) {
-			if got == nil || !slices.Equal(*got, []string{"pg_trgm", "vector"}) {
-				t.Fatalf("populated became %v", got)
-			}
-		}},
+		{name: "absent", value: nil, wantNil: true},
+		{name: "explicit empty", value: &[]string{}, wantList: []string{}},
+		{name: "populated", value: &[]string{"pg_trgm", "vector"}, wantList: []string{"pg_trgm", "vector"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,7 +127,7 @@ func TestRecoveryExtensionsPresence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tc.check(t, got.Clusters[0].RecoveryExtensions)
+			checkRecoveryExtensionsPresence(t, got.Clusters[0].RecoveryExtensions, tc.wantNil, tc.wantList)
 			again, err := got.Encode()
 			if err != nil {
 				t.Fatal(err)
@@ -147,6 +136,24 @@ func TestRecoveryExtensionsPresence(t *testing.T) {
 				t.Fatalf("presence did not survive a second round trip:\n%s\n---\n%s", raw, again)
 			}
 		})
+	}
+}
+
+func checkRecoveryExtensionsPresence(t *testing.T, got *[]string, wantNil bool, wantList []string) {
+	t.Helper()
+	switch {
+	case wantNil:
+		if got != nil {
+			t.Fatalf("absent became %v", got)
+		}
+	case len(wantList) == 0:
+		if got == nil || len(*got) != 0 {
+			t.Fatalf("explicit empty became %v", got)
+		}
+	default:
+		if got == nil || !slices.Equal(*got, wantList) {
+			t.Fatalf("populated became %v", got)
+		}
 	}
 }
 
@@ -904,258 +911,277 @@ func TestHostProviderValidationIncludesImplicitDefaults(t *testing.T) {
 }
 
 func TestHostAggregateSameSQLMetadata(t *testing.T) {
-	def := sharedSQLDefinition
-	t.Run("baseline defaults remain compatible", func(t *testing.T) {
-		cfg := extensionCluster(t)
-		cfg.Clusters = append(cfg.Clusters, hostClusterSpec("other", 5434))
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("baseline host refused: %v", err)
-		}
-		packages, err := cfg.ExtensionResolver().Packages(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(packages) != 0 {
-			t.Fatalf("baseline package union = %v", packages)
-		}
-	})
+	t.Run("baseline defaults remain compatible", testHostBaselineDefaults)
+	t.Run("different preloads and settings across databases", testHostDifferentPreloadsAndSettings)
+	t.Run("same preload conflicting settings across databases", testHostSamePreloadConflictingSettings)
+	t.Run("different preloads with equal normalized settings", testHostDifferentPreloadsEqualNormalizedSettings)
+	t.Run("different preloads with disjoint settings", testHostDifferentPreloadsDisjointSettings)
+	t.Run("sparse duplicate omits preload and settings", testHostSparseDuplicate)
+	t.Run("same preload sparse overlapping equal settings", testHostSamePreloadSparseOverlapping)
+	t.Run("sparse first does not mask a later preload conflict", testHostSparseFirstPreloadConflict)
+	t.Run("sparse first does not mask a later setting conflict", testHostSparseFirstSettingConflict)
+	t.Run("rich first then sparse does not mask a later conflict", testHostRichFirstSparseConflict)
+	t.Run("sparse first still accumulates compatible requirements", testHostSparseFirstAccumulates)
+	t.Run("rich first then sparse remains compatible", testHostRichFirstSparseCompatible)
+}
 
-	t.Run("different preloads and settings across databases", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("one_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("two_lib", map[string]string{"shared.mode": "off"}),
-		}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
-		err := cfg.Validate()
-		if err == nil {
-			t.Fatal("conflicting same-SQL metadata passed")
-		}
-		for _, want := range []string{
-			`resolve SQL extension "shared" with conflicting preload libraries`,
-			`resolve SQL extension "shared" with conflicting setting "shared.mode"`,
-		} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("missing %q: %v", want, err)
-			}
-		}
-	})
+func testHostBaselineDefaults(t *testing.T) {
+	cfg := extensionCluster(t)
+	cfg.Clusters = append(cfg.Clusters, hostClusterSpec("other", 5434))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("baseline host refused: %v", err)
+	}
+	packages, err := cfg.ExtensionResolver().Packages(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packages) != 0 {
+		t.Fatalf("baseline package union = %v", packages)
+	}
+}
 
-	t.Run("same preload conflicting settings across databases", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("shared_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("shared_lib", map[string]string{"shared.mode": "off"}),
-		}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting setting "shared.mode"`) {
-			t.Fatalf("conflicting settings passed: %v", err)
+func testHostDifferentPreloadsAndSettings(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("one_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("two_lib", map[string]string{"shared.mode": "off"}),
+	}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("conflicting same-SQL metadata passed")
+	}
+	for _, want := range []string{
+		`resolve SQL extension "shared" with conflicting preload libraries`,
+		`resolve SQL extension "shared" with conflicting setting "shared.mode"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q: %v", want, err)
 		}
-	})
+	}
+}
 
-	t.Run("different preloads with equal normalized settings", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("one_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("two_lib", map[string]string{"shared.mode": "'on'"}),
-		}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
-			t.Fatalf("conflicting preloads passed: %v", err)
-		}
-		if strings.Contains(err.Error(), `conflicting setting "shared.mode"`) {
-			t.Fatalf("equal normalized settings were reported as a conflict: %v", err)
-		}
-	})
+func testHostSamePreloadConflictingSettings(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "off"}),
+	}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting setting "shared.mode"`) {
+		t.Fatalf("conflicting settings passed: %v", err)
+	}
+}
 
-	t.Run("different preloads with disjoint settings", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("one_lib", map[string]string{"shared.one": "on"}),
-			"two": def("two_lib", map[string]string{"shared.two": "off"}),
-		}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
-			t.Fatalf("distinct preloads passed: %v", err)
-		}
-	})
+func testHostDifferentPreloadsEqualNormalizedSettings(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("one_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("two_lib", map[string]string{"shared.mode": "'on'"}),
+	}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
+		t.Fatalf("conflicting preloads passed: %v", err)
+	}
+	if strings.Contains(err.Error(), `conflicting setting "shared.mode"`) {
+		t.Fatalf("equal normalized settings were reported as a conflict: %v", err)
+	}
+}
 
-	t.Run("sparse duplicate omits preload and settings", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("", nil),
-			"two": def("shared_lib", map[string]string{"shared.mode": "on"}),
-		}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("compatible sparse metadata refused: %v", err)
-		}
-	})
+func testHostDifferentPreloadsDisjointSettings(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("one_lib", map[string]string{"shared.one": "on"}),
+		"two": sharedSQLDefinition("two_lib", map[string]string{"shared.two": "off"}),
+	}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
+		t.Fatalf("distinct preloads passed: %v", err)
+	}
+}
 
-	t.Run("same preload sparse overlapping equal settings", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("shared_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("shared_lib", map[string]string{"shared.mode": "'on'", "shared.extra": "off"}),
-		}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("compatible overlapping settings refused: %v", err)
-		}
-	})
+func testHostSparseDuplicate(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("", nil),
+		"two": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+	}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("compatible sparse metadata refused: %v", err)
+	}
+}
 
-	t.Run("sparse first does not mask a later preload conflict", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"sparse": def("", nil),
-			"rich":   def("one_lib", map[string]string{"shared.mode": "on"}),
-			"other":  def("two_lib", map[string]string{"shared.mode": "off"}),
-		}, hostClusterSpec("app", 5433, "sparse"), hostClusterSpec("rich", 5434, "rich"), hostClusterSpec("third", 5435, "other"))
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
-			t.Fatalf("sparse first masked a preload conflict: %v", err)
-		}
-	})
+func testHostSamePreloadSparseOverlapping(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "'on'", "shared.extra": "off"}),
+	}, hostClusterSpec("app", 5433, "one"), hostClusterSpec("other", 5434, "two"))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("compatible overlapping settings refused: %v", err)
+	}
+}
 
-	t.Run("sparse first does not mask a later setting conflict", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"sparse": def("", nil),
-			"on":     def("", map[string]string{"shared.mode": "on"}),
-			"off":    def("", map[string]string{"shared.mode": "off"}),
-		}, hostClusterSpec("app", 5433, "sparse"), hostClusterSpec("on", 5434, "on"), hostClusterSpec("off", 5435, "off"))
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting setting "shared.mode"`) {
-			t.Fatalf("sparse first masked a setting conflict: %v", err)
-		}
-	})
+func testHostSparseFirstPreloadConflict(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"sparse": sharedSQLDefinition("", nil),
+		"rich":   sharedSQLDefinition("one_lib", map[string]string{"shared.mode": "on"}),
+		"other":  sharedSQLDefinition("two_lib", map[string]string{"shared.mode": "off"}),
+	}, hostClusterSpec("app", 5433, "sparse"), hostClusterSpec("rich", 5434, "rich"), hostClusterSpec("third", 5435, "other"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
+		t.Fatalf("sparse first masked a preload conflict: %v", err)
+	}
+}
 
-	t.Run("rich first then sparse does not mask a later conflict", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"rich":   def("one_lib", map[string]string{"shared.mode": "on"}),
-			"sparse": def("", nil),
-			"other":  def("two_lib", map[string]string{"shared.mode": "off"}),
-		}, hostClusterSpec("rich", 5433, "rich"), hostClusterSpec("app", 5434, "sparse"), hostClusterSpec("third", 5435, "other"))
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
-			t.Fatalf("rich first masked a preload conflict: %v", err)
-		}
-	})
+func testHostSparseFirstSettingConflict(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"sparse": sharedSQLDefinition("", nil),
+		"on":     sharedSQLDefinition("", map[string]string{"shared.mode": "on"}),
+		"off":    sharedSQLDefinition("", map[string]string{"shared.mode": "off"}),
+	}, hostClusterSpec("app", 5433, "sparse"), hostClusterSpec("on", 5434, "on"), hostClusterSpec("off", 5435, "off"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting setting "shared.mode"`) {
+		t.Fatalf("sparse first masked a setting conflict: %v", err)
+	}
+}
 
-	t.Run("sparse first still accumulates compatible requirements", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"sparse": def("", nil),
-			"rich":   def("shared_lib", map[string]string{"shared.mode": "on"}),
-			"equal":  def("shared_lib", map[string]string{"shared.mode": "'on'", "shared.extra": "off"}),
-		}, hostClusterSpec("app", 5433, "sparse"), hostClusterSpec("rich", 5434, "rich"), hostClusterSpec("equal", 5435, "equal"))
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("compatible accumulated requirements refused: %v", err)
-		}
-	})
+func testHostRichFirstSparseConflict(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"rich":   sharedSQLDefinition("one_lib", map[string]string{"shared.mode": "on"}),
+		"sparse": sharedSQLDefinition("", nil),
+		"other":  sharedSQLDefinition("two_lib", map[string]string{"shared.mode": "off"}),
+	}, hostClusterSpec("rich", 5433, "rich"), hostClusterSpec("app", 5434, "sparse"), hostClusterSpec("third", 5435, "other"))
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
+		t.Fatalf("rich first masked a preload conflict: %v", err)
+	}
+}
 
-	t.Run("rich first then sparse remains compatible", func(t *testing.T) {
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"sparse": def("", nil),
-			"rich":   def("shared_lib", map[string]string{"shared.mode": "on"}),
-		}, hostClusterSpec("rich", 5433, "rich"), hostClusterSpec("app", 5434, "sparse"))
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("rich then sparse refused: %v", err)
-		}
-	})
+func testHostSparseFirstAccumulates(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"sparse": sharedSQLDefinition("", nil),
+		"rich":   sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+		"equal":  sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "'on'", "shared.extra": "off"}),
+	}, hostClusterSpec("app", 5433, "sparse"), hostClusterSpec("rich", 5434, "rich"), hostClusterSpec("equal", 5435, "equal"))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("compatible accumulated requirements refused: %v", err)
+	}
+}
+
+func testHostRichFirstSparseCompatible(t *testing.T) {
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"sparse": sharedSQLDefinition("", nil),
+		"rich":   sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+	}, hostClusterSpec("rich", 5433, "rich"), hostClusterSpec("app", 5434, "sparse"))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("rich then sparse refused: %v", err)
+	}
 }
 
 func TestHostAggregateCurrentRecoveryMetadata(t *testing.T) {
-	def := sharedSQLDefinition
-	t.Run("current and recovery conflicting preloads and settings", func(t *testing.T) {
-		db := hostClusterSpec("app", 5433, "one")
-		recovery := []string{"two"}
-		db.RecoveryExtensions = &recovery
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("one_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("two_lib", map[string]string{"shared.mode": "off"}),
-		}, db)
-		err := cfg.Validate()
-		if err == nil {
-			t.Fatal("conflicting current/recovery metadata passed")
-		}
-		for _, want := range []string{
-			`clusters.app.recovery_extensions "two"`,
-			`resolve SQL extension "shared" with conflicting preload libraries`,
-			`resolve SQL extension "shared" with conflicting setting "shared.mode"`,
-		} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("missing %q: %v", want, err)
-			}
-		}
-	})
+	t.Run("current and recovery conflicting preloads and settings", testHostCurrentRecoveryConflicts)
+	t.Run("current and recovery same preload conflicting settings", testHostCurrentRecoverySamePreload)
+	t.Run("recovery metadata is checked across databases", testHostRecoveryAcrossDatabases)
+	t.Run("sparse recovery accumulates against a rich current selection", testHostSparseRecovery)
+	t.Run("rich recovery accumulates against a sparse current selection", testHostRichRecovery)
+	t.Run("same descriptor in current and recovery", testHostSameCurrentRecovery)
+	t.Run("explicitly empty recovery still adds defaults only", testHostEmptyRecovery)
+}
 
-	t.Run("current and recovery same preload conflicting settings", func(t *testing.T) {
-		db := hostClusterSpec("app", 5433, "one")
-		recovery := []string{"two"}
-		db.RecoveryExtensions = &recovery
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("shared_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("shared_lib", map[string]string{"shared.mode": "off"}),
-		}, db)
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting setting "shared.mode"`) {
-			t.Fatalf("conflicting current/recovery settings passed: %v", err)
+func testHostCurrentRecoveryConflicts(t *testing.T) {
+	db := hostClusterSpec("app", 5433, "one")
+	recovery := []string{"two"}
+	db.RecoveryExtensions = &recovery
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("one_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("two_lib", map[string]string{"shared.mode": "off"}),
+	}, db)
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("conflicting current/recovery metadata passed")
+	}
+	for _, want := range []string{
+		`clusters.app.recovery_extensions "two"`,
+		`resolve SQL extension "shared" with conflicting preload libraries`,
+		`resolve SQL extension "shared" with conflicting setting "shared.mode"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q: %v", want, err)
 		}
-	})
+	}
+}
 
-	t.Run("recovery metadata is checked across databases", func(t *testing.T) {
-		first := hostClusterSpec("app", 5433, "one")
-		second := hostClusterSpec("other", 5434)
-		recovery := []string{"two"}
-		second.RecoveryExtensions = &recovery
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("one_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("two_lib", map[string]string{"shared.mode": "off"}),
-		}, first, second)
-		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
-			t.Fatalf("cross-database recovery metadata passed: %v", err)
-		}
-	})
+func testHostCurrentRecoverySamePreload(t *testing.T) {
+	db := hostClusterSpec("app", 5433, "one")
+	recovery := []string{"two"}
+	db.RecoveryExtensions = &recovery
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "off"}),
+	}, db)
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting setting "shared.mode"`) {
+		t.Fatalf("conflicting current/recovery settings passed: %v", err)
+	}
+}
 
-	t.Run("sparse recovery accumulates against a rich current selection", func(t *testing.T) {
-		db := hostClusterSpec("app", 5433, "one")
-		recovery := []string{"two"}
-		db.RecoveryExtensions = &recovery
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("shared_lib", map[string]string{"shared.mode": "on"}),
-			"two": def("", nil),
-		}, db)
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("sparse recovery refused: %v", err)
-		}
-	})
+func testHostRecoveryAcrossDatabases(t *testing.T) {
+	first := hostClusterSpec("app", 5433, "one")
+	second := hostClusterSpec("other", 5434)
+	recovery := []string{"two"}
+	second.RecoveryExtensions = &recovery
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("one_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("two_lib", map[string]string{"shared.mode": "off"}),
+	}, first, second)
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `resolve SQL extension "shared" with conflicting preload libraries`) {
+		t.Fatalf("cross-database recovery metadata passed: %v", err)
+	}
+}
 
-	t.Run("rich recovery accumulates against a sparse current selection", func(t *testing.T) {
-		db := hostClusterSpec("app", 5433, "one")
-		recovery := []string{"two"}
-		db.RecoveryExtensions = &recovery
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("", nil),
-			"two": def("shared_lib", map[string]string{"shared.mode": "on"}),
-		}, db)
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("rich recovery refused: %v", err)
-		}
-	})
+func testHostSparseRecovery(t *testing.T) {
+	db := hostClusterSpec("app", 5433, "one")
+	recovery := []string{"two"}
+	db.RecoveryExtensions = &recovery
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+		"two": sharedSQLDefinition("", nil),
+	}, db)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("sparse recovery refused: %v", err)
+	}
+}
 
-	t.Run("same descriptor in current and recovery", func(t *testing.T) {
-		db := hostClusterSpec("app", 5433, "one")
-		recovery := []string{"one"}
-		db.RecoveryExtensions = &recovery
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("shared_lib", map[string]string{"shared.mode": "on"}),
-		}, db)
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("identical current/recovery selection refused: %v", err)
-		}
-	})
+func testHostRichRecovery(t *testing.T) {
+	db := hostClusterSpec("app", 5433, "one")
+	recovery := []string{"two"}
+	db.RecoveryExtensions = &recovery
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("", nil),
+		"two": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+	}, db)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("rich recovery refused: %v", err)
+	}
+}
 
-	t.Run("explicitly empty recovery still adds defaults only", func(t *testing.T) {
-		db := hostClusterSpec("app", 5433, "one")
-		empty := []string{}
-		db.RecoveryExtensions = &empty
-		cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
-			"one": def("shared_lib", map[string]string{"shared.mode": "on"}),
-		}, db)
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("explicitly empty recovery refused: %v", err)
-		}
-	})
+func testHostSameCurrentRecovery(t *testing.T) {
+	db := hostClusterSpec("app", 5433, "one")
+	recovery := []string{"one"}
+	db.RecoveryExtensions = &recovery
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+	}, db)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("identical current/recovery selection refused: %v", err)
+	}
+}
+
+func testHostEmptyRecovery(t *testing.T) {
+	db := hostClusterSpec("app", 5433, "one")
+	empty := []string{}
+	db.RecoveryExtensions = &empty
+	cfg := hostExtensionCluster(t, map[string]ExtensionDefinition{
+		"one": sharedSQLDefinition("shared_lib", map[string]string{"shared.mode": "on"}),
+	}, db)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicitly empty recovery refused: %v", err)
+	}
 }
 
 func TestHostAggregateDatabasePlaceholderIsNotFalseConflict(t *testing.T) {

@@ -59,7 +59,7 @@ func TestHandleApplyReleasesTransitionTargetLocksOnFailure(t *testing.T) {
 		if fail {
 			return nil, release, errors.New("follower runtime verification failed")
 		}
-		return nil, release, &extensionApplyPending{Message: "waiting for the follower restart token"}
+		return nil, release, &extensionApplyPendingError{Message: "waiting for the follower restart token"}
 	}
 	withServeActivity(t, &fakeActivityStore{})
 	req := matchingBuildRequest("apply")

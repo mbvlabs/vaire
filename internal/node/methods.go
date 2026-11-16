@@ -610,49 +610,15 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	if !env.Req.DryRun {
-		reloaded, err := applyReloadCluster()
-		if err != nil {
+		if err := reloadApplyCluster(env, p); err != nil {
 			return Result{}, err
 		}
-		actualMode := env.LockMode
-		if actualMode == engine.LockNone {
-			actualMode = applyLockWithConfig(env.Cluster, env.Req)
-		}
-		oldCluster, oldClusterMode := applyClusterLockWithConfig(env.Cluster, env.Req)
-		newCluster, newClusterMode := applyClusterLockWithConfig(reloaded, env.Req)
-		if actualMode != applyLockWithConfig(reloaded, env.Req) || oldCluster != newCluster || oldClusterMode != newClusterMode {
-			return Result{}, output.NewError(output.CodePrecondition,
-				"cluster.toml changed while apply waited for its lock, so the locked target set is stale",
-				output.ExitPrecondition, "Retry vaire apply; it will take the current envelope and target locks.").
-				WithDetails(map[string]any{"reason": "apply_lock_class_changed", "database": p.DB})
-		}
-		env.Cluster = reloaded
 	}
 	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
-	if !env.Req.DryRun && p.DB != "" && len(p.Steps) == 0 {
-		if fence, ok, err := forkFenceFor(env.Cluster, p.DB); err != nil {
-			return Result{}, err
-		} else if ok {
-			_, found, err := readMaterialisation(p.DB, env.Cluster.Server.DataRoot)
-			if err != nil {
-				return Result{}, materialisationIncomplete(p.DB, nil)
-			}
-			if found || fence.Phase != fencePhaseRouting {
-				lease := materialisationContinuationLeaseFrom(ctx)
-				if lease == nil {
-					return Result{}, materialisationIncomplete(p.DB, nil)
-				}
-				scope, err := openForkContinuation(ctx, env.Cluster, env, lease)
-				if err != nil {
-					return Result{}, err
-				}
-				defer scope.close()
-				ctx = withForkContinuationScope(ctx, scope)
-			}
-			return resumeForkSettlementAt(ctx, env, fence)
-		}
+	if res, handled, err := applyForkContinuation(ctx, env, p); handled || err != nil {
+		return res, err
 	}
 	if err := refuseActiveActivationFences(env.Cluster, p); err != nil {
 		return Result{}, err
@@ -668,34 +634,37 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 			return Result{}, err
 		}
 	}
-	var transitionWarnings []output.Warning
-	if !env.Req.DryRun {
-		warnings, release, err := applyTransitions(ctx, env, p)
-		// Every non-nil release belongs to this request once it has been
-		// returned: install it before any error branch so a failure after the
-		// transition took its target locks cannot leak them.
-		if release != nil {
-			defer release()
-		}
-		if err != nil {
-			var pending *extensionApplyPending
-			if errors.As(err, &pending) {
-				return Result{Data: pending.Data, Warnings: append(pending.Warnings, NoOffsiteWarning(env.Cluster)...)}, nil
-			}
-			return Result{}, output.WithWarnings(err, warnings...)
-		}
-		transitionWarnings = warnings
+	transitionWarnings, release, pending, err := beginApplyTransitions(ctx, env, p)
+	// Every non-nil release belongs to this request once it has been
+	// returned: install it before any error branch so a failure after the
+	// transition took its target locks cannot leak them.
+	if release != nil {
+		defer release()
+	}
+	if pending != nil {
+		return *pending, nil
+	}
+	if err != nil {
+		return Result{}, err
 	}
 	if env.Req.DryRun {
-		rt := runtimeFor(env, true)
-		data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: p.Steps, DB: p.DB})
-		if err != nil {
-			return Result{}, err
-		}
-		return Result{Data: data, Warnings: append(NoOffsiteWarning(env.Cluster), oversubscriptionWarnings(env.Cluster, rt.Host)...)}, nil
+		return planApply(ctx, env, p)
 	}
 	rt := runtimeFor(env, false)
 	rt.RotateSecrets = p.RotateBackupSecrets
+	return runApply(ctx, env, p, rt, transitionWarnings)
+}
+
+func planApply(ctx context.Context, env *Env, p stepParams) (Result, error) {
+	rt := runtimeFor(env, true)
+	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: p.Steps, DB: p.DB})
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Data: data, Warnings: append(NoOffsiteWarning(env.Cluster), oversubscriptionWarnings(env.Cluster, rt.Host)...)}, nil
+}
+
+func runApply(ctx context.Context, env *Env, p stepParams, rt engine.Runtime, transitionWarnings []output.Warning) (Result, error) {
 	data, warnings, err := applyEngine(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
 		Only: p.Steps,
 		DB:   p.DB,
@@ -727,6 +696,77 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		warnings = append(warnings, doctorWarnings...)
 	}
 	return Result{Data: out, Warnings: warnings}, nil
+}
+
+// reloadApplyCluster reloads cluster.toml under the request's locks and
+// refuses to continue unless the reloaded target set needs the same locks.
+func reloadApplyCluster(env *Env, p stepParams) error {
+	reloaded, err := applyReloadCluster()
+	if err != nil {
+		return err
+	}
+	actualMode := env.LockMode
+	if actualMode == engine.LockNone {
+		actualMode = applyLockWithConfig(env.Cluster, env.Req)
+	}
+	oldCluster, oldClusterMode := applyClusterLockWithConfig(env.Cluster, env.Req)
+	newCluster, newClusterMode := applyClusterLockWithConfig(reloaded, env.Req)
+	if actualMode != applyLockWithConfig(reloaded, env.Req) || oldCluster != newCluster || oldClusterMode != newClusterMode {
+		return output.NewError(output.CodePrecondition,
+			"cluster.toml changed while apply waited for its lock, so the locked target set is stale",
+			output.ExitPrecondition, "Retry vaire apply; it will take the current envelope and target locks.").
+			WithDetails(map[string]any{"reason": "apply_lock_class_changed", "database": p.DB})
+	}
+	env.Cluster = reloaded
+	return nil
+}
+
+// applyForkContinuation finishes a fork fence through the non-secret
+// continuation. The second result reports that the fence owned this apply.
+func applyForkContinuation(ctx context.Context, env *Env, p stepParams) (Result, bool, error) {
+	if env.Req.DryRun || p.DB == "" || len(p.Steps) != 0 {
+		return Result{}, false, nil
+	}
+	fence, ok, err := forkFenceFor(p.DB)
+	if err != nil || !ok {
+		return Result{}, ok, err
+	}
+	_, found, err := readMaterialisation(p.DB, env.Cluster.Server.DataRoot)
+	if err != nil {
+		return Result{}, true, materialisationIncomplete(p.DB, nil)
+	}
+	if found || fence.Phase != fencePhaseRouting {
+		lease := materialisationContinuationLeaseFrom(ctx)
+		if lease == nil {
+			return Result{}, true, materialisationIncomplete(p.DB, nil)
+		}
+		scope, err := openForkContinuation(ctx, env.Cluster, env, lease)
+		if err != nil {
+			return Result{}, true, err
+		}
+		defer scope.close()
+		ctx = withForkContinuationScope(ctx, scope)
+	}
+	res, err := resumeForkSettlementAt(ctx, env, fence)
+	return res, true, err
+}
+
+// beginApplyTransitions applies extension transitions and keeps their target
+// locks for the rest of the request. A pending transition is already a
+// completed request, not an error.
+func beginApplyTransitions(ctx context.Context, env *Env, p stepParams) ([]output.Warning, func(), *Result, error) {
+	if env.Req.DryRun {
+		return nil, nil, nil, nil
+	}
+	warnings, release, err := applyTransitions(ctx, env, p)
+	if err != nil {
+		var pending *extensionApplyPendingError
+		if errors.As(err, &pending) {
+			return nil, release, &Result{Data: pending.Data, Warnings: append(pending.Warnings, NoOffsiteWarning(env.Cluster)...)}, nil
+		}
+		return nil, release, nil, output.WithWarnings(err, warnings...)
+	}
+	return warnings, release, nil, nil
 }
 
 // applyResult is apply's result: the steps and, after a full apply, the

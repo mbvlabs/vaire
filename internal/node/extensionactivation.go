@@ -151,34 +151,52 @@ func verifyCopyGuard(ctx context.Context, local sqlRunner, dataDir string) ([]st
 	if !present {
 		return nil, nil
 	}
-	var pending []string
-	if len(guard.Preloads) > 0 {
-		rows, err := local.Query(ctx, "postgres",
-			"SELECT current_setting('shared_preload_libraries') AS v, coalesce((SELECT pending_restart::text FROM pg_settings WHERE name = 'shared_preload_libraries'), 'false') AS p", nil)
-		if err != nil {
-			return nil, err
-		}
-		loaded := map[string]bool{}
-		pendingRestart := false
-		if len(rows) > 0 {
-			loaded = steps.ParsePreloads(rows[0]["v"])
-			pendingRestart = rows[0]["p"] == "true"
-		}
-		for _, p := range guard.Preloads {
-			if loaded[p] {
-				continue
-			}
-			if pendingRestart {
-				pending = append(pending, "shared_preload_libraries")
-				break
-			}
-			return nil, output.NewError(output.CodePrecondition,
-				"the copy's guard requires library "+p+", but it is not loaded and no restart is pending",
-				output.ExitPrecondition,
-				"Check the copy's postgresql.auto.conf and the package that provides "+p+"; the copy was not activated.").
-				WithDetails(map[string]any{"reason": "extension_copy_guard_inactive", "library": p})
-		}
+	pending, err := verifyCopyGuardPreloads(ctx, local, guard)
+	if err != nil {
+		return nil, err
 	}
+	settingPending, err := verifyCopyGuardSettings(ctx, local, guard)
+	if err != nil {
+		return nil, err
+	}
+	pending = append(pending, settingPending...)
+	sort.Strings(pending)
+	return pending, nil
+}
+
+func verifyCopyGuardPreloads(ctx context.Context, local sqlRunner, guard backup.CopyGuard) ([]string, error) {
+	if len(guard.Preloads) == 0 {
+		return nil, nil
+	}
+	rows, err := local.Query(ctx, "postgres",
+		"SELECT current_setting('shared_preload_libraries') AS v, coalesce((SELECT pending_restart::text FROM pg_settings WHERE name = 'shared_preload_libraries'), 'false') AS p", nil)
+	if err != nil {
+		return nil, err
+	}
+	loaded := map[string]bool{}
+	pendingRestart := false
+	if len(rows) > 0 {
+		loaded = steps.ParsePreloads(rows[0]["v"])
+		pendingRestart = rows[0]["p"] == "true"
+	}
+	for _, p := range guard.Preloads {
+		if loaded[p] {
+			continue
+		}
+		if pendingRestart {
+			return []string{"shared_preload_libraries"}, nil
+		}
+		return nil, output.NewError(output.CodePrecondition,
+			"the copy's guard requires library "+p+", but it is not loaded and no restart is pending",
+			output.ExitPrecondition,
+			"Check the copy's postgresql.auto.conf and the package that provides "+p+"; the copy was not activated.").
+			WithDetails(map[string]any{"reason": "extension_copy_guard_inactive", "library": p})
+	}
+	return nil, nil
+}
+
+func verifyCopyGuardSettings(ctx context.Context, local sqlRunner, guard backup.CopyGuard) ([]string, error) {
+	var pending []string
 	for _, key := range guard.SettingKeys() {
 		want := catalog.NormalizedSettingValue(guard.Settings[key])
 		rows, err := local.Query(ctx, "postgres", copyGuardSettingSQL(key), nil)
@@ -204,7 +222,6 @@ func verifyCopyGuard(ctx context.Context, local sqlRunner, dataDir string) ([]st
 			"Check the copy's postgresql.auto.conf; the copy was not activated.").
 			WithDetails(map[string]any{"reason": "extension_copy_guard_inactive", "setting": key})
 	}
-	sort.Strings(pending)
 	return pending, nil
 }
 
@@ -512,7 +529,7 @@ func reconcileDesiredExtensionSQL(ctx context.Context, cfg config.Cluster, spec 
 			have[row["name"]] = true
 		}
 		for _, name := range created {
-			if !have[extensionSQLName(cfg, spec, name)] {
+			if !have[extensionSQLName(cfg, name)] {
 				return nil, output.NewError(output.CodeStepFailed,
 					"the desired extension "+name+" is still absent from "+spec.Name+" after CREATE EXTENSION",
 					output.ExitStep, "The copy stays suppressed and unrouted; read vaire logs postgres --db "+spec.Name+".").
@@ -523,7 +540,7 @@ func reconcileDesiredExtensionSQL(ctx context.Context, cfg config.Cluster, spec 
 	return created, nil
 }
 
-func extensionSQLName(cfg config.Cluster, spec config.ClusterSpec, canonical string) string {
+func extensionSQLName(cfg config.Cluster, canonical string) string {
 	if ext, err := cfg.ExtensionResolver().Resolve(canonical); err == nil {
 		return ext.ExtName
 	}
@@ -541,10 +558,36 @@ func checkRestoredExtensions(ctx context.Context, cfg config.Cluster, spec confi
 			"The copy stays suppressed and unrouted; retry after fixing the cluster.").
 			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name})
 	}
+	desired, known, defs, err := restoredExtensionSets(cfg, spec, plan)
+	if err != nil {
+		return nil, err
+	}
+	var warnings []output.Warning
+	var unknown []string
+	for _, row := range rows {
+		warning, isUnknown := restoredExtensionOutcome(row["name"], spec, desired, known, defs)
+		if isUnknown {
+			unknown = append(unknown, row["name"])
+		}
+		if warning != nil {
+			warnings = append(warnings, *warning)
+		}
+	}
+	if len(unknown) > 0 {
+		return warnings, output.NewError(output.CodePrecondition,
+			"the restored data of "+spec.Name+" has extensions with no safe declaration: "+strings.Join(unknown, ", "),
+			output.ExitPrecondition,
+			"Declare each in [extensions.<name>] with copy_safety and standby_safe, or remove it from the data; the copy stays suppressed and unrouted.").
+			WithDetails(map[string]any{"reason": "extension_unknown", "database": spec.Name, "extensions": unknown})
+	}
+	return warnings, nil
+}
+
+func restoredExtensionSets(cfg config.Cluster, spec config.ClusterSpec, plan *backup.CopyPlan) (map[string]bool, map[string]catalog.Extension, map[string]catalog.Extension, error) {
 	desired := map[string]bool{}
 	entries, err := steps.DesiredExtensionNames(cfg, spec)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	for _, ext := range entries {
 		desired[ext.ExtName] = true
@@ -565,37 +608,25 @@ func checkRestoredExtensions(ctx context.Context, cfg config.Cluster, spec confi
 			}
 		}
 	}
-	var warnings []output.Warning
-	var unknown []string
-	for _, row := range rows {
-		name := row["name"]
-		if name == "plpgsql" || desired[name] {
-			continue
-		}
-		if ext, ok := known[name]; ok {
-			warnings = append(warnings, output.Warning{Code: "extension_retained",
-				Message: spec.Name + "'s restored data has " + name + " from its retained history; vaire keeps its library and copy settings, and does not create or drop it. Add [extensions." + ext.Name + "] to the database's intent to make it desired."})
-			continue
-		}
-		if ext, ok := defs[name]; ok {
-			if ext.CopySafety == catalog.CopySafetyUnknown {
-				unknown = append(unknown, name)
-				continue
-			}
-			warnings = append(warnings, output.Warning{Code: "extension_not_in_config",
-				Message: spec.Name + "'s restored data has " + name + ", which cluster.toml does not enable; vaire keeps it and does not drop it. Add it to extensions to manage it."})
-			continue
-		}
-		unknown = append(unknown, name)
+	return desired, known, defs, nil
+}
+
+func restoredExtensionOutcome(name string, spec config.ClusterSpec, desired map[string]bool, known, defs map[string]catalog.Extension) (*output.Warning, bool) {
+	if name == "plpgsql" || desired[name] {
+		return nil, false
 	}
-	if len(unknown) > 0 {
-		return warnings, output.NewError(output.CodePrecondition,
-			"the restored data of "+spec.Name+" has extensions with no safe declaration: "+strings.Join(unknown, ", "),
-			output.ExitPrecondition,
-			"Declare each in [extensions.<name>] with copy_safety and standby_safe, or remove it from the data; the copy stays suppressed and unrouted.").
-			WithDetails(map[string]any{"reason": "extension_unknown", "database": spec.Name, "extensions": unknown})
+	if ext, ok := known[name]; ok {
+		return &output.Warning{Code: "extension_retained",
+			Message: spec.Name + "'s restored data has " + name + " from its retained history; vaire keeps its library and copy settings, and does not create or drop it. Add [extensions." + ext.Name + "] to the database's intent to make it desired."}, false
 	}
-	return warnings, nil
+	if ext, ok := defs[name]; ok {
+		if ext.CopySafety == catalog.CopySafetyUnknown {
+			return nil, true
+		}
+		return &output.Warning{Code: "extension_not_in_config",
+			Message: spec.Name + "'s restored data has " + name + ", which cluster.toml does not enable; vaire keeps it and does not drop it. Add it to extensions to manage it."}, false
+	}
+	return nil, true
 }
 
 // pruneCopyGuardForSettlement rewrites the guard after settlement. It keeps
@@ -708,32 +739,13 @@ func persistCopySettings(name string, plan *backup.CopyPlan, db string) (config.
 	if !ok {
 		return cfg, nil, databaseNotFound(name)
 	}
-	var warnings []output.Warning
 	settings := spec.Clone().Settings
 	if settings == nil {
 		settings = map[string]string{}
 	}
-	changed := false
-	for _, ext := range plan.Requirements {
-		if ext.CopySafety != catalog.CopySafetyDisabled {
-			continue
-		}
-		for k, v := range ext.ResolvedCopySettings(db) {
-			if config.IsReservedSetting(k) {
-				return cfg, nil, output.NewError(output.CodePrecondition,
-					"extension "+ext.Name+"'s copy setting "+k+" is managed by vaire and cannot be persisted",
-					output.ExitPrecondition, "Choose a setting the extension owns; the copy was not made independent.").
-					WithDetails(map[string]any{"reason": "extension_copy_setting_reserved", "database": name, "setting": k})
-			}
-			raw := catalog.NormalizedSettingValue(v)
-			if prev, ok := settings[k]; ok && catalog.NormalizedSettingValue(prev) != raw {
-				warnings = append(warnings, output.Warning{Code: "extension_copy_setting_override",
-					Message: name + "'s inherited setting " + k + " = " + prev + " was overridden with " + raw + " to keep the copy's " + ext.Name + " background work disabled; change it deliberately after settlement"})
-			}
-			if settings[k] != raw {
-				settings[k], changed = raw, true
-			}
-		}
+	warnings, changed, err := persistCopyGuardSettings(name, db, plan, settings)
+	if err != nil {
+		return cfg, nil, err
 	}
 	if !changed {
 		return cfg, warnings, nil
@@ -754,6 +766,33 @@ func persistCopySettings(name string, plan *backup.CopyPlan, db string) (config.
 		return cfg, nil, err
 	}
 	return cfg, warnings, nil
+}
+
+func persistCopyGuardSettings(name, db string, plan *backup.CopyPlan, settings map[string]string) ([]output.Warning, bool, error) {
+	var warnings []output.Warning
+	changed := false
+	for _, ext := range plan.Requirements {
+		if ext.CopySafety != catalog.CopySafetyDisabled {
+			continue
+		}
+		for k, v := range ext.ResolvedCopySettings(db) {
+			if config.IsReservedSetting(k) {
+				return nil, false, output.NewError(output.CodePrecondition,
+					"extension "+ext.Name+"'s copy setting "+k+" is managed by vaire and cannot be persisted",
+					output.ExitPrecondition, "Choose a setting the extension owns; the copy was not made independent.").
+					WithDetails(map[string]any{"reason": "extension_copy_setting_reserved", "database": name, "setting": k})
+			}
+			raw := catalog.NormalizedSettingValue(v)
+			if prev, ok := settings[k]; ok && catalog.NormalizedSettingValue(prev) != raw {
+				warnings = append(warnings, output.Warning{Code: "extension_copy_setting_override",
+					Message: name + "'s inherited setting " + k + " = " + prev + " was overridden with " + raw + " to keep the copy's " + ext.Name + " background work disabled; change it deliberately after settlement"})
+			}
+			if settings[k] != raw {
+				settings[k], changed = raw, true
+			}
+		}
+	}
+	return warnings, changed, nil
 }
 
 // settleRestoredCopy is the same-database restore's activation sequence:

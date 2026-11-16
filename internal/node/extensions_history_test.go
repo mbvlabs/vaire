@@ -22,12 +22,12 @@ func useTempExtensionRecords(t *testing.T) {
 	t.Cleanup(func() { backup.RecordsPath = old })
 }
 
-func planCfg(t *testing.T, exts ...string) config.Cluster {
+func planCfg(t *testing.T) config.Cluster {
 	t.Helper()
 	cfg := config.DefaultCluster()
 	cfg.ClusterName, cfg.Domain = "prod", "example.com"
 	cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
-	cfg.Clusters = []config.ClusterSpec{{Name: "app", Node: "db1", Port: 5433, Stanza: "app-abc123", Size: "small", StatementTimeout: "60s", Extensions: exts}}
+	cfg.Clusters = []config.ClusterSpec{{Name: "app", Node: "db1", Port: 5433, Stanza: "app-abc123", Size: "small", StatementTimeout: "60s"}}
 	return cfg
 }
 
@@ -289,7 +289,7 @@ func TestDumpPromoteRetryKeepsFixedStanzaIdentities(t *testing.T) {
 		t.Fatalf("retry switched to %q, want recorded %q", loaded.Clusters[0].Stanza, newStanza)
 	}
 	// Interruption after the stanza save: the same identities are reused.
-	_, gotR, retryNew, retryOld, err = prepareDumpPromoteStanza(loaded, "app", spec, gotR)
+	_, _, retryNew, retryOld, err = prepareDumpPromoteStanza(loaded, "app", spec, gotR)
 	if err != nil {
 		t.Fatal(err)
 	}

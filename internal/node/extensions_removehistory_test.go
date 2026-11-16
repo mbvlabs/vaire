@@ -175,8 +175,12 @@ func TestExtRemoveSaveFailureWithoutDropReportsNoSQLStage(t *testing.T) {
 		t.Fatalf("save failure = %q / %q", cliErr.Message, cliErr.Hint)
 	}
 	details := extDetails(t, err)
+	pending, ok := details["pending"].([]string)
+	if !ok {
+		t.Fatalf("pending has unexpected type %T", details["pending"])
+	}
 	if details["sql_dropped"] != false || details["intent_saved"] != false ||
-		details["pending"].([]string)[0] != "app" {
+		len(pending) == 0 || pending[0] != "app" {
 		t.Fatalf("save failure details = %+v", details)
 	}
 	if len(h.pg.execs) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 0 || h.restartCalls != 0 {
@@ -242,8 +246,12 @@ func TestExtRemoveIntentFailureSharesEncodeSaveShape(t *testing.T) {
 	if !reflect.DeepEqual(encodeDetails, saveDetails) {
 		t.Fatalf("Encode/Save details differ:\nencode=%+v\nsave=%+v", encodeDetails, saveDetails)
 	}
+	pending, ok := saveDetails["pending"].([]string)
+	if !ok {
+		t.Fatalf("pending has unexpected type %T", saveDetails["pending"])
+	}
 	if saveDetails["sql_dropped"] != true || saveDetails["intent_saved"] != false ||
-		saveDetails["restart_required"] != true || saveDetails["pending"].([]string)[0] != "app" ||
+		saveDetails["restart_required"] != true || len(pending) == 0 || pending[0] != "app" ||
 		saveDetails["retry"] != retry {
 		t.Fatalf("shared failure details = %+v", saveDetails)
 	}

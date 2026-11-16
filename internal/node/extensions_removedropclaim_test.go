@@ -217,57 +217,61 @@ func TestExtRemoveSQLOnlyVerifyFailureReportsExecutedDrop(t *testing.T) {
 	}
 }
 
-func TestExtRemoveRetryConfigFailureReportsNoSQLDrop(t *testing.T) {
-	newRetryHarness := func(t *testing.T) *extHarness {
-		t.Helper()
-		h := newExtHarness(t, extTestCfg("pg_stat_statements"))
-		h.pendingSettings = []string{"max_files_per_process"}
-		return h
-	}
+func newRemoveRetryHarness(t *testing.T) *extHarness {
+	t.Helper()
+	h := newExtHarness(t, extTestCfg("pg_stat_statements"))
+	h.pendingSettings = []string{"max_files_per_process"}
+	return h
+}
+
+func testRemoveRetryConfigFailure(t *testing.T) {
 	params := map[string]any{"name": "pg_trgm", "db": "app"}
+	h := newRemoveRetryHarness(t)
+	h.applyFn = func(engine.Options) (engine.ApplyData, error) {
+		return engine.ApplyData{}, errors.New("config write failed")
+	}
+	env := &Env{Cluster: h.cfg, Req: extReq(t, params, "app", "app/restart")}
+	_, err := handleExtRemove(context.Background(), env)
+	if err == nil || extReason(t, err) != "extension_apply_failed" {
+		t.Fatalf("retry config failure = %v", err)
+	}
+	details := extDetails(t, err)
+	if details["sql_dropped"] != false || details["intent_saved"] != true {
+		t.Fatalf("retry config details = %+v", details)
+	}
+	if len(h.pg.execs) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 1 {
+		t.Fatalf("retry config effects: exec=%v saves=%d apply=%d",
+			h.pg.execs, len(h.saves), len(h.applyCalls))
+	}
+}
 
-	t.Run("config apply failure", func(t *testing.T) {
-		h := newRetryHarness(t)
-		h.applyFn = func(engine.Options) (engine.ApplyData, error) {
-			return engine.ApplyData{}, errors.New("config write failed")
+func testRemoveRetryVerificationFailure(t *testing.T) {
+	params := map[string]any{"name": "pg_trgm", "db": "app"}
+	h := newRemoveRetryHarness(t)
+	h.installedFn = func(call int) (map[string]extensionInstalledVersion, error) {
+		if call == 1 {
+			return map[string]extensionInstalledVersion{}, nil
 		}
-		env := &Env{Cluster: h.cfg, Req: extReq(t, params, "app", "app/restart")}
-		_, err := handleExtRemove(context.Background(), env)
-		if err == nil || extReason(t, err) != "extension_apply_failed" {
-			t.Fatalf("retry config failure = %v", err)
-		}
-		details := extDetails(t, err)
-		if details["sql_dropped"] != false || details["intent_saved"] != true {
-			t.Fatalf("retry config details = %+v", details)
-		}
-		if len(h.pg.execs) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 1 {
-			t.Fatalf("retry config effects: exec=%v saves=%d apply=%d",
-				h.pg.execs, len(h.saves), len(h.applyCalls))
-		}
-	})
+		return nil, errors.New("catalog unavailable")
+	}
+	env := &Env{Cluster: h.cfg, Req: extReq(t, params, "app", "app/restart")}
+	_, err := handleExtRemove(context.Background(), env)
+	if err == nil || extReason(t, err) != "extension_verify_failed" {
+		t.Fatalf("retry verification failure = %v", err)
+	}
+	details := extDetails(t, err)
+	if details["sql_dropped"] != false || details["intent_saved"] != true {
+		t.Fatalf("retry verification details = %+v", details)
+	}
+	if len(h.pg.execs) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 1 {
+		t.Fatalf("retry verification effects: exec=%v saves=%d apply=%d",
+			h.pg.execs, len(h.saves), len(h.applyCalls))
+	}
+}
 
-	t.Run("verification failure", func(t *testing.T) {
-		h := newRetryHarness(t)
-		h.installedFn = func(call int) (map[string]extensionInstalledVersion, error) {
-			if call == 1 {
-				return map[string]extensionInstalledVersion{}, nil
-			}
-			return nil, errors.New("catalog unavailable")
-		}
-		env := &Env{Cluster: h.cfg, Req: extReq(t, params, "app", "app/restart")}
-		_, err := handleExtRemove(context.Background(), env)
-		if err == nil || extReason(t, err) != "extension_verify_failed" {
-			t.Fatalf("retry verification failure = %v", err)
-		}
-		details := extDetails(t, err)
-		if details["sql_dropped"] != false || details["intent_saved"] != true {
-			t.Fatalf("retry verification details = %+v", details)
-		}
-		if len(h.pg.execs) != 0 || len(h.saves) != 0 || len(h.applyCalls) != 1 {
-			t.Fatalf("retry verification effects: exec=%v saves=%d apply=%d",
-				h.pg.execs, len(h.saves), len(h.applyCalls))
-		}
-	})
+func TestExtRemoveRetryConfigFailureReportsNoSQLDrop(t *testing.T) {
+	t.Run("config apply failure", testRemoveRetryConfigFailure)
+	t.Run("verification failure", testRemoveRetryVerificationFailure)
 }
 
 func newFollowerRemoveFailureHarness(t *testing.T, installed bool) (*extHarness, config.Cluster) {
@@ -282,64 +286,78 @@ func newFollowerRemoveFailureHarness(t *testing.T, installed bool) (*extHarness,
 	return h, cfg
 }
 
+func followerRemoveEnv(t *testing.T, cfg config.Cluster) *Env {
+	return &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"},
+		"app", "app/restart", "app_follower_1/restart", "app_follower_2/restart")}
+}
+
+func assertFollowerRemoveFailure(t *testing.T, h *extHarness, err error, installed bool, wantReason string, wantCompleted, wantPending []string) {
+	t.Helper()
+	if err == nil || extReason(t, err) != wantReason {
+		t.Fatalf("follower failure = %v", err)
+	}
+	details := extDetails(t, err)
+	if details["sql_dropped"] != installed || details["intent_saved"] != true {
+		t.Fatalf("follower failure details = %+v", details)
+	}
+	if completed, _ := details["completed"].([]string); !slices.Equal(completed, wantCompleted) {
+		t.Fatalf("follower failure completed = %#v", details["completed"])
+	}
+	if pending, _ := details["pending"].([]string); !slices.Equal(pending, wantPending) {
+		t.Fatalf("follower failure pending = %#v", details["pending"])
+	}
+	if len(h.pg.execs) != removeDropWantExecs(installed) {
+		t.Fatalf("follower failure effects: exec=%v", h.pg.execs)
+	}
+	removeDropAssertMessageAvoidsFalseClaim(t, err, installed)
+}
+
+func testFollowerRemovePrimaryConfigFailure(t *testing.T, installed bool) {
+	t.Helper()
+	h, cfg := newFollowerRemoveFailureHarness(t, installed)
+	h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
+		if opts.DB == "app" {
+			return engine.ApplyData{}, errors.New("primary config failed")
+		}
+		return engine.ApplyData{}, nil
+	}
+	_, err := handleExtRemove(context.Background(), followerRemoveEnv(t, cfg))
+	assertFollowerRemoveFailure(t, h, err, installed, "extension_apply_failed", nil, []string{"app"})
+}
+
+func testFollowerRemoveFollowerConfigFailure(t *testing.T, installed bool) {
+	t.Helper()
+	h, cfg := newFollowerRemoveFailureHarness(t, installed)
+	h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
+		if opts.DB != "app" {
+			return engine.ApplyData{}, errors.New("follower config failed")
+		}
+		return engine.ApplyData{}, nil
+	}
+	_, err := handleExtRemove(context.Background(), followerRemoveEnv(t, cfg))
+	assertFollowerRemoveFailure(t, h, err, installed, "extension_apply_failed", []string{"app"}, []string{"app_follower_1"})
+}
+
+func testFollowerRemoveFollowerPreloadMissing(t *testing.T, installed bool) {
+	t.Helper()
+	h, cfg := newFollowerRemoveFailureHarness(t, installed)
+	h.preloadLoaded = map[string]bool{}
+	h.preloadPending = false
+	_, err := handleExtRemove(context.Background(), followerRemoveEnv(t, cfg))
+	assertFollowerRemoveFailure(t, h, err, installed, "extension_preload_missing", []string{"app"}, []string{"app_follower_1"})
+}
+
 func TestExtRemoveFollowerFailureBoundariesReportActualSQLDrop(t *testing.T) {
 	for _, installed := range []bool{false, true} {
 		t.Run(removeDropCaseName(installed), func(t *testing.T) {
-			envFor := func(cfg config.Cluster) *Env {
-				return &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"},
-					"app", "app/restart", "app_follower_1/restart", "app_follower_2/restart")}
-			}
-			assertFailure := func(t *testing.T, h *extHarness, err error, wantReason string, wantCompleted, wantPending []string) {
-				t.Helper()
-				if err == nil || extReason(t, err) != wantReason {
-					t.Fatalf("follower failure = %v", err)
-				}
-				details := extDetails(t, err)
-				if details["sql_dropped"] != installed || details["intent_saved"] != true {
-					t.Fatalf("follower failure details = %+v", details)
-				}
-				if completed, _ := details["completed"].([]string); !slices.Equal(completed, wantCompleted) {
-					t.Fatalf("follower failure completed = %#v", details["completed"])
-				}
-				if pending, _ := details["pending"].([]string); !slices.Equal(pending, wantPending) {
-					t.Fatalf("follower failure pending = %#v", details["pending"])
-				}
-				if len(h.pg.execs) != removeDropWantExecs(installed) {
-					t.Fatalf("follower failure effects: exec=%v", h.pg.execs)
-				}
-				removeDropAssertMessageAvoidsFalseClaim(t, err, installed)
-			}
-
 			t.Run("primary config failure", func(t *testing.T) {
-				h, cfg := newFollowerRemoveFailureHarness(t, installed)
-				h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
-					if opts.DB == "app" {
-						return engine.ApplyData{}, errors.New("primary config failed")
-					}
-					return engine.ApplyData{}, nil
-				}
-				_, err := handleExtRemove(context.Background(), envFor(cfg))
-				assertFailure(t, h, err, "extension_apply_failed", nil, []string{"app"})
+				testFollowerRemovePrimaryConfigFailure(t, installed)
 			})
-
 			t.Run("follower config failure", func(t *testing.T) {
-				h, cfg := newFollowerRemoveFailureHarness(t, installed)
-				h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
-					if opts.DB != "app" {
-						return engine.ApplyData{}, errors.New("follower config failed")
-					}
-					return engine.ApplyData{}, nil
-				}
-				_, err := handleExtRemove(context.Background(), envFor(cfg))
-				assertFailure(t, h, err, "extension_apply_failed", []string{"app"}, []string{"app_follower_1"})
+				testFollowerRemoveFollowerConfigFailure(t, installed)
 			})
-
 			t.Run("follower preload missing", func(t *testing.T) {
-				h, cfg := newFollowerRemoveFailureHarness(t, installed)
-				h.preloadLoaded = map[string]bool{}
-				h.preloadPending = false
-				_, err := handleExtRemove(context.Background(), envFor(cfg))
-				assertFailure(t, h, err, "extension_preload_missing", []string{"app"}, []string{"app_follower_1"})
+				testFollowerRemoveFollowerPreloadMissing(t, installed)
 			})
 		})
 	}

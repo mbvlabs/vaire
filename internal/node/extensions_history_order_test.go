@@ -14,14 +14,15 @@ import (
 	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-func extensionRequirementNames(t *testing.T, stanza string) []string {
+func extensionRequirementNames(t *testing.T) []string {
 	t.Helper()
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var names []string
-	for _, ext := range recs.RetainedExtensions(stanza) {
+	retained := recs.RetainedExtensions("app-abc123")
+	names := make([]string, 0, len(retained))
+	for _, ext := range retained {
 		names = append(names, ext.Name)
 	}
 	return names
@@ -62,7 +63,7 @@ func TestExtAddWithFollowersLastPrepareFailureLeavesNoIncomingHistory(t *testing
 	if len(h.saves) != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 {
 		t.Fatalf("failed package preparation had later effects: saves=%d apply=%d exec=%d", len(h.saves), len(h.applyCalls), len(h.pg.execs))
 	}
-	if names := extensionRequirementNames(t, "app-abc123"); containsExtension(names, "pg_cron") {
+	if names := extensionRequirementNames(t); containsExtension(names, "pg_cron") {
 		t.Fatalf("failed preparation recorded the speculative incoming provider: %v", names)
 	}
 	details := extDetails(t, err)
@@ -169,7 +170,7 @@ func TestExtAddWithFollowersLaterFailureRetainsIncomingHistory(t *testing.T) {
 	if len(h.saves) != 1 {
 		t.Fatalf("the incoming intent was not saved before followers: %d", len(h.saves))
 	}
-	if names := extensionRequirementNames(t, "app-abc123"); !containsExtension(names, "pg_cron") {
+	if names := extensionRequirementNames(t); !containsExtension(names, "pg_cron") {
 		t.Fatalf("a later failure erased the incoming requirement history: %v", names)
 	}
 }
@@ -198,7 +199,7 @@ func TestExtAddWithFollowersOutgoingPartialWriteIsRetained(t *testing.T) {
 	if err == nil || extReason(t, err) != "extension_history_capture_failed" {
 		t.Fatalf("partial outgoing write failure = %v", err)
 	}
-	names := extensionRequirementNames(t, "app-abc123")
+	names := extensionRequirementNames(t)
 	if !containsExtension(names, "pg_stat_statements") || !containsExtension(names, "auto_explain") {
 		t.Fatalf("valid outgoing history was not retained: %v", names)
 	}
@@ -279,7 +280,7 @@ func TestExtAddWithFollowersIncomingPartialWriteIsDisclosed(t *testing.T) {
 	if strings.Contains(err.Error(), "Nothing was changed") {
 		t.Fatalf("partial incoming history falsely claimed nothing changed: %v", err)
 	}
-	if names := extensionRequirementNames(t, "app-abc123"); !containsExtension(names, "pg_cron") {
+	if names := extensionRequirementNames(t); !containsExtension(names, "pg_cron") {
 		t.Fatalf("the incoming write was not actually durable: %v", names)
 	}
 	if len(h.saves) != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 || h.restartCalls != 0 {
@@ -309,7 +310,7 @@ func TestExtAddWithFollowersSaveFailureAfterPreparationIsTypedPartial(t *testing
 		t.Fatalf("save failure effects: attempts=%d apply=%d exec=%d restart=%d",
 			len(h.saveAttempts), len(h.applyCalls), len(h.pg.execs), h.restartCalls)
 	}
-	if names := extensionRequirementNames(t, "app-abc123"); !containsExtension(names, "pg_cron") {
+	if names := extensionRequirementNames(t); !containsExtension(names, "pg_cron") {
 		t.Fatalf("the incoming history was not retained after save failure: %v", names)
 	}
 }
@@ -355,7 +356,7 @@ func TestExtRemoveWithFollowersCapturePartialRetainsHistory(t *testing.T) {
 		t.Fatalf("partial remove capture crossed DROP/save/config: exec=%d saves=%d apply=%d",
 			len(h.pg.execs), len(h.saves), len(h.applyCalls))
 	}
-	if names := extensionRequirementNames(t, "app-abc123"); !containsExtension(names, "pg_cron") {
+	if names := extensionRequirementNames(t); !containsExtension(names, "pg_cron") {
 		t.Fatalf("captured history was not durable before the failure: %v", names)
 	}
 }
