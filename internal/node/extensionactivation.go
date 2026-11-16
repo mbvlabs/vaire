@@ -230,10 +230,14 @@ func verifyStartedCopyGuard(ctx context.Context, env *jobEnv, cfg config.Cluster
 	return err
 }
 
-// cronSettlement is what a copy's metadata inspection proved.
+// cronSettlement is what a copy's metadata inspection proved. Installed says
+// pg_cron's SQL extension was actually present: a copy can retain the library
+// and launch suppression from history while the application removed the
+// extension, and then there is no cron metadata to inspect or settle.
 type cronSettlement struct {
 	MetadataDB  string
 	MetadataOID string
+	Installed   bool
 	Deactivated int
 }
 
@@ -281,6 +285,24 @@ func cronUnknown(message string) error {
 	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition,
 		"Set cron.database_name to a database that exists in the copy, or remove pg_cron from the copy's requirement; the copy was not activated.").
 		WithDetails(map[string]any{"reason": "cron_metadata_unknown"})
+}
+
+// cronExtensionInstalled proves whether pg_cron's SQL extension really exists
+// in the copy's effective metadata database. A retained requirement keeps the
+// library and suppression without the extension being installed (an
+// application can install and later remove it). Only a successful catalog read
+// that returns false proves absence; an unreadable or malformed result stays
+// fail-closed, and presence still requires the job table below.
+func cronExtensionInstalled(ctx context.Context, local sqlRunner, metadataDB string) (bool, error) {
+	rows, err := local.Query(ctx, metadataDB,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')::text AS installed", nil)
+	if err != nil {
+		return false, cronUnknown("the copy's pg_cron installation in " + metadataDB + " cannot be read: " + err.Error())
+	}
+	if len(rows) != 1 || (rows[0]["installed"] != "true" && rows[0]["installed"] != "false") {
+		return false, cronUnknown("the copy's pg_cron installation in " + metadataDB + " returned no usable result")
+	}
+	return rows[0]["installed"] == "true", nil
 }
 
 func cronJobTable(ctx context.Context, local sqlRunner, metadataDB string) (bool, error) {
@@ -334,6 +356,17 @@ func deactivateCopiedCronJobsAt(ctx context.Context, local sqlRunner, recorded *
 		return cronSettlement{}, err
 	}
 	s.MetadataDB = metadataDB
+	installed, err := cronExtensionInstalled(ctx, local, metadataDB)
+	if err != nil {
+		return cronSettlement{}, err
+	}
+	if !installed {
+		// The retained requirement still keeps the library preloaded and its
+		// launch suppression in the guard, but the extension is absent from
+		// the metadata database: there are no copied jobs to deactivate.
+		return s, nil
+	}
+	s.Installed = true
 	if _, err := cronJobTable(ctx, local, metadataDB); err != nil {
 		return cronSettlement{}, err
 	}
@@ -357,6 +390,11 @@ func deactivateCopiedCronJobsAt(ctx context.Context, local sqlRunner, recorded *
 // untouched. It is idempotent.
 func retargetCopiedCronJobs(ctx context.Context, local sqlRunner, s cronSettlement, oldDB, newDB string) (int, error) {
 	if oldDB == newDB {
+		return 0, nil
+	}
+	if !s.Installed {
+		// Deactivation proved the extension absent; a desired CREATE EXTENSION
+		// later in activation starts with no copied jobs to retarget.
 		return 0, nil
 	}
 	metadataDB := s.MetadataDB
@@ -383,9 +421,10 @@ func retargetCopiedCronJobs(ctx context.Context, local sqlRunner, s cronSettleme
 	return len(rows), nil
 }
 
-// checkCronMetadataSetting verifies the permanent configuration points at the
-// metadata database that was actually renamed. A fixed old name is refused; a
-// {db} substitution renders the new name.
+// checkCronMetadataSetting verifies the settled configuration points at the
+// metadata database that was actually renamed. Callers run it after the guard
+// handoff, so a fixed old name is refused whether it survived in the guard or
+// in the permanent configuration; a {db} substitution renders the new name.
 func checkCronMetadataSetting(ctx context.Context, local sqlRunner, oldDB, newDB string) error {
 	if oldDB == newDB {
 		return nil

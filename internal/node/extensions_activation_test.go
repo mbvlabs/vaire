@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/catalog"
@@ -16,13 +17,19 @@ import (
 
 // cronFake models the owned copy's cron metadata for settlement tests.
 type cronFake struct {
-	metadataDB  string
-	metadataOID string
-	currentName string
-	present     bool
-	columns     map[string]bool
-	jobs        []map[string]string
-	execs       []string
+	metadataDB    string
+	metadataOID   string
+	currentName   string
+	installed     bool
+	extensionErr  error
+	extensionRows []map[string]string
+	installDB     string
+	present       bool
+	columns       map[string]bool
+	jobs          []map[string]string
+	execs         []string
+	jobReads      int
+	jobDB         string
 }
 
 func (c *cronFake) Query(_ context.Context, db, sql string, vars map[string]string) ([]map[string]string, error) {
@@ -34,15 +41,30 @@ func (c *cronFake) Query(_ context.Context, db, sql string, vars map[string]stri
 			return nil, nil
 		}
 		return []map[string]string{{"db": c.currentName}}, nil
+	case strings.Contains(sql, "FROM pg_extension"):
+		c.installDB = db
+		if c.extensionErr != nil {
+			return nil, c.extensionErr
+		}
+		if c.extensionRows != nil {
+			return c.extensionRows, nil
+		}
+		return []map[string]string{{"installed": boolText(c.installed)}}, nil
 	case strings.Contains(sql, "to_regclass('cron.job')"):
+		c.jobReads++
+		c.jobDB = db
 		return []map[string]string{{"present": boolText(c.present)}}, nil
 	case strings.Contains(sql, "information_schema.columns"):
+		c.jobReads++
+		c.jobDB = db
 		var rows []map[string]string
 		for name := range c.columns {
 			rows = append(rows, map[string]string{"name": name})
 		}
 		return rows, nil
 	case strings.Contains(sql, "UPDATE cron.job SET active = false"):
+		c.jobReads++
+		c.jobDB = db
 		var rows []map[string]string
 		for _, job := range c.jobs {
 			if job["active"] == "true" {
@@ -52,6 +74,8 @@ func (c *cronFake) Query(_ context.Context, db, sql string, vars map[string]stri
 		}
 		return rows, nil
 	case strings.Contains(sql, "count(*)") && strings.Contains(sql, "WHERE active"):
+		c.jobReads++
+		c.jobDB = db
 		n := 0
 		for _, job := range c.jobs {
 			if job["active"] == "true" {
@@ -60,6 +84,8 @@ func (c *cronFake) Query(_ context.Context, db, sql string, vars map[string]stri
 		}
 		return []map[string]string{{"n": cronItoa(n)}}, nil
 	case strings.Contains(sql, "UPDATE cron.job SET database"):
+		c.jobReads++
+		c.jobDB = db
 		var rows []map[string]string
 		for _, job := range c.jobs {
 			if job["database"] == vars["old"] {
@@ -69,6 +95,8 @@ func (c *cronFake) Query(_ context.Context, db, sql string, vars map[string]stri
 		}
 		return rows, nil
 	case strings.Contains(sql, "count(*)") && strings.Contains(sql, "WHERE database"):
+		c.jobReads++
+		c.jobDB = db
 		n := 0
 		for _, job := range c.jobs {
 			if job["database"] == vars["old"] {
@@ -105,7 +133,7 @@ func cronItoa(n int) string {
 }
 
 func TestCronSettlementUsesActualMetadataDatabase(t *testing.T) {
-	fake := &cronFake{metadataDB: "cron_db", metadataOID: "42", currentName: "cron_db", present: true, columns: map[string]bool{"active": true, "database": true},
+	fake := &cronFake{metadataDB: "cron_db", metadataOID: "42", currentName: "cron_db", installed: true, present: true, columns: map[string]bool{"active": true, "database": true},
 		jobs: []map[string]string{
 			{"jobid": "1", "active": "true", "database": "app"},
 			{"jobid": "2", "active": "true", "database": "other"},
@@ -136,13 +164,136 @@ func TestCronSettlementUsesActualMetadataDatabase(t *testing.T) {
 }
 
 func TestCronUnknownMetadataFailsNotZero(t *testing.T) {
-	fake := &cronFake{metadataDB: "cron_db", present: false, columns: map[string]bool{"active": true, "database": true}}
+	fake := &cronFake{metadataDB: "cron_db", metadataOID: "9", currentName: "cron_db", installed: true, present: false, columns: map[string]bool{"active": true, "database": true}}
 	if _, err := deactivateCopiedCronJobs(context.Background(), fake); err == nil {
-		t.Fatal("a missing cron.job table reported zero")
+		t.Fatal("an installed pg_cron with no cron.job table reported zero")
 	}
 	fake = &cronFake{metadataDB: "", present: true, columns: map[string]bool{"active": true, "database": true}}
 	if _, err := deactivateCopiedCronJobs(context.Background(), fake); err == nil {
 		t.Fatal("an empty metadata database was guessed")
+	}
+}
+
+func TestCronPresenceUnknownFailsClosed(t *testing.T) {
+	cases := []struct {
+		name   string
+		fake   *cronFake
+		reason string
+	}{
+		{
+			name:   "query error",
+			fake:   &cronFake{metadataDB: "cron_db", metadataOID: "9", currentName: "cron_db", extensionErr: errors.New("catalog unavailable")},
+			reason: "unreadable pg_extension",
+		},
+		{
+			name:   "no row",
+			fake:   &cronFake{metadataDB: "cron_db", metadataOID: "9", currentName: "cron_db", extensionRows: []map[string]string{}},
+			reason: "empty result",
+		},
+		{
+			name:   "malformed value",
+			fake:   &cronFake{metadataDB: "cron_db", metadataOID: "9", currentName: "cron_db", extensionRows: []map[string]string{{"installed": "maybe"}}},
+			reason: "malformed result",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := deactivateCopiedCronJobs(context.Background(), tc.fake); err == nil {
+				t.Fatalf("%s was treated as proven absence", tc.reason)
+			}
+			if tc.fake.jobReads != 0 {
+				t.Fatalf("%s inspected cron.job", tc.reason)
+			}
+		})
+	}
+}
+
+func TestCronAbsentExtensionSkipsJobsAndRetarget(t *testing.T) {
+	fake := &cronFake{metadataDB: "postgres", metadataOID: "1", currentName: "postgres",
+		present: true, columns: map[string]bool{"active": true, "database": true},
+		jobs: []map[string]string{{"jobid": "1", "active": "true", "database": "app"}}}
+	settled, err := deactivateCopiedCronJobs(context.Background(), fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.Installed || settled.Deactivated != 0 || settled.MetadataDB != "postgres" {
+		t.Fatalf("an absent extension was settled as installed: %+v", settled)
+	}
+	if fake.jobReads != 0 {
+		t.Fatalf("proven absence still inspected cron.job: %d reads", fake.jobReads)
+	}
+	if fake.jobs[0]["active"] != "true" {
+		t.Fatalf("proven absence changed a job: %+v", fake.jobs)
+	}
+	n, err := retargetCopiedCronJobs(context.Background(), fake, settled, "app", "fork")
+	if err != nil || n != 0 {
+		t.Fatalf("retarget after absence = %d, %v", n, err)
+	}
+	if fake.jobReads != 0 || fake.jobs[0]["database"] != "app" {
+		t.Fatalf("proven absence still retargeted jobs: %+v", fake.jobs)
+	}
+}
+
+func TestCronSeparateMetadataDatabase(t *testing.T) {
+	fake := &cronFake{metadataDB: "cron_db", metadataOID: "7", currentName: "cron_db", installed: true,
+		present: true, columns: map[string]bool{"active": true, "database": true},
+		jobs: []map[string]string{{"jobid": "1", "active": "true", "database": "app"}}}
+	settled, err := deactivateCopiedCronJobs(context.Background(), fake)
+	if err != nil || !settled.Installed || settled.Deactivated != 1 || settled.MetadataDB != "cron_db" {
+		t.Fatalf("settlement = %+v, %v", settled, err)
+	}
+	if fake.installDB != "cron_db" {
+		t.Fatalf("presence was read from %q, not the metadata database", fake.installDB)
+	}
+	n, err := retargetCopiedCronJobs(context.Background(), fake, settled, "app", "fork")
+	if err != nil || n != 1 || fake.jobs[0]["database"] != "fork" {
+		t.Fatalf("retarget = %d, %v, %+v", n, err, fake.jobs)
+	}
+}
+
+func TestCronRenamedMetadataDatabase(t *testing.T) {
+	fake := &cronFake{metadataDB: "app", metadataOID: "42", currentName: "app_follower", installed: true,
+		present: true, columns: map[string]bool{"active": true, "database": true},
+		jobs: []map[string]string{{"jobid": "1", "active": "true", "database": "app"}}}
+	settled, err := deactivateCopiedCronJobsAt(context.Background(), fake, &backup.UnfollowCron{MetadataDB: "app", MetadataOID: "42"})
+	if err != nil || !settled.Installed || settled.Deactivated != 1 || settled.MetadataDB != "app_follower" {
+		t.Fatalf("settlement = %+v, %v", settled, err)
+	}
+	if fake.installDB != "app_follower" {
+		t.Fatalf("presence was read from %q, not the renamed metadata database", fake.installDB)
+	}
+	n, err := retargetCopiedCronJobs(context.Background(), fake, settled, "app", "app_follower")
+	if err != nil || n != 1 || fake.jobs[0]["database"] != "app_follower" {
+		t.Fatalf("retarget = %d, %v, %+v", n, err, fake.jobs)
+	}
+}
+
+func TestCronRetargetFollowsCopyRename(t *testing.T) {
+	fake := &cronFake{metadataDB: "app", metadataOID: "42", currentName: "app", installed: true,
+		present: true, columns: map[string]bool{"active": true, "database": true},
+		jobs: []map[string]string{{"jobid": "1", "active": "true", "database": "app"}}}
+	settled, err := deactivateCopiedCronJobs(context.Background(), fake)
+	if err != nil || !settled.Installed || settled.MetadataDB != "app" {
+		t.Fatalf("pre-rename settlement = %+v, %v", settled, err)
+	}
+	n, err := retargetCopiedCronJobs(context.Background(), fake, settled, "app", "fork")
+	if err != nil || n != 1 || fake.jobs[0]["database"] != "fork" {
+		t.Fatalf("retarget = %d, %v, %+v", n, err, fake.jobs)
+	}
+	if fake.jobDB != "fork" {
+		t.Fatalf("retarget queried %q, not the renamed copy database", fake.jobDB)
+	}
+}
+
+func TestCronAbsentInSeparateMetadataDatabase(t *testing.T) {
+	fake := &cronFake{metadataDB: "cron_db", metadataOID: "7", currentName: "cron_db",
+		jobs: []map[string]string{{"jobid": "1", "active": "true", "database": "app"}}}
+	settled, err := deactivateCopiedCronJobs(context.Background(), fake)
+	if err != nil || settled.Installed || settled.Deactivated != 0 {
+		t.Fatalf("settlement = %+v, %v", settled, err)
+	}
+	if fake.installDB != "cron_db" || fake.jobReads != 0 {
+		t.Fatalf("presence db=%q job reads=%d", fake.installDB, fake.jobReads)
 	}
 }
 
@@ -151,6 +302,102 @@ func TestCronStaleMetadataSettingRefused(t *testing.T) {
 	if err := checkCronMetadataSetting(context.Background(), fake, "app", "fork"); err == nil {
 		t.Fatal("a metadata database left naming the renamed old database was accepted")
 	}
+}
+
+// The data may not have pg_cron installed; the plan must still carry the
+// historical prerequisite and its suppression. Deactivation's separate
+// presence probe is covered below.
+func TestRetainedCronKeepsPlanGuardWithoutInstalledExtension(t *testing.T) {
+	useTempExtensionRecords(t)
+	cfg := planCfg(t)
+	spec := cfg.Clusters[0]
+	if err := backup.RecordExtensionRequirements(spec.Stanza, "app", []catalog.Extension{cronRequirement(t)}, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := buildExtensionCopyPlan(context.Background(), cfg, extensionCopyRequest{
+		Intent: spec, Stanza: spec.Stanza, CopyDB: "app", IncludeRetained: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Plan.Cron || !hasMerged(plan.Merged, "pg_cron") {
+		t.Fatalf("the retained cron requirement was dropped: %+v", plan.Merged)
+	}
+	if !contains(plan.Plan.Guard.Preloads, "pg_cron") {
+		t.Fatalf("the retained cron library left the guard: %+v", plan.Plan.Guard)
+	}
+	if plan.Plan.Guard.Settings["cron.launch_active_jobs"] != "off" {
+		t.Fatalf("the retained cron launch suppression left the guard: %+v", plan.Plan.Guard.Settings)
+	}
+	if plan.Plan.Guard.Settings["cron.database_name"] != "'app'" {
+		t.Fatalf("the retained cron metadata setting was not resolved to the copy: %+v", plan.Plan.Guard.Settings)
+	}
+}
+
+// Settlement must not drop a retained library and its launch suppression just
+// because the application removed the SQL extension.
+func TestPruneCopyGuardKeepsRetainedCronWithoutInstalledExtension(t *testing.T) {
+	useTestInstance(t)
+	useTempExtensionRecords(t)
+	extRoot := t.TempDir()
+	controlDir, libDir := filepath.Join(extRoot, "extension"), filepath.Join(extRoot, "lib")
+	for _, dir := range []string{controlDir, libDir} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restoreExt := steps.ExtensionDirsForTest(controlDir, libDir)
+	t.Cleanup(restoreExt)
+	for _, path := range []string{
+		filepath.Join(controlDir, "pg_cron.control"),
+		filepath.Join(controlDir, "pg_stat_statements.control"),
+		filepath.Join(libDir, "pg_cron.so"),
+		filepath.Join(libDir, "pg_stat_statements.so"),
+		filepath.Join(libDir, "auto_explain.so"),
+	} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	useTempGuardWriter(t)
+	restoreConf := steps.PGConfRootForTest(t.TempDir())
+	t.Cleanup(restoreConf)
+	confDir := steps.PGConfDir("fork")
+	if err := os.MkdirAll(filepath.Join(confDir, "conf.d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "postgresql.conf"), []byte("include_dir = 'conf.d'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldRunning := clusterRunning
+	clusterRunning = func(config.ClusterSpec) bool { return false }
+	t.Cleanup(func() { clusterRunning = oldRunning })
+	cfg := config.DefaultCluster()
+	spec := config.ClusterSpec{Name: "fork", Stanza: "fork-stanza"}
+	dataDir := t.TempDir()
+	plan := &backup.CopyPlan{Cron: true, Requirements: []catalog.Extension{cronRequirement(t)}}
+	if _, err := pruneCopyGuardForSettlement(context.Background(), cfg, spec, dataDir, plan, true, "fork", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, present, err := backup.ReadCopyGuard(dataDir)
+	if err != nil || !present {
+		t.Fatalf("guard = %+v, %v", got, err)
+	}
+	if !contains(got.Preloads, "pg_cron") || got.Settings["cron.launch_active_jobs"] != "off" {
+		t.Fatalf("an absent installed extension dropped the retained suppression: %+v", got)
+	}
+	if got.Settings["cron.database_name"] != "'fork'" {
+		t.Fatalf("the retained metadata setting did not follow the rename: %+v", got.Settings)
+	}
+}
+
+func cronRequirement(t *testing.T) catalog.Extension {
+	t.Helper()
+	ext, ok := catalog.Lookup("pg_cron")
+	if !ok {
+		t.Fatal("the built-in pg_cron definition is missing")
+	}
+	return ext
 }
 
 func TestVerifyCopyGuardEffectiveAndPending(t *testing.T) {
@@ -324,6 +571,22 @@ func (r *restoredFake) Query(_ context.Context, _, sql string, _ map[string]stri
 }
 func (r *restoredFake) Exec(context.Context, string, string, map[string]string) error { return nil }
 
+func TestSettleRestoredCopySkipsAbsentCron(t *testing.T) {
+	old := deactivateCopyCron
+	deactivateCopyCron = deactivateCopiedCronJobs
+	t.Cleanup(func() { deactivateCopyCron = old })
+	fake := &cronFake{metadataDB: "app", metadataOID: "42", currentName: "app"}
+	cfg := config.DefaultCluster()
+	spec := config.ClusterSpec{Name: "app", Stanza: "app-stanza"}
+	plan := &backup.CopyPlan{Cron: true, Requirements: []catalog.Extension{cronRequirement(t)}}
+	if _, err := settleRestoredCopy(context.Background(), cfg, spec, fake, t.TempDir(), plan, "app", nil); err != nil {
+		t.Fatalf("a retained pg_cron that the restored data does not install blocked settlement: %v", err)
+	}
+	if fake.jobReads != 0 {
+		t.Fatalf("proven absence still inspected cron.job: %d reads", fake.jobReads)
+	}
+}
+
 func TestSettleRestoredCopyErrorKeepsCallerFromResuming(t *testing.T) {
 	oldReconcile := reconcileCopySQL
 	reconcileCopySQL = func(context.Context, config.Cluster, config.ClusterSpec, sqlRunner, string) ([]string, error) {
@@ -398,7 +661,7 @@ func TestEnsureCopyGuardStillPendingAfterRestartRefuses(t *testing.T) {
 }
 
 func TestCronMetadataIdentityResolvesRenameByOID(t *testing.T) {
-	fake := &cronFake{metadataDB: "app", metadataOID: "42", currentName: "app_follower",
+	fake := &cronFake{metadataDB: "app", metadataOID: "42", currentName: "app_follower", installed: true,
 		present: true, columns: map[string]bool{"active": true, "database": true},
 		jobs: []map[string]string{{"jobid": "1", "active": "true", "database": "app"}}}
 	id, err := cronMetadataIdentity(context.Background(), fake)
