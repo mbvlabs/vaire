@@ -2462,11 +2462,53 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	return map[string]any{"source": p.Source, "name": p.Name, "at": p.At, "port": spec.Port, "stanza": spec.Stanza, "warnings": warnings}, nil
 }
 
+// prepareForkMaterialisation fixes the copy plan and destination
+// configuration, enriches the prepared fence and records the requirements
+// before any physical artifact exists.
+func prepareForkMaterialisation(ctx context.Context, cfg config.Cluster, p dbForkParams, spec, src config.ClusterSpec, opID string) (*extensionCopyPlan, *backup.MaterialiseConfig, error) {
+	opts := backup.RestoreOptions{Kind: backup.TargetTime}
+	if p.At != "" {
+		at, err := time.Parse(time.RFC3339, p.At)
+		if err != nil {
+			return nil, nil, err
+		}
+		opts.Time = at
+	}
+	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
+		Intent: src, Stanza: src.Stanza, CopyDB: p.Source, Options: opts,
+		Historical: p.At != "", Standby: p.At != "", IncludeRetained: true,
+		Declaration: src.RecoveryExtensions,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	destination, err := prepareMaterialisationConfig(cfg, spec)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, _, err := verifyActivationFence(cfg, p.Name, opID, "fork", fencePhasePrepared); err != nil {
+		return nil, nil, err
+	}
+	if err := backup.UpdateActivationFence(p.Name, opID, func(f *backup.ActivationFence) error {
+		f.Requirements = append([]catalog.Extension(nil), plan.Plan.Requirements...)
+		return nil
+	}); err != nil {
+		return nil, nil, err
+	}
+	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
+		return nil, nil, output.NewError(output.CodePrecondition,
+			"recording the fork's extension requirements failed: "+err.Error(),
+			output.ExitPrecondition, "The copy was not started. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.Name})
+	}
+	return plan, destination, nil
+}
+
 // materialiseFork builds the fork's data in the temporary cluster <new>,
 // promotes it, renames it, and adopts it as 18/<new> on spec's port. A
 // failure before the adoption drops what was built. It returns the copy plan
 // the caller needs to persist settings and finish activation.
-func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec config.ClusterSpec) (*extensionCopyPlan, error) {
+func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec config.ClusterSpec) (plan *extensionCopyPlan, err error) {
 	cfg := env.Cluster
 	src, err := clusterOf(cfg, p.Source)
 	if err != nil {
@@ -2480,41 +2522,16 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 	if opID == "" {
 		opID = env.ID
 	}
-	opts := backup.RestoreOptions{Kind: backup.TargetTime}
-	if p.At != "" {
-		opts.Time, err = time.Parse(time.RFC3339, p.At)
-		if err != nil {
-			return nil, err
-		}
-	}
-	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
-		Intent: src, Stanza: src.Stanza, CopyDB: p.Source, Options: opts,
-		Historical: p.At != "", Standby: p.At != "", IncludeRetained: true,
-		Declaration: src.RecoveryExtensions,
-	})
+	// Before the constructor returns, a failure may have created nothing at
+	// all. Compensate only metadata, and only under this live lease; a nil
+	// constructor or a prepared record never grants physical deletion.
+	var m *backup.Materialised
+	defer func() { err = joinPreparedForkCleanup(ctx, err, m, authority, p.Name, opID) }()
+	plan, destination, err := prepareForkMaterialisation(ctx, cfg, p, spec, src, opID)
 	if err != nil {
 		return nil, err
 	}
-	destination, err := prepareMaterialisationConfig(cfg, spec)
-	if err != nil {
-		return nil, err
-	}
-	if _, _, err := verifyActivationFence(cfg, p.Name, opID, "fork", fencePhasePrepared); err != nil {
-		return nil, err
-	}
-	if err := backup.UpdateActivationFence(p.Name, opID, func(f *backup.ActivationFence) error {
-		f.Requirements = append([]catalog.Extension(nil), plan.Plan.Requirements...)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
-		return nil, output.NewError(output.CodePrecondition,
-			"recording the fork's extension requirements failed: "+err.Error(),
-			output.ExitPrecondition, "The copy was not started. Retry after fixing the requirement history store.").
-			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.Name})
-	}
-	m, err := forkNewMaterialised(cfg.Server.DataRoot, p.Name, p.Source, src.Port, env.shell(), env.Job, env.Report)
+	m, err = forkNewMaterialised(cfg.Server.DataRoot, p.Name, p.Source, src.Port, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}
@@ -2566,10 +2583,7 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 		err = forkAdopt(m, ctx, spec.Port)
 	}
 	if err != nil {
-		if reason := recoveryFailureReason(err); reason != "" {
-			return nil, errors.Join(err, authority.advance(ctx, materialisationFailed, reason))
-		}
-		return nil, errors.Join(err, cleanupFailedFork(ctx, authority, m, p.Name))
+		return nil, forkMaterialisationFailure(ctx, authority, m, p.Name, opID, err)
 	}
 	if err := authority.advance(ctx, materialisationProvisioning, ""); err != nil {
 		return nil, err
@@ -2581,6 +2595,31 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 		return nil, err
 	}
 	return plan, nil
+}
+
+// forkMaterialisationFailure keeps typed recovery failures for exact later
+// cleanup and rolls back every other failure of a copied fork.
+func forkMaterialisationFailure(ctx context.Context, authority *forkMaterialisationAuthority, m *backup.Materialised, target, opID string, err error) error {
+	if reason := recoveryFailureReason(err); reason != "" {
+		return errors.Join(err, authority.advance(ctx, materialisationFailed, reason))
+	}
+	if cleanupErr := cleanupFailedFork(ctx, authority, m, target, opID); cleanupErr != nil {
+		return errors.Join(err, cleanupErr)
+	}
+	return err
+}
+
+// joinPreparedForkCleanup compensates a failure before the materialised
+// constructor returned. No artifact can be shown to exist without it, so only
+// metadata is retired, under the live runner lease.
+func joinPreparedForkCleanup(ctx context.Context, err error, m *backup.Materialised, authority *forkMaterialisationAuthority, target, opID string) error {
+	if err == nil || m != nil {
+		return err
+	}
+	if cleanupErr := cleanupPreparedForkMetadata(ctx, authority, target, opID); cleanupErr != nil {
+		return errors.Join(err, cleanupErr)
+	}
+	return err
 }
 
 // restoreFork restores the source's stanza into m and promotes it at --at,

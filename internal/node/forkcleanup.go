@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 
+	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/config"
 )
 
@@ -79,6 +81,182 @@ type forkCleanupArtifact struct {
 	file *os.File
 	id   materialisationFileID
 	mode os.FileMode
+}
+
+// preparedForkFenceForCleanup captures the exact prepared fork fence before
+// any configuration is removed. A fence that is not this operation's prepared
+// fork is conflicting evidence, not something cleanup may retire.
+func preparedForkFenceForCleanup(cfg config.Cluster, target, opID string) (backup.ActivationFence, bool, error) {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return backup.ActivationFence{}, false, err
+	}
+	f, ok := recs.ActivationFenceFor(target)
+	if !ok {
+		return backup.ActivationFence{}, false, nil
+	}
+	if f.Kind != "fork" || f.Phase != fencePhasePrepared || f.OperationID != opID {
+		return backup.ActivationFence{}, false, materialisationIncomplete(target, nil)
+	}
+	verified, spec, err := verifyActivationFence(cfg, target, opID, "fork", fencePhasePrepared)
+	if err != nil {
+		return backup.ActivationFence{}, false, err
+	}
+	if spec.Follows != "" || spec.FollowGeneration != "" {
+		return backup.ActivationFence{}, false, materialisationIncomplete(target, nil)
+	}
+	if err := CheckNotProtected(cfg, target, "db fork cleanup"); err != nil {
+		return backup.ActivationFence{}, false, err
+	}
+	if err := refuseSourceDrop(cfg, target); err != nil {
+		return backup.ActivationFence{}, false, err
+	}
+	return verified, true, nil
+}
+
+// retireAbandonedForkFence removes exactly the captured fence in one records
+// compare-and-set. check, when present, re-proves the surrounding absence and
+// conflicts under the same lock.
+func retireAbandonedForkFence(want backup.ActivationFence, check func(*backup.Records) error) error {
+	return forkFenceUpdateRecords(func(s *backup.Records) error {
+		current, ok := s.ActivationFenceFor(want.Database)
+		if !ok || !reflect.DeepEqual(current, want) {
+			return materialisationIncomplete(want.Database, nil)
+		}
+		if check != nil {
+			if err := check(s); err != nil {
+				return err
+			}
+		}
+		delete(s.Activation, want.Database)
+		return nil
+	})
+}
+
+// preparedForkConfig is the exact target configuration and server data root a
+// prepared fork was created with. Cleanup may remove only this still-identical
+// entry, never a replacement that reused the name.
+type preparedForkConfig struct {
+	spec     config.ClusterSpec
+	dataRoot string
+}
+
+func capturePreparedForkConfig(cfg config.Cluster, target string, o materialisationOwnership, dataRoot string) (preparedForkConfig, error) {
+	spec, ok := cfg.ClusterByName(target)
+	if !ok || dataRoot == "" || cfg.Server.DataRoot != dataRoot ||
+		spec.Name != target || spec.Port != o.IntendedPort ||
+		spec.Follows != "" || spec.FollowGeneration != "" ||
+		o.DataPath != filepath.Join(dataRoot, target) ||
+		o.RegisteredPath != filepath.Join(materialisationConfigRoot, target) {
+		return preparedForkConfig{}, materialisationIncomplete(target, &o)
+	}
+	return preparedForkConfig{spec: spec, dataRoot: dataRoot}, nil
+}
+
+func matchPreparedForkConfig(fresh config.Cluster, expected preparedForkConfig) error {
+	spec, ok := fresh.ClusterByName(expected.spec.Name)
+	if !ok || !reflect.DeepEqual(spec, expected.spec) || fresh.Server.DataRoot != expected.dataRoot {
+		return materialisationIncomplete(expected.spec.Name, nil)
+	}
+	return nil
+}
+
+func freshPreparedForkConfig(expected preparedForkConfig) (config.Cluster, error) {
+	fresh, _, err := followerState().Load()
+	if err != nil {
+		return config.Cluster{}, err
+	}
+	if err := matchPreparedForkConfig(fresh, expected); err != nil {
+		return config.Cluster{}, err
+	}
+	return fresh, nil
+}
+
+// removePreparedForkConfig removes only the exact still-identical target entry
+// from a freshly loaded cluster.toml. Any changed stanza, setting, port, data
+// root or follower ownership retains the evidence.
+func removePreparedForkConfig(expected preparedForkConfig) error {
+	store := followerState()
+	fresh, _, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if err := matchPreparedForkConfig(fresh, expected); err != nil {
+		return err
+	}
+	if err := CheckNotProtected(fresh, expected.spec.Name, "db fork cleanup"); err != nil {
+		return err
+	}
+	if err := refuseSourceDrop(fresh, expected.spec.Name); err != nil {
+		return err
+	}
+	_, err = saveDroppedConfig(store, fresh, expected.spec.Name)
+	return err
+}
+
+// cleanupPreparedForkMetadata compensates a fork that failed before a
+// materialised cluster existed. It runs under the live runner lease and removes
+// only metadata: the exact prepared materialisation record, the target's
+// cluster.toml entry and the still-prepared activation fence, and only after
+// both deterministic target names and the allocator reservation are proven
+// absent. A foreign path, reservation, record or changed configuration retains
+// every piece of evidence.
+func cleanupPreparedForkMetadata(ctx context.Context, a *forkMaterialisationAuthority, target, opID string) error {
+	if a == nil || a.artifacts == nil || a.env == nil {
+		return errors.New("fork authority unavailable")
+	}
+	return a.run(ctx, func() error {
+		return cleanupPreparedForkMetadataOwned(ctx, a, target, opID)
+	})
+}
+
+func cleanupPreparedForkMetadataOwned(ctx context.Context, a *forkMaterialisationAuthority, target, opID string) error {
+	o := a.artifacts.owner
+	if o.Kind != materialisationFork || o.Phase != materialisationPrepared || o.Target != target ||
+		o.ArtifactStage != "" || o.TemporaryPort != 0 ||
+		o.DataIdentity != (materialisationFileID{}) || o.ConfigIdentity != (materialisationFileID{}) ||
+		o.ReservationIdentity != (backup.ReservationIdentity{}) {
+		return materialisationIncomplete(target, &o)
+	}
+	targetCfg, err := capturePreparedForkConfig(a.env.Cluster, target, o, a.artifacts.dataRoot)
+	if err != nil {
+		return err
+	}
+	fresh, err := freshPreparedForkConfig(targetCfg)
+	if err != nil {
+		return err
+	}
+	expected, hasFence, err := preparedForkFenceForCleanup(fresh, target, opID)
+	if err != nil {
+		return err
+	}
+	if err := a.artifacts.validate(); err != nil {
+		return err
+	}
+	if err := a.artifacts.validateCleanupCompleted(); err != nil {
+		return err
+	}
+	unlock, err := forkAbsenceReservation(ctx, target)
+	if err != nil || unlock == nil {
+		return materialisationIncomplete(target, &o)
+	}
+	defer unlock()
+	if err := removePreparedForkConfig(targetCfg); err != nil {
+		return err
+	}
+	if err := a.artifacts.validate(); err != nil {
+		return err
+	}
+	if err := a.artifacts.validateCleanupCompleted(); err != nil {
+		return err
+	}
+	if err := a.artifacts.removeMaterialisationRecord(); err != nil {
+		return err
+	}
+	if !hasFence {
+		return nil
+	}
+	return retireAbandonedForkFence(expected, nil)
 }
 
 func removeFailedForkArtifacts(a *materialisationArtifacts) error {

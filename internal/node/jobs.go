@@ -336,7 +336,10 @@ func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts J
 	if rec.DB == "" {
 		rec.DB = rpcJobDatabase(env.Job, env.Params)
 	}
-	retain := env.Job == "restore" || env.Job == "recover" || env.Job == "restore-drill"
+	// A fork's fence and prepared materialisation record outlive its process
+	// until an owned cleanup retires them, so its exact terminal job record
+	// must survive history pruning too.
+	retain := env.Job == "restore" || env.Job == "recover" || env.Job == "restore-drill" || env.Job == "db-fork"
 	stateErr := jobUpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(env.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit

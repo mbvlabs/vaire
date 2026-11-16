@@ -44,7 +44,17 @@ var releaseMaterialisationJob = func(id string) {
 // Called outside either state or records locks. Failure to inspect records
 // retains evidence rather than discarding it.
 func releaseResolvedMaterialisationJob(id, job string) {
-	if id == "" || job != "restore" && job != "recover" && job != "restore-drill" {
+	if id == "" {
+		return
+	}
+	if job == "db-fork" {
+		if forkJobUnresolved(id) {
+			return
+		}
+		releaseMaterialisationJob(id)
+		return
+	}
+	if job != "restore" && job != "recover" && job != "restore-drill" {
 		return
 	}
 	records, err := backup.LoadRecords()
@@ -62,6 +72,35 @@ func releaseResolvedMaterialisationJob(id, job string) {
 		}
 	}
 	releaseMaterialisationJob(id)
+}
+
+// forkJobUnresolved reports whether the job's prepared materialisation
+// record or activation fence still exists. Until one is retired, the exact
+// owning job record is the only durable linkage to the residue.
+func forkJobUnresolved(id string) bool {
+	records, err := backup.LoadRecords()
+	if err != nil {
+		return true
+	}
+	for _, f := range records.Activation {
+		if f.OperationID == id {
+			return true
+		}
+	}
+	cfg, _, err := followerState().Load()
+	if err != nil {
+		return true
+	}
+	list, err := listMaterialisations(cfg.Server.DataRoot)
+	if err != nil {
+		return true
+	}
+	for _, o := range list {
+		if o.Job == id {
+			return true
+		}
+	}
+	return false
 }
 
 var reapDrillJob = reapJobs

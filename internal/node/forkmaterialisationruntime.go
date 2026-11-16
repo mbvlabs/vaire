@@ -87,7 +87,25 @@ var (
 	forkWriteMetrics      = steps.WriteMetrics
 )
 
-func cleanupFailedFork(ctx context.Context, a *forkMaterialisationAuthority, m *backup.Materialised, target string) error {
+// cleanupFailedFork rolls back a fork that got past its data/config creation.
+// The prepared activation fence is retired only after the birth-bound physical
+// drop, the cluster.toml removal and the materialisation-record retirement all
+// succeeded. Keeping it until then makes every intermediate crash recoverable
+// and never lets intent alone authorize deletion.
+func cleanupFailedFork(ctx context.Context, a *forkMaterialisationAuthority, m *backup.Materialised, target, opID string) error {
+	o := a.artifacts.owner
+	targetCfg, err := capturePreparedForkConfig(a.env.Cluster, target, o, a.artifacts.dataRoot)
+	if err != nil {
+		return err
+	}
+	fresh, err := freshPreparedForkConfig(targetCfg)
+	if err != nil {
+		return err
+	}
+	expected, hasFence, err := preparedForkFenceForCleanup(fresh, target, opID)
+	if err != nil {
+		return err
+	}
 	if err := forkDrop(m); err != nil {
 		return err
 	}
@@ -98,9 +116,29 @@ func cleanupFailedFork(ctx context.Context, a *forkMaterialisationAuthority, m *
 		if err := errors.Join(a.artifacts.validateCleanupCompleted(), a.reservation(ctx, false)); err != nil {
 			return err
 		}
+		// Re-prove the exact target configuration under the live lease
+		// immediately before the configuration write.
+		fresh, err := freshPreparedForkConfig(targetCfg)
+		if err != nil {
+			return err
+		}
+		if err := CheckNotProtected(fresh, target, "db fork cleanup"); err != nil {
+			return err
+		}
+		if err := refuseSourceDrop(fresh, target); err != nil {
+			return err
+		}
 		return forkForgetDatabase(target)
 	}); err != nil {
 		return err
 	}
-	return a.retireDropped(ctx)
+	if err := a.retireDropped(ctx); err != nil {
+		return err
+	}
+	if !hasFence {
+		return nil
+	}
+	return a.run(ctx, func() error {
+		return retireAbandonedForkFence(expected, nil)
+	})
 }

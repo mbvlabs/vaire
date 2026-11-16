@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/state"
 )
 
 func TestRunDrillRequiresPersistedJobEvidence(t *testing.T) {
@@ -53,6 +55,42 @@ func TestMaterialisationJobRejectsConflictingHistory(t *testing.T) {
 	st.Jobs = append(st.Jobs, job)
 	if _, err := materialisationJob(st, job.ID); err == nil {
 		t.Fatal("duplicate history accepted")
+	}
+}
+
+func TestForkJobRetentionTracksUnresolvedAuthority(t *testing.T) {
+	useTempRecords(t)
+	o, root := materialisationFixture(t)
+	cfg := config.DefaultCluster()
+	cfg.Server.DataRoot = root
+	oldFollower, oldRelease := followerState, releaseMaterialisationJob
+	t.Cleanup(func() { followerState, releaseMaterialisationJob = oldFollower, oldRelease })
+	followerState = func() state.Store { return ownedForkConfigStore{cfg: &cfg} }
+	released := ""
+	releaseMaterialisationJob = func(id string) { released = id }
+	_, err := createMaterialisation(o, root)
+	mustNoErr(t, err)
+	mustNoErr(t, backup.SetActivationFence(backup.ActivationFence{
+		OperationID: o.Job, Kind: "fork", Database: o.Target, Instance: o.Instance,
+		TargetStanza: "target-abcdef", OldStanza: "source-abcdef", NewStanza: "target-abcdef",
+		Registration: "target:5433:", Port: 5433, DataDir: o.DataPath, ConfDir: o.RegisteredPath,
+		Phase: fencePhasePrepared, CreatedAt: "2026-11-01T00:00:00Z",
+	}))
+	releaseResolvedMaterialisationJob(o.Job, "db-fork")
+	if released != "" {
+		t.Fatalf("job released while its fence and marker exist: %q", released)
+	}
+	mustNoErr(t, backup.ClearActivationFence(o.Target, o.Job))
+	releaseResolvedMaterialisationJob(o.Job, "db-fork")
+	if released != "" {
+		t.Fatalf("job released while its materialisation marker exists: %q", released)
+	}
+	p, err := materialisationPath(o.Target)
+	mustNoErr(t, err)
+	mustNoErr(t, os.Remove(p))
+	releaseResolvedMaterialisationJob(o.Job, "db-fork")
+	if released != o.Job {
+		t.Fatalf("resolved job retained: %q", released)
 	}
 }
 

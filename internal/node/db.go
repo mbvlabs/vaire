@@ -717,7 +717,12 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	// A never-started prepared fork is metadata only: there is no cluster,
 	// artifact, slot or stanza to touch. It is handled before the ordinary
 	// machinery so that machinery's failed-recovery requirements cannot keep
-	// the target blocked forever.
+	// the target blocked forever. Fence-only residue of an abandoned fork is
+	// the same kind of metadata, but with its materialisation record already
+	// retired.
+	if res, handled, err := dropAbandonedForkFence(ctx, env, store, cfg, p.Name); handled {
+		return res, err
+	}
 	if res, handled, err := dropPreparedForkMetadata(ctx, env, store, cfg, p.Name); handled {
 		return res, err
 	}

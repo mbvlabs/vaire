@@ -586,6 +586,55 @@ func TestDropPreparedForkMetadataSuccess(t *testing.T) {
 	}
 }
 
+func TestDropPreparedForkMetadataReleasesRetainedJob(t *testing.T) {
+	f := newForkAbsenceFixture(t, "success")
+	st := engine.State{RetainedJobs: map[string]engine.JobRecord{f.job.ID: f.job}}
+	forkAbsenceState = func() (engine.State, error) { return st, nil }
+	oldFollower, oldRelease := followerState, releaseMaterialisationJob
+	t.Cleanup(func() { followerState, releaseMaterialisationJob = oldFollower, oldRelease })
+	followerState = func() state.Store { return f.store }
+	released := ""
+	releaseMaterialisationJob = func(id string) { released = id }
+	res, err := f.drop(t)
+	mustNoErr(t, err)
+	f.assertSuccess(t, res)
+	if released != f.job.ID {
+		t.Fatalf("retained job released = %q, want %q", released, f.job.ID)
+	}
+}
+
+func TestDropPreparedForkMetadataRetainsJobWhileFenceExists(t *testing.T) {
+	for _, operation := range []string{"job", "foreign-operation"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newForkAbsenceFixture(t, "success")
+			st := engine.State{RetainedJobs: map[string]engine.JobRecord{f.job.ID: f.job}}
+			forkAbsenceState = func() (engine.State, error) { return st, nil }
+			oldFollower, oldRelease := followerState, releaseMaterialisationJob
+			t.Cleanup(func() { followerState, releaseMaterialisationJob = oldFollower, oldRelease })
+			followerState = func() state.Store { return f.store }
+			released := ""
+			releaseMaterialisationJob = func(id string) { released = id }
+			mustNoErr(t, backup.SetActivationFence(backup.ActivationFence{
+				OperationID: operation, Kind: "fork", Database: f.o.Target, Instance: f.o.Instance,
+				TargetStanza: "target-abcdef", OldStanza: "source-abcdef", NewStanza: "target-abcdef",
+				Registration: "target:5433:", Port: 5433, DataDir: f.o.DataPath, ConfDir: f.o.RegisteredPath,
+				Phase: fencePhasePrepared, CreatedAt: "2026-11-01T00:00:00Z",
+			}))
+			res, err := f.drop(t)
+			mustNoErr(t, err)
+			f.assertSuccess(t, res)
+			if released != "" {
+				t.Fatalf("retained job released while its fence exists: %q", released)
+			}
+			recs, err := backup.LoadRecords()
+			mustNoErr(t, err)
+			if _, ok := recs.ActivationFenceFor(f.o.Target); !ok {
+				t.Fatal("marker-only drop removed the pending fence")
+			}
+		})
+	}
+}
+
 func TestDropPreparedForkMetadataSaveFailureRetry(t *testing.T) {
 	f := newForkAbsenceFixture(t, "save-failure")
 	if _, err := f.drop(t); err == nil {
