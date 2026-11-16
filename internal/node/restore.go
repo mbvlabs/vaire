@@ -928,6 +928,25 @@ var (
 	promoteStartFull    = startFullBackup
 )
 
+// restorePromoteFenceIdentity is the prepared restore-promote checkpoint: the
+// temporary copy's registration and paths, and the stanza transition fixed
+// before the swap. The fence moves to the live endpoint only when the swap
+// advances it, so an abort may retire exactly this authority without touching
+// a swapped one.
+func restorePromoteFenceIdentity(cfg config.Cluster, r backup.Restore, aside string, spec config.ClusterSpec) activationFenceIdentity {
+	restoring := backup.RestoringName(r.Database)
+	fenceStanza, fenceOld, fenceNew := spec.Stanza, spec.Stanza, spec.Stanza
+	if r.Kind == targetDump {
+		fenceStanza, fenceOld, fenceNew = r.NewStanza, r.OldStanza, r.NewStanza
+	}
+	return activationFenceIdentity{
+		Database: r.Database, Kind: "restore-promote", OperationID: r.ID, Spec: spec,
+		TargetStanza: fenceStanza, OldStanza: fenceOld, NewStanza: fenceNew, Aside: aside,
+		Registration: fmt.Sprintf("%s:%d:", restoring, r.Port),
+		Port:         r.Port, DataDir: cfg.Server.DataDirectory(restoring), ConfDir: steps.PGConfDir(restoring),
+	}
+}
+
 func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter, unlock func()) (map[string]any, error) {
 	bs, err := backup.LoadRecords()
 	if err != nil {
@@ -1025,18 +1044,9 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
 	}
 	start := time.Now()
-	fenceStanza := spec.Stanza
-	fenceOld, fenceNew := spec.Stanza, spec.Stanza
-	if r.Kind == targetDump {
-		fenceStanza, fenceOld, fenceNew = r.NewStanza, r.OldStanza, r.NewStanza
-	}
-	if _, err := writeActivationFence(cfg, activationFenceIdentity{
-		Database: db, Kind: "restore-promote", OperationID: r.ID, Spec: spec,
-		TargetStanza: fenceStanza, OldStanza: fenceOld, NewStanza: fenceNew, Aside: aside,
-		Registration: fmt.Sprintf("%s:%d:", backup.RestoringName(db), r.Port),
-		Port:         r.Port, DataDir: restoringData, ConfDir: steps.PGConfDir(backup.RestoringName(db)),
-		Requirements: plan.Plan.Requirements,
-	}); err != nil {
+	fenceID := restorePromoteFenceIdentity(cfg, r, aside, spec)
+	fenceID.Requirements = plan.Plan.Requirements
+	if _, err := writeActivationFence(cfg, fenceID); err != nil {
 		return nil, err
 	}
 	// Before the swap, or a retry's start of already swapped data, withdraw
@@ -1120,7 +1130,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	// and the fence's routing eligibility is one records update. A failed
 	// write leaves the old promoted continuation whole; no orphan routing
 	// fence can outlive the restore record.
-	if err := retireRestoreAndRoute(cfg, db, r, spec, aside, oldStanza, newStanza, fenceStanza, fenceOld, fenceNew, oldArchived); err != nil {
+	if err := retireRestoreAndRoute(cfg, db, r, spec, aside, oldStanza, newStanza, fenceID.TargetStanza, fenceID.OldStanza, fenceID.NewStanza, oldArchived); err != nil {
 		return nil, err
 	}
 	data := map[string]any{"database": db, "pre_restore": aside, "target": r.Target, "swap_ms": took.Milliseconds()}
@@ -1617,7 +1627,13 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	}
 	r, ok := bs.OpenRestore(p.Database)
 	if !ok {
-		return Result{}, noOpenRestore(bs, p.Database)
+		return continueRestoreAbortRouting(ctx, env, bs, p.Database)
+	}
+	if f, fenced := bs.ActivationFenceFor(p.Database); fenced && f.Kind == "restore-abort" {
+		return Result{}, output.NewError(output.CodePrecondition,
+			p.Database+" has both an open restore and a restore-abort routing fence",
+			output.ExitPrecondition, "Inspect the node records and repair the ambiguous state deliberately; vaire will not clean up or route from it.").
+			WithDetails(map[string]any{"reason": "activation_fence_changed", "database": p.Database, "operation_id": f.OperationID})
 	}
 	if err := ensureRestoreNotRunning(r, p.Database); err != nil {
 		return Result{}, err
@@ -1626,6 +1642,26 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 		return res, err
 	}
 	return abortRestoredCopy(ctx, env, p, r, bs)
+}
+
+// continueRestoreAbortRouting resumes an abort after its conversion is
+// durable and its restore record is gone. It never repeats cleanup.
+func continueRestoreAbortRouting(ctx context.Context, env *Env, bs backup.Records, db string) (Result, error) {
+	f, ok := bs.ActivationFenceFor(db)
+	if !ok || f.Kind != "restore-abort" {
+		return Result{}, noOpenRestore(bs, db)
+	}
+	if _, _, err := verifyActivationFence(env.Cluster, db, f.OperationID, "restore-abort", fencePhaseRouting); err != nil {
+		return Result{}, err
+	}
+	if env.Req.DryRun {
+		return Result{Data: map[string]any{"database": db, "routing": "dry_run"}}, nil
+	}
+	if err := completeRestoreAbortRouting(ctx, env, db, f.OperationID); err != nil {
+		return Result{Data: map[string]any{"database": db, "routing": "pending", "live_untouched": true},
+			Warnings: []output.Warning{restoreAbortRoutingWarning(db, err)}}, nil
+	}
+	return Result{Data: map[string]any{"database": db, "routing": "complete", "live_untouched": true}}, nil
 }
 
 func ensureRestoreNotRunning(r backup.Restore, db string) error {
@@ -1678,18 +1714,30 @@ func abortMaterialisedRestore(ctx context.Context, env *Env, p restoreDBParams, 
 	return Result{Data: map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}, Warnings: warnings}, true, nil
 }
 
+// preSwapRestoreAbort is the exact authority an abort may convert: the ready
+// restore record and its prepared restore-promote fence, both captured before
+// cleanup and rechecked inside the locked conversion.
+type preSwapRestoreAbort struct {
+	restore backup.Restore
+	fence   backup.ActivationFence
+	aside   string
+}
+
 func abortRestoredCopy(ctx context.Context, env *Env, p restoreDBParams, r backup.Restore, bs backup.Records) (Result, error) {
 	aside := r.Aside
 	if aside == "" {
 		aside = swappedAside(env.Cluster, p.Database, bs, r)
 	}
 	if aside != "" && backup.SwapState(env.Cluster.Server.DataRoot, p.Database, backup.RestoringName(p.Database), aside) != backup.SwapNotStarted {
-		// A promote that failed after its first rename: the copy is (being)
-		// swapped in, and the old data is aside. Dropping the record would
-		// lose both.
-		return Result{}, output.NewError(output.CodePrecondition, "the restored copy of "+p.Database+" is already swapped in by a promote that stopped part way; the old data is the cluster "+aside,
-			output.ExitPrecondition, "Finish it with vaire restore promote "+p.Database+" --confirm "+p.Database+"/restore (it resumes), then vaire restore undo "+p.Database+" to go back.").
-			WithDetails(map[string]any{"reason": "restore_swapped_in", "aside": aside})
+		return Result{}, restoreSwappedInError(p.Database, aside)
+	}
+	// A promote writes its prepared fence before cutting the poolers or
+	// swapping. Aborting the copy must convert exactly that fence into a
+	// durable abort-owned routing continuation; deleting it would lose the
+	// only resumable publication authority.
+	auth, fenced, err := verifyPreSwapRestoreAbort(env.Cluster, p.Database, r, aside)
+	if err != nil {
+		return Result{}, err
 	}
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "drop": backup.RestoringName(p.Database), "dry_run": true}}, nil
@@ -1704,23 +1752,275 @@ func abortRestoredCopy(ctx context.Context, env *Env, p restoreDBParams, r backu
 			return Result{}, err
 		}
 	}
-	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		cur, ok := s.Restores[p.Database]
-		if !ok || cur.ID != r.ID || cur.Attempt != nil || cur.MaterialisationPending {
-			return incompleteMaterialisation(backup.RestoringName(p.Database))
+	data := map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}
+	if fenced {
+		if err := convertPreSwapRestoreAbort(env.Cluster, p.Database, auth); err != nil {
+			return Result{}, err
 		}
-		delete(s.Restores, p.Database)
-		return nil
-	}); err != nil {
+		data["routing"] = "pending"
+		if err := completeRestoreAbortRouting(ctx, env, p.Database, auth.fence.OperationID); err != nil {
+			steps.WriteMetrics(env.Cluster)
+			return Result{Data: data, Warnings: []output.Warning{restoreAbortRoutingWarning(p.Database, err)}}, nil
+		}
+		data["routing"] = "complete"
+		steps.WriteMetrics(env.Cluster)
+		return Result{Data: data}, nil
+	}
+	if err := retirePreSwapRestore(p.Database, r); err != nil {
 		return Result{}, err
 	}
 	var warnings []output.Warning
-	if err := reloadPoolers(ctx, env, env.Cluster); err != nil {
+	if err := restoreAbortReload(ctx, env, env.Cluster); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the session pooler still lists " + backup.RestoringName(p.Database) + " until vaire apply: " + err.Error()})
 	}
 	steps.WriteMetrics(env.Cluster)
-	return Result{Data: map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}, Warnings: warnings}, nil
+	return Result{Data: data, Warnings: warnings}, nil
+}
+
+// verifyPreSwapRestoreAbort verifies the open restore and, when a fence is
+// present, that it is exactly this restore's prepared pre-swap checkpoint.
+// A missing fence is allowed: a copy aborted before promotion never wrote one.
+func verifyPreSwapRestoreAbort(cfg config.Cluster, db string, r backup.Restore, aside string) (preSwapRestoreAbort, bool, error) {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return preSwapRestoreAbort{}, false, err
+	}
+	f, ok := recs.ActivationFenceFor(db)
+	if !ok {
+		return preSwapRestoreAbort{}, false, nil
+	}
+	cur, err := verifyPreSwapRestoreRecord(recs, db, r, aside)
+	if err != nil {
+		return preSwapRestoreAbort{}, true, err
+	}
+	if err := verifyPreSwapRestoreFence(cfg, f, cur, aside); err != nil {
+		return preSwapRestoreAbort{}, true, err
+	}
+	if _, err := verifyPreSwapRestoreBoundary(cfg, db, cur, aside); err != nil {
+		return preSwapRestoreAbort{}, true, err
+	}
+	return preSwapRestoreAbort{restore: cur, fence: f, aside: aside}, true, nil
+}
+
+// verifyPreSwapRestoreRecord checks the exact ready, ordinary restore record
+// an abort may convert. Provenance is part of the captured authority: a
+// changed instance, invocation or recovery scaffold is unknown state, not
+// something whose copy may be dropped.
+func verifyPreSwapRestoreRecord(recs backup.Records, db string, r backup.Restore, aside string) (backup.Restore, error) {
+	cur, ok := recs.Restores[db]
+	if !ok || !samePreSwapRestoreRecord(cur, r, db, aside) {
+		return cur, restoreAbortRefusal(db, "its restore record changed while aborting")
+	}
+	if cur.Recover {
+		return cur, restoreAbortRefusal(db, "a recovery scaffold is not a publishable live target")
+	}
+	if cur.ID == "" || cur.InstanceID == "" || cur.OperationID == "" {
+		return cur, restoreAbortRefusal(db, "its restore record has no complete operation provenance")
+	}
+	instance, err := currentFollowInstance()
+	if err != nil {
+		return cur, err
+	}
+	if instance == "" || cur.InstanceID != instance {
+		return cur, restoreAbortRefusal(db, "its restore record belongs to another installation instance")
+	}
+	return cur, nil
+}
+
+func samePreSwapRestoreRecord(cur, r backup.Restore, db, aside string) bool {
+	return r.Database == db && cur.Database == db && r.Phase == backup.PhaseReady &&
+		cur.Phase == backup.PhaseReady &&
+		cur.ID == r.ID && cur.InstanceID == r.InstanceID && cur.OperationID == r.OperationID &&
+		cur.Recover == r.Recover && cur.Kind == r.Kind && cur.Port == r.Port &&
+		cur.Aside == aside && r.Aside == aside &&
+		cur.OldStanza == r.OldStanza && cur.NewStanza == r.NewStanza &&
+		cur.Attempt == nil && r.Attempt == nil &&
+		!cur.MaterialisationPending && !r.MaterialisationPending
+}
+
+// verifyPreSwapRestoreFence proves a fence is this restore's own prepared
+// pre-swap checkpoint. The prepared phase owns the temporary endpoint only; a
+// swapped fence, another operation's fence, another installation's instance or
+// any changed stanza/aside/registration/path is refused. The fence owner is
+// the restore ID, never the invocation operation ID.
+func verifyPreSwapRestoreFence(cfg config.Cluster, f backup.ActivationFence, r backup.Restore, aside string) error {
+	db := r.Database
+	if f.Database != db || f.Kind != "restore-promote" || f.OperationID != r.ID || f.Phase != fencePhasePrepared {
+		return restoreAbortRefusal(db, "its activation fence is not this restore's prepared pre-swap checkpoint ("+f.Kind+" "+f.Phase+")")
+	}
+	if err := verifyFenceInstance(f, db); err != nil {
+		return err
+	}
+	if err := verifyFencePaths(cfg, f, db); err != nil {
+		return err
+	}
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return restoreAbortRefusal(db, "its cluster.toml entry is missing")
+	}
+	if !fenceTargetMatches(f, spec) {
+		return activationIdentityError(db, f, "target stanza", f.TargetStanza, spec.Stanza)
+	}
+	if f.OldStanza == "" || f.NewStanza == "" {
+		return restoreAbortRefusal(db, "its activation fence has no recorded old/new stanza transition")
+	}
+	if err := verifyFenceRegistration(f, db); err != nil {
+		return err
+	}
+	if r.Aside == "" || aside == "" || r.Aside != aside {
+		return restoreAbortRefusal(db, "its restore record lost the aside its prepared fence owns")
+	}
+	if f.CreatedAt == "" {
+		return restoreAbortRefusal(db, "its activation fence has no creation timestamp")
+	}
+	want := restorePromoteFenceIdentity(cfg, r, aside, spec)
+	for _, field := range []struct {
+		name       string
+		have, want string
+	}{
+		{"target stanza", f.TargetStanza, want.TargetStanza},
+		{"old stanza", f.OldStanza, want.OldStanza},
+		{"new stanza", f.NewStanza, want.NewStanza},
+		{"aside", f.Aside, want.Aside},
+		{"registration", f.Registration, want.Registration},
+		{"data directory", f.DataDir, want.DataDir},
+		{"configuration directory", f.ConfDir, want.ConfDir},
+	} {
+		if field.have != field.want {
+			return activationIdentityError(db, f, field.name, field.have, field.want)
+		}
+	}
+	if f.Port != want.Port {
+		return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(want.Port))
+	}
+	if spec.Stanza != want.OldStanza {
+		return activationIdentityError(db, f, "stanza", f.OldStanza, spec.Stanza)
+	}
+	return nil
+}
+
+// verifyPreSwapRestoreBoundary rechecks the physical pre-swap state and the
+// untouched live stanza. It is called before cleanup and again inside the
+// locked conversion.
+func verifyPreSwapRestoreBoundary(cfg config.Cluster, db string, r backup.Restore, aside string) (config.ClusterSpec, error) {
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return spec, restoreAbortRefusal(db, "its cluster.toml entry is missing")
+	}
+	if aside == "" || r.Aside == "" || r.Aside != aside {
+		return spec, restoreAbortRefusal(db, "its restore record lost the aside its prepared fence owns")
+	}
+	oldStanza := spec.Stanza
+	if r.Kind == targetDump {
+		oldStanza = r.OldStanza
+	}
+	if oldStanza == "" || spec.Stanza != oldStanza {
+		return spec, restoreAbortRefusal(db, "its live stanza "+spec.Stanza+" is no longer the pre-swap stanza "+oldStanza)
+	}
+	if state := backup.SwapState(cfg.Server.DataRoot, db, backup.RestoringName(db), aside); state != backup.SwapNotStarted {
+		return spec, restoreSwappedInError(db, aside)
+	}
+	return spec, nil
+}
+
+// convertPreSwapRestoreAbort replaces the prepared promote fence with the
+// abort's own routing continuation in one records update, and deletes the
+// restore record. No promotion fact (timeline, leftover, dropped stanza or
+// awaiting recovery) is created or changed.
+func convertPreSwapRestoreAbort(cfg config.Cluster, db string, auth preSwapRestoreAbort) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		cur, err := verifyPreSwapRestoreRecord(*s, db, auth.restore, auth.aside)
+		if err != nil {
+			return err
+		}
+		f, ok := s.ActivationFenceFor(db)
+		if !ok || !reflect.DeepEqual(f, auth.fence) {
+			return restoreAbortRefusal(db, "its activation fence changed while aborting")
+		}
+		if err := verifyPreSwapRestoreFence(cfg, f, cur, auth.aside); err != nil {
+			return err
+		}
+		spec, err := verifyPreSwapRestoreBoundary(cfg, db, cur, auth.aside)
+		if err != nil {
+			return err
+		}
+		s.Activation[db] = restoreAbortRoutingFence(cfg, spec, cur, f)
+		delete(s.Restores, db)
+		return nil
+	})
+}
+
+// restoreAbortRoutingFence is the abort-owned continuation. It keeps the
+// promote's owner ID and verified aside/creation time, but binds the live
+// cluster's untouched stanza, registration, paths, port and follow generation
+// only, with no promotion requirements or renames.
+func restoreAbortRoutingFence(cfg config.Cluster, spec config.ClusterSpec, r backup.Restore, f backup.ActivationFence) backup.ActivationFence {
+	return backup.ActivationFence{
+		OperationID: r.ID, Kind: "restore-abort", Database: r.Database,
+		Instance: f.Instance, TargetStanza: spec.Stanza, OldStanza: spec.Stanza, NewStanza: spec.Stanza,
+		Aside: f.Aside, Registration: activationRegistration(spec), Ownership: spec.FollowGeneration,
+		Port: spec.Port, DataDir: cfg.Server.DataDirectory(r.Database), ConfDir: steps.PGConfDir(r.Database),
+		Phase: fencePhaseRouting, CreatedAt: f.CreatedAt,
+	}
+}
+
+// completeRestoreAbortRouting always publishes both poolers through the strict
+// fence, then uses the shared finalizer to verify both live mappings and the
+// restore-inspection alias's absence before releasing the pause. Any failure
+// leaves the abort routing fence for apply or abort to resume.
+func completeRestoreAbortRouting(ctx context.Context, env *Env, db, owner string) error {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+	if _, ok := recs.Restores[db]; ok {
+		return routingContinuationWithRestoreError(db)
+	}
+	_, spec, err := verifyActivationFence(env.Cluster, db, owner, "restore-abort", fencePhaseRouting)
+	if err != nil {
+		return err
+	}
+	if err := applyPoolerFence(ctx, env.Cluster, runtimeFor(env, false), env.Report); err != nil {
+		return err
+	}
+	return verifyRoutingFence(ctx, env.Cluster, spec, owner, "restore-abort")
+}
+
+func restoreAbortRoutingWarning(db string, err error) output.Warning {
+	return output.Warning{Code: "activation_routing_incomplete",
+		Message: db + "'s abort route is not settled: " + err.Error() + "; run vaire apply or vaire restore abort " + db + " to retry."}
+}
+
+func restoreSwappedInError(db, aside string) error {
+	return output.NewError(output.CodePrecondition, "the restored copy of "+db+" is already swapped in by a promote that stopped part way; the old data is the cluster "+aside,
+		output.ExitPrecondition, "Finish it with vaire restore promote "+db+" --confirm "+db+"/restore (it resumes), then vaire restore undo "+db+" to go back.").
+		WithDetails(map[string]any{"reason": "restore_swapped_in", "aside": aside})
+}
+
+// retirePreSwapRestore retires a fence-less ready restore exactly as before:
+// the record is rechecked inside the lock and removed without creating any
+// routing authority. A fence appearing concurrently is unknown state.
+func retirePreSwapRestore(db string, r backup.Restore) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		if _, ok := s.ActivationFenceFor(db); ok {
+			return restoreAbortRefusal(db, "its activation fence changed while aborting")
+		}
+		cur, ok := s.Restores[db]
+		if !ok || cur.ID != r.ID || cur.Attempt != nil || cur.MaterialisationPending {
+			return incompleteMaterialisation(backup.RestoringName(db))
+		}
+		delete(s.Restores, db)
+		return nil
+	})
+}
+
+func restoreAbortRefusal(db, detail string) error {
+	return output.NewError(output.CodePrecondition,
+		"the restore of "+db+" cannot be aborted: "+detail,
+		output.ExitPrecondition,
+		"Finish the promote with vaire restore promote "+db+"; vaire will not retire authority it cannot prove is this restore's prepared pre-swap checkpoint.").
+		WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
 }
 
 type restoreCleanupParams struct {

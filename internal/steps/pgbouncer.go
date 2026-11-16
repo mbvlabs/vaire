@@ -368,7 +368,7 @@ func validateRoutingEligibility(cfg config.Cluster, recs backup.Records) error {
 		if f.Instance == "" || f.Instance != instance {
 			return fail("its installation instance does not match this node")
 		}
-		if f.Kind != "fork" && f.Kind != "unfollow" && f.Kind != "restore-promote" {
+		if f.Kind != "fork" && f.Kind != "unfollow" && f.Kind != "restore-promote" && f.Kind != "restore-abort" {
 			return fail("its operation kind is unknown")
 		}
 		if f.TargetStanza == "" || f.TargetStanza != spec.Stanza {
@@ -376,6 +376,14 @@ func validateRoutingEligibility(cfg config.Cluster, recs backup.Records) error {
 		}
 		if f.OldStanza == "" || f.NewStanza == "" || f.NewStanza != f.TargetStanza {
 			return fail("its recorded old/new stanza transition is incomplete")
+		}
+		if f.Kind == "restore-abort" {
+			if _, ok := recs.Restores[db]; ok {
+				return fail("its database still has a restore record")
+			}
+			if f.OldStanza != f.TargetStanza || f.Aside == "" {
+				return fail("its abort checkpoint does not describe the untouched live cluster")
+			}
 		}
 		if f.Port != spec.Port {
 			return fail("its recorded port does not match cluster.toml")
