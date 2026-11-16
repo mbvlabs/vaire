@@ -17,8 +17,22 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
+	"github.com/mbvlabs/vaire/internal/state"
 	"github.com/mbvlabs/vaire/internal/steps"
 )
+
+type ownedForkConfigStore struct{ cfg *config.Cluster }
+
+func (s ownedForkConfigStore) Load() (config.Cluster, []byte, error) { return *s.cfg, nil, nil }
+func (s ownedForkConfigStore) Save(raw []byte) error {
+	cfg, err := config.ParseCluster(raw)
+	if err != nil {
+		return err
+	}
+	*s.cfg = cfg
+	return nil
+}
+func (ownedForkConfigStore) Revision() (string, error) { return "", nil }
 
 // ownedForkState carries the fixture, the stubbed runtime observations and the
 // target paths shared by the fork-owned runtime assertions.
@@ -132,17 +146,27 @@ func (s *ownedForkState) stubJobRuntime(t *testing.T) {
 	}
 	oldLocks, oldStat, oldUID, oldRead, oldLoad := nodeLockers, jobNodeStat, jobEffectiveUID, jobReadSpec, jobLoadCluster
 	oldUpdate, oldFence, oldActivity, oldSettle := jobUpdateState, jobFenceCheck, activityRecorderFactory, settleJobRecord
+	oldFollower, oldAbsence := followerState, forkAbsenceReservation
 	t.Cleanup(func() {
 		nodeLockers, jobNodeStat, jobEffectiveUID, jobReadSpec, jobLoadCluster = oldLocks, oldStat, oldUID, oldRead, oldLoad
 		jobUpdateState, jobFenceCheck, activityRecorderFactory, settleJobRecord = oldUpdate, oldFence, oldActivity, oldSettle
+		followerState, forkAbsenceReservation = oldFollower, oldAbsence
 	})
+	if strings.HasPrefix(s.mode, "prephysical") || strings.HasPrefix(s.mode, "cleanup") {
+		followerState = func() state.Store { return ownedForkConfigStore{cfg: &s.cfg} }
+	}
+	if strings.HasPrefix(s.mode, "prephysical") {
+		forkAbsenceReservation = func(ctx context.Context, name string) (func(), error) {
+			return backup.LockTemporaryReservationAbsenceWithHost(ctx, s.registry, uint32(os.Geteuid()), name)
+		}
+	}
 	nodeLockers = lockers
 	jobNodeStat = func(string) (os.FileInfo, error) { return os.Stat(s.root) }
 	jobEffectiveUID = func() int { return 0 }
 	jobReadSpec = func(string) (jobSpec, error) {
 		return jobSpec{Job: "db-fork", Params: params, OperationID: s.owner.Operation}, nil
 	}
-	jobLoadCluster = func(string) (config.Cluster, error) { return s.cfg, nil }
+	jobLoadCluster = func(string) (config.Cluster, error) { return s.cfg.Clone(), nil }
 	jobUpdateState = func(fn func(*engine.State) error) error { return fn(&s.state) }
 	jobFenceCheck = func(context.Context, config.Cluster, engine.Reporter) error { return nil }
 	activityRecorderFactory = func() *activityRecorder { return recorderForSettlementTest(t) }
@@ -187,13 +211,36 @@ func (s *ownedForkState) stubForkHooks(t *testing.T) {
 	})
 	host := func(string) (hostinfo.Info, error) { return hostinfo.Info{RAMMiB: 8192, VCPU: 4}, nil }
 	materialisationHostInfo, jobRuntimeHostRead = host, host
-	forkDrop = func(*backup.Materialised) error {
+	forkDrop = func(m *backup.Materialised) error {
 		s.dropCalls++
-		return errors.New("test refuses host cleanup")
+		if !strings.HasPrefix(s.mode, "cleanup") {
+			return errors.New("test refuses host cleanup")
+		}
+		// Simulate the birth-bound physical drop the real method performs:
+		// only the still-pinned artifacts and their reservation are removed,
+		// then the authority records them as dropped.
+		err := m.GuardOwnership(context.Background(), backup.MaterialisationDrop, func() error {
+			p := m.OwnershipPaths()
+			return errors.Join(os.RemoveAll(p.DataDir), os.RemoveAll(p.ConfigDir), os.Remove(filepath.Join(s.registry, p.Name)))
+		})
+		if err == nil && strings.HasPrefix(s.mode, "cleanup-postphysical-changed") {
+			s.changeTargetConfig(s.mode)
+		}
+		return err
 	}
-	forkForgetDatabase = func(string) error {
+	forkForgetDatabase = func(name string) error {
 		s.forgetCalls++
-		return errors.New("test refuses config mutation")
+		if s.mode != "cleanup" {
+			return errors.New("test refuses config mutation")
+		}
+		kept := s.cfg.Clusters[:0]
+		for _, c := range s.cfg.Clusters {
+			if c.Name != name {
+				kept = append(kept, c)
+			}
+		}
+		s.cfg.Clusters = kept
+		return nil
 	}
 	uid := uint32(os.Geteuid())
 	forkReservationLock = func(ctx context.Context, name string, port int, present bool) (func(), error) {
@@ -203,6 +250,25 @@ func (s *ownedForkState) stubForkHooks(t *testing.T) {
 		return backup.LockForkReservationWithHost(ctx, s.registry, uid, name, port, present)
 	}
 	forkNewMaterialised = func(root, name, source string, port int, sh engine.Shell, step string, report engine.Reporter) (*backup.Materialised, error) {
+		if s.mode == "prephysical" {
+			return nil, errors.New("constructor failed")
+		}
+		if s.mode == "prephysical-foreign" {
+			if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+				return nil, err
+			}
+			return nil, errors.New("constructor found a foreign path")
+		}
+		if s.mode == "prephysical-reservation" {
+			if err := os.WriteFile(filepath.Join(s.registry, name), []byte(fmt.Sprintf("%d\n", config.TemporaryPortMin)), 0o600); err != nil {
+				return nil, err
+			}
+			return nil, errors.New("constructor found a foreign reservation")
+		}
+		if strings.HasPrefix(s.mode, "prephysical-changed") {
+			s.changeTargetConfig(s.mode)
+			return nil, errors.New("constructor found changed configuration")
+		}
 		return backup.NewForkMaterialisedWithHost(root, name, source, port, sh, step, report, backup.ForkMaterialisationHost{
 			ReservationDir: s.registry, ConfigRoot: materialisationConfigRoot, UID: uid,
 			ClusterPorts: func() map[int]bool { return map[int]bool{} }, SocketTaken: func(int) bool { return false },
@@ -219,7 +285,30 @@ func (s *ownedForkState) stubForkHooks(t *testing.T) {
 	forkPromote = func(m *backup.Materialised, ctx context.Context) ([]string, error) {
 		return nil, m.GuardOwnership(ctx, backup.MaterialisationPromote, func() error { return nil })
 	}
-	forkRename = func(context.Context, sqlRunner, string, string, map[string]string) error { return nil }
+	forkRename = func(context.Context, sqlRunner, string, string, map[string]string) error {
+		if s.mode == "cleanup" {
+			return errors.New("rename failed")
+		}
+		if s.mode == "cleanup-foreign-fence" {
+			if err := backup.UpdateRecords(func(r *backup.Records) error {
+				f := r.Activation[s.owner.Target]
+				f.OperationID = "foreign-operation"
+				r.Activation[s.owner.Target] = f
+				return nil
+			}); err != nil {
+				return err
+			}
+			return errors.New("rename failed")
+		}
+		if strings.HasPrefix(s.mode, "cleanup-changed") {
+			s.changeTargetConfig(s.mode)
+			return errors.New("rename failed")
+		}
+		if strings.HasPrefix(s.mode, "cleanup-postphysical-changed") {
+			return errors.New("rename failed")
+		}
+		return nil
+	}
 	forkOtherConfigs = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, string, string) []string {
 		return nil
 	}
@@ -339,11 +428,221 @@ func (s *ownedForkState) assertOutcome(t *testing.T, err error) {
 		return
 	}
 	rejectf(t, err == nil || s.exposed, "failure exposed target: %v", err)
+	if s.mode == "cleanup" {
+		s.assertCleanupRetired(t)
+		return
+	}
+	if s.mode == "cleanup-foreign-fence" {
+		s.assertCleanupForeignFenceRetained(t)
+		return
+	}
+	if strings.HasPrefix(s.mode, "cleanup-postphysical-changed") {
+		s.assertCleanupPostphysicalChangedRetained(t)
+		return
+	}
+	if strings.HasPrefix(s.mode, "cleanup-changed") {
+		s.assertCleanupChangedConfigRetained(t)
+		return
+	}
+	if strings.HasPrefix(s.mode, "prephysical") {
+		s.assertPrephysicalCleanup(t)
+		return
+	}
 	if s.foreignBytes != nil {
 		s.assertForeignMarker(t)
 		return
 	}
 	s.assertFailureMarker(t)
+}
+
+func (s *ownedForkState) changeTargetConfig(mode string) {
+	for i := range s.cfg.Clusters {
+		if s.cfg.Clusters[i].Name != s.owner.Target {
+			continue
+		}
+		switch mode {
+		case "cleanup-changedstanza", "cleanup-postphysical-changedstanza", "prephysical-changedstanza":
+			s.cfg.Clusters[i].Stanza = "changed-abcdef"
+		case "cleanup-changedsettings", "cleanup-postphysical-changedsettings", "prephysical-changedsettings":
+			s.cfg.Clusters[i].Settings = map[string]string{"shared_buffers": "512MB"}
+		case "cleanup-changeddataroot", "cleanup-postphysical-changeddataroot", "prephysical-changeddataroot":
+			s.cfg.Server.DataRoot = filepath.Join(s.root, "moved")
+		case "prephysical-changedcfg":
+			s.cfg.Clusters[i].Port++
+		}
+	}
+}
+
+func (s *ownedForkState) assertPrephysicalCleanup(t *testing.T) {
+	t.Helper()
+	if s.dropCalls != 0 || s.forgetCalls != 0 {
+		t.Fatalf("pre-physical cleanup attempted physical/config mutation: drops=%d forgets=%d", s.dropCalls, s.forgetCalls)
+	}
+	recs, err := backup.LoadRecords()
+	mustNoErr(t, err)
+	if s.mode != "prephysical" {
+		s.assertPrephysicalEvidenceRetained(t, recs)
+		return
+	}
+	if _, found, readErr := readMaterialisation(s.owner.Target, s.root); readErr != nil || found {
+		t.Fatalf("marker state: found=%v err=%v", found, readErr)
+	}
+	if _, ok := s.cfg.ClusterByName(s.owner.Target); ok {
+		t.Fatal("pre-physical cleanup left the target configured")
+	}
+	if _, ok := recs.ActivationFenceFor(s.owner.Target); ok {
+		t.Fatal("pre-physical cleanup left the prepared fence")
+	}
+}
+
+func (s *ownedForkState) assertPrephysicalEvidenceRetained(t *testing.T, recs backup.Records) {
+	t.Helper()
+	if s.mode == "prephysical-foreign" {
+		if _, err := os.Stat(s.owner.DataPath); err != nil {
+			t.Fatalf("foreign path lost: %v", err)
+		}
+	}
+	if s.mode == "prephysical-reservation" {
+		if _, err := os.Stat(filepath.Join(s.registry, s.owner.Target)); err != nil {
+			t.Fatalf("foreign reservation lost: %v", err)
+		}
+	}
+	if _, found, readErr := readMaterialisation(s.owner.Target, s.root); readErr != nil || !found {
+		t.Fatalf("evidence lost the marker: found=%v err=%v", found, readErr)
+	}
+	target, ok := s.cfg.ClusterByName(s.owner.Target)
+	if !ok {
+		t.Fatal("evidence lost the configured target")
+	}
+	switch s.mode {
+	case "prephysical-changedstanza":
+		if target.Stanza != "changed-abcdef" {
+			t.Fatalf("changed stanza lost: %+v", target)
+		}
+	case "prephysical-changedsettings":
+		if target.Settings["shared_buffers"] != "512MB" {
+			t.Fatalf("changed settings lost: %+v", target.Settings)
+		}
+	case "prephysical-changeddataroot":
+		if s.cfg.Server.DataRoot != filepath.Join(s.root, "moved") {
+			t.Fatalf("changed data root lost: %s", s.cfg.Server.DataRoot)
+		}
+	}
+	if _, ok := recs.ActivationFenceFor(s.owner.Target); !ok {
+		t.Fatal("evidence lost the prepared fence")
+	}
+}
+
+func (s *ownedForkState) assertCleanupPostphysicalChangedRetained(t *testing.T) {
+	t.Helper()
+	if s.dropCalls != 1 || s.forgetCalls != 0 {
+		t.Fatalf("post-physical changed configuration: drops=%d forgets=%d", s.dropCalls, s.forgetCalls)
+	}
+	for _, path := range []string{s.owner.DataPath, s.owner.RegisteredPath, filepath.Join(s.registry, s.owner.Target)} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("physical drop did not finish at %s: %v", path, err)
+		}
+	}
+	if _, found, err := readMaterialisation(s.owner.Target, s.root); err != nil || !found {
+		t.Fatalf("post-physical change lost the marker: found=%v err=%v", found, err)
+	}
+	target, ok := s.cfg.ClusterByName(s.owner.Target)
+	if !ok {
+		t.Fatal("post-physical change lost the target")
+	}
+	switch s.mode {
+	case "cleanup-postphysical-changedstanza":
+		if target.Stanza != "changed-abcdef" {
+			t.Fatalf("changed stanza lost: %+v", target)
+		}
+	case "cleanup-postphysical-changedsettings":
+		if target.Settings["shared_buffers"] != "512MB" {
+			t.Fatalf("changed settings lost: %+v", target.Settings)
+		}
+	case "cleanup-postphysical-changeddataroot":
+		if s.cfg.Server.DataRoot != filepath.Join(s.root, "moved") {
+			t.Fatalf("changed data root lost: %s", s.cfg.Server.DataRoot)
+		}
+	}
+	recs, err := backup.LoadRecords()
+	mustNoErr(t, err)
+	if _, ok := recs.ActivationFenceFor(s.owner.Target); !ok {
+		t.Fatal("post-physical change lost the prepared fence")
+	}
+}
+
+func (s *ownedForkState) assertCleanupChangedConfigRetained(t *testing.T) {
+	t.Helper()
+	if s.dropCalls != 0 || s.forgetCalls != 0 {
+		t.Fatalf("changed configuration reached physical/config cleanup: drops=%d forgets=%d", s.dropCalls, s.forgetCalls)
+	}
+	if _, found, err := readMaterialisation(s.owner.Target, s.root); err != nil || !found {
+		t.Fatalf("changed configuration lost the marker: found=%v err=%v", found, err)
+	}
+	target, ok := s.cfg.ClusterByName(s.owner.Target)
+	if !ok {
+		t.Fatal("changed configuration lost the target")
+	}
+	switch s.mode {
+	case "cleanup-changedstanza":
+		if target.Stanza != "changed-abcdef" {
+			t.Fatalf("changed stanza lost: %+v", target)
+		}
+	case "cleanup-changedsettings":
+		if target.Settings["shared_buffers"] != "512MB" {
+			t.Fatalf("changed settings lost: %+v", target.Settings)
+		}
+	case "cleanup-changeddataroot":
+		if s.cfg.Server.DataRoot != filepath.Join(s.root, "moved") {
+			t.Fatalf("changed data root lost: %s", s.cfg.Server.DataRoot)
+		}
+	}
+	recs, err := backup.LoadRecords()
+	mustNoErr(t, err)
+	if _, ok := recs.ActivationFenceFor(s.owner.Target); !ok {
+		t.Fatal("changed configuration lost the prepared fence")
+	}
+}
+
+func (s *ownedForkState) assertCleanupForeignFenceRetained(t *testing.T) {
+	t.Helper()
+	if s.dropCalls != 0 || s.forgetCalls != 0 {
+		t.Fatalf("foreign fence reached physical/config cleanup: drops=%d forgets=%d", s.dropCalls, s.forgetCalls)
+	}
+	if _, found, err := readMaterialisation(s.owner.Target, s.root); err != nil || !found {
+		t.Fatalf("foreign fence lost the marker: found=%v err=%v", found, err)
+	}
+	if _, ok := s.cfg.ClusterByName(s.owner.Target); !ok {
+		t.Fatal("foreign fence lost the configured target")
+	}
+	recs, err := backup.LoadRecords()
+	mustNoErr(t, err)
+	if got, ok := recs.Activation[s.owner.Target]; !ok || got.OperationID != "foreign-operation" {
+		t.Fatalf("foreign fence changed: %+v found=%v", got, ok)
+	}
+}
+
+func (s *ownedForkState) assertCleanupRetired(t *testing.T) {
+	t.Helper()
+	if s.dropCalls != 1 || s.forgetCalls != 1 {
+		t.Fatalf("cleanup calls: drops=%d forgets=%d", s.dropCalls, s.forgetCalls)
+	}
+	if _, found, err := readMaterialisation(s.owner.Target, s.root); err != nil || found {
+		t.Fatalf("marker remains: found=%v err=%v", found, err)
+	}
+	if _, ok := s.cfg.ClusterByName(s.owner.Target); ok {
+		t.Fatal("target remains configured")
+	}
+	recs, err := backup.LoadRecords()
+	mustNoErr(t, err)
+	if _, ok := recs.ActivationFenceFor(s.owner.Target); ok {
+		t.Fatal("prepared fork fence remains after cleanup")
+	}
+	for _, path := range []string{s.owner.DataPath, s.owner.RegisteredPath, filepath.Join(s.registry, s.owner.Target)} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("cleanup left %s: %v", path, err)
+		}
+	}
 }
 
 func (s *ownedForkState) assertForeignMarker(t *testing.T) {
@@ -455,7 +754,7 @@ func TestForkProvisionVerificationRequiresRolesAndAccess(t *testing.T) {
 }
 
 func TestForkOwnedRuntime(t *testing.T) {
-	for _, mode := range []string{"success", "recovery_requirements_unmet", "recovery_parameter_mismatch", "replacement", "foreign-reservation", "foreign-marker-install", "foreign-marker-job", "foreign-marker-operation", "access", "retire"} {
+	for _, mode := range []string{"success", "recovery_requirements_unmet", "recovery_parameter_mismatch", "replacement", "foreign-reservation", "foreign-marker-install", "foreign-marker-job", "foreign-marker-operation", "access", "retire", "cleanup", "cleanup-foreign-fence", "cleanup-changedstanza", "cleanup-changedsettings", "cleanup-changeddataroot", "cleanup-postphysical-changedstanza", "cleanup-postphysical-changedsettings", "cleanup-postphysical-changeddataroot", "prephysical", "prephysical-foreign", "prephysical-reservation", "prephysical-changedcfg", "prephysical-changedstanza", "prephysical-changedsettings", "prephysical-changeddataroot"} {
 		t.Run(mode, func(t *testing.T) { runOwnedForkFixture(t, mode) })
 	}
 }

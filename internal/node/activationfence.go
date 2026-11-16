@@ -736,7 +736,7 @@ func clearActivationFenceVerified(cfg config.Cluster, db, opID, kind string) err
 	if err != nil {
 		return err
 	}
-	return backup.UpdateRecords(func(s *backup.Records) error {
+	err = backup.UpdateRecords(func(s *backup.Records) error {
 		f, ok := s.ActivationFenceFor(db)
 		if !ok {
 			return output.NewError(output.CodePrecondition,
@@ -766,6 +766,12 @@ func clearActivationFenceVerified(cfg config.Cluster, db, opID, kind string) err
 		delete(s.Activation, db)
 		return nil
 	})
+	if err == nil && kind == "fork" {
+		// The fence was the fork job's last unresolved authority; its exact
+		// retained record can now be pruned with the ordinary history.
+		releaseResolvedMaterialisationJob(want.OperationID, "db-fork")
+	}
+	return err
 }
 
 // routingContinuationWithRestoreError is the fail-closed state where a
