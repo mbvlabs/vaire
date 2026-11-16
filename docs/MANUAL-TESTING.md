@@ -28,7 +28,7 @@ Live qualification evidence and original checklists. Dated failures, fixes and t
 - Full-snapshot master-bundle verification may say `behind` after backup telemetry updates that deliberately do not mark durable state dirty. Cryptographic verification and recovery passed; privileged per-file freshness comparison was not done.
 - Self-revert's journal and supported resume are now proven. Final DNS/TLS completion of that last resumed init was not supplied; the operator anticipated DNS mismatch, but no actual TLS failure output was recorded. Earlier completed remote/local bootstrap evidence remains valid.
 - Stable tag ancestry/signing/upload/channel promotion and stable install/upgrade await the first authorized alpha publication. Local release-promotion tests are not stable workflow evidence. macOS live testing was excluded by the operator.
-- **Phase 7 (extensions, repack and the exact report) has no live evidence.** Its source implementation has stage acceptance through E7-06; the two whole-change reviews and fresh final checks have not run. Every Phase 7 live case below is **NOT RUN**; the coordinated map is [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
+- **Phase 7 update (2026-11-16):** the corrected Linux candidate passed two independent whole-change source reviews, fresh local verification and the bounded clean-slate lab cases recorded below, including CLI/WireGuard transport. Signed publication, deployment and the full platform/recovery/protection matrix remain separate and incomplete. Requirements and limits are in the [finishing checklist](../specs/extensions-finish.md); procedures remain in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md).
 - Historical detailed fault-injection and cosmetic follow-ups below remain qualified by their individual evidence; this summary does not blanket-check them or expand the agreed scope.
 
 ### Test-resource accounting and release boundary
@@ -461,7 +461,7 @@ Original exit procedure from [`PHASE-5-WORK-UNITS.md`](./PHASE-5-WORK-UNITS.md),
 
 ## Phase 6: Followers (built, live test pending)
 
-Run on the context chosen for the live test, after upgrading the server to the build that has Phase 6. These boxes are unchecked until the run is recorded here. Live execution is specified in [RUN-phase-6-live.md](RUN-phase-6-live.md), which is source-based and grants no live permission: it resolves disposable fixture names, sizes, slot caps, WAL bounds and stop conditions from an approved inventory. The historical `app`/`other` names below are not fixtures, and the `large` size is not a default budget. Cases the run sheet marks blocked must not be forced with `chmod`, `ALTER SYSTEM`, timing-only kills, `records.json` corruption, hooks or hand edits.
+Run on the workspace chosen for the live test, after upgrading the server to the candidate build. These boxes are unchecked until the run is recorded here. Follower cases are consolidated in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md#preserved-follower-case-map), which grants no live permission: resolve disposable fixture names, sizes, slot caps, WAL bounds and stop conditions from an approved inventory. The historical `app`/`other` names below are not fixtures, and the `large` size is not a default budget. Cases the run sheet marks blocked must not be forced with `chmod`, `ALTER SYSTEM`, timing-only kills, `records.json` corruption, hooks or hand edits.
 
 - [ ] **The upgrade**
     - `vaire apply`: every database's `postgres-config-v1` re-runs and warns `restart_pending` for `wal_level`; `vaire apply --confirm app/restart --confirm other/restart` clears it. `SHOW wal_level` is `replica` and `SHOW max_slot_wal_keep_size` matches `vaire tune explain --db app`. Followers stream before the restart too.
@@ -486,34 +486,34 @@ Run on the context chosen for the live test, after upgrading the server to the b
     - Row counts and `select last_value from <seq>` for each sequence equal `app`'s at the moment of the promote; `app_follower_app` connects with the new password; `app_app` doesn't connect to `app_follower`; the slot `vaire_app_follower` is gone from `app`.
     - Run a migration on `app_follower` (an `alter table … add column … default …` through `vaire tunnel --db app_follower --target postgres` as `app_follower_migrate`). Then `vaire db drop app_follower --confirm app_follower`.
 - [ ] **Resize a source**
-    - Follow `app` again, then run the budget-safe growth [RUN-phase-6-live.md](RUN-phase-6-live.md) resolves (not a fixed `large`): the follower restarts first with the higher floors, then `app`, and it keeps streaming. Without the follower's token the result warns `restart_pending` for it and says its replay may pause.
-    - A retry after a failed follower update is **blocked** for live execution: the configuration writer is root, and no supported deterministic way to fail its write was found. Do not make `conf.d` unwritable for postgres; root's writer ignores that. The retry semantics are covered by source regressions; see [RUN-phase-6-live.md](RUN-phase-6-live.md).
+    - Follow `app` again, then run budget-safe growth as specified in [the combined run sheet](RUN-phase-6-7-live.md#follower-observations-and-safety-requirements) (not a fixed `large`): the follower restarts first with the higher floors, then `app`, and it keeps streaming. Without the follower's token the result warns `restart_pending` for it and says its replay may pause.
+    - A retry after a failed follower update is **blocked** for live execution: the configuration writer is root, and no supported deterministic way to fail its write was found. Do not make `conf.d` unwritable for postgres; root's writer ignores that. The retry semantics are covered by source regressions; see [the fault-boundary requirements](RUN-phase-6-7-live.md#fault-boundaries-that-remain-conditional-or-blocked).
     - `vaire db resize app --size nano`: refused with `has_followers`, naming the follower and the floor that would fall. Unfollow or drop the follower, resize, then follow again.
 - [ ] **Restore a source with a follower**
     - `app` is protected since the Phase 5 test: lift it first with `vaire db unprotect app` (a human, with the authenticator), and `vaire db protect app` again afterwards.
     - `vaire restore app --time <t> --confirm app/restore`, then `vaire restore promote app --confirm app/restore`: warns `followers_diverged`; doctor fails `follower.streaming`; `vaire db drop app_follower --confirm app_follower` and `vaire db follow app` again bring it back.
 - [ ] **Recovery after a rebuild**
     - With `app_follower` following `app`, rebuild with `server init --restore`. `db list` shows both `awaiting_recovery`; `vaire db recover app_follower` is refused with `source_awaiting_recovery`; `vaire db recover --all` recovers `app`, then `app_follower` (following again), and takes a full of `app` only.
-    - **Kill recovery during the copy.** [RUN-phase-6-live.md](RUN-phase-6-live.md) requires post-termination evidence of the actual stopped phase and partial-copy artifacts. A pre-stop `copying` marker or timer alone cannot distinguish preparation/copy/adoption; otherwise record inconclusive or blocked even if retry succeeds.
-    - **Kill recovery during adoption, and before the adopted marker.** **Blocked** for live execution: no supported deterministic way to observe those exact boundaries exists. Do not kill by feel, add a hook or edit records. The retry semantics are covered by source regressions in [RUN-phase-6-live.md](RUN-phase-6-live.md).
-    - **An unreserved slot.** Bounded diagnostics in [RUN-phase-6-live.md](RUN-phase-6-live.md) start with a materialised follower and retained slot. Capture original cap presence/value, use supported config/apply, generate approved bounded WAL, record actual `unreserved` versus `lost`, then restore the original value/inheritance. Retained-copy recovery preview/recopy remains blocked until completed owned-copy progress with awaiting state is proven; fresh rebuild alone does not establish it. No `ALTER SYSTEM` or unbounded writer.
+    - **Kill recovery during the copy.** [The combined run sheet](RUN-phase-6-7-live.md#fault-boundaries-that-remain-conditional-or-blocked) requires post-termination evidence of the actual stopped phase and partial-copy artifacts. A pre-stop `copying` marker or timer alone cannot distinguish preparation/copy/adoption; otherwise record inconclusive or blocked even if retry succeeds.
+    - **Kill recovery during adoption, and before the adopted marker.** **Blocked** for live execution: no supported deterministic way to observe those exact boundaries exists. Do not kill by feel, add a hook or edit records. See [the fault-boundary requirements](RUN-phase-6-7-live.md#fault-boundaries-that-remain-conditional-or-blocked).
+    - **An unreserved slot.** Bounded diagnostics in [the combined run sheet](RUN-phase-6-7-live.md#fault-boundaries-that-remain-conditional-or-blocked) start with a materialised follower and retained slot. Capture original cap presence/value, use supported config/apply, generate approved bounded WAL, record actual `unreserved` versus `lost`, then restore the original value/inheritance. Retained-copy recovery preview/recopy remains blocked until completed owned-copy progress with awaiting state is proven; fresh rebuild alone does not establish it. No `ALTER SYSTEM` or unbounded writer.
     - A dry run whose slot cannot be read reports `resume_conditional`, and the job decides for itself; the live case is **blocked** because no supported way to make only the slot unreadable is approved.
 - [ ] **Corrective-pass semantics (source-level regressions; live pending)**
-    - **A prepared follow is never a general-apply cluster.** **Blocked** for live execution: the required kill after the entry save and before any copy has no supported deterministic boundary; a timing-only kill is not proof. Do not add a hook or edit `cluster.toml`. Source regressions cover `follow_generation`, general apply exclusion, diagnostics and public retry; see [RUN-phase-6-live.md](RUN-phase-6-live.md).
-    - **An unfollow owns its target.** **Blocked** for live execution: interrupting after promotion and before the renames has no supported deterministic boundary. Do not sleep, hook or edit records. Source regressions cover the `unfollow_in_progress` refusal and the unfollow's own retry; see [RUN-phase-6-live.md](RUN-phase-6-live.md).
+    - **A prepared follow is never a general-apply cluster.** **Blocked** for live execution: the required kill after the entry save and before any copy has no supported deterministic boundary; a timing-only kill is not proof. Do not add a hook or edit `cluster.toml`. Source regressions cover `follow_generation`, general apply exclusion, diagnostics and public retry; see [the fault-boundary requirements](RUN-phase-6-7-live.md#fault-boundaries-that-remain-conditional-or-blocked).
+    - **An unfollow owns its target.** **Blocked** for live execution: interrupting after promotion and before the renames has no supported deterministic boundary. Do not sleep, hook or edit records. Source regressions cover the `unfollow_in_progress` refusal and the unfollow's own retry; see [the fault-boundary requirements](RUN-phase-6-7-live.md#fault-boundaries-that-remain-conditional-or-blocked).
     - **A fresh floor refusal is executable.** Before a fresh follow has an entry, a `source_floors_above_follower` refusal names `vaire config set clusters.<source>.settings.<setting> <running value>`; running that command on the node's persisted configuration makes the retry safe. A retry of an existing unfinished follower names `clusters.<follower>.settings.<setting>` instead. No command targets a follower that does not exist, and no command restarts anything.
-    - **Unread transition records fail closed at the poolers.** **Blocked** for live execution: making `records.json` unreadable or corrupt is not approved, even on a disposable node. Do not `chmod`, truncate, replace or hand-edit it. The fail-closed rendering and direct-fence behavior are covered by source regressions; see [RUN-phase-6-live.md](RUN-phase-6-live.md).
+    - **Unread transition records fail closed at the poolers.** **Blocked** for live execution: making `records.json` unreadable or corrupt is not approved, even on a disposable node. Do not `chmod`, truncate, replace or hand-edit it. The fail-closed rendering and direct-fence behavior are covered by source regressions; see [the fault-boundary requirements](RUN-phase-6-7-live.md#fault-boundaries-that-remain-conditional-or-blocked).
 
 
-## Phase 7: Extensions and maintenance (implemented locally, all live cases NOT RUN)
+## Phase 7: Extensions and maintenance (final qualification pending)
 
-Source implementation through E7-05 is accepted by both independent cumulative source lanes; E7-06 is at final targeted source closure. The two whole-change reviews and fresh final verification have not run, and nothing is published, deployed or live-qualified. **Every item in this section is unchecked and NOT RUN.** The command templates in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md) are preparation only: resolve the candidate, context, fixtures, budgets and permissions before executing anything. Do not force failures with hooks, corrupted records, `ALTER SYSTEM`, timing-only kills or repository edits.
+Extensions and their finishing corrections have Linux source acceptance. See the [finishing checklist](../specs/extensions-finish.md) for exact source identity and acceptance gates. **The checkboxes below describe the complete qualification matrix, not whether any part of a case was executed.** The current-candidate results below record bounded Linux passes and remaining partial/blocked coverage. Signed-artifact and other-platform qualification are not implied. The [combined run sheet](RUN-phase-6-7-live.md) retains prerequisites for further runs. Do not force failures with hooks, corrupted records, `ALTER SYSTEM`, timing-only kills or repository edits.
 
 - [ ] **X1 — built-in extension and alias**
     - On a disposable independent primary, `vaire ext list --db <db>`, `vaire ext add pgvector --db <db>`, `vaire ext list --db <db>`, then `vaire ext remove vector --db <db> --confirm <db>`.
     - Expected: the alias is persisted as `vector`; package/control/installed/default facts are factual; no unrelated restart; removal keeps the package. Details in [EXTENSION-DEFINITIONS.md](EXTENSION-DEFINITIONS.md).
-- [ ] **X2 — real non-built-in custom definition (BLOCKED on fixture)**
-    - No safe real package or preinstalled fixture is selected; pgvector is built-in and does not prove general support. Do not execute the `pg_stat_kcache` template until its package availability and runtime behavior are verified on the target OS/architecture.
+- [ ] **X2 — real non-built-in custom definition**
+    - The Debian lab verified `postgresql-18-pg-stat-kcache` 2.3.2-1.pgdg13+3, its control/library files, durable custom descriptor and effective runtime. Revalidate that fixture on the final candidate and target platform; pgvector is built-in and does not prove general support.
     - Expected when a fixture exists: durable `[extensions.<name>]`, package/control/library facts, the same resolver in follower and rebuild paths, and honest rebuild prerequisites.
 - [ ] **X3 — missing repository or preinstalled prerequisite**
     - Use a safely verified absent package or preinstalled file. Expected: an actionable prerequisite before effects, unknown facts not reported as absent, awaiting-recovery state preserved, and no automatic repository/key setup.
@@ -540,7 +540,83 @@ Source implementation through E7-05 is accepted by both independent cumulative s
     - Add `pgstattuple`; run `vaire maint report bloat --db <db> --table <table> --exact`.
     - Expected: full `pgstattuple`, not `pgstattuple_approx`; measured table/live/dead/free bytes and percentages plus method; `vaire_admin` with `pg_monitor`; 5-second lock and 60-second statement timeouts; permission/timeout failures honest; no instantaneous, reclaimable, index or database-wide claim.
 
-The Phase 4 entries below that say `maint repack` “refuses until Phase 7” are historical evidence from that qualification; Phase 7 now implements repack locally, but it has not been live-tested.
+The Phase 4 entries below that say `maint repack` “refuses until Phase 7” are historical. Current manual/auto-repack lab results are recorded below; the full protection/window/failure matrix is not complete.
+
+### Current candidate: clean-slate Linux lab — 2026-11-16
+
+Two independent source reviewers accepted the corrected Linux source. Fresh
+build, vet, full uncached tests, formatting and metadata/shell/workflow checks
+passed with all 687 source hashes unchanged. Strict lint remains red at 142
+findings versus 131 baseline; macOS is explicitly deferred.
+
+Clean Debian 13.7 x86_64 Firecracker guest, PostgreSQL 18, 4 CPU/4 GiB/20 GiB:
+normal `server init`, real CLI over WireGuard, node dispatcher and systemd jobs.
+The dev binary was **not** a signed published artifact.
+
+- Source manifest SHA-256:
+  `66ae70f96f88f0577dac3388b9da6f26add06a897ad047950e762ab8c27ff7ea`.
+- Binary SHA-256:
+  `069516576918705d82b137994adf6dfe3588951a83a1ac75b8a2d3db99ca2c6f`.
+- Fresh custom-only kcache source/follower loaded stats before kcache and
+  streamed with native `pg_stat_statements.max=5000`, without a placeholder.
+  Empty selection also recreated implicit stats SQL at native defaults.
+- Copied `work_mem='1024kB'` was accepted against effective `1MB`.
+- Alias/install/remove/package retention, real custom provider, dependency
+  refusal/cascade, exact restart-token isolation, follower-first staging,
+  stopped-source/follower apply and failed-provider history prevention passed.
+- Real cron fork/unfollow kept copied jobs inactive/retargeted and launch-off,
+  while source jobs/settings stayed unchanged.
+- Manual and auto-repack used application-owner-created tables with no extra
+  grants and truthfully reported `completion_unknown/clean_exit`.
+  Exact `pgstattuple` reported 1,523,712 bytes and 5,000 tuples.
+
+[Sanitized case results, commands, job IDs and cleanup](../specs/evidence/extensions/results-final-candidate-v3.md)
+preserve the exact scope. Protected/TOTP, deterministic crash boundaries,
+drill, bucket/rebuild, other platforms, forced OID races and the legacy
+lexical-guard-to-restart-token scenario remain partial/blocked. Fresh correct
+guard ordering passed; no old generated guard was injected to manufacture a
+legacy test. No production or external bucket was used.
+
+### Development lab checkpoint — 2026-11-16
+
+The following baseline/overlay observations are historical and superseded by
+the current-candidate run above where cases overlap.
+
+User-authorized disposable Firecracker guest: Debian 13.7 x86_64, PostgreSQL 18,
+4 vCPU/4 GiB/20 GiB. Tests used real production node RPC and systemd jobs.
+They did **not** qualify CLI/WireGuard transport or signed-release installation;
+the old isolated operator state did not match the guest's operators.
+
+- Baseline source `84f71bb`, dev binary SHA-256
+  `7f5fab783bd314ce09cec55a7d27fd65e7226634c1a4ed3de6f91eca5ce40ddc`.
+  [Sanitized case results](../specs/evidence/extensions/results-84f71bb.md)
+  preserve exact scope, commands, versions, partial cases and remaining fixtures.
+- Built-in vector alias/install/remove/package retention, a real custom
+  pg_stat_kcache provider, isolated restart authorization and bounded
+  source/follower propagation were observed. Missing prerequisite refusals
+  exposed EFIN-12 speculative history pollution despite restored config.
+- A real cron copy exposed the CSV boolean bug and unfollow session-renaming
+  failure. A clean baseline-plus-EFIN-1/11 overlay, binary SHA-256
+  `da72cce56f8e969edf61ec695ce0c1c1c83c064009a240c68468cbc903c82f93`,
+  successfully drained the copied launcher, settled unfollow and forked the cron
+  source. Copied jobs were inactive/retargeted with launches off; source jobs
+  remained unchanged. [Overlay evidence](../specs/evidence/extensions/results-efin1-efin11-overlay.md)
+  is not proof of the later integrated candidate.
+- Manual repack and auto-repack on a fresh application-owned table attempted
+  rewrites with no backend killing; unattributable completion was correctly
+  reported `unknown`, not confirmed repacked. The apparent auto-statistics
+  failure was a postgres-owned fixture artifact: owner-created application
+  tables worked without explicit grants. Diagnostic grants were revoked.
+  No privileged statistics probe or grant expansion was added.
+- The one-table `pgstattuple` full-scan report returned actual measured bytes,
+  tuple counts and percentages. The later OID-bound correction still requires
+  an integrated-candidate rerun.
+
+Protected/TOTP cases, deterministic interruption boundaries, drill, historical
+bucket/rebuild recovery and the complete platform matrix remain partial or
+blocked as detailed in the evidence. No production VPS, external bucket or
+eregion state was used. Raw unsanitized streams are excluded from repository
+evidence; no credentials are included in the linked reports.
 
 ## Historical v1 fix checklist (written 2026-10-16 before deployment)
 

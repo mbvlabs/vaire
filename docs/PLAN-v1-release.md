@@ -2,7 +2,7 @@
 
 Status, 2026-10-19: main live qualification for Phases 0–5 is complete, with explicit coverage limits in [MANUAL-TESTING.md](MANUAL-TESTING.md). No alpha has been tagged or published by this qualification. This is the release procedure, not authorization to execute it.
 
-Phase 7 checkpoint, 2026-11-11: the local source implementation is accepted through E7-05; E7-06 is at final targeted source closure. The two whole-change reviews (E7-08A/B) and fresh final verification (E7-09) have not run, and no Phase 7 commit, publication, deployment or live qualification is authorized or claimed.
+Phase 7 checkpoint, 2026-11-16: extensions and later fixes are on `master`; eight relevant packages pass uncached tests. Historical final reviews blocked. Current finding closure, full final verification, signed-candidate identity and per-case live qualification remain to be established in the [finishing checklist](../specs/extensions-finish.md). This procedure does not authorize Git or live actions.
 
 ## Release strategy (updated 2026-10-19)
 
@@ -61,7 +61,7 @@ No unresolved reproducible code blocker remains from the main qualification run.
 ## Toward the beta
 
 1. Qualify activity history on edge, or explicitly accept its named evidence gaps before deployment.
-2. Followers were published through PR #14 at `0d8e1fcc493c`; that is not deployment or live qualification. Phase 7's local source implementation is accepted through E7-05; E7-06 is at final targeted source closure, and the two whole-change reviews and fresh final checks have not run. After that closure, separately authorize its pull request/publication and signed-artifact verification. Separately authorize deployment and the combined follower/extension qualification in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md); preserve all follower cases and blocked fault-boundary cases. The run sheet is preparation only and is not execution-ready.
+2. Finish the [extension acceptance checklist](../specs/extensions-finish.md): reconcile the seven historical final findings, obtain two fresh whole-change verdicts and run the full final gate. The feature is already on `master`; verify the actual matching workflow and signed artifact rather than assuming an unpublished feature branch. Reconcile existing VPS evidence, then separately authorize any remaining deployment and combined follower/extension qualification in [RUN-phase-6-7-live.md](RUN-phase-6-7-live.md). Preserve follower cases and blocked fault boundaries; unresolved admission values still block execution.
 3. Open a pull request from `master` into `1.x` and merge it with a merge commit; tag `v1.0.0-beta.1` on `1.x` (with authorization) and qualify it as in the cut checklist.
 
 - Until then, v1 fixes still target `1.x` and are merged up into master.

@@ -236,6 +236,7 @@ type followerStub struct {
 	slotSource   string
 	finishSpec   config.ClusterSpec
 	finishSource string
+	renameTarget unfollowRenameTarget
 	resumed      bool
 }
 
@@ -292,7 +293,10 @@ func (s *followerStub) install(t *testing.T) *followerStub {
 			return nil, followerReading{}, s.stage("start")
 		},
 		promote: func(context.Context, pg.Local, string) ([]string, error) { return nil, s.stage("promote") },
-		rename: func(context.Context, sqlRunner, string, string, map[string]string, engine.Reporter, string) error {
+		rename: func(_ context.Context, target unfollowRenameTarget, _, _ string, _ map[string]string, _ engine.Reporter, _ string) error {
+			s.mu.Lock()
+			s.renameTarget = target
+			s.mu.Unlock()
 			return s.stage("rename")
 		},
 		removeConf: func(cluster string) error {
@@ -1650,6 +1654,14 @@ func TestUnfollowSettlesAccessBeforeExposingTheAlias(t *testing.T) {
 	rejectf(t, atPromote.Settled || atRestart.Settled, "the record was settled before the restart: promote %+v restart %+v", atPromote, atRestart)
 	rejectf(t, !atFinish.Settled, "finish saw an unsettled record: %+v", atFinish)
 	reject(t, !stub.resumed, "the poolers were not resumed after the settled render")
+	followerSpec, _ := cfg.ClusterByName("app_follower")
+	sourceSpec, _ := cfg.ClusterByName("app")
+	local, ok := stub.renameTarget.local.(pg.Local)
+	if !ok || local.Port != followerSpec.Port || stub.renameTarget.cluster != "app_follower" ||
+		stub.renameTarget.port != followerSpec.Port || stub.renameTarget.dataDir != cfg.Server.DataDirectory("app_follower") ||
+		stub.renameTarget.sourcePort != sourceSpec.Port || stub.renameTarget.sourceDataDir != cfg.Server.DataDirectory("app") {
+		t.Fatalf("the rename was not bound to the follower cluster: %+v (local %+v)", stub.renameTarget, local)
+	}
 	if recs := node.records().Unfollowing; len(recs) != 0 {
 		t.Fatalf("the finished unfollow left a record: %v", recs)
 	}
@@ -1996,8 +2008,8 @@ func waitingNodeLock(locks jobLockers) func(context.Context, string, string) (en
 	}
 }
 
-// fakeSQL models a promoted follower's cluster for the renames: the databases
-// and roles it holds. It records what renameFollower asked it to run.
+// fakeSQL models a promoted follower's catalog: the databases and roles it
+// holds. The unfollow protection-policy tests read it.
 type fakeSQL struct {
 	databases map[string]bool
 	roles     map[string]bool
@@ -2030,12 +2042,11 @@ func (f *fakeSQL) last() string { return strings.Join(f.executed, "\n") }
 // gone, so every rename is done) failed on the old roles; the cluster's names
 // decide now.
 func TestRenameFollowerFinishesASubsetOfRoles(t *testing.T) {
-	fake := &fakeSQL{
-		databases: map[string]bool{"app_follower": true},
-		roles:     map[string]bool{"app_follower_owner": true, "app_migrate": true, "app_app": true, "app_ro": true},
-	}
+	fake := newFakeUnfollowRenameSQL()
+	fake.setDatabases("app_follower")
+	fake.roles = map[string]bool{"app_follower_owner": true, "app_migrate": true, "app_app": true, "app_ro": true}
 	passwords := rolePasswords("app_follower")
-	if err := renameFollower(context.Background(), fake, "app", "app_follower", passwords, nil, "db-unfollow"); err != nil {
+	if err := renameFollower(context.Background(), fake.target(), "app", "app_follower", passwords, nil, "db-unfollow"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	sql := fake.last()
@@ -2067,8 +2078,8 @@ func TestRenameFollowerFinishesASubsetOfRoles(t *testing.T) {
 	// Run again on the finished cluster: nothing is renamed, the settings and
 	// passwords are set once more, and it still succeeds.
 	fake.executed = nil
-	fake.roles = map[string]bool{"app_follower_owner": true, "app_follower_migrate": true, "app_follower_app": true, "app_follower_ro": true}
-	if err := renameFollower(context.Background(), fake, "app", "app_follower", passwords, nil, "db-unfollow"); err != nil {
+	fake.targetRoles()
+	if err := renameFollower(context.Background(), fake.target(), "app", "app_follower", passwords, nil, "db-unfollow"); err != nil {
 		t.Fatalf("second rename: %v", err)
 	}
 	if sql := fake.last(); strings.Contains(sql, "RENAME") {
@@ -2079,11 +2090,9 @@ func TestRenameFollowerFinishesASubsetOfRoles(t *testing.T) {
 // R2-3: the rename from the source's names happens once, with the fork's
 // settings and passwords, when the cluster still has all of them.
 func TestRenameFollowerRenamesEverythingOnce(t *testing.T) {
-	fake := &fakeSQL{
-		databases: map[string]bool{"app": true},
-		roles:     map[string]bool{"app_owner": true, "app_migrate": true, "app_app": true, "app_ro": true},
-	}
-	if err := renameFollower(context.Background(), fake, "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err != nil {
+	fake := newFakeUnfollowRenameSQL()
+	fake.setDatabases("app")
+	if err := renameFollower(context.Background(), fake.target(), "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	sql := fake.last()
@@ -2098,11 +2107,9 @@ func TestRenameFollowerRenamesEverythingOnce(t *testing.T) {
 // R2-3: a cluster the renames can't finish is refused with what is in the way,
 // instead of half renaming it.
 func TestRenameFollowerRefusesWhatItCannotFinish(t *testing.T) {
-	both := &fakeSQL{
-		databases: map[string]bool{"app": true, "app_follower": true},
-		roles:     map[string]bool{"app_owner": true, "app_migrate": true, "app_app": true, "app_ro": true},
-	}
-	if err := renameFollower(context.Background(), both, "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err == nil {
+	both := newFakeUnfollowRenameSQL()
+	both.setDatabases("app", "app_follower")
+	if err := renameFollower(context.Background(), both.target(), "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err == nil {
 		t.Error("both databases in one cluster are renamed")
 	} else if !strings.Contains(err.Error(), "both app and app_follower") {
 		t.Errorf("error %v", err)
@@ -2110,11 +2117,10 @@ func TestRenameFollowerRefusesWhatItCannotFinish(t *testing.T) {
 	if len(both.executed) != 0 {
 		t.Error("a refused rename changed the cluster")
 	}
-	missing := &fakeSQL{
-		databases: map[string]bool{"app_follower": true},
-		roles:     map[string]bool{"app_follower_owner": true, "app_follower_migrate": true, "app_follower_app": true},
-	}
-	if err := renameFollower(context.Background(), missing, "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err == nil {
+	missing := newFakeUnfollowRenameSQL()
+	missing.setDatabases("app_follower")
+	missing.roles = map[string]bool{"app_follower_owner": true, "app_follower_migrate": true, "app_follower_app": true}
+	if err := renameFollower(context.Background(), missing.target(), "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err == nil {
 		t.Error("a missing role is ignored")
 	} else if !strings.Contains(err.Error(), "app_follower_ro is missing") {
 		t.Errorf("error %v", err)
@@ -2124,12 +2130,11 @@ func TestRenameFollowerRefusesWhatItCannotFinish(t *testing.T) {
 	}
 	// A role under both names is as ambiguous as the database: the unfollow
 	// can't tell which one belongs to it.
-	clash := &fakeSQL{
-		databases: map[string]bool{"app_follower": true},
-		roles: map[string]bool{"app_follower_owner": true, "app_follower_migrate": true,
-			"app_follower_app": true, "app_ro": true, "app_follower_ro": true},
-	}
-	if err := renameFollower(context.Background(), clash, "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err == nil {
+	clash := newFakeUnfollowRenameSQL()
+	clash.setDatabases("app_follower")
+	clash.roles = map[string]bool{"app_follower_owner": true, "app_follower_migrate": true,
+		"app_follower_app": true, "app_ro": true, "app_follower_ro": true}
+	if err := renameFollower(context.Background(), clash.target(), "app", "app_follower", rolePasswords("app_follower"), nil, "db-unfollow"); err == nil {
 		t.Error("both app_ro and app_follower_ro in one cluster are ignored")
 	} else if !strings.Contains(err.Error(), "both app_ro and app_follower_ro") {
 		t.Errorf("error %v", err)

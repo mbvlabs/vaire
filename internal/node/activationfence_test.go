@@ -170,7 +170,7 @@ func TestRoutingFinalizerFailureLeavesRoutingFence(t *testing.T) {
 	}
 }
 
-func TestApplyDBDispatchesAdoptedForkContinuation(t *testing.T) {
+func TestApplyRefusesAdoptedForkWithoutRetainedOwnership(t *testing.T) {
 	useTempExtensionRecords(t)
 	useTestInstance(t)
 	cfg := planCfg(t)
@@ -189,11 +189,12 @@ func TestApplyDBDispatchesAdoptedForkContinuation(t *testing.T) {
 		return Result{}, nil
 	}
 	t.Cleanup(func() { applyReloadCluster, resumeForkSettlementAt = oldReload, oldResume })
-	if _, err := handleApply(context.Background(), &Env{Req: request("apply", map[string]any{"db": "app"}), Cluster: cfg}); err != nil {
-		t.Fatal(err)
+	_, err := handleApply(context.Background(), &Env{Req: request("apply", map[string]any{"db": "app"}), Cluster: cfg})
+	if err == nil || extReason(t, err) != "materialisation_incomplete" {
+		t.Fatalf("adopted fence without a retained record = %v", err)
 	}
-	if !called {
-		t.Fatal("apply --db did not resume the adopted fork continuation")
+	if called {
+		t.Fatal("an unowned adopted fence dispatched a continuation")
 	}
 }
 
@@ -399,6 +400,18 @@ func TestForkRoutingFailureRetriesThroughApply(t *testing.T) {
 	spec := cfg.Clusters[0]
 	dataDir := cfg.Server.DataDirectory(spec.Name)
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	confRoot := t.TempDir()
+	restoreSteps, oldMatConf := steps.PGConfRootForTest(confRoot), materialisationConfigRoot
+	materialisationConfigRoot = confRoot
+	t.Cleanup(func() { restoreSteps(); materialisationConfigRoot = oldMatConf })
+	confDir := filepath.Join(confRoot, spec.Name)
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registration := "data_directory = '" + dataDir + "'\ncluster_name = '18/" + spec.Name + "'\nport = 5433\n"
+	if err := os.WriteFile(filepath.Join(confDir, "postgresql.conf"), []byte(registration), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	oldConf, oldData := followConfRegistered, followRegisteredData

@@ -107,12 +107,11 @@ WHERE e.extname = 'pgstattuple' AND p.proname = 'pgstattuple'
 LIMIT 1`
 
 // ExactBloatSQL is the full-scan pgstattuple measurement of one table. It
-// never uses pgstattuple_approx. schema is the extension's schema; the table
-// is a SQL-quoted regclass input.
-func ExactBloatSQL(table, schema string) (string, error) {
-	q, err := QuoteRelation(table)
-	if err != nil {
-		return "", err
+// never uses pgstattuple_approx. schema is the extension's schema. The scan is
+// pinned to the admitted catalog OID, not resolved again through search_path.
+func ExactBloatSQL(oid int64, schema string) (string, error) {
+	if oid <= 0 || oid > 4294967295 {
+		return "", fmt.Errorf("table OID %d is invalid", oid)
 	}
 	if schema == "" {
 		return "", fmt.Errorf("pgstattuple schema is empty")
@@ -126,7 +125,7 @@ func ExactBloatSQL(table, schema string) (string, error) {
   dead_tuple_percent::float8 AS dead_tuple_percent,
   free_space::bigint AS free_space,
   free_percent::float8 AS free_percent
-FROM ` + pg.Quote(schema) + `.pgstattuple(` + literal(q) + `::regclass)`, nil
+FROM ` + pg.Quote(schema) + `.pgstattuple(` + strconv.FormatInt(oid, 10) + `::oid::regclass)`, nil
 }
 
 // TableStats is one table's measured pgstattuple result. FreeBytes is the

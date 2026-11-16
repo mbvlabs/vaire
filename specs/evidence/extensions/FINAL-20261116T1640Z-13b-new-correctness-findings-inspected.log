@@ -1,0 +1,38 @@
+# FINAL GATE 2026-11-16T16:43:06Z
+# New-vs-initial correctness-adjacent findings, inspected manually (no fixes).
+
+## 1) staticcheck SA4006 internal/node/forkcontinuation.go:486 (production, new file)
+Finding: SA4006: this value of info is never used
+Code:
+	info, err := os.Lstat(path)        // line 486
+	present := err == nil
+	...
+	info, err = os.Lstat(path)         // line 504, re-read after lock
+	if present {
+		st, ok := info.Sys().(*syscall.Stat_t)
+Assessment: first Lstat's info is intentionally unused; only err/present feed the
+reservation-lock step, and info is re-read after the lock then validated.
+Dead store only; no behavior change. Not a functional blocker.
+
+## 2) ineffassign x3 (test-only)
+- internal/steps/extensions_follower_runtime_test.go:281:7 and :323:7 "ineffectual assignment to follower"
+- internal/steps/extensions_settings_test.go:144:7 "ineffectual assignment to follower"
+Pattern: helper returns (cfg, follower); test mutates cfg.Clusters, then does
+  follower = cfg.Clusters[1]
+The reassignment is the value used later; the helper's returned follower is dead.
+Intended post-mutation value is used. Benign test hygiene.
+
+## 3) wastedassign internal/steps/extensions_settings_test.go:29:7
+Same follower pattern as (2). Benign.
+
+## 4) new unparam (all test helpers, strict debt)
+- internal/node/extensions_captureboundary_test.go:18:43 captureBoundaryHistory - stanza always "app-abc123"
+- internal/node/extensions_commands_test.go:239:33 extAddCluster - port always 5434
+- internal/node/extensions_history_order_test.go:15:46 extensionRequirementNames - stanza always "app-abc123"
+- internal/node/extensions_installedidentity_test.go:15:83 writeExtTestFence - kind always "fork"
+- internal/node/forkrename_test.go:79:53 and :334:47 fake helpers
+No production correctness impact.
+
+## Also new
+- errcheck moved into new file internal/steps/extension_schemas_test.go:37; total errcheck unchanged at 3.
+- nestif +1 (internal/node/forkcontinuation.go, new file) and prealloc +1: accepted debt drift.

@@ -938,6 +938,14 @@ func (a *materialisationArtifacts) persistMaterialisation(next materialisationOw
 type materialisationReservationGuard func(materialisationOwnership) (unlock func(), err error)
 
 var materialisationRemoveRecord = os.Remove
+var materialisationSyncStateDir = func() error {
+	dir, err := os.Open(materialisationStateDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
+}
 var materialisationSyncArtifactParent = func(root *os.Root) error {
 	f, err := root.Open(".")
 	if err != nil {
@@ -997,15 +1005,19 @@ func (a *materialisationArtifacts) retireMaterialisation(guard materialisationRe
 	return a.removeMaterialisationRecord()
 }
 
-// Unlink is the logical commit point and the final fallible operation. Its
-// absence is not fsynced: after a crash the marker may reappear, in which case
-// normal ownership guards conservatively block it rather than adopting it.
+// Unlink is the logical commit point. Its parent directory is synced before
+// success, so a caller may clear the final activation fence only after the
+// absence is durable. A crash before that sync can restore the marker; the
+// ordinary ownership guards conservatively block it rather than adopting it.
 func (a *materialisationArtifacts) removeMaterialisationRecord() error {
 	if err := a.validateRecord(); err != nil {
 		return err
 	}
 	p, _ := materialisationPath(a.owner.Target)
-	return materialisationRemoveRecord(p)
+	if err := materialisationRemoveRecord(p); err != nil {
+		return err
+	}
+	return materialisationSyncStateDir()
 }
 
 func (a *materialisationArtifacts) retireProvisioned(guard materialisationReservationGuard) error {

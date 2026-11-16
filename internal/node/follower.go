@@ -56,18 +56,19 @@ type followerServer struct {
 	// databases' changed configuration, a short wait for streaming).
 	// recovering is a database awaiting recovery the steps must see.
 	start func(ctx context.Context, env *jobEnv, cfg config.Cluster, src, spec config.ClusterSpec, recovering string) ([]output.Warning, followerReading, error)
-	// promote ends recovery, rename renames the source's database and roles to
-	// the follower's with the operator's new passwords, removeConf removes
-	// 60-vaire-follower.conf, restart starts the cluster with its own
-	// configuration, dropSlot drops the follower's slot on its source, and
-	// finish makes the rest of it independent (its own steps, the poolers,
-	// metrics, its stanza, first full and timers). fence cuts the poolers'
-	// clients and renders their alias out before the promotion, settle applies
-	// the protection policy to the database and owner names the cluster holds,
-	// and resume lets the poolers' clients in again after the renames and
-	// clears a pause an earlier attempt left.
+	// promote ends recovery, rename quiesces the follower's own database and
+	// renames the source's database and roles to the follower's with the
+	// operator's new passwords, removeConf removes 60-vaire-follower.conf,
+	// restart starts the cluster with its own configuration, dropSlot drops
+	// the follower's slot on its source, and finish makes the rest of it
+	// independent (its own steps, the poolers, metrics, its stanza, first full
+	// and timers). fence cuts the poolers' clients and renders their alias out
+	// before the promotion, settle applies the protection policy to the
+	// database and owner names the cluster holds, and resume lets the poolers'
+	// clients in again after the renames and clears a pause an earlier attempt
+	// left.
 	promote    func(ctx context.Context, local pg.Local, data string) ([]string, error)
-	rename     func(ctx context.Context, local sqlRunner, source, name string, passwords map[string]string, report engine.Reporter, job string) error
+	rename     func(ctx context.Context, target unfollowRenameTarget, source, name string, passwords map[string]string, report engine.Reporter, job string) error
 	removeConf func(cluster string) error
 	restart    func(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec) error
 	dropSlot   func(ctx context.Context, cfg config.Cluster, source, name string) *output.Warning
@@ -2087,7 +2088,12 @@ func jobUnfollow(ctx context.Context, env *jobEnv) (any, error) {
 	if err := followerServerOps.settle(ctx, local, spec, src, p.Name); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
-	if err := followerServerOps.rename(ctx, local, src, p.Name, env.Secrets, env.Report, env.Job); err != nil {
+	// The rename is bound to the follower's own promoted cluster; the source
+	// endpoint is carried only so the helper can refuse it.
+	if err := followerServerOps.rename(ctx, unfollowRenameTarget{
+		local: local, cluster: p.Name, port: spec.Port, dataDir: cfg.Server.DataDirectory(p.Name),
+		sourcePort: srcSpec.Port, sourceDataDir: cfg.Server.DataDirectory(src),
+	}, src, p.Name, env.Secrets, env.Report, env.Job); err != nil {
 		return nil, mayHaveChangedPasswords(err)
 	}
 	if plan.Plan.Cron {
@@ -2442,8 +2448,22 @@ type renameState struct {
 // resumed unfollow at whichever rename it stopped: the names the cluster still
 // holds decide, so a database renamed with only some roles renamed completes
 // instead of failing on the old ones.
-func renameFollower(ctx context.Context, local sqlRunner, source, name string, passwords map[string]string, report engine.Reporter, job string) error {
-	st, err := readRenames(ctx, local, source, name)
+//
+// When the database itself still has the source's name, the helper first
+// proves the endpoint is the follower's own cluster, captures that database's
+// OID and original datallowconn, refuses new connections to it, drains only
+// sessions whose catalog datid is that OID, and renames it with the original
+// flag restored in the same transaction. A failure, cancellation or ambiguous
+// commit after the gate restores the original flag by OID; a retry where the
+// database is renamed already only finishes the roles and passwords.
+func renameFollower(ctx context.Context, target unfollowRenameTarget, source, name string, passwords map[string]string, report engine.Reporter, job string) (err error) {
+	if ctx == nil {
+		return errors.New("unfollow rename needs a context")
+	}
+	if err := target.attest(ctx, name); err != nil {
+		return err
+	}
+	st, err := readRenames(ctx, target.local, source, name)
 	if err != nil {
 		return err
 	}
@@ -2456,7 +2476,52 @@ func renameFollower(ctx context.Context, local sqlRunner, source, name string, p
 	} else {
 		logLine(report, job, name+" is renamed already; setting its new passwords")
 	}
-	return local.Exec(ctx, "postgres", statements, nil)
+	if !st.database {
+		// The database is renamed already: only roles and passwords are left,
+		// which need no connection gate or drain.
+		return target.local.Exec(ctx, "postgres", statements, nil)
+	}
+	database, err := target.database(ctx, source)
+	if err != nil {
+		return err
+	}
+	// The maintenance connection runs in steps.AuthDB; renaming it cannot work
+	// and fencing it would also block the compensation connection. Refuse
+	// before the gate rather than leaving the cluster's only maintenance
+	// database unreachable.
+	if database.name == steps.AuthDB {
+		return errors.New("the follower cluster's database " + steps.AuthDB + " cannot be renamed through vaire's maintenance connection")
+	}
+	if err := target.refusePrepared(ctx, database.oid); err != nil {
+		return err
+	}
+
+	gated := false
+	defer func() {
+		if err == nil || !gated {
+			return
+		}
+		compensateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unfollowRenameCompensateTimeout)
+		compErr := restoreUnfollowRenameAllowConnections(compensateCtx, target, database.oid, database.allowConnections)
+		cancel()
+		err = errors.Join(err, compErr)
+	}()
+
+	gated = true
+	if err := target.setAllowConnections(ctx, database.name, false); err != nil {
+		return fmt.Errorf("refusing new connections to the follower cluster's database %s: %w", database.name, err)
+	}
+	if err := target.verifyAllowConnections(ctx, database.oid, false); err != nil {
+		return err
+	}
+	if err := drainUnfollowRenameSessions(ctx, target, database.oid); err != nil {
+		return err
+	}
+	if err := target.rename(ctx, statements, database, name); err != nil {
+		return err
+	}
+	gated = false
+	return nil
 }
 
 // renameRoles are the roles a database owns: the owner and its login roles.

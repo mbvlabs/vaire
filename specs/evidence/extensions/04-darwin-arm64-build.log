@@ -1,0 +1,10 @@
+# start 2026-11-16T14:22:36Z commit=84f71bbaa1804fb9b7d581ca8a109192dc6375a9
+$ GOOS=darwin GOARCH=arm64 go build ./...
+# github.com/mbvlabs/vaire/internal/node
+internal/node/dropcluster_config.go:255:14: undefined: unix.Renameat2
+internal/node/dropcluster_config.go:255:98: undefined: unix.RENAME_NOREPLACE
+internal/node/dropcluster_config.go:276:13: undefined: unix.Renameat2
+internal/node/dropcluster_config.go:276:97: undefined: unix.RENAME_NOREPLACE
+internal/node/materialisationownership.go:375:39: cannot use st.Dev (variable of type int32) as uint64 value in struct literal
+exit_code=1
+# end 2026-11-16T14:22:39Z

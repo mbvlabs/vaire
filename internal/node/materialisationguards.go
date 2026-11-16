@@ -65,8 +65,21 @@ func guardMaterialisation(ctx context.Context, cfg config.Cluster, db string, al
 
 func guardMaterialisationApply(ctx context.Context, cfg config.Cluster, db string) error {
 	if db != "" {
-		// Public requests have no lifecycle authority.
-		return guardPublicMaterialisation(ctx, cfg, db)
+		o, found, err := readMaterialisation(db, cfg.Server.DataRoot)
+		if err != nil {
+			return materialisationIncomplete(db, nil)
+		}
+		if found {
+			// A verified public continuation lease may admit the exact target.
+			// The lease is issued only by the dispatcher after it acquired the
+			// global and target locks, and openForkContinuation re-proves every
+			// fact before any effect.
+			if materialisationContinuationLeaseMatches(ctx, o) {
+				return nil
+			}
+			return materialisationIncomplete(db, &o)
+		}
+		return nil
 	}
 	records, err := guardedMaterialisations(cfg.Server.DataRoot)
 	if err != nil {
@@ -85,7 +98,14 @@ func materialisationGuardView(ctx context.Context, cfg config.Cluster, opts engi
 	}
 	excluded := make(map[string]bool, len(records))
 	for _, o := range records {
-		if opts.DB == "" || opts.DB != o.Target || !materialisationOwner(ctx, o) {
+		owner := materialisationOwner(ctx, o)
+		// A public continuation keeps only its exact per-database target in
+		// view. Shared renders (DB empty) and other databases still exclude it,
+		// so its routes and timers stay withheld.
+		if opts.DB != "" && opts.DB == o.Target && materialisationContinuationOwner(ctx, o) {
+			owner = true
+		}
+		if opts.DB == "" || opts.DB != o.Target || !owner {
 			excluded[o.Target] = true
 		}
 	}
@@ -120,6 +140,13 @@ func refuseMaterialisationRequest(ctx context.Context, cfg config.Cluster, req r
 	}
 	if req.Method == "apply" {
 		db, _ := params["db"].(string)
+		// The dispatcher reloads this guard before it can acquire locks, so an
+		// admission candidate must pass the read-only classifier here. The
+		// handler still requires the dispatcher's lock-bound lease and re-proves
+		// the complete continuation under those locks.
+		if !req.DryRun && db != "" && !requestSelectsSteps(params) && forkContinuationCandidate(cfg, db) {
+			return nil
+		}
 		return guardMaterialisationApply(ctx, cfg, db)
 	}
 	for _, field := range awaitingParamFields {
@@ -130,4 +157,14 @@ func refuseMaterialisationRequest(ctx context.Context, cfg config.Cluster, req r
 		}
 	}
 	return nil
+}
+
+func requestSelectsSteps(params map[string]any) bool {
+	raw, _ := params["steps"].([]any)
+	for _, step := range raw {
+		if name, _ := step.(string); name != "" {
+			return true
+		}
+	}
+	return false
 }

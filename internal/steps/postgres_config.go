@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -201,6 +202,36 @@ func (s postgresConfig) Check(ctx context.Context, cfg config.Cluster, rt engine
 	return complete(), nil
 }
 
+// configRefusalState qualifies an extension-unload refusal at the config step
+// with what this step did not do. It never claims the cluster was started or
+// stopped here: an ordinary apply may already have started it, or found it
+// running. Earlier steps and package work may therefore already have run.
+func configRefusalState(err error, spec config.ClusterSpec) error {
+	details := map[string]any{}
+	var base *output.CLIError
+	if errors.As(err, &base) {
+		switch have := base.Details.(type) {
+		case map[string]any:
+			for k, v := range have {
+				details[k] = v
+			}
+		case nil:
+		default:
+			details["cause_details"] = have
+		}
+		details["database"] = spec.Name
+		details["step"] = postgresConfigID
+		details["configuration_staged"] = false
+		details["config_files_written"] = false
+		details["sql_run"] = false
+		details["earlier_steps_may_have_run"] = true
+		copied := *base
+		copied.Details = details
+		return &copied
+	}
+	return err
+}
+
 func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	spec, err := s.spec(cfg)
 	if err != nil {
@@ -213,7 +244,7 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	}
 	backups, first := configBackups(files)
 	if err := RefuseExtensionUnload(ctx, cfg, spec, first); err != nil {
-		return engine.ApplyResult{}, err
+		return engine.ApplyResult{}, configRefusalState(err, spec)
 	}
 	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
 		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)

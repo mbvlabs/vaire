@@ -545,6 +545,62 @@ var applyReloadCluster = func() (config.Cluster, error) {
 	return cfg, err
 }
 
+// applyTransitions is a test seam for the extension transition's ownership of
+// extra target locks. Production is applyExtensionTransitions.
+var applyTransitions = applyExtensionTransitions
+
+// applyEngine is a test seam for ordinary apply's engine pass. Production is
+// engine.Apply.
+var applyEngine = engine.Apply
+
+// applyFailureWithData preserves the observations an ordinary engine.Apply made
+// before a step refused or failed. The public failure envelope has no result
+// body, so the partial ApplyData and warnings travel in the typed error
+// details/failure warnings instead of being discarded.
+func applyFailureWithData(err error, data engine.ApplyData, transitionWarnings, warnings []output.Warning) error {
+	if err == nil {
+		return nil
+	}
+	allWarnings := append([]output.Warning{}, transitionWarnings...)
+	allWarnings = append(allWarnings, warnings...)
+	observed := data.Total > 0 || len(data.Steps) > 0 || len(data.Restarts) > 0 ||
+		len(data.RestartsSettled) > 0 || len(data.RestartPending) > 0
+	if !observed && len(allWarnings) == 0 {
+		return err
+	}
+	details := map[string]any{}
+	var base *output.CLIError
+	if errors.As(err, &base) {
+		switch have := base.Details.(type) {
+		case map[string]any:
+			for k, v := range have {
+				details[k] = v
+			}
+		case nil:
+		default:
+			details["cause_details"] = have
+		}
+	}
+	if observed {
+		details["apply_data"] = data
+	}
+	if len(warnings) > 0 {
+		details["warnings"] = append([]output.Warning{}, warnings...)
+	}
+	if len(transitionWarnings) > 0 {
+		details["transition_warnings"] = append([]output.Warning{}, transitionWarnings...)
+	}
+	if base != nil {
+		copied := *base
+		copied.Details = details
+		return output.WithWarnings(&copied, allWarnings...)
+	}
+	if !observed {
+		return output.WithWarnings(err, allWarnings...)
+	}
+	return output.WithWarnings(output.NewError(output.CodeStepFailed, err.Error(), output.ExitStep, "").WithDetails(details), allWarnings...)
+}
+
 func handleApply(ctx context.Context, env *Env) (Result, error) {
 	var p stepParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
@@ -579,6 +635,22 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		if fence, ok, err := forkFenceFor(env.Cluster, p.DB); err != nil {
 			return Result{}, err
 		} else if ok {
+			_, found, err := readMaterialisation(p.DB, env.Cluster.Server.DataRoot)
+			if err != nil {
+				return Result{}, materialisationIncomplete(p.DB, nil)
+			}
+			if found || fence.Phase != fencePhaseRouting {
+				lease := materialisationContinuationLeaseFrom(ctx)
+				if lease == nil {
+					return Result{}, materialisationIncomplete(p.DB, nil)
+				}
+				scope, err := openForkContinuation(ctx, env.Cluster, env, lease)
+				if err != nil {
+					return Result{}, err
+				}
+				defer scope.close()
+				ctx = withForkContinuationScope(ctx, scope)
+			}
 			return resumeForkSettlementAt(ctx, env, fence)
 		}
 	}
@@ -588,21 +660,29 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
+	if !env.Req.DryRun {
+		// Refuse before extension history/packages/settings and before the
+		// engine's shared pooler render unless every selected fork route has
+		// its final actual registration and durable marker absence.
+		if err := prepareForkRoutingFences(env.Cluster, routingFencesFor(p)); err != nil {
+			return Result{}, err
+		}
+	}
 	var transitionWarnings []output.Warning
 	if !env.Req.DryRun {
-		warnings, release, err := applyExtensionTransitions(ctx, env, p)
+		warnings, release, err := applyTransitions(ctx, env, p)
+		// Every non-nil release belongs to this request once it has been
+		// returned: install it before any error branch so a failure after the
+		// transition took its target locks cannot leak them.
+		if release != nil {
+			defer release()
+		}
 		if err != nil {
 			var pending *extensionApplyPending
 			if errors.As(err, &pending) {
-				if release != nil {
-					release()
-				}
 				return Result{Data: pending.Data, Warnings: append(pending.Warnings, NoOffsiteWarning(env.Cluster)...)}, nil
 			}
-			return Result{}, err
-		}
-		if release != nil {
-			defer release()
+			return Result{}, output.WithWarnings(err, warnings...)
 		}
 		transitionWarnings = warnings
 	}
@@ -616,7 +696,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	}
 	rt := runtimeFor(env, false)
 	rt.RotateSecrets = p.RotateBackupSecrets
-	data, warnings, err := engine.Apply(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
+	data, warnings, err := applyEngine(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{
 		Only: p.Steps,
 		DB:   p.DB,
 		// The tokens were already checked against applyTokens.
@@ -626,7 +706,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 		Report:        env.Report,
 	})
 	if err != nil {
-		return Result{}, err
+		return Result{}, applyFailureWithData(err, data, transitionWarnings, warnings)
 	}
 	for _, r := range data.Restarts {
 		clearDeferred(r.Cluster)

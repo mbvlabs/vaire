@@ -307,7 +307,7 @@ func TestComposeCopyGuardKeepsCompleteUnionAndDropsObsoleteCurrent(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"new_current", "operator_lib", "retained_lib"}
+	want := []string{"new_current", "retained_lib", "operator_lib"}
 	if !slices.Equal(got.Preloads, want) {
 		t.Fatalf("preloads = %v, want %v", got.Preloads, want)
 	}
@@ -448,7 +448,7 @@ func TestComposeCopyGuardDropsPriorGuardButKeepsPlainOperatorLine(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"desired_lib", "operator_lib", "plain_auto_lib", "retained_lib"}
+	want := []string{"desired_lib", "retained_lib", "operator_lib", "plain_auto_lib"}
 	if !slices.Equal(got.Preloads, want) {
 		t.Fatalf("preloads = %v, want %v", got.Preloads, want)
 	}

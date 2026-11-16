@@ -280,6 +280,8 @@ func TestPlanFollowerRuntimeCollectsGuardOnlyRetainedMetadata(t *testing.T) {
 func TestPlanFollowerRuntimeCurrentDescriptorWinsHistory(t *testing.T) {
 	cfg, follower := followerRuntimeTestConfig(t)
 	cfg.Clusters[0].Extensions = []string{"pg_cron"}
+	cfg.Clusters[1].Extensions = []string{"pg_cron"}
+	follower = cfg.Clusters[1]
 	oldExt := catalog.Extension{
 		Name: "pg_cron", ExtName: "pg_cron", Source: catalog.SourcePreinstalled, Preload: "pg_cron",
 		Settings: map[string]string{"cron.database_name": "'old'"}, CopySafety: catalog.CopySafetyDisabled,
@@ -329,6 +331,8 @@ func TestPlanFollowerRuntimeExpectedOwnMandatoryOverlay(t *testing.T) {
 		},
 	}
 	cfg.Clusters[0].Extensions = []string{"addon"}
+	cfg.Clusters[1].Extensions = []string{"addon"}
+	follower = cfg.Clusters[1]
 	restore := SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return map[string]bool{"plpgsql": true, "addon_ext": true}, nil
 	})
@@ -488,7 +492,10 @@ func TestPlanFollowerRuntimeRetirementKeepsRetainedSharedLibrary(t *testing.T) {
 
 func TestCheckPrimaryExtensionReadinessDecodesActualOnce(t *testing.T) {
 	cfg := config.DefaultCluster()
-	spec := config.ClusterSpec{Name: "app"}
+	cfg.Extensions = map[string]config.ExtensionDefinition{
+		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext"},
+	}
+	spec := config.ClusterSpec{Name: "app", Extensions: []string{"custom"}}
 	ext := catalog.Extension{
 		Name: "custom", ExtName: "custom_ext", Source: catalog.SourcePreinstalled,
 		Settings: map[string]string{"custom.worker": "'''off'''"},

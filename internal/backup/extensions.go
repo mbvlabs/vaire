@@ -138,6 +138,8 @@ func (s Records) RetainedExtensions(stanza string) []catalog.Extension {
 // persists those settings explicitly, and a same-database restore drops this
 // guard once copied jobs are deactivated.
 type CopyGuard struct {
+	// Preloads is the shared_preload_libraries value in load order, not a
+	// set: one library may require another to load before it.
 	Preloads []string          `json:"preloads,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"`
 	// Origins records why each preload is in the guard: retained, desired or
@@ -403,15 +405,17 @@ func OperatorPreloads(confDir, dataDir string) ([]string, error) {
 	return out, nil
 }
 
-// ComposeCopyGuard returns the complete guard a copy must carry: base (the
-// retained requirements), current desired preloads, and the current underlying
+// ComposeCopyGuard returns the complete guard a copy must carry: current
+// desired preloads, then retained requirements, then the current underlying
 // operator configuration (postgresql.conf, conf.d and a plain
 // postgresql.auto.conf assignment) excluding the generated guard and vaire's
-// obsolete managed current intent. A prior guard block is not independent
-// evidence: only the requirements and the operator's current configuration
-// survive, so a deliberate removal of a library takes effect. Settings are
-// base.Settings only: the caller recomputes them from current intent and
-// retained history, never by accumulating an old guard.
+// obsolete managed current intent. Preload order is the load order: current
+// desired preloads come first because a library may require another to load
+// before it, and each remaining source keeps its own order. A prior guard block
+// is not independent evidence: only the requirements and the operator's current
+// configuration survive, so a deliberate removal of a library takes effect.
+// Settings are base.Settings only: the caller recomputes them from current
+// intent and retained history, never by accumulating an old guard.
 func ComposeCopyGuard(confDir, dataDir string, base CopyGuard, desired []string) (CopyGuard, error) {
 	return ComposeCopyGuardDropping(confDir, dataDir, base, desired, nil)
 }
@@ -446,21 +450,31 @@ func ComposeCopyGuardDropping(confDir, dataDir string, base CopyGuard, desired [
 	out.Origins = nil
 	origins := map[string]string{}
 	seen := map[string]bool{}
+	// Origin precedence: retained evidence outranks current intent, which
+	// outranks the operator configuration. Desired preloads are inserted first
+	// to keep their load order; that insertion must not downgrade a library
+	// also backed by retained history, or a later rewrite could unload it
+	// while the data still needs it.
+	originRank := map[string]int{"operator": 0, "desired": 1, "retained": 2}
 	add := func(p, origin string) {
 		if p == "" {
 			return
 		}
-		if !seen[p] {
-			seen[p] = true
-			out.Preloads = append(out.Preloads, p)
-			origins[p] = origin
+		if seen[p] {
+			if originRank[origin] > originRank[origins[p]] {
+				origins[p] = origin
+			}
+			return
 		}
-	}
-	for _, p := range base.Preloads {
-		add(p, "retained")
+		seen[p] = true
+		out.Preloads = append(out.Preloads, p)
+		origins[p] = origin
 	}
 	for _, p := range desired {
 		add(p, "desired")
+	}
+	for _, p := range base.Preloads {
+		add(p, "retained")
 	}
 	for _, p := range confEffective {
 		if !oldCurrent[p] {
@@ -498,7 +512,6 @@ func ComposeCopyGuardDropping(confDir, dataDir string, base CopyGuard, desired [
 			}
 		}
 	}
-	sort.Strings(out.Preloads)
 	if len(out.Preloads) == 0 {
 		out.Preloads = nil
 	}
@@ -689,7 +702,6 @@ func parseCopyGuard(raw string) (CopyGuard, bool, error) {
 	if !closed {
 		return CopyGuard{}, false, fmt.Errorf("the vaire copy guard block has no end marker")
 	}
-	sort.Strings(g.Preloads)
 	if len(g.Settings) == 0 {
 		g.Settings = nil
 	}
@@ -1207,10 +1219,14 @@ func providerText(ext catalog.Extension) string {
 
 func copyGuardFor(exts []catalog.Extension, standby bool, copyDB string) (CopyGuard, error) {
 	guard := CopyGuard{Settings: map[string]string{}}
-	preloads := map[string]bool{}
+	seenPreloads := map[string]bool{}
 	for _, ext := range exts {
-		if ext.Preload != "" {
-			preloads[ext.Preload] = true
+		// Descriptor order is runtime load order; a set plus a later sort would
+		// erase a native dependency (for example pg_stat_statements before a
+		// custom pg_stat_kcache).
+		if ext.Preload != "" && !seenPreloads[ext.Preload] {
+			seenPreloads[ext.Preload] = true
+			guard.Preloads = append(guard.Preloads, ext.Preload)
 		}
 		switch ext.CopySafety {
 		case catalog.CopySafetySafe:
@@ -1248,11 +1264,6 @@ func copyGuardFor(exts []catalog.Extension, standby bool, copyDB string) (CopyGu
 				WithDetails(map[string]any{"reason": "extension_standby_unsafe", "extension": ext.Name})
 		}
 	}
-	guard.Preloads = make([]string, 0, len(preloads))
-	for p := range preloads {
-		guard.Preloads = append(guard.Preloads, p)
-	}
-	sort.Strings(guard.Preloads)
 	if len(guard.Settings) == 0 {
 		guard.Settings = nil
 	}

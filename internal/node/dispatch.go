@@ -36,6 +36,11 @@ type Env struct {
 	// configuration after the lock compares against this decision instead of
 	// reconstructing it from current state.
 	LockMode engine.LockMode
+	// ClusterLock and ClusterLockMode are the target lock the dispatcher took
+	// after the global one. A fork continuation lease is issued only when both
+	// envelopes were actually acquired exclusively.
+	ClusterLock     string
+	ClusterLockMode engine.LockMode
 }
 
 // Result is a successful method outcome.
@@ -103,6 +108,14 @@ var serveRunsAsRoot = func() bool { return os.Geteuid() == 0 }
 var loadGuardCluster = func() (config.Cluster, error) {
 	return config.LoadCluster(config.ClusterPath)
 }
+
+// The lock functions are seams for isolated dispatcher tests. Production
+// always uses the node's real global and target locks.
+var (
+	serveAcquire        = engine.Acquire
+	serveAcquireCluster = engine.AcquireCluster
+	openServeRunLog     = engine.OpenRunLog
+)
 
 // Called for the initial read and again with the operation locks held.
 func reloadMaterialisationConfig(ctx context.Context, req rpc.Request) (config.Cluster, error) {
@@ -197,6 +210,12 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 
 	if code, ok := serveRecheck(ctx, m, req, env, rec, out); !ok {
 		return code
+	}
+	// The lease is issued only after the dispatcher has acquired both locks.
+	// Its deferred revocation runs before the lock releases registered above.
+	if lease := issueMaterialisationContinuationLease(env, req); lease != nil {
+		ctx = withMaterialisationContinuationLease(ctx, lease)
+		defer lease.revoke()
 	}
 
 	// 8. Checked local start, run log, handler, result.
@@ -293,7 +312,7 @@ func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env,
 	}
 	env.LockMode = mode
 	if mode != engine.LockNone {
-		release, err := engine.Acquire(ctx, mode, req.Method, req.RequestID, req.LockTimeout())
+		release, err := serveAcquire(ctx, mode, req.Method, req.RequestID, req.LockTimeout())
 		if err != nil {
 			recordActivityRefusal(ctx, rec, req, req.Method, err, "")
 			return releases, out.fail(req.Method, err), false
@@ -306,6 +325,7 @@ func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env,
 	} else if m.clusterLock != nil {
 		cluster, clusterMode = m.clusterLock(req)
 	}
+	env.ClusterLock, env.ClusterLockMode = cluster, clusterMode
 	if cluster == "" || clusterMode == engine.LockNone {
 		return releases, 0, true
 	}
@@ -314,7 +334,7 @@ func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env,
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "database_not_found")
 		return releases, out.fail(req.Method, err), false
 	}
-	release, err := engine.AcquireCluster(ctx, cluster, clusterMode, req.Method, req.RequestID, req.LockTimeout())
+	release, err := serveAcquireCluster(ctx, cluster, clusterMode, req.Method, req.RequestID, req.LockTimeout())
 	if err != nil {
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "")
 		return releases, out.fail(req.Method, err), false
@@ -379,7 +399,7 @@ func serveRunLog(ctx context.Context, m method, req rpc.Request, env *Env, scope
 	if m.runLog == nil || !m.runLog(req) {
 		return nil
 	}
-	log, err := engine.OpenRunLog(req.Method, req.RequestID)
+	log, err := openServeRunLog(req.Method, req.RequestID)
 	if err != nil {
 		_ = scope.finishWarn(ctx, activity.OutcomeFailed, output.CodePrecondition, "run_log_unavailable", out.emit)
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition,

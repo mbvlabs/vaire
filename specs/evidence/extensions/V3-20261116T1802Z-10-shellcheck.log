@@ -1,0 +1,7 @@
+# V3 FINAL GATE 2026-11-16T18:04:02Z
+ShellCheck - shell script analysis tool
+version: 0.11.0
+$ justfile shellcheck expression
+files=26
+exit_code=0
+# end 2026-11-16T18:04:03Z

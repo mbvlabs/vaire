@@ -1,14 +1,23 @@
 # Combined follower and extension qualification
 
-**Preparation only — not execution-ready. Source is not finally reviewed; no live action is authorized or has run.**
+**Preparation only — not execution-ready.** Current source acceptance and existing live evidence must be reconciled using the [finishing checklist](../specs/extensions-finish.md). This sheet records procedures, not proof that no later live testing occurred, and authorizes no live actions.
 
 One verified signed edge candidate will qualify both features. Publication does not establish installation identity, deployment or a live pass. Activity AC-01 must pass, or the operator must explicitly accept its named gaps in MANUAL-TESTING before deployment. An activity-health read alone is insufficient.
 
-The command shapes below come from the implemented CLI metadata and source at this documentation checkpoint. They are local preparation templates, not copy-pasteable live commands: every `<...>` value is unresolved until the admission table is filled from the actual published candidate, context, inventory, fixtures and approved budgets. Do not invent a context, host, database, table, package, bundle, threshold or budget to make a template look complete.
+**Authorized development lane (2026-11-16):** the user permits local candidate
+builds and tests in the disposable Debian Firecracker VM at `~/work/vps-lab`.
+Use its isolated operator state and lab-only fixtures, with recorded build
+identity and bounded resources. These results can establish real package,
+PostgreSQL and systemd behavior; they do not establish signed-release install/
+upgrade or production deployment. The production admission requirements below
+still apply to a later signed-candidate run. No production credentials, bucket
+access or host resource destruction is authorized by the lab permission.
+
+The command shapes below come from the implemented CLI metadata and source at the original documentation checkpoint. Revalidate them against the actual candidate, including the context-to-workspace CLI change. They are local preparation templates, not copy-pasteable live commands: every `<...>` value is unresolved until the admission table is filled from the actual published candidate, workspace, inventory, fixtures and approved budgets. Do not invent a workspace, host, database, table, package, bundle, threshold or budget to make a template look complete.
 
 ## Execution admission
 
-Use one live owner and serial activity, no-bucket, then separately approved bucket/rebuild passes. The existing [follower run sheet](RUN-phase-6-live.md) remains authoritative for its detailed cases and bounded observations. This sheet adds extension mapping; it does not erase blocked cases or convert historical evidence into fresh results.
+Use one live owner and serial activity, no-bucket, then separately approved bucket/rebuild passes. This sheet retains both follower and extension coverage. The older separate follower run sheet was removed before this cleanup; its necessary observations and blocked boundaries are consolidated below. Dated results remain in [MANUAL-TESTING.md](MANUAL-TESTING.md), not in historical planning status.
 
 Before any execution, record the candidate version/commit/channel, immutable artifact checksum/signature identity, operator/node installed identities, named context and target host, plan/doctor, database inventory/protection, recovery options, fixture absence and measured sizes, human permissions, evidence directory and cleanup scope. Context names and VPS recorded in the handoff are observations to revalidate, not permission to switch or repoint them.
 
@@ -29,13 +38,13 @@ No source-built binary uploads, local harnesses, `ALTER SYSTEM`, generated-confi
 | Human permissions (sudo, TOTP, root key, provider console, rebuild, cleanup) | **Unresolved.** Name each separately |
 | Activity gate (AC-01 pass or explicit named-gap acceptance) | **Unresolved** |
 | Evidence directory and cleanup scope | **Unresolved.** One owner-only `/tmp/opencode/` run directory; durable narrative only in repository docs |
-| X2 real non-built-in package or preinstalled fixture | **BLOCKED.** No safe real fixture verified; vector is built-in and does not prove it |
+| X2 real non-built-in package or preinstalled fixture | Debian 13 lab verified `postgresql-18-pg-stat-kcache` 2.3.2-1.pgdg13+3; revalidate availability/runtime for the final candidate and target platform. Vector is built-in and is insufficient |
 
-**This sheet is not execution-ready until every row above is resolved and the implementation, documentation and candidate are frozen after E7-08/E7-09.**
+**This sheet is not execution-ready until every row above is resolved and the implementation, documentation and candidate pass the source-review and final-verification gates in the [finishing checklist](../specs/extensions-finish.md).**
 
 ## Preserved follower case map
 
-All cases below remain **NOT RUN** unless explicitly marked blocked. Their full prerequisites, command preparation, observations and cleanup remain in RUN-phase-6-live. Do not resolve its templates by guessing.
+The original case map below has no reconciled results here; blocked boundaries remain blocked unless actual supported evidence resolves them. Reconcile any later results before scheduling reruns. Requirements below were recovered from `8c11370:docs/RUN-phase-6-live.md`; old fixture names, host identities and command spelling are not execution values.
 
 | ID | Case | Extension overlap / status constraint |
 | --- | --- | --- |
@@ -68,14 +77,85 @@ All cases below remain **NOT RUN** unless explicitly marked blocked. Their full 
 | B12 | Unreadable transition records fail closed | BLOCKED: corruption/unreadable-record technique not approved |
 | B13 | Pass B cleanup | Explicit cleanup and rebuild-boundary permission |
 
+### Follower observations and safety requirements
+
+Use this table with the case map above, the admission table and candidate-specific
+command discovery. It preserves required observations, not an executable script.
+Source/follower/auxiliary/probe fixtures must be verified absent and sized from
+the actual budget. Never reuse historical `app`/`other` names as permission.
+
+| Cases | Required observations |
+| --- | --- |
+| A0 | Verify signed CLI/node identity, plan and pending restarts. Apply without tokens must not restart existing clusters. Pre-restart streaming needs an approved pre-existing source with a genuinely pending wal_level restart; a fresh fixture does not prove it |
+| A1–A2 | Bound write rows, batches, payload and duration; record LSN/times and reserve. No-bucket follow must report `from=base_backup`, active `vaire_<follower>` slot, recovery state and measured catch-up lag. Confirm a pending source restart only with permission; verify effective wal_level/slot cap and continued streaming |
+| A3 | Inspect actual follower config, floors, hot_standby, primary connection and slot facts without exposing credentials. No-bucket has no restore_command; a stanza-backed follower has the correct one in its managed config, never an inherited stale auto.conf value |
+| A4 | Source read credentials can read the follower alias on transaction 6432, direct TLS 443 and session 5432. Direct writes fail read-only; operator --write refuses `is_follower`. Optional tunnel is additional coverage, not a substitute. Never put passwords in argv/evidence |
+| A5 | Record doctor follower checks/backup skips, status/list and metrics. Exercise both running, source stopped, follower stopped and both stopped within approved bounds. Source-known and self-known are independent; unknown facts/lag are omitted, not zero. Stopped list rows retain follows identity. NULL slot allowance is not proof of uncapped; only proven uncapped reports -1/true, measured zero/negative remains factual |
+| A6 | An actually over-budget request without overcommit refuses with `memory_overcommitted`, a fitting size and actionable hint, before entry/slot/copy effects. Another refusal does not prove this case; no safe over-budget request means BLOCKED |
+| A7 | Source drop refuses `has_followers`; follower backup, restore, fork, credential rotation, write maintenance and operator --write refuse `is_follower`; follow-of-follower refuses `follows_follower`; aggregate backup skips followers. Supply applicable tokens so guards, not missing authorization, win. Source still serves after refusals |
+| A8–A9 | Bound stopped-follower/replay-pause time, writes/WAL and disk. Observe source slot retention independently of stopped self facts; paused replay is visible and doctor streaming fails. Resume/start and verify catch-up. Stop early on unsafe allowance/disk; do not force a lost slot |
+| A10 | Select budget-safe growth/shrink sizes. Deferred growth writes follower config first and restarts nothing; where needed complete follower restart before source. Separately approved growth with all tokens proves ordered execution. Shrink refuses `has_followers` before mutation; absent safe sizes mean BLOCKED subcases |
+| A11 | Use a genuinely absent probe and source running floors above its proposed floors. Dry-run refusal must name executable config-set commands on the existing source. Record original values/absence, apply the hints without restart, retry admission, and restore exact original semantics. Dry-run admission alone does not prove real follow completion |
+| A12 | Verify source protection versus independently unprotected follower, unfollow promotion, both-pooler aliases, slot removal, retired source credentials on the copy, new copy credentials and a migration. Source remains unchanged. Creation-after-protection needs its own follow fixture; protecting an existing follower's source does not prove that variant. Human TOTP/protection changes are separate |
+| B1 | With a verified full backup and bounded writes, follow must report `from=stanza`; fallback is not a pass. Repeat streaming, aliases, configuration and independent-known/unknown diagnostics from A2–A5 |
+| B2 | Unfollow gets its own stanza, successful first full and timers. Compare rows/sequences at promotion, verify new access and source credential refusal, source slot removal and migration. first_backup_failed or missing timers is a failure, not a partial pass |
+| B3 | Use a verified restore window and approved target. Source restore/promotion warns `followers_diverged`; follower serves the old timeline read-only and doctor fails streaming. Approved drop/re-follow restores streaming. Protected variant needs human unprotect/reprotect permission |
+| B4 | Each approved rebuild needs verified backup/root access and a complete resolved command. Both entries become awaiting; follower recovery first refuses `source_awaiting_recovery`; recover-all runs source first, then follower, and takes a full only of source |
+| A13/B13 | Stop writers; restore exact temporary setting values/absence, protection and pending work through supported interfaces. Drop followers before sources only with permission; bucket objects/rebuild cleanup are separately scoped. Record remaining databases, slots, stanzas, timers, routes, host and evidence resources |
+
+### Fault boundaries that remain conditional or blocked
+
+- **A10b:** root performs configuration writes; making postgres's conf.d
+  unwritable does not prove a writer failure. No supported deterministic live
+  failure mechanism is established. Keep BLOCKED; use source regression evidence.
+- **B5:** requires its own fresh approved awaiting-recovery fixture. A `copying`
+  marker precedes slot preparation and can outlive copying. Only post-termination
+  artifacts/progress that distinguish the actual stopped phase prove the copy
+  boundary. Otherwise record INCONCLUSIVE even if retry works. Valid evidence
+  must show awaiting persists, dry-run plans partial-copy removal rather than
+  unsafe reuse, and supported retry restores config/slot/streaming.
+- **B6/B7:** adoption and pre-adopted-marker boundaries lack deterministic
+  supported live observation. Timing-only kills, hooks or record edits are not
+  substitutes. Adopted-copy reuse versus recopy remains live-pending.
+- **B8:** start with a proven materialised streaming disposable follower and
+  existing slot, not merely a rebuilt awaiting entry. Capture exact desired cap
+  presence/value, inherited value, effective value and slot facts. Use supported
+  config/apply for an approved temporary cap, verifying no unapproved restart/
+  floor effect; stop the follower and generate only approved WAL/time while
+  monitoring reserve. At most one separately approved checkpoint may aid
+  observation; do not loop. Record reserved/extended, unreserved, lost or missing
+  as actually observed, never relabel. Restore original value or absence through
+  supported config, then verify effective inheritance. Missing-slot diagnostics
+  require separate destructive approval for the exact fixture slot/source
+  cluster endpoint, followed only by approved public drop/re-follow cleanup.
+  Do not repair slots manually. Retained-copy preview/recopy remains BLOCKED
+  until completed owned-copy progress plus awaiting state is proven; stopped
+  streaming followers or copying markers do not establish that setup.
+- **B9:** no supported isolated slot-unreadable mechanism; stopping a source or
+  revoking access does not prove the intended conditional-resume path.
+- **B10:** prepared-entry-before-copy interruption has no supported deterministic
+  live boundary. General apply must not initialize it; source regression is
+  evidence, not a live pass.
+- **B11:** post-promotion/pre-rename unfollow interruption likewise lacks a
+  deterministic live boundary. Ownership refusal/retry remains source evidence.
+- **B12:** making records unreadable/corrupt is not approved. A missing records
+  file is normal initial state, not this fault. Fail-closed routing regressions
+  do not certify a live filesystem failure.
+
+Every case result must include permission/bounds, exact resolved commands and
+UTC times, workspace/host and binary identity, job/unit IDs, exit/first failure,
+actual JSON/SQL/runtime observations, cleanup or remaining resources, and
+PASS/FAIL/INCONCLUSIVE/BLOCKED/NOT RUN. A healthy command or existing procedure
+does not prove the intended boundary. Record results in MANUAL-TESTING.
+
 ## Added extension coverage
 
-All extension cases are **NOT RUN**. X2 remains **BLOCKED on fixture selection**. The command templates below are exact implemented shapes; their placeholders and admission values are not approved execution values.
+Final signed-candidate qualification remains pending. The [current-candidate checkpoint](MANUAL-TESTING.md#current-candidate-clean-slate-linux-lab--2026-11-16) records clean-slate Debian CLI/WireGuard and native PostgreSQL/systemd passes plus remaining limits; it does not blanket-pass this procedure. Command templates require candidate-specific revalidation; placeholders and admission values are not approved execution values. A shared lab must have an explicit ownership handoff before use; availability never implies permission to reset another agent's disk.
 
 | ID | Prerequisites / permissions | Required observations | Boundaries and cleanup |
 | --- | --- | --- | --- |
 | X1 | Disposable independent primary; verified vector package/control facts; add permission | Alias persists as vector; installed/default versions and provider factual; no unrelated restart | Bounded fixture/data; removal needs database token; packages retained |
-| X2 | Actual compatible non-built-in package in configured trusted repo, or operator-preinstalled extension; explicit complete descriptor; installation permission | Custom definition durable; install/control/library facts; A2 and B1 use same resolver; rebuild prerequisites honest | BLOCKED fixture selection: no safe real non-built-in fixture verified yet; vector is insufficient proof |
+| X2 | Actual compatible non-built-in package in configured trusted repo, or operator-preinstalled extension; explicit complete descriptor; installation permission | Custom definition durable; install/control/library facts; A2 and B1 use same resolver; rebuild prerequisites honest | pg_stat_kcache verified in the Debian development lab; revalidate the final platform/candidate. Vector is insufficient proof |
 | X3 | Approved absent-repository or absent-preinstalled fixture without changing trust config | Actionable prerequisite; unknown is not absent; awaiting recovery preserved; no automatic repo/key setup | No destructive repository edits; use safe verified absence; cleanup only if authorized |
 | X4 | Disposable unprotected primary; owned-data/dependent-object fixture; remove/cascade permission | Bounded preview with count/truncation; no implicit cascade; protected remove refuses; SQL-absent reconciliation retries | Database token required; preserve source jobs/data; explicit destructive fixture cleanup |
 | X5 | One preload target plus unrelated serving database; restart permission | Missing target token has zero effects; exact target restart only; effective preload before CREATE; pending roles retry | Enumerated cluster tokens, never broad server substitute; bounded outage; retain packages |
@@ -101,7 +181,7 @@ vaire ext remove vector --db <db> --confirm <db> --json
 
 Expected: `pgvector` is accepted as an alias and persisted as `vector`; `postgresql-18-pgvector` and its control facts are reported; installed/default versions are factual; no unrelated cluster restarts; removal keeps the package. Reference: `internal/cli/ext.go`, `internal/node/extensions.go`, `EXTENSION-DEFINITIONS.md`.
 
-**X2 — real custom non-built-in extension (BLOCKED on fixture).**
+**X2 — real custom non-built-in extension.**
 
 Candidate APT shape, only if package availability and runtime behavior are verified on the target:
 
@@ -124,7 +204,7 @@ vaire ext add <operator_ext> --db <db> --preinstalled \
   --confirm <db>/restart --json
 ```
 
-Expected: the definition is durable in `[extensions.<name>]`; package/control/library facts are reported; A2/B1 use the same resolver; rebuild prerequisites are honest. The `pg_stat_kcache` example is a metadata template, not a selected fixture: its package and runtime behavior are not live-verified here. No safe real non-built-in fixture is selected, so X2 stays **BLOCKED**; pgvector is built-in and does not prove general custom support.
+Expected: the definition is durable in `[extensions.<name>]`; package/control/library facts are reported; A2/B1 use the same resolver; rebuild prerequisites are honest. The development lab verified pg_stat_kcache 2.3.2 from `postgresql-18-pg-stat-kcache` on Debian 13; final candidate, other-platform, stanza-backed follower and rebuild coverage remain separate. Pgvector is built-in and does not prove general custom support.
 
 **X3 — missing repository or preinstalled files.**
 
