@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,7 +46,7 @@ const (
 
 func validFenceKind(kind string) bool {
 	switch kind {
-	case "fork", "unfollow", "restore-promote":
+	case "fork", "unfollow", "restore-promote", "restore-abort":
 		return true
 	}
 	return false
@@ -58,6 +59,16 @@ func validFencePhase(phase string) bool {
 		return true
 	}
 	return false
+}
+
+// validFencePhaseForKind enforces the only phase a restore-abort fence may
+// hold. It is created by the atomic abort conversion at routing; it never
+// advances or returns to an earlier checkpoint.
+func validFencePhaseForKind(kind, phase string) bool {
+	if kind == "restore-abort" {
+		return phase == fencePhaseRouting
+	}
+	return true
 }
 
 // activationRegistration is the actual cluster registration/ownership text a
@@ -97,6 +108,9 @@ func (id activationFenceIdentity) fence() (backup.ActivationFence, error) {
 	}
 	if !validFenceKind(id.Kind) {
 		return backup.ActivationFence{}, fmt.Errorf("unknown activation fence kind %q", id.Kind)
+	}
+	if !validFencePhaseForKind(id.Kind, fencePhasePrepared) {
+		return backup.ActivationFence{}, fmt.Errorf("a %s activation fence is created only at routing", id.Kind)
 	}
 	if id.TargetStanza == "" {
 		return backup.ActivationFence{}, fmt.Errorf("the activation fence of %s has no target stanza", id.Database)
@@ -240,33 +254,57 @@ func verifyFencePaths(cfg config.Cluster, f backup.ActivationFence, db string) e
 			output.ExitPrecondition, "Finish the owning operation before removing or re-identifying the database.").
 			WithDetails(map[string]any{"reason": "activation_fence_orphan", "database": db, "operation_id": f.OperationID})
 	}
-	if f.Port != 0 && f.Port != spec.Port {
-		temporaryPort := (f.Kind == "fork" && f.Phase == fencePhaseAdopting) ||
-			(f.Kind == "restore-promote" && f.Phase == fencePhasePrepared)
-		if !temporaryPort {
-			return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
-		}
+	if f.Port != 0 && f.Port != spec.Port && !fenceHasTemporaryPort(f) {
+		return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
 	}
-	dataDir := cfg.Server.DataDirectory(db)
-	if f.Kind == "restore-promote" && (f.Phase == fencePhasePrepared || f.Phase == fencePhaseSwapped) {
-		if f.DataDir != "" && f.DataDir != cfg.Server.DataDirectory(backup.RestoringName(db)) && f.DataDir != dataDir {
-			return activationIdentityError(db, f, "data directory", f.DataDir, dataDir)
-		}
-	} else if f.DataDir != "" && f.DataDir != dataDir {
-		return activationIdentityError(db, f, "data directory", f.DataDir, dataDir)
+	if err := verifyFenceDataDir(cfg, f, db); err != nil {
+		return err
 	}
-	if f.ConfDir != "" {
-		confDir := steps.PGConfDir(db)
-		restoring := steps.PGConfDir(backup.RestoringName(db))
-		if f.Kind == "restore-promote" && (f.Phase == fencePhasePrepared || f.Phase == fencePhaseSwapped) {
-			if f.ConfDir != restoring && f.ConfDir != confDir {
-				return activationIdentityError(db, f, "configuration directory", f.ConfDir, confDir)
-			}
-		} else if f.ConfDir != confDir {
-			return activationIdentityError(db, f, "configuration directory", f.ConfDir, confDir)
-		}
+	return verifyFenceConfDir(f, db)
+}
+
+// fenceHasTemporaryPort reports phases that may still record the temporary
+// cluster's port: a fork's adopting checkpoint and a restore's prepared one.
+// Temporary paths are narrower; see fenceHasTemporaryPaths.
+func fenceHasTemporaryPort(f backup.ActivationFence) bool {
+	return (f.Kind == "fork" && f.Phase == fencePhaseAdopting) ||
+		(f.Kind == "restore-promote" && f.Phase == fencePhasePrepared)
+}
+
+// fenceHasTemporaryPaths admits only a restore's prepared/swapped checkpoint.
+// A fork/adopting fence may carry the temporary port, but its data and
+// configuration paths must already be the live ones; a restore-abort never
+// admits either exception.
+func fenceHasTemporaryPaths(f backup.ActivationFence) bool {
+	return f.Kind == "restore-promote" && (f.Phase == fencePhasePrepared || f.Phase == fencePhaseSwapped)
+}
+
+func verifyFenceDataDir(cfg config.Cluster, f backup.ActivationFence, db string) error {
+	if f.DataDir == "" {
+		return nil
 	}
-	return nil
+	live := cfg.Server.DataDirectory(db)
+	if f.DataDir == live {
+		return nil
+	}
+	if fenceHasTemporaryPaths(f) && f.DataDir == cfg.Server.DataDirectory(backup.RestoringName(db)) {
+		return nil
+	}
+	return activationIdentityError(db, f, "data directory", f.DataDir, live)
+}
+
+func verifyFenceConfDir(f backup.ActivationFence, db string) error {
+	if f.ConfDir == "" {
+		return nil
+	}
+	live := steps.PGConfDir(db)
+	if f.ConfDir == live {
+		return nil
+	}
+	if fenceHasTemporaryPaths(f) && f.ConfDir == steps.PGConfDir(backup.RestoringName(db)) {
+		return nil
+	}
+	return activationIdentityError(db, f, "configuration directory", f.ConfDir, live)
 }
 
 func activationIdentityError(db string, f backup.ActivationFence, what, have, want string) error {
@@ -460,7 +498,7 @@ func verifyActivationFence(cfg config.Cluster, db, opID, kind string, phases ...
 			output.ExitPrecondition, "Repair the records file deliberately; vaire will not guess the operation.").
 			WithDetails(map[string]any{"reason": "activation_fence_kind", "database": db, "kind": f.Kind})
 	}
-	if !validFencePhase(f.Phase) {
+	if !validFencePhase(f.Phase) || !validFencePhaseForKind(f.Kind, f.Phase) {
 		return backup.ActivationFence{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
 			db+"'s activation fence has an unknown phase "+f.Phase,
 			output.ExitPrecondition, "Repair the records file deliberately; vaire will not guess the checkpoint.").
@@ -507,6 +545,11 @@ func verifyActivationFence(cfg config.Cluster, db, opID, kind string, phases ...
 	if err := verifyFenceRegistration(f, db); err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
+	if f.Kind == "restore-abort" {
+		if err := verifyRestoreAbortFence(cfg, f, spec); err != nil {
+			return backup.ActivationFence{}, config.ClusterSpec{}, err
+		}
+	}
 	if f.Kind == "fork" || f.Kind == "unfollow" {
 		check := f.Kind == "fork"
 		if !check {
@@ -546,6 +589,8 @@ func fenceTargetMatches(f backup.ActivationFence, spec config.ClusterSpec) bool 
 		return f.TargetStanza != "" && (spec.Stanza == "" || f.TargetStanza == spec.Stanza)
 	case "restore-promote":
 		return f.TargetStanza == f.NewStanza || f.TargetStanza == spec.Stanza || f.TargetStanza == f.OldStanza
+	case "restore-abort":
+		return f.TargetStanza == spec.Stanza
 	default:
 		return false
 	}
@@ -577,6 +622,48 @@ func verifyFenceRegistration(f backup.ActivationFence, db string) error {
 	return nil
 }
 
+// verifyRestoreAbortFence proves a restore-abort fence still owns exactly the
+// untouched live cluster: its current stanza/port/paths, full activation
+// registration including follow generation, and the verified aside. It carries
+// no promotion requirements or renames.
+func verifyRestoreAbortFence(cfg config.Cluster, f backup.ActivationFence, spec config.ClusterSpec) error {
+	db := spec.Name
+	if f.Database != db {
+		return activationIdentityError(db, f, "database", f.Database, db)
+	}
+	if f.TargetStanza != spec.Stanza || f.OldStanza != spec.Stanza || f.NewStanza != spec.Stanza {
+		return activationIdentityError(db, f, "stanza", f.TargetStanza+"/"+f.OldStanza+"/"+f.NewStanza, spec.Stanza)
+	}
+	if f.Registration != activationRegistration(spec) {
+		return activationIdentityError(db, f, "registration", f.Registration, activationRegistration(spec))
+	}
+	if f.Ownership != spec.FollowGeneration {
+		return activationIdentityError(db, f, "follow generation", f.Ownership, spec.FollowGeneration)
+	}
+	if f.Port != spec.Port {
+		return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
+	}
+	if f.DataDir != cfg.Server.DataDirectory(db) {
+		return activationIdentityError(db, f, "data directory", f.DataDir, cfg.Server.DataDirectory(db))
+	}
+	if f.ConfDir != steps.PGConfDir(db) {
+		return activationIdentityError(db, f, "configuration directory", f.ConfDir, steps.PGConfDir(db))
+	}
+	if f.Aside == "" || f.CreatedAt == "" {
+		return output.NewError(output.CodePrecondition,
+			db+"'s restore-abort fence has no verified aside or creation time",
+			output.ExitPrecondition, "Repair the records deliberately; vaire will not route a restore whose pre-swap evidence is missing.").
+			WithDetails(map[string]any{"reason": "activation_fence_identity", "database": db})
+	}
+	if len(f.Requirements) != 0 || len(f.Renames) != 0 {
+		return output.NewError(output.CodePrecondition,
+			db+"'s restore-abort fence retained promotion facts",
+			output.ExitPrecondition, "Repair the records deliberately; vaire will not publish a restore's requirements or renames as the live cluster's.").
+			WithDetails(map[string]any{"reason": "activation_fence_identity", "database": db})
+	}
+	return nil
+}
+
 func fencePhaseRank(phase string) int {
 	switch phase {
 	case fencePhasePrepared:
@@ -602,6 +689,9 @@ func fencePhaseRank(phase string) int {
 // the operation, instance and immutable stanza transition inside the records
 // lock.
 func advanceActivationFence(cfg config.Cluster, db, opID, kind, from, to string, spec config.ClusterSpec, update func(*backup.ActivationFence)) error {
+	if kind == "restore-abort" {
+		return fmt.Errorf("a restore-abort activation fence is created at routing and cannot advance")
+	}
 	if !validFencePhase(from) || !validFencePhase(to) {
 		return fmt.Errorf("invalid activation phase transition %q -> %q", from, to)
 	}
@@ -637,10 +727,13 @@ func advanceActivationFence(cfg config.Cluster, db, opID, kind, from, to string,
 }
 
 // clearActivationFenceVerified retires exactly the verified routing fence in
-// one records compare-and-set. A changed operation, instance, stanza
-// transition or phase is refused rather than cleared.
-func clearActivationFenceVerified(cfg config.Cluster, db, opID, kind string, spec config.ClusterSpec) error {
-	if _, _, err := verifyActivationFence(cfg, db, opID, kind, fencePhaseRouting); err != nil {
+// one records compare-and-set. The complete verified snapshot is compared
+// under the lock, not only operation/kind/phase/target/port: any changed
+// requirement, rename, aside, registration, ownership, instance or path leaves
+// the fence whole.
+func clearActivationFenceVerified(cfg config.Cluster, db, opID, kind string) error {
+	want, _, err := verifyActivationFence(cfg, db, opID, kind, fencePhaseRouting)
+	if err != nil {
 		return err
 	}
 	return backup.UpdateRecords(func(s *backup.Records) error {
@@ -651,9 +744,21 @@ func clearActivationFenceVerified(cfg config.Cluster, db, opID, kind string, spe
 				output.ExitPrecondition, "Retry vaire apply; vaire will not recreate or guess a fence.").
 				WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
 		}
-		if f.OperationID != opID || f.Kind != kind || f.Phase != fencePhaseRouting ||
-			f.TargetStanza != spec.Stanza || f.Port != spec.Port {
-			return activationIdentityError(db, f, "routing completion", f.OperationID+":"+f.Phase, opID+":"+fencePhaseRouting)
+		if !reflect.DeepEqual(f, want) {
+			return activationIdentityError(db, f, "routing completion", f.OperationID+":"+f.Phase, want.OperationID+":"+want.Phase)
+		}
+		spec, ok := cfg.ClusterByName(db)
+		if !ok {
+			return activationIdentityError(db, f, "cluster.toml entry", "present", "missing")
+		}
+		if f.TargetStanza != spec.Stanza {
+			return activationIdentityError(db, f, "target stanza", f.TargetStanza, spec.Stanza)
+		}
+		if f.Port != spec.Port {
+			return activationIdentityError(db, f, "port", strconv.Itoa(f.Port), strconv.Itoa(spec.Port))
+		}
+		if _, ok := s.Restores[db]; ok {
+			return routingContinuationWithRestoreError(db)
 		}
 		if err := verifyFenceInstance(f, db); err != nil {
 			return err
@@ -661,6 +766,17 @@ func clearActivationFenceVerified(cfg config.Cluster, db, opID, kind string, spe
 		delete(s.Activation, db)
 		return nil
 	})
+}
+
+// routingContinuationWithRestoreError is the fail-closed state where a
+// routing continuation and a restore record coexist for one database. No
+// common finalizer may publish, resume or clear from it.
+func routingContinuationWithRestoreError(db string) error {
+	return output.NewError(output.CodePrecondition,
+		db+" has an open restore record while its activation routing continuation is being completed",
+		output.ExitPrecondition,
+		"Inspect the node records and repair the ambiguous state deliberately; vaire will not publish or clear routing while a restore record exists.").
+		WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
 }
 
 // completeUnfollowSafety atomically marks the unfollow's privilege settlement
@@ -792,6 +908,21 @@ func verifyRoutingFence(ctx context.Context, cfg config.Cluster, spec config.Clu
 	if _, _, err := verifyActivationFence(cfg, spec.Name, opID, kind, fencePhaseRouting); err != nil {
 		return err
 	}
+	if err := verifyRoutingRoutes(ctx, spec, false); err != nil {
+		return err
+	}
+	poolerResumeDatabase(ctx, spec.Name)
+	if err := verifyRoutingRoutes(ctx, spec, true); err != nil {
+		return err
+	}
+	return clearActivationFenceVerified(cfg, spec.Name, opID, kind)
+}
+
+// verifyRoutingRoutes proves both running poolers serve the live mapping and
+// no restore-inspection alias. After resume it also proves the transition
+// pause is gone; the mapping and alias absence are rechecked so a host that
+// changed while releasing the pause cannot be cleared.
+func verifyRoutingRoutes(ctx context.Context, spec config.ClusterSpec, afterResume bool) error {
 	poolers := []struct {
 		name string
 		dir  string
@@ -803,10 +934,17 @@ func verifyRoutingFence(ctx context.Context, cfg config.Cluster, spec config.Clu
 	for _, p := range poolers {
 		routes, err := poolerRuntimeRoutes(ctx, p.dir, p.port)
 		if err != nil {
-			return routingIncomplete(spec.Name, p.name, "cannot read its running routes: "+err.Error())
+			detail := "cannot read its running routes: "
+			if afterResume {
+				detail = "cannot verify its pause release: "
+			}
+			return routingIncomplete(spec.Name, p.name, detail+err.Error())
 		}
 		route, ok := routes[spec.Name]
 		if !ok {
+			if afterResume {
+				return routingIncomplete(spec.Name, p.name, "dropped the alias while releasing its pause")
+			}
 			return routingIncomplete(spec.Name, p.name, "does not serve the alias")
 		}
 		if route.Host != steps.PGSocketDir || route.Port != spec.Port || route.Database != spec.DatabaseName() {
@@ -816,22 +954,11 @@ func verifyRoutingFence(ctx context.Context, cfg config.Cluster, spec config.Clu
 		if _, ok := routes[backup.RestoringName(spec.Name)]; ok {
 			return routingIncomplete(spec.Name, p.name, "still serves the restore-inspection alias")
 		}
-	}
-	poolerResumeDatabase(ctx, spec.Name)
-	for _, p := range poolers {
-		routes, err := poolerRuntimeRoutes(ctx, p.dir, p.port)
-		if err != nil {
-			return routingIncomplete(spec.Name, p.name, "cannot verify its pause release: "+err.Error())
-		}
-		route, ok := routes[spec.Name]
-		if !ok {
-			return routingIncomplete(spec.Name, p.name, "dropped the alias while releasing its pause")
-		}
-		if route.Paused {
+		if afterResume && route.Paused {
 			return routingIncomplete(spec.Name, p.name, "still has the alias paused")
 		}
 	}
-	return clearActivationFenceVerified(cfg, spec.Name, opID, kind, spec)
+	return nil
 }
 
 func routingIncomplete(db, pooler, detail string) error {
@@ -910,9 +1037,17 @@ func finalizeRoutingFences(ctx context.Context, env *Env, dbs []string) []output
 				Message: db + "'s routing fence has no current cluster.toml entry"})
 			continue
 		}
-		if err := verifyRoutingFence(ctx, env.Cluster, spec, f.OperationID, f.Kind); err != nil {
+		var routingErr error
+		if f.Kind == "restore-abort" {
+			// A normal pooler render can skip on an unchanged input hash, so
+			// an aborted restore always re-publishes through the strict fence.
+			routingErr = completeRestoreAbortRouting(ctx, env, db, f.OperationID)
+		} else {
+			routingErr = verifyRoutingFence(ctx, env.Cluster, spec, f.OperationID, f.Kind)
+		}
+		if routingErr != nil {
 			warnings = append(warnings, output.Warning{Code: "activation_routing_incomplete",
-				Message: db + " is not routed yet: " + err.Error()})
+				Message: db + " is not routed yet: " + routingErr.Error()})
 		}
 	}
 	return warnings
