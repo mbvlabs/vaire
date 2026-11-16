@@ -65,6 +65,17 @@ func ProbeWithEnv(ctx context.Context, extraEnv []string, name string, args ...s
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// PackageInstalled reports whether dpkg's ${Status} output describes an
+// installed package. Its three fields are the selection, the error flag and the
+// state. Apply holds every package it installs, so a held package reads
+// "hold ok installed": the selection does not say whether the package is
+// installed, only the state does. Partial, removed and broken states are not
+// installed.
+func PackageInstalled(status string) bool {
+	fields := strings.Fields(status)
+	return len(fields) == 3 && fields[1] == "ok" && fields[2] == "installed"
+}
+
 // canonical marshals v as the step's Inputs bytes.
 func canonical(v any) ([]byte, error) {
 	return json.Marshal(v)

@@ -13,7 +13,10 @@ set -euo pipefail
 : "${PHASE:?PHASE is required}"
 
 if [ "${PHASE}" = "install" ]; then
-  if dpkg-query -W -f='${Status}' caddy 2>/dev/null | grep -q 'install ok installed'; then
+  caddy_status="$(dpkg-query -W -f='${Status}' caddy 2>/dev/null)" || caddy_status=""
+  # ${Status} is "<selection> <flag> <state>"; a held caddy was still installed
+  # by an older vaire. Partial, removed and broken states are not.
+  if [[ "${caddy_status}" =~ ^[^[:space:]]+[[:space:]]+ok[[:space:]]+installed$ ]]; then
     printf 'caddy is installed: this server was set up by an older vaire that used Caddy.\n' >&2
     printf 'vaire now serves TLS with nginx and does not migrate. Rebuild the server and run server init again.\n' >&2
     exit 1

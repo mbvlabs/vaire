@@ -36,7 +36,7 @@ func (basePackages) Check(ctx context.Context, _ config.Cluster, _ engine.Runtim
 	var missing []string
 	for _, pkg := range basePackageList {
 		out, _ := Probe(ctx, "dpkg-query", "-W", "-f=${Status}", pkg)
-		if out != "install ok installed" {
+		if !PackageInstalled(out) {
 			missing = append(missing, pkg)
 		}
 	}

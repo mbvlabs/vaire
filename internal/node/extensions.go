@@ -1998,7 +1998,7 @@ func extensionPackageInstalledDefault(ctx context.Context, pkg string) (bool, bo
 		}
 		return false, false, err.Error()
 	}
-	return out == "install ok installed", true, ""
+	return steps.PackageInstalled(out), true, ""
 }
 
 // --- PostgreSQL facts and previews ---
