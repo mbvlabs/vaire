@@ -741,22 +741,22 @@ func TestRolesCheckReportsPGQueryErrors(t *testing.T) {
 	useFakeRolesPG(t, fake)
 	oldQuery := rolesQueryColumn
 	t.Cleanup(func() { rolesQueryColumn = oldQuery })
-	rolesQueryColumn = func(_ context.Context, _ pg.Local, _ string, sql string) ([]string, error) {
+	rolesQueryColumn = func(ctx context.Context, local pg.Local, db, sql string) ([]string, error) {
 		if strings.Contains(sql, "FROM pg_roles") {
 			return nil, errors.New("roles unavailable")
 		}
-		return fake.query(context.Background(), pg.Local{}, "", sql)
+		return fake.query(ctx, local, db, sql)
 	}
 	step := postgresRoles{}.Instance("app")
 	if res, err := step.Check(context.Background(), cfg, engine.Runtime{}); err != nil || res.Complete || !strings.Contains(res.Detail, "cannot read pg_roles") {
 		t.Fatalf("pg_roles error = %+v, %v", res, err)
 	}
 
-	rolesQueryColumn = func(_ context.Context, _ pg.Local, _ string, sql string) ([]string, error) {
+	rolesQueryColumn = func(ctx context.Context, local pg.Local, db, sql string) ([]string, error) {
 		if strings.Contains(sql, "FROM pg_extension") {
 			return nil, errors.New("extensions unavailable")
 		}
-		return fake.query(context.Background(), pg.Local{}, "", sql)
+		return fake.query(ctx, local, db, sql)
 	}
 	if res, err := step.Check(context.Background(), cfg, engine.Runtime{}); err != nil || res.Complete || !strings.Contains(res.Detail, "cannot read extensions") {
 		t.Fatalf("pg_extension error = %+v, %v", res, err)
