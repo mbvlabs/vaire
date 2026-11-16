@@ -285,7 +285,7 @@ func (s *ownedForkState) stubForkHooks(t *testing.T) {
 	forkPromote = func(m *backup.Materialised, ctx context.Context) ([]string, error) {
 		return nil, m.GuardOwnership(ctx, backup.MaterialisationPromote, func() error { return nil })
 	}
-	forkRename = func(context.Context, sqlRunner, string, string, map[string]string) error {
+	forkRename = func(context.Context, *backup.Materialised, string, string, map[string]string, int) error {
 		if s.mode == "cleanup" {
 			return errors.New("rename failed")
 		}

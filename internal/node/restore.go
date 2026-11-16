@@ -2562,7 +2562,7 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 	if err == nil {
 		logLine(env.Report, env.Job, "renaming "+p.Source+" and its roles to "+p.Name)
 		err = m.GuardOwnership(ctx, backup.MaterialisationRename, func() error {
-			return forkRename(ctx, m.PG(), p.Source, p.Name, env.Secrets)
+			return forkRename(ctx, m, p.Source, p.Name, env.Secrets, spec.Port)
 		})
 	}
 	if err == nil && plan.Plan.Cron {
@@ -2641,21 +2641,6 @@ func restoreFork(ctx context.Context, env *jobEnv, p dbForkParams, src config.Cl
 		logLine(env.Report, env.Job, "recovered to "+at)
 	}
 	return nil
-}
-
-// renameFork renames the source's database and roles to the fork's in the
-// cluster at local (RFC 10.2). Ownership, grants, memberships, default
-// privileges and per-role settings follow the role OIDs; only
-// <name>_migrate's SET role names the owner, so it is rewritten. The login
-// roles get the passwords the operator generated for the fork, as SCRAM
-// verifiers: the source's no longer work. A fork's copy always has every old
-// name, so it renames them all; db unfollow reads which are left instead.
-func renameFork(ctx context.Context, local sqlRunner, source, name string, passwords map[string]string) error {
-	statements, err := renameStatements(renameState{database: true, roles: renameRoles()}, source, name, passwords)
-	if err != nil {
-		return err
-	}
-	return local.Exec(ctx, "postgres", statements, nil)
 }
 
 // preflightDropLeftovers refuses incomplete work before db.drop touches the
