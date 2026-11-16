@@ -171,6 +171,36 @@ func TestPackageScriptsAcceptHeldAndRejectOtherStates(t *testing.T) {
 	}
 }
 
+// Debian 13's PGDG publishes no postgresql-contrib binary for PostgreSQL 18;
+// postgresql-18 Provides postgresql-contrib-18 and ships its files. A
+// converged PG18 host must not ask apt to install the virtual package on
+// every apply.
+func TestPostgresPackagesScriptAcceptsPG18ContribVirtual(t *testing.T) {
+	env := postgresPackagesEnv(nil)
+	// This test exercises installed-package detection, not PGDG provisioning
+	// or stopping the host's pooler.
+	env["PGDG_SCRIPT"] = ""
+	env["STOP_PGBOUNCER"] = "0"
+	installed := dpkgAnswer{status: "hold ok installed"}
+	packages := map[string]dpkgAnswer{
+		"postgresql-common":    {status: "install ok installed"},
+		"postgresql-18":        installed,
+		"postgresql-client-18": installed,
+		"pgbouncer":            installed,
+		"pgbackrest":           installed,
+		"postgresql-contrib":   {status: "unknown ok not-installed"},
+	}
+	out, apt := runPackageScript(t, "postgres-packages", env, packages)
+	if strings.Contains(apt, "install -y") {
+		t.Fatalf("converged PG18 host reinstalled packages: %q\n%s", apt, out)
+	}
+	if !strings.Contains(env["PACKAGES"], "postgresql-18") ||
+		!strings.Contains(env["PACKAGES"], "postgresql-client-18") ||
+		strings.Contains(env["PACKAGES"], "postgresql-contrib") {
+		t.Fatalf("PACKAGES = %q", env["PACKAGES"])
+	}
+}
+
 // tls.sh refuses a Caddy box before it changes anything, so this is the one
 // path that runs without root. A caddy held by the old vaire is still a Caddy
 // box.
