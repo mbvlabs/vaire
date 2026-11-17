@@ -394,7 +394,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 	if !supportedRestoreKind(p.Kind) {
 		return nil, unsupportedRestoreKind(p.Kind)
 	}
-	port, warnings, attempt, err := materialiseRestore(ctx, env, p)
+	port, attempt, err := materialiseRestore(ctx, env, p)
 	if err != nil {
 		return nil, errors.Join(err, failRestoreChecked(env, err, attempt))
 	}
@@ -406,7 +406,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 			(attempt == nil && r.Attempt != nil) {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
-		r.Phase, r.ReadyAt, r.Warnings, r.Error, r.Port = backup.PhaseReady, readyAt, warnings, "", port
+		r.Phase, r.ReadyAt, r.Error, r.Port = backup.PhaseReady, readyAt, "", port
 		r.Attempt = nil
 		r.MaterialisationPending = false
 		r.MaterialisationCleaned = false
@@ -416,7 +416,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 		return nil, err
 	}
 	rt := jobRuntime(env)
-	res := map[string]any{"database": p.Database, "restoring": backup.RestoringName(p.Database), "port": port, "phase": backup.PhaseReady, "warnings": warnings}
+	res := map[string]any{"database": p.Database, "restoring": backup.RestoringName(p.Database), "port": port, "phase": backup.PhaseReady}
 	if p.Promote {
 		promoted, err := promote(ctx, env.Cluster, p.Database, rt, env.Report, func() {})
 		if err != nil {
@@ -608,15 +608,15 @@ func applyFailedRestore(r *backup.Restore, p restoreParams, cause error, expecte
 // pgBackRest restore of the database's stanza paused at the target (a
 // standby following the archive for latest). It returns the cluster's
 // port. A failure drops what was built.
-func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int, []string, *backup.MaterialisationAttempt, error) {
+func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int, *backup.MaterialisationAttempt, error) {
 	cfg := env.Cluster
 	spec, err := clusterOf(cfg, p.Database)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	bs, err := backup.LoadRecords()
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	opts := backup.RestoreOptions{Kind: p.Kind, Set: p.Set, Pause: true, Timeline: bs.Restores[p.Database].Timeline}
 	if p.Kind == backup.TargetTime {
@@ -628,28 +628,28 @@ func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int,
 		Declaration: spec.RecoveryExtensions,
 	})
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	if err := prepareRestoreRecord(env, p, bs); err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	m, err := constructRestoreMaterialised(env, p, spec, cfg)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	defer m.ReleaseForkReservationAuthority()
 	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	prestartFollowerCopy(m, env, cfg, spec, plan)
-	warnings, expected, birth, err := buildRestoreMaterialisation(ctx, env, p, spec, bs, m)
+	expected, birth, err := buildRestoreMaterialisation(ctx, env, p, spec, bs, m)
 	if err != nil {
-		return cleanupFailedRestore(ctx, env, p, m, expected, birth, warnings, err)
+		return cleanupFailedRestore(ctx, env, p, m, expected, birth, err)
 	}
 	if birth != nil {
 		defer birth.close()
 	}
-	return m.Port, warnings, expected, nil
+	return m.Port, expected, nil
 }
 
 func prepareRestoreRecord(env *jobEnv, p restoreParams, bs backup.Records) error {
@@ -688,10 +688,10 @@ func constructRestoreMaterialised(env *jobEnv, p restoreParams, spec config.Clus
 	return m, err
 }
 
-func buildRestoreMaterialisation(ctx context.Context, env *jobEnv, p restoreParams, spec config.ClusterSpec, bs backup.Records, m *backup.Materialised) ([]string, *backup.MaterialisationAttempt, *restoreBirth, error) {
+func buildRestoreMaterialisation(ctx context.Context, env *jobEnv, p restoreParams, spec config.ClusterSpec, bs backup.Records, m *backup.Materialised) (*backup.MaterialisationAttempt, *restoreBirth, error) {
 	destination, err := prepareMaterialisationConfig(env.Cluster, spec)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	m.DestinationConfig = destination
 	kind := "restore"
@@ -700,26 +700,26 @@ func buildRestoreMaterialisation(ctx context.Context, env *jobEnv, p restorePara
 	}
 	attempt, err := newMaterialisationAttempt(env, m, spec.Stanza, kind)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	attempt.ReservationIdentity, err = m.ForkReservationIdentity()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	expected := &attempt
 	if err := bindRestoreAttempt(ctx, env, p, bs, m, &attempt); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	birth, err := newRestoreBirth(ctx, env, m, expected)
 	if err != nil {
-		return nil, expected, nil, err
+		return expected, nil, err
 	}
 	m.Ownership = birth
 	err = runRestoreMaterialised(ctx, env, p, spec, bs, m, expected)
 	if err != nil {
-		return nil, expected, birth, err
+		return expected, birth, err
 	}
-	return nil, expected, birth, nil
+	return expected, birth, nil
 }
 
 func bindRestoreAttempt(ctx context.Context, env *jobEnv, p restoreParams, bs backup.Records, m *backup.Materialised, attempt *backup.MaterialisationAttempt) error {
@@ -757,13 +757,13 @@ func runRestoreMaterialised(ctx context.Context, env *jobEnv, p restoreParams, s
 	return nil
 }
 
-func cleanupFailedRestore(ctx context.Context, env *jobEnv, p restoreParams, m *backup.Materialised, expected *backup.MaterialisationAttempt, birth *restoreBirth, warnings []string, cause error) (int, []string, *backup.MaterialisationAttempt, error) {
+func cleanupFailedRestore(ctx context.Context, env *jobEnv, p restoreParams, m *backup.Materialised, expected *backup.MaterialisationAttempt, birth *restoreBirth, cause error) (int, *backup.MaterialisationAttempt, error) {
 	if backup.RetainRecoveryFailure(cause) {
-		return 0, warnings, expected, cause
+		return 0, expected, cause
 	}
 	if expected != nil {
 		if checkErr := verifyRestoreAttempt(p.Database, env.ID, expected); checkErr != nil {
-			return 0, warnings, expected, errors.Join(cause, checkErr)
+			return 0, expected, errors.Join(cause, checkErr)
 		}
 	}
 	var dropErr error
@@ -788,7 +788,7 @@ func cleanupFailedRestore(ctx context.Context, env *jobEnv, p restoreParams, m *
 			return nil
 		})
 	}
-	return 0, warnings, expected, cause
+	return 0, expected, cause
 }
 
 type restoreDBParams struct {
@@ -962,7 +962,7 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 			output.ExitPrecondition, "Nothing was promoted. Retry after fixing the requirement history store.").
 			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
 	}
-	aside, err = recordPromoteAside(ctx, cfg, db, r, aside, report)
+	aside, err = recordPromoteAside(cfg, db, r, aside, report)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,7 +1004,7 @@ func ensurePromoteGuard(ctx context.Context, cfg config.Cluster, db string, r ba
 
 // recordPromoteAside fixes the aside before any rename, so a promote that
 // fails part way resumes with the same aside and abort knows the copy is in.
-func recordPromoteAside(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, aside string, report engine.Reporter) (string, error) {
+func recordPromoteAside(cfg config.Cluster, db string, r backup.Restore, aside string, report engine.Reporter) (string, error) {
 	const step = "restore.promote"
 	switch {
 	case aside == "":

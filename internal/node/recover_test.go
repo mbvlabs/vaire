@@ -30,12 +30,11 @@ func TestJobStepsGetTheRequestSecrets(t *testing.T) {
 		steps.SecretAdminPassword: "admin", steps.SecretPgbouncerAuth: "auth", steps.SecretMonitor: "mon",
 		steps.SecretMetricsHash: "$2a$hash", steps.SecretBackupKeyID: "AKID", steps.SecretBackupKeySecret: "s3cret",
 		steps.SecretBackupCipherPass: "cipher", steps.SecretBackupAgeRecipient: "age1xyz",
-		// Not a step's: the dump identity and the master bundle stay out.
-		steps.SecretBackupAgeIdentity: "AGE-SECRET-KEY-1", steps.SecretMasterBundle: "tar",
+		// Not a step's: the master bundle stays out.
+		steps.SecretMasterBundle: "tar",
 	}
 	got := stepSecrets(req)
 	want := maps.Clone(req)
-	delete(want, steps.SecretBackupAgeIdentity)
 	delete(want, steps.SecretMasterBundle)
 	if !maps.Equal(got, want) {
 		t.Errorf("job secrets %v, want %v", got, want)

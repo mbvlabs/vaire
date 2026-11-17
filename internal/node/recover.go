@@ -303,7 +303,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	}
 
 	// 2. Materialise the stanza into <db>__restoring.
-	port, warnings, attempt, err := materialiseRestore(ctx, env, p.restore())
+	port, attempt, err := materialiseRestore(ctx, env, p.restore())
 	if err != nil {
 		return nil, errors.Join(err, failRestoreChecked(env, err, attempt))
 	}
@@ -313,7 +313,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 			attempt == nil || r.Attempt == nil || !sameAttemptIdentity(*r.Attempt, *attempt) || !restoreRecordMatchesAttempt(r, attempt) {
 			return incompleteMaterialisation(backup.RestoringName(db))
 		}
-		r.Phase, r.ReadyAt, r.Warnings, r.Error, r.Port = backup.PhaseReady, stamp(), warnings, "", port
+		r.Phase, r.ReadyAt, r.Error, r.Port = backup.PhaseReady, stamp(), "", port
 		r.Attempt = nil
 		r.MaterialisationPending = false
 		r.MaterialisationCleaned = false
@@ -349,7 +349,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 		return nil, err
 	}
 
-	res := map[string]any{"database": db, "stanza": spec.Stanza, "restoring": backup.RestoringName(db), "port": port, "warnings": warnings}
+	res := map[string]any{"database": db, "stanza": spec.Stanza, "restoring": backup.RestoringName(db), "port": port}
 	if p.NoPromote {
 		// Inspection is ready, but the writable application target is still
 		// awaiting recovery. Keep that durable routing fence until promotion

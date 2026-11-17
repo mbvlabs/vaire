@@ -110,7 +110,7 @@ func TestMaterialiseRestoreRejectsReplacedInvocationBeforeConstructor(t *testing
 				called = true
 				return nil, errors.New("unexpected constructor")
 			}
-			_, _, _, err := materialiseRestore(context.Background(), env, restoreParams{Database: "app", Kind: backup.TargetLatest})
+			_, _, err := materialiseRestore(context.Background(), env, restoreParams{Database: "app", Kind: backup.TargetLatest})
 			rejectf(t, err == nil || called, "replaced invocation: err=%v constructor called=%v", err, called)
 			records, err := backup.LoadRecords()
 			rejectf(t, err != nil || !reflect.DeepEqual(records.Restores["app"], r), "replaced record changed: %+v, %v", records.Restores["app"], err)

@@ -284,13 +284,12 @@ type Restore struct {
 	InstanceID  string `json:"instance_id,omitempty"`
 	OperationID string `json:"operation_id,omitempty"`
 	// Target describes the recovery target: latest, a time or a set label.
-	Target    string   `json:"target"`
-	Kind      string   `json:"kind"`
-	Phase     string   `json:"phase"`
-	StartedAt string   `json:"started_at"`
-	ReadyAt   string   `json:"ready_at,omitempty"`
-	Error     string   `json:"error,omitempty"`
-	Warnings  []string `json:"warnings,omitempty"`
+	Target    string `json:"target"`
+	Kind      string `json:"kind"`
+	Phase     string `json:"phase"`
+	StartedAt string `json:"started_at"`
+	ReadyAt   string `json:"ready_at,omitempty"`
+	Error     string `json:"error,omitempty"`
 	// Promote is set when the restore was started with --promote.
 	Promote bool `json:"promote,omitempty"`
 	// Port is the temporary cluster's port once it is materialised; the

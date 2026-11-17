@@ -200,7 +200,7 @@ func (f *restoreOwnedAbort) restore() error {
 		f.env.lease.finish()
 	}
 	if f.mode == "recover-success" {
-		_, _, attempt, cause := materialiseRestore(context.Background(), f.env, (recoverParams{Database: "app"}).restore())
+		_, attempt, cause := materialiseRestore(context.Background(), f.env, (recoverParams{Database: "app"}).restore())
 		return errors.Join(cause, failRestoreChecked(f.env, cause, attempt))
 	}
 	_, err := jobRestore(context.Background(), f.env)
