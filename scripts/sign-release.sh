@@ -31,10 +31,28 @@ artifacts=(
   "${channel_manifest}"
   "${version_root}/manifest.json"
 )
-for os in linux darwin; do
-  for arch in amd64 arm64; do
-    artifacts+=("${version_root}/${os}/${arch}/vaire")
-  done
+version_manifest="${version_root}/manifest.json"
+if ! jq -e '.artifacts | type == "object"' "${version_manifest}" >/dev/null 2>&1; then
+  echo "version manifest is invalid: ${version_manifest}" >&2
+  exit 1
+fi
+platforms=()
+while IFS= read -r platform; do
+  case "${platform}" in
+    linux/amd64 | linux/arm64 | darwin/amd64 | darwin/arm64) ;;
+    *)
+      echo "version manifest contains an unsupported platform: ${platform}" >&2
+      exit 1
+      ;;
+  esac
+  platforms+=("${platform}")
+done < <(jq -r '.artifacts | keys_unsorted[]' "${version_manifest}")
+[ "${#platforms[@]}" -gt 0 ] || {
+  echo "version manifest has no artifacts: ${version_manifest}" >&2
+  exit 1
+}
+for platform in "${platforms[@]}"; do
+  artifacts+=("${version_root}/${platform}/vaire")
 done
 
 for artifact in "${artifacts[@]}"; do

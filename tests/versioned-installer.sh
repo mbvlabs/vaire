@@ -51,6 +51,8 @@ for channel in stable-1.x edge; do
   version=1.0.0-alpha.4
   [ "${channel}" != edge ] || version=edge-abcdef012345
   bash scripts/build-release.sh "${version}" "${channel}" https://vaire.mbvlabs.com >/dev/null
+  manifest="dist/release-${channel}/releases/${version}/manifest.json"
+  [ "$(jq -r '.artifacts | keys | join(" ")' "${manifest}")" = 'darwin/amd64 darwin/arm64 linux/amd64 linux/arm64' ]
   installer="dist/release-${channel}/releases/${version}/install.sh"
   grep -Fxq "channel_root=\"https://vaire.mbvlabs.com/releases/${version}\"" "${installer}"
   if grep -q '@@' "${installer}"; then echo 'unsubstituted placeholder' >&2; exit 1; fi

@@ -38,9 +38,14 @@ jobs:
           }
       - name: Lint
         run: just lint
+      - name: Test release tooling
+        run: |
+          bash tests/versioned-installer.sh
+          bash tests/release-platforms.sh
       - name: Build edge release
         env:
           RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
+          RELEASE_PLATFORMS: linux/amd64
         run: scripts/build-release.sh "edge-${GITHUB_SHA::12}" edge "${RELEASE_BASE_URL}"
       - name: Sign and verify edge release
         run: scripts/sign-release.sh dist/release-edge

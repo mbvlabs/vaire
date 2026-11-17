@@ -50,6 +50,31 @@ if [[ ! "${base_url}" =~ ^https://[^[:space:]\"\\]+$ ]]; then
   exit 1
 fi
 
+platforms=()
+if [ -n "${RELEASE_PLATFORMS:-}" ]; then
+  # RELEASE_PLATFORMS is a whitespace-separated allowlist of platforms.
+  # shellcheck disable=SC2086
+  for platform in ${RELEASE_PLATFORMS}; do
+    case "${platform}" in
+      linux/amd64 | linux/arm64 | darwin/amd64 | darwin/arm64) ;;
+      *)
+        echo "unknown release platform ${platform}" >&2
+        exit 1
+        ;;
+    esac
+    for selected in "${platforms[@]}"; do
+      if [ "${selected}" = "${platform}" ]; then
+        echo "duplicate release platform ${platform}" >&2
+        exit 1
+      fi
+    done
+    platforms+=("${platform}")
+  done
+fi
+if [ "${#platforms[@]}" -eq 0 ]; then
+  platforms=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)
+fi
+
 channel_root="${base_url}"
 if [ "${channel}" = edge ]; then
   channel_root="${base_url}/edge"
@@ -78,11 +103,6 @@ commit="$(git rev-parse --short=12 HEAD)"
 ldflags="-s -w -X ${pkg}.Version=${version} -X ${pkg}.Commit=${commit} -X ${pkg}.Channel=${signing_channel}"
 build_args=(go build -trimpath -ldflags "${ldflags}")
 
-linux_amd64_sha=""
-linux_arm64_sha=""
-darwin_amd64_sha=""
-darwin_arm64_sha=""
-
 build_one() {
   local os="$1"
   local arch="$2"
@@ -95,31 +115,28 @@ build_one() {
   printf '%s' "${hex}"
 }
 
-linux_amd64_sha="$(build_one linux amd64)"
-linux_arm64_sha="$(build_one linux arm64)"
-darwin_amd64_sha="$(build_one darwin amd64)"
-darwin_arm64_sha="$(build_one darwin arm64)"
-
 release_base_url="${base_url}/releases/${version}"
+artifacts_json='{}'
+for platform in "${platforms[@]}"; do
+  sha="$(build_one "${platform%/*}" "${platform#*/}")"
+  artifacts_json="$(jq -c \
+    --arg platform "${platform}" \
+    --arg url "${release_base_url}/${platform}/vaire" \
+    --arg sha "${sha}" \
+    '. + {($platform): {"url": $url, "sha256": $sha}}' <<<"${artifacts_json}")"
+done
+
 jq -n \
   --arg channel "${signing_channel}" \
   --arg version "${version}" \
   --arg releaseBaseUrl "${release_base_url}" \
-  --arg linux_amd64 "${linux_amd64_sha}" \
-  --arg linux_arm64 "${linux_arm64_sha}" \
-  --arg darwin_amd64 "${darwin_amd64_sha}" \
-  --arg darwin_arm64 "${darwin_arm64_sha}" \
+  --argjson artifacts "${artifacts_json}" \
   '{
     schemaVersion: 1,
     channel: $channel,
     version: $version,
     releaseBaseUrl: $releaseBaseUrl,
-    artifacts: {
-      "linux/amd64":  {"url": ($releaseBaseUrl + "/linux/amd64/vaire"),  "sha256": $linux_amd64},
-      "linux/arm64":  {"url": ($releaseBaseUrl + "/linux/arm64/vaire"),  "sha256": $linux_arm64},
-      "darwin/amd64": {"url": ($releaseBaseUrl + "/darwin/amd64/vaire"), "sha256": $darwin_amd64},
-      "darwin/arm64": {"url": ($releaseBaseUrl + "/darwin/arm64/vaire"), "sha256": $darwin_arm64}
-    }
+    artifacts: $artifacts
   }' >"${out}/releases/${version}/manifest.json"
 
 if [ "${channel}" = edge ]; then
