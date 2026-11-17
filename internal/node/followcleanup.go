@@ -39,9 +39,11 @@ var followCleanupRegistration = func(name, source, dataRoot string, sourcePort, 
 	}
 	// postgresql-common may resolve included settings differently from the
 	// main file. Refuse cleanup unless its effective data directory agrees.
+	// -s makes pg_conftool print the value alone; its default output is the
+	// labelled "data_directory = <path>" form, which never matches the path.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", "data_directory")
+	cmd := exec.CommandContext(ctx, "pg_conftool", "-s", "18", name, "show", "data_directory")
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != filepath.Join(dataRoot, name) {

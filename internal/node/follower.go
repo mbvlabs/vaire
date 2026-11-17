@@ -573,10 +573,11 @@ func handleDBFollow(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	host := runtimeFor(env, false).Host
-	cpuSpec, err := followAdmission(ctx, cfg, src, p, existing, resume, host)
+	cpuSpec, admitted, err := followAdmission(ctx, cfg, src, p, existing, resume, host)
 	if err != nil {
 		return Result{}, err
 	}
+	p = admitted
 	if _, err := followSpace(ctx, cfg, p.Source); err != nil {
 		return Result{}, err
 	}
@@ -729,7 +730,7 @@ func resolveFollowTarget(ctx context.Context, cfg config.Cluster, recs backup.Re
 	return existing, false, nil
 }
 
-func followAdmission(ctx context.Context, cfg config.Cluster, src config.ClusterSpec, p dbFollowParams, existing config.ClusterSpec, resume bool, host hostinfo.Info) (config.ClusterSpec, error) {
+func followAdmission(ctx context.Context, cfg config.Cluster, src config.ClusterSpec, p dbFollowParams, existing config.ClusterSpec, resume bool, host hostinfo.Info) (config.ClusterSpec, dbFollowParams, error) {
 	if resume {
 		return resumeFollowAdmission(ctx, p, existing)
 	}
@@ -738,36 +739,37 @@ func followAdmission(ctx context.Context, cfg config.Cluster, src config.Cluster
 	// preparation lock and again in the job after its locked reload.
 	previewCfg, previewSpec, err := followerPreviewEntry(cfg, src, p)
 	if err != nil {
-		return previewSpec, err
+		return previewSpec, p, err
 	}
 	if _, err := previewCfg.Resources(previewSpec); err != nil {
-		return previewSpec, config.ValidationError(err)
+		return previewSpec, p, config.ValidationError(err)
 	}
 	if err := checkSpareCPU(ctx, previewSpec.Name, previewSpec.CPUMode); err != nil {
-		return previewSpec, err
+		return previewSpec, p, err
 	}
 	if err := guardRecoveryFloorChanges(cfg, previewCfg, host); err != nil {
-		return previewSpec, err
+		return previewSpec, p, err
 	}
-	return previewSpec, refuseUnsafeFollowFloors(ctx, previewCfg, src, previewSpec, host, false)
+	return previewSpec, p, refuseUnsafeFollowFloors(ctx, previewCfg, src, previewSpec, host, false)
 }
 
-func resumeFollowAdmission(ctx context.Context, p dbFollowParams, existing config.ClusterSpec) (config.ClusterSpec, error) {
+func resumeFollowAdmission(ctx context.Context, p dbFollowParams, existing config.ClusterSpec) (config.ClusterSpec, dbFollowParams, error) {
 	// The generation is the operation's identity; a later writer that removes
 	// or replaces the entry makes the job refuse rather than build under it. A
-	// retry never prepares or rolls back the entry.
+	// retry never prepares or rolls back the entry. The admitted params carry
+	// it to the caller's job submission.
 	if existing.FollowGeneration == "" {
-		return existing, existingDatabase(p.Name)
+		return existing, p, existingDatabase(p.Name)
 	}
 	p.Generation = existing.FollowGeneration
 	proposed := existing
 	if err := followCPU(&proposed, p); err != nil {
-		return existing, err
+		return existing, p, err
 	}
 	if proposed.CPUMode != existing.CPUMode || proposed.CPUQuota != existing.CPUQuota {
-		return existing, output.NewError(output.CodePrecondition, "retry CPU policy differs from the prepared follower", output.ExitPrecondition, "Retry with the saved CPU policy.")
+		return existing, p, output.NewError(output.CodePrecondition, "retry CPU policy differs from the prepared follower", output.ExitPrecondition, "Retry with the saved CPU policy.")
 	}
-	return existing, checkSpareCPU(ctx, existing.Name, existing.CPUMode)
+	return existing, p, checkSpareCPU(ctx, existing.Name, existing.CPUMode)
 }
 
 func followDryRun(ctx context.Context, cfg config.Cluster, src config.ClusterSpec, p dbFollowParams, existing config.ClusterSpec, resume bool, cpuSpec config.ClusterSpec) (Result, error) {

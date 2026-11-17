@@ -3126,6 +3126,29 @@ func TestOrdinaryFollowRetryAfterStartFailure(t *testing.T) {
 	}
 }
 
+// QF05: a public follow retry hands the prepared entry's generation to the job
+// it starts; the job's own reload validates that generation, so submitting the
+// original request's empty generation is refused as changed. A direct job test
+// that injects the generation cannot exercise this handoff.
+func TestPublicFollowRetrySubmitsPreparedGeneration(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	installFollowAdmission(t, func(spec config.ClusterSpec) bool { return !spec.IsFollower() })
+	var started dbFollowParams
+	installStartFailure(t, func(p dbFollowParams) { started = p })
+	if _, err := handleDBFollow(ctx, &Env{Req: followRequest("app_follower"), Cluster: node.config()}); err == nil {
+		t.Fatal("the failed job start returned no error")
+	}
+	spec := mustSpec(t, cfg, "app_follower")
+	rejectf(t, started.Generation != spec.FollowGeneration,
+		"the public retry submitted generation %q, want the prepared entry's %q", started.Generation, spec.FollowGeneration)
+	reject(t, started.PreparedNew, "the public retry marked the prepared entry as new")
+	if _, ok := node.config().ClusterByName("app_follower"); !ok {
+		t.Fatal("the public retry removed its entry")
+	}
+}
+
 // followRequest is db.follow's real (non-dry-run) request.
 func followRequest(name string) (req rpc.Request) {
 	size := "small"
