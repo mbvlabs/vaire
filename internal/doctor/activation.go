@@ -7,15 +7,17 @@ func ActivationChecks() []Check {
 	}
 }
 
-// activationPending reports a database whose activation fence or unfollow has
-// not finished. A running PostgreSQL says nothing about client readiness: a
-// routing fence still has to verify both poolers' routes and release their
-// pause, and an unsettled unfollow still withholds the pooler alias.
+// activationPending reports a database whose activation fence, restore undo
+// or unfollow has not finished. A running PostgreSQL says nothing about client
+// readiness: a routing fence still has to verify both poolers' routes and
+// release their pause, an undo still has to publish its routes, and an
+// unsettled unfollow still withholds the pooler alias.
 func activationPending(f Facts) []Result {
 	out := make([]Result, 0, len(f.Clusters))
 	for _, c := range f.Clusters {
 		r := Result{DB: c.Name}
 		fence, fenced := f.Records.ActivationFenceFor(c.Name)
+		undo, undoing := f.Records.Undoing[c.Name]
 		unfollow, unfollowing := f.Records.Unfollowing[c.Name]
 		switch {
 		case fenced && fence.Phase == "routing":
@@ -28,6 +30,13 @@ func activationPending(f Facts) []Result {
 			r.Detail = "the " + fence.Kind + " activation " + fence.OperationID +
 				" is unfinished in phase " + fence.Phase + "; client routing stays withheld"
 			r.Fix = "finish or resume the " + fence.Kind + " operation " + fence.OperationID
+		case undoing:
+			r.Status = Fail
+			r.Detail = "a restore undo of " + c.Name + " is unfinished; its pooler routes are not verified"
+			if undo.Aside != "" {
+				r.Detail = "a restore undo of " + c.Name + " is unfinished (the restored data was kept as " + undo.Aside + "); its pooler routes are not verified"
+			}
+			r.Fix = "vaire restore undo " + c.Name + " --confirm " + c.Name + "/restore"
 		case unfollowing && !unfollow.Settled:
 			r.Status = Fail
 			r.Detail = "the unfollow from " + unfollow.Source + " has not settled, so the poolers keep " + c.Name + "'s aliases withheld"

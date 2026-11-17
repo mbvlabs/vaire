@@ -69,6 +69,23 @@ func TestActivationUnsettledUnfollowFails(t *testing.T) {
 	}
 }
 
+func TestActivationUnfinishedUndoFails(t *testing.T) {
+	f := healthy()
+	f.Records.Undoing = map[string]backup.Undo{
+		"app": {Aside: "app__pre_restore_20261117", StartedAt: "2026-11-17T10:00:00Z"},
+	}
+	r := byID(Run(ActivationChecks(), f, ""), "activation.pending", "app")
+	if r.Status != Fail || !strings.Contains(r.Detail, "restore undo") || !strings.Contains(r.Detail, "routes are not verified") {
+		t.Fatalf("unfinished undo: %+v", r)
+	}
+	if !strings.Contains(r.Fix, "vaire restore undo app --confirm app/restore") {
+		t.Errorf("fix %q does not resume the undo", r.Fix)
+	}
+	if other := byID(Run(ActivationChecks(), f, ""), "activation.pending", "other"); other.Status != Pass {
+		t.Errorf("other database inherited the undo: %+v", other)
+	}
+}
+
 func TestActivationPendingFiltersByDatabase(t *testing.T) {
 	f := healthy()
 	f.Records.Activation = map[string]backup.ActivationFence{
