@@ -477,17 +477,34 @@ func applyStepIDs(cmd *cobra.Command) ([]string, error) {
 // applyRecoveryKit adds this machine's recovery kit to the secrets the node
 // receives, and refuses when backups are on without one. The node writes the
 // kit only when its copy is missing (D7); vaire never makes a new cipher for
-// an existing repository.
+// an existing repository. The age recipient rides along even without a
+// bucket, so master-backup-v1 can repair a node that lost its copy.
 func applyRecoveryKit(cmd *cobra.Command, s *session, p *progress, secretValues map[string]string, creds workspaces.Credentials) error {
 	if creds.Backup != nil && creds.Backup.HasBucket() {
 		addRecoveryKit(secretValues, creds.Backup)
 		return nil
 	}
-	if cfg, err := remoteConfig(cmd, s, p); err == nil && cfg.BackupConfigured() {
+	cfg, err := remoteConfig(cmd, s, p)
+	if err != nil {
+		// The apply itself reports an unreachable node; still carry what the
+		// kit has.
+		addRecoveryKit(secretValues, creds.Backup)
+		return nil
+	}
+	return addRecoveryKitUnlessIncomplete(secretValues, creds.Backup, cfg.BackupConfigured())
+}
+
+// addRecoveryKitUnlessIncomplete adds the kit to a request's secrets and
+// refuses when the node has backups configured but this machine's kit has no
+// bucket to restore its keys and cipher. An identity-only kit still sends its
+// age recipient when backups are off.
+func addRecoveryKitUnlessIncomplete(secretValues map[string]string, kit *workspaces.BackupCreds, backupConfigured bool) error {
+	if backupConfigured && (kit == nil || !kit.HasBucket()) {
 		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's workspace has no recovery kit", output.ExitInput,
 			"Log in from a current transfer bundle (vaire login), which carries the recovery kit, then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
+	addRecoveryKit(secretValues, kit)
 	return nil
 }
 

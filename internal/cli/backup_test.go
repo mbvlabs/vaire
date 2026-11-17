@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 )
@@ -170,6 +172,87 @@ func TestAddRecoveryKit(t *testing.T) {
 		if value == kit.Encryption.Identity {
 			t.Error("the recovery identity never leaves the operator")
 		}
+	}
+}
+
+func TestAddRecoveryKitUnlessIncomplete(t *testing.T) {
+	identityOnly := func() *workspaces.BackupCreds {
+		kit := &workspaces.BackupCreds{}
+		kit.Encryption.Identity, kit.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
+		return kit
+	}
+	bucketKit := func() *workspaces.BackupCreds {
+		kit := identityOnly()
+		kit.AccessKeyID, kit.SecretAccessKey = "AKID", "s3cret"
+		kit.PgBackRest.CipherPass = "cipher"
+		return kit
+	}
+	withService := func(extra map[string]string) map[string]string {
+		out := map[string]string{"svc.vaire_monitor": "pw"}
+		maps.Copy(out, extra)
+		return out
+	}
+	cases := []struct {
+		name             string
+		kit              *workspaces.BackupCreds
+		backupConfigured bool
+		want             map[string]string
+		refused          bool
+	}{
+		{
+			name: "identity only without backups sends the recipient",
+			kit:  identityOnly(),
+			want: withService(map[string]string{steps.SecretBackupAgeRecipient: "age1xyz"}),
+		},
+		{
+			name:             "identity only with backups is refused",
+			kit:              identityOnly(),
+			backupConfigured: true,
+			want:             withService(nil),
+			refused:          true,
+		},
+		{
+			name:             "missing kit with backups is refused",
+			backupConfigured: true,
+			want:             withService(nil),
+			refused:          true,
+		},
+		{
+			name: "missing kit without backups is a no-op",
+			want: withService(nil),
+		},
+		{
+			name:             "bucket kit with backups is not refused",
+			kit:              bucketKit(),
+			backupConfigured: true,
+			want: withService(map[string]string{
+				steps.SecretBackupKeyID:        "AKID",
+				steps.SecretBackupKeySecret:    "s3cret",
+				steps.SecretBackupCipherPass:   "cipher",
+				steps.SecretBackupAgeRecipient: "age1xyz",
+			}),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			values := withService(nil)
+			err := addRecoveryKitUnlessIncomplete(values, c.kit, c.backupConfigured)
+			if c.refused {
+				var cliErr *output.CLIError
+				if !errors.As(err, &cliErr) || cliErr.Code != output.CodeInputRequired {
+					t.Fatalf("error = %v, want an input_required refusal", err)
+				}
+				details, _ := cliErr.Details.(map[string]any)
+				if details["reason"] != "recovery_kit_missing" {
+					t.Errorf("details = %v", cliErr.Details)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !maps.Equal(values, c.want) {
+				t.Errorf("secrets = %v, want %v", values, c.want)
+			}
+		})
 	}
 }
 
