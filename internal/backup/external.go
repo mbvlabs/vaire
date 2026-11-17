@@ -1316,14 +1316,16 @@ func (s *tocSelector) omit(entry ArchiveEntry, kind, name string) {
 	s.selection.Omitted = append(s.selection.Omitted, OmittedEntry{ID: entry.ID, Kind: kind, Name: name})
 }
 
-// inspect reads the SQL of one entry.
-func (s *tocSelector) inspect(entry ArchiveEntry) (string, error) {
-	return inspectTOCEntry(s.ctx, s.exec, s.stepID, s.report, s.ws, entry.ID)
+// inspect reads the SQL of one entry and returns the statement that starts
+// with prefix. The prefix identifies the selected entry because --create makes
+// pg_restore emit the archive's database entries before it.
+func (s *tocSelector) inspect(entry ArchiveEntry, prefix string) (string, error) {
+	return inspectTOCEntry(s.ctx, s.exec, s.stepID, s.report, s.ws, entry.ID, prefix)
 }
 
 // selectDatabase verifies and omits the archive's single database definition.
 func (s *tocSelector) selectDatabase(entry ArchiveEntry) error {
-	stmt, err := s.inspect(entry)
+	stmt, err := s.inspect(entry, "CREATE DATABASE ")
 	if err != nil {
 		return err
 	}
@@ -1346,7 +1348,7 @@ func (s *tocSelector) selectDatabase(entry ArchiveEntry) error {
 // selectDatabaseProperties verifies and omits the archive's single database
 // properties entry.
 func (s *tocSelector) selectDatabaseProperties(entry ArchiveEntry) error {
-	stmt, err := s.inspect(entry)
+	stmt, err := s.inspect(entry, "ALTER DATABASE ")
 	if err != nil {
 		return err
 	}
@@ -1374,7 +1376,7 @@ func (s *tocSelector) selectExtension(entry ArchiveEntry, after string) error {
 			"the source archive contains an extension definition that was not in the approved destination extension plan",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
-	stmt, err := s.inspect(entry)
+	stmt, err := s.inspect(entry, "CREATE EXTENSION ")
 	if err != nil {
 		return err
 	}
@@ -1394,10 +1396,19 @@ func (s *tocSelector) selectExtension(entry ArchiveEntry, after string) error {
 	return nil
 }
 
+// commentStatementPrefix returns the COMMENT statement that belongs to an
+// inspected comment entry.
+func commentStatementPrefix(rest string) string {
+	if strings.HasPrefix(strings.TrimPrefix(rest, "COMMENT - "), "DATABASE ") {
+		return "COMMENT ON DATABASE "
+	}
+	return "COMMENT ON EXTENSION "
+}
+
 // selectComment omits a verified comment on the database or an approved
 // extension, keeps an ordinary comment, and refuses one that is neither.
 func (s *tocSelector) selectComment(entry ArchiveEntry) error {
-	stmt, err := s.inspect(entry)
+	stmt, err := s.inspect(entry, commentStatementPrefix(entry.Rest))
 	if err != nil {
 		return err
 	}
@@ -1454,7 +1465,7 @@ func (s *tocSelector) omitDatabaseComment(entry ArchiveEntry, name string) error
 // selectSecurityLabel omits a verified security label on the database, keeps
 // an ordinary one, and refuses one that is neither.
 func (s *tocSelector) selectSecurityLabel(entry ArchiveEntry) error {
-	stmt, err := s.inspect(entry)
+	stmt, err := s.inspect(entry, "SECURITY LABEL ")
 	if err != nil {
 		return err
 	}
@@ -1606,7 +1617,14 @@ func extensionDefinitionName(after string) (string, bool) {
 
 func tocIDLine(id int) string { return strconv.Itoa(id) + ";" }
 
-func inspectTOCEntry(ctx context.Context, exec CopyExecutor, stepID string, report engine.Reporter, ws *CopyWorkspace, id int) (stmt string, err error) {
+// inspectTOCEntry renders one archive entry and returns the first SQL
+// statement with prefix. --create is required to make pg_restore emit the
+// archive's database definition, but it also always emits the unselected
+// DATABASE and DATABASE PROPERTIES entries, so the selected entry's statement
+// is identified by its shape rather than by position. --no-owner keeps the
+// DATABASE entry's ALTER DATABASE ... OWNER TO out of the properties
+// inspection.
+func inspectTOCEntry(ctx context.Context, exec CopyExecutor, stepID string, report engine.Reporter, ws *CopyWorkspace, id int, prefix string) (stmt string, err error) {
 	if err := ws.WriteFile(copyInspectName, []byte(strconv.Itoa(id)+";\n")); err != nil {
 		return "", err
 	}
@@ -1622,7 +1640,7 @@ func inspectTOCEntry(ctx context.Context, exec CopyExecutor, stepID string, repo
 	out.limit = copyInspectLimitBytes
 	cmd := engine.Command{
 		Name:   sourceTool("pg_restore"),
-		Args:   []string{"--create", "--use-list=" + ws.FilePath(copyInspectName), "--file=-"},
+		Args:   []string{"--create", "--no-owner", "--use-list=" + ws.FilePath(copyInspectName), "--file=-"},
 		Stdin:  archive,
 		Stdout: &out,
 	}
@@ -1635,7 +1653,7 @@ func inspectTOCEntry(ctx context.Context, exec CopyExecutor, stepID string, repo
 	if execErr != nil {
 		return "", archiveToolError("the source archive TOC entry could not be inspected", execErr)
 	}
-	stmt = firstSQLStatement(out.String())
+	stmt = firstSQLStatementWithPrefix(out.String(), prefix)
 	if stmt == "" {
 		return "", copyPreconditionError("archive_invalid",
 			"a source archive TOC entry contains no SQL statement",
@@ -1644,7 +1662,12 @@ func inspectTOCEntry(ctx context.Context, exec CopyExecutor, stepID string, repo
 	return stmt, nil
 }
 
-func firstSQLStatement(raw string) string {
+// firstSQLStatementWithPrefix returns the first non-session SQL statement
+// with prefix.
+func firstSQLStatementWithPrefix(raw, prefix string) string {
+	if prefix == "" {
+		return ""
+	}
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), maxTOCLineBytes)
 	for scanner.Scan() {
@@ -1659,7 +1682,7 @@ func firstSQLStatement(raw string) string {
 			line == "BEGIN;",
 			line == "COMMIT;":
 			continue
-		default:
+		case strings.HasPrefix(line, prefix):
 			return line
 		}
 	}

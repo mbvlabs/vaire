@@ -1135,6 +1135,91 @@ func TestSelectArchiveTOC(t *testing.T) {
 	}
 }
 
+// pg_restore --create always emits the archive's DATABASE and DATABASE
+// PROPERTIES entries before the selected entry, even with a one-entry
+// use-list. Inspecting an extension must find the extension's statement
+// instead of treating the database prologue as its definition.
+func TestSelectArchiveTOCIgnoresCreatePrologue(t *testing.T) {
+	tocText := ";\n;     dbname: app\n;     Format: CUSTOM\n;\n" +
+		"1; 1262 0 DATABASE - app owner\n" +
+		"2; 3079 0 EXTENSION - pg_trgm \n" +
+		"3; 0 0 COMMENT - \"pg_trgm\" \n" +
+		"4; 1259 16390 TABLE public users owner\n"
+	prologue := "--\n-- PostgreSQL database dump\n--\n\n\\restrict key\n\n" +
+		"SET statement_timeout = 0;\n" +
+		"SELECT pg_catalog.set_config('search_path', '', false);\n\n" +
+		"CREATE DATABASE \"app\" WITH TEMPLATE = template0;\n\n" +
+		"ALTER DATABASE \"app\" SET \"work_mem\" TO '8MB';\n\n"
+	sql := map[int]string{
+		1: `CREATE DATABASE "app" WITH TEMPLATE = template0;`,
+		2: prologue + `CREATE EXTENSION IF NOT EXISTS "pg_trgm" WITH SCHEMA "public";`,
+		3: prologue + `COMMENT ON EXTENSION "pg_trgm" IS 'trgm';`,
+	}
+	ws, fake, archive := selectionFixture(t, tocText, sql)
+	sel, err := SelectArchiveTOC(context.Background(), fake, "db.copy.select", nil, ws, archive, SelectionOptions{
+		SourceDatabase: "app",
+		Extensions:     []SourceExtension{{Name: "pg_trgm", Version: "1.6", Schema: "public"}},
+	})
+	if err != nil {
+		t.Fatalf("SelectArchiveTOC: %v", err)
+	}
+	if got, want := strings.Join(sel.Lines, " "), "4;"; got != want {
+		t.Fatalf("selected lines %q, want %q", got, want)
+	}
+	omittedIDs := make([]int, 0, len(sel.Omitted))
+	for _, o := range sel.Omitted {
+		omittedIDs = append(omittedIDs, o.ID)
+	}
+	if fmt.Sprint(omittedIDs) != "[1 2 3]" {
+		t.Fatalf("omitted ids %v", omittedIDs)
+	}
+	for _, call := range fake.calls {
+		args := strings.Join(call.cmd.Args, " ")
+		if !strings.Contains(args, "--create") || !strings.Contains(args, "--no-owner") {
+			t.Fatalf("inspection args %q", args)
+		}
+	}
+}
+
+// Database entries must still be verified when pg_restore --create emits the
+// always-required DATABASE PROPERTIES entry before the selected DATABASE
+// entry, and database comments and security labels after that prologue.
+func TestSelectArchiveTOCFindsDatabaseEntriesInCreatePrologue(t *testing.T) {
+	tocText := ";\n;     dbname: app\n;     Format: CUSTOM\n;\n" +
+		"1; 1262 0 DATABASE - app owner\n" +
+		"2; 0 0 DATABASE PROPERTIES - app owner\n" +
+		"3; 0 0 COMMENT - DATABASE \"app\" owner\n" +
+		"4; 0 0 SECURITY LABEL - DATABASE \"app\" owner\n"
+	header := "--\n-- PostgreSQL database dump\n--\n\n\\restrict key\n\n" +
+		"SET statement_timeout = 0;\n" +
+		"SELECT pg_catalog.set_config('search_path', '', false);\n\n"
+	createDB := "CREATE DATABASE \"app\" WITH TEMPLATE = template0;\n\n"
+	properties := "ALTER DATABASE \"app\" SET \"work_mem\" TO '8MB';\n\n"
+	sql := map[int]string{
+		1: header + properties + createDB,
+		2: header + createDB + properties,
+		3: header + createDB + properties + `COMMENT ON DATABASE "app" IS 'db';`,
+		4: header + createDB + properties + `SECURITY LABEL FOR selinux ON DATABASE "app" IS 'label';`,
+	}
+	ws, fake, archive := selectionFixture(t, tocText, sql)
+	sel, err := SelectArchiveTOC(context.Background(), fake, "db.copy.select", nil, ws, archive, SelectionOptions{
+		SourceDatabase: "app",
+	})
+	if err != nil {
+		t.Fatalf("SelectArchiveTOC: %v", err)
+	}
+	if len(sel.Lines) != 0 {
+		t.Fatalf("selected lines %v", sel.Lines)
+	}
+	omittedIDs := make([]int, 0, len(sel.Omitted))
+	for _, o := range sel.Omitted {
+		omittedIDs = append(omittedIDs, o.ID)
+	}
+	if fmt.Sprint(omittedIDs) != "[1 2 3 4]" {
+		t.Fatalf("omitted ids %v", omittedIDs)
+	}
+}
+
 // Modern pg_dump omits plpgsql's definition even though the source catalog
 // always reports the installed extension. Ordinary objects must still be
 // selected, while every non-built-in installed extension keeps the strict
