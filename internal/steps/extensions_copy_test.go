@@ -400,7 +400,7 @@ func TestPoolerRoutingEligibilityIsProvenBeforeRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(backupRoot, spec.Name, "postgresql.conf"),
-		[]byte("data_directory = '"+dataDir+"'\n"), 0o600); err != nil {
+		[]byte("data_directory = '"+dataDir+"'\t\t# use data in another directory\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := backup.UpdateRecords(func(s *backup.Records) error {

@@ -190,13 +190,20 @@ func ClusterDataDirectory(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		key, value, ok := strings.Cut(line, "=")
-		if ok && strings.TrimSpace(key) == "data_directory" {
-			return strings.Trim(strings.TrimSpace(value), "'"), nil
+	// postgresql-common appends an inline comment to data_directory. Use the
+	// configuration lexer so comments outside quotes are ignored without
+	// changing literal hashes, quotes or escapes in the registered path.
+	tokens, err := lexConfigLines(string(raw))
+	if err != nil {
+		return "", fmt.Errorf("read cluster %s registration: %w", name, err)
+	}
+	var data string
+	for _, token := range tokens {
+		if token.Name == "data_directory" {
+			data = token.Value
 		}
 	}
-	return "", nil
+	return data, nil
 }
 
 // PG is a SQL runner for the temporary cluster.

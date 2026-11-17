@@ -152,11 +152,31 @@ func TestClusterDataDirectory(t *testing.T) {
 	if got, err := ClusterDataDirectory("app"); err != nil || got != "" {
 		t.Fatalf("unregistered cluster: %q %v", got, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "postgresql.conf"), []byte("data_directory = '/var/lib/postgresql/18/app'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := ClusterDataDirectory("app"); err != nil || got != "/var/lib/postgresql/18/app" {
-		t.Fatalf("registered cluster: %q %v", got, err)
+	for _, tt := range []struct {
+		name, conf, want string
+		wantErr          bool
+	}{
+		{"plain", "data_directory = '/var/lib/postgresql/18/app'\n", "/var/lib/postgresql/18/app", false},
+		{"postgresql-common comment", "data_directory = '/var/lib/postgresql/18/app'\t\t# use data in another directory\n", "/var/lib/postgresql/18/app", false},
+		{"quoted hash", "data_directory = '/srv/pg#data/app' # outside comment\n", "/srv/pg#data/app", false},
+		{"doubled quote", "data_directory = '/srv/it''s/app' # comment\n", "/srv/it's/app", false},
+		{"escaped quote", "data_directory = '/srv/it\\'s/app' # comment\n", "/srv/it's/app", false},
+		{"bare", "data_directory = /srv/pg/app # comment\n", "/srv/pg/app", false},
+		{"optional equals and case", " DATA_DIRECTORY '/srv/pg/app' # comment\n", "/srv/pg/app", false},
+		{"commented only", "# data_directory = '/wrong'\ninclude_dir = 'conf.d'\n", "", false},
+		{"last assignment", "data_directory = '/old'\ndata_directory = '/srv/pg/app' # current\n", "/srv/pg/app", false},
+		{"unterminated", "data_directory = '/srv/pg/app\n", "", true},
+		{"trailing text", "data_directory = '/srv/pg/app' unexpected\n", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(dir, "postgresql.conf"), []byte(tt.conf), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ClusterDataDirectory("app")
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("registered cluster: got %q, %v; want %q, error=%v", got, err, tt.want, tt.wantErr)
+			}
+		})
 	}
 }
 
