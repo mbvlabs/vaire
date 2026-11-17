@@ -95,17 +95,18 @@ func validateRestoreInvocation(env *jobEnv) error {
 		return err
 	}
 	r, ok := records.Restores[p.Database]
-	if !ok || r.Phase != backup.PhaseRestoring || !matchesRestoreInvocation(r, env, p.Database) {
+	if !ok || r.Phase != backup.PhaseRestoring || !supportedRestoreKind(r.Kind) ||
+		!matchesRestoreInvocation(r, env, p.Database) {
 		return incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
 	if env.Job == "restore" {
 		var params restoreParams
-		if json.Unmarshal(env.Params, &params) != nil || params.Kind != r.Kind || params.Promote != r.Promote {
+		if json.Unmarshal(env.Params, &params) != nil || !supportedRestoreKind(params.Kind) || params.Kind != r.Kind || params.Promote != r.Promote {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
 	} else {
 		var params recoverParams
-		if json.Unmarshal(env.Params, &params) != nil || params.restore().Kind != r.Kind ||
+		if json.Unmarshal(env.Params, &params) != nil || !supportedRestoreKind(params.restore().Kind) || params.restore().Kind != r.Kind ||
 			params.NoPromote == r.Promote || params.NoFull != r.NoFull {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}

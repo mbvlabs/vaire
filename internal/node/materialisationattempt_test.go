@@ -216,7 +216,7 @@ func TestAttemptMetadataFailureDoesNotStartDrill(t *testing.T) {
 func TestPendingRestoreBlocksUnverifiedAbortAndRetry(t *testing.T) {
 	env, _ := attemptFixture(t)
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		s.Restores["app"] = backup.Restore{ID: env.ID, Database: "app", Phase: backup.PhaseFailed, MaterialisationPending: true}
+		s.Restores["app"] = backup.Restore{ID: env.ID, Database: "app", Kind: backup.TargetLatest, Phase: backup.PhaseFailed, MaterialisationPending: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

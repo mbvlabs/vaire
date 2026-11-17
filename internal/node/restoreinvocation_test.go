@@ -33,7 +33,7 @@ func TestRestoreInvocationFence(t *testing.T) {
 				{"operation", func(r *backup.Restore) { r.OperationID = "other" }},
 				{"legacy", func(r *backup.Restore) { r.InstanceID = "" }},
 				{"type", func(r *backup.Restore) { r.Recover = !r.Recover }},
-				{"source kind", func(r *backup.Restore) { r.Kind = targetDump }},
+				{"source kind", func(r *backup.Restore) { r.Kind = "unsupported" }},
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {

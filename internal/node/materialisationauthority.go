@@ -244,12 +244,12 @@ func (a *forkMaterialisationAuthority) CreateConfig(ctx context.Context, p backu
 
 func forkActionAllowed(action backup.MaterialisationAction, stage string) bool {
 	switch action {
-	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup, backup.MaterialisationInitdb:
+	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup:
 		return stage == materialisationDataCreated
 	case backup.MaterialisationDrop:
 		return stage == "" || stage == materialisationDataCreated || stage == materialisationRegistered
 	case backup.MaterialisationRegister, backup.MaterialisationPrepare, backup.MaterialisationInspect, backup.MaterialisationStart,
-		backup.MaterialisationStop, backup.MaterialisationPromote, backup.MaterialisationRename, backup.MaterialisationAdopt, backup.MaterialisationCopyRoles:
+		backup.MaterialisationStop, backup.MaterialisationPromote, backup.MaterialisationRename, backup.MaterialisationAdopt:
 		return stage == materialisationRegistered
 	}
 	return false
@@ -267,9 +267,9 @@ func (a *forkMaterialisationAuthority) actionReady(action backup.Materialisation
 		return a.promoted && !a.renamed
 	case backup.MaterialisationAdopt:
 		return a.renamed
-	case backup.MaterialisationStop, backup.MaterialisationCopyRoles:
+	case backup.MaterialisationStop:
 		return a.started
-	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup, backup.MaterialisationInitdb, backup.MaterialisationDrop:
+	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup, backup.MaterialisationDrop:
 		return true
 	}
 	return true
@@ -308,7 +308,7 @@ func (a *forkMaterialisationAuthority) Guard(ctx context.Context, p backup.Mater
 func (a *forkMaterialisationAuthority) guardAllowed(p backup.MaterialisationPaths, action backup.MaterialisationAction) error {
 	if !a.pathsMatch(p) || a.adopted || a.dropped || a.artifacts.owner.Phase != materialisationCopying ||
 		!forkActionAllowed(action, a.artifacts.owner.ArtifactStage) || !a.actionReady(action) ||
-		a.populated && (action == backup.MaterialisationRestore || action == backup.MaterialisationBaseBackup || action == backup.MaterialisationInitdb) {
+		a.populated && (action == backup.MaterialisationRestore || action == backup.MaterialisationBaseBackup) {
 		return errors.New("fork action not authorized")
 	}
 	return nil
@@ -328,7 +328,7 @@ func (a *forkMaterialisationAuthority) guardPost(ctx context.Context, action bac
 
 func (a *forkMaterialisationAuthority) recordAction(action backup.MaterialisationAction) {
 	switch action {
-	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup, backup.MaterialisationInitdb:
+	case backup.MaterialisationRestore, backup.MaterialisationBaseBackup:
 		a.populated = true
 	case backup.MaterialisationRegister:
 		a.registered = true
@@ -339,7 +339,7 @@ func (a *forkMaterialisationAuthority) recordAction(action backup.Materialisatio
 	case backup.MaterialisationRename:
 		a.renamed = true
 	case backup.MaterialisationPrepare, backup.MaterialisationInspect, backup.MaterialisationStop,
-		backup.MaterialisationAdopt, backup.MaterialisationDrop, backup.MaterialisationCopyRoles:
+		backup.MaterialisationAdopt, backup.MaterialisationDrop:
 	}
 }
 

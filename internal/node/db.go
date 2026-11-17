@@ -89,9 +89,6 @@ type dbCreateParams struct {
 
 type dbDropParams struct {
 	Name string `json:"name"`
-	// NoFinalDump skips the final long-retention dump db drop takes when
-	// backups are configured.
-	NoFinalDump bool `json:"no_final_dump"`
 }
 
 type dbCredentialsParams struct {
@@ -690,6 +687,9 @@ func databaseIn(ctx context.Context, local pg.Local, name string) (bool, error) 
 var (
 	dbDropStore             = func() state.Store { return state.FileStore{} }
 	dbDropClusterExists     = steps.ClusterExists
+	dbDropDatabaseExists    = dropDatabaseExists
+	dbDropCluster           = dropCluster
+	dbDropRoles             = existingRolesIn
 	dbDropSlot              = dropFollowerSlot
 	dbDropLeftovers         = dropLeftovers
 	dbDropForgetJournal     = engine.ForgetCluster
@@ -745,11 +745,8 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	local := steps.ClusterPG(spec)
-	exists := dropDatabaseExists(ctx, local, p.Name, inConfig, clusterExists)
-	warnings, final, err := dropFinalDump(ctx, env, cfg, p, exists)
-	if err != nil {
-		return Result{}, err
-	}
+	exists := dbDropDatabaseExists(ctx, local, p.Name, inConfig, clusterExists)
+	warnings := dropSnapshotWarning(cfg, p.Name, exists)
 	roles, lastArchived, dropWarnings, err := dropClusterAndJournal(ctx, env, cfg, spec, inConfig, clusterExists, exists, local, p.Name)
 	if err != nil {
 		return Result{}, err
@@ -767,7 +764,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	// Without a bucket the stanza never held a backup, so nothing is kept.
 	stanzaKept := forkCleanup == nil && inConfig && spec.Stanza != "" && cfg.BackupConfigured()
 	if stanzaKept {
-		if err := recordDroppedStanza(cfg, spec, final, lastArchived); err != nil {
+		if err := recordDroppedStanza(cfg, spec, lastArchived); err != nil {
 			warnings = append(warnings, output.Warning{Code: "records_not_updated",
 				Message: "the stanza " + spec.Stanza + " of " + p.Name + " is kept, but recording it failed: " + err.Error()})
 		}
@@ -776,7 +773,7 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return dropResult(p.Name, spec, roles, stanzaKept, final, warnings), nil
+	return dropResult(p.Name, spec, roles, stanzaKept, warnings), nil
 }
 
 func captureDropRequirements(cfg config.Cluster, spec config.ClusterSpec, inConfig bool) error {
@@ -822,13 +819,10 @@ func cleanupDroppedRouting(ctx context.Context, env *Env, cfg config.Cluster, sp
 	return warnings, nil
 }
 
-func dropResult(name string, spec config.ClusterSpec, roles []string, stanzaKept bool, final *backup.Dump, warnings []output.Warning) Result {
+func dropResult(name string, spec config.ClusterSpec, roles []string, stanzaKept bool, warnings []output.Warning) Result {
 	data := map[string]any{"dropped": name, "roles_dropped": roles}
 	if stanzaKept {
 		data["stanza_kept"] = spec.Stanza
-	}
-	if final != nil {
-		data["final_dump"] = final
 	}
 	return Result{Data: data, Warnings: warnings}
 }
@@ -908,34 +902,25 @@ func dropPreflight(ctx context.Context, env *Env, cfg config.Cluster, name strin
 	return nil
 }
 
-func dropFinalDump(ctx context.Context, env *Env, cfg config.Cluster, p dbDropParams, exists bool) ([]output.Warning, *backup.Dump, error) {
-	var warnings []output.Warning
+// dropSnapshotWarning tells the operator that db drop takes no new copy: the
+// kept physical stanza is the only backup after the drop.
+func dropSnapshotWarning(cfg config.Cluster, name string, exists bool) []output.Warning {
 	if !exists {
-		return warnings, nil, nil
+		return nil
 	}
-	switch {
-	case !cfg.BackupConfigured():
-		warnings = append(warnings, output.Warning{Code: "no_backup_before_drop",
-			Message: "backups are not configured, so no final dump of " + p.Name + " was taken"})
-	case p.NoFinalDump:
-		warnings = append(warnings, output.Warning{Code: "no_backup_before_drop",
-			Message: "--no-final-dump: no final dump of " + p.Name + " was taken"})
-	default:
-		dump, err := dumpToBucket(ctx, cfg, engine.Shell{Secrets: secrets.Default, Log: env.Log}, "db.drop", env.Report, p.Name, true)
-		if err != nil {
-			return nil, nil, output.WrapError(output.CodePrecondition, fmt.Errorf("the final dump of %s failed, so it was not dropped: %w", p.Name, err),
-				output.ExitPrecondition, "Fix the bucket, or drop without it with --no-final-dump.").WithDetails(map[string]any{"reason": "final_dump_failed"})
-		}
-		return warnings, &dump, nil
+	if !cfg.BackupConfigured() {
+		return []output.Warning{{Code: "no_backup_before_drop",
+			Message: "backups are not configured, so no copy of " + name + " remains after the drop"}}
 	}
-	return warnings, nil, nil
+	return []output.Warning{{Code: "no_backup_before_drop",
+		Message: "db drop takes no snapshot of " + name + "; its physical backup stanza is kept until its restore window expires"}}
 }
 
 func dropClusterAndJournal(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, inConfig, clusterExists, exists bool, local pg.Local, name string) ([]string, string, []output.Warning, error) {
 	// The database's roles live in its cluster, so they go with it.
 	var roles []string
 	if exists {
-		roles, _ = existingRolesIn(ctx, local, name)
+		roles, _ = dbDropRoles(ctx, local, name)
 	}
 	// The kept stanza's window ends at the last WAL the cluster archived.
 	lastArchived := ""
@@ -943,7 +928,7 @@ func dropClusterAndJournal(ctx context.Context, env *Env, cfg config.Cluster, sp
 		lastArchived = lastArchivedTime(ctx, spec)
 	}
 	if clusterExists {
-		if err := dropCluster(ctx, env, name); err != nil {
+		if err := dbDropCluster(ctx, env, name); err != nil {
 			return nil, "", nil, err
 		}
 	}
@@ -1068,11 +1053,8 @@ func refuseUnverifiedFollowerDrop(name string, spec config.ClusterSpec) error {
 // drop keeps it, so its backups and WAL stay restorable for the database's
 // restore window, after which the stanza-expiry job deletes it. The
 // database's last backup and verify results go, so its metrics stop.
-func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, final *backup.Dump, lastArchived string) error {
+func recordDroppedStanza(cfg config.Cluster, spec config.ClusterSpec, lastArchived string) error {
 	entry := droppedStanza(cfg, spec, lastArchived)
-	if final != nil {
-		entry.FinalDump = final.ID
-	}
 	err := backup.UpdateRecords(func(r *backup.Records) error {
 		r.DroppedStanzas = append(r.DroppedStanzas, entry)
 		delete(r.LastBackup, spec.Name)

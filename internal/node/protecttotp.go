@@ -403,8 +403,7 @@ func (g protectGuard) status(clusterPath string) (Result, error) {
 
 // protectedCopies lists the open copies (<db>__restoring) of a protected
 // database, from the restores the server holds open. A copy is read-only
-// until promote when it came from a backup, but a dump copy takes writes;
-// both follow the live database's protection.
+// until promote and follows the live database's protection.
 func protectedCopies(cfg config.Cluster) []string {
 	recs, err := backup.LoadRecords()
 	if err != nil {

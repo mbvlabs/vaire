@@ -14,9 +14,9 @@ import (
 const TextfilePath = promfile.Dir + "/" + promfile.Backup
 
 // WriteMetrics renders vaire.prom from records.json and the job records in
-// state.json. It is called after every backup, verify, drill, dump and
-// restore change, and by metrics-refresh; a failure to write is never fatal
-// for the job.
+// state.json. It is called after every backup, verify, drill and restore
+// change, and by metrics-refresh; a failure to write is never fatal for the
+// job.
 func WriteMetrics(server, node string) error {
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
@@ -45,8 +45,8 @@ func BackupFamilies(server, node, version string, rs Records, jobs []engine.JobR
 	return append([]*promfile.Family{info}, families...)
 }
 
-// lastBackupFamilies are the last backup's timestamp, dump size, repository
-// size and duration per database and type.
+// lastBackupFamilies are the last backup's timestamp, repository size and
+// duration per database and type.
 func lastBackupFamilies(rs Records) []*promfile.Family {
 	last := promfile.Gauge("vaire_backup_last_success_timestamp_seconds", "Last successful pgBackRest backup per database and type.")
 	size := promfile.Gauge("vaire_backup_last_size_bytes", "Database size of the last successful backup per database and type.")

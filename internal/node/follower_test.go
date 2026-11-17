@@ -58,7 +58,6 @@ func TestRefuseFollower(t *testing.T) {
 		request("restore.promote", map[string]any{"database": "app_follower"}),
 		request("restore.undo", map[string]any{"database": "app_follower"}),
 		request("restore.drill", map[string]any{"database": "app_follower"}),
-		request("dump.create", map[string]any{"database": "app_follower"}),
 		request("db.fork", map[string]any{"source": "app_follower", "name": "x"}),
 		request("maint.run", map[string]any{"db": "app_follower", "kind": "vacuum"}),
 		request("db.credentials", map[string]any{"name": "app_follower", "rotate": true}),

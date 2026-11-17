@@ -19,7 +19,6 @@ type MaterialisationAction string
 const (
 	MaterialisationRestore    MaterialisationAction = "restore"
 	MaterialisationBaseBackup MaterialisationAction = "base_backup"
-	MaterialisationInitdb     MaterialisationAction = "initdb"
 	MaterialisationRegister   MaterialisationAction = "register"
 	MaterialisationPrepare    MaterialisationAction = "prepare"
 	MaterialisationInspect    MaterialisationAction = "inspect"
@@ -29,7 +28,6 @@ const (
 	MaterialisationRename     MaterialisationAction = "rename"
 	MaterialisationAdopt      MaterialisationAction = "adopt"
 	MaterialisationDrop       MaterialisationAction = "drop"
-	MaterialisationCopyRoles  MaterialisationAction = "copy_roles"
 )
 
 // MaterialisationOwnership is supplied by the node's exact leased operation.

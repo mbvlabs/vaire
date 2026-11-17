@@ -105,7 +105,7 @@ func (a *jobActivity) warn() {
 // jobSafetyJob reports the jobs that must keep running when history cannot be
 // written. Every detachable job and timer run is background work whose outcome
 // is already durable in state.json: losing the diagnostic copy must not stop a
-// backup, restore, recovery, drill, dump, certificate renewal or maintenance
+// backup, restore, recovery, drill, certificate renewal or maintenance
 // run. The interactive RPC that starts a live mutation still uses a checked
 // start when activityImportant says so.
 func jobSafetyJob(string) bool { return true }

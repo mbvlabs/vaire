@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -240,8 +238,6 @@ type backupList struct {
 	Dropped  *backup.DroppedStanza     `json:"dropped,omitempty"`
 	Verify   *backup.VerifyResult      `json:"last_verify,omitempty"`
 	Drill    *backup.Drill             `json:"last_drill,omitempty"`
-	Dumps    []backup.Dump             `json:"dumps"`
-	Policies map[string]dumpPolicy     `json:"dump_policies,omitempty"`
 	Restores map[string]backup.Restore `json:"restores,omitempty"`
 }
 
@@ -256,18 +252,9 @@ type backupRow struct {
 	Latest   *backup.Set          `json:"latest,omitempty"`
 	Verify   *backup.VerifyResult `json:"last_verify,omitempty"`
 	Drill    *backup.Drill        `json:"last_drill,omitempty"`
-	Dump     *backup.Dump         `json:"last_dump,omitempty"`
-	// DroppedAt and ExpiresAt are set on a dropped database's row, and
-	// Reason when its stanza was replaced rather than dropped
-	// (backup.DroppedReasonReplaced).
+	// DroppedAt and ExpiresAt are set on a dropped database's row.
 	DroppedAt string `json:"dropped_at,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-}
-
-type dumpPolicy struct {
-	Schedule  string `json:"schedule"`
-	Retention int    `json:"retention"`
 }
 
 func handleBackupList(ctx context.Context, env *Env) (Result, error) {
@@ -314,8 +301,8 @@ func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (
 	}
 	for _, d := range rs.DroppedStanzas {
 		row := listRow(d.Database, d.Stanza, infos[d.Stanza], droppedArchive(d), rs)
-		row.Verify, row.Drill, row.Dump = nil, nil, nil
-		row.DroppedAt, row.ExpiresAt, row.Reason = d.DroppedAt, d.ExpiresAt, d.Reason
+		row.Verify, row.Drill = nil, nil
+		row.DroppedAt, row.ExpiresAt = d.DroppedAt, d.ExpiresAt
 		rows = append(rows, row)
 	}
 	if empty > 0 {
@@ -353,15 +340,12 @@ func listRow(db, stanza string, info backup.Info, archive backup.ArchiveStatus, 
 	if d, ok := rs.DrillOf(db, stanza); ok {
 		row.Drill = &d
 	}
-	if d, ok := rs.LastDump[db]; ok {
-		row.Dump = &d
-	}
 	return row
 }
 
 // backupListOne describes one database: its sets, window, last verify and
-// drill, dumps and dump policy. A dropped database still in its window is
-// listed from its kept stanza.
+// drill. A dropped database still in its window is listed from its kept
+// stanza.
 func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, db string) (Result, error) {
 	spec, live := cfg.ClusterByName(db)
 	out := backupList{Database: db}
@@ -392,7 +376,6 @@ func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, d
 	if live {
 		liveBackupMetadata(&out, rs, spec, db)
 	}
-	out.Dumps = listBackupDumps(ctx, cfg, db, &warnings)
 	if len(out.Sets) == 0 {
 		warnings = append(warnings, output.Warning{Code: "no_backups", Message: "the stanza of " + db + " holds no backup yet; run vaire backup now --db " + db + " --type full"})
 	}
@@ -409,22 +392,6 @@ func liveBackupMetadata(out *backupList, rs backup.Records, spec config.ClusterS
 	if r, ok := rs.Restores[db]; ok {
 		out.Restores = map[string]backup.Restore{db: r}
 	}
-	if spec.Backup.DumpSchedule != "" {
-		out.Policies = map[string]dumpPolicy{db: {Schedule: spec.Backup.DumpSchedule, Retention: spec.Backup.DumpRetention}}
-	}
-}
-
-func listBackupDumps(ctx context.Context, cfg config.Cluster, db string, warnings *[]output.Warning) []backup.Dump {
-	target, _, err := steps.BackupTarget(cfg)
-	if err != nil {
-		return []backup.Dump{}
-	}
-	dumps, err := backup.ListDumps(ctx, target, db)
-	if err != nil {
-		*warnings = append(*warnings, output.Warning{Code: "dumps_unavailable", Message: "could not list the dumps: " + err.Error()})
-		return []backup.Dump{}
-	}
-	return dumps
 }
 
 // restoreWindow is from just after the end of the oldest backup to the last
@@ -474,7 +441,7 @@ func inWindow(w Window, t time.Time) error {
 		return output.NewError(output.CodePrecondition,
 			fmt.Sprintf("%s is outside the restore window %s to %s", t.UTC().Format(time.RFC3339Nano), w.From, w.To),
 			output.ExitPrecondition,
-			"Pick a time inside the window (vaire backup list). A time just now becomes restorable once its WAL is archived, within about a minute; older points need a long-retention dump (restore --dump).").
+			"Pick a time inside the window (vaire backup list). A time just now becomes restorable once its WAL is archived, within about a minute.").
 			WithDetails(map[string]any{"reason": "outside_window", "window": w})
 	}
 	return nil
@@ -955,134 +922,6 @@ func jobStanzaExpiry(ctx context.Context, env *jobEnv) (any, error) {
 			WithDetails(map[string]any{"failed": failed, "expired": expired})
 	}
 	return res, nil
-}
-
-// --- long-retention dumps ---
-
-type dumpCreateParams struct {
-	Database string `json:"database"`
-}
-
-func handleDumpCreate(ctx context.Context, env *Env) (Result, error) {
-	var p dumpCreateParams
-	if err := decodeParams(env.Req.Params, &p); err != nil {
-		return Result{}, err
-	}
-	if err := requireBackups(env.Cluster); err != nil {
-		return Result{}, err
-	}
-	if _, ok := env.Cluster.ClusterByName(p.Database); !ok {
-		return Result{}, databaseNotFound(p.Database)
-	}
-	if env.Req.DryRun {
-		return Result{Data: map[string]any{"database": p.Database, "dry_run": true}}, nil
-	}
-	return runJobRPC(ctx, env, "db-dump", p, nil)
-}
-
-// jobDump streams one database's dump into the bucket, encrypted to the age
-// recipient, then prunes its scheduled dumps beyond dump_retention.
-func jobDump(ctx context.Context, env *jobEnv) (any, error) {
-	db := env.DB
-	if len(env.Params) > 0 {
-		var p dumpCreateParams
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, err
-		}
-		db = p.Database
-	}
-	cfg := env.Cluster
-	if err := requireBackups(cfg); err != nil {
-		return nil, err
-	}
-	entry, ok := cfg.ClusterByName(db)
-	if !ok {
-		return nil, databaseNotFound(db)
-	}
-	dump, err := dumpToBucket(ctx, cfg, env.shell(), env.Job, env.Report, db, false)
-	if err != nil {
-		return nil, err
-	}
-	res := map[string]any{"dump": dump}
-	if entry.Backup.DumpRetention > 0 {
-		target, _, err := steps.BackupTarget(cfg)
-		if err != nil {
-			return nil, err
-		}
-		removed, err := backup.PruneDumps(ctx, target, db, entry.Backup.DumpRetention)
-		if err != nil {
-			return nil, err
-		}
-		res["pruned"] = removed
-	}
-	return res, nil
-}
-
-// dumpToBucket takes one dump and records it.
-func dumpToBucket(ctx context.Context, cfg config.Cluster, sh engine.Shell, stepID string, report engine.Reporter, db string, final bool) (backup.Dump, error) {
-	if err := requireNotFenced(ctx, cfg, report); err != nil {
-		return backup.Dump{}, err
-	}
-	target, recipient, err := steps.BackupTarget(cfg)
-	if err != nil {
-		return backup.Dump{}, err
-	}
-	if recipient == "" {
-		return backup.Dump{}, output.NewError(output.CodePrecondition, "the node has no age recipient for dumps", output.ExitPrecondition,
-			"Run vaire backup setup again; it sends the recipient.").WithDetails(map[string]any{"reason": "no_dump_recipient"})
-	}
-	local, err := clusterPG(cfg, db)
-	if err != nil {
-		return backup.Dump{}, err
-	}
-	logLine(report, stepID, "dumping "+db+" to the bucket")
-	spec, ok := cfg.ClusterByName(db)
-	if !ok {
-		return backup.Dump{}, databaseNotFound(db)
-	}
-	if err := captureStanzaRequirements(cfg, spec); err != nil {
-		return backup.Dump{}, output.NewError(output.CodePrecondition,
-			"recording "+db+"'s extension requirements before the dump failed: "+err.Error(),
-			output.ExitPrecondition, "Nothing was dumped. Retry after fixing the requirement history store.").
-			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
-	}
-	dump, err := backup.DumpToBucket(ctx, sh, stepID, report, target, local, db, recipient, final)
-	if err != nil {
-		return dump, err
-	}
-	_ = backup.UpdateRecords(func(s *backup.Records) error {
-		s.LastDump[db] = dump
-		return nil
-	})
-	logLine(report, stepID, fmt.Sprintf("dump %s of %s uploaded (%s)", dump.ID, db, humanSize(dump.Size)))
-	return dump, nil
-}
-
-// DumpStream writes pg_dump -Fc of db to w. It backs vaire node dump, which
-// vaire dump --to local runs over SSH to stream an archive to the laptop.
-func DumpStream(ctx context.Context, db string, w io.Writer) error {
-	if os.Geteuid() != 0 {
-		return rootRequired("vaire node dump")
-	}
-	cfg, err := config.LoadCluster(config.ClusterPath)
-	if err != nil {
-		return err
-	}
-	local, err := clusterPG(cfg, db)
-	if err != nil {
-		return err
-	}
-	spec, ok := cfg.ClusterByName(db)
-	if !ok {
-		return databaseNotFound(db)
-	}
-	if err := captureStanzaRequirements(cfg, spec); err != nil {
-		return output.NewError(output.CodePrecondition,
-			"recording "+db+"'s extension requirements before the dump failed: "+err.Error(),
-			output.ExitPrecondition, "Nothing was dumped. Retry after fixing the requirement history store.").
-			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
-	}
-	return backup.PgDump(ctx, engine.Shell{Secrets: secrets.Default}, "dump", nil, local, db, w)
 }
 
 // NoOffsiteWarning is the no_offsite_backup warning for a server without a

@@ -27,7 +27,7 @@ func recordsLockPath() string { return RecordsPath + ".lock" }
 const maxDrills = 12
 
 // Records is /var/lib/vaire/records.json: open restores per database, restore
-// leftovers, drills, the dropped stanzas and the last backup, verify and dump
+// leftovers, drills, the dropped stanzas and the last backup and verify
 // results per database, and the timelines restore undo went back to.
 type Records struct {
 	// Restores are the open restores, by database: one per database at a
@@ -54,8 +54,6 @@ type Records struct {
 	// Repo is each database's stanza facts from its last backup, verify or
 	// expiry (Phase 4).
 	Repo map[string]RepoFacts `json:"repo,omitempty"`
-	// LastDump is the last dump per database.
-	LastDump map[string]Dump `json:"last_dump,omitempty"`
 	// DroppedStanzas are the stanzas of dropped databases. db drop keeps a
 	// database's stanza, so its backups and WAL can still be restored, and
 	// records it here; the stanza-expiry job deletes the stanza and the
@@ -120,12 +118,12 @@ type ActivationFence struct {
 	// Instance is the actual installation identity from the master backup's
 	// instance file, never a host name derived from configuration text.
 	Instance string `json:"instance"`
-	// TargetStanza is the stanza the activated data belongs to. OldStanza and
-	// NewStanza are a promote's fixed identities (equal for a non-dump copy).
+	// TargetStanza is the stanza the activated data belongs to.
 	TargetStanza string `json:"target_stanza,omitempty"`
-	OldStanza    string `json:"old_stanza,omitempty"`
-	NewStanza    string `json:"new_stanza,omitempty"`
-	Aside        string `json:"aside,omitempty"`
+	// OldStanza and NewStanza are a promotion's fixed stanza identities.
+	OldStanza string `json:"old_stanza,omitempty"`
+	NewStanza string `json:"new_stanza,omitempty"`
+	Aside     string `json:"aside,omitempty"`
 	// Registration is the actual cluster registration/ownership evidence:
 	// the cluster name, port and follow generation or awaiting state.
 	Registration string `json:"registration,omitempty"`
@@ -231,14 +229,9 @@ type Undo struct {
 	From Leftover `json:"from"`
 	// Aside is the <db>__pre_restore_<ts> cluster the restored data becomes.
 	Aside string `json:"aside"`
-	// Stanza is the restored data's stanza, cluster.toml's at the start.
-	Stanza string `json:"stanza,omitempty"`
 	// Abandoned is the restored data's timeline, read before the swap.
 	Abandoned string `json:"abandoned,omitempty"`
-	// LastArchivedAt is when the restored data last archived WAL, read
-	// before the swap, for an undo that drops the dump's stanza.
-	LastArchivedAt string `json:"last_archived_at,omitempty"`
-	StartedAt      string `json:"started_at"`
+	StartedAt string `json:"started_at"`
 	// Routing means the swap and timeline bookkeeping are durable. A retry
 	// only settles pooler routing; it must not swap the data a second time.
 	Routing bool `json:"routing,omitempty"`
@@ -270,26 +263,11 @@ type DroppedStanza struct {
 	// ExpiresAt is DroppedAt plus the database's restore window
 	// (retention_full) at the drop.
 	ExpiresAt string `json:"expires_at"`
-	// FinalDump is the id of the final dump db drop took, if any.
-	FinalDump string `json:"final_dump,omitempty"`
 	// LastArchivedAt is when the cluster last archived a WAL segment to
 	// the stanza before the drop: the end of its restore window. pgbackrest
 	// info names the newest segment, not its time.
 	LastArchivedAt string `json:"last_archived_at,omitempty"`
-	// Reason is why the stanza stopped being the database's: empty for db
-	// drop (records from before the field mean that too), or
-	// DroppedReasonReplaced when a restore from a dump, or its undo, gave
-	// the live database a new stanza.
-	Reason string `json:"reason,omitempty"`
 }
-
-// DroppedReasonReplaced marks a stanza kept after restore promote (or undo)
-// switched its database to another stanza.
-const DroppedReasonReplaced = "replaced"
-
-// Replaced reports whether a restore replaced the stanza, rather than db
-// drop dropping its database.
-func (d DroppedStanza) Replaced() bool { return d.Reason == DroppedReasonReplaced }
 
 // Restore phases.
 const (
@@ -305,8 +283,7 @@ type Restore struct {
 	// Invocation provenance is established before the detachable job is queued.
 	InstanceID  string `json:"instance_id,omitempty"`
 	OperationID string `json:"operation_id,omitempty"`
-	// Target describes the recovery target: latest, a time, a set label or
-	// a dump id.
+	// Target describes the recovery target: latest, a time or a set label.
 	Target    string   `json:"target"`
 	Kind      string   `json:"kind"`
 	Phase     string   `json:"phase"`
@@ -326,20 +303,12 @@ type Restore struct {
 	// fails after the swap resumes with it, and abort refuses once the copy
 	// is swapped in.
 	Aside string `json:"aside,omitempty"`
-	// AsideArchivedAt is when the live data last archived WAL, read before
-	// the swap of a restore from a dump, whose old stanza is dropped.
-	AsideArchivedAt string `json:"aside_archived_at,omitempty"`
 	// Recover marks a db recover after a rebuild (Phase 5): the live
 	// cluster promote sets aside is an empty scaffold, dropped at once.
 	Recover bool `json:"recover,omitempty"`
 	// NoFull skips the full backup promote starts (db recover --all takes
 	// the fulls once every database is back).
 	NoFull bool `json:"no_full,omitempty"`
-	// OldStanza and NewStanza are a restore-from-dump promote's fixed
-	// identities: recorded before the stanza switch, so a retry never creates
-	// another new stanza or records the wrong one as replaced.
-	OldStanza string `json:"old_stanza,omitempty"`
-	NewStanza string `json:"new_stanza,omitempty"`
 	// Attempt records an in-progress or retained physical materialisation.
 	Attempt *MaterialisationAttempt `json:"materialisation_attempt,omitempty"`
 	// MaterialisationPending blocks cleanup even when recording the attempt
@@ -392,9 +361,7 @@ type Leftover struct {
 	// Port is the leftover cluster's registered port, from the temporary
 	// range.
 	Port int `json:"port,omitempty"`
-	// Stanza is the stanza the leftover's data belongs to. It differs from
-	// the database's own after a restore from a dump, which starts a new
-	// stanza; undo then takes this one back.
+	// Stanza is the stanza the leftover's data belongs to.
 	Stanza string `json:"stanza,omitempty"`
 }
 
@@ -554,9 +521,6 @@ func decode(raw []byte) (Records, error) {
 	}
 	if s.LastVerify == nil {
 		s.LastVerify = map[string]VerifyResult{}
-	}
-	if s.LastDump == nil {
-		s.LastDump = map[string]Dump{}
 	}
 	if s.Timelines == nil {
 		s.Timelines = map[string]TimelineSwitch{}
@@ -742,9 +706,9 @@ func (s Records) DrillOf(db, stanza string) (Drill, bool) {
 	return Drill{}, false
 }
 
-// VerifyOf is db's last verify when it ran on stanza: a new stanza (after a
-// restore from a dump, or a database created again) has no verify yet. A
-// result recorded before verifies named their stanza counts for none.
+// VerifyOf is db's last verify when it ran on stanza: a new stanza (or a
+// database created again) has no verify yet. A result recorded before
+// verifies named their stanza counts for none.
 func (s Records) VerifyOf(db, stanza string) (VerifyResult, bool) {
 	v, ok := s.LastVerify[db]
 	if !ok || v.Stanza == "" || v.Stanza != stanza {

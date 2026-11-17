@@ -385,8 +385,8 @@ func (a *followBirth) guardAction(action backup.MaterialisationAction, o followO
 		if !a.registered || action == backup.MaterialisationStart && a.started {
 			return errors.New("follower lifecycle action not authorized")
 		}
-	case backup.MaterialisationInitdb, backup.MaterialisationPromote, backup.MaterialisationRename,
-		backup.MaterialisationAdopt, backup.MaterialisationDrop, backup.MaterialisationCopyRoles:
+	case backup.MaterialisationPromote, backup.MaterialisationRename,
+		backup.MaterialisationAdopt, backup.MaterialisationDrop:
 		return errors.New("unsupported follower materialisation action")
 	}
 	return nil
@@ -400,8 +400,8 @@ func (a *followBirth) recordAction(action backup.MaterialisationAction) {
 		a.registered = true
 	case backup.MaterialisationStart:
 		a.started = true
-	case backup.MaterialisationInitdb, backup.MaterialisationPrepare, backup.MaterialisationInspect,
+	case backup.MaterialisationPrepare, backup.MaterialisationInspect,
 		backup.MaterialisationStop, backup.MaterialisationPromote, backup.MaterialisationRename,
-		backup.MaterialisationAdopt, backup.MaterialisationDrop, backup.MaterialisationCopyRoles:
+		backup.MaterialisationAdopt, backup.MaterialisationDrop:
 	}
 }

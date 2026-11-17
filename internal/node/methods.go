@@ -271,7 +271,6 @@ func methods() map[string]method {
 		// db.follow takes the exclusive lock itself to add the entry.
 		{name: "db.follow", cluster: true, runLog: always, handler: handleDBFollow},
 		{name: "db.unfollow", cluster: true, confirm: unfollowToken, runLog: always, handler: handleDBUnfollow},
-		{name: "dump.create", cluster: true, runLog: always, handler: handleDumpCreate},
 		{
 			name:    "sql",
 			lock:    fixedLock(engine.LockShared),

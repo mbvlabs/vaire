@@ -479,7 +479,7 @@ func TestRetireRestoreAndRouteIsAtomic(t *testing.T) {
 	// A changed restore identity leaves both the restore and the fence whole.
 	changed := r
 	changed.ID = "other-op"
-	if err := retireRestoreAndRoute(cfg, "app", changed, spec, "app__pre", spec.Stanza, "", spec.Stanza, spec.Stanza, spec.Stanza, ""); err == nil {
+	if err := retireRestoreAndRoute("app", changed, spec, "app__pre", spec.Stanza, spec.Stanza, spec.Stanza); err == nil {
 		t.Fatal("a changed restore was retired")
 	}
 	recs, err := backup.LoadRecords()
@@ -494,7 +494,7 @@ func TestRetireRestoreAndRouteIsAtomic(t *testing.T) {
 	}
 	// The exact identity retires the restore, timeline and leftover and sets
 	// routing in one update.
-	if err := retireRestoreAndRoute(cfg, "app", r, spec, "app__pre", spec.Stanza, "", spec.Stanza, spec.Stanza, spec.Stanza, ""); err != nil {
+	if err := retireRestoreAndRoute("app", r, spec, "app__pre", spec.Stanza, spec.Stanza, spec.Stanza); err != nil {
 		t.Fatal(err)
 	}
 	recs, err = backup.LoadRecords()
@@ -740,124 +740,6 @@ func TestWriteActivationFenceKeepsAdvancedCheckpoint(t *testing.T) {
 	}
 	if got.Phase != fencePhasePromoted || got.Port != spec.Port || got.Registration != activationRegistration(spec) {
 		t.Fatalf("the retry rewrote the advanced checkpoint: %+v", got)
-	}
-}
-
-func TestDumpPromoteRetryCompletesThroughRouting(t *testing.T) {
-	useTempExtensionRecords(t)
-	useTestInstance(t)
-	cfg := planCfg(t)
-	cfg.Server.DataRoot = t.TempDir()
-	spec := cfg.Clusters[0]
-	oldStanza := spec.Stanza
-	newStanza := "app-abcdef"
-	empty := []string{}
-	spec.RecoveryExtensions = &empty
-	cfg.Clusters[0] = spec
-	store := state.FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
-	raw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Save(raw); err != nil {
-		t.Fatal(err)
-	}
-	oldState := followerState
-	followerState = func() state.Store { return store }
-	oldSwitchStore := switchStanzaStore
-	switchStanzaStore = func() state.Store { return store }
-	t.Cleanup(func() {
-		followerState = oldState
-		switchStanzaStore = oldSwitchStore
-	})
-	aside := "app__pre_restore_20260101T000000"
-	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		s.Restores["app"] = backup.Restore{
-			ID: "dump-retry", Database: "app", Kind: targetDump, Phase: backup.PhaseReady,
-			StartedAt: "2026-01-01T00:00:00Z", Port: 6001, OldStanza: oldStanza, NewStanza: newStanza,
-			Aside: aside,
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writeActivationFence(cfg, activationFenceIdentity{
-		Database: "app", Kind: "restore-promote", OperationID: "dump-retry", Spec: spec,
-		TargetStanza: newStanza, OldStanza: oldStanza, NewStanza: newStanza, Aside: aside,
-		Registration: activationRegistration(spec), Port: spec.Port,
-		DataDir: cfg.Server.DataDirectory("app"), ConfDir: steps.PGConfDir("app"),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := backup.UpdateActivationFence("app", "dump-retry", func(f *backup.ActivationFence) error {
-		f.Phase = fencePhasePromoted
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	oldEnsure := ensureCopyGuardAt
-	ensureCopyGuardAt = func(context.Context, string, *extensionCopyPlan, copyGuardEndpoint, func() error) ([]string, error) {
-		return nil, nil
-	}
-	oldFenceRestore, oldApplyFence := fenceRestorePoolers, applyPoolerFence
-	fenceRestorePoolers = func(context.Context, string) error { return nil }
-	applyPoolerFence = func(context.Context, config.Cluster, engine.Runtime, engine.Reporter) error { return nil }
-	t.Cleanup(func() { fenceRestorePoolers, applyPoolerFence = oldFenceRestore, oldApplyFence })
-	oldSwap, oldStart, oldPromote, oldSettle, oldStanzaApply := swapCluster, startCluster, promoteCluster, settlePromoted, applyStanzaAt
-	swapCluster = func(context.Context, engine.Shell, string, engine.Reporter, string, string, string, string, int) error {
-		return nil
-	}
-	startCluster = func(context.Context, engine.Shell, string, engine.Reporter, string, string, int, string) error {
-		return nil
-	}
-	promoteCluster = func(context.Context, pg.Local, string) ([]string, error) { return nil, nil }
-	settlePromoted = func(context.Context, engine.Shell, string, engine.Reporter, pg.Local, string, string, int, []string) error {
-		return nil
-	}
-	applyStanzaAt = func(context.Context, config.Cluster, string, engine.Runtime, engine.Reporter) error { return nil }
-	oldPublish, oldRoutes, oldResume := publishRouting, poolerRuntimeRoutes, poolerResumeDatabase
-	published := false
-	publishRouting = func(context.Context, config.Cluster, engine.Runtime, engine.Reporter) error {
-		published = true
-		return nil
-	}
-	poolerResumeDatabase = func(context.Context, string) {}
-	poolerRuntimeRoutes = func(context.Context, string, int) (map[string]steps.PoolerRoute, error) {
-		if !published {
-			return map[string]steps.PoolerRoute{}, nil
-		}
-		return map[string]steps.PoolerRoute{
-			"app": {Name: "app", Host: steps.PGSocketDir, Port: spec.Port, Database: "app"},
-		}, nil
-	}
-	t.Cleanup(func() {
-		ensureCopyGuardAt, swapCluster, startCluster = oldEnsure, oldSwap, oldStart
-		promoteCluster, settlePromoted, applyStanzaAt = oldPromote, oldSettle, oldStanzaApply
-		publishRouting, poolerRuntimeRoutes, poolerResumeDatabase = oldPublish, oldRoutes, oldResume
-	})
-	if _, err := promote(context.Background(), cfg, "app", engine.Runtime{}, nil, func() {}); err != nil {
-		t.Fatal(err)
-	}
-	if !published {
-		t.Fatal("dump promote did not publish routing")
-	}
-	recs, err := backup.LoadRecords()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := recs.Restores["app"]; ok {
-		t.Fatal("dump promote left the restore record")
-	}
-	if _, ok := recs.ActivationFenceFor("app"); ok {
-		t.Fatal("dump promote left its activation fence")
-	}
-	loaded, _, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _ := loaded.ClusterByName("app")
-	if got.Stanza != newStanza {
-		t.Fatalf("dump promote kept stanza %q, want %q", got.Stanza, newStanza)
 	}
 }
 

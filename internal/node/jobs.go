@@ -31,10 +31,10 @@ import (
 // is deleted before the job does anything else.
 const JobDir = "/var/lib/vaire/jobs"
 
-// jobNames lists every job vaire node run accepts. restore, db-fork, db-copy
-// and dump-create run only as detachable jobs an RPC starts (--job-id).
+// jobNames lists every job vaire node run accepts. restore, db-fork and
+// db-copy run only as detachable jobs an RPC starts (--job-id).
 var jobNames = []string{
-	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump",
+	"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill",
 	"stanza-expiry", "restore", "db-fork", "maint", "recover",
 	"maint-daily", "maint-weekly", "certs-renew", "metrics-refresh", "doctor",
 	"master-backup", "fence-check", "db-follow", "db-unfollow", "db-copy",
@@ -43,7 +43,7 @@ var jobNames = []string{
 // bucketWriteJobs write to or delete from the bucket, so they check the
 // epoch fence first (Phase 5, D5).
 var bucketWriteJobs = map[string]bool{
-	"backup-full": true, "backup-diff": true, "backup-incr": true, "db-dump": true,
+	"backup-full": true, "backup-diff": true, "backup-incr": true,
 	"stanza-expiry": true, "db-fork": true, "db-copy": true, "restore": true, "recover": true,
 	// db unfollow creates the follower's stanza and its first full (Phase 6).
 	"db-unfollow": true,
@@ -76,14 +76,14 @@ var (
 // databaseJobs are the template-unit jobs: each runs for one database, named
 // by --db on a timer run (vaire-<job>@<db>) or by the RPC's params.
 var databaseJobs = map[string]bool{
-	"backup-full": true, "backup-diff": true, "backup-incr": true, "backup-verify": true, "restore-drill": true, "db-dump": true,
+	"backup-full": true, "backup-diff": true, "backup-incr": true, "backup-verify": true, "restore-drill": true,
 }
 
 // heavyIOJobs take the server's heavy-I/O lock (RFC 9.3), so at most one of
 // them reads the disk and pushes to the bucket at a time. Incrementals are
 // small and frequent; they only take their cluster's lock.
 var heavyIOJobs = map[string]bool{
-	"backup-full": true, "backup-diff": true, "backup-verify": true, "restore-drill": true, "db-dump": true,
+	"backup-full": true, "backup-diff": true, "backup-verify": true, "restore-drill": true,
 	"db-copy": true,
 }
 
@@ -266,7 +266,7 @@ func jobAuthorityCheck(ctx context.Context, env *jobEnv, ja *jobActivity) error 
 	// Lifecycle jobs carry their own exact-target authority. Ordinary jobs
 	// must never dispatch against a retained target, including timer runs.
 	switch env.Job {
-	case "backup-full", "backup-diff", "backup-incr", "backup-verify", "db-dump", "restore-drill", "maint":
+	case "backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "maint":
 		target := env.DB
 		if target == "" {
 			target = rpcJobDatabase(env.Job, env.Params)
@@ -570,7 +570,7 @@ func activityJobID(id string) string {
 // jobLockWait is how long a timer run waits for its locks before it is
 // recorded as skipped: an apply, a db create or another backup job holding
 // them would otherwise cost the run until the next timer, a day for a daily
-// dump or full.
+// full.
 const jobLockWait = 15 * time.Minute
 
 // jobLockPoll is how often a waiting timer run tries its locks again.
@@ -790,8 +790,6 @@ func runJobFunc(ctx context.Context, env *jobEnv) (any, error) {
 		return jobVerify(ctx, env)
 	case "restore-drill":
 		return jobDrill(ctx, env)
-	case "db-dump":
-		return jobDump(ctx, env)
 	case "stanza-expiry":
 		return jobStanzaExpiry(ctx, env)
 	case "restore":

@@ -18,7 +18,7 @@ func validateNeverStartedRestore(db string, expected backup.Restore) error {
 	name := backup.RestoringName(db)
 	if expected.Database != db || expected.ID == "" || expected.OperationID == "" || expected.InstanceID == "" ||
 		!expected.MaterialisationPending || expected.MaterialisationCleaned || expected.Attempt != nil ||
-		expected.Port != 0 || expected.Aside != "" || expected.Kind == targetDump ||
+		expected.Port != 0 || expected.Aside != "" || !supportedRestoreKind(expected.Kind) ||
 		(expected.Phase != backup.PhaseRestoring && expected.Phase != backup.PhaseFailed) {
 		return incompleteMaterialisation(name)
 	}

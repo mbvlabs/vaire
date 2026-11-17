@@ -126,7 +126,7 @@ func prepareRecovery(ctx context.Context, env *Env, p recoverParams, target, tim
 		return err
 	}
 	rp := p.restore()
-	*target, err = restoreCheckTarget(ctx, cfg, rp, env.Req.Secrets)
+	*target, err = restoreCheckTarget(ctx, cfg, rp)
 	if err != nil {
 		return err
 	}
@@ -176,8 +176,7 @@ func restorePreconditions(ctx context.Context, cfg config.Cluster, db, what stri
 }
 
 // stanzaHasBackup refuses a stanza without a backup set: a database created
-// moments before the loss, or a dump-restored one whose first full never
-// finished.
+// moments before the loss, or one whose first full never finished.
 func stanzaHasBackup(ctx context.Context, spec config.ClusterSpec, recs backup.Records) error {
 	info, err := driver(spec, "db.recover", nil).Info(ctx, "")
 	if err != nil {
@@ -186,8 +185,7 @@ func stanzaHasBackup(ctx context.Context, spec config.ClusterSpec, recs backup.R
 	if _, ok := info.Latest(); ok {
 		return nil
 	}
-	hint := "Create it again: vaire db drop " + spec.Name + " --confirm " + spec.Name + ", vaire db create " + spec.Name +
-		", then restore a long-retention dump with vaire restore " + spec.Name + " --dump <id> (vaire dump list " + spec.Name + ")."
+	hint := "Create it again: vaire db drop " + spec.Name + " --confirm " + spec.Name + ", then vaire db create " + spec.Name + "."
 	if d, ok := recs.Dropped(spec.Name); ok && d.Stanza != spec.Stanza {
 		hint += " Older history is in the stanza " + d.Stanza + " (kept until " + d.ExpiresAt + ")."
 	}

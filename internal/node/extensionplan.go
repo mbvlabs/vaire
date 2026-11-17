@@ -26,22 +26,18 @@ type extensionCopyRequest struct {
 	// Intent is the database whose current configuration the copy will load:
 	// the source for a fork or follower, the target otherwise.
 	Intent config.ClusterSpec
-	// Stanza is the immutable history owner. Empty for a live base backup or
-	// a dump.
+	// Stanza is the immutable history owner. Empty for a live base backup.
 	Stanza string
 	// CopyDB is the database name inside the copy before any rename.
 	CopyDB string
 	// Options is the restore point for a stanza copy; zero for a base backup.
 	Options backup.RestoreOptions
-	// Historical says the data comes from a stanza point (or a dump).
+	// Historical says the data comes from a stanza point.
 	Historical bool
 	// IncludeRetained adds the stanza's retained snapshots even when the copy
 	// is a live base backup (no historical coverage is claimed, but a library
 	// the data still holds must not vanish).
 	IncludeRetained bool
-	// Dump says the data is a long-retention dump: unbound, so the operator's
-	// declaration is the only historical requirement.
-	Dump bool
 	// Standby says the copy starts as a physical standby, even if it promotes
 	// immediately. It requires standby_safe on every requirement.
 	Standby bool
@@ -55,17 +51,17 @@ type extensionCopyRequest struct {
 // open-restore record is written. The job builds the same plan again under
 // its locks.
 func preflightRestoreExtensionPlan(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, p restoreParams) error {
+	if !supportedRestoreKind(p.Kind) {
+		return unsupportedRestoreKind(p.Kind)
+	}
 	opts := backup.RestoreOptions{Kind: p.Kind, Set: p.Set}
 	if p.Kind == backup.TargetTime {
 		opts.Time, _ = time.Parse(time.RFC3339, p.Time)
 	}
 	stanza := spec.Stanza
-	if p.Kind == targetDump {
-		stanza = ""
-	}
 	_, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
 		Intent: spec, Stanza: stanza, CopyDB: p.Database, Options: opts,
-		Historical: p.Kind != targetDump, Dump: p.Kind == targetDump, Standby: p.Kind != targetDump,
+		Historical: true, Standby: true,
 		Declaration: spec.RecoveryExtensions,
 	})
 	return err
@@ -94,7 +90,7 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 	if err != nil {
 		return nil, err
 	}
-	historical := req.Historical || req.Dump
+	historical := req.Historical
 
 	merged, guard, err := backup.MergeCopyRequirements(known, declared, req.Standby, req.CopyDB)
 	if err != nil {
@@ -136,12 +132,6 @@ func extensionCopyHistory(ctx context.Context, req extensionCopyRequest, resolve
 	declaration := "known"
 	coverage := ""
 	switch {
-	case req.Dump:
-		var err error
-		declaration, declared, err = declaredRequirements(resolver, req.Declaration, req.Intent.Name, "the dump")
-		if err != nil {
-			return nil, nil, "", "", err
-		}
 	case req.Historical || req.IncludeRetained:
 		recs, err := backup.LoadRecords()
 		if err != nil {
@@ -355,7 +345,7 @@ func captureExtensionIncoming(cfg config.Cluster) error {
 }
 
 // captureStanzaRequirements is the producer-side capture: before a backup,
-// first full or dump is taken, the stanza's current requirements are recorded.
+// first full is taken, the stanza's current requirements are recorded.
 func captureStanzaRequirements(cfg config.Cluster, spec config.ClusterSpec) error {
 	return steps.CaptureStanzaRequirements(cfg, spec)
 }

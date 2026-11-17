@@ -84,7 +84,7 @@ func TestMaterialisationRequestMutationClasses(t *testing.T) {
 		"apply", "db.create", "db.copy", "db.resize", "db.recover", "db.credentials",
 		"db.write-access", "db.fork", "db.follow", "db.unfollow", "backup.now",
 		"backup.verify", "restore.start", "restore.promote", "restore.undo", "restore.drill",
-		"dump.create", "maint.run", "maint.kill", "queries.reset", "sql",
+		"maint.run", "maint.kill", "queries.reset", "sql",
 	} {
 		for _, field := range []string{"db", "database", "name", "source"} {
 			if method == "apply" && field != "db" {

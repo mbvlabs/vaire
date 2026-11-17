@@ -31,7 +31,7 @@ func TestUndoRepublishesAndVerifiesBothPoolers(t *testing.T) {
 				}
 			}
 			probe := stubUndoRouting(t, scenario, spec)
-			warnings := finishUndo(context.Background(), cfg, spec.Name, spec, spec.Stanza, u,
+			warnings := finishUndo(context.Background(), cfg, spec.Name, u,
 				engine.Runtime{}, &Env{Cluster: cfg}, func() { probe.released = true })
 			requireUndoRoutingResult(t, scenario, probe, warnings)
 		})
@@ -42,11 +42,11 @@ func routingUndoFixture(t *testing.T) backup.Undo {
 	t.Helper()
 	u := backup.Undo{
 		From:  backup.Leftover{Database: "app", Name: "app__pre_restore_20261117T160000", Stanza: "app-abc123", RestoreID: "restore-op"},
-		Aside: "app__pre_restore_20261117T161000", Stanza: "app-abc123", Routing: true,
+		Aside: "app__pre_restore_20261117T161000", Routing: true,
 	}
 	if err := backup.UpdateRecords(func(recs *backup.Records) error {
 		recs.Undoing["app"] = u
-		recs.Timelines["app"] = backup.TimelineSwitch{Stanza: u.Stanza, Timeline: "1"}
+		recs.Timelines["app"] = backup.TimelineSwitch{Stanza: "app-abc123", Timeline: "1"}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -126,7 +126,7 @@ func TestUndoRoutingRetryDoesNotSwapAgain(t *testing.T) {
 	u := routingUndoFixture(t)
 	probe := stubUndoRouting(t, "session-missing", spec)
 	env := &Env{Cluster: cfg, Req: request("restore.undo", map[string]any{"database": spec.Name})}
-	warnings := finishUndo(context.Background(), cfg, spec.Name, spec, spec.Stanza, u,
+	warnings := finishUndo(context.Background(), cfg, spec.Name, u,
 		engine.Runtime{}, env, func() { probe.released = true })
 	requireUndoRoutingResult(t, "session-missing", probe, warnings)
 
@@ -161,7 +161,7 @@ func TestRecordUndoKeepsFinishOnlyContinuation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordUndo(cfg, spec.Name, spec, u, u.Aside, "2", "", "1", spec.Stanza); err != nil {
+	if err := recordUndo(spec.Name, u, u.Aside, "2", "1", spec.Stanza); err != nil {
 		t.Fatal(err)
 	}
 	recs, err := backup.LoadRecords()
@@ -177,7 +177,7 @@ func TestRecordUndoKeepsFinishOnlyContinuation(t *testing.T) {
 	}
 }
 
-func TestUndoRefusesStanzaChangeWithPendingRoutingBeforeSwap(t *testing.T) {
+func TestUndoRefusesCrossStanzaLeftover(t *testing.T) {
 	useTempExtensionRecords(t)
 	useTestInstance(t)
 	cfg := planCfg(t)
@@ -196,8 +196,8 @@ func TestUndoRefusesStanzaChangeWithPendingRoutingBeforeSwap(t *testing.T) {
 	}
 	req := request("restore.undo", map[string]any{"database": "app"})
 	req.DryRun = true
-	if _, err := handleRestoreUndo(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil || reasonOf(t, err) != "undo_routing_pending" {
-		t.Fatalf("pending stanza-changing undo = %v", err)
+	if _, err := handleRestoreUndo(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil || reasonOf(t, err) != "undo_identity_changed" {
+		t.Fatalf("cross-stanza undo = %v", err)
 	}
 }
 
@@ -205,20 +205,17 @@ func TestUndoReloadsConfigurationUnderCutoverLock(t *testing.T) {
 	useTempExtensionRecords(t)
 	cfg := planCfg(t)
 	u := routingUndoFixture(t)
-	u.Stanza = "app-restored123"
 	if err := backup.UpdateRecords(func(recs *backup.Records) error {
 		recs.Undoing["app"] = u
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stale := cfg.Clone()
-	stale.Clusters[0].Stanza = u.Stanza
-	env := &Env{Cluster: stale, Req: request("restore.undo", map[string]any{"database": "app"})}
+	env := &Env{Cluster: cfg.Clone(), Req: request("restore.undo", map[string]any{"database": "app"})}
 	env.Req.Confirm = "app/restore"
-	oldLock, oldLoad, oldStanza := lockForCutover, applyReloadCluster, applyStanzaAt
-	t.Cleanup(func() { lockForCutover, applyReloadCluster, applyStanzaAt = oldLock, oldLoad, oldStanza })
-	locked, stanzaApplies := false, 0
+	oldLock, oldLoad := lockForCutover, applyReloadCluster
+	t.Cleanup(func() { lockForCutover, applyReloadCluster = oldLock, oldLoad })
+	locked := false
 	lockForCutover = func(context.Context, *Env, string, string) (func(), error) {
 		locked = true
 		return func() {}, nil
@@ -229,18 +226,11 @@ func TestUndoReloadsConfigurationUnderCutoverLock(t *testing.T) {
 		}
 		return cfg, nil
 	}
-	applyStanzaAt = func(_ context.Context, current config.Cluster, _ string, _ engine.Runtime, _ engine.Reporter) error {
-		stanzaApplies++
-		if current.Clusters[0].Stanza != cfg.Clusters[0].Stanza {
-			t.Fatal("stanza settlement used stale configuration")
-		}
-		return nil
-	}
 	probe := stubUndoRouting(t, "settled", cfg.Clusters[0])
 	result, err := handleRestoreUndo(context.Background(), env)
-	if err != nil || len(result.Warnings) != 0 || stanzaApplies != 1 || probe.published != 1 ||
+	if err != nil || len(result.Warnings) != 0 || probe.published != 1 ||
 		env.Cluster.Clusters[0].Stanza != cfg.Clusters[0].Stanza {
-		t.Fatalf("locked reload: result=%+v error=%v stanza applies=%d probe=%+v", result, err, stanzaApplies, probe)
+		t.Fatalf("locked reload: result=%+v error=%v probe=%+v", result, err, probe)
 	}
 }
 
@@ -261,7 +251,7 @@ func TestRestoreStartCannotOvertakeUnfinishedUndo(t *testing.T) {
 		return func() { locks-- }, nil
 	}
 	loadGuardCluster = func() (config.Cluster, error) { return cfg, nil }
-	restoreCheckTarget = func(context.Context, config.Cluster, restoreParams, map[string]string) (string, error) {
+	restoreCheckTarget = func(context.Context, config.Cluster, restoreParams) (string, error) {
 		t.Fatal("new restore reached external preparation while undo was pending")
 		return "", nil
 	}

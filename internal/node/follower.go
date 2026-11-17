@@ -207,7 +207,6 @@ var followerRefused = map[string]followerRefusal{
 	"restore.promote": {action: "a restore promote", field: "database"},
 	"restore.undo":    {action: "a restore undo", field: "database"},
 	"restore.drill":   {action: "a restore drill", field: "database"},
-	"dump.create":     {action: "a dump", field: "database"},
 	"db.fork":         {action: "a fork", field: "source"},
 	"maint.run":       {action: "maintenance", field: "db"},
 	"db.credentials":  {action: "rotating its credentials", field: "name", applies: func(p map[string]any) bool { r, _ := p["rotate"].(bool); return r }},

@@ -793,69 +793,6 @@ func LiveDatabase(name string) string {
 	return name
 }
 
-// Initdb creates an empty cluster in the data directory, with the live
-// clusters' initdb options (data checksums, peer and SCRAM authentication,
-// the locale and its provider), registers it and starts it: the target of
-// a restore from a dump.
-func (m *Materialised) Initdb(ctx context.Context, provider, locale string) error {
-	if err := m.createOwnedData(ctx); err != nil {
-		return err
-	}
-	args := []string{"-u", "postgres", "--", pgBin + "/initdb", "-D", m.Data, "--data-checksums",
-		"--auth-local=peer", "--auth-host=scram-sha-256", "--locale=" + locale, "--locale-provider=" + provider}
-	switch provider {
-	case "builtin":
-		args = append(args, "--builtin-locale="+locale)
-	case "icu":
-		args = append(args, "--icu-locale="+locale)
-	}
-	m.log("creating an empty cluster in " + m.Data)
-	if err := m.GuardOwnership(ctx, MaterialisationInitdb, func() error {
-		if err := runMaterialisedCommand(ctx, m, engine.Command{Name: "runuser", Args: args}); err != nil {
-			return wrapTool("initdb of "+m.Name, err)
-		}
-		// The registration in /etc/postgresql holds the configuration.
-		for _, name := range []string{"postgresql.conf", "pg_hba.conf", "pg_ident.conf"} {
-			if err := os.Remove(filepath.Join(m.Data, name)); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := m.registerOwned(ctx); err != nil {
-		return err
-	}
-	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx) })
-}
-
-// CopyRoles copies every role of the live source into the temporary
-// cluster with pg_dumpall --roles-only: password verifiers, memberships and
-// per-role settings included, so credentials don't change. The output never
-// reaches the log: it carries the verifiers.
-func (m *Materialised) CopyRoles(ctx context.Context) error {
-	return m.GuardOwnership(ctx, MaterialisationCopyRoles, func() error { return m.copyRoles(ctx) })
-}
-
-func (m *Materialised) copyRoles(ctx context.Context) error {
-	var buf bytes.Buffer
-	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "runuser", Args: []string{
-		"-u", "postgres", "--", pgBin + "/pg_dumpall", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "--roles-only", "--no-password",
-	}, Stdout: &buf}, m.Report); err != nil {
-		return wrapTool("pg_dumpall --roles-only of "+m.Source, err)
-	}
-	// postgres exists already in a fresh cluster; its ALTER ROLE stays.
-	var sql strings.Builder
-	for _, line := range strings.SplitAfter(buf.String(), "\n") {
-		if strings.TrimSpace(line) != "CREATE ROLE postgres;" {
-			sql.WriteString(line)
-		}
-	}
-	m.log("copying the roles of " + m.Source)
-	return m.PG().Exec(ctx, "postgres", sql.String(), nil)
-}
-
 // Swap puts the data directory of cluster from (a stopped or running
 // temporary cluster, or a leftover) in the place of live cluster live's, in
 // a few seconds, and keeps live's old data directory as cluster aside on

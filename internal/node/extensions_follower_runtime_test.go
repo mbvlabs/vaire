@@ -270,7 +270,7 @@ func testStandaloneCustomFollowPreflight(t *testing.T) {
 	cfg.Clusters[0].Extensions = []string{"custom"}
 	declared := []string{"custom"}
 	cfg.Clusters[0].RecoveryExtensions = &declared
-	if err := preflightRestoreExtensionPlan(context.Background(), cfg, cfg.Clusters[0], restoreParams{Kind: targetDump, Database: "app"}); err == nil || extReason(t, err) != "extension_copy_safety_unknown" {
+	if err := preflightRestoreExtensionPlan(context.Background(), cfg, cfg.Clusters[0], restoreParams{Kind: backup.TargetLatest, Database: "app"}); err == nil || extReason(t, err) != "extension_copy_safety_unknown" {
 		t.Fatalf("copy preflight = %v", err)
 	}
 	if recs, err := backup.LoadRecords(); err != nil || len(recs.Restores) != 0 {

@@ -60,7 +60,7 @@ func newRestoreAbsenceFixture(t *testing.T, mode string) *restoreAbsenceFixture 
 		root:   root,
 		ports:  ports,
 		other:  backup.Restore{ID: "other", Database: "other", Phase: backup.PhaseReady},
-		record: backup.Restore{ID: "job", Database: "app", InstanceID: "install", OperationID: "operation", Phase: backup.PhaseRestoring, MaterialisationPending: true},
+		record: backup.Restore{ID: "job", Database: "app", Kind: backup.TargetLatest, InstanceID: "install", OperationID: "operation", Phase: backup.PhaseRestoring, MaterialisationPending: true},
 	}
 	if mode == "history-pruned" {
 		oldRelease := releaseMaterialisationJob

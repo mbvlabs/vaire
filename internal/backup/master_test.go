@@ -11,7 +11,6 @@ func TestDurableHashIgnoresBackupFacts(t *testing.T) {
 	base := r.durableHash()
 
 	r.RecordBackup("app", Set{Label: "20261015-010000F", Type: TypeFull}, "2026-10-15T01:05:00Z")
-	r.LastDump["app"] = Dump{Database: "app", ID: "x"}
 	r.Drills = append(r.Drills, Drill{Database: "app"})
 	if r.durableHash() != base {
 		t.Fatal("a backup fact changed the durable hash: every backup would make a bundle")

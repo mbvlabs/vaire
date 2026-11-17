@@ -94,7 +94,7 @@ func awaitingError(db, action string) error {
 // among them (D9).
 var awaitingRefused = map[string]string{ //nolint:gosec // G101: method names and actions, not credentials.
 	"restore.start": "a restore", "restore.promote": "restore promote", "restore.undo": "restore undo",
-	"restore.drill": "a restore drill", "db.fork": "a fork", "dump.create": "a dump",
+	"restore.drill": "a restore drill", "db.fork": "a fork",
 	"backup.now": "a backup", "backup.verify": "a verify", "db.resize": "a resize",
 	"db.credentials": "rotating its credentials", "maint.run": "maintenance", "maint.kill": "maint kill",
 	"maint.report": "a maintenance report", "queries.reset": "a statistics reset", "apply": "apply --db",

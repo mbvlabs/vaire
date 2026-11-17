@@ -40,7 +40,7 @@ func handleActivityList(ctx context.Context, env *Env) (Result, error) {
 }
 
 // handleActivityShow returns one operation, request or job and its steps and
-// refusals. Exactly one correlation id is required: an unbounded history dump
+// refusals. Exactly one correlation id is required: an unbounded history export
 // is activity list's job, not show's.
 func handleActivityShow(ctx context.Context, env *Env) (Result, error) {
 	var q activity.Query

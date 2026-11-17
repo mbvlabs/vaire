@@ -126,7 +126,7 @@ var materialisationRefused = map[string]bool{
 	"db.credentials": true, "db.write-access": true, "db.fork": true,
 	"db.follow": true, "db.unfollow": true, "backup.now": true, "backup.verify": true,
 	"restore.start": true, "restore.promote": true, "restore.undo": true,
-	"restore.drill": true, "dump.create": true, "maint.run": true,
+	"restore.drill": true, "maint.run": true,
 	"maint.kill": true, "queries.reset": true, "sql": true,
 }
 

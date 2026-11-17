@@ -300,8 +300,8 @@ func (a *restoreBirth) guardAction(action backup.MaterialisationAction) error {
 		if a.attempt.ArtifactStage != materialisationRegistered || !a.registered || action == backup.MaterialisationStart && a.started {
 			return errors.New("restore lifecycle action not authorized")
 		}
-	case backup.MaterialisationBaseBackup, backup.MaterialisationInitdb, backup.MaterialisationPromote,
-		backup.MaterialisationRename, backup.MaterialisationAdopt, backup.MaterialisationDrop, backup.MaterialisationCopyRoles:
+	case backup.MaterialisationBaseBackup, backup.MaterialisationPromote,
+		backup.MaterialisationRename, backup.MaterialisationAdopt, backup.MaterialisationDrop:
 		return errors.New("unsupported restore materialisation action")
 	}
 	return nil
@@ -315,10 +315,9 @@ func (a *restoreBirth) recordAction(action backup.MaterialisationAction) {
 		a.registered = true
 	case backup.MaterialisationStart:
 		a.started = true
-	case backup.MaterialisationBaseBackup, backup.MaterialisationInitdb, backup.MaterialisationPrepare,
+	case backup.MaterialisationBaseBackup, backup.MaterialisationPrepare,
 		backup.MaterialisationInspect, backup.MaterialisationStop, backup.MaterialisationPromote,
-		backup.MaterialisationRename, backup.MaterialisationAdopt, backup.MaterialisationDrop,
-		backup.MaterialisationCopyRoles:
+		backup.MaterialisationRename, backup.MaterialisationAdopt, backup.MaterialisationDrop:
 	}
 }
 

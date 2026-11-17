@@ -69,7 +69,7 @@ func setupRestorePreparation(t *testing.T) config.Cluster {
 	cfg := config.Cluster{Server: config.Server{DataRoot: dir}, Clusters: []config.ClusterSpec{{Name: "app", Port: 5433, Stanza: "app-abcdef"}}}
 	cfg.Backup.Provider = "r2"
 	loadGuardCluster = func() (config.Cluster, error) { return cfg, nil }
-	restoreCheckTarget = func(context.Context, config.Cluster, restoreParams, map[string]string) (string, error) {
+	restoreCheckTarget = func(context.Context, config.Cluster, restoreParams) (string, error) {
 		return "latest", nil
 	}
 	restoreCheckSpace = func(context.Context, config.Cluster, string) ([]backup.SpaceNeed, error) { return nil, nil }
@@ -214,7 +214,7 @@ func runRestorePreparation(cfg config.Cluster, job, id string) error {
 }
 
 func TestRestoreRecoverRunnerInvocationFenceAndLease(t *testing.T) {
-	for _, kind := range []string{"restore", "dump", "recover"} {
+	for _, kind := range []string{"restore", "recover"} {
 		for _, scenario := range []string{"matching", "missing", "replaced", "install", "install-changed", "operation", "legacy", "type", "kind", "phase", "prelock-operation"} {
 			t.Run(kind+"/"+scenario, func(t *testing.T) {
 				assertRunnerInvocationFence(t, kind, scenario)
@@ -241,9 +241,6 @@ func invocationCase(kind string) (string, string, json.RawMessage) {
 	job, restoreKind := kind, backup.TargetLatest
 	params := json.RawMessage(`{"database":"app","kind":"latest"}`)
 	switch kind {
-	case "dump":
-		job, restoreKind = "restore", targetDump
-		params = json.RawMessage(`{"database":"app","kind":"dump","dump":"dump1"}`)
 	case "recover":
 		params = json.RawMessage(`{"database":"app"}`)
 	}

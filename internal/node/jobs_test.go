@@ -102,9 +102,9 @@ func TestJobErrorDetailsFlattens(t *testing.T) {
 
 func TestTimerUnit(t *testing.T) {
 	cases := map[string]engine.JobRecord{
-		"vaire-db-dump@app2.service":  {Job: "db-dump", DB: "app2"},
-		"vaire-stanza-expiry.service": {Job: "stanza-expiry"},
-		"":                            {Job: "restore", DB: "app"},
+		"vaire-backup-full@app2.service": {Job: "backup-full", DB: "app2"},
+		"vaire-stanza-expiry.service":    {Job: "stanza-expiry"},
+		"":                               {Job: "restore", DB: "app"},
 	}
 	for want, rec := range cases {
 		if got := timerUnit(rec); got != want {

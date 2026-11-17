@@ -309,7 +309,6 @@ func TestActivityImportantClassifications(t *testing.T) {
 		{"restore.undo", rpc.Request{}, false},
 		{"restore.drill", rpc.Request{}, false},
 		{"restore.cleanup", rpc.Request{}, false},
-		{"dump.create", rpc.Request{}, false},
 		{"db.recover", rpc.Request{}, false},
 		{"master-backup.now", rpc.Request{}, false},
 		{"ssh.confirm", rpc.Request{}, false},
@@ -487,8 +486,8 @@ func TestJobRefusalRecordsInvocationActor(t *testing.T) {
 	rec, _ := testRecorder(t, store)
 	cause := output.NewError(output.CodePrecondition, "database app is gone", output.ExitPrecondition, "").
 		WithDetails(map[string]any{"reason": "database_not_found"})
-	recordJobRefusal(context.Background(), rec, "db-dump", testJobID, cause, "", true)
-	recordJobRefusal(context.Background(), rec, "db-dump", testJobID, cause, "", false)
+	recordJobRefusal(context.Background(), rec, "backup-full", testJobID, cause, "", true)
+	recordJobRefusal(context.Background(), rec, "backup-full", testJobID, cause, "", false)
 	events := store.recorded()
 	rejectf(t, len(events) != 2, "refusals = %+v, want two", events)
 	rejectf(t, events[0].ActorKind != activity.ActorTimer || events[1].ActorKind != activity.ActorOperator, "actors = %q/%q, want timer/operator", events[0].ActorKind, events[1].ActorKind)

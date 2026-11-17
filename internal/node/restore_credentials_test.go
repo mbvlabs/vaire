@@ -345,27 +345,19 @@ func TestRestoreCredentialsCaptureIsRetrySafe(t *testing.T) {
 	}
 }
 
-func TestRestoreCredentialsCaptureSkipsRecoverAndDump(t *testing.T) {
-	for _, mode := range []string{"recover", "dump"} {
-		t.Run(mode, func(t *testing.T) {
-			p, fake := restoreCredentialTestPromotion(t)
-			fake.queryErr = errors.New("no SQL may run")
-			if mode == "recover" {
-				p.r.Recover = true
-			} else {
-				p.r.Kind = targetDump
-			}
-			mustNoErr(t, captureRestoreCredentialsAt(context.Background(), p, fake))
-			mustNoErr(t, applyRestoreCredentialsAt(context.Background(), p, fake))
-			if fake.queries != 0 || len(fake.execs) != 0 {
-				t.Fatalf("queries/execs = %d/%d, want 0/0", fake.queries, len(fake.execs))
-			}
-			path, err := restoreCredentialSnapshotPath(p.db, p.r.ID)
-			mustNoErr(t, err)
-			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("snapshot exists for %s: %v", mode, err)
-			}
-		})
+func TestRestoreCredentialsCaptureSkipsRecover(t *testing.T) {
+	p, fake := restoreCredentialTestPromotion(t)
+	fake.queryErr = errors.New("no SQL may run")
+	p.r.Recover = true
+	mustNoErr(t, captureRestoreCredentialsAt(context.Background(), p, fake))
+	mustNoErr(t, applyRestoreCredentialsAt(context.Background(), p, fake))
+	if fake.queries != 0 || len(fake.execs) != 0 {
+		t.Fatalf("queries/execs = %d/%d, want 0/0", fake.queries, len(fake.execs))
+	}
+	path, err := restoreCredentialSnapshotPath(p.db, p.r.ID)
+	mustNoErr(t, err)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot exists for recover: %v", err)
 	}
 }
 
@@ -614,9 +606,6 @@ func TestRestoreCredentialsAbortedCleanupUsesRecordIdentity(t *testing.T) {
 	r = p.r
 	mustNoErr(t, clearRestoreCredentialsForRestore(p.cfg, r, p.aside))
 
-	dump := r
-	dump.Kind, dump.Aside = targetDump, ""
-	mustNoErr(t, clearRestoreCredentialsForRestore(p.cfg, dump, ""))
 	recover := r
 	recover.Recover, recover.Aside = true, ""
 	mustNoErr(t, clearRestoreCredentialsForRestore(p.cfg, recover, ""))

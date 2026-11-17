@@ -113,7 +113,7 @@ func captureRestoreCredentialsAt(ctx context.Context, p *restorePromotion, local
 	if p == nil {
 		return errors.New("restore credential capture has no promotion state")
 	}
-	if p.r.Recover || p.r.Kind == targetDump {
+	if p.r.Recover {
 		return nil
 	}
 	id, err := restoreCredentialIdentityFor(p)
@@ -168,7 +168,7 @@ func applyRestoreCredentialsAt(ctx context.Context, p *restorePromotion, local s
 	if p == nil {
 		return errors.New("restore credential apply has no promotion state")
 	}
-	if p.r.Recover || p.r.Kind == targetDump {
+	if p.r.Recover {
 		return nil
 	}
 	id, err := restoreCredentialIdentityFor(p)
@@ -220,7 +220,7 @@ func clearRestoreCredentials(p *restorePromotion) error {
 	if p == nil {
 		return errors.New("restore credential cleanup has no promotion state")
 	}
-	if p.r.Recover || p.r.Kind == targetDump {
+	if p.r.Recover {
 		return nil
 	}
 	id, err := restoreCredentialIdentityFor(p)
@@ -235,7 +235,7 @@ func clearRestoreCredentials(p *restorePromotion) error {
 // uses the same ready record, stanza and aside the promote fixed; anything
 // else leaves the snapshot untouched.
 func clearRestoreCredentialsForRestore(cfg config.Cluster, r backup.Restore, aside string) error {
-	if r.Recover || r.Kind == targetDump {
+	if r.Recover {
 		return nil
 	}
 	if r.ID == "" || r.Database == "" {

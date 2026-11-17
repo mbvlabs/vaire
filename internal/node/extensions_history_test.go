@@ -12,7 +12,6 @@ import (
 	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
-	"github.com/mbvlabs/vaire/internal/state"
 )
 
 func useTempExtensionRecords(t *testing.T) {
@@ -29,31 +28,6 @@ func planCfg(t *testing.T) config.Cluster {
 	cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Node: "db1", Port: 5433, Stanza: "app-abc123", Size: "small", StatementTimeout: "60s"}}
 	return cfg
-}
-
-func TestBuildCopyPlanDumpRequiresDeclaration(t *testing.T) {
-	useTempExtensionRecords(t)
-	cfg := planCfg(t)
-	spec := cfg.Clusters[0]
-	req := extensionCopyRequest{Intent: spec, CopyDB: "app", Dump: true, Historical: true, Standby: false}
-	if _, err := buildExtensionCopyPlan(context.Background(), cfg, req); err == nil || !strings.Contains(err.Error(), "recovery_extensions") {
-		t.Fatalf("absent dump declaration = %v", err)
-	}
-	empty := []string{}
-	req.Declaration = &empty
-	plan, err := buildExtensionCopyPlan(context.Background(), cfg, req)
-	if err != nil || plan.Plan.Declaration != "empty" {
-		t.Fatalf("explicit empty declaration = %+v, %v", plan, err)
-	}
-	cfg.Extensions = map[string]config.ExtensionDefinition{
-		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext", CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true)},
-	}
-	declared := []string{"custom"}
-	req.Declaration = &declared
-	plan, err = buildExtensionCopyPlan(context.Background(), cfg, req)
-	if err != nil || !hasMerged(plan.Merged, "custom") {
-		t.Fatalf("populated declaration = %+v, %v", plan, err)
-	}
 }
 
 func hasMerged(exts []catalog.Extension, name string) bool {
@@ -235,76 +209,6 @@ func TestRestoreFilesKeepsExtensionRequirements(t *testing.T) {
 func stringPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool       { return &b }
 
-func TestDumpPromoteRetryKeepsFixedStanzaIdentities(t *testing.T) {
-	useTempExtensionRecords(t)
-	cfg := planCfg(t)
-	oldRaw, err := cfg.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	storePath := filepath.Join(t.TempDir(), "cluster.toml")
-	store := state.FileStore{Path: storePath}
-	if err := store.Save(oldRaw); err != nil {
-		t.Fatal(err)
-	}
-	oldStore := switchStanzaStore
-	switchStanzaStore = func() state.Store { return store }
-	t.Cleanup(func() { switchStanzaStore = oldStore })
-	if err := backup.UpdateRecords(func(s *backup.Records) error {
-		s.Restores["app"] = backup.Restore{ID: "r1", Database: "app", Kind: targetDump, Target: "dump x", Phase: backup.PhaseReady}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	recs, _ := backup.LoadRecords()
-	r := recs.Restores["app"]
-	spec := cfg.Clusters[0]
-	gotCfg, gotR, newStanza, oldStanza, err := prepareDumpPromoteStanza(cfg, "app", spec, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if newStanza == "" || newStanza == oldStanza || oldStanza != spec.Stanza {
-		t.Fatalf("identities = new %q old %q spec %q", newStanza, oldStanza, spec.Stanza)
-	}
-	if gotR.NewStanza != newStanza || gotR.OldStanza != oldStanza || gotCfg.Clusters[0].Stanza != newStanza {
-		t.Fatalf("first promote = %+v %+v", gotR, gotCfg.Clusters[0])
-	}
-	// Interruption before the stanza save: the record is fixed but cluster.toml
-	// still names the old stanza. The retry reuses the recorded new stanza.
-	if err := store.Save(oldRaw); err != nil {
-		t.Fatal(err)
-	}
-	_, gotR, retryNew, retryOld, err := prepareDumpPromoteStanza(cfg, "app", spec, gotR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retryNew != newStanza || retryOld != oldStanza {
-		t.Fatalf("retry before save = new %q old %q, want %q/%q", retryNew, retryOld, newStanza, oldStanza)
-	}
-	loaded, _, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Clusters[0].Stanza != newStanza {
-		t.Fatalf("retry switched to %q, want recorded %q", loaded.Clusters[0].Stanza, newStanza)
-	}
-	// Interruption after the stanza save: the same identities are reused.
-	_, _, retryNew, retryOld, err = prepareDumpPromoteStanza(loaded, "app", spec, gotR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retryNew != newStanza || retryOld != oldStanza {
-		t.Fatalf("retry after save = new %q old %q", retryNew, retryOld)
-	}
-	recs, err = backup.LoadRecords()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec := recs.Restores["app"]; rec.ID != "r1" || rec.NewStanza != newStanza || rec.OldStanza != oldStanza {
-		t.Fatalf("a retry rewrote the restore's fixed identities: %+v", rec)
-	}
-}
-
 func TestBuildCopyPlanKeepsHistoricalOrdinarySetting(t *testing.T) {
 	useTempExtensionRecords(t)
 	cfg := planCfg(t)
@@ -343,46 +247,5 @@ func TestBuildCopyPlanRefusesConflictingHistoricalSetting(t *testing.T) {
 		Intent: spec, Stanza: spec.Stanza, CopyDB: "app", IncludeRetained: true, Standby: true,
 	}); err == nil {
 		t.Fatal("conflicting old/current ordinary settings were accepted")
-	}
-}
-
-func TestDumpPromoteDoesNotRequireStandbySafe(t *testing.T) {
-	useTempExtensionRecords(t)
-	cfg := planCfg(t)
-	cfg.Extensions = map[string]config.ExtensionDefinition{
-		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom",
-			CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(false)},
-	}
-	cfg.Clusters[0].Extensions = []string{"custom"}
-	spec := cfg.Clusters[0]
-	empty := []string{}
-	req := extensionCopyRequest{Intent: spec, CopyDB: "app", Dump: true, Historical: true, Standby: false, Declaration: &empty}
-	if _, err := buildExtensionCopyPlan(context.Background(), cfg, req); err != nil {
-		t.Fatalf("a logical dump required standby_safe: %v", err)
-	}
-	req.Standby = true
-	if _, err := buildExtensionCopyPlan(context.Background(), cfg, req); err == nil {
-		t.Fatal("a physical copy accepted standby_safe=false")
-	}
-}
-
-func TestUnboundDumpPlanHasNoStanzaOrHistory(t *testing.T) {
-	useTempExtensionRecords(t)
-	cfg := planCfg(t)
-	spec := cfg.Clusters[0]
-	if err := backup.RecordExtensionRequirements(spec.Stanza, "app", []catalog.Extension{{
-		Name: "old", ExtName: "old", Source: catalog.SourcePreinstalled,
-	}}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	empty := []string{}
-	plan, err := buildExtensionCopyPlan(context.Background(), cfg, extensionCopyRequest{
-		Intent: spec, CopyDB: "app", Dump: true, Historical: true, Standby: false, Declaration: &empty,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Plan.Stanza != "" || hasMerged(plan.Plan.Requirements, "old") {
-		t.Fatalf("an unbound dump inherited stanza history: %+v", plan.Plan)
 	}
 }

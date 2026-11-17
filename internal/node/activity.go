@@ -806,9 +806,9 @@ func activityImportant(m method, req rpc.Request) bool {
 		return rotateRequested(req.Params)
 	case "backup.now", "backup.verify", "restore.start", "restore.drill",
 		"restore.abort", "restore.cleanup", "restore.promote", "restore.undo",
-		"dump.create", "db.recover", "master-backup.now", "maint.run":
+		"db.recover", "master-backup.now", "maint.run":
 		// These start or clean up background work, but a diagnostic history
-		// problem must not stop backups, drills, dumps, recovery copies or
+		// problem must not stop backups, drills, recovery copies or
 		// maintenance. The job runner records the outcome in state.json and
 		// reports any lost activity evidence as a warning.
 		return false
@@ -1044,7 +1044,7 @@ var activityKnownReason = map[string]bool{
 	"cipher_mismatch": true, "cluster_mismatch": true,
 	"config_changed": true, "confirm_mismatch": true, "database_exists": true,
 	"database_not_found": true, "database_protected": true, "database_required": true,
-	"dump_not_found": true, "epoch_conflict": true, "extension_missing": true,
+	"epoch_conflict": true, "extension_missing": true,
 	"extension_not_found": true, "extension_not_managed": true, "extension_default": true,
 	"extension_definition_exists": true, "extension_safety_renewal_required": true,
 	"extension_in_use": true, "extension_not_installed": true, "extension_update_unsupported": true,
@@ -1062,7 +1062,7 @@ var activityKnownReason = map[string]bool{
 	"package_install_failed":           true,
 	"follower_propagation_unavailable": true, "cluster_not_running": true,
 	"unfollow_in_progress": true,
-	"final_dump_failed":    true, "follower_not_running": true, "follows_follower": true,
+	"follower_not_running": true, "follows_follower": true,
 	"follower_recovery_floor_decrease": true,
 	"has_followers":                    true, "heavy_io_lock_held": true, "host_phase_incomplete": true,
 	"immutable_key": true, "install_source_invalid": true, "is_follower": true,
@@ -1072,8 +1072,9 @@ var activityKnownReason = map[string]bool{
 	"journal_corrupt": true, "pgbackrest_too_old": true, "preflight_failed": true,
 	"sha256_mismatch": true, "state_corrupt": true,
 	"no_backup_in_stanza": true, "no_backups": true, "no_cluster_port": true,
-	"no_dump_recipient": true, "no_leftover": true, "no_lockdown_pending": true,
+	"no_leftover": true, "no_lockdown_pending": true,
 	"no_offsite_backup": true, "no_open_restore": true, "no_ready_restore": true,
+	"restore_kind_unsupported":     true,
 	"node_belongs_to_other_server": true, "node_fenced": true, "node_outdated": true,
 	"not_a_follower": true, "not_a_node": true, "not_awaiting_recovery": true, "operator_only": true,
 	"os_unsupported": true, "outside_window": true, "postgres_present": true,

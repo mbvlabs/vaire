@@ -1388,8 +1388,8 @@ type CopyPlan struct {
 	// DesiredPreloads are current intent's preloads. They are not retained
 	// history: the guard composer refreshes them on every rewrite.
 	DesiredPreloads []string
-	// Historical records that the data came from a stanza point or a dump,
-	// not from a live base backup.
+	// Historical records that the data came from a stanza point, not from a
+	// live base backup.
 	Historical bool
 	// Cron says the built-in pg_cron launch guard and settlement apply.
 	Cron bool

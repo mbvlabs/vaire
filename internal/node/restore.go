@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -24,22 +23,38 @@ import (
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/mbvlabs/vaire/internal/secrets"
-	"github.com/mbvlabs/vaire/internal/state"
 	"github.com/mbvlabs/vaire/internal/steps"
 )
-
-// Restore source kinds beyond the pgBackRest targets.
-const targetDump = "dump"
 
 // restoreParams start a restore of one database.
 type restoreParams struct {
 	Database string `json:"database"`
-	// Kind is latest, time, set or dump.
+	// Kind is latest, time or set.
 	Kind    string `json:"kind"`
 	Time    string `json:"time,omitempty"`
 	Set     string `json:"set,omitempty"`
-	Dump    string `json:"dump,omitempty"`
 	Promote bool   `json:"promote,omitempty"`
+}
+
+// supportedRestoreKind reports whether kind names a current physical restore
+// target.
+func supportedRestoreKind(kind string) bool {
+	switch kind {
+	case backup.TargetLatest, backup.TargetTime, backup.TargetSet:
+		return true
+	}
+	return false
+}
+
+func unsupportedRestoreKind(kind string) error {
+	return output.NewError(output.CodePrecondition, "kind must be latest, time or set", output.ExitPrecondition, "").
+		WithDetails(map[string]any{"reason": "restore_kind_unsupported", "kind": kind})
+}
+
+func unsupportedRestoreState(kind string) error {
+	return output.NewError(output.CodePrecondition, "the stored restore has an unsupported kind; only latest, time and set are restored", output.ExitPrecondition,
+		"Preserve the records and inspect the operation; nothing was changed.").
+		WithDetails(map[string]any{"reason": "restore_kind_unsupported", "kind": kind})
 }
 
 // restoreToken is <db>/restore.
@@ -72,6 +87,9 @@ func restoreInProgress(db, action string) error {
 	if !ok {
 		return nil
 	}
+	if !supportedRestoreKind(r.Kind) {
+		return unsupportedRestoreState(r.Kind)
+	}
 	return output.NewError(output.CodePrecondition,
 		"a restore of "+db+" is open ("+r.Phase+"); "+action+" waits until it is promoted or aborted",
 		output.ExitPrecondition,
@@ -88,6 +106,9 @@ func clearFailedRestore(ctx context.Context, cfg config.Cluster, db string) erro
 		return err
 	}
 	r, ok := bs.OpenRestore(db)
+	if ok && !supportedRestoreKind(r.Kind) {
+		return unsupportedRestoreState(r.Kind)
+	}
 	if ok && r.Phase == backup.PhaseFailed && r.MaterialisationPending && r.Attempt == nil {
 		return retireNeverStartedRestore(ctx, cfg, db, r)
 	}
@@ -154,6 +175,9 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+	if !supportedRestoreKind(p.Kind) {
+		return Result{}, unsupportedRestoreKind(p.Kind)
+	}
 	cfg := env.Cluster
 	if err := requireBackups(cfg); err != nil {
 		return Result{}, err
@@ -176,14 +200,13 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 		return Result{Data: map[string]any{"database": p.Database, "target": target, "timeline": timeline, "space": space, "dry_run": true}}, nil
 	}
 	restoreWriteMetrics(cfg)
-	jobSecrets := map[string]string{}
-	if v := env.Req.Secrets[steps.SecretBackupAgeIdentity]; v != "" {
-		jobSecrets[steps.SecretBackupAgeIdentity] = v
-	}
-	return restoreLaunch(ctx, env, "restore", p, jobSecrets)
+	return restoreLaunch(ctx, env, "restore", p, nil)
 }
 
 func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target, timeline *string, space *[]backup.SpaceNeed) error {
+	if !supportedRestoreKind(p.Kind) {
+		return unsupportedRestoreKind(p.Kind)
+	}
 	cfg := env.Cluster
 	if err := requireBackups(cfg); err != nil {
 		return err
@@ -195,7 +218,7 @@ func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target,
 		return err
 	}
 	var err error
-	*target, err = restoreCheckTarget(ctx, cfg, p, env.Req.Secrets)
+	*target, err = restoreCheckTarget(ctx, cfg, p)
 	if err != nil {
 		return err
 	}
@@ -233,7 +256,7 @@ func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target,
 			ID: env.Req.RequestID, Database: p.Database, Kind: p.Kind, Target: *target,
 			InstanceID: instance, OperationID: operation,
 			Phase: backup.PhaseRestoring, StartedAt: stamp(), Promote: p.Promote, Timeline: *timeline,
-			MaterialisationPending: p.Kind != targetDump,
+			MaterialisationPending: true,
 		}
 		return nil
 	})
@@ -258,12 +281,8 @@ func refusePendingUndo(db string) error {
 }
 
 // restoreTimeline is the timeline a restore of p's database follows: the one
-// restore undo recorded for its stanza, or pgBackRest's latest (empty). A
-// dump has none.
+// restore undo recorded for its stanza, or pgBackRest's latest (empty).
 func restoreTimeline(cfg config.Cluster, p restoreParams) (string, error) {
-	if p.Kind == targetDump {
-		return "", nil
-	}
 	spec, err := clusterOf(cfg, p.Database)
 	if err != nil {
 		return "", err
@@ -276,7 +295,7 @@ func restoreTimeline(cfg config.Cluster, p restoreParams) (string, error) {
 }
 
 // checkRestoreTarget validates the target and describes it.
-func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams, sec map[string]string) (string, error) {
+func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams) (string, error) {
 	spec, err := clusterOf(cfg, p.Database)
 	if err != nil {
 		return "", err
@@ -289,10 +308,8 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 		return restoreTimeTarget(ctx, d, spec, p)
 	case backup.TargetSet:
 		return restoreSetTarget(ctx, d, p)
-	case targetDump:
-		return restoreDumpTarget(ctx, cfg, p, sec)
 	}
-	return "", output.NewError(output.CodeUsage, "kind must be latest, time, set or dump", output.ExitUsage, "")
+	return "", unsupportedRestoreKind(p.Kind)
 }
 
 func restoreLatestTarget(ctx context.Context, d backup.Driver) (string, error) {
@@ -338,32 +355,9 @@ func restoreSetTarget(ctx context.Context, d backup.Driver, p restoreParams) (st
 	return "set " + p.Set, nil
 }
 
-func restoreDumpTarget(ctx context.Context, cfg config.Cluster, p restoreParams, sec map[string]string) (string, error) {
-	if sec[steps.SecretBackupAgeIdentity] == "" {
-		return "", output.NewError(output.CodeInputRequired, "a restore from a dump needs the age identity from the recovery kit", output.ExitInput,
-			"Run the restore with an vaire that has the recovery kit (vaire login from a transfer bundle made with vaire secrets export); it sends the identity with the request.").WithDetails(map[string]any{"secret": steps.SecretBackupAgeIdentity})
-	}
-	target, _, err := steps.BackupTarget(cfg)
-	if err != nil {
-		return "", err
-	}
-	dumps, err := backup.ListDumps(ctx, target, p.Database)
-	if err != nil {
-		return "", err
-	}
-	for _, dump := range dumps {
-		if dump.ID == p.Dump {
-			return "dump " + p.Dump, nil
-		}
-	}
-	return "", output.NewError(output.CodePrecondition, "there is no dump "+p.Dump+" of "+p.Database, output.ExitPrecondition,
-		"List the dumps with vaire dump list "+p.Database+".").WithDetails(map[string]any{"reason": "dump_not_found"})
-}
-
 // olderStanzaHint names db's dropped stanza in a target-outside-the-window
-// refusal when one is still kept under another name: after a restore from a
-// dump, the history from before the dump is in the old stanza, which a
-// restore doesn't search.
+// refusal when one is still kept under another name, which vaire restore
+// doesn't search.
 func olderStanzaHint(err error, db, stanza string) error {
 	bs, lerr := backup.LoadRecords()
 	if lerr != nil {
@@ -397,6 +391,9 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
+	if !supportedRestoreKind(p.Kind) {
+		return nil, unsupportedRestoreKind(p.Kind)
+	}
 	port, warnings, attempt, err := materialiseRestore(ctx, env, p)
 	if err != nil {
 		return nil, errors.Join(err, failRestoreChecked(env, err, attempt))
@@ -429,7 +426,7 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 		res["promoted"] = promoted
 		// A restored source opens on a new timeline, so its followers stop
 		// following it (D12). They stay structured warnings: the CLI forwards
-		// their followers_diverged code, not the dump warnings' label.
+		// their followers_diverged code, not the warnings' label.
 		res["follower_warnings"] = followersDiverged(env.Cluster, p.Database)
 	} else if err := restoreApplyPoolers(ctx, env.Cluster, rt, "", env.Report); err != nil {
 		res["pooler_warning"] = "the session pooler was not reloaded, so vaire sql --db " + backup.RestoringName(p.Database) + " fails until vaire apply: " + err.Error()
@@ -590,7 +587,7 @@ func validateFailedRestoreRecord(r backup.Restore, ok bool, env *jobEnv, p resto
 
 func applyFailedRestore(r *backup.Restore, p restoreParams, cause error, expected *backup.MaterialisationAttempt) error {
 	r.Phase, r.Error = backup.PhaseFailed, cause.Error()
-	if p.Kind != targetDump && r.Attempt == nil && !r.MaterialisationCleaned {
+	if r.Attempt == nil && !r.MaterialisationCleaned {
 		r.MaterialisationPending = true
 		r.MaterialisationCleaned = false
 	}
@@ -609,8 +606,8 @@ func applyFailedRestore(r *backup.Restore, p restoreParams, cause error, expecte
 
 // materialiseRestore builds the temporary cluster <db>__restoring: a
 // pgBackRest restore of the database's stanza paused at the target (a
-// standby following the archive for latest), or a new cluster loaded from a
-// dump. It returns the cluster's port. A failure drops what was built.
+// standby following the archive for latest). It returns the cluster's
+// port. A failure drops what was built.
 func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int, []string, *backup.MaterialisationAttempt, error) {
 	cfg := env.Cluster
 	spec, err := clusterOf(cfg, p.Database)
@@ -627,26 +624,22 @@ func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int,
 	}
 	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
 		Intent: spec, Stanza: spec.Stanza, CopyDB: p.Database, Options: opts,
-		Historical: p.Kind != targetDump, Dump: p.Kind == targetDump, Standby: p.Kind != targetDump,
+		Historical: true, Standby: true,
 		Declaration: spec.RecoveryExtensions,
 	})
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	if p.Kind != targetDump {
-		if err := prepareRestoreRecord(env, p, bs); err != nil {
-			return 0, nil, nil, err
-		}
+	if err := prepareRestoreRecord(env, p, bs); err != nil {
+		return 0, nil, nil, err
 	}
 	m, err := constructRestoreMaterialised(env, p, spec, cfg)
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	if p.Kind != targetDump {
-		defer m.ReleaseForkReservationAuthority()
-		if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
-			return 0, nil, nil, err
-		}
+	defer m.ReleaseForkReservationAuthority()
+	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
+		return 0, nil, nil, err
 	}
 	prestartFollowerCopy(m, env, cfg, spec, plan)
 	warnings, expected, birth, err := buildRestoreMaterialisation(ctx, env, p, spec, bs, m)
@@ -685,29 +678,17 @@ func prepareRestoreRecord(env *jobEnv, p restoreParams, bs backup.Records) error
 }
 
 func constructRestoreMaterialised(env *jobEnv, p restoreParams, spec config.ClusterSpec, cfg config.Cluster) (*backup.Materialised, error) {
-	constructor := callerNewMaterialised
-	if p.Kind != targetDump {
-		constructor = callerNewRestoreOwned
-	}
+	constructor := callerNewRestoreOwned
 	var m *backup.Materialised
-	var err error
-	if p.Kind == targetDump {
+	err := withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
+		var err error
 		m, err = constructor(cfg.Server.DataRoot, backup.RestoringName(p.Database), p.Database, spec.Port, env.shell(), env.Job, env.Report)
-	} else {
-		err = withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
-			var err error
-			m, err = constructor(cfg.Server.DataRoot, backup.RestoringName(p.Database), p.Database, spec.Port, env.shell(), env.Job, env.Report)
-			return err
-		})
-	}
+		return err
+	})
 	return m, err
 }
 
 func buildRestoreMaterialisation(ctx context.Context, env *jobEnv, p restoreParams, spec config.ClusterSpec, bs backup.Records, m *backup.Materialised) ([]string, *backup.MaterialisationAttempt, *restoreBirth, error) {
-	if p.Kind == targetDump {
-		warnings, err := loadFromDump(ctx, env, p, spec, m)
-		return warnings, nil, nil, err
-	}
 	destination, err := prepareMaterialisationConfig(env.Cluster, spec)
 	if err != nil {
 		return nil, nil, nil, err
@@ -794,7 +775,7 @@ func cleanupFailedRestore(ctx context.Context, env *jobEnv, p restoreParams, m *
 	} else {
 		dropErr = m.Drop() //nolint:contextcheck // cleanup runs after the caller's operation and bounds itself.
 	}
-	if dropErr == nil && p.Kind != targetDump {
+	if dropErr == nil {
 		_ = backup.UpdateRecords(func(s *backup.Records) error {
 			r, ok := s.Restores[p.Database]
 			if !ok || !matchesRestoreInvocation(r, env, p.Database) || r.Attempt == nil || expected == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected) {
@@ -808,61 +789,6 @@ func cleanupFailedRestore(ctx context.Context, env *jobEnv, p restoreParams, m *
 		})
 	}
 	return 0, warnings, expected, cause
-}
-
-// loadFromDump creates the empty cluster m, copies the live cluster's roles
-// into it, creates the database with vaire's grants, then downloads and
-// decrypts the dump with the age identity the operator sent for this job
-// and loads it.
-func loadFromDump(ctx context.Context, env *jobEnv, p restoreParams, spec config.ClusterSpec, m *backup.Materialised) ([]string, error) {
-	t, _, err := steps.BackupTarget(env.Cluster)
-	if err != nil {
-		return nil, err
-	}
-	r, err := backup.OpenDump(ctx, t, p.Database, p.Dump, env.Secrets[steps.SecretBackupAgeIdentity])
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = r.Close() }()
-	// Resolve the extension SQL before any write, so invalid intent cannot
-	// leave a partially loaded restore target behind.
-	grants, err := steps.DatabaseGrantsSQL(env.Cluster, spec)
-	if err != nil {
-		return nil, err
-	}
-	if err := m.Initdb(ctx, env.Cluster.Postgres.LocaleProvider, env.Cluster.Postgres.Locale); err != nil {
-		return nil, err
-	}
-	if err := m.CopyRoles(ctx); err != nil {
-		return nil, err
-	}
-	local := m.PG()
-	// The copy holds the live database's roles, so its vaire_admin follows
-	// the live database's protection: on a protected database it can only
-	// read and a write needs a code (db.write-access), exactly as on the
-	// live one, so a promote cannot launder the protection away.
-	if err := local.Exec(ctx, steps.AuthDB, steps.AdminRoleSQL(spec), nil); err != nil {
-		return nil, err
-	}
-	sql := steps.AuthFunctionsSQL() + fmt.Sprintf("CREATE DATABASE %s OWNER %s;\n", pg.Quote(spec.Name), pg.Quote(spec.Name+"_owner")) +
-		steps.DatabaseConnectSQL(spec.Name, spec.Name)
-	if err := local.Exec(ctx, steps.AuthDB, sql, nil); err != nil {
-		return nil, err
-	}
-	if err := local.Exec(ctx, spec.Name, grants, nil); err != nil {
-		return nil, err
-	}
-	logLine(env.Report, env.Job, "loading dump "+p.Dump+" into "+m.Name)
-	warnings, err := backup.LoadDump(ctx, env.shell(), env.Job, env.Report, io.Reader(r), local, spec.Name, spec.Name+"_owner")
-	if err != nil {
-		return warnings, err
-	}
-	// The grants again for what the dump created, and ANALYZE, so restore
-	// status can compare row estimates.
-	if err := local.Exec(ctx, spec.Name, grants, nil); err != nil {
-		return warnings, err
-	}
-	return warnings, local.Exec(ctx, spec.Name, "ANALYZE;\n", nil)
 }
 
 type restoreDBParams struct {
@@ -902,6 +828,9 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	r, ok := bs.OpenRestore(p.Database)
+	if ok && !supportedRestoreKind(r.Kind) {
+		return Result{}, unsupportedRestoreState(r.Kind)
+	}
 	if ok && (r.Attempt != nil || r.MaterialisationPending) {
 		return Result{}, incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
@@ -935,9 +864,8 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 // directory takes the live one's place and the old one becomes the stopped
 // leftover cluster <db>__pre_restore_<ts>. 18/<db> starts with its own
 // configuration, cgroup and archive_command, replays to the target again
-// and is promoted onto a new timeline, archiving to the same stanza. A
-// restore from a dump has a new system identifier, so db gets a new stanza
-// and the old one is kept as a dropped stanza. Then a full backup starts.
+// and is promoted onto a new timeline, archiving to the same stanza.
+// Then a full backup starts.
 // A failed backup start is data["warning"], not an error: the cut-over is
 // done. unlock runs before the backup starts, so its job can take db's
 // cluster lock.
@@ -959,13 +887,9 @@ var (
 // a swapped one.
 func restorePromoteFenceIdentity(cfg config.Cluster, r backup.Restore, aside string, spec config.ClusterSpec) activationFenceIdentity {
 	restoring := backup.RestoringName(r.Database)
-	fenceStanza, fenceOld, fenceNew := spec.Stanza, spec.Stanza, spec.Stanza
-	if r.Kind == targetDump {
-		fenceStanza, fenceOld, fenceNew = r.NewStanza, r.OldStanza, r.NewStanza
-	}
 	return activationFenceIdentity{
 		Database: r.Database, Kind: "restore-promote", OperationID: r.ID, Spec: spec,
-		TargetStanza: fenceStanza, OldStanza: fenceOld, NewStanza: fenceNew, Aside: aside,
+		TargetStanza: spec.Stanza, OldStanza: spec.Stanza, NewStanza: spec.Stanza, Aside: aside,
 		Registration: fmt.Sprintf("%s:%d:", restoring, r.Port),
 		Port:         r.Port, DataDir: cfg.Server.DataDirectory(restoring), ConfDir: steps.PGConfDir(restoring),
 	}
@@ -974,19 +898,18 @@ func restorePromoteFenceIdentity(cfg config.Cluster, r backup.Restore, aside str
 // restorePromotion carries the state fixed before a promote's first
 // irreversible step.
 type restorePromotion struct {
-	cfg         config.Cluster
-	db          string
-	rt          engine.Runtime
-	report      engine.Reporter
-	spec        config.ClusterSpec
-	r           backup.Restore
-	aside       string
-	oldArchived string
-	plan        *extensionCopyPlan
-	liveData    string
-	fenceID     activationFenceIdentity
-	started     time.Time
-	elapsed     time.Duration
+	cfg      config.Cluster
+	db       string
+	rt       engine.Runtime
+	report   engine.Reporter
+	spec     config.ClusterSpec
+	r        backup.Restore
+	aside    string
+	plan     *extensionCopyPlan
+	liveData string
+	fenceID  activationFenceIdentity
+	started  time.Time
+	elapsed  time.Duration
 }
 
 // preparePromotion resolves the restore record, aside, extension plan and
@@ -1000,6 +923,9 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 	if !exists || r.ID == "" || r.Database != db || r.Phase != backup.PhaseReady {
 		return nil, fmt.Errorf("restore record for %s is missing or not ready", db)
 	}
+	if !supportedRestoreKind(r.Kind) {
+		return nil, unsupportedRestoreState(r.Kind)
+	}
 	spec, err := clusterOf(cfg, db)
 	if err != nil {
 		return nil, err
@@ -1009,24 +935,15 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 		// A promote from before the aside was recorded.
 		aside = swappedAside(cfg, db, bs, r)
 	}
-	oldArchived := r.AsideArchivedAt
 	opts := restoreOptionsFromRecord(r)
-	planStanza := spec.Stanza
-	if r.Kind == targetDump {
-		planStanza = ""
-		r, _, _, err = fixDumpPromoteStanzaIdentities(db, spec, r)
-		if err != nil {
-			return nil, err
-		}
-	}
 	// Owned promote: after the target and aside are resolved, before the first
 	// durable record update, pause, swap or start.
 	if err := prepareTargetExtensions(ctx, cfg, spec, rt, report); err != nil {
 		return nil, err
 	}
 	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
-		Intent: spec, Stanza: planStanza, CopyDB: db, Options: opts,
-		Historical: r.Kind != targetDump, Dump: r.Kind == targetDump, Standby: r.Kind != targetDump,
+		Intent: spec, Stanza: spec.Stanza, CopyDB: db, Options: opts,
+		Historical: true, Standby: true,
 		Declaration: spec.RecoveryExtensions,
 	})
 	if err != nil {
@@ -1039,15 +956,13 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 	if err != nil {
 		return nil, err
 	}
-	if r.Kind != targetDump {
-		if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
-			return nil, output.NewError(output.CodePrecondition,
-				"recording the restore's extension requirements before promotion failed: "+err.Error(),
-				output.ExitPrecondition, "Nothing was promoted. Retry after fixing the requirement history store.").
-				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
-		}
+	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
+		return nil, output.NewError(output.CodePrecondition,
+			"recording the restore's extension requirements before promotion failed: "+err.Error(),
+			output.ExitPrecondition, "Nothing was promoted. Retry after fixing the requirement history store.").
+			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
 	}
-	aside, oldArchived, err = recordPromoteAside(ctx, cfg, db, r, spec, aside, oldArchived, report)
+	aside, err = recordPromoteAside(ctx, cfg, db, r, aside, report)
 	if err != nil {
 		return nil, err
 	}
@@ -1059,7 +974,7 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 	}
 	return &restorePromotion{
 		cfg: cfg, db: db, rt: rt, report: report, spec: spec, r: r,
-		aside: aside, oldArchived: oldArchived, plan: plan, liveData: liveData,
+		aside: aside, plan: plan, liveData: liveData,
 		fenceID: fenceID, started: start,
 	}, nil
 }
@@ -1089,25 +1004,21 @@ func ensurePromoteGuard(ctx context.Context, cfg config.Cluster, db string, r ba
 
 // recordPromoteAside fixes the aside before any rename, so a promote that
 // fails part way resumes with the same aside and abort knows the copy is in.
-func recordPromoteAside(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, spec config.ClusterSpec, aside, oldArchived string, report engine.Reporter) (string, string, error) {
+func recordPromoteAside(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, aside string, report engine.Reporter) (string, error) {
 	const step = "restore.promote"
 	switch {
 	case aside == "":
 		aside = backup.PreRestoreName(db, time.Now())
-		if r.Kind == targetDump {
-			// The old stanza is dropped below; its window ends at its last WAL.
-			oldArchived = lastArchivedTime(ctx, spec)
-		}
 		if err := backup.UpdateRecords(func(s *backup.Records) error {
 			cur, ok := s.Restores[db]
 			if !ok || cur.ID != r.ID {
 				return fmt.Errorf("the restore of %s changed while promoting it", db)
 			}
-			cur.Aside, cur.AsideArchivedAt = aside, oldArchived
+			cur.Aside = aside
 			s.Restores[db] = cur
 			return nil
 		}); err != nil {
-			return "", "", err
+			return "", err
 		}
 		logLine(report, step, "cutting "+db+" over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
 	case backup.SwapState(cfg.Server.DataRoot, db, backup.RestoringName(db), aside) == backup.SwapNotStarted:
@@ -1115,7 +1026,7 @@ func recordPromoteAside(ctx context.Context, cfg config.Cluster, db string, r ba
 	default:
 		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
 	}
-	return aside, oldArchived, nil
+	return aside, nil
 }
 
 // cutoverPromotion fences the poolers and swaps, starts and promotes the
@@ -1150,7 +1061,7 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 	}
 	if err == nil {
 		until := backup.UntilPaused
-		if p.r.Kind == backup.TargetLatest || p.r.Kind == targetDump {
+		if p.r.Kind == backup.TargetLatest {
 			until = backup.UntilOpen
 		}
 		err = startCluster(ctx, p.rt.Shell, step, p.report, p.db, p.cfg.Server.DataDirectory(p.db), p.spec.Port, until)
@@ -1177,54 +1088,34 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 	return nil
 }
 
-// finishPromotion switches a dump's stanza, settles the restored copy's
-// extensions, provisions recovered access, and atomically retires the
-// restore into routing.
-func finishPromotion(ctx context.Context, p *restorePromotion) (string, []output.Warning, error) {
+// finishPromotion settles the restored copy's extensions, provisions
+// recovered access, and atomically retires the restore into routing.
+func finishPromotion(ctx context.Context, p *restorePromotion) ([]output.Warning, error) {
 	const step = "restore.promote"
-	newStanza := ""
-	oldStanza := p.spec.Stanza
-	if p.r.Kind == targetDump {
-		cfg, r, fresh, old, err := prepareDumpPromoteStanza(p.cfg, p.db, p.spec, p.r)
-		if err != nil {
-			return "", nil, err
-		}
-		p.cfg, p.r, newStanza, oldStanza = cfg, r, fresh, old
-		// The stanza switch is already durable in cluster.toml. The
-		// destination spec is now the new stanza; oldStanza stays the
-		// separate fact for the leftover and replaced-stanza records.
-		p.spec, _ = p.cfg.ClusterByName(p.db)
-		if err := recordCopyRequirements(newStanza, p.db, p.plan.Plan); err != nil {
-			return "", nil, output.NewError(output.CodePrecondition,
-				"recording the restored stanza's extension requirements failed: "+err.Error(),
-				output.ExitPrecondition, "The data is promoted but routing stays blocked. Retry vaire restore promote "+p.db+".").
-				WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.db})
-		}
-	}
 	warnings, err := settleRestoredCopy(ctx, p.cfg, p.spec, steps.ClusterPG(p.spec), p.liveData, p.plan.Plan, p.spec.DatabaseName(), func() error {
 		return backup.RestartCluster(ctx, p.rt.Shell, step, p.report, p.db, p.liveData, p.spec.Port)
 	})
 	if err != nil {
-		return "", nil, withHint(err, "The data is promoted but its extension settlement is incomplete, so routing stays blocked and the copy's suppression remains. Fix the prerequisite, then run vaire restore promote "+p.db+" again.")
+		return nil, withHint(err, "The data is promoted but its extension settlement is incomplete, so routing stays blocked and the copy's suppression remains. Fix the prerequisite, then run vaire restore promote "+p.db+" again.")
 	}
 	if err := provisionRecoveredAccess(ctx, p.cfg, p.db, p.r, p.rt, p.report); err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	if err := restoreCredentialsApply(ctx, p); err != nil {
-		return "", nil, withHint(err, "The data is promoted but its managed login credentials were not restored, so routing stays blocked. Retry vaire restore promote "+p.db+".")
+		return nil, withHint(err, "The data is promoted but its managed login credentials were not restored, so routing stays blocked. Retry vaire restore promote "+p.db+".")
 	}
 	p.elapsed = time.Since(p.started)
-	// Retiring the open restore, its timeline/leftover/replaced-stanza facts
-	// and the fence's routing eligibility is one records update. A failed
-	// write leaves the old promoted continuation whole; no orphan routing
-	// fence can outlive the restore record.
-	if err := retireRestoreAndRoute(p.cfg, p.db, p.r, p.spec, p.aside, oldStanza, newStanza, p.fenceID.TargetStanza, p.fenceID.OldStanza, p.fenceID.NewStanza, p.oldArchived); err != nil {
-		return "", nil, err
+	// Retiring the open restore, its timeline/leftover facts and the fence's
+	// routing eligibility is one records update. A failed write leaves the old
+	// promoted continuation whole; no orphan routing fence can outlive the
+	// restore record.
+	if err := retireRestoreAndRoute(p.db, p.r, p.spec, p.aside, p.fenceID.TargetStanza, p.fenceID.OldStanza, p.fenceID.NewStanza); err != nil {
+		return nil, err
 	}
 	if err := restoreCredentialsClear(p); err != nil {
 		warnings = append(warnings, restoreCredentialCleanupWarning(p.db, err))
 	}
-	return newStanza, warnings, nil
+	return warnings, nil
 }
 
 func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter, unlock func()) (map[string]any, error) {
@@ -1235,7 +1126,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	if err := cutoverPromotion(ctx, p); err != nil {
 		return nil, err
 	}
-	newStanza, warnings, err := finishPromotion(ctx, p)
+	warnings, err := finishPromotion(ctx, p)
 	if err != nil {
 		return nil, err
 	}
@@ -1245,9 +1136,6 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	}
 	var warn error
 	runs := []engine.Options{{Only: steps.PoolerStepIDs()}}
-	if newStanza != "" {
-		runs = append(runs, stanzaRuns(db)...)
-	}
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), p.cfg, runs...))
 	if _, _, err := verifyActivationFence(p.cfg, db, p.r.ID, "restore-promote", fencePhaseRouting); err != nil {
 		warn = err
@@ -1256,12 +1144,7 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	} else if err := verifyRoutingFence(ctx, p.cfg, p.spec, p.r.ID, "restore-promote"); err != nil {
 		warn = err
 	}
-	if newStanza != "" {
-		data["stanza"] = newStanza
-		if err := applyStanzaAt(ctx, p.cfg, db, rt, report); err != nil {
-			warn = err
-		}
-	} else if !p.r.NoFull {
+	if !p.r.NoFull {
 		unlock()
 		if err := startFullBackup(ctx, p.cfg, rt, db, "restore.promote", report); err != nil {
 			warn = err
@@ -1297,12 +1180,12 @@ func provisionRecoveredAccess(ctx context.Context, cfg config.Cluster, db string
 // fence routing eligibility. The restore record, fence operation/kind/phase,
 // immutable stanza transition and aside must all still be the exact ones the
 // promote fixed; otherwise nothing changes.
-func retireRestoreAndRoute(cfg config.Cluster, db string, r backup.Restore, spec config.ClusterSpec, aside, oldStanza, newStanza, fenceStanza, fenceOld, fenceNew, oldArchived string) error {
+func retireRestoreAndRoute(db string, r backup.Restore, spec config.ClusterSpec, aside, fenceStanza, fenceOld, fenceNew string) error {
 	return backup.UpdateRecords(func(s *backup.Records) error {
 		cur, ok := s.Restores[db]
 		if !ok || cur.ID != r.ID || cur.Database != db || cur.Aside != aside || cur.Recover != r.Recover ||
 			cur.Phase != backup.PhaseReady ||
-			cur.Kind != r.Kind || cur.Port != r.Port || cur.OldStanza != r.OldStanza || cur.NewStanza != r.NewStanza {
+			cur.Kind != r.Kind || cur.Port != r.Port {
 			return fmt.Errorf("the restore of %s changed while retiring it", db)
 		}
 		f, ok := s.ActivationFenceFor(db)
@@ -1320,14 +1203,7 @@ func retireRestoreAndRoute(cfg config.Cluster, db string, r backup.Restore, spec
 		}
 		delete(s.Restores, db)
 		delete(s.Timelines, db)
-		s.Leftovers = append(s.Leftovers, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: r.ID, Port: r.Port, Stanza: oldStanza})
-		if newStanza != "" {
-			oldSpec := spec
-			oldSpec.Stanza = oldStanza
-			s.DroppedStanzas = append(s.DroppedStanzas, replacedStanza(cfg, oldSpec, oldArchived))
-			// The last verify was of the old stanza.
-			delete(s.LastVerify, db)
-		}
+		s.Leftovers = append(s.Leftovers, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: r.ID, Port: r.Port, Stanza: spec.Stanza})
 		return nil
 	})
 }
@@ -1342,48 +1218,6 @@ func restoreOptionsFromRecord(r backup.Restore) backup.RestoreOptions {
 		opts.Set = strings.TrimPrefix(r.Target, "set ")
 	}
 	return opts
-}
-
-// prepareDumpPromoteStanza fixes a restore-from-dump promote's old and new
-// stanza identities before the switch, then switches cluster.toml to the
-// recorded new stanza. A retry after an interruption before or after the save
-// reuses the same identities and never creates another stanza.
-func prepareDumpPromoteStanza(cfg config.Cluster, db string, spec config.ClusterSpec, r backup.Restore) (config.Cluster, backup.Restore, string, string, error) {
-	r, newStanza, oldStanza, err := fixDumpPromoteStanzaIdentities(db, spec, r)
-	if err != nil {
-		return cfg, r, "", "", err
-	}
-	cfg, _, err = switchStanza(cfg, db, newStanza)
-	return cfg, r, newStanza, oldStanza, err
-}
-
-// fixDumpPromoteStanzaIdentities fixes a dump promote's old/new stanza
-// identities in the restore record before the swap or any ordinary entry
-// publication. A retry reuses them and never creates another stanza.
-func fixDumpPromoteStanzaIdentities(db string, spec config.ClusterSpec, r backup.Restore) (backup.Restore, string, string, error) {
-	if r.NewStanza == "" {
-		name, err := config.NewStanza(db)
-		if err != nil {
-			return r, "", "", err
-		}
-		if err := backup.UpdateRecords(func(s *backup.Records) error {
-			cur, ok := s.Restores[db]
-			if !ok || cur.ID != r.ID {
-				return fmt.Errorf("the restore of %s changed while promoting it", db)
-			}
-			cur.OldStanza, cur.NewStanza = spec.Stanza, name
-			s.Restores[db] = cur
-			return nil
-		}); err != nil {
-			return r, "", "", err
-		}
-		r.OldStanza, r.NewStanza = spec.Stanza, name
-	}
-	oldStanza := spec.Stanza
-	if r.OldStanza != "" {
-		oldStanza = r.OldStanza
-	}
-	return r, r.NewStanza, oldStanza, nil
 }
 
 // swappedAside returns the cluster an earlier promote of restore r left the
@@ -1420,15 +1254,6 @@ func droppedStanza(cfg config.Cluster, spec config.ClusterSpec, lastArchived str
 		ExpiresAt: now.AddDate(0, 0, 7*cfg.RetentionFull(spec)).Format(time.RFC3339), LastArchivedAt: lastArchived}
 }
 
-// replacedStanza records spec's stanza as replaced now by a restore that
-// switched the database to a new stanza, kept for its window like a dropped
-// one.
-func replacedStanza(cfg config.Cluster, spec config.ClusterSpec, lastArchived string) backup.DroppedStanza {
-	d := droppedStanza(cfg, spec, lastArchived)
-	d.Reason = backup.DroppedReasonReplaced
-	return d
-}
-
 // lastArchivedTime is when spec's running cluster last archived a WAL
 // segment (pg_stat_archiver), or "" when it can't be read. pgbackrest info
 // names a stanza's newest segment but not its time, so a stanza about to be
@@ -1439,66 +1264,6 @@ func lastArchivedTime(ctx context.Context, spec config.ClusterSpec) string {
 		return ""
 	}
 	return st.LastArchivedTime
-}
-
-// switchStanzaStore is the desired-state store switchStanza writes. It is a
-// variable so dump-promote retry tests can use a scratch cluster.toml.
-var switchStanzaStore = func() state.Store { return state.FileStore{} }
-
-// switchStanza gives db the stanza to (a new one when empty) in
-// cluster.toml: an exception to "stanza immutable" that only restore makes,
-// when the cluster's system identifier changes (a restore from a dump, or
-// undo of one). It returns the saved configuration.
-func switchStanza(cfg config.Cluster, db, to string) (config.Cluster, string, error) {
-	store := switchStanzaStore()
-	cur, _, err := store.Load()
-	if err != nil {
-		return cfg, "", err
-	}
-	if to == "" {
-		if to, err = config.NewStanza(db); err != nil {
-			return cfg, "", err
-		}
-	}
-	for i := range cur.Clusters {
-		if cur.Clusters[i].Name == db {
-			cur.Clusters[i].Stanza = to
-		}
-	}
-	raw, err := cur.Encode()
-	if err != nil {
-		return cfg, "", err
-	}
-	if err := store.Save(raw); err != nil {
-		return cfg, "", err
-	}
-	return cur, to, nil
-}
-
-// stanzaRuns are the applies applyStanza runs, for the request's step
-// numbering.
-func stanzaRuns(db string) []engine.Options {
-	return []engine.Options{{DB: db}, {Only: append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...)}}
-}
-
-// applyStanza points db's archive_command at its stanza (its own steps, a
-// reload), then runs pgbackrest-v1 (the stanza's section, stanza-create,
-// check and a first full when it has none) and timers-v1.
-// applyStanzaAt is the post-promote stanza/timer apply. It is a variable so a
-// lifecycle test can run the real orchestration without a repository host.
-var applyStanzaAt = applyStanza
-
-func applyStanza(ctx context.Context, cfg config.Cluster, db string, rt engine.Runtime, report engine.Reporter) error {
-	catalog := steps.Catalog()
-	ids := existingSettlementSteps(catalog, cfg, db)
-	if len(ids) == 0 {
-		return fmt.Errorf("no settlement steps for %q", db)
-	}
-	if _, _, err := engine.Apply(ctx, catalog, cfg, rt, engine.Options{DB: db, Only: ids, Restarter: steps.Restarter(cfg), Report: report}); err != nil {
-		return err
-	}
-	_, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: append(steps.PgBackRestStepIDs(), steps.TimersStepIDs()...), Restarter: steps.RestarterFor(cfg, rt, report), Report: report})
-	return err
 }
 
 // startFullBackup starts db's full backup job through its timer's template
@@ -1523,12 +1288,7 @@ func prepareUndoStart(ctx context.Context, env *Env, p restoreDBParams, spec con
 	if u.Aside == back.Name {
 		u.Aside += "b"
 	}
-	if back.Stanza != "" && back.Stanza != spec.Stanza {
-		// The restored data's stanza is dropped below; its window ends at its
-		// last WAL.
-		u.LastArchivedAt = lastArchivedTime(ctx, spec)
-	}
-	u.Stanza, u.StartedAt = spec.Stanza, stamp()
+	u.StartedAt = stamp()
 	// Recorded before any rename, so an undo that fails part way resumes with
 	// the same names, and the aside is never lost.
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
@@ -1552,7 +1312,7 @@ func swapUndo(ctx context.Context, cfg config.Cluster, db string, spec config.Cl
 	return err
 }
 
-func recordUndo(cfg config.Cluster, db string, spec config.ClusterSpec, u backup.Undo, aside, abandoned, oldArchived, timeline, stanza string) error {
+func recordUndo(db string, u backup.Undo, aside, abandoned, timeline, stanza string) error {
 	back := u.From
 	return backup.UpdateRecords(func(s *backup.Records) error {
 		if cur, ok := s.Undoing[db]; !ok || cur != u {
@@ -1564,17 +1324,7 @@ func recordUndo(cfg config.Cluster, db string, spec config.ClusterSpec, u backup
 				kept = append(kept, l)
 			}
 		}
-		s.Leftovers = append(kept, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: undoRestoreID(back.RestoreID), Port: back.Port, Stanza: spec.Stanza})
-		if stanza != spec.Stanza {
-			dropped := s.DroppedStanzas[:0]
-			for _, d := range s.DroppedStanzas {
-				if d.Stanza != stanza {
-					dropped = append(dropped, d)
-				}
-			}
-			s.DroppedStanzas = append(dropped, replacedStanza(cfg, spec, oldArchived))
-			delete(s.LastVerify, db)
-		}
+		s.Leftovers = append(kept, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: undoRestoreID(back.RestoreID), Port: back.Port, Stanza: stanza})
 		s.Timelines[db] = backup.TimelineSwitch{Stanza: stanza, Timeline: timeline, SwitchedAt: stamp(), Abandoned: abandoned}
 		u.Routing = true
 		s.Undoing[db] = u
@@ -1607,7 +1357,7 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	back := u.From
-	if err := validateUndoRoutingStanza(bs, p.Database, spec, back); err != nil {
+	if err := validateUndoRoutingStanza(p.Database, spec, back); err != nil {
 		return Result{}, err
 	}
 	if env.Req.DryRun {
@@ -1649,7 +1399,7 @@ func runLockedUndo(ctx context.Context, env *Env, db string, release func()) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	if err := validateUndoRoutingStanza(bs, db, spec, u.From); err != nil {
+	if err := validateUndoRoutingStanza(db, spec, u.From); err != nil {
 		return Result{}, err
 	}
 	if err := validateUndoContinuation(bs, db, spec, u); err != nil {
@@ -1685,11 +1435,7 @@ func executeUndo(ctx context.Context, env *Env, cfg config.Cluster, spec config.
 	rt := runtimeFor(env, false)
 	if u.Routing {
 		// Do not repeat the swap after a reload/resume/verification failure.
-		stanza := spec.Stanza
-		if u.Stanza != "" {
-			spec.Stanza = u.Stanza
-		}
-		return undoResult(ctx, env, cfg, spec, u, stanza, bs.Timelines[db].Timeline, rt, release), nil
+		return undoResult(ctx, env, cfg, spec, u, spec.Stanza, bs.Timelines[db].Timeline, rt, release), nil
 	}
 	local := steps.ClusterPG(spec)
 	if err := prepareTargetExtensions(ctx, cfg, spec, rt, env.Report); err != nil {
@@ -1698,12 +1444,7 @@ func executeUndo(ctx context.Context, env *Env, cfg config.Cluster, spec config.
 	if err := prepareUndoStart(ctx, env, restoreDBParams{Database: db}, spec, &u, back, resuming); err != nil {
 		return Result{}, err
 	}
-	aside, abandoned, oldArchived := u.Aside, u.Abandoned, u.LastArchivedAt
-	if u.Stanza != "" {
-		// A resumed undo may have switched cluster.toml's stanza already;
-		// the restored data's stanza is the one recorded at the start.
-		spec.Stanza = u.Stanza
-	}
+	aside, abandoned := u.Aside, u.Abandoned
 	if err := swapUndo(ctx, cfg, db, spec, back, aside, rt, env); err != nil {
 		return Result{}, withHint(err, "Read vaire logs postgres --db "+db+", then run vaire restore undo "+db+" again: it resumes; the restored data is in the cluster "+aside+".")
 	}
@@ -1711,15 +1452,8 @@ func executeUndo(ctx context.Context, env *Env, cfg config.Cluster, spec config.
 	if err != nil {
 		return Result{}, err
 	}
-	// Undo of a restore from a dump brings back the cluster of the old
-	// stanza: it returns to cluster.toml, and the dump's stanza is dropped.
 	stanza := spec.Stanza
-	if back.Stanza != "" && back.Stanza != spec.Stanza {
-		if cfg, stanza, err = switchStanza(cfg, db, back.Stanza); err != nil {
-			return Result{}, err
-		}
-	}
-	if err := recordUndo(cfg, db, spec, u, aside, abandoned, oldArchived, timeline, stanza); err != nil {
+	if err := recordUndo(db, u, aside, abandoned, timeline, stanza); err != nil {
 		return Result{}, err
 	}
 	u.Routing = true
@@ -1729,32 +1463,25 @@ func executeUndo(ctx context.Context, env *Env, cfg config.Cluster, spec config.
 func undoResult(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, u backup.Undo, stanza, timeline string, rt engine.Runtime, release func()) Result {
 	db := spec.Name
 	data := map[string]any{"database": db, "restored_from": u.From.Name, "pre_undo": u.Aside, "timeline": timeline, "stanza": stanza}
-	warnings := finishUndo(ctx, cfg, db, spec, stanza, u, rt, env, release)
+	warnings := finishUndo(ctx, cfg, db, u, rt, env, release)
 	steps.WriteMetrics(cfg)
 	warnings = append(warnings, followersDiverged(cfg, db)...)
 	return Result{Data: data, Warnings: warnings}
 }
 
-func validateUndoRoutingStanza(recs backup.Records, db string, spec config.ClusterSpec, back backup.Leftover) error {
-	if _, pending := recs.ActivationFenceFor(db); pending && back.Stanza != "" && back.Stanza != spec.Stanza {
+func validateUndoRoutingStanza(db string, spec config.ClusterSpec, back backup.Leftover) error {
+	if back.Stanza != "" && back.Stanza != spec.Stanza {
 		return output.NewError(output.CodePrecondition,
-			"finish "+db+"'s pending routing before undo changes its stanza",
-			output.ExitPrecondition, "Run vaire apply to finish the promotion's routing, then retry undo. Nothing was swapped.").
-			WithDetails(map[string]any{"reason": "undo_routing_pending", "database": db})
+			"the pre-restore copy of "+db+" belongs to stanza "+back.Stanza+", not its current stanza "+spec.Stanza,
+			output.ExitPrecondition, "Preserve the records and inspect the operation; nothing was swapped.").
+			WithDetails(map[string]any{"reason": "undo_identity_changed", "database": db})
 	}
 	return nil
 }
 
-func finishUndo(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, stanza string, u backup.Undo, rt engine.Runtime, env *Env, release func()) []output.Warning {
+func finishUndo(ctx context.Context, cfg config.Cluster, db string, u backup.Undo, rt engine.Runtime, env *Env, release func()) []output.Warning {
 	var warnings []output.Warning
-	var err error
-	if stanza != spec.Stanza {
-		ctx := engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, stanzaRuns(db)...))
-		err = applyStanzaAt(ctx, cfg, db, rt, env.Report)
-	}
-	if err == nil {
-		err = settleUndoRouting(ctx, cfg, db, u, rt, env.Report)
-	}
+	err := settleUndoRouting(ctx, cfg, db, u, rt, env.Report)
 	if err == nil {
 		err = backup.UpdateRecords(func(s *backup.Records) error {
 			if cur, ok := s.Undoing[db]; !ok || cur != u || !cur.Routing {
@@ -1873,6 +1600,9 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	r, ok := bs.OpenRestore(p.Database)
 	if !ok {
 		return continueRestoreAbortRouting(ctx, env, bs, p.Database)
+	}
+	if !supportedRestoreKind(r.Kind) {
+		return Result{}, unsupportedRestoreState(r.Kind)
 	}
 	if f, fenced := bs.ActivationFenceFor(p.Database); fenced && f.Kind == "restore-abort" {
 		return Result{}, output.NewError(output.CodePrecondition,
@@ -2083,7 +1813,6 @@ func samePreSwapRestoreRecord(cur, r backup.Restore, db, aside string) bool {
 		cur.ID == r.ID && cur.InstanceID == r.InstanceID && cur.OperationID == r.OperationID &&
 		cur.Recover == r.Recover && cur.Kind == r.Kind && cur.Port == r.Port &&
 		cur.Aside == aside && r.Aside == aside &&
-		cur.OldStanza == r.OldStanza && cur.NewStanza == r.NewStanza &&
 		cur.Attempt == nil && r.Attempt == nil &&
 		!cur.MaterialisationPending && !r.MaterialisationPending
 }
@@ -2161,9 +1890,6 @@ func verifyPreSwapRestoreBoundary(cfg config.Cluster, db string, r backup.Restor
 		return spec, restoreAbortRefusal(db, "its restore record lost the aside its prepared fence owns")
 	}
 	oldStanza := spec.Stanza
-	if r.Kind == targetDump {
-		oldStanza = r.OldStanza
-	}
 	if oldStanza == "" || spec.Stanza != oldStanza {
 		return spec, restoreAbortRefusal(db, "its live stanza "+spec.Stanza+" is no longer the pre-swap stanza "+oldStanza)
 	}
@@ -2373,9 +2099,6 @@ func handleRestoreStatus(ctx context.Context, env *Env) (Result, error) {
 		st := restoreStatus{Restore: r, Restoring: backup.RestoringName(db),
 			OnPromote: "PgBouncer pauses " + db + ", its cluster and the copy stop, the copy's data directory takes the live one's place and the old one is kept as the cluster " +
 				db + "__pre_restore_<time>; " + db + " starts, reaches the target and is promoted (a few seconds plus the replay), then PgBouncer resumes and a full backup starts. Credentials don't change."}
-		if r.Kind == targetDump {
-			st.OnPromote += " A restore from a dump gives " + db + " a new stanza; the old one is kept for its window."
-		}
 		if r.Recover {
 			ready := false
 			st.ApplicationReady = &ready
@@ -2496,7 +2219,7 @@ func validateFork(ctx context.Context, env *Env, p dbForkParams, cfg config.Clus
 		if err := requireBackups(cfg); err != nil {
 			return err
 		}
-		if _, err := checkRestoreTarget(ctx, cfg, restoreParams{Database: p.Source, Kind: backup.TargetTime, Time: p.At}, nil); err != nil {
+		if _, err := checkRestoreTarget(ctx, cfg, restoreParams{Database: p.Source, Kind: backup.TargetTime, Time: p.At}); err != nil {
 			return err
 		}
 	}

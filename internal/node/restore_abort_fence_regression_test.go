@@ -259,29 +259,6 @@ func TestPreSwapRestoreAbortRetiresPreparedFence(t *testing.T) {
 	}
 }
 
-// TestPreSwapRestoreAbortConvertDumpUsesLiveStanza proves a dump promote's
-// planned new stanza is discarded: the abort continuation binds the untouched
-// live stanza and preserves only the verified aside/creation time.
-func TestPreSwapRestoreAbortConvertDumpUsesLiveStanza(t *testing.T) {
-	cfg, r, live, _ := preSwapRestoreAbortFixture(t)
-	spec := cfg.Clusters[0]
-	r.Kind, r.OldStanza, r.NewStanza = targetDump, spec.Stanza, "app-dump-new"
-	writeRestoreRecord(t, r)
-	prepared := writePreSwapRestoreFence(t, cfg, r)
-	if prepared.TargetStanza != r.NewStanza {
-		t.Fatalf("dump prepared fence target = %q, want %q", prepared.TargetStanza, r.NewStanza)
-	}
-	stub := newAbortRoutingStub(t, cfg)
-	stub.onPublish = func(f backup.ActivationFence) { assertAbortFence(t, f, spec, prepared, live) }
-	if _, err := abortRestore(t, cfg, false); err != nil {
-		t.Fatalf("dump abort: %v", err)
-	}
-	assertAbortRoutingSequence(t, stub)
-	if _, ok := mustRecords(t).ActivationFenceFor("app"); ok {
-		t.Fatal("dump abort left its routing continuation")
-	}
-}
-
 // TestRestoreAbortRetainsRoutingOnRenderFailure proves a failed publish keeps
 // the abort-owned continuation and never resumes. A retried abort finishes it
 // without repeating cleanup.
@@ -595,12 +572,9 @@ func conversionRecheckSwapStarted(t *testing.T) {
 
 func conversionRecheckLiveStanzaChanged(t *testing.T) {
 	cfg, r, _, _ := preSwapRestoreAbortFixture(t)
-	spec := cfg.Clusters[0]
-	r.Kind, r.OldStanza, r.NewStanza = targetDump, spec.Stanza, "app-dump-new"
-	writeRestoreRecord(t, r)
 	writePreSwapRestoreFence(t, cfg, r)
 	auth := capturePreSwapAbort(t, cfg, r)
-	cfg.Clusters[0].Stanza = r.NewStanza
+	cfg.Clusters[0].Stanza = "app-other"
 	if err := convertPreSwapRestoreAbort(cfg, "app", auth); err == nil {
 		t.Fatal("conversion accepted a changed live stanza")
 	}
