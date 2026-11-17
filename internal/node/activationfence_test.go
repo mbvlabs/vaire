@@ -862,6 +862,25 @@ func TestDumpPromoteRetryCompletesThroughRouting(t *testing.T) {
 }
 
 func TestRestorePromoteRetryAfterSwappedCompletes(t *testing.T) {
+	cfg, _ := swappedPromotionFixture(t)
+	if _, err := promote(context.Background(), cfg, "app", engine.Runtime{}, nil, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := recs.Restores["app"]; ok {
+		t.Fatal("swapped retry left the restore record")
+	}
+	if _, ok := recs.ActivationFenceFor("app"); ok {
+		t.Fatal("swapped retry left the activation fence")
+	}
+}
+
+func swappedPromotionFixture(t *testing.T) (config.Cluster, *bool) {
+	t.Helper()
+	stubRestoreCredentialLifecycle(t)
 	useTempExtensionRecords(t)
 	useTestInstance(t)
 	cfg := planCfg(t)
@@ -932,19 +951,7 @@ func TestRestorePromoteRetryAfterSwappedCompletes(t *testing.T) {
 		swapCluster, startCluster, promoteCluster, settlePromoted = oldSwap, oldStart, oldPromote, oldSettle
 		publishRouting, poolerRuntimeRoutes, poolerResumeDatabase = oldPublish, oldRoutes, oldResume
 	})
-	if _, err := promote(context.Background(), cfg, "app", engine.Runtime{}, nil, func() {}); err != nil {
-		t.Fatal(err)
-	}
-	recs, err := backup.LoadRecords()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := recs.Restores["app"]; ok {
-		t.Fatal("swapped retry left the restore record")
-	}
-	if _, ok := recs.ActivationFenceFor("app"); ok {
-		t.Fatal("swapped retry left the activation fence")
-	}
+	return cfg, &published
 }
 
 func TestInstallCopyPlanGuardRefusesUnknownPriorGuard(t *testing.T) {

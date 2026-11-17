@@ -1136,6 +1136,9 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 	if err := verifyPoolerAliasAbsent(ctx, p.db); err != nil {
 		return withHint(err, "The restore's poolers still serve the target or its restore-inspection alias, so nothing was swapped. Retry vaire restore promote "+p.db+".")
 	}
+	if err := restoreCredentialsCapture(ctx, p); err != nil {
+		return withHint(err, "The restore's managed credential preservation is incomplete; routing stays fenced. Preserve its state and inspect the prerequisite before retrying vaire restore promote "+p.db+".")
+	}
 	err := swapCluster(ctx, p.rt.Shell, step, p.report, p.cfg.Server.DataRoot, p.db, backup.RestoringName(p.db), p.aside, p.r.Port)
 	if err == nil {
 		err = advanceActivationFence(p.cfg, p.db, p.r.ID, "restore-promote", fencePhasePrepared, fencePhaseSwapped, p.spec, func(f *backup.ActivationFence) {
@@ -1207,6 +1210,9 @@ func finishPromotion(ctx context.Context, p *restorePromotion) (string, []output
 	if err := provisionRecoveredAccess(ctx, p.cfg, p.db, p.r, p.rt, p.report); err != nil {
 		return "", nil, err
 	}
+	if err := restoreCredentialsApply(ctx, p); err != nil {
+		return "", nil, withHint(err, "The data is promoted but its managed login credentials were not restored, so routing stays blocked. Retry vaire restore promote "+p.db+".")
+	}
 	p.elapsed = time.Since(p.started)
 	// Retiring the open restore, its timeline/leftover/replaced-stanza facts
 	// and the fence's routing eligibility is one records update. A failed
@@ -1214,6 +1220,9 @@ func finishPromotion(ctx context.Context, p *restorePromotion) (string, []output
 	// fence can outlive the restore record.
 	if err := retireRestoreAndRoute(p.cfg, p.db, p.r, p.spec, p.aside, oldStanza, newStanza, p.fenceID.TargetStanza, p.fenceID.OldStanza, p.fenceID.NewStanza, p.oldArchived); err != nil {
 		return "", nil, err
+	}
+	if err := restoreCredentialsClear(p); err != nil {
+		warnings = append(warnings, restoreCredentialCleanupWarning(p.db, err))
 	}
 	return newStanza, warnings, nil
 }
@@ -1993,14 +2002,18 @@ func abortRestoredCopy(ctx context.Context, env *Env, p restoreDBParams, r backu
 		if err := convertPreSwapRestoreAbort(env.Cluster, p.Database, auth); err != nil {
 			return Result{}, err
 		}
+		var warnings []output.Warning
+		if err := restoreCredentialsClearAborted(env.Cluster, auth.restore, auth.aside); err != nil {
+			warnings = append(warnings, restoreCredentialCleanupWarning(p.Database, err))
+		}
 		data["routing"] = "pending"
 		if err := completeRestoreAbortRouting(ctx, env, p.Database, auth.fence.OperationID); err != nil {
 			steps.WriteMetrics(env.Cluster)
-			return Result{Data: data, Warnings: []output.Warning{restoreAbortRoutingWarning(p.Database, err)}}, nil
+			return Result{Data: data, Warnings: append(warnings, restoreAbortRoutingWarning(p.Database, err))}, nil
 		}
 		data["routing"] = "complete"
 		steps.WriteMetrics(env.Cluster)
-		return Result{Data: data}, nil
+		return Result{Data: data, Warnings: warnings}, nil
 	}
 	if err := retirePreSwapRestore(p.Database, r); err != nil {
 		return Result{}, err

@@ -12,12 +12,20 @@ import (
 	"syscall"
 
 	"github.com/mbvlabs/vaire/internal/backup"
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/steps"
 )
+
+func restoreCredentialCleanupWarning(db string, err error) output.Warning {
+	return output.Warning{
+		Code:    "restore_credentials_cleanup_failed",
+		Message: db + "'s restore is retired, but its root-only credential snapshot could not be removed: " + err.Error() + "; inspect the node state as root.",
+	}
+}
 
 // A physical restore copies the backup's pg_authid, so promoting it would roll
 // every managed login password back to the backup's verifier. The snapshot

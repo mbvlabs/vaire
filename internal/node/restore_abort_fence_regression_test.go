@@ -125,6 +125,7 @@ type abortRoutingStub struct {
 
 func newAbortRoutingStub(t *testing.T, cfg config.Cluster) *abortRoutingStub {
 	t.Helper()
+	stubRestoreCredentialLifecycle(t)
 	s := &abortRoutingStub{spec: cfg.Clusters[0]}
 	oldApply, oldRoutes, oldResume := applyPoolerFence, poolerRuntimeRoutes, poolerResumeDatabase
 	t.Cleanup(func() { applyPoolerFence, poolerRuntimeRoutes, poolerResumeDatabase = oldApply, oldRoutes, oldResume })
