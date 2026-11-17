@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,6 +25,33 @@ func TestWorkspaceHintOnNode(t *testing.T) {
 	}
 	if got := workspaceHint("default"); !strings.Contains(got, "vaire node") || !strings.Contains(got, "your own machine") {
 		t.Fatalf("on a node: got %q, want the run-from-your-machine hint", got)
+	}
+}
+
+func TestRecoveryKitEncryptionRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	creds := Credentials{Backup: &BackupCreds{Bucket: "backups"}}
+	creds.Backup.Encryption.Identity = "AGE-SECRET-KEY-1"
+	creds.Backup.Encryption.Recipient = "age1recipient"
+	if err := SaveCredentials("prod", creds); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadCredentials("prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Backup == nil || got.Backup.Encryption != creds.Backup.Encryption {
+		t.Fatalf("encryption = %+v, want the same key pair", got.Backup)
+	}
+	if !slices.Contains(got.Backup.SecretValues(), creds.Backup.Encryption.Identity) {
+		t.Error("the recovery identity is not exported as a secret")
+	}
+	raw, err := ReadFile("prod", CredentialsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"encryption"`) || strings.Contains(string(raw), `"dumps"`) || strings.Contains(string(raw), `"age_identity"`) {
+		t.Fatalf("credentials.json still uses a dump-shaped wire format:\n%s", raw)
 	}
 }
 

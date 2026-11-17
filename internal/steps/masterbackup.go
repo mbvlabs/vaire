@@ -75,7 +75,7 @@ func (masterBackupStep) Apply(_ context.Context, _ config.Cluster, rt engine.Run
 	if ReadRecipient() == "" {
 		recipient := strings.TrimSpace(rt.SecretValues[SecretBackupAgeRecipient])
 		if recipient == "" {
-			// Fall back to the copy pgbackrest-v1 keeps with a bucket.
+			// Fall back to the copy pgbackrest-v1 keeps with or without a bucket.
 			recipient = ReadBackupEnv()[envRecipient]
 		}
 		if recipient == "" {

@@ -12,7 +12,7 @@ import (
 // The secrets a job hands its steps are the ones the steps in db recover
 // and db fork read: the service passwords (postgres-roles-v1 writes their
 // files), the /metrics hash (metrics-v1) and the recovery kit
-// (pgbackrest-v1). The dump identity and the master bundle are never a
+// (pgbackrest-v1). The recovery identity and the master bundle are never a
 // step's.
 func TestStepSecrets(t *testing.T) {
 	for _, role := range ServiceRoles {

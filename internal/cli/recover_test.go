@@ -58,7 +58,7 @@ func TestRecoverSecrets(t *testing.T) {
 		Backup:   &workspaces.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"},
 	}
 	creds.Backup.PgBackRest.CipherPass = "cipher"
-	creds.Backup.Dumps.AgeIdentity, creds.Backup.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
+	creds.Backup.Encryption.Identity, creds.Backup.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
 	for _, role := range steps.ServiceRoles {
 		creds.Database.Services[role] = workspaces.Role{User: role, Password: role + "-pw"}
 	}
@@ -86,7 +86,7 @@ func TestRecoverSecrets(t *testing.T) {
 		t.Errorf("no /metrics hash: %q", values[steps.SecretMetricsHash])
 	}
 	if _, ok := values[steps.SecretBackupAgeIdentity]; ok {
-		t.Error("the age identity never leaves the operator outside a dump restore")
+		t.Error("the recovery identity never leaves the operator")
 	}
 }
 

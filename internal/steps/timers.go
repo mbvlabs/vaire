@@ -26,7 +26,7 @@ const CertsTimerName = "vaire-certs.timer"
 // ownedService matches the template services timers-v1 writes, so a removed
 // schedule takes its service with it. vaire-certs.service and vaire-thp.service
 // belong to other steps.
-var ownedService = regexp.MustCompile(`^vaire-((backup-(full|diff|incr|verify)|restore-drill|db-dump)@|stanza-expiry|maint-daily|maint-weekly|metrics-refresh|doctor|master-backup|fence)\.service$`)
+var ownedService = regexp.MustCompile(`^vaire-((backup-(full|diff|incr|verify)|restore-drill)@|stanza-expiry|maint-daily|maint-weekly|metrics-refresh|doctor|master-backup|fence)\.service$`)
 
 // Master backup units (Phase 5): the job, the path unit that starts it after
 // a change, its daily safety-net timer, and with a bucket the epoch fence
@@ -103,8 +103,7 @@ type timerJob struct {
 }
 
 // scheduledJobs are spec's jobs with a schedule: its own, else
-// [backup.database]'s for the backups, verify and drill. Dumps have no
-// server default.
+// [backup.database]'s for the backups, verify and drill.
 func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 	db, own := cfg.Backup.Database, spec.Backup
 	pick := func(own, def string) string {
@@ -119,7 +118,6 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 		{"backup-incr", "vaire incremental backup of " + spec.Name, pick(own.IncrSchedule, db.IncrSchedule), "2m"},
 		{"backup-verify", "vaire backup verify of " + spec.Name, pick(own.VerifySchedule, db.VerifySchedule), "10m"},
 		{"restore-drill", "vaire restore drill of " + spec.Name, pick(own.DrillSchedule, db.DrillSchedule), "30m"},
-		{"db-dump", "vaire long-retention dump of " + spec.Name, own.DumpSchedule, "10m"},
 	}
 	var out []timerJob
 	for _, j := range all {
@@ -146,7 +144,7 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 	}
 	files["vaire-stanza-expiry.service"] = render.JobService("stanza-expiry", "")
 	files[StanzaExpiryTimerName] = render.JobTimer("vaire expiry of dropped databases' stanzas", stanzaExpirySchedule, "30m")
-	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump"} {
+	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill"} {
 		files["vaire-"+job+"@.service"] = render.JobService(job, "--db %i")
 	}
 	spread := StaggerSpread(cfg)
@@ -304,7 +302,7 @@ type timersStep struct{}
 func (timersStep) ID() string { return timersID }
 
 func (timersStep) Describe(config.Cluster) string {
-	return "install the systemd timers for certificates, maintenance, the master backup and each database's backups, verify, drill and dumps"
+	return "install the systemd timers for certificates, maintenance, the master backup and each database's backups, verify and drills"
 }
 
 func (timersStep) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []engine.RenderedFile {

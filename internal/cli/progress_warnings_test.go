@@ -497,7 +497,7 @@ func TestFailureJQCanSelectWarnings(t *testing.T) {
 
 func TestNodeRunUntypedFailureCarriesEvidenceWarning(t *testing.T) {
 	warning := output.Warning{Code: "activity_not_recorded", Message: "the job's evidence could not be recorded"}
-	untyped := errors.New("creating the final dump failed: permission denied")
+	untyped := errors.New("creating the final backup failed: permission denied")
 	wrapped := withEvidenceWarnings(untyped, []output.Warning{warning})
 	if !errors.Is(wrapped, untyped) {
 		t.Fatal("untyped error identity was not preserved")

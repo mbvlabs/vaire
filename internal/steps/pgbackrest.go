@@ -19,15 +19,15 @@ import (
 
 const pgbackrestID = "pgbackrest-v1"
 
-// BackupEnvPath holds the bucket keys and the dump age recipient for the
-// node-side jobs that talk to the bucket directly (long-retention dumps).
+// BackupEnvPath holds the bucket keys and the recovery age recipient for the
+// node-side jobs that encrypt master bundles.
 const BackupEnvPath = RuntimeDir + "/backup.env"
 
 // backup.env keys.
 const (
 	envKeyID     = "AWS_ACCESS_KEY_ID"
 	envSecret    = "AWS_SECRET_ACCESS_KEY" //nolint:gosec // G101: a key name, not a value.
-	envRecipient = "VAIRE_DUMP_AGE_RECIPIENT"
+	envRecipient = "VAIRE_RECOVERY_AGE_RECIPIENT"
 )
 
 // redactedValue stands in for a secret the plan cannot know.

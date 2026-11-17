@@ -19,11 +19,11 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 	}
 	// master-backup-v1 encrypts the master bundles to the recovery
 	// recipient, with or without a bucket (Phase 5).
-	if r.sec.Backup != nil && r.sec.Backup.Dumps.AgeRecipient != "" {
+	if r.sec.Backup != nil && r.sec.Backup.Encryption.Recipient != "" {
 		if r.dbSecrets == nil {
 			r.dbSecrets = map[string]string{}
 		}
-		r.dbSecrets[steps.SecretBackupAgeRecipient] = r.sec.Backup.Dumps.AgeRecipient
+		r.dbSecrets[steps.SecretBackupAgeRecipient] = r.sec.Backup.Encryption.Recipient
 	}
 	reply, err := r.p.call(ctx, caller, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseDatabase,

@@ -23,8 +23,8 @@ const (
 	SecretBackupCipherPass   = "backup.cipher_pass"   //nolint:gosec // G101: a key name, not a value.
 	SecretBackupKeyID        = "backup.s3_key_id"     //nolint:gosec // G101: a key name, not a value.
 	SecretBackupAgeRecipient = "backup.age_recipient" //nolint:gosec // G101: a key name, not a value.
-	// SecretBackupAgeIdentity opens long-retention dumps. Only a restore from
-	// a dump sends it, and the node keeps it in memory for that job.
+	// SecretBackupAgeIdentity decrypts master bundles. It stays on the
+	// operator and is never a step's secret.
 	SecretBackupAgeIdentity = "backup.age_identity"
 )
 

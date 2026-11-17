@@ -46,7 +46,7 @@ type ExtensionPrerequisite struct {
 }
 
 // CaptureStanzaRequirements records spec's current resolved requirements
-// against its immutable stanza before a backup, first full or dump is taken.
+// against its immutable stanza before a backup is taken.
 // A failure stops the producer; today's intent is never assumed to cover an
 // older point.
 func CaptureStanzaRequirements(cfg config.Cluster, spec config.ClusterSpec) error {

@@ -258,14 +258,14 @@ func ensureRecoveryIdentity(kit *workspaces.BackupCreds) (*workspaces.BackupCred
 	if kit != nil {
 		*out = *kit
 	}
-	if out.Dumps.AgeIdentity != "" {
+	if out.Encryption.Identity != "" {
 		return out, false, nil
 	}
 	identity, recipient, err := backup.NewIdentity()
 	if err != nil {
 		return nil, false, err
 	}
-	out.Dumps.AgeIdentity, out.Dumps.AgeRecipient = identity, recipient
+	out.Encryption.Identity, out.Encryption.Recipient = identity, recipient
 	secrets.Add(identity)
 	return out, true, nil
 }
@@ -294,7 +294,7 @@ func prepareKit(kit *workspaces.BackupCreds, s backupSettings, wasConfigured boo
 		}
 		out.PgBackRest.CipherPass = pass
 		if kit != nil {
-			out.Dumps = kit.Dumps
+			out.Encryption = kit.Encryption
 		}
 		generated = true
 	}
@@ -323,7 +323,7 @@ func backupSecrets(kit *workspaces.BackupCreds) map[string]string {
 		steps.SecretBackupKeyID:        kit.AccessKeyID,
 		steps.SecretBackupKeySecret:    kit.SecretAccessKey,
 		steps.SecretBackupCipherPass:   kit.PgBackRest.CipherPass,
-		steps.SecretBackupAgeRecipient: kit.Dumps.AgeRecipient,
+		steps.SecretBackupAgeRecipient: kit.Encryption.Recipient,
 	}
 }
 
@@ -340,8 +340,8 @@ func addRecoveryKit(secretValues map[string]string, kit *workspaces.BackupCreds)
 	if kit == nil {
 		return
 	}
-	if kit.Dumps.AgeRecipient != "" {
-		secretValues[steps.SecretBackupAgeRecipient] = kit.Dumps.AgeRecipient
+	if kit.Encryption.Recipient != "" {
+		secretValues[steps.SecretBackupAgeRecipient] = kit.Encryption.Recipient
 	}
 	if !kit.HasBucket() {
 		return
@@ -605,8 +605,6 @@ type backupListData struct {
 	Dropped  *backup.DroppedStanza     `json:"dropped,omitempty"`
 	Verify   *backup.VerifyResult      `json:"last_verify,omitempty"`
 	Drill    *backup.Drill             `json:"last_drill,omitempty"`
-	Dumps    []backup.Dump             `json:"dumps"`
-	Policies map[string]any            `json:"dump_policies,omitempty"`
 	Restores map[string]backup.Restore `json:"restores,omitempty"`
 }
 
@@ -620,12 +618,8 @@ type backupRowData struct {
 	Latest    *backup.Set          `json:"latest,omitempty"`
 	Verify    *backup.VerifyResult `json:"last_verify,omitempty"`
 	Drill     *backup.Drill        `json:"last_drill,omitempty"`
-	Dump      *backup.Dump         `json:"last_dump,omitempty"`
 	DroppedAt string               `json:"dropped_at,omitempty"`
 	ExpiresAt string               `json:"expires_at,omitempty"`
-	// Reason is backup.DroppedReasonReplaced when a restore replaced the
-	// stanza; empty means its database was dropped.
-	Reason string `json:"reason,omitempty"`
 }
 
 // backupRowsData is backup.list's result without --db.
@@ -920,12 +914,8 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 	}
 	lines := []string{"Restore window for " + db + ": " + data.Window.describe()}
 	if data.Dropped != nil {
-		ended := "Dropped"
-		if data.Dropped.Replaced() {
-			ended = "Replaced by a restore"
-		}
 		lines = []string{"Restore window for " + db + ": " + data.Window.span(),
-			ended + " at " + data.Dropped.DroppedAt + "; stanza " + data.Stanza + " is kept until " + data.Dropped.ExpiresAt}
+			"Dropped at " + data.Dropped.DroppedAt + "; stanza " + data.Stanza + " is kept until " + data.Dropped.ExpiresAt}
 	}
 	lines = append(lines, "", fmt.Sprintf("  %-24s %-5s %-21s %10s %10s", "SET", "TYPE", "FINISHED", "SIZE", "IN REPO"))
 	for _, set := range data.Sets {
@@ -937,12 +927,6 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 	if data.Drill != nil {
 		lines = append(lines, "Last drill: "+data.Drill.Result+" at "+data.Drill.FinishedAt+" (backup "+data.Drill.BackupLabel+")")
 	}
-	if len(data.Dumps) > 0 {
-		lines = append(lines, "", "Long-retention dumps:")
-		for _, d := range data.Dumps {
-			lines = append(lines, fmt.Sprintf("  %-20s %-24s %10s", d.Database, d.ID, humanBytes(d.Size)))
-		}
-	}
 	for name, r := range data.Restores {
 		lines = append(lines, "", "Open restore of "+name+": "+r.Phase+" (target "+r.Target+")")
 	}
@@ -950,22 +934,18 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 }
 
 // backupRowLines renders backup list without --db: a row per database, then
-// a table of the stanzas kept after their database was dropped or a restore
-// replaced them. Times are ages or minutes, to keep a row within about 120
-// columns; backup list --db has the full times.
+// a table of the stanzas kept after their database was dropped. Times are
+// ages or minutes, to keep a row within about 120 columns; backup list --db
+// has the full times.
 func backupRowLines(data backupRowsData, now time.Time) []string {
-	rows := [][]string{{"DATABASE", "STANZA", "STATUS", "SETS", "LATEST", "VERIFY", "DRILL", "DUMP", "RESTORE WINDOW"}}
+	rows := [][]string{{"DATABASE", "STANZA", "STATUS", "SETS", "LATEST", "VERIFY", "DRILL", "RESTORE WINDOW"}}
 	dropped := [][]string{{"DATABASE", "STANZA", "SETS", "ENDED", "KEPT UNTIL", "WINDOW"}}
 	for _, r := range data.Databases {
 		if r.DroppedAt != "" {
-			ended := "dropped "
-			if r.Reason == backup.DroppedReasonReplaced {
-				ended = "replaced by restore "
-			}
-			dropped = append(dropped, []string{r.Database, r.Stanza, strconv.Itoa(r.Sets), ended + shortTime(r.DroppedAt), shortTime(r.ExpiresAt), r.Window.shortSpan()})
+			dropped = append(dropped, []string{r.Database, r.Stanza, strconv.Itoa(r.Sets), "dropped " + shortTime(r.DroppedAt), shortTime(r.ExpiresAt), r.Window.shortSpan()})
 			continue
 		}
-		latest, verify, drill, dump := "-", "-", "-", "-"
+		latest, verify, drill := "-", "-", "-"
 		if r.Latest != nil {
 			latest = r.Latest.Type + " " + ago(r.Latest.Stop, now)
 		}
@@ -975,14 +955,11 @@ func backupRowLines(data backupRowsData, now time.Time) []string {
 		if r.Drill != nil {
 			drill = drillState(r.Drill) + " " + ago(r.Drill.FinishedAt, now)
 		}
-		if r.Dump != nil {
-			dump = ago(r.Dump.Created, now)
-		}
-		rows = append(rows, []string{r.Database, r.Stanza, r.Status, strconv.Itoa(r.Sets), latest, verify, drill, dump, r.Window.short()})
+		rows = append(rows, []string{r.Database, r.Stanza, r.Status, strconv.Itoa(r.Sets), latest, verify, drill, r.Window.short()})
 	}
 	lines := alignColumns(rows)
 	if len(dropped) > 1 {
-		lines = append(lines, "", "Kept stanzas of dropped or restore-replaced databases (restorable until KEPT UNTIL):")
+		lines = append(lines, "", "Kept stanzas of dropped databases (restorable until KEPT UNTIL):")
 		lines = append(lines, alignColumns(dropped)...)
 	}
 	for name, r := range data.Restores {

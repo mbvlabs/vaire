@@ -11,12 +11,10 @@ import (
 )
 
 // The combined restore --promote decodes the job's followers_diverged
-// warnings as structured warnings with their own code, while the job's dump
-// warnings keep the restore_dump_errors label (D12, R3-3).
+// warnings as structured warnings with their own code (D12).
 func TestRestoreWarningsKeepFollowersDivergedStructured(t *testing.T) {
 	raw := `{
 		"phase": "promoted",
-		"warnings": ["dump public.events had 2 errors"],
 		"follower_warnings": [{"code": "followers_diverged",
 			"message": "app is on a new timeline, so its followers (app_follower) stopped following it and serve the old data read-only."}],
 		"promoted": {"stanza": "app-3f9a1c"}
@@ -26,26 +24,18 @@ func TestRestoreWarningsKeepFollowersDivergedStructured(t *testing.T) {
 		t.Fatal(err)
 	}
 	warnings := restoreWarnings(nil, nil, res)
-	if len(warnings) != 2 {
-		t.Fatalf("warnings %+v, want the dump warning and the divergence warning", warnings)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings %+v, want the divergence warning", warnings)
 	}
-	if warnings[0].Code != "restore_dump_errors" || warnings[0].Message != "dump public.events had 2 errors" {
-		t.Errorf("the dump warning: %+v", warnings[0])
-	}
-	if warnings[1].Code != "followers_diverged" || !strings.Contains(warnings[1].Message, "new timeline") {
-		t.Errorf("the divergence warning: %+v", warnings[1])
-	}
-	for _, w := range warnings {
-		if w.Code == "restore_dump_errors" && strings.Contains(w.Message, "new timeline") {
-			t.Errorf("the divergence message is labelled a dump error: %+v", w)
-		}
+	if warnings[0].Code != "followers_diverged" || !strings.Contains(warnings[0].Message, "new timeline") {
+		t.Errorf("the divergence warning: %+v", warnings[0])
 	}
 }
 
 // The combined restore --promote uses the same node-order preflight: a
 // follower is refused with is_follower before protection is checked, so a
-// protected follower does not answer database_protected and no token, dump
-// identity or dry run follows (Phase 6, B-04).
+// protected follower does not answer database_protected and no token or dry
+// run follows (Phase 6, B-04).
 func TestCombinedRestorePreflightRefusesAFollowerFirst(t *testing.T) {
 	assertFollowerPreflightRefusal(t, "combined restore", combinedRestorePreflight)
 }

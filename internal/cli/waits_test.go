@@ -30,16 +30,6 @@ func TestWaitSilentWhenStructured(t *testing.T) {
 	}
 }
 
-func TestDumpListMessage(t *testing.T) {
-	if got := dumpListMessage(nil); got != "no dumps in the bucket" {
-		t.Errorf("empty = %q", got)
-	}
-	lines := strings.Split(dumpListMessage([]backup.Dump{{Database: "app", ID: "20260701T030000Z", Size: 2048, Created: "2026-07-01T03:00:00Z"}}), "\n")
-	if len(lines) != 2 || !strings.HasPrefix(strings.TrimSpace(lines[0]), "DATABASE") || !strings.Contains(lines[1], "20260701T030000Z") {
-		t.Errorf("lines = %q", lines)
-	}
-}
-
 func TestDrillLinesRecoveredToOnce(t *testing.T) {
 	drill := backup.Drill{Database: "app", Result: "pass", BackupLabel: "F1", RecoveredTo: "2026-10-14T10:00:00Z",
 		Checks: []backup.DrillCheck{{Name: "restore", OK: true, Detail: "recovered to 2026-10-14T10:00:00Z"}, {Name: "tables", OK: true, Detail: "1 table"}}}

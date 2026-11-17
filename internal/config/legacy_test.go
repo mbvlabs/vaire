@@ -47,3 +47,15 @@ func TestParseClusterDropsLegacyVPS(t *testing.T) {
 		t.Fatal("strict decoding is gone for other unknown tables")
 	}
 }
+
+func TestParseClusterRejectsDumpKeys(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"dump_schedule", `"*-*-* 03:00:00"`},
+		{"dump_retention", "3"},
+	} {
+		raw := "[[clusters]]\nname = 'app'\n[clusters.backup]\n" + tc.key + " = " + tc.value + "\n"
+		if _, err := ParseCluster([]byte(raw)); err == nil || !strings.Contains(err.Error(), tc.key) {
+			t.Errorf("%s: err = %v, want the unknown key reported", tc.key, err)
+		}
+	}
+}

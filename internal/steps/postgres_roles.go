@@ -658,8 +658,8 @@ func adminGrants(spec config.ClusterSpec) string {
 }
 
 // AdminRoleSQL is vaire_admin's predefined roles and access to db
-// (adminGrants, AdminAccessSQL), run in postgres. A restore from a dump
-// runs it in its new cluster after copying the live cluster's roles, so the
+// (adminGrants, AdminAccessSQL), run in postgres. A copy built from an
+// existing cluster runs it after copying the live cluster's roles, so the
 // copy's vaire_admin follows db's protection as it is now.
 func AdminRoleSQL(db config.ClusterSpec) string {
 	return "GRANT " + adminGrants(db) + " TO vaire_admin;\n" + AdminAccessSQL(db)
@@ -733,8 +733,8 @@ END $vaire$;
 func literal(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // DatabaseConnectSQL is the database-level access SQL for database target,
-// granted to the roles of roleDB, run in postgres. A restore from a dump
-// uses it for the database it loads into a new cluster.
+// granted to the roles of roleDB, run in postgres. A copy uses it for the
+// database it creates in a new cluster.
 func DatabaseConnectSQL(target, roleDB string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "REVOKE ALL ON DATABASE %s FROM PUBLIC;\n", pg.Quote(target))
@@ -744,17 +744,17 @@ func DatabaseConnectSQL(target, roleDB string) string {
 }
 
 // DatabaseGrantsSQL is postgres-roles-v1's schema, default-privilege and
-// extension SQL for db, run inside the database it is for. A restore from a
-// dump and vaire db fork run it in the databases they load. It resolves the
-// cluster's definitions so a custom extension is created too.
+// extension SQL for db, run inside the database it is for. vaire db fork
+// runs it in the database it loads. It resolves the cluster's definitions so
+// a custom extension is created too.
 func DatabaseGrantsSQL(cfg config.Cluster, db config.ClusterSpec) (string, error) {
 	return databaseGrantsSQL(cfg, db)
 }
 
 // databaseGrantsSQL is the schema, default-privilege and extension SQL run
-// inside db. It is used by dump restore after the copy is running with its
-// preloads; the roles step uses extensionCreationSQL so it can defer a
-// preload-dependent CREATE instead.
+// inside db. It is used after a copy is running with its preloads; the roles
+// step uses extensionCreationSQL so it can defer a preload-dependent CREATE
+// instead.
 func databaseGrantsSQL(cfg config.Cluster, db config.ClusterSpec) (string, error) {
 	extensions, err := allExtensionsSQL(cfg, db)
 	if err != nil {
@@ -1495,5 +1495,5 @@ func prefixed(name string, roles []string) []string {
 }
 
 // AuthFunctionsSQL is the pooler auth functions and their grants, run in
-// AuthDB. A restore from a dump creates them in its new cluster.
+// AuthDB. A copy creates them in its new cluster.
 func AuthFunctionsSQL() string { return pgbouncerAuthSQL }

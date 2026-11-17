@@ -457,7 +457,6 @@ func phase1Commands() []cmdSpec {
 		tuneCommands(),
 		backupCommands(),
 		restoreCommands(),
-		dumpCommands(),
 		jobCommands(),
 		activityCommands(),
 		diagnosticsCommands(),
@@ -1021,12 +1020,9 @@ func dbCommands() cmdSpec {
 				use:  "drop <name>",
 				args: cobra.ExactArgs(1),
 				run:  runDBDrop,
-				flags: []fl{
-					flagBool("no-final-dump", "Skip the final long-retention dump taken when backups are configured"),
-				},
 				meta: CommandMeta{
-					Summary:        "Drop a database and its roles after a final dump to the bucket",
-					WhenToUse:      []string{"Remove an application database the human has approved dropping. With backups on, a final age-encrypted dump goes to the bucket first. Its cluster is stopped and deleted with its data, roles, pooler entries and timers. With backups on, its pgBackRest stanza is kept (data.stanza_kept) and recorded as dropped, so its backups stay restorable until they expire. The other databases' changed postgres-config (their larger share of the server) is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending). Dropping the last database stops both poolers. A protected database (clusters.<db>.protected) is refused with database_protected, even with --confirm."},
+					Summary:        "Drop a database and its roles",
+					WhenToUse:      []string{"Remove an application database the human has approved dropping. Its cluster is stopped and deleted with its data, roles, pooler entries and timers. With backups on, its pgBackRest stanza is kept (data.stanza_kept) and recorded as dropped, so its backups stay restorable until they expire. The other databases' changed postgres-config (their larger share of the server) is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending). Dropping the last database stops both poolers. A protected database (clusters.<db>.protected) is refused with database_protected, even with --confirm."},
 					Examples:       []string{"vaire db drop app --confirm app", "vaire db drop app --dry-run"},
 					Mutating:       true,
 					Destructive:    true,
@@ -1325,7 +1321,7 @@ func backupCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary: "Turn on backups to an S3-compatible bucket, or rotate its keys",
 					WhenToUse: []string{
-						"Add backups to a cluster: probes the bucket, generates the repository cipher and the dump key, writes [backup], switches every database's WAL archiving to the bucket with a reload (no restart) and takes a first full backup of each.",
+						"Add backups to a cluster: probes the bucket, generates the repository cipher and the recovery encryption key, writes [backup], switches every database's WAL archiving to the bucket with a reload (no restart) and takes a first full backup of each.",
 						"Re-run with the same bucket to rotate the access keys.",
 					},
 					WhenNotToUse:     []string{"Do not use it to move backups to another bucket or prefix: that is refused, because the restore window would be lost."},
@@ -1361,11 +1357,11 @@ func backupCommands() cmdSpec {
 				use: "list",
 				run: runBackupList,
 				flags: []fl{
-					flagString("db", "", "Show this database's sets, window, verify, drill and dumps"),
+					flagString("db", "", "Show this database's sets, window, verify and drill"),
 				},
 				meta: CommandMeta{
-					Summary:   "Show the restore window, backup sets, verify, drill, and dumps per database",
-					WhenToUse: []string{"Pick a restore target, or check that backups, verify and drills are current. Without --db: one row per database (window, sets, latest set, last verify, drill and dump), then the dropped databases whose stanzas are kept until they expire. --db: that database's sets, archive status, window and dumps; a dropped database still in its window is listed from its kept stanza."},
+					Summary:   "Show the restore window, backup sets, verify and drill per database",
+					WhenToUse: []string{"Pick a restore target, or check that backups, verify and drills are current. Without --db: one row per database (window, sets, latest set, last verify and drill), then the dropped databases whose stanzas are kept until they expire. --db: that database's sets, archive status and window; a dropped database still in its window is listed from its kept stanza."},
 					Examples:  []string{"vaire backup list", "vaire backup list --db app --output json"},
 					Remote:    true,
 					Next:      []string{"vaire restore <db> --time <ts>", "vaire backup verify"},
@@ -1399,7 +1395,7 @@ func jobCommands() cmdSpec {
 		run: parentRun,
 		meta: CommandMeta{
 			Summary:   "List and follow detachable jobs",
-			WhenToUse: []string{"Backups, restores, drills, forks and dumps run as jobs on the node that survive a closed laptop."},
+			WhenToUse: []string{"Backups, restores, drills and forks run as jobs on the node that survive a closed laptop."},
 			Examples:  []string{"vaire job list", "vaire job follow 01J..."},
 			Remote:    true,
 		},
@@ -1439,19 +1435,18 @@ func restoreCommands() cmdSpec {
 			flagString("time", "", "Point in time: RFC 3339, or relative like -15m"),
 			flagBool("latest", "Restore to the newest archived WAL"),
 			flagString("set", "", "pgBackRest backup label"),
-			flagString("dump", "", "Long-retention dump id, for points older than the restore window"),
 			flagBool("promote", "Cut over to the restored copy as soon as it is ready"),
 		},
 		meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 			Summary: "Rewind one database while the others keep serving",
 			WhenToUse: []string{
-				"Restore one database to a time, the latest WAL, a backup set or a dump. A physical restore of its stanza becomes the temporary cluster <db>__restoring, paused at the target, beside the live database, which keeps serving; inspect it with vaire sql --db <db>__restoring, then promote (a cut-over in place, a few seconds plus the replay to the target) or abort. It needs free space for one copy of the database. A dump (for points older than the window) loads into a new cluster instead, which gets a new stanza on promote.",
+				"Restore one database to a time, the latest WAL or a backup set. A physical restore of its stanza becomes the temporary cluster <db>__restoring, paused at the target, beside the live database, which keeps serving; inspect it with vaire sql --db <db>__restoring, then promote (a cut-over in place, a few seconds plus the replay to the target) or abort. It needs free space for one copy of the database.",
 			},
 			WhenNotToUse: []string{"Do not use it to copy a database under a new name: use vaire db fork. Rebuilding a whole server is server init --restore."},
 			Examples: []string{
 				"vaire restore app --time 2026-10-09T12:00:00Z --confirm app/restore",
 				"vaire restore app --time -15m --promote --confirm app/restore",
-				"vaire restore app --dump 20260701T030000Z --confirm app/restore",
+				"vaire restore app --set 20261009-120000F --confirm app/restore",
 			},
 			Mutating:         true,
 			Destructive:      true,
@@ -1497,7 +1492,7 @@ func restoreCommands() cmdSpec {
 				run:  runRestoreUndo,
 				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
 					Summary:        "Swap the data from before the last promote back in",
-					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists. The old cluster resumes on its old timeline, vaire records it so later restores follow it, and a full backup starts. After a restore from a dump it also takes the old stanza back."},
+					WhenToUse:      []string{"A promoted restore was the wrong point in time and the leftover still exists. The old cluster resumes on its old timeline, vaire records it so later restores follow it, and a full backup starts."},
 					Examples:       []string{"vaire restore undo app --confirm app/restore"},
 					Mutating:       true,
 					Destructive:    true,
@@ -1552,60 +1547,6 @@ func restoreCommands() cmdSpec {
 					Remote:         true,
 					ErrorCodes:     backupErrorCodes,
 					Next:           []string{"vaire backup list"},
-				},
-			},
-		},
-	}
-}
-
-func dumpCommands() cmdSpec {
-	return cmdSpec{
-		use:  "dump <db>",
-		args: cobra.MaximumNArgs(1),
-		run:  runDump,
-		flags: []fl{
-			flagString("to", "local", "local (stream to this machine) or bucket (age-encrypted long-retention dump)"),
-			flagString("out", "", "Local output path (default ./<db>-<time>.dump)"),
-		},
-		meta: CommandMeta{
-			Summary:          "Write a pg_dump custom-format archive of one database",
-			WhenToUse:        []string{"Take a logical copy now: to this machine, or into the bucket next to the scheduled long-retention dumps."},
-			Examples:         []string{"vaire dump app --out app.dump", "vaire dump app --to bucket"},
-			Mutating:         true,
-			Remote:           true,
-			SkipDryRunCheck:  true,
-			SkipDryRunReason: "dump writes an archive and does not change the cluster",
-			ErrorCodes:       backupErrorCodes,
-			Next:             []string{"vaire dump list <db>"},
-		},
-		children: []cmdSpec{
-			{
-				use:  "list [db]",
-				args: cobra.MaximumNArgs(1),
-				run:  runDumpList,
-				meta: CommandMeta{
-					Summary:   "List the long-retention dumps in the bucket",
-					WhenToUse: []string{"Find a dump id for dump get or restore --dump. Reads the bucket with the recovery kit; the node is not involved."},
-					Examples:  []string{"vaire dump list", "vaire dump list app"},
-				},
-			},
-			{
-				use:  "get <db> <id>",
-				args: cobra.ExactArgs(2),
-				run:  runDumpGet,
-				flags: []fl{
-					flagString("out", "", "Where to write the decrypted archive"),
-				},
-				meta: CommandMeta{
-					Summary:          "Download and decrypt one dump on this machine",
-					WhenToUse:        []string{"Get a dump older than the restore window as a plain pg_dump archive. The age identity never leaves this machine."},
-					Examples:         []string{"vaire dump get app 20260701T030000Z --out app-july.dump"},
-					Mutating:         true,
-					SkipDryRunCheck:  true,
-					SkipDryRunReason: "get writes a local file and changes nothing on the cluster",
-					Prompts:          true,
-					InteractiveFlags: []string{"--out"},
-					ErrorCodes:       []string{"input_required", "secrets_error", "backup_auth_failed", "bucket_not_found", "endpoint_unreachable", "precondition_failed"},
 				},
 			},
 		},
@@ -1704,25 +1645,13 @@ func nodeCommands() cmdSpec {
 				run:  runNodeRun,
 				flags: []fl{
 					flagString("job-id", "", "Run the detachable job an RPC prepared under this id"),
-					flagString("db", "", "Database of a backup, verify, drill or dump job (the timer's instance)"),
+					flagString("db", "", "Database of a backup, verify or drill job (the timer's instance)"),
 				},
 				meta: CommandMeta{
 					Summary:        "Run one timer job or detachable job",
-					WhenToUse:      []string{"systemd timers and transient vaire-job-<id> units call this: certs-renew, stanza-expiry (daily: deletes the stanzas of dropped databases once their window has passed), and per database (--db, from vaire-<job>@<db>.timer) backup-full|diff|incr, backup-verify, restore-drill and db-dump; restore and db-fork run only with --job-id. Full, diff, verify, drill and dump take the server's heavy-I/O lock, so one runs at a time. A busy lock records the job as skipped: a timer run first waits up to 15 minutes for its locks, a run by hand or by an operator command skips at once."},
-					Examples:       []string{"sudo vaire node run certs-renew", "sudo vaire node run backup-incr --db app", "sudo vaire node run db-dump --db app", "sudo vaire node run stanza-expiry"},
+					WhenToUse:      []string{"systemd timers and transient vaire-job-<id> units call this: certs-renew, stanza-expiry (daily: deletes the stanzas of dropped databases once their window has passed), and per database (--db, from vaire-<job>@<db>.timer) backup-full|diff|incr, backup-verify and restore-drill; restore and db-fork run only with --job-id. Full, diff, verify and drill take the server's heavy-I/O lock, so one runs at a time. A busy lock records the job as skipped: a timer run first waits up to 15 minutes for its locks, a run by hand or by an operator command skips at once."},
+					Examples:       []string{"sudo vaire node run certs-renew", "sudo vaire node run backup-incr --db app", "sudo vaire node run stanza-expiry"},
 					Mutating:       true,
-					SupportsDryRun: true,
-					LinuxOnly:      true,
-				},
-			},
-			{
-				use:  "dump <db>",
-				args: cobra.ExactArgs(1),
-				run:  runNodeDump,
-				meta: CommandMeta{
-					Summary:        "Write pg_dump -Fc of one database to stdout",
-					WhenToUse:      []string{"vaire dump --to local runs this over SSH and streams the archive to the operator."},
-					Examples:       []string{"sudo vaire node dump app > app.dump"},
 					SupportsDryRun: true,
 					LinuxOnly:      true,
 				},

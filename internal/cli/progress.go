@@ -383,7 +383,6 @@ var waitLabelVerbs = map[string]string{
 	"db.fork":         "forking",
 	"db.follow":       "following",
 	"db.unfollow":     "unfollowing",
-	"dump.create":     "dumping",
 	"restore.start":   "restoring",
 	"restore.promote": "promoting the restore of",
 	"restore.abort":   "aborting the restore of",

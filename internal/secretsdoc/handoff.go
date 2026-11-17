@@ -79,8 +79,8 @@ func (d Document) Groups() []Group {
 			Field{"Secret access key", b.SecretAccessKey},
 			Field{"URI style", b.URIStyle},
 			Field{"pgBackRest cipher pass", b.PgBackRest.CipherPass},
-			Field{"Dump age identity", b.Dumps.AgeIdentity},
-			Field{"Dump age recipient", b.Dumps.AgeRecipient},
+			Field{"Recovery age identity", b.Encryption.Identity},
+			Field{"Recovery age recipient", b.Encryption.Recipient},
 		)})
 	}
 	if m := d.Metrics; m != nil {

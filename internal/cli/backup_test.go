@@ -35,15 +35,14 @@ func TestBackupRowLines(t *testing.T) {
 		Latest: &backup.Set{Type: "incr", Stop: "2026-10-14T10:00:00Z"},
 		Verify: &backup.VerifyResult{OK: true, FinishedAt: "2026-10-14T10:00:00Z"},
 		Drill:  &backup.Drill{Result: backup.DrillFail, FinishedAt: "2026-10-11T12:00:00Z"},
-		Dump:   &backup.Dump{Created: "2026-10-13T12:00:00Z"},
 	}}}
 	lines := backupRowLines(data, now)
-	for _, col := range []string{"STATUS", "DUMP", "VERIFY", "DRILL"} {
+	for _, col := range []string{"STATUS", "VERIFY", "DRILL"} {
 		if !strings.Contains(lines[0], col) {
 			t.Errorf("header lacks %s: %q", col, lines[0])
 		}
 	}
-	for _, want := range []string{"ok", "incr 2h ago", "passed 2h ago", "FAILED 3d ago", "24h ago", "from 2026-10-07 02:00Z, lag 1m"} {
+	for _, want := range []string{"ok", "incr 2h ago", "passed 2h ago", "FAILED 3d ago", "from 2026-10-07 02:00Z, lag 1m"} {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("row lacks %q: %q", want, lines[1])
 		}
@@ -102,23 +101,19 @@ func TestBackupRowLinesKeptStanzas(t *testing.T) {
 			Window: windowData{From: "2026-10-14T09:00:01Z", To: "2026-10-14T10:00:00Z", UpToDate: true}},
 		{Database: "app", Stanza: "app-c273db", Status: "ok", Sets: 1, Window: window,
 			DroppedAt: "2026-10-14T10:23:22Z", ExpiresAt: "2026-10-21T10:23:22Z"},
-		{Database: "app2", Stanza: "app2-111111", Status: "ok", Sets: 2, Window: window,
-			DroppedAt: "2026-10-14T11:00:00Z", ExpiresAt: "2026-10-21T11:00:00Z", Reason: backup.DroppedReasonReplaced},
 	}}
 	lines := backupRowLines(data, now)
 	text := strings.Join(lines, "\n")
 	if strings.Contains(text, "archive lag") || strings.Contains(text, "lag 0s") {
 		t.Errorf("kept stanzas show a lag:\n%s", text)
 	}
-	var header, dropped, replaced string
+	var header, dropped string
 	for _, l := range lines {
 		switch {
 		case strings.Contains(l, "KEPT UNTIL"):
 			header = l
 		case strings.Contains(l, "app-c273db"):
 			dropped = l
-		case strings.Contains(l, "app2-111111"):
-			replaced = l
 		}
 	}
 	for _, col := range []string{"DATABASE", "STANZA", "SETS", "ENDED", "KEPT UNTIL", "WINDOW"} {
@@ -130,9 +125,6 @@ func TestBackupRowLinesKeptStanzas(t *testing.T) {
 		if !strings.Contains(dropped, want) {
 			t.Errorf("dropped row lacks %q: %q", want, dropped)
 		}
-	}
-	if !strings.Contains(replaced, "replaced by restore 2026-10-14 11:00Z") || strings.Contains(replaced, "dropped") {
-		t.Errorf("replaced row: %q", replaced)
 	}
 }
 
@@ -155,14 +147,14 @@ func TestAddRecoveryKit(t *testing.T) {
 	// server init creates the recovery identity without a bucket: no keys to
 	// send, but the recipient, which the master bundles are encrypted to.
 	identityOnly := &workspaces.BackupCreds{}
-	identityOnly.Dumps.AgeIdentity, identityOnly.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
+	identityOnly.Encryption.Identity, identityOnly.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, identityOnly)
 	if len(values) != 2 || values[steps.SecretBackupAgeRecipient] != "age1xyz" {
 		t.Errorf("identity only: secrets = %v", values)
 	}
 	kit := &workspaces.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"}
 	kit.PgBackRest.CipherPass = "cipher"
-	kit.Dumps.AgeIdentity, kit.Dumps.AgeRecipient = "AGE-SECRET-KEY-1", "age1xyz"
+	kit.Encryption.Identity, kit.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, kit)
 	want := map[string]string{
 		"svc.vaire_monitor":            "pw",
@@ -175,7 +167,7 @@ func TestAddRecoveryKit(t *testing.T) {
 		t.Errorf("bucket kit: secrets = %v, want %v", values, want)
 	}
 	if _, ok := values[steps.SecretBackupAgeIdentity]; ok {
-		t.Error("the age identity never leaves the operator outside a dump restore")
+		t.Error("the recovery identity never leaves the operator")
 	}
 }
 

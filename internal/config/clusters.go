@@ -65,8 +65,7 @@ type ClusterSpec struct {
 }
 
 // ClusterBackup is [clusters.backup]: the cluster's restore window and
-// schedules, each defaulting to [backup.database], and its scheduled
-// pg_dump archives kept longer than the window.
+// schedules, each defaulting to [backup.database].
 type ClusterBackup struct {
 	FullSchedule   string `toml:"full_schedule,omitempty"`
 	DiffSchedule   string `toml:"diff_schedule,omitempty"`
@@ -74,11 +73,6 @@ type ClusterBackup struct {
 	VerifySchedule string `toml:"verify_schedule,omitempty"`
 	DrillSchedule  string `toml:"drill_schedule,omitempty"`
 	RetentionFull  int    `toml:"retention_full,omitempty"`
-	// DumpSchedule is a systemd OnCalendar expression; empty means no
-	// scheduled dumps.
-	DumpSchedule string `toml:"dump_schedule,omitempty"`
-	// DumpRetention is how many dumps are kept.
-	DumpRetention int `toml:"dump_retention,omitempty"`
 }
 
 var (
@@ -184,7 +178,7 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 		c.validateClusterPlacement(add, at, s, ports, stanzas)
 		c.validateClusterResources(add, at, s)
 		c.validateClusterRuntime(add, at, s)
-		c.validateClusterBackup(add, at, s.Name, s.Backup)
+		c.validateClusterBackup(add, at, s.Backup)
 	}
 }
 
@@ -279,20 +273,9 @@ func (c Cluster) validateClusterResources(add func(string, ...any), at string, s
 }
 
 // validateClusterBackup checks [clusters.backup].
-func (c Cluster) validateClusterBackup(add func(string, ...any), at, name string, b ClusterBackup) {
+func (c Cluster) validateClusterBackup(add func(string, ...any), at string, b ClusterBackup) {
 	if b.RetentionFull < 0 {
 		add("%s.backup.retention_full must not be negative", at)
-	}
-	if b.DumpSchedule != "" {
-		if c.Backup.Provider == "" {
-			add("%s.backup.dump_schedule needs a bucket: run vaire backup setup first", at)
-		}
-		if b.DumpRetention < 1 {
-			add("%s.backup.dump_retention must be at least 1 when dump_schedule is set: set it first with vaire config set clusters.%s.backup.dump_retention <n>", at, name)
-		}
-	}
-	if b.DumpRetention < 0 {
-		add("%s.backup.dump_retention must not be negative", at)
 	}
 }
 

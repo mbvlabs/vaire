@@ -173,7 +173,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 		}
 		hint := "Fix the statement and retry."
 		if write && backup.LiveDatabase(db) != db {
-			hint += " " + db + " is a copy: one restored from a backup is read-only (in recovery) until vaire restore promote " + backup.LiveDatabase(db) + "; one restored from a dump takes writes."
+			hint += " " + db + " is a copy: one restored from a backup is read-only (in recovery) until vaire restore promote " + backup.LiveDatabase(db) + "."
 		}
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, hint)
 	}

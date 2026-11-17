@@ -3,9 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,17 +30,6 @@ func recoveryKit(name string) (*workspaces.BackupCreds, error) {
 	return creds.Backup, nil
 }
 
-// dumpIdentity returns the kit's age identity for opening dumps, or an
-// operator-side error when this machine's kit doesn't carry one.
-func dumpIdentity(k *workspaces.BackupCreds) (string, error) {
-	if k.Dumps.AgeIdentity == "" {
-		return "", output.NewError(output.CodeInputRequired, "this workspace's recovery kit has no dump age identity", output.ExitInput,
-			"Dumps open with the age identity from the recovery kit. Run vaire secrets export on the machine that ran vaire backup setup, then vaire login with that bundle here.").
-			WithDetails(map[string]any{"reason": "recovery_kit_missing", "secret": steps.SecretBackupAgeIdentity})
-	}
-	return k.Dumps.AgeIdentity, nil
-}
-
 func kitTarget(k *workspaces.BackupCreds) backup.Target {
 	return backup.Target{Endpoint: k.Endpoint, Region: k.Region, Bucket: k.Bucket, Prefix: k.Prefix, URIStyle: k.URIStyle, KeyID: k.AccessKeyID, Secret: k.SecretAccessKey}
 }
@@ -51,9 +37,8 @@ func kitTarget(k *workspaces.BackupCreds) backup.Target {
 // restoreJobResult is the restore.start job's result, as the restore command
 // reads it back.
 type restoreJobResult struct {
-	Phase     string   `json:"phase"`
-	Restoring string   `json:"restoring"`
-	Warnings  []string `json:"warnings"`
+	Phase     string `json:"phase"`
+	Restoring string `json:"restoring"`
 	// FollowerWarnings are a combined --promote's structured warnings, such
 	// as followers_diverged (D12): they keep their code.
 	FollowerWarnings []output.Warning `json:"follower_warnings"`
@@ -65,14 +50,10 @@ type restoreJobResult struct {
 }
 
 // restoreWarnings is the restore command's warning list: the run's own and
-// the reply's, the job's dump warnings (sentences, so labelled
-// restore_dump_errors) and the job's structured warnings, which keep the code
-// the node gave them.
+// the reply's, and the job's structured warnings, which keep the code the
+// node gave them.
 func restoreWarnings(own, reply []output.Warning, res restoreJobResult) []output.Warning {
 	warnings := append(own, reply...)
-	for _, w := range res.Warnings {
-		warnings = append(warnings, output.Warning{Code: "restore_dump_errors", Message: w})
-	}
 	warnings = append(warnings, res.FollowerWarnings...)
 	if res.PoolerWarning != "" {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: res.PoolerWarning})
@@ -103,8 +84,8 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if flagTrue(cmd, "promote") {
-		// The node refuses it too; this saves asking for the token, loading
-		// the dump identity or reporting a dry run first.
+		// The node refuses it too; this saves asking for the token or
+		// reporting a dry run first.
 		if err := combinedRestorePreflight(cfg, db); err != nil {
 			return err
 		}
@@ -112,17 +93,13 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if !target.IsZero() {
 		p.note("restore target: " + echoTime(target, cfg.Timezone))
 	}
-	sec, err := restoreSecrets(s.ctx.Name, params)
-	if err != nil {
-		return err
-	}
 	token := db + "/restore"
 	if !dryRun(cmd) {
 		if err := Confirm(cmd, token); err != nil {
 			return err
 		}
 	}
-	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "restore.start", params, remote.CallOptions{Secrets: sec, Confirm: token, DryRun: dryRun(cmd)})
+	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "restore.start", params, remote.CallOptions{Confirm: token, DryRun: dryRun(cmd)})
 	if err != nil {
 		return err
 	}
@@ -158,10 +135,6 @@ func restoreParams(cmd *cobra.Command, db string) (map[string]any, time.Time, er
 		kinds++
 		params["kind"], params["set"] = backup.TargetSet, v
 	}
-	if v := stringFlag(cmd, "dump"); v != "" {
-		kinds++
-		params["kind"], params["dump"] = "dump", v
-	}
 	t, wire, err := targetFlag(cmd, "time")
 	if err != nil {
 		return nil, time.Time{}, err
@@ -172,29 +145,10 @@ func restoreParams(cmd *cobra.Command, db string) (map[string]any, time.Time, er
 		params["kind"], params["time"] = backup.TargetTime, wire
 	}
 	if kinds != 1 {
-		return nil, time.Time{}, output.NewError(output.CodeUsage, "pass exactly one of --time, --latest, --set or --dump", output.ExitUsage,
+		return nil, time.Time{}, output.NewError(output.CodeUsage, "pass exactly one of --time, --latest or --set", output.ExitUsage,
 			"For example vaire restore "+db+" --time -15m.")
 	}
 	return params, target, nil
-}
-
-// restoreSecrets are the secrets a dump restore sends: the age identity that
-// opens the dump.
-func restoreSecrets(workspaceName string, params map[string]any) (map[string]string, error) {
-	sec := map[string]string{}
-	if params["kind"] != "dump" {
-		return sec, nil
-	}
-	kit, err := recoveryKit(workspaceName)
-	if err != nil {
-		return nil, err
-	}
-	ident, err := dumpIdentity(kit)
-	if err != nil {
-		return nil, err
-	}
-	sec[steps.SecretBackupAgeIdentity] = ident
-	return sec, nil
 }
 
 // restoreDryRunResult reports what a dry run would do.
@@ -222,15 +176,10 @@ func restorePromotedResult(cmd *cobra.Command, db string, jr jobReply, res resto
 // database.
 func restoreReadyResult(cmd *cobra.Command, db string, params map[string]any, jr jobReply, res restoreJobResult, warnings []output.Warning, token string) error {
 	ready := "the temporary cluster " + res.Restoring + " is ready, paused at the target, beside the live " + db + ", which kept serving."
-	switch params["kind"] {
-	case backup.TargetLatest:
+	if params["kind"] == backup.TargetLatest {
 		// --latest has no target to pause at: the copy keeps replaying the
 		// archived WAL until it is promoted or aborted.
 		ready = "the temporary cluster " + res.Restoring + " is ready, still replaying the latest archived WAL, beside the live " + db + ", which kept serving."
-	case "dump":
-		// A dump is loaded as it is: there is no WAL to replay and no target
-		// to pause at.
-		ready = "the temporary cluster " + res.Restoring + " is ready and holds the data of dump " + stringFlag(cmd, "dump") + " (a dump has no WAL to replay), beside the live " + db + ", which kept serving."
 	}
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"job_id": jr.JobID, "result": res},
@@ -315,12 +264,11 @@ func rowCount(n *int64) string {
 	return fmt.Sprint(*n)
 }
 
-// promotedWhere says where a promoted database archives now: a restore from
-// a backup continues its stanza on a new timeline, a restore from a dump is
-// a new cluster with a stanza of its own.
+// promotedWhere says where a promoted database archives now: a restore
+// continues its stanza on a new timeline.
 func promotedWhere(stanza string) string {
 	if stanza != "" {
-		return "as a new cluster archiving to a new stanza, " + stanza + ", which has its first full backup."
+		return "archiving to stanza " + stanza + "; a full backup is running."
 	}
 	return "on a new timeline; a full backup is running."
 }
@@ -666,137 +614,6 @@ func forkResult(cmd *cobra.Command, reply remote.Reply, src, name string, at tim
 	})
 }
 
-func runDump(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return parentRun(cmd, args)
-	}
-	db := args[0]
-	to := stringFlag(cmd, "to")
-	if to == "" {
-		to = "local"
-	}
-	if to != "local" && to != "bucket" {
-		return output.NewError(output.CodeUsage, "--to must be local or bucket", output.ExitUsage, "")
-	}
-	p := newProgress(cmd)
-	s, err := openSession(cmd, p)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	if to == "bucket" {
-		reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "dump.create", map[string]string{"database": db}, remote.CallOptions{})
-		if err != nil {
-			return err
-		}
-		if detached {
-			return detachedResult(cmd, s, jobID, "the dump")
-		}
-		var res struct {
-			Dump backup.Dump `json:"dump"`
-		}
-		if _, err := decodeJob(reply, &res); err != nil {
-			return err
-		}
-		return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, db, humanBytes(res.Dump.Size)), Warnings: append(s.warnings, reply.Warnings...)})
-	}
-	out := stringFlag(cmd, "out")
-	if out == "" {
-		out = backup.DumpFileName(db, time.Now().UTC().Format("20060102T150405Z"))
-	}
-	if abs, err := filepath.Abs(out); err == nil {
-		out = abs
-	}
-	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Pick a path that does not exist yet with --out.")
-	}
-	p.note("streaming pg_dump -Fc of " + db + " to " + out)
-	stopWait := p.wait("streaming the dump of " + db)
-	streamErr := s.node.Stream(commandContext(cmd), "dump "+db, &countingWriter{w: f, report: func(n int64) { p.setDetail(humanBytes(n) + " written") }})
-	stopWait()
-	if cerr := f.Close(); streamErr == nil {
-		streamErr = cerr
-	}
-	if streamErr != nil {
-		_ = os.Remove(out)
-		return streamErr
-	}
-	info, _ := os.Stat(out)
-	size := int64(0)
-	if info != nil {
-		size = info.Size()
-	}
-	return output.Success(cmd, output.Result{Data: map[string]any{"database": db, "out": out, "size": size},
-		Message: fmt.Sprintf("wrote %s (%s); restore it with pg_restore", out, humanBytes(size)), Warnings: s.warnings})
-}
-
-func runDumpList(cmd *cobra.Command, args []string) error {
-	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
-	if err != nil {
-		return err
-	}
-	kit, err := recoveryKit(c.Name)
-	if err != nil {
-		return err
-	}
-	db := ""
-	if len(args) > 0 {
-		db = args[0]
-	}
-	stop := waitOn(cmd, "listing the dumps in "+kit.Bucket)
-	dumps, err := backup.ListDumps(commandContext(cmd), kitTarget(kit), db)
-	stop()
-	if err != nil {
-		return err
-	}
-	return output.Success(cmd, output.Result{Data: map[string]any{"dumps": dumps}, Message: dumpListMessage(dumps)})
-}
-
-// dumpListMessage is the dump list for humans: a header row, then one row
-// per dump.
-func dumpListMessage(dumps []backup.Dump) string {
-	if len(dumps) == 0 {
-		return "no dumps in the bucket"
-	}
-	rows := [][]string{{"DATABASE", "ID", "SIZE", "CREATED"}}
-	for _, d := range dumps {
-		rows = append(rows, []string{d.Database, d.ID, humanBytes(d.Size), d.Created})
-	}
-	return strings.Join(alignColumns(rows), "\n")
-}
-
-func runDumpGet(cmd *cobra.Command, args []string) error {
-	db, id := args[0], args[1]
-	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
-	if err != nil {
-		return err
-	}
-	kit, err := recoveryKit(c.Name)
-	if err != nil {
-		return err
-	}
-	out := stringFlag(cmd, "out")
-	if err := RequireFlag(cmd, out != "", "--out", "dump get"); err != nil {
-		return err
-	}
-	if out == "" {
-		out = backup.DumpFileName(db, id)
-	}
-	ident, err := dumpIdentity(kit)
-	if err != nil {
-		return err
-	}
-	stop := waitOn(cmd, "downloading and decrypting dump "+id+" of "+db)
-	n, err := backup.DownloadDump(commandContext(cmd), kitTarget(kit), db, id, ident, out)
-	stop()
-	if err != nil {
-		return err
-	}
-	return output.Success(cmd, output.Result{Data: map[string]any{"database": db, "id": id, "out": out, "size": n},
-		Message: fmt.Sprintf("decrypted dump %s of %s to %s (%s); read it with pg_restore --list", id, db, out, humanBytes(n))})
-}
-
 // drillLines renders a drill result: a header, then one line per check.
 // The restore check says where the copy recovered to, so the header names
 // it only when no check does.
@@ -825,18 +642,4 @@ func drillLines(drill backup.Drill) string {
 		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
-}
-
-// countingWriter passes writes through to w and reports the running total.
-type countingWriter struct {
-	w      io.Writer
-	n      int64
-	report func(n int64)
-}
-
-func (c *countingWriter) Write(b []byte) (int, error) {
-	n, err := c.w.Write(b)
-	c.n += int64(n)
-	c.report(c.n)
-	return n, err
 }

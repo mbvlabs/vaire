@@ -436,7 +436,7 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]string{"database": name}, Message: "dry run: would drop " + name, Warnings: s.warnings})
 	}
-	reply, err := p.call(commandContext(cmd), s.node, "db.drop", map[string]any{"name": name, "no_final_dump": flagTrue(cmd, "no-final-dump")},
+	reply, err := p.call(commandContext(cmd), s.node, "db.drop", map[string]any{"name": name},
 		remote.CallOptions{Confirm: name, OnEvent: p.event})
 	if err != nil {
 		return err
@@ -446,9 +446,6 @@ func runDBDrop(cmd *cobra.Command, args []string) error {
 	message := "dropped database " + name
 	if stanza, ok := dropped["stanza_kept"].(string); ok {
 		message += "; its stanza " + stanza + " is kept, so its backups stay restorable until they expire"
-	}
-	if final, ok := dropped["final_dump"].(map[string]any); ok {
-		message += fmt.Sprintf("; its final dump %v is in the bucket (vaire dump get %s %v --out <file>)", final["id"], name, final["id"])
 	}
 	return output.Success(cmd, output.Result{
 		Data:     dropped,

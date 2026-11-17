@@ -35,10 +35,10 @@ type MetricsCreds struct {
 }
 
 // BackupCreds is the recovery kit (Phases 3 and 5): where the bucket is, its
-// keys, the pgBackRest repository cipher and the age identity that opens the
-// long-retention dumps. The operator generates the cipher and the identity
-// and stores them here before anything reaches the node. The node never sees
-// the age identity except for the length of a restore from a dump.
+// keys, the pgBackRest repository cipher and the age key pair that encrypts
+// and opens the master recovery bundles. The operator generates the cipher
+// and the identity and stores them here before anything reaches the node.
+// The node only ever receives the recipient.
 type BackupCreds struct {
 	Provider        string `json:"provider"`
 	Endpoint        string `json:"endpoint"`
@@ -52,12 +52,13 @@ type BackupCreds struct {
 		CipherPass string `json:"cipher_pass"`
 	} `json:"pgbackrest"`
 
-	// Dumps holds the age X25519 identity the long-retention dumps are
-	// encrypted to.
-	Dumps struct {
-		AgeIdentity  string `json:"age_identity,omitempty"`
-		AgeRecipient string `json:"age_recipient,omitempty"`
-	} `json:"dumps"`
+	// Encryption is the age X25519 key pair for the master recovery
+	// bundles: the node encrypts to Recipient, and Identity stays on the
+	// operator to open them.
+	Encryption struct {
+		Identity  string `json:"identity,omitempty"`
+		Recipient string `json:"recipient,omitempty"`
+	} `json:"encryption"`
 }
 
 // HasBucket reports whether the kit holds a bucket's keys and cipher, not
@@ -68,5 +69,5 @@ func (b BackupCreds) HasBucket() bool {
 
 // SecretValues returns every secret in the recovery kit.
 func (b BackupCreds) SecretValues() []string {
-	return []string{b.SecretAccessKey, b.PgBackRest.CipherPass, b.Dumps.AgeIdentity}
+	return []string{b.SecretAccessKey, b.PgBackRest.CipherPass, b.Encryption.Identity}
 }

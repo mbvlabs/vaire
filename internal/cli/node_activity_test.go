@@ -83,7 +83,7 @@ func TestWithEvidenceWarningsAttachesOnce(t *testing.T) {
 	if !errors.Is(err, cause) || output.ExitCode(err) != output.ExitGeneric {
 		t.Fatalf("typed failure behavior changed: cause=%v exit=%d", errors.Is(err, cause), output.ExitCode(err))
 	}
-	untyped := &testJobError{text: "the final dump failed"}
+	untyped := &testJobError{text: "the final backup failed"}
 	wrapped := withEvidenceWarnings(untyped, []output.Warning{warning})
 	if !errors.Is(wrapped, untyped) {
 		t.Fatalf("untyped error identity was lost: %v", wrapped)

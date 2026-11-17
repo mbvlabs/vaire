@@ -82,7 +82,7 @@ func PgBackRestStepIDs() []string { return []string{pgbackrestID} }
 // plans it to refuse a node that vaire apply hasn't brought up to date.
 func PackagesStepIDs() []string { return []string{postgresPackagesID} }
 
-// TimersStepIDs is the step a per-database dump schedule change needs.
+// TimersStepIDs is the step a per-database schedule change needs.
 func TimersStepIDs() []string { return []string{timersID} }
 
 // RolesStepIDs is the step db.create runs on its own.

@@ -767,7 +767,6 @@ func (c Cluster) ScheduleValues() map[string]string {
 		add(at+"incr_schedule", cl.Backup.IncrSchedule)
 		add(at+"verify_schedule", cl.Backup.VerifySchedule)
 		add(at+"drill_schedule", cl.Backup.DrillSchedule)
-		add(at+"dump_schedule", cl.Backup.DumpSchedule)
 	}
 	return out
 }

@@ -130,18 +130,6 @@ func jobReporter(cmd *cobra.Command) engine.Reporter {
 	}
 }
 
-// runNodeDump writes pg_dump -Fc of one database to stdout, for
-// vaire dump --to local.
-func runNodeDump(cmd *cobra.Command, args []string) error {
-	if dryRun(cmd) {
-		return output.OK(cmd, map[string]any{"database": args[0], "dry_run": true}, "would dump "+args[0])
-	}
-	if err := node.DumpStream(commandContext(cmd), args[0], cmd.OutOrStdout()); err != nil {
-		return err
-	}
-	return nil
-}
-
 // runNodeArchivePush is the archive_command wrapper (Phase 5). It replaces
 // the process with pgBackRest, so nothing after it runs on success.
 func runNodeArchivePush(cmd *cobra.Command, args []string) error {

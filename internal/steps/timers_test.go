@@ -41,7 +41,7 @@ func timersConfig(state string) config.Cluster {
 func assertBackupServiceTemplates(t *testing.T, cfg config.Cluster) {
 	t.Helper()
 	files := timerFiles(cfg)
-	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill", "db-dump"} {
+	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill"} {
 		name := "vaire-" + job + "@.service"
 		if got := string(files[name]); got != string(render.JobService(job, "--db %i")) {
 			t.Errorf("%s missing or incorrect", name)
@@ -61,6 +61,14 @@ func TestBackupServiceTemplatesRequireBackups(t *testing.T) {
 	for name := range timerFiles(config.DefaultCluster()) {
 		if strings.Contains(name, "@") {
 			t.Errorf("database backup unit without backups: %s", name)
+		}
+	}
+}
+
+func TestNoDumpUnits(t *testing.T) {
+	for name := range timerFiles(timersConfig("unscheduled")) {
+		if strings.Contains(name, "dump") {
+			t.Errorf("dump unit still rendered: %s", name)
 		}
 	}
 }

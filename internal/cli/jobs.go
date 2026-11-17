@@ -218,7 +218,7 @@ func runJobFollow(cmd *cobra.Command, args []string) error {
 }
 
 // jobResultMessage is the result line the command that started a job prints
-// for its result (vaire backup now, backup verify, restore drill, dump, restore,
+// for its result (vaire backup now, backup verify, restore drill, restore,
 // db fork), so vaire job follow on a finished job says the same. It is empty
 // for a result it can't read.
 func jobResultMessage(job string, raw json.RawMessage) string {
@@ -232,8 +232,6 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 		return verifyJobMessage(raw)
 	case "restore-drill":
 		return drillJobMessage(raw)
-	case "db-dump":
-		return dumpJobMessage(raw)
 	case "restore":
 		return restoreJobMessage(raw)
 	case "db-fork":
@@ -280,17 +278,6 @@ func drillJobMessage(raw json.RawMessage) string {
 		return ""
 	}
 	return drillLines(drill)
-}
-
-// dumpJobMessage renders the result of a dump job.
-func dumpJobMessage(raw json.RawMessage) string {
-	var res struct {
-		Dump backup.Dump `json:"dump"`
-	}
-	if json.Unmarshal(raw, &res) != nil || res.Dump.ID == "" {
-		return ""
-	}
-	return fmt.Sprintf("dump %s of %s is in the bucket (%s, age-encrypted)", res.Dump.ID, res.Dump.Database, humanBytes(res.Dump.Size))
 }
 
 // restoreJobMessage renders the result of a restore job: the promoted
