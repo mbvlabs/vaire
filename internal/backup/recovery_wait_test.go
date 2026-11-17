@@ -44,7 +44,7 @@ const mismatchLog = "123:WARNING:  hot standby is not possible because of insuff
 func TestWaitRecoveryChecksDiagnosticsAfterSQL(t *testing.T) {
 	cursor, path := testRecoveryCursor(t, "old log\n")
 	probes := recoveryWaitProbes{
-		service: func(context.Context, string) recoveryServiceState { return serviceStarting },
+		service: func(context.Context, string) recoveryServiceState { return serviceActive },
 		process: func(context.Context, string) recoveryObservation { return recoveryRecovering },
 		sql: func(context.Context, int) recoveryObservation {
 			appendRecoveryLog(t, path, mismatchLog)
@@ -111,6 +111,124 @@ func TestWaitRecoveryTargetStates(t *testing.T) {
 			if (err == nil) != tc.success {
 				t.Fatalf("err=%v success=%v", err, tc.success)
 			}
+		})
+	}
+}
+
+// TestWaitRecoveryStartupCompletesBeforeReadiness proves recovery readiness is
+// not reported while the unit is still activating: adoption stops the cluster
+// immediately, and stopping it before systemd's Type=forking start job has
+// handed over the PID file breaks the start job.
+func TestWaitRecoveryStartupCompletesBeforeReadiness(t *testing.T) {
+	tests := []struct {
+		name, until, kind, log string
+		observation            recoveryObservation
+	}{
+		{"open", UntilOpen, TargetLatest, "123:LOG:  consistent recovery state reached\n", recoveryRecovering},
+		{"paused", UntilPaused, TargetTime, "123:LOG:  recovery stopping before commit of transaction 4, time 2026\n123:LOG:  pausing at the end of recovery\n", recoveryPaused},
+		{"promoted", UntilPromoted, TargetLatest, "123:LOG:  recovery done\n", recoveryPromoted},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cursor, path := testRecoveryCursor(t, "")
+			appendRecoveryLog(t, path, tc.log)
+			polls := 0
+			err := waitRecovery(context.Background(), "target", "data", 5555, tc.until, tc.kind, cursor, recoveryWaitProbes{
+				service: func(context.Context, string) recoveryServiceState {
+					polls++
+					if polls == 1 {
+						return serviceStarting
+					}
+					return serviceActive
+				},
+				sql:     func(context.Context, int) recoveryObservation { return tc.observation },
+				process: func(context.Context, string) recoveryObservation { return recoveryRecovering },
+			}, func(string) {})
+			if err != nil || polls != 2 {
+				t.Fatalf("startup completion: err=%v polls=%d", err, polls)
+			}
+		})
+	}
+}
+
+func TestWaitRecoveryStartupFailureAndTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		service func(int) recoveryServiceState
+		process func(int) recoveryObservation
+		check   func(*testing.T, error)
+	}{
+		{
+			name: "failed",
+			service: func(call int) recoveryServiceState {
+				if call == 1 {
+					return serviceStarting
+				}
+				return serviceFailed
+			},
+			process: func(int) recoveryObservation { return recoveryRecovering },
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err == nil || !strings.Contains(err.Error(), "stopped") || RetainRecoveryFailure(err) {
+					t.Fatalf("start failure: %v", err)
+				}
+			},
+		},
+		{
+			name: "process stop fallback",
+			service: func(call int) recoveryServiceState {
+				if call == 1 {
+					return serviceStarting
+				}
+				return serviceUnknown
+			},
+			process: func(call int) recoveryObservation {
+				if call == 1 {
+					return recoveryRecovering
+				}
+				return recoveryStopped
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err == nil || !strings.Contains(err.Error(), "stopped") || RetainRecoveryFailure(err) {
+					t.Fatalf("process fallback: %v", err)
+				}
+			},
+		},
+		{
+			name:    "never active",
+			timeout: 20 * time.Millisecond,
+			service: func(int) recoveryServiceState { return serviceStarting },
+			process: func(int) recoveryObservation { return recoveryRecovering },
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if !errors.Is(err, context.DeadlineExceeded) || RetainRecoveryFailure(err) {
+					t.Fatalf("activating timeout: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cursor, path := testRecoveryCursor(t, "")
+			appendRecoveryLog(t, path, "123:LOG:  consistent recovery state reached\n")
+			ctx := context.Background()
+			cancel := func() {}
+			if tc.timeout != 0 {
+				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
+			}
+			defer cancel()
+			calls := 0
+			err := waitRecovery(ctx, "target", "data", 5555, UntilOpen, TargetLatest, cursor, recoveryWaitProbes{
+				service: func(context.Context, string) recoveryServiceState {
+					calls++
+					return tc.service(calls)
+				},
+				sql:     func(context.Context, int) recoveryObservation { return recoveryRecovering },
+				process: func(context.Context, string) recoveryObservation { return tc.process(calls) },
+			}, func(string) {})
+			tc.check(t, err)
 		})
 	}
 }

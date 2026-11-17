@@ -371,11 +371,15 @@ func (s *recoveryWaitState) stopped(poll recoveryPoll) bool {
 }
 
 // reached reports a target that trustworthy evidence shows recovery has
-// reached. A missing file, backlog or partial line makes negative diagnostic
-// evidence unknown; it cannot authorize readiness.
+// reached. The unit must be active, not still starting: its start job is
+// pg_ctlcluster, which hands systemd the PID file after PostgreSQL accepts
+// connections. A waiter that returns while it is activating lets adoption stop
+// the cluster before that handoff, and the unit then fails with
+// Result=protocol. A missing file, backlog or partial line makes negative
+// diagnostic evidence unknown; it cannot authorize readiness.
 func (s *recoveryWaitState) reached(poll recoveryPoll) bool {
 	trustworthy := s.cursor.initial != nil && s.cursor.observedNew && !s.cursor.backlog && !s.cursor.partial && !s.cursor.skipOldLine && !s.evidence.uncertain
-	if !trustworthy || (poll.service != serviceActive && poll.service != serviceStarting) {
+	if !trustworthy || poll.service != serviceActive {
 		return false
 	}
 	switch s.until {
