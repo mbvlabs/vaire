@@ -362,6 +362,15 @@ func (p PgBackRest) StanzaDelete(ctx context.Context, pgPath string) error {
 // opts.Pause recovery pauses at the target, or keeps following the archive
 // as a standby for the latest point; otherwise it promotes there.
 func (p PgBackRest) Materialise(ctx context.Context, opts RestoreOptions) error {
+	args, err := materialiseArgs(opts)
+	if err != nil {
+		return err
+	}
+	prog := newProgress("restore", p.Report)
+	return wrapTool("pgbackrest restore", p.runDetail(ctx, prog.line, append(args, "restore")...))
+}
+
+func materialiseArgs(opts RestoreOptions) ([]string, error) {
 	args := []string{"--pg1-path=" + opts.Path, "--no-delta", networkProcessMax}
 	action := "--target-action=promote"
 	if opts.Pause {
@@ -379,13 +388,15 @@ func (p PgBackRest) Materialise(ctx context.Context, opts RestoreOptions) error 
 	case TargetSet:
 		args = append(args, "--set="+opts.Set, "--type=immediate", action)
 	default:
-		return fmt.Errorf("restore target %q is unknown", opts.Kind)
+		return nil, fmt.Errorf("restore target %q is unknown", opts.Kind)
 	}
-	if opts.Timeline != "" {
+	// An immediate restore stops at the selected backup's own consistency
+	// point. pgBackRest rejects target-timeline with type=immediate; the
+	// timeline remembered after undo is only needed for archive replay.
+	if opts.Timeline != "" && opts.Kind != TargetSet {
 		args = append(args, "--target-timeline="+opts.Timeline)
 	}
-	prog := newProgress("restore", p.Report)
-	return wrapTool("pgbackrest restore", p.runDetail(ctx, prog.line, append(args, "restore")...))
+	return args, nil
 }
 
 // ArchiveStatus reads pg_stat_archiver.

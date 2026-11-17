@@ -3,10 +3,30 @@ package backup
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/engine"
 )
+
+func TestMaterialiseTimelineOptions(t *testing.T) {
+	for _, kind := range []string{TargetLatest, "", TargetTime, TargetSet} {
+		for _, pause := range []bool{false, true} {
+			opts := RestoreOptions{Kind: kind, Pause: pause, Path: "/data/copy", Set: "20261117-155723F", Timeline: "1"}
+			args, err := materialiseArgs(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTimeline := kind != TargetSet
+			if got := slices.Contains(args, "--target-timeline=1"); got != wantTimeline {
+				t.Errorf("kind=%q pause=%v: timeline=%v, want %v: %v", kind, pause, got, wantTimeline, args)
+			}
+			if kind == TargetSet && (!slices.Contains(args, "--type=immediate") || !slices.Contains(args, "--set="+opts.Set)) {
+				t.Errorf("selected-set restore lost its immediate target: %v", args)
+			}
+		}
+	}
+}
 
 // A stanza-create that meets an async archive-push holding the stanza lock
 // waits and retries; any other failure is returned at once.
