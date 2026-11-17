@@ -39,7 +39,7 @@ func TestActivationRoutingFenceFails(t *testing.T) {
 			t.Errorf("detail %q does not mention %q", r.Detail, want)
 		}
 	}
-	if !strings.Contains(r.Fix, "vaire apply --db app") {
+	if r.Fix != "vaire apply" {
 		t.Errorf("fix %q does not finish routing with apply", r.Fix)
 	}
 	if other := byID(Run(NodeChecks(), f, ""), "activation.pending", "other"); other.Status != Pass {
@@ -83,6 +83,13 @@ func TestActivationUnfinishedUndoFails(t *testing.T) {
 	}
 	if other := byID(Run(ActivationChecks(), f, ""), "activation.pending", "other"); other.Status != Pass {
 		t.Errorf("other database inherited the undo: %+v", other)
+	}
+	f.Records.Activation = map[string]backup.ActivationFence{
+		"app": {OperationID: "restore-1", Kind: "restore-promote", Database: "app", Phase: "routing"},
+	}
+	r = byID(Run(ActivationChecks(), f, ""), "activation.pending", "app")
+	if !strings.Contains(r.Fix, "vaire restore undo app") {
+		t.Errorf("an inherited fence hid the finish-only undo retry: %+v", r)
 	}
 }
 

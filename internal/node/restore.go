@@ -191,6 +191,9 @@ func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target,
 	if err := checkRestorable(cfg, p.Database); err != nil {
 		return err
 	}
+	if err := refusePendingUndo(p.Database); err != nil {
+		return err
+	}
 	var err error
 	*target, err = restoreCheckTarget(ctx, cfg, p, env.Req.Secrets)
 	if err != nil {
@@ -220,6 +223,9 @@ func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target,
 		return err
 	}
 	return restorePublish(func(s *backup.Records) error {
+		if _, undoing := s.Undoing[p.Database]; undoing {
+			return pendingUndoError(p.Database)
+		}
 		if _, open := s.Restores[p.Database]; open {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
@@ -231,6 +237,24 @@ func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target,
 		}
 		return nil
 	})
+}
+
+func pendingUndoError(db string) error {
+	return output.NewError(output.CodePrecondition,
+		"an undo of "+db+" is unfinished; a new restore cannot overtake it",
+		output.ExitPrecondition, "Run vaire restore undo "+db+" --confirm "+db+"/restore to finish it first.").
+		WithDetails(map[string]any{"reason": "undo_in_progress", "database": db})
+}
+
+func refusePendingUndo(db string) error {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+	if _, pending := recs.Undoing[db]; pending {
+		return pendingUndoError(db)
+	}
+	return nil
 }
 
 // restoreTimeline is the timeline a restore of p's database follows: the one
@@ -1511,7 +1535,7 @@ func prepareUndoStart(ctx context.Context, env *Env, p restoreDBParams, spec con
 func swapUndo(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, back backup.Leftover, aside string, rt engine.Runtime, env *Env) error {
 	const step = "restore.undo"
 	resume := steps.PauseDatabase(ctx, db)
-	err := backup.Swap(ctx, rt.Shell, step, env.Report, cfg.Server.DataRoot, db, back.Name, aside, back.Port)
+	err := swapCluster(ctx, rt.Shell, step, env.Report, cfg.Server.DataRoot, db, back.Name, aside, back.Port)
 	if err == nil {
 		err = backup.StartCluster(ctx, rt.Shell, step, env.Report, db, cfg.Server.DataDirectory(db), spec.Port, backup.UntilOpen)
 	}
@@ -1519,8 +1543,12 @@ func swapUndo(ctx context.Context, cfg config.Cluster, db string, spec config.Cl
 	return err
 }
 
-func recordUndo(cfg config.Cluster, db string, spec config.ClusterSpec, back backup.Leftover, aside, abandoned, oldArchived, timeline, stanza string) error {
+func recordUndo(cfg config.Cluster, db string, spec config.ClusterSpec, u backup.Undo, aside, abandoned, oldArchived, timeline, stanza string) error {
+	back := u.From
 	return backup.UpdateRecords(func(s *backup.Records) error {
+		if cur, ok := s.Undoing[db]; !ok || cur != u {
+			return fmt.Errorf("the undo of %s changed before its routing checkpoint", db)
+		}
 		kept := s.Leftovers[:0]
 		for _, l := range s.Leftovers {
 			if l.Name != back.Name {
@@ -1539,7 +1567,8 @@ func recordUndo(cfg config.Cluster, db string, spec config.ClusterSpec, back bac
 			delete(s.LastVerify, db)
 		}
 		s.Timelines[db] = backup.TimelineSwitch{Stanza: stanza, Timeline: timeline, SwitchedAt: stamp(), Abandoned: abandoned}
-		delete(s.Undoing, db)
+		u.Routing = true
+		s.Undoing[db] = u
 		return nil
 	})
 }
@@ -1569,6 +1598,9 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	back := u.From
+	if err := validateUndoRoutingStanza(bs, p.Database, spec, back); err != nil {
+		return Result{}, err
+	}
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "restore_from": back.Name, "resume": resuming, "dry_run": true}}, nil
 	}
@@ -1577,13 +1609,84 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	defer release()
-	const step = "restore.undo"
+	return runLockedUndo(ctx, env, p.Database, release)
+}
+
+func runLockedUndo(ctx context.Context, env *Env, db string, release func()) (Result, error) {
+	cfg, err := applyReloadCluster()
+	if err != nil {
+		return Result{}, err
+	}
+	if err := CheckNotProtected(cfg, db, "restore undo"); err != nil {
+		return Result{}, err
+	}
+	if err := refuseFollower(env.Req, cfg); err != nil {
+		return Result{}, err
+	}
+	if err := restoreInProgress(db, "undo"); err != nil {
+		return Result{}, err
+	}
+	spec, err := clusterOf(cfg, db)
+	if err != nil {
+		return Result{}, err
+	}
+	// The initial preview may have waited behind another cutover. Re-read
+	// ownership and the stanza/routing guard while holding the cutover lock.
+	bs, err := backup.LoadRecords()
+	if err != nil {
+		return Result{}, err
+	}
+	u, resuming, err := planUndo(bs, db)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := validateUndoRoutingStanza(bs, db, spec, u.From); err != nil {
+		return Result{}, err
+	}
+	if err := validateUndoContinuation(bs, db, spec, u); err != nil {
+		return Result{}, err
+	}
+	env.Cluster = cfg
+	return executeUndo(ctx, env, cfg, spec, u, resuming, bs, release)
+}
+
+func validateUndoContinuation(recs backup.Records, db string, spec config.ClusterSpec, u backup.Undo) error {
+	if !u.Routing {
+		return nil
+	}
+	timeline, ok := recs.Timelines[db]
+	if !ok || timeline.Timeline == "" || timeline.Stanza != spec.Stanza ||
+		(u.From.Stanza != "" && u.From.Stanza != spec.Stanza) {
+		return output.NewError(output.CodePrecondition, db+"'s undo routing checkpoint no longer matches its stanza and timeline",
+			output.ExitPrecondition, "Preserve the undo records and inspect the owning operation; nothing was swapped.").
+			WithDetails(map[string]any{"reason": "undo_identity_changed", "database": db})
+	}
+	if fence, pending := recs.ActivationFenceFor(db); pending &&
+		(fence.Kind != "restore-promote" || fence.Phase != fencePhaseRouting || fence.OperationID != u.From.RestoreID) {
+		return output.NewError(output.CodePrecondition, db+"'s undo does not own the pending activation fence",
+			output.ExitPrecondition, "Preserve both operations' records; this undo cannot finalize a different operation.").
+			WithDetails(map[string]any{"reason": "undo_identity_changed", "database": db})
+	}
+	return nil
+}
+
+func executeUndo(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, u backup.Undo, resuming bool, bs backup.Records, release func()) (Result, error) {
+	db := spec.Name
+	back := u.From
 	rt := runtimeFor(env, false)
+	if u.Routing {
+		// Do not repeat the swap after a reload/resume/verification failure.
+		stanza := spec.Stanza
+		if u.Stanza != "" {
+			spec.Stanza = u.Stanza
+		}
+		return undoResult(ctx, env, cfg, spec, u, stanza, bs.Timelines[db].Timeline, rt, release), nil
+	}
 	local := steps.ClusterPG(spec)
 	if err := prepareTargetExtensions(ctx, cfg, spec, rt, env.Report); err != nil {
 		return Result{}, err
 	}
-	if err := prepareUndoStart(ctx, env, p, spec, &u, back, resuming); err != nil {
+	if err := prepareUndoStart(ctx, env, restoreDBParams{Database: db}, spec, &u, back, resuming); err != nil {
 		return Result{}, err
 	}
 	aside, abandoned, oldArchived := u.Aside, u.Abandoned, u.LastArchivedAt
@@ -1592,8 +1695,8 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 		// the restored data's stanza is the one recorded at the start.
 		spec.Stanza = u.Stanza
 	}
-	if err := swapUndo(ctx, cfg, p.Database, spec, back, aside, rt, env); err != nil {
-		return Result{}, withHint(err, "Read vaire logs postgres --db "+p.Database+", then run vaire restore undo "+p.Database+" again: it resumes; the restored data is in the cluster "+aside+".")
+	if err := swapUndo(ctx, cfg, db, spec, back, aside, rt, env); err != nil {
+		return Result{}, withHint(err, "Read vaire logs postgres --db "+db+", then run vaire restore undo "+db+" again: it resumes; the restored data is in the cluster "+aside+".")
 	}
 	timeline, err := backup.Timeline(ctx, local)
 	if err != nil {
@@ -1603,37 +1706,97 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	// stanza: it returns to cluster.toml, and the dump's stanza is dropped.
 	stanza := spec.Stanza
 	if back.Stanza != "" && back.Stanza != spec.Stanza {
-		if cfg, stanza, err = switchStanza(cfg, p.Database, back.Stanza); err != nil {
+		if cfg, stanza, err = switchStanza(cfg, db, back.Stanza); err != nil {
 			return Result{}, err
 		}
 	}
-	if err := recordUndo(cfg, p.Database, spec, back, aside, abandoned, oldArchived, timeline, stanza); err != nil {
+	if err := recordUndo(cfg, db, spec, u, aside, abandoned, oldArchived, timeline, stanza); err != nil {
 		return Result{}, err
 	}
-	data := map[string]any{"database": p.Database, "restored_from": back.Name, "pre_undo": aside, "timeline": timeline, "stanza": stanza}
-	warnings := finishUndo(ctx, cfg, p.Database, spec, stanza, rt, env, release, step, err)
-	steps.WriteMetrics(cfg)
-	warnings = append(warnings, followersDiverged(cfg, p.Database)...)
-	return Result{Data: data, Warnings: warnings}, nil
+	u.Routing = true
+	return undoResult(ctx, env, cfg, spec, u, stanza, timeline, rt, release), nil
 }
 
-func finishUndo(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, stanza string, rt engine.Runtime, env *Env, release func(), step string, cause error) []output.Warning {
+func undoResult(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, u backup.Undo, stanza, timeline string, rt engine.Runtime, release func()) Result {
+	db := spec.Name
+	data := map[string]any{"database": db, "restored_from": u.From.Name, "pre_undo": u.Aside, "timeline": timeline, "stanza": stanza}
+	warnings := finishUndo(ctx, cfg, db, spec, stanza, u, rt, env, release)
+	steps.WriteMetrics(cfg)
+	warnings = append(warnings, followersDiverged(cfg, db)...)
+	return Result{Data: data, Warnings: warnings}
+}
+
+func validateUndoRoutingStanza(recs backup.Records, db string, spec config.ClusterSpec, back backup.Leftover) error {
+	if _, pending := recs.ActivationFenceFor(db); pending && back.Stanza != "" && back.Stanza != spec.Stanza {
+		return output.NewError(output.CodePrecondition,
+			"finish "+db+"'s pending routing before undo changes its stanza",
+			output.ExitPrecondition, "Run vaire apply to finish the promotion's routing, then retry undo. Nothing was swapped.").
+			WithDetails(map[string]any{"reason": "undo_routing_pending", "database": db})
+	}
+	return nil
+}
+
+func finishUndo(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, stanza string, u backup.Undo, rt engine.Runtime, env *Env, release func()) []output.Warning {
 	var warnings []output.Warning
-	err := cause
+	var err error
 	if stanza != spec.Stanza {
 		ctx := engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, stanzaRuns(db)...))
-		err = applyStanza(ctx, cfg, db, rt, env.Report)
+		err = applyStanzaAt(ctx, cfg, db, rt, env.Report)
 	}
+	if err == nil {
+		err = settleUndoRouting(ctx, cfg, db, u, rt, env.Report)
+	}
+	if err == nil {
+		err = backup.UpdateRecords(func(s *backup.Records) error {
+			if cur, ok := s.Undoing[db]; !ok || cur != u || !cur.Routing {
+				return fmt.Errorf("the undo of %s changed before routing completed", db)
+			}
+			delete(s.Undoing, db)
+			return nil
+		})
+	}
+	hint := "; retry vaire restore undo " + db + " to finish routing without swapping again"
 	if err == nil {
 		// The full backup's job takes the cluster lock, so let it go.
 		release()
-		err = startFullBackup(ctx, cfg, rt, db, step, env.Report)
+		err = startFullBackup(ctx, cfg, rt, db, "restore.undo", env.Report)
+		hint = "; run vaire apply, then vaire backup now --db " + db + " --type full"
 	}
 	if err != nil {
 		warnings = append(warnings, output.Warning{Code: "after_cutover_failed",
-			Message: db + " is back, but " + err.Error() + "; run vaire apply, then vaire backup now --db " + db + " --type full"})
+			Message: db + " is back, but " + err.Error() + hint})
 	}
 	return warnings
+}
+
+// settleUndoRouting also repairs aliases withdrawn by a promotion whose data
+// cutover finished but whose routing did not. Always reload both poolers: an
+// unchanged engine input hash is not proof that an earlier reload succeeded.
+func settleUndoRouting(ctx context.Context, cfg config.Cluster, db string, u backup.Undo, rt engine.Runtime, report engine.Reporter) error {
+	spec, ok := cfg.ClusterByName(db)
+	if !ok {
+		return fmt.Errorf("undo routing target %s is missing", db)
+	}
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+	if err := validateUndoContinuation(recs, db, spec, u); err != nil {
+		return err
+	}
+	if err := applyPoolerFence(ctx, cfg, rt, report); err != nil {
+		return err
+	}
+	if f, pending := recs.ActivationFenceFor(db); pending {
+		// Preserve the exact owning fence until both runtime mappings and
+		// pause release are verified; never clear it merely after the swap.
+		return verifyRoutingFence(ctx, cfg, spec, f.OperationID, f.Kind)
+	}
+	if err := verifyRoutingRoutes(ctx, spec, false); err != nil {
+		return err
+	}
+	poolerResumeDatabase(ctx, db)
+	return verifyRoutingRoutes(ctx, spec, true)
 }
 
 // undoPrefix marks the RestoreID of the leftover a completed undo leaves:

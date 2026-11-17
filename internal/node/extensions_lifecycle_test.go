@@ -140,16 +140,19 @@ func TestUndoPreflightFailureLeavesNoRecordOrEffect(t *testing.T) {
 	useTempRecords(t)
 	marker := failTargetPreflight(t)
 	oldLock := lockForCutover
+	oldReload := applyReloadCluster
 	lockForCutover = func(context.Context, *Env, string, string) (func(), error) { return func() {}, nil }
 	oldDetect := detectHost
 	detectHost = func(string) (hostinfo.Info, error) { return hostinfo.Info{}, nil }
 	t.Cleanup(func() {
 		lockForCutover = oldLock
 		detectHost = oldDetect
+		applyReloadCluster = oldReload
 	})
 	cfg := config.DefaultCluster()
 	cfg.Server.DataRoot = t.TempDir()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Port: 5433, Stanza: "app-abc123", Size: "small"}}
+	applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		s.Leftovers = append(s.Leftovers, backup.Leftover{
 			Database: "app", Name: "app__pre_restore_20260101T000000", RestoreID: "r1", Port: 6001,

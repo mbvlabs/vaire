@@ -239,6 +239,9 @@ type Undo struct {
 	// before the swap, for an undo that drops the dump's stanza.
 	LastArchivedAt string `json:"last_archived_at,omitempty"`
 	StartedAt      string `json:"started_at"`
+	// Routing means the swap and timeline bookkeeping are durable. A retry
+	// only settles pooler routing; it must not swap the data a second time.
+	Routing bool `json:"routing,omitempty"`
 }
 
 // TimelineSwitch is the timeline a database is on after restore undo.
