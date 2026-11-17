@@ -434,7 +434,9 @@ FROM pg_stat_archiver`, nil)
 	return st, nil
 }
 
-// PgTime formats t as pgBackRest's recovery target.
+// PgTime formats t as pgBackRest's recovery target. PostgreSQL stores
+// timestamps at microsecond resolution, and so does pgBackRest's target: a
+// target with nanoseconds is reduced to its microseconds here.
 func PgTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05.000000") + "+00"
 }

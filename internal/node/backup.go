@@ -472,7 +472,7 @@ func inWindow(w Window, t time.Time) error {
 	}
 	if t.Before(from) || t.After(to) {
 		return output.NewError(output.CodePrecondition,
-			fmt.Sprintf("%s is outside the restore window %s to %s", t.UTC().Format(time.RFC3339), w.From, w.To),
+			fmt.Sprintf("%s is outside the restore window %s to %s", t.UTC().Format(time.RFC3339Nano), w.From, w.To),
 			output.ExitPrecondition,
 			"Pick a time inside the window (vaire backup list). A time just now becomes restorable once its WAL is archived, within about a minute; older points need a long-retention dump (restore --dump).").
 			WithDetails(map[string]any{"reason": "outside_window", "window": w})
@@ -588,7 +588,7 @@ func drillPlans(ctx context.Context, specs []config.ClusterSpec, at time.Time, r
 			if err := inWindow(restoreWindow(info, archive), at); err != nil {
 				return nil, err
 			}
-			target = at.UTC().Format(time.RFC3339)
+			target = at.UTC().Format(time.RFC3339Nano)
 		}
 		plan = append(plan, drillPlan{Database: spec.Name, Target: target, Timeline: rs.TargetTimeline(spec.Name, spec.Stanza)})
 	}
@@ -618,7 +618,7 @@ func startDrill(ctx context.Context, env *jobEnv, p drillParams, spec config.Clu
 			return opts, nil, backup.Set{}, err
 		}
 		opts.Kind, opts.Time = backup.TargetTime, t
-		drill.Target = t.UTC().Format(time.RFC3339)
+		drill.Target = t.UTC().Format(time.RFC3339Nano)
 	}
 	d := driver(spec, env.Job, env.Report)
 	info, err := drillReadInfo(ctx, spec, env.Job, env.Report)

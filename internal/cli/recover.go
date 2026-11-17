@@ -205,20 +205,19 @@ func recoverSuccess(cmd *cobra.Command, outcomes []dbJobOutcome, lines []string,
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: []string{"vaire db list", "vaire doctor"}})
 }
 
-// recoverTarget is --time as the UTC RFC 3339 the node takes, or "".
+// recoverTarget is --time as the UTC RFC 3339Nano the node takes, or "".
 func recoverTarget(cmd *cobra.Command, args []string, all bool) (string, error) {
-	v := stringFlag(cmd, "time")
-	if v == "" {
-		return "", nil
-	}
-	t, err := parseTarget(v, time.Now())
+	_, at, err := targetFlag(cmd, "time")
 	if err != nil {
 		return "", err
+	}
+	if at == "" {
+		return "", nil
 	}
 	if all || len(args) != 1 {
 		return "", output.NewError(output.CodeUsage, "--time recovers one database", output.ExitUsage, "Name one database with --time.")
 	}
-	return t.UTC().Format(time.RFC3339), nil
+	return at, nil
 }
 
 // recoverAwaiting lists the databases that await recovery, in order. Its

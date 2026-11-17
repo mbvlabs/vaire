@@ -323,7 +323,7 @@ func restoreTimeTarget(ctx context.Context, d backup.Driver, spec config.Cluster
 	if err := inWindow(restoreWindow(info, archive), t); err != nil {
 		return "", olderStanzaHint(err, p.Database, spec.Stanza)
 	}
-	return t.UTC().Format(time.RFC3339), nil
+	return t.UTC().Format(time.RFC3339Nano), nil
 }
 
 func restoreSetTarget(ctx context.Context, d backup.Driver, p restoreParams) (string, error) {

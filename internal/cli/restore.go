@@ -162,14 +162,14 @@ func restoreParams(cmd *cobra.Command, db string) (map[string]any, time.Time, er
 		kinds++
 		params["kind"], params["dump"] = "dump", v
 	}
-	if v := stringFlag(cmd, "time"); v != "" {
+	t, wire, err := targetFlag(cmd, "time")
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if wire != "" {
 		kinds++
-		t, err := parseTarget(v, time.Now())
-		if err != nil {
-			return nil, time.Time{}, err
-		}
 		target = t
-		params["kind"], params["time"] = backup.TargetTime, t.Format(time.RFC3339)
+		params["kind"], params["time"] = backup.TargetTime, wire
 	}
 	if kinds != 1 {
 		return nil, time.Time{}, output.NewError(output.CodeUsage, "pass exactly one of --time, --latest, --set or --dump", output.ExitUsage,
@@ -459,13 +459,9 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 }
 
 func runRestoreDrill(cmd *cobra.Command, _ []string) error {
-	at := ""
-	if v := stringFlag(cmd, "time"); v != "" {
-		t, err := parseTarget(v, time.Now())
-		if err != nil {
-			return err
-		}
-		at = t.Format(time.RFC3339)
+	_, at, err := targetFlag(cmd, "time")
+	if err != nil {
+		return err
 	}
 	p := newProgress(cmd)
 	s, err := openSession(cmd, p)
@@ -587,13 +583,13 @@ func forkName(cmd *cobra.Command, src string) (string, error) {
 func forkParams(cmd *cobra.Command, src, name string) (map[string]any, time.Time, error) {
 	params := map[string]any{"source": src, "name": name}
 	var at time.Time
-	if v := stringFlag(cmd, "at"); v != "" {
-		t, err := parseTarget(v, time.Now())
-		if err != nil {
-			return nil, time.Time{}, err
-		}
+	t, wire, err := targetFlag(cmd, "at")
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if wire != "" {
 		at = t
-		params["at"] = t.Format(time.RFC3339)
+		params["at"] = wire
 	}
 	// Sent only when set, so an older node still takes the request.
 	if size := stringFlag(cmd, "size"); size != "" {
@@ -659,7 +655,7 @@ func forkResult(cmd *cobra.Command, reply remote.Reply, src, name string, at tim
 	all := append(append(warnings, reply.Warnings...), res.Warnings...)
 	from := "the live " + src
 	if !at.IsZero() {
-		from = src + " as of " + at.Format(time.RFC3339)
+		from = src + " as of " + at.Format(time.RFC3339Nano)
 	}
 	message, human := credentialsMessage(cmd, fmt.Sprintf("forked %s into %s with its own roles", from, name), "forked "+from+" into "+name+" with its own roles", name, secret)
 	return output.Success(cmd, output.Result{

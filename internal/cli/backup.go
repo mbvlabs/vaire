@@ -1169,9 +1169,24 @@ func parseTarget(v string, now time.Time) (time.Time, error) {
 	return t.UTC(), nil
 }
 
+// targetFlag reads a recovery target flag and returns its instant and the
+// UTC RFC3339Nano string the node's request carries. A missing flag is zero
+// and empty.
+func targetFlag(cmd *cobra.Command, name string) (time.Time, string, error) {
+	v := stringFlag(cmd, name)
+	if v == "" {
+		return time.Time{}, "", nil
+	}
+	t, err := parseTarget(v, time.Now())
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	return t, t.UTC().Format(time.RFC3339Nano), nil
+}
+
 // echoTime shows a target in UTC and the cluster's timezone.
 func echoTime(t time.Time, tz string) string {
-	out := t.UTC().Format(time.RFC3339)
+	out := t.UTC().Format(time.RFC3339Nano)
 	if loc, err := time.LoadLocation(tz); err == nil && tz != "UTC" {
 		out += " (" + t.In(loc).Format("2006-01-02 15:04:05 MST") + ")"
 	}
