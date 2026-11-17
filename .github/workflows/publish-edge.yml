@@ -40,6 +40,7 @@ jobs:
         run: just lint
       - name: Test release tooling
         run: |
+          go test ./internal/release ./internal/remote
           bash tests/versioned-installer.sh
           bash tests/release-platforms.sh
       - name: Build edge release

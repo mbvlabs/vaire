@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 )
@@ -41,7 +42,8 @@ type peekManifest struct {
 }
 
 // Validate checks a verified manifest against the channel policy. A major
-// line's manifest says stable and must carry a version on that line.
+// line's manifest says stable and must carry a version on that line. Edge may
+// publish a non-empty subset of the supported platforms.
 func Validate(m Manifest, channel, wantVersion string) error {
 	if m.SchemaVersion != schemaVersion {
 		return verificationFailed("release manifest schemaVersion is invalid")
@@ -59,13 +61,12 @@ func Validate(m Manifest, channel, wantVersion string) error {
 	if m.ReleaseBaseURL != wantBase {
 		return verificationFailed("release manifest releaseBaseUrl is invalid")
 	}
-	if len(m.Artifacts) != len(artifactKeys) {
+	if len(m.Artifacts) == 0 || (channel != "edge" && len(m.Artifacts) != len(artifactKeys)) {
 		return verificationFailed("release manifest artifacts are incomplete")
 	}
-	for _, key := range artifactKeys {
-		art, ok := m.Artifacts[key]
-		if !ok {
-			return verificationFailed("release manifest is missing " + key)
+	for key, art := range m.Artifacts {
+		if !slices.Contains(artifactKeys, key) {
+			return verificationFailed("release manifest artifact platform is invalid")
 		}
 		if art.URL != wantBase+"/"+key+"/vaire" {
 			return verificationFailed("release manifest artifact URL is invalid")
