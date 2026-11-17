@@ -1,5 +1,0 @@
-# FINAL GATE 2026-11-16T16:41:30Z
-$ gofmt -l $(git ls-files '*.go')
-exit_code=0 (non-empty list = unformatted)
-checked_files=594
-# end 2026-11-16T16:41:31Z

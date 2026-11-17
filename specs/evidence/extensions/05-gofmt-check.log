@@ -1,5 +1,0 @@
-# start 2026-11-16T14:22:51Z commit=84f71bbaa1804fb9b7d581ca8a109192dc6375a9
-$ gofmt -l $(git ls-files '*.go')
-exit_code=0 (gofmt -l exits 0 even when files are listed; non-empty list = unformatted)
-checked_files=594
-# end 2026-11-16T14:22:51Z

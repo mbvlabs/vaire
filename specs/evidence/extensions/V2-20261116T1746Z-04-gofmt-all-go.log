@@ -1,9 +1,0 @@
-# V2 FINAL GATE gofmt ALL tracked+untracked non-ignored Go 2026-11-16T17:47:13Z
-$ git ls-files --cached --others --exclude-standard -- "*.go"
-checked_files=614
-tracked_only=594
-untracked_nonignored=20
-
-$ gofmt -l <all>
-exit_code=0 (non-empty list above = unformatted)
-# end 2026-11-16T17:47:13Z

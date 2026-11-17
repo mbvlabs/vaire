@@ -1,6 +1,0 @@
-# start 2026-11-16T14:21:32Z commit=84f71bbaa1804fb9b7d581ca8a109192dc6375a9
-$ go version
-go version go1.27.1 linux/amd64
-$ go build ./...
-exit_code=0
-# end 2026-11-16T14:21:33Z

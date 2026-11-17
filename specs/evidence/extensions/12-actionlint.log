@@ -1,8 +1,0 @@
-# start 2026-11-16T14:23:19Z
-$ actionlint --version
-1.7.12
-installed by downloading from release page
-built with go1.26.1 compiler for linux/amd64
-$ actionlint
-exit_code=0
-# end 2026-11-16T14:23:19Z
