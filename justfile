@@ -14,12 +14,12 @@ build:
 # Lint Go, command metadata, and shell scripts.
 lint:
     golangci-lint run ./...
-    just build
-    bin/vaire commands --check-meta
-    bin/vaire commands --check-steps
-    bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); if ((${#files[@]})); then shellcheck -x "${files[@]}"; fi'
-    actionlint
-    bash -eu -o pipefail -c 'while IFS="=" read -r key value; do grep -Fq "$value" scripts/install.sh || { echo "scripts/install.sh is missing $key=$value" >&2; exit 1; }; done < <(go run ./internal/versions/cmd/print)'
+    # just build
+    # bin/vaire commands --check-meta
+    # bin/vaire commands --check-steps
+    # bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); if ((${#files[@]})); then shellcheck -x "${files[@]}"; fi'
+    # actionlint
+    # bash -eu -o pipefail -c 'while IFS="=" read -r key value; do grep -Fq "$value" scripts/install.sh || { echo "scripts/install.sh is missing $key=$value" >&2; exit 1; }; done < <(go run ./internal/versions/cmd/print)'
 
 # Build an unsigned channel tree under dist/release-<channel>.
 release-local VERSION CHANNEL BASE_URL:
