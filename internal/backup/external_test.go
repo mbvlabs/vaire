@@ -1220,6 +1220,86 @@ func TestSelectArchiveTOCFindsDatabaseEntriesInCreatePrologue(t *testing.T) {
 	}
 }
 
+// An empty-owner COMMENT entry is ambiguous in the TOC: it can be an
+// extension comment or an ordinary global comment such as a schema comment.
+// Inspection must keep the ordinary SQL target instead of requiring an
+// extension definition. pg_dump also emits empty-owner comments for casts,
+// transforms and access methods.
+func TestSelectArchiveTOCKeepsOrdinaryEmptyOwnerComment(t *testing.T) {
+	prologue := "--\n-- PostgreSQL database dump\n--\n\n\\restrict key\n\n" +
+		"SET statement_timeout = 0;\n" +
+		"SELECT pg_catalog.set_config('search_path', '', false);\n\n" +
+		"CREATE DATABASE \"app\" WITH TEMPLATE = template0;\n\n" +
+		"ALTER DATABASE \"app\" SET \"work_mem\" TO '8MB';\n\n"
+	for _, tc := range []struct {
+		name string
+		tag  string
+		sql  string
+	}{
+		{
+			name: "schema",
+			tag:  `SCHEMA "reporting" `,
+			sql:  `COMMENT ON SCHEMA "reporting" IS 'ordinary';`,
+		},
+		{
+			name: "access method",
+			tag:  `ACCESS METHOD "heap" `,
+			sql:  `COMMENT ON ACCESS METHOD "heap" IS 'ordinary';`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tocText := ";\n;     dbname: app\n;     Format: CUSTOM\n;\n" +
+				"1; 1262 0 DATABASE - app owner\n" +
+				"2; 0 0 COMMENT - " + tc.tag + "\n" +
+				"3; 1259 16390 TABLE public users owner\n"
+			sql := map[int]string{
+				1: `CREATE DATABASE "app" WITH TEMPLATE = template0;`,
+				2: prologue + tc.sql,
+			}
+			ws, fake, archive := selectionFixture(t, tocText, sql)
+			sel, err := SelectArchiveTOC(context.Background(), fake, "db.copy.select", nil, ws, archive, SelectionOptions{
+				SourceDatabase: "app",
+			})
+			if err != nil {
+				t.Fatalf("SelectArchiveTOC: %v", err)
+			}
+			if got, want := strings.Join(sel.Lines, " "), "2; 3;"; got != want {
+				t.Fatalf("selected lines %q, want %q", got, want)
+			}
+			omittedIDs := make([]int, 0, len(sel.Omitted))
+			for _, o := range sel.Omitted {
+				omittedIDs = append(omittedIDs, o.ID)
+			}
+			if fmt.Sprint(omittedIDs) != "[1]" {
+				t.Fatalf("omitted ids %v", omittedIDs)
+			}
+		})
+	}
+}
+
+// The generic COMMENT ON fallback must not accept arbitrary SQL from an
+// empty-owner ambiguous comment entry.
+func TestSelectArchiveTOCRejectsMalformedEmptyOwnerComment(t *testing.T) {
+	tocText := ";\n;     dbname: app\n;     Format: CUSTOM\n;\n" +
+		"1; 1262 0 DATABASE - app owner\n" +
+		"2; 0 0 COMMENT - something \n"
+	prologue := "--\n-- PostgreSQL database dump\n--\n\n\\restrict key\n\n" +
+		"SET statement_timeout = 0;\n" +
+		"SELECT pg_catalog.set_config('search_path', '', false);\n\n" +
+		"CREATE DATABASE \"app\" WITH TEMPLATE = template0;\n\n"
+	sql := map[int]string{
+		1: `CREATE DATABASE "app" WITH TEMPLATE = template0;`,
+		2: prologue + "DROP TABLE x;",
+	}
+	ws, fake, archive := selectionFixture(t, tocText, sql)
+	_, err := SelectArchiveTOC(context.Background(), fake, "db.copy.select", nil, ws, archive, SelectionOptions{
+		SourceDatabase: "app",
+	})
+	if err == nil || errorReason(t, err) != "archive_invalid" {
+		t.Fatalf("malformed empty-owner comment: %v", err)
+	}
+}
+
 // Modern pg_dump omits plpgsql's definition even though the source catalog
 // always reports the installed extension. Ordinary objects must still be
 // selected, while every non-built-in installed extension keeps the strict

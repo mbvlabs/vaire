@@ -1397,12 +1397,18 @@ func (s *tocSelector) selectExtension(entry ArchiveEntry, after string) error {
 }
 
 // commentStatementPrefix returns the COMMENT statement that belongs to an
-// inspected comment entry.
+// inspected comment entry. An empty-owner comment can be an extension comment
+// or an ordinary global comment, so only the SQL target decides; the generic
+// fallback keeps the target for selectComment to verify or keep.
 func commentStatementPrefix(rest string) string {
-	if strings.HasPrefix(strings.TrimPrefix(rest, "COMMENT - "), "DATABASE ") {
+	switch after := strings.TrimPrefix(rest, "COMMENT - "); {
+	case strings.HasPrefix(after, "DATABASE "):
 		return "COMMENT ON DATABASE "
+	case strings.HasPrefix(after, "EXTENSION "):
+		return "COMMENT ON EXTENSION "
+	default:
+		return "COMMENT ON "
 	}
-	return "COMMENT ON EXTENSION "
 }
 
 // selectComment omits a verified comment on the database or an approved
