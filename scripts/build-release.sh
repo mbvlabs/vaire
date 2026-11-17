@@ -107,11 +107,11 @@ build_one() {
   local os="$1"
   local arch="$2"
   local platform_dir="${out}/releases/${version}/${os}/${arch}"
-  mkdir -p "${platform_dir}"
-  CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" "${build_args[@]}" -o "${platform_dir}/vaire" ./cmd/vaire
+  mkdir -p "${platform_dir}" || return
+  CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" "${build_args[@]}" -o "${platform_dir}/vaire" ./cmd/vaire || return
   local hex
-  hex="$(sha256_hex "${platform_dir}/vaire")"
-  printf '%s  vaire\n' "${hex}" >"${platform_dir}/vaire.sha256"
+  hex="$(sha256_hex "${platform_dir}/vaire")" || return
+  printf '%s  vaire\n' "${hex}" >"${platform_dir}/vaire.sha256" || return
   printf '%s' "${hex}"
 }
 

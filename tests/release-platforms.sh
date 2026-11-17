@@ -9,6 +9,7 @@ cp "${source_root}"/scripts/{build-release,sign-release,install}.sh "${work}/scr
 cat >"${work}/mock/go" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[ "${TEST_BUILD_FAIL:-0}" = 0 ] || exit 1
 while [ "$1" != -o ]; do shift; done
 printf binary >"$2"
 EOF
@@ -57,6 +58,12 @@ for selection in linux/386 'linux/amd64 linux/amd64' '../../etc/passwd' 'linux/*
   fi
   [ -d "${root}/sentinel" ]
 done
+
+if TEST_BUILD_FAIL=1 build linux/amd64 >/dev/null 2>&1; then
+  echo 'reported success after a failed compiler invocation' >&2
+  exit 1
+fi
+[ ! -e "${manifest}" ]
 
 build ' linux/amd64 ' >/dev/null
 [ "$(jq -r '.artifacts | keys | join(" ")' "${manifest}")" = linux/amd64 ]
