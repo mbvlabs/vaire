@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/backup"
@@ -213,4 +214,89 @@ func assertLegacyCleanup(t *testing.T, s *legacyCleanupState, err error) {
 	if _, err := os.Lstat(filepath.Join(s.ports, s.name)); err != nil {
 		t.Fatalf("failure lost reservation: %v", err)
 	}
+}
+
+// The effective setting is pg_conftool's short output; the labelled default
+// never equals the bare value.
+func TestLegacyLeftoverEffectiveSettingUsesShortConftoolOutput(t *testing.T) {
+	const name = "app__pre_restore_20260101T010203"
+	args := fakePgConftoolSettings(t, map[string]fakePgConftoolSetting{
+		"port": {value: "5482"},
+	})
+	got, err := legacyLeftoverEffectiveSetting(name, "port")
+	if err != nil || got != "5482" {
+		t.Fatalf("effective setting: got %q, err = %v", got, err)
+	}
+	if got, want := args(), "-s 18 "+name+" show port"; got != want {
+		t.Fatalf("pg_conftool args = %q, want %q", got, want)
+	}
+}
+
+func TestLegacyLeftoverRegistrationUsesShortConftoolOutput(t *testing.T) {
+	root, name, port, settings := legacyLeftoverSettingFixture(t)
+	fakePgConftoolSettings(t, settings)
+	if err := legacyLeftoverRegistration(name, "app", root, 0, port); err != nil {
+		t.Fatalf("registration with exact effective settings: %v", err)
+	}
+}
+
+func TestLegacyLeftoverRegistrationRefusesUnverifiableSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting string
+		status        int
+	}{
+		{"mismatched data directory", "data_directory", 0},
+		{"failed cluster name", "cluster_name", 1},
+		{"failed port", "port", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, name, port, settings := legacyLeftoverSettingFixture(t)
+			s := settings[tc.setting]
+			if tc.status == 0 {
+				s.value = "wrong"
+			}
+			s.status = tc.status
+			settings[tc.setting] = s
+			fakePgConftoolSettings(t, settings)
+			if err := legacyLeftoverRegistration(name, "app", root, 0, port); err == nil ||
+				err.Error() != "effective legacy "+tc.setting+" is unverifiable" {
+				t.Fatalf("unverifiable %s: err = %v", tc.setting, err)
+			}
+		})
+	}
+}
+
+// The direct registration guard runs before postgresql-common is asked
+// anything.
+func TestLegacyLeftoverRegistrationVerifiesDirectPortBeforeConftool(t *testing.T) {
+	root, name, port := t.TempDir(), "app__pre_restore_20260101T010203", config.TemporaryPortMin
+	old := legacyLeftoverPort
+	legacyLeftoverPort = func(_, _, _ string) (int, error) { return port + 1, nil }
+	t.Cleanup(func() { legacyLeftoverPort = old })
+	args := fakePgConftoolSettings(t, map[string]fakePgConftoolSetting{
+		"data_directory": {value: filepath.Join(root, name)},
+		"cluster_name":   {value: "18/" + name},
+		"port":           {value: strconv.Itoa(port)},
+	})
+	if err := legacyLeftoverRegistration(name, "app", root, 0, port); err == nil ||
+		err.Error() != "direct legacy registration is unverifiable" {
+		t.Fatalf("mismatched direct port: err = %v", err)
+	}
+	if got := args(); got != "" {
+		t.Fatalf("pg_conftool ran before the direct registration check: %q", got)
+	}
+}
+
+func legacyLeftoverSettingFixture(t *testing.T) (string, string, int, map[string]fakePgConftoolSetting) {
+	t.Helper()
+	root, name, port := t.TempDir(), "app__pre_restore_20260101T010203", config.TemporaryPortMin
+	settings := map[string]fakePgConftoolSetting{
+		"data_directory": {value: filepath.Join(root, name)},
+		"cluster_name":   {value: "18/" + name},
+		"port":           {value: strconv.Itoa(port)},
+	}
+	old := legacyLeftoverPort
+	legacyLeftoverPort = func(_, _, _ string) (int, error) { return port, nil }
+	t.Cleanup(func() { legacyLeftoverPort = old })
+	return root, name, port, settings
 }

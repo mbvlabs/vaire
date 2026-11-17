@@ -24,7 +24,8 @@ var restoreCleanupRegistration = func(name, source, dataRoot string, sourcePort,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", "port")
+	// -s prints the bare value; pg_conftool's default output is "port = <n>".
+	cmd := exec.CommandContext(ctx, "pg_conftool", "-s", "18", name, "show", "port")
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.Output()
 	effective, parseErr := strconv.Atoi(strings.TrimSpace(string(out)))

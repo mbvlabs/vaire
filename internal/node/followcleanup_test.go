@@ -53,22 +53,43 @@ func (f *followCleanupRegistrationFixture) writeRegistration(t *testing.T, clust
 	}
 }
 
-// fakePgConftool puts a pg_conftool on PATH that records its arguments and
-// behaves like postgresql-common's: -s prints only the value, the default
-// prints the labelled pair. A nonzero status fails after printing.
-func fakePgConftool(t *testing.T, value string, status int) func() string {
+// fakePgConftoolSetting is one setting's short output and exit status.
+type fakePgConftoolSetting struct {
+	value  string
+	status int
+}
+
+// fakePgConftoolSettings puts a pg_conftool on PATH that records its arguments
+// and behaves like postgresql-common's: -s prints only the setting's value, the
+// default prints the labelled pair. A setting's nonzero status fails after
+// printing.
+func fakePgConftoolSettings(t *testing.T, settings map[string]fakePgConftoolSetting) func() string {
 	t.Helper()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "pg_conftool.args")
+	var cases strings.Builder
+	for setting, s := range settings {
+		fmt.Fprintf(&cases, "%s) value='%s' status=%d ;;\n", setting, s.value, s.status)
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" > '%s'
 if [ "$1" = "-s" ]; then
-	printf '%%s\n' '%s'
+	setting="$5"
 else
-	printf "data_directory = '%s'\n"
+	setting="$4"
 fi
-exit %d
-`, marker, value, value, status)
+value=''
+status=0
+case "$setting" in
+%s
+esac
+if [ "$1" = "-s" ]; then
+	printf '%%s\n' "$value"
+else
+	printf "%%s = '%%s'\n" "$setting" "$value"
+fi
+exit "$status"
+`, marker, cases.String())
 	if err := os.WriteFile(filepath.Join(dir, "pg_conftool"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +101,14 @@ exit %d
 		}
 		return strings.TrimSpace(string(raw))
 	}
+}
+
+// fakePgConftool is fakePgConftoolSettings for the data directory alone.
+func fakePgConftool(t *testing.T, value string, status int) func() string {
+	t.Helper()
+	return fakePgConftoolSettings(t, map[string]fakePgConftoolSetting{
+		"data_directory": {value: value, status: status},
+	})
 }
 
 // QF06: the effective data directory is pg_conftool's short output; the

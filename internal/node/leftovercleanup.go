@@ -26,7 +26,8 @@ var legacyLeftoverPort = func(root, name, source string) (int, error) {
 var legacyLeftoverEffectiveSetting = func(name, setting string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "pg_conftool", "18", name, "show", setting)
+	// -s prints the bare value; pg_conftool's default output is "<setting> = <value>".
+	cmd := exec.CommandContext(ctx, "pg_conftool", "-s", "18", name, "show", setting)
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
