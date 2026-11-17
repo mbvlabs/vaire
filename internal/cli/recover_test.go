@@ -85,8 +85,10 @@ func TestRecoverSecrets(t *testing.T) {
 	if !strings.HasPrefix(values[steps.SecretMetricsHash], "$2") {
 		t.Errorf("no /metrics hash: %q", values[steps.SecretMetricsHash])
 	}
-	if _, ok := values[steps.SecretBackupAgeIdentity]; ok {
-		t.Error("the recovery identity never leaves the operator")
+	for _, value := range values {
+		if value == creds.Backup.Encryption.Identity {
+			t.Error("the recovery identity never leaves the operator")
+		}
 	}
 }
 

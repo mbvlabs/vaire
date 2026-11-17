@@ -27,7 +27,7 @@ func ClusterLockPath(cluster string) string { return "/run/lock/vaire-" + cluste
 
 // HeavyIOLockPath is the server's heavy-I/O lock (RFC 9.3): the backup jobs
 // of every cluster take it exclusive after the global lock and before their
-// cluster's, so at most one full, diff, verify, drill or dump reads the disk
+// cluster's, so at most one full, diff, verify or drill reads the disk
 // at a time. Database names have no hyphen, so no cluster lock shares it.
 const HeavyIOLockPath = "/run/lock/vaire-heavy-io.lock"
 

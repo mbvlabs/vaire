@@ -45,7 +45,6 @@ type restoreJobResult struct {
 	PoolerWarning    string           `json:"pooler_warning"`
 	Promoted         struct {
 		Warning *output.Warning `json:"warning"`
-		Stanza  string          `json:"stanza"`
 	} `json:"promoted"`
 }
 
@@ -166,7 +165,7 @@ func restoreDryRunResult(cmd *cobra.Command, db string, s *session, reply remote
 func restorePromotedResult(cmd *cobra.Command, db string, jr jobReply, res restoreJobResult, warnings []output.Warning) error {
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"job_id": jr.JobID, "result": res},
-		Message:  db + " is restored and promoted, " + promotedWhere(res.Promoted.Stanza) + " The replaced data is kept as a stopped cluster until vaire restore cleanup " + db + "; vaire restore undo " + db + " swaps it back.",
+		Message:  db + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until vaire restore cleanup " + db + "; vaire restore undo " + db + " swaps it back.",
 		Warnings: warnings,
 		Next:     []string{"vaire restore undo " + db, "vaire restore cleanup " + db},
 	})
@@ -264,15 +263,6 @@ func rowCount(n *int64) string {
 	return fmt.Sprint(*n)
 }
 
-// promotedWhere says where a promoted database archives now: a restore
-// continues its stanza on a new timeline.
-func promotedWhere(stanza string) string {
-	if stanza != "" {
-		return "archiving to stanza " + stanza + "; a full backup is running."
-	}
-	return "on a new timeline; a full backup is running."
-}
-
 // restoreAction runs promote, undo or abort for one database. done gives
 // the message from the node's reply. A protected database refuses action
 // (when set) before the token is asked for; the node refuses it too.
@@ -331,9 +321,8 @@ func combinedRestorePreflight(cfg config.Cluster, db string) error {
 
 func runRestorePromote(cmd *cobra.Command, args []string) error {
 	db := args[0]
-	return restoreAction(cmd, db, "restore.promote", db+"/restore", "restore promote", func(data map[string]any) string {
-		stanza, _ := data["stanza"].(string)
-		return db + " now holds the restored data, " + promotedWhere(stanza) + " The previous data is kept as a stopped cluster: vaire restore undo " + db + " swaps it back, vaire restore cleanup " + db + " drops it."
+	return restoreAction(cmd, db, "restore.promote", db+"/restore", "restore promote", func(_ map[string]any) string {
+		return db + " now holds the restored data, on a new timeline; a full backup is running. The previous data is kept as a stopped cluster: vaire restore undo " + db + " swaps it back, vaire restore cleanup " + db + " drops it."
 	})
 }
 

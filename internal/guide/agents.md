@@ -170,6 +170,8 @@ Upgrade: `vaire upgrade --output agent` updates only the local binary for now; n
 
 ## Refusals
 
+- `db drop` takes no final snapshot. Its `no_backup_before_drop` warning states whether an existing physical backup stanza is retained; dropping a follower creates no independent backup.
+
 - Printing the secrets handoff, the transfer bundle or its passphrase. `vaire secrets export` and a new handoff are gated: a human master password (`vaire secrets password set`) or a current code from the authenticator app the node verifies. There is no flag or environment variable for either, so with `--json`, `--no-input` or no terminal they are refused with `secret_gate_required`; an agent cannot export. Without a terminal, init still needs `--secrets-out`/`--out` (the bundle is written there) and `--reveal-passphrase`; only pass `--reveal-passphrase` when the human asked for it.
 - `vaire restore cleanup` or `vaire db drop` without explicit human approval of that action.
 - `--sudo` or `--install-missing` without human approval of that escalation.

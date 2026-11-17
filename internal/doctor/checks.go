@@ -422,7 +422,7 @@ func memoryBudget(f Facts) []Result {
 // timerJobs are the timer jobs doctor watches for skips and failures.
 var timerJobs = map[string]bool{
 	"backup-full": true, "backup-diff": true, "backup-incr": true, "backup-verify": true, "restore-drill": true,
-	"db-dump": true, "stanza-expiry": true, "maint-daily": true, "maint-weekly": true,
+	"stanza-expiry": true, "maint-daily": true, "maint-weekly": true,
 }
 
 // lastRuns groups the timer runs (newest last) by job and database.

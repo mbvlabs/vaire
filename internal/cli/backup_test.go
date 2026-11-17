@@ -166,8 +166,10 @@ func TestAddRecoveryKit(t *testing.T) {
 	if !maps.Equal(values, want) {
 		t.Errorf("bucket kit: secrets = %v, want %v", values, want)
 	}
-	if _, ok := values[steps.SecretBackupAgeIdentity]; ok {
-		t.Error("the recovery identity never leaves the operator")
+	for _, value := range values {
+		if value == kit.Encryption.Identity {
+			t.Error("the recovery identity never leaves the operator")
+		}
 	}
 }
 

@@ -746,7 +746,8 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 	}
 	local := steps.ClusterPG(spec)
 	exists := dbDropDatabaseExists(ctx, local, p.Name, inConfig, clusterExists)
-	warnings := dropSnapshotWarning(cfg, p.Name, exists)
+	stanzaKept := forkCleanup == nil && inConfig && spec.Stanza != "" && cfg.BackupConfigured()
+	warnings := dropSnapshotWarning(cfg, p.Name, exists, stanzaKept)
 	roles, lastArchived, dropWarnings, err := dropClusterAndJournal(ctx, env, cfg, spec, inConfig, clusterExists, exists, local, p.Name)
 	if err != nil {
 		return Result{}, err
@@ -762,7 +763,6 @@ func handleDBDrop(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 	// Without a bucket the stanza never held a backup, so nothing is kept.
-	stanzaKept := forkCleanup == nil && inConfig && spec.Stanza != "" && cfg.BackupConfigured()
 	if stanzaKept {
 		if err := recordDroppedStanza(cfg, spec, lastArchived); err != nil {
 			warnings = append(warnings, output.Warning{Code: "records_not_updated",
@@ -904,13 +904,17 @@ func dropPreflight(ctx context.Context, env *Env, cfg config.Cluster, name strin
 
 // dropSnapshotWarning tells the operator that db drop takes no new copy: the
 // kept physical stanza is the only backup after the drop.
-func dropSnapshotWarning(cfg config.Cluster, name string, exists bool) []output.Warning {
+func dropSnapshotWarning(cfg config.Cluster, name string, exists, stanzaKept bool) []output.Warning {
 	if !exists {
 		return nil
 	}
 	if !cfg.BackupConfigured() {
 		return []output.Warning{{Code: "no_backup_before_drop",
 			Message: "backups are not configured, so no copy of " + name + " remains after the drop"}}
+	}
+	if !stanzaKept {
+		return []output.Warning{{Code: "no_backup_before_drop",
+			Message: "db drop takes no snapshot of " + name + "; no independent physical backup stanza is kept"}}
 	}
 	return []output.Warning{{Code: "no_backup_before_drop",
 		Message: "db drop takes no snapshot of " + name + "; its physical backup stanza is kept until its restore window expires"}}

@@ -427,7 +427,7 @@ func BackupConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
 }
 
 // JobService renders the vaire-<job>.service a timer starts (§18). arg is
-// appended to vaire node run <job>, for example --db %i for the dump template.
+// appended to vaire node run <job>, for example --db %i for a backup template.
 func JobService(job, arg string) []byte {
 	return execute("vaire-job.service.tmpl", map[string]any{"Job": job, "Arg": arg})
 }

@@ -71,7 +71,7 @@ func TestDBDropReportsNoSnapshot(t *testing.T) {
 	cfg.Backup.Provider, cfg.Backup.Bucket = "s3", "bucket"
 	spec := config.ClusterSpec{Name: "app", Stanza: "app-abc123"}
 
-	warnings := dropSnapshotWarning(cfg, "app", true)
+	warnings := dropSnapshotWarning(cfg, "app", true, true)
 	if len(warnings) != 1 || warnings[0].Code != "no_backup_before_drop" || !strings.Contains(warnings[0].Message, "no snapshot") {
 		t.Fatalf("configured drop warning = %+v", warnings)
 	}
@@ -83,12 +83,16 @@ func TestDBDropReportsNoSnapshot(t *testing.T) {
 	if data["stanza_kept"] != spec.Stanza {
 		t.Fatalf("drop lost the kept stanza: %+v", data)
 	}
-	if len(dropSnapshotWarning(cfg, "app", false)) != 0 {
+	if len(dropSnapshotWarning(cfg, "app", false, false)) != 0 {
 		t.Fatal("a missing database warned about a snapshot")
 	}
 	cfg.Backup.Provider = ""
-	if got := dropSnapshotWarning(cfg, "app", true); len(got) != 1 || !strings.Contains(got[0].Message, "no copy") {
+	if got := dropSnapshotWarning(cfg, "app", true, false); len(got) != 1 || !strings.Contains(got[0].Message, "no copy") {
 		t.Fatalf("unconfigured drop warning = %+v", got)
+	}
+	cfg.Backup.Provider = "s3"
+	if got := dropSnapshotWarning(cfg, "follower", true, false); len(got) != 1 || !strings.Contains(got[0].Message, "no independent physical backup stanza is kept") {
+		t.Fatalf("drop without its own stanza = %+v", got)
 	}
 }
 

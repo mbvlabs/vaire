@@ -626,17 +626,17 @@ func TestForkAdoptingFenceKeepsTemporaryPortNotPaths(t *testing.T) {
 	}
 }
 
-// TestScopedApplyRefusesRevertedDumpPromoteFence proves the explicit routing
-// target/port checks survive the full-snapshot CAS: a dump promote's fence
-// still naming the old/reverted stanza is never cleared by a scoped apply.
-func TestScopedApplyRefusesRevertedDumpPromoteFence(t *testing.T) {
+// TestScopedApplyRefusesMismatchedPromoteFence proves the explicit routing
+// target/port checks survive the full-snapshot CAS: a promote fence naming
+// another stanza is never cleared by a scoped apply.
+func TestScopedApplyRefusesMismatchedPromoteFence(t *testing.T) {
 	useTempExtensionRecords(t)
 	useTestInstance(t)
 	cfg := planCfg(t)
 	cfg.Clusters[0].Stanza = "app-new"
 	spec := cfg.Clusters[0]
 	fence := backup.ActivationFence{
-		OperationID: "dump-reverted", Kind: "restore-promote", Database: "app", Instance: "test-instance",
+		OperationID: "restore-mismatch", Kind: "restore-promote", Database: "app", Instance: "test-instance",
 		TargetStanza: "app-old", OldStanza: "app-old", NewStanza: spec.Stanza,
 		Registration: activationRegistration(spec), Ownership: spec.FollowGeneration,
 		Port: spec.Port, DataDir: cfg.Server.DataDirectory("app"), ConfDir: steps.PGConfDir("app"),
@@ -662,8 +662,8 @@ func TestScopedApplyRefusesRevertedDumpPromoteFence(t *testing.T) {
 		t.Fatalf("pause releases = %d, want 1 before the target check", resumes)
 	}
 	f, ok := mustRecords(t).ActivationFenceFor("app")
-	if !ok || f.TargetStanza != "app-old" || f.OperationID != "dump-reverted" {
-		t.Fatalf("reverted dump-promote fence was cleared: %+v", f)
+	if !ok || f.TargetStanza != "app-old" || f.OperationID != "restore-mismatch" {
+		t.Fatalf("mismatched promote fence was cleared: %+v", f)
 	}
 }
 

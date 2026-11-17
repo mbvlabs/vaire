@@ -25,7 +25,7 @@ func TestStepSecrets(t *testing.T) {
 			t.Errorf("%s is missing", key)
 		}
 	}
-	for _, key := range []string{SecretBackupAgeIdentity, SecretMasterBundle} {
+	for _, key := range []string{SecretMasterBundle} {
 		if slices.Contains(StepSecrets, key) {
 			t.Errorf("%s is not a step's", key)
 		}
