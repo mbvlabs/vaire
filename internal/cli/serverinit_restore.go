@@ -232,9 +232,9 @@ func (r *initRun) restoreResumePending(name string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.ParseCluster(raw)
+	cfg, err := config.ParseAnswers(raw)
 	if err != nil {
-		return output.NewError(output.CodeConfig, "the pending cluster.toml does not parse: "+err.Error(), output.ExitConfig, "")
+		return output.NewError(output.CodeConfig, "the pending answers do not parse: "+err.Error(), output.ExitConfig, "")
 	}
 	r.cfg, r.boot, r.prog = cfg, boot, prog
 	r.restore.state = prog.Restore

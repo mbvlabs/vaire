@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,7 +11,81 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/workspaces"
+	"github.com/spf13/cobra"
 )
+
+func TestRestoreResumePendingReadsSavedAnswers(t *testing.T) {
+	for _, identity := range []string{"", "/test/replacement-key"} {
+		t.Run("identity="+identity, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			cfg := config.DefaultCluster()
+			cfg.ClusterName, cfg.Domain = "prod", "example.com"
+			cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
+			cfg.Clusters = []config.ClusterSpec{{Name: "app", Node: "db1", Port: 5433, Stanza: "app-abc123", Size: "small", Protected: true}}
+			boot := workspaces.Bootstrap{
+				Host: "203.0.113.10", User: "root", Port: 22,
+				Identity: "/test/original-key", HostKeyFingerprint: "SHA256:test",
+			}
+			prog := &workspaces.Progress{
+				SetupOperationID: "original-operation",
+				Phases:           map[string]string{phaseHost: "done", phaseFenced: "done"},
+				Restore: &workspaces.RestoreProgress{
+					Bundle: "original-bundle", From: "bucket", Epoch: 4,
+					InstanceID: "original-instance", EpochWrittenAt: "2026-11-18T13:46:00Z",
+					OldAddress: boot.Host, NewAddress: boot.Host,
+				},
+			}
+			original := &initRun{name: "prod", cfg: cfg, boot: boot, prog: prog}
+			if err := original.savePending(); err != nil {
+				t.Fatal(err)
+			}
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("resume", true, "")
+			cmd.Flags().String("identity", identity, "")
+			resumed := &initRun{name: "prod", cmd: cmd, restore: &restoreRun{}}
+			if err := resumed.restoreLoadPending(); err != nil {
+				t.Fatal(err)
+			}
+			if resumed.cfg.ClusterName != cfg.ClusterName ||
+				!reflect.DeepEqual(resumed.cfg.Nodes, cfg.Nodes) ||
+				len(resumed.cfg.Clusters) != 1 || !resumed.cfg.Clusters[0].Protected ||
+				resumed.cfg.Clusters[0].Stanza != "app-abc123" {
+				t.Fatalf("pending cluster configuration changed: %+v", resumed.cfg)
+			}
+			if identity != "" {
+				boot.Identity = identity
+			}
+			if resumed.boot != boot || !reflect.DeepEqual(resumed.prog, prog) ||
+				!reflect.DeepEqual(resumed.restore.state, prog.Restore) {
+				t.Fatalf("resume changed bootstrap or recovery identity: %+v %+v", resumed.boot, resumed.prog)
+			}
+		})
+	}
+}
+
+func TestRestoreResumePendingStillRejectsUnknownClusterKeys(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.DefaultCluster()
+	cfg.ClusterName = "prod"
+	raw, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, []byte("\n[unexpected]\nvalue = true\n")...)
+	if err := workspaces.SaveAnswers("prod", raw, workspaces.Bootstrap{Host: "203.0.113.10", User: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspaces.SaveProgress("prod", &workspaces.Progress{Restore: &workspaces.RestoreProgress{Epoch: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("resume", true, "")
+	cmd.Flags().String("identity", "", "")
+	r := &initRun{name: "prod", cmd: cmd, restore: &restoreRun{}}
+	if err := r.restoreLoadPending(); err == nil || !strings.Contains(err.Error(), "unexpected") {
+		t.Fatalf("unknown cluster keys were not rejected: %v", err)
+	}
+}
 
 // The real master bundle path must keep global descriptors and all three
 // recovery declaration states through Build, ReadTar and restoreConfig's
