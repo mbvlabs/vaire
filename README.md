@@ -1,3 +1,5 @@
+![Vairë wordmark](assets/vaire-wordmark-dark.svg)
+
 # Vairë (`vaire`)
 
 One CLI that turns a fresh VPS into a hardened PostgreSQL 18 server, and then stays the only way in.

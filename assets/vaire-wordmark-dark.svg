@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2256" height="408" viewBox="0 0 282 51" shape-rendering="crispEdges">
+  <title>Vairë</title>
+  <defs>
+    <path id="wordmark" fill-rule="evenodd" d="
+      M13 12H23V22H26V28H29V33H35V28H38V22H41V12H51V23H48V29H45V35H42V39H22V35H19V29H16V23H13Z
+      M58 39V21H61V17H65V14H71V12H96V39H86V30H68V39Z M68 25H86V18H73V20H68Z
+      M104 12H140V18H127V33H140V39H104V33H117V18H104Z
+      M148 12H176V14H182V17H186V25H182V28H177V31H182V34H186V39H175V35H171V32H158V39H148Z M158 18V24H173V22H176V18Z
+      M197 12H224V18H205V23H219V28H205V33H227V39H195V36H192V17H194V14H197Z
+      M199 6H206V10H199Z M213 6H220V10H213Z"/>
+    <clipPath id="ink"><use href="#wordmark"/></clipPath>
+    <clipPath id="offset"><path d="M0 25H240V28H0Z M0 36H240V38H0Z"/></clipPath>
+    <linearGradient id="scanlines" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop offset="0" stop-color="#eee8d6"/>
+      <stop offset=".36" stop-color="#eee8d6"/>
+      <stop offset=".36" stop-color="#dcd9c9"/>
+      <stop offset=".52" stop-color="#dcd9c9"/>
+      <stop offset=".52" stop-color="#aaa592"/>
+      <stop offset=".68" stop-color="#aaa592"/>
+      <stop offset=".68" stop-color="#8ef5a1"/>
+      <stop offset=".84" stop-color="#8ef5a1"/>
+      <stop offset=".84" stop-color="#4c5e57"/>
+      <stop offset="1" stop-color="#4c5e57"/>
+    </linearGradient>
+  </defs>
+  <path fill="#0a0d0d" d="M0 0H282V51H0Z"/>
+  <g transform="translate(1 0) scale(1.165 1)">
+    <use href="#wordmark" fill="#131a18" transform="translate(2 3)"/>
+    <path d="M0 6H240V39H0Z" fill="url(#scanlines)" clip-path="url(#ink)"/>
+    <g clip-path="url(#offset)">
+      <path d="M0 25H240V28H0Z M0 36H240V38H0Z" fill="#0a0d0d"/>
+      <g transform="translate(-3 0)">
+        <path d="M0 6H240V39H0Z" fill="url(#scanlines)" clip-path="url(#ink)"/>
+      </g>
+    </g>
+  </g>
+</svg>
