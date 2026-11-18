@@ -162,7 +162,7 @@ func (f *publicForkContinuation) prepareArtifactReservation() backup.Reservation
 
 	sum := sha256.Sum256(reservation)
 
-	return backup.ReservationIdentity{Device: st.Dev, Inode: st.Ino, UID: st.Uid, Digest: hex.EncodeToString(sum[:])}
+	return backup.ReservationIdentity{Device: statDevice(st), Inode: st.Ino, UID: st.Uid, Digest: hex.EncodeToString(sum[:])}
 }
 
 // bindArtifactReservation opens the birth-bound artifact handles and binds the

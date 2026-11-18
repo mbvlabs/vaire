@@ -639,7 +639,7 @@ func verifyReservationBirth(path string, info os.FileInfo, id backup.Reservation
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
 		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || st.Nlink != 1 ||
-		st.Dev != id.Device || st.Ino != id.Inode ||
+		statDevice(st) != id.Device || st.Ino != id.Inode ||
 		st.Uid != id.UID || info.Size() > 256 {
 		return errors.New("reservation replaced")
 	}

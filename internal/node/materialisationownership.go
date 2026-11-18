@@ -426,7 +426,7 @@ func materialisationID(info os.FileInfo) (materialisationFileID, error) {
 		return materialisationFileID{}, errors.New("unverifiable artifact directory")
 	}
 
-	return materialisationFileID{Device: st.Dev, Inode: st.Ino, UID: st.Uid}, nil
+	return materialisationFileID{Device: statDevice(st), Inode: st.Ino, UID: st.Uid}, nil
 }
 
 // Separate seams let rootless tests model the postgres-owned artifacts without

@@ -291,7 +291,7 @@ func (c *registeredDropConfig) moveIntoQuarantine(q *dropConfigQuarantine) error
 
 	defer func() { _ = jail.Close() }()
 
-	return unix.Renameat2(int(parent.Fd()), c.name, int(jail.Fd()), dropConfigQuarantineEntry, unix.RENAME_NOREPLACE)
+	return renameNoReplaceAt(int(parent.Fd()), c.name, int(jail.Fd()), dropConfigQuarantineEntry)
 }
 
 // restoreFromQuarantine returns a non-authoritative candidate to an absent
@@ -316,7 +316,7 @@ func (c *registeredDropConfig) restoreFromQuarantine(q *dropConfigQuarantine) (b
 
 	defer func() { _ = jail.Close() }()
 
-	err = unix.Renameat2(int(jail.Fd()), dropConfigQuarantineEntry, int(parent.Fd()), c.name, unix.RENAME_NOREPLACE)
+	err = renameNoReplaceAt(int(jail.Fd()), dropConfigQuarantineEntry, int(parent.Fd()), c.name)
 	if err == nil {
 		return true, nil
 	}
