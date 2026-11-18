@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -54,8 +55,14 @@ const (
 	localLockdownTimeout = 30 * time.Minute
 	confirmWithin        = 60 * time.Second
 	revertGrace          = 15 * time.Second
-	firstOperatorName    = "op-1"
 )
+
+// machineOperatorPrefix marks the operator identity generated for a fresh
+// init. The suffix is lowercase Crockford base32: digits and letters without
+// i, l, o or u, so it stays readable when copied by hand.
+const machineOperatorPrefix = "machine-"
+
+const machineOperatorAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 
 // tlsWaitTimeout bounds the wait for a real certificate (D10).
 const tlsWaitTimeout = 120 * time.Second
@@ -761,6 +768,27 @@ func (r *initRun) mark(phase string) error {
 	return workspaces.SaveProgress(r.name, r.prog)
 }
 
+// newMachineOperatorName returns a fresh init's immutable operator identity:
+// machine- and 12 characters (60 bits) from crypto/rand. The name is written
+// to the pending secrets before first contact, so resume and restore keep it.
+func newMachineOperatorName() (string, error) {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate operator name: %w", err)
+	}
+
+	// 256 is a multiple of the 32-character alphabet, so the low five bits of
+	// each random byte are unbiased.
+	name := make([]byte, 0, len(machineOperatorPrefix)+len(raw))
+	name = append(name, machineOperatorPrefix...)
+
+	for _, b := range raw {
+		name = append(name, machineOperatorAlphabet[b&0x1f])
+	}
+
+	return string(name), nil
+}
+
 // generateSecrets creates the operator identity and sudo password (§8.2 step 3).
 func (r *initRun) generateSecrets() error {
 	if r.prog.Done(phaseSecrets) {
@@ -769,12 +797,17 @@ func (r *initRun) generateSecrets() error {
 
 	r.p.phase("init.secrets", "started", "generate the operator WireGuard and SSH keys")
 
+	operatorName, err := newMachineOperatorName()
+	if err != nil {
+		return err
+	}
+
 	wgPriv, _, err := transport.GenerateWGKey()
 	if err != nil {
 		return err
 	}
 
-	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + firstOperatorName)
+	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + operatorName)
 	if err != nil {
 		return err
 	}
@@ -785,7 +818,7 @@ func (r *initRun) generateSecrets() error {
 	}
 
 	r.sec = workspaces.PendingSecrets{
-		OperatorName:  firstOperatorName,
+		OperatorName:  operatorName,
 		WGPrivateKey:  wgPriv,
 		SSHPrivateKey: string(sshPriv),
 		SudoPassword:  sudo,
@@ -1858,7 +1891,7 @@ func runInitLocal(cmd *cobra.Command) error {
 		return err
 	}
 
-	caller := remote.Local{Operator: firstOperatorName}
+	caller := remote.Local{Operator: r.sec.OperatorName}
 	if err := r.localHostPhase(ctx, caller); err != nil {
 		return err
 	}

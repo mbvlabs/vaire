@@ -2,7 +2,9 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -44,16 +46,43 @@ func LoadOperators(path string) (Operators, error) {
 	return ops, nil
 }
 
-// Upsert adds op or replaces the operator with the same name.
-func (o *Operators) Upsert(op Operator) {
+// Upsert adds op, or updates the operator with the same name when its public
+// keys match. A different identity under that name is refused: a fresh init
+// must never replace a foreign registration.
+func (o *Operators) Upsert(op Operator) error {
 	for i := range o.Operators {
-		if o.Operators[i].Name == op.Name {
-			o.Operators[i] = op
-			return
+		if o.Operators[i].Name != op.Name {
+			continue
 		}
+
+		if !sameOperatorKeys(o.Operators[i], op) {
+			return fmt.Errorf("operator %s is already registered with different public keys", op.Name)
+		}
+
+		o.Operators[i] = op
+
+		return nil
 	}
 
 	o.Operators = append(o.Operators, op)
+
+	return nil
+}
+
+// sameOperatorKeys reports whether a and b grant the same keys. The SSH
+// authorized_keys comment is not part of the identity: it carries the server
+// or workspace name, which can differ on a renamed workspace.
+func sameOperatorKeys(a, b Operator) bool {
+	return a.WGPublicKey == b.WGPublicKey && sameAuthorizedKey(a.SSHPublicKey, b.SSHPublicKey)
+}
+
+func sameAuthorizedKey(a, b string) bool {
+	af, bf := strings.Fields(a), strings.Fields(b)
+	if len(af) >= 2 && len(bf) >= 2 {
+		return af[0] == bf[0] && af[1] == bf[1]
+	}
+
+	return a == b
 }
 
 // Encode returns operators.toml bytes.

@@ -339,7 +339,14 @@ func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Ope
 		return err
 	}
 
-	ops.Upsert(op)
+	if err := ops.Upsert(op); err != nil {
+		return output.NewError(
+			output.CodePrecondition,
+			err.Error(),
+			output.ExitPrecondition,
+			"Check that this is the intended server. For a fresh setup, discard the unfinished init with vaire server init --discard --name "+cfg.Name()+" and start again.",
+		).WithDetails(map[string]any{"reason": "operator_name_conflict", "operator": op.Name})
+	}
 
 	opsRaw, err := ops.Encode()
 	if err != nil {
