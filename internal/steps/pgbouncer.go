@@ -35,11 +35,14 @@ func (pgbouncer) SkipReason(cfg config.Cluster) string {
 		if err != nil {
 			return "" // Inputs reports unknown state rather than silently skipping.
 		}
+
 		if _, _, ok := recoverInspectionSource(cfg, recs); ok {
 			return ""
 		}
+
 		return "no_databases"
 	}
+
 	return ""
 }
 
@@ -59,27 +62,33 @@ func pgbouncerIni(cfg config.Cluster, rt engine.Runtime, dbs []render.PoolerData
 // about which aliases the transition withholds.
 func poolerDatabases(cfg config.Cluster, recs backup.Records, session bool) []render.PoolerDatabase {
 	fenced := fencedPoolerAliases(recs)
+
 	out := make([]render.PoolerDatabase, 0, len(cfg.Clusters))
 	for _, c := range cfg.Clusters {
 		if fenced[c.Name] || recs.IsAwaiting(c.Name) {
 			continue
 		}
+
 		db := render.PoolerDatabase{Name: c.Name, Port: c.Port}
 		if c.IsFollower() {
 			// The follower's cluster holds its source's database (Phase 6).
 			db.DBName = c.Follows
 		}
+
 		if r, err := cfg.Resources(c); err == nil {
 			db.MaxConnections = r.PoolSize
 			if session {
 				db.MaxConnections = r.SessionPoolSize
 			}
 		}
+
 		out = append(out, db)
 	}
+
 	if session {
 		out = append(out, restoreEntries(cfg, recs)...)
 	}
+
 	return out
 }
 
@@ -88,13 +97,16 @@ func poolerDatabases(cfg config.Cluster, recs backup.Records, session bool) []re
 // interruption keeps withholding them.
 func fencedPoolerAliases(recs backup.Records) map[string]bool {
 	var out map[string]bool
+
 	for name, u := range recs.Unfollowing {
 		if u.Settled {
 			continue
 		}
+
 		if out == nil {
 			out = map[string]bool{}
 		}
+
 		out[name] = true
 	}
 	// A recovered target is not an application target until access has been
@@ -104,19 +116,24 @@ func fencedPoolerAliases(recs backup.Records) map[string]bool {
 		if !r.Recover {
 			continue
 		}
+
 		if out == nil {
 			out = map[string]bool{}
 		}
+
 		out[name] = true
 	}
+
 	for name, fence := range recs.Activation {
 		if fence.Active() {
 			if out == nil {
 				out = map[string]bool{}
 			}
+
 			out[name] = true
 		}
 	}
+
 	return out
 }
 
@@ -134,6 +151,7 @@ func poolerRecords() (backup.Records, error) {
 			"Inspect the node's records file and fix it; vaire never resets it on its own.").
 			WithDetails(map[string]any{"reason": "unfollow_state_unknown"})
 	}
+
 	return recs, nil
 }
 
@@ -143,6 +161,7 @@ func poolerRecords() (backup.Records, error) {
 // pooler has them; promote and abort reload it without them.
 func restoreEntries(cfg config.Cluster, recs backup.Records) []render.PoolerDatabase {
 	var out []render.PoolerDatabase
+
 	for db, r := range recs.Restores {
 		_, visible := cfg.ClusterByName(db)
 		if !visible && r.Recover && r.ID != "" && r.Database == db && recs.IsAwaiting(db) {
@@ -153,6 +172,7 @@ func restoreEntries(cfg config.Cluster, recs backup.Records) []render.PoolerData
 				}
 			}
 		}
+
 		if !visible || r.Phase != backup.PhaseReady || r.Port == 0 {
 			continue
 		}
@@ -161,8 +181,10 @@ func restoreEntries(cfg config.Cluster, recs backup.Records) []render.PoolerData
 		if f, ok := recs.ActivationFenceFor(db); ok && f.Active() {
 			continue
 		}
+
 		out = append(out, render.PoolerDatabase{Name: backup.RestoringName(db), DBName: db, Port: r.Port, MaxConnections: restoreEntryPool})
 	}
+
 	return out
 }
 
@@ -174,6 +196,7 @@ func recoverInspectionSource(cfg config.Cluster, recs backup.Records) (config.Cl
 			return spec, r, true
 		}
 	}
+
 	return config.ClusterSpec{}, backup.Restore{}, false
 }
 
@@ -209,9 +232,11 @@ func pgbouncerFiles(cfg config.Cluster, rt engine.Runtime) ([]pgbouncerFile, err
 	if err != nil {
 		return nil, err
 	}
+
 	if err := validateRoutingEligibility(cfg, recs); err != nil {
 		return nil, err
 	}
+
 	return pgbouncerFilesFrom(cfg, rt, recs), nil
 }
 
@@ -238,10 +263,12 @@ func (pgbouncer) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []engine.R
 		// file has already failed the plan; there is nothing safe to show.
 		return nil
 	}
+
 	out := make([]engine.RenderedFile, 0, len(files))
 	for _, f := range files {
 		out = append(out, engine.RenderedFile{Path: f.path, Content: []byte(f.content)})
 	}
+
 	return out
 }
 
@@ -252,10 +279,12 @@ func (pgbouncer) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	rendered := map[string]string{}
 	for _, f := range files {
 		rendered[f.path] = f.content
 	}
+
 	return canonical(map[string]any{"files": rendered, "users": ServiceRoles})
 }
 
@@ -264,29 +293,36 @@ func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	for _, f := range files {
 		if !fileIsOwned(f.path, f.content, f.mode, f.owner, f.group) {
 			return incomplete(f.path + " differs"), nil
 		}
 	}
+
 	verifiers, err := roleVerifiers(ctx, cfg)
 	if err != nil || len(verifiers) < len(ServiceRoles) {
 		return incomplete("cannot read the service role verifiers"), nil
 	}
+
 	if !fileIsOwned(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640, pgFileOwner, pgFileGroup) {
 		return incomplete(PgbouncerUserlistPath + " differs"), nil
 	}
+
 	for _, unit := range []string{PgbouncerService, SessionPoolerService} {
 		if !serviceActive(ctx, unit) {
 			return incomplete(unit + " is not active"), nil
 		}
 	}
+
 	if err := pgbouncerResponds(ctx, PGSocketDir, PgbouncerPort); err != nil {
 		return incomplete("the transaction pooler does not answer: " + err.Error()), nil
 	}
+
 	if err := pgbouncerResponds(ctx, SessionSocketDir, SessionPoolerPort); err != nil {
 		return incomplete("the session pooler does not answer: " + err.Error()), nil
 	}
+
 	return complete(), nil
 }
 
@@ -295,25 +331,31 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	verifiers, err := roleVerifiers(ctx, cfg)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if len(verifiers) < len(ServiceRoles) {
 		return engine.ApplyResult{}, fmt.Errorf("the service role verifiers are missing; run postgres-roles-v1 first")
 	}
+
 	for _, f := range files {
 		if err := writePoolerFile(f.path, f.content, f.mode, f.owner, f.group); err != nil {
 			return engine.ApplyResult{}, err
 		}
 	}
+
 	if err := writeFileOwned(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	err = rt.Shell.Run(ctx, s.ID(), Script("pgbouncer"), map[string]string{
 		"PGBOUNCER_DIR":   PgbouncerDir,
 		"SESSION_SERVICE": SessionPoolerService,
 	}, report)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
 
@@ -330,18 +372,22 @@ func validateRoutingEligibility(cfg config.Cluster, recs backup.Records) error {
 	if !routingFenceActive(recs) {
 		return nil
 	}
+
 	instance, err := routingInstanceIdentity()
 	if err != nil {
 		return err
 	}
+
 	for db, f := range recs.Activation {
 		if f.OperationID == "" || f.Phase != "routing" {
 			continue
 		}
+
 		if err := validateRoutingFence(cfg, recs, instance, db, f); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -351,6 +397,7 @@ func routingFenceActive(recs backup.Records) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -362,6 +409,7 @@ func routingInstanceIdentity() (string, error) {
 			output.ExitPrecondition, "Repair the node's instance file deliberately; no pooler file was written.").
 			WithDetails(map[string]any{"reason": "routing_instance_unknown"})
 	}
+
 	instance = strings.TrimSpace(instance)
 	if instance == "" {
 		return "", output.NewError(output.CodePrecondition,
@@ -369,6 +417,7 @@ func routingInstanceIdentity() (string, error) {
 			output.ExitPrecondition, "Repair the node's instance file deliberately; no pooler file was written.").
 			WithDetails(map[string]any{"reason": "routing_instance_unknown"})
 	}
+
 	return instance, nil
 }
 
@@ -379,22 +428,28 @@ func validateRoutingFence(cfg config.Cluster, recs backup.Records, instance, db 
 			output.ExitPrecondition, "Finish or repair the owning operation; no pooler file was written.").
 			WithDetails(map[string]any{"reason": "routing_eligibility", "database": db, "detail": detail})
 	}
+
 	spec, ok := cfg.ClusterByName(db)
 	if !ok {
 		return fail("its database entry is missing")
 	}
+
 	if detail := routingFenceTargetGap(spec, f, instance); detail != "" {
 		return fail(detail)
 	}
+
 	if detail := routingFenceRestoreGap(recs, db, f); detail != "" {
 		return fail(detail)
 	}
+
 	if detail := routingFencePathGap(cfg, spec, db, f); detail != "" {
 		return fail(detail)
 	}
+
 	if detail := routingFenceRegistrationGap(db, f); detail != "" {
 		return fail(detail)
 	}
+
 	return nil
 }
 
@@ -402,15 +457,19 @@ func routingFenceTargetGap(spec config.ClusterSpec, f backup.ActivationFence, in
 	if f.Instance == "" || f.Instance != instance {
 		return "its installation instance does not match this node"
 	}
+
 	if f.Kind != "fork" && f.Kind != "unfollow" && f.Kind != "restore-promote" && f.Kind != "restore-abort" {
 		return "its operation kind is unknown"
 	}
+
 	if f.TargetStanza == "" || f.TargetStanza != spec.Stanza {
 		return "its target stanza does not match cluster.toml"
 	}
+
 	if f.OldStanza == "" || f.NewStanza == "" || f.NewStanza != f.TargetStanza {
 		return "its recorded old/new stanza transition is incomplete"
 	}
+
 	return ""
 }
 
@@ -418,12 +477,15 @@ func routingFenceRestoreGap(recs backup.Records, db string, f backup.ActivationF
 	if f.Kind != "restore-abort" {
 		return ""
 	}
+
 	if _, ok := recs.Restores[db]; ok {
 		return "its database still has a restore record"
 	}
+
 	if f.OldStanza != f.TargetStanza || f.Aside == "" {
 		return "its abort checkpoint does not describe the untouched live cluster"
 	}
+
 	return ""
 }
 
@@ -431,28 +493,35 @@ func routingFencePathGap(cfg config.Cluster, spec config.ClusterSpec, db string,
 	if f.Port != spec.Port {
 		return "its recorded port does not match cluster.toml"
 	}
+
 	if f.DataDir != cfg.Server.DataDirectory(db) || f.ConfDir != PGConfDir(db) {
 		return "its recorded data/configuration directory does not match the database"
 	}
+
 	return ""
 }
 
 func routingFenceRegistrationGap(db string, f backup.ActivationFence) string {
 	name, rest, ok := strings.Cut(f.Registration, ":")
+
 	portText, _, _ := strings.Cut(rest, ":")
 	if !ok || name != db || portText != strconv.Itoa(f.Port) {
 		return "its recorded registration does not match the database"
 	}
+
 	if !backup.ClusterRegistered(db) {
 		return "no postgresql-common registration exists"
 	}
+
 	data, err := backup.ClusterDataDirectory(db)
 	if err != nil {
 		return "its registration cannot be read: " + err.Error()
 	}
+
 	if data == "" || data != f.DataDir {
 		return "its registration points at a different data directory"
 	}
+
 	return ""
 }
 
@@ -476,61 +545,85 @@ func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime
 	if err != nil {
 		return err
 	}
+
 	if err := validateRoutingEligibility(cfg, recs); err != nil {
 		return err
 	}
+
 	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs)
 	for _, f := range files {
 		if err := writePoolerFile(f.path, f.content, f.mode, f.owner, f.group); err != nil {
 			return err
 		}
 	}
+
 	return rt.Shell.Run(ctx, pgbouncerID, Script("pgbouncer"), map[string]string{
 		"PGBOUNCER_DIR":   PgbouncerDir,
 		"SESSION_SERVICE": SessionPoolerService,
 	}, report)
 }
 
+// roleVerifierSource names the cluster and port the service roles are read
+// from. A rebuilt master's await-recovery view has no ordinary cluster; the
+// ready copy is then the only source, and a first recovery's kept target uses
+// its temporary port. The target alias itself is never the source before the
+// copy is promoted.
+func roleVerifierSource(cfg config.Cluster, recs backup.Records) (config.ClusterSpec, int, error) {
+	if len(cfg.Clusters) != 0 {
+		spec := cfg.Clusters[0]
+		if !recs.IsAwaiting(spec.Name) {
+			return spec, spec.Port, nil
+		}
+
+		r, ok := recs.Restores[spec.Name]
+		if !ok || !r.Recover || r.ID == "" || r.Database != spec.Name || r.Phase != backup.PhaseReady || r.Port == 0 {
+			return spec, 0, fmt.Errorf("service role source for %s is not ready for inspection", spec.Name)
+		}
+
+		return spec, r.Port, nil
+	}
+
+	if ready, r, ok := recoverInspectionSource(cfg, recs); ok {
+		return ready, r.Port, nil
+	}
+
+	return config.ClusterSpec{}, 0, fmt.Errorf("there is no cluster to read the service roles from")
+}
+
 // roleVerifiers reads the SCRAM verifiers of the service roles from the
-// first cluster. They are the same in every cluster (RFC 12).
+// first cluster, or from the ready copy while every database awaits recovery.
+// They are the same in every cluster (RFC 12).
 func roleVerifiers(ctx context.Context, cfg config.Cluster) (map[string]string, error) {
 	recs, err := poolerRecords()
 	if err != nil {
 		return nil, err
 	}
-	var spec config.ClusterSpec
-	var inspection *backup.Restore
-	if len(cfg.Clusters) != 0 {
-		spec = cfg.Clusters[0]
-	} else if ready, r, ok := recoverInspectionSource(cfg, recs); ok {
-		spec, inspection = ready, &r
-	} else {
-		return nil, fmt.Errorf("there is no cluster to read the service roles from")
+
+	spec, port, err := roleVerifierSource(cfg, recs)
+	if err != nil {
+		return nil, err
 	}
+
 	local := ClusterPG(spec)
-	if inspection != nil {
-		local.Port = inspection.Port
-	} else if recs.IsAwaiting(spec.Name) {
-		r, ok := recs.Restores[spec.Name]
-		if !ok || !r.Recover || r.ID == "" || r.Database != spec.Name || r.Phase != backup.PhaseReady || r.Port == 0 {
-			return nil, fmt.Errorf("service role source for %s is not ready for inspection", spec.Name)
-		}
-		local.Port = r.Port
-	}
+	local.Port = port
+
 	rows, err := local.Query(ctx, "postgres",
 		"SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('pgbouncer_auth','vaire_monitor')", nil)
 	if err != nil {
 		return nil, err
 	}
+
 	out := make(map[string]string, len(rows))
 	for _, row := range rows {
 		verifier := row["rolpassword"]
 		if verifier == "" {
 			continue
 		}
+
 		secrets.Add(verifier)
 		out[row["rolname"]] = verifier
 	}
+
 	return out, nil
 }
 
@@ -554,18 +647,21 @@ func PoolerRoutes(ctx context.Context, dir string, port int) (map[string]PoolerR
 	if err != nil {
 		return nil, err
 	}
+
 	out := make(map[string]PoolerRoute, len(rows))
 	for _, row := range rows {
 		name := row["name"]
 		if name == "" {
 			continue
 		}
+
 		backendPort, _ := strconv.Atoi(row["port"])
 		out[name] = PoolerRoute{
 			Name: name, Host: row["host"], Port: backendPort,
 			Database: row["database"], Paused: row["paused"] == "1" || row["paused"] == "true",
 		}
 	}
+
 	return out, nil
 }
 
@@ -574,24 +670,31 @@ func pgbouncerResponds(ctx context.Context, socketDir string, port int) error {
 	if err != nil {
 		return err
 	}
+
 	f, err := os.CreateTemp("", "vaire-pgpass-*")
 	if err != nil {
 		return err
 	}
+
 	name := f.Name()
 	defer func() { _ = os.Remove(name) }()
+
 	if _, err := fmt.Fprintf(f, "*:*:*:vaire_monitor:%s\n", strings.TrimSpace(string(password))); err != nil {
 		_ = f.Close()
 		return err
 	}
+
 	if err := f.Close(); err != nil {
 		return err
 	}
+
 	if err := os.Chmod(name, 0o600); err != nil {
 		return err
 	}
+
 	_, err = ProbeWithEnv(ctx, []string{"PGPASSFILE=" + name}, "psql",
 		"-h", socketDir, "-p", strconv.Itoa(port), "-U", "vaire_monitor", "-d", "pgbouncer", "-tAc", "SHOW VERSION")
+
 	return err
 }
 
@@ -605,6 +708,7 @@ const poolerAdminTimeout = 15 * time.Second
 func poolerAdmin(ctx context.Context, command string) error {
 	ctx, cancel := context.WithTimeout(ctx, poolerAdminTimeout)
 	defer cancel()
+
 	return runCmd(ctx, "runuser", "-u", "postgres", "--", "psql", "-X", "-q",
 		"-h", PGSocketDir, "-p", strconv.Itoa(PgbouncerPort), "-U", "pgbouncer", "-d", "pgbouncer", "-c", command)
 }

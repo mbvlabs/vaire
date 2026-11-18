@@ -44,6 +44,7 @@ func recoverToken(_ config.Cluster, params json.RawMessage) string {
 	if json.Unmarshal(params, &p) != nil || p.Database == "" || p.Time == "" {
 		return ""
 	}
+
 	return p.Database + "/recover"
 }
 
@@ -59,6 +60,7 @@ func (p recoverParams) restore() restoreParams {
 	if p.Time != "" {
 		r.Kind, r.Time = backup.TargetTime, p.Time
 	}
+
 	return r
 }
 
@@ -67,31 +69,39 @@ func handleDBRecover(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	cfg := env.Cluster
+
 	spec, err := clusterOf(cfg, p.Database)
 	if err != nil {
 		return Result{}, err
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	if !recs.IsAwaiting(p.Database) {
 		return Result{}, output.NewError(output.CodePrecondition, "database "+p.Database+" isn't awaiting recovery", output.ExitPrecondition,
 			"db recover is for databases a rebuilt master hasn't recovered. To go back in time on a running database use vaire restore "+p.Database+".").
 			WithDetails(map[string]any{"reason": "not_awaiting_recovery", "database": p.Database})
 	}
+
 	if spec.IsFollower() {
 		// A follower follows its recovered source again (Phase 6, D14).
 		return recoverFollower(ctx, env, p, spec, recs)
 	}
+
 	var target, timeline string
+
 	err = withRestorePreparation(ctx, env, p.Database, "db.recover", func() error {
 		return prepareRecovery(ctx, env, p, &target, &timeline)
 	})
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "stanza": spec.Stanza, "target": target, "timeline": timeline, "dry_run": true}}, nil
 	}
@@ -103,54 +113,69 @@ func handleDBRecover(ctx context.Context, env *Env) (Result, error) {
 
 func prepareRecovery(ctx context.Context, env *Env, p recoverParams, target, timeline *string) error {
 	cfg := env.Cluster
+
 	spec, err := clusterOf(cfg, p.Database)
 	if err != nil {
 		return err
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	if spec.IsFollower() || !recs.IsAwaiting(p.Database) {
 		return incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
+
 	if !cfg.BackupConfigured() {
 		return output.NewError(output.CodePrecondition, "there is no bucket, so there is no stanza to recover "+p.Database+" from", output.ExitPrecondition,
 			"The data is lost with the old server. Create the database again: vaire db drop "+p.Database+" --confirm "+p.Database+", then vaire db create "+p.Database+".").
 			WithDetails(map[string]any{"reason": "no_offsite_backup", "database": p.Database})
 	}
+
 	if p.Time != "" && env.Req.Confirm == "" && !env.Req.DryRun {
 		return confirmRequired("a recovery to a time leaves out everything "+p.Database+" wrote after it", p.Database+"/recover")
 	}
+
 	if err := recoverChecks(ctx, cfg, spec, recs, env.Report); err != nil {
 		return err
 	}
+
 	rp := p.restore()
+
 	*target, err = restoreCheckTarget(ctx, cfg, rp)
 	if err != nil {
 		return err
 	}
+
 	*timeline = recs.TargetTimeline(p.Database, spec.Stanza)
+
 	if env.Req.DryRun {
 		return nil
 	}
+
 	if err := restorePreconditions(ctx, cfg, p.Database, "a recovery"); err != nil {
 		return err
 	}
+
 	instance, operation, err := restoreInvocationProvenance(env)
 	if err != nil {
 		return err
 	}
+
 	return restorePublish(func(s *backup.Records) error {
 		if _, exists := s.Restores[p.Database]; exists || !s.IsAwaiting(p.Database) {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
+
 		s.Restores[p.Database] = backup.Restore{
 			ID: env.Req.RequestID, Database: p.Database, Kind: rp.Kind, Target: *target,
 			InstanceID: instance, OperationID: operation,
 			Phase: backup.PhaseRestoring, StartedAt: stamp(), Promote: !p.NoPromote, Timeline: *timeline,
 			Recover: true, NoFull: p.NoFull, MaterialisationPending: true,
 		}
+
 		return nil
 	})
 }
@@ -159,9 +184,11 @@ func recoverChecks(ctx context.Context, cfg config.Cluster, spec config.ClusterS
 	if err := recoverCheckFence(ctx, cfg, report); err != nil {
 		return err
 	}
+
 	if err := recoverCheckBackup(ctx, spec, recs); err != nil {
 		return err
 	}
+
 	return recoverCheckWritten(ctx, cfg, spec)
 }
 
@@ -169,9 +196,11 @@ func restorePreconditions(ctx context.Context, cfg config.Cluster, db, what stri
 	if err := clearFailedRestore(ctx, cfg, db); err != nil {
 		return err
 	}
+
 	if err := restoreInProgress(db, what); err != nil {
 		return err
 	}
+
 	return restoreCheckNamespace(ctx, cfg, db)
 }
 
@@ -182,13 +211,16 @@ func stanzaHasBackup(ctx context.Context, spec config.ClusterSpec, recs backup.R
 	if err != nil {
 		return err
 	}
+
 	if _, ok := info.Latest(); ok {
 		return nil
 	}
+
 	hint := "Create it again: vaire db drop " + spec.Name + " --confirm " + spec.Name + ", then vaire db create " + spec.Name + "."
 	if d, ok := recs.Dropped(spec.Name); ok && d.Stanza != spec.Stanza {
 		hint += " Older history is in the stanza " + d.Stanza + " (kept until " + d.ExpiresAt + ")."
 	}
+
 	return output.NewError(output.CodePrecondition, "the stanza "+spec.Stanza+" of "+spec.Name+" has no backup to recover from", output.ExitPrecondition, hint).
 		WithDetails(map[string]any{"reason": "no_backup_in_stanza", "database": spec.Name, "stanza": spec.Stanza})
 }
@@ -202,6 +234,7 @@ func stanzaStillWritten(ctx context.Context, cfg config.Cluster, spec config.Clu
 	if err != nil {
 		return err
 	}
+
 	fence := e.WrittenTime()
 	if fence.IsZero() {
 		return nil
@@ -215,6 +248,7 @@ func stanzaStillWritten(ctx context.Context, cfg config.Cluster, spec config.Clu
 			}
 		}
 	}
+
 	return stillWrittenSince(ctx, cfg, spec, fence)
 }
 
@@ -222,17 +256,21 @@ func stillWrittenSince(ctx context.Context, cfg config.Cluster, spec config.Clus
 	if fence.IsZero() {
 		return nil
 	}
+
 	t, _, err := steps.BackupTarget(cfg)
 	if err != nil {
 		return err
 	}
+
 	key, newest, err := backup.NewestArchive(ctx, t, spec.Stanza)
 	if err != nil {
 		return err
 	}
+
 	if !writtenAfterFence(newest, fence) {
 		return nil
 	}
+
 	return output.NewError(output.CodePrecondition,
 		"the stanza "+spec.Stanza+" received WAL at "+newest.UTC().Format(time.RFC3339)+", after this master took over: the old master is still running",
 		output.ExitPrecondition,
@@ -254,7 +292,12 @@ func scaffoldSteps(db string) []string {
 	return []string{steps.KernelStepIDs()[0], steps.PackagesStepIDs()[0], engine.InstanceID("postgres-cluster-v1", db), steps.ConfigStepID(db)}
 }
 
-var recoverScaffoldApply = engine.Apply
+var (
+	recoverScaffoldApply  = engine.Apply
+	recoverMaterialise    = materialiseRestore
+	recoverArmArchiving   = armArchiving
+	recoverCutoverPoolers = applyPoolers
+)
 
 // jobRecover recovers one database (D8).
 func jobRecover(ctx context.Context, env *jobEnv) (any, error) {
@@ -262,23 +305,28 @@ func jobRecover(ctx context.Context, env *jobEnv) (any, error) {
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
+
 	res, err := recoverDatabase(ctx, env, p)
 	if err != nil {
 		if backup.RetainRecoveryFailure(err) {
 			return nil, err
 		}
+
 		return nil, errors.Join(err, failRestoreChecked(env, err, nil))
 	}
+
 	return res, nil
 }
 
 func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[string]any, error) {
 	cfg := env.Cluster
 	db := p.Database
+
 	spec, err := clusterOf(cfg, db)
 	if err != nil {
 		return nil, err
 	}
+
 	if env.lease == nil {
 		return nil, fmt.Errorf("recover requires the runner's lock lease")
 	}
@@ -294,7 +342,9 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	// part way through (the cluster made, its configuration step failed)
 	// finishes the scaffold; on a complete one they change nothing.
 	logLine(env.Report, env.Job, "building the empty cluster 18/"+db+" for the recovered data")
+
 	scaffold := cfg
+
 	scaffold.Backup.Provider = ""
 	if _, _, err := recoverScaffoldApply(ctx, steps.Catalog(), scaffold, rt, engine.Options{
 		Only: scaffoldSteps(db), Recovering: db, Restarter: steps.Restarter(scaffold), Report: env.Report,
@@ -303,21 +353,24 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	}
 
 	// 2. Materialise the stanza into <db>__restoring.
-	port, attempt, err := materialiseRestore(ctx, env, p.restore())
+	port, attempt, err := recoverMaterialise(ctx, env, p.restore())
 	if err != nil {
 		return nil, errors.Join(err, failRestoreChecked(env, err, attempt))
 	}
+
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		r, ok := s.Restores[db]
 		if !ok || !matchesRestoreInvocation(r, env, db) || r.Phase != backup.PhaseRestoring ||
 			attempt == nil || r.Attempt == nil || !sameAttemptIdentity(*r.Attempt, *attempt) || !restoreRecordMatchesAttempt(r, attempt) {
 			return incompleteMaterialisation(backup.RestoringName(db))
 		}
+
 		r.Phase, r.ReadyAt, r.Error, r.Port = backup.PhaseReady, stamp(), "", port
 		r.Attempt = nil
 		r.MaterialisationPending = false
 		r.MaterialisationCleaned = false
 		s.Restores[db] = r
+
 		return nil
 	}); err != nil {
 		return nil, err
@@ -328,7 +381,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	// from its first start (its new timeline's history file above all), here
 	// and when restore promote finishes a --no-promote run. Stop the empty
 	// scaffold first, so no reload can make it archive into the stanza.
-	if err := armArchiving(ctx, env, cfg, spec, rt); err != nil {
+	if err := recoverArmArchiving(ctx, env, cfg, spec, rt); err != nil {
 		return nil, err
 	}
 	// The ordinary entry is published by clearAwaiting below; write the
@@ -338,6 +391,7 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	if err != nil {
 		return nil, err
 	}
+
 	r := bs.Restores[db]
 	if _, err := writeActivationFence(cfg, activationFenceIdentity{
 		Database: db, Kind: "restore-promote", OperationID: r.ID, Spec: spec,
@@ -357,9 +411,19 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 		return recoverInspectionReady(ctx, cfg, rt, db, env.Report, res), nil
 	}
 
-	// 4. The split-brain check again, just before the copy opens. A failure
-	// here leaves the database awaiting recovery, for db recover again.
-	if err := stanzaStillWritten(ctx, cfg, spec); err != nil {
+	// A rebuilt master's first recovery has no pooler yet: server init
+	// skipped pgbouncer-v1 while every configured database awaited recovery.
+	// Start both here, before the strict cut-over fence reads their admin
+	// sockets. The recovery fence is already active, so neither the target nor
+	// the ready copy's inspection alias is rendered. Later recoveries keep
+	// the ordinary strict fence, including its failure when a pooler is down.
+	if err := ensureRecoveryPoolers(ctx, env, cfg, db, rt); err != nil {
+		return res, err
+	}
+
+	// 4. The split-brain check again, after pooler preparation and just
+	// before the copy opens. A failure leaves the database awaiting recovery.
+	if err := recoverCheckWritten(ctx, cfg, spec); err != nil {
 		return res, err
 	}
 
@@ -371,8 +435,10 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	if err != nil {
 		return res, err
 	}
+
 	applyRecoveredTimers(ctx, cfg, rt, env, res)
 	res["phase"] = "recovered"
+
 	res["promoted"] = promoted
 	if aside, _ := promoted["pre_restore"].(string); aside != "" {
 		recoverScaffoldResult(ctx, env, cfg, db, aside, port, spec.Stanza, res)
@@ -382,12 +448,16 @@ func recoverDatabase(ctx context.Context, env *jobEnv, p recoverParams) (map[str
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.MetricsStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report}); err != nil {
 		res["metrics_warning"] = "the data is recovered, but its metrics did not finish: " + err.Error() + "; vaire apply finishes them"
 	}
+
 	if t := recoveredTo(ctx, spec); t != "" {
 		res["recovered_to"] = t
 	}
+
 	res["duration_s"] = int64(time.Since(started).Seconds())
+
 	steps.WriteMetrics(cfg)
 	writeMasterMetrics(cfg)
+
 	return res, nil
 }
 
@@ -397,16 +467,44 @@ func recoverScaffoldResult(ctx context.Context, env *jobEnv, cfg config.Cluster,
 	}
 }
 
+// ensureRecoveryPoolers starts both poolers before a rebuilt master's first
+// cut-over. The condition is read from the full configuration, never from a
+// routing view: every configured database must still await recovery. Any
+// ordinary live database means the poolers already have a legitimate run, and
+// its recovery keeps the existing strict fence unchanged.
+func ensureRecoveryPoolers(ctx context.Context, env *jobEnv, cfg config.Cluster, db string, rt engine.Runtime) error {
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return err
+	}
+
+	if !recs.IsAwaiting(db) {
+		return nil
+	}
+
+	for _, configured := range cfg.Clusters {
+		if !recs.IsAwaiting(configured.Name) {
+			return nil
+		}
+	}
+
+	logLine(env.Report, env.Job, "preparing both poolers before the first recovered database is cut over")
+
+	return recoverCutoverPoolers(ctx, cfg, rt, db, env.Report)
+}
+
 var recoverInspectionPoolers = applyPoolers
 
 func recoverInspectionReady(ctx context.Context, cfg config.Cluster, rt engine.Runtime, db string, report engine.Reporter, res map[string]any) map[string]any {
 	if err := recoverInspectionPoolers(ctx, cfg, rt, db, report); err != nil {
 		res["pooler_warning"] = err.Error()
 	}
+
 	res["phase"] = backup.PhaseReady
 	res["application_ready"] = false
 	res["access_coverage"] = "unknown"
 	res["access_notice"] = "The read-only restore is ready for inspection; application access is not ready until promotion and access provisioning succeed."
+
 	return res
 }
 
@@ -414,11 +512,14 @@ func recoverInspectionReady(ctx context.Context, cfg config.Cluster, rt engine.R
 // record it removed.
 func clearAwaiting(db string) (backup.Awaiting, error) {
 	var prev backup.Awaiting
+
 	err := backup.UpdateRecords(func(s *backup.Records) error {
 		prev = s.AwaitingRecovery[db]
 		delete(s.AwaitingRecovery, db)
+
 		return nil
 	})
+
 	return prev, err
 }
 
@@ -441,9 +542,11 @@ func armArchiving(ctx context.Context, env *jobEnv, cfg config.Cluster, spec con
 	if err := env.shell().Exec(ctx, env.Job, engine.Command{Name: "systemctl", Args: []string{"stop", "postgresql@18-" + spec.Name}}, env.Report); err != nil {
 		return err
 	}
+
 	if _, _, err := engine.Apply(ctx, steps.Catalog(), cfg, rt, stanzaConfOptions(cfg, spec.Name, rt, env.Report)); err != nil {
 		return err
 	}
+
 	return steps.WriteBackupConf(cfg, spec)
 }
 
@@ -461,32 +564,40 @@ func validateRecoverScaffold(env *jobEnv, cfg config.Cluster, db string, port in
 		(env.lease.targets[db] != engine.LockShared && env.lease.targets[db] != engine.LockExclusive) {
 		return errors.New("recover scaffold lease does not match")
 	}
+
 	instance, err := currentFollowInstance()
 	if err != nil || instance != env.installID {
 		return errors.New("recover scaffold install changed")
 	}
+
 	spec, ok := cfg.ClusterByName(db)
+
 	current, currentOK := env.Cluster.ClusterByName(db)
 	if !ok || !currentOK || cfg.Server.DataRoot != env.Cluster.Server.DataRoot ||
 		spec.Stanza != stanza || current.Stanza != stanza || spec.Port != current.Port ||
 		port < config.TemporaryPortMin || port > config.TemporaryPortMax {
 		return errors.New("recover scaffold target changed")
 	}
+
 	return nil
 }
 
 func recoverScaffoldLeftover(records backup.Records, env *jobEnv, db, aside string, port int, stanza string) (backup.Leftover, error) {
 	var l backup.Leftover
+
 	matches := 0
+
 	for _, candidate := range records.Leftovers {
 		if candidate.Name == aside {
 			matches++
 			l = candidate
 		}
 	}
+
 	if matches != 1 || strings.HasSuffix(aside, "b") || l.Database != db || l.RestoreID != env.ID || l.Port != port || l.Stanza != stanza {
 		return l, errors.New("recover scaffold leftover mismatch")
 	}
+
 	return l, nil
 }
 
@@ -497,22 +608,27 @@ func dropScaffold(ctx context.Context, env *jobEnv, cfg config.Cluster, db, asid
 		if err := validateRecoverScaffold(env, cfg, db, port, stanza); err != nil {
 			return err
 		}
+
 		records, err := backup.LoadRecords()
 		if err != nil {
 			return err
 		}
+
 		l, err := recoverScaffoldLeftover(records, env, db, aside, port, stanza)
 		if err != nil {
 			return err
 		}
+
 		a, err := openLegacyLeftover(cfg, l)
 		if err != nil {
 			return err
 		}
 		defer a.close()
+
 		if err := a.remove(ctx, &Env{Cluster: cfg, Report: env.Report}); err != nil {
 			return err
 		}
+
 		return retireLegacyLeftover(cfg, l)
 	})
 }
@@ -525,5 +641,6 @@ func recoveredTo(ctx context.Context, spec config.ClusterSpec) string {
 	if err != nil || len(rows) == 0 {
 		return ""
 	}
+
 	return rows[0]["t"]
 }

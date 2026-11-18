@@ -43,6 +43,7 @@ func supportedRestoreKind(kind string) bool {
 	case backup.TargetLatest, backup.TargetTime, backup.TargetSet:
 		return true
 	}
+
 	return false
 }
 
@@ -65,6 +66,7 @@ func restoreToken(_ config.Cluster, params json.RawMessage) string {
 	if json.Unmarshal(params, &p) != nil || p.Database == "" {
 		return ""
 	}
+
 	return p.Database + "/restore"
 }
 
@@ -74,6 +76,7 @@ func cleanupToken(_ config.Cluster, params json.RawMessage) string {
 	if json.Unmarshal(params, &p) != nil || !p.Drop {
 		return ""
 	}
+
 	return p.Database + "/cleanup"
 }
 
@@ -83,13 +86,16 @@ func restoreInProgress(db, action string) error {
 	if err != nil {
 		return err
 	}
+
 	r, ok := bs.OpenRestore(db)
 	if !ok {
 		return nil
 	}
+
 	if !supportedRestoreKind(r.Kind) {
 		return unsupportedRestoreState(r.Kind)
 	}
+
 	return output.NewError(output.CodePrecondition,
 		"a restore of "+db+" is open ("+r.Phase+"); "+action+" waits until it is promoted or aborted",
 		output.ExitPrecondition,
@@ -105,35 +111,45 @@ func clearFailedRestore(ctx context.Context, cfg config.Cluster, db string) erro
 	if err != nil {
 		return err
 	}
+
 	r, ok := bs.OpenRestore(db)
 	if ok && !supportedRestoreKind(r.Kind) {
 		return unsupportedRestoreState(r.Kind)
 	}
+
 	if ok && r.Phase == backup.PhaseFailed && r.MaterialisationPending && r.Attempt == nil {
 		return retireNeverStartedRestore(ctx, cfg, db, r)
 	}
+
 	if ok && (r.Attempt != nil || r.MaterialisationPending) {
 		return incompleteMaterialisation(backup.RestoringName(db))
 	}
+
 	if !ok || r.Phase != backup.PhaseFailed {
 		return nil
 	}
+
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return err
 	}
+
 	if job, ok := st.Job(r.ID); ok && !job.Final() {
 		return nil
 	}
+
 	if err := dropRestoring(ctx, cfg, db, nil); err != nil {
 		return err
 	}
+
 	return backup.UpdateRecords(func(s *backup.Records) error {
 		cur, ok := s.Restores[db]
 		if !ok || cur.ID != r.ID || cur.Phase != backup.PhaseFailed || cur.Attempt != nil || cur.MaterialisationPending {
 			return incompleteMaterialisation(backup.RestoringName(db))
 		}
+
 		delete(s.Restores, db)
+
 		return nil
 	})
 }
@@ -142,6 +158,7 @@ func clearFailedRestore(ctx context.Context, cfg config.Cluster, db string) erro
 func dropRestoring(ctx context.Context, cfg config.Cluster, db string, report engine.Reporter) error {
 	_ = ctx // cleanup deliberately ignores cancellation; DropTemporaryCluster bounds itself.
 	name := backup.RestoringName(db)
+
 	return backup.DropTemporaryCluster(engine.Shell{Secrets: secrets.Default}, "restore.abort", report, name, filepath.Join(cfg.Server.DataRoot, name)) //nolint:contextcheck // DropTemporaryCluster bounds its own cleanup.
 }
 
@@ -150,6 +167,7 @@ func checkRestorable(cfg config.Cluster, db string) error {
 	if _, ok := cfg.ClusterByName(db); !ok {
 		return databaseNotFound(db)
 	}
+
 	return nil
 }
 
@@ -158,14 +176,17 @@ func checkRestorable(cfg config.Cluster, db string) error {
 // or a database of that name.
 func restoringInTheWay(ctx context.Context, cfg config.Cluster, db string) error {
 	name := backup.RestoringName(db)
+
 	_, statErr := os.Stat(filepath.Join(cfg.Server.DataRoot, name))
 	if !steps.ClusterExists(ctx, name) && statErr != nil {
 		return nil
 	}
+
 	hint := "Drop it with vaire restore abort " + db + "."
 	if _, ok := cfg.ClusterByName(name); ok {
 		hint = "It is the database " + name + "; rename one of them or drop it with vaire db drop " + name + "."
 	}
+
 	return output.NewError(output.CodePrecondition, "cluster 18/"+name+" is in the way of a restore of "+db, output.ExitPrecondition, hint).
 		WithDetails(map[string]any{"reason": "restoring_exists", "cluster": name})
 }
@@ -175,31 +196,42 @@ func handleRestoreStart(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if !supportedRestoreKind(p.Kind) {
 		return Result{}, unsupportedRestoreKind(p.Kind)
 	}
+
 	cfg := env.Cluster
 	if err := requireBackups(cfg); err != nil {
 		return Result{}, err
 	}
+
 	if err := checkRestorable(cfg, p.Database); err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.Confirm == "" && !env.Req.DryRun {
 		return Result{}, confirmRequired("a restore replaces "+p.Database+" once promoted", p.Database+"/restore")
 	}
-	var target, timeline string
-	var space []backup.SpaceNeed
+
+	var (
+		target, timeline string
+		space            []backup.SpaceNeed
+	)
+
 	err := withRestorePreparation(ctx, env, p.Database, "restore.start", func() error {
 		return prepareRestoreStart(ctx, env, p, &target, &timeline, &space)
 	})
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "target": target, "timeline": timeline, "space": space, "dry_run": true}}, nil
 	}
+
 	restoreWriteMetrics(cfg)
+
 	return restoreLaunch(ctx, env, "restore", p, nil)
 }
 
@@ -207,57 +239,72 @@ func prepareRestoreStart(ctx context.Context, env *Env, p restoreParams, target,
 	if !supportedRestoreKind(p.Kind) {
 		return unsupportedRestoreKind(p.Kind)
 	}
+
 	cfg := env.Cluster
 	if err := requireBackups(cfg); err != nil {
 		return err
 	}
+
 	if err := checkRestorable(cfg, p.Database); err != nil {
 		return err
 	}
+
 	if err := refusePendingUndo(p.Database); err != nil {
 		return err
 	}
+
 	var err error
+
 	*target, err = restoreCheckTarget(ctx, cfg, p)
 	if err != nil {
 		return err
 	}
+
 	if !env.Req.DryRun {
 		if err := clearFailedRestore(ctx, cfg, p.Database); err != nil {
 			return err
 		}
 	}
+
 	if err := restoreInProgress(p.Database, "a new restore"); err != nil {
 		return err
 	}
+
 	if err := restoreCheckNamespace(ctx, cfg, p.Database); err != nil {
 		return err
 	}
+
 	*space, err = restoreCheckSpace(ctx, cfg, p.Database)
 	if err != nil {
 		return err
 	}
+
 	*timeline, err = restoreTimeline(cfg, p)
 	if err != nil || env.Req.DryRun {
 		return err
 	}
+
 	instance, operation, err := restoreInvocationProvenance(env)
 	if err != nil {
 		return err
 	}
+
 	return restorePublish(func(s *backup.Records) error {
 		if _, undoing := s.Undoing[p.Database]; undoing {
 			return pendingUndoError(p.Database)
 		}
+
 		if _, open := s.Restores[p.Database]; open {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
+
 		s.Restores[p.Database] = backup.Restore{
 			ID: env.Req.RequestID, Database: p.Database, Kind: p.Kind, Target: *target,
 			InstanceID: instance, OperationID: operation,
 			Phase: backup.PhaseRestoring, StartedAt: stamp(), Promote: p.Promote, Timeline: *timeline,
 			MaterialisationPending: true,
 		}
+
 		return nil
 	})
 }
@@ -274,9 +321,11 @@ func refusePendingUndo(db string) error {
 	if err != nil {
 		return err
 	}
+
 	if _, pending := recs.Undoing[db]; pending {
 		return pendingUndoError(db)
 	}
+
 	return nil
 }
 
@@ -287,10 +336,12 @@ func restoreTimeline(cfg config.Cluster, p restoreParams) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return "", err
 	}
+
 	return bs.TargetTimeline(p.Database, spec.Stanza), nil
 }
 
@@ -300,7 +351,9 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 	if err != nil {
 		return "", err
 	}
+
 	d := driver(spec, "restore", nil)
+
 	switch p.Kind {
 	case backup.TargetLatest:
 		return restoreLatestTarget(ctx, d)
@@ -309,6 +362,7 @@ func checkRestoreTarget(ctx context.Context, cfg config.Cluster, p restoreParams
 	case backup.TargetSet:
 		return restoreSetTarget(ctx, d, p)
 	}
+
 	return "", unsupportedRestoreKind(p.Kind)
 }
 
@@ -317,10 +371,12 @@ func restoreLatestTarget(ctx context.Context, d backup.Driver) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	if _, ok := info.Latest(); !ok {
 		return "", output.NewError(output.CodePrecondition, "the repository has no backup", output.ExitPrecondition,
 			"Take one with vaire backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
 	}
+
 	return "latest", nil
 }
 
@@ -329,17 +385,21 @@ func restoreTimeTarget(ctx context.Context, d backup.Driver, spec config.Cluster
 	if err != nil {
 		return "", output.NewError(output.CodeUsage, "time must be RFC 3339", output.ExitUsage, "")
 	}
+
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return "", err
 	}
+
 	archive, err := d.ArchiveStatus(ctx)
 	if err != nil {
 		return "", err
 	}
+
 	if err := inWindow(restoreWindow(info, archive), t); err != nil {
 		return "", olderStanzaHint(err, p.Database, spec.Stanza)
 	}
+
 	return t.UTC().Format(time.RFC3339Nano), nil
 }
 
@@ -348,10 +408,12 @@ func restoreSetTarget(ctx context.Context, d backup.Driver, p restoreParams) (st
 	if err != nil {
 		return "", err
 	}
+
 	if _, ok := info.Find(p.Set); !ok {
 		return "", output.NewError(output.CodePrecondition, "there is no backup set "+p.Set, output.ExitPrecondition,
 			"List the sets with vaire backup list.").WithDetails(map[string]any{"reason": "set_not_found"})
 	}
+
 	return "set " + p.Set, nil
 }
 
@@ -363,10 +425,12 @@ func olderStanzaHint(err error, db, stanza string) error {
 	if lerr != nil {
 		return err
 	}
+
 	d, ok := bs.Dropped(db)
 	if !ok || d.Stanza == stanza {
 		return err
 	}
+
 	return withHint(err, "Points before "+d.DroppedAt+" are in the older stanza "+d.Stanza+" (kept until "+d.ExpiresAt+"; vaire backup list --db "+db+"), which vaire restore doesn't read.")
 }
 
@@ -377,8 +441,10 @@ func restoreSpace(ctx context.Context, cfg config.Cluster, db string) ([]backup.
 	if err != nil {
 		return nil, err
 	}
+
 	size := databaseSize(ctx, local, db)
 	dataDir := cfg.Server.DataDirectory(db)
+
 	return backup.CheckSpace([]backup.SpaceNeed{{Path: dataDir, Need: backup.CopyNeed(size), Purpose: "the copy of " + db}})
 }
 
@@ -391,14 +457,18 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
+
 	if !supportedRestoreKind(p.Kind) {
 		return nil, unsupportedRestoreKind(p.Kind)
 	}
+
 	port, attempt, err := materialiseRestore(ctx, env, p)
 	if err != nil {
 		return nil, errors.Join(err, failRestoreChecked(env, err, attempt))
 	}
+
 	readyAt := stamp()
+
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		r, ok := s.Restores[p.Database]
 		if !ok || !matchesRestoreInvocation(r, env, p.Database) || r.Phase != backup.PhaseRestoring ||
@@ -406,22 +476,27 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 			(attempt == nil && r.Attempt != nil) {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
+
 		r.Phase, r.ReadyAt, r.Error, r.Port = backup.PhaseReady, readyAt, "", port
 		r.Attempt = nil
 		r.MaterialisationPending = false
 		r.MaterialisationCleaned = false
 		s.Restores[p.Database] = r
+
 		return nil
 	}); err != nil {
 		return nil, err
 	}
+
 	rt := jobRuntime(env)
+
 	res := map[string]any{"database": p.Database, "restoring": backup.RestoringName(p.Database), "port": port, "phase": backup.PhaseReady}
 	if p.Promote {
 		promoted, err := promote(ctx, env.Cluster, p.Database, rt, env.Report, func() {})
 		if err != nil {
 			return res, err
 		}
+
 		res["phase"] = "promoted"
 		res["promoted"] = promoted
 		// A restored source opens on a new timeline, so its followers stop
@@ -431,7 +506,9 @@ func jobRestore(ctx context.Context, env *jobEnv) (any, error) {
 	} else if err := restoreApplyPoolers(ctx, env.Cluster, rt, "", env.Report); err != nil {
 		res["pooler_warning"] = "the session pooler was not reloaded, so vaire sql --db " + backup.RestoringName(p.Database) + " fails until vaire apply: " + err.Error()
 	}
+
 	restoreWriteMetrics(env.Cluster)
+
 	return res, nil
 }
 
@@ -456,6 +533,7 @@ func extensionPrestart(env *jobEnv, cfg config.Cluster, spec config.ClusterSpec,
 		if err := steps.PrepareExtensionStart(ctx, cfg, spec, extra, jobRuntime(env), env.Report); err != nil {
 			return fmt.Errorf("extension prerequisites before starting the copy: %w", err)
 		}
+
 		return nil
 	}
 }
@@ -474,6 +552,7 @@ var prepareCopyExtensions = func(ctx context.Context, plan *extensionCopyPlan, r
 	if plan == nil {
 		return nil
 	}
+
 	return steps.PrepareExtensionRequirements(ctx, plan.Reqs, rt, report)
 }
 
@@ -481,6 +560,7 @@ func prepareTargetExtensionsDefault(ctx context.Context, cfg config.Cluster, spe
 	if err := steps.PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
 		return fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
 	}
+
 	return nil
 }
 
@@ -514,11 +594,14 @@ func prestartCopy(m *backup.Materialised, env *jobEnv, cfg config.Cluster, spec 
 	if m == nil {
 		return
 	}
+
 	var extra []steps.ExtensionPrerequisite
+
 	if plan != nil {
 		m.Plan = plan.Plan
 		extra = plan.Reqs
 	}
+
 	m.BeforeStart = extensionPrestart(env, cfg, spec, extra)
 }
 
@@ -530,7 +613,9 @@ func newPrestartMaterialised(dataRoot, name, source string, sourcePort int, env 
 	if err != nil {
 		return nil, err
 	}
+
 	prestartCopy(m, env, cfg, spec, plan)
+
 	return m, nil
 }
 
@@ -561,16 +646,20 @@ func failRestoreChecked(env *jobEnv, cause error, expected *backup.Materialisati
 	if json.Unmarshal(env.Params, &p) != nil || p.Database == "" {
 		return errors.New("cannot identify the failed restore")
 	}
+
 	return withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
 		return backup.UpdateRecords(func(s *backup.Records) error {
 			r, ok := s.Restores[p.Database]
 			if err := validateFailedRestoreRecord(r, ok, env, p, expected); err != nil {
 				return err
 			}
+
 			if err := applyFailedRestore(&r, p, cause, expected); err != nil {
 				return err
 			}
+
 			s.Restores[p.Database] = r
+
 			return nil
 		})
 	})
@@ -582,6 +671,7 @@ func validateFailedRestoreRecord(r backup.Restore, ok bool, env *jobEnv, p resto
 		(expected != nil && (r.Attempt == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected))) {
 		return incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
+
 	return nil
 }
 
@@ -591,16 +681,19 @@ func applyFailedRestore(r *backup.Restore, p restoreParams, cause error, expecte
 		r.MaterialisationPending = true
 		r.MaterialisationCleaned = false
 	}
+
 	if reason := recoveryFailureReason(cause); reason != "" {
 		r.Error = "recovery could not meet parameter requirements"
 		if expected == nil || r.Attempt == nil {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
+
 		r.Attempt.Reason = reason
 	} else if r.MaterialisationCleaned && expected != nil {
 		r.Attempt = nil
 		r.MaterialisationPending = false
 	}
+
 	return nil
 }
 
@@ -610,18 +703,22 @@ func applyFailedRestore(r *backup.Restore, p restoreParams, cause error, expecte
 // port. A failure drops what was built.
 func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int, *backup.MaterialisationAttempt, error) {
 	cfg := env.Cluster
+
 	spec, err := clusterOf(cfg, p.Database)
 	if err != nil {
 		return 0, nil, err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return 0, nil, err
 	}
+
 	opts := backup.RestoreOptions{Kind: p.Kind, Set: p.Set, Pause: true, Timeline: bs.Restores[p.Database].Timeline}
 	if p.Kind == backup.TargetTime {
 		opts.Time, _ = time.Parse(time.RFC3339, p.Time)
 	}
+
 	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
 		Intent: spec, Stanza: spec.Stanza, CopyDB: p.Database, Options: opts,
 		Historical: true, Standby: true,
@@ -630,25 +727,32 @@ func materialiseRestore(ctx context.Context, env *jobEnv, p restoreParams) (int,
 	if err != nil {
 		return 0, nil, err
 	}
+
 	if err := prepareRestoreRecord(env, p, bs); err != nil {
 		return 0, nil, err
 	}
+
 	m, err := constructRestoreMaterialised(env, p, spec, cfg)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer m.ReleaseForkReservationAuthority()
+
 	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
 		return 0, nil, err
 	}
+
 	prestartFollowerCopy(m, env, cfg, spec, plan)
+
 	expected, birth, err := buildRestoreMaterialisation(ctx, env, p, spec, bs, m)
 	if err != nil {
 		return cleanupFailedRestore(ctx, env, p, m, expected, birth, err)
 	}
+
 	if birth != nil {
 		defer birth.close()
 	}
+
 	return m.Port, expected, nil
 }
 
@@ -656,13 +760,16 @@ func prepareRestoreRecord(env *jobEnv, p restoreParams, bs backup.Records) error
 	if err := validateRestoreInvocation(env); err != nil {
 		return err
 	}
+
 	if err := withLockedJobTarget(env, backup.RestoringName(p.Database), func() error { return nil }); err != nil {
 		return err
 	}
+
 	initial, found := bs.Restores[p.Database]
 	if !found {
 		return incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
+
 	return withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
 		return backup.UpdateRecords(func(s *backup.Records) error {
 			r, ok := s.Restores[p.Database]
@@ -670,8 +777,10 @@ func prepareRestoreRecord(env *jobEnv, p restoreParams, bs backup.Records) error
 				r.Kind != p.Kind || env.Job == "restore" && r.Promote != p.Promote || r.Attempt != nil {
 				return incompleteMaterialisation(backup.RestoringName(p.Database))
 			}
+
 			r.MaterialisationPending = true
 			s.Restores[p.Database] = r
+
 			return nil
 		})
 	})
@@ -679,12 +788,17 @@ func prepareRestoreRecord(env *jobEnv, p restoreParams, bs backup.Records) error
 
 func constructRestoreMaterialised(env *jobEnv, p restoreParams, spec config.ClusterSpec, cfg config.Cluster) (*backup.Materialised, error) {
 	constructor := callerNewRestoreOwned
+
 	var m *backup.Materialised
+
 	err := withLockedJobTarget(env, backup.RestoringName(p.Database), func() error {
 		var err error
+
 		m, err = constructor(cfg.Server.DataRoot, backup.RestoringName(p.Database), p.Database, spec.Port, env.shell(), env.Job, env.Report)
+
 		return err
 	})
+
 	return m, err
 }
 
@@ -693,32 +807,41 @@ func buildRestoreMaterialisation(ctx context.Context, env *jobEnv, p restorePara
 	if err != nil {
 		return nil, nil, err
 	}
+
 	m.DestinationConfig = destination
+
 	kind := "restore"
 	if bs.Restores[p.Database].Recover {
 		kind = "recover"
 	}
+
 	attempt, err := newMaterialisationAttempt(env, m, spec.Stanza, kind)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	attempt.ReservationIdentity, err = m.ForkReservationIdentity()
 	if err != nil {
 		return nil, nil, err
 	}
+
 	expected := &attempt
 	if err := bindRestoreAttempt(ctx, env, p, bs, m, &attempt); err != nil {
 		return nil, nil, err
 	}
+
 	birth, err := newRestoreBirth(ctx, env, m, expected)
 	if err != nil {
 		return expected, nil, err
 	}
+
 	m.Ownership = birth
+
 	err = runRestoreMaterialised(ctx, env, p, spec, bs, m, expected)
 	if err != nil {
 		return expected, birth, err
 	}
+
 	return expected, birth, nil
 }
 
@@ -731,9 +854,11 @@ func bindRestoreAttempt(ctx context.Context, env *jobEnv, p restoreParams, bs ba
 					r.Kind != p.Kind || env.Job == "restore" && r.Promote != p.Promote || r.Attempt != nil {
 					return incompleteMaterialisation(m.Name)
 				}
+
 				attempt.RecordDigest = restoreRecordDigest(r)
 				r.Attempt = attempt
 				s.Restores[p.Database] = r
+
 				return nil
 			})
 		})
@@ -745,15 +870,19 @@ func runRestoreMaterialised(ctx context.Context, env *jobEnv, p restoreParams, s
 	if p.Kind == backup.TargetTime {
 		opts.Time, _ = time.Parse(time.RFC3339, p.Time)
 	}
+
 	if err := callerRestoreMaterialised(ctx, m, driver(spec, env.Job, env.Report), opts); err != nil {
 		return err
 	}
+
 	if err := verifyRestoreAttempt(p.Database, env.ID, expected); err != nil {
 		return err
 	}
+
 	if t := callerRecoveredTo(ctx, m); t != "" {
 		logLine(env.Report, env.Job, "recovered to "+t)
 	}
+
 	return nil
 }
 
@@ -761,33 +890,42 @@ func cleanupFailedRestore(ctx context.Context, env *jobEnv, p restoreParams, m *
 	if backup.RetainRecoveryFailure(cause) {
 		return 0, expected, cause
 	}
+
 	if expected != nil {
 		if checkErr := verifyRestoreAttempt(p.Database, env.ID, expected); checkErr != nil {
 			return 0, expected, errors.Join(cause, checkErr)
 		}
 	}
+
 	var dropErr error
+
 	if birth != nil {
 		defer birth.close()
+
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 		dropErr = birth.discard(cleanupCtx)
+
 		cancel()
 	} else {
 		dropErr = m.Drop() //nolint:contextcheck // cleanup runs after the caller's operation and bounds itself.
 	}
+
 	if dropErr == nil {
 		_ = backup.UpdateRecords(func(s *backup.Records) error {
 			r, ok := s.Restores[p.Database]
 			if !ok || !matchesRestoreInvocation(r, env, p.Database) || r.Attempt == nil || expected == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected) {
 				return incompleteMaterialisation(m.Name)
 			}
+
 			r.MaterialisationCleaned = true
 			r.Attempt.RecordDigest = restoreRecordDigest(r)
 			expected.RecordDigest = r.Attempt.RecordDigest
 			s.Restores[p.Database] = r
+
 			return nil
 		})
 	}
+
 	return 0, expected, cause
 }
 
@@ -807,11 +945,13 @@ var lockForCutover = func(ctx context.Context, env *Env, db, method string) (fun
 	if err != nil {
 		return nil, err
 	}
+
 	releaseCluster, err := engine.AcquireCluster(ctx, db, engine.LockExclusive, method, env.Req.RequestID, env.Req.LockTimeout())
 	if err != nil {
 		release()
 		return nil, err
 	}
+
 	return sync.OnceFunc(func() { releaseCluster(); release() }), nil
 }
 
@@ -820,42 +960,54 @@ func handleRestorePromote(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.Confirm == "" && !env.Req.DryRun {
 		return Result{}, confirmRequired("promote replaces "+p.Database+" with its restored copy", p.Database+"/restore")
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	r, ok := bs.OpenRestore(p.Database)
 	if ok && !supportedRestoreKind(r.Kind) {
 		return Result{}, unsupportedRestoreState(r.Kind)
 	}
+
 	if ok && (r.Attempt != nil || r.MaterialisationPending) {
 		return Result{}, incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
+
 	if !ok || r.Phase != backup.PhaseReady {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no restore of "+p.Database+" ready to promote", output.ExitPrecondition,
 			"Start one with vaire restore "+p.Database+", and check vaire restore status.").WithDetails(map[string]any{"reason": "no_ready_restore"})
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "restore": r, "dry_run": true}}, nil
 	}
+
 	release, err := lockForCutover(ctx, env, p.Database, "restore.promote")
 	if err != nil {
 		return Result{}, err
 	}
 	defer release()
+
 	data, err := promote(ctx, env.Cluster, p.Database, runtimeFor(env, false), env.Report, release)
 	if err != nil {
 		return Result{}, err
 	}
+
 	var warnings []output.Warning
 	if w, ok := data["warning"].(output.Warning); ok {
 		warnings = append(warnings, w)
+
 		delete(data, "warning")
 	}
+
 	warnings = append(warnings, followersDiverged(env.Cluster, p.Database)...)
+
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
@@ -887,6 +1039,7 @@ var (
 // a swapped one.
 func restorePromoteFenceIdentity(cfg config.Cluster, r backup.Restore, aside string, spec config.ClusterSpec) activationFenceIdentity {
 	restoring := backup.RestoringName(r.Database)
+
 	return activationFenceIdentity{
 		Database: r.Database, Kind: "restore-promote", OperationID: r.ID, Spec: spec,
 		TargetStanza: spec.Stanza, OldStanza: spec.Stanza, NewStanza: spec.Stanza, Aside: aside,
@@ -919,28 +1072,34 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 	if err != nil {
 		return nil, err
 	}
+
 	r, exists := bs.Restores[db]
 	if !exists || r.ID == "" || r.Database != db || r.Phase != backup.PhaseReady {
 		return nil, fmt.Errorf("restore record for %s is missing or not ready", db)
 	}
+
 	if !supportedRestoreKind(r.Kind) {
 		return nil, unsupportedRestoreState(r.Kind)
 	}
+
 	spec, err := clusterOf(cfg, db)
 	if err != nil {
 		return nil, err
 	}
+
 	aside := r.Aside
 	if aside == "" {
 		// A promote from before the aside was recorded.
 		aside = swappedAside(cfg, db, bs, r)
 	}
+
 	opts := restoreOptionsFromRecord(r)
 	// Owned promote: after the target and aside are resolved, before the first
 	// durable record update, pause, swap or start.
 	if err := prepareTargetExtensions(ctx, cfg, spec, rt, report); err != nil {
 		return nil, err
 	}
+
 	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
 		Intent: spec, Stanza: spec.Stanza, CopyDB: db, Options: opts,
 		Historical: true, Standby: true,
@@ -949,29 +1108,36 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 	if err != nil {
 		return nil, err
 	}
+
 	if err := prepareCopyExtensions(ctx, plan, rt, report); err != nil {
 		return nil, fmt.Errorf("extension prerequisites before promoting %s: %w", db, err)
 	}
+
 	liveData, err := ensurePromoteGuard(ctx, cfg, db, r, aside, spec, plan, rt, report)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
 		return nil, output.NewError(output.CodePrecondition,
 			"recording the restore's extension requirements before promotion failed: "+err.Error(),
 			output.ExitPrecondition, "Nothing was promoted. Retry after fixing the requirement history store.").
 			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": db})
 	}
+
 	aside, err = recordPromoteAside(cfg, db, r, aside, report)
 	if err != nil {
 		return nil, err
 	}
+
 	start := time.Now()
 	fenceID := restorePromoteFenceIdentity(cfg, r, aside, spec)
+
 	fenceID.Requirements = plan.Plan.Requirements
 	if _, err := writeActivationFence(cfg, fenceID); err != nil {
 		return nil, err
 	}
+
 	return &restorePromotion{
 		cfg: cfg, db: db, rt: rt, report: report, spec: spec, r: r,
 		aside: aside, plan: plan, liveData: liveData,
@@ -983,8 +1149,10 @@ func preparePromotion(ctx context.Context, cfg config.Cluster, db string, rt eng
 // or already swapped live endpoint before the cut-over.
 func ensurePromoteGuard(ctx context.Context, cfg config.Cluster, db string, r backup.Restore, aside string, spec config.ClusterSpec, plan *extensionCopyPlan, rt engine.Runtime, report engine.Reporter) (string, error) {
 	const step = "restore.promote"
+
 	liveData := cfg.Server.DataDirectory(db)
 	guardData := cfg.Server.DataDirectory(backup.RestoringName(db))
+
 	guardEndpoint := copyGuardEndpoint{
 		Name: backup.RestoringName(db), Port: r.Port,
 		ConfDir: steps.PGConfDir(backup.RestoringName(db)),
@@ -993,12 +1161,14 @@ func ensurePromoteGuard(ctx context.Context, cfg config.Cluster, db string, r ba
 		guardData = liveData
 		guardEndpoint = liveCopyGuardEndpoint(spec)
 	}
+
 	restartGuard := func() error {
 		return backup.RestartCluster(ctx, rt.Shell, step, report, guardEndpoint.Name, guardData, guardEndpoint.Port)
 	}
 	if _, err := ensureCopyGuardAt(ctx, guardData, plan, guardEndpoint, restartGuard); err != nil {
 		return "", err
 	}
+
 	return liveData, nil
 }
 
@@ -1006,26 +1176,32 @@ func ensurePromoteGuard(ctx context.Context, cfg config.Cluster, db string, r ba
 // fails part way resumes with the same aside and abort knows the copy is in.
 func recordPromoteAside(cfg config.Cluster, db string, r backup.Restore, aside string, report engine.Reporter) (string, error) {
 	const step = "restore.promote"
+
 	switch {
 	case aside == "":
 		aside = backup.PreRestoreName(db, time.Now())
+
 		if err := backup.UpdateRecords(func(s *backup.Records) error {
 			cur, ok := s.Restores[db]
 			if !ok || cur.ID != r.ID {
 				return fmt.Errorf("the restore of %s changed while promoting it", db)
 			}
+
 			cur.Aside = aside
 			s.Restores[db] = cur
+
 			return nil
 		}); err != nil {
 			return "", err
 		}
+
 		logLine(report, step, "cutting "+db+" over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
 	case backup.SwapState(cfg.Server.DataRoot, db, backup.RestoringName(db), aside) == backup.SwapNotStarted:
 		logLine(report, step, "resuming the promote of "+db+": cutting it over to "+backup.RestoringName(db)+"; the old data becomes the cluster "+aside)
 	default:
 		logLine(report, step, "resuming the promote of "+db+": the data was swapped already, and the old data is the cluster "+aside)
 	}
+
 	return aside, nil
 }
 
@@ -1041,15 +1217,19 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 	if err := fenceRestorePoolers(ctx, p.db); err != nil {
 		return withHint(err, "The restore's poolers could not be fenced, so nothing was swapped. Retry vaire restore promote "+p.db+".")
 	}
+
 	if err := applyPoolerFence(ctx, p.cfg, p.rt, p.report); err != nil {
 		return withHint(err, "The restore's poolers could not be rendered without the target, so nothing was swapped. Retry vaire restore promote "+p.db+".")
 	}
+
 	if err := verifyPoolerAliasAbsent(ctx, p.db); err != nil {
 		return withHint(err, "The restore's poolers still serve the target or its restore-inspection alias, so nothing was swapped. Retry vaire restore promote "+p.db+".")
 	}
+
 	if err := restoreCredentialsCapture(ctx, p); err != nil {
 		return withHint(err, "The restore's managed credential preservation is incomplete; routing stays fenced. Preserve its state and inspect the prerequisite before retrying vaire restore promote "+p.db+".")
 	}
+
 	err := swapCluster(ctx, p.rt.Shell, step, p.report, p.cfg.Server.DataRoot, p.db, backup.RestoringName(p.db), p.aside, p.r.Port)
 	if err == nil {
 		err = advanceActivationFence(p.cfg, p.db, p.r.ID, "restore-promote", fencePhasePrepared, fencePhaseSwapped, p.spec, func(f *backup.ActivationFence) {
@@ -1059,13 +1239,16 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 			f.ConfDir = steps.PGConfDir(p.db)
 		})
 	}
+
 	if err == nil {
 		until := backup.UntilPaused
 		if p.r.Kind == backup.TargetLatest {
 			until = backup.UntilOpen
 		}
+
 		err = startCluster(ctx, p.rt.Shell, step, p.report, p.db, p.cfg.Server.DataDirectory(p.db), p.spec.Port, until)
 	}
+
 	if err == nil {
 		var dropped []string
 		if dropped, err = promoteCluster(ctx, steps.ClusterPG(p.spec), p.cfg.Server.DataDirectory(p.db)); err == nil {
@@ -1074,6 +1257,7 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 			err = settlePromoted(ctx, p.rt.Shell, step, p.report, steps.ClusterPG(p.spec), p.db, p.cfg.Server.DataDirectory(p.db), p.spec.Port, dropped)
 		}
 	}
+
 	if err == nil {
 		err = advanceActivationFence(p.cfg, p.db, p.r.ID, "restore-promote", fencePhaseSwapped, fencePhasePromoted, p.spec, func(f *backup.ActivationFence) {
 			f.Registration = activationRegistration(p.spec)
@@ -1082,9 +1266,11 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 			f.ConfDir = steps.PGConfDir(p.db)
 		})
 	}
+
 	if err != nil {
 		return withHint(err, "Read vaire logs postgres --db "+p.db+" and vaire restore status "+p.db+"; the old data is in the cluster "+p.aside+". Routing stays blocked while the activation fence is active; retry vaire restore promote "+p.db+".")
 	}
+
 	return nil
 }
 
@@ -1092,18 +1278,22 @@ func cutoverPromotion(ctx context.Context, p *restorePromotion) error {
 // recovered access, and atomically retires the restore into routing.
 func finishPromotion(ctx context.Context, p *restorePromotion) ([]output.Warning, error) {
 	const step = "restore.promote"
+
 	warnings, err := settleRestoredCopy(ctx, p.cfg, p.spec, steps.ClusterPG(p.spec), p.liveData, p.plan.Plan, p.spec.DatabaseName(), func() error {
 		return backup.RestartCluster(ctx, p.rt.Shell, step, p.report, p.db, p.liveData, p.spec.Port)
 	})
 	if err != nil {
 		return nil, withHint(err, "The data is promoted but its extension settlement is incomplete, so routing stays blocked and the copy's suppression remains. Fix the prerequisite, then run vaire restore promote "+p.db+" again.")
 	}
+
 	if err := provisionRecoveredAccess(ctx, p.cfg, p.db, p.r, p.rt, p.report); err != nil {
 		return nil, err
 	}
+
 	if err := restoreCredentialsApply(ctx, p); err != nil {
 		return nil, withHint(err, "The data is promoted but its managed login credentials were not restored, so routing stays blocked. Retry vaire restore promote "+p.db+".")
 	}
+
 	p.elapsed = time.Since(p.started)
 	// Retiring the open restore, its timeline/leftover facts and the fence's
 	// routing eligibility is one records update. A failed write leaves the old
@@ -1112,9 +1302,11 @@ func finishPromotion(ctx context.Context, p *restorePromotion) ([]output.Warning
 	if err := retireRestoreAndRoute(p.db, p.r, p.spec, p.aside, p.fenceID.TargetStanza, p.fenceID.OldStanza, p.fenceID.NewStanza); err != nil {
 		return nil, err
 	}
+
 	if err := restoreCredentialsClear(p); err != nil {
 		warnings = append(warnings, restoreCredentialCleanupWarning(p.db, err))
 	}
+
 	return warnings, nil
 }
 
@@ -1123,19 +1315,25 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	if err != nil {
 		return nil, err
 	}
+
 	if err := cutoverPromotion(ctx, p); err != nil {
 		return nil, err
 	}
+
 	warnings, err := finishPromotion(ctx, p)
 	if err != nil {
 		return nil, err
 	}
+
 	data := map[string]any{"database": db, "pre_restore": p.aside, "target": p.r.Target, "swap_ms": p.elapsed.Milliseconds()}
 	if len(warnings) > 0 {
 		data["extension_warnings"] = warnings
 	}
+
 	var warn error
+
 	runs := []engine.Options{{Only: steps.PoolerStepIDs()}}
+
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), p.cfg, runs...))
 	if _, _, err := verifyActivationFence(p.cfg, db, p.r.ID, "restore-promote", fencePhaseRouting); err != nil {
 		warn = err
@@ -1144,16 +1342,21 @@ func promote(ctx context.Context, cfg config.Cluster, db string, rt engine.Runti
 	} else if err := verifyRoutingFence(ctx, p.cfg, p.spec, p.r.ID, "restore-promote"); err != nil {
 		warn = err
 	}
+
 	if !p.r.NoFull {
 		unlock()
+
 		if err := startFullBackup(ctx, p.cfg, rt, db, "restore.promote", report); err != nil {
 			warn = err
 		}
 	}
+
 	if warn != nil {
 		data["warning"] = output.Warning{Code: "after_cutover_failed", Message: db + " is restored, but " + warn.Error() + "; run vaire apply, then vaire backup now --db " + db + " --type full"}
 	}
+
 	steps.WriteMetrics(p.cfg)
+
 	return data, nil
 }
 
@@ -1166,13 +1369,16 @@ func provisionRecoveredAccess(ctx context.Context, cfg config.Cluster, db string
 	if r.ID == "" || r.Database != db || r.Phase != backup.PhaseReady {
 		return fmt.Errorf("restore record for %s is missing or not ready", db)
 	}
+
 	if !r.Recover {
 		return nil
 	}
+
 	spec, ok := cfg.ClusterByName(db)
 	if !ok || spec.IsFollower() {
 		return fmt.Errorf("recovered access target %s is not an independent database", db)
 	}
+
 	return recoverProvisionOwned(ctx, cfg, rt, db, db, report)
 }
 
@@ -1188,22 +1394,28 @@ func retireRestoreAndRoute(db string, r backup.Restore, spec config.ClusterSpec,
 			cur.Kind != r.Kind || cur.Port != r.Port {
 			return fmt.Errorf("the restore of %s changed while retiring it", db)
 		}
+
 		f, ok := s.ActivationFenceFor(db)
 		if !ok || f.OperationID != r.ID || f.Kind != "restore-promote" || f.Phase != fencePhasePromoted ||
 			f.TargetStanza != fenceStanza || f.OldStanza != fenceOld || f.NewStanza != fenceNew || f.Aside != aside {
 			return fmt.Errorf("the activation fence of %s changed while retiring its restore", db)
 		}
+
 		if err := verifyFenceInstance(f, db); err != nil {
 			return err
 		}
+
 		f.Phase = fencePhaseRouting
+
 		s.Activation[db] = f
 		if r.Recover {
 			delete(s.AwaitingRecovery, db)
 		}
+
 		delete(s.Restores, db)
 		delete(s.Timelines, db)
 		s.Leftovers = append(s.Leftovers, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: r.ID, Port: r.Port, Stanza: spec.Stanza})
+
 		return nil
 	})
 }
@@ -1217,6 +1429,7 @@ func restoreOptionsFromRecord(r backup.Restore) backup.RestoreOptions {
 	case backup.TargetSet:
 		opts.Set = strings.TrimPrefix(r.Target, "set ")
 	}
+
 	return opts
 }
 
@@ -1229,19 +1442,24 @@ func swappedAside(cfg config.Cluster, db string, bs backup.Records, r backup.Res
 	if _, err := os.Stat(filepath.Join(cfg.Server.DataRoot, backup.RestoringName(db))); err == nil {
 		return ""
 	}
+
 	started, err := time.Parse(time.RFC3339, r.StartedAt)
 	if err != nil {
 		return ""
 	}
+
 	dirs, _ := filepath.Glob(filepath.Join(cfg.Server.DataRoot, db+"__pre_restore_*"))
 	aside := ""
+
 	for _, dir := range dirs {
 		name := filepath.Base(dir)
 		if name < backup.PreRestoreName(db, started) || slices.ContainsFunc(bs.Leftovers, func(l backup.Leftover) bool { return l.Name == name }) {
 			continue
 		}
+
 		aside = name
 	}
+
 	return aside
 }
 
@@ -1250,6 +1468,7 @@ func swappedAside(cfg config.Cluster, db string, bs backup.Records, r backup.Res
 // the stanza's window.
 func droppedStanza(cfg config.Cluster, spec config.ClusterSpec, lastArchived string) backup.DroppedStanza {
 	now := time.Now().UTC()
+
 	return backup.DroppedStanza{Database: spec.Name, Stanza: spec.Stanza, DroppedAt: now.Format(time.RFC3339),
 		ExpiresAt: now.AddDate(0, 0, 7*cfg.RetentionFull(spec)).Format(time.RFC3339), LastArchivedAt: lastArchived}
 }
@@ -1263,6 +1482,7 @@ func lastArchivedTime(ctx context.Context, spec config.ClusterSpec) string {
 	if err != nil {
 		return ""
 	}
+
 	return st.LastArchivedTime
 }
 
@@ -1273,6 +1493,7 @@ func startFullBackup(ctx context.Context, cfg config.Cluster, rt engine.Runtime,
 	if !cfg.BackupConfigured() {
 		return nil
 	}
+
 	return rt.Shell.Exec(ctx, step, engine.Command{Name: "systemctl", Args: []string{"start", "--no-block", "vaire-backup-full@" + db + ".service"}}, report)
 }
 
@@ -1282,12 +1503,15 @@ func prepareUndoStart(ctx context.Context, env *Env, p restoreDBParams, spec con
 		logLine(env.Report, step, "resuming the undo of "+p.Database+": swapping it back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
 		return nil
 	}
+
 	local := steps.ClusterPG(spec)
 	u.Abandoned, _ = backup.Timeline(ctx, local)
+
 	u.Aside = backup.PreRestoreName(p.Database, time.Now())
 	if u.Aside == back.Name {
 		u.Aside += "b"
 	}
+
 	u.StartedAt = stamp()
 	// Recorded before any rename, so an undo that fails part way resumes with
 	// the same names, and the aside is never lost.
@@ -1297,37 +1521,47 @@ func prepareUndoStart(ctx context.Context, env *Env, p restoreDBParams, spec con
 	}); err != nil {
 		return err
 	}
+
 	logLine(env.Report, step, "swapping "+p.Database+" back to "+back.Name+"; the restored data becomes the cluster "+u.Aside)
+
 	return nil
 }
 
 func swapUndo(ctx context.Context, cfg config.Cluster, db string, spec config.ClusterSpec, back backup.Leftover, aside string, rt engine.Runtime, env *Env) error {
 	const step = "restore.undo"
+
 	resume := steps.PauseDatabase(ctx, db)
+
 	err := swapCluster(ctx, rt.Shell, step, env.Report, cfg.Server.DataRoot, db, back.Name, aside, back.Port)
 	if err == nil {
 		err = backup.StartCluster(ctx, rt.Shell, step, env.Report, db, cfg.Server.DataDirectory(db), spec.Port, backup.UntilOpen)
 	}
+
 	resume()
+
 	return err
 }
 
 func recordUndo(db string, u backup.Undo, aside, abandoned, timeline, stanza string) error {
 	back := u.From
+
 	return backup.UpdateRecords(func(s *backup.Records) error {
 		if cur, ok := s.Undoing[db]; !ok || cur != u {
 			return fmt.Errorf("the undo of %s changed before its routing checkpoint", db)
 		}
+
 		kept := s.Leftovers[:0]
 		for _, l := range s.Leftovers {
 			if l.Name != back.Name {
 				kept = append(kept, l)
 			}
 		}
+
 		s.Leftovers = append(kept, backup.Leftover{Database: db, Name: aside, CreatedAt: stamp(), RestoreID: undoRestoreID(back.RestoreID), Port: back.Port, Stanza: stanza})
 		s.Timelines[db] = backup.TimelineSwitch{Stanza: stanza, Timeline: timeline, SwitchedAt: stamp(), Abandoned: abandoned}
 		u.Routing = true
 		s.Undoing[db] = u
+
 		return nil
 	})
 }
@@ -1337,37 +1571,47 @@ func handleRestoreUndo(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.Confirm == "" && !env.Req.DryRun {
 		return Result{}, confirmRequired("undo swaps "+p.Database+" back to its data from before the restore", p.Database+"/restore")
 	}
+
 	if err := restoreInProgress(p.Database, "undo"); err != nil {
 		return Result{}, err
 	}
+
 	cfg := env.Cluster
+
 	spec, err := clusterOf(cfg, p.Database)
 	if err != nil {
 		return Result{}, err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	u, resuming, err := planUndo(bs, p.Database)
 	if err != nil {
 		return Result{}, err
 	}
+
 	back := u.From
 	if err := validateUndoRoutingStanza(p.Database, spec, back); err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "restore_from": back.Name, "resume": resuming, "dry_run": true}}, nil
 	}
+
 	release, err := lockForCutover(ctx, env, p.Database, "restore.undo")
 	if err != nil {
 		return Result{}, err
 	}
 	defer release()
+
 	return runLockedUndo(ctx, env, p.Database, release)
 }
 
@@ -1376,15 +1620,19 @@ func runLockedUndo(ctx context.Context, env *Env, db string, release func()) (Re
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := CheckNotProtected(cfg, db, "restore undo"); err != nil {
 		return Result{}, err
 	}
+
 	if err := refuseFollower(env.Req, cfg); err != nil {
 		return Result{}, err
 	}
+
 	if err := restoreInProgress(db, "undo"); err != nil {
 		return Result{}, err
 	}
+
 	spec, err := clusterOf(cfg, db)
 	if err != nil {
 		return Result{}, err
@@ -1395,17 +1643,22 @@ func runLockedUndo(ctx context.Context, env *Env, db string, release func()) (Re
 	if err != nil {
 		return Result{}, err
 	}
+
 	u, resuming, err := planUndo(bs, db)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := validateUndoRoutingStanza(db, spec, u.From); err != nil {
 		return Result{}, err
 	}
+
 	if err := validateUndoContinuation(bs, db, spec, u); err != nil {
 		return Result{}, err
 	}
+
 	env.Cluster = cfg
+
 	return executeUndo(ctx, env, cfg, spec, u, resuming, bs, release)
 }
 
@@ -1413,6 +1666,7 @@ func validateUndoContinuation(recs backup.Records, db string, spec config.Cluste
 	if !u.Routing {
 		return nil
 	}
+
 	timeline, ok := recs.Timelines[db]
 	if !ok || timeline.Timeline == "" || timeline.Stanza != spec.Stanza ||
 		(u.From.Stanza != "" && u.From.Stanza != spec.Stanza) {
@@ -1420,43 +1674,53 @@ func validateUndoContinuation(recs backup.Records, db string, spec config.Cluste
 			output.ExitPrecondition, "Preserve the undo records and inspect the owning operation; nothing was swapped.").
 			WithDetails(map[string]any{"reason": "undo_identity_changed", "database": db})
 	}
+
 	if fence, pending := recs.ActivationFenceFor(db); pending &&
 		(fence.Kind != "restore-promote" || fence.Phase != fencePhaseRouting || fence.OperationID != u.From.RestoreID) {
 		return output.NewError(output.CodePrecondition, db+"'s undo does not own the pending activation fence",
 			output.ExitPrecondition, "Preserve both operations' records; this undo cannot finalize a different operation.").
 			WithDetails(map[string]any{"reason": "undo_identity_changed", "database": db})
 	}
+
 	return nil
 }
 
 func executeUndo(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, u backup.Undo, resuming bool, bs backup.Records, release func()) (Result, error) {
 	db := spec.Name
 	back := u.From
+
 	rt := runtimeFor(env, false)
 	if u.Routing {
 		// Do not repeat the swap after a reload/resume/verification failure.
 		return undoResult(ctx, env, cfg, spec, u, spec.Stanza, bs.Timelines[db].Timeline, rt, release), nil
 	}
+
 	local := steps.ClusterPG(spec)
 	if err := prepareTargetExtensions(ctx, cfg, spec, rt, env.Report); err != nil {
 		return Result{}, err
 	}
+
 	if err := prepareUndoStart(ctx, env, restoreDBParams{Database: db}, spec, &u, back, resuming); err != nil {
 		return Result{}, err
 	}
+
 	aside, abandoned := u.Aside, u.Abandoned
 	if err := swapUndo(ctx, cfg, db, spec, back, aside, rt, env); err != nil {
 		return Result{}, withHint(err, "Read vaire logs postgres --db "+db+", then run vaire restore undo "+db+" again: it resumes; the restored data is in the cluster "+aside+".")
 	}
+
 	timeline, err := backup.Timeline(ctx, local)
 	if err != nil {
 		return Result{}, err
 	}
+
 	stanza := spec.Stanza
 	if err := recordUndo(db, u, aside, abandoned, timeline, stanza); err != nil {
 		return Result{}, err
 	}
+
 	u.Routing = true
+
 	return undoResult(ctx, env, cfg, spec, u, stanza, timeline, rt, release), nil
 }
 
@@ -1466,6 +1730,7 @@ func undoResult(ctx context.Context, env *Env, cfg config.Cluster, spec config.C
 	warnings := finishUndo(ctx, cfg, db, u, rt, env, release)
 	steps.WriteMetrics(cfg)
 	warnings = append(warnings, followersDiverged(cfg, db)...)
+
 	return Result{Data: data, Warnings: warnings}
 }
 
@@ -1476,32 +1741,41 @@ func validateUndoRoutingStanza(db string, spec config.ClusterSpec, back backup.L
 			output.ExitPrecondition, "Preserve the records and inspect the operation; nothing was swapped.").
 			WithDetails(map[string]any{"reason": "undo_identity_changed", "database": db})
 	}
+
 	return nil
 }
 
 func finishUndo(ctx context.Context, cfg config.Cluster, db string, u backup.Undo, rt engine.Runtime, env *Env, release func()) []output.Warning {
 	var warnings []output.Warning
+
 	err := settleUndoRouting(ctx, cfg, db, u, rt, env.Report)
 	if err == nil {
 		err = backup.UpdateRecords(func(s *backup.Records) error {
 			if cur, ok := s.Undoing[db]; !ok || cur != u || !cur.Routing {
 				return fmt.Errorf("the undo of %s changed before routing completed", db)
 			}
+
 			delete(s.Undoing, db)
+
 			return nil
 		})
 	}
+
 	hint := "; retry vaire restore undo " + db + " to finish routing without swapping again"
+
 	if err == nil {
 		// The full backup's job takes the cluster lock, so let it go.
 		release()
+
 		err = startFullBackup(ctx, cfg, rt, db, "restore.undo", env.Report)
 		hint = "; run vaire apply, then vaire backup now --db " + db + " --type full"
 	}
+
 	if err != nil {
 		warnings = append(warnings, output.Warning{Code: "after_cutover_failed",
 			Message: db + " is back, but " + err.Error() + hint})
 	}
+
 	return warnings
 }
 
@@ -1513,25 +1787,32 @@ func settleUndoRouting(ctx context.Context, cfg config.Cluster, db string, u bac
 	if !ok {
 		return fmt.Errorf("undo routing target %s is missing", db)
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	if err := validateUndoContinuation(recs, db, spec, u); err != nil {
 		return err
 	}
+
 	if err := applyPoolerFence(ctx, cfg, rt, report); err != nil {
 		return err
 	}
+
 	if f, pending := recs.ActivationFenceFor(db); pending {
 		// Preserve the exact owning fence until both runtime mappings and
 		// pause release are verified; never clear it merely after the swap.
 		return verifyRoutingFence(ctx, cfg, spec, f.OperationID, f.Kind)
 	}
+
 	if err := verifyRoutingRoutes(ctx, spec, false); err != nil {
 		return err
 	}
+
 	poolerResumeDatabase(ctx, db)
+
 	return verifyRoutingRoutes(ctx, spec, true)
 }
 
@@ -1554,17 +1835,20 @@ func planUndo(bs backup.Records, db string) (backup.Undo, bool, error) {
 	if u, ok := bs.Undoing[db]; ok {
 		return u, true, nil
 	}
+
 	leftovers := bs.LeftoversOf(db)
 	if len(leftovers) == 0 {
 		return backup.Undo{}, false, output.NewError(output.CodePrecondition, "there is no pre-restore copy of "+db+" to go back to", output.ExitPrecondition,
 			"restore cleanup may already have dropped it.").WithDetails(map[string]any{"reason": "no_leftover"})
 	}
+
 	last := leftovers[len(leftovers)-1]
 	if fromUndo(last) {
 		return backup.Undo{}, false, output.NewError(output.CodePrecondition, db+" was already undone; nothing to undo", output.ExitPrecondition,
 			"The restored data it left is kept as the stopped cluster "+last.Name+"; vaire restore cleanup "+db+" drops it.").
 			WithDetails(map[string]any{"reason": "already_undone", "aside": last.Name})
 	}
+
 	return backup.Undo{From: last}, false, nil
 }
 
@@ -1585,6 +1869,7 @@ func noOpenRestore(bs backup.Records, db string) error {
 			hint = "vaire restore undo " + db + " swaps the old data (the cluster " + last.Name + ") back in; vaire restore cleanup " + db + " drops it."
 		}
 	}
+
 	return output.NewError(output.CodePrecondition, msg, output.ExitPrecondition, hint).WithDetails(map[string]any{"reason": reason})
 }
 
@@ -1593,29 +1878,36 @@ func handleRestoreAbort(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	r, ok := bs.OpenRestore(p.Database)
 	if !ok {
 		return continueRestoreAbortRouting(ctx, env, bs, p.Database)
 	}
+
 	if !supportedRestoreKind(r.Kind) {
 		return Result{}, unsupportedRestoreState(r.Kind)
 	}
+
 	if f, fenced := bs.ActivationFenceFor(p.Database); fenced && f.Kind == "restore-abort" {
 		return Result{}, output.NewError(output.CodePrecondition,
 			p.Database+" has both an open restore and a restore-abort routing fence",
 			output.ExitPrecondition, "Inspect the node records and repair the ambiguous state deliberately; vaire will not clean up or route from it.").
 			WithDetails(map[string]any{"reason": "activation_fence_changed", "database": p.Database, "operation_id": f.OperationID})
 	}
+
 	if err := ensureRestoreNotRunning(r, p.Database); err != nil {
 		return Result{}, err
 	}
+
 	if res, handled, err := abortMaterialisedRestore(ctx, env, p, r); handled {
 		return res, err
 	}
+
 	return abortRestoredCopy(ctx, env, p, r, bs)
 }
 
@@ -1626,16 +1918,20 @@ func continueRestoreAbortRouting(ctx context.Context, env *Env, bs backup.Record
 	if !ok || f.Kind != "restore-abort" {
 		return Result{}, noOpenRestore(bs, db)
 	}
+
 	if _, _, err := verifyActivationFence(env.Cluster, db, f.OperationID, "restore-abort", fencePhaseRouting); err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": db, "routing": "dry_run"}}, nil
 	}
+
 	if err := completeRestoreAbortRouting(ctx, env, db, f.OperationID); err != nil {
 		return Result{Data: map[string]any{"database": db, "routing": "pending", "live_untouched": true},
 			Warnings: []output.Warning{restoreAbortRoutingWarning(db, err)}}, nil
 	}
+
 	return Result{Data: map[string]any{"database": db, "routing": "complete", "live_untouched": true}}, nil
 }
 
@@ -1643,49 +1939,249 @@ func ensureRestoreNotRunning(r backup.Restore, db string) error {
 	if r.Phase != backup.PhaseRestoring {
 		return nil
 	}
+
 	st, err := restoreAbsenceState()
 	if err != nil {
 		return err
 	}
+
 	if job, ok := st.Job(r.ID); ok && !job.Final() {
 		return output.NewError(output.CodePrecondition, "the restore of "+db+" is still materialising", output.ExitPrecondition,
 			"Wait for it (vaire job follow "+r.ID+"), then abort.").WithDetails(map[string]any{"reason": "restore_running", "job_id": r.ID})
 	}
+
+	return nil
+}
+
+var restoreDropTemporary = dropRestoring
+
+// abortFailedRecoveryCopy is the explicit abort of a recovery that reached its
+// ready copy and then failed before any swap. It drops only the temporary
+// copy, deletes its record and prepared restore-promote fence atomically, and
+// leaves the database awaiting recovery: no scaffold, target or inspection
+// alias is published. A protected database stays protected; a live cluster and
+// its backups are untouched.
+func abortFailedRecoveryCopy(ctx context.Context, env *Env, p restoreDBParams, r backup.Restore) (Result, bool, error) {
+	if !failedRecoveryAbortCandidate(r) {
+		return Result{}, false, nil
+	}
+
+	fence, err := verifyAbortableRecoveryCopy(env, p, r)
+	if err != nil {
+		return Result{}, true, err
+	}
+
+	if env.Req.DryRun {
+		return Result{}, true, incompleteMaterialisation(backup.RestoringName(p.Database))
+	}
+
+	if err := restoreDropTemporary(ctx, env.Cluster, p.Database, env.Report); err != nil {
+		return Result{}, true, err
+	}
+
+	if err := retireAbortedRecovery(p.Database, r, fence); err != nil {
+		return Result{}, true, err
+	}
+
+	releaseMaterialisationJob(r.ID)
+
+	return Result{Data: map[string]any{
+		"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true,
+		"awaiting_recovery": true, "retry": "vaire db recover " + p.Database,
+	}}, true, nil
+}
+
+func failedRecoveryAbortCandidate(r backup.Restore) bool {
+	return r.Recover && r.Promote && r.Phase == backup.PhaseFailed && r.MaterialisationPending &&
+		r.Attempt == nil && r.Port != 0
+}
+
+func verifyAbortableRecoveryCopy(env *Env, p restoreDBParams, r backup.Restore) (backup.ActivationFence, error) {
+	cfg := env.Cluster
+	name := backup.RestoringName(p.Database)
+
+	spec, ok := cfg.ClusterByName(p.Database)
+	if !ok || spec.IsFollower() {
+		return backup.ActivationFence{}, incompleteMaterialisation(name)
+	}
+
+	instance, err := currentFollowInstance()
+	if err != nil || instance != r.InstanceID {
+		return backup.ActivationFence{}, incompleteMaterialisation(name)
+	}
+
+	recs, err := backup.LoadRecords()
+	if err != nil {
+		return backup.ActivationFence{}, err
+	}
+
+	fence, err := abortableRecoveryRecord(cfg, recs, p.Database, r, name)
+	if err != nil {
+		return backup.ActivationFence{}, err
+	}
+
+	if err := verifyRetainedRecoveryCopy(cfg, name, r.Port); err != nil {
+		return backup.ActivationFence{}, err
+	}
+
+	state, err := restoreAbsenceState()
+	if err != nil {
+		return backup.ActivationFence{}, err
+	}
+
+	return fence, checkRestoreJobAbsence(state, p.Database, r)
+}
+
+func abortableRecoveryRecord(cfg config.Cluster, recs backup.Records, db string, r backup.Restore, name string) (backup.ActivationFence, error) {
+	refuse := incompleteMaterialisation(name)
+	if r.MaterialisationCleaned || r.Database != db || r.ID == "" || r.InstanceID == "" || r.OperationID == "" ||
+		r.Port < config.TemporaryPortMin || r.Port > config.TemporaryPortMax {
+		return backup.ActivationFence{}, refuse
+	}
+
+	cur, ok := recs.Restores[db]
+	if !ok || !reflect.DeepEqual(cur, r) || !recs.IsAwaiting(db) {
+		return backup.ActivationFence{}, refuse
+	}
+
+	if r.Aside != "" && backup.SwapState(cfg.Server.DataRoot, db, name, r.Aside) != backup.SwapNotStarted {
+		return backup.ActivationFence{}, restoreSwappedInError(db, r.Aside)
+	}
+
+	f, ok := recs.ActivationFenceFor(db)
+	if !ok {
+		return backup.ActivationFence{}, refuse
+	}
+
+	if _, _, err := verifyActivationFence(cfg, db, r.ID, "restore-promote", fencePhasePrepared); err != nil {
+		return backup.ActivationFence{}, err
+	}
+
+	spec, ok := cfg.ClusterByName(db)
+	if !ok || recs.AwaitingRecovery[db].Stanza != spec.Stanza {
+		return backup.ActivationFence{}, refuse
+	}
+
+	want := restorePromoteFenceIdentity(cfg, r, r.Aside, spec)
+	if f.Database != want.Database || f.Registration != want.Registration ||
+		f.TargetStanza != want.TargetStanza || f.OldStanza != want.OldStanza ||
+		f.NewStanza != want.NewStanza || f.Port != want.Port || f.Aside != want.Aside ||
+		f.DataDir != want.DataDir || f.ConfDir != want.ConfDir {
+		return backup.ActivationFence{}, refuse
+	}
+
+	return f, nil
+}
+
+func retireAbortedRecovery(db string, r backup.Restore, fence backup.ActivationFence) error {
+	return backup.UpdateRecords(func(s *backup.Records) error {
+		cur, ok := s.Restores[db]
+		if !ok || !reflect.DeepEqual(cur, r) {
+			return incompleteMaterialisation(backup.RestoringName(db))
+		}
+
+		have, ok := s.ActivationFenceFor(db)
+		if !ok || !reflect.DeepEqual(have, fence) {
+			return incompleteMaterialisation(backup.RestoringName(db))
+		}
+
+		delete(s.Restores, db)
+		delete(s.Activation, db)
+
+		return nil
+	})
+}
+
+var (
+	retainedCopyRegistered    = backup.ClusterRegistered
+	retainedCopyConfigDir     = backup.ClusterConfigDirectory
+	retainedCopyDataDirectory = backup.ClusterDataDirectory
+)
+
+// verifyRetainedRecoveryCopy proves the temporary cluster's on-host
+// registration is still the recovered copy this record owns. A copy already
+// removed by a prior abort attempt is accepted only when neither its
+// registration nor its directories remain, so a retry can finish the metadata
+// deletion without ever dropping an unowned path.
+func verifyRetainedRecoveryCopy(cfg config.Cluster, name string, port int) error {
+	if !retainedCopyRegistered(name) {
+		conf, err := retainedCopyConfigDir(name)
+		if err != nil || conf {
+			return incompleteMaterialisation(name)
+		}
+
+		if _, err := os.Stat(cfg.Server.DataDirectory(name)); err == nil || !os.IsNotExist(err) {
+			return incompleteMaterialisation(name)
+		}
+
+		return nil
+	}
+
+	data, err := retainedCopyDataDirectory(name)
+	if err != nil || data != cfg.Server.DataDirectory(name) {
+		return incompleteMaterialisation(name)
+	}
+
+	for _, setting := range []struct{ name, want string }{
+		{"data_directory", cfg.Server.DataDirectory(name)},
+		{"cluster_name", "18/" + name},
+		{"port", strconv.Itoa(port)},
+	} {
+		got, err := legacyLeftoverEffectiveSetting(name, setting.name)
+		if err != nil || got != setting.want {
+			return incompleteMaterialisation(name)
+		}
+	}
+
 	return nil
 }
 
 func abortMaterialisedRestore(ctx context.Context, env *Env, p restoreDBParams, r backup.Restore) (Result, bool, error) {
+	if res, handled, err := abortFailedRecoveryCopy(ctx, env, p, r); handled {
+		return res, true, err
+	}
+
 	if r.Attempt == nil && r.MaterialisationPending {
 		if env.Req.DryRun {
 			return Result{}, true, incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
+
 		if err := retireNeverStartedRestore(ctx, env.Cluster, p.Database, r); err != nil {
 			return Result{}, true, err
 		}
+
 		return Result{Data: map[string]any{"database": p.Database, "dropped": "", "never_started": true, "live_untouched": true}}, true, nil
 	}
+
 	if r.Attempt == nil {
 		return Result{}, false, nil
 	}
+
 	if env.Req.DryRun {
 		return Result{}, true, incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
+
 	cleanup, err := openRestoreCleanup(env.Cluster, r)
 	if err != nil {
 		return Result{}, true, err
 	}
 	defer cleanup.close()
+
 	if err := cleanup.remove(ctx, env); err != nil {
 		return Result{}, true, err
 	}
+
 	if err := cleanup.retire(ctx); err != nil {
 		return Result{}, true, err
 	}
+
 	var warnings []output.Warning
 	if err := restoreAbortReload(ctx, env, env.Cluster); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: "the session pooler still lists " + backup.RestoringName(p.Database) + " until vaire apply: " + err.Error()})
 	}
+
 	restoreWriteMetrics(env.Cluster)
+
 	return Result{Data: map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}, Warnings: warnings}, true, nil
 }
 
@@ -1703,6 +2199,7 @@ func abortRestoredCopy(ctx context.Context, env *Env, p restoreDBParams, r backu
 	if aside == "" {
 		aside = swappedAside(env.Cluster, p.Database, bs, r)
 	}
+
 	if aside != "" && backup.SwapState(env.Cluster.Server.DataRoot, p.Database, backup.RestoringName(p.Database), aside) != backup.SwapNotStarted {
 		return Result{}, restoreSwappedInError(p.Database, aside)
 	}
@@ -1714,12 +2211,15 @@ func abortRestoredCopy(ctx context.Context, env *Env, p restoreDBParams, r backu
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"database": p.Database, "drop": backup.RestoringName(p.Database), "dry_run": true}}, nil
 	}
+
 	if err := dropRestoring(ctx, env.Cluster, p.Database, env.Report); err != nil {
 		return Result{}, err
 	}
+
 	if r.Aside != "" {
 		// A promote that stopped before its renames may have registered
 		// the aside already.
@@ -1727,33 +2227,44 @@ func abortRestoredCopy(ctx context.Context, env *Env, p restoreDBParams, r backu
 			return Result{}, err
 		}
 	}
+
 	data := map[string]any{"database": p.Database, "dropped": backup.RestoringName(p.Database), "live_untouched": true}
 	if fenced {
 		if err := convertPreSwapRestoreAbort(env.Cluster, p.Database, auth); err != nil {
 			return Result{}, err
 		}
+
 		var warnings []output.Warning
 		if err := restoreCredentialsClearAborted(env.Cluster, auth.restore, auth.aside); err != nil {
 			warnings = append(warnings, restoreCredentialCleanupWarning(p.Database, err))
 		}
+
 		data["routing"] = "pending"
+
 		if err := completeRestoreAbortRouting(ctx, env, p.Database, auth.fence.OperationID); err != nil {
 			steps.WriteMetrics(env.Cluster)
 			return Result{Data: data, Warnings: append(warnings, restoreAbortRoutingWarning(p.Database, err))}, nil
 		}
+
 		data["routing"] = "complete"
+
 		steps.WriteMetrics(env.Cluster)
+
 		return Result{Data: data, Warnings: warnings}, nil
 	}
+
 	if err := retirePreSwapRestore(p.Database, r); err != nil {
 		return Result{}, err
 	}
+
 	var warnings []output.Warning
 	if err := restoreAbortReload(ctx, env, env.Cluster); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the session pooler still lists " + backup.RestoringName(p.Database) + " until vaire apply: " + err.Error()})
 	}
+
 	steps.WriteMetrics(env.Cluster)
+
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
@@ -1765,20 +2276,25 @@ func verifyPreSwapRestoreAbort(cfg config.Cluster, db string, r backup.Restore, 
 	if err != nil {
 		return preSwapRestoreAbort{}, false, err
 	}
+
 	f, ok := recs.ActivationFenceFor(db)
 	if !ok {
 		return preSwapRestoreAbort{}, false, nil
 	}
+
 	cur, err := verifyPreSwapRestoreRecord(recs, db, r, aside)
 	if err != nil {
 		return preSwapRestoreAbort{}, true, err
 	}
+
 	if err := verifyPreSwapRestoreFence(cfg, f, cur, aside); err != nil {
 		return preSwapRestoreAbort{}, true, err
 	}
+
 	if _, err := verifyPreSwapRestoreBoundary(cfg, db, cur, aside); err != nil {
 		return preSwapRestoreAbort{}, true, err
 	}
+
 	return preSwapRestoreAbort{restore: cur, fence: f, aside: aside}, true, nil
 }
 
@@ -1791,19 +2307,24 @@ func verifyPreSwapRestoreRecord(recs backup.Records, db string, r backup.Restore
 	if !ok || !samePreSwapRestoreRecord(cur, r, db, aside) {
 		return cur, restoreAbortRefusal(db, "its restore record changed while aborting")
 	}
+
 	if cur.Recover {
 		return cur, restoreAbortRefusal(db, "a recovery scaffold is not a publishable live target")
 	}
+
 	if cur.ID == "" || cur.InstanceID == "" || cur.OperationID == "" {
 		return cur, restoreAbortRefusal(db, "its restore record has no complete operation provenance")
 	}
+
 	instance, err := currentFollowInstance()
 	if err != nil {
 		return cur, err
 	}
+
 	if instance == "" || cur.InstanceID != instance {
 		return cur, restoreAbortRefusal(db, "its restore record belongs to another installation instance")
 	}
+
 	return cur, nil
 }
 
@@ -1827,31 +2348,40 @@ func verifyPreSwapRestoreFence(cfg config.Cluster, f backup.ActivationFence, r b
 	if f.Database != db || f.Kind != "restore-promote" || f.OperationID != r.ID || f.Phase != fencePhasePrepared {
 		return restoreAbortRefusal(db, "its activation fence is not this restore's prepared pre-swap checkpoint ("+f.Kind+" "+f.Phase+")")
 	}
+
 	if err := verifyFenceInstance(f, db); err != nil {
 		return err
 	}
+
 	if err := verifyFencePaths(cfg, f, db); err != nil {
 		return err
 	}
+
 	spec, ok := cfg.ClusterByName(db)
 	if !ok {
 		return restoreAbortRefusal(db, "its cluster.toml entry is missing")
 	}
+
 	if !fenceTargetMatches(f, spec) {
 		return activationIdentityError(db, "target stanza", f.TargetStanza, spec.Stanza)
 	}
+
 	if f.OldStanza == "" || f.NewStanza == "" {
 		return restoreAbortRefusal(db, "its activation fence has no recorded old/new stanza transition")
 	}
+
 	if err := verifyFenceRegistration(f, db); err != nil {
 		return err
 	}
+
 	if r.Aside == "" || aside == "" || r.Aside != aside {
 		return restoreAbortRefusal(db, "its restore record lost the aside its prepared fence owns")
 	}
+
 	if f.CreatedAt == "" {
 		return restoreAbortRefusal(db, "its activation fence has no creation timestamp")
 	}
+
 	want := restorePromoteFenceIdentity(cfg, r, aside, spec)
 	for _, field := range []struct {
 		name       string
@@ -1869,12 +2399,15 @@ func verifyPreSwapRestoreFence(cfg config.Cluster, f backup.ActivationFence, r b
 			return activationIdentityError(db, field.name, field.have, field.want)
 		}
 	}
+
 	if f.Port != want.Port {
 		return activationIdentityError(db, "port", strconv.Itoa(f.Port), strconv.Itoa(want.Port))
 	}
+
 	if spec.Stanza != want.OldStanza {
 		return activationIdentityError(db, "stanza", f.OldStanza, spec.Stanza)
 	}
+
 	return nil
 }
 
@@ -1886,16 +2419,20 @@ func verifyPreSwapRestoreBoundary(cfg config.Cluster, db string, r backup.Restor
 	if !ok {
 		return spec, restoreAbortRefusal(db, "its cluster.toml entry is missing")
 	}
+
 	if aside == "" || r.Aside == "" || r.Aside != aside {
 		return spec, restoreAbortRefusal(db, "its restore record lost the aside its prepared fence owns")
 	}
+
 	oldStanza := spec.Stanza
 	if oldStanza == "" || spec.Stanza != oldStanza {
 		return spec, restoreAbortRefusal(db, "its live stanza "+spec.Stanza+" is no longer the pre-swap stanza "+oldStanza)
 	}
+
 	if state := backup.SwapState(cfg.Server.DataRoot, db, backup.RestoringName(db), aside); state != backup.SwapNotStarted {
 		return spec, restoreSwappedInError(db, aside)
 	}
+
 	return spec, nil
 }
 
@@ -1909,19 +2446,24 @@ func convertPreSwapRestoreAbort(cfg config.Cluster, db string, auth preSwapResto
 		if err != nil {
 			return err
 		}
+
 		f, ok := s.ActivationFenceFor(db)
 		if !ok || !reflect.DeepEqual(f, auth.fence) {
 			return restoreAbortRefusal(db, "its activation fence changed while aborting")
 		}
+
 		if err := verifyPreSwapRestoreFence(cfg, f, cur, auth.aside); err != nil {
 			return err
 		}
+
 		spec, err := verifyPreSwapRestoreBoundary(cfg, db, cur, auth.aside)
 		if err != nil {
 			return err
 		}
+
 		s.Activation[db] = restoreAbortRoutingFence(cfg, spec, cur, f)
 		delete(s.Restores, db)
+
 		return nil
 	})
 }
@@ -1949,16 +2491,20 @@ func completeRestoreAbortRouting(ctx context.Context, env *Env, db, owner string
 	if err != nil {
 		return err
 	}
+
 	if _, ok := recs.Restores[db]; ok {
 		return routingContinuationWithRestoreError(db)
 	}
+
 	_, spec, err := verifyActivationFence(env.Cluster, db, owner, "restore-abort", fencePhaseRouting)
 	if err != nil {
 		return err
 	}
+
 	if err := applyPoolerFence(ctx, env.Cluster, runtimeFor(env, false), env.Report); err != nil {
 		return err
 	}
+
 	return verifyRoutingFence(ctx, env.Cluster, spec, owner, "restore-abort")
 }
 
@@ -1981,11 +2527,14 @@ func retirePreSwapRestore(db string, r backup.Restore) error {
 		if _, ok := s.ActivationFenceFor(db); ok {
 			return restoreAbortRefusal(db, "its activation fence changed while aborting")
 		}
+
 		cur, ok := s.Restores[db]
 		if !ok || cur.ID != r.ID || cur.Attempt != nil || cur.MaterialisationPending {
 			return incompleteMaterialisation(backup.RestoringName(db))
 		}
+
 		delete(s.Restores, db)
+
 		return nil
 	})
 }
@@ -2014,55 +2563,71 @@ func handleRestoreCleanup(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	items := []leftoverInfo{}
+
 	for _, l := range bs.LeftoversOf(p.Database) {
 		info := leftoverInfo{Leftover: l, Exists: legacyLeftoverExists(ctx, l.Name)}
 		info.SizeBytes = dirSize(filepath.Join(env.Cluster.Server.DataRoot, l.Name))
 		items = append(items, info)
 	}
+
 	if !p.Drop || env.Req.DryRun {
 		return Result{Data: map[string]any{"leftovers": items, "dropped": false}}, nil
 	}
+
 	if p.Database == "" {
 		return Result{}, output.NewError(output.CodeUsage, "name the database whose leftovers to drop", output.ExitUsage, "")
 	}
+
 	if env.Req.Confirm == "" {
 		return Result{}, confirmRequired("cleanup drops the pre-restore clusters of "+p.Database+"; restore undo is no longer possible", p.Database+"/cleanup")
 	}
+
 	var dropped []string
+
 	for _, l := range items {
 		a, err := openLegacyLeftover(env.Cluster, l.Leftover)
 		if err != nil {
 			return Result{}, err
 		}
+
 		err = a.remove(ctx, env)
 		if err == nil {
 			err = retireLegacyLeftover(env.Cluster, l.Leftover)
 		}
+
 		a.close()
+
 		if err != nil {
 			return Result{}, err
 		}
+
 		dropped = append(dropped, l.Name)
 	}
+
 	return Result{Data: map[string]any{"leftovers": items, "dropped": true, "names": dropped}}, nil
 }
 
 // dirSize is the apparent size of the files under dir; 0 when it is gone.
 func dirSize(dir string) int64 {
 	var total int64
+
 	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() {
 			if info, err := d.Info(); err == nil {
 				total += info.Size()
 			}
 		}
+
 		return nil
 	})
+
 	return total
 }
 
@@ -2087,15 +2652,19 @@ func handleRestoreStatus(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	var out []restoreStatus
+
 	for db, r := range bs.Restores {
 		if p.Database != "" && db != p.Database {
 			continue
 		}
+
 		st := restoreStatus{Restore: r, Restoring: backup.RestoringName(db),
 			OnPromote: "PgBouncer pauses " + db + ", its cluster and the copy stop, the copy's data directory takes the live one's place and the old one is kept as the cluster " +
 				db + "__pre_restore_<time>; " + db + " starts, reaches the target and is promoted (a few seconds plus the replay), then PgBouncer resumes and a full backup starts. Credentials don't change."}
@@ -2105,13 +2674,16 @@ func handleRestoreStatus(ctx context.Context, env *Env) (Result, error) {
 			st.AccessCoverage = "unknown"
 			st.AccessNotice = "Restore readiness is for inspection; application access is not ready until promotion and access provisioning succeed."
 		}
+
 		if r.Phase == backup.PhaseReady && r.Port != 0 {
 			if local, err := clusterPG(env.Cluster, db); err == nil {
 				st.Tables = compareRows(ctx, local, pg.Local{Host: steps.PGSocketDir, Port: r.Port}, db)
 			}
 		}
+
 		out = append(out, st)
 	}
+
 	return Result{Data: map[string]any{"restores": out, "leftovers": bs.LeftoversOf(p.Database)}}, nil
 }
 
@@ -2125,24 +2697,30 @@ WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_s
 func compareRows(ctx context.Context, live, restoring pg.Local, db string) []tableRows {
 	read := func(local pg.Local) map[string]int64 {
 		rows, err := local.Query(ctx, db, rowEstimateSQL, nil)
+
 		out := map[string]int64{}
 		if err != nil {
 			return out
 		}
+
 		for _, r := range rows {
 			n, _ := strconv.ParseInt(r["r"], 10, 64)
 			out[r["t"]] = n
 		}
+
 		return out
 	}
 	a, b := read(live), read(restoring)
+
 	names := map[string]bool{}
 	for k := range a {
 		names[k] = true
 	}
+
 	for k := range b {
 		names[k] = true
 	}
+
 	out := make([]tableRows, 0, len(names))
 	for name := range names {
 		row := tableRows{Table: name}
@@ -2150,13 +2728,17 @@ func compareRows(ctx context.Context, live, restoring pg.Local, db string) []tab
 			v := v
 			row.Live = &v
 		}
+
 		if v, ok := b[name]; ok {
 			v := v
 			row.Restoring = &v
 		}
+
 		out = append(out, row)
 	}
+
 	sortTables(out)
+
 	return out
 }
 
@@ -2199,31 +2781,40 @@ func validateFork(ctx context.Context, env *Env, p dbForkParams, cfg config.Clus
 	if !ok {
 		return databaseNotFound(p.Source)
 	}
+
 	if err := config.CheckDatabaseName(p.Name); err != nil {
 		return output.NewError(output.CodeValidation, "database name "+p.Name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
 	}
+
 	if err := restoreInProgress(p.Source, "db fork"); err != nil {
 		return err
 	}
+
 	spec := forkSpec(src, p.Name)
 	if p.Size != "" {
 		spec.Size, spec.Memory = p.Size, ""
 	}
+
 	if err := checkSpareCPU(ctx, spec.Name, spec.CPUMode); err != nil {
 		return err
 	}
+
 	if err := guardRecoveryFloorAddition(cfg, spec, runtimeFor(env, true).Host); err != nil {
 		return err
 	}
+
 	if p.At != "" {
 		if err := requireBackups(cfg); err != nil {
 			return err
 		}
+
 		if _, err := checkRestoreTarget(ctx, cfg, restoreParams{Database: p.Source, Kind: backup.TargetTime, Time: p.At}); err != nil {
 			return err
 		}
 	}
+
 	_, err := forkSpace(ctx, cfg, p.Source)
+
 	return err
 }
 
@@ -2232,13 +2823,16 @@ func forkBuild(ctx context.Context, cfg config.Cluster, p dbForkParams) (config.
 	if !ok {
 		return config.ClusterSpec{}, databaseNotFound(p.Source)
 	}
+
 	spec := forkSpec(src, p.Name)
 	if p.Size != "" {
 		spec.Size, spec.Memory = p.Size, ""
 	}
+
 	if err := checkSpareCPU(ctx, spec.Name, spec.CPUMode); err != nil {
 		return config.ClusterSpec{}, err
 	}
+
 	return spec, nil
 }
 
@@ -2247,18 +2841,23 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	cfg := env.Cluster
 	if err := validateFork(ctx, env, p, cfg); err != nil {
 		return Result{}, err
 	}
+
 	var release engine.Release
+
 	if !env.Req.DryRun {
 		var err error
+
 		release, err = forkAcquire(ctx, engine.LockExclusive, "db.fork", env.Req.RequestID, env.Req.LockTimeout())
 		if err != nil {
 			return Result{}, err
 		}
 	}
+
 	saved, _, created, err := addDatabaseFrom(ctx, env,
 		func(cfg config.Cluster) (config.ClusterSpec, error) { return forkBuild(ctx, cfg, p) },
 		p.AllowOvercommit, forkCommand(p),
@@ -2267,37 +2866,48 @@ func handleDBFork(ctx context.Context, env *Env) (Result, error) {
 			if !ok {
 				return databaseNotFound(p.Source)
 			}
+
 			return forkPrepareOwnership(env, cfg, source, placed)
 		})
+
 	if release != nil {
 		release()
 	}
+
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"source": p.Source, "name": p.Name, "at": p.At, "dry_run": true}}, nil
 	}
+
 	env.Cluster = saved
 	// The new roles' passwords for the rename, and what the fork's steps
 	// read (the service passwords db fork sends, as db create does).
 	jobSecrets := stepSecrets(env.Req.Secrets)
+
 	for _, role := range steps.DatabaseRoles {
 		key := steps.SecretDatabaseRole(p.Name, role)
 		jobSecrets[key] = env.Req.Secrets[key]
 	}
+
 	id, err := forkStartJob(ctx, env, "db-fork", p, jobSecrets)
 	if err != nil {
 		return Result{}, err
 	}
+
 	res, err := followJob(ctx, env, id)
 	if err != nil {
 		return res, err
 	}
+
 	if m, ok := res.Data.(map[string]any); ok {
 		m["database"] = created
 	}
+
 	res.Warnings = append(res.Warnings, oversubscriptionWarnings(saved, runtimeFor(env, false).Host)...)
+
 	return res, nil
 }
 
@@ -2315,6 +2925,7 @@ func forkCommand(p dbForkParams) func(size string) string {
 		if p.At != "" {
 			cmd += " --at " + p.At
 		}
+
 		return cmd + " --size " + size
 	}
 }
@@ -2330,6 +2941,7 @@ func forkSpec(src config.ClusterSpec, name string) config.ClusterSpec {
 	spec.Backup = config.ClusterBackup{}
 	spec.Follows, spec.FollowGeneration = "", ""
 	spec.Protected = false
+
 	return spec
 }
 
@@ -2358,19 +2970,24 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return nil, err
 	}
+
 	opID := p.OperationID
 	if opID == "" {
 		opID = env.ID
 	}
+
 	cfg := env.Cluster
+
 	spec, ok := cfg.ClusterByName(p.Name)
 	if !ok {
 		return nil, databaseNotFound(p.Name)
 	}
+
 	src, err := clusterOf(cfg, p.Source)
 	if err != nil {
 		return nil, err
 	}
+
 	if _, err := writeActivationFence(cfg, activationFenceIdentity{
 		Database: p.Name, Kind: "fork", OperationID: opID, Spec: spec,
 		TargetStanza: spec.Stanza, OldStanza: src.Stanza, NewStanza: spec.Stanza,
@@ -2379,48 +2996,62 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
+
 	authority, err := newForkMaterialisationAuthority(env, p.Name)
 	if err != nil {
 		return nil, err
 	}
 	defer authority.Close()
+
 	plan, err := forkMaterialise(ctx, env, p, spec)
 	if err != nil {
 		return nil, err
 	}
+
 	rt := jobRuntime(env)
+
 	var warnings []output.Warning
+
 	others := forkOtherConfigs(ctx, steps.Catalog(), cfg, rt, p.Name, "")
 	ctx = engine.WithNumbering(ctx, engine.NewNumbering(steps.Catalog(), cfg, createRuns(cfg, p.Name, others)...))
 	logLine(env.Report, env.Job, "starting "+p.Name+" with its own configuration")
+
 	_, _, err = forkApplyKernel(ctx, steps.Catalog(), cfg, rt, engine.Options{Only: steps.KernelStepIDs(), Restarter: steps.Restarter(cfg), Report: env.Report})
 	if err == nil {
 		cfg, warnings, err = provisionForkActivation(ctx, env, cfg, spec, plan, opID, rt, authority)
 	}
+
 	if err != nil {
 		return nil, withHint(err, "The incomplete fork remains blocked; inspect its job and retained state.")
 	}
+
 	if err := authority.markProvisioned(ctx, func() error { return forkVerifyProvision(ctx, cfg, rt, p.Name) }); err != nil {
 		return nil, err
 	}
+
 	if err := authority.retire(ctx); err != nil {
 		return nil, err
 	}
+
 	if err := forkApplyPoolers(ctx, cfg, rt, "", env.Report); err != nil {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed",
 			Message: "the poolers were not reloaded, so " + p.Name + " is not reachable through them until vaire apply: " + err.Error()})
 	} else if err := verifyRoutingFence(ctx, cfg, spec, opID, "fork"); err != nil {
 		warnings = append(warnings, output.Warning{Code: "activation_routing_incomplete", Message: err.Error()})
 	}
+
 	if w := forkApplyMetrics(ctx, cfg, rt, env.Report, p.Name, ""); w != nil {
 		warnings = append(warnings, *w)
 	}
+
 	warnings = append(warnings, forkApplyOtherConfigs(ctx, steps.Catalog(), cfg, rt, others,
 		engine.Options{Restarter: steps.Restarter(cfg), Report: env.Report})...)
 	if w := forkFirstBackup(ctx, cfg, rt, env.Report, p.Name); w != nil {
 		warnings = append(warnings, *w)
 	}
+
 	forkWriteMetrics(cfg)
+
 	return map[string]any{"source": p.Source, "name": p.Name, "at": p.At, "port": spec.Port, "stanza": spec.Stanza, "warnings": warnings}, nil
 }
 
@@ -2428,17 +3059,22 @@ func jobFork(ctx context.Context, env *jobEnv) (any, error) {
 // activation under the retained materialisation authority.
 func provisionForkActivation(ctx context.Context, env *jobEnv, cfg config.Cluster, spec config.ClusterSpec, plan *extensionCopyPlan, opID string, rt engine.Runtime, authority *forkMaterialisationAuthority) (config.Cluster, []output.Warning, error) {
 	var warnings []output.Warning
+
 	err := authority.withProvisionedForkTarget(ctx, func(owned context.Context) error {
 		if err := forkProvisionOwned(owned, cfg, rt, spec.Name, "", env.Report); err != nil {
 			return err
 		}
+
 		fence, _, err := verifyActivationFence(cfg, spec.Name, opID, "fork", fencePhaseAdopted)
 		if err != nil {
 			return err
 		}
+
 		cfg, warnings, err = forkCompleteActivation(owned, spec, fence, plan, rt, env.Report)
+
 		return err
 	})
+
 	return cfg, warnings, err
 }
 
@@ -2447,13 +3083,16 @@ func provisionForkActivation(ctx context.Context, env *jobEnv, cfg config.Cluste
 // before any physical artifact exists.
 func prepareForkMaterialisation(ctx context.Context, cfg config.Cluster, p dbForkParams, spec, src config.ClusterSpec, opID string) (*extensionCopyPlan, *backup.MaterialiseConfig, error) {
 	opts := backup.RestoreOptions{Kind: backup.TargetTime}
+
 	if p.At != "" {
 		at, err := time.Parse(time.RFC3339, p.At)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		opts.Time = at
 	}
+
 	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
 		Intent: src, Stanza: src.Stanza, CopyDB: p.Source, Options: opts,
 		Historical: p.At != "", Standby: p.At != "", IncludeRetained: true,
@@ -2462,25 +3101,30 @@ func prepareForkMaterialisation(ctx context.Context, cfg config.Cluster, p dbFor
 	if err != nil {
 		return nil, nil, err
 	}
+
 	destination, err := prepareMaterialisationConfig(cfg, spec)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	if _, _, err := verifyActivationFence(cfg, p.Name, opID, "fork", fencePhasePrepared); err != nil {
 		return nil, nil, err
 	}
+
 	if err := backup.UpdateActivationFence(p.Name, opID, func(f *backup.ActivationFence) error {
 		f.Requirements = append([]catalog.Extension(nil), plan.Plan.Requirements...)
 		return nil
 	}); err != nil {
 		return nil, nil, err
 	}
+
 	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
 		return nil, nil, output.NewError(output.CodePrecondition,
 			"recording the fork's extension requirements failed: "+err.Error(),
 			output.ExitPrecondition, "The copy was not started. Retry after fixing the requirement history store.").
 			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": p.Name})
 	}
+
 	return plan, destination, nil
 }
 
@@ -2490,14 +3134,17 @@ func prepareForkMaterialisation(ctx context.Context, cfg config.Cluster, p dbFor
 // the caller needs to persist settings and finish activation.
 func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec config.ClusterSpec) (plan *extensionCopyPlan, err error) {
 	cfg := env.Cluster
+
 	src, err := clusterOf(cfg, p.Source)
 	if err != nil {
 		return nil, err
 	}
+
 	authority := activeForkAuthority(env)
 	if authority == nil {
 		return nil, errors.New("fork authority unavailable")
 	}
+
 	opID := p.OperationID
 	if opID == "" {
 		opID = env.ID
@@ -2507,47 +3154,59 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 	// constructor or a prepared record never grants physical deletion.
 	var m *backup.Materialised
 	defer func() { err = joinPreparedForkCleanup(ctx, err, m, authority, p.Name, opID) }()
+
 	plan, destination, err := prepareForkMaterialisation(ctx, cfg, p, spec, src, opID)
 	if err != nil {
 		return nil, err
 	}
+
 	m, err = forkNewMaterialised(cfg.Server.DataRoot, p.Name, p.Source, src.Port, env.shell(), env.Job, env.Report)
 	if err != nil {
 		return nil, err
 	}
 	defer m.ReleaseForkReservationAuthority()
+
 	if err := authority.bindReservation(ctx, m); err != nil {
 		return nil, err
 	}
+
 	m.Ownership = authority
 	m.DestinationConfig = destination
 	prestartFollowerCopy(m, env, cfg, src, plan)
+
 	if err := authority.advance(ctx, materialisationCopying, ""); err != nil {
 		return nil, err
 	}
+
 	if p.At == "" {
 		err = forkBaseBackup(m, ctx)
 	} else {
 		err = forkRestore(ctx, env, p, src, m)
 	}
+
 	if err == nil {
 		// The copy stops before Adopt starts it as 18/<new>, which drops
 		// the recovery targets with it.
 		_, err = forkPromote(m, ctx)
 	}
+
 	var cron cronSettlement
 	if err == nil && plan.Plan.Cron {
 		cron, err = deactivateCopyCron(ctx, m.PG())
 	}
+
 	if err == nil {
 		logLine(env.Report, env.Job, "renaming "+p.Source+" and its roles to "+p.Name)
+
 		err = m.GuardOwnership(ctx, backup.MaterialisationRename, func() error {
 			return forkRename(ctx, m, p.Source, p.Name, env.Secrets, spec.Port)
 		})
 	}
+
 	if err == nil && plan.Plan.Cron {
 		_, err = retargetCopyCron(ctx, m.PG(), cron, p.Source, p.Name)
 	}
+
 	if err == nil {
 		// Credentials, rename and copied-job retarget are complete. The
 		// checkpoint is durable before the fallible registration, so a retry
@@ -2559,21 +3218,26 @@ func materialiseFork(ctx context.Context, env *jobEnv, p dbForkParams, spec conf
 			f.ConfDir = steps.PGConfDir(p.Name)
 		})
 	}
+
 	if err == nil {
 		err = forkAdopt(m, ctx, spec.Port)
 	}
+
 	if err != nil {
 		return nil, forkMaterialisationFailure(ctx, authority, m, p.Name, opID, err)
 	}
+
 	if err := authority.advance(ctx, materialisationProvisioning, ""); err != nil {
 		return nil, err
 	}
+
 	if err := advanceActivationFence(cfg, p.Name, opID, "fork", fencePhaseAdopting, fencePhaseAdopted, spec, func(f *backup.ActivationFence) {
 		f.Registration = activationRegistration(spec)
 		f.Port, f.DataDir, f.ConfDir = spec.Port, cfg.Server.DataDirectory(spec.Name), steps.PGConfDir(spec.Name)
 	}); err != nil {
 		return nil, err
 	}
+
 	return plan, nil
 }
 
@@ -2583,9 +3247,11 @@ func forkMaterialisationFailure(ctx context.Context, authority *forkMaterialisat
 	if reason := recoveryFailureReason(err); reason != "" {
 		return errors.Join(err, authority.advance(ctx, materialisationFailed, reason))
 	}
+
 	if cleanupErr := cleanupFailedFork(ctx, authority, m, target, opID); cleanupErr != nil {
 		return errors.Join(err, cleanupErr)
 	}
+
 	return err
 }
 
@@ -2596,9 +3262,11 @@ func joinPreparedForkCleanup(ctx context.Context, err error, m *backup.Materiali
 	if err == nil || m != nil {
 		return err
 	}
+
 	if cleanupErr := cleanupPreparedForkMetadata(ctx, authority, target, opID); cleanupErr != nil {
 		return errors.Join(err, cleanupErr)
 	}
+
 	return err
 }
 
@@ -2609,17 +3277,21 @@ func restoreFork(ctx context.Context, env *jobEnv, p dbForkParams, src config.Cl
 	if err != nil {
 		return err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	opts := backup.RestoreOptions{Kind: backup.TargetTime, Time: t, Timeline: bs.TargetTimeline(p.Source, src.Stanza)}
 	if err := m.Restore(ctx, driver(src, env.Job, env.Report), opts); err != nil {
 		return err
 	}
+
 	if at := m.RecoveredTo(ctx); at != "" {
 		logLine(env.Report, env.Job, "recovered to "+at)
 	}
+
 	return nil
 }
 
@@ -2631,30 +3303,39 @@ func preflightDropLeftovers(cfg config.Cluster, db string) error {
 	if err != nil {
 		return err
 	}
+
 	if u, ok := s.Undoing[db]; ok {
 		if u.From.Database != db || !validGeneratedLeftoverName(db, u.From.Name) ||
 			!validGeneratedLeftoverName(db, u.Aside) || u.From.Name == u.Aside {
 			return errors.New("cannot inspect unverifiable undo layout")
 		}
+
 		layout := backup.SwapState(cfg.Server.DataRoot, db, u.From.Name, u.Aside)
+
 		return fmt.Errorf("cannot drop %s while undo is incomplete (swap %s)", db, layout)
 	}
+
 	if _, ok := s.Drilling[db]; ok {
 		return fmt.Errorf("cannot drop %s with an unfinished drill", db)
 	}
+
 	if _, ok := s.DrillAttempts[db]; ok {
 		return fmt.Errorf("cannot drop %s with a retained drill attempt", db)
 	}
+
 	if r, ok := s.Restores[db]; ok && (r.Attempt != nil || r.MaterialisationPending) {
 		return incompleteMaterialisation(backup.RestoringName(db))
 	}
+
 	for _, l := range s.LeftoversOf(db) {
 		a, err := openLegacyLeftover(cfg, l)
 		if err != nil {
 			return err
 		}
+
 		a.close()
 	}
+
 	return nil
 }
 
@@ -2664,37 +3345,48 @@ func dropLeftovers(env *Env, db string) error {
 	if err := preflightDropLeftovers(env.Cluster, db); err != nil {
 		return err
 	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	for _, l := range bs.LeftoversOf(db) {
 		a, err := openLegacyLeftover(env.Cluster, l)
 		if err != nil {
 			return err
 		}
+
 		err = a.remove(context.Background(), env)
 		if err == nil {
 			err = retireLegacyLeftover(env.Cluster, l)
 		}
+
 		a.close()
+
 		if err != nil {
 			return err
 		}
 	}
+
 	return backup.UpdateRecords(func(s *backup.Records) error {
 		_, drilling := s.Drilling[db]
+
 		_, attempt := s.DrillAttempts[db]
 		if len(s.LeftoversOf(db)) != 0 || drilling || attempt {
 			return errors.New("database cleanup records changed")
 		}
+
 		if _, ok := s.Undoing[db]; ok {
 			return errors.New("database undo appeared during cleanup")
 		}
+
 		if _, ok := s.Restores[db]; ok {
 			return errors.New("database restore appeared during cleanup")
 		}
+
 		forgetDropped(s, db)
+
 		return nil
 	})
 }
@@ -2711,6 +3403,7 @@ func forgetDropped(s *backup.Records, db string) {
 			kept = append(kept, l)
 		}
 	}
+
 	s.Leftovers = kept
 	delete(s.Timelines, db)
 	delete(s.Drilling, db)
