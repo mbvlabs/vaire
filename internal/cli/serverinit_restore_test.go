@@ -18,6 +18,7 @@ func TestRestoreResumePendingReadsSavedAnswers(t *testing.T) {
 	for _, identity := range []string{"", "/test/replacement-key"} {
 		t.Run("identity="+identity, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 			cfg := config.DefaultCluster()
 			cfg.ClusterName, cfg.Domain = "prod", "example.com"
 			cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "203.0.113.10", WGAddress: "10.42.0.1"}}
@@ -35,26 +36,32 @@ func TestRestoreResumePendingReadsSavedAnswers(t *testing.T) {
 					OldAddress: boot.Host, NewAddress: boot.Host,
 				},
 			}
+
 			original := &initRun{name: "prod", cfg: cfg, boot: boot, prog: prog}
 			if err := original.savePending(); err != nil {
 				t.Fatal(err)
 			}
+
 			cmd := &cobra.Command{}
 			cmd.Flags().Bool("resume", true, "")
 			cmd.Flags().String("identity", identity, "")
+
 			resumed := &initRun{name: "prod", cmd: cmd, restore: &restoreRun{}}
 			if err := resumed.restoreLoadPending(); err != nil {
 				t.Fatal(err)
 			}
+
 			if resumed.cfg.ClusterName != cfg.ClusterName ||
 				!reflect.DeepEqual(resumed.cfg.Nodes, cfg.Nodes) ||
 				len(resumed.cfg.Clusters) != 1 || !resumed.cfg.Clusters[0].Protected ||
 				resumed.cfg.Clusters[0].Stanza != "app-abc123" {
 				t.Fatalf("pending cluster configuration changed: %+v", resumed.cfg)
 			}
+
 			if identity != "" {
 				boot.Identity = identity
 			}
+
 			if resumed.boot != boot || !reflect.DeepEqual(resumed.prog, prog) ||
 				!reflect.DeepEqual(resumed.restore.state, prog.Restore) {
 				t.Fatalf("resume changed bootstrap or recovery identity: %+v %+v", resumed.boot, resumed.prog)
@@ -65,22 +72,28 @@ func TestRestoreResumePendingReadsSavedAnswers(t *testing.T) {
 
 func TestRestoreResumePendingStillRejectsUnknownClusterKeys(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	cfg := config.DefaultCluster()
 	cfg.ClusterName = "prod"
+
 	raw, err := cfg.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	raw = append(raw, []byte("\n[unexpected]\nvalue = true\n")...)
 	if err := workspaces.SaveAnswers("prod", raw, workspaces.Bootstrap{Host: "203.0.113.10", User: "root"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := workspaces.SaveProgress("prod", &workspaces.Progress{Restore: &workspaces.RestoreProgress{Epoch: 4}}); err != nil {
 		t.Fatal(err)
 	}
+
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("resume", true, "")
 	cmd.Flags().String("identity", "", "")
+
 	r := &initRun{name: "prod", cmd: cmd, restore: &restoreRun{}}
 	if err := r.restoreLoadPending(); err == nil || !strings.Contains(err.Error(), "unexpected") {
 		t.Fatalf("unknown cluster keys were not rejected: %v", err)
@@ -108,6 +121,7 @@ func TestRestoreConfigKeepsExtensionIntent(t *testing.T) {
 
 func testRestoreConfigKeepsExtensionIntent(t *testing.T, recovery *[]string) {
 	t.Helper()
+
 	cfg := config.DefaultCluster()
 	cfg.ClusterName = "prod"
 	cfg.Domain = "example.com"
@@ -120,13 +134,15 @@ func testRestoreConfigKeepsExtensionIntent(t *testing.T, recovery *[]string) {
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {
 			Source: catalog.SourcePreinstalled, Settings: map[string]string{"custom.mode": "on"},
-			CopySafety: stringPtr("safe"), StandbySafe: boolPtr(true),
+			CopySafety: new("safe"), StandbySafe: new(true),
 		},
 	}
+
 	raw, err := cfg.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	tarball, _, err := masterbackup.Build(masterbackup.Meta{
 		Server: "prod", Node: "db1", Epoch: 1, CreatedAt: time.Unix(0, 0).UTC(), VaireVersion: "test",
 	}, []masterbackup.File{
@@ -135,10 +151,12 @@ func testRestoreConfigKeepsExtensionIntent(t *testing.T, recovery *[]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	bundle, err := masterbackup.ReadTar(tarball)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	r := &initRun{
 		name: "prod",
 		restore: &restoreRun{
@@ -150,12 +168,15 @@ func testRestoreConfigKeepsExtensionIntent(t *testing.T, recovery *[]string) {
 	if err := r.restoreConfig(); err != nil {
 		t.Fatal(err)
 	}
+
 	if r.cfg.Nodes[0].PublicAddress != "203.0.113.20" {
 		t.Fatalf("public address was not rewritten: %+v", r.cfg.Nodes[0])
 	}
+
 	if got := r.cfg.Extensions["custom"]; got.Source != catalog.SourcePreinstalled || got.Settings["custom.mode"] != "on" {
 		t.Fatalf("custom definition lost: %+v", got)
 	}
+
 	switch {
 	case recovery == nil:
 		if r.cfg.Clusters[0].RecoveryExtensions != nil {
@@ -172,9 +193,6 @@ func testRestoreConfigKeepsExtensionIntent(t *testing.T, recovery *[]string) {
 	}
 }
 
-func stringPtr(s string) *string { return &s }
-func boolPtr(b bool) *bool       { return &b }
-
 // A no-bucket rebuild's next commands drop followers before their sources,
 // create the sources and re-follow the followers: no db create of a follower,
 // whatever order the configuration lists them in (D12, R3-4).
@@ -189,9 +207,11 @@ func TestRestoreResultDataNoBucketOrdersFollowersFirst(t *testing.T) {
 		"vaire doctor",
 		"vaire server backup list",
 	}
+
 	for _, clusters := range [][]config.ClusterSpec{{source, follower}, {follower, source}} {
 		cfg := config.DefaultCluster()
 		cfg.Clusters = clusters
+
 		r := &initRun{cfg: cfg, restore: &restoreRun{state: &workspaces.RestoreProgress{}}}
 		if got := r.restoreResultData().Next; !slices.Equal(got, want) {
 			t.Fatalf("configuration %v:\n got %v\nwant %v", clusters, got, want)

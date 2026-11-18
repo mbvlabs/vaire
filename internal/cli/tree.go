@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"strings"
+
 	"github.com/spf13/cobra"
 )
 
@@ -37,6 +39,7 @@ func addSpec(parent *cobra.Command, spec cmdSpec) {
 	if cmd.Args == nil {
 		cmd.Args = cobra.NoArgs
 	}
+
 	if cmd.RunE == nil {
 		if len(spec.children) > 0 {
 			cmd.RunE = parentRun
@@ -44,10 +47,13 @@ func addSpec(parent *cobra.Command, spec cmdSpec) {
 			cmd.RunE = notImplemented
 		}
 	}
+
 	if spec.meta.WhenToUse != nil {
 		cmd.Long = joinLines(spec.meta.WhenToUse)
 	}
+
 	applyFlags(cmd, spec.flags)
+
 	if spec.meta.SupportsDryRun {
 		cmd.Flags().Bool("dry-run", false, "Report what would change and do not apply it")
 	}
@@ -56,20 +62,24 @@ func addSpec(parent *cobra.Command, spec cmdSpec) {
 	if (spec.meta.Destructive || spec.meta.ConfirmToken != "") && cmd.Flags().Lookup("confirm") == nil {
 		cmd.Flags().String("confirm", "", "Confirmation token. --yes never satisfies this check")
 	}
+
 	registerMeta(cmd, spec.meta)
 	parent.AddCommand(cmd)
 	addSpecs(cmd, spec.children)
 }
 
 func joinLines(lines []string) string {
-	out := ""
+	var out strings.Builder
+
 	for i, line := range lines {
 		if i > 0 {
-			out += "\n"
+			out.WriteString("\n")
 		}
-		out += line
+
+		out.WriteString(line)
 	}
-	return out
+
+	return out.String()
 }
 
 func phase1Commands() []cmdSpec {
@@ -1134,6 +1144,7 @@ func dbCommands() cmdSpec {
 func extCommands() cmdSpec {
 	// A confirmation phrase is protocol text, not a credential.
 	const addRestartConfirmation = "{db}/restart"
+
 	return cmdSpec{
 		use: "ext",
 		run: parentRun,

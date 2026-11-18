@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/backup"
@@ -92,6 +93,7 @@ func methods() map[string]method {
 				if req.DryRun {
 					return engine.LockShared
 				}
+
 				return engine.LockExclusive
 			},
 			runLog:  func(req rpc.Request) bool { return !req.DryRun },
@@ -140,6 +142,7 @@ func methods() map[string]method {
 				if req.DryRun {
 					return engine.LockShared
 				}
+
 				return engine.LockExclusive
 			},
 			cluster: true,
@@ -180,12 +183,14 @@ func methods() map[string]method {
 				if req.DryRun {
 					return engine.LockShared
 				}
+
 				return engine.LockExclusive
 			},
 			clusterLock: func(req rpc.Request) (string, engine.LockMode) {
 				if req.DryRun {
 					return "", engine.LockNone
 				}
+
 				return paramName(req.Params), engine.LockExclusive
 			},
 			cluster:    true,
@@ -200,6 +205,7 @@ func methods() map[string]method {
 				if !rotateRequested(req.Params) {
 					return "", engine.LockNone
 				}
+
 				return paramName(req.Params), engine.LockExclusive
 			},
 			cluster: true,
@@ -307,10 +313,12 @@ func methods() map[string]method {
 		{name: "master-backup.get", cluster: true, handler: handleMasterBackupGet},
 		{name: "db.recover", cluster: true, confirm: recoverToken, runLog: always, handler: refuseProtected("db recover --time", "database", recoverAtTime, handleDBRecover)},
 	}
+
 	table := make(map[string]method, len(list))
 	for _, m := range list {
 		table[m.name] = m
 	}
+
 	return table
 }
 
@@ -319,7 +327,9 @@ func paramDB(params json.RawMessage) string {
 	var p struct {
 		DB string `json:"db"`
 	}
+
 	_ = json.Unmarshal(params, &p)
+
 	return p.DB
 }
 
@@ -328,7 +338,9 @@ func paramName(params json.RawMessage) string {
 	var p struct {
 		Name string `json:"name"`
 	}
+
 	_ = json.Unmarshal(params, &p)
+
 	return p.Name
 }
 
@@ -344,6 +356,7 @@ func dbClusterLock(req rpc.Request) (string, engine.LockMode) {
 	if req.DryRun || json.Unmarshal(req.Params, &p) != nil {
 		return "", engine.LockNone
 	}
+
 	return p.Database, engine.LockExclusive
 }
 
@@ -351,10 +364,12 @@ func dbClusterLock(req rpc.Request) (string, engine.LockMode) {
 // time, and <cluster>/restart for each cluster (RFC 11.2).
 func restartTokens(cfg config.Cluster, _ json.RawMessage) []string {
 	out := make([]string, 1, 1+len(cfg.Clusters))
+
 	out[0] = cfg.Name() + "/restart"
 	for _, c := range cfg.Clusters {
 		out = append(out, c.Name+"/restart")
 	}
+
 	return out
 }
 
@@ -365,6 +380,7 @@ func applyTokens(cfg config.Cluster, params json.RawMessage) []string {
 			out = append(out, c.Name+"/access")
 		}
 	}
+
 	return out
 }
 
@@ -373,6 +389,7 @@ func applySelectionMayTransition(req rpc.Request) bool {
 	if json.Unmarshal(req.Params, &p) != nil || len(p.Steps) == 0 {
 		return true
 	}
+
 	for _, id := range p.Steps {
 		base, _ := engine.SplitID(id)
 		switch base {
@@ -380,6 +397,7 @@ func applySelectionMayTransition(req rpc.Request) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -387,17 +405,21 @@ func applyLockWithConfig(cfg config.Cluster, req rpc.Request) engine.LockMode {
 	if req.DryRun {
 		return engine.LockShared
 	}
+
 	db := paramDB(req.Params)
 	if db == "" {
 		return engine.LockExclusive
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil || len(recs.Activation) > 0 {
 		return engine.LockExclusive
 	}
+
 	if _, ok := cfg.ClusterByName(db); ok && len(cfg.FollowerNames(db)) > 0 && applySelectionMayTransition(req) {
 		return engine.LockExclusive
 	}
+
 	return engine.LockShared
 }
 
@@ -405,27 +427,33 @@ func applyClusterLockWithConfig(cfg config.Cluster, req rpc.Request) (string, en
 	if req.DryRun {
 		return "", engine.LockNone
 	}
+
 	db := paramDB(req.Params)
 	if db == "" {
 		return "", engine.LockNone
 	}
+
 	if _, ok := cfg.ClusterByName(db); ok && len(cfg.FollowerNames(db)) > 0 && applySelectionMayTransition(req) {
 		return "", engine.LockNone
 	}
+
 	return db, engine.LockExclusive
 }
 
 func accessConfirmation(cfg config.Cluster, req rpc.Request) map[string]bool {
 	confirmed := make(map[string]bool)
+
 	for _, token := range req.ConfirmTokens() {
 		name, ok := strings.CutSuffix(token, "/access")
 		if !ok {
 			continue
 		}
+
 		if spec, exists := cfg.ClusterByName(name); exists && !spec.IsFollower() {
 			confirmed[name] = true
 		}
 	}
+
 	return confirmed
 }
 
@@ -433,17 +461,21 @@ func accessConfirmation(cfg config.Cluster, req rpc.Request) map[string]bool {
 // they allow.
 func restartConfirmation(cfg config.Cluster, req rpc.Request) engine.Confirmation {
 	var c engine.Confirmation
+
 	for _, token := range req.ConfirmTokens() {
 		name, ok := strings.CutSuffix(token, "/restart")
 		if !ok {
 			continue
 		}
+
 		if token == cfg.Name()+"/restart" {
 			c.Server = true
 			continue
 		}
+
 		c.Clusters = append(c.Clusters, name)
 	}
+
 	return c
 }
 
@@ -455,6 +487,7 @@ func dbToken(_ config.Cluster, params json.RawMessage) string {
 	if json.Unmarshal(params, &p) != nil {
 		return ""
 	}
+
 	return p.Name
 }
 
@@ -463,6 +496,7 @@ func dbCredentialsToken(cfg config.Cluster, params json.RawMessage) string {
 	if !rotateRequested(params) {
 		return ""
 	}
+
 	return dbToken(cfg, params)
 }
 
@@ -473,6 +507,7 @@ func rotateRequested(params json.RawMessage) bool {
 	if json.Unmarshal(params, &p) != nil {
 		return false
 	}
+
 	return p.Rotate
 }
 
@@ -493,11 +528,14 @@ func decodeParams(raw json.RawMessage, v any) error {
 	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
 		return nil
 	}
+
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
+
 	if err := dec.Decode(v); err != nil {
 		return output.NewError(output.CodeUsage, "params do not decode: "+err.Error(), output.ExitUsage, "")
 	}
+
 	return nil
 }
 
@@ -508,6 +546,7 @@ var detectHost = hostinfo.Detect
 
 func runtimeFor(env *Env, dryRun bool) engine.Runtime {
 	host, _ := detectHost(env.Cluster.Server.DataRoot)
+
 	return engine.Runtime{
 		DryRun:       dryRun,
 		Shell:        engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},
@@ -523,17 +562,22 @@ func handlePlan(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
+
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
+
 	rt := runtimeFor(env, true)
+
 	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: p.Steps, DB: p.DB})
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: data, Warnings: oversubscriptionWarnings(env.Cluster, rt.Host)}, nil
 }
 
@@ -560,43 +604,52 @@ func applyFailureWithData(err error, data engine.ApplyData, transitionWarnings, 
 	if err == nil {
 		return nil
 	}
+
 	allWarnings := append([]output.Warning{}, transitionWarnings...)
 	allWarnings = append(allWarnings, warnings...)
+
 	observed := data.Total > 0 || len(data.Steps) > 0 || len(data.Restarts) > 0 ||
 		len(data.RestartsSettled) > 0 || len(data.RestartPending) > 0
 	if !observed && len(allWarnings) == 0 {
 		return err
 	}
+
 	details := map[string]any{}
+
 	var base *output.CLIError
 	if errors.As(err, &base) {
 		switch have := base.Details.(type) {
 		case map[string]any:
-			for k, v := range have {
-				details[k] = v
-			}
+			maps.Copy(details, have)
 		case nil:
 		default:
 			details["cause_details"] = have
 		}
 	}
+
 	if observed {
 		details["apply_data"] = data
 	}
+
 	if len(warnings) > 0 {
 		details["warnings"] = append([]output.Warning{}, warnings...)
 	}
+
 	if len(transitionWarnings) > 0 {
 		details["transition_warnings"] = append([]output.Warning{}, transitionWarnings...)
 	}
+
 	if base != nil {
 		copied := *base
 		copied.Details = details
+
 		return output.WithWarnings(&copied, allWarnings...)
 	}
+
 	if !observed {
 		return output.WithWarnings(err, allWarnings...)
 	}
+
 	return output.WithWarnings(output.NewError(output.CodeStepFailed, err.Error(), output.ExitStep, "").WithDetails(details), allWarnings...)
 }
 
@@ -605,26 +658,33 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
+
 	if !env.Req.DryRun {
 		if err := reloadApplyCluster(env, p); err != nil {
 			return Result{}, err
 		}
 	}
+
 	if err := guardMaterialisationApply(ctx, env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
+
 	if res, handled, err := applyForkContinuation(ctx, env, p); handled || err != nil {
 		return res, err
 	}
+
 	if err := refuseActiveActivationFences(env.Cluster, p); err != nil {
 		return Result{}, err
 	}
+
 	if err := refuseUnfinishedFollowApply(env.Cluster, p.DB); err != nil {
 		return Result{}, err
 	}
+
 	if !env.Req.DryRun {
 		// Refuse before extension history/packages/settings and before the
 		// engine's shared pooler render unless every selected fork route has
@@ -633,6 +693,7 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 			return Result{}, err
 		}
 	}
+
 	transitionWarnings, release, pending, err := beginApplyTransitions(ctx, env, p)
 	// Every non-nil release belongs to this request once it has been
 	// returned: install it before any error branch so a failure after the
@@ -640,26 +701,33 @@ func handleApply(ctx context.Context, env *Env) (Result, error) {
 	if release != nil {
 		defer release()
 	}
+
 	if pending != nil {
 		return *pending, nil
 	}
+
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return planApply(ctx, env, p)
 	}
+
 	rt := runtimeFor(env, false)
 	rt.RotateSecrets = p.RotateBackupSecrets
+
 	return runApply(ctx, env, p, rt, transitionWarnings)
 }
 
 func planApply(ctx context.Context, env *Env, p stepParams) (Result, error) {
 	rt := runtimeFor(env, true)
+
 	data, err := engine.Plan(ctx, steps.Catalog(), env.Cluster, rt, engine.Options{Only: p.Steps, DB: p.DB})
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: data, Warnings: append(NoOffsiteWarning(env.Cluster), oversubscriptionWarnings(env.Cluster, rt.Host)...)}, nil
 }
 
@@ -676,12 +744,15 @@ func runApply(ctx context.Context, env *Env, p stepParams, rt engine.Runtime, tr
 	if err != nil {
 		return Result{}, applyFailureWithData(err, data, transitionWarnings, warnings)
 	}
+
 	for _, r := range data.Restarts {
 		clearDeferred(r.Cluster)
 	}
+
 	if len(data.RestartsSettled) > 0 {
 		clearDeferred(data.RestartsSettled...)
 	}
+
 	warnings = append(warnings, finalizeRoutingFences(ctx, env, routingFencesFor(p))...)
 	warnings = append(warnings, NoOffsiteWarning(env.Cluster)...)
 	warnings = append(warnings, oversubscriptionWarnings(env.Cluster, rt.Host)...)
@@ -692,8 +763,10 @@ func runApply(ctx context.Context, env *Env, p stepParams, rt engine.Runtime, tr
 	if len(p.Steps) == 0 && !p.SkipDoctor {
 		gate, doctorWarnings, _ := doctorGate(ctx, env.Cluster, runtimeFor(env, true), false)
 		out.Doctor = gate
+
 		warnings = append(warnings, doctorWarnings...)
 	}
+
 	return Result{Data: out, Warnings: warnings}, nil
 }
 
@@ -704,11 +777,14 @@ func reloadApplyCluster(env *Env, p stepParams) error {
 	if err != nil {
 		return err
 	}
+
 	actualMode := env.LockMode
 	if actualMode == engine.LockNone {
 		actualMode = applyLockWithConfig(env.Cluster, env.Req)
 	}
+
 	oldCluster, oldClusterMode := applyClusterLockWithConfig(env.Cluster, env.Req)
+
 	newCluster, newClusterMode := applyClusterLockWithConfig(reloaded, env.Req)
 	if actualMode != applyLockWithConfig(reloaded, env.Req) || oldCluster != newCluster || oldClusterMode != newClusterMode {
 		return output.NewError(output.CodePrecondition,
@@ -716,7 +792,9 @@ func reloadApplyCluster(env *Env, p stepParams) error {
 			output.ExitPrecondition, "Retry vaire apply; it will take the current envelope and target locks.").
 			WithDetails(map[string]any{"reason": "apply_lock_class_changed", "database": p.DB})
 	}
+
 	env.Cluster = reloaded
+
 	return nil
 }
 
@@ -726,27 +804,34 @@ func applyForkContinuation(ctx context.Context, env *Env, p stepParams) (Result,
 	if env.Req.DryRun || p.DB == "" || len(p.Steps) != 0 {
 		return Result{}, false, nil
 	}
+
 	fence, ok, err := forkFenceFor(p.DB)
 	if err != nil || !ok {
 		return Result{}, ok, err
 	}
+
 	_, found, err := readMaterialisation(p.DB, env.Cluster.Server.DataRoot)
 	if err != nil {
 		return Result{}, true, materialisationIncomplete(p.DB, nil)
 	}
+
 	if found || fence.Phase != fencePhaseRouting {
 		lease := materialisationContinuationLeaseFrom(ctx)
 		if lease == nil {
 			return Result{}, true, materialisationIncomplete(p.DB, nil)
 		}
+
 		scope, err := openForkContinuation(ctx, env.Cluster, env, lease)
 		if err != nil {
 			return Result{}, true, err
 		}
 		defer scope.close()
+
 		ctx = withForkContinuationScope(ctx, scope)
 	}
+
 	res, err := resumeForkSettlementAt(ctx, env, fence)
+
 	return res, true, err
 }
 
@@ -757,14 +842,16 @@ func beginApplyTransitions(ctx context.Context, env *Env, p stepParams) ([]outpu
 	if env.Req.DryRun {
 		return nil, nil, nil, nil
 	}
+
 	warnings, release, err := applyTransitions(ctx, env, p)
 	if err != nil {
-		var pending *extensionApplyPendingError
-		if errors.As(err, &pending) {
+		if pending, ok := errors.AsType[*extensionApplyPendingError](err); ok {
 			return nil, release, &Result{Data: pending.Data, Warnings: append(pending.Warnings, NoOffsiteWarning(env.Cluster)...)}, nil
 		}
+
 		return nil, release, nil, output.WithWarnings(err, warnings...)
 	}
+
 	return warnings, release, nil, nil
 }
 
@@ -780,5 +867,6 @@ func handleSelfcheck(context.Context, *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: data, Warnings: warnings}, nil
 }

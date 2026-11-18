@@ -44,14 +44,17 @@ func TestTOTPRFC6238(t *testing.T) {
 
 func TestVerifySkewWindow(t *testing.T) {
 	now := time.Unix(1234567890, 0)
+
 	step := Step(now)
 	for d := int64(-1); d <= 1; d++ {
 		code := HOTP(rfcKey, step+d, Digits)
+
 		got, err := Verify(rfcKey, code, now, 0)
 		if err != nil || got != step+d {
 			t.Fatalf("offset %d: step %d, err %v", d, got, err)
 		}
 	}
+
 	for _, d := range []int64{-2, 2} {
 		if _, err := Verify(rfcKey, HOTP(rfcKey, step+d, Digits), now, 0); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("offset %d: got %v, want ErrInvalid", d, err)
@@ -62,10 +65,12 @@ func TestVerifySkewWindow(t *testing.T) {
 func TestVerifyReplay(t *testing.T) {
 	now := time.Unix(1234567890, 0)
 	code := Code(rfcKey, now)
+
 	step, err := Verify(rfcKey, code, now, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := Verify(rfcKey, code, now, step); !errors.Is(err, ErrReused) {
 		t.Fatalf("replay: got %v, want ErrReused", err)
 	}
@@ -88,7 +93,9 @@ func TestVerifyMalformed(t *testing.T) {
 			t.Fatalf("%q: got %v", code, err)
 		}
 	}
+
 	spaced := Code(rfcKey, now)
+
 	spaced = spaced[:3] + " " + spaced[3:]
 	if _, err := Verify(rfcKey, spaced, now, 0); err != nil {
 		t.Fatalf("spaced code: %v", err)
@@ -100,13 +107,16 @@ func TestSecretRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(secret) != 32 || strings.Contains(secret, "=") {
 		t.Fatalf("secret %q: want 32 base32 characters without padding", secret)
 	}
+
 	key, err := DecodeSecret(strings.ToLower(secret[:4]) + " " + secret[4:])
 	if err != nil || len(key) != SecretBytes {
 		t.Fatalf("decode: %d bytes, %v", len(key), err)
 	}
+
 	if _, err := DecodeSecret("not base32!"); err == nil {
 		t.Fatal("want an error for a non-base32 secret")
 	}
@@ -114,6 +124,7 @@ func TestSecretRoundTrip(t *testing.T) {
 
 func TestURI(t *testing.T) {
 	got := URI("vaire", "prod", "JBSWY3DPEHPK3PXP")
+
 	want := "otpauth://totp/vaire:prod?algorithm=SHA1&digits=6&issuer=vaire&period=30&secret=JBSWY3DPEHPK3PXP"
 	if got != want {
 		t.Fatalf("got %s\nwant %s", got, want)

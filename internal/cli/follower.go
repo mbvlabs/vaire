@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
@@ -66,33 +67,42 @@ func dbUnfollowCommand() cmdSpec {
 
 func runDBFollow(cmd *cobra.Command, args []string) error {
 	src := args[0]
+
 	name := stringFlag(cmd, "name")
 	if name == "" {
 		name = src + "_follower"
 	}
+
 	if err := config.CheckDatabaseName(name); err != nil {
 		return output.NewError(output.CodeValidation, "database name "+name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
 	}
+
 	params := map[string]any{"source": src, "name": name}
 	addCPUFlags(cmd, params)
+
 	size := stringFlag(cmd, "size")
 	if size != "" {
 		params["size"] = size
 	}
+
 	if flagTrue(cmd, "allow-overcommit") {
 		params["allow_overcommit"] = true
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	if size != "" {
 		cfg, err := remoteConfig(cmd, s, p)
 		if err != nil {
 			return err
 		}
+
 		if spec, ok := cfg.ClusterByName(src); ok {
 			spec.Size, spec.Memory = size, ""
 			if err := checkSizeFlags(cfg, spec); err != nil {
@@ -106,34 +116,45 @@ func runDBFollow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	s.warnings = append(s.warnings, staleWarning(generated)...)
+
 	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "db.follow", params, remote.CallOptions{DryRun: dryRun(cmd), Secrets: service})
 	if err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		var data map[string]any
+
 		_ = reply.Decode(&data)
+
 		return output.Success(cmd, output.Result{Data: data, Warnings: append(s.warnings, reply.Warnings...),
 			Message: fmt.Sprintf("dry run: would follow %s as %s, copied from %v, streaming through the slot %v", src, name, data["from"], data["slot"])})
 	}
+
 	if detached {
 		return detachedResult(cmd, s, jobID, "the follower "+name)
 	}
+
 	var res struct {
 		Follower health.FollowerState `json:"follower"`
 		From     string               `json:"from"`
 		Warnings []output.Warning     `json:"warnings"`
 	}
+
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
+
 	warnings := append(append(s.warnings, reply.Warnings...), res.Warnings...)
+
 	state := "not streaming yet"
 	if res.Follower.Streaming {
 		state = "streaming, lag " + followerLagText(&res.Follower)
 	}
+
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"job_id": jr.JobID, "source": src, "name": name, "from": res.From, "follower": res.Follower},
 		Message: fmt.Sprintf("%s follows %s (%s). Read it at the server's host as %s with %s's credentials (%s_ro or %s_app); it is read-only.",
@@ -147,6 +168,7 @@ func addCPUFlags(cmd *cobra.Command, params map[string]any) {
 	if cmd.Flags().Changed("cpu-mode") {
 		params["cpu_mode"] = stringFlag(cmd, "cpu-mode")
 	}
+
 	if cmd.Flags().Changed("cpu-quota") {
 		params["cpu_quota"] = stringFlag(cmd, "cpu-quota")
 	}
@@ -155,36 +177,43 @@ func addCPUFlags(cmd *cobra.Command, params map[string]any) {
 func runDBUnfollow(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	opts := remote.CallOptions{DryRun: dryRun(cmd)}
 	if !dryRun(cmd) {
 		token := name + "/unfollow"
 		if err := Confirm(cmd, token); err != nil {
 			return err
 		}
+
 		opts.Confirm = token
 	}
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	secret, rpcSecrets, err := newDatabaseSecret(cfg, name, steps.DatabaseRoles)
 	if err != nil {
 		return err
 	}
+
 	service, _, generated, err := serviceSecrets(s.ctx.Name)
 	if err != nil {
 		return err
 	}
-	for k, v := range service {
-		rpcSecrets[k] = v
-	}
+
+	maps.Copy(rpcSecrets, service)
+
 	s.warnings = append(s.warnings, staleWarning(generated)...)
 	opts.Secrets = rpcSecrets
+
 	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "db.unfollow", map[string]any{"name": name}, opts)
 	if err != nil {
 		// The node marks every failure of an unfollow that started, and a lost
@@ -194,43 +223,57 @@ func runDBUnfollow(cmd *cobra.Command, args []string) error {
 		if note != "" {
 			printCredentialBlock(cmd, note, name, secret)
 		}
+
 		return out
 	}
+
 	if dryRun(cmd) {
 		var data map[string]any
+
 		_ = reply.Decode(&data)
+
 		return output.Success(cmd, output.Result{Data: data, Warnings: s.warnings,
 			Message: fmt.Sprintf("dry run: would promote %s, stop it following %v, rename %v's database and roles to its own with new passwords, and give it its own stanza; CPU priority and quota continue", name, data["source"], data["source"])})
 	}
+
 	if detached {
 		p.warn("detached: the unfollow keeps running. These credentials work once it is done and are shown only now:")
+
 		message, human := credentialsMessage(cmd, "unfollow detached; CPU priority and quota continue; credentials shown only now", "unfollow detached; CPU priority and quota continue; credentials shown only now", name, secret)
 		data := map[string]any{"job_id": jobID, "detached": true, "database": secret, "cpu_policy_continues": true}
+
 		if spec, ok := cfg.ClusterByName(name); ok {
 			if res, err := cfg.Resources(spec); err == nil {
 				data["cpu_policy_at_request"] = map[string]string{"mode": res.CPUMode, "quota": res.CPUQuota}
 			}
 		}
+
 		return output.Success(cmd, output.Result{Data: data,
 			Message: message, Human: human, Next: []string{"vaire job follow " + jobID}})
 	}
+
 	var res struct {
 		Source    string            `json:"source"`
 		Stanza    string            `json:"stanza"`
 		Warnings  []output.Warning  `json:"warnings"`
 		CPUPolicy map[string]string `json:"cpu_policy"`
 	}
+
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
+
 	warnings := append(append(s.warnings, reply.Warnings...), res.Warnings...)
+
 	quota := res.CPUPolicy["quota"]
 	if quota == "" {
 		quota = "none"
 	}
+
 	headline := name + " no longer follows " + res.Source + ": it is an independent database with its own roles; CPU mode " + res.CPUPolicy["mode"] + " and quota " + quota + " continue"
 	message, human := credentialsMessage(cmd, headline, headline, name, secret)
+
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"job_id": jr.JobID, "source": res.Source, "stanza": res.Stanza, "database": secret, "cpu_policy": res.CPUPolicy},
 		Message:  message,
@@ -255,19 +298,21 @@ func unfollowCredentials(err error, name string, secret databaseSecret, dryRun b
 	if dryRun || !errors.As(err, &cliErr) || !unfollowPasswordsUnknown(cliErr) {
 		return "", err
 	}
+
 	note := "The unfollow failed after it may have changed " + name + "'s roles and passwords, so these are the credentials to try first. " +
 		"If " + name + " still follows its source, they are unused and the next vaire db unfollow makes new ones."
 	out := *cliErr
+
 	details := map[string]any{}
 	if m, ok := cliErr.Details.(map[string]any); ok {
-		for k, v := range m {
-			details[k] = v
-		}
+		maps.Copy(details, m)
 	}
+
 	details["database"] = secret
 	details["credentials_note"] = note + " " + shownOnceNote
 	out.Details = details
 	out.Hint = strings.TrimSpace(out.Hint + " If they don't work, run vaire db unfollow " + name + " again; it finishes the unfollow and prints new ones.")
+
 	return note, &out
 }
 
@@ -279,11 +324,14 @@ func unfollowPasswordsUnknown(cliErr *output.CLIError) bool {
 	if cliErr.Code == output.CodeTransportFailed {
 		return true
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if changed, _ := details[node.UnfollowPasswordsDetail].(bool); changed {
 		return true
 	}
+
 	reason, _ := details["reason"].(string)
+
 	return reason == node.JobOutcomeUnknown
 }
 
@@ -294,11 +342,14 @@ func printCredentialBlock(cmd *cobra.Command, note, title string, secret databas
 	if output.UsesStructuredOutput(opts) {
 		return
 	}
+
 	text := note + "\n" + secret.String() + "\n" + shownOnceNote
 	if width, ok := styledStdout(cmd); ok {
 		text = ui.Warn(note) + "\n" + secret.styled("", title, shownOnceNote, width)
 	}
+
 	resume := ui.Suspend()
 	_, _ = fmt.Fprintln(cmd.OutOrStdout(), text)
+
 	resume()
 }

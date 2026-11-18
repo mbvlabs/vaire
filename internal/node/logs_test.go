@@ -32,6 +32,7 @@ time=2026-10-15T06:00:00Z level=WARN source=main.go:81 msg="Error loading config
 time=2026-10-15T06:00:00Z level=WARN source=main.go:137 msg="Failed to create PostgresCollector" err="empty dsn"
 time=2026-10-15T06:01:00Z level=ERROR source=probe.go:48 msg="Error opening connection to database" err="dial unix: no such file"
 `
+
 	got := lastExporterErrors(journal, 5)
 	if len(got) != 1 || !strings.Contains(got[0], "Error opening connection") {
 		t.Errorf("quoted %q", got)

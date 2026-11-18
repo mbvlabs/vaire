@@ -16,36 +16,48 @@ import (
 
 func followRetentionFixture(t *testing.T, recover bool) (followOwner, followAttemptKey) {
 	t.Helper()
+
 	oldPath, oldInstance, oldWrite := backup.RecordsPath, followHostInstance, followRetentionWrite
 	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
 	followHostInstance = func() (string, error) { return "install", nil }
+
 	t.Cleanup(func() { backup.RecordsPath, followHostInstance, followRetentionWrite = oldPath, oldInstance, oldWrite })
+
 	spec := config.ClusterSpec{Name: "follower", Follows: "source", FollowGeneration: "generation"}
+
 	owner := followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec}
 	if recover {
 		owner.Generation = ""
 		owner.Awaiting = backup.Awaiting{Since: "2026-01-01", Stanza: "follower-abcdef"}
 	}
+
 	key := followAttemptKey{
 		Job: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Operation: "01ARZ3NDEKTSV4RRFFQ69G5FAW",
 		SourceStanza: "source-abcdef", TemporaryPort: config.TemporaryPortMin,
 	}
+
 	if err := writeFollowOwnership(owner, followPhaseCopying); err != nil {
 		t.Fatal(err)
 	}
+
 	return owner, key
 }
 
 // Parser-only metadata fixture: these IDs are not used to authorize effects.
 func seedFollowRetentionBindingForParser(t *testing.T, owner followOwner, key followAttemptKey) {
 	t.Helper()
+
 	old := materialisationPostgresUID
 	materialisationPostgresUID = func() (uint32, error) { return 123, nil }
+
 	t.Cleanup(func() { materialisationPostgresUID = old })
+
 	o, err := pendingFollowAttempt(owner, key)
 	reject(t, err != nil, err)
+
 	o.Attempt.ArtifactStage = materialisationRegistered
 	o.Attempt.DataIdentity = materialisationFileID{Device: 1, Inode: 1, UID: 123}
+
 	o.Attempt.ConfigIdentity = materialisationFileID{Device: 1, Inode: 2, UID: 123}
 	if err := writeFollowRetention(o); err != nil {
 		t.Fatal(err)
@@ -84,12 +96,15 @@ func TestFollowerDropRefusesUnverifiedAttempt(t *testing.T) {
 	if err := beginFollowAttempt(owner, key); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := retainFollowAttempt(owner, key, "recovery_parameter_mismatch"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := refuseUnverifiedFollowerDrop(owner.Name, owner.Spec); err == nil {
 		t.Fatal("retained attempt accepted for name-only drop")
 	}
+
 	own, found, err := readFollowOwnership(owner)
 	rejectf(t, err != nil || !found || own.Attempt.State != followAttemptRetained, "retained record changed: %+v %v", own, err)
 }
@@ -108,18 +123,24 @@ func TestFollowRetentionCompletionAndLegacy(t *testing.T) {
 	owner, key := followRetentionFixture(t, false)
 	o, owned, err := readFollowOwnership(owner)
 	rejectf(t, err != nil || !owned || o.Attempt != nil || refuseIncompleteFollowAttempt(o) != nil, "legacy: %+v %v %v", o, owned, err)
+
 	if err := beginFollowAttempt(owner, key); err != nil {
 		t.Fatal(err)
 	}
+
 	foreign := owner
+
 	foreign.Generation = "another-generation"
 	if err := completeFollowAttempt(foreign, key); err == nil {
 		t.Fatal("different follow generation accepted")
 	}
+
 	seedFollowRetentionBindingForParser(t, owner, key)
+
 	if err := completeFollowAttempt(owner, key); err != nil {
 		t.Fatal(err)
 	}
+
 	o, owned, err = readFollowOwnership(owner)
 	rejectf(t, err != nil || !owned || o.Phase != followPhaseCopied || o.Attempt.State != followAttemptCompleted || refuseIncompleteFollowAttempt(o) != nil, "completed: %+v %v %v", o, owned, err)
 }
@@ -129,6 +150,7 @@ func TestFollowRetentionRejectsForeignIdentityAndFailureWrite(t *testing.T) {
 	if err := beginFollowAttempt(owner, key); err != nil {
 		t.Fatal(err)
 	}
+
 	for name, mutate := range map[string]func(*followOwner, *followAttemptKey){
 		"target":        func(o *followOwner, _ *followAttemptKey) { o.Name = "another" },
 		"source":        func(o *followOwner, _ *followAttemptKey) { o.Source = "another" },
@@ -142,23 +164,31 @@ func TestFollowRetentionRejectsForeignIdentityAndFailureWrite(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			foreign, foreignKey := owner, key
 			mutate(&foreign, &foreignKey)
+
 			if err := retainFollowAttempt(foreign, foreignKey, "recovery_parameter_mismatch"); err == nil {
 				t.Fatal("foreign attempt accepted")
 			}
 		})
 	}
+
 	followHostInstance = func() (string, error) { return "other-install", nil }
+
 	if err := retainFollowAttempt(owner, key, "recovery_parameter_mismatch"); err == nil {
 		t.Fatal("foreign install accepted")
 	}
+
 	followHostInstance = func() (string, error) { return "install", nil }
+
 	if err := retainFollowAttempt(owner, key, "other"); err == nil {
 		t.Fatal("unsafe reason accepted")
 	}
+
 	followRetentionWrite = func(string, []byte, os.FileMode) error { return errors.New("injected write failure") }
+
 	if err := retainFollowAttempt(owner, key, "recovery_parameter_mismatch"); err == nil {
 		t.Fatal("write failure ignored")
 	}
+
 	o, owned, err := readFollowOwnership(owner)
 	rejectf(t, err != nil || !owned || o.Attempt.State != followAttemptPending || refuseIncompleteFollowAttempt(o) == nil, "failed write did not retain blocked pending: %+v %v %v", o, owned, err)
 }
@@ -167,6 +197,7 @@ func TestFollowRetentionInvalidAttemptFailsClosed(t *testing.T) {
 	owner, _ := followRetentionFixture(t, false)
 	p, err := followOwnershipPath(owner.Name)
 	reject(t, err != nil, err)
+
 	for _, raw := range []string{
 		`{"database":"follower","source":"source","instance":"install","operation":"follow","generation":"generation","phase":"copying","attempt":null}`,
 		`{"database":"follower","source":"source","instance":"install","operation":"follow","generation":"generation","phase":"copying","attempt":{"state":"pending"}}`,
@@ -174,6 +205,7 @@ func TestFollowRetentionInvalidAttemptFailsClosed(t *testing.T) {
 		if err := os.WriteFile(p, []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
 		}
+
 		if _, _, err := readFollowOwnership(owner); err == nil {
 			t.Fatal("accepted corrupt attempt")
 		}
@@ -189,21 +221,27 @@ func runFollowerRuntimeRefusal(t *testing.T, recover, foreign bool) {
 	reject(t, err != nil, err)
 	before, err := os.ReadFile(path)
 	reject(t, err != nil, err)
+
 	if foreign {
 		followHostInstance = func() (string, error) { return "different-install", nil }
 	}
+
 	cfg := config.DefaultCluster()
 	cfg.Server.DataRoot = t.TempDir()
 	source := config.ClusterSpec{Name: owner.Source, Port: 5433, Stanza: "source-abcdef", Size: "small"}
 	cfg.Clusters = []config.ClusterSpec{source, owner.Spec}
+
 	if recover {
 		mustNoErr(t, backup.UpdateRecords(func(s *backup.Records) error {
 			s.AwaitingRecovery[owner.Name] = owner.Awaiting
 			return nil
 		}))
 	}
+
 	oldSlots, oldNew := followerSlotOps, newFollowerCopy
+
 	t.Cleanup(func() { followerSlotOps, newFollowerCopy = oldSlots, oldNew })
+
 	effects := 0
 	followerSlotOps.inspect = func(context.Context, config.ClusterSpec, string) (followerSlotState, error) {
 		effects++
@@ -215,12 +253,15 @@ func runFollowerRuntimeRefusal(t *testing.T, recover, foreign bool) {
 	}
 	env := &jobEnv{ID: key.Job, OperationID: key.Operation, Job: "db-follow", Cluster: cfg}
 	reject(t, materialiseFollower(context.Background(), env, cfg, source, owner.Spec, followFromStanza, recover) == nil, "retained attempt accepted by build")
+
 	if !recover {
 		recs, err := backup.LoadRecords()
 		reject(t, err != nil, err)
+
 		_, retryErr := followRetryable(cfg, recs, owner.Spec)
 		reject(t, retryErr == nil, "retained attempt accepted for public retry")
 	}
+
 	after, err := os.ReadFile(path)
 	rejectf(t, err != nil || string(before) != string(after) || effects != 0, "record or host effects changed: %v effects=%d", err, effects)
 }
@@ -229,6 +270,7 @@ func runRetentionCaseEquivalent(t *testing.T, state, name string) {
 	t.Helper()
 	owner, key := followRetentionFixture(t, false)
 	mustNoErr(t, beginFollowAttempt(owner, key))
+
 	switch state {
 	case "retained":
 		mustNoErr(t, retainFollowAttempt(owner, key, "recovery_parameter_mismatch"))
@@ -236,11 +278,14 @@ func runRetentionCaseEquivalent(t *testing.T, state, name string) {
 		seedFollowRetentionBindingForParser(t, owner, key)
 		mustNoErr(t, completeFollowAttempt(owner, key))
 	}
+
 	path, err := followOwnershipPath(owner.Name)
 	reject(t, err != nil, err)
 	data, err := os.ReadFile(path)
 	reject(t, err != nil, err)
+
 	raw := strings.Replace(string(data), `"attempt":`, `"`+name+`":`, 1)
+
 	switch state {
 	case "malformed-completed":
 		raw = strings.Replace(raw, `"job":"`+key.Job+`"`, `"job":""`, 1)
@@ -250,18 +295,23 @@ func runRetentionCaseEquivalent(t *testing.T, state, name string) {
 		raw = strings.TrimSpace(raw)
 		raw = strings.TrimSuffix(raw, "}") + `,"attempt":null}`
 	}
+
 	mustNoErr(t, os.WriteFile(path, []byte(raw), 0o600))
+
 	own, owned, readErr := readFollowOwnership(owner)
+
 	switch state {
 	case "completed":
 		rejectf(t, readErr != nil || !owned || refuseIncompleteFollowAttempt(own) != nil, "valid completed rejected: %+v %v %v", own, owned, readErr)
 		mustNoErr(t, clearFollowOwnership(owner.Name))
+
 		return
 	case "pending", "retained":
 		rejectf(t, readErr != nil || !owned || refuseIncompleteFollowAttempt(own) == nil, "incomplete not blocked: %+v %v %v", own, owned, readErr)
 	default:
 		reject(t, readErr == nil, "invalid record accepted")
 	}
+
 	reject(t, clearFollowOwnership(owner.Name) == nil ||
 		retireFollowOwnershipAfterDrop(owner.Name, owner.Source, owner.Generation) == nil ||
 		writeFollowOwnership(owner, followPhaseCopying) == nil, "invalid or incomplete record was cleared, retired or overwritten")
@@ -275,6 +325,7 @@ func TestFollowRetentionCaseEquivalentAttempt(t *testing.T) {
 			})
 		}
 	}
+
 	invalid := followOwnership{Phase: followPhaseCopied, Attempt: &followRetentionAttempt{State: followAttemptCompleted}}
 	reject(t, refuseIncompleteFollowAttempt(invalid) == nil, "malformed completed value bypassed predicate validation")
 }

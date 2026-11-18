@@ -38,11 +38,14 @@ func Hash(pw string) (string, error) {
 	if len(pw) < MinLength {
 		return "", ErrTooShort
 	}
+
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
+
 	sum := argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, keyLen)
+
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, argonMemory, argonTime, argonThreads,
 		base64.RawStdEncoding.EncodeToString(salt),
@@ -56,7 +59,9 @@ func Verify(encoded, pw string) bool {
 	if !ok {
 		return false
 	}
+
 	got := argon2.IDKey([]byte(pw), salt, params[1], params[0], uint8(params[2]), uint32(len(want))) //nolint:gosec // G115: parseHash bounds all parameters and lengths.
+
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
@@ -73,10 +78,12 @@ func parseHash(encoded string) (params [3]uint32, salt, sum []byte, ok bool) {
 	if len(encoded) > 256 {
 		return params, nil, nil, false
 	}
+
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" || parts[2] != "v=19" {
 		return params, nil, nil, false
 	}
+
 	m := hashParams.FindStringSubmatch(parts[3])
 	if m == nil {
 		return params, nil, nil, false
@@ -84,24 +91,31 @@ func parseHash(encoded string) (params [3]uint32, salt, sum []byte, ok bool) {
 	// At most 64 MiB, three passes and four lanes. Raise these bounds
 	// deliberately if a future release starts generating stronger hashes.
 	limits := [3]uint64{64 * 1024, 3, 4}
+
 	for i := range params {
 		n, err := strconv.ParseUint(m[i+1], 10, 32)
 		if err != nil || n == 0 || n > limits[i] {
 			return params, nil, nil, false
 		}
+
 		params[i] = uint32(n)
 	}
+
 	if params[0] < 8*params[2] {
 		return params, nil, nil, false
 	}
+
 	var err error
+
 	salt, err = base64.RawStdEncoding.Strict().DecodeString(parts[4])
 	if err != nil || len(salt) < saltLen || len(salt) > 32 || base64.RawStdEncoding.EncodeToString(salt) != parts[4] {
 		return params, nil, nil, false
 	}
+
 	sum, err = base64.RawStdEncoding.Strict().DecodeString(parts[5])
 	if err != nil || len(sum) < keyLen || len(sum) > 64 || base64.RawStdEncoding.EncodeToString(sum) != parts[5] {
 		return params, nil, nil, false
 	}
+
 	return params, salt, sum, true
 }

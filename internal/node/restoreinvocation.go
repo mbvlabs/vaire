@@ -33,24 +33,30 @@ func withRestorePreparation(ctx context.Context, env *Env, db, method string, pr
 		return err
 	}
 	defer release()
+
 	names := []string{db, backup.RestoringName(db)}
 	sort.Strings(names)
+
 	for _, name := range names {
 		mode := engine.LockShared
 		if name == backup.RestoringName(db) {
 			mode = engine.LockExclusive
 		}
+
 		unlock, err := nodeLockers.cluster(ctx, name, mode, method, env.Req.RequestID, env.Req.LockTimeout())
 		if err != nil {
 			return err
 		}
 		defer unlock()
 	}
+
 	cfg, err := loadGuardCluster()
 	if err != nil {
 		return err
 	}
+
 	env.Cluster = cfg
+
 	return prepare()
 }
 
@@ -59,13 +65,16 @@ func restoreInvocationProvenance(env *Env) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+
 	operation := env.Req.OperationID
 	if operation == "" {
 		operation = env.Req.RequestID
 	}
+
 	if instance == "" || operation == "" || env.Req.RequestID == "" {
 		return "", "", incompleteMaterialisation("restore invocation")
 	}
+
 	return instance, operation, nil
 }
 
@@ -74,6 +83,7 @@ func matchesRestoreInvocation(r backup.Restore, env *jobEnv, db string) bool {
 	if operation == "" {
 		operation = env.ID
 	}
+
 	return db != "" && env.ID != "" && env.installID != "" && operation != "" &&
 		r.Database == db && r.ID == env.ID &&
 		r.InstanceID == env.installID && r.OperationID == operation &&
@@ -84,21 +94,25 @@ func validateRestoreInvocation(env *jobEnv) error {
 	if env.Job != "restore" && env.Job != "recover" {
 		return nil
 	}
+
 	var p struct {
 		Database string `json:"database"`
 	}
 	if err := json.Unmarshal(env.Params, &p); err != nil {
 		return err
 	}
+
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	r, ok := records.Restores[p.Database]
 	if !ok || r.Phase != backup.PhaseRestoring || !supportedRestoreKind(r.Kind) ||
 		!matchesRestoreInvocation(r, env, p.Database) {
 		return incompleteMaterialisation(backup.RestoringName(p.Database))
 	}
+
 	if env.Job == "restore" {
 		var params restoreParams
 		if json.Unmarshal(env.Params, &params) != nil || !supportedRestoreKind(params.Kind) || params.Kind != r.Kind || params.Promote != r.Promote {
@@ -111,5 +125,6 @@ func validateRestoreInvocation(env *jobEnv) error {
 			return incompleteMaterialisation(backup.RestoringName(p.Database))
 		}
 	}
+
 	return nil
 }

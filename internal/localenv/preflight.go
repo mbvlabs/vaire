@@ -49,11 +49,13 @@ func PackageManager() string {
 	if runtime.GOOS == "darwin" {
 		order = []string{"brew"}
 	}
+
 	for _, pm := range order {
 		if _, err := exec.LookPath(pm); err == nil {
 			return pm
 		}
 	}
+
 	return ""
 }
 
@@ -61,11 +63,14 @@ func PackageManager() string {
 // or nil when no supported package manager is present.
 func InstallCommand(tool Tool) []string {
 	pm := PackageManager()
+
 	pkg, ok := tool.Packages[pm]
 	if !ok {
 		return nil
 	}
+
 	var cmd []string
+
 	switch pm {
 	case "apt-get":
 		cmd = []string{"apt-get", "install", "-y", pkg}
@@ -76,19 +81,23 @@ func InstallCommand(tool Tool) []string {
 	case "brew":
 		return []string{"brew", "install", pkg}
 	}
+
 	if os.Geteuid() != 0 {
 		cmd = append([]string{"sudo"}, cmd...)
 	}
+
 	return cmd
 }
 
 func missingBinaries(tool Tool) []string {
 	var missing []string
+
 	for _, bin := range tool.Binaries {
 		if _, err := exec.LookPath(bin); err != nil {
 			missing = append(missing, bin)
 		}
 	}
+
 	return missing
 }
 
@@ -100,9 +109,11 @@ func RequireTool(cmd *cobra.Command, tool Tool) error {
 	if len(missing) == 0 {
 		return nil
 	}
+
 	install := InstallCommand(tool)
 	line := strings.Join(install, " ")
 	run := false
+
 	switch {
 	case flagBool(cmd, "install-missing"):
 		run = install != nil
@@ -111,29 +122,36 @@ func RequireTool(cmd *cobra.Command, tool Tool) error {
 		if err != nil {
 			return err
 		}
+
 		run = ok
 	}
+
 	if run {
 		args := install
 		if args[0] == "sudo" && !canPrompt(cmd) {
 			args = append([]string{"sudo", "-n"}, args[1:]...)
 		}
+
 		child := exec.CommandContext(cmd.Context(), args[0], args[1:]...) //nolint:gosec // G204: fixed package-manager command for a known tool.
 		child.Stdin = os.Stdin
 		child.Stdout = os.Stderr
+
 		child.Stderr = os.Stderr
 		if err := child.Run(); err != nil {
 			return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "Install "+tool.Name+" by hand: "+line).
 				WithDetails(map[string]any{"tool": tool.Name, "install_command": line})
 		}
+
 		if missing = missingBinaries(tool); len(missing) == 0 {
 			return nil
 		}
 	}
+
 	hint := "Install " + tool.Name + " and retry."
 	if line != "" {
 		hint = "Run `" + line + "`, or re-run with --install-missing."
 	}
+
 	return output.NewError(
 		output.CodeMissingTool,
 		tool.Name+" is needed to "+tool.Reason+" but "+strings.Join(missing, ", ")+" is not on PATH",
@@ -147,14 +165,18 @@ func CheckReachable(ctx context.Context, addr string, timeout time.Duration) err
 	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		hint := "Check the address and that SSH is open on it."
+
 		var opErr *net.OpError
 		if errors.As(err, &opErr) && opErr.Timeout() {
 			hint = "The connection timed out. Check the provider firewall and the address."
 		}
+
 		return output.WrapError(output.CodeRemoteUnreachable, err, output.ExitTransport, hint).
 			WithDetails(map[string]any{"address": addr})
 	}
+
 	_ = conn.Close()
+
 	return nil
 }
 

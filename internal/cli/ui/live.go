@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,7 @@ func Enabled(f *os.File) bool {
 	if f == nil || !term.IsTerminal(int(f.Fd())) {
 		return false
 	}
+
 	return os.Getenv("TERM") != "dumb"
 }
 
@@ -76,6 +78,7 @@ func Writer(w io.Writer) io.Writer {
 func Start(f *os.File) *Live {
 	activeMu.Lock()
 	defer activeMu.Unlock()
+
 	if active == nil {
 		active = &Live{
 			out:     Writer(f),
@@ -88,6 +91,7 @@ func Start(f *os.File) *Live {
 			),
 		}
 	}
+
 	return active
 }
 
@@ -97,13 +101,16 @@ func Suspend() func() {
 	activeMu.Lock()
 	l := active
 	activeMu.Unlock()
+
 	if l == nil {
 		return func() {}
 	}
+
 	l.mu.Lock()
 	l.paused++
 	l.clear()
 	l.mu.Unlock()
+
 	return func() {
 		l.mu.Lock()
 		l.paused--
@@ -118,17 +125,21 @@ func Finish(failed bool) {
 	activeMu.Lock()
 	l := active
 	activeMu.Unlock()
+
 	if l == nil {
 		return
 	}
+
 	if failed {
 		l.mu.Lock()
 		running := append([]*Task(nil), l.tasks...)
 		l.mu.Unlock()
-		for i := len(running) - 1; i >= 0; i-- {
-			running[i].End(EndFail, "")
+
+		for _, r := range slices.Backward(running) {
+			r.End(EndFail, "")
 		}
 	}
+
 	Close()
 }
 
@@ -138,9 +149,11 @@ func Close() {
 	l := active
 	active = nil
 	activeMu.Unlock()
+
 	if l == nil {
 		return
 	}
+
 	l.mu.Lock()
 	l.tasks = nil
 	l.status = nil
@@ -154,6 +167,7 @@ func (l *Live) Width() int {
 	if w, _, err := term.GetSize(l.fd); err == nil && w > 0 {
 		return w
 	}
+
 	return 80
 }
 
@@ -161,6 +175,7 @@ func (l *Live) Width() int {
 func (l *Live) Println(s string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	l.clear()
 	_, _ = fmt.Fprintln(l.out, s)
 	l.lastOut = time.Now()
@@ -174,6 +189,7 @@ func (l *Live) Header(title string) {
 		l.mu.Unlock()
 		return
 	}
+
 	l.lastHead = title
 	l.mu.Unlock()
 	l.Println("\n" + Header(title, l.Width()))
@@ -183,16 +199,19 @@ func (l *Live) Header(title string) {
 func (l *Live) Start(key, title string) *Task {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	for _, t := range l.tasks {
 		if t.key == key {
 			t.title = title
 			return t
 		}
 	}
+
 	t := &Task{l: l, key: key, title: title, started: time.Now()}
 	l.tasks = append(l.tasks, t)
 	l.startTicker()
 	l.draw()
+
 	return t
 }
 
@@ -201,14 +220,17 @@ func (l *Live) Start(key, title string) *Task {
 func (l *Live) Task(key string) *Task {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	for _, t := range l.tasks {
 		if t.key == key {
 			return t
 		}
 	}
+
 	if len(l.tasks) > 0 {
 		return l.tasks[len(l.tasks)-1]
 	}
+
 	return nil
 }
 
@@ -216,11 +238,13 @@ func (l *Live) Task(key string) *Task {
 func (l *Live) Running(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	for _, t := range l.tasks {
 		if t.key == key {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -241,6 +265,7 @@ func (t *Task) Title(s string) {
 // Lines sets status lines shown under the task, such as resolver answers.
 func (t *Task) Lines(lines []string) {
 	t.l.mu.Lock()
+
 	t.lines = append([]string(nil), lines...)
 	t.l.mu.Unlock()
 }
@@ -272,18 +297,22 @@ func (t *Task) End(state, detail string) {
 	l := t.l
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	for i, other := range l.tasks {
 		if other == t {
 			l.tasks = append(l.tasks[:i], l.tasks[i+1:]...)
 			break
 		}
 	}
+
 	l.clear()
 	_, _ = fmt.Fprintln(l.out, l.truncate(finalLine(state, t.title, detail, time.Since(t.started))))
+
 	l.lastOut = time.Now()
 	if len(l.tasks) == 0 && l.status == nil {
 		l.stopTicker()
 	}
+
 	l.draw()
 }
 
@@ -295,6 +324,7 @@ func (l *Live) Line(state, title, detail string) {
 
 func finalLine(state, title, detail string, took time.Duration) string {
 	var sym string
+
 	switch state {
 	case EndOK:
 		sym = styleOK.Render(SymOK)
@@ -306,13 +336,16 @@ func finalLine(state, title, detail string, took time.Duration) string {
 		sym = styleDim.Render(SymSkip)
 		return sym + " " + styleDim.Render(strings.TrimSpace(title+"  "+detail))
 	}
+
 	line := sym + " " + title
+
 	if detail != "" {
 		// A failed step's detail is its error, not a secondary hint.
 		detailStyle := styleDim
 		if state == EndFail {
 			detailStyle = styleFail
 		}
+
 		line += "  " + detailStyle.Render(sanitize(detail))
 	}
 	// took is zero only for a line that never ran as a task, whose duration
@@ -320,6 +353,7 @@ func finalLine(state, title, detail string, took time.Duration) string {
 	if took > 0 {
 		line += "  " + styleDim.Render(formatDuration(took))
 	}
+
 	return line
 }
 
@@ -327,11 +361,14 @@ func (l *Live) startTicker() {
 	if l.running {
 		return
 	}
+
 	l.running = true
+
 	l.stop = make(chan struct{})
 	go func(stop chan struct{}) {
 		t := time.NewTicker(tick)
 		defer t.Stop()
+
 		for {
 			select {
 			case <-stop:
@@ -357,10 +394,12 @@ func (l *Live) clear() {
 	if l.drawn == 0 {
 		return
 	}
+
 	seq := "\r"
 	if l.drawn > 1 {
 		seq += ansi.CursorUp(l.drawn - 1)
 	}
+
 	_, _ = io.WriteString(l.out, seq+ansi.EraseScreenBelow)
 	l.drawn = 0
 }
@@ -368,39 +407,50 @@ func (l *Live) clear() {
 // draw redraws the live area. The caller holds l.mu.
 func (l *Live) draw() {
 	l.clear()
+
 	if l.paused > 0 {
 		return
 	}
+
 	frames := l.spinner.Frames
+
 	frame := frames[int(time.Now().UnixMilli()/int64(l.spinner.FPS/time.Millisecond))%len(frames)]
 	if len(l.tasks) == 0 {
 		if l.status != nil && time.Since(l.lastOut) >= idleAfter {
 			_, _ = io.WriteString(l.out, l.truncate(l.status.line(styleSpinner.Render(frame), time.Now())))
 			l.drawn = 1
 		}
+
 		return
 	}
+
 	var lines []string
+
 	for _, t := range l.tasks {
 		elapsed := formatDuration(time.Since(t.started))
 		if !t.deadline.IsZero() {
 			left := max(time.Until(t.deadline), 0)
 			elapsed += ", " + formatDuration(left) + " left"
 		}
+
 		lines = append(lines, styleSpinner.Render(frame)+" "+t.title+"  "+styleDim.Render(elapsed))
 		for _, s := range t.lines {
 			lines = append(lines, "  "+s)
 		}
+
 		if t.hasPct {
 			lines = append(lines, "  "+l.bar.ViewAs(t.pct)+" "+styleDim.Render(t.pctLabel))
 		}
+
 		if t.detail != "" {
 			lines = append(lines, styleDim.Render("  └ "+t.detail))
 		}
 	}
+
 	for i := range lines {
 		lines[i] = l.truncate(lines[i])
 	}
+
 	_, _ = io.WriteString(l.out, strings.Join(lines, "\n"))
 	l.drawn = len(lines)
 }
@@ -416,10 +466,12 @@ func truncate(s string, width int) string {
 // sanitize keeps one printable line from script output.
 func sanitize(s string) string {
 	s = ansi.Strip(s)
+
 	s = strings.ReplaceAll(s, "\t", "  ")
 	if i := strings.LastIndex(s, "\r"); i >= 0 {
 		s = s[i+1:]
 	}
+
 	return strings.TrimSpace(s)
 }
 

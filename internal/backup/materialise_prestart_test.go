@@ -17,9 +17,11 @@ func TestMaterialisedBeforeStartRunsBeforeStarting(t *testing.T) {
 		return errors.New("missing extension prerequisite")
 	}}
 	err := m.start(context.Background())
+
 	if !called {
 		t.Fatal("BeforeStart was not called")
 	}
+
 	if err == nil || !strings.Contains(err.Error(), "missing extension prerequisite") {
 		t.Fatalf("start error = %v", err)
 	}

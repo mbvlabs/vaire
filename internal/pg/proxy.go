@@ -34,8 +34,10 @@ func ServeTLSProxy(ctx context.Context, ln net.Listener, dialer transport.Dialer
 		if err != nil {
 			return
 		}
+
 		go func() {
 			defer func() { _ = conn.Close() }()
+
 			_ = proxyTLS(ctx, conn, dialer, remote, cfg)
 		}()
 	}
@@ -45,21 +47,27 @@ func proxyTLS(ctx context.Context, client net.Conn, dialer transport.Dialer, rem
 	// Decline SSL and GSS encryption on the loopback leg until the client
 	// sends its startup (or cancel) message.
 	var first []byte
+
 	for range 3 {
 		msg, err := readStartup(client)
 		if err != nil {
 			return err
 		}
+
 		code := binary.BigEndian.Uint32(msg[4:8])
 		if len(msg) == 8 && (code == sslRequestCode || code == gssencRequestCode) {
 			if _, err := client.Write([]byte{'N'}); err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		first = msg
+
 		break
 	}
+
 	if first == nil {
 		return errors.New("client sent no startup message")
 	}
@@ -69,30 +77,40 @@ func proxyTLS(ctx context.Context, client net.Conn, dialer transport.Dialer, rem
 		return err
 	}
 	defer func() { _ = upstream.Close() }()
+
 	req := make([]byte, 8)
 	binary.BigEndian.PutUint32(req[0:4], 8)
 	binary.BigEndian.PutUint32(req[4:8], sslRequestCode)
+
 	if _, err := upstream.Write(req); err != nil {
 		return err
 	}
+
 	answer := make([]byte, 1)
 	if _, err := io.ReadFull(upstream, answer); err != nil {
 		return err
 	}
+
 	if answer[0] != 'S' {
 		return errors.New("the server refused TLS")
 	}
+
 	secure := tls.Client(upstream, cfg)
 	if err := secure.HandshakeContext(ctx); err != nil {
 		return err
 	}
+
 	if _, err := secure.Write(first); err != nil {
 		return err
 	}
+
 	done := make(chan struct{}, 2)
+
 	go func() { _, _ = io.Copy(secure, client); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(client, secure); done <- struct{}{} }()
+
 	<-done
+
 	return nil
 }
 
@@ -102,14 +120,18 @@ func readStartup(r io.Reader) ([]byte, error) {
 	if _, err := io.ReadFull(r, head); err != nil {
 		return nil, err
 	}
+
 	n := binary.BigEndian.Uint32(head)
 	if n < 8 || n > maxStartupLen {
 		return nil, fmt.Errorf("bad startup message length %d", n)
 	}
+
 	msg := make([]byte, n)
 	copy(msg, head)
+
 	if _, err := io.ReadFull(r, msg[4:]); err != nil {
 		return nil, err
 	}
+
 	return msg, nil
 }

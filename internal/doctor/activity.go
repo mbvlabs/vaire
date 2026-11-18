@@ -25,11 +25,13 @@ func activityStorage(f Facts) []Result {
 	if !f.ActivityHealthChecked {
 		return one(Skip, "the activity history was not measured", "")
 	}
+
 	if !f.ActivityHealthKnown {
 		// The store refused or failed the read: that is missing evidence, not a
 		// clean skip. The fixed message keeps any raw error out of the report.
 		return one(Warn, "activity history health could not be read", "")
 	}
+
 	h := f.ActivityHealth
 	switch {
 	case !h.Exists:
@@ -41,12 +43,15 @@ func activityStorage(f Facts) []Result {
 	case !h.Readable:
 		return one(Fail, "the activity history is not readable", "")
 	}
+
 	if h.OverBudget {
 		return one(Warn, activityUsage(h)+": over its byte budget", "")
 	}
+
 	if h.LossDetected || h.MalformedSegments > 0 || h.MalformedEvents > 0 || h.DroppedEvents > 0 || h.SequenceGaps > 0 {
 		return one(Warn, "the activity history shows lost or unreadable evidence", "")
 	}
+
 	return one(Pass, activityUsage(h), "")
 }
 
@@ -57,13 +62,16 @@ func activityPermissions(f Facts) []Result {
 	if !f.ActivityHealthChecked {
 		return one(Skip, "the activity history was not measured", "")
 	}
+
 	if !f.ActivityHealthKnown {
 		return one(Skip, "activity history health could not be read", "")
 	}
+
 	h := f.ActivityHealth
 	if !h.Exists {
 		return one(Skip, "no activity history recorded yet", "")
 	}
+
 	switch {
 	case !h.IsDir:
 		return one(Fail, "the activity history is not a directory", "")
@@ -75,8 +83,10 @@ func activityPermissions(f Facts) []Result {
 		if h.NonOwnerOnlySegments > 0 {
 			return one(Fail, fmt.Sprintf("the activity history is not owner-only (%d segments)", h.NonOwnerOnlySegments), "")
 		}
+
 		return one(Fail, "the activity history is not owner-only", "")
 	}
+
 	return one(Pass, "the activity history is owner-only and writable", "")
 }
 
@@ -87,9 +97,11 @@ func activityCoverage(f Facts) []Result {
 	if !f.ActivityHealthChecked {
 		return one(Skip, "the activity history was not measured", "")
 	}
+
 	if !f.ActivityHealthKnown {
 		return one(Skip, "activity history health could not be read", "")
 	}
+
 	h := f.ActivityHealth
 	switch {
 	case !h.Exists:
@@ -101,7 +113,9 @@ func activityCoverage(f Facts) []Result {
 	case h.FirstRetainedAt == "" || h.LastRetainedAt == "":
 		return one(Warn, "the activity history's retained window is incomplete", "")
 	}
+
 	first, firstOK := parseTime(h.FirstRetainedAt)
+
 	last, lastOK := parseTime(h.LastRetainedAt)
 	switch {
 	case (h.FirstRetainedAt != "" && !firstOK) || (h.LastRetainedAt != "" && !lastOK):
@@ -109,6 +123,7 @@ func activityCoverage(f Facts) []Result {
 	case first.After(last):
 		return one(Warn, "the activity history's retained window is inconsistent", "")
 	}
+
 	return one(Pass, "activity history covers "+h.FirstRetainedAt+" to "+h.LastRetainedAt, "")
 }
 
@@ -117,5 +132,6 @@ func activityUsage(h activity.Health) string {
 	if h.MaxBytes > 0 {
 		return fmt.Sprintf("%d activity segments use %d of %d bytes", h.Segments, h.UsedBytes, h.MaxBytes)
 	}
+
 	return fmt.Sprintf("%d activity segments", h.Segments)
 }

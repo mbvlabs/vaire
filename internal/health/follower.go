@@ -57,14 +57,17 @@ type FollowerState struct {
 // state is never encoded as false or as the -1 no-cap sentinel.
 func (s FollowerState) MarshalJSON() ([]byte, error) {
 	type state FollowerState
+
 	raw, err := json.Marshal(state(s))
 	if err != nil {
 		return nil, err
 	}
+
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
 	}
+
 	if !s.SourceKnown {
 		delete(fields, "streaming")
 		delete(fields, "slot_exists")
@@ -72,10 +75,12 @@ func (s FollowerState) MarshalJSON() ([]byte, error) {
 		delete(fields, "slot_safe_bytes")
 		delete(fields, "slot_uncapped")
 	}
+
 	if !s.SelfKnown {
 		delete(fields, "in_recovery")
 		delete(fields, "replay_paused")
 	}
+
 	return json.Marshal(fields)
 }
 
@@ -88,6 +93,7 @@ func FollowerSourceSQL(follower, slot string) string {
 	app, s := quote(follower), quote(slot)
 	rep := "FROM pg_stat_replication WHERE application_name = " + app + " ORDER BY backend_start DESC LIMIT 1"
 	sl := "FROM pg_replication_slots WHERE slot_name = " + s
+
 	return `SELECT
   pg_current_wal_lsn()::text AS source_lsn,
   coalesce((SELECT state ` + rep + `), '') AS sender_state,
@@ -118,31 +124,40 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 		st.InRecovery = self["in_recovery"] == "true"
 		st.ReplayPaused = self["pause_state"] == "paused" || self["pause_state"] == "pause requested"
 	}
+
 	if src == nil {
 		return st
 	}
+
 	st.SenderState = src["sender_state"]
+
 	st.Streaming = st.SenderState == "streaming"
 	if st.SelfKnown && st.InRecovery {
 		st.ReceiveBacklogBytes = lsnBacklog(src["source_lsn"], self["receive_lsn"])
 		st.ReplayBacklogBytes = lsnBacklog(src["source_lsn"], self["replay_lsn"])
 	}
+
 	st.SlotExists = src["slot_active"] != ""
 	if st.SlotExists {
 		st.SlotActive = src["slot_active"] == "true"
+
 		st.SlotWALStatus = src["slot_wal_status"]
 		if retained, ok := parseKnownInt(src["slot_retained"]); ok {
 			st.SlotRetainedBytes = &retained
 		}
+
 		st.SlotSafeBytes, st.SlotUncapped = slotSafety(src)
 	}
+
 	if lag, ok := parseKnownInt(src["lag_bytes"]); ok {
 		// A replay LSN at or ahead of the source's is a caught-up follower.
 		if lag < 0 {
 			lag = 0
 		}
+
 		st.LagBytes = &lag
 	}
+
 	switch {
 	case !st.Streaming:
 		// PostgreSQL reports replay_lag on a walsender: no sender, no
@@ -158,6 +173,7 @@ func ParseFollower(source, slot string, src, self map[string]string) FollowerSta
 		seconds := 0.0
 		st.LagSeconds = &seconds
 	}
+
 	return st
 }
 
@@ -166,21 +182,27 @@ func parseLSN(s string) (uint64, bool) {
 	if !ok || hi == "" || lo == "" || len(hi) > 8 || len(lo) > 8 {
 		return 0, false
 	}
+
 	h, e1 := strconv.ParseUint(hi, 16, 32)
+
 	l, e2 := strconv.ParseUint(lo, 16, 32)
 	if e1 != nil || e2 != nil {
 		return 0, false
 	}
+
 	return h<<32 | l, true
 }
 
 func lsnBacklog(source, follower string) *uint64 {
 	s, ok := parseLSN(source)
+
 	f, ok2 := parseLSN(follower)
 	if !ok || !ok2 || f > s || s-f > math.MaxInt64 {
 		return nil
 	}
+
 	n := s - f
+
 	return &n
 }
 
@@ -192,6 +214,7 @@ func (s FollowerState) SlotHalfUsed() bool {
 	if s.SlotUncapped || s.SlotSafeBytes == nil || s.SlotRetainedBytes == nil {
 		return false
 	}
+
 	return s.SlotExists && *s.SlotRetainedBytes > *s.SlotSafeBytes
 }
 
@@ -205,19 +228,25 @@ func slotSafety(src map[string]string) (*int64, bool) {
 	if n, ok := parseKnownInt(src["slot_safe"]); ok {
 		return &n, false
 	}
+
 	if strings.TrimSpace(src["slot_safe"]) != "" {
 		return nil, false
 	}
+
 	if strings.TrimSpace(src["slot_uncapped"]) != "true" {
 		return nil, false
 	}
+
 	if status := strings.TrimSpace(src["slot_wal_status"]); status == "" || status == "lost" {
 		return nil, false
 	}
+
 	if strings.TrimSpace(src["slot_retained"]) == "" {
 		return nil, false
 	}
+
 	unlimited := int64(-1)
+
 	return &unlimited, true
 }
 

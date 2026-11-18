@@ -25,10 +25,11 @@ func verificationWrap(err error) error {
 	if err == nil {
 		return nil
 	}
-	var cliErr *output.CLIError
-	if errors.As(err, &cliErr) {
+
+	if _, ok := errors.AsType[*output.CLIError](err); ok {
 		return err
 	}
+
 	return output.WrapError(
 		output.CodeReleaseVerification,
 		err,
@@ -46,10 +47,11 @@ func unreachable(url string, err error) error {
 			"",
 		).WithDetails(map[string]any{"url": url})
 	}
-	var cliErr *output.CLIError
-	if errors.As(err, &cliErr) {
+
+	if _, ok := errors.AsType[*output.CLIError](err); ok {
 		return err
 	}
+
 	return output.WrapError(
 		output.CodeRemoteUnreachable,
 		err,

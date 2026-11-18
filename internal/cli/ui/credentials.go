@@ -26,13 +26,16 @@ type URLRow struct {
 // dropped, and the note wraps to width.
 func Credentials(headline, title string, rows []CredentialRow, urls []URLRow, note string, width int) string {
 	width = max(width, 20)
+
 	roleW, userW := len("ROLE"), len("USER")
 	for _, r := range rows {
 		roleW = max(roleW, lipgloss.Width(r.Role))
 		userW = max(userW, lipgloss.Width(r.User))
 	}
+
 	pad := func(s string, w int) string { return s + strings.Repeat(" ", max(w-lipgloss.Width(s), 0)) }
 	lines := make([]string, 0, 3+len(rows))
+
 	lines = append(lines,
 		styleTitle.Render(title),
 		"",
@@ -41,6 +44,7 @@ func Credentials(headline, title string, rows []CredentialRow, urls []URLRow, no
 	for _, r := range rows {
 		lines = append(lines, styleAccent.Render(pad(r.Role, roleW))+"  "+pad(r.User, userW)+"  "+r.Password)
 	}
+
 	table := strings.Join(lines, "\n")
 	// Border and padding take two columns on each side.
 	if lipgloss.Width(table)+4 <= width {
@@ -51,21 +55,28 @@ func Credentials(headline, title string, rows []CredentialRow, urls []URLRow, no
 	if headline != "" {
 		b.WriteString(styleOK.Render(SymOK+" "+headline) + "\n")
 	}
+
 	b.WriteString(table)
+
 	if len(urls) > 0 {
 		b.WriteString("\n\n" + urlFrame(urls, width))
 	}
+
 	if note != "" {
 		wrapped := lipgloss.NewStyle().Width(max(width-2, 18)).Render(note)
+
 		b.WriteString("\n")
+
 		for i, line := range strings.Split(wrapped, "\n") {
 			mark := "  "
 			if i == 0 {
 				mark = SymWarn + " "
 			}
+
 			b.WriteString("\n" + styleWarn.Render(mark+strings.TrimRight(line, " ")))
 		}
 	}
+
 	return b.String()
 }
 
@@ -78,19 +89,25 @@ const urlTitle = "Connection URLs"
 // the longest line, up to width.
 func urlFrame(urls []URLRow, width int) string {
 	rule := lipgloss.NewStyle().Foreground(colorOK)
+
 	ruleW := lipgloss.Width(urlTitle) + 6
 	for _, u := range urls {
 		ruleW = max(ruleW, lipgloss.Width(u.Label)+1, lipgloss.Width(u.URL))
 	}
+
 	ruleW = min(ruleW, max(width-1, 20))
 	head := "── " + urlTitle + " "
 	lines := []string{rule.Render("── ") + styleTitle.Render(urlTitle) + " " + rule.Render(strings.Repeat("─", max(ruleW-lipgloss.Width(head), 2)))}
+
 	for i, u := range urls {
 		if i > 0 {
 			lines = append(lines, "")
 		}
+
 		lines = append(lines, styleDim.Render(u.Label+":"), u.URL)
 	}
+
 	lines = append(lines, rule.Render(strings.Repeat("─", ruleW)))
+
 	return strings.Join(lines, "\n")
 }

@@ -40,6 +40,7 @@ var lockPath = LockPath
 func LockPathForTest(path string) func() {
 	old := lockPath
 	lockPath = path
+
 	return func() { lockPath = old }
 }
 
@@ -89,23 +90,29 @@ func AcquireClusters(ctx context.Context, clusters []string, method, requestID s
 	names := append([]string(nil), clusters...)
 	sort.Strings(names)
 	names = slices.Compact(names)
+
 	var releases []Release
+
 	releaseAll := func() {
-		for i := len(releases) - 1; i >= 0; i-- {
-			releases[i]()
+		for _, release := range slices.Backward(releases) {
+			release()
 		}
 	}
+
 	for _, name := range names {
 		if name == "" {
 			continue
 		}
+
 		release, err := AcquireCluster(ctx, name, LockExclusive, method, requestID, timeout)
 		if err != nil {
 			releaseAll()
 			return nil, err
 		}
+
 		releases = append(releases, release)
 	}
+
 	return releaseAll, nil
 }
 
@@ -126,30 +133,38 @@ func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, met
 	if mode == LockNone {
 		return func() {}, nil
 	}
+
 	how := syscall.LOCK_EX
 	if mode == LockShared {
 		how = syscall.LOCK_SH
 	}
+
 	infoPath := path + ".info"
+
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
+
 	fd := int(f.Fd())
 	deadline := time.Now().Add(timeout)
+
 	for {
 		err := syscall.Flock(fd, how|syscall.LOCK_NB)
 		if err == nil {
 			break
 		}
+
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			_ = f.Close()
 			return nil, err
 		}
+
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			_ = f.Close()
 			return nil, lockHeld(infoPath, cluster, lock)
 		}
+
 		select {
 		case <-ctx.Done():
 			_ = f.Close()
@@ -157,6 +172,7 @@ func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, met
 		case <-time.After(lockPoll):
 		}
 	}
+
 	info := Holder{
 		PID:       os.Getpid(),
 		Cluster:   cluster,
@@ -168,10 +184,12 @@ func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, met
 	if raw, err := json.Marshal(info); err == nil {
 		_ = WriteFileAtomic(infoPath, append(raw, '\n'), 0o644)
 	}
+
 	return func() {
 		if mode == LockExclusive {
 			_ = os.Remove(infoPath)
 		}
+
 		_ = syscall.Flock(fd, syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
@@ -179,22 +197,27 @@ func acquire(ctx context.Context, path, cluster, lock string, mode LockMode, met
 
 func lockHeld(infoPath, cluster, lock string) *output.CLIError {
 	var holder *Holder
+
 	if raw, err := os.ReadFile(infoPath); err == nil {
 		var h Holder
 		if json.Unmarshal(raw, &h) == nil && processAlive(h.PID) {
 			holder = &h
 		}
 	}
+
 	message := "another vaire operation holds the node lock"
 	details := map[string]any{"reason": "lock_held", "holder": holder}
+
 	if cluster != "" {
 		message = "another vaire operation holds the lock of " + cluster
 		details["cluster"] = cluster
 	}
+
 	if lock == "heavy_io" {
 		message = "another backup job holds the heavy-I/O lock"
 		details["lock"] = lock
 	}
+
 	return output.NewError(
 		output.CodePrecondition,
 		message,
@@ -207,7 +230,9 @@ func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
+
 	err := syscall.Kill(pid, 0)
+
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
@@ -218,6 +243,8 @@ func IsLockHeld(err error) bool {
 	if !errors.As(err, &cliErr) {
 		return false
 	}
+
 	details, ok := cliErr.Details.(map[string]any)
+
 	return ok && details["reason"] == "lock_held"
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ func mustPrefixes(values ...string) []netip.Prefix {
 	for _, v := range values {
 		out = append(out, netip.MustParsePrefix(v))
 	}
+
 	return out
 }
 
@@ -48,9 +50,11 @@ func dnsRecords(hostname, ipv4, ipv6 string) []dnsRecord {
 	if ipv4 != "" {
 		records = append(records, dnsRecord{Type: "A", Name: hostname, Value: ipv4})
 	}
+
 	if ipv6 != "" {
 		records = append(records, dnsRecord{Type: "AAAA", Name: hostname, Value: ipv6})
 	}
+
 	return records
 }
 
@@ -73,19 +77,23 @@ type dnsCheck struct {
 // the node's addresses.
 func checkDNS(ctx context.Context, hostname, ipv4, ipv6 string) dnsCheck {
 	check := dnsCheck{Matches: ipv4 != "" || ipv6 != ""}
+
 	for _, server := range publicResolvers {
 		got := resolveWith(ctx, server, hostname)
 		check.Resolvers = append(check.Resolvers, got)
+
 		merged := map[string][]string{"A": got.A, "AAAA": got.AAAA}
 		if !dnsMatches(merged, ipv4, ipv6) {
 			check.Matches = false
 		}
+
 		for _, ip := range append(append([]string(nil), got.A...), got.AAAA...) {
 			if inCloudflare(ip) {
 				check.Proxied = true
 			}
 		}
 	}
+
 	return check
 }
 
@@ -98,8 +106,10 @@ func resolveWith(ctx context.Context, server, hostname string) dnsAnswers {
 			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "udp", server)
 		},
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
+
 	ips, err := resolver.LookupNetIP(ctx, "ip4", hostname)
 	if err == nil {
 		for _, ip := range ips {
@@ -108,6 +118,7 @@ func resolveWith(ctx context.Context, server, hostname string) dnsAnswers {
 	} else {
 		out.Error = lookupError(err)
 	}
+
 	if ips, err := resolver.LookupNetIP(ctx, "ip6", hostname); err == nil {
 		for _, ip := range ips {
 			if !ip.Is4In6() {
@@ -115,14 +126,15 @@ func resolveWith(ctx context.Context, server, hostname string) dnsAnswers {
 			}
 		}
 	}
+
 	sort.Strings(out.A)
 	sort.Strings(out.AAAA)
+
 	return out
 }
 
 func lookupError(err error) string {
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
 		switch {
 		case dnsErr.IsNotFound:
 			return "no record"
@@ -130,6 +142,7 @@ func lookupError(err error) string {
 			return "timeout"
 		}
 	}
+
 	return err.Error()
 }
 
@@ -138,12 +151,14 @@ func inCloudflare(ip string) bool {
 	if err != nil {
 		return false
 	}
+
 	addr = addr.Unmap()
 	for _, p := range cloudflareRanges {
 		if p.Contains(addr) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -151,7 +166,9 @@ func inCloudflare(ip string) bool {
 // "1.1.1.1: A 104.21.27.128 (want 46.224.129.96)".
 func (a dnsAnswers) describe(ipv4, ipv6 string) (string, bool) {
 	ok := true
+
 	var parts []string
+
 	if ipv4 != "" {
 		got := strings.Join(a.A, ", ")
 		if got == "" {
@@ -160,25 +177,33 @@ func (a dnsAnswers) describe(ipv4, ipv6 string) (string, bool) {
 				got = a.Error
 			}
 		}
+
 		part := "A " + got
+
 		if !contains(a.A, ipv4) {
 			ok = false
 			part += " (want " + ipv4 + ")"
 		}
+
 		parts = append(parts, part)
 	}
+
 	if ipv6 != "" {
 		got := strings.Join(a.AAAA, ", ")
 		if got == "" {
 			got = "none"
 		}
+
 		part := "AAAA " + got
+
 		if !contains(a.AAAA, ipv6) {
 			ok = false
 			part += " (want " + ipv6 + ")"
 		}
+
 		parts = append(parts, part)
 	}
+
 	return a.Resolver + ": " + strings.Join(parts, "; "), ok
 }
 
@@ -188,27 +213,23 @@ func dnsMatches(got map[string][]string, ipv4, ipv6 string) bool {
 	if ipv4 != "" && !contains(got["A"], ipv4) {
 		return false
 	}
+
 	if ipv6 != "" && !contains(got["AAAA"], ipv6) {
 		return false
 	}
+
 	return ipv4 != "" || ipv6 != ""
 }
 
 func contains(values []string, want string) bool {
-	for _, v := range values {
-		if v == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func appendUnique(values []string, v string) []string {
-	for _, existing := range values {
-		if existing == v {
-			return values
-		}
+	if slices.Contains(values, v) {
+		return values
 	}
+
 	return append(values, v)
 }
 
@@ -219,9 +240,11 @@ func recordLines(records []dnsRecord) []string {
 	for _, r := range records {
 		nameWidth = max(nameWidth, len(r.Name))
 	}
+
 	out := make([]string, 0, len(records))
 	for _, r := range records {
 		out = append(out, fmt.Sprintf("%-4s  %-*s  %s", r.Type, nameWidth, r.Name, r.Value))
 	}
+
 	return out
 }

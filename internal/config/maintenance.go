@@ -20,16 +20,21 @@ func ParseWindow(window string) (start, end time.Duration, err error) {
 	if !ok {
 		return 0, 0, fmt.Errorf("must be HH:MM-HH:MM")
 	}
+
 	s, err1 := time.Parse("15:04", strings.TrimSpace(from))
+
 	e, err2 := time.Parse("15:04", strings.TrimSpace(to))
 	if err1 != nil || err2 != nil {
 		return 0, 0, fmt.Errorf("must be HH:MM-HH:MM")
 	}
+
 	start = time.Duration(s.Hour())*time.Hour + time.Duration(s.Minute())*time.Minute
+
 	end = time.Duration(e.Hour())*time.Hour + time.Duration(e.Minute())*time.Minute
 	if start == end {
 		return 0, 0, fmt.Errorf("must not start and end at the same time")
 	}
+
 	return start, end, nil
 }
 
@@ -40,6 +45,7 @@ func CheckRepackBloatThreshold(v float64) error {
 	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > 1 {
 		return fmt.Errorf("must be greater than 0 and at most 1")
 	}
+
 	return nil
 }
 
@@ -48,6 +54,7 @@ func WindowLength(start, end time.Duration) time.Duration {
 	if end <= start {
 		end += 24 * time.Hour
 	}
+
 	return end - start
 }
 
@@ -57,12 +64,15 @@ func InWindow(t time.Time, start, end time.Duration) (bool, time.Duration) {
 	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
 	now := t.Sub(midnight)
 	length := WindowLength(start, end)
+
 	since := now - start
 	if since < 0 {
 		since += 24 * time.Hour
 	}
+
 	if since < length {
 		return true, length - since
 	}
+
 	return false, 0
 }

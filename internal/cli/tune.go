@@ -68,28 +68,36 @@ func sheetLines(name string, sv tuneServer) []string {
 		} else if c.Running != nil && *c.Running {
 			state = "running"
 		}
+
 		limits := fmt.Sprintf("cpu %3d  io %3d  conns %3d", c.CPUWeight, c.IOWeight, c.MaxConnections)
 		if c.CPUQuota != "" {
 			limits += "  quota " + c.CPUQuota
 		}
+
 		if c.MemoryMaxMiB > 0 {
 			limits += "  max " + tune.FormatMiB(c.MemoryMaxMiB)
 		}
+
 		if c.MemoryCurrentMiB != nil {
 			limits += "  using " + tune.FormatMiB(*c.MemoryCurrentMiB)
 		}
+
 		lines = append(lines, fmt.Sprintf("  %-16s %-7s %9s   %s   %s", c.Name, c.Size, tune.FormatMiB(c.MemoryMiB), limits, state))
 	}
+
 	free := "free " + tune.FormatMiB(sv.FreeMiB)
 	if sv.FreeMiB < 0 {
 		free = "overcommitted by " + tune.FormatMiB(-sv.FreeMiB)
 	}
+
 	lines = append(lines, fmt.Sprintf("  allocated %s of %s · %s", tune.FormatMiB(sv.ClusterMemoryMiB), tune.FormatMiB(sv.ClusterBudgetMiB), free))
 	if sv.CommitLimitMiB > 0 {
 		lines = append(lines, fmt.Sprintf("  commit limit %s · committed %s · huge pages %d reserved, %d free",
 			tune.FormatMiB(sv.CommitLimitMiB), tune.FormatMiB(sv.CommittedMiB), sv.HugePages, sv.HugePagesFree))
 	}
+
 	lines = append(lines, "  io weight: "+sv.IOWeight)
+
 	return lines
 }
 
@@ -112,84 +120,105 @@ func fetchTune(cmd *cobra.Command, s *session, p *progress) (tuneShowData, error
 	if db := stringFlag(cmd, "db"); db != "" {
 		params = map[string]string{"db": db}
 	}
+
 	reply, err := p.call(commandContext(cmd), s.node, "tune.show", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return tuneShowData{}, err
 	}
+
 	var data tuneShowData
 	if err := reply.Decode(&data); err != nil {
 		return tuneShowData{}, err
 	}
+
 	s.warnings = append(s.warnings, reply.Warnings...)
+
 	return data, nil
 }
 
 func runTuneShow(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	data, err := fetchTune(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	lines := sheetLines(s.ctx.Name, data.Server)
 	if data.Database != "" {
 		lines = append(lines, "", fmt.Sprintf("%d settings for %s (vaire tune explain --db %s shows them)", len(data.Settings), data.Database, data.Database))
 	} else if len(data.Server.Clusters) > 1 {
 		lines = append(lines, "", "vaire tune show --db <name> for a database's settings")
 	}
+
 	message := strings.Join(lines, "\n")
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings})
 }
 
 func runTuneExplain(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	data, err := fetchTune(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	if data.Database == "" && len(data.Server.Clusters) > 1 {
 		names := make([]string, 0, len(data.Server.Clusters))
 		for _, c := range data.Server.Clusters {
 			names = append(names, c.Name)
 		}
+
 		return output.NewError(output.CodeInputRequired, "this server has several databases; name one with --db", output.ExitInput,
 			"Pick a database from details.databases.").WithDetails(map[string]any{"flag": "--db", "databases": names})
 	}
+
 	lines := sheetLines(s.ctx.Name, data.Server)
 	if data.Database == "" {
 		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(append(lines, "", "no databases yet"), "\n"), Warnings: s.warnings})
 	}
+
 	lines = append(lines, "", "inputs for "+data.Database+":")
 	for _, key := range sortedKeys(data.Inputs) {
 		lines = append(lines, fmt.Sprintf("  %s = %v", key, data.Inputs[key]))
 	}
+
 	lines = append(lines, "", "settings:")
 	for _, st := range data.Settings {
 		lines = append(lines, fmt.Sprintf("  %-32s %-12s %-12s %s", st.Name, st.Value, data.Current[st.Name], st.Reason))
 	}
+
 	if len(data.PendingRestart) > 0 {
 		lines = append(lines, "", "restart pending for: "+strings.Join(data.PendingRestart, ", "))
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: s.warnings})
 }
 
 func runTuneApply(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	confirm, confirms := confirmOptions(cmd)
+
 	reply, err := p.call(commandContext(cmd), s.node, "tune.apply", nil, remote.CallOptions{
 		DryRun:   dryRun(cmd),
 		Confirm:  confirm,
@@ -199,27 +228,35 @@ func runTuneApply(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	warnings := append(s.warnings, reply.Warnings...)
+
 	if dryRun(cmd) {
 		var data engine.PlanData
 		if err := reply.Decode(&data); err != nil {
 			return err
 		}
+
 		return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("dry run: %d of %d tuning steps would apply", data.WouldApply, data.Total), Warnings: warnings})
 	}
+
 	var data engine.ApplyData
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	message := fmt.Sprintf("applied %d, skipped %d of %d tuning steps", data.Applied, data.Skipped, data.Total)
 	if data.Restarted() {
 		message += "; restarted " + restartSummary(data.Restarts)
 	}
+
 	var next []string
+
 	if len(data.RestartPending) > 0 {
 		message += "; restart pending: " + strings.Join(data.RestartPending, ", ")
 		next = []string{"vaire tune apply " + confirmFlags(data.ConfirmTokens)}
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
 }
 
@@ -228,10 +265,12 @@ func sortedKeys(m map[string]any) []string {
 	for k := range m {
 		out = append(out, k)
 	}
+
 	for i := 1; i < len(out); i++ {
 		for j := i; j > 0 && out[j] < out[j-1]; j-- {
 			out[j], out[j-1] = out[j-1], out[j]
 		}
 	}
+
 	return out
 }

@@ -21,6 +21,7 @@ func bucketVersion(ctx context.Context, aws awsRunner, bucket, key, endpoint str
 	if err != nil {
 		return "", fmt.Errorf("list channel manifest %s: %w", key, err)
 	}
+
 	var listing struct {
 		KeyCount *int
 		Contents []struct{ Key string }
@@ -29,27 +30,34 @@ func bucketVersion(ctx context.Context, aws awsRunner, bucket, key, endpoint str
 		*listing.KeyCount != len(listing.Contents) || *listing.KeyCount > 1 {
 		return "", fmt.Errorf("invalid bucket listing for channel manifest %s", key)
 	}
+
 	if len(listing.Contents) == 0 {
 		return "", nil
 	}
+
 	if !strings.HasPrefix(listing.Contents[0].Key, key) {
 		return "", fmt.Errorf("invalid key in bucket listing for channel manifest %s", key)
 	}
+
 	if listing.Contents[0].Key != key {
 		return "", nil
 	}
+
 	raw, err = aws(ctx, "s3", "cp", "s3://"+bucket+"/"+key, "-", "--endpoint-url", endpoint)
 	if err != nil {
 		return "", fmt.Errorf("read channel manifest %s: %w", key, err)
 	}
+
 	var manifest struct {
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		return "", fmt.Errorf("invalid channel manifest %s: %w", key, err)
 	}
+
 	if _, ok := release.ParseStable(manifest.Version); !ok {
 		return "", fmt.Errorf("invalid version in channel manifest %s", key)
 	}
+
 	return manifest.Version, nil
 }

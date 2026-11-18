@@ -34,10 +34,12 @@ func TestCursorRoundTrip(t *testing.T) {
 	if raw == "" {
 		t.Fatal("encodeCursor returned an empty cursor")
 	}
+
 	decoded, err := decodeCursor(raw)
 	if err != nil {
 		t.Fatalf("decodeCursor: %v", err)
 	}
+
 	if decoded != sampleCursor() {
 		t.Fatalf("round trip mismatch:\n got %+v\nwant %+v", decoded, sampleCursor())
 	}
@@ -45,17 +47,21 @@ func TestCursorRoundTrip(t *testing.T) {
 
 func TestCursorRejectsTampering(t *testing.T) {
 	raw := encodeCursor(sampleCursor())
+
 	tampered := raw[:len(raw)-2] + "AA"
 	if _, err := decodeCursor(tampered); err == nil {
 		t.Fatal("tampered cursor was accepted")
 	}
+
 	oversized := cursorPrefix + strings.Repeat("A", maxCursorBytes)
 	if _, err := decodeCursor(oversized); !errors.Is(err, errInvalidCursor) {
 		t.Fatalf("oversized cursor error = %v", err)
 	}
+
 	if _, err := decodeCursor(""); !errors.Is(err, errInvalidCursor) {
 		t.Fatalf("empty cursor error = %v", err)
 	}
+
 	if _, err := decodeCursor("c1."); !errors.Is(err, errInvalidCursor) {
 		t.Fatalf("empty payload error = %v", err)
 	}
@@ -91,7 +97,9 @@ func TestCursorRejectsTrailingJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	body = append(body, []byte(`{"x":1}`)...)
+
 	raw := cursorPrefix + base64.RawURLEncoding.EncodeToString(body)
 	if _, err := decodeCursor(raw); !errors.Is(err, errInvalidCursor) {
 		t.Fatalf("decodeCursor error = %v, want errInvalidCursor", err)
@@ -101,18 +109,23 @@ func TestCursorRejectsTrailingJSON(t *testing.T) {
 func TestCursorKeepsMixedWindowAfterClockAdvances(t *testing.T) {
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	q := Query{Since: "1h", Until: now.Add(-30 * time.Minute).Format(time.RFC3339), Limit: 1}
+
 	first, err := normalizeQuery(q, now)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	q.Cursor = cursorFor(first, 1, 2, sampleCursor().StoreID)
+
 	next, err := normalizeQuery(q, now.Add(2*time.Hour))
 	if err != nil {
 		t.Fatalf("frozen cursor stopped working: %v", err)
 	}
+
 	if !next.since.Equal(first.since) || !next.until.Equal(first.until) {
 		t.Fatalf("cursor window drifted: got %v to %v, want %v to %v", next.since, next.until, first.since, first.until)
 	}
+
 	q.Cursor = ""
 	if _, err := normalizeQuery(q, now.Add(2*time.Hour)); !errors.Is(err, errInvalidQuery) {
 		t.Fatalf("a new inverted query must still fail: %v", err)

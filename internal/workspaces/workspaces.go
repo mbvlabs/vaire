@@ -106,9 +106,11 @@ func (c *Workspace) Master() (Node, bool) {
 			return n, true
 		}
 	}
+
 	if len(c.Nodes) > 0 {
 		return c.Nodes[0], true
 	}
+
 	return Node{}, false
 }
 
@@ -122,7 +124,9 @@ func (c *Workspace) DatabaseNode(db string) (Node, bool) {
 			}
 		}
 	}
+
 	n, _ := c.Master()
+
 	return n, false
 }
 
@@ -137,10 +141,12 @@ func Root() string {
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
 		return filepath.Join(v, "vaire")
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), "vaire-config", "vaire")
 	}
+
 	return filepath.Join(home, ".config", "vaire")
 }
 
@@ -155,6 +161,7 @@ func ensureRoot() error {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return err
 	}
+
 	return os.Chmod(root, 0o700) //nolint:gosec // G302: §6.3 sets the config directory to 0700.
 }
 
@@ -163,7 +170,9 @@ func ValidateName(name string) error {
 	if NamePattern.MatchString(name) {
 		return nil
 	}
+
 	hint := "Use lower-case letters, digits, '.', '_' and '-'."
+
 	return output.NewError(
 		output.CodeValidation,
 		"workspace name "+name+" is invalid",
@@ -185,15 +194,20 @@ func List() ([]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+
 		return nil, err
 	}
+
 	var names []string
+
 	for _, e := range entries {
 		if e.IsDir() && Exists(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
+
 	sort.Strings(names)
+
 	return names, nil
 }
 
@@ -202,19 +216,24 @@ func Load(name string) (*Workspace, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
+
 	raw, err := os.ReadFile(Path(name, WorkspaceFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, notFound(name)
 		}
+
 		return nil, err
 	}
+
 	var c Workspace
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&c); err != nil {
 		return nil, output.NewError(output.CodeConfig, Path(name, WorkspaceFile)+" does not parse: "+err.Error(), output.ExitConfig,
 			"Recreate the workspace with vaire login.")
 	}
+
 	c.Name = name
+
 	return &c, nil
 }
 
@@ -237,6 +256,7 @@ func workspaceHint(hint string) string {
 		return "This machine is an vaire node (" + nodeMarker + " exists) and holds no workspaces. " +
 			"Run this command from your own machine; on the node, use sudo vaire node run or sudo vaire node selfcheck."
 	}
+
 	return hint
 }
 
@@ -245,13 +265,16 @@ func Save(c *Workspace) error {
 	if err := ValidateName(c.Name); err != nil {
 		return err
 	}
+
 	if err := ensureRoot(); err != nil {
 		return err
 	}
+
 	raw, err := toml.Marshal(c)
 	if err != nil {
 		return err
 	}
+
 	return transport.WriteSecretFile(Path(c.Name, WorkspaceFile), raw)
 }
 
@@ -260,6 +283,7 @@ func WriteFile(name, file string, data []byte) error {
 	if err := ensureRoot(); err != nil {
 		return err
 	}
+
 	return transport.WriteSecretFile(Path(name, file), data)
 }
 
@@ -274,6 +298,7 @@ func SaveCredentials(name string, creds Credentials) error {
 	if err != nil {
 		return err
 	}
+
 	return WriteFile(name, CredentialsFile, append(raw, '\n'))
 }
 
@@ -284,12 +309,15 @@ func LoadCredentials(name string) (Credentials, error) {
 		if os.IsNotExist(err) {
 			return Credentials{}, nil
 		}
+
 		return Credentials{}, err
 	}
+
 	var creds Credentials
 	if err := json.Unmarshal(raw, &creds); err != nil {
 		return Credentials{}, err
 	}
+
 	return creds, nil
 }
 
@@ -299,7 +327,9 @@ func SetMasterPasswordHash(name, hash string) error {
 	if err != nil {
 		return err
 	}
+
 	creds.MasterPasswordHash = hash
+
 	return SaveCredentials(name, creds)
 }
 
@@ -309,15 +339,19 @@ func Remove(name string) error {
 	if err := ValidateName(name); err != nil {
 		return err
 	}
+
 	if !Exists(name) {
 		return notFound(name)
 	}
+
 	if err := os.RemoveAll(Dir(name)); err != nil {
 		return err
 	}
+
 	if current, _ := Current(); current == name {
 		return SetCurrent("")
 	}
+
 	return nil
 }
 
@@ -332,12 +366,15 @@ func Current() (string, error) {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
+
 		return "", err
 	}
+
 	var cfg rootConfig
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&cfg); err != nil {
 		return "", output.NewError(output.CodeConfig, "config.toml does not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	return cfg.CurrentWorkspace, nil
 }
 
@@ -346,13 +383,16 @@ func SetCurrent(name string) error {
 	if name != "" && !Exists(name) {
 		return notFound(name)
 	}
+
 	if err := ensureRoot(); err != nil {
 		return err
 	}
+
 	raw, err := toml.Marshal(rootConfig{CurrentWorkspace: name})
 	if err != nil {
 		return err
 	}
+
 	return transport.WriteSecretFile(filepath.Join(Root(), "config.toml"), raw)
 }
 
@@ -363,13 +403,16 @@ func Resolve(flag string) (*Workspace, error) {
 	if name == "" {
 		name = strings.TrimSpace(os.Getenv(EnvWorkspace))
 	}
+
 	if name == "" {
 		current, err := Current()
 		if err != nil {
 			return nil, err
 		}
+
 		name = current
 	}
+
 	if name == "" {
 		return nil, output.NewError(
 			output.CodeWorkspaceNotFound,
@@ -378,6 +421,7 @@ func Resolve(flag string) (*Workspace, error) {
 			workspaceHint("Run vaire login <secrets.age>, or pick one with vaire workspace use <name>."),
 		)
 	}
+
 	return Load(name)
 }
 
@@ -385,25 +429,30 @@ func Resolve(flag string) (*Workspace, error) {
 // the directory to 0700. It returns a warning per fixed path.
 func FixModes(name string) []output.Warning {
 	var warnings []output.Warning
+
 	dir := Dir(name)
 	if info, err := os.Stat(dir); err == nil && info.Mode().Perm() != 0o700 {
 		if os.Chmod(dir, 0o700) == nil { //nolint:gosec // G302: §6.3 workspace directories are 0700.
 			warnings = append(warnings, output.Warning{Code: "workspace_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0700", dir, info.Mode().Perm())})
 		}
 	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return warnings
 	}
+
 	for _, e := range entries {
 		info, err := e.Info()
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 == 0 {
 			continue
 		}
+
 		path := filepath.Join(dir, e.Name())
 		if os.Chmod(path, 0o600) == nil {
 			warnings = append(warnings, output.Warning{Code: "workspace_mode_fixed", Message: fmt.Sprintf("%s was %04o; set to 0600", path, info.Mode().Perm())})
 		}
 	}
+
 	return warnings
 }

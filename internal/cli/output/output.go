@@ -125,12 +125,15 @@ func (e *CLIError) Error() string {
 	if e == nil {
 		return ""
 	}
+
 	if e.Message != "" {
 		return e.Message
 	}
+
 	if e.Cause != nil {
 		return e.Cause.Error()
 	}
+
 	return e.Code
 }
 
@@ -139,12 +142,14 @@ func (e *CLIError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
+
 	return e.Cause
 }
 
 // failureWarnings is implemented by an error that carries bounded failure
 // notices. Warnings are deliberately separate from the error payload.
 type failureWarnings interface {
+	error
 	FailureWarnings() []Warning
 }
 
@@ -169,20 +174,23 @@ func WithWarnings(err error, warnings ...Warning) error {
 	if err == nil {
 		return nil
 	}
+
 	compact := compactWarnings(warnings)
 	if len(compact) == 0 {
 		return err
 	}
-	var carried failureWarnings
-	if errors.As(err, &carried) {
+
+	if carried, ok := errors.AsType[failureWarnings](err); ok {
 		compact = compactWarnings(append(append([]Warning{}, carried.FailureWarnings()...), compact...))
 	}
-	var cliErr *CLIError
-	if errors.As(err, &cliErr) {
+
+	if cliErr, ok := errors.AsType[*CLIError](err); ok {
 		copied := *cliErr
 		copied.Warnings = compactWarnings(append(append([]Warning{}, cliErr.Warnings...), compact...))
+
 		return &copied
 	}
+
 	return &warnedError{err: err, warnings: compact}
 }
 
@@ -191,7 +199,9 @@ func (e *CLIError) WithDetails(details any) *CLIError {
 	if e == nil {
 		return nil
 	}
+
 	e.Details = details
+
 	return e
 }
 
@@ -220,10 +230,12 @@ func ExitCode(err error) int {
 	if err == nil {
 		return ExitOK
 	}
+
 	var cliErr *CLIError
 	if errors.As(err, &cliErr) && cliErr != nil && cliErr.ExitCode != 0 {
 		return cliErr.ExitCode
 	}
+
 	return classify(err).ExitCode
 }
 
@@ -249,6 +261,7 @@ func ParseOptions(cmd *cobra.Command) (Options, error) {
 	if cmd == nil {
 		return Options{Mode: ModeHuman}, nil
 	}
+
 	return optionsFromFlags(cmd.Flags())
 }
 
@@ -260,15 +273,18 @@ func OptionsFromArgs(args []string) (Options, error) {
 	flags.ParseErrorsAllowlist.UnknownFlags = true
 	flags.SetOutput(io.Discard)
 	addOutputFlags(flags)
+
 	if err := flags.Parse(args); err != nil {
 		return Options{Mode: ModeHuman}, err
 	}
+
 	return optionsFromFlags(flags)
 }
 
 func optionsFromFlags(flags *pflag.FlagSet) (Options, error) {
 	opts := Options{Mode: ModeHuman}
 	outputName, outputSet := stringFlag(flags, "output")
+
 	jsonMode, jsonSet := boolFlag(flags, "json")
 	if jsonSet && jsonMode && outputSet && outputName != string(ModeJSON) {
 		return opts, NewError(
@@ -283,9 +299,11 @@ func optionsFromFlags(flags *pflag.FlagSet) (Options, error) {
 	if mode == "" {
 		mode = string(ModeHuman)
 	}
+
 	if jsonSet && jsonMode {
 		mode = string(ModeJSON)
 	}
+
 	switch Mode(mode) {
 	case ModeHuman, ModeJSON, ModeAgent, ModeMarkdown:
 		opts.Mode = Mode(mode)
@@ -302,6 +320,7 @@ func optionsFromFlags(flags *pflag.FlagSet) (Options, error) {
 	opts.JQ, _ = stringFlag(flags, "jq")
 	opts.Verbose, _ = boolFlag(flags, "verbose")
 	opts.Stream, _ = boolFlag(flags, "stream")
+
 	return opts, nil
 }
 
@@ -311,6 +330,7 @@ func outputFlagsChanged(cmd *cobra.Command) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -330,6 +350,7 @@ func Success(cmd *cobra.Command, result Result) error {
 	if err != nil {
 		return err
 	}
+
 	env := Envelope{
 		Schema:    Schema,
 		OK:        true,
@@ -339,16 +360,20 @@ func Success(cmd *cobra.Command, result Result) error {
 		Warnings:  resultWarnings(cmd, result.Warnings),
 		Next:      result.Next,
 	}
+
 	if opts.Mode == ModeAgent {
 		if CommandNext != nil {
 			env.Next = mergeNext(env.Next, CommandNext(cmd))
 		}
+
 		env.Message = result.Message
 	}
+
 	message := result.Message
 	if result.Human != "" && opts.Mode == ModeHuman {
 		message = result.Human
 	}
+
 	return renderSuccess(cmd, opts, env, message)
 }
 
@@ -357,10 +382,10 @@ func Success(cmd *cobra.Command, result Result) error {
 // resolves a typed CLIError through it.
 func failureWarningsOf(err error, cliErr *CLIError) []Warning {
 	warnings := append([]Warning{}, cliErr.Warnings...)
-	var carried failureWarnings
-	if errors.As(err, &carried) {
+	if carried, ok := errors.AsType[failureWarnings](err); ok {
 		warnings = append(warnings, carried.FailureWarnings()...)
 	}
+
 	return warnings
 }
 
@@ -373,12 +398,15 @@ func Fail(cmd *cobra.Command, err error) Failure {
 		copied := *cliErr
 		cliErr = &copied
 	}
+
 	if cliErr.Code == "" {
 		cliErr.Code = CodeError
 	}
+
 	if cliErr.ExitCode == 0 {
 		cliErr.ExitCode = ExitGeneric
 	}
+
 	return Failure{
 		Schema:    Schema,
 		OK:        false,
@@ -401,11 +429,13 @@ func RenderError(cmd *cobra.Command, err error) error {
 		_, werr := fmt.Fprintln(os.Stderr, err)
 		return werr
 	}
+
 	opts, parseErr := ParseOptions(cmd)
 	if parseErr == nil && !outputFlagsChanged(cmd) {
 		// Cobra stops at the first unknown command or flag, so output flags
 		// later on the line were never parsed. Read them from the raw arguments.
 		raw, rawErr := OptionsFromArgs(os.Args[1:])
+
 		var cliErr *CLIError
 		switch {
 		case rawErr == nil:
@@ -414,26 +444,33 @@ func RenderError(cmd *cobra.Command, err error) error {
 			parseErr = rawErr
 		}
 	}
+
 	if parseErr != nil {
 		err = parseErr
 		opts = Options{}
 	}
+
 	failure := Fail(cmd, err)
 	if opts.JQ != "" && parseErr == nil && !errors.Is(err, errJQFilter) {
 		selected, jerr := applyJQ(failure, opts.JQ)
 		if jerr != nil {
 			failed := Fail(cmd, jerr)
+
 			failed.Warnings = unshownWarnings(cmd, failed.Warnings)
 			if opts.Quiet {
 				failed.Warnings = nil
 			}
+
 			return writeHumanError(cmd.ErrOrStderr(), failed)
 		}
+
 		return writeJSON(cmd.OutOrStdout(), selected)
 	}
+
 	if opts.Stream && parseErr == nil {
 		return writeEvent(cmd.OutOrStdout(), Event{Type: "result", Envelope: failure})
 	}
+
 	if opts.Mode == ModeJSON || opts.Mode == ModeAgent {
 		return writeJSON(cmd.OutOrStdout(), failure)
 	}
@@ -443,9 +480,11 @@ func RenderError(cmd *cobra.Command, err error) error {
 	if opts.Quiet {
 		failure.Warnings = nil
 	}
+
 	if opts.Mode == ModeMarkdown {
 		return writeMarkdownError(cmd.ErrOrStderr(), failure)
 	}
+
 	return writeHumanError(cmd.ErrOrStderr(), failure)
 }
 
@@ -454,16 +493,20 @@ func renderSuccess(cmd *cobra.Command, opts Options, env Envelope, message strin
 	if cmd != nil {
 		out = cmd.OutOrStdout()
 	}
+
 	if opts.JQ != "" {
 		selected, err := applyJQ(env, opts.JQ)
 		if err != nil {
 			return err
 		}
+
 		return writeJSON(out, selected)
 	}
+
 	if opts.Stream {
 		return writeEvent(out, Event{Type: "result", Envelope: env})
 	}
+
 	switch opts.Mode {
 	case ModeJSON, ModeAgent:
 		return writeJSON(out, env)
@@ -480,32 +523,39 @@ func writeHuman(w io.Writer, opts Options, message string, warnings []Warning, n
 	if opts.Quiet {
 		return nil
 	}
+
 	if message != "" {
 		if _, err := fmt.Fprintln(w, message); err != nil {
 			return err
 		}
 	}
+
 	for _, warning := range warnings {
 		if _, err := fmt.Fprintf(w, "warning: %s\n", warning.Message); err != nil {
 			return err
 		}
 	}
+
 	if len(next) == 0 {
 		return nil
 	}
+
 	if message != "" {
 		if _, err := fmt.Fprintln(w); err != nil {
 			return err
 		}
 	}
+
 	if _, err := fmt.Fprintln(w, "Next steps:"); err != nil {
 		return err
 	}
+
 	for _, step := range next {
 		if _, err := fmt.Fprintf(w, "  %s\n", step); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -526,10 +576,12 @@ func TrackShownWarnings(cmd *cobra.Command) {
 	if cmd == nil {
 		return
 	}
+
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	cmd.SetContext(context.WithValue(ctx, shownKey{}, &shownWarnings{
 		msgs: map[string]bool{}, observed: map[Warning]bool{},
 	}))
@@ -541,9 +593,11 @@ func RecordWarning(cmd *cobra.Command, warning Warning) {
 	if warning.Code == "" || warning.Message == "" {
 		return
 	}
+
 	if set := shownSet(cmd); set != nil {
 		set.mu.Lock()
 		defer set.mu.Unlock()
+
 		if !set.observed[warning] {
 			set.observed[warning] = true
 			set.warnings = append(set.warnings, warning)
@@ -556,14 +610,17 @@ func RecordWarning(cmd *cobra.Command, warning Warning) {
 // promoted from an untrusted payload.
 func compactWarnings(warnings []Warning) []Warning {
 	out := make([]Warning, 0, len(warnings))
+
 	seen := make(map[Warning]bool, len(warnings))
 	for _, warning := range warnings {
 		if warning.Code == "" || warning.Message == "" || seen[warning] {
 			continue
 		}
+
 		seen[warning] = true
 		out = append(out, warning)
 	}
+
 	return out
 }
 
@@ -575,9 +632,12 @@ func resultWarnings(cmd *cobra.Command, explicit []Warning) []Warning {
 	if set == nil {
 		return explicit
 	}
+
 	set.mu.Lock()
 	defer set.mu.Unlock()
+
 	var merged []Warning
+
 	seen := make(map[Warning]bool, len(explicit)+len(set.warnings))
 	for _, group := range [][]Warning{explicit, set.warnings} {
 		for _, warning := range group {
@@ -587,6 +647,7 @@ func resultWarnings(cmd *cobra.Command, explicit []Warning) []Warning {
 			}
 		}
 	}
+
 	return merged
 }
 
@@ -605,7 +666,9 @@ func shownSet(cmd *cobra.Command) *shownWarnings {
 	if cmd == nil || cmd.Context() == nil {
 		return nil
 	}
+
 	set, _ := cmd.Context().Value(shownKey{}).(*shownWarnings)
+
 	return set
 }
 
@@ -615,14 +678,17 @@ func unshownWarnings(cmd *cobra.Command, warnings []Warning) []Warning {
 	if set == nil || len(warnings) == 0 {
 		return warnings
 	}
+
 	set.mu.Lock()
 	defer set.mu.Unlock()
+
 	out := make([]Warning, 0, len(warnings))
 	for _, w := range warnings {
 		if !set.msgs[w.Message] {
 			out = append(out, w)
 		}
 	}
+
 	return out
 }
 
@@ -634,14 +700,17 @@ func writeHumanError(w io.Writer, failure Failure) error {
 	if RichError != nil && RichError(w, failure) {
 		return writeHumanErrorWarnings(w, failure.Warnings)
 	}
+
 	if _, err := fmt.Fprintf(w, "Error: %s [%s]\n", failure.Error.Message, failure.Error.Code); err != nil {
 		return err
 	}
+
 	if failure.Error.Hint != "" {
 		if _, err := fmt.Fprintf(w, "Hint: %s\n", failure.Error.Hint); err != nil {
 			return err
 		}
 	}
+
 	return writeHumanErrorWarnings(w, failure.Warnings)
 }
 
@@ -652,6 +721,7 @@ func writeHumanErrorWarnings(w io.Writer, warnings []Warning) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -659,21 +729,25 @@ func writeMarkdownError(w io.Writer, failure Failure) error {
 	if _, err := fmt.Fprintf(w, "**Error:** %s\n\n`%s`\n", failure.Error.Message, failure.Error.Code); err != nil {
 		return err
 	}
+
 	if failure.Error.Hint != "" {
 		if _, err := fmt.Fprintf(w, "\n%s\n", failure.Error.Hint); err != nil {
 			return err
 		}
 	}
+
 	if len(failure.Warnings) > 0 {
 		if _, err := fmt.Fprintln(w, "\nWarnings:"); err != nil {
 			return err
 		}
+
 		for _, warning := range failure.Warnings {
 			if _, err := fmt.Fprintf(w, "- `%s`: %s\n", warning.Code, warning.Message); err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -682,24 +756,30 @@ func writeMarkdown(w io.Writer, opts Options, message string, data any, next []s
 		if _, err := fmt.Fprintln(w, message); err != nil {
 			return err
 		}
+
 		if _, err := fmt.Fprintln(w); err != nil {
 			return err
 		}
 	}
+
 	if err := writeMarkdownData(w, data); err != nil {
 		return err
 	}
+
 	if opts.Quiet || len(next) == 0 {
 		return nil
 	}
+
 	if _, err := fmt.Fprintln(w, "Next:"); err != nil {
 		return err
 	}
+
 	for _, step := range next {
 		if _, err := fmt.Fprintf(w, "- `%s`\n", step); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -707,10 +787,12 @@ func writeMarkdownData(w io.Writer, data any) error {
 	if data == nil {
 		return nil
 	}
+
 	normalized, err := normalizeJSON(data)
 	if err != nil {
 		return err
 	}
+
 	switch value := normalized.(type) {
 	case []any:
 		return writeMarkdownSlice(w, value)
@@ -726,14 +808,17 @@ func writeMarkdownSlice(w io.Writer, items []any) error {
 		_, err := fmt.Fprintln(w, "(empty)")
 		return err
 	}
+
 	rows := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		obj, ok := item.(map[string]any)
 		if !ok {
 			return writeMarkdownJSON(w, items)
 		}
+
 		rows = append(rows, obj)
 	}
+
 	return writeObjectTable(w, rows)
 }
 
@@ -742,53 +827,67 @@ func writeMarkdownMap(w io.Writer, value map[string]any) error {
 	for key := range value {
 		keys = append(keys, key)
 	}
+
 	sort.Strings(keys)
+
 	if _, err := fmt.Fprintln(w, "| Key | Value |"); err != nil {
 		return err
 	}
+
 	if _, err := fmt.Fprintln(w, "| --- | --- |"); err != nil {
 		return err
 	}
+
 	for _, key := range keys {
 		if _, err := fmt.Fprintf(w, "| %s | %s |\n", escapeCell(key), escapeCell(fmt.Sprint(value[key]))); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
 func writeObjectTable(w io.Writer, rows []map[string]any) error {
 	seen := map[string]bool{}
 	keys := make([]string, 0)
+
 	for _, row := range rows {
 		for key := range row {
 			if seen[key] {
 				continue
 			}
+
 			seen[key] = true
 			keys = append(keys, key)
 		}
 	}
+
 	sort.Strings(keys)
+
 	if _, err := fmt.Fprintf(w, "| %s |\n", strings.Join(keys, " | ")); err != nil {
 		return err
 	}
+
 	seps := make([]string, len(keys))
 	for i := range seps {
 		seps[i] = "---"
 	}
+
 	if _, err := fmt.Fprintf(w, "| %s |\n", strings.Join(seps, " | ")); err != nil {
 		return err
 	}
+
 	for _, row := range rows {
 		cells := make([]string, len(keys))
 		for i, key := range keys {
 			cells[i] = escapeCell(fmt.Sprint(row[key]))
 		}
+
 		if _, err := fmt.Fprintf(w, "| %s |\n", strings.Join(cells, " | ")); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -797,13 +896,16 @@ func writeMarkdownJSON(w io.Writer, value any) error {
 	if err != nil {
 		return err
 	}
+
 	_, err = fmt.Fprintf(w, "```json\n%s\n```\n", encoded)
+
 	return err
 }
 
 func escapeCell(value string) string {
 	value = strings.ReplaceAll(value, "|", "\\|")
 	value = strings.ReplaceAll(value, "\n", " ")
+
 	return value
 }
 
@@ -811,6 +913,7 @@ func writeJSON(w io.Writer, value any) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
+
 	return enc.Encode(value)
 }
 
@@ -819,8 +922,10 @@ func writeEvent(w io.Writer, event Event) error {
 	if event.TS == "" {
 		event.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
+
 	return enc.Encode(event)
 }
 
@@ -837,33 +942,40 @@ func applyJQ(value any, expr string) (any, error) {
 	if err != nil {
 		return nil, jqError("response cannot be filtered with --jq", err.Error())
 	}
+
 	query, err := gojq.Parse(expr)
 	if err != nil {
 		return nil, jqError("invalid --jq expression", err.Error())
 	}
+
 	code, err := gojq.Compile(query)
 	if err != nil {
 		return nil, jqError("invalid --jq expression", err.Error())
 	}
+
 	iter := code.Run(normalized)
 	results := make([]any, 0, 1)
+
 	for {
 		item, ok := iter.Next()
 		if !ok {
 			break
 		}
+
 		if jqErr, isErr := item.(error); isErr {
 			// error/0 and error/1 carry a value that can be the whole envelope.
 			// Keep it out of the hint.
 			hint := jqErr.Error()
-			var valueErr gojq.ValueError
-			if errors.As(jqErr, &valueErr) {
+			if _, ok := errors.AsType[gojq.ValueError](jqErr); ok {
 				hint = "the filter called error"
 			}
+
 			return nil, jqError("jq filter failed", hint)
 		}
+
 		results = append(results, item)
 	}
+
 	switch len(results) {
 	case 0:
 		return nil, nil
@@ -879,23 +991,28 @@ func normalizeJSON(value any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var normalized any
 	if err := json.Unmarshal(encoded, &normalized); err != nil {
 		return nil, err
 	}
+
 	return normalized, nil
 }
 
 func mergeNext(base, extra []string) []string {
 	seen := map[string]bool{}
+
 	out := make([]string, 0, len(base)+len(extra))
 	for _, item := range append(append([]string{}, base...), extra...) {
 		if item == "" || seen[item] {
 			continue
 		}
+
 		seen[item] = true
 		out = append(out, item)
 	}
+
 	return out
 }
 
@@ -903,13 +1020,16 @@ func commandID(cmd *cobra.Command) string {
 	if cmd == nil {
 		return ""
 	}
+
 	fields := strings.Fields(cmd.CommandPath())
 	if len(fields) == 0 {
 		return ""
 	}
+
 	if len(fields) == 1 {
 		return fields[0]
 	}
+
 	return strings.Join(fields[1:], " ")
 }
 
@@ -917,10 +1037,12 @@ func workspaceName(cmd *cobra.Command) string {
 	if cmd == nil || cmd.Flags() == nil {
 		return ""
 	}
+
 	flag := cmd.Flags().Lookup("workspace")
 	if flag == nil {
 		return ""
 	}
+
 	return strings.TrimSpace(flag.Value.String())
 }
 
@@ -929,6 +1051,7 @@ func stringFlag(flags *pflag.FlagSet, name string) (string, bool) {
 	if flag == nil {
 		return "", false
 	}
+
 	return flag.Value.String(), flag.Changed
 }
 
@@ -937,18 +1060,20 @@ func boolFlag(flags *pflag.FlagSet, name string) (bool, bool) {
 	if flag == nil {
 		return false, false
 	}
+
 	value, err := strconv.ParseBool(flag.Value.String())
 	if err != nil {
 		return false, flag.Changed
 	}
+
 	return value, flag.Changed
 }
 
 func asCLI(err error) *CLIError {
-	var cliErr *CLIError
-	if errors.As(err, &cliErr) {
+	if cliErr, ok := errors.AsType[*CLIError](err); ok {
 		return cliErr
 	}
+
 	return nil
 }
 
@@ -956,7 +1081,9 @@ func classify(err error) *CLIError {
 	if err == nil {
 		return NewError(CodeError, "unknown error", ExitGeneric, "")
 	}
+
 	msg := err.Error()
+
 	low := strings.ToLower(msg)
 	switch {
 	case strings.Contains(low, "unknown command"),

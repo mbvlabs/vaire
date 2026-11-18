@@ -90,16 +90,19 @@ func Allowed(p string) bool {
 	if p != path.Clean(p) || !path.IsAbs(p) {
 		return false
 	}
+
 	for _, s := range Specs() {
 		if !s.Glob && s.Path == p {
 			return true
 		}
+
 		if s.Glob {
 			if ok, _ := path.Match(s.Path, p); ok {
 				return true
 			}
 		}
 	}
+
 	return false
 }
 
@@ -122,30 +125,39 @@ const MaxFileSize = 4 << 20
 // a missing optional one is left out.
 func Snapshot(root string) ([]File, error) {
 	var out []File
+
 	seen := map[string]bool{}
+
 	for _, s := range Specs() {
 		paths, err := snapshotPaths(root, s.Path, s.Glob)
 		if err != nil {
 			return nil, err
 		}
+
 		for _, p := range paths {
 			if seen[p] {
 				continue
 			}
+
 			f, err := readFile(root, p)
 			if errors.Is(err, fs.ErrNotExist) {
 				if s.Required {
 					return nil, fmt.Errorf("%s is missing", p)
 				}
+
 				continue
 			}
+
 			if err != nil {
 				return nil, err
 			}
+
 			seen[p] = true
+
 			out = append(out, f)
 		}
 	}
+
 	return out, nil
 }
 
@@ -153,23 +165,29 @@ func snapshotPaths(root, pattern string, glob bool) ([]string, error) {
 	if !glob {
 		return []string{pattern}, nil
 	}
+
 	matches, err := filepath.Glob(filepath.Join(root, pattern))
 	if err != nil {
 		return nil, err
 	}
+
 	paths := make([]string, 0, len(matches))
 	for _, m := range matches {
 		if info, err := os.Lstat(m); err != nil || !info.Mode().IsRegular() {
 			// A directory or link beside the keys isn't bundled.
 			continue
 		}
+
 		rel, err := filepath.Rel(rootDir(root), m)
 		if err != nil {
 			return nil, err
 		}
+
 		paths = append(paths, "/"+filepath.ToSlash(rel))
 	}
+
 	sort.Strings(paths)
+
 	return paths, nil
 }
 
@@ -177,29 +195,36 @@ func rootDir(root string) string {
 	if root == "" {
 		return "/"
 	}
+
 	return root
 }
 
 func readFile(root, p string) (File, error) {
 	full := filepath.Join(rootDir(root), filepath.FromSlash(p))
+
 	info, err := os.Lstat(full)
 	if err != nil {
 		return File{}, err
 	}
+
 	if !info.Mode().IsRegular() {
 		return File{}, fmt.Errorf("%s is not a regular file", p)
 	}
+
 	if info.Size() > MaxFileSize {
 		return File{}, fmt.Errorf("%s is larger than %d bytes", p, MaxFileSize)
 	}
+
 	data, err := os.ReadFile(full)
 	if err != nil {
 		return File{}, err
 	}
+
 	owner, group := "root", "root"
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
 		owner, group = userName(st.Uid), groupName(st.Gid)
 	}
+
 	return NewFile(p, owner, group, uint32(info.Mode().Perm()), data), nil
 }
 
@@ -214,6 +239,7 @@ func userName(uid uint32) string {
 	if u, err := user.LookupId(id); err == nil {
 		return u.Username
 	}
+
 	return id
 }
 
@@ -222,6 +248,7 @@ func groupName(gid uint32) string {
 	if g, err := user.LookupGroupId(id); err == nil {
 		return g.Name
 	}
+
 	return id
 }
 
@@ -230,10 +257,12 @@ func groupName(gid uint32) string {
 func ContentHash(files []File) string {
 	sorted := append([]File(nil), files...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+
 	h := sha256.New()
 	for _, f := range sorted {
 		_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%o\x00%s\n", f.Path, f.Owner, f.Group, f.Mode, f.SHA256)
 	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -245,5 +274,6 @@ func Revision(files []File) string {
 			return f.SHA256
 		}
 	}
+
 	return ""
 }

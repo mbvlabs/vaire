@@ -45,12 +45,16 @@ func (s *session) reconnect(ctx context.Context) error {
 	if s == nil || s.node == nil || s.dial == nil {
 		return errors.New("this session can't reconnect")
 	}
+
 	s.node.SSH.Close()
+
 	client, err := s.dial(ctx)
 	if err != nil {
 		return err
 	}
+
 	s.node.SSH = client
+
 	return nil
 }
 
@@ -60,9 +64,11 @@ func (s *session) Close() {
 	if s == nil {
 		return
 	}
+
 	if s.node != nil {
 		s.node.SSH.Close()
 	}
+
 	if s.closeDialer != nil {
 		s.closeDialer()
 	}
@@ -72,6 +78,7 @@ func commandContext(cmd *cobra.Command) context.Context {
 	if ctx := cmd.Context(); ctx != nil {
 		return ctx
 	}
+
 	return context.Background()
 }
 
@@ -79,6 +86,7 @@ func timeoutFlag(cmd *cobra.Command) time.Duration {
 	if d, err := cmd.Flags().GetDuration("timeout"); err == nil && d > 0 {
 		return d
 	}
+
 	return 30 * time.Second
 }
 
@@ -90,23 +98,29 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	s := &session{ctx: c, warnings: workspaces.FixModes(c.Name)}
+
 	nodeSpec, ok := c.Master()
 	if !ok {
 		return nil, output.NewError(output.CodeConfig, "workspace "+c.Name+" lists no node", output.ExitConfig, "Recreate it with vaire login.")
 	}
+
 	wgCfg, err := workspaceTunnelConfig(c, nodeSpec)
 	if err != nil {
 		return nil, err
 	}
+
 	sshKey, err := workspaces.ReadFile(c.Name, workspaces.SSHKeyFile)
 	if err != nil {
 		return nil, workspaceFileError(c.Name, workspaces.SSHKeyFile, err)
 	}
+
 	auth, err := transport.KeyAuth(sshKey)
 	if err != nil {
 		return nil, workspaceFileError(c.Name, workspaces.SSHKeyFile, err)
 	}
+
 	known, err := transport.LoadKnownHosts(workspaces.Path(c.Name, workspaces.KnownHostsFile))
 	if err != nil {
 		return nil, err
@@ -114,38 +128,47 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	// The tunnel, SSH dial and version handshake are silent; the waiting
 	// line covers them until the first RPC.
 	defer p.wait("connecting to " + nodeLabel(c, nodeSpec))()
+
 	ctx := commandContext(cmd)
 	if err := s.openDialer(ctx, cmd, wgCfg, p); err != nil {
 		return nil, err
 	}
+
 	target := transport.SSHTarget{User: c.Operator.SSHUser, Addr: net.JoinHostPort(nodeSpec.WGAddress, "22")}
 	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{auth}, HostKeys: known, Timeout: timeoutFlag(cmd)}
 	s.dial = func(ctx context.Context) (*transport.SSHClient, error) {
 		return transport.DialSSH(ctx, s.dialer, target, sshOpts)
 	}
+
 	client, err := s.dial(ctx)
 	if err != nil {
 		s.Close()
+
 		again, healed, retryErr := retryHealedSession(cmd, p, c, nodeSpec, err)
 		if healed {
 			return again, retryErr
 		}
+
 		return nil, err
 	}
+
 	s.node = &remote.Node{SSH: client, Operator: c.Operator.Name}
 	if p.opts.Verbose {
 		s.node.Stderr = os.Stderr
 	}
+
 	if err := s.handshake(ctx, cmd, c, nodeSpec, p); err != nil {
 		s.Close()
 		return nil, err
 	}
+
 	if c.LockdownConfirmedAt == "" {
 		if err := s.confirmLockdown(ctx, p); err != nil {
 			s.Close()
 			return nil, err
 		}
 	}
+
 	return s, nil
 }
 
@@ -157,17 +180,23 @@ func retryHealedSession(cmd *cobra.Command, p *progress, c *workspaces.Workspace
 	if endpointHealed(cmd) {
 		return nil, false, nil
 	}
+
 	err := tunnelHint(dialErr, nodeSpec.PublicAddress, nodeSpec.ListenPort)
+
 	healed, w := healEndpoint(commandContext(cmd), c, err)
 	if !healed {
 		return nil, false, nil
 	}
+
 	markEndpointHealed(cmd)
+
 	again, err := openSession(cmd, p)
 	if err != nil {
 		return nil, true, err
 	}
+
 	again.warnings = append(again.warnings, w)
+
 	return again, true, nil
 }
 
@@ -179,6 +208,7 @@ func (s *session) handshake(ctx context.Context, cmd *cobra.Command, c *workspac
 		p.note(line)
 		p.setPhase("upgrading vaire on " + nodeLabel(c, nodeSpec))
 	}
+
 	return s.node.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: auto, Progress: upgrading})
 }
 
@@ -190,6 +220,7 @@ func nodeLabel(c *workspaces.Workspace, n workspaces.Node) string {
 			return name
 		}
 	}
+
 	return c.Name
 }
 
@@ -203,6 +234,7 @@ func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
 	if err != nil {
 		return err
 	}
+
 	var res struct {
 		Confirmed    bool   `json:"confirmed"`
 		LockedDownAt string `json:"locked_down_at"`
@@ -210,14 +242,18 @@ func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
 	if err := reply.Decode(&res); err != nil {
 		return err
 	}
+
 	if res.Confirmed {
 		p.note("confirmed the SSH lockdown over WireGuard; public SSH is closed")
+
 		s.warnings = append(s.warnings, output.Warning{Code: "lockdown_confirmed", Message: "public SSH on the node is now closed; SSH works only over WireGuard"})
 	}
+
 	s.ctx.LockdownConfirmedAt = res.LockedDownAt
 	if s.ctx.LockdownConfirmedAt == "" {
 		s.ctx.LockdownConfirmedAt = time.Now().UTC().Format(time.RFC3339)
 	}
+
 	return workspaces.Save(s.ctx)
 }
 
@@ -228,17 +264,21 @@ func tunnelConfig(privateKey, operatorAddr, nodePub, publicAddr string, port int
 	if err != nil {
 		return transport.WireGuardConfig{}, output.NewError(output.CodeConfig, "operator wg_address "+operatorAddr+" is invalid", output.ExitConfig, "")
 	}
+
 	pub, err := netip.ParseAddr(publicAddr)
 	if err != nil {
 		return transport.WireGuardConfig{}, output.NewError(output.CodeConfig, "node public_address "+publicAddr+" is invalid", output.ExitConfig, "")
 	}
+
 	wg, err := netip.ParseAddr(nodeWG)
 	if err != nil {
 		return transport.WireGuardConfig{}, output.NewError(output.CodeConfig, "node wg_address "+nodeWG+" is invalid", output.ExitConfig, "")
 	}
+
 	if port == 0 {
 		port = 51820
 	}
+
 	return transport.WireGuardConfig{
 		PrivateKey:    strings.TrimSpace(privateKey),
 		Address:       opAddr,
@@ -255,7 +295,9 @@ func workspaceTunnelConfig(c *workspaces.Workspace, n workspaces.Node) (transpor
 	if err != nil {
 		return transport.WireGuardConfig{}, workspaceFileError(c.Name, workspaces.WGKeyFile, err)
 	}
+
 	secrets.Add(strings.TrimSpace(string(wgKey)))
+
 	return tunnelConfig(string(wgKey), c.Operator.WGAddress, n.WGPublicKey, n.PublicAddress, n.ListenPort, n.WGAddress)
 }
 
@@ -269,19 +311,24 @@ func upTunnel(ctx context.Context, workspaceName, privateKey, operatorAddr, node
 	if err != nil {
 		return nil, err
 	}
+
 	if p != nil && p.opts.Verbose {
 		cfg.Logf = func(format string, args ...any) { p.note("wireguard: " + fmt.Sprintf(format, args...)) }
 	}
+
 	release, err := lockTunnel(ctx, workspaceName, p)
 	if err != nil {
 		return nil, err
 	}
+
 	tun, err := transport.UpWireGuard(cfg)
 	if err != nil {
 		release()
 		return nil, err
 	}
+
 	tun.OnClose(release)
+
 	return tun, nil
 }
 
@@ -294,8 +341,10 @@ func tunnelHint(err error, publicAddr string, port int) error {
 	if !errors.As(err, &cliErr) || cliErr.Code != output.CodeRemoteUnreachable {
 		return err
 	}
+
 	cliErr.Code = output.CodeTransportFailed
 	target := net.JoinHostPort(publicAddr, strconv.Itoa(port))
+
 	var dialErr *transport.TunnelDialError
 	switch {
 	case transport.IsNoDaemon(err):
@@ -310,6 +359,7 @@ func tunnelHint(err error, publicAddr string, port int) error {
 		cliErr.Hint = "WireGuard to " + target + " did not answer. Check that UDP " +
 			strconv.Itoa(port) + " leaves this network and reaches the server, then retry."
 	}
+
 	return err
 }
 
@@ -320,28 +370,35 @@ func dialRetryReport(ctx context.Context, d transport.Dialer, target transport.S
 	onAttempt func(attempt int, deadline time.Time),
 ) (*transport.SSHClient, error) {
 	deadline := time.Now().Add(within)
+
 	for n := 1; ; n++ {
 		if onAttempt != nil {
 			onAttempt(n, deadline)
 		}
+
 		attempt := opts
 		if left := time.Until(deadline); left < attempt.Timeout || attempt.Timeout == 0 {
 			attempt.Timeout = left
 		}
+
 		if attempt.Timeout < time.Second {
 			attempt.Timeout = time.Second
 		}
+
 		client, err := transport.DialSSH(ctx, d, target, attempt)
 		if err == nil {
 			return client, nil
 		}
+
 		var cliErr *output.CLIError
 		if errors.As(err, &cliErr) && (cliErr.Code == output.CodeHostKeyMismatch || isAuthFailure(cliErr)) {
 			return nil, err
 		}
+
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return nil, err
 		}
+
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -357,23 +414,28 @@ func isAuthFailure(e *output.CLIError) bool {
 
 func runPlan(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	var params any
 	if db := stringFlag(cmd, "db"); db != "" {
 		params = map[string]string{"db": db}
 	}
+
 	reply, err := p.call(commandContext(cmd), s.node, "plan", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	var data engine.PlanData
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     data,
 		Message:  planMessage(fmt.Sprintf("%d of %d steps would apply on %s", data.WouldApply, data.Total, s.ctx.Name), data),
@@ -386,26 +448,33 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	dry := dryRun(cmd)
+
 	secretValues, creds, generated, err := serviceSecrets(s.ctx.Name)
 	if err != nil {
 		return err
 	}
+
 	if err := applyRecoveryKit(cmd, s, p, secretValues, creds); err != nil {
 		return err
 	}
+
 	params := applyParams(cmd, stepIDs)
 	confirm, confirms := confirmOptions(cmd)
 	// The summary names the pending restarts and next steps carry the
 	// command, so the human output leaves out the node's restart_pending
 	// warning (JSON keeps it).
 	p.hideWarning("restart_pending")
+
 	reply, err := p.call(commandContext(cmd), s.node, "apply", params, remote.CallOptions{
 		Secrets:  secretValues,
 		DryRun:   dry,
@@ -416,43 +485,55 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	warnings := append(append(s.warnings, reply.Warnings...), staleWarning(generated)...)
+
 	if dry {
 		var data engine.PlanData
 		if err := reply.Decode(&data); err != nil {
 			return err
 		}
+
 		return output.Success(cmd, output.Result{
 			Data:     data,
 			Message:  planMessage(fmt.Sprintf("dry run: %d of %d steps would apply", data.WouldApply, data.Total), data),
 			Warnings: warnings,
 		})
 	}
+
 	var data applyReplyData
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	warnings = append(warnings, syncWorkspaceFromNode(commandContext(cmd), s, p)...)
+
 	message := fmt.Sprintf("applied %d, skipped %d of %d steps", data.Applied, data.Skipped, data.Total)
 	if data.Restarted() {
 		message += "; restarted " + restartSummary(data.Restarts)
 	}
+
 	if len(data.RestartsSettled) > 0 {
 		message += "; no restart needed for " + strings.Join(data.RestartsSettled, ", ") + " (already running the new settings)"
 	}
+
 	if data.Doctor != nil {
 		message += "\n" + healthLine(data.Doctor.Summary)
 	}
+
 	var next []string
+
 	if len(data.RestartPending) > 0 {
 		message += "; restart pending for " + strings.Join(data.RestartPending, ", ")
 		next = []string{"vaire apply " + confirmFlags(data.ConfirmTokens)}
+
 		for _, w := range warnings {
 			if w.Code == "restart_pending" {
 				p.shown(w.Message)
 			}
 		}
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     data,
 		Message:  message,
@@ -467,10 +548,12 @@ func applyStepIDs(cmd *cobra.Command) ([]string, error) {
 	if cmd.Flags().Lookup("step") == nil {
 		return nil, nil
 	}
+
 	stepIDs, err := cmd.Flags().GetStringSlice("step")
 	if err != nil {
 		return nil, err
 	}
+
 	return stepIDs, nil
 }
 
@@ -484,6 +567,7 @@ func applyRecoveryKit(cmd *cobra.Command, s *session, p *progress, secretValues 
 		addRecoveryKit(secretValues, creds.Backup)
 		return nil
 	}
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		// The apply itself reports an unreachable node; still carry what the
@@ -491,6 +575,7 @@ func applyRecoveryKit(cmd *cobra.Command, s *session, p *progress, secretValues 
 		addRecoveryKit(secretValues, creds.Backup)
 		return nil
 	}
+
 	return addRecoveryKitUnlessIncomplete(secretValues, creds.Backup, cfg.BackupConfigured())
 }
 
@@ -504,7 +589,9 @@ func addRecoveryKitUnlessIncomplete(secretValues map[string]string, kit *workspa
 			"Log in from a current transfer bundle (vaire login), which carries the recovery kit, then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
+
 	addRecoveryKit(secretValues, kit)
+
 	return nil
 }
 
@@ -514,12 +601,15 @@ func applyParams(cmd *cobra.Command, stepIDs []string) map[string]any {
 	if len(stepIDs) > 0 {
 		params["steps"] = stepIDs
 	}
+
 	if db := stringFlag(cmd, "db"); db != "" {
 		params["db"] = db
 	}
+
 	if flagTrue(cmd, "skip-doctor") {
 		params["skip_doctor"] = true
 	}
+
 	return params
 }
 
@@ -533,18 +623,22 @@ func planMessage(header string, data engine.PlanData) string {
 			lines = append(lines, "        "+step.Detail)
 		}
 	}
+
 	if len(data.AccessConfirmTokens) > 0 {
 		lines = append(lines, "", "access expansion requires: "+confirmFlags(data.AccessConfirmTokens))
 	}
+
 	for _, step := range data.Steps {
 		for _, d := range step.Diffs {
 			lines = append(lines, "", strings.TrimRight(d.Diff, "\n"))
 		}
 	}
+
 	if len(data.RestartPending) > 0 {
 		lines = append(lines, "", "restart pending for: "+strings.Join(data.RestartPending, ", "),
 			"run vaire apply "+confirmFlags(data.ConfirmTokens)+" to restart those clusters")
 	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -555,5 +649,6 @@ func restartSummary(restarts []engine.ClusterRestart) string {
 	for i, r := range restarts {
 		parts[i] = fmt.Sprintf("%s (%d ms unavailable)", r.Cluster, r.DowntimeMS)
 	}
+
 	return strings.Join(parts, ", ")
 }

@@ -19,8 +19,10 @@ func handleMasterBackupNow(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		st := readMasterStatus(env.Cluster, true)
+
 		return Result{Data: map[string]any{
 			"dry_run": true, "bucket": env.Cluster.BackupConfigured(),
 			"changed": st.ContentHash != st.Last.ContentHash, "last": st.Last.Name,
@@ -31,6 +33,7 @@ func handleMasterBackupNow(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: res}, nil
 }
 
@@ -59,6 +62,7 @@ func handleMasterBackupGet(_ context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	name := trimName(p.Name)
 	if name == "" {
 		local := localBundles()
@@ -66,15 +70,19 @@ func handleMasterBackupGet(_ context.Context, env *Env) (Result, error) {
 			return Result{}, output.NewError(output.CodeBundleNotFound, "the server has no master bundle yet", output.ExitPrecondition,
 				"Run vaire server backup now.")
 		}
+
 		name = local[0].Name
 	}
+
 	raw, side, err := readLocalBundle(name)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if p.Export {
 		_ = withMasterLast(func(l *MasterLast) { l.LastExportedAt = time.Now().UTC().Format(time.RFC3339) })
 	}
+
 	return Result{Data: MasterBundleData{Name: name, Bundle: base64.StdEncoding.EncodeToString(raw), Sidecar: side}}, nil
 }
 
@@ -83,6 +91,7 @@ func withMasterLast(fn func(*MasterLast)) error {
 	return withMasterLock(func() error {
 		l := loadMasterLast()
 		fn(&l)
+
 		return saveMasterLast(l)
 	})
 }

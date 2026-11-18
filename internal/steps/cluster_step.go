@@ -18,6 +18,7 @@ func (c clusterStep) id(base string) string {
 	if c.cluster == "" {
 		return base
 	}
+
 	return engine.InstanceID(base, c.cluster)
 }
 
@@ -26,9 +27,11 @@ func (c clusterStep) spec(cfg config.Cluster) (config.ClusterSpec, error) {
 	if c.cluster == "" {
 		return config.ClusterSpec{}, fmt.Errorf("a per-cluster step ran without a cluster; this is an vaire bug")
 	}
+
 	spec, ok := cfg.ClusterByName(c.cluster)
 	if !ok {
 		return config.ClusterSpec{}, fmt.Errorf("cluster %s is not in cluster.toml", c.cluster)
 	}
+
 	return spec, nil
 }

@@ -37,31 +37,40 @@ func TestSettledRestartsClearWithoutRestarting(t *testing.T) {
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app"}, {Name: "other"}}}
 	catalog := []Step{templateStep{countedStep{"cfg-v1"}}}
 	path := filepath.Join(t.TempDir(), "journal.json")
+
 	j := &Journal{Steps: map[string]JournalEntry{}, RestartPending: []string{"cfg-v1@app", "cfg-v1@other"}}
 	for _, id := range []string{"cfg-v1@app", "cfg-v1@other"} {
 		j.Steps[id] = JournalEntry{Status: StatusCompleted, InputsHash: InputsHash(id, []byte(id))}
 	}
+
 	if err := j.Save(path); err != nil {
 		t.Fatal(err)
 	}
+
 	r := &fakeRestarter{needs: map[string]bool{"app": true}}
+
 	data, _, err := Apply(context.Background(), catalog, cfg, Runtime{}, Options{JournalPath: path, Restarter: r})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(r.restarted) != 0 {
 		t.Errorf("restarted %v without a token", r.restarted)
 	}
+
 	if !slices.Equal(data.RestartsSettled, []string{"other"}) {
 		t.Errorf("settled %v, want [other]", data.RestartsSettled)
 	}
+
 	if !slices.Equal(data.RestartPending, []string{"cfg-v1@app"}) {
 		t.Errorf("still pending %v, want [cfg-v1@app]", data.RestartPending)
 	}
+
 	got, err := LoadJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(got.RestartPending, []string{"cfg-v1@app"}) {
 		t.Errorf("journal pending %v", got.RestartPending)
 	}
@@ -71,6 +80,7 @@ func TestSettledRestartsClearWithoutRestarting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(r.restarted, []string{"app"}) || len(data.RestartPending) != 0 {
 		t.Errorf("restarted %v, pending %v", r.restarted, data.RestartPending)
 	}
@@ -87,6 +97,7 @@ func (s driftStep) Check(context.Context, config.Cluster, Runtime) (CheckResult,
 	if s.drifted {
 		return CheckResult{Detail: "ufw rules differ"}, nil
 	}
+
 	return CheckResult{Complete: true}, nil
 }
 func (s driftStep) Apply(context.Context, config.Cluster, Runtime, Reporter) (ApplyResult, error) {
@@ -98,29 +109,38 @@ func (s driftStep) Apply(context.Context, config.Cluster, Runtime, Reporter) (Ap
 // drifted, and skips as journaled when it didn't.
 func TestRecheckerAppliesOnDrift(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.json")
+
 	j := &Journal{Steps: map[string]JournalEntry{"fw-v1": {Status: StatusCompleted, InputsHash: InputsHash("fw-v1", []byte("fw-v1"))}}}
 	if err := j.Save(path); err != nil {
 		t.Fatal(err)
 	}
+
 	applied := 0
+
 	step := driftStep{countedStep: countedStep{"fw-v1"}, applied: &applied}
 	if _, _, err := Apply(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, Options{JournalPath: path}); err != nil {
 		t.Fatal(err)
 	}
+
 	if applied != 0 {
 		t.Fatalf("applied %d times with no drift", applied)
 	}
+
 	step.drifted = true
+
 	plan, err := Plan(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, Options{JournalPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(plan.Steps) != 1 || plan.Steps[0].Reason != ReasonCheckIncomplete || plan.Steps[0].Detail != "ufw rules differ" {
 		t.Errorf("plan %+v", plan.Steps)
 	}
+
 	if _, _, err := Apply(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, Options{JournalPath: path}); err != nil {
 		t.Fatal(err)
 	}
+
 	if applied != 1 {
 		t.Errorf("applied %d times after drift, want 1", applied)
 	}
@@ -133,15 +153,19 @@ func TestFollowerRunLeavesTheSourcePending(t *testing.T) {
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app"}, {Name: "app_follower"}}}
 	catalog := []Step{templateStep{countedStep{"cfg-v1"}}}
 	path := filepath.Join(t.TempDir(), "journal.json")
+
 	j := &Journal{Steps: map[string]JournalEntry{}, RestartPending: []string{"cfg-v1@app", "cfg-v1@app_follower"}}
 	for _, id := range []string{"cfg-v1@app", "cfg-v1@app_follower"} {
 		j.Steps[id] = JournalEntry{Status: StatusCompleted, InputsHash: InputsHash(id, []byte(id))}
 	}
+
 	if err := j.Save(path); err != nil {
 		t.Fatal(err)
 	}
+
 	r := &fakeRestarter{needs: map[string]bool{"app": true, "app_follower": true}}
 	confirm := Confirmation{Server: true}
+
 	data, _, err := Apply(context.Background(), catalog, cfg, Runtime{}, Options{
 		JournalPath: path, Restarter: r, Confirm: confirm,
 		Only: []string{"cfg-v1@app_follower"}, DB: "app_follower",
@@ -149,16 +173,20 @@ func TestFollowerRunLeavesTheSourcePending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(r.restarted, []string{"app_follower"}) {
 		t.Fatalf("the follower's run restarted %v, want only app_follower", r.restarted)
 	}
+
 	if len(data.Restarts) != 1 || data.Restarts[0].Cluster != "app_follower" {
 		t.Errorf("restarts %v, want the follower's", data.Restarts)
 	}
+
 	after, err := LoadJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(after.RestartPending, []string{"cfg-v1@app"}) {
 		t.Errorf("journal pending %v, want the source's restart left alone", after.RestartPending)
 	}
@@ -169,13 +197,16 @@ func TestFollowerRunLeavesTheSourcePending(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(r.restarted, []string{"app_follower", "app"}) {
 		t.Fatalf("restarted %v, want app_follower then app once each", r.restarted)
 	}
+
 	got, err := LoadJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got.RestartPending) != 0 {
 		t.Errorf("journal pending %v, want none", got.RestartPending)
 	}

@@ -52,11 +52,13 @@ var (
 // is already held by goroutines waiting on the store.
 func acquireActivityWriter() bool {
 	limit := atomic.LoadInt64(&activityWriterCap)
+
 	for {
 		live := activityWritersLive.Load()
 		if live >= limit {
 			return false
 		}
+
 		if activityWritersLive.CompareAndSwap(live, live+1) {
 			return true
 		}
@@ -156,12 +158,15 @@ type activityRecorder struct {
 // recorder that reports the failure on append rather than panicking.
 func newActivityRecorder(paths activityPaths) *activityRecorder {
 	rec := &activityRecorder{paths: paths, now: time.Now}
+
 	store, err := activityStoreFactory()
 	if err != nil || store == nil {
 		rec.storeOK = false
 		return rec
 	}
+
 	rec.store, rec.storeOK = store, true
+
 	return rec
 }
 
@@ -204,18 +209,22 @@ type activityWriter struct {
 func (w *activityWriter) submit(rec *activityRecorder, wr *activityWrite) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	if w.queue == nil {
 		w.queue = make(chan *activityWrite, 1)
 	}
+
 	if !w.running {
 		if !acquireActivityWriter() {
 			// Enough goroutines are already pinned on the store. Adding one more
 			// would let a stalled filesystem grow without bound.
 			return false
 		}
+
 		w.running = true
 		go w.run(rec)
 	}
+
 	select {
 	case w.queue <- wr:
 		return true
@@ -227,16 +236,19 @@ func (w *activityWriter) submit(rec *activityRecorder, wr *activityWrite) bool {
 // run writes queued events in order until the queue drains.
 func (w *activityWriter) run(rec *activityRecorder) {
 	defer releaseActivityWriter()
+
 	for {
 		wr, ok := w.next()
 		if !ok {
 			return
 		}
+
 		err := w.write(rec, wr)
 		if wr.state.CompareAndSwap(activityWritePending, activityWriteDone) {
 			wr.done <- err
 			continue
 		}
+
 		if err == nil && wr.closeOnAbandon {
 			w.closeAbandoned(rec, wr.event)
 		}
@@ -254,8 +266,10 @@ func (w *activityWriter) write(rec *activityRecorder, wr *activityWrite) (err er
 			err = errActivityStorePanic
 		}
 	}()
+
 	rec.fill(&wr.event)
 	_, err = rec.store.Append(context.Background(), wr.event)
+
 	return err
 }
 
@@ -264,6 +278,7 @@ func (w *activityWriter) write(rec *activityRecorder, wr *activityWrite) (err er
 func (w *activityWriter) next() (*activityWrite, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	select {
 	case wr := <-w.queue:
 		return wr, true
@@ -281,6 +296,7 @@ func (w *activityWriter) next() (*activityWrite, bool) {
 // incomplete.
 func (w *activityWriter) closeAbandoned(rec *activityRecorder, start activity.Event) {
 	defer func() { _ = recover() }()
+
 	terminal := start
 	terminal.EventID = ""
 	terminal.OccurredAt = ""
@@ -312,30 +328,38 @@ func (r *activityRecorder) submitEvent(ev activity.Event, closeOnAbandon bool) e
 	if r == nil {
 		return nil
 	}
+
 	if !r.storeOK || r.store == nil {
 		return errActivityStoreUnavailable
 	}
+
 	if r.degraded.Load() {
 		return errActivityWriterBusy
 	}
+
 	wr := &activityWrite{event: ev, done: make(chan error, 1), closeOnAbandon: closeOnAbandon}
 	if !r.writer.submit(r, wr) {
 		// A write is still in flight and the queue is full. That is bounded
 		// already: report the event as lost without adding another waiter.
 		return errActivityWriterBusy
 	}
+
 	timer := time.NewTimer(activityWriteWait)
 	defer timer.Stop()
+
 	select {
 	case err := <-wr.done:
 		return err
 	case <-timer.C:
 	}
+
 	if !wr.state.CompareAndSwap(activityWritePending, activityWriteAbandoned) {
 		// The write won the race; its result is already on its way.
 		return <-wr.done
 	}
+
 	r.degraded.Store(true)
+
 	return errActivityWriteTimeout
 }
 
@@ -345,22 +369,28 @@ func (r *activityRecorder) fill(ev *activity.Event) {
 	if ev.Schema == "" {
 		ev.Schema = activity.Schema
 	}
+
 	r.refreshIdentity()
 	r.nodeMu.Lock()
 	node := r.node
 	r.nodeMu.Unlock()
+
 	if ev.Server == "" {
 		ev.Server = node.Server
 	}
+
 	if ev.Node == "" {
 		ev.Node = node.Node
 	}
+
 	if ev.NodeInstanceID == "" {
 		ev.NodeInstanceID = node.NodeInstanceID
 	}
+
 	if ev.BootID == "" {
 		ev.BootID = node.BootID
 	}
+
 	if ev.NodeVersion == "" {
 		ev.NodeVersion = node.NodeVersion
 	}
@@ -376,27 +406,35 @@ func (r *activityRecorder) refreshIdentity() {
 	if r == nil {
 		return
 	}
+
 	if r.paths.Node == "" && r.paths.Cluster == "" && r.paths.Instance == "" && r.paths.BootID == "" {
 		return
 	}
+
 	r.nodeMu.Lock()
 	defer r.nodeMu.Unlock()
+
 	if r.node.Server != "" && r.node.Node != "" && r.node.NodeInstanceID != "" && r.node.BootID != "" {
 		return
 	}
+
 	fresh := activityNodeInfoLoader(r.paths, config.Cluster{})
 	if r.node.Server == "" {
 		r.node.Server = fresh.Server
 	}
+
 	if r.node.Node == "" {
 		r.node.Node = fresh.Node
 	}
+
 	if r.node.NodeInstanceID == "" {
 		r.node.NodeInstanceID = fresh.NodeInstanceID
 	}
+
 	if r.node.BootID == "" {
 		r.node.BootID = fresh.BootID
 	}
+
 	if r.node.NodeVersion == "" {
 		r.node.NodeVersion = fresh.NodeVersion
 	}
@@ -435,6 +473,7 @@ func newRPCScope(rec *activityRecorder, method string, req rpc.Request) *activit
 	if op == "" {
 		op = req.RequestID
 	}
+
 	return &activityScope{
 		rec:             rec,
 		action:          safeActivityAction(method),
@@ -456,10 +495,12 @@ func newJobScope(rec *activityRecorder, job, id, operationID, parentRequestID, d
 	if operationID == "" {
 		operationID = id
 	}
+
 	actor := activity.ActorOperator
 	if timer {
 		actor = activity.ActorTimer
 	}
+
 	return &activityScope{
 		rec:             rec,
 		action:          jobActivityAction(job),
@@ -493,17 +534,21 @@ func (s *activityScope) beginEvent(ctx context.Context, checked bool) error {
 	if s == nil || s.rec == nil {
 		return nil
 	}
+
 	s.started = s.now()
 	ev := s.event(activity.OutcomeStarted, "", "", 0)
+
 	var err error
 	if checked {
 		err = s.rec.appendChecked(ev) //nolint:contextcheck // a checked start is recorded independently of the caller's context.
 	} else {
 		err = s.rec.append(ctx, ev)
 	}
+
 	if err != nil {
 		s.markLost()
 	}
+
 	return err
 }
 
@@ -513,18 +558,19 @@ func (s *activityScope) finish(ctx context.Context, outcome, code, reason string
 	if s == nil || s.rec == nil || s.finished {
 		return nil
 	}
+
 	s.finished = true
+
 	ms := int64(0)
 	if !s.started.IsZero() {
-		ms = s.now().Sub(s.started).Milliseconds()
-		if ms < 0 {
-			ms = 0
-		}
+		ms = max(s.now().Sub(s.started).Milliseconds(), 0)
 	}
+
 	err := s.rec.append(ctx, s.event(outcome, code, reason, ms))
 	if err != nil {
 		s.markLost()
 	}
+
 	return err
 }
 
@@ -536,6 +582,7 @@ func (s *activityScope) finishWarn(ctx context.Context, outcome, code, reason st
 	if err != nil && s != nil {
 		s.warn(emit)
 	}
+
 	return err
 }
 
@@ -544,6 +591,7 @@ func (s *activityScope) warn(emit func(output.Event)) {
 	if s == nil || emit == nil {
 		return
 	}
+
 	s.warned.Do(func() {
 		emit(activityWarningEvent())
 	})
@@ -556,6 +604,7 @@ func (s *activityScope) markLost() {
 	if s == nil {
 		return
 	}
+
 	s.lostMu.Lock()
 	s.lost = true
 	s.lostMu.Unlock()
@@ -566,8 +615,10 @@ func (s *activityScope) lostEvidence() bool {
 	if s == nil {
 		return false
 	}
+
 	s.lostMu.Lock()
 	defer s.lostMu.Unlock()
+
 	return s.lost
 }
 
@@ -576,12 +627,16 @@ func (s *activityScope) resultWarning() (output.Warning, bool) {
 	if s == nil || !s.lostEvidence() {
 		return output.Warning{}, false
 	}
+
 	s.lostMu.Lock()
 	defer s.lostMu.Unlock()
+
 	if s.resultWarned {
 		return output.Warning{}, false
 	}
+
 	s.resultWarned = true
+
 	return activityWarning(), true
 }
 
@@ -592,6 +647,7 @@ func finishActivitySuccess(ctx context.Context, scope *activityScope, res *Resul
 	if err := scope.finish(ctx, activity.OutcomeSucceeded, "", ""); err != nil {
 		scope.warn(emit)
 	}
+
 	if warning, ok := scope.resultWarning(); ok {
 		res.Warnings = append(res.Warnings, warning)
 	}
@@ -604,10 +660,12 @@ func (s *activityScope) recorder(ctx context.Context, next engine.Reporter) engi
 	if s == nil {
 		return next
 	}
+
 	return func(ev output.Event) {
 		if ev.Type == "step" {
 			s.recordStep(ctx, ev, next)
 		}
+
 		if next != nil {
 			next(ev)
 		}
@@ -622,33 +680,43 @@ func (s *activityScope) recordStep(ctx context.Context, ev output.Event, next en
 	if ev.TS != "" {
 		return
 	}
+
 	if s == nil || s.rec == nil {
 		return
 	}
+
 	step := safeActivityStep(ev.Step)
 	if step == "" {
 		return
 	}
+
 	outcome, code, reason := activityStepOutcome(ev.State, ev.Detail)
 	now := s.now()
+
 	var ms int64
+
 	s.stepMu.Lock()
 	if outcome == activity.OutcomeStarted {
 		s.stepStarted[step] = now
 	} else if started, ok := s.stepStarted[step]; ok {
 		ms = now.Sub(started).Milliseconds()
+
 		delete(s.stepStarted, step)
 	}
 	s.stepMu.Unlock()
+
 	if ms < 0 {
 		ms = 0
 	}
+
 	e := s.event(outcome, code, reason, ms)
 	e.Source = activity.SourceStep
+
 	e.Step = step
 	if cluster := stepCluster(step); cluster != "" {
 		e.Database = cluster
 	}
+
 	if err := s.rec.append(ctx, e); err != nil {
 		s.markLost()
 		s.warn(next)
@@ -678,6 +746,7 @@ func (s *activityScope) now() time.Time {
 	if s.rec != nil && s.rec.now != nil {
 		return s.rec.now()
 	}
+
 	return time.Now()
 }
 
@@ -688,18 +757,22 @@ func beginActivityScope(ctx context.Context, scope *activityScope, important boo
 	if scope == nil {
 		return nil
 	}
+
 	var err error
 	if important {
 		err = scope.beginChecked(ctx)
 	} else {
 		err = scope.begin(ctx)
 	}
+
 	if err != nil {
 		if important {
 			return activityUnavailableError()
 		}
+
 		scope.warn(emit)
 	}
+
 	return nil
 }
 
@@ -710,14 +783,17 @@ func recordActivityRefusal(ctx context.Context, rec *activityRecorder, req rpc.R
 	if rec == nil {
 		return
 	}
+
 	code, reason := activityErrorTokens(err)
 	if reason == "" {
 		reason = safeActivityToken(defaultReason)
 	}
+
 	op := safeActivityID(req.OperationID)
 	if op == "" {
 		op = safeActivityID(req.RequestID)
 	}
+
 	ev := activity.Event{
 		OperationID:     op,
 		RequestID:       safeActivityID(req.RequestID),
@@ -742,14 +818,17 @@ func recordJobRefusal(ctx context.Context, rec *activityRecorder, job, id string
 	if rec == nil {
 		return
 	}
+
 	code, reason := activityErrorTokens(err)
 	if reason == "" {
 		reason = safeActivityToken(defaultReason)
 	}
+
 	actor := activity.ActorOperator
 	if timer {
 		actor = activity.ActorTimer
 	}
+
 	ev := activity.Event{
 		OperationID:   safeActivityID(id),
 		JobID:         safeActivityID(id),
@@ -790,6 +869,7 @@ func activityImportant(m method, req rpc.Request) bool {
 	if req.DryRun && activityDryRunAware[m.name] {
 		return false
 	}
+
 	switch m.name {
 	case "protect.init", "db.write-access":
 		return true
@@ -820,9 +900,11 @@ func activityImportant(m method, req rpc.Request) bool {
 		// store is unavailable. Refusing them would lock the operator out.
 		return false
 	}
+
 	if m.runLog != nil && m.runLog(req) {
 		return true
 	}
+
 	return m.lock != nil && m.lock(req) == engine.LockExclusive
 }
 
@@ -835,6 +917,7 @@ func isActivityMethod(name string) bool {
 	case "activity.list", "activity.show", "activity.health":
 		return true
 	}
+
 	return false
 }
 
@@ -866,19 +949,22 @@ func activityErrorTokens(err error) (string, string) {
 	if err == nil {
 		return code, reason
 	}
-	var cliErr *output.CLIError
-	if errors.As(err, &cliErr) {
+
+	if cliErr, ok := errors.AsType[*output.CLIError](err); ok {
 		if output.IsKnownCode(cliErr.Code) {
 			code = cliErr.Code
 		}
+
 		reason = activityReasonOf(cliErr.Details)
 	}
+
 	switch {
 	case errors.Is(err, context.Canceled):
 		reason = firstActivityValue(reason, "cancelled")
 	case errors.Is(err, context.DeadlineExceeded):
 		reason = firstActivityValue(reason, "deadline_exceeded")
 	}
+
 	return code, reason
 }
 
@@ -891,6 +977,7 @@ func activityReasonOf(details any) string {
 	case map[string]string:
 		return safeActivityToken(d["reason"])
 	}
+
 	return ""
 }
 
@@ -911,6 +998,7 @@ func activityStepOutcome(state, detail string) (string, string, string) {
 		// a crash whose outcome is unknown.
 		return activity.OutcomeUnknown, "", "incomplete"
 	}
+
 	return activity.OutcomeUnknown, "", ""
 }
 
@@ -928,6 +1016,7 @@ func jobActivityAction(job string) string {
 	if job == "" || !knownJob(job) {
 		return "job.unknown"
 	}
+
 	return "job." + job
 }
 
@@ -938,9 +1027,11 @@ func safeActivityAction(action string) string {
 	if action == "node.rpc" {
 		return action
 	}
+
 	if _, ok := methods()[action]; ok {
 		return action
 	}
+
 	return "node.rpc"
 }
 
@@ -952,6 +1043,7 @@ func activityDatabaseFor(method string, params json.RawMessage) string {
 	if len(params) == 0 {
 		return ""
 	}
+
 	var p struct {
 		DB       string `json:"db"`
 		Database string `json:"database"`
@@ -960,15 +1052,19 @@ func activityDatabaseFor(method string, params json.RawMessage) string {
 	if json.Unmarshal(params, &p) != nil {
 		return ""
 	}
+
 	if p.DB != "" {
 		return safeActivityResource(p.DB)
 	}
+
 	if p.Database != "" {
 		return safeActivityResource(p.Database)
 	}
+
 	if activityNameIsDatabase[method] {
 		return safeActivityResource(p.Name)
 	}
+
 	return ""
 }
 
@@ -990,26 +1086,33 @@ func loadActivityNodeInfo(paths activityPaths, cluster config.Cluster) activityN
 		info.Server = safeActivityResource(node.Server)
 		info.Node = safeActivityResource(node.NodeName)
 	}
+
 	if cluster.Name() == "" {
 		if cfg, err := config.LoadCluster(paths.Cluster); err == nil {
 			cluster = cfg
 		}
 	}
+
 	if info.Server == "" {
 		info.Server = safeActivityResource(cluster.Name())
 	}
+
 	if info.Node == "" {
 		if master, ok := cluster.Master(); ok {
 			info.Node = safeActivityResource(master.Name)
 		}
 	}
+
 	if raw, err := os.ReadFile(paths.Instance); err == nil {
 		info.NodeInstanceID = safeActivityResource(strings.TrimSpace(string(raw)))
 	}
+
 	if raw, err := os.ReadFile(paths.BootID); err == nil {
 		info.BootID = safeActivityResource(strings.TrimSpace(string(raw)))
 	}
+
 	info.NodeVersion = activityNodeVersion()
+
 	return info
 }
 
@@ -1018,12 +1121,15 @@ func activityNodeVersion() string {
 	if buildinfo.Commit != "" && buildinfo.Commit != "none" {
 		version += "+" + buildinfo.Commit
 	}
+
 	if len(version) > 64 {
 		version = version[:64]
 	}
+
 	if !activityVersionPattern.MatchString(version) {
 		return ""
 	}
+
 	return version
 }
 
@@ -1150,6 +1256,7 @@ func safeActivityResource(value string) string {
 	if !activityNamePattern.MatchString(value) {
 		return ""
 	}
+
 	return value
 }
 
@@ -1160,6 +1267,7 @@ func activityActorLabel(value string) string {
 	if !activityLabelPattern.MatchString(value) {
 		return ""
 	}
+
 	return value
 }
 
@@ -1168,6 +1276,7 @@ func safeActivityToken(value string) string {
 	if !activityTokenPattern.MatchString(value) || !activityKnownReason[value] {
 		return ""
 	}
+
 	return value
 }
 
@@ -1176,6 +1285,7 @@ func safeActivityStep(value string) string {
 	if !activityStepPattern.MatchString(value) {
 		return ""
 	}
+
 	return value
 }
 
@@ -1184,6 +1294,7 @@ func safeActivityID(value string) string {
 	if !activityIDPattern.MatchString(value) {
 		return ""
 	}
+
 	return value
 }
 
@@ -1193,5 +1304,6 @@ func firstActivityValue(values ...string) string {
 			return value
 		}
 	}
+
 	return ""
 }

@@ -51,36 +51,44 @@ func openRegisteredDropConfig(name string) (*registeredDropConfig, error) {
 	if !validDropConfigName(name) {
 		return nil, errors.New("invalid cluster name for configuration cleanup")
 	}
+
 	uid, err := materialisationPostgresUID()
 	if err != nil {
 		return nil, err
 	}
+
 	parent, parentInfo, ancestors, err := openMaterialisationConfigParent(uid)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, errDropConfigNotRegistered
 		}
+
 		return nil, err
 	}
+
 	named, err := parent.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		_ = parent.Close()
 		return nil, errDropConfigNotRegistered
 	}
+
 	if err != nil {
 		_ = parent.Close()
 		return nil, err
 	}
+
 	id, err := materialisationArtifactID(named)
 	if err != nil || id.UID != uid || named.Mode().Perm() != 0o755 {
 		_ = parent.Close()
 		return nil, errors.New("registered configuration directory is unsafe")
 	}
+
 	dir, err := openMaterialisationChild(parent, name)
 	if err != nil {
 		_ = parent.Close()
 		return nil, err
 	}
+
 	c := &registeredDropConfig{
 		name: name, parent: parent, parentInfo: parentInfo,
 		ancestors: ancestors, dir: dir, dirID: id,
@@ -89,15 +97,18 @@ func openRegisteredDropConfig(name string) (*registeredDropConfig, error) {
 		c.close()
 		return nil, err
 	}
+
 	present, err := c.registrationPresent()
 	if err != nil {
 		c.close()
 		return nil, err
 	}
+
 	if !present {
 		c.close()
 		return nil, errors.New("configuration directory is not registered")
 	}
+
 	return c, nil
 }
 
@@ -105,6 +116,7 @@ func (c *registeredDropConfig) close() {
 	if c.dir != nil {
 		_ = c.dir.Close()
 	}
+
 	if c.parent != nil {
 		_ = c.parent.Close()
 	}
@@ -114,9 +126,11 @@ func (c *registeredDropConfig) validatePinned() error {
 	if err := validateMaterialisationAncestry(c.ancestors); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationParent(materialisationConfigRoot, c.parentInfo); err != nil {
 		return err
 	}
+
 	return validateMaterialisationDir(c.parent, c.name, c.dirID, c.dir, 0o755)
 }
 
@@ -129,18 +143,23 @@ func registrationPresentIn(dir *os.File) (bool, error) {
 	if errors.Is(err, unix.ENOENT) {
 		return false, nil
 	}
+
 	if err != nil {
 		return false, err
 	}
+
 	f := os.NewFile(uintptr(fd), "postgresql.conf")
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil {
 		return false, err
 	}
+
 	if !info.Mode().IsRegular() {
 		return false, errors.New("cluster registration is not a regular file")
 	}
+
 	return true, nil
 }
 
@@ -152,13 +171,16 @@ func (c *registeredDropConfig) validateRegistered() error {
 	if err := c.validatePinned(); err != nil {
 		return err
 	}
+
 	present, err := c.registrationPresent()
 	if err != nil {
 		return err
 	}
+
 	if !present {
 		return errDropConfigNotRegistered
 	}
+
 	return nil
 }
 
@@ -168,12 +190,15 @@ func (c *registeredDropConfig) drop(effect func() error) error {
 	if effect == nil {
 		return errors.New("missing cluster drop effect")
 	}
+
 	if err := c.validateRegistered(); err != nil {
 		return err
 	}
+
 	if err := effect(); err != nil {
 		return err
 	}
+
 	return c.finish()
 }
 
@@ -190,35 +215,43 @@ func (q *dropConfigQuarantine) candidatePath() string {
 // config parent. The directory is held by fd, so later renames of its public
 // name cannot redirect the candidate move or removal.
 func (c *registeredDropConfig) createQuarantine() (*dropConfigQuarantine, error) {
-	for attempt := 0; attempt < 8; attempt++ {
+	for range 8 {
 		var raw [12]byte
 		if _, err := rand.Read(raw[:]); err != nil {
 			return nil, err
 		}
+
 		name := dropConfigQuarantinePrefix + hex.EncodeToString(raw[:])
 		if err := c.parent.Mkdir(name, 0o700); err != nil {
 			if errors.Is(err, os.ErrExist) {
 				continue
 			}
+
 			return nil, err
 		}
+
 		named, err := c.parent.Lstat(name)
 		if err != nil {
 			return nil, err
 		}
+
 		qroot, err := c.parent.OpenRoot(name)
 		if err != nil {
 			return nil, err
 		}
+
 		opened, statErr := qroot.Stat(".")
+
 		id, idErr := materialisationArtifactID(named)
 		if statErr != nil || idErr != nil || id.UID != materialisationRecordUID ||
 			named.Mode().Perm() != 0o700 || !os.SameFile(named, opened) || opened.Mode().Perm() != 0o700 {
 			_ = qroot.Close()
 			return nil, errors.New("configuration quarantine is unsafe")
 		}
+
 		return &dropConfigQuarantine{name: name, root: qroot}, nil
 	}
+
 	return nil, errors.New("cannot create configuration quarantine")
 }
 
@@ -227,15 +260,18 @@ func (c *registeredDropConfig) removeQuarantine(q *dropConfigQuarantine) error {
 	if err != nil {
 		return err
 	}
+
 	opened, err := q.root.Stat(".")
 	if err != nil {
 		return err
 	}
+
 	id, err := materialisationArtifactID(opened)
 	if err != nil || id.UID != materialisationRecordUID || !os.SameFile(named, opened) ||
 		named.Mode().Perm() != 0o700 || opened.Mode().Perm() != 0o700 {
 		return errors.New("configuration quarantine changed")
 	}
+
 	return c.parent.Remove(q.name)
 }
 
@@ -247,11 +283,14 @@ func (c *registeredDropConfig) moveIntoQuarantine(q *dropConfigQuarantine) error
 		return err
 	}
 	defer func() { _ = parent.Close() }()
+
 	jail, err := q.root.Open(".")
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = jail.Close() }()
+
 	return unix.Renameat2(int(parent.Fd()), c.name, int(jail.Fd()), dropConfigQuarantineEntry, unix.RENAME_NOREPLACE)
 }
 
@@ -263,23 +302,29 @@ func (c *registeredDropConfig) restoreFromQuarantine(q *dropConfigQuarantine) (b
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
+
 	parent, err := c.parent.Open(".")
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = parent.Close() }()
+
 	jail, err := q.root.Open(".")
 	if err != nil {
 		return false, err
 	}
+
 	defer func() { _ = jail.Close() }()
+
 	err = unix.Renameat2(int(jail.Fd()), dropConfigQuarantineEntry, int(parent.Fd()), c.name, unix.RENAME_NOREPLACE)
 	if err == nil {
 		return true, nil
 	}
+
 	if errors.Is(err, unix.EEXIST) {
 		return false, nil
 	}
+
 	return false, err
 }
 
@@ -291,12 +336,15 @@ func (c *registeredDropConfig) rejectQuarantine(q *dropConfigQuarantine, reason 
 	if err != nil {
 		return errors.Join(reason, fmt.Errorf("unknown configuration retained at %s: %w", q.candidatePath(), err))
 	}
+
 	if !restored {
 		return fmt.Errorf("%w; unknown configuration retained at %s", reason, q.candidatePath())
 	}
+
 	if err := c.removeQuarantine(q); err != nil {
 		return errors.Join(reason, fmt.Errorf("rejected configuration was restored, quarantine remains at %s: %w", q.root.Name(), err))
 	}
+
 	return reason
 }
 
@@ -305,10 +353,12 @@ func (c *registeredDropConfig) requirePinnedRemoved() error {
 	if err != nil {
 		return err
 	}
+
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || st.Nlink != 0 {
 		return errors.New("original configuration directory was not removed")
 	}
+
 	return nil
 }
 
@@ -318,17 +368,21 @@ func (c *registeredDropConfig) finishAbsent() error {
 	if err := c.requirePinnedRemoved(); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationAncestry(c.ancestors); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationParent(materialisationConfigRoot, c.parentInfo); err != nil {
 		return err
 	}
+
 	if _, err := c.parent.Lstat(c.name); err == nil {
 		return errors.New("configuration name was recreated during drop")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+
 	return materialisationSyncArtifactParent(c.parent)
 }
 
@@ -345,11 +399,13 @@ func (c *registeredDropConfig) finish() error {
 	if err := c.validateParents(); err != nil {
 		return err
 	}
+
 	if _, err := c.parent.Lstat(c.name); errors.Is(err, os.ErrNotExist) {
 		return c.finishAbsent()
 	} else if err != nil {
 		return err
 	}
+
 	return c.finishQuarantined()
 }
 
@@ -357,6 +413,7 @@ func (c *registeredDropConfig) validateParents() error {
 	if err := validateMaterialisationAncestry(c.ancestors); err != nil {
 		return err
 	}
+
 	return validateMaterialisationParent(materialisationConfigRoot, c.parentInfo)
 }
 
@@ -368,6 +425,7 @@ func (c *registeredDropConfig) finishQuarantined() error {
 	defer func() { _ = q.root.Close() }()
 
 	dropConfigBeforeQuarantine()
+
 	err = c.moveIntoQuarantine(q)
 	if err != nil {
 		cleanupErr := c.removeQuarantine(q)
@@ -375,14 +433,19 @@ func (c *registeredDropConfig) finishQuarantined() error {
 			if cleanupErr != nil {
 				return cleanupErr
 			}
+
 			return c.finishAbsent()
 		}
+
 		return errors.Join(err, cleanupErr)
 	}
+
 	dropConfigAfterQuarantine()
+
 	if err := c.validateAndRemoveQuarantined(q); err != nil {
 		return err
 	}
+
 	if err := c.removeQuarantine(q); err != nil {
 		return err
 	}
@@ -397,14 +460,18 @@ func (c *registeredDropConfig) validateAndRemoveQuarantined(q *dropConfigQuarant
 	if err := validateMaterialisationDir(q.root, dropConfigQuarantineEntry, c.dirID, c.dir, 0o755); err != nil {
 		return c.rejectQuarantine(q, err)
 	}
+
 	candidate, err := openMaterialisationChild(q.root, dropConfigQuarantineEntry)
 	if err != nil {
 		return c.rejectQuarantine(q, err)
 	}
+
 	defer func() { _ = candidate.Close() }()
+
 	if err := c.requireQuarantinedUnregistered(candidate); err != nil {
 		return c.rejectQuarantine(q, err)
 	}
+
 	if err := c.validateParents(); err != nil {
 		return c.rejectQuarantine(q, err)
 	}
@@ -412,12 +479,15 @@ func (c *registeredDropConfig) validateAndRemoveQuarantined(q *dropConfigQuarant
 	if err := c.requireQuarantinedUnregistered(candidate); err != nil {
 		return c.rejectQuarantine(q, err)
 	}
+
 	if err := q.root.RemoveAll(dropConfigQuarantineEntry); err != nil {
 		return err
 	}
+
 	if _, err := q.root.Lstat(dropConfigQuarantineEntry); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("quarantined configuration directory remains")
 	}
+
 	return c.requirePinnedRemoved()
 }
 
@@ -426,9 +496,11 @@ func (c *registeredDropConfig) requireQuarantinedUnregistered(candidate *os.File
 	if err != nil {
 		return err
 	}
+
 	if present {
 		return errors.New("cluster registration was recreated before removal")
 	}
+
 	return nil
 }
 
@@ -442,13 +514,17 @@ func dropRegisteredCluster(name string, effect func() error) error {
 	if effect == nil {
 		return errors.New("missing cluster drop effect")
 	}
+
 	c, err := openRegisteredDropConfig(name)
 	if errors.Is(err, errDropConfigNotRegistered) {
 		return effect()
 	}
+
 	if err != nil {
 		return err
 	}
+
 	defer c.close()
+
 	return c.drop(effect)
 }

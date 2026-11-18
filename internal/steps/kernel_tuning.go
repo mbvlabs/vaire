@@ -50,18 +50,22 @@ func (kernelTuning) Check(ctx context.Context, cfg config.Cluster, rt engine.Run
 	if !fileIs(SysctlPath, in.Sysctl, 0o644) {
 		return incomplete(SysctlPath + " differs"), nil
 	}
+
 	if !fileIs(THPUnitPath, in.THPUnit, 0o644) {
 		return incomplete(THPUnitPath + " differs"), nil
 	}
+
 	for _, kv := range parseSysctl(in.Sysctl) {
 		got, err := Probe(ctx, "sysctl", "-n", kv.key)
 		if err != nil || strings.TrimSpace(got) != kv.value {
 			return incomplete("sysctl " + kv.key + " is not " + kv.value), nil
 		}
 	}
+
 	if thp, err := Probe(ctx, "cat", "/sys/kernel/mm/transparent_hugepage/enabled"); err != nil || !strings.Contains(thp, "[never]") {
 		return incomplete("transparent huge pages are not disabled"), nil
 	}
+
 	return complete(), nil
 }
 
@@ -70,10 +74,13 @@ func (s kernelTuning) Apply(ctx context.Context, cfg config.Cluster, rt engine.R
 	if err := writeFile(SysctlPath, in.Sysctl, 0o644); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := writeFile(THPUnitPath, in.THPUnit, 0o644); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	err := rt.Shell.Run(ctx, s.ID(), Script("kernel-tuning"), nil, report)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
 
@@ -82,17 +89,21 @@ type sysctlKV struct{ key, value string }
 // parseSysctl reads "key = value" lines from a rendered sysctl file.
 func parseSysctl(content string) []sysctlKV {
 	var out []sysctlKV
-	for _, line := range strings.Split(content, "\n") {
+
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
+
 		out = append(out, sysctlKV{key: strings.TrimSpace(key), value: strings.TrimSpace(value)})
 	}
+
 	return out
 }
 
@@ -106,5 +117,6 @@ func hugePagesFromKernel(ctx context.Context, cluster, dataDir string) (int, err
 	if err != nil {
 		return 0, err
 	}
+
 	return strconv.Atoi(strings.TrimSpace(out))
 }

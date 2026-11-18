@@ -52,6 +52,7 @@ func (pgbackrestStep) SkipReason(cfg config.Cluster) string {
 	if !cfg.BackupConfigured() {
 		return "backups_not_configured"
 	}
+
 	return ""
 }
 
@@ -67,11 +68,14 @@ type backupValues struct {
 // ReadBackupEnv parses /etc/vaire/runtime/backup.env.
 func ReadBackupEnv() map[string]string {
 	out := map[string]string{}
+
 	f, err := os.Open(BackupEnvPath)
 	if err != nil {
 		return out
 	}
+
 	defer func() { _ = f.Close() }()
+
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		key, value, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
@@ -80,6 +84,7 @@ func ReadBackupEnv() map[string]string {
 			secrets.Add(value)
 		}
 	}
+
 	return out
 }
 
@@ -91,6 +96,7 @@ func BackupTarget(cfg config.Cluster) (backup.Target, string, error) {
 		return backup.Target{}, "", output.NewError(output.CodePrecondition, "the bucket keys are not on this node", output.ExitPrecondition,
 			"Run vaire backup setup, or vaire apply, so the node gets them.").WithDetails(map[string]any{"reason": "backup_not_configured", "path": BackupEnvPath})
 	}
+
 	return backup.Target{
 		Endpoint: cfg.Backup.Endpoint,
 		Region:   cfg.Backup.Region,
@@ -108,12 +114,14 @@ func diskCipher() string {
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "repo1-cipher-pass="); ok {
 			secrets.Add(v)
 			return v
 		}
 	}
+
 	return ""
 }
 
@@ -128,15 +136,15 @@ func resolveBackupValues(rt engine.Runtime) (backupValues, []string, error) {
 		if request != "" && (rt.RotateSecrets || disk == "") {
 			return request
 		}
+
 		return disk
 	}
 	v := backupValues{
-		BackupSecrets: render.BackupSecrets{
-			KeyID:  pick(env[envKeyID], req[SecretBackupKeyID]),
-			Secret: pick(env[envSecret], req[SecretBackupKeySecret]),
-		},
+		KeyID:     pick(env[envKeyID], req[SecretBackupKeyID]),
+		Secret:    pick(env[envSecret], req[SecretBackupKeySecret]),
 		Recipient: pick(env[envRecipient], req[SecretBackupAgeRecipient]),
 	}
+
 	cipher := diskCipher()
 	if cipher != "" && req[SecretBackupCipherPass] != "" && req[SecretBackupCipherPass] != cipher {
 		if rt.RotateSecrets {
@@ -147,23 +155,30 @@ func resolveBackupValues(rt engine.Runtime) (backupValues, []string, error) {
 				WithDetails(map[string]any{"reason": "cipher_mismatch"})
 		}
 	}
+
 	if cipher == "" {
 		cipher = req[SecretBackupCipherPass]
 	}
+
 	v.CipherPass = cipher
+
 	var missing []string
 	if v.KeyID == "" {
 		missing = append(missing, SecretBackupKeyID)
 	}
+
 	if v.Secret == "" {
 		missing = append(missing, SecretBackupKeySecret)
 	}
+
 	if v.CipherPass == "" {
 		missing = append(missing, SecretBackupCipherPass)
 	}
+
 	for _, s := range []string{v.KeyID, v.Secret, v.CipherPass} {
 		secrets.Add(s)
 	}
+
 	return v, missing, nil
 }
 
@@ -176,6 +191,7 @@ func backupEnv(v backupValues) string {
 	if v.Recipient != "" {
 		lines = append(lines, envRecipient+"="+v.Recipient)
 	}
+
 	return strings.Join(lines, "\n") + "\n"
 }
 
@@ -188,6 +204,7 @@ func (pgbackrestStep) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []eng
 	if !cfg.BackupConfigured() {
 		return nil
 	}
+
 	v, missing, err := resolveBackupValues(rt)
 	if err != nil || len(missing) > 0 {
 		v.BackupSecrets = render.BackupSecrets{KeyID: redactedValue, Secret: redactedValue, CipherPass: redactedValue}
@@ -211,18 +228,23 @@ func (pgbackrestStep) Force(cfg config.Cluster, rt engine.Runtime) string {
 	if !cfg.BackupConfigured() {
 		return ""
 	}
+
 	env := ReadBackupEnv()
+
 	req := rt.SecretValues
 	if req[SecretBackupKeySecret] == "" {
 		return ""
 	}
+
 	if env[envSecret] == "" || diskCipher() == "" {
 		return "backup_credentials_missing"
 	}
+
 	if rt.RotateSecrets && (req[SecretBackupKeySecret] != env[envSecret] || (req[SecretBackupKeyID] != "" && req[SecretBackupKeyID] != env[envKeyID]) ||
 		(req[SecretBackupAgeRecipient] != "" && req[SecretBackupAgeRecipient] != env[envRecipient])) {
 		return "backup_credentials_rotated"
 	}
+
 	return ""
 }
 
@@ -230,28 +252,35 @@ func (pgbackrestStep) Check(ctx context.Context, cfg config.Cluster, rt engine.R
 	if !cfg.BackupConfigured() {
 		return complete(), nil
 	}
+
 	v, missing, err := resolveBackupValues(rt)
 	if err != nil || len(missing) > 0 {
 		return incomplete("the bucket keys or cipher pass are missing"), nil
 	}
+
 	if !fileIsOwned(backup.ConfPath, string(render.PgBackRestConf(cfg, rt.Host, v.BackupSecrets)), 0o600, pgFileOwner, pgFileGroup) {
 		return incomplete(backup.ConfPath + " differs"), nil
 	}
+
 	if _, err := os.Stat(BackupEnvPath); err != nil {
 		return incomplete(BackupEnvPath + " is missing"), nil
 	}
+
 	if len(cfg.StanzaClusters()) == 0 {
 		return complete(), nil
 	}
+
 	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
 	if err != nil {
 		return incomplete("pgbackrest info failed: " + err.Error()), nil
 	}
+
 	for _, c := range cfg.StanzaClusters() {
 		if !all[c.Stanza].HasFull() {
 			return incomplete("stanza " + c.Stanza + " (" + c.Name + ") has no full backup"), nil
 		}
 	}
+
 	return complete(), nil
 }
 
@@ -260,47 +289,60 @@ func (s pgbackrestStep) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if len(missing) > 0 {
 		sort.Strings(missing)
+
 		return engine.ApplyResult{}, output.NewError(output.CodeInputRequired,
 			"the bucket keys or the cipher pass are not on the node and were not supplied",
 			output.ExitInput,
 			"Run vaire backup setup, or vaire apply from a machine whose context has the recovery kit (vaire login from a current transfer bundle).",
 		).WithDetails(map[string]any{"secrets": missing})
 	}
+
 	local := "false"
 	if cfg.Backup.Database.LocalRepo {
 		local = "true"
 	}
+
 	if err := rt.Shell.Run(ctx, s.ID(), Script("pgbackrest"), map[string]string{"LOCAL_REPO": local}, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := writeFile(BackupEnvPath, backupEnv(v), 0o600); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := writeFileOwned(backup.ConfPath, string(render.PgBackRestConf(cfg, rt.Host, v.BackupSecrets)), 0o600, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if len(cfg.StanzaClusters()) == 0 {
 		return engine.ApplyResult{Restart: engine.RestartNone, Notes: []string{noDatabasesNote}}, nil
 	}
+
 	all, err := BackupDriver(config.ClusterSpec{}, rt.Shell, pgbackrestID, nil).InfoAll(ctx)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	var notes []string
+
 	for _, c := range cfg.StanzaClusters() {
 		// A stanza with a full backup is done; rotated keys check every
 		// stanza again, so a key that cannot push WAL shows up now.
 		if all[c.Stanza].HasFull() && !rt.RotateSecrets {
 			continue
 		}
+
 		note, err := setupStanza(ctx, cfg, c, BackupDriver(c, rt.Shell, pgbackrestID, report))
 		if err != nil {
 			return engine.ApplyResult{}, err
 		}
+
 		notes = append(notes, note)
 	}
+
 	return engine.ApplyResult{Restart: engine.RestartNone, Notes: notes}, nil
 }
 
@@ -310,25 +352,32 @@ func setupStanza(ctx context.Context, cfg config.Cluster, c config.ClusterSpec, 
 	if err := d.StanzaCreate(ctx); err != nil {
 		return "", err
 	}
+
 	if err := d.Check(ctx); err != nil {
 		return "", err
 	}
+
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return "", err
 	}
+
 	if info.HasFull() {
 		return "stanza " + d.Stanza + " (" + c.Name + ") checked", nil
 	}
+
 	if err := CaptureStanzaRequirements(cfg, c); err != nil {
 		return "", fmt.Errorf("recording %s's extension requirements before its first full backup: %w", c.Name, err)
 	}
+
 	set, err := d.Backup(ctx, backup.TypeFull)
 	if err != nil {
 		return "", err
 	}
+
 	RecordBackup(cfg, c.Name, set)
 	RecordRepo(ctx, cfg, d, c.Name)
+
 	return "stanza " + d.Stanza + " (" + c.Name + ") checked, first full backup " + set.Label, nil
 }
 
@@ -345,10 +394,12 @@ func RecordBackup(cfg config.Cluster, db string, set backup.Set) {
 	if finished == "" {
 		finished = time.Now().UTC().Format(time.RFC3339)
 	}
+
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.RecordBackup(db, set, finished)
 		return nil
 	})
+
 	WriteMetrics(cfg)
 }
 
@@ -359,6 +410,7 @@ func RecordBackupFailure(cfg config.Cluster, db, kind string) {
 		s.RecordBackupFailure(db, kind, time.Now().UTC().Format(time.RFC3339))
 		return nil
 	})
+
 	WriteMetrics(cfg)
 }
 
@@ -370,10 +422,12 @@ func RecordRepo(ctx context.Context, cfg config.Cluster, d backup.PgBackRest, db
 	if err != nil {
 		return
 	}
+
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.RecordRepo(db, backup.FactsFrom(info, time.Now().UTC().Format(time.RFC3339)))
 		return nil
 	})
+
 	WriteMetrics(cfg)
 }
 
@@ -383,5 +437,6 @@ func WriteMetrics(cfg config.Cluster) {
 	if n, ok := cfg.Master(); ok {
 		node = n.Name
 	}
+
 	_ = backup.WriteMetrics(cfg.Name(), node)
 }

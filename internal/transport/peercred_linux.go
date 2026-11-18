@@ -14,15 +14,21 @@ func peerUID(c *net.UnixConn) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	var cred *unix.Ucred
-	var credErr error
+
+	var (
+		cred    *unix.Ucred
+		credErr error
+	)
+
 	if err := raw.Control(func(fd uintptr) {
 		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 	}); err != nil {
 		return 0, err
 	}
+
 	if credErr != nil {
 		return 0, credErr
 	}
+
 	return cred.Uid, nil
 }

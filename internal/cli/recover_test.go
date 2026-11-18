@@ -21,18 +21,24 @@ func TestRecoverFullParamsDecode(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
+
 		var p node.BackupNowParams
+
 		return p, dec.Decode(&p)
 	}
+
 	p, err := strict(recoverFullParams("app"))
 	if err != nil {
 		t.Fatalf("the recover path's backup request does not decode: %v", err)
 	}
+
 	if p.Database != "app" || p.Type != backup.TypeFull {
 		t.Errorf("params %+v", p)
 	}
+
 	if _, err := strict(map[string]any{"db": "app", "type": "full"}); err == nil {
 		t.Error("the strict decode accepts the old db field, so this test proves nothing")
 	}
@@ -52,26 +58,32 @@ func TestRecoverInspectionLineShowsApplicationNotReady(t *testing.T) {
 // run in the job, and a rebuilt master has no service password files.
 func TestRecoverSecrets(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	creds := workspaces.Credentials{
 		Database: &workspaces.DatabaseCreds{Admin: workspaces.Role{User: "vaire_admin", Password: "admin-pw"}, Services: map[string]workspaces.Role{}},
 		Metrics:  &workspaces.MetricsCreds{Username: "metrics", Password: "metrics-pw"},
 		Backup:   &workspaces.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"},
 	}
 	creds.Backup.PgBackRest.CipherPass = "cipher"
+
 	creds.Backup.Encryption.Identity, creds.Backup.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
 	for _, role := range steps.ServiceRoles {
 		creds.Database.Services[role] = workspaces.Role{User: role, Password: role + "-pw"}
 	}
+
 	if err := workspaces.SaveCredentials("dr", creds); err != nil {
 		t.Fatal(err)
 	}
+
 	values, generated, err := recoverSecrets("dr")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(generated) != 0 {
 		t.Errorf("generated %v from a complete workspace", generated)
 	}
+
 	want := map[string]string{
 		steps.SecretPgbouncerAuth: "pgbouncer_auth-pw", steps.SecretMonitor: "vaire_monitor-pw", steps.SecretAdminPassword: "admin-pw",
 		steps.SecretBackupKeyID: "AKID", steps.SecretBackupKeySecret: "s3cret", steps.SecretBackupCipherPass: "cipher",
@@ -82,9 +94,11 @@ func TestRecoverSecrets(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, values[k], v)
 		}
 	}
+
 	if !strings.HasPrefix(values[steps.SecretMetricsHash], "$2") {
 		t.Errorf("no /metrics hash: %q", values[steps.SecretMetricsHash])
 	}
+
 	for _, value := range values {
 		if value == creds.Backup.Encryption.Identity {
 			t.Error("the recovery identity never leaves the operator")
@@ -105,19 +119,23 @@ func TestRecoverPreservesFollowerJobWarnings(t *testing.T) {
 			{"code": "follower_metrics_failed", "message": "the follower metrics were not written: bad path"}
 		]
 	}`
+
 	var res map[string]any
 	if err := json.Unmarshal([]byte(raw), &res); err != nil {
 		t.Fatal(err)
 	}
+
 	w := recoverWarnings("app_follower", res)
 	if len(w) != 3 {
 		t.Fatalf("warnings %+v, want the three follower job warnings", w)
 	}
+
 	for i, code := range []string{"pooler_reload_failed", "follower_not_streaming", "follower_metrics_failed"} {
 		if w[i].Code != code || w[i].Message == "" {
 			t.Errorf("warning %d = %+v, want code %s", i, w[i], code)
 		}
 	}
+
 	line := recoverLine("app_follower", res)
 	if !strings.Contains(line, "following app again (stanza)") || !strings.Contains(line, "3 part(s) of finishing it failed") {
 		t.Errorf("line %q does not qualify the follower's completion", line)
@@ -127,9 +145,11 @@ func TestRecoverPreservesFollowerJobWarnings(t *testing.T) {
 	if err := json.Unmarshal([]byte(clean), &res); err != nil {
 		t.Fatal(err)
 	}
+
 	if w := recoverWarnings("app_follower", res); len(w) != 0 {
 		t.Errorf("clean warnings %+v", w)
 	}
+
 	if got := recoverLine("app_follower", res); got != "app_follower: following app again (stanza)" {
 		t.Errorf("clean line %q", got)
 	}
@@ -143,16 +163,20 @@ func TestRecoverSummaryReportsWhatFailed(t *testing.T) {
 	if got := recoverLine("app", clean); got != "app: recovered to 2026-10-15T09:30:00Z in 42s" {
 		t.Errorf("clean line %q", got)
 	}
+
 	if w := recoverWarnings("app", clean); len(w) != 0 {
 		t.Errorf("clean warnings %+v", w)
 	}
+
 	failed := map[string]any{"phase": "recovered", "duration_s": float64(42),
 		"steps_warning": "the data is recovered, but its configuration did not finish: step postgres-roles-v1@app failed: x; vaire apply finishes it",
 		"promoted":      map[string]any{"warning": map[string]any{"code": "after_cutover_failed", "message": "app is restored, but y"}}}
+
 	w := recoverWarnings("app", failed)
 	if len(w) != 2 || w[0].Code != "after_cutover_failed" || w[1].Code != "recover_steps" || !strings.HasPrefix(w[1].Message, "app: the data is recovered") {
 		t.Errorf("warnings %+v", w)
 	}
+
 	if got := recoverLine("app", failed); !strings.Contains(got, "2 part(s) of finishing it failed") {
 		t.Errorf("failed line %q", got)
 	}

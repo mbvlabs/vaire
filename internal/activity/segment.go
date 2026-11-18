@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,10 +77,12 @@ func parseSegmentName(name string) (uint64, bool) {
 	if len(name) != segmentNameLen || !strings.HasPrefix(name, segmentPrefix) || !strings.HasSuffix(name, segmentSuffix) {
 		return 0, false
 	}
+
 	index, err := strconv.ParseUint(name[len(segmentPrefix):len(segmentPrefix)+segmentIndexLen], 16, 64)
 	if err != nil || index == 0 {
 		return 0, false
 	}
+
 	return index, true
 }
 
@@ -95,16 +98,20 @@ func listSegments(dir string) ([]segmentInfo, bool, bool, error) {
 		return nil, false, false, fmt.Errorf("activity: read store directory: %w", err)
 	}
 	defer func() { _ = f.Close() }()
+
 	segments, more, raced, err := readSegmentEntries(f, dir)
 	if err != nil {
 		return nil, false, raced, err
 	}
+
 	sort.Slice(segments, func(i, j int) bool { return segments[i].index < segments[j].index })
+
 	for i := 1; i < len(segments); i++ {
 		if segments[i].index == segments[i-1].index {
 			return nil, false, raced, errUnsafeSegment
 		}
 	}
+
 	return segments, more, raced, nil
 }
 
@@ -113,18 +120,22 @@ func listSegments(dir string) ([]segmentInfo, bool, bool, error) {
 // raced reports that a listed entry vanished before its metadata was read.
 func readSegmentEntries(f *os.File, dir string) ([]segmentInfo, bool, bool, error) {
 	var listing segmentListing
+
 	for {
 		batch, readErr := f.ReadDir(dirReadBatch)
 		if err := listing.add(dir, batch); err != nil {
 			return nil, false, listing.raced, err
 		}
+
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return nil, false, listing.raced, fmt.Errorf("activity: read store directory: %w", readErr)
 		}
+
 		if listing.more || readErr != nil {
 			break
 		}
 	}
+
 	return listing.segments, listing.more, listing.raced, nil
 }
 
@@ -145,17 +156,21 @@ func (l *segmentListing) add(dir string, batch []os.DirEntry) error {
 			l.more = true
 			return nil
 		}
+
 		seg, kept, vanished, err := readSegmentEntry(dir, entry)
 		if err != nil {
 			return err
 		}
+
 		if vanished {
 			l.raced = true
 		}
+
 		if kept {
 			l.segments = append(l.segments, seg)
 		}
 	}
+
 	return nil
 }
 
@@ -167,20 +182,25 @@ func readSegmentEntry(dir string, entry os.DirEntry) (seg segmentInfo, kept, van
 	if name == stateName || name == lockName || strings.HasPrefix(name, ".") {
 		return segmentInfo{}, false, false, nil
 	}
+
 	index, ok := parseSegmentName(name)
 	if !ok {
 		return segmentInfo{}, false, false, nil
 	}
+
 	if dirEntryHook != nil {
 		dirEntryHook(name)
 	}
+
 	info, infoErr := entry.Info()
 	if infoErr != nil {
 		if errors.Is(infoErr, fs.ErrNotExist) {
 			return segmentInfo{}, false, true, nil
 		}
+
 		return segmentInfo{}, false, false, fmt.Errorf("activity: read segment entry: %w", infoErr)
 	}
+
 	return segmentInfo{
 		index:   index,
 		name:    name,
@@ -200,10 +220,12 @@ func openSegmentRead(seg segmentInfo) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if err := verifyOpenSegment(f); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	return f, nil
 }
 
@@ -213,9 +235,11 @@ func verifyOpenSegment(f *os.File) error {
 	if err != nil {
 		return err
 	}
+
 	if !info.Mode().IsRegular() || info.Mode().Perm() != fileMode || !ownerMatches(info) {
 		return errUnsafeSegment
 	}
+
 	return nil
 }
 
@@ -233,28 +257,35 @@ func segmentFirstEventErr(seg segmentInfo, budget int64) (Event, bool, error) {
 	if seg.size <= 0 {
 		return Event{}, false, nil
 	}
+
 	if budget <= 0 || budget > seg.size {
 		budget = seg.size
 	}
+
 	f, err := openSegmentRead(seg)
 	if err != nil {
 		return Event{}, false, err
 	}
+
 	defer func() { _ = f.Close() }()
+
 	reader := bufio.NewReaderSize(io.LimitReader(f, budget), 4096)
 	for {
 		line, terminated, oversize, readErr := readEventLine(reader, maxEventBytes)
 		if line == nil && errors.Is(readErr, io.EOF) {
 			return Event{}, false, nil
 		}
+
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return Event{}, false, nil
 		}
+
 		if terminated && !oversize && len(line) > 0 {
 			if ev, decErr := decodeStoredEvent(line); decErr == nil {
 				return ev, true, nil
 			}
 		}
+
 		if errors.Is(readErr, io.EOF) {
 			return Event{}, false, nil
 		}
@@ -281,19 +312,21 @@ func segmentLastEventErr(ctx context.Context, seg segmentInfo, budget int64) (Ev
 	if seg.size <= 0 {
 		return Event{}, false, nil
 	}
+
 	if budget <= 0 || budget > seg.size {
 		budget = seg.size
 	}
-	chunk := int64(2 * maxEventBytes)
-	if chunk > budget {
-		chunk = budget
-	}
+
+	chunk := min(int64(2*maxEventBytes), budget)
 	start := seg.size - chunk
+
 	f, err := openSegmentRead(seg)
 	if err != nil {
 		return Event{}, false, err
 	}
+
 	defer func() { _ = f.Close() }()
+
 	raw := make([]byte, chunk)
 	if _, err := f.ReadAt(raw, start); err != nil && !errors.Is(err, io.EOF) {
 		return Event{}, false, nil
@@ -305,11 +338,14 @@ func segmentLastEventErr(ctx context.Context, seg segmentInfo, budget int64) (Ev
 		if idx < 0 {
 			return Event{}, false, nil
 		}
+
 		raw = raw[idx+1:]
 	}
+
 	if ev, ok := lastDecodableLine(raw); ok {
 		return ev, true, nil
 	}
+
 	if start == 0 {
 		return Event{}, false, nil
 	}
@@ -327,15 +363,17 @@ func lastDecodableLine(raw []byte) (Event, bool) {
 		// write, not evidence; never let it become a stored event.
 		lines = lines[:len(lines)-1]
 	}
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
+
+	for _, line := range slices.Backward(lines) {
 		if len(line) == 0 || len(line) > maxEventBytes {
 			continue
 		}
+
 		if ev, decErr := decodeStoredEvent(line); decErr == nil {
 			return ev, true
 		}
 	}
+
 	return Event{}, false
 }
 
@@ -351,13 +389,16 @@ func segmentLastEventScan(ctx context.Context, f *os.File, budget int64, cutAtLi
 	if beforeSegmentLastEventScanHook != nil {
 		beforeSegmentLastEventScanHook()
 	}
+
 	walk, err := walkSegment(ctx, f, budget, cutAtLimit, false, 0, func(Event) bool { return true })
 	if err != nil {
 		return Event{}, false, err
 	}
+
 	if !walk.hasLast {
 		return Event{}, false, nil
 	}
+
 	return walk.last, true, nil
 }
 
@@ -367,15 +408,19 @@ func segmentEndsWithNewline(seg segmentInfo) (bool, error) {
 	if seg.size == 0 {
 		return true, nil
 	}
+
 	f, err := openSegmentRead(seg)
 	if err != nil {
 		return false, err
 	}
+
 	defer func() { _ = f.Close() }()
+
 	var last [1]byte
 	if _, err := f.ReadAt(last[:], seg.size-1); err != nil {
 		return false, err
 	}
+
 	return last[0] == '\n', nil
 }
 
@@ -391,6 +436,7 @@ func readEventLine(reader *bufio.Reader, max int) (line []byte, terminated bool,
 		if !oversize {
 			if len(line)+len(chunk) > max {
 				oversize = true
+
 				if len(line) < max {
 					line = append(line, chunk[:max-len(line)]...)
 				}
@@ -398,6 +444,7 @@ func readEventLine(reader *bufio.Reader, max int) (line []byte, terminated bool,
 				line = append(line, chunk...)
 			}
 		}
+
 		switch {
 		case readErr == nil:
 			return line, true, oversize, nil
@@ -407,6 +454,7 @@ func readEventLine(reader *bufio.Reader, max int) (line []byte, terminated bool,
 			if len(line) == 0 && !oversize {
 				return nil, false, false, io.EOF
 			}
+
 			return line, false, oversize, nil
 		default:
 			return nil, false, false, readErr
@@ -421,19 +469,24 @@ func decodeStoredEvent(line []byte) (Event, error) {
 	if len(line) == 0 {
 		return Event{}, errMalformedEvent
 	}
+
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.DisallowUnknownFields()
+
 	var ev Event
 	if err := dec.Decode(&ev); err != nil {
 		return Event{}, errMalformedEvent
 	}
+
 	var trailing json.RawMessage
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return Event{}, errMalformedEvent
 	}
+
 	if err := validateStoredEvent(ev); err != nil {
 		return Event{}, errMalformedEvent
 	}
+
 	return ev, nil
 }
 
@@ -443,10 +496,12 @@ func encodeEvent(ev Event) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("activity: encode event: %w", err)
 	}
+
 	raw = append(raw, '\n')
 	if len(raw) > maxEventBytes {
 		return nil, errInvalidEvent
 	}
+
 	return raw, nil
 }
 
@@ -486,29 +541,37 @@ func walkSegment(ctx context.Context, f *os.File, maxBytes int64, cutAtLimit, ne
 	if maxBytes <= 0 {
 		return walk, nil
 	}
+
 	counter := &byteCounter{r: io.LimitReader(f, maxBytes)}
 	defer func() { walk.bytes = counter.n }()
+
 	reader := bufio.NewReaderSize(counter, 4096)
+
 	for lines := 0; ; lines++ {
 		if lines%512 == 0 {
 			if err := ctx.Err(); err != nil {
 				return walk, err
 			}
 		}
+
 		line, terminated, oversize, readErr := readEventLine(reader, maxEventBytes)
 		if line == nil && errors.Is(readErr, io.EOF) {
 			break
 		}
+
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return walk, fmt.Errorf("activity: read segment: %w", readErr)
 		}
+
 		if walk.consumeLine(f, counter.n, line, terminated, oversize, cutAtLimit, newestSegment, visit) {
 			return walk, nil
 		}
+
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
 	}
+
 	return walk, nil
 }
 
@@ -529,7 +592,9 @@ func (w *segmentWalk) consumeLine(f *os.File, consumed int64, line []byte, termi
 			w.inFlightTail = true
 			return true
 		}
+
 		w.malformedEvents++
+
 		return false
 	case oversize:
 		w.malformedEvents++
@@ -537,16 +602,21 @@ func (w *segmentWalk) consumeLine(f *os.File, consumed int64, line []byte, termi
 	case len(line) == 0:
 		return false
 	}
+
 	ev, decErr := decodeStoredEvent(line)
 	if decErr != nil {
 		w.malformedEvents++
 		return false
 	}
+
 	w.applyEvent(ev)
+
 	if visit(ev) {
 		return false
 	}
+
 	w.stoppedByVisit = true
+
 	return true
 }
 
@@ -556,16 +626,21 @@ func (w *segmentWalk) applyEvent(ev Event) {
 	if w.prevSeq != 0 && w.prevSeq != ^uint64(0) && ev.Sequence > w.prevSeq+1 {
 		w.gaps += ev.Sequence - w.prevSeq - 1
 	}
+
 	if ev.Sequence > w.prevSeq {
 		w.prevSeq = ev.Sequence
 	}
+
 	if ev.Sequence > w.lastScannedSeq {
 		w.lastScannedSeq = ev.Sequence
 	}
+
 	w.observeTime(eventTime(ev))
+
 	if !w.hasFirst {
 		w.first, w.hasFirst = ev, true
 	}
+
 	w.last, w.hasLast = ev, true
 }
 
@@ -574,9 +649,11 @@ func (w *segmentWalk) observeTime(t time.Time) {
 	if t.IsZero() {
 		return
 	}
+
 	if !w.hasFirst || t.Before(w.earliest) {
 		w.earliest = t
 	}
+
 	if !w.hasLast || t.After(w.latest) {
 		w.latest = t
 	}
@@ -596,9 +673,11 @@ func tailInFlight(f *os.File, consumed int64) bool {
 	if segmentGrew(f, consumed) {
 		return true
 	}
+
 	if afterTailStatHook != nil {
 		afterTailStatHook()
 	}
+
 	if appendLockHeld(filepath.Dir(f.Name())) {
 		return true
 	}
@@ -625,6 +704,7 @@ type byteCounter struct {
 func (c *byteCounter) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
+
 	return n, err
 }
 
@@ -636,27 +716,34 @@ func (w *segmentWalk) merge(into *segmentWalk) {
 	into.malformedEvents += w.malformedEvents
 	into.events += w.events
 	into.gaps += w.gaps
+
 	into.prevSeq = w.prevSeq
 	if !into.hasFirst && w.hasFirst {
 		into.first, into.hasFirst = w.first, true
 	}
+
 	if w.hasLast {
 		into.last, into.hasLast = w.last, true
 	}
+
 	if w.hasFirst {
 		if into.earliest.IsZero() || w.earliest.Before(into.earliest) {
 			into.earliest = w.earliest
 		}
+
 		if into.latest.IsZero() || w.latest.After(into.latest) {
 			into.latest = w.latest
 		}
 	}
+
 	if w.lastScannedSeq > into.lastScannedSeq {
 		into.lastScannedSeq = w.lastScannedSeq
 	}
+
 	if w.stoppedByVisit {
 		into.stoppedByVisit = true
 	}
+
 	if w.inFlightTail {
 		into.inFlightTail = true
 	}
@@ -669,6 +756,7 @@ func eventTime(ev Event) time.Time {
 	if err != nil {
 		return time.Time{}
 	}
+
 	return t.UTC()
 }
 
@@ -677,20 +765,26 @@ func laterString(a, b string) string {
 	if a == "" {
 		return b
 	}
+
 	if b == "" {
 		return a
 	}
+
 	at, aErr := time.Parse(time.RFC3339Nano, a)
+
 	bt, bErr := time.Parse(time.RFC3339Nano, b)
 	if aErr != nil {
 		return b
 	}
+
 	if bErr != nil {
 		return a
 	}
+
 	if bt.After(at) {
 		return b
 	}
+
 	return a
 }
 
@@ -699,20 +793,26 @@ func earlierString(a, b string) string {
 	if a == "" {
 		return b
 	}
+
 	if b == "" {
 		return a
 	}
+
 	at, aErr := time.Parse(time.RFC3339Nano, a)
+
 	bt, bErr := time.Parse(time.RFC3339Nano, b)
 	if aErr != nil {
 		return b
 	}
+
 	if bErr != nil {
 		return a
 	}
+
 	if bt.Before(at) {
 		return b
 	}
+
 	return a
 }
 
@@ -720,17 +820,13 @@ func earlierString(a, b string) string {
 // bound, but the absolute page cap always applies; it is never raised to a
 // configured segment size.
 func scanBudget(cfg storeConfig) int64 {
-	budget := cfg.maxBytes + cfg.segmentBytes
-	if budget > maxPageBytes {
-		budget = maxPageBytes
-	}
-	minRead := int64(maxEventBytes)
-	if maxPageBytes < minRead {
-		minRead = maxPageBytes
-	}
+	budget := min(cfg.maxBytes+cfg.segmentBytes, maxPageBytes)
+
+	minRead := min(maxPageBytes, int64(maxEventBytes))
 	if budget < minRead {
 		budget = minRead
 	}
+
 	return budget
 }
 
@@ -742,6 +838,7 @@ func segmentSafeCheck(segs []segmentInfo) error {
 			return errUnsafeSegment
 		}
 	}
+
 	return nil
 }
 

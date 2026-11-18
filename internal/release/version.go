@@ -32,21 +32,26 @@ func ParseStable(v string) (StableVersion, bool) {
 	if m == nil {
 		return StableVersion{}, false
 	}
+
 	var out StableVersion
 	for i, dst := range []*int{&out.Major, &out.Minor, &out.Patch} {
 		n, err := strconv.Atoi(m[i+1])
 		if err != nil {
 			return StableVersion{}, false
 		}
+
 		*dst = n
 	}
+
 	if m[4] != "" {
 		n, err := strconv.Atoi(m[5])
 		if err != nil {
 			return StableVersion{}, false
 		}
+
 		out.Pre, out.PreN = m[4], n
 	}
+
 	return out, true
 }
 
@@ -76,10 +81,12 @@ func lineMajor(channel string) (int, bool) {
 	if m == nil {
 		return 0, false
 	}
+
 	n, err := strconv.Atoi(m[1])
 	if err != nil {
 		return 0, false
 	}
+
 	return n, true
 }
 
@@ -91,6 +98,7 @@ func CompareStable(a, b StableVersion) int {
 			return c
 		}
 	}
+
 	switch {
 	case a.Pre == "" && b.Pre == "":
 		return 0
@@ -99,9 +107,11 @@ func CompareStable(a, b StableVersion) int {
 	case b.Pre == "":
 		return -1
 	}
+
 	if c := strings.Compare(a.Pre, b.Pre); c != 0 {
 		return c
 	}
+
 	return cmp.Compare(a.PreN, b.PreN)
 }
 
@@ -109,10 +119,12 @@ func CompareStable(a, b StableVersion) int {
 // It falls back to a string comparison when either is not a stable version.
 func CompareVersions(a, b string) int {
 	pa, okA := ParseStable(a)
+
 	pb, okB := ParseStable(b)
 	if !okA || !okB {
 		return strings.Compare(a, b)
 	}
+
 	return CompareStable(pa, pb)
 }
 
@@ -125,15 +137,19 @@ func Promotes(current, candidate string) (bool, error) {
 	if !ok {
 		return false, fmt.Errorf("stable release version %q is invalid", candidate)
 	}
+
 	if current == "" {
 		return true, nil
 	}
+
 	cur, ok := ParseStable(current)
 	if !ok {
 		return false, fmt.Errorf("current channel version %q is invalid", current)
 	}
+
 	if next.Prerelease() && !cur.Prerelease() {
 		return false, nil
 	}
+
 	return CompareStable(next, cur) > 0, nil
 }

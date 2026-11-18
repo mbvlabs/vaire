@@ -49,10 +49,12 @@ func (m *Materialised) ForkReservationIdentity() (ReservationIdentity, error) {
 	if m == nil || m.reservation == nil || m.reservation.owner != m {
 		return ReservationIdentity{}, errors.New("fork reservation capability required")
 	}
+
 	st, ok := m.reservation.info.Sys().(*syscall.Stat_t)
 	if !ok || st.Ino == 0 {
 		return ReservationIdentity{}, errors.New("unverifiable reservation identity")
 	}
+
 	return ReservationIdentity{Device: statDevice(st), Inode: st.Ino, UID: st.Uid, Digest: m.reservation.digest}, nil
 }
 
@@ -61,13 +63,16 @@ var forkReservationStore = func() (string, uint32, error) {
 	if err != nil {
 		return "", 0, err
 	}
+
 	st, ok := parent.Sys().(*syscall.Stat_t)
 	if !ok || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || st.Uid != 0 || parent.Mode().Perm()&0o022 != 0 {
 		return "", 0, errors.New("unsafe reservation parent")
 	}
+
 	if err := os.Mkdir(TemporaryPortDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", 0, err
 	}
+
 	return TemporaryPortDir, 0, nil
 }
 
@@ -85,6 +90,7 @@ func LockForkReservation(ctx context.Context, name string, port int, present boo
 	if err != nil {
 		return nil, err
 	}
+
 	return LockForkReservationWithHost(ctx, dir, uid, name, port, present)
 }
 
@@ -93,10 +99,12 @@ func LockForkReservationWithHost(ctx context.Context, dir string, uid uint32, na
 	if !validForkReservationName(name) || port < config.TemporaryPortMin || port > config.TemporaryPortMax {
 		return nil, errors.New("invalid fork reservation")
 	}
+
 	a, err := openForkAllocator(ctx, dir, uid)
 	if err != nil {
 		return nil, err
 	}
+
 	got, _, err := a.read(name, uid)
 	if present {
 		if err == nil && got == port {
@@ -109,10 +117,12 @@ func LockForkReservationWithHost(ctx context.Context, dir string, uid uint32, na
 	} else {
 		err = errors.Join(err, errors.New("fork reservation is not absent"))
 	}
+
 	if err != nil {
 		a.close()
 		return nil, err
 	}
+
 	return a.close, nil
 }
 
@@ -123,6 +133,7 @@ func LockTemporaryReservationAbsence(ctx context.Context, name string) (func(), 
 	if err != nil {
 		return nil, err
 	}
+
 	return LockTemporaryReservationAbsenceWithHost(ctx, dir, uid, name)
 }
 
@@ -131,14 +142,17 @@ func LockTemporaryReservationAbsenceWithHost(ctx context.Context, dir string, ui
 	if !validForkReservationName(name) {
 		return nil, errors.New("invalid reservation owner")
 	}
+
 	a, err := openForkAllocator(ctx, dir, uid)
 	if err != nil {
 		return nil, err
 	}
+
 	if _, err := a.root.Lstat(name); !errors.Is(err, os.ErrNotExist) {
 		a.close()
 		return nil, errors.Join(err, errors.New("reservation exists or is unverifiable"))
 	}
+
 	return a.close, nil
 }
 
@@ -151,6 +165,7 @@ func CleanupFollowerReservation(ctx context.Context, name string, port int, id R
 	if err != nil {
 		return err
 	}
+
 	return CleanupFollowerReservationWithHost(ctx, dir, uid, name, port, id, effect)
 }
 
@@ -166,6 +181,7 @@ func CleanupRestoreReservation(ctx context.Context, name string, port int, id Re
 	if err != nil {
 		return err
 	}
+
 	return CleanupRestoreReservationWithHost(ctx, dir, uid, name, port, id, effect)
 }
 
@@ -183,6 +199,7 @@ func CleanupCurrentLegacyReservation(ctx context.Context, name string, port int,
 	if err != nil {
 		return err
 	}
+
 	return CleanupCurrentLegacyReservationWithHost(ctx, dir, uid, name, port, effect)
 }
 
@@ -191,21 +208,27 @@ func CleanupCurrentLegacyReservationWithHost(ctx context.Context, dir string, ui
 	if !validForkReservationName(name) || port < config.TemporaryPortMin || port > config.TemporaryPortMax || effect == nil {
 		return errors.New("invalid legacy reservation cleanup")
 	}
+
 	a, err := openForkAllocator(ctx, dir, uid)
 	if err != nil {
 		return err
 	}
 	defer a.close()
+
 	got, info, err := a.read(name, uid)
+
 	present := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+
 	digest := ""
+
 	if present {
 		if got != port {
 			return errors.New("legacy reservation port mismatch")
 		}
+
 		pinned, pinnedDigest, err := pinLegacyReservation(a, name, info)
 		if err != nil {
 			return err
@@ -215,23 +238,30 @@ func CleanupCurrentLegacyReservationWithHost(ctx context.Context, dir string, ui
 		// recycle its inode number, so a replacement created during the effect
 		// cannot pass the identity check as this mapping.
 		defer func() { _ = pinned.Close() }()
+
 		digest = pinnedDigest
 	}
+
 	if err := a.unique(name, port, uid); err != nil {
 		return err
 	}
+
 	if err := effect(); err != nil {
 		return err
 	}
+
 	if !present {
 		return verifyLegacyReservationAbsent(a, name, uid, port)
 	}
+
 	if err := verifyLegacyReservationUnchanged(a, name, uid, port, info, digest); err != nil {
 		return err
 	}
+
 	if err := a.root.Remove(name); err != nil {
 		return err
 	}
+
 	return a.dir.Sync()
 }
 
@@ -245,17 +275,21 @@ func pinLegacyReservation(a *forkAllocator, name string, info os.FileInfo) (*os.
 	if err != nil {
 		return nil, "", err
 	}
+
 	pinned := os.NewFile(uintptr(fd), name)
+
 	opened, err := pinned.Stat()
 	if err != nil || !os.SameFile(info, opened) {
 		_ = pinned.Close()
 		return nil, "", errors.New("legacy reservation replaced while pinning")
 	}
+
 	digest, err := a.digest(name, info)
 	if err != nil {
 		_ = pinned.Close()
 		return nil, "", err
 	}
+
 	return pinned, digest, nil
 }
 
@@ -266,10 +300,12 @@ func verifyLegacyReservationUnchanged(a *forkAllocator, name string, uid uint32,
 	if err != nil || got != port || !os.SameFile(info, after) {
 		return errors.New("legacy reservation changed during cleanup")
 	}
+
 	afterDigest, err := a.digest(name, after)
 	if err != nil || digest != afterDigest {
 		return errors.New("legacy reservation content changed during cleanup")
 	}
+
 	return a.unique(name, port, uid)
 }
 
@@ -279,6 +315,7 @@ func verifyLegacyReservationAbsent(a *forkAllocator, name string, uid uint32, po
 	if _, _, err := a.read(name, uid); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("legacy reservation appeared during cleanup")
 	}
+
 	return a.unique(name, port, uid)
 }
 
@@ -287,34 +324,43 @@ func cleanupBoundReservation(ctx context.Context, dir string, uid uint32, name s
 		id.Inode == 0 || id.UID != uid || len(id.Digest) != 64 || effect == nil {
 		return errors.New("missing follower reservation birth evidence")
 	}
+
 	if _, err := hex.DecodeString(id.Digest); err != nil {
 		return errors.New("invalid follower reservation birth evidence")
 	}
+
 	a, err := openForkAllocator(ctx, dir, uid)
 	if err != nil {
 		return err
 	}
 	defer a.close()
+
 	present, err := boundReservationState(a, name, uid, port, id)
 	if err != nil {
 		return err
 	}
+
 	if requirePresent && !present {
 		return errors.New("restore reservation is absent")
 	}
+
 	if err := effect(); err != nil {
 		return err
 	}
+
 	after, err := boundReservationState(a, name, uid, port, id)
 	if err != nil || after != present {
 		return errors.Join(err, errors.New("follower reservation changed during cleanup"))
 	}
+
 	if !present {
 		return nil
 	}
+
 	if err := a.root.Remove(name); err != nil {
 		return err
 	}
+
 	return a.dir.Sync()
 }
 
@@ -326,16 +372,20 @@ func boundReservationState(a *forkAllocator, name string, uid uint32, port int, 
 	if errors.Is(err, os.ErrNotExist) {
 		return false, a.unique("", port, uid)
 	}
+
 	if err != nil || got != port {
 		return false, errors.Join(err, errors.New("follower reservation mismatch"))
 	}
+
 	if !reservationIdentityMatches(info, id) {
 		return false, errors.New("follower reservation replaced")
 	}
+
 	digest, err := a.digest(name, info)
 	if err != nil || digest != id.Digest {
 		return false, errors.New("follower reservation content replaced")
 	}
+
 	return true, a.unique(name, port, uid)
 }
 
@@ -354,6 +404,7 @@ func NewForkMaterialised(dataRoot, name, source string, sourcePort int, sh engin
 	if err != nil {
 		return nil, err
 	}
+
 	return NewForkMaterialisedWithHost(dataRoot, name, source, sourcePort, sh, stepID, report, ForkMaterialisationHost{
 		ReservationDir: dir, UID: uid, ClusterPorts: forkClusterPorts, SocketTaken: forkSocketTaken,
 	})
@@ -375,20 +426,25 @@ func NewForkMaterialisedWithHost(dataRoot, name, source string, sourcePort int, 
 	if host.ClusterPorts == nil || host.SocketTaken == nil {
 		return nil, errors.New("fork host probes required")
 	}
+
 	m := &Materialised{Name: name, Source: source, SourcePort: sourcePort, Data: filepath.Join(dataRoot, name), Shell: sh, StepID: stepID, Report: report}
 	m.forkConfigRoot = host.ConfigRoot
 	m.forkRunning = host.Running
+
 	m.forkWriteFile = host.WriteFile
 	for _, path := range []string{m.ConfDir(), m.Data} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			return nil, errors.Join(err, errors.New("materialisation path exists or is unverifiable"))
 		}
 	}
+
 	r, err := reserveForkAt(context.Background(), host.ReservationDir, host.UID, m, host.ClusterPorts, host.SocketTaken)
 	if err != nil {
 		return nil, err
 	}
+
 	m.Port, m.reservation = r.port, r
+
 	return m, nil
 }
 
@@ -396,11 +452,13 @@ func validForkReservationName(name string) bool {
 	if name == "" || len(name) > 128 || name == "ports.lock" {
 		return false
 	}
+
 	for _, c := range name {
 		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -413,37 +471,47 @@ func openForkAllocator(ctx context.Context, path string, uid uint32) (*forkAlloc
 	if ctx == nil || ctx.Err() != nil {
 		return nil, errors.New("invalid allocator context")
 	}
+
 	info, err := validateAllocatorDirectory(path, uid)
 	if err != nil {
 		return nil, err
 	}
+
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return nil, err
 	}
+
 	a := &forkAllocator{root: root}
 	fail := func(err error) (*forkAllocator, error) { a.close(); return nil, err }
+
 	a.dir, err = root.Open(".")
 	if err != nil {
 		return fail(err)
 	}
+
 	di, err := a.dir.Stat()
 	if err != nil || !os.SameFile(info, di) {
 		return fail(errors.New("reservation directory replaced"))
 	}
+
 	lock, li, err := openAllocatorLock(a.dir, uid)
 	if err != nil {
 		return fail(err)
 	}
+
 	a.lock = lock
 	if err := flockAllocator(ctx, int(lock.Fd())); err != nil {
 		return fail(err)
 	}
+
 	named, err := os.Lstat(path)
+
 	ln, le := root.Lstat("ports.lock")
 	if err != nil || le != nil || !os.SameFile(info, named) || !os.SameFile(li, ln) {
 		return fail(errors.New("allocator replaced"))
 	}
+
 	return a, nil
 }
 
@@ -454,10 +522,12 @@ func validateAllocatorDirectory(path string, uid uint32) (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || info.Mode().Perm() != 0o700 || st.Uid != uid {
 		return nil, errors.New("unsafe reservation directory")
 	}
+
 	return info, nil
 }
 
@@ -469,17 +539,21 @@ func openAllocatorLock(dir *os.File, uid uint32) (*os.File, os.FileInfo, error) 
 	if err != nil {
 		return nil, nil, err
 	}
+
 	lock := os.NewFile(uintptr(fd), "ports.lock")
+
 	li, err := lock.Stat()
 	if err != nil {
 		_ = lock.Close()
 		return nil, nil, err
 	}
+
 	ls, ok := li.Sys().(*syscall.Stat_t)
 	if !ok || !li.Mode().IsRegular() || li.Mode().Perm() != 0o600 || li.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || ls.Uid != uid || ls.Nlink != 1 {
 		_ = lock.Close()
 		return nil, nil, errors.New("unsafe allocator lock")
 	}
+
 	return lock, li, nil
 }
 
@@ -491,9 +565,11 @@ func flockAllocator(ctx context.Context, fd int) error {
 		if err == nil {
 			return nil
 		}
+
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			return err
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -507,9 +583,11 @@ func (a *forkAllocator) close() {
 		_ = syscall.Flock(int(a.lock.Fd()), syscall.LOCK_UN)
 		_ = a.lock.Close()
 	}
+
 	if a.dir != nil {
 		_ = a.dir.Close()
 	}
+
 	if a.root != nil {
 		_ = a.root.Close()
 	}
@@ -525,29 +603,37 @@ func (a *forkAllocator) readLinks(name string, uid uint32, links uint64) (int, o
 	if !validForkReservationName(name) {
 		return 0, nil, errors.New("invalid reservation owner")
 	}
+
 	fd, err := xunix.Openat(int(a.dir.Fd()), name, xunix.O_RDONLY|xunix.O_NOFOLLOW|xunix.O_NONBLOCK|xunix.O_CLOEXEC, 0)
 	if err != nil {
 		return 0, nil, err
 	}
+
 	f := os.NewFile(uintptr(fd), name)
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil {
 		return 0, nil, err
 	}
+
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || st.Uid != uid || statLinks(st) != links || info.Size() > 256 {
 		return 0, nil, errors.New("unsafe reservation")
 	}
+
 	raw, err := io.ReadAll(io.LimitReader(f, 257))
+
 	named, ne := a.root.Lstat(name)
 	if err != nil || ne != nil || !os.SameFile(info, named) {
 		return 0, nil, errors.New("reservation replaced")
 	}
+
 	port, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || port < config.TemporaryPortMin || port > config.TemporaryPortMax {
 		return 0, nil, errors.New("invalid reservation port")
 	}
+
 	return port, info, nil
 }
 
@@ -557,22 +643,27 @@ func (a *forkAllocator) unique(name string, port int, uid uint32) error {
 		return err
 	}
 	defer func() { _ = d.Close() }()
+
 	entries, err := d.ReadDir(257)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
+
 	if len(entries) > 256 {
 		return errors.New("too many reservations")
 	}
+
 	for _, entry := range entries {
 		if entry.Name() == "ports.lock" || entry.Name() == name {
 			continue
 		}
+
 		other, _, err := a.read(entry.Name(), uid)
 		if err != nil || other == port {
 			return errors.Join(err, errors.New("conflicting or unverifiable reservation"))
 		}
 	}
+
 	return nil
 }
 
@@ -581,21 +672,27 @@ func (a *forkAllocator) digest(name string, expected os.FileInfo) (string, error
 	if err != nil {
 		return "", err
 	}
+
 	f := os.NewFile(uintptr(fd), name)
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil || !os.SameFile(expected, info) {
 		return "", errors.New("reservation replaced")
 	}
+
 	raw, err := io.ReadAll(io.LimitReader(f, 257))
 	if err != nil || len(raw) > 256 {
 		return "", errors.New("invalid reservation content")
 	}
+
 	named, err := a.root.Lstat(name)
 	if err != nil || !os.SameFile(info, named) {
 		return "", errors.New("reservation replaced")
 	}
+
 	sum := sha256.Sum256(raw)
+
 	return hex.EncodeToString(sum[:]), nil
 }
 
@@ -603,24 +700,30 @@ func reserveForkAt(ctx context.Context, dir string, uid uint32, m *Materialised,
 	if m == nil || !validForkReservationName(m.Name) {
 		return nil, errors.New("invalid reservation owner")
 	}
+
 	a, err := openForkAllocator(ctx, dir, uid)
 	if err != nil {
 		return nil, err
 	}
 	defer a.close()
+
 	if _, err := a.root.Lstat(m.Name); !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.Join(err, errors.New("reservation owner exists or is unverifiable"))
 	}
+
 	taken, err := reservationTakenPorts(a, uid, cluster())
 	if err != nil {
 		return nil, err
 	}
+
 	for port := config.TemporaryPortMin; port <= config.TemporaryPortMax; port++ {
 		if taken[port] || socket(port) {
 			continue
 		}
+
 		return createReservation(a, m, uid, dir, port)
 	}
+
 	return nil, errors.New("no temporary port available")
 }
 
@@ -631,19 +734,24 @@ func reservationTakenPorts(a *forkAllocator, uid uint32, taken map[int]bool) (ma
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+
 	if len(entries) > 256 {
 		return nil, errors.New("too many reservations")
 	}
+
 	for _, entry := range entries {
 		if entry.Name() == "ports.lock" {
 			continue
 		}
+
 		port, _, err := a.read(entry.Name(), uid)
 		if err != nil {
 			return nil, err
 		}
+
 		taken[port] = true
 	}
+
 	return taken, nil
 }
 
@@ -655,34 +763,43 @@ func createReservation(a *forkAllocator, m *Materialised, uid uint32, dir string
 	if err != nil {
 		return nil, err
 	}
+
 	f := os.NewFile(uintptr(fd), m.Name)
+
 	nonce, err := reservationNonce()
 	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	_, err = fmt.Fprintf(f, "%d%s\n", port, nonce)
 	if err == nil {
 		err = f.Sync()
 	}
+
 	if err == nil {
 		err = a.dir.Sync()
 	}
+
 	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	info, err := f.Stat()
+
 	got, named, readErr := a.read(m.Name, uid)
 	if err != nil || readErr != nil || got != port || !os.SameFile(info, named) {
 		_ = f.Close()
 		return nil, errors.New("created reservation unverifiable")
 	}
+
 	digest, err := a.digest(m.Name, info)
 	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	return &ownedReservation{owner: m, dir: dir, uid: uid, name: m.Name, port: port, file: f, info: info, digest: digest}, nil
 }
 
@@ -693,9 +810,11 @@ func reservationNonce() (string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
+
 	var whitespace strings.Builder
+
 	for _, b := range nonce {
-		for bit := 0; bit < 8; bit++ {
+		for bit := range 8 {
 			if b&(1<<bit) != 0 {
 				whitespace.WriteByte('\t')
 			} else {
@@ -703,6 +822,7 @@ func reservationNonce() (string, error) {
 			}
 		}
 	}
+
 	return whitespace.String(), nil
 }
 
@@ -710,25 +830,30 @@ func (r *ownedReservation) matches(a *forkAllocator, m *Materialised) error {
 	if r.done || r.owner != m || m.Name != r.name || m.Port != r.port || r.file == nil {
 		return errors.New("stale or mismatched reservation capability")
 	}
+
 	port, info, err := a.read(r.name, r.uid)
 	if err != nil || port != r.port || !os.SameFile(r.info, info) {
 		return errors.New("reservation identity or port mismatch")
 	}
+
 	digest, err := a.digest(r.name, info)
 	if err != nil || digest != r.digest {
 		return errors.New("reservation content changed")
 	}
+
 	return a.unique(r.name, r.port, r.uid)
 }
 
 func (r *ownedReservation) validate(ctx context.Context, m *Materialised) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	a, err := openForkAllocator(ctx, r.dir, r.uid)
 	if err != nil {
 		return err
 	}
 	defer a.close()
+
 	return r.matches(a, m)
 }
 
@@ -740,17 +865,22 @@ func (m *Materialised) WithForkReservation(ctx context.Context, effect func() er
 	if r == nil || effect == nil {
 		return errors.New("fork reservation capability required")
 	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	a, err := openForkAllocator(ctx, r.dir, r.uid)
 	if err != nil {
 		return err
 	}
 	defer a.close()
+
 	if err := r.matches(a, m); err != nil {
 		return err
 	}
+
 	err = effect()
+
 	return errors.Join(err, r.matches(a, m))
 }
 
@@ -759,36 +889,46 @@ func (m *Materialised) WithForkReservation(ctx context.Context, effect func() er
 func (r *ownedReservation) perform(ctx context.Context, m *Materialised, effect func() error, complete func()) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	if effect == nil {
 		return errors.New("stale or mismatched reservation capability")
 	}
+
 	a, err := openForkAllocator(ctx, r.dir, r.uid)
 	if err != nil {
 		return err
 	}
 	defer a.close()
+
 	check := func() error { return r.matches(a, m) }
 	if err := check(); err != nil {
 		return err
 	}
+
 	if err := effect(); err != nil {
 		return err
 	}
+
 	if err := check(); err != nil {
 		return err
 	}
+
 	if err := a.root.Remove(r.name); err != nil {
 		return err
 	}
+
 	if err := a.dir.Sync(); err != nil {
 		return err
 	}
+
 	r.done = true
 	_ = r.file.Close()
 	r.file = nil
+
 	if complete != nil {
 		complete()
 	}
+
 	return nil
 }
 
@@ -799,6 +939,7 @@ func (m *Materialised) DiscardOwnedReservation(ctx context.Context, effect func(
 	if m == nil || m.Ownership == nil || m.reservation == nil || m.reservation.owner != m {
 		return errors.New("owned reservation and materialisation guard required")
 	}
+
 	return m.reservation.perform(ctx, m, effect, nil)
 }
 
@@ -810,8 +951,10 @@ func (m *Materialised) ReleaseForkReservationAuthority() {
 	if r == nil || r.owner != m {
 		return
 	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	r.done = true
 	if r.file != nil {
 		_ = r.file.Close()

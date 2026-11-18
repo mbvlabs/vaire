@@ -19,11 +19,14 @@ func TestPgBackRestSkipReason(t *testing.T) {
 	// the step, so the node stores the bucket keys and cipher pass before the
 	// first db create needs them.
 	empty := config.Cluster{}
+
 	empty.Backup.Provider = "r2"
 	if got := (pgbackrestStep{}).SkipReason(empty); got != "" {
 		t.Errorf("backups on, no databases: SkipReason = %q, want the step to run", got)
 	}
+
 	withDB := empty
+
 	withDB.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-1"}}
 	if got := (pgbackrestStep{}).SkipReason(withDB); got != "" {
 		t.Errorf("backups on, one database: SkipReason = %q, want the step to run", got)
@@ -38,6 +41,7 @@ func onDisk() bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -45,27 +49,33 @@ func TestResolveBackupValuesFromRequest(t *testing.T) {
 	if onDisk() {
 		t.Skip("this machine has a node's backup files")
 	}
+
 	_, missing, err := resolveBackupValues(engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := []string{SecretBackupKeyID, SecretBackupKeySecret, SecretBackupCipherPass}
 	if !slices.Equal(missing, want) {
 		t.Errorf("nothing on disk or in the request: missing = %v, want %v", missing, want)
 	}
+
 	rt := engine.Runtime{SecretValues: map[string]string{
 		SecretBackupKeyID:        "AKID",
 		SecretBackupKeySecret:    "s3cret",
 		SecretBackupCipherPass:   "cipher",
 		SecretBackupAgeRecipient: "age1xyz",
 	}}
+
 	v, missing, err := resolveBackupValues(rt)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(missing) > 0 {
 		t.Errorf("request carries the kit: missing = %v", missing)
 	}
+
 	if v.KeyID != "AKID" || v.Secret != "s3cret" || v.CipherPass != "cipher" || v.Recipient != "age1xyz" {
 		t.Errorf("values = %+v, want the request's", v)
 	}

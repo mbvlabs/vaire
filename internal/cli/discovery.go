@@ -67,21 +67,26 @@ type commandsDiscoveryPayload struct {
 
 func runCommands(cmd *cobra.Command, _ []string) error {
 	root := cmd.Root()
+
 	check, err := cmd.Flags().GetBool("check-meta")
 	if err != nil {
 		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
 	}
+
 	checkSteps, err := cmd.Flags().GetBool("check-steps")
 	if err != nil {
 		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
 	}
+
 	if checkSteps {
 		return runCheckSteps(cmd)
 	}
+
 	path, err := cmd.Flags().GetString("path")
 	if err != nil {
 		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
 	}
+
 	if check && strings.TrimSpace(path) != "" {
 		return output.NewError(
 			output.CodeUsage,
@@ -90,13 +95,16 @@ func runCommands(cmd *cobra.Command, _ []string) error {
 			"Run vaire commands --json, --path, or --check-meta.",
 		)
 	}
+
 	if check {
 		return runCommandsCheck(cmd, root)
 	}
+
 	opts, err := output.ParseOptions(cmd)
 	if err != nil {
 		return err
 	}
+
 	if strings.TrimSpace(path) != "" {
 		found, ok := findCommand(root, path)
 		if !ok {
@@ -107,22 +115,28 @@ func runCommands(cmd *cobra.Command, _ []string) error {
 				"Run vaire commands --json to list commands.",
 			)
 		}
+
 		if opts.Mode == output.ModeHuman || opts.Mode == output.ModeMarkdown {
 			return printCommand(cmd, found)
 		}
+
 		return output.OK(cmd, discoverCommand(found), "Discovered "+found.CommandPath())
 	}
+
 	if opts.Mode == output.ModeHuman || opts.Mode == output.ModeMarkdown {
 		table := renderCatalogMarkdown(flattenCatalog(root))
 		if _, err := fmt.Fprint(cmd.OutOrStdout(), table); err != nil {
 			return err
 		}
+
 		return nil
 	}
+
 	payload := commandsDiscoveryPayload{
 		commandDiscovery: discoverCommandTree(root),
 		Catalog:          flattenCatalog(root),
 	}
+
 	return output.OK(cmd, payload, "Discovered vaire commands")
 }
 
@@ -133,6 +147,7 @@ func findCommand(root *cobra.Command, path string) (*cobra.Command, bool) {
 			return cmd, true
 		}
 	}
+
 	return nil, false
 }
 
@@ -140,13 +155,16 @@ func commandPathID(cmd *cobra.Command) string {
 	if cmd == nil {
 		return ""
 	}
+
 	fields := strings.Fields(cmd.CommandPath())
 	if len(fields) <= 1 {
 		if len(fields) == 1 {
 			return fields[0]
 		}
+
 		return ""
 	}
+
 	return strings.Join(fields[1:], " ")
 }
 
@@ -155,6 +173,7 @@ func discoverCommandTree(root *cobra.Command) commandDiscovery {
 	for _, cmd := range childCommands(root) {
 		discovery.Commands = append(discovery.Commands, discoverCommandTree(cmd))
 	}
+
 	return discovery
 }
 
@@ -176,15 +195,18 @@ func discoverCommand(cmd *cobra.Command) commandDiscovery {
 		discovery.AgentNotes = cmd.Annotations[agentNotesAnnotation]
 		discovery.Category = cmd.Annotations[agentCategoryAnnotation]
 	}
+
 	if meta, ok := metaFor(cmd); ok {
 		copied := meta
 		discovery.Meta = &copied
 	}
+
 	return discovery
 }
 
 func discoverSubcommands(cmd *cobra.Command) []commandSummary {
 	children := childCommands(cmd)
+
 	summaries := make([]commandSummary, 0, len(children))
 	for _, sub := range children {
 		summary := commandSummary{
@@ -197,19 +219,24 @@ func discoverSubcommands(cmd *cobra.Command) []commandSummary {
 		if sub.Annotations != nil {
 			summary.Category = sub.Annotations[agentCategoryAnnotation]
 		}
+
 		summaries = append(summaries, summary)
 	}
+
 	return summaries
 }
 
 func childCommands(cmd *cobra.Command) []*cobra.Command {
 	out := make([]*cobra.Command, 0)
+
 	for _, sub := range cmd.Commands() {
 		if sub.Name() == "help" || sub.Name() == "completion" {
 			continue
 		}
+
 		out = append(out, sub)
 	}
+
 	return out
 }
 
@@ -217,11 +244,14 @@ func discoverFlags(flags *pflag.FlagSet) []flagDiscovery {
 	if flags == nil {
 		return nil
 	}
+
 	discovered := make([]flagDiscovery, 0)
+
 	flags.VisitAll(func(flag *pflag.Flag) {
 		if flag.Hidden {
 			return
 		}
+
 		discovered = append(discovered, flagDiscovery{
 			Name:      flag.Name,
 			Shorthand: flag.Shorthand,
@@ -233,11 +263,13 @@ func discoverFlags(flags *pflag.FlagSet) []flagDiscovery {
 	sort.SliceStable(discovered, func(i, j int) bool {
 		return discovered[i].Name < discovered[j].Name
 	})
+
 	return discovered
 }
 
 func flattenCatalog(root *cobra.Command) []catalogRecord {
 	commands := walkCommands(root)
+
 	records := make([]catalogRecord, 0, len(commands))
 	for _, cmd := range commands {
 		meta, _ := metaFor(cmd)
@@ -251,9 +283,11 @@ func flattenCatalog(root *cobra.Command) []catalogRecord {
 			Flags:       discoverFlags(cmd.LocalFlags()),
 		})
 	}
+
 	sort.SliceStable(records, func(i, j int) bool {
 		return records[i].Path < records[j].Path
 	})
+
 	return records
 }
 
@@ -261,6 +295,7 @@ func renderCatalogMarkdown(records []catalogRecord) string {
 	var b strings.Builder
 	b.WriteString("| Command | Summary | Audience | Mutating | Dry-run | Confirm |\n")
 	b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+
 	for _, record := range records {
 		dry := "no"
 		if record.SupportsDryRun {
@@ -268,12 +303,14 @@ func renderCatalogMarkdown(records []catalogRecord) string {
 		} else if record.SkipDryRunCheck {
 			dry = "n/a"
 		}
+
 		mutating := "no"
 		if record.Mutating {
 			mutating = "yes"
 		} else if len(record.MutatingFlags) > 0 {
 			mutating = "with " + strings.Join(record.MutatingFlags, ", ")
 		}
+
 		fmt.Fprintf(
 			&b,
 			"| `%s` | %s | %s | %s | %s | %s |\n",
@@ -285,26 +322,33 @@ func renderCatalogMarkdown(records []catalogRecord) string {
 			escapeCell(record.ConfirmToken),
 		)
 	}
+
 	return b.String()
 }
 
 func printCommand(cmd *cobra.Command, found *cobra.Command) error {
 	meta, _ := metaFor(found)
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n%s\n\nUsage: %s\n", found.CommandPath(), meta.Summary, found.UseLine())
+
 	if len(meta.Examples) > 0 {
 		b.WriteString("\nExamples:\n")
+
 		for _, example := range meta.Examples {
 			fmt.Fprintf(&b, "  %s\n", example)
 		}
 	}
+
 	_, err := fmt.Fprint(cmd.OutOrStdout(), b.String())
+
 	return err
 }
 
 func escapeCell(value string) string {
 	value = strings.ReplaceAll(value, "|", "\\|")
 	value = strings.ReplaceAll(value, "\n", " ")
+
 	return value
 }
 
@@ -312,6 +356,7 @@ func setAgentMetadata(cmd *cobra.Command, category, notes string) {
 	if cmd.Annotations == nil {
 		cmd.Annotations = map[string]string{}
 	}
+
 	cmd.Annotations[agentCategoryAnnotation] = category
 	cmd.Annotations[agentNotesAnnotation] = notes
 }

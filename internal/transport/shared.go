@@ -120,11 +120,13 @@ func IsNoDaemon(err error) bool {
 func TunnelFingerprint(cfg WireGuardConfig) string {
 	pub, _ := WGPublicKey(cfg.PrivateKey)
 	h := sha256.New()
+
 	_, _ = fmt.Fprintf(h, "proto=%d\noperator=%s\naddress=%s\npeer=%s\nendpoint=%s\nmtu=%d\n",
 		SharedProto, pub, cfg.Address, strings.TrimSpace(cfg.PeerPublicKey), cfg.Endpoint, TunnelMTU)
 	for _, p := range cfg.AllowedIPs {
 		_, _ = fmt.Fprintf(h, "allowed=%s\n", p)
 	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -132,6 +134,7 @@ func TunnelFingerprint(cfg WireGuardConfig) string {
 // after it (a dial's raw bytes) is consumed.
 func readLine(r io.Reader) ([]byte, error) {
 	var line []byte
+
 	b := make([]byte, 1)
 	for {
 		n, err := r.Read(b)
@@ -139,16 +142,20 @@ func readLine(r io.Reader) ([]byte, error) {
 			if b[0] == '\n' {
 				return line, nil
 			}
+
 			line = append(line, b[0])
 			if len(line) > maxSharedLine {
 				return nil, errors.New("protocol line too long")
 			}
+
 			continue
 		}
+
 		if err != nil {
 			if errors.Is(err, io.EOF) && len(line) > 0 {
 				return nil, io.ErrUnexpectedEOF
 			}
+
 			return nil, err
 		}
 	}
@@ -159,7 +166,9 @@ func writeReply(w io.Writer, r sharedReply) error {
 	if err != nil {
 		return err
 	}
+
 	_, err = w.Write(append(raw, '\n'))
+
 	return err
 }
 
@@ -173,42 +182,54 @@ func roundTrip(ctx context.Context, socket string, req sharedRequest) (net.Conn,
 // no deadline of its own.
 func roundTripWithin(ctx context.Context, socket string, req sharedRequest, budget time.Duration) (net.Conn, sharedReply, error) {
 	req.V = SharedProto
+
 	var d net.Dialer
+
 	conn, err := d.DialContext(ctx, "unix", socket)
 	if err != nil {
 		return nil, sharedReply{}, err
 	}
+
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stop()
+
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	} else {
 		_ = conn.SetDeadline(time.Now().Add(budget))
 	}
+
 	raw, _ := json.Marshal(req)
 	if _, err := conn.Write(append(raw, '\n')); err != nil {
 		_ = conn.Close()
 		return nil, sharedReply{}, err
 	}
+
 	line, err := readLine(conn)
 	if err != nil {
 		_ = conn.Close()
+
 		if ctx.Err() != nil {
 			return nil, sharedReply{}, ctx.Err()
 		}
+
 		return nil, sharedReply{}, fmt.Errorf("%w: %w", ErrDaemonNoAnswer, err)
 	}
+
 	var reply sharedReply
 	if err := json.Unmarshal(line, &reply); err != nil {
 		_ = conn.Close()
 		return nil, sharedReply{}, fmt.Errorf("the tunnel daemon's reply is not JSON: %w", err)
 	}
+
 	if !stop() {
 		// ctx ended while the reply came in; the deadline already fired.
 		_ = conn.Close()
 		return nil, sharedReply{}, ctx.Err()
 	}
+
 	_ = conn.SetDeadline(time.Time{})
+
 	return conn, reply, nil
 }
 
@@ -218,10 +239,13 @@ func SharedHello(ctx context.Context, socket string) (SharedStatus, error) {
 	if err != nil {
 		return SharedStatus{}, err
 	}
+
 	_ = conn.Close()
+
 	if !reply.OK {
 		return SharedStatus{}, errors.New(reply.Message)
 	}
+
 	return reply.SharedStatus, nil
 }
 
@@ -233,10 +257,13 @@ func SharedStop(ctx context.Context, socket string, force bool) (draining bool, 
 	if err != nil {
 		return false, err
 	}
+
 	_ = conn.Close()
+
 	if !reply.OK {
 		return false, errors.New(reply.Message)
 	}
+
 	return reply.Draining, nil
 }
 
@@ -244,16 +271,21 @@ func SharedStop(ctx context.Context, socket string, force bool) (draining bool, 
 // answering.
 func SharedWaitGone(ctx context.Context, socket string, within time.Duration) bool {
 	deadline := time.Now().Add(within)
+
 	for {
 		hctx, cancel := context.WithTimeout(ctx, time.Second)
 		_, err := SharedHello(hctx, socket)
+
 		cancel()
+
 		if err != nil && IsNoDaemon(err) {
 			return true
 		}
+
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return false
 		}
+
 		select {
 		case <-ctx.Done():
 			return false
@@ -302,6 +334,7 @@ func NewSharedDialer(cfg SharedDialerConfig) *SharedDialer {
 	if cfg.Retry <= 0 {
 		cfg.Retry = 250 * time.Millisecond
 	}
+
 	return &SharedDialer{cfg: cfg}
 }
 
@@ -309,6 +342,7 @@ func NewSharedDialer(cfg SharedDialerConfig) *SharedDialer {
 func (d *SharedDialer) Attach(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	return d.attachLocked(ctx)
 }
 
@@ -316,6 +350,7 @@ func (d *SharedDialer) Attach(ctx context.Context) error {
 func (d *SharedDialer) DaemonPID() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	return d.daemonPID
 }
 
@@ -323,37 +358,48 @@ func (d *SharedDialer) attachLocked(ctx context.Context) error {
 	if d.closed {
 		return errors.New("the shared tunnel dialer is closed")
 	}
+
 	if d.lease != nil {
 		return nil
 	}
+
 	st, err := d.ensure(ctx)
 	if err != nil {
 		return err
 	}
+
 	conn, reply, err := roundTrip(ctx, d.cfg.Socket, sharedRequest{Op: "attach", PID: d.cfg.PID, Cmd: d.cfg.Command})
 	if err != nil {
 		return sharedError(err)
 	}
+
 	if !reply.OK {
 		_ = conn.Close()
+
 		if reply.Code == "draining" {
 			return stoppingError(st)
 		}
+
 		return sharedError(errors.New(reply.Message))
 	}
+
 	d.lease = conn
 	d.daemonPID = st.PID
+
 	go func() {
 		// The daemon never writes on a lease: a read returns when it
 		// exits or the lease is released.
 		_, _ = io.Copy(io.Discard, conn)
+
 		d.mu.Lock()
 		if d.lease == conn {
 			d.lease = nil
 		}
 		d.mu.Unlock()
+
 		_ = conn.Close()
 	}()
+
 	return nil
 }
 
@@ -365,40 +411,51 @@ func (d *SharedDialer) ensure(ctx context.Context) (SharedStatus, error) {
 		return SharedStatus{}, sharedError(err)
 	}
 	defer unlock()
+
 	var lastErr error
+
 	for range 40 {
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		st, err := SharedHello(hctx, d.cfg.Socket)
+
 		cancel()
+
 		if err == nil {
 			st, err = d.check(ctx, st)
 			if !errors.Is(err, errRestart) {
 				return st, err
 			}
+
 			continue
 		}
+
 		if ctx.Err() != nil {
 			return SharedStatus{}, ctx.Err()
 		}
+
 		if !IsNoDaemon(err) {
 			return SharedStatus{}, sharedError(err)
 		}
+
 		err = d.cfg.Spawn(ctx)
 		if err == nil {
 			continue
 		}
+
 		if !errors.Is(err, ErrDaemonRunning) {
 			return SharedStatus{}, err
 		}
 		// A daemon that is exiting, or an in-process tunnel (server init),
 		// holds the singleton lock; wait for it.
 		lastErr = err
+
 		select {
 		case <-ctx.Done():
 			return SharedStatus{}, ctx.Err()
 		case <-time.After(d.cfg.Retry):
 		}
 	}
+
 	return SharedStatus{}, output.WrapError(output.CodePrecondition, lastErr, output.ExitPrecondition,
 		"Another vaire process holds the tunnel lock without serving the shared tunnel (vaire server init uses its own); wait for it, then retry.").
 		WithDetails(map[string]any{"reason": "tunnel_busy"})
@@ -410,23 +467,29 @@ func (d *SharedDialer) check(ctx context.Context, st SharedStatus) (SharedStatus
 	if st.Draining {
 		return st, stoppingError(st)
 	}
+
 	if st.Fingerprint == d.cfg.Fingerprint && st.Build == d.cfg.Build {
 		return st, nil
 	}
+
 	if st.Attached == 0 && st.Streams == 0 {
 		if _, err := SharedStop(ctx, d.cfg.Socket, true); err != nil && !IsNoDaemon(err) {
 			return st, sharedError(err)
 		}
+
 		if !SharedWaitGone(ctx, d.cfg.Socket, 10*time.Second) {
 			return st, sharedError(fmt.Errorf("the tunnel daemon (pid %d) did not exit after a stop", st.PID))
 		}
+
 		return st, errRestart
 	}
+
 	if st.Fingerprint == d.cfg.Fingerprint {
 		// Another build, same tunnel: the dial protocol doesn't depend on
 		// the build, so use it until it goes idle.
 		return st, nil
 	}
+
 	return st, output.NewError(output.CodeTransportFailed,
 		"the running tunnel daemon serves another configuration of this workspace", output.ExitTransport,
 		"Another vaire command ("+describeClients(st.Clients)+") is using the old tunnel; wait for it, or run vaire tunnel stop --force.").
@@ -443,18 +506,20 @@ func describeClients(clients []SharedClient) string {
 	if len(clients) == 0 {
 		return "its last stream"
 	}
+
 	parts := make([]string, 0, len(clients))
 	for _, c := range clients {
 		parts = append(parts, fmt.Sprintf("pid %d, %s", c.PID, c.Command))
 	}
+
 	return strings.Join(parts, "; ")
 }
 
 func sharedError(err error) error {
-	var cliErr *output.CLIError
-	if errors.As(err, &cliErr) {
+	if _, ok := errors.AsType[*output.CLIError](err); ok {
 		return err
 	}
+
 	return output.WrapError(output.CodeTransportFailed, fmt.Errorf("shared tunnel: %w", err), output.ExitTransport,
 		"See tunnel.log in the workspace directory; vaire tunnel stop --force restarts the tunnel daemon.")
 }
@@ -473,22 +538,27 @@ func (d *SharedDialer) DialContext(ctx context.Context, network, addr string) (n
 	if network != "tcp" && network != "tcp4" {
 		return nil, fmt.Errorf("the shared tunnel dials tcp, not %s", network)
 	}
+
 	for attempt := 0; ; attempt++ {
 		if err := d.Attach(ctx); err != nil {
 			return nil, err
 		}
+
 		conn, reply, err := roundTripWithin(ctx, d.cfg.Socket, sharedRequest{Op: "dial", Addr: addr}, sharedDialBudget)
 		if err != nil {
 			if IsNoDaemon(err) && attempt == 0 {
 				d.dropLease()
 				continue
 			}
+
 			return nil, err
 		}
+
 		if !reply.OK {
 			_ = conn.Close()
 			return nil, &TunnelDialError{Addr: addr, Message: reply.Message}
 		}
+
 		return conn, nil
 	}
 }
@@ -496,6 +566,7 @@ func (d *SharedDialer) DialContext(ctx context.Context, network, addr string) (n
 func (d *SharedDialer) dropLease() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	if d.lease != nil {
 		_ = d.lease.Close()
 		d.lease = nil
@@ -508,8 +579,10 @@ func (d *SharedDialer) Close() {
 	if d == nil {
 		return
 	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	d.closed = true
 	if d.lease != nil {
 		_ = d.lease.Close()
@@ -523,16 +596,19 @@ func lockFile(ctx context.Context, path string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+
 	fd := int(f.Fd())
 	for {
 		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			break
 		}
+
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			_ = f.Close()
 			return nil, err
 		}
+
 		select {
 		case <-ctx.Done():
 			_ = f.Close()
@@ -540,6 +616,7 @@ func lockFile(ctx context.Context, path string) (func(), error) {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+
 	return func() {
 		_ = syscall.Flock(fd, syscall.LOCK_UN)
 		_ = f.Close()

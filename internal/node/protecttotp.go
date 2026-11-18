@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"sort"
 	"strings"
@@ -64,16 +65,20 @@ var defaultProtectGuard = protectGuard{path: ProtectStatePath, now: time.Now}
 
 func (g protectGuard) load() (protectState, error) {
 	var st protectState
+
 	raw, err := os.ReadFile(g.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
 	}
+
 	if err != nil {
 		return st, err
 	}
+
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return st, fmt.Errorf("%s does not parse: %w", g.path, err)
 	}
+
 	return st, nil
 }
 
@@ -82,12 +87,15 @@ func (g protectGuard) save(st protectState) error {
 	if err != nil {
 		return err
 	}
+
 	if err := engine.WriteFileAtomic(g.path, append(raw, '\n'), protectStateMode); err != nil {
 		return err
 	}
+
 	if g.path == ProtectStatePath {
 		masterbackup.MarkDirty("protect.json")
 	}
+
 	return nil
 }
 
@@ -106,49 +114,62 @@ func (g protectGuard) verify(code string, pending bool) (protectState, error) {
 	if err != nil {
 		return st, err
 	}
+
 	now := g.now()
 	if now.Before(st.LockedUntil) {
 		return st, protectLocked(st.LockedUntil)
 	}
+
 	secret, last := st.Secret, st.LastStep
 	if pending {
 		// A pending secret has never accepted a code.
 		secret, last = st.Pending, 0
 	}
+
 	if strings.TrimSpace(code) == "" {
 		return st, protectCodeError("a code from the authenticator app is required", "code_required",
 			"Run the command yourself at a terminal; it asks for the current 6-digit code.", nil)
 	}
+
 	key, err := totp.DecodeSecret(secret)
 	if err != nil {
 		return st, err
 	}
+
 	step, verr := totp.Verify(key, code, now, last)
 	if verr != nil {
 		st.Failures++
+
 		left := protectMaxFailures - st.Failures
 		if st.Failures >= protectMaxFailures {
 			st.Failures, st.LockedUntil = 0, now.Add(protectLockout)
 		}
+
 		if err := g.save(st); err != nil {
 			return st, err
 		}
+
 		if !st.LockedUntil.IsZero() && now.Before(st.LockedUntil) {
 			return st, protectLocked(st.LockedUntil)
 		}
+
 		reason := "code_invalid"
 		if errors.Is(verr, totp.ErrReused) {
 			reason = "code_reused"
 		}
+
 		return st, protectCodeError(verr.Error(), reason,
 			"Wait for the next code in the authenticator app and try again. "+lockoutWarning(left, protectLockout),
 			map[string]any{"attempts_left": left})
 	}
+
 	st.Failures, st.LockedUntil = 0, time.Time{}
 	if pending {
 		st.Secret, st.Pending, st.ConfirmedAt = st.Pending, "", now.UTC()
 	}
+
 	st.LastStep = step
+
 	return st, g.save(st)
 }
 
@@ -158,6 +179,7 @@ func lockoutWarning(left int, lockout time.Duration) string {
 	if left == 1 {
 		return "1 more wrong code locks codes out for " + humanMinutes(lockout) + "."
 	}
+
 	return fmt.Sprintf("%d more wrong codes lock codes out for %s.", left, humanMinutes(lockout))
 }
 
@@ -168,20 +190,22 @@ func humanMinutes(d time.Duration) string {
 	if d%time.Hour == 0 {
 		unit, n = "hour", int(d/time.Hour)
 	}
+
 	if d <= 0 || d%time.Minute != 0 {
 		return d.String()
 	}
+
 	if n != 1 {
 		unit += "s"
 	}
+
 	return fmt.Sprintf("%d %s", n, unit)
 }
 
 func protectCodeError(message, reason, hint string, extra map[string]any) error {
 	details := map[string]any{"reason": reason}
-	for k, v := range extra {
-		details[k] = v
-	}
+	maps.Copy(details, extra)
+
 	return output.NewError(output.CodeProtectCodeRejected, message, output.ExitUnsafe, hint).WithDetails(details)
 }
 
@@ -201,14 +225,17 @@ func protectNotInitialized(code, message string, exit int) error {
 // old.
 func newlyProtected(old, updated config.Cluster) []string {
 	var out []string
+
 	for _, c := range updated.Clusters {
 		if !c.Protected {
 			continue
 		}
+
 		if o, ok := old.ClusterByName(c.Name); !ok || !o.Protected {
 			out = append(out, c.Name)
 		}
 	}
+
 	return out
 }
 
@@ -218,13 +245,16 @@ func (g protectGuard) checkProtect(names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
+
 	ok, err := g.configured()
 	if err != nil {
 		return err
 	}
+
 	if ok {
 		return nil
 	}
+
 	return protectNotInitialized(output.CodePrecondition,
 		"protecting "+strings.Join(names, ", ")+" needs two-factor protection set up first", output.ExitPrecondition)
 }
@@ -239,15 +269,19 @@ func (g protectGuard) checkUnprotect(old, updated config.Cluster, code string) e
 	if len(lifted) == 0 {
 		return nil
 	}
+
 	ok, err := g.configured()
 	if err != nil {
 		return err
 	}
+
 	if !ok {
 		return protectNotInitialized(output.CodeDatabaseProtected,
 			"lifting the protection of "+strings.Join(lifted, ", ")+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe)
 	}
+
 	_, err = g.verify(code, false)
+
 	return err
 }
 
@@ -269,10 +303,12 @@ func (g protectGuard) init(env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	st, err := g.load()
 	if err != nil {
 		return Result{}, err
 	}
+
 	switch {
 	case st.Secret != "" && !p.Rotate:
 		return Result{}, output.NewError(output.CodePrecondition, "two-factor protection is already set up on this node", output.ExitPrecondition,
@@ -287,18 +323,22 @@ func (g protectGuard) init(env *Env) (Result, error) {
 			return Result{}, err
 		}
 	}
+
 	secret, err := totp.NewSecret()
 	if err != nil {
 		return Result{}, err
 	}
+
 	st.Pending = secret
 	if err := g.save(st); err != nil {
 		return Result{}, err
 	}
+
 	label := strings.TrimSpace(p.Label)
 	if label == "" {
 		label, _ = os.Hostname()
 	}
+
 	return Result{Data: map[string]any{
 		"secret": secret,
 		"uri":    totp.URI(protectIssuer, label, secret),
@@ -317,14 +357,17 @@ func (g protectGuard) confirm(env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	if st.Pending == "" {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no pending two-factor setup to confirm", output.ExitPrecondition,
 			"Run vaire protect init first.").WithDetails(map[string]any{"reason": "protect_not_pending"})
 	}
+
 	rotated := st.Secret != ""
 	if st, err = g.verify(env.Req.Secrets[ProtectCodeSecret], true); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: map[string]any{"configured": true, "rotated": rotated, "confirmed_at": st.ConfirmedAt.Format(time.RFC3339)}}, nil
 }
 
@@ -367,13 +410,16 @@ func handleProtectVerify(_ context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	if !ok {
 		return Result{}, protectNotInitialized(output.CodePrecondition,
 			"this node has no two-factor protection set up", output.ExitPrecondition)
 	}
+
 	if _, err := defaultProtectGuard.verify(env.Req.Secrets[ProtectCodeSecret], false); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: protectVerify{Verified: true}}, nil
 }
 
@@ -382,14 +428,17 @@ func (g protectGuard) status(clusterPath string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	out := protectStatus{Configured: st.Secret != "", Pending: st.Pending != "", Failures: st.Failures,
 		Protected: []string{}, Databases: []ProtectedDatabase{}}
 	if !st.ConfirmedAt.IsZero() {
 		out.ConfirmedAt = st.ConfirmedAt.UTC().Format(time.RFC3339)
 	}
+
 	if g.now().Before(st.LockedUntil) {
 		out.LockedUntil = st.LockedUntil.UTC().Format(time.RFC3339)
 	}
+
 	if cfg, err := config.LoadCluster(clusterPath); err == nil {
 		out.Protected, out.Databases = protectionOf(cfg)
 		// An open copy of a protected database (<db>__restoring) holds the
@@ -398,6 +447,7 @@ func (g protectGuard) status(clusterPath string) (Result, error) {
 		// cluster.toml's own databases).
 		out.Protected = append(out.Protected, protectedCopies(cfg)...)
 	}
+
 	return Result{Data: out}, nil
 }
 
@@ -409,18 +459,22 @@ func protectedCopies(cfg config.Cluster) []string {
 	if err != nil {
 		return nil
 	}
+
 	return copiesOf(cfg, recs)
 }
 
 // copiesOf is protectedCopies over records already read.
 func copiesOf(cfg config.Cluster, recs backup.Records) []string {
 	var out []string
+
 	for db, r := range recs.Restores {
 		if spec, ok := cfg.ClusterByName(db); ok && spec.Protected && r.Port != 0 {
 			out = append(out, backup.RestoringName(db))
 		}
 	}
+
 	sort.Strings(out)
+
 	return out
 }
 
@@ -434,5 +488,6 @@ func protectionOf(cfg config.Cluster) ([]string, []ProtectedDatabase) {
 			protected = append(protected, c.Name)
 		}
 	}
+
 	return protected, all
 }

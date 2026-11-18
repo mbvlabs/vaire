@@ -25,10 +25,12 @@ import (
 // and the run log keeps the result.
 func runNodeRPC(cmd *cobra.Command, _ []string) error {
 	signal.Ignore(syscall.SIGPIPE)
+
 	code := node.Serve(os.Stdin, cmd.OutOrStdout())
 	if code != output.ExitOK {
 		return &localenv.SilentExitError{Code: code}
 	}
+
 	return nil
 }
 
@@ -37,10 +39,12 @@ func runNodeSelfcheck(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	message := "node selfcheck passed"
 	if len(warnings) > 0 {
 		message = "node selfcheck passed with warnings"
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings})
 }
 
@@ -53,8 +57,10 @@ func nodeReporter(cmd *cobra.Command) engine.Reporter {
 	if output.UsesStructuredOutput(opts) || opts.Quiet {
 		return func(output.Event) {}
 	}
+
 	w := cmd.ErrOrStderr()
 	shown := map[string]int{}
+
 	return func(ev output.Event) {
 		switch {
 		case ev.Type == "log":
@@ -64,6 +70,7 @@ func nodeReporter(cmd *cobra.Command) engine.Reporter {
 			if seen && *ev.Pct/10 <= last/10 {
 				return
 			}
+
 			shown[ev.Phase] = *ev.Pct
 			_, _ = fmt.Fprintf(w, "%s: %d%%\n", ev.Phase, *ev.Pct)
 		}
@@ -75,13 +82,16 @@ func runNodeSSHRevert(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	message := "restored SSH and firewall rules from the commit-confirm snapshot"
+
 	switch {
 	case res.Skipped != "":
 		message = "nothing to revert: " + res.Skipped
 	case res.Mode == "lockdown-only":
 		message = "break-glass closed: password login is off and public SSH is closed again"
 	}
+
 	return output.OK(cmd, res, message)
 }
 
@@ -90,21 +100,27 @@ func runNodeRun(cmd *cobra.Command, args []string) error {
 	if dryRun(cmd) {
 		return output.OK(cmd, map[string]any{"job": job, "dry_run": true}, "would run "+job)
 	}
+
 	opts := node.JobOptions{ID: strings.ToUpper(stringFlag(cmd, "job-id")), DB: stringFlag(cmd, "db")}
+
 	report := nodeReporter(cmd)
 	if opts.ID != "" || os.Getenv("INVOCATION_ID") != "" {
 		// Under systemd the events go to the journal as NDJSON, which
 		// vaire job follow replays.
 		report = jobReporter(cmd)
 	}
+
 	var evidence jobEvidenceWarnings
+
 	data, skipped, err := node.RunJob(commandContext(cmd), job, opts, evidence.reporter(report))
 	if err != nil {
 		return withEvidenceWarnings(err, evidence.warnings())
 	}
+
 	if skipped != "" {
 		return output.Success(cmd, output.Result{Data: data, Message: "skipped " + job + ": " + skipped, Warnings: evidence.warnings()})
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: "ran " + job, Warnings: evidence.warnings()})
 }
 
@@ -119,11 +135,13 @@ func withEvidenceWarnings(err error, warnings []output.Warning) error {
 // jobReporter writes each event as one redacted NDJSON line on stdout.
 func jobReporter(cmd *cobra.Command) engine.Reporter {
 	w := cmd.OutOrStdout()
+
 	return func(ev output.Event) {
 		ev.Schema = output.EventSchema
 		if ev.TS == "" {
 			ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
 		}
+
 		if raw, err := json.Marshal(secrets.RedactValue(ev)); err == nil {
 			_, _ = fmt.Fprintln(w, string(raw))
 		}
@@ -149,7 +167,9 @@ func runNodeUnfence(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	var message string
+
 	switch {
 	case !res.WasFenced:
 		message = "this node is not fenced"
@@ -162,6 +182,7 @@ func runNodeUnfence(cmd *cobra.Command, _ []string) error {
 	default:
 		message = "lifted the fence; run vaire apply to bring back the timers and poolers"
 	}
+
 	return output.Success(cmd, output.Result{Data: res, Message: message, Next: []string{"vaire apply"}})
 }
 
@@ -170,15 +191,19 @@ func runNodeUnlockSSH(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	res, err := node.UnlockSSH(commandContext(cmd), minutes, dryRun(cmd), nodeReporter(cmd))
 	if err != nil {
 		return err
 	}
+
 	verb := "Opened"
 	if res.DryRun {
 		verb = "Would open"
 	}
+
 	message := fmt.Sprintf("%s public SSH (22/tcp) until %s. Only %s may log in, with its password from the secrets document.\nClose it early with: sudo vaire node ssh-revert --lockdown-only",
 		verb, res.OpenUntil, res.AdminUser)
+
 	return output.OK(cmd, res, message)
 }

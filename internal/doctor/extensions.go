@@ -77,15 +77,19 @@ func extPackages(f Facts) []Result {
 		if !x.Checked {
 			return Skip, "extension facts were not gathered", ""
 		}
+
 		if len(x.MissingPackages) > 0 {
 			return Fail, "the packages of its extensions are not installed: " + joinSorted(x.MissingPackages), "vaire apply"
 		}
+
 		if x.MissingPrerequisites != "" {
 			return Fail, x.MissingPrerequisites, "vaire apply, or install the preinstalled extension files named above"
 		}
+
 		if !x.PackagesKnown {
 			return Warn, "cannot read the package state: " + x.PackageError, "vaire apply"
 		}
+
 		return Pass, "every package and file its extensions need is present", ""
 	})
 }
@@ -96,16 +100,20 @@ func extState(f Facts) []Result {
 		if !x.Checked {
 			return Skip, "extension facts were not gathered", ""
 		}
+
 		if !x.Available {
 			return Warn, "cannot read its extensions: " + x.Error, "vaire status --db " + c.Name + "; vaire logs postgres --db " + c.Name
 		}
+
 		enabled, waiting, notLoaded, missing := extStateIssues(x)
 		unconfigured, unmanaged := extStateUnmanaged(x, enabled)
+
 		sort.Strings(waiting)
 		sort.Strings(notLoaded)
 		sort.Strings(missing)
 		sort.Strings(unconfigured)
 		sort.Strings(unmanaged)
+
 		switch {
 		case len(waiting) > 0:
 			return Warn, joinSorted(waiting) + " wait for the restart that preloads them", "vaire apply --db " + c.Name + " --confirm " + c.Name + "/restart"
@@ -120,6 +128,7 @@ func extState(f Facts) []Result {
 		case !x.LoadedKnown:
 			return Warn, "cannot read its shared_preload_libraries", "vaire status --db " + c.Name + "; vaire logs postgres --db " + c.Name
 		}
+
 		return Pass, "the extensions match cluster.toml: " + describeExtensionVersions(x), ""
 	})
 }
@@ -130,6 +139,7 @@ func extStateIssues(x ExtensionFacts) (enabled map[string]bool, waiting, notLoad
 	enabled = map[string]bool{}
 	for _, e := range x.Enabled {
 		enabled[e.Name] = true
+
 		preloadMissing := e.Preload != "" && x.LoadedKnown && !x.Loaded[e.Preload]
 		switch {
 		case preloadMissing && x.PendingKnown && x.PendingRestart:
@@ -137,12 +147,14 @@ func extStateIssues(x ExtensionFacts) (enabled map[string]bool, waiting, notLoad
 		case preloadMissing:
 			notLoaded = append(notLoaded, e.Name)
 		}
+
 		if e.ExtName != "" {
 			if _, ok := x.Installed[e.ExtName]; !ok {
 				missing = append(missing, e.Name)
 			}
 		}
 	}
+
 	return enabled, waiting, notLoaded, missing
 }
 
@@ -153,15 +165,18 @@ func extStateUnmanaged(x ExtensionFacts, enabled map[string]bool) (unconfigured,
 		if extname == "plpgsql" {
 			continue
 		}
+
 		info, ok := x.Known[extname]
 		if !ok {
 			unmanaged = append(unmanaged, extname+" "+v.Version)
 			continue
 		}
+
 		if !enabled[info.Name] {
 			unconfigured = append(unconfigured, info.Name)
 		}
 	}
+
 	return unconfigured, unmanaged
 }
 
@@ -171,33 +186,42 @@ func extUpdates(f Facts) []Result {
 		if !x.Checked || !x.Available {
 			return Skip, "its extensions could not be read", ""
 		}
+
 		var stale, unknown []string
+
 		fix := ""
+
 		for extname, v := range x.Installed {
 			info, ok := x.Known[extname]
 			if !ok {
 				continue
 			}
+
 			if v.Default == "" {
 				unknown = append(unknown, info.Name)
 				continue
 			}
+
 			if !extensionVersionNewer(v.Version, v.Default) {
 				continue
 			}
+
 			stale = append(stale, info.Name+" "+v.Version+" -> "+v.Default)
 			if fix == "" {
 				fix = "vaire ext add " + info.Name + " --db " + c.Name
 			}
 		}
+
 		sort.Strings(stale)
 		sort.Strings(unknown)
+
 		switch {
 		case len(stale) > 0:
 			return Warn, "the package is newer than the extension in the database: " + strings.Join(stale, ", "), fix
 		case len(unknown) > 0:
 			return Warn, "cannot read the default version of " + joinSorted(unknown), "vaire apply --db " + c.Name
 		}
+
 		return Pass, "every extension runs its installed package's default version", ""
 	})
 }
@@ -209,25 +233,32 @@ func extensionVersionNewer(version, def string) bool {
 	if def == "" || def == version {
 		return false
 	}
+
 	as, aok := extensionVersionParts(version)
+
 	bs, bok := extensionVersionParts(def)
 	if !aok || !bok {
 		return true
 	}
+
 	for len(as) < len(bs) {
 		as = append(as, 0)
 	}
+
 	for len(bs) < len(as) {
 		bs = append(bs, 0)
 	}
+
 	for i := range as {
 		if as[i] < bs[i] {
 			return true
 		}
+
 		if as[i] > bs[i] {
 			return false
 		}
 	}
+
 	return false
 }
 
@@ -236,29 +267,38 @@ func extensionVersionParts(v string) ([]int, bool) {
 	if v == "" {
 		return nil, false
 	}
+
 	parts := strings.Split(v, ".")
+
 	out := make([]int, 0, len(parts))
 	for _, part := range parts {
 		n, err := strconv.Atoi(part)
 		if err != nil || n < 0 {
 			return nil, false
 		}
+
 		out = append(out, n)
 	}
+
 	return out, true
 }
 
 func describeExtensionVersions(x ExtensionFacts) string {
 	var parts []string
+
 	for extname, v := range x.Installed {
 		if extname == "plpgsql" {
 			continue
 		}
+
 		parts = append(parts, extname+" "+v.Version)
 	}
+
 	sort.Strings(parts)
+
 	if len(parts) == 0 {
 		return "none"
 	}
+
 	return strings.Join(parts, ", ")
 }

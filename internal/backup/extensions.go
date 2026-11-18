@@ -2,8 +2,10 @@ package backup
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -41,7 +43,9 @@ func (s Records) ExtensionRequirementsFor(stanza string) (ExtensionRequirements,
 	if stanza == "" {
 		return ExtensionRequirements{}, false
 	}
+
 	r, ok := s.ExtensionRequirements[stanza]
+
 	return r, ok
 }
 
@@ -53,36 +57,46 @@ func (s *Records) RecordExtensionRequirements(stanza, database string, exts []ca
 	if stanza == "" {
 		return false
 	}
+
 	if s.ExtensionRequirements == nil {
 		s.ExtensionRequirements = map[string]ExtensionRequirements{}
 	}
+
 	entry, ok := s.ExtensionRequirements[stanza]
+
 	changed := !ok
 	if entry.Database == "" && database != "" {
 		entry.Database, changed = database, true
 	}
+
 	if entry.CoverageSince == "" {
 		entry.CoverageSince = at.UTC().Format(time.RFC3339)
 		changed = true
 	}
+
 	since := at.UTC().Format(time.RFC3339)
+
 	for _, ext := range exts {
 		if ext.Name == "" {
 			continue
 		}
+
 		ext = ext.Clone()
 		if requirementsContain(entry.Requirements, ext) {
 			continue
 		}
+
 		entry.Requirements = append(entry.Requirements, ExtensionRequirement{
 			Name: ext.Name, Since: since, Extension: ext,
 		})
 		changed = true
 	}
+
 	if changed {
 		sortExtensionRequirements(entry.Requirements)
 		s.ExtensionRequirements[stanza] = entry
 	}
+
 	return changed
 }
 
@@ -92,6 +106,7 @@ func requirementsContain(reqs []ExtensionRequirement, ext catalog.Extension) boo
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -101,9 +116,11 @@ func sortExtensionRequirements(reqs []ExtensionRequirement) {
 		if a.Name != b.Name {
 			return a.Name < b.Name
 		}
+
 		if a.Since != b.Since {
 			return a.Since < b.Since
 		}
+
 		return requirementKey(a.Extension) < requirementKey(b.Extension)
 	})
 }
@@ -119,6 +136,7 @@ func RecordExtensionRequirements(stanza, database string, exts []catalog.Extensi
 	if stanza == "" {
 		return nil
 	}
+
 	return UpdateRecords(func(s *Records) error {
 		s.RecordExtensionRequirements(stanza, database, exts, at)
 		return nil
@@ -132,10 +150,12 @@ func (s Records) RetainedExtensions(stanza string) []catalog.Extension {
 	if !ok {
 		return nil
 	}
+
 	out := make([]catalog.Extension, 0, len(r.Requirements))
 	for _, req := range r.Requirements {
 		out = append(out, req.Extension.Clone())
 	}
+
 	return out
 }
 
@@ -163,16 +183,14 @@ func (g CopyGuard) Clone() CopyGuard {
 	out := CopyGuard{Preloads: append([]string(nil), g.Preloads...)}
 	if g.Settings != nil {
 		out.Settings = make(map[string]string, len(g.Settings))
-		for k, v := range g.Settings {
-			out.Settings[k] = v
-		}
+		maps.Copy(out.Settings, g.Settings)
 	}
+
 	if g.Origins != nil {
 		out.Origins = make(map[string]string, len(g.Origins))
-		for k, v := range g.Origins {
-			out.Origins[k] = v
-		}
+		maps.Copy(out.Origins, g.Origins)
 	}
+
 	return out
 }
 
@@ -182,7 +200,9 @@ func (g CopyGuard) SettingKeys() []string {
 	for k := range g.Settings {
 		out = append(out, k)
 	}
+
 	sort.Strings(out)
+
 	return out
 }
 
@@ -222,45 +242,60 @@ func autoConfPath(dataDir string) string { return filepath.Join(dataDir, "postgr
 // The guard is appended last, so PostgreSQL reads it after that line.
 func InstallCopyGuard(dataDir string, g CopyGuard) (bool, error) {
 	path := autoConfPath(dataDir)
+
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
+
 	if _, _, err := parseCopyGuard(string(raw)); err != nil {
 		return false, fmt.Errorf("the existing vaire copy guard is unreadable, so vaire will not overwrite it: %w", err)
 	}
+
 	kept := stripCopyGuard(string(raw))
 	if g.Empty() {
 		if kept == string(raw) {
 			return false, nil
 		}
+
 		return true, writeCopyGuardFile(path, []byte(kept), 0o600)
 	}
+
 	var b strings.Builder
 	b.WriteString(strings.TrimRight(kept, "\n"))
+
 	if b.Len() > 0 {
 		b.WriteString("\n")
 	}
+
 	b.WriteString(copyGuardBegin + "\n")
+
 	if len(g.Origins) > 0 {
 		libs := make([]string, 0, len(g.Origins))
 		for lib := range g.Origins {
 			libs = append(libs, lib)
 		}
+
 		sort.Strings(libs)
+
 		parts := make([]string, 0, len(libs))
 		for _, lib := range libs {
 			parts = append(parts, lib+"="+g.Origins[lib])
 		}
+
 		b.WriteString(copyGuardOriginsPrefix + strings.Join(parts, ",") + "\n")
 	}
+
 	if len(g.Preloads) > 0 {
 		b.WriteString("shared_preload_libraries = '" + strings.Join(g.Preloads, ",") + "'\n")
 	}
+
 	for _, key := range g.SettingKeys() {
 		b.WriteString(key + " = " + g.Settings[key] + "\n")
 	}
+
 	b.WriteString(copyGuardEnd + "\n")
+
 	return true, writeCopyGuardFile(path, []byte(b.String()), 0o600)
 }
 
@@ -270,20 +305,25 @@ func InstallCopyGuard(dataDir string, g CopyGuard) (bool, error) {
 // later operator change is not hidden by a guard that was already released.
 func RemoveCopyGuard(dataDir string) (bool, error) {
 	path := autoConfPath(dataDir)
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
+
 		return false, err
 	}
+
 	if _, present, err := parseCopyGuard(string(raw)); err != nil || !present {
 		return false, err
 	}
+
 	kept := stripCopyGuard(string(raw))
 	if kept == string(raw) {
 		return false, nil
 	}
+
 	return true, writeCopyGuardFile(path, []byte(kept), 0o600)
 }
 
@@ -294,9 +334,12 @@ func ReadCopyGuard(dataDir string) (CopyGuard, bool, error) {
 		if os.IsNotExist(err) {
 			return CopyGuard{}, false, nil
 		}
+
 		return CopyGuard{}, false, err
 	}
+
 	g, present, err := parseCopyGuard(string(raw))
+
 	return g, present, err
 }
 
@@ -308,17 +351,20 @@ func CopyGuardCovered(g CopyGuard, preloads []string, settings map[string]string
 	for _, p := range preloads {
 		have[p] = true
 	}
+
 	for _, p := range g.Preloads {
 		if !have[p] {
 			return false
 		}
 	}
+
 	for k, want := range g.Settings {
 		got, ok := settings[k]
 		if !ok || got != catalog.NormalizedSettingValue(want) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -332,18 +378,23 @@ func managedConfPreloads(confDir string) ([]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+
 		return nil, err
 	}
+
 	tokens, err := lexConfigLines(string(raw))
 	if err != nil {
 		return nil, err
 	}
+
 	value := ""
+
 	for _, tok := range tokens {
 		if tok.Name == "shared_preload_libraries" {
 			value = tok.Value
 		}
 	}
+
 	return splitSettingList(value), nil
 }
 
@@ -358,18 +409,23 @@ func PlainAutoPreloads(dataDir string) ([]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+
 		return nil, err
 	}
+
 	tokens, err := lexConfigLines(stripCopyGuard(string(raw)))
 	if err != nil {
 		return nil, err
 	}
+
 	value := ""
+
 	for _, tok := range tokens {
 		if tok.Name == "shared_preload_libraries" {
 			value = tok.Value
 		}
 	}
+
 	return splitSettingList(value), nil
 }
 
@@ -382,20 +438,26 @@ func OperatorPreloads(confDir, dataDir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	autoPlain, err := PlainAutoPreloads(dataDir)
 	if err != nil {
 		return nil, err
 	}
+
 	oldManaged, err := managedConfPreloads(confDir)
 	if err != nil {
 		return nil, err
 	}
+
 	oldCurrent := map[string]bool{}
 	for _, p := range oldManaged {
 		oldCurrent[p] = true
 	}
+
 	seen := map[string]bool{}
+
 	var out []string
+
 	add := func(p string) {
 		if p != "" && !oldCurrent[p] && !seen[p] {
 			seen[p] = true
@@ -405,10 +467,13 @@ func OperatorPreloads(confDir, dataDir string) ([]string, error) {
 	for _, p := range confEffective {
 		add(p)
 	}
+
 	for _, p := range autoPlain {
 		add(p)
 	}
+
 	sort.Strings(out)
+
 	return out, nil
 }
 
@@ -436,22 +501,27 @@ func ComposeCopyGuardDropping(confDir, dataDir string, base CopyGuard, desired [
 	if err != nil {
 		return CopyGuard{}, err
 	}
+
 	confEffective, err := EffectiveConfPreloads(confDir)
 	if err != nil {
 		return CopyGuard{}, err
 	}
+
 	autoPlain, err := PlainAutoPreloads(dataDir)
 	if err != nil {
 		return CopyGuard{}, err
 	}
+
 	oldManaged, err := managedConfPreloads(confDir)
 	if err != nil {
 		return CopyGuard{}, err
 	}
+
 	oldCurrent := map[string]bool{}
 	for _, p := range oldManaged {
 		oldCurrent[p] = true
 	}
+
 	out := base.Clone()
 	out.Preloads = nil
 	out.Origins = nil
@@ -464,32 +534,39 @@ func ComposeCopyGuardDropping(confDir, dataDir string, base CopyGuard, desired [
 	for _, p := range desired {
 		preloads.add(p, "desired")
 	}
+
 	for _, p := range base.Preloads {
 		preloads.add(p, "retained")
 	}
+
 	for _, p := range confEffective {
 		if !oldCurrent[p] {
 			preloads.add(p, "operator")
 		}
 	}
+
 	for _, p := range autoPlain {
 		if !oldCurrent[p] {
 			preloads.add(p, "operator")
 		}
 	}
+
 	if present {
 		if err := rejectUnexplainedCopyGuardPreloads(existing, preloads.seen, dropped); err != nil {
 			return CopyGuard{}, err
 		}
 	}
+
 	out.Preloads = preloads.preloads
 	if len(out.Preloads) == 0 {
 		out.Preloads = nil
 	}
+
 	out.Origins = preloads.origins
 	if len(out.Origins) == 0 {
 		out.Origins = nil
 	}
+
 	return out, nil
 }
 
@@ -505,12 +582,15 @@ func (s *copyGuardPreloadSet) add(preload, origin string) {
 	if preload == "" {
 		return
 	}
+
 	if s.seen[preload] {
 		if copyGuardOriginRank[origin] > copyGuardOriginRank[s.origins[preload]] {
 			s.origins[preload] = origin
 		}
+
 		return
 	}
+
 	s.seen[preload] = true
 	s.preloads = append(s.preloads, preload)
 	s.origins[preload] = origin
@@ -521,6 +601,7 @@ func rejectUnexplainedCopyGuardPreloads(existing CopyGuard, seen, dropped map[st
 		if seen[p] || dropped[p] {
 			continue
 		}
+
 		switch existing.Origins[p] {
 		case "operator", "desired":
 			// The previous guard recorded an operator or current-intent
@@ -538,6 +619,7 @@ func rejectUnexplainedCopyGuardPreloads(existing CopyGuard, seen, dropped map[st
 				WithDetails(map[string]any{"reason": "extension_previous_guard_unknown", "library": p})
 		}
 	}
+
 	return nil
 }
 
@@ -590,66 +672,83 @@ func CopyGuardSettings(opts CopyGuardSettingsOptions) (CopyGuardSettingsDecision
 	if len(known) == 0 {
 		known = opts.Current
 	}
+
 	effective, owners, err := effectiveCopySettings(known, opts.CopyDB)
 	if err != nil {
 		return CopyGuardSettingsDecision{}, err
 	}
+
 	guard, handoff := copyGuardSettingDecisions(effective, owners, opts)
+
 	return CopyGuardSettingsDecision{Settings: guard, Handoff: handoff}, nil
 }
 
 func effectiveCopySettings(known []catalog.Extension, copyDB string) (map[string]string, map[string]copySettingOwner, error) {
 	effective := map[string]string{}
 	owners := map[string]copySettingOwner{}
+
 	for _, ext := range known {
 		ordinary := ext.ResolvedSettings(copyDB)
+
 		mandatory := map[string]string{}
 		if ext.CopySafety == catalog.CopySafetyDisabled {
 			mandatory = ext.ResolvedCopySettings(copyDB)
 		}
+
 		for k, v := range ordinary {
 			if _, own := mandatory[k]; own {
 				// The descriptor's own suppression overlays its own ordinary
 				// setting. This is the built-in Timescale 2→0 case.
 				continue
 			}
+
 			if err := mergeEffective(effective, owners, k, v, copySettingOwner{name: ext.Name}); err != nil {
 				return nil, nil, err
 			}
 		}
+
 		for k, v := range mandatory {
 			if err := mergeEffective(effective, owners, k, v, copySettingOwner{name: ext.Name, mandatory: true}); err != nil {
 				return nil, nil, err
 			}
 		}
 	}
+
 	return effective, owners, nil
 }
 
 func copyGuardSettingDecisions(effective map[string]string, owners map[string]copySettingOwner, opts CopyGuardSettingsOptions) (guard, handoff map[string]string) {
 	guard = map[string]string{}
 	handoff = map[string]string{}
+
 	for k, v := range effective {
 		owner := owners[k]
 		if !owner.mandatory {
 			if _, supplied := opts.Permanent[k]; supplied {
 				continue
 			}
+
 			guard[k] = v
+
 			continue
 		}
+
 		if value, ok := handedOffCopySetting(k, v, opts); ok {
 			handoff[k] = value
 			continue
 		}
+
 		guard[k] = v
 	}
+
 	if len(guard) == 0 {
 		guard = nil
 	}
+
 	if len(handoff) == 0 {
 		handoff = nil
 	}
+
 	return guard, handoff
 }
 
@@ -659,19 +758,23 @@ func handedOffCopySetting(key, value string, opts CopyGuardSettingsOptions) (str
 	if opts.Pending {
 		return "", false
 	}
+
 	want := catalog.NormalizedSettingValue(value)
 	if prev, ok := opts.Handoff[key]; ok && prev == want {
 		// Already handed off to verified equivalent permanent
 		// configuration: a later deliberate change is respected.
 		return prev, true
 	}
+
 	proof := opts.HandoffPermanent
 	if proof == nil {
 		proof = opts.Permanent
 	}
+
 	if permanent, supplied := proof[key]; supplied && permanent == want {
 		return want, true
 	}
+
 	return "", false
 }
 
@@ -685,12 +788,16 @@ func mergeEffective(effective map[string]string, owners map[string]copySettingOw
 				"Keep one effective value in the current intent and retained history; the copy was not started.").
 				WithDetails(map[string]any{"reason": "extension_setting_conflict", "setting": key, "extensions": []string{prevOwner.name, owner.name}})
 		}
+
 		if owner.mandatory {
 			owners[key] = owner
 		}
+
 		return nil
 	}
+
 	effective[key], owners[key] = value, owner
+
 	return nil
 }
 
@@ -699,18 +806,22 @@ func parseCopyGuard(raw string) (CopyGuard, bool, error) {
 	if !present {
 		return CopyGuard{}, false, nil
 	}
+
 	g := CopyGuard{Settings: map[string]string{}}
 	for _, line := range block {
 		if err := applyCopyGuardLine(&g, line); err != nil {
 			return CopyGuard{}, false, err
 		}
 	}
+
 	if !closed {
 		return CopyGuard{}, false, fmt.Errorf("the vaire copy guard block has no end marker")
 	}
+
 	if len(g.Settings) == 0 {
 		g.Settings = nil
 	}
+
 	return g, true, nil
 }
 
@@ -718,48 +829,60 @@ func parseCopyGuard(raw string) (CopyGuard, bool, error) {
 // false when there is no block; closed is false when the end marker is missing.
 func copyGuardBlock(lines []string) (block []string, closed, present bool) {
 	begin := -1
+
 	for i, line := range lines {
 		if strings.TrimSpace(line) == copyGuardBegin {
 			begin = i
 			break
 		}
 	}
+
 	if begin < 0 {
 		return nil, false, false
 	}
+
 	for i := begin + 1; i < len(lines); i++ {
 		if strings.TrimSpace(lines[i]) == copyGuardEnd {
 			return lines[begin+1 : i], true, true
 		}
 	}
+
 	return lines[begin+1:], false, true
 }
 
 func applyCopyGuardLine(g *CopyGuard, line string) error {
 	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, copyGuardOriginsPrefix) {
-		origins, err := parseCopyGuardOrigins(strings.TrimSpace(strings.TrimPrefix(trimmed, copyGuardOriginsPrefix)))
+	if after, ok := strings.CutPrefix(trimmed, copyGuardOriginsPrefix); ok {
+		origins, err := parseCopyGuardOrigins(strings.TrimSpace(after))
 		if err != nil {
 			return err
 		}
+
 		g.Origins = origins
+
 		return nil
 	}
+
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 		return nil
 	}
+
 	tok, ok, err := lexConfigLine(trimmed)
 	if err != nil {
 		return fmt.Errorf("the vaire copy guard line %q is not a setting: %w", trimmed, err)
 	}
+
 	if !ok {
 		return nil
 	}
+
 	if tok.Name == "shared_preload_libraries" {
 		g.Preloads = splitSettingList(tok.Value)
 		return nil
 	}
+
 	g.Settings[tok.Name] = tok.RawValue
+
 	return nil
 }
 
@@ -767,19 +890,24 @@ func parseCopyGuardOrigins(raw string) (map[string]string, error) {
 	if raw == "" {
 		return nil, nil
 	}
+
 	out := map[string]string{}
-	for _, part := range strings.Split(raw, ",") {
+
+	for part := range strings.SplitSeq(raw, ",") {
 		lib, origin, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok || lib == "" || origin == "" {
 			return nil, fmt.Errorf("the vaire copy guard origin %q is malformed", part)
 		}
+
 		switch origin {
 		case "retained", "desired", "operator":
 		default:
 			return nil, fmt.Errorf("the vaire copy guard origin %q is unknown", origin)
 		}
+
 		out[lib] = origin
 	}
+
 	return out, nil
 }
 
@@ -788,6 +916,7 @@ func stripCopyGuard(raw string) string {
 	lines := strings.SplitAfter(raw, "\n")
 	out := make([]string, 0, len(lines))
 	in := false
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
@@ -800,8 +929,10 @@ func stripCopyGuard(raw string) string {
 		case in:
 			continue
 		}
+
 		out = append(out, line)
 	}
+
 	return strings.Join(out, "")
 }
 
@@ -811,12 +942,15 @@ func splitSettingList(value string) []string {
 	if value == "" {
 		return nil
 	}
+
 	var out []string
-	for _, part := range strings.Split(value, ",") {
+
+	for part := range strings.SplitSeq(value, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
 		}
 	}
+
 	return out
 }
 
@@ -838,20 +972,24 @@ func effectivePreloads(confDir string, withAuto bool, dataDir string) ([]string,
 	if err := readPreloadValue(filepath.Join(confDir, "postgresql.conf"), &value); err != nil {
 		return nil, err
 	}
+
 	names, err := confDConfigNames(confDir)
 	if err != nil {
 		return nil, err
 	}
+
 	for _, name := range names {
 		if err := readPreloadValue(filepath.Join(confDir, "conf.d", name), &value); err != nil {
 			return nil, err
 		}
 	}
+
 	if withAuto {
 		if err := readPreloadValue(autoConfPath(dataDir), &value); err != nil {
 			return nil, err
 		}
 	}
+
 	return splitSettingList(value), nil
 }
 
@@ -863,17 +1001,21 @@ func readPreloadValue(path string, value *string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
+
 		return err
 	}
+
 	tokens, err := lexConfigLines(string(raw))
 	if err != nil {
 		return err
 	}
+
 	for _, tok := range tokens {
 		if tok.Name == "shared_preload_libraries" {
 			*value = tok.Value
 		}
 	}
+
 	return nil
 }
 
@@ -884,13 +1026,16 @@ func confDConfigNames(confDir string) ([]string, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".conf") {
 			names = append(names, e.Name())
 		}
 	}
+
 	sort.Strings(names)
+
 	return names, nil
 }
 
@@ -904,16 +1049,20 @@ func EffectivePermanentSettings(confDir, dataDir string) (map[string]string, err
 	if err := readPermanentSettings(filepath.Join(confDir, "postgresql.conf"), out, confDir, true); err != nil {
 		return nil, err
 	}
+
 	raw, err := os.ReadFile(autoConfPath(dataDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return out, nil
 		}
+
 		return nil, err
 	}
+
 	if err := parsePermanentSettings(stripCopyGuard(string(raw)), out); err != nil {
 		return nil, fmt.Errorf("%s: %w", autoConfPath(dataDir), err)
 	}
+
 	return out, nil
 }
 
@@ -923,12 +1072,15 @@ func readPermanentSettings(path string, out map[string]string, confDir string, a
 		if os.IsNotExist(err) {
 			return nil
 		}
+
 		return err
 	}
+
 	tokens, err := lexConfigLines(string(raw))
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
+
 	for _, tok := range tokens {
 		switch tok.Name {
 		case "include", "include_if_exists":
@@ -937,13 +1089,17 @@ func readPermanentSettings(path string, out map[string]string, confDir string, a
 			if !allowIncludeDir || tok.Value != "conf.d" {
 				return fmt.Errorf("%s: configuration include_dir %q cannot be proven", path, tok.Value)
 			}
+
 			if err := readConfDSettings(confDir, out); err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		out[tok.Name] = tok.Value
 	}
+
 	return nil
 }
 
@@ -952,11 +1108,13 @@ func readConfDSettings(confDir string, out map[string]string) error {
 	if err != nil {
 		return err
 	}
+
 	for _, name := range names {
 		if err := readPermanentSettings(filepath.Join(confDir, "conf.d", name), out, "", false); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -965,6 +1123,7 @@ func parsePermanentSettings(raw string, out map[string]string) error {
 	if err != nil {
 		return err
 	}
+
 	for _, tok := range tokens {
 		switch tok.Name {
 		case "include", "include_if_exists":
@@ -972,8 +1131,10 @@ func parsePermanentSettings(raw string, out map[string]string) error {
 		case "include_dir":
 			return fmt.Errorf("configuration include_dir %q cannot be proven in postgresql.auto.conf", tok.Value)
 		}
+
 		out[tok.Name] = tok.Value
 	}
+
 	return nil
 }
 
@@ -996,32 +1157,41 @@ func lexConfigLine(line string) (configToken, bool, error) {
 	if s == "" || strings.HasPrefix(s, "#") {
 		return configToken{}, false, nil
 	}
+
 	name, i, err := configLineName(s, line)
 	if err != nil {
 		return configToken{}, false, err
 	}
+
 	i = skipConfigSpace(s, i)
 	if i < len(s) && s[i] == '=' {
 		i = skipConfigSpace(s, i+1)
 	}
+
 	if i >= len(s) || s[i] == '#' {
 		return configToken{}, false, fmt.Errorf("configuration line %q has no value", line)
 	}
+
 	rawStart := i
+
 	var value string
 	if s[i] == '\'' {
 		value, i, err = decodeQuotedConfigValue(s, line, i)
 	} else {
 		value, i, err = decodeBareConfigValue(s, line, i)
 	}
+
 	if err != nil {
 		return configToken{}, false, err
 	}
+
 	rawEnd := i
+
 	i = skipConfigSpace(s, i)
 	if i < len(s) && s[i] != '#' {
 		return configToken{}, false, fmt.Errorf("configuration line %q has trailing text %q", line, s[i:])
 	}
+
 	return configToken{Name: name, Value: value, RawValue: s[rawStart:rawEnd]}, true, nil
 }
 
@@ -1030,9 +1200,11 @@ func configLineName(s, line string) (string, int, error) {
 	for i < len(s) && s[i] != '=' && !isConfigSpace(s[i]) {
 		i++
 	}
+
 	if i == 0 {
 		return "", 0, fmt.Errorf("configuration line %q has no setting name", line)
 	}
+
 	return asciiLower(s[:i]), i, nil
 }
 
@@ -1040,17 +1212,21 @@ func skipConfigSpace(s string, i int) int {
 	for i < len(s) && isConfigSpace(s[i]) {
 		i++
 	}
+
 	return i
 }
 
 func decodeQuotedConfigValue(s, line string, i int) (string, int, error) {
 	i++
+
 	var b strings.Builder
+
 	for i < len(s) {
 		c := s[i]
 		switch {
 		case c == '\'' && i+1 < len(s) && s[i+1] == '\'':
 			b.WriteByte('\'')
+
 			i += 2
 		case c == '\'':
 			return b.String(), i + 1, nil
@@ -1059,13 +1235,17 @@ func decodeQuotedConfigValue(s, line string, i int) (string, int, error) {
 			if err != nil {
 				return "", i, fmt.Errorf("configuration line %q: %w", line, err)
 			}
+
 			b.WriteByte(decoded)
+
 			i = next
 		default:
 			b.WriteByte(c)
+
 			i++
 		}
 	}
+
 	return "", i, fmt.Errorf("configuration line %q has an unterminated quoted value", line)
 }
 
@@ -1074,9 +1254,11 @@ func decodeBareConfigValue(s, line string, i int) (string, int, error) {
 	for i < len(s) && !isConfigSpace(s[i]) && s[i] != '#' {
 		i++
 	}
+
 	if i == start {
 		return "", i, fmt.Errorf("configuration line %q has no value", line)
 	}
+
 	return s[start:i], i, nil
 }
 
@@ -1089,6 +1271,7 @@ func asciiLower(s string) string {
 			b[i] = c + ('a' - 'A')
 		}
 	}
+
 	return string(b)
 }
 
@@ -1096,6 +1279,7 @@ func decodeConfigEscape(s string, i int) (byte, int, error) {
 	if i+1 >= len(s) {
 		return 0, i, fmt.Errorf("trailing backslash in quoted value")
 	}
+
 	switch s[i+1] {
 	case '\\':
 		return '\\', i + 2, nil
@@ -1122,15 +1306,18 @@ func decodeConfigEscape(s string, i int) (byte, int, error) {
 
 func lexConfigLines(raw string) ([]configToken, error) {
 	var out []configToken
-	for _, line := range strings.Split(raw, "\n") {
+
+	for line := range strings.SplitSeq(raw, "\n") {
 		tok, ok, err := lexConfigLine(line)
 		if err != nil {
 			return nil, err
 		}
+
 		if ok {
 			out = append(out, tok)
 		}
 	}
+
 	return out, nil
 }
 
@@ -1143,25 +1330,28 @@ func SelectedBackupStart(info Info, opts RestoreOptions) (time.Time, bool) {
 	if !ok {
 		return time.Time{}, false
 	}
+
 	return fullBackupStart(info, selected)
 }
 
 func selectedBackupSet(info Info, opts RestoreOptions) (Set, bool) {
 	switch opts.Kind {
 	case TargetTime:
-		for i := len(info.Sets) - 1; i >= 0; i-- {
-			set := info.Sets[i]
+		for _, set := range slices.Backward(info.Sets) {
 			if set.Error {
 				continue
 			}
+
 			start, err := time.Parse(time.RFC3339, set.Start)
 			if err != nil {
 				return Set{}, false
 			}
+
 			if !start.After(opts.Time) {
 				return set, true
 			}
 		}
+
 		return Set{}, false
 	case TargetSet:
 		return info.Find(opts.Set)
@@ -1174,24 +1364,31 @@ func selectedBackupSet(info Info, opts RestoreOptions) (Set, bool) {
 
 func fullBackupStart(info Info, selected Set) (time.Time, bool) {
 	seen := map[string]bool{}
-	for depth := 0; depth < 100; depth++ {
+
+	for range 100 {
 		if selected.Type == TypeFull {
 			start, err := time.Parse(time.RFC3339, selected.Start)
 			if err != nil {
 				return time.Time{}, false
 			}
+
 			return start, true
 		}
+
 		if selected.Prior == "" || seen[selected.Label] {
 			return time.Time{}, false
 		}
+
 		seen[selected.Label] = true
+
 		prior, found := info.Find(selected.Prior)
 		if !found || prior.Error {
 			return time.Time{}, false
 		}
+
 		selected = prior
 	}
+
 	return time.Time{}, false
 }
 
@@ -1205,13 +1402,16 @@ func MergeExtensionRequirements(known, declared []catalog.Extension) ([]catalog.
 	if err != nil {
 		return nil, err
 	}
+
 	for _, ext := range declared {
 		next, err := mergeOneRequirement(merged, ext, true)
 		if err != nil {
 			return nil, fmt.Errorf("declared recovery requirement %s conflicts with known history: %w", ext.Name, err)
 		}
+
 		merged = next
 	}
+
 	return merged, nil
 }
 
@@ -1224,10 +1424,12 @@ func MergeCopyRequirements(known, declared []catalog.Extension, standby bool, co
 	if err != nil {
 		return nil, CopyGuard{}, err
 	}
+
 	guard, err := copyGuardFor(merged, standby, copyDB)
 	if err != nil {
 		return nil, CopyGuard{}, err
 	}
+
 	return merged, guard, nil
 }
 
@@ -1238,29 +1440,37 @@ func mergeKnownRequirements(exts []catalog.Extension) ([]catalog.Extension, erro
 		if err != nil {
 			return nil, err
 		}
+
 		out = next
 	}
+
 	return out, nil
 }
 
 func mergeOneRequirement(out []catalog.Extension, ext catalog.Extension, declared bool) ([]catalog.Extension, error) {
 	ext = ext.Clone()
+
 	for i := range out {
 		have := out[i]
+
 		done, err := mergeSameExtName(out, i, ext, declared)
 		if err != nil {
 			return nil, err
 		}
+
 		if done {
 			return out, nil
 		}
+
 		if ext.Preload != "" && have.Preload == ext.Preload && !sameProvider(have, ext) {
 			return nil, providerConflict(have, ext)
 		}
 	}
+
 	if containsSemanticExtension(out, ext) {
 		return out, nil
 	}
+
 	return append(out, ext), nil
 }
 
@@ -1271,15 +1481,19 @@ func mergeSameExtName(out []catalog.Extension, i int, ext catalog.Extension, dec
 	if ext.ExtName == "" || have.ExtName != ext.ExtName {
 		return false, nil
 	}
+
 	if have.Source != ext.Source || have.Package != ext.Package {
 		return false, providerConflict(have, ext)
 	}
+
 	if have.Preload != "" && ext.Preload != "" && have.Preload != ext.Preload {
 		return false, providerConflict(have, ext)
 	}
+
 	if have.Preload == "" {
 		out[i].Preload = ext.Preload
 	}
+
 	return !declared && have.SemanticEqual(ext), nil
 }
 
@@ -1293,6 +1507,7 @@ func containsSemanticExtension(out []catalog.Extension, ext catalog.Extension) b
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -1317,6 +1532,7 @@ func providerText(ext catalog.Extension) string {
 
 func copyGuardFor(exts []catalog.Extension, standby bool, copyDB string) (CopyGuard, error) {
 	guard := CopyGuard{Settings: map[string]string{}}
+
 	seenPreloads := map[string]bool{}
 	for _, ext := range exts {
 		// Descriptor order is runtime load order; a set plus a later sort would
@@ -1326,9 +1542,11 @@ func copyGuardFor(exts []catalog.Extension, standby bool, copyDB string) (CopyGu
 			seenPreloads[ext.Preload] = true
 			guard.Preloads = append(guard.Preloads, ext.Preload)
 		}
+
 		if err := addCopySafetySettings(&guard, ext, copyDB); err != nil {
 			return CopyGuard{}, err
 		}
+
 		if standby && !ext.StandbySafe {
 			return CopyGuard{}, output.NewError(output.CodePrecondition,
 				"extension "+ext.Name+" is not declared standby_safe, and this copy starts as a physical standby",
@@ -1337,9 +1555,11 @@ func copyGuardFor(exts []catalog.Extension, standby bool, copyDB string) (CopyGu
 				WithDetails(map[string]any{"reason": "extension_standby_unsafe", "extension": ext.Name})
 		}
 	}
+
 	if len(guard.Settings) == 0 {
 		guard.Settings = nil
 	}
+
 	return guard, nil
 }
 
@@ -1356,6 +1576,7 @@ func addCopySafetySettings(guard *CopyGuard, ext catalog.Extension, copyDB strin
 				"Add the settings that suppress its background work, or declare it safe.").
 				WithDetails(map[string]any{"reason": "extension_copy_safety_incomplete", "extension": ext.Name})
 		}
+
 		for k, v := range settings {
 			if prev, ok := guard.Settings[k]; ok && catalog.NormalizedSettingValue(prev) != catalog.NormalizedSettingValue(v) {
 				return output.NewError(output.CodePrecondition,
@@ -1364,8 +1585,10 @@ func addCopySafetySettings(guard *CopyGuard, ext catalog.Extension, copyDB strin
 					"Two required extensions cannot suppress the same setting differently. Keep one provider or one safe definition.").
 					WithDetails(map[string]any{"reason": "extension_copy_setting_conflict", "setting": k, "extensions": []string{ext.Name}})
 			}
+
 			guard.Settings[k] = v
 		}
+
 		return nil
 	default:
 		return output.NewError(output.CodePrecondition,
@@ -1410,16 +1633,20 @@ func InstallCopyPlanGuard(confDir, dataDir string, plan *CopyPlan) (CopyGuard, b
 	if plan == nil {
 		return CopyGuard{}, false, nil
 	}
+
 	g, err := ComposeCopyGuard(confDir, dataDir, plan.Guard, plan.DesiredPreloads)
 	if err != nil {
 		return CopyGuard{}, false, err
 	}
+
 	if plan.ValidateGuard != nil {
 		if err := plan.ValidateGuard(g); err != nil {
 			return CopyGuard{}, false, err
 		}
 	}
+
 	changed, err := InstallCopyGuard(dataDir, g)
+
 	return g, changed, err
 }
 
@@ -1430,6 +1657,8 @@ func (m *Materialised) InstallCopyPlan() error {
 	if m.Plan == nil {
 		return nil
 	}
+
 	_, _, err := InstallCopyPlanGuard(m.ConfDir(), m.Data, m.Plan)
+
 	return err
 }

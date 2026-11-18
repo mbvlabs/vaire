@@ -17,13 +17,16 @@ import (
 
 func fenceForTest(t *testing.T) {
 	t.Helper()
+
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, filepath.Dir(masterbackup.FencedPath)), 0o750); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(root+masterbackup.FencedPath, []byte(`{"epoch":2}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(masterbackup.SetTestRoot(root))
 }
 
@@ -32,11 +35,13 @@ func TestFencedRefusals(t *testing.T) {
 	req := func(name string) rpc.Request { return rpc.Request{Method: name} }
 	reject(t, fencedRefuses(table["apply"], req("apply")), "a node that isn't fenced refuses apply")
 	fenceForTest(t)
+
 	for _, name := range []string{"apply", "db.create", "config.set", "backup.now", "restore.start", "db.drop"} {
 		if !fencedRefuses(table[name], req(name)) {
 			t.Errorf("a fenced node accepts %s", name)
 		}
 	}
+
 	for _, name := range []string{"status", "doctor.run", "db.list", "logs", "ssh.status", "ssh.confirm", "selfcheck"} {
 		if fencedRefuses(table[name], req(name)) {
 			t.Errorf("a fenced node refuses the read %s", name)
@@ -47,17 +52,23 @@ func TestFencedRefusals(t *testing.T) {
 // captureArchiveLog sends the wrapper's stderr lines to a buffer.
 func captureArchiveLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
+
 	var buf bytes.Buffer
+
 	old := archiveLog
 	archiveLog = &buf
+
 	t.Cleanup(func() { archiveLog = old })
+
 	return &buf
 }
 
 func TestArchivePushRefusesWhenFenced(t *testing.T) {
 	logged := captureArchiveLog(t)
 	fenceForTest(t)
+
 	err := ArchivePush("", "app-3f9a1c", "pg_wal/000000010000000000000001")
+
 	var cli *output.CLIError
 	rejectf(t, !errors.As(err, &cli) || cli.Code != output.CodeNodeFenced, "fenced archive-push: %v", err)
 	rejectf(t, !strings.Contains(logged.String(), "fenced by a newer master"), "no reason on stderr: %q", logged.String())
@@ -67,16 +78,20 @@ func TestArchivePushRefusesWhenFenced(t *testing.T) {
 // writes to the cluster's log; a silent refusal shows only as a WAL backlog.
 func TestArchivePushLogsEveryRefusal(t *testing.T) {
 	const wal = "pg_wal/000000010000000000000001"
+
 	notADir := t.TempDir()
 	// /etc/vaire is a file here, so the fence marker's stat fails with
 	// ENOTDIR: neither fenced nor provably not, so it must refuse.
 	if err := os.MkdirAll(filepath.Join(notADir, "etc"), 0o750); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(filepath.Join(notADir, "etc", "vaire"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	missing := filepath.Join(t.TempDir(), "pgbackrest")
+
 	cases := []struct {
 		name, bin, stanza, wal, root, reason string
 	}{
@@ -93,9 +108,11 @@ func TestArchivePushLogsEveryRefusal(t *testing.T) {
 			if c.root != "" {
 				t.Cleanup(masterbackup.SetTestRoot(c.root))
 			}
+
 			if err := ArchivePush(c.bin, c.stanza, c.wal); err == nil {
 				t.Fatal("archive-push accepted")
 			}
+
 			line := logged.String()
 			rejectf(t, !strings.HasPrefix(line, "vaire archive-push: not archiving") || !strings.Contains(line, c.reason), "stderr %q lacks %q", line, c.reason)
 		})
@@ -105,12 +122,15 @@ func TestArchivePushLogsEveryRefusal(t *testing.T) {
 // archiveCommand is the archive_command 40-vaire-backup.conf sets.
 func archiveCommand(t *testing.T, conf string) string {
 	t.Helper()
-	for _, line := range strings.Split(conf, "\n") {
+
+	for line := range strings.SplitSeq(conf, "\n") {
 		if v, ok := strings.CutPrefix(line, "archive_command = '"); ok {
 			return strings.TrimSuffix(v, "'")
 		}
 	}
+
 	t.Fatalf("no archive_command in:\n%s", conf)
+
 	return ""
 }
 
@@ -124,6 +144,7 @@ func TestArchiveCommandUsesTheWrapper(t *testing.T) {
 	// without "pgbackrest" in it (error 068, archive-command-invalid), so a
 	// new stanza never got its first full backup.
 	rejectf(t, !strings.Contains(cmd, "pgbackrest"), "pgBackRest rejects archive_command %q: it must contain pgbackrest", cmd)
+
 	cfg.Backup.Provider = ""
 	reject(t, archiveCommand(t, string(render.BackupConf(cfg, spec))) != "/bin/true", "no bucket: archive_command isn't /bin/true")
 }

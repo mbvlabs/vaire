@@ -24,23 +24,29 @@ func acquireLock(ctx context.Context, path string) (*fileLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("activity: open lock file: %w", err)
 	}
+
 	if err := verifyLockFile(f); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	deadline := time.NewTimer(lockWait)
 	defer deadline.Stop()
+
 	ticker := time.NewTicker(lockPoll)
 	defer ticker.Stop()
+
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return &fileLock{f: f}, nil
 		}
+
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			_ = f.Close()
 			return nil, fmt.Errorf("activity: lock store: %w", err)
 		}
+
 		select {
 		case <-ctx.Done():
 			_ = f.Close()
@@ -59,9 +65,11 @@ func verifyLockFile(f *os.File) error {
 	if err != nil {
 		return err
 	}
+
 	if !info.Mode().IsRegular() || info.Mode().Perm() != fileMode || !ownerMatches(info) {
 		return errUnsafeLock
 	}
+
 	return nil
 }
 
@@ -70,6 +78,7 @@ func (l *fileLock) release() {
 	if l == nil || l.f == nil {
 		return
 	}
+
 	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	_ = l.f.Close()
 }
@@ -84,13 +93,17 @@ func appendLockHeld(dir string) bool {
 		return false
 	}
 	defer func() { _ = f.Close() }()
+
 	if err := verifyLockFile(f); err != nil {
 		return false
 	}
+
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
 	if err != nil {
 		return errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR)
 	}
+
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
 	return false
 }

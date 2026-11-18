@@ -106,6 +106,7 @@ func captureRestoreCredentials(ctx context.Context, p *restorePromotion) error {
 	if p == nil {
 		return errors.New("restore credential capture has no promotion state")
 	}
+
 	return captureRestoreCredentialsAt(ctx, p, restoreCredentialsPG(p.spec))
 }
 
@@ -113,34 +114,43 @@ func captureRestoreCredentialsAt(ctx context.Context, p *restorePromotion, local
 	if p == nil {
 		return errors.New("restore credential capture has no promotion state")
 	}
+
 	if p.r.Recover {
 		return nil
 	}
+
 	id, err := restoreCredentialIdentityFor(p)
 	if err != nil {
 		return err
 	}
+
 	path, err := restoreCredentialSnapshotPath(id.Database, id.RestoreID)
 	if err != nil {
 		return err
 	}
+
 	snap, exists, err := readRestoreCredentialSnapshot(path)
 	if err != nil {
 		return err
 	}
+
 	if exists {
 		return validateRestoreCredentialSnapshot(snap, id)
 	}
+
 	if state := backup.SwapState(p.cfg.Server.DataRoot, p.db, backup.RestoringName(p.db), p.aside); state != backup.SwapNotStarted {
 		return fmt.Errorf("the restore credential snapshot of %s is missing after its data swap began (%s); vaire will not capture the restored target's historical passwords", p.db, state)
 	}
+
 	if local == nil {
 		return errors.New("restore credential capture has no SQL runner")
 	}
+
 	roles, err := readRestoreCredentialValues(ctx, local, p.db)
 	if err != nil {
 		return err
 	}
+
 	snap = restoreCredentialSnapshot{
 		Version:  restoreCredentialSnapshotVersion,
 		Instance: id.Instance, Database: id.Database, RestoreID: id.RestoreID,
@@ -150,6 +160,7 @@ func captureRestoreCredentialsAt(ctx context.Context, p *restorePromotion, local
 	if err := writeRestoreCredentialSnapshot(path, snap); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -161,6 +172,7 @@ func applyRestoreCredentials(ctx context.Context, p *restorePromotion) error {
 	if p == nil {
 		return errors.New("restore credential apply has no promotion state")
 	}
+
 	return applyRestoreCredentialsAt(ctx, p, restoreCredentialsPG(p.spec))
 }
 
@@ -168,47 +180,59 @@ func applyRestoreCredentialsAt(ctx context.Context, p *restorePromotion, local s
 	if p == nil {
 		return errors.New("restore credential apply has no promotion state")
 	}
+
 	if p.r.Recover {
 		return nil
 	}
+
 	id, err := restoreCredentialIdentityFor(p)
 	if err != nil {
 		return err
 	}
+
 	path, err := restoreCredentialSnapshotPath(id.Database, id.RestoreID)
 	if err != nil {
 		return err
 	}
+
 	snap, exists, err := readRestoreCredentialSnapshot(path)
 	if err != nil {
 		return err
 	}
+
 	if !exists {
 		return fmt.Errorf("the restore credential snapshot of %s is missing; it can only be captured before the data swap and must not be rebuilt from the restored target", p.db)
 	}
+
 	if err := validateRestoreCredentialSnapshot(snap, id); err != nil {
 		return err
 	}
+
 	if local == nil {
 		return errors.New("restore credential apply has no SQL runner")
 	}
+
 	if err := local.Exec(ctx, steps.AuthDB, restoreCredentialApplySQL(snap.Roles), nil); err != nil {
 		return fmt.Errorf("restore the managed login credentials of %s: %w", p.db, err)
 	}
+
 	got, err := readRestoreCredentialValues(ctx, local, p.db)
 	if err != nil {
 		return fmt.Errorf("verify the managed login credentials of %s after restore: %w", p.db, err)
 	}
+
 	want := make(map[string]restoreCredential, len(snap.Roles))
 	for _, role := range snap.Roles {
 		want[role.Role] = role
 	}
+
 	for _, role := range got {
 		w, ok := want[role.Role]
 		if !ok || w != role {
 			return fmt.Errorf("the managed login credential of role %s did not verify after restore", role.Role)
 		}
 	}
+
 	return nil
 }
 
@@ -220,13 +244,16 @@ func clearRestoreCredentials(p *restorePromotion) error {
 	if p == nil {
 		return errors.New("restore credential cleanup has no promotion state")
 	}
+
 	if p.r.Recover {
 		return nil
 	}
+
 	id, err := restoreCredentialIdentityFor(p)
 	if err != nil {
 		return err
 	}
+
 	return removeRestoreCredentialSnapshot(id)
 }
 
@@ -238,25 +265,31 @@ func clearRestoreCredentialsForRestore(cfg config.Cluster, r backup.Restore, asi
 	if r.Recover {
 		return nil
 	}
+
 	if r.ID == "" || r.Database == "" {
 		return fmt.Errorf("the restore credential snapshot of %s cannot be identified without its restore", r.Database)
 	}
+
 	if aside == "" {
 		// Capture requires the promote's aside, so a restore without one has
 		// no snapshot to clear.
 		return nil
 	}
+
 	if r.Aside != "" && r.Aside != aside {
 		return fmt.Errorf("the restore credential snapshot of %s cannot be identified without its restore, stanza and aside", r.Database)
 	}
+
 	spec, ok := cfg.ClusterByName(r.Database)
 	if !ok || spec.Name != r.Database || spec.Stanza == "" {
 		return fmt.Errorf("the restore credential snapshot of %s has no matching cluster.toml stanza", r.Database)
 	}
+
 	instance, err := currentFollowInstance()
 	if err != nil {
 		return err
 	}
+
 	return removeRestoreCredentialSnapshot(restoreCredentialIdentity{
 		Instance: instance, Database: r.Database, RestoreID: r.ID,
 		Stanza: spec.Stanza, Aside: aside,
@@ -268,19 +301,24 @@ func removeRestoreCredentialSnapshot(id restoreCredentialIdentity) error {
 	if err != nil {
 		return err
 	}
+
 	snap, exists, err := readRestoreCredentialSnapshot(path)
 	if err != nil {
 		return err
 	}
+
 	if !exists {
 		return nil
 	}
+
 	if err := validateRestoreCredentialSnapshot(snap, id); err != nil {
 		return err
 	}
+
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove the restore credential snapshot of %s: %w", id.Database, err)
 	}
+
 	return nil
 }
 
@@ -289,18 +327,22 @@ func restoreCredentialIdentityFor(p *restorePromotion) (restoreCredentialIdentit
 		p.r.ID == "" || p.r.Phase != backup.PhaseReady {
 		return restoreCredentialIdentity{}, errors.New("the restore credential snapshot needs the ready restore record of the promoted database")
 	}
+
 	if p.aside == "" {
 		return restoreCredentialIdentity{}, errors.New("the restore credential snapshot needs the promote's aside")
 	}
+
 	if p.fenceID.Database != p.db || p.fenceID.Kind != "restore-promote" ||
 		p.fenceID.OperationID != p.r.ID || p.fenceID.TargetStanza == "" ||
 		p.fenceID.TargetStanza != p.spec.Stanza || p.fenceID.Aside != p.aside {
 		return restoreCredentialIdentity{}, errors.New("the restore credential snapshot does not match the prepared promote fence")
 	}
+
 	instance, err := currentFollowInstance()
 	if err != nil {
 		return restoreCredentialIdentity{}, err
 	}
+
 	return restoreCredentialIdentity{
 		Instance: instance, Database: p.db, RestoreID: p.r.ID,
 		Stanza: p.fenceID.TargetStanza, Aside: p.aside,
@@ -315,33 +357,42 @@ func restoreManagedLoginRoles(db string) []string {
 	for _, role := range steps.DatabaseRoles {
 		roles = append(roles, db+"_"+role)
 	}
+
 	roles = append(roles, steps.ServiceRoles...)
 	roles = append(roles, pg.RoleAdmin)
+
 	return roles
 }
 
 func readRestoreCredentialValues(ctx context.Context, local sqlRunner, db string) ([]restoreCredential, error) {
 	expected := restoreManagedLoginRoles(db)
+
 	rows, err := local.Query(ctx, steps.AuthDB, restoreCredentialQuery(expected), nil)
 	if err != nil {
 		return nil, fmt.Errorf("read the managed login credentials of %s: %w", db, err)
 	}
+
 	expectedSet := make(map[string]bool, len(expected))
 	for _, role := range expected {
 		expectedSet[role] = true
 	}
+
 	found := make(map[string]restoreCredential, len(expected))
+
 	for _, row := range rows {
 		role := row["rolname"]
 		if !expectedSet[role] {
 			return nil, fmt.Errorf("the managed login credential query returned unexpected role %q", role)
 		}
+
 		if _, ok := found[role]; ok {
 			return nil, fmt.Errorf("the managed login credential query returned role %q twice", role)
 		}
+
 		if row["rolcanlogin"] != "t" {
 			return nil, fmt.Errorf("managed role %q is not a login role", role)
 		}
+
 		switch row["password_state"] {
 		case "null":
 			found[role] = restoreCredential{Role: role, PasswordNull: true}
@@ -350,20 +401,24 @@ func readRestoreCredentialValues(ctx context.Context, local sqlRunner, db string
 			if verifier == "" || strings.ContainsRune(verifier, 0) {
 				return nil, fmt.Errorf("managed login role %q has an unusable stored password", role)
 			}
+
 			secrets.Add(verifier)
 			found[role] = restoreCredential{Role: role, Verifier: verifier}
 		default:
 			return nil, fmt.Errorf("managed login role %q has an unknown stored password state", role)
 		}
 	}
+
 	out := make([]restoreCredential, 0, len(expected))
 	for _, role := range expected {
 		credential, ok := found[role]
 		if !ok {
 			return nil, fmt.Errorf("managed login role %q is missing", role)
 		}
+
 		out = append(out, credential)
 	}
+
 	return out, nil
 }
 
@@ -372,6 +427,7 @@ func restoreCredentialQuery(roles []string) string {
 	for i, role := range roles {
 		quoted[i] = restoreCredentialSQLString(role)
 	}
+
 	return "SELECT rolname, rolcanlogin, CASE WHEN rolpassword IS NULL THEN 'null' ELSE 'set' END AS password_state, " +
 		"COALESCE(rolpassword, '') AS verifier FROM pg_catalog.pg_authid WHERE rolname IN (" + strings.Join(quoted, ", ") + ") ORDER BY rolname"
 }
@@ -382,14 +438,18 @@ func restoreCredentialApplySQL(roles []restoreCredential) string {
 	// The verifier is a literal below. Force the literal rules the escaping
 	// assumes, even if the server configuration changed the default.
 	b.WriteString("SET LOCAL standard_conforming_strings = on;\n")
+
 	for _, role := range roles {
 		if role.PasswordNull {
 			fmt.Fprintf(&b, "ALTER ROLE %s PASSWORD NULL;\n", pg.Quote(role.Role))
 			continue
 		}
+
 		fmt.Fprintf(&b, "ALTER ROLE %s PASSWORD %s;\n", pg.Quote(role.Role), restoreCredentialSQLString(role.Verifier))
 	}
+
 	b.WriteString("COMMIT;\n")
+
 	return b.String()
 }
 
@@ -401,40 +461,50 @@ func validateRestoreCredentialSnapshot(snap restoreCredentialSnapshot, want rest
 	if snap.Version != restoreCredentialSnapshotVersion {
 		return fmt.Errorf("the restore credential snapshot of %s has unsupported version %d", want.Database, snap.Version)
 	}
+
 	if snap.Instance != want.Instance || snap.Database != want.Database ||
 		snap.RestoreID != want.RestoreID || snap.Stanza != want.Stanza || snap.Aside != want.Aside {
 		return fmt.Errorf("the restore credential snapshot of %s belongs to another installation, restore, stanza or aside", want.Database)
 	}
+
 	expected := restoreManagedLoginRoles(want.Database)
 	if len(snap.Roles) != len(expected) {
 		return fmt.Errorf("the restore credential snapshot of %s does not hold exactly its managed login roles", want.Database)
 	}
+
 	expectedSet := make(map[string]bool, len(expected))
 	for _, role := range expected {
 		expectedSet[role] = true
 	}
+
 	seen := make(map[string]bool, len(expected))
 	for _, role := range snap.Roles {
 		if !expectedSet[role.Role] || seen[role.Role] {
 			return fmt.Errorf("the restore credential snapshot of %s holds an unexpected or duplicate role %q", want.Database, role.Role)
 		}
+
 		seen[role.Role] = true
 		if role.PasswordNull {
 			if role.Verifier != "" {
 				return fmt.Errorf("the restore credential snapshot of %s has both a NULL and a stored password for role %s", want.Database, role.Role)
 			}
+
 			continue
 		}
+
 		if role.Verifier == "" || strings.ContainsRune(role.Verifier, 0) {
 			return fmt.Errorf("the restore credential snapshot of %s has an unusable password for role %s", want.Database, role.Role)
 		}
+
 		secrets.Add(role.Verifier)
 	}
+
 	for _, role := range expected {
 		if !seen[role] {
 			return fmt.Errorf("the restore credential snapshot of %s is missing the managed login role %s", want.Database, role)
 		}
 	}
+
 	return nil
 }
 
@@ -444,6 +514,7 @@ func restoreCredentialSnapshotPath(db, restoreID string) (string, error) {
 			return "", fmt.Errorf("restore credential snapshot name %q is unsafe", value)
 		}
 	}
+
 	return filepath.Join(filepath.Dir(backup.RecordsPath), "restore-credentials-"+db+"-"+restoreID+".json"), nil
 }
 
@@ -451,13 +522,16 @@ func writeRestoreCredentialSnapshot(path string, snap restoreCredentialSnapshot)
 	if err := checkRestoreCredentialDirectory(filepath.Dir(path)); err != nil {
 		return err
 	}
+
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("encode the restore credential snapshot: %w", err)
 	}
+
 	if err := restoreCredentialsWrite(path, append(raw, '\n'), restoreCredentialFileMode, restoreCredentialOwner, restoreCredentialGroup); err != nil {
 		return fmt.Errorf("write the restore credential snapshot: %w", err)
 	}
+
 	return nil
 }
 
@@ -466,35 +540,46 @@ func readRestoreCredentialSnapshot(path string) (restoreCredentialSnapshot, bool
 	if err := checkRestoreCredentialDirectory(filepath.Dir(path)); err != nil {
 		return snap, false, err
 	}
+
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return snap, false, nil
 	}
+
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
 			return snap, false, fmt.Errorf("the restore credential snapshot %s is a symlink", path)
 		}
+
 		return snap, false, fmt.Errorf("open the restore credential snapshot: %w", err)
 	}
+
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil {
 		return snap, false, fmt.Errorf("inspect the restore credential snapshot: %w", err)
 	}
+
 	if err := checkRestoreCredentialFile(info); err != nil {
 		return snap, false, err
 	}
+
 	if info.Size() > restoreCredentialSnapshotMaxBytes {
 		return snap, false, errors.New("the restore credential snapshot is too large")
 	}
+
 	dec := json.NewDecoder(io.LimitReader(f, restoreCredentialSnapshotMaxBytes))
 	dec.DisallowUnknownFields()
+
 	if err := dec.Decode(&snap); err != nil {
 		return snap, false, fmt.Errorf("the restore credential snapshot is corrupt: %w", err)
 	}
+
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return snap, false, errors.New("the restore credential snapshot has trailing data")
 	}
+
 	return snap, true, nil
 }
 
@@ -503,11 +588,13 @@ func checkRestoreCredentialDirectory(dir string) error {
 	if err != nil {
 		return fmt.Errorf("inspect the node state directory: %w", err)
 	}
+
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != restoreCredentialsUID || info.Mode()&os.ModeSymlink != 0 ||
 		!info.IsDir() || info.Mode().Perm()&0o022 != 0 {
 		return errors.New("the node state directory is not a safe root-owned directory")
 	}
+
 	return nil
 }
 
@@ -518,5 +605,6 @@ func checkRestoreCredentialFile(info os.FileInfo) error {
 		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		return errors.New("the restore credential snapshot is not a private root-owned regular file")
 	}
+
 	return nil
 }

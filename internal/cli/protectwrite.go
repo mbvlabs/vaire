@@ -24,33 +24,40 @@ func protectedWriteCode(cmd *cobra.Command, db, what string, status func() (prot
 	if err != nil {
 		return nil, err
 	}
+
 	if !slices.Contains(st.Protected, db) {
 		return nil, nil
 	}
+
 	if isFollowerStatus(st.Databases, db) {
 		// A follower takes no writes: the node refuses a write code for it
 		// and the write itself fails on the read-only cluster. Asking for a
 		// code would suggest a code could make it writable (Phase 6).
 		return nil, nil
 	}
+
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil, output.NewError(output.CodeDatabaseProtected,
 			"database "+db+" is protected, so "+what+" needs a code from the authenticator app, typed at a terminal", output.ExitUnsafe,
 			"Reads need no code: run it without --write. A person who means to write runs the command at an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with vaire protect init.").
 			WithDetails(map[string]any{"reason": "write_requires_human", "database": db})
 	}
+
 	if !st.Configured {
 		return nil, output.NewError(output.CodeDatabaseProtected,
 			"database "+db+" is protected and "+what+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe,
 			"A human runs vaire protect init first, at a terminal, and scans the QR code with an authenticator app.").
 			WithDetails(map[string]any{"reason": "protect_not_initialized", "database": db})
 	}
+
 	if st.LockedUntil != "" {
 		return nil, output.NewError(output.CodeProtectCodeRejected, "too many wrong codes; codes are locked out until "+st.LockedUntil, output.ExitUnsafe,
 			"Wait until the lockout ends, then try again with a fresh code.").
 			WithDetails(map[string]any{"reason": "locked", "locked_until": st.LockedUntil})
 	}
+
 	note("Database " + db + " is protected: " + what + " needs a code from the authenticator app set up with vaire protect init.")
+
 	return readAuthenticatorCode(cmd, "nothing was written to "+db, map[string]any{"database": db})
 }
 
@@ -69,6 +76,7 @@ func followerSource(dbs []node.ProtectedDatabase, db string) (string, bool) {
 			return d.Follows, true
 		}
 	}
+
 	return "", false
 }
 
@@ -83,10 +91,12 @@ func refuseFollowerWrite(status func() (protectStatusData, error), db string) fu
 		if err != nil {
 			return protectStatusData{}, err
 		}
+
 		source, follower := followerSource(st.Databases, db)
 		if follower {
 			return protectStatusData{}, followerWriteError(db, source)
 		}
+
 		return st, nil
 	}
 }
@@ -116,7 +126,9 @@ func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write 
 	if err != nil || !write {
 		return user, password, err
 	}
+
 	status := func() (protectStatusData, error) { return fetchWriteProtectStatus(cmd, s, p) }
+
 	code, err := protectedWriteCode(cmd, db, "writing to it", refuseFollowerWrite(status, db), p.note)
 	if err != nil || code == nil {
 		return user, password, err
@@ -128,19 +140,24 @@ func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write 
 	if err != nil {
 		return "", "", err
 	}
+
 	code[node.WritePasswordSecret] = writePassword
+
 	reply, err := p.call(commandContext(cmd), s.node, "db.write-access", map[string]any{"db": db},
 		remote.CallOptions{Secrets: code, OnEvent: p.event})
 	if err != nil {
 		return "", "", err
 	}
+
 	var access node.WriteAccess
 	if err := reply.Decode(&access); err != nil {
 		return "", "", err
 	}
+
 	if !access.Protected {
 		// The protection was lifted meanwhile: vaire_admin writes again.
 		return user, password, nil
 	}
+
 	return access.User, writePassword, nil
 }

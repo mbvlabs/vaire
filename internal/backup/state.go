@@ -2,7 +2,9 @@ package backup
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"time"
 
@@ -220,6 +222,7 @@ func (s Records) durableHash() string {
 		Extensions  map[string]ExtensionRequirements `json:"e"`
 		Activation  map[string]ActivationFence       `json:"f"`
 	}{s.DroppedStanzas, s.Timelines, s.AwaitingRecovery, s.Unfollowing, s.ExtensionRequirements, s.Activation})
+
 	return masterbackup.SHA256(raw)
 }
 
@@ -252,6 +255,7 @@ func (s Records) TargetTimeline(db, stanza string) string {
 	if t, ok := s.Timelines[db]; ok && t.Stanza == stanza {
 		return t.Timeline
 	}
+
 	return ""
 }
 
@@ -336,9 +340,9 @@ type MaterialisationAttempt struct {
 	Reason              string              `json:"reason,omitempty"`
 	RecordDigest        string              `json:"record_digest,omitempty"`
 	ArtifactStage       string              `json:"artifact_stage,omitempty"`
-	DataIdentity        ArtifactIdentity    `json:"data_identity,omitempty"`
-	ConfigIdentity      ArtifactIdentity    `json:"config_identity,omitempty"`
-	ReservationIdentity ReservationIdentity `json:"reservation_identity,omitempty"`
+	DataIdentity        ArtifactIdentity    `json:"data_identity"`
+	ConfigIdentity      ArtifactIdentity    `json:"config_identity"`
+	ReservationIdentity ReservationIdentity `json:"reservation_identity"`
 }
 
 // ArtifactIdentity is the immutable identity of an exclusively created
@@ -373,21 +377,25 @@ func (s Records) IsTemporary(cluster string) bool {
 			return true
 		}
 	}
+
 	for db, r := range s.Restores {
 		if RestoringName(db) == cluster || (r.Aside != "" && r.Aside == cluster) {
 			return true
 		}
 	}
+
 	for _, u := range s.Undoing {
 		if u.Aside == cluster {
 			return true
 		}
 	}
+
 	for _, l := range s.Leftovers {
 		if l.Name == cluster {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -416,6 +424,7 @@ func (d Drill) DescribeRecoveredTo() string {
 	if d.NoWALReplayed {
 		return d.RecoveredTo + " (the backup's end; no transaction replayed after it)"
 	}
+
 	return d.RecoveredTo
 }
 
@@ -467,12 +476,15 @@ func FactsFrom(info Info, at string) RepoFacts {
 		if s.Error {
 			continue
 		}
+
 		out.Sets++
+
 		out.RepoSize += s.RepoSize
 		if s.Type == TypeFull && s.Start != "" && (out.WindowStart == "" || s.Start < out.WindowStart) {
 			out.WindowStart = s.Start
 		}
 	}
+
 	return out
 }
 
@@ -480,10 +492,12 @@ func FactsFrom(info Info, at string) RepoFacts {
 // doesn't parse.
 func setDuration(set Set) int64 {
 	start, err1 := time.Parse(time.RFC3339, set.Start)
+
 	stop, err2 := time.Parse(time.RFC3339, set.Stop)
 	if err1 != nil || err2 != nil || stop.Before(start) {
 		return 0
 	}
+
 	return int64(stop.Sub(start).Seconds())
 }
 
@@ -495,8 +509,10 @@ func LoadRecords() (Records, error) {
 		if os.IsNotExist(err) {
 			return decode(nil)
 		}
+
 		return Records{}, err
 	}
+
 	return decode(raw)
 }
 
@@ -512,39 +528,51 @@ func decode(raw []byte) (Records, error) {
 			).WithDetails(map[string]any{"reason": "records_corrupt", "path": RecordsPath})
 		}
 	}
+
 	if s.Restores == nil {
 		s.Restores = map[string]Restore{}
 	}
+
 	if s.LastBackup == nil {
 		s.LastBackup = map[string]map[string]BackupResult{}
 	}
+
 	if s.LastVerify == nil {
 		s.LastVerify = map[string]VerifyResult{}
 	}
+
 	if s.Timelines == nil {
 		s.Timelines = map[string]TimelineSwitch{}
 	}
+
 	if s.Drilling == nil {
 		s.Drilling = map[string]string{}
 	}
+
 	if s.Undoing == nil {
 		s.Undoing = map[string]Undo{}
 	}
+
 	if s.AwaitingRecovery == nil {
 		s.AwaitingRecovery = map[string]Awaiting{}
 	}
+
 	if s.Unfollowing == nil {
 		s.Unfollowing = map[string]Unfollow{}
 	}
+
 	if s.ExtensionRequirements == nil {
 		s.ExtensionRequirements = map[string]ExtensionRequirements{}
 	}
+
 	if s.ExtensionGuardHandoffs == nil {
 		s.ExtensionGuardHandoffs = map[string]GuardHandoff{}
 	}
+
 	if s.Activation == nil {
 		s.Activation = map[string]ActivationFence{}
 	}
+
 	return s, nil
 }
 
@@ -556,13 +584,14 @@ func (s Records) GuardHandoffFor(db, instance, stanza string) map[string]string 
 	if !ok || h.Instance == "" || h.Stanza == "" || instance == "" || stanza == "" {
 		return nil
 	}
+
 	if h.Instance != instance || h.Stanza != stanza {
 		return nil
 	}
+
 	out := map[string]string{}
-	for k, v := range h.Values {
-		out[k] = v
-	}
+	maps.Copy(out, h.Values)
+
 	return out
 }
 
@@ -574,10 +603,9 @@ func (s *Records) SetGuardHandoff(db, instance, stanza string, handoff map[strin
 		delete(s.ExtensionGuardHandoffs, db)
 		return
 	}
+
 	next := make(map[string]string, len(handoff))
-	for k, v := range handoff {
-		next[k] = v
-	}
+	maps.Copy(next, handoff)
 	s.ExtensionGuardHandoffs[db] = GuardHandoff{Instance: instance, Stanza: stanza, Values: next}
 }
 
@@ -590,7 +618,9 @@ func SetActivationFence(f ActivationFence) error {
 		if s.Activation == nil {
 			s.Activation = map[string]ActivationFence{}
 		}
+
 		s.Activation[f.Database] = f
+
 		return nil
 	})
 }
@@ -607,10 +637,13 @@ func UpdateActivationFence(db, operationID string, fn func(*ActivationFence) err
 				output.ExitPrecondition, "Retry the owning operation; vaire will not guess another operation's state.").
 				WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
 		}
+
 		if err := fn(&f); err != nil {
 			return err
 		}
+
 		s.Activation[db] = f
+
 		return nil
 	})
 }
@@ -622,13 +655,16 @@ func ClearActivationFence(db, operationID string) error {
 		if !ok {
 			return nil
 		}
+
 		if operationID != "" && f.OperationID != operationID {
 			return output.NewError(output.CodePrecondition,
 				"the activation fence of "+db+" belongs to another operation",
 				output.ExitPrecondition, "Retry the owning operation; vaire will not clear another operation's fence.").
 				WithDetails(map[string]any{"reason": "activation_fence_changed", "database": db})
 		}
+
 		delete(s.Activation, db)
+
 		return nil
 	})
 }
@@ -639,21 +675,27 @@ func UpdateRecords(fn func(*Records) error) error {
 		if err != nil {
 			return err
 		}
+
 		before := s.durableHash()
 		if err := fn(&s); err != nil {
 			return err
 		}
+
 		s.Drills = trimDrills(s.Drills)
+
 		raw, err := json.MarshalIndent(s, "", "  ")
 		if err != nil {
 			return err
 		}
+
 		if err := engine.WriteFileAtomic(RecordsPath, append(raw, '\n'), RecordsMode); err != nil {
 			return err
 		}
+
 		if s.durableHash() != before {
 			masterbackup.MarkDirty("records.json")
 		}
+
 		return nil
 	})
 }
@@ -667,29 +709,35 @@ func (s Records) OpenRestore(db string) (Restore, bool) {
 // LeftoversOf returns the leftovers of db, or all of them when db is empty.
 func (s Records) LeftoversOf(db string) []Leftover {
 	var out []Leftover
+
 	for _, l := range s.Leftovers {
 		if db == "" || l.Database == db {
 			out = append(out, l)
 		}
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
 	return out
 }
 
 // trimDrills keeps the newest maxDrills drills of each database, in order.
 func trimDrills(drills []Drill) []Drill {
 	count := map[string]int{}
+
 	keep := make([]bool, len(drills))
 	for i := len(drills) - 1; i >= 0; i-- {
 		count[drills[i].Database]++
 		keep[i] = count[drills[i].Database] <= maxDrills
 	}
+
 	out := make([]Drill, 0, len(drills))
 	for i, d := range drills {
 		if keep[i] {
 			out = append(out, d)
 		}
 	}
+
 	return out
 }
 
@@ -697,11 +745,12 @@ func trimDrills(drills []Drill) []Drill {
 // a new stanza has no drill yet, and a drill recorded before drills named
 // their stanza counts for none.
 func (s Records) DrillOf(db, stanza string) (Drill, bool) {
-	for i := len(s.Drills) - 1; i >= 0; i-- {
-		if s.Drills[i].Database == db && s.Drills[i].Stanza != "" && s.Drills[i].Stanza == stanza {
-			return s.Drills[i], true
+	for _, v := range slices.Backward(s.Drills) {
+		if v.Database == db && v.Stanza != "" && v.Stanza == stanza {
+			return v, true
 		}
 	}
+
 	return Drill{}, false
 }
 
@@ -713,6 +762,7 @@ func (s Records) VerifyOf(db, stanza string) (VerifyResult, bool) {
 	if !ok || v.Stanza == "" || v.Stanza != stanza {
 		return VerifyResult{}, false
 	}
+
 	return v, true
 }
 
@@ -721,6 +771,7 @@ func (s *Records) RecordBackup(db string, set Set, finishedAt string) {
 	if s.LastBackup[db] == nil {
 		s.LastBackup[db] = map[string]BackupResult{}
 	}
+
 	s.LastBackup[db][set.Type] = BackupResult{
 		Label: set.Label, FinishedAt: finishedAt, Size: set.Size,
 		RepoSize: set.RepoSize, Delta: set.Delta, DurationSeconds: setDuration(set),
@@ -732,11 +783,12 @@ func (s *Records) RecordBackup(db string, set Set, finishedAt string) {
 
 // LastDrill is db's newest drill result.
 func (s Records) LastDrill(db string) (Drill, bool) {
-	for i := len(s.Drills) - 1; i >= 0; i-- {
-		if s.Drills[i].Database == db {
-			return s.Drills[i], true
+	for _, v := range slices.Backward(s.Drills) {
+		if v.Database == db {
+			return v, true
 		}
 	}
+
 	return Drill{}, false
 }
 
@@ -746,9 +798,11 @@ func (s *Records) RecordBackupFailure(db, kind, at string) {
 	if s.LastFailure == nil {
 		s.LastFailure = map[string]map[string]string{}
 	}
+
 	if s.LastFailure[db] == nil {
 		s.LastFailure[db] = map[string]string{}
 	}
+
 	s.LastFailure[db][kind] = at
 }
 
@@ -757,17 +811,19 @@ func (s *Records) RecordRepo(db string, facts RepoFacts) {
 	if s.Repo == nil {
 		s.Repo = map[string]RepoFacts{}
 	}
+
 	s.Repo[db] = facts
 }
 
 // Dropped returns the dropped stanza of db, if any. A name dropped twice has
 // two; the newest wins.
 func (s Records) Dropped(db string) (DroppedStanza, bool) {
-	for i := len(s.DroppedStanzas) - 1; i >= 0; i-- {
-		if s.DroppedStanzas[i].Database == db {
-			return s.DroppedStanzas[i], true
+	for _, v := range slices.Backward(s.DroppedStanzas) {
+		if v.Database == db {
+			return v, true
 		}
 	}
+
 	return DroppedStanza{}, false
 }
 
@@ -775,10 +831,12 @@ func (s Records) Dropped(db string) (DroppedStanza, bool) {
 // record without a parseable ExpiresAt never expires on its own.
 func (s Records) Expired(now time.Time) []DroppedStanza {
 	var out []DroppedStanza
+
 	for _, d := range s.DroppedStanzas {
 		if t, err := time.Parse(time.RFC3339, d.ExpiresAt); err == nil && !now.Before(t) {
 			out = append(out, d)
 		}
 	}
+
 	return out
 }

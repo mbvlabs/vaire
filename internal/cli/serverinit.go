@@ -135,17 +135,21 @@ func runServerInit(cmd *cobra.Command, args []string) error {
 	if flagTrue(cmd, "restore") {
 		return runInitRestore(cmd)
 	}
+
 	for _, name := range []string{"bundle", "bundle-file", "old-master-unreachable"} {
 		if flagChanged(cmd, name) {
 			return output.NewError(output.CodeUsage, "--"+name+" needs --restore", output.ExitUsage, "")
 		}
 	}
+
 	if flagTrue(cmd, "discard") {
 		return runInitDiscard(cmd)
 	}
+
 	if flagTrue(cmd, "local") {
 		return runInitLocal(cmd)
 	}
+
 	return runInitRemote(cmd)
 }
 
@@ -153,6 +157,7 @@ func runServerInit(cmd *cobra.Command, args []string) error {
 // non-interactive requirement before anything changes, and asks for the go.
 func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 	r := &initRun{cmd: cmd, p: newProgress(cmd), local: local}
+
 	resume := flagTrue(cmd, "resume")
 	if resume {
 		if err := r.loadPending(); err != nil {
@@ -161,9 +166,11 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 	} else if err := r.collect(); err != nil {
 		return nil, err
 	}
+
 	if err := r.cfg.Validate(); err != nil {
 		return nil, config.ValidationError(err)
 	}
+
 	if !resume {
 		if workspaces.Exists(r.name) && !local {
 			return nil, output.NewError(
@@ -173,6 +180,7 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 				"Pick another --name, or remove the workspace with vaire workspace remove "+r.name+".",
 			).WithDetails(map[string]any{"reason": "workspace_exists", "workspace": r.name})
 		}
+
 		if workspaces.PendingExists(r.name) {
 			return nil, output.NewError(
 				output.CodePrecondition,
@@ -182,15 +190,19 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 			).WithDetails(map[string]any{"reason": "init_pending", "server": r.name, "pending_path": workspaces.PendingDir(r.name)})
 		}
 	}
+
 	if dryRun(cmd) {
 		return r, nil
 	}
+
 	if err := requireStructuredHandoff(cmd, "secrets-out", "server init", "confirm-secrets-stored"); err != nil {
 		return nil, err
 	}
+
 	if err := r.confirm(); err != nil {
 		return nil, err
 	}
+
 	return r, nil
 }
 
@@ -199,45 +211,57 @@ func (r *initRun) confirm() error {
 	if stringFlag(cmd, "confirm") != "" || MustNotPrompt(cmd) {
 		return Confirm(cmd, r.name)
 	}
+
 	if flagTrue(cmd, "yes") {
 		return nil
 	}
+
 	target := "this server"
 	if !r.local {
 		target = r.boot.User + "@" + r.boot.Host
 	}
+
 	ok, err := PromptYes(cmd, fmt.Sprintf("Bootstrap %s as server %s? This hardens the host and closes public SSH.", target, r.name))
 	if err != nil {
 		return err
 	}
+
 	if !ok {
 		return output.NewError(output.CodeUnsafeAction, "server init was not confirmed", output.ExitUnsafe, "Re-run with --confirm "+r.name+".").
 			WithDetails(map[string]any{"confirm_token": r.name})
 	}
+
 	return nil
 }
 
 // collect builds the answers from --answers, flags and prompts.
 func (r *initRun) collect() error {
 	cmd := r.cmd
+
 	cfg, answersRaw, err := r.initAnswers(cmd)
 	if err != nil {
 		return err
 	}
+
 	r.applyConfigFlags(cmd, &cfg)
+
 	userGiven, portGiven, err := r.applyBootFlags(cmd)
 	if err != nil {
 		return err
 	}
+
 	if err := r.resolveHost(cmd, &userGiven, &portGiven); err != nil {
 		return err
 	}
+
 	if err := r.resolveName(cmd, &cfg); err != nil {
 		return err
 	}
+
 	if err := r.resolveNode(cmd, &cfg); err != nil {
 		return err
 	}
+
 	supplied := suppliedAnswers(cmd, cfg, stringFlag(cmd, "answers") != "")
 	// The huh interview asks the Phase 2 question set in a TTY (D13).
 	if !MustNotPrompt(cmd) {
@@ -245,11 +269,14 @@ func (r *initRun) collect() error {
 			return err
 		}
 	}
+
 	if err := r.collectBackups(&cfg, answersRaw); err != nil {
 		return err
 	}
+
 	r.cfg = cfg
 	r.prog = &workspaces.Progress{Local: r.local, Phases: map[string]string{}}
+
 	return nil
 }
 
@@ -257,25 +284,31 @@ func (r *initRun) collect() error {
 // bytes the backups page reads.
 func (r *initRun) initAnswers(cmd *cobra.Command) (config.Cluster, []byte, error) {
 	cfg := config.DefaultCluster()
+
 	path := stringFlag(cmd, "answers")
 	if path == "" {
 		return cfg, nil, nil
 	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, raw, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 	}
+
 	parsed, err := config.ParseAnswers(raw)
 	if err != nil {
 		return cfg, raw, output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	if len(parsed.Clusters) > 0 {
 		return cfg, raw, output.NewError(output.CodeValidation, path+" declares [[clusters]]: server init creates no databases", output.ExitConfig,
 			"Remove [[clusters]] from the answers file and add each database after init with vaire db create <name>.")
 	}
+
 	if _, r.boot, err = decodeBootstrap(raw); err != nil {
 		return cfg, raw, output.NewError(output.CodeConfig, path+" [bootstrap] does not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	return parsed, raw, nil
 }
 
@@ -284,36 +317,46 @@ func (r *initRun) applyConfigFlags(cmd *cobra.Command, cfg *config.Cluster) {
 	if v := stringFlag(cmd, "name"); v != "" {
 		cfg.ClusterName = v
 	}
+
 	if v := stringFlag(cmd, "domain"); v != "" {
 		cfg.Domain = v
 	}
+
 	if v := stringFlag(cmd, "admin-user"); v != "" {
 		cfg.Server.AdminUser = v
 	}
+
 	if v := stringFlag(cmd, "timezone"); v != "" {
 		cfg.Timezone = v
 	}
+
 	if v := stringFlag(cmd, "data-root"); v != "" {
 		cfg.Server.DataRoot = v
 	}
+
 	if v := stringFlag(cmd, "acme-email"); v != "" {
 		cfg.ACMEEmail = v
 	}
+
 	if flagChanged(cmd, "allow") {
 		allow, _ := cmd.Flags().GetStringSlice("allow")
 		cfg.Network.ClientAllowlist = allow
 	}
+
 	if v := stringFlag(cmd, "profile"); v != "" {
 		cfg.Postgres.Profile = v
 	}
+
 	if v := stringFlag(cmd, "default-size"); v != "" {
 		cfg.Postgres.DefaultSize = v
 	}
+
 	if flagChanged(cmd, "client-connections") {
 		if n, err := cmd.Flags().GetInt("client-connections"); err == nil {
 			cfg.Postgres.ClientConnections = n
 		}
 	}
+
 	if v := stringFlag(cmd, "tls-mode"); v != "" {
 		cfg.TLS.Mode = v
 	}
@@ -324,23 +367,29 @@ func (r *initRun) applyConfigFlags(cmd *cobra.Command, cfg *config.Cluster) {
 func (r *initRun) applyBootFlags(cmd *cobra.Command) (userGiven, portGiven bool, err error) {
 	// An answers file's [bootstrap] user and port count as explicit.
 	userGiven, portGiven = r.boot.User != "", r.boot.Port != 0
+
 	if v := stringFlag(cmd, "host"); v != "" {
 		user, host, port, err := parseHostFlag(v)
 		if err != nil {
 			return false, false, err
 		}
+
 		r.boot.User, r.boot.Host, r.boot.Port = user, host, port
 		userGiven, portGiven = hostFlagExplicit(v)
 	}
+
 	if v := stringFlag(cmd, "identity"); v != "" {
 		r.boot.Identity = v
 	}
+
 	if v := stringFlag(cmd, "host-key-fingerprint"); v != "" {
 		r.boot.HostKeyFingerprint = v
 	}
+
 	if err := checkIdentity(r.boot.Identity); err != nil {
 		return false, false, err
 	}
+
 	return userGiven, portGiven, nil
 }
 
@@ -351,28 +400,35 @@ func (r *initRun) resolveHost(cmd *cobra.Command, userGiven, portGiven *bool) er
 		if err := RequireFlag(cmd, false, "--host", "server init"); err != nil {
 			return err
 		}
+
 		v, err := promptLine(cmd, "Server to bootstrap (user@host, or a Host from ~/.ssh/config)", "")
 		if err != nil {
 			return err
 		}
+
 		user, host, port, err := parseHostFlag(v)
 		if err != nil {
 			return err
 		}
+
 		r.boot.User, r.boot.Host, r.boot.Port = user, host, port
 		*userGiven, *portGiven = hostFlagExplicit(v)
 	}
+
 	if !r.local {
 		if src := applySSHConfig(&r.boot, *userGiven, *portGiven, r.boot.Identity != ""); src != "" {
 			r.p.note("Using " + src + " for first contact.")
 		}
 	}
+
 	if r.boot.User == "" {
 		r.boot.User = "root"
 	}
+
 	if r.boot.Port == 0 {
 		r.boot.Port = 22
 	}
+
 	return nil
 }
 
@@ -383,16 +439,21 @@ func (r *initRun) resolveName(cmd *cobra.Command, cfg *config.Cluster) error {
 		if err := RequireFlag(cmd, false, "--name", "server init"); err != nil {
 			return err
 		}
+
 		v, err := promptLine(cmd, "Workspace name", "prod")
 		if err != nil {
 			return err
 		}
+
 		cfg.ClusterName = v
 	}
+
 	if !config.NamePattern.MatchString(cfg.ClusterName) {
 		return output.NewError(output.CodeValidation, "workspace name "+cfg.ClusterName+" must match "+config.NamePattern.String(), output.ExitConfig, "")
 	}
+
 	r.name = cfg.ClusterName
+
 	return nil
 }
 
@@ -403,30 +464,39 @@ func (r *initRun) resolveNode(cmd *cobra.Command, cfg *config.Cluster) error {
 	if len(cfg.Nodes) > 0 {
 		public = cfg.Nodes[0].PublicAddress
 	}
+
 	if public == "" {
 		addr, err := r.publicAddress()
 		if err != nil {
 			return err
 		}
+
 		public = addr
 	}
+
 	if len(cfg.Nodes) == 0 {
 		cfg.Nodes = []config.NodeSpec{{Role: config.RoleMaster, WGAddress: config.DefaultCentralWG}}
 	}
+
 	node := &cfg.Nodes[0]
+
 	node.PublicAddress = public
 	if v := stringFlag(cmd, "node-name"); v != "" {
 		node.Name = v
 	}
+
 	if node.Name == "" {
 		node.Name = config.DefaultNodeName
 	}
+
 	if node.WGAddress == "" {
 		node.WGAddress = config.DefaultCentralWG
 	}
+
 	if node.Role == "" {
 		node.Role = config.RoleMaster
 	}
+
 	return nil
 }
 
@@ -437,6 +507,7 @@ func decodeBootstrap(raw []byte) ([]byte, workspaces.Bootstrap, error) {
 	if err := toml.Unmarshal(raw, &wrap); err != nil {
 		return nil, workspaces.Bootstrap{}, err
 	}
+
 	return raw, wrap.Bootstrap, nil
 }
 
@@ -450,68 +521,87 @@ func (r *initRun) publicAddress() (string, error) {
 			return "", output.NewError(output.CodeInputRequired, "could not detect this server's public address", output.ExitInput,
 				"Pass it with --host <public-ip>.").WithDetails(map[string]any{"flag": "--host"})
 		}
+
 		if addr.IsPrivate() {
 			r.warnings = append(r.warnings, output.Warning{
 				Code:    "public_address_private",
 				Message: "the detected address " + addr.String() + " is private; pass --host <public-ip> if operators connect through NAT",
 			})
 		}
+
 		return addr.String(), nil
 	}
+
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return ip.Unmap().String(), nil
 	}
+
 	stop := r.p.wait("resolving " + host)
 	ips, err := net.DefaultResolver.LookupNetIP(commandContext(r.cmd), "ip", host)
+
 	stop()
+
 	if err != nil || len(ips) == 0 {
 		return "", output.NewError(output.CodeRemoteUnreachable, "cannot resolve "+host, output.ExitTransport, "Pass the server's IP address in --host.")
 	}
+
 	for _, ip := range ips {
 		if ip.Unmap().Is4() {
 			return ip.Unmap().String(), nil
 		}
 	}
+
 	return ips[0].String(), nil
 }
 
 func defaultRouteAddress(ctx context.Context) (netip.Addr, error) {
 	var dialer net.Dialer
+
 	conn, err := dialer.DialContext(ctx, "udp", "192.0.2.1:9")
 	if err != nil {
 		return netip.Addr{}, err
 	}
+
 	defer func() { _ = conn.Close() }()
+
 	udp, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		return netip.Addr{}, errors.New("no local UDP address")
 	}
+
 	addr, ok := netip.AddrFromSlice(udp.IP)
 	if !ok {
 		return netip.Addr{}, errors.New("no local UDP address")
 	}
+
 	return addr.Unmap(), nil
 }
 
 // parseHostFlag parses user@host[:port]; IPv6 needs brackets with a port.
 func parseHostFlag(v string) (user, host string, port int, err error) {
 	user = "root"
+
 	rest := strings.TrimSpace(v)
 	if at := strings.LastIndex(rest, "@"); at >= 0 {
 		user, rest = rest[:at], rest[at+1:]
 	}
+
 	port = 22
+
 	if h, p, splitErr := net.SplitHostPort(rest); splitErr == nil {
 		n, convErr := strconv.Atoi(p)
 		if convErr != nil || n < 1 || n > 65535 {
 			return "", "", 0, output.NewError(output.CodeUsage, "--host port "+p+" is invalid", output.ExitUsage, "")
 		}
+
 		rest, port = h, n
 	}
+
 	rest = strings.Trim(rest, "[]")
 	if user == "" || rest == "" {
 		return "", "", 0, output.NewError(output.CodeUsage, "--host must be user@host[:port]", output.ExitUsage, "For example --host root@203.0.113.10.")
 	}
+
 	return user, rest, port, nil
 }
 
@@ -531,22 +621,27 @@ func (r *initRun) loadPending() error {
 				"Pass --name with one of details.pending.").WithDetails(map[string]any{"pending": pending})
 		}
 	}
+
 	if !workspaces.PendingExists(name) {
 		return output.NewError(output.CodePrecondition, "there is no unfinished init for "+name, output.ExitPrecondition,
 			"Start one with vaire server init.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 	}
+
 	raw, boot, err := workspaces.LoadAnswers(name)
 	if err != nil {
 		return err
 	}
+
 	cfg, err := config.ParseAnswers(raw)
 	if err != nil {
 		return output.NewError(output.CodeConfig, "the pending answers do not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	prog, err := workspaces.LoadProgress(name)
 	if err != nil {
 		return err
 	}
+
 	if prog.Local != r.local {
 		return output.NewError(output.CodeUsage, "the unfinished init of "+name+" was started with a different --local setting", output.ExitUsage, "")
 	}
@@ -554,23 +649,28 @@ func (r *initRun) loadPending() error {
 	if v := stringFlag(r.cmd, "identity"); v != "" {
 		boot.Identity = v
 	}
+
 	if v := stringFlag(r.cmd, "host-key-fingerprint"); v != "" {
 		boot.HostKeyFingerprint = v
 	}
+
 	if !prog.Done(phaseHost) {
 		if err := checkIdentity(boot.Identity); err != nil {
 			return err
 		}
 	}
+
 	r.name, r.cfg, r.boot, r.prog = name, cfg, boot, prog
 	if prog.Done(phaseSecrets) {
 		sec, err := workspaces.LoadSecrets(name)
 		if err != nil {
 			return err
 		}
+
 		r.sec = sec
 		registerPending(sec)
 	}
+
 	return nil
 }
 
@@ -578,16 +678,19 @@ func registerPending(sec workspaces.PendingSecrets) {
 	secrets.Add(sec.WGPrivateKey)
 	secrets.Add(sec.SSHPrivateKey)
 	secrets.Add(sec.SudoPassword)
+
 	if sec.Database != nil {
 		for _, value := range sec.Database.SecretValues() {
 			secrets.Add(value)
 		}
 	}
+
 	if sec.Backup != nil {
 		for _, value := range sec.Backup.SecretValues() {
 			secrets.Add(value)
 		}
 	}
+
 	if sec.Metrics != nil {
 		secrets.Add(sec.Metrics.Password)
 	}
@@ -600,12 +703,14 @@ func (r *initRun) master() config.NodeSpec {
 
 func (r *initRun) planData() initPlanData {
 	n := r.master()
+
 	done := make([]string, 0, len(r.prog.Phases))
 	for _, phase := range []string{phaseSecrets, phaseFirstHost, phaseBinary, phaseHost, phaseTransport, phaseLockdown, phaseDNS, phaseDatabase, phaseTLS, phaseBackups, phaseDocument, phaseSecretsDone} {
 		if r.prog.Done(phase) {
 			done = append(done, phase)
 		}
 	}
+
 	data := initPlanData{
 		Server:        r.name,
 		Node:          n.Name,
@@ -621,6 +726,7 @@ func (r *initRun) planData() initPlanData {
 	if !r.local {
 		data.Host = r.boot.User + "@" + net.JoinHostPort(r.boot.Host, strconv.Itoa(r.boot.Port))
 	}
+
 	return data
 }
 
@@ -628,6 +734,7 @@ func (r *initRun) dryRunResult() error {
 	data := r.planData()
 	message := fmt.Sprintf("Would bootstrap %s as node %s, the master of server %s: steps %s, then move SSH to WireGuard %s and show the secrets handoff.",
 		map[bool]string{true: "this machine", false: data.Host}[r.local], data.Node, data.Server, strings.Join(data.Steps, ", "), data.WGAddress)
+
 	return output.Success(r.cmd, output.Result{Data: data, Message: message, Warnings: r.warnings})
 }
 
@@ -637,12 +744,15 @@ func (r *initRun) savePending() error {
 	if err != nil {
 		return err
 	}
+
 	if err := workspaces.SaveAnswers(r.name, raw, r.boot); err != nil {
 		return err
 	}
+
 	if r.prog.SetupOperationID == "" {
 		r.prog.SetupOperationID = rpc.NewRequestID()
 	}
+
 	return workspaces.SaveProgress(r.name, r.prog)
 }
 
@@ -656,19 +766,24 @@ func (r *initRun) generateSecrets() error {
 	if r.prog.Done(phaseSecrets) {
 		return nil
 	}
+
 	r.p.phase("init.secrets", "started", "generate the operator WireGuard and SSH keys")
+
 	wgPriv, _, err := transport.GenerateWGKey()
 	if err != nil {
 		return err
 	}
+
 	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + firstOperatorName)
 	if err != nil {
 		return err
 	}
+
 	sudo, err := secrets.Base62(24)
 	if err != nil {
 		return err
 	}
+
 	r.sec = workspaces.PendingSecrets{
 		OperatorName:  firstOperatorName,
 		WGPrivateKey:  wgPriv,
@@ -676,10 +791,13 @@ func (r *initRun) generateSecrets() error {
 		SudoPassword:  sudo,
 	}
 	registerPending(r.sec)
+
 	if err := workspaces.SaveSecrets(r.name, r.sec); err != nil {
 		return err
 	}
+
 	r.p.phase("init.secrets", "completed", "")
+
 	return r.mark(phaseSecrets)
 }
 
@@ -696,12 +814,15 @@ func (r *initRun) ensureDatabaseSecrets() error {
 	if err != nil {
 		return err
 	}
+
 	if _, err := addMetricsSecret(&r.sec.Metrics, rpc); err != nil {
 		return err
 	}
+
 	r.sec.Database = &creds
 	r.dbSecrets = rpc
 	registerPending(r.sec)
+
 	return workspaces.SaveSecrets(r.name, r.sec)
 }
 
@@ -710,14 +831,17 @@ func (r *initRun) operator() (config.Operator, error) {
 	if err != nil {
 		return config.Operator{}, err
 	}
+
 	sshPub, err := transport.AuthorizedKey([]byte(r.sec.SSHPrivateKey), "vaire-"+r.name+"-"+r.sec.OperatorName)
 	if err != nil {
 		return config.Operator{}, err
 	}
+
 	addr := config.DefaultFirstOperatorWG
 	if r.restore != nil {
 		addr = r.restore.ctx.Operator.WGAddress
 	}
+
 	return config.Operator{Name: r.sec.OperatorName, WGAddress: addr, WGPublicKey: pub, SSHPublicKey: sshPub}, nil
 }
 
@@ -728,11 +852,14 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
+
 	raw, err := r.nodeConfig().Encode()
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
+
 	r.p.phase("init.bootstrap", "started", "run host steps 1-6 on the node")
+
 	reply, err := r.p.call(ctx, caller, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseHost,
 		"cluster_toml": string(raw),
@@ -748,15 +875,18 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
+
 	var res node.BootstrapResult
 	if err := reply.Decode(&res); err != nil {
 		return res, err
 	}
+
 	r.warnings = append(r.warnings, reply.Warnings...)
 	r.prog.WGPublicKey = res.WGPublicKey
 	r.prog.SSHHostKeys = res.SSHHostKeys
 	r.prog.OS = res.OS.Pretty
 	r.p.phase("init.bootstrap", "completed", "")
+
 	return res, nil
 }
 
@@ -765,12 +895,15 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		return r.dryRunResult()
 	}
+
 	ctx := commandContext(cmd)
 	timeout := timeoutFlag(cmd)
 	n := r.master()
+
 	publicSSH := net.JoinHostPort(n.PublicAddress, strconv.Itoa(r.boot.Port))
 	if err := r.savePending(); err != nil {
 		return err
@@ -784,16 +917,20 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.generateSecrets(); err != nil {
 		return err
 	}
+
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
+
 	if err := r.ensureBackupKit(ctx); err != nil {
 		return err
 	}
+
 	known, err := transport.LoadKnownHosts(workspaces.PendingKnownHosts(r.name))
 	if err != nil {
 		return err
 	}
+
 	opAuth, err := transport.KeyAuth([]byte(r.sec.SSHPrivateKey))
 	if err != nil {
 		return err
@@ -839,10 +976,12 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.askMasterPassword(cmd); err != nil {
 		return err
 	}
+
 	doc, res, err := r.writeDocument()
 	if err != nil {
 		return err
 	}
+
 	if err := r.confirmSecrets(ctx, rt.node); err != nil {
 		return err
 	}
@@ -874,6 +1013,7 @@ func (r *initRun) remotePreflight(ctx context.Context, publicSSH string, timeout
 	if r.prog.Done(phaseHost) {
 		return nil
 	}
+
 	return r.p.during("checking that "+publicSSH+" answers", func() error { return localenv.CheckReachable(ctx, publicSSH, timeout) })
 }
 
@@ -882,6 +1022,7 @@ func (r *initRun) remoteFirstContact(ctx context.Context, known *transport.Known
 	if r.prog.Done(phaseHost) {
 		return nil
 	}
+
 	return r.firstContact(ctx, known, publicSSH, timeout)
 }
 
@@ -891,29 +1032,38 @@ func (r *initRun) remoteTransport(ctx context.Context, n config.NodeSpec, known 
 	// Init runs its own tunnel; a daemon left from an earlier workspace of
 	// this name would hold the tunnel lock and the node's peer.
 	stopTunnelDaemonQuietly(ctx, r.name)
+
 	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, config.DefaultFirstOperatorWG, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
 	if err != nil {
 		return nil, err
 	}
+
 	adminTarget := transport.SSHTarget{User: r.cfg.Server.AdminUser, Addr: net.JoinHostPort(n.WGAddress, "22")}
 	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{opAuth}, HostKeys: known, Timeout: 15 * time.Second}
+
 	wgClient, err := dialRetryReport(ctx, tun, adminTarget, sshOpts, confirmWithin, r.attemptReporter("init.transport", "SSH over WireGuard to "+adminTarget.Addr))
 	if err != nil {
 		tun.Close()
 		return nil, tunnelHint(err, n.PublicAddress, r.cfg.Transport.ListenPort)
 	}
+
 	wgNode := &remote.Node{SSH: wgClient, Operator: r.sec.OperatorName}
 	if err := wgNode.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: flagTrue(r.cmd, "auto-upgrade-nodes"), Progress: r.p.note}); err != nil {
 		wgClient.Close()
 		tun.Close()
+
 		return nil, err
 	}
+
 	r.p.phase("init.transport", "completed", "")
+
 	if err := r.mark(phaseTransport); err != nil {
 		wgClient.Close()
 		tun.Close()
+
 		return nil, err
 	}
+
 	return &initTransport{node: wgNode, client: wgClient, tunnel: tun, target: adminTarget, opts: sshOpts}, nil
 }
 
@@ -927,12 +1077,15 @@ func (r *initRun) remoteLockdown(ctx context.Context, rt *initTransport, n confi
 	if err != nil {
 		return "", err
 	}
+
 	if err := r.mark(phaseLockdown); err != nil {
 		return "", err
 	}
+
 	if at == "" {
 		at = r.prog.Phases[phaseLockdown]
 	}
+
 	return at, nil
 }
 
@@ -941,9 +1094,11 @@ func (r *initRun) remoteDNSPhase(ctx context.Context) error {
 	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) {
 		return nil
 	}
+
 	if err := r.dnsStep(ctx); err != nil {
 		return err
 	}
+
 	return r.mark(phaseDNS)
 }
 
@@ -952,13 +1107,17 @@ func (r *initRun) remoteDatabasePhase(ctx context.Context, caller remote.Caller)
 	if r.prog.Done(phaseDatabase) {
 		return nil
 	}
+
 	r.p.phase("init.database", "started", "run database steps 7-13 on the node")
+
 	res, err := r.callDatabasePhase(ctx, caller)
 	if err != nil {
 		return err
 	}
+
 	r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
 	r.p.phase("init.database", "completed", "")
+
 	return r.mark(phaseDatabase)
 }
 
@@ -967,9 +1126,11 @@ func (r *initRun) remoteTLSPhase(ctx context.Context, caller remote.Caller) erro
 	if r.prog.Done(phaseTLS) {
 		return nil
 	}
+
 	if err := r.waitForTLS(ctx, caller); err != nil {
 		return err
 	}
+
 	return r.mark(phaseTLS)
 }
 
@@ -978,6 +1139,7 @@ func (r *initRun) confirmSecrets(ctx context.Context, caller remote.Caller) erro
 	if _, err := r.p.call(ctx, caller, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
 		return err
 	}
+
 	return r.mark(phaseSecretsDone)
 }
 
@@ -987,15 +1149,19 @@ func (r *initRun) initInstallWorkspace(doc secretsdoc.Document, lockedAt string,
 		return output.NewError(output.CodePrecondition, "a workspace named "+r.name+" appeared during init", output.ExitPrecondition,
 			"Remove it, then run vaire login and paste the transfer bundle.")
 	}
+
 	if _, err := secretsdoc.Install(doc, r.name, lockedAt); err != nil {
 		return err
 	}
+
 	if err := workspaces.SetCurrent(r.name); err != nil {
 		return err
 	}
+
 	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
+
 	res.Workspace = r.name
 	res.PublicSSHClosed = true
 	r.fillResult(res)
@@ -1006,6 +1172,7 @@ func (r *initRun) initInstallWorkspace(doc secretsdoc.Document, lockedAt string,
 		"Workspace " + r.name + " is the current workspace on this machine. On another machine run vaire login and paste the transfer bundle.",
 	}, "\n")
 	r.warnings = append(r.warnings, node.NoOffsiteWarning(r.cfg)...)
+
 	return r.finish(*res, message, res.Next, fmt.Sprintf("Server %s is ready", r.name), nil)
 }
 
@@ -1016,7 +1183,9 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 	if r.p.live == nil {
 		return output.Success(cmd, output.Result{Data: res, Message: message, Warnings: r.warnings, Next: next})
 	}
+
 	n := r.master()
+
 	rows := [][2]string{
 		{"Node", fmt.Sprintf("%s  %s  (WireGuard %s)", n.Name, n.PublicAddress, n.WGAddress)},
 		{"PgBouncer", r.cfg.MasterHostname() + ":6432"},
@@ -1029,10 +1198,12 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 	if r.health != "" {
 		rows = append(rows, [2]string{"Health", strings.TrimPrefix(r.health, "health: ")})
 	}
+
 	var footer []string
 	for _, w := range r.warnings {
 		footer = append(footer, ui.Warn(w.Message))
 	}
+
 	footer = append(footer, notes...)
 	if len(next) > 0 {
 		footer = append(footer, ui.Dim("Next:"))
@@ -1040,7 +1211,9 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 			footer = append(footer, "  "+ui.Code(step))
 		}
 	}
+
 	_, err := fmt.Fprintln(ui.Writer(cmd.OutOrStdout()), "\n"+ui.Card(title, rows, footer))
+
 	return err
 }
 
@@ -1050,7 +1223,9 @@ func (r *initRun) fillResult(res *initResult) {
 		res.TLS = r.tlsState.State
 		res.TLSNotAfter = r.tlsState.NotAfter
 	}
+
 	res.RestartPerformed = r.dbRestart
+
 	res.Next = []string{"vaire db create <name>", "vaire guide agents"}
 	if !r.cfg.BackupConfigured() {
 		res.Next = append(res.Next, "vaire backup setup")
@@ -1061,6 +1236,7 @@ func (r *initRun) tlsSummary() string {
 	if r.tlsState == nil {
 		return r.cfg.TLS.Mode
 	}
+
 	return r.tlsState.State
 }
 
@@ -1068,47 +1244,60 @@ func (r *initRun) tlsSummary() string {
 // over public SSH.
 func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts, publicSSH string, timeout time.Duration) error {
 	r.p.phase("init.first-contact", "started", r.boot.User+"@"+publicSSH)
+
 	if err := r.pinFirstContactKey(ctx, known, publicSSH, timeout); err != nil {
 		return err
 	}
+
 	auth, closeAuth, err := firstContactAuth(ctx, r.cmd, r.boot)
 	if err != nil {
 		return err
 	}
 	defer closeAuth()
+
 	client, err := transport.DialSSH(ctx, transport.Direct{Timeout: timeout}, transport.SSHTarget{User: r.boot.User, Addr: publicSSH},
 		transport.SSHOptions{Auth: auth, HostKeys: known, Timeout: timeout})
 	if err != nil {
 		return err
 	}
 	defer client.Close()
+
 	n := &remote.Node{SSH: client, Operator: r.sec.OperatorName}
 
 	osInfo, err := n.OS(ctx)
 	if err != nil {
 		return err
 	}
+
 	if !osInfo.Supported() {
 		return output.NewError(output.CodePrecondition, "the server runs "+osInfo.Pretty+", which vaire does not support", output.ExitPrecondition,
 			"Use "+hostinfo.SupportedList+".").WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
 	}
+
 	arch, err := n.Arch(ctx)
 	if err != nil {
 		return err
 	}
+
 	r.prog.OS, r.prog.Arch = osInfo.Pretty, arch
+
 	r.prog.PublicIPv6 = n.PublicIPv6(ctx)
 	if err := r.mark(phaseFirstHost); err != nil {
 		return err
 	}
+
 	r.p.phase("init.first-contact", "completed", osInfo.Pretty+", "+arch)
+
 	if err := r.confirmDNSEarly(); err != nil {
 		return err
 	}
+
 	if err := r.installNodeBinary(ctx, n, arch); err != nil {
 		return err
 	}
+
 	r.p.phase("init.binary", "completed", "")
+
 	if err := r.mark(phaseBinary); err != nil {
 		return err
 	}
@@ -1123,10 +1312,12 @@ func (r *initRun) firstContact(ctx context.Context, known *transport.KnownHosts,
 	if err != nil {
 		return err
 	}
+
 	r.prog.PublicIPv6 = res.PublicIPv6
 	if err := verifyHostKeys(known, publicSSH, res, r.master()); err != nil {
 		return err
 	}
+
 	return r.mark(phaseHost)
 }
 
@@ -1135,36 +1326,45 @@ func (r *initRun) pinFirstContactKey(ctx context.Context, known *transport.Known
 	if len(known.Keys(publicSSH)) > 0 {
 		return nil
 	}
+
 	key, err := transport.ProbeHostKey(ctx, transport.Direct{Timeout: timeout}, publicSSH, timeout)
 	if err != nil {
 		return err
 	}
+
 	if err := r.trustHostKey(key); err != nil {
 		return err
 	}
+
 	known.Pin(publicSSH, key)
+
 	return known.Save()
 }
 
 // installNodeBinary installs vaire on the node unless its build matches.
 func (r *initRun) installNodeBinary(ctx context.Context, n *remote.Node, arch string) error {
 	r.p.phase("init.binary", "started", "install vaire "+buildinfo.Version+" on the node")
+
 	got, installed, err := n.Version(ctx)
 	if err != nil {
 		return err
 	}
+
 	if t := r.p.task("init.binary"); t != nil {
 		n.OnUpload = func(sent, total int64) {
 			t.Progress(float64(sent)/float64(max(total, 1)), fmt.Sprintf("%.1f / %.1f MB", float64(sent)/1e6, float64(total)/1e6))
 		}
 	}
+
 	if installed && remote.SameBuild(got, remote.LocalBuild()) {
 		return nil
 	}
+
 	art, err := remote.NodeArtifact(ctx, arch)
 	if err != nil {
 		return err
 	}
+
 	if installed {
 		if _, err := n.InstallUpgrade(ctx, art, remote.CallOptions{OnEvent: r.p.event}); err != nil {
 			return err
@@ -1172,6 +1372,7 @@ func (r *initRun) installNodeBinary(ctx context.Context, n *remote.Node, arch st
 	} else if err := n.InstallBootstrap(ctx, art); err != nil {
 		return err
 	}
+
 	return n.Handshake(ctx, remote.HandshakeOptions{})
 }
 
@@ -1181,11 +1382,14 @@ func (r *initRun) placeRestoreKeys(ctx context.Context, n *remote.Node, known *t
 	if r.restore == nil {
 		return nil
 	}
+
 	keys, err := r.restore.place(ctx, r, n)
 	if err != nil {
 		return err
 	}
+
 	known.Replace(publicSSH, keys...)
+
 	return known.Save()
 }
 
@@ -1196,6 +1400,7 @@ func verifyHostKeys(known *transport.KnownHosts, publicSSH string, res node.Boot
 	if err != nil {
 		return err
 	}
+
 	for _, pinned := range known.Keys(publicSSH) {
 		if !transport.ContainsKey(resKeys, pinned) {
 			return output.NewError(output.CodeHostKeyMismatch, "the node reported host keys that do not include the key pinned on first contact",
@@ -1203,9 +1408,11 @@ func verifyHostKeys(known *transport.KnownHosts, publicSSH string, res node.Boot
 				WithDetails(map[string]any{"pinned": ssh.FingerprintSHA256(pinned)})
 		}
 	}
+
 	known.Pin(publicSSH, resKeys...)
 	known.Pin(net.JoinHostPort(n.PublicAddress, "22"), resKeys...)
 	known.Pin(net.JoinHostPort(n.WGAddress, "22"), resKeys...)
+
 	return known.Save()
 }
 
@@ -1214,6 +1421,7 @@ func verifyHostKeys(known *transport.KnownHosts, publicSSH string, res node.Boot
 // terminal.
 func (r *initRun) trustHostKey(key ssh.PublicKey) error {
 	fp := ssh.FingerprintSHA256(key)
+
 	want := strings.TrimSpace(r.boot.HostKeyFingerprint)
 	switch {
 	case want != "":
@@ -1222,6 +1430,7 @@ func (r *initRun) trustHostKey(key ssh.PublicKey) error {
 				"Check the fingerprint on the provider console with ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub.").
 				WithDetails(map[string]any{"got": fp, "want": want})
 		}
+
 		return nil
 	case flagTrue(r.cmd, "accept-new-host-key"):
 		r.warnings = append(r.warnings, output.Warning{Code: "host_key_accepted_unverified", Message: "trusted host key " + fp + " without checking it"})
@@ -1231,10 +1440,12 @@ func (r *initRun) trustHostKey(key ssh.PublicKey) error {
 		if err != nil {
 			return err
 		}
+
 		if !ok {
 			return output.NewError(output.CodeHostKeyMismatch, "the server's host key was not trusted", output.ExitTransport,
 				"Check it on the provider console, then pass --host-key-fingerprint "+fp+".").WithDetails(map[string]any{"got": fp})
 		}
+
 		return nil
 	default:
 		return output.NewError(output.CodeInputRequired, "first contact needs the server's host key to be confirmed", output.ExitInput,
@@ -1251,33 +1462,43 @@ func (r *initRun) trustHostKey(key ssh.PublicKey) error {
 // in a terminal, and named in the error otherwise.
 func firstContactAuth(ctx context.Context, cmd *cobra.Command, boot workspaces.Bootstrap) ([]ssh.AuthMethod, func(), error) {
 	noop := func() {}
+
 	if flagTrue(cmd, "password-stdin") {
 		pw, err := readFirstLine(cmd.InOrStdin())
 		if err != nil {
 			return nil, noop, err
 		}
+
 		secrets.Add(pw)
+
 		return transport.PasswordAuth(pw), noop, nil
 	}
+
 	if boot.Identity != "" {
 		path := expandHome(boot.Identity)
 		ask := func() ([]byte, error) {
 			if MustNotPrompt(cmd) {
 				return nil, errors.New("the identity is encrypted; load it into ssh-agent")
 			}
+
 			pw, err := readSecretTTY(cmd, "Passphrase for "+path)
+
 			return []byte(pw), err
 		}
+
 		auth, err := transport.KeyFileAuth(path, ask)
 		if err != nil {
 			return nil, noop, output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass a readable private key with --identity.")
 		}
+
 		return []ssh.AuthMethod{auth}, noop, nil
 	}
+
 	signers, closeAgent, skipped := defaultSSHKeys(ctx, cmd)
 	if len(signers) == 0 {
 		return nil, closeAgent, noFirstContactCredential(skipped)
 	}
+
 	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, closeAgent, nil
 }
 
@@ -1285,13 +1506,17 @@ func firstContactAuth(ctx context.Context, cmd *cobra.Command, boot workspaces.B
 // ones a passphrase blocked. The caller closes the agent, if one was used.
 func defaultSSHKeys(ctx context.Context, cmd *cobra.Command) ([]ssh.Signer, func(), []string) {
 	closeAgent := func() {}
+
 	var signers []ssh.Signer
+
 	agentSigners, closer, ok := transport.AgentSigners(ctx)
 	if ok {
 		signers = append(signers, agentSigners...)
 		closeAgent = closer
 	}
+
 	skipped := defaultKeySigners(cmd, agentSigners, &signers)
+
 	return signers, closeAgent, skipped
 }
 
@@ -1303,9 +1528,12 @@ func defaultKeySigners(cmd *cobra.Command, agentSigners []ssh.Signer, signers *[
 	if err != nil {
 		return nil
 	}
+
 	var skipped []string
+
 	for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
 		path := filepath.Join(home, ".ssh", name)
+
 		signer, encrypted, err := transport.KeyFileSigner(path, nil)
 		switch {
 		case err == nil:
@@ -1318,17 +1546,20 @@ func defaultKeySigners(cmd *cobra.Command, agentSigners []ssh.Signer, signers *[
 				if err == nil && pw == "" {
 					err = errors.New("skipped")
 				}
+
 				return []byte(pw), err
 			})
 			if err != nil {
 				skipped = append(skipped, path)
 				continue
 			}
+
 			*signers = append(*signers, signer)
 		case encrypted:
 			skipped = append(skipped, path)
 		}
 	}
+
 	return skipped
 }
 
@@ -1336,10 +1567,12 @@ func defaultKeySigners(cmd *cobra.Command, agentSigners []ssh.Signer, signers *[
 func noFirstContactCredential(skipped []string) error {
 	hint := "Pass --identity <key>, load a key into ssh-agent, or pipe the password with --password-stdin."
 	details := map[string]any{"flag": "--identity"}
+
 	if len(skipped) > 0 {
 		hint = "These keys have a passphrase and were skipped: " + strings.Join(skipped, ", ") + ". Load one with ssh-add, or pass it with --identity in a terminal."
 		details["skipped_keys"] = skipped
 	}
+
 	return output.NewError(output.CodeInputRequired, "first contact needs an SSH credential", output.ExitInput, hint).
 		WithDetails(details)
 }
@@ -1350,6 +1583,7 @@ func expandHome(path string) string {
 			return filepath.Join(home, rest)
 		}
 	}
+
 	return path
 }
 
@@ -1368,54 +1602,70 @@ func (r *initRun) attemptReporter(phase, what string) func(int, time.Time) {
 // failure waits for the node's revert and reports what it did.
 func (r *initRun) lockdown(ctx context.Context, wgNode *remote.Node, tun *transport.Tunnel, target transport.SSHTarget, opts transport.SSHOptions, publicSSH string) (string, error) {
 	r.p.phase("init.lockdown", "started", "close public SSH; the node reverts unless confirmed within 2 minutes")
+
 	reply, err := r.p.call(ctx, wgNode, "ssh.lockdown", map[string]any{"timeout_s": int(lockdownTimeout.Seconds())}, remote.CallOptions{OnEvent: r.p.event})
 	if err != nil {
 		return "", err
 	}
+
 	armedAt := time.Now()
+
 	var res node.LockdownResult
 	if err := reply.Decode(&res); err != nil {
 		return "", err
 	}
+
 	if res.AlreadyLocked {
 		r.p.phase("init.lockdown", "completed", "already locked down")
 		return time.Now().UTC().Format(time.RFC3339), nil
 	}
+
 	confirmClient, err := dialRetryReport(ctx, tun, target, opts, confirmWithin, r.attemptReporter("init.lockdown", "new SSH connection over WireGuard"))
 	if err == nil {
 		defer confirmClient.Close()
+
 		confirmNode := &remote.Node{SSH: confirmClient, Operator: r.sec.OperatorName}
+
 		var reply remote.Reply
+
 		reply, err = r.p.call(ctx, confirmNode, "ssh.confirm", nil, remote.CallOptions{OnEvent: r.p.event})
 		if err == nil {
 			var confirmed node.ConfirmResult
 			if err := reply.Decode(&confirmed); err != nil {
 				return "", err
 			}
+
 			r.p.phase("init.lockdown", "completed", "public SSH is closed; SSH answers on WireGuard")
+
 			return confirmed.LockedDownAt, nil
 		}
 	}
+
 	return "", r.lockdownFailed(ctx, armedAt, publicSSH, opts, err)
 }
 
 func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicSSH string, opts transport.SSHOptions, cause error) error {
 	r.p.phase("init.lockdown", "failed", "waiting for the node to revert")
+
 	wait := time.Until(armedAt.Add(lockdownTimeout + revertGrace))
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(wait):
 	}
+
 	details := map[string]any{"cause": secrets.Redact(cause.Error())}
+
 	client, err := transport.DialSSH(ctx, transport.Direct{Timeout: opts.Timeout}, transport.SSHTarget{User: r.cfg.Server.AdminUser, Addr: publicSSH}, opts)
 	if err != nil {
 		details["public_ssh"] = secrets.Redact(err.Error())
+
 		return output.NewError(output.CodeLockdownFailed,
 			"SSH over WireGuard did not work, and the node is not reachable over public SSH either", output.ExitLockdown,
 			"Use the provider console: run vaire node ssh-revert as root, check ufw and wg0, then vaire server init --resume.").WithDetails(details)
 	}
 	defer client.Close()
+
 	n := &remote.Node{SSH: client, Operator: r.sec.OperatorName}
 	if reply, err := r.p.call(ctx, n, "ssh.status", nil, remote.CallOptions{}); err == nil {
 		var status node.SSHStatus
@@ -1425,6 +1675,7 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 	} else {
 		details["ssh_status_error"] = secrets.Redact(err.Error())
 	}
+
 	return output.NewError(output.CodeLockdownFailed,
 		"SSH over WireGuard did not work, so the node reverted to public SSH", output.ExitLockdown,
 		"Check that UDP "+strconv.Itoa(r.cfg.Transport.ListenPort)+" reaches the server (provider firewall, local network), then run vaire server init --resume.").
@@ -1440,19 +1691,23 @@ func (r *initRun) askMasterPassword(cmd *cobra.Command) error {
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil
 	}
+
 	ok, err := PromptYes(cmd, "Set a master password now to gate vaire secrets export?")
 	if err != nil || !ok {
 		return err
 	}
+
 	for range 3 {
 		pw, err := readSecretTTY(cmd, fmt.Sprintf("Master password (at least %d characters)", password.MinLength))
 		if err != nil {
 			return err
 		}
+
 		again, err := readSecretTTY(cmd, "Repeat the master password")
 		if err != nil {
 			return err
 		}
+
 		switch {
 		case pw != again:
 			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "The two passwords do not match.")
@@ -1462,12 +1717,16 @@ func (r *initRun) askMasterPassword(cmd *cobra.Command) error {
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), herr.Error())
 				continue
 			}
+
 			r.masterHash = hash
+
 			return nil
 		}
 	}
+
 	r.warnings = append(r.warnings, output.Warning{Code: "master_password_unset",
 		Message: "no master password was set; set one later with vaire secrets password set, or use a code from the authenticator app"})
+
 	return nil
 }
 
@@ -1476,6 +1735,7 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 	if r.prog.WGPublicKey == "" || len(r.prog.SSHHostKeys) == 0 {
 		return secretsdoc.Document{}, errors.New("the node identity is missing from the pending init; re-run with --resume")
 	}
+
 	return secretsdoc.Document{
 		Schema:       secretsdoc.Schema,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
@@ -1515,34 +1775,43 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 	cmd := r.cmd
 	n := r.master()
 	res := initResult{Server: r.name, Node: n.Name, PublicAddress: n.PublicAddress, WGAddress: n.WGAddress, AdminUser: r.cfg.Server.AdminUser}
+
 	doc, err := r.document()
 	if err != nil {
 		return doc, res, err
 	}
+
 	out := stringFlag(cmd, "secrets-out")
 	if out == "" {
 		out = r.prog.SecretsOut
 	}
+
 	if out != "" {
 		if abs, err := filepath.Abs(out); err == nil {
 			out = abs
 		}
+
 		if _, err := os.Stat(out); err == nil && r.prog.SecretsOut != out {
 			return doc, res, output.NewError(output.CodePrecondition, out+" already exists", output.ExitPrecondition,
 				"Move it away, or pass --secrets-out with another path, then re-run with --resume.").WithDetails(map[string]any{"reason": "secrets_out_exists", "path": out})
 		}
 	}
+
 	r.p.phase("init.secrets-document", "started", out)
+
 	h, err := newHandoff(r.cmd, doc, out)
 	if err != nil {
 		return doc, res, err
 	}
+
 	r.prog.SecretsOut = h.path
 	if err := r.mark(phaseDocument); err != nil {
 		return doc, res, err
 	}
+
 	res.SecretsDocument = h.path
 	r.p.phase("init.secrets-document", "completed", h.path)
+
 	if MustNotPrompt(cmd) {
 		// Explicitly requested with --reveal-passphrase: it travels in the envelope.
 		res.Passphrase = h.passphrase
@@ -1553,6 +1822,7 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored"), !r.local); err != nil {
 		return doc, res, err
 	}
+
 	return doc, res, nil
 }
 
@@ -1560,26 +1830,34 @@ func runInitLocal(cmd *cobra.Command) error {
 	if handled, err := checkInitLocal(cmd); handled || err != nil {
 		return err
 	}
+
 	r, err := prepareInit(cmd, true)
 	if err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		return r.dryRunResult()
 	}
+
 	ctx := commandContext(cmd)
+
 	if err := r.savePending(); err != nil {
 		return err
 	}
+
 	if err := r.generateSecrets(); err != nil {
 		return err
 	}
+
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
+
 	if err := r.ensureBackupKit(ctx); err != nil {
 		return err
 	}
+
 	caller := remote.Local{Operator: firstOperatorName}
 	if err := r.localHostPhase(ctx, caller); err != nil {
 		return err
@@ -1598,26 +1876,34 @@ func runInitLocal(cmd *cobra.Command) error {
 	if err := r.localDatabasePhase(ctx, caller); err != nil {
 		return err
 	}
+
 	if err := r.remoteTLSPhase(ctx, caller); err != nil {
 		return err
 	}
+
 	if err := r.configureInitBackups(ctx, caller); err != nil {
 		return err
 	}
+
 	if err := r.askMasterPassword(cmd); err != nil {
 		return err
 	}
+
 	_, res, err := r.writeDocument()
 	if err != nil {
 		return err
 	}
+
 	if err := r.confirmSecrets(ctx, caller); err != nil {
 		return err
 	}
+
 	r.firstMasterBundle(ctx, caller)
+
 	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
+
 	res.LockdownPending = true
 	res.LockdownDeadline = deadline
 	res.LoginCommand = "vaire login"
@@ -1630,6 +1916,7 @@ func runInitLocal(cmd *cobra.Command) error {
 		"Then run any remote command, such as vaire plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
 		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",
 	}, "\n")
+
 	return r.finish(res, message, append([]string{res.LoginCommand}, res.Next...), fmt.Sprintf("Server %s is bootstrapped on this machine", r.name), []string{
 		"On your machine run vaire login and paste the transfer bundle,",
 		"then any remote command within 30 minutes. That closes public SSH; otherwise the SSH change reverts.",
@@ -1644,11 +1931,13 @@ func checkInitLocal(cmd *cobra.Command) (bool, error) {
 	if handled, err := localenv.Escalate(cmd, "initialise this server"); handled || err != nil {
 		return handled, err
 	}
+
 	osInfo, err := hostinfo.ReadOS()
 	if err != nil || !osInfo.Supported() {
 		return false, output.NewError(output.CodePrecondition, "this server runs "+osInfo.Pretty+", which vaire does not support", output.ExitPrecondition,
 			"Use "+hostinfo.SupportedList+".").WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
 	}
+
 	if self, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(self); err == nil && resolved != node.BinaryPath {
 			return false, output.NewError(output.CodePrecondition, "server init --local must run as "+node.BinaryPath, output.ExitPrecondition,
@@ -1656,11 +1945,13 @@ func checkInitLocal(cmd *cobra.Command) (bool, error) {
 				WithDetails(map[string]any{"reason": "binary_not_installed", "running": resolved})
 		}
 	}
+
 	if _, err := os.Stat(config.NodePath); err == nil && !flagTrue(cmd, "resume") {
 		return false, output.NewError(output.CodePrecondition, "this server is already an vaire node ("+config.NodePath+" exists)", output.ExitPrecondition,
 			"Operate it from your machine with vaire login, or continue an unfinished init with --resume.").
 			WithDetails(map[string]any{"reason": "already_a_node"})
 	}
+
 	return false, nil
 }
 
@@ -1669,15 +1960,19 @@ func (r *initRun) localHostPhase(ctx context.Context, caller remote.Caller) erro
 	if r.prog.Done(phaseHost) {
 		return nil
 	}
+
 	r.prog.PublicIPv6 = hostinfo.PublicIPv6(ctx)
 	if err := r.confirmDNSEarly(); err != nil {
 		return err
 	}
+
 	hostRes, err := r.bootstrapHost(ctx, caller)
 	if err != nil {
 		return err
 	}
+
 	r.prog.PublicIPv6 = hostRes.PublicIPv6
+
 	return r.mark(phaseHost)
 }
 
@@ -1687,18 +1982,23 @@ func (r *initRun) localLockdownPhase(ctx context.Context, caller remote.Caller) 
 	if r.prog.Done(phaseLockdown) {
 		return "", nil
 	}
+
 	r.p.phase("init.lockdown", "started", "arm the lockdown; public SSH stays open until an operator confirms over WireGuard")
+
 	if _, err := r.p.call(ctx, caller, "ssh.lockdown", map[string]any{
 		"timeout_s":   int(localLockdownTimeout.Seconds()),
 		"keep_public": true,
 	}, remote.CallOptions{OnEvent: r.p.event}); err != nil {
 		return "", err
 	}
+
 	deadline := time.Now().Add(localLockdownTimeout).UTC().Format(time.RFC3339)
 	r.p.phase("init.lockdown", "completed", "pending until "+deadline)
+
 	if err := r.mark(phaseLockdown); err != nil {
 		return "", err
 	}
+
 	return deadline, nil
 }
 
@@ -1707,12 +2007,16 @@ func (r *initRun) localDatabasePhase(ctx context.Context, caller remote.Caller) 
 	if r.prog.Done(phaseDatabase) {
 		return nil
 	}
+
 	r.p.phase("init.database", "started", "run database steps 7-13 on this server")
+
 	res, err := r.callDatabasePhase(ctx, caller)
 	if err != nil {
 		return err
 	}
+
 	r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
 	r.p.phase("init.database", "completed", "")
+
 	return r.mark(phaseDatabase)
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -22,11 +23,13 @@ func recoveryKit(name string) (*workspaces.BackupCreds, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if creds.Backup == nil || creds.Backup.AccessKeyID == "" {
 		return nil, output.NewError(output.CodeInputRequired, "this workspace has no recovery kit", output.ExitInput,
 			"Run vaire backup setup, or log in from a transfer bundle that carries the recovery kit (vaire login).").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
+
 	return creds.Backup, nil
 }
 
@@ -53,13 +56,16 @@ type restoreJobResult struct {
 // node gave them.
 func restoreWarnings(own, reply []output.Warning, res restoreJobResult) []output.Warning {
 	warnings := append(own, reply...)
+
 	warnings = append(warnings, res.FollowerWarnings...)
 	if res.PoolerWarning != "" {
 		warnings = append(warnings, output.Warning{Code: "pooler_reload_failed", Message: res.PoolerWarning})
 	}
+
 	if res.Promoted.Warning != nil {
 		warnings = append(warnings, *res.Promoted.Warning)
 	}
+
 	return warnings
 }
 
@@ -67,21 +73,27 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return parentRun(cmd, args)
 	}
+
 	db := args[0]
+
 	params, target, err := restoreParams(cmd, db)
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	if flagTrue(cmd, "promote") {
 		// The node refuses it too; this saves asking for the token or
 		// reporting a dry run first.
@@ -89,34 +101,43 @@ func runRestore(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+
 	if !target.IsZero() {
 		p.note("restore target: " + echoTime(target, cfg.Timezone))
 	}
+
 	token := db + "/restore"
 	if !dryRun(cmd) {
 		if err := Confirm(cmd, token); err != nil {
 			return err
 		}
 	}
+
 	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "restore.start", params, remote.CallOptions{Confirm: token, DryRun: dryRun(cmd)})
 	if err != nil {
 		return err
 	}
+
 	if detached {
 		return detachedResult(cmd, s, jobID, "the restore")
 	}
+
 	if dryRun(cmd) {
 		return restoreDryRunResult(cmd, db, s, reply)
 	}
+
 	res := restoreJobResult{}
+
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
+
 	warnings := restoreWarnings(s.warnings, reply.Warnings, res)
 	if res.Phase == "promoted" {
 		return restorePromotedResult(cmd, db, jr, res, warnings)
 	}
+
 	return restoreReadyResult(cmd, db, params, jr, res, warnings, token)
 }
 
@@ -125,39 +146,49 @@ func runRestore(cmd *cobra.Command, args []string) error {
 func restoreParams(cmd *cobra.Command, db string) (map[string]any, time.Time, error) {
 	kinds := 0
 	params := map[string]any{"database": db, "promote": flagTrue(cmd, "promote")}
+
 	var target time.Time
+
 	if flagTrue(cmd, "latest") {
 		kinds++
 		params["kind"] = backup.TargetLatest
 	}
+
 	if v := stringFlag(cmd, "set"); v != "" {
 		kinds++
 		params["kind"], params["set"] = backup.TargetSet, v
 	}
+
 	t, wire, err := targetFlag(cmd, "time")
 	if err != nil {
 		return nil, time.Time{}, err
 	}
+
 	if wire != "" {
 		kinds++
 		target = t
 		params["kind"], params["time"] = backup.TargetTime, wire
 	}
+
 	if kinds != 1 {
 		return nil, time.Time{}, output.NewError(output.CodeUsage, "pass exactly one of --time, --latest or --set", output.ExitUsage,
 			"For example vaire restore "+db+" --time -15m.")
 	}
+
 	return params, target, nil
 }
 
 // restoreDryRunResult reports what a dry run would do.
 func restoreDryRunResult(cmd *cobra.Command, db string, s *session, reply remote.Reply) error {
 	var data map[string]any
+
 	_ = reply.Decode(&data)
+
 	msg := fmt.Sprintf("dry run: would restore %s to %v beside the live database", db, data["target"])
 	if tl, _ := data["timeline"].(string); tl != "" {
 		msg += ", with --target-timeline=" + tl
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
 }
 
@@ -180,6 +211,7 @@ func restoreReadyResult(cmd *cobra.Command, db string, params map[string]any, jr
 		// archived WAL until it is promoted or aborted.
 		ready = "the temporary cluster " + res.Restoring + " is ready, still replaying the latest archived WAL, beside the live " + db + ", which kept serving."
 	}
+
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"job_id": jr.JobID, "result": res},
 		Message: strings.Join([]string{
@@ -196,16 +228,20 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		params["database"] = args[0]
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, err := p.call(commandContext(cmd), s.node, "restore.status", params, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	var data struct {
 		Restores []struct {
 			backup.Restore
@@ -225,31 +261,38 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	var lines []string
 	for _, r := range data.Restores {
 		lines = append(lines, fmt.Sprintf("%s: %s, target %s, started %s", r.Database, r.Phase, r.Target, r.StartedAt))
 		if r.Error != "" {
 			lines = append(lines, "  error: "+r.Error)
 		}
+
 		if r.AccessNotice != "" {
 			lines = append(lines, "  "+r.AccessNotice)
 		}
+
 		if len(r.Tables) > 0 {
 			lines = append(lines, fmt.Sprintf("  %-40s %14s %14s", "TABLE (estimated rows)", "LIVE", "RESTORED"))
 			for _, t := range r.Tables {
 				lines = append(lines, fmt.Sprintf("  %-40s %14s %14s", t.Table, rowCount(t.Live), rowCount(t.Restoring)))
 			}
 		}
+
 		if r.Phase == backup.PhaseReady {
 			lines = append(lines, "  promote: "+r.OnPromote)
 		}
 	}
+
 	for _, l := range data.Leftovers {
 		lines = append(lines, "leftover "+l.Name+" (from "+l.CreatedAt+"); drop it with vaire restore cleanup "+l.Database)
 	}
+
 	if len(lines) == 0 {
 		lines = []string{"no restore is open"}
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
 }
 
@@ -257,9 +300,11 @@ func rowCount(n *int64) string {
 	if n == nil {
 		return "-"
 	}
+
 	if *n < 0 {
 		return "unknown"
 	}
+
 	return fmt.Sprint(*n)
 }
 
@@ -268,38 +313,46 @@ func rowCount(n *int64) string {
 // (when set) before the token is asked for; the node refuses it too.
 func restoreAction(cmd *cobra.Command, db, method, token, action string, done func(data map[string]any) string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	if action != "" {
 		cfg, err := remoteConfig(cmd, s, p)
 		if err != nil {
 			return err
 		}
+
 		if err := restorePreflight(cfg, db, method, action); err != nil {
 			return err
 		}
 	}
+
 	if token != "" && !dryRun(cmd) {
 		if err := Confirm(cmd, token); err != nil {
 			return err
 		}
 	}
+
 	reply, err := p.call(commandContext(cmd), s.node, method, map[string]string{"database": db},
 		remote.CallOptions{Confirm: token, DryRun: dryRun(cmd), OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	var data map[string]any
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	msg := done(data)
 	if dryRun(cmd) {
 		msg = "dry run: " + method + " " + db + " would run"
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: msg, Warnings: append(s.warnings, reply.Warnings...)})
 }
 
@@ -310,6 +363,7 @@ func restorePreflight(cfg config.Cluster, db, method, action string) error {
 	if err := node.RefuseFollowerMethod(cfg, method, map[string]string{"database": db}); err != nil {
 		return err
 	}
+
 	return node.CheckNotProtected(cfg, db, action)
 }
 
@@ -321,6 +375,7 @@ func combinedRestorePreflight(cfg config.Cluster, db string) error {
 
 func runRestorePromote(cmd *cobra.Command, args []string) error {
 	db := args[0]
+
 	return restoreAction(cmd, db, "restore.promote", db+"/restore", "restore promote", func(_ map[string]any) string {
 		return db + " now holds the restored data, on a new timeline; a full backup is running. The previous data is kept as a stopped cluster: vaire restore undo " + db + " swaps it back, vaire restore cleanup " + db + " drops it."
 	})
@@ -328,17 +383,20 @@ func runRestorePromote(cmd *cobra.Command, args []string) error {
 
 func runRestoreUndo(cmd *cobra.Command, args []string) error {
 	db := args[0]
+
 	return restoreAction(cmd, db, "restore.undo", db+"/restore", "restore undo", func(data map[string]any) string {
 		msg := db + " is back to its data from before the restore, on its old timeline; a full backup is running."
 		if aside, _ := data["pre_undo"].(string); aside != "" {
 			msg += " The restored data is kept as the stopped cluster " + aside + " until vaire restore cleanup " + db + "; undo can't swap it back in."
 		}
+
 		return msg
 	})
 }
 
 func runRestoreAbort(cmd *cobra.Command, args []string) error {
 	db := args[0]
+
 	return restoreAction(cmd, db, "restore.abort", "", "", func(map[string]any) string {
 		return "dropped the temporary cluster " + db + "__restoring; the live " + db + " was never touched"
 	})
@@ -349,17 +407,22 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		db = args[0]
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	ctx := commandContext(cmd)
+
 	reply, err := p.call(ctx, s.node, "restore.cleanup", map[string]any{"database": db}, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	var data struct {
 		Leftovers []struct {
 			backup.Leftover
@@ -369,29 +432,38 @@ func runRestoreCleanup(cmd *cobra.Command, args []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	rows := make([][]string, 0, len(data.Leftovers))
 	for _, l := range data.Leftovers {
 		rows = append(rows, []string{l.Name, humanBytes(l.SizeBytes), l.CreatedAt})
 	}
+
 	lines := alignColumns(rows)
 	if len(lines) == 0 {
 		return output.Success(cmd, output.Result{Data: data, Message: "no restore leftovers", Warnings: append(s.warnings, reply.Warnings...)})
 	}
+
 	if db == "" || dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: data, Message: "restore leftovers:\n" + strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...),
 			Next: []string{"vaire restore cleanup <db> --confirm <db>/cleanup"}})
 	}
+
 	p.panel("Leftovers of "+db, lines)
+
 	token := db + "/cleanup"
 	if err := Confirm(cmd, token); err != nil {
 		return err
 	}
+
 	reply, err = p.call(ctx, s.node, "restore.cleanup", map[string]any{"database": db, "drop": true}, remote.CallOptions{Confirm: token, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	var res map[string]any
+
 	_ = reply.Decode(&res)
+
 	return output.Success(cmd, output.Result{Data: res, Message: fmt.Sprintf("dropped %d leftover cluster(s) of %s", len(lines), db), Warnings: append(s.warnings, reply.Warnings...)})
 }
 
@@ -400,18 +472,22 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	params := func(db string) any { return map[string]string{"time": at, "database": db} }
 	if dryRun(cmd) {
 		reply, err := p.call(commandContext(cmd), s.node, "restore.drill", params(stringFlag(cmd, "db")), remote.CallOptions{DryRun: true, OnEvent: p.event})
 		if err != nil {
 			return err
 		}
+
 		var data struct {
 			Drills []struct {
 				Database string `json:"database"`
@@ -419,27 +495,34 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 				Timeline string `json:"timeline,omitempty"`
 			} `json:"drills"`
 		}
+
 		_ = reply.Decode(&data)
+
 		lines := make([]string, 0, len(data.Drills))
 		for _, d := range data.Drills {
 			line := fmt.Sprintf("dry run: would restore %s at %s into %s, check it and drop it", d.Database, d.Target, backup.DrillName(d.Database))
 			if d.Timeline != "" {
 				line += " (timeline " + d.Timeline + ")"
 			}
+
 			lines = append(lines, line)
 		}
+
 		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
 	}
+
 	dbs, err := backupDatabases(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	outcomes, lines, warnings, detached := eachDatabase(cmd, s, p, dbs, "restore.drill", params,
 		func(raw []byte) (any, string, error) {
 			var drill backup.Drill
 			if err := json.Unmarshal(raw, &drill); err != nil {
 				return nil, "", err
 			}
+
 			return drill, drillLines(drill), nil
 		})
 	if detached != nil {
@@ -447,12 +530,15 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 			if at != "" {
 				return "vaire restore drill --db " + db + " --time " + at
 			}
+
 			return "vaire restore drill --db " + db
 		})
 	}
+
 	if err := failedOutcomes("the restore drill", "drills", outcomes); err != nil {
 		return err
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"drills": outcomes},
 		Message:  strings.Join(lines, "\n"),
@@ -463,44 +549,56 @@ func runRestoreDrill(cmd *cobra.Command, _ []string) error {
 
 func runDBFork(cmd *cobra.Command, args []string) error {
 	src := args[0]
+
 	name, err := forkName(cmd, src)
 	if err != nil {
 		return err
 	}
+
 	params, at, err := forkParams(cmd, src, name)
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	if err := checkForkSize(cfg, src, stringFlag(cmd, "size")); err != nil {
 		return err
 	}
+
 	if !at.IsZero() {
 		p.note("fork point: " + echoTime(at, cfg.Timezone))
 	}
+
 	rpc, secret, err := forkSecrets(cfg, s, name)
 	if err != nil {
 		return err
 	}
+
 	reply, jobID, detached, err := callJob(commandContext(cmd), s, p, "db.fork", params, remote.CallOptions{Secrets: rpc, DryRun: dryRun(cmd)})
 	if err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: params, Message: "dry run: would fork " + src + " into " + name, Warnings: s.warnings})
 	}
+
 	if detached {
 		return forkDetachedResult(cmd, p, name, jobID, secret, s.warnings)
 	}
+
 	return forkResult(cmd, reply, src, name, at, secret, s.warnings)
 }
 
@@ -510,20 +608,25 @@ func forkName(cmd *cobra.Command, src string) (string, error) {
 	if name == "" {
 		name = src + "_fork_" + time.Now().UTC().Format("200601021504")
 	}
+
 	if err := config.CheckDatabaseName(name); err != nil {
 		return "", output.NewError(output.CodeValidation, "database name "+name+" "+err.Error(), output.ExitConfig, "Pass a shorter --name.")
 	}
+
 	return name, nil
 }
 
 // forkParams are db.fork's parameters, and the fork point for the note.
 func forkParams(cmd *cobra.Command, src, name string) (map[string]any, time.Time, error) {
 	params := map[string]any{"source": src, "name": name}
+
 	var at time.Time
+
 	t, wire, err := targetFlag(cmd, "at")
 	if err != nil {
 		return nil, time.Time{}, err
 	}
+
 	if wire != "" {
 		at = t
 		params["at"] = wire
@@ -532,9 +635,11 @@ func forkParams(cmd *cobra.Command, src, name string) (map[string]any, time.Time
 	if size := stringFlag(cmd, "size"); size != "" {
 		params["size"] = size
 	}
+
 	if flagTrue(cmd, "allow-overcommit") {
 		params["allow_overcommit"] = true
 	}
+
 	return params, at, nil
 }
 
@@ -543,11 +648,14 @@ func checkForkSize(cfg config.Cluster, src, size string) error {
 	if size == "" {
 		return nil
 	}
+
 	spec, ok := cfg.ClusterByName(src)
 	if !ok {
 		return nil
 	}
+
 	spec.Size, spec.Memory = size, ""
+
 	return checkSizeFlags(cfg, spec)
 }
 
@@ -558,14 +666,16 @@ func forkSecrets(cfg config.Cluster, s *session, name string) (map[string]string
 	if err != nil {
 		return nil, databaseSecret{}, err
 	}
+
 	service, _, generated, err := serviceSecrets(s.ctx.Name)
 	if err != nil {
 		return nil, databaseSecret{}, err
 	}
-	for k, v := range service {
-		rpc[k] = v
-	}
+
+	maps.Copy(rpc, service)
+
 	s.warnings = append(s.warnings, staleWarning(generated)...)
+
 	return rpc, secret, nil
 }
 
@@ -575,7 +685,9 @@ func forkDetachedResult(cmd *cobra.Command, p *progress, name, jobID string, sec
 	// The passwords are set in the copy before the job ends; they are
 	// only shown here.
 	p.warn("detached: the fork keeps running. These credentials work once it is done and are shown only now:")
+
 	message, human := credentialsMessage(cmd, "fork detached; credentials shown only now", "fork detached; credentials shown only now", name, secret)
+
 	return output.Success(cmd, output.Result{Data: map[string]any{"job_id": jobID, "detached": true, "database": secret},
 		Message: message, Human: human, Warnings: warnings, Next: []string{"vaire job follow " + jobID}})
 }
@@ -585,16 +697,21 @@ func forkResult(cmd *cobra.Command, reply remote.Reply, src, name string, at tim
 	var res struct {
 		Warnings []output.Warning `json:"warnings"`
 	}
+
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return err
 	}
+
 	all := append(append(warnings, reply.Warnings...), res.Warnings...)
+
 	from := "the live " + src
 	if !at.IsZero() {
 		from = src + " as of " + at.Format(time.RFC3339Nano)
 	}
+
 	message, human := credentialsMessage(cmd, fmt.Sprintf("forked %s into %s with its own roles", from, name), "forked "+from+" into "+name+" with its own roles", name, secret)
+
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"job_id": jr.JobID, "database": secret},
 		Message:  message,
@@ -609,26 +726,33 @@ func forkResult(cmd *cobra.Command, reply remote.Reply, src, name string, at tim
 func drillLines(drill backup.Drill) string {
 	header := fmt.Sprintf("%s: restore drill %s: backup %s", drill.Database, drill.Result, drill.BackupLabel)
 	restoreChecked := false
+
 	for _, c := range drill.Checks {
 		if c.Name == "restore" && c.Detail != "" {
 			restoreChecked = true
 		}
 	}
+
 	if !restoreChecked && drill.RecoveredTo != "" {
 		header += " recovered to " + drill.DescribeRecoveredTo()
 	}
+
 	out := make([]string, 1, 1+len(drill.Checks))
 	out[0] = header
+
 	for _, c := range drill.Checks {
 		mark := "ok"
 		if !c.OK {
 			mark = "FAILED"
 		}
+
 		line := "  " + mark + "  " + c.Name
 		if c.Detail != "" {
 			line += ": " + c.Detail
 		}
+
 		out = append(out, line)
 	}
+
 	return strings.Join(out, "\n")
 }

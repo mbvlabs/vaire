@@ -13,6 +13,7 @@ func TestBackupFamilies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	set := Set{Label: "20261014-010000F", Type: TypeFull, Start: "2026-10-14T01:00:00Z", Stop: "2026-10-14T01:02:30Z", Size: 1000, RepoSize: 300, Delta: 1000}
 	rs.RecordBackup("app", set, set.Stop)
 	rs.RecordBackupFailure("app", TypeDiff, "2026-10-14T02:00:00Z")
@@ -28,6 +29,7 @@ func TestBackupFamilies(t *testing.T) {
 	rs.LastVerify["other"] = VerifyResult{OK: false, FinishedAt: "2026-10-14T04:00:00Z"}
 	rs.Drills = []Drill{{Database: "app", FinishedAt: "2026-10-01T05:00:00Z", Result: DrillPass}}
 	jobs := []engine.JobRecord{{Job: "backup-full", DB: "other", State: engine.JobSkipped, FinishedAt: "2026-10-14T01:00:00Z"}}
+
 	out := string(promfile.Render(BackupFamilies("prod", "db1", "1.0.0", rs, jobs)))
 	for _, line := range []string{
 		`vaire_info{version="1.0.0",server="prod",node="db1"} 1`,
@@ -48,6 +50,7 @@ func TestBackupFamilies(t *testing.T) {
 			t.Errorf("missing %s in\n%s", line, out)
 		}
 	}
+
 	for _, absent := range []string{`type="full"} 1791856800`, `verify_last_success_timestamp_seconds{db="other"}`} {
 		if strings.Contains(out, absent) {
 			t.Errorf("unexpected %s", absent)

@@ -82,6 +82,7 @@ var Theme = huh.ThemeFunc(func(isDark bool) *huh.Styles {
 	s.Focused.TextInput.Prompt = s.Focused.TextInput.Prompt.Foreground(accent)
 	s.Focused.FocusedButton = s.Focused.FocusedButton.Foreground(onAccent).Background(accent).Bold(true)
 	s.Focused.Next = s.Focused.FocusedButton
+
 	return s
 })
 
@@ -98,6 +99,7 @@ func Panel(title, body string) string {
 	if title != "" {
 		content = styleTitle.Render(title) + "\n" + body
 	}
+
 	return stylePanel.Render(content)
 }
 
@@ -109,6 +111,7 @@ func PanelFit(title, body string, width int) string {
 	if title != "" {
 		content = styleTitle.Render(title) + "\n" + body
 	}
+
 	return fitBox(stylePanel, content, width)
 }
 
@@ -121,6 +124,7 @@ func fitBox(style lipgloss.Style, content string, width int) string {
 	if width <= 0 || lipgloss.Width(framed) <= width {
 		return framed
 	}
+
 	if width >= minPanelWidth {
 		// Whether Width counts the border differs between lipgloss
 		// versions; take the first that fits.
@@ -130,6 +134,7 @@ func fitBox(style lipgloss.Style, content string, width int) string {
 			}
 		}
 	}
+
 	return content
 }
 
@@ -167,19 +172,24 @@ type ErrorBlock struct {
 func (e ErrorBlock) Render(width int) string {
 	var b strings.Builder
 	b.WriteString(styleFail.Render(SymFail+" "+e.Message) + "  " + styleDim.Render("["+e.Code+"]"))
+
 	if e.Step != "" && !strings.Contains(e.Message, e.Step) {
 		b.WriteString("\n" + styleDim.Render("step ") + styleTitle.Render(e.Step))
 	}
+
 	if len(e.Tail) > 0 {
 		b.WriteString("\n\n" + styleDim.Render("last output:"))
+
 		inner := max(width-8, 20)
 		for _, line := range e.Tail {
 			b.WriteString("\n" + styleDim.Render("  "+truncate(line, inner)))
 		}
 	}
+
 	if e.Hint != "" {
 		b.WriteString("\n\n" + styleInfo.Render("→ ") + e.Hint)
 	}
+
 	return fitBox(styleErrorBox, b.String(), width)
 }
 
@@ -189,21 +199,27 @@ func Card(title string, rows [][2]string, footer []string) string {
 	for _, r := range rows {
 		width = max(width, lipgloss.Width(r[0]))
 	}
+
 	var b strings.Builder
 	b.WriteString(styleOK.Render(SymOK + " " + title))
+
 	for _, r := range rows {
 		if r[0] == "" && r[1] == "" {
 			b.WriteString("\n")
 			continue
 		}
+
 		key := r[0] + strings.Repeat(" ", width-lipgloss.Width(r[0]))
 		b.WriteString("\n" + styleDim.Render(key) + "  " + r[1])
 	}
+
 	if len(footer) > 0 {
 		b.WriteString("\n")
+
 		for _, f := range footer {
 			b.WriteString("\n" + f)
 		}
 	}
+
 	return styleCard.Render(b.String())
 }

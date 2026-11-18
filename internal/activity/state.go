@@ -45,12 +45,15 @@ func (st storeState) valid() bool {
 	if st.Version != stateVersion || st.NextSequence == 0 || !validStoreID(st.StoreID) {
 		return false
 	}
+
 	if st.LastSequence >= st.NextSequence {
 		return false
 	}
+
 	if st.FirstSequence > st.LastSequence {
 		return false
 	}
+
 	if st.FirstSequence == 0 {
 		if st.LastSequence != 0 || st.FirstEventAt != "" || st.LastEventAt != "" {
 			return false
@@ -58,20 +61,25 @@ func (st storeState) valid() bool {
 	} else if st.FirstEventAt == "" || st.LastEventAt == "" {
 		return false
 	}
+
 	for _, value := range []string{st.FirstEventAt, st.LastEventAt, st.LastWriteAt} {
 		if value == "" {
 			continue
 		}
+
 		if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
 			return false
 		}
 	}
+
 	if st.ActiveSegment == 0 && st.ActiveBytes != 0 {
 		return false
 	}
+
 	if st.ActiveBytes < 0 {
 		return false
 	}
+
 	return true
 }
 
@@ -79,50 +87,65 @@ func (st storeState) valid() bool {
 // file is not an error; an unsafe or corrupt file is.
 func readState(dir string) (storeState, bool, error) {
 	path := filepath.Join(dir, stateName)
+
 	info, err := os.Lstat(path)
 	if err != nil {
 		if isNotExist(err) {
 			return storeState{}, false, nil
 		}
+
 		return storeState{}, false, fmt.Errorf("activity: inspect state file: %w", err)
 	}
+
 	if !info.Mode().IsRegular() || !ownerMatches(info) || info.Mode().Perm() != fileMode {
 		return storeState{}, false, errUnsafeState
 	}
+
 	if info.Size() > maxStateBytes {
 		return storeState{}, false, errCorruptState
 	}
+
 	f, err := os.OpenFile(path, os.O_RDONLY|noFollowFlag, 0)
 	if err != nil {
 		if isNotExist(err) {
 			return storeState{}, false, nil
 		}
+
 		if errors.Is(err, fs.ErrPermission) {
 			return storeState{}, false, errUnsafeState
 		}
+
 		return storeState{}, false, fmt.Errorf("activity: open state file: %w", err)
 	}
+
 	defer func() { _ = f.Close() }()
+
 	raw, err := io.ReadAll(io.LimitReader(f, maxStateBytes+1))
 	if err != nil {
 		return storeState{}, false, fmt.Errorf("activity: read state file: %w", err)
 	}
+
 	if len(raw) > maxStateBytes {
 		return storeState{}, false, errCorruptState
 	}
+
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
+
 	var st storeState
 	if err := dec.Decode(&st); err != nil {
 		return storeState{}, false, errCorruptState
 	}
+
 	var trailing json.RawMessage
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return storeState{}, false, errCorruptState
 	}
+
 	if !st.valid() {
 		return storeState{}, false, errCorruptState
 	}
+
 	return st, true, nil
 }
 
@@ -133,38 +156,49 @@ func writeState(dir string, st storeState) (err error) {
 	if err != nil {
 		return fmt.Errorf("activity: encode state: %w", err)
 	}
+
 	raw = append(raw, '\n')
+
 	tmp, err := os.CreateTemp(dir, ".state.json.")
 	if err != nil {
 		return fmt.Errorf("activity: create state file: %w", err)
 	}
+
 	tmpName := tmp.Name()
+
 	defer func() {
 		if err != nil {
 			_ = os.Remove(tmpName)
 		}
 	}()
+
 	if err = tmp.Chmod(fileMode); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("activity: chmod state file: %w", err)
 	}
+
 	if _, err = tmp.Write(raw); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("activity: write state file: %w", err)
 	}
+
 	if err = tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("activity: sync state file: %w", err)
 	}
+
 	if err = tmp.Close(); err != nil {
 		return fmt.Errorf("activity: close state file: %w", err)
 	}
+
 	if err = os.Rename(tmpName, filepath.Join(dir, stateName)); err != nil {
 		return fmt.Errorf("activity: replace state file: %w", err)
 	}
+
 	if err = syncDir(dir); err != nil {
 		return fmt.Errorf("activity: sync store directory: %w", err)
 	}
+
 	return nil
 }
 
@@ -175,5 +209,6 @@ func syncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
 	return f.Sync()
 }

@@ -12,6 +12,7 @@ func TestActivationPendingHealthyIsUnchanged(t *testing.T) {
 	f.Records.Unfollowing = map[string]backup.Unfollow{
 		"app": {Source: "source", Settled: true},
 	}
+
 	results := Run(NodeChecks(), f, "")
 	for _, db := range []string{"app", "other"} {
 		if r := byID(results, "activation.pending", db); r.Status != Pass {
@@ -30,18 +31,22 @@ func TestActivationRoutingFenceFails(t *testing.T) {
 	f.Records.Unfollowing = map[string]backup.Unfollow{
 		"app": {Source: "source", OperationID: "unfollow-1", Settled: true},
 	}
+
 	r := byID(Run(NodeChecks(), f, ""), "activation.pending", "app")
 	if r.Status != Fail {
 		t.Fatalf("routing fence: %s (%s), want fail", r.Status, r.Detail)
 	}
+
 	for _, want := range []string{"routing", "not verified as ready for clients"} {
 		if !strings.Contains(r.Detail, want) {
 			t.Errorf("detail %q does not mention %q", r.Detail, want)
 		}
 	}
+
 	if r.Fix != "vaire apply" {
 		t.Errorf("fix %q does not finish routing with apply", r.Fix)
 	}
+
 	if other := byID(Run(NodeChecks(), f, ""), "activation.pending", "other"); other.Status != Pass {
 		t.Errorf("other database inherited the fence: %s (%s)", other.Status, other.Detail)
 	}
@@ -52,6 +57,7 @@ func TestActivationUnfinishedPhaseFails(t *testing.T) {
 	f.Records.Activation = map[string]backup.ActivationFence{
 		"app": {OperationID: "fork-1", Kind: "fork", Database: "app", Phase: "promoted"},
 	}
+
 	r := byID(Run(ActivationChecks(), f, ""), "activation.pending", "app")
 	if r.Status != Fail || !strings.Contains(r.Detail, "promoted") || !strings.Contains(r.Fix, "fork-1") {
 		t.Fatalf("unfinished fence: %+v", r)
@@ -63,6 +69,7 @@ func TestActivationUnsettledUnfollowFails(t *testing.T) {
 	f.Records.Unfollowing = map[string]backup.Unfollow{
 		"app": {Source: "source", OperationID: "unfollow-1"},
 	}
+
 	r := byID(Run(ActivationChecks(), f, ""), "activation.pending", "app")
 	if r.Status != Fail || !strings.Contains(r.Detail, "aliases withheld") || !strings.Contains(r.Fix, "vaire db unfollow app") {
 		t.Fatalf("unsettled unfollow: %+v", r)
@@ -74,19 +81,24 @@ func TestActivationUnfinishedUndoFails(t *testing.T) {
 	f.Records.Undoing = map[string]backup.Undo{
 		"app": {Aside: "app__pre_restore_20261117", StartedAt: "2026-11-17T10:00:00Z"},
 	}
+
 	r := byID(Run(ActivationChecks(), f, ""), "activation.pending", "app")
 	if r.Status != Fail || !strings.Contains(r.Detail, "restore undo") || !strings.Contains(r.Detail, "routes are not verified") {
 		t.Fatalf("unfinished undo: %+v", r)
 	}
+
 	if !strings.Contains(r.Fix, "vaire restore undo app --confirm app/restore") {
 		t.Errorf("fix %q does not resume the undo", r.Fix)
 	}
+
 	if other := byID(Run(ActivationChecks(), f, ""), "activation.pending", "other"); other.Status != Pass {
 		t.Errorf("other database inherited the undo: %+v", other)
 	}
+
 	f.Records.Activation = map[string]backup.ActivationFence{
 		"app": {OperationID: "restore-1", Kind: "restore-promote", Database: "app", Phase: "routing"},
 	}
+
 	r = byID(Run(ActivationChecks(), f, ""), "activation.pending", "app")
 	if !strings.Contains(r.Fix, "vaire restore undo app") {
 		t.Errorf("an inherited fence hid the finish-only undo retry: %+v", r)
@@ -95,6 +107,7 @@ func TestActivationUnfinishedUndoFails(t *testing.T) {
 
 func TestActivationPendingFiltersByDatabase(t *testing.T) {
 	f := healthy()
+
 	f.Records.Activation = map[string]backup.ActivationFence{
 		"app": {OperationID: "restore-1", Kind: "restore-promote", Database: "app", Phase: "routing"},
 	}
@@ -103,6 +116,7 @@ func TestActivationPendingFiltersByDatabase(t *testing.T) {
 			t.Fatalf("--db other included app's pending fence: %+v", r)
 		}
 	}
+
 	if r := byID(Run(ActivationChecks(), f, "app"), "activation.pending", "app"); r.Status != Fail {
 		t.Errorf("--db app did not report the pending fence: %+v", r)
 	}
@@ -110,6 +124,7 @@ func TestActivationPendingFiltersByDatabase(t *testing.T) {
 
 func TestActivationAwaitingRecoverySkips(t *testing.T) {
 	f := healthy()
+
 	f.Clusters[0].AwaitingRecovery = true
 	if r := byID(Run(ActivationChecks(), f, ""), "activation.pending", "app"); r.Status != Skip {
 		t.Errorf("awaiting recovery: %s (%s), want skip", r.Status, r.Detail)

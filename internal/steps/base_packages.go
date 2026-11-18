@@ -34,15 +34,18 @@ func (basePackages) Inputs(config.Cluster, engine.Runtime) ([]byte, error) {
 
 func (basePackages) Check(ctx context.Context, _ config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {
 	var missing []string
+
 	for _, pkg := range basePackageList {
 		out, _ := Probe(ctx, "dpkg-query", "-W", "-f=${Status}", pkg)
 		if !PackageInstalled(out) {
 			missing = append(missing, pkg)
 		}
 	}
+
 	if len(missing) > 0 {
 		return incomplete("missing " + strings.Join(missing, ", ")), nil
 	}
+
 	return complete(), nil
 }
 
@@ -51,5 +54,6 @@ func (s basePackages) Apply(ctx context.Context, _ config.Cluster, rt engine.Run
 		"PACKAGES":          strings.Join(basePackageList, " "),
 		"OPTIONAL_PACKAGES": strings.Join(optionalPackageList, " "),
 	}, report)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }

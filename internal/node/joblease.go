@@ -22,6 +22,7 @@ func leaseJob(job string) bool {
 	case "db-fork", "db-follow", "restore", "recover", "restore-drill":
 		return true
 	}
+
 	return false
 }
 
@@ -29,6 +30,7 @@ func validateJobLockParams(env *jobEnv) error {
 	if !leaseJob(env.Job) {
 		return nil
 	}
+
 	var p struct {
 		Database string `json:"database"`
 		Source   string `json:"source"`
@@ -39,12 +41,15 @@ func validateJobLockParams(env *jobEnv) error {
 			return err
 		}
 	}
+
 	valid := func(name string) bool { return config.DatabasePattern.MatchString(name) }
+
 	switch env.Job {
 	case "db-fork", "db-follow":
 		if !valid(p.Source) || !valid(p.Name) {
 			return errors.New("invalid job source or target")
 		}
+
 		if _, ok := env.Cluster.ClusterByName(p.Source); !ok {
 			return fmt.Errorf("job source %s is not configured", p.Source)
 		}
@@ -52,6 +57,7 @@ func validateJobLockParams(env *jobEnv) error {
 		if !valid(p.Database) {
 			return errors.New("invalid job database")
 		}
+
 		if _, ok := env.Cluster.ClusterByName(p.Database); !ok {
 			return fmt.Errorf("job database %s is not configured", p.Database)
 		}
@@ -59,15 +65,18 @@ func validateJobLockParams(env *jobEnv) error {
 		if !valid(env.DB) {
 			return errors.New("invalid job database")
 		}
+
 		if _, ok := env.Cluster.ClusterByName(env.DB); !ok {
 			return fmt.Errorf("job database %s is not configured", env.DB)
 		}
 	}
+
 	return nil
 }
 
 func jobLockRequests(env *jobEnv) []jobLockRequest {
 	byName := make(map[string]engine.LockMode)
+
 	add := func(name string, mode engine.LockMode) {
 		if name != "" && (byName[name] == "" || mode == engine.LockExclusive) {
 			byName[name] = mode
@@ -78,12 +87,15 @@ func jobLockRequests(env *jobEnv) []jobLockRequest {
 		if env.Job == "db-fork" {
 			mode = engine.LockShared
 		}
+
 		add(name, mode)
 	}
+
 	var p struct {
 		Database string `json:"database"`
 		Name     string `json:"name"`
 	}
+
 	_ = json.Unmarshal(env.Params, &p)
 	switch env.Job {
 	case "db-fork", "db-follow":
@@ -93,19 +105,24 @@ func jobLockRequests(env *jobEnv) []jobLockRequest {
 	case "restore-drill":
 		add(backup.DrillName(env.DB), engine.LockExclusive)
 	}
+
 	out := make([]jobLockRequest, 0, len(byName))
 	for name, mode := range byName {
 		out = append(out, jobLockRequest{name, mode})
 	}
+
 	slices.SortFunc(out, func(a, b jobLockRequest) int {
 		if a.name < b.name {
 			return -1
 		}
+
 		if a.name > b.name {
 			return 1
 		}
+
 		return 0
 	})
+
 	return out
 }
 
@@ -134,9 +151,11 @@ func newLockedJobLease(env *jobEnv, requests []jobLockRequest, heavy, release en
 	for _, r := range requests {
 		l.targets[r.name] = r.mode
 	}
+
 	lockedJobs.Lock()
 	lockedJobs.active[l] = struct{}{}
 	lockedJobs.Unlock()
+
 	return l
 }
 
@@ -146,18 +165,23 @@ func withLockedJobTarget(env *jobEnv, target string, action func() error) error 
 	if env == nil || env.lease == nil || action == nil {
 		return errors.New("locked job authority required")
 	}
+
 	l := env.lease
+
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+
 	lockedJobs.Lock()
 	_, active := lockedJobs.active[l]
 	lockedJobs.Unlock()
+
 	if !active || l.env != env || env.ID == "" || env.OperationID == "" || env.installID == "" ||
 		l.id != env.ID || l.kind != env.Job || l.operation != env.OperationID || l.install != env.installID ||
 		l.params != string(env.Params) || l.db != env.DB || l.target != target ||
 		target == "" || l.targets[target] != engine.LockExclusive {
 		return errors.New("locked job authority does not match target")
 	}
+
 	return action()
 }
 
@@ -166,6 +190,7 @@ func jobLeaseTarget(env *jobEnv) string {
 		Database string `json:"database"`
 		Name     string `json:"name"`
 	}
+
 	_ = json.Unmarshal(env.Params, &p)
 	switch env.Job {
 	case "db-fork", "db-follow":
@@ -175,6 +200,7 @@ func jobLeaseTarget(env *jobEnv) string {
 	case "restore-drill":
 		return backup.DrillName(env.DB)
 	}
+
 	return ""
 }
 
@@ -188,6 +214,7 @@ func (l *lockedJobLease) finish() {
 	l.once.Do(func() {
 		l.mu.Lock()
 		defer l.mu.Unlock()
+
 		lockedJobs.Lock()
 		delete(lockedJobs.active, l)
 		lockedJobs.Unlock()

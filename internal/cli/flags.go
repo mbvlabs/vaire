@@ -69,6 +69,7 @@ func applyFlags(cmd *cobra.Command, flags []fl) {
 		default:
 			panic("unknown flag kind for " + flag.name)
 		}
+
 		if flag.hidden {
 			if err := cmd.Flags().MarkHidden(flag.name); err != nil {
 				panic(err)

@@ -32,32 +32,40 @@ func run(ctx context.Context, args []string, out io.Writer, aws awsRunner) error
 	fs.SetOutput(io.Discard)
 	bucket := fs.String("bucket", "", "release bucket")
 	key := fs.String("key", "manifest.json", "channel manifest key")
+
 	endpoint := fs.String("endpoint", "", "S3 endpoint")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
 	var current, candidate string
+
 	switch {
 	case *bucket != "" && *endpoint != "" && fs.NArg() == 1:
 		var err error
+
 		current, err = bucketVersion(ctx, aws, *bucket, *key, *endpoint)
 		if err != nil {
 			return err
 		}
+
 		candidate = fs.Arg(0)
 	case *bucket == "" && *endpoint == "" && fs.NArg() == 2:
 		current, candidate = fs.Arg(0), fs.Arg(1)
 	default:
 		return fmt.Errorf("usage: promote CURRENT CANDIDATE, or promote --bucket BUCKET --key KEY --endpoint URL CANDIDATE")
 	}
+
 	ok, err := release.Promotes(current, candidate)
 	if err != nil {
 		return err
 	}
+
 	if ok {
 		_, err = fmt.Fprintln(out, "yes")
 	} else {
 		_, err = fmt.Fprintln(out, "no")
 	}
+
 	return err
 }

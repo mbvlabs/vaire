@@ -38,6 +38,7 @@ func targetWindowDriver() restoreTargetDriver {
 // second.
 func TestRestoreTimeTargetKeepsFraction(t *testing.T) {
 	spec := config.ClusterSpec{Name: "app", Stanza: "app-stanza"}
+
 	cases := []struct {
 		name  string
 		value string
@@ -56,6 +57,7 @@ func TestRestoreTimeTargetKeepsFraction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if got != c.want {
 				t.Errorf("target %q, want %q", got, c.want)
 			}
@@ -76,10 +78,12 @@ func TestRestoreTimeTargetRefusesInvalidTime(t *testing.T) {
 // archived WAL is refused even though its whole second is inside.
 func TestRestoreWindowKeepsFractionalInstant(t *testing.T) {
 	w := Window{From: "2026-11-17T18:00:01Z", To: "2026-11-17T19:00:00Z"}
+
 	at, err := time.Parse(time.RFC3339Nano, "2026-11-17T19:00:00.000001Z")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := inWindow(w, at); err == nil {
 		t.Fatal("a target after the window's end was accepted")
 	}
@@ -92,6 +96,7 @@ func TestDrillTargetKeepsFraction(t *testing.T) {
 	drillReadInfo = func(context.Context, config.ClusterSpec, string, engine.Reporter) (backup.Info, error) {
 		return backup.Info{Sets: []backup.Set{{Label: "F1", Type: backup.TypeFull}}}, nil
 	}
+
 	t.Cleanup(func() { drillReadInfo = old })
 
 	cases := []struct {
@@ -106,21 +111,26 @@ func TestDrillTargetKeepsFraction(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			drill := backup.Drill{Database: "app"}
+
 			opts, _, latest, err := startDrill(context.Background(), &jobEnv{Job: "restore-drill"}, drillParams{Time: c.value},
 				config.ClusterSpec{Name: "app", Stanza: "app-stanza"}, "app", backup.Records{}, &drill, func() {})
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if latest.Label != "F1" || opts.Kind != backup.TargetTime {
 				t.Fatalf("drill options %+v, latest %+v", opts, latest)
 			}
+
 			want, err := time.Parse(time.RFC3339Nano, c.want)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if !opts.Time.Equal(want) {
 				t.Errorf("drill restore target %s, want %s", opts.Time, want)
 			}
+
 			if drill.Target != c.want {
 				t.Errorf("drill record target %q, want %q", drill.Target, c.want)
 			}
@@ -143,6 +153,7 @@ func TestRestoreRecordTargetKeepsFraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	opts := restoreOptionsFromRecord(backup.Restore{
 		Kind: backup.TargetTime, Target: "2026-11-17T18:44:53.983364Z",
 	})

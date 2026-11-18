@@ -17,12 +17,15 @@ func runCheckSteps(cmd *cobra.Command) error {
 	if err := engine.ValidateIDs(catalog); err != nil {
 		return output.NewError(output.CodeValidation, err.Error(), output.ExitConfig, "Fix the step catalogue in internal/steps.")
 	}
+
 	if err := versions.CheckExporterPins(); err != nil {
 		return output.NewError(output.CodeValidation, err.Error(), output.ExitConfig, "Pin a version and a sha256 per architecture in internal/versions.")
 	}
+
 	ids := make([]string, 0, len(catalog))
 	for _, step := range catalog {
 		ids = append(ids, step.ID())
 	}
+
 	return output.OK(cmd, map[string]any{"count": len(ids), "ids": ids}, fmt.Sprintf("%d steps", len(ids)))
 }

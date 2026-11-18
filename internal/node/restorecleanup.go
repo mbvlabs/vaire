@@ -22,16 +22,19 @@ var restoreCleanupRegistration = func(name, source, dataRoot string, sourcePort,
 	if err := followCleanupRegistration(name, source, dataRoot, sourcePort, port); err != nil {
 		return err
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// -s prints the bare value; pg_conftool's default output is "port = <n>".
 	cmd := exec.CommandContext(ctx, "pg_conftool", "-s", "18", name, "show", "port")
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.Output()
+
 	effective, parseErr := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil || parseErr != nil || effective != port {
 		return errors.New("effective restore port is unverifiable")
 	}
+
 	return nil
 }
 var restoreCleanupDrop = followCleanupDrop
@@ -54,6 +57,7 @@ func (a *restoreCleanup) close() {
 			_ = f.Close()
 		}
 	}
+
 	for _, r := range []*os.Root{a.dataParent, a.confParent} {
 		if r != nil {
 			_ = r.Close()
@@ -65,6 +69,7 @@ func openRestoreCleanup(cfg config.Cluster, r backup.Restore) (*restoreCleanup, 
 	if err := validateRestoreCleanupRecord(cfg, r); err != nil {
 		return nil, err
 	}
+
 	return openRestoreCleanupArtifacts(cfg, r)
 }
 
@@ -73,32 +78,40 @@ func validateRestoreCleanupRecord(cfg config.Cluster, r backup.Restore) error {
 	if t == nil {
 		return incompleteMaterialisation(backup.RestoringName(r.Database))
 	}
+
 	if err := validateRestoreCleanupPair(r, t); err != nil {
 		return err
 	}
+
 	if err := validateRestoreCleanupAttempt(cfg, t); err != nil {
 		return err
 	}
+
 	instance, err := currentFollowInstance()
 	if err != nil || instance != r.InstanceID {
 		return incompleteMaterialisation(t.Target)
 	}
+
 	spec, ok := cfg.ClusterByName(r.Database)
 	if !ok || spec.Port != t.SourcePort || spec.Stanza != t.Stanza {
 		return incompleteMaterialisation(t.Target)
 	}
+
 	state, err := restoreAbsenceState()
 	if err != nil {
 		return err
 	}
+
 	job, err := materialisationJob(state, r.ID)
 	if err != nil || job.Job != t.Kind || job.DB != r.Database || !job.Final() {
 		return incompleteMaterialisation(t.Target)
 	}
+
 	uid, err := materialisationPostgresUID()
 	if err != nil || t.DataIdentity.UID != uid || t.ConfigIdentity.UID != uid {
 		return incompleteMaterialisation(t.Target)
 	}
+
 	return nil
 }
 
@@ -110,6 +123,7 @@ func validateRestoreCleanupPair(r backup.Restore, t *backup.MaterialisationAttem
 		(t.Kind != "restore" && t.Kind != "recover") || (t.Kind == "recover") != r.Recover {
 		return incompleteMaterialisation(backup.RestoringName(r.Database))
 	}
+
 	return nil
 }
 
@@ -122,60 +136,74 @@ func validateRestoreCleanupAttempt(cfg config.Cluster, t *backup.Materialisation
 		t.ConfigPath != filepath.Join(materialisationConfigRoot, t.Target) {
 		return incompleteMaterialisation(t.Target)
 	}
+
 	return nil
 }
 
 func openRestoreCleanupArtifacts(cfg config.Cluster, r backup.Restore) (*restoreCleanup, error) {
 	t := r.Attempt
+
 	uid, err := materialisationPostgresUID()
 	if err != nil {
 		return nil, err
 	}
+
 	a := &restoreCleanup{record: r, dataRoot: cfg.Server.DataRoot}
+
 	a.dataParent, a.dataInfo, a.dataAncestors, err = openMaterialisationParent(a.dataRoot, uid, true)
 	if err != nil {
 		return nil, err
 	}
+
 	a.confParent, a.confInfo, a.confAncestors, err = openMaterialisationConfigParent(uid)
 	if err != nil {
 		a.close()
 		return nil, err
 	}
+
 	a.data, err = openMaterialisationChild(a.dataParent, t.Target)
 	if err != nil {
 		a.close()
 		return nil, err
 	}
+
 	a.conf, err = openMaterialisationChild(a.confParent, t.Target)
 	if err != nil {
 		a.close()
 		return nil, err
 	}
+
 	if err := a.validate(false); err != nil {
 		a.close()
 		return nil, err
 	}
+
 	if err := restoreCleanupRegistration(t.Target, t.Source, a.dataRoot, t.SourcePort, t.TemporaryPort); err != nil {
 		a.close()
 		return nil, err
 	}
+
 	return a, nil
 }
 
 func (a *restoreCleanup) validate(removed bool) error {
 	t := a.record.Attempt
+
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	current, ok := records.Restores[t.Source]
 	if !ok || !reflect.DeepEqual(current, a.record) {
 		return incompleteMaterialisation(t.Target)
 	}
+
 	if err := errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.confAncestors),
 		validateMaterialisationParent(a.dataRoot, a.dataInfo), validateMaterialisationParent(materialisationConfigRoot, a.confInfo)); err != nil {
 		return err
 	}
+
 	for _, item := range []struct {
 		root *os.Root
 		file *os.File
@@ -186,36 +214,46 @@ func (a *restoreCleanup) validate(removed bool) error {
 			if err := validateMaterialisationDir(item.root, t.Target, restoreNodeID(item.id), item.file, item.mode); err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		if _, err := item.root.Lstat(t.Target); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("restore cleanup path remains or was replaced")
 		}
+
 		info, err := item.file.Stat()
 		if err != nil {
 			return err
 		}
+
 		id, err := materialisationArtifactID(info)
+
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if err != nil || !ok || restoreFileID(id) != item.id || st.Nlink != 0 {
 			return errors.New("original restore artifact not removed")
 		}
 	}
+
 	return nil
 }
 
 func (a *restoreCleanup) remove(ctx context.Context, env *Env) error {
 	t := a.record.Attempt
+
 	return restoreCleanupReservation(ctx, t.Target, t.TemporaryPort, t.ReservationIdentity, func() error {
 		if err := a.validate(false); err != nil {
 			return err
 		}
+
 		if err := restoreCleanupRegistration(t.Target, t.Source, a.dataRoot, t.SourcePort, t.TemporaryPort); err != nil {
 			return err
 		}
+
 		if err := a.validate(false); err != nil {
 			return err
 		}
+
 		if err := restoreCleanupDrop(ctx, env, t.Target); err != nil {
 			return err
 		}
@@ -224,26 +262,32 @@ func (a *restoreCleanup) remove(ctx context.Context, env *Env) error {
 		if err := a.removeRemaining(); err != nil {
 			return err
 		}
+
 		if err := a.validate(true); err != nil {
 			return err
 		}
+
 		return errors.Join(materialisationSyncArtifactParent(a.dataParent), materialisationSyncArtifactParent(a.confParent))
 	})
 }
 
 func (a *restoreCleanup) removeRemaining() error {
 	t := a.record.Attempt
+
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	if current, ok := records.Restores[t.Source]; !ok || !reflect.DeepEqual(current, a.record) {
 		return incompleteMaterialisation(t.Target)
 	}
+
 	if err := errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.confAncestors),
 		validateMaterialisationParent(a.dataRoot, a.dataInfo), validateMaterialisationParent(materialisationConfigRoot, a.confInfo)); err != nil {
 		return err
 	}
+
 	for _, item := range []struct {
 		root *os.Root
 		file *os.File
@@ -254,39 +298,49 @@ func (a *restoreCleanup) removeRemaining() error {
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+
 		if err != nil {
 			return err
 		}
+
 		if err := validateMaterialisationDir(item.root, t.Target, restoreNodeID(item.id), item.file, item.mode); err != nil {
 			return err
 		}
+
 		if err := item.root.RemoveAll(t.Target); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
 func (a *restoreCleanup) retire(ctx context.Context) error {
 	t := a.record.Attempt
+
 	unlock, err := restoreCleanupAbsence(ctx, t.Target, t.TemporaryPort, false)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+
 	if err := a.validate(true); err != nil {
 		return err
 	}
+
 	err = backup.UpdateRecords(func(s *backup.Records) error {
 		current, ok := s.Restores[t.Source]
 		if !ok || !reflect.DeepEqual(current, a.record) {
 			return incompleteMaterialisation(t.Target)
 		}
+
 		delete(s.Restores, t.Source)
+
 		return nil
 	})
 	if err == nil {
 		releaseMaterialisationJob(t.JobID)
 	}
+
 	return err
 }

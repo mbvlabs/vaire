@@ -10,6 +10,7 @@ import (
 
 func retentionStore(t *testing.T, retention time.Duration) *Store {
 	t.Helper()
+
 	return &Store{
 		Dir:          t.TempDir() + "/activity",
 		MaxBytes:     2 * maxEventBytes,
@@ -31,33 +32,42 @@ func labelledEvent(label string) Event {
 func TestRetentionByteBudget(t *testing.T) {
 	s := retentionStore(t, 24*time.Hour)
 	label := strings.Repeat("a", 100)
+
 	const total = 80
-	for i := 0; i < total; i++ {
+	for range total {
 		mustAppend(t, s, labelledEvent(label))
 	}
+
 	health, err := s.Health(context.Background())
 	if err != nil {
 		t.Fatalf("Health: %v", err)
 	}
+
 	if health.UsedBytes > health.MaxBytes {
 		t.Fatalf("used bytes %d > budget %d", health.UsedBytes, health.MaxBytes)
 	}
+
 	if health.Segments > 3 {
 		t.Fatalf("segments = %d, want at most 3", health.Segments)
 	}
+
 	page, err := s.Query(context.Background(), Query{Limit: MaxLimit})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
+
 	if len(page.Events) == 0 {
 		t.Fatal("retention kept no events")
 	}
+
 	if !page.Coverage.Partial {
 		t.Fatalf("retention loss not reported: %+v", page.Coverage)
 	}
+
 	if page.Coverage.FirstRetainedAt == "" {
 		t.Fatal("first retained timestamp missing")
 	}
+
 	if page.Events[0].Sequence <= 1 {
 		t.Fatalf("oldest sequence = %d, want later than 1", page.Events[0].Sequence)
 	}
@@ -65,44 +75,56 @@ func TestRetentionByteBudget(t *testing.T) {
 
 func TestCursorExpiredAfterRotation(t *testing.T) {
 	s := retentionStore(t, time.Hour)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		mustAppend(t, s, labelledEvent(strings.Repeat("a", 100)))
 	}
+
 	first, err := s.Query(context.Background(), Query{Limit: 2})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
+
 	if first.NextCursor == "" {
 		t.Fatal("first page has no cursor")
 	}
+
 	expiring := &Store{Dir: s.Dir, MaxBytes: s.MaxBytes, SegmentBytes: s.SegmentBytes, Retention: time.Nanosecond}
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		mustAppend(t, expiring, labelledEvent(strings.Repeat("b", 100)))
 	}
+
 	q := Query{Limit: 2, Cursor: first.NextCursor}
+
 	page, err := expiring.Query(context.Background(), q)
 	if err != nil {
 		t.Fatalf("expired cursor Query returned error: %v", err)
 	}
+
 	if !page.Coverage.CursorExpired {
 		t.Fatalf("cursor did not expire: %+v", page.Coverage)
 	}
+
 	if !page.Coverage.Partial {
 		t.Fatalf("expired cursor page not partial: %+v", page.Coverage)
 	}
+
 	if len(page.Events) != 0 {
 		t.Fatalf("expired cursor silently returned %d events", len(page.Events))
 	}
+
 	if page.NextCursor != "" {
 		t.Fatalf("expired cursor offered a next cursor: %q", page.NextCursor)
 	}
+
 	fresh, err := expiring.Query(context.Background(), Query{Limit: MaxLimit})
 	if err != nil {
 		t.Fatalf("fresh Query: %v", err)
 	}
+
 	if !fresh.Coverage.Partial || fresh.Coverage.FirstRetainedAt == "" {
 		t.Fatalf("fresh query after retention = %+v", fresh.Coverage)
 	}
+
 	if len(fresh.Events) == 0 || fresh.Events[0].Sequence <= 3 {
 		t.Fatalf("retained events = %+v", fresh.Events)
 	}
@@ -111,8 +133,9 @@ func TestCursorExpiredAfterRotation(t *testing.T) {
 func TestRetentionByTime(t *testing.T) {
 	s := retentionStore(t, time.Hour)
 	old := time.Now().UTC().Add(-2 * time.Hour)
+
 	label := strings.Repeat("c", 100)
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		mustAppend(t, s, Event{
 			Source:     SourceJob,
 			Action:     "backup.full",
@@ -122,35 +145,44 @@ func TestRetentionByTime(t *testing.T) {
 			OccurredAt: old.Format(time.RFC3339),
 		})
 	}
-	for i := 0; i < 40; i++ {
+
+	for range 40 {
 		mustAppend(t, s, labelledEvent(label))
 	}
+
 	health, err := s.Health(context.Background())
 	if err != nil {
 		t.Fatalf("Health: %v", err)
 	}
+
 	if health.FirstRetainedAt == "" {
 		t.Fatal("first retained timestamp missing")
 	}
+
 	first, err := time.Parse(time.RFC3339Nano, health.FirstRetainedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if first.Before(time.Now().UTC().Add(-time.Hour)) {
 		t.Fatalf("expired events retained: first = %v", first)
 	}
+
 	page, err := s.Query(context.Background(), Query{Since: "1h", Limit: MaxLimit})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
+
 	if len(page.Events) == 0 {
 		t.Fatal("no recent events after time retention")
 	}
+
 	for _, ev := range page.Events {
 		at, err := time.Parse(time.RFC3339Nano, ev.OccurredAt)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if at.Before(time.Now().UTC().Add(-time.Hour)) {
 			t.Fatalf("expired event returned: %v", at)
 		}
@@ -162,10 +194,12 @@ func TestRetentionRefusesToDeleteActiveContent(t *testing.T) {
 	// segment, and retention never removes the segment it is writing.
 	s := retentionStore(t, time.Nanosecond)
 	assigned := mustAppend(t, s, labelledEvent(strings.Repeat("d", 100)))
+
 	page, err := s.Query(context.Background(), Query{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
+
 	if len(page.Events) != 1 || page.Events[0].EventID != assigned.EventID {
 		t.Fatalf("active event was lost: %+v", page.Events)
 	}
@@ -189,19 +223,24 @@ func TestRetentionKeepsFreshEventsBeforeBackdatedTail(t *testing.T) {
 	fresh := mustAppend(t, s, ev)
 	ev.OccurredAt = now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
 	mustAppend(t, s, ev)
+
 	segments := segmentsOf(t, s)
 	if len(segments) != 1 {
 		t.Fatalf("setup has %d segments, want 1", len(segments))
 	}
+
 	if newest, ok := retentionTime(context.Background(), segments[0], s.SegmentBytes, now); !ok || !newest.Equal(now) {
 		t.Errorf("retention time = %v, %t; want newest occurrence %v", newest, ok, now)
 	}
+
 	ev.OccurredAt = now.Format(time.RFC3339Nano)
 	mustAppend(t, s, ev)
+
 	page, err := s.Query(context.Background(), Query{Limit: MaxLimit})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(page.Events) != 3 || page.Events[0].EventID != fresh.EventID {
 		t.Fatalf("backdated tail expired fresh evidence: %+v", page.Events)
 	}
@@ -211,10 +250,12 @@ func TestRetentionKeepsFreshEventsBeforeBackdatedTail(t *testing.T) {
 	for range 40 {
 		mustAppend(t, s, ev)
 	}
+
 	page, err = s.Query(context.Background(), Query{Limit: MaxLimit})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(page.Events) == 0 || page.Events[0].EventID != fresh.EventID {
 		t.Fatal("rotation expired a segment that still contained fresh evidence")
 	}
@@ -226,12 +267,15 @@ func TestRetentionDoesNotExpireIncompleteScan(t *testing.T) {
 	now := time.Now().UTC()
 	ev.OccurredAt = now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
 	mustAppend(t, s, ev)
+
 	seg := segmentsOf(t, s)[0]
 	if segmentExpired(context.Background(), seg, seg.size-1, now.Add(-time.Hour), now) {
 		t.Fatal("a bounded partial scan authorized deletion")
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	if segmentExpired(ctx, seg, seg.size, now.Add(-time.Hour), now) {
 		t.Fatal("a cancelled scan authorized deletion")
 	}

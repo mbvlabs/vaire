@@ -54,23 +54,29 @@ func ReadCgroup(dir string) (Cgroup, bool) {
 	if err != nil {
 		return Cgroup{}, false
 	}
+
 	c := Cgroup{MemoryCurrent: cur, MemoryEvents: map[string]int64{}, Pressure: map[string]Pressure{}}
 	c.MemoryHigh, _ = readInt(filepath.Join(dir, "memory.high"))
+
 	c.MemoryMax, _ = readInt(filepath.Join(dir, "memory.max"))
 	if raw, err := os.ReadFile(filepath.Join(dir, "memory.events")); err == nil {
 		c.MemoryEvents = ParseKeyValues(string(raw))
 	}
+
 	for _, res := range []string{"cpu", "memory", "io"} {
 		if raw, err := os.ReadFile(filepath.Join(dir, res+".pressure")); err == nil {
 			c.Pressure[res] = ParsePressure(string(raw))
 		}
 	}
+
 	if raw, err := os.ReadFile(filepath.Join(dir, "cpu.stat")); err == nil {
 		c.CPUUsageSec = float64(ParseKeyValues(string(raw))["usage_usec"]) / 1e6
 	}
+
 	if raw, err := os.ReadFile(filepath.Join(dir, "io.stat")); err == nil {
 		c.IOReadBytes, c.IOWriteByte = ParseIOStat(string(raw))
 	}
+
 	return c, true
 }
 
@@ -80,25 +86,30 @@ func readInt(path string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	s := strings.TrimSpace(string(raw))
 	if s == "max" {
 		return 0, nil
 	}
+
 	return strconv.ParseInt(s, 10, 64)
 }
 
 // ParseKeyValues parses "key value" lines (memory.events, cpu.stat).
 func ParseKeyValues(raw string) map[string]int64 {
 	out := map[string]int64{}
-	for _, line := range strings.Split(raw, "\n") {
+
+	for line := range strings.SplitSeq(raw, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			continue
 		}
+
 		if n, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
 			out[fields[0]] = n
 		}
 	}
+
 	return out
 }
 
@@ -110,21 +121,26 @@ func ParseKeyValues(raw string) map[string]int64 {
 // total is in microseconds.
 func ParsePressure(raw string) Pressure {
 	var p Pressure
-	for _, line := range strings.Split(raw, "\n") {
+
+	for line := range strings.SplitSeq(raw, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
 		}
+
 		var pl PressureLine
+
 		for _, f := range fields[1:] {
 			k, v, ok := strings.Cut(f, "=")
 			if !ok {
 				continue
 			}
+
 			n, err := strconv.ParseFloat(v, 64)
 			if err != nil {
 				continue
 			}
+
 			switch k {
 			case "avg10":
 				pl.Avg10 = n
@@ -136,6 +152,7 @@ func ParsePressure(raw string) Pressure {
 				pl.TotalSec = n / 1e6
 			}
 		}
+
 		switch fields[0] {
 		case "some":
 			p.Some = pl
@@ -143,6 +160,7 @@ func ParsePressure(raw string) Pressure {
 			p.Full, p.HasFull = pl, true
 		}
 	}
+
 	return p
 }
 
@@ -150,16 +168,18 @@ func ParsePressure(raw string) Pressure {
 //
 //	253:0 rbytes=1 wbytes=2 rios=3 wios=4 dbytes=0 dios=0
 func ParseIOStat(raw string) (read, write int64) {
-	for _, line := range strings.Split(raw, "\n") {
-		for _, f := range strings.Fields(line) {
+	for line := range strings.SplitSeq(raw, "\n") {
+		for f := range strings.FieldsSeq(line) {
 			k, v, ok := strings.Cut(f, "=")
 			if !ok {
 				continue
 			}
+
 			n, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {
 				continue
 			}
+
 			switch k {
 			case "rbytes":
 				read += n
@@ -168,5 +188,6 @@ func ParseIOStat(raw string) (read, write int64) {
 			}
 		}
 	}
+
 	return read, write
 }

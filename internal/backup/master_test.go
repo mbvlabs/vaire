@@ -11,21 +11,26 @@ func TestDurableHashIgnoresBackupFacts(t *testing.T) {
 	base := r.durableHash()
 
 	r.RecordBackup("app", Set{Label: "20261015-010000F", Type: TypeFull}, "2026-10-15T01:05:00Z")
+
 	r.Drills = append(r.Drills, Drill{Database: "app"})
 	if r.durableHash() != base {
 		t.Fatal("a backup fact changed the durable hash: every backup would make a bundle")
 	}
 
 	r.DroppedStanzas = append(r.DroppedStanzas, DroppedStanza{Database: "old", Stanza: "old-abc123"})
+
 	afterDrop := r.durableHash()
 	if afterDrop == base {
 		t.Fatal("a dropped stanza didn't change the durable hash")
 	}
+
 	r.Timelines["app"] = TimelineSwitch{Stanza: "app-abc123", Timeline: "2"}
 	if r.durableHash() == afterDrop {
 		t.Fatal("a timeline switch didn't change the durable hash")
 	}
+
 	before := r.durableHash()
+
 	r.AwaitingRecovery["app"] = Awaiting{Stanza: "app-abc123"}
 	if r.durableHash() == before || !r.IsAwaiting("app") {
 		t.Fatal("awaiting recovery isn't durable")
@@ -35,6 +40,7 @@ func TestDurableHashIgnoresBackupFacts(t *testing.T) {
 func TestOwnsPrefix(t *testing.T) {
 	mine := &masterbackup.Epoch{Server: "prod", InstanceID: "aaa"}
 	earlier := &masterbackup.Epoch{Server: "prod", InstanceID: "old"}
+
 	theirs := &masterbackup.Epoch{Server: "staging", InstanceID: "bbb"}
 	for name, c := range map[string]struct {
 		epoch   *masterbackup.Epoch

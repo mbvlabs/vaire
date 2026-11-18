@@ -48,6 +48,7 @@ func ServerReserve(ramMiB, overrideMiB int) int {
 	if overrideMiB > 0 {
 		return overrideMiB
 	}
+
 	return maxInt(ReserveMinMiB, ramMiB*ReservePercent/100)
 }
 
@@ -62,6 +63,7 @@ func CPUShare(vcpu, clusters int) int {
 	if clusters < 1 {
 		clusters = 1
 	}
+
 	return minInt(vcpu, maxInt(2, vcpu/clusters))
 }
 
@@ -85,6 +87,7 @@ type Result struct {
 func Calculate(in Input) Result {
 	r := &calc{in: in}
 	r.add()
+
 	return r.res
 }
 
@@ -103,10 +106,12 @@ func (c *calc) add() {
 	in := c.in
 	ram := in.RAMMiB
 	cpu := CPUShare(in.VCPU, in.Clusters)
+
 	cpuReason := fmt.Sprintf("%d vCPU", cpu)
 	if cpu != in.VCPU {
 		cpuReason = fmt.Sprintf("%d vCPU share of %d over %d clusters", cpu, in.VCPU, in.Clusters)
 	}
+
 	analytics := in.Profile == ProfileAnalytics
 	ssd := !in.DiskRotational
 
@@ -117,6 +122,7 @@ func (c *calc) add() {
 	} else {
 		sharedBuffers = minInt(int(float64(ram)*0.25), 65536)
 	}
+
 	c.res.SharedBuffersMiB = sharedBuffers
 	c.set("shared_buffers", fmt.Sprintf("%dMB", sharedBuffers), "MB",
 		fmt.Sprintf("%s of the cluster's %d MiB", percentReason(ram, sharedBuffers), ram), "postmaster")
@@ -126,16 +132,19 @@ func (c *calc) add() {
 	if analytics {
 		ratio = 0.75
 	}
+
 	c.set("effective_cache_size", fmt.Sprintf("%dMB", int(float64(ram)*ratio)), "MB",
 		fmt.Sprintf("%.0f%% of the cluster's %d MiB", ratio*100, ram), "user")
 
 	// Connections.
 	maxConn := clampInt(4*cpu, 50, 400)
 	connReason := fmt.Sprintf("4 x %d vCPU, PgBouncer fans in", cpu)
+
 	if in.MaxConnections > 0 {
 		maxConn = in.MaxConnections
 		connReason = "from the cluster's size; both poolers fan in"
 	}
+
 	c.set("max_connections", itoa(maxConn), "", connReason, "postmaster")
 	// The two sum to config.ReservedConnections, the slots both pools leave free.
 	// Superusers may take reserved_connections' slots too, so no separate
@@ -148,14 +157,13 @@ func (c *calc) add() {
 	if factor == 0 {
 		factor = 2
 	}
+
 	ceiling := 256
 	if analytics {
 		ceiling = 1024
 	}
-	remaining := ram - sharedBuffers
-	if remaining < 0 {
-		remaining = 0
-	}
+
+	remaining := max(ram-sharedBuffers, 0)
 	workMem := remaining / (maxConn * factor)
 	workMem = clampInt(workMem, 4, ceiling)
 	c.set("work_mem", fmt.Sprintf("%dMB", workMem), "MB",
@@ -172,7 +180,9 @@ func (c *calc) add() {
 	if ram >= HugePagesMinMiB {
 		hugePages = "try"
 	}
+
 	c.set("huge_pages", hugePages, "", hugePagesReason(ram), "postmaster")
+
 	if hugePages == "try" {
 		c.res.HugePages = HugePages(sharedBuffers)
 	}
@@ -201,6 +211,7 @@ func (c *calc) add() {
 		c.set("effective_io_concurrency", "2", "", "HDD: little seek parallelism", "user")
 		c.set("maintenance_io_concurrency", "10", "", "HDD maintenance parallelism", "user")
 	}
+
 	c.set("io_method", "worker", "", "PostgreSQL 18 default; io_uring is an explicit opt-in", "postmaster")
 	c.set("io_workers", itoa(maxInt(3, cpu/4)), "", "one I/O worker per 4 vCPU, at least 3", "sighup")
 
@@ -209,10 +220,12 @@ func (c *calc) add() {
 	c.set("max_parallel_workers", itoa(cpu), "", "one parallel worker per vCPU: "+cpuReason, "postmaster")
 	c.set("max_parallel_workers_per_gather", itoa(parallelGather(in.Profile, cpu)), "", profileReason(in.Profile, "parallelism"), "user")
 	c.set("max_parallel_maintenance_workers", itoa(minInt(4, maxInt(1, cpu/2))), "", "parallel maintenance workers", "user")
+
 	jit := "off"
 	if analytics {
 		jit = "on"
 	}
+
 	c.set("jit", jit, "", jitReason(analytics), "user")
 
 	// Statistics and autovacuum.
@@ -220,6 +233,7 @@ func (c *calc) add() {
 	if analytics {
 		target = 500
 	}
+
 	c.set("default_statistics_target", itoa(target), "", profileReason(in.Profile, "statistics detail"), "user")
 	c.set("autovacuum_worker_slots", "16", "", "room for concurrent autovacuum workers", "postmaster")
 	c.set("autovacuum_max_workers", itoa(clampInt(cpu/2, 3, 8)), "", fmt.Sprintf("%d vCPU / 2, 3-8 workers", cpu), "sighup")
@@ -227,11 +241,13 @@ func (c *calc) add() {
 	c.set("autovacuum_vacuum_scale_factor", "0.05", "", "vacuum earlier than the 0.2 default", "sighup")
 	c.set("autovacuum_vacuum_insert_scale_factor", "0.05", "", "vacuum insert-only tables too", "sighup")
 	c.set("autovacuum_analyze_scale_factor", "0.02", "", "analyze earlier than the 0.1 default", "sighup")
+
 	if ssd {
 		c.set("autovacuum_vacuum_cost_limit", "2000", "", "SSD: allow more vacuum I/O", "sighup")
 	} else {
 		c.set("autovacuum_vacuum_cost_limit", "400", "", "HDD: throttle vacuum I/O", "sighup")
 	}
+
 	c.set("track_io_timing", "on", "", "measure I/O for pg_stat_statements and reports", "user")
 
 	// Guardrails and logging.
@@ -252,6 +268,7 @@ func HugePages(sharedBuffersMiB int) int {
 	if sharedBuffersMiB <= 0 {
 		return 0
 	}
+
 	return (sharedBuffersMiB*105+199)/200 + 64
 }
 
@@ -281,6 +298,7 @@ func hugePagesReason(ram int) string {
 	if ram >= HugePagesMinMiB {
 		return "try: the cluster's memory is large enough to reserve huge pages"
 	}
+
 	return fmt.Sprintf("off: the cluster has under %d MiB", HugePagesMinMiB)
 }
 
@@ -288,6 +306,7 @@ func jitReason(analytics bool) string {
 	if analytics {
 		return "analytics: JIT pays off on long scans"
 	}
+
 	return "off: JIT costs more than it saves on short queries"
 }
 
@@ -299,6 +318,7 @@ func percentReason(ram, value int) string {
 	if ram <= 0 {
 		return "20%"
 	}
+
 	return fmt.Sprintf("%d%%", value*100/ram)
 }
 
@@ -314,9 +334,11 @@ func clampFloat(v, lo, hi float64) float64 {
 	if v < lo {
 		return lo
 	}
+
 	if v > hi {
 		return hi
 	}
+
 	return v
 }
 
@@ -324,6 +346,7 @@ func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
+
 	return b
 }
 
@@ -331,5 +354,6 @@ func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
+
 	return b
 }

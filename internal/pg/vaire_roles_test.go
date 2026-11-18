@@ -11,6 +11,7 @@ func TestIsVaireRole(t *testing.T) {
 			t.Errorf("IsVaireRole(%q) = false", role)
 		}
 	}
+
 	for _, role := range []string{"app_app", "app_ro", "app_migrate", "app_owner", "postgres_app", "pg_maintain_owner", "vaire_direct_only", ""} {
 		if IsVaireRole(role) {
 			t.Errorf("IsVaireRole(%q) = true", role)
@@ -25,6 +26,7 @@ func TestVaireRoleSQLAdministrativeRoles(t *testing.T) {
 			t.Errorf("SQL filter omits %s: %s", role, sql)
 		}
 	}
+
 	if !strings.Contains(sql, "starts_with(r.rolname, 'vaire_write_')") {
 		t.Errorf("SQL filter omits short-lived write roles: %s", sql)
 	}

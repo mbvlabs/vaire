@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -63,6 +64,7 @@ func (o Options) journalPath() string {
 	if o.JournalPath == "" {
 		return JournalPath
 	}
+
 	return o.JournalPath
 }
 
@@ -79,12 +81,8 @@ func (c Confirmation) Covers(cluster string) bool {
 	if c.Server {
 		return true
 	}
-	for _, name := range c.Clusters {
-		if name == cluster {
-			return true
-		}
-	}
-	return false
+
+	return slices.Contains(c.Clusters, cluster)
 }
 
 // RestartTokens are the confirm tokens that clear pending, in order: one
@@ -92,18 +90,23 @@ func (c Confirmation) Covers(cluster string) bool {
 // step's restart.
 func RestartTokens(server string, pending []string) []string {
 	var out []string
+
 	seen := map[string]bool{}
+
 	for _, id := range pending {
 		_, cluster := SplitID(id)
+
 		token := server + "/restart"
 		if cluster != "" {
 			token = cluster + "/restart"
 		}
+
 		if !seen[token] {
 			seen[token] = true
 			out = append(out, token)
 		}
 	}
+
 	return out
 }
 
@@ -197,9 +200,11 @@ func view(ctx context.Context, cfg config.Cluster, opts Options) (config.Cluster
 	if ClusterView != nil {
 		cfg = ClusterView(cfg, opts.Recovering)
 	}
+
 	if GuardView != nil {
 		return GuardView(ctx, cfg, opts)
 	}
+
 	return cfg, nil
 }
 
@@ -219,31 +224,39 @@ func planWithInvalidatedCompletions(ctx context.Context, steps []Step, cfg confi
 	if err != nil {
 		return PlanData{}, err
 	}
+
 	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return PlanData{}, err
 	}
+
 	j, err := LoadJournal(opts.journalPath())
 	if err != nil {
 		return PlanData{}, err
 	}
+
 	dropCompleted(j, ids)
+
 	data := PlanData{Steps: make([]PlanStep, 0, len(selected)), Total: len(selected)}
 	for i, step := range selected {
 		ps, d, err := planStep(ctx, step, i+1, cfg, rt, j)
 		if err != nil {
 			return data, stepFailed(step.ID(), i+1, err)
 		}
+
 		if d.apply {
 			data.WouldApply++
 			if access, ok := step.(AccessTransition); ok {
 				data.AccessConfirmTokens = append(data.AccessConfirmTokens, access.AccessTarget()+"/access")
 			}
 		}
+
 		data.Steps = append(data.Steps, ps)
 	}
+
 	data.RestartPending = pendingIn(j, all, opts.DB)
 	data.ConfirmTokens = RestartTokens(cfg.Name(), data.RestartPending)
+
 	return data, nil
 }
 
@@ -264,15 +277,19 @@ func planStep(ctx context.Context, step Step, index int, cfg config.Cluster, rt 
 	if err != nil {
 		return PlanStep{}, decision{}, err
 	}
+
 	action := "skip"
 	if d.apply {
 		action = "apply"
 	}
+
 	_, cluster := SplitID(step.ID())
+
 	ps := PlanStep{ID: step.ID(), Cluster: cluster, Index: index, Action: action, Reason: d.reason, Detail: d.detail}
 	if d.apply {
 		ps.Diffs = fileDiffs(step, cfg, rt)
 	}
+
 	return ps, d, nil
 }
 
@@ -282,12 +299,15 @@ func fileDiffs(step Step, cfg config.Cluster, rt Runtime) []FileDiff {
 	if !ok {
 		return nil
 	}
+
 	var out []FileDiff
+
 	for _, f := range r.RenderedFiles(cfg, rt) {
 		if diff := render.Diff(f.Path, f.Content); diff != "" {
 			out = append(out, FileDiff{Path: f.Path, Diff: secrets.Redact(diff)})
 		}
 	}
+
 	return out
 }
 
@@ -298,19 +318,24 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	if rt.DryRun {
 		return ApplyData{}, nil, errors.New("engine.Apply called with DryRun; use Plan")
 	}
+
 	cfg, err := view(ctx, cfg, opts)
 	if err != nil {
 		return ApplyData{}, nil, err
 	}
+
 	all, selected, err := prepare(steps, cfg, opts)
 	if err != nil {
 		return ApplyData{}, nil, err
 	}
+
 	path := opts.journalPath()
+
 	j, err := LoadJournal(path)
 	if err != nil {
 		return ApplyData{}, nil, err
 	}
+
 	r := &applyRun{ctx: ctx, cfg: cfg, rt: rt, all: all, j: j, path: path, opts: opts, report: opts.Report}
 	r.data = ApplyData{Steps: make([]ApplyStep, 0, len(selected)), Total: len(selected)}
 	// The events carry the request's numbering when it runs several applies
@@ -319,7 +344,9 @@ func Apply(ctx context.Context, steps []Step, cfg config.Cluster, rt Runtime, op
 	if n := numberingFrom(ctx); n != nil {
 		r.offset, r.shown = n.span(len(selected))
 	}
+
 	warnings, err := r.run(selected)
+
 	return r.data, warnings, err
 }
 
@@ -354,42 +381,53 @@ func (r *applyRun) run(selected []Step) ([]output.Warning, error) {
 			return warnings, err
 		}
 	}
+
 	if accessErr != nil {
 		return r.warnings, accessErr
 	}
+
 	if err := r.restarts(); err != nil {
 		return nil, err
 	}
+
 	return r.warnings, nil
 }
 
 // preflight inspects every selected access transition before any of them
 // writes.
 func (r *applyRun) preflight(selected []Step) error {
-	var accessErr error
-	var missing []string
+	var (
+		accessErr error
+		missing   []string
+	)
+
 	for i, step := range selected {
 		access, ok := step.(AccessTransition)
 		if !ok {
 			continue
 		}
+
 		d, err := decide(r.ctx, step, r.cfg, r.rt, r.j)
 		if err != nil {
 			if accessErr == nil {
 				accessErr = stepFailed(step.ID(), i+1, err)
 			}
+
 			continue
 		}
+
 		target := access.AccessTarget()
 		if d.apply && !r.confirmed(target) {
 			missing = append(missing, target+"/access")
 		}
 	}
+
 	if accessErr == nil && len(missing) > 0 {
 		accessErr = output.NewError(output.CodeUnsafeAction, "access changes require confirmation", output.ExitUnsafe,
 			"Re-run apply with the exact access confirmation tokens.").
 			WithDetails(map[string]any{"confirm_tokens": missing})
 	}
+
 	return accessErr
 }
 
@@ -404,24 +442,30 @@ func (r *applyRun) confirmed(target string) bool {
 func (r *applyRun) step(index int, step Step, accessErr error) ([]output.Warning, error) {
 	id := step.ID()
 	_, cluster := SplitID(id)
+
 	at := r.offset + index
 	if _, ok := step.(AccessTransition); ok && accessErr != nil {
 		r.data.Steps = append(r.data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: "access_preflight"})
 		r.data.Skipped++
+
 		return nil, nil
 	}
+
 	d, err := decide(r.ctx, step, r.cfg, r.rt, r.j)
 	if err != nil {
 		return nil, failStep(r.j, r.path, r.opts, id, index, at, r.shown, decision{}, err)
 	}
+
 	if !d.apply {
 		return nil, r.skip(id, cluster, index, d)
 	}
+
 	if access, ok := step.(AccessTransition); ok && !r.confirmed(access.AccessTarget()) {
 		return r.warnings, output.NewError(output.CodeUnsafeAction, "access changes require confirmation", output.ExitUnsafe,
 			"Re-run apply with the exact access confirmation token.").
 			WithDetails(map[string]any{"confirm_tokens": []string{access.AccessTarget() + "/access"}})
 	}
+
 	return nil, r.execute(index, step, id, cluster, at, d)
 }
 
@@ -432,50 +476,62 @@ func (r *applyRun) skip(id, cluster string, index int, d decision) error {
 		entry.Status = StatusCompleted
 		entry.InputsHash = d.hash
 		entry.CompletedAt = now()
+
 		entry.Error = ""
 		if err := r.j.setEntry(r.path, id, entry); err != nil {
 			return err
 		}
 	}
+
 	detail := d.reason
 	if d.reason == ReasonCheckInconclusive {
 		detail = d.detail
 		r.warnings = append(r.warnings, output.Warning{Code: "step_check_inconclusive", Message: id + ": " + d.detail})
 	}
-	r.report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: intPtr(r.offset + index), Total: intPtr(r.shown), Detail: detail})
+
+	r.report.emit(output.Event{Type: "step", Step: id, State: "skipped", Index: new(r.offset + index), Total: new(r.shown), Detail: detail})
 	r.data.Steps = append(r.data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: "skipped", Reason: d.reason, Detail: d.detail})
 	r.data.Skipped++
+
 	return nil
 }
 
 // execute applies a step whose decision says it must run.
 func (r *applyRun) execute(index int, step Step, id, cluster string, at int, d decision) error {
-	r.report.emit(output.Event{Type: "step", Step: id, State: "started", Index: intPtr(at), Total: intPtr(r.shown), Detail: step.Describe(r.cfg)})
+	r.report.emit(output.Event{Type: "step", Step: id, State: "started", Index: new(at), Total: new(r.shown), Detail: step.Describe(r.cfg)})
+
 	if err := r.j.setEntry(r.path, id, JournalEntry{Status: StatusRunning, InputsHash: d.hash, StartedAt: now()}); err != nil {
 		return err
 	}
+
 	res, err := step.Apply(r.ctx, r.cfg, r.rt, r.report)
 	if err == nil && r.ctx.Err() != nil {
 		err = ErrInterrupted
 	}
+
 	if err != nil {
 		if r.ctx.Err() != nil {
 			err = ErrInterrupted
 		}
+
 		return failStep(r.j, r.path, r.opts, id, index, at, r.shown, d, err)
 	}
+
 	restart, err := r.complete(id, res)
 	if err != nil {
 		return err
 	}
+
 	state := "completed"
 	if res.Incomplete {
 		state = "incomplete"
 	}
-	r.report.emit(output.Event{Type: "step", Step: id, State: state, Index: intPtr(at), Total: intPtr(r.shown), Detail: strings.Join(res.Notes, "; ")})
+
+	r.report.emit(output.Event{Type: "step", Step: id, State: state, Index: new(at), Total: new(r.shown), Detail: strings.Join(res.Notes, "; ")})
 	r.warnings = append(r.warnings, res.Warnings...)
 	r.data.Steps = append(r.data.Steps, ApplyStep{ID: id, Cluster: cluster, Index: index, State: state, Restart: string(restart)})
 	r.data.Applied++
+
 	return nil
 }
 
@@ -486,21 +542,25 @@ func (r *applyRun) complete(id string, res ApplyResult) (RestartNeed, error) {
 	if restart == "" {
 		restart = RestartNone
 	}
+
 	entry := r.j.Steps[id]
 	entry.Status = StatusCompleted
 	entry.CompletedAt = now()
 	entry.Restart = string(restart)
+
 	entry.Error = ""
 	if res.Incomplete {
 		entry.Status = StatusIncomplete
 		entry.CompletedAt = ""
 	}
+
 	err := r.j.update(r.path, func(j *Journal) {
 		j.Steps[id] = entry
 		if restart == RestartRestart {
 			j.addPending(id)
 		}
 	})
+
 	return restart, err
 }
 
@@ -511,19 +571,25 @@ func (r *applyRun) restarts() error {
 	if len(pending) == 0 {
 		return nil
 	}
+
 	if r.opts.LeaveRestartsPending {
 		r.setPending(pending)
 		r.warnings = append(r.warnings, pendingRestartWarning(pending, r.data.ConfirmTokens))
+
 		return nil
 	}
+
 	settled, err := settlePending(r.ctx, r.j, r.path, r.opts, pending)
 	r.data.RestartsSettled = settled
+
 	if err != nil {
 		return err
 	}
+
 	if pending = pendingIn(r.j, r.all, r.opts.DB); len(pending) == 0 {
 		return nil
 	}
+
 	if r.opts.Restarter == nil {
 		return output.NewError(
 			output.CodeError,
@@ -532,15 +598,19 @@ func (r *applyRun) restarts() error {
 			"This is an vaire bug. Report it with the run log.",
 		).WithDetails(map[string]any{"restart_pending": pending})
 	}
+
 	restarts, err := restartConfirmed(r.ctx, r.j, r.path, r.opts, r.cfg, pending)
 	r.data.Restarts = append(r.data.Restarts, restarts...)
+
 	if err != nil {
 		return err
 	}
+
 	if left := pendingIn(r.j, r.all, r.opts.DB); len(left) > 0 {
 		r.setPending(left)
 		r.warnings = append(r.warnings, pendingRestartWarning(left, r.data.ConfirmTokens))
 	}
+
 	return nil
 }
 
@@ -567,31 +637,41 @@ func settlePending(ctx context.Context, j *Journal, path string, opts Options, p
 	if !ok {
 		return nil, nil
 	}
+
 	byCluster := map[string][]string{}
+
 	var order []string
+
 	for _, id := range pending {
 		if _, cluster := SplitID(id); cluster != "" {
 			if _, seen := byCluster[cluster]; !seen {
 				order = append(order, cluster)
 			}
+
 			byCluster[cluster] = append(byCluster[cluster], id)
 		}
 	}
+
 	report := opts.Report
+
 	var settled []string
+
 	for _, cluster := range order {
 		needed, err := checker.NeedsRestart(ctx, cluster)
 		if err != nil || needed {
 			continue
 		}
+
 		if err := j.clearPending(path, byCluster[cluster]); err != nil {
 			return settled, err
 		}
+
 		settled = append(settled, cluster)
 		if report != nil {
 			report(output.Event{Type: "log", Step: "restart", Line: cluster + " no longer needs its pending restart: PostgreSQL already runs every setting; cleared without restarting"})
 		}
 	}
+
 	return settled, nil
 }
 
@@ -602,7 +682,9 @@ func settlePending(ctx context.Context, j *Journal, path string, opts Options, p
 // pending.
 func restartConfirmed(ctx context.Context, j *Journal, path string, opts Options, cfg config.Cluster, pending []string) ([]ClusterRestart, error) {
 	byCluster := map[string][]string{}
+
 	var serverIDs []string
+
 	for _, id := range pending {
 		if _, cluster := SplitID(id); cluster != "" {
 			byCluster[cluster] = append(byCluster[cluster], id)
@@ -610,69 +692,87 @@ func restartConfirmed(ctx context.Context, j *Journal, path string, opts Options
 			serverIDs = append(serverIDs, id)
 		}
 	}
+
 	all := len(serverIDs) > 0 && opts.Confirm.Server
+
 	var out []ClusterRestart
+
 	for _, c := range cfg.Clusters {
 		ids, needed := byCluster[c.Name]
 		if (!needed || !opts.Confirm.Covers(c.Name)) && !all {
 			continue
 		}
+
 		if opts.DB != "" && c.Name != opts.DB {
 			continue
 		}
+
 		downtime, err := opts.Restarter.Restart(ctx, c.Name)
 		if err != nil {
 			msg := secrets.Redact(err.Error())
+
 			return out, output.WrapError(output.CodeStepFailed, fmt.Errorf("restart of %s failed: %s", c.Name, msg), output.ExitStep,
 				"Inspect the run log, then re-run apply with the confirm token.").
 				WithDetails(map[string]any{"step": "restart", "cluster": c.Name, "error": msg, "restart_pending": pending})
 		}
+
 		out = append(out, ClusterRestart{Cluster: c.Name, DowntimeMS: downtime.Milliseconds()})
 		if err := j.clearPending(path, ids); err != nil {
 			return out, err
 		}
 	}
+
 	if all {
 		if err := j.clearPending(path, serverIDs); err != nil {
 			return out, err
 		}
 	}
+
 	return out, nil
 }
 
 func decide(ctx context.Context, step Step, cfg config.Cluster, rt Runtime, j *Journal) (decision, error) {
 	id := step.ID()
+
 	inputs, err := step.Inputs(cfg, rt)
 	if err != nil {
 		return decision{}, fmt.Errorf("inputs: %w", err)
 	}
+
 	hash := InputsHash(id, inputs)
+
 	if sk, ok := step.(Skipper); ok {
 		if reason := sk.SkipReason(cfg); reason != "" {
 			return decision{reason: reason, hash: hash}, nil
 		}
 	}
+
 	if _, ok := step.(AccessTransition); ok {
 		return decideAccess(ctx, step, cfg, rt, hash)
 	}
+
 	if f, ok := step.(Forcer); ok {
 		if reason := f.Force(cfg, rt); reason != "" {
 			return decision{apply: true, reason: reason, hash: hash}, nil
 		}
 	}
+
 	entry, ok := j.Steps[id]
 	if ok && entry.Status == StatusCompleted && entry.InputsHash == hash {
 		return decideCompleted(ctx, step, cfg, rt, hash)
 	}
+
 	if ok && entry.InputsHash == hash && entry.Status != StatusFailed && entry.Status != StatusRunning {
 		check, err := step.Check(ctx, cfg, rt)
 		if err != nil {
 			return decision{}, fmt.Errorf("check: %w", err)
 		}
+
 		if check.Complete && !check.Inconclusive {
 			return decision{reason: ReasonCheck, hash: hash, detail: check.Detail}, nil
 		}
 	}
+
 	return decision{apply: true, reason: reasonFor(entry, ok, hash), hash: hash}, nil
 }
 
@@ -683,9 +783,11 @@ func decideAccess(ctx context.Context, step Step, cfg config.Cluster, rt Runtime
 	if err != nil {
 		return decision{}, fmt.Errorf("check: %w", err)
 	}
+
 	if check.Complete && !check.Inconclusive {
 		return decision{reason: "access_installed", hash: hash, detail: check.Detail}, nil
 	}
+
 	return decision{apply: true, reason: ReasonCheckIncomplete, hash: hash, detail: check.Detail}, nil
 }
 
@@ -697,20 +799,25 @@ func decideCompleted(ctx context.Context, step Step, cfg config.Cluster, rt Runt
 	if !recheck || !rc.Recheck() {
 		return decision{reason: ReasonJournal, hash: hash}, nil
 	}
+
 	check, err := step.Check(ctx, cfg, rt)
 	if err != nil {
 		return decision{}, fmt.Errorf("check: %w", err)
 	}
+
 	if check.Inconclusive {
 		detail := "effective state is unknown"
 		if check.Detail != "" {
 			detail += ": " + secrets.Redact(check.Detail)
 		}
+
 		return decision{reason: ReasonCheckInconclusive, hash: hash, detail: detail}, nil
 	}
+
 	if check.Complete {
 		return decision{reason: ReasonJournal, hash: hash}, nil
 	}
+
 	return decision{apply: true, reason: ReasonCheckIncomplete, hash: hash, detail: check.Detail}, nil
 }
 
@@ -735,6 +842,7 @@ func InputsHash(id string, inputs []byte) string {
 	h.Write([]byte(id))
 	h.Write([]byte{0})
 	h.Write(inputs)
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -743,30 +851,37 @@ func InputsHash(id string, inputs []byte) string {
 func failStep(j *Journal, path string, opts Options, id string, index, at, shown int, d decision, cause error) error {
 	msg := secrets.Redact(cause.Error())
 	entry := j.Steps[id]
+
 	entry.Status = StatusFailed
 	if d.hash != "" {
 		entry.InputsHash = d.hash
 	}
+
 	entry.Error = msg
 	saveErr := j.setEntry(path, id, entry)
-	opts.Report.emit(output.Event{Type: "step", Step: id, State: "failed", Index: intPtr(at), Total: intPtr(shown), Detail: msg})
+	opts.Report.emit(output.Event{Type: "step", Step: id, State: "failed", Index: new(at), Total: new(shown), Detail: msg})
+
 	err := stepFailed(id, index, cause)
 	if opts.FailureHint != "" {
 		err.Hint = opts.FailureHint
 	}
+
 	if saveErr != nil {
 		err.Cause = errors.Join(cause, saveErr)
 	}
+
 	return err
 }
 
 func stepFailed(id string, index int, cause error) *output.CLIError {
 	msg := secrets.Redact(cause.Error())
 	details := map[string]any{"step": id, "error": msg, "index": index}
+
 	var scriptErr *ScriptError
 	if errors.As(cause, &scriptErr) && len(scriptErr.Tail) > 0 {
 		details["output_tail"] = scriptErr.Tail
 	}
+
 	out := &output.CLIError{
 		Code:     output.CodeStepFailed,
 		Message:  fmt.Sprintf("step %s failed: %s", id, msg),
@@ -783,6 +898,7 @@ func stepFailed(id string, index int, cause error) *output.CLIError {
 		if cliErr.Hint != "" {
 			out.Hint = cliErr.Hint
 		}
+
 		if extra, ok := cliErr.Details.(map[string]any); ok {
 			for k, v := range extra {
 				if _, taken := details[k]; !taken {
@@ -791,6 +907,7 @@ func stepFailed(id string, index int, cause error) *output.CLIError {
 			}
 		}
 	}
+
 	return out
 }
 
@@ -800,6 +917,7 @@ func prepare(steps []Step, cfg config.Cluster, opts Options) (all, selected []St
 	if err := ValidateIDs(steps); err != nil {
 		return nil, nil, output.WrapError(output.CodeError, err, output.ExitGeneric, "This is an vaire bug in the step catalogue.")
 	}
+
 	all = Expand(steps, cfg)
 	if opts.DB != "" {
 		if _, ok := cfg.ClusterByName(opts.DB); !ok {
@@ -807,6 +925,7 @@ func prepare(steps []Step, cfg config.Cluster, opts Options) (all, selected []St
 			for _, c := range cfg.Clusters {
 				names = append(names, c.Name)
 			}
+
 			return nil, nil, output.NewError(
 				output.CodeValidation,
 				"database "+opts.DB+" is not in cluster.toml",
@@ -815,10 +934,12 @@ func prepare(steps []Step, cfg config.Cluster, opts Options) (all, selected []St
 			).WithDetails(map[string]any{"database": opts.DB, "databases": names})
 		}
 	}
+
 	selected, err = selectSteps(steps, all, opts.Only)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	if opts.DB != "" {
 		kept := selected[:0:0]
 		for _, step := range selected {
@@ -826,8 +947,10 @@ func prepare(steps []Step, cfg config.Cluster, opts Options) (all, selected []St
 				kept = append(kept, step)
 			}
 		}
+
 		selected = kept
 	}
+
 	return all, selected, nil
 }
 
@@ -837,26 +960,35 @@ func selectSteps(catalog, all []Step, only []string) ([]Step, error) {
 	if len(only) == 0 {
 		return all, nil
 	}
+
 	var valid []string
+
 	known := map[string]bool{}
+
 	for _, step := range catalog {
 		if _, ok := step.(Template); ok {
 			valid = append(valid, step.ID())
 			known[step.ID()] = true
 		}
 	}
+
 	for _, step := range all {
 		valid = append(valid, step.ID())
 		known[step.ID()] = true
 	}
+
 	want := map[string]bool{}
+
 	var unknown []string
+
 	for _, id := range only {
 		if !known[id] {
 			unknown = append(unknown, id)
 		}
+
 		want[id] = true
 	}
+
 	if len(unknown) > 0 {
 		return nil, output.NewError(
 			output.CodeValidation,
@@ -865,6 +997,7 @@ func selectSteps(catalog, all []Step, only []string) ([]Step, error) {
 			"Pick step IDs from details.valid.",
 		).WithDetails(map[string]any{"unknown": unknown, "valid": valid})
 	}
+
 	out := make([]Step, 0, len(all))
 	for _, step := range all {
 		template, _ := SplitID(step.ID())
@@ -872,6 +1005,7 @@ func selectSteps(catalog, all []Step, only []string) ([]Step, error) {
 			out = append(out, step)
 		}
 	}
+
 	return out, nil
 }
 
@@ -882,16 +1016,21 @@ func pendingIn(j *Journal, steps []Step, db string) []string {
 	for _, step := range steps {
 		known[step.ID()] = true
 	}
+
 	var out []string
+
 	for _, id := range j.RestartPending {
 		if !known[id] {
 			continue
 		}
+
 		if _, cluster := SplitID(id); db != "" && cluster != db {
 			continue
 		}
+
 		out = append(out, id)
 	}
+
 	return out
 }
 

@@ -38,28 +38,36 @@ func Fetch(ctx context.Context, a Artifact) error {
 	if Installed(a) {
 		return nil
 	}
+
 	if err := os.MkdirAll(a.Dir(), 0o755); err != nil { //nolint:gosec // G301: system binaries are 0755.
 		return err
 	}
+
 	archive, err := os.CreateTemp(a.Dir(), ".download-*")
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = archive.Close(); _ = os.Remove(archive.Name()) }()
+
 	if err := download(ctx, a.URL, archive); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Check that the server reaches github.com, then run vaire apply again.").WithDetails(map[string]any{"url": a.URL})
 	}
+
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+
 	if err := Verify(archive, a.SHA256); err != nil {
 		return output.WrapError(output.CodeReleaseVerification, err, output.ExitReleaseVerification,
 			"The download does not match the sha256 pinned in vaire; do not install it.").WithDetails(map[string]any{"url": a.URL, "exporter": a.Name})
 	}
+
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+
 	return Extract(archive, a.Member, a.BinaryPath())
 }
 
@@ -67,25 +75,32 @@ func Fetch(ctx context.Context, a Artifact) error {
 func download(ctx context.Context, url string, w io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
+
 	resp, err := (&http.Client{CheckRedirect: httpsOnly}).Do(req)
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
+
 	n, err := io.Copy(w, io.LimitReader(resp.Body, maxTarball+1))
 	if err != nil {
 		return err
 	}
+
 	if n > maxTarball {
 		return errors.New("the exporter archive is larger than expected")
 	}
+
 	return nil
 }
 
@@ -95,9 +110,11 @@ func httpsOnly(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("too many redirects")
 	}
+
 	if req.URL == nil || req.URL.Scheme != "https" {
 		return errors.New("refusing a non-https redirect")
 	}
+
 	return nil
 }
 
@@ -107,9 +124,11 @@ func Verify(r io.Reader, want string) error {
 	if _, err := io.Copy(h, r); err != nil {
 		return err
 	}
+
 	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, want) {
 		return fmt.Errorf("sha256 mismatch: got %s, want %s", got, want)
 	}
+
 	return nil
 }
 
@@ -122,21 +141,26 @@ func Extract(r io.Reader, member, dest string) error {
 		return err
 	}
 	defer func() { _ = gz.Close() }()
+
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			return fmt.Errorf("the archive has no %s", member)
 		}
+
 		if err != nil {
 			return err
 		}
+
 		if path.Clean(hdr.Name) != member {
 			continue
 		}
+
 		if hdr.Typeflag != tar.TypeReg {
 			return fmt.Errorf("%s in the archive is not a regular file", member)
 		}
+
 		return writeBinary(tr, dest)
 	}
 }
@@ -146,25 +170,32 @@ func writeBinary(r io.Reader, dest string) error {
 	if err != nil {
 		return err
 	}
+
 	n, err := io.Copy(tmp, io.LimitReader(r, maxTarball+1))
 	if err == nil && n > maxTarball {
 		err = errors.New("the exporter binary is larger than expected")
 	}
+
 	if err == nil {
 		err = tmp.Sync()
 	}
+
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
+
 	if err == nil {
 		err = os.Chmod(tmp.Name(), 0o755) //nolint:gosec // G302: an executable.
 	}
+
 	if err == nil {
 		err = os.Rename(tmp.Name(), dest)
 	}
+
 	if err != nil {
 		_ = os.Remove(tmp.Name())
 	}
+
 	return err
 }
 
@@ -178,8 +209,10 @@ func removeOldIn(root, name, keepDir string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
+
 		return err
 	}
+
 	for _, e := range entries {
 		dir := filepath.Join(root, e.Name())
 		if !e.IsDir() || dir == keepDir || !strings.HasPrefix(e.Name(), name+"-") {
@@ -191,9 +224,11 @@ func removeOldIn(root, name, keepDir string) error {
 		if rest == "" || rest[0] < '0' || rest[0] > '9' {
 			continue
 		}
+
 		if err := os.RemoveAll(dir); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

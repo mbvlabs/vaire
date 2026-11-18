@@ -34,6 +34,7 @@ func TestValidateHealth(t *testing.T) {
 	if err := ValidateHealth(validHealth()); err != nil {
 		t.Fatalf("valid health: %v", err)
 	}
+
 	cases := map[string]func(*activity.Health){
 		"node injection":    func(h *activity.Health) { h.Node = "db1; DROP TABLE users" },
 		"unexpected dir":    func(h *activity.Health) { h.Dir = "/tmp/activity" },
@@ -65,10 +66,12 @@ func TestValidateHealth(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := validHealth()
 			edit(&h)
+
 			err := ValidateHealth(h)
 			if codeOf(t, err) != output.CodeValidation {
 				t.Fatalf("err = %v", err)
 			}
+
 			if name == "node injection" && strings.Contains(err.Error(), "DROP TABLE") {
 				t.Fatalf("error echoed the value: %v", err)
 			}

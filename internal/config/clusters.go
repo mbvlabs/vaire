@@ -88,6 +88,7 @@ func (c Cluster) ClusterByName(name string) (ClusterSpec, bool) {
 			return s, true
 		}
 	}
+
 	return ClusterSpec{}, false
 }
 
@@ -99,6 +100,7 @@ func (c Cluster) ClusterByName(name string) (ClusterSpec, bool) {
 // engine and the direct unfollow pooler fence apply the same eligibility.
 func (c Cluster) RoutingView(isAwaiting func(string) bool, keep string) Cluster {
 	out := c.Clone()
+
 	out.Clusters, out.Awaiting = nil, nil
 	for _, spec := range c.Clusters {
 		spec = spec.Clone()
@@ -113,6 +115,7 @@ func (c Cluster) RoutingView(isAwaiting func(string) bool, keep string) Cluster 
 			out.Clusters = append(out.Clusters, spec)
 		}
 	}
+
 	return out
 }
 
@@ -124,6 +127,7 @@ func (c Cluster) Stanzas() []string {
 			out = append(out, s.Stanza)
 		}
 	}
+
 	return out
 }
 
@@ -138,11 +142,13 @@ func (c Cluster) FreeClusterPort() (int, error) {
 	for _, s := range c.Clusters {
 		used[s.Port] = true
 	}
+
 	for port := ClusterPortMin; port <= ClusterPortMax; port++ {
 		if !used[port] {
 			return port, nil
 		}
 	}
+
 	return 0, fmt.Errorf("every cluster port from %d to %d is taken", ClusterPortMin, ClusterPortMax)
 }
 
@@ -154,6 +160,7 @@ func NewStanza(name string) (string, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
+
 	return name + "-" + hex.EncodeToString(raw), nil
 }
 
@@ -165,6 +172,7 @@ func NewFollowGeneration() (string, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
+
 	return hex.EncodeToString(raw), nil
 }
 
@@ -172,6 +180,7 @@ func NewFollowGeneration() (string, error) {
 func (c Cluster) validateClusters(add func(string, ...any)) {
 	master, _ := c.Master()
 	names, ports, stanzas := map[string]bool{}, map[int]string{}, map[string]bool{}
+
 	for i, s := range c.Clusters {
 		at := fmt.Sprintf("clusters[%d]", i)
 		c.validateClusterIdentity(add, at, s, master.Name, names)
@@ -188,13 +197,16 @@ func (c Cluster) validateClusterIdentity(add func(string, ...any), at string, s 
 	if err := CheckDatabaseName(s.Name); err != nil {
 		add("%s.name %q %v", at, s.Name, err)
 	}
+
 	if names[s.Name] {
 		add("%s.name %q is a duplicate", at, s.Name)
 	}
+
 	names[s.Name] = true
 	if s.Node != master {
 		add("%s.node %q must be the master %q: workers arrive in Phase 10", at, s.Node, master)
 	}
+
 	if !s.IsFollower() && s.FollowGeneration != "" {
 		add("%s.follow_generation is managed by vaire and only a follower may have one", at)
 	}
@@ -208,6 +220,7 @@ func (c Cluster) validateClusterPlacement(add func(string, ...any), at string, s
 	} else if other, taken := ports[s.Port]; taken {
 		add("%s.port %d is already used by %s", at, s.Port, other)
 	}
+
 	ports[s.Port] = s.Name
 	switch {
 	case s.IsFollower():
@@ -215,9 +228,11 @@ func (c Cluster) validateClusterPlacement(add func(string, ...any), at string, s
 	case !stanzaPattern.MatchString(s.Stanza) || !strings.HasPrefix(s.Stanza, s.Name+"-"):
 		add("%s.stanza %q must be %s-<6 hex>", at, s.Stanza, s.Name)
 	}
+
 	if s.Stanza != "" && stanzas[s.Stanza] {
 		add("%s.stanza %q is a duplicate", at, s.Stanza)
 	}
+
 	stanzas[s.Stanza] = true
 }
 
@@ -229,14 +244,18 @@ func (c Cluster) validateClusterRuntime(add func(string, ...any), at string, s C
 			add("%s.profile %q %v", at, s.Profile, err)
 		}
 	}
+
 	if !durationPattern.MatchString(s.StatementTimeout) {
 		add("%s.statement_timeout %q must be a PostgreSQL duration such as 60s, 500ms or 0", at, s.StatementTimeout)
 	}
+
 	c.validateExtensionSelection(add, at, s)
+
 	for key := range s.Settings {
 		if !SettingKeyPattern.MatchString(key) {
 			add("%s.settings key %q must match %s", at, key, SettingKeyPattern)
 		}
+
 		if isReservedSetting(key) {
 			add("%s.settings key %q is managed by vaire and cannot be overridden", at, key)
 		}
@@ -249,23 +268,29 @@ func (c Cluster) validateClusterResources(add func(string, ...any), at string, s
 	if s.CPUWeight < 0 || s.CPUWeight > 10000 {
 		add("%s.cpu_weight %d must be 0 (from the size) or 1-10000", at, s.CPUWeight)
 	}
+
 	if s.IOWeight < 0 || s.IOWeight > 10000 {
 		add("%s.io_weight %d must be 0 (the default 100) or 1-10000", at, s.IOWeight)
 	}
+
 	if s.PoolSize < 0 {
 		add("%s.pool_size must not be negative", at)
 	}
+
 	if s.SessionPoolSize < 0 {
 		add("%s.session_pool_size must not be negative", at)
 	}
+
 	r, err := c.Resources(s)
 	if err != nil {
 		add("%s.%v", at, err)
 		return
 	}
+
 	if r.MemoryMaxMiB != 0 && r.MemoryMaxMiB < r.MemoryMiB {
 		add("%s.memory_max %q is below the cluster's memory (%d MiB)", at, s.MemoryMax, r.MemoryMiB)
 	}
+
 	if r.PoolSize < 1 || r.PoolSize+r.SessionPoolSize+ReservedConnections > r.MaxConnections {
 		add("%s: pool_size %d + session_pool_size %d + %d reserved must fit in max_connections %d", at,
 			r.PoolSize, r.SessionPoolSize, ReservedConnections, r.MaxConnections)
@@ -285,6 +310,7 @@ func checkProfile(v string) error {
 	case "oltp", "mixed", "analytics":
 		return nil
 	}
+
 	return errors.New("must be oltp, mixed or analytics")
 }
 
@@ -294,5 +320,6 @@ func (c Cluster) RetentionFull(spec ClusterSpec) int {
 	if spec.Backup.RetentionFull > 0 {
 		return spec.Backup.RetentionFull
 	}
+
 	return c.Backup.Database.RetentionFull
 }

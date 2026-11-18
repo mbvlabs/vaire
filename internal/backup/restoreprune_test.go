@@ -49,6 +49,7 @@ func TestPruneForRestoreRetiresInterruptedUnfollows(t *testing.T) {
 	for _, state := range states {
 		t.Run(state.name, func(t *testing.T) {
 			tempRecords(t)
+
 			now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
 			newStanza := "app_follower-f00d"
 			raw := interruptedUnfollowRecords(t, state, newStanza, now)
@@ -62,6 +63,7 @@ func TestPruneForRestoreRetiresInterruptedUnfollows(t *testing.T) {
 
 func interruptedUnfollowRecords(t *testing.T, state interruptedUnfollowState, newStanza string, now time.Time) []byte {
 	t.Helper()
+
 	r, _ := decode(nil)
 	r.RecordExtensionRequirements(newStanza, "app_follower", []catalog.Extension{ext("pg_trgm")}, now)
 	r.DroppedStanzas = append(r.DroppedStanzas, DroppedStanza{
@@ -88,10 +90,12 @@ func interruptedUnfollowRecords(t *testing.T, state interruptedUnfollowState, ne
 		DataDir: "/var/lib/postgresql/18/app_follower", ConfDir: "/etc/postgresql/18/app_follower",
 		Phase: state.phase, CreatedAt: now.Format(time.RFC3339),
 	}
+
 	raw, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return raw
 }
 
@@ -108,14 +112,17 @@ func interruptedUnfollowBundle(t *testing.T, state interruptedUnfollowState, now
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	bundle, err := masterbackup.ReadTar(tarBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	bundled, ok := bundle.File(masterbackup.RecordsPath)
 	if !ok {
 		t.Fatal("the bundle lost records.json")
 	}
+
 	return bundled.Data
 }
 
@@ -128,36 +135,46 @@ func pruneAndLoadRestoredRecords(t *testing.T, state interruptedUnfollowState, n
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := engine.WriteFileAtomic(RecordsPath, prunedRaw, RecordsMode); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := LoadRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return got, pruned
 }
 
 func requireRestoredInterruptedUnfollow(t *testing.T, got Records, state interruptedUnfollowState, newStanza string, now time.Time) {
 	t.Helper()
+
 	if len(got.Unfollowing) != 0 {
 		t.Fatalf("the rebuilt host inherited lost-unfollow continuations: %+v", got.Unfollowing)
 	}
+
 	if len(got.Activation) != 0 {
 		t.Fatalf("the rebuilt host inherited lost activation authority: %+v", got.Activation)
 	}
+
 	if len(got.ExtensionGuardHandoffs) != 0 {
 		t.Fatalf("the rebuilt host inherited lost guard handoffs: %+v", got.ExtensionGuardHandoffs)
 	}
+
 	if req, ok := got.ExtensionRequirementsFor(newStanza); !ok || len(req.Requirements) != 1 || req.Requirements[0].Name != "pg_trgm" {
 		t.Fatalf("the rebuild dropped retained extension history: %+v", req)
 	}
+
 	if len(got.DroppedStanzas) != 1 || got.DroppedStanzas[0].Stanza != "old-abc123" {
 		t.Fatalf("the rebuild dropped retained stanza history: %+v", got.DroppedStanzas)
 	}
+
 	if got.Timelines["app_follower"].Timeline != "3" {
 		t.Fatalf("the rebuild dropped the timeline switch: %+v", got.Timelines)
 	}
+
 	if aw, ok := got.AwaitingRecovery["app_follower"]; !ok || aw.Stanza != state.awaiting || aw.Since != now.Format(time.RFC3339) {
 		t.Fatalf("the rebuild lost its own awaiting-recovery intent: %+v", got.AwaitingRecovery)
 	}
@@ -175,6 +192,7 @@ func requirePrunedInterruptedUnfollow(t *testing.T, pruned []PrunedRecord) {
 	if len(pruned) != len(wantPruned) {
 		t.Fatalf("pruned %+v, want the lost fence and unfollow", pruned)
 	}
+
 	for _, p := range pruned {
 		if !wantPruned[p] {
 			t.Fatalf("unexpected pruned record %+v", p)

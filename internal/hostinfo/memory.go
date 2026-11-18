@@ -26,21 +26,25 @@ func ReadMemory() (Memory, bool) {
 	if err != nil {
 		return Memory{}, false
 	}
+
 	return ParseMeminfo(raw), true
 }
 
 // ParseMeminfo picks the commit and huge-page fields out of /proc/meminfo.
 func ParseMeminfo(raw []byte) Memory {
 	var m Memory
-	for _, line := range strings.Split(string(raw), "\n") {
+
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
+
 		n, err := strconv.Atoi(fields[1])
 		if err != nil {
 			continue
 		}
+
 		switch fields[0] {
 		case "CommitLimit:":
 			m.CommitLimitMiB = n / 1024
@@ -56,6 +60,7 @@ func ParseMeminfo(raw []byte) Memory {
 			m.HugePageSizeKiB = n
 		}
 	}
+
 	return m
 }
 
@@ -66,15 +71,17 @@ func IOWeight(device string) (enforced bool, reason string) {
 	if device == "" {
 		return false, "the data disk's device is unknown"
 	}
+
 	name := filepath.Base(device)
 	if raw, err := os.ReadFile(filepath.Join("/sys/block", name, "queue", "scheduler")); err == nil {
 		if strings.Contains(string(raw), "[bfq]") {
 			return true, name + " uses the bfq scheduler"
 		}
 	}
+
 	if devno, err := os.ReadFile(filepath.Join("/sys/block", name, "dev")); err == nil {
 		if qos, err := os.ReadFile("/sys/fs/cgroup/io.cost.qos"); err == nil {
-			for _, line := range strings.Split(string(qos), "\n") {
+			for line := range strings.SplitSeq(string(qos), "\n") {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 && fields[0] == strings.TrimSpace(string(devno)) && fields[1] == "enable=1" {
 					return true, name + " has the io.cost model enabled"
@@ -82,6 +89,7 @@ func IOWeight(device string) (enforced bool, reason string) {
 			}
 		}
 	}
+
 	return false, "not enforced: " + name + " uses neither bfq nor io.cost"
 }
 
@@ -91,10 +99,12 @@ func UsedGiB(path string) (int, bool) {
 	if !ok {
 		return 0, false
 	}
+
 	free, ok := FreeBytes(path)
 	if !ok {
 		return 0, false
 	}
+
 	return maxZero(total - int(free/(1<<30))), true //nolint:gosec // G115: free bytes in GiB fit in int.
 }
 
@@ -102,5 +112,6 @@ func maxZero(v int) int {
 	if v < 0 {
 		return 0
 	}
+
 	return v
 }

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -45,29 +46,37 @@ func parseControlRequirements(stdout, stderr string) (map[string]int64, error) {
 	if strings.TrimSpace(stderr) != "" {
 		return nil, errors.New("pg_controldata reported a diagnostic")
 	}
+
 	values := make(map[string]int64, len(recoveryFloors))
-	for _, line := range strings.Split(stdout, "\n") {
+
+	for line := range strings.SplitSeq(stdout, "\n") {
 		label, value, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
 		}
+
 		for _, floor := range recoveryFloors {
 			if strings.TrimSpace(label) != floor.label {
 				continue
 			}
+
 			if _, exists := values[floor.setting]; exists {
 				return nil, errors.New("duplicate control requirement")
 			}
+
 			n, err := recoveryNumber(strings.TrimSpace(value), floor)
 			if err != nil {
 				return nil, errors.New("malformed control requirement")
 			}
+
 			values[floor.setting] = n
 		}
 	}
+
 	if len(values) != len(recoveryFloors) {
 		return nil, errors.New("missing control requirement")
 	}
+
 	return values, nil
 }
 
@@ -75,10 +84,12 @@ func recoveryNumber(value string, floor recoveryFloor) (int64, error) {
 	if !decimalRecoveryValue.MatchString(value) {
 		return 0, errors.New("not a decimal integer")
 	}
+
 	n, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || n < floor.minimum || n > floor.maximum {
 		return 0, errors.New("invalid recovery value")
 	}
+
 	return n, nil
 }
 
@@ -87,19 +98,24 @@ func recoveryNumber(value string, floor recoveryFloor) (int64, error) {
 // postgres -C against the actual temporary configuration.
 func RecoveryRequirementsUnmet(target string, required, configured map[string]int64) error {
 	var unmet []RecoveryRequirement
+
 	for _, floor := range recoveryFloors {
 		r, rok := required[floor.setting]
+
 		c, cok := configured[floor.setting]
 		if !rok || !cok || r < floor.minimum || c < floor.minimum || r > floor.maximum || c > floor.maximum {
 			return recoveryInspectionFailure(target)
 		}
+
 		if c < r {
 			unmet = append(unmet, RecoveryRequirement{floor.setting, r, c})
 		}
 	}
+
 	if len(unmet) == 0 {
 		return nil
 	}
+
 	return output.NewError(output.CodePrecondition, "the temporary cluster does not meet the restored recovery requirements", output.ExitPrecondition,
 		"Request sufficient settings and use a new unused target name; later WAL may require higher values.").
 		WithDetails(map[string]any{"reason": "recovery_requirements_unmet", "target": target, "settings": unmet})
@@ -117,22 +133,28 @@ func (b *limitedProbeBuffer) Write(p []byte) (int, error) {
 	if b.Len()+len(p) > 128*1024 {
 		return 0, errors.New("inspection output exceeds limit")
 	}
+
 	return b.Buffer.Write(p)
 }
 
 func runRecoveryProbe(ctx context.Context, args ...string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+
 	cmd := recoveryProbeCommand(ctx, args...)
+
 	var stdout, stderr limitedProbeBuffer
+
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+
 	return stdout.String(), stderr.String(), err
 }
 
 func recoveryProbeCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "runuser", append([]string{"-u", "postgres", "--"}, args...)...) //nolint:gosec // G204: fixed PG18 tools and managed paths.
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "LANG=C", "HOME=/var/lib/postgresql"}
+
 	return cmd
 }
 
@@ -162,16 +184,22 @@ func (m *Materialised) reconcileRecoveryFloors() error {
 	if m.DestinationConfig == nil {
 		return nil
 	}
+
 	path := filepath.Join(m.Data, "postgresql.auto.conf")
+
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+
 	if err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	var kept strings.Builder
+
 	changed := false
+
 	for _, line := range strings.SplitAfter(string(raw), "\n") {
 		text := strings.TrimRight(line, "\r\n")
 		if indices := autoFloorStart.FindStringSubmatchIndex(text); indices != nil {
@@ -179,49 +207,63 @@ func (m *Materialised) reconcileRecoveryFloors() error {
 			if strings.HasPrefix(value, "=") {
 				value = strings.TrimSpace(value[1:])
 			}
+
 			if !autoFloorValue.MatchString(value) {
 				return recoveryInspectionFailure(m.Name)
 			}
+
 			changed = true
+
 			continue
 		}
+
 		kept.WriteString(line)
 	}
+
 	if changed {
 		if err := writeClusterFile(path, []byte(kept.String()), 0o600, "postgres", "postgres"); err != nil {
 			return recoveryInspectionFailure(m.Name)
 		}
 	}
+
 	return nil
 }
 
 func (m *Materialised) prepareRecoveryDiagnostics() error {
 	path := filepath.Join(m.ConfDir(), "pg_ctl.conf")
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	if string(raw) != recoveryCtlOptions {
 		seenEmpty := false
-		for _, line := range strings.Split(string(raw), "\n") {
+
+		for line := range strings.SplitSeq(string(raw), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
+
 			if seenEmpty || !emptyPgCtlOptions.MatchString(line) {
 				return recoveryInspectionFailure(m.Name)
 			}
+
 			seenEmpty = true
 		}
+
 		if err := writeClusterFile(filepath.Join(m.ConfDir(), recoveryOriginalCtl), raw, 0o644, "postgres", "postgres"); err != nil {
 			return recoveryInspectionFailure(m.Name)
 		}
 	} else if _, err := os.Stat(filepath.Join(m.ConfDir(), recoveryOriginalCtl)); err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	if err := writeClusterFile(path, []byte(recoveryCtlOptions), 0o644, "postgres", "postgres"); err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	return nil
 }
 
@@ -229,23 +271,29 @@ func (m *Materialised) prepareRecoveryDiagnostics() error {
 // before adoption. The backup permits an interrupted adoption to be retried.
 func (m *Materialised) restoreRecoveryDiagnostics() error {
 	original := filepath.Join(m.ConfDir(), recoveryOriginalCtl)
+
 	raw, err := os.ReadFile(original)
 	if errors.Is(err, os.ErrNotExist) {
 		current, readErr := os.ReadFile(filepath.Join(m.ConfDir(), "pg_ctl.conf"))
 		if readErr != nil {
 			return readErr
 		}
+
 		if string(current) == recoveryCtlOptions {
 			return recoveryInspectionFailure(m.Name)
 		}
+
 		return nil
 	}
+
 	if err != nil {
 		return err
 	}
+
 	if err := writeClusterFile(filepath.Join(m.ConfDir(), "pg_ctl.conf"), raw, 0o644, "postgres", "postgres"); err != nil {
 		return err
 	}
+
 	return os.Remove(original)
 }
 
@@ -258,34 +306,43 @@ func (m *Materialised) inspectRecoveryRequirements(ctx context.Context) error {
 	if err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	if string(raw) != recoveryCtlOptions {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	stdout, stderr, err := recoveryProbe(ctx, pgBin+"/pg_controldata", "-D", m.Data)
 	if err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	required, err := parseControlRequirements(stdout, stderr)
 	if err != nil {
 		return recoveryInspectionFailure(m.Name)
 	}
+
 	configured := make(map[string]int64, len(recoveryFloors))
 	for _, floor := range recoveryFloors {
 		args := []string{pgBin + "/postgres", "-D", m.Data}
 		for _, setting := range recoveryStartupSettings {
 			args = append(args, "-c", setting)
 		}
+
 		args = append(args, "-c", "config_file="+filepath.Join(m.ConfDir(), "postgresql.conf"), "-C", floor.setting)
+
 		stdout, stderr, err = recoveryProbe(ctx, args...)
 		if err != nil || strings.TrimSpace(stderr) != "" {
 			return recoveryInspectionFailure(m.Name)
 		}
+
 		n, err := recoveryNumber(strings.TrimSpace(stdout), floor)
 		if err != nil {
 			return recoveryInspectionFailure(m.Name)
 		}
+
 		configured[floor.setting] = n
 	}
+
 	return RecoveryRequirementsUnmet(m.Name, required, configured)
 }
 
@@ -301,20 +358,18 @@ func RetainRecoveryFailure(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	if e, ok := err.(*output.CLIError); ok { //nolint:errorlint // Examine each wrapper, including outer CLI errors, before unwrapping.
 		if details, ok := e.Details.(map[string]any); ok &&
 			(details["reason"] == "recovery_requirements_unmet" || details["reason"] == "recovery_parameter_mismatch") {
 			return true
 		}
 	}
+
 	if e, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, child := range e.Unwrap() {
-			if RetainRecoveryFailure(child) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(e.Unwrap(), RetainRecoveryFailure)
 	}
+
 	return RetainRecoveryFailure(errors.Unwrap(err))
 }
 
@@ -329,23 +384,30 @@ func recoveryMismatch(raw string) (RecoveryRequirement, bool) {
 			!strings.HasSuffix(strings.TrimSpace(line), "FATAL:  recovery aborted because of insufficient parameter settings") {
 			continue
 		}
+
 		if i+1 >= len(lines) || !strings.Contains(lines[i+1], "DETAIL:") {
 			continue
 		}
+
 		marker := "WARNING:  "
 		if strings.Contains(line, "FATAL:  ") {
 			marker = "FATAL:  "
 		}
+
 		prefix, _, _ := strings.Cut(line, marker)
+
 		detailPrefix, detail, _ := strings.Cut(lines[i+1], "DETAIL:")
 		if prefix != detailPrefix {
 			continue
 		}
+
 		match := recoveryMismatchDetail.FindStringSubmatch(strings.TrimSpace(detail))
 		if match == nil {
 			continue
 		}
+
 		configured, err1 := strconv.ParseInt(match[2], 10, 64)
+
 		required, err2 := strconv.ParseInt(match[3], 10, 64)
 		for _, floor := range recoveryFloors {
 			if floor.setting == match[1] && err1 == nil && err2 == nil &&
@@ -354,6 +416,7 @@ func recoveryMismatch(raw string) (RecoveryRequirement, bool) {
 			}
 		}
 	}
+
 	return RecoveryRequirement{}, false
 }
 

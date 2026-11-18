@@ -32,14 +32,17 @@ func (p *progress) line(line string) {
 	if m == nil || p.report == nil {
 		return
 	}
+
 	f, err := strconv.ParseFloat(m[2], 64)
 	if err != nil {
 		return
 	}
+
 	pct := int(f)
 	if pct <= p.last {
 		return
 	}
+
 	p.last = pct
 	p.report(output.Event{Type: "progress", Phase: p.phase, Pct: &pct, Detail: m[2] + "%"})
 }

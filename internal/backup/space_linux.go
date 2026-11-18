@@ -11,5 +11,6 @@ func deviceOf(path string) uint64 {
 	if err := syscall.Stat(path, &st); err != nil {
 		return 0
 	}
+
 	return st.Dev
 }

@@ -7,11 +7,14 @@ import "testing"
 // yet, and doctor measures the filesystem it will live on.
 func TestNearestExisting(t *testing.T) {
 	existing := map[string]bool{"/": true, "/var": true, "/var/lib": true}
+
 	exists := func(p string) bool { return existing[p] }
 	if got := nearestExisting("/var/lib/vaire/clusters", exists); got != "/var/lib" {
 		t.Errorf("missing tree: %q, want /var/lib", got)
 	}
+
 	existing["/var/lib/vaire/clusters"] = true
+
 	if got := nearestExisting("/var/lib/vaire/clusters", exists); got != "/var/lib/vaire/clusters" {
 		t.Errorf("existing: %q", got)
 	}

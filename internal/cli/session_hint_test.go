@@ -19,6 +19,7 @@ func TestTunnelHint(t *testing.T) {
 		return output.WrapError(output.CodeRemoteUnreachable,
 			fmt.Errorf("cannot reach 10.42.0.1:22: %w", inner), output.ExitTransport, "")
 	}
+
 	cases := []struct {
 		name    string
 		inner   error
@@ -31,13 +32,16 @@ func TestTunnelHint(t *testing.T) {
 	}
 	for _, c := range cases {
 		err := tunnelHint(wrap(c.inner), "203.0.113.5", 51820)
+
 		var cliErr *output.CLIError
 		if !errors.As(err, &cliErr) || cliErr.Code != output.CodeTransportFailed {
 			t.Fatalf("%s: %v", c.name, err)
 		}
+
 		if !strings.Contains(cliErr.Hint, c.want) {
 			t.Errorf("%s: hint %q lacks %q", c.name, cliErr.Hint, c.want)
 		}
+
 		if c.notWant != "" && strings.Contains(cliErr.Hint, c.notWant) {
 			t.Errorf("%s: hint %q should not mention %q", c.name, cliErr.Hint, c.notWant)
 		}

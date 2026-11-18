@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"errors"
+	"maps"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/rpc"
@@ -21,6 +22,7 @@ func WithNewOperation(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	return context.WithValue(ctx, operationKey{}, rpc.NewRequestID())
 }
 
@@ -29,10 +31,12 @@ func operationIDFromContext(ctx context.Context) (string, bool) {
 	if ctx == nil {
 		return "", false
 	}
+
 	id, ok := ctx.Value(operationKey{}).(string)
 	if !ok || id == "" {
 		return "", false
 	}
+
 	return id, true
 }
 
@@ -42,6 +46,7 @@ func effectiveOperationID(operationID, requestID string) string {
 	if operationID != "" {
 		return operationID
 	}
+
 	return requestID
 }
 
@@ -51,9 +56,11 @@ func callOptionsForContext(ctx context.Context, opts CallOptions) CallOptions {
 	if opts.OperationID != "" {
 		return opts
 	}
+
 	if id, ok := operationIDFromContext(ctx); ok {
 		opts.OperationID = id
 	}
+
 	return opts
 }
 
@@ -66,12 +73,15 @@ func annotateRPCError(err error, operationID, requestID string) error {
 	if err == nil || (operationID == "" && requestID == "") {
 		return err
 	}
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) || cliErr == nil {
 		return err
 	}
+
 	copied := *cliErr
 	copied.Details = correlateDetails(cliErr.Details, operationID, requestID)
+
 	return &copied
 }
 
@@ -83,32 +93,34 @@ func correlateDetails(details any, operationID, requestID string) any {
 	if operationID != "" {
 		ids["operation_id"] = operationID
 	}
+
 	if requestID != "" {
 		ids["request_id"] = requestID
 	}
+
 	if len(ids) == 0 {
 		return details
 	}
+
 	switch value := details.(type) {
 	case nil:
 		return ids
 	case map[string]any:
 		out := make(map[string]any, len(value)+len(ids))
-		for key, item := range value {
-			out[key] = item
-		}
+		maps.Copy(out, value)
+
 		for key, item := range ids {
 			if _, exists := out[key]; !exists {
 				out[key] = item
 			}
 		}
+
 		return out
 	default:
 		out := make(map[string]any, len(ids)+1)
-		for key, item := range ids {
-			out[key] = item
-		}
+		maps.Copy(out, ids)
 		out["details"] = details
+
 		return out
 	}
 }

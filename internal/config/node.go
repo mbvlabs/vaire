@@ -33,20 +33,25 @@ func LoadNode(path string) (Node, error) {
 	if err != nil {
 		return Node{}, err
 	}
+
 	var node Node
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&node); err != nil {
 		return Node{}, configError(path, err)
 	}
+
 	var missing []string
 	if strings.TrimSpace(node.Server) == "" {
 		missing = append(missing, "server")
 	}
+
 	if strings.TrimSpace(node.NodeName) == "" {
 		missing = append(missing, "node_name")
 	}
+
 	if len(missing) > 0 {
 		return Node{}, configError(path, fmt.Errorf("missing %s", strings.Join(missing, ", ")))
 	}
+
 	return node, nil
 }
 

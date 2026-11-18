@@ -27,17 +27,21 @@ pg_ctl_options = ''
 
 func recoveryRegistration(t *testing.T, dest *MaterialiseConfig) *Materialised {
 	t.Helper()
+
 	oldConf, oldIDs, oldWrite := pgConfRoot, resolveClusterIDs, writeClusterFile
 	pgConfRoot = t.TempDir()
 	resolveClusterIDs = func(_, _ string) (int, int, error) { return -1, -1, nil }
 	writeClusterFile = func(path string, data []byte, perm os.FileMode, _, _ string) error {
 		return engine.WriteFileAtomicOwned(path, data, perm, "", "")
 	}
+
 	t.Cleanup(func() { pgConfRoot, resolveClusterIDs, writeClusterFile = oldConf, oldIDs, oldWrite })
+
 	src := filepath.Join(pgConfRoot, "source", "conf.d")
 	if err := os.MkdirAll(src, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	for name, text := range map[string]string{
 		"10-vaire-tuning.conf":   "max_connections = 30\n",
 		"50-vaire-settings.conf": "# source settings\n",
@@ -48,15 +52,18 @@ func recoveryRegistration(t *testing.T, dest *MaterialiseConfig) *Materialised {
 			t.Fatal(err)
 		}
 	}
+
 	m := &Materialised{Name: "target", Source: "source", Data: filepath.Join(t.TempDir(), "data"), Port: 5555, DestinationConfig: dest}
 	if err := m.register(); err != nil {
 		t.Fatal(err)
 	}
+
 	return m
 }
 
 func TestDestinationRecoveryLayers(t *testing.T) {
 	override := "max_connections = 55\n"
+
 	m := recoveryRegistration(t, &MaterialiseConfig{
 		Tuning: "max_connections = 50\n", Settings: "max_connections = 52\n", Overrides: &override,
 	})
@@ -70,17 +77,21 @@ func TestDestinationRecoveryLayers(t *testing.T) {
 			t.Fatalf("%s: %q %v", name, got, err)
 		}
 	}
+
 	if _, err := os.Stat(filepath.Join(m.ConfDir(), "conf.d", "60-vaire-follower.conf")); !os.IsNotExist(err) {
 		t.Fatalf("source follower layer remains: %v", err)
 	}
+
 	data, err := os.ReadFile(filepath.Join(m.ConfDir(), "conf.d", MaterialiseOverrides))
 	if err != nil || strings.Contains(string(data), "max_connections") {
 		t.Fatalf("temporary override must not raise a floor: %s %v", data, err)
 	}
+
 	m.DestinationConfig = nil
 	if err := m.register(); err != nil {
 		t.Fatal(err)
 	}
+
 	data, err = os.ReadFile(filepath.Join(m.ConfDir(), "conf.d", "10-vaire-tuning.conf"))
 	if err != nil || string(data) != "max_connections = 30\n" {
 		t.Fatalf("source fallback: %q %v", data, err)
@@ -104,8 +115,11 @@ func newPrestartRun(t *testing.T, m *Materialised) *prestartRun {
 	t.Helper()
 	r := &prestartRun{t: t, m: m, control: controlExcerpt}
 	old := recoveryProbe
+
 	t.Cleanup(func() { recoveryProbe = old })
+
 	recoveryProbe = r.probe
+
 	return r
 }
 
@@ -114,9 +128,11 @@ func (r *prestartRun) probe(_ context.Context, args ...string) (string, string, 
 	if args[0] == pgBin+"/pg_controldata" {
 		return r.control, r.stderr, nil
 	}
+
 	if args[len(args)-1] == r.failSetting {
 		return "sensitive diagnostic", "", errors.New("sensitive diagnostic")
 	}
+
 	return r.base[args[len(args)-1]] + "\n", "", nil
 }
 
@@ -125,6 +141,7 @@ func (r *prestartRun) start(_ context.Context, until string) error {
 	if until != UntilPromoted {
 		r.t.Fatalf("until=%s", until)
 	}
+
 	return nil
 }
 
@@ -137,14 +154,17 @@ func (r *prestartRun) restore() error {
 func (r *prestartRun) requireInspectionFailure(setting string) {
 	r.t.Helper()
 	err := r.restore()
+
 	var cli *output.CLIError
 	if !errors.As(err, &cli) || cli.Code != output.CodePrecondition || !RetainRecoveryFailure(err) || r.starts != 1 {
 		r.t.Fatalf("%s: err=%v starts=%d", setting, err, r.starts)
 	}
+
 	details, ok := cli.Details.(map[string]any)
 	if !ok {
 		r.t.Fatalf("%s: details %T", setting, cli.Details)
 	}
+
 	unmet, ok := details["settings"].([]RecoveryRequirement)
 	if !ok || len(unmet) != 1 || unmet[0].Setting != setting || unmet[0].Configured >= unmet[0].Required {
 		r.t.Fatalf("%s: incorrect details %v", setting, details)
@@ -155,6 +175,7 @@ func (r *prestartRun) requireInspectionFailure(setting string) {
 // the target floor, without starting the cluster.
 func (r *prestartRun) requireStartRefused(what string) {
 	r.t.Helper()
+
 	if err := r.restore(); err == nil || RetainRecoveryFailure(err) || r.starts != 1 {
 		r.t.Fatalf("%s: %v", what, err)
 	}
@@ -164,15 +185,19 @@ func (r *prestartRun) requireStartRefused(what string) {
 // postgres -C per floor with the temporary cluster's configuration.
 func (r *prestartRun) requireCalls() {
 	r.t.Helper()
+
 	if len(r.calls) != 6 || !reflect.DeepEqual(r.calls[0], []string{pgBin + "/pg_controldata", "-D", r.m.Data}) {
 		r.t.Fatalf("control call: %v", r.calls)
 	}
+
 	for i, floor := range recoveryFloors {
 		want := make([]string, 0, 7+2*len(recoveryStartupSettings))
+
 		want = append(want, pgBin+"/postgres", "-D", r.m.Data)
 		for _, setting := range recoveryStartupSettings {
 			want = append(want, "-c", setting)
 		}
+
 		want = append(want, "-c", "config_file="+filepath.Join(r.m.ConfDir(), "postgresql.conf"), "-C", floor.setting)
 		if !reflect.DeepEqual(r.calls[i+1], want) {
 			r.t.Fatalf("setting call: got %v want %v", r.calls[i+1], want)
@@ -184,6 +209,7 @@ func (r *prestartRun) requireCalls() {
 // its requirement to refuse start with exactly that unmet requirement.
 func (r *prestartRun) requireFloorFailure(floor recoveryFloor) {
 	r.t.Helper()
+
 	orig, origControl := r.base[floor.setting], r.control
 	defer func() { r.base[floor.setting], r.control = orig, origControl }()
 	// Each selected value is a valid configured value below its requirement.
@@ -199,12 +225,14 @@ func (r *prestartRun) requireFloorFailure(floor recoveryFloor) {
 	default:
 		r.base[floor.setting] = "0"
 	}
+
 	r.requireInspectionFailure(floor.setting)
 }
 
 func TestRecoveryPrestartInspections(t *testing.T) {
 	m := recoveryRegistration(t, &MaterialiseConfig{Tuning: "max_connections = 50\n"})
 	run := newPrestartRun(t, m)
+
 	run.base = map[string]string{
 		"max_connections": "50", "max_worker_processes": "8", "max_wal_senders": "10",
 		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
@@ -212,18 +240,23 @@ func TestRecoveryPrestartInspections(t *testing.T) {
 	if err := run.restore(); err != nil || run.starts != 1 {
 		t.Fatalf("sufficient: %v, starts=%d", err, run.starts)
 	}
+
 	run.requireCalls()
+
 	for _, floor := range recoveryFloors {
 		run.requireFloorFailure(floor)
 	}
+
 	run.stderr = "CRC warning with sensitive diagnostic"
 	if err := run.restore(); err == nil || RetainRecoveryFailure(err) || strings.Contains(err.Error(), "sensitive") || run.starts != 1 {
 		t.Fatalf("bad control: %v", err)
 	}
+
 	run.stderr = ""
 	run.control = strings.Replace(controlExcerpt, "max_connections setting:", "unknown label:", 1)
 	run.requireStartRefused("missing control field")
 	run.control = controlExcerpt
+
 	run.failSetting = "max_connections"
 	if err := run.restore(); err == nil || strings.Contains(err.Error(), "sensitive") || run.starts != 1 {
 		t.Fatalf("bad setting inspection: %v", err)
@@ -232,6 +265,7 @@ func TestRecoveryPrestartInspections(t *testing.T) {
 
 func TestRecoveryProbeIdentityAndOptions(t *testing.T) {
 	cmd := recoveryProbeCommand(context.Background(), pgBin+"/postgres", "-D", "/data", "-c", "config_file=/config", "-C", "max_connections")
+
 	want := []string{"runuser", "-u", "postgres", "--", pgBin + "/postgres", "-D", "/data", "-c", "config_file=/config", "-C", "max_connections"}
 	if !reflect.DeepEqual(cmd.Args, want) || !reflect.DeepEqual(cmd.Env, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "LANG=C", "HOME=/var/lib/postgresql"}) {
 		t.Fatalf("args=%v env=%v", cmd.Args, cmd.Env)
@@ -243,7 +277,9 @@ func TestRecoveryRejectsUninspectedStartupOptions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(m.ConfDir(), "pg_ctl.conf"), []byte("pg_ctl_options = '-o -cmax_connections=1'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	called := false
+
 	err := m.restoreRegistered(context.Background(), RestoreOptions{}, func(context.Context, string) error { called = true; return nil })
 	if err == nil || called || RetainRecoveryFailure(err) {
 		t.Fatalf("err=%v started=%v", err, called)
@@ -252,12 +288,16 @@ func TestRecoveryRejectsUninspectedStartupOptions(t *testing.T) {
 
 func TestStockPgCtlPreparationInspectionStartAndRestoration(t *testing.T) {
 	m := recoveryRegistration(t, nil)
+
 	ctl := filepath.Join(m.ConfDir(), "pg_ctl.conf")
 	if err := os.WriteFile(ctl, []byte(stockPgCtlConf), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	old := recoveryProbe
+
 	t.Cleanup(func() { recoveryProbe = old })
+
 	values := map[string]string{
 		"max_connections": "30", "max_worker_processes": "8", "max_wal_senders": "10",
 		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
@@ -266,22 +306,28 @@ func TestStockPgCtlPreparationInspectionStartAndRestoration(t *testing.T) {
 		if args[0] == pgBin+"/pg_controldata" {
 			return controlExcerpt, "", nil
 		}
+
 		return values[args[len(args)-1]], "", nil
 	}
+
 	started := false
 	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, func(context.Context, string) error {
 		started = true
+
 		current, err := os.ReadFile(ctl)
 		if err != nil || string(current) != recoveryCtlOptions {
 			t.Fatalf("startup options: %q %v", current, err)
 		}
+
 		return nil
 	}); err != nil || !started {
 		t.Fatalf("stock registration failed: %v; started=%v", err, started)
 	}
+
 	if err := m.restoreRecoveryDiagnostics(); err != nil {
 		t.Fatal(err)
 	}
+
 	actual, err := os.ReadFile(ctl)
 	if err != nil || string(actual) != stockPgCtlConf {
 		t.Fatalf("stock config not restored: %q %v", actual, err)
@@ -290,24 +336,30 @@ func TestStockPgCtlPreparationInspectionStartAndRestoration(t *testing.T) {
 
 func TestExplicitDestinationReconcilesAutoFloors(t *testing.T) {
 	override := "max_connections = 55\n"
+
 	m := recoveryRegistration(t, &MaterialiseConfig{
 		Tuning: "max_connections = 50\n", Settings: "# no override\n", Overrides: &override,
 	})
 	if err := os.MkdirAll(m.Data, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	auto := "# recovery settings\nrestore_command = 'keep this'\n" +
 		"max_connections = '30'\nmax_worker_processes = '8'\nmax_wal_senders = '10'\n" +
 		"max_prepared_transactions = '0'\nmax_locks_per_transaction = '64'\n" +
 		"recovery_target_time = '2026-11-13 00:00:00+00'\nshared_buffers = '256MB'\n"
 	kept := "# recovery settings\nrestore_command = 'keep this'\n" +
 		"recovery_target_time = '2026-11-13 00:00:00+00'\nshared_buffers = '256MB'\n"
+
 	path := filepath.Join(m.Data, "postgresql.auto.conf")
 	if err := os.WriteFile(path, []byte(auto), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	old := recoveryProbe
+
 	t.Cleanup(func() { recoveryProbe = old })
+
 	values := map[string]string{
 		"max_connections": "55", "max_worker_processes": "8", "max_wal_senders": "10",
 		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
@@ -317,6 +369,7 @@ func TestExplicitDestinationReconcilesAutoFloors(t *testing.T) {
 		if err != nil || string(current) != kept {
 			t.Fatalf("auto config at inspection: %q %v", current, err)
 		}
+
 		if args[0] == pgBin+"/pg_controldata" {
 			return strings.Replace(controlExcerpt, "30", "50", 1), "", nil
 		}
@@ -324,13 +377,16 @@ func TestExplicitDestinationReconcilesAutoFloors(t *testing.T) {
 		// not a Go reimplementation of PostgreSQL's precedence.
 		return values[args[len(args)-1]], "", nil
 	}
+
 	started := false
 	if err := m.restoreRegistered(context.Background(), RestoreOptions{}, func(context.Context, string) error {
 		started = true
+
 		actual, err := os.ReadFile(path)
 		if err != nil || string(actual) != kept {
 			t.Fatalf("startup auto config: %q %v", actual, err)
 		}
+
 		return nil
 	}); err != nil || !started {
 		t.Fatalf("explicit destination: %v; started=%v", err, started)
@@ -342,25 +398,33 @@ func TestAutoFloorReconciliationFallbackAndMalformed(t *testing.T) {
 	if err := os.MkdirAll(m.Data, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	path := filepath.Join(m.Data, "postgresql.auto.conf")
+
 	original := "max_connections = '30'\nrestore_command = 'keep'\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := m.reconcileRecoveryFloors(); err != nil {
 		t.Fatal(err)
 	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(raw) != original {
 		t.Fatalf("source fallback changed: %q", raw)
 	}
+
 	m.DestinationConfig = &MaterialiseConfig{}
+
 	if err := os.WriteFile(path, []byte("max_connections =\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := m.reconcileRecoveryFloors(); err == nil || RetainRecoveryFailure(err) {
 		t.Fatalf("malformed floor should fail inspection: %v", err)
 	}
@@ -371,12 +435,16 @@ func TestExplicitTarget50OverridesRestoredAuto30(t *testing.T) {
 	if err := os.MkdirAll(m.Data, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	path := filepath.Join(m.Data, "postgresql.auto.conf")
 	if err := os.WriteFile(path, []byte("max_connections = '30'\nrestore_command = 'retained'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	old := recoveryProbe
+
 	t.Cleanup(func() { recoveryProbe = old })
+
 	values := map[string]string{
 		"max_connections": "50", "max_worker_processes": "8", "max_wal_senders": "10",
 		"max_prepared_transactions": "0", "max_locks_per_transaction": "64",
@@ -386,12 +454,15 @@ func TestExplicitTarget50OverridesRestoredAuto30(t *testing.T) {
 		if err != nil || string(auto) != "restore_command = 'retained'\n" {
 			t.Fatalf("restored auto overrides still affect target: %q %v", auto, err)
 		}
+
 		if args[0] == pgBin+"/pg_controldata" {
 			return strings.Replace(controlExcerpt, "30", "50", 1), "", nil
 		}
+
 		return values[args[len(args)-1]], "", nil
 	}
 	started := false
+
 	err := m.restoreRegistered(context.Background(), RestoreOptions{}, func(context.Context, string) error {
 		started = true
 		return nil
@@ -405,23 +476,29 @@ func TestExplicitTarget50OverridesRestoredAuto30(t *testing.T) {
 // the retained pg_cron and pgaudit preloads and pg_cron's launch suppression.
 func recoveryStartFixture(t *testing.T) *Materialised {
 	t.Helper()
+
 	oldWrite := writeCopyGuardFile
 	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
 		return os.WriteFile(path, data, perm)
 	}
+
 	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
+
 	m := recoveryRegistration(t, nil)
 	if err := os.MkdirAll(m.Data, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	cron, ok := catalog.Lookup("pg_cron")
 	if !ok {
 		t.Fatal("catalog has no pg_cron")
 	}
+
 	audit, ok := catalog.Lookup("pgaudit")
 	if !ok {
 		t.Fatal("catalog has no pgaudit")
 	}
+
 	merged, guard, err := MergeCopyRequirements([]catalog.Extension{cron, audit}, nil, true, "app")
 	if err != nil {
 		t.Fatal(err)
@@ -434,8 +511,10 @@ func recoveryStartFixture(t *testing.T) *Materialised {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	guard.Settings = decision.Settings
 	m.Plan = &CopyPlan{Guard: guard, Requirements: merged, Historical: true, Cron: true}
+
 	return m
 }
 
@@ -450,22 +529,30 @@ type recoveryStartRun struct {
 // submitted copy lacks the plan's guard.
 func stubRecoveryStart(t *testing.T, m *Materialised) *recoveryStartRun {
 	t.Helper()
+
 	oldSubmit, oldWait := submitRecoveryService, waitRecoveryService
+
 	t.Cleanup(func() { submitRecoveryService, waitRecoveryService = oldSubmit, oldWait })
+
 	run := &recoveryStartRun{}
 	submitRecoveryService = func(context.Context, string) error {
 		run.submitted = true
+
 		if err := requireRecoveryCopyGuard(m.Data); err != nil {
 			t.Error(err)
 		}
+
 		run.events = append(run.events, "submit")
+
 		return nil
 	}
 	waitRecoveryService = func(context.Context, string, string, int, string, string, *recoveryLogCursor, recoveryWaitProbes, func(string)) error {
 		run.waited = true
 		run.events = append(run.events, "wait")
+
 		return nil
 	}
+
 	return run
 }
 
@@ -474,12 +561,15 @@ func requireRecoveryCopyGuard(data string) error {
 	if err != nil {
 		return fmt.Errorf("read the submitted copy's guard: %w", err)
 	}
+
 	if !present {
 		return errors.New("service submitted before the copy plan was installed")
 	}
+
 	if !reflect.DeepEqual(got.Preloads, []string{"pg_cron", "pgaudit"}) {
 		return fmt.Errorf("submitted preloads = %v", got.Preloads)
 	}
+
 	if !reflect.DeepEqual(got.Settings, map[string]string{
 		"cron.launch_active_jobs":     "off",
 		"cron.database_name":          "'app'",
@@ -489,28 +579,35 @@ func requireRecoveryCopyGuard(data string) error {
 	}) {
 		return fmt.Errorf("submitted copy settings = %v", got.Settings)
 	}
+
 	return nil
 }
 
 func TestRecoveryStartPrestartThenPlanThenService(t *testing.T) {
 	m := recoveryStartFixture(t)
 	run := stubRecoveryStart(t, m)
+
 	m.BeforeStart = func(context.Context) error {
 		if _, present, err := ReadCopyGuard(m.Data); err != nil || present {
 			if err != nil {
 				return fmt.Errorf("read the copy guard before the prestart hook: %w", err)
 			}
+
 			return errors.New("prestart hook saw the copy plan already installed")
 		}
+
 		run.events = append(run.events, "prestart")
+
 		return nil
 	}
 	if err := m.startRecovery(context.Background(), UntilPaused, TargetLatest); err != nil {
 		t.Fatal(err)
 	}
+
 	if !run.submitted || !run.waited {
 		t.Fatalf("submitted=%v waited=%v", run.submitted, run.waited)
 	}
+
 	if want := []string{"prestart", "submit", "wait"}; !reflect.DeepEqual(run.events, want) {
 		t.Fatalf("startup events = %v, want %v", run.events, want)
 	}
@@ -534,9 +631,11 @@ func TestRecoveryStartPlanFailurePreventsService(t *testing.T) {
 
 func requireRecoveryStartRefused(t *testing.T, err error, run *recoveryStartRun, want string) {
 	t.Helper()
+
 	if run.submitted || run.waited {
 		t.Fatalf("prestart failure reached the service: submitted=%v waited=%v", run.submitted, run.waited)
 	}
+
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("err = %v, want %q", err, want)
 	}

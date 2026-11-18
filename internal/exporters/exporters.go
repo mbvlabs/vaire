@@ -42,15 +42,19 @@ var repos = map[string]string{
 // <name>-<version>.linux-<arch>.tar.gz holding <name>-<version>.linux-<arch>/<name>.
 func ArtifactFor(name, arch string) (Artifact, error) {
 	version := versions.ExporterVersion(name)
+
 	repo, ok := repos[name]
 	if version == "" || !ok {
 		return Artifact{}, fmt.Errorf("unknown exporter %q", name)
 	}
+
 	sum, ok := versions.ExporterSHA256[name+"-"+arch]
 	if !ok {
 		return Artifact{}, fmt.Errorf("exporter %s has no pinned build for %s", name, arch)
 	}
+
 	stem := fmt.Sprintf("%s-%s.linux-%s", name, version, arch)
+
 	return Artifact{
 		Name:    name,
 		Version: version,

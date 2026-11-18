@@ -27,6 +27,7 @@ func extensionFixture(x ExtensionFacts) Facts {
 	f := healthy()
 	f.Clusters = f.Clusters[:1]
 	f.Clusters[0].Ext = x
+
 	return f
 }
 
@@ -159,6 +160,7 @@ func TestExtensionChecksProblems(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			x := extensionFacts()
 			tc.edit(&x)
+
 			r := byID(Run(ExtensionChecks(), extensionFixture(x), ""), tc.id, "app")
 			if r.Status != tc.status || !strings.Contains(r.Detail, tc.detail) || !strings.Contains(r.Fix, tc.fix) {
 				t.Fatalf("%s: %s %q fix %q", tc.name, r.Status, r.Detail, r.Fix)
@@ -169,11 +171,13 @@ func TestExtensionChecksProblems(t *testing.T) {
 
 func TestExtensionChecksInNodeChecks(t *testing.T) {
 	found := 0
+
 	for _, c := range NodeChecks() {
 		if strings.HasPrefix(c.ID, "ext.") {
 			found++
 		}
 	}
+
 	if found != 3 {
 		t.Fatalf("NodeChecks has %d ext checks", found)
 	}

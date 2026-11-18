@@ -77,6 +77,7 @@ func (metricsStep) Describe(cfg config.Cluster) string {
 	if !cfg.Metrics.Enabled {
 		return "stop the exporters and remove the /metrics endpoint ([metrics] enabled = false)"
 	}
+
 	return "install node_exporter, postgres_exporter and the pgbouncer_exporters on loopback, and the authenticated /metrics endpoint on nginx"
 }
 
@@ -125,6 +126,7 @@ func exporterUnits(cfg config.Cluster) map[string][]byte {
 		units[PgbouncerExporterTx] = pgbouncerExporterUnit("transaction pooler", PgbouncerTxAddr, PgbouncerExporterEnv, PgbouncerService+".service")
 		units[PgbouncerExporterSess] = pgbouncerExporterUnit("session pooler", PgbouncerSessAddr, PgbouncerSessionExporterEnv, SessionPoolerService+".service")
 	}
+
 	return units
 }
 
@@ -165,17 +167,21 @@ func MetricsLocations(cfg config.Cluster) []render.MetricsLocation {
 	if prefix == "" {
 		prefix = "/metrics"
 	}
+
 	server, node := cfg.Name(), ""
 	if n, ok := cfg.Master(); ok {
 		node = n.Name
 	}
+
 	base := func(component string, extra ...string) map[string]string {
 		labels := map[string]string{"vaire_server": server, "vaire_node": node, "vaire_component": component}
 		for i := 0; i+1 < len(extra); i += 2 {
 			labels[extra[i]] = extra[i+1]
 		}
+
 		return labels
 	}
+
 	out := []render.MetricsLocation{
 		{Path: prefix + "/targets.json", Alias: MetricsTargetsPath},
 		{Path: prefix + "/node", Upstream: "http://" + NodeExporterAddr + "/metrics", Labels: base("node")},
@@ -188,12 +194,14 @@ func MetricsLocations(cfg config.Cluster) []render.MetricsLocation {
 			Labels:   base("postgres", "db", c.Name),
 		})
 	}
+
 	if len(cfg.Clusters) > 0 {
 		out = append(out,
 			render.MetricsLocation{Path: prefix + "/pgbouncer", Upstream: "http://" + PgbouncerTxAddr + "/metrics", Labels: base("pgbouncer", "pooler", "transaction")},
 			render.MetricsLocation{Path: prefix + "/pgbouncer-session", Upstream: "http://" + PgbouncerSessAddr + "/metrics", Labels: base("pgbouncer", "pooler", "session")},
 		)
 	}
+
 	return out
 }
 
@@ -208,12 +216,14 @@ func metricsFiles(cfg config.Cluster) []metricsFile {
 		{path: MetricsJailPath, content: metricsJail, mode: 0o644},
 		{path: PostgresExporterConfPath, content: postgresExporterConf, mode: 0o644},
 	}
+
 	units := exporterUnits(cfg)
 	for _, name := range allExporterUnits {
 		if content, ok := units[name]; ok {
 			files = append(files, metricsFile{path: SystemdSystemDir + "/" + name, content: string(content), mode: 0o644})
 		}
 	}
+
 	return files
 }
 
@@ -221,24 +231,29 @@ func (metricsStep) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []engine.
 	if !cfg.Metrics.Enabled {
 		return nil
 	}
+
 	var out []engine.RenderedFile
 	for _, f := range metricsFiles(cfg) {
 		out = append(out, engine.RenderedFile{Path: f.path, Content: []byte(f.content)})
 	}
+
 	return out
 }
 
 func (metricsStep) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
 	files := map[string]string{}
+
 	if cfg.Metrics.Enabled {
 		for _, f := range metricsFiles(cfg) {
 			files[f.path] = f.content
 		}
 	}
+
 	pins := map[string]string{}
 	for _, name := range versions.Exporters {
 		pins[name] = versions.ExporterVersion(name)
 	}
+
 	return canonical(map[string]any{"enabled": cfg.Metrics.Enabled, "files": files, "pins": pins, "arch": runtime.GOARCH})
 }
 
@@ -247,27 +262,35 @@ func (metricsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runti
 		if reason := metricsDisabledReason(ctx); reason != "" {
 			return incomplete(reason), nil
 		}
+
 		return complete(), nil
 	}
+
 	reason, err := exportersInstalledReason()
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	if reason != "" {
 		return incomplete(reason), nil
 	}
+
 	if reason := metricsFilesReason(cfg); reason != "" {
 		return incomplete(reason), nil
 	}
+
 	if _, err := os.Stat(MetricsHtpasswdPath); err != nil {
 		return incomplete(MetricsHtpasswdPath + " is missing"), nil
 	}
+
 	if reason := metricsUnitsReason(ctx, cfg); reason != "" {
 		return incomplete(reason), nil
 	}
+
 	if err := httpOK(ctx, "http://"+NodeExporterAddr+"/metrics"); err != nil {
 		return incomplete("node_exporter does not answer: " + err.Error()), nil
 	}
+
 	return complete(), nil
 }
 
@@ -276,11 +299,13 @@ func metricsDisabledReason(ctx context.Context) string {
 	if _, err := os.Stat(MetricsConfPath); err == nil {
 		return MetricsConfPath + " is still there"
 	}
+
 	for _, unit := range allExporterUnits {
 		if serviceActive(ctx, unit) {
 			return unit + " is still running"
 		}
 	}
+
 	return ""
 }
 
@@ -292,10 +317,12 @@ func exportersInstalledReason() (string, error) {
 		if err != nil {
 			return "", err
 		}
+
 		if !exporters.Installed(a) {
 			return name + " " + a.Version + " is not installed", nil
 		}
 	}
+
 	return "", nil
 }
 
@@ -307,6 +334,7 @@ func metricsFilesReason(cfg config.Cluster) string {
 			return f.path + " differs"
 		}
 	}
+
 	return ""
 }
 
@@ -319,10 +347,12 @@ func metricsUnitsReason(ctx context.Context, cfg config.Cluster) string {
 		if want && !serviceActive(ctx, unit) {
 			return unit + " is not active"
 		}
+
 		if !want && serviceActive(ctx, unit) {
 			return unit + " runs without a database"
 		}
 	}
+
 	return ""
 }
 
@@ -330,6 +360,7 @@ func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Ru
 	if !cfg.Metrics.Enabled {
 		return applyMetricsDisabled(ctx, rt, s.ID(), report)
 	}
+
 	if err := rt.Shell.Run(ctx, s.ID(), Script("metrics"), map[string]string{
 		"PHASE":          "users",
 		"EXPORTER_USERS": strings.Join(exporterUsers, " "),
@@ -337,20 +368,26 @@ func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Ru
 	}, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := fetchMetricsExporters(ctx, s.ID(), report); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := writeHtpasswd(rt, false); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	previous, hadPrevious := readMaybe(MetricsConfPath)
+
 	if err := writeMetricsConfigFiles(cfg); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if _, err := Probe(ctx, "nginx", "-t"); err != nil {
 		restoreFile(MetricsConfPath, previous, hadPrevious)
 		return engine.ApplyResult{}, fmt.Errorf("nginx refused the metrics configuration; the previous one is back: %w", err)
 	}
+
 	start, stop := exporterUnitChanges(cfg)
 	if err := rt.Shell.Run(ctx, s.ID(), Script("metrics"), map[string]string{
 		"PHASE":       "start",
@@ -359,8 +396,10 @@ func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Ru
 	}, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	removeStoppedExporterUnits(stop)
 	pruneOldExporterArtifacts()
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, nil
 }
 
@@ -371,7 +410,9 @@ func applyMetricsDisabled(ctx context.Context, rt engine.Runtime, stepID string,
 			return engine.ApplyResult{}, err
 		}
 	}
+
 	err := rt.Shell.Run(ctx, stepID, Script("metrics"), map[string]string{"PHASE": "disable", "ALL_UNITS": strings.Join(allExporterUnits, " ")}, report)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
 
@@ -383,13 +424,16 @@ func fetchMetricsExporters(ctx context.Context, stepID string, report engine.Rep
 		if err != nil {
 			return err
 		}
+
 		if !exporters.Installed(a) && report != nil {
 			report(output.Event{Type: "log", Step: stepID, Line: "downloading " + a.Tarball})
 		}
+
 		if err := exporters.Fetch(ctx, a); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -401,9 +445,11 @@ func writeMetricsConfigFiles(cfg config.Cluster) error {
 			return err
 		}
 	}
+
 	if len(cfg.Clusters) > 0 {
 		return writePgbouncerExporterEnv()
 	}
+
 	return nil
 }
 
@@ -418,6 +464,7 @@ func exporterUnitChanges(cfg config.Cluster) (start, stop []string) {
 			stop = append(stop, unit)
 		}
 	}
+
 	return start, stop
 }
 
@@ -445,10 +492,12 @@ func writePgbouncerExporterEnv() error {
 	if err != nil {
 		return fmt.Errorf("the vaire_monitor password is missing (%w); run vaire apply so postgres-roles-v1 writes it", err)
 	}
+
 	password := strings.TrimSpace(string(raw))
 	if err := writeFile(PgbouncerExporterEnv, pgbouncerConnection(PGSocketDir, PgbouncerPort, password), 0o600); err != nil {
 		return err
 	}
+
 	return writeFile(PgbouncerSessionExporterEnv, pgbouncerConnection(SessionSocketDir, SessionPoolerPort, password), 0o600)
 }
 
@@ -460,15 +509,18 @@ func writeHtpasswd(rt engine.Runtime, rotate bool) error {
 	if _, err := os.Stat(MetricsHtpasswdPath); err == nil && !rotate {
 		return nil
 	}
+
 	hash := rt.SecretValues[SecretMetricsHash]
 	if hash == "" {
 		return output.NewError(output.CodeInputRequired, "the /metrics credential is missing on the node and the request carries none", output.ExitInput,
 			"Run vaire apply from a machine whose workspace has the metrics credential (vaire login with a current transfer bundle).").
 			WithDetails(map[string]any{"secret": SecretMetricsHash})
 	}
+
 	if !strings.HasPrefix(hash, "$2") {
 		return errors.New("the metrics credential hash is not bcrypt")
 	}
+
 	return writeFileOwned(MetricsHtpasswdPath, HtpasswdLine(hash), 0o640, "root", "www-data")
 }
 
@@ -483,6 +535,7 @@ func readMaybe(path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+
 	return string(raw), true
 }
 
@@ -491,6 +544,7 @@ func restoreFile(path, content string, existed bool) {
 		_ = os.Remove(path)
 		return
 	}
+
 	_ = writeFile(path, content, 0o644)
 }
 
@@ -498,18 +552,22 @@ func restoreFile(path, content string, existed bool) {
 func httpOK(ctx context.Context, url string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
+
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+
 	return nil
 }
 
@@ -518,15 +576,19 @@ func httpOK(ctx context.Context, url string) error {
 func HTTPStatus(ctx context.Context, url string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
+
 	_ = resp.Body.Close()
+
 	return resp.StatusCode, nil
 }
 

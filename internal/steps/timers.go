@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,6 +51,7 @@ func masterBackupUnits(cfg config.Cluster, start string) map[string][]byte {
 		files[FenceService] = render.FenceService()
 		files[FenceTimer] = render.JobTimer("vaire epoch fence check", "*:0/5", "30s")
 	}
+
 	return files
 }
 
@@ -67,6 +69,7 @@ func serverTimers(cfg config.Cluster) map[string][]byte {
 	if s, _, err := config.ParseWindow(cfg.Maintenance.Window); err == nil {
 		start = fmt.Sprintf("%02d:%02d", int(s.Hours()), int(s.Minutes())%60)
 	}
+
 	files := map[string][]byte{}
 	for _, t := range []struct{ job, description, schedule, jitter string }{
 		{"maint-daily", "vaire daily maintenance (wraparound, ANALYZE of stale tables, deferred restarts)", "*-*-* " + start + ":00", "10m"},
@@ -77,9 +80,9 @@ func serverTimers(cfg config.Cluster) map[string][]byte {
 		files["vaire-"+t.job+".service"] = render.JobService(t.job, "")
 		files["vaire-"+t.job+".timer"] = render.JobTimer(t.description, t.schedule, t.jitter)
 	}
-	for name, content := range masterBackupUnits(cfg, start) {
-		files[name] = content
-	}
+
+	maps.Copy(files, masterBackupUnits(cfg, start))
+
 	return files
 }
 
@@ -110,6 +113,7 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 		if own != "" {
 			return own
 		}
+
 		return def
 	}
 	all := []timerJob{
@@ -119,12 +123,15 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 		{"backup-verify", "vaire backup verify of " + spec.Name, pick(own.VerifySchedule, db.VerifySchedule), "10m"},
 		{"restore-drill", "vaire restore drill of " + spec.Name, pick(own.DrillSchedule, db.DrillSchedule), "30m"},
 	}
+
 	var out []timerJob
+
 	for _, j := range all {
 		if j.Schedule != "" {
 			out = append(out, j)
 		}
 	}
+
 	return out
 }
 
@@ -138,15 +145,19 @@ func scheduledJobs(cfg config.Cluster, spec config.ClusterSpec) []timerJob {
 // the month too (RFC 9.4).
 func timerFiles(cfg config.Cluster) map[string][]byte {
 	files := serverTimers(cfg)
+
 	files[CertsTimerName] = render.CertsTimer()
 	if !cfg.BackupConfigured() {
 		return files
 	}
+
 	files["vaire-stanza-expiry.service"] = render.JobService("stanza-expiry", "")
+
 	files[StanzaExpiryTimerName] = render.JobTimer("vaire expiry of dropped databases' stanzas", stanzaExpirySchedule, "30m")
 	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill"} {
 		files["vaire-"+job+"@.service"] = render.JobService(job, "--db %i")
 	}
+
 	spread := StaggerSpread(cfg)
 	for _, spec := range cfg.StanzaClusters() {
 		offset := StaggerOffset(spec.Stanza, spread)
@@ -155,9 +166,11 @@ func timerFiles(cfg config.Cluster) map[string][]byte {
 			if j.Job == "restore-drill" {
 				schedule = StaggerDay(schedule, spec.Stanza)
 			}
+
 			files["vaire-"+j.Job+"@"+spec.Name+".timer"] = render.JobTimer(j.Description, schedule, j.Jitter)
 		}
 	}
+
 	return files
 }
 
@@ -171,14 +184,18 @@ func StaggerSpread(cfg config.Cluster) time.Duration {
 	if !ok {
 		return defaultStaggerSpread
 	}
+
 	start, err1 := time.Parse("15:04", strings.TrimSpace(from))
+
 	end, err2 := time.Parse("15:04", strings.TrimSpace(to))
 	if err1 != nil || err2 != nil || start.Equal(end) {
 		return defaultStaggerSpread
 	}
+
 	if end.Before(start) {
 		end = end.Add(24 * time.Hour)
 	}
+
 	return end.Sub(start)
 }
 
@@ -190,8 +207,10 @@ func StaggerOffset(stanza string, spread time.Duration) time.Duration {
 	if minutes == 0 || stanza == "" {
 		return 0
 	}
+
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(stanza))
+
 	return time.Duration(h.Sum32()%minutes) * time.Minute
 }
 
@@ -210,27 +229,36 @@ func Stagger(schedule string, offset time.Duration) string {
 	if len(fields) == 0 || offset <= 0 {
 		return schedule
 	}
+
 	m := calendarTime.FindStringSubmatch(fields[len(fields)-1])
 	if m == nil {
 		return schedule
 	}
+
 	minute, _ := strconv.Atoi(m[2])
 	shift := int(offset / time.Minute)
+
 	if m[1] == "*" {
 		if minute >= 60 {
 			return schedule
 		}
+
 		minute += shift % (60 - minute)
 		fields[len(fields)-1] = fmt.Sprintf("*:%02d%s", minute, m[3])
+
 		return strings.Join(fields, " ")
 	}
+
 	hour, _ := strconv.Atoi(m[1])
+
 	start := hour*60 + minute
 	if hour >= 24 || minute >= 60 {
 		return schedule
 	}
+
 	start += shift % (24*60 - start)
 	fields[len(fields)-1] = fmt.Sprintf("%02d:%02d%s", start/60, start%60, m[3])
+
 	return strings.Join(fields, " ")
 }
 
@@ -251,40 +279,50 @@ func StaggerDay(schedule, stanza string) string {
 	if stanza == "" {
 		return schedule
 	}
+
 	for i, f := range fields {
 		m := calendarDate.FindStringSubmatch(f)
 		if m == nil {
 			continue
 		}
+
 		day, _ := strconv.Atoi(m[3])
 		if day < 1 || day > staggerDays {
 			return schedule
 		}
+
 		h := fnv.New32a()
 		_, _ = h.Write([]byte(stanza))
 		day = (day-1+int(h.Sum32()%staggerDays))%staggerDays + 1
 		fields[i] = fmt.Sprintf("%s-%s-%02d", m[1], m[2], day)
+
 		return strings.Join(fields, " ")
 	}
+
 	return schedule
 }
 
 // staleUnits are vaire timers and owned services on disk that are not rendered.
 func staleUnits(want map[string][]byte) []string {
 	var out []string
+
 	timers, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "vaire-*.timer"))
 	paths, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "vaire-*.path"))
+
 	services, _ := filepath.Glob(filepath.Join(SystemdSystemDir, "vaire-*.service"))
 	for _, path := range append(append(timers, paths...), services...) {
 		name := filepath.Base(path)
 		if _, ok := want[name]; ok {
 			continue
 		}
+
 		if strings.HasSuffix(name, ".timer") || strings.HasSuffix(name, ".path") || ownedService.MatchString(name) {
 			out = append(out, name)
 		}
 	}
+
 	sort.Strings(out)
+
 	return out
 }
 
@@ -293,7 +331,9 @@ func sortedNames(files map[string][]byte) []string {
 	for name := range files {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
@@ -307,19 +347,23 @@ func (timersStep) Describe(config.Cluster) string {
 
 func (timersStep) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []engine.RenderedFile {
 	files := timerFiles(cfg)
+
 	out := make([]engine.RenderedFile, 0, len(files))
 	for _, name := range sortedNames(files) {
 		out = append(out, engine.RenderedFile{Path: SystemdSystemDir + "/" + name, Content: files[name]})
 	}
+
 	return out
 }
 
 func (timersStep) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
 	files := timerFiles(cfg)
+
 	units := make(map[string]string, len(files))
 	for name, content := range files {
 		units[name] = string(content)
 	}
+
 	return canonical(map[string]any{"units": units, "script": Script("timers")})
 }
 
@@ -329,43 +373,53 @@ func (timersStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtim
 		if !fileIs(SystemdSystemDir+"/"+name, string(files[name]), 0o644) {
 			return incomplete(name + " differs"), nil
 		}
+
 		if enabledUnit(name) {
 			if out, _ := Probe(ctx, "systemctl", "is-enabled", name); out != "enabled" {
 				return incomplete(name + " is not enabled"), nil
 			}
 		}
 	}
+
 	if stale := staleUnits(files); len(stale) > 0 {
 		return incomplete("stale units: " + strings.Join(stale, ", ")), nil
 	}
+
 	return complete(), nil
 }
 
 func (s timersStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	files := timerFiles(cfg)
+
 	var enable []string
+
 	for _, name := range sortedNames(files) {
 		if err := writeFile(SystemdSystemDir+"/"+name, string(files[name]), 0o644); err != nil {
 			return engine.ApplyResult{}, err
 		}
+
 		if enabledUnit(name) {
 			enable = append(enable, name)
 		}
 	}
+
 	stale := staleUnits(files)
 	for _, name := range append(append([]string(nil), enable...), stale...) {
 		if !unitNamePattern.MatchString(name) {
 			return engine.ApplyResult{}, os.ErrInvalid
 		}
 	}
+
 	err := rt.Shell.Run(ctx, s.ID(), Script("timers"), map[string]string{
 		"SYSTEMD_DIR": SystemdSystemDir,
 		"ENABLE":      strings.Join(enable, " "),
 		"STALE":       strings.Join(stale, " "),
 	}, report)
+
 	notes := []string{"timers: " + strings.Join(enable, ", ")}
 	if len(stale) > 0 {
 		notes = append(notes, "removed: "+strings.Join(stale, ", "))
 	}
+
 	return engine.ApplyResult{Restart: engine.RestartNone, Notes: notes}, err
 }

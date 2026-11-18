@@ -36,14 +36,18 @@ func (s *forkAbsenceStore) Save(raw []byte) error {
 			return err
 		}
 	}
+
 	if s.saveErr != nil {
 		return s.saveErr
 	}
+
 	cfg, err := config.ParseCluster(raw)
 	if err != nil {
 		return err
 	}
+
 	s.cfg, s.saves = cfg, s.saves+1
+
 	return nil
 }
 
@@ -74,10 +78,12 @@ func newForkAbsenceFixture(t *testing.T, mode string) *forkAbsenceFixture {
 	mustNoErr(t, os.Mkdir(root, 0o700))
 	ports := filepath.Join(filepath.Dir(root), "ports")
 	mustNoErr(t, os.Mkdir(ports, 0o700))
+
 	oldRecords := backup.RecordsPath
 	backup.RecordsPath = filepath.Join(materialisationStateDir, "records.json")
 	oldState, oldReservation, oldStore, oldRemove := forkAbsenceState, forkAbsenceReservation, dbDropStore, materialisationRemoveRecord
 	oldBeforePin := forkAbsenceBeforePin
+
 	t.Cleanup(func() {
 		backup.RecordsPath = oldRecords
 		forkAbsenceState, forkAbsenceReservation, dbDropStore, materialisationRemoveRecord = oldState, oldReservation, oldStore, oldRemove
@@ -98,6 +104,7 @@ func newForkAbsenceFixture(t *testing.T, mode string) *forkAbsenceFixture {
 		if !f.probeLock {
 			return nil
 		}
+
 		return f.checkReservationHeld(context.Background())
 	}
 	f.job = engine.JobRecord{ID: o.Job, Job: "db-fork", DB: "target", State: engine.JobFailed}
@@ -117,13 +124,16 @@ func newForkAbsenceFixture(t *testing.T, mode string) *forkAbsenceFixture {
 	mustNoErr(t, err)
 	f.store.cfg, err = config.ParseCluster(raw)
 	mustNoErr(t, err)
+
 	f.appBefore, _ = f.store.cfg.ClusterByName("app")
 	if mode == "retire-failure" {
 		f.failRemove = true
 	}
+
 	if mode == "save-failure" {
 		f.store.saveErr = errors.New("config save failed")
 	}
+
 	return f
 }
 
@@ -157,8 +167,10 @@ func (f *forkAbsenceFixture) beforePin() error {
 		if err != nil {
 			return err
 		}
+
 		writeForkAbsenceRecord(f.t, o)
 	}
+
 	return nil
 }
 
@@ -171,32 +183,40 @@ func (f *forkAbsenceFixture) boundRecord() (materialisationOwnership, error) {
 		if err := os.Mkdir(dir.path, dir.mode); err != nil {
 			return materialisationOwnership{}, err
 		}
+
 		if err := os.Chmod(dir.path, dir.mode); err != nil {
 			return materialisationOwnership{}, err
 		}
+
 		if err := os.WriteFile(filepath.Join(dir.path, "keep"), []byte("unchanged"), 0o600); err != nil {
 			return materialisationOwnership{}, err
 		}
 	}
+
 	dataInfo, err := os.Lstat(dataTarget)
 	if err != nil {
 		return materialisationOwnership{}, err
 	}
+
 	dataID, err := materialisationID(dataInfo)
 	if err != nil {
 		return materialisationOwnership{}, err
 	}
+
 	configInfo, err := os.Lstat(configTarget)
 	if err != nil {
 		return materialisationOwnership{}, err
 	}
+
 	configID, err := materialisationID(configInfo)
 	if err != nil {
 		return materialisationOwnership{}, err
 	}
+
 	o := f.o
 	o.ArtifactStage, o.TemporaryPort = materialisationRegistered, config.TemporaryPortMin
 	o.DataIdentity, o.ConfigIdentity = dataID, configID
+
 	return o, nil
 }
 
@@ -219,6 +239,7 @@ func (f *forkAbsenceFixture) applyConfigMode() {
 
 func (f *forkAbsenceFixture) applyFilesystemMode(t *testing.T) {
 	t.Helper()
+
 	dataTarget, configTarget := filepath.Join(f.root, f.o.Target), filepath.Join(materialisationConfigRoot, f.o.Target)
 	switch f.mode {
 	case "data-present":
@@ -244,12 +265,14 @@ func (f *forkAbsenceFixture) applyFilesystemMode(t *testing.T) {
 		other.IntendedPort = 5432
 		other.DataPath, other.RegisteredPath = filepath.Join(f.root, "app"), filepath.Join(materialisationConfigRoot, "app")
 		writeForkAbsenceRecord(t, other)
+
 		f.appMarker, _ = materialisationPath("app")
 	}
 }
 
 func (f *forkAbsenceFixture) applyJobMode(t *testing.T) {
 	t.Helper()
+
 	switch f.mode {
 	case "job-queued":
 		f.job.State = engine.JobQueued
@@ -264,9 +287,11 @@ func (f *forkAbsenceFixture) applyJobMode(t *testing.T) {
 
 func (f *forkAbsenceFixture) applyLeaseMode(t *testing.T) {
 	t.Helper()
+
 	if f.mode != "active-lease" {
 		return
 	}
+
 	env := &jobEnv{ID: "other", Job: "db-fork", OperationID: "operation", installID: "install", Params: json.RawMessage(`{"name":"target"}`)}
 	f.lease = newLockedJobLease(env, []jobLockRequest{{name: "target", mode: engine.LockExclusive}}, nil, func() {})
 	t.Cleanup(f.lease.finish)
@@ -274,6 +299,7 @@ func (f *forkAbsenceFixture) applyLeaseMode(t *testing.T) {
 
 func writeForkAbsenceRecord(t *testing.T, o materialisationOwnership) {
 	t.Helper()
+
 	raw, err := json.Marshal(o)
 	mustNoErr(t, err)
 	p, err := materialisationPath(o.Target)
@@ -295,13 +321,16 @@ func (f *forkAbsenceFixture) state() (engine.State, error) {
 		st.RetainedJobs = map[string]engine.JobRecord{
 			f.job.ID: {ID: f.job.ID, Job: "db-fork", DB: "app", State: engine.JobFailed},
 		}
+
 		return st, nil
 	case "job-active-other":
 		st := engine.State{}
 		st.PutJob(f.job)
 		st.PutJob(engine.JobRecord{ID: "other", Job: "db-fork", DB: "target", State: engine.JobQueued})
+
 		return st, nil
 	}
+
 	return engine.State{Jobs: []engine.JobRecord{f.job}}, nil
 }
 
@@ -310,18 +339,21 @@ func (f *forkAbsenceFixture) reservation(ctx context.Context, owner string) (fun
 	if err != nil {
 		return nil, err
 	}
+
 	if f.probeLock {
 		if err := f.checkReservationHeld(ctx); err != nil {
 			unlock()
 			return nil, err
 		}
 	}
+
 	switch f.mode {
 	case "record-changed":
 		f.recordChange = true
 		o := f.o
 		o.Operation = "replacement"
 		raw, _ := json.Marshal(o)
+
 		p, _ := materialisationPath(o.Target)
 		if err := os.WriteFile(p, append(raw, '\n'), 0o600); err != nil {
 			unlock()
@@ -332,21 +364,26 @@ func (f *forkAbsenceFixture) reservation(ctx context.Context, owner string) (fun
 			unlock()
 			return nil, err
 		}
+
 		if err := os.Mkdir(f.root, 0o700); err != nil {
 			unlock()
 			return nil, err
 		}
 	}
+
 	return unlock, nil
 }
 
 func (f *forkAbsenceFixture) checkReservationHeld(ctx context.Context) error {
 	f.lockProbes++
+
 	probe, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
+
 	if _, err := backup.LockTemporaryReservationAbsenceWithHost(probe, f.ports, materialisationRecordUID, f.o.Target); !errors.Is(err, context.DeadlineExceeded) {
 		return errors.New("allocator lock was not held")
 	}
+
 	return nil
 }
 
@@ -357,48 +394,60 @@ func (f *forkAbsenceFixture) removeRecord(p string) error {
 			return err
 		}
 	}
+
 	if f.failRemove && f.removeCalls == 1 {
 		return errors.New("marker unlink failed")
 	}
+
 	return os.Remove(p)
 }
 
 func (f *forkAbsenceFixture) drop(t *testing.T) (Result, error) {
 	t.Helper()
+
 	env := &Env{Cluster: f.store.cfg, Req: rpc.Request{Params: json.RawMessage(`{"name":"target"}`), Confirm: "target"}}
 	if f.mode == "wrong-confirm" {
 		env.Req.Confirm = "other"
 	}
+
 	return handleDBDrop(context.Background(), env)
 }
 
 func (f *forkAbsenceFixture) assertRefused(t *testing.T, err error, wantCode string) {
 	t.Helper()
+
 	if err == nil {
 		t.Fatal("metadata cleanup accepted")
 	}
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("not a CLI error: %v", err)
 	}
+
 	if wantCode != "" && cliErr.Code != wantCode {
 		t.Fatalf("error code = %s, want %s: %v", cliErr.Code, wantCode, err)
 	}
+
 	if f.store.saves != 0 || f.removeCalls != 0 {
 		t.Fatalf("refusal mutated state: saves=%d removes=%d", f.store.saves, f.removeCalls)
 	}
+
 	marker, _ := materialisationPath("target")
 	if _, err := os.Lstat(marker); err != nil {
 		t.Fatalf("refusal lost marker: %v", err)
 	}
+
 	if _, ok := f.store.cfg.ClusterByName("target"); !ok {
 		t.Fatal("refusal removed the configured target")
 	}
+
 	f.assertArtifacts(t)
 }
 
 func (f *forkAbsenceFixture) assertArtifacts(t *testing.T) {
 	t.Helper()
+
 	dataTarget, configTarget := filepath.Join(f.root, f.o.Target), filepath.Join(materialisationConfigRoot, f.o.Target)
 	switch f.mode {
 	case "data-present":
@@ -423,6 +472,7 @@ func (f *forkAbsenceFixture) assertArtifacts(t *testing.T) {
 
 func assertUnchangedFile(t *testing.T, path string) {
 	t.Helper()
+
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != "unchanged" {
 		t.Fatalf("path changed: %s %q %v", path, data, err)
@@ -431,6 +481,7 @@ func assertUnchangedFile(t *testing.T, path string) {
 
 func assertPathExists(t *testing.T, path string) {
 	t.Helper()
+
 	if _, err := os.Lstat(path); err != nil {
 		t.Fatalf("path changed: %s %v", path, err)
 	}
@@ -438,6 +489,7 @@ func assertPathExists(t *testing.T, path string) {
 
 func (f *forkAbsenceFixture) assertReplacementJobRecord(t *testing.T) {
 	t.Helper()
+
 	got, found, err := readMaterialisation(f.o.Target, f.root)
 	if err != nil || !found || got.Job != "other-job" {
 		t.Fatalf("replacement marker changed: %+v %v %v", got, found, err)
@@ -446,22 +498,27 @@ func (f *forkAbsenceFixture) assertReplacementJobRecord(t *testing.T) {
 
 func (f *forkAbsenceFixture) assertMetadataGone(t *testing.T) {
 	t.Helper()
+
 	if _, ok := f.store.cfg.ClusterByName("target"); ok {
 		t.Fatal("target remains configured")
 	}
+
 	app, ok := f.store.cfg.ClusterByName("app")
 	if !ok || !reflect.DeepEqual(app, f.appBefore) {
 		t.Fatalf("unrelated configuration changed: before=%+v after=%+v", f.appBefore, app)
 	}
+
 	marker, _ := materialisationPath("target")
 	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("marker remains: %v", err)
 	}
+
 	for _, path := range []string{filepath.Join(f.root, f.o.Target), filepath.Join(materialisationConfigRoot, f.o.Target)} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("artifact path changed: %s %v", path, err)
 		}
 	}
+
 	if _, err := os.Lstat(filepath.Join(f.ports, f.o.Target)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("reservation remains: %v", err)
 	}
@@ -469,9 +526,11 @@ func (f *forkAbsenceFixture) assertMetadataGone(t *testing.T) {
 
 func (f *forkAbsenceFixture) assertUnrelated(t *testing.T) {
 	t.Helper()
+
 	if f.mode != "unrelated" {
 		return
 	}
+
 	for path, want := range map[string]string{
 		filepath.Join(f.root, "app", "keep"): "app-unchanged",
 		filepath.Join(f.root, "scratch"):     "scratch-unchanged",
@@ -481,6 +540,7 @@ func (f *forkAbsenceFixture) assertUnrelated(t *testing.T) {
 			t.Fatalf("unrelated path changed: %s %q %v", path, data, err)
 		}
 	}
+
 	if _, err := os.Lstat(f.appMarker); err != nil {
 		t.Fatalf("unrelated marker changed: %v", err)
 	}
@@ -488,19 +548,24 @@ func (f *forkAbsenceFixture) assertUnrelated(t *testing.T) {
 
 func (f *forkAbsenceFixture) assertSuccess(t *testing.T, res Result) {
 	t.Helper()
+
 	data, ok := res.Data.(map[string]any)
 	if !ok || data["dropped"] != "target" || data["metadata_only"] != true {
 		t.Fatalf("result = %#v", res.Data)
 	}
+
 	if f.store.saves != 1 {
 		t.Fatalf("config saves = %d", f.store.saves)
 	}
+
 	if f.removeCalls != 1 {
 		t.Fatalf("marker removals = %d", f.removeCalls)
 	}
+
 	if f.probeLock && f.lockProbes < 3 {
 		t.Fatalf("reservation lock probes = %d, want save and retire under the lock", f.lockProbes)
 	}
+
 	f.assertMetadataGone(t)
 	f.assertUnrelated(t)
 }
@@ -510,6 +575,7 @@ func TestLegacyPreparedForkPredicate(t *testing.T) {
 	if !legacyPreparedFork(base) {
 		t.Fatal("prepared fork not recognised")
 	}
+
 	for name, mutate := range map[string]func(*materialisationOwnership){
 		"kind":      func(o *materialisationOwnership) { o.Kind = materialisationRestore },
 		"phase":     func(o *materialisationOwnership) { o.Phase = materialisationFailed },
@@ -577,10 +643,12 @@ func TestDropPreparedForkMetadataSuccess(t *testing.T) {
 	for _, mode := range []string{"success", "changed-spec", "unrelated"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newForkAbsenceFixture(t, mode)
+
 			res, err := f.drop(t)
 			if err != nil {
 				t.Fatalf("drop: %v", err)
 			}
+
 			f.assertSuccess(t, res)
 		})
 	}
@@ -591,13 +659,16 @@ func TestDropPreparedForkMetadataReleasesRetainedJob(t *testing.T) {
 	st := engine.State{RetainedJobs: map[string]engine.JobRecord{f.job.ID: f.job}}
 	forkAbsenceState = func() (engine.State, error) { return st, nil }
 	oldFollower, oldRelease := followerState, releaseMaterialisationJob
+
 	t.Cleanup(func() { followerState, releaseMaterialisationJob = oldFollower, oldRelease })
+
 	followerState = func() state.Store { return f.store }
 	released := ""
 	releaseMaterialisationJob = func(id string) { released = id }
 	res, err := f.drop(t)
 	mustNoErr(t, err)
 	f.assertSuccess(t, res)
+
 	if released != f.job.ID {
 		t.Fatalf("retained job released = %q, want %q", released, f.job.ID)
 	}
@@ -610,10 +681,13 @@ func TestDropPreparedForkMetadataRetainsJobWhileFenceExists(t *testing.T) {
 			st := engine.State{RetainedJobs: map[string]engine.JobRecord{f.job.ID: f.job}}
 			forkAbsenceState = func() (engine.State, error) { return st, nil }
 			oldFollower, oldRelease := followerState, releaseMaterialisationJob
+
 			t.Cleanup(func() { followerState, releaseMaterialisationJob = oldFollower, oldRelease })
+
 			followerState = func() state.Store { return f.store }
 			released := ""
 			releaseMaterialisationJob = func(id string) { released = id }
+
 			mustNoErr(t, backup.SetActivationFence(backup.ActivationFence{
 				OperationID: operation, Kind: "fork", Database: f.o.Target, Instance: f.o.Instance,
 				TargetStanza: "target-abcdef", OldStanza: "source-abcdef", NewStanza: "target-abcdef",
@@ -623,11 +697,14 @@ func TestDropPreparedForkMetadataRetainsJobWhileFenceExists(t *testing.T) {
 			res, err := f.drop(t)
 			mustNoErr(t, err)
 			f.assertSuccess(t, res)
+
 			if released != "" {
 				t.Fatalf("retained job released while its fence exists: %q", released)
 			}
+
 			recs, err := backup.LoadRecords()
 			mustNoErr(t, err)
+
 			if _, ok := recs.ActivationFenceFor(f.o.Target); !ok {
 				t.Fatal("marker-only drop removed the pending fence")
 			}
@@ -640,22 +717,29 @@ func TestDropPreparedForkMetadataSaveFailureRetry(t *testing.T) {
 	if _, err := f.drop(t); err == nil {
 		t.Fatal("config save failure accepted")
 	}
+
 	if f.store.saves != 0 || f.store.attempts == 0 || f.removeCalls != 0 {
 		t.Fatalf("save failure state: saves=%d attempts=%d removes=%d", f.store.saves, f.store.attempts, f.removeCalls)
 	}
+
 	if _, ok := f.store.cfg.ClusterByName("target"); !ok {
 		t.Fatal("save failure lost the configured target")
 	}
+
 	marker, _ := materialisationPath("target")
 	if _, err := os.Lstat(marker); err != nil {
 		t.Fatalf("save failure lost marker: %v", err)
 	}
+
 	f.store.saveErr = nil
+
 	res, err := f.drop(t)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
+
 	f.assertSuccess(t, res)
+
 	if f.store.attempts != 2 {
 		t.Fatalf("save attempts = %d", f.store.attempts)
 	}
@@ -666,31 +750,41 @@ func TestDropPreparedForkMetadataMarkerRetireFailureRetry(t *testing.T) {
 	if _, err := f.drop(t); err == nil {
 		t.Fatal("marker unlink failure accepted")
 	}
+
 	if f.store.saves != 1 || f.removeCalls != 1 {
 		t.Fatalf("retire failure state: saves=%d removes=%d", f.store.saves, f.removeCalls)
 	}
+
 	if _, ok := f.store.cfg.ClusterByName("target"); ok {
 		t.Fatal("retire failure kept the configured target")
 	}
+
 	marker, _ := materialisationPath("target")
 	if _, err := os.Lstat(marker); err != nil {
 		t.Fatalf("retire failure lost marker: %v", err)
 	}
+
 	f.failRemove = false
+
 	res, err := f.drop(t)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
+
 	if data, ok := res.Data.(map[string]any); !ok || data["metadata_only"] != true {
 		t.Fatalf("retry result = %#v", res.Data)
 	}
+
 	if f.store.saves != 1 || f.store.attempts != 1 {
 		t.Fatalf("retry saved config again: saves=%d attempts=%d", f.store.saves, f.store.attempts)
 	}
+
 	if f.removeCalls != 2 {
 		t.Fatalf("marker removals = %d", f.removeCalls)
 	}
+
 	f.assertMetadataGone(t)
+
 	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("marker remains after retry: %v", err)
 	}
@@ -702,6 +796,7 @@ func TestPreparedForkMetadataLeavesFailedForkAlone(t *testing.T) {
 	f := newForkAbsenceFixture(t, "failed-fork")
 	_, err := f.drop(t)
 	f.assertRefused(t, err, output.CodePrecondition)
+
 	if f.recordChange {
 		t.Fatal("failed record was treated as a prepared fork")
 	}

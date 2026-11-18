@@ -21,6 +21,7 @@ func TestRestoreInvocationFence(t *testing.T) {
 			env.Params = json.RawMessage(`{"database":"app","kind":"latest"}`)
 			base := backup.Restore{ID: env.ID, Database: "app", InstanceID: env.installID,
 				OperationID: env.OperationID, Phase: backup.PhaseRestoring, Kind: backup.TargetLatest, Recover: job == "recover", Promote: job == "recover"}
+
 			cases := []struct {
 				name string
 				edit func(*backup.Restore)
@@ -39,18 +40,22 @@ func TestRestoreInvocationFence(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					r := base
 					tc.edit(&r)
+
 					if err := backup.UpdateRecords(func(s *backup.Records) error { s.Restores["app"] = r; return nil }); err != nil {
 						t.Fatal(err)
 					}
+
 					err := validateRestoreInvocation(env)
 					rejectf(t, (err == nil) != (tc.name == "matching"), "validation: %v", err)
 					got, err := backup.LoadRecords()
 					rejectf(t, err != nil || !reflect.DeepEqual(got.Restores["app"], r), "record changed: %+v %v", got.Restores["app"], err)
 				})
 			}
+
 			if err := backup.UpdateRecords(func(s *backup.Records) error { delete(s.Restores, "app"); return nil }); err != nil {
 				t.Fatal(err)
 			}
+
 			reject(t, validateRestoreInvocation(env) == nil, "missing record accepted")
 		})
 	}
@@ -58,16 +63,22 @@ func TestRestoreInvocationFence(t *testing.T) {
 
 func TestRestorePreparationLockOrderAndRelease(t *testing.T) {
 	oldLocks, oldLoad := nodeLockers, loadGuardCluster
+
 	t.Cleanup(func() { nodeLockers, loadGuardCluster = oldLocks, oldLoad })
+
 	var events []string
+
 	nodeLockers.node = func(_ context.Context, mode engine.LockMode, _, _ string, _ time.Duration) (engine.Release, error) {
 		events = append(events, "node")
+
 		reject(t, mode != engine.LockShared, "node lock not shared")
+
 		return func() { events = append(events, "-node") }, nil
 	}
 	nodeLockers.cluster = func(_ context.Context, name string, mode engine.LockMode, _, _ string, _ time.Duration) (engine.Release, error) {
 		events = append(events, name)
 		rejectf(t, (name == "app" && mode != engine.LockShared) || (name != "app" && mode != engine.LockExclusive), "wrong lock mode for %s", name)
+
 		return func() { events = append(events, "-"+name) }, nil
 	}
 	loadGuardCluster = func() (config.Cluster, error) { events = append(events, "load"); return config.Cluster{}, nil }
@@ -77,6 +88,7 @@ func TestRestorePreparationLockOrderAndRelease(t *testing.T) {
 		return nil
 	})
 	reject(t, err != nil, err)
+
 	events = append(events, "launch")
 	want := []string{"node", "app", "app__restoring", "load", "publish", "-app__restoring", "-app", "-node", "launch"}
 	rejectf(t, !reflect.DeepEqual(events, want), "events %v, want %v", events, want)

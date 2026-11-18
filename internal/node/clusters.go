@@ -16,6 +16,7 @@ func clusterOf(cfg config.Cluster, db string) (config.ClusterSpec, error) {
 	if !ok {
 		return config.ClusterSpec{}, databaseNotFound(db)
 	}
+
 	return spec, nil
 }
 
@@ -25,6 +26,7 @@ func clusterPG(cfg config.Cluster, db string) (pg.Local, error) {
 	if err != nil {
 		return pg.Local{}, err
 	}
+
 	return steps.ClusterPG(spec), nil
 }
 
@@ -33,9 +35,11 @@ func onlyCluster(cfg config.Cluster, db string) (config.ClusterSpec, error) {
 	if db != "" {
 		return clusterOf(cfg, db)
 	}
+
 	if len(cfg.Clusters) == 1 {
 		return cfg.Clusters[0], nil
 	}
+
 	return config.ClusterSpec{}, output.NewError(output.CodeInputRequired, "this server has several databases; name one with --db", output.ExitInput,
 		"Pick a database from details.databases.").WithDetails(map[string]any{"flag": "--db", "databases": clusterNames(cfg)})
 }
@@ -45,6 +49,7 @@ func clusterNames(cfg config.Cluster) []string {
 	for _, c := range cfg.Clusters {
 		names = append(names, c.Name)
 	}
+
 	return names
 }
 
@@ -54,10 +59,13 @@ func withHint(err error, hint string) error {
 	if !errors.As(err, &cliErr) {
 		return output.WrapError(output.CodeError, err, output.ExitGeneric, hint)
 	}
+
 	out := *cliErr
 	if out.Hint != "" {
 		hint = out.Hint + " " + hint
 	}
+
 	out.Hint = hint
+
 	return &out
 }

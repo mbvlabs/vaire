@@ -22,6 +22,7 @@ func TestCrashedJobKeepsOutcomeUnknownAcrossRPC(t *testing.T) {
 	rejectf(t, done.State != engine.JobFailed, "the synthesized crash is recorded as %q", done.State)
 	rejectf(t, done.Error == nil || done.Error.Details == nil, "the crash lost its structured error: %+v", done.Error)
 	_, err := jobOutcome(done)
+
 	var cliErr *output.CLIError
 	rejectf(t, !errors.As(err, &cliErr), "not a CLI error: %v", err)
 	details, _ := cliErr.Details.(map[string]any)
@@ -31,14 +32,17 @@ func TestCrashedJobKeepsOutcomeUnknownAcrossRPC(t *testing.T) {
 	// parser turns it back into a CLI error with the same details.
 	raw, marshalErr := json.Marshal(output.Fail(nil, err))
 	reject(t, marshalErr != nil, marshalErr)
+
 	var env struct {
 		Error output.ErrorBody `json:"error"`
 	}
 	if unmarshalErr := json.Unmarshal(raw, &env); unmarshalErr != nil {
 		t.Fatal(unmarshalErr)
 	}
+
 	serialized, _ := env.Error.Details.(map[string]any)
 	rejectf(t, serialized["reason"] != JobOutcomeUnknown, "RPC serialization lost the reason: %s", raw)
+
 	for _, secret := range []string{"app_follower-owner-pw", "app_follower-app-pw"} {
 		reject(t, strings.Contains(string(raw), secret) || strings.Contains(cliErr.Error(), secret), "the job failure carries a password")
 	}
@@ -75,13 +79,18 @@ func TestJournalFilterDropsEnvelope(t *testing.T) {
 		"}",
 		"after",
 	}
-	var f journalFilter
-	var got []output.Event
+
+	var (
+		f   journalFilter
+		got []output.Event
+	)
+
 	for _, l := range lines {
 		if ev, ok := f.event(l); ok {
 			got = append(got, ev)
 		}
 	}
+
 	rejectf(t, len(got) != 3 || got[0].Type != "step" || got[0].TS != "2026-10-14T12:00:00Z" || got[1].Line != "backup 20261014-101010F finished" || got[2].Line != "after", "events = %+v", got)
 }
 
@@ -89,12 +98,15 @@ func TestJobErrorDetailsFlattens(t *testing.T) {
 	rec := engine.JobRecord{ID: "01M4X0ME0NBQ95HNNDT213BGH9", Job: "backup-full"}
 	got := jobErrorDetails(rec, map[string]any{"output_tail": []any{"ERROR: x"}, "step": "backup"})
 	rejectf(t, got["job_id"] != rec.ID || got["job"] != rec.Job || got["step"] != "backup", "details = %v", got)
+
 	if tail, ok := got["output_tail"].([]any); !ok || len(tail) != 1 {
 		t.Fatalf("output_tail = %v", got["output_tail"])
 	}
+
 	if got := jobErrorDetails(rec, "text"); got["error_details"] != "text" {
 		t.Fatalf("non-object details = %v", got)
 	}
+
 	if got := jobErrorDetails(rec, nil); len(got) != 2 {
 		t.Fatalf("nil details = %v", got)
 	}
@@ -119,6 +131,7 @@ func TestJobProcessAlive(t *testing.T) {
 	if _, err := os.Stat("/proc/self/cmdline"); err == nil && jobProcessAlive(os.Getpid(), "backup-full") {
 		t.Fatal("the test process counted as vaire node run backup-full")
 	}
+
 	reject(t, jobProcessAlive(1<<22+12345, "backup-full"), "a PID that doesn't exist counted as alive")
 }
 

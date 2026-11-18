@@ -68,14 +68,17 @@ func newPublicForkContinuation(t *testing.T, stage, recordPhase, fencePhase stri
 	useExtensionFileFixture(t)
 	f := &publicForkContinuation{t: t}
 	owner, root := materialisationFixture(t)
+
 	f.owner, f.root = owner, root
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	f.prepareConfig()
 	f.prepareArtifacts(stage, recordPhase)
 	f.prepareFence(fencePhase)
 	f.stub(t)
+
 	return f
 }
 
@@ -90,22 +93,26 @@ func (f *publicForkContinuation) prepareConfig() {
 		{Name: "source", Node: "db1", Stanza: f.owner.Stanza, Port: 5440, Size: "small", StatementTimeout: "60s"},
 		{Name: "target", Node: "db1", Stanza: "target-abcdef", Port: 5433, Size: "medium", StatementTimeout: "60s"},
 	}
+
 	f.cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {
 			Source: catalog.SourcePreinstalled, ExtName: "custom",
-			CopySafety: stringPtr(catalog.CopySafetyDisabled), StandbySafe: boolPtr(true),
+			CopySafety: new(catalog.CopySafetyDisabled), StandbySafe: new(true),
 			CopySettings: map[string]string{"custom.worker": "off"},
 		},
 	}
 	if err := os.Mkdir(filepath.Join(materialisationConfigRoot, f.owner.Source), 0o700); err != nil {
 		f.t.Fatal(err)
 	}
+
 	sourceConf := []byte("port = 5440\n")
 	if err := os.WriteFile(f.sourceConfig(), sourceConf, 0o600); err != nil {
 		f.t.Fatal(err)
 	}
+
 	f.sourceBefore = string(sourceConf)
 	restoreSteps, restoreBackup := steps.PGConfRootForTest(materialisationConfigRoot), backup.PGConfRootForTest(materialisationConfigRoot)
+
 	f.t.Cleanup(func() { restoreSteps(); restoreBackup() })
 }
 
@@ -115,12 +122,15 @@ func (f *publicForkContinuation) prepareArtifacts(stage, recordPhase string) {
 	if _, err := createMaterialisation(f.owner, f.root); err != nil {
 		f.t.Fatal(err)
 	}
+
 	identity := f.prepareArtifactReservation()
 	artifacts := f.bindArtifactReservation(identity)
 	f.writeTempRegistration(config.TemporaryPortMin)
+
 	if recordPhase == materialisationProvisioning || recordPhase == materialisationProvisioned || stage == materialisationProvisioned {
 		f.writeFinalRegistration()
 	}
+
 	f.advanceArtifactPhase(artifacts, stage, recordPhase)
 	f.owner = artifacts.owner
 }
@@ -132,20 +142,26 @@ func (f *publicForkContinuation) prepareArtifactReservation() backup.Reservation
 	if err := os.Mkdir(f.registry, 0o700); err != nil {
 		f.t.Fatal(err)
 	}
+
 	reservation := []byte(fmt.Sprintf("%d\n", config.TemporaryPortMin))
+
 	reservationPath := filepath.Join(f.registry, f.owner.Target)
 	if err := os.WriteFile(reservationPath, reservation, 0o600); err != nil {
 		f.t.Fatal(err)
 	}
+
 	info, err := os.Lstat(reservationPath)
 	if err != nil {
 		f.t.Fatal(err)
 	}
+
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		f.t.Fatal("reservation stat unavailable")
 	}
+
 	sum := sha256.Sum256(reservation)
+
 	return backup.ReservationIdentity{Device: st.Dev, Inode: st.Ino, UID: st.Uid, Digest: hex.EncodeToString(sum[:])}
 }
 
@@ -156,22 +172,28 @@ func (f *publicForkContinuation) bindArtifactReservation(identity backup.Reserva
 	if err != nil {
 		f.t.Fatal(err)
 	}
+
 	f.artifacts = artifacts
 	f.t.Cleanup(func() { artifacts.close() })
+
 	if err := artifacts.bindMaterialisationReservation(config.TemporaryPortMin, func(_ materialisationOwnership, _ int, finish func() error) error {
 		return finish()
 	}, identity); err != nil {
 		f.t.Fatal(err)
 	}
+
 	if err := artifacts.bindCreated(false); err != nil {
 		f.t.Fatal(err)
 	}
+
 	if err := artifacts.bindCreated(true); err != nil {
 		f.t.Fatal(err)
 	}
+
 	if err := os.Mkdir(filepath.Join(materialisationConfigRoot, f.owner.Target, "conf.d"), 0o755); err != nil {
 		f.t.Fatal(err)
 	}
+
 	return artifacts
 }
 
@@ -180,23 +202,29 @@ func (f *publicForkContinuation) bindArtifactReservation(identity backup.Reserva
 func (f *publicForkContinuation) advanceArtifactPhase(artifacts *materialisationArtifacts, stage, recordPhase string) {
 	if recordPhase == materialisationProvisioning || recordPhase == materialisationProvisioned || stage == materialisationProvisioned {
 		next := artifacts.owner
+
 		next.Phase = materialisationCopying
 		if err := artifacts.persistMaterialisation(next); err != nil {
 			f.t.Fatal(err)
 		}
+
 		next = artifacts.owner
+
 		next.Phase = materialisationProvisioning
 		if err := artifacts.persistMaterialisation(next); err != nil {
 			f.t.Fatal(err)
 		}
 	}
+
 	if recordPhase == materialisationCopying {
 		next := artifacts.owner
+
 		next.Phase = materialisationCopying
 		if err := artifacts.persistMaterialisation(next); err != nil {
 			f.t.Fatal(err)
 		}
 	}
+
 	if stage == materialisationProvisioned {
 		if err := artifacts.markMaterialisationProvisioned(func() error { return nil }); err != nil {
 			f.t.Fatal(err)
@@ -212,6 +240,7 @@ func (f *publicForkContinuation) prepareFence(fencePhase string) {
 		return backup.LockForkReservationWithHost(ctx, f.registry, uint32(os.Geteuid()), name, port, present)
 	}
 	forkContinuationReservationDir = func() string { return f.registry }
+
 	f.t.Cleanup(func() { forkReservationLock, forkContinuationReservationDir = oldLock, oldDir })
 
 	spec, _ := f.cfg.ClusterByName(f.owner.Target)
@@ -221,6 +250,7 @@ func (f *publicForkContinuation) prepareFence(fencePhase string) {
 		CopySafety: catalog.CopySafetyDisabled, StandbySafe: true,
 		CopySettings: map[string]string{"custom.worker": "off"},
 	}}
+
 	_, err := writeActivationFence(f.cfg, activationFenceIdentity{
 		Database: f.owner.Target, Kind: "fork", OperationID: f.owner.Job, Spec: spec,
 		TargetStanza: spec.Stanza, OldStanza: f.owner.Stanza, NewStanza: spec.Stanza,
@@ -231,6 +261,7 @@ func (f *publicForkContinuation) prepareFence(fencePhase string) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
+
 	if fencePhase != fencePhasePrepared {
 		if err := backup.UpdateActivationFence(f.owner.Target, f.owner.Job, func(cur *backup.ActivationFence) error {
 			cur.Phase = fencePhase
@@ -240,14 +271,17 @@ func (f *publicForkContinuation) prepareFence(fencePhase string) {
 				cur.DataDir = f.cfg.Server.DataDirectory(f.owner.Target)
 				cur.ConfDir = steps.PGConfDir(f.owner.Target)
 			}
+
 			return nil
 		}); err != nil {
 			f.t.Fatal(err)
 		}
 	}
+
 	if fencePhase == fencePhaseAdopted || fencePhase == fencePhaseRouting {
 		f.writeFinalRegistration()
 	}
+
 	f.state = engine.State{Jobs: []engine.JobRecord{{
 		ID: f.owner.Job, Job: "db-fork", DB: f.owner.Target, State: engine.JobFailed,
 	}}}
@@ -257,6 +291,7 @@ func (f *publicForkContinuation) prepareFence(fencePhase string) {
 		if err := os.Remove(filepath.Join(f.registry, f.owner.Target)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			f.t.Fatal(err)
 		}
+
 		f.started, f.provisioned = true, true
 	}
 }
@@ -281,6 +316,7 @@ func (f *publicForkContinuation) writeRegistration(port int, name string) {
 
 func (f *publicForkContinuation) stub(t *testing.T) {
 	t.Helper()
+
 	oldState, oldReap := forkAbsenceState, forkContinuationReapJob
 	oldAdopt, oldHost := forkContinuationAdopt, forkContinuationResumeHost
 	oldStart, oldProvision, oldVerify := forkStartCluster, forkProvisionOwned, forkVerifyProvision
@@ -292,6 +328,7 @@ func (f *publicForkContinuation) stub(t *testing.T) {
 	oldLoad, oldReload := loadGuardCluster, applyReloadCluster
 	oldFollower := followerState
 	oldAcquire, oldAcquireCluster, oldRunLog := serveAcquire, serveAcquireCluster, openServeRunLog
+
 	t.Cleanup(func() {
 		forkAbsenceState, forkContinuationReapJob = oldState, oldReap
 		forkContinuationAdopt, forkContinuationResumeHost = oldAdopt, oldHost
@@ -305,6 +342,7 @@ func (f *publicForkContinuation) stub(t *testing.T) {
 		followerState = oldFollower
 		serveAcquire, serveAcquireCluster, openServeRunLog = oldAcquire, oldAcquireCluster, oldRunLog
 	})
+
 	forkAbsenceState = func() (engine.State, error) { return f.state, nil }
 	forkContinuationReapJob = func(context.Context, string) error { return errors.New("test reaper unavailable") }
 	forkContinuationAdopt = f.adoptHook()
@@ -355,10 +393,12 @@ func (f *publicForkContinuation) adoptHook() func(context.Context, config.Cluste
 		f.adoptCalls++
 		m := backup.ResumeMaterialisedWithHost(cfg.Server.DataRoot, o.Target, o.Source, src.Port,
 			runtimeFor(env, false).Shell, "db-fork", env.Report, materialisationConfigRoot, followerResumeHostForTest{f})
+
 		_, err := m.AdoptResumedFollower(ctx, spec.Port, guard)
 		if err == nil {
 			f.adopted = true
 		}
+
 		return err
 	}
 }
@@ -366,17 +406,22 @@ func (f *publicForkContinuation) adoptHook() func(context.Context, config.Cluste
 func (f *publicForkContinuation) startHook() func(context.Context, config.Cluster, engine.Runtime, config.ClusterSpec, engine.Reporter) error {
 	return func(context.Context, config.Cluster, engine.Runtime, config.ClusterSpec, engine.Reporter) error {
 		f.startCalls++
+
 		guard, present, err := backup.ReadCopyGuard(f.dataDir())
 		if err != nil {
 			return err
 		}
+
 		if present && guard.Settings["custom.worker"] == "off" {
 			f.guardSeen = true
 		}
+
 		if !present {
 			return errors.New("retry start ran before the complete guard was installed")
 		}
+
 		f.started = true
+
 		return nil
 	}
 }
@@ -387,11 +432,14 @@ func (f *publicForkContinuation) provisionHook() func(context.Context, config.Cl
 		if name != f.owner.Target || scope == nil || !scope.hasOwner || !materialisationContinuationOwner(ctx, scope.owner) {
 			return errors.New("owned provisioning lost its exact continuation scope")
 		}
+
 		if hasForkMaterialisationView(ctx, name) {
 			return errors.New("public continuation minted a job authority")
 		}
+
 		f.provisionCalls++
 		f.provisioned = true
+
 		return nil
 	}
 }
@@ -402,10 +450,13 @@ func (f *publicForkContinuation) verifyHook() func(context.Context, config.Clust
 		if !f.provisioned || !f.started {
 			return errors.New("provisioning was verified before it ran")
 		}
+
 		if _, found, _ := readMaterialisation(f.owner.Target, f.root); !found {
 			return errors.New("marker retired before provisioning verification")
 		}
+
 		f.verified = true
+
 		return nil
 	}
 }
@@ -416,7 +467,9 @@ func (f *publicForkContinuation) publishHook() func(context.Context, config.Clus
 		if _, found, _ := readMaterialisation(f.owner.Target, f.root); found {
 			return errors.New("routes published before marker retirement")
 		}
+
 		f.published = true
+
 		return nil
 	}
 }
@@ -426,6 +479,7 @@ func (f *publicForkContinuation) routesHook() func(context.Context, string, int)
 		if !f.published {
 			return map[string]steps.PoolerRoute{}, nil
 		}
+
 		return map[string]steps.PoolerRoute{
 			f.owner.Target: {Name: f.owner.Target, Host: steps.PGSocketDir, Port: 5433, Database: f.owner.Target},
 		}, nil
@@ -452,26 +506,33 @@ func (f *publicForkContinuation) apply() (string, int) {
 
 func (f *publicForkContinuation) applyParams(params string) (string, int) {
 	withServeActivity(f.t, &fakeActivityStore{})
+
 	req := matchingBuildRequest("apply")
 	req.Params = json.RawMessage(params)
+
 	return serveRequest(f.t, req)
 }
 
 func (f *publicForkContinuation) assertRetired() {
 	f.t.Helper()
+
 	if _, found, err := readMaterialisation(f.owner.Target, f.root); err != nil || found {
 		f.t.Fatalf("materialisation record remains: found=%v err=%v", found, err)
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		f.t.Fatal(err)
 	}
+
 	if _, ok := recs.ActivationFenceFor(f.owner.Target); ok {
 		f.t.Fatal("activation fence remains")
 	}
+
 	if _, err := os.Stat(filepath.Join(f.registry, f.owner.Target)); !errors.Is(err, os.ErrNotExist) {
 		f.t.Fatalf("temporary reservation remains: %v", err)
 	}
+
 	if got, err := os.ReadFile(f.sourceConfig()); err != nil || string(got) != f.sourceBefore {
 		f.t.Fatalf("source configuration changed: %q %v", got, err)
 	}
@@ -483,14 +544,17 @@ func TestPublicApplyContinuesAdoptedFork(t *testing.T) {
 		recs, _ := backup.LoadRecords()
 		t.Fatalf("not a candidate: owner=%+v fence=%+v", f.owner, recs.Activation[f.owner.Target])
 	}
+
 	out, code := f.apply()
 	if code != 0 {
 		t.Fatalf("public apply = %d\n%s", code, out)
 	}
+
 	if !f.adopted || !f.started || !f.provisioned || !f.verified || !f.published || !f.guardSeen {
 		t.Fatalf("continuation effects: adopted=%v started=%v provisioned=%v verified=%v published=%v guardSeen=%v",
 			f.adopted, f.started, f.provisioned, f.verified, f.published, f.guardSeen)
 	}
+
 	f.assertRetired()
 }
 
@@ -501,18 +565,23 @@ func TestPublicApplyFinishesAdoptingProvisioningGap(t *testing.T) {
 	if err := os.Remove(filepath.Join(f.registry, f.owner.Target)); err != nil {
 		t.Fatal(err)
 	}
+
 	f.published = false
+
 	out, code := f.apply()
 	if code != 0 {
 		t.Fatalf("public apply = %d\n%s", code, out)
 	}
+
 	if f.adoptCalls != 0 {
 		t.Fatal("an already-adopted checkpoint replayed adoption")
 	}
+
 	if !f.started || !f.provisioned || !f.verified || !f.published {
 		t.Fatalf("adopting gap did not settle: started=%v provisioned=%v verified=%v published=%v",
 			f.started, f.provisioned, f.verified, f.published)
 	}
+
 	f.assertRetired()
 }
 
@@ -521,32 +590,40 @@ func TestPublicApplyResumesAdoptedProvisioning(t *testing.T) {
 	if err := os.Remove(filepath.Join(f.registry, f.owner.Target)); err != nil {
 		t.Fatal(err)
 	}
+
 	out, code := f.apply()
 	if code != 0 {
 		t.Fatalf("public apply = %d\n%s", code, out)
 	}
+
 	if f.adoptCalls != 0 {
 		t.Fatal("an adopted checkpoint replayed adoption")
 	}
+
 	if !f.provisioned || !f.started || !f.verified || !f.published {
 		t.Fatalf("adopted continuation did not settle: provisioned=%v started=%v verified=%v published=%v",
 			f.provisioned, f.started, f.verified, f.published)
 	}
+
 	f.assertRetired()
 }
 
 func TestPublicApplyRoutingOnlyRetiresProvisionedMarker(t *testing.T) {
 	f := newPublicForkContinuation(t, materialisationProvisioned, materialisationProvisioning, fencePhaseRouting)
+
 	out, code := f.apply()
 	if code != 0 {
 		t.Fatalf("public apply = %d\n%s", code, out)
 	}
+
 	if f.adoptCalls != 0 || f.startCalls != 0 || f.provisionCalls != 0 {
 		t.Fatalf("routing retry replayed effects: adopt=%d start=%d provision=%d", f.adoptCalls, f.startCalls, f.provisionCalls)
 	}
+
 	if f.verifyCalls != 1 || !f.published {
 		t.Fatalf("routing retry verify=%d published=%v", f.verifyCalls, f.published)
 	}
+
 	f.assertRetired()
 }
 
@@ -558,28 +635,37 @@ func TestPublicApplyRoutingRetryAfterUnlinkSyncFailure(t *testing.T) {
 		if fail {
 			return errors.New("injected state directory sync failure")
 		}
+
 		return oldSync()
 	}
+
 	t.Cleanup(func() { materialisationSyncStateDir = oldSync })
+
 	out, code := f.apply()
 	if code == 0 {
 		t.Fatalf("sync failure was reported as success:\n%s", out)
 	}
+
 	if _, found, err := readMaterialisation(f.owner.Target, f.root); err != nil || found {
 		t.Fatalf("marker state after sync failure: found=%v err=%v", found, err)
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if fence, ok := recs.ActivationFenceFor(f.owner.Target); !ok || fence.Phase != fencePhaseRouting {
 		t.Fatalf("sync failure did not retain the routing fence: %+v", fence)
 	}
+
 	fail = false
+
 	out, code = f.apply()
 	if code != 0 {
 		t.Fatalf("routing retry = %d\n%s", code, out)
 	}
+
 	f.assertRetired()
 }
 
@@ -592,32 +678,40 @@ func TestPublicApplyRoutingPublicationFailureRetries(t *testing.T) {
 			fail = false
 			return errors.New("injected publication failure")
 		}
+
 		return oldPublish(ctx, cfg, rt, report)
 	}
+
 	out, code := f.apply()
 	if code != 0 || !strings.Contains(out, "activation_routing_incomplete") {
 		t.Fatalf("publication failure = %d\n%s", code, out)
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if fence, ok := recs.ActivationFenceFor(f.owner.Target); !ok || fence.Phase != fencePhaseRouting {
 		t.Fatalf("publication failure did not retain routing: %+v", fence)
 	}
+
 	out, code = f.apply()
 	if code != 0 || !f.published {
 		t.Fatalf("publication retry = %d published=%v\n%s", code, f.published, out)
 	}
+
 	f.assertRetired()
 }
 
 // assertNoContinuationEffects proves a refusal reached no continuation stage.
 func (f *publicForkContinuation) assertNoContinuationEffects() {
 	f.t.Helper()
+
 	if f.adoptCalls != 0 || f.startCalls != 0 || f.provisionCalls != 0 || f.verifyCalls != 0 || f.publishCalls != 0 || f.engineCalls != 0 {
 		f.t.Fatalf("refusal had effects: %+v", f)
 	}
+
 	if f.published || f.resumeCalls != 0 {
 		f.t.Fatalf("refusal published or resumed: %+v", f)
 	}
@@ -628,19 +722,24 @@ func (f *publicForkContinuation) assertNoContinuationEffects() {
 func (f *publicForkContinuation) assertRefusedBeforeEffects(fencePhase string) {
 	f.t.Helper()
 	f.assertNoContinuationEffects()
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		f.t.Fatal(err)
 	}
+
 	if len(recs.ExtensionRequirements) != 0 {
 		f.t.Fatalf("refusal wrote extension history: %+v", recs.ExtensionRequirements)
 	}
+
 	if _, found, err := readMaterialisation(f.owner.Target, f.root); err != nil || !found {
 		f.t.Fatalf("refusal lost the marker: found=%v err=%v", found, err)
 	}
+
 	if fence, ok := recs.ActivationFenceFor(f.owner.Target); !ok || fence.Phase != fencePhase {
 		f.t.Fatalf("refusal changed the fence: %+v", fence)
 	}
+
 	if _, present, err := backup.ReadCopyGuard(f.dataDir()); err != nil || present {
 		f.t.Fatalf("refusal installed a guard: present=%v err=%v", present, err)
 	}
@@ -648,6 +747,7 @@ func (f *publicForkContinuation) assertRefusedBeforeEffects(fencePhase string) {
 
 func (f *publicForkContinuation) assertNoUnprovenEffects() {
 	f.t.Helper()
+
 	if f.adoptCalls != 0 || f.startCalls != 0 || f.provisionCalls != 0 || f.publishCalls != 0 {
 		f.t.Fatalf("refusal had effects: %+v", f)
 	}
@@ -655,6 +755,7 @@ func (f *publicForkContinuation) assertNoUnprovenEffects() {
 
 func (f *publicForkContinuation) updateFence(change func(*backup.ActivationFence)) {
 	f.t.Helper()
+
 	if err := backup.UpdateActivationFence(f.owner.Target, f.owner.Job, func(cur *backup.ActivationFence) error {
 		change(cur)
 		return nil
@@ -709,6 +810,7 @@ func (f *publicForkContinuation) replaceDataDir() {
 	if err := os.Rename(f.dataDir(), f.dataDir()+"-old"); err != nil {
 		f.t.Fatal(err)
 	}
+
 	if err := os.Mkdir(f.dataDir(), 0o700); err != nil {
 		f.t.Fatal(err)
 	}
@@ -718,6 +820,7 @@ func (f *publicForkContinuation) makeAncestryUnsafe() {
 	if err := os.Chmod(materialisationConfigRoot, 0o777); err != nil {
 		f.t.Fatal(err)
 	}
+
 	f.t.Cleanup(func() { _ = os.Chmod(materialisationConfigRoot, 0o700) })
 }
 
@@ -749,11 +852,14 @@ func TestPublicApplyRefusesWrongActualRegistrationBeforeEffects(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+
 			tc.mutate(f)
+
 			out, code := f.apply()
 			if code == 0 || strings.Contains(out, `"ok":true`) {
 				t.Fatalf("wrong actual registration accepted: %d\n%s", code, out)
 			}
+
 			f.assertRefusedBeforeEffects(tc.fence)
 		})
 	}
@@ -767,22 +873,28 @@ func TestForkRoutingDurableAbsenceBoundaryBeforeEngine(t *testing.T) {
 		if !syncAllowed {
 			return errors.New("injected boundary sync failure")
 		}
+
 		return oldSync()
 	}
+
 	t.Cleanup(func() { materialisationSyncStateDir = oldSync })
 	// The scoped retry unlinks the marker but fails its durable parent sync.
 	if out, code := f.apply(); code == 0 {
 		t.Fatalf("scoped sync failure = %d\n%s", code, out)
 	}
+
 	if _, found, err := readMaterialisation(f.owner.Target, f.root); err != nil || found {
 		t.Fatalf("scoped sync failure marker state: found=%v err=%v", found, err)
 	}
+
 	fenceStillRouting := func() bool {
 		recs, err := backup.LoadRecords()
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		fence, ok := recs.ActivationFenceFor(f.owner.Target)
+
 		return ok && fence.Phase == fencePhaseRouting
 	}
 	if !fenceStillRouting() {
@@ -798,6 +910,7 @@ func TestForkRoutingDurableAbsenceBoundaryBeforeEngine(t *testing.T) {
 		if code == 0 || strings.Contains(out, `"ok":true`) {
 			t.Fatalf("apply %s ran with a non-durable marker absence: %d\n%s", params, code, out)
 		}
+
 		if f.engineCalls != 0 || f.published || f.resumeCalls != 0 || !fenceStillRouting() {
 			t.Fatalf("apply %s touched routing: engine=%d published=%v resume=%d", params, f.engineCalls, f.published, f.resumeCalls)
 		}
@@ -807,16 +920,20 @@ func TestForkRoutingDurableAbsenceBoundaryBeforeEngine(t *testing.T) {
 	applyEngine = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
 		f.engineCalls++
 		f.published = true
+
 		return engine.ApplyData{}, nil, nil
 	}
 	syncAllowed = true
+
 	out, code := f.applyParams(`{"db":"target","steps":["postgres-config-v1@target"],"skip_doctor":true}`)
 	if code != 0 {
 		t.Fatalf("allowed step-selected retry = %d\n%s", code, out)
 	}
+
 	if f.engineCalls != 1 || !f.published || f.resumeCalls != 1 || fenceStillRouting() {
 		t.Fatalf("allowed retry did not finalize: engine=%d published=%v resume=%d", f.engineCalls, f.published, f.resumeCalls)
 	}
+
 	f.assertRetired()
 }
 
@@ -843,10 +960,12 @@ func TestPublicApplyRefusesUnprovenForkContinuations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPublicForkContinuation(t, materialisationRegistered, materialisationCopying, fencePhaseAdopting)
 			tc.mutate(f)
+
 			out, code := f.apply()
 			if code == 0 || strings.Contains(out, `"ok":true`) {
 				t.Fatalf("unproven continuation accepted: %d\n%s", code, out)
 			}
+
 			f.assertNoUnprovenEffects()
 		})
 	}
@@ -855,41 +974,49 @@ func TestPublicApplyRefusesUnprovenForkContinuations(t *testing.T) {
 func TestCopyPlanFromFenceUsesCompleteDurableUnion(t *testing.T) {
 	useTempExtensionRecords(t)
 	useExtensionFileFixture(t)
+
 	cfg := config.DefaultCluster()
 	cfg.Server.DataRoot = t.TempDir()
 	cfg.Clusters = []config.ClusterSpec{{Name: "target", Stanza: "target-abcdef", Port: 5433, Size: "small", StatementTimeout: "60s", Extensions: []string{"current"}}}
 	cfg.Extensions = map[string]config.ExtensionDefinition{
-		"current":  {Source: catalog.SourcePreinstalled, ExtName: "current_ext", CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true)},
-		"history":  {Source: catalog.SourcePreinstalled, ExtName: "history_ext", CopySafety: stringPtr(catalog.CopySafetyDisabled), StandbySafe: boolPtr(true), CopySettings: map[string]string{"history.worker": "off"}},
-		"retained": {Source: catalog.SourcePreinstalled, ExtName: "retained_ext", CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(false)},
+		"current":  {Source: catalog.SourcePreinstalled, ExtName: "current_ext", CopySafety: new(catalog.CopySafetySafe), StandbySafe: new(true)},
+		"history":  {Source: catalog.SourcePreinstalled, ExtName: "history_ext", CopySafety: new(catalog.CopySafetyDisabled), StandbySafe: new(true), CopySettings: map[string]string{"history.worker": "off"}},
+		"retained": {Source: catalog.SourcePreinstalled, ExtName: "retained_ext", CopySafety: new(catalog.CopySafetySafe), StandbySafe: new(false)},
 	}
 	history := catalog.Extension{Name: "history", ExtName: "history_ext", Source: catalog.SourcePreinstalled, CopySafety: catalog.CopySafetyDisabled, StandbySafe: true, CopySettings: map[string]string{"history.worker": "off"}}
+
 	retained := catalog.Extension{Name: "retained", ExtName: "retained_ext", Source: catalog.SourcePreinstalled, CopySafety: catalog.CopySafetySafe, StandbySafe: false}
 	if err := backup.RecordExtensionRequirements("target-abcdef", "target", []catalog.Extension{retained}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+
 	spec, _ := cfg.ClusterByName("target")
 	f := backup.ActivationFence{
 		Database: "target", Kind: "fork", Phase: fencePhaseAdopted,
 		TargetStanza: spec.Stanza, OldStanza: "source-abc", NewStanza: spec.Stanza,
 		Requirements: []catalog.Extension{history},
 	}
+
 	plan, err := copyPlanFromFence(cfg, spec, f)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	names := map[string]bool{}
 	for _, ext := range plan.Plan.Requirements {
 		names[ext.Name] = true
 	}
+
 	for _, name := range []string{"current", "history", "retained"} {
 		if !names[name] {
 			t.Fatalf("the plan lost %s from the durable/current union: %+v", name, plan.Plan.Requirements)
 		}
 	}
+
 	if plan.Plan.Guard.Settings["history.worker"] != "off" {
 		t.Fatalf("mandatory copied settings were not enforced: %+v", plan.Plan.Guard)
 	}
+
 	if plan.Plan.Cron || plan.Plan.ValidateGuard == nil || len(plan.Merged) != len(plan.Plan.Requirements) {
 		t.Fatalf("incomplete derived plan: %+v", plan.Plan)
 	}
@@ -898,12 +1025,14 @@ func TestCopyPlanFromFenceUsesCompleteDurableUnion(t *testing.T) {
 func TestCopyPlanFromFenceRefusesUnknownAndConflictingHistory(t *testing.T) {
 	useTempExtensionRecords(t)
 	useExtensionFileFixture(t)
+
 	base := config.DefaultCluster()
 	base.Clusters = []config.ClusterSpec{{Name: "target", Stanza: "target-abcdef", Port: 5433, Size: "small", StatementTimeout: "60s", Extensions: []string{"sqlonly"}}}
 	base.Extensions = map[string]config.ExtensionDefinition{
-		"sqlonly": {Source: catalog.SourcePreinstalled, CopySafety: stringPtr(catalog.CopySafetyUnknown), StandbySafe: boolPtr(true)},
+		"sqlonly": {Source: catalog.SourcePreinstalled, CopySafety: new(catalog.CopySafetyUnknown), StandbySafe: new(true)},
 	}
 	spec, _ := base.ClusterByName("target")
+
 	f := backup.ActivationFence{Database: "target", Kind: "fork", Phase: fencePhaseAdopted, TargetStanza: spec.Stanza, OldStanza: "source-abc", NewStanza: spec.Stanza}
 	if _, err := copyPlanFromFence(base, spec, f); err == nil {
 		t.Fatal("a current SQL-only descriptor without copy safety was accepted")
@@ -913,11 +1042,14 @@ func TestCopyPlanFromFenceRefusesUnknownAndConflictingHistory(t *testing.T) {
 	conflict := base
 	conflict.Clusters[0].Extensions = nil
 	conflict.Extensions = map[string]config.ExtensionDefinition{}
+
 	retained := catalog.Extension{Name: "history", ExtName: "history_ext", Source: catalog.SourceAPT, Package: "one", CopySafety: catalog.CopySafetySafe, StandbySafe: true}
 	if err := backup.RecordExtensionRequirements("target-abcdef", "target", []catalog.Extension{retained}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+
 	other := catalog.Extension{Name: "history", ExtName: "history_ext", Source: catalog.SourceAPT, Package: "two", CopySafety: catalog.CopySafetySafe, StandbySafe: true}
+
 	f.Requirements = []catalog.Extension{other}
 	if _, err := copyPlanFromFence(conflict, spec, f); err == nil {
 		t.Fatal("conflicting historical providers were not refused")
@@ -929,15 +1061,20 @@ func TestForkContinuationLeaseRejectsCopiesAndRevocation(t *testing.T) {
 	l := &materialisationContinuationLease{env: env, target: "target", global: engine.LockExclusive, cluster: engine.LockExclusive, dispatcher: true}
 	l.self = l
 	l.active.Store(true)
+
 	if !l.valid() {
 		t.Fatal("a fresh dispatcher lease is invalid")
 	}
+
 	copied := &materialisationContinuationLease{self: l.self, env: l.env, target: l.target, global: l.global, cluster: l.cluster, dispatcher: l.dispatcher}
 	copied.active.Store(true)
+
 	if copied.valid() {
 		t.Fatal("a copied lease was accepted")
 	}
+
 	l.revoke()
+
 	if l.valid() || materialisationContinuationLeaseFrom(withMaterialisationContinuationLease(context.Background(), l)) != nil {
 		t.Fatal("a revoked lease was accepted")
 	}
@@ -952,22 +1089,28 @@ func TestPublicApplyVerifyFailureRetainsRoutingMarker(t *testing.T) {
 			fail = false
 			return errors.New("injected provisioning verification failure")
 		}
+
 		return oldVerify(ctx, cfg, rt, target)
 	}
+
 	out, code := f.apply()
 	if code == 0 || !strings.Contains(out, "injected provisioning verification failure") {
 		t.Fatalf("verification failure = %d\n%s", code, out)
 	}
+
 	if _, found, err := readMaterialisation(f.owner.Target, f.root); err != nil || !found {
 		t.Fatalf("verification failure retired the marker: found=%v err=%v", found, err)
 	}
+
 	if f.published {
 		t.Fatal("verification failure published routes")
 	}
+
 	out, code = f.apply()
 	if code != 0 || !f.verified || !f.published {
 		t.Fatalf("verification retry = %d verified=%v published=%v\n%s", code, f.verified, f.published, out)
 	}
+
 	f.assertRetired()
 }
 
@@ -980,23 +1123,30 @@ func TestPublicApplyUnlinkFailureRetainsRoutingMarker(t *testing.T) {
 			fail = false
 			return errors.New("injected unlink failure")
 		}
+
 		return oldRemove(path)
 	}
+
 	t.Cleanup(func() { materialisationRemoveRecord = oldRemove })
+
 	out, code := f.apply()
 	if code == 0 || !strings.Contains(out, "injected unlink failure") {
 		t.Fatalf("unlink failure = %d\n%s", code, out)
 	}
+
 	if _, found, err := readMaterialisation(f.owner.Target, f.root); err != nil || !found {
 		t.Fatalf("unlink failure lost the marker: found=%v err=%v", found, err)
 	}
+
 	if f.published {
 		t.Fatal("unlink failure published routes")
 	}
+
 	out, code = f.apply()
 	if code != 0 || !f.published {
 		t.Fatalf("unlink retry = %d published=%v\n%s", code, f.published, out)
 	}
+
 	f.assertRetired()
 }
 
@@ -1005,10 +1155,12 @@ func (f *publicForkContinuation) rewriteRecord() {
 	if err != nil {
 		f.t.Fatal(err)
 	}
+
 	p, err := materialisationPath(f.owner.Target)
 	if err != nil {
 		f.t.Fatal(err)
 	}
+
 	if err := os.WriteFile(p, raw, 0o600); err != nil {
 		f.t.Fatal(err)
 	}

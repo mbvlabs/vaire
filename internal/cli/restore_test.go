@@ -19,14 +19,17 @@ func TestRestoreWarningsKeepFollowersDivergedStructured(t *testing.T) {
 			"message": "app is on a new timeline, so its followers (app_follower) stopped following it and serve the old data read-only."}],
 		"promoted": {"stanza": "app-3f9a1c"}
 	}`
+
 	var res restoreJobResult
 	if err := json.Unmarshal([]byte(raw), &res); err != nil {
 		t.Fatal(err)
 	}
+
 	warnings := restoreWarnings(nil, nil, res)
 	if len(warnings) != 1 {
 		t.Fatalf("warnings %+v, want the divergence warning", warnings)
 	}
+
 	if warnings[0].Code != "followers_diverged" || !strings.Contains(warnings[0].Message, "new timeline") {
 		t.Errorf("the divergence warning: %+v", warnings[0])
 	}
@@ -45,6 +48,7 @@ func TestCombinedRestorePreflightRefusesAFollowerFirst(t *testing.T) {
 // follower does not answer database_protected (R3-2). A source still passes.
 func TestRestorePreflightRefusesAFollowerFirst(t *testing.T) {
 	cfg := config.DefaultCluster()
+
 	cfg.Clusters = []config.ClusterSpec{
 		{Name: "app", Port: 5433, Stanza: "app-3f9a1c", Size: "large", StatementTimeout: "60s"},
 		{Name: "app_follower", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app"},
@@ -56,14 +60,17 @@ func TestRestorePreflightRefusesAFollowerFirst(t *testing.T) {
 			{"restore.undo", "restore undo"},
 		} {
 			err := restorePreflight(cfg, "app_follower", c.method, c.action)
+
 			var ce *output.CLIError
 			if !errors.As(err, &ce) {
 				t.Fatalf("%s on a follower (protected %v): %v, want is_follower", c.method, protected, err)
 			}
+
 			d, _ := ce.Details.(map[string]any)
 			if d["reason"] != "is_follower" || d["source"] != "app" {
 				t.Errorf("%s on a follower (protected %v): details %v, want is_follower from app", c.method, protected, d)
 			}
+
 			if err := restorePreflight(cfg, "app", c.method, c.action); err != nil {
 				t.Errorf("%s on the source: %v", c.method, err)
 			}

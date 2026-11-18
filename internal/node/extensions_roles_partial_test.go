@@ -29,6 +29,7 @@ func TestExtAddWithFollowersRolesFailureUsesBaselinePartialOutcome(t *testing.T)
 	rolesID := steps.RolesStepID("app")
 	rolesIncomplete := engine.ApplyData{Steps: []engine.ApplyStep{{ID: rolesID, State: engine.StatusIncomplete}}}
 	rolesRestartPending := engine.ApplyData{RestartPending: []string{rolesID}}
+
 	const generic = "the extension intent and every cluster's configuration are saved, but creating the SQL failed"
 
 	for _, tc := range []rolesPartialCase{
@@ -64,6 +65,7 @@ func TestExtAddWithFollowersRolesFailureUsesBaselinePartialOutcome(t *testing.T)
 
 func runFollowerAddRolesPartialCase(t *testing.T, tc rolesPartialCase) ([]engine.Options, error) {
 	t.Helper()
+
 	rolesID := steps.RolesStepID("app")
 	cfg := extFollowerCfg(t)
 	h := newExtHarness(t, cfg)
@@ -77,41 +79,51 @@ func runFollowerAddRolesPartialCase(t *testing.T, tc rolesPartialCase) ([]engine
 		if len(opts.Only) == 1 && opts.Only[0] == rolesID {
 			return tc.rolesData, tc.rolesErr
 		}
+
 		return engine.ApplyData{}, nil
 	}
 	req := extReq(t, map[string]any{"name": "pg_cron", "db": "app"},
 		"app/restart", "app_follower_1/restart", "app_follower_2/restart")
 	_, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg})
+
 	return h.applyCalls, err
 }
 
 func assertFollowerAddRolesPartialOutcome(t *testing.T, err error, wantMessage string) {
 	t.Helper()
+
 	if err == nil {
 		t.Fatal("the roles failure was reported as success")
 	}
+
 	if got := extReason(t, err); got != "extension_sql_failed" {
 		t.Fatalf("reason = %q, want extension_sql_failed", got)
 	}
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("error is not typed: %T %v", err, err)
 	}
+
 	if cliErr.Message != wantMessage {
 		t.Fatalf("message = %q, want %q", cliErr.Message, wantMessage)
 	}
+
 	details := extDetails(t, err)
 	if details["intent_saved"] != true {
 		t.Fatalf("intent_saved = %v, want true", details["intent_saved"])
 	}
+
 	completed, _ := details["completed"].([]string)
 	if strings.Join(completed, ",") != "app_follower_1,app_follower_2,app" {
 		t.Fatalf("completed = %v, want both followers and the source", completed)
 	}
+
 	pending, _ := details["pending"].([]string)
 	if !slices.Equal(pending, []string{"sql"}) {
 		t.Fatalf("pending = %v, want [sql]", pending)
 	}
+
 	if details["restart_required"] != true || details["restarted"] != true {
 		t.Fatalf("restart fields = required:%v restarted:%v, want true/true",
 			details["restart_required"], details["restarted"])
@@ -120,6 +132,7 @@ func assertFollowerAddRolesPartialOutcome(t *testing.T, err error, wantMessage s
 
 func assertFollowerAddRolesApplyOrder(t *testing.T, calls []engine.Options) {
 	t.Helper()
+
 	want := []string{
 		"app_follower_1:postgres-config-v1@app_follower_1",
 		"app_follower_2:postgres-config-v1@app_follower_2",

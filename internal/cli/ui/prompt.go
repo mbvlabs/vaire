@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ var ErrAborted = errors.New("prompt cancelled")
 func run(title string, answer func() string, fields ...huh.Field) error {
 	resume := Suspend()
 	defer resume()
+
 	err := huh.NewForm(huh.NewGroup(fields...)).
 		WithTheme(Theme).
 		WithOutput(os.Stderr).
@@ -30,9 +32,11 @@ func run(title string, answer func() string, fields ...huh.Field) error {
 	if errors.Is(err, huh.ErrUserAborted) {
 		return ErrAborted
 	}
+
 	if err == nil {
 		printAnswered(Writer(os.Stderr), title, answer())
 	}
+
 	return err
 }
 
@@ -46,6 +50,7 @@ func answeredLine(title, answer string) string {
 	if answer != "" {
 		line += " " + styleDim.Render(answer)
 	}
+
 	return line
 }
 
@@ -53,9 +58,11 @@ func answeredLine(title, answer string) string {
 // area that something was printed, so the waiting line keeps its pause.
 func printAnswered(w io.Writer, title, answer string) {
 	_, _ = fmt.Fprintln(w, answeredLine(title, answer))
+
 	activeMu.Lock()
 	l := active
 	activeMu.Unlock()
+
 	if l != nil {
 		l.mu.Lock()
 		l.lastOut = time.Now()
@@ -67,23 +74,28 @@ func printAnswered(w io.Writer, title, answer string) {
 func RunForm(groups ...*huh.Group) error {
 	resume := Suspend()
 	defer resume()
+
 	err := huh.NewForm(groups...).WithTheme(Theme).WithOutput(os.Stderr).Run()
 	if errors.Is(err, huh.ErrUserAborted) {
 		return ErrAborted
 	}
+
 	return err
 }
 
 // Input asks for one line. def is pre-filled.
 func Input(title, description, def string) (string, error) {
 	value := def
+
 	in := huh.NewInput().Title(title).Value(&value)
 	if description != "" {
 		in = in.Description(description)
 	}
+
 	if err := run(title, func() string { return strings.TrimSpace(value) }, in); err != nil {
 		return "", err
 	}
+
 	return strings.TrimSpace(value), nil
 }
 
@@ -93,6 +105,7 @@ func Secret(title string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return strings.TrimSpace(value), nil
 }
 
@@ -104,6 +117,7 @@ func SecretExact(title string) (string, error) {
 	if err := run(title, func() string { return secretMask }, huh.NewInput().Title(title).EchoMode(huh.EchoModePassword).Value(&value)); err != nil {
 		return "", err
 	}
+
 	return value, nil
 }
 
@@ -115,19 +129,23 @@ func YesNo(title, description string) (bool, error) {
 // YesNoDefault asks a yes/no question with def preselected.
 func YesNoDefault(title, description string, def bool) (bool, error) {
 	ok := def
+
 	c := huh.NewConfirm().Title(title).Affirmative("Yes").Negative("No").Value(&ok)
 	if description != "" {
 		c = c.Description(description)
 	}
+
 	answer := func() string {
 		if ok {
 			return "Yes"
 		}
+
 		return "No"
 	}
 	if err := run(title, answer, c); err != nil {
 		return false, err
 	}
+
 	return ok, nil
 }
 
@@ -135,6 +153,7 @@ func YesNoDefault(title, description string, def bool) (bool, error) {
 // inline until it matches or the prompt is cancelled.
 func TypeWord(title, description, word string) error {
 	var value string
+
 	in := huh.NewInput().
 		Title(title).
 		Placeholder(word).
@@ -143,36 +162,43 @@ func TypeWord(title, description, word string) error {
 			if strings.TrimSpace(s) != word {
 				return errors.New("type " + word + " exactly")
 			}
+
 			return nil
 		})
 	if description != "" {
 		in = in.Description(description)
 	}
+
 	return run(title, func() string { return strings.TrimSpace(value) }, in)
 }
 
 // Choose asks the operator to pick one of options (label, value pairs).
 func Choose(title, description string, options [][2]string) (string, error) {
 	var value string
+
 	opts := make([]huh.Option[string], 0, len(options))
 	for _, o := range options {
 		opts = append(opts, huh.NewOption(o[0], o[1]))
 	}
+
 	sel := huh.NewSelect[string]().Title(title).Options(opts...).Value(&value)
 	if description != "" {
 		sel = sel.Description(description)
 	}
+
 	answer := func() string {
 		for _, o := range options {
 			if o[1] == value {
 				return o[0]
 			}
 		}
+
 		return value
 	}
 	if err := run(title, answer, sel); err != nil {
 		return "", err
 	}
+
 	return value, nil
 }
 
@@ -181,39 +207,41 @@ func Choose(title, description string, options [][2]string) (string, error) {
 // order in options; picking none is an answer too.
 func MultiSelect(title, description string, options, selected []string) ([]string, error) {
 	value := make([]string, 0, len(selected))
+
 	opts := make([]huh.Option[string], 0, len(options))
 	for _, o := range options {
 		on := false
-		for _, s := range selected {
-			if s == o {
-				on = true
-				value = append(value, o)
-				break
-			}
+		if slices.Contains(selected, o) {
+			on = true
+
+			value = append(value, o)
 		}
+
 		opts = append(opts, huh.NewOption(o, o).Selected(on))
 	}
+
 	ms := huh.NewMultiSelect[string]().Title(title).Options(opts...).Value(&value).Filterable(false)
 	if description != "" {
 		ms = ms.Description(description)
 	}
+
 	answer := func() string {
 		if len(value) == 0 {
 			return "none"
 		}
+
 		return strings.Join(value, ", ")
 	}
 	if err := run(title, answer, ms); err != nil {
 		return nil, err
 	}
+
 	out := make([]string, 0, len(value))
 	for _, o := range options {
-		for _, v := range value {
-			if v == o {
-				out = append(out, o)
-				break
-			}
+		if slices.Contains(value, o) {
+			out = append(out, o)
 		}
 	}
+
 	return out, nil
 }

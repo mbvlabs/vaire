@@ -23,13 +23,17 @@ import (
 // runs it). The zone abbreviation is not parsed: only the gaps matter.
 func ParseCalendarIterations(out string) []time.Time {
 	var utc, local []time.Time
-	for _, line := range strings.Split(out, "\n") {
+
+	for line := range strings.SplitSeq(out, "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
 		if !ok {
 			continue
 		}
+
 		key = strings.TrimSpace(key)
+
 		var into *[]time.Time
+
 		switch {
 		case key == "(in UTC)":
 			into = &utc
@@ -43,13 +47,16 @@ func ParseCalendarIterations(out string) []time.Time {
 		if len(fields) < 3 {
 			continue
 		}
+
 		if t, err := time.Parse("2006-01-02 15:04:05", fields[1]+" "+fields[2]); err == nil {
 			*into = append(*into, t.UTC())
 		}
 	}
+
 	if len(utc) > 0 {
 		return utc
 	}
+
 	return local
 }
 
@@ -60,11 +67,13 @@ func ScheduleInterval(times []time.Time) (time.Duration, error) {
 	if len(times) < 2 {
 		return 0, errors.New("the schedule has fewer than two elapses")
 	}
+
 	var longest time.Duration
 	for i := 1; i < len(times); i++ {
 		if d := times[i].Sub(times[i-1]); d > longest {
 			longest = d
 		}
 	}
+
 	return longest, nil
 }

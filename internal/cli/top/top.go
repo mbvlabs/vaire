@@ -37,6 +37,7 @@ func StatementsSQL(allSessions bool) string {
 	if !allSessions {
 		filter = "\n  AND NOT " + pg.VaireRoleSQL("r.rolname")
 	}
+
 	return `SELECT s.queryid::text AS queryid, s.calls::text AS calls, s.total_exec_time::text AS total_ms,
   left(regexp_replace(s.query, '\s+', ' ', 'g'), 200) AS query
 FROM pg_stat_statements s JOIN pg_roles r ON r.oid = s.userid
@@ -137,13 +138,15 @@ func ParseSessions(db string, rows []map[string]string) []Session {
 	for _, r := range rows {
 		s := Session{DB: db, PID: int(atoi(r["pid"])), Role: r["role"], State: r["state"], Wait: r["wait"],
 			Seconds: atoi(r["secs"]), App: r["app"], Query: r["query"]}
-		for _, p := range strings.Split(r["blocked_by"], ",") {
+		for p := range strings.SplitSeq(r["blocked_by"], ",") {
 			if n := atoi(p); n > 0 {
 				s.BlockedBy = append(s.BlockedBy, int(n))
 			}
 		}
+
 		out = append(out, s)
 	}
+
 	return out
 }
 
@@ -155,10 +158,12 @@ func ParseCounters(row map[string]string) Counters {
 // ParseStatements reads StatementsSQL rows by queryid.
 func ParseStatements(rows []map[string]string) map[string]Statement {
 	out := map[string]Statement{}
+
 	for _, r := range rows {
 		ms, _ := strconv.ParseFloat(r["total_ms"], 64)
 		out[r["queryid"]] = Statement{QueryID: r["queryid"], Calls: atoi(r["calls"]), TotalMS: ms, Query: r["query"]}
 	}
+
 	return out
 }
 
@@ -166,14 +171,17 @@ func ParseStatements(rows []map[string]string) map[string]Statement {
 // auth aliases.
 func ParsePools(pooler string, rows []map[string]string) []Pool {
 	var out []Pool
+
 	for _, r := range rows {
 		db := r["database"]
 		if db == "pgbouncer" || strings.HasSuffix(db, "__auth") {
 			continue
 		}
+
 		out = append(out, Pool{Pooler: pooler, Database: db, ClActive: atoi(r["cl_active"]), ClWaiting: atoi(r["cl_waiting"]),
 			SvActive: atoi(r["sv_active"]), SvIdle: atoi(r["sv_idle"]), MaxWait: atoi(r["maxwait"])})
 	}
+
 	return out
 }
 
@@ -182,26 +190,33 @@ func ParsePools(pooler string, rows []map[string]string) []Pool {
 // zero; one with no new calls is left out.
 func StatementDeltas(db string, prev, cur map[string]Statement, limit int) []Busy {
 	var out []Busy
+
 	for id, c := range cur {
 		p, ok := prev[id]
 		if !ok || c.Calls < p.Calls {
 			p = Statement{}
 		}
+
 		calls := c.Calls - p.Calls
 		if calls <= 0 {
 			continue
 		}
+
 		out = append(out, Busy{DB: db, QueryID: id, Calls: calls, TotalMS: c.TotalMS - p.TotalMS, Query: c.Query})
 	}
+
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].TotalMS != out[j].TotalMS {
 			return out[i].TotalMS > out[j].TotalMS
 		}
+
 		return out[i].QueryID < out[j].QueryID
 	})
+
 	if len(out) > limit {
 		out = out[:limit]
 	}
+
 	return out
 }
 
@@ -212,12 +227,16 @@ func BlockingChains(sessions []Session) []string {
 	for _, s := range sessions {
 		byPID[s.PID] = s
 	}
+
 	var out []string
+
 	for _, s := range sessions {
 		if len(s.BlockedBy) == 0 {
 			continue
 		}
+
 		var blockers []string
+
 		for _, pid := range s.BlockedBy {
 			b, ok := byPID[pid]
 			if ok {
@@ -226,8 +245,10 @@ func BlockingChains(sessions []Session) []string {
 				blockers = append(blockers, strconv.Itoa(pid))
 			}
 		}
+
 		out = append(out, fmt.Sprintf("%s: %d (%s, %ds) waits for %s", s.DB, s.PID, s.Role, s.Seconds, strings.Join(blockers, ", ")))
 	}
+
 	return out
 }
 
@@ -235,31 +256,40 @@ func BlockingChains(sessions []Session) []string {
 // into a snapshot. dbFilter narrows sessions and statements to a database.
 func Build(prev, cur map[string]Sample, pools []Pool, dbFilter string, at time.Time) Snapshot {
 	snap := Snapshot{At: at, Databases: []DBRow{}, Sessions: []Session{}, Blocking: []string{}, Statements: []Busy{}, Pools: pools}
+
 	names := make([]string, 0, len(cur))
 	for name := range cur {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	for _, name := range names {
 		s := cur[name]
+
 		row := dbRow(name, s)
 		if p, ok := prev[name]; ok && s.Error == "" && p.Error == "" {
 			rates := ratesBetween(p, s)
 			row.TPS, row.CacheHit = rates.tps, rates.cacheHit
+
 			if dbFilter == "" || dbFilter == name {
 				snap.Statements = append(snap.Statements, StatementDeltas(name, p.Statements, s.Statements, 10)...)
 			}
 		}
+
 		snap.Databases = append(snap.Databases, row)
 		if dbFilter == "" || dbFilter == name {
 			snap.Sessions = append(snap.Sessions, s.Sessions...)
 		}
 	}
+
 	snap.Blocking = BlockingChains(snap.Sessions)
 	sort.SliceStable(snap.Statements, func(i, j int) bool { return snap.Statements[i].TotalMS > snap.Statements[j].TotalMS })
+
 	if len(snap.Statements) > 10 {
 		snap.Statements = snap.Statements[:10]
 	}
+
 	return snap
 }
 
@@ -268,16 +298,19 @@ func dbRow(name string, s Sample) DBRow {
 	row := DBRow{DB: name, Max: s.Counters.MaxConnections, Error: s.Error}
 	for _, se := range s.Sessions {
 		row.Connections++
+
 		switch {
 		case se.State == "active":
 			row.Active++
 		case strings.HasPrefix(se.State, "idle in transaction"):
 			row.IdleInTx++
 		}
+
 		if se.State != "idle" && se.Seconds > row.LongestXact {
 			row.LongestXact = se.Seconds
 		}
 	}
+
 	return row
 }
 
@@ -291,15 +324,18 @@ type sampleRates struct {
 // between p and s.
 func ratesBetween(p, s Sample) sampleRates {
 	var rates sampleRates
+
 	if dt := s.At.Sub(p.At).Seconds(); dt > 0 && s.Counters.Xacts >= p.Counters.Xacts {
 		tps := float64(s.Counters.Xacts-p.Counters.Xacts) / dt
 		rates.tps = &tps
 	}
+
 	hit, read := s.Counters.BlksHit-p.Counters.BlksHit, s.Counters.BlksRead-p.Counters.BlksRead
 	if hit+read > 0 && hit >= 0 && read >= 0 {
 		ratio := float64(hit) / float64(hit+read)
 		rates.cacheHit = &ratio
 	}
+
 	return rates
 }
 
@@ -308,6 +344,7 @@ func ratesBetween(p, s Sample) sampleRates {
 func SortSessions(sessions []Session, key string) {
 	sort.SliceStable(sessions, func(i, j int) bool {
 		a, b := sessions[i], sessions[j]
+
 		switch key {
 		case "state":
 			if a.State != b.State {
@@ -318,6 +355,7 @@ func SortSessions(sessions []Session, key string) {
 				return a.DB < b.DB
 			}
 		}
+
 		return a.Seconds > b.Seconds
 	})
 }
@@ -326,10 +364,12 @@ func SortSessions(sessions []Session, key string) {
 // fit height rows.
 func Render(s Snapshot, filter, sortKey string, width, height int) string {
 	var b strings.Builder
+
 	title := "vaire top · " + s.At.Format("15:04:05")
 	if filter != "" {
 		title += " · " + filter
 	}
+
 	b.WriteString(title + " · q quit · d database · s sort (" + sortKey + ")\n\n")
 	b.WriteString(renderDatabases(s.Databases, width))
 	b.WriteString(renderPools(s.Pools, width))
@@ -337,6 +377,7 @@ func Render(s Snapshot, filter, sortKey string, width, height int) string {
 	b.WriteString(renderStatements(s.Statements, width))
 	b.WriteString("\nSESSIONS\n")
 	b.WriteString(renderSessions(s.Sessions, sortKey, width, height-strings.Count(b.String(), "\n")-1))
+
 	return b.String()
 }
 
@@ -344,20 +385,25 @@ func Render(s Snapshot, filter, sortKey string, width, height int) string {
 func renderDatabases(dbs []DBRow, width int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%-16s %7s %7s %7s %8s %7s %8s\n", "DATABASE", "CONNS", "ACTIVE", "IDLE-TX", "TPS", "CACHE", "LONGEST")
+
 	for _, d := range dbs {
 		tps, cache := "-", "-"
 		if d.TPS != nil {
 			tps = fmt.Sprintf("%.1f", *d.TPS)
 		}
+
 		if d.CacheHit != nil {
 			cache = fmt.Sprintf("%.1f%%", *d.CacheHit*100)
 		}
+
 		line := fmt.Sprintf("%-16s %7s %7d %7d %8s %7s %7ds", d.DB, fmt.Sprintf("%d/%d", d.Connections, d.Max), d.Active, d.IdleInTx, tps, cache, d.LongestXact)
 		if d.Error != "" {
 			line = fmt.Sprintf("%-16s %s", d.DB, d.Error)
 		}
+
 		b.WriteString(clip(line, width) + "\n")
 	}
+
 	return b.String()
 }
 
@@ -366,12 +412,15 @@ func renderPools(pools []Pool, width int) string {
 	if len(pools) == 0 {
 		return ""
 	}
+
 	var b strings.Builder
 	b.WriteString("\nPOOLS\n")
+
 	for _, p := range pools {
 		b.WriteString(clip(fmt.Sprintf("  %-11s %-16s clients %d active %d waiting · servers %d active %d idle · maxwait %ds",
 			p.Pooler, p.Database, p.ClActive, p.ClWaiting, p.SvActive, p.SvIdle, p.MaxWait), width) + "\n")
 	}
+
 	return b.String()
 }
 
@@ -380,11 +429,14 @@ func renderBlocking(blocking []string, width int) string {
 	if len(blocking) == 0 {
 		return ""
 	}
+
 	var b strings.Builder
 	b.WriteString("\nBLOCKING\n")
+
 	for _, l := range blocking {
 		b.WriteString(clip("  "+l, width) + "\n")
 	}
+
 	return b.String()
 }
 
@@ -393,11 +445,14 @@ func renderStatements(statements []Busy, width int) string {
 	if len(statements) == 0 {
 		return ""
 	}
+
 	var b strings.Builder
 	b.WriteString("\nBUSIEST STATEMENTS SINCE THE LAST REFRESH\n")
+
 	for _, st := range statements {
 		b.WriteString(clip(fmt.Sprintf("  %-12s %6d calls %10.1f ms  %s", st.DB, st.Calls, st.TotalMS, st.Query), width) + "\n")
 	}
+
 	return b.String()
 }
 
@@ -406,19 +461,25 @@ func renderSessions(sessions []Session, sortKey string, width, room int) string 
 	if room < 3 {
 		room = 3
 	}
+
 	ordered := append([]Session(nil), sessions...)
 	SortSessions(ordered, sortKey)
+
 	var b strings.Builder
+
 	for i, se := range ordered {
 		if i >= room {
 			fmt.Fprintf(&b, "  … %d more\n", len(ordered)-i)
 			break
 		}
+
 		b.WriteString(clip(fmt.Sprintf("  %-12s %7d %-16s %-20s %-18s %6ds  %s", se.DB, se.PID, se.Role, se.State, se.Wait, se.Seconds, se.Query), width) + "\n")
 	}
+
 	if len(ordered) == 0 {
 		b.WriteString("  no client sessions\n")
 	}
+
 	return b.String()
 }
 
@@ -426,8 +487,10 @@ func clip(s string, width int) string {
 	if width <= 0 || len(s) <= width {
 		return s
 	}
+
 	if width < 2 {
 		return s[:width]
 	}
+
 	return s[:width-1] + "…"
 }

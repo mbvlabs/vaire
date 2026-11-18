@@ -76,15 +76,19 @@ func NewSharedServer(cfg SharedServerConfig) *SharedServer {
 	if cfg.StartGrace <= 0 {
 		cfg.StartGrace = DefaultSharedStartGrace
 	}
+
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = DefaultTimeout
 	}
+
 	if cfg.CheckPeer == nil {
 		cfg.CheckPeer = checkPeerUID
 	}
+
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
+
 	return &SharedServer{
 		cfg:     cfg,
 		started: time.Now(),
@@ -102,6 +106,7 @@ func (s *SharedServer) Serve(ctx context.Context) string {
 	s.mu.Lock()
 	s.armIdleLocked(s.cfg.StartGrace)
 	s.mu.Unlock()
+
 	go func() {
 		for {
 			conn, err := s.cfg.Listener.Accept()
@@ -109,24 +114,30 @@ func (s *SharedServer) Serve(ctx context.Context) string {
 				s.finish("stopped")
 				return
 			}
+
 			go s.handle(ctx, conn)
 		}
 	}()
+
 	select {
 	case <-ctx.Done():
 		s.finish("signal")
 	case <-s.done:
 	}
+
 	_ = s.cfg.Listener.Close()
 	s.mu.Lock()
 	if s.idle != nil {
 		s.idle.Stop()
 	}
+
 	for c := range s.conns {
 		_ = c.Close()
 	}
+
 	reason := s.reason
 	s.mu.Unlock()
+
 	return reason
 }
 
@@ -146,16 +157,19 @@ func (s *SharedServer) armIdleLocked(after time.Duration) {
 		s.idle.Stop()
 		s.idle = nil
 	}
+
 	if len(s.leases) > 0 || s.streams > 0 {
 		s.idleAt = time.Time{}
 		return
 	}
+
 	gen := s.idleGen
 	s.idleAt = time.Now().Add(after)
 	s.idle = time.AfterFunc(after, func() {
 		s.mu.Lock()
 		still := gen == s.idleGen && len(s.leases) == 0 && s.streams == 0
 		s.mu.Unlock()
+
 		if still {
 			s.cfg.Logf("idle for %s with no client; exiting", after)
 			s.finish("idle")
@@ -170,18 +184,22 @@ func (s *SharedServer) activityChangedLocked() {
 		go s.finish("stopped")
 		return
 	}
+
 	s.armIdleLocked(s.cfg.Persist)
 }
 
 func (s *SharedServer) track(c net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	select {
 	case <-s.done:
 		return false
 	default:
 	}
+
 	s.conns[c] = struct{}{}
+
 	return true
 }
 
@@ -198,21 +216,27 @@ func (s *SharedServer) handle(ctx context.Context, conn net.Conn) {
 	}
 	defer s.untrack(conn)
 	defer func() { _ = conn.Close() }()
+
 	if err := s.cfg.CheckPeer(conn); err != nil {
 		s.cfg.Logf("refused a client: %v", err)
 		return
 	}
+
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 	line, err := readLine(conn)
 	if err != nil {
 		return
 	}
+
 	_ = conn.SetReadDeadline(time.Time{})
+
 	var req sharedRequest
 	if err := json.Unmarshal(line, &req); err != nil {
 		_ = writeReply(conn, sharedReply{Code: "bad_request", Message: "the request is not JSON"})
 		return
 	}
+
 	switch req.Op {
 	case "hello":
 		_ = writeReply(conn, s.hello())
@@ -230,6 +254,7 @@ func (s *SharedServer) handle(ctx context.Context, conn net.Conn) {
 func (s *SharedServer) hello() sharedReply {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	r := sharedReply{
 		OK:          true,
 		Proto:       SharedProto,
@@ -244,14 +269,17 @@ func (s *SharedServer) hello() sharedReply {
 	for _, c := range s.leases {
 		r.Clients = append(r.Clients, c)
 	}
+
 	if !s.idleAt.IsZero() {
 		r.IdleDeadline = s.idleAt.UTC().Format(time.RFC3339)
 	}
+
 	if s.cfg.LastHandshake != nil {
 		if t := s.cfg.LastHandshake(); !t.IsZero() {
 			r.LastHandshake = t.UTC().Format(time.RFC3339)
 		}
 	}
+
 	return r
 }
 
@@ -260,12 +288,16 @@ func (s *SharedServer) attach(conn net.Conn, req sharedRequest) {
 	s.mu.Lock()
 	if s.draining {
 		s.mu.Unlock()
+
 		_ = writeReply(conn, sharedReply{Code: "draining", Message: "the tunnel daemon is stopping"})
+
 		return
 	}
+
 	s.leases[conn] = SharedClient{PID: req.PID, Command: req.Cmd, Since: time.Now().UTC().Format(time.RFC3339)}
 	s.activityChangedLocked()
 	s.mu.Unlock()
+
 	s.cfg.Logf("client attached: pid %d (%s)", req.PID, req.Cmd)
 	defer func() {
 		s.mu.Lock()
@@ -274,6 +306,7 @@ func (s *SharedServer) attach(conn net.Conn, req sharedRequest) {
 		s.mu.Unlock()
 		s.cfg.Logf("client detached: pid %d (%s)", req.PID, req.Cmd)
 	}()
+
 	if err := writeReply(conn, sharedReply{OK: true}); err != nil {
 		return
 	}
@@ -288,9 +321,11 @@ func (s *SharedServer) dial(ctx context.Context, conn net.Conn, req sharedReques
 		_ = writeReply(conn, sharedReply{Code: "dial_refused", Message: err.Error()})
 		return
 	}
+
 	s.mu.Lock()
 	s.streams++
 	s.activityChangedLocked()
+
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -298,25 +333,33 @@ func (s *SharedServer) dial(ctx context.Context, conn net.Conn, req sharedReques
 		s.activityChangedLocked()
 		s.mu.Unlock()
 	}()
+
 	dialCtx, cancel := context.WithTimeout(ctx, s.cfg.DialTimeout)
 	upstream, err := s.cfg.Dialer.DialContext(dialCtx, "tcp", req.Addr)
+
 	cancel()
+
 	if err != nil {
 		_ = writeReply(conn, sharedReply{Code: "dial_failed", Message: err.Error()})
 		return
 	}
+
 	s.mu.Lock()
 	s.conns[upstream] = struct{}{}
+
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.conns, upstream)
 		s.mu.Unlock()
+
 		_ = upstream.Close()
 	}()
+
 	if err := writeReply(conn, sharedReply{OK: true}); err != nil {
 		return
 	}
+
 	splice(conn, upstream)
 }
 
@@ -325,19 +368,23 @@ func (s *SharedServer) dial(ctx context.Context, conn net.Conn, req sharedReques
 func splice(a, b net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
+
 	pipe := func(dst, src net.Conn) {
 		defer wg.Done()
+
 		_, _ = io.Copy(dst, src)
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 			if cw.CloseWrite() == nil {
 				return
 			}
 		}
+
 		_ = dst.Close()
 		_ = src.Close()
 	}
 	go pipe(a, b)
 	go pipe(b, a)
+
 	wg.Wait()
 }
 
@@ -346,11 +393,13 @@ func (s *SharedServer) allowed(addr string) error {
 	if err != nil {
 		return fmt.Errorf("%s is not an IP address and port", addr)
 	}
+
 	for _, p := range s.cfg.Allowed {
 		if p.Contains(ap.Addr()) {
 			return nil
 		}
 	}
+
 	return fmt.Errorf("%s is outside the tunnel's node network", addr)
 }
 
@@ -359,12 +408,15 @@ func (s *SharedServer) stop(conn net.Conn, req sharedRequest) {
 	s.draining = true
 	idle := len(s.leases) == 0 && s.streams == 0
 	s.mu.Unlock()
+
 	_ = writeReply(conn, sharedReply{OK: true, Draining: !req.Force && !idle})
 	if req.Force || idle {
 		s.cfg.Logf("stop requested (force=%t); exiting", req.Force)
 		s.finish("stopped")
+
 		return
 	}
+
 	s.cfg.Logf("stop requested; refusing new clients and exiting once idle")
 }
 
@@ -374,12 +426,15 @@ func checkPeerUID(c net.Conn) error {
 	if !ok {
 		return errors.New("not a unix socket connection")
 	}
+
 	uid, err := peerUID(uc)
 	if err != nil {
 		return err
 	}
+
 	if int(uid) != os.Getuid() {
 		return fmt.Errorf("peer uid %d is not %d", uid, os.Getuid())
 	}
+
 	return nil
 }

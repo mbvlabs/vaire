@@ -24,16 +24,18 @@ var (
 
 func wordlist() []string {
 	wordsOnce.Do(func() {
-		for _, line := range strings.Split(wordlistRaw, "\n") {
+		for line := range strings.SplitSeq(wordlistRaw, "\n") {
 			fields := strings.Fields(line)
 			if len(fields) == 2 {
 				words = append(words, fields[1])
 			}
 		}
+
 		if len(words) != 7776 {
 			panic("embedded EFF wordlist is damaged")
 		}
 	})
+
 	return words
 }
 
@@ -41,13 +43,16 @@ func wordlist() []string {
 func NewPassphrase() (string, error) {
 	list := wordlist()
 	max := big.NewInt(int64(len(list)))
+
 	out := make([]string, PassphraseWords)
 	for i := range out {
 		n, err := rand.Int(rand.Reader, max)
 		if err != nil {
 			return "", err
 		}
+
 		out[i] = list[n.Int64()]
 	}
+
 	return strings.Join(out, "-"), nil
 }

@@ -21,15 +21,18 @@ var edgeVersionPattern = regexp.MustCompile(`^edge-[0-9a-f]{12}$`)
 // under /1.x and edge under /edge.
 func ChannelRoot(channel string) (string, error) {
 	base := strings.TrimRight(currentBaseURL(), "/")
+
 	switch channel {
 	case ChannelStable:
 		return base, nil
 	case ChannelEdge:
 		return base + "/edge", nil
 	}
+
 	if major, ok := lineMajor(channel); ok {
 		return base + "/" + strconv.Itoa(major) + ".x", nil
 	}
+
 	return "", fmt.Errorf("release channel %q is invalid", channel)
 }
 
@@ -40,6 +43,7 @@ func SigningChannel(channel string) string {
 	if _, ok := lineMajor(channel); ok {
 		return ChannelStable
 	}
+
 	return channel
 }
 
@@ -48,6 +52,7 @@ func Identity(channel, version string) (string, error) {
 	if err := matchVersion(channel, version); err != nil {
 		return "", err
 	}
+
 	switch SigningChannel(channel) {
 	case ChannelStable:
 		return "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v" + version, nil
@@ -64,24 +69,30 @@ func matchVersion(channel, version string) error {
 		if _, ok := ParseStable(version); !ok {
 			return fmt.Errorf("stable release version %q is invalid", version)
 		}
+
 		return nil
 	case ChannelEdge:
 		if !edgeVersionPattern.MatchString(version) {
 			return fmt.Errorf("edge release version %q is invalid", version)
 		}
+
 		return nil
 	}
+
 	major, ok := lineMajor(channel)
 	if !ok {
 		return fmt.Errorf("release channel %q is invalid", channel)
 	}
+
 	v, ok := ParseStable(version)
 	if !ok {
 		return fmt.Errorf("stable release version %q is invalid", version)
 	}
+
 	if v.Major != major {
 		return fmt.Errorf("release version %q is not on the %s channel", version, channel)
 	}
+
 	return nil
 }
 

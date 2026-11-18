@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -39,6 +40,7 @@ func clusterDropin(cfg config.Cluster, spec config.ClusterSpec) (string, config.
 	if err != nil {
 		return "", config.Resources{}, err
 	}
+
 	return string(render.PGServiceDropin(res)), res, nil
 }
 
@@ -47,10 +49,12 @@ func (s postgresCluster) RenderedFiles(cfg config.Cluster, _ engine.Runtime) []e
 	if err != nil {
 		return nil
 	}
+
 	dropin, _, err := clusterDropin(cfg, spec)
 	if err != nil {
 		return nil
 	}
+
 	return []engine.RenderedFile{{Path: PGServiceDropIn(spec.Name), Content: []byte(dropin)}}
 }
 
@@ -59,10 +63,12 @@ func (s postgresCluster) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+
 	dropin, _, err := clusterDropin(cfg, spec)
 	if err != nil {
 		return nil, err
 	}
+
 	return canonical(map[string]any{
 		"data_directory":  cfg.Server.DataDirectory(spec.Name),
 		"port":            spec.Port,
@@ -85,13 +91,15 @@ func lsCluster(ctx context.Context, name string) (clusterRow, bool) {
 	if err != nil {
 		return clusterRow{}, false
 	}
-	for _, line := range strings.Split(out, "\n") {
+
+	for line := range strings.SplitSeq(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 6 && fields[0] == strconv.Itoa(PGVersion) && fields[1] == name {
 			port, _ := strconv.Atoi(fields[2])
 			return clusterRow{Port: port, Status: fields[3], DataDir: fields[5]}, true
 		}
 	}
+
 	return clusterRow{}, false
 }
 
@@ -102,13 +110,16 @@ func ClusterNames(ctx context.Context) map[string]string {
 	if err != nil {
 		return nil
 	}
+
 	names := map[string]string{}
-	for _, line := range strings.Split(out, "\n") {
+
+	for line := range strings.SplitSeq(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 6 && fields[0] == strconv.Itoa(PGVersion) {
 			names[fields[1]] = fields[3]
 		}
 	}
+
 	return names
 }
 
@@ -124,29 +135,36 @@ func clusterNamesStrict(ctx context.Context, probe func(context.Context, string,
 	if err != nil {
 		return nil, err
 	}
+
 	return parseClusterNamesStrict(out)
 }
 
 func parseClusterNamesStrict(out string) (map[string]string, error) {
 	names := make(map[string]string)
 	seen := make(map[string]bool)
-	for _, line := range strings.Split(out, "\n") {
+
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+
 		version, name, status, err := parseClusterLine(line)
 		if err != nil {
 			return nil, err
 		}
+
 		key := version + "/" + name
 		if seen[key] {
 			return nil, errors.New("pg_lsclusters returned a duplicate cluster")
 		}
+
 		seen[key] = true
+
 		if version == strconv.Itoa(PGVersion) {
 			names[name] = status
 		}
 	}
+
 	return names, nil
 }
 
@@ -157,17 +175,21 @@ func parseClusterLine(line string) (version, name, status string, err error) {
 	if len(fields) < 7 {
 		return "", "", "", errors.New("pg_lsclusters returned an incomplete line")
 	}
+
 	if err := validateClusterVersion(fields[0]); err != nil {
 		return "", "", "", err
 	}
+
 	port, err := strconv.Atoi(fields[2])
 	if err != nil || port < 1 || port > 65535 || fields[4] == "<unknown>" || fields[5] == "<unknown>" || fields[6] == "<unknown>" {
 		return "", "", "", errors.New("pg_lsclusters returned incomplete cluster information")
 	}
+
 	status, err = clusterPrimaryStatus(fields[3])
 	if err != nil {
 		return "", "", "", err
 	}
+
 	return fields[0], fields[1], status, nil
 }
 
@@ -177,11 +199,13 @@ func validateClusterVersion(version string) error {
 	if len(parts) > 2 {
 		return errors.New("pg_lsclusters returned an invalid version")
 	}
+
 	for _, part := range parts {
 		if part == "" || strings.Trim(part, "0123456789") != "" {
 			return errors.New("pg_lsclusters returned an invalid version")
 		}
 	}
+
 	return nil
 }
 
@@ -192,18 +216,23 @@ func clusterPrimaryStatus(status string) (string, error) {
 	if parts[0] != "online" && parts[0] != "down" {
 		return "", errors.New("pg_lsclusters returned an unrecognized status")
 	}
+
 	seen := make(map[string]bool)
+
 	for _, modifier := range parts[1:] {
 		switch modifier {
 		case "recovery", "pacemaker", "patroni", "binaries_missing":
 		default:
 			return "", errors.New("pg_lsclusters returned an unrecognized status modifier")
 		}
+
 		if seen[modifier] || (modifier == "pacemaker" && seen["patroni"]) || (modifier == "patroni" && seen["pacemaker"]) {
 			return "", errors.New("pg_lsclusters returned duplicate or conflicting status modifiers")
 		}
+
 		seen[modifier] = true
 	}
+
 	return parts[0], nil
 }
 
@@ -222,20 +251,26 @@ func AllClusterNames(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	names := map[string]string{}
-	for _, line := range strings.Split(out, "\n") {
+
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			return nil, errors.New("pg_lsclusters returned an incomplete line")
 		}
+
 		if _, err := strconv.Atoi(fields[0]); err != nil {
 			return nil, errors.New("pg_lsclusters returned an invalid major version")
 		}
+
 		names[fields[1]] = fields[0]
 	}
+
 	return names, nil
 }
 
@@ -244,15 +279,19 @@ func (s postgresCluster) Check(ctx context.Context, cfg config.Cluster, _ engine
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	if err := config.CheckDatabaseName(spec.Name); err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	dropin, res, err := clusterDropin(cfg, spec)
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	name := "cluster 18/" + spec.Name
 	row, exists := lsCluster(ctx, spec.Name)
+
 	primary, statusErr := clusterPrimaryStatus(row.Status)
 	switch {
 	case !exists:
@@ -266,13 +305,16 @@ func (s postgresCluster) Check(ctx context.Context, cfg config.Cluster, _ engine
 	case !fileIs(PGServiceDropIn(spec.Name), dropin, 0o644):
 		return incomplete(PGServiceDropIn(spec.Name) + " differs"), nil
 	}
+
 	overlay, err := cpuOverlayExists(PGServiceDropInDir(spec.Name))
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	if overlay {
 		return checkCPUWithOverlay(name, res, true, hostinfo.CPUObservation{}), nil
 	}
+
 	return checkCPUWithOverlay(name, res, false, hostinfo.ObserveCPUService(ctx, PGServiceName(spec.Name))), nil
 }
 
@@ -280,6 +322,7 @@ func checkCPUWithOverlay(name string, res config.Resources, overlay bool, facts 
 	if overlay {
 		return incomplete(name + " has a CPU-only overlay")
 	}
+
 	return checkCPUObserved(name, res, facts)
 }
 
@@ -288,10 +331,12 @@ func checkCPUObserved(name string, res config.Resources, facts hostinfo.CPUObser
 	if err == nil {
 		return complete()
 	}
+
 	var mismatch *hostinfo.CPUPolicyMismatchError
 	if errors.As(err, &mismatch) && mismatch.Reason == "effective_policy_unknown" {
 		return engine.CheckResult{Inconclusive: true, Detail: name + " CPU policy is unknown"}
 	}
+
 	return incomplete(name + " CPU policy differs")
 }
 
@@ -306,19 +351,24 @@ func checkSpareCPU(ctx context.Context, cluster, mode string, screen func(contex
 	if mode != "" && mode != "normal" && mode != "spare" {
 		return output.NewError(output.CodeValidation, "invalid CPU mode", output.ExitConfig, "Use normal or spare.")
 	}
+
 	if mode != "spare" {
 		return nil
 	}
+
 	fact := screen(ctx, PGServiceName(cluster))
 	if fact.Capability == hostinfo.CPUCapable {
 		return nil
 	}
+
 	reason := "spare_cpu_capability_unknown"
 	message := "Cannot verify native spare CPU scheduling for " + cluster
+
 	if fact.Capability == hostinfo.CPUUnsupported {
 		reason = "spare_cpu_unsupported"
 		message = "Native spare CPU scheduling is unsupported for " + cluster
 	}
+
 	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition,
 		"Inspect the service cgroup and native CPU controller support, then retry.").
 		WithDetails(map[string]any{"reason": reason, "cluster": cluster, "capability": fact.Capability, "capability_reason": fact.Reason})
@@ -329,10 +379,12 @@ func cpuPolicy(res config.Resources) hostinfo.CPUPolicy {
 	if res.CPUWeight > 0 {
 		want.Weight = uint64(res.CPUWeight)
 	}
+
 	if res.CPUQuota != "" {
 		percent, _ := strconv.ParseFloat(strings.TrimSuffix(res.CPUQuota, "%"), 64) // ResolveResources validates the quota.
 		want.QuotaPercent = &percent
 	}
+
 	return want
 }
 
@@ -343,36 +395,45 @@ func applyCPUChecked(ctx context.Context, cluster string, res config.Resources,
 	if err := checkSpareCPU(ctx, cluster, res.CPUMode, screen); err != nil {
 		return err
 	}
+
 	if err := run(); err != nil {
-		var scriptErr *engine.ScriptError
-		if errors.As(err, &scriptErr) {
+		if scriptErr, ok := errors.AsType[*engine.ScriptError](err); ok {
 			for _, line := range scriptErr.Tail {
 				reason := ""
+
 				switch line {
 				case "vaire_cpu_policy_set_failed":
 					reason = "runtime_property_update_failed"
 				case "vaire_cpu_start_failed":
 					reason = "startup_cpu_attribute_failed"
 				}
+
 				if reason != "" {
 					cpuErr := cpuPolicyError(cluster, res, observe(ctx, PGServiceName(cluster)), reason)
 					cpuErr.Cause = err
+
 					return cpuErr
 				}
 			}
 		}
+
 		return err
 	}
+
 	facts := observe(ctx, PGServiceName(cluster))
 	if err := hostinfo.ValidateCPUPolicy(cpuPolicy(res), facts); err != nil {
 		var mismatch *hostinfo.CPUPolicyMismatchError
+
 		_ = errors.As(err, &mismatch)
+
 		reason := "effective_policy_unknown"
 		if mismatch != nil {
 			reason = mismatch.Reason
 		}
+
 		return cpuPolicyError(cluster, res, facts, reason)
 	}
+
 	return nil
 }
 
@@ -389,9 +450,8 @@ func cpuPolicyErrorWithDetails(cluster string, res config.Resources, facts hosti
 		"effective":          map[string]any{"idle": facts.Idle, "weight": facts.Weight, "quota": facts.Quota},
 		"observation_reason": facts.Reason, "capability_reason": facts.Screen.Reason, "mismatch": mismatch,
 	}
-	for key, value := range extra {
-		details[key] = value
-	}
+	maps.Copy(details, extra)
+
 	return output.NewError(output.CodeStepFailed, "CPU policy was not verified for "+cluster, output.ExitStep,
 		"Inspect the native service cgroup and re-run apply; unrelated settings are not rolled back.").WithDetails(details)
 }
@@ -401,6 +461,7 @@ func clusterScriptEnv(cfg config.Cluster, spec config.ClusterSpec, res config.Re
 	if res.MemoryMaxMiB > 0 {
 		memoryMax = strconv.Itoa(res.MemoryMaxMiB) + "M"
 	}
+
 	return map[string]string{
 		"CLUSTER":         spec.Name,
 		"PORT":            strconv.Itoa(spec.Port),
@@ -420,13 +481,16 @@ func (s postgresCluster) Apply(ctx context.Context, cfg config.Cluster, rt engin
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := config.CheckDatabaseName(spec.Name); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	dropin, res, err := clusterDropin(cfg, spec)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	dataDir := cfg.Server.DataDirectory(spec.Name)
 	if row, exists := lsCluster(ctx, spec.Name); exists && (row.DataDir != dataDir || row.Port != spec.Port) {
 		return engine.ApplyResult{}, output.NewError(
@@ -440,16 +504,20 @@ func (s postgresCluster) Apply(ctx context.Context, cfg config.Cluster, rt engin
 			"wanted":   map[string]any{"data_directory": dataDir, "port": spec.Port},
 		})
 	}
+
 	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
 		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
 	}
+
 	err = applyCPUChecked(ctx, spec.Name, res, hostinfo.CPUServiceScreen, func() error {
 		if err := prepareFullCPUDropin(PGServiceDropInDir(spec.Name), func() error {
 			return writeFile(PGServiceDropIn(spec.Name), dropin, 0o644)
 		}); err != nil {
 			return err
 		}
+
 		return rt.Shell.Run(ctx, s.ID(), Script("postgres-cluster"), clusterScriptEnv(cfg, spec, res), report)
 	}, hostinfo.ObserveCPUService)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }

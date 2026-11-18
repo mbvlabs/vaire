@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"sort"
 	"time"
 )
@@ -52,19 +53,23 @@ type storeSnapshot struct {
 // from a mixed snapshot.
 func observeStore(ctx context.Context, dir string, cfg storeConfig, checkSafe bool) (storeSnapshot, error) {
 	var snap storeSnapshot
-	for attempt := 0; attempt < maxSnapshotAttempts; attempt++ {
+
+	for range maxSnapshotAttempts {
 		if err := ctx.Err(); err != nil {
 			return storeSnapshot{}, err
 		}
+
 		observed, err := observeStoreOnce(ctx, dir, cfg, checkSafe)
 		if err != nil {
 			return storeSnapshot{}, err
 		}
+
 		snap = observed
 		if !snap.vanished {
 			break
 		}
 	}
+
 	return snap, nil
 }
 
@@ -72,24 +77,31 @@ func observeStore(ctx context.Context, dir string, cfg storeConfig, checkSafe bo
 // recheck that distinguishes a first append from a genuinely missing state.
 func observeStoreOnce(ctx context.Context, dir string, cfg storeConfig, checkSafe bool) (storeSnapshot, error) {
 	state, stateExists, stateErr := readState(dir)
+
 	if afterStateReadHook != nil {
 		afterStateReadHook()
 	}
+
 	listing, err := readListing(dir, checkSafe)
 	if err != nil {
 		return storeSnapshot{}, err
 	}
+
 	if afterListSegmentsHook != nil {
 		afterListSegmentsHook()
 	}
+
 	if !stateExists && hasSegmentHistory(listing.segments) {
 		recheck, err := restoreMissingState(dir, checkSafe, stateErr, listing)
 		if err != nil {
 			return storeSnapshot{}, err
 		}
+
 		state, stateExists, stateErr, listing = recheck.state, recheck.stateExists, recheck.stateErr, recheck.listing
 	}
+
 	ret, vanished := readRetainedBounds(ctx, listing.segments, cfg)
+
 	return storeSnapshot{
 		state:        state,
 		stateExists:  stateExists,
@@ -116,11 +128,13 @@ func readListing(dir string, checkSafe bool) (storeListing, error) {
 	if err != nil {
 		return storeListing{}, err
 	}
+
 	if checkSafe {
 		if err := segmentSafeCheck(segments); err != nil {
 			return storeListing{}, err
 		}
 	}
+
 	return storeListing{segments: segments, moreEntries: more, racedEntries: raced}, nil
 }
 
@@ -141,6 +155,7 @@ func restoreMissingState(dir string, checkSafe bool, stateErr error, listing sto
 	if beforeStateRecheckHook != nil {
 		beforeStateRecheckHook()
 	}
+
 	restored, restoredOK, recheckErr := readState(dir)
 	switch {
 	case recheckErr == nil && restoredOK:
@@ -148,6 +163,7 @@ func restoreMissingState(dir string, checkSafe bool, stateErr error, listing sto
 		if err != nil {
 			return stateRecheck{}, err
 		}
+
 		return stateRecheck{state: restored, stateExists: true, listing: fresh}, nil
 	case recheckErr == nil:
 		return stateRecheck{stateErr: stateErr, listing: listing}, nil
@@ -183,40 +199,52 @@ func restoreMissingState(dir string, checkSafe bool, stateErr error, listing sto
 // package never rebuilds or heals it.
 func (s *Store) Query(ctx context.Context, q Query) (Page, error) {
 	ctx = requestContext(ctx)
+
 	cfg, err := s.config()
 	if err != nil {
 		return Page{}, err
 	}
+
 	if err := ctx.Err(); err != nil {
 		return Page{}, err
 	}
+
 	nq, err := normalizeQuery(q, time.Now().UTC())
 	if err != nil {
 		return Page{}, err
 	}
+
 	page := Page{Schema: Schema, Events: []Event{}}
+
 	snap, available, err := loadSnapshot(ctx, cfg)
 	if err != nil {
 		return Page{}, err
 	}
+
 	if !available {
 		page.Coverage = Coverage{Available: false, Partial: true}
 		return page, nil
 	}
+
 	facts, err := deriveFacts(snap)
 	if err != nil {
 		return Page{}, err
 	}
+
 	cov := baseCoverage(facts)
+
 	after, snapshot, expired, err := cursorPosition(nq, facts, cov)
 	if err != nil {
 		return Page{}, err
 	}
+
 	if expired != nil {
 		page.Coverage = *expired
 		return page, nil
 	}
+
 	ret := facts.ret
+
 	scan := &pageScan{
 		nq:        nq,
 		cfg:       cfg,
@@ -229,6 +257,7 @@ func (s *Store) Query(ctx context.Context, q Query) (Page, error) {
 	if err := scan.run(ctx); err != nil {
 		return Page{}, err
 	}
+
 	if !scan.truncated && !scan.walk.stoppedByVisit && scan.walk.hasFirst {
 		// A complete scan gives exact retained time bounds even when supplied
 		// occurrence timestamps are not monotonic with sequence order.
@@ -236,18 +265,23 @@ func (s *Store) Query(ctx context.Context, q Query) (Page, error) {
 		cov.FirstRetainedAt = retainedFirstString(ret)
 		cov.LastRetainedAt = retainedLastString(ret)
 	}
+
 	sort.Slice(scan.matches, func(i, j int) bool { return scan.matches[i].Sequence < scan.matches[j].Sequence })
 	returnedAll := len(scan.matches) <= nq.limit
+
 	more := scan.walk.stoppedByVisit || !returnedAll
 	if !returnedAll {
 		scan.matches = scan.matches[:nq.limit]
 	}
+
 	page.Events = scan.matches
 	coverageFromScan(&cov, nq, scan)
 	next, stalled := continuation(nq, scan, after, snapshot, facts.storeID, more, returnedAll)
 	page.NextCursor = next
+
 	finishVerdict(&cov, nq, snap, ret, stalled, len(facts.segments), facts.stateLost)
 	page.Coverage = cov
+
 	return page, nil
 }
 
@@ -260,8 +294,10 @@ func loadSnapshot(ctx context.Context, cfg storeConfig) (snap storeSnapshot, ava
 		if isNotExist(err) {
 			return storeSnapshot{}, false, nil
 		}
+
 		return storeSnapshot{}, false, fmt.Errorf("activity: inspect store directory: %w", err)
 	}
+
 	if err := dirSafe(info); err != nil {
 		return storeSnapshot{}, false, err
 	}
@@ -275,6 +311,7 @@ func loadSnapshot(ctx context.Context, cfg storeConfig) (snap storeSnapshot, ava
 	if err != nil {
 		return storeSnapshot{}, false, err
 	}
+
 	return snap, true, nil
 }
 
@@ -295,6 +332,7 @@ func deriveFacts(snap storeSnapshot) (snapshotFacts, error) {
 	if snap.stateErr != nil && !stateCorrupt {
 		return snapshotFacts{}, snap.stateErr
 	}
+
 	facts := snapshotFacts{
 		state:       snap.state,
 		stateExists: snap.stateExists,
@@ -305,10 +343,13 @@ func deriveFacts(snap storeSnapshot) (snapshotFacts, error) {
 	if !snap.stateExists && hasSegmentHistory(snap.segments) {
 		facts.stateLost = true
 	}
+
 	if snap.stateExists {
 		facts.storeID = snap.state.StoreID
 	}
+
 	facts.high = highwater(snap.state, snap.stateExists, snap.ret)
+
 	return facts, nil
 }
 
@@ -331,6 +372,7 @@ func baseCoverage(facts snapshotFacts) Coverage {
 	if facts.stateExists {
 		cov.DroppedEvents = facts.state.DroppedEvents
 	}
+
 	return cov
 }
 
@@ -342,7 +384,9 @@ func cursorPosition(nq normalizedQuery, facts snapshotFacts, cov Coverage) (afte
 	if nq.cur == nil {
 		return after, snapshot, nil, nil
 	}
+
 	after, snapshot = nq.cur.After, nq.cur.Snapshot
+
 	if !facts.stateExists {
 		// Without state the store instance and the loss counters cannot be
 		// verified, and the cursor cannot be trusted to continue safely.
@@ -350,18 +394,23 @@ func cursorPosition(nq normalizedQuery, facts snapshotFacts, cov Coverage) (afte
 		gone.CursorExpired = true
 		gone.Partial = true
 		gone.LossDetected = true
+
 		return 0, 0, &gone, nil
 	}
+
 	if nq.cur.StoreID != facts.storeID {
 		return 0, 0, nil, errCursorMismatch
 	}
+
 	if cursorExpired(nq.cur, facts.ret, facts.high, len(facts.segments)) {
 		gone := cov
 		gone.CursorExpired = true
 		gone.Partial = true
 		gone.LossDetected = facts.stateLost || cov.DroppedEvents > 0
+
 		return 0, 0, &gone, nil
 	}
+
 	return after, snapshot, nil, nil
 }
 
@@ -385,14 +434,17 @@ func (ps *pageScan) run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		stop, err := ps.scanSegment(ctx, i, seg)
 		if err != nil {
 			return err
 		}
+
 		if stop {
 			break
 		}
 	}
+
 	return nil
 }
 
@@ -401,27 +453,35 @@ func (ps *pageScan) scanSegment(ctx context.Context, i int, seg segmentInfo) (bo
 	if seg.size == 0 {
 		return false, nil
 	}
+
 	if ps.guaranteed && ps.walk.bytes >= ps.budget {
 		ps.truncated = true
 		return true, nil
 	}
+
 	if ps.after > 0 && ps.skipBeforeCursor(ctx, seg) {
 		return false, nil
 	}
+
 	limit, cutAtLimit, done := ps.segmentLimit(seg)
 	if done {
 		return true, nil
 	}
+
 	f, openErr := openSegmentRead(seg)
 	if openErr != nil {
 		return ps.failedOpen(openErr, cutAtLimit)
 	}
+
 	walk, walkErr := walkSegment(ctx, f, limit, cutAtLimit, i == len(ps.segments)-1, ps.walk.prevSeq, ps.collector())
 	_ = f.Close()
+
 	if walkErr != nil {
 		return ps.failedWalk(ctx, cutAtLimit)
 	}
+
 	ps.mergeWalk(walk)
+
 	return cutAtLimit || ps.walk.stoppedByVisit, nil
 }
 
@@ -433,9 +493,11 @@ func (ps *pageScan) skipBeforeCursor(ctx context.Context, seg segmentInfo) bool 
 	if !ok || last.Sequence > ps.after {
 		return false
 	}
+
 	if last.Sequence > ps.walk.prevSeq {
 		ps.walk.prevSeq = last.Sequence
 	}
+
 	return true
 }
 
@@ -446,23 +508,28 @@ func (ps *pageScan) skipBeforeCursor(ctx context.Context, seg segmentInfo) bool 
 // budget remains.
 func (ps *pageScan) segmentLimit(seg segmentInfo) (limit int64, cutAtLimit, done bool) {
 	limit = seg.size
+
 	if !ps.guaranteed {
 		ps.guaranteed = true
 		if limit > maxPageBytes {
 			ps.truncated = true
 			return maxPageBytes, true, false
 		}
+
 		return limit, false, false
 	}
+
 	remaining := ps.budget - ps.walk.bytes
 	if remaining <= 0 {
 		ps.truncated = true
 		return 0, false, true
 	}
+
 	if remaining < limit {
 		ps.truncated = true
 		return remaining, true, false
 	}
+
 	return limit, false, false
 }
 
@@ -471,16 +538,19 @@ func (ps *pageScan) failedOpen(openErr error, cutAtLimit bool) (bool, error) {
 	if errors.Is(openErr, errUnsafeSegment) {
 		return false, openErr
 	}
+
 	if errors.Is(openErr, fs.ErrNotExist) {
 		// Retention removed the segment after it was listed.
 		ps.truncated = true
 		return false, nil
 	}
+
 	ps.walk.malformedSegments++
 	if cutAtLimit {
 		ps.truncated = true
 		return true, nil
 	}
+
 	return false, nil
 }
 
@@ -489,11 +559,13 @@ func (ps *pageScan) failedWalk(ctx context.Context, cutAtLimit bool) (bool, erro
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return false, ctxErr
 	}
+
 	ps.walk.malformedSegments++
 	if cutAtLimit {
 		ps.truncated = true
 		return true, nil
 	}
+
 	return false, nil
 }
 
@@ -504,10 +576,13 @@ func (ps *pageScan) collector() func(Event) bool {
 		if ev.Sequence <= ps.after || ev.Sequence > ps.snapshot {
 			return true
 		}
+
 		if !matchesQuery(ps.nq, ev) {
 			return true
 		}
+
 		ps.matches = append(ps.matches, ev)
+
 		return len(ps.matches) <= ps.nq.limit
 	}
 }
@@ -515,6 +590,7 @@ func (ps *pageScan) collector() func(Event) bool {
 // mergeWalk folds one walked segment into the page scan.
 func (ps *pageScan) mergeWalk(walk segmentWalk) {
 	walk.merge(&ps.walk)
+
 	ps.walk.segments++
 	if walk.inFlightTail {
 		// A writer is still appending the newest record: this page is a prefix
@@ -546,6 +622,7 @@ func coverageFromScan(cov *Coverage, nq normalizedQuery, ps *pageScan) {
 	cov.MalformedEvents = ps.walk.malformedEvents
 	cov.SequenceGaps = ps.walk.gaps
 	cov.Truncated = ps.truncated
+
 	cov.LimitReached = len(ps.matches) == nq.limit && nq.limit > 0
 	if len(ps.matches) > 0 {
 		cov.FirstReturnedAt, cov.LastReturnedAt = returnedWindow(ps.matches)
@@ -559,6 +636,7 @@ func returnedWindow(matches []Event) (first, last string) {
 		first = earlierString(first, ev.OccurredAt)
 		last = laterString(last, ev.OccurredAt)
 	}
+
 	return first, last
 }
 
@@ -569,16 +647,20 @@ func continuation(nq normalizedQuery, ps *pageScan, after, snapshot uint64, stor
 	if !more && !ps.truncated {
 		return "", false
 	}
+
 	afterSeq := uint64(0)
 	if len(ps.matches) > 0 {
 		afterSeq = ps.matches[len(ps.matches)-1].Sequence
 	}
+
 	if ps.truncated && returnedAll && ps.walk.lastScannedSeq > afterSeq {
 		afterSeq = ps.walk.lastScannedSeq
 	}
+
 	if afterSeq <= after {
 		return "", true
 	}
+
 	return cursorFor(nq, afterSeq, snapshot, storeID), false
 }
 
@@ -598,6 +680,7 @@ func hasSegmentHistory(segments []segmentInfo) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -620,15 +703,22 @@ type retainedBounds struct {
 // listing and the bounds then belong to different snapshots and a missing last
 // sequence cannot be inferred from them.
 func readRetainedBounds(ctx context.Context, segments []segmentInfo, cfg storeConfig) (retainedBounds, bool) {
-	var ret retainedBounds
-	var vanished bool
+	var (
+		ret      retainedBounds
+		vanished bool
+	)
+
 	ret.firstSeq, ret.firstAt, ret.hasFirst, vanished = firstRetainedEdge(segments, cfg)
+
 	var lastVanished bool
+
 	ret.lastSeq, ret.lastAt, ret.hasLast, lastVanished = lastRetainedEdge(ctx, segments, cfg)
 	vanished = vanished || lastVanished
+
 	if ret.hasFirst && ret.hasLast && ret.lastAt.Before(ret.firstAt) {
 		ret.lastAt = ret.firstAt
 	}
+
 	return ret, vanished
 }
 
@@ -636,26 +726,30 @@ func readRetainedBounds(ctx context.Context, segments []segmentInfo, cfg storeCo
 func firstRetainedEdge(segments []segmentInfo, cfg storeConfig) (seq uint64, at time.Time, ok, vanished bool) {
 	edge := cfg.segmentBytes + maxEventBytes
 	budget := scanBudget(cfg)
+
 	for _, seg := range segments {
 		if seg.size <= 0 {
 			continue
 		}
+
 		if budget <= 0 {
 			break
 		}
-		segmentBudget := edge
-		if budget < segmentBudget {
-			segmentBudget = budget
-		}
+
+		segmentBudget := min(budget, edge)
+
 		ev, found, err := segmentFirstEventErr(seg, segmentBudget)
 		if isNotExist(err) {
 			vanished = true
 		}
+
 		if found {
 			return ev.Sequence, eventTime(ev), true, vanished
 		}
+
 		budget -= seg.size
 	}
+
 	return 0, time.Time{}, false, vanished
 }
 
@@ -663,27 +757,30 @@ func firstRetainedEdge(segments []segmentInfo, cfg storeConfig) (seq uint64, at 
 func lastRetainedEdge(ctx context.Context, segments []segmentInfo, cfg storeConfig) (seq uint64, at time.Time, ok, vanished bool) {
 	edge := cfg.segmentBytes + maxEventBytes
 	budget := scanBudget(cfg)
-	for i := len(segments) - 1; i >= 0; i-- {
-		seg := segments[i]
+
+	for _, seg := range slices.Backward(segments) {
 		if seg.size <= 0 {
 			continue
 		}
+
 		if budget <= 0 {
 			break
 		}
-		segmentBudget := edge
-		if budget < segmentBudget {
-			segmentBudget = budget
-		}
+
+		segmentBudget := min(budget, edge)
+
 		ev, found, err := segmentLastEventErr(ctx, seg, segmentBudget)
 		if isNotExist(err) {
 			vanished = true
 		}
+
 		if found {
 			return ev.Sequence, eventTime(ev), true, vanished
 		}
+
 		budget -= seg.size
 	}
+
 	return 0, time.Time{}, false, vanished
 }
 
@@ -693,6 +790,7 @@ func highwater(state storeState, stateExists bool, ret retainedBounds) uint64 {
 	if stateExists && state.LastSequence > high {
 		high = state.LastSequence
 	}
+
 	return high
 }
 
@@ -702,18 +800,23 @@ func cursorExpired(cur *cursorState, ret retainedBounds, high uint64, segmentCou
 	if high == 0 && cur.After > 0 {
 		return true
 	}
+
 	if cur.After > high {
 		return true
 	}
+
 	if cur.After == 0 {
 		return false
 	}
+
 	if segmentCount == 0 {
 		return true
 	}
+
 	if ret.hasFirst && ret.firstSeq > cur.After+1 {
 		return true
 	}
+
 	return false
 }
 
@@ -724,6 +827,7 @@ func windowBeforeRetained(nq normalizedQuery, ret retainedBounds, segmentCount i
 	if !ret.hasFirst {
 		return segmentCount > 0
 	}
+
 	if nq.since.IsZero() {
 		if ret.firstSeq > 1 {
 			return true
@@ -731,9 +835,11 @@ func windowBeforeRetained(nq normalizedQuery, ret retainedBounds, segmentCount i
 	} else if ret.firstSeq > 1 && nq.since.Before(ret.firstAt) {
 		return true
 	}
+
 	if !nq.until.IsZero() && !nq.until.After(ret.firstAt) {
 		return ret.firstSeq > 1
 	}
+
 	return false
 }
 
@@ -744,34 +850,44 @@ func matchesQuery(nq normalizedQuery, ev Event) bool {
 	if q.OperationID != "" && ev.OperationID != q.OperationID {
 		return false
 	}
+
 	if q.RequestID != "" && ev.RequestID != q.RequestID {
 		return false
 	}
+
 	if q.JobID != "" && ev.JobID != q.JobID {
 		return false
 	}
+
 	if q.Database != "" && ev.Database != q.Database {
 		return false
 	}
+
 	if q.Action != "" && ev.Action != q.Action {
 		return false
 	}
+
 	if q.Outcome != "" && ev.Outcome != q.Outcome {
 		return false
 	}
+
 	if nq.since.IsZero() && nq.until.IsZero() {
 		return true
 	}
+
 	t := eventTime(ev)
 	if t.IsZero() {
 		return false
 	}
+
 	if !nq.since.IsZero() && t.Before(nq.since) {
 		return false
 	}
+
 	if !nq.until.IsZero() && !t.Before(nq.until) {
 		return false
 	}
+
 	return true
 }
 
@@ -779,6 +895,7 @@ func retainedFirstString(ret retainedBounds) string {
 	if !ret.hasFirst {
 		return ""
 	}
+
 	return formatTime(ret.firstAt)
 }
 
@@ -786,5 +903,6 @@ func retainedLastString(ret retainedBounds) string {
 	if !ret.hasLast {
 		return ""
 	}
+
 	return formatTime(ret.lastAt)
 }

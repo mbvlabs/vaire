@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,13 +30,16 @@ func handleActivityList(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &q); err != nil {
 		return Result{}, err
 	}
+
 	if err := normalizeActivityQuery(&q); err != nil {
 		return Result{}, err
 	}
+
 	page, err := queryActivity(ctx, q)
 	if err != nil {
 		return Result{}, activityQueryError(err)
 	}
+
 	return Result{Data: decorateActivityPage(page)}, nil
 }
 
@@ -47,21 +51,23 @@ func handleActivityShow(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &q); err != nil {
 		return Result{}, err
 	}
+
 	if q.Limit == 0 {
-		q.Limit = activityShowDefaultLimit
-		if q.Limit > activity.MaxLimit {
-			q.Limit = activity.MaxLimit
-		}
+		q.Limit = min(activityShowDefaultLimit, activity.MaxLimit)
 	}
+
 	if err := normalizeActivityQuery(&q); err != nil {
 		return Result{}, err
 	}
+
 	ids := 0
+
 	for _, id := range []string{q.OperationID, q.RequestID, q.JobID} {
 		if id != "" {
 			ids++
 		}
 	}
+
 	if ids != 1 {
 		return Result{}, output.NewError(
 			output.CodeUsage,
@@ -70,10 +76,12 @@ func handleActivityShow(ctx context.Context, env *Env) (Result, error) {
 			"Pass one correlation id from an activity list result.",
 		)
 	}
+
 	page, err := queryActivity(ctx, q)
 	if err != nil {
 		return Result{}, activityQueryError(err)
 	}
+
 	return Result{Data: decorateActivityPage(page)}, nil
 }
 
@@ -82,19 +90,24 @@ func handleActivityHealth(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	store, err := activityStoreFactory()
 	if err != nil || store == nil {
 		return Result{}, activityReadError()
 	}
+
 	qctx, cancel := activityReadContext(ctx)
 	defer cancel()
+
 	health, err := store.Health(qctx)
 	if err != nil {
 		return Result{}, activityReadError()
 	}
+
 	if health.Node == "" {
 		health.Node = activityNodeName()
 	}
+
 	return Result{Data: health}, nil
 }
 
@@ -104,9 +117,11 @@ func decorateActivityPage(page activity.Page) activity.Page {
 	if page.Schema == "" {
 		page.Schema = activity.Schema
 	}
+
 	if page.Coverage.Node == "" {
 		page.Coverage.Node = activityNodeName()
 	}
+
 	return page
 }
 
@@ -122,8 +137,10 @@ func queryActivity(ctx context.Context, q activity.Query) (activity.Page, error)
 	if err != nil || store == nil {
 		return activity.Page{}, activityReadError()
 	}
+
 	qctx, cancel := activityReadContext(ctx)
 	defer cancel()
+
 	page, err := store.Query(qctx, q)
 	if err != nil {
 		// The handler classifies caller-caused query errors (invalid cursor or
@@ -131,6 +148,7 @@ func queryActivity(ctx context.Context, q activity.Query) (activity.Page, error)
 		// both into activity_unavailable here.
 		return activity.Page{}, err
 	}
+
 	return page, nil
 }
 
@@ -138,6 +156,7 @@ func activityReadContext(ctx context.Context) (context.Context, context.CancelFu
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	return context.WithTimeout(ctx, activityQueryTimeout)
 }
 
@@ -161,7 +180,9 @@ func activityQueryError(err error) error {
 	if !ok {
 		return activityReadError()
 	}
+
 	message := "the activity query is not valid"
+
 	switch reason {
 	case activity.QueryReasonInvalidCursor:
 		message = "the activity cursor is not valid"
@@ -170,6 +191,7 @@ func activityQueryError(err error) error {
 	case activity.QueryReasonOutOfRange:
 		message = "an activity filter value is out of range"
 	}
+
 	return output.NewError(output.CodeUsage, message, output.ExitUsage,
 		"Use vaire activity list with bounded filters and a cursor from the same query.").
 		WithDetails(map[string]any{"reason": reason})
@@ -181,18 +203,23 @@ func normalizeActivityQuery(q *activity.Query) error {
 	if err := normalizeActivityIDs(q); err != nil {
 		return err
 	}
+
 	if err := normalizeActivityFilters(q); err != nil {
 		return err
 	}
+
 	if q.Limit < 0 {
 		return activityQueryUsage("limit must not be negative")
 	}
+
 	if q.Limit > activity.MaxLimit {
 		q.Limit = activity.MaxLimit
 	}
+
 	if err := activity.ValidateQuery(*q); err != nil {
 		return activityQueryUsage("the activity query is not valid")
 	}
+
 	return nil
 }
 
@@ -201,14 +228,17 @@ func normalizeActivityIDs(q *activity.Query) error {
 	if q.OperationID != "" && safeActivityID(q.OperationID) == "" {
 		return activityQueryUsage("operation_id must be a ULID")
 	}
+
 	q.RequestID = strings.ToUpper(strings.TrimSpace(q.RequestID))
 	if q.RequestID != "" && safeActivityID(q.RequestID) == "" {
 		return activityQueryUsage("request_id must be a ULID")
 	}
+
 	q.JobID = strings.ToUpper(strings.TrimSpace(q.JobID))
 	if q.JobID != "" && safeActivityID(q.JobID) == "" {
 		return activityQueryUsage("job_id must be a ULID")
 	}
+
 	return nil
 }
 
@@ -217,28 +247,34 @@ func normalizeActivityFilters(q *activity.Query) error {
 	if q.Database != "" && safeActivityResource(q.Database) == "" {
 		return activityQueryUsage("database is not a bounded resource name")
 	}
+
 	q.Action = strings.TrimSpace(q.Action)
 	if q.Action != "" && !activityQueryActionPattern.MatchString(q.Action) {
 		return activityQueryUsage("action is not a bounded action name")
 	}
+
 	q.Outcome = strings.TrimSpace(q.Outcome)
 	if q.Outcome != "" && !validActivityOutcome(q.Outcome) {
 		return activityQueryUsage("outcome is not one of " + strings.Join(activity.Outcomes, ", "))
 	}
+
 	q.Cursor = strings.TrimSpace(q.Cursor)
 	if len(q.Cursor) > 2048 || !activityCursorPattern.MatchString(q.Cursor) {
 		return activityQueryUsage("cursor is not a bounded opaque value")
 	}
+
 	if q.Since != "" {
 		if err := validateActivityTime(q.Since); err != nil {
 			return err
 		}
 	}
+
 	if q.Until != "" {
 		if err := validateActivityTime(q.Until); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -247,22 +283,20 @@ func validateActivityTime(value string) error {
 	if value == "" || len(value) > 64 {
 		return activityQueryUsage("since and until must be an RFC3339 time or a lookback duration")
 	}
+
 	if _, err := time.Parse(time.RFC3339, value); err == nil {
 		return nil
 	}
+
 	if d, err := time.ParseDuration(value); err == nil && d > 0 {
 		return nil
 	}
+
 	return activityQueryUsage("since and until must be an RFC3339 time or a positive lookback duration")
 }
 
 func validActivityOutcome(value string) bool {
-	for _, outcome := range activity.Outcomes {
-		if value == outcome {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(activity.Outcomes, value)
 }
 
 func activityQueryUsage(message string) error {

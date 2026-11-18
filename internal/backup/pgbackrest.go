@@ -42,11 +42,14 @@ func (p PgBackRest) run(ctx context.Context, stdout *bytes.Buffer, onLine func(s
 	if p.Stanza != "" {
 		full = append(full, "--stanza="+p.Stanza)
 	}
+
 	full = append(full, args...)
+
 	c := engine.Command{Name: "runuser", Args: full, OnLine: onLine}
 	if stdout != nil {
 		c.Stdout = stdout
 	}
+
 	return p.Shell.Exec(ctx, p.StepID, c, p.Report)
 }
 
@@ -63,12 +66,15 @@ func (p PgBackRest) runDetail(ctx context.Context, onLine func(string), args ...
 		if ev.Type == "log" && detailLine.MatchString(ev.Line) {
 			return
 		}
+
 		if report != nil {
 			report(ev)
 			return
 		}
+
 		log.Line("log "+step, ev.Line)
 	}
+
 	return p.run(ctx, nil, onLine, append([]string{"--log-level-console=detail"}, args...)...)
 }
 
@@ -94,6 +100,7 @@ func (p PgBackRest) StanzaCreate(ctx context.Context) error {
 	err := retryStanzaLock(ctx, func(ctx context.Context) error {
 		return p.run(ctx, nil, nil, p.withPort("stanza-create")...)
 	})
+
 	return wrapTool("pgbackrest stanza-create", err)
 }
 
@@ -107,10 +114,12 @@ func retryStanzaLock(ctx context.Context, op func(context.Context) error) error 
 		if err == nil {
 			return nil
 		}
+
 		var scriptErr *engine.ScriptError
 		if !errors.As(err, &scriptErr) || scriptErr.Status != stanzaLockBusy || attempt >= stanzaLockRetries {
 			return err
 		}
+
 		select {
 		case <-ctx.Done():
 			return err
@@ -124,6 +133,7 @@ func (p PgBackRest) withPort(args ...string) []string {
 	if p.Port == 0 {
 		return args
 	}
+
 	return append([]string{"--pg1-port=" + strconv.Itoa(p.Port)}, args...)
 }
 
@@ -142,10 +152,13 @@ func (p PgBackRest) Backup(ctx context.Context, kind string) (Set, error) {
 	default:
 		return Set{}, fmt.Errorf("backup type %q must be full, diff or incr", kind)
 	}
+
 	prog := newProgress("backup", p.Report)
 	label := ""
+
 	onLine := func(line string) {
 		prog.line(line)
+
 		if m := newLabel.FindStringSubmatch(line); m != nil {
 			label = m[1]
 		}
@@ -153,19 +166,23 @@ func (p PgBackRest) Backup(ctx context.Context, kind string) (Set, error) {
 	if err := p.runDetail(ctx, onLine, p.withPort("--type="+kind, "backup")...); err != nil {
 		return Set{}, wrapTool("pgbackrest backup", err)
 	}
+
 	info, err := p.Info(ctx, "")
 	if err != nil {
 		return Set{}, err
 	}
+
 	if label != "" {
 		if set, ok := info.Find(label); ok {
 			return set, nil
 		}
 	}
+
 	latest, ok := info.Latest()
 	if !ok {
 		return Set{}, errors.New("pgbackrest reported success but the repository lists no backup")
 	}
+
 	return latest, nil
 }
 
@@ -218,15 +235,18 @@ func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
 	if label != "" {
 		args = append(args, "--set="+label)
 	}
+
 	stanzas, err := p.info(ctx, args...)
 	if err != nil {
 		return Info{}, err
 	}
+
 	for _, st := range stanzas {
 		if st.Name == p.Stanza {
 			return parseInfo(st), nil
 		}
 	}
+
 	return Info{Stanza: p.Stanza}, nil
 }
 
@@ -235,28 +255,35 @@ func (p PgBackRest) Info(ctx context.Context, label string) (Info, error) {
 func (p PgBackRest) InfoAll(ctx context.Context) (map[string]Info, error) {
 	all := p
 	all.Stanza = ""
+
 	stanzas, err := all.info(ctx, "--output=json")
 	if err != nil {
 		return nil, err
 	}
+
 	out := make(map[string]Info, len(stanzas))
 	for _, st := range stanzas {
 		out[st.Name] = parseInfo(st)
 	}
+
 	return out, nil
 }
 
 func (p PgBackRest) info(ctx context.Context, args ...string) ([]infoJSON, error) {
 	var stdout bytes.Buffer
+
 	quiet := p
+
 	quiet.Report = nil
 	if err := quiet.run(ctx, &stdout, nil, append(args, "info")...); err != nil {
 		return nil, wrapTool("pgbackrest info", err)
 	}
+
 	var stanzas []infoJSON
 	if err := json.Unmarshal(stdout.Bytes(), &stanzas); err != nil {
 		return nil, fmt.Errorf("pgbackrest info output does not parse: %w", err)
 	}
+
 	return stanzas, nil
 }
 
@@ -264,15 +291,18 @@ func (p PgBackRest) info(ctx context.Context, args ...string) ([]infoJSON, error
 func parseInfo(st infoJSON) Info {
 	out := Info{Stanza: st.Name}
 	out.StatusCode, out.Status = st.Status.Code, st.Status.Message
+
 	out.BackupLockHeld = st.Status.Lock.Backup.Held
 	for _, a := range st.Archive {
 		if out.ArchiveMin == "" || a.Min < out.ArchiveMin {
 			out.ArchiveMin = a.Min
 		}
+
 		if a.Max > out.ArchiveMax {
 			out.ArchiveMax = a.Max
 		}
 	}
+
 	for _, b := range st.Backup {
 		// pgBackRest leaves repository.size out of bundled backups; what
 		// the set stored (its delta) is then the best figure.
@@ -280,6 +310,7 @@ func parseInfo(st infoJSON) Info {
 		if repoSize == 0 {
 			repoSize = b.Info.Repository.Delta
 		}
+
 		set := Set{
 			Label:     b.Label,
 			Type:      b.Type,
@@ -296,11 +327,14 @@ func parseInfo(st infoJSON) Info {
 		if b.Prior != nil {
 			set.Prior = *b.Prior
 		}
+
 		for _, d := range b.DatabaseRef {
 			set.Databases = append(set.Databases, d.Name)
 		}
+
 		out.Sets = append(out.Sets, set)
 	}
+
 	return out
 }
 
@@ -313,7 +347,9 @@ const networkProcessMax = "--process-max=4"
 // repository is checked one stanza at a time.
 func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 	res := VerifyResult{StartedAt: now()}
+
 	var lines []string
+
 	err := p.run(ctx, nil, func(line string) {
 		lines = append(lines, line)
 		if len(lines) > 40 {
@@ -322,6 +358,7 @@ func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 	}, networkProcessMax, "verify")
 	res.FinishedAt = now()
 	res.Output = lines
+
 	var scriptErr *engine.ScriptError
 	switch {
 	case err == nil:
@@ -333,6 +370,7 @@ func (p PgBackRest) Verify(ctx context.Context) (VerifyResult, error) {
 	default:
 		return res, err
 	}
+
 	return res, nil
 }
 
@@ -345,12 +383,15 @@ func (p PgBackRest) StanzaDelete(ctx context.Context, pgPath string) error {
 	if p.Stanza == "" {
 		return errors.New("stanza-delete needs a stanza")
 	}
+
 	if err := wrapTool("pgbackrest stop", p.run(ctx, nil, nil, "stop")); err != nil {
 		return err
 	}
+
 	if err := wrapTool("pgbackrest stanza-delete", p.run(ctx, nil, nil, "--pg1-path="+pgPath, "--force", "stanza-delete")); err != nil {
 		return err
 	}
+
 	return wrapTool("pgbackrest start", p.run(ctx, nil, nil, "start"))
 }
 
@@ -366,16 +407,20 @@ func (p PgBackRest) Materialise(ctx context.Context, opts RestoreOptions) error 
 	if err != nil {
 		return err
 	}
+
 	prog := newProgress("restore", p.Report)
+
 	return wrapTool("pgbackrest restore", p.runDetail(ctx, prog.line, append(args, "restore")...))
 }
 
 func materialiseArgs(opts RestoreOptions) ([]string, error) {
 	args := []string{"--pg1-path=" + opts.Path, "--no-delta", networkProcessMax}
+
 	action := "--target-action=promote"
 	if opts.Pause {
 		action = "--target-action=pause"
 	}
+
 	switch opts.Kind {
 	case TargetLatest, "":
 		if opts.Pause {
@@ -396,6 +441,7 @@ func materialiseArgs(opts RestoreOptions) ([]string, error) {
 	if opts.Timeline != "" && opts.Kind != TargetSet {
 		args = append(args, "--target-timeline="+opts.Timeline)
 	}
+
 	return args, nil
 }
 
@@ -409,9 +455,11 @@ FROM pg_stat_archiver`, nil)
 	if err != nil {
 		return ArchiveStatus{}, err
 	}
+
 	if len(rows) == 0 {
 		return ArchiveStatus{}, nil
 	}
+
 	row := rows[0]
 	st := ArchiveStatus{
 		LastArchivedWAL:  row["last_archived_wal"],
@@ -420,6 +468,7 @@ FROM pg_stat_archiver`, nil)
 		LastFailedTime:   row["last_failed_time"],
 	}
 	st.ArchivedCount, _ = strconv.ParseInt(row["archived_count"], 10, 64)
+
 	st.FailedCount, _ = strconv.ParseInt(row["failed_count"], 10, 64)
 	if t, err := time.Parse(time.RFC3339, st.LastArchivedTime); err == nil {
 		st.LagSeconds = int64(time.Since(t).Seconds())
@@ -431,6 +480,7 @@ FROM pg_stat_archiver`, nil)
 			st.PendingWAL = &n
 		}
 	}
+
 	return st, nil
 }
 
@@ -445,6 +495,7 @@ func unixTime(sec int64) string {
 	if sec == 0 {
 		return ""
 	}
+
 	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
 
@@ -456,15 +507,17 @@ func wrapTool(what string, err error) error {
 	if err == nil {
 		return nil
 	}
+
 	if errors.Is(err, engine.ErrInterrupted) {
 		return err
 	}
+
 	details := map[string]any{"command": what}
-	var scriptErr *engine.ScriptError
-	if errors.As(err, &scriptErr) {
+	if scriptErr, ok := errors.AsType[*engine.ScriptError](err); ok {
 		details["exit_status"] = scriptErr.Status
 		details["output_tail"] = scriptErr.Tail
 	}
+
 	return output.WrapError(output.CodeExternalCommand, fmt.Errorf("%s failed: %w", what, err), output.ExitExternal,
 		"Read details.output_tail, or the run log under /var/log/vaire and /var/log/pgbackrest.").WithDetails(details)
 }

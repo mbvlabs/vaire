@@ -41,21 +41,27 @@ func (o Options) Validate() error {
 	if !slices.Contains(RunKinds, o.Kind) {
 		return fmt.Errorf("unknown maintenance %q", o.Kind)
 	}
+
 	if o.DB == "" {
 		return errors.New("a maintenance run needs a database")
 	}
+
 	if o.Table != "" && o.Index != "" {
 		return errors.New("pass --table or --index, not both")
 	}
+
 	if o.Index != "" && o.Kind != Reindex {
 		return errors.New("--index is for reindex")
 	}
+
 	if o.Kind == Reindex && o.NotConcurrently {
 		return errors.New("REINDEX without CONCURRENTLY blocks writes to the table; vaire only reindexes concurrently")
 	}
+
 	if o.Parallel < 0 || o.Parallel > 16 {
 		return errors.New("--parallel must be 0-16")
 	}
+
 	for _, name := range []string{o.Table, o.Index} {
 		if name != "" {
 			if _, err := QuoteRelation(name); err != nil {
@@ -63,6 +69,7 @@ func (o Options) Validate() error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -80,22 +87,28 @@ func (o Options) Statements() ([]string, error) {
 	if err := o.Validate(); err != nil {
 		return nil, err
 	}
+
 	switch o.Kind {
 	case Vacuum:
 		if o.Table == "" {
 			return nil, nil
 		}
+
 		t, _ := QuoteRelation(o.Table)
+
 		opts := "ANALYZE " + boolWord(o.Analyze) + ", FREEZE " + boolWord(o.Freeze)
 		if o.Parallel > 0 {
 			opts += ", PARALLEL " + strconv.Itoa(o.Parallel)
 		}
+
 		return []string{"VACUUM (" + opts + ") " + t}, nil
 	case Analyze:
 		if o.Table == "" {
 			return nil, nil
 		}
+
 		t, _ := QuoteRelation(o.Table)
+
 		return []string{"ANALYZE " + t}, nil
 	case Reindex:
 		switch {
@@ -106,8 +119,10 @@ func (o Options) Statements() ([]string, error) {
 			t, _ := QuoteRelation(o.Table)
 			return []string{"REINDEX TABLE CONCURRENTLY " + t}, nil
 		}
+
 		return []string{"REINDEX DATABASE CONCURRENTLY " + pg.Quote(o.DB)}, nil
 	}
+
 	return nil, nil
 }
 
@@ -115,6 +130,7 @@ func boolWord(b bool) string {
 	if b {
 		return "true"
 	}
+
 	return "false"
 }
 
@@ -125,16 +141,20 @@ func (o Options) VacuumdbArgs(socketDir, user string, port, jobs int) []string {
 	if jobs < 1 {
 		jobs = 1
 	}
+
 	args := []string{"-h", socketDir, "-p", strconv.Itoa(port), "-U", user, "--jobs=" + strconv.Itoa(jobs)}
+
 	switch {
 	case o.Kind == Analyze:
 		args = append(args, "--analyze-only")
 	case o.Analyze:
 		args = append(args, "--analyze")
 	}
+
 	if o.Kind == Vacuum && o.Freeze {
 		args = append(args, "--freeze")
 	}
+
 	return append(args, "--dbname="+o.DB)
 }
 
@@ -150,6 +170,7 @@ func DropInvalidSQL(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return "DROP INDEX CONCURRENTLY IF EXISTS " + q, nil
 }
 

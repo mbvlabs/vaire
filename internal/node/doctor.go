@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,10 +45,12 @@ func loadDoctorState() (doctorState, bool) {
 	if err != nil {
 		return doctorState{}, false
 	}
+
 	var st doctorState
 	if json.Unmarshal(raw, &st) != nil {
 		return doctorState{}, false
 	}
+
 	return st, true
 }
 
@@ -93,9 +96,11 @@ func gatherFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, ini
 	view := diagnosticsViewWith(cfg, f.Records)
 	followers := readFollowers(ctx, view, "")
 	gatherOrphanSlots(ctx, view, &f)
+
 	for _, s := range readClusters(ctx, cfg, "", false) {
 		f.Clusters = append(f.Clusters, gatherClusterFacts(ctx, cfg, rt, s, followers, prev, havePrev, created, f.Records))
 	}
+
 	return f
 }
 
@@ -103,29 +108,37 @@ func gatherHostFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime,
 	if o, err := hostinfo.ReadOS(); err == nil {
 		f.OSSupported, f.OSName = o.Supported(), osName(o)
 	}
+
 	_, err := os.Stat("/var/run/reboot-required")
 	f.RebootRequired = err == nil
 	f.DiskPath = nearestExisting(cfg.Server.DataRoot, pathExists)
 	f.DiskTotal, f.DiskFree, f.DiskKnown = hostinfo.DiskUsage(f.DiskPath)
+
 	f.UnattendedActive = doctorServiceRead(ctx, "unattended-upgrades")
 	if out, err := doctorProbeRead(ctx, "timedatectl", "show", "-p", "NTPSynchronized", "--value"); err == nil {
 		f.TimeKnown, f.TimeSynced = true, out == "yes"
 	}
+
 	if st, err := engine.LoadState(engine.StatePath); err == nil {
 		f.LockedDownAt, f.LockdownPending, f.SecretsAtTime, f.Jobs = st.LockedDownAt, st.LockdownPending, st.SecretsConfirmedAt, st.Jobs
 	}
+
 	_, err = os.Stat(steps.BreakGlassPath)
 	f.BreakGlassOpen = err == nil
 	f.SSHConfigDrift = doctorDriftRead(ctx, cfg, rt, steps.SSHDStepID)
+
 	f.FirewallDrift = doctorDriftRead(ctx, cfg, rt, steps.FirewallStepID)
 	if out, err := doctorProbeRead(ctx, "ufw", "status"); err == nil {
 		f.UFWActive = strings.HasPrefix(out, "Status: active")
 	}
+
 	f.OpenAllowlists = openAllowlists(cfg)
+
 	f.TLSMode = cfg.TLS.Mode
 	if cert := readCert(steps.TLSCertPath); cert != nil {
 		f.CertKnown, f.CertNotAfter, f.CertSelfSign = true, cert.NotAfter, isSelfSignedCert(cert)
 	}
+
 	f.Hostname = steps.NodeHostname(cfg)
 	if f.Hostname != "" {
 		f.DNSChecked, f.DNSMatches, f.DNSDetail = checkDNS(ctx, cfg, f.Hostname)
@@ -139,6 +152,7 @@ func gatherServiceFacts(ctx context.Context, cfg config.Cluster, f *doctor.Facts
 		f.EndpointStatus, f.EndpointError = endpointStatus(ctx, f.Hostname, cfg.Metrics.PathPrefix)
 		f.PGProbes, f.PGExporterLog = postgresProbes(ctx, stepsView(cfg))
 	}
+
 	f.NginxActive = doctorServiceRead(ctx, steps.NginxService)
 	// Databases awaiting recovery have no cluster and no pooler entry yet
 	// (Phase 5), so the poolers run only once one is recovered.
@@ -156,6 +170,7 @@ func gatherRuntimeFacts(ctx context.Context, cfg config.Cluster, rt engine.Runti
 	for _, w := range oversubscriptionWarnings(cfg, rt.Host) {
 		f.BudgetWarnings = append(f.BudgetWarnings, doctor.Warning{Code: w.Code, Message: w.Message})
 	}
+
 	f.Records, _ = backup.LoadRecords()
 	f.Master = masterFacts(cfg)
 	f.ActivityHealthChecked = true
@@ -167,6 +182,7 @@ func gatherOrphanSlots(ctx context.Context, view config.Cluster, f *doctor.Facts
 	for _, o := range slots {
 		f.OrphanSlots = append(f.OrphanSlots, doctor.OrphanSlot{Source: o.Source, Port: o.Port, Slot: o.Slot})
 	}
+
 	for _, e := range slotFailures {
 		f.OrphanSlotErrors = append(f.OrphanSlotErrors, doctor.OrphanSlotError{Source: e.Source, Port: e.Port, Error: e.Error})
 	}
@@ -174,37 +190,46 @@ func gatherOrphanSlots(ctx context.Context, view config.Cluster, f *doctor.Facts
 
 func gatherClusterFacts(ctx context.Context, cfg config.Cluster, rt engine.Runtime, s clusterSnapshot, followers map[string]followerReading, prev doctorState, havePrev bool, created map[string]time.Time, records backup.Records) doctor.ClusterFacts {
 	c := doctor.ClusterFacts{Name: s.Spec.Name, Stanza: s.Spec.Stanza, State: s.State, Error: s.Error, Sample: s.Sample, Follows: s.Spec.Follows}
+
 	c.Ext = extensionFactsForCluster(ctx, cfg, s.Spec, s.State, records.IsAwaiting(s.Spec.Name))
 	if st, ok := followers[s.Spec.Name]; ok {
 		c.Follower = &st
 	}
+
 	if records.IsAwaiting(s.Spec.Name) {
 		c.AwaitingRecovery = true
 		return c
 	}
+
 	c.ConfigDrift = doctorDriftRead(ctx, cfg, rt, steps.ConfigStepID(s.Spec.Name))
+
 	c.Overrides = doctorOverridesRead(filepath.Join(steps.PGConfD(s.Spec.Name), "90-overrides.conf"))
 	if s.State == "running" {
 		c.HBAWeak = doctorWeakHBARead(ctx, s.Spec)
 	}
+
 	if s.CgroupOK {
 		if p, ok := s.Cgroup.Pressure["memory"]; ok {
 			c.PressureKnown, c.PressureAvg300 = true, p.Some.Avg300
 		}
+
 		c.HighEvents = s.Cgroup.MemoryEvents["high"]
 		if havePrev {
 			c.PrevHighEvents, c.PrevKnown = prev.HighEvents[s.Spec.Name]
 		}
 	}
+
 	if s.State == "stopped" {
 		if err := checkStarts(cfg, s.Spec, rt.Host, 0); err != nil {
 			c.WouldNotStart = err.Error()
 		}
 	}
+
 	c.CreatedAt = created[s.Spec.Name]
 	if cfg.BackupConfigured() {
 		c.FullInterval, c.FullIntervalErr = fullInterval(ctx, cfg, s.Spec)
 	}
+
 	return c
 }
 
@@ -242,6 +267,7 @@ func gatherActivityHealth(ctx context.Context) (activity.Health, bool) {
 	if err != nil || store == nil {
 		return activity.Health{}, false
 	}
+
 	return activityStoreHealth(ctx, store)
 }
 
@@ -254,27 +280,36 @@ func activityStoreHealth(ctx context.Context, store activityStore) (activity.Hea
 	if store == nil {
 		return activity.Health{}, false
 	}
+
 	if ctx == nil {
 		ctx = context.Background() //nolint:contextcheck // the detached health read still needs a context to observe cancellation.
 	}
+
 	if !activityHealthInFlight.CompareAndSwap(false, true) {
 		// An earlier read is still pinned on the store. Adding another one
 		// would let a stalled filesystem grow goroutines without bound.
 		return activity.Health{}, false
 	}
+
 	read := make(chan activityHealthRead, 1) // buffered: an abandoned read must not block on delivery
+
 	go func() {
 		r := readActivityHealth(ctx, store)
+
 		activityHealthInFlight.Store(false)
+
 		read <- r
 	}()
+
 	timer := time.NewTimer(activityHealthWait)
 	defer timer.Stop()
+
 	select {
 	case r := <-read:
 		if r.err != nil {
 			return activity.Health{}, false
 		}
+
 		return r.health, true
 	case <-timer.C:
 		return activity.Health{}, false
@@ -290,9 +325,12 @@ func readActivityHealth(ctx context.Context, store activityStore) (r activityHea
 			r = activityHealthRead{err: errActivityHealthPanic}
 		}
 	}()
+
 	readCtx, cancel := context.WithTimeout(ctx, activityHealthWait)
 	defer cancel()
+
 	r.health, r.err = store.Health(readCtx)
+
 	return r
 }
 
@@ -302,12 +340,14 @@ func driftOf(ctx context.Context, cfg config.Cluster, rt engine.Runtime, id stri
 	if err != nil {
 		return "cannot check: " + err.Error()
 	}
+
 	return detail
 }
 
 // openAllowlists are the allowlist entries open to every address.
 func openAllowlists(cfg config.Cluster) []string {
 	var out []string
+
 	for _, l := range []struct {
 		name string
 		list []string
@@ -319,12 +359,14 @@ func openAllowlists(cfg config.Cluster) []string {
 		if !l.on {
 			continue
 		}
+
 		for _, cidr := range l.list {
 			if open, err := openToAll(cidr); err == nil && open {
 				out = append(out, l.name+" "+cidr)
 			}
 		}
 	}
+
 	return out
 }
 
@@ -334,7 +376,9 @@ func openToAll(cidr string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
 	ones, _ := n.Mask.Size()
+
 	return ones == 0, nil
 }
 
@@ -342,19 +386,21 @@ func openToAll(cidr string) (bool, error) {
 func checkDNS(ctx context.Context, cfg config.Cluster, hostname string) (checked, matches bool, detail string) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+
 	addrs, err := net.DefaultResolver.LookupHost(ctx, hostname)
 	if err != nil {
 		return false, false, err.Error()
 	}
+
 	want := ""
 	if n, ok := cfg.Master(); ok {
 		want = n.PublicAddress
 	}
-	for _, a := range addrs {
-		if a == want {
-			return true, true, ""
-		}
+
+	if slices.Contains(addrs, want) {
+		return true, true, ""
 	}
+
 	return true, false, "resolves to " + strings.Join(addrs, ", ") + ", not " + want
 }
 
@@ -368,14 +414,18 @@ func exporterHealth(ctx context.Context, databases bool) map[string]error {
 		targets["pgbouncer_exporter"] = "http://" + steps.PgbouncerTxAddr + "/metrics"
 		targets["pgbouncer_exporter-session"] = "http://" + steps.PgbouncerSessAddr + "/metrics"
 	}
+
 	out := map[string]error{}
+
 	for name, url := range targets {
 		code, err := steps.HTTPStatus(ctx, url)
 		if err == nil && code != http.StatusOK {
 			err = httpStatusError(code)
 		}
+
 		out[name] = err
 	}
+
 	return out
 }
 
@@ -390,27 +440,34 @@ func endpointStatus(ctx context.Context, hostname, prefix string) (int, string) 
 	if prefix == "" {
 		prefix = "/metrics"
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+
 	client := &http.Client{Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{ServerName: hostname, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, //nolint:gosec // G402: loopback probe of the node's own nginx; the certificate is checked by tls.expiry.
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, "127.0.0.1:443")
 		},
 	}}
+
 	host := hostname
 	if host == "" {
 		host = "localhost"
 	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+prefix+"/node", nil)
 	if err != nil {
 		return 0, err.Error()
 	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err.Error()
 	}
+
 	_ = resp.Body.Close()
+
 	return resp.StatusCode, ""
 }
 
@@ -421,10 +478,12 @@ func weakHBA(ctx context.Context, spec config.ClusterSpec) []string {
 	if err != nil {
 		return nil
 	}
+
 	var out []string
 	for _, r := range rows {
 		out = append(out, r["auth_method"])
 	}
+
 	return out
 }
 
@@ -435,25 +494,30 @@ func overriddenSettings(path string) []string {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
+
 	return parseSettingNames(f)
 }
 
 func parseSettingNames(r interface{ Read([]byte) (int, error) }) []string {
 	var out []string
+
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+
 		name, _, ok := strings.Cut(line, "=")
 		if !ok {
 			name = strings.Fields(line)[0]
 		}
+
 		if name = strings.TrimSpace(name); name != "" {
 			out = append(out, name)
 		}
 	}
+
 	return out
 }
 
@@ -461,23 +525,28 @@ func parseSettingNames(r interface{ Read([]byte) (int, error) }) []string {
 // completed, from the journal.
 func clusterCreated() map[string]time.Time {
 	out := map[string]time.Time{}
+
 	j, err := engine.LoadJournal(engine.JournalPath)
 	if err != nil {
 		return out
 	}
+
 	for id, e := range j.Steps {
 		tmpl, cluster := engine.SplitID(id)
 		if tmpl != "postgres-cluster-v1" || cluster == "" {
 			continue
 		}
+
 		at := e.StartedAt
 		if at == "" {
 			at = e.CompletedAt
 		}
+
 		if t, err := time.Parse(time.RFC3339, at); err == nil {
 			out[cluster] = t
 		}
 	}
+
 	return out
 }
 
@@ -493,10 +562,12 @@ func fullInterval(ctx context.Context, cfg config.Cluster, spec config.ClusterSp
 	if err != nil {
 		return 0, err.Error()
 	}
+
 	d, err := doctor.ScheduleInterval(doctor.ParseCalendarIterations(out))
 	if err != nil {
 		return 0, err.Error()
 	}
+
 	return d, ""
 }
 
@@ -518,19 +589,24 @@ func handleDoctorRun(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if err := guardMaterialisationApply(ctx, env.Cluster, ""); err != nil {
 		return Result{}, err
 	}
+
 	if !doctor.ValidOnly(p.Only) {
 		return Result{}, output.NewError(output.CodeUsage, "unknown --only "+p.Only, output.ExitUsage,
 			"Use one of "+strings.Join(doctor.Categories, ", ")+".")
 	}
+
 	if p.DB != "" {
 		if _, err := clusterOf(env.Cluster, p.DB); err != nil {
 			return Result{}, err
 		}
 	}
+
 	results := runDoctor(ctx, env.Cluster, runtimeFor(env, true), false, p.Only, p.DB)
+
 	return Result{Data: doctorData{Results: results, Summary: doctor.Summary(results)}}, nil
 }
 
@@ -538,10 +614,12 @@ func handleDoctorRun(ctx context.Context, env *Env) (Result, error) {
 // the results in doctor.json and vaire-doctor.prom.
 func runDoctor(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init bool, only, db string) []doctor.Result {
 	f := gatherFacts(ctx, cfg, rt, init)
+
 	results := doctor.Run(doctor.Filter(doctor.NodeChecks(), only), f, db)
 	if only == "" && db == "" && !init {
 		recordDoctor(f, results)
 	}
+
 	return results
 }
 
@@ -551,9 +629,11 @@ func recordDoctor(f doctor.Facts, results []doctor.Result) {
 	for _, c := range f.Clusters {
 		st.HighEvents[c.Name] = c.HighEvents
 	}
+
 	if raw, err := json.MarshalIndent(st, "", "  "); err == nil {
 		_ = engine.WriteFileAtomic(DoctorStatePath, append(raw, '\n'), 0o600)
 	}
+
 	_ = promfile.Write(promfile.Doctor, doctorFamilies(f.Now, results))
 }
 
@@ -561,20 +641,26 @@ func recordDoctor(f doctor.Facts, results []doctor.Result) {
 // external Prometheus can alert on any failing check until Phase 9's alerts.
 func doctorFamilies(at time.Time, results []doctor.Result) []*promfile.Family {
 	check := promfile.Gauge("vaire_doctor_check", "vaire doctor results: 1 for the check's status.")
+
 	sorted := append([]doctor.Result(nil), results...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if sorted[i].ID != sorted[j].ID {
 			return sorted[i].ID < sorted[j].ID
 		}
+
 		return sorted[i].DB < sorted[j].DB
 	})
+
 	for _, r := range sorted {
 		check.Add(1, promfile.L("check", r.ID, "db", r.DB, "status", string(r.Status))...)
 	}
+
 	last := promfile.Gauge("vaire_doctor_last_run_timestamp_seconds", "When vaire doctor last ran on the node.")
 	last.Add(float64(at.Unix()))
+
 	failing := promfile.Gauge("vaire_doctor_failing_checks", "How many doctor checks fail.")
 	failing.Add(float64(len(doctor.Failed(results))))
+
 	return []*promfile.Family{check, last, failing}
 }
 
@@ -587,28 +673,36 @@ func doctorGate(ctx context.Context, cfg config.Cluster, rt engine.Runtime, init
 		return nil, []output.Warning{{Code: "materialisation_incomplete",
 			Message: "doctor could not check incomplete or unverifiable materialisation state"}}, err
 	}
+
 	results := runDoctor(ctx, cfg, rt, init, "", "")
 	data := &doctorData{Results: results, Summary: doctor.Summary(results)}
+
 	failed := doctor.Failed(results)
 	if len(failed) == 0 {
 		return data, nil, nil
 	}
+
 	if init {
 		names := make([]string, 0, len(failed))
 		for _, r := range failed {
 			names = append(names, resultName(r))
 		}
+
 		return data, nil, output.NewError(output.CodeDoctorFailed, "doctor checks fail after the database phase: "+strings.Join(names, ", "), output.ExitStep,
 			"Run the fix of each failing check (vaire doctor shows them), then vaire server init --resume.").WithDetails(map[string]any{"checks": failed, "summary": data.Summary})
 	}
+
 	var warnings []output.Warning
+
 	for _, r := range failed {
 		msg := resultName(r) + ": " + r.Detail
 		if r.Fix != "" {
 			msg += " (fix: " + r.Fix + ")"
 		}
+
 		warnings = append(warnings, output.Warning{Code: "doctor_check_failed", Message: msg})
 	}
+
 	return data, warnings, nil
 }
 
@@ -616,6 +710,7 @@ func resultName(r doctor.Result) string {
 	if r.DB != "" {
 		return r.ID + "@" + r.DB
 	}
+
 	return r.ID
 }
 
@@ -625,6 +720,7 @@ func runDoctorJob(ctx context.Context, cfg config.Cluster, report engine.Reporte
 	results := runDoctor(ctx, cfg, runtimeFor(env, true), false, "", "")
 	summary := doctor.Summary(results)
 	logLine(report, "doctor", formatSummary(summary))
+
 	return map[string]any{"summary": summary}, nil
 }
 

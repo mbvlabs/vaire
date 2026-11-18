@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -69,18 +70,22 @@ func ValidateEvent(ev Event) error {
 	if ev.Schema != "" && ev.Schema != Schema {
 		return eventError("schema", "is not the supported version")
 	}
+
 	if err := checkToken("event_id", ev.EventID, maxTokenLen, false); err != nil {
 		return err
 	}
+
 	if ev.OccurredAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, ev.OccurredAt)
 		if err != nil {
 			return eventError("occurred_at", "is not an RFC3339 timestamp")
 		}
+
 		if t.Year() < minEventYear || t.Year() > 9999 {
 			return eventError("occurred_at", "is outside the supported years")
 		}
 	}
+
 	for _, field := range []struct {
 		name  string
 		value string
@@ -104,28 +109,36 @@ func ValidateEvent(ev Event) error {
 			return err
 		}
 	}
+
 	if err := checkEnum("source", ev.Source, Sources); err != nil {
 		return err
 	}
+
 	if err := checkToken("action", ev.Action, maxActionLen, true); err != nil {
 		return err
 	}
+
 	if err := checkEnum("outcome", ev.Outcome, Outcomes); err != nil {
 		return err
 	}
+
 	if ev.DurationMS < 0 || ev.DurationMS > maxDurationMS {
 		return eventError("duration_ms", "is out of range")
 	}
+
 	if err := validateActor(ev); err != nil {
 		return err
 	}
+
 	raw, err := json.Marshal(ev)
 	if err != nil {
 		return eventError("event", "cannot be encoded")
 	}
+
 	if len(raw)+1 > maxEventBytes {
 		return eventError("event", "is too large")
 	}
+
 	return nil
 }
 
@@ -135,12 +148,15 @@ func validateActor(ev Event) error {
 			return err
 		}
 	}
+
 	if err := checkToken("actor_label", ev.ActorLabel, maxTokenLen, false); err != nil {
 		return err
 	}
+
 	if ev.ActorLabel != "" && ev.ActorKind == "" {
 		return eventError("actor_label", "needs an actor_kind")
 	}
+
 	if ev.ActorVerified {
 		switch ev.ActorKind {
 		case ActorTimer, ActorSystem:
@@ -148,6 +164,7 @@ func validateActor(ev Event) error {
 			return eventError("actor_verified", "cannot be claimed for an operator")
 		}
 	}
+
 	return nil
 }
 
@@ -167,7 +184,9 @@ func ValidateQueryAt(q Query, at time.Time) error {
 	if at.IsZero() || at.Year() < minEventYear || at.Year() > 9999 {
 		return errors.New("activity: invalid query reference time")
 	}
+
 	_, err := normalizeQuery(q, at.UTC())
+
 	return err
 }
 
@@ -200,9 +219,11 @@ func normalizeQuery(q Query, now time.Time) (normalizedQuery, error) {
 			return nq, errInvalidQuery
 		}
 	}
+
 	if q.Outcome != "" && !contains(Outcomes, q.Outcome) {
 		return nq, errInvalidQuery
 	}
+
 	switch {
 	case q.Limit < 0:
 		return nq, errQueryOutOfRange
@@ -213,35 +234,44 @@ func normalizeQuery(q Query, now time.Time) (normalizedQuery, error) {
 	default:
 		nq.limit = q.Limit
 	}
+
 	if q.Since != "" {
 		t, err := parseQueryBound(q.Since, now)
 		if err != nil {
 			return nq, errInvalidQuery
 		}
+
 		nq.since = t
 	}
+
 	if q.Until != "" {
 		t, err := parseQueryBound(q.Until, now)
 		if err != nil {
 			return nq, errInvalidQuery
 		}
+
 		nq.until = t
 	}
+
 	if q.Cursor == "" && !nq.since.IsZero() && !nq.until.IsZero() && !nq.since.Before(nq.until) {
 		return nq, errInvalidQuery
 	}
+
 	if q.Cursor == "" {
 		return nq, nil
 	}
+
 	return normalizeCursorQuery(nq)
 }
 
 func normalizeCursorQuery(nq normalizedQuery) (normalizedQuery, error) {
 	q := nq.filter
+
 	cur, err := decodeCursor(q.Cursor)
 	if err != nil {
 		return nq, err
 	}
+
 	if cur.SinceRaw != q.Since || cur.UntilRaw != q.Until ||
 		cur.OperationID != q.OperationID || cur.RequestID != q.RequestID ||
 		cur.JobID != q.JobID || cur.Database != q.Database ||
@@ -249,7 +279,9 @@ func normalizeCursorQuery(nq normalizedQuery) (normalizedQuery, error) {
 		cur.Limit != nq.limit {
 		return nq, errCursorMismatch
 	}
+
 	nq.cur = &cur
+
 	nq.since, nq.until = time.Time{}, time.Time{}
 	if cur.SinceAt != "" {
 		nq.since, err = parseStoredTime(cur.SinceAt)
@@ -257,15 +289,18 @@ func normalizeCursorQuery(nq normalizedQuery) (normalizedQuery, error) {
 			return nq, errInvalidCursor
 		}
 	}
+
 	if cur.UntilAt != "" {
 		nq.until, err = parseStoredTime(cur.UntilAt)
 		if err != nil {
 			return nq, errInvalidCursor
 		}
 	}
+
 	if !nq.since.IsZero() && !nq.until.IsZero() && !nq.since.Before(nq.until) {
 		return nq, errInvalidCursor
 	}
+
 	return nq, nil
 }
 
@@ -276,12 +311,15 @@ func parseQueryBound(value string, now time.Time) (time.Time, error) {
 		if d <= 0 || d > maxQueryLookback {
 			return time.Time{}, errInvalidQuery
 		}
+
 		return now.Add(-d).UTC(), nil
 	}
+
 	t, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil || t.Year() < minEventYear || t.Year() > 9999 {
 		return time.Time{}, errInvalidQuery
 	}
+
 	return t.UTC(), nil
 }
 
@@ -291,6 +329,7 @@ func parseStoredTime(value string) (time.Time, error) {
 	if err != nil || t.Year() < minEventYear || t.Year() > 9999 {
 		return time.Time{}, errInvalidCursor
 	}
+
 	return t.UTC(), nil
 }
 
@@ -304,10 +343,12 @@ func normalizeEventTime(value string, now time.Time) (string, error) {
 	if value == "" {
 		return formatTime(now), nil
 	}
+
 	t, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil || t.Year() < minEventYear || t.Year() > 9999 {
 		return "", errInvalidEvent
 	}
+
 	return formatTime(t), nil
 }
 
@@ -317,6 +358,7 @@ func validateStoredEvent(ev Event) error {
 	if err := ValidateEvent(ev); err != nil {
 		return err
 	}
+
 	if ev.Schema != Schema || ev.EventID == "" || ev.OccurredAt == "" || ev.Sequence == 0 {
 		return errMalformedEvent
 	}
@@ -325,6 +367,7 @@ func validateStoredEvent(ev Event) error {
 	if ev.Sequence == ^uint64(0) {
 		return errMalformedEvent
 	}
+
 	return nil
 }
 
@@ -335,9 +378,11 @@ func checkOccurrenceSkew(occurred string, now time.Time) error {
 	if err != nil {
 		return eventError("occurred_at", "is not an RFC3339 timestamp")
 	}
+
 	if t.After(now.Add(maxFutureSkew)) {
 		return eventError("occurred_at", "is in the future")
 	}
+
 	return nil
 }
 
@@ -361,6 +406,7 @@ func sanitizeEvent(ev Event) Event {
 	ev.ActorKind = redactField(ev.ActorKind)
 	ev.ActorLabel = redactField(ev.ActorLabel)
 	ev.NodeVersion = redactField(ev.NodeVersion)
+
 	return ev
 }
 
@@ -368,9 +414,11 @@ func redactField(value string) string {
 	if value == "" {
 		return ""
 	}
+
 	if redacted := redactor.Redact(value); redacted != value {
 		return ""
 	}
+
 	return value
 }
 
@@ -380,18 +428,23 @@ func checkToken(field, value string, max int, required bool) error {
 		if required {
 			return eventError(field, "is required")
 		}
+
 		return nil
 	}
+
 	if len(value) > max {
 		return eventError(field, "is too long")
 	}
+
 	pattern := tokenPattern
 	if field == "database" {
 		pattern = databasePattern
 	}
+
 	if !pattern.MatchString(value) || strings.Contains(value, "://") {
 		return eventError(field, "is not an allowlisted identifier")
 	}
+
 	return nil
 }
 
@@ -400,16 +453,12 @@ func checkEnum(field, value string, allowed []string) error {
 	if !contains(allowed, value) {
 		return eventError(field, "is not an allowed value")
 	}
+
 	return nil
 }
 
 func contains(allowed []string, value string) bool {
-	for _, item := range allowed {
-		if item == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowed, value)
 }
 
 func eventError(field, reason string) error {

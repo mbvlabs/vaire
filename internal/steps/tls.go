@@ -51,12 +51,15 @@ func (tlsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) 
 	if !fileIs(NginxConfPath, string(nginxConf(cfg)), 0o644) {
 		return incomplete(NginxConfPath + " differs"), nil
 	}
+
 	if !fileIs(SystemdSystemDir+"/"+CertsServiceName, string(render.CertsService()), 0o644) {
 		return incomplete(CertsServiceName + " differs"), nil
 	}
+
 	if !serviceActive(ctx, NginxService) {
 		return incomplete("nginx is not active"), nil
 	}
+
 	if _, err := os.Stat(TLSCertPath); err != nil {
 		return incomplete(TLSCertPath + " is missing"), nil
 	}
@@ -75,6 +78,7 @@ func (tlsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) 
 			return incomplete(fmt.Sprintf("%s isn't %s:%s %04o", f.path, f.owner, f.group, f.mode)), nil
 		}
 	}
+
 	return complete(), nil
 }
 
@@ -90,13 +94,17 @@ func (s tlsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 	if err := rt.Shell.Run(ctx, s.ID(), Script("tls"), env, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := writeFile(NginxConfPath, string(nginxConf(cfg)), 0o644); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := writeFile(SystemdSystemDir+"/"+CertsServiceName, string(render.CertsService()), 0o644); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	env["PHASE"] = "start"
 	err := rt.Shell.Run(ctx, s.ID(), Script("tls"), env, report)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }

@@ -11,6 +11,7 @@ import (
 
 func TestReadTarValidatesManifestEntries(t *testing.T) {
 	file := NewFile(ClusterPath, "root", "root", 0o600, []byte("cluster"))
+
 	disallowed := NewFile("/etc/shadow", "root", "root", 0o600, []byte("secret"))
 	for _, tc := range []struct {
 		name    string
@@ -35,8 +36,10 @@ func TestReadTarValidatesManifestEntries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			entries := make([][2]string, 0, 1+len(tc.entries))
 			entries = append(entries, [2]string{ManifestName, string(manifest)})
+
 			entries = append(entries, tc.entries...)
 			if _, err := ReadTar(tarOf(t, entries...)); !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("ReadTar error = %v, want ErrCorrupt", err)
@@ -47,6 +50,7 @@ func TestReadTarValidatesManifestEntries(t *testing.T) {
 
 func TestReadTarRejectsOversizedEntryBeforeReadingPayload(t *testing.T) {
 	var buf bytes.Buffer
+
 	writer := tar.NewWriter(&buf)
 	if err := writer.WriteHeader(&tar.Header{Name: "etc/vaire/cluster.toml", Typeflag: tar.TypeReg, Size: MaxFileSize + 1}); err != nil {
 		t.Fatal(err)

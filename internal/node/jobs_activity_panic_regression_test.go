@@ -32,14 +32,17 @@ func TestRunJobPanicAfterActivityStartRecordsUnknown(t *testing.T) {
 
 func runJobPanicRegression(t *testing.T, job string) {
 	t.Helper()
+
 	store := &panicActivityStore{}
 	nowCalls := 0
 	oldFactory, oldNodeStat, oldUID := activityRecorderFactory, jobNodeStat, jobEffectiveUID
 	oldLoad, oldSettle := jobLoadCluster, settleJobRecord
+
 	t.Cleanup(func() {
 		activityRecorderFactory, jobNodeStat, jobEffectiveUID = oldFactory, oldNodeStat, oldUID
 		jobLoadCluster, settleJobRecord = oldLoad, oldSettle
 	})
+
 	activityRecorderFactory = func() *activityRecorder {
 		return &activityRecorder{
 			store: store, storeOK: true,
@@ -48,6 +51,7 @@ func runJobPanicRegression(t *testing.T, job string) {
 				if nowCalls == 1 {
 					panic("injected activity start panic")
 				}
+
 				return time.Now()
 			},
 		}
@@ -63,13 +67,16 @@ func runJobPanicRegression(t *testing.T, job string) {
 		if r := recover(); r == nil {
 			t.Fatal("the injected panic was swallowed")
 		}
+
 		if len(store.events) == 0 {
 			t.Fatal("no terminal activity event was recorded")
 		}
+
 		last := store.events[len(store.events)-1]
 		if last.Outcome != activity.OutcomeUnknown || last.ReasonCode != "panic" {
 			t.Fatalf("terminal event = %+v, want unknown/panic", last)
 		}
 	}()
+
 	_, _, _ = RunJob(context.Background(), job, JobOptions{DB: "app"}, nil)
 }

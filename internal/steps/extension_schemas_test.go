@@ -13,12 +13,15 @@ import (
 
 func schemaTestReason(t *testing.T, err error) string {
 	t.Helper()
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("error is not typed: %T %v", err, err)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
+
 	return reason
 }
 
@@ -27,24 +30,30 @@ func TestValidateInstalledExtensionSchemas(t *testing.T) {
 	if err := ValidateInstalledExtensionSchemas("app", []catalog.Extension{partman}, map[string]string{"pg_partman": "partman"}); err != nil {
 		t.Fatalf("matching schema refused: %v", err)
 	}
+
 	if err := ValidateInstalledExtensionSchemas("app", []catalog.Extension{partman}, map[string]string{}); err != nil {
 		t.Fatalf("fresh extension refused: %v", err)
 	}
+
 	err := ValidateInstalledExtensionSchemas("app", []catalog.Extension{partman}, map[string]string{"pg_partman": "public"})
 	if err == nil || schemaTestReason(t, err) != "extension_schema_mismatch" {
 		t.Fatalf("mismatch = %v", err)
 	}
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("mismatch error is not typed: %T %v", err, err)
 	}
+
 	details, ok := cliErr.Details.(map[string]any)
 	if !ok {
 		t.Fatalf("mismatch details = %#v", cliErr.Details)
 	}
+
 	if details["actual_schema"] != "public" || details["requested_schema"] != "partman" {
 		t.Fatalf("mismatch details = %+v", details)
 	}
+
 	err = ValidateInstalledExtensionSchemas("app", []catalog.Extension{partman}, map[string]string{"pg_partman": ""})
 	if err == nil || schemaTestReason(t, err) != "extension_schema_unknown" {
 		t.Fatalf("unknown installed namespace = %v", err)
@@ -72,6 +81,7 @@ func explicitSchemaConfig(schema string) config.Cluster {
 	cfg.Extensions["custom"] = config.ExtensionDefinition{
 		Source: catalog.SourcePreinstalled, ExtName: "custom_ext", Schema: schema,
 	}
+
 	return cfg
 }
 
@@ -102,12 +112,14 @@ func TestPlanFollowerRuntimeRefusesInstalledSchemaMismatch(t *testing.T) {
 	}
 
 	schemas["custom_ext"] = ""
+
 	_, err = PlanFollowerRuntime(context.Background(), cfg, follower, FollowerRuntimeRequest{Class: FollowerRuntimeLive})
 	if err == nil || schemaTestReason(t, err) != "extension_schema_unknown" {
 		t.Fatalf("follower schema unknown = %v", err)
 	}
 
 	schemas["custom_ext"] = "custom"
+
 	if _, err := PlanFollowerRuntime(context.Background(), cfg, follower, FollowerRuntimeRequest{Class: FollowerRuntimeLive}); err != nil {
 		t.Fatalf("matching follower schema refused: %v", err)
 	}
@@ -123,21 +135,25 @@ func TestPostgresRolesApplyRefusesInstalledSchemaMismatchBeforeSQL(t *testing.T)
 	if err == nil || schemaTestReason(t, err) != "extension_schema_mismatch" {
 		t.Fatalf("installed schema mismatch = %v", err)
 	}
+
 	if len(fake.execs) != 0 {
 		t.Fatalf("roles SQL ran before the schema refusal: %+v", fake.execs)
 	}
 
 	fake.schemas["custom_ext"] = "custom"
+
 	if _, err := (postgresRoles{}).Instance("app").Apply(context.Background(), cfg, engine.Runtime{}, nil); err != nil {
 		t.Fatalf("matching installed schema refused: %v", err)
 	}
 
 	fake.execs = nil
 	delete(fake.schemas, "custom_ext")
+
 	_, err = (postgresRoles{}).Instance("app").Apply(context.Background(), cfg, engine.Runtime{}, nil)
 	if err == nil || schemaTestReason(t, err) != "extension_schema_unknown" {
 		t.Fatalf("unknown installed schema = %v", err)
 	}
+
 	if len(fake.execs) != 0 {
 		t.Fatalf("roles SQL ran with an unknown installed schema: %+v", fake.execs)
 	}
@@ -152,6 +168,7 @@ func TestPostgresRolesApplyAllowsFreshExplicitSchema(t *testing.T) {
 	if _, err := (postgresRoles{}).Instance("app").Apply(context.Background(), cfg, engine.Runtime{}, nil); err != nil {
 		t.Fatalf("fresh explicit schema refused: %v", err)
 	}
+
 	if !containsString(fake.extensions, "custom_ext") {
 		t.Fatalf("fresh explicit schema did not create SQL: %v", fake.extensions)
 	}

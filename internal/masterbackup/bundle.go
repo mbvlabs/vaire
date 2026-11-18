@@ -59,6 +59,7 @@ func (b Bundle) File(p string) (File, bool) {
 			return f, true
 		}
 	}
+
 	return File{}, false
 }
 
@@ -77,12 +78,16 @@ func Build(meta Meta, files []File) ([]byte, Manifest, error) {
 		Content:      ContentHash(files),
 		Files:        files,
 	}
+
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return nil, m, err
 	}
+
 	var buf bytes.Buffer
+
 	tw := tar.NewWriter(&buf)
+
 	write := func(name string, mode int64, data []byte) error {
 		hdr := &tar.Header{
 			Typeflag: tar.TypeReg,
@@ -95,23 +100,29 @@ func Build(meta Meta, files []File) ([]byte, Manifest, error) {
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
+
 		_, err := tw.Write(data)
+
 		return err
 	}
 	if err := write(ManifestName, 0o600, raw); err != nil {
 		return nil, m, err
 	}
+
 	for _, f := range files {
 		if !Allowed(f.Path) {
 			return nil, m, fmt.Errorf("%s is not part of the bundle", f.Path)
 		}
+
 		if err := write(strings.TrimPrefix(f.Path, "/"), int64(f.Mode), f.Data); err != nil {
 			return nil, m, err
 		}
 	}
+
 	if err := tw.Close(); err != nil {
 		return nil, m, err
 	}
+
 	return buf.Bytes(), m, nil
 }
 
@@ -121,17 +132,22 @@ func Seal(tarball []byte, recipient string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the recovery recipient is invalid: %w", err)
 	}
+
 	var out bytes.Buffer
+
 	w, err := age.Encrypt(&out, rcpt)
 	if err != nil {
 		return nil, err
 	}
+
 	if _, err := w.Write(tarball); err != nil {
 		return nil, err
 	}
+
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
+
 	return out.Bytes(), nil
 }
 
@@ -144,17 +160,21 @@ func Open(ciphertext []byte, identity string) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, fmt.Errorf("the recovery identity is invalid: %w", err)
 	}
+
 	r, err := age.Decrypt(bytes.NewReader(ciphertext), id)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
+
 	raw, err := io.ReadAll(io.LimitReader(r, maxBundleSize+1))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
+
 	if len(raw) > maxBundleSize {
 		return Bundle{}, fmt.Errorf("%w: larger than %d bytes", ErrCorrupt, maxBundleSize)
 	}
+
 	return ReadTar(raw)
 }
 
@@ -163,49 +183,66 @@ func Open(ciphertext []byte, identity string) (Bundle, error) {
 // manifest's size and sha256, and nothing missing.
 func ReadTar(raw []byte) (Bundle, error) {
 	tr := tar.NewReader(bytes.NewReader(raw))
+
 	var b Bundle
+
 	first := true
 	byPath := map[string]File{}
+
 	var got []File
+
 	for {
 		hdr, data, err := readTarEntry(tr)
 		if errors.Is(err, io.EOF) {
 			break
 		}
+
 		if err != nil {
 			return Bundle{}, err
 		}
+
 		if first {
 			b.Manifest, byPath, err = readTarManifest(hdr.Name, data)
 			if err != nil {
 				return Bundle{}, err
 			}
+
 			first = false
+
 			continue
 		}
+
 		p := "/" + hdr.Name
+
 		want, ok := byPath[p]
 		if !ok || !Allowed(p) {
 			return Bundle{}, fmt.Errorf("%w: %s is not in the manifest", ErrCorrupt, hdr.Name)
 		}
+
 		sum := sha256.Sum256(data)
 		if int64(len(data)) != want.Size || hex.EncodeToString(sum[:]) != want.SHA256 {
 			return Bundle{}, fmt.Errorf("%w: %s does not match its manifest entry", ErrCorrupt, p)
 		}
+
 		want.Data = data
 		got = append(got, want)
+
 		delete(byPath, p)
 	}
+
 	if first {
 		return Bundle{}, fmt.Errorf("%w: the tar is empty", ErrCorrupt)
 	}
+
 	for p := range byPath {
 		return Bundle{}, fmt.Errorf("%w: %s is in the manifest but not in the tar", ErrCorrupt, p)
 	}
+
 	b.Files = got
 	if ContentHash(got) != b.Manifest.Content {
 		return Bundle{}, fmt.Errorf("%w: the content hash does not match", ErrCorrupt)
 	}
+
 	return b, nil
 }
 
@@ -214,16 +251,20 @@ func readTarEntry(tr *tar.Reader) (*tar.Header, []byte, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
+
 	if hdr.Typeflag != tar.TypeReg {
 		return nil, nil, fmt.Errorf("%w: %s is not a regular file", ErrCorrupt, hdr.Name)
 	}
+
 	if hdr.Size > MaxFileSize && hdr.Name != ManifestName || hdr.Size > maxBundleSize {
 		return nil, nil, fmt.Errorf("%w: %s is too large", ErrCorrupt, hdr.Name)
 	}
+
 	data, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
+
 	return hdr, data, nil
 }
 
@@ -232,22 +273,28 @@ func readTarManifest(name string, data []byte) (Manifest, map[string]File, error
 	if name != ManifestName {
 		return manifest, nil, fmt.Errorf("%w: the first entry is %s, not %s", ErrCorrupt, name, ManifestName)
 	}
+
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return manifest, nil, fmt.Errorf("%w: manifest.json: %w", ErrCorrupt, err)
 	}
+
 	if manifest.Schema != Schema {
 		return manifest, nil, fmt.Errorf("%w: schema %q, want %q", ErrCorrupt, manifest.Schema, Schema)
 	}
+
 	byPath := make(map[string]File, len(manifest.Files))
 	for _, f := range manifest.Files {
 		if !Allowed(f.Path) {
 			return manifest, nil, fmt.Errorf("%w: the manifest names %s, which a bundle never holds", ErrCorrupt, f.Path)
 		}
+
 		if _, dup := byPath[f.Path]; dup {
 			return manifest, nil, fmt.Errorf("%w: the manifest names %s twice", ErrCorrupt, f.Path)
 		}
+
 		byPath[f.Path] = f
 	}
+
 	return manifest, byPath, nil
 }
 

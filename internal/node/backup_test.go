@@ -12,6 +12,7 @@ import (
 func TestRestoreWindow(t *testing.T) {
 	one := backup.Info{Sets: []backup.Set{{Label: "a", Stop: "2026-10-14T10:21:20Z"}}}
 	two := backup.Info{Sets: []backup.Set{{Label: "a", Stop: "2026-10-14T08:00:00Z"}, {Label: "b", Stop: "2026-10-14T08:20:14Z"}}}
+
 	cases := []struct {
 		name     string
 		info     backup.Info
@@ -36,16 +37,20 @@ func TestFirstBackupWarning(t *testing.T) {
 	missing := output.NewError(output.CodeInputRequired, "the bucket keys or the cipher pass are not on the node and were not supplied",
 		output.ExitInput, "Run vaire backup setup, or vaire apply from a machine whose context has the recovery kit (vaire login from a current transfer bundle).")
 	stepErr := &output.CLIError{Code: output.CodeInputRequired, Message: "step pgbackrest-v1 failed: " + missing.Message, Hint: missing.Hint, Cause: missing}
+
 	w := firstBackupWarning("app", stepErr)
 	if w.Code != "first_backup_failed" {
 		t.Errorf("code = %q", w.Code)
 	}
+
 	if strings.Contains(w.Message, "run vaire apply to retry") {
 		t.Errorf("input_required: %q suggests a bare vaire apply", w.Message)
 	}
+
 	if !strings.Contains(w.Message, "recovery kit") {
 		t.Errorf("input_required: %q lacks the step's hint", w.Message)
 	}
+
 	script := &output.CLIError{Code: output.CodeStepFailed, Message: "step pgbackrest-v1 failed: exit status 1", Hint: "Fix the cause and re-run apply. It resumes at this step.", Cause: errors.New("exit status 1")}
 	if w := firstBackupWarning("app", script); !strings.HasSuffix(w.Message, "; run vaire apply to retry") {
 		t.Errorf("script failure: %q, want the vaire apply retry", w.Message)

@@ -20,6 +20,7 @@ func ownerMatches(info fs.FileInfo) bool {
 	if !ok {
 		return false
 	}
+
 	return int(st.Uid) == os.Geteuid()
 }
 

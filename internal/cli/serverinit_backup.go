@@ -33,6 +33,7 @@ func answersBackupCreds(raw []byte) (keyID, secret string) {
 	if toml.Unmarshal(raw, &wrap) != nil {
 		return "", ""
 	}
+
 	return wrap.Backup.Credentials.AccessKeyID, wrap.Backup.Credentials.SecretAccessKey
 }
 
@@ -42,26 +43,34 @@ func answersBackupCreds(raw []byte) (keyID, secret string) {
 func (r *initRun) collectBackups(cfg *config.Cluster, answersRaw []byte) error {
 	cmd := r.cmd
 	s := settingsFromConfig(*cfg, nil)
+
 	s.KeyID, s.Secret = answersBackupCreds(answersRaw)
 	if err := applyBackupFlags(cmd, initBackupFlags, &s); err != nil {
 		return err
 	}
+
 	if err := collectBackupAnswers(cmd, &s); err != nil {
 		return err
 	}
+
 	if s.Provider == "" {
 		return nil
 	}
+
 	fillPreset(&s)
+
 	if err := requireBackupSettings(initBackupFlags, s, "server init"); err != nil {
 		return err
 	}
+
 	for key, value := range s.configKeys() {
 		if err := cfg.Set(key, value); err != nil {
 			return err
 		}
 	}
+
 	r.backup = &s
+
 	return nil
 }
 
@@ -72,6 +81,7 @@ func collectBackupAnswers(cmd *cobra.Command, s *backupSettings) error {
 		if MustNotPrompt(cmd) {
 			return nil
 		}
+
 		choice, err := chooseOption(cmd, "Backups", [][2]string{
 			{"Configure an S3-compatible bucket now", "configure"},
 			{"Skip for now (vaire backup setup later)", "skip"},
@@ -79,14 +89,18 @@ func collectBackupAnswers(cmd *cobra.Command, s *backupSettings) error {
 		if err != nil {
 			return err
 		}
+
 		if choice == "skip" {
 			return nil
 		}
+
 		return askBackupSettings(s)
 	}
+
 	if !MustNotPrompt(cmd) && (s.Bucket == "" || s.KeyID == "" || s.Secret == "") {
 		return askBackupSettings(s)
 	}
+
 	return nil
 }
 
@@ -96,10 +110,12 @@ func (r *initRun) backupSettings() backupSettings {
 	if r.backup != nil {
 		return *r.backup
 	}
+
 	s := settingsFromConfig(r.cfg, r.sec.Backup)
 	if r.sec.Backup != nil {
 		s.KeyID, s.Secret = r.sec.Backup.AccessKeyID, r.sec.Backup.SecretAccessKey
 	}
+
 	return s
 }
 
@@ -112,31 +128,40 @@ func (r *initRun) ensureBackupKit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	if created {
 		r.sec.Backup = kit
 		registerPending(r.sec)
+
 		if err := workspaces.SaveSecrets(r.name, r.sec); err != nil {
 			return err
 		}
 	}
+
 	if !r.cfg.BackupConfigured() || r.prog.Done(phaseBackups) {
 		return nil
 	}
+
 	s := r.backupSettings()
 	if s.Secret == "" {
 		return output.NewError(output.CodeInputRequired, "server init needs the bucket's secret key", output.ExitInput,
 			"Pass --backup-secret-stdin or --backup-secret-file.").WithDetails(map[string]any{"flag": "--backup-secret-file"})
 	}
+
 	r.p.note("checking the bucket " + s.Bucket + " at " + s.Endpoint)
+
 	if err := r.p.during("checking the bucket "+s.Bucket, func() error { return backup.Probe(ctx, s.target(), r.initPrefixOwner()) }); err != nil {
 		return err
 	}
+
 	kit, _, err = prepareKit(r.sec.Backup, s, false)
 	if err != nil {
 		return err
 	}
+
 	r.sec.Backup = kit
 	registerPending(r.sec)
+
 	return workspaces.SaveSecrets(r.name, r.sec)
 }
 
@@ -156,8 +181,10 @@ func (r *initRun) nodeConfig() config.Cluster {
 		// A rebuild's cluster.toml already has [backup].
 		return r.cfg
 	}
+
 	cfg := r.cfg
 	cfg.Backup = config.DefaultCluster().Backup
+
 	return cfg
 }
 
@@ -167,15 +194,19 @@ func (r *initRun) configureInitBackups(ctx context.Context, caller remote.Caller
 	if !r.cfg.BackupConfigured() || r.prog.Done(phaseBackups) {
 		return nil
 	}
+
 	started, completed := initBackupPhaseText(r.backupSettings().Bucket, len(r.cfg.Clusters))
 	r.p.phase("init.backups", "started", started)
+
 	_, warnings, err := configureBackups(ctx, caller, r.p, r.backupSettings(), r.sec.Backup)
 	if err != nil {
 		return err
 	}
+
 	r.warnings = append(r.warnings, warnings...)
 	r.p.phase("init.backups", "completed", completed)
 	r.backupsDone = true
+
 	return r.mark(phaseBackups)
 }
 
@@ -184,11 +215,14 @@ func (r *initRun) backupSummary() string {
 	if !r.cfg.BackupConfigured() {
 		return "none off the server: run vaire backup setup"
 	}
+
 	s := r.backupSettings()
+
 	state := "first full backup taken"
 	if len(r.cfg.Clusters) == 0 {
 		state = "each database's first full backup runs at db create"
 	}
+
 	return strings.Join([]string{s.Provider, s.Bucket + "/" + s.Prefix, state}, "  ")
 }
 
@@ -201,6 +235,7 @@ func initBackupPhaseText(bucket string, databases int) (started, completed strin
 		return "store the bucket keys and cipher pass for " + bucket + " on the server",
 			"backups configured; each database's first full backup runs at db create"
 	}
+
 	return "turn on WAL archiving and take the first full backup to " + bucket, "WAL archiving on, first full backup taken"
 }
 
@@ -215,13 +250,17 @@ func (r *initRun) firstMasterBundle(ctx context.Context, caller remote.Caller) {
 	if r.cfg.BackupConfigured() {
 		detail = "upload the first master bundle to " + r.backupSettings().Bucket
 	}
+
 	r.p.phase("init.master-backup", "started", detail)
+
 	res, err := masterBundleNow(ctx, r.p, caller)
 	if w := firstBundleWarning(r.cfg.BackupConfigured(), r.backupSettings().Bucket, res, err); w != nil {
 		r.warnings = append(r.warnings, *w)
 		r.p.phase("init.master-backup", "failed", w.Message)
+
 		return
 	}
+
 	r.p.phase("init.master-backup", "completed", res.Name)
 }
 
@@ -229,10 +268,12 @@ func (r *initRun) firstMasterBundle(ctx context.Context, caller remote.Caller) {
 // changed, and with a bucket make sure the bucket holds it.
 func masterBundleNow(ctx context.Context, p *progress, caller remote.Caller) (node.MasterBackupResult, error) {
 	var res node.MasterBackupResult
+
 	reply, err := p.call(ctx, caller, "master-backup.now", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return res, err
 	}
+
 	return res, reply.Decode(&res)
 }
 
@@ -240,6 +281,7 @@ func masterBundleNow(ctx context.Context, p *progress, caller remote.Caller) (no
 // or, with a bucket, didn't reach it; nil when it is where it belongs.
 func firstBundleWarning(bucket bool, name string, res node.MasterBackupResult, err error) *output.Warning {
 	const noCopy = ". The bucket has no copy of the server's current control state until vaire server backup now succeeds"
+
 	switch {
 	case err != nil && bucket:
 		return &output.Warning{Code: "master_backup_failed", Message: "the master bundle didn't reach the bucket " + name + ": " + err.Error() + noCopy}
@@ -248,5 +290,6 @@ func firstBundleWarning(bucket bool, name string, res node.MasterBackupResult, e
 	case bucket && !res.Uploaded && !res.Verified:
 		return &output.Warning{Code: "master_backup_failed", Message: "master bundle " + res.Name + " isn't confirmed in the bucket " + name + noCopy}
 	}
+
 	return nil
 }

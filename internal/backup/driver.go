@@ -10,6 +10,7 @@ package backup
 
 import (
 	"context"
+	"slices"
 	"time"
 )
 
@@ -87,6 +88,7 @@ func (i Info) HasFull() bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -97,16 +99,18 @@ func (i Info) Oldest() (Set, bool) {
 			return s, true
 		}
 	}
+
 	return Set{}, false
 }
 
 // Latest returns the newest complete set.
 func (i Info) Latest() (Set, bool) {
-	for n := len(i.Sets) - 1; n >= 0; n-- {
-		if !i.Sets[n].Error {
-			return i.Sets[n], true
+	for _, v := range slices.Backward(i.Sets) {
+		if !v.Error {
+			return v, true
 		}
 	}
+
 	return Set{}, false
 }
 
@@ -117,6 +121,7 @@ func (i Info) Find(label string) (Set, bool) {
 			return s, true
 		}
 	}
+
 	return Set{}, false
 }
 
@@ -155,11 +160,14 @@ func (a ArchiveStatus) UpToDate() bool {
 	if a.LastArchivedWAL == "" || a.PendingWAL == nil || *a.PendingWAL > 0 {
 		return false
 	}
+
 	if a.FailedCount == 0 || a.LastFailedTime == "" {
 		return true
 	}
+
 	failed, errF := time.Parse(time.RFC3339, a.LastFailedTime)
 	archived, errA := time.Parse(time.RFC3339, a.LastArchivedTime)
+
 	return errF == nil && errA == nil && !failed.After(archived)
 }
 

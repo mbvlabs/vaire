@@ -18,16 +18,19 @@ func TestErrorBlockWrapsToWidth(t *testing.T) {
 	}
 	for _, width := range []int{40, 60, 80} {
 		out := block.Render(width)
+
 		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if w := lipgloss.Width(line); w > width {
 				t.Fatalf("width %d: line is %d columns wide: %q", width, w, ansi.Strip(line))
 			}
 		}
+
 		first, last := ansi.Strip(lines[0]), ansi.Strip(lines[len(lines)-1])
 		if !strings.HasPrefix(first, "╭") || !strings.HasPrefix(last, "╰") {
 			t.Fatalf("width %d: border missing:\n%s", width, ansi.Strip(out))
 		}
+
 		plain := strings.Join(strings.Fields(ansi.Strip(out)), " ")
 		if !strings.Contains(plain, "precondition_failed") {
 			t.Fatalf("width %d: code lost:\n%s", width, ansi.Strip(out))

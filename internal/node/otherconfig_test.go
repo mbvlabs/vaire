@@ -26,6 +26,7 @@ func (f fakeConfig) ID() string {
 	if f.cluster == "" {
 		return "postgres-config-v1"
 	}
+
 	return engine.InstanceID("postgres-config-v1", f.cluster)
 }
 func (f fakeConfig) Describe(config.Cluster) string { return "fake config" }
@@ -40,6 +41,7 @@ func (f fakeConfig) Apply(context.Context, config.Cluster, engine.Runtime, engin
 	if f.restart[f.cluster] {
 		return engine.ApplyResult{Restart: engine.RestartRestart}, nil
 	}
+
 	return engine.ApplyResult{Restart: engine.RestartReload}, nil
 }
 func (f fakeConfig) Instance(cluster string) engine.Step {
@@ -57,7 +59,9 @@ func (r noRestarts) Restart(_ context.Context, cluster string) (time.Duration, e
 func TestOtherConfigsCreateAndDrop(t *testing.T) {
 	ctx := context.Background()
 	journal := filepath.Join(t.TempDir(), "journal.json")
+
 	var applied []string
+
 	catalog := []engine.Step{fakeConfig{applied: &applied, restart: map[string]bool{"other": true}}}
 	opts := engine.Options{JournalPath: journal, Restarter: noRestarts{t}}
 	rt := engine.Runtime{}
@@ -68,16 +72,20 @@ func TestOtherConfigsCreateAndDrop(t *testing.T) {
 	if _, _, err := engine.Apply(ctx, catalog, before, rt, opts); err != nil {
 		t.Fatal(err)
 	}
+
 	applied = nil
 
 	// db create big: the others' inputs change; pending and big don't count.
 	after := budgetCluster(config.ClusterSpec{Name: "app2"}, config.ClusterSpec{Name: "other"},
 		config.ClusterSpec{Name: "pending"}, config.ClusterSpec{Name: "big"})
+
 	others := otherConfigs(ctx, catalog, after, rt, "big", journal)
 	if want := []string{"postgres-config-v1@app2", "postgres-config-v1@other"}; !slices.Equal(others, want) {
 		t.Fatalf("others = %v, want %v", others, want)
 	}
+
 	warnings := applyOtherConfigs(ctx, catalog, after, rt, others, opts)
+
 	if want := []string{"app2", "other"}; !slices.Equal(applied, want) {
 		t.Errorf("applied %v, want %v", applied, want)
 	}
@@ -86,6 +94,7 @@ func TestOtherConfigsCreateAndDrop(t *testing.T) {
 	for _, w := range warnings {
 		pending = pending || (w.Code == "restart_pending" && strings.Contains(w.Message, "--confirm other/restart"))
 	}
+
 	if !pending {
 		t.Errorf("warnings %v lack restart_pending for other", warnings)
 	}
@@ -96,10 +105,13 @@ func TestOtherConfigsCreateAndDrop(t *testing.T) {
 
 	// db drop other: app2 changes again (and big, configured in between).
 	applied = nil
+
 	if _, _, err := engine.Apply(ctx, catalog, after, rt, engine.Options{JournalPath: journal, Only: []string{"postgres-config-v1@big"}, Restarter: noRestarts{t}}); err != nil {
 		t.Fatal(err)
 	}
+
 	dropped := budgetCluster(config.ClusterSpec{Name: "app2"}, config.ClusterSpec{Name: "pending"}, config.ClusterSpec{Name: "big"})
+
 	others = otherConfigs(ctx, catalog, dropped, rt, "", journal)
 	if want := []string{"postgres-config-v1@app2", "postgres-config-v1@big"}; !slices.Equal(others, want) {
 		t.Fatalf("others after drop = %v, want %v", others, want)
@@ -108,15 +120,18 @@ func TestOtherConfigsCreateAndDrop(t *testing.T) {
 
 func TestCreateRunsNumbering(t *testing.T) {
 	cfg := budgetCluster(config.ClusterSpec{Name: "app2"}, config.ClusterSpec{Name: "big"})
+
 	runs := createRuns(cfg, "big", []string{"postgres-config-v1@app2"})
 	if len(runs) != 6 {
 		t.Fatalf("runs = %d, want kernel, packages, big, poolers, metrics and app2's config (no backups)", len(runs))
 	}
+
 	if !slices.Equal(runs[0].Only, []string{"kernel-tuning-v1"}) || !slices.Equal(runs[1].Only, []string{"postgres-packages-v1"}) ||
 		runs[2].DB != "big" || !slices.Equal(runs[3].Only, []string{"pgbouncer-v1"}) ||
 		!slices.Equal(runs[4].Only, []string{"metrics-v1"}) || !slices.Equal(runs[5].Only, []string{"postgres-config-v1@app2"}) {
 		t.Errorf("runs = %+v", runs)
 	}
+
 	if got := dropRuns(budgetCluster(), nil); len(got) != 2 {
 		t.Errorf("dropping the last database: %d runs, want the timers and metrics", len(got))
 	}

@@ -13,26 +13,32 @@ import (
 
 func testRecoveryCursor(t *testing.T, stale string) (*recoveryLogCursor, string) {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "log")
 	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	c, err := newRecoveryLogCursor(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return c, path
 }
 
 func appendRecoveryLog(t *testing.T, path, text string) {
 	t.Helper()
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.WriteString(text); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +58,7 @@ func TestWaitRecoveryChecksDiagnosticsAfterSQL(t *testing.T) {
 		},
 	}
 	start := time.Now()
+
 	err := waitRecovery(context.Background(), "target", "data", 5555, UntilOpen, TargetLatest, cursor, probes, func(string) {})
 	if !RetainRecoveryFailure(err) || time.Since(start) > recoveryPollBudget {
 		t.Fatalf("err=%v elapsed=%v", err, time.Since(start))
@@ -60,21 +67,26 @@ func TestWaitRecoveryChecksDiagnosticsAfterSQL(t *testing.T) {
 
 func TestWaitRecoveryWholePollBudgetAndSplitDetail(t *testing.T) {
 	cursor, path := testRecoveryCursor(t, "")
+
 	warning, detail, ok := strings.Cut(mismatchLog, "\n")
 	if !ok {
 		t.Fatal("missing detail")
 	}
+
 	appendRecoveryLog(t, path, warning+"\n")
+
 	start := time.Now()
 	err := waitRecovery(context.Background(), "target", "data", 5555, UntilOpen, TargetLatest, cursor, recoveryWaitProbes{
 		service: func(ctx context.Context, _ string) recoveryServiceState {
 			appendRecoveryLog(t, path, detail)
 			<-ctx.Done()
+
 			return serviceUnknown
 		},
 		sql:     func(context.Context, int) recoveryObservation { return recoveryUnknown },
 		process: func(context.Context, string) recoveryObservation { return recoveryUnknown },
 	}, func(string) {})
+
 	elapsed := time.Since(start)
 	if !RetainRecoveryFailure(err) || elapsed > 4*time.Second {
 		t.Fatalf("split detail: err=%v elapsed=%v", err, elapsed)
@@ -101,8 +113,10 @@ func TestWaitRecoveryTargetStates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cursor, path := testRecoveryCursor(t, "")
 			appendRecoveryLog(t, path, tc.log)
+
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
+
 			err := waitRecovery(ctx, "target", "data", 5555, tc.until, tc.kind, cursor, recoveryWaitProbes{
 				service: func(context.Context, string) recoveryServiceState { return serviceActive },
 				sql:     func(context.Context, int) recoveryObservation { return tc.observation },
@@ -132,13 +146,16 @@ func TestWaitRecoveryStartupCompletesBeforeReadiness(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cursor, path := testRecoveryCursor(t, "")
 			appendRecoveryLog(t, path, tc.log)
+
 			polls := 0
+
 			err := waitRecovery(context.Background(), "target", "data", 5555, tc.until, tc.kind, cursor, recoveryWaitProbes{
 				service: func(context.Context, string) recoveryServiceState {
 					polls++
 					if polls == 1 {
 						return serviceStarting
 					}
+
 					return serviceActive
 				},
 				sql:     func(context.Context, int) recoveryObservation { return tc.observation },
@@ -165,11 +182,13 @@ func TestWaitRecoveryStartupFailureAndTimeout(t *testing.T) {
 				if call == 1 {
 					return serviceStarting
 				}
+
 				return serviceFailed
 			},
 			process: func(int) recoveryObservation { return recoveryRecovering },
 			check: func(t *testing.T, err error) {
 				t.Helper()
+
 				if err == nil || !strings.Contains(err.Error(), "stopped") || RetainRecoveryFailure(err) {
 					t.Fatalf("start failure: %v", err)
 				}
@@ -181,16 +200,19 @@ func TestWaitRecoveryStartupFailureAndTimeout(t *testing.T) {
 				if call == 1 {
 					return serviceStarting
 				}
+
 				return serviceUnknown
 			},
 			process: func(call int) recoveryObservation {
 				if call == 1 {
 					return recoveryRecovering
 				}
+
 				return recoveryStopped
 			},
 			check: func(t *testing.T, err error) {
 				t.Helper()
+
 				if err == nil || !strings.Contains(err.Error(), "stopped") || RetainRecoveryFailure(err) {
 					t.Fatalf("process fallback: %v", err)
 				}
@@ -203,6 +225,7 @@ func TestWaitRecoveryStartupFailureAndTimeout(t *testing.T) {
 			process: func(int) recoveryObservation { return recoveryRecovering },
 			check: func(t *testing.T, err error) {
 				t.Helper()
+
 				if !errors.Is(err, context.DeadlineExceeded) || RetainRecoveryFailure(err) {
 					t.Fatalf("activating timeout: %v", err)
 				}
@@ -213,12 +236,15 @@ func TestWaitRecoveryStartupFailureAndTimeout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cursor, path := testRecoveryCursor(t, "")
 			appendRecoveryLog(t, path, "123:LOG:  consistent recovery state reached\n")
+
 			ctx := context.Background()
+
 			cancel := func() {}
 			if tc.timeout != 0 {
 				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
 			}
 			defer cancel()
+
 			calls := 0
 			err := waitRecovery(ctx, "target", "data", 5555, UntilOpen, TargetLatest, cursor, recoveryWaitProbes{
 				service: func(context.Context, string) recoveryServiceState {
@@ -255,15 +281,18 @@ func waitRecoveryEvidenceCases() []waitRecoveryEvidenceCase {
 	rotation := evidenceCase("rotation")
 	rotation.setup = func(t *testing.T, path string) {
 		t.Helper()
+
 		if err := os.Rename(path, path+".old"); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := os.WriteFile(path, []byte("new\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	rotation.check = func(t *testing.T, err error) {
 		t.Helper()
+
 		if !strings.Contains(err.Error(), "diagnostics") {
 			t.Fatalf("wrong rotation result: %v", err)
 		}
@@ -271,6 +300,7 @@ func waitRecoveryEvidenceCases() []waitRecoveryEvidenceCase {
 	truncated := evidenceCase("truncated")
 	truncated.setup = func(t *testing.T, path string) {
 		t.Helper()
+
 		if err := os.Truncate(path, 0); err != nil {
 			t.Fatal(err)
 		}
@@ -278,6 +308,7 @@ func waitRecoveryEvidenceCases() []waitRecoveryEvidenceCase {
 	unreadable := evidenceCase("unreadable")
 	unreadable.setup = func(t *testing.T, path string) {
 		t.Helper()
+
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
@@ -285,6 +316,7 @@ func waitRecoveryEvidenceCases() []waitRecoveryEvidenceCase {
 	stale := evidenceCase("stale")
 	stale.check = func(t *testing.T, err error) {
 		t.Helper()
+
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("stale evidence: %v", err)
 		}
@@ -298,12 +330,14 @@ func waitRecoveryEvidenceCases() []waitRecoveryEvidenceCase {
 	serviceFailedCase.service = serviceFailed
 	serviceFailedCase.check = func(t *testing.T, err error) {
 		t.Helper()
+
 		if !strings.Contains(err.Error(), "stopped") {
 			t.Fatalf("wrong service result: %v", err)
 		}
 	}
 	sqlRefused := evidenceCase("sql-refused")
 	sqlRefused.observation = recoveryUnknown
+
 	return []waitRecoveryEvidenceCase{rotation, truncated, unreadable, stale, partial, serviceFailedCase, sqlRefused}
 }
 
@@ -314,8 +348,10 @@ func TestWaitRecoveryUnknownEvidenceAndFailure(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(t, path)
 			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
+
 			err := waitRecovery(ctx, "target", "data", 5555, UntilPaused, TargetTime, cursor, recoveryWaitProbes{
 				service: func(context.Context, string) recoveryServiceState { return tc.service },
 				process: func(context.Context, string) recoveryObservation { return recoveryRecovering },
@@ -324,6 +360,7 @@ func TestWaitRecoveryUnknownEvidenceAndFailure(t *testing.T) {
 			if err == nil || RetainRecoveryFailure(err) {
 				t.Fatalf("unexpected result: %v", err)
 			}
+
 			if tc.check != nil {
 				tc.check(t, err)
 			}
@@ -336,6 +373,7 @@ func TestMismatchAssociationRequiresSamePrefix(t *testing.T) {
 	if _, ok := recoveryMismatch(foreign); ok {
 		t.Fatal("associated a different process's detail")
 	}
+
 	fatal := strings.Replace(mismatchLog, "WARNING:  hot standby is not possible", "FATAL:  recovery aborted", 1)
 	if _, ok := recoveryMismatch(fatal); !ok {
 		t.Fatal("missed fatal mismatch")
@@ -344,23 +382,30 @@ func TestMismatchAssociationRequiresSamePrefix(t *testing.T) {
 
 func TestRecoveryServiceSubmissionAndStartupOptions(t *testing.T) {
 	cmd := recoveryStartCommand(context.Background(), "target")
+
 	want := []string{"systemctl", "start", "--no-block", "postgresql@18-target"}
 	if !reflect.DeepEqual(cmd.Args, want) {
 		t.Fatalf("start command %v", cmd.Args)
 	}
+
 	_, options, ok := strings.Cut(recoveryCtlOptions, "'")
 	if !ok {
 		t.Fatal("missing pg_ctl options")
 	}
+
 	options, _, _ = strings.Cut(options, "'")
 	parts := strings.Fields(options)
+
 	var settings []string
+
 	for i := 0; i < len(parts); i += 2 {
 		if i+1 >= len(parts) || parts[i] != "-o" || !strings.HasPrefix(parts[i+1], "-c") {
 			t.Fatalf("invalid pg_ctl options: %v", parts)
 		}
+
 		settings = append(settings, strings.TrimPrefix(parts[i+1], "-c"))
 	}
+
 	if !reflect.DeepEqual(settings, recoveryStartupSettings) {
 		t.Fatalf("postgres -C and start overrides differ: %v vs %v", settings, recoveryStartupSettings)
 	}
@@ -369,23 +414,29 @@ func TestRecoveryServiceSubmissionAndStartupOptions(t *testing.T) {
 func TestRecoveryDiagnosticOverridesAreTemporary(t *testing.T) {
 	m := recoveryRegistration(t, nil)
 	ctl := filepath.Join(m.ConfDir(), "pg_ctl.conf")
+
 	original := "# original pg_ctl configuration\n"
 	if err := os.WriteFile(ctl, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := m.prepareRecoveryDiagnostics(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := m.prepareRecoveryDiagnostics(); err != nil {
 		t.Fatalf("preparation retry: %v", err)
 	}
+
 	if err := m.restoreRecoveryDiagnostics(); err != nil {
 		t.Fatal(err)
 	}
+
 	raw, err := os.ReadFile(ctl)
 	if err != nil || string(raw) != original {
 		t.Fatalf("original pg_ctl.conf: %q, %v", raw, err)
 	}
+
 	if err := m.restoreRecoveryDiagnostics(); err != nil {
 		t.Fatalf("adoption retry: %v", err)
 	}
@@ -394,6 +445,7 @@ func TestRecoveryDiagnosticOverridesAreTemporary(t *testing.T) {
 func TestWaitRecoveryStoppedProcess(t *testing.T) {
 	cursor, path := testRecoveryCursor(t, "")
 	appendRecoveryLog(t, path, "123:LOG:  starting\n")
+
 	err := waitRecovery(context.Background(), "target", "data", 5555, UntilOpen, TargetLatest, cursor, recoveryWaitProbes{
 		service: func(context.Context, string) recoveryServiceState { return serviceActive },
 		sql:     func(context.Context, int) recoveryObservation { return recoveryUnknown },
@@ -409,6 +461,7 @@ func TestRecoveryEvidenceRequiresOrderedMarkers(t *testing.T) {
 	raw := "123:LOG:  pausing at the end of recovery\n123:LOG:  recovery stopping after reaching consistency\n"
 	e.observe(raw, TargetSet, 0)
 	e.observe(raw, TargetSet, 0)
+
 	if e.arrived {
 		t.Fatal("a replayed earlier pause was mistaken for target arrival")
 	}
@@ -417,14 +470,17 @@ func TestRecoveryEvidenceRequiresOrderedMarkers(t *testing.T) {
 func TestWaitRecoveryServiceStopsBeforeFirstSQLReady(t *testing.T) {
 	cursor, path := testRecoveryCursor(t, "")
 	appendRecoveryLog(t, path, "123:LOG:  starting recovery\n")
+
 	calls := 0
 	start := time.Now()
+
 	err := waitRecovery(context.Background(), "target", "data", 5555, UntilOpen, TargetLatest, cursor, recoveryWaitProbes{
 		service: func(context.Context, string) recoveryServiceState {
 			calls++
 			if calls == 1 {
 				return serviceStarting
 			}
+
 			return serviceInactive
 		},
 		sql:     func(context.Context, int) recoveryObservation { return recoveryUnknown },
@@ -438,19 +494,23 @@ func TestWaitRecoveryServiceStopsBeforeFirstSQLReady(t *testing.T) {
 func TestWaitRecoveryQueuedInitiallyInactive(t *testing.T) {
 	cursor, path := testRecoveryCursor(t, "")
 	appendRecoveryLog(t, path, "123:LOG:  startup submitted\n")
+
 	calls := 0
+
 	err := waitRecovery(context.Background(), "target", "data", 5555, UntilOpen, TargetLatest, cursor, recoveryWaitProbes{
 		service: func(context.Context, string) recoveryServiceState {
 			calls++
 			if calls == 1 {
 				return serviceInactive
 			}
+
 			return serviceActive
 		},
 		sql: func(context.Context, int) recoveryObservation {
 			if calls == 1 {
 				return recoveryUnknown
 			}
+
 			return recoveryRecovering
 		},
 		process: func(context.Context, string) recoveryObservation { return recoveryUnknown },
@@ -463,13 +523,16 @@ func TestWaitRecoveryQueuedInitiallyInactive(t *testing.T) {
 func TestWaitRecoveryProcessStopsWhileServiceUnknownBeforeSQLReady(t *testing.T) {
 	cursor, path := testRecoveryCursor(t, "")
 	appendRecoveryLog(t, path, "123:LOG:  starting recovery\n")
+
 	calls := 0
+
 	err := waitRecovery(context.Background(), "target", "data", 5555, UntilOpen, TargetLatest, cursor, recoveryWaitProbes{
 		service: func(context.Context, string) recoveryServiceState {
 			calls++
 			if calls == 1 {
 				return serviceStarting
 			}
+
 			return serviceUnknown
 		},
 		sql: func(context.Context, int) recoveryObservation { return recoveryUnknown },
@@ -477,6 +540,7 @@ func TestWaitRecoveryProcessStopsWhileServiceUnknownBeforeSQLReady(t *testing.T)
 			if calls == 1 {
 				return recoveryRecovering
 			}
+
 			return recoveryStopped
 		},
 	}, func(string) {})

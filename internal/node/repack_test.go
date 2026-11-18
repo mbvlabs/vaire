@@ -31,10 +31,12 @@ type fakeRepackPG struct {
 
 func (f *fakeRepackPG) Query(_ context.Context, db, sql string, _ map[string]string) ([]map[string]string, error) {
 	f.queries = append(f.queries, sql)
+
 	f.dbs = append(f.dbs, db)
 	if f.answer != nil {
 		return f.answer(db, sql)
 	}
+
 	return nil, nil
 }
 
@@ -48,6 +50,7 @@ func repackStorageAnswerFor(pg *fakeRepackPG, base func(db, sql string) ([]map[s
 		if strings.Contains(sql, "relfilenode") && strings.Contains(sql, "pg_class") {
 			return []map[string]string{{"oid": "1", "relfilenode": fmt.Sprint(100 + pg.storageVersion*100), "tablespace": "pg_default"}}, nil
 		}
+
 		return base(db, sql)
 	}
 }
@@ -62,23 +65,29 @@ func repackStorageAnswer(pg *fakeRepackPG) func(db, sql string) ([]map[string]st
 // fixed so the fixture cannot mask an identity mismatch.
 func repackStorageAnswerByRelation(t *testing.T, pg *fakeRepackPG, oids map[string]string, base func(db, sql string) ([]map[string]string, error)) func(db, sql string) ([]map[string]string, error) {
 	t.Helper()
+
 	return func(db, sql string) ([]map[string]string, error) {
 		t.Helper()
+
 		if !strings.Contains(sql, "relfilenode") || !strings.Contains(sql, "pg_class") {
 			return base(db, sql)
 		}
+
 		for name, oid := range oids {
 			q, err := maint.QuoteRelation(name)
 			if err != nil {
 				t.Fatalf("storage fixture relation %q: %v", name, err)
 			}
+
 			if strings.Contains(sql, q) {
 				return []map[string]string{{
 					"oid": oid, "relfilenode": fmt.Sprint(100 + pg.storageVersion*100), "tablespace": "pg_default",
 				}}, nil
 			}
 		}
+
 		t.Fatalf("storage probe did not name an admitted relation: %s", sql)
+
 		return nil, nil
 	}
 }
@@ -94,6 +103,7 @@ func repackTableAnswer(name, oid string, base func(db, sql string) ([]map[string
 				"access_method": "heap", "is_partition": "f", "has_parent": "f", "system_schema": "f",
 			}}, nil
 		}
+
 		return base(db, sql)
 	}
 }
@@ -115,6 +125,7 @@ func repackRelationProbeKind(sql string) (string, bool) {
 	case strings.Contains(sql, "reltablespace"):
 		return "tablespace", true
 	}
+
 	return "", false
 }
 
@@ -124,28 +135,37 @@ func repackRelationProbeKind(sql string) (string, bool) {
 // tablespace, key, size, before/after storage and final identity probes.
 func assertRepackCanonicalProbes(t *testing.T, queries []string, admission, canonical string) {
 	t.Helper()
+
 	probes := map[string]int{}
 	unqualified := 0
+
 	for _, q := range queries {
 		kind, relationScoped := repackRelationProbeKind(q)
 		if !relationScoped {
 			continue
 		}
+
 		if strings.Contains(q, admission) {
 			unqualified++
+
 			if kind != "identity" {
 				t.Fatalf("unqualified relation probe was not the admission lookup: %s", q)
 			}
+
 			continue
 		}
+
 		if !strings.Contains(q, canonical) {
 			t.Fatalf("relation probe did not use resolved target %s: %s", canonical, q)
 		}
+
 		probes[kind]++
 	}
+
 	if unqualified != 1 {
 		t.Fatalf("unqualified admission lookups = %d, want exactly 1 in %v", unqualified, queries)
 	}
+
 	for kind, least := range map[string]int{
 		"identity": 2, "dependency": 1, "tablespace": 1, "key": 1, "size": 1, "storage": 2,
 	} {
@@ -157,37 +177,45 @@ func assertRepackCanonicalProbes(t *testing.T, queries []string, admission, cano
 
 func repackResultData(t *testing.T, res any) map[string]any {
 	t.Helper()
+
 	data, ok := res.(map[string]any)
 	if !ok {
 		t.Fatalf("repack result is %T, want map[string]any", res)
 	}
+
 	return data
 }
 
 func repackResultCounts(t *testing.T, data map[string]any) maint.RepackCounts {
 	t.Helper()
+
 	counts, ok := data["counts"].(maint.RepackCounts)
 	if !ok {
 		t.Fatalf("repack counts are %T, want maint.RepackCounts", data["counts"])
 	}
+
 	return counts
 }
 
 func repackResultUnknown(t *testing.T, data map[string]any) map[string]string {
 	t.Helper()
+
 	unknown, ok := data["unknown"].(map[string]string)
 	if !ok {
 		t.Fatalf("repack unknown is %T, want map[string]string", data["unknown"])
 	}
+
 	return unknown
 }
 
 func repackResultSkipped(t *testing.T, data map[string]any) []maint.RepackSkip {
 	t.Helper()
+
 	skipped, ok := data["skipped"].([]maint.RepackSkip)
 	if !ok {
 		t.Fatalf("repack skipped is %T, want []maint.RepackSkip", data["skipped"])
 	}
+
 	return skipped
 }
 
@@ -205,23 +233,29 @@ type repackCompletionWant struct {
 // job reports for one exit and storage sequence.
 func assertRepackCompletion(t *testing.T, data map[string]any, err error, want repackCompletionWant, execs int) {
 	t.Helper()
+
 	if err != nil {
 		t.Fatalf("repack completion error = %v", err)
 	}
+
 	counts := repackResultCounts(t, data)
 	if counts.Unknown != want.unknown || counts.Repacked != want.repacked || counts.Failed != want.failed {
 		t.Fatalf("completion counts = %+v, want %+v", counts, want)
 	}
+
 	skips := repackResultSkipped(t, data)
 	if len(skips) != want.skipped {
 		t.Fatalf("completion skips = %+v, want %d", skips, want.skipped)
 	}
+
 	if want.skipped == 1 && skips[0].Reason != want.skipReason {
 		t.Fatalf("skip reason = %q, want %q", skips[0].Reason, want.skipReason)
 	}
+
 	if want.unknownDetail && repackResultUnknown(t, data)["public.events"] == "" {
 		t.Fatalf("unknown detail missing: %+v", data)
 	}
+
 	if execs != want.execs {
 		t.Fatalf("repack execs = %d, want %d", execs, want.execs)
 	}
@@ -229,6 +263,7 @@ func assertRepackCompletion(t *testing.T, data map[string]any, err error, want r
 
 func repackTestConfig(t *testing.T) config.Cluster {
 	t.Helper()
+
 	return config.Cluster{
 		ClusterName: "prod",
 		Server:      config.Server{DataRoot: t.TempDir()},
@@ -283,11 +318,13 @@ func repackDefaultAnswer(db, sql string) ([]map[string]string, error) {
 			"free_space": "200", "free_percent": "20",
 		}}, nil
 	}
+
 	return nil, nil
 }
 
 func installRepackSeams(t *testing.T, pg *fakeRepackPG) {
 	t.Helper()
+
 	oldPG, oldPriv, oldClient, oldSpace, oldExec := maintRepackPG, maintRepackPrivilegedPG, maintRepackClientVersion, maintRepackSpace, maintRepackExec
 	oldReport, oldRunning, oldRecords, oldInstance := maintReportPG, clusterRunning, backup.RecordsPath, followHostInstance
 	oldLocks, oldNow, oldReload := autoRepackLocks, autoRepackNow, reloadJobCluster
@@ -299,6 +336,7 @@ func installRepackSeams(t *testing.T, pg *fakeRepackPG) {
 	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
 		pg.execs++
 		pg.storageVersion++
+
 		return repackExecResult{}
 	}
 	clusterRunning = func(config.ClusterSpec) bool { return true }
@@ -309,6 +347,7 @@ func installRepackSeams(t *testing.T, pg *fakeRepackPG) {
 	}
 	autoRepackNow = repackTestNow
 	reloadJobCluster = func() (config.Cluster, error) { return repackTestConfig(t), nil }
+
 	t.Cleanup(func() {
 		maintRepackPG, maintRepackPrivilegedPG, maintRepackClientVersion, maintRepackSpace, maintRepackExec = oldPG, oldPriv, oldClient, oldSpace, oldExec
 		maintReportPG, clusterRunning, backup.RecordsPath, followHostInstance = oldReport, oldRunning, oldRecords, oldInstance
@@ -318,6 +357,7 @@ func installRepackSeams(t *testing.T, pg *fakeRepackPG) {
 
 func reloadRepackAs(t *testing.T, cfg config.Cluster) {
 	t.Helper()
+
 	reloadJobCluster = func() (config.Cluster, error) { return cfg, nil }
 }
 
@@ -326,10 +366,12 @@ func TestMaintenancePGDefaults(t *testing.T) {
 	if !ok || !report.AsRoot || report.User != "vaire_admin" || report.Host != steps.PGSocketDir || report.Port != 5433 {
 		t.Fatalf("report default %+v", report)
 	}
+
 	admin, ok := maintRepackAdminPG(config.ClusterSpec{Port: 5433}).(pg.Local)
 	if !ok || !admin.AsRoot || admin.User != "vaire_admin" {
 		t.Fatalf("repack admin default %+v", admin)
 	}
+
 	postgres, ok := maintRepackPostgresPG(config.ClusterSpec{Port: 5433}).(pg.Local)
 	if !ok || postgres.AsRoot || postgres.User != "" || postgres.Port != 5433 {
 		t.Fatalf("repack postgres default %+v", postgres)
@@ -341,31 +383,40 @@ func TestRepackVersionProbeUsesPrivilegedConnection(t *testing.T) {
 		if strings.Contains(sql, ".version()") || strings.Contains(sql, ".version_sql()") {
 			return nil, fmt.Errorf("permission denied for schema repack")
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	priv := &fakeRepackPG{answer: repackDefaultAnswer}
+
 	installRepackSeams(t, admin)
+
 	maintRepackPrivilegedPG = func(config.ClusterSpec) sqlRunner { return priv }
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	plan, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.VersionCheck != "matched" {
 		t.Fatalf("version check %q", plan.VersionCheck)
 	}
+
 	for _, q := range admin.queries {
 		if strings.Contains(q, ".version()") || strings.Contains(q, ".version_sql()") {
 			t.Fatalf("unprivileged connection called version functions: %s", q)
 		}
 	}
+
 	found := false
+
 	for _, q := range priv.queries {
 		if strings.Contains(q, "version_sql") {
 			found = true
 		}
 	}
+
 	if !found {
 		t.Fatalf("privileged probe did not call version_sql: %v", priv.queries)
 	}
@@ -374,14 +425,18 @@ func TestRepackVersionProbeUsesPrivilegedConnection(t *testing.T) {
 func TestRepackPreflightDefersVersionProbe(t *testing.T) {
 	admin := &fakeRepackPG{answer: repackDefaultAnswer}
 	priv := &fakeRepackPG{answer: repackDefaultAnswer}
+
 	installRepackSeams(t, admin)
+
 	maintRepackPrivilegedPG = func(config.ClusterSpec) sqlRunner { return priv }
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	plan, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if plan.VersionCheck != "deferred_to_job" || len(priv.queries) != 0 {
 		t.Fatalf("preflight probe: %q %v", plan.VersionCheck, priv.queries)
 	}
@@ -390,15 +445,19 @@ func TestRepackPreflightDefersVersionProbe(t *testing.T) {
 func TestRepackProtectedNoPrivilegedProbe(t *testing.T) {
 	admin := &fakeRepackPG{answer: repackDefaultAnswer}
 	priv := &fakeRepackPG{answer: repackDefaultAnswer}
+
 	installRepackSeams(t, admin)
+
 	maintRepackPrivilegedPG = func(config.ClusterSpec) sqlRunner { return priv }
 	cfg := repackTestConfig(t)
 	cfg.Clusters[0].Protected = true
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonProtected {
 		t.Fatalf("protected: %v", err)
 	}
+
 	if len(admin.queries) != 0 || len(priv.queries) != 0 {
 		t.Fatalf("protected probe: admin %v privileged %v", admin.queries, priv.queries)
 	}
@@ -410,10 +469,12 @@ func TestRepackPlanProtectedRefused(t *testing.T) {
 	cfg := repackTestConfig(t)
 	cfg.Clusters[0].Protected = true
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonProtected {
 		t.Fatalf("err %v", err)
 	}
+
 	if len(pg.queries) != 0 {
 		t.Fatalf("protected preflight queried: %v", pg.queries)
 	}
@@ -423,6 +484,7 @@ func TestRepackPlanLeavesAccepted(t *testing.T) {
 	pg := &fakeRepackPG{answer: repackDefaultAnswer}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
+
 	for _, facts := range []map[string]string{
 		{"oid": "1", "schema": "public", "table": "events", "kind": "r", "persistence": "p", "access_method": "heap", "is_partition": "t", "has_parent": "t", "system_schema": "f"},
 		{"oid": "1", "schema": "public", "table": "events", "kind": "r", "persistence": "p", "access_method": "heap", "is_partition": "f", "has_parent": "t", "system_schema": "f"},
@@ -431,13 +493,16 @@ func TestRepackPlanLeavesAccepted(t *testing.T) {
 			if strings.Contains(sql, "relkind") {
 				return []map[string]string{facts}, nil
 			}
+
 			return repackDefaultAnswer(db, sql)
 		}
 		o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 		plan, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 		if err != nil {
 			t.Fatalf("%v: %v", facts, err)
 		}
+
 		if len(plan.Tables) != 1 || plan.Tables[0] != "public.events" {
 			t.Fatalf("%v: plan %+v", facts, plan)
 		}
@@ -448,6 +513,7 @@ func TestRepackPlanUnsupportedAndKey(t *testing.T) {
 	pg := &fakeRepackPG{answer: repackDefaultAnswer}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
+
 	cases := []struct {
 		name string
 		sql  string
@@ -465,9 +531,11 @@ func TestRepackPlanUnsupportedAndKey(t *testing.T) {
 			if strings.Contains(sql, tc.sql) {
 				return []map[string]string{tc.row}, nil
 			}
+
 			return repackDefaultAnswer(db, sql)
 		}
 		o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 		_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 		if err == nil || reason(t, err) != tc.want {
 			t.Errorf("%s: %v", tc.name, err)
@@ -480,37 +548,46 @@ func TestRepackPlanExternalTablespaceAndSpace(t *testing.T) {
 		if strings.Contains(sql, "pg_tablespace") && strings.Contains(sql, "reltablespace") {
 			return []map[string]string{{"kind": "index", "name": "events_pkey", "tablespace": "fastspace"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonTablespace {
 		t.Fatalf("external index tablespace: %v", err)
 	}
+
 	pg.answer = func(db, sql string) ([]map[string]string, error) {
 		if strings.Contains(sql, "pg_tablespace") && strings.Contains(sql, "reltablespace") {
 			return []map[string]string{{"kind": "table", "name": "events", "tablespace": "fastspace"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}
+
 	_, err = planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonTablespace {
 		t.Fatalf("external database-default tablespace: %v", err)
 	}
+
 	maintRepackSpace = func(needs []backup.SpaceNeed) ([]backup.SpaceNeed, error) {
 		return []backup.SpaceNeed{{Path: "/data", Need: 100, Unknown: true}}, nil
 	}
 	pg.answer = repackDefaultAnswer
+
 	_, err = planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonSpaceUnknown {
 		t.Fatalf("unknown space: %v", err)
 	}
+
 	maintRepackSpace = func([]backup.SpaceNeed) ([]backup.SpaceNeed, error) {
 		return nil, output.NewError(output.CodePrecondition, "not enough free space", output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": maint.RepackReasonInsufficientSpace})
 	}
+
 	_, err = planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonInsufficientSpace {
 		t.Fatalf("insufficient space: %v", err)
@@ -522,21 +599,26 @@ func TestRepackPlanDefaultTablespaceExternalOrUnknown(t *testing.T) {
 		if strings.Contains(sql, "pg_tablespace") && strings.Contains(sql, "dattablespace") && !strings.Contains(sql, "reltablespace") {
 			return []map[string]string{{"tablespace": "fastspace"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), false)
 	if err == nil || reason(t, err) != maint.RepackReasonDefaultTablespace {
 		t.Fatalf("external database default: %v", err)
 	}
+
 	pg.answer = func(db, sql string) ([]map[string]string, error) {
 		if strings.Contains(sql, "pg_tablespace") && strings.Contains(sql, "dattablespace") && !strings.Contains(sql, "reltablespace") {
 			return nil, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}
+
 	_, err = planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), false)
 	if err == nil || reason(t, err) != maint.RepackReasonDefaultTablespace {
 		t.Fatalf("unknown database default: %v", err)
@@ -550,12 +632,16 @@ func TestRepackPlanSessionDefaultTablespaceExternal(t *testing.T) {
 			return []map[string]string{{"extension_version": "1.5.3", "library_version": "pg_repack 1.5.3", "sql_version": "pg_repack 1.5.3",
 				"db_default_tablespace": "pg_default", "session_default_tablespace": "fastspace"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
+
 	installRepackSeams(t, admin)
+
 	maintRepackPrivilegedPG = func(config.ClusterSpec) sqlRunner { return priv }
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonDefaultTablespace {
 		t.Fatalf("external session default: %v", err)
@@ -567,11 +653,13 @@ func TestRepackPlanTOASTExternalTablespace(t *testing.T) {
 		if strings.Contains(sql, "pg_tablespace") && strings.Contains(sql, "reltablespace") {
 			return []map[string]string{{"kind": "toast", "name": "pg_toast_1", "tablespace": "fastspace"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonTablespace {
 		t.Fatalf("external toast tablespace: %v", err)
@@ -583,15 +671,19 @@ func TestRepackPlanWindowAndVersion(t *testing.T) {
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events"}
+
 	outside := time.Date(2026, 10, 14, 12, 0, 0, 0, time.Local)
 	if _, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, outside, true); err == nil || reason(t, err) != maint.RepackReasonOutsideWindow {
 		t.Fatalf("outside window: %v", err)
 	}
+
 	o.Now = true
 	if _, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, outside, true); err != nil {
 		t.Fatalf("--now: %v", err)
 	}
+
 	maintRepackClientVersion = func(context.Context) (string, error) { return "pg_repack 1.5.1", nil }
+
 	o.Now = true
 	if _, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true); err == nil || reason(t, err) != maint.RepackReasonVersionMismatch {
 		t.Fatalf("version mismatch: %v", err)
@@ -603,11 +695,13 @@ func TestRepackPlanExtensionMissing(t *testing.T) {
 		if strings.Contains(sql, "extversion") && strings.Contains(sql, "pg_repack") {
 			return nil, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonExtensionMissing {
 		t.Fatalf("err %v", err)
@@ -620,12 +714,15 @@ func TestRepackPlanNotRunningAndClientMissing(t *testing.T) {
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
 	clusterRunning = func(config.ClusterSpec) bool { return false }
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonClusterNotRunning || len(pg.queries) != 0 || pg.execs != 0 {
 		t.Fatalf("not running: %v queries %v", err, pg.queries)
 	}
+
 	clusterRunning = func(config.ClusterSpec) bool { return true }
 	maintRepackClientVersion = func(context.Context) (string, error) { return "", fmt.Errorf("missing binary") }
+
 	_, err = planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonClientMissing || pg.execs != 0 {
 		t.Fatalf("client missing: %v", err)
@@ -637,14 +734,17 @@ func TestRepackPlanVersionFactsUnknown(t *testing.T) {
 		if strings.Contains(sql, "extversion") && strings.Contains(sql, "pg_repack") {
 			return []map[string]string{{"extversion": "1.5.2"}}, nil
 		}
+
 		if strings.Contains(sql, "pg_proc") && strings.Contains(sql, "version_sql") {
 			return nil, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}
+
 	_, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err == nil || reason(t, err) != maint.RepackReasonVersionMismatch || !strings.Contains(err.Error(), "version facts are unavailable") {
 		t.Fatalf("err %v", err)
@@ -659,18 +759,22 @@ func TestRepackPlanNoTableSkips(t *testing.T) {
 				{"kind": "table", "schemaname": "public", "table_name": "bad", "index_name": "", "bloat_bytes": "52428800", "real_size": "104857600", "bloat_pct": "50", "fillfactor": "100", "is_na": "f"},
 			}, nil
 		}
+
 		if strings.Contains(sql, "relkind") && strings.Contains(sql, "bad") {
 			return []map[string]string{{"schema": "public", "table": "bad", "kind": "p", "persistence": "p", "access_method": "heap"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	})}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Now: true}
+
 	plan, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(plan.Tables) != 1 || plan.Tables[0] != "public.big" || len(plan.Skipped) != 1 || plan.Skipped[0].Reason != maint.RepackReasonPartitionParent {
 		t.Fatalf("%+v", plan)
 	}
@@ -681,6 +785,7 @@ func TestRepackResolvedIdentityCarriesThroughProbesAndExecution(t *testing.T) {
 		admission = `'"events"'`
 		canonical = `"tenant"."events"`
 	)
+
 	tenantFacts := []map[string]string{{
 		"oid": "42", "schema": "tenant", "table": "events", "kind": "r", "persistence": "p",
 		"access_method": "heap", "is_partition": "f", "has_parent": "f", "system_schema": "f",
@@ -691,38 +796,50 @@ func TestRepackResolvedIdentityCarriesThroughProbesAndExecution(t *testing.T) {
 			if strings.Contains(sql, admission) || strings.Contains(sql, canonical) {
 				return tenantFacts, nil
 			}
+
 			return nil, fmt.Errorf("relation identity probe did not name the admitted or resolved target: %s", sql)
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}
 	pg.answer = repackStorageAnswerByRelation(t, pg, map[string]string{"tenant.events": "42"}, relations)
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	o := maint.Options{Kind: maint.Repack, DB: "app", Table: "events", Now: true}
+
 	plan, err := planRepack(context.Background(), cfg, cfg.Clusters[0], &o, repackTestNow(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(plan.Targets) != 1 || len(plan.Tables) != 1 || plan.Tables[0] != "tenant.events" ||
 		plan.Targets[0].Name != "tenant.events" || plan.Targets[0].OID != 42 {
 		t.Fatalf("admitted target %+v", plan)
 	}
+
 	pg.queries = nil
+
 	var ran []string
+
 	maintRepackExec = func(_ context.Context, _ *jobEnv, _ config.ClusterSpec, table string) repackExecResult {
 		ran = append(ran, table)
 		pg.storageVersion++
+
 		return repackExecResult{}
 	}
+
 	res, err := jobRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint"}, o, cfg.Clusters[0])
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(ran) != 1 || ran[0] != "tenant.events" {
 		t.Fatalf("executed %v, want the admitted canonical relation", ran)
 	}
+
 	assertRepackCanonicalProbes(t, pg.queries, admission, canonical)
 	data := repackResultData(t, res)
+
 	counts := repackResultCounts(t, data)
 	if counts.Unknown != 1 || counts.Repacked != 0 {
 		t.Fatalf("zero exit must remain unknown: %+v", data)
@@ -735,15 +852,18 @@ func TestJobRepackRefusesReplacedRelationBeforeExecution(t *testing.T) {
 	relations := func(db, sql string) ([]map[string]string, error) {
 		if strings.Contains(sql, "relkind") {
 			lookups++
+
 			oid := "42"
 			if lookups >= 3 {
 				oid = "43"
 			}
+
 			return []map[string]string{{
 				"oid": oid, "schema": "tenant", "table": "events", "kind": "r", "persistence": "p",
 				"access_method": "heap", "is_partition": "f", "has_parent": "f", "system_schema": "f",
 			}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}
 	pg.answer = repackStorageAnswerByRelation(t, pg, map[string]string{"tenant.events": "42"}, relations)
@@ -755,10 +875,12 @@ func TestJobRepackRefusesReplacedRelationBeforeExecution(t *testing.T) {
 		execs++
 		return repackExecResult{}
 	}
+
 	_, err := jobRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint"}, o, cfg.Clusters[0])
 	if err == nil || reason(t, err) != maint.RepackReasonRelationChanged {
 		t.Fatalf("replaced relation: %v", err)
 	}
+
 	if execs != 0 {
 		t.Fatalf("repack ran on a replaced relation: %d execution(s)", execs)
 	}
@@ -771,10 +893,12 @@ func TestJobRepackProtectedAndConfirm(t *testing.T) {
 	cfg.Clusters[0].Protected = true
 	reloadRepackAs(t, cfg)
 	env := &jobEnv{Cluster: cfg, Job: "maint", Params: json.RawMessage(`{"kind":"repack","db":"app","table":"public.events","now":true}`)}
+
 	_, err := jobRepack(context.Background(), env, maint.Options{Kind: maint.Repack, DB: "app", Table: "public.events", Now: true}, cfg.Clusters[0])
 	if err == nil || reason(t, err) != maint.RepackReasonProtected {
 		t.Fatalf("protected job: %v", err)
 	}
+
 	if len(pg.queries) != 0 {
 		t.Fatalf("protected job queried: %v", pg.queries)
 	}
@@ -783,37 +907,47 @@ func TestJobRepackProtectedAndConfirm(t *testing.T) {
 func TestJobRepackReloadsProtectionAndIdentityUnderLocks(t *testing.T) {
 	admin := &fakeRepackPG{answer: repackDefaultAnswer}
 	priv := &fakeRepackPG{answer: repackDefaultAnswer}
+
 	installRepackSeams(t, admin)
+
 	maintRepackPrivilegedPG = func(config.ClusterSpec) sqlRunner { return priv }
 	cfg := repackTestConfig(t)
 	params := json.RawMessage(`{"kind":"repack","db":"app","table":"public.events","now":true}`)
 	protected := repackTestConfig(t)
 	protected.Clusters[0].Protected = true
 	reloadRepackAs(t, protected)
+
 	_, err := jobMaint(context.Background(), &jobEnv{Cluster: cfg, Job: "maint", Params: params})
 	if err == nil || reason(t, err) != maint.RepackReasonProtected {
 		t.Fatalf("protection flip: %v", err)
 	}
+
 	if len(admin.queries) != 0 || len(priv.queries) != 0 || admin.execs != 0 {
 		t.Fatalf("protection flip effects: admin %v privileged %v execs %d", admin.queries, priv.queries, admin.execs)
 	}
+
 	changed := repackTestConfig(t)
 	changed.Clusters[0].Port = 5434
 	reloadRepackAs(t, changed)
+
 	_, err = jobMaint(context.Background(), &jobEnv{Cluster: cfg, Job: "maint", Params: params})
 	if err == nil || reason(t, err) != "config_changed" {
 		t.Fatalf("identity change: %v", err)
 	}
+
 	if len(admin.queries) != 0 || len(priv.queries) != 0 || admin.execs != 0 {
 		t.Fatalf("identity change effects: admin %v privileged %v execs %d", admin.queries, priv.queries, admin.execs)
 	}
+
 	changedStanza := repackTestConfig(t)
 	changedStanza.Clusters[0].Stanza = "app-abcdef"
 	reloadRepackAs(t, changedStanza)
+
 	_, err = jobMaint(context.Background(), &jobEnv{Cluster: cfg, Job: "maint", Params: params})
 	if err == nil || reason(t, err) != "config_changed" {
 		t.Fatalf("stanza change: %v", err)
 	}
+
 	if len(admin.queries) != 0 || len(priv.queries) != 0 || admin.execs != 0 {
 		t.Fatalf("stanza change effects: admin %v privileged %v execs %d", admin.queries, priv.queries, admin.execs)
 	}
@@ -822,6 +956,7 @@ func TestJobRepackReloadsProtectionAndIdentityUnderLocks(t *testing.T) {
 func TestRepackSkipRequiresIdenticalValidStorage(t *testing.T) {
 	before := maint.RepackStorage{OID: 42, RelFileNode: 100, TableSpace: "pg_default"}
 	res := repackExecResult{Output: "INFO: Skipping repack public.events due to timeout"}
+
 	for _, tc := range []struct {
 		name  string
 		after maint.RepackStorage
@@ -853,10 +988,12 @@ func TestJobRepackCompletionEvidence(t *testing.T) {
 	env := &jobEnv{Cluster: cfg, Job: "maint", Params: json.RawMessage(`{"kind":"repack","db":"app","table":"public.events","now":true}`)}
 	run := func(t *testing.T) (map[string]any, error) {
 		t.Helper()
+
 		res, err := jobRepack(context.Background(), env, o, cfg.Clusters[0])
 		if res == nil {
 			return nil, err
 		}
+
 		return repackResultData(t, res), err
 	}
 	storageAnswer := repackStorageAnswer(pg)
@@ -864,8 +1001,10 @@ func TestJobRepackCompletionEvidence(t *testing.T) {
 		if strings.Contains(sql, "relfilenode") && strings.Contains(sql, "pg_class") {
 			return nil, fmt.Errorf("storage facts unavailable")
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}
+
 	cases := []struct {
 		name          string
 		output        string
@@ -891,17 +1030,21 @@ func TestJobRepackCompletionEvidence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pg.storageVersion = 0
+
 			answer := storageAnswer
 			if tc.unavailable {
 				answer = storageUnavailable
 			}
+
 			pg.answer = answer
 			execs := 0
 			maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
 				execs++
+
 				if tc.changeStorage {
 					pg.storageVersion++
 				}
+
 				return repackExecResult{Output: tc.output, Err: tc.execErr}
 			}
 			data, err := run(t)
@@ -922,9 +1065,11 @@ func TestJobRepackManualWindowRecheckedAfterAllProbes(t *testing.T) {
 				{"kind": "table", "schemaname": "public", "table_name": "second", "index_name": "", "bloat_bytes": "52428800", "real_size": "104857600", "bloat_pct": "50", "fillfactor": "100", "is_na": "f"},
 			}, nil
 		}
+
 		if strings.Contains(sql, "relfilenode") && strings.Contains(sql, `"public"."second"`) {
 			expired = true
 		}
+
 		return storage(db, sql)
 	}
 	installRepackSeams(t, pg)
@@ -934,31 +1079,42 @@ func TestJobRepackManualWindowRecheckedAfterAllProbes(t *testing.T) {
 		if expired {
 			return repackTestNow().Add(3 * time.Hour)
 		}
+
 		return repackTestNow()
 	}
+
 	t.Cleanup(func() { repackNow = oldNow })
+
 	var ran []string
+
 	maintRepackExec = func(_ context.Context, _ *jobEnv, _ config.ClusterSpec, table string) repackExecResult {
 		ran = append(ran, table)
 		pg.storageVersion++
+
 		return repackExecResult{}
 	}
+
 	res, err := jobRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint"},
 		maint.Options{Kind: maint.Repack, DB: "app"}, cfg.Clusters[0])
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(ran) != 1 || ran[0] != "public.first" {
 		t.Fatalf("ran %v, want only the table that started before expiry", ran)
 	}
+
 	data := repackResultData(t, res)
+
 	counts := repackResultCounts(t, data)
 	if counts.Selected != 2 || counts.Unknown != 1 || counts.Skipped != 1 || counts.Repacked != 0 {
 		t.Fatalf("counts %+v", counts)
 	}
+
 	if repackResultUnknown(t, data)["public.first"] == "" {
 		t.Fatalf("clean zero exit was not reported unknown: %+v", data)
 	}
+
 	skips := repackResultSkipped(t, data)
 	if len(skips) != 1 || skips[0].Table != "public.second" || skips[0].Reason != maint.RepackReasonWindowEnded {
 		t.Fatalf("manual window skips %+v", skips)
@@ -967,7 +1123,9 @@ func TestJobRepackManualWindowRecheckedAfterAllProbes(t *testing.T) {
 
 func TestRepackJobTakesHeavyAndClusterLocks(t *testing.T) {
 	cfg := repackTestConfig(t)
+
 	var got []string
+
 	old := nodeLockers
 	nodeLockers = jobLockers{
 		node: func(context.Context, engine.LockMode, string, string, time.Duration) (engine.Release, error) {
@@ -983,13 +1141,18 @@ func TestRepackJobTakesHeavyAndClusterLocks(t *testing.T) {
 			return func() {}, nil
 		},
 	}
+
 	t.Cleanup(func() { nodeLockers = old })
+
 	env := &jobEnv{Cluster: cfg, Job: "maint", Params: json.RawMessage(`{"kind":"repack","db":"app","now":true}`)}
+
 	release, busy, err := takeJobLocks(context.Background(), env, nodeLockers)
 	if err != nil || busy != nil {
 		t.Fatalf("%v %v", busy, err)
 	}
+
 	release.finish()
+
 	if strings.Join(got, ",") != "node,heavy,cluster:app" {
 		t.Fatalf("locks %v", got)
 	}
@@ -1000,6 +1163,7 @@ func TestMaintRunTokenOnlyRepack(t *testing.T) {
 	if got := maintRunToken(cfg, json.RawMessage(`{"kind":"repack","db":"app"}`)); got != "app" {
 		t.Errorf("repack token %q", got)
 	}
+
 	for _, kind := range []string{"vacuum", "analyze", "reindex"} {
 		if got := maintRunToken(cfg, json.RawMessage(`{"kind":"`+kind+`","db":"app"}`)); got != "" {
 			t.Errorf("%s token %q", kind, got)
@@ -1013,17 +1177,22 @@ func TestMaintRunProtectedAndConfirm(t *testing.T) {
 	cfg := repackTestConfig(t)
 	cfg.Clusters[0].Protected = true
 	reloadRepackAs(t, cfg)
+
 	req := request("maint.run", map[string]any{"db": "app", "kind": "repack", "now": true})
+
 	_, err := handleMaintRun(context.Background(), &Env{Cluster: cfg, Req: req})
 	if err == nil || reason(t, err) != maint.RepackReasonProtected {
 		t.Fatalf("protected: %v", err)
 	}
+
 	cfg.Clusters[0].Protected = false
 	_, err = handleMaintRun(context.Background(), &Env{Cluster: cfg, Req: request("maint.run", map[string]any{"db": "app", "kind": "repack", "now": true})})
+
 	var ce *output.CLIError
 	if !errors.As(err, &ce) || ce.Code != output.CodeUnsafeAction {
 		t.Fatalf("confirm: %v", err)
 	}
+
 	if pg.execs != 0 {
 		t.Fatal("missing confirmation executed pg_repack")
 	}
@@ -1034,6 +1203,7 @@ func TestMaintenanceRefusesActiveFence(t *testing.T) {
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	reloadRepackAs(t, cfg)
+
 	fence := backup.ActivationFence{
 		OperationID: "op", Kind: "fork", Database: "app", Instance: "test-instance",
 		TargetStanza: "stanza", OldStanza: "old", NewStanza: "new",
@@ -1043,19 +1213,24 @@ func TestMaintenanceRefusesActiveFence(t *testing.T) {
 	if err := backup.SetActivationFence(fence); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := handleMaintRun(context.Background(), &Env{Cluster: cfg, Req: request("maint.run", map[string]any{"db": "app", "kind": "vacuum"})})
 	if err == nil || reason(t, err) != "activation_fence_active" {
 		t.Fatalf("maint run: %v", err)
 	}
+
 	_, err = handleMaintKill(context.Background(), &Env{Cluster: cfg, Req: request("maint.kill", map[string]any{"db": "app", "pid": 42})})
 	if err == nil || reason(t, err) != "activation_fence_active" {
 		t.Fatalf("maint kill: %v", err)
 	}
+
 	_, err = jobMaint(context.Background(), &jobEnv{Cluster: cfg, Job: "maint", Params: json.RawMessage(`{"kind":"vacuum","db":"app"}`)})
 	if err == nil || reason(t, err) != "activation_fence_active" {
 		t.Fatalf("job maint: %v", err)
 	}
+
 	reports := map[string]maint.BloatReport{"app": {Rows: []maint.BloatRow{{Kind: "table", Schema: "public", Table: "events", BloatBytes: maint.AutoRepackMinBytes, Ratio: 0.5}}}}
+
 	runs := autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 	if runs["app"].Counts.Skipped != 1 || runs["app"].Skipped[0].Reason != maint.RepackReasonActivationFence {
 		t.Fatalf("auto fence: %+v", runs["app"])
@@ -1066,26 +1241,33 @@ func TestExactMaintReport(t *testing.T) {
 	pg := &fakeRepackPG{answer: repackDefaultAnswer}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
+
 	res, err := handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{
 		"kind": "bloat", "db": "app", "table": "public.events", "exact": true,
 	})})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	data, _ := res.Data.(map[string]any)
+
 	dbs, _ := data["databases"].([]maintReportDB)
 	if len(dbs) != 1 || dbs[0].Exact == nil || dbs[0].Exact.TableBytes != 1000 || dbs[0].Exact.FreePercent != 20 {
 		t.Fatalf("%+v", data)
 	}
+
 	if len(pg.dbs) == 0 {
 		t.Fatal("no query")
 	}
+
 	for _, db := range pg.dbs {
 		if db != "app" {
 			t.Errorf("query db %q", db)
 		}
 	}
+
 	foundScan, foundSchema, readOnly := false, false, false
+
 	for _, q := range pg.queries {
 		if strings.Contains(q, "pgstattuple") && !strings.Contains(q, "pgstattuple_approx") && strings.Contains(q, "table_len") {
 			foundScan = true
@@ -1093,13 +1275,16 @@ func TestExactMaintReport(t *testing.T) {
 				strings.Contains(q, "lock_timeout = '5s'") &&
 				strings.Contains(q, "statement_timeout = '60s'")
 		}
+
 		if strings.Contains(q, "proname = 'pgstattuple'") {
 			foundSchema = true
 		}
 	}
+
 	if !foundScan || !foundSchema || !readOnly {
 		t.Fatalf("exact queries scan=%v schema=%v readonly=%v: %v", foundScan, foundSchema, readOnly, pg.queries)
 	}
+
 	if pg.execs != 0 {
 		t.Fatal("exact report executed SQL")
 	}
@@ -1110,17 +1295,21 @@ func TestExactMaintReportFollowerUsesSourceDB(t *testing.T) {
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
 	cfg.Clusters = []config.ClusterSpec{{Name: "app_follower", Follows: "app", Port: 5434}}
+
 	res, err := handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{
 		"kind": "bloat", "db": "app_follower", "table": "public.events", "exact": true,
 	})})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	data, _ := res.Data.(map[string]any)
+
 	dbs, _ := data["databases"].([]maintReportDB)
 	if len(dbs) != 1 || dbs[0].DB != "app_follower" || dbs[0].Exact == nil {
 		t.Fatalf("%+v", data)
 	}
+
 	for _, db := range pg.dbs {
 		if db != "app" {
 			t.Fatalf("follower query used %q, want app", db)
@@ -1133,34 +1322,42 @@ func TestExactMaintReportMissingAndUnsupported(t *testing.T) {
 		if strings.Contains(sql, "extversion") && strings.Contains(sql, "pgstattuple") {
 			return nil, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
+
 	_, err := handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{
 		"kind": "bloat", "db": "app", "table": "public.events", "exact": true,
 	})})
 	if err == nil || reason(t, err) != maint.RepackReasonExtensionMissing {
 		t.Fatalf("missing: %v", err)
 	}
+
 	pg.answer = func(db, sql string) ([]map[string]string, error) {
 		if strings.Contains(sql, "relkind") {
 			return []map[string]string{{"schema": "public", "table": "events", "kind": "p", "persistence": "p", "access_method": "heap"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}
+
 	_, err = handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{
 		"kind": "bloat", "db": "app", "table": "public.events", "exact": true,
 	})})
 	if err == nil || reason(t, err) != maint.RepackReasonPartitionParent {
 		t.Fatalf("unsupported: %v", err)
 	}
+
 	pg.answer = func(db, sql string) ([]map[string]string, error) {
 		if strings.Contains(sql, "pg_proc") && strings.Contains(sql, "pgstattuple") {
 			return nil, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}
+
 	_, err = handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{
 		"kind": "bloat", "db": "app", "table": "public.events", "exact": true,
 	})})
@@ -1171,24 +1368,30 @@ func TestExactMaintReportMissingAndUnsupported(t *testing.T) {
 
 func TestExactMaintReportFlagsAndErrors(t *testing.T) {
 	cfg := repackTestConfig(t)
+
 	_, err := handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{"kind": "bloat", "db": "app", "exact": true})})
 	if err == nil {
 		t.Fatal("missing table passed")
 	}
+
 	_, err = handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{"kind": "bloat", "db": "app", "table": "events"})})
 	if err == nil {
 		t.Fatal("table without exact passed")
 	}
+
 	pg := &fakeRepackPG{answer: func(db, sql string) ([]map[string]string, error) {
 		if strings.Contains(sql, "pgstattuple") && strings.Contains(sql, "table_len") {
 			return nil, fmt.Errorf("permission denied for function pgstattuple")
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
+
 	_, err = handleMaintReport(context.Background(), &Env{Cluster: cfg, Req: request("maint.report", map[string]any{
 		"kind": "bloat", "db": "app", "table": "events", "exact": true,
 	})})
+
 	var ce *output.CLIError
 	if err == nil || reason(t, err) != "exact_bloat_failed" || !errors.As(err, &ce) || !strings.Contains(ce.Hint, "does not escalate") {
 		t.Fatalf("query error: %v", err)
@@ -1201,10 +1404,13 @@ func TestAutoRepackOrderAndCounts(t *testing.T) {
 	pg.answer = repackStorageAnswerByRelation(t, pg, map[string]string{"public.big": "2", "public.small": "3"}, relations)
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
+
 	var order []string
+
 	maintRepackExec = func(_ context.Context, _ *jobEnv, _ config.ClusterSpec, table string) repackExecResult {
 		order = append(order, table)
 		pg.storageVersion++
+
 		return repackExecResult{}
 	}
 	reports := map[string]maint.BloatReport{"app": {Rows: []maint.BloatRow{
@@ -1212,9 +1418,11 @@ func TestAutoRepackOrderAndCounts(t *testing.T) {
 		{Kind: "table", Schema: "public", Table: "big", BloatBytes: 2 * maint.AutoRepackMinBytes, Ratio: 0.6},
 	}}}
 	runs := autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
+
 	if strings.Join(order, ",") != "public.big,public.small" {
 		t.Fatalf("order %v", order)
 	}
+
 	if runs["app"].Counts.Unknown != 2 || runs["app"].Counts.Repacked != 0 || runs["app"].Counts.Selected != 2 {
 		t.Fatalf("%+v", runs["app"])
 	}
@@ -1226,21 +1434,26 @@ func TestAutoRepackProtectedAndBusy(t *testing.T) {
 	cfg := repackTestConfig(t)
 	cfg.Clusters[0].Protected = true
 	reports := map[string]maint.BloatReport{"app": {Rows: []maint.BloatRow{{Kind: "table", Schema: "public", Table: "events", BloatBytes: maint.AutoRepackMinBytes, Ratio: 0.5}}}}
+
 	runs := autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 	if runs["app"].Counts.Skipped != 1 || runs["app"].Skipped[0].Reason != maint.RepackReasonProtected || len(pg.queries) != 0 {
 		t.Fatalf("protected: %+v queries %v", runs["app"], pg.queries)
 	}
+
 	cfg.Clusters[0].Protected = false
 	autoRepackLocks = func(context.Context, *jobEnv, config.ClusterSpec) (engine.Release, string, error) {
 		return nil, maint.RepackReasonHeavyIOBusy, nil
 	}
+
 	runs = autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 	if runs["app"].Counts.Busy != 1 || runs["app"].Busy[0].Reason != maint.RepackReasonHeavyIOBusy {
 		t.Fatalf("heavy busy: %+v", runs["app"])
 	}
+
 	autoRepackLocks = func(context.Context, *jobEnv, config.ClusterSpec) (engine.Release, string, error) {
 		return nil, maint.RepackReasonClusterBusy, nil
 	}
+
 	runs = autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 	if runs["app"].Counts.Busy != 1 || runs["app"].Busy[0].Reason != maint.RepackReasonClusterBusy {
 		t.Fatalf("cluster busy: %+v", runs["app"])
@@ -1253,24 +1466,31 @@ func TestAutoRepackWindowStopsNewTables(t *testing.T) {
 	pg.answer = repackStorageAnswerByRelation(t, pg, map[string]string{"public.first": "2", "public.second": "3"}, relations)
 	installRepackSeams(t, pg)
 	cfg := repackTestConfig(t)
+
 	var calls int
+
 	autoRepackNow = func() time.Time {
 		calls++
 		if calls <= 2 {
 			return repackTestNow()
 		}
+
 		return repackTestNow().Add(3 * time.Hour)
 	}
+
 	var ran []string
+
 	maintRepackExec = func(_ context.Context, _ *jobEnv, _ config.ClusterSpec, table string) repackExecResult {
 		ran = append(ran, table)
 		pg.storageVersion++
+
 		return repackExecResult{}
 	}
 	reports := map[string]maint.BloatReport{"app": {Rows: []maint.BloatRow{
 		{Kind: "table", Schema: "public", Table: "first", BloatBytes: 2 * maint.AutoRepackMinBytes, Ratio: 0.5},
 		{Kind: "table", Schema: "public", Table: "second", BloatBytes: maint.AutoRepackMinBytes, Ratio: 0.5},
 	}}}
+
 	runs := autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 	if strings.Join(ran, ",") != "public.first" || runs["app"].Counts.Skipped != 1 || runs["app"].Skipped[0].Reason != maint.RepackReasonWindowEnded {
 		t.Fatalf("ran %v run %+v", ran, runs["app"])
@@ -1288,15 +1508,18 @@ func TestAutoRepackCompletionSkipsAndUnknownCounts(t *testing.T) {
 	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
 		return repackExecResult{Output: "INFO: Skipping repack public.events due to timeout"}
 	}
+
 	runs := autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 	if runs["app"].Counts.Skipped != 1 || runs["app"].Skipped[0].Reason != maint.RepackReasonLockTimeout || runs["app"].Counts.Repacked != 0 {
 		t.Fatalf("auto zero-exit skip: %+v", runs["app"])
 	}
+
 	pg.storageVersion = 0
 	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
 		pg.storageVersion++
 		return repackExecResult{Err: fmt.Errorf("client failed after swap")}
 	}
+
 	runs = autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 	if runs["app"].Counts.Unknown != 1 || runs["app"].Counts.Repacked != 0 || runs["app"].Unknown["public.events"] == "" {
 		t.Fatalf("auto process error with unattributable completion: %+v", runs["app"])
@@ -1310,6 +1533,7 @@ func TestAutoRepackWindowExpiresDuringStorageProbe(t *testing.T) {
 			storageQueried = true
 			return []map[string]string{{"oid": "1", "relfilenode": "100", "tablespace": "pg_default"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
@@ -1318,6 +1542,7 @@ func TestAutoRepackWindowExpiresDuringStorageProbe(t *testing.T) {
 		if storageQueried {
 			return repackTestNow().Add(3 * time.Hour)
 		}
+
 		return repackTestNow()
 	}
 	execs, releases := 0, 0
@@ -1333,13 +1558,16 @@ func TestAutoRepackWindowExpiresDuringStorageProbe(t *testing.T) {
 		{Kind: "table", Schema: "public", Table: "second", BloatBytes: maint.AutoRepackMinBytes, Ratio: 0.5},
 	}}}
 	runs := autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
+
 	if !storageQueried {
 		t.Fatal("storage probe never ran, so the clock did not advance during it")
 	}
+
 	if execs != 0 || releases != 1 || runs["app"].Counts.Repacked != 0 || runs["app"].Counts.Unknown != 0 ||
 		runs["app"].Counts.Skipped != 2 {
 		t.Fatalf("execs %d releases %d run %+v", execs, releases, runs["app"])
 	}
+
 	for _, skip := range runs["app"].Skipped {
 		if skip.Reason != maint.RepackReasonWindowEnded {
 			t.Fatalf("window expiry skip reason: %+v", runs["app"].Skipped)
@@ -1364,10 +1592,12 @@ func TestAutoRepackReloadIdentityStopsRemaining(t *testing.T) {
 			changed := repackTestConfig(t)
 			variant.mutate(&changed.Clusters[0])
 			reloadRepackAs(t, changed)
+
 			reports := map[string]maint.BloatReport{"app": {Rows: []maint.BloatRow{
 				{Kind: "table", Schema: "public", Table: "first", BloatBytes: 2 * maint.AutoRepackMinBytes, Ratio: 0.5},
 				{Kind: "table", Schema: "public", Table: "second", BloatBytes: maint.AutoRepackMinBytes, Ratio: 0.5},
 			}}}
+
 			runs := autoRepack(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}, reports, repackTestNow())
 			if runs["app"].Counts.Skipped != 2 || runs["app"].Skipped[0].Reason != "config_changed" || pg.execs != 0 {
 				t.Fatalf("identity reload: %+v execs %d", runs["app"], pg.execs)
@@ -1381,10 +1611,13 @@ func TestMaintWeeklyReloadIdentity(t *testing.T) {
 		if strings.Contains(sql, "bloat_bytes") {
 			return nil, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
+
 	var ports []int
+
 	maintReportPG = func(spec config.ClusterSpec) sqlRunner {
 		ports = append(ports, spec.Port)
 		return pg
@@ -1396,9 +1629,11 @@ func TestMaintWeeklyReloadIdentity(t *testing.T) {
 	changed := repackTestConfig(t)
 	changed.Clusters[0].Port = 5434
 	reloadRepackAs(t, changed)
+
 	if _, err := jobMaintWeekly(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(ports) != 1 || ports[0] != 5434 {
 		t.Fatalf("weekly report ports %v", ports)
 	}
@@ -1410,10 +1645,13 @@ func TestMaintWeeklyReloadsProtectionUnderLock(t *testing.T) {
 			return []map[string]string{{"kind": "table", "schemaname": "public", "table_name": "events", "index_name": "",
 				"bloat_bytes": "104857600", "real_size": "209715200", "bloat_pct": "50", "fillfactor": "100", "is_na": "f"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	priv := &fakeRepackPG{answer: repackDefaultAnswer}
+
 	installRepackSeams(t, admin)
+
 	maintRepackPrivilegedPG = func(config.ClusterSpec) sqlRunner { return priv }
 	oldPath := maintStatePath
 	maintStatePath = filepath.Join(t.TempDir(), "maint.json")
@@ -1424,14 +1662,17 @@ func TestMaintWeeklyReloadsProtectionUnderLock(t *testing.T) {
 	protected.Maintenance.AutoRepack = true
 	protected.Clusters[0].Protected = true
 	reloadRepackAs(t, protected)
+
 	res, err := jobMaintWeekly(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	runs, ok := res.(map[string]any)["repack"].(map[string]maint.RepackRun)
 	if !ok || runs["app"].Counts.Skipped != 1 || runs["app"].Skipped[0].Reason != maint.RepackReasonProtected {
 		t.Fatalf("protected reload: %+v", res)
 	}
+
 	if len(priv.queries) != 0 || admin.execs != 0 {
 		t.Fatalf("protected reload privileged queries %v execs %d", priv.queries, admin.execs)
 	}
@@ -1443,22 +1684,27 @@ func TestMaintWeeklyAutoRepackDisabledClearsState(t *testing.T) {
 			return []map[string]string{{"kind": "table", "schemaname": "public", "table_name": "events", "index_name": "",
 				"bloat_bytes": "104857600", "real_size": "209715200", "bloat_pct": "50", "fillfactor": "100", "is_na": "f"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
+
 	oldPath := maintStatePath
 	maintStatePath = filepath.Join(t.TempDir(), "maint.json")
 	t.Cleanup(func() { maintStatePath = oldPath })
 	cfg := repackTestConfig(t)
 	cfg.Maintenance.AutoRepack = false
 	reloadRepackAs(t, cfg)
+
 	res, err := jobMaintWeekly(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, ok := repackResultData(t, res)["repack"]; ok {
 		t.Fatal("disabled auto-repack returned a repack result")
 	}
+
 	raw, _ := os.ReadFile(maintStatePath)
 	if strings.Contains(string(raw), `"repack"`) {
 		t.Fatalf("disabled auto-repack wrote repack state: %s", raw)
@@ -1471,40 +1717,49 @@ func TestMaintWeeklyAutoRepackEnabledRecordsCounts(t *testing.T) {
 			return []map[string]string{{"kind": "table", "schemaname": "public", "table_name": "events", "index_name": "",
 				"bloat_bytes": "104857600", "real_size": "209715200", "bloat_pct": "50", "fillfactor": "100", "is_na": "f"}}, nil
 		}
+
 		return repackDefaultAnswer(db, sql)
 	}}
 	installRepackSeams(t, pg)
+
 	oldPath := maintStatePath
 	maintStatePath = filepath.Join(t.TempDir(), "maint.json")
 	t.Cleanup(func() { maintStatePath = oldPath })
 	cfg := repackTestConfig(t)
 	cfg.Maintenance.AutoRepack = true
 	reloadRepackAs(t, cfg)
+
 	baseAnswer := pg.answer
 	pg.answer = repackStorageAnswerFor(pg, baseAnswer)
 	maintRepackExec = func(context.Context, *jobEnv, config.ClusterSpec, string) repackExecResult {
 		pg.storageVersion++
 		return repackExecResult{}
 	}
+
 	res, err := jobMaintWeekly(context.Background(), &jobEnv{Cluster: cfg, Job: "maint-weekly"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	runs, ok := res.(map[string]any)["repack"].(map[string]maint.RepackRun)
 	if !ok || runs["app"].Counts.Unknown != 1 || runs["app"].Counts.Repacked != 0 || runs["app"].Counts.Selected != 1 {
 		t.Fatalf("repack result %+v", res)
 	}
+
 	if runs["app"].Unknown["public.events"] == "" {
 		t.Fatalf("repack result missing unknown detail %+v", runs["app"])
 	}
+
 	raw, _ := os.ReadFile(maintStatePath)
 	if !strings.Contains(string(raw), `"unknown": 1`) || strings.Contains(string(raw), `"repacked": 1`) {
 		t.Fatalf("state missing unknown repack counts: %s", raw)
 	}
+
 	var st maintState
 	if err := json.Unmarshal(raw, &st); err != nil {
 		t.Fatal(err)
 	}
+
 	out := string(promfile.Render(maintFamilies(st)))
 	if !strings.Contains(out, `vaire_maint_repack_tables{db="app",outcome="unknown"} 1`) {
 		t.Fatalf("state did not round-trip to the unknown metric: %s", out)
@@ -1513,6 +1768,7 @@ func TestMaintWeeklyAutoRepackEnabledRecordsCounts(t *testing.T) {
 
 func TestMaintRepackFamilies(t *testing.T) {
 	st := maintState{Repack: map[string]maint.RepackCounts{"app": {Repacked: 1, Failed: 2, Unknown: 5, Skipped: 3, Busy: 4}}}
+
 	out := string(promfile.Render(maintFamilies(st)))
 	for _, want := range []string{
 		`vaire_maint_repack_tables{db="app",outcome="repacked"} 1`,
@@ -1557,6 +1813,7 @@ func TestMaintStateRepackBackwardShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"last_weekly":"2026-10-14T02:00:00Z"}`), &st); err != nil {
 		t.Fatal(err)
 	}
+
 	if st.Repack != nil {
 		t.Fatalf("legacy JSON gained a repack map: %+v", st.Repack)
 	}

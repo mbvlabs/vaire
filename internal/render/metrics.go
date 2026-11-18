@@ -2,6 +2,7 @@ package render
 
 import (
 	"encoding/json"
+	"maps"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -44,6 +45,7 @@ func ProbeTarget(socketDir string, spec config.ClusterSpec) string {
 	q.Set("sslmode", "disable")
 	q.Set("connect_timeout", "5")
 	u := url.URL{Scheme: "postgresql", User: url.User("vaire_monitor"), Path: "/" + spec.DatabaseName(), RawQuery: q.Encode()}
+
 	return u.String()
 }
 
@@ -72,6 +74,7 @@ func MetricsConf(locations []MetricsLocation, htpasswd string, allowlist []strin
 	if len(allowlist) > 0 {
 		allow = append(allow, "127.0.0.1", "::1")
 	}
+
 	for _, cidr := range allowlist {
 		if p, err := netip.ParsePrefix(cidr); err == nil {
 			allow = append(allow, p.Masked().String())
@@ -79,6 +82,7 @@ func MetricsConf(locations []MetricsLocation, htpasswd string, allowlist []strin
 			allow = append(allow, a.String())
 		}
 	}
+
 	return execute("vaire-metrics.conf.tmpl", map[string]any{"Locations": locations, "Htpasswd": htpasswd, "Allow": allow})
 }
 
@@ -98,19 +102,21 @@ type sdTarget struct {
 // itself) are left out.
 func TargetsJSON(host string, locations []MetricsLocation) []byte {
 	out := []sdTarget{}
+
 	for _, l := range locations {
 		if l.Labels == nil {
 			continue
 		}
+
 		labels := map[string]string{"__metrics_path__": l.Path, "__scheme__": "https"}
-		for k, v := range l.Labels {
-			labels[k] = v
-		}
+		maps.Copy(labels, l.Labels)
 		out = append(out, sdTarget{Targets: []string{host + ":443"}, Labels: labels})
 	}
+
 	raw, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		panic(err)
 	}
+
 	return append(raw, '\n')
 }

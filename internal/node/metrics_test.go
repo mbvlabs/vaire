@@ -29,6 +29,7 @@ func TestHostFamilies(t *testing.T) {
 		TLSNotAfter: time.Unix(1800000000, 0),
 		Deferred:    map[string]string{"other": "2026-10-14T00:00:00Z"},
 	}
+
 	out := string(promfile.Render(hostFamilies(r)))
 	for _, line := range []string{
 		`vaire_cluster_running{db="app"} 1`,
@@ -50,9 +51,11 @@ func TestHostFamilies(t *testing.T) {
 			t.Errorf("missing %s in\n%s", line, out)
 		}
 	}
+
 	if strings.Contains(out, `resource="cpu",kind="full"`) {
 		t.Error("cpu has no full line")
 	}
+
 	if strings.Contains(out, `vaire_cluster_memory_max_bytes`) {
 		t.Error("no MemoryMax set, but a max line")
 	}
@@ -63,6 +66,7 @@ func TestPendingFromIDs(t *testing.T) {
 	if !pendingFor(p, "app") || pendingFor(p, "other") {
 		t.Errorf("instance pending %v", p)
 	}
+
 	p = pendingFromIDs([]string{"kernel-tuning-v1"})
 	if !pendingFor(p, "other") {
 		t.Error("a server-level restart counts for every cluster")

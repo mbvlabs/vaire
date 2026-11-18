@@ -95,7 +95,9 @@ func NewSheet(h Host, clusters []Demand) Sheet {
 	for _, c := range clusters {
 		s.AllocatedMiB += c.MemoryMiB
 	}
+
 	s.FreeMiB = s.BudgetMiB - s.AllocatedMiB
+
 	return s
 }
 
@@ -110,10 +112,12 @@ func (s Sheet) Warnings(h Host) []Warning {
 			"%s of database sizes on a %s budget (%s RAM less a %s reserve): under load they are throttled and the page cache shrinks. Shrink one with vaire db resize, move one to its own node, or use a bigger server.",
 			FormatMiB(s.AllocatedMiB), FormatMiB(s.BudgetMiB), FormatMiB(s.RAMMiB), FormatMiB(s.ReserveMiB))})
 	}
+
 	quota := 0
 	for _, c := range s.Clusters {
 		quota += c.CPUQuotaPercent
 	}
+
 	switch {
 	case h.VCPU > 0 && len(s.Clusters) > CrowdedClustersPerVCPU*h.VCPU:
 		out = append(out, Warning{Code: WarnCPUCrowded, Message: fmt.Sprintf(
@@ -122,11 +126,13 @@ func (s Sheet) Warnings(h Host) []Warning {
 		out = append(out, Warning{Code: WarnCPUCrowded, Message: fmt.Sprintf(
 			"the cpu_quota values add up to %d%% on %d vCPU (%d%%)", quota, h.VCPU, 100*h.VCPU)})
 	}
+
 	if h.DiskGiB > 0 {
 		wal := 0
 		for _, c := range s.Clusters {
 			wal += c.MaxWALGiB
 		}
+
 		need := h.DiskUsedGiB + wal + ArchiveSpoolGiB
 		if need*100 > h.DiskGiB*DiskCrowdedPercent {
 			out = append(out, Warning{Code: WarnDiskCrowded, Message: fmt.Sprintf(
@@ -134,6 +140,7 @@ func (s Sheet) Warnings(h Host) []Warning {
 				h.DiskUsedGiB, wal, ArchiveSpoolGiB, DiskCrowdedPercent, h.DiskGiB)})
 		}
 	}
+
 	return out
 }
 
@@ -146,26 +153,32 @@ func WouldNotStart(h Host, c Demand, freedMiB int) string {
 	if !h.MemoryKnown {
 		return ""
 	}
+
 	pageMiB := h.HugePageSizeKiB / 1024
 	if pageMiB <= 0 {
 		pageMiB = 2
 	}
+
 	if c.HugePages > 0 && h.HugePagesFree >= c.HugePages {
 		return ""
 	}
+
 	if c.HugePagesRequired {
 		grow := h.AvailableMiB / pageMiB
 		if h.HugePagesFree+grow < c.HugePages {
 			return fmt.Sprintf("%s requires %d huge pages, but the pool has %d free and %s of memory can grow it by about %d",
 				c.Name, c.HugePages, h.HugePagesFree, FormatMiB(h.AvailableMiB), grow)
 		}
+
 		return ""
 	}
+
 	left := h.CommitLimitMiB - h.CommittedMiB + freedMiB
 	if c.SharedMemoryMiB > left {
 		return fmt.Sprintf("%s needs %s of shared memory at start-up, but only %s of CommitLimit is left (%s limit, %s committed)",
 			c.Name, FormatMiB(c.SharedMemoryMiB), FormatMiB(maxInt(0, left)), FormatMiB(h.CommitLimitMiB), FormatMiB(h.CommittedMiB))
 	}
+
 	return ""
 }
 
@@ -177,6 +190,7 @@ func SmallestThatStarts(h Host, candidates []Demand, freedMiB int) string {
 			return c.Size
 		}
 	}
+
 	return ""
 }
 
@@ -186,11 +200,13 @@ func SmallestThatStarts(h Host, candidates []Demand, freedMiB int) string {
 // so only a larger size counts.
 func LargestThatFits(candidates []Demand, freeMiB, aboveMiB int) string {
 	picked := ""
+
 	for _, c := range candidates {
 		if c.MemoryMiB <= freeMiB && c.MemoryMiB > aboveMiB {
 			picked = c.Size
 		}
 	}
+
 	return picked
 }
 
@@ -200,9 +216,12 @@ func FormatMiB(mib int) string {
 	if mib < 0 {
 		return "-" + FormatMiB(-mib)
 	}
+
 	if mib < 1024 {
 		return fmt.Sprintf("%d MiB", mib)
 	}
+
 	s := fmt.Sprintf("%.1f", float64(mib)/1024)
+
 	return strings.TrimSuffix(s, ".0") + " GiB"
 }

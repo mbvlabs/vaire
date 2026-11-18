@@ -42,19 +42,23 @@ func NewSecret() (string, error) {
 	if _, err := rand.Read(key); err != nil {
 		return "", err
 	}
+
 	return encoding.EncodeToString(key), nil
 }
 
 // DecodeSecret decodes a base32 secret, ignoring case, spaces and padding.
 func DecodeSecret(secret string) ([]byte, error) {
 	clean := strings.ToUpper(strings.ReplaceAll(strings.TrimRight(strings.TrimSpace(secret), "="), " ", ""))
+
 	key, err := encoding.DecodeString(clean)
 	if err != nil {
 		return nil, fmt.Errorf("the TOTP secret is not base32: %w", err)
 	}
+
 	if len(key) == 0 {
 		return nil, errors.New("the TOTP secret is empty")
 	}
+
 	return key, nil
 }
 
@@ -67,15 +71,18 @@ func Step(t time.Time) int64 {
 func HOTP(key []byte, counter int64, digits int) string {
 	var msg [8]byte
 	binary.BigEndian.PutUint64(msg[:], uint64(counter)) //nolint:gosec // G115: steps are positive.
+
 	mac := hmac.New(sha1.New, key)
 	mac.Write(msg[:])
 	sum := mac.Sum(nil)
 	offset := sum[len(sum)-1] & 0x0f
 	value := binary.BigEndian.Uint32(sum[offset:offset+4]) & 0x7fffffff
+
 	mod := uint32(1)
 	for range digits {
 		mod *= 10
 	}
+
 	return fmt.Sprintf("%0*d", digits, value%mod)
 }
 
@@ -92,22 +99,28 @@ func Verify(key []byte, code string, now time.Time, last int64) (int64, error) {
 	if !WellFormed(code) {
 		return 0, ErrInvalid
 	}
+
 	current := Step(now)
 	reused := false
+
 	for d := int64(-Skew); d <= Skew; d++ {
 		step := current + d
 		if subtle.ConstantTimeCompare([]byte(HOTP(key, step, Digits)), []byte(code)) != 1 {
 			continue
 		}
+
 		if step <= last {
 			reused = true
 			continue
 		}
+
 		return step, nil
 	}
+
 	if reused {
 		return 0, ErrReused
 	}
+
 	return 0, ErrInvalid
 }
 
@@ -121,11 +134,13 @@ func WellFormed(code string) bool {
 	if len(code) != Digits {
 		return false
 	}
+
 	for _, r := range code {
 		if r < '0' || r > '9' {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -138,5 +153,6 @@ func URI(issuer, account, secret string) string {
 	q.Set("algorithm", "SHA1")
 	q.Set("digits", fmt.Sprint(Digits))
 	q.Set("period", fmt.Sprint(int(Period/time.Second)))
+
 	return "otpauth://totp/" + label + "?" + q.Encode()
 }

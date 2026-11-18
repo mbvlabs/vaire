@@ -59,12 +59,16 @@ var (
 		if err != nil {
 			return repackExecResult{Err: err}
 		}
+
 		logLine(env.Report, env.Job, "pg_repack "+strings.Join(args, " "))
+
 		var lines []string
+
 		execErr := env.shell().Exec(ctx, env.Job, engine.Command{
 			Name: "runuser", Args: args,
 			OnLine: func(line string) { lines = append(lines, line) },
 		}, env.Report)
+
 		return repackExecResult{Output: secrets.Redact(strings.Join(lines, "\n")), Err: execErr}
 	}
 )
@@ -80,6 +84,7 @@ func maintRunToken(_ config.Cluster, params json.RawMessage) string {
 	if json.Unmarshal(params, &p) != nil || p.Kind != maint.Repack {
 		return ""
 	}
+
 	return p.DB
 }
 
@@ -110,6 +115,7 @@ func reloadRepackTarget(expected config.ClusterSpec) (config.Cluster, config.Clu
 	if err != nil {
 		return config.Cluster{}, config.ClusterSpec{}, err
 	}
+
 	current, ok := cfg.ClusterByName(expected.Name)
 	if !ok {
 		return config.Cluster{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
@@ -117,6 +123,7 @@ func reloadRepackTarget(expected config.ClusterSpec) (config.Cluster, config.Clu
 			"Retry after the configuration settles; vaire will not act on a database it can no longer identify.").
 			WithDetails(map[string]any{"reason": "config_changed", "database": expected.Name})
 	}
+
 	if targetIdentityChanged(expected, current) {
 		return config.Cluster{}, config.ClusterSpec{}, output.NewError(output.CodePrecondition,
 			"the target identity of "+expected.Name+" changed while the repack waited for its locks", output.ExitPrecondition,
@@ -128,6 +135,7 @@ func reloadRepackTarget(expected config.ClusterSpec) (config.Cluster, config.Clu
 				"expected_follows": expected.Follows, "current_follows": current.Follows,
 			})
 	}
+
 	return cfg, current, nil
 }
 
@@ -208,6 +216,7 @@ func repackNotRunning(db string) error {
 
 func repackProblemError(db, table string, problem maint.RepackSkip) error {
 	hint := repackProblemHint(problem.Reason)
+
 	return output.NewError(output.CodePrecondition, problem.Message, output.ExitPrecondition, hint).
 		WithDetails(map[string]any{"reason": problem.Reason, "database": db, "table": table})
 }
@@ -236,14 +245,14 @@ func repackProblemHint(reason string) string {
 }
 
 func repackReason(err error) string {
-	var cliErr *output.CLIError
-	if errors.As(err, &cliErr) {
+	if cliErr, ok := errors.AsType[*output.CLIError](err); ok {
 		if details, ok := cliErr.Details.(map[string]any); ok {
 			if reason, ok := details["reason"].(string); ok && reason != "" {
 				return reason
 			}
 		}
 	}
+
 	return maint.RepackReasonFailed
 }
 
@@ -283,43 +292,55 @@ func repackDefaultTablespaceError(db, dbDefault, sessionDefault string) error {
 // pg_repack's version functions.
 func checkRepackFacts(ctx context.Context, spec config.ClusterSpec) (repackFacts, error) {
 	local := maintRepackPG(spec)
+
 	rows, err := local.Query(ctx, spec.DatabaseName(), maint.RepackInstalledSQL, nil)
 	if err != nil {
 		return repackFacts{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read pg_repack's catalog facts; the database is reachable.")
 	}
+
 	if len(rows) != 1 {
 		return repackFacts{}, repackExtensionMissing(spec.Name, "pg_repack",
 			"maint repack runs pg_repack, which needs its extension in the database")
 	}
+
 	facts := repackFacts{Installed: rows[0]["extversion"]}
+
 	rows, err = local.Query(ctx, spec.DatabaseName(), maint.RepackDBDefaultTablespaceSQL, nil)
 	if err != nil {
 		return repackFacts{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the database default tablespace.")
 	}
+
 	if len(rows) != 1 {
 		return repackFacts{}, repackDefaultTablespaceError(spec.Name, "", "")
 	}
+
 	facts.DBDefaultTablespace = rows[0]["tablespace"]
 	if facts.DBDefaultTablespace != "pg_default" {
 		return repackFacts{}, repackDefaultTablespaceError(spec.Name, facts.DBDefaultTablespace, "")
 	}
+
 	rows, err = local.Query(ctx, spec.DatabaseName(), maint.RepackExtensionSchemaSQL, nil)
 	if err != nil {
 		return repackFacts{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read pg_repack's version function schema.")
 	}
+
 	if len(rows) != 1 || rows[0]["schema"] == "" {
 		return repackFacts{}, repackVersionUnknown(spec.Name, facts.Installed,
 			"the installed extension has no readable version_sql function")
 	}
+
 	facts.Schema = rows[0]["schema"]
+
 	client, err := maintRepackClientVersion(ctx)
 	if err != nil {
 		return repackFacts{}, repackClientMissing(err)
 	}
+
 	facts.Client = client
+
 	return facts, nil
 }
 
@@ -330,31 +351,39 @@ func checkRepackVersions(ctx context.Context, spec config.ClusterSpec) (maint.Re
 	if spec.Protected {
 		return maint.RepackVersions{}, ProtectedRepackError(spec.Name)
 	}
+
 	if spec.IsFollower() {
 		return maint.RepackVersions{}, followerError(spec, "maintenance")
 	}
+
 	facts, err := checkRepackFacts(ctx, spec)
 	if err != nil {
 		return maint.RepackVersions{}, err
 	}
+
 	rows, err := maintRepackPrivilegedPG(spec).Query(ctx, spec.DatabaseName(), maint.RepackVersionsSQL(facts.Schema), nil)
 	if err != nil {
 		return maint.RepackVersions{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read pg_repack's extension, library and SQL versions through the postgres peer connection.")
 	}
+
 	if len(rows) != 1 {
 		return maint.RepackVersions{}, repackVersionUnknown(spec.Name, facts.Installed,
 			"the installed extension has no readable version functions")
 	}
+
 	versions, err := maint.NormalizeRepackVersions(facts.Client, rows[0]["extension_version"], rows[0]["library_version"], rows[0]["sql_version"])
 	if err != nil || !versions.Match() {
 		return versions, repackVersionMismatch(spec.Name, versions)
 	}
+
 	versions.DBDefaultTablespace = rows[0]["db_default_tablespace"]
+
 	versions.SessionDefaultTablespace = rows[0]["session_default_tablespace"]
 	if !defaultTablespaceSupported(versions.DBDefaultTablespace, versions.SessionDefaultTablespace) {
 		return versions, repackDefaultTablespaceError(spec.Name, versions.DBDefaultTablespace, versions.SessionDefaultTablespace)
 	}
+
 	return versions, nil
 }
 
@@ -368,78 +397,98 @@ func inspectRepackTable(ctx context.Context, spec config.ClusterSpec, table stri
 	if err != nil {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: table, Reason: maint.RepackReasonUnsupportedRelation, Message: err.Error()}, nil
 	}
+
 	local := maintRepackPG(spec)
+
 	rows, err := local.Query(ctx, spec.DatabaseName(), maint.RelationFactsSQL(q), nil)
 	if err != nil {
 		return 0, repackTarget{}, nil, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the relation's kind, persistence and access method.")
 	}
+
 	if len(rows) == 0 {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: table, Reason: maint.RepackReasonRelationNotFound,
 			Message: table + " does not exist in " + spec.Name}, nil
 	}
+
 	facts := maint.ParseRelationFacts(rows[0])
 	if reason, message, unsupported := facts.UnsupportedOrdinaryTable(); unsupported {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: table, Reason: reason, Message: message}, nil
 	}
+
 	if expectedOID != 0 && facts.OID != expectedOID {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: table, Reason: maint.RepackReasonRelationChanged,
 			Message: table + " is now OID " + strconv.FormatInt(facts.OID, 10) + ", not the admitted OID " + strconv.FormatInt(expectedOID, 10)}, nil
 	}
+
 	canonical := facts.Schema + "." + facts.Table
+
 	cq, err := maint.QuoteRelation(canonical)
 	if err != nil {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: table, Reason: maint.RepackReasonUnsupportedRelation,
 			Message: "the resolved relation " + canonical + " is not a supported ordinary identifier: " + err.Error()}, nil
 	}
+
 	target := repackTarget{Name: canonical, OID: facts.OID}
+
 	extRows, err := local.Query(ctx, spec.DatabaseName(), maint.ExtensionChainSQL(cq), nil)
 	if err != nil {
 		return 0, repackTarget{}, nil, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the relation's extension dependency chain.")
 	}
+
 	if deps := maint.ParseExtensionChain(extRows); len(deps) > 0 {
 		d := deps[0]
+
 		return 0, repackTarget{}, &maint.RepackSkip{Table: canonical, Reason: maint.RepackReasonExtensionStorage,
 			Message: canonical + " is extension-managed (" + d.Extension + ", " + d.Scope + " at depth " + strconv.Itoa(d.Depth) + ")"}, nil
 	}
+
 	tsRows, err := local.Query(ctx, spec.DatabaseName(), maint.RepackTablespaceSQL(cq), nil)
 	if err != nil {
 		return 0, repackTarget{}, nil, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the table, TOAST and index tablespaces.")
 	}
+
 	if len(tsRows) == 0 {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: canonical, Reason: maint.RepackReasonRelationNotFound,
 			Message: canonical + " has no readable tablespace facts"}, nil
 	}
+
 	for _, fact := range maint.ParseTablespaceFacts(tsRows) {
 		if !fact.SupportedPGDATA() {
 			return 0, repackTarget{}, &maint.RepackSkip{Table: canonical, Reason: maint.RepackReasonTablespace,
 				Message: fact.Kind + " " + fact.Name + " is in tablespace " + fact.Tablespace + "; repack supports only pg_default (PGDATA)"}, nil
 		}
 	}
+
 	keyRows, err := local.Query(ctx, spec.DatabaseName(), maint.RepackKeySQL(cq), nil)
 	if err != nil {
 		return 0, repackTarget{}, nil, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the relation's primary key or unique key facts.")
 	}
+
 	if len(keyRows) != 1 || !boolValue(keyRows[0]["ok"]) {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: canonical, Reason: maint.RepackReasonNoKey,
 			Message: canonical + " has no primary key or unique index on NOT NULL key columns"}, nil
 	}
+
 	sizeRows, err := local.Query(ctx, spec.DatabaseName(), maint.RelationSizeSQL(cq), nil)
 	if err != nil {
 		return 0, repackTarget{}, nil, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the relation's total size.")
 	}
+
 	if len(sizeRows) != 1 {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: canonical, Reason: maint.RepackReasonRelationNotFound,
 			Message: canonical + " has no readable size"}, nil
 	}
+
 	size, err := strconv.ParseInt(sizeRows[0]["n"], 10, 64)
 	if err != nil {
 		return 0, repackTarget{}, nil, output.WrapError(output.CodeExternalCommand, fmt.Errorf("relation size: %w", err), output.ExitExternal, "")
 	}
+
 	return size, target, nil, nil
 }
 
@@ -448,17 +497,20 @@ func repackStorage(ctx context.Context, spec config.ClusterSpec, target repackTa
 	if err != nil {
 		return maint.RepackStorage{}, err
 	}
+
 	rows, err := maintRepackPG(spec).Query(ctx, spec.DatabaseName(), maint.RepackStorageSQL(q), nil)
 	if err != nil {
 		return maint.RepackStorage{}, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the relation's storage identity before or after the rewrite.")
 	}
+
 	if len(rows) != 1 {
 		return maint.RepackStorage{}, output.NewError(output.CodePrecondition,
 			target.Name+" has no readable storage identity", output.ExitPrecondition,
 			"Retry after the relation is stable; without its OID and relfilenode vaire reports the attempt's completion as unknown.").
 			WithDetails(map[string]any{"reason": maint.RepackReasonCompletionUnknown, "table": target.Name, "database": spec.Name})
 	}
+
 	return maint.ParseRepackStorage(rows[0]), nil
 }
 
@@ -471,16 +523,19 @@ func verifyRepackTargetIdentity(ctx context.Context, spec config.ClusterSpec, ta
 	if err != nil {
 		return err
 	}
+
 	rows, err := maintRepackPG(spec).Query(ctx, spec.DatabaseName(), maint.RelationFactsSQL(q), nil)
 	if err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the admitted relation identity immediately before pg_repack.")
 	}
+
 	if len(rows) == 0 {
 		return output.NewError(output.CodePrecondition, target.Name+" disappeared before pg_repack", output.ExitPrecondition,
 			"Retry the repack after the relation is stable.").
 			WithDetails(map[string]any{"reason": maint.RepackReasonRelationChanged, "table": target.Name, "database": spec.Name})
 	}
+
 	facts := maint.ParseRelationFacts(rows[0])
 	if facts.OID != target.OID || facts.Schema+"."+facts.Table != target.Name {
 		return output.NewError(output.CodePrecondition,
@@ -491,6 +546,7 @@ func verifyRepackTargetIdentity(ctx context.Context, spec config.ClusterSpec, ta
 				"expected_oid": target.OID, "actual_oid": facts.OID,
 			})
 	}
+
 	return nil
 }
 
@@ -506,6 +562,7 @@ func repackOutputSkipReason(output string) (string, bool) {
 	case strings.Contains(lower, "invalid index:"):
 		return maint.RepackReasonInvalidIndex, true
 	}
+
 	return "", false
 }
 
@@ -520,33 +577,41 @@ func classifyRepackCompletion(before maint.RepackStorage, res repackExecResult, 
 		before.RelFileNode > 0 && after.RelFileNode > 0 &&
 		before.TableSpace != "" && after.TableSpace != ""
 	storageChanged := storageKnown && before != after
+
 	skipReason, skipped := repackOutputSkipReason(res.Output)
 	if res.Err != nil {
 		detail := "completion_unknown/process_error: " + res.Err.Error()
 		if storageChanged {
 			detail += "; storage changed, but the rewrite completion is not attributable"
 		}
+
 		return maint.RepackOutcomeUnknown, maint.RepackReasonCompletionUnknown, detail
 	}
+
 	if skipped {
 		if !storageKnown {
 			return maint.RepackOutcomeUnknown, maint.RepackReasonCompletionUnknown,
 				"completion_unknown/clean_exit: pg_repack reported a skip, but valid storage facts are unavailable; completion is unknown"
 		}
+
 		if storageChanged {
 			return maint.RepackOutcomeUnknown, maint.RepackReasonCompletionUnknown,
 				"completion_unknown/clean_exit: pg_repack reported a skip, but storage changed; completion is not attributable"
 		}
+
 		return maint.RepackOutcomeSkipped, skipReason, res.Output
 	}
+
 	if !storageKnown {
 		return maint.RepackOutcomeUnknown, maint.RepackReasonCompletionUnknown,
 			"completion_unknown/clean_exit: pg_repack exited successfully, but valid storage facts are unavailable; rewrite completion could not be confirmed"
 	}
+
 	if storageChanged {
 		return maint.RepackOutcomeUnknown, maint.RepackReasonCompletionUnknown,
 			"completion_unknown/clean_exit: pg_repack exited successfully and storage changed, but rewrite completion is not attributable from external observables"
 	}
+
 	return maint.RepackOutcomeUnknown, maint.RepackReasonCompletionUnknown,
 		"completion_unknown/clean_exit: pg_repack exited successfully, but no completed rewrite could be attributed"
 }
@@ -561,24 +626,30 @@ func revalidateRepackTable(ctx context.Context, cfg config.Cluster, expected, sp
 		return 0, repackTarget{}, &maint.RepackSkip{Table: target.Name, Reason: "config_changed",
 			Message: "the target identity of " + expected.Name + " changed before this table started"}, nil
 	}
+
 	if spec.Protected {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: target.Name, Reason: maint.RepackReasonProtected,
 			Message: "repack is not supported on a protected database"}, nil
 	}
+
 	if spec.IsFollower() {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: target.Name, Reason: "is_follower",
 			Message: spec.Name + " is a follower; its source's tables are maintained on the source"}, nil
 	}
+
 	if !clusterRunning(spec) {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: target.Name, Reason: maint.RepackReasonClusterNotRunning,
 			Message: "the cluster is not running"}, nil
 	}
+
 	if err := refuseAnyActivationFence(cfg, spec.Name); err != nil {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: target.Name, Reason: repackReason(err), Message: err.Error()}, nil
 	}
+
 	if _, err := checkRepackVersions(ctx, spec); err != nil {
 		return 0, repackTarget{}, &maint.RepackSkip{Table: target.Name, Reason: repackReason(err), Message: err.Error()}, nil
 	}
+
 	return inspectRepackTable(ctx, spec, target.Name, target.OID)
 }
 
@@ -587,6 +658,7 @@ func checkRepackSpace(cfg config.Cluster, spec config.ClusterSpec, table string,
 	if err != nil {
 		return nil, err
 	}
+
 	needs, err := maintRepackSpace([]backup.SpaceNeed{{
 		Path:    cfg.Server.DataDirectory(spec.Name),
 		Need:    need,
@@ -595,6 +667,7 @@ func checkRepackSpace(cfg config.Cluster, spec config.ClusterSpec, table string,
 	if err != nil {
 		return needs, err
 	}
+
 	for _, n := range needs {
 		if n.Unknown {
 			return needs, output.NewError(output.CodePrecondition,
@@ -604,6 +677,7 @@ func checkRepackSpace(cfg config.Cluster, spec config.ClusterSpec, table string,
 				WithDetails(map[string]any{"reason": maint.RepackReasonSpaceUnknown, "database": spec.Name, "table": table, "space": needs})
 		}
 	}
+
 	return needs, nil
 }
 
@@ -616,39 +690,50 @@ func planRepack(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec
 	if spec.Protected {
 		return repackPlan{}, ProtectedRepackError(spec.Name)
 	}
+
 	if spec.IsFollower() {
 		return repackPlan{}, followerError(spec, "maintenance")
 	}
+
 	if !clusterRunning(spec) {
 		return repackPlan{}, repackNotRunning(spec.Name)
 	}
+
 	versions, versionCheck, err := repackPlanVersions(ctx, spec, privilegedVersionProbe)
 	if err != nil {
 		return repackPlan{}, err
 	}
+
 	deadline, err := repackPlanDeadline(cfg, spec, o, now)
 	if err != nil {
 		return repackPlan{}, err
 	}
+
 	named := o.Table != ""
+
 	candidates, err := repackPlanCandidates(ctx, cfg, spec, o, named)
 	if err != nil {
 		return repackPlan{}, err
 	}
+
 	plan := repackPlan{Versions: versions, VersionCheck: versionCheck, Deadline: deadline}
+
 	for _, table := range candidates {
 		target, space, skip, err := planRepackTable(ctx, cfg, spec, table, named)
 		if err != nil {
 			return repackPlan{}, err
 		}
+
 		if skip != nil {
 			plan.Skipped = append(plan.Skipped, *skip)
 			continue
 		}
+
 		plan.Tables = append(plan.Tables, target.Name)
 		plan.Targets = append(plan.Targets, target)
 		plan.Space = append(plan.Space, space...)
 	}
+
 	return plan, nil
 }
 
@@ -658,12 +743,15 @@ func repackPlanVersions(ctx context.Context, spec config.ClusterSpec, privileged
 		if err != nil {
 			return maint.RepackVersions{}, "", err
 		}
+
 		return versions, "matched", nil
 	}
+
 	facts, err := checkRepackFacts(ctx, spec)
 	if err != nil {
 		return maint.RepackVersions{}, "", err
 	}
+
 	return maint.RepackVersions{Client: facts.Client, Extension: facts.Installed}, "deferred_to_job", nil
 }
 
@@ -671,10 +759,12 @@ func repackPlanDeadline(cfg config.Cluster, spec config.ClusterSpec, o *maint.Op
 	if o.Now {
 		return time.Time{}, nil
 	}
+
 	in, left := windowLeft(cfg, now)
 	if !in {
 		return time.Time{}, repackOutsideWindow(cfg, spec.Name)
 	}
+
 	return now.Add(left), nil
 }
 
@@ -682,11 +772,13 @@ func repackPlanCandidates(ctx context.Context, cfg config.Cluster, spec config.C
 	if named {
 		return []string{o.Table}, nil
 	}
+
 	rows, err := maintRepackPG(spec).Query(ctx, spec.DatabaseName(), maint.ReportSetup+maint.BloatSQL(), nil)
 	if err != nil {
 		return nil, output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Read the bloat estimate to choose tables for repack.")
 	}
+
 	return maint.RepackCandidates(maint.ParseBloat(spec.Name, rows, 0), cfg.Maintenance.RepackBloatThreshold, 1), nil
 }
 
@@ -698,21 +790,27 @@ func planRepackTable(ctx context.Context, cfg config.Cluster, spec config.Cluste
 		if named {
 			return repackTarget{}, nil, nil, err
 		}
+
 		return repackTarget{}, nil, &maint.RepackSkip{Table: table, Reason: maint.RepackReasonFailed, Message: err.Error()}, nil
 	}
+
 	if problem != nil {
 		if named {
 			return repackTarget{}, nil, nil, repackProblemError(spec.Name, table, *problem)
 		}
+
 		return repackTarget{}, nil, problem, nil
 	}
+
 	space, err := checkRepackSpace(cfg, spec, target.Name, size)
 	if err != nil {
 		if named {
 			return repackTarget{}, nil, nil, err
 		}
+
 		return repackTarget{}, nil, &maint.RepackSkip{Table: target.Name, Reason: repackReason(err), Message: err.Error()}, nil
 	}
+
 	return target, space, nil, nil
 }
 
@@ -723,32 +821,40 @@ func jobRepack(ctx context.Context, env *jobEnv, p maint.Options, spec config.Cl
 	if err := refuseAnyActivationFence(env.Cluster, spec.Name); err != nil {
 		return nil, err
 	}
+
 	plan, err := planRepack(ctx, env.Cluster, spec, &p, repackNow(), true)
 	if err != nil {
 		return nil, err
 	}
+
 	run := maint.RepackRun{DB: spec.Name, Tables: plan.Tables, Failed: map[string]string{}, Unknown: map[string]string{}}
 	for _, skip := range plan.Skipped {
 		run.Skipped = append(run.Skipped, skip)
 		run.Counts.AddSkipped(skip.Reason)
 	}
+
 	for i, target := range plan.Targets {
 		prepared, decision, err := prepareRepackTarget(ctx, env, p, plan, spec, i, target, &run)
 		if err != nil {
 			return nil, err
 		}
+
 		if decision == repackStop {
 			break
 		}
+
 		if decision == repackNext {
 			continue
 		}
+
 		execRes := maintRepackExec(ctx, env, prepared.spec, prepared.target.Name)
 		after, afterErr := repackStorage(ctx, prepared.spec, prepared.target)
 		outcome, reason, detail := classifyRepackCompletion(prepared.before, execRes, after, afterErr)
 		recordRepackOutcome(&run, target.Name, spec.Name, env, outcome, reason, detail)
 	}
+
 	run.Counts.At = stamp()
+
 	res := map[string]any{
 		"db": spec.Name, "kind": maint.Repack, "tables": run.Tables,
 		"repacked": run.Repacked, "failed": run.Failed, "unknown": run.Unknown,
@@ -757,6 +863,7 @@ func jobRepack(ctx context.Context, env *jobEnv, p maint.Options, spec config.Cl
 	if len(run.Failed) > 0 {
 		return res, repackFailed(run)
 	}
+
 	return res, nil
 }
 
@@ -780,36 +887,47 @@ type repackPrepared struct {
 // identity, not the config loaded before the locks.
 func prepareRepackTarget(ctx context.Context, env *jobEnv, p maint.Options, plan repackPlan, spec config.ClusterSpec, i int, target repackTarget, run *maint.RepackRun) (repackPrepared, repackStep, error) {
 	table := target.Name
+
 	freshCfg, freshSpec, err := reloadRepackTarget(spec)
 	if err != nil {
 		return repackPrepared{}, repackNext, repackTableFailure(run, table, p, err)
 	}
+
 	env.Cluster = freshCfg
+
 	size, freshTarget, problem, err := revalidateRepackTable(ctx, freshCfg, spec, freshSpec, target)
 	if err != nil {
 		return repackPrepared{}, repackNext, repackTableFailure(run, table, p, err)
 	}
+
 	if problem != nil {
 		if p.Table != "" {
 			return repackPrepared{}, repackNext, repackProblemError(freshSpec.Name, table, *problem)
 		}
+
 		run.Skipped = append(run.Skipped, *problem)
 		run.Counts.AddSkipped(problem.Reason)
+
 		return repackPrepared{}, repackNext, nil
 	}
+
 	if _, err := checkRepackSpace(freshCfg, freshSpec, freshTarget.Name, size); err != nil {
 		if p.Table != "" {
 			return repackPrepared{}, repackNext, err
 		}
+
 		run.Skipped = append(run.Skipped, maint.RepackSkip{Table: freshTarget.Name, Reason: repackReason(err), Message: err.Error()})
 		run.Counts.AddSkipped(repackReason(err))
+
 		return repackPrepared{}, repackNext, nil
 	}
+
 	before, err := repackStorage(ctx, freshSpec, freshTarget)
 	if err != nil {
 		run.Unknown[table] = "completion_unknown/not_started: storage identity unavailable before execution: " + err.Error()
 		run.Counts.AddUnknown()
 		logLine(env.Report, env.Job, "pg_repack for "+table+" was not started; rewrite completion is unknown: "+err.Error())
+
 		return repackPrepared{}, repackNext, nil
 	}
 	// Re-read the admitted canonical relation immediately before the
@@ -819,8 +937,10 @@ func prepareRepackTarget(ctx context.Context, env *jobEnv, p maint.Options, plan
 		if p.Table != "" {
 			return repackPrepared{}, repackNext, err
 		}
+
 		run.Skipped = append(run.Skipped, maint.RepackSkip{Table: freshTarget.Name, Reason: repackReason(err), Message: err.Error()})
 		run.Counts.AddSkipped(repackReason(err))
+
 		return repackPrepared{}, repackNext, nil
 	}
 	// The window is checked after every probe and immediately before
@@ -830,10 +950,13 @@ func prepareRepackTarget(ctx context.Context, env *jobEnv, p maint.Options, plan
 		if p.Table != "" {
 			return repackPrepared{}, repackNext, repackWindowEnded(freshSpec.Name)
 		}
+
 		repackSkipRemaining(run, plan.Targets, i, maint.RepackReasonWindowEnded,
 			"the maintenance window ended while this table was being prepared")
+
 		return repackPrepared{}, repackStop, nil
 	}
+
 	return repackPrepared{spec: freshSpec, target: freshTarget, before: before}, repackProceed, nil
 }
 
@@ -841,8 +964,10 @@ func repackTableFailure(run *maint.RepackRun, table string, p maint.Options, err
 	if p.Table != "" {
 		return err
 	}
+
 	run.Failed[table] = err.Error()
 	run.Counts.AddFailed()
+
 	return nil
 }
 
@@ -876,16 +1001,21 @@ func acquireAutoRepackLocks(ctx context.Context, env *jobEnv, spec config.Cluste
 		if engine.IsLockHeld(err) {
 			return nil, maint.RepackReasonHeavyIOBusy, nil
 		}
+
 		return nil, "", err
 	}
+
 	cluster, err := engine.AcquireCluster(ctx, spec.Name, engine.LockShared, env.Job, rpc.NewRequestID(), 0)
 	if err != nil {
 		heavy()
+
 		if engine.IsLockHeld(err) {
 			return nil, maint.RepackReasonClusterBusy, nil
 		}
+
 		return nil, "", err
 	}
+
 	return func() { cluster(); heavy() }, "", nil
 }
 
@@ -921,6 +1051,7 @@ func repackDBWideReason(reason string) bool {
 		maint.RepackReasonSpaceUnknown, maint.RepackReasonDefaultTablespace:
 		return true
 	}
+
 	return false
 }
 
@@ -933,17 +1064,21 @@ func autoRepack(ctx context.Context, env *jobEnv, reports map[string]maint.Bloat
 	inWindow, left := windowLeft(cfg, now)
 	deadline := now.Add(left)
 	out := map[string]maint.RepackRun{}
+
 	for _, spec := range cfg.Clusters {
 		candidates := maint.RepackCandidates(reports[spec.Name], cfg.Maintenance.RepackBloatThreshold, maint.AutoRepackMinBytes)
+
 		run := maint.RepackRun{DB: spec.Name, Tables: candidates, Failed: map[string]string{}, Unknown: map[string]string{}}
 		if reason, message := autoRepackUnavailable(spec, inWindow); reason != "" {
 			autoRepackSeed(&run, candidates, reason, message)
 		} else {
 			autoRepackTables(ctx, env, spec, candidates, deadline, &run)
 		}
+
 		run.Counts.At = stamp()
 		out[spec.Name] = run
 	}
+
 	return out
 }
 
@@ -960,6 +1095,7 @@ func autoRepackUnavailable(spec config.ClusterSpec, inWindow bool) (reason, mess
 	case !inWindow:
 		return maint.RepackReasonOutsideWindow, "it is outside the maintenance window"
 	}
+
 	return "", ""
 }
 
@@ -985,30 +1121,39 @@ func autoRepackTables(ctx context.Context, env *jobEnv, spec config.ClusterSpec,
 			autoRepackSkipRemaining(run, candidates, i, maint.RepackReasonWindowEnded, "the maintenance window ended before this table started")
 			break
 		}
+
 		release, busy, err := autoRepackLocks(ctx, env, spec)
 		if busy != "" {
 			for _, rest := range candidates[i:] {
 				autoRepackBusy(run, rest, busy)
 			}
+
 			break
 		}
+
 		if err != nil {
 			run.Failed[table] = err.Error()
 			run.Counts.AddFailed()
 			logLine(env.Report, env.Job, "auto-repack of "+table+" could not take its locks: "+err.Error())
+
 			continue
 		}
+
 		prepared, decision := prepareAutoRepack(ctx, env, spec, candidates, i, table, deadline, run)
 		if decision != autoRepackProceed {
 			release()
+
 			if decision == autoRepackStopDatabase {
 				break
 			}
+
 			continue
 		}
+
 		execRes := maintRepackExec(ctx, env, prepared.spec, prepared.target.Name)
 		after, afterErr := repackStorage(ctx, prepared.spec, prepared.target)
 		outcome, reason, detail := classifyRepackCompletion(prepared.before, execRes, after, afterErr)
+
 		release()
 		recordAutoRepackOutcome(run, table, prepared.spec.Name, env, outcome, reason, detail)
 	}
@@ -1019,47 +1164,60 @@ func prepareAutoRepack(ctx context.Context, env *jobEnv, spec config.ClusterSpec
 	if err != nil {
 		reason := repackReason(err)
 		autoRepackSkipRemaining(run, candidates, i, reason, err.Error())
+
 		return repackPrepared{}, autoRepackStopDatabase
 	}
+
 	env.Cluster = freshCfg
+
 	size, freshTarget, problem, err := revalidateRepackTable(ctx, freshCfg, spec, freshSpec, repackTarget{Name: table})
 	if err != nil {
 		run.Failed[table] = err.Error()
 		run.Counts.AddFailed()
 		logLine(env.Report, env.Job, "auto-repack of "+table+" failed validation: "+err.Error())
+
 		return repackPrepared{}, autoRepackNextTable
 	}
+
 	if problem != nil {
 		return repackPrepared{}, autoRepackSkipOrStop(run, table, candidates, i, problem.Reason, problem.Message)
 	}
+
 	if _, err := checkRepackSpace(freshCfg, freshSpec, freshTarget.Name, size); err != nil {
 		reason := repackReason(err)
 		return repackPrepared{}, autoRepackSkipOrStop(run, table, candidates, i, reason, err.Error())
 	}
+
 	before, err := repackStorage(ctx, freshSpec, freshTarget)
 	if err != nil {
 		run.Unknown[table] = "completion_unknown/not_started: storage identity unavailable before execution: " + err.Error()
 		run.Counts.AddUnknown()
 		logLine(env.Report, env.Job, "auto-repack of "+table+" was not started; rewrite completion is unknown: "+err.Error())
+
 		return repackPrepared{}, autoRepackNextTable
 	}
+
 	if err := verifyRepackTargetIdentity(ctx, freshSpec, freshTarget); err != nil {
 		reason := repackReason(err)
 		return repackPrepared{}, autoRepackSkipOrStop(run, table, candidates, i, reason, err.Error())
 	}
+
 	if autoRepackNow().After(deadline) {
 		autoRepackSkipRemaining(run, candidates, i, maint.RepackReasonWindowEnded, "the maintenance window ended while this table was being prepared")
 		return repackPrepared{}, autoRepackStopDatabase
 	}
+
 	return repackPrepared{spec: freshSpec, target: freshTarget, before: before}, autoRepackProceed
 }
 
 func autoRepackSkipOrStop(run *maint.RepackRun, table string, candidates []string, i int, reason, message string) autoRepackDecision {
 	autoRepackSkip(run, table, reason, message)
+
 	if repackDBWideReason(reason) {
 		autoRepackSkipRemaining(run, candidates, i+1, reason, message)
 		return autoRepackStopDatabase
 	}
+
 	return autoRepackNextTable
 }
 

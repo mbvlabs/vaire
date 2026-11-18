@@ -31,15 +31,18 @@ func followerCfg() config.Cluster {
 			Backup: config.ClusterBackup{RetentionFull: 4}},
 		{Name: "app_follower", Node: "db1", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app", Extensions: []string{"pg_stat_statements"}},
 	}
+
 	return cfg
 }
 
 func reason(t *testing.T, err error) string {
 	t.Helper()
+
 	var ce *output.CLIError
 	rejectf(t, !errors.As(err, &ce), "not a CLI error: %v", err)
 	d, _ := ce.Details.(map[string]any)
 	r, _ := d["reason"].(string)
+
 	return r
 }
 
@@ -50,6 +53,7 @@ func request(method string, params map[string]any) rpc.Request {
 
 func TestRefuseFollower(t *testing.T) {
 	cfg := followerCfg()
+
 	refused := []rpc.Request{
 		request("backup.now", map[string]any{"database": "app_follower"}),
 		request("backup.verify", map[string]any{"database": "app_follower"}),
@@ -68,10 +72,12 @@ func TestRefuseFollower(t *testing.T) {
 			t.Errorf("%s is not refused for a follower", req.Method)
 			continue
 		}
+
 		if got := reason(t, err); got != "is_follower" {
 			t.Errorf("%s: reason %q", req.Method, got)
 		}
 	}
+
 	allowed := []rpc.Request{
 		request("backup.now", map[string]any{"database": "app"}),
 		request("db.fork", map[string]any{"source": "app", "name": "x"}),
@@ -102,13 +108,16 @@ func TestRefuseFollowerRestorePromoteAndUndo(t *testing.T) {
 			cfg.Clusters[i].Protected = true
 		}
 	}
+
 	for _, method := range []string{"restore.promote", "restore.undo"} {
 		err := refuseFollower(request(method, map[string]any{"database": "app_follower"}), cfg)
+
 		var ce *output.CLIError
 		rejectf(t, !errors.As(err, &ce) || ce.Code != output.CodePrecondition, "%s on a protected follower: %v", method, err)
 		details, _ := ce.Details.(map[string]any)
 		rejectf(t, details["reason"] != "is_follower" || details["database"] != "app_follower" || details["source"] != "app", "%s: details %v", method, details)
 		rejectf(t, !strings.Contains(ce.Message, "app_follower is a follower of app") || !strings.Contains(ce.Hint, "vaire db unfollow app_follower"), "%s: message %q, hint %q", method, ce.Message, ce.Hint)
+
 		if err := refuseFollower(request(method, map[string]any{"database": "app"}), cfg); err != nil {
 			t.Fatalf("%s on the source: %v", method, err)
 		}
@@ -119,6 +128,7 @@ func TestRefuseSourceDrop(t *testing.T) {
 	cfg := followerCfg()
 	err := refuseSourceDrop(cfg, "app")
 	rejectf(t, err == nil || reason(t, err) != "has_followers", "dropping a source with followers: %v", err)
+
 	if err := refuseSourceDrop(cfg, "app_follower"); err != nil {
 		t.Fatalf("dropping a follower: %v", err)
 	}
@@ -135,6 +145,7 @@ func TestUnfollowToken(t *testing.T) {
 	if got := unfollowToken(config.Cluster{}, json.RawMessage(`{"name":"app_follower"}`)); got != "app_follower/unfollow" {
 		t.Fatalf("token %q", got)
 	}
+
 	if got := unfollowToken(config.Cluster{}, json.RawMessage(`{}`)); got != "" {
 		t.Fatalf("token without a name %q", got)
 	}
@@ -145,12 +156,15 @@ func TestFollowerSpecAndCommand(t *testing.T) {
 	src, _ := cfg.ClusterByName("app")
 	spec := followerSpec(src, "f", "")
 	rejectf(t, spec.Follows != "app" || spec.Size != "large" || spec.Stanza != "" || spec.Backup != (config.ClusterBackup{}) || spec.Settings["work_mem"] != "8MB", "follower spec %+v", spec)
+
 	if small := followerSpec(src, "f", "small"); small.Size != "small" || small.Memory != "" {
 		t.Fatalf("--size: %+v", small)
 	}
+
 	if got := followerName(dbFollowParams{Source: "app"}); got != "app_follower" {
 		t.Fatalf("default name %q", got)
 	}
+
 	if got := followCommand(dbFollowParams{Source: "app", Name: "f"})("small"); got != "vaire db follow app --name f --size small" {
 		t.Fatalf("suggested command %q", got)
 	}
@@ -166,6 +180,7 @@ func TestFollowDoesNotInheritProtection(t *testing.T) {
 			cfg.Clusters[i].Protected = true
 		}
 	}
+
 	src, _ := cfg.ClusterByName("app")
 	spec := followerSpec(src, "app_follower", "")
 	rejectf(t, spec.Protected, "the follower inherited the source's protection: %+v", spec)
@@ -181,6 +196,7 @@ func TestUnfollowKeepsNoInheritedProtection(t *testing.T) {
 		if ownProtection {
 			name = "protected by the operator"
 		}
+
 		t.Run(name, func(t *testing.T) {
 			cfg := followerLifecycleCfg(t, "app_follower")
 			for i := range cfg.Clusters {
@@ -191,26 +207,35 @@ func TestUnfollowKeepsNoInheritedProtection(t *testing.T) {
 					cfg.Clusters[i].Protected = ownProtection
 				}
 			}
+
 			dir := t.TempDir()
 			store := state.FileStore{Path: filepath.Join(dir, "cluster.toml")}
 			old := followerState
 			followerState = func() state.Store { return store }
+
 			t.Cleanup(func() { followerState = old })
+
 			raw, err := cfg.Encode()
 			reject(t, err != nil, err)
+
 			if err := store.Save(raw); err != nil {
 				t.Fatal(err)
 			}
+
 			stanza, err := config.NewStanza("app_follower")
 			reject(t, err != nil, err)
+
 			if _, err := independent("app_follower", stanza); err != nil {
 				t.Fatal(err)
 			}
+
 			updated, _, err := store.Load()
 			reject(t, err != nil, err)
+
 			f, _ := updated.ClusterByName("app_follower")
 			rejectf(t, f.Follows != "" || f.Stanza != stanza, "unfollowed %+v", f)
 			rejectf(t, f.Protected != ownProtection, "the unfollowed copy has protected=%v, want %v", f.Protected, ownProtection)
+
 			if src, _ := updated.ClusterByName("app"); !src.Protected {
 				t.Fatal("unfollow cleared the source's protection")
 			}
@@ -221,11 +246,14 @@ func TestUnfollowKeepsNoInheritedProtection(t *testing.T) {
 func TestPlaceFollowerHasNoStanza(t *testing.T) {
 	cfg := followerCfg()
 	src, _ := cfg.ClusterByName("app")
+
 	spec := followerSpec(src, "f2", "small")
 	if err := placeCluster(cfg, &spec); err != nil {
 		t.Fatal(err)
 	}
+
 	rejectf(t, spec.Stanza != "" || spec.Port != 5435 || spec.Node != "db1", "placed %+v", spec)
+
 	cfg.Clusters = append(cfg.Clusters, spec)
 	if err := cfg.Validate(); err != nil && strings.Contains(err.Error(), "clusters[") {
 		t.Fatalf("the placed follower does not validate: %v", err)
@@ -248,28 +276,32 @@ func TestOwnedSlots(t *testing.T) {
 
 func TestFollowerFamilies(t *testing.T) {
 	fams := followerFamilies(map[string]followerReading{
-		"app_follower": {Source: "app", SourceKnown: true, Streaming: true, LagBytes: int64p(10), LagSeconds: float64p(1),
-			SlotExists: true, SlotRetainedBytes: int64p(100)},
+		"app_follower": {Source: "app", SourceKnown: true, Streaming: true, LagBytes: new(int64(10)), LagSeconds: new(float64(1)),
+			SlotExists: true, SlotRetainedBytes: new(int64(100))},
 		"old":    {Source: "app", SourceKnown: true, SlotExists: true, SlotWALStatus: "lost"},
 		"unread": {Source: "app"},
 	})
 	byName := map[string]float64{}
+
 	for _, f := range fams {
 		for _, s := range f.Samples {
 			byName[f.Name+"/"+s.Labels[0].Value] = s.Value
 		}
 	}
+
 	if byName["vaire_follower_streaming/app_follower"] != 1 || byName["vaire_follower_lag_bytes/app_follower"] != 10 ||
 		byName["vaire_follower_lag_seconds/app_follower"] != 1 || byName["vaire_follower_slot_retained_bytes/app_follower"] != 100 ||
 		byName["vaire_follower_slot_lost/old"] != 1 || byName["vaire_follower_slot_lost/app_follower"] != 0 {
 		t.Fatalf("%v", byName)
 	}
+
 	for _, metric := range []string{"vaire_follower_streaming", "vaire_follower_lag_bytes", "vaire_follower_lag_seconds",
 		"vaire_follower_slot_retained_bytes", "vaire_follower_slot_lost"} {
 		if _, ok := byName[metric+"/unread"]; ok {
 			t.Errorf("an unread follower published %s: %v", metric, byName)
 		}
 	}
+
 	for _, metric := range []string{"vaire_follower_lag_bytes", "vaire_follower_lag_seconds", "vaire_follower_slot_retained_bytes"} {
 		if _, ok := byName[metric+"/old"]; ok {
 			t.Errorf("an unmeasured value published %s for old: %v", metric, byName)
@@ -311,27 +343,35 @@ func TestFollowerSlotState(t *testing.T) {
 func TestApplyFollowerConfigsRunsEachFollowerAlone(t *testing.T) {
 	cfg := followerCfg()
 	cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: "app_follower2", Node: "db1", Port: 5435, Size: "small", StatementTimeout: "60s", Follows: "app"})
+
 	var runs []engine.Options
+
 	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		runs = append(runs, opts)
 		return engine.ApplyData{Restarts: []engine.ClusterRestart{{Cluster: opts.DB}}}, nil, nil
 	}
 	defer func() { applyFollowerStep = engine.Apply }()
+
 	got, err := applyFollowerConfigs(context.Background(), cfg, engine.Runtime{}, "app", engine.Options{Confirm: engine.Confirmation{Server: true}})
 	reject(t, err != nil, err)
+
 	want := []string{"app_follower", "app_follower2"}
 	rejectf(t, len(runs) != len(want), "ran %d applies, want one per follower (%d)", len(runs), len(want))
+
 	for i, f := range want {
 		if runs[i].DB != f {
 			t.Errorf("run %d is for %q, want %q", i, runs[i].DB, f)
 		}
+
 		if !slices.Equal(runs[i].Only, []string{steps.ConfigStepID(f)}) {
 			t.Errorf("run %d selects %v, want only %s", i, runs[i].Only, steps.ConfigStepID(f))
 		}
+
 		if !runs[i].Confirm.Server {
 			t.Errorf("run %d lost the restart confirmation", i)
 		}
 	}
+
 	if got.Failed != "" || len(got.Restarts) != 2 {
 		t.Errorf("result %+v, want both followers restarted", got)
 	}
@@ -343,20 +383,26 @@ func TestApplyFollowerConfigsStopsOnAFailure(t *testing.T) {
 	cfg := followerCfg()
 	cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: "app_follower2", Node: "db1", Port: 5435, Size: "small", StatementTimeout: "60s", Follows: "app"})
 	boom := errors.New("postgres-config-v1@app_follower: writing the rendered configuration: disk full")
+
 	var runs []string
+
 	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		runs = append(runs, opts.DB)
 		if opts.DB == "app_follower" {
 			return engine.ApplyData{}, nil, boom
 		}
+
 		return engine.ApplyData{}, nil, nil
 	}
 	defer func() { applyFollowerStep = engine.Apply }()
+
 	got, err := applyFollowerConfigs(context.Background(), cfg, engine.Runtime{}, "app", engine.Options{})
 	rejectf(t, !errors.Is(err, boom), "got %v, want the follower's error", err)
+
 	if !slices.Equal(runs, []string{"app_follower"}) {
 		t.Errorf("ran %v, want the run to stop at app_follower", runs)
 	}
+
 	if got.Failed != "app_follower" {
 		t.Errorf("Failed %q, want app_follower", got.Failed)
 	}
@@ -375,25 +421,33 @@ func TestFollowerPlansShowTheFloorChange(t *testing.T) {
 	plans, err := followerPlans(context.Background(), cfg, rt, "app", was, now, engine.Options{JournalPath: filepath.Join(t.TempDir(), "journal.json")})
 	reject(t, err != nil, err)
 	rejectf(t, len(plans) != 1 || plans[0].Follower != "app_follower", "plans %+v, want app_follower only", plans)
+
 	if plans[0].Restart != engine.RestartRestart {
 		t.Errorf("restart %q, want a restart: the floors are postmaster settings", plans[0].Restart)
 	}
+
 	var step *engine.PlanStep
+
 	for i := range plans[0].Plan.Steps {
 		if id := plans[0].Plan.Steps[i].ID; strings.Contains(id, "other") || id == steps.ConfigStepID("app") {
 			t.Errorf("the follower's plan includes %s", id)
 		}
+
 		if plans[0].Plan.Steps[i].ID == steps.ConfigStepID("app_follower") {
 			step = &plans[0].Plan.Steps[i]
 		}
 	}
+
 	rejectf(t, step == nil || step.Action != "apply", "plan %+v lacks an apply of app_follower's configuration", plans[0].Plan.Steps)
+
 	var conf string
+
 	for _, d := range step.Diffs {
 		if strings.HasSuffix(d.Path, render.FollowerConfName) {
 			conf = d.Diff
 		}
 	}
+
 	if !strings.Contains(conf, "max_connections = 100") {
 		t.Errorf("the plan does not render the source's max_connections floor:\n%s", conf)
 	}
@@ -412,16 +466,21 @@ func resizeFixture(t *testing.T, cfg config.Cluster, size string, dryRun bool) (
 	detectHost = func(string) (hostinfo.Info, error) {
 		return hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}, nil
 	}
+
 	t.Cleanup(func() {
 		followerState, backup.RecordsPath, cpuJournalPath, detectHost = oldState, oldRecords, oldJournal, oldDetect
 	})
+
 	raw, err := cfg.Encode()
 	reject(t, err != nil, err)
+
 	if err := store.Save(raw); err != nil {
 		t.Fatal(err)
 	}
+
 	env := &Env{Cluster: cfg, Req: request("db.resize", map[string]any{"name": "app", "size": size})}
 	env.Req.DryRun = dryRun
+
 	return env, store
 }
 
@@ -435,10 +494,12 @@ func TestDBListStoppedFollowerDoesNotReadReplication(t *testing.T) {
 	oldRecords := backup.RecordsPath
 	backup.RecordsPath = filepath.Join(dir, "records.json")
 	oldNames, oldPG, oldFollowerPG := databaseListClusterNames, databaseListPG, followerPG
+
 	t.Cleanup(func() {
 		backup.RecordsPath = oldRecords
 		databaseListClusterNames, databaseListPG, followerPG = oldNames, oldPG, oldFollowerPG
 	})
+
 	databaseListClusterNames = func(context.Context) (map[string]string, error) {
 		return map[string]string{"app": "online", "app_follower": "down"}, nil
 	}
@@ -451,9 +512,12 @@ func TestDBListStoppedFollowerDoesNotReadReplication(t *testing.T) {
 
 	res, err := handleDBList(context.Background(), &Env{Cluster: cfg})
 	reject(t, err != nil, err)
+
 	data, _ := res.Data.(map[string]any)
 	databases, _ := data["databases"].([]databaseInfo)
+
 	var app, follower *databaseInfo
+
 	for i := range databases {
 		switch databases[i].Name {
 		case "app":
@@ -462,19 +526,25 @@ func TestDBListStoppedFollowerDoesNotReadReplication(t *testing.T) {
 			follower = &databases[i]
 		}
 	}
+
 	rejectf(t, app == nil || app.State != stateRunning, "app row %+v, want running", app)
 	reject(t, follower == nil, "db list lost the stopped follower row")
+
 	if follower.State != stateStopped || follower.Follows != "app" {
 		t.Errorf("stopped follower %+v, want state %q and follows app", follower, stateStopped)
 	}
+
 	if follower.Follower != nil {
 		t.Errorf("db list read a stopped follower's replication: %+v", follower.Follower)
 	}
+
 	if followerReads != 0 {
 		t.Errorf("db list queried replication %d times for a stopped follower", followerReads)
 	}
+
 	raw, err := json.Marshal(follower)
 	reject(t, err != nil, err)
+
 	if strings.Contains(string(raw), `"follower"`) {
 		t.Errorf("stopped follower row carries a follower object: %s", raw)
 	}
@@ -485,10 +555,12 @@ func TestDBListStoppedFollowerDoesNotReadReplication(t *testing.T) {
 // running says whether the old cluster gives its shared memory back.
 func fixedResizeHost(t *testing.T, host hostinfo.Info, mem hostinfo.Memory, running bool) {
 	t.Helper()
+
 	oldDetect, oldMemory, oldRunning := detectHost, readHostMemory, clusterRunning
 	detectHost = func(string) (hostinfo.Info, error) { return host, nil }
 	readHostMemory = func() (hostinfo.Memory, bool) { return mem, true }
 	clusterRunning = func(config.ClusterSpec) bool { return running }
+
 	t.Cleanup(func() { detectHost, readHostMemory, clusterRunning = oldDetect, oldMemory, oldRunning })
 }
 
@@ -503,10 +575,12 @@ func TestResizeRefusesADecreasedFollowerFloor(t *testing.T) {
 func runResizeFollowerFloorRefusal(t *testing.T, dryRun bool) {
 	t.Helper()
 	env, store := resizeFixture(t, followerLifecycleCfg(t, "app_follower"), "small", dryRun)
+
 	_, before, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	applies := 0
 	oldResize, oldFollower := applyResizeStep, applyFollowerStep
 	applyResizeStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
@@ -517,50 +591,64 @@ func runResizeFollowerFloorRefusal(t *testing.T, dryRun bool) {
 		applies++
 		return engine.ApplyData{}, nil, nil
 	}
+
 	t.Cleanup(func() { applyResizeStep, applyFollowerStep = oldResize, oldFollower })
+
 	_, err = handleDBResize(context.Background(), env)
 	applyResizeStep, applyFollowerStep = oldResize, oldFollower
+
 	if err == nil || reason(t, err) != "has_followers" {
 		t.Fatalf("dry run %v: got %v, want has_followers", dryRun, err)
 	}
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) || cliErr.Code != output.CodePrecondition || cliErr.ExitCode != output.ExitPrecondition {
 		t.Fatalf("dry run %v: %v is not a precondition error", dryRun, err)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if details["database"] != "app" {
 		t.Errorf("details database %v", details["database"])
 	}
+
 	followers, _ := details["followers"].([]string)
 	if !slices.Contains(followers, "app_follower") {
 		t.Errorf("details followers %v", followers)
 	}
+
 	settings, _ := details["settings"].([]recoveryFloorDecrease)
 	found := false
+
 	for _, s := range settings {
 		if s.Setting == "max_connections" && s.Before == 100 && s.After == 30 {
 			found = true
 		}
 	}
+
 	if !found {
 		t.Errorf("details settings %v lack app_follower max_connections 100 -> 30", settings)
 	}
+
 	if !strings.Contains(cliErr.Message, "recovery floors would decrease") || !strings.Contains(cliErr.Hint, "Unfollow or drop") {
 		t.Errorf("message %q, hint %q", cliErr.Message, cliErr.Hint)
 	}
+
 	if applies != 0 {
 		t.Errorf("dry run %v: %d applies, want none", dryRun, applies)
 	}
+
 	_, after, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(before) != string(after) {
 		t.Errorf("dry run %v: the refusal saved cluster.toml", dryRun)
 	}
 }
 func TestRecoveryFloorSnapshotGuard(t *testing.T) {
 	host := hostinfo.Info{VCPU: 4, RAMMiB: 8192}
+
 	for _, setting := range steps.FloorSettings {
 		t.Run(setting, func(t *testing.T) {
 			old := followerCfg()
@@ -571,14 +659,17 @@ func TestRecoveryFloorSnapshotGuard(t *testing.T) {
 			next.Clusters[0].Settings = map[string]string{setting: "50"}
 			err := guardRecoveryFloorChanges(old, next, host)
 			rejectf(t, err == nil || reason(t, err) != "has_followers", "masked source decrease: %v", err)
+
 			next.Clusters[0] = old.Clusters[0]
 			next.Clusters[1].Settings = map[string]string{setting: "150"}
 			err = guardRecoveryFloorChanges(old, next, host)
 			rejectf(t, err == nil || reason(t, err) != "follower_recovery_floor_decrease", "follower decrease: %v", err)
+
 			next.Clusters[1].Settings = map[string]string{setting: "0x100"}
 			if err := guardRecoveryFloorChanges(old, next, host); err != nil {
 				t.Fatalf("hex growth: %v", err)
 			}
+
 			next.Clusters[1].Settings = map[string]string{setting: "not-a-number"}
 			if err := guardRecoveryFloorChanges(old, next, host); err == nil {
 				t.Fatal("invalid floor accepted")
@@ -595,20 +686,26 @@ func TestConfigSetRefusesRecoveryFloorDecrease(t *testing.T) {
 			env, store := resizeFixture(t, cfg, "small", dry)
 			oldFactory := configSetStore
 			configSetStore = func() state.FileStore { return store }
+
 			t.Cleanup(func() { configSetStore = oldFactory })
+
 			revision, err := store.Revision()
 			reject(t, err != nil, err)
 			_, before, err := store.Load()
 			reject(t, err != nil, err)
+
 			params := map[string]any{"base_revision": revision}
+
 			if full {
 				cfg.Clusters[0].Size = "small"
 				raw, err := cfg.Encode()
 				reject(t, err != nil, err)
+
 				params["toml"] = string(raw)
 			} else {
 				params["set"] = map[string]string{"clusters.app.size": "small"}
 			}
+
 			env.Req = request("config.set", params)
 			env.Req.DryRun = dry
 			_, err = handleConfigSet(context.Background(), env)
@@ -626,20 +723,26 @@ func TestConfigSetRefusesFollowerDecrease(t *testing.T) {
 		env, store := resizeFixture(t, cfg, "small", false)
 		oldFactory := configSetStore
 		configSetStore = func() state.FileStore { return store }
+
 		t.Cleanup(func() { configSetStore = oldFactory })
+
 		revision, err := store.Revision()
 		reject(t, err != nil, err)
 		_, before, err := store.Load()
 		reject(t, err != nil, err)
+
 		params := map[string]any{"base_revision": revision}
+
 		if full {
 			cfg.Clusters[1].Size = "small"
 			raw, err := cfg.Encode()
 			reject(t, err != nil, err)
+
 			params["toml"] = string(raw)
 		} else {
 			params["set"] = map[string]string{"clusters.app_follower.size": "small"}
 		}
+
 		env.Req = request("config.set", params)
 		_, err = handleConfigSet(context.Background(), env)
 		rejectf(t, err == nil || reason(t, err) != "follower_recovery_floor_decrease", "full=%v: %v", full, err)
@@ -657,6 +760,7 @@ func TestResizeFollowerFloorRefusedBeforeApply(t *testing.T) {
 		env.Req.DryRun = dry
 		_, before, err := store.Load()
 		reject(t, err != nil, err)
+
 		calls := 0
 		oldResize, oldFollower := applyResizeStep, applyFollowerStep
 		applyResizeStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
@@ -669,6 +773,7 @@ func TestResizeFollowerFloorRefusedBeforeApply(t *testing.T) {
 		}
 		_, err = handleDBResize(context.Background(), env)
 		applyResizeStep, applyFollowerStep = oldResize, oldFollower
+
 		rejectf(t, err == nil || reason(t, err) != "follower_recovery_floor_decrease", "dry=%v: %v", dry, err)
 		_, after, err := store.Load()
 		rejectf(t, err != nil || string(before) != string(after) || calls != 0, "dry=%v: saved or applied on refusal, calls=%d err=%v", dry, calls, err)
@@ -685,28 +790,35 @@ func TestRecoveryFloorTopologyChanges(t *testing.T) {
 	next.Clusters = append([]config.ClusterSpec(nil), old.Clusters...)
 	next.Postgres.Settings = map[string]string{"max_connections": "100"}
 	next.Clusters[0].Settings = map[string]string{"max_connections": "200"}
+
 	next.Clusters[1].Settings = map[string]string{"max_connections": "250"}
 	if err := guardRecoveryFloorChanges(old, next, host); err == nil || reason(t, err) != "follower_recovery_floor_decrease" {
 		t.Fatalf("simultaneous global/source/follower edit: %v", err)
 	}
+
 	next.Clusters[1].Settings = map[string]string{"max_connections": "300"}
 	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
 		t.Fatalf("unchanged effective values: %v", err)
 	}
+
 	next.Clusters[1].CPUQuota = "50%"
 	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
 		t.Fatalf("CPU-only edit: %v", err)
 	}
+
 	next = old
 	next.Clusters = append([]config.ClusterSpec(nil), old.Clusters...)
+
 	next.Clusters[1].Follows = ""
 	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
 		t.Fatalf("unfollow: %v", err)
 	}
+
 	next.Clusters = next.Clusters[:1]
 	if err := guardRecoveryFloorChanges(old, next, host); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
+
 	if err := guardRecoveryFloorChanges(next, old, host); err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -726,7 +838,9 @@ func TestResizeAppliesFollowersFirstOnRetry(t *testing.T) {
 		hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
 		hostinfo.Memory{CommitLimitMiB: 16384, CommittedMiB: 1024, AvailableMiB: 8192, HugePageSizeKiB: 2048},
 		true)
+
 	var runs []string
+
 	followerRuns := 0
 	oldResize, oldFollower := applyResizeStep, applyFollowerStep
 	applyResizeStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
@@ -734,23 +848,30 @@ func TestResizeAppliesFollowersFirstOnRetry(t *testing.T) {
 			runs = append(runs, "source")
 			return engine.ApplyData{Restarts: []engine.ClusterRestart{{Cluster: "app"}}}, nil, nil
 		}
+
 		runs = append(runs, "kernel")
+
 		return engine.ApplyData{}, nil, nil
 	}
+
 	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		runs = append(runs, opts.DB)
+
 		followerRuns++
 		if followerRuns == 1 {
 			return engine.ApplyData{}, nil, errors.New("writing app_follower's 60-vaire-follower.conf: disk full")
 		}
+
 		return engine.ApplyData{Restarts: []engine.ClusterRestart{{Cluster: opts.DB}}}, nil, nil
 	}
 	defer func() { applyResizeStep, applyFollowerStep = oldResize, oldFollower }()
 
 	_, err := handleDBResize(context.Background(), env)
+
 	var followerErr *output.CLIError
 	rejectf(t, !errors.As(err, &followerErr) || !strings.Contains(followerErr.Error(), "app_follower") || !strings.Contains(followerErr.Hint, "run the same db resize again"), "failed follower update: %v", err)
 	rejectf(t, !slices.Equal(runs, []string{"kernel", "app_follower"}), "first attempt ran %v, want the kernel and the follower only", runs)
+
 	saved, _, err := store.Load()
 	reject(t, err != nil, err)
 	rejectf(t, saved.Clusters[0].Size != "medium", "the failed attempt saved size %q, want medium", saved.Clusters[0].Size)
@@ -760,7 +881,9 @@ func TestResizeAppliesFollowersFirstOnRetry(t *testing.T) {
 	res, err := handleDBResize(context.Background(), env)
 	rejectf(t, err != nil, "retry: %v", err)
 	rejectf(t, !slices.Equal(runs, []string{"kernel", "app_follower", "source"}), "retry ran %v, want the follower before the source", runs)
+
 	data, _ := res.Data.(map[string]any)
+
 	apply, _ := data["apply"].(engine.ApplyData)
 	if len(apply.Restarts) != 2 || apply.Restarts[0].Cluster != "app_follower" || apply.Restarts[1].Cluster != "app" {
 		t.Errorf("restarts %+v, want app_follower then app", apply.Restarts)
@@ -779,12 +902,14 @@ func TestResizeRefusesInsufficientCommitHeadroom(t *testing.T) {
 		hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
 		hostinfo.Memory{CommitLimitMiB: 1024, CommittedMiB: 1024, AvailableMiB: 0, HugePageSizeKiB: 2048},
 		false)
+
 	applies := 0
 	oldResize, oldFollower := applyResizeStep, applyFollowerStep
 	applyResizeStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
 		applies++
 		return engine.ApplyData{}, nil, nil
 	}
+
 	applyFollowerStep = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
 		applies++
 		return engine.ApplyData{}, nil, nil
@@ -793,11 +918,14 @@ func TestResizeRefusesInsufficientCommitHeadroom(t *testing.T) {
 
 	_, err := handleDBResize(context.Background(), env)
 	rejectf(t, err == nil || reason(t, err) != "would_not_start", "no CommitLimit headroom: got %v, want would_not_start", err)
+
 	if applies != 0 {
 		t.Errorf("the refusal ran %d applies", applies)
 	}
+
 	saved, _, err := store.Load()
 	reject(t, err != nil, err)
+
 	if saved.Clusters[0].Size != "small" {
 		t.Errorf("the refusal saved size %q, want small", saved.Clusters[0].Size)
 	}
@@ -811,14 +939,18 @@ func TestFollowerPlansMarkAPendingRestart(t *testing.T) {
 	rt := engine.Runtime{Host: hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}}}
 	path := filepath.Join(t.TempDir(), "journal.json")
 	id := steps.ConfigStepID("app_follower")
+
 	var inputs []byte
+
 	for _, step := range engine.Expand(steps.Catalog(), cfg) {
 		if step.ID() == id {
 			var err error
+
 			inputs, err = step.Inputs(cfg, rt)
 			reject(t, err != nil, err)
 		}
 	}
+
 	journal := &engine.Journal{
 		Steps:          map[string]engine.JournalEntry{id: {Status: engine.StatusCompleted, InputsHash: engine.InputsHash(id, inputs)}},
 		RestartPending: []string{id},
@@ -826,24 +958,31 @@ func TestFollowerPlansMarkAPendingRestart(t *testing.T) {
 	if err := journal.Save(path); err != nil {
 		t.Fatal(err)
 	}
+
 	journalBefore, err := os.ReadFile(path)
 	reject(t, err != nil, err)
 	cfgBefore, err := cfg.Encode()
 	reject(t, err != nil, err)
+
 	spec, _ := cfg.ClusterByName("app")
 	plans, err := followerPlans(context.Background(), cfg, rt, "app", spec, spec, engine.Options{JournalPath: path})
 	reject(t, err != nil, err)
 	rejectf(t, len(plans) != 1 || plans[0].Follower != "app_follower" || plans[0].Restart != engine.RestartRestart, "plans %+v, want app_follower restarting", plans)
+
 	if plans[0].Plan.WouldApply != 0 {
 		t.Errorf("the preview would apply %d steps, want none", plans[0].Plan.WouldApply)
 	}
+
 	journalAfter, err := os.ReadFile(path)
 	reject(t, err != nil, err)
+
 	if string(journalBefore) != string(journalAfter) {
 		t.Error("the preview changed the journal")
 	}
+
 	cfgAfter, err := cfg.Encode()
 	reject(t, err != nil, err)
+
 	if string(cfgBefore) != string(cfgAfter) {
 		t.Error("the preview changed the configuration")
 	}
@@ -854,14 +993,18 @@ func TestFollowerPlansMarkAPendingRestart(t *testing.T) {
 func TestApplyFollowerConfigsExplainsADeferredRestart(t *testing.T) {
 	cfg := followerCfg()
 	old := applyFollowerStep
+
 	applyFollowerStep = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		id := steps.ConfigStepID(opts.DB)
+
 		return engine.ApplyData{RestartPending: []string{id}, ConfirmTokens: []string{opts.DB + "/restart"}},
 			[]output.Warning{{Code: "restart_pending", Message: "a restart is pending for " + id + "; re-run apply with --confirm " + opts.DB + "/restart"}}, nil
 	}
 	defer func() { applyFollowerStep = old }()
+
 	got, err := applyFollowerConfigs(context.Background(), cfg, engine.Runtime{}, "app", engine.Options{})
 	reject(t, err != nil, err)
+
 	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0].Message, "app_follower may pause replay until it restarts") ||
 		!strings.Contains(got.Warnings[0].Message, "PostgreSQL 18 pauses recovery") {
 		t.Fatalf("warnings %+v, want the replay pause", got.Warnings)

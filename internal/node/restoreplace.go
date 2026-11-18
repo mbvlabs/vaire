@@ -75,6 +75,7 @@ func placementOf(p string) (placement, bool) {
 			return e.placement, true
 		}
 	}
+
 	return placement{}, false
 }
 
@@ -94,50 +95,63 @@ func bootstrapRestore(ctx context.Context, env *Env, p bootstrapParams) (Result,
 	if err != nil {
 		return Result{}, output.NewError(output.CodeConfig, "cluster_toml does not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	if err := cfg.ValidateFor(config.ScopeHost); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
+
 	if _, err := bootstrapPreflight(ctx, cfg); err != nil {
 		return Result{}, err
 	}
+
 	if err := placementFresh(p.InstanceID); err != nil {
 		return Result{}, err
 	}
+
 	raw, err := base64.StdEncoding.DecodeString(env.Req.Secrets[steps.SecretMasterBundle])
 	if err != nil || len(raw) == 0 {
 		return Result{}, output.NewError(output.CodeInputRequired, "the request has no master bundle", output.ExitInput,
 			"Run vaire server init --restore from your machine; it sends the decrypted bundle.").WithDetails(map[string]any{"secret": steps.SecretMasterBundle})
 	}
+
 	b, err := masterbackup.ReadTar(raw)
 	if err != nil {
 		return Result{}, output.WrapError(output.CodeBundleCorrupt, err, output.ExitSecrets, "")
 	}
+
 	if b.Manifest.Server != cfg.Name() {
 		return Result{}, output.NewError(output.CodePrecondition, "the bundle is server "+b.Manifest.Server+"'s, not "+cfg.Name()+"'s", output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": "bundle_server_mismatch"})
 	}
+
 	files, pruned, err := restoreFiles(b, cfg, p.ClusterTOML, time.Now())
 	if err != nil {
 		return Result{}, err
 	}
+
 	res := RestorePlaced{Phase: PhaseRestore, Pruned: pruned}
+
 	for _, f := range files {
 		if err := placeFile(f); err != nil {
 			return Result{}, fmt.Errorf("place %s: %w", f.Path, err)
 		}
+
 		res.Placed = append(res.Placed, f.Path)
 		if strings.HasPrefix(f.Path, "/etc/ssh/") && strings.HasSuffix(f.Path, ".pub") {
 			res.SSHHostKeys = append(res.SSHHostKeys, strings.TrimSpace(string(f.Data)))
 		}
 	}
+
 	if err := placeInstance(p.InstanceID, p.Epoch); err != nil {
 		return Result{}, err
 	}
+
 	for _, c := range cfg.Clusters {
 		res.Awaiting = append(res.Awaiting, c.Name)
 	}
 	// New SSH connections get the restored host keys; this one stays up.
 	_ = exec.CommandContext(ctx, "systemctl", "try-reload-or-restart", "ssh.service").Run()
+
 	return Result{Data: res}, nil
 }
 
@@ -152,9 +166,11 @@ func placementFresh(instance string) error {
 	if config.IsNotExist(err) {
 		return nil
 	}
+
 	if err != nil {
 		return err
 	}
+
 	placed, _ := masterbackup.ReadInstance("")
 	if instance == "" || placed != instance {
 		return output.NewError(output.CodePrecondition,
@@ -163,12 +179,14 @@ func placementFresh(instance string) error {
 			"Check --host: it must be the new VPS, never the running master.").
 			WithDetails(map[string]any{"reason": "already_a_node", "server": existing.Server})
 	}
+
 	if entries, err := os.ReadDir("/etc/postgresql/18"); err == nil && len(entries) > 0 {
 		return output.NewError(output.CodePrecondition,
 			"this rebuild's node already has PostgreSQL clusters; the bundle was placed before",
 			output.ExitPrecondition, "Continue with vaire server init --restore --resume.").
 			WithDetails(map[string]any{"reason": "already_placed"})
 	}
+
 	return nil
 }
 
@@ -177,41 +195,53 @@ func placementFresh(instance string) error {
 // and awaiting recovery, protect.json's failures and lockout reset, and every
 // SSH key checked.
 func restoreFiles(b masterbackup.Bundle, cfg config.Cluster, clusterTOML string, now time.Time) ([]masterbackup.File, []backup.PrunedRecord, error) {
-	var out []masterbackup.File
-	var pruned []backup.PrunedRecord
+	var (
+		out    []masterbackup.File
+		pruned []backup.PrunedRecord
+	)
+
 	haveRecords := false
+
 	for _, f := range b.Files {
 		switch {
 		case f.Path == masterbackup.ClusterPath:
 			f.Data = []byte(clusterTOML)
 		case f.Path == masterbackup.RecordsPath:
 			haveRecords = true
+
 			data, p, err := backup.PruneForRestore(f.Data, awaitingOf(cfg), now)
 			if err != nil {
 				return nil, nil, err
 			}
+
 			f.Data, pruned = data, p
 		case f.Path == masterbackup.ProtectPath:
 			data, err := resetProtect(f.Data)
 			if err != nil {
 				return nil, nil, err
 			}
+
 			f.Data = data
 		case strings.HasPrefix(f.Path, "/etc/ssh/"):
 			if err := checkHostKey(f); err != nil {
 				return nil, nil, err
 			}
 		}
+
 		out = append(out, f)
 	}
+
 	if !haveRecords && len(cfg.Clusters) > 0 {
 		data, _, err := backup.PruneForRestore(nil, awaitingOf(cfg), now)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		out = append(out, masterbackup.NewFile(masterbackup.RecordsPath, "root", "root", 0o600, data))
 	}
+
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+
 	return out, pruned, nil
 }
 
@@ -220,6 +250,7 @@ func awaitingOf(cfg config.Cluster) []backup.AwaitingDatabase {
 	for _, c := range cfg.Clusters {
 		out = append(out, backup.AwaitingDatabase{Name: c.Name, Stanza: c.Stanza})
 	}
+
 	return out
 }
 
@@ -230,11 +261,14 @@ func resetProtect(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return nil, fmt.Errorf("protect.json in the bundle does not parse: %w", err)
 	}
+
 	st.Failures, st.LockedUntil = 0, time.Time{}
+
 	out, err := json.MarshalIndent(st, "", "  ") //nolint:gosec // G117: the root-only file that holds the secret.
 	if err != nil {
 		return nil, err
 	}
+
 	return append(out, '\n'), nil
 }
 
@@ -244,11 +278,14 @@ func checkHostKey(f masterbackup.File) error {
 		if _, _, _, _, err := ssh.ParseAuthorizedKey(f.Data); err != nil {
 			return fmt.Errorf("%s in the bundle is not a public key: %w", f.Path, err)
 		}
+
 		return nil
 	}
+
 	if _, err := ssh.ParseRawPrivateKey(f.Data); err != nil {
 		return fmt.Errorf("%s in the bundle is not a private key: %w", f.Path, err)
 	}
+
 	return nil
 }
 
@@ -258,9 +295,11 @@ func placeFile(f masterbackup.File) error {
 	if err != nil {
 		return err
 	}
+
 	if err := placeDir("/", filepath.Dir(f.Path)); err != nil {
 		return err
 	}
+
 	return engine.WriteFileAtomicOwned(f.Path, f.Data, mode, owner, group)
 }
 
@@ -273,13 +312,16 @@ func placedAs(p string) (owner, group string, mode os.FileMode, err error) {
 	if !ok {
 		return "", "", 0, fmt.Errorf("%s has no placement", p)
 	}
+
 	owner, group = pl.owner, pl.group
 	if _, _, err := engine.ResolveIDs(owner, ""); err != nil {
 		owner = "root"
 	}
+
 	if _, _, err := engine.ResolveIDs("", group); err != nil {
 		group = "root"
 	}
+
 	return owner, group, pl.mode, nil
 }
 
@@ -297,17 +339,21 @@ func placeDir(root, dir string) error {
 	} else {
 		return nil
 	}
+
 	mode, known := placeDirs[dir]
 	if !known {
 		mode = 0o755
 	}
+
 	full := filepath.Join(root, dir)
 	if err := os.Mkdir(full, mode); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return nil
 		}
+
 		return err
 	}
+
 	return os.Chmod(full, mode)
 }
 
@@ -318,13 +364,16 @@ func placeInstance(instance string, e *masterbackup.Epoch) error {
 	if err := os.MkdirAll(masterbackup.Dir, 0o700); err != nil {
 		return err
 	}
+
 	if instance != "" {
 		if err := engine.WriteFileAtomic(masterbackup.InstancePath, []byte(instance+"\n"), 0o600); err != nil {
 			return err
 		}
 	}
+
 	if e != nil {
 		return saveLocalEpoch(*e)
 	}
+
 	return nil
 }

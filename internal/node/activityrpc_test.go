@@ -18,8 +18,10 @@ import (
 
 func withActivityStore(t *testing.T, store activityStore) {
 	t.Helper()
+
 	old := activityStoreFactory
 	activityStoreFactory = func() (activityStore, error) { return store, nil }
+
 	t.Cleanup(func() { activityStoreFactory = old })
 }
 
@@ -34,8 +36,10 @@ func TestActivityListQuery(t *testing.T) {
 	env := activityEnv(t, `{"since":"24h","operation_id":"01m4x0me0nbq95hnndt213bgh9","outcome":"failed","action":"backup.now","limit":9999}`)
 	res, err := handleActivityList(t.Context(), env)
 	reject(t, err != nil, err)
+
 	page, ok := res.Data.(activity.Page)
 	rejectf(t, !ok || page.Schema != activity.Schema, "result = %#v", res.Data)
+
 	q := store.query
 	rejectf(t, q.OperationID != testOperationID, "operation_id = %q, want normalized %q", q.OperationID, testOperationID)
 	rejectf(t, q.Limit != activity.MaxLimit, "limit = %d, want cap %d", q.Limit, activity.MaxLimit)
@@ -46,6 +50,7 @@ func TestActivityListQuery(t *testing.T) {
 func TestActivityListRejectsUnknownAndUnsafeParams(t *testing.T) {
 	store := &fakeActivityStore{}
 	withActivityStore(t, store)
+
 	cases := []string{
 		`{"bogus":true}`,
 		`{"outcome":"maybe"}`,
@@ -61,9 +66,11 @@ func TestActivityListRejectsUnknownAndUnsafeParams(t *testing.T) {
 	for _, params := range cases {
 		_, err := handleActivityList(t.Context(), activityEnv(t, params))
 		rejectf(t, err == nil, "params %s were accepted", params)
+
 		var cliErr *output.CLIError
 		rejectf(t, !errors.As(err, &cliErr) || cliErr.Code != output.CodeUsage, "params %s error = %v, want usage_error", params, err)
 	}
+
 	reject(t, len(store.recorded()) != 0, "a rejected query wrote a history event")
 }
 
@@ -79,15 +86,18 @@ func TestActivityShowRequiresExactlyOneID(t *testing.T) {
 
 	res, err := handleActivityShow(t.Context(), activityEnv(t, `{"job_id":"`+testJobID+`"}`))
 	reject(t, err != nil, err)
+
 	if _, ok := res.Data.(activity.Page); !ok {
 		t.Fatalf("result = %#v", res.Data)
 	}
+
 	rejectf(t, store.query.JobID != testJobID || store.query.OperationID != "" || store.query.RequestID != "", "query = %+v", store.query)
 	rejectf(t, store.query.Limit != activityShowDefaultLimit, "limit = %d, want bounded default %d", store.query.Limit, activityShowDefaultLimit)
 
 	if _, err := handleActivityShow(t.Context(), activityEnv(t, `{"operation_id":"bad"}`)); err == nil {
 		t.Fatal("show accepted a malformed id")
 	}
+
 	reject(t, len(store.recorded()) != 0, "show wrote a history event")
 }
 
@@ -96,6 +106,7 @@ func TestActivityHealthAndReadErrors(t *testing.T) {
 	withActivityStore(t, store)
 	res, err := handleActivityHealth(t.Context(), activityEnv(t, `{}`))
 	reject(t, err != nil, err)
+
 	health, ok := res.Data.(activity.Health)
 	rejectf(t, !ok || !health.Exists || !health.Readable, "health = %#v", res.Data)
 	reject(t, len(store.recorded()) != 0, "health wrote a history event")
@@ -105,18 +116,22 @@ func TestActivityHealthAndReadErrors(t *testing.T) {
 	}
 
 	const storeText = "secret path /var/log/vaire/activity said no"
+
 	store.healthErr = errors.New(storeText)
 	_, err = handleActivityHealth(t.Context(), activityEnv(t, `{}`))
 	reject(t, err == nil, "health hid a store error")
 	raw, _ := json.Marshal(output.Fail(nil, err))
 	rejectf(t, strings.Contains(string(raw), storeText), "health error leaked store text: %s", raw)
+
 	var cliErr *output.CLIError
 	rejectf(t, !errors.As(err, &cliErr) || cliErr.Code != output.CodePrecondition, "health error = %v", err)
+
 	if details, ok := cliErr.Details.(map[string]any); !ok || details["reason"] != "activity_unavailable" {
 		t.Fatalf("health error details = %#v", cliErr.Details)
 	}
 
 	store.queryErr = errors.New(storeText)
+
 	if _, err := handleActivityList(t.Context(), activityEnv(t, `{}`)); err == nil {
 		t.Fatal("list hid a store error")
 	}
@@ -131,10 +146,12 @@ func TestActivityQueryErrorsAreSafeUsageErrors(t *testing.T) {
 		{activity.ValidateQuery(activity.Query{Limit: -1}), activity.QueryReasonOutOfRange},
 	} {
 		err := activityQueryError(tc.err)
+
 		var cliErr *output.CLIError
 		rejectf(t, !errors.As(err, &cliErr) || cliErr.Code != output.CodeUsage || cliErr.ExitCode != output.ExitUsage, "query error = %v, want usage_error", err)
 		details, ok := cliErr.Details.(map[string]any)
 		rejectf(t, !ok || details["reason"] != tc.reason, "query reason = %#v, want %q", cliErr.Details, tc.reason)
+
 		raw, _ := json.Marshal(output.Fail(nil, err))
 		rejectf(t, strings.Contains(string(raw), "bad action") || strings.Contains(string(raw), "negative"), "query error echoed a rejected filter: %s", raw)
 	}
@@ -147,13 +164,14 @@ func TestActivityCursorMismatchIsNotReportedAsUnreadableStore(t *testing.T) {
 		SegmentBytes: 8 << 10,
 		Retention:    time.Hour,
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if _, err := store.Append(t.Context(), activity.Event{
 			Source: activity.SourceRPC, Action: "plan", Outcome: activity.OutcomeStarted,
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	first, err := store.Query(t.Context(), activity.Query{Limit: 1})
 	rejectf(t, err != nil || first.NextCursor == "", "first page: %v cursor=%q", err, first.NextCursor)
 	_, mismatch := store.Query(t.Context(), activity.Query{
@@ -161,6 +179,7 @@ func TestActivityCursorMismatchIsNotReportedAsUnreadableStore(t *testing.T) {
 	})
 	reject(t, mismatch == nil, "a cursor with different filters was accepted")
 	err = activityQueryError(mismatch)
+
 	var cliErr *output.CLIError
 	rejectf(t, !errors.As(err, &cliErr) || cliErr.Code != output.CodeUsage, "cursor mismatch = %v, want usage_error", err)
 	details, _ := cliErr.Details.(map[string]any)
@@ -172,6 +191,7 @@ func TestActivityCursorMismatchIsNotReportedAsUnreadableStore(t *testing.T) {
 	_, err = handleActivityList(t.Context(), activityEnv(t,
 		`{"limit":1,"action":"backup.now","cursor":"`+first.NextCursor+`"}`))
 	reject(t, err == nil, "handler accepted a cursor with different filters")
+
 	var handlerErr *output.CLIError
 	rejectf(t, !errors.As(err, &handlerErr) || handlerErr.Code != output.CodeUsage, "handler cursor mismatch = %v, want usage_error", err)
 }
@@ -186,16 +206,21 @@ func TestActivityQueriesDoNotCreateStore(t *testing.T) {
 	})
 	res, err := handleActivityList(t.Context(), activityEnv(t, `{}`))
 	reject(t, err != nil, err)
+
 	page, ok := res.Data.(activity.Page)
 	rejectf(t, !ok || page.Coverage.Available, "absent store page = %#v, want unavailable coverage", res.Data)
+
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("activity list created the store: %v", err)
 	}
+
 	res, err = handleActivityHealth(t.Context(), activityEnv(t, `{}`))
 	reject(t, err != nil, err)
+
 	if health, ok := res.Data.(activity.Health); !ok || health.Exists {
 		t.Fatalf("absent store health = %#v", res.Data)
 	}
+
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("activity health created the store: %v", err)
 	}
@@ -203,6 +228,7 @@ func TestActivityQueriesDoNotCreateStore(t *testing.T) {
 
 func withServeActivity(t *testing.T, store *fakeActivityStore) {
 	t.Helper()
+
 	oldStore := activityStoreFactory
 	oldRecorder := activityRecorderFactory
 	oldRoot := serveRunsAsRoot
@@ -212,6 +238,7 @@ func withServeActivity(t *testing.T, store *fakeActivityStore) {
 		return rec
 	}
 	serveRunsAsRoot = func() bool { return true }
+
 	t.Cleanup(func() {
 		activityStoreFactory = oldStore
 		activityRecorderFactory = oldRecorder
@@ -221,10 +248,14 @@ func withServeActivity(t *testing.T, store *fakeActivityStore) {
 
 func serveRequest(t *testing.T, req rpc.Request) (string, int) {
 	t.Helper()
+
 	raw, err := json.Marshal(req)
 	reject(t, err != nil, err)
+
 	var out bytes.Buffer
+
 	code := Serve(bytes.NewReader(append(raw, '\n')), &out)
+
 	return out.String(), code
 }
 
@@ -248,8 +279,10 @@ func TestServeRecordsEarlyRefusals(t *testing.T) {
 		withServeActivity(t, store)
 		out, code := serveRequest(t, matchingBuildRequest("nope.nope"))
 		rejectf(t, code == 0 || !strings.Contains(out, "unknown method"), "output = %s, code = %d", out, code)
+
 		events := store.recorded()
 		rejectf(t, len(events) != 1, "recorded %d events, want one refusal: %+v", len(events), events)
+
 		ev := events[0]
 		if ev.Outcome != activity.OutcomeRefused || ev.Action != "node.rpc" ||
 			ev.ReasonCode != "unknown_method" || ev.ErrorCode != output.CodeUsage {
@@ -260,10 +293,12 @@ func TestServeRecordsEarlyRefusals(t *testing.T) {
 	t.Run("version mismatch", func(t *testing.T) {
 		store := &fakeActivityStore{}
 		withServeActivity(t, store)
+
 		req := matchingBuildRequest("status")
 		req.ClientVersion = "old-build"
 		out, code := serveRequest(t, req)
 		rejectf(t, code == 0 || !strings.Contains(out, "does not match node build"), "output = %s, code = %d", out, code)
+
 		events := store.recorded()
 		if len(events) != 1 || events[0].ReasonCode != "version_mismatch" ||
 			events[0].ErrorCode != output.CodeNodeVersionMismatch {
@@ -276,6 +311,7 @@ func TestServeRecordsEarlyRefusals(t *testing.T) {
 		withServeActivity(t, store)
 		out, code := serveRequest(t, matchingBuildRequest("activity.foo"))
 		rejectf(t, code == 0 || !strings.Contains(out, "unknown method"), "output = %s, code = %d", out, code)
+
 		events := store.recorded()
 		rejectf(t, len(events) != 1, "recorded %d events, want one refusal: %+v", len(events), events)
 		ev := events[0]
@@ -286,9 +322,12 @@ func TestServeRecordsEarlyRefusals(t *testing.T) {
 	t.Run("decode failure", func(t *testing.T) {
 		store := &fakeActivityStore{}
 		withServeActivity(t, store)
+
 		var out bytes.Buffer
+
 		code := Serve(strings.NewReader("{not json"), &out)
 		rejectf(t, code == 0, "bad request exited 0: %s", out.String())
+
 		events := store.recorded()
 		if len(events) != 1 || events[0].Action != "node.rpc" ||
 			events[0].ReasonCode != "request_rejected" {

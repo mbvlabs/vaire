@@ -63,34 +63,43 @@ func (s *Store) config() (storeConfig, error) {
 		segmentBytes: defaultSegmentBytes,
 		retention:    defaultRetention,
 	}
+
 	if s != nil {
 		if s.Dir != "" {
 			cfg.dir = filepath.Clean(s.Dir)
 		}
+
 		if s.MaxBytes != 0 {
 			cfg.maxBytes = s.MaxBytes
 		}
+
 		if s.SegmentBytes != 0 {
 			cfg.segmentBytes = s.SegmentBytes
 		}
+
 		if s.Retention != 0 {
 			cfg.retention = s.Retention
 		}
 	}
+
 	if !filepath.IsAbs(cfg.dir) || cfg.dir == string(filepath.Separator) {
 		return storeConfig{}, errConfig
 	}
+
 	if cfg.retention < 0 {
 		return storeConfig{}, errConfig
 	}
+
 	if cfg.segmentBytes < maxEventBytes || cfg.maxBytes < cfg.segmentBytes {
 		return storeConfig{}, errConfig
 	}
+
 	if cfg.segmentBytes > hardScanCap {
 		// A segment that cannot be read within the absolute page cap would
 		// make bounded progress impossible; refuse the configuration instead.
 		return storeConfig{}, errConfig
 	}
+
 	return cfg, nil
 }
 
@@ -103,40 +112,51 @@ func (s *Store) config() (storeConfig, error) {
 // events, or the write itself fails.
 func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 	ctx = requestContext(ctx)
+
 	cfg, err := s.config()
 	if err != nil {
 		return Event{}, err
 	}
+
 	if err := ctx.Err(); err != nil {
 		return Event{}, err
 	}
+
 	if ev, err = preflightEvent(ev, time.Now().UTC()); err != nil {
 		return Event{}, err
 	}
+
 	if err := ensureStoreDir(cfg.dir); err != nil {
 		return Event{}, err
 	}
+
 	lock, err := acquireLock(ctx, filepath.Join(cfg.dir, lockName))
 	if err != nil {
 		return Event{}, err
 	}
 	defer lock.release()
+
 	if err := ctx.Err(); err != nil {
 		return Event{}, err
 	}
+
 	segments, state, stateExists, err := inspectStore(cfg.dir)
 	if err != nil {
 		return Event{}, err
 	}
+
 	now := time.Now().UTC()
+
 	base, err := appendBase(ctx, cfg, segments, state, stateExists)
 	if err != nil {
 		return Event{}, err
 	}
+
 	assigned, line, err := buildAssignedEvent(ev, base.next, now)
 	if err != nil {
 		return Event{}, err
 	}
+
 	plan, err := planAppend(ctx, cfg, segments, base, int64(len(line)), now)
 	if err != nil {
 		return Event{}, err
@@ -147,6 +167,7 @@ func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 	if err := ctx.Err(); err != nil {
 		return Event{}, err
 	}
+
 	if !stateExists {
 		// Publish the store identity and an empty counter document before the
 		// first segment.
@@ -154,6 +175,7 @@ func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 			return Event{}, err
 		}
 	}
+
 	if err := writeSegmentLine(plan.path, line, plan.create); err != nil {
 		_ = recordDropped(cfg.dir, base.state, true)
 		return Event{}, fmt.Errorf("activity: append event: %w", err)
@@ -166,18 +188,22 @@ func (s *Store) Append(ctx context.Context, ev Event) (Event, error) {
 		// retries the budget.
 		return Event{}, fmt.Errorf("activity: apply retention: %w", err)
 	}
+
 	if err := syncWrittenDir(cfg.dir, plan.create || deleted); err != nil {
 		return Event{}, err
 	}
+
 	updated, err := updatedState(cfg, base, remaining, plan, assigned, now)
 	if err != nil {
 		return Event{}, err
 	}
+
 	if err := writeState(cfg.dir, updated); err != nil {
 		// The event and the pruned history are durable but the counters are
 		// not. Report the uncertainty; the next append rebuilds from the tail.
 		return Event{}, fmt.Errorf("activity: record event state: %w", err)
 	}
+
 	return assigned, nil
 }
 
@@ -188,13 +214,16 @@ func preflightEvent(ev Event, now time.Time) (Event, error) {
 	if err := ValidateEvent(ev); err != nil {
 		return Event{}, err
 	}
+
 	occurred, err := normalizeEventTime(ev.OccurredAt, now)
 	if err != nil {
 		return Event{}, err
 	}
+
 	if err := checkOccurrenceSkew(occurred, now); err != nil {
 		return Event{}, err
 	}
+
 	return ev, nil
 }
 
@@ -206,13 +235,16 @@ func inspectStore(dir string) ([]segmentInfo, storeState, bool, error) {
 	if err != nil {
 		return nil, storeState{}, false, fmt.Errorf("activity: inspect store directory: %w", err)
 	}
+
 	if err := dirSafe(dirInfo); err != nil {
 		return nil, storeState{}, false, err
 	}
+
 	segments, more, raced, err := listSegments(dir)
 	if err != nil {
 		return nil, storeState{}, false, err
 	}
+
 	if raced {
 		// An external delete raced the enumeration. Re-list once for a
 		// consistent view; the append lock already excludes our own writers.
@@ -221,27 +253,33 @@ func inspectStore(dir string) ([]segmentInfo, storeState, bool, error) {
 			return nil, storeState{}, false, err
 		}
 	}
+
 	if more {
 		return nil, storeState{}, false, errTooManySegments
 	}
+
 	if err := segmentSafeCheck(segments); err != nil {
 		return nil, storeState{}, false, err
 	}
+
 	state, stateExists, err := readState(dir)
 	if err != nil {
 		return nil, storeState{}, false, err
 	}
+
 	if !stateExists && hasSegmentHistory(segments) {
 		// The counters, including dropped-event history, cannot be rebuilt
 		// from segments. Refuse rather than silently rebaseline them.
 		return nil, storeState{}, false, errStateMissing
 	}
+
 	if stateExists && state.LastSequence > 0 && !hasSegmentHistory(segments) {
 		// The state counts events but every segment holding them is gone.
 		// Appending would rebaseline the counters and hide that loss from
 		// reads, so the store refuses until a human inspects it.
 		return nil, storeState{}, false, errHistoryMissing
 	}
+
 	return segments, state, stateExists, nil
 }
 
@@ -261,19 +299,23 @@ type appendBasis struct {
 // instead of falling back to a possibly stale state counter.
 func appendBase(ctx context.Context, cfg storeConfig, segments []segmentInfo, state storeState, stateExists bool) (appendBasis, error) {
 	var active segmentInfo
+
 	hasActive := len(segments) > 0
 	if hasActive {
 		active = segments[len(segments)-1]
 	}
+
 	needTail := !stateExists
 	if hasActive && stateExists && (state.ActiveSegment != active.index || state.ActiveBytes != active.size) {
 		needTail = true
 	}
+
 	var (
 		tailSeq  uint64
 		tailAt   time.Time
 		tailRead bool
 	)
+
 	if hasActive && needTail {
 		last, ok, err := segmentLastEventErr(ctx, active, cfg.segmentBytes+maxEventBytes)
 		if err != nil {
@@ -282,34 +324,43 @@ func appendBase(ctx context.Context, cfg storeConfig, segments []segmentInfo, st
 			// is already durable.
 			return appendBasis{}, err
 		}
+
 		if ok {
 			tailSeq = last.Sequence
 			if t := eventTime(last); !t.IsZero() {
 				tailAt = t
 			}
 		}
+
 		tailRead = true
 	}
+
 	if tailSeq == ^uint64(0) {
 		return appendBasis{}, errSequenceExhausted
 	}
+
 	if !stateExists {
 		id, err := newStoreID()
 		if err != nil {
 			return appendBasis{}, err
 		}
+
 		state = storeState{Version: stateVersion, StoreID: id, NextSequence: 1}
 	}
+
 	next := state.NextSequence
 	if tailSeq >= next {
 		next = tailSeq + 1
 	}
+
 	if next == 0 {
 		next = 1
 	}
+
 	if next == ^uint64(0) {
 		return appendBasis{}, errSequenceExhausted
 	}
+
 	return appendBasis{state: state, next: next, tailAt: tailAt, tailRead: tailRead}, nil
 }
 
@@ -318,26 +369,33 @@ func appendBase(ctx context.Context, cfg storeConfig, segments []segmentInfo, st
 func buildAssignedEvent(ev Event, sequence uint64, now time.Time) (Event, []byte, error) {
 	assigned := ev
 	assigned.Schema = Schema
+
 	id, err := newEventID()
 	if err != nil {
 		return Event{}, nil, err
 	}
+
 	assigned.EventID = id
+
 	assigned.OccurredAt, err = normalizeEventTime(ev.OccurredAt, now)
 	if err != nil {
 		return Event{}, nil, err
 	}
+
 	if err := checkOccurrenceSkew(assigned.OccurredAt, now); err != nil {
 		return Event{}, nil, err
 	}
+
 	assigned.Sequence = sequence
 	if err := validateStoredEvent(assigned); err != nil {
 		return Event{}, nil, err
 	}
+
 	line, err := encodeEvent(assigned)
 	if err != nil {
 		return Event{}, nil, err
 	}
+
 	return assigned, line, nil
 }
 
@@ -356,32 +414,40 @@ type appendPlan struct {
 // pending write into the listed segments.
 func planAppend(ctx context.Context, cfg storeConfig, segments []segmentInfo, base appendBasis, lineBytes int64, now time.Time) (appendPlan, error) {
 	var active segmentInfo
+
 	hasActive := len(segments) > 0
 	if hasActive {
 		active = segments[len(segments)-1]
 	}
+
 	cleanEnd, err := segmentEndsWithNewline(active)
 	if err != nil {
 		return appendPlan{}, fmt.Errorf("activity: inspect active segment: %w", err)
 	}
+
 	latest := base.state.LastEventAt
 	if base.tailRead {
 		latest = laterString(latest, formatTime(base.tailAt))
 	}
+
 	cutoff := now.Add(-cfg.retention)
+
 	rotate := !hasActive || !cleanEnd
 	if !rotate && active.size > 0 {
 		rotate = active.size+lineBytes > cfg.segmentBytes ||
 			staleActive(ctx, cfg, active, latest, cutoff, now)
 	}
+
 	index, create, err := writeTarget(active, hasActive, rotate)
 	if err != nil {
 		return appendPlan{}, err
 	}
+
 	remaining, err := withWrittenSegment(cfg.dir, segments, index, create, lineBytes, now)
 	if err != nil {
 		return appendPlan{}, err
 	}
+
 	return appendPlan{
 		path:     filepath.Join(cfg.dir, segmentFileName(index)),
 		index:    index,
@@ -400,10 +466,12 @@ func staleActive(ctx context.Context, cfg storeConfig, active segmentInfo, lates
 	if latest == "" {
 		return false
 	}
+
 	t, err := time.Parse(time.RFC3339Nano, latest)
 	if err != nil || t.After(now.Add(maxFutureSkew)) || !t.Before(cutoff) {
 		return false
 	}
+
 	return segmentExpired(ctx, active, cfg.segmentBytes+maxEventBytes, cutoff, now)
 }
 
@@ -413,12 +481,15 @@ func writeTarget(active segmentInfo, hasActive, rotate bool) (uint64, bool, erro
 	if !hasActive {
 		return 1, true, nil
 	}
+
 	if !rotate {
 		return active.index, false, nil
 	}
+
 	if active.index == ^uint64(0) {
 		return 0, false, errTooManySegments
 	}
+
 	return active.index + 1, true, nil
 }
 
@@ -426,8 +497,10 @@ func writeTarget(active segmentInfo, hasActive, rotate bool) (uint64, bool, erro
 // errCorruptState when an in-place write names a segment the listing lost.
 func withWrittenSegment(dir string, segments []segmentInfo, index uint64, create bool, lineBytes int64, now time.Time) ([]segmentInfo, error) {
 	remaining := append([]segmentInfo(nil), segments...)
+
 	if create {
 		name := segmentFileName(index)
+
 		return append(remaining, segmentInfo{
 			index:   index,
 			name:    name,
@@ -439,13 +512,16 @@ func withWrittenSegment(dir string, segments []segmentInfo, index uint64, create
 			regular: true,
 		}), nil
 	}
+
 	for i := range remaining {
 		if remaining[i].index == index {
 			remaining[i].size += lineBytes
 			remaining[i].modTime = now
+
 			return remaining, nil
 		}
 	}
+
 	return nil, errCorruptState
 }
 
@@ -456,16 +532,19 @@ func updatedState(cfg storeConfig, base appendBasis, remaining []segmentInfo, pl
 	if !firstOK {
 		firstSeq, firstAt = base.next, assigned.OccurredAt
 	}
+
 	lastAt := assigned.OccurredAt
 	if !plan.create {
 		// Keep the active segment's newest occurrence, not just its last
 		// appended occurrence. Backdated events must not age fresh evidence.
 		lastAt = laterString(plan.latest, lastAt)
 	}
+
 	writeSize, ok := segmentSize(remaining, plan.index)
 	if !ok {
 		return storeState{}, errCorruptState
 	}
+
 	updated := base.state
 	updated.Version = stateVersion
 	updated.NextSequence = base.next + 1
@@ -475,10 +554,12 @@ func updatedState(cfg storeConfig, base appendBasis, remaining []segmentInfo, pl
 	updated.FirstEventAt = firstAt
 	updated.LastEventAt = lastAt
 	updated.ActiveSegment = plan.index
+
 	updated.ActiveBytes = writeSize
 	if !updated.valid() {
 		return storeState{}, errCorruptState
 	}
+
 	return updated, nil
 }
 
@@ -489,6 +570,7 @@ func segmentSize(segments []segmentInfo, index uint64) (int64, bool) {
 			return seg.size, true
 		}
 	}
+
 	return 0, false
 }
 
@@ -499,6 +581,7 @@ func publishInitialState(dir string, state storeState) error {
 	if err := writeState(dir, state); err != nil {
 		return fmt.Errorf("activity: initialize event state: %w", err)
 	}
+
 	return nil
 }
 
@@ -508,9 +591,11 @@ func syncWrittenDir(dir string, changed bool) error {
 	if !changed {
 		return nil
 	}
+
 	if err := syncDir(dir); err != nil {
 		return fmt.Errorf("activity: sync store directory: %w", err)
 	}
+
 	return nil
 }
 
@@ -521,6 +606,7 @@ func requestContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()
 	}
+
 	return ctx
 }
 
@@ -529,32 +615,41 @@ func requestContext(ctx context.Context) context.Context {
 // the segment just written and is never removed.
 func pruneRetention(ctx context.Context, cfg storeConfig, segments []segmentInfo, keep uint64, cutoff, now time.Time) ([]segmentInfo, int64, bool, error) {
 	remaining := append([]segmentInfo(nil), segments...)
+
 	total := int64(0)
 	for _, seg := range remaining {
 		total += seg.size
 	}
+
 	deleted := false
+
 	for len(remaining) > 1 {
 		candidate := remaining[0]
 		if candidate.index == keep {
 			break
 		}
+
 		overBytes := total > cfg.maxBytes
 		overCount := len(remaining) > hardMaxSegments
+
 		expired := false
 		if !overBytes && !overCount {
 			expired = segmentExpired(ctx, candidate, cfg.segmentBytes+maxEventBytes, cutoff, now)
 		}
+
 		if !overBytes && !overCount && !expired {
 			break
 		}
+
 		if err := os.Remove(candidate.path); err != nil {
 			return nil, total, deleted, fmt.Errorf("activity: remove expired segment: %w", err)
 		}
+
 		total -= candidate.size
 		remaining = remaining[1:]
 		deleted = true
 	}
+
 	return remaining, total, deleted, nil
 }
 
@@ -567,7 +662,9 @@ func segmentExpired(ctx context.Context, seg segmentInfo, budget int64, cutoff, 
 			return false
 		}
 	}
+
 	t, ok := retentionTime(ctx, seg, budget, now)
+
 	return ok && t.Before(cutoff)
 }
 
@@ -578,28 +675,36 @@ func retentionTime(ctx context.Context, seg segmentInfo, budget int64, now time.
 	if budget <= 0 || seg.size > budget {
 		return time.Time{}, false
 	}
+
 	f, err := openSegmentRead(seg)
 	if err != nil {
 		return time.Time{}, false
 	}
+
 	defer func() { _ = f.Close() }()
+
 	var newest time.Time
+
 	_, err = walkSegment(ctx, f, seg.size, false, false, 0, func(ev Event) bool {
 		t := eventTime(ev)
 		if !t.After(now.Add(maxFutureSkew)) && t.After(newest) {
 			newest = t
 		}
+
 		return true
 	})
 	if err != nil {
 		return time.Time{}, false
 	}
+
 	if !newest.IsZero() {
 		return newest, true
 	}
+
 	if !seg.modTime.IsZero() && !seg.modTime.After(now.Add(maxFutureSkew)) {
 		return seg.modTime, true
 	}
+
 	return time.Time{}, false
 }
 
@@ -616,25 +721,31 @@ func appendSegmentLine(path string, line []byte, create bool) (err error) {
 	} else {
 		flags |= os.O_APPEND
 	}
+
 	f, err := os.OpenFile(path, flags, fileMode)
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		closeErr := f.Close()
 		if err == nil && closeErr != nil {
 			err = closeErr
 		}
 	}()
+
 	if err := verifyOpenSegment(f); err != nil {
 		return err
 	}
+
 	if _, err := f.Write(line); err != nil {
 		return err
 	}
+
 	if err := f.Sync(); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -643,10 +754,12 @@ func firstRetained(segments []segmentInfo, cfg storeConfig) (uint64, string, boo
 	if len(segments) == 0 {
 		return 0, "", false
 	}
+
 	ev, ok := segmentFirstEvent(segments[0], cfg.segmentBytes+maxEventBytes)
 	if !ok {
 		return 0, "", false
 	}
+
 	return ev.Sequence, ev.OccurredAt, true
 }
 
@@ -656,7 +769,9 @@ func recordDropped(dir string, state storeState, exists bool) error {
 	if !exists || !state.valid() {
 		return nil
 	}
+
 	state.DroppedEvents++
+
 	return writeState(dir, state)
 }
 
@@ -675,6 +790,7 @@ func newStoreID() (string, error) {
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("activity: generate store id: %w", err)
 	}
+
 	return "st-" + hex.EncodeToString(raw[:]), nil
 }
 
@@ -684,6 +800,7 @@ func newEventID() (string, error) {
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("activity: generate event id: %w", err)
 	}
+
 	return "evt-" + hex.EncodeToString(raw[:]), nil
 }
 
@@ -695,13 +812,16 @@ func ensureStoreDir(dir string) error {
 	if err := os.MkdirAll(parent, parentMode); err != nil {
 		return fmt.Errorf("activity: create store parent: %w", err)
 	}
+
 	if err := os.Mkdir(dir, dirMode); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("activity: create store directory: %w", err)
 	}
+
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return fmt.Errorf("activity: inspect store directory: %w", err)
 	}
+
 	return dirSafe(info)
 }
 
@@ -711,11 +831,14 @@ func dirSafe(info os.FileInfo) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errUnsafeDir
 	}
+
 	if info.Mode().Perm() != dirMode {
 		return errUnsafeDir
 	}
+
 	if !ownerMatches(info) {
 		return errUnsafeDir
 	}
+
 	return nil
 }

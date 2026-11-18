@@ -61,31 +61,41 @@ func recoveryStartCommand(ctx context.Context, name string) *exec.Cmd {
 func recoveryService(ctx context.Context, name string) recoveryServiceState {
 	cmd := exec.CommandContext(ctx, "systemctl", "show", "postgresql@18-"+name, //nolint:gosec // G204: managed service name.
 		"--property=ActiveState", "--property=Result", "--property=LoadState")
+
 	var out limitedProbeBuffer
+
 	cmd.Stdout = &out
+
 	cmd.WaitDelay = 100 * time.Millisecond
 	if cmd.Run() != nil {
 		return serviceUnknown
 	}
+
 	var active, result, loaded string
-	for _, line := range strings.Split(out.String(), "\n") {
+
+	for line := range strings.SplitSeq(out.String(), "\n") {
 		key, value, ok := strings.Cut(line, "=")
 		if ok && key == "ActiveState" {
 			active = value
 		}
+
 		if ok && key == "Result" {
 			result = value
 		}
+
 		if ok && key == "LoadState" {
 			loaded = value
 		}
 	}
+
 	if loaded == "not-found" || loaded == "error" || loaded == "masked" || loaded == "bad-setting" {
 		return serviceFailed
 	}
+
 	if loaded != "loaded" {
 		return serviceUnknown
 	}
+
 	switch active {
 	case "active":
 		return serviceActive
@@ -97,8 +107,10 @@ func recoveryService(ctx context.Context, name string) recoveryServiceState {
 		if result != "" && result != "success" {
 			return serviceFailed
 		}
+
 		return serviceInactive
 	}
+
 	return serviceUnknown
 }
 
@@ -106,16 +118,21 @@ func recoverySQL(ctx context.Context, port int) recoveryObservation {
 	cmd := exec.CommandContext(ctx, "runuser", "-u", "postgres", "--", "psql", "-X", "-q", "-t", "-A", //nolint:gosec // G204: fixed SQL and managed socket.
 		"-v", "ON_ERROR_STOP=1", "-h", pgSocketDir, "-p", strconv.Itoa(port), "-d", "postgres",
 		"-c", `SELECT pg_is_in_recovery()::text || '|' || CASE WHEN pg_is_in_recovery() THEN pg_get_wal_replay_pause_state() ELSE '' END`)
+
 	var out limitedProbeBuffer
+
 	cmd.Stdout = &out
+
 	cmd.WaitDelay = 100 * time.Millisecond
 	if err := cmd.Run(); err != nil {
 		return recoveryUnknown
 	}
+
 	recovery, pause, ok := strings.Cut(strings.TrimSpace(out.String()), "|")
 	if !ok {
 		return recoveryUnknown
 	}
+
 	switch recovery {
 	case "false":
 		return recoveryPromoted
@@ -127,19 +144,23 @@ func recoverySQL(ctx context.Context, port int) recoveryObservation {
 			return recoveryRecovering
 		}
 	}
+
 	return recoveryUnknown
 }
 
 func recoveryProcess(ctx context.Context, data string) recoveryObservation {
 	cmd := exec.CommandContext(ctx, "runuser", "-u", "postgres", "--", pgBin+"/pg_ctl", "-D", data, "status")
+
 	err := cmd.Run()
 	if err == nil {
 		return recoveryRecovering // alive; SQL establishes actual recovery state.
 	}
+
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 3 {
 		return recoveryStopped
 	}
+
 	return recoveryUnknown
 }
 
@@ -160,13 +181,16 @@ func (m *Materialised) startRecovery(ctx context.Context, until, kind string) er
 	if err != nil {
 		return recoveryDiagnosticFailure(m.Name)
 	}
+
 	if err := m.prepareStart(ctx); err != nil {
 		return err
 	}
+
 	if err := submitRecoveryService(ctx, m.Name); err != nil {
 		return output.NewError(output.CodeExternalCommand, "could not submit temporary cluster start", output.ExitExternal,
 			"Inspect the temporary cluster service.").WithDetails(map[string]any{"reason": "recovery_start_failed", "target": m.Name, "stage": "start"})
 	}
+
 	return waitRecoveryService(ctx, m.Name, m.Data, m.Port, until, kind, cursor, recoveryProbes, m.log)
 }
 
@@ -183,6 +207,7 @@ func (e *recoveryEvidence) observe(raw, kind string, base int64) (RecoveryRequir
 	if mismatch, ok := recoveryMismatch(raw); ok {
 		return mismatch, true
 	}
+
 	position := base
 	for _, chunk := range strings.SplitAfter(raw, "\n") {
 		end := position + int64(len(chunk))
@@ -190,10 +215,13 @@ func (e *recoveryEvidence) observe(raw, kind string, base int64) (RecoveryRequir
 			position = end
 			continue
 		}
+
 		e.seenTo = end
 		position = end
+
 		e.observeLine(strings.TrimSuffix(chunk, "\n"), kind)
 	}
+
 	return RecoveryRequirement{}, false
 }
 
@@ -203,9 +231,11 @@ func completeLogLines(raw string) string {
 	if strings.HasSuffix(raw, "\n") {
 		return raw
 	}
+
 	if i := strings.LastIndexByte(raw, '\n'); i >= 0 {
 		return raw[:i+1]
 	}
+
 	return ""
 }
 
@@ -215,21 +245,26 @@ func (e *recoveryEvidence) observeLine(line, kind string) {
 		strings.HasSuffix(line, "FATAL:  recovery aborted because of insufficient parameter settings") {
 		e.uncertain = true
 	}
+
 	prefix, body, ok := strings.Cut(line, "LOG:  ")
 	if !ok {
 		return
 	}
+
 	pid, ok := strings.CutSuffix(prefix, ":")
 	if !ok {
 		return
 	}
+
 	if n, err := strconv.ParseUint(pid, 10, 32); err != nil || n == 0 {
 		return
 	}
+
 	if recoveryStoppedAtTarget(kind, body) {
 		e.stopSeen = true
 		e.stopPID = pid
 	}
+
 	if e.stopSeen && pid == e.stopPID && body == "pausing at the end of recovery" {
 		e.arrived = true
 	}
@@ -247,6 +282,7 @@ func recoveryStoppedAtTarget(kind, body string) bool {
 			strings.HasPrefix(body, "recovery stopping before abort of transaction ") ||
 			strings.HasPrefix(body, "recovery stopping after abort of transaction ")
 	}
+
 	return false
 }
 
@@ -281,24 +317,31 @@ func waitRecovery(ctx context.Context, name, data string, port int, until, kind 
 	}
 	deadline := time.Now().Add(recoveryWait)
 	lastNote := time.Now()
+
 	for {
 		poll, err := state.poll(ctx)
 		if err != nil {
 			return err
 		}
+
 		if state.stopped(poll) {
 			return recoveryStoppedFailure(name)
 		}
+
 		if state.reached(poll) {
 			return nil
 		}
+
 		if time.Now().After(deadline) {
 			return errors.New("the cluster " + name + " did not reach its target within 24 hours")
 		}
+
 		if time.Since(lastNote) > time.Minute {
 			lastNote = time.Now()
+
 			log("recovery is still replaying WAL")
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -312,18 +355,24 @@ func waitRecovery(ctx context.Context, name, data string, port int, until, kind 
 // round, and records what the observations add up to.
 func (s *recoveryWaitState) poll(ctx context.Context) (recoveryPoll, error) {
 	var poll recoveryPoll
+
 	pollCtx, cancel := context.WithTimeout(ctx, recoveryPollBudget)
 	defer cancel()
+
 	if err := s.observeLog(); err != nil {
 		return poll, err
 	}
+
 	poll.service = s.probes.service(pollCtx, s.name)
 	poll.observation = s.probes.sql(pollCtx, s.port)
+
 	poll.process = s.probes.process(pollCtx, s.data)
 	if err := s.observeLog(); err != nil {
 		return poll, err
 	}
+
 	s.record(&poll)
+
 	return poll, nil
 }
 
@@ -335,9 +384,11 @@ func (s *recoveryWaitState) observeLog() error {
 	if err != nil {
 		return recoveryDiagnosticFailure(s.name)
 	}
+
 	if mismatch, ok := s.evidence.observe(raw, s.kind, s.cursor.offset-int64(len(raw))); ok {
 		return recoveryMismatchFailure(s.name, mismatch)
 	}
+
 	return nil
 }
 
@@ -348,12 +399,15 @@ func (s *recoveryWaitState) record(poll *recoveryPoll) {
 	if poll.observation == recoveryRecovering || poll.observation == recoveryPaused || poll.observation == recoveryPromoted {
 		s.everReady = true
 	}
+
 	if poll.service == serviceStarting || poll.service == serviceActive {
 		s.seenStarting = true
 	}
+
 	if poll.process == recoveryRecovering {
 		s.seenProcess = true
 	}
+
 	if poll.observation == recoveryUnknown && !s.everReady && poll.service == serviceStarting {
 		poll.observation = recoveryStarting
 	}
@@ -366,12 +420,15 @@ func (s *recoveryWaitState) stopped(poll recoveryPoll) bool {
 	if s.cursor.backlog || s.cursor.partial {
 		return false
 	}
+
 	if poll.service == serviceFailed {
 		return true
 	}
+
 	if poll.service == serviceInactive && (s.seenStarting || time.Since(s.submittedAt) >= recoverySubmissionGrace) {
 		return true
 	}
+
 	return poll.process == recoveryStopped && (poll.service == serviceActive || s.everReady || s.seenProcess)
 }
 
@@ -387,6 +444,7 @@ func (s *recoveryWaitState) reached(poll recoveryPoll) bool {
 	if !trustworthy || poll.service != serviceActive {
 		return false
 	}
+
 	switch s.until {
 	case UntilOpen:
 		return poll.observation == recoveryRecovering || poll.observation == recoveryPromoted ||
@@ -396,5 +454,6 @@ func (s *recoveryWaitState) reached(poll recoveryPoll) bool {
 	case UntilPromoted:
 		return poll.observation == recoveryPromoted
 	}
+
 	return false
 }

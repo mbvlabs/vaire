@@ -28,14 +28,17 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if p.DB == "" {
 		return Result{}, output.NewError(output.CodeInputRequired, "vaire sql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
+
 	spec, err := clusterOf(env.Cluster, p.DB)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if p.Write && spec.IsFollower() {
 		// A follower takes no writes: a code from the authenticator app can
 		// never make it writable (Phase 6). Refuse before any psql run, so a
@@ -49,24 +52,30 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 	if err := refuseUnsettledSQL(spec.Name); err != nil {
 		return Result{}, err
 	}
+
 	local := steps.ClusterPG(spec)
 	// A follower's cluster holds its source's database and roles (Phase 6).
 	db := spec.DatabaseName()
+
 	role := p.Role
 	if role == "" {
 		role = "ro"
 	}
+
 	user, err := sqlRoleUser(db, role)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if role == "migrate" {
 		user = db + "_owner"
 	}
+
 	mode := "READ WRITE"
 	if !p.Write {
 		mode = "READ ONLY"
 	}
+
 	statement := fmt.Sprintf("BEGIN %s;\nSET LOCAL ROLE %s;\n%s\n;\nCOMMIT;\n", mode, pg.Quote(user), p.Query)
 	if spec.Protected && !p.Write {
 		// psql runs every statement in the query, a COMMIT too, and as the
@@ -75,16 +84,20 @@ func handleSQL(ctx context.Context, env *Env) (Result, error) {
 		local = steps.AdminPG(spec)
 		statement = fmt.Sprintf("BEGIN READ ONLY;\n%s\n;\nCOMMIT;\n", p.Query)
 	}
+
 	if p.Write {
 		if err := local.Exec(ctx, db, statement, nil); err != nil {
 			return Result{}, err
 		}
+
 		return Result{Data: map[string]any{"command_tag": "OK", "row_count": 0}}, nil
 	}
+
 	columns, rows, err := local.QueryRows(ctx, db, statement, nil)
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: map[string]any{"columns": columns, "rows": rows, "row_count": len(rows), "command_tag": "SELECT"}}, nil
 }
 
@@ -102,15 +115,18 @@ func refuseUnsettledSQL(db string) error {
 			"Inspect the node's records file and fix it; vaire never resets it on its own.").
 			WithDetails(map[string]any{"reason": "unfollow_state_unknown", "database": db})
 	}
+
 	if u, ok := recs.Unfollowing[db]; ok && !u.Settled {
 		return output.NewError(output.CodePrecondition,
 			db+"'s unfollow has not settled its protection, so no SQL runs on it", output.ExitPrecondition,
 			"Finish the unfollow with vaire db unfollow "+db+" --confirm "+db+"/unfollow, then retry.").
 			WithDetails(map[string]any{"reason": "unfollow_unsettled", "database": db})
 	}
+
 	if f, ok := recs.ActivationFenceFor(db); ok && f.Active() {
 		return activationFenceRefusal(f, db)
 	}
+
 	return nil
 }
 

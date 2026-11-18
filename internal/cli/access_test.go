@@ -20,10 +20,12 @@ func TestAccessMessages(t *testing.T) {
 			t.Errorf("missing %q: %s", want, msg)
 		}
 	}
+
 	unknown := accessMessage(databaseAccess{Coverage: steps.AccessCoverage{Status: "unknown"}})
 	if strings.Contains(unknown, "missing:") {
 		t.Fatalf("unknown printed zero counts as measurements: %s", unknown)
 	}
+
 	plan := planMessage("plan", engine.PlanData{
 		Steps:               []engine.PlanStep{{Action: "apply", ID: "postgres-access-v1@app", Detail: "global owner defaults"}},
 		AccessConfirmTokens: []string{"app/access"},

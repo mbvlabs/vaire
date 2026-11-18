@@ -25,11 +25,13 @@ func TestStatementsFilterBeforeLimit(t *testing.T) {
 			orderAt := strings.Index(sql, "ORDER BY")
 			limitAt := strings.Index(sql, "LIMIT")
 			rejectf(t, filterAt < 0 || orderAt < filterAt || limitAt < orderAt || !strings.Contains(sql, "r.oid = s.userid"), "filter must run before ranking/limit: %s", sql)
+
 			for _, role := range []string{"postgres", "pg_maintain", "pg_signal_backend"} {
 				if !strings.Contains(sql[filterAt:orderAt], "'"+role+"'") {
 					t.Errorf("administrative role %s not filtered before ranking/limit: %s", role, sql)
 				}
 			}
+
 			reject(t, strings.Contains(query.sql(true), predicate), "--all-sessions still filters internal roles")
 		})
 	}
@@ -45,6 +47,7 @@ func TestParseStatementsAdministrativeRoles(t *testing.T) {
 	filtered := parseStatements("app", rows, false)
 	got := mergeStatements(map[string][]statement{"app": filtered}, "total", 1)
 	rejectf(t, len(got) != 1 || got[0].Role != "app_owner", "application work lost behind administrative statements: %+v", got)
+
 	all := parseStatements("app", rows, true)
 	rejectf(t, len(all) != len(rows), "--all-sessions lost administrative statements: %+v", all)
 	got = mergeStatements(map[string][]statement{"app": all}, "total", 1)
@@ -58,14 +61,17 @@ func TestParseStatementsAdministrativeRoles(t *testing.T) {
 // never appear there. Replication is shown in status and db list instead.
 func TestFollowerReplicationIsAdministrative(t *testing.T) {
 	reject(t, !pg.IsVaireSession("postgres", "app_follower"), "the source's walsender (postgres, the follower's application_name) is not administrative")
+
 	rows := []map[string]string{
 		{"role": "postgres", "query": "START_REPLICATION SLOT vaire_app_follower", "total_ms": "1"},
 	}
 	if got := parseStatements("app", rows, false); len(got) != 0 {
 		t.Fatalf("the walsender's statement survived the filter: %+v", got)
 	}
+
 	if got := parseStatements("app", rows, true); len(got) != 1 {
 		t.Fatalf("--all-sessions lost the walsender's statement: %+v", got)
 	}
+
 	rejectf(t, !strings.Contains(top.ActivitySQL, "backend_type = 'client backend'"), "top no longer reads client backends only, so startup and walreceiver processes could appear: %s", top.ActivitySQL)
 }

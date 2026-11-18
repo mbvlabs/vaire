@@ -27,22 +27,29 @@ func runPackageScript(t *testing.T, script string, env map[string]string, packag
 	t.Helper()
 	dir := t.TempDir()
 	aptLog := filepath.Join(dir, "apt.log")
+
 	var dpkg strings.Builder
 	dpkg.WriteString("#!/bin/bash\nfor last; do :; done\n")
 	dpkg.WriteString("case \"$*\" in *'-f=${Version}'*) printf '2.60\\n'; exit 0;; esac\n")
 	dpkg.WriteString("case \"${last}\" in\n")
+
 	for pkg, answer := range packages {
 		fmt.Fprintf(&dpkg, "  %s)\n", pkg)
+
 		if answer.stderr != "" {
 			fmt.Fprintf(&dpkg, "    printf '%%s\\n' %s >&2\n", shellQuote(answer.stderr))
 		}
+
 		if answer.status != "" {
 			fmt.Fprintf(&dpkg, "    printf '%%s\\n' %s\n", shellQuote(answer.status))
 		}
+
 		fmt.Fprintf(&dpkg, "    exit %d\n    ;;\n", answer.exit)
 	}
+
 	dpkg.WriteString("  *) printf 'dpkg-query: no packages found matching %s\\n' \"${last}\" >&2; exit 1 ;;\n")
 	dpkg.WriteString("esac\n")
+
 	stubs := map[string]string{
 		"dpkg-query": dpkg.String(),
 		"apt-get":    "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"${APT_LOG}\"\nexit 0\n",
@@ -54,20 +61,25 @@ func runPackageScript(t *testing.T, script string, env map[string]string, packag
 			t.Fatal(err)
 		}
 	}
+
 	cmd := exec.Command("/bin/bash", "-s")
 	cmd.Stdin = strings.NewReader(Script(script))
+
 	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "APT_LOG=" + aptLog}
 	for key, value := range env {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: %v\n%s", script, err, out)
 	}
+
 	apt, err := os.ReadFile(aptLog)
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
+
 	return string(out), string(apt)
 }
 
@@ -80,6 +92,7 @@ func TestPackageScriptsAcceptHeldAndRejectOtherStates(t *testing.T) {
 		"EXTENSION_PACKAGES": "", "STOP_PGBOUNCER": "0",
 	}
 	installed := dpkgAnswer{status: "install ok installed"}
+
 	held := dpkgAnswer{status: "hold ok installed"}
 	for _, tc := range []struct {
 		name     string
@@ -162,8 +175,10 @@ func TestPackageScriptsAcceptHeldAndRejectOtherStates(t *testing.T) {
 				if strings.Contains(apt, "install -y") {
 					t.Fatalf("apt-get installed an installed package: %q\n%s", apt, out)
 				}
+
 				return
 			}
+
 			if !strings.Contains(apt, tc.want) {
 				t.Fatalf("apt-get did not run %q: %q\n%s", tc.want, apt, out)
 			}
@@ -190,10 +205,12 @@ func TestPostgresPackagesScriptAcceptsPG18ContribVirtual(t *testing.T) {
 		"pgbackrest":           installed,
 		"postgresql-contrib":   {status: "unknown ok not-installed"},
 	}
+
 	out, apt := runPackageScript(t, "postgres-packages", env, packages)
 	if strings.Contains(apt, "install -y") {
 		t.Fatalf("converged PG18 host reinstalled packages: %q\n%s", apt, out)
 	}
+
 	if !strings.Contains(env["PACKAGES"], "postgresql-18") ||
 		!strings.Contains(env["PACKAGES"], "postgresql-client-18") ||
 		strings.Contains(env["PACKAGES"], "postgresql-contrib") {
@@ -206,6 +223,7 @@ func TestPostgresPackagesScriptAcceptsPG18ContribVirtual(t *testing.T) {
 // box.
 func TestTLSScriptRefusesHeldCaddy(t *testing.T) {
 	dir := t.TempDir()
+
 	stubs := map[string]string{
 		// A held caddy, still installed.
 		"dpkg-query": "#!/bin/bash\nprintf '%s\\n' 'hold ok installed'\n",
@@ -218,12 +236,14 @@ func TestTLSScriptRefusesHeldCaddy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	cmd := exec.Command("/bin/bash", "-s")
 	cmd.Stdin = strings.NewReader(Script("tls"))
 	cmd.Env = []string{
 		"PATH=" + dir + ":/usr/bin:/bin", "PHASE=install", "NGINX_MIN_VERSION=1.24.0",
 		"TLS_HOSTNAME=db.example.test", "ACME_WEBROOT=/tmp/vaire-acme-test",
 	}
+
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "caddy is installed") {
 		t.Fatalf("held caddy: %v\n%s", err, out)

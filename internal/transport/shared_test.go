@@ -24,20 +24,25 @@ import (
 // for the node behind the tunnel.
 func echoServer(t *testing.T) string {
 	t.Helper()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = ln.Close() })
+
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
+
 			go func() { _, _ = io.Copy(c, c); _ = c.Close() }()
 		}
 	}()
+
 	return ln.Addr().String()
 }
 
@@ -72,6 +77,7 @@ func newDaemons(t *testing.T) *daemons {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	f := &daemons{
 		t:           t,
@@ -85,30 +91,37 @@ func newDaemons(t *testing.T) *daemons {
 	t.Cleanup(func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+
 		for _, d := range f.all {
 			d.cancel()
 			<-d.done
 		}
 	})
+
 	return f
 }
 
 func (f *daemons) spawn(ctx context.Context) error {
 	f.spawns.Add(1)
+
 	lock, err := os.OpenFile(f.singleton, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
+
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = lock.Close()
 		return ErrDaemonRunning
 	}
+
 	_ = os.Remove(f.socket)
+
 	ln, err := net.Listen("unix", f.socket)
 	if err != nil {
 		_ = lock.Close()
 		return err
 	}
+
 	srv := NewSharedServer(SharedServerConfig{
 		Listener:    ln,
 		Dialer:      Direct{},
@@ -118,34 +131,43 @@ func (f *daemons) spawn(ctx context.Context) error {
 		Persist:     f.persist,
 		StartGrace:  f.persist,
 	})
+
 	unixLn, ok := ln.(*net.UnixListener)
 	if !ok {
 		_ = ln.Close()
 		_ = lock.Close()
+
 		return errors.New("the daemon socket is not a unix listener")
 	}
 	// The fake daemon outlives the spawn call, as the setsid'd process does,
 	// so it inherits the caller's values but not its cancellation.
 	serveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+
 	d := &daemon{srv: srv, ln: unixLn, cancel: cancel, done: make(chan string, 1)}
 	go func() {
 		reason := srv.Serve(serveCtx)
 		_ = lock.Close() // releases the singleton lock, as process exit does
+
 		d.done <- reason
+
 		close(d.done)
 	}()
+
 	f.mu.Lock()
 	f.all = append(f.all, d)
 	f.mu.Unlock()
+
 	return nil
 }
 
 func (f *daemons) last() *daemon {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if len(f.all) == 0 {
 		f.t.Fatal("no daemon was spawned")
 	}
+
 	return f.all[len(f.all)-1]
 }
 
@@ -172,26 +194,34 @@ func (f *daemons) dialer(cmd string) *SharedDialer {
 
 func ctxT(t *testing.T) context.Context {
 	t.Helper()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
+
 	return ctx
 }
 
 func echoOnce(t *testing.T, d Dialer, addr, msg string) {
 	t.Helper()
+
 	conn, err := d.DialContext(ctxT(t), "tcp", addr)
 	if err != nil {
 		t.Fatalf("dial %s: %v", addr, err)
 	}
+
 	defer func() { _ = conn.Close() }()
+
 	if _, err := conn.Write([]byte(msg)); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := make([]byte, len(msg))
+
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		t.Fatal(err)
 	}
+
 	if string(buf) != msg {
 		t.Fatalf("echo = %q, want %q", buf, msg)
 	}
@@ -199,6 +229,7 @@ func echoOnce(t *testing.T, d Dialer, addr, msg string) {
 
 func waitDone(t *testing.T, d *daemon) string {
 	t.Helper()
+
 	select {
 	case reason := <-d.done:
 		return reason
@@ -212,31 +243,39 @@ func waitDone(t *testing.T, d *daemon) string {
 // than asserting unchecked.
 func cliDetails(t *testing.T, err error) (*output.CLIError, map[string]any) {
 	t.Helper()
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("err = %v, want a CLIError", err)
 	}
+
 	details, ok := cliErr.Details.(map[string]any)
 	if !ok {
 		t.Fatalf("details = %#v, want map[string]any", cliErr.Details)
 	}
+
 	return cliErr, details
 }
 
 func TestSharedStartsDaemonAndDials(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
+
 	d := f.dialer("vaire test")
 	defer d.Close()
+
 	echoOnce(t, d, addr, "hello through the daemon")
 	echoOnce(t, d, addr, "and again")
+
 	if n := f.spawns.Load(); n != 1 {
 		t.Fatalf("spawned %d daemons, want 1", n)
 	}
+
 	st, err := SharedHello(ctxT(t), f.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if st.Attached != 1 || len(st.Clients) != 1 || st.Clients[0].Command != "vaire test" || st.PID != os.Getpid() {
 		t.Fatalf("hello = %+v, want one attached client", st)
 	}
@@ -245,19 +284,26 @@ func TestSharedStartsDaemonAndDials(t *testing.T) {
 func TestSharedReusesRunningDaemon(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
+
 	first := f.dialer("vaire first")
 	defer first.Close()
+
 	echoOnce(t, first, addr, "one")
+
 	second := f.dialer("vaire second")
 	defer second.Close()
+
 	echoOnce(t, second, addr, "two")
+
 	if n := f.spawns.Load(); n != 1 {
 		t.Fatalf("spawned %d daemons, want 1", n)
 	}
+
 	st, err := SharedHello(ctxT(t), f.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if st.Attached != 2 {
 		t.Fatalf("attached = %d, want 2", st.Attached)
 	}
@@ -265,12 +311,15 @@ func TestSharedReusesRunningDaemon(t *testing.T) {
 
 func TestSharedRefusesAddressOutsidePrefix(t *testing.T) {
 	f := newDaemons(t)
+
 	d := f.dialer("vaire test")
 	defer d.Close()
+
 	_, err := d.DialContext(ctxT(t), "tcp", "10.9.9.9:22")
 	if err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("err = %v, want a refusal outside the prefix", err)
 	}
+
 	_, err = d.DialContext(ctxT(t), "tcp", "localhost:22")
 	if err == nil || !strings.Contains(err.Error(), "not an IP") {
 		t.Fatalf("err = %v, want a refusal of a hostname", err)
@@ -284,9 +333,11 @@ func TestSharedIdleExit(t *testing.T) {
 	d := f.dialer("vaire test")
 	echoOnce(t, d, addr, "x")
 	d.Close()
+
 	if reason := waitDone(t, f.last()); reason != "idle" {
 		t.Fatalf("exit reason = %q, want idle", reason)
 	}
+
 	if _, err := os.Stat(f.socket); !os.IsNotExist(err) {
 		t.Fatalf("socket still exists after an idle exit: %v", err)
 	}
@@ -295,15 +346,18 @@ func TestSharedIdleExit(t *testing.T) {
 func TestSharedLeaseKeepsDaemonAlive(t *testing.T) {
 	f := newDaemons(t)
 	f.persist = 30 * time.Millisecond
+
 	d := f.dialer("vaire tunnel")
 	if err := d.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
+
 	select {
 	case <-f.last().done:
 		t.Fatal("the daemon exited while a lease was held")
 	case <-time.After(300 * time.Millisecond):
 	}
+
 	d.Close()
 	waitDone(t, f.last())
 }
@@ -313,40 +367,51 @@ func TestSharedOpenStreamKeepsDaemonAlive(t *testing.T) {
 	f := newDaemons(t)
 	f.persist = 30 * time.Millisecond
 	d := f.dialer("vaire test")
+
 	conn, err := d.DialContext(ctxT(t), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	d.Close() // the lease is gone; the stream still counts
+
 	select {
 	case <-f.last().done:
 		t.Fatal("the daemon exited with a stream open")
 	case <-time.After(300 * time.Millisecond):
 	}
+
 	_ = conn.Close()
+
 	waitDone(t, f.last())
 }
 
 func TestSharedRecoversFromStaleSocket(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
+
 	d := f.dialer("vaire test")
 	defer d.Close()
+
 	echoOnce(t, d, addr, "before")
 	f.kill()
+
 	if _, err := os.Stat(f.socket); err != nil {
 		t.Fatalf("the killed daemon's socket should be left behind: %v", err)
 	}
 	// The next dial finds a socket nobody serves, spawns a new daemon and
 	// re-attaches.
 	echoOnce(t, d, addr, "after")
+
 	if n := f.spawns.Load(); n != 2 {
 		t.Fatalf("spawned %d daemons, want 2", n)
 	}
+
 	st, err := SharedHello(ctxT(t), f.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if st.Attached != 1 {
 		t.Fatalf("attached = %d after respawn, want 1", st.Attached)
 	}
@@ -355,44 +420,59 @@ func TestSharedRecoversFromStaleSocket(t *testing.T) {
 func TestSharedConcurrentClientsSpawnOneDaemon(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
+
 	const n = 12
+
 	dialers := make([]*SharedDialer, n)
+
 	var wg sync.WaitGroup
+
 	errs := make(chan error, n)
 	for i := range n {
 		dialers[i] = f.dialer("vaire parallel")
+
 		wg.Add(1)
 		go func(d *SharedDialer) {
 			defer wg.Done()
+
 			conn, err := d.DialContext(ctxT(t), "tcp", addr)
 			if err != nil {
 				errs <- err
 				return
 			}
+
 			_, _ = conn.Write([]byte("ping"))
 			buf := make([]byte, 4)
+
 			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			if _, err := io.ReadFull(conn, buf); err != nil {
 				errs <- err
 			}
+
 			_ = conn.Close()
 		}(dialers[i])
 	}
+
 	wg.Wait()
 	close(errs)
+
 	for err := range errs {
 		t.Fatal(err)
 	}
+
 	if got := f.spawns.Load(); got != 1 {
 		t.Fatalf("spawned %d daemons, want exactly 1", got)
 	}
+
 	st, err := SharedHello(ctxT(t), f.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if st.Attached != n {
 		t.Fatalf("attached = %d, want %d", st.Attached, n)
 	}
+
 	for _, d := range dialers {
 		d.Close()
 	}
@@ -403,20 +483,26 @@ func TestSharedReplacesIdleStaleDaemon(t *testing.T) {
 	if err := f.spawn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+
 	old := f.last()
 	f.fingerprint = "fp-2" // a re-login changed the workspace
+
 	d := f.dialer("vaire test")
 	defer d.Close()
+
 	if err := d.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
+
 	if reason := waitDone(t, old); reason != "stopped" {
 		t.Fatalf("old daemon exit = %q, want stopped", reason)
 	}
+
 	st, err := SharedHello(ctxT(t), f.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if st.Fingerprint != "fp-2" {
 		t.Fatalf("fingerprint = %q, want the new one", st.Fingerprint)
 	}
@@ -424,29 +510,39 @@ func TestSharedReplacesIdleStaleDaemon(t *testing.T) {
 
 func TestSharedBusyStaleDaemonIsNotKilled(t *testing.T) {
 	f := newDaemons(t)
+
 	busy := f.dialer("vaire restore")
 	defer busy.Close()
+
 	if err := busy.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
+
 	f.fingerprint = "fp-2"
+
 	d := f.dialer("vaire plan")
 	defer d.Close()
+
 	err := d.Attach(ctxT(t))
+
 	cliErr, details := cliDetails(t, err)
 	if details["reason"] != "tunnel_config_changed" {
 		t.Fatalf("err = %v, want tunnel_config_changed", err)
 	}
+
 	if !strings.Contains(cliErr.Hint, "vaire restore") {
 		t.Fatalf("hint %q should name the busy command", cliErr.Hint)
 	}
 	// Another build with the same configuration is used as it is.
 	f.fingerprint, f.build = "fp-1", "build-2"
+
 	other := f.dialer("vaire plan")
 	defer other.Close()
+
 	if err := other.Attach(ctxT(t)); err != nil {
 		t.Fatalf("a busy daemon of another build should serve: %v", err)
 	}
+
 	if n := f.spawns.Load(); n != 1 {
 		t.Fatalf("spawned %d daemons, want 1", n)
 	}
@@ -454,22 +550,29 @@ func TestSharedBusyStaleDaemonIsNotKilled(t *testing.T) {
 
 func TestSharedStopDrainsThenExits(t *testing.T) {
 	f := newDaemons(t)
+
 	d := f.dialer("vaire restore")
 	if err := d.Attach(ctxT(t)); err != nil {
 		t.Fatal(err)
 	}
+
 	draining, err := SharedStop(ctxT(t), f.socket, false)
 	if err != nil || !draining {
 		t.Fatalf("stop = %v, %v; want draining", draining, err)
 	}
+
 	late := f.dialer("vaire plan")
 	defer late.Close()
+
 	err = late.Attach(ctxT(t))
+
 	_, details := cliDetails(t, err)
 	if details["reason"] != "tunnel_stopping" {
 		t.Fatalf("err = %v, want tunnel_stopping", err)
 	}
+
 	d.Close()
+
 	if reason := waitDone(t, f.last()); reason != "stopped" {
 		t.Fatalf("exit = %q, want stopped", reason)
 	}
@@ -478,17 +581,23 @@ func TestSharedStopDrainsThenExits(t *testing.T) {
 func TestSharedForceStopDropsStreams(t *testing.T) {
 	addr := echoServer(t)
 	f := newDaemons(t)
+
 	d := f.dialer("vaire backup now")
+
 	defer d.Close()
+
 	conn, err := d.DialContext(ctxT(t), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
+
 	if _, err := SharedStop(ctxT(t), f.socket, true); err != nil {
 		t.Fatal(err)
 	}
+
 	waitDone(t, f.last())
+
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("a stream survived a forced stop")
@@ -500,10 +609,12 @@ func TestSharedForceStopDropsStreams(t *testing.T) {
 func TestReadLineLeavesTheRest(t *testing.T) {
 	a, b := net.Pipe()
 	go func() { _, _ = a.Write([]byte("{\"ok\":true}\nRAW")); _ = a.Close() }()
+
 	line, err := readLine(b)
 	if err != nil || string(line) != `{"ok":true}` {
 		t.Fatalf("line = %q, %v", line, err)
 	}
+
 	rest, _ := io.ReadAll(b)
 	if string(rest) != "RAW" {
 		t.Fatalf("rest = %q, want RAW", rest)
@@ -515,6 +626,7 @@ func TestTunnelFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, peer, _ := GenerateWGKey()
 	cfg := WireGuardConfig{
 		PrivateKey:    priv,
@@ -523,13 +635,16 @@ func TestTunnelFingerprint(t *testing.T) {
 		Endpoint:      netip.MustParseAddrPort("203.0.113.5:51820"),
 		AllowedIPs:    []netip.Prefix{netip.MustParsePrefix("10.42.0.0/24")},
 	}
+
 	a := TunnelFingerprint(cfg)
 	if a != TunnelFingerprint(cfg) {
 		t.Fatal("fingerprint is not stable")
 	}
+
 	if strings.Contains(a, priv) {
 		t.Fatal("fingerprint leaks the private key")
 	}
+
 	cfg.Endpoint = netip.MustParseAddrPort("203.0.113.6:51820")
 	if a == TunnelFingerprint(cfg) {
 		t.Fatal("a new endpoint should change the fingerprint")
@@ -543,6 +658,7 @@ func TestSharedDialBudget(t *testing.T) {
 	if sharedDialBudget <= SharedDialTimeout {
 		t.Fatalf("client budget %s must exceed the daemon's %s", sharedDialBudget, SharedDialTimeout)
 	}
+
 	var d Dialer = NewSharedDialer(SharedDialerConfig{Socket: "x"})
 	if b, ok := d.(interface{ DialBudget() time.Duration }); !ok || b.DialBudget() != sharedDialBudget {
 		t.Fatalf("SharedDialer budget = %v, %v", b, ok)
@@ -557,20 +673,26 @@ func TestSharedDialBudget(t *testing.T) {
 // the budget, and succeeds within it.
 func TestRoundTripBudget(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "slow.sock")
+
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = ln.Close() })
+
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
+
 			go func() {
 				_, _ = readLine(c)
+
 				time.Sleep(60 * time.Millisecond)
+
 				_ = writeReply(c, sharedReply{OK: true})
 				_ = c.Close()
 			}()
@@ -578,10 +700,12 @@ func TestRoundTripBudget(t *testing.T) {
 	}()
 
 	ctx := context.Background()
+
 	conn, reply, err := roundTripWithin(ctx, socket, sharedRequest{Op: "hello"}, time.Second)
 	if err != nil || !reply.OK {
 		t.Fatalf("within budget: %v %+v", err, reply)
 	}
+
 	_ = conn.Close()
 
 	_, _, err = roundTripWithin(ctx, socket, sharedRequest{Op: "hello"}, 10*time.Millisecond)

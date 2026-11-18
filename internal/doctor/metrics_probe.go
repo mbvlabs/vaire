@@ -22,9 +22,11 @@ func metricsPGUp(f Facts) []Result {
 	if !f.MetricsEnabled {
 		return one(Skip, "[metrics] enabled is false", "")
 	}
+
 	if len(f.Clusters) == 0 {
 		return one(Skip, "no databases", "")
 	}
+
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
 		p, ok := f.PGProbes[c.Name]
 		switch {
@@ -33,13 +35,16 @@ func metricsPGUp(f Facts) []Result {
 		case p.Known && p.Up:
 			return Pass, "pg_up 1", ""
 		}
+
 		detail := "pg_up 0: postgres_exporter can't connect"
 		if !p.Known {
 			detail = "the probe failed: " + p.Error
 		}
+
 		if len(f.PGExporterLog) > 0 {
 			detail += fmt.Sprintf("; postgres_exporter's last log lines: %s", strings.Join(f.PGExporterLog, " | "))
 		}
+
 		return Warn, detail, "vaire logs postgres_exporter"
 	})
 }

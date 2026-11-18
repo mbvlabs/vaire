@@ -39,42 +39,52 @@ func runSkillInstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
 	}
+
 	dir, err := cmd.Flags().GetString("dir")
 	if err != nil {
 		return output.NewError(output.CodeUsage, err.Error(), output.ExitUsage, "")
 	}
+
 	if strings.TrimSpace(dir) == "" {
 		dir = "."
 	}
+
 	root, err := filepath.Abs(dir)
 	if err != nil {
 		return output.WrapError(output.CodeError, err, output.ExitGeneric, "")
 	}
+
 	selected, err := selectSkillHarnesses(cmd, requested)
 	if err != nil {
 		return err
 	}
+
 	dry := dryRun(cmd)
 	installations := make([]skillInstallation, 0, len(selected))
 	labels := make([]string, 0, len(selected))
 	document := skillDocument()
+
 	for _, harness := range selected {
 		target := filepath.Join(root, filepath.FromSlash(harness.directory), "SKILL.md")
 		if !dry {
 			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 				return output.WrapError(output.CodeError, fmt.Errorf("create skill directory: %w", err), output.ExitGeneric, "")
 			}
+
 			if err := writeSkillFile(target, document); err != nil {
 				return output.WrapError(output.CodeError, fmt.Errorf("write skill: %w", err), output.ExitGeneric, "")
 			}
 		}
+
 		installations = append(installations, skillInstallation{Harness: harness.name, Path: target})
 		labels = append(labels, harness.label)
 	}
+
 	message := "Installed vaire skill for " + strings.Join(labels, ", ")
 	if dry {
 		message = "Would install vaire skill for " + strings.Join(labels, ", ")
 	}
+
 	data := map[string]any{
 		"name":          "vaire",
 		"dry_run":       dry,
@@ -83,6 +93,7 @@ func runSkillInstall(cmd *cobra.Command, _ []string) error {
 	if len(installations) == 1 {
 		data["path"] = installations[0].Path
 	}
+
 	return output.OK(cmd, data, message)
 }
 
@@ -99,9 +110,11 @@ func selectSkillHarnesses(cmd *cobra.Command, requested []string) ([]skillHarnes
 	if len(requested) > 0 {
 		return parseSkillHarnessNames(requested)
 	}
+
 	if err := RequireFlag(cmd, false, "--harness", "skill install"); err != nil {
 		return nil, err
 	}
+
 	return promptSkillHarnesses(cmd)
 }
 
@@ -110,18 +123,22 @@ func promptSkillHarnesses(cmd *cobra.Command) ([]skillHarness, error) {
 	if _, err := fmt.Fprintln(writer, "Select harnesses (comma-separated numbers):"); err != nil {
 		return nil, err
 	}
+
 	for index, harness := range skillHarnesses {
 		if _, err := fmt.Fprintf(writer, "  %d) %s\n", index+1, harness.label); err != nil {
 			return nil, err
 		}
 	}
+
 	if _, err := fmt.Fprint(writer, "Selection: "); err != nil {
 		return nil, err
 	}
+
 	selection, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("read harness selection: %w", err)
 	}
+
 	selection = strings.TrimSpace(selection)
 	if selection == "" {
 		return nil, output.NewError(
@@ -131,8 +148,10 @@ func promptSkillHarnesses(cmd *cobra.Command) ([]skillHarness, error) {
 			"Pass --harness with one or more of: "+validSkillHarnessNames()+".",
 		)
 	}
+
 	names := make([]string, 0, len(skillHarnesses))
-	for _, value := range strings.Split(selection, ",") {
+
+	for value := range strings.SplitSeq(selection, ",") {
 		number, convErr := strconv.Atoi(strings.TrimSpace(value))
 		if convErr != nil || number < 1 || number > len(skillHarnesses) {
 			return nil, output.NewError(
@@ -142,13 +161,16 @@ func promptSkillHarnesses(cmd *cobra.Command) ([]skillHarness, error) {
 				fmt.Sprintf("Enter comma-separated numbers from 1 to %d.", len(skillHarnesses)),
 			)
 		}
+
 		names = append(names, skillHarnesses[number-1].name)
 	}
+
 	return parseSkillHarnessNames(names)
 }
 
 func parseSkillHarnessNames(names []string) ([]skillHarness, error) {
 	selected := make([]skillHarness, 0, len(names))
+
 	seen := make(map[string]bool, len(names))
 	for _, value := range names {
 		name := strings.ToLower(strings.TrimSpace(value))
@@ -160,18 +182,23 @@ func parseSkillHarnessNames(names []string) ([]skillHarness, error) {
 				"Choose one or more of: "+validSkillHarnessNames()+".",
 			)
 		}
+
 		if seen[name] {
 			continue
 		}
+
 		found := false
+
 		for _, harness := range skillHarnesses {
 			if harness.name == name {
 				selected = append(selected, harness)
 				seen[name] = true
 				found = true
+
 				break
 			}
 		}
+
 		if !found {
 			return nil, output.NewError(
 				output.CodeUsage,
@@ -181,6 +208,7 @@ func parseSkillHarnessNames(names []string) ([]skillHarness, error) {
 			)
 		}
 	}
+
 	if len(selected) == 0 {
 		return nil, output.NewError(
 			output.CodeUsage,
@@ -189,6 +217,7 @@ func parseSkillHarnessNames(names []string) ([]skillHarness, error) {
 			"Choose one or more of: "+validSkillHarnessNames()+".",
 		)
 	}
+
 	return selected, nil
 }
 
@@ -197,5 +226,6 @@ func validSkillHarnessNames() string {
 	for i, harness := range skillHarnesses {
 		names[i] = harness.name
 	}
+
 	return strings.Join(names, ", ")
 }

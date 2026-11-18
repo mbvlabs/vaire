@@ -11,5 +11,3 @@ func (r Reporter) emit(ev output.Event) {
 		r(ev)
 	}
 }
-
-func intPtr(v int) *int { return &v }

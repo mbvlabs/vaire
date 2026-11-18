@@ -16,10 +16,12 @@ func TestWithoutVaireSessions(t *testing.T) {
 		{PID: 6, Role: "pg_maintain", App: ""},
 		{PID: 7, Role: "pg_signal_backend", App: ""},
 	}
+
 	out := withoutVaireSessions(in)
 	if len(out) != 2 || out[0].PID != 3 || out[1].PID != 4 {
 		t.Fatalf("kept %+v, want the application's two sessions", out)
 	}
+
 	if len(in) != 7 {
 		t.Fatal("withoutVaireSessions changed its input")
 	}

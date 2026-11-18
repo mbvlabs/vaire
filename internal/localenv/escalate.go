@@ -22,6 +22,7 @@ func (e *SilentExitError) Error() string {
 	if e == nil {
 		return ""
 	}
+
 	return "exit " + strconv.Itoa(e.Code)
 }
 
@@ -46,6 +47,7 @@ func waitOn(cmd *cobra.Command, label string) func() {
 	if waiter == nil || cmd == nil {
 		return func() {}
 	}
+
 	return waiter(cmd, label)
 }
 
@@ -60,19 +62,24 @@ func Escalate(cmd *cobra.Command, reason string, extraArgs ...string) (bool, err
 	if os.Geteuid() == 0 || flagBool(cmd, "escalated") {
 		return false, nil
 	}
+
 	if err := exec.CommandContext(cmd.Context(), "sudo", "-n", "true").Run(); err == nil {
 		return reexec(cmd.Context(), true, extraArgs)
 	}
+
 	if canPrompt(cmd) {
 		ok, err := ask(cmd, "vaire needs root to "+reason+". Escalate with sudo?")
 		if err != nil {
 			return false, err
 		}
+
 		if !ok {
 			return false, rootRequired(extraArgs)
 		}
+
 		return reexec(cmd.Context(), false, extraArgs)
 	}
+
 	if flagBool(cmd, "sudo") {
 		return false, output.NewError(
 			output.CodePrecondition,
@@ -84,6 +91,7 @@ func Escalate(cmd *cobra.Command, reason string, extraArgs ...string) (bool, err
 			"command": sudoLine(extraArgs),
 		})
 	}
+
 	return false, rootRequired(extraArgs)
 }
 
@@ -93,14 +101,17 @@ func canPrompt(cmd *cobra.Command) bool {
 			return false
 		}
 	}
+
 	opts, err := output.ParseOptions(cmd)
 	if err == nil && output.UsesStructuredOutput(opts) {
 		return false
 	}
+
 	info, err := os.Stdin.Stat()
 	if err != nil {
 		return false
 	}
+
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
@@ -108,6 +119,7 @@ func ask(cmd *cobra.Command, question string) (bool, error) {
 	if prompter == nil {
 		return false, errors.New("sudo prompt is not configured")
 	}
+
 	return prompter.YesNo(cmd, question)
 }
 
@@ -116,10 +128,12 @@ func reexec(ctx context.Context, noninteractive bool, extraArgs []string) (bool,
 	if err != nil {
 		return false, err
 	}
+
 	sudoArgs := make([]string, 0, 4+len(os.Args)+len(extraArgs))
 	if noninteractive {
 		sudoArgs = append(sudoArgs, "-n")
 	}
+
 	sudoArgs = append(sudoArgs, self)
 	sudoArgs = append(sudoArgs, filteredArgs()...)
 	sudoArgs = append(sudoArgs, "--escalated")
@@ -128,14 +142,16 @@ func reexec(ctx context.Context, noninteractive bool, extraArgs []string) (bool,
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
+
 	err = child.Run()
 	if err == nil {
 		return true, nil
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return true, &SilentExitError{Code: exitErr.ExitCode()}
 	}
+
 	return true, err
 }
 
@@ -145,8 +161,10 @@ func filteredArgs() []string {
 		if arg == "--escalated" || strings.HasPrefix(arg, "--escalated=") {
 			continue
 		}
+
 		out = append(out, arg)
 	}
+
 	return out
 }
 
@@ -155,11 +173,13 @@ func sudoLine(extraArgs []string) string {
 	if err != nil {
 		self = "vaire"
 	}
+
 	filtered := filteredArgs()
 	parts := make([]string, 0, 2+len(filtered)+len(extraArgs))
 	parts = append(parts, "sudo", self)
 	parts = append(parts, filtered...)
 	parts = append(parts, extraArgs...)
+
 	quoted := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if strings.ContainsAny(part, " \t\"'") {
@@ -168,11 +188,13 @@ func sudoLine(extraArgs []string) string {
 			quoted = append(quoted, part)
 		}
 	}
+
 	return strings.Join(quoted, " ")
 }
 
 func rootRequired(extraArgs []string) error {
 	line := sudoLine(extraArgs)
+
 	return output.NewError(
 		output.CodePrecondition,
 		"this command needs root",
@@ -188,10 +210,13 @@ func flagBool(cmd *cobra.Command, name string) bool {
 	if cmd == nil || cmd.Flags() == nil {
 		return false
 	}
+
 	flag := cmd.Flags().Lookup(name)
 	if flag == nil {
 		return false
 	}
+
 	value, err := strconv.ParseBool(flag.Value.String())
+
 	return err == nil && value
 }

@@ -31,22 +31,28 @@ type SpaceNeed struct {
 // filesystem as an earlier one add up.
 func CheckSpace(needs []SpaceNeed) ([]SpaceNeed, error) {
 	byDev := map[uint64]uint64{}
+
 	out := make([]SpaceNeed, 0, len(needs))
 	for _, n := range needs {
 		free, ok := hostinfo.FreeBytes(existingParent(n.Path))
 		if !ok {
 			n.Unknown = true
 			out = append(out, n)
+
 			continue
 		}
+
 		n.Free = free
 		dev := deviceOf(existingParent(n.Path))
+
 		byDev[dev] += n.Need
 		if total := byDev[dev] + keepFree; total > free {
 			n.Shortfall = total - free
 		}
+
 		out = append(out, n)
 	}
+
 	for _, n := range out {
 		if n.Shortfall > 0 {
 			return out, output.NewError(output.CodePrecondition,
@@ -56,6 +62,7 @@ func CheckSpace(needs []SpaceNeed) ([]SpaceNeed, error) {
 				WithDetails(map[string]any{"reason": "insufficient_space", "space": out})
 		}
 	}
+
 	return out, nil
 }
 
@@ -65,6 +72,7 @@ func CopyNeed(size int64) uint64 {
 	if size < 0 {
 		size = 0
 	}
+
 	return uint64(size) + copyOverhead
 }
 
@@ -74,10 +82,12 @@ func existingParent(path string) string {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
+
 		parent := parentDir(p)
 		if parent == p {
 			return p
 		}
+
 		p = parent
 	}
 }
@@ -88,6 +98,7 @@ func parentDir(p string) string {
 			return p[:i]
 		}
 	}
+
 	return "/"
 }
 
@@ -96,10 +107,12 @@ func humanBytes(n uint64) string {
 	if n < unit {
 		return fmt.Sprintf("%d B", n)
 	}
+
 	div, exp := uint64(unit), 0
 	for m := n / unit; m >= unit; m /= unit {
 		div *= unit
 		exp++
 	}
+
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

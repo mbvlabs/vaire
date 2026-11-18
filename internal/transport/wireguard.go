@@ -61,38 +61,48 @@ func UpWireGuard(cfg WireGuardConfig) (*Tunnel, error) {
 	if err != nil {
 		return nil, wgError("the operator WireGuard private key is invalid", err)
 	}
+
 	peer, err := keyHex(cfg.PeerPublicKey)
 	if err != nil {
 		return nil, wgError("the node WireGuard public key is invalid", err)
 	}
+
 	if !cfg.Address.IsValid() || !cfg.Endpoint.IsValid() {
 		return nil, wgError("the tunnel address or endpoint is invalid", errors.New("invalid address"))
 	}
+
 	tdev, tnet, err := netstack.CreateNetTUN([]netip.Addr{cfg.Address}, nil, TunnelMTU)
 	if err != nil {
 		return nil, wgError("could not create the userspace tunnel", err)
 	}
+
 	logger := &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf}
 	if cfg.Logf != nil {
 		logger = &device.Logger{Verbosef: device.DiscardLogf, Errorf: cfg.Logf}
 	}
+
 	dev := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+
 	var ipc strings.Builder
 	fmt.Fprintf(&ipc, "private_key=%s\n", priv)
 	fmt.Fprintf(&ipc, "public_key=%s\n", peer)
 	fmt.Fprintf(&ipc, "endpoint=%s\n", cfg.Endpoint)
 	fmt.Fprintf(&ipc, "persistent_keepalive_interval=%d\n", KeepaliveSeconds)
+
 	for _, prefix := range cfg.AllowedIPs {
 		fmt.Fprintf(&ipc, "allowed_ip=%s\n", prefix)
 	}
+
 	if err := dev.IpcSet(ipc.String()); err != nil {
 		dev.Close()
 		return nil, wgError("could not configure the userspace tunnel", err)
 	}
+
 	if err := dev.Up(); err != nil {
 		dev.Close()
 		return nil, wgError("could not start the userspace tunnel", err)
 	}
+
 	return &Tunnel{dev: dev, net: tnet}, nil
 }
 
@@ -107,17 +117,20 @@ func (t *Tunnel) LastHandshake() time.Time {
 	if t == nil || t.dev == nil {
 		return time.Time{}
 	}
+
 	state, err := t.dev.IpcGet()
 	if err != nil {
 		return time.Time{}
 	}
-	for _, line := range strings.Split(state, "\n") {
+
+	for line := range strings.SplitSeq(state, "\n") {
 		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok {
 			if sec, err := strconv.ParseInt(v, 10, 64); err == nil && sec > 0 {
 				return time.Unix(sec, 0)
 			}
 		}
 	}
+
 	return time.Time{}
 }
 
@@ -131,10 +144,12 @@ func (t *Tunnel) OnClose(fn func()) {
 func (t *Tunnel) Close() {
 	if t != nil && t.dev != nil {
 		t.dev.Close()
+
 		t.dev = nil
 		for _, fn := range t.onClose {
 			fn()
 		}
+
 		t.onClose = nil
 	}
 }
@@ -153,9 +168,11 @@ func keyHex(b64 string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	if len(raw) != curve25519.ScalarSize {
 		return "", fmt.Errorf("key is %d bytes, want 32", len(raw))
 	}
+
 	return hex.EncodeToString(raw), nil
 }
 
@@ -170,6 +187,7 @@ func GenerateWGKey() (private, public string, err error) {
 	k[31] = (k[31] & 127) | 64
 	private = base64.StdEncoding.EncodeToString(k[:])
 	public, err = WGPublicKey(private)
+
 	return private, public, err
 }
 
@@ -179,9 +197,11 @@ func WGPublicKey(private string) (string, error) {
 	if err != nil || len(raw) != curve25519.ScalarSize {
 		return "", errors.New("invalid WireGuard private key")
 	}
+
 	pub, err := curve25519.X25519(raw, curve25519.Basepoint)
 	if err != nil {
 		return "", err
 	}
+
 	return base64.StdEncoding.EncodeToString(pub), nil
 }

@@ -30,5 +30,6 @@ func (d Direct) DialContext(ctx context.Context, network, addr string) (net.Conn
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+
 	return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, addr)
 }

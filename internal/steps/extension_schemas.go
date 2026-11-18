@@ -35,17 +35,21 @@ func queryInstalledExtensionSchemasColumn(ctx context.Context, local pg.Local, d
 	if err != nil {
 		return nil, err
 	}
+
 	out := make(map[string]string, len(rows))
 	for _, row := range rows {
 		name, schema, ok := strings.Cut(row, "\x1f")
 		if !ok {
 			name, schema = row, ""
 		}
+
 		if name == "" {
 			return nil, fmt.Errorf("installed extension schema query in %s returned an empty extension name", db)
 		}
+
 		out[name] = schema
 	}
+
 	return out, nil
 }
 
@@ -56,14 +60,17 @@ func QueryInstalledExtensionSchemas(ctx context.Context, local pg.Local, db stri
 	if err != nil {
 		return nil, err
 	}
+
 	out := make(map[string]string, len(rows))
 	for _, row := range rows {
 		name := row["name"]
 		if name == "" {
 			return nil, fmt.Errorf("installed extension schema query in %s returned an empty extension name", db)
 		}
+
 		out[name] = row["schema"]
 	}
+
 	return out, nil
 }
 
@@ -79,10 +86,12 @@ func ValidateInstalledExtensionSchemas(db string, entries []catalog.Extension, i
 		if ext.ExtName == "" || ext.Schema == "" {
 			continue
 		}
+
 		actual, ok := installed[ext.ExtName]
 		if !ok {
 			continue
 		}
+
 		if actual == "" {
 			return output.NewError(output.CodePrecondition,
 				"cannot prove the installed schema of "+ext.ExtName+" in "+db,
@@ -93,6 +102,7 @@ func ValidateInstalledExtensionSchemas(db string, entries []catalog.Extension, i
 					"extension": ext.Name, "ext_name": ext.ExtName,
 				})
 		}
+
 		if actual != ext.Schema {
 			return output.NewError(output.CodePrecondition,
 				ext.Name+" is installed in "+db+" as SQL extension "+ext.ExtName+" in schema "+actual+
@@ -106,5 +116,6 @@ func ValidateInstalledExtensionSchemas(db string, entries []catalog.Extension, i
 				})
 		}
 	}
+
 	return nil
 }

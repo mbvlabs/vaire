@@ -91,9 +91,11 @@ func (s State) Job(id string) (JobRecord, bool) {
 			return r, true
 		}
 	}
+
 	if r, ok := s.RetainedJobs[id]; ok {
 		return r, true
 	}
+
 	return JobRecord{}, false
 }
 
@@ -102,12 +104,14 @@ func (s *State) PutJob(rec JobRecord) {
 	if _, ok := s.RetainedJobs[rec.ID]; ok {
 		s.RetainedJobs[rec.ID] = rec
 	}
+
 	for i, r := range s.Jobs {
 		if r.ID == rec.ID {
 			s.Jobs[i] = rec
 			return
 		}
 	}
+
 	s.Jobs = append(s.Jobs, rec)
 	if over := len(s.Jobs) - maxJobs; over > 0 {
 		s.Jobs = append([]JobRecord(nil), s.Jobs[over:]...)
@@ -120,6 +124,7 @@ func (s *State) RetainJob(id string) {
 		if s.RetainedJobs == nil {
 			s.RetainedJobs = make(map[string]JobRecord)
 		}
+
 		s.RetainedJobs[id] = rec
 	}
 }
@@ -151,9 +156,11 @@ func updateState(fn func(*State) error) error {
 	if err != nil {
 		return err
 	}
+
 	if err := fn(&st); err != nil {
 		return err
 	}
+
 	return st.Save(StatePath)
 }
 
@@ -167,16 +174,21 @@ func WithFileLock(lockPath string, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
+
 	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = f.Close() }()
+
 	fd := int(f.Fd())
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		return err
 	}
+
 	defer func() { _ = syscall.Flock(fd, syscall.LOCK_UN) }()
+
 	return fn()
 }
 
@@ -185,38 +197,50 @@ func WithFileLock(lockPath string, fn func() error) error {
 // A nil ctx waits like WithFileLock: it has no deadline.
 func withFileLockContext(ctx context.Context, lockPath string, fn func() error) error {
 	var done <-chan struct{}
+
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		done = ctx.Done()
 	}
+
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
+
 	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = f.Close() }()
+
 	fd := int(f.Fd())
+
 	ticker := time.NewTicker(stateLockPoll)
 	defer ticker.Stop()
+
 	for {
 		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			break
 		}
+
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			return err
 		}
+
 		select {
 		case <-done:
 			return ctx.Err()
 		case <-ticker.C:
 		}
 	}
+
 	defer func() { _ = syscall.Flock(fd, syscall.LOCK_UN) }()
+
 	return fn()
 }
 
@@ -233,8 +257,10 @@ func LoadState(path string) (State, error) {
 		if os.IsNotExist(err) {
 			return State{}, nil
 		}
+
 		return State{}, err
 	}
+
 	var s State
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return State{}, output.NewError(
@@ -244,6 +270,7 @@ func LoadState(path string) (State, error) {
 			"Inspect "+path+" and fix or remove it. vaire never resets it on its own.",
 		).WithDetails(map[string]any{"reason": "state_corrupt", "path": path})
 	}
+
 	return s, nil
 }
 
@@ -253,8 +280,10 @@ func (s State) Save(path string) error {
 	if err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+
 	return WriteFileAtomic(path, append(raw, '\n'), 0o600)
 }

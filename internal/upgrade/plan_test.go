@@ -53,6 +53,7 @@ func TestSelectChannel(t *testing.T) {
 			if (err != nil) != c.err {
 				t.Fatalf("error = %v, want error %v", err, c.err)
 			}
+
 			if got != c.want {
 				t.Fatalf("got %q, want %q", got, c.want)
 			}
@@ -62,6 +63,7 @@ func TestSelectChannel(t *testing.T) {
 
 func TestDecide(t *testing.T) {
 	stable := func(v string) release.Manifest { return release.Manifest{Channel: "stable", Version: v} }
+
 	cases := []struct {
 		name       string
 		from       Version
@@ -85,13 +87,16 @@ func TestDecide(t *testing.T) {
 			if plan.Changed != c.changed {
 				t.Fatalf("changed = %v, want %v", plan.Changed, c.changed)
 			}
+
 			var codes []string
 			for _, w := range plan.Warnings {
 				codes = append(codes, w.Code)
 			}
+
 			if len(codes) != len(c.warnings) {
 				t.Fatalf("warnings = %v, want %v", codes, c.warnings)
 			}
+
 			for i := range codes {
 				if codes[i] != c.warnings[i] {
 					t.Fatalf("warnings = %v, want %v", codes, c.warnings)

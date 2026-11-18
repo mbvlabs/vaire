@@ -12,21 +12,26 @@ func TestEmbeddedSQL(t *testing.T) {
 			t.Errorf("%s: header, trailing semicolon or body", name)
 		}
 	}
+
 	b := BloatSQL()
 	if strings.Count(b, "FROM (") < 2 || !strings.Contains(b, "UNION ALL") {
 		t.Errorf("bloat sql:\n%s", b)
 	}
+
 	if !strings.Contains(License(), "Redistribution") {
 		t.Error("the licence is not embedded")
 	}
+
 	for _, kind := range ReportKinds {
 		if _, err := ReportSQL(kind, 300); err != nil {
 			t.Errorf("%s: %v", kind, err)
 		}
 	}
+
 	if q, _ := ReportSQL(ReportLongQueries, 600); !strings.Contains(q, "make_interval(secs => 600)") {
 		t.Error("long-queries threshold")
 	}
+
 	if _, err := ReportSQL("nope", 0); err == nil || ValidReport("nope") {
 		t.Error("an unknown report")
 	}
@@ -42,9 +47,11 @@ func TestParseBloat(t *testing.T) {
 	if len(r.Rows) != 2 || r.Rows[0].Index != "events_pkey" || r.Rows[0].Ratio != 0.75 || r.Rows[1].BloatBytes != 5000000 {
 		t.Errorf("%+v", r.Rows)
 	}
+
 	if len(r.Unestimated) != 1 || r.Unestimated[0] != "public.nostats" {
 		t.Errorf("unestimated %v", r.Unestimated)
 	}
+
 	if tot := TotalBloat(r); tot["index"] != 9000000 || tot["table"] != 5000000 {
 		t.Errorf("total %v", tot)
 	}
@@ -68,9 +75,11 @@ func TestStatements(t *testing.T) {
 			t.Errorf("%+v: %v %v", c.o, got, err)
 		}
 	}
+
 	if got, _ := (Options{Kind: Vacuum, DB: "app"}).Statements(); got != nil {
 		t.Error("a database-wide vacuum runs vacuumdb")
 	}
+
 	for _, bad := range []Options{
 		{Kind: Reindex, DB: "app", NotConcurrently: true},
 		{Kind: Vacuum, DB: "app", Table: "x; drop table y"},
@@ -88,10 +97,12 @@ func TestHeavyAndVacuumdb(t *testing.T) {
 	if !(Options{Kind: Vacuum}).Heavy() || (Options{Kind: Vacuum, Table: "t"}).Heavy() || !(Options{Kind: Reindex, Table: "t"}).Heavy() || (Options{Kind: Analyze}).Heavy() {
 		t.Error("heavy")
 	}
+
 	got := strings.Join(Options{Kind: Vacuum, DB: "app", Analyze: true, Freeze: true}.VacuumdbArgs("/var/run/postgresql", "vaire_admin", 5433, 2), " ")
 	if got != "-h /var/run/postgresql -p 5433 -U vaire_admin --jobs=2 --analyze --freeze --dbname=app" {
 		t.Errorf("vacuumdb %s", got)
 	}
+
 	got = strings.Join(Options{Kind: Analyze, DB: "app"}.VacuumdbArgs("/s", "postgres", 5433, 0), " ")
 	if !strings.Contains(got, "--analyze-only") || !strings.Contains(got, "--jobs=1") || !strings.Contains(got, "-U postgres") {
 		t.Errorf("analyze %s", got)
@@ -107,18 +118,22 @@ func TestSelectBackends(t *testing.T) {
 		{"pid": "5", "role": "app_ro", "state": "idle in transaction (aborted)", "state_seconds": "900", "app": "vaire top"},
 		{"pid": "6", "role": "app_app", "state": "active", "state_seconds": "900"},
 	})
+
 	sel, _ := SelectBackends(all, KillOptions{IdleInTx: true, OlderThanSecond: 600})
 	if len(sel) != 1 || sel[0].PID != 1 {
 		t.Errorf("idle-in-tx %+v", sel)
 	}
+
 	sel, refused := SelectBackends(all, KillOptions{PID: 4})
 	if len(sel) != 0 || len(refused) != 1 {
 		t.Error("a superuser's pid must be refused")
 	}
+
 	sel, _ = SelectBackends(all, KillOptions{PID: 3})
 	if len(sel) != 1 {
 		t.Error("an explicit pid of an vaire role is allowed")
 	}
+
 	if TerminateSQL([]int{1, 2}) != "SELECT pid, pg_terminate_backend(pid) AS terminated FROM unnest(ARRAY[1,2]::int[]) AS pid" {
 		t.Error("terminate sql")
 	}
@@ -128,9 +143,11 @@ func TestQuoteRelationAndWraparound(t *testing.T) {
 	if q, err := QuoteRelation("public.events"); err != nil || q != `"public"."events"` {
 		t.Errorf("%s %v", q, err)
 	}
+
 	if _, err := QuoteRelation(`a"b`); err == nil {
 		t.Error("a quote passed")
 	}
+
 	if WraparoundStatus(5) != "pass" || WraparoundStatus(1_200_000_000) != "warn" || WraparoundStatus(2_000_000_000) != "fail" {
 		t.Error("wraparound")
 	}

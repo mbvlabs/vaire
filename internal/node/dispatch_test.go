@@ -34,18 +34,23 @@ func newTestWriter(t *testing.T, w interface{ Write([]byte) (int, error) }) (*ev
 	path := filepath.Join(t.TempDir(), "run.log")
 	log, err := engine.OpenRunLogFile(path)
 	reject(t, err != nil, err)
+
 	out := &eventWriter{w: w}
 	out.setLog(log)
+
 	return out, path
 }
 
 func readLog(t *testing.T, out *eventWriter, path string) string {
 	t.Helper()
+
 	if err := out.log.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	raw, err := os.ReadFile(path)
 	reject(t, err != nil, err)
+
 	return string(raw)
 }
 
@@ -53,15 +58,19 @@ func readLog(t *testing.T, out *eventWriter, path string) string {
 // emit blocks.
 func emitAll(t *testing.T, out *eventWriter, n int) {
 	t.Helper()
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+
 		for i := range n {
 			out.emit(output.Event{Type: "log", Line: "line " + strings.Repeat("x", i%3)})
 		}
+
 		out.emit(output.Event{Type: "step", Step: "after-flood", State: "ok"})
 		out.emit(output.Event{Type: "warning", Code: "w1", Message: "kept"})
 	}()
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -72,18 +81,22 @@ func emitAll(t *testing.T, out *eventWriter, n int) {
 func TestEventWriterBlockedStdout(t *testing.T) {
 	old := streamDrainTimeout
 	streamDrainTimeout = 200 * time.Millisecond
+
 	t.Cleanup(func() { streamDrainTimeout = old })
 
 	w := blockingWriter{block: make(chan struct{})}
+
 	t.Cleanup(func() { close(w.block) })
 	out, path := newTestWriter(t, w)
 	n := streamQueueMax + 500
 	emitAll(t, out, n)
 
 	start := time.Now()
+
 	if code := out.ok("test", Result{Data: map[string]string{"k": "v"}}); code != output.ExitOK {
 		t.Fatalf("ok = %d", code)
 	}
+
 	if took := time.Since(start); took > 2*time.Second {
 		t.Fatalf("ok took %s, want about the drain timeout", took)
 	}
@@ -99,6 +112,7 @@ func TestEventWriterBlockedStdout(t *testing.T) {
 	if got := strings.Count(log, `"type":"log"`); got != n {
 		t.Fatalf("run log has %d log events, want %d", got, n)
 	}
+
 	for _, want := range []string{`"step":"after-flood"`, `"code":"w1"`, `"code":"events_dropped"`, `"type":"result"`, "did not drain"} {
 		rejectf(t, !strings.Contains(log, want), "run log lacks %s", want)
 	}
@@ -112,15 +126,18 @@ func TestEventWriterBrokenStdout(t *testing.T) {
 	start := time.Now()
 	code := out.fail("test", output.NewError(output.CodeError, "boom", output.ExitGeneric, ""))
 	rejectf(t, code != output.ExitGeneric, "fail = %d", code)
+
 	if took := time.Since(start); took > time.Second {
 		t.Fatalf("fail took %s with a dead stdout", took)
 	}
+
 	rejectf(t, w.writes != 1, "stdout got %d writes after EPIPE, want 1", w.writes)
 
 	log := readLog(t, out, path)
 	if got := strings.Count(log, `"type":"log"`); got != 100 {
 		t.Fatalf("run log has %d log events, want 100", got)
 	}
+
 	for _, want := range []string{`"step":"after-flood"`, `"type":"result"`, `"message":"boom"`, "broken pipe"} {
 		rejectf(t, !strings.Contains(log, want), "run log lacks %s", want)
 	}

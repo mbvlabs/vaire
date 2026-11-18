@@ -16,6 +16,7 @@ func sqlFile(name string) string {
 	if err != nil {
 		panic("missing embedded SQL " + name)
 	}
+
 	return strings.TrimSuffix(strings.TrimSpace(string(raw)), ";")
 }
 
@@ -59,27 +60,33 @@ type BloatReport struct {
 // ParseBloat shapes BloatSQL rows of db.
 func ParseBloat(db string, rows []map[string]string, minBytes int64) BloatReport {
 	out := BloatReport{Rows: []BloatRow{}}
+
 	for _, r := range rows {
 		name := r["schemaname"] + "." + r["table_name"]
 		if r["index_name"] != "" {
 			name += "." + r["index_name"]
 		}
+
 		if r["is_na"] == "t" || r["is_na"] == "true" {
 			out.Unestimated = append(out.Unestimated, name)
 			continue
 		}
+
 		bytes, _ := strconv.ParseInt(r["bloat_bytes"], 10, 64)
 		if bytes < minBytes || bytes <= 0 {
 			continue
 		}
+
 		size, _ := strconv.ParseInt(r["real_size"], 10, 64)
 		pct, _ := strconv.ParseFloat(r["bloat_pct"], 64)
 		ff, _ := strconv.Atoi(r["fillfactor"])
 		out.Rows = append(out.Rows, BloatRow{DB: db, Kind: r["kind"], Schema: r["schemaname"], Table: r["table_name"], Index: r["index_name"],
 			RealSize: size, BloatBytes: bytes, Ratio: pct / 100, Fillfactor: ff})
 	}
+
 	sort.SliceStable(out.Rows, func(i, j int) bool { return out.Rows[i].BloatBytes > out.Rows[j].BloatBytes })
 	sort.Strings(out.Unestimated)
+
 	return out
 }
 
@@ -89,6 +96,7 @@ func TotalBloat(r BloatReport) map[string]int64 {
 	for _, row := range r.Rows {
 		out[row.Kind] += row.BloatBytes
 	}
+
 	return out
 }
 
@@ -113,9 +121,11 @@ func ExactBloatSQL(oid int64, schema string) (string, error) {
 	if oid <= 0 || oid > 4294967295 {
 		return "", fmt.Errorf("table OID %d is invalid", oid)
 	}
+
 	if schema == "" {
 		return "", fmt.Errorf("pgstattuple schema is empty")
 	}
+
 	return `SELECT table_len::bigint AS table_len,
   tuple_count::bigint AS tuple_count,
   tuple_len::bigint AS tuple_len,
@@ -152,12 +162,14 @@ func ParseTableStats(db, schema, table string, rows []map[string]string) (TableS
 	if len(rows) != 1 {
 		return TableStats{}, fmt.Errorf("pgstattuple returned %d rows for %s.%s, want one", len(rows), schema, table)
 	}
+
 	r := rows[0]
 	parseInt := func(name string) (int64, error) {
 		v, err := strconv.ParseInt(r[name], 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", name, err)
 		}
+
 		return v, nil
 	}
 	parseFloat := func(name string) (float64, error) {
@@ -165,9 +177,12 @@ func ParseTableStats(db, schema, table string, rows []map[string]string) (TableS
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", name, err)
 		}
+
 		return v, nil
 	}
+
 	var out TableStats
+
 	out.DB, out.Schema, out.Table, out.Method = db, schema, table, "pgstattuple"
 	for name, dst := range map[string]*int64{
 		"table_len": &out.TableBytes, "tuple_count": &out.TupleCount, "tuple_len": &out.TupleBytes,
@@ -177,8 +192,10 @@ func ParseTableStats(db, schema, table string, rows []map[string]string) (TableS
 		if err != nil {
 			return TableStats{}, err
 		}
+
 		*dst = v
 	}
+
 	for name, dst := range map[string]*float64{
 		"tuple_percent": &out.TuplePercent, "dead_tuple_percent": &out.DeadTuplePercent, "free_percent": &out.FreePercent,
 	} {
@@ -186,7 +203,9 @@ func ParseTableStats(db, schema, table string, rows []map[string]string) (TableS
 		if err != nil {
 			return TableStats{}, err
 		}
+
 		*dst = v
 	}
+
 	return out, nil
 }

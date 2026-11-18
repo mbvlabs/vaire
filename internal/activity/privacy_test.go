@@ -15,6 +15,7 @@ import (
 func TestPrivacyCanariesAreRejectedAndNeverPersisted(t *testing.T) {
 	s := testStore(t)
 	mustAppend(t, s, baseEvent())
+
 	canaries := []string{
 		"SELECT * FROM pg_shadow WHERE usename='postgres'",
 		"https://user:pass@example.com/hook",
@@ -38,26 +39,32 @@ func TestPrivacyCanariesAreRejectedAndNeverPersisted(t *testing.T) {
 			if !errors.Is(err, errInvalidEvent) {
 				t.Fatalf("Append accepted canary %q: %v", canary, err)
 			}
+
 			if strings.Contains(err.Error(), canary) {
 				t.Fatalf("append error echoed canary %q: %v", canary, err)
 			}
 		}
+
 		if _, err := s.Query(context.Background(), Query{Action: canary}); !errors.Is(err, errInvalidQuery) {
 			t.Fatalf("Query accepted canary filter %q: %v", canary, err)
 		}
 	}
+
 	assertNoCanary(t, s.Dir, canaries...)
 }
 
 func TestRegisteredSecretRemovesField(t *testing.T) {
 	old := redactor
 	registry := secrets.NewRegistry()
+
 	const secret = "s3cr3tvalue"
 	registry.Add(secret)
 	redactor = registry
+
 	t.Cleanup(func() { redactor = old })
 
 	s := testStore(t)
+
 	assigned := mustAppend(t, s, Event{
 		Source:     SourceRPC,
 		Action:     "backup.full",
@@ -69,6 +76,7 @@ func TestRegisteredSecretRemovesField(t *testing.T) {
 	if assigned.Server != "" || assigned.ActorLabel != "" {
 		t.Fatalf("registered secret field survived: %+v", assigned)
 	}
+
 	if _, err := s.Append(context.Background(), Event{
 		Source:  SourceRPC,
 		Action:  secret,
@@ -76,6 +84,7 @@ func TestRegisteredSecretRemovesField(t *testing.T) {
 	}); !errors.Is(err, errInvalidEvent) {
 		t.Fatalf("secret action error = %v, want errInvalidEvent", err)
 	}
+
 	if _, err := s.Append(context.Background(), Event{
 		Source:  SourceRPC,
 		Action:  "backup." + secret,
@@ -83,30 +92,37 @@ func TestRegisteredSecretRemovesField(t *testing.T) {
 	}); !errors.Is(err, errInvalidEvent) {
 		t.Fatalf("partially redacted action error = %v, want errInvalidEvent", err)
 	}
+
 	assertNoCanary(t, s.Dir, secret)
 }
 
 func assertNoCanary(t *testing.T, dir string, canaries ...string) {
 	t.Helper()
+
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		return
 	}
+
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+
 		if entry.IsDir() || !entry.Type().IsRegular() {
 			return nil
 		}
+
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
+
 		for _, canary := range canaries {
 			if bytes.Contains(raw, []byte(canary)) {
 				t.Fatalf("%s contains canary %q", path, canary)
 			}
 		}
+
 		return nil
 	})
 	if err != nil {

@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -60,15 +62,19 @@ func (d copyDestination) params() map[string]any {
 	if d.Size != "" {
 		params["size"] = d.Size
 	}
+
 	if d.Memory != "" {
 		params["memory"] = d.Memory
 	}
+
 	if d.Profile != "" {
 		params["profile"] = d.Profile
 	}
+
 	if d.AllowOvercommit {
 		params["allow_overcommit"] = true
 	}
+
 	return params
 }
 
@@ -85,6 +91,7 @@ type copySourceInput struct {
 // the caller and again here, before any RPC or error can carry them.
 func (s copySourceInput) secrets() (map[string]string, error) {
 	out := map[string]string{}
+
 	switch {
 	case s.URL != "" && s.Fields != nil:
 		return nil, output.NewError(output.CodeValidation,
@@ -97,8 +104,10 @@ func (s copySourceInput) secrets() (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		secrets.Add(string(raw))
 		secrets.Add(s.Fields.Password)
+
 		out[node.CopySourceSpecSecret] = string(raw)
 	default:
 		return nil, output.NewError(output.CodeInputRequired,
@@ -106,10 +115,12 @@ func (s copySourceInput) secrets() (map[string]string, error) {
 			"Pass a newline-terminated postgres:// URL on stdin with --source-url-stdin.").
 			WithDetails(map[string]any{"reason": "source_required"})
 	}
+
 	if s.CA != "" {
 		secrets.Add(s.CA)
 		out[node.CopySourceCASecret] = s.CA
 	}
+
 	return out, nil
 }
 
@@ -170,6 +181,7 @@ func runDBCopy(cmd *cobra.Command, args []string) error {
 	if flagTrue(cmd, "source-url-stdin") {
 		cmd.SetIn(bufio.NewReader(cmd.InOrStdin()))
 	}
+
 	name, err := copyName(cmd, args)
 	if err != nil {
 		return err
@@ -179,28 +191,36 @@ func runDBCopy(cmd *cobra.Command, args []string) error {
 	if !dryRun(cmd) && MustNotPrompt(cmd) && !flagTrue(cmd, "source-url-stdin") {
 		return copyInputRequired("source", "Pass a newline-terminated PostgreSQL URL on stdin with --source-url-stdin.")
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	dest, err := resolveCopyDestination(cmd, cfg, name)
 	if err != nil {
 		return err
 	}
+
 	var source *copySourceInput
+
 	if !dryRun(cmd) {
 		src, err := collectCopySource(cmd)
 		if err != nil {
 			return err
 		}
+
 		source = &src
 	}
+
 	calls := copyRPC{
 		Preflight: func(ctx context.Context, params map[string]any, sec map[string]string) (remote.Reply, error) {
 			return p.call(ctx, s.node, "db.copy.preflight", params, remote.CallOptions{Secrets: sec, OnEvent: p.event})
@@ -211,9 +231,11 @@ func runDBCopy(cmd *cobra.Command, args []string) error {
 				reply, err := p.call(ctx, s.node, "db.copy", params, opts)
 				return reply, "", false, err
 			}
+
 			return callJob(ctx, s, p, "db.copy", params, opts)
 		},
 	}
+
 	return executeDBCopy(cmd, p, s.ctx.Name, cfg, dest, source, s.warnings, calls)
 }
 
@@ -225,31 +247,39 @@ func copyName(cmd *cobra.Command, args []string) (string, error) {
 	if len(args) > 0 {
 		name = strings.TrimSpace(args[0])
 	}
+
 	if name == "" {
 		if MustNotPrompt(cmd) {
 			return "", copyInputRequired("name", "Pass the new database name: vaire db copy <name>.")
 		}
+
 		var err error
+
 		name, err = promptLine(cmd, "Name of the new vaire database", "")
 		if err != nil {
 			return "", err
 		}
+
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return "", copyInputRequired("name", "Pass the new database name: vaire db copy <name>.")
 		}
 	}
+
 	if !config.DatabasePattern.MatchString(name) {
 		hint := "Use lowercase letters, digits and underscores; the name is also the prefix of its roles."
 		if fixed := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(strings.ToLower(name)); config.DatabasePattern.MatchString(fixed) {
 			hint = "Try " + fixed + ". Hyphens aren't allowed because the name is also the prefix of its roles."
 		}
+
 		return "", output.NewError(output.CodeValidation, "database name "+name+" must match "+config.DatabasePattern.String(), output.ExitConfig, hint).
 			WithDetails(map[string]any{"name": name})
 	}
+
 	if err := config.CheckDatabaseName(name); err != nil {
 		return "", output.NewError(output.CodeValidation, "database name "+name+" "+err.Error(), output.ExitConfig, "Pass a shorter name.")
 	}
+
 	return name, nil
 }
 
@@ -274,11 +304,14 @@ func resolveCopyDestination(cmd *cobra.Command, cfg config.Cluster, name string)
 		if err != nil {
 			return copyDestination{}, err
 		}
+
 		dest.Size, dest.Memory = size, memory
 	}
+
 	if err := checkSizeFlags(cfg, dest.spec()); err != nil {
 		return copyDestination{}, err
 	}
+
 	return dest, nil
 }
 
@@ -293,22 +326,28 @@ func promptCopySize(cmd *cobra.Command, cfg config.Cluster) (string, string, err
 		} else if res, err := cfg.Resources(config.ClusterSpec{Size: name}); err == nil {
 			label = fmt.Sprintf("%s (%s memory, cpu weight %d, %d connections)", name, tune.FormatMiB(res.MemoryMiB), res.CPUWeight, res.MaxConnections)
 		}
+
 		options = append(options, [2]string{label, name})
 	}
+
 	choice, err := chooseOption(cmd, "Size of the new database (memory, CPU and connections, not storage)", options)
 	if err != nil {
 		return "", "", err
 	}
+
 	if choice != config.SizeCustom {
 		return choice, "", nil
 	}
+
 	memory, err := promptLine(cmd, "Memory for the custom size (for example 768MiB or 2GiB)", "")
 	if err != nil {
 		return "", "", err
 	}
+
 	if strings.TrimSpace(memory) == "" {
 		return "", "", copyInputRequired("custom size memory", "Pass --memory 768MiB (or another amount) with --size custom.")
 	}
+
 	return choice, strings.TrimSpace(memory), nil
 }
 
@@ -319,16 +358,20 @@ func collectCopySource(cmd *cobra.Command) (copySourceInput, error) {
 	if err != nil {
 		return copySourceInput{}, err
 	}
+
 	if flagTrue(cmd, "source-url-stdin") {
 		raw, err := readCopySourceURL(cmd)
 		if err != nil {
 			return copySourceInput{}, err
 		}
+
 		return copySourceInput{URL: raw, CA: ca}, nil
 	}
+
 	if MustNotPrompt(cmd) {
 		return copySourceInput{}, copyInputRequired("source", "Pass a newline-terminated PostgreSQL URL on stdin with --source-url-stdin.")
 	}
+
 	mode, err := chooseOption(cmd, "How will you provide the source connection?", [][2]string{
 		{"Full PostgreSQL URL (masked while typed)", "url"},
 		{"Individual host, port, database, user and password", "fields"},
@@ -336,22 +379,27 @@ func collectCopySource(cmd *cobra.Command) (copySourceInput, error) {
 	if err != nil {
 		return copySourceInput{}, err
 	}
+
 	if mode == "url" {
 		raw, err := readSecretTTY(cmd, "Source PostgreSQL URL")
 		if err != nil {
 			return copySourceInput{}, err
 		}
+
 		if strings.TrimSpace(raw) == "" {
 			return copySourceInput{}, copyInputRequired("source URL", "Paste a postgres:// or postgresql:// URL.")
 		}
 		// Register before any validation or display can carry it.
 		secrets.Add(raw)
+
 		return copySourceInput{URL: raw, CA: ca}, nil
 	}
+
 	fields, err := promptCopySourceFields(cmd)
 	if err != nil {
 		return copySourceInput{}, err
 	}
+
 	return copySourceInput{Fields: fields, CA: ca}, nil
 }
 
@@ -363,31 +411,39 @@ func promptCopySourceFields(cmd *cobra.Command) (*node.CopySourceSecret, error) 
 	if err != nil {
 		return nil, err
 	}
+
 	if strings.TrimSpace(host) == "" {
 		return nil, copyInputRequired("source host", "Pass the source host name or address.")
 	}
+
 	portText, err := promptLine(cmd, "Source port", "5432")
 	if err != nil {
 		return nil, err
 	}
+
 	port, err := strconv.Atoi(strings.TrimSpace(portText))
 	if err != nil || port < 1 || port > 65535 {
 		return nil, output.NewError(output.CodeValidation, "the source port must be between 1 and 65535", output.ExitConfig, "")
 	}
+
 	database, err := promptLine(cmd, "Source database", "")
 	if err != nil {
 		return nil, err
 	}
+
 	if strings.TrimSpace(database) == "" {
 		return nil, copyInputRequired("source database", "Pass one source database name.")
 	}
+
 	user, err := promptLine(cmd, "Source user", "")
 	if err != nil {
 		return nil, err
 	}
+
 	if strings.TrimSpace(user) == "" {
 		return nil, copyInputRequired("source user", "Pass the source user name.")
 	}
+
 	password, err := readCopyPassword(cmd)
 	if err != nil {
 		return nil, err
@@ -395,6 +451,7 @@ func promptCopySourceFields(cmd *cobra.Command) (*node.CopySourceSecret, error) 
 	// Register immediately: a later TLS prompt cancellation must not expose
 	// the password in an error or log.
 	secrets.Add(password)
+
 	tlsMode, err := chooseOption(cmd, "Source TLS mode", [][2]string{
 		{"verify-full (verify the certificate and hostname; default)", backup.SourceTLSVerifyFull},
 		{"verify-ca (verify the certificate, not the hostname)", backup.SourceTLSVerifyCA},
@@ -403,6 +460,7 @@ func promptCopySourceFields(cmd *cobra.Command) (*node.CopySourceSecret, error) 
 	if err != nil {
 		return nil, err
 	}
+
 	return &node.CopySourceSecret{
 		Host:     strings.TrimSpace(host),
 		Port:     port,
@@ -433,29 +491,36 @@ func readCopyPassword(cmd *cobra.Command) (string, error) {
 // without a terminal. The plain path writes its label and final newline to w
 // before and after the masked reader, never the password itself.
 func readCopyPasswordWith(rich bool, w io.Writer, label string) (string, error) {
-	var value string
-	var err error
+	var (
+		value string
+		err   error
+	)
 	if rich {
 		value, err = copyPasswordFromUI(label)
 	} else {
 		if _, werr := fmt.Fprint(w, label+": "); werr != nil {
 			return "", werr
 		}
+
 		value, err = copyPasswordRead()
 		_, _ = fmt.Fprintln(w)
 	}
+
 	if err != nil {
 		if rich {
 			return "", promptErr(err)
 		}
+
 		return "", output.WrapError(output.CodeInputRequired, err, output.ExitInput, "")
 	}
+
 	if strings.ContainsAny(value, "\x00\r\n") {
 		return "", output.NewError(output.CodeValidation,
 			"the source password cannot contain a line break or NUL byte", output.ExitConfig,
 			"A PostgreSQL password file cannot carry those characters; enter one password without a line break or NUL byte.").
 			WithDetails(map[string]any{"reason": "invalid_source_password"})
 	}
+
 	return value, nil
 }
 
@@ -468,25 +533,32 @@ func readCopySourceURL(cmd *cobra.Command) (string, error) {
 		reader = bufio.NewReader(cmd.InOrStdin())
 		cmd.SetIn(reader)
 	}
+
 	line, err := reader.ReadString('\n')
+
 	raw := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 	if strings.TrimSpace(raw) != "" {
 		// Register before the newline/EOF check can return an error.
 		secrets.Add(raw)
 	}
+
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", output.WrapError(output.CodeInputRequired, err, output.ExitInput, "")
 	}
+
 	if err != nil || !strings.HasSuffix(line, "\n") {
 		return "", copyInputRequired("source URL on stdin", "Pipe one newline-terminated PostgreSQL URL: printf '%s\\n' \"$URL\" | vaire db copy <name> --source-url-stdin.")
 	}
+
 	if strings.TrimSpace(raw) == "" {
 		return "", copyInputRequired("source URL on stdin", "The first stdin line was empty; pipe one PostgreSQL URL.")
 	}
+
 	if strings.ContainsAny(raw, "\r\n") {
 		return "", output.NewError(output.CodeValidation, "the source URL must be one line", output.ExitConfig,
 			"Pipe exactly one newline-terminated URL.")
 	}
+
 	return raw, nil
 }
 
@@ -498,17 +570,21 @@ func readCopyCAFile(cmd *cobra.Command) (string, error) {
 	if path == "" {
 		return "", nil
 	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", output.WrapError(output.CodeUsage, err, output.ExitUsage,
 			"Pass a readable PEM CA certificate with --source-ca-file.")
 	}
+
 	content := string(raw)
 	if strings.TrimSpace(content) == "" {
 		return "", output.NewError(output.CodeValidation, "the source CA file is empty", output.ExitConfig,
 			"Pass a PEM-encoded CA certificate, or omit --source-ca-file to use the system trust store.")
 	}
+
 	secrets.Add(content)
+
 	return content, nil
 }
 
@@ -519,17 +595,21 @@ func executeDBCopy(cmd *cobra.Command, p *progress, workspaceName string, cfg co
 	if dryRun(cmd) {
 		return executeDBCopyDryRun(cmd, cfg, dest, ownWarnings, calls)
 	}
+
 	if source == nil {
 		return copyInputRequired("source", "Pass a newline-terminated PostgreSQL URL on stdin with --source-url-stdin.")
 	}
+
 	sourceSecrets, err := source.secrets()
 	if err != nil {
 		return err
 	}
+
 	pre, warnings, err := copyPreflight(cmd, p, workspaceName, cfg, dest, sourceSecrets, ownWarnings, calls)
 	if err != nil {
 		return err
 	}
+
 	secret, roleSecrets, err := copyCredentials(cfg, workspaceName, dest, sourceSecrets, &warnings)
 	if err != nil {
 		return err
@@ -539,32 +619,42 @@ func executeDBCopy(cmd *cobra.Command, p *progress, workspaceName string, cfg co
 	// before the call is what lets a detached or lost reply still hand over
 	// the one-time credentials and the job id.
 	jobID := rpc.NewRequestID()
+
 	reply, announced, detached, err := calls.Start(commandContext(cmd), dest.params(), roleSecrets, jobID, dest.Name, false)
 	if announced != "" {
 		jobID = announced
 	}
+
 	if err != nil {
 		return copyStartFailure(cmd, err, jobID, dest.Name, secret, warnings)
 	}
+
 	if detached {
 		return copyDetachedResult(cmd, jobID, dest.Name, pre, secret, warnings)
 	}
+
 	var res copyJobResult
+
 	jr, err := decodeJob(reply, &res)
 	if err != nil {
 		return copyResultFailure(cmd, jobID, dest.Name, secret, warnings)
 	}
+
 	if jr.JobID != "" {
 		jobID = jr.JobID
 	}
+
 	warnings = append(warnings, reply.Warnings...)
 	warnings = append(warnings, res.Warnings...)
 	from := copySourceLabel(pre)
+
 	headline := "copied " + from + " into " + dest.Name + " with its own roles"
 	if res.Backup.Configured && res.Backup.Ready {
 		headline += " and first backup"
 	}
+
 	message, human := credentialsMessage(cmd, headline, headline, dest.Name, secret)
+
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{
 			"job_id":   jobID,
@@ -588,9 +678,12 @@ func executeDBCopyDryRun(cmd *cobra.Command, cfg config.Cluster, dest copyDestin
 	if err != nil {
 		return err
 	}
+
 	var data map[string]any
+
 	_ = reply.Decode(&data)
 	summary := copyDestinationSummary(cfg, dest)
+
 	return output.Success(cmd, output.Result{
 		Data: data,
 		Message: fmt.Sprintf("dry run: would copy into a new database %s (%s); no source connection was made, so source compatibility and reachability are not checked",
@@ -611,25 +704,32 @@ func copyPreflight(cmd *cobra.Command, p *progress, workspaceName string, cfg co
 			return copyPreflightData{}, nil, err
 		}
 	}
+
 	reply, err := calls.Preflight(commandContext(cmd), dest.params(), sourceSecrets)
 	if err != nil {
 		return copyPreflightData{}, nil, err
 	}
+
 	var pre copyPreflightData
 	if err := reply.Decode(&pre); err != nil {
 		return copyPreflightData{}, nil, err
 	}
+
 	warnings := append(append([]output.Warning{}, ownWarnings...), reply.Warnings...)
+
 	warnings = append(warnings, pre.Source.Warnings...)
 	for _, warning := range warnings {
 		if warning.Message != "" {
 			p.warn(warning.Message)
 		}
 	}
+
 	p.panel("Copy summary", copySummaryLines(workspaceName, cfg, dest, pre))
+
 	if err := Confirm(cmd, dest.Name); err != nil {
 		return copyPreflightData{}, nil, err
 	}
+
 	return pre, warnings, nil
 }
 
@@ -640,18 +740,18 @@ func copyCredentials(cfg config.Cluster, workspaceName string, dest copyDestinat
 	if err != nil {
 		return databaseSecret{}, nil, err
 	}
+
 	service, creds, generated, err := serviceSecrets(workspaceName)
 	if err != nil {
 		return databaseSecret{}, nil, err
 	}
-	for k, v := range service {
-		roleSecrets[k] = v
-	}
+
+	maps.Copy(roleSecrets, service)
 	addRecoveryKit(roleSecrets, creds.Backup)
-	for k, v := range sourceSecrets {
-		roleSecrets[k] = v
-	}
+	maps.Copy(roleSecrets, sourceSecrets)
+
 	*warnings = append(*warnings, staleWarning(generated)...)
+
 	return secret, roleSecrets, nil
 }
 
@@ -662,6 +762,7 @@ func copyDestinationSummary(cfg config.Cluster, dest copyDestination) string {
 	if err != nil {
 		return dest.Size
 	}
+
 	return copyResolvedSummary(res)
 }
 
@@ -672,9 +773,11 @@ func copyResolvedSummary(res config.Resources) string {
 	if res.MemoryMaxMiB > 0 {
 		out += fmt.Sprintf(", max %s", tune.FormatMiB(res.MemoryMaxMiB))
 	}
+
 	if res.CPUQuota != "" {
 		out += ", cpu quota " + res.CPUQuota
 	}
+
 	return out
 }
 
@@ -685,28 +788,35 @@ func copySummaryLines(workspaceName string, cfg config.Cluster, dest copyDestina
 	if source == "" {
 		source = pre.Source.URL
 	}
+
 	if source == "" {
 		source = "the external source"
 	}
+
 	if pre.Source.Database != "" {
 		source += " (database " + pre.Source.Database + ")"
 	}
+
 	version := strings.TrimSpace(pre.Source.ServerVersionText)
 	if version == "" {
 		version = "version not reported"
 	}
+
 	size := ""
 	if pre.Source.SizeBytes > 0 {
 		size = ", " + humanBytes(pre.Source.SizeBytes)
 	}
+
 	tls := strings.TrimSpace(pre.Source.TLSMode)
 	if tls == "" {
 		tls = "TLS mode not reported"
 	}
+
 	resources := copyDestinationSummary(cfg, dest)
 	if pre.Target.Resources.Size != "" {
 		resources = copyResolvedSummary(pre.Target.Resources)
 	}
+
 	lines := []string{
 		"Source: " + source,
 		fmt.Sprintf("Source server: PostgreSQL %s%s, %s, %d extension(s)", version, size, tls, len(pre.Source.Extensions)),
@@ -718,6 +828,7 @@ func copySummaryLines(workspaceName string, cfg config.Cluster, dest copyDestina
 		"Target: a brand-new database is created; an existing database is never an import target. The new database is unprotected unless you protect it afterwards.",
 		"Credentials: new vaire role passwords are generated here and shown once. If the copy may have started, they are kept and shown even when the reply is lost or its outcome is unknown.",
 	}
+
 	return lines
 }
 
@@ -727,12 +838,15 @@ func copySourceLabel(pre copyPreflightData) string {
 	if source == "" {
 		source = pre.Source.URL
 	}
+
 	if source == "" {
 		return "the external source"
 	}
+
 	if pre.Source.Database != "" {
 		return source + " (database " + pre.Source.Database + ")"
 	}
+
 	return source
 }
 
@@ -742,10 +856,12 @@ func copyDetachedResult(cmd *cobra.Command, jobID, name string, pre copyPrefligh
 	headline := "detached: the copy of " + copySourceLabel(pre) + " into " + name + " keeps running as job " + jobID +
 		"; these credentials work once it finishes and are shown only now"
 	message, human := credentialsMessage(cmd, headline, headline, name, secret)
+
 	next := []string{"vaire job list"}
 	if jobID != "" {
 		next = []string{"vaire job follow " + jobID}
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"job_id": jobID, "detached": true, "database": secret},
 		Message:  message,
@@ -765,33 +881,38 @@ func copyStartFailure(cmd *cobra.Command, err error, jobID, name string, secret 
 	if !errors.As(err, &cliErr) || !copyCredentialsMaybeUsed(cliErr) {
 		return err
 	}
+
 	details := map[string]any{}
 	if original, ok := cliErr.Details.(map[string]any); ok {
-		for k, v := range original {
-			details[k] = v
-		}
+		maps.Copy(details, original)
 	}
+
 	if jobID != "" {
 		if _, exists := details["job_id"]; !exists {
 			details["job_id"] = jobID
 		}
 	}
+
 	note := copyCredentialNote(details, name)
 	details["database"] = secret
 	details["credentials_note"] = note + " " + shownOnceNote
 	out := *cliErr
+
 	out.Details = details
 	if jobID != "" {
 		out.Hint = strings.TrimSpace(out.Hint + " Check vaire job follow " + jobID + " and vaire db list before retrying or reusing the name; another copy needs a new unused name.")
 	} else {
 		out.Hint = strings.TrimSpace(out.Hint + " Check vaire job list and vaire db list before retrying or reusing the name; another copy needs a new unused name.")
 	}
+
 	for _, warning := range warnings {
 		if !containsWarning(out.Warnings, warning) {
 			out.Warnings = append(out.Warnings, warning)
 		}
 	}
+
 	printCopyCredentials(cmd, note, copyCredentialHeadline(details, name), name, secret)
+
 	return &out
 }
 
@@ -811,7 +932,9 @@ func copyResultFailure(cmd *cobra.Command, jobID, name string, secret databaseSe
 			"credentials_note": note + " " + shownOnceNote,
 		})
 	out.Warnings = warnings
+
 	printCopyCredentials(cmd, note, "copy finished but its result could not be read; credentials for "+name, name, secret)
+
 	return out
 }
 
@@ -823,19 +946,24 @@ func copyCredentialsMaybeUsed(cliErr *output.CLIError) bool {
 	if cliErr.Code == output.CodeTransportFailed {
 		return true
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if used, _ := details["credentials_may_be_used"].(bool); used {
 		return true
 	}
+
 	if observed, _ := details["observation_failed"].(bool); observed {
 		return true
 	}
+
 	if imported, _ := details["imported"].(bool); imported {
 		return true
 	}
+
 	if present, _ := details["target_present"].(bool); present {
 		return true
 	}
+
 	reason, _ := details["reason"].(string)
 	// A job.follow observation failure carries no credentials flag because
 	// the follow RPC does not know the job type; the copy command knows the
@@ -848,6 +976,7 @@ func copyCredentialsMaybeUsed(cliErr *output.CLIError) bool {
 // claiming a definite success or advising a replay.
 func copyCredentialNote(details map[string]any, name string) string {
 	imported, _ := details["imported"].(bool)
+
 	present, _ := details["target_present"].(bool)
 	switch {
 	case imported:
@@ -864,9 +993,11 @@ func copyCredentialHeadline(details map[string]any, name string) string {
 	if imported {
 		return "copy failed after its import; credentials and the retained database " + name
 	}
+
 	if present, _ := details["target_present"].(bool); present {
 		return "copy failed with a retained destination; credentials for " + name
 	}
+
 	return "copy outcome unknown; credentials for " + name
 }
 
@@ -877,21 +1008,20 @@ func printCopyCredentials(cmd *cobra.Command, headline, richHeadline, title stri
 	if err == nil && output.UsesStructuredOutput(opts) {
 		return
 	}
+
 	plain, human := credentialsMessage(cmd, headline, richHeadline, title, secret)
+
 	text := plain
 	if human != "" {
 		text = human
 	}
+
 	resume := ui.Suspend()
 	_, _ = fmt.Fprintln(cmd.OutOrStdout(), text)
+
 	resume()
 }
 
 func containsWarning(warnings []output.Warning, warning output.Warning) bool {
-	for _, existing := range warnings {
-		if existing == warning {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(warnings, warning)
 }

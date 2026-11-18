@@ -26,6 +26,7 @@ func Script(name string) string {
 	if err != nil {
 		panic("missing embedded script " + name)
 	}
+
 	return string(raw)
 }
 
@@ -50,18 +51,25 @@ func Probe(ctx context.Context, name string, args ...string) (string, error) {
 func ProbeWithEnv(ctx context.Context, extraEnv []string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeLimit)
 	defer cancel()
+
 	cmd := exec.CommandContext(ctx, name, args...)
+
 	cmd.Env = append(append([]string(nil), probeEnv...), extraEnv...)
+
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
+
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
+
 		return strings.TrimSpace(stdout.String()), fmt.Errorf("%s: %s", name, msg)
 	}
+
 	return strings.TrimSpace(stdout.String()), nil
 }
 
@@ -92,7 +100,9 @@ func fileIsOwned(path, content string, perm os.FileMode, owner, group string) bo
 	if !ownedAs(path, perm, owner, group) {
 		return false
 	}
+
 	raw, err := os.ReadFile(path)
+
 	return err == nil && string(raw) == content
 }
 
@@ -103,16 +113,19 @@ func ownedAs(path string, perm os.FileMode, owner, group string) bool {
 	if err != nil || info.Mode().Perm() != perm {
 		return false
 	}
+
 	if owner != "" || group != "" {
 		uid, gid, err := engine.ResolveIDs(owner, group)
 		if err != nil {
 			return false
 		}
+
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || (uid != -1 && int(st.Uid) != uid) || (gid != -1 && int(st.Gid) != gid) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -129,6 +142,7 @@ func writeFileOwned(path, content string, perm os.FileMode, owner, group string)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: system config directories are 0755.
 		return err
 	}
+
 	return engine.WriteFileAtomicOwned(path, []byte(content), perm, owner, group)
 }
 

@@ -18,13 +18,16 @@ func fakeSQLBinaries(t *testing.T) (ran func() bool, clear func()) {
 	t.Helper()
 	marker := filepath.Join(t.TempDir(), "sql-ran")
 	bin := t.TempDir()
+
 	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$*\" >> \"" + marker + "\"\nexit 0\n"
 	for _, name := range []string{"psql", "runuser"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	t.Setenv("PATH", bin)
+
 	return func() bool {
 			_, err := os.Stat(marker)
 			return err == nil
@@ -48,6 +51,7 @@ func sqlRead(cfg config.Cluster, db, query string) (Result, error) {
 // settled read still run.
 func TestSQLReadEscapeRefusedForProtectedUnsettledUnfollow(t *testing.T) {
 	const escape = "COMMIT;\nSET ROLE app_owner;\nDELETE FROM t;\nCOMMIT;"
+
 	for _, stop := range []string{"settle", "rename"} {
 		t.Run(stop, func(t *testing.T) {
 			ctx := context.Background()
@@ -77,9 +81,11 @@ func TestSQLReadEscapeRefusedForProtectedUnsettledUnfollow(t *testing.T) {
 // the fake psql binary.
 func requireFollowerReadReachesPSQL(t *testing.T, cfg config.Cluster, ran func() bool, label string) {
 	t.Helper()
+
 	if _, err := sqlRead(cfg, "app_follower", "SELECT 1"); err != nil {
 		t.Fatalf("%s is refused: %v", label, err)
 	}
+
 	rejectf(t, !ran(), "%s did not reach psql", label)
 }
 
@@ -87,12 +93,15 @@ func requireFollowerReadReachesPSQL(t *testing.T, cfg config.Cluster, ran func()
 // promotion, leaving its record unsettled and the poolers down.
 func requireUnsettledUnfollowStop(t *testing.T, ctx context.Context, node *followerNode, stub *followerStub, stop string) {
 	t.Helper()
+
 	if _, err := jobUnfollow(ctx, unfollowEnv(node.config(), "app_follower")); err == nil {
 		t.Fatalf("the unfollow that stopped at %s returned no error", stop)
 	}
+
 	rejectf(t, !stub.reached("promote"), "the unfollow stopped at %s before the promotion", stop)
 	reject(t, stop == "rename" && !stub.reached("settle"), "the rename failure did not follow the first policy settlement")
 	reject(t, stub.resumed, "the failed unfollow resumed the poolers before settlement")
+
 	recs := node.records()
 	unfinished, ok := recs.Unfollowing["app_follower"]
 	rejectf(t, !ok || unfinished.Settled, "the failed unfollow left no unsettled record: %+v", unfinished)
@@ -101,11 +110,13 @@ func requireUnsettledUnfollowStop(t *testing.T, ctx context.Context, node *follo
 // requireUnsettledSQLRefusal asserts the escape is refused before psql runs.
 func requireUnsettledSQLRefusal(t *testing.T, cfg config.Cluster, escape string, ran func() bool) {
 	t.Helper()
+
 	if _, err := sqlRead(cfg, "app_follower", escape); err == nil {
 		t.Fatal("the write:false transaction escape ran through the unsettled unfollow")
 	} else if got := reason(t, err); got != "unfollow_unsettled" {
 		t.Fatalf("refusal reason = %q, want unfollow_unsettled", got)
 	}
+
 	reject(t, ran(), "psql ran for the refused transaction escape")
 }
 
@@ -113,10 +124,13 @@ func requireUnsettledSQLRefusal(t *testing.T, cfg config.Cluster, escape string,
 // poolers and clears its record.
 func requireUnfollowSettlement(t *testing.T, ctx context.Context, node *followerNode, stub *followerStub) {
 	t.Helper()
+
 	if _, err := jobUnfollow(ctx, unfollowEnv(node.config(), "app_follower")); err != nil {
 		t.Fatalf("the resumed unfollow failed: %v", err)
 	}
+
 	reject(t, !stub.resumed, "the finished unfollow did not resume the poolers")
+
 	if recs := node.records().Unfollowing; len(recs) != 0 {
 		t.Fatalf("the finished unfollow left a record: %v", recs)
 	}
@@ -129,15 +143,18 @@ func TestSQLRefusedOnProtectedDatabaseWhenUnfollowStateIsUnreadable(t *testing.T
 	cfg := followerLifecycleCfg(t, "app_follower")
 	cfg.Clusters[1].Protected = true
 	newFollowerNode(t, cfg)
+
 	ran, _ := fakeSQLBinaries(t)
 	if err := os.WriteFile(backup.RecordsPath, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := sqlRead(cfg, "app_follower", "SELECT 1"); err == nil {
 		t.Fatal("SQL ran with unreadable unfollow state")
 	} else if got := reason(t, err); got != "unfollow_state_unknown" {
 		t.Fatalf("refusal reason = %q, want unfollow_state_unknown", got)
 	}
+
 	reject(t, ran(), "psql ran with unreadable unfollow state")
 }
 
@@ -145,9 +162,11 @@ func TestSQLRefusedOnProtectedDatabaseWhenUnfollowStateIsUnreadable(t *testing.T
 // as vaire_admin, and its write gate stays behind the authenticator app.
 func TestSQLReadOnAProtectedPrimaryIsUnchanged(t *testing.T) {
 	cfg := protectedCluster()
+
 	ran, _ := fakeSQLBinaries(t)
 	if _, err := sqlRead(cfg, "app", "SELECT 1"); err != nil {
 		t.Fatalf("a protected primary read is refused: %v", err)
 	}
+
 	reject(t, !ran(), "a protected primary read did not reach psql")
 }

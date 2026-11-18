@@ -32,30 +32,39 @@ func PruneForRestore(raw []byte, databases []AwaitingDatabase, now time.Time) ([
 	if err != nil {
 		return nil, nil, err
 	}
+
 	var pruned []PrunedRecord
 	for _, l := range r.Leftovers {
 		pruned = append(pruned, PrunedRecord{Kind: "restore_leftover", Database: l.Database, Name: l.Name})
 	}
+
 	r.Leftovers = nil
 	for db, rs := range r.Restores {
 		pruned = append(pruned, PrunedRecord{Kind: "open_restore", Database: db, Name: RestoringName(rs.Database)})
 	}
+
 	r.Restores = map[string]Restore{}
+
 	drills := make(map[PrunedRecord]struct{})
 	for db, name := range r.Drilling {
 		drills[PrunedRecord{Kind: "drill", Database: db, Name: name}] = struct{}{}
 	}
+
 	for db, attempt := range r.DrillAttempts {
 		drills[PrunedRecord{Kind: "drill", Database: db, Name: attempt.Target}] = struct{}{}
 	}
+
 	for record := range drills {
 		pruned = append(pruned, record)
 	}
+
 	r.Drilling = map[string]string{}
+
 	r.DrillAttempts = nil
 	for db, u := range r.Undoing {
 		pruned = append(pruned, PrunedRecord{Kind: "undo", Database: db, Name: u.Aside})
 	}
+
 	r.Undoing = map[string]Undo{}
 	// An activation fence and an interrupted unfollow are local authority over
 	// files, registrations, routing and pg_cron on the lost host. They must not
@@ -66,29 +75,37 @@ func PruneForRestore(raw []byte, databases []AwaitingDatabase, now time.Time) ([
 	for db, f := range r.Activation {
 		pruned = append(pruned, PrunedRecord{Kind: "activation_fence", Database: db, Name: f.OperationID})
 	}
+
 	r.Activation = map[string]ActivationFence{}
 	for db, u := range r.Unfollowing {
 		pruned = append(pruned, PrunedRecord{Kind: "unfollow", Database: db, Name: u.OperationID})
 	}
+
 	r.Unfollowing = map[string]Unfollow{}
 	r.ExtensionGuardHandoffs = map[string]GuardHandoff{}
 	r.AwaitingRecovery = map[string]Awaiting{}
+
 	since := now.UTC().Format(time.RFC3339)
 	for _, d := range databases {
 		r.AwaitingRecovery[d.Name] = Awaiting{Stanza: d.Stanza, Since: since}
 	}
+
 	sort.Slice(pruned, func(i, j int) bool {
 		if pruned[i].Database != pruned[j].Database {
 			return pruned[i].Database < pruned[j].Database
 		}
+
 		if pruned[i].Kind != pruned[j].Kind {
 			return pruned[i].Kind < pruned[j].Kind
 		}
+
 		return pruned[i].Name < pruned[j].Name
 	})
+
 	out, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return append(out, '\n'), pruned, nil
 }

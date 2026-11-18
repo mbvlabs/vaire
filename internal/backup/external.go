@@ -172,36 +172,45 @@ func ParseSourceURLWithRegistry(reg *secrets.Registry, raw string) (Source, erro
 	if reg == nil {
 		reg = secrets.Default
 	}
+
 	reg.Add(raw)
 	raw = strings.TrimRight(raw, "\r\n")
 	reg.Add(raw)
+
 	if err := validateSourceURLText(raw); err != nil {
 		return Source{}, err
 	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		// Never wrap url.Error: its text includes the raw URL.
 		return Source{}, sourceInputError("invalid_source_url", "the source URL is not a valid PostgreSQL URL", "Use a postgres:// or postgresql:// URL with one host and one database.")
 	}
+
 	if err := validateSourceURLShape(u); err != nil {
 		return Source{}, err
 	}
+
 	username, password, err := sourceURLUser(reg, u)
 	if err != nil {
 		return Source{}, err
 	}
+
 	host, port, err := sourceURLHost(u)
 	if err != nil {
 		return Source{}, err
 	}
+
 	database, err := sourceURLDatabase(u)
 	if err != nil {
 		return Source{}, err
 	}
+
 	tlsMode, err := sourceURLTLSMode(u)
 	if err != nil {
 		return Source{}, err
 	}
+
 	return NewSourceWithRegistry(reg, SourceSpec{
 		Host:     host,
 		Port:     port,
@@ -218,12 +227,15 @@ func validateSourceURLText(raw string) error {
 	if raw == "" {
 		return sourceInputError("invalid_source_url", "the source URL is empty", "Enter a postgres:// or postgresql:// URL.")
 	}
+
 	if len(raw) > maxSourceURLLength {
 		return sourceInputError("invalid_source_url", "the source URL is too long", "Enter a shorter source URL.")
 	}
+
 	if strings.ContainsAny(raw, "\x00\r\n") {
 		return sourceInputError("invalid_source_url", "the source URL contains a line break or control character", "Paste the URL as a single line.")
 	}
+
 	return nil
 }
 
@@ -234,12 +246,15 @@ func validateSourceURLShape(u *url.URL) error {
 	if scheme != "postgres" && scheme != "postgresql" {
 		return sourceInputError("invalid_source_url", "the source URL scheme must be postgres or postgresql", "Use a postgres:// or postgresql:// URL.")
 	}
+
 	if u.Opaque != "" || u.Fragment != "" {
 		return sourceInputError("invalid_source_url", "the source URL must not use an opaque form or fragment", "Use postgres://user:password@host:port/database.")
 	}
+
 	if u.User == nil {
 		return sourceInputError("invalid_source_url", "the source URL must name the source user", "Use postgres://user:password@host:port/database.")
 	}
+
 	return nil
 }
 
@@ -247,13 +262,16 @@ func validateSourceURLShape(u *url.URL) error {
 // password for redaction before it can appear in an error.
 func sourceURLUser(reg *secrets.Registry, u *url.URL) (string, string, error) {
 	username := u.User.Username()
+
 	password, hasPassword := u.User.Password()
 	if hasPassword {
 		reg.Add(password)
 	}
+
 	if username == "" {
 		return "", "", sourceInputError("invalid_source_url", "the source URL must name the source user", "Use postgres://user:password@host:port/database.")
 	}
+
 	return username, password, nil
 }
 
@@ -262,21 +280,27 @@ func sourceURLHost(u *url.URL) (string, int, error) {
 	if u.Host == "" {
 		return "", 0, sourceInputError("invalid_source_url", "the source URL must use a TCP host, not a Unix socket", "Use postgres://user:password@host:port/database.")
 	}
+
 	if strings.HasSuffix(u.Host, ":") {
 		return "", 0, sourceInputError("invalid_source_url", "the source URL has an empty port", "Use a port between 1 and 65535, or omit it.")
 	}
+
 	host := u.Hostname()
 	if host == "" {
 		return "", 0, sourceInputError("invalid_source_url", "the source URL has no host", "Use postgres://user:password@host:port/database.")
 	}
+
 	port := 5432
+
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 {
 			return "", 0, sourceInputError("invalid_source_url", "the source URL port must be between 1 and 65535", "Use a port between 1 and 65535.")
 		}
+
 		port = n
 	}
+
 	return host, port, nil
 }
 
@@ -286,14 +310,17 @@ func sourceURLDatabase(u *url.URL) (string, error) {
 	if !strings.HasPrefix(escapedPath, "/") {
 		return "", sourceInputError("invalid_source_url", "the source URL must name one database in its path", "Use postgres://user:password@host:port/database.")
 	}
+
 	segment := strings.TrimPrefix(escapedPath, "/")
 	if segment == "" || strings.Contains(segment, "/") {
 		return "", sourceInputError("invalid_source_url", "the source URL must name exactly one database", "Use postgres://user:password@host:port/database without extra path segments.")
 	}
+
 	database, err := url.PathUnescape(segment)
 	if err != nil {
 		return "", sourceInputError("invalid_source_url", "the source database name is not valid percent-encoding", "Percent-encode the database name once.")
 	}
+
 	return database, nil
 }
 
@@ -305,18 +332,22 @@ func sourceURLTLSMode(u *url.URL) (string, error) {
 	if err != nil {
 		return "", sourceInputError("invalid_source_url", "the source URL query is not valid percent-encoding", "Use only sslmode=verify-full, verify-ca or require.")
 	}
+
 	for key := range query {
 		if key != "sslmode" {
 			return "", sourceInputError("invalid_source_url", "the source URL has an unsupported query parameter", "Use only sslmode=verify-full, verify-ca or require; vaire sets the rest itself.")
 		}
 	}
+
 	values, ok := query["sslmode"]
 	if !ok {
 		return SourceTLSVerifyFull, nil
 	}
+
 	if len(values) != 1 || strings.TrimSpace(values[0]) == "" {
 		return "", sourceInputError("invalid_source_url", "the source URL needs exactly one sslmode value", "Use sslmode=verify-full, verify-ca or require.")
 	}
+
 	return strings.ToLower(values[0]), nil
 }
 
@@ -331,30 +362,39 @@ func NewSourceWithRegistry(reg *secrets.Registry, spec SourceSpec) (Source, erro
 	if reg == nil {
 		reg = secrets.Default
 	}
+
 	reg.Add(spec.Password)
+
 	port := spec.Port
 	if port == 0 {
 		port = 5432
 	}
+
 	if err := validateSourceHost(spec.Host); err != nil {
 		return Source{}, err
 	}
+
 	if port < 1 || port > 65535 {
 		return Source{}, sourceInputError("invalid_source_url", "the source port must be between 1 and 65535", "Check the source port.")
 	}
+
 	if err := validateSourceDatabase(spec.Database); err != nil {
 		return Source{}, err
 	}
+
 	if err := validateSourceUser(spec.User); err != nil {
 		return Source{}, err
 	}
+
 	if strings.ContainsAny(spec.Password, "\x00\r\n") {
 		return Source{}, sourceInputError("invalid_source_password", "the source password cannot contain a line break or NUL byte", "A PostgreSQL password file cannot carry those characters.")
 	}
+
 	tlsMode := strings.ToLower(strings.TrimSpace(spec.TLSMode))
 	if tlsMode == "" {
 		tlsMode = SourceTLSVerifyFull
 	}
+
 	switch tlsMode {
 	case SourceTLSVerifyFull, SourceTLSVerifyCA, SourceTLSRequire:
 	case "disable", "allow", "prefer":
@@ -362,18 +402,22 @@ func NewSourceWithRegistry(reg *secrets.Registry, spec SourceSpec) (Source, erro
 	default:
 		return Source{}, sourceInputError("invalid_source_tls", "the source TLS mode must be verify-full, verify-ca or require", "Use sslmode=verify-full, verify-ca or require.")
 	}
+
 	if len(spec.CACert) > maxSourceCASize {
 		return Source{}, sourceInputError("invalid_source_ca", "the source CA certificate is too large", "Supply one small PEM CA certificate.")
 	}
+
 	if len(spec.CACert) > 0 {
 		if tlsMode == SourceTLSRequire {
 			return Source{}, sourceInputError("invalid_source_ca", "a source CA certificate cannot be used with sslmode=require", "Use verify-full or verify-ca, or remove the CA.")
 		}
+
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(spec.CACert) {
 			return Source{}, sourceInputError("invalid_source_ca", "the source CA certificate is not valid PEM", "Supply a PEM-encoded CA certificate.")
 		}
 	}
+
 	return Source{
 		Host:     spec.Host,
 		Port:     port,
@@ -413,12 +457,15 @@ func (s Source) CACert() []byte { return append([]byte(nil), s.caPEM...) }
 // second certificate rather than silently replacing it.
 func (s Source) WithCACert(caPEM []byte) (Source, error) {
 	secrets.Add(string(caPEM))
+
 	if len(s.caPEM) > 0 {
 		return Source{}, sourceInputError("invalid_source_ca",
 			"the source already has a CA certificate",
 			"Supply the source CA certificate once.")
 	}
+
 	s.caPEM = append([]byte(nil), caPEM...)
+
 	return s.validated()
 }
 
@@ -426,28 +473,36 @@ func (s Source) WithCACert(caPEM []byte) (Source, error) {
 // constructed Source directly instead of using NewSource.
 func (s Source) validated() (Source, error) {
 	secrets.Add(s.password)
+
 	if s.Port == 0 {
 		s.Port = 5432
 	}
+
 	if s.TLSMode == "" {
 		s.TLSMode = SourceTLSVerifyFull
 	}
+
 	s.TLSMode = strings.ToLower(strings.TrimSpace(s.TLSMode))
 	if err := validateSourceHost(s.Host); err != nil {
 		return Source{}, err
 	}
+
 	if s.Port < 1 || s.Port > 65535 {
 		return Source{}, sourceInputError("invalid_source_url", "the source port must be between 1 and 65535", "Check the source port.")
 	}
+
 	if err := validateSourceDatabase(s.Database); err != nil {
 		return Source{}, err
 	}
+
 	if err := validateSourceUser(s.User); err != nil {
 		return Source{}, err
 	}
+
 	if strings.ContainsAny(s.password, "\x00\r\n") {
 		return Source{}, sourceInputError("invalid_source_password", "the source password cannot contain a line break or NUL byte", "A PostgreSQL password file cannot carry those characters.")
 	}
+
 	switch s.TLSMode {
 	case SourceTLSVerifyFull, SourceTLSVerifyCA, SourceTLSRequire:
 	case "disable", "allow", "prefer":
@@ -455,18 +510,22 @@ func (s Source) validated() (Source, error) {
 	default:
 		return Source{}, sourceInputError("invalid_source_tls", "the source TLS mode must be verify-full, verify-ca or require", "Use sslmode=verify-full, verify-ca or require.")
 	}
+
 	if len(s.caPEM) > 0 {
 		if len(s.caPEM) > maxSourceCASize {
 			return Source{}, sourceInputError("invalid_source_ca", "the source CA certificate is too large", "Supply one small PEM CA certificate.")
 		}
+
 		if s.TLSMode == SourceTLSRequire {
 			return Source{}, sourceInputError("invalid_source_ca", "a source CA certificate cannot be used with sslmode=require", "Use verify-full or verify-ca, or remove the CA.")
 		}
+
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(s.caPEM) {
 			return Source{}, sourceInputError("invalid_source_ca", "the source CA certificate is not valid PEM", "Supply a PEM-encoded CA certificate.")
 		}
 	}
+
 	return s, nil
 }
 
@@ -486,7 +545,9 @@ func (s Source) RedactedURL() string {
 	if s.User != "" {
 		u.User = url.User(s.User)
 	}
+
 	u.RawPath = "/" + url.PathEscape(s.Database)
+
 	return u.String()
 }
 
@@ -505,35 +566,44 @@ func validateSourceHost(host string) error {
 	if host == "" {
 		return sourceInputError("invalid_source_host", "the source host is empty", "Use a DNS name or IP address.")
 	}
+
 	if len(host) > 253 {
 		return sourceInputError("invalid_source_host", "the source host is too long", "Use a DNS name or IP address.")
 	}
+
 	for _, r := range host {
 		if unicode.IsControl(r) || unicode.IsSpace(r) {
 			return sourceInputError("invalid_source_host", "the source host contains whitespace or a control character", "Use a DNS name or IP address.")
 		}
 	}
+
 	if strings.ContainsAny(host, `/\ ,@%=?#*`) {
 		return sourceInputError("invalid_source_host", "the source host is not a plain DNS name or IP address", "Do not use a Unix socket path, a comma-separated host list or a connection parameter in the host.")
 	}
+
 	if strings.Contains(host, ":") {
 		if net.ParseIP(host) == nil {
 			return sourceInputError("invalid_source_host", "the source IPv6 address is not valid", "Use a valid IPv6 address without a zone.")
 		}
+
 		return nil
 	}
+
 	if net.ParseIP(host) != nil {
 		return nil
 	}
+
 	name := strings.TrimSuffix(host, ".")
 	if name == "" {
 		return sourceInputError("invalid_source_host", "the source host is not valid", "Use a DNS name or IP address.")
 	}
-	for _, label := range strings.Split(name, ".") {
+
+	for label := range strings.SplitSeq(name, ".") {
 		if label == "" || len(label) > 63 || !hostLabelPattern.MatchString(label) {
 			return sourceInputError("invalid_source_host", "the source host is not a valid DNS name", "Use a DNS name or IP address.")
 		}
 	}
+
 	return nil
 }
 
@@ -543,25 +613,32 @@ func validateSourceDatabase(database string) error {
 	if database == "" {
 		return sourceInputError("invalid_source_url", "the source database is empty", "Name one database in the URL path.")
 	}
+
 	if len(database) > 63 {
 		return sourceInputError("invalid_source_url", "the source database name is too long", "PostgreSQL database names are at most 63 bytes.")
 	}
+
 	if hasControl(database) {
 		return sourceInputError("invalid_source_url", "the source database name contains a control character", "Use the database name as PostgreSQL stores it.")
 	}
+
 	if strings.TrimSpace(database) != database {
 		return sourceInputError("invalid_source_url", "the source database name has leading or trailing whitespace", "Use the database name without surrounding whitespace.")
 	}
+
 	if strings.Contains(database, "=") {
 		return sourceInputError("invalid_source_url", "the source database name contains =", "vaire does not pass database names that libpq could read as a connection string.")
 	}
+
 	if strings.Contains(database, "*") {
 		return sourceInputError("invalid_source_url", "the source database name contains a passfile wildcard", "vaire keeps the source password scoped to the exact database and user.")
 	}
+
 	lower := strings.ToLower(database)
 	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
 		return sourceInputError("invalid_source_url", "the source database name looks like a connection URL", "vaire does not pass database names that libpq could read as a connection string.")
 	}
+
 	return nil
 }
 
@@ -569,15 +646,19 @@ func validateSourceUser(username string) error {
 	if username == "" {
 		return sourceInputError("invalid_source_url", "the source user is empty", "Name the source role in the URL userinfo.")
 	}
+
 	if len(username) > 63 {
 		return sourceInputError("invalid_source_url", "the source user name is too long", "PostgreSQL role names are at most 63 bytes.")
 	}
+
 	if hasControl(username) {
 		return sourceInputError("invalid_source_url", "the source user name contains a control character", "Use the role name as PostgreSQL stores it.")
 	}
+
 	if strings.Contains(username, "*") {
 		return sourceInputError("invalid_source_url", "the source user name contains a passfile wildcard", "vaire keeps the source password scoped to the exact database and user.")
 	}
+
 	return nil
 }
 
@@ -587,6 +668,7 @@ func hasControl(s string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -635,22 +717,27 @@ func PreflightSource(ctx context.Context, exec CopyExecutor, stepID string, repo
 	if exec == nil {
 		return SourcePreflight{}, copyInternalError("source_preflight_failed", "no command executor is configured")
 	}
+
 	src, err = src.validated()
 	if err != nil {
 		return SourcePreflight{}, err
 	}
+
 	access, err := prepareSourceAccess(ws, src)
 	if err != nil {
 		return SourcePreflight{}, err
 	}
 	defer func() { err = joinCleanupError(err, access.remove()) }()
+
 	if err := probeSourceAccess(ctx, exec, stepID, access, src); err != nil {
 		return SourcePreflight{}, err
 	}
+
 	records, err := readSourcePreflight(ctx, exec, stepID, report, access, src)
 	if err != nil {
 		return SourcePreflight{}, err
 	}
+
 	return parseSourcePreflight(records, src)
 }
 
@@ -658,22 +745,28 @@ func PreflightSource(ctx context.Context, exec CopyExecutor, stepID string, repo
 func readSourcePreflight(ctx context.Context, exec CopyExecutor, stepID string, report engine.Reporter, access *sourceAccess, src Source) ([][]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, sourcePreflightLimit)
 	defer cancel()
+
 	var out limitedBuffer
+
 	out.limit = copyPreflightLimitBytes
 	cmd := sourceCommand(access, sourceTool("psql"), sourcePSQLArgs(src))
 	cmd.Stdin = strings.NewReader(sourcePreflightSQL)
 	cmd.Stdout = &out
 	execErr := exec.Exec(ctx, stepID, cmd, copyReporter(report))
+
 	if out.overflow {
 		return nil, copyPreconditionError("source_preflight_failed",
 			"the source returned more preflight data than vaire accepts",
 			"Check the source and retry; do not point the copy at an untrusted server.", nil)
 	}
+
 	if execErr != nil {
 		return nil, sourcePreflightError(execErr)
 	}
+
 	reader := csv.NewReader(strings.NewReader(out.String()))
 	reader.FieldsPerRecord = -1
+
 	records, err := reader.ReadAll()
 	if err != nil || len(records) == 0 {
 		return nil, copyPreconditionError("source_preflight_failed",
@@ -688,6 +781,7 @@ func readSourcePreflight(ctx context.Context, exec CopyExecutor, stepID string, 
 			"the source returned no preflight data",
 			"Check the source connection and that the source user can read the database catalog.", nil)
 	}
+
 	return records, nil
 }
 
@@ -699,39 +793,47 @@ func parseSourcePreflight(records [][]string, src Source) (SourcePreflight, erro
 			"the source returned an unexpected preflight row",
 			"Check the source version and that nothing modifies the source's catalog.", nil)
 	}
+
 	versionNum, err := strconv.Atoi(server[0])
 	if err != nil {
 		return SourcePreflight{}, copyPreconditionError("source_preflight_failed",
 			"the source returned an invalid server version",
 			"Check the source version and that nothing modifies the source's catalog.", nil)
 	}
+
 	sizeBytes, err := strconv.ParseInt(server[3], 10, 64)
 	if err != nil || sizeBytes < 0 {
 		return SourcePreflight{}, copyPreconditionError("source_preflight_failed",
 			"the source returned an invalid database size",
 			"Retry the preflight, or check the source catalog.", nil)
 	}
+
 	connectOK, err := parsePreflightBool(server[4])
 	if err != nil {
 		return SourcePreflight{}, copyPreconditionError("source_preflight_failed",
 			"the source returned an invalid connection permission",
 			"Check the source catalog.", nil)
 	}
+
 	catalogOK, err := parsePreflightBool(server[5])
 	if err != nil {
 		return SourcePreflight{}, copyPreconditionError("source_preflight_failed",
 			"the source returned an invalid catalog permission",
 			"Check the source catalog.", nil)
 	}
+
 	rawDatabase := server[2]
+
 	if err := validateSourceVersion(versionNum); err != nil {
 		return SourcePreflight{}, err
 	}
+
 	if rawDatabase != src.Database {
 		return SourcePreflight{}, copyPreconditionError("source_database_mismatch",
 			"the source reported a different current database than the one requested",
 			"Check the source URL database name.", nil)
 	}
+
 	pre := SourcePreflight{
 		ServerVersion:     versionNum,
 		ServerVersionText: server[1],
@@ -744,13 +846,16 @@ func parseSourcePreflight(records [][]string, src Source) (SourcePreflight, erro
 	if pre.ServerVersionText == "" {
 		pre.ServerVersionText = majorVersionText(versionNum)
 	}
+
 	extensions, err := parseSourceExtensions(records[1:])
 	if err != nil {
 		return SourcePreflight{}, err
 	}
+
 	pre.Extensions = extensions
 	sortSourceExtensions(pre.Extensions)
 	pre.Warnings = sourcePreflightWarnings(src, pre.CatalogOK)
+
 	return pre, nil
 }
 
@@ -762,11 +867,13 @@ func validateSourceVersion(versionNum int) error {
 			"the source is PostgreSQL "+majorVersionText(versionNum)+"; PostgreSQL 18 tools cannot export a newer major version",
 			"Upgrade vaire to a release with newer PostgreSQL tools before copying this source.", nil)
 	}
+
 	if versionNum < 90200 {
 		return copyPreconditionError("source_version_unsupported",
 			"the source is PostgreSQL "+majorVersionText(versionNum)+"; PostgreSQL 18 tools support 9.2 and newer sources",
 			"Upgrade the source to a supported PostgreSQL release before copying it.", nil)
 	}
+
 	return nil
 }
 
@@ -779,12 +886,15 @@ func parseSourceExtensions(records [][]string) ([]SourceExtension, error) {
 				"the source returned an unexpected extension row",
 				"Check the source extension catalog.", nil)
 		}
+
 		ext := SourceExtension{Name: record[0], Version: record[1], Schema: record[2]}
 		if err := validateExtensionRow(ext); err != nil {
 			return nil, err
 		}
+
 		extensions = append(extensions, ext)
 	}
+
 	return extensions, nil
 }
 
@@ -795,12 +905,14 @@ func sourcePreflightWarnings(src Source, catalogOK bool) []output.Warning {
 	if warning, ok := src.TLSWarning(); ok {
 		warnings = append(warnings, warning)
 	}
+
 	if !catalogOK {
 		warnings = append(warnings, output.Warning{
 			Code:    "source_permissions_unverified",
 			Message: "The source user may not be able to read the full database schema; the export can still fail on permissions.",
 		})
 	}
+
 	return warnings
 }
 
@@ -829,6 +941,7 @@ func majorVersionText(versionNum int) string {
 	if versionNum <= 0 {
 		return "an unknown version"
 	}
+
 	return strconv.Itoa(versionNum / 10000)
 }
 
@@ -854,15 +967,18 @@ func ExportSource(ctx context.Context, exec CopyExecutor, stepID string, report 
 	if exec == nil {
 		return SourceArchive{}, copyInternalError("source_export_failed", "no command executor is configured")
 	}
+
 	src, err = src.validated()
 	if err != nil {
 		return SourceArchive{}, err
 	}
+
 	access, err := prepareSourceAccess(ws, src)
 	if err != nil {
 		return SourceArchive{}, err
 	}
 	defer func() { err = joinCleanupError(err, access.remove()) }()
+
 	if err := probeSourceAccess(ctx, exec, stepID, access, src); err != nil {
 		return SourceArchive{}, err
 	}
@@ -871,25 +987,30 @@ func ExportSource(ctx context.Context, exec CopyExecutor, stepID string, report 
 	if err != nil {
 		return SourceArchive{}, err
 	}
+
 	keep := false
 	defer func() {
 		if keep {
 			return
 		}
+
 		_ = f.Close()
 		err = joinCleanupError(err, ws.RemoveFile(copyArchiveName))
 	}()
 
 	cmd := sourceCommand(access, sourceTool("pg_dump"), sourceDumpArgs(src))
+
 	cmd.Stdout = f
 	if err := exec.Exec(ctx, stepID, cmd, copyReporter(report)); err != nil {
 		return SourceArchive{}, sourceExportError(err)
 	}
+
 	if err := f.Sync(); err != nil {
 		return SourceArchive{}, copyPreconditionError("source_export_failed",
 			"the source archive could not be written to disk",
 			"Check free space and the copy workspace, then retry with a new job.", nil)
 	}
+
 	if err := f.Close(); err != nil {
 		return SourceArchive{}, copyPreconditionError("source_export_failed",
 			"the source archive could not be closed cleanly",
@@ -900,26 +1021,33 @@ func ExportSource(ctx context.Context, exec CopyExecutor, stepID string, report 
 	if err != nil {
 		return SourceArchive{}, err
 	}
+
 	toc, listErr := ReadArchiveTOC(ctx, exec, stepID+"-list", report, r)
 	_ = r.Close()
+
 	if listErr != nil {
 		return SourceArchive{}, listErr
 	}
+
 	if toc.Database != src.Database {
 		return SourceArchive{}, copyPreconditionError("archive_database_mismatch",
 			"the source archive was not created from the selected database",
 			"Retry the copy with a new job; do not restore this archive.", nil)
 	}
+
 	info, err := ws.Stat(copyArchiveName)
 	if err != nil {
 		return SourceArchive{}, err
 	}
+
 	if info.Size() == 0 {
 		return SourceArchive{}, copyPreconditionError("archive_invalid",
 			"the source archive is empty",
 			"Retry the copy with a new job.", nil)
 	}
+
 	keep = true
+
 	return SourceArchive{Size: info.Size(), TOC: toc}, nil
 }
 
@@ -945,9 +1073,12 @@ func ReadArchiveTOC(ctx context.Context, exec CopyExecutor, stepID string, repor
 	if exec == nil {
 		return ArchiveTOC{}, copyInternalError("archive_unreadable", "no command executor is configured")
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, archiveListLimit)
 	defer cancel()
+
 	var out limitedBuffer
+
 	out.limit = copyTOCLimitBytes
 	cmd := engine.Command{
 		Name:   sourceTool("pg_restore"),
@@ -956,70 +1087,85 @@ func ReadArchiveTOC(ctx context.Context, exec CopyExecutor, stepID string, repor
 		Stdout: &out,
 	}
 	err := exec.Exec(ctx, stepID, cmd, copyReporter(report))
+
 	if out.overflow {
 		return ArchiveTOC{}, copyPreconditionError("archive_invalid",
 			"the source archive TOC is too large for vaire to inspect safely",
 			"The source has too many objects for this copy implementation.", nil)
 	}
+
 	if err != nil {
 		return ArchiveTOC{}, archiveToolError("the source archive could not be read", err)
 	}
+
 	return parseArchiveTOCList(out.String())
 }
 
 func parseArchiveTOCList(raw string) (ArchiveTOC, error) {
 	var toc ArchiveTOC
+
 	seen := map[int]bool{}
 	formatCustom := false
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), maxTOCLineBytes)
+
 	for scanner.Scan() {
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, ";") {
-			field := strings.TrimSpace(strings.TrimPrefix(line, ";"))
+
+		if after, ok := strings.CutPrefix(line, ";"); ok {
+			field := strings.TrimSpace(after)
 			switch {
 			case strings.HasPrefix(field, "dbname: "):
 				toc.Database = strings.TrimSpace(strings.TrimPrefix(field, "dbname: "))
 			case field == "Format: CUSTOM":
 				formatCustom = true
 			}
+
 			continue
 		}
+
 		entry, err := parseTOCLine(line)
 		if err != nil {
 			return ArchiveTOC{}, err
 		}
+
 		if seen[entry.ID] {
 			return ArchiveTOC{}, copyPreconditionError("archive_invalid",
 				"the source archive TOC repeats an entry id",
 				"Do not restore this archive; retry the copy with a new job.", nil)
 		}
+
 		seen[entry.ID] = true
 		toc.Entries = append(toc.Entries, entry)
 	}
+
 	if err := scanner.Err(); err != nil {
 		return ArchiveTOC{}, copyPreconditionError("archive_invalid",
 			"the source archive TOC could not be parsed safely",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	if toc.Database == "" {
 		return ArchiveTOC{}, copyPreconditionError("archive_invalid",
 			"the source archive has no database name in its TOC",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	if !formatCustom {
 		return ArchiveTOC{}, copyPreconditionError("archive_invalid",
 			"the source archive is not a PostgreSQL custom-format archive",
 			"Retry the copy with the PG18 pg_dump export.", nil)
 	}
+
 	if len(toc.Entries) == 0 {
 		return ArchiveTOC{}, copyPreconditionError("archive_invalid",
 			"the source archive TOC is empty",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	return toc, nil
 }
 
@@ -1030,17 +1176,21 @@ func parseTOCLine(line string) (ArchiveEntry, error) {
 			"the source archive TOC contains a line with no entry id",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	id, err := parsePositiveInt(line[:semi])
 	if err != nil {
 		return ArchiveEntry{}, copyPreconditionError("archive_invalid",
 			"the source archive TOC contains an invalid entry id",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	rest := strings.TrimPrefix(line[semi+1:], " ")
+
 	tableOID, oid, tail, err := parseCatalogHeader(rest)
 	if err != nil {
 		return ArchiveEntry{}, err
 	}
+
 	return ArchiveEntry{ID: id, TableOID: tableOID, OID: oid, Rest: tail}, nil
 }
 
@@ -1048,16 +1198,20 @@ func parsePositiveInt(s string) (int, error) {
 	if s == "" {
 		return 0, errors.New("empty")
 	}
+
 	n := 0
+
 	for _, r := range s {
 		if r < '0' || r > '9' {
 			return 0, errors.New("not numeric")
 		}
+
 		n = n*10 + int(r-'0')
 		if n <= 0 || n > 1<<30 {
 			return 0, errors.New("out of range")
 		}
 	}
+
 	return n, nil
 }
 
@@ -1068,25 +1222,30 @@ func parseCatalogHeader(s string) (uint32, uint32, string, error) {
 			"the source archive TOC has an incomplete entry header",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	tableOID, err := strconv.ParseUint(s[:first], 10, 32)
 	if err != nil {
 		return 0, 0, "", copyPreconditionError("archive_invalid",
 			"the source archive TOC has an invalid catalog id",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	rest := s[first+1:]
+
 	second := strings.IndexByte(rest, ' ')
 	if second <= 0 {
 		return 0, 0, "", copyPreconditionError("archive_invalid",
 			"the source archive TOC has an incomplete entry header",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	oid, err := strconv.ParseUint(rest[:second], 10, 32)
 	if err != nil {
 		return 0, 0, "", copyPreconditionError("archive_invalid",
 			"the source archive TOC has an invalid object id",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	return uint32(tableOID), uint32(oid), rest[second+1:], nil
 }
 
@@ -1105,47 +1264,60 @@ type ExtensionMatch struct {
 // vaire defaults).
 func MatchSourceExtensions(source, destination []SourceExtension) ([]ExtensionMatch, error) {
 	want := map[string]SourceExtension{}
+
 	for _, d := range destination {
 		if err := validateExtensionRow(d); err != nil {
 			return nil, err
 		}
+
 		if _, ok := want[d.Name]; ok {
 			return nil, copyPreconditionError("extension_incompatible",
 				"the destination extension plan repeats "+safeDiag(d.Name),
 				"Report this as a vaire bug; do not retry the copy.", nil)
 		}
+
 		want[d.Name] = d
 	}
+
 	seen := map[string]bool{}
+
 	var matches []ExtensionMatch
+
 	for _, s := range source {
 		if err := validateExtensionRow(s); err != nil {
 			return nil, err
 		}
+
 		if seen[s.Name] {
 			return nil, copyPreconditionError("extension_incompatible",
 				"the source reports extension "+safeDiag(s.Name)+" more than once",
 				"Do not copy from this source until its catalog is consistent.", nil)
 		}
+
 		seen[s.Name] = true
+
 		d, ok := want[s.Name]
 		if !ok {
 			return nil, copyPreconditionError("extension_missing",
 				"the source extension "+safeDiag(s.Name)+" is not supported or not available on the destination",
 				"Remove the extension from the source, or install a compatible vaire support for it.", nil)
 		}
+
 		if s.Version != d.Version {
 			return nil, copyPreconditionError("extension_version_incompatible",
 				"extension "+safeDiag(s.Name)+" is version "+safeDiag(s.Version)+" on the source but version "+safeDiag(d.Version)+" on the destination",
 				"Align the extension versions before copying; vaire does not convert extension versions automatically.", nil)
 		}
+
 		if s.Schema != d.Schema {
 			return nil, copyPreconditionError("extension_schema_incompatible",
 				"extension "+safeDiag(s.Name)+" is in schema "+safeDiag(s.Schema)+" on the source but in schema "+safeDiag(d.Schema)+" on the destination",
 				"Install the destination extension in the same schema; vaire does not rewrite extension schemas.", nil)
 		}
+
 		matches = append(matches, ExtensionMatch{Source: s, Destination: d})
 	}
+
 	return matches, nil
 }
 
@@ -1155,11 +1327,13 @@ func validateExtensionRow(e SourceExtension) error {
 			"the extension inventory has an empty name, version or schema",
 			"Do not copy from this source until its extension catalog is complete.", nil)
 	}
+
 	if hasControl(e.Name) || hasControl(e.Version) || hasControl(e.Schema) {
 		return copyPreconditionError("extension_incompatible",
 			"the extension inventory contains a control character",
 			"Do not copy from this source until its extension catalog is consistent.", nil)
 	}
+
 	return nil
 }
 
@@ -1206,11 +1380,13 @@ func (s *TOCSelection) WriteList(w io.Writer) error {
 	if s == nil {
 		return errors.New("nil TOC selection")
 	}
+
 	for _, line := range s.Lines {
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -1222,26 +1398,32 @@ func SelectArchiveTOC(ctx context.Context, exec CopyExecutor, stepID string, rep
 	if exec == nil {
 		return nil, copyInternalError("archive_selection_failed", "no command executor is configured")
 	}
+
 	if ws == nil {
 		return nil, copyInternalError("archive_selection_failed", "no copy workspace is configured")
 	}
+
 	if err := validateSelectionOptions(opts); err != nil {
 		return nil, err
 	}
+
 	if archive.TOC.Database != opts.SourceDatabase {
 		return nil, copyPreconditionError("archive_database_mismatch",
 			"the source archive database does not match the selected source database",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	selector := newTOCSelector(ctx, exec, stepID, report, ws, opts)
 	for _, entry := range archive.TOC.Entries {
 		if err := selector.selectEntry(entry); err != nil {
 			return nil, err
 		}
 	}
+
 	if err := selector.validateComplete(); err != nil {
 		return nil, err
 	}
+
 	return &selector.selection, nil
 }
 
@@ -1268,11 +1450,13 @@ type tocSelector struct {
 
 func newTOCSelector(ctx context.Context, exec CopyExecutor, stepID string, report engine.Reporter, ws *CopyWorkspace, opts SelectionOptions) *tocSelector {
 	extNames := make(map[string]bool, len(opts.Extensions))
+
 	extPlan := make(map[string]SourceExtension, len(opts.Extensions))
 	for _, ext := range opts.Extensions {
 		extNames[ext.Name] = true
 		extPlan[ext.Name] = ext
 	}
+
 	return &tocSelector{
 		ctx: ctx, exec: exec, stepID: stepID, report: report, ws: ws, opts: opts,
 		extNames: extNames, extPlan: extPlan,
@@ -1287,10 +1471,12 @@ func (s *tocSelector) selectEntry(entry ArchiveEntry) error {
 	if err != nil {
 		return err
 	}
+
 	if !candidate {
 		s.keep(entry)
 		return nil
 	}
+
 	switch kind {
 	case omittedDatabase:
 		return s.selectDatabase(entry)
@@ -1303,6 +1489,7 @@ func (s *tocSelector) selectEntry(entry ArchiveEntry) error {
 	case "security_label":
 		return s.selectSecurityLabel(entry)
 	}
+
 	return nil
 }
 
@@ -1329,19 +1516,23 @@ func (s *tocSelector) selectDatabase(entry ArchiveEntry) error {
 	if err != nil {
 		return err
 	}
+
 	name, ok := parseCreateDatabase(stmt)
 	if !ok || name != s.opts.SourceDatabase {
 		return copyPreconditionError("archive_invalid",
 			"the source archive's database definition does not match the selected source database",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.dbSeen++
 	if s.dbSeen > 1 {
 		return copyPreconditionError("archive_ambiguous",
 			"the source archive has more than one database definition",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.omit(entry, omittedDatabase, s.opts.SourceDatabase)
+
 	return nil
 }
 
@@ -1352,19 +1543,23 @@ func (s *tocSelector) selectDatabaseProperties(entry ArchiveEntry) error {
 	if err != nil {
 		return err
 	}
+
 	name, ok := parseAlterDatabase(stmt)
 	if !ok || name != s.opts.SourceDatabase {
 		return copyPreconditionError("archive_invalid",
 			"the source archive's database properties do not match the selected source database",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.dbPropsSeen++
 	if s.dbPropsSeen > 1 {
 		return copyPreconditionError("archive_ambiguous",
 			"the source archive has more than one database-properties entry",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.omit(entry, omittedDatabaseProperties, s.opts.SourceDatabase)
+
 	return nil
 }
 
@@ -1376,23 +1571,28 @@ func (s *tocSelector) selectExtension(entry ArchiveEntry, after string) error {
 			"the source archive contains an extension definition that was not in the approved destination extension plan",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	stmt, err := s.inspect(entry, "CREATE EXTENSION ")
 	if err != nil {
 		return err
 	}
+
 	got, schema, ok := parseCreateExtension(stmt)
 	if !ok || got != name || schema != s.extPlan[name].Schema {
 		return copyPreconditionError("archive_invalid",
 			"the source archive's extension definition does not match its approved name or schema",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	if s.extDefSeen[name] {
 		return copyPreconditionError("archive_ambiguous",
 			"the source archive has more than one definition for extension "+safeDiag(name),
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.extDefSeen[name] = true
 	s.omit(entry, omittedExtension, name)
+
 	return nil
 }
 
@@ -1418,18 +1618,23 @@ func (s *tocSelector) selectComment(entry ArchiveEntry) error {
 	if err != nil {
 		return err
 	}
+
 	if name, ok := parseCommentOnExtension(stmt); ok {
 		return s.omitExtensionComment(entry, name)
 	}
+
 	if name, ok := parseCommentOnDatabase(stmt); ok {
 		return s.omitDatabaseComment(entry, name)
 	}
+
 	if !strings.HasPrefix(stmt, "COMMENT ON ") {
 		return copyPreconditionError("archive_invalid",
 			"the source archive's comment entry does not contain a COMMENT statement",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.keep(entry)
+
 	return nil
 }
 
@@ -1440,13 +1645,16 @@ func (s *tocSelector) omitExtensionComment(entry ArchiveEntry, name string) erro
 			"the source archive has an extension comment for an extension outside the approved plan",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	if s.extCommentSeen[name] {
 		return copyPreconditionError("archive_ambiguous",
 			"the source archive has more than one comment for extension "+safeDiag(name),
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.extCommentSeen[name] = true
 	s.omit(entry, omittedExtensionComment, name)
+
 	return nil
 }
 
@@ -1458,13 +1666,16 @@ func (s *tocSelector) omitDatabaseComment(entry ArchiveEntry, name string) error
 			"the source archive has a database comment for a different database",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.dbCommentSeen++
 	if s.dbCommentSeen > 1 {
 		return copyPreconditionError("archive_ambiguous",
 			"the source archive has more than one database comment",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.omit(entry, omittedDatabaseComment, name)
+
 	return nil
 }
 
@@ -1475,15 +1686,19 @@ func (s *tocSelector) selectSecurityLabel(entry ArchiveEntry) error {
 	if err != nil {
 		return err
 	}
+
 	if name, ok := parseSecurityLabelOnDatabase(stmt); ok {
 		return s.omitDatabaseSecurityLabel(entry, name)
 	}
+
 	if !strings.HasPrefix(stmt, "SECURITY LABEL ") {
 		return copyPreconditionError("archive_invalid",
 			"the source archive's security-label entry does not contain a SECURITY LABEL statement",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.keep(entry)
+
 	return nil
 }
 
@@ -1495,13 +1710,16 @@ func (s *tocSelector) omitDatabaseSecurityLabel(entry ArchiveEntry, name string)
 			"the source archive has a database security label for a different database",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.dbLabelsSeen++
 	if s.dbLabelsSeen > 1 {
 		return copyPreconditionError("archive_ambiguous",
 			"the source archive has more than one database security-label entry",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	s.omit(entry, omittedDatabaseSecurityLabel, name)
+
 	return nil
 }
 
@@ -1513,6 +1731,7 @@ func (s *tocSelector) validateComplete() error {
 			"the source archive does not have exactly one database definition",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	for name := range s.extNames {
 		if !s.extDefSeen[name] && archiveExtensionDefinitionRequired(name) {
 			return copyPreconditionError("archive_invalid",
@@ -1520,6 +1739,7 @@ func (s *tocSelector) validateComplete() error {
 				"Do not restore this archive; retry the copy with a new job.", nil)
 		}
 	}
+
 	return nil
 }
 
@@ -1537,19 +1757,25 @@ func validateSelectionOptions(opts SelectionOptions) error {
 	if opts.SourceDatabase == "" {
 		return copyInternalError("archive_selection_failed", "the source database name is empty")
 	}
+
 	if err := validateSourceDatabase(opts.SourceDatabase); err != nil {
 		return copyInternalError("archive_selection_failed", "the source database name is not safe")
 	}
+
 	seen := map[string]bool{}
+
 	for _, ext := range opts.Extensions {
 		if err := validateExtensionRow(ext); err != nil {
 			return err
 		}
+
 		if seen[ext.Name] {
 			return copyInternalError("archive_selection_failed", "the approved extension plan repeats an extension")
 		}
+
 		seen[ext.Name] = true
 	}
+
 	return nil
 }
 
@@ -1574,17 +1800,20 @@ func classifyTOCEntry(entry ArchiveEntry) (kind, after string, candidate bool, e
 	default:
 		return "", "", false, nil
 	}
+
 	if !strings.HasPrefix(rest, "- ") {
 		// A COMMENT or SECURITY LABEL on a namespaced object is ordinary
 		// user data and must be kept.
 		return "", "", false, nil
 	}
+
 	after = rest[2:]
 	if hasTOCControl(after) {
 		return "", "", false, copyPreconditionError("archive_invalid",
 			"the source archive TOC contains a control character in an entry vaire must inspect",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	switch kind {
 	case "comment":
 		// Extension comments have an empty owner (a trailing space);
@@ -1593,6 +1822,7 @@ func classifyTOCEntry(entry ArchiveEntry) (kind, after string, candidate bool, e
 		if strings.HasPrefix(after, "DATABASE ") || strings.HasSuffix(after, " ") {
 			return kind, after, true, nil
 		}
+
 		return "", "", false, nil
 	case "security_label":
 		// Only a database security label is removed with the database
@@ -1600,6 +1830,7 @@ func classifyTOCEntry(entry ArchiveEntry) (kind, after string, candidate bool, e
 		if strings.HasPrefix(after, "DATABASE ") {
 			return kind, after, true, nil
 		}
+
 		return "", "", false, nil
 	default:
 		return kind, after, true, nil
@@ -1614,10 +1845,12 @@ func extensionDefinitionName(after string) (string, bool) {
 	if !strings.HasSuffix(after, " ") {
 		return "", false
 	}
+
 	name := strings.TrimSuffix(after, " ")
 	if name == "" {
 		return "", false
 	}
+
 	return name, true
 }
 
@@ -1635,14 +1868,19 @@ func inspectTOCEntry(ctx context.Context, exec CopyExecutor, stepID string, repo
 		return "", err
 	}
 	defer func() { err = joinCleanupError(err, ws.RemoveFile(copyInspectName)) }()
+
 	archive, err := ws.Open(copyArchiveName)
 	if err != nil {
 		return "", err
 	}
+
 	defer func() { _ = archive.Close() }()
+
 	ctx, cancel := context.WithTimeout(ctx, archiveInspectLimit)
 	defer cancel()
+
 	var out limitedBuffer
+
 	out.limit = copyInspectLimitBytes
 	cmd := engine.Command{
 		Name:   sourceTool("pg_restore"),
@@ -1651,20 +1889,24 @@ func inspectTOCEntry(ctx context.Context, exec CopyExecutor, stepID string, repo
 		Stdout: &out,
 	}
 	execErr := exec.Exec(ctx, stepID+"-inspect", cmd, copyReporter(report))
+
 	if out.overflow {
 		return "", copyPreconditionError("archive_invalid",
 			"a source archive TOC entry is too large for vaire to inspect safely",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	if execErr != nil {
 		return "", archiveToolError("the source archive TOC entry could not be inspected", execErr)
 	}
+
 	stmt = firstSQLStatementWithPrefix(out.String(), prefix)
 	if stmt == "" {
 		return "", copyPreconditionError("archive_invalid",
 			"a source archive TOC entry contains no SQL statement",
 			"Do not restore this archive; retry the copy with a new job.", nil)
 	}
+
 	return stmt, nil
 }
 
@@ -1674,8 +1916,10 @@ func firstSQLStatementWithPrefix(raw, prefix string) string {
 	if prefix == "" {
 		return ""
 	}
+
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), maxTOCLineBytes)
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		switch {
@@ -1692,6 +1936,7 @@ func firstSQLStatementWithPrefix(raw, prefix string) string {
 			return line
 		}
 	}
+
 	return ""
 }
 
@@ -1701,6 +1946,7 @@ func parseCreateDatabase(stmt string) (string, bool) {
 	if !strings.HasPrefix(stmt, prefix) {
 		return "", false
 	}
+
 	return parseSQLIdentifier(strings.TrimPrefix(stmt, prefix))
 }
 
@@ -1710,6 +1956,7 @@ func parseAlterDatabase(stmt string) (string, bool) {
 	if !strings.HasPrefix(stmt, prefix) {
 		return "", false
 	}
+
 	return parseSQLIdentifier(strings.TrimPrefix(stmt, prefix))
 }
 
@@ -1720,18 +1967,23 @@ func parseCreateExtension(stmt string) (name, schema string, ok bool) {
 	if !strings.HasPrefix(stmt, prefix) {
 		return "", "", false
 	}
+
 	rest := strings.TrimPrefix(strings.TrimPrefix(stmt, prefix), "IF NOT EXISTS ")
+
 	name, rest, ok = parseSQLIdentifierPrefix(rest)
 	if !ok {
 		return "", "", false
 	}
+
 	if !strings.HasPrefix(rest, "WITH SCHEMA ") {
 		return "", "", false
 	}
+
 	schema, _, ok = parseSQLIdentifierPrefix(strings.TrimPrefix(rest, "WITH SCHEMA "))
 	if !ok || schema == "" {
 		return "", "", false
 	}
+
 	return name, schema, true
 }
 
@@ -1740,6 +1992,7 @@ func parseCommentOnExtension(stmt string) (string, bool) {
 	if !strings.HasPrefix(stmt, prefix) {
 		return "", false
 	}
+
 	return parseSQLIdentifier(strings.TrimPrefix(stmt, prefix))
 }
 
@@ -1748,6 +2001,7 @@ func parseCommentOnDatabase(stmt string) (string, bool) {
 	if !strings.HasPrefix(stmt, prefix) {
 		return "", false
 	}
+
 	return parseSQLIdentifier(strings.TrimPrefix(stmt, prefix))
 }
 
@@ -1755,10 +2009,12 @@ func parseSecurityLabelOnDatabase(stmt string) (string, bool) {
 	if !strings.HasPrefix(stmt, "SECURITY LABEL ") {
 		return "", false
 	}
+
 	idx := strings.LastIndex(stmt, " ON DATABASE ")
 	if idx < 0 {
 		return "", false
 	}
+
 	return parseSQLIdentifier(stmt[idx+len(" ON DATABASE "):])
 }
 
@@ -1776,36 +2032,48 @@ func parseSQLIdentifierPrefix(s string) (string, string, bool) {
 	if s == "" {
 		return "", "", false
 	}
+
 	if s[0] != '"' {
 		end := strings.IndexAny(s, " \t;")
 		if end < 0 {
 			return "", "", false
 		}
+
 		name := s[:end]
 		if name == "" {
 			return "", "", false
 		}
+
 		return name, strings.TrimSpace(s[end:]), true
 	}
+
 	var b strings.Builder
+
 	for i := 1; i < len(s); i++ {
 		if s[i] != '"' {
 			b.WriteByte(s[i])
 			continue
 		}
+
 		if i+1 < len(s) && s[i+1] == '"' {
 			b.WriteByte('"')
+
 			i++
+
 			continue
 		}
+
 		if i+1 >= len(s) {
 			return "", "", false
 		}
+
 		if next := s[i+1]; next != ' ' && next != '\t' && next != ';' {
 			return "", "", false
 		}
+
 		return b.String(), strings.TrimSpace(s[i+1:]), true
 	}
+
 	return "", "", false
 }
 
@@ -1825,37 +2093,49 @@ func RestoreStrict(ctx context.Context, exec CopyExecutor, stepID string, report
 	if exec == nil {
 		return copyInternalError("restore_failed", "no command executor is configured")
 	}
+
 	if ws == nil {
 		return copyInternalError("restore_failed", "no copy workspace is configured")
 	}
+
 	if !config.DatabasePattern.MatchString(opts.Target) {
 		return copyInternalError("restore_failed", "the destination database name is not valid")
 	}
+
 	if err := validateRestoreOwner(opts.Owner); err != nil {
 		return err
 	}
+
 	if opts.Local.User != "" && opts.Local.User != "postgres" {
 		return copyInternalError("restore_failed", "the strict loader must connect as the postgres local role")
 	}
+
 	if opts.Local.AsRoot {
 		return copyInternalError("restore_failed", "the strict loader cannot run psql as root")
 	}
+
 	if opts.Local.Port < 0 || opts.Local.Port > 65535 {
 		return copyInternalError("restore_failed", "the destination cluster port is not valid")
 	}
+
 	if opts.Local.Host != "" && !filepath.IsAbs(opts.Local.Host) {
 		return copyInternalError("restore_failed", "the strict loader requires the destination cluster's local Unix socket")
 	}
+
 	if opts.Selection == nil {
 		return copyInternalError("restore_failed", "the restore selection is empty")
 	}
+
 	var list bytes.Buffer
+
 	if err := opts.Selection.WriteList(&list); err != nil {
 		return copyInternalError("restore_failed", "the restore selection could not be written")
 	}
+
 	if !validUseList(list.Bytes()) {
 		return copyInternalError("restore_failed", "the restore selection contains an unsafe line")
 	}
+
 	if err := ws.WriteFile(copyUseListName, list.Bytes()); err != nil {
 		return err
 	}
@@ -1877,10 +2157,12 @@ func RestoreStrict(ctx context.Context, exec CopyExecutor, stepID string, report
 	)
 	args = append(args, connection...)
 	args = append(args, "-d", opts.Target)
+
 	cmd := engine.Command{Name: "runuser", Args: args, Stdin: archive}
 	if err := exec.Exec(ctx, stepID, cmd, copyReporter(report)); err != nil {
 		return restoreError(err)
 	}
+
 	return nil
 }
 
@@ -1890,11 +2172,13 @@ func validUseList(data []byte) bool {
 	if len(data) == 0 {
 		return true
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(data), "\n"), "\n") {
 		if !useListLinePattern.MatchString(line) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -1902,9 +2186,11 @@ func validateRestoreOwner(owner string) error {
 	if owner == "" || len(owner) > 63 || hasControl(owner) {
 		return copyInternalError("restore_failed", "the destination owner role is not valid")
 	}
+
 	if owner == "postgres" || pg.IsVaireRole(owner) {
 		return copyInternalError("restore_failed", "the strict loader must run as the destination database owner, not an administrative role")
 	}
+
 	return nil
 }
 
@@ -1915,7 +2201,9 @@ func CheckCopySpace(ws *CopyWorkspace, dataDir string, sourceSize int64) ([]Spac
 	if ws == nil || dataDir == "" {
 		return nil, copyInternalError("copy_space_check_failed", "the copy space check is missing a path")
 	}
+
 	need := CopyNeed(sourceSize)
+
 	return externalCheckSpace([]SpaceNeed{
 		{Path: ws.Dir, Need: need, Purpose: "temporary source archive"},
 		{Path: dataDir, Need: need, Purpose: "imported database"},
@@ -1930,13 +2218,16 @@ func CheckPG18ToolsAt(dir string) error {
 	if dir == "" {
 		return copyMissingToolError("")
 	}
+
 	for _, name := range []string{"pg_dump", "pg_restore", "psql"} {
 		path := filepath.Join(dir, name)
+
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
 			return copyMissingToolError(path)
 		}
 	}
+
 	return nil
 }
 
@@ -1987,14 +2278,17 @@ func PostgresWorkspaceOwner() (WorkspaceOwner, error) {
 	if err != nil {
 		return WorkspaceOwner{}, copyInternalError("copy_workspace_failed", "the postgres account is required to create a copy workspace")
 	}
+
 	uid, err := strconv.Atoi(u.Uid)
 	if err != nil {
 		return WorkspaceOwner{}, copyInternalError("copy_workspace_failed", "the postgres account has an invalid uid")
 	}
+
 	gid, err := strconv.Atoi(u.Gid)
 	if err != nil {
 		return WorkspaceOwner{}, copyInternalError("copy_workspace_failed", "the postgres account has an invalid gid")
 	}
+
 	return WorkspaceOwner{UID: uid, GID: gid}, nil
 }
 
@@ -2005,6 +2299,7 @@ func workspaceFileOwner(info fs.FileInfo) (uid, gid int, ok bool) {
 	if !ok {
 		return 0, 0, false
 	}
+
 	return int(stat.Uid), int(stat.Gid), true
 }
 
@@ -2018,18 +2313,23 @@ func workspaceFileOwner(info fs.FileInfo) (uid, gid int, ok bool) {
 // other-writable, and group-writable only to the process's own group.
 func verifyCopyAncestors(rootDir string, owner WorkspaceOwner) error {
 	euid, egid := copyEffectiveUID(), copyEffectiveGID()
+
 	for parent := filepath.Dir(rootDir); ; {
 		info, err := os.Lstat(parent)
 		if errors.Is(err, fs.ErrNotExist) {
 			return copyWorkspaceUnsafe("a copy root ancestor is missing")
 		}
+
 		if err != nil {
 			return copyWorkspaceUnsafe("a copy root ancestor could not be inspected")
 		}
+
 		if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
 			return copyWorkspaceUnsafe("a copy root ancestor is not a plain directory")
 		}
+
 		perm := info.Mode().Perm()
+
 		uid, gid, owned := copyWorkspaceOwnerOf(info)
 		switch {
 		case !owned:
@@ -2044,13 +2344,16 @@ func verifyCopyAncestors(rootDir string, owner WorkspaceOwner) error {
 		case perm&0o020 != 0 && (uid != euid || gid != egid):
 			return copyWorkspaceUnsafe("a copy root ancestor is writable by another group")
 		}
+
 		if !workspaceModeAllows(perm, uid, gid, owner, 0o100) {
 			return copyWorkspaceAccessDenied("ancestor", "directory")
 		}
+
 		next := filepath.Dir(parent)
 		if next == parent {
 			return nil
 		}
+
 		parent = next
 	}
 }
@@ -2064,26 +2367,33 @@ func openCopyRoot(rootDir string, owner WorkspaceOwner, create bool) (root *os.R
 	if err != nil {
 		return nil, false, err
 	}
+
 	if err := verifyCopyAncestors(rootDir, owner); err != nil {
 		return nil, false, err
 	}
+
 	parentRoot, err := openCopyRootParent(parentDir)
 	if err != nil {
 		return nil, false, err
 	}
+
 	defer func() { _ = parentRoot.Close() }()
+
 	entry, created, err := ensureCopyRootEntry(parentRoot, name, create)
 	if err != nil || entry == nil {
 		return nil, false, err
 	}
+
 	root, err = parentRoot.OpenRoot(name)
 	if err != nil {
 		return nil, false, copyWorkspaceUnsafe("the copy root could not be opened")
 	}
+
 	if err := verifyOpenedCopyRoot(root, entry, rootDir == CopyRoot, created, owner); err != nil {
 		_ = root.Close()
 		return nil, false, err
 	}
+
 	return root, true, nil
 }
 
@@ -2093,12 +2403,15 @@ func copyRootLocation(rootDir string) (clean, parentDir, name string, err error)
 	if rootDir == "" || !filepath.IsAbs(rootDir) {
 		return "", "", "", copyInternalError("copy_workspace_unsafe", "the copy root must be an absolute path")
 	}
+
 	clean = filepath.Clean(rootDir)
 	parentDir = filepath.Dir(clean)
+
 	name = filepath.Base(clean)
 	if name == "." || name == string(filepath.Separator) {
 		return "", "", "", copyWorkspaceUnsafe("the copy root is not a named directory")
 	}
+
 	return clean, parentDir, name, nil
 }
 
@@ -2109,18 +2422,22 @@ func openCopyRootParent(parentDir string) (*os.Root, error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, copyWorkspaceUnsafe("the copy root parent is missing")
 	}
+
 	if err != nil || parentInfo.Mode()&fs.ModeSymlink != 0 || !parentInfo.IsDir() {
 		return nil, copyWorkspaceUnsafe("the copy root parent is not a plain directory")
 	}
+
 	parentRoot, err := os.OpenRoot(parentDir)
 	if err != nil {
 		return nil, copyWorkspaceUnsafe("the copy root parent could not be opened")
 	}
+
 	openedParent, err := parentRoot.Stat(".")
 	if err != nil || !openedParent.IsDir() || !os.SameFile(parentInfo, openedParent) {
 		_ = parentRoot.Close()
 		return nil, copyWorkspaceUnsafe("the copy root parent changed while it was being inspected")
 	}
+
 	return parentRoot, nil
 }
 
@@ -2134,16 +2451,20 @@ func ensureCopyRootEntry(parentRoot *os.Root, name string, create bool) (entry f
 		if !create {
 			return nil, false, nil
 		}
+
 		entry, created, err = createCopyRootEntry(parentRoot, name)
 	} else if err != nil {
 		return nil, false, copyWorkspaceUnsafe("the copy root could not be inspected")
 	}
+
 	if err != nil {
 		return nil, false, err
 	}
+
 	if entry.Mode()&fs.ModeSymlink != 0 || !entry.IsDir() {
 		return nil, false, copyWorkspaceUnsafe("the copy root is not a plain directory")
 	}
+
 	return entry, created, nil
 }
 
@@ -2154,10 +2475,12 @@ func createCopyRootEntry(parentRoot *os.Root, name string) (fs.FileInfo, bool, e
 	if err != nil && !errors.Is(err, fs.ErrExist) {
 		return nil, false, copyWorkspaceError("the copy root could not be created")
 	}
+
 	entry, statErr := parentRoot.Lstat(name)
 	if statErr != nil {
 		return nil, false, copyWorkspaceUnsafe("the copy root could not be inspected after creation")
 	}
+
 	return entry, err == nil, nil
 }
 
@@ -2169,28 +2492,35 @@ func verifyOpenedCopyRoot(root *os.Root, entry fs.FileInfo, fixedMode, created b
 	if err != nil || !opened.IsDir() || !os.SameFile(entry, opened) {
 		return copyWorkspaceUnsafe("the copy root changed while it was being inspected")
 	}
+
 	if created {
 		if err := root.Chmod(".", 0o711); err != nil {
 			return copyWorkspaceError("the copy root permissions could not be set")
 		}
+
 		opened, err = root.Stat(".")
 		if err != nil {
 			return copyWorkspaceUnsafe("the copy root could not be inspected after setting permissions")
 		}
 	}
+
 	if uid, _, ok := copyWorkspaceOwnerOf(opened); !ok || uid != copyEffectiveUID() {
 		return copyWorkspaceUnsafe("the copy root is not owned by the vaire process")
 	}
+
 	perm := opened.Mode().Perm()
 	if perm&0o022 != 0 {
 		return copyWorkspaceUnsafe("the copy root is writable by group or others")
 	}
+
 	if fixedMode && perm != 0o711 {
 		return copyWorkspaceUnsafe("the copy root does not have mode 0711")
 	}
+
 	if !workspaceModeAllows(perm, copyEffectiveUID(), copyEffectiveGID(), owner, 0o100) {
 		return copyWorkspaceAccessDenied("ancestor", "copy-root")
 	}
+
 	return nil
 }
 
@@ -2201,6 +2531,7 @@ func OpenCopyWorkspace(jobID string) (*CopyWorkspace, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return NewCopyWorkspace(CopyRoot, jobID, owner, nil)
 }
 
@@ -2240,32 +2571,41 @@ func PruneCopyWorkspace(rootDir, jobID string, owner WorkspaceOwner) (removed bo
 	if err != nil || leaseInfo.Mode()&fs.ModeSymlink != 0 || !leaseInfo.Mode().IsRegular() || leaseInfo.Size() > 1024 {
 		return false, copyWorkspaceUnsafe("the copy workspace has no verified lifetime lease")
 	}
+
 	leaseFile, err := jobRoot.OpenFile(CopyWorkspaceLeaseName, os.O_RDWR, 0)
 	if err != nil {
 		return false, copyWorkspaceUnsafe("the copy workspace lease could not be opened")
 	}
+
 	defer func() { _ = leaseFile.Close() }()
+
 	openedInfo, err := leaseFile.Stat()
 	if err != nil || !os.SameFile(leaseInfo, openedInfo) {
 		return false, copyWorkspaceUnsafe("the copy workspace lease changed while it was being inspected")
 	}
+
 	identity, ok := copyLeaseIdentityOf(openedInfo)
 	if !ok || identity != lease.identity {
 		return false, copyWorkspaceUnsafe("the copy workspace lease identity does not match its marker")
 	}
+
 	token, err := io.ReadAll(io.LimitReader(leaseFile, 1025))
 	if err != nil || len(token) > 1024 || strings.TrimSuffix(string(token), "\n") != lease.token {
 		return false, copyWorkspaceUnsafe("the copy workspace lease content does not match its marker")
 	}
+
 	if err := syscall.Flock(int(leaseFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 			return false, ErrCopyWorkspaceBusy
 		}
+
 		return false, copyWorkspaceUnsafe("the copy workspace lease could not be locked")
 	}
+
 	if err := root.RemoveAll(jobID); err != nil {
 		return false, copyWorkspaceUnsafe("the copy workspace could not be removed")
 	}
+
 	return true, nil
 }
 
@@ -2277,11 +2617,14 @@ func CopyWorkspaceOperation(rootDir, jobID string, owner WorkspaceOwner) (string
 	if err != nil {
 		return "", err
 	}
+
 	if !found {
 		return "", copyInternalError("copy_workspace_gone", "the copy workspace is gone")
 	}
+
 	_ = jobRoot.Close()
 	_ = root.Close()
+
 	return kind, nil
 }
 
@@ -2291,14 +2634,17 @@ func CopyWorkspaceLeaseIdentity(f *os.File) (string, error) {
 	if f == nil {
 		return "", copyInternalError("copy_workspace_failed", "the copy workspace lease is missing")
 	}
+
 	info, err := f.Stat()
 	if err != nil {
 		return "", copyWorkspaceUnsafe("the copy workspace lease could not be inspected")
 	}
+
 	identity, ok := copyLeaseIdentityOf(info)
 	if !ok {
 		return "", copyWorkspaceUnsafe("the copy workspace lease identity could not be read")
 	}
+
 	return identity, nil
 }
 
@@ -2307,6 +2653,7 @@ func copyLeaseIdentityOf(info fs.FileInfo) (string, bool) {
 	if !ok {
 		return "", false
 	}
+
 	return strconv.FormatUint(statDevice(stat), 10) + ":" + strconv.FormatUint(statInode(stat), 10), true
 }
 
@@ -2324,25 +2671,32 @@ func openVerifiedCopyWorkspace(rootDir, jobID string, owner WorkspaceOwner) (roo
 	if !copyJobIDPattern.MatchString(jobID) {
 		return nil, nil, "", copyLeaseMarker{}, false, copyInternalError("copy_workspace_unsafe", "the copy job id is not a safe directory name")
 	}
+
 	if rootDir == "" || !filepath.IsAbs(rootDir) {
 		return nil, nil, "", copyLeaseMarker{}, false, copyInternalError("copy_workspace_unsafe", "the copy root must be an absolute path")
 	}
+
 	rootDir = filepath.Clean(rootDir)
+
 	root, found, err = openCopyRoot(rootDir, owner, false)
 	if err != nil || !found {
 		return nil, nil, "", copyLeaseMarker{}, false, err
 	}
+
 	jobRoot, found, err = openVerifiedCopyJob(root, jobID, owner)
 	if err != nil || !found {
 		_ = root.Close()
 		return nil, nil, "", copyLeaseMarker{}, false, err
 	}
+
 	kind, lease, err = readCopyWorkspaceMarker(jobRoot, jobID)
 	if err != nil {
 		_ = jobRoot.Close()
 		_ = root.Close()
+
 		return nil, nil, "", copyLeaseMarker{}, false, err
 	}
+
 	return root, jobRoot, kind, lease, true, nil
 }
 
@@ -2354,20 +2708,25 @@ func openVerifiedCopyJob(root *os.Root, jobID string, owner WorkspaceOwner) (job
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
+
 	if err != nil {
 		return nil, false, copyWorkspaceUnsafe("the copy workspace could not be inspected")
 	}
+
 	if entryInfo.Mode()&fs.ModeSymlink != 0 || !entryInfo.IsDir() {
 		return nil, false, copyWorkspaceUnsafe("the copy workspace is not a plain directory")
 	}
+
 	jobRoot, err = root.OpenRoot(jobID)
 	if err != nil {
 		return nil, false, copyWorkspaceUnsafe("the copy workspace could not be opened")
 	}
+
 	if err := verifyCopyJobRoot(jobRoot, entryInfo, owner); err != nil {
 		_ = jobRoot.Close()
 		return nil, false, err
 	}
+
 	return jobRoot, true, nil
 }
 
@@ -2378,12 +2737,15 @@ func verifyCopyJobRoot(jobRoot *os.Root, entryInfo fs.FileInfo, owner WorkspaceO
 	if err != nil || !openedInfo.IsDir() || !os.SameFile(entryInfo, openedInfo) {
 		return copyWorkspaceUnsafe("the copy workspace changed while it was being inspected")
 	}
+
 	if uid, gid, ok := copyWorkspaceOwnerOf(openedInfo); !ok || uid != owner.UID || gid != owner.GID {
 		return copyWorkspaceUnsafe("the copy workspace is not owned by the postgres account")
 	}
+
 	if openedInfo.Mode().Perm() != 0o700 {
 		return copyWorkspaceUnsafe("the copy workspace does not have private permissions")
 	}
+
 	return nil
 }
 
@@ -2394,18 +2756,22 @@ func readCopyWorkspaceMarker(jobRoot *os.Root, jobID string) (string, copyLeaseM
 	if err != nil || markerInfo.Mode()&fs.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() || markerInfo.Size() > 4096 {
 		return "", copyLeaseMarker{}, copyWorkspaceUnsafe("the copy workspace has no verified operation-ownership marker")
 	}
+
 	raw, err := jobRoot.ReadFile(CopyWorkspaceMarkerName)
 	if err != nil {
 		return "", copyLeaseMarker{}, copyWorkspaceUnsafe("the copy workspace has no operation-ownership marker")
 	}
+
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
 	if len(lines) != 4 || lines[1] != jobID ||
 		(lines[0] != "db-copy" && lines[0] != "db-copy-preflight") {
 		return "", copyLeaseMarker{}, copyWorkspaceUnsafe("the copy workspace operation marker does not match this job")
 	}
+
 	if !copyLeaseTokenPattern.MatchString(lines[3]) {
 		return "", copyLeaseMarker{}, copyWorkspaceUnsafe("the copy workspace operation marker has an invalid lease token")
 	}
+
 	return lines[0], copyLeaseMarker{identity: lines[2], token: lines[3]}, nil
 }
 
@@ -2420,12 +2786,15 @@ func workspaceModeAllows(mode fs.FileMode, uid, gid int, owner WorkspaceOwner, b
 	if owner.UID == 0 {
 		return true
 	}
+
 	if owner.UID == uid {
 		return mode&bit != 0
 	}
+
 	if owner.GID == gid {
 		return mode&(bit>>3) != 0
 	}
+
 	return mode&(bit>>6) != 0
 }
 
@@ -2436,6 +2805,7 @@ func copyWorkspaceAccessDenied(stage, label string) error {
 			"Inspect the system CA bundle permissions before retrying.",
 			map[string]any{"stage": stage, "file": label})
 	}
+
 	return copyPreconditionError("copy_workspace_access_denied",
 		"the PostgreSQL service account cannot access the copy workspace",
 		"Inspect the copy workspace ownership and permissions before retrying.",
@@ -2451,30 +2821,38 @@ func NewCopyWorkspace(rootDir, jobID string, owner WorkspaceOwner, _ func(string
 	if !copyJobIDPattern.MatchString(jobID) {
 		return nil, copyInternalError("copy_workspace_failed", "the copy job id is not a safe directory name")
 	}
+
 	if rootDir == "" || !filepath.IsAbs(rootDir) {
 		return nil, copyInternalError("copy_workspace_failed", "the copy root must be an absolute path")
 	}
+
 	rootDir = filepath.Clean(rootDir)
+
 	dir := filepath.Join(rootDir, jobID)
 	if filepath.Dir(dir) != rootDir {
 		return nil, copyInternalError("copy_workspace_failed", "the copy job path escapes the copy root")
 	}
+
 	parent, found, err := openCopyRoot(rootDir, owner, true)
 	if err != nil {
 		return nil, err
 	}
+
 	if !found {
 		return nil, copyWorkspaceUnsafe("the copy root could not be created")
 	}
+
 	ws, err := createCopyJobWorkspace(parent, dir, jobID, owner)
 	if err != nil {
 		_ = parent.Close()
 		return nil, err
 	}
+
 	if err := ws.mkdir(copyHomeName); err != nil {
 		cleanupErr := ws.Remove()
 		return nil, joinCleanupError(err, cleanupErr)
 	}
+
 	return ws, nil
 }
 
@@ -2483,55 +2861,73 @@ func NewCopyWorkspace(rootDir, jobID string, owner WorkspaceOwner, _ func(string
 // removes what it created on failure, but leaves the parent handle to its
 // caller.
 func createCopyJobWorkspace(parent *os.Root, dir, jobID string, owner WorkspaceOwner) (*CopyWorkspace, error) {
-	var created fs.FileInfo
-	var jobRoot *os.Root
+	var (
+		created fs.FileInfo
+		jobRoot *os.Root
+	)
+
 	fail := func(cause error) (*CopyWorkspace, error) {
 		var cleanupErrs []error
 		if jobRoot != nil {
 			cleanupErrs = append(cleanupErrs, jobRoot.Close())
 		}
+
 		if created != nil {
 			cleanupErrs = append(cleanupErrs, removeCreatedCopyJob(parent, jobID, created))
 		}
+
 		return nil, joinCleanupError(cause, errors.Join(cleanupErrs...))
 	}
+
 	if err := parent.Mkdir(jobID, 0o700); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fail(copyInternalError("copy_workspace_exists", "a workspace for this copy job already exists"))
 		}
+
 		return fail(copyWorkspaceError("the copy workspace could not be created"))
 	}
+
 	var err error
+
 	created, err = parent.Lstat(jobID)
 	if err != nil || created.Mode()&fs.ModeSymlink != 0 || !created.IsDir() {
 		return fail(copyWorkspaceUnsafe("the copy workspace was not created as a plain directory"))
 	}
+
 	copyAfterJobMkdir(dir)
+
 	entry, err := verifyCreatedCopyJob(parent, jobID, created)
 	if err != nil {
 		return fail(err)
 	}
+
 	jobRoot, err = parent.OpenRoot(jobID)
 	if err != nil {
 		return fail(copyWorkspaceUnsafe("the copy workspace could not be opened"))
 	}
+
 	opened, err := jobRoot.Stat(".")
 	if err != nil || !opened.IsDir() || !os.SameFile(entry, opened) {
 		return fail(copyWorkspaceUnsafe("the copy workspace changed while it was being opened"))
 	}
+
 	if err := jobRoot.Chmod(".", 0o700); err != nil {
 		return fail(copyWorkspaceError("the copy workspace permissions could not be set"))
 	}
+
 	if owner != CurrentWorkspaceOwner() {
 		if err := jobRoot.Chown(".", owner.UID, owner.GID); err != nil {
 			return fail(copyWorkspaceError("the copy workspace ownership could not be set"))
 		}
 	}
+
 	copyAfterJobRootOpen(dir)
+
 	identity, err := verifyCreatedCopyWorkspace(jobRoot, parent, jobID, owner)
 	if err != nil {
 		return fail(err)
 	}
+
 	return &CopyWorkspace{
 		Dir:      dir,
 		owner:    owner,
@@ -2549,6 +2945,7 @@ func verifyCreatedCopyJob(parent *os.Root, jobID string, created fs.FileInfo) (f
 	if err != nil || entry.Mode()&fs.ModeSymlink != 0 || !entry.IsDir() || !os.SameFile(created, entry) {
 		return nil, copyWorkspaceUnsafe("the copy workspace changed while it was being created")
 	}
+
 	return entry, nil
 }
 
@@ -2559,16 +2956,20 @@ func verifyCreatedCopyWorkspace(jobRoot, parent *os.Root, jobID string, owner Wo
 	if err != nil {
 		return nil, copyWorkspaceUnsafe("the copy workspace could not be verified")
 	}
+
 	if uid, gid, ok := copyWorkspaceOwnerOf(finalInfo); !ok || uid != owner.UID || gid != owner.GID {
 		return nil, copyWorkspaceUnsafe("the copy workspace is not owned by the postgres account")
 	}
+
 	if finalInfo.Mode().Perm() != 0o700 {
 		return nil, copyWorkspaceUnsafe("the copy workspace does not have private permissions")
 	}
+
 	entryNow, err := parent.Lstat(jobID)
 	if err != nil || entryNow.Mode()&fs.ModeSymlink != 0 || !entryNow.IsDir() || !os.SameFile(entryNow, finalInfo) {
 		return nil, copyWorkspaceUnsafe("the copy workspace changed while ownership was being set")
 	}
+
 	return finalInfo, nil
 }
 
@@ -2580,15 +2981,19 @@ func removeCreatedCopyJob(parent *os.Root, jobID string, created fs.FileInfo) er
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
+
 	if err != nil {
 		return copyWorkspaceUnsafe("the copy workspace could not be inspected for cleanup")
 	}
+
 	if current.Mode()&fs.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(created, current) {
 		return nil
 	}
+
 	if err := parent.RemoveAll(jobID); err != nil {
 		return copyWorkspaceError("the copy workspace could not be removed after a failed creation")
 	}
+
 	return nil
 }
 
@@ -2602,6 +3007,7 @@ func copyMissingToolError(path string) error {
 	if path != "" {
 		details["path"] = path
 	}
+
 	return output.NewError(output.CodeMissingTool, "a PostgreSQL 18 client tool is missing", output.ExitMissingTool,
 		"Install the PostgreSQL 18 client tools on the node and retry.").WithDetails(details)
 }
@@ -2615,9 +3021,11 @@ func copyPreconditionError(reason, message, hint string, details map[string]any)
 	if details == nil {
 		details = map[string]any{}
 	}
+
 	if _, ok := details["reason"]; !ok {
 		details["reason"] = reason
 	}
+
 	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).WithDetails(details)
 }
 
@@ -2630,6 +3038,7 @@ func copyReporter(report engine.Reporter) engine.Reporter {
 	if report == nil {
 		return func(output.Event) {}
 	}
+
 	return func(ev output.Event) {
 		// A subprocess log line is arbitrary server/database text. It can
 		// contain SQL, row values or continuation data, so it never leaves
@@ -2637,6 +3046,7 @@ func copyReporter(report engine.Reporter) engine.Reporter {
 		if ev.Type == "log" {
 			return
 		}
+
 		report(ev)
 	}
 }
@@ -2645,9 +3055,11 @@ func joinCleanupError(err, cleanup error) error {
 	if cleanup == nil {
 		return err
 	}
+
 	if err == nil {
 		return cleanup
 	}
+
 	return errors.Join(err, cleanup)
 }
 
@@ -2657,36 +3069,46 @@ func (ws *CopyWorkspace) mkdir(name string) error {
 	if !validCopyName(name) {
 		return copyInternalError("copy_workspace_failed", "the workspace file name is not safe")
 	}
+
 	if err := ws.root.Mkdir(name, 0o700); err != nil {
 		return copyWorkspaceError("the copy workspace directory could not be created")
 	}
+
 	fail := func(cause error) error {
 		var removeErr error
 		if err := ws.root.RemoveAll(name); err != nil {
 			removeErr = copyWorkspaceError("the copy workspace directory could not be removed after a failed creation")
 		}
+
 		return joinCleanupError(cause, removeErr)
 	}
+
 	sub, err := ws.root.OpenRoot(name)
 	if err != nil {
 		return fail(copyWorkspaceError("the copy workspace directory could not be opened"))
 	}
+
 	defer func() { _ = sub.Close() }()
+
 	if err := sub.Chmod(".", 0o700); err != nil {
 		return fail(copyWorkspaceError("the copy workspace directory permissions could not be set"))
 	}
+
 	if ws.owner != CurrentWorkspaceOwner() {
 		if err := sub.Chown(".", ws.owner.UID, ws.owner.GID); err != nil {
 			return fail(copyWorkspaceError("the copy workspace directory ownership could not be set"))
 		}
 	}
+
 	info, err := sub.Stat(".")
 	if err != nil {
 		return fail(copyWorkspaceError("the copy workspace directory could not be verified"))
 	}
+
 	if uid, gid, ok := copyWorkspaceOwnerOf(info); !ok || uid != ws.owner.UID || gid != ws.owner.GID {
 		return fail(copyWorkspaceUnsafe("the copy workspace directory is not owned by the postgres account"))
 	}
+
 	return nil
 }
 
@@ -2696,33 +3118,41 @@ func (ws *CopyWorkspace) Create(name string) (*os.File, error) {
 	if ws == nil || ws.root == nil {
 		return nil, copyInternalError("copy_workspace_failed", "the copy workspace is closed")
 	}
+
 	if !validCopyName(name) {
 		return nil, copyInternalError("copy_workspace_failed", "the workspace file name is not safe")
 	}
+
 	f, err := ws.root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, copyWorkspaceError("the workspace file could not be created exclusively")
 	}
+
 	fail := func() (*os.File, error) {
 		_ = f.Close()
 		removeErr := ws.RemoveFile(name)
+
 		return nil, joinCleanupError(copyWorkspaceError("the workspace file could not be prepared safely"), removeErr)
 	}
 	if err := f.Chmod(0o600); err != nil {
 		return fail()
 	}
+
 	if ws.owner != CurrentWorkspaceOwner() {
 		if err := f.Chown(ws.owner.UID, ws.owner.GID); err != nil {
 			return fail()
 		}
 	}
+
 	info, err := f.Stat()
 	if err != nil {
 		return fail()
 	}
+
 	if uid, gid, ok := copyWorkspaceOwnerOf(info); !ok || uid != ws.owner.UID || gid != ws.owner.GID {
 		return fail()
 	}
+
 	return f, nil
 }
 
@@ -2732,12 +3162,15 @@ func (ws *CopyWorkspace) WriteFile(name string, data []byte) error {
 	if err != nil {
 		return err
 	}
+
 	_, writeErr := f.Write(data)
+
 	closeErr := f.Close()
 	if writeErr != nil || closeErr != nil {
 		removeErr := ws.RemoveFile(name)
 		return joinCleanupError(copyWorkspaceError("the workspace file could not be written"), removeErr)
 	}
+
 	return nil
 }
 
@@ -2746,9 +3179,11 @@ func (ws *CopyWorkspace) Open(name string) (*os.File, error) {
 	if ws == nil || ws.root == nil {
 		return nil, copyInternalError("copy_workspace_failed", "the copy workspace is closed")
 	}
+
 	if !validCopyName(name) {
 		return nil, copyInternalError("copy_workspace_failed", "the workspace file name is not safe")
 	}
+
 	return ws.root.Open(name)
 }
 
@@ -2757,9 +3192,11 @@ func (ws *CopyWorkspace) Stat(name string) (fs.FileInfo, error) {
 	if ws == nil || ws.root == nil {
 		return nil, copyInternalError("copy_workspace_failed", "the copy workspace is closed")
 	}
+
 	if !validCopyName(name) {
 		return nil, copyInternalError("copy_workspace_failed", "the workspace file name is not safe")
 	}
+
 	return ws.root.Stat(name)
 }
 
@@ -2768,6 +3205,7 @@ func (ws *CopyWorkspace) FilePath(name string) string {
 	if ws == nil || !validCopyName(name) {
 		return ""
 	}
+
 	return filepath.Join(ws.Dir, name)
 }
 
@@ -2776,14 +3214,17 @@ func (ws *CopyWorkspace) RemoveFile(name string) error {
 	if ws == nil || ws.root == nil {
 		return nil
 	}
+
 	if !validCopyName(name) {
 		return copyInternalError("copy_workspace_failed", "the workspace file name is not safe")
 	}
+
 	if err := ws.root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return copyPreconditionError("workspace_cleanup_failed",
 			"a temporary copy file could not be removed",
 			"Check /var/lib/vaire-copies and retry after the copy job has stopped.", nil)
 	}
+
 	return nil
 }
 
@@ -2793,17 +3234,21 @@ func (ws *CopyWorkspace) Cleanup() error {
 	if ws == nil || ws.root == nil {
 		return nil
 	}
+
 	var errs []error
+
 	for _, name := range []string{copyArchiveName, copyUseListName, copyInspectName, copyPassfileName, copyCAName} {
 		if err := ws.RemoveFile(name); err != nil {
 			errs = append(errs, err)
 		}
 	}
+
 	if err := ws.root.RemoveAll(copyHomeName); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, copyPreconditionError("workspace_cleanup_failed",
 			"the temporary copy home directory could not be removed",
 			"Check /var/lib/vaire-copies and retry after the copy job has stopped.", nil))
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -2814,42 +3259,53 @@ func (ws *CopyWorkspace) Remove() error {
 	if ws == nil {
 		return nil
 	}
+
 	closeHandles := func() error {
 		var errs []error
 		if ws.root != nil {
 			errs = append(errs, ws.root.Close())
 			ws.root = nil
 		}
+
 		if ws.parent != nil {
 			errs = append(errs, ws.parent.Close())
 			ws.parent = nil
 		}
+
 		return errors.Join(errs...)
 	}
+
 	if ws.parent == nil || ws.identity == nil {
 		_, err := os.Lstat(ws.Dir)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
+
 		return joinCleanupError(copyWorkspaceUnsafe("the copy workspace has no verified parent handle"), closeHandles())
 	}
+
 	entry, err := ws.parent.Lstat(ws.jobID)
 	if errors.Is(err, fs.ErrNotExist) {
 		return closeHandles()
 	}
+
 	if err != nil || entry.Mode()&fs.ModeSymlink != 0 || !entry.IsDir() || !os.SameFile(entry, ws.identity) {
 		return joinCleanupError(copyWorkspaceUnsafe("the copy workspace changed before removal"), closeHandles())
 	}
+
 	if ws.root != nil {
 		_ = ws.root.Close()
 		ws.root = nil
 	}
+
 	removeErr := ws.parent.RemoveAll(ws.jobID)
 	parentErr := ws.parent.Close()
 	ws.parent = nil
+
 	if removeErr != nil {
 		return joinCleanupError(copyWorkspaceError("the copy workspace could not be removed"), parentErr)
 	}
+
 	return parentErr
 }
 
@@ -2858,15 +3314,18 @@ func (ws *CopyWorkspace) Close() error {
 	if ws == nil {
 		return nil
 	}
+
 	var errs []error
 	if ws.root != nil {
 		errs = append(errs, ws.root.Close())
 		ws.root = nil
 	}
+
 	if ws.parent != nil {
 		errs = append(errs, ws.parent.Close())
 		ws.parent = nil
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -2874,9 +3333,11 @@ func validCopyName(name string) bool {
 	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
 		return false
 	}
+
 	if strings.ContainsAny(name, `/\`) {
 		return false
 	}
+
 	return !hasControl(name)
 }
 
@@ -2892,15 +3353,19 @@ func prepareSourceAccess(ws *CopyWorkspace, src Source) (*sourceAccess, error) {
 	if ws == nil || ws.root == nil {
 		return nil, copyInternalError("copy_workspace_failed", "the copy workspace is closed")
 	}
+
 	mode := src.TLSMode
 	if mode == "" {
 		mode = SourceTLSVerifyFull
 	}
+
 	caPath := ""
 	if len(src.caPEM) > 0 {
 		caPath = ws.FilePath(copyCAName)
 	}
+
 	var env []string
+
 	if mode == SourceTLSVerifyCA && caPath == "" {
 		info, err := os.Stat(systemCABundlePath)
 		if err != nil || info.IsDir() {
@@ -2908,18 +3373,23 @@ func prepareSourceAccess(ws *CopyWorkspace, src Source) (*sourceAccess, error) {
 				"sslmode=verify-ca needs a system CA bundle, and this node does not have one",
 				"Use sslmode=verify-full, or supply the source CA explicitly.", nil)
 		}
+
 		caPath = systemCABundlePath
 	}
+
 	if err := ws.WriteFile(copyPassfileName, []byte(src.passfileLine())); err != nil {
 		return nil, err
 	}
+
 	copyAfterSourcePassfile(ws)
+
 	if len(src.caPEM) > 0 {
 		if err := ws.WriteFile(copyCAName, src.caPEM); err != nil {
 			cleanupErr := ws.RemoveFile(copyPassfileName)
 			return nil, joinCleanupError(err, cleanupErr)
 		}
 	}
+
 	env = []string{
 		"HOME=" + ws.FilePath(copyHomeName),
 		"PGPASSFILE=" + ws.FilePath(copyPassfileName),
@@ -2932,9 +3402,11 @@ func prepareSourceAccess(ws *CopyWorkspace, src Source) (*sourceAccess, error) {
 	if mode == SourceTLSVerifyFull && caPath == "" {
 		caPath = "system"
 	}
+
 	if caPath != "" {
 		env = append(env, "PGSSLROOTCERT="+caPath)
 	}
+
 	return &sourceAccess{ws: ws, passfile: copyPassfileName, caFile: copyCAName, env: env}, nil
 }
 
@@ -2942,20 +3414,24 @@ func (a *sourceAccess) remove() error {
 	if a == nil || a.ws == nil {
 		return nil
 	}
+
 	var errs []error
 	if err := a.ws.RemoveFile(a.passfile); err != nil {
 		errs = append(errs, err)
 	}
+
 	if a.ws.FilePath(a.caFile) != "" {
 		if err := a.ws.RemoveFile(a.caFile); err != nil {
 			errs = append(errs, err)
 		}
 	}
+
 	if len(errs) > 0 {
 		return output.NewError(output.CodeSecrets, "the temporary source access file could not be removed", output.ExitSecrets,
 			"Check /var/lib/vaire-copies before retrying; the copy job must not continue with source secrets on disk.").
 			WithDetails(map[string]any{"reason": "secret_cleanup_failed"})
 	}
+
 	return nil
 }
 
@@ -2967,42 +3443,52 @@ const sourceAccessProbeScript = `if /usr/bin/test -r "$1"; then printf readable;
 // Probe as the same service identity used by libpq without reading contents.
 func probeSourceAccess(ctx context.Context, exec CopyExecutor, step string, a *sourceAccess, src Source) error {
 	type probe struct{ label, path string }
+
 	probes := []probe{{copyPassfileName, a.ws.FilePath(copyPassfileName)}}
 	if len(src.caPEM) > 0 {
 		probes = append(probes, probe{copyCAName, a.ws.FilePath(copyCAName)})
 	} else if src.TLSMode == SourceTLSVerifyCA {
 		probes = append(probes, probe{copySystemCALabel, systemCABundlePath})
 	}
+
 	for _, p := range probes {
 		probeCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
+
 		var out limitedBuffer
+
 		out.limit = 32
 		err := exec.Exec(probeCtx, step+"-workspace-probe", engine.Command{
 			Name: "runuser", Args: []string{"-u", "postgres", "--", "/bin/sh", "-c", sourceAccessProbeScript, "vaire-copy-probe", p.path},
 			Stdout: &out,
 		}, copyReporter(nil))
+
 		cancel()
+
 		if err != nil {
 			if errors.Is(err, engine.ErrInterrupted) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
-			var cliErr *output.CLIError
-			if errors.As(err, &cliErr) {
+
+			if cliErr, ok := errors.AsType[*output.CLIError](err); ok {
 				return cliErr
 			}
+
 			return output.NewError(output.CodeExternalCommand, "the copy workspace access probe failed", output.ExitExternal,
 				"Check the node's copy process prerequisites before retrying.").
 				WithDetails(map[string]any{"reason": "copy_workspace_probe_failed"})
 		}
+
 		if !out.overflow && out.String() == "denied" {
 			return copyWorkspaceAccessDenied("source-access", p.label)
 		}
+
 		if out.overflow || out.String() != "readable" {
 			return output.NewError(output.CodeExternalCommand, "the copy workspace access probe returned an invalid result", output.ExitExternal,
 				"Check the node's copy process prerequisites before retrying.").
 				WithDetails(map[string]any{"reason": "copy_workspace_probe_failed"})
 		}
 	}
+
 	return nil
 }
 
@@ -3011,6 +3497,7 @@ func (s Source) passfileLine() string {
 	for i := range fields {
 		fields[i] = escapePassfileField(fields[i])
 	}
+
 	return strings.Join(fields, ":") + "\n"
 }
 
@@ -3025,15 +3512,18 @@ func sourceCommand(access *sourceAccess, tool string, args []string) engine.Comm
 	argv = append(argv, access.env...)
 	argv = append(argv, tool)
 	argv = append(argv, args...)
+
 	return engine.Command{Name: "runuser", Args: argv}
 }
 
 func (a *sourceAccess) envValues() map[string]string {
 	out := map[string]string{}
+
 	for _, kv := range a.env {
 		key, value, _ := strings.Cut(kv, "=")
 		out[key] = value
 	}
+
 	return out
 }
 
@@ -3041,15 +3531,18 @@ func sourcePreflightError(err error) error {
 	if errors.Is(err, engine.ErrInterrupted) {
 		return err
 	}
-	var scriptErr *engine.ScriptError
-	if errors.As(err, &scriptErr) {
+
+	if scriptErr, ok := errors.AsType[*engine.ScriptError](err); ok {
 		if label := localSourceFileLabel(boundedDiagnosticText(scriptErr.Tail)); label != "" {
 			return copyWorkspaceAccessDenied("source-access", label)
 		}
+
 		reason, message, hint := classifySourceFailure(scriptErr.Tail)
+
 		return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).
 			WithDetails(map[string]any{"reason": reason, "exit_status": scriptErr.Status})
 	}
+
 	return output.NewError(output.CodeExternalCommand,
 		"the source preflight command could not be started", output.ExitExternal,
 		"Check that the PostgreSQL 18 client tools are installed and the source is reachable.").
@@ -3060,6 +3553,7 @@ func sourceExportError(err error) error {
 	if errors.Is(err, engine.ErrInterrupted) {
 		return err
 	}
+
 	var scriptErr *engine.ScriptError
 	if !errors.As(err, &scriptErr) {
 		return output.NewError(output.CodeExternalCommand,
@@ -3067,13 +3561,16 @@ func sourceExportError(err error) error {
 			"Check that the PostgreSQL 18 client tools are installed and the copy workspace is writable.").
 			WithDetails(map[string]any{"reason": "source_export_failed"})
 	}
+
 	if label := localSourceFileLabel(boundedDiagnosticText(scriptErr.Tail)); label != "" {
 		return copyWorkspaceAccessDenied("source-access", label)
 	}
+
 	if reason, message, hint, ok := classifySourceFailureStrict(scriptErr.Tail); ok {
 		return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).
 			WithDetails(map[string]any{"reason": reason, "exit_status": scriptErr.Status})
 	}
+
 	return output.NewError(output.CodeExternalCommand,
 		"the source database export failed", output.ExitExternal,
 		"Check the source and the run log, then retry with a new copy job.").
@@ -3087,6 +3584,7 @@ func classifySourceFailure(tail []string) (reason, message, hint string) {
 	if reason, message, hint, ok := classifySourceFailureStrict(tail); ok {
 		return reason, message, hint
 	}
+
 	return "source_preflight_failed",
 		"the source preflight query failed",
 		"Check the source connection details and that the source user can read the database catalog."
@@ -3096,18 +3594,22 @@ func classifySourceFailure(tail []string) (reason, message, hint string) {
 // classification. It is never returned, logged or stored.
 func boundedDiagnosticText(tail []string) string {
 	const limit = 64 << 10
+
 	var b strings.Builder
 	for _, line := range tail {
 		if b.Len() >= limit {
 			break
 		}
+
 		remaining := limit - b.Len()
 		if len(line) > remaining {
 			line = line[:remaining]
 		}
+
 		b.WriteString(line)
 		b.WriteByte('\n')
 	}
+
 	return strings.ToLower(b.String())
 }
 
@@ -3116,6 +3618,7 @@ func classifySourceFailureStrict(tail []string) (reason, message, hint string, o
 	if sourceSQLFailure(text) {
 		return "", "", "", false
 	}
+
 	switch {
 	case localSourceFileLabel(text) != "":
 		return "copy_workspace_access_denied",
@@ -3158,12 +3661,13 @@ func classifySourceFailureStrict(tail []string) (reason, message, hint string, o
 var sourcePSQLSQLFailure = regexp.MustCompile(`^(?:psql:[^:\n]*:[0-9]+: )?error:`)
 
 func sourceSQLFailure(text string) bool {
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "pg_dump: error: query failed:") || sourcePSQLSQLFailure.MatchString(line) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -3171,23 +3675,28 @@ func localSourceFileLabel(text string) string {
 	if sourceSQLFailure(text) {
 		return ""
 	}
+
 	root := regexp.QuoteMeta(strings.ToLower(CopyRoot))
 	systemCA := regexp.QuoteMeta(strings.ToLower(systemCABundlePath))
 	privatePath := root + `/[a-z0-9][a-z0-9._-]{0,127}/`
 	clientPrefix := `^(?:psql|pg_dump): (?:error|warning): (?:connection to server at [^\n]* failed: )?`
 	ca := regexp.MustCompile(clientPrefix + `could not (?:open|read) root certificate file "(` + privatePath + regexp.QuoteMeta(copyCAName) + `|` + systemCA + `)": permission denied\.?$`)
 	pass := regexp.MustCompile(clientPrefix + `could not (?:open|read) password file "(` + privatePath + regexp.QuoteMeta(copyPassfileName) + `)": permission denied\.?$`)
-	for _, line := range strings.Split(text, "\n") {
+
+	for line := range strings.SplitSeq(text, "\n") {
 		if match := ca.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
 			if match[1] == strings.ToLower(systemCABundlePath) {
 				return copySystemCALabel
 			}
+
 			return copyCAName
 		}
+
 		if pass.MatchString(strings.TrimSpace(line)) {
 			return copyPassfileName
 		}
 	}
+
 	return ""
 }
 
@@ -3195,11 +3704,12 @@ func archiveToolError(message string, err error) error {
 	if errors.Is(err, engine.ErrInterrupted) {
 		return err
 	}
+
 	details := map[string]any{"reason": "archive_unreadable"}
-	var scriptErr *engine.ScriptError
-	if errors.As(err, &scriptErr) {
+	if scriptErr, ok := errors.AsType[*engine.ScriptError](err); ok {
 		details["exit_status"] = scriptErr.Status
 	}
+
 	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition,
 		"The export may be incomplete; retry the copy with a new job.").WithDetails(details)
 }
@@ -3208,6 +3718,7 @@ func restoreError(err error) error {
 	if errors.Is(err, engine.ErrInterrupted) {
 		return err
 	}
+
 	var scriptErr *engine.ScriptError
 	if !errors.As(err, &scriptErr) {
 		return output.NewError(output.CodeExternalCommand,
@@ -3215,7 +3726,9 @@ func restoreError(err error) error {
 			"Check the destination cluster and the run log; do not retry into the same database.").
 			WithDetails(map[string]any{"reason": "restore_failed"})
 	}
+
 	reason, message, hint := classifyRestoreFailure(scriptErr.Tail)
+
 	return output.NewError(output.CodeExternalCommand, message, output.ExitExternal, hint).
 		WithDetails(map[string]any{"reason": reason, "exit_status": scriptErr.Status})
 }
@@ -3247,14 +3760,18 @@ func safeDiag(value string) string {
 	if len(value) > 120 {
 		value = value[:120] + "..."
 	}
+
 	var b strings.Builder
+
 	for _, r := range value {
 		if unicode.IsControl(r) {
 			b.WriteRune('?')
 			continue
 		}
+
 		b.WriteRune(r)
 	}
+
 	return b.String()
 }
 
@@ -3276,13 +3793,16 @@ func dropPSQLCommandTags(records [][]string) [][]string {
 	for _, record := range records {
 		if len(record) == 1 {
 			value := strings.TrimSpace(record[0])
+
 			upper := strings.ToUpper(value)
 			if strings.EqualFold(value, "SET") || strings.HasPrefix(upper, "COPY ") {
 				continue
 			}
 		}
+
 		out = append(out, record)
 	}
+
 	return out
 }
 
@@ -3297,15 +3817,19 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	if b.overflow {
 		return 0, errors.New("output limit exceeded")
 	}
+
 	remaining := b.limit - b.Len()
 	if remaining <= 0 {
 		b.overflow = true
 		return 0, errors.New("output limit exceeded")
 	}
+
 	if len(p) > remaining {
 		b.overflow = true
 		_, _ = b.Buffer.Write(p[:remaining])
+
 		return remaining, errors.New("output limit exceeded")
 	}
+
 	return b.Buffer.Write(p)
 }

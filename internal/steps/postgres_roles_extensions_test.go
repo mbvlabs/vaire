@@ -25,27 +25,34 @@ func rolesIdentityBase() config.Cluster {
 
 func rolesInputsFor(t *testing.T, cfg config.Cluster) []byte {
 	t.Helper()
+
 	inputs, err := (postgresRoles{}).Instance("app").Inputs(cfg, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return inputs
 }
 
 func assertRolesInputsCase(t *testing.T, base config.Cluster, baseline []byte, tc rolesInputsCase) {
 	t.Helper()
+
 	cfg := base.Clone()
+
 	cfg.Extensions = tc.defs
 	if tc.clusters != nil {
 		cfg.Clusters = tc.clusters
 	}
+
 	got := rolesInputsFor(t, cfg)
 	if tc.equalBaseline {
 		if string(got) != string(baseline) {
 			t.Fatalf("%s changed roles inputs", tc.name)
 		}
+
 		return
 	}
+
 	for _, want := range tc.contains {
 		if !strings.Contains(string(got), want) {
 			t.Fatalf("%s missing from roles inputs:\n%s", want, got)
@@ -55,10 +62,12 @@ func assertRolesInputsCase(t *testing.T, base config.Cluster, baseline []byte, t
 
 func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
 	base := rolesIdentityBase()
+
 	baseline := rolesInputsFor(t, base)
 	if strings.Contains(string(baseline), "extension_identity") {
 		t.Fatalf("baseline inputs gained an identity:\n%s", baseline)
 	}
+
 	for _, tc := range []rolesInputsCase{
 		{
 			name:          "note-only built-in override",
@@ -75,7 +84,7 @@ func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
 			defs: map[string]config.ExtensionDefinition{
 				"auto_explain": {
 					Source: catalog.SourceAPT, Package: "postgresql-18-auto-explain",
-					CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true),
+					CopySafety: new(catalog.CopySafetySafe), StandbySafe: new(true),
 				},
 			},
 			contains: []string{`"name":"auto_explain"`, "postgresql-18-auto-explain"},
@@ -83,7 +92,7 @@ func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
 		{
 			name: "implicit auto_explain safety change",
 			defs: map[string]config.ExtensionDefinition{
-				"auto_explain": {CopySafety: stringPtr(catalog.CopySafetyUnknown)},
+				"auto_explain": {CopySafety: new(catalog.CopySafetyUnknown)},
 			},
 			contains: []string{`"name":"auto_explain"`, `"copy_safety":"unknown"`},
 		},
@@ -92,7 +101,7 @@ func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
 			defs: map[string]config.ExtensionDefinition{
 				"pg_stat_statements": {
 					Source: catalog.SourceAPT, Package: "postgresql-18-pg-stat-statements",
-					CopySafety: stringPtr("safe"), StandbySafe: boolPtr(true),
+					CopySafety: new("safe"), StandbySafe: new(true),
 				},
 			},
 			contains: []string{"extension_identity", "postgresql-18-pg-stat-statements"},
@@ -107,7 +116,7 @@ func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
 		{
 			name: "safety change",
 			defs: map[string]config.ExtensionDefinition{
-				"pg_stat_statements": {CopySafety: stringPtr(catalog.CopySafetyUnknown)},
+				"pg_stat_statements": {CopySafety: new(catalog.CopySafetyUnknown)},
 			},
 			contains: []string{`"copy_safety":"unknown"`},
 		},
@@ -139,9 +148,11 @@ func TestRolesInputsCarryOnlySemanticCustomIdentity(t *testing.T) {
 	}
 	withCustom := rolesInputsFor(t, custom)
 	withCustomNote := custom.Clone()
+
 	withCustomNote.Extensions["custom"] = func() config.ExtensionDefinition {
 		d := withCustomNote.Extensions["custom"]
 		d.Note = "different note"
+
 		return d
 	}()
 	if noteAgain := rolesInputsFor(t, withCustomNote); string(noteAgain) != string(withCustom) {
@@ -156,65 +167,76 @@ func TestConfigInputsCarrySemanticIdentity(t *testing.T) {
 		Extensions: []string{"pg_stat_statements"},
 	}}
 	step := postgresConfig{}.Instance("app")
+
 	baseline, err := step.Inputs(base, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if strings.Contains(string(baseline), "extension_identity") {
 		t.Fatalf("baseline config inputs gained an identity:\n%s", baseline)
 	}
+
 	note := base.Clone()
 	note.Extensions = map[string]config.ExtensionDefinition{
 		"pg_stat_statements": {Note: "human note"},
 	}
+
 	withNote, err := step.Inputs(note, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(withNote) != string(baseline) {
 		t.Fatal("a note-only override changed config inputs")
 	}
+
 	implicitNote := base.Clone()
 	implicitNote.Extensions = map[string]config.ExtensionDefinition{
 		"auto_explain": {Note: "human note"},
 	}
+
 	withImplicitNote, err := step.Inputs(implicitNote, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(withImplicitNote) != string(baseline) {
 		t.Fatal("a note-only implicit auto_explain override changed config inputs")
 	}
+
 	implicit := base.Clone()
 	implicit.Extensions = map[string]config.ExtensionDefinition{
 		"auto_explain": {
 			Source: catalog.SourceAPT, Package: "postgresql-18-auto-explain",
-			CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true),
+			CopySafety: new(catalog.CopySafetySafe), StandbySafe: new(true),
 		},
 	}
+
 	withImplicit, err := step.Inputs(implicit, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(string(withImplicit), `"name":"auto_explain"`) ||
 		!strings.Contains(string(withImplicit), "postgresql-18-auto-explain") {
 		t.Fatalf("implicit auto_explain provider change missing from config inputs:\n%s", withImplicit)
 	}
+
 	override := base.Clone()
 	override.Extensions = map[string]config.ExtensionDefinition{
 		"pg_stat_statements": {Schema: "custom"},
 	}
+
 	withSchema, err := step.Inputs(override, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(string(withSchema), "extension_identity") || !strings.Contains(string(withSchema), `"schema":"custom"`) {
 		t.Fatalf("schema change missing from config inputs:\n%s", withSchema)
 	}
 }
-
-func stringPtr(s string) *string { return &s }
-func boolPtr(b bool) *bool       { return &b }
 
 func TestDatabaseGrantsSQLQuotesSafeExtensionNames(t *testing.T) {
 	cfg := config.DefaultCluster()
@@ -222,10 +244,12 @@ func TestDatabaseGrantsSQLQuotesSafeExtensionNames(t *testing.T) {
 		"uuid-ossp": {Source: catalog.SourcePreinstalled},
 		"mixed_ext": {Source: catalog.SourcePreinstalled, ExtName: "Mixed.Ext!"},
 	}
+
 	sql, err := DatabaseGrantsSQL(cfg, config.ClusterSpec{Name: "app", Extensions: []string{"uuid-ossp", "mixed_ext"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, want := range []string{
 		`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`,
 		`CREATE EXTENSION IF NOT EXISTS "Mixed.Ext!";`,
@@ -241,17 +265,21 @@ func TestDatabaseGrantsSQLResolvesCustomDefinitions(t *testing.T) {
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourcePreinstalled, ExtName: "my_ext"},
 	}
+
 	sql, err := DatabaseGrantsSQL(cfg, config.ClusterSpec{Name: "app", Extensions: []string{"custom"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(sql, `CREATE EXTENSION IF NOT EXISTS "my_ext";`) {
 		t.Fatalf("custom extension missing:\n%s", sql)
 	}
+
 	sql, err = DatabaseGrantsSQL(cfg, config.ClusterSpec{Name: "app", Extensions: []string{"nope"}})
 	if err == nil {
 		t.Fatal("unknown extension was silently skipped")
 	}
+
 	if sql != "" {
 		t.Fatalf("invalid intent emitted SQL: %q", sql)
 	}

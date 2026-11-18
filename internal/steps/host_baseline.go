@@ -90,7 +90,9 @@ func hostFilePaths() []string {
 	for path := range hostFiles {
 		paths = append(paths, path)
 	}
+
 	sort.Strings(paths)
+
 	return paths
 }
 
@@ -108,19 +110,23 @@ func (hostBaseline) Check(ctx context.Context, cfg config.Cluster, _ engine.Runt
 			return incomplete(path + " differs"), nil
 		}
 	}
+
 	for _, unit := range []string{"chrony", "fail2ban"} {
 		if !serviceActive(ctx, unit) {
 			return incomplete(unit + " is not active"), nil
 		}
 	}
+
 	if tz, _ := Probe(ctx, "timedatectl", "show", "-p", "Timezone", "--value"); tz != cfg.Timezone {
 		return incomplete("timezone is " + tz), nil
 	}
+
 	if cfg.Server.SwapMB > 0 {
 		if swaps, _ := Probe(ctx, "swapon", "--noheadings", "--raw"); swaps == "" {
 			return incomplete("no swap is active"), nil
 		}
 	}
+
 	return complete(), nil
 }
 
@@ -130,12 +136,15 @@ func (s hostBaseline) Apply(ctx context.Context, cfg config.Cluster, rt engine.R
 			return engine.ApplyResult{}, err
 		}
 	}
+
 	if err := os.MkdirAll(engine.LogDir, 0o750); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	err := rt.Shell.Run(ctx, s.ID(), Script("host-baseline"), map[string]string{
 		"SWAP_MB":  strconv.Itoa(cfg.Server.SwapMB),
 		"TIMEZONE": cfg.Timezone,
 	}, report)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }

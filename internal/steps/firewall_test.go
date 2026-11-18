@@ -35,13 +35,16 @@ func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
 	cfg.Network.ExposePostgres = true
 	cfg.Network.ClientAllowlist = []string{"203.0.113.7/32", "203.0.113.7/32", "198.51.100.9/24", "2001:db8::1/128"}
 	want := configuredRules(cfg)
+
 	have := parseShowAdded(showAdded)
 	if len(have) != 12 {
 		t.Fatalf("parsed %d rules: %v", len(have), have)
 	}
+
 	if d := firewallDrift(want, have, publicSSHAbsent); d != "" {
 		t.Errorf("drift on a converged firewall: %s\nwant %v\nhave %v", d, want, have)
 	}
+
 	if n := countOf(want, "allow from 203.0.113.7 to any port 6432 proto tcp"); n != 1 {
 		t.Errorf("203.0.113.7 rendered %d times", n)
 	}
@@ -54,11 +57,13 @@ func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
 
 func countOf(list []string, s string) int {
 	n := 0
+
 	for _, x := range list {
 		if x == s {
 			n++
 		}
 	}
+
 	return n
 }
 
@@ -67,6 +72,7 @@ func TestFirewallDriftNamesTheRules(t *testing.T) {
 	if d := firewallDrift(want, []string{RuleWGSSH, "allow 80/tcp"}, publicSSHAbsent); d != "" {
 		t.Errorf("order counts: %s", d)
 	}
+
 	d := firewallDrift(want, []string{RuleWGSSH, "allow 8080/tcp"}, publicSSHAbsent)
 	if !strings.Contains(d, `ufw is missing "allow 80/tcp"`) || !strings.Contains(d, `ufw has "allow 8080/tcp", which vaire doesn't manage`) {
 		t.Errorf("detail %q", d)
@@ -76,10 +82,12 @@ func TestFirewallDriftNamesTheRules(t *testing.T) {
 	if d := firewallDrift(want, want, publicSSHPresent); !strings.Contains(d, `ufw is missing "allow 22/tcp"`) {
 		t.Errorf("before lockdown: %q", d)
 	}
+
 	withSSH := append(slices.Clone(want), RulePublicSSH)
 	if d := firewallDrift(want, withSSH, publicSSHAbsent); !strings.Contains(d, `ufw has "allow 22/tcp"`) {
 		t.Errorf("after lockdown: %q", d)
 	}
+
 	for _, have := range [][]string{want, withSSH} {
 		if d := firewallDrift(want, have, publicSSHEither); d != "" {
 			t.Errorf("unlock open: %q", d)
@@ -108,6 +116,7 @@ func TestPublicSSHExpectation(t *testing.T) {
 	if slices.Contains(FirewallRules(config.DefaultCluster(), locked, false), RulePublicSSH) {
 		t.Error("locked down, no unlock: 22 rendered")
 	}
+
 	if !slices.Contains(FirewallRules(config.DefaultCluster(), locked, true), RulePublicSSH) {
 		t.Error("unlock open: 22 not rendered, apply would close the break-glass")
 	}

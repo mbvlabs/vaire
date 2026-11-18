@@ -15,8 +15,10 @@ func isAwaitingErr(err error) bool {
 	if !errors.As(err, &cliErr) || cliErr.Code != output.CodePrecondition {
 		return false
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
+
 	return reason == "awaiting_recovery"
 }
 
@@ -26,6 +28,7 @@ func isAwaitingErr(err error) bool {
 func TestAwaitingRefusedMethods(t *testing.T) {
 	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"app": {}}}
 	reject(t, !isAwaitingErr(refuseAwaitingIn(map[string]any{"db": "app"}, recs, "writing to it")), "db.write-access must refuse a database awaiting recovery")
+
 	for method, action := range awaitingRefused {
 		// refuseAwaitingIn checks every name field, so fill them all.
 		param := map[string]any{"db": "app", "database": "app", "name": "app", "source": "app"}
@@ -53,10 +56,12 @@ func TestAwaitingNotRefused(t *testing.T) {
 			t.Errorf("%s must not be refused while its database awaits recovery", method)
 		}
 	}
+
 	recs := backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"app": {}}}
 	if err := refuseAwaitingIn(map[string]any{"db": "other"}, recs, "a backup"); err != nil {
 		t.Fatalf("other: got %v", err)
 	}
+
 	if err := refuseAwaitingIn(nil, recs, "a backup"); err != nil {
 		t.Fatalf("no params: got %v", err)
 	}

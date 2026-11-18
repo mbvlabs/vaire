@@ -20,12 +20,15 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+
 	state := filepath.Join(base, "state")
 	if err := os.Mkdir(state, 0o700); err != nil {
 		_ = os.RemoveAll(base)
+
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+
 	materialisationAncestorBase = base
 	materialisationStateDir = state
 	materialisationRecordUID = uint32(os.Geteuid())
@@ -42,9 +45,11 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	releaseMaterialisationJob, reapDrillJob = oldRelease, oldReap
 	jobRuntimeHostRead, materialisationHostInfo, detectHost = oldJobHostRead, oldMaterialisationHost, oldDetectHost
+
 	if err := os.RemoveAll(base); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+
 	os.Exit(code)
 }

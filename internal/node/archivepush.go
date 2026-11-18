@@ -43,17 +43,21 @@ func ArchivePush(bin, stanza, walPath string) error {
 		return refuse("--stanza must be <db>-<6 hex>",
 			output.NewError(output.CodeUsage, "archive-push needs --stanza <db>-<6 hex>", output.ExitUsage, ""))
 	}
+
 	if walPath == "" {
 		return refuse("it needs exactly one WAL path (PostgreSQL's %p)",
 			output.NewError(output.CodeUsage, "archive-push needs one WAL path", output.ExitUsage, ""))
 	}
+
 	if bin == "" {
 		bin = PgBackRestBin
 	}
+
 	if !filepath.IsAbs(bin) || filepath.Base(bin) != "pgbackrest" {
 		return refuse("--pgbackrest must be an absolute path to pgbackrest, not "+fmt.Sprintf("%q", bin),
 			output.NewError(output.CodeUsage, "archive-push needs --pgbackrest <absolute path to pgbackrest>", output.ExitUsage, ""))
 	}
+
 	if fenced, err := archiveFenced(); err != nil {
 		// Fail closed: PostgreSQL keeps the segment and retries.
 		return refuse("can't tell whether this node is fenced ("+err.Error()+")",
@@ -61,11 +65,14 @@ func ArchivePush(bin, stanza, walPath string) error {
 	} else if fenced {
 		return refuse("this node is fenced by a newer master", fencedError())
 	}
+
 	if _, err := os.Stat(bin); err != nil {
 		return refuse("pgBackRest is not at "+bin+" ("+err.Error()+")",
 			output.WrapError(output.CodeMissingTool, err, output.ExitMissingTool, "pgBackRest is installed by postgres-packages-v1: run vaire apply."))
 	}
+
 	err := syscall.Exec(bin, []string{"pgbackrest", "--stanza=" + stanza, "archive-push", walPath}, os.Environ()) //nolint:gosec // G204: a validated stanza and binary, and PostgreSQL's %p.
+
 	return refuse("exec "+bin+" failed ("+err.Error()+")", output.WrapError(output.CodeMissingTool, err, output.ExitMissingTool, ""))
 }
 

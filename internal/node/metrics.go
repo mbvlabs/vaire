@@ -38,40 +38,53 @@ type hostClusterMetrics struct {
 
 func (m hostClusterMetrics) add(c clusterReading) {
 	db := promfile.L("db", c.Name)
+
 	running := 0.0
 	if c.OK {
 		running = 1
 	}
+
 	m.up.Add(running, db...)
+
 	restart := 0.0
 	if c.RestartPending {
 		restart = 1
 	}
+
 	m.pending.Add(restart, db...)
+
 	if !c.OK {
 		return
 	}
+
 	g := c.Cgroup
 	m.memCur.Add(float64(g.MemoryCurrent), db...)
+
 	if g.MemoryHigh > 0 {
 		m.memHigh.Add(float64(g.MemoryHigh), db...)
 	}
+
 	if g.MemoryMax > 0 {
 		m.memMax.Add(float64(g.MemoryMax), db...)
 	}
+
 	for _, ev := range []string{"high", "max", "oom", "oom_kill"} {
 		m.events.Add(float64(g.MemoryEvents[ev]), promfile.L("db", c.Name, "event", ev)...)
 	}
+
 	for _, res := range []string{"cpu", "memory", "io"} {
 		p, ok := g.Pressure[res]
 		if !ok {
 			continue
 		}
+
 		m.pressure.Add(p.Some.TotalSec, promfile.L("db", c.Name, "resource", res, "kind", "some")...)
+
 		if p.HasFull {
 			m.pressure.Add(p.Full.TotalSec, promfile.L("db", c.Name, "resource", res, "kind", "full")...)
 		}
 	}
+
 	m.cpu.Add(g.CPUUsageSec, db...)
 	m.io.Add(float64(g.IOReadBytes), promfile.L("db", c.Name, "direction", "read")...)
 	m.io.Add(float64(g.IOWriteByte), promfile.L("db", c.Name, "direction", "write")...)
@@ -91,6 +104,7 @@ func hostFamilies(r hostReadings) []*promfile.Family {
 	io := promfile.Counter("vaire_cluster_io_bytes_total", "Bytes read and written by each database's cluster.")
 	up := promfile.Gauge("vaire_cluster_running", "Whether each database's cluster has a running cgroup.")
 	pending := promfile.Gauge("vaire_cluster_restart_pending", "Whether each database's cluster waits for a restart to apply settings.")
+
 	metrics := hostClusterMetrics{memCur: memCur, memHigh: memHigh, memMax: memMax, events: events,
 		pressure: pressure, cpu: cpu, io: io, up: up, pending: pending}
 	for _, c := range r.Clusters {
@@ -98,28 +112,37 @@ func hostFamilies(r hostReadings) []*promfile.Family {
 	}
 
 	const mib = 1 << 20
+
 	budget := promfile.Gauge("vaire_memory_budget_bytes", "Memory the database clusters share: RAM minus the server reserve.")
 	budget.Add(float64(r.Sheet.BudgetMiB) * mib)
+
 	allocated := promfile.Gauge("vaire_memory_allocated_bytes", "Memory the database clusters' sizes add up to.")
 	allocated.Add(float64(r.Sheet.AllocatedMiB) * mib)
+
 	reserve := promfile.Gauge("vaire_memory_reserve_bytes", "Memory kept for the OS, the poolers, nginx, the exporters and vaire.")
 	reserve.Add(float64(r.Sheet.ReserveMiB) * mib)
+
 	commit := promfile.Gauge("vaire_commit_limit_bytes", "CommitLimit from /proc/meminfo.")
 	committed := promfile.Gauge("vaire_committed_bytes", "Committed_AS from /proc/meminfo.")
+
 	if r.Host.MemoryKnown {
 		commit.Add(float64(r.Host.CommitLimitMiB) * mib)
 		committed.Add(float64(r.Host.CommittedMiB) * mib)
 	}
+
 	tls := promfile.Gauge("vaire_tls_cert_expiry_timestamp_seconds", "Expiry of the node's certificate.")
 	if !r.TLSNotAfter.IsZero() {
 		tls.Add(float64(r.TLSNotAfter.Unix()))
 	}
+
 	deferred := promfile.Gauge("vaire_deferred_restart_requested_timestamp_seconds", "Databases whose restart waits for the maintenance window, by when it was asked.")
+
 	for _, db := range promfile.SortedKeys(r.Deferred) {
 		if t, err := time.Parse(time.RFC3339, r.Deferred[db]); err == nil {
 			deferred.Add(float64(t.Unix()), promfile.L("db", db)...)
 		}
 	}
+
 	return []*promfile.Family{up, memCur, memHigh, memMax, events, pressure, cpu, io, pending,
 		budget, allocated, reserve, commit, committed, tls, deferred}
 }
@@ -131,16 +154,20 @@ func readHost(cfg config.Cluster, host hostinfo.Info) hostReadings {
 	h, sheet := budgetSheet(cfg, host)
 	r := hostReadings{Sheet: sheet, Host: h}
 	pending := pendingRestarts()
+
 	for _, spec := range cfg.Clusters {
 		g, ok := hostinfo.ReadCgroup(hostinfo.ServiceCgroup(steps.PGServiceName(spec.Name)))
 		r.Clusters = append(r.Clusters, clusterReading{Name: spec.Name, Cgroup: g, OK: ok, RestartPending: pendingFor(pending, spec.Name)})
 	}
+
 	if cert := readCert(steps.TLSCertPath); cert != nil {
 		r.TLSNotAfter = cert.NotAfter
 	}
+
 	if st, err := engine.LoadState(engine.StatePath); err == nil {
 		r.Deferred = st.DeferredRestarts
 	}
+
 	return r
 }
 
@@ -152,18 +179,22 @@ func pendingRestarts() map[string]bool {
 	if err != nil {
 		return map[string]bool{}
 	}
+
 	return pendingFromIDs(j.RestartPending)
 }
 
 func pendingFromIDs(ids []string) map[string]bool {
 	out := map[string]bool{}
+
 	for _, id := range ids {
 		_, cluster := engine.SplitID(id)
 		if cluster == "" {
 			cluster = "*"
 		}
+
 		out[cluster] = true
 	}
+
 	return out
 }
 
@@ -182,5 +213,6 @@ func refreshMetrics(ctx context.Context, cfg config.Cluster) error {
 	refreshBackupMetrics(cfg)
 	followerErr := writeFollowerMetrics(ctx, cfg)
 	host, _ := refreshHostRead(cfg.Server.DataRoot)
+
 	return errors.Join(followerErr, refreshHostWrite(promfile.Host, hostFamilies(readHost(cfg, host))))
 }

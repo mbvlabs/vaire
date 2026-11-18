@@ -25,12 +25,16 @@ func TestSecretGateRefusesWithoutTerminal(t *testing.T) {
 	if err := secretGateUnlock(cmd, "", nil, nil, "vaire secrets export"); !isSecretGateErr(err) {
 		t.Fatalf("no factor: %v", err)
 	}
+
 	err := secretGateUnlock(cmd, "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA", nil, nil, "vaire secrets export")
 	if !isSecretGateErr(err) {
 		t.Fatalf("password set: %v", err)
 	}
+
 	var cliErr *output.CLIError
+
 	_ = errors.As(err, &cliErr)
+
 	details, _ := cliErr.Details.(map[string]any)
 	if details["master_password_set"] != true {
 		t.Fatalf("details = %+v, want master_password_set true", details)
@@ -54,12 +58,15 @@ func TestSecretGateFactorSelection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ""
 			opened, closed := false, false
+
 			err := unlockSecretFactors(tc.human, tc.password, func() (func() error, func()) {
 				opened = true
+
 				closeFn := func() { closed = true }
 				if !tc.node || !tc.totp {
 					return nil, closeFn
 				}
+
 				return func() error { got = "code"; return nil }, closeFn
 			}, func() error { got = "password"; return nil })
 			if isSecretGateErr(err) {
@@ -67,6 +74,7 @@ func TestSecretGateFactorSelection(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
+
 			if got != tc.want || opened != tc.human || closed != tc.human {
 				t.Fatalf("factor=%s opened=%v closed=%v, want %s human=%v", got, opened, closed, tc.want, tc.human)
 			}
@@ -76,6 +84,7 @@ func TestSecretGateFactorSelection(t *testing.T) {
 
 func TestSecretGateDoesNotHideCodeRejection(t *testing.T) {
 	rejected := errors.New("replayed code")
+
 	err := unlockSecretFactors(true, true, func() (func() error, func()) {
 		return func() error { return rejected }, func() {}
 	}, func() error { t.Fatal("must not silently fall back after a rejected code"); return nil })

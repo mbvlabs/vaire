@@ -47,10 +47,13 @@ func (d Document) Groups() []Group {
 			if err != nil {
 				continue
 			}
+
 			fields = append(fields, Field{"SSH host key " + key.Type(), ssh.FingerprintSHA256(key)})
 		}
+
 		groups = append(groups, Group{Title: "Node " + n.Name, Fields: fields})
 	}
+
 	groups = append(groups, Group{Title: "Operator " + d.Operator.Name, Fields: nonEmpty(
 		Field{"Admin user", d.Operator.SSHUser},
 		Field{"Sudo password", d.Operator.SudoPassword},
@@ -65,9 +68,11 @@ func (d Document) Groups() []Group {
 			for _, name := range sortedKeys(db.Services) {
 				fields = append(fields, roleFields(name+" ", db.Services[name])...)
 			}
+
 			groups = append(groups, Group{Title: "Services", Fields: fields})
 		}
 	}
+
 	if b := d.Backup; b != nil {
 		groups = append(groups, Group{Title: "Backups", Fields: nonEmpty(
 			Field{"Provider", b.Provider},
@@ -83,6 +88,7 @@ func (d Document) Groups() []Group {
 			Field{"Recovery age recipient", b.Encryption.Recipient},
 		)})
 	}
+
 	if m := d.Metrics; m != nil {
 		groups = append(groups, Group{Title: "Metrics", Fields: nonEmpty(
 			Field{"Base URL", m.BaseURL},
@@ -90,9 +96,11 @@ func (d Document) Groups() []Group {
 			Field{"Password", m.Password},
 		)})
 	}
+
 	if d.BreakGlass != "" {
 		groups = append(groups, Group{Title: "Notes", Fields: []Field{{"Break-glass", d.BreakGlass}}})
 	}
+
 	return groups
 }
 
@@ -107,6 +115,7 @@ func nonEmpty(fields ...Field) []Field {
 			out = append(out, f)
 		}
 	}
+
 	return out
 }
 
@@ -115,7 +124,9 @@ func sortedKeys[V any](m map[string]V) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+
 	sort.Strings(keys)
+
 	return keys
 }
 
@@ -126,14 +137,18 @@ func EncryptArmored(doc Document, passphrase string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var out bytes.Buffer
+
 	w := armor.NewWriter(&out)
 	if _, err := w.Write(raw); err != nil {
 		return nil, err
 	}
+
 	if err := w.Close(); err != nil {
 		return nil, fmt.Errorf("armoring the bundle: %w", err)
 	}
+
 	return out.Bytes(), nil
 }
 

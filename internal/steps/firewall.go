@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 
@@ -32,6 +33,7 @@ func FirewallRules(cfg config.Cluster, st engine.State, unlockOpen bool) []strin
 	if st.PublicSSHOpen() || unlockOpen {
 		rules = appendRule(rules, RulePublicSSH)
 	}
+
 	return rules
 }
 
@@ -51,9 +53,11 @@ func configuredRules(cfg config.Cluster) []string {
 	// cluster has a TCP port to open: they listen on sockets only (RFC 8.2).
 	dbPort := func(port int, exposed bool) {
 		rules = appendRule(rules, fmt.Sprintf("allow in on wg0 to any port %d proto tcp", port))
+
 		if !exposed {
 			return
 		}
+
 		for _, cidr := range cfg.Network.ClientAllowlist {
 			if p, err := netip.ParsePrefix(cidr); err == nil {
 				rules = appendRule(rules, allowFromRule(p, port))
@@ -62,6 +66,7 @@ func configuredRules(cfg config.Cluster) []string {
 	}
 	dbPort(PgbouncerPort, cfg.Network.ExposePgbouncer)
 	dbPort(SessionPoolerPort, cfg.Network.ExposePostgres)
+
 	return rules
 }
 
@@ -76,16 +81,16 @@ func allowFromRule(p netip.Prefix, port int) string {
 	case p.IsSingleIP():
 		return fmt.Sprintf("allow from %s to any port %d proto tcp", p.Addr().Unmap(), port)
 	}
+
 	return fmt.Sprintf("allow from %s to any port %d proto tcp", p, port)
 }
 
 // appendRule appends rule unless rules has it: ufw keeps one copy of a rule.
 func appendRule(rules []string, rule string) []string {
-	for _, r := range rules {
-		if r == rule {
-			return rules
-		}
+	if slices.Contains(rules, rule) {
+		return rules
 	}
+
 	return append(rules, rule)
 }
 
@@ -95,6 +100,7 @@ func UFWRules(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return parseShowAdded(out), nil
 }
 
@@ -102,11 +108,13 @@ func UFWRules(ctx context.Context) ([]string, error) {
 // each after its header.
 func parseShowAdded(out string) []string {
 	var rules []string
-	for _, line := range strings.Split(out, "\n") {
+
+	for line := range strings.SplitSeq(out, "\n") {
 		if rule, ok := strings.CutPrefix(strings.TrimSpace(line), "ufw "); ok {
 			rules = append(rules, strings.Join(strings.Fields(rule), " "))
 		}
 	}
+
 	return rules
 }
 
@@ -123,6 +131,7 @@ func firewallInputs(ctx context.Context, cfg config.Cluster) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return FirewallRules(cfg, st, sshUnlockOpen(ctx)), nil
 }
 
@@ -152,17 +161,21 @@ func (firewall) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime)
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	status, _ := Probe(ctx, "ufw", "status")
 	if !strings.HasPrefix(status, "Status: active") {
 		return incomplete("ufw is inactive"), nil
 	}
+
 	have, err := UFWRules(ctx)
 	if err != nil {
 		return incomplete("cannot read ufw rules"), nil
 	}
+
 	if detail := firewallDrift(configuredRules(cfg), have, publicSSHExpectation(st, sshUnlockOpen(ctx))); detail != "" {
 		return incomplete(detail), nil
 	}
+
 	return complete(), nil
 }
 
@@ -184,6 +197,7 @@ func publicSSHExpectation(st engine.State, unlockOpen bool) int {
 	case st.PublicSSHOpen():
 		return publicSSHPresent
 	}
+
 	return publicSSHAbsent
 }
 
@@ -197,14 +211,18 @@ func firewallDrift(want, have []string, publicSSH int) string {
 		want = without(want, RulePublicSSH)
 		have = without(have, RulePublicSSH)
 	}
+
 	missing, extra := setDiff(want, have), setDiff(have, want)
+
 	var parts []string
 	if len(missing) > 0 {
 		parts = append(parts, "ufw is missing "+quoteRules(missing))
 	}
+
 	if len(extra) > 0 {
 		parts = append(parts, "ufw has "+quoteRules(extra)+", which vaire doesn't manage")
 	}
+
 	return strings.Join(parts, "; ")
 }
 
@@ -215,6 +233,7 @@ func without(rules []string, rule string) []string {
 			out = append(out, r)
 		}
 	}
+
 	return out
 }
 
@@ -224,14 +243,18 @@ func setDiff(a, b []string) []string {
 	for _, r := range b {
 		in[r] = true
 	}
+
 	var out []string
+
 	for _, r := range a {
 		if !in[r] {
 			out = append(out, r)
 			in[r] = true
 		}
 	}
+
 	sort.Strings(out)
+
 	return out
 }
 
@@ -240,6 +263,7 @@ func quoteRules(rules []string) string {
 	for i, r := range rules {
 		quoted[i] = "\"" + r + "\""
 	}
+
 	return strings.Join(quoted, ", ")
 }
 
@@ -248,6 +272,8 @@ func (s firewall) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runti
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	err = rt.Shell.Run(ctx, s.ID(), Script("firewall"), map[string]string{"UFW_RULES": strings.Join(rules, "\n")}, report)
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }

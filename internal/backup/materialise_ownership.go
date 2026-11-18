@@ -67,6 +67,7 @@ func (m *Materialised) GuardOwnership(ctx context.Context, action Materialisatio
 	if m.Ownership == nil {
 		return effect()
 	}
+
 	return m.Ownership.Guard(ctx, m.OwnershipPaths(), action, effect)
 }
 
@@ -74,6 +75,7 @@ func (m *Materialised) createOwnedData(ctx context.Context) error {
 	if m.Ownership == nil {
 		return m.makeData()
 	}
+
 	return m.Ownership.CreateData(ctx, m.OwnershipPaths())
 }
 
@@ -83,5 +85,6 @@ func (m *Materialised) registerOwned(ctx context.Context) error {
 			return err
 		}
 	}
+
 	return m.GuardOwnership(ctx, MaterialisationRegister, m.register)
 }

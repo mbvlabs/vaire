@@ -13,24 +13,31 @@ import (
 // only when it agrees with any still-visible history entry.
 func materialisationJob(st engine.State, id string) (engine.JobRecord, error) {
 	var found engine.JobRecord
+
 	count := 0
+
 	for _, rec := range st.Jobs {
 		if rec.ID == id {
 			found, count = rec, count+1
 		}
 	}
+
 	if count > 1 {
 		return engine.JobRecord{}, errors.New("ambiguous materialisation job")
 	}
+
 	if retained, ok := st.RetainedJobs[id]; ok {
 		if retained.ID != id || count == 1 && !reflect.DeepEqual(found, retained) {
 			return engine.JobRecord{}, errors.New("conflicting materialisation job")
 		}
+
 		found, count = retained, 1
 	}
+
 	if count != 1 {
 		return engine.JobRecord{}, errors.New("missing materialisation job")
 	}
+
 	return found, nil
 }
 
@@ -47,30 +54,38 @@ func releaseResolvedMaterialisationJob(id, job string) {
 	if id == "" {
 		return
 	}
+
 	if job == "db-fork" {
 		if forkJobUnresolved(id) {
 			return
 		}
+
 		releaseMaterialisationJob(id)
+
 		return
 	}
+
 	if job != "restore" && job != "recover" && job != "restore-drill" {
 		return
 	}
+
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return
 	}
+
 	for _, r := range records.Restores {
 		if r.ID == id && (r.MaterialisationPending || r.Attempt != nil) {
 			return
 		}
 	}
+
 	for _, a := range records.DrillAttempts {
 		if a.JobID == id {
 			return
 		}
 	}
+
 	releaseMaterialisationJob(id)
 }
 
@@ -82,24 +97,29 @@ func forkJobUnresolved(id string) bool {
 	if err != nil {
 		return true
 	}
+
 	for _, f := range records.Activation {
 		if f.OperationID == id {
 			return true
 		}
 	}
+
 	cfg, _, err := followerState().Load()
 	if err != nil {
 		return true
 	}
+
 	list, err := listMaterialisations(cfg.Server.DataRoot)
 	if err != nil {
 		return true
 	}
+
 	for _, o := range list {
 		if o.Job == id {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -110,19 +130,24 @@ func finishedDrillJob(ctx context.Context, id, db string) error {
 	if err != nil {
 		return err
 	}
+
 	rec, err := materialisationJob(st, id)
 	if err != nil || rec.Job != "restore-drill" || rec.DB != db {
 		return incompleteMaterialisation(backup.DrillName(db))
 	}
+
 	if !rec.Final() {
 		original := rec
+
 		if err := reapDrillJob(ctx, id); err != nil {
 			return err
 		}
+
 		st, err = restoreAbsenceState()
 		if err != nil {
 			return err
 		}
+
 		rec, err = materialisationJob(st, id)
 		if err == nil && (rec.ID != original.ID || rec.Job != original.Job || rec.DB != original.DB ||
 			rec.Unit != original.Unit || rec.PID != original.PID || rec.InvocationID != original.InvocationID ||
@@ -130,8 +155,10 @@ func finishedDrillJob(ctx context.Context, id, db string) error {
 			return incompleteMaterialisation(backup.DrillName(db))
 		}
 	}
+
 	if err != nil || rec.ID != id || rec.Job != "restore-drill" || rec.DB != db || !rec.Final() {
 		return incompleteMaterialisation(backup.DrillName(db))
 	}
+
 	return nil
 }

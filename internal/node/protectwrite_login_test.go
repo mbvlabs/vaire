@@ -50,10 +50,13 @@ func TestWriteAccessLoginPath(t *testing.T) {
 	for _, v := range env.Req.Secrets {
 		secrets.Add(v)
 	}
+
 	var created string
+
 	grant := func(_ context.Context, spec config.ClusterSpec, role writeRole) error {
 		verifier, err := pg.SCRAMVerifier(role.Password)
 		created = writeRoleSQL(spec, role, verifier)
+
 		return err
 	}
 	res, err := g.writeAccess(context.Background(), env, grant)
@@ -61,10 +64,13 @@ func TestWriteAccessLoginPath(t *testing.T) {
 
 	// The result as the CLI reads it off the node's stdout.
 	var stdout bytes.Buffer
+
 	out, _ := newTestWriter(t, &stdout)
 	out.ok("db.write-access", res)
+
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	last := lines[len(lines)-1]
+
 	var ev struct {
 		Type     string `json:"type"`
 		Envelope struct {
@@ -75,10 +81,12 @@ func TestWriteAccessLoginPath(t *testing.T) {
 	if err := json.Unmarshal([]byte(last), &ev); err != nil || ev.Type != "result" || !ev.Envelope.OK {
 		t.Fatalf("result line %s: %v", last, err)
 	}
+
 	var access WriteAccess
 	if err := json.Unmarshal(ev.Envelope.Data, &access); err != nil {
 		t.Fatal(err)
 	}
+
 	rejectf(t, strings.Contains(last, secrets.Placeholder), "the result the CLI depends on was redacted: %s", last)
 	rejectf(t, !access.Protected || !strings.HasPrefix(access.User, writeRolePrefix), "access %+v", access)
 
@@ -99,15 +107,19 @@ func TestWriteAccessLoginPath(t *testing.T) {
 	alias := iniValue(t, ini, render.AuthAlias("app"))
 	rejectf(t, !strings.Contains(" "+alias+" ", " dbname="+steps.AuthDB+" "), "%s = %s does not open %s", render.AuthAlias("app"), alias, steps.AuthDB)
 	rejectf(t, !strings.Contains(iniValue(t, ini, "app"), "auth_dbname="+render.AuthAlias("app")), "app does not run its auth_query on %s:\n%s", render.AuthAlias("app"), ini)
+
 	if user := iniValue(t, ini, "auth_user"); user != "pgbouncer_auth" {
 		t.Fatalf("auth_user = %s", user)
 	}
+
 	fn := regexp.MustCompile(`FROM vaire\.(\w+)\(\$1\)`).FindStringSubmatch(iniValue(t, ini, "auth_query"))
 	rejectf(t, fn == nil, "auth_query in\n%s", ini)
+
 	authSQL := steps.AuthFunctionsSQL()
 	if !strings.Contains(authSQL, "GRANT EXECUTE ON FUNCTION vaire."+fn[1]+"(text) TO pgbouncer_auth;") {
 		t.Fatalf("pgbouncer_auth may not run vaire.%s", fn[1])
 	}
+
 	where := authWhere(t, authSQL, fn[1])
 
 	// A fresh write role: a member of app_owner only, never a superuser.
@@ -128,6 +140,7 @@ func TestWriteAccessLoginPath(t *testing.T) {
 // proof against its StoredKey.
 func scramAccepts(t *testing.T, verifier, password string) bool {
 	t.Helper()
+
 	m := regexp.MustCompile(`^SCRAM-SHA-256\$(\d+):([^$]+)\$([^:]+):(.+)$`).FindStringSubmatch(verifier)
 	rejectf(t, m == nil, "verifier %q", verifier)
 	iterations, _ := strconv.Atoi(m[1])
@@ -137,39 +150,49 @@ func scramAccepts(t *testing.T, verifier, password string) bool {
 	reject(t, err != nil, err)
 	salted, err := pbkdf2.Key(sha256.New, password, salt, iterations, sha256.Size)
 	reject(t, err != nil, err)
+
 	mac := hmac.New(sha256.New, salted)
 	mac.Write([]byte("Client Key"))
 	got := sha256.Sum256(mac.Sum(nil))
+
 	return hmac.Equal(got[:], stored)
 }
 
 // iniValue is the value of key's first line in ini.
 func iniValue(t *testing.T, ini, key string) string {
 	t.Helper()
-	for _, line := range strings.Split(ini, "\n") {
+
+	for line := range strings.SplitSeq(ini, "\n") {
 		if k, v, ok := strings.Cut(line, " = "); ok && k == key {
 			return v
 		}
 	}
+
 	t.Fatalf("no %s in\n%s", key, ini)
+
 	return ""
 }
 
 // authWhere is the WHERE clauses of auth function fn in sql.
 func authWhere(t *testing.T, sql, fn string) []string {
 	t.Helper()
+
 	_, body, ok := strings.Cut(sql, "CREATE OR REPLACE FUNCTION vaire."+fn+"(p_usename text)")
 	rejectf(t, !ok, "vaire.%s is not created in\n%s", fn, sql)
+
 	body, _, _ = strings.Cut(body, "$vaire$;")
 	rejectf(t, !strings.Contains(body, "FROM pg_shadow"), "vaire.%s does not read pg_shadow:\n%s", fn, body)
 	_, where, ok := strings.Cut(body, "WHERE ")
 	rejectf(t, !ok, "vaire.%s has no WHERE", fn)
+
 	var kept []string
-	for _, line := range strings.Split(where, "\n") {
+
+	for line := range strings.SplitSeq(where, "\n") {
 		if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "--") {
 			kept = append(kept, l)
 		}
 	}
+
 	return strings.Split(strings.Join(kept, " "), " AND ")
 }
 
@@ -191,9 +214,12 @@ var (
 // to the function has to be taught here.
 func evalAuthWhere(t *testing.T, where []string, row shadowRow, name string, now time.Time) bool {
 	t.Helper()
+
 	match := true
+
 	for _, clause := range where {
 		var ok bool
+
 		switch {
 		case clause == "usename = p_usename":
 			ok = row.usename == name
@@ -210,7 +236,9 @@ func evalAuthWhere(t *testing.T, where []string, row shadowRow, name string, now
 		default:
 			t.Fatalf("auth function clause %q is not known to this test", clause)
 		}
+
 		match = match && ok
 	}
+
 	return match
 }

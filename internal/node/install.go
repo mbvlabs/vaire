@@ -61,10 +61,12 @@ func parseInstallParams(env *Env) (installParams, error) {
 			return p, output.NewError(output.CodeUsage, "params do not decode: "+err.Error(), output.ExitUsage, "")
 		}
 	}
+
 	p.SHA256 = strings.ToLower(strings.TrimSpace(p.SHA256))
 	if err := validateInstallParams(p); err != nil {
 		return p, err
 	}
+
 	return p, nil
 }
 
@@ -74,10 +76,12 @@ func stageAndVerifyInstall(ctx context.Context, p installParams, progress func(s
 		_ = os.Remove(installStaging)
 		return err
 	}
+
 	if subtle.ConstantTimeCompare([]byte(sum), []byte(p.SHA256)) != 1 {
 		_ = os.Remove(installStaging)
 		return verificationFailed("the pushed binary does not match the expected sha256", map[string]any{"reason": "sha256_mismatch"})
 	}
+
 	progress("sha256 verified")
 
 	// The staged binary must report the expected build.
@@ -86,40 +90,51 @@ func stageAndVerifyInstall(ctx context.Context, p installParams, progress func(s
 		_ = os.Remove(installStaging)
 		return verificationFailed("the pushed binary failed its version preflight", map[string]any{"reason": "preflight_failed"})
 	}
+
 	want := BuildID{Version: p.Version, Commit: p.Commit, Channel: p.Channel}
 	if got != want {
 		_ = os.Remove(installStaging)
+
 		return verificationFailed(
 			fmt.Sprintf("the pushed binary reports %s (%s, %s), expected %s (%s, %s)", got.Version, got.Commit, got.Channel, want.Version, want.Commit, want.Channel),
 			map[string]any{"reason": "version_mismatch", "got": got, "want": want},
 		)
 	}
+
 	progress("version preflight passed")
+
 	return nil
 }
 
 func swapInstalledBinary(ctx context.Context) (*BuildID, bool, error) {
 	var previous *BuildID
+
 	hadPrevious := false
+
 	if _, err := os.Lstat(BinaryPath); err == nil {
 		if prev, err := binaryVersion(ctx, BinaryPath); err == nil {
 			previous = &prev
 		}
+
 		_ = os.Remove(installPrevious)
 		if err := os.Link(BinaryPath, installPrevious); err != nil {
 			_ = os.Remove(installStaging)
 			return nil, false, err
 		}
+
 		hadPrevious = true
 	}
+
 	if err := os.Chmod(installStaging, 0o755); err != nil { //nolint:gosec // G302: §6.2 binary mode.
 		_ = os.Remove(installStaging)
 		return nil, false, err
 	}
+
 	if err := os.Rename(installStaging, BinaryPath); err != nil {
 		_ = os.Remove(installStaging)
 		return nil, false, err
 	}
+
 	return previous, hadPrevious, nil
 }
 
@@ -135,6 +150,7 @@ func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	want := BuildID{Version: p.Version, Commit: p.Commit, Channel: p.Channel}
 	progress := func(line string) {
 		env.Report(output.Event{Type: "log", Step: "upgrade.install", Line: line})
@@ -157,9 +173,11 @@ func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := syncDir(filepath.Dir(BinaryPath)); err != nil {
 		return Result{}, err
 	}
+
 	progress("installed " + BinaryPath)
 
 	// 5. The new binary checks itself. A failure rolls back.
@@ -170,11 +188,15 @@ func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
 		} else {
 			err = os.Remove(BinaryPath)
 		}
+
 		if err != nil {
 			return Result{}, output.WrapError(output.CodeError, err, output.ExitGeneric, "Rollback failed. Inspect /usr/local/bin by hand.")
 		}
+
 		_ = syncDir(filepath.Dir(BinaryPath))
+
 		progress("selfcheck failed; rolled back")
+
 		return Result{}, (&output.CLIError{
 			Code:     output.CodeStepFailed,
 			Message:  "the new binary failed its selfcheck and was rolled back",
@@ -182,6 +204,7 @@ func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
 			ExitCode: output.ExitStep,
 		}).WithDetails(map[string]any{"reason": "selfcheck_failed_rolled_back", "checks": checks})
 	}
+
 	progress("selfcheck passed")
 
 	// 6. The deferred remove deletes the source.
@@ -193,21 +216,27 @@ func validateInstallParams(p installParams) error {
 	if !installPathPattern.MatchString(p.Path) {
 		bad = append(bad, "path")
 	}
+
 	if !sha256Pattern.MatchString(p.SHA256) {
 		bad = append(bad, "sha256")
 	}
+
 	if p.Version == "" {
 		bad = append(bad, "version")
 	}
+
 	if p.Commit == "" {
 		bad = append(bad, "commit")
 	}
+
 	if p.Channel == "" {
 		bad = append(bad, "channel")
 	}
+
 	if len(bad) == 0 {
 		return nil
 	}
+
 	return output.NewError(
 		output.CodeValidation,
 		"upgrade.install params are invalid: "+strings.Join(bad, ", "),
@@ -221,22 +250,28 @@ func checkInstallSource(path string) error {
 	if err != nil {
 		return installSourceInvalid(path, "missing")
 	}
+
 	if !info.Mode().IsRegular() {
 		return installSourceInvalid(path, "not a regular file")
 	}
+
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return installSourceInvalid(path, "owner unknown")
 	}
+
 	allowed := map[uint32]bool{0: true}
+
 	if raw := os.Getenv("SUDO_UID"); raw != "" {
 		if uid, err := strconv.ParseUint(raw, 10, 32); err == nil {
 			allowed[uint32(uid)] = true
 		}
 	}
+
 	if !allowed[st.Uid] {
 		return installSourceInvalid(path, "owned by uid "+strconv.FormatUint(uint64(st.Uid), 10))
 	}
+
 	return nil
 }
 
@@ -257,41 +292,51 @@ func stageBinary(src string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = in.Close() }()
+
 	info, err := in.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return "", installSourceInvalid(src, "changed while opening")
 	}
+
 	_ = os.Remove(installStaging)
+
 	out, err := os.OpenFile(installStaging, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700) //nolint:gosec // G302: root-only staging file, made 0755 after verification.
 	if err != nil {
 		return "", err
 	}
+
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(out, h), in); err != nil {
 		_ = out.Close()
 		return "", err
 	}
+
 	if err := out.Chown(0, 0); err != nil {
 		_ = out.Close()
 		return "", err
 	}
+
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
 		return "", err
 	}
+
 	if err := out.Close(); err != nil {
 		return "", err
 	}
+
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func binaryVersion(ctx context.Context, path string) (BuildID, error) {
 	ctx, cancel := context.WithTimeout(ctx, installVersionLimit)
 	defer cancel()
+
 	raw, err := exec.CommandContext(ctx, path, "version", "--output", "json").Output()
 	if err != nil {
 		return BuildID{}, err
 	}
+
 	var env struct {
 		OK   bool    `json:"ok"`
 		Data BuildID `json:"data"`
@@ -299,9 +344,11 @@ func binaryVersion(ctx context.Context, path string) (BuildID, error) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return BuildID{}, err
 	}
+
 	if !env.OK {
 		return BuildID{}, errors.New("version reported ok=false")
 	}
+
 	return env.Data, nil
 }
 
@@ -310,7 +357,9 @@ func binaryVersion(ctx context.Context, path string) (BuildID, error) {
 func newBinarySelfcheck(ctx context.Context) (any, bool) {
 	ctx, cancel := context.WithTimeout(ctx, installCheckLimit)
 	defer cancel()
+
 	raw, runErr := exec.CommandContext(ctx, BinaryPath, "node", "selfcheck", "--output", "json").Output()
+
 	var env struct {
 		OK   bool `json:"ok"`
 		Data struct {
@@ -325,12 +374,15 @@ func newBinarySelfcheck(ctx context.Context) (any, bool) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return []Check{{Name: "selfcheck", Status: CheckFail, Detail: "the new binary's selfcheck output did not parse"}}, false
 	}
+
 	if runErr != nil || !env.OK {
 		if env.Error != nil && env.Error.Details.Checks != nil {
 			return env.Error.Details.Checks, false
 		}
+
 		return []Check{{Name: "selfcheck", Status: CheckFail, Detail: "the new binary's selfcheck failed"}}, false
 	}
+
 	return env.Data.Checks, true
 }
 
@@ -349,5 +401,6 @@ func syncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = d.Close() }()
+
 	return d.Sync()
 }

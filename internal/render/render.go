@@ -6,6 +6,7 @@ package render
 import (
 	"bytes"
 	"embed"
+	"maps"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -35,6 +36,7 @@ func execute(name string, data any) []byte {
 	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		panic("render " + name + ": " + err.Error())
 	}
+
 	return buf.Bytes()
 }
 
@@ -56,6 +58,7 @@ func TuningConf(res tune.Result) []byte {
 	for _, s := range res.Settings {
 		items = append(items, setting{Name: s.Name, Value: s.Value, Reason: s.Reason})
 	}
+
 	return execute("10-vaire-tuning.conf.tmpl", map[string]any{"Settings": items})
 }
 
@@ -74,30 +77,39 @@ func SecurityConf(port int) []byte {
 func ExtensionsConf(cfg config.Cluster, spec config.ClusterSpec, res tune.Result) ([]byte, error) {
 	enabled := append([]string(nil), spec.Extensions...)
 	sort.Strings(enabled)
+
 	resolver := cfg.ExtensionResolver()
 	items := make([]setting, 0)
+
 	preloads, err := resolver.Preloads(enabled)
 	if err != nil {
 		return nil, err
 	}
+
 	if len(preloads) > 0 {
 		items = append(items, setting{Name: "shared_preload_libraries", Value: "'" + strings.Join(preloads, ",") + "'"})
 	}
+
 	for _, name := range enabled {
 		ext, err := resolver.Resolve(name)
 		if err != nil {
 			return nil, err
 		}
+
 		settings := ext.ResolvedSettings(spec.DatabaseName())
+
 		keys := make([]string, 0, len(settings))
 		for k := range settings {
 			keys = append(keys, k)
 		}
+
 		sort.Strings(keys)
+
 		for _, k := range keys {
 			items = append(items, setting{Name: k, Value: settings[k]})
 		}
 	}
+
 	if _, ok := resolver.Lookup("auto_explain"); ok {
 		base := baseLogDuration(res)
 		items = append(items,
@@ -106,6 +118,7 @@ func ExtensionsConf(cfg config.Cluster, spec config.ClusterSpec, res tune.Result
 			setting{Name: "auto_explain.log_analyze", Value: "off"},
 		)
 	}
+
 	return execute("30-vaire-extensions.conf.tmpl", map[string]any{"Settings": items}), nil
 }
 
@@ -116,6 +129,7 @@ func baseLogDuration(res tune.Result) string {
 			return s.Value
 		}
 	}
+
 	return "1s"
 }
 
@@ -128,6 +142,7 @@ func doubleDuration(value string) string {
 			}
 		}
 	}
+
 	return value
 }
 
@@ -136,21 +151,21 @@ func doubleDuration(value string) string {
 // winning.
 func SettingsConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
 	merged := map[string]string{}
-	for k, v := range cfg.Postgres.Settings {
-		merged[k] = v
-	}
-	for k, v := range spec.Settings {
-		merged[k] = v
-	}
+	maps.Copy(merged, cfg.Postgres.Settings)
+	maps.Copy(merged, spec.Settings)
+
 	keys := make([]string, 0, len(merged))
 	for k := range merged {
 		keys = append(keys, k)
 	}
+
 	sort.Strings(keys)
+
 	items := make([]setting, 0, len(keys))
 	for _, k := range keys {
 		items = append(items, setting{Name: k, Value: quote(merged[k])})
 	}
+
 	return execute("50-vaire-settings.conf.tmpl", map[string]any{"Settings": items})
 }
 
@@ -218,10 +233,12 @@ func PgbouncerIni(cfg config.Cluster, host hostinfo.Info, dbs []PoolerDatabase) 
 // carries its admin console, and its pidfile are its own.
 func SessionIni(cfg config.Cluster, dbs []PoolerDatabase, socketDir string) []byte {
 	entries := poolerEntries(dbs)
+
 	pool := 1
 	for _, db := range entries {
 		pool = maxInt(pool, db.MaxConnections)
 	}
+
 	return execute("pgbouncer.ini.tmpl", map[string]any{
 		"Databases":         entries,
 		"AdminAuthDB":       adminAuthDB(dbs),
@@ -250,9 +267,11 @@ func SessionUnit() []byte { return execute("vaire-pgbouncer-session.service.tmpl
 func poolerEntries(dbs []PoolerDatabase) []PoolerDatabase {
 	out := append([]PoolerDatabase(nil), dbs...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
 	for i := range out {
 		out[i].MaxConnections = maxInt(out[i].MaxConnections, 1)
 	}
+
 	return out
 }
 
@@ -267,6 +286,7 @@ func adminAuthDB(dbs []PoolerDatabase) string {
 			return AuthAlias(db.Name)
 		}
 	}
+
 	return ""
 }
 
@@ -276,11 +296,14 @@ func PgbouncerUserlist(verifiers map[string]string) []byte {
 	for user := range verifiers {
 		users = append(users, user)
 	}
+
 	sort.Strings(users)
+
 	entries := make([]map[string]string, 0, len(users))
 	for _, user := range users {
 		entries = append(entries, map[string]string{"User": user, "Verifier": verifiers[user]})
 	}
+
 	return execute("userlist.txt.tmpl", map[string]any{"Entries": entries})
 }
 
@@ -288,6 +311,7 @@ func PgbouncerUserlist(verifiers map[string]string) []byte {
 // and on 443 HTTPS plus direct-TLS PostgreSQL routed to PgBouncer by ALPN.
 func NginxConf(cfg config.Cluster, hostname, acmeWebroot string) []byte {
 	var allow []string
+
 	if cfg.Network.ExposePgbouncer {
 		for _, cidr := range cfg.Network.ClientAllowlist {
 			if p, err := netip.ParsePrefix(cidr); err == nil {
@@ -295,6 +319,7 @@ func NginxConf(cfg config.Cluster, hostname, acmeWebroot string) []byte {
 			}
 		}
 	}
+
 	return execute("nginx.conf.tmpl", map[string]any{
 		"Hostname":    hostname,
 		"WGSubnet":    cfg.Transport.Subnet,
@@ -326,6 +351,7 @@ func PGCPUWeight(r config.Resources) string {
 	if r.CPUMode == "spare" {
 		return "idle"
 	}
+
 	return strconv.Itoa(r.CPUWeight)
 }
 
@@ -361,6 +387,7 @@ type BackupSecrets struct {
 // [global] repository and cipher, and a section per cluster's stanza.
 func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) []byte {
 	endpoint := strings.TrimSuffix(strings.TrimPrefix(cfg.Backup.Endpoint, "https://"), "/")
+
 	hostPart, port := endpoint, ""
 	if h, p, ok := strings.Cut(endpoint, ":"); ok {
 		hostPart, port = h, p
@@ -369,11 +396,13 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 	withStanza := cfg.StanzaClusters()
 	// The spool is shared by every stanza, those awaiting recovery too.
 	queueShares := len(withStanza)
+
 	for _, c := range cfg.Awaiting {
 		if !c.IsFollower() {
 			queueShares++
 		}
 	}
+
 	stanzas := make([]map[string]any, 0, len(withStanza))
 	for _, c := range withStanza {
 		stanzas = append(stanzas, map[string]any{
@@ -386,6 +415,7 @@ func PgBackRestConf(cfg config.Cluster, host hostinfo.Info, sec BackupSecrets) [
 			"QueueMaxMiB":   ArchiveQueueMaxMiB(queueShares),
 		})
 	}
+
 	return execute("pgbackrest.conf.tmpl", map[string]any{
 		"EndpointHost": hostPart,
 		"EndpointPort": port,
@@ -423,6 +453,7 @@ func BackupConf(cfg config.Cluster, spec config.ClusterSpec) []byte {
 	if cfg.BackupConfigured() {
 		stanza = spec.Stanza
 	}
+
 	return execute("40-vaire-backup.conf.tmpl", map[string]any{"Stanza": stanza, "PgBackRest": PgBackRestBin})
 }
 
@@ -454,6 +485,7 @@ func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
+
 	return b
 }
 
@@ -461,5 +493,6 @@ func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
+
 	return b
 }

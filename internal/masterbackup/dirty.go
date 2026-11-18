@@ -21,11 +21,14 @@ func MarkDirty(reason string) {
 	if _, err := os.Stat(filepath.Dir(path)); err != nil {
 		return
 	}
+
 	now := time.Now()
+
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return
 	}
+
 	_, _ = f.WriteString(reason + "\n")
 	_ = f.Close()
 	_ = os.Chtimes(path, now, now)
@@ -37,6 +40,7 @@ func Dirty(root string) (bool, time.Time) {
 	if err != nil {
 		return false, time.Time{}
 	}
+
 	return true, info.ModTime()
 }
 
@@ -47,6 +51,7 @@ func ClearDirty(root string) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
+
 	return err
 }
 
@@ -55,6 +60,7 @@ func ClearDirty(root string) error {
 func SetTestRoot(root string) func() {
 	old := testRoot
 	testRoot = root
+
 	return func() { testRoot = old }
 }
 

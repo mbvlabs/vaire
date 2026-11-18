@@ -40,32 +40,41 @@ func Unfence(ctx context.Context, confirm string, reclaim, dryRun bool) (Unfence
 	if err != nil {
 		return UnfenceResult{}, err
 	}
+
 	token := cfg.Name() + "/unfence"
 	if confirm != token {
 		return UnfenceResult{}, output.NewError(output.CodeUnsafeAction, "lifting the fence needs --confirm "+token, output.ExitUnsafe,
 			"Only when the rebuild that fenced this server was abandoned or was a mistake. Destroy a replaced server instead.").
 			WithDetails(map[string]any{"confirm": token})
 	}
+
 	_, fenced := masterbackup.ReadFenced("")
+
 	res := UnfenceResult{WasFenced: fenced, DryRun: dryRun}
 	if !fenced {
 		return res, nil
 	}
+
 	if !dryRun && os.Geteuid() != 0 {
 		return res, rootRequired("vaire node unfence")
 	}
+
 	if cfg.BackupConfigured() {
 		if err := unfenceBucket(ctx, cfg, reclaim, dryRun, &res); err != nil {
 			return res, err
 		}
 	}
+
 	if dryRun {
 		return res, nil
 	}
+
 	if err := os.Remove(masterbackup.FencedPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return res, err
 	}
+
 	writeMasterMetrics(cfg)
+
 	return res, nil
 }
 
@@ -75,17 +84,21 @@ func unfenceBucket(ctx context.Context, cfg config.Cluster, reclaim, dryRun bool
 	if err != nil {
 		return err
 	}
+
 	instance, err := masterbackup.ReadInstance("")
 	if err != nil || instance == "" {
 		return output.NewError(output.CodePrecondition, "this node has no instance id", output.ExitPrecondition,
 			"A node without "+masterbackup.InstancePath+" can't be fenced; remove "+masterbackup.FencedPath+" by hand.")
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+
 	cur, err := backup.ReadEpoch(ctx, t)
 	if err != nil {
 		return err
 	}
+
 	if cur == nil || cur.InstanceID == instance {
 		if cur != nil {
 			res.Bucket, res.Epoch = fmt.Sprintf("epoch %d names this node", cur.Epoch), cur.Epoch
@@ -93,8 +106,10 @@ func unfenceBucket(ctx context.Context, cfg config.Cluster, reclaim, dryRun bool
 				return saveLocalEpoch(*cur)
 			}
 		}
+
 		return nil
 	}
+
 	res.Bucket, res.Epoch = fmt.Sprintf("epoch %d names instance %s", cur.Epoch, cur.InstanceID), cur.Epoch
 	if !reclaim {
 		return output.NewError(output.CodePrecondition,
@@ -102,20 +117,26 @@ func unfenceBucket(ctx context.Context, cfg config.Cluster, reclaim, dryRun bool
 			"A rebuild took over this server. Destroy this one. Only if that rebuild was abandoned and its VPS is gone, pass --reclaim: it writes a newer epoch naming this node and fences the other.").
 			WithDetails(map[string]any{"reason": "node_fenced", "epoch": cur.Epoch, "instance_id": cur.InstanceID})
 	}
+
 	e := masterbackup.NewEpoch(cfg.Name(), cur.Epoch+1, instance, "node", ReasonReclaim)
 	res.Reclaimed, res.Epoch = true, e.Epoch
+
 	if dryRun {
 		return nil
 	}
+
 	if err := backup.WriteEpoch(ctx, t, e); err != nil {
 		return err
 	}
+
 	back, err := backup.ReadEpoch(ctx, t)
 	if err != nil {
 		return err
 	}
+
 	if back == nil || back.InstanceID != instance {
 		return epochConflict()
 	}
+
 	return saveLocalEpoch(e)
 }

@@ -112,15 +112,19 @@ func NewMaterialised(dataRoot, name, source string, sourcePort int, sh engine.Sh
 		return nil, output.NewError(output.CodePrecondition, "cluster 18/"+name+" already exists", output.ExitPrecondition,
 			"Drop what is left of it first.").WithDetails(map[string]any{"reason": "cluster_exists", "cluster": name})
 	}
+
 	if _, err := os.Stat(m.Data); err == nil {
 		return nil, output.NewError(output.CodePrecondition, m.Data+" already exists", output.ExitPrecondition,
 			"Remove what is left of an earlier cluster "+name+" first.").WithDetails(map[string]any{"reason": "cluster_exists", "cluster": name})
 	}
+
 	port, err := reserveTemporaryPort(name)
 	if err != nil {
 		return nil, err
 	}
+
 	m.Port = port
+
 	return m, nil
 }
 
@@ -144,6 +148,7 @@ func (m *Materialised) ConfDir() string {
 	if m.forkConfigRoot != "" {
 		return filepath.Join(m.forkConfigRoot, m.Name)
 	}
+
 	return filepath.Join(pgConfRoot, m.Name)
 }
 
@@ -152,6 +157,7 @@ func (m *Materialised) ConfDir() string {
 func PGConfRootForTest(dir string) func() {
 	old := pgConfRoot
 	pgConfRoot = dir
+
 	return func() { pgConfRoot = old }
 }
 
@@ -172,9 +178,11 @@ func ClusterConfigDirectory(name string) (bool, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
+
 	if err != nil {
 		return false, err
 	}
+
 	return true, nil
 }
 
@@ -187,6 +195,7 @@ func ClusterDataDirectory(name string) (string, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
+
 	if err != nil {
 		return "", err
 	}
@@ -197,12 +206,15 @@ func ClusterDataDirectory(name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read cluster %s registration: %w", name, err)
 	}
+
 	var data string
+
 	for _, token := range tokens {
 		if token.Name == "data_directory" {
 			data = token.Value
 		}
 	}
+
 	return data, nil
 }
 
@@ -216,16 +228,20 @@ func (m *Materialised) Restore(ctx context.Context, d Driver, opts RestoreOption
 	if err := m.createOwnedData(ctx); err != nil {
 		return err
 	}
+
 	opts.Path = m.Data
 	m.log("restoring " + m.Source + "'s stanza into " + m.Data)
+
 	if err := m.GuardOwnership(ctx, MaterialisationRestore, func() error {
 		return d.Materialise(ctx, opts)
 	}); err != nil {
 		return err
 	}
+
 	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
+
 	return m.restoreRegistered(ctx, opts, func(ctx context.Context, until string) error {
 		return startMaterialisedRecovery(ctx, m, until, opts.Kind)
 	})
@@ -236,22 +252,27 @@ func (m *Materialised) restoreRegistered(ctx context.Context, opts RestoreOption
 		if err := m.prepareRecoveryDiagnostics(); err != nil {
 			return err
 		}
+
 		return m.reconcileRecoveryFloors()
 	}); err != nil {
 		return err
 	}
+
 	if err := m.GuardOwnership(ctx, MaterialisationInspect, func() error {
 		return m.inspectRecoveryRequirements(ctx)
 	}); err != nil {
 		return err
 	}
+
 	until := UntilPaused
+
 	switch {
 	case !opts.Pause:
 		until = UntilPromoted
 	case opts.Kind == TargetLatest || opts.Kind == "":
 		until = UntilOpen
 	}
+
 	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return start(ctx, until) })
 }
 
@@ -262,7 +283,9 @@ func (m *Materialised) BaseBackup(ctx context.Context) error {
 	if err := m.createOwnedData(ctx); err != nil {
 		return err
 	}
+
 	m.log("copying the live " + m.Source + " into " + m.Data)
+
 	if err := m.GuardOwnership(ctx, MaterialisationBaseBackup, func() error {
 		return wrapTool("pg_basebackup of "+m.Source, runMaterialisedCommand(ctx, m, engine.Command{Name: "runuser", Args: []string{
 			"-u", "postgres", "--", pgBin + "/pg_basebackup", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "-U", "postgres",
@@ -271,9 +294,11 @@ func (m *Materialised) BaseBackup(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+
 	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
+
 	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx) })
 }
 
@@ -283,12 +308,15 @@ func (m *Materialised) makeData() error {
 	if err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(m.Data, 0o700); err != nil {
 		return err
 	}
+
 	if err := os.Chown(m.Data, uid, gid); err != nil {
 		return err
 	}
+
 	return os.Chmod(m.Data, 0o700) //nolint:gosec // G302: a data directory; postgres needs to enter it.
 }
 
@@ -299,25 +327,31 @@ func (m *Materialised) makeData() error {
 func (m *Materialised) register() error {
 	src := filepath.Join(pgConfRoot, m.Source)
 	dir := m.ConfDir()
+
 	files := m.baseRegistrationFiles(dir)
 	if err := copySourceConfigFiles(files, src); err != nil {
 		return err
 	}
+
 	if err := copySourceConfD(files, src); err != nil {
 		return err
 	}
+
 	if c := m.DestinationConfig; c != nil {
 		applyDestinationConfig(files, c)
 	}
+
 	files[filepath.Join("conf.d", MaterialiseOverrides)] = materialiseOverrideConf(m.Port)
 	for _, d := range []string{dir, filepath.Join(dir, "conf.d")} {
 		if err := createRegistrationDir(d); err != nil {
 			return err
 		}
 	}
+
 	if err := m.removeStaleRegistrationLayers(dir); err != nil {
 		return err
 	}
+
 	return writeRegistrationFiles(dir, files)
 }
 
@@ -350,8 +384,10 @@ func copySourceConfigFiles(files map[string]string, src string) error {
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
+
 		files[name] = string(raw)
 	}
+
 	return nil
 }
 
@@ -362,16 +398,20 @@ func copySourceConfD(files map[string]string, src string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	for _, e := range confD {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".conf") || e.Name() == MaterialiseOverrides {
 			continue
 		}
+
 		raw, err := os.ReadFile(filepath.Join(src, "conf.d", e.Name()))
 		if err != nil {
 			return err
 		}
+
 		files[filepath.Join("conf.d", e.Name())] = string(raw)
 	}
+
 	return nil
 }
 
@@ -383,9 +423,11 @@ func applyDestinationConfig(files map[string]string, c *MaterialiseConfig) {
 	files[filepath.Join("conf.d", "50-vaire-settings.conf")] = c.Settings
 	follower := filepath.Join("conf.d", "60-vaire-follower.conf")
 	delete(files, follower)
+
 	if c.Follower != nil {
 		files[follower] = *c.Follower
 	}
+
 	if c.Overrides != nil {
 		files[filepath.Join("conf.d", UserOverrides)] = *c.Overrides
 	}
@@ -414,10 +456,12 @@ func createRegistrationDir(d string) error {
 	if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // G301: postgresql-common's configuration directories are world-readable.
 		return err
 	}
+
 	uid, gid, err := resolveClusterIDs("postgres", "postgres")
 	if err != nil {
 		return err
 	}
+
 	return os.Chown(d, uid, gid)
 }
 
@@ -427,9 +471,11 @@ func (m *Materialised) removeStaleRegistrationLayers(dir string) error {
 	if m.DestinationConfig == nil || m.DestinationConfig.Follower != nil {
 		return nil
 	}
+
 	if err := os.Remove(filepath.Join(dir, "conf.d", "60-vaire-follower.conf")); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	return nil
 }
 
@@ -441,6 +487,7 @@ func writeRegistrationFiles(dir string, files map[string]string) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -453,6 +500,7 @@ func confMode(name string) os.FileMode {
 	case "pg_hba.conf", "pg_ident.conf":
 		return 0o640
 	}
+
 	return 0o644
 }
 
@@ -476,14 +524,17 @@ func (m *Materialised) Adopt(ctx context.Context, port int) error {
 	if m.reservation != nil && (m.Ownership == nil || m.reservation.owner != m) {
 		return errors.New("fork ownership guard required")
 	}
+
 	if m.reservation != nil {
 		if err := m.reservation.validate(ctx, m); err != nil {
 			return err
 		}
 	}
+
 	if err := m.Stop(ctx); err != nil {
 		return err
 	}
+
 	return m.GuardOwnership(ctx, MaterialisationAdopt, func() error {
 		return m.adopt(ctx, port)
 	})
@@ -493,11 +544,14 @@ func (m *Materialised) adopt(ctx context.Context, port int) error {
 	if m.reservation != nil {
 		return m.reservation.perform(ctx, m, func() error { return m.adoptRegistration(port) }, func() { m.Port = port })
 	}
+
 	if err := m.adoptRegistration(port); err != nil {
 		return err
 	}
+
 	m.Port = port
 	_ = os.Remove(filepath.Join(legacyReservationDir, m.Name))
+
 	return nil
 }
 
@@ -505,14 +559,17 @@ func (m *Materialised) adoptRegistration(port int) error {
 	if err := m.restoreRecoveryDiagnostics(); err != nil {
 		return err
 	}
+
 	sourceRoot := pgConfRoot
 	if m.forkConfigRoot != "" {
 		sourceRoot = m.forkConfigRoot
 	}
+
 	raw, err := os.ReadFile(filepath.Join(sourceRoot, m.Source, "postgresql.conf"))
 	if err != nil {
 		return err
 	}
+
 	dir := m.ConfDir()
 	conf := setConf(string(raw), [][2]string{
 		{"data_directory", "'" + m.Data + "'"},
@@ -522,33 +579,42 @@ func (m *Materialised) adoptRegistration(port int) error {
 		{"port", strconv.Itoa(port)},
 		{"cluster_name", "'18/" + m.Name + "'"},
 	})
+
 	write := writeClusterFile
 	if m.forkWriteFile != nil {
 		write = m.forkWriteFile
 	}
+
 	if err := write(filepath.Join(dir, "postgresql.conf"), []byte(conf), 0o644, "postgres", "postgres"); err != nil {
 		return err
 	}
+
 	if err := write(filepath.Join(dir, "start.conf"), []byte("auto\n"), 0o644, "postgres", "postgres"); err != nil {
 		return err
 	}
+
 	confD := filepath.Join(dir, "conf.d")
+
 	entries, err := os.ReadDir(confD)
 	if err != nil {
 		return err
 	}
+
 	for _, e := range entries {
 		if e.Name() == UserOverrides {
 			// register writes 0640; postgres-config-v1 writes it 0644.
 			if err := os.Chmod(filepath.Join(confD, e.Name()), 0o644); err != nil { //nolint:gosec // G302: conf.d files are world-readable, as postgres-config-v1 writes them.
 				return err
 			}
+
 			continue
 		}
+
 		if err := os.RemoveAll(filepath.Join(confD, e.Name())); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -556,8 +622,10 @@ func (m *Materialised) adoptRegistration(port int) error {
 // uncommented line, or at the end when it has none.
 func setConf(raw string, values [][2]string) string {
 	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
+
 	for _, kv := range values {
 		found := false
+
 		for i, line := range lines {
 			key, _, ok := strings.Cut(line, "=")
 			if ok && strings.TrimSpace(key) == kv[0] {
@@ -565,10 +633,12 @@ func setConf(raw string, values [][2]string) string {
 				found = true
 			}
 		}
+
 		if !found {
 			lines = append(lines, kv[0]+" = "+kv[1])
 		}
 	}
+
 	return strings.Join(lines, "\n") + "\n"
 }
 
@@ -589,6 +659,7 @@ func (m *Materialised) prepareStart(ctx context.Context) error {
 			return err
 		}
 	}
+
 	return m.InstallCopyPlan()
 }
 
@@ -597,10 +668,12 @@ func (m *Materialised) start(ctx context.Context) error {
 	if err := m.prepareStart(ctx); err != nil {
 		return err
 	}
+
 	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "pg_ctlcluster", Args: []string{"18", m.Name, "start"}}, m.Report); err != nil {
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("start the temporary cluster %s: %w", m.Name, err), output.ExitExternal,
 			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": m.LogTail(20)})
 	}
+
 	return waitCluster(ctx, m.Name, m.Data, m.Port, UntilOpen, m.log)
 }
 
@@ -611,22 +684,28 @@ func (m *Materialised) start(ctx context.Context) error {
 func waitCluster(ctx context.Context, name, data string, port int, until string, log func(string)) error {
 	deadline := time.Now().Add(recoveryWait)
 	lastNote := time.Now()
+
 	for {
 		if reached(ctx, port, until) {
 			return nil
 		}
+
 		if !dataRunning(ctx, data) {
 			return output.NewError(output.CodeExternalCommand, "the cluster "+name+" stopped during recovery", output.ExitExternal,
 				"Read details.log_tail. A time outside the restore window ends recovery before its target.").
 				WithDetails(map[string]any{"log_tail": clusterLogTail(name, 20)})
 		}
+
 		if time.Now().After(deadline) {
 			return errors.New("the cluster " + name + " did not reach its target within 24 hours")
 		}
+
 		if time.Since(lastNote) > time.Minute {
 			lastNote = time.Now()
+
 			log("recovery is still replaying WAL")
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -641,14 +720,17 @@ func reached(ctx context.Context, port int, until string) bool {
 	if runQuiet(ctx, "pg_isready", "-q", "-h", pgSocketDir, "-p", strconv.Itoa(port)) != nil {
 		return false
 	}
+
 	if until == UntilOpen {
 		return true
 	}
+
 	rows, err := (pg.Local{Host: pgSocketDir, Port: port}).Query(ctx, "postgres",
 		`SELECT pg_is_in_recovery()::text AS r, CASE WHEN pg_is_in_recovery() THEN pg_get_wal_replay_pause_state() ELSE '' END AS p`, nil)
 	if err != nil || len(rows) == 0 {
 		return false
 	}
+
 	if until == UntilPromoted {
 		return rows[0]["r"] == "false"
 	}
@@ -661,6 +743,7 @@ func (m *Materialised) Running(ctx context.Context) bool {
 	if m.forkRunning != nil {
 		return m.forkRunning(ctx, m.Data)
 	}
+
 	return materialisedDataRunning(ctx, m.Data)
 }
 
@@ -685,10 +768,12 @@ func clusterLogTail(name string, n int) []string {
 	if err != nil {
 		return nil
 	}
+
 	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
+
 	return lines
 }
 
@@ -699,6 +784,7 @@ func (m *Materialised) RecoveredTo(ctx context.Context) string {
 	if err != nil || len(rows) == 0 {
 		return ""
 	}
+
 	return rows[0]["t"]
 }
 
@@ -711,6 +797,7 @@ func (m *Materialised) stop(ctx context.Context) error {
 	if !m.Running(ctx) {
 		return nil
 	}
+
 	return wrapTool("stop the temporary cluster "+m.Name, m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "pg_ctlcluster", Args: []string{
 		"18", m.Name, "stop", "-m", "fast",
 	}}, m.Report))
@@ -722,19 +809,23 @@ func (m *Materialised) Drop() error {
 	if m.reservation != nil && (m.Ownership == nil || m.reservation.owner != m) {
 		return errors.New("fork ownership guard required")
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+
 	drop := func() error {
 		if m.reservation != nil {
 			return m.reservation.perform(ctx, m, func() error {
 				return dropTemporaryClusterFiles(ctx, m.Shell, m.StepID, m.Report, m.Name, m.Data)
 			}, nil)
 		}
+
 		return dropTemporaryCluster(ctx, m.Shell, m.StepID, m.Report, m.Name, m.Data)
 	}
 	if m.Ownership == nil && m.reservation == nil {
 		return drop()
 	}
+
 	return m.GuardOwnership(ctx, MaterialisationDrop, drop)
 }
 
@@ -747,6 +838,7 @@ func (m *Materialised) Drop() error {
 func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+
 	return dropTemporaryCluster(ctx, sh, stepID, report, name, data)
 }
 
@@ -754,19 +846,24 @@ func DropTemporaryCluster(sh engine.Shell, stepID string, report engine.Reporter
 func dropTemporaryCluster(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	err := dropTemporaryClusterFiles(ctx, sh, stepID, report, name, data)
 	_ = os.Remove(filepath.Join(legacyReservationDir, name))
+
 	return err
 }
 
 func dropTemporaryClusterFiles(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, name, data string) error {
 	var err error
+
 	_, confErr := os.Stat(filepath.Join(pgConfRoot, name, "postgresql.conf"))
+
 	_, dataErr := os.Stat(data)
 	if confErr == nil && dataErr == nil {
 		err = wrapTool("pg_dropcluster "+name, sh.Exec(ctx, stepID, engine.Command{Name: "pg_dropcluster", Args: []string{"18", name, "--stop"}}, report))
 	}
+
 	if err == nil {
 		err = errors.Join(os.RemoveAll(data), os.RemoveAll(filepath.Join(pgConfRoot, name)))
 	}
+
 	return err
 }
 
@@ -795,9 +892,11 @@ func LiveDatabase(name string) string {
 			return db
 		}
 	}
+
 	if i := strings.LastIndex(name, "__pre_restore_"); i > 0 {
 		return name[:i]
 	}
+
 	return name
 }
 
@@ -816,6 +915,7 @@ func LiveDatabase(name string) string {
 // the first rename it does the second, after both it finishes the rest.
 func Swap(ctx context.Context, sh engine.Shell, stepID string, report engine.Reporter, dataRoot, live, from, aside string, port int) error {
 	liveData, fromData, asideData := filepath.Join(dataRoot, live), filepath.Join(dataRoot, from), filepath.Join(dataRoot, aside)
+
 	leftover := &Materialised{Name: aside, Source: live, Data: asideData, Port: port}
 	switch SwapState(dataRoot, live, from, aside) {
 	case SwapDone:
@@ -824,31 +924,39 @@ func Swap(ctx context.Context, sh engine.Shell, stepID string, report engine.Rep
 		if err := os.Rename(fromData, liveData); err != nil {
 			return err
 		}
+
 		return finishSwap(leftover, liveData, fromData, from)
 	case SwapConflict:
 		return output.NewError(output.CodePrecondition, asideData+" already exists", output.ExitPrecondition,
 			"Retry in a second; the name carries the time.").WithDetails(map[string]any{"reason": "cluster_exists", "cluster": aside})
 	}
+
 	if err := sh.Exec(ctx, stepID, engine.Command{Name: "systemctl", Args: []string{"stop", "postgresql@18-" + live}}, report); err != nil {
 		return wrapTool("stop "+live, err)
 	}
+
 	if dataRunning(ctx, fromData) {
 		if err := sh.Exec(ctx, stepID, engine.Command{Name: "pg_ctlcluster", Args: []string{"18", from, "stop", "-m", "fast"}}, report); err != nil {
 			return wrapTool("stop "+from, err)
 		}
 	}
+
 	if err := leftover.register(); err != nil {
 		return errors.Join(err, os.RemoveAll(leftover.ConfDir()))
 	}
+
 	if err := os.Rename(liveData, asideData); err != nil {
 		return errors.Join(err, os.RemoveAll(leftover.ConfDir()))
 	}
+
 	if err := os.Rename(fromData, liveData); err != nil {
 		if back := os.Rename(asideData, liveData); back != nil {
 			return errors.Join(err, back)
 		}
+
 		return errors.Join(err, os.RemoveAll(leftover.ConfDir()))
 	}
+
 	return finishSwap(leftover, liveData, fromData, from)
 }
 
@@ -860,10 +968,13 @@ func finishSwap(leftover *Materialised, liveData, fromData, from string) error {
 	if err := repointAutoConf(liveData, fromData); err != nil {
 		return err
 	}
+
 	if err := leftover.register(); err != nil {
 		return err
 	}
+
 	_ = os.Rename(filepath.Join(TemporaryPortDir, from), filepath.Join(TemporaryPortDir, leftover.Name))
+
 	return os.RemoveAll(filepath.Join(pgConfRoot, from))
 }
 
@@ -873,6 +984,7 @@ func UnregisterAside(dataRoot, aside string) error {
 	if _, err := os.Stat(filepath.Join(dataRoot, aside)); err == nil || !os.IsNotExist(err) {
 		return err
 	}
+
 	return os.RemoveAll(filepath.Join(pgConfRoot, aside))
 }
 
@@ -894,6 +1006,7 @@ func SwapState(dataRoot, live, from, aside string) string {
 		_, err := os.Stat(filepath.Join(dataRoot, name))
 		return err == nil
 	}
+
 	liveOK, fromOK, asideOK := exists(live), exists(from), exists(aside)
 	switch {
 	case !asideOK:
@@ -919,16 +1032,20 @@ var writeAutoConf = engine.WriteFileAtomicOwned
 
 func repointAutoConf(data, oldData string) error {
 	path := filepath.Join(data, "postgresql.auto.conf")
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
+
 		return err
 	}
+
 	if !bytes.Contains(raw, []byte(oldData)) {
 		return nil
 	}
+
 	return writeAutoConf(path, bytes.ReplaceAll(raw, []byte(oldData), []byte(data)), 0o600, "postgres", "postgres")
 }
 
@@ -940,6 +1057,7 @@ func StartCluster(ctx context.Context, sh engine.Shell, stepID string, report en
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("start %s: %w", name, err), output.ExitExternal,
 			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": clusterLogTail(name, 20)})
 	}
+
 	return waitCluster(ctx, name, data, port, until, func(line string) {
 		if report != nil {
 			report(output.Event{Type: "log", Step: stepID, Line: line})
@@ -965,11 +1083,15 @@ const recoveryHeader = "# Recovery settings generated by pgBackRest"
 // Promote ends recovery under the materialisation ownership guard.
 func (m *Materialised) Promote(ctx context.Context) ([]string, error) {
 	var dropped []string
+
 	err := m.GuardOwnership(ctx, MaterialisationPromote, func() error {
 		var err error
+
 		dropped, err = Promote(ctx, m.PG(), m.Data)
+
 		return err
 	})
+
 	return dropped, err
 }
 
@@ -984,17 +1106,21 @@ func Promote(ctx context.Context, local pg.Local, data string) ([]string, error)
 	if err := local.Exec(ctx, "postgres", "SELECT pg_promote() WHERE pg_is_in_recovery();\n", nil); err != nil {
 		return nil, err
 	}
+
 	rows, err := local.Query(ctx, "postgres", "SELECT pg_is_in_recovery()::text AS r", nil)
 	if err != nil {
 		return nil, err
 	}
+
 	if len(rows) == 0 || rows[0]["r"] != "false" {
 		return nil, errors.New("pg_promote() did not end recovery within 60 seconds")
 	}
+
 	dropped, err := dropRecoverySettings(data)
 	if err != nil {
 		return nil, err
 	}
+
 	return dropped, local.Exec(ctx, "postgres", "SELECT pg_reload_conf();\n", nil)
 }
 
@@ -1013,25 +1139,31 @@ func SettlePromoted(ctx context.Context, sh engine.Shell, stepID string, report 
 	if err != nil {
 		return err
 	}
+
 	pending, err := pendingRecovery(ctx, local)
 	if err != nil {
 		return err
 	}
+
 	for _, p := range pending {
 		if !slices.Contains(restartFor, p) {
 			restartFor = append(restartFor, p)
 		}
 	}
+
 	if len(restartFor) == 0 {
 		return nil
 	}
+
 	if report != nil {
 		report(output.Event{Type: "log", Step: stepID, Line: "restarting " + name + " so it runs without the recovery settings " + strings.Join(restartFor, ", ")})
 	}
+
 	if err := sh.Exec(ctx, stepID, engine.Command{Name: "systemctl", Args: []string{"restart", "postgresql@18-" + name}}, report); err != nil {
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("restart %s: %w", name, err), output.ExitExternal,
 			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": clusterLogTail(name, 20)})
 	}
+
 	if err := waitCluster(ctx, name, data, port, UntilOpen, func(line string) {
 		if report != nil {
 			report(output.Event{Type: "log", Step: stepID, Line: line})
@@ -1039,11 +1171,13 @@ func SettlePromoted(ctx context.Context, sh engine.Shell, stepID string, report 
 	}); err != nil {
 		return err
 	}
+
 	if pending, err := pendingRecovery(ctx, local); err != nil {
 		return err
 	} else if len(pending) > 0 {
 		return fmt.Errorf("%s still waits for a restart for %s after one", name, strings.Join(pending, ", "))
 	}
+
 	return nil
 }
 
@@ -1053,14 +1187,17 @@ func postmasterSettings(ctx context.Context, local pg.Local, names []string) ([]
 	if len(names) == 0 {
 		return nil, nil
 	}
+
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {
 		quoted = append(quoted, "'"+n+"'")
 	}
+
 	rows, err := local.Query(ctx, "postgres", "SELECT name FROM pg_settings WHERE context = 'postmaster' AND name IN ("+strings.Join(quoted, ", ")+") ORDER BY name", nil)
 	if err != nil {
 		return nil, err
 	}
+
 	return column(rows, "name"), nil
 }
 
@@ -1070,6 +1207,7 @@ func pendingRecovery(ctx context.Context, local pg.Local) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return recoveryOnly(column(rows, "name")), nil
 }
 
@@ -1077,11 +1215,13 @@ func pendingRecovery(ctx context.Context, local pg.Local) ([]string, error) {
 // restart was not this promote's.
 func recoveryOnly(names []string) []string {
 	var out []string
+
 	for _, n := range names {
 		if slices.Contains(recoverySettings, n) {
 			out = append(out, n)
 		}
 	}
+
 	return out
 }
 
@@ -1090,6 +1230,7 @@ func column(rows []map[string]string, name string) []string {
 	for _, r := range rows {
 		out = append(out, r[name])
 	}
+
 	return out
 }
 
@@ -1097,17 +1238,21 @@ func column(rows []map[string]string, name string) []string {
 // directory's postgresql.auto.conf and returns the ones it removed.
 func dropRecoverySettings(data string) ([]string, error) {
 	path := filepath.Join(data, "postgresql.auto.conf")
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+
 		return nil, err
 	}
+
 	kept, dropped := withoutRecoverySettings(string(raw))
 	if kept == string(raw) {
 		return dropped, nil
 	}
+
 	return dropped, engine.WriteFileAtomicOwned(path, []byte(kept), 0o600, "postgres", "postgres")
 }
 
@@ -1115,20 +1260,25 @@ func dropRecoverySettings(data string) ([]string, error) {
 // settings and pgBackRest's comment above them, and the settings removed.
 func withoutRecoverySettings(raw string) (string, []string) {
 	var kept, dropped []string
+
 	for _, line := range strings.SplitAfter(raw, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, recoveryHeader) {
 			continue
 		}
+
 		key, _, _ := strings.Cut(trimmed, "=")
 		if key = strings.TrimSpace(key); slices.Contains(recoverySettings, key) {
 			if !slices.Contains(dropped, key) {
 				dropped = append(dropped, key)
 			}
+
 			continue
 		}
+
 		kept = append(kept, line)
 	}
+
 	return strings.Join(kept, ""), dropped
 }
 
@@ -1139,12 +1289,15 @@ func Timeline(ctx context.Context, local pg.Local) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	if len(rows) == 0 {
 		return "", errors.New("the cluster returned no WAL position")
 	}
+
 	n, err := strconv.ParseInt(rows[0]["t"], 16, 64)
 	if err != nil {
 		return "", err
 	}
+
 	return strconv.FormatInt(n, 10), nil
 }

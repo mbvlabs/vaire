@@ -15,10 +15,12 @@ func prepareForkOwnership(env *Env, cfg config.Cluster, source, target config.Cl
 	if err != nil {
 		return err
 	}
+
 	operation := env.Req.OperationID
 	if operation == "" {
 		operation = env.Req.RequestID
 	}
+
 	o := materialisationOwnership{
 		Operation: operation, Job: env.Req.RequestID, Instance: instance,
 		Kind: materialisationFork, Source: source.Name, Target: target.Name,
@@ -28,5 +30,6 @@ func prepareForkOwnership(env *Env, cfg config.Cluster, source, target config.Cl
 		Phase:          materialisationPrepared,
 	}
 	_, err = createMaterialisation(o, cfg.Server.DataRoot)
+
 	return err
 }

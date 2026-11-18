@@ -34,58 +34,72 @@ func fetchConfig(ctx context.Context, s *session, p *progress) (configData, erro
 	if err != nil {
 		return configData{}, err
 	}
+
 	var data configData
 	if err := reply.Decode(&data); err != nil {
 		return configData{}, err
 	}
+
 	return data, nil
 }
 
 func runConfigShow(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
+
 	opts, _ := output.ParseOptions(cmd)
 	if opts.Mode == output.ModeHuman || opts.Mode == output.ModeMarkdown {
 		if opts.Quiet {
 			return nil
 		}
+
 		_, err := fmt.Fprint(cmd.OutOrStdout(), data.TOML)
+
 		return err
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: "cluster.toml (" + data.Revision[:12] + ")", Warnings: s.warnings})
 }
 
 func runConfigGet(cmd *cobra.Command, args []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
+
 	cfg, err := config.ParseCluster([]byte(data.TOML))
 	if err != nil {
 		return err
 	}
+
 	value, err := cfg.Get(args[0])
 	if err != nil {
 		return err
 	}
+
 	shown, message, err := configValueOutput(args[0], value)
 	if err != nil {
 		return err
 	}
+
 	return output.Success(cmd, output.Result{Data: map[string]any{"key": args[0], "value": shown}, Message: message, Warnings: s.warnings})
 }
 
@@ -98,14 +112,17 @@ func configValueOutput(key string, value any) (any, string, error) {
 	if scalar, ok := configScalar(value); ok {
 		return scalar, fmt.Sprintf("%s = %v", key, scalar), nil
 	}
+
 	raw, err := toml.Marshal(map[string]any{"v": value})
 	if err != nil {
 		return nil, "", err
 	}
+
 	var doc map[string]any
 	if err := toml.Unmarshal(raw, &doc); err != nil {
 		return nil, "", err
 	}
+
 	data := doc["v"]
 	if !configTable(data) {
 		// One key-value line, with the value in TOML's inline syntax.
@@ -113,19 +130,23 @@ func configValueOutput(key string, value any) (any, string, error) {
 		if inline, ok := strings.CutPrefix(line, "v = "); ok && !strings.Contains(inline, "\n") {
 			return data, key + " = " + inline, nil
 		}
+
 		return data, fmt.Sprintf("%s = %v", key, data), nil
 	}
 	// Nest the value under the key's segments, so the TOML carries the
 	// header ([maintenance], [[clusters]], [postgres.settings]).
 	segs := strings.Split(key, ".")
+
 	nested := value
-	for i := len(segs) - 1; i >= 0; i-- {
-		nested = map[string]any{segs[i]: nested}
+	for _, seg := range slices.Backward(segs) {
+		nested = map[string]any{seg: nested}
 	}
+
 	out, err := toml.Marshal(nested)
 	if err != nil {
 		return nil, "", err
 	}
+
 	return data, dropEmptyHeaders(strings.TrimRight(string(out), "\n")), nil
 }
 
@@ -134,14 +155,17 @@ func configValueOutput(key string, value any) (any, string, error) {
 // whose next line is another header holds nothing.
 func dropEmptyHeaders(doc string) string {
 	lines := strings.Split(doc, "\n")
+
 	kept := lines[:0]
 	for i, line := range lines {
 		header := strings.HasPrefix(line, "[") && !strings.HasPrefix(line, "[[")
 		if header && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "[") {
 			continue
 		}
+
 		kept = append(kept, line)
 	}
+
 	return strings.Join(kept, "\n")
 }
 
@@ -153,8 +177,10 @@ func configScalar(value any) (any, bool) {
 		if v.IsNil() {
 			return nil, true
 		}
+
 		v = v.Elem()
 	}
+
 	switch v.Kind() {
 	case reflect.String, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
@@ -166,6 +192,7 @@ func configScalar(value any) (any, bool) {
 		// A table, an array of tables, or a value TOML cannot decode.
 		return nil, false
 	}
+
 	return nil, false
 }
 
@@ -179,40 +206,50 @@ func configTable(value any) bool {
 		if len(v) == 0 {
 			return false
 		}
+
 		for _, e := range v {
 			if _, ok := e.(map[string]any); !ok {
 				return false
 			}
 		}
+
 		return true
 	}
+
 	return false
 }
 
 func runConfigSet(cmd *cobra.Command, args []string) error {
 	key, value := args[0], args[1]
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
+
 	var lifted []string
+
 	if old, err := config.ParseCluster([]byte(data.TOML)); err == nil {
 		updated := old
+
 		updated.Clusters = slices.Clone(old.Clusters)
 		if updated.Set(key, value) == nil {
 			lifted = node.Unprotected(old, updated)
 		}
 	}
+
 	code, err := unprotectCode(cmd, s, p, lifted)
 	if err != nil {
 		return err
 	}
+
 	reply, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
 		"set":           map[string]string{key: value},
 		"base_revision": data.Revision,
@@ -220,6 +257,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		var planned struct {
 			Plan engine.PlanData `json:"plan"`
@@ -227,12 +265,14 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		if err := reply.Decode(&planned); err != nil {
 			return err
 		}
+
 		return output.Success(cmd, output.Result{
 			Data:     map[string]any{"key": key, "value": value, "plan": planned.Plan},
 			Message:  fmt.Sprintf("dry run: would set %s = %s; %d of %d steps would then apply", key, value, planned.Plan.WouldApply, planned.Plan.Total),
 			Warnings: append(s.warnings, reply.Warnings...),
 		})
 	}
+
 	var res struct {
 		Revision string          `json:"revision"`
 		Plan     engine.PlanData `json:"plan"`
@@ -240,10 +280,13 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	if err := reply.Decode(&res); err != nil {
 		return err
 	}
+
 	if flagTrue(cmd, "apply") {
 		return runApply(cmd, nil)
 	}
+
 	warnings := append(append(s.warnings, reply.Warnings...), syncWorkspaceFromNode(commandContext(cmd), s, p)...)
+
 	return output.Success(cmd, output.Result{
 		Data:     res,
 		Message:  fmt.Sprintf("set %s = %s; ", key, value) + pendingSteps(res.Plan),
@@ -258,25 +301,32 @@ func runConfigValidate(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
+
 		cfg, err := config.ParseCluster(raw)
 		if err != nil {
 			return output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "")
 		}
+
 		if err := cfg.Validate(); err != nil {
 			return config.ValidationError(err)
 		}
+
 		return output.Success(cmd, output.Result{Data: map[string]any{"valid": true}, Message: path + " is valid"})
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, err := p.call(commandContext(cmd), s.node, "config.validate", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	var data struct {
 		Valid    bool     `json:"valid"`
 		Problems []string `json:"problems"`
@@ -284,9 +334,11 @@ func runConfigValidate(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	if !data.Valid {
 		return config.ValidationError(fmt.Errorf("%s", strings.Join(data.Problems, "; ")))
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: "cluster.toml is valid", Warnings: s.warnings})
 }
 
@@ -295,37 +347,47 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		return output.NewError(output.CodeInputRequired, "vaire config edit needs a terminal", output.ExitInput,
 			"Use vaire config set <key> <value> instead.").WithDetails(map[string]any{"flag": "--file"})
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	data, err := fetchConfig(commandContext(cmd), s, p)
 	if err != nil {
 		return err
 	}
+
 	edited, err := editConfigInEditor(cmd, data.TOML)
 	if err != nil {
 		return err
 	}
+
 	if string(edited) == data.TOML {
 		return output.Success(cmd, output.Result{Data: map[string]any{"changed": false}, Message: "no changes", Warnings: s.warnings})
 	}
+
 	if err := previewConfigSet(cmd, s, p, data, edited); err != nil {
 		return err
 	}
+
 	ok, err := PromptYes(cmd, "Push this configuration?")
 	if err != nil {
 		return err
 	}
+
 	if !ok {
 		return output.NewError(output.CodeUnsafeAction, "the edit was discarded", output.ExitUnsafe, "")
 	}
+
 	code, err := unprotectCode(cmd, s, p, liftedProtections(data.TOML, edited))
 	if err != nil {
 		return err
 	}
+
 	reply, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
 		"toml":          string(edited),
 		"base_revision": data.Revision,
@@ -333,6 +395,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	var res struct {
 		Revision string          `json:"revision"`
 		Plan     engine.PlanData `json:"plan"`
@@ -340,17 +403,21 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	if err := reply.Decode(&res); err != nil {
 		return err
 	}
+
 	if flagTrue(cmd, "apply") {
 		return runApply(cmd, nil)
 	}
+
 	warnings := append(s.warnings, reply.Warnings...)
 	if cfg, err := config.ParseCluster(edited); err == nil {
 		synced, err := syncWorkspace(s, cfg)
 		if err != nil {
 			synced = workspaceSyncFailed(s, err)
 		}
+
 		warnings = append(warnings, synced...)
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     res,
 		Message:  "saved; " + pendingSteps(res.Plan),
@@ -366,18 +433,23 @@ func editConfigInEditor(cmd *cobra.Command, toml string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	path := tmp.Name()
 	defer func() { _ = os.Remove(path) }()
+
 	if err := os.Chmod(path, 0o600); err != nil {
 		return nil, err
 	}
+
 	if _, err := tmp.WriteString(toml); err != nil {
 		_ = tmp.Close()
 		return nil, err
 	}
+
 	if err := tmp.Close(); err != nil {
 		return nil, err
 	}
+
 	return editUntilValid(cmd, path)
 }
 
@@ -391,14 +463,17 @@ func previewConfigSet(cmd *cobra.Command, s *session, p *progress, data configDa
 	if err != nil {
 		return err
 	}
+
 	var planned struct {
 		Plan engine.PlanData `json:"plan"`
 	}
 	if err := preview.Decode(&planned); err != nil {
 		return err
 	}
+
 	p.note(render.DiffBytes("cluster.toml", []byte(data.TOML), edited) +
 		fmt.Sprintf("%d of %d steps would apply on the next vaire apply.", planned.Plan.WouldApply, planned.Plan.Total))
+
 	return nil
 }
 
@@ -408,10 +483,12 @@ func liftedProtections(oldTOML string, edited []byte) []string {
 	if err != nil {
 		return nil
 	}
+
 	updated, err := config.ParseCluster(edited)
 	if err != nil {
 		return nil
 	}
+
 	return node.Unprotected(old, updated)
 }
 
@@ -426,6 +503,7 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 	if len(lifted) == 0 || dryRun(cmd) {
 		return nil, nil
 	}
+
 	names := strings.Join(lifted, ", ")
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil, output.NewError(output.CodeDatabaseProtected,
@@ -438,18 +516,22 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 	if err != nil {
 		return nil, err
 	}
+
 	if !status.Configured {
 		return nil, output.NewError(output.CodeDatabaseProtected,
 			"lifting the protection of "+names+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe,
 			"A human runs vaire protect init first, at a terminal, and scans the QR code with an authenticator app. Lifting a protection then needs a current code from it.").
 			WithDetails(map[string]any{"reason": "protect_not_initialized", "databases": lifted})
 	}
+
 	if status.LockedUntil != "" {
 		return nil, output.NewError(output.CodeProtectCodeRejected, "too many wrong codes; codes are locked out until "+status.LockedUntil, output.ExitUnsafe,
 			"Wait until the lockout ends, then try again with a fresh code.").
 			WithDetails(map[string]any{"reason": "locked", "locked_until": status.LockedUntil})
 	}
+
 	p.note(liftNotice(names))
+
 	return readAuthenticatorCode(cmd, "the protection of "+names+" was kept", map[string]any{"databases": lifted})
 }
 
@@ -461,15 +543,16 @@ func readAuthenticatorCode(cmd *cobra.Command, kept string, details map[string]a
 	if err != nil {
 		return nil, err
 	}
+
 	code = totp.NormalizeCode(code)
 	if !totp.WellFormed(code) {
 		d := map[string]any{"reason": "code_invalid"}
-		for k, v := range details {
-			d[k] = v
-		}
+		maps.Copy(d, details)
+
 		return nil, output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits; "+kept, output.ExitUnsafe,
 			"Type the 6-digit code the authenticator app shows for vaire.").WithDetails(d)
 	}
+
 	return map[string]string{node.ProtectCodeSecret: code}, nil
 }
 
@@ -480,18 +563,22 @@ func editUntilValid(cmd *cobra.Command, path string) ([]byte, error) {
 		if err := runEditor(cmd, path); err != nil {
 			return nil, err
 		}
+
 		edited, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
+
 		problem := editProblem(edited)
 		if problem == nil {
 			return edited, nil
 		}
+
 		again, err := PromptYes(cmd, problem.Error()+"\nEdit again?")
 		if err != nil {
 			return nil, err
 		}
+
 		if !again {
 			return nil, problem
 		}
@@ -504,9 +591,11 @@ func editProblem(raw []byte) error {
 	if err != nil {
 		return output.NewError(output.CodeConfig, "the edited file does not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return config.ValidationError(err)
 	}
+
 	return nil
 }
 
@@ -516,9 +605,11 @@ func runEditor(cmd *cobra.Command, path string) error {
 	if editor == "" {
 		editor = os.Getenv("EDITOR")
 	}
+
 	if editor == "" {
 		editor = "vi"
 	}
+
 	parts := strings.Fields(editor)
 	args := append(parts[1:], path)
 	child := exec.CommandContext(commandContext(cmd), parts[0], args...) //nolint:gosec // G204: the operator's chosen editor.
@@ -528,10 +619,13 @@ func runEditor(cmd *cobra.Command, path string) error {
 	// The editor owns the terminal: nothing of vaire's live area may draw.
 	resume := ui.Suspend()
 	err := child.Run()
+
 	resume()
+
 	if err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "Set $EDITOR to a working editor.")
 	}
+
 	return nil
 }
 
@@ -543,6 +637,7 @@ func runEditor(cmd *cobra.Command, path string) error {
 func syncWorkspace(s *session, cfg config.Cluster) ([]output.Warning, error) {
 	previous, previousMode := s.ctx.MasterHostname(), s.ctx.TLSMode
 	changed := s.ctx.Domain != cfg.Domain || s.ctx.TLSMode != cfg.TLS.Mode
+
 	s.ctx.Domain, s.ctx.TLSMode = cfg.Domain, cfg.TLS.Mode
 	for i, n := range s.ctx.Nodes {
 		if h := cfg.Hostname(n.Name); h != n.Hostname {
@@ -550,25 +645,31 @@ func syncWorkspace(s *session, cfg config.Cluster) ([]output.Warning, error) {
 			changed = true
 		}
 	}
+
 	if placement := placementOf(cfg); !maps.Equal(placement, s.ctx.Databases) {
 		s.ctx.Databases = placement
 		changed = true
 	}
+
 	if !changed {
 		return nil, nil
 	}
+
 	if err := workspaces.Save(s.ctx); err != nil {
 		return nil, err
 	}
+
 	hostname := s.ctx.MasterHostname()
 	if hostname == previous && cfg.TLS.Mode == previousMode {
 		return nil, nil
 	}
+
 	message := fmt.Sprintf("workspace %s now verifies the server as %s (tls.mode %s)", s.ctx.Name, hostname, cfg.TLS.Mode)
 	if previous != hostname {
 		message += "; until the node holds a certificate for " + hostname +
 			", connections from vaire fail with a hostname mismatch. vaire-certs.timer issues it within the hour, or now with: vaire ssh --command 'sudo vaire node run certs-renew'"
 	}
+
 	return []output.Warning{{Code: "workspace_tls_updated", Message: message}}, nil
 }
 
@@ -578,6 +679,7 @@ func placementOf(cfg config.Cluster) map[string]string {
 	for _, cl := range cfg.Clusters {
 		out[cl.Name] = cl.Node
 	}
+
 	return out
 }
 
@@ -588,14 +690,17 @@ func syncWorkspaceFromNode(ctx context.Context, s *session, p *progress) []outpu
 	if err != nil {
 		return workspaceSyncFailed(s, err)
 	}
+
 	cfg, err := config.ParseCluster([]byte(data.TOML))
 	if err != nil {
 		return workspaceSyncFailed(s, err)
 	}
+
 	warnings, err := syncWorkspace(s, cfg)
 	if err != nil {
 		return workspaceSyncFailed(s, err)
 	}
+
 	return warnings
 }
 
@@ -617,6 +722,7 @@ func pendingSteps(plan engine.PlanData) string {
 	if plan.WouldApply == 0 {
 		return "nothing to apply"
 	}
+
 	return fmt.Sprintf("%d of %d steps would apply on the next vaire apply", plan.WouldApply, plan.Total)
 }
 
@@ -625,5 +731,6 @@ func applyNext(plan engine.PlanData) []string {
 	if plan.WouldApply == 0 {
 		return nil
 	}
+
 	return []string{"vaire apply"}
 }

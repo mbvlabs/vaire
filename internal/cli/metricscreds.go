@@ -22,15 +22,20 @@ func ensureMetricsCreds(creds **workspaces.MetricsCreds) (bool, error) {
 		if (*creds).Username == "" {
 			(*creds).Username = workspaces.MetricsUser
 		}
+
 		secrets.Add((*creds).Password)
+
 		return false, nil
 	}
+
 	pw, err := secrets.Base62(32)
 	if err != nil {
 		return false, err
 	}
+
 	*creds = &workspaces.MetricsCreds{Username: workspaces.MetricsUser, Password: pw}
 	secrets.Add(pw)
+
 	return true, nil
 }
 
@@ -42,7 +47,9 @@ func metricsHash(creds *workspaces.MetricsCreds) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	secrets.Add(string(h))
+
 	return string(h), nil
 }
 
@@ -53,11 +60,14 @@ func addMetricsSecret(creds **workspaces.MetricsCreds, rpc map[string]string) (b
 	if err != nil {
 		return false, err
 	}
+
 	h, err := metricsHash(*creds)
 	if err != nil {
 		return false, err
 	}
+
 	rpc[steps.SecretMetricsHash] = h
+
 	return generated, nil
 }
 
@@ -67,6 +77,7 @@ func metricsDocument(creds *workspaces.MetricsCreds, hostname, pathPrefix string
 	if creds == nil || creds.Password == "" {
 		return nil
 	}
+
 	return &secretsdoc.Metrics{BaseURL: metricsBaseURL(hostname, pathPrefix), Username: creds.Username, Password: creds.Password}
 }
 
@@ -75,8 +86,10 @@ func metricsBaseURL(hostname, pathPrefix string) string {
 	if pathPrefix == "" {
 		pathPrefix = "/metrics"
 	}
+
 	if hostname == "" {
 		return ""
 	}
+
 	return "https://" + hostname + pathPrefix
 }

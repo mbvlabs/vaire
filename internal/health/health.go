@@ -75,8 +75,10 @@ func ParseSample(row map[string]string) Sample {
 		if err != nil {
 			return 0
 		}
+
 		return v
 	}
+
 	return Sample{
 		UptimeS: n("uptime_s"), DBSize: n("db_size"), MaxConnections: n("max_connections"),
 		Connections: n("connections"), Active: n("active"), Idle: n("idle"), IdleInTx: n("idle_in_tx"),
@@ -94,6 +96,7 @@ func CacheHit(hit, read int64) (float64, bool) {
 	if hit+read <= 0 {
 		return 0, false
 	}
+
 	return float64(hit) / float64(hit+read), true
 }
 
@@ -103,6 +106,7 @@ func TPS(before, after int64, dt time.Duration) float64 {
 	if dt <= 0 || after < before {
 		return 0
 	}
+
 	return float64(after-before) / dt.Seconds()
 }
 
@@ -111,6 +115,7 @@ func ConnectionUse(s Sample) float64 {
 	if s.MaxConnections <= 0 {
 		return 0
 	}
+
 	return float64(s.Connections) / float64(s.MaxConnections)
 }
 
@@ -127,11 +132,13 @@ type Pools struct {
 // pgbouncer database and the auth aliases.
 func SumPools(rows []map[string]string) Pools {
 	var p Pools
+
 	for _, r := range rows {
 		db := r["database"]
 		if db == "pgbouncer" || strings.HasSuffix(db, "__auth") {
 			continue
 		}
+
 		n := func(k string) int64 {
 			v, _ := strconv.ParseInt(strings.TrimSpace(r[k]), 10, 64)
 			return v
@@ -139,11 +146,13 @@ func SumPools(rows []map[string]string) Pools {
 		p.ClientsActive += n("cl_active")
 		p.ClientsWaiting += n("cl_waiting")
 		p.ServersActive += n("sv_active")
+
 		p.ServersIdle += n("sv_idle")
 		if w := n("maxwait"); w > p.MaxWaitS {
 			p.MaxWaitS = w
 		}
 	}
+
 	return p
 }
 
@@ -152,10 +161,12 @@ func Uptime(seconds int64) string {
 	if seconds <= 0 {
 		return "-"
 	}
+
 	d := time.Duration(seconds) * time.Second
 	days := int64(d / (24 * time.Hour))
 	hours := int64(d/time.Hour) % 24
 	minutes := int64(d/time.Minute) % 60
+
 	switch {
 	case days > 0:
 		return strconv.FormatInt(days, 10) + "d" + strconv.FormatInt(hours, 10) + "h"

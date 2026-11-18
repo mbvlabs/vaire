@@ -18,24 +18,30 @@ func Main() int {
 	root := NewRoot()
 	cmd, err := root.ExecuteC()
 	ui.Finish(err != nil)
+
 	if err == nil {
 		return 0
 	}
+
 	var silent *localenv.SilentExitError
 	if errors.As(err, &silent) && silent != nil {
 		return silent.Code
 	}
+
 	if cmd == nil {
 		cmd = root
 	}
+
 	if richOutput(cmd) {
 		output.RichError = renderRichError
 	}
+
 	if rerr := output.RenderError(cmd, err); rerr != nil {
 		if _, werr := fmt.Fprintln(os.Stderr, err.Error()); werr != nil {
 			return output.ExitGeneric
 		}
 	}
+
 	return output.ExitCode(err)
 }
 
@@ -77,9 +83,11 @@ func NewRoot() *cobra.Command {
 	flags.Duration("timeout", 30*time.Second, "How long to wait for a lock or connection")
 	flags.Bool("yes", false, "Accept non-destructive prompts. Never satisfies --confirm")
 	flags.Bool("escalated", false, "Internal marker for a sudo re-exec")
+
 	if err := flags.MarkHidden("escalated"); err != nil {
 		panic(err)
 	}
+
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return output.NewError(
 			output.CodeUsage,
@@ -91,6 +99,7 @@ func NewRoot() *cobra.Command {
 	registerMeta(root, rootMeta())
 	addSpecs(root, phase1Commands())
 	finalizeMeta(root)
+
 	return root
 }
 

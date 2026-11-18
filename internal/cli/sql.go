@@ -40,6 +40,7 @@ func databaseEndpoint(ctx context.Context, s *session, p *progress, db string) d
 		s.warnings = append(s.warnings, syncWorkspaceFromNode(ctx, s, p)...)
 		n, _ = s.ctx.DatabaseNode(db)
 	}
+
 	return dbEndpoint{WGAddress: n.WGAddress, Hostname: n.Hostname}
 }
 
@@ -57,10 +58,12 @@ func adminCredentials(c *workspaces.Workspace) (user, password string, err error
 	if err != nil {
 		return "", "", err
 	}
+
 	if creds.Database == nil || creds.Database.Admin.Password == "" {
 		return "", "", output.NewError(output.CodePrecondition, "this workspace has no vaire_admin password", output.ExitPrecondition,
 			"Re-run vaire login with a newer secrets document.")
 	}
+
 	return creds.Database.Admin.User, creds.Database.Admin.Password, nil
 }
 
@@ -73,6 +76,7 @@ func sessionOptions(db string, write bool) string {
 	if write {
 		return "--role=" + ownerRole(db)
 	}
+
 	return "--default_transaction_read_only=on"
 }
 
@@ -85,53 +89,66 @@ func sqlQuery(cmd *cobra.Command, args []string) (string, error) {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		return args[0], nil
 	}
+
 	if path := stringFlag(cmd, "file"); path != "" {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return "", output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
+
 		return string(raw), nil
 	}
+
 	if !stdinIsTTY() {
 		raw, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20))
 		if err != nil {
 			return "", output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
+
 		return string(raw), nil
 	}
+
 	return "", nil
 }
 
 func runSQL(cmd *cobra.Command, args []string) error {
 	db := stringFlag(cmd, "db")
 	write := flagTrue(cmd, "write")
+
 	query, err := sqlQuery(cmd, args)
 	if err != nil {
 		return err
 	}
+
 	if strings.TrimSpace(query) == "" {
 		return output.NewError(output.CodeUsage, "no query was given", output.ExitUsage, "Pass the SQL as an argument, or use --file.")
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "vaire sql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
+
 	user, password, err := sessionLogin(cmd, s, p, db, write)
 	if err != nil {
 		return err
 	}
+
 	ctx := commandContext(cmd)
 	at := databaseEndpoint(ctx, s, p, db)
 	// Connecting through the tunnel and running the statement send no
 	// events; the waiting line shows them. It ends before the result prints.
 	stopWait := p.wait("connecting to " + db)
 	defer stopWait()
+
 	conn, err := pg.Connect(ctx, s.dialer, pg.Params{
 		Host: at.WGAddress, Port: pgPort, ServerName: at.Hostname, TLSMode: s.ctx.TLSMode,
 		User: user, Password: password, Database: db,
@@ -141,7 +158,9 @@ func runSQL(cmd *cobra.Command, args []string) error {
 			"Check that the database exists (vaire db list), that the session pooler runs (vaire logs pgbouncer-session), and that the credentials are current.")
 	}
 	defer conn.Close(ctx)
+
 	p.setPhase("running the query on " + db)
+
 	warnings := s.warnings
 	if s.ctx.TLSMode == "self-signed" {
 		warnings = append(warnings, output.Warning{Code: "tls_unverified", Message: "the cluster uses a self-signed certificate; the connection is encrypted but not verified"})
@@ -150,17 +169,21 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	// database's owner role (see sessionOptions).
 	begin := "BEGIN READ ONLY"
 	setup := "SET default_transaction_read_only = on"
+
 	if write {
 		begin = "BEGIN READ WRITE"
 		setup = "SET ROLE " + pg.Quote(ownerRole(db))
 	}
+
 	if _, err := conn.Exec(ctx, setup); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
+
 	if _, err := conn.Exec(ctx, begin); err != nil {
 		if rerr := readOnlyCopyError(db, err); rerr != nil {
 			return rerr
 		}
+
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
 	// The simple query protocol runs several statements in one call; vaire sql
@@ -168,20 +191,27 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	results, err := conn.QueryAll(ctx, query)
 	if err != nil {
 		_, _ = conn.Exec(ctx, "ROLLBACK")
+
 		if rerr := readOnlyCopyError(db, err); rerr != nil {
 			return rerr
 		}
+
 		hint := "Fix the statement and retry."
 		if write && backup.LiveDatabase(db) != db {
 			hint += " " + db + " is a copy: one restored from a backup is read-only (in recovery) until vaire restore promote " + backup.LiveDatabase(db) + "."
 		}
+
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, hint)
 	}
+
 	if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "The transaction did not commit.")
 	}
+
 	stopWait()
+
 	data := newSQLData(results)
+
 	return output.Success(cmd, output.Result{Data: data, Message: data.render(), Warnings: warnings})
 }
 
@@ -200,6 +230,7 @@ func newSQLData(results []*pg.Result) sqlData {
 	case 1:
 		return sqlData{Result: results[0]}
 	}
+
 	return sqlData{Result: results[len(results)-1], Results: results}
 }
 
@@ -209,10 +240,12 @@ func (d sqlData) render() string {
 	if len(d.Results) == 0 {
 		return renderTable(d.Result)
 	}
+
 	parts := make([]string, len(d.Results))
 	for i, res := range d.Results {
 		parts[i] = renderTable(res)
 	}
+
 	return strings.Join(parts, "\n\n")
 }
 
@@ -229,12 +262,14 @@ func readOnlyCopyError(db string, err error) error {
 	if live == db || backup.RestoringName(live) != db {
 		return nil
 	}
+
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != sqlstateRecovery {
 		if !strings.Contains(err.Error(), "during recovery") {
 			return nil
 		}
 	}
+
 	return output.WrapError(output.CodePrecondition, fmt.Errorf("%s is read-only: it was restored from a backup and stays in recovery until promoted: %w", db, err),
 		output.ExitPrecondition, "Inspect it read-only (vaire sql --db "+db+" without --write), or promote it with vaire restore promote "+live+" --confirm "+live+"/restore and write to "+live+".").
 		WithDetails(map[string]any{"reason": "restore_copy_read_only", "sqlstate": sqlstateRecovery})
@@ -246,12 +281,15 @@ func renderTable(res *pg.Result) string {
 		if res != nil && res.CommandTag != "" {
 			return res.CommandTag
 		}
+
 		return "no rows"
 	}
+
 	widths := make([]int, len(res.Columns))
 	for i, c := range res.Columns {
 		widths[i] = len(c)
 	}
+
 	cells := make([][]string, len(res.Rows))
 	for r, row := range res.Rows {
 		cells[r] = make([]string, len(res.Columns))
@@ -260,23 +298,30 @@ func renderTable(res *pg.Result) string {
 			if i < len(row) && row[i] != nil {
 				v = *row[i]
 			}
+
 			cells[r][i] = v
 			if len(v) > widths[i] {
 				widths[i] = len(v)
 			}
 		}
 	}
+
 	var b strings.Builder
 	for i, c := range res.Columns {
 		fmt.Fprintf(&b, "%-*s  ", widths[i], c)
 	}
+
 	b.WriteString("\n")
+
 	for _, row := range cells {
 		for i, v := range row {
 			fmt.Fprintf(&b, "%-*s  ", widths[i], v)
 		}
+
 		b.WriteString("\n")
 	}
+
 	fmt.Fprintf(&b, "(%d rows)", len(res.Rows))
+
 	return b.String()
 }

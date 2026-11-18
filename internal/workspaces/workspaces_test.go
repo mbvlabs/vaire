@@ -14,15 +14,18 @@ import (
 
 func TestWorkspaceHintOnNode(t *testing.T) {
 	saved := nodeMarker
+
 	t.Cleanup(func() { nodeMarker = saved })
 
 	nodeMarker = filepath.Join(t.TempDir(), "cluster.toml")
 	if got := workspaceHint("default"); got != "default" {
 		t.Fatalf("off a node: got %q, want the default hint", got)
 	}
+
 	if err := os.WriteFile(nodeMarker, []byte(""), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := workspaceHint("default"); !strings.Contains(got, "vaire node") || !strings.Contains(got, "your own machine") {
 		t.Fatalf("on a node: got %q, want the run-from-your-machine hint", got)
 	}
@@ -30,26 +33,33 @@ func TestWorkspaceHintOnNode(t *testing.T) {
 
 func TestRecoveryKitEncryptionRoundTrip(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	creds := Credentials{Backup: &BackupCreds{Bucket: "backups"}}
 	creds.Backup.Encryption.Identity = "AGE-SECRET-KEY-1"
+
 	creds.Backup.Encryption.Recipient = "age1recipient"
 	if err := SaveCredentials("prod", creds); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := LoadCredentials("prod")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got.Backup == nil || got.Backup.Encryption != creds.Backup.Encryption {
 		t.Fatalf("encryption = %+v, want the same key pair", got.Backup)
 	}
+
 	if !slices.Contains(got.Backup.SecretValues(), creds.Backup.Encryption.Identity) {
 		t.Error("the recovery identity is not exported as a secret")
 	}
+
 	raw, err := ReadFile("prod", CredentialsFile)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(string(raw), `"encryption"`) || strings.Contains(string(raw), `"dumps"`) || strings.Contains(string(raw), `"age_identity"`) {
 		t.Fatalf("credentials.json still uses a dump-shaped wire format:\n%s", raw)
 	}
@@ -58,6 +68,7 @@ func TestRecoveryKitEncryptionRoundTrip(t *testing.T) {
 func TestWorkspaceRoundTripAndSelection(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv(EnvWorkspace, "")
+
 	prod := &Workspace{
 		Name: "prod", Server: "prod",
 		Nodes: []Node{
@@ -69,36 +80,46 @@ func TestWorkspaceRoundTripAndSelection(t *testing.T) {
 	if err := Save(prod); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := Save(&Workspace{Name: "lab", Server: "lab"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := SetCurrent("prod"); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := Load("prod")
 	if err != nil || !reflect.DeepEqual(got, prod) {
 		t.Fatalf("round trip = %+v, %v", got, err)
 	}
+
 	if node, ok := got.DatabaseNode("billing"); !ok || node.Name != "db2" {
 		t.Fatalf("placement = %+v, %v", node, ok)
 	}
+
 	if node, ok := got.Master(); !ok || node.Name != "db1" {
 		t.Fatalf("master = %+v, %v", node, ok)
 	}
+
 	if node, ok := got.DatabaseNode("unknown"); ok || node.Name != "db1" {
 		t.Fatalf("unknown placement = %+v, %v", node, ok)
 	}
+
 	if names, err := List(); err != nil || !reflect.DeepEqual(names, []string{"lab", "prod"}) {
 		t.Fatalf("List = %v, %v", names, err)
 	}
+
 	checkWorkspaceSelection(t)
 	checkWorkspaceStorage(t)
 }
 
 func checkWorkspaceSelection(t *testing.T) {
 	t.Helper()
+
 	check := func(flag, want string) {
 		t.Helper()
+
 		workspace, err := Resolve(flag)
 		if err != nil || workspace.Name != want {
 			t.Fatalf("Resolve(%q) = %+v, %v; want %s", flag, workspace, err, want)
@@ -109,36 +130,44 @@ func checkWorkspaceSelection(t *testing.T) {
 	check("", "lab")
 	check(" prod ", "prod")
 	t.Setenv(EnvWorkspace, "missing")
+
 	if _, err := Resolve(""); output.ExitCode(err) != output.ExitWorkspace {
 		t.Fatalf("missing explicit environment target: %v", err)
 	}
+
 	check("prod", "prod")
 }
 
 func checkWorkspaceStorage(t *testing.T) {
 	t.Helper()
+
 	raw, err := os.ReadFile(filepath.Join(Root(), "config.toml"))
 	if err != nil || !strings.Contains(string(raw), "current_workspace") || strings.Contains(string(raw), "current_context") {
 		t.Fatalf("saved selection = %q, %v", raw, err)
 	}
+
 	if Path("prod", WorkspaceFile) != filepath.Join(Root(), "workspaces", "prod", "workspace.toml") {
 		t.Fatal("unexpected workspace path")
 	}
+
 	for _, path := range []string{Root(), Dir("prod")} {
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != 0o700 {
 			t.Fatalf("directory mode: %s: %v", path, err)
 		}
 	}
+
 	for _, path := range []string{Path("prod", WorkspaceFile), filepath.Join(Root(), "config.toml")} {
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("file mode: %s: %v", path, err)
 		}
 	}
+
 	if err := Remove("prod"); err != nil {
 		t.Fatal(err)
 	}
+
 	if current, err := Current(); err != nil || current != "" || Exists("prod") || !Exists("lab") {
 		t.Fatalf("remove current workspace: current=%q, err=%v", current, err)
 	}
@@ -151,6 +180,7 @@ func TestValidateName(t *testing.T) {
 			t.Fatalf("ValidateName(%q) = %v, want the workspace naming hint", name, err)
 		}
 	}
+
 	for _, name := range []string{"prod", "my-lab", "prod.eu", "lab_1"} {
 		if err := ValidateName(name); err != nil {
 			t.Fatalf("ValidateName(%q): %v", name, err)

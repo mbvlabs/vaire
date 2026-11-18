@@ -9,5 +9,6 @@ func NewIdentity() (identity, recipient string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+
 	return id.String(), id.Recipient().String(), nil
 }

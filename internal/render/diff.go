@@ -23,11 +23,14 @@ func Diff(path string, want []byte) string {
 	if err != nil && !os.IsNotExist(err) {
 		return ""
 	}
+
 	if bytes.Equal(have, want) {
 		return ""
 	}
+
 	ops := diffOps(splitLines(have), splitLines(want))
 	numberOps(ops)
+
 	return formatDiff(path, ops)
 }
 
@@ -36,8 +39,10 @@ func DiffBytes(name string, have, want []byte) string {
 	if bytes.Equal(have, want) {
 		return ""
 	}
+
 	ops := diffOps(splitLines(have), splitLines(want))
 	numberOps(ops)
+
 	return formatDiff(name, ops)
 }
 
@@ -47,18 +52,22 @@ func splitLines(raw []byte) []string {
 	if len(raw) == 0 {
 		return nil
 	}
+
 	s := string(raw)
 	s = strings.TrimSuffix(s, "\n")
+
 	return strings.Split(s, "\n")
 }
 
 // diffOps computes a line diff with an LCS table.
 func diffOps(a, b []string) []op {
 	n, m := len(a), len(b)
+
 	dp := make([][]int, n+1)
 	for i := range dp {
 		dp[i] = make([]int, m+1)
 	}
+
 	for i := n - 1; i >= 0; i-- {
 		for j := m - 1; j >= 0; j-- {
 			if a[i] == b[j] {
@@ -70,7 +79,9 @@ func diffOps(a, b []string) []op {
 			}
 		}
 	}
+
 	var ops []op
+
 	i, j := 0, 0
 	for i < n && j < m {
 		switch {
@@ -86,23 +97,28 @@ func diffOps(a, b []string) []op {
 			j++
 		}
 	}
+
 	for ; i < n; i++ {
 		ops = append(ops, op{kind: '-', line: a[i]})
 	}
+
 	for ; j < m; j++ {
 		ops = append(ops, op{kind: '+', line: b[j]})
 	}
+
 	return ops
 }
 
 // numberOps fills each op's old and new line numbers.
 func numberOps(ops []op) {
 	oldLine, newLine := 1, 1
+
 	for i := range ops {
 		if ops[i].kind != '+' {
 			ops[i].old = oldLine
 			oldLine++
 		}
+
 		if ops[i].kind != '-' {
 			ops[i].new = newLine
 			newLine++
@@ -113,35 +129,44 @@ func numberOps(ops []op) {
 // formatDiff groups ops into hunks with 3 lines of context.
 func formatDiff(path string, ops []op) string {
 	const ctx = 3
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "--- %s\n+++ %s (vaire)\n", path, path)
+
 	i := 0
 	for i < len(ops) {
 		if ops[i].kind == ' ' {
 			i++
 			continue
 		}
+
 		start := maxInt(i-ctx, 0)
+
 		end := i
 		for end < len(ops) {
 			if ops[end].kind != ' ' {
 				end++
 				continue
 			}
+
 			k := end
 			for k < len(ops) && ops[k].kind == ' ' {
 				k++
 			}
+
 			if k < len(ops) && k-end <= ctx {
 				end = k
 				continue
 			}
+
 			break
 		}
+
 		end = minInt(end+ctx, len(ops))
 		writeHunk(&b, ops[start:end])
 		i = end
 	}
+
 	return b.String()
 }
 
@@ -150,19 +175,25 @@ func writeHunk(b *strings.Builder, hunk []op) {
 	if oldStart == 0 {
 		oldStart = 1
 	}
+
 	if newStart == 0 {
 		newStart = 1
 	}
+
 	oldCount, newCount := 0, 0
+
 	for _, o := range hunk {
 		if o.kind != '+' {
 			oldCount++
 		}
+
 		if o.kind != '-' {
 			newCount++
 		}
 	}
+
 	fmt.Fprintf(b, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
+
 	for _, o := range hunk {
 		b.WriteByte(o.kind)
 		b.WriteString(o.line)

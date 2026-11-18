@@ -42,33 +42,42 @@ func (s Shell) Exec(ctx context.Context, stepID string, c Command, report Report
 	// process group and escalating to SIGKILL after killGrace, which
 	// CommandContext cannot do (see supervise).
 	cmd := exec.Command(c.Name, c.Args...) //nolint:gosec,noctx // G204: fixed backup tools; noctx: process-group cancellation below.
+
 	cmd.Env = []string{"PATH=" + scriptPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=/root"}
 	for key, value := range c.Env {
 		if !envKeyPattern.MatchString(key) {
 			return fmt.Errorf("command env key %q is not an upper-case identifier", key)
 		}
+
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
+
 	cmd.Stdin = c.Stdin
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return err
 	}
+
 	cmd.Stderr = pw
 	if c.Stdout != nil {
 		cmd.Stdout = c.Stdout
 	} else {
 		cmd.Stdout = pw
 	}
+
 	if err := cmd.Start(); err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
+
 		return err
 	}
+
 	_ = pw.Close()
 
 	done := make(chan struct{})
+
 	interrupted := make(chan struct{})
 	go supervise(ctx, cmd, done, interrupted)
 
@@ -76,29 +85,36 @@ func (s Shell) Exec(ctx context.Context, stepID string, c Command, report Report
 	if c.OnLine != nil {
 		lineReport = func(ev output.Event) {
 			c.OnLine(ev.Line)
+
 			if report != nil {
 				report(ev)
 				return
 			}
+
 			s.Log.Line("log "+stepID, ev.Line)
 		}
 	}
+
 	tail := s.stream(pr, stepID, lineReport)
 	_ = pr.Close()
 	waitErr := cmd.Wait()
+
 	close(done)
+
 	select {
 	case <-interrupted:
 		return ErrInterrupted
 	default:
 	}
+
 	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
 			return &ScriptError{Step: stepID, Status: exitErr.ExitCode(), Tail: tail}
 		}
+
 		return fmt.Errorf("%s for %s: %w", c.Name, stepID, waitErr)
 	}
+
 	return nil
 }
 
@@ -107,5 +123,6 @@ func (s Shell) Exec(ctx context.Context, stepID string, c Command, report Report
 func RunQuiet(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{"PATH=" + scriptPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=/root"}
+
 	return cmd.Run()
 }

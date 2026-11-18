@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"maps"
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/backup"
@@ -54,16 +55,19 @@ func preflightRestoreExtensionPlan(ctx context.Context, cfg config.Cluster, spec
 	if !supportedRestoreKind(p.Kind) {
 		return unsupportedRestoreKind(p.Kind)
 	}
+
 	opts := backup.RestoreOptions{Kind: p.Kind, Set: p.Set}
 	if p.Kind == backup.TargetTime {
 		opts.Time, _ = time.Parse(time.RFC3339, p.Time)
 	}
+
 	stanza := spec.Stanza
 	_, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
 		Intent: spec, Stanza: stanza, CopyDB: p.Database, Options: opts,
 		Historical: true, Standby: true,
 		Declaration: spec.RecoveryExtensions,
 	})
+
 	return err
 }
 
@@ -77,10 +81,12 @@ type extensionCopyPlan struct {
 
 func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensionCopyRequest) (*extensionCopyPlan, error) {
 	resolver := cfg.ExtensionResolver()
+
 	currentNames, err := resolver.EffectiveNames(req.Intent.Extensions)
 	if err != nil {
 		return nil, config.ValidationError(err)
 	}
+
 	current, err := resolveExtensions(resolver, currentNames)
 	if err != nil {
 		return nil, config.ValidationError(err)
@@ -90,13 +96,16 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 	if err != nil {
 		return nil, err
 	}
+
 	historical := req.Historical
 
 	merged, guard, err := backup.MergeCopyRequirements(known, declared, req.Standby, req.CopyDB)
 	if err != nil {
 		return nil, err
 	}
+
 	permanent := permanentExtensionSettings(cfg, req.Intent, current)
+
 	decision, err := backup.CopyGuardSettings(backup.CopyGuardSettingsOptions{
 		Known: merged, Current: current, Permanent: permanent,
 		Explicit: req.Intent.Settings, CopyDB: req.CopyDB, Pending: true,
@@ -104,6 +113,7 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 	if err != nil {
 		return nil, err
 	}
+
 	guard.Settings = decision.Settings
 	// The copied configuration already carries current intent's preloads. The
 	// guard only needs the libraries current intent does not name; the guard
@@ -113,8 +123,10 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 	if err != nil {
 		return nil, config.ValidationError(err)
 	}
+
 	guard.Preloads = extensionGuardPreloads(guard.Preloads, desiredPreloads)
 	reqs, cron := extensionPlanPrerequisites(merged)
+
 	return &extensionCopyPlan{
 		Plan: &backup.CopyPlan{
 			Guard: guard, Requirements: merged, Stanza: req.Stanza,
@@ -128,20 +140,26 @@ func buildExtensionCopyPlan(ctx context.Context, cfg config.Cluster, req extensi
 
 func extensionCopyHistory(ctx context.Context, req extensionCopyRequest, resolver config.ExtensionResolver, current []catalog.Extension) ([]catalog.Extension, []catalog.Extension, string, string, error) {
 	known := append([]catalog.Extension(nil), current...)
+
 	var declared []catalog.Extension
+
 	declaration := "known"
 	coverage := ""
+
 	switch {
 	case req.Historical || req.IncludeRetained:
 		recs, err := backup.LoadRecords()
 		if err != nil {
 			return nil, nil, "", "", err
 		}
+
 		hist, _ := recs.ExtensionRequirementsFor(req.Stanza)
 		coverage = hist.CoverageSince
+
 		known = append(known, recs.RetainedExtensions(req.Stanza)...)
 		if req.Historical {
 			root, ok := selectedBackupRoot(ctx, req)
+
 			covered := ok && coverage != "" && coverageAtOrBefore(coverage, root)
 			if !covered {
 				declaration, declared, err = declaredRequirements(resolver, req.Declaration, req.Intent.Name, "restore point "+req.Stanza)
@@ -151,6 +169,7 @@ func extensionCopyHistory(ctx context.Context, req extensionCopyRequest, resolve
 			}
 		}
 	}
+
 	return known, declared, declaration, coverage, nil
 }
 
@@ -159,30 +178,36 @@ func extensionGuardPreloads(guardPreloads, desiredPreloads []string) []string {
 	for _, preload := range desiredPreloads {
 		desired[preload] = true
 	}
+
 	out := guardPreloads[:0]
 	for _, preload := range guardPreloads {
 		if !desired[preload] {
 			out = append(out, preload)
 		}
 	}
+
 	return out
 }
 
 func extensionPlanPrerequisites(merged []catalog.Extension) ([]steps.ExtensionPrerequisite, bool) {
 	reqs := make([]steps.ExtensionPrerequisite, 0, len(merged))
 	cron := false
+
 	for _, ext := range merged {
 		if ext.Name == "pg_cron" || ext.ExtName == "pg_cron" {
 			cron = true
 		}
+
 		if ext.ExtName == "" && ext.Preload == "" {
 			continue
 		}
+
 		reqs = append(reqs, steps.ExtensionPrerequisite{
 			Name: ext.Name, Source: ext.Source, Package: ext.Package,
 			ExtName: ext.ExtName, Preload: ext.Preload,
 		})
 	}
+
 	return reqs, cron
 }
 
@@ -193,8 +218,10 @@ func resolveExtensions(resolver config.ExtensionResolver, names []string) ([]cat
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, ext)
 	}
+
 	return out, nil
 }
 
@@ -205,17 +232,14 @@ func resolveExtensions(resolver config.ExtensionResolver, names []string) ([]cat
 // suppression still wins in the guard while the copy is pending.
 func permanentExtensionSettings(cfg config.Cluster, spec config.ClusterSpec, current []catalog.Extension) map[string]string {
 	out := map[string]string{}
-	for k, v := range cfg.Postgres.Settings {
-		out[k] = v
-	}
+	maps.Copy(out, cfg.Postgres.Settings)
+
 	for _, ext := range current {
-		for k, v := range ext.ResolvedSettings(spec.DatabaseName()) {
-			out[k] = v
-		}
+		maps.Copy(out, ext.ResolvedSettings(spec.DatabaseName()))
 	}
-	for k, v := range spec.Settings {
-		out[k] = v
-	}
+
+	maps.Copy(out, spec.Settings)
+
 	return out
 }
 
@@ -240,17 +264,21 @@ func declaredRequirements(resolver config.ExtensionResolver, declaration *[]stri
 			"Declare the complete extension requirement for that point in clusters."+db+".recovery_extensions (use [] only when it truly used none), then retry.").
 			WithDetails(map[string]any{"reason": "extension_history_unknown", "database": db})
 	}
+
 	if len(*declaration) == 0 {
 		return "empty", nil, nil
 	}
+
 	names, err := resolver.EffectiveNames(*declaration)
 	if err != nil {
 		return "", nil, config.ValidationError(err)
 	}
+
 	exts, err := resolveExtensions(resolver, names)
 	if err != nil {
 		return "", nil, config.ValidationError(err)
 	}
+
 	return "populated", exts, nil
 }
 
@@ -258,10 +286,12 @@ func selectedBackupRoot(ctx context.Context, req extensionCopyRequest) (time.Tim
 	if req.Stanza == "" {
 		return time.Time{}, false
 	}
+
 	info, err := extensionBackupInfo(ctx, req.Intent)
 	if err != nil {
 		return time.Time{}, false
 	}
+
 	return backup.SelectedBackupStart(info, req.Options)
 }
 
@@ -270,6 +300,7 @@ func coverageAtOrBefore(coverage string, root time.Time) bool {
 	if err != nil {
 		return false
 	}
+
 	return !root.Before(t)
 }
 
@@ -283,11 +314,13 @@ func captureExtensionIntent(cfg config.Cluster, at time.Time) error {
 			return err
 		}
 	}
+
 	for _, spec := range cfg.Awaiting {
 		if err := captureSpecExtensionIntent(cfg, spec, seen, at); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -295,27 +328,34 @@ func captureSpecExtensionIntent(cfg config.Cluster, spec config.ClusterSpec, see
 	if spec.IsFollower() || spec.Stanza == "" || seen[spec.Stanza] {
 		return nil
 	}
+
 	seen[spec.Stanza] = true
 	resolver := cfg.ExtensionResolver()
+
 	names, err := resolver.EffectiveNames(spec.Extensions)
 	if err != nil {
 		return err
 	}
+
 	exts, err := resolveExtensions(resolver, names)
 	if err != nil {
 		return err
 	}
+
 	if spec.RecoveryExtensions != nil {
 		declared, err := resolver.EffectiveNames(*spec.RecoveryExtensions)
 		if err != nil {
 			return err
 		}
+
 		more, err := resolveExtensions(resolver, declared)
 		if err != nil {
 			return err
 		}
+
 		exts = append(exts, more...)
 	}
+
 	return backup.RecordExtensionRequirements(spec.Stanza, spec.Name, exts, at)
 }
 
@@ -327,6 +367,7 @@ func captureExtensionChange(old, updated config.Cluster) error {
 	if err := captureExtensionIntent(old, now); err != nil {
 		return err
 	}
+
 	return captureExtensionIntent(updated, now)
 }
 
@@ -357,5 +398,6 @@ func recordCopyRequirements(stanza, db string, plan *backup.CopyPlan) error {
 	if stanza == "" || plan == nil || len(plan.Requirements) == 0 {
 		return nil
 	}
+
 	return backup.RecordExtensionRequirements(stanza, db, plan.Requirements, time.Now().UTC())
 }

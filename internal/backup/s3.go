@@ -56,6 +56,7 @@ func PresetFor(provider string) (Preset, bool) {
 			return p, true
 		}
 	}
+
 	return Preset{}, false
 }
 
@@ -70,10 +71,12 @@ func (t Target) client() (*minio.Client, error) {
 	if err != nil || u.Host == "" {
 		return nil, output.NewError(output.CodeValidation, "backup endpoint "+t.Endpoint+" is not a URL", output.ExitConfig, "")
 	}
+
 	lookup := minio.BucketLookupDNS
 	if t.URIStyle == "path" {
 		lookup = minio.BucketLookupPath
 	}
+
 	return minio.New(u.Host, &minio.Options{
 		Creds:        credentials.NewStaticV4(t.KeyID, t.Secret, ""),
 		Secure:       u.Scheme != "http",
@@ -100,54 +103,69 @@ func Probe(ctx context.Context, t Target, owner PrefixOwner) error {
 	if err != nil {
 		return err
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+
 	exists, err := c.BucketExists(ctx, t.Bucket)
 	if err != nil {
 		return s3Error(t, "read the bucket", err)
 	}
+
 	if !exists {
 		return bucketMissing(t)
 	}
+
 	body := []byte("vaire probe " + time.Now().UTC().Format(time.RFC3339) + "\n")
+
 	key := t.key(ProbeKey)
 	if _, err := c.PutObject(ctx, t.Bucket, key, bytes.NewReader(body), int64(len(body)), minio.PutObjectOptions{ContentType: "text/plain"}); err != nil {
 		return s3Error(t, "write "+key, err)
 	}
+
 	obj, err := c.GetObject(ctx, t.Bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return s3Error(t, "read "+key, err)
 	}
+
 	got, err := io.ReadAll(io.LimitReader(obj, 4096))
 	_ = obj.Close()
+
 	if err != nil {
 		return s3Error(t, "read "+key, err)
 	}
+
 	if !bytes.Equal(got, body) {
 		return output.NewError(output.CodeBackupAuthFailed, "the bucket returned different bytes than vaire wrote to "+key, output.ExitTransport,
 			"Check that the endpoint is the bucket's S3 API and not a proxy or cache.").WithDetails(map[string]any{"key": key})
 	}
+
 	if err := c.RemoveObject(ctx, t.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		return s3Error(t, "delete "+key, err)
 	}
+
 	stanzas, err := t.stanzas(ctx, c)
 	if err != nil {
 		return err
 	}
+
 	epoch, err := ReadEpoch(ctx, t)
 	if err != nil {
 		return err
 	}
+
 	if other, ok := OwnsPrefix(owner, epoch, stanzas); !ok {
 		hint := "Pick another prefix (the default is the server name). Two servers must never share a repository."
 		if epoch != nil && epoch.Server == owner.Server {
 			hint = "The prefix holds the master backup of an earlier " + owner.Server + ": to rebuild that server use vaire server init --restore; otherwise pick another prefix. Using it would fence this server."
 		}
+
 		return output.NewError(output.CodePrecondition,
 			"prefix "+t.Prefix+" already holds the backups of "+other,
 			output.ExitPrecondition, hint).
 			WithDetails(map[string]any{"reason": "repo_in_use", "owner": other, "prefix": t.Prefix})
 	}
+
 	return nil
 }
 
@@ -174,51 +192,63 @@ func OwnsPrefix(owner PrefixOwner, epoch *masterbackup.Epoch, stanzas []string) 
 		if epoch.Server != owner.Server {
 			return "server " + epoch.Server, false
 		}
+
 		if owner.Resumed || (owner.Instance != "" && epoch.InstanceID == owner.Instance) {
 			return "", true
 		}
+
 		return "an earlier install of server " + epoch.Server + " (instance " + epoch.InstanceID + ")", false
 	}
+
 	if owner.Resumed {
 		// The prefix was accepted before (an earlier run of this init, or the
 		// configured prefix): the stanzas since are the server's own.
 		return "", true
 	}
+
 	mine := map[string]bool{}
 	for _, s := range owner.Stanzas {
 		mine[s] = true
 	}
+
 	for _, s := range stanzas {
 		if !mine[s] {
 			return "stanza " + s, false
 		}
 	}
+
 	return "", true
 }
 
 // stanzas lists the stanza directories under <prefix>/pgbackrest/backup/.
 func (t Target) stanzas(ctx context.Context, c *minio.Client) ([]string, error) {
 	prefix := t.key("pgbackrest/backup/")
+
 	var out []string
+
 	for obj := range c.ListObjects(ctx, t.Bucket, minio.ListObjectsOptions{Prefix: prefix}) {
 		if obj.Err != nil {
 			return nil, s3Error(t, "list "+prefix, obj.Err)
 		}
+
 		name := strings.Trim(strings.TrimPrefix(obj.Key, prefix), "/")
 		if name != "" {
 			out = append(out, name)
 		}
 	}
+
 	return out, nil
 }
 
 // s3Error maps a minio error to vaire's codes.
 func s3Error(t Target, what string, err error) error {
 	resp := minio.ToErrorResponse(err)
+
 	details := map[string]any{"endpoint": t.Endpoint, "bucket": t.Bucket, "action": what}
 	if resp.Code != "" {
 		details["s3_code"] = resp.Code
 	}
+
 	switch resp.Code {
 	case "NoSuchBucket":
 		return bucketMissing(t)
@@ -226,13 +256,17 @@ func s3Error(t Target, what string, err error) error {
 		return output.NewError(output.CodeBackupAuthFailed, "the bucket refused the keys: "+resp.Code+" while trying to "+what, output.ExitTransport,
 			"Check the access key ID and secret, and that the key may read, write, list and delete in "+t.Bucket+".").WithDetails(details)
 	}
-	var netErr net.Error
-	var dnsErr *net.DNSError
-	var urlErr *url.Error
+
+	var (
+		netErr net.Error
+		dnsErr *net.DNSError
+		urlErr *url.Error
+	)
 	if errors.As(err, &dnsErr) || errors.As(err, &netErr) || errors.As(err, &urlErr) || resp.StatusCode == 0 {
 		return output.WrapError(output.CodeEndpointUnreachable, errors.New("cannot reach "+t.Endpoint+" to "+what+": "+err.Error()), output.ExitTransport,
 			"Check the endpoint URL and that this machine reaches it over HTTPS.").WithDetails(details)
 	}
+
 	return output.WrapError(output.CodeExternalCommand, errors.New("the bucket failed to "+what+": "+err.Error()), output.ExitExternal, "").WithDetails(details)
 }
 
@@ -254,14 +288,20 @@ func (t Target) list(ctx context.Context, rest string) ([]Object, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	prefix := t.key(rest)
+
 	var out []Object
+
 	for obj := range c.ListObjects(ctx, t.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 		if obj.Err != nil {
 			return nil, s3Error(t, "list "+prefix, obj.Err)
 		}
+
 		out = append(out, Object{Key: obj.Key, Size: obj.Size, LastModified: obj.LastModified.UTC().Format(time.RFC3339)})
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+
 	return out, nil
 }

@@ -33,31 +33,39 @@ var nodeConfigStore = func() state.Store { return configSetStore() }
 
 func handleConfigGet(context.Context, *Env) (Result, error) {
 	store := state.FileStore{}
+
 	raw, err := os.ReadFile(state.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitWorkspace, "Run vaire server init first.")
 		}
+
 		return Result{}, err
 	}
+
 	revision, err := store.Revision()
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: map[string]string{"toml": string(raw), "revision": revision}}, nil
 }
 
 func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	ctx = steps.WithFollowerRuntimeOperation(ctx, env.Req.RequestID)
+
 	var p configSetParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	store := nodeConfigStore()
+
 	current, err := store.Revision()
 	if err != nil {
 		return Result{}, err
 	}
+
 	if p.BaseRevision != current {
 		return Result{}, output.NewError(
 			output.CodePrecondition,
@@ -66,39 +74,49 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 			"Re-read the configuration and retry.",
 		).WithDetails(map[string]any{"reason": "config_changed", "base_revision": p.BaseRevision, "revision": current})
 	}
+
 	raw, cfg, old, err := prepareConfigSet(store, p)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := guardRecoveryFloorChanges(old, cfg, runtimeFor(env, true).Host); err != nil {
 		return Result{}, err
 	}
+
 	if err := checkCPUProposalWithRequests(ctx, old, cfg, p.Set); err != nil {
 		return Result{}, err
 	}
+
 	if err := configSetSchedules(ctx, cfg); err != nil {
 		return Result{}, err
 	}
+
 	if err := configSetSafetyChecks(ctx, env, old, cfg); err != nil {
 		return Result{}, err
 	}
+
 	if err := checkExtensionConfigChange(ctx, env, old, cfg); err != nil {
 		return Result{}, err
 	}
+
 	extensionWarnings := extensionIntentWarnings(old, cfg)
 	// A dry run previews the plan for the new file without saving it.
 	revision, synced, err := saveConfigSet(ctx, env, store, raw, old, cfg, p, current)
 	if err != nil {
 		return Result{}, err
 	}
+
 	env.Cluster = cfg
 	rt := runtimeFor(env, true)
 	plan, planErr := configSetPlan(ctx, steps.Catalog(), cfg, rt, engine.Options{})
 	data := map[string]any{"revision": revision, "plan": plan, "saved": !env.Req.DryRun}
+
 	warnings := append(append(synced, extensionWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
 	if planErr != nil {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}
+
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
@@ -109,16 +127,19 @@ func prepareConfigSet(store state.Store, p configSetParams) ([]byte, config.Clus
 	if err != nil {
 		return nil, config.Cluster{}, config.Cluster{}, err
 	}
+
 	cfg, err := config.ParseCluster(raw)
 	if err != nil {
 		return nil, config.Cluster{}, config.Cluster{}, err
 	}
+
 	old, _, oldErr := store.Load()
 	if oldErr == nil {
 		propagated, changed, err := propagateFollowerExtensions(old, cfg)
 		if err != nil {
 			return nil, config.Cluster{}, config.Cluster{}, err
 		}
+
 		if changed {
 			cfg = propagated
 			if raw, err = cfg.Encode(); err != nil {
@@ -126,13 +147,16 @@ func prepareConfigSet(store state.Store, p configSetParams) ([]byte, config.Clus
 			}
 		}
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, config.Cluster{}, config.Cluster{}, config.ValidationError(err)
 	}
+
 	old, _, err = store.Load()
 	if err != nil {
 		return nil, config.Cluster{}, config.Cluster{}, err
 	}
+
 	return raw, cfg, old, nil
 }
 
@@ -140,11 +164,13 @@ func configSetSafetyChecks(ctx context.Context, env *Env, old, cfg config.Cluste
 	if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
 		return err
 	}
+
 	if !env.Req.DryRun {
 		if err := defaultProtectGuard.checkUnprotect(old, cfg, env.Req.Secrets[ProtectCodeSecret]); err != nil {
 			return err
 		}
 	}
+
 	return checkRepoMove(ctx, old, cfg)
 }
 
@@ -152,6 +178,7 @@ func saveConfigSet(ctx context.Context, env *Env, store state.Store, raw []byte,
 	if env.Req.DryRun {
 		return current, nil, nil
 	}
+
 	if err := invalidateCPUProofs(cpuProofTargets(old, cfg, p.Set)); err != nil {
 		return "", nil, err
 	}
@@ -162,16 +189,20 @@ func saveConfigSet(ctx context.Context, env *Env, store state.Store, raw []byte,
 	if err != nil {
 		return "", nil, err
 	}
+
 	if err := store.Save(raw); err != nil {
 		return "", nil, err
 	}
+
 	if err := configSetHostname(cfg); err != nil {
 		return "", nil, err
 	}
+
 	revision, err := store.Revision()
 	if err != nil {
 		return "", nil, err
 	}
+
 	return revision, synced, nil
 }
 
@@ -179,35 +210,44 @@ func checkExtensionConfigChange(ctx context.Context, env *Env, old, cfg config.C
 	if err := refuseUnsafeExtensionConfigRemoval(ctx, old, cfg); err != nil {
 		return err
 	}
+
 	if err := refusePendingConfigChanges(old, cfg); err != nil {
 		return err
 	}
+
 	var followers []config.ClusterSpec
+
 	for _, spec := range cfg.Clusters {
 		if spec.IsFollower() {
 			followers = append(followers, spec)
 		}
 	}
+
 	recs, err := extensionRecords()
 	if err != nil {
 		return err
 	}
+
 	if err := preflightFollowerRuntime(ctx, cfg, recs, followers, nil); err != nil {
 		return err
 	}
+
 	for _, spec := range cfg.Clusters {
 		if spec.IsFollower() {
 			continue
 		}
+
 		if err := validateTargetExtensionDescriptors(cfg, spec); err != nil {
 			return err
 		}
+
 		if sourceHasFollowers(cfg, spec.Name) {
 			if err := validateTargetExtensionCopySafety(cfg, spec, false); err != nil {
 				return err
 			}
 		}
 	}
+
 	if !env.Req.DryRun {
 		if err := captureExtensionChange(old, cfg); err != nil {
 			return output.NewError(output.CodePrecondition,
@@ -216,6 +256,7 @@ func checkExtensionConfigChange(ctx context.Context, env *Env, old, cfg config.C
 				WithDetails(map[string]any{"reason": "extension_history_capture_failed"})
 		}
 	}
+
 	return nil
 }
 
@@ -225,15 +266,18 @@ func newConfigBytes(store state.Store, p configSetParams) ([]byte, error) {
 	if p.TOML != "" && len(p.Set) > 0 {
 		return nil, output.NewError(output.CodeUsage, "pass either toml or set, not both", output.ExitUsage, "")
 	}
+
 	cfg, _, err := store.Load()
 	if err != nil {
 		return nil, err
 	}
+
 	if p.TOML != "" {
 		updated, err := config.ParseCluster([]byte(p.TOML))
 		if err != nil {
 			return nil, output.NewError(output.CodeConfig, "the supplied cluster.toml does not parse: "+err.Error(), output.ExitConfig, "")
 		}
+
 		if changed := config.ImmutableChanges(cfg, updated); len(changed) > 0 {
 			return nil, output.NewError(
 				output.CodePrecondition,
@@ -242,13 +286,16 @@ func newConfigBytes(store state.Store, p configSetParams) ([]byte, error) {
 				config.ImmutableHint(),
 			).WithDetails(map[string]any{"reason": "immutable_key", "keys": changed})
 		}
+
 		return []byte(p.TOML), nil
 	}
+
 	for key, value := range p.Set {
 		if err := cfg.Set(key, value); err != nil {
 			return nil, err
 		}
 	}
+
 	return cfg.Encode()
 }
 
@@ -257,15 +304,19 @@ func handleConfigValidate(_ context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	raw := []byte(p.TOML)
 	if p.TOML == "" {
 		file, err := os.ReadFile(state.Path)
 		if err != nil {
 			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitWorkspace, "Run vaire server init first.")
 		}
+
 		raw = file
 	}
+
 	problems := validateProblems(raw)
+
 	return Result{Data: map[string]any{"valid": len(problems) == 0, "problems": problems}}, nil
 }
 
@@ -275,9 +326,11 @@ func validateProblems(raw []byte) []string {
 	if err != nil {
 		return []string{err.Error()}
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return []string{err.Error()}
 	}
+
 	return nil
 }
 
@@ -289,6 +342,7 @@ func extensionIntentWarnings(old, updated config.Cluster) []output.Warning {
 	if len(changes) == 0 {
 		return nil
 	}
+
 	return []output.Warning{{
 		Code:    "extension_intent_changed",
 		Message: "extension intent changed for " + strings.Join(changes, ", ") + "; review the plan before applying",
@@ -299,15 +353,19 @@ func extensionIntentWarnings(old, updated config.Cluster) []output.Warning {
 // a timer never fails to load: the node has the final say on OnCalendar.
 func checkSchedules(ctx context.Context, cfg config.Cluster) error {
 	var problems []string
+
 	for key, value := range cfg.ScheduleValues() {
 		if _, err := steps.Probe(ctx, "systemd-analyze", "calendar", value); err != nil {
 			problems = append(problems, key+" "+strconv.Quote(value)+" is not a valid OnCalendar expression")
 		}
 	}
+
 	if len(problems) == 0 {
 		return nil
 	}
+
 	sort.Strings(problems)
+
 	return output.NewError(output.CodeValidation, strings.Join(problems, "; "), output.ExitConfig,
 		"Use systemd OnCalendar syntax, for example \"Sun *-*-* 01:00:00\" or \"daily\".").WithDetails(map[string]any{"problems": problems})
 }
@@ -318,21 +376,26 @@ func checkRepoMove(ctx context.Context, old, updated config.Cluster) error {
 	if !old.BackupConfigured() || !updated.BackupConfigured() {
 		return nil
 	}
+
 	ob, nb := old.Backup, updated.Backup
 	if ob.Endpoint == nb.Endpoint && ob.Bucket == nb.Bucket && ob.Prefix == nb.Prefix {
 		return nil
 	}
+
 	all, err := driver(config.ClusterSpec{}, "config.set", nil).InfoAll(ctx)
 	if err != nil {
 		return nil
 	}
+
 	inUse := false
 	for _, info := range all {
 		inUse = inUse || len(info.Sets) > 0
 	}
+
 	if !inUse {
 		return nil
 	}
+
 	return output.NewError(output.CodePrecondition,
 		"backups already live in "+ob.Bucket+"/"+ob.Prefix+"; moving them would lose the restore window",
 		output.ExitPrecondition,
@@ -348,20 +411,27 @@ func syncNodeHostname(cfg config.Cluster) error {
 		if config.IsNotExist(err) {
 			return nil
 		}
+
 		return err
 	}
+
 	hostname := cfg.Hostname(n.NodeName)
 	if n.Hostname == hostname {
 		return nil
 	}
+
 	n.Hostname = hostname
+
 	raw, err := config.EncodeNode(n)
 	if err != nil {
 		return err
 	}
+
 	if err := engine.WriteFileAtomic(config.NodePath, raw, config.FileMode); err != nil {
 		return err
 	}
+
 	masterbackup.MarkDirty("node.toml")
+
 	return nil
 }

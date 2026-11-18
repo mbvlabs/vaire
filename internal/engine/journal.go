@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,12 +47,15 @@ type Journal struct {
 // instead of overwriting it with this run's copy.
 func (j *Journal) update(path string, fn func(*Journal)) error {
 	fn(j)
+
 	return WithFileLock(path+".lock", func() error {
 		disk, err := LoadJournal(path)
 		if err != nil {
 			return err
 		}
+
 		fn(disk)
+
 		return disk.Save(path)
 	})
 }
@@ -67,6 +71,7 @@ func (j *Journal) clearPending(path string, ids []string) error {
 	for _, id := range ids {
 		drop[id] = true
 	}
+
 	return j.update(path, func(j *Journal) {
 		kept := j.RestartPending[:0:0]
 		for _, id := range j.RestartPending {
@@ -74,6 +79,7 @@ func (j *Journal) clearPending(path string, ids []string) error {
 				kept = append(kept, id)
 			}
 		}
+
 		j.RestartPending = kept
 	})
 }
@@ -96,6 +102,7 @@ func ForgetSteps(path string, ids ...string) error {
 	for _, id := range ids {
 		drop[id] = true
 	}
+
 	return forget(path, func(id string) bool { return drop[id] })
 }
 
@@ -109,19 +116,24 @@ func InvalidateStepCompletion(path, id string) error {
 	if !IDPattern.MatchString(template) || (instance && !config.DatabasePattern.MatchString(cluster)) {
 		return fmt.Errorf("invalid step instance ID %q", id)
 	}
+
 	if path == "" {
 		path = JournalPath
 	}
+
 	return WithFileLock(path+".lock", func() error {
 		j, err := LoadJournal(path)
 		if err != nil {
 			return err
 		}
+
 		entry, ok := j.Steps[id]
 		if !ok || entry.Status != StatusCompleted {
 			return nil
 		}
+
 		delete(j.Steps, id)
+
 		return j.Save(path)
 	})
 }
@@ -134,25 +146,33 @@ func forget(path string, match func(id string) bool) error {
 		if err != nil {
 			return err
 		}
+
 		changed := false
+
 		for id := range j.Steps {
 			if match(id) {
 				delete(j.Steps, id)
+
 				changed = true
 			}
 		}
+
 		kept := j.RestartPending[:0:0]
 		for _, id := range j.RestartPending {
 			if match(id) {
 				changed = true
 				continue
 			}
+
 			kept = append(kept, id)
 		}
+
 		if !changed {
 			return nil
 		}
+
 		j.RestartPending = kept
+
 		return j.Save(path)
 	})
 }
@@ -176,15 +196,19 @@ func LoadJournal(path string) (*Journal, error) {
 		if os.IsNotExist(err) {
 			return &Journal{Schema: JournalSchema, Steps: map[string]JournalEntry{}}, nil
 		}
+
 		return nil, err
 	}
+
 	var j Journal
 	if err := json.Unmarshal(raw, &j); err != nil || j.Schema != JournalSchema {
 		return nil, journalCorrupt(path)
 	}
+
 	if j.Steps == nil {
 		j.Steps = map[string]JournalEntry{}
 	}
+
 	return &j, nil
 }
 
@@ -202,26 +226,29 @@ func journalCorrupt(path string) *output.CLIError {
 func (j *Journal) Save(path string) error {
 	j.Schema = JournalSchema
 	j.VaireVersion = buildinfo.Version
+
 	j.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	for id, entry := range j.Steps {
 		entry.Error = secrets.Redact(entry.Error)
 		j.Steps[id] = entry
 	}
+
 	raw, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+
 	return WriteFileAtomic(path, append(raw, '\n'), 0o600)
 }
 
 func (j *Journal) addPending(id string) {
-	for _, existing := range j.RestartPending {
-		if existing == id {
-			return
-		}
+	if slices.Contains(j.RestartPending, id) {
+		return
 	}
+
 	j.RestartPending = append(j.RestartPending, id)
 }

@@ -41,17 +41,21 @@ var (
 	rolesInstalledExtensionSchemas = queryInstalledExtensionSchemasColumn
 	rolesExtensionSettings         = func(ctx context.Context, local pg.Local, db string, keys []string) (map[string]ExtensionSettingFact, error) {
 		out := map[string]ExtensionSettingFact{}
+
 		for _, key := range keys {
 			rows, err := local.Query(ctx, db, ExtensionSettingFactSQL(key), nil)
 			if err != nil {
 				return nil, err
 			}
+
 			fact := ExtensionSettingFact{}
 			if len(rows) > 0 {
 				fact = ParseExtensionSettingFact(rows[0])
 			}
+
 			out[key] = fact
 		}
+
 		return out, nil
 	}
 )
@@ -74,27 +78,35 @@ func SetRolesTestHooks(h RolesTestHooks) func() {
 	oldQuery, oldExec := rolesQueryColumn, rolesExec
 	oldLoaded, oldPending, oldSettings, oldWrite := rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings, rolesWriteRuntimePass
 	oldSchemas := rolesInstalledExtensionSchemas
+
 	if h.QueryColumn != nil {
 		rolesQueryColumn = h.QueryColumn
 	}
+
 	if h.Exec != nil {
 		rolesExec = h.Exec
 	}
+
 	if h.LoadedPreloads != nil {
 		rolesLoadedPreloads = h.LoadedPreloads
 	}
+
 	if h.PendingRestart != nil {
 		rolesPendingRestart = h.PendingRestart
 	}
+
 	if h.InstalledExtensionSchemas != nil {
 		rolesInstalledExtensionSchemas = h.InstalledExtensionSchemas
 	}
+
 	if h.ExtensionSettings != nil {
 		rolesExtensionSettings = h.ExtensionSettings
 	}
+
 	if h.WriteRuntimePass != nil {
 		rolesWriteRuntimePass = h.WriteRuntimePass
 	}
+
 	return func() {
 		rolesQueryColumn, rolesExec = oldQuery, oldExec
 		rolesLoadedPreloads, rolesPendingRestart, rolesExtensionSettings, rolesWriteRuntimePass = oldLoaded, oldPending, oldSettings, oldWrite
@@ -127,6 +139,7 @@ func (s postgresRoles) SkipReason(cfg config.Cluster) string {
 	if spec, err := s.spec(cfg); err == nil && spec.IsFollower() {
 		return "follower"
 	}
+
 	return ""
 }
 
@@ -168,10 +181,12 @@ func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
+
 	identity, err := extensionIdentities(cfg, spec)
 	if err != nil {
 		return nil, err
 	}
+
 	return canonical(roleInputs{
 		Admin: true, Monitor: true, Auth: true, AuthSQL: pgbouncerAuthSQL, AccessSQL: AdminRoleSQL(spec), MonitorSQL: monitorSQL,
 		DB: databaseInputs{Name: spec.Name, StatementTimeout: spec.StatementTimeout, Extensions: spec.Extensions, ExtensionIdentity: identity, Protected: spec.Protected},
@@ -184,22 +199,29 @@ func (s postgresRoles) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, err
 // built-in or a note-only override leaves the inputs bytes unchanged.
 func extensionIdentities(cfg config.Cluster, spec config.ClusterSpec) ([]catalog.SemanticIdentity, error) {
 	resolver := cfg.ExtensionResolver()
+
 	effective, err := resolver.EffectiveNames(spec.Extensions)
 	if err != nil {
 		return nil, err
 	}
+
 	var out []catalog.SemanticIdentity
+
 	for _, name := range effective {
 		ext, err := resolver.Resolve(name)
 		if err != nil {
 			return nil, err
 		}
+
 		if builtin, ok := catalog.Lookup(ext.Name); ok && builtin.SemanticEqual(ext) {
 			continue
 		}
+
 		out = append(out, ext.SemanticIdentity())
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
 	return out, nil
 }
 
@@ -208,34 +230,43 @@ func (s postgresRoles) Check(ctx context.Context, cfg config.Cluster, rt engine.
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	local := ClusterPG(spec)
 	if detail := missingRoleOrDatabase(ctx, local, spec); detail != "" {
 		return incomplete(detail), nil
 	}
+
 	if detail := outdatedAuthFunctions(ctx, local); detail != "" {
 		return incomplete(detail), nil
 	}
+
 	if detail := adminOwnerMembershipGap(ctx, local, spec); detail != "" {
 		return incomplete(detail), nil
 	}
+
 	if detail := adminProtectedMembershipGap(ctx, local, spec); detail != "" {
 		return incomplete(detail), nil
 	}
+
 	if detail := missingDirectMigrateMembership(ctx, local, spec); detail != "" {
 		return incomplete(detail), nil
 	}
+
 	detail, err := extensionReadinessGap(ctx, cfg, spec, local)
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	if detail != "" {
 		return incomplete(detail), nil
 	}
+
 	for _, name := range []string{"pgbouncer_auth", "monitor"} {
 		if _, err := os.Stat(rolesRuntimeDir + "/" + name + ".pass"); err != nil {
 			return incomplete(rolesRuntimeDir + "/" + name + ".pass is missing"), nil
 		}
 	}
+
 	return complete(), nil
 }
 
@@ -244,19 +275,23 @@ func missingRoleOrDatabase(ctx context.Context, local pg.Local, spec config.Clus
 	if err != nil {
 		return "cannot read pg_roles"
 	}
+
 	roleSet := stringSet(roles)
 	for _, role := range append([]string{"vaire_admin", "vaire_monitor", "pgbouncer_auth", RoleDirectOnly, spec.Name + "_owner"}, prefixed(spec.Name, DatabaseRoles)...) {
 		if !roleSet[role] {
 			return "role " + role + " is missing"
 		}
 	}
+
 	dbs, err := rolesQueryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
 	if err != nil {
 		return "cannot read pg_database"
 	}
+
 	if !stringSet(dbs)[spec.Name] {
 		return "database " + spec.Name + " is missing"
 	}
+
 	return ""
 }
 
@@ -269,10 +304,12 @@ func outdatedAuthFunctions(ctx context.Context, local pg.Local) string {
 		if err != nil || len(src) == 0 {
 			return "vaire." + fn.name + " is missing"
 		}
+
 		if !strings.Contains(src[0], fn.needs) {
 			return "vaire." + fn.name + " is out of date"
 		}
 	}
+
 	return ""
 }
 
@@ -281,12 +318,15 @@ func adminOwnerMembershipGap(ctx context.Context, local pg.Local, spec config.Cl
 	if err != nil || len(member) != 1 {
 		return "cannot read vaire_admin's membership in " + spec.Name + "_owner"
 	}
+
 	if (member[0] == "t") == spec.Protected {
 		if spec.Protected {
 			return "vaire_admin can still write to protected " + spec.Name
 		}
+
 		return "vaire_admin is not a member of " + spec.Name + "_owner"
 	}
+
 	return ""
 }
 
@@ -299,13 +339,16 @@ func adminProtectedMembershipGap(ctx context.Context, local pg.Local, spec confi
 		if err != nil || len(held) != 1 {
 			return "cannot read vaire_admin's membership in " + r.role
 		}
+
 		if (held[0] == "t") == spec.Protected {
 			if spec.Protected {
 				return r.protectedGap
 			}
+
 			return "vaire_admin is not a member of " + r.role
 		}
 	}
+
 	return ""
 }
 
@@ -314,9 +357,11 @@ func missingDirectMigrateMembership(ctx context.Context, local pg.Local, spec co
 	if err != nil {
 		return "cannot read " + RoleDirectOnly + " members"
 	}
+
 	if !stringSet(direct)[spec.Name+"_"+RoleMigrate] {
 		return "role " + spec.Name + "_" + RoleMigrate + " is not in " + RoleDirectOnly
 	}
+
 	return ""
 }
 
@@ -325,32 +370,40 @@ func extensionReadinessGap(ctx context.Context, cfg config.Cluster, spec config.
 	if err != nil {
 		return "cannot read extensions in " + spec.Name, nil
 	}
+
 	missing, err := missingExtensionNames(cfg, spec, stringSet(installed))
 	if err != nil {
 		return "", err
 	}
+
 	if len(missing) == 1 {
 		return "extension " + missing[0] + " is missing in " + spec.Name, nil
 	}
+
 	if len(missing) > 1 {
 		return "extensions " + strings.Join(missing, ", ") + " are missing in " + spec.Name, nil
 	}
+
 	reqs, err := extensionRuntimeRequirementsForSpec(cfg, spec)
 	if err != nil {
 		return "", err
 	}
+
 	if missingFiles := missingExtensionFiles(reqs); len(missingFiles) > 0 {
 		return strings.Join(missingFiles, "; "), nil
 	}
+
 	loaded, err := rolesLoadedPreloads(ctx, local)
 	if err != nil {
 		return "cannot read shared_preload_libraries in " + spec.Name, nil
 	}
+
 	for _, req := range reqs {
 		if req.Preload != "" && !loaded[req.Preload] {
 			return "library " + req.Preload + " is not preloaded in " + spec.Name, nil
 		}
 	}
+
 	return "", nil
 }
 
@@ -359,6 +412,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	local := ClusterPG(spec)
 	// Install/hold and verify this target's extension prerequisites before
 	// any SQL or password file write. The effective SQL selection itself is
@@ -366,10 +420,12 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
 		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
 	}
+
 	loaded, err := rolesLoadedPreloads(ctx, local)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	pending, err := rolesPendingRestart(ctx, local)
 	if err != nil {
 		return engine.ApplyResult{}, err
@@ -381,11 +437,14 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	roleSet := stringSet(roles)
+
 	dbs, err := rolesQueryColumn(ctx, local, "postgres", "SELECT datname FROM pg_database")
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	dbSet := stringSet(dbs)
 	databaseMissing := !dbSet[spec.Name]
 
@@ -393,10 +452,12 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	sql, err := databaseSQL(rt, spec, roleSet, dbSet)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	clusterSQL += sql
 	// Establish a missing database before querying its catalog or deciding
 	// whether a dependent extension may be created. The roles and the database
@@ -408,16 +469,20 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 			return engine.ApplyResult{}, err
 		}
 	}
+
 	extensionSQL, deferred, err := extensionApplySQL(ctx, cfg, spec, local, loaded, pending)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	grants := databaseBaseGrantsSQL(spec) + extensionSQL
+
 	if !databaseMissing {
 		if err := rolesExec(ctx, local, AuthDB, clusterSQL, nil); err != nil {
 			return engine.ApplyResult{}, err
 		}
 	}
+
 	if err := rolesExec(ctx, local, spec.Name, grants, nil); err != nil {
 		return engine.ApplyResult{}, err
 	}
@@ -425,12 +490,14 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 	if err := rolesWriteRuntimePass(rt, "pgbouncer_auth", SecretPgbouncerAuth); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := rolesWriteRuntimePass(rt, "monitor", SecretMonitor); err != nil {
 		return engine.ApplyResult{}, err
 	}
 
 	result := engine.ApplyResult{Restart: engine.RestartNone, Warnings: orphanedWarnings(spec, dbs, roleSet)}
 	appendExtensionDeferrals(&result, spec, deferred)
+
 	return result, nil
 }
 
@@ -439,6 +506,7 @@ func (s postgresRoles) Apply(ctx context.Context, cfg config.Cluster, rt engine.
 func clusterRolesSQL(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime, roleSet map[string]bool) (string, error) {
 	var cluster strings.Builder
 	cluster.WriteString("-- managed by vaire - do not edit; use cluster.toml\n")
+
 	service := []struct {
 		role, secret, attrs, grants string
 	}{
@@ -452,17 +520,22 @@ func clusterRolesSQL(ctx context.Context, cfg config.Cluster, spec config.Cluste
 			if err != nil {
 				return "", err
 			}
+
 			fmt.Fprintf(&cluster, "CREATE ROLE %s %s PASSWORD '%s';\n", pg.Quote(r.role), r.attrs, v)
 		}
+
 		if r.grants != "" {
 			fmt.Fprintf(&cluster, "GRANT %s TO %s;\n", r.grants, pg.Quote(r.role))
 		}
 	}
+
 	if !roleSet[RoleDirectOnly] {
 		fmt.Fprintf(&cluster, "CREATE ROLE %s NOLOGIN;\n", RoleDirectOnly)
 	}
+
 	cluster.WriteString(monitorSQL)
 	cluster.WriteString(pgbouncerAuthSQL)
+
 	return cluster.String(), nil
 }
 
@@ -474,22 +547,28 @@ func extensionApplySQL(ctx context.Context, cfg config.Cluster, spec config.Clus
 	if err != nil {
 		return "", nil, fmt.Errorf("reading %s's installed extensions before its dependent SQL: %w", spec.Name, err)
 	}
+
 	installed := stringSet(installedNames)
+
 	sqlExtensions, err := extensionSQLSelection(cfg, spec)
 	if err != nil {
 		return "", nil, err
 	}
+
 	installedSchemas, err := rolesInstalledExtensionSchemas(ctx, local, spec.Name)
 	if err != nil {
 		return "", nil, fmt.Errorf("reading %s's installed extension schemas before its dependent SQL: %w", spec.Name, err)
 	}
+
 	if err := ValidateInstalledExtensionSchemas(spec.Name, sqlExtensions, installedSchemas); err != nil {
 		return "", nil, err
 	}
+
 	actualSettings, err := requiredExtensionSettings(ctx, cfg, spec, local, sqlExtensions, installed, loaded)
 	if err != nil {
 		return "", nil, err
 	}
+
 	return extensionCreationSQLWithReadiness(cfg, spec, loaded, stringSet(pending), installed, actualSettings)
 }
 
@@ -497,32 +576,39 @@ func extensionApplySQL(ctx context.Context, cfg config.Cluster, spec config.Clus
 // depends on. A key PostgreSQL did not report is an error, never a default.
 func requiredExtensionSettings(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, local pg.Local, sqlExtensions []catalog.Extension, installed, loaded map[string]bool) (map[string]ExtensionSettingFact, error) {
 	requiredKeys := map[string]bool{}
+
 	for _, ext := range sqlExtensions {
 		if ext.ExtName == "" || installed[ext.ExtName] {
 			continue
 		}
+
 		if ext.Preload != "" && !loaded[ext.Preload] {
 			// The library is not loaded yet; its custom GUCs may not be
 			// visible until the preload restart, so the preload check in
 			// the SQL builder is the readiness decision.
 			continue
 		}
+
 		for key := range PrimaryExtensionExpectedSettings(cfg, spec, ext) {
 			requiredKeys[key] = true
 		}
 	}
+
 	if len(requiredKeys) == 0 {
 		return nil, nil
 	}
+
 	actualSettings, err := rolesExtensionSettings(ctx, local, spec.Name, sortedKeys(requiredKeys))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s's required extension settings before dependent SQL: %w", spec.Name, err)
 	}
+
 	for key := range requiredKeys {
 		if _, ok := actualSettings[key]; !ok {
 			return nil, fmt.Errorf("%s did not report the effective value of %s; no dependent SQL was run", spec.Name, key)
 		}
 	}
+
 	return actualSettings, nil
 }
 
@@ -532,16 +618,23 @@ func appendExtensionDeferrals(result *engine.ApplyResult, spec config.ClusterSpe
 	if len(deferred) == 0 {
 		return
 	}
+
 	result.Incomplete = true
-	var restartNames []string
-	var settingDetails []string
+
+	var (
+		restartNames   []string
+		settingDetails []string
+	)
+
 	for _, item := range deferred {
 		if item.RestartPending {
 			restartNames = append(restartNames, item.Name)
 			continue
 		}
+
 		settingDetails = append(settingDetails, item.Name+": "+item.Detail)
 	}
+
 	if len(restartNames) > 0 {
 		message := extensionPendingMessage(spec.Name, restartNames)
 		result.Notes = append(result.Notes, message)
@@ -550,6 +643,7 @@ func appendExtensionDeferrals(result *engine.ApplyResult, spec config.ClusterSpe
 			Message: message,
 		})
 	}
+
 	if len(settingDetails) > 0 {
 		message := strings.Join(settingDetails, "; ") + " in " + spec.Name +
 			" before its dependent SQL; fix the required setting and re-run apply (no restart token is needed for a reload-only change)"
@@ -584,22 +678,26 @@ func serviceVerifier(ctx context.Context, cfg config.Cluster, spec config.Cluste
 		if other.Name == spec.Name {
 			continue
 		}
+
 		rows, err := queryColumn(ctx, ClusterPG(other), "postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"+role+"'")
 		if err == nil && len(rows) == 1 && strings.HasPrefix(rows[0], "SCRAM-SHA-256$") {
 			secrets.Add(rows[0])
 			return rows[0], nil
 		}
 	}
+
 	return roleVerifier(rt, secretKey, role, "")
 }
 
 // databaseSQL creates the roles and the database, cluster-wide, in postgres.
 func databaseSQL(rt engine.Runtime, db config.ClusterSpec, roleSet, dbSet map[string]bool) (string, error) {
 	var b strings.Builder
+
 	owner := db.Name + "_owner"
 	if !roleSet[owner] {
 		fmt.Fprintf(&b, "CREATE ROLE %s NOLOGIN;\n", pg.Quote(owner))
 	}
+
 	for _, role := range DatabaseRoles {
 		name := db.Name + "_" + role
 		if !roleSet[name] {
@@ -607,6 +705,7 @@ func databaseSQL(rt engine.Runtime, db config.ClusterSpec, roleSet, dbSet map[st
 			if err != nil {
 				return "", err
 			}
+
 			switch role {
 			case RoleMigrate:
 				fmt.Fprintf(&b, "CREATE ROLE %s LOGIN PASSWORD '%s' IN ROLE %s;\n", pg.Quote(name), v, pg.Quote(owner))
@@ -615,15 +714,19 @@ func databaseSQL(rt engine.Runtime, db config.ClusterSpec, roleSet, dbSet map[st
 			}
 		}
 	}
+
 	fmt.Fprintf(&b, "ALTER ROLE %s SET role = '%s';\n", pg.Quote(db.Name+"_migrate"), owner)
 	fmt.Fprintf(&b, "GRANT %s TO %s;\n", RoleDirectOnly, pg.Quote(db.Name+"_migrate"))
 	fmt.Fprintf(&b, "ALTER ROLE %s SET statement_timeout = '%s';\n", pg.Quote(db.Name+"_app"), db.StatementTimeout)
 	fmt.Fprintf(&b, "ALTER ROLE %s SET default_transaction_read_only = on;\n", pg.Quote(db.Name+"_ro"))
+
 	if !dbSet[db.Name] {
 		fmt.Fprintf(&b, "CREATE DATABASE %s OWNER %s;\n", pg.Quote(db.Name), pg.Quote(owner))
 	}
+
 	b.WriteString(DatabaseConnectSQL(db.Name, db.Name))
 	b.WriteString(AdminAccessSQL(db))
+
 	return b.String(), nil
 }
 
@@ -654,6 +757,7 @@ func adminGrants(spec config.ClusterSpec) string {
 	if spec.Protected {
 		return "pg_monitor, pg_use_reserved_connections"
 	}
+
 	return "pg_monitor, pg_signal_backend, pg_maintain, pg_use_reserved_connections"
 }
 
@@ -695,6 +799,7 @@ DO $vaire$ BEGIN
 END $vaire$;
 `, pg.Quote(owner))
 	}
+
 	return fmt.Sprintf(`GRANT pg_read_all_data TO vaire_admin;
 ALTER ROLE %[1]s NOLOGIN;
 DO $vaire$ BEGIN
@@ -740,6 +845,7 @@ func DatabaseConnectSQL(target, roleDB string) string {
 	fmt.Fprintf(&b, "REVOKE ALL ON DATABASE %s FROM PUBLIC;\n", pg.Quote(target))
 	fmt.Fprintf(&b, "GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s, %s, %s, vaire_admin, vaire_monitor;\n",
 		pg.Quote(target), pg.Quote(roleDB+"_migrate"), pg.Quote(roleDB+"_app"), pg.Quote(roleDB+"_ro"))
+
 	return b.String()
 }
 
@@ -760,6 +866,7 @@ func databaseGrantsSQL(cfg config.Cluster, db config.ClusterSpec) (string, error
 	if err != nil {
 		return "", err
 	}
+
 	return databaseBaseGrantsSQL(db) + extensions, nil
 }
 
@@ -769,12 +876,14 @@ func databaseBaseGrantsSQL(db config.ClusterSpec) string {
 	owner := pg.Quote(db.Name + "_owner")
 	app := pg.Quote(db.Name + "_app")
 	ro := pg.Quote(db.Name + "_ro")
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "GRANT USAGE ON SCHEMA public TO %s, %s;\n", app, ro)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT ON TABLES TO %s;\n", owner, ro)
+
 	return b.String()
 }
 
@@ -783,10 +892,12 @@ func allExtensionsSQL(cfg config.Cluster, db config.ClusterSpec) (string, error)
 	if err != nil {
 		return "", err
 	}
+
 	var b strings.Builder
 	for _, entry := range entries {
 		b.WriteString(ExtensionSQL(entry, db.Name))
 	}
+
 	return b.String(), nil
 }
 
@@ -795,13 +906,17 @@ func missingExtensionNames(cfg config.Cluster, spec config.ClusterSpec, installe
 	if err != nil {
 		return nil, err
 	}
+
 	var missing []string
+
 	for _, entry := range entries {
 		if !installed[entry.ExtName] {
 			missing = append(missing, entry.ExtName)
 		}
 	}
+
 	sort.Strings(missing)
+
 	return missing, nil
 }
 
@@ -840,19 +955,24 @@ func CopyExtensionPlan(source []ExtensionState) ([]ExtensionState, []string, err
 			return nil, nil, err
 		}
 	}
+
 	plan, err := resolveCopyExtensions(source, configured)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	ordered, err := extensionDependencyOrder(configured)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	out := make([]ExtensionState, 0, len(plan))
 	for _, ext := range plan {
 		out = append(out, ext)
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
 	return out, ordered, nil
 }
 
@@ -861,31 +981,38 @@ func CopyExtensionPlan(source []ExtensionState) ([]ExtensionState, []string, err
 // instrumentation.
 func configuredCopyExtensions(source []ExtensionState) (map[string]bool, error) {
 	seen := map[string]bool{}
+
 	for _, ext := range source {
 		if err := validateExtensionState(ext); err != nil {
 			return nil, err
 		}
+
 		if seen[ext.Name] {
 			return nil, copyExtensionError("extension_incompatible",
 				"the source reports extension "+safeExtensionName(ext.Name)+" more than once",
 				"Do not copy from this source until its extension catalog is consistent.")
 		}
+
 		seen[ext.Name] = true
 	}
 
 	configured := map[string]bool{defaultCopyExtension: true}
+
 	for _, ext := range source {
 		if ext.Name == "plpgsql" {
 			continue
 		}
+
 		entry, ok := catalog.Lookup(ext.Name)
 		if !ok || entry.ExtName == "" {
 			return nil, copyExtensionError("extension_missing",
 				"the source extension "+safeExtensionName(ext.Name)+" is not supported by vaire",
 				"Remove the extension from the source, or install a compatible vaire support for it.")
 		}
+
 		configured[entry.ExtName] = true
 	}
+
 	return configured, nil
 }
 
@@ -896,32 +1023,40 @@ func addExtensionRequirements(name string, configured, visiting map[string]bool)
 	if name == "plpgsql" {
 		return nil
 	}
+
 	if visiting[name] {
 		return copyExtensionError("extension_incompatible",
 			"the destination extension metadata has a dependency cycle at "+safeExtensionName(name),
 			"Report this as a vaire bug; do not retry the copy.")
 	}
+
 	control, err := readExtensionControl(name)
 	if err != nil {
 		return err
 	}
+
 	visiting[name] = true
+
 	for _, req := range control.requires {
 		if req == "plpgsql" {
 			continue
 		}
+
 		entry, ok := catalog.Lookup(req)
 		if !ok || entry.ExtName == "" {
 			return copyExtensionError("extension_missing",
 				"extension "+safeExtensionName(name)+" requires "+safeExtensionName(req)+", which vaire does not support",
 				"Remove "+safeExtensionName(name)+" from the source, or install compatible vaire support for "+safeExtensionName(req)+".")
 		}
+
 		configured[entry.ExtName] = true
 		if err := addExtensionRequirements(entry.ExtName, configured, visiting); err != nil {
 			return err
 		}
 	}
+
 	delete(visiting, name)
+
 	return nil
 }
 
@@ -929,26 +1064,32 @@ func addExtensionRequirements(name string, configured, visiting map[string]bool)
 // schema, and the dependencies', from PG18's installed control metadata.
 func resolveCopyExtensions(source []ExtensionState, configured map[string]bool) (map[string]ExtensionState, error) {
 	plan := map[string]ExtensionState{}
+
 	for _, ext := range source {
 		control, err := readExtensionControl(ext.Name)
 		if err != nil {
 			return nil, err
 		}
+
 		if ext.Version != control.version {
 			return nil, copyExtensionError("extension_version_incompatible",
 				"extension "+safeExtensionName(ext.Name)+" is version "+safeExtensionName(ext.Version)+" on the source but version "+safeExtensionName(control.version)+" on the destination",
 				"Align the extension versions before copying; vaire does not convert extension versions automatically.")
 		}
+
 		if ext.Schema != control.schema {
 			return nil, copyExtensionError("extension_schema_incompatible",
 				"extension "+safeExtensionName(ext.Name)+" is in schema "+safeExtensionName(ext.Schema)+" on the source but in schema "+safeExtensionName(control.schema)+" on the destination",
 				"Install the destination extension in the same schema; vaire does not rewrite extension schemas.")
 		}
+
 		plan[ext.Name] = ext
 	}
+
 	if err := addConfiguredExtensions(plan, configured); err != nil {
 		return nil, err
 	}
+
 	return plan, nil
 }
 
@@ -962,28 +1103,37 @@ func addConfiguredExtensions(plan map[string]ExtensionState, configured map[stri
 		if err != nil {
 			return err
 		}
+
 		plan["plpgsql"] = ExtensionState{Name: "plpgsql", Version: control.version, Schema: control.schema}
 	}
+
 	for name := range configured {
 		if name == "plpgsql" {
 			continue
 		}
+
 		if _, ok := plan[name]; ok {
 			continue
 		}
+
 		control, err := readExtensionControl(name)
 		if err != nil {
 			return err
 		}
+
 		plan[name] = ExtensionState{Name: name, Version: control.version, Schema: control.schema}
 	}
+
 	return nil
 }
 
 func extensionDependencyOrder(configured map[string]bool) ([]string, error) {
 	var out []string
+
 	state := map[string]int{}
+
 	var visit func(string) error
+
 	visit = func(name string) error {
 		switch state[name] {
 		case 1:
@@ -993,33 +1143,43 @@ func extensionDependencyOrder(configured map[string]bool) ([]string, error) {
 		case 2:
 			return nil
 		}
+
 		state[name] = 1
+
 		control, err := readExtensionControl(name)
 		if err != nil {
 			return err
 		}
+
 		for _, req := range control.requires {
 			if req == "plpgsql" || !configured[req] {
 				continue
 			}
+
 			if err := visit(req); err != nil {
 				return err
 			}
 		}
+
 		state[name] = 2
 		out = append(out, name)
+
 		return nil
 	}
+
 	names := make([]string, 0, len(configured))
 	for name := range configured {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	for _, name := range names {
 		if err := visit(name); err != nil {
 			return nil, err
 		}
 	}
+
 	return out, nil
 }
 
@@ -1041,39 +1201,48 @@ func readExtensionControl(name string) (extensionControl, error) {
 			"the extension name is not a safe control-file name",
 			"Do not copy from this source until its extension catalog is consistent.")
 	}
+
 	path := filepath.Join(pgExtensionControlDir, name+".control")
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return extensionControl{}, copyExtensionError("extension_missing",
 			"extension "+safeExtensionName(name)+" is not installed on the destination",
 			"Install the extension package on the node before copying, or remove it from the source.")
 	}
+
 	values := map[string]string{}
-	for _, line := range strings.Split(string(raw), "\n") {
+
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			return extensionControl{}, copyExtensionError("extension_incompatible",
 				"the destination extension metadata for "+safeExtensionName(name)+" is malformed",
 				"Do not copy until the node's extension package is repaired.")
 		}
+
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
 		value = strings.Trim(value, "'\"")
 		values[key] = value
 	}
+
 	control := extensionControl{version: values["default_version"], schema: values["schema"]}
 	if control.version == "" {
 		return extensionControl{}, copyExtensionError("extension_incompatible",
 			"the destination extension metadata for "+safeExtensionName(name)+" has no default version",
 			"Do not copy until the node's extension package is repaired.")
 	}
+
 	if control.schema == "" {
 		control.schema = "public"
 	}
+
 	for _, req := range strings.FieldsFunc(values["requires"], func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t'
 	}) {
@@ -1081,15 +1250,18 @@ func readExtensionControl(name string) (extensionControl, error) {
 			control.requires = append(control.requires, req)
 		}
 	}
+
 	available, err := extensionInstallPath(name, control.version)
 	if err != nil {
 		return extensionControl{}, err
 	}
+
 	if !available {
 		return extensionControl{}, copyExtensionError("extension_version_incompatible",
 			"the destination has no installation path for extension "+safeExtensionName(name)+" version "+safeExtensionName(control.version),
 			"Align the extension versions before copying; vaire does not convert extension versions automatically.")
 	}
+
 	return control, nil
 }
 
@@ -1101,9 +1273,11 @@ func extensionInstallPath(name, target string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
 	if bases[target] {
 		return true, nil
 	}
+
 	return extensionReachable(bases, updates, target), nil
 }
 
@@ -1116,30 +1290,39 @@ func extensionScripts(name string) (bases map[string]bool, updates map[string][]
 			"the destination extension directory could not be read",
 			"Do not copy until the node's PostgreSQL extension directory is readable.")
 	}
+
 	prefix := name + "--"
 	bases = map[string]bool{}
 	updates = map[string][]string{}
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
+
 		file := entry.Name()
 		if !strings.HasPrefix(file, prefix) || !strings.HasSuffix(file, ".sql") {
 			continue
 		}
+
 		rest := strings.TrimSuffix(strings.TrimPrefix(file, prefix), ".sql")
 		if rest == "" {
 			continue
 		}
+
 		if from, to, ok := strings.Cut(rest, "--"); ok {
 			if from == "" || to == "" {
 				continue
 			}
+
 			updates[from] = append(updates[from], to)
+
 			continue
 		}
+
 		bases[rest] = true
 	}
+
 	return bases, updates, nil
 }
 
@@ -1147,25 +1330,31 @@ func extensionScripts(name string) (bases map[string]bool, updates map[string][]
 // one of the base versions.
 func extensionReachable(bases map[string]bool, updates map[string][]string, target string) bool {
 	seen := make(map[string]bool, len(bases))
+
 	queue := make([]string, 0, len(bases))
 	for version := range bases {
 		seen[version] = true
 		queue = append(queue, version)
 	}
+
 	for len(queue) > 0 {
 		version := queue[0]
 		queue = queue[1:]
+
 		for _, next := range updates[version] {
 			if seen[next] {
 				continue
 			}
+
 			if next == target {
 				return true
 			}
+
 			seen[next] = true
 			queue = append(queue, next)
 		}
 	}
+
 	return false
 }
 
@@ -1176,6 +1365,7 @@ func validateExtensionState(ext ExtensionState) error {
 			"the extension inventory has an invalid name, version or schema",
 			"Do not copy from this source until its extension catalog is complete.")
 	}
+
 	return nil
 }
 
@@ -1183,10 +1373,12 @@ func safeExtensionName(value string) string {
 	if len(value) > 120 {
 		value = value[:120] + "..."
 	}
+
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return '?'
 		}
+
 		return r
 	}, value)
 }
@@ -1266,6 +1458,7 @@ func CopyObjectGrantsSQL(database string) string {
 	owner := pg.Quote(database + "_owner")
 	app := pg.Quote(database + "_app")
 	ro := pg.Quote(database + "_ro")
+
 	return strings.NewReplacer(
 		"{{OWNER}}", owner,
 		"{{OWNER_LITERAL}}", literal(database+"_owner"),
@@ -1412,6 +1605,7 @@ func roleVerifier(rt engine.Runtime, secretKey, role, db string) (string, error)
 		if db != "" {
 			hint = "Databases are created with vaire db create " + db + ", which supplies the passwords; remove " + db + " from cluster.toml (vaire config edit) and create it that way."
 		}
+
 		return "", output.NewError(
 			output.CodeInputRequired,
 			"the password for role "+role+" was not supplied",
@@ -1419,7 +1613,9 @@ func roleVerifier(rt engine.Runtime, secretKey, role, db string) (string, error)
 			hint,
 		).WithDetails(map[string]any{"role": role, "secret": secretKey, "database": db})
 	}
+
 	secrets.Add(password)
+
 	return pg.SCRAMVerifier(password)
 }
 
@@ -1430,6 +1626,7 @@ func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
+
 	password := rt.SecretValues[secretKey]
 	if password == "" {
 		return output.NewError(
@@ -1439,7 +1636,9 @@ func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 			"Re-run init with --resume so the operator can supply svc."+name+".",
 		).WithDetails(map[string]any{"secret": secretKey, "path": path})
 	}
+
 	secrets.Add(password)
+
 	return writeFile(path, password+"\n", 0o600)
 }
 
@@ -1447,10 +1646,12 @@ func writeRuntimePass(rt engine.Runtime, name, secretKey string) error {
 // that look like vaire databases.
 func orphanedWarnings(spec config.ClusterSpec, dbs []string, roleSet map[string]bool) []output.Warning {
 	var warnings []output.Warning
+
 	for _, name := range dbs {
 		if systemDatabases[name] || name == spec.Name {
 			continue
 		}
+
 		if roleSet[name+"_owner"] {
 			warnings = append(warnings, output.Warning{
 				Code:    "orphaned_database",
@@ -1458,7 +1659,9 @@ func orphanedWarnings(spec config.ClusterSpec, dbs []string, roleSet map[string]
 			})
 		}
 	}
+
 	sort.Slice(warnings, func(i, j int) bool { return warnings[i].Message < warnings[j].Message })
+
 	return warnings
 }
 
@@ -1467,6 +1670,7 @@ func queryColumn(ctx context.Context, local pg.Local, db, sql string) ([]string,
 	if err != nil {
 		return nil, err
 	}
+
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
 		for _, v := range row {
@@ -1474,6 +1678,7 @@ func queryColumn(ctx context.Context, local pg.Local, db, sql string) ([]string,
 			break
 		}
 	}
+
 	return out, nil
 }
 
@@ -1482,6 +1687,7 @@ func stringSet(values []string) map[string]bool {
 	for _, v := range values {
 		out[v] = true
 	}
+
 	return out
 }
 
@@ -1491,6 +1697,7 @@ func prefixed(name string, roles []string) []string {
 	for _, role := range roles {
 		out = append(out, name+"_"+role)
 	}
+
 	return out
 }
 

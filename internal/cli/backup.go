@@ -64,6 +64,7 @@ var initBackupFlags = backupFlagNames{
 // kit, so a re-run keeps the bucket and only asks for what changes.
 func settingsFromConfig(cfg config.Cluster, kit *workspaces.BackupCreds) backupSettings {
 	b := cfg.Backup
+
 	s := backupSettings{
 		Provider: b.Provider, Endpoint: b.Endpoint, Region: b.Region, Bucket: b.Bucket, Prefix: b.Prefix, URIStyle: b.URIStyle,
 		FullSchedule: b.Database.FullSchedule, DiffSchedule: b.Database.DiffSchedule, IncrSchedule: b.Database.IncrSchedule,
@@ -72,9 +73,11 @@ func settingsFromConfig(cfg config.Cluster, kit *workspaces.BackupCreds) backupS
 	if s.Prefix == "" {
 		s.Prefix = cfg.Name()
 	}
+
 	if kit != nil && kit.Bucket == b.Bucket {
 		s.KeyID = kit.AccessKeyID
 	}
+
 	return s
 }
 
@@ -95,28 +98,35 @@ func applyBackupFlags(cmd *cobra.Command, names backupFlagNames, s *backupSettin
 	set(names.FullSchedule, &s.FullSchedule)
 	set(names.DiffSchedule, &s.DiffSchedule)
 	set(names.IncrSchedule, &s.IncrSchedule)
+
 	if names.RetentionFull != "" && flagChanged(cmd, names.RetentionFull) {
 		n, err := cmd.Flags().GetInt(names.RetentionFull)
 		if err != nil {
 			return err
 		}
+
 		s.RetentionFull = n
 	}
+
 	switch {
 	case flagTrue(cmd, names.SecretStdin):
 		v, err := readFirstLine(cmd.InOrStdin())
 		if err != nil {
 			return err
 		}
+
 		s.Secret = strings.TrimSpace(v)
 	case stringFlag(cmd, names.SecretFile) != "":
 		raw, err := os.ReadFile(stringFlag(cmd, names.SecretFile))
 		if err != nil {
 			return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
+
 		s.Secret = strings.TrimSpace(string(raw))
 	}
+
 	secrets.Add(s.Secret)
+
 	return nil
 }
 
@@ -126,12 +136,15 @@ func fillPreset(s *backupSettings) {
 	if !ok {
 		return
 	}
+
 	if s.URIStyle == "" {
 		s.URIStyle = preset.URIStyle
 	}
+
 	if s.Region == "" {
 		s.Region = preset.Region
 	}
+
 	if s.Endpoint == "" && preset.Endpoint != "" && !strings.Contains(preset.Endpoint, "<account_id>") && s.Region != "" {
 		s.Endpoint = backup.FillEndpoint(preset.Endpoint, s.Region)
 	}
@@ -157,6 +170,7 @@ func requireBackupSettings(names backupFlagNames, s backupSettings, action strin
 				"Pass --"+c.flag+" to continue without a prompt.").WithDetails(map[string]any{"flag": "--" + c.flag})
 		}
 	}
+
 	return nil
 }
 
@@ -165,13 +179,16 @@ func requireBackupSettings(names backupFlagNames, s backupSettings, action strin
 // database rewind about N weeks.
 func backupFields(s *backupSettings, weeks *string) []huh.Field {
 	providers := make([]huh.Option[string], 0, len(backup.Presets))
+
 	labels := map[string]string{"r2": "Cloudflare R2", "s3": "AWS S3", "b2": "Backblaze B2", "hetzner": "Hetzner Object Storage", "minio": "MinIO", "custom": "Other S3-compatible"}
 	for _, p := range backup.Presets {
 		providers = append(providers, huh.NewOption(labels[p.Provider], p.Provider))
 	}
+
 	if s.Provider == "" {
 		s.Provider = "r2"
 	}
+
 	return []huh.Field{
 		huh.NewSelect[string]().Title("Storage provider").Options(providers...).Value(&s.Provider),
 		huh.NewInput().Title("Region").Description("R2 uses auto; Hetzner fsn1, nbg1 or hel1.").
@@ -182,6 +199,7 @@ func backupFields(s *backupSettings, weeks *string) []huh.Field {
 				if p.Endpoint == "" {
 					return "The https:// URL of the S3 API."
 				}
+
 				return "For example " + p.Endpoint
 			}, &s.Provider).
 			Validate(optional(config.CheckEndpoint)).Value(&s.Endpoint),
@@ -202,6 +220,7 @@ func nonEmpty(v, what string) error {
 	if strings.TrimSpace(v) == "" {
 		return fmt.Errorf("%s is required", what)
 	}
+
 	return nil
 }
 
@@ -211,14 +230,18 @@ func askBackupSettings(s *backupSettings) error {
 	if weeks == "0" {
 		weeks = "4"
 	}
+
 	if err := ui.RunForm(huh.NewGroup(backupFields(s, &weeks)...).Title("Backups")); err != nil {
 		return promptErr(err)
 	}
+
 	if n, err := strconv.Atoi(weeks); err == nil {
 		s.RetentionFull = n
 	}
+
 	s.Region, s.Endpoint = strings.TrimSpace(s.Region), strings.TrimSpace(s.Endpoint)
 	secrets.Add(s.Secret)
+
 	return nil
 }
 
@@ -240,13 +263,16 @@ func (s backupSettings) configKeys() map[string]string {
 	if s.FullSchedule != "" {
 		keys["backup.database.full_schedule"] = s.FullSchedule
 	}
+
 	if s.DiffSchedule != "" {
 		keys["backup.database.diff_schedule"] = s.DiffSchedule
 	}
+
 	keys["backup.database.incr_schedule"] = s.IncrSchedule
 	if s.RetentionFull > 0 {
 		keys["backup.database.retention_full"] = strconv.Itoa(s.RetentionFull)
 	}
+
 	return keys
 }
 
@@ -258,15 +284,19 @@ func ensureRecoveryIdentity(kit *workspaces.BackupCreds) (*workspaces.BackupCred
 	if kit != nil {
 		*out = *kit
 	}
+
 	if out.Encryption.Identity != "" {
 		return out, false, nil
 	}
+
 	identity, recipient, err := backup.NewIdentity()
 	if err != nil {
 		return nil, false, err
 	}
+
 	out.Encryption.Identity, out.Encryption.Recipient = identity, recipient
 	secrets.Add(identity)
+
 	return out, true, nil
 }
 
@@ -283,7 +313,9 @@ func prepareKit(kit *workspaces.BackupCreds, s backupSettings, wasConfigured boo
 			"vaire never makes a new cipher for an existing repository. Log in from a current transfer bundle (vaire login), then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
+
 	generated := false
+
 	out := &workspaces.BackupCreds{}
 	if sameRepo {
 		*out = *kit
@@ -292,25 +324,32 @@ func prepareKit(kit *workspaces.BackupCreds, s backupSettings, wasConfigured boo
 		if err != nil {
 			return nil, false, err
 		}
+
 		out.PgBackRest.CipherPass = pass
 		if kit != nil {
 			out.Encryption = kit.Encryption
 		}
+
 		generated = true
 	}
+
 	out, created, err := ensureRecoveryIdentity(out)
 	if err != nil {
 		return nil, false, err
 	}
+
 	generated = generated || created
 	if out.AccessKeyID != s.KeyID || out.SecretAccessKey != s.Secret {
 		generated = true
 	}
+
 	out.Provider, out.Endpoint, out.Region, out.Bucket, out.Prefix, out.URIStyle = s.Provider, strings.TrimSuffix(s.Endpoint, "/"), s.Region, s.Bucket, s.Prefix, s.URIStyle
+
 	out.AccessKeyID, out.SecretAccessKey = s.KeyID, s.Secret
 	for _, v := range out.SecretValues() {
 		secrets.Add(v)
 	}
+
 	return out, generated, nil
 }
 
@@ -319,6 +358,7 @@ func backupSecrets(kit *workspaces.BackupCreds) map[string]string {
 	if kit == nil {
 		return nil
 	}
+
 	return map[string]string{
 		steps.SecretBackupKeyID:        kit.AccessKeyID,
 		steps.SecretBackupKeySecret:    kit.SecretAccessKey,
@@ -340,12 +380,15 @@ func addRecoveryKit(secretValues map[string]string, kit *workspaces.BackupCreds)
 	if kit == nil {
 		return
 	}
+
 	if kit.Encryption.Recipient != "" {
 		secretValues[steps.SecretBackupAgeRecipient] = kit.Encryption.Recipient
 	}
+
 	if !kit.HasBucket() {
 		return
 	}
+
 	for k, v := range backupSecrets(kit) {
 		if v != "" {
 			secretValues[k] = v
@@ -361,13 +404,16 @@ func requirePackagesCurrent(ctx context.Context, caller remote.Caller, p *progre
 	if err != nil {
 		return err
 	}
+
 	var plan engine.PlanData
 	if err := reply.Decode(&plan); err != nil {
 		return err
 	}
+
 	if plan.WouldApply == 0 {
 		return nil
 	}
+
 	return output.NewError(output.CodePrecondition,
 		"the node's packages are out of date: pgBackRest isn't installed yet",
 		output.ExitPrecondition,
@@ -383,19 +429,23 @@ func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s 
 	if err := requirePackagesCurrent(ctx, caller, p); err != nil {
 		return engine.ApplyData{}, nil, err
 	}
+
 	reply, err := p.call(ctx, caller, "config.get", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return engine.ApplyData{}, nil, err
 	}
+
 	var current configData
 	if err := reply.Decode(&current); err != nil {
 		return engine.ApplyData{}, nil, err
 	}
+
 	setReply, err := p.call(ctx, caller, "config.set", map[string]any{"set": s.configKeys(), "base_revision": current.Revision},
 		remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return engine.ApplyData{}, nil, err
 	}
+
 	applyReply, err := p.call(ctx, caller, "apply", map[string]any{"steps": steps.BackupStepIDs(), "rotate_backup_secrets": true}, remote.CallOptions{
 		Secrets: backupSecrets(kit),
 		OnEvent: p.event,
@@ -403,10 +453,12 @@ func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s 
 	if err != nil {
 		return engine.ApplyData{}, setReply.Warnings, err
 	}
+
 	var data engine.ApplyData
 	if err := applyReply.Decode(&data); err != nil {
 		return data, nil, err
 	}
+
 	return data, append(setReply.Warnings, applyReply.Warnings...), nil
 }
 
@@ -415,6 +467,7 @@ func configureBackups(ctx context.Context, caller remote.Caller, p *progress, s 
 // re-run on the configured prefix is the server's own by definition.
 func setupPrefixOwner(ctx context.Context, p *progress, node remote.Caller, cfg config.Cluster, configured bool) backup.PrefixOwner {
 	owner := backup.PrefixOwner{Server: cfg.Name(), Stanzas: cfg.Stanzas(), Resumed: configured}
+
 	if reply, err := p.call(ctx, node, "master-backup.list", nil, remote.CallOptions{}); err == nil {
 		var st struct {
 			InstanceID string `json:"instance_id"`
@@ -423,50 +476,64 @@ func setupPrefixOwner(ctx context.Context, p *progress, node remote.Caller, cfg 
 			owner.Instance = st.InstanceID
 		}
 	}
+
 	return owner
 }
 
 func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	ctx := commandContext(cmd)
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	creds, err := workspaces.LoadCredentials(s.ctx.Name)
 	if err != nil {
 		return err
 	}
+
 	settings := settingsFromConfig(cfg, creds.Backup)
 	if err := applyBackupFlags(cmd, setupFlags, &settings); err != nil {
 		return err
 	}
+
 	wasConfigured := cfg.BackupConfigured()
 	if err := checkSameBackupRepo(cfg, settings, wasConfigured); err != nil {
 		return err
 	}
+
 	if !MustNotPrompt(cmd) {
 		if err := askBackupSettings(&settings); err != nil {
 			return err
 		}
 	}
+
 	fillPreset(&settings)
+
 	if err := requireBackupSettings(setupFlags, settings, "backup setup"); err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		return backupSetupDryRun(cmd, settings, s.warnings)
 	}
+
 	owner := setupPrefixOwner(ctx, p, s.node, cfg, wasConfigured)
 	p.note("checking the bucket " + settings.Bucket + " at " + settings.Endpoint)
+
 	if err := p.during("checking the bucket "+settings.Bucket, func() error { return backup.Probe(ctx, settings.target(), owner) }); err != nil {
 		return err
 	}
+
 	kit, generated, err := prepareKit(creds.Backup, settings, wasConfigured)
 	if err != nil {
 		return err
@@ -477,10 +544,12 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	if err := workspaces.SaveCredentials(s.ctx.Name, creds); err != nil {
 		return err
 	}
+
 	data, warnings, err := configureBackups(ctx, s.node, p, settings, kit)
 	if err != nil {
 		return err
 	}
+
 	warnings = append(s.warnings, warnings...)
 	// The newest master bundle goes up at once, with epoch 1 on a new
 	// bucket, rather than waiting for the next change or the daily run.
@@ -495,16 +564,20 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	next := []string{"vaire backup list"}
+
 	if generated && !stored {
 		warnings = append(warnings, output.Warning{
 			Code:    "recovery_kit_changed",
 			Message: "the recovery kit changed; run vaire secrets export and store the new handoff",
 		})
 	}
+
 	if !stored {
 		next = append([]string{"vaire secrets export"}, next...)
 	}
+
 	list := backupListSummary(ctx, p, s)
 	message := make([]string, 0, 1+len(list))
 	message = append(message, fmt.Sprintf("backups go to %s/%s (%s); applied %d of %d steps", settings.Bucket, settings.Prefix, settings.Provider, data.Applied, data.Total))
@@ -515,6 +588,7 @@ func runBackupSetup(cmd *cobra.Command, _ []string) error {
 		Warnings: warnings,
 		Next:     next,
 	}
+
 	return output.Success(cmd, res)
 }
 
@@ -524,10 +598,12 @@ func checkSameBackupRepo(cfg config.Cluster, settings backupSettings, wasConfigu
 	if !wasConfigured {
 		return nil
 	}
+
 	if settings.Bucket == cfg.Backup.Bucket && settings.Prefix == cfg.Backup.Prefix &&
 		strings.TrimSuffix(settings.Endpoint, "/") == cfg.Backup.Endpoint {
 		return nil
 	}
+
 	return output.NewError(output.CodePrecondition,
 		"backups already go to "+cfg.Backup.Bucket+"/"+cfg.Backup.Prefix+"; moving them would lose the restore window",
 		output.ExitPrecondition, "Keep the bucket and prefix. Re-running setup with them rotates the keys.").
@@ -549,6 +625,7 @@ func offerSetupHandoff(cmd *cobra.Command, s *session, p *progress, generated bo
 	if !generated || MustNotPrompt(cmd) {
 		return false, nil
 	}
+
 	ok, _ := PromptYes(cmd, "Show the secrets handoff with the recovery kit now?")
 	if !ok {
 		return false, nil
@@ -558,6 +635,7 @@ func offerSetupHandoff(cmd *cobra.Command, s *session, p *progress, generated bo
 	if err != nil {
 		return false, err
 	}
+
 	if err := secretGateUnlock(cmd, hash, s, p, "showing the secrets handoff"); err != nil {
 		return false, err
 	}
@@ -565,6 +643,7 @@ func offerSetupHandoff(cmd *cobra.Command, s *session, p *progress, generated bo
 	if err := showWorkspaceHandoff(cmd, s.ctx); err != nil {
 		return false, err
 	}
+
 	return true, nil
 }
 
@@ -575,21 +654,26 @@ func backupListSummary(ctx context.Context, p *progress, s *session) []string {
 	if err != nil {
 		return nil
 	}
+
 	var bl backupRowsData
 	if reply.Decode(&bl) != nil {
 		return nil
 	}
+
 	lines := make([]string, 0, len(bl.Databases))
 	for _, r := range bl.Databases {
 		if r.DroppedAt != "" {
 			continue
 		}
+
 		line := r.Database + ": restore window " + r.Window.describe()
 		if r.Latest != nil {
 			line = r.Database + ": latest backup " + r.Latest.Label + " (" + humanBytes(r.Latest.Size) + "), restore window " + r.Window.describe()
 		}
+
 		lines = append(lines, line)
 	}
+
 	return lines
 }
 
@@ -644,6 +728,7 @@ func (w windowData) describe() string {
 	if w.From == "" {
 		return "none yet"
 	}
+
 	return w.span() + " (" + w.archiveState() + ")"
 }
 
@@ -653,6 +738,7 @@ func (w windowData) span() string {
 	if w.From == "" {
 		return "none yet"
 	}
+
 	return w.From + " to " + w.To
 }
 
@@ -662,10 +748,12 @@ func (w windowData) archiveState() string {
 	if w.UpToDate {
 		return "archive up to date"
 	}
+
 	state := "archive lag " + compactDuration(time.Duration(w.LagSeconds)*time.Second)
 	if w.PendingWAL != nil && *w.PendingWAL > 0 {
 		state += fmt.Sprintf(", %d WAL %s waiting", *w.PendingWAL, plural(int(*w.PendingWAL), "segment", "segments"))
 	}
+
 	return state
 }
 
@@ -674,6 +762,7 @@ func plural(n int, one, many string) string {
 	if n == 1 {
 		return one
 	}
+
 	return many
 }
 
@@ -683,17 +772,21 @@ func backupDatabases(cmd *cobra.Command, s *session, p *progress) ([]string, err
 	if db := stringFlag(cmd, "db"); db != "" {
 		return []string{db}, nil
 	}
+
 	reply, err := p.call(commandContext(cmd), s.node, "db.list", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return nil, err
 	}
+
 	var data struct {
 		Databases []databaseInfo `json:"databases"`
 	}
 	if err := reply.Decode(&data); err != nil {
 		return nil, err
 	}
+
 	var names, awaiting []string
+
 	for _, db := range data.Databases {
 		switch {
 		case db.State == stateAwaitingRecovery:
@@ -705,14 +798,17 @@ func backupDatabases(cmd *cobra.Command, s *session, p *progress) ([]string, err
 			names = append(names, db.Name)
 		}
 	}
+
 	if len(awaiting) > 0 {
 		s.warnings = append(s.warnings, output.Warning{Code: "awaiting_recovery",
 			Message: "skipped, awaiting recovery after the rebuild: " + strings.Join(awaiting, ", ") + " (vaire db recover --all)"})
 	}
+
 	if len(names) == 0 {
 		return nil, output.NewError(output.CodePrecondition, "there is no database to back up", output.ExitPrecondition,
 			"Create one with vaire db create <name>, or recover the databases with vaire db recover --all.").WithDetails(map[string]any{"reason": "no_databases"})
 	}
+
 	return names, nil
 }
 
@@ -739,15 +835,19 @@ func eachDatabase(cmd *cobra.Command, s *session, p *progress, dbs []string, met
 		if len(dbs) > 1 {
 			p.note(db + ":")
 		}
+
 		reply, jobID, wasDetached, callErr := callJob(commandContext(cmd), s, p, method, params(db), remote.CallOptions{})
 		if wasDetached {
 			return outcomes, lines, warnings, &jobID
 		}
+
 		o := dbJobOutcome{Database: db, JobID: jobID}
+
 		if callErr == nil {
 			var jr jobReply
 			if callErr = reply.Decode(&jr); callErr == nil {
 				var line string
+
 				o.JobID = jr.JobID
 				if o.Result, line, callErr = result(jr.Result); callErr == nil {
 					lines = append(lines, line)
@@ -755,25 +855,31 @@ func eachDatabase(cmd *cobra.Command, s *session, p *progress, dbs []string, met
 				}
 			}
 		}
+
 		if callErr != nil {
 			body := output.ErrorBody{Code: output.CodeError, Message: callErr.Error()}
-			var ce *output.CLIError
-			if errors.As(callErr, &ce) {
+			if ce, ok := errors.AsType[*output.CLIError](callErr); ok {
 				body = output.ErrorBody{Code: ce.Code, Message: ce.Error(), Hint: ce.Hint, Details: ce.Details}
 			}
+
 			o.Error = &body
 			lines = append(lines, db+": "+body.Message)
 		}
+
 		outcomes = append(outcomes, o)
 	}
+
 	return outcomes, lines, warnings, nil
 }
 
 // failedOutcomes is the error of a per-database run in which some failed:
 // the first failure's code, every outcome in details.
 func failedOutcomes(what, key string, outcomes []dbJobOutcome) error {
-	var failed []string
-	var first *output.ErrorBody
+	var (
+		failed []string
+		first  *output.ErrorBody
+	)
+
 	for _, o := range outcomes {
 		if o.Error != nil {
 			failed = append(failed, o.Database)
@@ -782,9 +888,11 @@ func failedOutcomes(what, key string, outcomes []dbJobOutcome) error {
 			}
 		}
 	}
+
 	if first == nil {
 		return nil
 	}
+
 	return output.NewError(first.Code, fmt.Sprintf("%s failed for %s: %s", what, strings.Join(failed, ", "), first.Message), output.ExitFor(first.Code),
 		first.Hint).WithDetails(map[string]any{key: outcomes, "failed": failed})
 }
@@ -796,35 +904,44 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 	default:
 		return output.NewError(output.CodeUsage, "--type must be full, diff or incr", output.ExitUsage, "")
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	if dryRun(cmd) {
 		reply, err := p.call(commandContext(cmd), s.node, "backup.now", node.BackupNowParams{Type: kind, Database: stringFlag(cmd, "db")},
 			remote.CallOptions{DryRun: true, OnEvent: p.event})
 		if err != nil {
 			return err
 		}
+
 		var data struct {
 			Backups []struct {
 				Database string `json:"database"`
 				Type     string `json:"type"`
 			} `json:"backups"`
 		}
+
 		_ = reply.Decode(&data)
+
 		lines := make([]string, 0, len(data.Backups))
 		for _, b := range data.Backups {
 			lines = append(lines, fmt.Sprintf("dry run: would take a %s backup of %s", b.Type, b.Database))
 		}
+
 		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: append(s.warnings, reply.Warnings...)})
 	}
+
 	dbs, err := backupDatabases(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	outcomes, lines, warnings, detached := eachDatabase(cmd, s, p, dbs, "backup.now",
 		func(db string) any { return node.BackupNowParams{Type: kind, Database: db} },
 		func(raw []byte) (any, string, error) {
@@ -835,6 +952,7 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 			if err := json.Unmarshal(raw, &res); err != nil {
 				return nil, "", err
 			}
+
 			return res.Set, fmt.Sprintf("%s: backup %s (%s) finished: %s", res.DB, res.Set.Label, res.Set.Type, humanBytes(res.Set.Size)), nil
 		})
 	if detached != nil {
@@ -842,12 +960,15 @@ func runBackupNow(cmd *cobra.Command, _ []string) error {
 			if kind != "" {
 				return "vaire backup now --db " + db + " --type " + kind
 			}
+
 			return "vaire backup now --db " + db
 		})
 	}
+
 	if err := failedOutcomes("the backup", "backups", outcomes); err != nil {
 		return err
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"backups": outcomes},
 		Message:  strings.Join(lines, "\n"),
@@ -871,65 +992,83 @@ func detachedEach(cmd *cobra.Command, s *session, jobID, what string, rest []str
 	if len(rest) == 0 {
 		return detachedResult(cmd, s, jobID, what)
 	}
+
 	commands := make([]string, len(rest))
 	for i, db := range rest {
 		commands[i] = command(db)
 	}
+
 	message := "Detached; " + what + " keeps running on the node."
 	next := make([]string, 1, 1+len(commands))
 	next[0] = "vaire job list"
+
 	if jobID != "" {
 		message += " Re-attach with vaire job follow " + jobID + "."
 		next = []string{"vaire job follow " + jobID}
 	}
+
 	message += "\nNot started for " + strings.Join(rest, ", ") + ": each job takes the heavy-I/O lock, so once this one is done, start the rest with " +
 		strings.Join(commands, ", then ") + "."
 	data := map[string]any{"job_id": jobID, "detached": true, "not_started": rest, "commands": commands}
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings, Next: append(next, commands...)})
 }
 
 func runBackupList(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	db := stringFlag(cmd, "db")
+
 	reply, err := p.call(commandContext(cmd), s.node, "backup.list", map[string]string{"database": db}, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	warnings := append(s.warnings, reply.Warnings...)
+
 	if db == "" {
 		var data backupRowsData
 		if err := reply.Decode(&data); err != nil {
 			return err
 		}
+
 		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(backupRowLines(data, time.Now()), "\n"), Warnings: warnings})
 	}
+
 	var data backupListData
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	lines := []string{"Restore window for " + db + ": " + data.Window.describe()}
 	if data.Dropped != nil {
 		lines = []string{"Restore window for " + db + ": " + data.Window.span(),
 			"Dropped at " + data.Dropped.DroppedAt + "; stanza " + data.Stanza + " is kept until " + data.Dropped.ExpiresAt}
 	}
+
 	lines = append(lines, "", fmt.Sprintf("  %-24s %-5s %-21s %10s %10s", "SET", "TYPE", "FINISHED", "SIZE", "IN REPO"))
 	for _, set := range data.Sets {
 		lines = append(lines, fmt.Sprintf("  %-24s %-5s %-21s %10s %10s", set.Label, set.Type, set.Stop, humanBytes(set.Size), humanBytes(set.RepoSize)))
 	}
+
 	if data.Verify != nil {
 		lines = append(lines, "", "Last verify: "+verifyState(data.Verify)+" at "+data.Verify.FinishedAt)
 	}
+
 	if data.Drill != nil {
 		lines = append(lines, "Last drill: "+data.Drill.Result+" at "+data.Drill.FinishedAt+" (backup "+data.Drill.BackupLabel+")")
 	}
+
 	for name, r := range data.Restores {
 		lines = append(lines, "", "Open restore of "+name+": "+r.Phase+" (target "+r.Target+")")
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: warnings})
 }
 
@@ -940,31 +1079,39 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 func backupRowLines(data backupRowsData, now time.Time) []string {
 	rows := [][]string{{"DATABASE", "STANZA", "STATUS", "SETS", "LATEST", "VERIFY", "DRILL", "RESTORE WINDOW"}}
 	dropped := [][]string{{"DATABASE", "STANZA", "SETS", "ENDED", "KEPT UNTIL", "WINDOW"}}
+
 	for _, r := range data.Databases {
 		if r.DroppedAt != "" {
 			dropped = append(dropped, []string{r.Database, r.Stanza, strconv.Itoa(r.Sets), "dropped " + shortTime(r.DroppedAt), shortTime(r.ExpiresAt), r.Window.shortSpan()})
 			continue
 		}
+
 		latest, verify, drill := "-", "-", "-"
 		if r.Latest != nil {
 			latest = r.Latest.Type + " " + ago(r.Latest.Stop, now)
 		}
+
 		if r.Verify != nil {
 			verify = verifyState(r.Verify) + " " + ago(r.Verify.FinishedAt, now)
 		}
+
 		if r.Drill != nil {
 			drill = drillState(r.Drill) + " " + ago(r.Drill.FinishedAt, now)
 		}
+
 		rows = append(rows, []string{r.Database, r.Stanza, r.Status, strconv.Itoa(r.Sets), latest, verify, drill, r.Window.short()})
 	}
+
 	lines := alignColumns(rows)
 	if len(dropped) > 1 {
 		lines = append(lines, "", "Kept stanzas of dropped databases (restorable until KEPT UNTIL):")
 		lines = append(lines, alignColumns(dropped)...)
 	}
+
 	for name, r := range data.Restores {
 		lines = append(lines, "", "Open restore of "+name+": "+r.Phase+" (target "+r.Target+")")
 	}
+
 	return lines
 }
 
@@ -975,9 +1122,11 @@ func (w windowData) short() string {
 	if w.From == "" {
 		return "none yet"
 	}
+
 	if w.UpToDate {
 		return "from " + shortTime(w.From) + ", up to date"
 	}
+
 	return "from " + shortTime(w.From) + ", lag " + compactDuration(time.Duration(w.LagSeconds)*time.Second)
 }
 
@@ -987,6 +1136,7 @@ func (w windowData) shortSpan() string {
 	if w.From == "" {
 		return "none"
 	}
+
 	return shortTime(w.From) + " to " + shortTime(w.To)
 }
 
@@ -997,6 +1147,7 @@ func shortTime(ts string) string {
 	if err != nil {
 		return ts
 	}
+
 	return t.UTC().Format("2006-01-02 15:04Z")
 }
 
@@ -1010,6 +1161,7 @@ func compactDuration(d time.Duration) string {
 	case d < 48*time.Hour:
 		return fmt.Sprintf("%dh", int(d/time.Hour))
 	}
+
 	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 }
 
@@ -1017,28 +1169,36 @@ func compactDuration(d time.Duration) string {
 // apart and indented by two; the last column isn't padded.
 func alignColumns(rows [][]string) []string {
 	var widths []int
+
 	for _, row := range rows {
 		for i, cell := range row {
 			if i >= len(widths) {
 				widths = append(widths, 0)
 			}
+
 			widths[i] = max(widths[i], len(cell))
 		}
 	}
+
 	lines := make([]string, 0, len(rows))
 	for _, row := range rows {
 		var b strings.Builder
 		b.WriteString(" ")
+
 		for i, cell := range row {
 			b.WriteString(" ")
+
 			if i == len(row)-1 {
 				b.WriteString(cell)
 				break
 			}
+
 			fmt.Fprintf(&b, "%-*s ", widths[i], cell)
 		}
+
 		lines = append(lines, b.String())
 	}
+
 	return lines
 }
 
@@ -1049,10 +1209,12 @@ func ago(ts string, now time.Time) string {
 	if err != nil {
 		return ts
 	}
+
 	d := now.Sub(t)
 	if d < time.Minute {
 		return "just now"
 	}
+
 	return compactDuration(d) + " ago"
 }
 
@@ -1064,6 +1226,7 @@ func drillState(d *backup.Drill) string {
 	case backup.DrillFail:
 		return "FAILED"
 	}
+
 	return d.Result
 }
 
@@ -1075,20 +1238,24 @@ func verifyState(v *backup.VerifyResult) string {
 	case v.OK:
 		return "passed"
 	}
+
 	return "FAILED"
 }
 
 func runBackupVerify(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	dbs, err := backupDatabases(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	outcomes, lines, warnings, detached := eachDatabase(cmd, s, p, dbs, "backup.verify",
 		func(db string) any { return map[string]string{"database": db} },
 		func(raw []byte) (any, string, error) {
@@ -1096,6 +1263,7 @@ func runBackupVerify(cmd *cobra.Command, _ []string) error {
 			if err := json.Unmarshal(raw, &res); err != nil {
 				return nil, "", err
 			}
+
 			return res, "pgbackrest verify passed at " + res.FinishedAt, nil
 		})
 	if detached != nil {
@@ -1103,12 +1271,15 @@ func runBackupVerify(cmd *cobra.Command, _ []string) error {
 			return "vaire backup verify --db " + db
 		})
 	}
+
 	if err := failedOutcomes("pgbackrest verify", "verifies", outcomes); err != nil {
 		return err
 	}
+
 	for i := range lines {
 		lines[i] = outcomes[i].Database + ": " + lines[i]
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     map[string]any{"verifies": outcomes},
 		Message:  strings.Join(lines, "\n"),
@@ -1122,27 +1293,32 @@ func humanBytes(n int64) string {
 	if n < unit {
 		return strconv.FormatInt(n, 10) + " B"
 	}
+
 	div, exp := int64(unit), 0
 	for m := n / unit; m >= unit; m /= unit {
 		div *= unit
 		exp++
 	}
+
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // parseTarget reads --time: RFC 3339, or relative like -15m or -2h.
 func parseTarget(v string, now time.Time) (time.Time, error) {
-	if strings.HasPrefix(v, "-") {
-		d, err := time.ParseDuration(strings.TrimPrefix(v, "-"))
+	if after, ok := strings.CutPrefix(v, "-"); ok {
+		d, err := time.ParseDuration(after)
 		if err != nil {
 			return time.Time{}, output.NewError(output.CodeUsage, "--time "+v+" is not a duration like -15m", output.ExitUsage, "")
 		}
+
 		return now.Add(-d).UTC(), nil
 	}
+
 	t, err := time.Parse(time.RFC3339, v)
 	if err != nil {
 		return time.Time{}, output.NewError(output.CodeUsage, "--time "+v+" is neither RFC 3339 (2026-10-09T12:00:00Z) nor relative (-15m)", output.ExitUsage, "")
 	}
+
 	return t.UTC(), nil
 }
 
@@ -1154,10 +1330,12 @@ func targetFlag(cmd *cobra.Command, name string) (time.Time, string, error) {
 	if v == "" {
 		return time.Time{}, "", nil
 	}
+
 	t, err := parseTarget(v, time.Now())
 	if err != nil {
 		return time.Time{}, "", err
 	}
+
 	return t, t.UTC().Format(time.RFC3339Nano), nil
 }
 
@@ -1167,5 +1345,6 @@ func echoTime(t time.Time, tz string) string {
 	if loc, err := time.LoadLocation(tz); err == nil && tz != "UTC" {
 		out += " (" + t.In(loc).Format("2006-01-02 15:04:05 MST") + ")"
 	}
+
 	return out
 }

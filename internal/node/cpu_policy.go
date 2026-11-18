@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
@@ -20,17 +21,21 @@ var invalidateCPUCompletion = engine.InvalidateStepCompletion
 
 func rejectNullCPUParams(raw json.RawMessage) error {
 	var fields map[string]json.RawMessage
+
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
+
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return err
 	}
+
 	for _, key := range []string{"cpu_mode", "cpu_quota"} {
 		if value, ok := fields[key]; ok && strings.TrimSpace(string(value)) == "null" {
 			return output.NewError(output.CodeValidation, key+" must be a string", output.ExitConfig, "")
 		}
 	}
+
 	return nil
 }
 
@@ -38,14 +43,17 @@ func validateCPUParams(mode, quota *string) error {
 	if mode != nil && *mode != "normal" && *mode != "spare" {
 		return output.NewError(output.CodeValidation, "CPU mode must be normal or spare", output.ExitConfig, "")
 	}
+
 	if quota != nil && *quota != "none" {
 		if *quota == "" {
 			return output.NewError(output.CodeValidation, "CPU quota must be a percentage or none", output.ExitConfig, "")
 		}
+
 		if _, err := config.ResolveResources(config.ClusterSpec{Size: "small", CPUQuota: *quota}, "small"); err != nil {
 			return config.ValidationError(err)
 		}
 	}
+
 	return nil
 }
 
@@ -53,6 +61,7 @@ func validateCPUParams(mode, quota *string) error {
 // CPU keys, including same-value requests that still require verification.
 func cpuProofTargets(old, next config.Cluster, dotted map[string]string) []string {
 	explicit := map[string]bool{}
+
 	for key := range dotted {
 		parts := strings.Split(key, ".")
 		if len(parts) == 3 && parts[0] == "clusters" &&
@@ -60,20 +69,25 @@ func cpuProofTargets(old, next config.Cluster, dotted map[string]string) []strin
 			explicit[parts[1]] = true
 		}
 	}
+
 	var targets []string
+
 	for _, spec := range next.Clusters {
 		prev, exists := old.ClusterByName(spec.Name)
 		if !exists {
 			continue
 		}
+
 		before, e1 := old.Resources(prev)
 		after, e2 := next.Resources(spec)
+
 		changed := prev.CPUMode != spec.CPUMode || prev.CPUQuota != spec.CPUQuota || prev.CPUWeight != spec.CPUWeight ||
 			e1 != nil || e2 != nil || before.CPUWeight != after.CPUWeight || before.CPUQuota != after.CPUQuota || before.CPUMode != after.CPUMode
 		if explicit[spec.Name] || changed {
 			targets = append(targets, spec.Name)
 		}
 	}
+
 	return targets
 }
 
@@ -83,11 +97,13 @@ func invalidateCPUProofs(targets []string) error {
 		if seen[name] {
 			continue
 		}
+
 		seen[name] = true
 		if err := invalidateCPUCompletion(cpuJournalPath(), engine.InstanceID("postgres-cluster-v1", name)); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -99,6 +115,7 @@ func checkCPUProposal(ctx context.Context, old, next config.Cluster) error {
 
 func checkCPUProposalWithRequests(ctx context.Context, old, next config.Cluster, dotted map[string]string) error {
 	explicit := map[string]bool{}
+
 	for key := range dotted {
 		parts := strings.Split(key, ".")
 		if len(parts) == 3 && parts[0] == "clusters" &&
@@ -106,23 +123,28 @@ func checkCPUProposalWithRequests(ctx context.Context, old, next config.Cluster,
 			explicit[parts[1]] = true
 		}
 	}
+
 	for _, spec := range next.Clusters {
 		if spec.CPUMode != "spare" {
 			continue
 		}
+
 		previous, exists := old.ClusterByName(spec.Name)
 		if exists {
 			before, e1 := old.Resources(previous)
+
 			after, e2 := next.Resources(spec)
 			if !explicit[spec.Name] && e1 == nil && e2 == nil && previous.CPUMode == spec.CPUMode && previous.CPUQuota == spec.CPUQuota &&
 				previous.CPUWeight == spec.CPUWeight && before.CPUWeight == after.CPUWeight {
 				continue
 			}
 		}
+
 		if err := checkSpareCPU(ctx, spec.Name, spec.CPUMode); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -131,16 +153,17 @@ func cpuPolicySaved(err error) error {
 	if !errors.As(err, &cli) {
 		return err
 	}
+
 	details, ok := cli.Details.(map[string]any)
 	if !ok || details["reason"] != "cpu_policy_not_enforced" {
 		return err
 	}
+
 	copied := *cli
 	copiedDetails := make(map[string]any, len(details))
-	for key, value := range details {
-		copiedDetails[key] = value
-	}
+	maps.Copy(copiedDetails, details)
 	copiedDetails["desired_saved"] = true
 	copied.Details = copiedDetails
+
 	return &copied
 }

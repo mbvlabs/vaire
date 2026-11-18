@@ -35,6 +35,7 @@ func L(pairs ...string) []Label {
 	for i := 0; i+1 < len(pairs); i += 2 {
 		out = append(out, Label{pairs[i], pairs[i+1]})
 	}
+
 	return out
 }
 
@@ -68,32 +69,41 @@ func Counter(name, help string) *Family { return &Family{Name: name, Help: help,
 // once per family.
 func Render(families []*Family) []byte {
 	var b strings.Builder
+
 	for _, f := range families {
 		if f == nil || len(f.Samples) == 0 {
 			continue
 		}
+
 		fmt.Fprintf(&b, "# HELP %s %s\n", f.Name, escapeHelp(f.Help))
 		fmt.Fprintf(&b, "# TYPE %s %s\n", f.Name, f.Type)
+
 		for _, s := range f.Samples {
 			b.WriteString(f.Name)
+
 			if len(s.Labels) > 0 {
 				b.WriteByte('{')
+
 				for i, l := range s.Labels {
 					if i > 0 {
 						b.WriteByte(',')
 					}
+
 					b.WriteString(l.Name)
 					b.WriteString(`="`)
 					b.WriteString(escapeLabel(l.Value))
 					b.WriteByte('"')
 				}
+
 				b.WriteByte('}')
 			}
+
 			b.WriteByte(' ')
 			b.WriteString(formatValue(s.Value))
 			b.WriteByte('\n')
 		}
 	}
+
 	return []byte(b.String())
 }
 
@@ -103,6 +113,7 @@ func formatValue(v float64) string {
 	if v == float64(int64(v)) && v < 1e15 && v > -1e15 {
 		return strconv.FormatInt(int64(v), 10)
 	}
+
 	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
@@ -125,6 +136,7 @@ func WriteIn(dir, name string, families []*Family) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: node_exporter reads this directory.
 		return err
 	}
+
 	return engine.WriteFileAtomic(filepath.Join(dir, name), Render(families), 0o644)
 }
 
@@ -134,6 +146,8 @@ func SortedKeys[V any](m map[string]V) []string {
 	for k := range m {
 		out = append(out, k)
 	}
+
 	sort.Strings(out)
+
 	return out
 }

@@ -224,12 +224,15 @@ func Filter(checks []Check, only string) []Check {
 	if only == "" {
 		return checks
 	}
+
 	var out []Check
+
 	for _, c := range checks {
 		if c.Category == only || (only == CatSecurity && c.Security) {
 			out = append(out, c)
 		}
 	}
+
 	return out
 }
 
@@ -237,18 +240,22 @@ func Filter(checks []Check, only string) []Check {
 // left out. db narrows per-database results.
 func Run(checks []Check, f Facts, db string) []Result {
 	var out []Result
+
 	for _, c := range checks {
 		if f.Init && !c.AtInit {
 			continue
 		}
+
 		for _, r := range c.Run(f) {
 			if db != "" && r.DB != "" && r.DB != db {
 				continue
 			}
+
 			r.ID, r.Category, r.Security = c.ID, c.Category, c.Security
 			out = append(out, r)
 		}
 	}
+
 	return out
 }
 
@@ -258,17 +265,20 @@ func Summary(results []Result) map[Status]int {
 	for _, r := range results {
 		out[r.Status]++
 	}
+
 	return out
 }
 
 // Failed returns the failing results.
 func Failed(results []Result) []Result {
 	var out []Result
+
 	for _, r := range results {
 		if r.Status == Fail {
 			out = append(out, r)
 		}
 	}
+
 	return out
 }
 
@@ -284,5 +294,6 @@ func one(status Status, detail, fix string) []Result {
 func joinSorted(items []string) string {
 	out := append([]string(nil), items...)
 	sort.Strings(out)
+
 	return strings.Join(out, ", ")
 }

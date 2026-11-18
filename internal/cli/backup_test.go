@@ -38,17 +38,20 @@ func TestBackupRowLines(t *testing.T) {
 		Verify: &backup.VerifyResult{OK: true, FinishedAt: "2026-10-14T10:00:00Z"},
 		Drill:  &backup.Drill{Result: backup.DrillFail, FinishedAt: "2026-10-11T12:00:00Z"},
 	}}}
+
 	lines := backupRowLines(data, now)
 	for _, col := range []string{"STATUS", "VERIFY", "DRILL"} {
 		if !strings.Contains(lines[0], col) {
 			t.Errorf("header lacks %s: %q", col, lines[0])
 		}
 	}
+
 	for _, want := range []string{"ok", "incr 2h ago", "passed 2h ago", "FAILED 3d ago", "from 2026-10-07 02:00Z, lag 1m"} {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("row lacks %q: %q", want, lines[1])
 		}
 	}
+
 	for _, l := range lines {
 		if len(l) > 120 {
 			t.Errorf("line is %d columns: %q", len(l), l)
@@ -65,22 +68,28 @@ func TestBackupRowLinesIdleVsLagging(t *testing.T) {
 		{Database: "busy", Stanza: "busy-1", Status: "ok", Sets: 2,
 			Window: windowData{From: "2026-10-14T09:00:01Z", To: "2026-10-14T11:51:00Z", LagSeconds: 540, PendingWAL: &three}},
 	}}
+
 	lines := backupRowLines(data, now)
 	if !strings.Contains(lines[1], "from 2026-10-14 09:00Z, up to date") || strings.Contains(lines[1], "lag") {
 		t.Errorf("idle row: %q", lines[1])
 	}
+
 	if !strings.Contains(lines[2], "from 2026-10-14 09:00Z, lag 9m") {
 		t.Errorf("lagging row: %q", lines[2])
 	}
+
 	idle := data.Databases[0].Window.describe()
 	if idle != "2026-10-14T09:00:01Z to 2026-10-14T10:00:00Z (archive up to date)" {
 		t.Errorf("idle describe = %q", idle)
 	}
+
 	busy := data.Databases[1].Window.describe()
 	if busy != "2026-10-14T09:00:01Z to 2026-10-14T11:51:00Z (archive lag 9m, 3 WAL segments waiting)" {
 		t.Errorf("lagging describe = %q", busy)
 	}
+
 	one := int64(1)
+
 	w := windowData{From: "x", To: "y", LagSeconds: 30, PendingWAL: &one}
 	if got := w.archiveState(); got != "archive lag 30s, 1 WAL segment waiting" {
 		t.Errorf("one waiting = %q", got)
@@ -105,11 +114,14 @@ func TestBackupRowLinesKeptStanzas(t *testing.T) {
 			DroppedAt: "2026-10-14T10:23:22Z", ExpiresAt: "2026-10-21T10:23:22Z"},
 	}}
 	lines := backupRowLines(data, now)
+
 	text := strings.Join(lines, "\n")
 	if strings.Contains(text, "archive lag") || strings.Contains(text, "lag 0s") {
 		t.Errorf("kept stanzas show a lag:\n%s", text)
 	}
+
 	var header, dropped string
+
 	for _, l := range lines {
 		switch {
 		case strings.Contains(l, "KEPT UNTIL"):
@@ -118,11 +130,13 @@ func TestBackupRowLinesKeptStanzas(t *testing.T) {
 			dropped = l
 		}
 	}
+
 	for _, col := range []string{"DATABASE", "STANZA", "SETS", "ENDED", "KEPT UNTIL", "WINDOW"} {
 		if !strings.Contains(header, col) {
 			t.Errorf("kept header lacks %s: %q", col, header)
 		}
 	}
+
 	for _, want := range []string{"dropped 2026-10-14 10:23Z", "2026-10-21 10:23Z", "2026-10-14 10:21Z to 2026-10-14 10:21Z"} {
 		if !strings.Contains(dropped, want) {
 			t.Errorf("dropped row lacks %q: %q", want, dropped)
@@ -135,6 +149,7 @@ func TestNotStarted(t *testing.T) {
 	if got := notStarted(dbs, nil); !slices.Equal(got, []string{"other", "third"}) {
 		t.Errorf("detached on the first: %v", got)
 	}
+
 	if got := notStarted(dbs, make([]dbJobOutcome, 2)); len(got) != 0 {
 		t.Errorf("detached on the last: %v", got)
 	}
@@ -143,6 +158,7 @@ func TestNotStarted(t *testing.T) {
 func TestAddRecoveryKit(t *testing.T) {
 	values := map[string]string{"svc.vaire_monitor": "pw"}
 	addRecoveryKit(values, nil)
+
 	if len(values) != 1 {
 		t.Errorf("no kit: secrets = %v", values)
 	}
@@ -151,13 +167,16 @@ func TestAddRecoveryKit(t *testing.T) {
 	identityOnly := &workspaces.BackupCreds{}
 	identityOnly.Encryption.Identity, identityOnly.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, identityOnly)
+
 	if len(values) != 2 || values[steps.SecretBackupAgeRecipient] != "age1xyz" {
 		t.Errorf("identity only: secrets = %v", values)
 	}
+
 	kit := &workspaces.BackupCreds{AccessKeyID: "AKID", SecretAccessKey: "s3cret", Bucket: "vaire-backups-test", Prefix: "mbvlabs"}
 	kit.PgBackRest.CipherPass = "cipher"
 	kit.Encryption.Identity, kit.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
 	addRecoveryKit(values, kit)
+
 	want := map[string]string{
 		"svc.vaire_monitor":            "pw",
 		steps.SecretBackupKeyID:        "AKID",
@@ -168,6 +187,7 @@ func TestAddRecoveryKit(t *testing.T) {
 	if !maps.Equal(values, want) {
 		t.Errorf("bucket kit: secrets = %v, want %v", values, want)
 	}
+
 	for _, value := range values {
 		if value == kit.Encryption.Identity {
 			t.Error("the recovery identity never leaves the operator")
@@ -179,19 +199,23 @@ func TestAddRecoveryKitUnlessIncomplete(t *testing.T) {
 	identityOnly := func() *workspaces.BackupCreds {
 		kit := &workspaces.BackupCreds{}
 		kit.Encryption.Identity, kit.Encryption.Recipient = "AGE-SECRET-KEY-1", "age1xyz"
+
 		return kit
 	}
 	bucketKit := func() *workspaces.BackupCreds {
 		kit := identityOnly()
 		kit.AccessKeyID, kit.SecretAccessKey = "AKID", "s3cret"
 		kit.PgBackRest.CipherPass = "cipher"
+
 		return kit
 	}
 	withService := func(extra map[string]string) map[string]string {
 		out := map[string]string{"svc.vaire_monitor": "pw"}
 		maps.Copy(out, extra)
+
 		return out
 	}
+
 	cases := []struct {
 		name             string
 		kit              *workspaces.BackupCreds
@@ -236,12 +260,14 @@ func TestAddRecoveryKitUnlessIncomplete(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			values := withService(nil)
+
 			err := addRecoveryKitUnlessIncomplete(values, c.kit, c.backupConfigured)
 			if c.refused {
 				var cliErr *output.CLIError
 				if !errors.As(err, &cliErr) || cliErr.Code != output.CodeInputRequired {
 					t.Fatalf("error = %v, want an input_required refusal", err)
 				}
+
 				details, _ := cliErr.Details.(map[string]any)
 				if details["reason"] != "recovery_kit_missing" {
 					t.Errorf("details = %v", cliErr.Details)
@@ -249,6 +275,7 @@ func TestAddRecoveryKitUnlessIncomplete(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
+
 			if !maps.Equal(values, c.want) {
 				t.Errorf("secrets = %v, want %v", values, c.want)
 			}
@@ -263,9 +290,11 @@ func TestInitBackupPhaseText(t *testing.T) {
 			t.Errorf("no databases: %q promises a backup init doesn't take", line)
 		}
 	}
+
 	if !strings.Contains(started, "vaire-backups-test") {
 		t.Errorf("started = %q, want the bucket", started)
 	}
+
 	if _, completed := initBackupPhaseText("b", 1); completed != "WAL archiving on, first full backup taken" {
 		t.Errorf("one database: completed = %q", completed)
 	}

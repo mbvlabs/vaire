@@ -15,9 +15,11 @@ func chainPersistentPreRun(existing, next func(*cobra.Command, []string) error) 
 				return err
 			}
 		}
+
 		if next != nil {
 			return next(cmd, args)
 		}
+
 		return nil
 	}
 }
@@ -26,10 +28,12 @@ func platformPreRun(cmd *cobra.Command, _ []string) error {
 	if runtime.GOOS == "linux" {
 		return nil
 	}
+
 	meta, ok := metaFor(cmd)
 	if !ok || !linuxOnlyApplies(cmd, meta) {
 		return nil
 	}
+
 	return output.NewError(
 		output.CodePrecondition,
 		"node commands run on the Linux server",
@@ -45,19 +49,24 @@ func linuxOnlyApplies(cmd *cobra.Command, meta CommandMeta) bool {
 	if meta.LinuxOnly {
 		return true
 	}
+
 	for _, name := range meta.LinuxOnlyFlags {
 		if flagChanged(cmd, name) {
 			return true
 		}
 	}
+
 	return false
 }
 
 func flagChanged(cmd *cobra.Command, name string) bool {
 	name = strings.TrimLeft(name, "-")
+
 	if cmd == nil || cmd.Flags() == nil {
 		return false
 	}
+
 	flag := cmd.Flags().Lookup(name)
+
 	return flag != nil && flag.Changed
 }

@@ -17,14 +17,17 @@ import (
 func extensionTestDirs(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
+
 	control, lib := filepath.Join(root, "extension"), filepath.Join(root, "lib")
 	for _, dir := range []string{control, lib} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	oldControl, oldLib := extensionControlDir, extensionLibDir
 	extensionControlDir, extensionLibDir = control, lib
+
 	t.Cleanup(func() {
 		extensionControlDir, extensionLibDir = oldControl, oldLib
 	})
@@ -32,9 +35,11 @@ func extensionTestDirs(t *testing.T) {
 
 func touchExtensionFile(t *testing.T, path string) {
 	t.Helper()
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +60,7 @@ func TestParsePreloads(t *testing.T) {
 	if !got["pg_stat_statements"] || !got["auto_explain"] || len(got) != 2 {
 		t.Fatalf("parse = %v", got)
 	}
+
 	if empty := ParsePreloads(""); len(empty) != 0 {
 		t.Fatalf("empty parse = %v", empty)
 	}
@@ -71,17 +77,19 @@ func TestExtensionPackagesUnion(t *testing.T) {
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"pg_stat_statements": {
 			Source: catalog.SourceAPT, Package: "postgresql-18-pg-stat-statements",
-			CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true),
+			CopySafety: new(catalog.CopySafetySafe), StandbySafe: new(true),
 		},
 		"custom_apt":          {Source: catalog.SourceAPT, Package: "postgresql-18-custom"},
 		"recovery_apt":        {Source: catalog.SourceAPT, Package: "postgresql-18-recovery"},
 		"awaiting_apt":        {Source: catalog.SourceAPT, Package: "postgresql-18-awaiting"},
 		"preinstalled_custom": {Source: catalog.SourcePreinstalled},
 	}
+
 	packages, err := ExtensionPackages(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := []string{
 		"postgresql-18-awaiting", "postgresql-18-custom",
 		"postgresql-18-pg-stat-statements", "postgresql-18-recovery",
@@ -94,6 +102,7 @@ func TestExtensionPackagesUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(baseline) != 0 {
 		t.Fatalf("baseline packages = %v", baseline)
 	}
@@ -101,24 +110,30 @@ func TestExtensionPackagesUnion(t *testing.T) {
 
 func TestExtensionPrerequisitesVerifyFiles(t *testing.T) {
 	extensionTestDirs(t)
+
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Extensions: []string{"pg_cron", "vector", "custom"}}}
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext", Preload: "custom_lib"},
 	}
+
 	reqs, err := ExtensionPrerequisites(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "pg_cron", "custom_ext"} {
 		touchExtensionControl(t, name)
 	}
+
 	if err := os.WriteFile(filepath.Join(extensionControlDir, "vector.control"), []byte("module_pathname = '$libdir/vector' # test comment\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "auto_explain", "pg_cron", "vector", "custom_lib"} {
 		touchExtensionLibrary(t, name)
 	}
+
 	if err := VerifyExtensionRequirements(reqs); err != nil {
 		t.Fatalf("complete files refused: %v", err)
 	}
@@ -126,6 +141,7 @@ func TestExtensionPrerequisitesVerifyFiles(t *testing.T) {
 	if err := os.Remove(filepath.Join(extensionControlDir, "custom_ext.control")); err != nil {
 		t.Fatal(err)
 	}
+
 	err = VerifyExtensionRequirements(reqs)
 	if err == nil || !strings.Contains(err.Error(), `preinstalled extension "custom"`) ||
 		!strings.Contains(err.Error(), "custom_ext.control") {
@@ -133,9 +149,11 @@ func TestExtensionPrerequisitesVerifyFiles(t *testing.T) {
 	}
 
 	touchExtensionControl(t, "custom_ext")
+
 	if err := os.Remove(filepath.Join(extensionLibDir, "pg_cron.so")); err != nil {
 		t.Fatal(err)
 	}
+
 	err = VerifyExtensionRequirements(reqs)
 	if err == nil || !strings.Contains(err.Error(), `extension "pg_cron" from package "postgresql-18-cron"`) ||
 		!strings.Contains(err.Error(), "pg_cron.so") {
@@ -143,9 +161,11 @@ func TestExtensionPrerequisitesVerifyFiles(t *testing.T) {
 	}
 
 	touchExtensionLibrary(t, "pg_cron")
+
 	if err := os.Remove(filepath.Join(extensionLibDir, "vector.so")); err != nil {
 		t.Fatal(err)
 	}
+
 	err = VerifyExtensionRequirements(reqs)
 	if err == nil || !strings.Contains(err.Error(), `extension "vector"`) || !strings.Contains(err.Error(), "vector.so") {
 		t.Fatalf("missing control module library = %v", err)
@@ -179,26 +199,32 @@ func TestExtensionLibraryNamingForms(t *testing.T) {
 		if err := os.Remove(tc.path); err != nil {
 			t.Fatal(err)
 		}
+
 		err := VerifyExtensionRequirements(reqs)
 		if err == nil || !strings.Contains(err.Error(), filepath.Base(tc.path)) ||
 			(tc.unwanted != "" && strings.Contains(err.Error(), tc.unwanted)) {
 			t.Fatalf("%s = %v", tc.name, err)
 		}
+
 		tc.restore()
 	}
 
 	unsupported := []ExtensionPrerequisite{{Name: "bad", Source: catalog.SourcePreinstalled, ExtName: "bad_ext"}}
+
 	if err := os.WriteFile(filepath.Join(extensionControlDir, "bad_ext.control"), []byte("module_pathname = '$libdir'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := VerifyExtensionRequirements(unsupported); err == nil || !strings.Contains(err.Error(), "unsupported module_pathname") {
 		t.Fatalf("unsupported module path = %v", err)
 	}
 
 	unreadable := []ExtensionPrerequisite{{Name: "unreadable", Source: catalog.SourcePreinstalled, ExtName: "unreadable"}}
+
 	if err := os.MkdirAll(filepath.Join(extensionControlDir, "unreadable.control"), 0o750); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := VerifyExtensionRequirements(unreadable); err == nil || !strings.Contains(err.Error(), "cannot read control file") {
 		t.Fatalf("unreadable control file = %v", err)
 	}
@@ -220,27 +246,36 @@ func extensionLibraryNamingFixtures(t *testing.T) ([]ExtensionPrerequisite, stri
 		"bare_mod":   {Source: catalog.SourcePreinstalled, ExtName: "bare_mod"},
 		"sql_only":   {Source: catalog.SourcePreinstalled, ExtName: "sql_only"},
 	}
+
 	reqs, err := ExtensionPrerequisites(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "suffix_ext", "bare_ext", "abs_ext", "bare_mod", "sql_only"} {
 		touchExtensionControl(t, name)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "auto_explain", "bare_lib", "bare_mod_lib"} {
 		touchExtensionLibrary(t, name)
 	}
+
 	touchExtensionFile(t, filepath.Join(extensionLibDir, "custom_lib.so"))
+
 	if err := os.WriteFile(filepath.Join(extensionControlDir, "abs_ext.control"), []byte("module_pathname = '"+absLib+"'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	touchExtensionFile(t, absLib+".so")
+
 	if err := os.WriteFile(filepath.Join(extensionControlDir, "bare_mod.control"), []byte("module_pathname = 'bare_mod_lib'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := VerifyExtensionRequirements(reqs); err != nil {
 		t.Fatalf("valid naming forms refused: %v", err)
 	}
+
 	return reqs, absLib
 }
 
@@ -249,10 +284,12 @@ func TestPostgresPackagesInputsPreserveBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var raw map[string]any
 	if err := json.Unmarshal(baseline, &raw); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, ok := raw["extension_packages"]; ok {
 		t.Fatal("baseline package inputs gained an extension_packages key")
 	}
@@ -262,10 +299,12 @@ func TestPostgresPackagesInputsPreserveBaseline(t *testing.T) {
 	preinstalled.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourcePreinstalled},
 	}
+
 	preinstalledInputs, err := (postgresPackages{}).Inputs(preinstalled, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(preinstalledInputs) != string(baseline) {
 		t.Fatal("a preinstalled-only selection changed the package step's baseline inputs")
 	}
@@ -275,13 +314,16 @@ func TestPostgresPackagesInputsPreserveBaseline(t *testing.T) {
 	apt.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourceAPT, Package: "postgresql-18-custom"},
 	}
+
 	aptInputs, err := (postgresPackages{}).Inputs(apt, engine.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := json.Unmarshal(aptInputs, &raw); err != nil {
 		t.Fatal(err)
 	}
+
 	got, ok := raw["extension_packages"].([]any)
 	if !ok || len(got) != 1 || got[0] != "postgresql-18-custom" {
 		t.Fatalf("extension_packages = %#v", raw["extension_packages"])
@@ -290,9 +332,11 @@ func TestPostgresPackagesInputsPreserveBaseline(t *testing.T) {
 
 func TestPostgresPackagesCheckUsesRealFilesAndHolds(t *testing.T) {
 	extensionTestDirs(t)
+
 	for _, name := range []string{"pg_stat_statements", "custom_ext"} {
 		touchExtensionControl(t, name)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "auto_explain"} {
 		touchExtensionLibrary(t, name)
 	}
@@ -303,7 +347,9 @@ func TestPostgresPackagesCheckUsesRealFilesAndHolds(t *testing.T) {
 		"custom": {Source: catalog.SourceAPT, Package: "postgresql-18-custom", ExtName: "custom_ext"},
 	}
 	oldProbe := packageProbe
+
 	var probes []string
+
 	packageProbe = func(_ context.Context, name string, args ...string) (string, error) {
 		probes = append(probes, name+" "+strings.Join(args, " "))
 		switch name {
@@ -312,13 +358,16 @@ func TestPostgresPackagesCheckUsesRealFilesAndHolds(t *testing.T) {
 		case "apt-mark":
 			return strings.Join(pgHold, "\n") + "\npostgresql-18-custom\n", nil
 		}
+
 		return "", nil
 	}
+
 	t.Cleanup(func() { packageProbe = oldProbe })
 
 	if res, err := (postgresPackages{}).Check(context.Background(), cfg, engine.Runtime{}); err != nil || !res.Complete {
 		t.Fatalf("complete package state = %+v, %v", res, err)
 	}
+
 	for _, want := range []string{
 		"dpkg-query -W -f=${Status} postgresql-18",
 		"dpkg-query -W -f=${Status} postgresql-18-custom",
@@ -336,8 +385,10 @@ func TestPostgresPackagesCheckUsesRealFilesAndHolds(t *testing.T) {
 		case "apt-mark":
 			return strings.Join(pgHold, "\n"), nil
 		}
+
 		return "", nil
 	}
+
 	if res, err := (postgresPackages{}).Check(context.Background(), cfg, engine.Runtime{}); err != nil || res.Complete || !strings.Contains(res.Detail, "is not held") {
 		t.Fatalf("missing hold = %+v, %v", res, err)
 	}
@@ -345,6 +396,7 @@ func TestPostgresPackagesCheckUsesRealFilesAndHolds(t *testing.T) {
 	if err := os.Remove(filepath.Join(extensionControlDir, "custom_ext.control")); err != nil {
 		t.Fatal(err)
 	}
+
 	packageProbe = func(_ context.Context, name string, args ...string) (string, error) {
 		switch name {
 		case "dpkg-query":
@@ -352,8 +404,10 @@ func TestPostgresPackagesCheckUsesRealFilesAndHolds(t *testing.T) {
 		case "apt-mark":
 			return strings.Join(pgHold, "\n") + "\npostgresql-18-custom\n", nil
 		}
+
 		return "", nil
 	}
+
 	if res, err := (postgresPackages{}).Check(context.Background(), cfg, engine.Runtime{}); err != nil || res.Complete || !strings.Contains(res.Detail, "custom_ext.control") {
 		t.Fatalf("missing control file = %+v, %v", res, err)
 	}
@@ -361,12 +415,15 @@ func TestPostgresPackagesCheckUsesRealFilesAndHolds(t *testing.T) {
 
 func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 	extensionTestDirs(t)
+
 	for _, name := range []string{"pg_stat_statements", "custom_ext"} {
 		touchExtensionControl(t, name)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "auto_explain"} {
 		touchExtensionLibrary(t, name)
 	}
+
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Extensions: []string{"custom"}}}
 	cfg.Extensions = map[string]config.ExtensionDefinition{
@@ -374,15 +431,20 @@ func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 	}
 
 	oldScript := runExtensionPackageScript
+
 	t.Cleanup(func() { runExtensionPackageScript = oldScript })
+
 	var got map[string]string
+
 	runExtensionPackageScript = func(_ context.Context, _ string, env map[string]string, _ engine.Runtime, _ engine.Reporter) error {
 		got = env
 		return nil
 	}
+
 	if err := installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{}, nil); err != nil {
 		t.Fatal(err)
 	}
+
 	if got["EXTENSION_PACKAGES"] != "postgresql-18-custom" ||
 		!strings.Contains(got["PACKAGES"], "postgresql-18") ||
 		!strings.Contains(got["HOLD"], "pgbackrest") ||
@@ -397,9 +459,11 @@ func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 	if err := os.Remove(filepath.Join(extensionControlDir, "custom_ext.control")); err != nil {
 		t.Fatal(err)
 	}
+
 	runExtensionPackageScript = func(context.Context, string, map[string]string, engine.Runtime, engine.Reporter) error {
 		return nil
 	}
+
 	err := installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "extension prerequisites are not met") ||
 		!strings.Contains(err.Error(), "installed packages are not removed") {
@@ -409,6 +473,7 @@ func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 	runExtensionPackageScript = func(context.Context, string, map[string]string, engine.Runtime, engine.Reporter) error {
 		return &engine.ScriptError{Step: "postgres-packages-v1", Status: 100, Tail: []string{"E: Unable to locate package postgresql-18-custom"}}
 	}
+
 	err = installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "Unable to locate package") ||
 		!strings.Contains(err.Error(), "installed packages are not removed") {
@@ -418,27 +483,36 @@ func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 
 func TestPrepareExtensionStartScopedAPT(t *testing.T) {
 	extensionTestDirs(t)
+
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Extensions: []string{"custom"}}}
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourceAPT, Package: "postgresql-18-custom", ExtName: "custom_ext", Preload: "custom_lib"},
 	}
+
 	for _, name := range []string{"pg_stat_statements", "custom_ext"} {
 		touchExtensionControl(t, name)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "auto_explain", "custom_lib"} {
 		touchExtensionLibrary(t, name)
 	}
+
 	oldScript := runExtensionPackageScript
+
 	t.Cleanup(func() { runExtensionPackageScript = oldScript })
+
 	var got map[string]string
+
 	runExtensionPackageScript = func(_ context.Context, _ string, env map[string]string, _ engine.Runtime, _ engine.Reporter) error {
 		got = env
 		return nil
 	}
+
 	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], nil, engine.Runtime{}, nil); err != nil {
 		t.Fatal(err)
 	}
+
 	if got["EXTENSION_PACKAGES"] != "postgresql-18-custom" || got["PACKAGES"] != "" ||
 		got["HOLD"] != "" || got["PGDG_SCRIPT"] != "" || got["PGBACKREST_MIN"] != "" ||
 		got["STOP_PGBOUNCER"] != "0" {
@@ -448,24 +522,32 @@ func TestPrepareExtensionStartScopedAPT(t *testing.T) {
 
 func TestPrepareExtensionStartExtraAndPreinstalled(t *testing.T) {
 	extensionTestDirs(t)
+
 	for _, name := range []string{"pg_stat_statements"} {
 		touchExtensionControl(t, name)
 	}
+
 	for _, name := range []string{"pg_stat_statements", "auto_explain"} {
 		touchExtensionLibrary(t, name)
 	}
+
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app"}}
 
 	oldScript := runExtensionPackageScript
+
 	t.Cleanup(func() { runExtensionPackageScript = oldScript })
+
 	var got map[string]string
+
 	runExtensionPackageScript = func(_ context.Context, _ string, env map[string]string, _ engine.Runtime, _ engine.Reporter) error {
 		got = env
 		return nil
 	}
+
 	touchExtensionControl(t, "extra_ext")
 	touchExtensionLibrary(t, "extra_lib")
+
 	extra := []ExtensionPrerequisite{{
 		Name: "extra", Source: catalog.SourceAPT, Package: "postgresql-18-extra",
 		ExtName: "extra_ext", Preload: "extra_lib",
@@ -473,6 +555,7 @@ func TestPrepareExtensionStartExtraAndPreinstalled(t *testing.T) {
 	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], extra, engine.Runtime{}, nil); err != nil {
 		t.Fatal(err)
 	}
+
 	if got["EXTENSION_PACKAGES"] != "postgresql-18-extra" || got["PACKAGES"] != "" ||
 		got["PGDG_SCRIPT"] != "" || got["STOP_PGBOUNCER"] != "0" {
 		t.Fatalf("prestart env = %#v", got)
@@ -481,16 +564,20 @@ func TestPrepareExtensionStartExtraAndPreinstalled(t *testing.T) {
 	// A preinstalled-only requirement performs no install but verifies the
 	// actual file and reports it explicitly when absent.
 	got = nil
+
 	if err := os.Remove(filepath.Join(extensionControlDir, "extra_ext.control")); err != nil {
 		t.Fatal(err)
 	}
+
 	preinstalled := []ExtensionPrerequisite{{
 		Name: "custom", Source: catalog.SourcePreinstalled, ExtName: "custom_ext",
 	}}
 	err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], preinstalled, engine.Runtime{}, nil)
+
 	if got != nil {
 		t.Fatalf("preinstalled-only prestart ran the package script: %#v", got)
 	}
+
 	if err == nil || !strings.Contains(err.Error(), "custom_ext.control") {
 		t.Fatalf("missing preinstalled file = %v", err)
 	}
@@ -505,6 +592,7 @@ func TestExtensionSQLSchemaGrantsAndDefaults(t *testing.T) {
 
 func testExtensionSQLCustomSchema(t *testing.T) {
 	custom := catalog.Extension{Name: "custom", ExtName: "my_ext", Schema: "myext"}
+
 	sql := ExtensionSQL(custom, "app")
 	for _, want := range []string{
 		`CREATE SCHEMA IF NOT EXISTS "myext";`,
@@ -514,6 +602,7 @@ func testExtensionSQLCustomSchema(t *testing.T) {
 			t.Errorf("custom SQL missing %q:\n%s", want, sql)
 		}
 	}
+
 	if strings.Contains(sql, "GRANT") {
 		t.Fatalf("custom extension gained a grant:\n%s", sql)
 	}
@@ -524,6 +613,7 @@ func testExtensionSQLBuiltinGrants(t *testing.T) {
 	if !strings.Contains(cron, `GRANT USAGE ON SCHEMA "cron" TO "app_owner";`) {
 		t.Fatalf("pg_cron grant missing:\n%s", cron)
 	}
+
 	partman := ExtensionSQL(catalog.Extension{Name: "pg_partman", ExtName: "pg_partman", Schema: "partman"}, "app")
 	if !strings.Contains(partman, `CREATE SCHEMA IF NOT EXISTS "partman";`) ||
 		!strings.Contains(partman, `GRANT ALL ON SCHEMA "partman" TO "app_owner";`) {
@@ -538,10 +628,12 @@ func testExtensionSQLPartmanOverride(t *testing.T) {
 	override.Extensions = map[string]config.ExtensionDefinition{
 		"pg_partman": {Schema: "custom_partman"},
 	}
+
 	partmanExt, err := override.ExtensionResolver().Resolve("pg_partman")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	partmanOverride := ExtensionSQL(partmanExt, "app")
 	for _, want := range []string{
 		`CREATE SCHEMA IF NOT EXISTS "custom_partman";`,
@@ -553,6 +645,7 @@ func testExtensionSQLPartmanOverride(t *testing.T) {
 			t.Errorf("pg_partman override missing %q:\n%s", want, partmanOverride)
 		}
 	}
+
 	if strings.Contains(partmanOverride, `"partman"`) {
 		t.Fatalf("pg_partman override granted the default schema:\n%s", partmanOverride)
 	}
@@ -561,9 +654,11 @@ func testExtensionSQLPartmanOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if fresh.Schema != "partman" || !strings.Contains(ExtensionSQL(fresh, "app"), `GRANT ALL ON SCHEMA "partman" TO "app_owner";`) {
 		t.Fatalf("fresh pg_partman schema = %q", fresh.Schema)
 	}
+
 	if auto := ExtensionSQL(catalog.Extension{Name: "auto_explain", Preload: "auto_explain"}, "app"); auto != "" {
 		t.Fatalf("preload-only module produced SQL: %q", auto)
 	}
@@ -575,10 +670,12 @@ func testExtensionSQLDatabaseGrants(t *testing.T) {
 		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext", Schema: "myext"},
 	}
 	db := config.ClusterSpec{Name: "app", Extensions: []string{"custom"}, Protected: true}
+
 	grants, err := databaseGrantsSQL(cfg, db)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, want := range []string{
 		`CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";`,
 		`CREATE SCHEMA IF NOT EXISTS "myext";`,
@@ -588,9 +685,11 @@ func testExtensionSQLDatabaseGrants(t *testing.T) {
 			t.Errorf("effective grants missing %q:\n%s", want, grants)
 		}
 	}
+
 	if strings.Contains(grants, `CREATE EXTENSION IF NOT EXISTS "auto_explain"`) {
 		t.Fatalf("auto_explain was created:\n%s", grants)
 	}
+
 	if strings.Contains(grants, "vaire_admin") {
 		t.Fatalf("extension SQL widened vaire_admin:\n%s", grants)
 	}
@@ -693,16 +792,20 @@ func TestMissingExtensionNamesUsesEffectiveSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(missing, []string{"custom_ext"}) {
 		t.Fatalf("missing = %v", missing)
 	}
+
 	missing, err = missingExtensionNames(cfg, spec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(missing, []string{"custom_ext", "pg_stat_statements"}) {
 		t.Fatalf("missing with empty installed = %v", missing)
 	}
+
 	if slices.Contains(missing, "auto_explain") {
 		t.Fatalf("preload-only auto_explain was required as SQL: %v", missing)
 	}

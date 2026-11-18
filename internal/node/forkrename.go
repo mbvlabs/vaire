@@ -50,19 +50,24 @@ func newForkRenameCopy(m *backup.Materialised, livePort int) (forkRenameCopy, er
 	if m == nil {
 		return forkRenameCopy{}, errors.New("fork rename needs its owned copy")
 	}
+
 	if m.Port < config.TemporaryPortMin || m.Port > config.TemporaryPortMax {
 		return forkRenameCopy{}, fmt.Errorf("fork rename refuses port %d outside the temporary range", m.Port)
 	}
+
 	if livePort <= 0 {
 		return forkRenameCopy{}, errors.New("fork rename needs the destination port")
 	}
+
 	if m.Port == m.SourcePort || m.Port == livePort {
 		return forkRenameCopy{}, errors.New("fork rename refuses the source or destination port")
 	}
+
 	dataDir := strings.TrimSpace(m.Data)
 	if dataDir == "" || !filepath.IsAbs(dataDir) {
 		return forkRenameCopy{}, errors.New("fork rename needs the copy's absolute data directory")
 	}
+
 	return forkRenameCopy{local: m.PG(), port: m.Port, dataDir: filepath.Clean(dataDir)}, nil
 }
 
@@ -75,10 +80,12 @@ func renameFork(ctx context.Context, m *backup.Materialised, source, name string
 	if m == nil || source != m.Source || name != m.Name {
 		return errors.New("fork rename does not match its owned copy")
 	}
+
 	target, err := newForkRenameCopy(m, livePort)
 	if err != nil {
 		return err
 	}
+
 	return renameForkOnCopy(ctx, target, source, name, passwords)
 }
 
@@ -94,20 +101,25 @@ func renameForkOnCopy(ctx context.Context, target forkRenameCopy, source, name s
 	if ctx == nil || target.local == nil {
 		return errors.New("fork rename needs a context and its owned copy endpoint")
 	}
+
 	if source == "" || name == "" || source == name {
 		return errors.New("fork rename needs distinct source and destination names")
 	}
+
 	statements, err := renameStatements(renameState{database: true, roles: renameRoles()}, source, name, passwords)
 	if err != nil {
 		return err
 	}
+
 	if err := target.attest(ctx); err != nil {
 		return err
 	}
+
 	database, err := target.database(ctx, source, name)
 	if err != nil {
 		return err
 	}
+
 	if err := target.refusePrepared(ctx, database.oid); err != nil {
 		return err
 	}
@@ -117,26 +129,35 @@ func renameForkOnCopy(ctx context.Context, target forkRenameCopy, source, name s
 		if err == nil || !gated {
 			return
 		}
+
 		compensateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), forkRenameCompensateTimeout)
 		compErr := restoreForkRenameAllowConnections(compensateCtx, target, database.oid, database.allowConnections)
+
 		cancel()
+
 		err = errors.Join(err, compErr)
 	}()
 
 	gated = true
+
 	if err := target.setAllowConnections(ctx, database.name, false); err != nil {
 		return fmt.Errorf("refusing new connections to the owned copy's database: %w", err)
 	}
+
 	if err := target.verifyAllowConnections(ctx, database.oid, false); err != nil {
 		return err
 	}
+
 	if err := drainForkRenameSessions(ctx, target, database.oid); err != nil {
 		return err
 	}
+
 	if err := target.rename(ctx, statements, database, name); err != nil {
 		return err
 	}
+
 	gated = false
+
 	return nil
 }
 
@@ -148,17 +169,21 @@ func (t forkRenameCopy) attest(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("attesting the owned copy's SQL endpoint: %w", err)
 	}
+
 	if len(rows) != 1 {
 		return errors.New("the owned copy's SQL endpoint returned no unique identity")
 	}
+
 	port, err := strconv.Atoi(strings.TrimSpace(rows[0]["port"]))
 	if err != nil || port != t.port {
 		return fmt.Errorf("the SQL endpoint port %q is not the owned copy's port %d", rows[0]["port"], t.port)
 	}
+
 	dataDir := filepath.Clean(strings.TrimSpace(rows[0]["data_dir"]))
 	if dataDir != t.dataDir {
 		return fmt.Errorf("the SQL endpoint data directory %q is not the owned copy's %q", dataDir, t.dataDir)
 	}
+
 	return nil
 }
 
@@ -179,33 +204,41 @@ func (t forkRenameCopy) database(ctx context.Context, source, name string) (fork
 	if err != nil {
 		return forkRenameDatabase{}, fmt.Errorf("reading the owned copy's databases: %w", err)
 	}
+
 	var found map[string]string
+
 	for _, row := range rows {
 		switch row["name"] {
 		case source:
 			if found != nil {
 				return forkRenameDatabase{}, errors.New("the owned copy has more than one source database")
 			}
+
 			found = row
 		case name:
 			return forkRenameDatabase{}, fmt.Errorf("destination database %s already exists in the owned copy", name)
 		}
 	}
+
 	if found == nil {
 		return forkRenameDatabase{}, fmt.Errorf("source database %s is missing from the owned copy", source)
 	}
+
 	oid, err := forkRenameOID(found["oid"])
 	if err != nil {
 		return forkRenameDatabase{}, err
 	}
+
 	currentName := strings.TrimSpace(found["name"])
 	if currentName == "" {
 		return forkRenameDatabase{}, errors.New("the owned copy's source database has no usable name")
 	}
+
 	allow, err := forkRenameBoolValue(found["allowconn"])
 	if err != nil {
 		return forkRenameDatabase{}, err
 	}
+
 	return forkRenameDatabase{oid: oid, name: currentName, allowConnections: allow}, nil
 }
 
@@ -219,12 +252,15 @@ func (t forkRenameCopy) refusePrepared(ctx context.Context, oid string) error {
 	if err != nil {
 		return fmt.Errorf("reading the owned copy's prepared transactions: %w", err)
 	}
+
 	if len(rows) != 1 {
 		return errors.New("the owned copy's prepared transactions returned no unique count")
 	}
+
 	if rows[0]["n"] != "0" {
 		return fmt.Errorf("the owned copy's database oid %s has prepared transactions; refusing to rename", oid)
 	}
+
 	return nil
 }
 
@@ -235,31 +271,39 @@ func (t forkRenameCopy) refusePrepared(ctx context.Context, oid string) error {
 func drainForkRenameSessions(ctx context.Context, target forkRenameCopy, oid string) error {
 	drainCtx, cancel := context.WithTimeout(ctx, forkRenameDrainTimeout)
 	defer cancel()
-	for round := 0; round < forkRenameDrainRounds; round++ {
+
+	for range forkRenameDrainRounds {
 		if err := target.refusePrepared(drainCtx, oid); err != nil {
 			return err
 		}
+
 		pids, err := target.sessions(drainCtx, oid)
 		if err != nil {
 			return err
 		}
+
 		if len(pids) == 0 {
 			return nil
 		}
+
 		if err := target.terminateSessions(drainCtx, oid); err != nil {
 			return err
 		}
 	}
+
 	if err := target.refusePrepared(drainCtx, oid); err != nil {
 		return err
 	}
+
 	pids, err := target.sessions(drainCtx, oid)
 	if err != nil {
 		return err
 	}
+
 	if len(pids) != 0 {
 		return fmt.Errorf("the owned copy's database oid %s still has %d unresolved session(s)", oid, len(pids))
 	}
+
 	return nil
 }
 
@@ -270,14 +314,17 @@ func (t forkRenameCopy) sessions(ctx context.Context, oid string) ([]string, err
 	if err != nil {
 		return nil, fmt.Errorf("reading the owned copy's sessions: %w", err)
 	}
+
 	pids := make([]string, 0, len(rows))
 	for _, row := range rows {
 		pid := strings.TrimSpace(row["pid"])
 		if _, err := strconv.ParseUint(pid, 10, 32); err != nil {
 			return nil, errors.New("the owned copy's sessions returned an invalid pid")
 		}
+
 		pids = append(pids, pid)
 	}
+
 	return pids, nil
 }
 
@@ -285,11 +332,13 @@ func (t forkRenameCopy) sessions(ctx context.Context, oid string) ([]string, err
 // backends, waiting at most forkRenameTerminateTimeout for each.
 func (t forkRenameCopy) terminateSessions(ctx context.Context, oid string) error {
 	timeout := strconv.FormatInt(int64(forkRenameTerminateTimeout/time.Millisecond), 10)
+
 	_, err := t.local.Query(ctx, "postgres",
 		"SELECT pid::text AS pid, pg_terminate_backend(pid, "+timeout+")::text AS terminated FROM pg_stat_activity WHERE datid = "+oid+" ORDER BY pid", nil)
 	if err != nil {
 		return fmt.Errorf("terminating the owned copy's sessions: %w", err)
 	}
+
 	return nil
 }
 
@@ -308,16 +357,20 @@ func (t forkRenameCopy) verifyAllowConnections(ctx context.Context, oid string, 
 	if err != nil {
 		return fmt.Errorf("reading the owned copy's database oid %s: %w", oid, err)
 	}
+
 	if len(rows) != 1 {
 		return fmt.Errorf("the owned copy's database oid %s is missing", oid)
 	}
+
 	got, err := forkRenameBoolValue(rows[0]["allowconn"])
 	if err != nil {
 		return err
 	}
+
 	if got != want {
 		return fmt.Errorf("the owned copy's database oid %s has allow_connections=%t, want %t", oid, got, want)
 	}
+
 	return nil
 }
 
@@ -330,6 +383,7 @@ func (t forkRenameCopy) rename(ctx context.Context, statements string, database 
 	if !strings.HasSuffix(statements, "\n") {
 		statements += "\n"
 	}
+
 	body := "BEGIN;\n" + statements +
 		"ALTER DATABASE " + pg.Quote(name) + " ALLOW_CONNECTIONS " + forkRenameSQLBool(database.allowConnections) + ";\n" +
 		"DO $vaire$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_database WHERE oid = " + database.oid +
@@ -338,6 +392,7 @@ func (t forkRenameCopy) rename(ctx context.Context, statements string, database 
 	if err := t.local.Exec(ctx, "postgres", body, nil); err != nil {
 		return fmt.Errorf("renaming %s to %s in its owned copy: %w", database.name, name, err)
 	}
+
 	return nil
 }
 
@@ -351,23 +406,29 @@ func restoreForkRenameAllowConnections(ctx context.Context, target forkRenameCop
 	if err != nil {
 		return fmt.Errorf("compensating database oid %s: %w", oid, err)
 	}
+
 	if len(rows) != 1 {
 		return fmt.Errorf("compensating database oid %s: the captured database is missing and stays fenced", oid)
 	}
+
 	current, err := forkRenameBoolValue(rows[0]["allowconn"])
 	if err != nil {
 		return err
 	}
+
 	if current == allow {
 		return nil
 	}
+
 	name := strings.TrimSpace(rows[0]["name"])
 	if name == "" {
 		return fmt.Errorf("compensating database oid %s: its current name is empty", oid)
 	}
+
 	if err := target.setAllowConnections(ctx, name, allow); err != nil {
 		return fmt.Errorf("compensating database oid %s: %w", oid, err)
 	}
+
 	return target.verifyAllowConnections(ctx, oid, allow)
 }
 
@@ -376,6 +437,7 @@ func forkRenameOID(value string) (string, error) {
 	if err != nil || parsed == 0 {
 		return "", errors.New("the owned copy's source database has no usable OID")
 	}
+
 	return strconv.FormatUint(parsed, 10), nil
 }
 
@@ -386,6 +448,7 @@ func forkRenameBoolValue(value string) (bool, error) {
 	case "f", "false", "0":
 		return false, nil
 	}
+
 	return false, errors.New("the owned copy's database has no usable allow_connections value")
 }
 
@@ -393,5 +456,6 @@ func forkRenameSQLBool(value bool) string {
 	if value {
 		return "true"
 	}
+
 	return "false"
 }

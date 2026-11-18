@@ -48,28 +48,35 @@ func floorValue(name, value string) (int, error) {
 	n, end, ok, overflow := strtolBase0(value)
 	val := float64(n)
 	retry := overflow
+
 	if end < len(value) {
 		switch value[end] {
 		case '.', 'e', 'E':
 			retry = true
 		}
 	}
+
 	if retry {
 		val, end, ok, overflow = strtodWhole(value)
 	}
+
 	if !ok || overflow {
 		return 0, floorValueError(name, value)
 	}
+
 	if end = skipCSpace(value, end); end != len(value) {
 		return 0, floorValueError(name, value)
 	}
+
 	if math.IsNaN(val) {
 		return 0, floorValueError(name, value)
 	}
+
 	rounded := math.RoundToEven(val)
 	if rounded < math.MinInt32 || rounded > math.MaxInt32 {
 		return 0, fmt.Errorf("%s %q is out of range for a PostgreSQL integer", name, value)
 	}
+
 	return int(rounded), nil
 }
 
@@ -87,10 +94,12 @@ func strtolBase0(value string) (n int64, end int, ok, overflow bool) {
 	if i == len(value) {
 		return 0, 0, false, false
 	}
+
 	negative := false
 	if value[i] == '+' || value[i] == '-' {
 		negative, i = value[i] == '-', i+1
 	}
+
 	base, digits := 10, i
 	if i < len(value) && value[i] == '0' {
 		base, digits = 8, i
@@ -98,15 +107,19 @@ func strtolBase0(value string) (n int64, end int, ok, overflow bool) {
 			base, digits = 16, i+2
 		}
 	}
+
 	for i = digits; i < len(value) && digitInBase(value[i], base); i++ {
 	}
+
 	if i == digits {
 		return 0, 0, false, false
 	}
+
 	mag, err := strconv.ParseUint(value[digits:i], base, 64)
 	if err != nil {
 		return 0, i, true, true
 	}
+
 	if negative {
 		switch {
 		case mag > 1<<63:
@@ -114,11 +127,14 @@ func strtolBase0(value string) (n int64, end int, ok, overflow bool) {
 		case mag == 1<<63:
 			return math.MinInt64, i, true, false
 		}
+
 		return -int64(mag), i, true, false //nolint:gosec // G115: mag < 2^63 here, so the conversion is exact.
 	}
+
 	if mag > math.MaxInt64 {
 		return 0, i, true, true
 	}
+
 	return int64(mag), i, true, false
 }
 
@@ -128,22 +144,27 @@ func strtolBase0(value string) (n int64, end int, ok, overflow bool) {
 func strtodWhole(value string) (f float64, end int, ok, overflow bool) {
 	i := skipCSpace(value, 0)
 	start := i
+
 	negative := false
 	if i < len(value) && (value[i] == '+' || value[i] == '-') {
 		negative, i = value[i] == '-', i+1
 	}
+
 	if f, n, ok := parseSpecialFloat(value[i:], negative); ok {
 		return f, i + n, true, false
 	}
+
 	if hasHexPrefix(value, i) {
 		if end, digits := hexFloatEnd(value, i+2); digits > 0 {
 			literal := value[start:end]
 			if !strings.ContainsAny(literal, "pP") {
 				literal += "p0"
 			}
+
 			return parseFloat(literal, end)
 		}
 	}
+
 	return parseDecimalFloat(value, start, i)
 }
 
@@ -165,9 +186,11 @@ func parseSpecialFloat(value string, negative bool) (f float64, n int, ok bool) 
 			if negative {
 				f = -f
 			}
+
 			return f, len(special.text), true
 		}
 	}
+
 	return 0, 0, false
 }
 
@@ -179,21 +202,25 @@ func hexFloatEnd(value string, i int) (end, digits int) {
 	for j < len(value) && hexDigit(value[j]) {
 		j, digits = j+1, digits+1
 	}
+
 	if j < len(value) && value[j] == '.' {
 		j++
 		for j < len(value) && hexDigit(value[j]) {
 			j, digits = j+1, digits+1
 		}
 	}
+
 	if digits == 0 {
 		return 0, 0
 	}
+
 	end = j
 	if j < len(value) && (value[j] == 'p' || value[j] == 'P') {
 		if k, ok := exponentEnd(value, j+1); ok {
 			end = k
 		}
 	}
+
 	return end, digits
 }
 
@@ -204,21 +231,25 @@ func parseDecimalFloat(value string, start, i int) (float64, int, bool, bool) {
 	for j < len(value) && decimalDigit(value[j]) {
 		j, digits = j+1, digits+1
 	}
+
 	if j < len(value) && value[j] == '.' {
 		j++
 		for j < len(value) && decimalDigit(value[j]) {
 			j, digits = j+1, digits+1
 		}
 	}
+
 	if digits == 0 {
 		return 0, 0, false, false
 	}
+
 	end := j
 	if end < len(value) && (value[end] == 'e' || value[end] == 'E') {
 		if k, ok := exponentEnd(value, end+1); ok {
 			end = k
 		}
 	}
+
 	return parseFloat(value[start:end], end)
 }
 
@@ -229,13 +260,16 @@ func exponentEnd(value string, i int) (end int, ok bool) {
 	if i < len(value) && (value[i] == '+' || value[i] == '-') {
 		i++
 	}
+
 	start := i
 	for i < len(value) && decimalDigit(value[i]) {
 		i++
 	}
+
 	if i == start {
 		return 0, false
 	}
+
 	return i, true
 }
 
@@ -248,12 +282,15 @@ func parseFloat(literal string, end int) (float64, int, bool, bool) {
 		if math.Abs(f) < 0x1p-1022 && nonzeroMantissa(literal) {
 			return 0, end, true, true
 		}
+
 		return f, end, true, false
 	}
+
 	var numErr *strconv.NumError
 	if errors.As(err, &numErr) && errors.Is(numErr.Err, strconv.ErrRange) {
 		return 0, end, true, true
 	}
+
 	return 0, 0, false, false
 }
 
@@ -261,13 +298,16 @@ func parseFloat(literal string, end int) (float64, int, bool, bool) {
 // has a nonzero digit before its exponent.
 func nonzeroMantissa(literal string) bool {
 	s := strings.TrimLeft(literal, "+-")
+
 	exp := "eE"
 	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
 		s, exp = s[2:], "pP"
 	}
+
 	if i := strings.IndexAny(s, exp); i >= 0 {
 		s = s[:i]
 	}
+
 	return strings.ContainsAny(s, "123456789abcdefABCDEF")
 }
 
@@ -287,6 +327,7 @@ func digitInBase(c byte, base int) bool {
 	case 16:
 		return hexDigit(c)
 	}
+
 	return decimalDigit(c)
 }
 
@@ -300,6 +341,7 @@ func skipCSpace(value string, i int) int {
 			return i
 		}
 	}
+
 	return i
 }
 
@@ -315,18 +357,22 @@ func effectiveSetting(owner string, spec config.ClusterSpec, pgSettings map[stri
 			if err != nil {
 				return 0, fmt.Errorf("%s: %w", owner, err)
 			}
+
 			return n, nil
 		}
 	}
+
 	for _, s := range res.Settings {
 		if s.Name == name {
 			return floorValue(name, s.Value)
 		}
 	}
+
 	n, ok := floorDefaults[name]
 	if !ok {
 		return 0, fmt.Errorf("%s: no PostgreSQL default is known for %s", owner, name)
 	}
+
 	return n, nil
 }
 
@@ -342,18 +388,22 @@ type floorPair struct {
 // own value and its source's (RFC 10.4).
 func followerFloorPairs(cfg config.Cluster, spec, src config.ClusterSpec, host hostinfo.Info) ([]floorPair, error) {
 	own, theirs := tuningFor(cfg, spec, host), tuningFor(cfg, src, host)
+
 	out := make([]floorPair, 0, len(FloorSettings))
 	for _, name := range FloorSettings {
 		mine, err := effectiveSetting(spec.Name, spec, cfg.Postgres.Settings, own, name)
 		if err != nil {
 			return nil, fmt.Errorf("%s's hot-standby floors: %w", spec.Name, err)
 		}
+
 		source, err := effectiveSetting(src.Name, src, cfg.Postgres.Settings, theirs, name)
 		if err != nil {
 			return nil, fmt.Errorf("%s's hot-standby floors: %w", spec.Name, err)
 		}
+
 		out = append(out, floorPair{name: name, mine: mine, source: source})
 	}
+
 	return out, nil
 }
 
@@ -364,14 +414,17 @@ func FollowerFloors(cfg config.Cluster, spec, src config.ClusterSpec, host hosti
 	if err != nil {
 		return nil, err
 	}
+
 	out := make([]render.Floor, 0, len(pairs))
 	for _, p := range pairs {
 		v, reason := p.mine, fmt.Sprintf("its own; %s runs %d", src.Name, p.source)
 		if p.source > p.mine {
 			v, reason = p.source, fmt.Sprintf("%s's, above its own %d", src.Name, p.mine)
 		}
+
 		out = append(out, render.Floor{Name: p.name, Value: strconv.Itoa(v), Reason: reason})
 	}
+
 	return out, nil
 }
 
@@ -379,14 +432,17 @@ func FollowerFloors(cfg config.Cluster, spec, src config.ClusterSpec, host hosti
 // rendering. It uses the same precedence and PostgreSQL parser as rendering.
 func OwnFloors(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) (map[string]int, error) {
 	result := make(map[string]int, len(FloorSettings))
+
 	tuning := tuningFor(cfg, spec, host)
 	for _, name := range FloorSettings {
 		value, err := effectiveSetting(spec.Name, spec, cfg.Postgres.Settings, tuning, name)
 		if err != nil {
 			return nil, err
 		}
+
 		result[name] = value
 	}
+
 	return result, nil
 }
 
@@ -397,14 +453,17 @@ func EffectiveFollowerFloors(cfg config.Cluster, spec config.ClusterSpec, host h
 	if !ok {
 		return nil, fmt.Errorf("%s: follower source not found", spec.Name)
 	}
+
 	pairs, err := followerFloorPairs(cfg, spec, src, host)
 	if err != nil {
 		return nil, err
 	}
+
 	result := make(map[string]int, len(pairs))
 	for _, p := range pairs {
 		result[p.name] = floorOf(p)
 	}
+
 	return result, nil
 }
 
@@ -416,11 +475,13 @@ func RunningFloors(ctx context.Context, src config.ClusterSpec) (map[string]int,
 	for _, name := range FloorSettings {
 		quoted = append(quoted, "'"+name+"'")
 	}
+
 	rows, err := ClusterPG(src).Query(ctx, "postgres",
 		"SELECT name, setting FROM pg_settings WHERE name IN ("+strings.Join(quoted, ", ")+")", nil)
 	if err != nil {
 		return nil, fmt.Errorf("read %s's running hot-standby settings: %w", src.Name, err)
 	}
+
 	return runningFloorsOf(src.Name, rows)
 }
 
@@ -428,26 +489,32 @@ func RunningFloors(ctx context.Context, src config.ClusterSpec) (map[string]int,
 // compares. An unknown or malformed row is an error, never a default.
 func runningFloorsOf(source string, rows []map[string]string) (map[string]int, error) {
 	out := make(map[string]int, len(FloorSettings))
+
 	known := make(map[string]bool, len(FloorSettings))
 	for _, name := range FloorSettings {
 		known[name] = true
 	}
+
 	for _, row := range rows {
 		name := row["name"]
 		if !known[name] {
 			continue
 		}
+
 		value, err := floorValue(name, row["setting"])
 		if err != nil {
 			return nil, fmt.Errorf("%s's running %s: %w", source, name, err)
 		}
+
 		out[name] = value
 	}
+
 	for _, name := range FloorSettings {
 		if _, ok := out[name]; !ok {
 			return nil, fmt.Errorf("%s did not report its running %s", source, name)
 		}
 	}
+
 	return out, nil
 }
 
@@ -467,22 +534,27 @@ type FollowerFloorDrop struct {
 // around the source.
 func FollowerFloorDrops(cfg config.Cluster, db string, was, now config.ClusterSpec, host hostinfo.Info) ([]FollowerFloorDrop, error) {
 	var out []FollowerFloorDrop
+
 	for _, f := range cfg.FollowersOf(db) {
 		before, err := followerFloorPairs(cfg, f, was, host)
 		if err != nil {
 			return nil, err
 		}
+
 		after, err := followerFloorPairs(cfg, f, now, host)
 		if err != nil {
 			return nil, err
 		}
+
 		for i := range after {
 			if floorOf(after[i]) >= floorOf(before[i]) {
 				continue
 			}
+
 			out = append(out, FollowerFloorDrop{Follower: f.Name, Setting: after[i].name, From: floorOf(before[i]), To: floorOf(after[i])})
 		}
 	}
+
 	return out, nil
 }
 
@@ -497,15 +569,18 @@ func FollowerFloorsChange(cfg config.Cluster, spec, was, now config.ClusterSpec,
 	if err != nil {
 		return false, err
 	}
+
 	after, err := followerFloorPairs(cfg, spec, now, host)
 	if err != nil {
 		return false, err
 	}
+
 	for i := range after {
 		if floorOf(after[i]) != floorOf(before[i]) {
 			return true, nil
 		}
 	}
+
 	return false, nil
 }
 
@@ -515,11 +590,14 @@ func FollowerFloorsChange(cfg config.Cluster, spec, was, now config.ClusterSpec,
 // change needs the follower's restart; a changed reason alone does not.
 func FloorsDiffer(diff string) bool {
 	removed, added := map[string]string{}, map[string]string{}
+
 	for line := range strings.SplitSeq(diff, "\n") {
 		if line == "" || strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++") {
 			continue
 		}
+
 		into := added
+
 		switch line[0] {
 		case '-':
 			into = removed
@@ -527,17 +605,21 @@ func FloorsDiffer(diff string) bool {
 		default:
 			continue
 		}
+
 		setting, _, _ := strings.Cut(line[1:], "#")
+
 		name, value, ok := strings.Cut(setting, "=")
 		if ok {
 			into[strings.TrimSpace(name)] = strings.TrimSpace(value)
 		}
 	}
+
 	for _, name := range FloorSettings {
 		if removed[name] != added[name] {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -554,6 +636,7 @@ func FollowerRestoreCommand(cfg config.Cluster, spec, src config.ClusterSpec) st
 	if !cfg.BackupConfigured() || src.Stanza == "" {
 		return ""
 	}
+
 	return render.PgBackRestBin + " --pg1-path=" + cfg.Server.DataDirectory(spec.Name) + " --stanza=" + src.Stanza + ` archive-get %f "%p"`
 }
 
@@ -563,14 +646,17 @@ func followerSettings(cfg config.Cluster, spec config.ClusterSpec, host hostinfo
 	if !spec.IsFollower() {
 		return render.FollowerSettings{}, false, nil
 	}
+
 	src, ok := cfg.ClusterByName(spec.Follows)
 	if !ok {
 		return render.FollowerSettings{}, false, nil
 	}
+
 	floors, err := FollowerFloors(cfg, spec, src, host)
 	if err != nil {
 		return render.FollowerSettings{}, false, err
 	}
+
 	return render.FollowerSettings{
 		Name: spec.Name, Source: src.Name,
 		Floors:         floors,
@@ -587,14 +673,18 @@ func followerFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtim
 	if !spec.IsFollower() {
 		return nil, nil
 	}
+
 	recs, _ := backup.LoadRecords()
+
 	f, ok, err := followerSettings(cfg, spec, rt.Host, recs)
 	if err != nil {
 		return nil, err
 	}
+
 	if !ok {
 		return nil, nil
 	}
+
 	return []managedFile{{Path: FollowerConfPath(spec.Name), Content: string(render.FollowerConf(f)), Mode: 0o644, Owner: pgFileOwner, Group: pgFileGroup}}, nil
 }
 
@@ -609,17 +699,20 @@ func WriteFollowerConf(cfg config.Cluster, spec config.ClusterSpec, host hostinf
 	if err != nil {
 		return err
 	}
+
 	for _, f := range files {
 		if err := writeFileOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group); err != nil {
 			return err
 		}
 	}
+
 	overrides := PGConfD(spec.Name) + "/90-overrides.conf"
 	if _, err := os.Stat(overrides); err != nil {
 		if err := writeFileOwned(overrides, string(render.OverridesHeader()), 0o644, pgFileOwner, pgFileGroup); err != nil {
 			return err
 		}
 	}
+
 	return ensureIncludeDir(spec.Name)
 }
 
@@ -629,6 +722,7 @@ func RemoveFollowerConf(cluster string) error {
 	if err := os.Remove(FollowerConfPath(cluster)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	return nil
 }
 
@@ -643,6 +737,7 @@ var unfollowPoolers = []struct {
 var poolerAdminAt = func(ctx context.Context, dir string, port int, command string) error {
 	ctx, cancel := context.WithTimeout(ctx, poolerAdminTimeout)
 	defer cancel()
+
 	return runCmd(ctx, "runuser", "-u", "postgres", "--", "psql", "-X", "-q",
 		"-h", dir, "-p", strconv.Itoa(port), "-U", "pgbouncer", "-d", "pgbouncer", "-c", command)
 }
@@ -655,12 +750,14 @@ var poolerDatabaseNames = func(ctx context.Context, dir string, port int) (map[s
 	if err != nil {
 		return nil, err
 	}
+
 	out := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if name := row["name"]; name != "" {
 			out[name] = true
 		}
 	}
+
 	return out, nil
 }
 
@@ -675,6 +772,7 @@ var poolerDatabaseNames = func(ctx context.Context, dir string, port int) (map[s
 // in again; it is only called after the transition's privileges are settled.
 func FencePoolerDatabase(ctx context.Context, db string) (resume func(), err error) {
 	resume = func() { ResumePoolerDatabase(ctx, db) }
+
 	fail := func(err error) (func(), error) {
 		resume()
 		return nil, err
@@ -684,6 +782,7 @@ func FencePoolerDatabase(ctx context.Context, db string) (resume func(), err err
 		if err != nil {
 			return fail(fmt.Errorf("read the databases of the pooler at %s: %w", p.dir, err))
 		}
+
 		if !names[db] {
 			continue
 		}
@@ -696,10 +795,12 @@ func FencePoolerDatabase(ctx context.Context, db string) (resume func(), err err
 		if err := poolerAdminAt(ctx, p.dir, p.port, "KILL "+db); err != nil {
 			return fail(fmt.Errorf("kill %s's clients on the pooler at %s: %w", db, p.dir, err))
 		}
+
 		if err := poolerAdminAt(ctx, p.dir, p.port, "PAUSE "+db); err != nil {
 			return fail(fmt.Errorf("pause %s on the pooler at %s: %w", db, p.dir, err))
 		}
 	}
+
 	return resume, nil
 }
 
@@ -710,23 +811,28 @@ func FencePoolerDatabase(ctx context.Context, db string) (resume func(), err err
 // never resumes before the routing finalizer proves the destination safe.
 func FenceRestorePoolers(ctx context.Context, db string) error {
 	aliases := []string{db, backup.RestoringName(db)}
+
 	for _, p := range unfollowPoolers {
 		names, err := poolerDatabaseNames(ctx, p.dir, p.port)
 		if err != nil {
 			return fmt.Errorf("read the databases of the pooler at %s: %w", p.dir, err)
 		}
+
 		for _, alias := range aliases {
 			if !names[alias] {
 				continue
 			}
+
 			if err := poolerAdminAt(ctx, p.dir, p.port, "KILL "+alias); err != nil {
 				return fmt.Errorf("kill %s's clients on the pooler at %s: %w", alias, p.dir, err)
 			}
+
 			if err := poolerAdminAt(ctx, p.dir, p.port, "PAUSE "+alias); err != nil {
 				return fmt.Errorf("pause %s on the pooler at %s: %w", alias, p.dir, err)
 			}
 		}
 	}
+
 	return nil
 }
 

@@ -28,14 +28,18 @@ import (
 // stdin isolated, without running its RunE (which would connect).
 func newCopyTestCommand(t *testing.T) *cobra.Command {
 	t.Helper()
+
 	root := NewRoot()
+
 	cmd, _, err := root.Find([]string{"db", "copy"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetIn(strings.NewReader(""))
+
 	return cmd
 }
 
@@ -43,22 +47,27 @@ func newCopyTestCommand(t *testing.T) *cobra.Command {
 // reads what the command wrote without an unchecked type assertion.
 func copyTestOutput(t *testing.T, cmd *cobra.Command) *bytes.Buffer {
 	t.Helper()
+
 	out, ok := cmd.OutOrStdout().(*bytes.Buffer)
 	if !ok {
 		t.Fatalf("command output is %T, want *bytes.Buffer", cmd.OutOrStdout())
 	}
+
 	return out
 }
 
 func setCopyFlag(t *testing.T, cmd *cobra.Command, name, value string) {
 	t.Helper()
+
 	flag := cmd.Flags().Lookup(name)
 	if flag == nil {
 		flag = cmd.InheritedFlags().Lookup(name)
 	}
+
 	if flag == nil {
 		t.Fatalf("flag --%s is not defined", name)
 	}
+
 	if err := flag.Value.Set(value); err != nil {
 		t.Fatalf("--%s=%s: %v", name, value, err)
 	}
@@ -67,6 +76,7 @@ func setCopyFlag(t *testing.T, cmd *cobra.Command, name, value string) {
 func copyCLIConfig() config.Cluster {
 	cfg := config.DefaultCluster()
 	cfg.ClusterName, cfg.Domain = "prod", "example.com"
+
 	return cfg
 }
 
@@ -75,20 +85,25 @@ func TestDBCopyCommandMetadata(t *testing.T) {
 	if report := checkCommandMetadata(root); !report.OK {
 		t.Fatalf("command metadata: %v", report.Failures)
 	}
+
 	cmd, _, err := root.Find([]string{"db", "copy"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	meta, ok := metaFor(cmd)
 	if !ok {
 		t.Fatal("db copy has no metadata")
 	}
+
 	if !meta.Mutating || meta.Destructive || !meta.SupportsDryRun || meta.ConfirmToken != "{name}" {
 		t.Fatalf("copy metadata = %+v", meta)
 	}
+
 	if !meta.Prompts || len(meta.InteractiveFlags) == 0 {
 		t.Fatalf("copy prompt metadata = %+v", meta)
 	}
+
 	for _, flag := range []string{"source-url-stdin", "source-ca-file", "size", "memory", "profile", "allow-overcommit", "confirm", "dry-run"} {
 		if cmd.Flags().Lookup(flag) == nil {
 			t.Errorf("db copy has no --%s", flag)
@@ -99,18 +114,25 @@ func TestDBCopyCommandMetadata(t *testing.T) {
 func TestCopyConfirmationUsesNameToken(t *testing.T) {
 	cmd := newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
+
 	if err := Confirm(cmd, "app"); err == nil || errorCode(t, err) != output.CodeUnsafeAction {
 		t.Fatalf("missing confirmation = %v, want unsafe_action", err)
 	}
+
 	setCopyFlag(t, cmd, "yes", "true")
+
 	if err := Confirm(cmd, "app"); err == nil || errorCode(t, err) != output.CodeUnsafeAction {
 		t.Fatalf("--yes confirmed the copy: %v", err)
 	}
+
 	setCopyFlag(t, cmd, "confirm", "wrong")
+
 	if err := Confirm(cmd, "app"); err == nil || errorCode(t, err) != output.CodeUnsafeAction {
 		t.Fatalf("wrong confirmation = %v, want unsafe_action", err)
 	}
+
 	setCopyFlag(t, cmd, "confirm", "app")
+
 	if err := Confirm(cmd, "app"); err != nil {
 		t.Fatalf("--confirm app was refused: %v", err)
 	}
@@ -119,19 +141,23 @@ func TestCopyConfirmationUsesNameToken(t *testing.T) {
 func TestCopyNameNoInputAndValidation(t *testing.T) {
 	cmd := newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
+
 	if _, err := copyName(cmd, nil); err == nil || errorCode(t, err) != output.CodeInputRequired {
 		t.Fatalf("missing name = %v, want input_required", err)
 	}
+
 	name, err := copyName(cmd, []string{"app"})
 	if err != nil || name != "app" {
 		t.Fatalf("name = %q, %v", name, err)
 	}
+
 	if _, err := copyName(cmd, []string{"Bad-Name"}); err == nil || errorCode(t, err) != output.CodeValidation {
 		t.Fatalf("invalid name = %v, want validation_failed", err)
 	}
 	// JSON mode also may not prompt.
 	cmd = newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "output", "json")
+
 	if _, err := copyName(cmd, nil); err == nil || errorCode(t, err) != output.CodeInputRequired {
 		t.Fatalf("JSON missing name = %v, want input_required", err)
 	}
@@ -139,10 +165,12 @@ func TestCopyNameNoInputAndValidation(t *testing.T) {
 
 func errorCode(t *testing.T, err error) string {
 	t.Helper()
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		return ""
 	}
+
 	return cliErr.Code
 }
 
@@ -153,6 +181,7 @@ func TestCollectCopySourceNeverPrompts(t *testing.T) {
 	} {
 		cmd := newCopyTestCommand(t)
 		setup(cmd)
+
 		if _, err := collectCopySource(cmd); err == nil || errorCode(t, err) != output.CodeInputRequired {
 			t.Errorf("%s: collect source = %v, want input_required", name, err)
 		}
@@ -163,6 +192,7 @@ func TestReadCopySourceURL(t *testing.T) {
 	raw := "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"
 	cmd := newCopyTestCommand(t)
 	cmd.SetIn(strings.NewReader(raw + "\nnext-line\n"))
+
 	got, err := readCopySourceURL(cmd)
 	if err != nil || got != raw {
 		t.Fatalf("URL = %q, %v", got, err)
@@ -173,6 +203,7 @@ func TestReadCopySourceURL(t *testing.T) {
 	if err != nil || next != "next-line" {
 		t.Fatalf("next line = %q, %v", next, err)
 	}
+
 	if strings.Contains(secrets.Redact("value "+raw), "source-password") {
 		t.Fatal("the raw URL password was not registered for redaction")
 	}
@@ -183,12 +214,15 @@ func TestReadCopySourceURL(t *testing.T) {
 	} {
 		cmd := newCopyTestCommand(t)
 		cmd.SetIn(strings.NewReader(input))
+
 		if _, err := readCopySourceURL(cmd); err == nil || errorCode(t, err) != output.CodeInputRequired {
 			t.Errorf("%s: %v, want input_required", name, err)
 		}
 	}
+
 	cmd = newCopyTestCommand(t)
 	cmd.SetIn(strings.NewReader(raw + "\r\n"))
+
 	if got, err := readCopySourceURL(cmd); err != nil || got != raw {
 		t.Fatalf("CRLF URL = %q, %v", got, err)
 	}
@@ -200,6 +234,7 @@ func TestReadCopySourceURL(t *testing.T) {
 // is deliberately unchanged.
 func TestCopyPasswordPromptPreservesExactBytes(t *testing.T) {
 	oldUI, oldRead := copyPasswordFromUI, copyPasswordRead
+
 	t.Cleanup(func() { copyPasswordFromUI, copyPasswordRead = oldUI, oldRead })
 
 	for name, password := range map[string]string{
@@ -223,47 +258,59 @@ func TestCopyPasswordPromptPreservesExactBytes(t *testing.T) {
 // unchanged and encode it identically in a URL.
 func assertCopyPasswordPreserved(t *testing.T, password string) {
 	t.Helper()
+
 	var plainDiag bytes.Buffer
+
 	copyPasswordRead = func() (string, error) {
 		if got := plainDiag.String(); got != "Source password: " {
 			t.Errorf("masked reader ran before the label: %q", got)
 		}
+
 		return password, nil
 	}
 	copyPasswordFromUI = func(string) (string, error) { return password, nil }
+
 	plain, err := readCopyPasswordWith(false, &plainDiag, "Source password")
 	if err != nil || plain != password {
 		t.Fatalf("plain renderer = %q, %v; want %q", plain, err, password)
 	}
+
 	if got := plainDiag.String(); got != "Source password: \n" {
 		t.Fatalf("plain prompt diagnostics = %q, want one label and newline", got)
 	}
+
 	if strings.Contains(plainDiag.String(), password) {
 		t.Fatalf("plain prompt echoed the password: %q", plainDiag.String())
 	}
 
 	var richDiag bytes.Buffer
+
 	rich, err := readCopyPasswordWith(true, &richDiag, "Source password")
 	if err != nil || rich != password {
 		t.Fatalf("rich renderer = %q, %v; want %q", rich, err, password)
 	}
+
 	if richDiag.Len() != 0 {
 		t.Fatalf("the rich renderer wrote the plain diagnostic: %q", richDiag.String())
 	}
 
 	var encoded [2]string
+
 	for i, value := range []string{plain, rich} {
 		u := &url.URL{Scheme: "postgresql", User: url.UserPassword("source_user", value), Host: "db.example.com", Path: "/app"}
 		encoded[i] = u.String()
+
 		parsed, parseErr := url.Parse(encoded[i])
 		if parseErr != nil {
 			t.Fatal(parseErr)
 		}
+
 		got, ok := parsed.User.Password()
 		if !ok || got != password {
 			t.Fatalf("renderer %d encoded URL %q did not preserve the password: %q %v", i, encoded[i], got, ok)
 		}
 	}
+
 	if encoded[0] != encoded[1] {
 		t.Fatalf("renderers disagree: %q vs %q", encoded[0], encoded[1])
 	}
@@ -273,8 +320,10 @@ func assertCopyPasswordPreserved(t *testing.T, password string) {
 // refused by one renderer.
 func assertCopyPasswordRefused(t *testing.T, password string, rich bool) {
 	t.Helper()
+
 	copyPasswordRead = func() (string, error) { return password, nil }
 	copyPasswordFromUI = func(string) (string, error) { return password, nil }
+
 	if _, err := readCopyPasswordWith(rich, &bytes.Buffer{}, "Source password"); err == nil || errorCode(t, err) != output.CodeValidation {
 		t.Errorf("rich=%v password %q = %v, want validation_failed", rich, password, err)
 	}
@@ -283,13 +332,16 @@ func assertCopyPasswordRefused(t *testing.T, password string, rich bool) {
 func TestCopySourceSecretsConverge(t *testing.T) {
 	ca := "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n"
 	urlInput := copySourceInput{URL: "postgresql://u:secret-password@db.example.com/app?sslmode=verify-full", CA: ca}
+
 	urlSecrets, err := urlInput.secrets()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if urlSecrets[node.CopySourceURLSecret] != urlInput.URL || urlSecrets[node.CopySourceCASecret] != ca {
 		t.Fatalf("URL secrets = %#v", urlSecrets)
 	}
+
 	if _, ok := urlSecrets[node.CopySourceSpecSecret]; ok {
 		t.Fatal("URL input also carried individual fields")
 	}
@@ -298,24 +350,30 @@ func TestCopySourceSecretsConverge(t *testing.T) {
 		Host: "db.example.com", Port: 5433, Database: "app", User: "u",
 		Password: "secret-password", TLSMode: backup.SourceTLSVerifyFull,
 	}
+
 	fieldSecrets, err := (copySourceInput{Fields: fields, CA: ca}).secrets()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, ok := fieldSecrets[node.CopySourceURLSecret]; ok {
 		t.Fatal("field input also carried a URL")
 	}
+
 	var decoded node.CopySourceSecret
 	if err := json.Unmarshal([]byte(fieldSecrets[node.CopySourceSpecSecret]), &decoded); err != nil {
 		t.Fatal(err)
 	}
+
 	if decoded.Host != fields.Host || decoded.Port != fields.Port || decoded.Database != fields.Database ||
 		decoded.User != fields.User || decoded.Password != fields.Password || decoded.TLSMode != fields.TLSMode {
 		t.Fatalf("field source changed: %+v", decoded)
 	}
+
 	if fieldSecrets[node.CopySourceCASecret] != ca {
 		t.Fatal("the CA content was not sent as the separate CA secret")
 	}
+
 	if strings.Contains(fieldSecrets[node.CopySourceCASecret], "secret-password") {
 		t.Fatal("the CA secret carries the password")
 	}
@@ -323,9 +381,11 @@ func TestCopySourceSecretsConverge(t *testing.T) {
 	if _, err := (copySourceInput{URL: "postgresql://u:p@db/app"}).secrets(); err != nil {
 		t.Fatalf("URL without a CA: %v", err)
 	}
+
 	if _, err := (copySourceInput{URL: "postgresql://u:p@db/app", Fields: fields}).secrets(); err == nil {
 		t.Fatal("both source forms were accepted")
 	}
+
 	if _, err := (copySourceInput{}).secrets(); err == nil || errorCode(t, err) != output.CodeInputRequired {
 		t.Fatalf("empty source = %v, want input_required", err)
 	}
@@ -333,19 +393,24 @@ func TestCopySourceSecretsConverge(t *testing.T) {
 
 func TestReadCopyCAFileSendsContentNotPath(t *testing.T) {
 	content := "-----BEGIN CERTIFICATE-----\nsource-ca\n-----END CERTIFICATE-----\n"
+
 	path := filepath.Join(t.TempDir(), "provider-ca.pem")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	cmd := newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "source-ca-file", path)
+
 	got, err := readCopyCAFile(cmd)
 	if err != nil || got != content {
 		t.Fatalf("CA = %q, %v", got, err)
 	}
+
 	if strings.Contains(got, path) {
 		t.Fatal("the CA secret carries the local path")
 	}
+
 	if strings.Contains(secrets.Redact("value "+content), "source-ca") {
 		t.Fatal("the CA content was not registered for redaction")
 	}
@@ -354,13 +419,17 @@ func TestReadCopyCAFileSendsContentNotPath(t *testing.T) {
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	cmd = newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "source-ca-file", empty)
+
 	if _, err := readCopyCAFile(cmd); err == nil || errorCode(t, err) != output.CodeValidation {
 		t.Fatalf("empty CA = %v, want validation_failed", err)
 	}
+
 	cmd = newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "source-ca-file", filepath.Join(t.TempDir(), "missing.pem"))
+
 	if _, err := readCopyCAFile(cmd); err == nil || errorCode(t, err) != output.CodeUsage {
 		t.Fatalf("missing CA = %v, want usage_error", err)
 	}
@@ -374,14 +443,17 @@ func TestCopyDestinationSizesOvercommitAndParams(t *testing.T) {
 	setCopyFlag(t, cmd, "memory", "768MiB")
 	setCopyFlag(t, cmd, "profile", "mixed")
 	setCopyFlag(t, cmd, "allow-overcommit", "true")
+
 	dest, err := resolveCopyDestination(cmd, cfg, "app")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
+
 	params := dest.params()
 	if params["size"] != "custom" || params["memory"] != "768MiB" || params["profile"] != "mixed" || params["allow_overcommit"] != true {
 		t.Fatalf("params = %#v", params)
 	}
+
 	if !strings.Contains(copyDestinationSummary(cfg, dest), "768 MiB") ||
 		!strings.Contains(copyDestinationSummary(cfg, dest), "connections") {
 		t.Fatalf("summary = %q", copyDestinationSummary(cfg, dest))
@@ -390,21 +462,27 @@ func TestCopyDestinationSizesOvercommitAndParams(t *testing.T) {
 	cmd = newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "size", "huge")
+
 	if _, err := resolveCopyDestination(cmd, cfg, "app"); err == nil || errorCode(t, err) != output.CodeValidation {
 		t.Fatalf("invalid size = %v, want validation_failed", err)
 	}
+
 	cmd = newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "size", "custom")
+
 	if _, err := resolveCopyDestination(cmd, cfg, "app"); err == nil {
 		t.Fatal("custom size without memory was accepted")
 	}
+
 	cmd = newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
+
 	dest, err = resolveCopyDestination(cmd, cfg, "app")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, ok := dest.params()["allow_overcommit"]; ok {
 		t.Fatal("overcommit was implicit")
 	}
@@ -425,6 +503,7 @@ func TestCopySummaryIsRedactedAndExplainsLimits(t *testing.T) {
 			Warnings:          []output.Warning{{Code: "source_tls_unverified", Message: "certificate is not verified"}},
 		},
 	}
+
 	lines := strings.Join(copySummaryLines("prod", cfg, dest, pre), "\n")
 	for _, want := range []string{
 		"db.example.com:5432/app", "PostgreSQL 16.4", "not a storage quota",
@@ -435,6 +514,7 @@ func TestCopySummaryIsRedactedAndExplainsLimits(t *testing.T) {
 			t.Errorf("summary is missing %q:\n%s", want, lines)
 		}
 	}
+
 	for _, forbidden := range []string{"source-password", "sslmode=require"} {
 		if strings.Contains(lines, forbidden) {
 			t.Errorf("summary carries %q:\n%s", forbidden, lines)
@@ -447,7 +527,9 @@ func TestCopyStartFailureCredentialsOnlyWhenPossiblyUsed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	const jobID = "01J0000000000000000000TEST"
+
 	handovers := map[string]error{
 		"lost reply": output.NewError(output.CodeTransportFailed, "the connection was lost", output.ExitTransport, ""),
 		"job outcome unknown": output.NewError(output.CodeError, "job 01J ended without a result", output.ExitGeneric, "").
@@ -479,10 +561,12 @@ func TestCopyStartFailureCredentialsOnlyWhenPossiblyUsed(t *testing.T) {
 		WithDetails(map[string]any{"reason": "target_cluster_exists"})
 	cmd := newCopyTestCommand(t)
 	out := copyTestOutput(t, cmd)
+
 	got := copyStartFailure(cmd, definite, jobID, "app", secret, nil)
 	if !errors.Is(got, definite) {
 		t.Fatalf("a definite refusal changed: %v", got)
 	}
+
 	if out.Len() != 0 {
 		t.Fatalf("a definite refusal printed credentials: %s", out.String())
 	}
@@ -493,13 +577,16 @@ func TestCopyStartFailureCredentialsOnlyWhenPossiblyUsed(t *testing.T) {
 	out = copyTestOutput(t, cmd)
 	lost := output.NewError(output.CodeTransportFailed, "the connection was lost", output.ExitTransport, "")
 	got = copyStartFailure(cmd, lost, jobID, "app", secret, nil)
+
 	if out.Len() != 0 {
 		t.Fatalf("structured output printed credentials: %s", out.String())
 	}
+
 	var cliErr *output.CLIError
 	if !errors.As(got, &cliErr) {
 		t.Fatal(got)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if _, ok := details["database"].(databaseSecret); !ok {
 		t.Fatal("structured failure details lack database credentials")
@@ -511,12 +598,15 @@ func TestCopyStartFailureCredentialsOnlyWhenPossiblyUsed(t *testing.T) {
 	observation := output.NewError(output.CodeError, "the job's state could not be read", output.ExitGeneric, "").
 		WithDetails(map[string]any{"reason": node.JobObservationFailed, "job_id": jobID, "observation_failed": true})
 	got = copyStartFailure(cmd, observation, jobID, "app", secret, nil)
+
 	if out.Len() != 0 {
 		t.Fatalf("structured observation output printed credentials: %s", out.String())
 	}
+
 	if !errors.As(got, &cliErr) {
 		t.Fatal(got)
 	}
+
 	details, _ = cliErr.Details.(map[string]any)
 	if _, ok := details["database"].(databaseSecret); !ok {
 		t.Fatal("structured observation failure details lack database credentials")
@@ -530,27 +620,35 @@ func assertCopyStartHandover(t *testing.T, name string, original error, jobID st
 	cmd := newCopyTestCommand(t)
 	out := copyTestOutput(t, cmd)
 	got := copyStartFailure(cmd, original, jobID, "app", secret, nil)
+
 	var cliErr *output.CLIError
 	if !errors.As(got, &cliErr) {
 		t.Fatalf("%s: not a CLI error: %v", name, got)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
+
 	shown, _ := details["database"].(databaseSecret)
 	if shown.Roles["app"].Password != secret.Roles["app"].Password {
 		t.Fatalf("%s: no credential handover", name)
 	}
+
 	if details["job_id"] != jobID {
 		t.Fatalf("%s: job_id = %v, want %s", name, details["job_id"], jobID)
 	}
+
 	if note, _ := details["credentials_note"].(string); note == "" {
 		t.Fatalf("%s: no credentials note", name)
 	}
+
 	if strings.Contains(cliErr.Error(), secret.Roles["app"].Password) {
 		t.Fatalf("%s: the error message carries a password", name)
 	}
+
 	if strings.Contains(cliErr.Hint, "vaire apply") {
 		t.Fatalf("%s: the copy hint reused db create's apply advice: %q", name, cliErr.Hint)
 	}
+
 	if !strings.Contains(out.String(), secret.Roles["app"].Password) {
 		t.Fatalf("%s: the human output did not print the credentials", name)
 	}
@@ -564,40 +662,46 @@ func TestCopyCredentialHandoffAfterReattachObservationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	id := rpc.NewRequestID()
 	lost := output.NewError(output.CodeTransportFailed, "the connection to the node was lost", output.ExitTransport, "").
 		WithDetails(map[string]any{"reason": "stream_lost"})
 	followErr := output.NewError(output.CodeError, "the job's state could not be read", output.ExitGeneric, "").
 		WithDetails(map[string]any{"reason": node.JobObservationFailed, "job_id": id, "observation_failed": true})
 	seen := 0
+
 	_, observed := reattachJob(context.Background(), id, lost, &seen,
 		func(context.Context) error { return nil },
 		func(context.Context, func(output.Event)) (remote.Reply, error) {
 			return remote.Reply{}, followErr
 		},
 		func(output.Event) {}, func(string) {}, []time.Duration{0})
-	var followCLI *output.CLIError
-	if !errors.As(observed, &followCLI) {
+	if _, ok := errors.AsType[*output.CLIError](observed); !ok {
 		t.Fatalf("reattach did not return the observation failure: %v", observed)
 	}
 
 	cmd := newCopyTestCommand(t)
 	out := copyTestOutput(t, cmd)
 	got := copyStartFailure(cmd, observed, id, "app", secret, nil)
+
 	var cliErr *output.CLIError
 	if !errors.As(got, &cliErr) {
 		t.Fatalf("observation handoff = %v", got)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if details["job_id"] != id {
 		t.Fatalf("job_id = %v, want %s", details["job_id"], id)
 	}
+
 	if shown, _ := details["database"].(databaseSecret); shown.Roles["app"].Password == "" {
 		t.Fatal("the reattach observation failure lost the credentials")
 	}
+
 	if note, _ := details["credentials_note"].(string); !strings.Contains(note, "outcome is unknown") {
 		t.Fatalf("credentials note = %q", note)
 	}
+
 	if !strings.Contains(out.String(), secret.Roles["app"].Password) {
 		t.Fatal("human output did not print the credentials")
 	}
@@ -608,6 +712,7 @@ func TestCopyCredentialHandoffAfterReattachObservationFailure(t *testing.T) {
 func saveCopyTestCredentials(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	creds := workspaces.Credentials{
 		Database: &workspaces.DatabaseCreds{
 			Admin:    workspaces.Role{User: "vaire_admin", Password: "admin-password"},
@@ -617,10 +722,12 @@ func saveCopyTestCredentials(t *testing.T) {
 			AccessKeyID: "backup-key", SecretAccessKey: "backup-secret", Bucket: "bucket",
 		},
 	}
+
 	creds.Backup.PgBackRest.CipherPass = "cipher-pass"
 	for _, role := range steps.ServiceRoles {
 		creds.Database.Services[role] = workspaces.Role{User: role, Password: role + "-password"}
 	}
+
 	if err := workspaces.SaveCredentials("prod", creds); err != nil {
 		t.Fatal(err)
 	}
@@ -644,6 +751,7 @@ func copyTestPreflightReply() remote.Reply {
 		},
 		"source_checked": true,
 	})
+
 	return remote.Reply{Data: data}
 }
 
@@ -651,11 +759,16 @@ func TestExecuteDBCopyDryRunAsksOnlyForDestinationValidation(t *testing.T) {
 	cmd := newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "dry-run", "true")
+
 	dest := copyDestination{Name: "app", Size: "small"}
-	var preflightCalls, startCalls int
-	var startedSecrets map[string]string
-	var startedRequestID string
-	var startedDry bool
+
+	var (
+		preflightCalls, startCalls int
+		startedSecrets             map[string]string
+		startedRequestID           string
+		startedDry                 bool
+	)
+
 	calls := copyRPC{
 		Preflight: func(context.Context, map[string]any, map[string]string) (remote.Reply, error) {
 			preflightCalls++
@@ -664,25 +777,32 @@ func TestExecuteDBCopyDryRunAsksOnlyForDestinationValidation(t *testing.T) {
 		Start: func(_ context.Context, params map[string]any, sec map[string]string, requestID, confirm string, dry bool) (remote.Reply, string, bool, error) {
 			startCalls++
 			startedSecrets, startedRequestID, startedDry = sec, requestID, dry
+
 			if params["name"] != "app" || params["size"] != "small" {
 				t.Fatalf("dry-run params = %#v", params)
 			}
+
 			if confirm != "" {
 				t.Fatalf("dry run asked to confirm %q", confirm)
 			}
+
 			return remote.Reply{Data: []byte(`{"dry_run":true,"source_checked":false}`)}, "", false, nil
 		},
 	}
+
 	p := newProgress(cmd)
 	if err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), dest, nil, nil, calls); err != nil {
 		t.Fatal(err)
 	}
+
 	if preflightCalls != 0 || startCalls != 1 {
 		t.Fatalf("calls: preflight %d, start %d", preflightCalls, startCalls)
 	}
+
 	if startedSecrets != nil || startedRequestID != "" || !startedDry {
 		t.Fatalf("dry run started a real request: secrets %v, id %q, dry %v", startedSecrets, startedRequestID, startedDry)
 	}
+
 	if text := copyTestOutput(t, cmd).String(); !strings.Contains(text, "no source connection") {
 		t.Fatalf("dry-run message = %q", text)
 	}
@@ -692,8 +812,11 @@ func TestExecuteDBCopyPreflightFailureProvisionsNothing(t *testing.T) {
 	cmd := newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "confirm", "app")
+
 	source := &copySourceInput{URL: "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"}
+
 	var startCalls int
+
 	calls := copyRPC{
 		Preflight: func(context.Context, map[string]any, map[string]string) (remote.Reply, error) {
 			return remote.Reply{}, output.NewError(output.CodePrecondition, "the source refused the connection", output.ExitPrecondition, "")
@@ -704,10 +827,12 @@ func TestExecuteDBCopyPreflightFailureProvisionsNothing(t *testing.T) {
 		},
 	}
 	p := newProgress(cmd)
+
 	err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), copyDestination{Name: "app"}, source, nil, calls)
 	if err == nil || errorCode(t, err) != output.CodePrecondition {
 		t.Fatalf("preflight failure = %v", err)
 	}
+
 	if startCalls != 0 {
 		t.Fatal("a failed preflight still started the copy")
 	}
@@ -720,33 +845,45 @@ func TestExecuteDBCopySuccessCarriesCredentialsAndServiceSecrets(t *testing.T) {
 	setCopyFlag(t, cmd, "confirm", "app")
 	setCopyFlag(t, cmd, "size", "small")
 	setCopyFlag(t, cmd, "output", "json")
+
 	source := &copySourceInput{URL: "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"}
-	var order []string
-	var jobID string
-	var jobSecrets map[string]string
+
+	var (
+		order      []string
+		jobID      string
+		jobSecrets map[string]string
+	)
+
 	calls := copyRPC{
 		Preflight: func(_ context.Context, params map[string]any, sec map[string]string) (remote.Reply, error) {
 			order = append(order, "preflight")
+
 			if params["name"] != "app" {
 				t.Fatalf("preflight params = %#v", params)
 			}
+
 			if sec[node.CopySourceURLSecret] == "" || sec[node.CopySourceSpecSecret] != "" {
 				t.Fatalf("preflight source secrets = %#v", sec)
 			}
+
 			return copyTestPreflightReply(), nil
 		},
 		Start: func(_ context.Context, params map[string]any, sec map[string]string, requestID, confirm string, dry bool) (remote.Reply, string, bool, error) {
 			order = append(order, "start")
 			jobID, jobSecrets = requestID, sec
+
 			if dry {
 				t.Fatal("success path was marked dry")
 			}
+
 			if confirm != "app" {
 				t.Fatalf("confirm = %q", confirm)
 			}
+
 			if len(requestID) != 26 {
 				t.Fatalf("preselected request id = %q", requestID)
 			}
+
 			result := map[string]any{
 				"database": map[string]any{"Name": "app", "Size": "small", "StatementTimeout": "60s"},
 				"target":   map[string]any{"in_config": true, "known": true},
@@ -758,16 +895,20 @@ func TestExecuteDBCopySuccessCarriesCredentialsAndServiceSecrets(t *testing.T) {
 			envelope, _ := json.Marshal(map[string]any{
 				"job_id": requestID, "job": "db-copy", "state": "succeeded", "result": json.RawMessage(raw),
 			})
+
 			return remote.Reply{Data: envelope}, requestID, false, nil
 		},
 	}
+
 	p := newProgress(cmd)
 	if err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), copyDestination{Name: "app", Size: "small"}, source, nil, calls); err != nil {
 		t.Fatal(err)
 	}
+
 	if strings.Join(order, ",") != "preflight,start" {
 		t.Fatalf("call order = %v", order)
 	}
+
 	assertCopySuccessOutput(t, cmd, jobID, jobSecrets)
 }
 
@@ -775,6 +916,7 @@ func TestExecuteDBCopySuccessCarriesCredentialsAndServiceSecrets(t *testing.T) {
 // job secrets, the job id, the one-time role passwords and the backup state.
 func assertCopySuccessOutput(t *testing.T, cmd *cobra.Command, jobID string, jobSecrets map[string]string) {
 	t.Helper()
+
 	for _, key := range []string{
 		steps.SecretDatabaseRole("app", "migrate"), steps.SecretDatabaseRole("app", "app"), steps.SecretDatabaseRole("app", "ro"),
 		steps.SecretAdminPassword, steps.SecretBackupKeyID, steps.SecretBackupKeySecret, steps.SecretBackupCipherPass,
@@ -784,6 +926,7 @@ func assertCopySuccessOutput(t *testing.T, cmd *cobra.Command, jobID string, job
 			t.Errorf("job secrets are missing %s", key)
 		}
 	}
+
 	if jobSecrets[node.CopySourceSpecSecret] != "" {
 		t.Error("the job carried both source forms")
 	}
@@ -794,13 +937,16 @@ func assertCopySuccessOutput(t *testing.T, cmd *cobra.Command, jobID string, job
 	if err := json.Unmarshal(copyTestOutput(t, cmd).Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
+
 	if env.Data["job_id"] != jobID {
 		t.Fatalf("job id = %v, want %s", env.Data["job_id"], jobID)
 	}
+
 	secret, ok := env.Data["database"].(map[string]any)
 	if !ok {
 		t.Fatalf("database credentials = %T", env.Data["database"])
 	}
+
 	roles, _ := secret["roles"].(map[string]any)
 	for _, role := range steps.DatabaseRoles {
 		entry, _ := roles[role].(map[string]any)
@@ -808,6 +954,7 @@ func assertCopySuccessOutput(t *testing.T, cmd *cobra.Command, jobID string, job
 			t.Errorf("role %s has no password in the handoff", role)
 		}
 	}
+
 	if env.Data["backup"] == nil {
 		t.Error("the successful copy did not report its backup state")
 	}
@@ -819,8 +966,11 @@ func TestExecuteDBCopyDetachedKeepsJobIDAndCredentials(t *testing.T) {
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "confirm", "app")
 	setCopyFlag(t, cmd, "output", "json")
+
 	source := &copySourceInput{URL: "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"}
+
 	var jobID string
+
 	calls := copyRPC{
 		Preflight: func(context.Context, map[string]any, map[string]string) (remote.Reply, error) {
 			return copyTestPreflightReply(), nil
@@ -830,13 +980,16 @@ func TestExecuteDBCopyDetachedKeepsJobIDAndCredentials(t *testing.T) {
 			return remote.Reply{}, requestID, true, nil
 		},
 	}
+
 	p := newProgress(cmd)
 	if err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), copyDestination{Name: "app"}, source, nil, calls); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(jobID) != 26 {
 		t.Fatalf("job id = %q", jobID)
 	}
+
 	var env struct {
 		Data    map[string]any `json:"data"`
 		Message string         `json:"message"`
@@ -845,20 +998,25 @@ func TestExecuteDBCopyDetachedKeepsJobIDAndCredentials(t *testing.T) {
 	if err := json.Unmarshal(copyTestOutput(t, cmd).Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
+
 	if env.Data["job_id"] != jobID || env.Data["detached"] != true {
 		t.Fatalf("detached data = %#v", env.Data)
 	}
+
 	secret, ok := env.Data["database"].(map[string]any)
 	if !ok {
 		t.Fatal("detached output lost the credentials")
 	}
+
 	roles, _ := secret["roles"].(map[string]any)
 	if roles["app"] == nil {
 		t.Fatal("detached output lost a role")
 	}
+
 	if env.Message != "" {
 		t.Fatalf("JSON detached output unexpectedly carried a human message: %q", env.Message)
 	}
+
 	if len(env.Next) == 0 || env.Next[0] != "vaire job follow "+jobID {
 		t.Fatalf("detached next = %v", env.Next)
 	}
@@ -870,32 +1028,40 @@ func TestExecuteDBCopyLostStartReplyKeepsCredentials(t *testing.T) {
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "confirm", "app")
 	setCopyFlag(t, cmd, "output", "json")
+
 	source := &copySourceInput{URL: "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"}
+
 	var jobID string
+
 	calls := copyRPC{
 		Preflight: func(context.Context, map[string]any, map[string]string) (remote.Reply, error) {
 			return copyTestPreflightReply(), nil
 		},
 		Start: func(_ context.Context, _ map[string]any, _ map[string]string, requestID, _ string, _ bool) (remote.Reply, string, bool, error) {
 			jobID = requestID
+
 			return remote.Reply{}, "", false, output.NewError(output.CodeTransportFailed,
 				"the connection to the node was lost", output.ExitTransport, "check the job list")
 		},
 	}
 	p := newProgress(cmd)
 	err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), copyDestination{Name: "app"}, source, nil, calls)
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("lost reply = %v", err)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if details["job_id"] != jobID {
 		t.Fatalf("lost reply job_id = %v, want %s", details["job_id"], jobID)
 	}
+
 	secret, ok := details["database"].(databaseSecret)
 	if !ok || secret.Roles["app"].Password == "" {
 		t.Fatal("lost reply lost the generated credentials")
 	}
+
 	if strings.Contains(cliErr.Error(), secret.Roles["app"].Password) {
 		t.Fatal("lost reply error message carries a password")
 	}
@@ -907,14 +1073,18 @@ func TestExecuteDBCopyUnknownOutcomeCarriesJobID(t *testing.T) {
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "confirm", "app")
 	setCopyFlag(t, cmd, "output", "json")
+
 	source := &copySourceInput{URL: "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"}
+
 	var jobID string
+
 	calls := copyRPC{
 		Preflight: func(context.Context, map[string]any, map[string]string) (remote.Reply, error) {
 			return copyTestPreflightReply(), nil
 		},
 		Start: func(_ context.Context, _ map[string]any, _ map[string]string, requestID, _ string, _ bool) (remote.Reply, string, bool, error) {
 			jobID = requestID
+
 			return remote.Reply{}, "", false, output.NewError(output.CodeError,
 				"the copy job's start could not be confirmed", output.ExitGeneric,
 				"Keep the generated credentials and the job id").
@@ -927,17 +1097,21 @@ func TestExecuteDBCopyUnknownOutcomeCarriesJobID(t *testing.T) {
 	}
 	p := newProgress(cmd)
 	err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), copyDestination{Name: "app"}, source, nil, calls)
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("unknown outcome = %v", err)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if details["job_id"] != jobID {
 		t.Fatalf("job_id = %v, want %s", details["job_id"], jobID)
 	}
+
 	if note, _ := details["credentials_note"].(string); !strings.Contains(note, "outcome is unknown") {
 		t.Fatalf("credentials note = %q", note)
 	}
+
 	if _, ok := details["database"].(databaseSecret); !ok {
 		t.Fatal("unknown outcome lost the credentials")
 	}
@@ -949,8 +1123,11 @@ func TestExecuteDBCopyUnreadableSuccessKeepsCredentials(t *testing.T) {
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "confirm", "app")
 	setCopyFlag(t, cmd, "output", "json")
+
 	source := &copySourceInput{URL: "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"}
+
 	var jobID string
+
 	calls := copyRPC{
 		Preflight: func(context.Context, map[string]any, map[string]string) (remote.Reply, error) {
 			return copyTestPreflightReply(), nil
@@ -962,14 +1139,17 @@ func TestExecuteDBCopyUnreadableSuccessKeepsCredentials(t *testing.T) {
 	}
 	p := newProgress(cmd)
 	err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), copyDestination{Name: "app"}, source, nil, calls)
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("unreadable result = %v", err)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	if details["job_id"] != jobID || details["reason"] != "copy_result_unreadable" {
 		t.Fatalf("details = %#v", details)
 	}
+
 	if secret, _ := details["database"].(databaseSecret); secret.Roles["app"].Password == "" {
 		t.Fatal("an unreadable successful result lost the credentials")
 	}
@@ -980,6 +1160,7 @@ func TestExecuteDBCopyHumanSuccessHandsOffCredentials(t *testing.T) {
 	cmd := newCopyTestCommand(t)
 	setCopyFlag(t, cmd, "no-input", "true")
 	setCopyFlag(t, cmd, "confirm", "app")
+
 	source := &copySourceInput{URL: "postgresql://source_user:source-password@db.example.com:5432/app?sslmode=verify-full"}
 	calls := copyRPC{
 		Preflight: func(context.Context, map[string]any, map[string]string) (remote.Reply, error) {
@@ -990,20 +1171,25 @@ func TestExecuteDBCopyHumanSuccessHandsOffCredentials(t *testing.T) {
 				"job_id": requestID, "job": "db-copy", "state": "succeeded",
 				"result": map[string]any{"database": map[string]any{"Name": "app"}, "phase": "succeeded", "imported": true},
 			})
+
 			return remote.Reply{Data: raw}, requestID, false, nil
 		},
 	}
+
 	p := newProgress(cmd)
 	if err := executeDBCopy(cmd, p, "prod", copyCLIConfig(), copyDestination{Name: "app"}, source, nil, calls); err != nil {
 		t.Fatal(err)
 	}
+
 	text := copyTestOutput(t, cmd).String()
 	if !strings.Contains(text, "app password:") {
 		t.Fatalf("human output has no role password:\n%s", text)
 	}
+
 	if !strings.Contains(text, "Store these now") {
 		t.Fatalf("human output has no one-time note:\n%s", text)
 	}
+
 	if strings.Contains(text, "source-password") {
 		t.Fatal("human output leaked the source password")
 	}

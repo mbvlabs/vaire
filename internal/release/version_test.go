@@ -67,12 +67,14 @@ func TestCompareVersionsPrecedence(t *testing.T) {
 	for i, a := range order {
 		for j, b := range order {
 			want := 0
+
 			switch {
 			case i < j:
 				want = -1
 			case i > j:
 				want = 1
 			}
+
 			if got := CompareVersions(a, b); got != want {
 				t.Errorf("CompareVersions(%q, %q) = %d, want %d", a, b, got, want)
 			}
@@ -119,6 +121,7 @@ func TestPromotes(t *testing.T) {
 			if (err != nil) != c.err {
 				t.Fatalf("Promotes(%q, %q) error = %v, want error %v", c.current, c.candidate, err, c.err)
 			}
+
 			if got != c.want {
 				t.Fatalf("Promotes(%q, %q) = %v, want %v", c.current, c.candidate, got, c.want)
 			}
@@ -131,9 +134,11 @@ func TestLineChannel(t *testing.T) {
 	if !ok {
 		t.Fatal("parse failed")
 	}
+
 	if v.Line() != "1.x" || v.Channel() != "stable-1.x" {
 		t.Fatalf("line %q channel %q", v.Line(), v.Channel())
 	}
+
 	for _, c := range []struct {
 		in    string
 		major int
@@ -171,6 +176,7 @@ func TestChannelRoot(t *testing.T) {
 			t.Errorf("ChannelRoot(%q) = %q, %v; want %q", c.channel, got, err, c.want)
 		}
 	}
+
 	for _, bad := range []string{"", "beta", "stable-1", "1.x", "stable-1.x/"} {
 		if _, err := ChannelRoot(bad); err == nil {
 			t.Errorf("ChannelRoot(%q) accepted an invalid channel", bad)
@@ -179,8 +185,11 @@ func TestChannelRoot(t *testing.T) {
 }
 
 func TestIdentity(t *testing.T) {
-	const stablePrefix = "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v"
-	const edgeIdentity = "https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master"
+	const (
+		stablePrefix = "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v"
+		edgeIdentity = "https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master"
+	)
+
 	cases := []struct {
 		channel string
 		version string
@@ -200,6 +209,7 @@ func TestIdentity(t *testing.T) {
 			t.Errorf("Identity(%q, %q) = %q, %v; want %q", c.channel, c.version, got, err, c.want)
 		}
 	}
+
 	bad := []struct{ channel, version string }{
 		{"stable", "1.0"},
 		{"stable", "1.0.0-alpha"},
@@ -219,6 +229,7 @@ func TestIdentity(t *testing.T) {
 
 func testManifest(channel, version string) Manifest {
 	base := versionRoot(version)
+
 	m := Manifest{
 		SchemaVersion:  schemaVersion,
 		Channel:        channel,
@@ -229,6 +240,7 @@ func testManifest(channel, version string) Manifest {
 	for _, key := range artifactKeys {
 		m.Artifacts[key] = Artifact{URL: base + "/" + key + "/vaire", SHA256: strings.Repeat("a", 64)}
 	}
+
 	return m
 }
 

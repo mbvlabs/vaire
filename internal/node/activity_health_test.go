@@ -27,9 +27,11 @@ func TestActivityHealthDoesNotCreateStore(t *testing.T) {
 	}
 	h, ok := activityStoreHealth(context.Background(), store)
 	reject(t, !ok, "health of an absent store is unknown, want an absent reading")
+
 	if h.Exists {
 		t.Error("an absent store is reported as existing")
 	}
+
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("Health created the store: %v", err)
 	}
@@ -47,6 +49,7 @@ func TestActivityHealthNilStore(t *testing.T) {
 func TestActivityHealthCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	store := &activity.Store{
 		Dir:          filepath.Join(t.TempDir(), "activity"),
 		MaxBytes:     1 << 20,
@@ -65,9 +68,11 @@ func TestActivityHealthUnsafeDirectory(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	store := &activity.Store{
 		Dir:          dir,
 		MaxBytes:     1 << 20,
@@ -76,9 +81,11 @@ func TestActivityHealthUnsafeDirectory(t *testing.T) {
 	}
 	h, ok := activityStoreHealth(context.Background(), store)
 	reject(t, !ok, "health of an unsafe directory is unknown, want a typed reading")
+
 	if !h.Exists || !h.IsDir {
 		t.Errorf("unsafe directory: exists %t, is_dir %t", h.Exists, h.IsDir)
 	}
+
 	if h.OwnerOnly {
 		t.Error("a 0755 activity directory is reported as owner-only")
 	}
@@ -121,7 +128,9 @@ func TestActivityHealthPanicIsUnknown(t *testing.T) {
 	if _, ok := activityStoreHealth(context.Background(), &panicHealthStore{}); ok {
 		t.Fatal("a panicking store reported known health")
 	}
+
 	reject(t, activityHealthInFlight.Load(), "a panicking store left the health read latched")
+
 	if _, ok := activityStoreHealth(context.Background(), &fakeActivityStore{health: activity.Health{Exists: true}}); !ok {
 		t.Fatal("health stays unknown after a store panic")
 	}
@@ -145,11 +154,14 @@ func newStalledHealthStore() *stalledHealthStore {
 
 func (s *stalledHealthStore) Health(context.Context) (activity.Health, error) {
 	s.calls.Add(1)
+
 	select {
 	case s.entered <- struct{}{}:
 	default:
 	}
+
 	<-s.release
+
 	return activity.Health{Exists: true, IsDir: true, Readable: true, Writable: true, OwnerOnly: true, Segments: 1}, nil
 }
 
@@ -164,22 +176,27 @@ func (s *stalledHealthStore) releaseStalledHealth() {
 // cannot leak the process-wide latch into the next.
 func stalledActivityHealth(t *testing.T) *stalledHealthStore {
 	t.Helper()
+
 	oldWait, oldFactory := activityHealthWait, activityStoreFactory
 	activityHealthWait = 25 * time.Millisecond
 	store := newStalledHealthStore()
 	activityStoreFactory = func() (activityStore, error) { return store, nil }
+
 	t.Cleanup(func() {
 		store.releaseStalledHealth()
 		waitActivityHealthReads(t)
+
 		activityHealthWait = oldWait
 		activityStoreFactory = oldFactory
 	})
+
 	return store
 }
 
 // waitActivityHealthReads waits until the background health read has returned.
 func waitActivityHealthReads(t *testing.T) {
 	t.Helper()
+
 	deadline := time.Now().Add(10 * time.Second)
 	for activityHealthInFlight.Load() {
 		reject(t, time.Now().After(deadline), "an activity health read is still in flight")
@@ -190,6 +207,7 @@ func waitActivityHealthReads(t *testing.T) {
 // waitStalledHealthEntered waits until the store is actually inside Health.
 func waitStalledHealthEntered(t *testing.T, store *stalledHealthStore) {
 	t.Helper()
+
 	select {
 	case <-store.entered:
 	case <-time.After(5 * time.Second):
@@ -205,12 +223,15 @@ func TestActivityHealthStallIsBounded(t *testing.T) {
 	store := stalledActivityHealth(t)
 
 	started := time.Now()
+
 	if h, ok := gatherActivityHealth(context.Background()); ok {
 		t.Fatalf("a stalled read reported known health: %+v", h)
 	}
+
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("the doctor caller waited %s for a stalled read", elapsed)
 	}
+
 	waitStalledHealthEntered(t, store)
 
 	store.releaseStalledHealth()
@@ -230,27 +251,34 @@ func TestActivityHealthKeepsOneReadInFlight(t *testing.T) {
 	if _, ok := gatherActivityHealth(context.Background()); ok {
 		t.Fatal("a stalled read reported known health")
 	}
+
 	waitStalledHealthEntered(t, store)
+
 	baseline := runtime.NumGoroutine()
 
 	started := time.Now()
-	for i := 0; i < 50; i++ {
+
+	for range 50 {
 		if _, ok := gatherActivityHealth(context.Background()); ok {
 			t.Fatal("a latched read reported known health")
 		}
 	}
+
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("50 latched calls took %s", elapsed)
 	}
+
 	if calls := store.calls.Load(); calls != 1 {
 		t.Fatalf("the stalled store was read %d times, want one in-flight read", calls)
 	}
+
 	if grown := runtime.NumGoroutine() - baseline; grown > 2 {
 		t.Fatalf("repeated stalls added %d goroutines", grown)
 	}
 
 	store.releaseStalledHealth()
 	waitActivityHealthReads(t)
+
 	if _, ok := gatherActivityHealth(context.Background()); !ok {
 		t.Fatal("health stays unknown after the stalled read returned")
 	}
@@ -268,12 +296,16 @@ func TestActivityHealthStallReleasesTheNodeLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vaire.lock")
 	lock, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	reject(t, err != nil, err)
+
 	defer func() { _ = lock.Close() }()
+
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
+
 	func() {
 		defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+
 		if _, ok := gatherActivityHealth(context.Background()); ok {
 			t.Error("a stalled read reported known health")
 		}
@@ -284,9 +316,12 @@ func TestActivityHealthStallReleasesTheNodeLock(t *testing.T) {
 	// the lock exclusive: the caller returned and its deferred release ran.
 	other, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	reject(t, err != nil, err)
+
 	defer func() { _ = other.Close() }()
+
 	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatalf("the node lock is still held while the health read stalls: %v", err)
 	}
+
 	_ = syscall.Flock(int(other.Fd()), syscall.LOCK_UN)
 }

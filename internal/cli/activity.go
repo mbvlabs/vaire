@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -147,27 +148,34 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, err := p.call(commandContext(cmd), s.node, "activity.list", q, quietCallOptions())
 	if err != nil {
 		return err
 	}
+
 	page, err := decodeNodeData[activity.Page](reply, "activity page")
 	if err != nil {
 		return err
 	}
+
 	page = redactActivityPage(page)
 	if err := diagnostics.ValidatePage(page); err != nil {
 		return err
 	}
+
 	warnings := append([]output.Warning{}, s.warnings...)
 	warnings = append(warnings, reply.Warnings...)
 	warnings = append(warnings, activityCoverageWarnings(page.Coverage)...)
+
 	return output.Success(cmd, output.Result{
 		Data:     page,
 		Message:  activityPageMessage(page),
@@ -185,30 +193,38 @@ func activityShowQuery(cmd *cobra.Command, args []string) (activity.Query, error
 		return q, activityUsageError("operation", "too_many", "only one correlation ID may be given",
 			"Use vaire activity show <operation-id>, or --request or --job.")
 	}
+
 	selectors := 0
+
 	if len(args) == 1 {
 		q.OperationID = strings.ToUpper(strings.TrimSpace(args[0]))
 		selectors++
 	}
+
 	if operation := strings.ToUpper(flagStringIf(cmd, "operation")); operation != "" {
 		q.OperationID = operation
 		selectors++
 	}
+
 	if request := strings.ToUpper(flagStringIf(cmd, "request")); request != "" {
 		q.RequestID = request
 		selectors++
 	}
+
 	if job := strings.ToUpper(flagStringIf(cmd, "job")); job != "" {
 		q.JobID = job
 		selectors++
 	}
+
 	if selectors == 0 {
 		return q, activityUsageError("operation", "required", "an operation, request or job ID is required",
 			"Use vaire activity show <operation-id>, or --request or --job.")
 	}
+
 	if selectors > 1 {
 		return q, activityUsageError("operation", "too_many", "choose exactly one operation, request or job ID", "")
 	}
+
 	for _, selector := range []struct {
 		name  string
 		value string
@@ -222,9 +238,11 @@ func activityShowQuery(cmd *cobra.Command, args []string) (activity.Query, error
 				"the "+selector.name+" ID is not a ULID", "Use an ID from vaire activity list.")
 		}
 	}
+
 	if err := activity.ValidateQuery(q); err != nil {
 		return q, activityUsageError("query", "invalid", "the activity query is not valid", "")
 	}
+
 	return q, nil
 }
 
@@ -233,27 +251,34 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, err := p.call(commandContext(cmd), s.node, "activity.show", q, quietCallOptions())
 	if err != nil {
 		return err
 	}
+
 	page, err := decodeNodeData[activity.Page](reply, "activity page")
 	if err != nil {
 		return err
 	}
+
 	page = redactActivityPage(page)
 	if err := diagnostics.ValidatePage(page); err != nil {
 		return err
 	}
+
 	warnings := append([]output.Warning{}, s.warnings...)
 	warnings = append(warnings, reply.Warnings...)
 	warnings = append(warnings, activityCoverageWarnings(page.Coverage)...)
+
 	return output.Success(cmd, output.Result{
 		Data:     page,
 		Message:  activityPageMessage(page),
@@ -264,25 +289,31 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 
 func runActivityHealth(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, err := p.call(commandContext(cmd), s.node, "activity.health", nil, quietCallOptions())
 	if err != nil {
 		return err
 	}
+
 	health, err := decodeNodeData[activity.Health](reply, "activity health")
 	if err != nil {
 		return err
 	}
+
 	health = redactActivityHealth(health)
 	if err := diagnostics.ValidateHealth(health); err != nil {
 		return err
 	}
+
 	warnings := append([]output.Warning{}, s.warnings...)
 	warnings = append(warnings, reply.Warnings...)
+
 	return output.Success(cmd, output.Result{
 		Data:     health,
 		Message:  activityHealthMessage(health),
@@ -313,11 +344,14 @@ func activityQueryFromFlags(cmd *cobra.Command) (activity.Query, error) {
 		if err != nil {
 			return q, activityUsageError("limit", "invalid", "the event limit is not a number", "")
 		}
+
 		q.Limit = limit
 	}
+
 	if err := validateActivityQuery(q); err != nil {
 		return q, err
 	}
+
 	return q, nil
 }
 
@@ -326,10 +360,12 @@ func validateActivityQuery(q activity.Query) error {
 		return activityUsageError("limit", "out_of_range",
 			fmt.Sprintf("the event limit must be between 1 and %d", activity.MaxLimit), "")
 	}
+
 	if q.Outcome != "" && !containsString(activity.Outcomes, q.Outcome) {
 		return activityUsageError("outcome", "not_allowed", "the outcome is not a known activity outcome",
 			"Use started, succeeded, failed, refused, skipped or unknown.")
 	}
+
 	for _, filter := range []struct {
 		name    string
 		value   string
@@ -346,9 +382,11 @@ func validateActivityQuery(q activity.Query) error {
 				"the "+filter.name+" filter is not a bounded identifier", "")
 		}
 	}
+
 	if q.Cursor != "" && (len(q.Cursor) > activityCursorMax || !activityCursorPattern.MatchString(q.Cursor)) {
 		return activityUsageError("cursor", "not_allowed", "the cursor is not a bounded page cursor", "")
 	}
+
 	if err := validateActivityWindow(q.Since, q.Until); err != nil {
 		return err
 	}
@@ -359,6 +397,7 @@ func validateActivityQuery(q activity.Query) error {
 		return activityUsageError("query", "invalid", "the activity query is not valid",
 			"Check the filters, limit and cursor; a cursor only works with the query that created it.")
 	}
+
 	return nil
 }
 
@@ -367,23 +406,28 @@ func validateActivityWindow(since, until string) error {
 		return activityUsageError("since", "too_long", "the since value is too long",
 			"Use an RFC3339 time or a lookback duration such as 24h.")
 	}
+
 	if len(until) > 64 {
 		return activityUsageError("until", "too_long", "the until value is too long",
 			"Use an RFC3339 time or a lookback duration such as 24h.")
 	}
+
 	sinceAt, sinceTime := activityWindowValue(since)
 	if since != "" && sinceAt == nil && !sinceTime {
 		return activityUsageError("since", "not_a_time",
 			"the since value is neither RFC3339 nor a positive duration", "Use 24h or 2026-10-26T10:00:00Z.")
 	}
+
 	untilAt, untilTime := activityWindowValue(until)
 	if until != "" && untilAt == nil && !untilTime {
 		return activityUsageError("until", "not_a_time",
 			"the until value is neither RFC3339 nor a positive duration", "Use 24h or 2026-10-26T10:00:00Z.")
 	}
+
 	if sinceAt != nil && untilAt != nil && !sinceAt.Before(*untilAt) {
 		return activityUsageError("until", "not_after_since", "the until time must be after the since time", "")
 	}
+
 	if sinceTime && untilTime {
 		sinceLookback, _ := time.ParseDuration(since)
 		untilLookback, _ := time.ParseDuration(until)
@@ -392,6 +436,7 @@ func validateActivityWindow(since, until string) error {
 			return activityUsageError("until", "not_after_since", "the until lookback must be shorter than the since lookback", "")
 		}
 	}
+
 	return nil
 }
 
@@ -401,12 +446,15 @@ func activityWindowValue(value string) (*time.Time, bool) {
 	if value == "" {
 		return nil, false
 	}
+
 	if at, err := time.Parse(time.RFC3339, value); err == nil {
 		return &at, false
 	}
+
 	if d, err := time.ParseDuration(value); err == nil && d > 0 {
 		return nil, true
 	}
+
 	return nil, false
 }
 
@@ -419,16 +467,12 @@ func flagStringIf(cmd *cobra.Command, name string) string {
 	if cmd.Flags().Lookup(name) == nil {
 		return ""
 	}
+
 	return stringFlag(cmd, name)
 }
 
 func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 // decodeNodeData decodes a typed node reply and rejects unknown fields or a
@@ -441,22 +485,27 @@ func decodeNodeData[T any](reply remote.Reply, what string) (T, error) {
 			"Query a smaller activity window.").
 			WithDetails(map[string]any{"reason": "reply_too_large"})
 	}
+
 	if len(bytes.TrimSpace(reply.Data)) == 0 {
 		return out, output.NewError(output.CodeValidation, "the node returned no "+what, output.ExitConfig,
 			"Upgrade the node with vaire node upgrade, then retry.").
 			WithDetails(map[string]any{"reason": "empty_reply"})
 	}
+
 	dec := json.NewDecoder(bytes.NewReader(reply.Data))
 	dec.DisallowUnknownFields()
+
 	if err := dec.Decode(&out); err != nil {
 		return out, output.NewError(output.CodeValidation, "the node's "+what+" does not match the typed contract", output.ExitConfig,
 			"Upgrade the node with vaire node upgrade, then retry.").
 			WithDetails(map[string]any{"reason": "decode_failed"})
 	}
+
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return out, output.NewError(output.CodeValidation, "the node's "+what+" has trailing data", output.ExitConfig, "").
 			WithDetails(map[string]any{"reason": "trailing_data"})
 	}
+
 	return out, nil
 }
 
@@ -478,16 +527,20 @@ func activityPageMessage(page activity.Page) string {
 			if events[i].OccurredAt != events[j].OccurredAt {
 				return events[i].OccurredAt < events[j].OccurredAt
 			}
+
 			return events[i].Sequence < events[j].Sequence
 		})
+
 		for _, ev := range events {
 			lines = append(lines, activityEventLine(ev))
 		}
 	}
+
 	lines = append(lines, activityCoverageLine(page.Coverage))
 	if page.NextCursor != "" {
 		lines = append(lines, "more evidence may be available; next cursor "+activityCursorCell(page.NextCursor))
 	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -500,37 +553,48 @@ func activityEventLine(ev activity.Event) string {
 	if ev.Database != "" {
 		parts = append(parts, "db="+activityCell(ev.Database))
 	}
+
 	if ev.Step != "" {
 		parts = append(parts, "step="+activityCell(ev.Step))
 	}
+
 	if ev.OperationID != "" {
 		parts = append(parts, "operation="+activityCell(ev.OperationID))
 	}
+
 	if ev.RequestID != "" {
 		parts = append(parts, "request="+activityCell(ev.RequestID))
 	}
+
 	if ev.JobID != "" {
 		parts = append(parts, "job="+activityCell(ev.JobID))
 	}
+
 	if ev.ErrorCode != "" {
 		parts = append(parts, "error="+activityCell(ev.ErrorCode))
 	}
+
 	if ev.ReasonCode != "" {
 		parts = append(parts, "reason="+activityCell(ev.ReasonCode))
 	}
+
 	if ev.DurationMS > 0 {
 		parts = append(parts, fmt.Sprintf("%dms", ev.DurationMS))
 	}
+
 	if ev.ActorKind != "" {
 		actor := "actor=" + activityCell(ev.ActorKind)
 		if ev.ActorLabel != "" {
 			actor += ":" + activityCell(ev.ActorLabel)
 		}
+
 		if ev.ActorKind == activity.ActorOperator && !ev.ActorVerified {
 			actor += " (claimed)"
 		}
+
 		parts = append(parts, actor)
 	}
+
 	return strings.Join(parts, "  ")
 }
 
@@ -539,6 +603,7 @@ func activityCoverageLine(c activity.Coverage) string {
 	if !c.Available {
 		availability = "unavailable"
 	}
+
 	parts := []string{
 		availability,
 		"node=" + activityNode(c),
@@ -548,29 +613,37 @@ func activityCoverageLine(c activity.Coverage) string {
 	if c.FirstRetainedAt != "" || c.LastRetainedAt != "" {
 		parts = append(parts, "retained "+activityCell(c.FirstRetainedAt)+" to "+activityCell(c.LastRetainedAt))
 	}
+
 	flags := make([]string, 0, 5)
 	if c.Partial {
 		flags = append(flags, "partial")
 	}
+
 	if c.Truncated {
 		flags = append(flags, "truncated")
 	}
+
 	if c.LimitReached {
 		flags = append(flags, "limit-reached")
 	}
+
 	if c.CursorExpired {
 		flags = append(flags, "cursor-expired")
 	}
+
 	if c.LossDetected {
 		flags = append(flags, "loss-detected")
 	}
+
 	if len(flags) > 0 {
 		parts = append(parts, "coverage="+strings.Join(flags, ","))
 	}
+
 	if c.MalformedSegments > 0 || c.MalformedEvents > 0 || c.DroppedEvents > 0 || c.SequenceGaps > 0 {
 		parts = append(parts, fmt.Sprintf("malformed segments=%d events=%d dropped=%d sequence-gaps=%d",
 			c.MalformedSegments, c.MalformedEvents, c.DroppedEvents, c.SequenceGaps))
 	}
+
 	return "coverage: " + strings.Join(parts, "; ")
 }
 
@@ -578,6 +651,7 @@ func activityNode(c activity.Coverage) string {
 	if c.Node == "" {
 		return "-"
 	}
+
 	return activityCell(c.Node)
 }
 
@@ -588,11 +662,14 @@ func activityNext(page activity.Page, q activity.Query, workspaceName string) []
 	if page.NextCursor == "" {
 		return nil
 	}
+
 	parts := []string{"vaire"}
 	if workspaceName != "" {
 		parts = append(parts, "--workspace", activityCell(workspaceName))
 	}
+
 	parts = append(parts, "activity", "list")
+
 	for _, filter := range []struct {
 		name  string
 		value string
@@ -610,10 +687,13 @@ func activityNext(page activity.Page, q activity.Query, workspaceName string) []
 			parts = append(parts, "--"+filter.name, activityCell(filter.value))
 		}
 	}
+
 	if q.Limit > 0 {
 		parts = append(parts, "--limit", fmt.Sprintf("%d", q.Limit))
 	}
+
 	parts = append(parts, "--cursor", activityCursorCell(page.NextCursor))
+
 	return []string{strings.Join(parts, " ")}
 }
 
@@ -625,30 +705,35 @@ func activityCoverageWarnings(c activity.Coverage) []output.Warning {
 			Message: "the node could not read its activity history; missing evidence is not a clean result",
 		})
 	}
+
 	if c.Partial {
 		warnings = append(warnings, output.Warning{
 			Code:    "activity_partial",
 			Message: "the requested activity evidence is incomplete; read the coverage fields",
 		})
 	}
+
 	if c.Truncated {
 		warnings = append(warnings, output.Warning{
 			Code:    "activity_truncated",
 			Message: "the activity scan stopped at a bound before the requested window was exhausted",
 		})
 	}
+
 	if c.CursorExpired {
 		warnings = append(warnings, output.Warning{
 			Code:    "activity_cursor_expired",
 			Message: "the activity cursor pointed into evidence removed by rotation or retention",
 		})
 	}
+
 	if c.LossDetected {
 		warnings = append(warnings, output.Warning{
 			Code:    "activity_loss_detected",
 			Message: "the activity store reports dropped, malformed or sequence-gap evidence",
 		})
 	}
+
 	return warnings
 }
 
@@ -657,6 +742,7 @@ func activityHealthMessage(h activity.Health) string {
 	if node == "" {
 		node = "-"
 	}
+
 	lines := []string{
 		"activity store on " + activityCell(node) + " at " + activityCell(h.Dir),
 		fmt.Sprintf("exists=%t is_dir=%t readable=%t writable=%t owner_only=%t",
@@ -668,12 +754,15 @@ func activityHealthMessage(h activity.Health) string {
 		lines = append(lines, "dir_mode="+activityCell(h.DirMode)+" segment_mode="+activityCell(h.SegmentMode)+
 			fmt.Sprintf(" non_owner_only_segments=%d", h.NonOwnerOnlySegments))
 	}
+
 	if h.FirstRetainedAt != "" || h.LastRetainedAt != "" || h.LastWriteAt != "" {
 		lines = append(lines, "retained "+activityCell(h.FirstRetainedAt)+" to "+activityCell(h.LastRetainedAt)+
 			" last_write="+activityCell(h.LastWriteAt))
 	}
+
 	lines = append(lines, fmt.Sprintf("malformed_segments=%d malformed_events=%d dropped_events=%d sequence_gaps=%d loss_detected=%t",
 		h.MalformedSegments, h.MalformedEvents, h.DroppedEvents, h.SequenceGaps, h.LossDetected))
+
 	return strings.Join(lines, "\n")
 }
 
@@ -684,21 +773,27 @@ func activityCursorCell(value string) string {
 	if value == "" {
 		return "-"
 	}
+
 	var b strings.Builder
+
 	for _, r := range value {
 		if unicode.IsControl(r) || r == unicode.ReplacementChar {
 			b.WriteByte('?')
 			continue
 		}
+
 		b.WriteRune(r)
+
 		if b.Len() >= 2048 {
 			b.WriteByte('?')
 			break
 		}
 	}
+
 	if b.Len() == 0 {
 		return "-"
 	}
+
 	return b.String()
 }
 
@@ -709,20 +804,26 @@ func activityCell(value string) string {
 	if value == "" {
 		return "-"
 	}
+
 	var b strings.Builder
+
 	for _, r := range value {
 		if unicode.IsControl(r) || r == unicode.ReplacementChar {
 			b.WriteByte('?')
 			continue
 		}
+
 		b.WriteRune(r)
+
 		if b.Len() >= 96 {
 			b.WriteByte('?')
 			break
 		}
 	}
+
 	if b.Len() == 0 {
 		return "-"
 	}
+
 	return b.String()
 }

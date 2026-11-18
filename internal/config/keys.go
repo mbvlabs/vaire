@@ -18,13 +18,16 @@ func (c Cluster) Get(key string) (any, error) {
 	if strings.TrimSpace(key) == "" {
 		return nil, unknownKeyError(key)
 	}
+
 	v, err := getIn(reflect.ValueOf(c), strings.Split(key, "."))
 	if err != nil {
 		return nil, err
 	}
+
 	if !v.IsValid() {
 		return nil, nil
 	}
+
 	return v.Interface(), nil
 }
 
@@ -40,9 +43,11 @@ func (c *Cluster) Set(key, value string) error {
 			immutableHint,
 		).WithDetails(map[string]any{"reason": "immutable_key", "key": key})
 	}
+
 	if err := setIn(reflect.ValueOf(c).Elem(), segs, value); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -65,6 +70,7 @@ func immutableKey(segs []string) bool {
 	case "clusters":
 		return len(segs) == 3 && immutableClusterKeys[segs[2]]
 	}
+
 	return false
 }
 
@@ -78,25 +84,31 @@ func ImmutableChanges(old, updated Cluster) []string {
 	if old.Schema != updated.Schema {
 		changed = append(changed, "schema")
 	}
+
 	if old.ClusterName != updated.ClusterName {
 		changed = append(changed, "name")
 	}
+
 	if !reflect.DeepEqual(old.Transport, updated.Transport) {
 		changed = append(changed, "transport")
 	}
+
 	changed = append(changed, changedNodeAddresses(old, updated)...)
 	changed = append(changed, addedClusterKeys(old, updated)...)
+
 	return append(changed, changedClusterKeys(old, updated)...)
 }
 
 // changedNodeAddresses lists the nodes whose wg_address differs.
 func changedNodeAddresses(old, updated Cluster) []string {
 	var changed []string
+
 	for _, n := range old.Nodes {
 		if u, ok := updated.Node(n.Name); ok && u.WGAddress != n.WGAddress {
 			changed = append(changed, "nodes."+n.Name+".wg_address")
 		}
 	}
+
 	return changed
 }
 
@@ -106,17 +118,21 @@ func changedNodeAddresses(old, updated Cluster) []string {
 // follow_generation is likewise written only by that preparation.
 func addedClusterKeys(old, updated Cluster) []string {
 	var changed []string
+
 	for _, u := range updated.Clusters {
 		if _, existed := old.ClusterByName(u.Name); existed {
 			continue
 		}
+
 		if u.Follows != "" {
 			changed = append(changed, "clusters."+u.Name+".follows")
 		}
+
 		if u.FollowGeneration != "" {
 			changed = append(changed, "clusters."+u.Name+".follow_generation")
 		}
 	}
+
 	return changed
 }
 
@@ -124,24 +140,30 @@ func addedClusterKeys(old, updated Cluster) []string {
 // files have.
 func changedClusterKeys(old, updated Cluster) []string {
 	var changed []string
+
 	for _, cl := range old.Clusters {
 		u, ok := updated.ClusterByName(cl.Name)
 		if !ok {
 			continue
 		}
+
 		if u.Port != cl.Port {
 			changed = append(changed, "clusters."+cl.Name+".port")
 		}
+
 		if u.Stanza != cl.Stanza {
 			changed = append(changed, "clusters."+cl.Name+".stanza")
 		}
+
 		if u.Follows != cl.Follows {
 			changed = append(changed, "clusters."+cl.Name+".follows")
 		}
+
 		if u.FollowGeneration != cl.FollowGeneration {
 			changed = append(changed, "clusters."+cl.Name+".follow_generation")
 		}
 	}
+
 	return changed
 }
 
@@ -151,12 +173,14 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 		if !v.IsValid() {
 			return reflect.Value{}, nil
 		}
+
 		switch v.Kind() {
 		case reflect.Struct:
 			f, ok := fieldByTag(v, segs[0])
 			if !ok {
 				return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
 			}
+
 			v = f
 			segs = segs[1:]
 		case reflect.Slice:
@@ -164,15 +188,20 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 			if !ok {
 				return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
 			}
+
 			v = v.Index(idx)
 			segs = segs[1:]
 		case reflect.Map:
-			var done bool
-			var err error
+			var (
+				done bool
+				err  error
+			)
+
 			v, segs, done, err = getMapValue(v, segs)
 			if err != nil {
 				return reflect.Value{}, err
 			}
+
 			if done {
 				return v, nil
 			}
@@ -185,10 +214,12 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 			return reflect.Value{}, unknownKeyError(strings.Join(segs, "."))
 		}
 	}
+
 	v = derefValue(v)
 	if !v.IsValid() {
 		return reflect.Value{}, nil
 	}
+
 	return v, nil
 }
 
@@ -198,16 +229,20 @@ func getIn(v reflect.Value, segs []string) (reflect.Value, error) {
 func getMapValue(v reflect.Value, segs []string) (reflect.Value, []string, bool, error) {
 	if v.Type().Elem().Kind() == reflect.String {
 		key := strings.Join(segs, ".")
+
 		mv := v.MapIndex(reflect.ValueOf(key))
 		if !mv.IsValid() {
 			return reflect.Value{}, nil, false, unknownKeyError(key)
 		}
+
 		return mv, nil, true, nil
 	}
+
 	mv := v.MapIndex(reflect.ValueOf(segs[0]))
 	if !mv.IsValid() {
 		return reflect.Value{}, nil, false, unknownKeyError(strings.Join(segs, "."))
 	}
+
 	return mv, segs[1:], false, nil
 }
 
@@ -218,8 +253,10 @@ func derefValue(v reflect.Value) reflect.Value {
 		if v.IsNil() {
 			return reflect.Value{}
 		}
+
 		v = v.Elem()
 	}
+
 	return v
 }
 
@@ -229,12 +266,14 @@ func setIn(v reflect.Value, segs []string, value string) error {
 		if !v.IsValid() {
 			return unknownKeyError(strings.Join(segs, "."))
 		}
+
 		switch v.Kind() {
 		case reflect.Struct:
 			f, ok := fieldByTag(v, segs[0])
 			if !ok {
 				return unknownKeyError(strings.Join(segs, "."))
 			}
+
 			v = f
 			segs = segs[1:]
 		case reflect.Slice:
@@ -242,6 +281,7 @@ func setIn(v reflect.Value, segs []string, value string) error {
 			if !ok {
 				return unknownKeyError(strings.Join(segs, "."))
 			}
+
 			v = v.Index(idx)
 			segs = segs[1:]
 		case reflect.Map:
@@ -255,21 +295,25 @@ func setIn(v reflect.Value, segs []string, value string) error {
 			return unknownKeyError(strings.Join(segs, "."))
 		}
 	}
+
 	v = derefValue(v)
 	if !v.IsValid() {
 		return unknownKeyError(strings.Join(segs, "."))
 	}
+
 	switch v.Kind() {
 	case reflect.Struct:
 		f, ok := fieldByTag(v, segs[0])
 		if !ok {
 			return unknownKeyError(segs[0])
 		}
+
 		return setScalar(f, value)
 	case reflect.Map:
 		if v.Type().Elem().Kind() == reflect.String {
 			return setMapEntry(v, segs[0], value)
 		}
+
 		return output.NewError(output.CodeValidation, "this key cannot be set from the command line", output.ExitConfig,
 			"Edit cluster.toml with vaire config edit instead.")
 	case reflect.Invalid, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16,
@@ -292,26 +336,34 @@ func setMapValue(v reflect.Value, segs []string, value string) error {
 	if v.Type().Elem().Kind() == reflect.String {
 		return setMapEntry(v, strings.Join(segs, "."), value)
 	}
+
 	if v.Type().Elem().Kind() != reflect.Struct {
 		return unknownKeyError(strings.Join(segs, "."))
 	}
+
 	m := v
 	if v.IsNil() {
 		m = reflect.MakeMap(v.Type())
 	}
+
 	key := reflect.ValueOf(segs[0])
 	current := m.MapIndex(key)
+
 	elem := reflect.New(v.Type().Elem()).Elem()
 	if current.IsValid() {
 		elem.Set(current)
 	}
+
 	if err := setIn(elem, segs[1:], value); err != nil {
 		return err
 	}
+
 	m.SetMapIndex(key, elem)
+
 	if v.IsNil() {
 		v.Set(m)
 	}
+
 	return nil
 }
 
@@ -323,10 +375,12 @@ func fieldByTag(v reflect.Value, name string) (reflect.Value, bool) {
 		if tag == "" || tag == "-" {
 			continue
 		}
+
 		if base, _, _ := strings.Cut(tag, ","); base == name {
 			return v.Field(i), true
 		}
 	}
+
 	return reflect.Value{}, false
 }
 
@@ -335,12 +389,14 @@ func indexByName(v reflect.Value, name string) (int, bool) {
 	if v.Type().Elem().Kind() != reflect.Struct {
 		return 0, false
 	}
+
 	for i := 0; i < v.Len(); i++ {
 		f, ok := fieldByTag(v.Index(i), "name")
 		if ok && f.Kind() == reflect.String && f.String() == name {
 			return i, true
 		}
 	}
+
 	return 0, false
 }
 
@@ -348,7 +404,9 @@ func setMapEntry(v reflect.Value, key, value string) error {
 	if v.IsNil() {
 		v.Set(reflect.MakeMap(v.Type()))
 	}
+
 	v.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(value))
+
 	return nil
 }
 
@@ -361,9 +419,12 @@ func setScalar(field reflect.Value, value string) error {
 		if err := setScalar(elem.Elem(), value); err != nil {
 			return err
 		}
+
 		field.Set(elem)
+
 		return nil
 	}
+
 	switch field.Kind() {
 	case reflect.String:
 		field.SetString(value)
@@ -372,24 +433,28 @@ func setScalar(field reflect.Value, value string) error {
 		if err != nil {
 			return invalidValue(value, "a boolean")
 		}
+
 		field.SetBool(b)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		n, err := strconv.Atoi(value)
 		if err != nil {
 			return invalidValue(value, "an integer")
 		}
+
 		field.SetInt(int64(n))
 	case reflect.Float64, reflect.Float32:
 		f, err := strconv.ParseFloat(value, 64)
 		if err != nil {
 			return invalidValue(value, "a number")
 		}
+
 		field.SetFloat(f)
 	case reflect.Slice:
 		list, err := parseStringList(value)
 		if err != nil {
 			return err
 		}
+
 		field.Set(reflect.ValueOf(list))
 	case reflect.Invalid, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
 		reflect.Uint64, reflect.Uintptr, reflect.Complex64, reflect.Complex128,
@@ -401,6 +466,7 @@ func setScalar(field reflect.Value, value string) error {
 		return output.NewError(output.CodeValidation, "this key cannot be set from the command line", output.ExitConfig,
 			"Edit cluster.toml with vaire config edit instead.")
 	}
+
 	return nil
 }
 
@@ -414,21 +480,27 @@ func parseStringList(value string) ([]string, error) {
 		if err := toml.Unmarshal([]byte("v = "+trimmed), &wrap); err != nil {
 			return nil, invalidValue(value, "a list")
 		}
+
 		if wrap.V == nil {
 			return []string{}, nil
 		}
+
 		return wrap.V, nil
 	}
+
 	if trimmed == "" {
 		return []string{}, nil
 	}
+
 	parts := strings.Split(trimmed, ",")
+
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
 	}
+
 	return out, nil
 }
 

@@ -32,12 +32,15 @@ func LoadOperators(path string) (Operators, error) {
 		if IsNotExist(err) {
 			return Operators{}, nil
 		}
+
 		return Operators{}, err
 	}
+
 	var ops Operators
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&ops); err != nil {
 		return Operators{}, configError(path, err)
 	}
+
 	return ops, nil
 }
 
@@ -49,6 +52,7 @@ func (o *Operators) Upsert(op Operator) {
 			return
 		}
 	}
+
 	o.Operators = append(o.Operators, op)
 }
 
@@ -58,6 +62,7 @@ func (o Operators) Encode() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return append([]byte("# managed by vaire: operator WireGuard peers and SSH keys\n"), raw...), nil
 }
 
@@ -66,5 +71,6 @@ func EncodeNode(n Node) ([]byte, error) {
 	if n.InstalledAt.IsZero() {
 		n.InstalledAt = time.Now().UTC().Truncate(time.Second)
 	}
+
 	return toml.Marshal(n)
 }

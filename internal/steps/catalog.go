@@ -118,18 +118,23 @@ func CheckStep(ctx context.Context, cfg config.Cluster, rt engine.Runtime, id st
 		if step.ID() != id {
 			continue
 		}
+
 		res, err := step.Check(ctx, cfg, rt)
 		if err != nil {
 			return "", err
 		}
+
 		if res.Complete {
 			return "", nil
 		}
+
 		if res.Detail == "" {
 			return "it differs", nil
 		}
+
 		return res.Detail, nil
 	}
+
 	return "", nil
 }
 

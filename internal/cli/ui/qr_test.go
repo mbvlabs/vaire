@@ -13,12 +13,14 @@ func TestQRSquare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	lines := strings.Split(strings.TrimSuffix(ansi.Strip(out), "\n"), "\n")
 	width := utf8.RuneCountInString(lines[0])
 	// Two modules per line, so the lines are about half the width.
 	if want := (width + 1) / 2; len(lines) != want {
 		t.Fatalf("%d lines for width %d, want %d", len(lines), width, want)
 	}
+
 	for i, line := range lines {
 		if utf8.RuneCountInString(line) != width {
 			t.Fatalf("line %d is %d wide, want %d", i, utf8.RuneCountInString(line), width)

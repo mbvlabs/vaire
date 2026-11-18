@@ -107,5 +107,6 @@ func ExitFor(code string) int {
 	if exit, ok := exitByCode[code]; ok {
 		return exit
 	}
+
 	return ExitGeneric
 }

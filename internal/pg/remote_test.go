@@ -22,9 +22,11 @@ func TestTLSConfigModes(t *testing.T) {
 			if cfg.InsecureSkipVerify != tc.skipVerify {
 				t.Errorf("certificate verification disabled = %v, want %v", cfg.InsecureSkipVerify, tc.skipVerify)
 			}
+
 			if cfg.MinVersion < tls.VersionTLS12 {
 				t.Error("the minimum TLS version is below TLS 1.2")
 			}
+
 			if !tc.skipVerify && cfg.ServerName != "db.example.test" {
 				t.Errorf("server name = %q, want db.example.test", cfg.ServerName)
 			}

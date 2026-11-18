@@ -77,6 +77,7 @@ func runInitRestore(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+
 	ctx := commandContext(cmd)
 	timer := newPhaseTimer(rr.state)
 
@@ -84,18 +85,23 @@ func runInitRestore(cmd *cobra.Command) error {
 	if err := timer.run(phaseBundleFetched, func() error { return r.restoreFetch(ctx, kit) }); err != nil {
 		return err
 	}
+
 	if err := r.restoreConfig(); err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		return r.restoreDryRun()
 	}
+
 	if err := r.restoreConfirm(kit); err != nil {
 		return err
 	}
+
 	if err := r.savePending(); err != nil {
 		return err
 	}
+
 	if err := r.restoreSaveBundle(); err != nil {
 		return err
 	}
@@ -111,6 +117,7 @@ func runInitRestore(cmd *cobra.Command) error {
 	if err := r.restoreSecrets(); err != nil {
 		return err
 	}
+
 	return r.restoreRemote(ctx, timer)
 }
 
@@ -121,25 +128,32 @@ func newRestoreRun(cmd *cobra.Command) (*initRun, *restoreRun, *workspaces.Backu
 		return nil, nil, nil, output.NewError(output.CodeUsage, "--restore runs from your machine, not with --local", output.ExitUsage,
 			"The bundle is decrypted with the recovery identity, which only your machine holds. Run vaire server init --restore --host root@<new-ip> there.")
 	}
+
 	name := stringFlag(cmd, "name")
 	if name == "" {
 		name = stringFlag(cmd, "workspace")
 	}
+
 	c, err := workspaces.Resolve(name)
 	if err != nil {
 		return nil, nil, nil, withHint(err, "server init --restore rebuilds the server of an existing workspace. With only the secrets document, run vaire login first.")
 	}
+
 	r := &initRun{cmd: cmd, p: newProgress(cmd), name: c.Name}
 	rr := &restoreRun{ctx: c}
 	r.restore = rr
+
 	kit, identity, err := recoveryIdentity(c.Name)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	rr.identity = identity
+
 	if err := r.restoreLoadPending(); err != nil {
 		return nil, nil, nil, err
 	}
+
 	return r, rr, kit, nil
 }
 
@@ -149,9 +163,11 @@ func (r *initRun) restoreSaveBundle() error {
 	if r.prog.Done(phaseBundleFetched) {
 		return nil
 	}
+
 	if err := workspaces.SavePendingBundle(r.name, r.restore.fetched.Cipher); err != nil {
 		return err
 	}
+
 	return r.mark(phaseBundleFetched)
 }
 
@@ -160,9 +176,11 @@ func (r *initRun) restoreOldMasterPhase(ctx context.Context) error {
 	if r.prog.Done(phaseOldChecked) {
 		return nil
 	}
+
 	if err := r.checkOldMaster(ctx); err != nil {
 		return err
 	}
+
 	return r.mark(phaseOldChecked)
 }
 
@@ -171,9 +189,11 @@ func (r *initRun) restoreFencePhase(ctx context.Context, timer *phaseTimer, kit 
 	if r.prog.Done(phaseFenced) {
 		return nil
 	}
+
 	if err := timer.run(phaseFenced, func() error { return r.fence(ctx, kit) }); err != nil {
 		return err
 	}
+
 	return r.mark(phaseFenced)
 }
 
@@ -183,33 +203,41 @@ func (r *initRun) restoreLoadPending() error {
 	if workspaces.PendingExists(name) {
 		return r.restoreResumePending(name)
 	}
+
 	if flagTrue(r.cmd, "resume") {
 		return output.NewError(output.CodePrecondition, "there is no unfinished rebuild of "+name+" to resume", output.ExitPrecondition,
 			"Start one with vaire server init --restore --host root@<new-ip>.").WithDetails(map[string]any{"reason": "nothing_to_resume"})
 	}
+
 	host := stringFlag(r.cmd, "host")
 	if err := RequireFlag(r.cmd, host != "", "--host", "server init --restore"); err != nil {
 		return err
 	}
+
 	if host == "" {
 		return output.NewError(output.CodeInputRequired, "server init --restore needs the new server", output.ExitInput,
 			"Pass --host root@<new-ip>.").WithDetails(map[string]any{"flag": "--host"})
 	}
+
 	user, h, port, err := parseHostFlag(host)
 	if err != nil {
 		return output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 	}
+
 	if user == "" {
 		user = "root"
 	}
+
 	if port == 0 {
 		port = 22
 	}
+
 	r.boot = workspaces.Bootstrap{Host: h, User: user, Port: port, Identity: stringFlag(r.cmd, "identity"), HostKeyFingerprint: stringFlag(r.cmd, "host-key-fingerprint")}
 	r.prog = &workspaces.Progress{Phases: map[string]string{}}
 	old, _ := r.restore.ctx.Master()
 	r.restore.state = &workspaces.RestoreProgress{OldAddress: old.PublicAddress, Timings: map[string]float64{}}
 	r.prog.Restore = r.restore.state
+
 	return nil
 }
 
@@ -220,27 +248,34 @@ func (r *initRun) restoreResumePending(name string) error {
 			"Continue it with vaire server init --restore --resume --name "+name+", or drop it with vaire server init --discard --name "+name+".").
 			WithDetails(map[string]any{"reason": "init_pending", "server": name})
 	}
+
 	prog, err := workspaces.LoadProgress(name)
 	if err != nil {
 		return err
 	}
+
 	if prog.Restore == nil {
 		return output.NewError(output.CodePrecondition, "the unfinished init of "+name+" is not a rebuild", output.ExitPrecondition,
 			"Resume it without --restore, or drop it with vaire server init --discard --name "+name+".")
 	}
+
 	raw, boot, err := workspaces.LoadAnswers(name)
 	if err != nil {
 		return err
 	}
+
 	cfg, err := config.ParseAnswers(raw)
 	if err != nil {
 		return output.NewError(output.CodeConfig, "the pending answers do not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	r.cfg, r.boot, r.prog = cfg, boot, prog
+
 	r.restore.state = prog.Restore
 	if v := stringFlag(r.cmd, "identity"); v != "" {
 		r.boot.Identity = v
 	}
+
 	return nil
 }
 
@@ -248,14 +283,19 @@ func (r *initRun) restoreResumePending(name string) error {
 // --resume, from --bundle-file, or from the bucket.
 func (r *initRun) restoreFetch(ctx context.Context, kit *workspaces.BackupCreds) error {
 	rr := r.restore
-	var f fetchedBundle
-	var err error
+
+	var (
+		f   fetchedBundle
+		err error
+	)
+
 	switch {
 	case r.prog.Done(phaseBundleFetched):
 		raw, lerr := workspaces.LoadPendingBundle(r.name)
 		if lerr != nil {
 			return lerr
 		}
+
 		f = fetchedBundle{Name: rr.state.Bundle, Cipher: raw, From: rr.state.From}
 	case stringFlag(r.cmd, "bundle-file") != "":
 		f, err = readBundleFile(stringFlag(r.cmd, "bundle-file"), r.cmd.InOrStdin())
@@ -264,29 +304,38 @@ func (r *initRun) restoreFetch(ctx context.Context, kit *workspaces.BackupCreds)
 			return output.NewError(output.CodeInputRequired, "this workspace has no bucket to fetch the master bundle from", output.ExitInput,
 				"Rebuild from an exported bundle: --bundle-file <file> (vaire server backup export made it).").WithDetails(map[string]any{"flag": "--bundle-file"})
 		}
+
 		stop := r.p.wait("fetching the master bundle from " + kit.Bucket)
 		f, err = fetchBundleFromBucket(ctx, kit, stringFlag(r.cmd, "bundle"))
+
 		stop()
 	}
+
 	if err != nil {
 		return err
 	}
+
 	b, err := openFetched(f, rr.identity, rr.ctx.Server)
 	if err != nil {
 		return err
 	}
+
 	if _, ok := b.File(masterbackup.ClusterPath); !ok {
 		return output.NewError(output.CodeBundleCorrupt, "the bundle has no cluster.toml", output.ExitSecrets, "")
 	}
+
 	if err := operatorInBundle(b, rr.ctx.Operator.Name); err != nil {
 		return err
 	}
+
 	rr.fetched, rr.bundle = f, b
 	if f.Name == "" {
 		// A file whose name isn't the bundle's: its manifest names it.
 		f.Name = b.Manifest.Name()
 	}
+
 	rr.state.Bundle, rr.state.From = f.Name, f.From
+
 	return nil
 }
 
@@ -297,15 +346,18 @@ func operatorInBundle(b masterbackup.Bundle, operator string) error {
 	if !ok {
 		return nil
 	}
+
 	var ops config.Operators
 	if err := toml.Unmarshal(f.Data, &ops); err != nil {
 		return output.NewError(output.CodeBundleCorrupt, "the bundle's operators.toml does not parse: "+err.Error(), output.ExitSecrets, "")
 	}
+
 	for _, op := range ops.Operators {
 		if op.Name == operator {
 			return nil
 		}
 	}
+
 	return output.NewError(output.CodePrecondition, "the bundle's operators don't include this workspace's operator "+operator, output.ExitPrecondition,
 		"Use the workspace of an operator the server knew, or an older bundle with --bundle.").WithDetails(map[string]any{"reason": "operator_not_in_bundle"})
 }
@@ -314,66 +366,82 @@ func operatorInBundle(b masterbackup.Bundle, operator string) error {
 func (r *initRun) restoreConfig() error {
 	rr := r.restore
 	f, _ := rr.bundle.File(masterbackup.ClusterPath)
+
 	cfg, err := config.ParseCluster(f.Data)
 	if err != nil {
 		return output.NewError(output.CodeBundleCorrupt, "the bundle's cluster.toml does not parse: "+err.Error(), output.ExitSecrets, "")
 	}
+
 	if cfg.Name() != rr.ctx.Server {
 		return output.NewError(output.CodePrecondition, "the bundle is server "+cfg.Name()+"'s, not "+rr.ctx.Server+"'s", output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": "bundle_server_mismatch"})
 	}
+
 	r.cfg = cfg
 	if rr.state.NewAddress == "" {
 		addr, err := r.publicAddress()
 		if err != nil {
 			return err
 		}
+
 		rr.state.NewAddress = addr
 	}
+
 	for i := range r.cfg.Nodes {
 		if r.cfg.Nodes[i].Role == config.RoleMaster {
 			r.cfg.Nodes[i].PublicAddress = rr.state.NewAddress
 		}
 	}
+
 	return r.cfg.Validate()
 }
 
 func (r *initRun) restoreDryRun() error {
 	rr := r.restore
 	m := rr.bundle.Manifest
+
 	dbs := make([]string, 0, len(r.cfg.Clusters))
 	for _, c := range r.cfg.Clusters {
 		dbs = append(dbs, c.Name)
 	}
+
 	data := map[string]any{"server": r.name, "bundle": rr.state.Bundle, "from": rr.state.From, "created_at": m.CreatedAt,
 		"epoch": m.Epoch, "databases": dbs, "host": r.boot.User + "@" + r.boot.Host, "public_address": rr.state.NewAddress, "dry_run": true}
+
 	plan := "fence the old master, place the bundle, run every server step; then " + strings.Join(dbs, ", ") + " await vaire db recover."
 	if !r.cfg.BackupConfigured() {
 		plan = "place the bundle, run every server step; with no bucket the old master isn't fenced, and the data of " + strings.Join(dbs, ", ") + " is lost with it."
 	}
+
 	msg := fmt.Sprintf("Would rebuild server %s on %s from master bundle %s (created %s, epoch %d): %s",
 		r.name, rr.state.NewAddress, rr.state.Bundle, m.CreatedAt, m.Epoch, plan)
+
 	return output.Success(r.cmd, output.Result{Data: data, Message: msg})
 }
 
 // restoreConfirm asks for <server>/replace.
 func (r *initRun) restoreConfirm(kit *workspaces.BackupCreds) error {
 	cmd := r.cmd
+
 	token := r.name + "/replace"
 	if stringFlag(cmd, "confirm") != "" || MustNotPrompt(cmd) {
 		return Confirm(cmd, token)
 	}
+
 	rr := r.restore
+
 	takeover := "This takes over the old server's identity and fences it: power it off or destroy it first."
 	if !canFence(r.cfg, kit) {
 		takeover = "This takes over the old server's identity. With no bucket it can't be fenced: power it off or destroy it first."
 	}
+
 	r.p.panel("Rebuild "+r.name, []string{
 		"bundle   " + rr.state.Bundle + " (" + rr.bundle.Manifest.CreatedAt + ")",
 		"new VPS  " + r.boot.User + "@" + rr.state.NewAddress,
 		"",
 		takeover,
 	})
+
 	return typeWord(cmd, "Type '"+token+"' to rebuild", "", token)
 }
 
@@ -383,29 +451,38 @@ func (r *initRun) checkOldMaster(ctx context.Context) error {
 	if flagTrue(r.cmd, "old-master-unreachable") || !rr.addressChanged() || rr.state.OldAddress == "" {
 		return nil
 	}
+
 	old, ok := rr.ctx.Master()
 	if !ok {
 		return nil
 	}
+
 	wgKey, err := workspaces.ReadFile(rr.ctx.Name, workspaces.WGKeyFile)
 	if err != nil {
 		return workspaceFileError(rr.ctx.Name, workspaces.WGKeyFile, err)
 	}
+
 	stopTunnelDaemonQuietly(ctx, rr.ctx.Name)
+
 	probeCtx, cancel := context.WithTimeout(ctx, oldMasterProbe)
 	defer cancel()
+
 	stop := r.p.wait("checking that the old master " + old.PublicAddress + " no longer answers")
 	defer stop()
+
 	tun, err := upTunnel(probeCtx, rr.ctx.Name, strings.TrimSpace(string(wgKey)), rr.ctx.Operator.WGAddress, old.WGPublicKey, old.PublicAddress, old.ListenPort, old.WGAddress, nil)
 	if err != nil {
 		return nil //nolint:nilerr // no tunnel: the old master doesn't answer.
 	}
 	defer tun.Close()
+
 	conn, err := tun.DialContext(probeCtx, "tcp", net.JoinHostPort(old.WGAddress, "22"))
 	if err != nil {
 		return nil //nolint:nilerr // nothing answers on its WireGuard address.
 	}
+
 	_ = conn.Close()
+
 	return output.NewError(output.CodePrecondition, "the old master "+old.PublicAddress+" still answers over WireGuard", output.ExitPrecondition,
 		"Power it off or destroy it first, then run the rebuild again. If it only looks alive, pass --old-master-unreachable.").
 		WithDetails(map[string]any{"reason": "old_master_alive", "address": old.PublicAddress})
@@ -426,46 +503,60 @@ func (r *initRun) fence(ctx context.Context, kit *workspaces.BackupCreds) error 
 		if err != nil {
 			return err
 		}
+
 		rr.state.InstanceID = id
 	}
+
 	if !canFence(r.cfg, kit) {
 		r.warnings = append(r.warnings, output.Warning{Code: "no_fence",
 			Message: "no bucket, so the old master can't be fenced: make sure it is powered off or destroyed"})
+
 		return nil
 	}
+
 	t := kitTarget(kit)
+
 	cur, err := backup.ReadEpoch(ctx, t)
 	if err != nil {
 		return err
 	}
+
 	next := int64(1)
+
 	if cur != nil {
 		if cur.Server != "" && cur.Server != r.name {
 			return output.NewError(output.CodePrecondition, "the bucket's master epoch belongs to server "+cur.Server+", not "+r.name, output.ExitPrecondition,
 				"Check the workspace's bucket and prefix.").WithDetails(map[string]any{"reason": "bundle_server_mismatch", "server": cur.Server})
 		}
+
 		if cur.InstanceID == rr.state.InstanceID {
 			// A resumed rebuild that already wrote it: keep its time, which
 			// db recover's stale-WAL check compares against.
 			rr.state.Epoch, rr.state.EpochWrittenAt = cur.Epoch, cur.WrittenAt
 			return nil
 		}
+
 		next = cur.Epoch + 1
 	}
+
 	e := masterbackup.NewEpoch(r.name, next, rr.state.InstanceID, rr.ctx.Operator.Name, masterbackup.ReasonRestore)
 	if err := backup.WriteEpoch(ctx, t, e); err != nil {
 		return err
 	}
+
 	back, err := backup.ReadEpoch(ctx, t)
 	if err != nil {
 		return err
 	}
+
 	if back == nil || back.InstanceID != rr.state.InstanceID {
 		return output.NewError(output.CodePrecondition, "the bucket's epoch changed while it was written: another rebuild is running", output.ExitPrecondition,
 			"Stop the other rebuild; one operator at a time.").WithDetails(map[string]any{"reason": "epoch_conflict"})
 	}
+
 	rr.state.Epoch, rr.state.EpochWrittenAt = e.Epoch, e.WrittenAt
 	r.p.note(fmt.Sprintf("fenced the old master: epoch %d now names this rebuild", e.Epoch))
+
 	return nil
 }
 
@@ -474,34 +565,42 @@ func (r *initRun) fence(ctx context.Context, kit *workspaces.BackupCreds) error 
 // re-send (D11).
 func (r *initRun) restoreSecrets() error {
 	rr := r.restore
+
 	wgKey, err := workspaces.ReadFile(rr.ctx.Name, workspaces.WGKeyFile)
 	if err != nil {
 		return workspaceFileError(rr.ctx.Name, workspaces.WGKeyFile, err)
 	}
+
 	sshKey, err := workspaces.ReadFile(rr.ctx.Name, workspaces.SSHKeyFile)
 	if err != nil {
 		return workspaceFileError(rr.ctx.Name, workspaces.SSHKeyFile, err)
 	}
+
 	creds, err := workspaces.LoadCredentials(rr.ctx.Name)
 	if err != nil {
 		return err
 	}
+
 	r.sec = workspaces.PendingSecrets{
 		OperatorName: rr.ctx.Operator.Name, WGPrivateKey: strings.TrimSpace(string(wgKey)), SSHPrivateKey: string(sshKey),
 		SudoPassword: creds.SudoPassword, Database: creds.Database, Backup: creds.Backup, Metrics: creds.Metrics,
 	}
 	registerPending(r.sec)
 	r.prog.Mark(phaseSecrets)
+
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
+
 	addRecoveryKit(r.dbSecrets, r.sec.Backup)
+
 	if r.sec.Database != nil && creds.Database != nil && len(r.sec.Database.Services) != len(creds.Database.Services) {
 		r.warnings = append(r.warnings, output.Warning{Code: "secrets_document_stale", Message: "service credentials were missing from this workspace and were generated; run vaire secrets export"})
 	}
 	// Generated credentials (a workspace from before a phase) go back into
 	// the workspace too, not only the pending state.
 	creds.Database, creds.Metrics = r.sec.Database, r.sec.Metrics
+
 	return workspaces.SaveCredentials(rr.ctx.Name, creds)
 }
 
@@ -512,6 +611,7 @@ func (rr *restoreRun) place(ctx context.Context, r *initRun, n *remote.Node) ([]
 	if err != nil {
 		return nil, err
 	}
+
 	tarball, _, err := masterbackup.Build(masterbackup.Meta{
 		Server: rr.bundle.Manifest.Server, Node: rr.bundle.Manifest.Node, Epoch: rr.bundle.Manifest.Epoch,
 		CreatedAt: parseRFC3339(rr.bundle.Manifest.CreatedAt), VaireVersion: rr.bundle.Manifest.VaireVersion,
@@ -519,15 +619,20 @@ func (rr *restoreRun) place(ctx context.Context, r *initRun, n *remote.Node) ([]
 	if err != nil {
 		return nil, err
 	}
+
 	encoded := base64.StdEncoding.EncodeToString(tarball)
 	secrets.Add(encoded)
+
 	var epoch *masterbackup.Epoch
+
 	if rr.state.Epoch > 0 {
 		e := masterbackup.NewEpoch(r.name, rr.state.Epoch, rr.state.InstanceID, rr.ctx.Operator.Name, masterbackup.ReasonRestore)
 		e.WrittenAt = rr.state.EpochWrittenAt
 		epoch = &e
 	}
+
 	r.p.phase("init.restore", "started", "place the master bundle on the new server")
+
 	reply, err := r.p.call(ctx, n, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseRestore,
 		"cluster_toml": string(raw),
@@ -538,27 +643,35 @@ func (rr *restoreRun) place(ctx context.Context, r *initRun, n *remote.Node) ([]
 	if err != nil {
 		return nil, err
 	}
+
 	var placed node.RestorePlaced
 	if err := reply.Decode(&placed); err != nil {
 		return nil, err
 	}
+
 	r.warnings = append(r.warnings, reply.Warnings...)
+
 	if len(placed.Pruned) > 0 {
 		var names []string
 		for _, p := range placed.Pruned {
 			names = append(names, p.Database+": "+p.Name)
 		}
+
 		r.warnings = append(r.warnings, output.Warning{Code: "restore_leftovers_lost",
 			Message: "these were on the lost server's disk and are gone: " + strings.Join(names, ", ")})
 	}
+
 	keys, err := transport.ParseHostKeys(placed.SSHHostKeys)
 	if err != nil {
 		return nil, err
 	}
+
 	r.p.phase("init.restore", "completed", fmt.Sprintf("%d files placed; %d databases await recovery", len(placed.Placed), len(placed.Awaiting)))
+
 	if err := r.mark(phasePlaced); err != nil {
 		return nil, err
 	}
+
 	return keys, nil
 }
 
@@ -568,11 +681,14 @@ func withHint(err error, hint string) error {
 	if !errors.As(err, &cliErr) {
 		return output.WrapError(output.CodeError, err, output.ExitGeneric, hint)
 	}
+
 	out := *cliErr
 	if out.Hint != "" {
 		hint = out.Hint + " " + hint
 	}
+
 	out.Hint = hint
+
 	return &out
 }
 
@@ -589,44 +705,55 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 	rr := r.restore
 	timeout := timeoutFlag(cmd)
 	n := r.master()
+
 	publicSSH := net.JoinHostPort(n.PublicAddress, strconv.Itoa(r.boot.Port))
 	if err := r.savePending(); err != nil {
 		return err
 	}
+
 	if err := r.restoreHostPhase(ctx, timer, publicSSH, timeout); err != nil {
 		return err
 	}
 
 	// WireGuard with the workspace's own keys: the server has the old key.
 	stopTunnelDaemonQuietly(ctx, r.name)
+
 	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, rr.ctx.Operator.WGAddress, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
 	if err != nil {
 		return err
 	}
 	defer tun.Close()
+
 	rt, err := r.restoreConnect(ctx, tun, n)
 	if err != nil {
 		return err
 	}
 	defer rt.close()
+
 	if err := r.restoreLockdown(ctx, timer, rt, tun, n); err != nil {
 		return err
 	}
+
 	if err := r.restoreDNSPhase(ctx, timer); err != nil {
 		return err
 	}
+
 	if err := r.restoreDatabasePhase(ctx, timer, rt.node); err != nil {
 		return err
 	}
+
 	if err := r.restoreFirstBundle(ctx, timer, rt.node); err != nil {
 		return err
 	}
+
 	if err := r.restoreWorkspacePhase(); err != nil {
 		return err
 	}
+
 	if err := r.restoreSecretsPhase(ctx, rt.node); err != nil {
 		return err
 	}
+
 	return r.restoreResult(cmd, rr)
 }
 
@@ -635,13 +762,16 @@ func (r *initRun) restoreHostPhase(ctx context.Context, timer *phaseTimer, publi
 	if r.prog.Done(phaseHost) {
 		return nil
 	}
+
 	if err := r.p.during("checking that "+publicSSH+" answers", func() error { return localenv.CheckReachable(ctx, publicSSH, timeout) }); err != nil {
 		return err
 	}
+
 	known, err := transport.LoadKnownHosts(workspaces.PendingKnownHosts(r.name))
 	if err != nil {
 		return err
 	}
+
 	return timer.run(phaseHost, func() error { return r.firstContact(ctx, known, publicSSH, timeout) })
 }
 
@@ -666,27 +796,35 @@ func (r *initRun) restoreConnect(ctx context.Context, tun *transport.Tunnel, n c
 	if err != nil {
 		return nil, err
 	}
+
 	opAuth, err := transport.KeyAuth([]byte(r.sec.SSHPrivateKey))
 	if err != nil {
 		return nil, err
 	}
+
 	adminTarget := transport.SSHTarget{User: r.cfg.Server.AdminUser, Addr: net.JoinHostPort(n.WGAddress, "22")}
 	sshOpts := transport.SSHOptions{Auth: []ssh.AuthMethod{opAuth}, HostKeys: known, Timeout: 15 * time.Second}
+
 	r.p.phase("init.transport", "started", "connect over WireGuard to "+n.WGAddress)
+
 	wgClient, err := dialRetryReport(ctx, tun, adminTarget, sshOpts, confirmWithin, r.attemptReporter("init.transport", "SSH over WireGuard to "+adminTarget.Addr))
 	if err != nil {
 		return nil, tunnelHint(err, n.PublicAddress, r.cfg.Transport.ListenPort)
 	}
+
 	wgNode := &remote.Node{SSH: wgClient, Operator: r.sec.OperatorName}
 	if err := wgNode.Handshake(ctx, remote.HandshakeOptions{AutoUpgrade: flagTrue(r.cmd, "auto-upgrade-nodes"), Progress: r.p.note}); err != nil {
 		wgClient.Close()
 		return nil, err
 	}
+
 	r.p.phase("init.transport", "completed", "the server answers with the old host key")
+
 	if err := r.mark(phaseTransport); err != nil {
 		wgClient.Close()
 		return nil, err
 	}
+
 	return &restoreTransport{node: wgNode, client: wgClient, target: adminTarget, opts: sshOpts}, nil
 }
 
@@ -695,12 +833,14 @@ func (r *initRun) restoreLockdown(ctx context.Context, timer *phaseTimer, rt *re
 	if r.prog.Done(phaseLockdown) {
 		return nil
 	}
+
 	if err := timer.run(phaseLockdown, func() error {
 		_, err := r.lockdown(ctx, rt.node, tun, rt.target, rt.opts, net.JoinHostPort(n.PublicAddress, "22"))
 		return err
 	}); err != nil {
 		return err
 	}
+
 	return r.mark(phaseLockdown)
 }
 
@@ -709,9 +849,11 @@ func (r *initRun) restoreDNSPhase(ctx context.Context, timer *phaseTimer) error 
 	if r.cfg.TLS.Mode != "acme" || !r.restore.addressChanged() || r.prog.Done(phaseDNS) {
 		return nil
 	}
+
 	if err := timer.run(phaseDNS, func() error { return r.dnsStep(ctx) }); err != nil {
 		return err
 	}
+
 	return r.mark(phaseDNS)
 }
 
@@ -720,14 +862,18 @@ func (r *initRun) restoreDatabasePhase(ctx context.Context, timer *phaseTimer, w
 	if r.prog.Done(phaseDatabase) {
 		return nil
 	}
+
 	r.p.phase("init.database", "started", "run every server step; the databases await recovery")
+
 	if err := timer.run(phaseDatabase, func() error {
 		_, err := r.callDatabasePhase(ctx, wgNode)
 		return err
 	}); err != nil {
 		return err
 	}
+
 	r.p.phase("init.database", "completed", "")
+
 	return r.mark(phaseDatabase)
 }
 
@@ -736,12 +882,14 @@ func (r *initRun) restoreFirstBundle(ctx context.Context, timer *phaseTimer, wgN
 	if r.prog.Done(phaseFirstBundle) {
 		return nil
 	}
+
 	if err := timer.run(phaseFirstBundle, func() error {
 		_, err := r.p.call(ctx, wgNode, "master-backup.now", map[string]any{"force": true}, remote.CallOptions{OnEvent: r.p.event})
 		return err
 	}); err != nil {
 		r.warnings = append(r.warnings, output.Warning{Code: "master_backup_failed", Message: "the rebuilt master's first bundle failed: " + err.Error() + "; run vaire server backup now"})
 	}
+
 	return r.mark(phaseFirstBundle)
 }
 
@@ -750,9 +898,11 @@ func (r *initRun) restoreWorkspacePhase() error {
 	if r.prog.Done(phaseWorkspaceUpdate) {
 		return nil
 	}
+
 	if err := r.updateWorkspace(); err != nil {
 		return err
 	}
+
 	return r.mark(phaseWorkspaceUpdate)
 }
 
@@ -762,14 +912,17 @@ func (r *initRun) restoreSecretsPhase(ctx context.Context, wgNode *remote.Node) 
 	if r.prog.Done(phaseSecretsDone) {
 		return nil
 	}
+
 	if r.restore.addressChanged() {
 		if err := r.restoreHandoff(); err != nil {
 			return err
 		}
 	}
+
 	if _, err := r.p.call(ctx, wgNode, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
 		return err
 	}
+
 	return r.mark(phaseSecretsDone)
 }
 
@@ -779,10 +932,12 @@ func (r *initRun) restoreResult(cmd *cobra.Command, rr *restoreRun) error {
 	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
+
 	awaiting := "The databases await recovery: " + strings.Join(res.AwaitingRecovery, ", ") + "."
 	if !r.cfg.BackupConfigured() {
 		awaiting = "With no bucket the databases' data is lost with the old server: drop them, create the sources again, then re-follow the followers."
 	}
+
 	msg := []string{
 		fmt.Sprintf("Server %s is rebuilt on %s from master bundle %s.", r.name, rr.state.NewAddress, rr.state.Bundle),
 		"Your workspace works as before. " + awaiting,
@@ -790,22 +945,26 @@ func (r *initRun) restoreResult(cmd *cobra.Command, rr *restoreRun) error {
 	if rr.addressChanged() && r.cfg.TLS.Mode == "acme" {
 		msg = append(msg, "Clients reconnect once "+r.cfg.MasterHostname()+" resolves to "+rr.state.NewAddress+".")
 	}
+
 	return output.Success(cmd, output.Result{Data: res, Message: strings.Join(msg, "\n"), Warnings: r.warnings, Next: res.Next})
 }
 
 // updateWorkspace points the workspace at the new address.
 func (r *initRun) updateWorkspace() error {
 	rr := r.restore
+
 	c, err := workspaces.Load(rr.ctx.Name)
 	if err != nil {
 		return err
 	}
+
 	for i := range c.Nodes {
 		if c.Nodes[i].Role == workspaces.RoleMaster || len(c.Nodes) == 1 {
 			if c.Nodes[i].PublicAddress != rr.state.NewAddress {
 				r.warnings = append(r.warnings, output.Warning{Code: "workspace_endpoint_updated",
 					Message: "workspace " + c.Name + " now reaches the server at " + rr.state.NewAddress + " (was " + c.Nodes[i].PublicAddress + ")"})
 			}
+
 			c.Nodes[i].PublicAddress = rr.state.NewAddress
 			if k := r.prog.WGPublicKey; k != "" && k != c.Nodes[i].WGPublicKey {
 				// A bundle without the WireGuard key made a new one.
@@ -815,8 +974,10 @@ func (r *initRun) updateWorkspace() error {
 			}
 		}
 	}
+
 	c.LockdownConfirmedAt = time.Now().UTC().Format(time.RFC3339)
 	rr.ctx = c
+
 	return workspaces.Save(c)
 }
 
@@ -826,19 +987,24 @@ func (r *initRun) restoreHandoff() error {
 	if MustNotPrompt(r.cmd) {
 		r.warnings = append(r.warnings, output.Warning{Code: "secrets_document_stale",
 			Message: "the server's address changed; run vaire secrets export at a terminal and store the new handoff"})
+
 		return nil
 	}
+
 	err := showWorkspaceHandoff(r.cmd, r.restore.ctx)
+
 	return err
 }
 
 func (r *initRun) restoreResultData() restoreResult {
 	rr := r.restore
+
 	res := restoreResult{Server: r.name, Bundle: rr.state.Bundle, From: rr.state.From, PublicAddress: rr.state.NewAddress,
 		OldAddress: rr.state.OldAddress, Epoch: rr.state.Epoch, Timings: rr.state.Timings, AwaitingRecovery: []string{}}
 	for _, c := range r.cfg.Clusters {
 		res.AwaitingRecovery = append(res.AwaitingRecovery, c.Name)
 	}
+
 	switch {
 	case len(res.AwaitingRecovery) == 0:
 	case r.cfg.BackupConfigured():
@@ -849,6 +1015,7 @@ func (r *initRun) restoreResultData() restoreResult {
 		// back with db follow once its source exists again, not with db create
 		// as a database of its own.
 		var followers, sources []config.ClusterSpec
+
 		for _, c := range r.cfg.Clusters {
 			if c.IsFollower() {
 				followers = append(followers, c)
@@ -856,20 +1023,26 @@ func (r *initRun) restoreResultData() restoreResult {
 				sources = append(sources, c)
 			}
 		}
+
 		for _, c := range followers {
 			res.Next = append(res.Next, "vaire db drop "+c.Name+" --confirm "+c.Name)
 		}
+
 		for _, c := range sources {
 			res.Next = append(res.Next, "vaire db drop "+c.Name+" --confirm "+c.Name)
 		}
+
 		for _, c := range sources {
 			res.Next = append(res.Next, "vaire db create "+c.Name)
 		}
+
 		for _, c := range followers {
 			res.Next = append(res.Next, "vaire db follow "+c.Follows+" --name "+c.Name)
 		}
 	}
+
 	res.Next = append(res.Next, "vaire doctor", "vaire server backup list")
+
 	return res
 }
 
@@ -880,14 +1053,17 @@ func newPhaseTimer(st *workspaces.RestoreProgress) *phaseTimer {
 	if st != nil && st.Timings == nil {
 		st.Timings = map[string]float64{}
 	}
+
 	return &phaseTimer{state: st}
 }
 
 func (t *phaseTimer) run(phase string, fn func() error) error {
 	start := time.Now()
+
 	err := fn()
 	if t.state != nil && err == nil {
 		t.state.Timings[phase] += time.Since(start).Round(100 * time.Millisecond).Seconds()
 	}
+
 	return err
 }

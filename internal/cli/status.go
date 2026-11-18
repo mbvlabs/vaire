@@ -93,10 +93,12 @@ type statusDB struct {
 
 func (db statusDB) MarshalJSON() ([]byte, error) {
 	type plain statusDB
+
 	raw, err := json.Marshal(plain(db))
 	if err != nil || db.State != "incomplete" {
 		return raw, err
 	}
+
 	return omitIncompleteFields(raw, "uptime_s", "connections", "db_size", "wal_bytes", "longest_xact_s", "backup", "restart_pending", "restore_in_progress")
 }
 
@@ -137,34 +139,42 @@ const statusWatchInterval = 5 * time.Second
 
 func runStatus(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	params := map[string]any{}
 	if db := stringFlag(cmd, "db"); db != "" {
 		params["db"] = db
 	}
+
 	fetch := func() (statusData, []output.Warning, error) {
 		reply, err := p.call(commandContext(cmd), s.node, "status", params, remote.CallOptions{OnEvent: p.event})
 		if err != nil {
 			return statusData{}, nil, err
 		}
+
 		var data statusData
 		if err := reply.Decode(&data); err != nil {
 			return statusData{}, nil, err
 		}
+
 		return data, reply.Warnings, nil
 	}
+
 	data, warnings, err := fetch()
 	if err != nil {
 		return err
 	}
+
 	if !flagTrue(cmd, "watch") || MustNotPrompt(cmd) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return output.Success(cmd, output.Result{Data: data, Message: statusMessage(data, warnings), Warnings: append(s.warnings, warnings...),
 			Next: statusNext(data)})
 	}
+
 	ctx := commandContext(cmd)
 	for {
 		_, _ = fmt.Fprint(cmd.OutOrStdout(), "\033[H\033[2J"+statusMessage(data, warnings)+
@@ -174,13 +184,16 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 			return nil
 		case <-time.After(statusWatchInterval):
 		}
+
 		next, w, err := fetch()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+
 			return err
 		}
+
 		statusWatchCPU(data, &next)
 		data, warnings = next, w
 	}
@@ -193,18 +206,22 @@ func statusWatchCPU(previous statusData, next *statusData) {
 	for _, db := range previous.Databases {
 		old[db.Name] = db.CPU
 	}
+
 	for i := range next.Databases {
 		cpu := next.Databases[i].CPU
 		prior := old[next.Databases[i].Name]
+
 		if cpu == nil {
 			continue
 		}
+
 		cpu.UsagePercent = nil
 		if prior == nil || prior.SampleGeneration == "" || cpu.SampleGeneration != prior.SampleGeneration ||
 			prior.SampleMonotonicNS == nil || cpu.SampleMonotonicNS == nil || prior.UsageUsec == nil || cpu.UsageUsec == nil ||
 			*cpu.UsageUsec < *prior.UsageUsec || *prior.SampleMonotonicNS <= 0 || *cpu.SampleMonotonicNS <= *prior.SampleMonotonicNS {
 			continue
 		}
+
 		elapsed := *cpu.SampleMonotonicNS - *prior.SampleMonotonicNS
 		rate := float64(*cpu.UsageUsec-*prior.UsageUsec) * 100000 / float64(elapsed)
 		cpu.UsagePercent = &rate
@@ -218,6 +235,7 @@ func statusNext(d statusData) []string {
 			return []string{"vaire doctor"}
 		}
 	}
+
 	return nil
 }
 
@@ -228,7 +246,9 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 		lines = append(lines, "", "no databases yet (vaire db create <name>)")
 		return strings.Join(lines, "\n")
 	}
+
 	lines = append(lines, statusDatabaseRows(d)...)
+
 	lines = append(lines, statusDatabaseDetails(d)...)
 	for _, db := range d.Databases {
 		if db.RestartPending {
@@ -236,47 +256,59 @@ func statusMessage(d statusData, warnings []output.Warning) string {
 			break
 		}
 	}
+
 	_ = warnings
+
 	return strings.Join(lines, "\n")
 }
 
 // statusHeaderLines renders the server card above the database table.
 func statusHeaderLines(d statusData) []string {
 	var lines []string
+
 	head := fmt.Sprintf("server %s · node %s · vaire %s", d.Server, d.Node, d.VaireVersion)
 	if d.PGVersion != "" {
 		head += " · PostgreSQL " + d.PGVersion
 	}
+
 	lines = append(lines, head)
 	b := d.Budget
+
 	free := "free " + tune.FormatMiB(b.FreeMiB)
 	if b.FreeMiB < 0 {
 		free = "overcommitted by " + tune.FormatMiB(-b.FreeMiB)
 	}
+
 	lines = append(lines, fmt.Sprintf("  memory  %s RAM · reserve %s · budget %s · allocated %s · %s",
 		tune.FormatMiB(b.RAMMiB), tune.FormatMiB(b.ReserveMiB), tune.FormatMiB(b.ClusterBudgetMiB), tune.FormatMiB(b.ClusterMemoryMiB), free))
 	if d.Disk != nil {
 		lines = append(lines, fmt.Sprintf("  disk    %s free of %s on %s (%.0f%% free)", humanBytes(d.Disk.FreeBytes), humanBytes(d.Disk.TotalBytes), d.Disk.Path, d.Disk.FreePct))
 	}
+
 	if d.TLS != nil {
 		tls := "  tls     " + d.TLS.State
 		if d.TLS.NotAfter != "" {
 			tls += " until " + d.TLS.NotAfter
 		}
+
 		lines = append(lines, tls)
 	}
+
 	for _, name := range []string{"transaction", "session"} {
 		if pl, ok := d.Poolers[name]; ok {
 			lines = append(lines, fmt.Sprintf("  %-7s clients %d active, %d waiting · servers %d active, %d idle", poolerLabel(name),
 				pl.ClientsActive, pl.ClientsWaiting, pl.ServersActive, pl.ServersIdle))
 		}
 	}
+
 	if !d.Backups {
 		lines = append(lines, "  backups none off the server (vaire backup setup)")
 	}
+
 	if line := statusMasterLine(d); line != "" {
 		lines = append(lines, line)
 	}
+
 	return lines
 }
 
@@ -287,13 +319,16 @@ func statusMasterLine(d statusData) string {
 	if m == nil {
 		return ""
 	}
+
 	line := "  master  "
+
 	switch {
 	case m.Fenced:
 		return line + "FENCED: a newer master took over this server's bucket"
 	case m.Last == "":
 		return line + "no bundle yet"
 	}
+
 	line += "last bundle " + m.CreatedAt
 	switch {
 	case m.Uploaded:
@@ -303,23 +338,28 @@ func statusMasterLine(d statusData) string {
 	default:
 		line += ", on the server only (vaire server backup export)"
 	}
+
 	if m.Pending {
 		line += "; a change is being bundled"
 	}
+
 	if m.LastFailed != "" {
 		line += "; last failure: " + m.LastFailed
 	}
+
 	return line
 }
 
 // statusDatabaseRows renders the table header and one row per database.
 func statusDatabaseRows(d statusData) []string {
 	lines := make([]string, 0, 2+len(d.Databases))
+
 	lines = append(lines, "", fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
 		"DATABASE", "STATE", "SIZE", "MEMORY", "CONNS", "CACHE", "TPS", "LAST BACKUP", "UP"))
 	for _, db := range d.Databases {
 		lines = append(lines, statusDatabaseRow(db))
 	}
+
 	return lines
 }
 
@@ -329,21 +369,26 @@ func statusDatabaseRow(db statusDB) string {
 	if db.MemoryCurrentMiB != nil {
 		mem = tune.FormatMiB(int(*db.MemoryCurrentMiB)) + "/" + tune.FormatMiB(db.MemoryMiB)
 	}
+
 	if db.State == "incomplete" {
 		return fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
 			db.Name, db.State, db.Size, mem, "-", "-", "-", "-", "-")
 	}
+
 	cache, tps := "-", "-"
 	if db.CacheHitRatio != nil {
 		cache = fmt.Sprintf("%.1f%%", *db.CacheHitRatio*100)
 	}
+
 	if db.TPS != nil {
 		tps = fmt.Sprintf("%.1f", *db.TPS)
 	}
+
 	state := db.State
 	if db.RestartPending {
 		state += "*"
 	}
+
 	return fmt.Sprintf("  %-16s %-11s %-7s %-16s %-9s %-6s %-7s %-20s %s",
 		db.Name, state, db.Size, mem, fmt.Sprintf("%d/%d", db.Connections.Used, db.Connections.Max), cache, tps, latestBackup(db), health.Uptime(db.UptimeS))
 }
@@ -351,29 +396,36 @@ func statusDatabaseRow(db statusDB) string {
 // statusDatabaseDetails renders the notes under the table.
 func statusDatabaseDetails(d statusData) []string {
 	var lines []string
+
 	for _, db := range d.Databases {
 		if db.State == "incomplete" {
 			lines = append(lines, "  "+db.Name+": "+incompleteReportText(db.Materialisation))
 			continue
 		}
+
 		if db.Backup.WindowStart != "" {
 			lines = append(lines, fmt.Sprintf("  %s: restorable from %s", db.Name, db.Backup.WindowStart))
 		}
 	}
+
 	for _, db := range d.Databases {
 		if db.State == "incomplete" {
 			continue
 		}
+
 		if line := followerLine(db); line != "" {
 			lines = append(lines, line)
 		}
+
 		if line := statusCPULine(db); line != "" {
 			lines = append(lines, line)
 		}
+
 		if db.Follows != "" && db.DataFreeBytes != nil {
 			lines = append(lines, fmt.Sprintf("  %s: data filesystem %d bytes free", db.Name, *db.DataFreeBytes))
 		}
 	}
+
 	return lines
 }
 
@@ -384,10 +436,12 @@ func statusCPULine(db statusDB) string {
 	if cpu == nil {
 		return ""
 	}
+
 	quota := cpu.Requested.Quota
 	if quota == "" {
 		quota = "none"
 	}
+
 	line := fmt.Sprintf("  %s: CPU %s, requested quota %s", db.Name, cpu.Requested.Mode, quota)
 	if !cpu.EffectiveKnown {
 		line += ", effective unknown"
@@ -397,11 +451,13 @@ func statusCPULine(db statusDB) string {
 	} else {
 		line += statusEffectiveCPUText(cpu)
 	}
+
 	if cpu.UsagePercent != nil {
 		line += fmt.Sprintf(", usage %.1f%% of one CPU", *cpu.UsagePercent)
 	} else if cpu.UsageUsec != nil {
 		line += fmt.Sprintf(", cumulative usage %d usec", *cpu.UsageUsec)
 	}
+
 	return line
 }
 
@@ -411,17 +467,20 @@ func statusEffectiveCPUText(cpu *statusCPU) string {
 	if e == nil {
 		return ""
 	}
+
 	text := ""
 	if e.Idle != nil && *e.Idle {
 		text += ", idle priority"
 	} else if e.Weight != nil {
 		text += fmt.Sprintf(", weight %d", *e.Weight)
 	}
+
 	if e.Unlimited != nil && *e.Unlimited {
 		text += ", effective quota unlimited"
 	} else if e.QuotaUsec != nil && e.QuotaPeriodUsec != nil {
 		text += fmt.Sprintf(", effective quota %d/%d usec", *e.QuotaUsec, *e.QuotaPeriodUsec)
 	}
+
 	return text
 }
 
@@ -429,6 +488,7 @@ func poolerLabel(name string) string {
 	if name == "transaction" {
 		return "pooler"
 	}
+
 	return "session"
 }
 
@@ -440,9 +500,11 @@ func latestBackup(db statusDB) string {
 			last = at
 		}
 	}
+
 	if last == "" {
 		return "-"
 	}
+
 	return last
 }
 
@@ -453,7 +515,9 @@ func followerLine(db statusDB) string {
 	if db.Follows == "" {
 		return ""
 	}
+
 	line := "  " + db.Name + ": follows " + db.Follows
+
 	switch {
 	case f == nil || (!f.SourceKnown && !f.SelfKnown):
 		return line + " (replication unknown)"
@@ -470,15 +534,19 @@ func followerLine(db statusDB) string {
 	default:
 		line += ", NOT streaming"
 	}
+
 	if !f.SourceKnown {
 		return line
 	}
+
 	if f.ReceiveBacklogBytes != nil {
 		line += fmt.Sprintf(" · receive backlog %d bytes", *f.ReceiveBacklogBytes)
 	}
+
 	if f.ReplayBacklogBytes != nil {
 		line += fmt.Sprintf(" · replay backlog %d bytes", *f.ReplayBacklogBytes)
 	}
+
 	switch {
 	case !f.SlotExists:
 		line += " · slot " + f.Slot + " missing"
@@ -489,5 +557,6 @@ func followerLine(db statusDB) string {
 	default:
 		line += " · slot " + f.Slot + " holds " + humanBytes(*f.SlotRetainedBytes)
 	}
+
 	return line
 }

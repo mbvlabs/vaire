@@ -104,14 +104,17 @@ func DatabaseURLs(host, tlsMode, db string, roles map[string]workspaces.Role) ma
 	if tlsMode == "self-signed" {
 		query = "sslmode=require"
 	}
+
 	out := map[string]string{}
 	if r, ok := roles["app"]; ok {
 		out["app"] = fmt.Sprintf("postgres://%s:%s@%s:6432/%s?%s", r.User, r.Password, host, db, query)
 		out["app_direct_tls"] = fmt.Sprintf("postgres://%s:%s@%s:443/%s?%s&sslnegotiation=direct", r.User, r.Password, host, db, query)
 	}
+
 	if r, ok := roles["migrate"]; ok {
 		out["migrate"] = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?%s", r.User, r.Password, host, db, query)
 	}
+
 	return out
 }
 
@@ -131,10 +134,12 @@ func (m *Metrics) creds() *workspaces.MetricsCreds {
 	if m == nil || m.Password == "" {
 		return nil
 	}
+
 	user := m.Username
 	if user == "" {
 		user = workspaces.MetricsUser
 	}
+
 	return &workspaces.MetricsCreds{Username: user, Password: m.Password}
 }
 
@@ -145,12 +150,15 @@ func (d Document) SecretValues() []string {
 	if d.Database != nil {
 		out = append(out, d.Database.SecretValues()...)
 	}
+
 	if d.Backup != nil {
 		out = append(out, d.Backup.SecretValues()...)
 	}
+
 	if d.Metrics != nil {
 		out = append(out, d.Metrics.Password)
 	}
+
 	return out
 }
 
@@ -160,22 +168,29 @@ func Encrypt(doc Document, passphrase string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	recipient, err := age.NewScryptRecipient(passphrase)
 	if err != nil {
 		return nil, err
 	}
+
 	recipient.SetWorkFactor(ScryptWorkFactor)
+
 	var out bytes.Buffer
+
 	w, err := age.Encrypt(&out, recipient)
 	if err != nil {
 		return nil, err
 	}
+
 	if _, err := w.Write(plain); err != nil {
 		return nil, err
 	}
+
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
+
 	return out.Bytes(), nil
 }
 
@@ -186,31 +201,37 @@ func Decrypt(raw []byte, passphrase string) (Document, error) {
 	if err != nil {
 		return Document{}, secretsError("the passphrase is empty", err)
 	}
+
 	var src io.Reader = bytes.NewReader(raw)
 	if IsArmored(raw) {
 		src = armor.NewReader(bytes.NewReader(bytes.TrimSpace(raw)))
 	}
+
 	r, err := age.Decrypt(src, identity)
 	if err != nil {
-		var noMatch *age.NoIdentityMatchError
-		if errors.As(err, &noMatch) {
+		if _, ok := errors.AsType[*age.NoIdentityMatchError](err); ok {
 			return Document{}, secretsError("the passphrase does not open this secrets document", err)
 		}
+
 		return Document{}, secretsError("the file is not an vaire secrets document or is damaged", err)
 	}
+
 	plain, err := io.ReadAll(io.LimitReader(r, maxDocument))
 	if err != nil {
 		return Document{}, secretsError("the passphrase does not open this secrets document", err)
 	}
+
 	var doc Document
 	if err := json.Unmarshal(plain, &doc); err != nil || doc.Schema != Schema {
 		return Document{}, secretsError("the decrypted document is not "+Schema, err)
 	}
+
 	return doc, nil
 }
 
 func secretsError(message string, cause error) *output.CLIError {
 	e := output.NewError(output.CodeSecrets, message, output.ExitSecrets, "Check the passphrase and the bundle, then retry.")
 	e.Cause = cause
+
 	return e
 }

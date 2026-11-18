@@ -19,14 +19,17 @@ func materialisationIncomplete(db string, o *materialisationOwnership) error {
 	if config.CheckDatabaseName(db) == nil {
 		details["database"] = db
 	}
+
 	if o != nil {
 		if validJobID(o.Job) {
 			details["owning_job"] = o.Job
 		}
+
 		if o.Reason != "" {
 			details["failure_reason"] = o.Reason
 		}
 	}
+
 	return output.NewError(output.CodePrecondition, "incomplete materialisation prevents this operation",
 		output.ExitPrecondition, "Inspect the incomplete database before continuing.").WithDetails(details)
 }
@@ -40,13 +43,16 @@ func guardedMaterialisations(dataRoot string) ([]materialisationOwnership, error
 	if err != nil {
 		return nil, err
 	}
+
 	records, err := listMaterialisations(dataRoot)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := validateMaterialisationAncestry(ancestors); err != nil {
 		return nil, err
 	}
+
 	return records, nil
 }
 
@@ -57,9 +63,11 @@ func guardMaterialisation(ctx context.Context, cfg config.Cluster, db string, al
 	if err != nil {
 		return materialisationIncomplete(db, nil)
 	}
+
 	if found && (!allowOwner || !materialisationOwner(ctx, o)) {
 		return materialisationIncomplete(db, &o)
 	}
+
 	return nil
 }
 
@@ -69,6 +77,7 @@ func guardMaterialisationApply(ctx context.Context, cfg config.Cluster, db strin
 		if err != nil {
 			return materialisationIncomplete(db, nil)
 		}
+
 		if found {
 			// A verified public continuation lease may admit the exact target.
 			// The lease is issued only by the dispatcher after it acquired the
@@ -77,17 +86,22 @@ func guardMaterialisationApply(ctx context.Context, cfg config.Cluster, db strin
 			if materialisationContinuationLeaseMatches(ctx, o) {
 				return nil
 			}
+
 			return materialisationIncomplete(db, &o)
 		}
+
 		return nil
 	}
+
 	records, err := guardedMaterialisations(cfg.Server.DataRoot)
 	if err != nil {
 		return materialisationIncomplete("", nil)
 	}
+
 	if len(records) != 0 {
 		return materialisationIncomplete(records[0].Target, &records[0])
 	}
+
 	return nil
 }
 
@@ -96,6 +110,7 @@ func materialisationGuardView(ctx context.Context, cfg config.Cluster, opts engi
 	if err != nil {
 		return config.Cluster{}, materialisationIncomplete("", nil)
 	}
+
 	excluded := make(map[string]bool, len(records))
 	for _, o := range records {
 		owner := materialisationOwner(ctx, o)
@@ -105,6 +120,7 @@ func materialisationGuardView(ctx context.Context, cfg config.Cluster, opts engi
 		if opts.DB != "" && opts.DB == o.Target && materialisationContinuationOwner(ctx, o) {
 			owner = true
 		}
+
 		if opts.DB == "" || opts.DB != o.Target || !owner {
 			excluded[o.Target] = true
 		}
@@ -112,12 +128,15 @@ func materialisationGuardView(ctx context.Context, cfg config.Cluster, opts engi
 	// RoutingView accounts for newly excluded entries but reconstructs
 	// Awaiting; preserve entries excluded by the preceding legacy view.
 	awaiting := cfg.Awaiting
+
 	keep := opts.Recovering
 	if excluded[keep] {
 		keep = ""
 	}
+
 	view := cfg.RoutingView(func(name string) bool { return excluded[name] }, keep)
 	view.Awaiting = append(view.Awaiting, awaiting...)
+
 	return view, nil
 }
 
@@ -134,10 +153,12 @@ func refuseMaterialisationRequest(ctx context.Context, cfg config.Cluster, req r
 	if req.Method != "apply" && !materialisationRefused[req.Method] {
 		return nil
 	}
+
 	var params map[string]any
 	if len(req.Params) != 0 && json.Unmarshal(req.Params, &params) != nil {
 		return nil
 	}
+
 	if req.Method == "apply" {
 		db, _ := params["db"].(string)
 		// The dispatcher reloads this guard before it can acquire locks, so an
@@ -147,8 +168,10 @@ func refuseMaterialisationRequest(ctx context.Context, cfg config.Cluster, req r
 		if !req.DryRun && db != "" && !requestSelectsSteps(params) && forkContinuationCandidate(cfg, db) {
 			return nil
 		}
+
 		return guardMaterialisationApply(ctx, cfg, db)
 	}
+
 	for _, field := range awaitingParamFields {
 		if name, _ := params[field].(string); name != "" {
 			if err := guardPublicMaterialisation(ctx, cfg, name); err != nil {
@@ -156,6 +179,7 @@ func refuseMaterialisationRequest(ctx context.Context, cfg config.Cluster, req r
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -166,5 +190,6 @@ func requestSelectsSteps(params map[string]any) bool {
 			return true
 		}
 	}
+
 	return false
 }

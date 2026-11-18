@@ -17,10 +17,13 @@ func QR(text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	var b strings.Builder
+
 	lo, hi := -qrQuiet, code.Size+qrQuiet
 	for y := lo; y < hi; y += 2 {
 		b.WriteString("\x1b[30;107m")
+
 		for x := lo; x < hi; x++ {
 			top, bottom := code.Black(x, y), y+1 < hi && code.Black(x, y+1)
 			switch {
@@ -34,7 +37,9 @@ func QR(text string) (string, error) {
 				b.WriteString(" ")
 			}
 		}
+
 		b.WriteString("\x1b[0m\n")
 	}
+
 	return b.String(), nil
 }

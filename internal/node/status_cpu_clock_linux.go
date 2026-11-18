@@ -9,6 +9,8 @@ func statusMonotonicNS() (int64, bool) {
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
 		return 0, false
 	}
+
 	ns := ts.Nano()
+
 	return ns, ns > 0
 }

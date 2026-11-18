@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -148,6 +149,7 @@ func knownJob(job string) bool { return slices.Contains(jobNames, job) }
 // is why a skipped job didn't run, empty when it ran.
 func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter) (res any, skipped string, err error) {
 	act := activityRecorderFactory()
+
 	var ja *jobActivity
 	// The activity finalizer is registered first, so every lock release
 	// deferred below runs before its append. A failed recorder never changes
@@ -156,6 +158,7 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	defer func() {
 		r := recover()
 		finishRunJobActivity(ctx, ja, err, skipped, r)
+
 		if r != nil {
 			panic(r)
 		}
@@ -164,13 +167,16 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	if err := validateJobInvocation(ctx, job, opts, act); err != nil {
 		return nil, "", err
 	}
+
 	if res, skipped, handled, err := runSpecialJob(ctx, job, opts, report, act, &ja); handled {
 		return res, skipped, err
 	}
+
 	if rpcOnlyJobs[job] && opts.ID == "" {
 		err := output.NewError(output.CodeUsage, "job "+job+" is started by its operator command, not by hand", output.ExitUsage,
 			"Use vaire restore, vaire db fork or vaire db copy from your machine.")
 		recordJobRefusal(ctx, act, job, opts.ID, err, "job_spec_required", timerRun(opts))
+
 		return nil, "", err
 	}
 
@@ -180,39 +186,46 @@ func RunJob(ctx context.Context, job string, opts JobOptions, report engine.Repo
 	}
 
 	var rec engine.JobRecord
+
 	rec, err = beginJobRun(ctx, env, act, opts, &ja)
 	if err != nil {
 		return nil, "", err
 	}
+
 	lease, busy, err := acquireJobLocks(ctx, env, &rec, timerRun(opts))
 	if busy != nil {
 		return jobBusyOutcome(ctx, env, ja, rec, job, busy, err)
 	}
+
 	if err != nil {
 		return jobFailure(env, ja, rec, err)
 	}
+
 	defer lease.finish()
+
 	env.lease = lease
 	if err := reloadJobAfterLocks(env, ja, rec); err != nil {
 		return nil, "", err
 	}
+
 	if err := validateRestoreInvocation(env); err != nil {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
 		return nil, "", err
 	}
+
 	if err := jobAuthorityCheck(ctx, env, ja); err != nil {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
 		return nil, "", err
 	}
+
 	return dispatchJob(ctx, env, ja, rec)
 }
 
 func jobBusyOutcome(ctx context.Context, env *jobEnv, ja *jobActivity, rec engine.JobRecord, job string, busy *jobLockBusy, cause error) (any, string, error) {
 	res := map[string]any{"job": job, "job_id": env.ID, "skipped": "lock_busy"}
-	for k, v := range busy.fields {
-		res[k] = v
-	}
+	maps.Copy(res, busy.fields)
 	copySkippedFields(job, res)
+
 	detail := busy.what + " was busy"
 	if cause != nil {
 		// systemctl stop while the run waited for the lock.
@@ -221,17 +234,21 @@ func jobBusyOutcome(ctx context.Context, env *jobEnv, ja *jobActivity, rec engin
 	} else {
 		logLine(env.Report, job, busy.log+"; skipping "+job)
 	}
+
 	ja.pending(activity.OutcomeSkipped, output.CodePrecondition, jobSkipReason(busy, cause))
 	finishJobWithActivity(rec, ja, engine.JobSkipped, detail, res, nil)
 	notRun(ctx, env, errors.New(detail))
+
 	return res, detail, nil
 }
 
 func jobFailure(env *jobEnv, ja *jobActivity, rec engine.JobRecord, err error) (any, string, error) {
 	finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+
 	if env.Job == "restore" || env.Job == "recover" {
 		failRestore(env, err)
 	}
+
 	return nil, "", err
 }
 
@@ -239,18 +256,23 @@ func reloadJobAfterLocks(env *jobEnv, ja *jobActivity, rec engine.JobRecord) err
 	fresh, err := jobLoadCluster(config.ClusterPath)
 	if err != nil {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+
 		if env.Job == "restore" || env.Job == "recover" {
 			failRestore(env, err)
 		}
+
 		return err
 	}
+
 	check := *env
 	check.Cluster = fresh
+
 	invalid := validateJobLockParams(&check) != nil || !slices.Equal(jobLockRequests(env), jobLockRequests(&check))
 	if leaseJob(env.Job) {
 		instance, instanceErr := currentFollowInstance()
 		invalid = invalid || instanceErr != nil || instance != env.installID
 	}
+
 	if invalid {
 		err = fmt.Errorf("job lock scope changed while waiting")
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
@@ -258,7 +280,9 @@ func reloadJobAfterLocks(env *jobEnv, ja *jobActivity, rec engine.JobRecord) err
 		// invocation has no authority to change a restore record.
 		return err
 	}
+
 	env.Cluster = fresh
+
 	return nil
 }
 
@@ -271,6 +295,7 @@ func jobAuthorityCheck(ctx context.Context, env *jobEnv, ja *jobActivity) error 
 		if target == "" {
 			target = rpcJobDatabase(env.Job, env.Params)
 		}
+
 		if target != "" {
 			if err := guardPublicMaterialisation(ctx, env.Cluster, target); err != nil {
 				return err
@@ -281,17 +306,22 @@ func jobAuthorityCheck(ctx context.Context, env *jobEnv, ja *jobActivity) error 
 			return err
 		}
 	}
+
 	if !bucketWriteJobs[env.Job] {
 		return nil
 	}
+
 	if err := jobFenceCheck(ctx, env.Cluster, env.Report); err != nil {
 		code, reason := activityErrorTokens(err)
 		if reason == "" {
 			reason = "node_fenced"
 		}
+
 		ja.pending(activity.OutcomeRefused, code, reason)
+
 		return err
 	}
+
 	return nil
 }
 
@@ -301,12 +331,16 @@ func dispatchJob(ctx context.Context, env *jobEnv, ja *jobActivity, rec engine.J
 		finishJobWithActivity(rec, ja, engine.JobSucceeded, "", res, nil)
 		return res, "", nil
 	}
+
 	if errors.Is(err, errSkipped) {
 		ja.pending(activity.OutcomeSkipped, "", "job_skipped")
 		finishJobWithActivity(rec, ja, engine.JobSkipped, err.Error(), res, nil)
+
 		return res, strings.TrimPrefix(err.Error(), errSkipped.Error()+": "), nil
 	}
+
 	finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+
 	return nil, "", err
 }
 
@@ -315,10 +349,12 @@ func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts J
 	if db == "" {
 		db = rpcJobDatabase(env.Job, env.Params)
 	}
+
 	ja := newJobActivity(act, env.Job, env.ID, env.OperationID, env.ParentRequestID, db, timerRun(opts), opts.ID != "", !jobSafetyJob(env.Job))
 	// Publish before begin so a panic in the checked start still reaches
 	// RunJob's finalizer as an unknown outcome.
 	*jaOut = ja
+
 	rep, berr := ja.begin(ctx, env.Report)
 	if berr != nil {
 		// The RPC already wrote a queued record and its spec has been read and
@@ -328,8 +364,10 @@ func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts J
 		if rec, ok := activityRefusedJobRecord(opts.ID != "", env.ID, env.Job, db, berr); ok {
 			putFinishedJob(rec)
 		}
+
 		return engine.JobRecord{}, berr
 	}
+
 	env.Report = rep
 
 	rec := engine.JobRecord{ID: env.ID, Job: env.Job, DB: env.DB, State: engine.JobRunning, StartedAt: stamp(), InvocationID: os.Getenv("INVOCATION_ID"), PID: os.Getpid()}
@@ -340,35 +378,46 @@ func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts J
 	// until an owned cleanup retires them, so its exact terminal job record
 	// must survive history pruning too.
 	retain := env.Job == "restore" || env.Job == "recover" || env.Job == "restore-drill" || env.Job == "db-fork"
+
 	stateErr := jobUpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(env.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
 		}
+
 		if rec.CreatedAt == "" {
 			rec.CreatedAt = rec.StartedAt
 		}
+
 		st.PutJob(rec)
+
 		if retain {
 			st.RetainJob(rec.ID)
 		}
+
 		return nil
 	})
 	if stateErr != nil && retain {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, stateErr)
 		return rec, stateErr
 	}
+
 	if !leaseJob(env.Job) {
 		return rec, nil
 	}
+
 	installID, err := currentFollowInstance()
 	if err != nil {
 		finishJobWithActivity(rec, ja, engine.JobFailed, "", nil, err)
+
 		if env.Job == "restore" || env.Job == "recover" {
 			failRestore(env, err)
 		}
+
 		return rec, err
 	}
+
 	env.installID = installID
+
 	return rec, nil
 }
 
@@ -381,6 +430,7 @@ func runSpecialJob(ctx context.Context, job string, opts JobOptions, report engi
 	case quietJobs[job]:
 		return runQuietLockJob(ctx, job, opts, report, act, jaOut)
 	}
+
 	return nil, "", false, nil
 }
 
@@ -389,15 +439,20 @@ func runCertsRenewJob(ctx context.Context, job string, opts JobOptions, report e
 	if err != nil {
 		return nil, "", true, err
 	}
+
 	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), certsLockWait)
 	if engine.IsLockHeld(err) {
 		return skippedJob(ja, job, rep)
 	}
+
 	if err != nil {
 		return nil, "", true, err
 	}
+
 	defer release()
+
 	res, err := certsRenew(ctx, rep)
+
 	return res, "", true, err
 }
 
@@ -406,18 +461,22 @@ func runLocklessJob(ctx context.Context, job string, opts JobOptions, report eng
 	if err != nil {
 		return nil, "", true, err
 	}
+
 	cfg, err := config.LoadCluster(config.ClusterPath)
 	if err != nil {
 		return nil, "", true, err
 	}
+
 	if job == "fence-check" {
 		res, err := runFenceCheck(ctx, cfg, rep)
 		return res, "", true, err
 	}
+
 	res, err := runMasterBackup(ctx, cfg, rep, masterBackupOptions{debounce: true})
 	if err == nil && res.Skipped != "" {
 		ja.pending(activity.OutcomeSkipped, "", safeActivityToken(res.Skipped))
 	}
+
 	return res, "", true, err
 }
 
@@ -426,19 +485,25 @@ func runQuietLockJob(ctx context.Context, job string, opts JobOptions, report en
 	if err != nil {
 		return nil, "", true, err
 	}
+
 	release, err := engine.Acquire(ctx, engine.LockShared, job, rpc.NewRequestID(), 0)
 	if engine.IsLockHeld(err) {
 		return skippedJob(ja, job, rep)
 	}
+
 	if err != nil {
 		return nil, "", true, err
 	}
+
 	defer release()
+
 	cfg, err := config.LoadCluster(config.ClusterPath)
 	if err != nil {
 		return nil, "", true, err
 	}
+
 	res, err := runQuietJob(ctx, job, cfg, rep)
+
 	return res, "", true, err
 }
 
@@ -449,12 +514,14 @@ func beginSpecialActivity(ctx context.Context, job string, opts JobOptions, repo
 	// RunJob's finalizer as unknown, not vanish behind a nil activity.
 	*jaOut = ja
 	rep, err := ja.begin(ctx, report)
+
 	return ja, rep, err
 }
 
 func skippedJob(ja *jobActivity, job string, rep engine.Reporter) (any, string, bool, error) {
 	ja.pending(activity.OutcomeSkipped, output.CodePrecondition, "lock_held")
 	logLine(rep, job, "the node lock is busy; skipping "+job)
+
 	return map[string]any{"job": job, "skipped": "lock_busy"}, "the node lock was busy", true, nil
 }
 
@@ -465,35 +532,44 @@ func prepareJobEnv(ctx context.Context, job string, opts JobOptions, report engi
 	} else if err := loadJobSpec(ctx, env, opts, act); err != nil {
 		return nil, err
 	}
+
 	cfg, err := jobLoadCluster(config.ClusterPath)
 	if err != nil {
 		recordJobRefusal(ctx, act, job, env.ID, err, "config_error", timerRun(opts))
 		return nil, err
 	}
+
 	env.Cluster = cfg
 	if env.OperationID == "" {
 		env.OperationID = env.ID
 	}
+
 	if err := validateJobDatabase(ctx, env, opts, act); err != nil {
 		return nil, err
 	}
+
 	return env, nil
 }
 
 func loadJobSpec(ctx context.Context, env *jobEnv, opts JobOptions, act *activityRecorder) error {
-	var spec jobSpec
-	var err error
+	var (
+		spec jobSpec
+		err  error
+	)
 	if env.Job == "db-copy" {
 		spec, err = readCopyJobSpec(env.ID)
 	} else {
 		spec, err = jobReadSpec(env.ID)
 	}
+
 	if err != nil {
 		reason := jobSpecErrorReason(err)
 		if reason == "" {
 			reason = "job_spec_missing"
 		}
+
 		recordJobRefusal(ctx, act, env.Job, env.ID, err, reason, timerRun(opts))
+
 		if env.Job == "db-copy" {
 			// Consumption of the private spec is a definite pre-execution
 			// refusal, not an ambiguous launch: no job function, config load,
@@ -502,15 +578,20 @@ func loadJobSpec(ctx context.Context, env *jobEnv, opts JobOptions, act *activit
 				engine.JobFailed, "private copy spec was not consumed", nil, err)
 			putFinishedJob(rec)
 		}
+
 		return err
 	}
+
 	if spec.Job != env.Job {
 		err := output.NewError(output.CodeUsage, "job "+env.ID+" is a "+spec.Job+" job, not "+env.Job, output.ExitUsage, "")
 		recordJobRefusal(ctx, act, env.Job, env.ID, err, "job_spec_mismatch", timerRun(opts))
+
 		return err
 	}
+
 	env.Params, env.Secrets = spec.Params, spec.Secrets
 	env.OperationID, env.ParentRequestID = spec.OperationID, spec.ParentRequestID
+
 	return nil
 }
 
@@ -518,18 +599,23 @@ func validateJobDatabase(ctx context.Context, env *jobEnv, opts JobOptions, act 
 	if !databaseJobs[env.Job] {
 		return nil
 	}
+
 	env.DB = jobDatabase(env)
 	if env.DB == "" {
 		err := output.NewError(output.CodeUsage, "job "+env.Job+" runs for one database", output.ExitUsage,
 			"Pass --db <database>, as the vaire-"+env.Job+"@<database> timer does.")
 		recordJobRefusal(ctx, act, env.Job, env.ID, err, "database_required", timerRun(opts))
+
 		return err
 	}
+
 	if _, ok := env.Cluster.ClusterByName(env.DB); !ok {
 		err := databaseNotFound(env.DB)
 		recordJobRefusal(ctx, act, env.Job, env.ID, err, "database_not_found", timerRun(opts))
+
 		return err
 	}
+
 	return nil
 }
 
@@ -538,8 +624,10 @@ func validateJobInvocation(ctx context.Context, job string, opts JobOptions, act
 		err := output.NewError(output.CodeUsage, "unknown job "+job, output.ExitUsage, "Use one of details.jobs.").
 			WithDetails(map[string]any{"jobs": jobNames})
 		recordJobRefusal(ctx, act, job, opts.ID, err, "unknown_job", timerRun(opts))
+
 		return err
 	}
+
 	if _, err := jobNodeStat(config.ClusterPath); errors.Is(err, os.ErrNotExist) {
 		err := output.NewError(
 			output.CodePrecondition,
@@ -548,13 +636,17 @@ func validateJobInvocation(ctx context.Context, job string, opts JobOptions, act
 			"vaire node run runs on the server. From your machine: vaire ssh --command 'sudo vaire node run "+job+"'",
 		).WithDetails(map[string]any{"reason": "not_a_node"})
 		recordJobRefusal(ctx, act, job, opts.ID, err, "not_a_node", timerRun(opts))
+
 		return err
 	}
+
 	if jobEffectiveUID() != 0 {
 		err := rootRequired("vaire node run")
 		recordJobRefusal(ctx, act, job, opts.ID, err, "root_required", timerRun(opts))
+
 		return err
 	}
+
 	return nil
 }
 
@@ -564,6 +656,7 @@ func activityJobID(id string) string {
 	if id != "" {
 		return id
 	}
+
 	return rpc.NewRequestID()
 }
 
@@ -610,6 +703,7 @@ func jobLockMode(env *jobEnv) engine.LockMode {
 	if exclusiveJobs[env.Job] || env.Job == "db-follow" || env.Job == "db-fork" {
 		return engine.LockExclusive
 	}
+
 	return engine.LockShared
 }
 
@@ -626,31 +720,41 @@ func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (*lockedJo
 	if err := validateJobLockParams(env); err != nil {
 		return nil, nil, err
 	}
-	var held []engine.Release
-	var heavy engine.Release
+
+	var (
+		held  []engine.Release
+		heavy engine.Release
+	)
+
 	releaseAll := func() {
-		for i := len(held) - 1; i >= 0; i-- {
-			held[i]()
+		for _, h := range slices.Backward(held) {
+			h()
 		}
 	}
 	mode := jobLockMode(env)
+
 	release, err := locks.node(ctx, mode, env.Job, env.ID, 0)
 	if engine.IsLockHeld(err) {
 		return nil, &jobLockBusy{what: "the node lock", log: "the node lock is busy"}, nil
 	}
+
 	if err != nil {
 		return nil, nil, err
 	}
+
 	held = append(held, release)
+
 	if heavyIOJobs[env.Job] || maintHeavy(env) || env.Job == "recover" {
 		heavyRelease, busy, err := acquireHeavyJobLock(ctx, env, locks)
 		if err != nil || busy != nil {
 			releaseAll()
 			return nil, busy, err
 		}
+
 		heavy = sync.OnceFunc(heavyRelease)
 		held = append(held, heavy)
 	}
+
 	requests := jobLockRequests(env)
 	for _, request := range requests {
 		release, busy, err := acquireClusterJobLock(ctx, env, locks, request)
@@ -658,42 +762,53 @@ func takeJobLocks(ctx context.Context, env *jobEnv, locks jobLockers) (*lockedJo
 			releaseAll()
 			return nil, busy, err
 		}
+
 		held = append(held, release)
 	}
+
 	return newLockedJobLease(env, requests, heavy, releaseAll), nil, nil
 }
 
 func acquireHeavyJobLock(ctx context.Context, env *jobEnv, locks jobLockers) (engine.Release, *jobLockBusy, error) {
-	var release engine.Release
-	var err error
+	var (
+		release engine.Release
+		err     error
+	)
 	if env.Job == "recover" && locks.heavyWait != nil {
 		release, err = locks.heavyWait(ctx, env.Job, env.ID, recoverHeavyIOWait)
 	} else {
 		release, err = locks.heavyIO(ctx, env.Job, env.ID)
 	}
+
 	if env.Job == "recover" && err != nil {
 		return nil, nil, err
 	}
+
 	if engine.IsLockHeld(err) {
 		return nil, &jobLockBusy{what: "the heavy-I/O lock", log: "another backup job holds the heavy-I/O lock",
 			fields: map[string]any{"lock": "heavy_io", "db": env.DB}}, nil
 	}
+
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return release, nil, nil
 }
 
 func acquireClusterJobLock(ctx context.Context, env *jobEnv, locks jobLockers, request jobLockRequest) (engine.Release, *jobLockBusy, error) {
 	cluster := request.name
+
 	release, err := locks.cluster(ctx, cluster, request.mode, env.Job, env.ID, 0)
 	if engine.IsLockHeld(err) {
 		return nil, &jobLockBusy{what: "the lock of " + cluster, log: "the lock of " + cluster + " is busy",
 			fields: map[string]any{"cluster": cluster}}, nil
 	}
+
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return release, nil, nil
 }
 
@@ -708,9 +823,12 @@ func acquireJobLocks(ctx context.Context, env *jobEnv, rec *engine.JobRecord, wa
 	if busy == nil || err != nil || !wait {
 		return release, busy, err
 	}
+
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
 	deadline := time.Now().Add(jobLockWait)
+
 	waitingFor := ""
 	for {
 		if busy.what != waitingFor {
@@ -719,21 +837,27 @@ func acquireJobLocks(ctx context.Context, env *jobEnv, rec *engine.JobRecord, wa
 			rec.Detail = "waiting for " + busy.what
 			putJob(*rec)
 		}
+
 		select {
 		case <-ctx.Done():
 			return nil, busy, ctx.Err()
 		case <-time.After(jobLockPoll):
 		}
+
 		release, next, err := tryJobLocks(ctx, env)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		if next == nil {
 			logLine(env.Report, env.Job, "got the locks; starting "+env.Job)
+
 			rec.Detail = ""
 			putJob(*rec)
+
 			return release, nil, nil
 		}
+
 		busy = next
 		if !time.Now().Before(deadline) {
 			return nil, busy, nil
@@ -747,7 +871,9 @@ func putJob(rec engine.JobRecord) {
 		if old, ok := st.Job(rec.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
 		}
+
 		st.PutJob(rec)
+
 		return nil
 	})
 }
@@ -811,6 +937,7 @@ func runJobFunc(ctx context.Context, env *jobEnv) (any, error) {
 	case "recover":
 		return jobRecover(ctx, env)
 	}
+
 	return nil, fmt.Errorf("job %s has no implementation", env.Job)
 }
 
@@ -821,10 +948,12 @@ func runQuietJob(ctx context.Context, job string, cfg config.Cluster, report eng
 		if err := refreshMetrics(ctx, cfg); err != nil {
 			return nil, err
 		}
+
 		return map[string]any{"job": job, "refreshed": true}, nil
 	case "doctor":
 		return runDoctorJob(ctx, cfg, report)
 	}
+
 	return nil, fmt.Errorf("job %s has no implementation", job)
 }
 
@@ -842,6 +971,7 @@ func finishJobWithActivity(rec engine.JobRecord, ja *jobActivity, state, detail 
 	if ja != nil {
 		ja.recorded = true
 	}
+
 	rec.ActivityPending = ja != nil && !ja.finished
 	finishJob(rec, state, detail, res, cause)
 }
@@ -877,6 +1007,7 @@ func jobObservationFailure(id string) error {
 func crashedJobRecord(rec engine.JobRecord) engine.JobRecord {
 	body := output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result",
 		Hint: "Read journalctl -u " + rec.Unit + " on the node.", Details: map[string]any{"reason": JobOutcomeUnknown}}
+
 	return finishedJobRecord(rec, engine.JobFailed, "ended without a result", nil, &output.CLIError{
 		Code: body.Code, Message: body.Message, Hint: body.Hint, Details: body.Details,
 	})
@@ -889,23 +1020,28 @@ var putCrashedJobState = engine.UpdateState
 
 func putCrashedJobIfUnfinished(rec engine.JobRecord) (engine.JobRecord, bool) {
 	current, updated := rec, false
+
 	err := putCrashedJobState(func(st *engine.State) error {
 		cur, ok := st.Job(rec.ID)
 		if !ok {
 			return nil
 		}
+
 		current = cur
 		if cur.Final() || !sameJobAttempt(cur, rec) {
 			return nil
 		}
+
 		crashed := crashedJobRecord(cur)
 		st.PutJob(crashed)
 		current, updated = crashed, true
+
 		return nil
 	})
 	if err != nil {
 		return rec, false
 	}
+
 	return current, updated
 }
 
@@ -913,12 +1049,15 @@ func sameJobAttempt(current, expected engine.JobRecord) bool {
 	if current.ID != expected.ID || current.Job != expected.Job || current.Unit != expected.Unit || current.State != expected.State {
 		return false
 	}
+
 	if expected.StartedAt != "" && current.StartedAt != expected.StartedAt {
 		return false
 	}
+
 	if expected.PID != 0 && current.PID != expected.PID {
 		return false
 	}
+
 	return true
 }
 
@@ -926,17 +1065,20 @@ func sameJobAttempt(current, expected engine.JobRecord) bool {
 // without writing state, so callers can test refusal bookkeeping safely.
 func finishedJobRecord(rec engine.JobRecord, state, detail string, res any, cause error) engine.JobRecord {
 	rec.State, rec.Detail, rec.FinishedAt = state, detail, stamp()
+
 	if res != nil {
 		if raw, err := json.Marshal(secrets.RedactValue(res)); err == nil {
 			rec.Result = raw
 		}
 	}
+
 	if cause != nil {
 		failure := output.Fail(nil, cause)
 		body := failure.Error
 		body.Message = secrets.Redact(body.Message)
 		rec.Error = &body
 	}
+
 	return rec
 }
 
@@ -947,8 +1089,10 @@ func activityRefusedJobRecord(existing bool, id, job, db string, cause error) (e
 	if !existing || id == "" {
 		return engine.JobRecord{}, false
 	}
+
 	rec := finishedJobRecord(engine.JobRecord{ID: id, Job: job, DB: db},
 		engine.JobFailed, "activity history unavailable", nil, cause)
+
 	return rec, true
 }
 
@@ -962,7 +1106,9 @@ func putFinishedJob(rec engine.JobRecord) {
 				rec.DB = old.DB
 			}
 		}
+
 		st.PutJob(rec)
+
 		return nil
 	})
 }
@@ -985,32 +1131,45 @@ func readJobSpecAt(dir, id string, requireUnlink bool) (jobSpec, error) {
 	if !validJobID(id) {
 		return jobSpec{}, output.NewError(output.CodeUsage, "job id "+id+" is not a ULID", output.ExitUsage, "")
 	}
+
 	path := filepath.Join(dir, id+".json")
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return jobSpec{}, output.NewError(output.CodePrecondition, "job "+id+" has no spec", output.ExitPrecondition,
 			"Start jobs from their operator command.").WithDetails(map[string]any{"reason": "job_not_found", "job_id": id})
 	}
+
 	var spec jobSpec
+
 	if !requireUnlink {
 		_ = os.Remove(path)
+
 		if err := json.Unmarshal(raw, &spec); err != nil {
 			return jobSpec{}, err
 		}
+
 		registerJobSpecSecrets(spec)
+
 		return spec, nil
 	}
+
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		// Even a partially decoded spec may already have exposed a secret in
 		// the prior process; register what is available before diagnostics.
 		registerJobSpecSecrets(spec)
+
 		removeErr := os.Remove(path)
+
 		return spec, copySpecInvalidError(id, removeErr)
 	}
+
 	registerJobSpecSecrets(spec)
+
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return spec, copySpecUnlinkError(id)
 	}
+
 	return spec, nil
 }
 
@@ -1032,8 +1191,10 @@ func jobSpecErrorReason(err error) string {
 	if !errors.As(err, &cliErr) {
 		return ""
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
+
 	return reason
 }
 
@@ -1042,6 +1203,7 @@ func copySpecInvalidError(id string, cleanup error) error {
 	if cleanup != nil && !errors.Is(cleanup, fs.ErrNotExist) {
 		details["spec_cleanup_failed"] = true
 	}
+
 	return output.NewError(output.CodeSecrets,
 		"the copy job's private spec is invalid", output.ExitSecrets,
 		"No copy work was started; inspect the private spec as root if it remains.").
@@ -1052,11 +1214,13 @@ func validJobID(id string) bool {
 	if len(id) != 26 {
 		return false
 	}
+
 	for _, r := range id {
 		if !strings.ContainsRune("0123456789ABCDEFGHJKMNPQRSTVWXYZ", r) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -1068,44 +1232,59 @@ func jobUnit(id string) string { return "vaire-job-" + id + ".service" }
 // without stopping the work. The job ID is the request ID.
 func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets map[string]string) (string, error) {
 	id := env.Req.RequestID
+
 	operationID := env.Req.OperationID
 	if operationID == "" {
 		operationID = id
 	}
+
 	spec := jobSpec{Job: job, Secrets: jobSecrets, OperationID: operationID, ParentRequestID: env.Req.RequestID}
+
 	if params != nil {
 		raw, err := json.Marshal(params)
 		if err != nil {
 			return "", err
 		}
+
 		spec.Params = raw
 	}
+
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		return "", err
 	}
+
 	if err := os.MkdirAll(JobDir, 0o700); err != nil {
 		return "", err
 	}
+
 	if err := engine.WriteFileAtomic(filepath.Join(JobDir, id+".json"), raw, 0o600); err != nil {
 		return "", err
 	}
+
 	unit := jobUnit(id)
+
 	if err := engine.UpdateState(func(st *engine.State) error {
 		st.PutJob(engine.JobRecord{ID: id, Job: job, DB: rpcJobDatabase(job, spec.Params), Unit: unit, State: engine.JobQueued, CreatedAt: stamp()})
+
 		if job == "restore" || job == "recover" || job == "restore-drill" {
 			st.RetainJob(id)
 		}
+
 		return nil
 	}); err != nil {
 		return "", err
 	}
+
 	if err := launchJobUnit(ctx, env, unit, job, id); err != nil {
 		_ = os.Remove(filepath.Join(JobDir, id+".json"))
 		finishJob(engine.JobRecord{ID: id, Job: job, Unit: unit}, engine.JobFailed, "systemd-run failed", nil, err)
+
 		return "", output.WrapError(output.CodeExternalCommand, fmt.Errorf("starting the job unit: %w", err), output.ExitExternal, "")
 	}
+
 	env.Report(output.Event{Type: "progress", Phase: "job", Detail: id, Message: "job " + id + " started as " + unit})
+
 	return id, nil
 }
 
@@ -1114,6 +1293,7 @@ func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets 
 // decide what a failure means.
 func launchJobUnit(ctx context.Context, env *Env, unit, job, id string) error {
 	sh := engine.Shell{Secrets: secrets.Default, Log: env.Log}
+
 	return sh.Exec(ctx, "job", engine.Command{Name: "systemd-run", Args: []string{
 		"--unit=" + strings.TrimSuffix(unit, ".service"), "--description=vaire " + job, "--collect",
 		"--property=After=postgresql.service", "--property=Nice=10",
@@ -1142,10 +1322,11 @@ func jobObservation(err error) error {
 	if err == nil {
 		return nil
 	}
-	var observed *jobObservationError
-	if errors.As(err, &observed) {
+
+	if _, ok := errors.AsType[*jobObservationError](err); ok {
 		return err
 	}
+
 	return &jobObservationError{err: err}
 }
 
@@ -1157,10 +1338,12 @@ func finalJobRecord(id string) (engine.JobRecord, bool) {
 	if err != nil {
 		return engine.JobRecord{}, false
 	}
+
 	rec, ok := st.Job(id)
 	if !ok || !rec.Final() {
 		return engine.JobRecord{}, false
 	}
+
 	return rec, true
 }
 
@@ -1179,10 +1362,13 @@ func waitJobEvidence(ctx context.Context, rec engine.JobRecord) (engine.JobRecor
 	if !rec.ActivityPending || rec.ID == "" {
 		return rec, false
 	}
+
 	deadline := time.NewTimer(jobEvidenceWait)
 	defer deadline.Stop()
+
 	ticker := time.NewTicker(jobEvidencePoll)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1191,13 +1377,16 @@ func waitJobEvidence(ctx context.Context, rec engine.JobRecord) (engine.JobRecor
 			return rec, rec.ActivityPending
 		case <-ticker.C:
 		}
+
 		st, err := loadJobState()
 		if err != nil {
 			continue
 		}
+
 		if next, ok := st.Job(rec.ID); ok {
 			rec = next
 		}
+
 		if !rec.ActivityPending {
 			return rec, false
 		}
@@ -1206,6 +1395,7 @@ func waitJobEvidence(ctx context.Context, rec engine.JobRecord) (engine.JobRecor
 
 func awaitJobRecord(ctx context.Context, id string, rec engine.JobRecord) (engine.JobRecord, error) {
 	inactiveSince := time.Time{}
+
 	for !rec.Final() {
 		select {
 		case <-ctx.Done():
@@ -1217,15 +1407,19 @@ func awaitJobRecord(ctx context.Context, id string, rec engine.JobRecord) (engin
 				rec = final
 				continue
 			}
+
 			return rec, jobObservation(ctx.Err())
 		case <-time.After(jobFollowPoll):
 		}
+
 		var err error
+
 		rec, err = refreshFollowedJob(ctx, id, rec, &inactiveSince)
 		if err != nil {
 			return rec, err
 		}
 	}
+
 	return rec, nil
 }
 
@@ -1234,18 +1428,23 @@ func refreshFollowedJob(ctx context.Context, id string, rec engine.JobRecord, in
 	if err != nil {
 		return rec, jobObservation(err)
 	}
+
 	if r, ok := st.Job(id); ok {
 		rec = r
 	}
+
 	if rec.Final() {
 		return rec, nil
 	}
+
 	if rec.Job == "db-copy" {
 		return refreshCopyJob(ctx, rec, inactiveSince), nil
 	}
+
 	if rec.Unit == "" {
 		return refreshLocalJob(ctx, id, rec), nil
 	}
+
 	return refreshUnitJob(ctx, rec, inactiveSince), nil
 }
 
@@ -1258,19 +1457,24 @@ func refreshCopyJob(ctx context.Context, rec engine.JobRecord, inactiveSince *ti
 			*inactiveSince = time.Now()
 			return rec
 		}
+
 		grace := 15 * time.Second
 		if rec.State == engine.JobQueued {
 			grace *= 4
 		}
+
 		if time.Since(*inactiveSince) <= grace {
 			return rec
 		}
+
 		next, updated := putCrashedJobIfUnfinished(rec)
 		if !updated {
 			*inactiveSince = time.Time{}
 		}
+
 		return next
 	}
+
 	return rec
 }
 
@@ -1279,36 +1483,45 @@ func refreshLocalJob(ctx context.Context, id string, rec engine.JobRecord) engin
 	if reapJobs(ctx, id) != nil {
 		return rec
 	}
+
 	st, err := loadJobState()
 	if err != nil {
 		return rec
 	}
+
 	if r, ok := st.Job(id); ok {
 		return r
 	}
+
 	return rec
 }
 
 func refreshUnitJob(ctx context.Context, rec engine.JobRecord, inactiveSince *time.Time) engine.JobRecord {
 	// A unit that ended without recording a result crashed.
 	out, _ := exec.CommandContext(ctx, "systemctl", "is-active", rec.Unit).Output() //nolint:gosec // G204: the unit name is vaire-job-<validated id>.
+
 	state := strings.TrimSpace(string(out))
 	if state == "active" || state == "activating" {
 		return rec
 	}
+
 	if inactiveSince.IsZero() {
 		*inactiveSince = time.Now()
 		return rec
 	}
+
 	grace := 15 * time.Second
 	if rec.State == engine.JobQueued {
 		grace *= 4
 	}
+
 	if time.Since(*inactiveSince) <= grace {
 		return rec
 	}
+
 	rec = crashedJobRecord(rec)
 	putFinishedJob(rec)
+
 	return rec
 }
 
@@ -1319,12 +1532,15 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 	if err != nil {
 		return Result{}, jobObservation(err)
 	}
+
 	rec, ok := st.Job(id)
 	if !ok {
 		return Result{}, output.NewError(output.CodePrecondition, "there is no job "+id, output.ExitPrecondition,
 			"List the jobs with vaire job list.").WithDetails(map[string]any{"reason": "job_not_found", "job_id": id})
 	}
+
 	args := []string{"-o", "cat", "--no-pager", "-n", "all"}
+
 	switch {
 	case rec.Unit != "":
 		args = append(args, "-u", rec.Unit)
@@ -1333,21 +1549,28 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 	default:
 		args = nil
 	}
+
 	if !rec.Final() && args != nil {
 		args = append(args, "-f")
 	}
+
 	jctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
 	done := make(chan struct{})
+
 	var warnings jobWarningCollector
+
 	if args != nil {
 		go func() {
 			defer close(done)
+
 			streamJournal(jctx, args, warnings.reporter(env.Report))
 		}()
 	} else {
 		close(done)
 	}
+
 	rec, err = awaitJobRecord(ctx, id, rec)
 	if err != nil {
 		return Result{}, err
@@ -1366,6 +1589,7 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 	if slices.Contains(args, "-f") {
 		catchUp = 2 * time.Second
 	}
+
 	if args != nil {
 		select {
 		case <-done:
@@ -1373,23 +1597,30 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 		case <-time.After(catchUp):
 		}
 	}
+
 	cancel()
 	// The job is over: never let the journal reader hold the reply.
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 	}
+
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	for _, warning := range cleanupCopyJobSpecs(cleanupCtx, engine.State{Jobs: []engine.JobRecord{rec}}) {
 		env.Report(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
 	}
+
 	cleanupCancel()
+
 	res, err := jobOutcome(rec)
+
 	all := mergeJobWarnings(rec.Warnings, warnings.list())
 	if err != nil {
 		return res, attachJobWarnings(err, all)
 	}
+
 	res.Warnings = append(res.Warnings, all...)
+
 	return res, nil
 }
 
@@ -1400,12 +1631,15 @@ func attachJobWarnings(err error, warnings []output.Warning) error {
 	if len(warnings) == 0 {
 		return err
 	}
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		return err
 	}
+
 	copied := *cliErr
 	copied.Warnings = mergeJobWarnings(cliErr.Warnings, warnings)
+
 	return &copied
 }
 
@@ -1419,10 +1653,12 @@ func jobOutcome(rec engine.JobRecord) (Result, error) {
 			"Another vaire operation or backup holds the lock; retry when it has finished.").
 			WithDetails(map[string]any{"reason": "lock_held", "job_id": rec.ID, "result": rec.Result})
 	}
+
 	body := output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " failed"}
 	if rec.Error != nil {
 		body = *rec.Error
 	}
+
 	return Result{}, &output.CLIError{
 		Code:     body.Code,
 		Message:  body.Message,
@@ -1437,16 +1673,17 @@ func jobOutcome(rec engine.JobRecord) (Result, error) {
 // details.step); details that aren't an object stay under error_details.
 func jobErrorDetails(rec engine.JobRecord, details any) map[string]any {
 	out := map[string]any{}
+
 	switch d := details.(type) {
 	case map[string]any:
-		for k, v := range d {
-			out[k] = v
-		}
+		maps.Copy(out, d)
 	case nil:
 	default:
 		out["error_details"] = d
 	}
+
 	out["job_id"], out["job"] = rec.ID, rec.Job
+
 	return out
 }
 
@@ -1455,21 +1692,26 @@ func jobErrorDetails(rec engine.JobRecord, details any) map[string]any {
 func streamJournal(ctx context.Context, args []string, report engine.Reporter) {
 	cmd := exec.CommandContext(ctx, "journalctl", args...)
 	cmd.WaitDelay = time.Second
+
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return
 	}
+
 	if err := cmd.Start(); err != nil {
 		return
 	}
+
 	sc := bufio.NewScanner(out)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+
 	var f journalFilter
 	for sc.Scan() {
 		if ev, ok := f.event(sc.Text()); ok {
 			report(ev)
 		}
 	}
+
 	_ = cmd.Wait()
 }
 
@@ -1490,12 +1732,15 @@ func (f *journalFilter) event(line string) (output.Event, bool) {
 		if line == "}" {
 			f.inEnvelope = false
 		}
+
 		return output.Event{}, false
 	}
+
 	if line == "{" {
 		f.inEnvelope = true
 		return output.Event{}, false
 	}
+
 	var ev output.Event
 	if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &ev) == nil && ev.Schema == output.EventSchema {
 		if ev.Type == "result" || ev.Type == "" {
@@ -1505,13 +1750,16 @@ func (f *journalFilter) event(line string) (output.Event, bool) {
 		// occurrence time in activity or the follower's output.
 		return ev, true
 	}
+
 	if strings.HasPrefix(line, "{") && strings.Contains(line, `"schema":"vaire/v1"`) {
 		// A compact final envelope.
 		return output.Event{}, false
 	}
+
 	if journalNoise(line) {
 		return output.Event{}, false
 	}
+
 	return output.Event{Type: "log", Step: "job", Line: line}, true
 }
 
@@ -1542,29 +1790,34 @@ func handleJobFollow(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	id := strings.ToUpper(p.ID)
 	if !validJobID(id) {
 		return Result{}, output.NewError(output.CodeUsage, "job id "+p.ID+" is not a job id", output.ExitUsage, "List the jobs with vaire job list.")
 	}
+
 	res, err := followJob(ctx, env, id)
-	var observed *jobObservationError
-	if errors.As(err, &observed) {
+	if _, ok := errors.AsType[*jobObservationError](err); ok {
 		return Result{}, jobObservationFailure(id)
 	}
+
 	return res, err
 }
 
 func handleJobList(ctx context.Context, _ *Env) (Result, error) {
 	_ = reapJobs(ctx, "")
 	warnings := pruneCopyWorkspaces(ctx)
+
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return Result{}, err
 	}
+
 	jobs := make([]engine.JobRecord, 0, len(st.Jobs))
-	for i := len(st.Jobs) - 1; i >= 0; i-- {
-		jobs = append(jobs, st.Jobs[i])
+	for _, v := range slices.Backward(st.Jobs) {
+		jobs = append(jobs, v)
 	}
+
 	return Result{Data: map[string]any{"jobs": jobs}, Warnings: warnings}, nil
 }
 
@@ -1587,11 +1840,13 @@ func reapJobs(ctx context.Context, id string) error {
 			if rec.Final() || id != "" && rec.ID != id {
 				continue
 			}
+
 			rec, ok := reapJobRecord(ctx, st, rec)
 			if ok {
 				st.PutJob(rec)
 			}
 		}
+
 		return nil
 	})
 }
@@ -1600,16 +1855,19 @@ func jobsAndRetained(st engine.State) []engine.JobRecord {
 	jobs := append([]engine.JobRecord(nil), st.Jobs...)
 	for key, rec := range st.RetainedJobs {
 		found := false
+
 		for _, j := range jobs {
 			if j.ID == key {
 				found = true
 				break
 			}
 		}
+
 		if !found {
 			jobs = append(jobs, rec)
 		}
 	}
+
 	return jobs
 }
 
@@ -1619,18 +1877,22 @@ func reapJobRecord(ctx context.Context, st *engine.State, rec engine.JobRecord) 
 			return rec, false
 		}
 	}
+
 	var gone bool
 	if rec.Job == "db-copy" {
 		gone = copyWorkspaceInactive(ctx, rec)
 	} else {
 		gone = reapJobGone(ctx, rec)
 	}
+
 	if !gone {
 		return rec, false
 	}
+
 	rec.State, rec.Detail, rec.FinishedAt = engine.JobFailed, "ended without a result", stamp()
 	rec.Error = &output.ErrorBody{Code: output.CodeError, Message: "job " + rec.ID + " ended without recording a result", Hint: jobLogHint(rec),
 		Details: map[string]any{"reason": JobOutcomeUnknown}}
+
 	return rec, true
 }
 
@@ -1641,23 +1903,28 @@ func jobGone(ctx context.Context, rec engine.JobRecord) bool {
 	if rec.PID > 0 {
 		return !jobProcessAlive(rec.PID, rec.Job)
 	}
+
 	unit, invocation := rec.Unit, ""
 	if unit == "" && rec.InvocationID != "" {
 		unit, invocation = timerUnit(rec), rec.InvocationID
 	}
+
 	if unit == "" {
 		return false
 	}
+
 	if rec.State == engine.JobQueued {
 		created, err := time.Parse(time.RFC3339, rec.CreatedAt)
 		if err != nil || time.Since(created) < queuedGrace {
 			return false
 		}
 	}
+
 	active, current, ok := unitState(ctx, unit)
 	if !ok {
 		return false
 	}
+
 	return !active || invocation != "" && current != invocation
 }
 
@@ -1667,10 +1934,12 @@ func jobProcessAlive(pid int, job string) bool {
 	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
+
 	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return !errors.Is(err, os.ErrNotExist)
 	}
+
 	return strings.Contains(string(cmdline), "\x00node\x00run\x00"+job+"\x00") || strings.HasSuffix(string(cmdline), "\x00node\x00run\x00"+job)
 }
 
@@ -1682,6 +1951,7 @@ func timerUnit(rec engine.JobRecord) string {
 	case rec.Job == "stanza-expiry":
 		return "vaire-stanza-expiry.service"
 	}
+
 	return ""
 }
 
@@ -1692,6 +1962,7 @@ func unitState(ctx context.Context, unit string) (active bool, invocation string
 	if err != nil {
 		return false, "", false
 	}
+
 	for line := range strings.SplitSeq(string(out), "\n") {
 		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
 		switch key {
@@ -1701,6 +1972,7 @@ func unitState(ctx context.Context, unit string) (active bool, invocation string
 			invocation = value
 		}
 	}
+
 	return active, invocation, true
 }
 
@@ -1712,6 +1984,7 @@ func jobLogHint(rec engine.JobRecord) string {
 	case rec.InvocationID != "":
 		return "Read journalctl _SYSTEMD_INVOCATION_ID=" + rec.InvocationID + " on the node."
 	}
+
 	return ""
 }
 
@@ -1722,11 +1995,13 @@ func jobLogHint(rec engine.JobRecord) string {
 // rebuilt master, which has no service password files yet).
 func stepSecrets(req map[string]string) map[string]string {
 	out := map[string]string{}
+
 	for _, key := range steps.StepSecrets {
 		if v := req[key]; v != "" {
 			out[key] = v
 		}
 	}
+
 	return out
 }
 
@@ -1736,6 +2011,7 @@ func runJobRPC(ctx context.Context, env *Env, job string, params any, jobSecrets
 	if err != nil {
 		return Result{}, err
 	}
+
 	return followJob(ctx, env, id)
 }
 
@@ -1745,12 +2021,14 @@ func jobDatabase(env *jobEnv) string {
 	if env.DB != "" {
 		return env.DB
 	}
+
 	var p struct {
 		Database string `json:"database"`
 	}
 	if len(env.Params) > 0 {
 		_ = json.Unmarshal(env.Params, &p)
 	}
+
 	return p.Database
 }
 
@@ -1766,6 +2044,7 @@ func rpcJobDatabase(job string, params json.RawMessage) string {
 	if len(params) > 0 {
 		_ = json.Unmarshal(params, &p)
 	}
+
 	switch job {
 	case "restore", "recover":
 		return p.Database
@@ -1776,6 +2055,7 @@ func rpcJobDatabase(job string, params json.RawMessage) string {
 	case "maint":
 		return p.DB
 	}
+
 	return ""
 }
 
@@ -1791,11 +2071,13 @@ func jobClusters(env *jobEnv) []string {
 	if len(env.Params) > 0 {
 		_ = json.Unmarshal(env.Params, &p)
 	}
+
 	var names []string
 	// A copy's target is not configured yet, but its cluster lock is taken
 	// anyway: the name must be serialized against another copy and against
 	// every later configuration writer before the job can create it.
 	includeUnconfigured := false
+
 	switch {
 	case databaseJobs[env.Job]:
 		names = []string{env.DB}
@@ -1811,17 +2093,22 @@ func jobClusters(env *jobEnv) []string {
 		names = []string{p.Name}
 		includeUnconfigured = true
 	}
+
 	var out []string
+
 	for _, name := range names {
 		if name == "" {
 			continue
 		}
+
 		if _, ok := env.Cluster.ClusterByName(name); ok || includeUnconfigured {
 			if !slices.Contains(out, name) {
 				out = append(out, name)
 			}
 		}
 	}
+
 	slices.Sort(out)
+
 	return out
 }

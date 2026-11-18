@@ -36,6 +36,7 @@ func newJobActivity(rec *activityRecorder, job, id, operationID, parentRequestID
 	if !rpcStarted {
 		scope.requestID = ""
 	}
+
 	return &jobActivity{scope: scope, important: important}
 }
 
@@ -46,19 +47,24 @@ func (a *jobActivity) begin(ctx context.Context, report engine.Reporter) (engine
 	if a == nil || a.scope == nil {
 		return report, nil
 	}
+
 	a.base = report
+
 	var err error
 	if a.important {
 		err = a.scope.beginChecked(ctx)
 	} else {
 		err = a.scope.begin(ctx)
 	}
+
 	if err != nil {
 		a.warn()
+
 		if a.important {
 			return report, activityUnavailableError()
 		}
 	}
+
 	return a.scope.recorder(ctx, report), nil
 }
 
@@ -68,6 +74,7 @@ func (a *jobActivity) pending(outcome, code, reason string) {
 	if a == nil {
 		return
 	}
+
 	a.pendingOutcome, a.pendingCode, a.pendingReason = outcome, code, reason
 }
 
@@ -76,16 +83,20 @@ func (a *jobActivity) finish(ctx context.Context, outcome, code, reason string) 
 	if a == nil || a.finished {
 		return
 	}
+
 	a.finished = true
 	if a.scope == nil {
 		return
 	}
+
 	if outcome == "" {
 		outcome, code, reason = a.pendingOutcome, a.pendingCode, a.pendingReason
 	}
+
 	if outcome == "" {
 		outcome = activity.OutcomeUnknown
 	}
+
 	if err := a.scope.finish(ctx, outcome, code, reason); err != nil {
 		a.warn()
 	}
@@ -98,6 +109,7 @@ func (a *jobActivity) warn() {
 	if a == nil || a.warned || a.base == nil {
 		return
 	}
+
 	a.warned = true
 	a.base(activityWarningEvent())
 }
@@ -126,6 +138,7 @@ func (c *jobWarningCollector) reporter(next engine.Reporter) engine.Reporter {
 			c.warnings = append(c.warnings, output.Warning{Code: ev.Code, Message: ev.Message})
 			c.mu.Unlock()
 		}
+
 		if next != nil {
 			next(ev)
 		}
@@ -135,6 +148,7 @@ func (c *jobWarningCollector) reporter(next engine.Reporter) engine.Reporter {
 func (c *jobWarningCollector) list() []output.Warning {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return append([]output.Warning(nil), c.warnings...)
 }
 
@@ -147,6 +161,7 @@ func finishRunJobActivity(ctx context.Context, ja *jobActivity, err error, skipp
 	if ja == nil {
 		return
 	}
+
 	if !ja.finished {
 		if recovered != nil {
 			ja.finish(ctx, activity.OutcomeUnknown, output.CodeError, "panic")
@@ -165,9 +180,11 @@ func finishRunJobActivity(ctx context.Context, ja *jobActivity, err error, skipp
 					outcome = activity.OutcomeSucceeded
 				}
 			}
+
 			ja.finish(ctx, outcome, code, reason)
 		}
 	}
+
 	if !ja.settle() {
 		ja.warn()
 	}
@@ -191,11 +208,13 @@ var (
 // is already held by goroutines waiting on the state file.
 func acquireJobSettler() bool {
 	limit := atomic.LoadInt64(&jobSettleCap)
+
 	for {
 		live := jobSettlesLive.Load()
 		if live >= limit {
 			return false
 		}
+
 		if jobSettlesLive.CompareAndSwap(live, live+1) {
 			return true
 		}
@@ -214,16 +233,22 @@ func (a *jobActivity) settle() bool {
 	if a == nil || !a.recorded || a.scope == nil || a.scope.jobID == "" {
 		return true
 	}
+
 	if !acquireJobSettler() {
 		return false
 	}
+
 	done := make(chan error, 1)
+
 	go func() {
 		defer releaseJobSettler()
+
 		done <- settleJobRecord(a.scope.jobID, a.scope.lostEvidence())
 	}()
+
 	timer := time.NewTimer(jobSettleWait)
 	defer timer.Stop()
+
 	select {
 	case err := <-done:
 		return err == nil
@@ -239,16 +264,20 @@ func (a *jobActivity) settle() bool {
 var settleJobRecord = func(id string, lost bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), jobSettleWait)
 	defer cancel()
+
 	return engine.UpdateStateWithin(ctx, func(st *engine.State) error {
 		rec, ok := st.Job(id)
 		if !ok {
 			return nil
 		}
+
 		rec.ActivityPending = false
 		if lost {
 			rec.Warnings = mergeJobWarnings(rec.Warnings, []output.Warning{activityWarning()})
 		}
+
 		st.PutJob(rec)
+
 		return nil
 	})
 }
@@ -256,19 +285,23 @@ var settleJobRecord = func(id string, lost bool) error {
 // mergeJobWarnings joins two bounded warning lists without duplicates.
 func mergeJobWarnings(a, b []output.Warning) []output.Warning {
 	out := make([]output.Warning, 0, len(a)+len(b))
+
 	seen := make(map[output.Warning]bool, len(a)+len(b))
 	for _, group := range [][]output.Warning{a, b} {
 		for _, warning := range group {
 			if warning.Code == "" || warning.Message == "" || seen[warning] {
 				continue
 			}
+
 			seen[warning] = true
 			out = append(out, warning)
 		}
 	}
+
 	if len(out) == 0 {
 		return nil
 	}
+
 	return out
 }
 
@@ -277,14 +310,18 @@ func jobSkipReason(busy *jobLockBusy, err error) string {
 	if err != nil {
 		return "stopped"
 	}
+
 	if busy == nil {
 		return "job_skipped"
 	}
+
 	if busy.fields["lock"] == "heavy_io" {
 		return "heavy_io_lock_held"
 	}
+
 	if _, ok := busy.fields["cluster"]; ok {
 		return "cluster_lock_held"
 	}
+
 	return "lock_held"
 }

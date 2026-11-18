@@ -27,15 +27,20 @@ func TestCreateAndCopyAccessFailurePreventsPoolerExposure(t *testing.T) {
 	cfg.Clusters = append(cfg.Clusters, spec)
 	previous, err := cfg.Encode()
 	reject(t, err != nil, err)
+
 	oldKernel, oldNew, oldPooler, oldExists := createApplyKernel, createApplyNewCluster, createReloadPoolers, createClusterExists
+
 	t.Cleanup(func() {
 		createApplyKernel, createApplyNewCluster, createReloadPoolers, createClusterExists = oldKernel, oldNew, oldPooler, oldExists
 	})
+
 	createApplyKernel = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.ApplyData, []output.Warning, error) {
 		return engine.ApplyData{}, nil, nil
 	}
 	createClusterExists = func(context.Context, string) bool { return true }
+
 	var target string
+
 	createApplyNewCluster = func(_ context.Context, _ config.Cluster, _ engine.Runtime, name, _ string, _ engine.Reporter) error {
 		target = name
 		return errors.New("owned access failed")
@@ -45,6 +50,7 @@ func TestCreateAndCopyAccessFailurePreventsPoolerExposure(t *testing.T) {
 		exposed++
 		return nil
 	}
+
 	for _, copyMode := range []bool{false, true} {
 		env := &Env{Cluster: cfg, Req: rpc.Request{}}
 		_, _, err := provisionDatabase(context.Background(), env, cfg, previous, spec, createOptions{deferInitialBackup: copyMode})
@@ -65,6 +71,7 @@ func (s provisionStep) ID() string {
 	if s.cluster == "" {
 		return s.id
 	}
+
 	return engine.InstanceID(s.id, s.cluster)
 }
 func (s provisionStep) Instance(cluster string) engine.Step { s.cluster = cluster; return s }
@@ -80,6 +87,7 @@ func (s provisionStep) Apply(context.Context, config.Cluster, engine.Runtime, en
 	if s.id == "postgres-roles-v1" {
 		s.state.roles = true
 	}
+
 	return engine.ApplyResult{}, nil
 }
 
@@ -95,6 +103,7 @@ func (s provisionAccess) Check(context.Context, config.Cluster, engine.Runtime) 
 	if !s.state.roles {
 		return engine.CheckResult{}, errors.New("roles do not exist")
 	}
+
 	return engine.CheckResult{Complete: s.state.installed}, nil
 }
 func (s provisionAccess) Apply(context.Context, config.Cluster, engine.Runtime, engine.Reporter) (engine.ApplyResult, error) {
@@ -102,7 +111,9 @@ func (s provisionAccess) Apply(context.Context, config.Cluster, engine.Runtime, 
 	if s.state.fail {
 		return engine.ApplyResult{}, errors.New("transaction rolled back")
 	}
+
 	s.state.installed = true
+
 	return engine.ApplyResult{}, nil
 }
 
@@ -133,23 +144,30 @@ func TestOwnedProvisionStagesAndExactAuthorization(t *testing.T) {
 		provisionStep{id: "after-v1", state: state},
 	}
 	path := filepath.Join(t.TempDir(), "journal.json")
+
 	var stages [][]string
+
 	apply := func(ctx context.Context, catalog []engine.Step, cfg config.Cluster, rt engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		stages = append(stages, slices.Clone(opts.Only))
 		rejectf(t, opts.DB != "app" || opts.Confirm.Server || !opts.Confirm.Covers("app") || opts.Confirm.Covers("other"), "scope: %+v", opts)
+
 		for target, allowed := range opts.InternalAccess {
 			rejectf(t, !allowed || target != "app" || len(opts.InternalAccess) != 1, "internal authorization crossed targets: %v", opts.InternalAccess)
 		}
+
 		reject(t, len(stages) == 2 && !opts.InternalAccess["app"], "access stage not internally authorized")
 		opts.JournalPath = path
+
 		return engine.Apply(ctx, catalog, cfg, rt, opts)
 	}
 	err := provisionOwnedTargetWith(context.Background(), cfg, engine.Runtime{}, "app", "", nil, catalog, apply, nil)
 	reject(t, err != nil, err)
+
 	if len(stages) != 3 || !slices.Equal(stages[0], []string{"postgres-config-v1@app", "postgres-roles-v1@app"}) ||
 		!slices.Equal(stages[1], []string{"postgres-access-v1@app"}) || !slices.Equal(stages[2], []string{"after-v1@app"}) {
 		t.Fatalf("stages: %v", stages)
 	}
+
 	rejectf(t, !state.installed || !slices.Equal(state.events, []string{"postgres-config-v1", "postgres-roles-v1", "inspect", "inspect", "grant", "after-v1"}), "events: %v", state.events)
 }
 
@@ -167,16 +185,20 @@ func TestOwnedProvisionFailureStopsBeforeExposure(t *testing.T) {
 		return engine.Apply(ctx, catalog, cfg, rt, opts)
 	}
 	exposed := false
+
 	err := provisionOwnedTargetWith(context.Background(), cfg, engine.Runtime{}, "app", "", nil, catalog, apply, nil)
 	if err == nil {
 		exposed = true // callers expose only on success
 	}
+
 	rejectf(t, err == nil || exposed || state.installed || slices.Contains(state.events, "after-v1"), "failure exposed target: %v, %v", state.events, err)
 	j, err := engine.LoadJournal(path)
 	rejectf(t, err != nil || j.Steps["postgres-access-v1@app"].Status == engine.StatusCompleted, "failed grant journal: %+v, %v", j, err)
+
 	if err := provisionOwnedTargetWith(context.Background(), cfg, engine.Runtime{}, "standby", "", nil, catalog, apply, nil); err == nil {
 		t.Fatal("physical follower accepted for local access writes")
 	}
+
 	if err := provisionOwnedTargetWith(context.Background(), cfg, engine.Runtime{}, "app", "other", nil, catalog, apply, nil); err == nil {
 		t.Fatal("different recovery target accepted")
 	}
@@ -207,16 +229,22 @@ func TestBootstrapStagesOwnedTargetsBeforeSharedExposure(t *testing.T) {
 	}
 	oldView := engine.ClusterView
 	engine.ClusterView = nil
+
 	t.Cleanup(func() { engine.ClusterView = oldView })
-	var runs []string
-	var applied engine.ApplyData
-	var warnings []output.Warning
-	var runErr error
+
+	var (
+		runs     []string
+		applied  engine.ApplyData
+		warnings []output.Warning
+		runErr   error
+	)
+
 	runner := func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.ApplyData, []output.Warning, error) {
 		runs = append(runs, strings.Join(opts.Only, ","))
 		for name := range opts.InternalAccess {
 			rejectf(t, name != opts.DB || len(opts.InternalAccess) != 1, "internal access crosses target: %+v", opts)
 		}
+
 		return applied, warnings, runErr
 	}
 	owner := &bootstrapOwnership{Targets: map[string]bool{"app": false, "other": false}}
@@ -230,6 +258,7 @@ func TestBootstrapStagesOwnedTargetsBeforeSharedExposure(t *testing.T) {
 		if slices.Contains(opts.Only, "postgres-access-v1@other") {
 			return engine.ApplyData{}, nil, errors.New("access failed")
 		}
+
 		return runner(ctx, c, cfg, rt, opts)
 	}
 	_, _, err = bootstrapDatabaseSteps(context.Background(), cfg, engine.Runtime{}, nil, catalog, fail, nil, "", owner, complete)

@@ -26,7 +26,9 @@ func (m *Materialised) StandbyBaseBackup(ctx context.Context, slot string) error
 	if err := m.createOwnedData(ctx); err != nil {
 		return err
 	}
+
 	m.log("copying the live " + m.Source + " into " + m.Data + " through the slot " + slot)
+
 	if err := m.GuardOwnership(ctx, MaterialisationBaseBackup, func() error {
 		if err := runMaterialisedCommand(ctx, m, engine.Command{Name: "runuser", Args: []string{
 			"-u", "postgres", "--", pgBin + "/pg_basebackup", "-h", pgSocketDir, "-p", strconv.Itoa(m.SourcePort), "-U", "postgres",
@@ -34,13 +36,16 @@ func (m *Materialised) StandbyBaseBackup(ctx context.Context, slot string) error
 		}}); err != nil {
 			return wrapTool("pg_basebackup of "+m.Source, err)
 		}
+
 		return engine.WriteFileAtomicOwned(filepath.Join(m.Data, "standby.signal"), nil, 0o600, "postgres", "postgres")
 	}); err != nil {
 		return err
 	}
+
 	if err := m.registerOwned(ctx); err != nil {
 		return err
 	}
+
 	return m.GuardOwnership(ctx, MaterialisationStart, func() error { return m.start(ctx) })
 }
 
@@ -62,6 +67,7 @@ func RestartCluster(ctx context.Context, sh engine.Shell, stepID string, report 
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("restart %s: %w", name, err), output.ExitExternal,
 			"Read details.log_tail.").WithDetails(map[string]any{"log_tail": clusterLogTail(name, 20)})
 	}
+
 	return waitCluster(ctx, name, data, port, UntilOpen, func(line string) {
 		if report != nil {
 			report(output.Event{Type: "log", Step: stepID, Line: line})

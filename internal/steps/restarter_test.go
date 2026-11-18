@@ -22,10 +22,12 @@ func TestRunCmdKeepsTheOutputTail(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error")
 	}
+
 	msg := err.Error()
 	if !strings.Contains(msg, "exit status 1") || !strings.Contains(msg, "Job for postgresql@18-other.service failed") || !strings.Contains(msg, "starting") {
 		t.Errorf("error %q", msg)
 	}
+
 	if err := runCmd(context.Background(), "sh", "-c", "echo fine"); err != nil {
 		t.Errorf("a passing command failed: %v", err)
 	}
@@ -34,11 +36,14 @@ func TestRunCmdKeepsTheOutputTail(t *testing.T) {
 func TestTailBufferKeepsTheEnd(t *testing.T) {
 	b := &tailBuffer{max: 8}
 	_, _ = b.Write([]byte("0123456789"))
+
 	_, _ = b.Write([]byte("ab"))
 	if got := b.String(); got != "…456789ab" {
 		t.Errorf("tail %q", got)
 	}
+
 	short := &tailBuffer{max: 8}
+
 	_, _ = short.Write([]byte("abc"))
 	if got := short.String(); got != "abc" {
 		t.Errorf("short %q", got)

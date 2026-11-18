@@ -23,14 +23,17 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	if err != nil {
 		return Result{}, err
 	}
+
 	nodeCfg, err := bootstrapDatabaseNode(cfg, p)
 	if err != nil {
 		return Result{}, err
 	}
+
 	owner, owned, err := bootstrapDatabaseAuthority(cfg, p, env)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if !hostPhaseComplete() {
 		return Result{}, output.NewError(
 			output.CodePrecondition,
@@ -44,28 +47,37 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := (state.FileStore{}).Save(raw); err != nil {
 		return Result{}, err
 	}
+
 	if err := syncNodeHostname(cfg); err != nil {
 		return Result{}, err
 	}
+
 	env.Cluster = cfg
 
-	var ownerPtr *bootstrapOwnership
-	var complete func(string) error
+	var (
+		ownerPtr *bootstrapOwnership
+		complete func(string) error
+	)
+
 	if owned {
 		ownerPtr = &owner
 		complete = func(target string) error {
 			return bootstrapCompleteTarget(&owner, cfg, p.NodeName, env.Req.OperationID, target)
 		}
 	}
+
 	rt := runtimeFor(env, false)
+
 	data, warnings, err := bootstrapDatabaseSteps(ctx, cfg, rt, env.Report,
 		steps.Catalog(), engine.Apply, steps.RestarterFor(cfg, rt, env.Report), initFailureHint(cfg.ClusterName, p.Local), ownerPtr, complete)
 	if err != nil {
 		return Result{}, err
 	}
+
 	res := BootstrapResult{
 		Phase:            PhaseDatabase,
 		Node:             nodeCfg.NodeName,
@@ -79,8 +91,10 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 		if err != nil {
 			return Result{}, err
 		}
+
 		res.Doctor = gate
 	}
+
 	return Result{Data: res, Warnings: warnings}, nil
 }
 
@@ -89,9 +103,11 @@ func bootstrapDatabaseConfig(p bootstrapParams) (config.Cluster, error) {
 	if err != nil {
 		return config.Cluster{}, output.NewError(output.CodeConfig, "cluster_toml does not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return config.Cluster{}, config.ValidationError(err)
 	}
+
 	return cfg, nil
 }
 
@@ -105,6 +121,7 @@ func bootstrapDatabaseNode(cfg config.Cluster, p bootstrapParams) (config.Node, 
 			"Run the host phase first with vaire server init.",
 		).WithDetails(map[string]any{"reason": "not_a_node"})
 	}
+
 	if nodeCfg.Server != cfg.Name() {
 		return config.Node{}, output.NewError(
 			output.CodePrecondition,
@@ -113,10 +130,12 @@ func bootstrapDatabaseNode(cfg config.Cluster, p bootstrapParams) (config.Node, 
 			"Use that server's own secrets document.",
 		).WithDetails(map[string]any{"reason": "node_belongs_to_other_server", "server": nodeCfg.Server})
 	}
+
 	if nodeCfg.NodeName != p.NodeName {
 		return config.Node{}, output.NewError(output.CodePrecondition, "bootstrap node identity does not match", output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
 	}
+
 	return nodeCfg, nil
 }
 
@@ -124,12 +143,15 @@ func bootstrapDatabaseAuthority(cfg config.Cluster, p bootstrapParams, env *Env)
 	if err := bootstrapDir(false); err != nil {
 		return bootstrapOwnership{}, false, err
 	}
+
 	owner, err := bootstrapReadOwnership()
+
 	owned := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return bootstrapOwnership{}, false, output.NewError(output.CodePrecondition, "bootstrap ownership is unavailable", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
 			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
 	}
+
 	if owned {
 		if err := bootstrapValidateOwnership(owner, cfg, p.NodeName, env.Req.OperationID); err != nil {
 			return bootstrapOwnership{}, false, output.NewError(output.CodePrecondition, "bootstrap ownership does not match this setup", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
@@ -138,10 +160,12 @@ func bootstrapDatabaseAuthority(cfg config.Cluster, p bootstrapParams, env *Env)
 	} else if err := bootstrapDatabaseNoAuthority(cfg); err != nil {
 		return bootstrapOwnership{}, false, err
 	}
+
 	if err := bootstrapExistingConfigMatches(cfg, p.NodeName); err != nil {
 		return bootstrapOwnership{}, false, output.NewError(output.CodePrecondition, "bootstrap configuration changed since ownership was established", output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
 			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
 	}
+
 	return owner, owned, nil
 }
 
@@ -150,12 +174,14 @@ func bootstrapDatabaseNoAuthority(cfg config.Cluster) error {
 	if engine.ClusterView != nil {
 		visible = engine.ClusterView(cfg, "")
 	}
+
 	for _, spec := range visible.Clusters {
 		if !spec.IsFollower() {
 			return output.NewError(output.CodePrecondition, "bootstrap has no authority over existing database "+spec.Name, output.ExitPrecondition, "Use an exact database access confirmation through normal apply.").
 				WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable", "database": spec.Name})
 		}
 	}
+
 	return nil
 }
 
@@ -172,11 +198,13 @@ func hostPhaseComplete() bool {
 	if err != nil {
 		return false
 	}
+
 	for _, id := range steps.HostStepIDs() {
 		if entry, ok := j.Steps[id]; !ok || entry.Status != engine.StatusCompleted {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -185,9 +213,11 @@ func inspectTLS(cfg config.Cluster) *TLSState {
 	if cfg.TLS.Mode == "self-signed" {
 		return &TLSState{State: "self-signed", NotAfter: certNotAfter()}
 	}
+
 	if isSelfSigned(steps.TLSCertPath) {
 		return &TLSState{State: "pending"}
 	}
+
 	return &TLSState{State: "acme", NotAfter: certNotAfter()}
 }
 
@@ -198,6 +228,7 @@ func isSelfSigned(path string) bool {
 	if cert == nil {
 		return true
 	}
+
 	return isSelfSignedCert(cert)
 }
 
@@ -210,6 +241,7 @@ func certNotAfter() string {
 	if cert == nil {
 		return ""
 	}
+
 	return cert.NotAfter.UTC().Format(time.RFC3339)
 }
 
@@ -218,13 +250,16 @@ func readCert(path string) *x509.Certificate {
 	if err != nil {
 		return nil
 	}
+
 	block, _ := pem.Decode(raw)
 	if block == nil {
 		return nil
 	}
+
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return nil
 	}
+
 	return cert
 }

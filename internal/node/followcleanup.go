@@ -43,12 +43,15 @@ var followCleanupRegistration = func(name, source, dataRoot string, sourcePort, 
 	// labelled "data_directory = <path>" form, which never matches the path.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	cmd := exec.CommandContext(ctx, "pg_conftool", "-s", "18", name, "show", "data_directory")
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != filepath.Join(dataRoot, name) {
 		return errors.New("effective follower data directory is unverifiable")
 	}
+
 	return nil
 }
 var followCleanupDrop = func(ctx context.Context, env *Env, name string) error {
@@ -59,12 +62,15 @@ func (a *followCleanup) close() {
 	if a.data != nil {
 		_ = a.data.Close()
 	}
+
 	if a.conf != nil {
 		_ = a.conf.Close()
 	}
+
 	if a.dataParent != nil {
 		_ = a.dataParent.Close()
 	}
+
 	if a.confParent != nil {
 		_ = a.confParent.Close()
 	}
@@ -75,6 +81,7 @@ func openFollowCleanup(cfg config.Cluster, spec config.ClusterSpec) (*followClea
 	if err != nil || !ok {
 		return nil, err
 	}
+
 	return openFollowCleanupArtifacts(cfg, spec, owner, record, info, source)
 }
 
@@ -82,39 +89,49 @@ func followCleanupEvidence(cfg config.Cluster, spec config.ClusterSpec) (followO
 	if !spec.IsFollower() {
 		return followOwner{}, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower configuration required")
 	}
+
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return followOwner{}, followOwnership{}, nil, config.ClusterSpec{}, false, err
 	}
+
 	owner := followOwner{Name: spec.Name, Source: spec.Follows, Generation: spec.FollowGeneration, Spec: spec}
 	if aw, ok := records.AwaitingRecovery[spec.Name]; ok {
 		owner.Awaiting = aw
 	}
+
 	info, err := trustedFollowRecord(spec.Name)
 	if errors.Is(err, os.ErrNotExist) {
 		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, nil
 	}
+
 	if err != nil {
 		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, err
 	}
+
 	o, owned, err := readFollowOwnership(owner)
 	if err != nil {
 		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, err
 	}
+
 	if o.Attempt == nil {
 		if !owned || o.Phase != followPhaseStarted {
 			return owner, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower cleanup has no bound birth evidence")
 		}
+
 		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, nil
 	}
+
 	if !owned || (o.Attempt.State != followAttemptRetained && o.Attempt.State != followAttemptCompleted) || o.Attempt.ArtifactStage != materialisationRegistered ||
 		o.Attempt.ReservationIdentity.Inode == 0 || o.Attempt.ReservationIdentity.Digest == "" {
 		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower cleanup birth or ownership is unverifiable")
 	}
+
 	source, ok := cfg.ClusterByName(spec.Follows)
 	if !ok || source.Stanza != o.Attempt.SourceStanza {
 		return owner, followOwnership{}, nil, config.ClusterSpec{}, false, errors.New("follower source identity changed")
 	}
+
 	return owner, o, info, source, true, nil
 }
 
@@ -123,38 +140,47 @@ func openFollowCleanupArtifacts(cfg config.Cluster, spec config.ClusterSpec, own
 	if err != nil {
 		return nil, err
 	}
+
 	a := &followCleanup{owner: owner, record: o, recordInfo: info, dataRoot: cfg.Server.DataRoot}
+
 	a.dataParent, a.dataParentInfo, a.dataAncestors, err = openMaterialisationParent(a.dataRoot, uid, true)
 	if err != nil {
 		return nil, err
 	}
+
 	a.confParent, a.confParentInfo, a.confAncestors, err = openMaterialisationConfigParent(uid)
 	if err != nil {
 		a.close()
 		return nil, err
 	}
+
 	a.data, err = openMaterialisationChild(a.dataParent, spec.Name)
 	if err != nil {
 		a.close()
 		return nil, err
 	}
+
 	a.conf, err = openMaterialisationChild(a.confParent, spec.Name)
 	if err != nil {
 		a.close()
 		return nil, err
 	}
+
 	if err := a.validate(false); err != nil {
 		a.close()
 		return nil, err
 	}
+
 	a.registeredPort = o.Attempt.TemporaryPort
 	if err := followCleanupRegistration(spec.Name, spec.Follows, a.dataRoot, source.Port, a.registeredPort); err != nil {
 		if o.Attempt.State != followAttemptCompleted || followCleanupRegistration(spec.Name, spec.Follows, a.dataRoot, source.Port, spec.Port) != nil {
 			a.close()
 			return nil, err
 		}
+
 		a.registeredPort = spec.Port
 	}
+
 	return a, nil
 }
 
@@ -163,14 +189,17 @@ func (a *followCleanup) validate(removed bool) error {
 	if err != nil || !os.SameFile(a.recordInfo, info) {
 		return errors.New("follower record replaced")
 	}
+
 	current, owned, err := readFollowOwnership(a.owner)
 	if err != nil || !owned || !reflect.DeepEqual(current, a.record) {
 		return errors.New("follower record changed")
 	}
+
 	if err := errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.confAncestors),
 		validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.confParentInfo)); err != nil {
 		return err
 	}
+
 	for _, item := range []struct {
 		root *os.Root
 		file *os.File
@@ -184,66 +213,84 @@ func (a *followCleanup) validate(removed bool) error {
 			if err := validateMaterialisationDir(item.root, a.owner.Name, item.id, item.file, item.mode); err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		if _, err := item.root.Lstat(a.owner.Name); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("follower cleanup path remains or was replaced")
 		}
+
 		info, err := item.file.Stat()
 		if err != nil {
 			return err
 		}
+
 		id, err := materialisationArtifactID(info)
+
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if err != nil || !ok || id != item.id || st.Nlink != 0 {
 			return errors.New("original follower artifact not removed")
 		}
 	}
+
 	return nil
 }
 
 func (a *followCleanup) remove(ctx context.Context, env *Env, cfg config.Cluster) error {
 	o := a.record
+
 	source, ok := cfg.ClusterByName(o.Source)
 	if !ok {
 		return errors.New("follower source missing")
 	}
+
 	return followCleanupReservation(ctx, o.Database, o.Attempt.TemporaryPort, o.Attempt.ReservationIdentity, func() error {
 		if err := a.validate(false); err != nil {
 			return err
 		}
+
 		if err := followCleanupRegistration(o.Database, o.Source, a.dataRoot, source.Port, a.registeredPort); err != nil {
 			return err
 		}
+
 		if err := followCleanupDrop(ctx, env, o.Database); err != nil {
 			return err
 		}
+
 		if err := a.dataParent.RemoveAll(o.Database); err != nil {
 			return err
 		}
+
 		if err := a.confParent.RemoveAll(o.Database); err != nil {
 			return err
 		}
+
 		if err := a.validate(true); err != nil {
 			return err
 		}
+
 		return errors.Join(materialisationSyncArtifactParent(a.dataParent), materialisationSyncArtifactParent(a.confParent))
 	})
 }
 
 func (a *followCleanup) retire(ctx context.Context) error {
 	o := a.record
+
 	unlock, err := followCleanupAbsent(ctx, o.Database, o.Attempt.TemporaryPort, false)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+
 	if err := a.validate(true); err != nil {
 		return err
 	}
+
 	path, err := followOwnershipPath(o.Database)
 	if err != nil {
 		return err
 	}
+
 	return os.Remove(path)
 }

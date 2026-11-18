@@ -98,19 +98,24 @@ func handleSSHLockdown(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if p.TimeoutS == 0 {
 		p.TimeoutS = defaultLockdownS
 	}
+
 	if p.TimeoutS < 30 || p.TimeoutS > maxLockdownS {
 		return Result{}, output.NewError(output.CodeValidation, "timeout_s must be 30-7200", output.ExitConfig, "")
 	}
+
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if st.LockedDownAt != "" && !st.LockdownPending {
 		return Result{Data: LockdownResult{AlreadyLocked: true, KeepPublic: p.KeepPublic}}, nil
 	}
+
 	sh := shellFor(env)
 
 	// 1. Snapshot. A re-armed lockdown keeps the first snapshot, which is the
@@ -120,13 +125,16 @@ func handleSSHLockdown(ctx context.Context, env *Env) (Result, error) {
 			return Result{}, err
 		}
 	}
+
 	_ = os.Remove(filepath.Join(SSHSnapshotDir, revertedFile))
 
 	// 2. Arm the revert before changing anything.
 	if err := armTimer(ctx, sh, lockdownStepID, revertUnit, p.TimeoutS, "node ssh-revert", env.Report); err != nil {
 		return Result{}, err
 	}
+
 	armedAt := time.Now().UTC().Format(time.RFC3339)
+
 	if err := engine.UpdateState(func(s *engine.State) error { s.LockdownPending = true; return nil }); err != nil {
 		return Result{}, err
 	}
@@ -135,13 +143,16 @@ func handleSSHLockdown(ctx context.Context, env *Env) (Result, error) {
 	if err := runScript(ctx, sh, lockdownStepID, "sshd-dropin", steps.SSHDropInEnv(steps.SSHDropInPath, steps.RenderSSHDropIn(env.Cluster), true), env.Report); err != nil {
 		return Result{}, err
 	}
+
 	var del []string
 	if !p.KeepPublic {
 		del = []string{steps.RulePublicSSH}
 	}
+
 	if err := ufwChange(ctx, sh, lockdownStepID, []string{steps.RuleWGSSH}, del, env.Report); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: LockdownResult{
 		Armed:      true,
 		TimeoutS:   p.TimeoutS,
@@ -155,29 +166,36 @@ func takeSnapshot(ctx context.Context) error {
 	if err := os.RemoveAll(SSHSnapshotDir); err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(SSHSnapshotDir, snapshotDirMode); err != nil {
 		return err
 	}
+
 	info := snapshotInfo{TakenAt: time.Now().UTC().Format(time.RFC3339)}
 	if raw, err := os.ReadFile(steps.SSHDropInPath); err == nil {
 		info.DropInPresent = true
+
 		if err := engine.WriteFileAtomic(filepath.Join(SSHSnapshotDir, snapshotDropIn), raw, snapshotFileMode); err != nil {
 			return err
 		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+
 	rules, err := steps.UFWRules(ctx)
 	if err != nil {
 		return err
 	}
+
 	if err := engine.WriteFileAtomic(filepath.Join(SSHSnapshotDir, snapshotRules), []byte(strings.Join(rules, "\n")+"\n"), snapshotFileMode); err != nil {
 		return err
 	}
+
 	raw, err := json.Marshal(info)
 	if err != nil {
 		return err
 	}
+
 	return engine.WriteFileAtomic(filepath.Join(SSHSnapshotDir, snapshotMeta), raw, snapshotFileMode)
 }
 
@@ -200,13 +218,16 @@ func handleSSHConfirm(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if st.LockedDownAt != "" && !st.LockdownPending {
 		return Result{Data: ConfirmResult{AlreadyLocked: true, LockedDownAt: st.LockedDownAt}}, nil
 	}
+
 	if !st.LockdownPending && !p.Auto {
 		return Result{}, output.NewError(
 			output.CodePrecondition,
@@ -215,24 +236,30 @@ func handleSSHConfirm(ctx context.Context, env *Env) (Result, error) {
 			"The revert timer may have fired already. Read ssh.status, then lock down again.",
 		).WithDetails(map[string]any{"reason": "no_lockdown_pending"})
 	}
+
 	sh := shellFor(env)
 	if st.LockdownPending {
 		if err := disarmTimer(ctx, sh, "ssh.confirm", revertUnit, env.Report); err != nil {
 			return Result{}, err
 		}
 	}
+
 	if err := ufwChange(ctx, sh, "ssh.confirm", []string{steps.RuleWGSSH}, []string{steps.RulePublicSSH}, env.Report); err != nil {
 		return Result{}, err
 	}
+
 	_ = os.RemoveAll(SSHSnapshotDir)
 	lockedAt := time.Now().UTC().Format(time.RFC3339)
+
 	if err := engine.UpdateState(func(s *engine.State) error {
 		s.LockdownPending = false
 		s.LockedDownAt = lockedAt
+
 		return nil
 	}); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: ConfirmResult{Confirmed: true, LockedDownAt: lockedAt}}, nil
 }
 
@@ -252,25 +279,31 @@ func handleSSHStatus(ctx context.Context, _ *Env) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	status := SSHStatus{LockdownPending: st.LockdownPending, LockedDownAt: st.LockedDownAt}
 	if _, err := os.Stat(filepath.Join(SSHSnapshotDir, snapshotMeta)); err == nil {
 		status.SnapshotPresent = true
 	}
+
 	if raw, err := os.ReadFile(filepath.Join(SSHSnapshotDir, revertedFile)); err == nil {
 		var r RevertResult
 		if json.Unmarshal(raw, &r) == nil {
 			status.Reverted = &r
 		}
 	}
+
 	if out, _ := steps.Probe(ctx, "systemctl", "is-active", revertUnit+".timer"); out == "active" {
 		status.RevertTimerActive = true
 	}
+
 	if out, _ := steps.Probe(ctx, "systemctl", "is-active", unlockUnit+".timer"); out == "active" {
 		status.UnlockTimerActive = true
 	}
+
 	if _, err := os.Stat(steps.BreakGlassPath); err == nil {
 		status.BreakGlassDropInOn = true
 	}
+
 	return Result{Data: status}, nil
 }
 
@@ -282,13 +315,16 @@ func RevertSSH(ctx context.Context, lockdownOnly bool, report engine.Reporter) (
 	if os.Geteuid() != 0 {
 		return RevertResult{}, rootRequired("vaire node ssh-revert")
 	}
+
 	release, err := engine.Acquire(ctx, engine.LockExclusive, "ssh-revert", "", revertLockTimeout)
 	if err != nil {
 		return RevertResult{}, err
 	}
 	defer release()
+
 	sh := engine.Shell{Secrets: secrets.Default}
 	res := RevertResult{RevertedAt: time.Now().UTC().Format(time.RFC3339), Mode: "snapshot"}
+
 	st, err := engine.LoadState(engine.StatePath)
 	if err != nil {
 		return res, err
@@ -302,32 +338,40 @@ func RevertSSH(ctx context.Context, lockdownOnly bool, report engine.Reporter) (
 		res.Skipped = "no lockdown is pending"
 		return res, writeReverted(res)
 	}
+
 	revertErr := restoreSnapshot(ctx, sh, &res, report)
 	if revertErr != nil {
 		res.Error = secrets.Redact(revertErr.Error())
 	}
+
 	if err := engine.UpdateState(func(s *engine.State) error { s.LockdownPending = false; return nil }); err != nil && revertErr == nil {
 		revertErr = err
 	}
+
 	if err := writeReverted(res); err != nil && revertErr == nil {
 		revertErr = err
 	}
+
 	return res, revertErr
 }
 
 func revertLockdownOnly(ctx context.Context, sh engine.Shell, st engine.State, res RevertResult, report engine.Reporter) (RevertResult, error) {
 	res.Mode = "lockdown-only"
+
 	_ = disarmTimer(ctx, sh, revertStepID, unlockUnit, report)
 	if err := runScript(ctx, sh, revertStepID, "sshd-dropin", steps.SSHDropInEnv(steps.BreakGlassPath, "", false), report); err != nil {
 		return res, err
 	}
+
 	if st.LockedDownAt == "" || st.LockdownPending {
 		res.Skipped = "the node was never locked down; public 22/tcp stays open"
 		return res, nil
 	}
+
 	if err := ufwChange(ctx, sh, revertStepID, []string{steps.RuleWGSSH}, []string{steps.RulePublicSSH}, report); err != nil {
 		return res, err
 	}
+
 	return res, nil
 }
 
@@ -336,25 +380,33 @@ func restoreSnapshot(ctx context.Context, sh engine.Shell, res *RevertResult, re
 	if err != nil {
 		return errors.New("the SSH snapshot is missing")
 	}
+
 	var info snapshotInfo
 	if err := json.Unmarshal(rawMeta, &info); err != nil {
 		return errors.New("the SSH snapshot does not parse")
 	}
+
 	dropIn := ""
+
 	if info.DropInPresent {
 		raw, err := os.ReadFile(filepath.Join(SSHSnapshotDir, snapshotDropIn))
 		if err != nil {
 			return err
 		}
+
 		dropIn = string(raw)
 	}
+
 	rawRules, err := os.ReadFile(filepath.Join(SSHSnapshotDir, snapshotRules))
 	if err != nil {
 		return err
 	}
+
 	var rules []string
+
 	hadWG := false
-	for _, line := range strings.Split(string(rawRules), "\n") {
+
+	for line := range strings.SplitSeq(string(rawRules), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			rules = append(rules, line)
 			hadWG = hadWG || line == steps.RuleWGSSH
@@ -366,10 +418,13 @@ func restoreSnapshot(ctx context.Context, sh engine.Shell, res *RevertResult, re
 	if !hadWG {
 		del = []string{steps.RuleWGSSH}
 	}
+
 	if err := ufwChange(ctx, sh, revertStepID, rules, del, report); err != nil {
 		return err
 	}
+
 	res.RestoredRules = rules
+
 	return runScript(ctx, sh, revertStepID, "sshd-dropin", steps.SSHDropInEnv(steps.SSHDropInPath, dropIn, false), report)
 }
 
@@ -377,10 +432,12 @@ func writeReverted(res RevertResult) error {
 	if err := os.MkdirAll(SSHSnapshotDir, snapshotDirMode); err != nil {
 		return err
 	}
+
 	raw, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		return err
 	}
+
 	return engine.WriteFileAtomic(filepath.Join(SSHSnapshotDir, revertedFile), append(raw, '\n'), snapshotFileMode)
 }
 
@@ -402,18 +459,23 @@ func UnlockSSH(ctx context.Context, minutes int, dryRun bool, report engine.Repo
 		if os.IsNotExist(err) {
 			return UnlockResult{}, unlockSSHNotOnServer()
 		}
+
 		return UnlockResult{}, err
 	}
+
 	if minutes <= 0 {
 		minutes = defaultUnlockMins
 	}
+
 	if minutes > maxUnlockMinutes {
 		return UnlockResult{}, output.NewError(output.CodeValidation, "--minutes must be at most 1440", output.ExitConfig, "")
 	}
+
 	cfg, err := config.LoadCluster(config.ClusterPath)
 	if err != nil {
 		return UnlockResult{}, err
 	}
+
 	res := UnlockResult{
 		AdminUser:  cfg.Server.AdminUser,
 		Minutes:    minutes,
@@ -424,24 +486,30 @@ func UnlockSSH(ctx context.Context, minutes int, dryRun bool, report engine.Repo
 	if dryRun {
 		return res, nil
 	}
+
 	if os.Geteuid() != 0 {
 		return res, rootRequired("vaire node unlock-ssh")
 	}
+
 	release, err := engine.Acquire(ctx, engine.LockExclusive, "unlock-ssh", "", revertLockTimeout)
 	if err != nil {
 		return res, err
 	}
 	defer release()
+
 	sh := engine.Shell{Secrets: secrets.Default}
 	if err := armTimer(ctx, sh, unlockStepID, unlockUnit, minutes*60, "node ssh-revert --lockdown-only", report); err != nil {
 		return res, err
 	}
+
 	if err := ufwChange(ctx, sh, unlockStepID, []string{steps.RulePublicSSH}, nil, report); err != nil {
 		return res, err
 	}
+
 	if err := runScript(ctx, sh, unlockStepID, "sshd-dropin", steps.SSHDropInEnv(steps.BreakGlassPath, steps.RenderBreakGlass(cfg.Server.AdminUser), false), report); err != nil {
 		return res, err
 	}
+
 	return res, nil
 }
 

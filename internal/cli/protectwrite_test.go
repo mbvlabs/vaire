@@ -28,10 +28,12 @@ func TestProtectedWriteRefusedWithoutHuman(t *testing.T) {
 			if code != nil {
 				t.Fatalf("%s %v: got a code", path, args)
 			}
+
 			e := cliErrorOf(t, err)
 			if e.Code != output.CodeDatabaseProtected || reasonOf(e) != "write_requires_human" || e.ExitCode != output.ExitUnsafe {
 				t.Errorf("%s %v: %s %q (exit %d)", path, args, e.Code, reasonOf(e), e.ExitCode)
 			}
+
 			if !strings.Contains(e.Hint, "without --write") {
 				t.Errorf("%s %v: the hint does not say reads need no code: %q", path, args, e.Hint)
 			}
@@ -49,6 +51,7 @@ func TestProtectedWriteUnprotectedNeedsNoCode(t *testing.T) {
 	}
 	// A status that can't be read fails the write; it never skips the check.
 	boom := errors.New("node unreachable")
+
 	_, err := protectedWriteCode(commandAt(t, "sql"), "app", "writing to it",
 		func() (protectStatusData, error) { return protectStatusData{}, boom }, noNote)
 	if !errors.Is(err, boom) {
@@ -75,7 +78,9 @@ func TestProtectedWriteFollowerNeedsNoCode(t *testing.T) {
 			t.Fatalf("%v: code %v, err %v", args, code, err)
 		}
 	}
+
 	_, err := protectedWriteCode(commandAt(t, "sql", "--output", "json"), "app", "writing to it", status, noNote)
+
 	e := cliErrorOf(t, err)
 	if e.Code != output.CodeDatabaseProtected || reasonOf(e) != "write_requires_human" {
 		t.Fatalf("the protected source: %s %q", e.Code, reasonOf(e))
@@ -86,12 +91,14 @@ func TestProtectedWriteFollowerNeedsNoCode(t *testing.T) {
 // the node about protection: reads need no code.
 func TestSessionLoginReadNeedsNoCode(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	creds := workspaces.Credentials{Database: &workspaces.DatabaseCreds{Admin: workspaces.Role{User: "vaire_admin", Password: "admin-pw"}}}
 	if err := workspaces.SaveCredentials("prod", creds); err != nil {
 		t.Fatal(err)
 	}
 	// No node and no progress: a read that reached for either would panic.
 	s := &session{ctx: &workspaces.Workspace{Name: "prod"}}
+
 	user, password, err := sessionLogin(commandAt(t, "sql", "--output", "json"), s, nil, "app", false)
 	if err != nil || user != "vaire_admin" || password != "admin-pw" {
 		t.Fatalf("read login: %s %s %v", user, password, err)

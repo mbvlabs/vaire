@@ -35,6 +35,7 @@ func (e *HostKeyError) Error() string {
 	if e.Unknown {
 		return "no host key is pinned for " + e.Host
 	}
+
 	return "the host key of " + e.Host + " (" + e.Got + ") does not match the pinned key"
 }
 
@@ -47,27 +48,34 @@ func HostID(addr string) string {
 // LoadKnownHosts reads path. A missing file is empty.
 func LoadKnownHosts(path string) (*KnownHosts, error) {
 	k := &KnownHosts{path: path, hosts: map[string][]ssh.PublicKey{}}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return k, nil
 		}
+
 		return nil, err
 	}
+
 	rest := raw
 	for len(bytes.TrimSpace(rest)) > 0 {
 		_, hosts, key, _, next, err := ssh.ParseKnownHosts(rest)
 		if errors.Is(err, io.EOF) {
 			break
 		}
+
 		if err != nil {
 			return nil, output.NewError(output.CodeConfig, path+" does not parse: "+err.Error(), output.ExitConfig, "Restore it from the secrets document with vaire login.")
 		}
+
 		for _, host := range hosts {
 			k.add(host, key)
 		}
+
 		rest = next
 	}
+
 	return k, nil
 }
 
@@ -77,6 +85,7 @@ func (k *KnownHosts) add(host string, key ssh.PublicKey) {
 			return
 		}
 	}
+
 	k.hosts[host] = append(k.hosts[host], key)
 }
 
@@ -105,19 +114,24 @@ func (k *KnownHosts) Save() error {
 	for host := range k.hosts {
 		hosts = append(hosts, host)
 	}
+
 	sort.Strings(hosts)
+
 	var b strings.Builder
+
 	for _, host := range hosts {
 		for _, key := range k.hosts[host] {
 			b.WriteString(knownhosts.Line([]string{host}, key) + "\n")
 		}
 	}
+
 	return WriteSecretFile(k.path, []byte(b.String()))
 }
 
 // Callback accepts only a key pinned for addr.
 func (k *KnownHosts) Callback(addr string) ssh.HostKeyCallback {
 	host := HostID(addr)
+
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		pinned := k.hosts[host]
 		for _, want := range pinned {
@@ -125,10 +139,12 @@ func (k *KnownHosts) Callback(addr string) ssh.HostKeyCallback {
 				return nil
 			}
 		}
+
 		e := &HostKeyError{Host: host, Got: ssh.FingerprintSHA256(key), Unknown: len(pinned) == 0}
 		for _, want := range pinned {
 			e.Want = append(e.Want, ssh.FingerprintSHA256(want))
 		}
+
 		return e
 	}
 }
@@ -137,6 +153,7 @@ func (k *KnownHosts) Callback(addr string) ssh.HostKeyCallback {
 // presents a key type that is pinned.
 func (k *KnownHosts) Algorithms(addr string) []string {
 	var out []string
+
 	seen := map[string]bool{}
 	add := func(algs ...string) {
 		for _, a := range algs {
@@ -146,6 +163,7 @@ func (k *KnownHosts) Algorithms(addr string) []string {
 			}
 		}
 	}
+
 	for _, key := range k.hosts[HostID(addr)] {
 		switch key.Type() {
 		case ssh.KeyAlgoRSA:
@@ -154,7 +172,9 @@ func (k *KnownHosts) Algorithms(addr string) []string {
 			add(key.Type())
 		}
 	}
+
 	sort.SliceStable(out, func(i, j int) bool { return out[i] == ssh.KeyAlgoED25519 && out[j] != ssh.KeyAlgoED25519 })
+
 	return out
 }
 
@@ -166,8 +186,10 @@ func ParseHostKeys(lines []string) ([]ssh.PublicKey, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		keys = append(keys, key)
 	}
+
 	return keys, nil
 }
 
@@ -178,6 +200,7 @@ func ContainsKey(keys []ssh.PublicKey, key ssh.PublicKey) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -188,24 +211,31 @@ func WriteSecretFile(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
+
 	tmp := f.Name()
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
+
 		return err
 	}
+
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
+
 		return err
 	}
+
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
+
 	return os.Rename(tmp, path)
 }

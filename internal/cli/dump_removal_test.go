@@ -17,16 +17,20 @@ func TestDumpSurfaceRemoved(t *testing.T) {
 			t.Errorf("%s still resolves", path)
 		}
 	}
+
 	var walk func(*cobra.Command)
+
 	walk = func(cmd *cobra.Command) {
 		if strings.EqualFold(cmd.Name(), "dump") {
 			t.Errorf("%q is still a command", cmd.CommandPath())
 		}
+
 		cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 			if strings.Contains(strings.ToLower(flag.Name), "dump") {
 				t.Errorf("%s still has --%s", cmd.CommandPath(), flag.Name)
 			}
 		})
+
 		for _, child := range cmd.Commands() {
 			walk(child)
 		}

@@ -10,10 +10,12 @@ func statfsGiB(path string) (int, bool) {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, false
 	}
+
 	total := st.Blocks * uint64(st.Bsize) //nolint:gosec // G115: Bsize is a positive filesystem block size.
 	if total == 0 {
 		return 0, false
 	}
+
 	return int(total / (1 << 30)), true //nolint:gosec // G115: a filesystem smaller than 8 EiB fits in int.
 }
 
@@ -24,6 +26,7 @@ func FreeBytes(path string) (uint64, bool) {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, false
 	}
+
 	return st.Bavail * uint64(st.Bsize), true //nolint:gosec // G115: Bsize is a positive filesystem block size.
 }
 
@@ -34,6 +37,8 @@ func DiskUsage(path string) (total, free uint64, ok bool) {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, 0, false
 	}
+
 	bs := uint64(st.Bsize) //nolint:gosec // G115: Bsize is a positive filesystem block size.
+
 	return st.Blocks * bs, st.Bavail * bs, st.Blocks > 0
 }

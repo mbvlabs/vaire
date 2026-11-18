@@ -18,25 +18,31 @@ import (
 
 func runSSH(cmd *cobra.Command, _ []string) error {
 	command := stringFlag(cmd, "command")
+
 	opts, _ := output.ParseOptions(cmd)
 	if command == "" && (output.UsesStructuredOutput(opts) || MustNotPrompt(cmd)) {
 		return output.NewError(output.CodeUsage, "vaire ssh needs a terminal or --command", output.ExitUsage,
 			"Pass --command to run one command, or use a TTY for a shell.")
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	client := s.node.SSH.SSH()
 	if client == nil {
 		return output.NewError(output.CodeError, "the SSH client is not available", output.ExitGeneric, "")
 	}
+
 	sess, err := client.NewSession()
 	if err != nil {
 		return output.WrapError(output.CodeTransportFailed, err, output.ExitTransport, "")
 	}
+
 	defer func() { _ = sess.Close() }()
 
 	// A command run from a terminal gets a PTY too (like ssh -t), so sudo can
@@ -49,6 +55,7 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 		sess.Stdout = cmd.OutOrStdout()
 		sess.Stderr = stderr
 		err := sess.Run(command)
+
 		var exitErr *ssh.ExitError
 		if errors.As(err, &exitErr) && stderr.seen {
 			return output.NewError(output.CodeInputRequired,
@@ -57,29 +64,37 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 					"or have sudo write the output to a file and read it back with vaire ssh --no-input --command 'cat <file>'.").
 				WithDetails(map[string]any{"exit_status": exitErr.ExitStatus()})
 		}
+
 		return sshExit(err)
 	}
 
 	fd := int(os.Stdin.Fd())
+
 	width, height, err := term.GetSize(fd)
 	if err != nil {
 		width, height = 80, 24
 	}
+
 	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
 	if err := sess.RequestPty("xterm-256color", height, width, modes); err != nil {
 		return output.WrapError(output.CodeTransportFailed, err, output.ExitTransport, "The node refused a PTY.")
 	}
 	// The remote shell owns the terminal: nothing of vaire's live area may draw.
 	defer ui.Suspend()()
+
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Run vaire ssh from a terminal.")
 	}
+
 	defer func() { _ = term.Restore(fd, oldState) }()
+
 	sess.Stdin = os.Stdin
 	sess.Stdout = os.Stdout
+
 	sess.Stderr = os.Stderr
 	go forwardWindowSize(fd, sess)
+
 	if command != "" {
 		return sshExit(sess.Run(command))
 	}
@@ -87,6 +102,7 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	if err := sess.Shell(); err != nil {
 		return sshExit(err)
 	}
+
 	return sshExit(sess.Wait())
 }
 
@@ -94,16 +110,18 @@ func sshExit(err error) error {
 	if err == nil {
 		return nil
 	}
-	var exitErr *ssh.ExitError
-	if errors.As(err, &exitErr) {
+
+	if exitErr, ok := errors.AsType[*ssh.ExitError](err); ok {
 		return &localenv.SilentExitError{Code: exitErr.ExitStatus()}
 	}
+
 	return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 }
 
 func forwardWindowSize(fd int, sess *ssh.Session) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
+
 	for range ch {
 		if width, height, err := term.GetSize(fd); err == nil {
 			_ = sess.WindowChange(height, width)
@@ -137,9 +155,11 @@ func (s *sudoPasswordWatch) Write(b []byte) (int, error) {
 				s.seen = true
 			}
 		}
+
 		if keep := 64; len(s.tail) > keep {
 			s.tail = append(s.tail[:0], s.tail[len(s.tail)-keep:]...)
 		}
 	}
+
 	return s.w.Write(b)
 }

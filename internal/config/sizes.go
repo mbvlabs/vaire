@@ -53,6 +53,7 @@ func LookupSize(name string) (Size, bool) {
 			return s, true
 		}
 	}
+
 	return Size{}, false
 }
 
@@ -62,6 +63,7 @@ func SizeNames() []string {
 	for _, s := range Sizes {
 		out = append(out, s.Name)
 	}
+
 	return append(out, SizeCustom)
 }
 
@@ -92,24 +94,30 @@ func ResolveResources(spec ClusterSpec, defaultSize string) (Resources, error) {
 	if spec.CPUMode != "" && spec.CPUMode != "normal" && spec.CPUMode != "spare" {
 		return Resources{}, fmt.Errorf("cpu_mode %q must be normal or spare", spec.CPUMode)
 	}
+
 	if spec.CPUQuota != "" && !cpuQuotaPattern.MatchString(spec.CPUQuota) {
 		return Resources{}, fmt.Errorf("cpu_quota %q must be a percentage such as 150%%", spec.CPUQuota)
 	}
+
 	name := spec.Size
 	if name == "" {
 		name = defaultSize
 	}
+
 	r, err := sizedResources(name, spec)
 	if err != nil {
 		return Resources{}, err
 	}
+
 	if err := r.applyExplicit(spec); err != nil {
 		return Resources{}, err
 	}
+
 	r.PoolSize = spec.PoolSize
 	if r.PoolSize == 0 {
 		r.PoolSize = r.MaxConnections - r.SessionPoolSize - ReservedConnections
 	}
+
 	return r, nil
 }
 
@@ -121,18 +129,24 @@ func sizedResources(name string, spec ClusterSpec) (Resources, error) {
 	if r.CPUMode == "" {
 		r.CPUMode = "normal"
 	}
+
 	if name == SizeCustom {
 		if spec.Memory == "" {
 			return Resources{}, errors.New("size custom needs memory")
 		}
+
 		r.CPUWeight = DefaultCPUWeight
+
 		return r, nil
 	}
+
 	size, ok := LookupSize(name)
 	if !ok {
 		return Resources{}, fmt.Errorf("size %q must be one of %s", name, strings.Join(SizeNames(), ", "))
 	}
+
 	r.MemoryMiB, r.CPUWeight, r.MaxConnections = size.MemoryMiB, size.CPUWeight, size.MaxConnections
+
 	return r, nil
 }
 
@@ -143,34 +157,44 @@ func (r *Resources) applyExplicit(spec ClusterSpec) error {
 		if err != nil {
 			return fmt.Errorf("memory %q %w", spec.Memory, err)
 		}
+
 		r.MemoryMiB = mib
 	}
+
 	if r.Size == SizeCustom {
 		r.MaxConnections = connectionsFor(r.MemoryMiB)
 	}
+
 	if spec.MemoryMax != "" {
 		mib, err := ParseMemoryMiB(spec.MemoryMax)
 		if err != nil {
 			return fmt.Errorf("memory_max %q %w", spec.MemoryMax, err)
 		}
+
 		r.MemoryMaxMiB = mib
 	}
+
 	if spec.CPUWeight != 0 {
 		r.CPUWeight = spec.CPUWeight
 	}
+
 	if spec.IOWeight != 0 {
 		r.IOWeight = spec.IOWeight
 	}
+
 	if v, ok := spec.Settings["max_connections"]; ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil || n < 1 {
 			return fmt.Errorf("settings.max_connections %q is not a positive integer", v)
 		}
+
 		r.MaxConnections = n
 	}
+
 	if spec.SessionPoolSize != 0 {
 		r.SessionPoolSize = spec.SessionPoolSize
 	}
+
 	return nil
 }
 
@@ -183,6 +207,7 @@ func connectionsFor(mib int) int {
 			out = s.MaxConnections
 		}
 	}
+
 	return out
 }
 
@@ -195,11 +220,14 @@ func ParseMemoryMiB(v string) (int, error) {
 	if m == nil {
 		return 0, errors.New("must be an amount such as 768MiB or 2GiB")
 	}
+
 	n, err := strconv.Atoi(m[1])
 	if err != nil {
 		return 0, errors.New("is too large")
 	}
+
 	var mib int
+
 	switch m[2] {
 	case "KiB", "kB":
 		mib = n / 1024
@@ -210,8 +238,10 @@ func ParseMemoryMiB(v string) (int, error) {
 	case "TiB", "TB":
 		mib = n * 1024 * 1024
 	}
+
 	if mib < 1 {
 		return 0, errors.New("must be at least 1MiB")
 	}
+
 	return mib, nil
 }

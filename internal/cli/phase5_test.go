@@ -24,6 +24,7 @@ func TestRecoverOrder(t *testing.T) {
 	if got := recoverOrder(dbs, nil); !slices.Equal(got, []string{"vital", "small", "mid", "big"}) {
 		t.Errorf("order %v", got)
 	}
+
 	if got := recoverOrder(dbs, []string{"big"}); !slices.Equal(got, []string{"big", "vital", "small", "mid"}) {
 		t.Errorf("named first: %v", got)
 	}
@@ -74,17 +75,21 @@ func TestPickBundleName(t *testing.T) {
 	b := masterbackup.Name(at.Add(time.Hour), 1, "bbb")
 	c := masterbackup.Name(at.Add(2*time.Hour), 1, "ccc")
 	list := []backup.MasterBundle{{Name: c, Epoch: 1, Complete: false}, {Name: b, Epoch: 1, Complete: true}, {Name: a, Epoch: 1, Complete: true}}
+
 	p, older, err := pickBundleName(list, "")
 	if err != nil || p.Name != b || older != a {
 		t.Fatalf("newest: %s older %s (%v)", p.Name, older, err)
 	}
+
 	p, _, err = pickBundleName(list, at.Add(30*time.Minute).Format(time.RFC3339))
 	if err != nil || p.Name != a {
 		t.Fatalf("by time: %s (%v)", p.Name, err)
 	}
+
 	if _, _, err := pickBundleName(list, c); err == nil {
 		t.Fatal("an incomplete bundle was picked by name")
 	}
+
 	var ce *output.CLIError
 	if _, _, err := pickBundleName(nil, ""); !errors.As(err, &ce) || ce.Code != output.CodeBundleNotFound {
 		t.Fatalf("empty bucket: %v", err)
@@ -96,40 +101,51 @@ func TestOpenFetched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	files := []masterbackup.File{
 		masterbackup.NewFile(masterbackup.ClusterPath, "root", "root", 0o640, []byte("name = \"prod\"\n")),
 		masterbackup.NewFile(masterbackup.NodePath, "root", "root", 0o640, []byte("server = \"prod\"\n")),
 		masterbackup.NewFile(masterbackup.OperatorsPath, "root", "root", 0o640, []byte("[[operators]]\nname = 'op-1'\n")),
 	}
+
 	tarball, m, err := masterbackup.Build(masterbackup.Meta{Server: "prod", Epoch: 1, CreatedAt: time.Now(), VaireVersion: "dev"}, files)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	sealed, err := masterbackup.Seal(tarball, id.Recipient().String())
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	side := masterbackup.NewSidecar("n", m, sealed)
 	f := fetchedBundle{Name: "n", Cipher: sealed, Sidecar: &side, Older: "older"}
+
 	b, err := openFetched(f, id.String(), "prod")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := operatorInBundle(b, "op-1"); err != nil {
 		t.Errorf("op-1 is in the bundle: %v", err)
 	}
+
 	if err := operatorInBundle(b, "op-2"); err == nil {
 		t.Error("op-2 isn't in the bundle")
 	}
+
 	var ce *output.CLIError
 	if _, err := openFetched(f, id.String(), "staging"); !errors.As(err, &ce) || ce.Code != output.CodePrecondition {
 		t.Errorf("another server's bundle: %v", err)
 	}
+
 	bad := append([]byte(nil), sealed...)
+
 	bad[len(bad)-3] ^= 1
 	if _, err := openFetched(fetchedBundle{Name: "n", Cipher: bad, Sidecar: &side, Older: "older"}, id.String(), "prod"); !errors.As(err, &ce) || ce.Code != output.CodeBundleCorrupt || ce.Hint == "" {
 		t.Errorf("sidecar mismatch: %v", err)
 	}
+
 	if _, err := openFetched(fetchedBundle{Name: "n", Cipher: bad}, id.String(), "prod"); !errors.As(err, &ce) || ce.Code != output.CodeBundleCorrupt {
 		t.Errorf("a corrupt file without a sidecar: %v", err)
 	}
@@ -144,14 +160,18 @@ func TestOpenFetched(t *testing.T) {
 // open.
 func assertCorruptExport(t *testing.T, identity, name string, cipher []byte) {
 	t.Helper()
+
 	var ce *output.CLIError
+
 	_, err := openFetched(fetchedBundle{Cipher: cipher, From: "/tmp/prod-master.tar.age"}, identity, "prod")
 	if !errors.As(err, &ce) || ce.Code != output.CodeBundleCorrupt {
 		t.Fatalf("%s file: %v", name, err)
 	}
+
 	if !strings.HasPrefix(ce.Message, "master bundle /tmp/prod-master.tar.age is corrupt: ") {
 		t.Errorf("%s file: message %q", name, ce.Message)
 	}
+
 	if strings.Contains(ce.Message, "the bundle is corrupt") || !strings.Contains(ce.Hint, "--bundle-file") {
 		t.Errorf("%s file: message %q, hint %q", name, ce.Message, ce.Hint)
 	}
@@ -161,9 +181,11 @@ func TestNewerThanBuild(t *testing.T) {
 	if newerThanBuild("edge-abc") || newerThanBuild("1.0.0") {
 		t.Error("a dev build compares versions")
 	}
+
 	if a, ok := semverParts("1.2.3"); !ok || a != [3]int{1, 2, 3} {
 		t.Error("semverParts")
 	}
+
 	if _, ok := semverParts("1.2"); ok {
 		t.Error("semverParts accepted 1.2")
 	}

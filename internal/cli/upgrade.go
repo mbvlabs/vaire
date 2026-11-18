@@ -38,23 +38,28 @@ type upgradeOptions struct {
 // upgradeFlags reads the command's flags.
 func upgradeFlags(cmd *cobra.Command) (upgradeOptions, error) {
 	var opts upgradeOptions
+
 	version, err := cmd.Flags().GetString("version")
 	if err != nil {
 		return opts, err
 	}
+
 	channel, err := cmd.Flags().GetString("channel")
 	if err != nil {
 		return opts, err
 	}
+
 	skipNodes, err := cmd.Flags().GetBool("skip-nodes")
 	if err != nil {
 		return opts, err
 	}
+
 	opts.version = version
 	opts.channel = channel
 	opts.skipNodes = skipNodes
 	opts.dry = dryRun(cmd)
 	opts.yes = flagTrue(cmd, "yes")
+
 	return opts, nil
 }
 
@@ -63,10 +68,12 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	manifest, plan, data, warnings, err := planUpgrade(cmd, opts)
 	if err != nil {
 		return err
 	}
+
 	return applyUpgrade(cmd, opts, manifest, plan, data, warnings)
 }
 
@@ -76,17 +83,22 @@ func planUpgrade(cmd *cobra.Command, opts upgradeOptions) (release.Manifest, upg
 	if err != nil {
 		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}
+
 	channel, err := upgrade.SelectChannel(opts.channel)
 	if err != nil {
 		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}
+
 	client := &release.Client{}
 	stop := waitOn(cmd, "checking for an vaire release on "+channel)
 	manifest, err := client.Resolve(commandContext(cmd), channel, opts.version)
+
 	stop()
+
 	if err != nil {
 		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}
+
 	from := upgrade.Version{Version: buildinfo.Version, Channel: buildinfo.Channel}
 	plan := upgrade.Decide(from, manifest, strings.TrimSpace(opts.version) != "")
 	plan.Target = target
@@ -99,6 +111,7 @@ func planUpgrade(cmd *cobra.Command, opts upgradeOptions) (release.Manifest, upg
 		DryRun:    opts.dry,
 		Escalated: flagTrue(cmd, "escalated"),
 	}
+
 	return manifest, plan, data, append([]output.Warning(nil), plan.Warnings...), nil
 }
 
@@ -114,23 +127,29 @@ func applyUpgrade(cmd *cobra.Command, opts upgradeOptions, manifest release.Mani
 			Next:     []string{"vaire version"},
 		})
 	}
+
 	if opts.dry {
 		return upgradeDryRun(cmd, data, warnings, plan, opts.skipNodes)
 	}
+
 	if err := confirmUpgrade(cmd, plan, opts); err != nil {
 		return err
 	}
+
 	if handled, err := escalateUpgrade(cmd, manifest, plan.Target); handled || err != nil {
 		return err
 	}
+
 	previous, swapWarnings, err := installUpgrade(cmd, manifest, plan.Target)
 	if err != nil {
 		return err
 	}
+
 	warnings = append(warnings, swapWarnings...)
 	data.PreviousPath = previous
 	data.Changed = true
 	data.Nodes = "skipped"
+
 	if !opts.skipNodes {
 		warnings = append(warnings, nodesWarning())
 	}
@@ -141,6 +160,7 @@ func applyUpgrade(cmd *cobra.Command, opts upgradeOptions, manifest release.Mani
 	if previous != "" {
 		lines = insert(lines, 0, "kept previous binary at "+previous)
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     data,
 		Warnings: warnings,
@@ -152,9 +172,11 @@ func applyUpgrade(cmd *cobra.Command, opts upgradeOptions, manifest release.Mani
 // upgradeDryRun reports what would change without touching the binary.
 func upgradeDryRun(cmd *cobra.Command, data upgradeData, warnings []output.Warning, plan upgrade.Plan, skipNodes bool) error {
 	data.Nodes = "skipped"
+
 	if !skipNodes {
 		warnings = append(warnings, nodesWarning())
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     data,
 		Warnings: warnings,
@@ -169,13 +191,16 @@ func confirmUpgrade(cmd *cobra.Command, plan upgrade.Plan, opts upgradeOptions) 
 	if opts.yes || MustNotPrompt(cmd) {
 		return nil
 	}
+
 	ok, err := PromptYes(cmd, fmt.Sprintf("Upgrade vaire %s → %s (%s) at %s?", plan.From.Version, plan.To.Version, plan.To.Channel, plan.Target))
 	if err != nil {
 		return err
 	}
+
 	if ok {
 		return nil
 	}
+
 	return output.NewError(
 		output.CodePrecondition,
 		"upgrade was not confirmed",
@@ -191,6 +216,7 @@ func escalateUpgrade(cmd *cobra.Command, manifest release.Manifest, target strin
 	if dirWritable(filepath.Dir(target)) {
 		return false, nil
 	}
+
 	return localenv.Escalate(cmd, "replace "+target, "--version", manifest.Version, "--channel", manifest.Channel, "--yes")
 }
 
@@ -201,25 +227,34 @@ func installUpgrade(cmd *cobra.Command, manifest release.Manifest, target string
 	client := &release.Client{}
 	stop := waitOn(cmd, "downloading vaire "+manifest.Version)
 	cached, err := client.Fetch(ctx, manifest, runtime.GOOS, runtime.GOARCH)
+
 	stop()
+
 	if err != nil {
 		return "", nil, err
 	}
+
 	stop = waitOn(cmd, "verifying vaire "+manifest.Version)
 	err = upgrade.Preflight(ctx, cached, manifest)
+
 	stop()
+
 	if err != nil {
 		return "", nil, err
 	}
+
 	stop = waitOn(cmd, "replacing "+target)
 	previous, swapWarnings, err := upgrade.Swap(target, cached)
+
 	stop()
+
 	if err != nil {
 		return "", nil, err
 	}
 	// Idle tunnel daemons still run the old binary; busy ones are replaced
 	// by the next command once they go idle.
 	stopIdleTunnelDaemons()
+
 	return previous, swapWarnings, nil
 }
 
@@ -235,9 +270,11 @@ func dirWritable(dir string) bool {
 	if err != nil {
 		return false
 	}
+
 	name := f.Name()
 	_ = f.Close()
 	_ = os.Remove(name)
+
 	return true
 }
 
@@ -245,10 +282,12 @@ func flagTrue(cmd *cobra.Command, name string) bool {
 	if cmd == nil || cmd.Flags() == nil {
 		return false
 	}
+
 	flag := cmd.Flags().Lookup(name)
 	if flag == nil {
 		return false
 	}
+
 	switch flag.Value.String() {
 	case "true", "TRUE", "1":
 		return true
@@ -262,5 +301,6 @@ func insert(lines []string, i int, line string) []string {
 	out = append(out, lines[:i]...)
 	out = append(out, line)
 	out = append(out, lines[i:]...)
+
 	return out
 }

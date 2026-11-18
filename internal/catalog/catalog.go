@@ -4,6 +4,7 @@
 package catalog
 
 import (
+	"maps"
 	"slices"
 	"strings"
 )
@@ -153,6 +154,7 @@ func (e Extension) Clone() Extension {
 	out.Aliases = slices.Clone(e.Aliases)
 	out.Settings = cloneMap(e.Settings)
 	out.CopySettings = cloneMap(e.CopySettings)
+
 	return out
 }
 
@@ -162,6 +164,7 @@ func List() []Extension {
 	for i, e := range entries {
 		out[i] = e.Clone()
 	}
+
 	return out
 }
 
@@ -172,17 +175,20 @@ func Lookup(name string) (Extension, bool) {
 			return e.Clone(), true
 		}
 	}
+
 	return Extension{}, false
 }
 
 // Defaults returns the names of the built-in entries enabled on init.
 func Defaults() []string {
 	var out []string
+
 	for _, e := range entries {
 		if e.Default {
 			out = append(out, e.Name)
 		}
 	}
+
 	return out
 }
 
@@ -192,6 +198,7 @@ func Names() []string {
 	for _, e := range entries {
 		out = append(out, e.Name)
 	}
+
 	return out
 }
 
@@ -203,6 +210,7 @@ func Canonical(name string) (string, bool) {
 	if !ok {
 		return name, false
 	}
+
 	return e.Name, true
 }
 
@@ -210,12 +218,14 @@ func Canonical(name string) (string, bool) {
 // duplicates dropped, in order. Unknown names stay, for validation to refuse.
 func CanonicalList(names []string) []string {
 	var out []string
+
 	for _, n := range names {
 		c, _ := Canonical(strings.TrimSpace(n))
 		if c != "" && !slices.Contains(out, c) {
 			out = append(out, c)
 		}
 	}
+
 	return out
 }
 
@@ -226,6 +236,7 @@ func ByExtName(extname string) (Extension, bool) {
 			return e.Clone(), true
 		}
 	}
+
 	return Extension{}, false
 }
 
@@ -251,10 +262,12 @@ func resolvedMap(settings map[string]string, db string) map[string]string {
 	if len(settings) == 0 {
 		return nil
 	}
+
 	out := make(map[string]string, len(settings))
 	for k, v := range settings {
 		out[k] = strings.ReplaceAll(v, DBPlaceholder, db)
 	}
+
 	return out
 }
 
@@ -265,6 +278,7 @@ func NormalizedSettingValue(value string) string {
 	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
 		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
 	}
+
 	return value
 }
 
@@ -327,11 +341,13 @@ func equalMap(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
+
 	for k, v := range a {
 		if b[k] != v {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -339,10 +355,10 @@ func cloneMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
 	}
+
 	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
+	maps.Copy(out, m)
+
 	return out
 }
 
@@ -351,5 +367,6 @@ func semanticMap(m map[string]string) map[string]string {
 	if len(m) == 0 {
 		return nil
 	}
+
 	return cloneMap(m)
 }

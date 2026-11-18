@@ -49,34 +49,43 @@ var statusBudgetWarnings = oversubscriptionWarnings
 
 func readClusterSnapshot(ctx context.Context, spec config.ClusterSpec) clusterSnapshot {
 	s := clusterSnapshot{Spec: spec}
+
 	s.Cgroup, s.CgroupOK = hostinfo.ReadCgroup(hostinfo.ServiceCgroup(steps.PGServiceName(spec.Name)))
 	if !clusterRunning(spec) {
 		s.State = "stopped"
 		return s
 	}
+
 	qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
+
 	rows, err := snapshotPG(spec).Query(qctx, spec.DatabaseName(), health.SampleSQL, nil)
 	if err != nil || len(rows) == 0 {
 		s.State = "unreachable"
 		if err != nil {
 			s.Error = err.Error()
 		}
+
 		return s
 	}
+
 	s.State = "running"
 	s.Sample = health.ParseSample(rows[0])
+
 	return s
 }
 
 func readClusterTPS(ctx context.Context, spec config.ClusterSpec, before int64, elapsed time.Duration) (float64, bool) {
 	qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
+
 	rows, err := snapshotPG(spec).Query(qctx, spec.DatabaseName(), health.XactsSQL, nil)
 	if err != nil || len(rows) == 0 {
 		return 0, false
 	}
+
 	after := health.ParseSample(rows[0]).Xacts
+
 	return health.TPS(before, after, elapsed), true
 }
 
@@ -85,28 +94,33 @@ func readClusterTPS(ctx context.Context, spec config.ClusterSpec, before int64, 
 // second apart.
 func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) []clusterSnapshot {
 	var specs []config.ClusterSpec
+
 	for _, spec := range cfg.Clusters {
 		if db == "" || spec.Name == db {
 			specs = append(specs, spec)
 		}
 	}
+
 	out := make([]clusterSnapshot, len(specs))
 	if len(specs) == 0 {
 		return out
 	}
+
 	started := time.Now()
+
 	var wg sync.WaitGroup
 	for i, spec := range specs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			out[i] = readClusterSnapshot(ctx, spec)
-		}()
+		})
 	}
+
 	wg.Wait()
+
 	if !tps {
 		return out
 	}
+
 	if wait := time.Second - time.Since(started); wait > 0 {
 		select {
 		case <-ctx.Done():
@@ -114,18 +128,21 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 		case <-time.After(wait):
 		}
 	}
+
 	elapsed := time.Since(started)
+
 	for i := range out {
 		if out[i].State != "running" {
 			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+
+		wg.Go(func() {
 			out[i].TPS, out[i].HasTPS = readClusterTPS(ctx, out[i].Spec, out[i].Sample.Xacts, elapsed)
-		}()
+		})
 	}
+
 	wg.Wait()
+
 	return out
 }
 
@@ -133,17 +150,21 @@ func readClusters(ctx context.Context, cfg config.Cluster, db string, tps bool) 
 // left out.
 func readPools(ctx context.Context) map[string]health.Pools {
 	out := map[string]health.Pools{}
+
 	for name, l := range map[string]struct {
 		dir  string
 		port int
 	}{"transaction": {steps.PGSocketDir, steps.PgbouncerPort}, "session": {steps.SessionSocketDir, steps.SessionPoolerPort}} {
 		qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 		rows, err := steps.PoolerAdminPG(l.dir, l.port).Query(qctx, "pgbouncer", "SHOW POOLS;", nil)
+
 		cancel()
+
 		if err == nil {
 			out[name] = health.SumPools(rows)
 		}
 	}
+
 	return out
 }
 
@@ -210,10 +231,12 @@ type statusDatabase struct {
 
 func (s statusDatabase) MarshalJSON() ([]byte, error) {
 	type plain statusDatabase
+
 	raw, err := json.Marshal(plain(s))
 	if err != nil || s.State != stateMaterialisationIncomplete {
 		return raw, err
 	}
+
 	return omitIncompleteMeasurements(raw)
 }
 
@@ -251,8 +274,10 @@ func masterStatusRow(cfg config.Cluster) *statusMaster {
 	if !f.Known {
 		return nil
 	}
+
 	last := loadMasterLast()
 	e, _ := masterbackup.ReadLocalEpoch("")
+
 	return &statusMaster{Last: last.Name, CreatedAt: last.CreatedAt, Uploaded: last.Name != "" && last.UploadedName == last.Name,
 		Bucket: f.Bucket, Epoch: e.Epoch, Pending: f.PendingSince != "" || f.Dirty, Fenced: f.Fenced, LastFailed: last.LastFailure}
 }
@@ -264,55 +289,66 @@ type statusMeasurements struct {
 
 func measureStatusClusters(ctx context.Context, cfg config.Cluster, snaps []clusterSnapshot) []statusMeasurements {
 	measurements := make([]statusMeasurements, len(snaps))
+
 	var wg sync.WaitGroup
 	for i, s := range snaps {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			qctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 			defer cancel()
+
 			res, err := cfg.Resources(s.Spec)
 			if err == nil {
 				obs, generation, monotonic := statusCPURead(qctx, s.Spec)
 				measurements[i].cpu = cpuStatus(res, obs, generation, monotonic)
 			}
+
 			if s.Spec.IsFollower() && s.State == "running" {
 				measurements[i].free = statusDataFree(qctx, cfg, s.Spec, snapshotPG(s.Spec).Query, hostinfo.FreeBytes)
 			}
-		}()
+		})
 	}
+
 	wg.Wait()
+
 	return measurements
 }
 
 func statusActiveCluster(cfg config.Cluster, reports map[string]materialisationReport) config.Cluster {
 	active := cfg
+
 	active.Clusters = nil
 	for _, spec := range cfg.Clusters {
 		if _, incomplete := reports[spec.Name]; !incomplete {
 			active.Clusters = append(active.Clusters, spec)
 		}
 	}
+
 	return active
 }
 
 func statusDatabaseRows(cfg config.Cluster, snaps []clusterSnapshot, measurements []statusMeasurements, rs backup.Records, st engine.State, pending map[string]bool, followers map[string]followerReading) ([]statusDatabase, string) {
 	rows := make([]statusDatabase, 0, len(snaps))
 	pgVersion := ""
+
 	for i, s := range snaps {
 		row := statusRow(cfg, s, rs, st, pending)
+
 		row.CPU, row.DataFreeBytes = measurements[i].cpu, measurements[i].free
 		if rs.IsAwaiting(s.Spec.Name) {
 			row.State, row.Error = stateAwaiting, "vaire db recover "+s.Spec.Name
 		}
+
 		if f, ok := followers[s.Spec.Name]; ok {
 			row.Follower = &f
 		}
+
 		if pgVersion == "" {
 			pgVersion = s.Sample.ServerVersion
 		}
+
 		rows = append(rows, row)
 	}
+
 	return rows, pgVersion
 }
 
@@ -321,8 +357,10 @@ func appendIncompleteStatusRows(rows []statusDatabase, cfg config.Cluster, repor
 		if db != "" && db != name {
 			continue
 		}
+
 		rows = append(rows, incompleteStatusRow(cfg, name, report))
 	}
+
 	return rows
 }
 
@@ -347,12 +385,15 @@ func statusBase(cfg config.Cluster, host hostinfo.Info, reports map[string]mater
 			}
 		}
 	}
+
 	if n, ok := cfg.Master(); ok {
 		data.Node = n.Name
 	}
+
 	if total, free, ok := hostinfo.DiskUsage(cfg.Server.DataRoot); ok {
 		data.Disk = map[string]any{"path": cfg.Server.DataRoot, "total_bytes": total, "free_bytes": free, "free_pct": freePct(total, free)}
 	}
+
 	return data
 }
 
@@ -364,40 +405,50 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	cfg := env.Cluster
+
 	reports, markerSnapshot, err := materialisationReports(ctx, cfg)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if p.DB != "" {
 		if _, err := clusterOf(cfg, p.DB); err != nil && reports[p.DB].Phase == "" {
 			return Result{}, err
 		}
 	}
+
 	host, _ := statusHostRead(cfg.Server.DataRoot)
 	data := statusBase(cfg, host, reports)
 	data.Master = statusMasterRead(cfg)
 	// Never sample an incomplete target as an application database.
 	active := statusActiveCluster(cfg, reports)
+
 	snaps := readClusters(ctx, active, p.DB, true)
 	if len(cfg.Clusters) > 0 {
 		data.Poolers = statusPoolRead(ctx)
 	}
+
 	rs, _ := backup.LoadRecords()
 	st, _ := statusStateRead()
 	pending := statusPendingRead()
 	followers := readFollowers(ctx, diagnosticsViewWith(active, rs), p.DB)
 	measurements := measureStatusClusters(ctx, cfg, snaps)
 	data.Databases, data.PGVersion = statusDatabaseRows(cfg, snaps, measurements, rs, st, pending, followers)
+
 	data.Databases = appendIncompleteStatusRows(data.Databases, cfg, reports, p.DB)
 	if len(reports) > 0 {
 		sort.Slice(data.Databases, func(i, j int) bool { return data.Databases[i].Name < data.Databases[j].Name })
 	}
+
 	if err := unchangedMaterialisationReports(cfg, markerSnapshot); err != nil {
 		return Result{}, err
 	}
+
 	warnings := append(statusBudgetWarnings(cfg, host), NoOffsiteWarning(cfg)...)
 	warnings = append(warnings, statusWarnings(data)...)
+
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
@@ -410,18 +461,22 @@ func statusDataFree(ctx context.Context, cfg config.Cluster, spec config.Cluster
 	if config.CheckDatabaseName(spec.Name) != nil {
 		return nil
 	}
+
 	expected := cfg.Server.DataDirectory(spec.Name)
 	if !filepath.IsAbs(expected) || filepath.Clean(expected) != expected {
 		return nil
 	}
+
 	rows, err := query(ctx, spec.DatabaseName(), "SHOW data_directory", nil)
 	if err != nil || len(rows) != 1 || rows[0]["data_directory"] != expected {
 		return nil
 	}
+
 	value, ok := free(expected)
 	if !ok {
 		return nil
 	}
+
 	return &value
 }
 
@@ -429,6 +484,7 @@ func freePct(total, free uint64) float64 {
 	if total == 0 {
 		return 0
 	}
+
 	return float64(free) * 100 / float64(total)
 }
 
@@ -436,6 +492,7 @@ func freePct(total, free uint64) float64 {
 func statusRow(cfg config.Cluster, s clusterSnapshot, rs backup.Records, st engine.State, pending map[string]bool) statusDatabase {
 	spec := s.Spec
 	res, _ := cfg.Resources(spec)
+
 	row := statusDatabase{
 		Name: spec.Name, State: s.State, Error: s.Error, Size: res.Size,
 		MemoryMiB: res.MemoryMiB, MemoryHighMiB: res.MemoryMiB + res.MemoryMiB/4,
@@ -452,22 +509,28 @@ func statusRow(cfg config.Cluster, s clusterSnapshot, rs backup.Records, st engi
 	if row.Connections.Max == 0 {
 		row.Connections.Max = int64(res.MaxConnections)
 	}
+
 	if s.CgroupOK {
 		mib := s.Cgroup.MemoryCurrent >> 20
 		row.MemoryCurrentMiB = &mib
+
 		if p, ok := s.Cgroup.Pressure["memory"]; ok {
 			avg := p.Some.Avg10
 			row.MemoryPressure10 = &avg
 		}
 	}
+
 	if ratio, ok := health.CacheHit(s.Sample.BlksHit, s.Sample.BlksRead); ok && s.State == "running" {
 		row.CacheHitRatio = &ratio
 	}
+
 	if s.HasTPS {
 		tps := s.TPS
 		row.TPS = &tps
 	}
+
 	last := rs.LastBackup[spec.Name]
+
 	row.Backup = statusBackup{
 		LastFull: last[backup.TypeFull].FinishedAt, LastDiff: last[backup.TypeDiff].FinishedAt, LastIncr: last[backup.TypeIncr].FinishedAt,
 		ArchiveFailed: s.Sample.ArchiveFailed, LastArchivedAgeS: s.Sample.LastArchivedAgeS,
@@ -475,15 +538,19 @@ func statusRow(cfg config.Cluster, s clusterSnapshot, rs backup.Records, st engi
 	if f, ok := rs.Repo[spec.Name]; ok && f.Stanza == spec.Stanza {
 		row.Backup.WindowStart, row.Backup.Sets, row.Backup.RepoSize = f.WindowStart, f.Sets, f.RepoSize
 	}
+
 	for _, at := range rs.LastFailure[spec.Name] {
 		if at > row.Backup.LastFailure {
 			row.Backup.LastFailure = at
 		}
 	}
+
 	if d, ok := rs.LastDrill(spec.Name); ok {
 		row.Drill = map[string]string{"last_result": d.Result, "at": d.FinishedAt}
 	}
+
 	_, row.RestoreInProgress = rs.OpenRestore(spec.Name)
+
 	return row
 }
 
@@ -491,6 +558,7 @@ func statusRow(cfg config.Cluster, s clusterSnapshot, rs backup.Records, st engi
 // restart, an open restore, a cluster that isn't running.
 func statusWarnings(d statusData) []output.Warning {
 	var out []output.Warning
+
 	for _, db := range d.Databases {
 		switch db.State {
 		case "stopped":
@@ -498,19 +566,24 @@ func statusWarnings(d statusData) []output.Warning {
 		case "unreachable":
 			out = append(out, output.Warning{Code: "database_unreachable", Message: db.Name + "'s cluster does not answer: " + db.Error})
 		}
+
 		if db.RestartPending {
 			msg := db.Name + " waits for a restart to apply settings"
 			if db.DeferredRestart != "" {
 				msg += "; it restarts at the start of the maintenance window"
 			}
+
 			out = append(out, output.Warning{Code: "restart_pending", Message: msg})
 		}
+
 		if f := db.Follower; f != nil && db.State == "running" && ((f.SourceKnown && !f.Streaming) || (f.SelfKnown && (!f.InRecovery || f.ReplayPaused))) {
 			out = append(out, output.Warning{Code: "follower_not_streaming", Message: db.Name + " is not streaming from " + db.Follows + " (vaire doctor --db " + db.Name + ")"})
 		}
+
 		if db.RestoreInProgress {
 			out = append(out, output.Warning{Code: "restore_in_progress", Message: "a restore of " + db.Name + " is open (vaire restore status " + db.Name + ")"})
 		}
 	}
+
 	return out
 }

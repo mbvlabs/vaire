@@ -100,6 +100,7 @@ func NewInstanceID() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
+
 	return hex.EncodeToString(b), nil
 }
 
@@ -109,6 +110,7 @@ func ReadInstance(root string) (string, error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
+
 	return strings.TrimSpace(string(raw)), err
 }
 
@@ -118,10 +120,13 @@ func ReadLocalEpoch(root string) (Epoch, error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return Epoch{}, nil
 	}
+
 	if err != nil {
 		return Epoch{}, err
 	}
+
 	var e Epoch
+
 	return e, json.Unmarshal(raw, &e)
 }
 
@@ -139,8 +144,11 @@ func ReadFenced(root string) (Fenced, bool) {
 	if err != nil {
 		return Fenced{}, false
 	}
+
 	var f Fenced
+
 	_ = json.Unmarshal(raw, &f)
+
 	return f, true
 }
 

@@ -16,6 +16,7 @@ import (
 func TestStatusCPUProbeExcludesFinalInvocationLatency(t *testing.T) {
 	info, err := os.Stat(t.TempDir())
 	reject(t, err != nil, err)
+
 	usage := uint64(10)
 	obs := hostinfo.CPUObservation{Identity: info, UsageUsec: &usage, ObservedAt: time.Now()}
 	elapsed := 10 * time.Millisecond
@@ -26,6 +27,7 @@ func TestStatusCPUProbeExcludesFinalInvocationLatency(t *testing.T) {
 		if calls == 2 {
 			elapsed = finalDelay
 		}
+
 		return "0123456789abcdef0123456789abcdef", nil
 	}
 	_, generation, stamp := statusCPUProbeWith(invocation, func() hostinfo.CPUObservation { return obs },
@@ -52,6 +54,7 @@ func TestStatusCPUFacts(t *testing.T) {
 	rejectf(t, !cpu.EffectiveKnown || cpu.Effective == nil || cpu.Effective.QuotaUsec != nil || !*cpu.Effective.Unlimited || cpu.UsageUsec == nil, "%+v", cpu)
 	raw, err := json.Marshal(cpu)
 	rejectf(t, err != nil || !strings.Contains(string(raw), `"unlimited":true`) || strings.Contains(string(raw), `"quota_usec":`), "%s %v", raw, err)
+
 	obs.Reason = "service_identity_unverified"
 	cpu = cpuStatus(config.Resources{}, obs, "generation", &stamp)
 	rejectf(t, cpu.EffectiveKnown || cpu.UsageUsec != nil || cpu.SampleGeneration != "" || cpu.Effective != nil, "%+v", cpu)
@@ -66,7 +69,9 @@ func TestStatusDataFreeRequiresActualManagedPath(t *testing.T) {
 	freeCalls := 0
 	free := func(path string) (uint64, bool) {
 		freeCalls++
+
 		rejectf(t, path != want, "unexpected path %s", path)
+
 		return 0, true
 	}
 	path := want
@@ -75,8 +80,11 @@ func TestStatusDataFreeRequiresActualManagedPath(t *testing.T) {
 	}
 	got := statusDataFree(context.Background(), cfg, spec, query, free)
 	reject(t, got == nil || *got != 0 || freeCalls != 1, got, freeCalls)
+
 	path = "/"
+
 	reject(t, statusDataFree(context.Background(), cfg, spec, query, free) != nil || freeCalls != 1, "mismatched path accepted")
+
 	fail := func(context.Context, string, string, map[string]string) ([]map[string]string, error) {
 		return nil, errors.New("unavailable")
 	}

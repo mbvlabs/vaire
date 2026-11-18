@@ -40,6 +40,7 @@ wait
 // script's whole process group gets SIGTERM, so a background child stops too.
 func TestShellRunCancelsProcessGroup(t *testing.T) {
 	shell := Shell{}
+
 	testShellCancelsProcessGroup(t, func(ctx context.Context, dir string, report Reporter) error {
 		return shell.Run(ctx, "cancel-test-v1", cancellationScript, map[string]string{cancelTestDir: dir}, report)
 	})
@@ -48,6 +49,7 @@ func TestShellRunCancelsProcessGroup(t *testing.T) {
 // TestShellExecCancelsProcessGroup pins the same contract for Shell.Exec.
 func TestShellExecCancelsProcessGroup(t *testing.T) {
 	shell := Shell{}
+
 	testShellCancelsProcessGroup(t, func(ctx context.Context, dir string, report Reporter) error {
 		return shell.Exec(ctx, "cancel-test-v1", Command{
 			Name: "/bin/bash",
@@ -67,6 +69,7 @@ func testShellCancelsProcessGroup(t *testing.T, start func(context.Context, stri
 	t.Helper()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
+
 	t.Cleanup(func() {
 		cancel()
 		killScriptGroup(dir)
@@ -74,16 +77,20 @@ func testShellCancelsProcessGroup(t *testing.T, start func(context.Context, stri
 	// The script prints ready exactly once, after its readiness handshake, so
 	// cancellation is triggered by observed output rather than by a delay.
 	ready := make(chan struct{})
+
 	var once sync.Once
+
 	report := func(ev output.Event) {
 		if ev.Line != "ready" {
 			return
 		}
+
 		once.Do(func() {
 			close(ready)
 			cancel()
 		})
 	}
+
 	result := make(chan error, 1)
 	go func() { result <- start(ctx, dir, report) }()
 
@@ -102,6 +109,7 @@ func testShellCancelsProcessGroup(t *testing.T, start func(context.Context, stri
 			t.Fatal("run never printed ready")
 		}
 	}
+
 	term, err := os.ReadFile(filepath.Join(dir, "child.term"))
 	if err != nil || string(term) != "term" {
 		t.Fatalf("background child did not record the group SIGTERM: %q, %v", term, err)
@@ -115,6 +123,7 @@ func killScriptGroup(dir string) {
 	if pid := recordedPID(filepath.Join(dir, "group.pid")); pid > 0 {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
+
 	if pid := recordedPID(filepath.Join(dir, "child.pid")); pid > 0 {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
@@ -126,9 +135,11 @@ func recordedPID(path string) int {
 	if err != nil {
 		return 0
 	}
+
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid <= 0 {
 		return 0
 	}
+
 	return pid
 }

@@ -23,9 +23,11 @@ func SameBuild(a, b node.BuildID) bool {
 	if a.Version != b.Version || a.Channel != b.Channel {
 		return false
 	}
+
 	if a.Channel == "dev" {
 		return a.Commit == b.Commit
 	}
+
 	return true
 }
 
@@ -37,11 +39,14 @@ func (n *Node) Version(ctx context.Context) (node.BuildID, bool, error) {
 		if status, ok := transport.ExitStatus(err); ok && (status == 127 || status == 126) {
 			return node.BuildID{}, false, nil
 		}
+
 		if strings.Contains(string(stderr), "No such file") || strings.Contains(string(stderr), "not found") {
 			return node.BuildID{}, false, nil
 		}
+
 		return node.BuildID{}, false, output.WrapError(output.CodeTransportFailed, fmt.Errorf("vaire node version failed on %s: %w", n.SSH.Target, err), output.ExitTransport, "")
 	}
+
 	var env struct {
 		OK   bool         `json:"ok"`
 		Data node.BuildID `json:"data"`
@@ -49,6 +54,7 @@ func (n *Node) Version(ctx context.Context) (node.BuildID, bool, error) {
 	if err := json.Unmarshal(stdout, &env); err != nil || !env.OK {
 		return node.BuildID{}, true, output.NewError(output.CodeTransportFailed, "vaire node version on "+n.SSH.Target.String()+" printed no version", output.ExitTransport, "")
 	}
+
 	return env.Data, true, nil
 }
 
@@ -67,24 +73,30 @@ func (n *Node) Handshake(ctx context.Context, opts HandshakeOptions) error {
 	if err != nil {
 		return err
 	}
+
 	want := LocalBuild()
 	if installed && SameBuild(got, want) {
 		return nil
 	}
+
 	if !opts.AutoUpgrade {
 		return versionMismatch(got, want, installed)
 	}
+
 	if opts.Progress != nil {
 		opts.Progress(fmt.Sprintf("node runs %s (%s); installing %s (%s)", got.Version, got.Channel, want.Version, want.Channel))
 	}
+
 	arch, err := n.Arch(ctx)
 	if err != nil {
 		return err
 	}
+
 	art, err := NodeArtifact(ctx, arch)
 	if err != nil {
 		return err
 	}
+
 	if installed {
 		if _, err := n.InstallUpgrade(ctx, art, CallOptions{}); err != nil {
 			return err
@@ -92,13 +104,16 @@ func (n *Node) Handshake(ctx context.Context, opts HandshakeOptions) error {
 	} else if err := n.InstallBootstrap(ctx, art); err != nil {
 		return err
 	}
+
 	got, installed, err = n.Version(ctx)
 	if err != nil {
 		return err
 	}
+
 	if !installed || !SameBuild(got, want) {
 		return versionMismatch(got, want, installed)
 	}
+
 	return nil
 }
 
@@ -108,6 +123,7 @@ func versionMismatch(got, want node.BuildID, installed bool) *output.CLIError {
 	if !installed {
 		message = "vaire is not installed on the node"
 	}
+
 	return output.NewError(
 		output.CodeNodeVersionMismatch,
 		message,

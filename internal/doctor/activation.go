@@ -18,14 +18,17 @@ func activationPending(f Facts) []Result {
 		r := Result{DB: c.Name}
 		fence, fenced := f.Records.ActivationFenceFor(c.Name)
 		undo, undoing := f.Records.Undoing[c.Name]
+
 		unfollow, unfollowing := f.Records.Unfollowing[c.Name]
 		switch {
 		case undoing:
 			r.Status = Fail
+
 			r.Detail = "a restore undo of " + c.Name + " is unfinished; its pooler routes are not verified"
 			if undo.Aside != "" {
 				r.Detail = "a restore undo of " + c.Name + " is unfinished (the restored data was kept as " + undo.Aside + "); its pooler routes are not verified"
 			}
+
 			r.Fix = "vaire restore undo " + c.Name + " --confirm " + c.Name + "/restore"
 		case fenced && fence.Phase == "routing":
 			r.Status = Fail
@@ -46,10 +49,13 @@ func activationPending(f Facts) []Result {
 		default:
 			r.Status, r.Detail = Pass, "no unfinished activation or routing"
 		}
+
 		out = append(out, r)
 	}
+
 	if len(out) == 0 {
 		return one(Skip, "no databases", "")
 	}
+
 	return out
 }

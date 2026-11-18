@@ -43,6 +43,7 @@ func ParseBackends(rows []map[string]string) []Backend {
 		out = append(out, Backend{PID: pid, Role: r["role"], State: r["state"], App: r["app"], Seconds: secs,
 			Super: r["superuser"] == "t" || r["superuser"] == "true", Query: r["query"]})
 	}
+
 	return out
 }
 
@@ -62,25 +63,32 @@ func SelectBackends(all []Backend, o KillOptions) (selected, refused []Backend) 
 			if b.PID != o.PID {
 				continue
 			}
+
 			if b.Super {
 				b.Refusal = "a superuser backend"
 				refused = append(refused, b)
+
 				continue
 			}
+
 			selected = append(selected, b)
 		case o.IdleInTx:
 			if !strings.HasPrefix(b.State, "idle in transaction") {
 				continue
 			}
+
 			if o.OlderThanSecond > 0 && b.Seconds < o.OlderThanSecond {
 				continue
 			}
+
 			if b.Super || protectedRole(b.Role) || b.App == "vaire top" {
 				continue
 			}
+
 			selected = append(selected, b)
 		}
 	}
+
 	return selected, refused
 }
 
@@ -90,5 +98,6 @@ func TerminateSQL(pids []int) string {
 	for _, p := range pids {
 		parts = append(parts, strconv.Itoa(p))
 	}
+
 	return "SELECT pid, pg_terminate_backend(pid) AS terminated FROM unnest(ARRAY[" + strings.Join(parts, ",") + "]::int[]) AS pid"
 }

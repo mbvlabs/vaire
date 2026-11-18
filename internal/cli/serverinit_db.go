@@ -23,8 +23,10 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 		if r.dbSecrets == nil {
 			r.dbSecrets = map[string]string{}
 		}
+
 		r.dbSecrets[steps.SecretBackupAgeRecipient] = r.sec.Backup.Encryption.Recipient
 	}
+
 	reply, err := r.p.call(ctx, caller, "cluster.bootstrap", map[string]any{
 		"phase":        node.PhaseDatabase,
 		"cluster_toml": string(raw),
@@ -35,14 +37,18 @@ func (r *initRun) callDatabasePhase(ctx context.Context, caller remote.Caller) (
 	if err != nil {
 		return node.BootstrapResult{}, err
 	}
+
 	var res node.BootstrapResult
 	if err := reply.Decode(&res); err != nil {
 		return res, err
 	}
+
 	if res.Doctor != nil {
 		r.health = healthLine(res.Doctor.Summary)
 	}
+
 	r.warnings = append(r.warnings, reply.Warnings...)
+
 	return res, nil
 }
 
@@ -51,6 +57,7 @@ func (r *initRun) healthSuffix() string {
 	if r.health == "" {
 		return ""
 	}
+
 	return "\n" + strings.ToUpper(r.health[:1]) + r.health[1:]
 }
 
@@ -64,10 +71,12 @@ const dnsHelp = "Set the records to DNS only (not proxied). Database clients can
 // certificate was issued (D10).
 func (r *initRun) dnsStep(ctx context.Context) error {
 	ipv4, ipv6 := r.master().PublicAddress, r.prog.PublicIPv6
+
 	records := dnsRecords(r.cfg.MasterHostname(), ipv4, ipv6)
 	if len(records) == 0 {
 		return nil
 	}
+
 	cmd := r.cmd
 	// The records were shown and confirmed after first contact unless this
 	// is a resume or host bootstrap reported another IPv6 address.
@@ -76,21 +85,26 @@ func (r *initRun) dnsStep(ctx context.Context) error {
 			return err
 		}
 	}
+
 	if flagChanged(cmd, "skip-dns-check") {
 		r.warnings = append(r.warnings, output.Warning{Code: "flag_deprecated", Message: "--skip-dns-check is no longer needed: a DNS mismatch is only a warning"})
 	}
 
 	r.p.phase("init.dns", "started", "ask "+strings.Join(resolverNames(), " and ")+" for "+r.cfg.MasterHostname())
 	check := checkDNS(ctx, r.cfg.MasterHostname(), ipv4, ipv6)
+
 	lines := make([]string, 0, len(check.Resolvers))
 	for _, a := range check.Resolvers {
 		line, ok := a.describe(ipv4, ipv6)
+
 		mark := "ok"
 		if !ok {
 			mark = "mismatch"
 		}
+
 		lines = append(lines, line+"  ["+mark+"]")
 	}
+
 	switch {
 	case check.Matches:
 		r.p.phase("init.dns", "completed", "the records resolve to the server")
@@ -102,11 +116,14 @@ func (r *initRun) dnsStep(ctx context.Context) error {
 		r.warnings = append(r.warnings, output.Warning{Code: "dns_mismatch",
 			Message: r.cfg.MasterHostname() + " does not resolve to the server yet; the certificate is issued once it does"})
 	}
+
 	r.p.phase("init.dns", "completed", "not resolving to the server yet; continuing")
 	r.p.panel("DNS answers", lines)
+
 	if check.Proxied {
 		r.p.warn("the record is proxied by Cloudflare; set it to DNS only (grey cloud)")
 	}
+
 	return nil
 }
 
@@ -115,6 +132,7 @@ func resolverNames() []string {
 	for _, s := range publicResolvers {
 		out = append(out, strings.TrimSuffix(s, ":53"))
 	}
+
 	return out
 }
 
@@ -125,40 +143,52 @@ func (r *initRun) waitForTLS(ctx context.Context, caller remote.Caller) error {
 	if r.cfg.TLS.Mode == "self-signed" {
 		return nil
 	}
+
 	r.p.phase("init.tls", "started", "wait for the certificate for "+r.cfg.MasterHostname())
+
 	deadline := time.Now().Add(tlsWaitTimeout)
 	if t := r.p.task("init.tls"); t != nil {
 		t.Deadline(deadline)
 	}
+
 	for {
 		state, err := r.tlsStatus(ctx, caller)
 		if err != nil {
 			return err
 		}
+
 		r.tlsState = state
 		if state.State != "pending" {
 			detail := "issued"
 			if state.NotAfter != "" {
 				detail += ", valid until " + state.NotAfter
 			}
+
 			r.p.phase("init.tls", "completed", detail)
+
 			return nil
 		}
+
 		if t := r.p.task("init.tls"); t != nil {
 			t.Detail("still the placeholder certificate; Let's Encrypt validates " + r.cfg.MasterHostname() + " over HTTP on port 80")
 		}
+
 		if time.Now().After(deadline) {
 			check := checkDNS(ctx, r.cfg.MasterHostname(), r.master().PublicAddress, r.prog.PublicIPv6)
+
 			msg := "the certificate is still pending; vaire retries every hour, so it is issued within the hour after DNS points at the server"
 			if check.Proxied {
 				msg += ". " + r.cfg.MasterHostname() + " is proxied by Cloudflare: set it to DNS only (grey cloud)"
 			} else if !check.Matches {
 				msg += ". DNS answers: " + dnsSummary(check, r.master().PublicAddress, r.prog.PublicIPv6)
 			}
+
 			r.warnings = append(r.warnings, output.Warning{Code: "tls_pending", Message: msg})
 			r.p.phase("init.tls", "completed", "still pending")
+
 			return nil
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -173,6 +203,7 @@ func dnsSummary(check dnsCheck, ipv4, ipv6 string) string {
 		line, _ := a.describe(ipv4, ipv6)
 		parts = append(parts, line)
 	}
+
 	return strings.Join(parts, "; ")
 }
 
@@ -182,10 +213,12 @@ func (r *initRun) tlsStatus(ctx context.Context, caller remote.Caller) (*node.TL
 	if err != nil {
 		return nil, err
 	}
+
 	var state node.TLSState
 	if err := reply.Decode(&state); err != nil {
 		return nil, err
 	}
+
 	return &state, nil
 }
 
@@ -196,6 +229,7 @@ func (r *initRun) confirmDNSEarly() error {
 	if r.cfg.TLS.Mode != "acme" || r.prog.Done(phaseDNS) || (r.restore != nil && !r.restore.addressChanged()) {
 		return nil
 	}
+
 	return r.askDNS(r.master().PublicAddress, r.prog.PublicIPv6, true)
 }
 
@@ -206,27 +240,34 @@ func (r *initRun) askDNS(ipv4, ipv6 string, early bool) error {
 	if len(records) == 0 {
 		return nil
 	}
+
 	title := "Create this DNS record"
 	if len(records) > 1 {
 		title = "Create these DNS records"
 	}
+
 	body := recordLines(records)
 	if ipv6 == "" {
 		body = append(body, "", "No AAAA record: the server has no public IPv6 address.")
 	}
+
 	body = append(body, "", dnsHelp)
 	if early {
 		body = append(body, "vaire checks that they resolve after it sets up the host, before the database.")
 	}
+
 	r.p.panel(title, body)
 	r.dnsShown, r.dnsIPv6 = true, ipv6
+
 	cmd := r.cmd
 	if MustNotPrompt(cmd) || flagTrue(cmd, "dns-ready") {
 		return nil
 	}
+
 	prompt := "Type 'confirmed' once the A record exists"
 	if ipv6 != "" {
 		prompt = "Type 'confirmed' once the A and AAAA records exist"
 	}
+
 	return typeWord(cmd, prompt, "", "confirmed")
 }

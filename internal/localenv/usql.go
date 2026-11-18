@@ -41,39 +41,50 @@ func UsqlPath(cmd *cobra.Command) (string, error) {
 	if p, err := exec.LookPath("usql"); err == nil {
 		return p, nil
 	}
+
 	cached := filepath.Join(toolsDir(), "usql", UsqlVersion, "usql")
 	if info, err := os.Stat(cached); err == nil && info.Mode().IsRegular() {
 		return cached, nil
 	}
+
 	platform := runtime.GOOS + "/" + runtime.GOARCH
+
 	want, ok := usqlSHA256[platform]
 	if !ok {
 		return "", output.NewError(output.CodeMissingTool, "usql is not on PATH and vaire has no pinned build for "+platform,
 			output.ExitMissingTool, "Install usql from https://github.com/xo/usql and retry.").
 			WithDetails(map[string]any{"tool": "usql", "missing": []string{"usql"}})
 	}
+
 	url := usqlURL(runtime.GOOS, runtime.GOARCH)
+
 	run := flagBool(cmd, "install-missing")
 	if !run && canPrompt(cmd) {
 		ok, err := ask(cmd, "Download usql "+UsqlVersion+" into "+filepath.Dir(cached)+"?")
 		if err != nil {
 			return "", err
 		}
+
 		run = ok
 	}
+
 	if !run {
 		return "", output.NewError(output.CodeMissingTool, "usql is needed to open the console but is not on PATH",
 			output.ExitMissingTool, "Re-run with --install-missing to download usql "+UsqlVersion+", or install it yourself.").
 			WithDetails(map[string]any{"tool": "usql", "missing": []string{"usql"}, "download_url": url})
 	}
+
 	stop := waitOn(cmd, "downloading usql "+UsqlVersion)
 	err := downloadUsql(cmd.Context(), url, want, cached)
+
 	stop()
+
 	if err != nil {
 		return "", output.WrapError(output.CodeExternalCommand, err, output.ExitExternal,
 			"Install usql from https://github.com/xo/usql and retry.").
 			WithDetails(map[string]any{"tool": "usql", "download_url": url})
 	}
+
 	return cached, nil
 }
 
@@ -89,8 +100,10 @@ func toolsDir() string {
 		if err != nil {
 			return filepath.Join(os.TempDir(), "vaire-tools")
 		}
+
 		base = filepath.Join(home, ".cache")
 	}
+
 	return filepath.Join(base, "vaire", "tools")
 }
 
@@ -98,41 +111,53 @@ func toolsDir() string {
 // the usql binary to dest.
 func downloadUsql(ctx context.Context, url, wantSHA, dest string) error {
 	ctx = usqlDownloadContext(ctx)
+
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return err
 	}
+
 	archive, err := os.CreateTemp(filepath.Dir(dest), "usql-*.tar.bz2")
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = os.Remove(archive.Name()); _ = archive.Close() }()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
+
 	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
+
 	hash := sha256.New()
+
 	n, err := io.Copy(io.MultiWriter(archive, hash), io.LimitReader(resp.Body, usqlMaxArchive+1))
 	if err != nil {
 		return err
 	}
+
 	if n > usqlMaxArchive {
 		return errors.New("the usql archive is larger than expected")
 	}
+
 	if got := hex.EncodeToString(hash.Sum(nil)); got != wantSHA {
 		return fmt.Errorf("usql archive sha256 mismatch: got %s, want %s", got, wantSHA)
 	}
+
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+
 	return extractUsql(archive, dest)
 }
 
@@ -140,6 +165,7 @@ func usqlDownloadContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()
 	}
+
 	return ctx
 }
 
@@ -150,29 +176,37 @@ func extractUsql(r io.Reader, dest string) error {
 		if errors.Is(err, io.EOF) {
 			return errors.New("the usql archive has no usql binary")
 		}
+
 		if err != nil {
 			return err
 		}
+
 		if hdr.Typeflag != tar.TypeReg || path.Base(hdr.Name) != "usql" {
 			continue
 		}
+
 		tmp, err := os.CreateTemp(filepath.Dir(dest), "usql-bin-*")
 		if err != nil {
 			return err
 		}
+
 		_, err = io.Copy(tmp, io.LimitReader(tr, usqlMaxArchive))
 		if cerr := tmp.Close(); err == nil {
 			err = cerr
 		}
+
 		if err == nil {
 			err = os.Chmod(tmp.Name(), 0o755) //nolint:gosec // G302: an executable.
 		}
+
 		if err == nil {
 			err = os.Rename(tmp.Name(), dest)
 		}
+
 		if err != nil {
 			_ = os.Remove(tmp.Name())
 		}
+
 		return err
 	}
 }

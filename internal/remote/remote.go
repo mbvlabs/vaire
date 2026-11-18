@@ -57,6 +57,7 @@ func (r Reply) Decode(v any) error {
 	if len(r.Data) == 0 {
 		return nil
 	}
+
 	return json.Unmarshal(r.Data, v)
 }
 
@@ -68,20 +69,25 @@ type Caller interface {
 // newRequest encodes one request line and returns it with its request id.
 func newRequest(method string, params any, operator string, opts CallOptions) ([]byte, string, error) {
 	var rawParams json.RawMessage
+
 	if params != nil {
 		encoded, err := json.Marshal(params)
 		if err != nil {
 			return nil, "", err
 		}
+
 		rawParams = encoded
 	}
+
 	for _, v := range opts.Secrets {
 		secrets.Add(v)
 	}
+
 	requestID := opts.RequestID
 	if requestID == "" {
 		requestID = rpc.NewRequestID()
 	}
+
 	req := rpc.Request{
 		Schema:          rpc.Schema,
 		RequestID:       requestID,
@@ -102,10 +108,12 @@ func newRequest(method string, params any, operator string, opts CallOptions) ([
 	if req.OperationID == "" {
 		req.OperationID = req.RequestID
 	}
+
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", err
 	}
+
 	return append(raw, '\n'), req.RequestID, nil
 }
 
@@ -118,6 +126,7 @@ func readEvents(r io.Reader, onEvent func(output.Event)) (Reply, bool, error) {
 			_, _ = io.Copy(io.Discard, reader)
 			return reply, true, perr
 		}
+
 		if err != nil {
 			return Reply{}, false, nil
 		}
@@ -130,6 +139,7 @@ func readEventLine(line []byte, onEvent func(output.Event)) (Reply, bool, error)
 	if len(bytes.TrimSpace(line)) == 0 {
 		return Reply{}, false, nil
 	}
+
 	var ev struct {
 		output.Event
 		Envelope json.RawMessage `json:"envelope"`
@@ -137,15 +147,18 @@ func readEventLine(line []byte, onEvent func(output.Event)) (Reply, bool, error)
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return Reply{}, false, nil
 	}
+
 	if ev.Type == "result" {
 		reply, perr := parseResult(ev.Envelope)
 		return reply, true, perr
 	}
+
 	if onEvent != nil {
 		e := ev.Event
 		e.Envelope = nil
 		onEvent(e)
 	}
+
 	return Reply{}, false, nil
 }
 
@@ -161,12 +174,15 @@ func parseResult(raw json.RawMessage) (Reply, error) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return Reply{}, output.NewError(output.CodeTransportFailed, "the node result does not parse: "+err.Error(), output.ExitTransport, "")
 	}
+
 	if env.OK {
 		return Reply{Data: env.Data, Warnings: env.Warnings}, nil
 	}
+
 	if env.Error == nil {
 		return Reply{}, output.NewError(output.CodeError, "the node reported a failure without an error", output.ExitGeneric, "")
 	}
+
 	return Reply{}, &output.CLIError{
 		Code:     env.Error.Code,
 		Message:  env.Error.Message,
@@ -194,42 +210,55 @@ func (n *Node) asRoot(command string) string {
 	if n.SSH.Target.User == "root" {
 		return command
 	}
+
 	return "sudo -n " + command
 }
 
 // Call runs one RPC method and streams its events to opts.OnEvent.
 func (n *Node) Call(ctx context.Context, method string, params any, opts CallOptions) (Reply, error) {
 	opts = callOptionsForContext(ctx, opts)
+
 	payload, requestID, err := newRequest(method, params, n.Operator, opts)
 	if err != nil {
 		return Reply{}, err
 	}
+
 	operationID := effectiveOperationID(opts.OperationID, requestID)
 	pr, pw := io.Pipe()
 	stderr := &tail{max: 8 * 1024}
+
 	var errOut io.Writer = stderr
 	if n.Stderr != nil {
 		errOut = io.MultiWriter(stderr, n.Stderr)
 	}
+
 	runErr := make(chan error, 1)
+
 	go func() {
 		err := n.SSH.Run(ctx, n.asRoot(node.BinaryPath+" node rpc"), bytes.NewReader(payload), pw, errOut)
 		_ = pw.CloseWithError(io.EOF)
+
 		runErr <- err
 	}()
+
 	reply, got, perr := readEvents(pr, opts.OnEvent)
 	err = <-runErr
+
 	if got {
 		return reply, annotateRPCError(perr, operationID, requestID)
 	}
+
 	if ctx.Err() != nil {
 		return Reply{}, ctx.Err()
 	}
+
 	if n.SSH.StreamLost(err) {
 		return Reply{}, streamLost(method, requestID, operationID, n.SSH, err)
 	}
+
 	detail := strings.TrimSpace(secrets.Redact(stderr.String()))
 	status, _ := transport.ExitStatus(err)
+
 	return Reply{}, annotateRPCError(output.NewError(
 		output.CodeTransportFailed,
 		fmt.Sprintf("vaire node rpc %s on %s ended without a result", method, n.SSH.Target),
@@ -243,14 +272,17 @@ func (n *Node) Call(ctx context.Context, method string, params any, opts CallOpt
 // the result to its run log, which is named after the request id.
 func streamLost(method, requestID, operationID string, c *transport.SSHClient, err error) *output.CLIError {
 	runLog := fmt.Sprintf("%s/*-%s-%s.log", engine.LogDir, method, requestID)
+
 	why := "the connection closed"
 	if c.Lost() {
 		why = "nothing came back from the node, not even an SSH keepalive reply, for " + c.Silence().String()
 	}
+
 	details := map[string]any{"reason": "stream_lost", "request_id": requestID, "run_log": runLog, "error": errString(err)}
 	if operationID != "" {
 		details["operation_id"] = operationID
 	}
+
 	return output.NewError(
 		output.CodeTransportFailed,
 		fmt.Sprintf("lost the connection to %s during %s (%s); the node keeps running it", c.Target, method, why),
@@ -263,6 +295,7 @@ func errString(err error) string {
 	if err == nil {
 		return ""
 	}
+
 	return secrets.Redact(err.Error())
 }
 
@@ -275,10 +308,12 @@ type Local struct {
 // Call runs one RPC method in-process.
 func (l Local) Call(ctx context.Context, method string, params any, opts CallOptions) (Reply, error) {
 	opts = callOptionsForContext(ctx, opts)
+
 	payload, requestID, err := newRequest(method, params, l.Operator, opts)
 	if err != nil {
 		return Reply{}, err
 	}
+
 	operationID := effectiveOperationID(opts.OperationID, requestID)
 	pr, pw := io.Pipe()
 	// node.Serve takes no context: the in-process dispatcher installs its own
@@ -287,10 +322,12 @@ func (l Local) Call(ctx context.Context, method string, params any, opts CallOpt
 		node.Serve(bytes.NewReader(payload), pw)
 		_ = pw.Close()
 	}()
+
 	reply, got, perr := readEvents(pr, opts.OnEvent)
 	if !got {
 		return Reply{}, errors.New("the in-process node dispatcher ended without a result")
 	}
+
 	return reply, annotateRPCError(perr, operationID, requestID)
 }
 
@@ -301,9 +338,11 @@ type tail struct {
 
 func (t *tail) Write(p []byte) (int, error) {
 	t.buf.Write(p)
+
 	if over := t.buf.Len() - t.max; over > 0 {
 		t.buf.Next(over)
 	}
+
 	return len(p), nil
 }
 

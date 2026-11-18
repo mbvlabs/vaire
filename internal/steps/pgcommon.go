@@ -102,6 +102,7 @@ var pgConfRoot = "/etc/postgresql/18"
 func ExtensionDirsForTest(control, lib string) func() {
 	oldControl, oldLib := extensionControlDir, extensionLibDir
 	extensionControlDir, extensionLibDir = control, lib
+
 	return func() { extensionControlDir, extensionLibDir = oldControl, oldLib }
 }
 
@@ -114,6 +115,7 @@ func PGConfDir(cluster string) string { return pgConfRoot + "/" + cluster }
 func PGConfRootForTest(dir string) func() {
 	old := pgConfRoot
 	pgConfRoot = dir
+
 	return func() { pgConfRoot = old }
 }
 
@@ -169,10 +171,12 @@ const (
 // others come back.
 func tuningFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) tune.Result {
 	res, _ := cfg.Resources(spec)
+
 	profile := spec.Profile
 	if profile == "" {
 		profile = cfg.Postgres.Profile
 	}
+
 	return tune.Calculate(tune.Input{
 		RAMMiB:            res.MemoryMiB,
 		VCPU:              host.VCPU,
@@ -190,14 +194,17 @@ func tuningFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) 
 // of memoryMiB to the memory of every cluster.
 func diskShareGiB(cfg config.Cluster, memoryMiB, diskGiB int) int {
 	total := 0
+
 	for _, c := range slices.Concat(cfg.Clusters, cfg.Awaiting) {
 		if r, err := cfg.Resources(c); err == nil {
 			total += r.MemoryMiB
 		}
 	}
+
 	if total <= 0 || memoryMiB >= total {
 		return diskGiB
 	}
+
 	return diskGiB * memoryMiB / total
 }
 
@@ -209,6 +216,7 @@ func hugePagesFor(cfg config.Cluster, host hostinfo.Info) int {
 	for _, c := range slices.Concat(cfg.Clusters, cfg.Awaiting) {
 		total += tuningFor(cfg, c, host).HugePages
 	}
+
 	return total
 }
 

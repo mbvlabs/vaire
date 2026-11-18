@@ -24,6 +24,7 @@ linters:
     - unparam         # unused function parameters
     - gocyclo
     - unused
+    - wsl_v5
   settings:
     gocognit:
       min-complexity: 20

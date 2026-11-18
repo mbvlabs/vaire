@@ -60,18 +60,23 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	hostname := steps.NodeHostname(cfg)
 	if hostname == "" {
 		logLine(report, "certs-renew", "no domain is configured; nothing to renew")
 		return map[string]any{"changed": false, "reason": "no domain configured"}, nil
 	}
+
 	selfSigned := cfg.TLS.Mode == "self-signed"
+
 	reason := renewReason(readCert(steps.TLSCertPath), hostname, selfSigned)
 	if reason == "" {
 		notAfter := certNotAfter()
 		logLine(report, "certs-renew", "the certificate for "+hostname+" is current until "+notAfter+"; nothing to renew")
+
 		return map[string]any{"changed": false, "hostname": hostname, "not_after": notAfter}, nil
 	}
+
 	logLine(report, "certs-renew", "renewing the certificate for "+hostname+": "+reason)
 
 	var chainPEM, keyPEM []byte
@@ -80,8 +85,10 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 	} else {
 		ctx, cancel := context.WithTimeout(ctx, acmeTimeout)
 		defer cancel()
+
 		chainPEM, keyPEM, err = issueACME(ctx, cfg, hostname, report)
 	}
+
 	var cliErr *output.CLIError
 	if errors.As(err, &cliErr) && cliErr.Code == output.CodePrecondition {
 		// DNS doesn't point here yet: that's the normal state right after
@@ -89,21 +96,26 @@ func certsRenew(ctx context.Context, report engine.Reporter) (any, error) {
 		logLine(report, "certs-renew", cliErr.Error())
 		return map[string]any{"changed": false, "hostname": hostname, "pending": cliErr.Error()}, nil
 	}
+
 	if err != nil {
 		return nil, err
 	}
+
 	if err := installCert(chainPEM, keyPEM); err != nil {
 		return nil, err
 	}
+
 	logLine(report, "certs-renew", "installed the certificate for "+hostname)
 	// Clients reach TLS at the poolers and nginx; the clusters listen on
 	// sockets only and reload last, one at a time (RFC 8.3).
 	for _, unit := range []string{steps.PgbouncerService, steps.SessionPoolerService, steps.NginxService} {
 		_ = runQuiet(ctx, "systemctl", "reload", unit)
 	}
+
 	for _, c := range cfg.Clusters {
 		_ = runQuiet(ctx, "pg_ctlcluster", "18", c.Name, "reload")
 	}
+
 	return map[string]any{"changed": true, "hostname": hostname, "not_after": certNotAfter()}, nil
 }
 
@@ -121,6 +133,7 @@ func renewReason(cert *x509.Certificate, domain string, selfSigned bool) string 
 	case time.Until(cert.NotAfter) < renewBefore:
 		return "it expires " + cert.NotAfter.UTC().Format(time.RFC3339)
 	}
+
 	return ""
 }
 
@@ -131,10 +144,13 @@ func installCert(chainPEM, keyPEM []byte) error {
 	if err := engine.WriteFileAtomicOwned(steps.TLSKeyPath, keyPEM, steps.TLSKeyMode, steps.TLSKeyOwner, steps.TLSKeyGroup); err != nil {
 		return err
 	}
+
 	if err := engine.WriteFileAtomicOwned(steps.TLSCertPath, chainPEM, steps.TLSCertMode, steps.TLSCertOwner, steps.TLSCertGroup); err != nil {
 		return err
 	}
+
 	masterbackup.MarkDirty("certificate")
+
 	return nil
 }
 
@@ -152,37 +168,46 @@ func issueACME(ctx context.Context, cfg config.Cluster, hostname string, report 
 		// server decide.
 		logLine(report, "certs-renew", "self-check inconclusive, trying anyway: "+err.Error())
 	}
+
 	accountKey, err := loadOrCreateKey(steps.ACMEAccountKeyPath)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	client := &acme.Client{Key: accountKey, DirectoryURL: acme.LetsEncryptURL, UserAgent: "vaire"}
 	if cfg.TLS.ACMECA != "" {
 		client.DirectoryURL = cfg.TLS.ACMECA
 	}
+
 	account := &acme.Account{}
 	if cfg.ACMEEmail != "" {
 		account.Contact = []string{"mailto:" + cfg.ACMEEmail}
 	}
+
 	if _, err := client.Register(ctx, account, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
 		return nil, nil, acmeError("register the ACME account", err)
 	}
+
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(hostname))
 	if err != nil {
 		return nil, nil, acmeError("create the order", err)
 	}
+
 	for _, url := range order.AuthzURLs {
 		if err := authorizeHTTP01(ctx, client, url, report); err != nil {
 			return nil, nil, err
 		}
 	}
+
 	if order, err = client.WaitOrder(ctx, order.URI); err != nil {
 		return nil, nil, acmeError("wait for the order", err)
 	}
+
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject:  pkix.Name{CommonName: hostname},
 		DNSNames: []string{hostname},
@@ -190,14 +215,18 @@ func issueACME(ctx context.Context, cfg config.Cluster, hostname string, report 
 	if err != nil {
 		return nil, nil, err
 	}
+
 	der, _, err := client.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
 	if err != nil {
 		return nil, nil, acmeError("finalize the order", err)
 	}
+
 	for _, block := range der {
 		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: block})...)
 	}
+
 	keyPEM, err = encodeKey(leafKey)
+
 	return chainPEM, keyPEM, err
 }
 
@@ -207,35 +236,46 @@ func authorizeHTTP01(ctx context.Context, client *acme.Client, url string, repor
 	if err != nil {
 		return acmeError("read the authorization", err)
 	}
+
 	if authz.Status == acme.StatusValid {
 		return nil
 	}
+
 	var chal *acme.Challenge
+
 	for _, c := range authz.Challenges {
 		if c.Type == "http-01" {
 			chal = c
 			break
 		}
 	}
+
 	if chal == nil {
 		return output.NewError(output.CodeExternalCommand, "the ACME server offered no http-01 challenge", output.ExitExternal, "")
 	}
+
 	body, err := client.HTTP01ChallengeResponse(chal.Token)
 	if err != nil {
 		return err
 	}
+
 	path := filepath.Join(steps.ACMEChallengeDir, chal.Token)
 	if err := engine.WriteFileAtomic(path, []byte(body), 0o644); err != nil {
 		return err
 	}
+
 	defer func() { _ = os.Remove(path) }()
+
 	logLine(report, "certs-renew", "answering the http-01 challenge for "+authz.Identifier.Value)
+
 	if _, err := client.Accept(ctx, chal); err != nil {
 		return acmeError("accept the challenge", err)
 	}
+
 	if _, err := client.WaitAuthorization(ctx, authz.URI); err != nil {
 		return acmeError("validate "+authz.Identifier.Value, err)
 	}
+
 	return nil
 }
 
@@ -249,28 +289,38 @@ func probeHTTP(ctx context.Context, domain string) (reached bool, err error) {
 	if _, err := rand.Read(raw); err != nil {
 		return false, err
 	}
+
 	token := "vaire-probe-" + hex.EncodeToString(raw)
+
 	path := filepath.Join(steps.ACMEChallengeDir, token)
 	if err := engine.WriteFileAtomic(path, []byte(token), 0o644); err != nil {
 		return false, err
 	}
+
 	defer func() { _ = os.Remove(path) }()
+
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+domain+"/.well-known/acme-challenge/"+token, nil)
 	if err != nil {
 		return false, err
 	}
+
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("%s does not reach this server over HTTP: %w", domain, err)
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	got, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(got)) != token {
 		return true, fmt.Errorf("%s does not reach this server over HTTP yet (another host answered with HTTP %d)", domain, resp.StatusCode)
 	}
+
 	return true, nil
 }
 
@@ -279,6 +329,7 @@ func acmeError(what string, err error) error {
 	if d, ok := acme.RateLimit(err); ok {
 		hint = "Let's Encrypt rate limit: retry after " + d.Round(time.Minute).String() + "."
 	}
+
 	return output.WrapError(output.CodeExternalCommand, fmt.Errorf("ACME: %s: %w", what, err), output.ExitExternal, hint)
 }
 
@@ -288,10 +339,12 @@ func selfSignedCert(domain string) (chainPEM, keyPEM []byte, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
 		return nil, nil, err
 	}
+
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
@@ -303,11 +356,14 @@ func selfSignedCert(domain string) (chainPEM, keyPEM []byte, err error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	keyPEM, err = encodeKey(key)
+
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), keyPEM, err
 }
 
@@ -318,23 +374,30 @@ func loadOrCreateKey(path string) (crypto.Signer, error) {
 		if block == nil {
 			return nil, fmt.Errorf("%s is not PEM", path)
 		}
+
 		return x509.ParseECPrivateKey(block.Bytes)
 	}
+
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
+
 	raw, err := encodeKey(key)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := os.MkdirAll(filepath.Dir(path), steps.ACMEDirMode); err != nil {
 		return nil, err
 	}
+
 	if err := engine.WriteFileAtomic(path, raw, steps.ACMEAccountKeyMode); err != nil {
 		return nil, err
 	}
+
 	masterbackup.MarkDirty("acme account")
+
 	return key, nil
 }
 
@@ -343,11 +406,13 @@ func encodeKey(key *ecdsa.PrivateKey) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), nil
 }
 
 func runQuiet(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+
 	return cmd.Run()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,12 +46,15 @@ func SetConfigTestHooks(h ConfigTestHooks) func() {
 	if h.Write != nil {
 		configWriteFileOwned = h.Write
 	}
+
 	if h.Validate != nil {
 		configValidate = h.Validate
 	}
+
 	if h.Script != nil {
 		configScriptRun = h.Script
 	}
+
 	return func() { configWriteFileOwned, configValidate, configScriptRun = oldWrite, oldValidate, oldScript }
 }
 
@@ -73,6 +77,7 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) (
 	conf := func(path string, content []byte, mode os.FileMode) managedFile {
 		return managedFile{Path: path, Content: string(content), Mode: mode, Owner: pgFileOwner, Group: pgFileGroup}
 	}
+
 	extensions, err := render.ExtensionsConf(cfg, spec, res)
 	if err != nil {
 		return nil, err
@@ -82,6 +87,7 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) (
 	if err != nil {
 		return nil, err
 	}
+
 	files := make([]managedFile, 0, 7+len(follower))
 	files = append(files,
 		conf(confD+"/10-vaire-tuning.conf", render.TuningConf(res), 0o644),
@@ -92,6 +98,7 @@ func confFiles(cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime) (
 		conf(dir+"/pg_hba.conf", render.HBA(), 0o640),
 		conf(dir+"/pg_ident.conf", render.Ident(cfg), 0o640),
 	)
+
 	return append(files, follower...), nil
 }
 
@@ -123,14 +130,17 @@ func (s postgresConfig) RenderedFiles(cfg config.Cluster, rt engine.Runtime) []e
 	if err != nil {
 		return nil
 	}
+
 	files, err := confFiles(cfg, spec, rt)
 	if err != nil {
 		return nil
 	}
+
 	out := make([]engine.RenderedFile, 0, len(files))
 	for _, f := range files {
 		out = append(out, engine.RenderedFile{Path: f.Path, Content: []byte(f.Content)})
 	}
+
 	return out
 }
 
@@ -139,22 +149,28 @@ func (s postgresConfig) Inputs(cfg config.Cluster, rt engine.Runtime) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+
 	files, err := confFiles(cfg, spec, rt)
 	if err != nil {
 		return nil, err
 	}
+
 	payload := make([]map[string]string, 0, len(files))
 	for _, f := range files {
 		payload = append(payload, map[string]string{"path": f.Path, "content": f.Content})
 	}
+
 	data := map[string]any{"files": payload, "overrides": string(render.OverridesHeader())}
+
 	identity, err := extensionIdentities(cfg, spec)
 	if err != nil {
 		return nil, err
 	}
+
 	if len(identity) > 0 {
 		data["extension_identity"] = identity
 	}
+
 	return canonical(data)
 }
 
@@ -163,27 +179,33 @@ func (s postgresConfig) Check(ctx context.Context, cfg config.Cluster, rt engine
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	files, err := confFiles(cfg, spec, rt)
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	for _, f := range files {
 		if !fileIsOwned(f.Path, f.Content, f.Mode, f.Owner, f.Group) {
 			return incomplete(f.Path + " differs"), nil
 		}
 	}
+
 	if spec.IsFollower() {
 		drifted, err := followerGuardDiffers(ctx, cfg, spec)
 		if err != nil {
 			return engine.CheckResult{}, err
 		}
+
 		if drifted {
 			return incomplete("the follower copy guard differs"), nil
 		}
 	}
+
 	if _, err := os.Stat(PGConfD(spec.Name) + "/90-overrides.conf"); err != nil {
 		return incomplete("90-overrides.conf is missing"), nil
 	}
+
 	return complete(), nil
 }
 
@@ -194,21 +216,26 @@ func followerGuardDiffers(ctx context.Context, cfg config.Cluster, spec config.C
 	if err != nil {
 		return false, err
 	}
+
 	snapshot, ok := FollowerRuntimePlanFor(ctx, id)
+
 	req := FollowerRuntimeRequest{
 		Class: FollowerRuntimeLive, Outgoing: FollowerRuntimeOutgoing(ctx), RetireAbsent: true,
 	}
 	if ok {
 		req.Snapshot = &snapshot
 	}
+
 	plan, err := PlanFollowerRuntime(ctx, cfg, spec, req)
 	if err != nil {
 		return false, err
 	}
+
 	guard, present, err := backup.ReadCopyGuard(cfg.Server.DataDirectory(spec.Name))
 	if err != nil {
 		return false, err
 	}
+
 	return FollowerGuardDrifted(guard, present, plan), nil
 }
 
@@ -218,17 +245,16 @@ func followerGuardDiffers(ctx context.Context, cfg config.Cluster, spec config.C
 // running. Earlier steps and package work may therefore already have run.
 func configRefusalState(err error, spec config.ClusterSpec) error {
 	details := map[string]any{}
-	var base *output.CLIError
-	if errors.As(err, &base) {
+
+	if base, ok := errors.AsType[*output.CLIError](err); ok {
 		switch have := base.Details.(type) {
 		case map[string]any:
-			for k, v := range have {
-				details[k] = v
-			}
+			maps.Copy(details, have)
 		case nil:
 		default:
 			details["cause_details"] = have
 		}
+
 		details["database"] = spec.Name
 		details["step"] = postgresConfigID
 		details["configuration_staged"] = false
@@ -237,8 +263,10 @@ func configRefusalState(err error, spec config.ClusterSpec) error {
 		details["earlier_steps_may_have_run"] = true
 		copied := *base
 		copied.Details = details
+
 		return &copied
 	}
+
 	return err
 }
 
@@ -247,29 +275,37 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	local := ClusterPG(spec)
+
 	files, err := confFiles(cfg, spec, rt)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	backups, first := configBackups(files)
 	if err := RefuseExtensionUnload(ctx, cfg, spec, first); err != nil {
 		return engine.ApplyResult{}, configRefusalState(err, spec)
 	}
+
 	if err := PrepareExtensionStart(ctx, cfg, spec, nil, rt, report); err != nil {
 		return engine.ApplyResult{}, fmt.Errorf("extension prerequisites for %s: %w", spec.Name, err)
 	}
+
 	if err := installConfigFiles(spec, files); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := configValidate(ctx, cfg, spec); err != nil {
 		restoreFiles(files, backups)
 		return engine.ApplyResult{}, err
 	}
+
 	if err := ReconcileCopyGuard(ctx, cfg, spec); err != nil {
 		restoreFiles(files, backups)
 		return engine.ApplyResult{}, err
 	}
+
 	if err := configScriptRun(ctx, rt, s.ID(), Script("postgres-config"), map[string]string{"CLUSTER": spec.Name}, report); err != nil {
 		return engine.ApplyResult{}, err
 	}
@@ -278,8 +314,10 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 		if err := restartPostgres(ctx, cfg, spec, rt, s.ID(), report); err != nil {
 			return engine.ApplyResult{}, err
 		}
+
 		return engine.ApplyResult{Restart: engine.RestartNone, Notes: []string{"restarted after the first configuration"}}, nil
 	}
+
 	return pendingRestartResult(ctx, local, spec), nil
 }
 
@@ -291,16 +329,19 @@ func (s postgresConfig) Apply(ctx context.Context, cfg config.Cluster, rt engine
 func configBackups(files []managedFile) (backups map[string]string, first bool) {
 	backups = make(map[string]string, len(files))
 	first = true
+
 	for _, f := range files {
 		raw, err := os.ReadFile(f.Path)
 		if err == nil {
 			backups[f.Path] = string(raw)
 		}
+
 		base := filepath.Base(f.Path)
 		if base != "pg_hba.conf" && base != "pg_ident.conf" && (err == nil || !os.IsNotExist(err)) {
 			first = false
 		}
 	}
+
 	return backups, first
 }
 
@@ -312,15 +353,18 @@ func installConfigFiles(spec config.ClusterSpec, files []managedFile) error {
 			return fmt.Errorf("writing the rendered configuration: %w", err)
 		}
 	}
+
 	overrides := PGConfD(spec.Name) + "/90-overrides.conf"
 	if _, err := os.Stat(overrides); err != nil {
 		if err := writeFileOwned(overrides, string(render.OverridesHeader()), 0o644, pgFileOwner, pgFileGroup); err != nil {
 			return fmt.Errorf("writing the rendered configuration: %w", err)
 		}
 	}
+
 	if err := ensureIncludeDir(spec.Name); err != nil {
 		return fmt.Errorf("writing the rendered configuration: %w", err)
 	}
+
 	return nil
 }
 
@@ -330,6 +374,7 @@ func pendingRestartResult(ctx context.Context, local pg.Local, spec config.Clust
 	if err != nil || len(pending) == 0 {
 		return engine.ApplyResult{Restart: engine.RestartReload}
 	}
+
 	return engine.ApplyResult{Restart: engine.RestartRestart, Notes: []string{"restart of " + spec.Name + " needed for " + strings.Join(pending, ", ")}}
 }
 
@@ -338,20 +383,25 @@ func pendingRestartResult(ctx context.Context, local pg.Local, spec config.Clust
 // file is otherwise kept.
 func ensureIncludeDir(cluster string) error {
 	path := PGConfDir(cluster) + "/postgresql.conf"
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "include_dir") {
 			return nil
 		}
 	}
+
 	content := string(raw)
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
+
 	content += "\n# managed by vaire\ninclude_dir = 'conf.d'\n"
+
 	return writeFileOwned(path, content, 0o644, pgFileOwner, pgFileGroup)
 }
 
@@ -363,6 +413,7 @@ func ensureIncludeDir(cluster string) error {
 // server would to catch an invalid value among them.
 func validateConfig(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec) error {
 	local := ClusterPG(spec)
+
 	rows, err := local.Query(ctx, "postgres", `SELECT coalesce(f.sourcefile, '') AS sourcefile, coalesce(f.sourceline::text, '') AS sourceline,
   coalesce(f.name, '') AS name, f.error, coalesce(s.context, '') AS context
 FROM pg_file_settings f LEFT JOIN pg_settings s ON s.name = f.name
@@ -371,23 +422,29 @@ ORDER BY f.seqno`, nil)
 	if err != nil {
 		return fmt.Errorf("validating the rendered configuration: %w", err)
 	}
+
 	var settings []map[string]string
+
 	for _, row := range rows {
 		if !restartOnly(row) {
 			settings = append(settings, row)
 		}
 	}
+
 	hba, err := local.Query(ctx, "postgres", "SELECT file_name, line_number, error FROM pg_hba_file_rules WHERE error IS NOT NULL ORDER BY rule_number", nil)
 	if err != nil {
 		return fmt.Errorf("validating the rendered configuration: %w", err)
 	}
+
 	var problems []string
 	for _, row := range settings {
 		problems = append(problems, fmt.Sprintf("%s:%s %s: %s", row["sourcefile"], row["sourceline"], row["name"], row["error"]))
 	}
+
 	for _, row := range hba {
 		problems = append(problems, fmt.Sprintf("%s:%s: %s", row["file_name"], row["line_number"], row["error"]))
 	}
+
 	if len(problems) == 0 {
 		if _, err := Probe(ctx, "runuser", "-u", "postgres", "--",
 			"/usr/lib/postgresql/"+strconv.Itoa(PGVersion)+"/bin/postgres",
@@ -395,10 +452,13 @@ ORDER BY f.seqno`, nil)
 			problems = append(problems, err.Error())
 		}
 	}
+
 	if len(problems) == 0 {
 		return nil
 	}
+
 	details := map[string]any{"file_settings": settings, "hba_rules": hba, "problems": problems}
+
 	return output.NewError(
 		output.CodeStepFailed,
 		"PostgreSQL rejected the rendered configuration: "+strings.Join(problems, "; "),
@@ -419,6 +479,7 @@ func restartOnly(row map[string]string) bool {
 	case row["sourcefile"] == "" && row["name"] == "" && strings.HasSuffix(row["error"], "cannot be changed without restarting the server"):
 		return true
 	}
+
 	return false
 }
 
@@ -428,11 +489,14 @@ func pendingRestartSettings(ctx context.Context, local pg.Local) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
+
 	names := make([]string, 0, len(rows))
 	for _, row := range rows {
 		names = append(names, row["name"])
 	}
+
 	sort.Strings(names)
+
 	return names, nil
 }
 
@@ -444,11 +508,13 @@ func restartPostgres(ctx context.Context, cfg config.Cluster, spec config.Cluste
 	if err := rt.Shell.Run(ctx, stepID, Script("pg-stop"), env, report); err != nil {
 		return err
 	}
+
 	if hugePagesEnabled(tuningFor(cfg, spec, rt.Host)) {
 		if err := sizeHugePages(ctx, cfg, spec, rt, stepID, report); err != nil {
 			return err
 		}
 	}
+
 	return rt.Shell.Run(ctx, stepID, Script("pg-start"), env, report)
 }
 
@@ -459,15 +525,19 @@ func sizeHugePages(ctx context.Context, cfg config.Cluster, spec config.ClusterS
 	if err != nil || hp <= 0 {
 		return nil
 	}
+
 	hp += hp / 20
+
 	for _, other := range cfg.Clusters {
 		if other.Name != spec.Name {
 			hp += tuningFor(cfg, other, rt.Host).HugePages
 		}
 	}
+
 	if err := writeFile(SysctlPath, string(render.SysctlConf(rt.Host, hp)), 0o644); err != nil {
 		return err
 	}
+
 	return rt.Shell.Run(ctx, stepID, Script("sysctl-apply"), nil, report)
 }
 
@@ -478,6 +548,7 @@ func hugePagesEnabled(res tune.Result) bool {
 			return s.Value != "off"
 		}
 	}
+
 	return false
 }
 
@@ -491,6 +562,7 @@ func restoreFiles(files []managedFile, backups map[string]string) {
 			_ = os.Remove(f.Path)
 			continue
 		}
+
 		_ = writeFileOwned(f.Path, previous, f.Mode, f.Owner, f.Group)
 	}
 }

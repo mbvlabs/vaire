@@ -49,10 +49,12 @@ func statusCPUProbe(ctx context.Context, spec config.ClusterSpec) (hostinfo.CPUO
 	if config.CheckDatabaseName(spec.Name) != nil {
 		return hostinfo.CPUObservation{Reason: "invalid_service"}, "", nil
 	}
+
 	unit := steps.PGServiceName(spec.Name) + ".service"
 	invocation := func() (string, error) {
 		return steps.Probe(ctx, "systemctl", "show", "--property=InvocationID", "--value", "--", unit)
 	}
+
 	return statusCPUProbeWith(invocation, func() hostinfo.CPUObservation {
 		return hostinfo.ObserveCPUService(ctx, unit)
 	}, statusMonotonicNS, time.Since)
@@ -65,20 +67,25 @@ func statusCPUProbeWith(invocation func() (string, error), observe func() hostin
 	obs := observe()
 	clock, clockOK := monotonic()
 	elapsed := since(obs.ObservedAt)
+
 	after, err2 := invocation()
 	if err != nil || err2 != nil || before != after || !statusInvocationPattern.MatchString(before) ||
 		obs.Reason == "service_identity_unverified" || obs.Identity == nil || obs.UsageUsec == nil || obs.ObservedAt.IsZero() || !clockOK {
 		return obs, "", nil
 	}
+
 	st, ok := obs.Identity.Sys().(*syscall.Stat_t)
 	if !ok {
 		return obs, "", nil
 	}
+
 	if elapsed < 0 || int64(elapsed) >= clock {
 		return obs, "", nil
 	}
+
 	stamp := clock - int64(elapsed)
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", strings.ToLower(before), st.Dev, st.Ino)))
+
 	return obs, hex.EncodeToString(sum[:]), &stamp
 }
 
@@ -87,35 +94,43 @@ func cpuStatus(res config.Resources, obs hostinfo.CPUObservation, generation str
 	if cpu.Requested.Mode == "" {
 		cpu.Requested.Mode = "normal"
 	}
+
 	if obs.Reason == "service_identity_unverified" {
 		return cpu
 	}
+
 	cpu.EffectiveKnown = obs.Screen.Capability == hostinfo.CPUCapable && obs.Idle != nil && obs.Quota != nil && obs.Weight != nil
 	if obs.Idle != nil || obs.Quota != nil || obs.Weight != nil {
 		eff := &statusCPUEffective{Idle: obs.Idle, Weight: obs.Weight}
 		if obs.Quota != nil {
 			period, unlimited := obs.Quota.PeriodUsec, obs.Quota.Unlimited
+
 			eff.QuotaPeriodUsec, eff.Unlimited = &period, &unlimited
 			if !unlimited {
 				quota := obs.Quota.QuotaUsec
 				eff.QuotaUsec = &quota
 			}
 		}
+
 		cpu.Effective = eff
 	}
+
 	if obs.UsageUsec != nil && !obs.ObservedAt.IsZero() {
 		cpu.UsageUsec = obs.UsageUsec
 		at := obs.ObservedAt.UTC()
+
 		cpu.ObservedAt = &at
 		if generation != "" && monotonic != nil && *monotonic > 0 {
 			cpu.SampleGeneration, cpu.SampleMonotonicNS = generation, monotonic
 		}
 	}
+
 	if !cpu.EffectiveKnown && cpu.Reason == "" {
 		cpu.Reason = obs.Screen.Reason
 		if cpu.Reason == "" {
 			cpu.Reason = "effective_policy_unknown"
 		}
 	}
+
 	return cpu
 }

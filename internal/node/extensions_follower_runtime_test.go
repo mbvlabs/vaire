@@ -26,24 +26,30 @@ func standaloneExtensionCfg() config.Cluster {
 		{Name: "app", Node: "db1", Port: 5433, Stanza: "app-abc123", Size: "small", StatementTimeout: "60s"},
 	}
 	cfg.Backup.Database = config.BackupDatabase{}
+
 	return cfg
 }
 
 func useNodeConfigStore(t *testing.T, raw []byte) (state.FileStore, string) {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "cluster.toml")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	store := state.FileStore{Path: path}
 	old := nodeConfigStore
 	nodeConfigStore = func() state.Store { return store }
+
 	t.Cleanup(func() { nodeConfigStore = old })
+
 	return store, path
 }
 
 func failFollowerCatalog(t *testing.T) {
 	t.Helper()
+
 	restore := steps.SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return nil, errors.New("catalog is down")
 	})
@@ -54,16 +60,20 @@ func testFollowerCatalogFailureExtAdd(t *testing.T) {
 	cfg := extFollowerCfg(t)
 	h := newExtHarness(t, cfg)
 	failFollowerCatalog(t)
+
 	req := request("ext.add", map[string]any{"name": "pg_cron", "db": "app"})
 	req.Confirm = "app/restart"
 	req.Confirms = []string{"app_follower_1/restart", "app_follower_2/restart"}
+
 	_, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil || extReason(t, err) != "follower_sql_unknown" {
 		t.Fatalf("ext add = %v", err)
 	}
+
 	if len(h.saves) != 0 || h.prepareCalls != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 {
 		t.Fatalf("ext add had effects: saves=%d prepare=%d apply=%d exec=%d", len(h.saves), h.prepareCalls, len(h.applyCalls), len(h.pg.execs))
 	}
+
 	if recs, err := backup.LoadRecords(); err != nil || len(recs.ExtensionRequirements) != 0 {
 		t.Fatalf("ext add wrote history: %+v, %v", recs.ExtensionRequirements, err)
 	}
@@ -76,13 +86,16 @@ func testFollowerCatalogFailureExtRemove(t *testing.T) {
 	cfg.Clusters[2].Extensions = []string{"pg_cron"}
 	h := newExtHarness(t, cfg)
 	failFollowerCatalog(t)
+
 	req := request("ext.remove", map[string]any{"name": "pg_cron", "db": "app"})
 	req.Confirm = "app"
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
+
 	_, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil || extReason(t, err) != "follower_sql_unknown" {
 		t.Fatalf("ext remove = %v", err)
 	}
+
 	if len(h.saves) != 0 || len(h.applyCalls) != 0 || len(h.pg.execs) != 0 {
 		t.Fatalf("ext remove had effects: saves=%d apply=%d exec=%d", len(h.saves), len(h.applyCalls), len(h.pg.execs))
 	}
@@ -91,24 +104,31 @@ func testFollowerCatalogFailureExtRemove(t *testing.T) {
 func testFollowerCatalogFailureConfigSet(t *testing.T) {
 	cfg := extFollowerCfg(t)
 	cfg.Backup.Database = config.BackupDatabase{}
+
 	raw, err := cfg.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	store, path := useNodeConfigStore(t, raw)
+
 	revision, err := store.Revision()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	h := newExtHarness(t, cfg)
 	failFollowerCatalog(t)
+
 	req := request("config.set", map[string]any{"toml": string(raw), "base_revision": revision})
 	if _, err := handleConfigSet(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil || extReason(t, err) != "follower_sql_unknown" {
 		t.Fatalf("config set = %v", err)
 	}
+
 	if got, err := os.ReadFile(path); err != nil || string(got) != string(raw) {
 		t.Fatalf("config set changed the file: %v", err)
 	}
+
 	if len(h.saves) != 0 || len(h.applyCalls) != 0 {
 		t.Fatalf("config set had effects: saves=%d apply=%d", len(h.saves), len(h.applyCalls))
 	}
@@ -118,15 +138,19 @@ func testFollowerCatalogFailurePlainApply(t *testing.T) {
 	cfg := extFollowerCfg(t)
 	h := newExtHarness(t, cfg)
 	failFollowerCatalog(t)
+
 	oldPlan := extensionPlan
 	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
 		return engine.PlanData{WouldApply: 1}, nil
 	}
+
 	t.Cleanup(func() { extensionPlan = oldPlan })
+
 	req := request("apply", map[string]any{"db": "app"})
 	if _, _, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"}); err == nil || extReason(t, err) != "follower_sql_unknown" {
 		t.Fatalf("plain apply = %v", err)
 	}
+
 	if len(h.applyCalls) != 0 || len(h.saves) != 0 || h.prepareCalls != 0 {
 		t.Fatalf("plain apply had effects: apply=%d saves=%d prepare=%d", len(h.applyCalls), len(h.saves), h.prepareCalls)
 	}
@@ -150,24 +174,28 @@ func TestVerifyFollowerRuntimeBooleanSettingFacts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := extFollowerCfg(t)
+
 			cfg.Extensions = map[string]config.ExtensionDefinition{
 				"custom": {
 					Source: catalog.SourcePreinstalled, ExtName: "custom_ext",
 					Settings:    map[string]string{"custom.worker": "true"},
-					CopySafety:  stringPtr(catalog.CopySafetySafe),
-					StandbySafe: boolPtr(true),
+					CopySafety:  new(catalog.CopySafetySafe),
+					StandbySafe: new(true),
 				},
 			}
 			for i := range cfg.Clusters {
 				cfg.Clusters[i].Extensions = []string{"custom"}
 			}
+
 			h := newExtHarness(t, cfg)
 			h.pg.queryFn = func(sql string) ([]map[string]string, error) {
 				if strings.Contains(sql, "custom.worker") {
 					return []map[string]string{{"v": "on", "vartype": tc.typ}}, nil
 				}
+
 				return defaultExtensionSettingsFake(sql)
 			}
+
 			err := verifyFollowerRuntime(context.Background(), cfg, cfg.Clusters[1])
 			if (err == nil) != tc.want {
 				t.Fatalf("verify = %v, want success %v", err, tc.want)
@@ -186,14 +214,17 @@ func testStandaloneCustomExtAdd(t *testing.T) {
 		}, nil
 	}
 	req := request("ext.add", map[string]any{"name": "custom", "db": "app", "preinstalled": true})
+
 	res, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err != nil {
 		t.Fatalf("standalone custom unknown add = %v", err)
 	}
+
 	got, ok := res.Data.(extAddResult)
 	if !ok || got.Extension != "custom" {
 		t.Fatalf("result = %+v", res.Data)
 	}
+
 	if len(h.saves) != 1 {
 		t.Fatalf("intent saves = %d", len(h.saves))
 	}
@@ -205,30 +236,38 @@ func testStandaloneCustomConfigSet(t *testing.T) {
 		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext"},
 	}
 	cfg.Clusters[0].Extensions = []string{"custom"}
+
 	raw, err := cfg.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	store, path := useNodeConfigStore(t, raw)
+
 	revision, err := store.Revision()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	newExtHarness(t, cfg)
 	updated := cfg.Clone()
 	updated.Postgres.Settings = map[string]string{"work_mem": "8MB"}
+
 	updatedRaw, err := updated.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	req := request("config.set", map[string]any{"toml": string(updatedRaw), "base_revision": revision})
 	if _, err := handleConfigSet(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("unrelated config set with custom unknown = %v", err)
 	}
+
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(string(got), "work_mem") {
 		t.Fatalf("unrelated setting was not saved: %s", got)
 	}
@@ -237,26 +276,33 @@ func testStandaloneCustomConfigSet(t *testing.T) {
 func testStandaloneCustomConfigSetWithFollower(t *testing.T) {
 	cfg := extFollowerCfg(t)
 	cfg.Backup.Database = config.BackupDatabase{}
+
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext"},
 	}
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Extensions = []string{"custom"}
 	}
+
 	raw, err := cfg.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	store, path := useNodeConfigStore(t, raw)
+
 	revision, err := store.Revision()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	newExtHarness(t, cfg)
+
 	req := request("config.set", map[string]any{"toml": string(raw), "base_revision": revision})
 	if _, err := handleConfigSet(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil || extReason(t, err) != "extension_copy_safety_unknown" {
 		t.Fatalf("config set with follower = %v", err)
 	}
+
 	if got, err := os.ReadFile(path); err != nil || string(got) != string(raw) {
 		t.Fatalf("config set with follower changed the file: %v", err)
 	}
@@ -269,10 +315,12 @@ func testStandaloneCustomFollowPreflight(t *testing.T) {
 	}
 	cfg.Clusters[0].Extensions = []string{"custom"}
 	declared := []string{"custom"}
+
 	cfg.Clusters[0].RecoveryExtensions = &declared
 	if err := preflightRestoreExtensionPlan(context.Background(), cfg, cfg.Clusters[0], restoreParams{Kind: backup.TargetLatest, Database: "app"}); err == nil || extReason(t, err) != "extension_copy_safety_unknown" {
 		t.Fatalf("copy preflight = %v", err)
 	}
+
 	if recs, err := backup.LoadRecords(); err != nil || len(recs.Restores) != 0 {
 		t.Fatalf("copy preflight wrote an open restore: %+v, %v", recs.Restores, err)
 	}
@@ -291,8 +339,8 @@ func TestRolesOnlyTransitionDoesNotCreatePrimarySQLBeforeFollowerReady(t *testin
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
 			Settings:    map[string]string{"addon.mode": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	cfg.Clusters[0].Extensions = []string{"addon"}
@@ -304,6 +352,7 @@ func TestRolesOnlyTransitionDoesNotCreatePrimarySQLBeforeFollowerReady(t *testin
 		if strings.Contains(sql, "addon.mode") {
 			return []map[string]string{{"v": addonValue}}, nil
 		}
+
 		return defaultExtensionSettingsFake(sql)
 	}
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
@@ -316,14 +365,18 @@ func TestRolesOnlyTransitionDoesNotCreatePrimarySQLBeforeFollowerReady(t *testin
 		if strings.HasPrefix(opts.Only[0], "postgres-roles-v1") {
 			return engine.PlanData{WouldApply: 1}, nil
 		}
+
 		return engine.PlanData{}, nil
 	}
+
 	t.Cleanup(func() { extensionPlan = oldPlan })
+
 	rolesCalls := 0
 	h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
 		if strings.HasPrefix(opts.Only[0], "postgres-roles-v1") {
 			rolesCalls++
 		}
+
 		return engine.ApplyData{}, nil
 	}
 
@@ -332,15 +385,19 @@ func TestRolesOnlyTransitionDoesNotCreatePrimarySQLBeforeFollowerReady(t *testin
 	// the primary roles step must not run.
 	oldReload := applyReloadCluster
 	applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
+
 	t.Cleanup(func() { applyReloadCluster = oldReload })
+
 	if _, err := handleApply(context.Background(), &Env{
 		Req: request("apply", map[string]any{"db": "app"}), Cluster: cfg, LockMode: engine.LockExclusive,
 	}); err == nil {
 		t.Fatal("a bad follower runtime was accepted")
 	}
+
 	if rolesCalls != 0 {
 		t.Fatalf("the primary roles step ran before the follower was effective: %d", rolesCalls)
 	}
+
 	for _, opts := range h.applyCalls {
 		if strings.HasPrefix(opts.Only[0], "postgres-roles-v1") {
 			t.Fatalf("primary extension SQL ran before the follower was effective: %v", h.applyCalls)
@@ -352,23 +409,29 @@ func TestRolesOnlyTransitionDoesNotCreatePrimarySQLBeforeFollowerReady(t *testin
 	addonValue = "on"
 	h.applyCalls = nil
 	req := request("apply", map[string]any{"db": "app"})
+
 	warnings, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"})
 	if release != nil {
 		defer release()
 	}
+
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_ = warnings
+
 	if rolesCalls != 1 {
 		t.Fatalf("roles calls = %d, want one", rolesCalls)
 	}
+
 	order := extApplyIDs(h.applyCalls)
 	for _, opts := range h.applyCalls {
 		if strings.HasPrefix(opts.Only[0], "postgres-roles-v1") && len(opts.Confirm.Clusters) != 0 {
 			t.Fatalf("roles needed a restart token: %+v", opts.Confirm)
 		}
 	}
+
 	want := []string{
 		"app_follower_1:postgres-config-v1@app_follower_1",
 		"app_follower_2:postgres-config-v1@app_follower_2",
@@ -389,6 +452,7 @@ func applyPgAuditOverride(cfg config.Cluster, where string) config.Cluster {
 			cfg.Clusters[i].Settings = map[string]string{"pgaudit.log": "write"}
 		}
 	}
+
 	return cfg
 }
 
@@ -406,6 +470,7 @@ func TestExtAddWithFollowersHonorsPrimarySettingOverride(t *testing.T) {
 				if strings.Contains(sql, "pgaudit.log") {
 					return []map[string]string{{"v": "write"}}, nil
 				}
+
 				return defaultExtensionSettingsFake(sql)
 			}
 			h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
@@ -415,14 +480,18 @@ func TestExtAddWithFollowersHonorsPrimarySettingOverride(t *testing.T) {
 			}
 			req := request("ext.add", map[string]any{"name": "pgaudit", "db": "app"})
 			req.Confirm = "app/restart"
+
 			req.Confirms = []string{"app_follower_1/restart", "app_follower_2/restart"}
 			if _, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 				t.Fatalf("pgaudit override add = %v", err)
 			}
+
 			if len(h.saves) != 1 {
 				t.Fatalf("intent saves = %d", len(h.saves))
 			}
+
 			order := extApplyIDs(h.applyCalls)
+
 			want := []string{
 				"app_follower_1:postgres-config-v1@app_follower_1",
 				"app_follower_2:postgres-config-v1@app_follower_2",
@@ -442,8 +511,8 @@ func TestExtAddWithFollowersUpdateUsesPrimaryReadiness(t *testing.T) {
 		"custom": {
 			Source: catalog.SourcePreinstalled, ExtName: "custom_ext",
 			Settings:    map[string]string{"custom.worker": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	cfg.Postgres.Settings = map[string]string{"custom.worker": "'off'"}
@@ -463,6 +532,7 @@ func TestExtAddWithFollowersUpdateUsesPrimaryReadiness(t *testing.T) {
 		if strings.Contains(sql, "custom.worker") {
 			return []map[string]string{{"v": actual}}, nil
 		}
+
 		return defaultExtensionSettingsFake(sql)
 	}
 	h.pg.execFn = func(sql string) {
@@ -472,10 +542,12 @@ func TestExtAddWithFollowersUpdateUsesPrimaryReadiness(t *testing.T) {
 	}
 	req := request("ext.add", map[string]any{"name": "custom", "db": "app"})
 	req.Confirm = "app/restart"
+
 	req.Confirms = []string{"app_follower_1/restart", "app_follower_2/restart"}
 	if _, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil {
 		t.Fatal("follower-enabled update accepted the wrong quote-content value")
 	}
+
 	for _, sql := range h.pg.execs {
 		if strings.Contains(sql, "ALTER EXTENSION") {
 			t.Fatalf("follower-enabled ALTER ran before the raw quote-content value was effective: %v", h.pg.execs)
@@ -486,16 +558,20 @@ func TestExtAddWithFollowersUpdateUsesPrimaryReadiness(t *testing.T) {
 	h.pg.execs = nil
 	req = request("ext.add", map[string]any{"name": "custom", "db": "app"})
 	req.Confirm = "app/restart"
+
 	req.Confirms = []string{"app_follower_1/restart", "app_follower_2/restart"}
 	if _, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("follower-enabled update = %v", err)
 	}
+
 	found := false
+
 	for _, sql := range h.pg.execs {
 		if strings.Contains(sql, "ALTER EXTENSION") {
 			found = true
 		}
 	}
+
 	if !found {
 		t.Fatalf("follower-enabled supported update did not run: %v", h.pg.execs)
 	}
@@ -503,21 +579,24 @@ func TestExtAddWithFollowersUpdateUsesPrimaryReadiness(t *testing.T) {
 
 func newCustomUpdateHarness(t *testing.T, where string) (*extHarness, *string) {
 	t.Helper()
+
 	cfg := standaloneExtensionCfg()
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"custom": {
 			Source: catalog.SourcePreinstalled, ExtName: "custom_ext",
 			Settings:    map[string]string{"custom.worker": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
+
 	switch where {
 	case "global":
 		cfg.Postgres.Settings = map[string]string{"custom.worker": "'off'"}
 	case "cluster":
 		cfg.Clusters[0].Settings = map[string]string{"custom.worker": "'off'"}
 	}
+
 	cfg.Clusters[0].Extensions = []string{"custom"}
 	h := newExtHarness(t, cfg)
 	version := "1.0"
@@ -532,6 +611,7 @@ func newCustomUpdateHarness(t *testing.T, where string) (*extHarness, *string) {
 		if strings.Contains(sql, "custom.worker") {
 			return []map[string]string{{"v": actual}}, nil
 		}
+
 		return defaultExtensionSettingsFake(sql)
 	}
 	h.pg.execFn = func(sql string) {
@@ -539,11 +619,13 @@ func newCustomUpdateHarness(t *testing.T, where string) (*extHarness, *string) {
 			version = "2.0"
 		}
 	}
+
 	return h, &actual
 }
 
 func assertNoExtensionAlter(t *testing.T, h *extHarness) {
 	t.Helper()
+
 	for _, sql := range h.pg.execs {
 		if strings.Contains(sql, "ALTER EXTENSION") {
 			t.Fatalf("ALTER EXTENSION ran before its required setting was effective: %v", h.pg.execs)
@@ -553,11 +635,13 @@ func assertNoExtensionAlter(t *testing.T, h *extHarness) {
 
 func assertExtensionAlterRan(t *testing.T, h *extHarness) {
 	t.Helper()
+
 	for _, sql := range h.pg.execs {
 		if strings.Contains(sql, "ALTER EXTENSION") {
 			return
 		}
 	}
+
 	t.Fatalf("supported update did not run after the setting became effective: %v", h.pg.execs)
 }
 
@@ -566,17 +650,21 @@ func TestExtAddInstalledUpdateWaitsForEffectivePrimarySettings(t *testing.T) {
 		t.Run(where, func(t *testing.T) {
 			h, actual := newCustomUpdateHarness(t, where)
 			req := request("ext.add", map[string]any{"name": "custom", "db": "app"})
+
 			_, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: h.cfg})
 			if err == nil || extReason(t, err) != "extension_update_prerequisites" {
 				t.Fatalf("old primary setting update = %v", err)
 			}
+
 			assertNoExtensionAlter(t, h)
 
 			*actual = "'off'"
+
 			req = request("ext.add", map[string]any{"name": "custom", "db": "app"})
 			if _, err := handleExtAdd(context.Background(), &Env{Req: req, Cluster: h.cfg}); err != nil {
 				t.Fatalf("effective setting update = %v", err)
 			}
+
 			assertExtensionAlterRan(t, h)
 		})
 	}
@@ -587,7 +675,7 @@ func TestRolesOnlyPolicyChangeDoesNotQueryFollowerExtensionState(t *testing.T) {
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
-			CopySafety: stringPtr(catalog.CopySafetySafe), StandbySafe: boolPtr(true),
+			CopySafety: new(catalog.CopySafetySafe), StandbySafe: new(true),
 		},
 	}
 	cfg.Clusters[0].Extensions = []string{"addon"}
@@ -607,31 +695,40 @@ func TestRolesOnlyPolicyChangeDoesNotQueryFollowerExtensionState(t *testing.T) {
 			if opts.DB == "app" {
 				return engine.PlanData{}, nil
 			}
+
 			followerConfigPlans++
 			// Run the real production Check. It must never be reached for a
 			// roles-only policy change.
 			return engine.Plan(ctx, catalogSteps, planCfg, rt, opts)
 		}
+
 		if strings.HasPrefix(opts.Only[0], "postgres-roles-v1") {
 			return engine.PlanData{WouldApply: 1}, nil
 		}
+
 		return engine.PlanData{}, nil
 	}
+
 	t.Cleanup(func() { extensionPlan = oldPlan })
 	failFollowerCatalog(t)
 
 	req := request("apply", map[string]any{"db": "app"})
+
 	warnings, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"})
 	if release != nil {
 		defer release()
 	}
+
 	if err != nil {
 		t.Fatalf("roles-only policy change was blocked by follower extension state: %v", err)
 	}
+
 	_ = warnings
+
 	if followerConfigPlans != 0 {
 		t.Fatalf("a roles-only policy change planned follower configuration %d times", followerConfigPlans)
 	}
+
 	if len(h.applyCalls) != 0 {
 		t.Fatalf("a roles-only policy change staged a follower transition: %v", h.applyCalls)
 	}
@@ -639,11 +736,13 @@ func TestRolesOnlyPolicyChangeDoesNotQueryFollowerExtensionState(t *testing.T) {
 	// A stopped follower must not block a roles-only change either: the source
 	// gate decides before the target set exists.
 	h.runningFn = func(spec config.ClusterSpec) bool { return spec.Name == "app" }
+
 	if _, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"}); err != nil {
 		t.Fatalf("roles-only change with a stopped follower = %v", err)
 	} else if release != nil {
 		release()
 	}
+
 	if followerConfigPlans != 0 {
 		t.Fatalf("a stopped follower was planned for a roles-only change: %d", followerConfigPlans)
 	}
@@ -655,8 +754,8 @@ func TestSettingOnlyRolesDeferralDoesNotSynthesizeRestartToken(t *testing.T) {
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
 			Settings:    map[string]string{"addon.mode": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	cfg.Clusters[0].Extensions = []string{"addon"}
@@ -667,6 +766,7 @@ func TestSettingOnlyRolesDeferralDoesNotSynthesizeRestartToken(t *testing.T) {
 		if strings.Contains(sql, "addon.mode") {
 			return []map[string]string{{"v": "on"}}, nil
 		}
+
 		return defaultExtensionSettingsFake(sql)
 	}
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
@@ -679,30 +779,39 @@ func TestSettingOnlyRolesDeferralDoesNotSynthesizeRestartToken(t *testing.T) {
 		if strings.HasPrefix(opts.Only[0], "postgres-roles-v1") {
 			return engine.PlanData{WouldApply: 1}, nil
 		}
+
 		return engine.PlanData{}, nil
 	}
+
 	t.Cleanup(func() { extensionPlan = oldPlan })
+
 	h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
 		if strings.HasPrefix(opts.Only[0], "postgres-roles-v1") {
 			h.applyWarnings = []output.Warning{{
 				Code: "extension_settings_pending", Message: "addon.mode is off, want on",
 			}}
+
 			return engine.ApplyData{Steps: []engine.ApplyStep{{
 				ID: opts.Only[0], State: engine.StatusIncomplete,
 			}}}, nil
 		}
+
 		h.applyWarnings = nil
+
 		return engine.ApplyData{}, nil
 	}
 	req := request("apply", map[string]any{"db": "app"})
+
 	_, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"})
 	if release != nil {
 		defer release()
 	}
+
 	var pending *extensionApplyPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("setting-only deferral = %v, want pending", err)
 	}
+
 	if slices.Contains(pending.Tokens, "app/restart") {
 		t.Fatalf("a reload-only setting wait synthesized a restart token: %v", pending.Tokens)
 	}
@@ -714,8 +823,8 @@ func TestFollowerRawQuoteOverrideBlocksPrimaryUntilCorrect(t *testing.T) {
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
 			Settings:    map[string]string{"addon.worker": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	cfg.Postgres.Settings = map[string]string{"addon.worker": "'off'"}
@@ -728,21 +837,27 @@ func TestFollowerRawQuoteOverrideBlocksPrimaryUntilCorrect(t *testing.T) {
 		if strings.Contains(sql, "addon.worker") {
 			return []map[string]string{{"v": actual}}, nil
 		}
+
 		return defaultExtensionSettingsFake(sql)
 	}
 	oldPlan := extensionPlan
 	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
 		return engine.PlanData{WouldApply: 1}, nil
 	}
+
 	t.Cleanup(func() { extensionPlan = oldPlan })
+
 	req := request("apply", map[string]any{"db": "app"})
+
 	_, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"})
 	if release != nil {
 		defer release()
 	}
+
 	if err == nil || !strings.Contains(err.Error(), "addon.worker") {
 		t.Fatalf("raw quote override wrong actual = %v", err)
 	}
+
 	for _, opts := range h.applyCalls {
 		if opts.DB == "app" {
 			t.Fatalf("primary configuration/SQL ran before the follower quote-content value was effective: %v", h.applyCalls)
@@ -751,18 +866,22 @@ func TestFollowerRawQuoteOverrideBlocksPrimaryUntilCorrect(t *testing.T) {
 
 	actual = "'off'"
 	h.applyCalls = nil
+
 	req = request("apply", map[string]any{"db": "app"})
 	if _, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"}); err != nil {
 		t.Fatalf("correct quote-content follower = %v", err)
 	} else if release != nil {
 		release()
 	}
+
 	primary := false
+
 	for _, opts := range h.applyCalls {
 		if opts.DB == "app" {
 			primary = true
 		}
 	}
+
 	if !primary {
 		t.Fatalf("primary did not proceed after the follower became effective: %v", h.applyCalls)
 	}
@@ -774,8 +893,8 @@ func TestFollowerExpectedRuntimeBlocksPrimaryBeforeConfigAndSQL(t *testing.T) {
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
 			Settings:    map[string]string{"addon.mode": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	cfg.Clusters[0].Extensions = []string{"addon"}
@@ -787,21 +906,27 @@ func TestFollowerExpectedRuntimeBlocksPrimaryBeforeConfigAndSQL(t *testing.T) {
 		if strings.Contains(sql, "addon.mode") {
 			return []map[string]string{{"v": "off"}}, nil
 		}
+
 		return defaultExtensionSettingsFake(sql)
 	}
 	oldPlan := extensionPlan
 	extensionPlan = func(context.Context, []engine.Step, config.Cluster, engine.Runtime, engine.Options) (engine.PlanData, error) {
 		return engine.PlanData{WouldApply: 1}, nil
 	}
+
 	t.Cleanup(func() { extensionPlan = oldPlan })
+
 	req := request("apply", map[string]any{"db": "app"})
+
 	_, release, err := applyExtensionTransitions(context.Background(), &Env{Req: req, Cluster: cfg}, stepParams{DB: "app"})
 	if release != nil {
 		defer release()
 	}
+
 	if err == nil || !strings.Contains(err.Error(), "addon.mode") {
 		t.Fatalf("wrong follower runtime = %v", err)
 	}
+
 	for _, opts := range h.applyCalls {
 		if opts.DB == "app" {
 			t.Fatalf("primary configuration or SQL ran before the follower was effective: %v", h.applyCalls)
@@ -814,28 +939,36 @@ func TestHandleApplyPendingTransitionReturnsStagedResult(t *testing.T) {
 	h := newExtHarness(t, cfg)
 	oldReload := applyReloadCluster
 	applyReloadCluster = func() (config.Cluster, error) { return cfg, nil }
+
 	t.Cleanup(func() { applyReloadCluster = oldReload })
+
 	oldPlan := extensionPlan
 	extensionPlan = func(_ context.Context, _ []engine.Step, _ config.Cluster, _ engine.Runtime, opts engine.Options) (engine.PlanData, error) {
 		return engine.PlanData{WouldApply: 1, RestartPending: []string{opts.Only[0]}}, nil
 	}
+
 	t.Cleanup(func() { extensionPlan = oldPlan })
+
 	h.applyFn = func(opts engine.Options) (engine.ApplyData, error) {
 		if strings.HasPrefix(opts.Only[0], "postgres-config-v1") && len(opts.Confirm.Clusters) == 0 {
 			return engine.ApplyData{RestartPending: []string{opts.Only[0]}}, nil
 		}
+
 		return engine.ApplyData{}, nil
 	}
+
 	res, err := handleApply(context.Background(), &Env{
 		Req: request("apply", map[string]any{"db": "app"}), Cluster: cfg, LockMode: engine.LockExclusive,
 	})
 	if err != nil {
 		t.Fatalf("handle apply pending = %v", err)
 	}
+
 	data, ok := res.Data.(engine.ApplyData)
 	if !ok || len(data.RestartPending) == 0 || len(data.ConfirmTokens) == 0 {
 		t.Fatalf("pending result = %+v", res.Data)
 	}
+
 	for _, opts := range h.applyCalls {
 		if opts.DB == "app" {
 			t.Fatalf("the normal apply pass or primary ran after a pending follower: %v", h.applyCalls)
@@ -852,23 +985,29 @@ func TestFollowerRemovalCatalogErrorAfterDropKeepsGuardPending(t *testing.T) {
 	h := newExtHarness(t, cfg)
 	h.preloadLoaded["pg_cron"] = true
 	cronSettingFake(h)
+
 	installedCalls := 0
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		installedCalls++
 		if installedCalls == 1 {
 			return map[string]extensionInstalledVersion{"pg_cron": {Name: "pg_cron", Version: "1.6"}}, nil
 		}
+
 		return map[string]extensionInstalledVersion{}, nil
 	}
+
 	dataDir := cfg.Server.DataDirectory("app_follower_1")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	oldWriter := backup.CopyGuardWriterForTest()
+
 	backup.RestoreCopyGuardWriterForTest(func(path string, data []byte, perm os.FileMode) error {
 		return os.WriteFile(path, data, perm)
 	})
 	t.Cleanup(func() { backup.RestoreCopyGuardWriterForTest(oldWriter) })
+
 	if _, err := backup.InstallCopyGuard(dataDir, backup.CopyGuard{
 		Preloads: []string{"pg_cron"},
 		Settings: map[string]string{"cron.launch_active_jobs": "off"},
@@ -876,12 +1015,15 @@ func TestFollowerRemovalCatalogErrorAfterDropKeepsGuardPending(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	sqlCalls := 0
+
 	restoreSQL := steps.SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		sqlCalls++
 		if sqlCalls <= 2 {
 			return map[string]bool{"plpgsql": true, "pg_cron": true}, nil
 		}
+
 		return nil, errors.New("catalog went away after the primary DROP")
 	})
 	defer restoreSQL()
@@ -889,17 +1031,21 @@ func TestFollowerRemovalCatalogErrorAfterDropKeepsGuardPending(t *testing.T) {
 	req := request("ext.remove", map[string]any{"name": "pg_cron", "db": "app"})
 	req.Confirm = "app"
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
+
 	_, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil || extReason(t, err) != "extension_follower_replay_pending" {
 		t.Fatalf("post-DROP catalog error = %v", err)
 	}
+
 	if len(h.pg.execs) == 0 || !strings.Contains(h.pg.execs[0], "DROP EXTENSION") {
 		t.Fatalf("the primary DROP did not run: %v", h.pg.execs)
 	}
+
 	guard, present, err := backup.ReadCopyGuard(dataDir)
 	if err != nil || !present {
 		t.Fatalf("guard = %+v, %v, %v", guard, present, err)
 	}
+
 	if !slices.Contains(guard.Preloads, "pg_cron") || guard.Settings["cron.launch_active_jobs"] != "off" {
 		t.Fatalf("an unreadable catalog retired the old guard: %+v", guard)
 	}
@@ -914,14 +1060,17 @@ func TestFollowerRemovalImmediateAbsenceCompletes(t *testing.T) {
 	h := newExtHarness(t, cfg)
 	h.preloadLoaded["pg_cron"] = true
 	cronSettingFake(h)
+
 	installedCalls := 0
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		installedCalls++
 		if installedCalls == 1 {
 			return map[string]extensionInstalledVersion{"pg_cron": {Name: "pg_cron", Version: "1.6"}}, nil
 		}
+
 		return map[string]extensionInstalledVersion{}, nil
 	}
+
 	restoreSQL := steps.SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return map[string]bool{"plpgsql": true}, nil
 	})
@@ -929,17 +1078,22 @@ func TestFollowerRemovalImmediateAbsenceCompletes(t *testing.T) {
 
 	req := request("ext.remove", map[string]any{"name": "pg_cron", "db": "app"})
 	req.Confirm = "app"
+
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
 	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("immediate absence removal = %v", err)
 	}
+
 	if len(h.pg.execs) == 0 || !strings.Contains(h.pg.execs[0], "DROP EXTENSION") {
 		t.Fatalf("DROP did not run first: %v", h.pg.execs)
 	}
+
 	if len(h.saves) != 1 {
 		t.Fatalf("intent saves = %d", len(h.saves))
 	}
+
 	applied := extApplyDatabases(h.applyCalls)
+
 	want := []string{"app", "app_follower_1", "app_follower_2"}
 	if strings.Join(applied, ",") != strings.Join(want, ",") {
 		t.Fatalf("apply order = %v, want %v", applied, want)
@@ -952,6 +1106,7 @@ func TestForkCopyPlanRejectsUnknownCopySafetyBeforeEffects(t *testing.T) {
 		"custom": {Source: catalog.SourcePreinstalled, ExtName: "custom_ext"},
 	}
 	cfg.Clusters[0].Extensions = []string{"custom"}
+
 	_, err := buildExtensionCopyPlan(context.Background(), cfg, extensionCopyRequest{
 		Intent: cfg.Clusters[0], CopyDB: "app", Standby: true, IncludeRetained: true,
 	})
@@ -969,23 +1124,29 @@ func TestFollowerRemovalReplayPendingKeepsGuardAndRetriesWithoutDrop(t *testing.
 	h := newExtHarness(t, cfg)
 	h.preloadLoaded["pg_cron"] = true
 	cronSettingFake(h)
+
 	installedCalls := 0
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		installedCalls++
 		if installedCalls == 1 {
 			return map[string]extensionInstalledVersion{"pg_cron": {Name: "pg_cron", Version: "1.6"}}, nil
 		}
+
 		return map[string]extensionInstalledVersion{}, nil
 	}
+
 	dataDir := cfg.Server.DataDirectory("app_follower_1")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	oldWriter := backup.CopyGuardWriterForTest()
+
 	backup.RestoreCopyGuardWriterForTest(func(path string, data []byte, perm os.FileMode) error {
 		return os.WriteFile(path, data, perm)
 	})
 	t.Cleanup(func() { backup.RestoreCopyGuardWriterForTest(oldWriter) })
+
 	if _, err := backup.InstallCopyGuard(dataDir, backup.CopyGuard{
 		Preloads: []string{"pg_cron"},
 		Settings: map[string]string{"cron.launch_active_jobs": "off"},
@@ -993,7 +1154,9 @@ func TestFollowerRemovalReplayPendingKeepsGuardAndRetriesWithoutDrop(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	followerSQL := map[string]bool{"plpgsql": true, "pg_cron": true}
+
 	restoreSQL := steps.SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return followerSQL, nil
 	})
@@ -1002,17 +1165,21 @@ func TestFollowerRemovalReplayPendingKeepsGuardAndRetriesWithoutDrop(t *testing.
 	req := request("ext.remove", map[string]any{"name": "pg_cron", "db": "app"})
 	req.Confirm = "app"
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
+
 	_, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil || extReason(t, err) != "extension_follower_replay_pending" {
 		t.Fatalf("lagging removal = %v", err)
 	}
+
 	if len(h.pg.execs) == 0 || !strings.Contains(h.pg.execs[0], "DROP EXTENSION") {
 		t.Fatalf("the primary DROP did not run first: %v", h.pg.execs)
 	}
+
 	guard, present, err := backup.ReadCopyGuard(dataDir)
 	if err != nil || !present {
 		t.Fatalf("guard = %+v, %v, %v", guard, present, err)
 	}
+
 	if !slices.Contains(guard.Preloads, "pg_cron") || guard.Settings["cron.launch_active_jobs"] != "off" {
 		t.Fatalf("the lagging follower lost its old guard: %+v", guard)
 	}
@@ -1022,6 +1189,7 @@ func TestFollowerRemovalReplayPendingKeepsGuardAndRetriesWithoutDrop(t *testing.
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Extensions = nil
 	}
+
 	h.cfg = cfg
 	followerSQL = map[string]bool{"plpgsql": true}
 	h.pg.execs = nil
@@ -1031,20 +1199,25 @@ func TestFollowerRemovalReplayPendingKeepsGuardAndRetriesWithoutDrop(t *testing.
 		if strings.Contains(id, "@app_follower_1") {
 			return "the follower copy guard differs", nil
 		}
+
 		return "", nil
 	}
 	req = request("ext.remove", map[string]any{"name": "pg_cron", "db": "app"})
 	req.Confirm = "app"
+
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
 	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("retry after replay absence = %v", err)
 	}
+
 	if len(h.pg.execs) != 0 {
 		t.Fatalf("the retry ran another DROP: %v", h.pg.execs)
 	}
+
 	if len(h.saves) != 0 {
 		t.Fatalf("the retry rewrote converged intent: %d", len(h.saves))
 	}
+
 	applied := extApplyDatabases(h.applyCalls)
 	if !slices.Contains(applied, "app_follower_1") {
 		t.Fatalf("the retry did not refresh the follower: %v", applied)

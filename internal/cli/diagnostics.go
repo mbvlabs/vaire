@@ -114,6 +114,7 @@ func runDiagnosticsCollect(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	out := stringFlag(cmd, "out")
 	if out == "" {
 		return activityUsageError("out", "required", "an output file is required",
@@ -123,6 +124,7 @@ func runDiagnosticsCollect(cmd *cobra.Command, _ []string) error {
 	if err := diagnostics.CheckWritePath(out); err != nil {
 		return err
 	}
+
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{
 			Data: diagnosticsCollectPlan{Path: out, Query: safeQuery, DryRun: true},
@@ -130,17 +132,21 @@ func runDiagnosticsCollect(cmd *cobra.Command, _ []string) error {
 				activityCell(out),
 		})
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, err := p.call(commandContext(cmd), s.node, "activity.list", q, quietCallOptions())
 	if err != nil {
 		// A remote failure never produces a success bundle.
 		return err
 	}
+
 	page, err := decodeNodeData[activity.Page](reply, "activity page")
 	if err != nil {
 		return err
@@ -150,21 +156,27 @@ func runDiagnosticsCollect(cmd *cobra.Command, _ []string) error {
 	if safeQuery, err = safeActivityQuery(q); err != nil {
 		return err
 	}
+
 	server := s.ctx.Server
 	if server == "" {
 		server = s.ctx.Name
 	}
+
 	node := s.ctx.Name
 	if spec, ok := s.ctx.Master(); ok {
 		node = nodeLabel(s.ctx, spec)
 	}
+
 	collectedAt := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+
 	bundle := newCollectBundle(server, node, collectedAt, safeQuery, page)
 	if err := diagnostics.Write(out, bundle); err != nil {
 		return err
 	}
+
 	warnings := append([]output.Warning{}, s.warnings...)
 	warnings = append(warnings, reply.Warnings...)
+
 	warnings = append(warnings, activityCoverageWarnings(bundle.Activity.Coverage)...)
 	if bundle.Activity.NextCursor != "" {
 		warnings = append(warnings, output.Warning{
@@ -172,12 +184,14 @@ func runDiagnosticsCollect(cmd *cobra.Command, _ []string) error {
 			Message: "more matching activity may be available; collect the next page from workspace " + s.ctx.Name + " with --cursor, the same filters and limit, and a new --out",
 		})
 	}
+
 	message := fmt.Sprintf("wrote incident bundle %s: %d events from %s\n%s",
 		activityCell(out), len(bundle.Activity.Events), activityNode(bundle.Activity.Coverage),
 		activityCoverageLine(bundle.Activity.Coverage))
 	if bundle.Activity.NextCursor != "" {
 		message += "\nmore evidence may be available; next cursor " + activityCursorCell(bundle.Activity.NextCursor)
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     diagnosticsCollectResult{Path: out, Query: safeQuery, Bundle: bundle},
 		Message:  message,
@@ -196,7 +210,9 @@ func runDiagnosticsInspect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	warnings := activityCoverageWarnings(bundle.Activity.Coverage)
+
 	return output.Success(cmd, output.Result{
 		Data:     bundle,
 		Message:  diagnosticsBundleMessage(args[0], bundle),
@@ -215,6 +231,7 @@ func diagnosticsInspectCommand(path string) string {
 // resolved window or arbitrary filter map is invented.
 func newCollectBundle(server, node, collectedAt string, q activity.Query, page activity.Page) diagnostics.Bundle {
 	safeQuery := redactActivityQuery(q)
+
 	return diagnostics.Bundle{
 		Schema:    diagnostics.Schema,
 		CreatedAt: collectedAt,
@@ -237,6 +254,7 @@ func safeActivityQuery(q activity.Query) (activity.Query, error) {
 			"Choose filters that do not contain registered secrets.").
 			WithDetails(map[string]any{"reason": "query_secret"})
 	}
+
 	return safe, nil
 }
 
@@ -250,6 +268,7 @@ func redactActivityQuery(q activity.Query) activity.Query {
 	q.Action = secrets.Redact(q.Action)
 	q.Outcome = secrets.Redact(q.Outcome)
 	q.Cursor = secrets.Redact(q.Cursor)
+
 	return q
 }
 
@@ -268,6 +287,7 @@ func activityNodeMetadataVersion() string {
 	if buildinfo.Channel == "dev" {
 		return activityBuildVersion(buildinfo.Version, buildinfo.Commit)
 	}
+
 	return activityBuildVersion(buildinfo.Version, "")
 }
 
@@ -275,9 +295,11 @@ func activityBuildVersion(version, commit string) string {
 	if commit != "" && commit != "none" {
 		version += "+" + commit
 	}
+
 	if len(version) > 64 {
 		version = version[:64]
 	}
+
 	return version
 }
 
@@ -289,6 +311,7 @@ func redactActivityHealth(h activity.Health) activity.Health {
 	h.FirstRetainedAt = secrets.Redact(h.FirstRetainedAt)
 	h.LastRetainedAt = secrets.Redact(h.LastRetainedAt)
 	h.LastWriteAt = secrets.Redact(h.LastWriteAt)
+
 	return h
 }
 
@@ -303,7 +326,9 @@ func diagnosticsBundleMessage(path string, b diagnostics.Bundle) string {
 	if b.Query != nil {
 		lines = append(lines, "query: "+diagnosticsQuerySummary(*b.Query))
 	}
+
 	lines = append(lines, strings.Split(activityPageMessage(b.Activity), "\n")...)
+
 	return strings.Join(lines, "\n")
 }
 
@@ -311,6 +336,7 @@ func diagnosticsBundleMessage(path string, b diagnostics.Bundle) string {
 // resolved node window. A cursor is shown as set, not copied into a long line.
 func diagnosticsQuerySummary(q activity.Query) string {
 	parts := make([]string, 0, 9)
+
 	for _, filter := range []struct {
 		name  string
 		value string
@@ -328,15 +354,19 @@ func diagnosticsQuerySummary(q activity.Query) string {
 			parts = append(parts, filter.name+"="+activityCell(filter.value))
 		}
 	}
+
 	if q.Limit > 0 {
 		parts = append(parts, fmt.Sprintf("limit=%d", q.Limit))
 	}
+
 	if q.Cursor != "" {
 		parts = append(parts, "cursor=set")
 	}
+
 	if len(parts) == 0 {
 		return "all retained activity"
 	}
+
 	return strings.Join(parts, " ")
 }
 
@@ -347,6 +377,7 @@ func redactActivityPage(page activity.Page) activity.Page {
 	if page.Events == nil {
 		page.Events = []activity.Event{}
 	}
+
 	page.Schema = secrets.Redact(page.Schema)
 	page.NextCursor = secrets.Redact(page.NextCursor)
 	c := page.Coverage
@@ -355,6 +386,7 @@ func redactActivityPage(page activity.Page) activity.Page {
 	c.LastRetainedAt = secrets.Redact(c.LastRetainedAt)
 	c.FirstReturnedAt = secrets.Redact(c.FirstReturnedAt)
 	c.LastReturnedAt = secrets.Redact(c.LastReturnedAt)
+
 	page.Coverage = c
 	for i := range page.Events {
 		ev := page.Events[i]
@@ -381,5 +413,6 @@ func redactActivityPage(page activity.Page) activity.Page {
 		ev.NodeVersion = secrets.Redact(ev.NodeVersion)
 		page.Events[i] = ev
 	}
+
 	return page
 }

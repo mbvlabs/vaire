@@ -36,6 +36,7 @@ func engineView(cfg config.Cluster, keep string) config.Cluster {
 		// an unfinished follow's generation still does.
 		recs = backup.Records{}
 	}
+
 	return withoutUnfinished(cfg, recs, keep)
 }
 
@@ -61,6 +62,7 @@ func diagnosticsView(cfg config.Cluster) config.Cluster {
 		// The awaiting entries are unknown, so they cannot narrow the view.
 		return cfg.Clone()
 	}
+
 	return diagnosticsViewWith(cfg, recs)
 }
 
@@ -69,6 +71,7 @@ func diagnosticsView(cfg config.Cluster) config.Cluster {
 // same report.
 func diagnosticsViewWith(cfg config.Cluster, recs backup.Records) config.Cluster {
 	out := cfg.Clone()
+
 	out.Clusters, out.Awaiting = nil, nil
 	for _, c := range cfg.Clusters {
 		c = c.Clone()
@@ -78,6 +81,7 @@ func diagnosticsViewWith(cfg config.Cluster, recs backup.Records) config.Cluster
 			out.Clusters = append(out.Clusters, c)
 		}
 	}
+
 	return out
 }
 
@@ -113,20 +117,24 @@ func refuseAwaiting(req rpc.Request) error {
 	if !ok {
 		return nil
 	}
+
 	var params map[string]any
 	if json.Unmarshal(req.Params, &params) != nil {
 		return nil
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil || len(recs.AwaitingRecovery) == 0 {
 		return nil
 	}
+
 	if req.Method == "restore.promote" {
 		name, _ := params["database"].(string)
 		if awaitingRecoverPromotable(name, recs) {
 			return nil
 		}
 	}
+
 	return refuseAwaitingIn(params, recs, action)
 }
 
@@ -141,5 +149,6 @@ func refuseAwaitingIn(params map[string]any, recs backup.Records, action string)
 			return awaitingError(name, action)
 		}
 	}
+
 	return nil
 }

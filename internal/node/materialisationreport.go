@@ -30,21 +30,25 @@ var materialisationReportArtifactsVerified = func(o materialisationOwnership, da
 	if err != nil {
 		return false
 	}
+
 	artifacts, err := openMaterialisationArtifacts(o.Target, dataRoot, uid)
 	if err != nil {
 		return false
 	}
 	defer artifacts.close()
+
 	return artifacts.owner == o && artifacts.validate() == nil
 }
 var materialisationReportQuery = func(ctx context.Context, port int) ([]map[string]string, error) {
 	local := steps.ClusterPG(config.ClusterSpec{Port: port})
+
 	return local.Query(ctx, "postgres",
 		"SELECT current_setting('data_directory') AS data_directory, current_setting('port') AS port, pg_is_in_recovery() AS in_recovery, CASE WHEN pg_is_in_recovery() THEN pg_is_wal_replay_paused() END AS replay_paused", nil)
 }
 
 func reportBool(v string) *bool {
 	var b bool
+
 	switch v {
 	case "t", "true":
 		b = true
@@ -53,6 +57,7 @@ func reportBool(v string) *bool {
 	default:
 		return nil
 	}
+
 	return &b
 }
 
@@ -63,12 +68,16 @@ func materialisationReports(ctx context.Context, cfg config.Cluster) (map[string
 	if err != nil {
 		return nil, nil, materialisationIncomplete("", nil)
 	}
+
 	var inventory map[string]string
+
 	if len(records) != 0 {
 		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		inventory, _ = materialisationReportInventory(qctx)
+
 		cancel()
 	}
+
 	return materialisationReportsFrom(ctx, cfg, records, inventory), records, nil
 }
 
@@ -79,6 +88,7 @@ func materialisationReportsFrom(ctx context.Context, cfg config.Cluster, records
 		if validJobID(o.Job) {
 			report.Job = o.Job
 		}
+
 		registered := o.ArtifactStage == materialisationRegistered || o.ArtifactStage == materialisationProvisioned
 		if registered && materialisationReportArtifactsVerified(o, cfg.Server.DataRoot) {
 			applyMaterialisationPhysicalState(ctx, o, inventory[o.Target], &report)
@@ -90,8 +100,10 @@ func materialisationReportsFrom(ctx context.Context, cfg config.Cluster, records
 			(registered && !materialisationReportArtifactsVerified(o, cfg.Server.DataRoot)) {
 			report.PhysicalState, report.InRecovery, report.ReplayPaused = "unknown", nil, nil
 		}
+
 		reports[o.Target] = report
 	}
+
 	return reports
 }
 
@@ -103,10 +115,12 @@ func applyMaterialisationPhysicalState(ctx context.Context, o materialisationOwn
 		if o.Phase != materialisationCopying && o.Phase != materialisationProvisioning && o.Phase != materialisationFailed {
 			return
 		}
+
 		port := o.TemporaryPort
 		if o.Phase == materialisationProvisioning {
 			port = o.IntendedPort
 		}
+
 		queryMaterialisationPort(ctx, o, port, report)
 	}
 }
@@ -114,11 +128,15 @@ func applyMaterialisationPhysicalState(ctx context.Context, o materialisationOwn
 func queryMaterialisationPort(ctx context.Context, o materialisationOwnership, port int, report *materialisationReport) {
 	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	rows, queryErr := materialisationReportQuery(qctx, port)
+
 	cancel()
+
 	if queryErr != nil || len(rows) != 1 || rows[0]["data_directory"] != o.DataPath || rows[0]["port"] != strconv.Itoa(port) {
 		return
 	}
+
 	report.PhysicalState = "online"
+
 	report.InRecovery = reportBool(rows[0]["in_recovery"])
 	if report.InRecovery != nil && *report.InRecovery {
 		report.ReplayPaused = reportBool(rows[0]["replay_paused"])
@@ -130,6 +148,7 @@ func unchangedMaterialisationReports(cfg config.Cluster, before []materialisatio
 	if err != nil || !reflect.DeepEqual(before, after) {
 		return materialisationIncomplete("", nil)
 	}
+
 	return nil
 }
 
@@ -138,17 +157,21 @@ func incompleteDiagnosticsView(cfg config.Cluster) (config.Cluster, []materialis
 	if err != nil {
 		return config.Cluster{}, nil, materialisationIncomplete("", nil)
 	}
+
 	excluded := make(map[string]bool, len(records))
 	for _, record := range records {
 		excluded[record.Target] = true
 	}
+
 	out := cfg
+
 	out.Clusters = nil
 	for _, spec := range cfg.Clusters {
 		if !excluded[spec.Name] {
 			out.Clusters = append(out.Clusters, spec)
 		}
 	}
+
 	return out, records, nil
 }
 
@@ -159,9 +182,11 @@ func omitIncompleteMeasurements(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
 	}
+
 	for _, key := range []string{"uptime_s", "connections", "db_size", "wal_bytes", "longest_xact_s", "backup", "restart_pending", "restore_in_progress"} {
 		delete(fields, key)
 	}
+
 	return json.Marshal(fields)
 }
 
@@ -170,6 +195,7 @@ func incompleteDatabaseListRow(info databaseInfo, report materialisationReport) 
 	info.State, info.Follower = stateMaterialisationIncomplete, nil
 	ready := false
 	info.ApplicationReady, info.Materialisation = &ready, &report
+
 	return info
 }
 
@@ -177,6 +203,7 @@ func incompleteStatusRow(cfg config.Cluster, name string, report materialisation
 	spec, _ := cfg.ClusterByName(name)
 	res, _ := cfg.Resources(spec)
 	ready := false
+
 	return statusDatabase{Name: name, State: stateMaterialisationIncomplete, Size: res.Size,
 		MemoryMiB: res.MemoryMiB, MemoryHighMiB: res.MemoryMiB + res.MemoryMiB/4,
 		Protected: spec.Protected, Follows: spec.Follows,
@@ -185,16 +212,20 @@ func incompleteStatusRow(cfg config.Cluster, name string, report materialisation
 
 func (row databaseInfo) MarshalJSON() ([]byte, error) {
 	type plain databaseInfo
+
 	raw, err := json.Marshal(plain(row))
 	if err != nil || row.State != stateMaterialisationIncomplete {
 		return raw, err
 	}
+
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
 	}
+
 	for _, key := range []string{"exists", "size_bytes", "roles", "extensions"} {
 		delete(fields, key)
 	}
+
 	return json.Marshal(fields)
 }

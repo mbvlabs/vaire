@@ -28,16 +28,20 @@ func TestPruneBundles(t *testing.T) {
 		{Name: at(3, 2), Complete: false}, // an incomplete upload older than a day
 	}
 	list[5].Name = masterbackup.Name(now.Add(-time.Hour), 2, "fff") // a fresh incomplete upload stays
+
 	var deleted []string
+
 	n, err := pruneBundles(context.Background(), list, now, config.MasterBackup{RetentionDays: 30, RetentionWeeks: 52, LocalKeep: 10},
 		func(name string) error { deleted = append(deleted, name); return nil })
 	reject(t, err != nil, err)
 	rejectf(t, n != len(deleted), "n %d, deleted %v", n, deleted)
+
 	for _, keep := range []string{at(0, 2), at(1, 2), list[5].Name} {
 		if slices.Contains(deleted, keep) {
 			t.Errorf("deleted %s", keep)
 		}
 	}
+
 	for _, gone := range []string{at(500, 1), at(3, 2)} {
 		if !slices.Contains(deleted, gone) {
 			t.Errorf("kept %s", gone)
@@ -47,10 +51,12 @@ func TestPruneBundles(t *testing.T) {
 
 func TestPruneKeepsTheNewestThreeWhateverTheirAge(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	var list []backup.MasterBundle
-	for d := 0; d < 3; d++ {
+
+	list := make([]backup.MasterBundle, 0, 3)
+	for d := range 3 {
 		list = append(list, backup.MasterBundle{Name: masterbackup.Name(now.Add(-time.Duration(800+d)*24*time.Hour), 1, "abc"), Complete: true})
 	}
+
 	n, err := pruneBundles(context.Background(), list, now, config.MasterBackup{RetentionDays: 30, RetentionWeeks: 52},
 		func(string) error { return nil })
 	rejectf(t, err != nil || n != 0, "pruned %d of three old bundles (%v)", n, err)
@@ -63,6 +69,7 @@ func TestNeedsBuild(t *testing.T) {
 	if needsBuild(base, "h1", 1, true) {
 		t.Error("unchanged, present: should not build")
 	}
+
 	for _, tc := range []struct {
 		name string
 		last MasterLast
@@ -84,6 +91,7 @@ func TestNeedsBuild(t *testing.T) {
 func TestMasterFamilies(t *testing.T) {
 	cfg := config.DefaultCluster()
 	last := MasterLast{CreatedAt: "2026-10-15T10:00:00Z", UploadedAt: "2026-10-15T10:00:05Z", Size: 4096, LastVerifiedAt: "2026-10-15T10:00:05Z"}
+
 	out := string(promfile.Render(masterFamilies(cfg, last, time.Now())))
 	for _, want := range []string{
 		"vaire_master_backup_last_success_timestamp_seconds 1792058400",
@@ -95,11 +103,14 @@ func TestMasterFamilies(t *testing.T) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
 	}
+
 	cfg.Backup.Provider = "r2"
+
 	out = string(promfile.Render(masterFamilies(cfg, last, time.Now())))
 	if !strings.Contains(out, "vaire_master_backup_last_success_timestamp_seconds 1792058405") {
 		t.Errorf("with a bucket, success is the upload:\n%s", out)
 	}
+
 	last.PendingSince = "2026-10-15T10:01:00Z"
 	if !strings.Contains(string(promfile.Render(masterFamilies(cfg, last, time.Now()))), "vaire_master_backup_dirty 1") {
 		t.Error("a pending change isn't dirty")
@@ -109,6 +120,7 @@ func TestMasterFamilies(t *testing.T) {
 func TestBucketCheckDue(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	fresh := now.Add(-time.Hour).Format(time.RFC3339)
+
 	stale := now.Add(-verifyEvery - time.Minute).Format(time.RFC3339)
 	for _, c := range []struct {
 		name   string

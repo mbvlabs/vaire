@@ -18,15 +18,18 @@ func TestMaterialisationConfigRendersDestinationAndFollowerFloors(t *testing.T) 
 	reject(t, err != nil, err)
 	medium, err := materialisationConfig(cfg, target, host)
 	reject(t, err != nil, err)
+
 	if !strings.Contains(small.Tuning, "max_connections = 30") || !strings.Contains(medium.Tuning, "max_connections = 50") ||
 		medium.Follower != nil || medium.Overrides != nil {
 		t.Fatalf("destination layers: small=%s medium=%+v", small.Tuning, medium)
 	}
+
 	target.Follows = source.Name
 	cfg.Clusters[1] = target
 	follower, err := materialisationConfig(cfg, target, host)
 	rejectf(t, err != nil || follower.Follower == nil, "follower layers: %+v %v", follower, err)
 	rejectf(t, !strings.Contains(*follower.Follower, "max_connections = 50"), "follower floors: %s", *follower.Follower)
+
 	for _, forbidden := range []string{"primary_conninfo", "primary_slot_name", "restore_command", "passfile", "standby.signal"} {
 		rejectf(t, strings.Contains(*follower.Follower, forbidden), "unexpected follower transport %q in %s", forbidden, *follower.Follower)
 	}

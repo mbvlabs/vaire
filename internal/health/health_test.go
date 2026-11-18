@@ -11,6 +11,7 @@ func TestParseSample(t *testing.T) {
 	if s.UptimeS != 3600 || s.MaxConnections != 30 || s.Connections != 6 || s.LastArchivedAgeS != -1 || s.SSL != "on" || s.MaxXIDAge != 0 {
 		t.Errorf("%+v", s)
 	}
+
 	if use := ConnectionUse(s); use != 0.2 {
 		t.Errorf("use %v", use)
 	}
@@ -20,15 +21,19 @@ func TestCacheHitAndTPS(t *testing.T) {
 	if _, ok := CacheHit(0, 0); ok {
 		t.Error("no reads yet, but a ratio")
 	}
+
 	if r, _ := CacheHit(99, 1); r != 0.99 {
 		t.Errorf("ratio %v", r)
 	}
+
 	if got := TPS(100, 150, 500*time.Millisecond); got != 100 {
 		t.Errorf("tps %v", got)
 	}
+
 	if got := TPS(150, 10, time.Second); got != 0 {
 		t.Errorf("a counter reset gave %v", got)
 	}
+
 	if got := TPS(1, 2, 0); got != 0 {
 		t.Errorf("zero interval gave %v", got)
 	}

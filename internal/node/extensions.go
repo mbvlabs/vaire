@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -241,27 +242,34 @@ func handleExtList(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	specs, err := extensionListSpecs(env.Cluster, p.DB)
 	if err != nil {
 		return Result{}, err
 	}
+
 	recs, err := extensionRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	entries, err := env.Cluster.ExtensionResolver().List()
 	if err != nil {
 		return Result{}, config.ValidationError(err)
 	}
+
 	used, err := steps.ExtensionPackages(env.Cluster)
 	if err != nil {
 		return Result{}, err
 	}
+
 	usedSet := map[string]bool{}
 	for _, pkg := range used {
 		usedSet[pkg] = true
 	}
+
 	known := map[string]bool{}
+
 	for _, ext := range entries {
 		if ext.ExtName != "" {
 			known[ext.ExtName] = true
@@ -277,12 +285,15 @@ func handleExtList(ctx context.Context, env *Env) (Result, error) {
 	for _, ext := range entries {
 		data.Extensions = append(data.Extensions, extensionListEntryFor(ctx, ext, dbs, usedSet))
 	}
+
 	extensionListUnmanaged(data.Databases, known)
+
 	return Result{Data: data}, nil
 }
 
 func extensionListEntryFor(ctx context.Context, ext catalog.Extension, dbs []extListDatabase, usedSet map[string]bool) extListEntry {
 	availability := extensionAvailabilityFor(ext)
+
 	entry := extListEntry{
 		Name: ext.Name, ExtName: ext.ExtName, Aliases: slices.Clone(ext.Aliases),
 		Source: ext.Source, Package: ext.Package, Preload: ext.Preload,
@@ -298,12 +309,14 @@ func extensionListEntryFor(ctx context.Context, ext catalog.Extension, dbs []ext
 		entry.PackageInstalled, entry.PackageKnown, entry.PackageError = extensionPackageInstalled(ctx, ext.Package)
 		entry.Unused = entry.PackageKnown && entry.PackageInstalled && !usedSet[ext.Package]
 	}
+
 	for _, db := range dbs {
 		st, include := extensionListDatabaseState(ext, db)
 		if include {
 			entry.Databases = append(entry.Databases, st)
 		}
 	}
+
 	return entry
 }
 
@@ -315,15 +328,18 @@ func extensionListDatabaseState(ext catalog.Extension, db extListDatabase) (extD
 	if !db.Available {
 		return st, st.Enabled
 	}
+
 	if ext.ExtName != "" {
 		if installed, ok := db.installed()[ext.ExtName]; ok {
 			st.Installed, st.Version, st.DefaultVersion = true, installed.Version, installed.Default
 			st.UpdateAvailable = extensionUpdateAvailable(installed.Version, installed.Default)
 		}
 	}
+
 	if st.Enabled && ext.Preload != "" && db.PreloadKnown && !db.loaded[ext.Preload] && db.pending {
 		st.PendingRestart = true
 	}
+
 	return st, st.Enabled || st.Installed
 }
 
@@ -333,13 +349,17 @@ func extensionListUnmanaged(dbs []extListDatabase, known map[string]bool) {
 		if !db.Available {
 			continue
 		}
+
 		var unmanaged []extensionInstalledVersion
+
 		for name, got := range db.installed() {
 			if name == "plpgsql" || known[name] {
 				continue
 			}
+
 			unmanaged = append(unmanaged, got)
 		}
+
 		sort.Slice(unmanaged, func(i, j int) bool { return unmanaged[i].Name < unmanaged[j].Name })
 		db.Unmanaged = unmanaged
 	}
@@ -347,58 +367,73 @@ func extensionListUnmanaged(dbs []extListDatabase, known map[string]bool) {
 
 func handleExtAdd(ctx context.Context, env *Env) (Result, error) {
 	ctx = steps.WithFollowerRuntimeOperation(ctx, env.Req.RequestID)
+
 	var p extAddParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	cfg, raw, err := extensionLoad()
 	if err != nil {
 		return Result{}, err
 	}
+
 	recs, err := extensionRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	spec, err := extensionTargetSpec(cfg, recs, p.DB, "ext add", true)
 	if err != nil {
 		return Result{}, err
 	}
+
 	var lockedTargets extensionTargetSet
+
 	if !env.Req.DryRun {
 		var release func()
+
 		cfg, raw, recs, lockedTargets, release, err = lockExtensionMutation(ctx, env, spec.Name)
 		if err != nil {
 			return Result{}, err
 		}
 		defer release()
+
 		spec = lockedTargets.Source
 		if err := extensionMutationRefusals(cfg, recs, spec, "ext add"); err != nil {
 			return Result{}, err
 		}
 	}
+
 	updated, ext, descriptorSaved, err := extensionAddIntent(cfg, spec.Name, p)
 	if err != nil {
 		return Result{}, err
 	}
+
 	updatedSpec, ok := updated.ClusterByName(spec.Name)
 	if !ok {
 		return Result{}, databaseNotFound(spec.Name)
 	}
+
 	if err := extensionAddDescriptorChecks(ctx, cfg, updated, updatedSpec, ext, spec.Name, descriptorSaved); err != nil {
 		return Result{}, err
 	}
+
 	alreadyEnabled := extensionEnabled(cfg, spec, ext.Name)
 	if !env.Req.DryRun && len(cfg.FollowerNames(spec.Name)) > 0 {
 		propagated, _, err := propagateFollowerExtensions(cfg, updated)
 		if err != nil {
 			return Result{}, err
 		}
+
 		updated = propagated
 		if err := updated.Validate(); err != nil {
 			return Result{}, config.ValidationError(err)
 		}
+
 		return extensionAddWithFollowers(ctx, env, cfg, raw, spec, updated, lockedTargets, ext, descriptorSaved, alreadyEnabled)
 	}
+
 	return extensionAddStandalone(ctx, env, cfg, updated, updatedSpec, spec, ext, descriptorSaved, alreadyEnabled)
 }
 
@@ -406,29 +441,37 @@ func extensionAddDescriptorChecks(ctx context.Context, cfg, updated config.Clust
 	if err := refuseInstalledExtensionSchemas(ctx, updated, updatedSpec); err != nil {
 		return err
 	}
+
 	if err := validateTargetExtensionDescriptors(updated, updatedSpec); err != nil {
 		return err
 	}
+
 	if sourceHasFollowers(updated, db) {
 		if err := validateTargetExtensionCopySafety(updated, updatedSpec, false); err != nil {
 			return err
 		}
 	}
+
 	if !descriptorSaved {
 		return nil
 	}
+
 	affected, err := extensionDefinitionImpact(cfg, updated, ext.Name, db)
 	if err != nil {
 		return config.ValidationError(err)
 	}
+
 	if len(affected) == 0 {
 		return nil
 	}
+
 	followers := cfg.FollowerNames(db)
 	sort.Strings(followers)
+
 	if !slices.Equal(affected, followers) {
 		return extensionGlobalIntentConflict(db, ext.Name, affected)
 	}
+
 	return nil
 }
 
@@ -437,31 +480,39 @@ func extensionAddStandalone(ctx context.Context, env *Env, cfg config.Cluster, u
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: extensionAddDryRunResult(pf, cfg, spec, ext, descriptorSaved, alreadyEnabled)}, nil
 	}
+
 	if pf.InstalledKnown && pf.HasInstalled && pf.Got.Default != "" && pf.Got.Default != pf.Got.Version {
 		if err := extensionAddRefuseVersionDirection(updatedSpec.Name, ext, pf.Got); err != nil {
 			return Result{}, err
 		}
 	}
+
 	if pf.TokenRequired && !hasConfirmToken(env.Req, updatedSpec.Name+"/restart") {
 		return Result{}, confirmRequired(ext.Name+" changes "+updatedSpec.Name+"'s extension configuration, so it needs that cluster's restart token (only that database)", updatedSpec.Name+"/restart")
 	}
+
 	if result, ok, err := extensionAddNoOp(ctx, updated, updatedSpec, ext, pf, descriptorSaved, alreadyEnabled); err != nil {
 		return Result{}, err
 	} else if ok {
 		return result, nil
 	}
+
 	env.Cluster = updated
+
 	rt := runtimeFor(env, false)
 	if err := extensionAddPrepareAndSave(ctx, env, cfg, updated, updatedSpec, ext, descriptorSaved, alreadyEnabled, rt); err != nil {
 		return Result{}, err
 	}
+
 	applied, warnings, err := extensionAddApplyConfig(ctx, env, updated, updatedSpec, ext, pf.TokenRequired, rt)
 	if err != nil {
 		return Result{}, err
 	}
+
 	restarted := applied.Restarted()
 	if pf.RestartExpected {
 		again, err := extensionRestartIfPending(ctx, updated, updatedSpec, pf.RestartExpected, applied, rt, env.Report)
@@ -469,18 +520,24 @@ func extensionAddStandalone(ctx context.Context, env *Env, cfg config.Cluster, u
 			return Result{}, extensionPartialError("saving the extension intent succeeded, but restarting its cluster failed: "+err.Error(),
 				"extension_apply_failed", updatedSpec.Name, ext.Name, pf.TokenRequired, restarted, applied)
 		}
+
 		restarted = restarted || again
 	}
+
 	_, roleWarnings, err := extensionAddApplyRoles(ctx, env, updated, updatedSpec, ext, pf.TokenRequired, restarted, rt)
 	warnings = append(warnings, roleWarnings...)
+
 	if err != nil {
 		return Result{}, err
 	}
+
 	got, err := extensionAddVerifyCreated(ctx, updatedSpec, ext)
 	if err != nil {
 		return Result{}, err
 	}
+
 	pendingNow := extensionAddPendingNow(ctx, updatedSpec, pf.PendingSettings, pf.Running)
+
 	return extensionAddFinishResult(ctx, updated, updatedSpec, ext, pf, descriptorSaved, alreadyEnabled, restarted, pendingNow, got, warnings)
 }
 
@@ -501,12 +558,15 @@ type extensionAddPreflightFacts struct {
 
 func extensionAddPreflight(ctx context.Context, env *Env, cfg config.Cluster, updated config.Cluster, spec config.ClusterSpec, updatedSpec config.ClusterSpec, ext catalog.Extension, descriptorSaved, alreadyEnabled bool) (extensionAddPreflightFacts, error) {
 	f := extensionAddPreflightFacts{Installed: map[string]extensionInstalledVersion{}}
+
 	preload, err := extensionAddPreloadState(ctx, env, cfg, updated, spec, updatedSpec, ext)
 	if err != nil {
 		return f, err
 	}
+
 	f.Running = preload.Running
 	f.PreloadMissing = preload.PreloadMissing
+
 	f.Runtime = runtimeFor(env, false)
 	if f.Running {
 		f.PendingSettings, err = extensionPendingRestarts(ctx, updatedSpec)
@@ -517,6 +577,7 @@ func extensionAddPreflight(ctx context.Context, env *Env, cfg config.Cluster, up
 				WithDetails(map[string]any{"reason": "extension_pending_unknown", "database": spec.Name, "extension": ext.Name})
 		}
 	}
+
 	configDetail, err := extensionCheckStep(ctx, updated, f.Runtime, steps.ConfigStepID(updatedSpec.Name))
 	if err != nil {
 		return f, output.NewError(output.CodePrecondition,
@@ -524,10 +585,12 @@ func extensionAddPreflight(ctx context.Context, env *Env, cfg config.Cluster, up
 			"Run vaire status --db "+spec.Name+" before retrying; no extension intent was saved.").
 			WithDetails(map[string]any{"reason": "extension_config_unknown", "database": spec.Name, "extension": ext.Name})
 	}
+
 	f.ConfigDrift = configDetail != ""
 	f.RestartExpected = preload.NeedRestart || len(f.PendingSettings) > 0
 	f.TokenRequired = f.RestartExpected || f.ConfigDrift ||
 		((!alreadyEnabled || descriptorSaved) && (ext.Preload != "" || len(ext.Settings) > 0))
+
 	f.Tokens = extensionAddConfirmTokens(updatedSpec.Name, f.TokenRequired)
 	if f.Running {
 		f.Installed, err = extensionInstalled(ctx, updatedSpec)
@@ -537,9 +600,12 @@ func extensionAddPreflight(ctx context.Context, env *Env, cfg config.Cluster, up
 				"Run vaire status --db "+spec.Name+" before retrying; no extension intent was saved.").
 				WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name, "extension": ext.Name})
 		}
+
 		f.InstalledKnown = true
 	}
+
 	f.Got, f.HasInstalled = f.Installed[ext.ExtName]
+
 	return f, nil
 }
 
@@ -551,23 +617,30 @@ type extensionAddPreloadFacts struct {
 
 func extensionAddPreloadState(ctx context.Context, env *Env, cfg, updated config.Cluster, spec, updatedSpec config.ClusterSpec, ext catalog.Extension) (extensionAddPreloadFacts, error) {
 	var st extensionAddPreloadFacts
+
 	beforePreloads, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
 	if err != nil {
 		return st, config.ValidationError(err)
 	}
+
 	afterPreloads, err := updated.ExtensionResolver().Preloads(updatedSpec.Extensions)
 	if err != nil {
 		return st, config.ValidationError(err)
 	}
+
 	preloadChange := !slices.Equal(beforePreloads, afterPreloads)
 	preloadKnownNeeded := ext.Preload != ""
+
 	st.Running = extensionClusterRunning(spec)
 	if !st.Running && !env.Req.DryRun {
 		return st, extensionClusterNotRunning(spec.Name, "ext add")
 	}
+
 	var loaded map[string]bool
+
 	pendingPreload := false
 	preloadKnown := false
+
 	if st.Running {
 		loaded, pendingPreload, err = extensionPreloadFacts(ctx, updatedSpec)
 		if err != nil {
@@ -581,8 +654,10 @@ func extensionAddPreloadState(ctx context.Context, env *Env, cfg, updated config
 			preloadKnown = true
 		}
 	}
+
 	st.PreloadMissing = preloadKnown && ext.Preload != "" && !loaded[ext.Preload] && !pendingPreload
 	st.NeedRestart = preloadChange || (preloadKnown && ext.Preload != "" && !loaded[ext.Preload] && pendingPreload)
+
 	return st, nil
 }
 
@@ -599,17 +674,20 @@ func extensionAddDryRunResult(pf extensionAddPreflightFacts, cfg config.Cluster,
 	if pf.InstalledKnown && pf.HasInstalled {
 		res.Version, res.DefaultVersion = pf.Got.Version, pf.Got.Default
 		res.UpdateAvailable = extensionUpdateAvailable(pf.Got.Version, pf.Got.Default)
+
 		res.Downgrade = extensionDowngrade(pf.Got.Version, pf.Got.Default)
 		if pf.Got.Default != "" && pf.Got.Default != pf.Got.Version {
 			_, ordered := extensionVersionCompare(pf.Got.Version, pf.Got.Default)
 			res.DirectionUnknown = !ordered
 		}
 	}
+
 	if followers := cfg.FollowerNames(spec.Name); len(followers) > 0 {
 		res.RequiredConfirmTokens = append(res.RequiredConfirmTokens, extensionRestartTokensFor(cfg, spec.Name)...)
 		sort.Strings(res.RequiredConfirmTokens)
 		res.RequiredConfirmTokens = slices.Compact(res.RequiredConfirmTokens)
 	}
+
 	return res
 }
 
@@ -618,9 +696,11 @@ func extensionAddRefuseVersionDirection(db string, ext catalog.Extension, got ex
 	if !ordered {
 		return extensionUpdateDirectionUnknown(db, ext.Name, got.Version, got.Default)
 	}
+
 	if cmp > 0 {
 		return extensionDowngradeError(db, ext.Name, got.Version, got.Default)
 	}
+
 	return nil
 }
 
@@ -633,6 +713,7 @@ func extensionAddNoOp(ctx context.Context, updated config.Cluster, updatedSpec c
 		pf.Got.Default == "" || pf.Got.Default != pf.Got.Version {
 		return Result{}, false, nil
 	}
+
 	journalOK, err := extensionJournalConverged(ctx, updated, updatedSpec, pf.Runtime)
 	if err != nil {
 		return Result{}, false, output.NewError(output.CodePrecondition,
@@ -640,9 +721,11 @@ func extensionAddNoOp(ctx context.Context, updated config.Cluster, updatedSpec c
 			"Run vaire status --db "+updatedSpec.Name+" before retrying; no extension intent was saved.").
 			WithDetails(map[string]any{"reason": "extension_journal_unknown", "database": updatedSpec.Name, "extension": ext.Name})
 	}
+
 	if !journalOK {
 		return Result{}, false, nil
 	}
+
 	rolesDetail, err := extensionCheckStep(ctx, updated, pf.Runtime, steps.RolesStepID(updatedSpec.Name))
 	if err != nil {
 		return Result{}, false, output.NewError(output.CodePrecondition,
@@ -650,9 +733,11 @@ func extensionAddNoOp(ctx context.Context, updated config.Cluster, updatedSpec c
 			"Run vaire status --db "+updatedSpec.Name+" before retrying; no extension intent was saved.").
 			WithDetails(map[string]any{"reason": "extension_runtime_unknown", "database": updatedSpec.Name, "extension": ext.Name})
 	}
+
 	if rolesDetail != "" {
 		return Result{}, false, nil
 	}
+
 	return Result{Data: extAddResult{
 		Database: updatedSpec.Name, Extension: ext.Name, ExtName: ext.ExtName, Source: ext.Source,
 		Package: ext.Package, Preload: ext.Preload, Schema: ext.Schema,
@@ -668,6 +753,7 @@ func extensionAddPrepareAndSave(ctx context.Context, env *Env, cfg config.Cluste
 			"No proposed extension intent was saved, and no package preparation, restart or extension SQL was requested; any outgoing requirement snapshots already written are retained. Retry after fixing the requirement history store.").
 			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": updatedSpec.Name, "extension": ext.Name})
 	}
+
 	saved := descriptorSaved || !alreadyEnabled
 	intentSaved := !saved
 	// Prepare the proposed packages and files before saving the proposed
@@ -680,6 +766,7 @@ func extensionAddPrepareAndSave(ctx context.Context, env *Env, cfg config.Cluste
 		} else {
 			hint += "cluster.toml was not changed; retry vaire ext add after fixing the package prerequisite."
 		}
+
 		return output.NewError(output.CodePartialFailure,
 			"installing extension packages for "+ext.Name+" failed: "+err.Error(), output.ExitStep, hint).
 			WithDetails(map[string]any{
@@ -701,9 +788,11 @@ func extensionAddPrepareAndSave(ctx context.Context, env *Env, cfg config.Cluste
 				"incoming_history_may_remain": true,
 			})
 	}
+
 	if !saved {
 		return nil
 	}
+
 	newRaw, err := updated.Encode()
 	if err != nil {
 		return output.NewError(output.CodePartialFailure,
@@ -716,6 +805,7 @@ func extensionAddPrepareAndSave(ctx context.Context, env *Env, cfg config.Cluste
 				"incoming_history_retained": true,
 			})
 	}
+
 	if err := extensionSave(newRaw); err != nil {
 		return output.NewError(output.CodePartialFailure,
 			"preparing extension packages for "+ext.Name+" succeeded and its incoming requirements were recorded, but saving the extension intent failed: "+err.Error(),
@@ -727,6 +817,7 @@ func extensionAddPrepareAndSave(ctx context.Context, env *Env, cfg config.Cluste
 				"incoming_history_retained": true,
 			})
 	}
+
 	return nil
 }
 
@@ -738,16 +829,20 @@ func extensionAddApplyConfig(ctx context.Context, env *Env, updated config.Clust
 	if tokenRequired {
 		applyOpts.Confirm = engine.Confirmation{Clusters: []string{updatedSpec.Name}}
 	}
+
 	applied, warnings, err := extensionApply(ctx, updated, rt, applyOpts)
 	if err != nil {
 		return applied, warnings, extensionPartialError("saving the extension intent succeeded, but applying it failed: "+err.Error(),
 			"extension_apply_failed", updatedSpec.Name, ext.Name, tokenRequired, false, applied)
 	}
+
 	clearExtensionDeferred(applied)
+
 	if extensionApplyIncomplete(applied) || extensionRestartPending(applied, updatedSpec.Name) {
 		return applied, warnings, extensionPartialError("saving the extension intent succeeded, but its configuration still waits for a restart",
 			"extension_pending_restart", updatedSpec.Name, ext.Name, tokenRequired, false, applied)
 	}
+
 	return applied, warnings, nil
 }
 
@@ -758,22 +853,27 @@ func extensionAddApplyRoles(ctx context.Context, env *Env, updated config.Cluste
 	}
 	rolesApplied, roleWarnings, err := extensionApply(ctx, updated, rt, rolesOpts)
 	clearExtensionDeferred(rolesApplied)
+
 	if err != nil {
 		return rolesApplied, roleWarnings, extensionPartialError("the extension intent and configuration are saved, but creating its SQL failed: "+err.Error(),
 			"extension_sql_failed", updatedSpec.Name, ext.Name, tokenRequired, restarted, rolesApplied)
 	}
+
 	if extensionApplyIncomplete(rolesApplied) {
 		if extensionWarningCode(roleWarnings, "extension_pending_restart") {
 			return rolesApplied, roleWarnings, extensionPartialError("the extension is configured but its SQL still waits for the preload restart",
 				"extension_pending_restart", updatedSpec.Name, ext.Name, tokenRequired, restarted, rolesApplied)
 		}
+
 		return rolesApplied, roleWarnings, extensionPartialError("the extension is configured, but the roles step is still incomplete",
 			"extension_roles_incomplete", updatedSpec.Name, ext.Name, tokenRequired, restarted, rolesApplied)
 	}
+
 	if extensionRestartPending(rolesApplied, updatedSpec.Name) {
 		return rolesApplied, roleWarnings, extensionPartialError("the extension is configured but its SQL still waits for a restart",
 			"extension_pending_restart", updatedSpec.Name, ext.Name, tokenRequired, restarted, rolesApplied)
 	}
+
 	return rolesApplied, roleWarnings, nil
 }
 
@@ -785,6 +885,7 @@ func extensionAddVerifyCreated(ctx context.Context, updatedSpec config.ClusterSp
 			"Check vaire ext list --db "+updatedSpec.Name+" before retrying; do not run the SQL again by hand.").
 			WithDetails(map[string]any{"reason": "extension_verify_failed", "database": updatedSpec.Name, "extension": ext.Name, "intent_saved": true})
 	}
+
 	got, has := have[ext.ExtName]
 	if !has {
 		return extensionInstalledVersion{}, output.NewError(output.CodePartialFailure,
@@ -792,16 +893,19 @@ func extensionAddVerifyCreated(ctx context.Context, updatedSpec config.ClusterSp
 			"Retry with vaire apply --db "+updatedSpec.Name+" --confirm "+updatedSpec.Name+"/restart, then check vaire ext list --db "+updatedSpec.Name+".").
 			WithDetails(map[string]any{"reason": "extension_not_created", "database": updatedSpec.Name, "extension": ext.Name, "intent_saved": true})
 	}
+
 	return got, nil
 }
 
 func extensionAddPendingNow(ctx context.Context, spec config.ClusterSpec, before []string, running bool) bool {
 	pendingNow := len(before) > 0
+
 	if running {
 		if stillPending, err := extensionPendingRestarts(ctx, spec); err == nil {
 			pendingNow = len(stillPending) > 0
 		}
 	}
+
 	return pendingNow
 }
 
@@ -818,20 +922,24 @@ func extensionAddFinishResult(ctx context.Context, updated config.Cluster, updat
 	if ext.Package != "" {
 		res.PackageKept = ext.Package
 	}
+
 	if got.Default != "" && got.Default != got.Version {
 		outcome, err := extensionAddUpdateIfNeeded(ctx, updated, updatedSpec, ext, got, pf.Tokens, restarted)
 		if err != nil {
 			return Result{}, err
 		}
+
 		if outcome.Skip {
 			res.UpdateAvailable, res.Downgrade = false, false
 			return Result{Data: res, Warnings: warnings}, nil
 		}
+
 		if outcome.Updated {
 			res.PreviousVersion, res.Version, res.Updated = outcome.Previous, outcome.Version, true
 			res.UpdateAvailable = false
 		}
 	}
+
 	return Result{Data: res, Warnings: warnings}, nil
 }
 
@@ -844,16 +952,20 @@ type extensionAddUpdate struct {
 
 func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, updatedSpec config.ClusterSpec, ext catalog.Extension, got extensionInstalledVersion, tokens []string, restarted bool) (extensionAddUpdate, error) {
 	previous := got.Version
+
 	cmp, ordered := extensionVersionCompare(previous, got.Default)
 	if !ordered {
 		return extensionAddUpdate{}, extensionUpdateDirectionUnknown(updatedSpec.Name, ext.Name, previous, got.Default)
 	}
+
 	if cmp > 0 {
 		return extensionAddUpdate{}, extensionDowngradeError(updatedSpec.Name, ext.Name, previous, got.Default)
 	}
+
 	if cmp == 0 {
 		return extensionAddUpdate{Skip: true}, nil
 	}
+
 	supported, err := extensionUpdatePath(ctx, updatedSpec, ext.ExtName, previous, got.Default)
 	if err != nil {
 		return extensionAddUpdate{}, output.NewError(output.CodePartialFailure,
@@ -861,6 +973,7 @@ func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, upd
 			output.ExitStep, "The extension is usable at "+previous+"; retry vaire ext add "+ext.Name+" --db "+updatedSpec.Name+" after fixing catalog access.").
 			WithDetails(map[string]any{"reason": "extension_update_path_unknown", "database": updatedSpec.Name, "extension": ext.Name, "version": previous, "default_version": got.Default, "intent_saved": true})
 	}
+
 	if !supported {
 		return extensionAddUpdate{}, output.NewError(output.CodePrecondition,
 			ext.Name+" is installed at "+previous+" and the package's default is "+got.Default+", but PostgreSQL has no supported update path between them",
@@ -868,6 +981,7 @@ func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, upd
 			"The extension stays at "+previous+". No package upgrade or downgrade is attempted; use a version whose package documents a supported ALTER EXTENSION UPDATE path.").
 			WithDetails(map[string]any{"reason": "extension_update_unsupported", "database": updatedSpec.Name, "extension": ext.Name, "version": previous, "default_version": got.Default, "intent_saved": true})
 	}
+
 	readiness, err := extensionPrimaryReadiness(ctx, updated, updatedSpec, ext)
 	if err != nil {
 		return extensionAddUpdate{}, output.NewError(output.CodePartialFailure,
@@ -875,6 +989,7 @@ func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, upd
 			output.ExitStep, "The extension stays at "+previous+"; retry vaire ext add "+ext.Name+" --db "+updatedSpec.Name+" after fixing the setting or catalog access.").
 			WithDetails(map[string]any{"reason": "extension_update_prerequisites_unknown", "database": updatedSpec.Name, "extension": ext.Name, "version": previous, "default_version": got.Default, "intent_saved": true})
 	}
+
 	if readiness.Deferred {
 		return extensionAddUpdate{}, extensionPartialError(
 			ext.Name+" is installed at "+previous+" but its required primary prerequisites are not effective: "+readiness.Detail,
@@ -884,6 +999,7 @@ func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, upd
 				"pending": []string{"update"}, "version": previous, "default_version": got.Default,
 			})
 	}
+
 	sql := "ALTER EXTENSION " + pg.Quote(ext.ExtName) + " UPDATE TO " + extensionLiteral(got.Default) + ";\n"
 	if err := extensionPG(updatedSpec).Exec(ctx, updatedSpec.DatabaseName(), sql, nil); err != nil {
 		return extensionAddUpdate{}, output.WrapError(output.CodeExternalCommand,
@@ -891,6 +1007,7 @@ func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, upd
 			"The extension is still at "+previous+"; read vaire logs postgres --db "+updatedSpec.Name+". No package upgrade or downgrade was attempted.").
 			WithDetails(map[string]any{"reason": "extension_update_failed", "database": updatedSpec.Name, "extension": ext.Name, "version": previous, "default_version": got.Default, "intent_saved": true})
 	}
+
 	after, err := extensionInstalled(ctx, updatedSpec)
 	if err != nil {
 		return extensionAddUpdate{}, output.NewError(output.CodePartialFailure,
@@ -898,54 +1015,67 @@ func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, upd
 			"Check vaire ext list --db "+updatedSpec.Name+" before retrying.").
 			WithDetails(map[string]any{"reason": "extension_verify_failed", "database": updatedSpec.Name, "extension": ext.Name, "intent_saved": true})
 	}
+
 	actual, ok := after[ext.ExtName]
 	if !ok || actual.Version != got.Default {
 		actualVersion := ""
 		if ok {
 			actualVersion = actual.Version
 		}
+
 		return extensionAddUpdate{}, output.NewError(output.CodePartialFailure,
 			"ALTER EXTENSION "+ext.Name+" did not reach "+got.Default+"; the database reports "+actualVersion, output.ExitStep,
 			"Check the extension's update path and the cluster log; no package upgrade or downgrade was attempted.").
 			WithDetails(map[string]any{"reason": "extension_update_failed", "database": updatedSpec.Name, "extension": ext.Name, "version": actualVersion, "default_version": got.Default, "intent_saved": true})
 	}
+
 	return extensionAddUpdate{Previous: previous, Version: actual.Version, Updated: true}, nil
 }
 
 func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 	ctx = steps.WithFollowerRuntimeOperation(ctx, env.Req.RequestID)
+
 	p, err := extensionRemoveParams(env)
 	if err != nil {
 		return Result{}, err
 	}
+
 	cfg, raw, err := extensionLoad()
 	if err != nil {
 		return Result{}, err
 	}
+
 	recs, err := extensionRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	spec, err := extensionTargetSpec(cfg, recs, p.DB, "ext remove", false)
 	if err != nil {
 		return Result{}, err
 	}
+
 	var lockedTargets extensionTargetSet
+
 	if !env.Req.DryRun {
 		var release func()
+
 		cfg, raw, recs, lockedTargets, release, err = lockExtensionMutation(ctx, env, spec.Name)
 		if err != nil {
 			return Result{}, err
 		}
 		defer release()
+
 		spec = lockedTargets.Source
 		if err := extensionMutationRefusals(cfg, recs, spec, "ext remove"); err != nil {
 			return Result{}, err
 		}
 	}
+
 	if err := CheckNotProtected(cfg, spec.Name, "ext remove"); err != nil {
 		return Result{}, err
 	}
+
 	ext, err := extensionRemoveResolve(cfg, p.Name)
 	if err != nil {
 		return Result{}, err
@@ -954,33 +1084,42 @@ func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
 	// existing guard entries and is retired only when the follower catalog
 	// proves its SQL absent.
 	ctx = steps.WithFollowerRuntimeOutgoing(ctx, []catalog.Extension{ext})
+
 	if !extensionClusterRunning(spec) {
 		return Result{}, extensionClusterNotRunning(spec.Name, "ext remove")
 	}
+
 	facts, err := extensionRemoveFacts(ctx, env, cfg, spec, ext)
 	if err != nil {
 		return Result{}, err
 	}
+
 	preview, err := extensionRemovePreview(ctx, spec, ext, facts.Installed, p.Cascade)
 	if err != nil {
 		return Result{}, err
 	}
+
 	updated, updatedSpec, _, retry, res, err := extensionRemovePlan(cfg, spec, ext, facts, p, preview, env)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: res}, nil
 	}
+
 	if !hasConfirmToken(env.Req, spec.Name) {
 		return Result{}, confirmRequired("removing "+ext.Name+" from "+spec.Name+" drops its objects and their data", spec.Name)
 	}
+
 	if len(cfg.FollowerNames(spec.Name)) > 0 {
 		return extensionRemoveWithFollowers(ctx, env, cfg, raw, spec, updated, lockedTargets, ext, facts.Installed, facts.Enabled, facts.RestartRequired, p.Cascade, res)
 	}
+
 	if facts.RestartRequired && !hasConfirmToken(env.Req, spec.Name+"/restart") {
 		return Result{}, confirmRequired(ext.Name+" changes "+spec.Name+"'s extension configuration, so it needs that cluster's restart token (only that database)", spec.Name+"/restart")
 	}
+
 	return extensionRemoveStandalone(ctx, env, cfg, spec, updated, updatedSpec, ext, facts, p, retry, res)
 }
 
@@ -989,9 +1128,11 @@ func extensionRemoveParams(env *Env) (extRemoveParams, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return p, err
 	}
+
 	if strings.TrimSpace(p.DB) == "" {
 		return p, extensionDatabaseRequired("ext remove")
 	}
+
 	return p, nil
 }
 
@@ -1003,14 +1144,18 @@ func extensionRemoveResolve(cfg config.Cluster, name string) (catalog.Extension,
 				return catalog.Extension{}, extensionNotFound(name)
 			}
 		}
+
 		return catalog.Extension{}, config.ValidationError(err)
 	}
+
 	if !ext.Managed() {
 		return catalog.Extension{}, extensionNotManaged(ext.Name)
 	}
+
 	if ext.Default {
 		return catalog.Extension{}, extensionDefault(ext.Name)
 	}
+
 	return ext, nil
 }
 
@@ -1024,6 +1169,7 @@ type extensionRemoveFactsData struct {
 func extensionRemoveFacts(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, ext catalog.Extension) (extensionRemoveFactsData, error) {
 	f := extensionRemoveFactsData{}
 	f.Enabled = extensionEnabled(cfg, spec, ext.Name)
+
 	installed, err := extensionInstalled(ctx, spec)
 	if err != nil {
 		return f, output.NewError(output.CodePrecondition,
@@ -1031,30 +1177,39 @@ func extensionRemoveFacts(ctx context.Context, env *Env, cfg config.Cluster, spe
 			"Run vaire status --db "+spec.Name+" before retrying; nothing was changed.").
 			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name, "extension": ext.Name})
 	}
+
 	_, f.Installed = installed[ext.ExtName]
 	retryPending := []string{}
 	retryDetail := ""
+
 	if !f.Enabled && !f.Installed && !env.Req.DryRun {
 		needed, pending, detail, err := extensionRemoveRetryNeeded(ctx, cfg, spec, ext, env)
 		if err != nil {
 			return f, err
 		}
+
 		if !needed {
 			return f, extensionNotInstalled(ext.Name, spec.Name, f.Enabled, f.Installed)
 		}
+
 		f.RetryConfig, retryPending, retryDetail = true, pending, detail
 	}
+
 	removedExtensions := removeExtensionName(cfg, spec, ext.Name)
+
 	beforePreloads, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
 	if err != nil {
 		return f, config.ValidationError(err)
 	}
+
 	afterPreloads, err := cfg.ExtensionResolver().Preloads(removedExtensions)
 	if err != nil {
 		return f, config.ValidationError(err)
 	}
+
 	pendingSettings := retryPending
 	configDetail := retryDetail
+
 	if f.Enabled {
 		pendingSettings, err = extensionPendingRestarts(ctx, spec)
 		if err != nil {
@@ -1063,6 +1218,7 @@ func extensionRemoveFacts(ctx context.Context, env *Env, cfg config.Cluster, spe
 				"Nothing was changed. Retry when the cluster answers.").
 				WithDetails(map[string]any{"reason": "extension_pending_unknown", "database": spec.Name, "extension": ext.Name})
 		}
+
 		configDetail, err = extensionCheckStep(ctx, cfg, runtimeFor(env, false), steps.ConfigStepID(spec.Name))
 		if err != nil {
 			return f, output.NewError(output.CodePrecondition,
@@ -1071,10 +1227,12 @@ func extensionRemoveFacts(ctx context.Context, env *Env, cfg config.Cluster, spe
 				WithDetails(map[string]any{"reason": "extension_config_unknown", "database": spec.Name, "extension": ext.Name})
 		}
 	}
+
 	settingsRemoval := f.Enabled && len(ext.Settings) > 0
 	f.RestartRequired = !slices.Equal(beforePreloads, afterPreloads) ||
 		settingsRemoval || (f.Enabled && (len(pendingSettings) > 0 || configDetail != "")) ||
 		(f.RetryConfig && (len(retryPending) > 0 || retryDetail != ""))
+
 	return f, nil
 }
 
@@ -1092,7 +1250,9 @@ func extensionRemovePreview(ctx context.Context, spec config.ClusterSpec, ext ca
 	if !installed {
 		return p, nil
 	}
+
 	var err error
+
 	p.Dependents, p.DependentsTotal, p.DependentsTruncated, err = extensionPreview(ctx, extensionPG(spec), spec.DatabaseName(), extensionDependentsBody(ext.ExtName), "object")
 	if err != nil {
 		return p, output.NewError(output.CodePrecondition,
@@ -1100,6 +1260,7 @@ func extensionRemovePreview(ctx context.Context, spec config.ClusterSpec, ext ca
 			"Nothing was changed. Retry when the cluster answers.").
 			WithDetails(map[string]any{"reason": "extension_dependency_preview_failed", "database": spec.Name, "extension": ext.Name})
 	}
+
 	p.OwnTables, p.OwnTablesTotal, p.OwnTablesTruncated, err = extensionPreview(ctx, extensionPG(spec), spec.DatabaseName(), extensionOwnedTablesBody(ext.ExtName), "name")
 	if err != nil {
 		return p, output.NewError(output.CodePrecondition,
@@ -1107,6 +1268,7 @@ func extensionRemovePreview(ctx context.Context, spec config.ClusterSpec, ext ca
 			"Nothing was changed. Retry when the cluster answers.").
 			WithDetails(map[string]any{"reason": "extension_dependency_preview_failed", "database": spec.Name, "extension": ext.Name})
 	}
+
 	if p.DependentsTotal > 0 && !cascade {
 		return p, output.NewError(output.CodePrecondition,
 			ext.Name+" in "+spec.Name+" is used by "+extensionCount(p.DependentsTotal, "object")+": "+extensionPreviewText(p.Dependents, p.DependentsTruncated),
@@ -1118,6 +1280,7 @@ func extensionRemovePreview(ctx context.Context, spec config.ClusterSpec, ext ca
 				"own_tables": p.OwnTables, "own_tables_total": p.OwnTablesTotal,
 			})
 	}
+
 	return p, nil
 }
 
@@ -1126,24 +1289,30 @@ func extensionRemovePlan(cfg config.Cluster, spec config.ClusterSpec, ext catalo
 	if facts.Enabled {
 		setExtensionSelection(&updated, spec.Name, removeExtensionName(cfg, spec, ext.Name))
 	}
+
 	if followers := cfg.FollowerNames(spec.Name); len(followers) > 0 {
 		propagated, _, err := propagateFollowerExtensions(cfg, updated)
 		if err != nil {
 			return config.Cluster{}, config.ClusterSpec{}, nil, "", extRemoveResult{}, err
 		}
+
 		updated = propagated
 		if err := updated.Validate(); err != nil {
 			return config.Cluster{}, config.ClusterSpec{}, nil, "", extRemoveResult{}, config.ValidationError(err)
 		}
 	}
+
 	updatedSpec, _ := updated.ClusterByName(spec.Name)
+
 	tokens := extensionRemoveConfirmTokens(spec.Name, facts.RestartRequired)
 	if facts.RestartRequired {
 		tokens = append(tokens, extensionRestartTokensFor(cfg, spec.Name)...)
 		sort.Strings(tokens)
 		tokens = slices.Compact(tokens)
 	}
+
 	retry := extensionRemoveRetry(spec.Name, ext.Name, tokens)
+
 	res := extRemoveResult{
 		Database: spec.Name, Extension: ext.Name, ExtName: ext.ExtName,
 		Enabled: facts.Enabled, Installed: facts.Installed, Dependents: preview.Dependents, DependentsTotal: preview.DependentsTotal,
@@ -1154,6 +1323,7 @@ func extensionRemovePlan(cfg config.Cluster, spec config.ClusterSpec, ext catalo
 	if ext.Package != "" {
 		res.PackageKept = ext.Package
 	}
+
 	return updated, updatedSpec, tokens, retry, res, nil
 }
 
@@ -1161,11 +1331,13 @@ func extensionRemoveStandalone(ctx context.Context, env *Env, cfg config.Cluster
 	if err := validateTargetExtensionDescriptors(updated, updatedSpec); err != nil {
 		return Result{}, err
 	}
+
 	if err := extensionCaptureRequirements(ctx, cfg, spec, updated, updatedSpec, "remove"); err != nil {
 		details := extensionRemovePartialDetails(spec, ext, retry, false, facts.RestartRequired)
 		details["reason"] = "extension_history_capture_failed"
 		details["outgoing_history_may_remain"] = true
 		details["incoming_history_may_remain"] = true
+
 		return Result{}, output.NewError(output.CodePartialFailure,
 			"recording extension requirements before the removal failed: "+err.Error(), output.ExitStep,
 			"Valid extension history may already have been retained; no DROP, reduced intent save, configuration apply or restart ran. Retry "+retry+" after fixing the requirement history store.").
@@ -1177,9 +1349,11 @@ func extensionRemoveStandalone(ctx context.Context, env *Env, cfg config.Cluster
 	if err != nil {
 		return Result{}, err
 	}
+
 	if facts.RetryConfig {
 		return extensionRemoveRetryConfig(ctx, env, cfg, spec, ext, facts, sqlDropped, res)
 	}
+
 	if facts.Enabled {
 		return extensionRemoveEnabled(ctx, env, updated, updatedSpec, spec, ext, facts, sqlDropped, retry, res)
 	}
@@ -1188,6 +1362,7 @@ func extensionRemoveStandalone(ctx context.Context, env *Env, cfg config.Cluster
 	if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, sqlDropped, false); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: res}, nil
 }
 
@@ -1195,22 +1370,26 @@ func extensionRemoveDirectDrop(ctx context.Context, spec config.ClusterSpec, ext
 	if !installed {
 		return false, nil
 	}
+
 	sql := "DROP EXTENSION IF EXISTS " + pg.Quote(ext.ExtName)
 	if cascade {
 		sql += " CASCADE"
 	}
+
 	if err := extensionPG(spec).Exec(ctx, spec.DatabaseName(), sql+";\n", nil); err != nil {
 		return false, output.WrapError(output.CodeExternalCommand,
 			fmt.Errorf("drop %s from %s: %w", ext.Name, spec.Name, err), output.ExitExternal,
 			"cluster.toml and the restart are unchanged. Nothing else was changed; read vaire logs postgres --db "+spec.Name+".").
 			WithDetails(map[string]any{"reason": "extension_drop_failed", "database": spec.Name, "extension": ext.Name})
 	}
+
 	return true, nil
 }
 
 func extensionRemoveRetryConfig(ctx context.Context, env *Env, cfg config.Cluster, spec config.ClusterSpec, ext catalog.Extension, facts extensionRemoveFactsData, sqlDropped bool, res extRemoveResult) (Result, error) {
 	env.Cluster = cfg
 	rt := runtimeFor(env, false)
+
 	opts := engine.Options{
 		Only: []string{steps.ConfigStepID(spec.Name)}, DB: spec.Name,
 		Restarter: steps.RestarterFor(cfg, rt, env.Report), Report: env.Report,
@@ -1218,17 +1397,22 @@ func extensionRemoveRetryConfig(ctx context.Context, env *Env, cfg config.Cluste
 	if facts.RestartRequired {
 		opts.Confirm = engine.Confirmation{Clusters: []string{spec.Name}}
 	}
+
 	applied, warnings, err := extensionApply(ctx, cfg, rt, opts)
 	clearExtensionDeferred(applied)
+
 	if err != nil {
 		return Result{}, extensionPartialError("the extension is absent but applying the reduced configuration failed: "+err.Error(),
 			"extension_apply_failed", spec.Name, ext.Name, facts.RestartRequired, applied.Restarted(), applied,
 			map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 	}
+
 	res.Restarted = applied.Restarted()
+
 	if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, sqlDropped, true); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: res, Warnings: warnings}, nil
 }
 
@@ -1237,11 +1421,14 @@ func extensionRemoveEnabled(ctx context.Context, env *Env, updated config.Cluste
 	if err != nil {
 		return Result{}, extensionRemoveIntentFailure("encoding the reduced extension intent", err, spec, ext, retry, sqlDropped, facts.RestartRequired)
 	}
+
 	if err := extensionSave(newRaw); err != nil {
 		return Result{}, extensionRemoveIntentFailure("saving the reduced cluster.toml", err, spec, ext, retry, sqlDropped, facts.RestartRequired)
 	}
+
 	env.Cluster = updated
 	rt := runtimeFor(env, false)
+
 	opts := engine.Options{
 		Only: []string{steps.ConfigStepID(spec.Name)}, DB: spec.Name,
 		Restarter: steps.RestarterFor(updated, rt, env.Report), Report: env.Report,
@@ -1249,18 +1436,22 @@ func extensionRemoveEnabled(ctx context.Context, env *Env, updated config.Cluste
 	if facts.RestartRequired {
 		opts.Confirm = engine.Confirmation{Clusters: []string{spec.Name}}
 	}
+
 	applied, warnings, err := extensionApply(ctx, updated, rt, opts)
 	if err != nil {
 		return Result{}, extensionPartialError("saving the reduced cluster.toml succeeded, but applying the reduced configuration failed: "+err.Error(),
 			"extension_apply_failed", spec.Name, ext.Name, facts.RestartRequired, false, applied,
 			map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 	}
+
 	clearExtensionDeferred(applied)
+
 	if extensionApplyIncomplete(applied) || extensionRestartPending(applied, spec.Name) {
 		return Result{}, extensionPartialError("saving the reduced cluster.toml succeeded, but the configuration still waits for a restart",
 			"extension_pending_restart", spec.Name, ext.Name, facts.RestartRequired, false, applied,
 			map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 	}
+
 	restarted := applied.Restarted()
 	if facts.RestartRequired {
 		again, err := extensionRestartIfPending(ctx, updated, updatedSpec, facts.RestartRequired, applied, rt, env.Report)
@@ -1269,12 +1460,16 @@ func extensionRemoveEnabled(ctx context.Context, env *Env, updated config.Cluste
 				"extension_apply_failed", spec.Name, ext.Name, facts.RestartRequired, restarted, applied,
 				map[string]any{"sql_dropped": sqlDropped, "intent_saved": true})
 		}
+
 		restarted = restarted || again
 	}
+
 	res.Restarted = restarted
+
 	if err := extensionVerifyAbsent(ctx, spec, ext.ExtName, sqlDropped, true); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: res, Warnings: warnings}, nil
 }
 
@@ -1299,13 +1494,16 @@ func extensionRemovePartialDetails(spec config.ClusterSpec, ext catalog.Extensio
 // fault-injectable Save path exercises this contract.
 func extensionRemoveIntentFailure(stage string, err error, spec config.ClusterSpec, ext catalog.Extension, retry string, sqlDropped, restartRequired bool) error {
 	message := "the reduced extension intent for " + ext.Name + " was not written because " + stage + " failed: " + err.Error()
+
 	hint := "No SQL was dropped, and cluster.toml still enables " + ext.Name + ". Retry " + retry + "."
 	if sqlDropped {
 		message = "dropping " + ext.Name + "'s SQL succeeded, but " + stage + " failed: " + err.Error()
 		hint = "The extension's SQL is dropped, but cluster.toml still enables it. Retry " + retry + "."
 	}
+
 	details := extensionRemovePartialDetails(spec, ext, retry, sqlDropped, restartRequired)
 	details["reason"] = "extension_intent_save_failed"
+
 	return output.NewError(output.CodePartialFailure, message, output.ExitStep, hint).WithDetails(details)
 }
 
@@ -1313,21 +1511,29 @@ func extensionRemoveRetryNeeded(ctx context.Context, cfg config.Cluster, spec co
 	if !extensionClusterRunning(spec) {
 		return false, nil, "", nil
 	}
+
 	recs, err := extensionRecords()
 	if err != nil {
 		return false, nil, "", err
 	}
+
 	targets, err := extensionTargetSetFor(cfg, recs, spec.Name)
 	if err != nil {
 		return false, nil, "", err
 	}
+
 	live := append([]config.ClusterSpec{targets.Source}, targets.Running...)
-	var pendingAll []string
-	var detailAll []string
+
+	var (
+		pendingAll []string
+		detailAll  []string
+	)
+
 	for _, target := range live {
 		if extensionEnabled(cfg, target, ext.Name) {
 			return true, []string{target.Name}, "", nil
 		}
+
 		pending, err := extensionPendingRestarts(ctx, target)
 		if err != nil {
 			return false, nil, "", output.NewError(output.CodePrecondition,
@@ -1335,6 +1541,7 @@ func extensionRemoveRetryNeeded(ctx context.Context, cfg config.Cluster, spec co
 				"Nothing was changed. Retry when the cluster answers.").
 				WithDetails(map[string]any{"reason": "extension_pending_unknown", "database": target.Name})
 		}
+
 		detail, err := extensionCheckStep(ctx, cfg, runtimeFor(env, false), steps.ConfigStepID(target.Name))
 		if err != nil {
 			return false, nil, "", output.NewError(output.CodePrecondition,
@@ -1342,6 +1549,7 @@ func extensionRemoveRetryNeeded(ctx context.Context, cfg config.Cluster, spec co
 				"Nothing was changed. Retry when the cluster answers.").
 				WithDetails(map[string]any{"reason": "extension_config_unknown", "database": target.Name})
 		}
+
 		pendingAll = append(pendingAll, pending...)
 		if detail != "" {
 			detailAll = append(detailAll, target.Name+": "+detail)
@@ -1358,11 +1566,13 @@ func extensionRemoveRetryNeeded(ctx context.Context, cfg config.Cluster, spec co
 		if err != nil {
 			return false, nil, "", err
 		}
+
 		if len(plan.PendingSQL) > 0 {
 			pendingAll = append(pendingAll, follower.Name)
 			detailAll = append(detailAll, follower.Name+": SQL replay still has "+strings.Join(plan.PendingSQL, ", "))
 		}
 	}
+
 	return len(pendingAll) > 0 || len(detailAll) > 0, pendingAll, strings.Join(detailAll, "; "), nil
 }
 
@@ -1373,10 +1583,12 @@ func extensionVerifyAbsent(ctx context.Context, spec config.ClusterSpec, extName
 		if sqlDropped {
 			message = "the SQL drop ran, but " + message
 		}
+
 		return output.NewError(output.CodePartialFailure, message, output.ExitStep,
 			"Check vaire ext list --db "+spec.Name+" before retrying; do not drop the extension by hand.").
 			WithDetails(map[string]any{"reason": "extension_verify_failed", "database": spec.Name, "extension": extName, "sql_dropped": sqlDropped, "intent_saved": intentSaved})
 	}
+
 	if _, ok := have[extName]; ok {
 		message := extName + " is still installed in " + spec.Name
 		if sqlDropped {
@@ -1384,11 +1596,13 @@ func extensionVerifyAbsent(ctx context.Context, spec config.ClusterSpec, extName
 		} else {
 			message += " even though this removal did not run a DROP"
 		}
+
 		return output.NewError(output.CodePartialFailure,
 			message, output.ExitStep,
 			"Read vaire logs postgres --db "+spec.Name+"; do not drop it by hand.").
 			WithDetails(map[string]any{"reason": "extension_drop_failed", "database": spec.Name, "extension": extName, "sql_dropped": sqlDropped, "intent_saved": intentSaved})
 	}
+
 	return nil
 }
 
@@ -1400,8 +1614,10 @@ func extensionListSpecs(cfg config.Cluster, db string) ([]config.ClusterSpec, er
 		if err != nil {
 			return nil, err
 		}
+
 		return []config.ClusterSpec{spec}, nil
 	}
+
 	return slices.Clone(cfg.Clusters), nil
 }
 
@@ -1411,11 +1627,14 @@ func extensionTargetSpec(cfg config.Cluster, recs backup.Records, db, action str
 		if err != nil {
 			return config.ClusterSpec{}, err
 		}
+
 		return spec, extensionMutationRefusals(cfg, recs, spec, action)
 	}
+
 	if !infer {
 		return config.ClusterSpec{}, extensionDatabaseRequired(action)
 	}
+
 	candidates := extensionEligibleSpecs(cfg, recs)
 	switch len(candidates) {
 	case 0:
@@ -1426,10 +1645,12 @@ func extensionTargetSpec(cfg config.Cluster, recs backup.Records, db, action str
 	case 1:
 		return candidates[0], extensionMutationRefusals(cfg, recs, candidates[0], action)
 	}
+
 	names := make([]string, len(candidates))
 	for i, spec := range candidates {
 		names[i] = spec.Name
 	}
+
 	return config.ClusterSpec{}, output.NewError(output.CodeInputRequired,
 		fmt.Sprintf("%s needs --db: the server has %d eligible databases", action, len(names)), output.ExitInput,
 		"Pass --db with one of "+strings.Join(names, ", ")+".").
@@ -1438,18 +1659,23 @@ func extensionTargetSpec(cfg config.Cluster, recs backup.Records, db, action str
 
 func extensionEligibleSpecs(cfg config.Cluster, recs backup.Records) []config.ClusterSpec {
 	var out []config.ClusterSpec
+
 	for _, spec := range cfg.Clusters {
 		if spec.IsFollower() || spec.FollowGeneration != "" || recs.IsAwaiting(spec.Name) {
 			continue
 		}
+
 		if _, ok := recs.OpenRestore(spec.Name); ok {
 			continue
 		}
+
 		if _, ok := recs.Unfollowing[spec.Name]; ok {
 			continue
 		}
+
 		out = append(out, spec)
 	}
+
 	return out
 }
 
@@ -1457,9 +1683,11 @@ func extensionMutationRefusals(cfg config.Cluster, recs backup.Records, spec con
 	if spec.IsFollower() {
 		return followerError(spec, action)
 	}
+
 	if recs.IsAwaiting(spec.Name) {
 		return awaitingError(spec.Name, action)
 	}
+
 	if r, ok := recs.OpenRestore(spec.Name); ok {
 		return output.NewError(output.CodePrecondition,
 			"a restore of "+spec.Name+" is open ("+r.Phase+"); "+action+" waits until it is promoted or aborted",
@@ -1467,12 +1695,14 @@ func extensionMutationRefusals(cfg config.Cluster, recs backup.Records, spec con
 			"Finish it with vaire restore promote "+spec.Name+" or vaire restore abort "+spec.Name+".").
 			WithDetails(map[string]any{"reason": "restore_in_progress", "database": spec.Name, "restore_id": r.ID})
 	}
+
 	if _, ok := recs.Unfollowing[spec.Name]; ok {
 		return output.NewError(output.CodePrecondition,
 			spec.Name+" has an unfinished unfollow, so "+action+" is refused until it settles", output.ExitPrecondition,
 			"Finish it with vaire db unfollow "+spec.Name+" --confirm "+spec.Name+"/unfollow, then retry.").
 			WithDetails(map[string]any{"reason": "unfollow_in_progress", "database": spec.Name})
 	}
+
 	for follower, u := range recs.Unfollowing {
 		if u.Source == spec.Name {
 			return output.NewError(output.CodePrecondition,
@@ -1492,6 +1722,7 @@ func extensionMutationRefusals(cfg config.Cluster, recs backup.Records, spec con
 			return err
 		}
 	}
+
 	if followers := cfg.FollowerNames(spec.Name); len(followers) > 0 {
 		// The target set and follower ordering are checked under the sorted
 		// cluster locks by the extension transition; this preflight only
@@ -1500,6 +1731,7 @@ func extensionMutationRefusals(cfg config.Cluster, recs backup.Records, spec con
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -1512,9 +1744,11 @@ func extensionFollowerPreflight(cfg config.Cluster, source string) error {
 		if !ok {
 			continue
 		}
+
 		if f.FollowGeneration != "" {
 			continue
 		}
+
 		if !extensionClusterRunning(f) {
 			return output.NewError(output.CodePrecondition,
 				name+" is a follower of "+source+" but its cluster is not running",
@@ -1522,6 +1756,7 @@ func extensionFollowerPreflight(cfg config.Cluster, source string) error {
 				WithDetails(map[string]any{"reason": "follower_not_running", "database": name, "source": source})
 		}
 	}
+
 	return nil
 }
 
@@ -1530,22 +1765,28 @@ func extensionAddIntent(cfg config.Cluster, db string, p extAddParams) (config.C
 	if name == "" {
 		return config.Cluster{}, catalog.Extension{}, false, output.NewError(output.CodeUsage, "ext add needs an extension name", output.ExitUsage, "")
 	}
+
 	builtin, isBuiltin := catalog.Lookup(name)
+
 	canonical := name
 	if isBuiltin {
 		canonical = builtin.Name
 	}
+
 	_, hasExisting := cfg.Extensions[canonical]
+
 	direct := p.Package != "" || p.Preinstalled || p.Preload != "" || len(p.Settings) > 0 ||
 		p.Schema != "" || p.CopySafety != "" || len(p.CopySettings) > 0 || p.StandbySafe != nil
 	if !direct {
 		updated, ext, err := extensionAddIntentSelection(cfg, db, name, isBuiltin, hasExisting)
 		return updated, ext, false, err
 	}
+
 	updated, ext, err := extensionAddIntentDirect(cfg, db, p, canonical, isBuiltin, hasExisting)
 	if err != nil {
 		return config.Cluster{}, catalog.Extension{}, false, err
 	}
+
 	return updated, ext, true, nil
 }
 
@@ -1553,23 +1794,29 @@ func extensionAddIntentSelection(cfg config.Cluster, db, name string, isBuiltin,
 	if !isBuiltin && !hasExisting {
 		return config.Cluster{}, catalog.Extension{}, extensionNotFound(name)
 	}
+
 	ext, err := cfg.ExtensionResolver().Resolve(name)
 	if err != nil {
 		return config.Cluster{}, catalog.Extension{}, config.ValidationError(err)
 	}
+
 	if !ext.Managed() {
 		return config.Cluster{}, catalog.Extension{}, extensionNotManaged(ext.Name)
 	}
+
 	updated := cfg.Clone()
 	setExtensionSelection(&updated, db, appendExtensionName(cfg, db, ext.Name))
+
 	propagated, _, err := propagateFollowerExtensions(cfg, updated)
 	if err != nil {
 		return config.Cluster{}, catalog.Extension{}, err
 	}
+
 	updated = propagated
 	if err := updated.Validate(); err != nil {
 		return config.Cluster{}, catalog.Extension{}, config.ValidationError(err)
 	}
+
 	return updated, ext, nil
 }
 
@@ -1580,19 +1827,24 @@ func extensionAddIntentDirect(cfg config.Cluster, db string, p extAddParams, can
 			"Edit it with vaire config edit, then select it by name: vaire ext add "+canonical+" --db "+db+".").
 			WithDetails(map[string]any{"reason": "extension_definition_exists", "extension": canonical})
 	}
+
 	if p.Preinstalled && p.Package != "" {
 		return config.Cluster{}, catalog.Extension{}, output.NewError(output.CodeUsage,
 			"--package and --preinstalled are mutually exclusive", output.ExitUsage, "")
 	}
+
 	base := config.ExtensionDefinition{}
 	if hasExisting {
 		base = cfg.Extensions[canonical]
 	}
+
 	def := extensionDefinitionFromFlags(base, p)
+
 	updated := cfg.Clone()
 	if updated.Extensions == nil {
 		updated.Extensions = map[string]config.ExtensionDefinition{}
 	}
+
 	updated.Extensions[canonical] = def
 	setExtensionSelection(&updated, db, appendExtensionName(cfg, db, canonical))
 	// Resolve the proposed provider with placeholder safety so a missing
@@ -1603,16 +1855,20 @@ func extensionAddIntentDirect(cfg config.Cluster, db string, p extAddParams, can
 		v := catalog.CopySafetyUnknown
 		probe.CopySafety = &v
 	}
+
 	if probe.StandbySafe == nil {
 		v := false
 		probe.StandbySafe = &v
 	}
+
 	probeCfg := updated.Clone()
 	probeCfg.Extensions[canonical] = probe
+
 	proposed, err := probeCfg.ExtensionResolver().Resolve(canonical)
 	if err != nil {
 		return config.Cluster{}, catalog.Extension{}, config.ValidationError(err)
 	}
+
 	oldExt, oldOK := cfg.ExtensionResolver().Lookup(canonical)
 	if oldOK && (oldExt.Source != proposed.Source || oldExt.Package != proposed.Package ||
 		oldExt.Preload != proposed.Preload || oldExt.ExtName != proposed.ExtName) {
@@ -1620,21 +1876,26 @@ func extensionAddIntentDirect(cfg config.Cluster, db string, p extAddParams, can
 			return config.Cluster{}, catalog.Extension{}, err
 		}
 	}
+
 	propagated, _, err := propagateFollowerExtensions(cfg, updated)
 	if err != nil {
 		return config.Cluster{}, catalog.Extension{}, err
 	}
+
 	updated = propagated
 	if err := updated.Validate(); err != nil {
 		return config.Cluster{}, catalog.Extension{}, config.ValidationError(err)
 	}
+
 	ext, err := updated.ExtensionResolver().Resolve(canonical)
 	if err != nil {
 		return config.Cluster{}, catalog.Extension{}, config.ValidationError(err)
 	}
+
 	if !ext.Managed() {
 		return config.Cluster{}, catalog.Extension{}, extensionNotManaged(ext.Name)
 	}
+
 	return updated, ext, nil
 }
 
@@ -1643,12 +1904,15 @@ func extensionAddSafetyRenewal(db, canonical string, p extAddParams) error {
 	if p.CopySafety == "" {
 		missing = append(missing, "copy_safety")
 	}
+
 	if p.StandbySafe == nil {
 		missing = append(missing, "standby_safe")
 	}
+
 	if len(missing) == 0 {
 		return nil
 	}
+
 	return extensionSafetyRenewalError(db, canonical, missing)
 }
 
@@ -1665,15 +1929,18 @@ func refuseInstalledExtensionSchemas(ctx context.Context, cfg config.Cluster, sp
 	if err != nil {
 		return err
 	}
+
 	guarded := make([]catalog.Extension, 0, len(entries))
 	for _, ext := range entries {
 		if ext.ExtName != "" && ext.Schema != "" {
 			guarded = append(guarded, ext)
 		}
 	}
+
 	if len(guarded) == 0 || !extensionClusterRunning(spec) {
 		return nil
 	}
+
 	installed, err := extensionInstalled(ctx, spec)
 	if err != nil {
 		return output.NewError(output.CodePrecondition,
@@ -1681,10 +1948,12 @@ func refuseInstalledExtensionSchemas(ctx context.Context, cfg config.Cluster, sp
 			"Nothing was changed. Retry when the cluster answers.").
 			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name})
 	}
+
 	schemas := make(map[string]string, len(installed))
 	for name, got := range installed {
 		schemas[name] = got.Schema
 	}
+
 	return steps.ValidateInstalledExtensionSchemas(spec.Name, guarded, schemas)
 }
 
@@ -1699,28 +1968,35 @@ func extensionDefinitionImpact(cfg, proposed config.Cluster, canonical, target s
 		// own selection is the only change this command is allowed to make.
 		return nil, nil
 	}
+
 	newExt, err := proposed.ExtensionResolver().Resolve(canonical)
 	if err != nil {
 		return nil, err
 	}
+
 	if oldExt.SemanticEqual(newExt) {
 		return nil, nil
 	}
+
 	affected := map[string]bool{}
+
 	add := func(spec config.ClusterSpec) error {
 		selections := [][]string{spec.Extensions}
 		if spec.RecoveryExtensions != nil {
 			selections = append(selections, *spec.RecoveryExtensions)
 		}
+
 		for _, names := range selections {
 			effective, err := cfg.ExtensionResolver().EffectiveNames(names)
 			if err != nil {
 				return err
 			}
+
 			if slices.Contains(effective, canonical) {
 				affected[spec.Name] = true
 			}
 		}
+
 		return nil
 	}
 	for _, spec := range cfg.Clusters {
@@ -1728,17 +2004,22 @@ func extensionDefinitionImpact(cfg, proposed config.Cluster, canonical, target s
 			return nil, err
 		}
 	}
+
 	for _, spec := range cfg.Awaiting {
 		if err := add(spec); err != nil {
 			return nil, err
 		}
 	}
+
 	delete(affected, target)
+
 	out := make([]string, 0, len(affected))
 	for name := range affected {
 		out = append(out, name)
 	}
+
 	sort.Strings(out)
+
 	return out, nil
 }
 
@@ -1764,32 +2045,40 @@ func extensionSafetyRenewalError(db, canonical string, missing []string) error {
 
 func extensionDefinitionFromFlags(base config.ExtensionDefinition, p extAddParams) config.ExtensionDefinition {
 	def := base.Clone()
+
 	switch {
 	case p.Preinstalled:
 		def.Source, def.Package = catalog.SourcePreinstalled, ""
 	case p.Package != "":
 		def.Source, def.Package = catalog.SourceAPT, p.Package
 	}
+
 	if p.Preload != "" {
 		def.Preload = p.Preload
 	}
+
 	if len(p.Settings) > 0 {
 		def.Settings = mergeExtensionMap(def.Settings, p.Settings)
 	}
+
 	if p.Schema != "" {
 		def.Schema = p.Schema
 	}
+
 	if p.CopySafety != "" {
 		v := p.CopySafety
 		def.CopySafety = &v
 	}
+
 	if len(p.CopySettings) > 0 {
 		def.CopySettings = mergeExtensionMap(def.CopySettings, p.CopySettings)
 	}
+
 	if p.StandbySafe != nil {
 		v := *p.StandbySafe
 		def.StandbySafe = &v
 	}
+
 	return def
 }
 
@@ -1797,22 +2086,22 @@ func mergeExtensionMap(base, override map[string]string) map[string]string {
 	if len(base) == 0 && len(override) == 0 {
 		return nil
 	}
+
 	out := make(map[string]string, len(base)+len(override))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range override {
-		out[k] = v
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, override)
+
 	return out
 }
 
 func extensionEnabled(cfg config.Cluster, spec config.ClusterSpec, name string) bool {
 	canonical, _ := cfg.ExtensionResolver().Canonical(name)
+
 	effective, err := cfg.ExtensionResolver().EffectiveNames(spec.Extensions)
 	if err != nil {
 		return false
 	}
+
 	return slices.Contains(effective, canonical)
 }
 
@@ -1821,15 +2110,18 @@ func appendExtensionName(cfg config.Cluster, db, name string) []string {
 	if !ok {
 		return []string{name}
 	}
+
 	out := slices.Clone(spec.Extensions)
 	if extensionEnabled(cfg, spec, name) {
 		return out
 	}
+
 	return append(out, name)
 }
 
 func removeExtensionName(cfg config.Cluster, spec config.ClusterSpec, name string) []string {
 	canonical, _ := cfg.ExtensionResolver().Canonical(name)
+
 	out := make([]string, 0, len(spec.Extensions))
 	for _, n := range spec.Extensions {
 		c, _ := cfg.ExtensionResolver().Canonical(n)
@@ -1837,6 +2129,7 @@ func removeExtensionName(cfg config.Cluster, spec config.ClusterSpec, name strin
 			out = append(out, n)
 		}
 	}
+
 	return out
 }
 
@@ -1853,6 +2146,7 @@ func extensionAddConfirmTokens(db string, restart bool) []string {
 	if !restart {
 		return nil
 	}
+
 	return []string{db + "/restart"}
 }
 
@@ -1861,6 +2155,7 @@ func extensionRemoveConfirmTokens(db string, restart bool) []string {
 	if restart {
 		out = append(out, db+"/restart")
 	}
+
 	return out
 }
 
@@ -1872,22 +2167,27 @@ func extensionAddTokens(cfg config.Cluster, params json.RawMessage) []string {
 	if json.Unmarshal(params, &p) != nil {
 		return nil
 	}
+
 	db := p.DB
 	if db == "" {
 		recs, err := extensionRecords()
 		if err != nil {
 			return nil
 		}
+
 		candidates := extensionEligibleSpecs(cfg, recs)
 		if len(candidates) != 1 {
 			return nil
 		}
+
 		db = candidates[0].Name
 	}
+
 	out := make([]string, 0, 1+len(cfg.FollowerNames(db)))
 	out = append(out, db+"/restart")
 	out = append(out, extensionRestartTokensFor(cfg, db)...)
 	sort.Strings(out)
+
 	return slices.Compact(out)
 }
 
@@ -1896,10 +2196,12 @@ func extensionRemoveTokens(cfg config.Cluster, params json.RawMessage) []string 
 	if json.Unmarshal(params, &p) != nil || p.DB == "" {
 		return nil
 	}
+
 	out := make([]string, 0, 2+len(cfg.FollowerNames(p.DB)))
 	out = append(out, p.DB, p.DB+"/restart")
 	out = append(out, extensionRestartTokensFor(cfg, p.DB)...)
 	sort.Strings(out)
+
 	return slices.Compact(out)
 }
 
@@ -1907,6 +2209,7 @@ func extensionMutationLock(req rpc.Request) engine.LockMode {
 	if req.DryRun {
 		return engine.LockShared
 	}
+
 	return engine.LockExclusive
 }
 
@@ -1965,11 +2268,13 @@ func extensionNotInstalled(name, db string, enabled, installed bool) error {
 
 func extensionPartialError(message, reason, db, name string, restart, restarted bool, applied engine.ApplyData, extra ...map[string]any) error {
 	retry := ""
+
 	for _, m := range extra {
 		if v, ok := m["retry"].(string); ok && v != "" {
 			retry = v
 		}
 	}
+
 	return extensionPartialErrorWithRetry(message, reason, db, name, restart, restarted, applied, retry, extra...)
 }
 
@@ -1978,6 +2283,7 @@ func extensionDefaultRetry(db string, restart bool) string {
 	if restart {
 		retry += " --confirm " + db + "/restart"
 	}
+
 	return retry
 }
 
@@ -1985,52 +2291,64 @@ func extensionPartialErrorWithRetry(message, reason, db, name string, restart, r
 	if retry == "" {
 		retry = extensionDefaultRetry(db, restart)
 	}
+
 	details := map[string]any{
 		"reason": reason, "database": db, "extension": name,
 		"intent_saved": true, "restart_required": restart, "restarted": restarted,
 		"retry": retry,
 	}
 	for _, m := range extra {
-		for k, v := range m {
-			details[k] = v
-		}
+		maps.Copy(details, m)
 	}
+
 	if len(applied.Steps) > 0 {
 		states := make([]string, 0, len(applied.Steps))
 		for _, step := range applied.Steps {
 			states = append(states, step.ID+"="+step.State)
 		}
+
 		details["steps"] = states
 	}
+
 	return output.NewError(output.CodePartialFailure, message, output.ExitStep,
 		"Retry with "+retry+". Installed packages are not removed.").WithDetails(details)
 }
 
 func extensionAddRetry(db, name string, tokens []string) string {
-	retry := "vaire ext add " + name + " --db " + db
+	var retry strings.Builder
+	retry.WriteString("vaire ext add " + name + " --db " + db)
+
 	for _, token := range tokens {
-		retry += " --confirm " + token
+		retry.WriteString(" --confirm " + token)
 	}
-	return retry
+
+	return retry.String()
 }
 
 func extensionRemoveRetry(db, name string, tokens []string) string {
-	retry := "vaire ext remove " + name + " --db " + db + " --confirm " + db
+	var retry strings.Builder
+	retry.WriteString("vaire ext remove " + name + " --db " + db + " --confirm " + db)
+
 	for _, token := range tokens {
-		retry += " --confirm " + token
+		retry.WriteString(" --confirm " + token)
 	}
-	return retry
+
+	return retry.String()
 }
 
 func extensionApplyRetry(server, source string, confirm engine.Confirmation) string {
-	retry := "vaire apply --db " + source
+	var retry strings.Builder
+	retry.WriteString("vaire apply --db " + source)
+
 	if confirm.Server {
-		retry += " --confirm " + server + "/restart"
+		retry.WriteString(" --confirm " + server + "/restart")
 	}
+
 	for _, cluster := range confirm.Clusters {
-		retry += " --confirm " + cluster + "/restart"
+		retry.WriteString(" --confirm " + cluster + "/restart")
 	}
-	return retry
+
+	return retry.String()
 }
 
 func extensionApplyIncomplete(data engine.ApplyData) bool {
@@ -2039,6 +2357,7 @@ func extensionApplyIncomplete(data engine.ApplyData) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -2048,6 +2367,7 @@ func extensionWarningCode(warnings []output.Warning, code string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -2057,6 +2377,7 @@ func extensionRestartPending(data engine.ApplyData, cluster string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -2068,20 +2389,26 @@ func extensionRestartIfPending(ctx context.Context, cfg config.Cluster, spec con
 	if !required {
 		return false, nil
 	}
+
 	if applied.Restarted() {
 		return true, nil
 	}
+
 	pending, err := extensionPendingRestarts(ctx, spec)
 	if err != nil {
 		return false, err
 	}
+
 	if len(pending) == 0 {
 		return false, nil
 	}
+
 	if _, err := extensionRestart(ctx, cfg, spec, rt, report); err != nil {
 		return false, err
 	}
+
 	extensionClearDeferred(spec.Name)
+
 	return true, nil
 }
 
@@ -2089,6 +2416,7 @@ func clearExtensionDeferred(data engine.ApplyData) {
 	for _, r := range data.Restarts {
 		extensionClearDeferred(r.Cluster)
 	}
+
 	for _, name := range data.RestartsSettled {
 		extensionClearDeferred(name)
 	}
@@ -2114,9 +2442,11 @@ func extensionUpdateAvailable(version, def string) bool {
 	if def == "" || def == version {
 		return false
 	}
+
 	if cmp, ok := extensionVersionCompare(version, def); ok {
 		return cmp < 0
 	}
+
 	return true
 }
 
@@ -2124,30 +2454,38 @@ func extensionDowngrade(version, def string) bool {
 	if def == "" || def == version {
 		return false
 	}
+
 	cmp, ok := extensionVersionCompare(version, def)
+
 	return ok && cmp > 0
 }
 
 func extensionVersionCompare(a, b string) (int, bool) {
 	as, aok := extensionVersionParts(a)
+
 	bs, bok := extensionVersionParts(b)
 	if !aok || !bok {
 		return 0, false
 	}
+
 	for len(as) < len(bs) {
 		as = append(as, 0)
 	}
+
 	for len(bs) < len(as) {
 		bs = append(bs, 0)
 	}
+
 	for i := range as {
 		if as[i] < bs[i] {
 			return -1, true
 		}
+
 		if as[i] > bs[i] {
 			return 1, true
 		}
 	}
+
 	return 0, true
 }
 
@@ -2156,15 +2494,19 @@ func extensionVersionParts(v string) ([]int, bool) {
 	if v == "" {
 		return nil, false
 	}
+
 	parts := strings.Split(v, ".")
+
 	out := make([]int, 0, len(parts))
 	for _, part := range parts {
 		n, err := strconv.Atoi(part)
 		if err != nil || n < 0 {
 			return nil, false
 		}
+
 		out = append(out, n)
 	}
+
 	return out, true
 }
 
@@ -2176,32 +2518,39 @@ func extensionLiteral(v string) string {
 
 func extensionListDatabaseFacts(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, recs backup.Records) extListDatabase {
 	db := extListDatabase{DB: spec.Name, State: stateRunning, Available: true}
+
 	effective, err := cfg.ExtensionResolver().EffectiveNames(spec.Extensions)
 	if err != nil {
 		db.State, db.Available, db.Error = "unreachable", false, err.Error()
 		return db
 	}
+
 	db.enabled = effective
 	if recs.IsAwaiting(spec.Name) {
 		db.State, db.Available, db.Error = stateAwaiting, false, "awaiting recovery; run vaire db recover "+spec.Name
 		return db
 	}
+
 	if !extensionClusterRunning(spec) {
 		db.State, db.Available, db.Error = stateStopped, false, "the cluster is stopped"
 		return db
 	}
+
 	installed, err := extensionInstalled(ctx, spec)
 	if err != nil {
 		db.State, db.Available, db.Error = "unreachable", false, err.Error()
 		return db
 	}
+
 	db.installedValues = installed
+
 	loaded, pending, err := extensionPreloadFacts(ctx, spec)
 	if err != nil {
 		db.PreloadKnown = false
 	} else {
 		db.PreloadKnown, db.loaded, db.pending = true, loaded, pending
 	}
+
 	return db
 }
 
@@ -2214,19 +2563,25 @@ func extensionAvailabilityFor(ext catalog.Extension) extensionAvailability {
 		if ext.Preload == "" {
 			return extensionAvailability{Known: true, Available: false, Error: "it has no control file or preload library"}
 		}
+
 		if err := extensionLibraryExists(ext.Preload); err != nil {
 			return extensionAvailability{Known: true, Available: false, Error: err.Error()}
 		}
+
 		return extensionAvailability{Known: true, Available: true}
 	}
+
 	control := filepath.Join(extensionControlDir, ext.ExtName+".control")
+
 	raw, err := os.ReadFile(control) // A catalogue name under PostgreSQL's extension directory.
 	if err != nil {
 		if os.IsNotExist(err) {
 			return extensionAvailability{Known: true, Available: false, Error: "control file " + control + " is missing"}
 		}
+
 		return extensionAvailability{Known: false, Available: false, Error: "cannot read control file " + control + ": " + err.Error()}
 	}
+
 	defaultVersion := parseExtensionControlDefaultVersion(string(raw))
 	if module, found, err := parseExtensionControlModule(string(raw)); err != nil {
 		return extensionAvailability{Known: true, Available: false, DefaultVersion: defaultVersion, Error: err.Error()}
@@ -2235,11 +2590,13 @@ func extensionAvailabilityFor(ext catalog.Extension) extensionAvailability {
 			return extensionAvailability{Known: true, Available: false, DefaultVersion: defaultVersion, Error: err.Error()}
 		}
 	}
+
 	if ext.Preload != "" {
 		if err := extensionLibraryExists(ext.Preload); err != nil {
 			return extensionAvailability{Known: true, Available: false, DefaultVersion: defaultVersion, Error: err.Error()}
 		}
 	}
+
 	return extensionAvailability{Known: true, Available: true, DefaultVersion: defaultVersion}
 }
 
@@ -2253,26 +2610,33 @@ func parseExtensionControlModule(text string) (string, bool, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			if strings.HasPrefix(line, "module_pathname") {
 				return "", true, errors.New("malformed module_pathname in control file")
 			}
+
 			continue
 		}
+
 		if strings.TrimSpace(key) != "module_pathname" {
 			continue
 		}
+
 		value = strings.TrimSpace(value)
 		if comment := strings.IndexByte(value, '#'); comment >= 0 {
 			value = strings.TrimSpace(value[:comment])
 		}
+
 		value = strings.Trim(value, `'"`)
 		if value == "" {
 			return "", true, errors.New("empty module_pathname in control file")
 		}
+
 		return value, true, nil
 	}
+
 	return "", false, nil
 }
 
@@ -2281,12 +2645,15 @@ func extensionLibraryExists(name string) error {
 	if err != nil {
 		return err
 	}
+
 	if _, err := os.Stat(path); err != nil { //nolint:gosec // G703: PostgreSQL's own control file names its module library; this is a read-only existence check.
 		if os.IsNotExist(err) {
 			return errors.New("library " + path + " is missing")
 		}
+
 		return errors.New("cannot read library " + path + ": " + err.Error())
 	}
+
 	return nil
 }
 
@@ -2295,21 +2662,26 @@ func extensionLibraryPath(name string) (string, error) {
 	if name == "" {
 		return "", errors.New("empty library name")
 	}
+
 	switch {
 	case strings.HasPrefix(name, "$libdir/"):
 		name = strings.TrimPrefix(name, "$libdir/")
 	case strings.HasPrefix(name, "$"):
 		return "", fmt.Errorf("unsupported module path %q", name)
 	}
+
 	if name == "" {
 		return "", errors.New("empty module path")
 	}
+
 	if !strings.HasSuffix(name, ".so") && !strings.Contains(name, ".so.") {
 		name += ".so"
 	}
+
 	if filepath.IsAbs(name) {
 		return filepath.Clean(name), nil
 	}
+
 	return filepath.Join(extensionLibDir, filepath.Clean(name)), nil
 }
 
@@ -2320,12 +2692,15 @@ func parseExtensionControlDefaultVersion(text string) string {
 		if !ok || strings.TrimSpace(key) != "default_version" {
 			continue
 		}
+
 		value = strings.TrimSpace(value)
 		if comment := strings.IndexByte(value, '#'); comment >= 0 {
 			value = strings.TrimSpace(value[:comment])
 		}
+
 		return strings.Trim(value, `'"`)
 	}
+
 	return ""
 }
 
@@ -2335,8 +2710,10 @@ func extensionPackageInstalledDefault(ctx context.Context, pkg string) (bool, bo
 		if strings.Contains(err.Error(), "no packages found matching") {
 			return false, true, ""
 		}
+
 		return false, false, err.Error()
 	}
+
 	return steps.PackageInstalled(out), true, ""
 }
 
@@ -2350,29 +2727,36 @@ LEFT JOIN pg_available_extensions a ON a.name = e.extname ORDER BY 1`
 func extensionInstalledDefault(ctx context.Context, spec config.ClusterSpec) (map[string]extensionInstalledVersion, error) {
 	ctx, cancel := context.WithTimeout(ctx, extensionQueryTimeout)
 	defer cancel()
+
 	rows, err := extensionPG(spec).Query(ctx, spec.DatabaseName(), extensionInstalledSQL, nil)
 	if err != nil {
 		return nil, err
 	}
+
 	out := map[string]extensionInstalledVersion{}
 	for _, row := range rows {
 		out[row["name"]] = extensionInstalledVersion{Name: row["name"], Version: row["version"], Default: row["default_version"], Schema: row["schema"]}
 	}
+
 	return out, nil
 }
 
 func extensionPreloadFactsDefault(ctx context.Context, spec config.ClusterSpec) (map[string]bool, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, extensionQueryTimeout)
 	defer cancel()
+
 	local := steps.ClusterPG(spec)
+
 	loaded, err := steps.LoadedPreloads(ctx, local)
 	if err != nil {
 		return nil, false, err
 	}
+
 	pending, err := steps.SharedPreloadsPending(ctx, local)
 	if err != nil {
 		return nil, false, err
 	}
+
 	return loaded, pending, nil
 }
 
@@ -2390,14 +2774,17 @@ func extensionJournalConvergedDefault(ctx context.Context, cfg config.Cluster, s
 	if err != nil {
 		return false, err
 	}
+
 	if len(plan.Steps) != 2 || len(plan.RestartPending) > 0 {
 		return false, nil
 	}
+
 	for _, step := range plan.Steps {
 		if step.Action != "skip" {
 			return false, nil
 		}
 	}
+
 	return true, nil
 }
 
@@ -2406,27 +2793,35 @@ func extensionPrimaryReadiness(ctx context.Context, cfg config.Cluster, spec con
 	if err != nil {
 		return steps.PrimaryExtensionReadiness{}, err
 	}
+
 	pendingList, err := extensionPendingRestarts(ctx, spec)
 	if err != nil {
 		return steps.PrimaryExtensionReadiness{}, err
 	}
+
 	pending := map[string]bool{}
 	if preloadPending {
 		pending["shared_preload_libraries"] = true
 	}
+
 	for _, key := range pendingList {
 		pending[key] = true
 	}
+
 	expected := steps.PrimaryExtensionExpectedSettings(cfg, spec, ext)
+
 	keys := make([]string, 0, len(expected))
 	for key := range expected {
 		keys = append(keys, key)
 	}
+
 	sort.Strings(keys)
+
 	actual, err := extensionSettingValues(ctx, spec, keys)
 	if err != nil {
 		return steps.PrimaryExtensionReadiness{}, err
 	}
+
 	return steps.CheckPrimaryExtensionReadiness(cfg, spec, ext, loaded, pending, actual)
 }
 
@@ -2438,42 +2833,53 @@ func extensionSettingValuesDefault(ctx context.Context, spec config.ClusterSpec,
 		if err != nil {
 			return nil, err
 		}
+
 		fact := steps.ExtensionSettingFact{}
 		if len(rows) > 0 {
 			fact = steps.ParseExtensionSettingFact(rows[0])
 		}
+
 		out[key] = fact
 	}
+
 	return out, nil
 }
 
 func extensionPendingRestartsDefault(ctx context.Context, spec config.ClusterSpec) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, extensionQueryTimeout)
 	defer cancel()
+
 	rows, err := extensionPG(spec).Query(ctx, spec.DatabaseName(), "SELECT name FROM pg_settings WHERE pending_restart ORDER BY name", nil)
 	if err != nil {
 		return nil, err
 	}
+
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, row["name"])
 	}
+
 	sort.Strings(out)
+
 	return out, nil
 }
 
 func extensionUpdatePathDefault(ctx context.Context, spec config.ClusterSpec, extName, from, to string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, extensionQueryTimeout)
 	defer cancel()
+
 	sql := `SELECT coalesce(path, '') AS path FROM pg_extension_update_paths(` + extensionLiteral(extName) + `)
 WHERE source = ` + extensionLiteral(from) + ` AND target = ` + extensionLiteral(to)
+
 	rows, err := extensionPG(spec).Query(ctx, spec.DatabaseName(), sql, nil)
 	if err != nil {
 		return false, err
 	}
+
 	if len(rows) == 0 {
 		return false, nil
 	}
+
 	return rows[0]["path"] != "", nil
 }
 
@@ -2572,32 +2978,40 @@ func extensionPreview(ctx context.Context, local sqlRunner, db, body, column str
 	if err != nil {
 		return nil, 0, false, err
 	}
+
 	truncated := len(rows) > extensionPreviewLimit
 	if truncated {
 		rows = rows[:extensionPreviewLimit]
 	}
+
 	items := make([]string, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, row[column])
 	}
+
 	countRows, err := local.Query(ctx, db, "SELECT count(*) AS n FROM ("+body+") AS preview", nil)
 	if err != nil {
 		return nil, 0, false, err
 	}
+
 	total := len(items)
 	if len(countRows) > 0 {
 		n, err := strconv.Atoi(countRows[0]["n"])
 		if err != nil {
 			return nil, 0, false, fmt.Errorf("read preview count %q: %w", countRows[0]["n"], err)
 		}
+
 		total = n
 	}
+
 	if total < len(items) {
 		total = len(items)
 	}
+
 	if total > len(items) {
 		truncated = true
 	}
+
 	return items, total, truncated, nil
 }
 
@@ -2605,14 +3019,17 @@ func extensionPreviewText(items []string, truncated bool) string {
 	if len(items) == 0 {
 		return "unknown objects"
 	}
+
 	shown := items
 	if len(shown) > 3 {
 		shown = shown[:3]
 	}
+
 	text := strings.Join(shown, "; ")
 	if len(items) > len(shown) || truncated {
 		text += "; ..."
 	}
+
 	return text
 }
 
@@ -2620,6 +3037,7 @@ func extensionCount(n int, word string) string {
 	if n == 1 {
 		return "1 " + word
 	}
+
 	return strconv.Itoa(n) + " " + word + "s"
 }
 
@@ -2628,43 +3046,55 @@ func extensionCount(n int, word string) string {
 func extensionFactsForCluster(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, state string, awaiting bool) doctor.ExtensionFacts {
 	x := doctor.ExtensionFacts{Checked: true}
 	resolver := cfg.ExtensionResolver()
+
 	enabled, err := extensionFactsEnabled(resolver, spec.Extensions)
 	if err != nil {
 		x.Available, x.Error = false, err.Error()
 		x.PackagesKnown, x.PackageError = false, err.Error()
 		x.PrerequisitesKnown, x.MissingPrerequisites = false, err.Error()
+
 		return x
 	}
+
 	x.Enabled = enabled
 	x.Known = map[string]doctor.ExtensionInfo{}
+
 	known, err := extensionFactsKnown(resolver)
 	if err != nil {
 		x.Available, x.Error = false, err.Error()
 		x.PackagesKnown, x.PackageError = false, err.Error()
+
 		return x
 	}
+
 	x.Known = known
 	packagesKnown, prerequisitesKnown, missingPackages, packageError, prerequisitesError := extensionFactsPrerequisites(ctx, cfg, spec)
 	x.PackagesKnown, x.MissingPackages = packagesKnown, missingPackages
 	x.PackageError = packageError
+
 	x.PrerequisitesKnown, x.MissingPrerequisites = prerequisitesKnown, prerequisitesError
 	if awaiting || state != "running" {
 		x.Available, x.Error = false, "the cluster is "+state
 		if awaiting {
 			x.Error = "awaiting recovery"
 		}
+
 		return x
 	}
+
 	installed, err := extensionInstalled(ctx, spec)
 	if err != nil {
 		x.Available, x.Error = false, err.Error()
 		return x
 	}
+
 	x.Available = true
+
 	x.Installed = map[string]doctor.ExtensionVersion{}
 	for name, got := range installed {
 		x.Installed[name] = doctor.ExtensionVersion{Version: got.Version, Default: got.Default}
 	}
+
 	loaded, pending, err := extensionPreloadFacts(ctx, spec)
 	if err != nil {
 		x.LoadedKnown, x.PendingKnown = false, false
@@ -2672,15 +3102,19 @@ func extensionFactsForCluster(ctx context.Context, cfg config.Cluster, spec conf
 		x.LoadedKnown, x.PendingKnown = true, true
 		x.Loaded, x.PendingRestart = loaded, pending
 	}
+
 	for name := range installed {
 		if name == "plpgsql" {
 			continue
 		}
+
 		if _, ok := x.Known[name]; !ok {
 			x.Unmanaged = append(x.Unmanaged, name)
 		}
 	}
+
 	sort.Strings(x.Unmanaged)
+
 	return x
 }
 
@@ -2689,14 +3123,17 @@ func extensionFactsEnabled(resolver config.ExtensionResolver, names []string) ([
 	if err != nil {
 		return nil, err
 	}
+
 	out := make([]doctor.ExtensionInfo, 0, len(effective))
 	for _, name := range effective {
 		ext, err := resolver.Resolve(name)
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, doctor.ExtensionInfo{Name: ext.Name, ExtName: ext.ExtName, Preload: ext.Preload})
 	}
+
 	return out, nil
 }
 
@@ -2705,12 +3142,15 @@ func extensionFactsKnown(resolver config.ExtensionResolver) (map[string]doctor.E
 	if err != nil {
 		return nil, err
 	}
+
 	known := map[string]doctor.ExtensionInfo{}
+
 	for _, ext := range all {
 		if ext.ExtName != "" {
 			known[ext.ExtName] = doctor.ExtensionInfo{Name: ext.Name, ExtName: ext.ExtName, Preload: ext.Preload}
 		}
 	}
+
 	return known, nil
 }
 
@@ -2719,25 +3159,33 @@ func extensionFactsPrerequisites(ctx context.Context, cfg config.Cluster, spec c
 	if err != nil {
 		return false, false, nil, err.Error(), err.Error()
 	}
+
 	packagesKnown, prerequisitesKnown = true, true
+
 	seen := map[string]bool{}
 	for _, req := range reqs {
 		if req.Source != catalog.SourceAPT || req.Package == "" || seen[req.Package] {
 			continue
 		}
+
 		seen[req.Package] = true
+
 		installed, known, detail := extensionPackageInstalled(ctx, req.Package)
 		if !known {
 			packagesKnown, packageError = false, detail
 			continue
 		}
+
 		if !installed {
 			missingPackages = append(missingPackages, req.Package)
 		}
 	}
+
 	sort.Strings(missingPackages)
+
 	if err := steps.VerifyExtensionRequirements(reqs); err != nil {
 		prerequisitesError = err.Error()
 	}
+
 	return packagesKnown, prerequisitesKnown, missingPackages, packageError, prerequisitesError
 }

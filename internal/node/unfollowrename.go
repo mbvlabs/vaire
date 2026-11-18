@@ -52,29 +52,37 @@ func (t unfollowRenameTarget) validate(name string) error {
 	if t.local == nil {
 		return errors.New("unfollow rename needs the follower cluster's SQL endpoint")
 	}
+
 	if name == "" || t.cluster != name {
 		return errors.New("unfollow rename does not match the follower cluster")
 	}
+
 	if t.port <= 0 {
 		return errors.New("unfollow rename needs the follower cluster's port")
 	}
+
 	if t.sourcePort <= 0 {
 		return errors.New("unfollow rename needs the source cluster's port")
 	}
+
 	if t.port == t.sourcePort {
 		return errors.New("unfollow rename refuses the source cluster's port")
 	}
+
 	dataDir := strings.TrimSpace(t.dataDir)
 	if dataDir == "" || !filepath.IsAbs(dataDir) {
 		return errors.New("unfollow rename needs the follower cluster's absolute data directory")
 	}
+
 	sourceDir := strings.TrimSpace(t.sourceDataDir)
 	if sourceDir == "" || !filepath.IsAbs(sourceDir) {
 		return errors.New("unfollow rename needs the source cluster's absolute data directory")
 	}
+
 	if filepath.Clean(dataDir) == filepath.Clean(sourceDir) {
 		return errors.New("unfollow rename refuses the source cluster's data directory")
 	}
+
 	return nil
 }
 
@@ -84,22 +92,27 @@ func (t unfollowRenameTarget) attest(ctx context.Context, name string) error {
 	if err := t.validate(name); err != nil {
 		return err
 	}
+
 	rows, err := t.local.Query(ctx, "postgres",
 		"SELECT current_setting('port') AS port, current_setting('data_directory') AS data_dir", nil)
 	if err != nil {
 		return fmt.Errorf("attesting the follower cluster's SQL endpoint: %w", err)
 	}
+
 	if len(rows) != 1 {
 		return errors.New("the follower cluster's SQL endpoint returned no unique identity")
 	}
+
 	port, err := strconv.Atoi(strings.TrimSpace(rows[0]["port"]))
 	if err != nil || port != t.port {
 		return fmt.Errorf("the SQL endpoint port %q is not the follower cluster's port %d", rows[0]["port"], t.port)
 	}
+
 	dataDir := filepath.Clean(strings.TrimSpace(rows[0]["data_dir"]))
 	if dataDir != filepath.Clean(t.dataDir) {
 		return fmt.Errorf("the SQL endpoint data directory %q is not the follower cluster's %q", dataDir, t.dataDir)
 	}
+
 	return nil
 }
 
@@ -123,21 +136,26 @@ func (t unfollowRenameTarget) database(ctx context.Context, source string) (unfo
 	if err != nil {
 		return unfollowRenameDatabase{}, fmt.Errorf("reading the follower cluster's source database: %w", err)
 	}
+
 	if len(rows) != 1 {
 		return unfollowRenameDatabase{}, fmt.Errorf("source database %s has no unique identity in the follower cluster", source)
 	}
+
 	oid, err := unfollowRenameOID(rows[0]["oid"])
 	if err != nil {
 		return unfollowRenameDatabase{}, err
 	}
+
 	currentName := strings.TrimSpace(rows[0]["name"])
 	if currentName == "" {
 		return unfollowRenameDatabase{}, errors.New("the follower cluster's source database has no usable name")
 	}
+
 	allow, err := unfollowRenameBoolValue(rows[0]["allowconn"])
 	if err != nil {
 		return unfollowRenameDatabase{}, err
 	}
+
 	return unfollowRenameDatabase{oid: oid, name: currentName, allowConnections: allow}, nil
 }
 
@@ -151,12 +169,15 @@ func (t unfollowRenameTarget) refusePrepared(ctx context.Context, oid string) er
 	if err != nil {
 		return fmt.Errorf("reading the follower cluster's prepared transactions: %w", err)
 	}
+
 	if len(rows) != 1 {
 		return errors.New("the follower cluster's prepared transactions returned no unique count")
 	}
+
 	if rows[0]["n"] != "0" {
 		return fmt.Errorf("the follower cluster's database oid %s has prepared transactions; refusing to rename", oid)
 	}
+
 	return nil
 }
 
@@ -169,31 +190,39 @@ func (t unfollowRenameTarget) refusePrepared(ctx context.Context, oid string) er
 func drainUnfollowRenameSessions(ctx context.Context, target unfollowRenameTarget, oid string) error {
 	drainCtx, cancel := context.WithTimeout(ctx, unfollowRenameDrainTimeout)
 	defer cancel()
-	for round := 0; round < unfollowRenameDrainRounds; round++ {
+
+	for range unfollowRenameDrainRounds {
 		if err := target.refusePrepared(drainCtx, oid); err != nil {
 			return err
 		}
+
 		pids, err := target.sessions(drainCtx, oid)
 		if err != nil {
 			return err
 		}
+
 		if len(pids) == 0 {
 			return nil
 		}
+
 		if err := target.terminateSessions(drainCtx, oid); err != nil {
 			return err
 		}
 	}
+
 	if err := target.refusePrepared(drainCtx, oid); err != nil {
 		return err
 	}
+
 	pids, err := target.sessions(drainCtx, oid)
 	if err != nil {
 		return err
 	}
+
 	if len(pids) != 0 {
 		return fmt.Errorf("the follower cluster's database oid %s still has %d unresolved session(s)", oid, len(pids))
 	}
+
 	return nil
 }
 
@@ -204,14 +233,17 @@ func (t unfollowRenameTarget) sessions(ctx context.Context, oid string) ([]strin
 	if err != nil {
 		return nil, fmt.Errorf("reading the follower cluster's sessions: %w", err)
 	}
+
 	pids := make([]string, 0, len(rows))
 	for _, row := range rows {
 		pid := strings.TrimSpace(row["pid"])
 		if _, err := strconv.ParseUint(pid, 10, 32); err != nil {
 			return nil, errors.New("the follower cluster's sessions returned an invalid pid")
 		}
+
 		pids = append(pids, pid)
 	}
+
 	return pids, nil
 }
 
@@ -219,11 +251,13 @@ func (t unfollowRenameTarget) sessions(ctx context.Context, oid string) ([]strin
 // backends, waiting at most unfollowRenameTerminateTimeout for each.
 func (t unfollowRenameTarget) terminateSessions(ctx context.Context, oid string) error {
 	timeout := strconv.FormatInt(int64(unfollowRenameTerminateTimeout/time.Millisecond), 10)
+
 	_, err := t.local.Query(ctx, "postgres",
 		"SELECT pid::text AS pid, pg_terminate_backend(pid, "+timeout+")::text AS terminated FROM pg_stat_activity WHERE datid = "+oid+" ORDER BY pid", nil)
 	if err != nil {
 		return fmt.Errorf("terminating the follower cluster's sessions: %w", err)
 	}
+
 	return nil
 }
 
@@ -242,16 +276,20 @@ func (t unfollowRenameTarget) verifyAllowConnections(ctx context.Context, oid st
 	if err != nil {
 		return fmt.Errorf("reading the follower cluster's database oid %s: %w", oid, err)
 	}
+
 	if len(rows) != 1 {
 		return fmt.Errorf("the follower cluster's database oid %s is missing", oid)
 	}
+
 	got, err := unfollowRenameBoolValue(rows[0]["allowconn"])
 	if err != nil {
 		return err
 	}
+
 	if got != want {
 		return fmt.Errorf("the follower cluster's database oid %s has allow_connections=%t, want %t", oid, got, want)
 	}
+
 	return nil
 }
 
@@ -264,6 +302,7 @@ func (t unfollowRenameTarget) rename(ctx context.Context, statements string, dat
 	if !strings.HasSuffix(statements, "\n") {
 		statements += "\n"
 	}
+
 	body := "BEGIN;\n" + statements +
 		"ALTER DATABASE " + pg.Quote(name) + " ALLOW_CONNECTIONS " + unfollowRenameSQLBool(database.allowConnections) + ";\n" +
 		"DO $vaire$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_database WHERE oid = " + database.oid +
@@ -272,6 +311,7 @@ func (t unfollowRenameTarget) rename(ctx context.Context, statements string, dat
 	if err := t.local.Exec(ctx, "postgres", body, nil); err != nil {
 		return fmt.Errorf("renaming %s to %s in the follower cluster: %w", database.name, name, err)
 	}
+
 	return nil
 }
 
@@ -285,23 +325,29 @@ func restoreUnfollowRenameAllowConnections(ctx context.Context, target unfollowR
 	if err != nil {
 		return fmt.Errorf("compensating follower database oid %s: %w", oid, err)
 	}
+
 	if len(rows) != 1 {
 		return fmt.Errorf("compensating follower database oid %s: the captured database is missing and stays fenced", oid)
 	}
+
 	current, err := unfollowRenameBoolValue(rows[0]["allowconn"])
 	if err != nil {
 		return err
 	}
+
 	if current == allow {
 		return nil
 	}
+
 	name := strings.TrimSpace(rows[0]["name"])
 	if name == "" {
 		return fmt.Errorf("compensating follower database oid %s: its current name is empty", oid)
 	}
+
 	if err := target.setAllowConnections(ctx, name, allow); err != nil {
 		return fmt.Errorf("compensating follower database oid %s: %w", oid, err)
 	}
+
 	return target.verifyAllowConnections(ctx, oid, allow)
 }
 
@@ -310,6 +356,7 @@ func unfollowRenameOID(value string) (string, error) {
 	if err != nil || parsed == 0 {
 		return "", errors.New("the follower cluster's source database has no usable OID")
 	}
+
 	return strconv.FormatUint(parsed, 10), nil
 }
 
@@ -320,6 +367,7 @@ func unfollowRenameBoolValue(value string) (bool, error) {
 	case "f", "false", "0":
 		return false, nil
 	}
+
 	return false, errors.New("the follower cluster's database has no usable allow_connections value")
 }
 
@@ -327,5 +375,6 @@ func unfollowRenameSQLBool(value bool) string {
 	if value {
 		return "true"
 	}
+
 	return "false"
 }

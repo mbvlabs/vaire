@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ func CheckAdminUser(v string) error {
 	if !userPattern.MatchString(v) || v == "root" {
 		return errors.New("must be a lower-case user name other than root")
 	}
+
 	return nil
 }
 
@@ -25,6 +27,7 @@ func CheckTimezone(v string) error {
 	if !timezonePattern.MatchString(v) {
 		return errors.New("is not a timezone name")
 	}
+
 	return nil
 }
 
@@ -33,6 +36,7 @@ func CheckDataRoot(v string) error {
 	if !strings.HasPrefix(v, "/") {
 		return errors.New("must be absolute")
 	}
+
 	return nil
 }
 
@@ -41,6 +45,7 @@ func CheckDomain(v string) error {
 	if !fqdnPattern.MatchString(v) {
 		return errors.New("is not a fully qualified domain name")
 	}
+
 	return nil
 }
 
@@ -49,6 +54,7 @@ func CheckACMEEmail(v string) error {
 	if !strings.Contains(v, "@") {
 		return errors.New("is not an email address")
 	}
+
 	return nil
 }
 
@@ -57,6 +63,7 @@ func CheckAllowlistEntry(v string) error {
 	if _, err := netip.ParsePrefix(v); err != nil {
 		return errors.New("is not a CIDR")
 	}
+
 	return nil
 }
 
@@ -65,6 +72,7 @@ func CheckClientConnections(n int) error {
 	if n < 10 || n > 100000 {
 		return errors.New("must be 10-100000")
 	}
+
 	return nil
 }
 
@@ -73,15 +81,18 @@ func CheckDatabaseName(v string) error {
 	if !DatabasePattern.MatchString(v) {
 		return errors.New("must match " + DatabasePattern.String())
 	}
+
 	switch v {
 	case "postgres", "template0", "template1":
 		return errors.New("is reserved")
 	}
+
 	for _, suffix := range []string{"_owner", "_migrate", "_app", "_ro"} {
 		if len(v)+len(suffix) > 63 {
 			return errors.New("is too long: " + v + suffix + " would exceed 63 characters")
 		}
 	}
+
 	return nil
 }
 
@@ -90,11 +101,10 @@ var Providers = []string{"r2", "s3", "b2", "hetzner", "minio", "custom"}
 
 // CheckProvider checks backup.provider.
 func CheckProvider(v string) error {
-	for _, p := range Providers {
-		if v == p {
-			return nil
-		}
+	if slices.Contains(Providers, v) {
+		return nil
 	}
+
 	return errors.New("must be one of " + strings.Join(Providers, ", "))
 }
 
@@ -102,10 +112,12 @@ func CheckProvider(v string) error {
 // port) and nothing after it. pgBackRest talks to S3 over TLS only.
 func CheckEndpoint(v string) error {
 	rest, ok := strings.CutPrefix(v, "https://")
+
 	rest = strings.TrimSuffix(rest, "/")
 	if !ok || rest == "" || strings.ContainsAny(rest, "/?# ") {
 		return errors.New("must be an https:// URL with only a host (and port)")
 	}
+
 	return nil
 }
 
@@ -114,6 +126,7 @@ func CheckBucket(v string) error {
 	if !bucketPattern.MatchString(v) {
 		return errors.New("is not an S3 bucket name")
 	}
+
 	return nil
 }
 
@@ -122,6 +135,7 @@ func CheckPrefix(v string) error {
 	if v == "" || !prefixPattern.MatchString(v) || strings.HasPrefix(v, "/") || strings.HasSuffix(v, "/") || strings.Contains(v, "//") {
 		return errors.New("must be a non-empty key prefix without leading or trailing slash")
 	}
+
 	return nil
 }
 

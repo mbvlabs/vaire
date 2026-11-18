@@ -50,27 +50,34 @@ func restoreNodeID(id backup.ArtifactIdentity) materialisationFileID {
 
 func newRestoreBirth(ctx context.Context, env *jobEnv, m *backup.Materialised, attempt *backup.MaterialisationAttempt) (*restoreBirth, error) {
 	var a *restoreBirth
+
 	err := withLockedJobTarget(env, m.Name, func() error {
 		uid, err := materialisationPostgresUID()
 		if err != nil {
 			return err
 		}
+
 		a = &restoreBirth{env: env, m: m, attempt: attempt, dataRoot: env.Cluster.Server.DataRoot, uid: uid}
+
 		a.dataParent, a.dataParentInfo, a.dataAncestors, err = openMaterialisationParent(a.dataRoot, uid, true)
 		if err != nil {
 			return err
 		}
+
 		a.confParent, a.confParentInfo, a.confAncestors, err = openMaterialisationConfigParent(uid)
 		if err != nil {
 			a.close()
 			return err
 		}
+
 		if err = a.validate(ctx); err != nil {
 			a.close()
 			return err
 		}
+
 		return nil
 	})
+
 	return a, err
 }
 
@@ -78,6 +85,7 @@ func (a *restoreBirth) verifyAttempt() error {
 	if a.attempt.Kind == "drill" {
 		return verifyDrillAttempt(a.attempt.Source, a.attempt.Target, *a.attempt)
 	}
+
 	return verifyRestoreAttempt(a.attempt.Source, a.env.ID, a.attempt)
 }
 
@@ -87,6 +95,7 @@ func (a *restoreBirth) close() {
 			_ = f.Close()
 		}
 	}
+
 	for _, r := range []*os.Root{a.dataParent, a.confParent} {
 		if r != nil {
 			_ = r.Close()
@@ -98,6 +107,7 @@ func (a *restoreBirth) validate(ctx context.Context) error {
 	if a.m == nil || a.attempt == nil {
 		return errors.New("missing restore authority")
 	}
+
 	drill := a.attempt.Kind == "drill"
 	if drill {
 		if a.env.Job != "restore-drill" || a.env.DB != a.attempt.Source ||
@@ -108,34 +118,43 @@ func (a *restoreBirth) validate(ctx context.Context) error {
 	} else if err := validateRestoreInvocation(a.env); err != nil {
 		return err
 	}
+
 	instance, err := currentFollowInstance()
 	if err != nil || instance != a.env.installID {
 		return errors.New("restore install changed")
 	}
+
 	spec, ok := a.env.Cluster.ClusterByName(a.attempt.Source)
+
 	target := backup.RestoringName(a.attempt.Source)
 	if drill {
 		target = backup.DrillName(a.attempt.Source)
 	}
+
 	if !ok || spec.Port != a.attempt.SourcePort || spec.Stanza != a.attempt.Stanza ||
 		a.attempt.Target != target ||
 		a.attempt.DataPath != filepath.Join(a.dataRoot, a.attempt.Target) ||
 		a.attempt.ConfigPath != filepath.Join(materialisationConfigRoot, a.attempt.Target) {
 		return errors.New("restore target changed")
 	}
+
 	if err := a.verifyAttempt(); err != nil {
 		return err
 	}
+
 	if err := a.m.WithForkReservation(ctx, func() error { return nil }); err != nil {
 		return err
 	}
+
 	if err := errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.confAncestors),
 		validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.confParentInfo)); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationDir(a.dataParent, a.attempt.Target, restoreNodeID(a.attempt.DataIdentity), a.data, 0o700); err != nil {
 		return err
 	}
+
 	return validateMaterialisationDir(a.confParent, a.attempt.Target, restoreNodeID(a.attempt.ConfigIdentity), a.conf, 0o755)
 }
 
@@ -144,6 +163,7 @@ func (a *restoreBirth) paths(p backup.MaterialisationPaths) error {
 		p.SourcePort != a.attempt.SourcePort || p.DataDir != a.attempt.DataPath || p.ConfigDir != a.attempt.ConfigPath {
 		return errors.New("restore materialisation paths changed")
 	}
+
 	return nil
 }
 
@@ -151,22 +171,27 @@ func (a *restoreBirth) create(ctx context.Context, p backup.MaterialisationPaths
 	if err := a.paths(p); err != nil {
 		return err
 	}
+
 	if err := a.validate(ctx); err != nil {
 		return err
 	}
+
 	root, mode, err := a.createdRoot(conf)
 	if err != nil {
 		return err
 	}
+
 	f, id, err := a.makeArtifact(root, mode)
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if f != nil {
 			_ = f.Close()
 		}
 	}()
+
 	if err := a.validateCreated(conf); err != nil {
 		return err
 	}
@@ -175,15 +200,19 @@ func (a *restoreBirth) create(ctx context.Context, p backup.MaterialisationPaths
 	// directory unbound, and detached cleanup would then refuse to drop it.
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), materialisationPersistTimeout)
 	defer cancel()
+
 	if err := a.bindAttempt(persistCtx, conf, id); err != nil {
 		return err
 	}
+
 	if conf {
 		a.conf = f
 	} else {
 		a.data = f
 	}
+
 	f = nil
+
 	if err := a.validate(persistCtx); err != nil {
 		return err
 	}
@@ -197,11 +226,14 @@ func (a *restoreBirth) createdRoot(conf bool) (*os.Root, os.FileMode, error) {
 		if a.attempt.ArtifactStage != materialisationDataCreated || !a.populated {
 			return nil, 0, errors.New("restore data not bound")
 		}
+
 		return a.confParent, 0o755, nil
 	}
+
 	if a.attempt.ArtifactStage != "" {
 		return nil, 0, errors.New("restore data already bound")
 	}
+
 	return a.dataParent, 0o700, nil
 }
 
@@ -214,20 +246,24 @@ func (a *restoreBirth) validateCreated(conf bool) error {
 		validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.confParentInfo)); err != nil {
 		return err
 	}
+
 	if !conf {
 		return nil
 	}
+
 	return validateMaterialisationDir(a.dataParent, a.attempt.Target, restoreNodeID(a.attempt.DataIdentity), a.data, 0o700)
 }
 
 func (a *restoreBirth) bindAttempt(ctx context.Context, conf bool, id materialisationFileID) error {
 	old := *a.attempt
+
 	next := old
 	if conf {
 		next.ConfigIdentity, next.ArtifactStage = restoreFileID(id), materialisationRegistered
 	} else {
 		next.DataIdentity, next.ArtifactStage = restoreFileID(id), materialisationDataCreated
 	}
+
 	err := a.m.WithForkReservation(ctx, func() error {
 		return backup.UpdateRecords(func(s *backup.Records) error {
 			if old.Kind == "drill" {
@@ -235,23 +271,30 @@ func (a *restoreBirth) bindAttempt(ctx context.Context, conf bool, id materialis
 				if !ok || cur != old || s.Drilling[old.Source] != old.Target {
 					return incompleteMaterialisation(old.Target)
 				}
+
 				s.DrillAttempts[old.Source] = next
+
 				return nil
 			}
+
 			r, ok := s.Restores[old.Source]
 			if !ok || r.Phase != backup.PhaseRestoring || !matchesRestoreInvocation(r, a.env, old.Source) || !restoreRecordMatchesAttempt(r, &old) ||
 				r.Attempt == nil || *r.Attempt != old {
 				return incompleteMaterialisation(old.Target)
 			}
+
 			r.Attempt = &next
 			s.Restores[old.Source] = r
+
 			return nil
 		})
 	})
 	if err != nil {
 		return err
 	}
+
 	*a.attempt = next
+
 	return nil
 }
 
@@ -265,23 +308,30 @@ func (a *restoreBirth) Guard(ctx context.Context, p backup.MaterialisationPaths,
 	return withLockedJobTarget(a.env, a.m.Name, func() error {
 		a.mu.Lock()
 		defer a.mu.Unlock()
+
 		if effect == nil {
 			return errors.New("missing restore effect")
 		}
+
 		if err := a.paths(p); err != nil {
 			return err
 		}
+
 		if err := a.guardAction(action); err != nil {
 			return err
 		}
+
 		if err := a.validate(ctx); err != nil {
 			return err
 		}
+
 		err := effect()
+
 		post := a.validate(ctx)
 		if err == nil && post == nil {
 			a.recordAction(action)
 		}
+
 		return errors.Join(err, post)
 	})
 }
@@ -304,6 +354,7 @@ func (a *restoreBirth) guardAction(action backup.MaterialisationAction) error {
 		backup.MaterialisationRename, backup.MaterialisationAdopt, backup.MaterialisationDrop:
 		return errors.New("unsupported restore materialisation action")
 	}
+
 	return nil
 }
 
@@ -325,6 +376,7 @@ func (a *restoreBirth) validateDiscard() error {
 	if err := a.verifyAttempt(); err != nil {
 		return err
 	}
+
 	return errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.confAncestors),
 		validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.confParentInfo))
 }
@@ -333,25 +385,31 @@ func (a *restoreBirth) discardRegistration(ctx context.Context) error {
 	if a.attempt.ConfigIdentity.Inode == 0 {
 		return nil
 	}
+
 	_, err := a.confParent.Lstat(filepath.Join(a.m.Name, "postgresql.conf"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+
 	if err != nil {
 		return err
 	}
+
 	if err := restoreCleanupRegistration(a.m.Name, a.m.Source, a.dataRoot, a.m.SourcePort, a.m.Port); err != nil {
 		return err
 	}
+
 	if err := a.validateDiscard(); err != nil {
 		return err
 	}
+
 	if err := errors.Join(
 		validateMaterialisationDir(a.dataParent, a.m.Name, restoreNodeID(a.attempt.DataIdentity), a.data, 0o700),
 		validateMaterialisationDir(a.confParent, a.m.Name, restoreNodeID(a.attempt.ConfigIdentity), a.conf, 0o755),
 	); err != nil {
 		return err
 	}
+
 	return birthDropCluster(ctx, a)
 }
 
@@ -367,28 +425,35 @@ func (a *restoreBirth) discardArtifacts() error {
 			if err := validateMaterialisationDir(item.root, a.m.Name, restoreNodeID(item.id), item.file, item.mode); err != nil {
 				return err
 			}
+
 			if item.id.Inode == 0 {
 				return errors.New("unbound restore artifact")
 			}
+
 			if err := item.root.RemoveAll(a.m.Name); err != nil {
 				return err
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+
 		if item.file == nil {
 			continue
 		}
+
 		info, err := item.file.Stat()
 		if err != nil {
 			return err
 		}
+
 		id, err := materialisationArtifactID(info)
+
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if err != nil || !ok || restoreFileID(id) != item.id || st.Nlink != 0 {
 			return errors.New("original restore artifact not removed")
 		}
 	}
+
 	return nil
 }
 
@@ -398,25 +463,32 @@ func (a *restoreBirth) discard(ctx context.Context) error {
 	return withLockedJobTarget(a.env, a.m.Name, func() error {
 		a.mu.Lock()
 		defer a.mu.Unlock()
+
 		if err := a.validate(ctx); err != nil {
 			return err
 		}
+
 		return a.m.DiscardOwnedReservation(ctx, func() error {
 			if err := a.validateDiscard(); err != nil {
 				return err
 			}
+
 			if err := a.discardRegistration(ctx); err != nil {
 				return err
 			}
+
 			if err := a.validateDiscard(); err != nil {
 				return err
 			}
+
 			if err := a.discardArtifacts(); err != nil {
 				return err
 			}
+
 			if err := a.validateDiscard(); err != nil {
 				return err
 			}
+
 			return errors.Join(materialisationSyncArtifactParent(a.dataParent), materialisationSyncArtifactParent(a.confParent))
 		})
 	})
@@ -427,6 +499,7 @@ func (a *restoreBirth) validateDrillAbsence() error {
 		validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.confParentInfo)); err != nil {
 		return err
 	}
+
 	for _, item := range []struct {
 		root *os.Root
 		file *os.File
@@ -435,19 +508,24 @@ func (a *restoreBirth) validateDrillAbsence() error {
 		if _, err := item.root.Lstat(a.m.Name); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("drill artifact remains or was replaced")
 		}
+
 		if item.file == nil {
 			continue
 		}
+
 		info, err := item.file.Stat()
 		if err != nil {
 			return err
 		}
+
 		id, err := materialisationArtifactID(info)
+
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if err != nil || !ok || restoreFileID(id) != item.id || st.Nlink != 0 {
 			return errors.New("original drill artifact not removed")
 		}
 	}
+
 	return nil
 }
 
@@ -460,24 +538,30 @@ func (a *restoreBirth) retireDrill(ctx context.Context) error {
 			return err
 		}
 		defer unlock()
+
 		if err := a.verifyAttempt(); err != nil {
 			return err
 		}
+
 		if err := a.validateDrillAbsence(); err != nil {
 			return err
 		}
+
 		err = backup.UpdateRecords(func(s *backup.Records) error {
 			cur, ok := s.DrillAttempts[a.attempt.Source]
 			if !ok || cur != *a.attempt || cur.Reason != "" || s.Drilling[cur.Source] != cur.Target {
 				return incompleteMaterialisation(a.m.Name)
 			}
+
 			delete(s.DrillAttempts, cur.Source)
 			delete(s.Drilling, cur.Source)
+
 			return nil
 		})
 		if err == nil {
 			releaseMaterialisationJob(a.attempt.JobID)
 		}
+
 		return err
 	})
 }

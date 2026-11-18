@@ -18,11 +18,14 @@ func openFailedForkCleanup(cfg config.Cluster, name string) (*materialisationArt
 	if err != nil {
 		return nil, err
 	}
+
 	a, err := openMaterialisationArtifacts(name, cfg.Server.DataRoot, uid)
 	if err != nil {
 		return nil, err
 	}
+
 	o := a.owner
+
 	target, targetOK := cfg.ClusterByName(name)
 	if o.Kind != materialisationFork || o.Phase != materialisationFailed ||
 		(o.Reason != "recovery_requirements_unmet" && o.Reason != "recovery_parameter_mismatch") ||
@@ -31,24 +34,30 @@ func openFailedForkCleanup(cfg config.Cluster, name string) (*materialisationArt
 		a.close()
 		return nil, materialisationIncomplete(name, &o)
 	}
+
 	return a, nil
 }
 
 func removeFailedFork(ctx context.Context, env *Env, a *materialisationArtifacts) error {
 	o := a.owner
+
 	return restoreCleanupReservation(ctx, o.Target, o.TemporaryPort, o.ReservationIdentity, func() error {
 		if err := a.validate(); err != nil {
 			return err
 		}
+
 		if err := dropFailedForkRegistration(ctx, env, a); err != nil {
 			return err
 		}
+
 		if err := removeFailedForkArtifacts(a); err != nil {
 			return err
 		}
+
 		if err := a.validateCleanupCompleted(); err != nil {
 			return err
 		}
+
 		return errors.Join(materialisationSyncArtifactParent(a.dataParent), materialisationSyncArtifactParent(a.configParent))
 	})
 }
@@ -58,10 +67,12 @@ func dropFailedForkRegistration(ctx context.Context, env *Env, a *materialisatio
 	if o.ConfigIdentity.Inode == 0 {
 		return nil
 	}
+
 	_, err := a.configParent.Lstat(filepath.Join(o.Target, "postgresql.conf"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+
 	if err != nil {
 		return err
 	}
@@ -70,9 +81,11 @@ func dropFailedForkRegistration(ctx context.Context, env *Env, a *materialisatio
 	if err := restoreCleanupRegistration(o.Target, o.Source, a.dataRoot, 0, o.TemporaryPort); err != nil {
 		return err
 	}
+
 	if err := a.validate(); err != nil {
 		return err
 	}
+
 	return restoreCleanupDrop(ctx, env, o.Target)
 }
 
@@ -91,26 +104,33 @@ func preparedForkFenceForCleanup(cfg config.Cluster, target, opID string) (backu
 	if err != nil {
 		return backup.ActivationFence{}, false, err
 	}
+
 	f, ok := recs.ActivationFenceFor(target)
 	if !ok {
 		return backup.ActivationFence{}, false, nil
 	}
+
 	if f.Kind != "fork" || f.Phase != fencePhasePrepared || f.OperationID != opID {
 		return backup.ActivationFence{}, false, materialisationIncomplete(target, nil)
 	}
+
 	verified, spec, err := verifyActivationFence(cfg, target, opID, "fork", fencePhasePrepared)
 	if err != nil {
 		return backup.ActivationFence{}, false, err
 	}
+
 	if spec.Follows != "" || spec.FollowGeneration != "" {
 		return backup.ActivationFence{}, false, materialisationIncomplete(target, nil)
 	}
+
 	if err := CheckNotProtected(cfg, target, "db fork cleanup"); err != nil {
 		return backup.ActivationFence{}, false, err
 	}
+
 	if err := refuseSourceDrop(cfg, target); err != nil {
 		return backup.ActivationFence{}, false, err
 	}
+
 	return verified, true, nil
 }
 
@@ -123,12 +143,15 @@ func retireAbandonedForkFence(want backup.ActivationFence, check func(*backup.Re
 		if !ok || !reflect.DeepEqual(current, want) {
 			return materialisationIncomplete(want.Database, nil)
 		}
+
 		if check != nil {
 			if err := check(s); err != nil {
 				return err
 			}
 		}
+
 		delete(s.Activation, want.Database)
+
 		return nil
 	})
 }
@@ -150,6 +173,7 @@ func capturePreparedForkConfig(cfg config.Cluster, target string, o materialisat
 		o.RegisteredPath != filepath.Join(materialisationConfigRoot, target) {
 		return preparedForkConfig{}, materialisationIncomplete(target, &o)
 	}
+
 	return preparedForkConfig{spec: spec, dataRoot: dataRoot}, nil
 }
 
@@ -158,6 +182,7 @@ func matchPreparedForkConfig(fresh config.Cluster, expected preparedForkConfig) 
 	if !ok || !reflect.DeepEqual(spec, expected.spec) || fresh.Server.DataRoot != expected.dataRoot {
 		return materialisationIncomplete(expected.spec.Name, nil)
 	}
+
 	return nil
 }
 
@@ -166,9 +191,11 @@ func freshPreparedForkConfig(expected preparedForkConfig) (config.Cluster, error
 	if err != nil {
 		return config.Cluster{}, err
 	}
+
 	if err := matchPreparedForkConfig(fresh, expected); err != nil {
 		return config.Cluster{}, err
 	}
+
 	return fresh, nil
 }
 
@@ -177,20 +204,26 @@ func freshPreparedForkConfig(expected preparedForkConfig) (config.Cluster, error
 // root or follower ownership retains the evidence.
 func removePreparedForkConfig(expected preparedForkConfig) error {
 	store := followerState()
+
 	fresh, _, err := store.Load()
 	if err != nil {
 		return err
 	}
+
 	if err := matchPreparedForkConfig(fresh, expected); err != nil {
 		return err
 	}
+
 	if err := CheckNotProtected(fresh, expected.spec.Name, "db fork cleanup"); err != nil {
 		return err
 	}
+
 	if err := refuseSourceDrop(fresh, expected.spec.Name); err != nil {
 		return err
 	}
+
 	_, err = saveDroppedConfig(store, fresh, expected.spec.Name)
+
 	return err
 }
 
@@ -205,6 +238,7 @@ func cleanupPreparedForkMetadata(ctx context.Context, a *forkMaterialisationAuth
 	if a == nil || a.artifacts == nil || a.env == nil {
 		return errors.New("fork authority unavailable")
 	}
+
 	return a.run(ctx, func() error {
 		return cleanupPreparedForkMetadataOwned(ctx, a, target, opID)
 	})
@@ -218,44 +252,56 @@ func cleanupPreparedForkMetadataOwned(ctx context.Context, a *forkMaterialisatio
 		o.ReservationIdentity != (backup.ReservationIdentity{}) {
 		return materialisationIncomplete(target, &o)
 	}
+
 	targetCfg, err := capturePreparedForkConfig(a.env.Cluster, target, o, a.artifacts.dataRoot)
 	if err != nil {
 		return err
 	}
+
 	fresh, err := freshPreparedForkConfig(targetCfg)
 	if err != nil {
 		return err
 	}
+
 	expected, hasFence, err := preparedForkFenceForCleanup(fresh, target, opID)
 	if err != nil {
 		return err
 	}
+
 	if err := a.artifacts.validate(); err != nil {
 		return err
 	}
+
 	if err := a.artifacts.validateCleanupCompleted(); err != nil {
 		return err
 	}
+
 	unlock, err := forkAbsenceReservation(ctx, target)
 	if err != nil || unlock == nil {
 		return materialisationIncomplete(target, &o)
 	}
 	defer unlock()
+
 	if err := removePreparedForkConfig(targetCfg); err != nil {
 		return err
 	}
+
 	if err := a.artifacts.validate(); err != nil {
 		return err
 	}
+
 	if err := a.artifacts.validateCleanupCompleted(); err != nil {
 		return err
 	}
+
 	if err := a.artifacts.removeMaterialisationRecord(); err != nil {
 		return err
 	}
+
 	if !hasFence {
 		return nil
 	}
+
 	return retireAbandonedForkFence(expected, nil)
 }
 
@@ -268,26 +314,33 @@ func removeFailedForkArtifacts(a *materialisationArtifacts) error {
 		if err := a.validateRecord(); err != nil {
 			return err
 		}
+
 		if err := errors.Join(validateMaterialisationAncestry(a.dataAncestors), validateMaterialisationAncestry(a.configAncestors),
 			validateMaterialisationParent(a.dataRoot, a.dataParentInfo), validateMaterialisationParent(materialisationConfigRoot, a.configParentInfo)); err != nil {
 			return err
 		}
+
 		_, err := item.root.Lstat(o.Target)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+
 		if err != nil {
 			return err
 		}
+
 		if item.id.Inode == 0 {
 			return materialisationIncomplete(o.Target, &o)
 		}
+
 		if err := validateMaterialisationDir(item.root, o.Target, item.id, item.file, item.mode); err != nil {
 			return err
 		}
+
 		if err := item.root.RemoveAll(o.Target); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

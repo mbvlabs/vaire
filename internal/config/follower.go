@@ -19,6 +19,7 @@ func (s ClusterSpec) DatabaseName() string {
 	if s.Follows != "" {
 		return s.Follows
 	}
+
 	return s.Name
 }
 
@@ -33,21 +34,25 @@ const FollowerSlotPrefix = "vaire_"
 // FollowersOf lists the entries that follow name, in [[clusters]] order.
 func (c Cluster) FollowersOf(name string) []ClusterSpec {
 	var out []ClusterSpec
+
 	for _, s := range c.Clusters {
 		if s.Follows == name {
 			out = append(out, s)
 		}
 	}
+
 	return out
 }
 
 // FollowerNames lists the names of the entries that follow name.
 func (c Cluster) FollowerNames(name string) []string {
 	followers := c.FollowersOf(name)
+
 	out := make([]string, 0, len(followers))
 	for _, s := range followers {
 		out = append(out, s.Name)
 	}
+
 	return out
 }
 
@@ -60,6 +65,7 @@ func (c Cluster) StanzaClusters() []ClusterSpec {
 			out = append(out, s)
 		}
 	}
+
 	return out
 }
 
@@ -78,20 +84,25 @@ func (c Cluster) validateFollower(add func(string, ...any), at string, s Cluster
 	case src.Node != s.Node:
 		add("%s.follows %q is on node %q; a follower runs on its source's node until Phase 10", at, s.Follows, src.Node)
 	}
+
 	if ok && !src.IsFollower() {
 		if !sameExplicitExtensions(c, s.Extensions, src.Extensions) {
 			add("%s.extensions must equal its source %s's inherited list; edit %s, not the follower", at, s.Follows, s.Follows)
 		}
+
 		if !sameRecoveryDeclaration(c, s.RecoveryExtensions, src.RecoveryExtensions) {
 			add("%s.recovery_extensions must equal its source %s's declaration; edit %s, not the follower", at, s.Follows, s.Follows)
 		}
 	}
+
 	if s.Stanza != "" {
 		add("%s.stanza %q must be empty for a follower: its source's backups cover it", at, s.Stanza)
 	}
+
 	if s.Backup != (ClusterBackup{}) {
 		add("%s.backup must be empty for a follower: it has no stanza of its own", at)
 	}
+
 	if s.FollowGeneration != "" && !followGenerationPattern.MatchString(s.FollowGeneration) {
 		add("%s.follow_generation %q is managed by vaire and must be 32 lowercase hexadecimal characters", at, s.FollowGeneration)
 	}
@@ -111,7 +122,9 @@ func (c Cluster) Sources() []string {
 			out = append(out, s.Follows)
 		}
 	}
+
 	slices.Sort(out)
+
 	return out
 }
 
@@ -121,7 +134,9 @@ func canonicalExplicit(c Cluster, names []string) []string {
 		canonical, _ := c.ExtensionResolver().Canonical(name)
 		out = append(out, canonical)
 	}
+
 	sort.Strings(out)
+
 	return slices.Compact(out)
 }
 
@@ -133,8 +148,10 @@ func sameRecoveryDeclaration(c Cluster, a, b *[]string) bool {
 	if (a == nil) != (b == nil) {
 		return false
 	}
+
 	if a == nil {
 		return true
 	}
+
 	return slices.Equal(canonicalExplicit(c, *a), canonicalExplicit(c, *b))
 }

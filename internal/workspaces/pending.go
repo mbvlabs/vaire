@@ -97,6 +97,7 @@ func (p *Progress) Mark(phase string) {
 	if p.Phases == nil {
 		p.Phases = map[string]string{}
 	}
+
 	p.Phases[phase] = time.Now().UTC().Format(time.RFC3339)
 }
 
@@ -115,13 +116,17 @@ func PendingNames() []string {
 	if err != nil {
 		return nil
 	}
+
 	var names []string
+
 	for _, e := range entries {
 		if e.IsDir() && PendingExists(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
@@ -129,9 +134,11 @@ func writePending(name, file string, data []byte) error {
 	if err := ensureRoot(); err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Join(Root(), "pending"), 0o700); err != nil {
 		return err
 	}
+
 	return transport.WriteSecretFile(filepath.Join(PendingDir(name), file), data)
 }
 
@@ -143,6 +150,7 @@ func SaveAnswers(name string, clusterTOML []byte, b Bootstrap) error {
 	if err != nil {
 		return err
 	}
+
 	return writePending(name, AnswersFile, append(append(append([]byte(nil), clusterTOML...), '\n'), raw...))
 }
 
@@ -152,12 +160,14 @@ func LoadAnswers(name string) ([]byte, Bootstrap, error) {
 	if err != nil {
 		return nil, Bootstrap{}, err
 	}
+
 	var wrap struct {
 		Bootstrap Bootstrap `toml:"bootstrap"`
 	}
 	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&wrap); err != nil {
 		return nil, Bootstrap{}, err
 	}
+
 	return raw, wrap.Bootstrap, nil
 }
 
@@ -167,16 +177,19 @@ func SaveSecrets(name string, s PendingSecrets) error {
 	if err != nil {
 		return err
 	}
+
 	return writePending(name, SecretsFile, append(raw, '\n'))
 }
 
 // LoadSecrets reads secrets.json.
 func LoadSecrets(name string) (PendingSecrets, error) {
 	var s PendingSecrets
+
 	raw, err := os.ReadFile(filepath.Join(PendingDir(name), SecretsFile))
 	if err != nil {
 		return s, err
 	}
+
 	return s, json.Unmarshal(raw, &s)
 }
 
@@ -186,25 +199,31 @@ func SaveProgress(name string, p *Progress) error {
 	if err != nil {
 		return err
 	}
+
 	return writePending(name, ProgressFile, append(raw, '\n'))
 }
 
 // LoadProgress reads progress.json. A missing file is a fresh progress.
 func LoadProgress(name string) (*Progress, error) {
 	p := &Progress{Phases: map[string]string{}}
+
 	raw, err := os.ReadFile(filepath.Join(PendingDir(name), ProgressFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return p, nil
 		}
+
 		return nil, err
 	}
+
 	if err := json.Unmarshal(raw, p); err != nil {
 		return nil, err
 	}
+
 	if p.Phases == nil {
 		p.Phases = map[string]string{}
 	}
+
 	return p, nil
 }
 

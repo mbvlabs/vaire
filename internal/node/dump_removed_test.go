@@ -25,12 +25,14 @@ func TestDumpRPCSurfaceRemoved(t *testing.T) {
 
 func TestDumpRestoreKindRefusedBeforeEffects(t *testing.T) {
 	useTempExtensionRecords(t)
+
 	cfg := config.DefaultCluster()
 
 	env := &Env{Cluster: cfg, Req: request("restore.start", map[string]any{"database": "app", "kind": "dump"})}
 	if _, err := handleRestoreStart(context.Background(), env); err == nil || reasonOf(t, err) != "restore_kind_unsupported" {
 		t.Fatalf("dump restore request = %v", err)
 	}
+
 	if recs, err := backup.LoadRecords(); err != nil || len(recs.Restores) != 0 {
 		t.Fatalf("refused request wrote a restore: %+v %v", recs.Restores, err)
 	}
@@ -40,10 +42,13 @@ func TestDumpRestoreKindRefusedBeforeEffects(t *testing.T) {
 	}
 
 	record := backup.Restore{ID: "dump-op", Database: "app", Kind: "dump", Target: "dump1", Phase: backup.PhaseReady}
+
 	mustNoErr(t, backup.UpdateRecords(func(s *backup.Records) error { s.Restores["app"] = record; return nil }))
+
 	if _, err := preparePromotion(context.Background(), cfg, "app", engine.Runtime{}, nil); err == nil || reasonOf(t, err) != "restore_kind_unsupported" {
 		t.Fatalf("dump promote = %v", err)
 	}
+
 	if recs, _ := backup.LoadRecords(); !reflect.DeepEqual(recs.Restores["app"], record) {
 		t.Fatalf("refused promote changed the record: %+v", recs.Restores["app"])
 	}
@@ -51,16 +56,20 @@ func TestDumpRestoreKindRefusedBeforeEffects(t *testing.T) {
 	if _, err := handleRestoreAbort(context.Background(), &Env{Cluster: cfg, Req: request("restore.abort", map[string]any{"database": "app"})}); err == nil || reasonOf(t, err) != "restore_kind_unsupported" {
 		t.Fatalf("dump abort = %v", err)
 	}
+
 	if recs, _ := backup.LoadRecords(); !reflect.DeepEqual(recs.Restores["app"], record) {
 		t.Fatalf("refused abort changed the record: %+v", recs.Restores["app"])
 	}
 
 	failed := record
 	failed.Phase, failed.MaterialisationPending = backup.PhaseFailed, true
+
 	mustNoErr(t, backup.UpdateRecords(func(s *backup.Records) error { s.Restores["app"] = failed; return nil }))
+
 	if err := clearFailedRestore(context.Background(), cfg, "app"); err == nil || reasonOf(t, err) != "restore_kind_unsupported" {
 		t.Fatalf("dump cleanup = %v", err)
 	}
+
 	if recs, _ := backup.LoadRecords(); !reflect.DeepEqual(recs.Restores["app"], failed) {
 		t.Fatalf("refused cleanup changed the record: %+v", recs.Restores["app"])
 	}
@@ -75,21 +84,27 @@ func TestDBDropReportsNoSnapshot(t *testing.T) {
 	if len(warnings) != 1 || warnings[0].Code != "no_backup_before_drop" || !strings.Contains(warnings[0].Message, "no snapshot") {
 		t.Fatalf("configured drop warning = %+v", warnings)
 	}
+
 	result := dropResult("app", spec, []string{"app_owner"}, true, warnings)
+
 	data, _ := result.Data.(map[string]any)
 	if _, ok := data["final_dump"]; ok {
 		t.Fatalf("drop still reports an exported dump: %+v", data)
 	}
+
 	if data["stanza_kept"] != spec.Stanza {
 		t.Fatalf("drop lost the kept stanza: %+v", data)
 	}
+
 	if len(dropSnapshotWarning(cfg, "app", false, false)) != 0 {
 		t.Fatal("a missing database warned about a snapshot")
 	}
+
 	cfg.Backup.Provider = ""
 	if got := dropSnapshotWarning(cfg, "app", true, false); len(got) != 1 || !strings.Contains(got[0].Message, "no copy") {
 		t.Fatalf("unconfigured drop warning = %+v", got)
 	}
+
 	cfg.Backup.Provider = "s3"
 	if got := dropSnapshotWarning(cfg, "follower", true, false); len(got) != 1 || !strings.Contains(got[0].Message, "no independent physical backup stanza is kept") {
 		t.Fatalf("drop without its own stanza = %+v", got)
@@ -113,12 +128,14 @@ func TestDBDropDoesNotExportOrPrune(t *testing.T) {
 	oldRoles, oldLeftovers, oldJournal := dbDropRoles, dbDropLeftovers, dbDropForgetJournal
 	oldOther, oldApply, oldRouting := dbDropOtherConfigs, dbDropApplyOtherConfigs, dbDropRouting
 	oldMetrics, oldClear := dbDropMetrics, dbDropClearDeferred
+
 	t.Cleanup(func() {
 		dbDropStore, dbDropClusterExists, dbDropDatabaseExists, dbDropCluster = oldStore, oldExists, oldDatabaseExists, oldCluster
 		dbDropRoles, dbDropLeftovers, dbDropForgetJournal = oldRoles, oldLeftovers, oldJournal
 		dbDropOtherConfigs, dbDropApplyOtherConfigs, dbDropRouting = oldOther, oldApply, oldRouting
 		dbDropMetrics, dbDropClearDeferred = oldMetrics, oldClear
 	})
+
 	dbDropStore = func() state.Store { return store }
 	dbDropClusterExists = func(context.Context, string) bool { return true }
 	dbDropDatabaseExists = func(context.Context, pg.Local, string, bool, bool) bool { return true }
@@ -142,9 +159,11 @@ func TestDBDropDoesNotExportOrPrune(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drop: %v", err)
 	}
+
 	if len(result.Warnings) != 1 || result.Warnings[0].Code != "no_backup_before_drop" {
 		t.Fatalf("drop warnings = %+v", result.Warnings)
 	}
+
 	data, _ := result.Data.(map[string]any)
 	if _, ok := data["final_dump"]; ok || data["dropped"] != "dropme" {
 		t.Fatalf("drop result = %+v", data)

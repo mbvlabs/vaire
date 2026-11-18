@@ -36,6 +36,7 @@ func requireBackups(cfg config.Cluster) error {
 	if cfg.BackupConfigured() {
 		return nil
 	}
+
 	return output.NewError(output.CodePrecondition, "backups are not configured on this cluster", output.ExitPrecondition,
 		"Run vaire backup setup first.").WithDetails(map[string]any{"reason": "backup_not_configured"})
 }
@@ -69,31 +70,38 @@ func handleBackupNow(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
+
 	switch p.Type {
 	case "", backup.TypeFull, backup.TypeDiff, backup.TypeIncr:
 	default:
 		return Result{}, output.NewError(output.CodeUsage, "type must be full, diff or incr", output.ExitUsage, "")
 	}
+
 	specs := env.Cluster.StanzaClusters() // a follower has no stanza (Phase 6)
 	if p.Database != "" {
 		spec, ok := env.Cluster.ClusterByName(p.Database)
 		if !ok {
 			return Result{}, databaseNotFound(p.Database)
 		}
+
 		specs = []config.ClusterSpec{spec}
 	} else if !env.Req.DryRun {
 		return Result{}, oneDatabase("backup.now")
 	}
+
 	var infos map[string]backup.Info
+
 	if p.Type == "" && len(specs) > 0 {
 		var err error
 		if infos, err = repoDriver("backup.now", nil).InfoAll(ctx); err != nil {
 			return Result{}, err
 		}
 	}
+
 	plan := make([]backupPlan, 0, len(specs))
 	for _, spec := range specs {
 		kind := p.Type
@@ -103,11 +111,14 @@ func handleBackupNow(ctx context.Context, env *Env) (Result, error) {
 				kind = backup.TypeFull
 			}
 		}
+
 		plan = append(plan, backupPlan{Database: spec.Name, Type: kind})
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"backups": plan, "dry_run": true}}, nil
 	}
+
 	return runJobRPC(ctx, env, "backup-"+plan[0].Type, map[string]string{"database": plan[0].Database}, nil)
 }
 
@@ -123,35 +134,44 @@ func jobBackup(ctx context.Context, env *jobEnv, kind string) (any, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return nil, err
 	}
+
 	d := driver(env.spec(), env.Job, env.Report)
+
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return nil, err
 	}
+
 	if info.BackupLockHeld {
 		logLine(env.Report, env.Job, "another pgBackRest backup is running; skipping")
 		return map[string]any{"skipped": "backup_running"}, fmt.Errorf("%w: another pgBackRest backup is running", errSkipped)
 	}
+
 	if kind != backup.TypeFull && !info.HasFull() {
 		logLine(env.Report, env.Job, "the repository has no full backup yet; taking a full backup instead")
+
 		kind = backup.TypeFull
 	}
+
 	if err := captureStanzaRequirements(env.Cluster, env.spec()); err != nil {
 		return nil, output.NewError(output.CodePrecondition,
 			"recording "+env.DB+"'s extension requirements before the backup failed: "+err.Error(),
 			output.ExitPrecondition, "Nothing was backed up. Retry after fixing the requirement history store.").
 			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": env.DB})
 	}
+
 	set, err := d.Backup(ctx, kind)
 	if err != nil {
 		steps.RecordBackupFailure(env.Cluster, env.DB, kind)
 		return nil, err
 	}
+
 	steps.RecordBackup(env.Cluster, env.DB, set)
 	// pgBackRest expires old sets at the end of the backup, so the window
 	// and the stanza's size are read once now (Phase 4).
 	steps.RecordRepo(ctx, env.Cluster, d, env.DB)
 	logLine(env.Report, env.Job, fmt.Sprintf("backup %s (%s) of %s finished: %s", set.Label, set.Type, env.DB, humanSize(set.Size)))
+
 	return map[string]any{"db": env.DB, "set": set}, nil
 }
 
@@ -165,15 +185,19 @@ func handleBackupVerify(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
+
 	if p.Database == "" {
 		return Result{}, oneDatabase("backup.verify")
 	}
+
 	if _, ok := env.Cluster.ClusterByName(p.Database); !ok {
 		return Result{}, databaseNotFound(p.Database)
 	}
+
 	return runJobRPC(ctx, env, "backup-verify", p, nil)
 }
 
@@ -181,6 +205,7 @@ func jobVerify(ctx context.Context, env *jobEnv) (any, error) {
 	if err := requireBackups(env.Cluster); err != nil {
 		return nil, err
 	}
+
 	return verify(ctx, env.Cluster, env.spec(), env.Job, env.Report)
 }
 
@@ -189,22 +214,27 @@ func jobVerify(ctx context.Context, env *jobEnv) (any, error) {
 // external_command_failed.
 func verify(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, stepID string, report engine.Reporter) (backup.VerifyResult, error) {
 	d := driver(spec, stepID, report)
+
 	res, err := d.Verify(ctx)
 	if err != nil {
 		return res, err
 	}
+
 	steps.RecordRepo(ctx, cfg, d, spec.Name)
 	res.Stanza = spec.Stanza
 	_ = backup.UpdateRecords(func(s *backup.Records) error {
 		s.LastVerify[spec.Name] = res
 		return nil
 	})
+
 	steps.WriteMetrics(cfg)
+
 	if !res.OK {
 		return res, output.NewError(output.CodeExternalCommand, "pgbackrest verify found problems in the stanza of "+spec.Name, output.ExitExternal,
 			"Read details.output, then take a new full backup with vaire backup now --db "+spec.Name+" --type full.").
 			WithDetails(map[string]any{"output": res.Output, "db": spec.Name})
 	}
+
 	return res, nil
 }
 
@@ -262,16 +292,20 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
+
 	rs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	if p.Database != "" {
 		return backupListOne(ctx, env.Cluster, rs, p.Database)
 	}
+
 	return backupListAll(ctx, env.Cluster, rs)
 }
 
@@ -282,33 +316,41 @@ func backupListAll(ctx context.Context, cfg config.Cluster, rs backup.Records) (
 	if err != nil {
 		return Result{}, err
 	}
+
 	var warnings []output.Warning
+
 	rows := make([]backupRow, 0, len(cfg.Clusters)+len(rs.DroppedStanzas))
 	empty := 0
 	// One row per stanza: a follower has none (Phase 6).
 	for _, spec := range cfg.StanzaClusters() {
 		info := infos[spec.Stanza]
+
 		archive, err := driver(spec, "backup.list", nil).ArchiveStatus(ctx)
 		if err != nil {
 			warnings = append(warnings, output.Warning{Code: "archive_status_unavailable",
 				Message: "could not read pg_stat_archiver of " + spec.Name + ": " + err.Error()})
 		}
+
 		row := listRow(spec.Name, spec.Stanza, info, archive, rs)
 		if row.Sets == 0 {
 			empty++
 		}
+
 		rows = append(rows, row)
 	}
+
 	for _, d := range rs.DroppedStanzas {
 		row := listRow(d.Database, d.Stanza, infos[d.Stanza], droppedArchive(d), rs)
 		row.Verify, row.Drill = nil, nil
 		row.DroppedAt, row.ExpiresAt = d.DroppedAt, d.ExpiresAt
 		rows = append(rows, row)
 	}
+
 	if empty > 0 {
 		warnings = append(warnings, output.Warning{Code: "no_backups",
 			Message: fmt.Sprintf("%d database(s) have no backup yet; run vaire backup now --type full", empty)})
 	}
+
 	return Result{Data: map[string]any{"databases": rows, "restores": rs.Restores}, Warnings: warnings}, nil
 }
 
@@ -326,20 +368,25 @@ func listRow(db, stanza string, info backup.Info, archive backup.ArchiveStatus, 
 	if row.Status == "" {
 		row.Status = "not in the repository"
 	}
+
 	for _, set := range info.Sets {
 		if !set.Error {
 			row.Sets++
 		}
 	}
+
 	if latest, ok := info.Latest(); ok {
 		row.Latest = &latest
 	}
+
 	if v, ok := rs.VerifyOf(db, stanza); ok {
 		row.Verify = &v
 	}
+
 	if d, ok := rs.DrillOf(db, stanza); ok {
 		row.Drill = &d
 	}
+
 	return row
 }
 
@@ -349,36 +396,49 @@ func listRow(db, stanza string, info backup.Info, archive backup.ArchiveStatus, 
 func backupListOne(ctx context.Context, cfg config.Cluster, rs backup.Records, db string) (Result, error) {
 	spec, live := cfg.ClusterByName(db)
 	out := backupList{Database: db}
+
 	var dropped backup.DroppedStanza
+
 	if !live {
 		var ok bool
 		if dropped, ok = rs.Dropped(db); !ok {
 			return Result{}, databaseNotFound(db)
 		}
+
 		out.Dropped = &dropped
 		spec = config.ClusterSpec{Name: db, Stanza: dropped.Stanza}
 	}
+
 	d := driver(spec, "backup.list", nil)
+
 	info, err := d.Info(ctx, "")
 	if err != nil {
 		return Result{}, err
 	}
+
 	archive := droppedArchive(dropped)
+
 	if live {
 		if out.Archive, err = d.ArchiveStatus(ctx); err != nil {
 			return Result{}, err
 		}
+
 		archive = out.Archive
 	}
+
 	out.Stanza, out.Status, out.Sets = info.Stanza, info.Status, info.Sets
 	out.Window = restoreWindow(info, archive)
+
 	var warnings []output.Warning
+
 	if live {
 		liveBackupMetadata(&out, rs, spec, db)
 	}
+
 	if len(out.Sets) == 0 {
 		warnings = append(warnings, output.Warning{Code: "no_backups", Message: "the stanza of " + db + " holds no backup yet; run vaire backup now --db " + db + " --type full"})
 	}
+
 	return Result{Data: out, Warnings: warnings}, nil
 }
 
@@ -386,9 +446,11 @@ func liveBackupMetadata(out *backupList, rs backup.Records, spec config.ClusterS
 	if v, ok := rs.VerifyOf(db, spec.Stanza); ok {
 		out.Verify = &v
 	}
+
 	if drill, ok := rs.DrillOf(db, spec.Stanza); ok {
 		out.Drill = &drill
 	}
+
 	if r, ok := rs.Restores[db]; ok {
 		out.Restores = map[string]backup.Restore{db: r}
 	}
@@ -408,13 +470,16 @@ func restoreWindow(info backup.Info, archive backup.ArchiveStatus) Window {
 			w.From = stop.Add(time.Second).UTC().Format(time.RFC3339)
 		}
 	}
+
 	w.To = archive.LastArchivedTime
 	if latest, ok := info.Latest(); ok && laterThan(latest.Stop, w.To) {
 		w.To = latest.Stop
 	}
+
 	if laterThan(w.From, w.To) {
 		w.To = w.From
 	}
+
 	return w
 }
 
@@ -425,18 +490,22 @@ func laterThan(a, b string) bool {
 	if err != nil {
 		return false
 	}
+
 	tb, err := time.Parse(time.RFC3339, b)
+
 	return err != nil || ta.After(tb)
 }
 
 // inWindow checks a point-in-time target against the window.
 func inWindow(w Window, t time.Time) error {
 	from, errFrom := time.Parse(time.RFC3339, w.From)
+
 	to, errTo := time.Parse(time.RFC3339, w.To)
 	if errFrom != nil || errTo != nil {
 		return output.NewError(output.CodePrecondition, "there is no restore window yet: the repository has no backup", output.ExitPrecondition,
 			"Take a backup first with vaire backup now --type full.").WithDetails(map[string]any{"reason": "no_backups"})
 	}
+
 	if t.Before(from) || t.After(to) {
 		return output.NewError(output.CodePrecondition,
 			fmt.Sprintf("%s is outside the restore window %s to %s", t.UTC().Format(time.RFC3339Nano), w.From, w.To),
@@ -444,6 +513,7 @@ func inWindow(w Window, t time.Time) error {
 			"Pick a time inside the window (vaire backup list). A time just now becomes restorable once its WAL is archived, within about a minute.").
 			WithDetails(map[string]any{"reason": "outside_window", "window": w})
 	}
+
 	return nil
 }
 
@@ -452,11 +522,13 @@ func humanSize(n int64) string {
 	if n < unit {
 		return strconv.FormatInt(n, 10) + " B"
 	}
+
 	div, exp := int64(unit), 0
 	for m := n / unit; m >= unit; m /= unit {
 		div *= unit
 		exp++
 	}
+
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
@@ -471,7 +543,9 @@ func databaseSize(ctx context.Context, local pg.Local, db string) int64 {
 	if err != nil || len(rows) == 0 {
 		return 0
 	}
+
 	n, _ := strconv.ParseInt(rows[0]["s"], 10, 64)
+
 	return n
 }
 
@@ -496,24 +570,30 @@ func handleRestoreDrill(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
+
 	specs, at, err := drillSelection(env, p)
 	if err != nil {
 		return Result{}, err
 	}
+
 	rs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
 	}
+
 	plan, err := drillPlans(ctx, specs, at, rs)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"drills": plan, "dry_run": true}}, nil
 	}
+
 	return runJobRPC(ctx, env, "restore-drill", p, nil)
 }
 
@@ -524,17 +604,21 @@ func drillSelection(env *Env, p drillParams) ([]config.ClusterSpec, time.Time, e
 		if !ok {
 			return nil, time.Time{}, databaseNotFound(p.Database)
 		}
+
 		specs = []config.ClusterSpec{spec}
 	} else if !env.Req.DryRun {
 		return nil, time.Time{}, oneDatabase("restore.drill")
 	}
+
 	if p.Time == "" {
 		return specs, time.Time{}, nil
 	}
+
 	at, err := time.Parse(time.RFC3339, p.Time)
 	if err != nil {
 		return nil, time.Time{}, output.NewError(output.CodeUsage, "time must be RFC 3339", output.ExitUsage, "")
 	}
+
 	return specs, at, nil
 }
 
@@ -542,23 +626,30 @@ func drillPlans(ctx context.Context, specs []config.ClusterSpec, at time.Time, r
 	plan := make([]drillPlan, 0, len(specs))
 	for _, spec := range specs {
 		target := backup.TargetLatest
+
 		if !at.IsZero() {
 			d := driver(spec, "restore.drill", nil)
+
 			info, err := d.Info(ctx, "")
 			if err != nil {
 				return nil, err
 			}
+
 			archive, err := d.ArchiveStatus(ctx)
 			if err != nil {
 				return nil, err
 			}
+
 			if err := inWindow(restoreWindow(info, archive), at); err != nil {
 				return nil, err
 			}
+
 			target = at.UTC().Format(time.RFC3339Nano)
 		}
+
 		plan = append(plan, drillPlan{Database: spec.Name, Target: target, Timeline: rs.TargetTimeline(spec.Name, spec.Stanza)})
 	}
+
 	return plan, nil
 }
 
@@ -570,6 +661,7 @@ var drillCheckSpace = func(ctx context.Context, cfg config.Cluster, spec config.
 	live := steps.ClusterPG(spec)
 	_, err := backup.CheckSpace([]backup.SpaceNeed{{Path: cfg.Server.DataDirectory(spec.Name), Need: backup.CopyNeed(databaseSize(ctx, live, spec.Name)),
 		Purpose: "the drill's copy of " + spec.Name}})
+
 	return err
 }
 
@@ -579,26 +671,35 @@ var drillWriteMetrics = steps.WriteMetrics
 // records a skipped drill when there is nothing to restore.
 func startDrill(ctx context.Context, env *jobEnv, p drillParams, spec config.ClusterSpec, db string, rs backup.Records, drill *backup.Drill, record func()) (backup.RestoreOptions, backup.Driver, backup.Set, error) {
 	opts := backup.RestoreOptions{Kind: backup.TargetLatest, Timeline: rs.TargetTimeline(db, spec.Stanza)}
+
 	if p.Time != "" {
 		t, err := time.Parse(time.RFC3339, p.Time)
 		if err != nil {
 			return opts, nil, backup.Set{}, err
 		}
+
 		opts.Kind, opts.Time = backup.TargetTime, t
 		drill.Target = t.UTC().Format(time.RFC3339Nano)
 	}
+
 	d := driver(spec, env.Job, env.Report)
+
 	info, err := drillReadInfo(ctx, spec, env.Job, env.Report)
 	if err != nil {
 		return opts, d, backup.Set{}, err
 	}
+
 	latest, ok := info.Latest()
 	if !ok {
 		drill.Result, drill.Reason = backup.DrillSkipped, "no_backups"
+
 		record()
+
 		return opts, d, backup.Set{}, fmt.Errorf("%w: the stanza has no backup", errSkipped)
 	}
+
 	drill.BackupLabel = latest.Label
+
 	return opts, d, latest, nil
 }
 
@@ -612,6 +713,7 @@ func jobDrill(ctx context.Context, env *jobEnv) (result any, jobErr error) {
 	if err != nil {
 		return nil, err
 	}
+
 	drill := backup.Drill{ID: env.ID, Database: db, Stanza: spec.Stanza, StartedAt: stamp(), Target: backup.TargetLatest}
 	record := func() {
 		drill.FinishedAt = stamp()
@@ -619,27 +721,35 @@ func jobDrill(ctx context.Context, env *jobEnv) (result any, jobErr error) {
 			s.Drills = append(s.Drills, drill)
 			return nil
 		})
+
 		drillWriteMetrics(cfg)
 	}
+
 	opts, d, latest, err := startDrill(ctx, env, p, spec, db, rs, &drill, record)
 	if err != nil {
 		return nil, err
 	}
+
 	live := steps.ClusterPG(spec)
 	if err := drillCheckSpace(ctx, cfg, spec); err != nil {
 		drill.Result, drill.Reason = backup.DrillSkipped, "insufficient_space"
+
 		record()
 		logLine(env.Report, env.Job, err.Error())
+
 		return drill, fmt.Errorf("%w: %s", errSkipped, err.Error())
 	}
+
 	name := backup.DrillName(db)
 	if err := dropKilledDrill(ctx, env, rs, db); err != nil {
 		return nil, err
 	}
+
 	destinationConfig, err := prepareMaterialisationConfig(cfg, spec)
 	if err != nil {
 		return nil, err
 	}
+
 	plan, err := buildExtensionCopyPlan(ctx, cfg, extensionCopyRequest{
 		Intent: spec, Stanza: spec.Stanza, CopyDB: db, Options: opts,
 		Historical: true, Standby: true, Declaration: spec.RecoveryExtensions,
@@ -647,49 +757,65 @@ func jobDrill(ctx context.Context, env *jobEnv) (result any, jobErr error) {
 	if err != nil {
 		drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "extensions", OK: false, Detail: secrets.Redact(err.Error())})
 		drill.Result = backup.DrillFail
+
 		record()
+
 		return drill, err
 	}
+
 	var m *backup.Materialised
+
 	err = withLockedJobTarget(env, name, func() error {
 		var err error
+
 		m, err = callerNewDrillOwned(cfg.Server.DataRoot, name, db, spec.Port, env.shell(), env.Job, env.Report)
+
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	defer m.ReleaseForkReservationAuthority()
+
 	m.DestinationConfig = destinationConfig
 	prestartFollowerCopy(m, env, cfg, spec, plan)
+
 	if err := recordCopyRequirements(spec.Stanza, spec.Name, plan.Plan); err != nil {
 		return nil, err
 	}
+
 	attempt, started, retain, restoreErr := materialiseDrill(ctx, env, m, d, opts, spec.Stanza)
 	defer func() {
 		birth, _ := m.Ownership.(*restoreBirth)
 		if birth != nil {
 			defer birth.close()
 		}
+
 		if !started || retain {
 			return
 		}
+
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 		defer cancel()
+
 		if err := finishDrill(cleanupCtx, birth, attempt, db, name); err != nil {
 			jobErr = errors.Join(jobErr, err)
 		}
 	}()
+
 	fail := func(check string, err error) (any, error) {
 		drill.Checks = append(drill.Checks, backup.DrillCheck{Name: check, OK: false, Detail: secrets.Redact(err.Error())})
 		drill.Result = backup.DrillFail
+
 		record()
+
 		return drill, output.WrapError(output.CodeExternalCommand, fmt.Errorf("the restore drill of %s failed at %s: %w", db, check, err), output.ExitExternal,
 			"Read the job log with vaire job follow "+env.ID+".")
 	}
 	if restoreErr != nil {
 		return drillRestoreFailure(env, m, &drill, record, fail, restoreErr, started, retain, name)
 	}
+
 	return verifyDrillCopy(ctx, env, &drill, m, plan, latest, live, cfg, spec, db, record, fail)
 }
 
@@ -701,39 +827,49 @@ func verifyDrillCopy(ctx context.Context, env *jobEnv, drill *backup.Drill, m *b
 			return fail("extensions", err)
 		}
 	}
+
 	if _, err := checkCopyExtensions(ctx, cfg, spec, plan.Plan, m.PG(), db); err != nil {
 		return fail("extensions", err)
 	}
+
 	drill.RecoveredTo = m.RecoveredTo(ctx)
 	if drill.RecoveredTo == "" {
 		// No transaction committed after the backup, so there is no replay
 		// timestamp: the copy is consistent at the backup's end.
 		drill.RecoveredTo, drill.NoWALReplayed = latest.Stop, true
 	}
+
 	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "restore", OK: true, Detail: "recovered to " + drill.DescribeRecoveredTo()})
+
 	copyPG := m.PG()
 	if _, err := copyPG.Query(ctx, db, "SELECT 1", nil); err != nil {
 		return fail("open "+db, err)
 	}
+
 	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "open " + db, OK: true})
 	ok, detail := drillAmcheck(ctx, env, copyPG, db)
 	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "amcheck " + db, OK: ok, Detail: detail})
 	drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "tables", OK: true, Detail: tableDiff(compareRows(ctx, live, copyPG, db))})
+
 	drill.Result = backup.DrillPass
 	if !ok {
 		drill.Result = backup.DrillFail
 	}
+
 	record()
+
 	if !ok {
 		return drill, output.NewError(output.CodeExternalCommand, "the restore drill of "+db+" failed its checks", output.ExitExternal,
 			"Read the checks in the job result with vaire job follow "+env.ID+".").WithDetails(map[string]any{"drill": drill})
 	}
+
 	return drill, nil
 }
 
 func drillAmcheck(ctx context.Context, env *jobEnv, copyPG pg.Local, db string) (ok bool, detail string) {
 	amctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
+
 	err := env.shell().Exec(amctx, env.Job, engine.Command{Name: "runuser", Args: []string{
 		"-u", "postgres", "--", "/usr/lib/postgresql/18/bin/pg_amcheck", "-h", copyPG.Host, "-p", strconv.Itoa(copyPG.Port),
 		"--install-missing", "--database=" + db,
@@ -741,6 +877,7 @@ func drillAmcheck(ctx context.Context, env *jobEnv, copyPG pg.Local, db string) 
 	if err != nil {
 		return false, secrets.Redact(err.Error())
 	}
+
 	return true, ""
 }
 
@@ -751,27 +888,36 @@ func drillSetup(env *jobEnv) (drillParams, config.Cluster, config.ClusterSpec, s
 			return p, config.Cluster{}, config.ClusterSpec{}, "", backup.Records{}, err
 		}
 	}
+
 	cfg := env.Cluster
 	if err := requireBackups(cfg); err != nil {
 		return p, cfg, config.ClusterSpec{}, "", backup.Records{}, err
 	}
+
 	spec := env.spec()
+
 	db := spec.Name
 	if err := checkDrillTargetName(db); err != nil {
 		return p, cfg, spec, db, backup.Records{}, err
 	}
+
 	rs, err := backup.LoadRecords()
+
 	return p, cfg, spec, db, rs, err
 }
 
 func drillRestoreFailure(env *jobEnv, m *backup.Materialised, drill *backup.Drill, record func(), fail func(string, error) (any, error), restoreErr error, started, retain bool, name string) (any, error) {
 	if retain && backup.RetainRecoveryFailure(restoreErr) {
 		reason := recoveryFailureReason(restoreErr)
+
 		drill.Checks = append(drill.Checks, backup.DrillCheck{Name: "restore", OK: false, Detail: "recovery parameter requirements were not met"})
 		drill.Result, drill.Reason = backup.DrillFail, reason
+
 		record()
+
 		return drill, restoreErr
 	}
+
 	if retain || !started {
 		return nil, restoreErr
 	}
@@ -779,6 +925,7 @@ func drillRestoreFailure(env *jobEnv, m *backup.Materialised, drill *backup.Dril
 	for _, line := range m.LogTail(20) {
 		logLine(env.Report, env.Job, name+": "+line)
 	}
+
 	return fail("restore", restoreErr)
 }
 
@@ -786,12 +933,15 @@ func finishDrill(ctx context.Context, birth *restoreBirth, attempt *backup.Mater
 	if attempt == nil || birth == nil || attempt.Reason != "" {
 		return incompleteMaterialisation(name)
 	}
+
 	if err := verifyDrillAttempt(db, name, *attempt); err != nil {
 		return err
 	}
+
 	if err := birth.discard(ctx); err != nil {
 		return err
 	}
+
 	return birth.retireDrill(ctx)
 }
 
@@ -804,6 +954,7 @@ func checkDrillTargetName(db string) error {
 			"Use a database name of at most 56 characters for a restore drill.").
 			WithDetails(map[string]any{"reason": "drill_target_name_invalid", "database": db, "target": name})
 	}
+
 	return nil
 }
 
@@ -813,19 +964,23 @@ func checkDrillTargetName(db string) error {
 // name is not the drill's, and NewMaterialised refuses it.
 func dropKilledDrill(ctx context.Context, env *jobEnv, rs backup.Records, db string) error {
 	name := backup.DrillName(db)
+
 	attempt, exists := rs.DrillAttempts[db]
 	if !exists && rs.Drilling[db] == "" {
 		return nil
 	}
+
 	if !exists || rs.Drilling[db] != name || attempt.Source != db || attempt.Target != name || attempt.Reason != "" {
 		return incompleteMaterialisation(name)
 	}
+
 	return withLockedJobTarget(env, name, func() error {
 		cleanup, err := openDrillCleanup(ctx, env.Cluster, attempt)
 		if err != nil {
 			return err
 		}
 		defer cleanup.close()
+
 		return cleanup.remove(ctx, &Env{Cluster: env.Cluster, Report: env.Report})
 	})
 }
@@ -838,6 +993,7 @@ const maxTableNames = 10
 // target is expected, so it is a detail, not a failure.
 func tableDiff(rows []tableRows) string {
 	var onlyCopy, onlyLive []string
+
 	for _, r := range rows {
 		switch {
 		case r.Live == nil:
@@ -846,22 +1002,28 @@ func tableDiff(rows []tableRows) string {
 			onlyLive = append(onlyLive, r.Table)
 		}
 	}
+
 	names := func(list []string) string {
 		if len(list) > maxTableNames {
 			return strings.Join(list[:maxTableNames], ", ") + fmt.Sprintf(" and %d more", len(list)-maxTableNames)
 		}
+
 		return strings.Join(list, ", ")
 	}
+
 	out := fmt.Sprintf("%d tables", len(rows))
 	if len(rows) == 1 {
 		out = "1 table"
 	}
+
 	if len(onlyCopy) > 0 {
 		out += "; only in the copy: " + names(onlyCopy)
 	}
+
 	if len(onlyLive) > 0 {
 		out += "; only live: " + names(onlyLive)
 	}
+
 	return out
 }
 
@@ -877,50 +1039,64 @@ func jobStanzaExpiry(ctx context.Context, env *jobEnv) (any, error) {
 	if err := requireBackups(cfg); err != nil {
 		return nil, err
 	}
+
 	rs, err := backup.LoadRecords()
 	if err != nil {
 		return nil, err
 	}
+
 	due := rs.Expired(time.Now())
 	expired := []backup.DroppedStanza{}
+
 	if len(due) == 0 {
 		logLine(env.Report, env.Job, "no dropped stanza has passed its window")
 		return map[string]any{"expired": expired}, nil
 	}
+
 	infos, err := repoDriver(env.Job, env.Report).InfoAll(ctx)
 	if err != nil {
 		return nil, err
 	}
+
 	var failed []string
+
 	for _, d := range due {
 		if _, open := rs.Restores[d.Database]; open {
 			logLine(env.Report, env.Job, "keeping "+d.Stanza+": a restore of "+d.Database+" is open")
 			continue
 		}
+
 		if _, ok := infos[d.Stanza]; ok {
 			drv := repoDriver(env.Job, env.Report)
+
 			drv.Stanza = d.Stanza
 			if err := drv.StanzaDelete(ctx, cfg.Server.DataDirectory(d.Database)); err != nil {
 				logLine(env.Report, env.Job, "deleting "+d.Stanza+" failed: "+err.Error())
 				failed = append(failed, d.Stanza)
+
 				continue
 			}
+
 			logLine(env.Report, env.Job, "deleted "+d.Stanza+" of dropped database "+d.Database+" (expired "+d.ExpiresAt+")")
 		}
+
 		if err := backup.UpdateRecords(func(r *backup.Records) error {
 			r.DroppedStanzas = slices.DeleteFunc(r.DroppedStanzas, func(x backup.DroppedStanza) bool { return x.Stanza == d.Stanza })
 			return nil
 		}); err != nil {
 			return map[string]any{"expired": expired}, err
 		}
+
 		expired = append(expired, d)
 	}
+
 	res := map[string]any{"expired": expired}
 	if len(failed) > 0 {
 		return res, output.NewError(output.CodeExternalCommand, "deleting the stanzas "+strings.Join(failed, ", ")+" failed", output.ExitExternal,
 			"Read the job log; the records stay, so the next vaire-stanza-expiry run tries again.").
 			WithDetails(map[string]any{"failed": failed, "expired": expired})
 	}
+
 	return res, nil
 }
 
@@ -931,6 +1107,7 @@ func NoOffsiteWarning(cfg config.Cluster) []output.Warning {
 	if cfg.BackupConfigured() {
 		return nil
 	}
+
 	return []output.Warning{{
 		Code:    "no_offsite_backup",
 		Message: "no backups leave this server: a lost disk loses every database. Run vaire backup setup to send them to an S3-compatible bucket.",

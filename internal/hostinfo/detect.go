@@ -40,14 +40,17 @@ func Detect(dataDirectory string) (Info, error) {
 	if osInfo, err := ReadOS(); err == nil {
 		info.OS = osInfo
 	}
+
 	if mib, err := MemTotalMiB(); err == nil {
 		info.RAMMiB = mib
 	}
+
 	info.Kernel = kernelRelease()
 	info.VCPU = vcpuCount()
 	info.PublicIPv4 = publicIPv4()
 	info.PublicIPv6 = PublicIPv6(context.Background())
 	info.DataDisk = detectDisk(dataDirectory)
+
 	return info, nil
 }
 
@@ -57,6 +60,7 @@ func kernelRelease() string {
 	if err != nil {
 		return ""
 	}
+
 	return strings.TrimSpace(string(raw))
 }
 
@@ -66,9 +70,11 @@ func vcpuCount() int {
 	if n := cgroupVCPU(); n > 0 {
 		return n
 	}
+
 	if n := cpuinfoVCPU(); n > 0 {
 		return n
 	}
+
 	return runtime.NumCPU()
 }
 
@@ -79,19 +85,24 @@ func cgroupVCPU() int {
 			return n
 		}
 	}
+
 	quotaRaw, err := os.ReadFile("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
 	if err != nil {
 		return 0
 	}
+
 	periodRaw, err := os.ReadFile("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
 	if err != nil {
 		return 0
 	}
+
 	quota, err1 := strconv.Atoi(strings.TrimSpace(string(quotaRaw)))
+
 	period, err2 := strconv.Atoi(strings.TrimSpace(string(periodRaw)))
 	if err1 != nil || err2 != nil || quota <= 0 || period <= 0 {
 		return 0
 	}
+
 	return (quota + period - 1) / period
 }
 
@@ -101,11 +112,14 @@ func parseCPUMax(fields []string) int {
 	if len(fields) != 2 || fields[0] == "max" {
 		return 0
 	}
+
 	quota, err1 := strconv.Atoi(fields[0])
+
 	period, err2 := strconv.Atoi(fields[1])
 	if err1 != nil || err2 != nil || quota <= 0 || period <= 0 {
 		return 0
 	}
+
 	return (quota + period - 1) / period
 }
 
@@ -115,12 +129,15 @@ func cpuinfoVCPU() int {
 	if err != nil {
 		return 0
 	}
+
 	n := 0
-	for _, line := range strings.Split(string(raw), "\n") {
+
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if strings.HasPrefix(line, "processor") {
 			n++
 		}
 	}
+
 	return n
 }
 
@@ -128,38 +145,48 @@ func cpuinfoVCPU() int {
 // there is none.
 func publicIPv4() string {
 	var dialer net.Dialer
+
 	conn, err := dialer.DialContext(context.Background(), "udp4", "192.0.2.1:9")
 	if err != nil {
 		return ""
 	}
+
 	defer func() { _ = conn.Close() }()
+
 	udp, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		return ""
 	}
+
 	addr, ok := netip.AddrFromSlice(udp.IP)
 	if !ok {
 		return ""
 	}
+
 	return addr.Unmap().String()
 }
 
 // PublicIPv6 is the source address the IPv6 default route would use, or "".
 func PublicIPv6(ctx context.Context) string {
 	var dialer net.Dialer
+
 	conn, err := dialer.DialContext(ctx, "udp6", "[2606:4700:4700::1111]:9")
 	if err != nil {
 		return ""
 	}
+
 	defer func() { _ = conn.Close() }()
+
 	udp, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		return ""
 	}
+
 	addr, ok := netip.AddrFromSlice(udp.IP)
 	if !ok || !usableIPv6(addr) {
 		return ""
 	}
+
 	return addr.String()
 }
 
@@ -175,12 +202,15 @@ func ParseIPv6Route(out []byte) string {
 		if fields[i] != "src" {
 			continue
 		}
+
 		addr, err := netip.ParseAddr(fields[i+1])
 		if err != nil || !usableIPv6(addr) {
 			return ""
 		}
+
 		return addr.String()
 	}
+
 	return ""
 }
 
@@ -191,22 +221,29 @@ func usableIPv6(addr netip.Addr) bool {
 // detectDisk resolves the block device backing path and its size/rotation.
 func detectDisk(path string) Disk {
 	mount := nearestExisting(path)
+
 	var d Disk
+
 	d.Mount = mount
+
 	source, target, ok := findmnt(mount)
 	if ok {
 		d.Mount = target
+
 		d.Device = source
 		if device, sizeGiB, rotational, ok := blockInfo(source); ok {
 			d.Device = device
 			d.SizeGiB = sizeGiB
 			d.Rotational = rotational
+
 			return d
 		}
 	}
+
 	if sizeGiB, ok := statfsGiB(d.Mount); ok {
 		d.SizeGiB = sizeGiB
 	}
+
 	return d
 }
 
@@ -215,15 +252,18 @@ func nearestExisting(path string) string {
 	if path == "" {
 		return "/"
 	}
+
 	p := path
 	for {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
+
 		parent := filepath.Dir(p)
 		if parent == p {
 			return "/"
 		}
+
 		p = parent
 	}
 }
@@ -235,10 +275,12 @@ func findmnt(path string) (source, target string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
+
 	fields := strings.Fields(string(out))
 	if len(fields) < 2 {
 		return "", "", false
 	}
+
 	return fields[0], fields[1], true
 }
 
@@ -248,10 +290,12 @@ func blockInfo(device string) (name string, sizeGiB int, rotational bool, ok boo
 	if !strings.HasPrefix(device, "/dev/") {
 		return "", 0, false, false
 	}
+
 	dir, err := filepath.EvalSymlinks(filepath.Join("/sys/class/block", filepath.Base(device)))
 	if err != nil {
 		return "", 0, false, false
 	}
+
 	for {
 		slaves, err := os.ReadDir(filepath.Join(dir, "slaves"))
 		if err == nil && len(slaves) > 0 {
@@ -261,17 +305,22 @@ func blockInfo(device string) (name string, sizeGiB int, rotational bool, ok boo
 				continue
 			}
 		}
+
 		if _, err := os.Stat(filepath.Join(dir, "partition")); err == nil {
 			dir = filepath.Dir(dir)
 			continue
 		}
+
 		break
 	}
+
 	rotRaw, _ := os.ReadFile(filepath.Join(dir, "queue", "rotational"))
 	sizeRaw, _ := os.ReadFile(filepath.Join(dir, "size"))
+
 	sectors, err := strconv.ParseInt(strings.TrimSpace(string(sizeRaw)), 10, 64)
 	if err != nil || sectors <= 0 {
 		return filepath.Base(dir), 0, strings.TrimSpace(string(rotRaw)) == "1", false
 	}
+
 	return filepath.Base(dir), int(sectors * 512 / (1 << 30)), strings.TrimSpace(string(rotRaw)) == "1", true
 }

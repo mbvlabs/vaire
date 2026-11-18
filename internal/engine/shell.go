@@ -62,6 +62,7 @@ func (s Shell) Run(ctx context.Context, stepID, script string, env map[string]st
 	if s.DryRun {
 		return errDryRun
 	}
+
 	keys, err := scriptEnvKeys(env)
 	if err != nil {
 		return err
@@ -71,44 +72,56 @@ func (s Shell) Run(ctx context.Context, stepID, script string, env map[string]st
 	// CommandContext cannot do (see supervise).
 	cmd := exec.Command("/bin/bash", "-s") //nolint:noctx // cancellation is process-group aware below.
 	cmd.Stdin = strings.NewReader(script)
+
 	cmd.Env = []string{"PATH=" + scriptPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "HOME=/root", "DEBIAN_FRONTEND=noninteractive"}
 	for _, key := range keys {
 		cmd.Env = append(cmd.Env, key+"="+env[key])
 	}
+
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return err
 	}
+
 	cmd.Stdout = pw
+
 	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
+
 		return err
 	}
+
 	_ = pw.Close()
 
 	done := make(chan struct{})
+
 	interrupted := make(chan struct{})
 	go supervise(ctx, cmd, done, interrupted)
 
 	tail := s.stream(pr, stepID, report)
 	_ = pr.Close()
 	waitErr := cmd.Wait()
+
 	close(done)
+
 	select {
 	case <-interrupted:
 		return ErrInterrupted
 	default:
 	}
+
 	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
 			return &ScriptError{Step: stepID, Status: exitErr.ExitCode(), Tail: tail}
 		}
+
 		return fmt.Errorf("script for %s: %w", stepID, waitErr)
 	}
+
 	return nil
 }
 
@@ -116,22 +129,27 @@ func (s Shell) Run(ctx context.Context, stepID, script string, env map[string]st
 // tailLines lines.
 func (s Shell) stream(r io.Reader, stepID string, report Reporter) []string {
 	reader := bufio.NewReaderSize(r, 64*1024)
+
 	var tail []string
+
 	for {
 		line, err := reader.ReadString('\n')
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
 			line = s.Secrets.Redact(secrets.Redact(line))
+
 			tail = append(tail, line)
 			if len(tail) > tailLines {
 				tail = tail[1:]
 			}
+
 			if report != nil {
 				report(output.Event{Type: "log", Step: stepID, Line: line})
 			} else {
 				s.Log.Line("log "+stepID, line)
 			}
 		}
+
 		if err != nil {
 			return tail
 		}
@@ -146,9 +164,12 @@ func scriptEnvKeys(env map[string]string) ([]string, error) {
 		if !envKeyPattern.MatchString(key) {
 			return nil, fmt.Errorf("script env key %q is not an upper-case identifier", key)
 		}
+
 		keys = append(keys, key)
 	}
+
 	sort.Strings(keys)
+
 	return keys, nil
 }
 
@@ -160,7 +181,9 @@ func supervise(ctx context.Context, cmd *exec.Cmd, done, interrupted chan struct
 	select {
 	case <-ctx.Done():
 		close(interrupted)
+
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+
 		select {
 		case <-done:
 		case <-time.After(killGrace):

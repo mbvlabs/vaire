@@ -38,6 +38,7 @@ func callJob(ctx context.Context, s *session, p *progress, method string, params
 	jobCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	defer p.wait(waitLabel(method, params))()
+
 	if m, ok := params.(map[string]string); ok && method == "job.follow" {
 		jobID = m["id"]
 	}
@@ -49,13 +50,17 @@ func callJob(ctx context.Context, s *session, p *progress, method string, params
 		if ev.Type == "progress" && ev.Phase == "job" {
 			jobID = ev.Detail
 			p.note("job " + jobID + " started; Ctrl-C detaches and it keeps running (vaire job follow " + jobID + ")")
+
 			return
 		}
+
 		if jobID != "" {
 			seen++
 		}
+
 		p.event(ev)
 	}
+
 	reply, err = s.node.Call(jobCtx, method, params, opts)
 	if err != nil && jobID != "" && isStreamLost(err) {
 		follow := func(ctx context.Context, onEvent func(output.Event)) (remote.Reply, error) {
@@ -63,9 +68,11 @@ func callJob(ctx context.Context, s *session, p *progress, method string, params
 		}
 		reply, err = reattachJob(jobCtx, jobID, err, &seen, s.reconnect, follow, p.event, p.note, jobReattachBackoff)
 	}
+
 	if err != nil && jobCtx.Err() != nil && ctx.Err() == nil {
 		return reply, jobID, true, nil
 	}
+
 	return reply, jobID, false, err
 }
 
@@ -83,30 +90,38 @@ func reattachJob(ctx context.Context, id string, lost error, seen *int, reconnec
 ) (remote.Reply, error) {
 	for n, wait := range backoff {
 		note(fmt.Sprintf("lost the connection to the node; job %s keeps running there; re-attaching (attempt %d of %d)", id, n+1, len(backoff)))
+
 		select {
 		case <-ctx.Done():
 			return remote.Reply{}, ctx.Err()
 		case <-time.After(wait):
 		}
+
 		if err := reconnect(ctx); err != nil {
 			if ctx.Err() != nil {
 				return remote.Reply{}, ctx.Err()
 			}
+
 			continue
 		}
+
 		skip := *seen
+
 		reply, err := follow(ctx, func(ev output.Event) {
 			if skip > 0 {
 				skip--
 				return
 			}
+
 			*seen++
+
 			emit(ev)
 		})
 		if err == nil || !isStreamLost(err) {
 			return reply, err
 		}
 	}
+
 	return remote.Reply{}, lost
 }
 
@@ -117,7 +132,9 @@ func isStreamLost(err error) bool {
 	if !errors.As(err, &cliErr) {
 		return false
 	}
+
 	details, ok := cliErr.Details.(map[string]any)
+
 	return ok && details["reason"] == "stream_lost"
 }
 
@@ -126,10 +143,12 @@ func detachedResult(cmd *cobra.Command, s *session, jobID, what string) error {
 	data := map[string]any{"job_id": jobID, "detached": true}
 	message := "Detached; " + what + " keeps running on the node."
 	next := []string{"vaire job list"}
+
 	if jobID != "" {
 		message += " Re-attach with vaire job follow " + jobID + "."
 		next = []string{"vaire job follow " + jobID}
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings, Next: next})
 }
 
@@ -139,49 +158,61 @@ func decodeJob(reply remote.Reply, v any) (jobReply, error) {
 	if err := reply.Decode(&jr); err != nil {
 		return jr, err
 	}
+
 	if v != nil && len(jr.Result) > 0 {
 		if err := json.Unmarshal(jr.Result, v); err != nil {
 			return jr, err
 		}
 	}
+
 	return jr, nil
 }
 
 func runJobList(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, err := p.call(commandContext(cmd), s.node, "job.list", nil, remote.CallOptions{OnEvent: p.event})
 	if err != nil {
 		return err
 	}
+
 	var data struct {
 		Jobs []engine.JobRecord `json:"jobs"`
 	}
 	if err := reply.Decode(&data); err != nil {
 		return err
 	}
+
 	lines := []string{fmt.Sprintf("  %-26s  %-14s  %-12s  %-9s  %s", "ID", "JOB", "DB", "STATE", "STARTED")}
+
 	for _, j := range data.Jobs {
 		started := j.StartedAt
 		if started == "" {
 			started = j.CreatedAt
 		}
+
 		db := jobListDB(j)
+
 		line := fmt.Sprintf("  %-26s  %-14s  %-12s  %-9s  %s", j.ID, j.Job, db, j.State, started)
 		if j.Error != nil {
 			line += "  " + j.Error.Message
 		} else if j.Detail != "" {
 			line += "  " + j.Detail
 		}
+
 		lines = append(lines, line)
 	}
+
 	if len(data.Jobs) == 0 {
 		lines = []string{"no jobs yet"}
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: s.warnings})
 }
 
@@ -190,26 +221,32 @@ func runJobFollow(cmd *cobra.Command, args []string) error {
 	p := newProgress(cmd)
 	// Following a job is for reading its log: show the log lines.
 	p.opts.Verbose = true
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	reply, _, detached, err := callJob(commandContext(cmd), s, p, "job.follow", map[string]string{"id": id}, remote.CallOptions{})
 	if err != nil {
 		return err
 	}
+
 	if detached {
 		return detachedResult(cmd, s, id, "the job")
 	}
+
 	jr, err := decodeJob(reply, nil)
 	if err != nil {
 		return err
 	}
+
 	message := fmt.Sprintf("job %s (%s) %s", jr.JobID, jr.Job, jr.State)
 	if line := jobResultMessage(jr.Job, jr.Result); line != "" {
 		message += "\n" + line
 	}
+
 	return output.Success(cmd, output.Result{
 		Data:     jr,
 		Message:  message,
@@ -225,6 +262,7 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
 	}
+
 	switch job {
 	case "backup-full", "backup-diff", "backup-incr":
 		return backupJobMessage(raw)
@@ -241,6 +279,7 @@ func jobResultMessage(job string, raw json.RawMessage) string {
 	case "db-unfollow":
 		return unfollowJobMessage(raw)
 	}
+
 	return ""
 }
 
@@ -259,6 +298,7 @@ func backupJobMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &res) != nil || res.Set.Label == "" {
 		return ""
 	}
+
 	return fmt.Sprintf("%s: backup %s (%s) finished: %s", res.DB, res.Set.Label, res.Set.Type, humanBytes(res.Set.Size))
 }
 
@@ -268,6 +308,7 @@ func verifyJobMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &res) != nil || res.FinishedAt == "" {
 		return ""
 	}
+
 	return "pgbackrest verify " + verifyState(&res) + " at " + res.FinishedAt
 }
 
@@ -277,6 +318,7 @@ func drillJobMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &drill) != nil || drill.Result == "" {
 		return ""
 	}
+
 	return drillLines(drill)
 }
 
@@ -291,9 +333,11 @@ func restoreJobMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &res) != nil || res.Database == "" {
 		return ""
 	}
+
 	if res.Phase == "promoted" {
 		return res.Database + " is restored and promoted, on a new timeline; a full backup is running. The replaced data is kept as a stopped cluster until vaire restore cleanup " + res.Database + "; vaire restore undo " + res.Database + " swaps it back."
 	}
+
 	return "the temporary cluster " + res.Restoring + " is ready beside the live " + res.Database + "; inspect it with vaire sql --db " + res.Restoring + ", then vaire restore promote " + res.Database + " or vaire restore abort " + res.Database + "."
 }
 
@@ -303,6 +347,7 @@ func forkJobMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &res) != nil || res.Name == "" {
 		return ""
 	}
+
 	return "forked " + res.Source + " into " + res.Name + " with its own roles (the credentials were shown only by vaire db fork)"
 }
 
@@ -312,6 +357,7 @@ func followJobMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &res) != nil || res.Name == "" {
 		return ""
 	}
+
 	return res.Name + " follows " + res.Source + " (vaire status --db " + res.Name + " shows its lag)"
 }
 
@@ -321,6 +367,7 @@ func unfollowJobMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &res) != nil || res.Name == "" {
 		return ""
 	}
+
 	return res.Name + " no longer follows " + res.Source + " and is independent (the credentials were shown only by vaire db unfollow)"
 }
 
@@ -332,6 +379,7 @@ func jobListDB(j engine.JobRecord) string {
 	if j.DB != "" {
 		return j.DB
 	}
+
 	if len(j.Result) > 0 {
 		var res struct {
 			Database string `json:"database"`
@@ -340,6 +388,7 @@ func jobListDB(j engine.JobRecord) string {
 				Database string `json:"database"`
 			} `json:"expired"`
 		}
+
 		_ = json.Unmarshal(j.Result, &res)
 		switch {
 		case j.Job == "restore" && res.Database != "":
@@ -347,15 +396,18 @@ func jobListDB(j engine.JobRecord) string {
 		case (j.Job == "db-fork" || j.Job == "db-follow" || j.Job == "db-unfollow") && res.Name != "":
 			return res.Name
 		}
+
 		var dbs []string
 		for _, e := range res.Expired {
 			if e.Database != "" && !slices.Contains(dbs, e.Database) {
 				dbs = append(dbs, e.Database)
 			}
 		}
+
 		if len(dbs) > 0 {
 			return strings.Join(dbs, ",")
 		}
 	}
+
 	return "-"
 }

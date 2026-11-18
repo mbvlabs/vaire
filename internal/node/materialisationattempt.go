@@ -17,6 +17,7 @@ func restoreRecordDigest(r backup.Restore) string {
 	r.Attempt = nil
 	raw, _ := json.Marshal(r)
 	sum := sha256.Sum256(raw)
+
 	return hex.EncodeToString(sum[:])
 }
 
@@ -38,14 +39,18 @@ func newMaterialisationAttempt(env *jobEnv, m *backup.Materialised, stanza, kind
 	if err != nil {
 		return backup.MaterialisationAttempt{}, err
 	}
+
 	operation := env.OperationID
 	if operation == "" {
 		operation = env.ID
 	}
+
 	if env.ID == "" || operation == "" || stanza == "" || m.Port == 0 {
 		return backup.MaterialisationAttempt{}, errors.New("materialisation attempt identity is incomplete")
 	}
+
 	p := m.OwnershipPaths()
+
 	return backup.MaterialisationAttempt{
 		JobID: env.ID, OperationID: operation, InstanceID: instance, Kind: kind,
 		Source: p.Source, Target: p.Name, Stanza: stanza, SourcePort: p.SourcePort,
@@ -57,6 +62,7 @@ func recoveryFailureReason(err error) string {
 	if err == nil {
 		return ""
 	}
+
 	if e, ok := err.(*output.CLIError); ok { //nolint:errorlint // Check each wrapper before descending.
 		if details, ok := e.Details.(map[string]any); ok {
 			if reason, ok := details["reason"].(string); ok &&
@@ -65,14 +71,17 @@ func recoveryFailureReason(err error) string {
 			}
 		}
 	}
+
 	if e, ok := err.(interface{ Unwrap() []error }); ok {
 		for _, child := range e.Unwrap() {
 			if reason := recoveryFailureReason(child); reason != "" {
 				return reason
 			}
 		}
+
 		return ""
 	}
+
 	return recoveryFailureReason(errors.Unwrap(err))
 }
 
@@ -94,10 +103,12 @@ func verifyRestoreAttempt(db, job string, expected *backup.MaterialisationAttemp
 	if err != nil {
 		return err
 	}
+
 	r, ok := records.Restores[db]
 	if !ok || r.ID != job || expected == nil || r.Attempt == nil || !sameAttemptIdentity(*r.Attempt, *expected) || !restoreRecordMatchesAttempt(r, expected) {
 		return incompleteMaterialisation(backup.RestoringName(db))
 	}
+
 	return nil
 }
 
@@ -108,47 +119,60 @@ func materialiseDrill(ctx context.Context, env *jobEnv, m *backup.Materialised, 
 	if err != nil {
 		return nil, false, false, err
 	}
+
 	attempt.ReservationIdentity, err = m.ForkReservationIdentity()
 	if err != nil {
 		return nil, false, false, err
 	}
+
 	db, name := m.Source, m.Name
 	if err := beginDrillAttempt(ctx, env, m, attempt); err != nil {
 		return nil, false, false, err
 	}
+
 	birth, err := newRestoreBirth(ctx, env, m, &attempt)
 	if err != nil {
 		return &attempt, true, true, err
 	}
+
 	m.Ownership = birth
 	err = callerRestoreMaterialised(ctx, m, d, opts)
+
 	checkErr := verifyDrillAttempt(db, name, attempt)
 	if checkErr != nil {
 		return &attempt, true, true, errors.Join(err, checkErr)
 	}
+
 	if !backup.RetainRecoveryFailure(err) {
 		return &attempt, true, false, err
 	}
+
 	writeErr := retainDrillFailure(err, db, name, &attempt)
+
 	return &attempt, true, true, errors.Join(err, writeErr)
 }
 
 func beginDrillAttempt(ctx context.Context, env *jobEnv, m *backup.Materialised, attempt backup.MaterialisationAttempt) error {
 	db, name := m.Source, m.Name
+
 	return withLockedJobTarget(env, name, func() error {
 		return m.WithForkReservation(ctx, func() error {
 			return backup.UpdateRecords(func(s *backup.Records) error {
 				if _, exists := s.Drilling[db]; exists {
 					return incompleteMaterialisation(name)
 				}
+
 				if s.DrillAttempts == nil {
 					s.DrillAttempts = make(map[string]backup.MaterialisationAttempt)
 				}
+
 				if _, exists := s.DrillAttempts[db]; exists {
 					return incompleteMaterialisation(name)
 				}
+
 				s.Drilling[db] = name
 				s.DrillAttempts[db] = attempt
+
 				return nil
 			})
 		})
@@ -157,14 +181,17 @@ func beginDrillAttempt(ctx context.Context, env *jobEnv, m *backup.Materialised,
 
 func retainDrillFailure(err error, db, name string, attempt *backup.MaterialisationAttempt) error {
 	reason := recoveryFailureReason(err)
+
 	return backup.UpdateRecords(func(s *backup.Records) error {
 		cur, ok := s.DrillAttempts[db]
 		if !ok || cur != *attempt || s.Drilling[db] != name {
 			return incompleteMaterialisation(name)
 		}
+
 		cur.Reason = reason
 		s.DrillAttempts[db] = cur
 		attempt.Reason = reason
+
 		return nil
 	})
 }
@@ -174,9 +201,11 @@ func verifyDrillAttempt(db, name string, expected backup.MaterialisationAttempt)
 	if err != nil {
 		return err
 	}
+
 	cur, ok := s.DrillAttempts[db]
 	if !ok || cur != expected || s.Drilling[db] != name {
 		return incompleteMaterialisation(name)
 	}
+
 	return nil
 }

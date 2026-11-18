@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -31,24 +32,22 @@ const SupportedList = "Debian 13, Ubuntu 26.04"
 
 // Supported reports whether o is a supported server release.
 func (o OS) Supported() bool {
-	for _, v := range supported[o.ID] {
-		if v == o.VersionID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(supported[o.ID], o.VersionID)
 }
 
 // ParseOSRelease parses os-release content.
 func ParseOSRelease(raw []byte) OS {
 	var o OS
+
 	sc := bufio.NewScanner(bytes.NewReader(raw))
 	for sc.Scan() {
 		key, value, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
 		if !ok {
 			continue
 		}
+
 		value = strings.Trim(value, `"'`)
+
 		switch key {
 		case "ID":
 			o.ID = value
@@ -58,6 +57,7 @@ func ParseOSRelease(raw []byte) OS {
 			o.Pretty = value
 		}
 	}
+
 	return o
 }
 
@@ -67,6 +67,7 @@ func ReadOS() (OS, error) {
 	if err != nil {
 		return OS{}, err
 	}
+
 	return ParseOSRelease(raw), nil
 }
 
@@ -76,16 +77,19 @@ func MemTotalMiB() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && fields[0] == "MemTotal:" {
 			kib, err := strconv.Atoi(fields[1])
 			if err != nil {
 				return 0, err
 			}
+
 			return kib / 1024, nil
 		}
 	}
+
 	return 0, os.ErrNotExist
 }
 

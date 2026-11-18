@@ -87,19 +87,24 @@ func writeSpec(cfg config.Cluster, recs backup.Records, name string) (config.Clu
 	if spec, ok := cfg.ClusterByName(name); ok {
 		return spec, true
 	}
+
 	live := backup.LiveDatabase(name)
 	if live == name {
 		return config.ClusterSpec{}, false
 	}
+
 	spec, ok := cfg.ClusterByName(live)
 	if !ok {
 		return config.ClusterSpec{}, false
 	}
+
 	r, ok := recs.OpenRestore(live)
 	if !ok || backup.RestoringName(live) != name || r.Port == 0 {
 		return config.ClusterSpec{}, false
 	}
+
 	spec.Port = r.Port
+
 	return spec, true
 }
 
@@ -108,11 +113,14 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	if p.DB == "" {
 		return Result{}, output.NewError(output.CodeInputRequired, "db.write-access needs db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
+
 	recs, _ := backup.LoadRecords()
+
 	spec, ok := writeSpec(env.Cluster, recs, p.DB)
 	if ok && spec.IsFollower() {
 		// Nothing can be written on a follower: its cluster follows its
@@ -120,14 +128,17 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 		// it writable (Phase 6).
 		return Result{}, followerError(spec, "writing to it")
 	}
+
 	if !ok || !spec.Protected {
 		// A copy the server isn't holding open, or an unprotected database:
 		// the CLI writes as vaire_admin, as before.
 		return Result{Data: WriteAccess{}}, nil
 	}
+
 	if err := g.checkWrite(p.DB, "writing to it", env.Req.Secrets[ProtectCodeSecret]); err != nil {
 		return Result{}, err
 	}
+
 	password := env.Req.Secrets[WritePasswordSecret]
 	if len(password) < writeRolePasswordMin {
 		return Result{}, output.NewError(output.CodeInputRequired,
@@ -135,13 +146,16 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 			"Run the write with an vaire CLI of the node's version: it sends the password.").
 			WithDetails(map[string]any{"secret": WritePasswordSecret})
 	}
+
 	role, err := newWriteRole(g.now(), password)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := grant(ctx, spec, role); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: WriteAccess{Protected: true, User: role.User,
 		ValidUntil: role.ValidUntil.UTC().Format(time.RFC3339)}}, nil
 }
@@ -153,17 +167,21 @@ func (g protectGuard) checkWrite(name, action, code string) error {
 	if err != nil {
 		return err
 	}
+
 	if !ok {
 		return protectNotInitialized(output.CodeDatabaseProtected,
 			"database "+name+" is protected and "+action+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe)
 	}
+
 	if strings.TrimSpace(code) == "" {
 		return output.NewError(output.CodeDatabaseProtected,
 			"database "+name+" is protected, so "+action+" needs a code from the authenticator app", output.ExitUnsafe,
 			"A person runs the command at an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with vaire protect init. Reads need no code.").
 			WithDetails(map[string]any{"reason": "write_requires_human", "database": name})
 	}
+
 	_, err = g.verify(code, false)
+
 	return err
 }
 
@@ -179,22 +197,27 @@ func (g protectGuard) requireWriteCode(action string, applies func(rpc.Request) 
 		if applies != nil {
 			writes = applies(env.Req)
 		}
+
 		if writes {
 			if err := g.checkRequestedWrite(action, env); err != nil {
 				return Result{}, err
 			}
 		}
+
 		return handler(ctx, env)
 	}
 }
 
 func (g protectGuard) checkRequestedWrite(action string, env *Env) error {
 	var params map[string]any
+
 	_ = json.Unmarshal(env.Req.Params, &params)
+
 	name, _ := params["db"].(string)
 	if name == "" {
 		return nil
 	}
+
 	spec, ok := env.Cluster.ClusterByName(name)
 	if !ok || !spec.Protected || spec.IsFollower() {
 		return nil
@@ -210,6 +233,7 @@ func sqlWrites(req rpc.Request) bool {
 	var p struct {
 		Write bool `json:"write"`
 	}
+
 	return json.Unmarshal(req.Params, &p) == nil && p.Write
 }
 
@@ -219,6 +243,7 @@ func newWriteRole(now time.Time, password string) (writeRole, error) {
 	if _, err := rand.Read(suffix); err != nil {
 		return writeRole{}, err
 	}
+
 	return writeRole{User: writeRolePrefix + hex.EncodeToString(suffix), Password: password, ValidUntil: now.Add(writeRoleLogin)}, nil
 }
 
@@ -229,13 +254,16 @@ func newWriteRole(now time.Time, password string) (writeRole, error) {
 func createWriteRole(ctx context.Context, spec config.ClusterSpec, role writeRole) error {
 	local := steps.ClusterPG(spec)
 	dropExpiredWriteRoles(ctx, local, spec)
+
 	verifier, err := pg.SCRAMVerifier(role.Password)
 	if err != nil {
 		return err
 	}
+
 	if err := local.Exec(ctx, steps.AuthDB, writeRoleSQL(spec, role, verifier), nil); err != nil {
 		return output.WrapError(output.CodeExternalCommand, fmt.Errorf("create the write role: %w", err), output.ExitExternal, "")
 	}
+
 	return nil
 }
 
@@ -243,6 +271,7 @@ func createWriteRole(ctx context.Context, spec config.ClusterSpec, role writeRol
 // pooler's auth_query looks it up.
 func writeRoleSQL(spec config.ClusterSpec, role writeRole, verifier string) string {
 	user := pg.Quote(role.User)
+
 	return fmt.Sprintf("CREATE ROLE %s LOGIN NOINHERIT PASSWORD '%s' VALID UNTIL '%s' IN ROLE %s;\nGRANT CONNECT, TEMPORARY ON DATABASE %s TO %s;\n",
 		user, verifier, role.ValidUntil.UTC().Format(time.RFC3339), pg.Quote(spec.Name+"_owner"), pg.Quote(spec.Name), user)
 }
@@ -260,12 +289,15 @@ func dropExpiredWriteRoles(ctx context.Context, local pg.Local, spec config.Clus
 	if err != nil {
 		return
 	}
+
 	owner := pg.Quote(spec.Name + "_owner")
+
 	for _, row := range rows {
 		name := row["rolname"]
 		if !strings.HasPrefix(name, writeRolePrefix) {
 			continue
 		}
+
 		role := pg.Quote(name)
 		_ = local.Exec(ctx, spec.Name, fmt.Sprintf("REASSIGN OWNED BY %s TO %s;\nDROP OWNED BY %s;\n", role, owner, role), nil)
 		_ = local.Exec(ctx, "postgres", "DROP ROLE IF EXISTS "+role+";\n", nil)
@@ -276,11 +308,13 @@ func dropExpiredWriteRoles(ctx context.Context, local pg.Local, spec config.Clus
 // protection differs.
 func protectionChanged(old, updated config.Cluster) []string {
 	var out []string
+
 	for _, c := range updated.Clusters {
 		if o, ok := old.ClusterByName(c.Name); ok && o.Protected != c.Protected {
 			out = append(out, c.Name)
 		}
 	}
+
 	return out
 }
 
@@ -294,23 +328,30 @@ func syncProtectedAccess(ctx context.Context, env *Env, old, updated config.Clus
 	if len(changed) == 0 {
 		return nil, nil
 	}
+
 	recs, _ := backup.LoadRecords()
 	rt := runtimeFor(&Env{Req: env.Req, Cluster: updated, Log: env.Log, Report: env.Report}, false)
+
 	var warnings []output.Warning
+
 	for _, name := range changed {
 		if recs.IsAwaiting(name) {
 			continue
 		}
+
 		if err := refuseActiveActivationFence(updated, name); err != nil {
 			return warnings, err
 		}
+
 		_, w, err := engine.Apply(ctx, steps.Catalog(), updated, rt, engine.Options{
 			Only: []string{steps.RolesStepID(name)}, DB: name, Restarter: steps.RestarterFor(updated, rt, env.Report), Report: env.Report,
 		})
 		if err != nil {
 			return warnings, withHint(err, "The protection of "+name+" was not changed: vaire_admin's access to it could not be set. Check that its cluster runs (vaire status) and retry.")
 		}
+
 		warnings = append(warnings, w...)
 	}
+
 	return warnings, nil
 }

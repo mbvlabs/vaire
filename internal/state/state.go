@@ -37,6 +37,7 @@ func (s FileStore) path() string {
 	if s.Path == "" {
 		return Path
 	}
+
 	return s.Path
 }
 
@@ -46,13 +47,16 @@ func (s FileStore) Load() (config.Cluster, []byte, error) {
 	if err != nil {
 		return config.Cluster{}, nil, err
 	}
+
 	cfg, err := config.ParseCluster(raw)
 	if err != nil {
 		return config.Cluster{}, nil, configError(err)
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return config.Cluster{}, nil, config.ValidationError(err)
 	}
+
 	return cfg, raw, nil
 }
 
@@ -62,15 +66,19 @@ func (s FileStore) Save(raw []byte) error {
 	if err != nil {
 		return configError(err)
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return config.ValidationError(err)
 	}
+
 	if err := engine.WriteFileAtomic(s.path(), raw, config.FileMode); err != nil {
 		return err
 	}
+
 	if s.path() == Path {
 		masterbackup.MarkDirty("cluster.toml")
 	}
+
 	return nil
 }
 
@@ -81,9 +89,12 @@ func (s FileStore) Revision() (string, error) {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
+
 		return "", err
 	}
+
 	sum := sha256.Sum256(raw)
+
 	return hex.EncodeToString(sum[:]), nil
 }
 

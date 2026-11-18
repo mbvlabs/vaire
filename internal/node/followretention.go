@@ -29,9 +29,9 @@ type followRetentionAttempt struct {
 	State               string                     `json:"state"`
 	Reason              string                     `json:"reason,omitempty"`
 	ArtifactStage       string                     `json:"artifact_stage,omitempty"`
-	DataIdentity        materialisationFileID      `json:"data_identity,omitempty"`
-	ConfigIdentity      materialisationFileID      `json:"config_identity,omitempty"`
-	ReservationIdentity backup.ReservationIdentity `json:"reservation_identity,omitempty"`
+	DataIdentity        materialisationFileID      `json:"data_identity"`
+	ConfigIdentity      materialisationFileID      `json:"config_identity"`
+	ReservationIdentity backup.ReservationIdentity `json:"reservation_identity"`
 }
 
 // followAttemptKey is supplied from the active job, the source spec and the
@@ -56,29 +56,36 @@ func validateFollowRetentionAttempt(o followOwnership) error {
 	if a == nil {
 		return errors.New("missing or invalid follower attempt identity")
 	}
+
 	if err := validateFollowAttemptKey(o); err != nil {
 		return err
 	}
+
 	if err := validateFollowReservation(a); err != nil {
 		return err
 	}
+
 	if err := validateFollowArtifactStage(a); err != nil {
 		return err
 	}
+
 	return validateFollowAttemptState(o)
 }
 
 func validateFollowAttemptKey(o followOwnership) error {
 	a := o.Attempt
+
 	key := followAttemptKey{a.Job, a.Operation, a.SourceStanza, a.TemporaryPort}
 	if a.State == followAttemptCompleted && key.TemporaryPort == 0 {
 		// Some historical records lack a port; birth identities still must be
 		// verified before any adoption and the mapping must be retained.
 		key.TemporaryPort = config.TemporaryPortMin
 	}
+
 	if !validFollowAttemptKey(key) {
 		return errors.New("missing or invalid follower attempt identity")
 	}
+
 	return nil
 }
 
@@ -88,6 +95,7 @@ func validateFollowReservation(a *followRetentionAttempt) error {
 		(a.ReservationIdentity.Digest != "" && !followReservationDigest.MatchString(a.ReservationIdentity.Digest)) {
 		return errors.New("invalid follower reservation identity")
 	}
+
 	return nil
 }
 
@@ -111,6 +119,7 @@ func validateFollowArtifactStage(a *followRetentionAttempt) error {
 	default:
 		return errors.New("invalid follower artifact stage")
 	}
+
 	return nil
 }
 
@@ -132,6 +141,7 @@ func validateFollowAttemptState(o followOwnership) error {
 	default:
 		return errors.New("unknown follower attempt state")
 	}
+
 	return nil
 }
 
@@ -139,14 +149,17 @@ func writeFollowRetention(o followOwnership) error {
 	if err := validateFollowRetentionAttempt(o); err != nil {
 		return err
 	}
+
 	path, err := followOwnershipPath(o.Database)
 	if err != nil {
 		return err
 	}
+
 	raw, err := json.Marshal(o)
 	if err != nil {
 		return err
 	}
+
 	return followRetentionWrite(path, append(raw, '\n'), 0o600)
 }
 
@@ -162,17 +175,21 @@ func beginFollowAttemptWithReservation(owner followOwner, k followAttemptKey, id
 	if !validFollowAttemptKey(k) {
 		return errors.New("invalid follower materialisation attempt identity")
 	}
+
 	o, owned, err := readFollowOwnership(owner)
 	if err != nil {
 		return err
 	}
+
 	if !owned || o.Phase != followPhaseCopying || o.Attempt != nil {
 		return errors.New("follower materialisation is not available for a new attempt")
 	}
+
 	o.Attempt = &followRetentionAttempt{
 		Job: k.Job, Operation: k.Operation, SourceStanza: k.SourceStanza,
 		TemporaryPort: k.TemporaryPort, State: followAttemptPending, ReservationIdentity: id,
 	}
+
 	return writeFollowRetention(o)
 }
 
@@ -180,15 +197,18 @@ func pendingFollowAttempt(owner followOwner, k followAttemptKey) (followOwnershi
 	if !validFollowAttemptKey(k) {
 		return followOwnership{}, errors.New("invalid follower materialisation attempt identity")
 	}
+
 	o, owned, err := readFollowOwnership(owner)
 	if err != nil {
 		return followOwnership{}, err
 	}
+
 	if !owned || o.Attempt == nil || o.Attempt.State != followAttemptPending ||
 		o.Attempt.Job != k.Job || o.Attempt.Operation != k.Operation ||
 		o.Attempt.SourceStanza != k.SourceStanza || o.Attempt.TemporaryPort != k.TemporaryPort {
 		return followOwnership{}, errors.New("follower materialisation attempt ownership changed")
 	}
+
 	return o, nil
 }
 
@@ -199,11 +219,14 @@ func retainFollowAttempt(owner followOwner, k followAttemptKey, reason string) e
 	if reason != "recovery_requirements_unmet" && reason != "recovery_parameter_mismatch" {
 		return errors.New("invalid follower materialisation failure reason")
 	}
+
 	o, err := pendingFollowAttempt(owner, k)
 	if err != nil {
 		return err
 	}
+
 	o.Attempt.State, o.Attempt.Reason = followAttemptRetained, reason
+
 	return writeFollowRetention(o)
 }
 
@@ -214,10 +237,13 @@ func completeFollowAttempt(owner followOwner, k followAttemptKey) error {
 	if err != nil {
 		return err
 	}
+
 	if o.Attempt.ArtifactStage != materialisationRegistered {
 		return errors.New("follower artifacts are not bound")
 	}
+
 	o.Phase, o.Attempt.State = followPhaseCopied, followAttemptCompleted
+
 	return writeFollowRetention(o)
 }
 
@@ -229,12 +255,15 @@ func refuseIncompleteFollowAttempt(o followOwnership) error {
 	if o.Attempt == nil {
 		return nil
 	}
+
 	if err := validateFollowRetentionAttempt(o); err != nil {
 		return fmt.Errorf("invalid follower materialisation attempt: %w", err)
 	}
+
 	if o.Attempt.State == followAttemptCompleted {
 		return nil
 	}
+
 	details := map[string]any{
 		"reason": "materialisation_incomplete", "database": o.Database,
 		"source": o.Source, "job_id": o.Attempt.Job,
@@ -242,6 +271,7 @@ func refuseIncompleteFollowAttempt(o followOwnership) error {
 	if o.Attempt.Reason != "" {
 		details["failure_reason"] = o.Attempt.Reason
 	}
+
 	return output.NewError(output.CodePrecondition,
 		"follower "+o.Database+" has an incomplete materialisation", output.ExitPrecondition,
 		"The partial target was retained; do not retry, adopt or remove it without ownership-checked cleanup.").WithDetails(details)

@@ -28,9 +28,11 @@ func Name(created time.Time, epoch int64, revision string) string {
 	if len(rev) > revisionChars {
 		rev = rev[:revisionChars]
 	}
+
 	if rev == "" {
 		rev = "0"
 	}
+
 	return fmt.Sprintf("%s-e%d-r%s", created.UTC().Format(nameTimeFmt), epoch, rev)
 }
 
@@ -55,14 +57,17 @@ func ParseName(name string) (Parsed, bool) {
 	if m == nil {
 		return Parsed{}, false
 	}
+
 	t, err := time.Parse(nameTimeFmt, m[1])
 	if err != nil {
 		return Parsed{}, false
 	}
+
 	e, err := strconv.ParseInt(m[2], 10, 64)
 	if err != nil {
 		return Parsed{}, false
 	}
+
 	return Parsed{Name: name, CreatedAt: t, Epoch: e, Revision: m[3]}, true
 }
 
@@ -78,9 +83,11 @@ func SplitKey(key string) (name string, isBundle, ok bool) {
 	default:
 		return "", false, false
 	}
+
 	if _, ok := ParseName(name); !ok {
 		return "", false, false
 	}
+
 	return name, isBundle, true
 }
 
@@ -119,6 +126,7 @@ func NewSidecar(name string, m Manifest, ciphertext []byte) Sidecar {
 	for _, f := range m.Files {
 		s.Files = append(s.Files, SidecarFile{Path: f.Path, Size: f.Size})
 	}
+
 	return s
 }
 
@@ -127,39 +135,50 @@ func NewSidecar(name string, m Manifest, ciphertext []byte) Sidecar {
 // `newest`. Names that don't parse are kept: pruning never touches them.
 func Keep(names []string, now time.Time, days, weeks, newest int) map[string]bool {
 	keep := map[string]bool{}
+
 	var parsed []Parsed
+
 	for _, n := range names {
 		p, ok := ParseName(n)
 		if !ok {
 			keep[n] = true
 			continue
 		}
+
 		parsed = append(parsed, p)
 	}
+
 	sort.Slice(parsed, func(i, j int) bool { return parsed[i].Name > parsed[j].Name })
+
 	for i, p := range parsed {
 		if i < newest {
 			keep[p.Name] = true
 		}
 	}
+
 	dayCut := now.Add(-time.Duration(days) * 24 * time.Hour)
 	weekCut := now.Add(-time.Duration(weeks) * 7 * 24 * time.Hour)
 	seenWeek := map[string]bool{}
+
 	for _, p := range parsed {
 		if !p.CreatedAt.Before(dayCut) {
 			keep[p.Name] = true
 			continue
 		}
+
 		if p.CreatedAt.Before(weekCut) {
 			continue
 		}
+
 		y, w := p.CreatedAt.ISOWeek()
+
 		wk := fmt.Sprintf("%d-%02d", y, w)
 		if !seenWeek[wk] {
 			seenWeek[wk] = true
 			keep[p.Name] = true
 		}
 	}
+
 	return keep
 }
 
@@ -172,21 +191,28 @@ func Pick(complete map[string]bool, name string, before time.Time) (Parsed, bool
 		if !ok || !complete[name] {
 			return Parsed{}, false
 		}
+
 		return p, true
 	}
+
 	var best Parsed
+
 	found := false
+
 	for n, ok := range complete {
 		if !ok {
 			continue
 		}
+
 		p, parsed := ParseName(n)
 		if !parsed || (!before.IsZero() && p.CreatedAt.After(before)) {
 			continue
 		}
+
 		if !found || p.Epoch > best.Epoch || (p.Epoch == best.Epoch && p.Name > best.Name) {
 			best, found = p, true
 		}
 	}
+
 	return best, found
 }

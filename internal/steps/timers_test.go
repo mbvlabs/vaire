@@ -26,6 +26,7 @@ func timersConfig(state string) config.Cluster {
 	cfg.Backup.Provider = "r2"
 	cfg.Backup.Bucket = "backups"
 	cfg.Clusters = nil
+
 	switch state {
 	case "awaiting":
 		cfg.Awaiting = []config.ClusterSpec{{Name: "app", Stanza: "app-abc123"}}
@@ -33,6 +34,7 @@ func timersConfig(state string) config.Cluster {
 		cfg.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-abc123"}}
 		cfg.Backup.Database = config.BackupDatabase{}
 	}
+
 	return cfg
 }
 
@@ -40,16 +42,20 @@ func timersConfig(state string) config.Cluster {
 // template, none is enabled automatically, and no database timer exists.
 func assertBackupServiceTemplates(t *testing.T, cfg config.Cluster) {
 	t.Helper()
+
 	files := timerFiles(cfg)
+
 	for _, job := range []string{"backup-full", "backup-diff", "backup-incr", "backup-verify", "restore-drill"} {
 		name := "vaire-" + job + "@.service"
 		if got := string(files[name]); got != string(render.JobService(job, "--db %i")) {
 			t.Errorf("%s missing or incorrect", name)
 		}
+
 		if enabledUnit(name) {
 			t.Errorf("%s must not be enabled automatically", name)
 		}
 	}
+
 	for name := range files {
 		if strings.Contains(name, "@") && strings.HasSuffix(name, ".timer") {
 			t.Errorf("unexpected database timer %s", name)

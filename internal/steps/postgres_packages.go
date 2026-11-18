@@ -60,6 +60,7 @@ func (postgresPackages) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
+
 	inputs := map[string]any{
 		"packages":       pgPackages,
 		"hold":           pgHold,
@@ -71,6 +72,7 @@ func (postgresPackages) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, er
 	if len(extensionPackages) > 0 {
 		inputs["extension_packages"] = extensionPackages
 	}
+
 	return canonical(inputs)
 }
 
@@ -79,33 +81,42 @@ func (postgresPackages) Check(ctx context.Context, cfg config.Cluster, _ engine.
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	var missing []string
+
 	for _, pkg := range append(append([]string(nil), pgPackages...), extensionPackages...) {
 		out, _ := packageProbe(ctx, "dpkg-query", "-W", "-f=${Status}", pkg)
 		if !PackageInstalled(out) {
 			missing = append(missing, pkg)
 		}
 	}
+
 	if len(missing) > 0 {
 		return incomplete("missing " + strings.Join(missing, ", ")), nil
 	}
+
 	held, _ := packageProbe(ctx, "apt-mark", "showhold")
+
 	heldSet := map[string]bool{}
-	for _, pkg := range strings.Fields(held) {
+	for pkg := range strings.FieldsSeq(held) {
 		heldSet[pkg] = true
 	}
+
 	for _, pkg := range append(append([]string(nil), pgHold...), extensionPackages...) {
 		if !heldSet[pkg] {
 			return incomplete(pkg + " is not held"), nil
 		}
 	}
+
 	reqs, err := ExtensionPrerequisites(cfg)
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	if missingFiles := missingExtensionFiles(reqs); len(missingFiles) > 0 {
 		return incomplete(strings.Join(missingFiles, "; ")), nil
 	}
+
 	return complete(), nil
 }
 
@@ -113,7 +124,9 @@ func (s postgresPackages) Apply(ctx context.Context, cfg config.Cluster, rt engi
 	if err := writeFile(CreateClusterConfPath, string(render.CreateClusterConf()), 0o644); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	err := installPostgresPackages(ctx, cfg, s.ID(), rt, report)
+
 	var scriptErr *engine.ScriptError
 	if errors.As(err, &scriptErr) && scriptErr.Status == pgbackrestTooOld {
 		return engine.ApplyResult{}, output.NewError(
@@ -123,6 +136,7 @@ func (s postgresPackages) Apply(ctx context.Context, cfg config.Cluster, rt engi
 			"vaire needs pgBackRest "+versions.PgBackRestMinVersion+" or newer, which fixes a bug in encrypted repositories. Wait for PGDG to publish it, then re-run apply.",
 		).WithDetails(map[string]any{"reason": "pgbackrest_too_old", "min_version": versions.PgBackRestMinVersion, "output_tail": scriptErr.Tail})
 	}
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
 
@@ -149,19 +163,24 @@ func installPostgresPackages(ctx context.Context, cfg config.Cluster, stepID str
 	if err != nil {
 		return err
 	}
+
 	if err := runExtensionPackageScript(ctx, stepID, postgresPackagesEnv(extensionPackages), rt, report); err != nil {
 		var scriptErr *engine.ScriptError
 		if errors.As(err, &scriptErr) && len(scriptErr.Tail) > 0 {
 			return fmt.Errorf("installing PostgreSQL and extension packages: %w: %s; installed packages are not removed", err, strings.Join(scriptErr.Tail, " | "))
 		}
+
 		return fmt.Errorf("installing PostgreSQL and extension packages: %w; installed packages are not removed", err)
 	}
+
 	reqs, err := ExtensionPrerequisites(cfg)
 	if err != nil {
 		return fmt.Errorf("resolving extension prerequisites after package installation: %w; installed packages are not removed", err)
 	}
+
 	if err := VerifyExtensionRequirements(reqs); err != nil {
 		return fmt.Errorf("extension prerequisites are not met after package installation: %w; installed packages are not removed", err)
 	}
+
 	return nil
 }

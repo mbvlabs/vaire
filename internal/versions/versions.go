@@ -66,6 +66,7 @@ func ExporterVersion(name string) string {
 	case PgbouncerExporter:
 		return PgbouncerExporterVersion
 	}
+
 	return ""
 }
 
@@ -88,6 +89,7 @@ func CheckExporterPins() error {
 		if ExporterVersion(name) == "" {
 			return fmt.Errorf("exporter %s has no pinned version", name)
 		}
+
 		for _, arch := range ExporterArches {
 			sum := ExporterSHA256[name+"-"+arch]
 			if len(sum) != 64 {
@@ -95,5 +97,6 @@ func CheckExporterPins() error {
 			}
 		}
 	}
+
 	return nil
 }

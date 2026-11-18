@@ -73,6 +73,7 @@ type readTracker struct {
 func newReadTracker(nc net.Conn) *readTracker {
 	t := &readTracker{Conn: nc}
 	t.last.Store(time.Now().UnixNano())
+
 	return t
 }
 
@@ -81,6 +82,7 @@ func (t *readTracker) Read(p []byte) (int, error) {
 	if n > 0 {
 		t.last.Store(time.Now().UnixNano())
 	}
+
 	return n, err
 }
 
@@ -102,14 +104,19 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 			dialTimeout = bt
 		}
 	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
+
 	raw, err := d.DialContext(dialCtx, "tcp", target.Addr)
 	if err != nil {
 		return nil, unreachable(target, err)
 	}
+
 	nc := newReadTracker(raw)
+
 	var hostErr *HostKeyError
+
 	callback := opts.HostKeys.Callback(target.Addr)
 	cfg := &ssh.ClientConfig{
 		User: target.User,
@@ -119,18 +126,22 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 			if errors.As(err, &hostErr) {
 				return err
 			}
+
 			return err
 		},
 		HostKeyAlgorithms: opts.HostKeys.Algorithms(target.Addr),
 		Timeout:           timeout,
 		ClientVersion:     opts.ClientVer,
 	}
+
 	conn, chans, reqs, err := handshake(ctx, nc, target.Addr, cfg, timeout)
 	if err != nil {
 		_ = nc.Close()
+
 		if hostErr != nil {
 			return nil, hostKeyMismatch(target, hostErr)
 		}
+
 		if strings.Contains(err.Error(), "unable to authenticate") {
 			return nil, output.NewError(
 				output.CodeTransportFailed,
@@ -139,17 +150,22 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 				"Check the SSH user and credential: --identity, an agent key, or --password-stdin.",
 			).WithDetails(map[string]any{"target": target.String(), "reason": "auth_failed"})
 		}
+
 		return nil, output.WrapError(output.CodeTransportFailed, fmt.Errorf("SSH handshake with %s failed: %w", target, err), output.ExitTransport,
 			"Check that sshd is running and reachable.").WithDetails(map[string]any{"target": target.String()})
 	}
+
 	interval, silence := opts.KeepaliveInterval, opts.KeepaliveTimeout
 	if interval <= 0 {
 		interval = DefaultKeepaliveInterval
 	}
+
 	if silence <= 0 {
 		silence = DefaultKeepaliveTimeout
 	}
+
 	c := &SSHClient{client: ssh.NewClient(conn, chans, reqs), Target: target, stop: make(chan struct{}), silence: silence}
+
 	go func() {
 		probe := func() error {
 			_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
@@ -160,6 +176,7 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 			_ = c.client.Close()
 		}
 	}()
+
 	return c, nil
 }
 
@@ -179,13 +196,16 @@ func DialSSH(ctx context.Context, d Dialer, target SSHTarget, opts SSHOptions) (
 func keepalive(stop <-chan struct{}, interval, silence time.Duration, probe func() error, lastRead func() time.Time) bool {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
 	var inFlight chan error
+
 	for {
 		select {
 		case <-stop:
 			return false
 		case err := <-inFlight:
 			inFlight = nil
+
 			if err != nil {
 				return false
 			}
@@ -193,8 +213,10 @@ func keepalive(stop <-chan struct{}, interval, silence time.Duration, probe func
 			if inFlight == nil {
 				inFlight = make(chan error, 1)
 				go func(reply chan<- error) { reply <- probe() }(inFlight)
+
 				continue
 			}
+
 			if time.Since(lastRead()) >= silence {
 				return true
 			}
@@ -214,6 +236,7 @@ func (c *SSHClient) Silence() time.Duration {
 	if c == nil {
 		return 0
 	}
+
 	return c.silence
 }
 
@@ -224,7 +247,9 @@ func (c *SSHClient) StreamLost(err error) bool {
 	if c.Lost() {
 		return true
 	}
+
 	var missing *ssh.ExitMissingError
+
 	return errors.As(err, &missing)
 }
 
@@ -233,8 +258,10 @@ func handshake(ctx context.Context, nc net.Conn, addr string, cfg *ssh.ClientCon
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
+
 	_ = nc.SetDeadline(deadline)
 	finished := make(chan struct{})
+
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -242,15 +269,21 @@ func handshake(ctx context.Context, nc net.Conn, addr string, cfg *ssh.ClientCon
 		case <-finished:
 		}
 	}()
+
 	conn, chans, reqs, err := ssh.NewClientConn(nc, addr, cfg)
+
 	close(finished)
+
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, nil, ctx.Err()
 		}
+
 		return nil, nil, nil, err
 	}
+
 	_ = nc.SetDeadline(time.Time{})
+
 	return conn, chans, reqs, nil
 }
 
@@ -269,6 +302,7 @@ func hostKeyMismatch(target SSHTarget, e *HostKeyError) *output.CLIError {
 			"Pin it with --host-key-fingerprint, or confirm it on first contact.",
 		).WithDetails(map[string]any{"target": target.String(), "got": e.Got})
 	}
+
 	return output.NewError(
 		output.CodeHostKeyMismatch,
 		"the host key of "+e.Host+" does not match the pinned key",
@@ -282,6 +316,7 @@ func (c *SSHClient) SSH() *ssh.Client {
 	if c == nil {
 		return nil
 	}
+
 	return c.client
 }
 
@@ -290,11 +325,13 @@ func (c *SSHClient) Close() {
 	if c == nil {
 		return
 	}
+
 	c.closeOnce.Do(func() {
 		if c.stop != nil {
 			close(c.stop)
 		}
 	})
+
 	if c.client != nil {
 		_ = c.client.Close()
 	}
@@ -308,17 +345,22 @@ func (c *SSHClient) Run(ctx context.Context, command string, stdin io.Reader, st
 		return output.WrapError(output.CodeTransportFailed, fmt.Errorf("open an SSH session to %s: %w", c.Target, err), output.ExitTransport, "")
 	}
 	defer func() { _ = sess.Close() }()
+
 	if stdin != nil {
 		sess.Stdin = stdin
 	}
+
 	sess.Stdout = stdout
 	sess.Stderr = stderr
+
 	done := make(chan error, 1)
 	go func() { done <- sess.Run(command) }()
+
 	select {
 	case <-ctx.Done():
 		_ = sess.Signal(ssh.SIGTERM)
 		_ = sess.Close()
+
 		return ctx.Err()
 	case err := <-done:
 		return err
@@ -330,15 +372,16 @@ func (c *SSHClient) Output(ctx context.Context, command string, stdin io.Reader)
 	stdout := &capped{max: maxOutput}
 	stderr := &capped{max: maxOutput}
 	err := c.Run(ctx, command, stdin, stdout, stderr)
+
 	return stdout.buf.Bytes(), stderr.buf.Bytes(), err
 }
 
 // ExitStatus returns the remote exit status of err, if it is one.
 func ExitStatus(err error) (int, bool) {
-	var exitErr *ssh.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*ssh.ExitError](err); ok {
 		return exitErr.ExitStatus(), true
 	}
+
 	return 0, false
 }
 
@@ -355,6 +398,7 @@ func (c *capped) Write(p []byte) (int, error) {
 			c.buf.Write(p)
 		}
 	}
+
 	return len(p), nil
 }
 
@@ -364,15 +408,21 @@ func ProbeHostKey(ctx context.Context, d Dialer, addr string, timeout time.Durat
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+
 	target := SSHTarget{User: "vaire-host-key-probe", Addr: addr}
+
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
 	nc, err := d.DialContext(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, unreachable(target, err)
 	}
+
 	defer func() { _ = nc.Close() }()
+
 	var captured ssh.PublicKey
+
 	errCaptured := errors.New("host key captured")
 	cfg := &ssh.ClientConfig{
 		User: target.User,
@@ -384,10 +434,12 @@ func ProbeHostKey(ctx context.Context, d Dialer, addr string, timeout time.Durat
 		HostKeyAlgorithms: []string{ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256},
 		Timeout:           timeout,
 	}
+
 	_, _, _, err = handshake(ctx, nc, addr, cfg, timeout)
 	if captured == nil {
 		return nil, output.WrapError(output.CodeTransportFailed, fmt.Errorf("read the SSH host key of %s: %w", addr, err), output.ExitTransport, "Check that sshd answers on that port.")
 	}
+
 	return captured, nil
 }
 
@@ -398,18 +450,22 @@ func GenerateSSHKey(comment string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+
 	block, err := ssh.MarshalPrivateKey(priv, comment)
 	if err != nil {
 		return nil, "", err
 	}
+
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
 		return nil, "", err
 	}
+
 	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
 	if comment != "" {
 		line += " " + comment
 	}
+
 	return pem.EncodeToMemory(block), line, nil
 }
 
@@ -419,10 +475,12 @@ func AuthorizedKey(privatePEM []byte, comment string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
 	if comment != "" {
 		line += " " + comment
 	}
+
 	return line, nil
 }
 
@@ -432,6 +490,7 @@ func KeyAuth(privatePEM []byte) (ssh.AuthMethod, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return ssh.PublicKeys(signer), nil
 }
 
@@ -442,6 +501,7 @@ func KeyFileAuth(path string, passphrase func() ([]byte, error)) (ssh.AuthMethod
 	if err != nil {
 		return nil, err
 	}
+
 	return ssh.PublicKeys(signer), nil
 }
 
@@ -452,22 +512,26 @@ func KeyFileSigner(path string, passphrase func() ([]byte, error)) (signer ssh.S
 	if err != nil {
 		return nil, false, err
 	}
+
 	signer, err = ssh.ParsePrivateKey(raw)
-	var missing *ssh.PassphraseMissingError
-	if errors.As(err, &missing) {
+	if _, ok := errors.AsType[*ssh.PassphraseMissingError](err); ok {
 		if passphrase == nil {
 			return nil, true, fmt.Errorf("%s is encrypted; load it into ssh-agent instead", path)
 		}
+
 		pw, perr := passphrase()
 		if perr != nil {
 			return nil, true, perr
 		}
+
 		signer, err = ssh.ParsePrivateKeyWithPassphrase(raw, pw)
 		encrypted = true
 	}
+
 	if err != nil {
 		return nil, encrypted, fmt.Errorf("parse %s: %w", path, err)
 	}
+
 	return signer, encrypted, nil
 }
 
@@ -478,16 +542,20 @@ func AgentSigners(ctx context.Context) ([]ssh.Signer, func(), bool) {
 	if sock == "" {
 		return nil, func() {}, false
 	}
+
 	var dialer net.Dialer
+
 	conn, err := dialer.DialContext(ctx, "unix", sock)
 	if err != nil {
 		return nil, func() {}, false
 	}
+
 	signers, err := agent.NewClient(conn).Signers()
 	if err != nil || len(signers) == 0 {
 		_ = conn.Close()
 		return nil, func() {}, false
 	}
+
 	return signers, func() { _ = conn.Close() }, true
 }
 
@@ -497,10 +565,12 @@ func AgentHolds(signers []ssh.Signer, pubPath string) bool {
 	if err != nil {
 		return false
 	}
+
 	pub, _, _, _, err := ssh.ParseAuthorizedKey(raw)
 	if err != nil {
 		return false
 	}
+
 	return ContainsKey(publicKeys(signers), pub)
 }
 
@@ -509,6 +579,7 @@ func publicKeys(signers []ssh.Signer) []ssh.PublicKey {
 	for _, s := range signers {
 		out = append(out, s.PublicKey())
 	}
+
 	return out
 }
 
@@ -521,6 +592,7 @@ func PasswordAuth(pw string) []ssh.AuthMethod {
 			for i := range answers {
 				answers[i] = pw
 			}
+
 			return answers, nil
 		}),
 	}

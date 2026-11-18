@@ -22,6 +22,7 @@ func protectStatusWith(dbs ...node.ProtectedDatabase) (protectStatusData, error)
 			st.Protected = append(st.Protected, d.Name)
 		}
 	}
+
 	return st, nil
 }
 
@@ -35,27 +36,33 @@ func TestRefuseFollowerWrite(t *testing.T) {
 		{Name: "app_follower", Follows: "app"},
 		{Name: "app_protected_follower", Protected: true, Follows: "app"},
 	}
+
 	for _, db := range []string{"app_follower", "app_protected_follower"} {
 		_, err := refuseFollowerWrite(func() (protectStatusData, error) {
 			return protectStatusWith(dbs...)
 		}, db)()
 		e := cliErrorOf(t, err)
+
 		details, _ := e.Details.(map[string]any)
 		if e.Code != output.CodePrecondition || e.ExitCode != output.ExitPrecondition || reasonOf(e) != "is_follower" {
 			t.Errorf("%s: %s %q (exit %d)", db, e.Code, reasonOf(e), e.ExitCode)
 		}
+
 		if details["database"] != db || details["source"] != "app" {
 			t.Errorf("%s: details %v, want is_follower from app", db, details)
 		}
+
 		if !strings.Contains(e.Message, db+" is a follower of app") {
 			t.Errorf("%s: message %q", db, e.Message)
 		}
+
 		for _, want := range []string{"vaire db unfollow " + db + " --confirm " + db + "/unfollow", "Reads need no --write"} {
 			if !strings.Contains(e.Hint, want) {
 				t.Errorf("%s: hint %q does not mention %q", db, e.Hint, want)
 			}
 		}
 	}
+
 	for _, db := range []string{"app", "unknown"} {
 		st, err := refuseFollowerWrite(func() (protectStatusData, error) {
 			return protectStatusWith(dbs...)
@@ -65,7 +72,9 @@ func TestRefuseFollowerWrite(t *testing.T) {
 			t.Errorf("%s: got %+v, %v; want the status unchanged", db, st, err)
 		}
 	}
+
 	boom := errors.New("node unreachable")
+
 	_, err := refuseFollowerWrite(func() (protectStatusData, error) {
 		return protectStatusData{}, boom
 	}, "app_follower")()
@@ -86,6 +95,7 @@ func TestProtectedWriteFollowerRefusedBeforeCode(t *testing.T) {
 			node.ProtectedDatabase{Name: "app_protected_follower", Protected: true, Follows: "app"},
 		)
 	}
+
 	for _, db := range []string{"app_follower", "app_protected_follower"} {
 		for _, args := range [][]string{nil, {"--yes"}, {"--output", "json"}, {"--no-input"}} {
 			code, err := protectedWriteCode(commandAt(t, "sql", args...), db, "writing to it",
@@ -93,12 +103,14 @@ func TestProtectedWriteFollowerRefusedBeforeCode(t *testing.T) {
 			if code != nil {
 				t.Fatalf("%s %v: got a code", db, args)
 			}
+
 			e := cliErrorOf(t, err)
 			if e.Code != output.CodePrecondition || reasonOf(e) != "is_follower" {
 				t.Errorf("%s %v: %s %q, want is_follower", db, args, e.Code, reasonOf(e))
 			}
 		}
 	}
+
 	_, err := protectedWriteCode(commandAt(t, "sql", "--output", "json"), "app", "writing to it",
 		refuseFollowerWrite(status, "app"), noNote)
 	if e := cliErrorOf(t, err); e.Code != output.CodeDatabaseProtected || reasonOf(e) != "write_requires_human" {
@@ -111,11 +123,14 @@ func TestProtectedWriteFollowerRefusedBeforeCode(t *testing.T) {
 // let through to SET ROLE.
 func TestRefuseFollowerWriteFromProtectStatusJSON(t *testing.T) {
 	reply := remote.Reply{Data: json.RawMessage(`{"configured":true,"protected_databases":["app"],"databases":[{"name":"app","protected":true},{"name":"app_follower","follows":"app"}]}`)}
+
 	var st protectStatusData
 	if err := reply.Decode(&st); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := refuseFollowerWrite(func() (protectStatusData, error) { return st, nil }, "app_follower")()
+
 	e := cliErrorOf(t, err)
 	if e.Code != output.CodePrecondition || reasonOf(e) != "is_follower" {
 		t.Fatalf("the node's protect.status: %s %q", e.Code, reasonOf(e))
@@ -128,12 +143,15 @@ func TestRefuseFollowerWriteFromProtectStatusJSON(t *testing.T) {
 // still logs in as vaire_admin, and a read never asks protect.status.
 func TestSessionLoginWriteRefusesFollower(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	creds := workspaces.Credentials{Database: &workspaces.DatabaseCreds{Admin: workspaces.Role{User: "vaire_admin", Password: "admin-pw"}}}
 	if err := workspaces.SaveCredentials("prod", creds); err != nil {
 		t.Fatal(err)
 	}
+
 	s := &session{ctx: &workspaces.Workspace{Name: "prod"}}
 	old := fetchWriteProtectStatus
+
 	t.Cleanup(func() { fetchWriteProtectStatus = old })
 
 	fetchWriteProtectStatus = func(*cobra.Command, *session, *progress) (protectStatusData, error) {
@@ -143,6 +161,7 @@ func TestSessionLoginWriteRefusesFollower(t *testing.T) {
 			node.ProtectedDatabase{Name: "app_protected_follower", Protected: true, Follows: "app"},
 		)
 	}
+
 	for _, c := range []struct {
 		db   string
 		args []string
@@ -153,6 +172,7 @@ func TestSessionLoginWriteRefusesFollower(t *testing.T) {
 		{"app_protected_follower", []string{"--yes"}},
 	} {
 		_, _, err := sessionLogin(commandAt(t, "sql", c.args...), s, &progress{}, c.db, true)
+
 		e := cliErrorOf(t, err)
 		if e.Code != output.CodePrecondition || reasonOf(e) != "is_follower" {
 			t.Errorf("%s %v: %s %q, want is_follower", c.db, c.args, e.Code, reasonOf(e))
@@ -163,6 +183,7 @@ func TestSessionLoginWriteRefusesFollower(t *testing.T) {
 	fetchWriteProtectStatus = func(*cobra.Command, *session, *progress) (protectStatusData, error) {
 		return protectStatusWith(node.ProtectedDatabase{Name: "app"})
 	}
+
 	user, password, err := sessionLogin(commandAt(t, "sql", "--write"), s, &progress{}, "app", true)
 	if err != nil || user != "vaire_admin" || password != "admin-pw" {
 		t.Fatalf("ordinary write: %s %s %v", user, password, err)
@@ -173,6 +194,7 @@ func TestSessionLoginWriteRefusesFollower(t *testing.T) {
 		t.Error("a read asked protect.status")
 		return protectStatusData{}, errors.New("asked")
 	}
+
 	user, password, err = sessionLogin(commandAt(t, "sql"), s, nil, "app_follower", false)
 	if err != nil || user != "vaire_admin" || password != "admin-pw" {
 		t.Fatalf("read login: %s %s %v", user, password, err)

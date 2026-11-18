@@ -56,6 +56,7 @@ func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Du
 	if !ok {
 		return 0, fmt.Errorf("cluster %s is not in cluster.toml", cluster)
 	}
+
 	if r.guarded {
 		// Before PAUSE, the deferred RESUME, downtime timing or the restart
 		// command. Only the named, already-confirmed target is checked.
@@ -63,16 +64,19 @@ func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Du
 			return 0, fmt.Errorf("extension prerequisites before restarting %s: %w", cluster, err)
 		}
 	}
+
 	start := time.Now()
 	// A PAUSE that fails or times out (PgBouncer down, a long transaction)
 	// doesn't stop the restart: -m fast ends the transaction anyway, and
 	// RESUME below clears a pause still in progress.
 	_ = restarterPoolerAdmin(ctx, PgbouncerPort, "PAUSE "+cluster)
 	defer func() { _ = restarterPoolerAdmin(context.WithoutCancel(ctx), PgbouncerPort, "RESUME "+cluster) }()
+
 	name, args := restartCommand(cluster)
 	if err := restarterRunCmd(ctx, name, args...); err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: %w%s", PGServiceName(cluster), err, unitDiagnosis(ctx, PGServiceName(cluster)))
 	}
+
 	if err := restarterWaitReady(ctx, spec.Port); err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: %w%s", PGServiceName(cluster), err, unitDiagnosis(ctx, PGServiceName(cluster)))
 	}
@@ -82,9 +86,11 @@ func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Du
 	if err != nil {
 		return time.Since(start), fmt.Errorf("restart %s: reading pending_restart: %w", PGServiceName(cluster), err)
 	}
+
 	if len(pending) > 0 {
 		return time.Since(start), fmt.Errorf("restart %s: still pending a restart after it: %s", PGServiceName(cluster), strings.Join(pending, ", "))
 	}
+
 	return time.Since(start), nil
 }
 
@@ -92,16 +98,20 @@ func (r postgresRestarter) Restart(ctx context.Context, cluster string) (time.Du
 // state and result, and its last journal lines, so the run log says why.
 func unitDiagnosis(ctx context.Context, unit string) string {
 	ctx = context.WithoutCancel(ctx)
+
 	var parts []string
 	if out, err := Probe(ctx, "systemctl", "show", "--property=ActiveState,SubState,Result", unit+".service"); err == nil && out != "" {
 		parts = append(parts, "unit "+strings.Join(strings.Fields(out), " "))
 	}
+
 	if out, err := Probe(ctx, "journalctl", "--unit", unit+".service", "--lines=5", "--no-pager", "--output=cat"); err == nil && out != "" {
 		parts = append(parts, "journal: "+strings.Join(strings.Split(out, "\n"), " | "))
 	}
+
 	if len(parts) == 0 {
 		return ""
 	}
+
 	return " (" + strings.Join(parts, "; ") + ")"
 }
 
@@ -109,14 +119,17 @@ func unitDiagnosis(ctx context.Context, unit string) string {
 // timeout passes.
 func waitReady(ctx context.Context, port int) error {
 	deadline := time.Now().Add(pgReadyTimeout)
+
 	for {
 		err := runCmd(ctx, "pg_isready", "-q", "-h", PGSocketDir, "-p", strconv.Itoa(port))
 		if err == nil {
 			return nil
 		}
+
 		if time.Now().After(deadline) {
 			return fmt.Errorf("postgresql did not become ready within 60s: %w", err)
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -132,13 +145,16 @@ func runCmd(ctx context.Context, name string, args ...string) error {
 	cmd.Env = probeEnv
 	out := &tailBuffer{max: cmdOutputTail}
 	cmd.Stdout = out
+
 	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
 		if tail := strings.TrimSpace(out.String()); tail != "" {
 			return fmt.Errorf("%w: %s", err, strings.Join(strings.Fields(tail), " "))
 		}
+
 		return err
 	}
+
 	return nil
 }
 
@@ -153,20 +169,24 @@ type tailBuffer struct {
 func (t *tailBuffer) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	t.buf = append(t.buf, p...)
 	if over := len(t.buf) - t.max; over > 0 {
 		t.buf = append(t.buf[:0], t.buf[over:]...)
 		t.cut = true
 	}
+
 	return len(p), nil
 }
 
 func (t *tailBuffer) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	if t.cut {
 		return "…" + string(t.buf)
 	}
+
 	return string(t.buf)
 }
 
@@ -197,9 +217,11 @@ func (r postgresRestarter) NeedsRestart(ctx context.Context, cluster string) (bo
 	if !ok {
 		return false, fmt.Errorf("cluster %s is not in cluster.toml", cluster)
 	}
+
 	pending, err := restarterPendingCheck(ctx, ClusterPG(spec))
 	if err != nil {
 		return false, err
 	}
+
 	return len(pending) > 0, nil
 }

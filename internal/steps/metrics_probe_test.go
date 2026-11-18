@@ -14,24 +14,31 @@ import (
 // query, then GetConnectionString rebuilds the URL with url.URL.String).
 func exporterConnString(t *testing.T, target string) string {
 	t.Helper()
+
 	if !strings.HasPrefix(target, "postgresql://") {
 		t.Fatalf("target %q is not a URL: postgres_exporter would parse it as key=value and put the socket path in the URL authority", target)
 	}
+
 	u, err := url.Parse(target)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	q := u.Query()
+
 	user := u.User.Username()
 	if user == "" {
 		user = q.Get("user")
 	}
+
 	q.Del("user")
 	q.Del("password")
+
 	out := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawQuery: q.Encode()}
 	if user != "" {
 		out.User = url.UserPassword(user, "")
 	}
+
 	return out.String()
 }
 
@@ -42,6 +49,7 @@ func TestPostgresProbeReachesSocket(t *testing.T) {
 	cfg := metricsCluster("app", "other")
 	conf := string(render.MetricsConf(MetricsLocations(cfg), MetricsHtpasswdPath, nil))
 	re := regexp.MustCompile(`location = /metrics/postgres/other \{[^}]*set \$args "([^"]*)";[^}]*proxy_pass http://127\.0\.0\.1:9187/probe;`)
+
 	m := re.FindStringSubmatch(conf)
 	if m == nil {
 		t.Fatalf("no probe location for other:\n%s", conf)
@@ -51,9 +59,11 @@ func TestPostgresProbeReachesSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("args %q: %v", m[1], err)
 	}
+
 	if len(q) != 1 || q.Get("auth_module") != "" {
 		t.Errorf("probe args %v: want target only (no auth_module, peer auth)", q)
 	}
+
 	conn := exporterConnString(t, q.Get("target"))
 	// lib/pq parses the connection string with url.Parse; a socket path in
 	// the authority comes out as %2F, which it refuses.
@@ -61,16 +71,20 @@ func TestPostgresProbeReachesSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lib/pq would refuse %q: %v", conn, err)
 	}
+
 	if u.Host != "" {
 		t.Errorf("host %q in the authority: lib/pq would dial TCP", u.Host)
 	}
+
 	got := u.Query()
 	if got.Get("host") != PGSocketDir || got.Get("port") != "5434" || got.Get("sslmode") != "disable" || got.Get("connect_timeout") != "5" {
 		t.Errorf("connection %q: want the socket %s, port 5434", conn, PGSocketDir)
 	}
+
 	if u.Path != "/other" || u.User.Username() != "vaire_monitor" {
 		t.Errorf("connection %q: want database other as vaire_monitor", conn)
 	}
+
 	if p, _ := u.User.Password(); p != "" || got.Get("password") != "" {
 		t.Errorf("connection %q carries a password; vaire_monitor uses peer auth", conn)
 	}
@@ -90,6 +104,7 @@ func TestPostgresExporterUnitReachesSocket(t *testing.T) {
 	if !strings.Contains(unit, "\nUser=postgres_exporter\n") {
 		t.Errorf("postgres_exporter runs as another user:\n%s", unit)
 	}
+
 	assertExporterSandboxReachesSocket(t, unit)
 	assertExporterPeerAuth(t)
 }
@@ -98,7 +113,8 @@ func TestPostgresExporterUnitReachesSocket(t *testing.T) {
 // PostgreSQL socket and AF_UNIX reachable.
 func assertExporterSandboxReachesSocket(t *testing.T, unit string) {
 	t.Helper()
-	for _, line := range strings.Split(unit, "\n") {
+
+	for line := range strings.SplitSeq(unit, "\n") {
 		key, value, _ := strings.Cut(line, "=")
 		switch key {
 		case "RestrictAddressFamilies":
@@ -125,7 +141,8 @@ func assertExporterSandboxReachesSocket(t *testing.T, unit string) {
 // PostgreSQL socket directory.
 func assertSocketDirNotHidden(t *testing.T, line, value string) {
 	t.Helper()
-	for _, p := range strings.Fields(value) {
+
+	for p := range strings.FieldsSeq(value) {
 		p = strings.TrimLeft(p, "-+")
 		if strings.HasPrefix(PGSocketDir, p) || strings.HasPrefix("/run/postgresql", p) {
 			t.Errorf("%s hides %s", line, PGSocketDir)
@@ -137,10 +154,12 @@ func assertSocketDirNotHidden(t *testing.T, line, value string) {
 // vaire_monitor and pg_hba accepts its peer connection.
 func assertExporterPeerAuth(t *testing.T) {
 	t.Helper()
+
 	ident := string(render.Ident(metricsCluster("app")))
 	if !regexp.MustCompile(`(?m)^vaire\s+postgres_exporter\s+vaire_monitor$`).MatchString(ident) {
 		t.Errorf("pg_ident lacks postgres_exporter -> vaire_monitor:\n%s", ident)
 	}
+
 	if !regexp.MustCompile(`(?m)^local\s+all\s+vaire_monitor\s+peer map=vaire$`).MatchString(string(render.HBA())) {
 		t.Error("pg_hba lacks vaire_monitor's peer rule")
 	}

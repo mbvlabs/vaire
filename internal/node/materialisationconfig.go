@@ -24,21 +24,27 @@ func materialisationConfig(cfg config.Cluster, spec config.ClusterSpec, host hos
 	if spec.Follows == "" {
 		return out, nil
 	}
+
 	src, ok := cfg.ClusterByName(spec.Follows)
 	if !ok {
 		return nil, fmt.Errorf("cannot resolve follower source for %s", spec.Name)
 	}
+
 	floors, err := steps.FollowerFloors(cfg, spec, src, host)
 	if err != nil {
 		return nil, err
 	}
+
 	var conf strings.Builder
 	conf.WriteString("# managed recovery floors\n")
+
 	for _, floor := range floors {
 		fmt.Fprintf(&conf, "%s = %s\n", floor.Name, floor.Value)
 	}
+
 	follower := conf.String()
 	out.Follower = &follower
+
 	return out, nil
 }
 

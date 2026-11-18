@@ -27,10 +27,12 @@ func SCRAMVerifier(password string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
+
 	salted, err := pbkdf2.Key(sha256.New, password, salt, SCRAMIterations, sha256.Size)
 	if err != nil {
 		return "", err
 	}
+
 	clientKey := hmacSHA256(salted, "Client Key")
 	storedKey := sha256.Sum256(clientKey)
 	serverKey := hmacSHA256(salted, "Server Key")
@@ -41,12 +43,14 @@ func SCRAMVerifier(password string) (string, error) {
 		base64.StdEncoding.EncodeToString(serverKey),
 	)
 	secrets.Add(verifier)
+
 	return verifier, nil
 }
 
 func hmacSHA256(key []byte, message string) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(message))
+
 	return mac.Sum(nil)
 }
 

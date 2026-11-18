@@ -56,6 +56,7 @@ func (l Local) Query(ctx context.Context, db, sql string, vars map[string]string
 	if err != nil {
 		return nil, err
 	}
+
 	return parseCSV(out)
 }
 
@@ -66,6 +67,7 @@ func (l Local) QueryRows(ctx context.Context, db, sql string, vars map[string]st
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return parseCSVRows(out)
 }
 
@@ -75,24 +77,32 @@ func (l Local) run(ctx context.Context, db, sql string, vars map[string]string, 
 	if l.Timeout > 0 {
 		timeout = l.Timeout
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
 	name, args, err := l.command(db, vars, csvOut)
 	if err != nil {
 		return nil, err
 	}
+
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(sql)
+
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
+
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		msg := secrets.Redact(strings.TrimSpace(stderr.String()))
 		if msg == "" {
 			return nil, fmt.Errorf("psql: %w", err)
 		}
+
 		return nil, errors.New(msg)
 	}
+
 	return stdout.Bytes(), nil
 }
 
@@ -103,33 +113,43 @@ func (l Local) command(db string, vars map[string]string, csvOut bool) (string, 
 	if l.Host != "" {
 		args = append(args, "-h", l.Host)
 	}
+
 	if l.Port != 0 {
 		args = append(args, "-p", strconv.Itoa(l.Port))
 	}
+
 	if l.User != "" {
 		args = append(args, "-U", l.User)
 	}
+
 	names := make([]string, 0, len(vars))
 	for name := range vars {
 		if !varNamePattern.MatchString(name) {
 			return "", nil, fmt.Errorf("psql variable name %q is invalid", name)
 		}
+
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	for _, name := range names {
 		if strings.ContainsAny(vars[name], "\n\r") {
 			return "", nil, fmt.Errorf("psql variable %s contains a newline", name)
 		}
+
 		args = append(args, "-v", name+"="+vars[name])
 	}
+
 	if csvOut {
 		args = append(args, "--csv")
 	}
+
 	args = append(args, "-d", db, "-f", "-")
 	if l.AsRoot {
 		return "psql", args[4:], nil
 	}
+
 	return "runuser", args, nil
 }
 
@@ -139,9 +159,11 @@ func parseCSV(raw []byte) ([]map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if header == nil {
 		return nil, nil
 	}
+
 	out := make([]map[string]string, 0, len(records))
 	for _, record := range records {
 		row := make(map[string]string, len(header))
@@ -150,8 +172,10 @@ func parseCSV(raw []byte) ([]map[string]string, error) {
 				row[name] = record[i]
 			}
 		}
+
 		out = append(out, row)
 	}
+
 	return out, nil
 }
 
@@ -161,9 +185,11 @@ func parseCSVRows(raw []byte) ([]string, [][]*string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+
 	if header == nil {
 		return nil, nil, nil
 	}
+
 	rows := make([][]*string, 0, len(records))
 	for _, record := range records {
 		row := make([]*string, len(header))
@@ -173,20 +199,25 @@ func parseCSVRows(raw []byte) ([]string, [][]*string, error) {
 				row[i] = &v
 			}
 		}
+
 		rows = append(rows, row)
 	}
+
 	return header, rows, nil
 }
 
 func readCSV(raw []byte) ([]string, [][]string, error) {
 	reader := csv.NewReader(bytes.NewReader(raw))
 	reader.FieldsPerRecord = -1
+
 	records, err := reader.ReadAll()
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse psql output: %w", err)
 	}
+
 	if len(records) == 0 {
 		return nil, nil, nil
 	}
+
 	return records[0], records[1:], nil
 }

@@ -57,10 +57,12 @@ func materialisationContinuationLeaseFrom(ctx context.Context) *materialisationC
 	if ctx == nil {
 		return nil
 	}
+
 	l, _ := ctx.Value(materialisationContinuationLeaseKey{}).(*materialisationContinuationLease)
 	if !l.valid() {
 		return nil
 	}
+
 	return l
 }
 
@@ -77,17 +79,20 @@ func issueMaterialisationContinuationLease(env *Env, req rpc.Request) *materiali
 	if env == nil || req.DryRun || req.Method != "apply" {
 		return nil
 	}
+
 	target, ok := applyContinuationTarget(req.Params)
 	if !ok || env.LockMode != engine.LockExclusive || env.ClusterLock != target ||
 		env.ClusterLockMode != engine.LockExclusive || !forkContinuationCandidate(env.Cluster, target) {
 		return nil
 	}
+
 	l := &materialisationContinuationLease{
 		env: env, requestID: req.RequestID, target: target,
 		global: engine.LockExclusive, cluster: engine.LockExclusive, dispatcher: true,
 	}
 	l.self = l
 	l.active.Store(true)
+
 	return l
 }
 
@@ -96,15 +101,18 @@ func applyContinuationTarget(raw json.RawMessage) (string, bool) {
 	if db == "" {
 		return "", false
 	}
+
 	var p struct {
 		Steps []string `json:"steps"`
 	}
 	if len(raw) != 0 && json.Unmarshal(raw, &p) != nil {
 		return "", false
 	}
+
 	if len(p.Steps) != 0 {
 		return "", false
 	}
+
 	return db, true
 }
 
@@ -115,7 +123,9 @@ func validForkContinuationRequest(req rpc.Request, target string) bool {
 	if req.DryRun || req.Method != "apply" {
 		return false
 	}
+
 	db, ok := applyContinuationTarget(req.Params)
+
 	return ok && db == target
 }
 
@@ -124,36 +134,45 @@ func forkContinuationCandidate(cfg config.Cluster, db string) bool {
 	if !ok || spec.IsFollower() {
 		return false
 	}
+
 	records, err := backup.LoadRecords()
 	if err != nil {
 		return false
 	}
+
 	f, ok := records.ActivationFenceFor(db)
 	if !ok || f.Kind != "fork" || f.OperationID == "" {
 		return false
 	}
+
 	switch f.Phase {
 	case fencePhaseAdopting, fencePhaseAdopted, fencePhaseRouting:
 	default:
 		return false
 	}
+
 	if err := verifyFenceInstance(f, db); err != nil {
 		return false
 	}
+
 	if err := verifyFencePaths(cfg, f, db); err != nil {
 		return false
 	}
+
 	if f.TargetStanza == "" || f.TargetStanza != spec.Stanza || f.NewStanza != spec.Stanza ||
 		f.OldStanza == "" || f.OldStanza == f.NewStanza {
 		return false
 	}
+
 	o, found, err := readMaterialisation(db, cfg.Server.DataRoot)
 	if err != nil {
 		return false
 	}
+
 	if !found {
 		return f.Phase == fencePhaseRouting
 	}
+
 	return forkContinuationOwnershipShape(cfg, f, spec, o) == nil
 }
 
@@ -172,15 +191,19 @@ func forkContinuationOwnershipShape(cfg config.Cluster, f backup.ActivationFence
 		o.TemporaryPort > config.TemporaryPortMax {
 		return refuse()
 	}
+
 	if len(f.Renames) != 1 || f.Renames[o.Source] != o.Target {
 		return refuse()
 	}
+
 	if f.TargetStanza != spec.Stanza || f.NewStanza != spec.Stanza || spec.IsFollower() {
 		return refuse()
 	}
+
 	if !validForkContinuationState(f.Phase, o) {
 		return refuse()
 	}
+
 	return nil
 }
 
@@ -195,6 +218,7 @@ func validForkContinuationState(fencePhase string, o materialisationOwnership) b
 		return o.Phase == materialisationProvisioning &&
 			(o.ArtifactStage == materialisationRegistered || o.ArtifactStage == materialisationProvisioned)
 	}
+
 	return false
 }
 
@@ -219,6 +243,7 @@ func (s *forkContinuationScope) close() {
 	if s == nil || s.artifacts == nil {
 		return
 	}
+
 	s.artifacts.close()
 	s.artifacts = nil
 }
@@ -233,10 +258,12 @@ func forkContinuationScopeFrom(ctx context.Context) *forkContinuationScope {
 	if ctx == nil {
 		return nil
 	}
+
 	s, _ := ctx.Value(forkContinuationScopeKey{}).(*forkContinuationScope)
 	if s == nil || s.self != s || s.lease == nil || !s.lease.valid() {
 		return nil
 	}
+
 	return s
 }
 
@@ -265,41 +292,52 @@ func openForkContinuation(ctx context.Context, cfg config.Cluster, env *Env, lea
 		lease.requestID != env.Req.RequestID || !validForkContinuationRequest(env.Req, lease.target) {
 		return nil, materialisationIncomplete(leaseTarget(lease), nil)
 	}
+
 	db := lease.target
+
 	f, spec, err := loadForkContinuationFence(cfg, db)
 	if err != nil {
 		return nil, err
 	}
+
 	o, found, err := readMaterialisation(db, cfg.Server.DataRoot)
 	if err != nil {
 		return nil, materialisationIncomplete(db, nil)
 	}
+
 	if !found {
 		return openAbsentForkContinuation(cfg, env, lease, db, f, spec)
 	}
+
 	if err := forkContinuationOwnershipShape(cfg, f, spec, o); err != nil {
 		return nil, err
 	}
+
 	if err := verifyForkContinuationOwner(ctx, cfg, spec, o); err != nil {
 		return nil, err
 	}
+
 	src, err := forkContinuationAdoptionSource(cfg, f, o)
 	if err != nil {
 		return nil, err
 	}
+
 	artifacts, err := openForkContinuationArtifacts(cfg.Server.DataRoot, db, o)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := forkContinuationReservationForPhase(ctx, o); err != nil {
 		artifacts.close()
 		return nil, materialisationIncomplete(db, &o)
 	}
+
 	s := &forkContinuationScope{
 		lease: lease, env: env, target: db, operationID: f.OperationID,
 		fence: f, spec: spec, owner: o, hasOwner: true, source: src, artifacts: artifacts,
 	}
 	s.self = s
+
 	return s, nil
 }
 
@@ -308,10 +346,12 @@ func loadForkContinuationFence(cfg config.Cluster, db string) (backup.Activation
 	if err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(db, nil)
 	}
+
 	fence, ok := recs.ActivationFenceFor(db)
 	if !ok || fence.Kind != "fork" || fence.OperationID == "" {
 		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(db, nil)
 	}
+
 	return verifyActivationFence(cfg, db, fence.OperationID, "fork", fencePhaseAdopting, fencePhaseAdopted, fencePhaseRouting)
 }
 
@@ -319,9 +359,11 @@ func openAbsentForkContinuation(cfg config.Cluster, env *Env, lease *materialisa
 	if f.Phase != fencePhaseRouting {
 		return nil, materialisationIncomplete(db, nil)
 	}
+
 	if err := materialisationAbsentDurableForRoot(cfg.Server.DataRoot, db); err != nil {
 		return nil, err
 	}
+
 	return &forkContinuationScope{
 		lease: lease, env: env, target: db, operationID: f.OperationID,
 		fence: f, spec: spec,
@@ -338,6 +380,7 @@ func verifyForkContinuationOwner(ctx context.Context, cfg config.Cluster, spec c
 			return err
 		}
 	}
+
 	return verifyForkContinuationJob(ctx, o)
 }
 
@@ -345,6 +388,7 @@ func forkContinuationAdoptionSource(cfg config.Cluster, f backup.ActivationFence
 	if o.Phase != materialisationCopying {
 		return config.ClusterSpec{}, nil
 	}
+
 	return verifyForkAdoptionSource(cfg, f, o)
 }
 
@@ -353,18 +397,22 @@ func openForkContinuationArtifacts(dataRoot, db string, o materialisationOwnersh
 	if err != nil {
 		return nil, materialisationIncomplete(db, &o)
 	}
+
 	artifacts, err := openMaterialisationArtifacts(db, dataRoot, uid)
 	if err != nil {
 		return nil, materialisationIncomplete(db, &o)
 	}
+
 	if artifacts.owner != o {
 		artifacts.close()
 		return nil, materialisationIncomplete(db, &o)
 	}
+
 	if err := artifacts.validate(); err != nil {
 		artifacts.close()
 		return nil, materialisationIncomplete(db, &o)
 	}
+
 	return artifacts, nil
 }
 
@@ -375,6 +423,7 @@ func forkContinuationReservationForPhase(ctx context.Context, o materialisationO
 	if o.Phase == materialisationCopying {
 		expect = forkReservationAny
 	}
+
 	return checkForkContinuationReservation(ctx, o, expect)
 }
 
@@ -382,6 +431,7 @@ func leaseTarget(l *materialisationContinuationLease) string {
 	if l == nil {
 		return ""
 	}
+
 	return l.target
 }
 
@@ -389,38 +439,48 @@ func (s *forkContinuationScope) reload(ctx context.Context, cfg config.Cluster) 
 	if s == nil || s.self != s || s.artifacts == nil || s.owner != s.artifacts.owner {
 		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(s.target, nil)
 	}
+
 	if !s.lease.valid() || s.lease.env != s.env || s.lease.target != s.target ||
 		s.lease.global != engine.LockExclusive || s.lease.cluster != engine.LockExclusive {
 		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(s.target, nil)
 	}
+
 	f, spec, err := verifyActivationFence(cfg, s.target, s.operationID, "fork", fencePhaseAdopting, fencePhaseAdopted, fencePhaseRouting)
 	if err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
+
 	current, found, err := readMaterialisation(s.target, cfg.Server.DataRoot)
 	if err != nil || !found || current != s.artifacts.owner {
 		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(s.target, &s.artifacts.owner)
 	}
+
 	if err := forkContinuationOwnershipShape(cfg, f, spec, current); err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
+
 	if current.Phase == materialisationProvisioning {
 		if err := verifyForkTargetRegistration(cfg, spec); err != nil {
 			return backup.ActivationFence{}, config.ClusterSpec{}, err
 		}
 	}
+
 	if err := s.artifacts.validate(); err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(s.target, &current)
 	}
+
 	if err := verifyForkContinuationJob(ctx, current); err != nil {
 		return backup.ActivationFence{}, config.ClusterSpec{}, err
 	}
+
 	if current.Phase != materialisationCopying {
 		if err := checkForkContinuationReservation(ctx, current, forkReservationAbsent); err != nil {
 			return backup.ActivationFence{}, config.ClusterSpec{}, materialisationIncomplete(s.target, &current)
 		}
 	}
+
 	s.fence, s.spec = f, spec
+
 	return f, spec, nil
 }
 
@@ -432,19 +492,24 @@ func verifyForkContinuationJob(ctx context.Context, o materialisationOwnership) 
 	if err != nil || forkAbsenceActiveLease(o.Target) || forkContinuationForeignActiveJob(st, o.Target, o.Job) {
 		return materialisationIncomplete(o.Target, &o)
 	}
+
 	job, err := materialisationJob(st, o.Job)
 	if err != nil || !forkContinuationJobShape(job, o) {
 		return materialisationIncomplete(o.Target, &o)
 	}
+
 	if !job.Final() {
 		original := job
+
 		if err := forkContinuationReapJob(ctx, o.Job); err != nil {
 			return materialisationIncomplete(o.Target, &o)
 		}
+
 		st, err = forkAbsenceState()
 		if err != nil {
 			return materialisationIncomplete(o.Target, &o)
 		}
+
 		job, err = materialisationJob(st, o.Job)
 		if err != nil || job.ID != original.ID || job.Job != original.Job || job.DB != original.DB ||
 			job.Unit != original.Unit || job.PID != original.PID || job.InvocationID != original.InvocationID ||
@@ -452,9 +517,11 @@ func verifyForkContinuationJob(ctx context.Context, o materialisationOwnership) 
 			return materialisationIncomplete(o.Target, &o)
 		}
 	}
+
 	if !forkContinuationJobShape(job, o) || !job.Final() {
 		return materialisationIncomplete(o.Target, &o)
 	}
+
 	return nil
 }
 
@@ -468,11 +535,13 @@ func forkContinuationForeignActiveJob(st engine.State, target, id string) bool {
 			return true
 		}
 	}
+
 	for _, rec := range st.RetainedJobs {
 		if rec.DB == target && !rec.Final() && rec.ID != id {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -483,14 +552,18 @@ func verifyForkAdoptionSource(cfg config.Cluster, f backup.ActivationFence, o ma
 	if !ok || src.Port < 1 || src.Stanza == "" || src.Stanza != o.Stanza || o.Stanza != f.OldStanza {
 		return config.ClusterSpec{}, materialisationIncomplete(o.Target, &o)
 	}
+
 	dir := filepath.Join(materialisationConfigRoot, o.Source)
+
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return config.ClusterSpec{}, materialisationIncomplete(o.Target, &o)
 	}
+
 	if info, err := os.Lstat(filepath.Join(dir, "postgresql.conf")); err != nil || !info.Mode().IsRegular() {
 		return config.ClusterSpec{}, materialisationIncomplete(o.Target, &o)
 	}
+
 	return src, nil
 }
 
@@ -509,36 +582,44 @@ func checkForkContinuationReservation(ctx context.Context, o materialisationOwne
 	if o.TemporaryPort < config.TemporaryPortMin || o.TemporaryPort > config.TemporaryPortMax {
 		return errors.New("invalid temporary reservation")
 	}
+
 	path := filepath.Join(forkContinuationReservationDir(), o.Target)
 	_, err := os.Lstat(path)
+
 	present := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+
 	if present {
 		if err := reservationBirthEvidence(o.ReservationIdentity); err != nil {
 			return err
 		}
 	}
+
 	unlock, err := forkReservationLock(ctx, o.Target, o.TemporaryPort, present)
 	if err != nil || unlock == nil {
 		return errors.New("reservation is not exactly owned")
 	}
 	defer unlock()
+
 	info, err := os.Lstat(path)
 	if present {
 		if err != nil {
 			return errors.New("reservation disappeared")
 		}
+
 		if err := verifyReservationBirth(path, info, o.ReservationIdentity); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("reservation appeared")
 	}
+
 	if expect == forkReservationAbsent && present {
 		return errors.New("reservation must be absent")
 	}
+
 	return nil
 }
 
@@ -546,9 +627,11 @@ func reservationBirthEvidence(id backup.ReservationIdentity) error {
 	if id.Inode == 0 || len(id.Digest) != 64 {
 		return errors.New("missing reservation birth evidence")
 	}
+
 	if _, err := hex.DecodeString(id.Digest); err != nil {
 		return errors.New("invalid reservation birth evidence")
 	}
+
 	return nil
 }
 
@@ -560,14 +643,17 @@ func verifyReservationBirth(path string, info os.FileInfo, id backup.Reservation
 		st.Uid != id.UID || info.Size() > 256 {
 		return errors.New("reservation replaced")
 	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil || len(raw) > 256 {
 		return errors.New("reservation unreadable")
 	}
+
 	sum := sha256.Sum256(raw)
 	if hex.EncodeToString(sum[:]) != id.Digest {
 		return errors.New("reservation content replaced")
 	}
+
 	return nil
 }
 
@@ -575,12 +661,15 @@ func materialisationAbsentDurableForRoot(dataRoot, target string) error {
 	if _, found, err := readMaterialisation(target, dataRoot); err != nil || found {
 		return materialisationIncomplete(target, nil)
 	}
+
 	if err := materialisationSyncStateDir(); err != nil {
 		return err
 	}
+
 	if _, found, err := readMaterialisation(target, dataRoot); err != nil || found {
 		return materialisationIncomplete(target, nil)
 	}
+
 	return nil
 }
 
@@ -591,10 +680,12 @@ func resumeForkContinuation(ctx context.Context, env *Env, s *forkContinuationSc
 	if s == nil || s.self != s || s.env != env || !s.hasOwner {
 		return Result{}, materialisationIncomplete("", nil)
 	}
+
 	cfg := env.Cluster
 	if _, _, err := s.reload(ctx, cfg); err != nil {
 		return Result{}, err
 	}
+
 	switch {
 	case s.fence.Phase == fencePhaseAdopting && s.owner.Phase == materialisationCopying:
 		if err := s.finishAdoption(ctx, env); err != nil {
@@ -604,6 +695,7 @@ func resumeForkContinuation(ctx context.Context, env *Env, s *forkContinuationSc
 		if err := s.verifyAdopted(env); err != nil {
 			return Result{}, err
 		}
+
 		if err := s.advanceToAdopted(ctx, env); err != nil {
 			return Result{}, err
 		}
@@ -613,6 +705,7 @@ func resumeForkContinuation(ctx context.Context, env *Env, s *forkContinuationSc
 	default:
 		return Result{}, materialisationIncomplete(s.target, &s.owner)
 	}
+
 	return s.provisionAndSettle(ctx, env)
 }
 
@@ -621,15 +714,20 @@ func (s *forkContinuationScope) finishAdoption(ctx context.Context, env *Env) er
 	if err := forkContinuationAdopt(ctx, env.Cluster, env, s.owner, s.source, s.spec, guard); err != nil {
 		return err
 	}
+
 	if err := verifyForkTargetRegistration(env.Cluster, s.spec); err != nil {
 		return err
 	}
+
 	next := s.artifacts.owner
+
 	next.Phase, next.Reason = materialisationProvisioning, ""
 	if err := s.artifacts.persistMaterialisation(next); err != nil {
 		return err
 	}
+
 	s.owner = s.artifacts.owner
+
 	return s.advanceToAdopted(ctx, env)
 }
 
@@ -646,7 +744,9 @@ func (s *forkContinuationScope) advanceToAdopted(ctx context.Context, env *Env) 
 	}); err != nil {
 		return err
 	}
+
 	_, _, err := s.reload(ctx, env.Cluster)
+
 	return err
 }
 
@@ -657,10 +757,12 @@ func verifyForkTargetRegistration(cfg config.Cluster, spec config.ClusterSpec) e
 			output.ExitPrecondition, "Retry vaire apply --db "+spec.Name+"; the fork fence stays adopting.").
 			WithDetails(map[string]any{"reason": "activation_registration_missing", "database": spec.Name})
 	}
+
 	data, err := followRegisteredData(spec.Name)
 	if err != nil {
 		return err
 	}
+
 	if data == "" || data != cfg.Server.DataDirectory(spec.Name) {
 		return output.NewError(output.CodePrecondition,
 			spec.Name+"'s registration does not name its deterministic data directory",
@@ -677,6 +779,7 @@ func verifyForkTargetRegistration(cfg config.Cluster, spec config.ClusterSpec) e
 			output.ExitPrecondition, "Retry the owning operation; vaire will not advance a temporary registration as adopted.").
 			WithDetails(map[string]any{"reason": "activation_registration_mismatch", "database": spec.Name})
 	}
+
 	return nil
 }
 
@@ -689,12 +792,15 @@ func verifyForkRoutingBoundary(cfg config.Cluster, db, opID string) error {
 	if err != nil {
 		return err
 	}
+
 	if err := verifyForkTargetRegistration(cfg, spec); err != nil {
 		return err
 	}
+
 	if err := materialisationAbsentDurableForRoot(cfg.Server.DataRoot, f.Database); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -708,14 +814,17 @@ func prepareForkRoutingFences(cfg config.Cluster, dbs []string) error {
 		if err != nil {
 			return materialisationIncomplete(db, nil)
 		}
+
 		f, ok := recs.ActivationFenceFor(db)
 		if !ok || f.Kind != "fork" || f.Phase != fencePhaseRouting {
 			continue
 		}
+
 		if err := verifyForkRoutingBoundary(cfg, db, f.OperationID); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -730,32 +839,40 @@ func (g *forkAdoptionGuard) GuardFollowerResume(ctx context.Context, p backup.Ma
 	if s == nil || s.self != s || effect == nil || final != s.spec.Port || s.source.Name == "" {
 		return materialisationIncomplete(s.target, nil)
 	}
+
 	o := s.artifacts.owner
 	if p.Name != o.Target || p.Source != o.Source || p.DataDir != o.DataPath ||
 		p.ConfigDir != o.RegisteredPath || p.Port != 0 || p.SourcePort != g.src.Port {
 		return materialisationIncomplete(s.target, &o)
 	}
+
 	if _, _, err := s.reload(ctx, g.cfg); err != nil {
 		return err
 	}
+
 	if err := checkForkContinuationReservation(ctx, o, forkReservationAny); err != nil {
 		return materialisationIncomplete(s.target, &o)
 	}
+
 	if err := s.artifacts.validate(); err != nil {
 		return materialisationIncomplete(s.target, &o)
 	}
+
 	effectErr := effect(backup.FollowerResumeEvidence{
 		TemporaryPort: o.TemporaryPort, ReservationIdentity: o.ReservationIdentity,
 	})
 	if effectErr != nil {
 		return errors.Join(effectErr, s.artifacts.validate())
 	}
+
 	if err := s.artifacts.validate(); err != nil {
 		return materialisationIncomplete(s.target, &o)
 	}
+
 	if err := verifyForkContinuationJob(ctx, o); err != nil {
 		return err
 	}
+
 	return checkForkContinuationReservation(ctx, o, forkReservationAbsent)
 }
 
@@ -763,6 +880,7 @@ var forkContinuationAdopt = func(ctx context.Context, cfg config.Cluster, env *E
 	m := backup.ResumeMaterialisedWithHost(cfg.Server.DataRoot, o.Target, o.Source, src.Port,
 		runtimeFor(env, false).Shell, "db-fork", env.Report, materialisationConfigRoot, forkContinuationResumeHost())
 	_, err := m.AdoptResumedFollower(ctx, spec.Port, guard)
+
 	return err
 }
 
@@ -770,12 +888,15 @@ var forkContinuationResumeHost = func() backup.FollowerResumeHost { return nil }
 
 func (s *forkContinuationScope) provisionAndSettle(ctx context.Context, env *Env) (Result, error) {
 	cfg := env.Cluster
+
 	if s.owner.Phase != materialisationProvisioning || s.fence.Phase != fencePhaseAdopted {
 		return Result{}, materialisationIncomplete(s.target, &s.owner)
 	}
+
 	if err := verifyForkTargetRegistration(cfg, s.spec); err != nil {
 		return Result{}, err
 	}
+
 	plan, err := copyPlanFromFence(cfg, s.spec, s.fence)
 	if err != nil {
 		return Result{}, err
@@ -788,57 +909,73 @@ func (s *forkContinuationScope) provisionAndSettle(ctx context.Context, env *Env
 			output.ExitPrecondition, "The continuation was not started. Retry after fixing the requirement history store.").
 			WithDetails(map[string]any{"reason": "extension_history_capture_failed", "database": s.target})
 	}
+
 	rt := runtimeFor(env, false)
 	if err := prepareCopyExtensions(ctx, plan, rt, env.Report); err != nil {
 		return Result{}, err
 	}
+
 	cfg, settingsWarnings, err := persistCopySettings(s.spec.Name, plan.Plan, s.spec.DatabaseName())
 	if err != nil {
 		return Result{}, err
 	}
+
 	spec, _ := cfg.ClusterByName(s.target)
+
 	dataDir := cfg.Server.DataDirectory(s.target)
 	if _, _, err := backup.InstallCopyPlanGuard(liveCopyGuardEndpoint(spec).ConfDir, dataDir, plan.Plan); err != nil {
 		return Result{}, err
 	}
+
 	if err := s.artifacts.validate(); err != nil {
 		return Result{}, materialisationIncomplete(s.target, &s.owner)
 	}
+
 	if err := forkProvisionOwned(ctx, cfg, rt, s.target, "", env.Report); err != nil {
 		return Result{}, err
 	}
+
 	if err := s.artifacts.validate(); err != nil {
 		return Result{}, materialisationIncomplete(s.target, &s.owner)
 	}
+
 	cfg, more, err := completeForkActivation(ctx, spec, s.fence, plan, rt, env.Report)
 	if err != nil {
 		return Result{}, err
 	}
+
 	env.Cluster = cfg
 	if _, _, err := s.reload(ctx, cfg); err != nil {
 		return Result{}, err
 	}
+
 	res, err := s.finishRouting(ctx, env)
 	if len(settingsWarnings) != 0 {
 		res.Warnings = append(settingsWarnings, res.Warnings...)
 	}
+
 	if len(more) != 0 {
 		res.Warnings = append(res.Warnings, more...)
 	}
+
 	return res, err
 }
 
 func (s *forkContinuationScope) finishRouting(ctx context.Context, env *Env) (Result, error) {
 	cfg := env.Cluster
+
 	f, spec, err := s.reload(ctx, cfg)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if f.Phase != fencePhaseRouting || s.owner.Phase != materialisationProvisioning {
 		return Result{}, materialisationIncomplete(s.target, &s.owner)
 	}
+
 	rt := runtimeFor(env, false)
 	verify := func() error { return forkVerifyProvision(ctx, cfg, rt, s.target) }
+
 	switch s.artifacts.owner.ArtifactStage {
 	case materialisationRegistered:
 		if err := s.artifacts.markMaterialisationProvisioned(verify); err != nil {
@@ -851,6 +988,7 @@ func (s *forkContinuationScope) finishRouting(ctx context.Context, env *Env) (Re
 	default:
 		return Result{}, materialisationIncomplete(s.target, &s.owner)
 	}
+
 	s.owner = s.artifacts.owner
 	// The durable routing checkpoint, the final actual registration, the
 	// pinned ownership and the exact reservation absence are re-proved
@@ -858,24 +996,30 @@ func (s *forkContinuationScope) finishRouting(ctx context.Context, env *Env) (Re
 	if _, _, err := verifyActivationFence(cfg, s.target, s.operationID, "fork", fencePhaseRouting); err != nil {
 		return Result{}, err
 	}
+
 	if err := verifyForkTargetRegistration(cfg, spec); err != nil {
 		return Result{}, err
 	}
+
 	if err := s.artifacts.validate(); err != nil {
 		return Result{}, materialisationIncomplete(s.target, &s.owner)
 	}
+
 	if err := verifyForkContinuationJob(ctx, s.owner); err != nil {
 		return Result{}, err
 	}
+
 	if err := s.artifacts.retireProvisioned(func(o materialisationOwnership) (func(), error) {
 		return forkReservationLock(ctx, o.Target, o.TemporaryPort, false)
 	}); err != nil {
 		return Result{}, err
 	}
+
 	s.hasOwner = false
 	if err := materialisationAbsentDurableForRoot(cfg.Server.DataRoot, s.target); err != nil {
 		return Result{}, err
 	}
+
 	return s.publishAndVerifyRouting(ctx, env, spec)
 }
 
@@ -883,16 +1027,19 @@ func (s *forkContinuationScope) publishAndVerifyRouting(ctx context.Context, env
 	if err := verifyForkRoutingBoundary(env.Cluster, spec.Name, s.operationID); err != nil {
 		return Result{}, err
 	}
+
 	if err := publishRouting(ctx, env.Cluster, runtimeFor(env, false), env.Report); err != nil {
 		return Result{Data: map[string]any{"database": spec.Name, "routing": "pending"},
 			Warnings: []output.Warning{{Code: "activation_routing_incomplete",
 				Message: spec.Name + "'s route is not published yet: " + err.Error()}}}, nil
 	}
+
 	if err := verifyRoutingFence(ctx, env.Cluster, spec, s.operationID, "fork"); err != nil {
 		return Result{Data: map[string]any{"database": spec.Name, "routing": "pending"},
 			Warnings: []output.Warning{{Code: "activation_routing_incomplete",
 				Message: spec.Name + " is not routed yet: " + err.Error()}}}, nil
 	}
+
 	return Result{Data: map[string]any{"database": spec.Name, "resumed": true}}, nil
 }
 
@@ -903,15 +1050,18 @@ func resumeForkRoutingOnly(ctx context.Context, env *Env, f backup.ActivationFen
 	if err := verifyForkRoutingBoundary(cfg, spec.Name, f.OperationID); err != nil {
 		return Result{}, err
 	}
+
 	if err := publishRouting(ctx, cfg, runtimeFor(env, false), env.Report); err != nil {
 		return Result{Data: map[string]any{"database": spec.Name, "routing": "pending"},
 			Warnings: []output.Warning{{Code: "activation_routing_incomplete",
 				Message: spec.Name + "'s route is not published yet: " + err.Error()}}}, nil
 	}
+
 	if err := verifyRoutingFence(ctx, cfg, spec, f.OperationID, "fork"); err != nil {
 		return Result{Data: map[string]any{"database": spec.Name, "routing": "pending"},
 			Warnings: []output.Warning{{Code: "activation_routing_incomplete",
 				Message: spec.Name + " is not routed yet: " + err.Error()}}}, nil
 	}
+
 	return Result{Data: map[string]any{"database": spec.Name, "resumed": true}}, nil
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
@@ -240,6 +241,7 @@ func (c Cluster) Master() (NodeSpec, bool) {
 			return n, true
 		}
 	}
+
 	return NodeSpec{}, false
 }
 
@@ -249,6 +251,7 @@ func (c Cluster) Hostname(node string) string {
 	if c.Domain == "" {
 		return ""
 	}
+
 	return node + "." + c.Domain
 }
 
@@ -259,6 +262,7 @@ func (c Cluster) MasterHostname() string {
 	if !ok {
 		return ""
 	}
+
 	return c.Hostname(n.Name)
 }
 
@@ -269,6 +273,7 @@ func (c Cluster) DatabaseHostname(db string) string {
 	if spec, ok := c.ClusterByName(db); ok && spec.Node != "" {
 		return c.Hostname(spec.Node)
 	}
+
 	return c.MasterHostname()
 }
 
@@ -279,6 +284,7 @@ func (c Cluster) Node(name string) (NodeSpec, bool) {
 			return n, true
 		}
 	}
+
 	return NodeSpec{}, false
 }
 
@@ -289,6 +295,7 @@ func (c Cluster) WGPrefixLen() int {
 	if err != nil {
 		return 16
 	}
+
 	return p.Bits()
 }
 
@@ -305,15 +312,19 @@ func LoadCluster(path string) (Cluster, error) {
 				"Initialise the cluster first with vaire server init.",
 			).WithDetails(map[string]any{"path": path})
 		}
+
 		return Cluster{}, configError(path, err)
 	}
+
 	cfg, err := ParseCluster(raw)
 	if err != nil {
 		return Cluster{}, configError(path, err)
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return Cluster{}, configError(path, err)
 	}
+
 	return cfg, nil
 }
 
@@ -324,25 +335,31 @@ func ParseCluster(raw []byte) (Cluster, error) {
 	if err != nil {
 		return Cluster{}, err
 	}
+
 	cfg := DefaultCluster()
 	dec := toml.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
+
 	if err := dec.Decode(&cfg); err != nil {
-		var strict *toml.StrictMissingError
-		if errors.As(err, &strict) {
+		if strict, ok := errors.AsType[*toml.StrictMissingError](err); ok {
 			return Cluster{}, unknownKeys(strict)
 		}
+
 		return Cluster{}, err
 	}
+
 	if cfg.Network.ClientAllowlist == nil {
 		cfg.Network.ClientAllowlist = []string{}
 	}
+
 	if cfg.Metrics.Allowlist == nil {
 		cfg.Metrics.Allowlist = []string{}
 	}
+
 	if cfg.Postgres.Settings == nil {
 		cfg.Postgres.Settings = map[string]string{}
 	}
+
 	return cfg, nil
 }
 
@@ -354,18 +371,23 @@ func dropLegacyVPS(raw []byte) ([]byte, error) {
 	if !HasLegacyVPS(raw) {
 		return raw, nil
 	}
+
 	var doc map[string]any
 	if err := toml.Unmarshal(raw, &doc); err != nil {
 		return raw, nil //nolint:nilerr // the strict decode reports the syntax error.
 	}
+
 	b, ok := doc["backup"].(map[string]any)
 	if !ok {
 		return raw, nil
 	}
+
 	if _, legacy := b["vps"]; !legacy {
 		return raw, nil
 	}
+
 	delete(b, "vps")
+
 	return toml.Marshal(doc)
 }
 
@@ -375,15 +397,19 @@ func HasLegacyVPS(raw []byte) bool {
 	if !bytes.Contains(raw, []byte("vps")) {
 		return false
 	}
+
 	var doc map[string]any
 	if err := toml.Unmarshal(raw, &doc); err != nil {
 		return false
 	}
+
 	b, ok := doc["backup"].(map[string]any)
 	if !ok {
 		return false
 	}
+
 	_, legacy := b["vps"]
+
 	return legacy
 }
 
@@ -393,6 +419,7 @@ func unknownKeys(strict *toml.StrictMissingError) error {
 	for _, e := range strict.Errors {
 		keys = append(keys, strings.Join(e.Key(), "."))
 	}
+
 	return fmt.Errorf("unknown keys: %s", strings.Join(keys, ", "))
 }
 
@@ -410,9 +437,11 @@ func stripTables(raw []byte, names ...string) []byte {
 	for _, name := range names {
 		drop["["+name+"]"] = true
 	}
+
 	lines := strings.Split(string(raw), "\n")
 	out := make([]string, 0, len(lines))
 	skipping := false
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") {
@@ -420,13 +449,17 @@ func stripTables(raw []byte, names ...string) []byte {
 			if idx := strings.Index(header, "]"); idx >= 0 {
 				header = header[:idx+1]
 			}
+
 			skipping = drop[header]
 		}
+
 		if skipping {
 			continue
 		}
+
 		out = append(out, line)
 	}
+
 	return []byte(strings.Join(out, "\n"))
 }
 
@@ -436,6 +469,7 @@ func (c Cluster) Encode() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return append([]byte("# managed by vaire: change it with vaire config set or vaire config edit\n"), raw...), nil
 }
 
@@ -479,16 +513,16 @@ var reservedSettingPrefixes = []string{"ssl", "archive_", "include", "primary_",
 
 // isReservedSetting reports whether key is one vaire writes itself.
 func isReservedSetting(key string) bool {
-	for _, name := range reservedSettings {
-		if key == name {
-			return true
-		}
+	if slices.Contains(reservedSettings, key) {
+		return true
 	}
+
 	for _, prefix := range reservedSettingPrefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -503,6 +537,7 @@ func (c Cluster) Validate() error { return c.ValidateFor(ScopeFull) }
 // only matter once the database runs, so a Phase 1 file still validates.
 func (c Cluster) ValidateFor(scope Scope) error {
 	var problems []string
+
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 	c.validateHeader(add)
 	subnet := c.validateTransport(add)
@@ -510,9 +545,11 @@ func (c Cluster) ValidateFor(scope Scope) error {
 	c.validateExposure(add)
 	c.validateNodes(add, subnet)
 	c.validatePhase2(add, scope)
+
 	if len(problems) == 0 {
 		return nil
 	}
+
 	return errors.New(strings.Join(problems, "; "))
 }
 
@@ -521,19 +558,23 @@ func (c Cluster) validateHeader(add func(string, ...any)) {
 	if c.Schema != ClusterSchema {
 		add("schema must be %d", ClusterSchema)
 	}
+
 	if !NamePattern.MatchString(c.ClusterName) {
 		add("name %q must match %s", c.ClusterName, NamePattern)
 	}
+
 	if c.Domain != "" {
 		if err := CheckDomain(c.Domain); err != nil {
 			add("domain %q %v", c.Domain, err)
 		}
 	}
+
 	if c.ACMEEmail != "" {
 		if err := CheckACMEEmail(c.ACMEEmail); err != nil {
 			add("acme_email %q %v", c.ACMEEmail, err)
 		}
 	}
+
 	if err := CheckTimezone(c.Timezone); err != nil {
 		add("timezone %q %v", c.Timezone, err)
 	}
@@ -546,13 +587,16 @@ func (c Cluster) validateTransport(add func(string, ...any)) netip.Prefix {
 	if c.Transport.Kind != "wireguard" {
 		add("transport.kind must be wireguard until Phase 10")
 	}
+
 	subnet, err := netip.ParsePrefix(c.Transport.Subnet)
 	if err != nil || !subnet.Addr().Is4() {
 		add("transport.subnet %q is not an IPv4 prefix", c.Transport.Subnet)
 	}
+
 	if c.Transport.ListenPort < 1 || c.Transport.ListenPort > 65535 {
 		add("transport.listen_port must be 1-65535")
 	}
+
 	return subnet
 }
 
@@ -561,9 +605,11 @@ func (c Cluster) validateServer(add func(string, ...any)) {
 	if err := CheckAdminUser(c.Server.AdminUser); err != nil {
 		add("server.admin_user %q %v", c.Server.AdminUser, err)
 	}
+
 	if c.Server.SwapMB < 0 || c.Server.SwapMB > 65536 {
 		add("server.swap_mb must be 0-65536")
 	}
+
 	if err := CheckDataRoot(c.Server.DataRoot); err != nil {
 		add("server.data_root %v", err)
 	}
@@ -576,17 +622,21 @@ func (c Cluster) validateExposure(add func(string, ...any)) {
 			add("network.client_allowlist entry %q %v", cidr, err)
 		}
 	}
+
 	for _, cidr := range c.Metrics.Allowlist {
 		if err := CheckAllowlistEntry(cidr); err != nil {
 			add("metrics.allowlist entry %q %v", cidr, err)
 		}
 	}
+
 	if !MetricsPathPattern.MatchString(c.Metrics.PathPrefix) {
 		add("metrics.path_prefix %q must match %s", c.Metrics.PathPrefix, MetricsPathPattern)
 	}
+
 	if _, _, err := ParseWindow(c.Maintenance.Window); err != nil {
 		add("maintenance.window %q %v", c.Maintenance.Window, err)
 	}
+
 	if err := CheckRepackBloatThreshold(c.Maintenance.RepackBloatThreshold); err != nil {
 		add("maintenance.repack_bloat_threshold %v", err)
 	}
@@ -597,27 +647,33 @@ func (c Cluster) validateExposure(add func(string, ...any)) {
 func (c Cluster) validateNodes(add func(string, ...any), subnet netip.Prefix) {
 	masters := 0
 	names := map[string]bool{}
+
 	for i, n := range c.Nodes {
 		if !NodeNamePattern.MatchString(n.Name) {
 			add("nodes[%d].name %q must match %s", i, n.Name, NodeNamePattern)
 		}
+
 		if names[n.Name] {
 			add("nodes[%d].name %q is a duplicate", i, n.Name)
 		}
+
 		names[n.Name] = true
 		if n.Role == RoleMaster {
 			masters++
 		} else {
 			add("nodes[%d].role %q: only master exists until Phase 10", i, n.Role)
 		}
+
 		if _, err := netip.ParseAddr(n.PublicAddress); err != nil {
 			add("nodes[%d].public_address %q is not an IP address", i, n.PublicAddress)
 		}
+
 		wg, err := netip.ParseAddr(n.WGAddress)
 		if err != nil || (subnet.IsValid() && !subnet.Contains(wg)) {
 			add("nodes[%d].wg_address %q is not inside %s", i, n.WGAddress, c.Transport.Subnet)
 		}
 	}
+
 	if masters != 1 {
 		add("exactly one node with role master is required (workers arrive in Phase 10)")
 	}
@@ -630,22 +686,29 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 		// meaningful only when the database runs: reject an invalid
 		// descriptor or selection before a Phase 1 file can be saved.
 		c.validateExtensionDefinitions(add)
+
 		for i, spec := range c.Clusters {
 			c.validateExtensionSelection(add, fmt.Sprintf("clusters[%d]", i), spec)
 		}
+
 		c.validateExtensionHost(add)
+
 		return
 	}
+
 	c.validateTLS(add)
 	c.validatePostgres(add)
+
 	if c.Server.MemoryReserve != "" {
 		if _, err := ParseMemoryMiB(c.Server.MemoryReserve); err != nil {
 			add("server.memory_reserve %q %v", c.Server.MemoryReserve, err)
 		}
 	}
+
 	if c.MasterBackup.RetentionDays < 1 || c.MasterBackup.RetentionWeeks < 0 || c.MasterBackup.LocalKeep < 1 {
 		add("master_backup needs retention_days and local_keep of at least 1, and retention_weeks of at least 0")
 	}
+
 	c.validateLocale(add)
 	c.validateExtensionDefinitions(add)
 	c.validateClusters(add)
@@ -658,11 +721,13 @@ func (c Cluster) validateTLS(add func(string, ...any)) {
 	if c.Domain == "" {
 		add("domain is required (set it with vaire config set domain <fqdn>)")
 	}
+
 	switch c.TLS.Mode {
 	case "acme", "self-signed":
 	default:
 		add("tls.mode %q must be acme or self-signed", c.TLS.Mode)
 	}
+
 	if c.TLS.ACMECA != "" && !strings.HasPrefix(c.TLS.ACMECA, "https://") {
 		add("tls.acme_ca %q must be an https:// URL", c.TLS.ACMECA)
 	}
@@ -673,15 +738,19 @@ func (c Cluster) validatePostgres(add func(string, ...any)) {
 	if c.Postgres.Version != 18 {
 		add("postgres.version must be 18")
 	}
+
 	if err := checkProfile(c.Postgres.Profile); err != nil {
 		add("postgres.profile %q %v", c.Postgres.Profile, err)
 	}
+
 	if err := CheckClientConnections(c.Postgres.ClientConnections); err != nil {
 		add("postgres.client_connections %v", err)
 	}
+
 	if err := CheckClientConnections(c.Postgres.SessionClientConnections); err != nil {
 		add("postgres.session_client_connections %v", err)
 	}
+
 	if _, ok := LookupSize(c.Postgres.DefaultSize); !ok {
 		add("postgres.default_size %q must be one of nano, small, medium, large, xlarge", c.Postgres.DefaultSize)
 	}
@@ -694,13 +763,16 @@ func (c Cluster) validateLocale(add func(string, ...any)) {
 	default:
 		add("postgres.locale_provider %q must be builtin, icu or libc", c.Postgres.LocaleProvider)
 	}
+
 	if !localePattern.MatchString(c.Postgres.Locale) {
 		add("postgres.locale %q is not a locale name", c.Postgres.Locale)
 	}
+
 	for key := range c.Postgres.Settings {
 		if !SettingKeyPattern.MatchString(key) {
 			add("postgres.settings key %q must match %s", key, SettingKeyPattern)
 		}
+
 		if isReservedSetting(key) {
 			add("postgres.settings key %q is managed by vaire and cannot be overridden", key)
 		}
@@ -712,34 +784,43 @@ func (c Cluster) validateBackup(add func(string, ...any)) {
 	if c.Backup.Provider == "" {
 		return
 	}
+
 	if err := CheckProvider(c.Backup.Provider); err != nil {
 		add("backup.provider %q %v", c.Backup.Provider, err)
 	}
+
 	if err := CheckEndpoint(c.Backup.Endpoint); err != nil {
 		add("backup.endpoint %q %v", c.Backup.Endpoint, err)
 	}
+
 	if err := CheckBucket(c.Backup.Bucket); err != nil {
 		add("backup.bucket %q %v", c.Backup.Bucket, err)
 	}
+
 	if err := CheckPrefix(c.Backup.Prefix); err != nil {
 		add("backup.prefix %q %v", c.Backup.Prefix, err)
 	}
+
 	if c.Backup.Region == "" {
 		add("backup.region is required")
 	}
+
 	switch c.Backup.URIStyle {
 	case "path", "host":
 	default:
 		add("backup.uri_style %q must be path or host", c.Backup.URIStyle)
 	}
+
 	if c.Backup.Database.FullSchedule == "" {
 		add("backup.database.full_schedule is required")
 	}
+
 	for key, value := range c.ScheduleValues() {
 		if !schedulePattern.MatchString(value) {
 			add("%s %q is not a systemd OnCalendar expression", key, value)
 		}
 	}
+
 	if c.Backup.Database.RetentionFull < 1 {
 		add("backup.database.retention_full must be at least 1")
 	}
@@ -760,6 +841,7 @@ func (c Cluster) ScheduleValues() map[string]string {
 	add("backup.database.incr_schedule", c.Backup.Database.IncrSchedule)
 	add("backup.database.verify_schedule", c.Backup.Database.VerifySchedule)
 	add("backup.database.drill_schedule", c.Backup.Database.DrillSchedule)
+
 	for _, cl := range c.Clusters {
 		at := "clusters." + cl.Name + ".backup."
 		add(at+"full_schedule", cl.Backup.FullSchedule)
@@ -768,6 +850,7 @@ func (c Cluster) ScheduleValues() map[string]string {
 		add(at+"verify_schedule", cl.Backup.VerifySchedule)
 		add(at+"drill_schedule", cl.Backup.DrillSchedule)
 	}
+
 	return out
 }
 

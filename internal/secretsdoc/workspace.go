@@ -40,6 +40,7 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*workspaces.Worksp
 	if err := workspaces.ValidateName(name); err != nil {
 		return nil, err
 	}
+
 	if workspaces.Exists(name) {
 		return nil, output.NewError(
 			output.CodePrecondition,
@@ -48,12 +49,15 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*workspaces.Worksp
 			"Pick another name with --name, or remove it first with vaire workspace remove "+name+".",
 		).WithDetails(map[string]any{"reason": "workspace_exists", "workspace": name})
 	}
+
 	if len(doc.Nodes) == 0 {
 		return nil, secretsError("the secrets document lists no node", nil)
 	}
+
 	if doc.MasterPassword != "" && !password.Valid(doc.MasterPassword) {
 		return nil, secretsError("the master password verifier in the document is invalid or has unsupported costs", nil)
 	}
+
 	ctx := &workspaces.Workspace{
 		Name:      name,
 		Server:    doc.Server.Name,
@@ -72,18 +76,22 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*workspaces.Worksp
 	if _, err := transport.WGPublicKey(doc.Operator.WGPrivateKey); err != nil {
 		return nil, secretsError("the operator WireGuard key in the document is invalid", err)
 	}
+
 	if _, err := transport.KeyAuth([]byte(doc.Operator.SSHPrivateKey)); err != nil {
 		return nil, secretsError("the operator SSH key in the document is invalid", err)
 	}
+
 	known, err := transport.LoadKnownHosts(workspaces.Path(name, workspaces.KnownHostsFile))
 	if err != nil {
 		return nil, err
 	}
+
 	for _, n := range doc.Nodes {
 		keys, err := transport.ParseHostKeys(n.SSHHostKeys)
 		if err != nil || len(keys) == 0 {
 			return nil, secretsError("the host keys of node "+n.Name+" are invalid", err)
 		}
+
 		known.Pin(net.JoinHostPort(n.WGAddress, "22"), keys...)
 		ctx.Nodes = append(ctx.Nodes, workspaces.Node{
 			Name:          n.Name,
@@ -95,41 +103,52 @@ func Install(doc Document, name, lockdownConfirmedAt string) (*workspaces.Worksp
 			ListenPort:    n.ListenPort,
 		})
 	}
+
 	if err := saveInstalledWorkspace(doc, ctx, known); err != nil {
 		return nil, err
 	}
+
 	if current, _ := workspaces.Current(); current == "" || !workspaces.Exists(current) {
 		if err := workspaces.SetCurrent(name); err != nil {
 			return ctx, err
 		}
 	}
+
 	return ctx, nil
 }
 
 func saveInstalledWorkspace(doc Document, ctx *workspaces.Workspace, known *transport.KnownHosts) error {
 	name := ctx.Name
+
 	ok := false
 	defer func() {
 		if !ok {
 			_ = os.RemoveAll(workspaces.Dir(name))
 		}
 	}()
+
 	if err := workspaces.WriteFile(name, workspaces.WGKeyFile, []byte(doc.Operator.WGPrivateKey+"\n")); err != nil {
 		return err
 	}
+
 	if err := workspaces.WriteFile(name, workspaces.SSHKeyFile, []byte(doc.Operator.SSHPrivateKey)); err != nil {
 		return err
 	}
+
 	if err := known.Save(); err != nil {
 		return err
 	}
+
 	if err := workspaces.SaveCredentials(name, workspaces.Credentials{SudoPassword: doc.Operator.SudoPassword, Database: doc.Database, Backup: doc.Backup, Metrics: doc.Metrics.creds(), MasterPasswordHash: doc.MasterPassword}); err != nil {
 		return err
 	}
+
 	if err := workspaces.Save(ctx); err != nil {
 		return err
 	}
+
 	ok = true
+
 	return nil
 }
 
@@ -174,6 +193,7 @@ func Summarize(doc Document) Summary {
 			WGAddress:     n.WGAddress,
 		})
 	}
+
 	return s
 }
 

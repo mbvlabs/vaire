@@ -89,9 +89,11 @@ func fencedRefuses(m method, req rpc.Request) bool {
 	if !masterbackup.IsFenced() || fencedReads[m.name] {
 		return false
 	}
+
 	if m.lock != nil && m.lock(req) == engine.LockExclusive {
 		return true
 	}
+
 	return m.runLog != nil && m.runLog(req)
 }
 
@@ -123,9 +125,11 @@ func reloadMaterialisationConfig(ctx context.Context, req rpc.Request) (config.C
 	if err != nil {
 		return config.Cluster{}, err
 	}
+
 	if err := refuseMaterialisationRequest(ctx, cfg, req); err != nil {
 		return config.Cluster{}, err
 	}
+
 	return cfg, nil
 }
 
@@ -135,13 +139,18 @@ func reloadMaterialisationConfig(ctx context.Context, req rpc.Request) (config.C
 func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	out := &eventWriter{w: stdout}
 	command := "node rpc"
-	var req rpc.Request
-	var err error
-	var rec *activityRecorder
-	var scope *activityScope
+
+	var (
+		req   rpc.Request
+		err   error
+		rec   *activityRecorder
+		scope *activityScope
+	)
+
 	defer func() {
 		if r := recover(); r != nil {
 			out.log.Line("panic", fmt.Sprintf("%v\n%s", r, debug.Stack()))
+
 			if scope != nil {
 				// A panic after the handler started leaves incomplete work:
 				// report unknown, never success or failure.
@@ -151,10 +160,13 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 				if action == "" {
 					action = "node.rpc"
 				}
+
 				recordActivityRefusal(context.Background(), rec, req, action, panicError(), "panic")
 			}
+
 			code = out.fail(command, panicError())
 		}
+
 		_ = out.log.Close()
 	}()
 
@@ -173,8 +185,10 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	if err != nil {
 		rec = activityRecorderFactory()
 		recordActivityRefusal(context.Background(), rec, rpc.Request{}, "node.rpc", err, "request_rejected")
+
 		return out.fail(command, err)
 	}
+
 	command = req.Method
 
 	// 3. Register secrets before anything else can print.
@@ -191,6 +205,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	// 4-6. Version, method lookup, fence, cluster facts and confirm tokens.
 	table := methods()
 	m, known := table[req.Method]
+
 	env, code, ok := serveCheckMethod(req, m, known, table, out, rec)
 	if !ok {
 		return code
@@ -204,6 +219,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	for _, release := range releases {
 		defer release()
 	}
+
 	if !ok {
 		return code
 	}
@@ -223,6 +239,7 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 	if !ok {
 		return code
 	}
+
 	return code
 }
 
@@ -233,6 +250,7 @@ func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]me
 			return nil, out.fail(req.Method, err), false
 		}
 	}
+
 	if !known {
 		if code, ok := serveUnknownMethod(req, table, out, rec); !ok {
 			return nil, code, false
@@ -243,8 +261,10 @@ func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]me
 	if fencedRefuses(m, req) {
 		err := fencedError()
 		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "node_fenced")
+
 		return nil, out.fail(req.Method, err), false
 	}
+
 	env := &Env{Req: req, Report: out.emit}
 	if code, ok := serveClusterCheck(req, m, env, out, rec); !ok {
 		return nil, code, false
@@ -255,6 +275,7 @@ func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]me
 		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "confirm_mismatch")
 		return nil, out.fail(req.Method, err), false
 	}
+
 	return env, 0, true
 }
 
@@ -263,6 +284,7 @@ func serveUnknownMethod(req rpc.Request, table map[string]method, out *eventWrit
 	for name := range table {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
 	err := output.NewError(
 		output.CodeUsage,
@@ -271,6 +293,7 @@ func serveUnknownMethod(req rpc.Request, table map[string]method, out *eventWrit
 		"Use one of details.methods.",
 	).WithDetails(map[string]any{"methods": names})
 	recordActivityRefusal(context.Background(), rec, req, req.Method, err, "unknown_method")
+
 	return out.fail(req.Method, err), false
 }
 
@@ -281,12 +304,15 @@ func serveClusterCheck(req rpc.Request, m method, env *Env, out *eventWriter, re
 			recordActivityRefusal(context.Background(), rec, req, req.Method, err, "")
 			return out.fail(req.Method, err), false
 		}
+
 		env.Cluster = cfg
 	}
+
 	if err := refuseAwaiting(req); err != nil {
 		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "awaiting_recovery")
 		return out.fail(req.Method, err), false
 	}
+
 	if !m.cluster {
 		return 0, true
 	}
@@ -295,21 +321,25 @@ func serveClusterCheck(req rpc.Request, m method, env *Env, out *eventWriter, re
 		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "is_follower")
 		return out.fail(req.Method, err), false
 	}
+
 	if raw, err := os.ReadFile(config.ClusterPath); err == nil && config.HasLegacyVPS(raw) {
 		out.emit(output.Event{Type: "warning", Code: "legacy_config_ignored",
 			Message: "cluster.toml still has [backup.vps] from before Phase 5 (restic is gone); it is ignored, and the next config change drops it"})
 	}
+
 	return 0, true
 }
 
 func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env, rec *activityRecorder, out *eventWriter) ([]func(), int, bool) {
 	var releases []func()
+
 	mode := engine.LockNone
 	if m.lockWithConfig != nil && m.cluster {
 		mode = m.lockWithConfig(env.Cluster, req)
 	} else if m.lock != nil {
 		mode = m.lock(req)
 	}
+
 	env.LockMode = mode
 	if mode != engine.LockNone {
 		release, err := serveAcquire(ctx, mode, req.Method, req.RequestID, req.LockTimeout())
@@ -317,28 +347,35 @@ func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env,
 			recordActivityRefusal(ctx, rec, req, req.Method, err, "")
 			return releases, out.fail(req.Method, err), false
 		}
+
 		releases = append(releases, release)
 	}
+
 	cluster, clusterMode := "", engine.LockNone
 	if m.clusterLockWithConfig != nil && m.cluster {
 		cluster, clusterMode = m.clusterLockWithConfig(env.Cluster, req)
 	} else if m.clusterLock != nil {
 		cluster, clusterMode = m.clusterLock(req)
 	}
+
 	env.ClusterLock, env.ClusterLockMode = cluster, clusterMode
 	if cluster == "" || clusterMode == engine.LockNone {
 		return releases, 0, true
 	}
+
 	if _, ok := env.Cluster.ClusterByName(cluster); !ok {
 		err := databaseNotFound(cluster)
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "database_not_found")
+
 		return releases, out.fail(req.Method, err), false
 	}
+
 	release, err := serveAcquireCluster(ctx, cluster, clusterMode, req.Method, req.RequestID, req.LockTimeout())
 	if err != nil {
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "")
 		return releases, out.fail(req.Method, err), false
 	}
+
 	return append(releases, release), 0, true
 }
 
@@ -347,40 +384,50 @@ func serveRecheck(ctx context.Context, m method, req rpc.Request, env *Env, rec 
 		(m.lock == nil && m.clusterLock == nil && m.lockWithConfig == nil && m.clusterLockWithConfig == nil) {
 		return 0, true
 	}
+
 	cfg, err := reloadMaterialisationConfig(ctx, req)
 	if err != nil {
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "")
 		return out.fail(req.Method, err), false
 	}
+
 	env.Cluster = cfg
+
 	if err := refuseAwaiting(req); err != nil {
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "awaiting_recovery")
 		return out.fail(req.Method, err), false
 	}
+
 	if err := refuseFollower(req, cfg); err != nil {
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "is_follower")
 		return out.fail(req.Method, err), false
 	}
+
 	if err := checkConfirm(m, cfg, req); err != nil {
 		recordActivityRefusal(ctx, rec, req, req.Method, err, "confirm_mismatch")
 		return out.fail(req.Method, err), false
 	}
+
 	return 0, true
 }
 
 func serveHandler(ctx context.Context, m method, req rpc.Request, env *Env, rec *activityRecorder, out *eventWriter) (*activityScope, int, bool) {
 	var scope *activityScope
+
 	important := activityImportant(m, req)
 	if rec != nil {
 		scope = newRPCScope(rec, m.name, req)
 		if err := beginActivityScope(ctx, scope, important, out.emit); err != nil {
 			return scope, out.fail(req.Method, err), false
 		}
+
 		env.Report = scope.recorder(ctx, out.emit)
 	}
+
 	if err := serveRunLog(ctx, m, req, env, scope, out); err != nil {
 		return scope, out.fail(req.Method, err), false
 	}
+
 	res, err, panicked := runHandler(ctx, m, env, out)
 	if err != nil {
 		if panicked {
@@ -389,9 +436,12 @@ func serveHandler(ctx context.Context, m method, req rpc.Request, env *Env, rec 
 			code, reason := activityErrorTokens(err)
 			_ = scope.finishWarn(ctx, activity.OutcomeFailed, code, reason, out.emit)
 		}
+
 		return scope, out.fail(req.Method, err), false
 	}
+
 	finishActivitySuccess(ctx, scope, &res, out.emit)
+
 	return scope, out.ok(req.Method, res), true
 }
 
@@ -399,15 +449,19 @@ func serveRunLog(ctx context.Context, m method, req rpc.Request, env *Env, scope
 	if m.runLog == nil || !m.runLog(req) {
 		return nil
 	}
+
 	log, err := openServeRunLog(req.Method, req.RequestID)
 	if err != nil {
 		_ = scope.finishWarn(ctx, activity.OutcomeFailed, output.CodePrecondition, "run_log_unavailable", out.emit)
+
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition,
 			"Check that "+engine.LogDir+" is writable by root.").WithDetails(map[string]any{"reason": "run_log_unavailable"})
 	}
+
 	out.setLog(log)
 	env.Log = log
 	log.JSON("request", req.Loggable())
+
 	return nil
 }
 
@@ -418,7 +472,9 @@ func checkConfirm(m method, cfg config.Cluster, req rpc.Request) error {
 	if len(tokens) == 0 {
 		return nil
 	}
+
 	var accepted []string
+
 	switch {
 	case m.confirmAny != nil:
 		accepted = m.confirmAny(cfg, req.Params)
@@ -428,22 +484,27 @@ func checkConfirm(m method, cfg config.Cluster, req rpc.Request) error {
 				"Re-run with the token in details.confirm_token after a human approves it.").
 				WithDetails(map[string]any{"confirm_token": m.confirm(cfg, req.Params)})
 		}
+
 		accepted = []string{m.confirm(cfg, req.Params)}
 	default:
 		return nil
 	}
+
 	ok := map[string]bool{}
 	for _, token := range accepted {
 		ok[token] = true
 	}
+
 	for _, token := range tokens {
 		if ok[token] {
 			continue
 		}
+
 		details := map[string]any{"confirm_token": accepted[0]}
 		if len(accepted) > 1 {
 			details["confirm_tokens"] = accepted
 		}
+
 		return output.NewError(
 			output.CodeUnsafeAction,
 			"the confirm token "+token+" does not match",
@@ -451,6 +512,7 @@ func checkConfirm(m method, cfg config.Cluster, req rpc.Request) error {
 			"Re-run with a token from details after a human approves it.",
 		).WithDetails(details)
 	}
+
 	return nil
 }
 
@@ -458,11 +520,14 @@ func runHandler(ctx context.Context, m method, env *Env, out *eventWriter) (res 
 	defer func() {
 		if r := recover(); r != nil {
 			out.log.Line("panic", fmt.Sprintf("%v\n%s", r, debug.Stack()))
+
 			panicked = true
 			err = panicError()
 		}
 	}()
+
 	res, err = m.handler(ctx, env)
+
 	return res, err, false
 }
 
@@ -482,9 +547,11 @@ func checkVersion(req rpc.Request) error {
 	if same && buildinfo.Channel == "dev" {
 		same = req.ClientCommit == buildinfo.Commit
 	}
+
 	if same {
 		return nil
 	}
+
 	return output.NewError(
 		output.CodeNodeVersionMismatch,
 		fmt.Sprintf("operator build %s (%s, %s) does not match node build %s (%s, %s)",
@@ -537,15 +604,18 @@ type eventWriter struct {
 func (e *eventWriter) setLog(log *engine.RunLog) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	e.log = log
 }
 
 func (e *eventWriter) emit(ev output.Event) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	if e.done {
 		return
 	}
+
 	e.writeLocked(ev)
 }
 
@@ -554,10 +624,12 @@ func (e *eventWriter) writeLocked(ev output.Event) {
 	if ev.TS == "" {
 		ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+
 	line, err := marshalLine(secrets.RedactValue(ev))
 	if err != nil {
 		line, _ = marshalLine(map[string]string{"schema": output.EventSchema, "type": "warning", "code": "event_encode_failed", "ts": ev.TS})
 	}
+
 	e.log.Line("event", string(line[:len(line)-1]))
 	e.enqueueLocked(ev.Type, line)
 }
@@ -569,17 +641,21 @@ func (e *eventWriter) enqueueLocked(kind string, line []byte) {
 	e.start.Do(e.startWriter)
 	e.qmu.Lock()
 	defer e.qmu.Unlock()
+
 	if e.dead {
 		if !e.deadLogged {
 			e.deadLogged = true
 			e.log.Line("stream", "stdout failed, events continue in this log only: "+errString(e.deadErr))
 		}
+
 		return
 	}
+
 	if len(e.pending) >= streamQueueMax && (kind == "log" || kind == "progress") {
 		e.dropped++
 		return
 	}
+
 	if e.dropped > 0 && (len(e.pending) < streamQueueMax || kind == "result") {
 		warning, _ := marshalLine(secrets.RedactValue(output.Event{
 			Schema:  output.EventSchema,
@@ -592,12 +668,14 @@ func (e *eventWriter) enqueueLocked(kind string, line []byte) {
 		e.pending = append(e.pending, warning)
 		e.dropped = 0
 	}
+
 	e.pending = append(e.pending, line)
 	e.cond.Signal()
 }
 
 func (e *eventWriter) startWriter() {
 	e.cond = sync.NewCond(&e.qmu)
+
 	e.drained = make(chan struct{})
 	go e.writeStdout()
 }
@@ -606,27 +684,33 @@ func (e *eventWriter) startWriter() {
 // empty. After the first write error it discards lines.
 func (e *eventWriter) writeStdout() {
 	defer close(e.drained)
+
 	for {
 		e.qmu.Lock()
 		for len(e.pending) == 0 && !e.closed {
 			e.cond.Wait()
 		}
+
 		batch := e.pending
 		e.pending = nil
 		dead := e.dead
 		e.qmu.Unlock()
+
 		if len(batch) == 0 {
 			return
 		}
+
 		if dead {
 			continue
 		}
+
 		for _, line := range batch {
 			if err := e.writeLine(line); err != nil {
 				e.qmu.Lock()
 				e.dead, e.deadErr = true, err
 				e.pending = nil
 				e.qmu.Unlock()
+
 				break
 			}
 		}
@@ -637,6 +721,7 @@ func (e *eventWriter) writeLine(line []byte) error {
 	if _, err := e.w.Write(line); err != nil {
 		return err
 	}
+
 	if f, ok := e.w.(interface{ Flush() error }); ok {
 		if err := f.Flush(); err != nil {
 			return err
@@ -646,6 +731,7 @@ func (e *eventWriter) writeLine(line []byte) error {
 	if f, ok := e.w.(interface{ Sync() error }); ok {
 		_ = f.Sync()
 	}
+
 	return nil
 }
 
@@ -657,8 +743,10 @@ func (e *eventWriter) drainLocked() {
 	e.closed = true
 	e.cond.Signal()
 	e.qmu.Unlock()
+
 	timer := time.NewTimer(streamDrainTimeout)
 	defer timer.Stop()
+
 	select {
 	case <-e.drained:
 	case <-timer.C:
@@ -670,6 +758,7 @@ func errString(err error) string {
 	if err == nil {
 		return ""
 	}
+
 	return err.Error()
 }
 
@@ -678,18 +767,22 @@ func marshalLine(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return append(raw, '\n'), nil
 }
 
 func (e *eventWriter) ok(command string, res Result) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	if e.done {
 		return output.ExitGeneric
 	}
+
 	for _, w := range res.Warnings {
 		e.writeLocked(output.Event{Type: "warning", Code: w.Code, Message: w.Message})
 	}
+
 	e.writeLocked(output.Event{Type: "result", Envelope: output.Envelope{
 		Schema:   output.Schema,
 		OK:       true,
@@ -699,23 +792,28 @@ func (e *eventWriter) ok(command string, res Result) int {
 	}})
 	e.done = true
 	e.drainLocked()
+
 	return output.ExitOK
 }
 
 func (e *eventWriter) fail(command string, err error) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	if e.done {
 		return output.ExitCode(err)
 	}
+
 	failure := output.Fail(nil, err)
 	failure.Command = command
 	e.writeLocked(output.Event{Type: "result", Envelope: failure})
 	e.done = true
 	e.drainLocked()
+
 	code := output.ExitCode(err)
 	if code == output.ExitOK {
 		code = output.ExitGeneric
 	}
+
 	return code
 }

@@ -32,6 +32,7 @@ func activityHealthy() Facts {
 		LastRetainedAt:  now.Add(-time.Hour).Format(time.RFC3339),
 		LastWriteAt:     now.Add(-time.Hour).Format(time.RFC3339),
 	}
+
 	return f
 }
 
@@ -46,16 +47,20 @@ func TestActivityChecksHealthy(t *testing.T) {
 func TestActivityMissingStoreWarnsWithoutFailing(t *testing.T) {
 	f := activityHealthy()
 	f.ActivityHealth = activity.Health{Exists: false}
+
 	results := Run(ActivityChecks(), f, "")
 	if got := byID(results, "activity.storage", ""); got.Status != Warn || got.Detail != "no activity history recorded yet" {
 		t.Errorf("storage: %s %q, want a warning that no history was recorded", got.Status, got.Detail)
 	}
+
 	if got := byID(results, "activity.permissions", ""); got.Status != Skip {
 		t.Errorf("permissions on a missing store: %s, want skip", got.Status)
 	}
+
 	if got := byID(results, "activity.coverage", ""); got.Status != Skip {
 		t.Errorf("coverage on a missing store: %s, want skip", got.Status)
 	}
+
 	if failed := Failed(results); len(failed) != 0 {
 		t.Errorf("a missing store failed: %+v", failed)
 	}
@@ -65,6 +70,7 @@ func TestActivityMissingStoreWarnsWithoutFailing(t *testing.T) {
 // existing checks skip rather than claiming the history is healthy or broken.
 func TestActivityUnmeasuredHealthSkips(t *testing.T) {
 	f := activityHealthy()
+
 	f.ActivityHealthChecked, f.ActivityHealthKnown = false, false
 	for _, r := range Run(ActivityChecks(), f, "") {
 		if r.Status != Skip {
@@ -79,18 +85,22 @@ func TestActivityUnmeasuredHealthSkips(t *testing.T) {
 func TestActivityCheckedUnknownHealthWarnsStorage(t *testing.T) {
 	f := activityHealthy()
 	f.ActivityHealthKnown = false
+
 	results := Run(ActivityChecks(), f, "")
 	if got := byID(results, "activity.storage", ""); got.Status != Warn || got.Detail != "activity history health could not be read" {
 		t.Errorf("storage: %s %q, want a fixed read-failure warning", got.Status, got.Detail)
 	}
+
 	for _, id := range []string{"activity.permissions", "activity.coverage"} {
 		if got := byID(results, id, ""); got.Status != Skip {
 			t.Errorf("%s with unknown health: %s, want skip", id, got.Status)
 		}
 	}
+
 	if failed := Failed(results); len(failed) != 0 {
 		t.Errorf("an unknown read failed: %+v", failed)
 	}
+
 	if got := byID(results, "activity.storage", ""); strings.Contains(got.Detail, "/") || got.Fix != "" {
 		t.Errorf("read failure echoes a path or asks for a repair: %+v", got)
 	}
@@ -107,6 +117,7 @@ func TestActivityStorageBudgetAndLoss(t *testing.T) {
 	} {
 		f := activityHealthy()
 		mutate(&f.ActivityHealth)
+
 		if got := activityStorage(f)[0].Status; got != Warn {
 			t.Errorf("%s: %s, want warn (never fail for capacity or loss)", name, got)
 		}
@@ -116,6 +127,7 @@ func TestActivityStorageBudgetAndLoss(t *testing.T) {
 	// with no loss counters still passes.
 	f := activityHealthy()
 	f.ActivityHealth.FirstRetainedAt = now.Add(-365 * 24 * time.Hour).Format(time.RFC3339)
+
 	f.ActivityHealth.RetentionS = int64((24 * time.Hour).Seconds())
 	if got := activityStorage(f)[0].Status; got != Pass {
 		t.Errorf("old retained evidence: %s, want pass", got)
@@ -124,13 +136,16 @@ func TestActivityStorageBudgetAndLoss(t *testing.T) {
 	f = activityHealthy()
 	f.ActivityHealth.Readable = false
 	f.ActivityHealth.Dir = "/secret/activity"
+
 	r := activityStorage(f)[0]
 	if r.Status != Fail {
 		t.Errorf("unreadable store: %s, want fail", r.Status)
 	}
+
 	if r.Fix != "" {
 		t.Errorf("unreadable store asks for a repair: %q", r.Fix)
 	}
+
 	if strings.Contains(r.Detail, f.ActivityHealth.Dir) {
 		t.Errorf("detail echoes the store path: %q", r.Detail)
 	}
@@ -148,19 +163,23 @@ func TestActivityPermissions(t *testing.T) {
 		f := activityHealthy()
 		mutate(&f.ActivityHealth)
 		f.ActivityHealth.Dir = "/secret/activity"
+
 		r := activityPermissions(f)[0]
 		if r.Status != Fail {
 			t.Errorf("%s: %s, want fail", name, r.Status)
 		}
+
 		if r.Fix != "" {
 			t.Errorf("%s asks for a repair: %q", name, r.Fix)
 		}
+
 		if strings.Contains(r.Detail, f.ActivityHealth.Dir) {
 			t.Errorf("%s: detail echoes the store path: %q", name, r.Detail)
 		}
 	}
 
 	f := activityHealthy()
+
 	f.ActivityHealth.Exists = false
 	if got := activityPermissions(f)[0].Status; got != Skip {
 		t.Errorf("missing store: %s, want skip", got)
@@ -169,18 +188,21 @@ func TestActivityPermissions(t *testing.T) {
 
 func TestActivityCoverage(t *testing.T) {
 	f := activityHealthy()
+
 	f.ActivityHealth.FirstRetainedAt, f.ActivityHealth.LastRetainedAt = "", ""
 	if r := activityCoverage(f)[0]; r.Status != Warn || !strings.Contains(r.Detail, "retained") {
 		t.Errorf("empty retained window: %s %q", r.Status, r.Detail)
 	}
 
 	f = activityHealthy()
+
 	f.ActivityHealth.LastRetainedAt = ""
 	if r := activityCoverage(f)[0]; r.Status != Warn || !strings.Contains(r.Detail, "incomplete") {
 		t.Errorf("incomplete retained window: %s %q", r.Status, r.Detail)
 	}
 
 	f = activityHealthy()
+
 	f.ActivityHealth.FirstRetainedAt = "yesterday"
 	if got := activityCoverage(f)[0].Status; got != Warn {
 		t.Errorf("unparseable retained window: %s, want warn", got)
@@ -188,12 +210,14 @@ func TestActivityCoverage(t *testing.T) {
 
 	f = activityHealthy()
 	f.ActivityHealth.FirstRetainedAt = now.Add(time.Hour).Format(time.RFC3339)
+
 	f.ActivityHealth.LastRetainedAt = now.Format(time.RFC3339)
 	if got := activityCoverage(f)[0].Status; got != Warn {
 		t.Errorf("inverted retained window: %s, want warn", got)
 	}
 
 	f = activityHealthy()
+
 	f.ActivityHealth.Exists = false
 	if got := activityCoverage(f)[0].Status; got != Skip {
 		t.Errorf("missing store: %s, want skip", got)
@@ -207,6 +231,7 @@ func TestActivityChecksAreRegistered(t *testing.T) {
 			t.Errorf("%s: %+v", id, got)
 		}
 	}
+
 	security := Filter(ActivityChecks(), CatSecurity)
 	if len(security) != 1 || security[0].ID != "activity.permissions" {
 		t.Errorf("security filter: %+v", security)
@@ -217,6 +242,7 @@ func TestActivityChecksAreRegistered(t *testing.T) {
 // activity write. The storage check warns; it never demands a repair command.
 func TestActivityMissingStoreHasNoRepair(t *testing.T) {
 	f := activityHealthy()
+
 	f.ActivityHealth = activity.Health{Exists: false}
 	if fix := activityStorage(f)[0].Fix; fix != "" {
 		t.Errorf("missing store asks for a repair: %q", fix)

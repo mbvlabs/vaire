@@ -16,10 +16,12 @@ func TestMaterialisationAttemptRecordRoundTrip(t *testing.T) {
 		Drilling: map[string]string{"app": attempt.Target}, DrillAttempts: map[string]MaterialisationAttempt{"app": attempt},
 		Restores: map[string]Restore{"app": {ID: "job", Phase: PhaseFailed, Attempt: &attempt, MaterialisationPending: true}},
 	}
+
 	raw, err := json.Marshal(original)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := decode(raw)
 	if err != nil || got.DrillAttempts["app"] != attempt || got.Restores["app"].Attempt == nil ||
 		*got.Restores["app"].Attempt != attempt || !got.Restores["app"].MaterialisationPending {

@@ -24,11 +24,13 @@ type Numbering struct {
 // A run that wouldn't prepare counts as none.
 func NewNumbering(catalog []Step, cfg config.Cluster, runs ...Options) *Numbering {
 	n := &Numbering{}
+
 	for _, opts := range runs {
 		if _, selected, err := prepare(catalog, cfg, opts); err == nil {
 			n.total += len(selected)
 		}
 	}
+
 	return n
 }
 
@@ -36,6 +38,7 @@ func NewNumbering(catalog []Step, cfg config.Cluster, runs ...Options) *Numberin
 func (n *Numbering) Total() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
 	return n.total
 }
 
@@ -44,11 +47,14 @@ func (n *Numbering) Total() int {
 func (n *Numbering) span(count int) (offset, total int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
 	offset = n.done
+
 	n.done += count
 	if n.done > n.total {
 		n.total = n.done
 	}
+
 	return offset, n.total
 }
 

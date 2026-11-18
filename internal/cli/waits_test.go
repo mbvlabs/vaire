@@ -14,6 +14,7 @@ func TestWaitStopTwice(t *testing.T) {
 	stop := p.wait("connecting to db1")
 	stop()
 	stop()
+
 	if p.beat != nil {
 		t.Fatal("the heartbeat survived the stop")
 	}
@@ -22,10 +23,12 @@ func TestWaitStopTwice(t *testing.T) {
 func TestWaitSilentWhenStructured(t *testing.T) {
 	for _, opts := range []output.Options{{Mode: output.ModeJSON}, {Mode: output.ModeHuman, Stream: true}, {Mode: output.ModeHuman, Quiet: true}} {
 		p := &progress{opts: opts, stderr: &syncBuffer{}}
+
 		stop := p.wait("downloading usql")
 		if p.beat != nil || p.status != nil {
 			t.Errorf("%+v: a wait showed", opts)
 		}
+
 		stop()
 	}
 }
@@ -36,6 +39,7 @@ func TestDrillLinesRecoveredToOnce(t *testing.T) {
 	if got := strings.Count(drillLines(drill), "recovered to"); got != 1 {
 		t.Errorf("recovered to printed %d times:\n%s", got, drillLines(drill))
 	}
+
 	drill.Checks = nil
 	if !strings.Contains(drillLines(drill), "recovered to") {
 		t.Errorf("without a restore check the header must say where it recovered to:\n%s", drillLines(drill))
@@ -46,9 +50,11 @@ func TestApplyNextOnlyWhenStepsApply(t *testing.T) {
 	if next := applyNext(engine.PlanData{Total: 20}); next != nil {
 		t.Errorf("0 steps suggested %v", next)
 	}
+
 	if got := pendingSteps(engine.PlanData{Total: 20}); got != "nothing to apply" {
 		t.Errorf("pendingSteps = %q", got)
 	}
+
 	if next := applyNext(engine.PlanData{WouldApply: 2, Total: 20}); len(next) != 1 || next[0] != "vaire apply" {
 		t.Errorf("2 steps suggested %v", next)
 	}

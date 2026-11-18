@@ -36,10 +36,12 @@ func FollowerChecks() []Check {
 // couldn't be read warns.
 func perFollower(f Facts, needsRunning bool, fn func(c ClusterFacts) (Status, string, string)) []Result {
 	var out []Result
+
 	for _, c := range f.Clusters {
 		if c.Follows == "" {
 			continue
 		}
+
 		r := Result{DB: c.Name}
 		switch {
 		case c.AwaitingRecovery:
@@ -56,25 +58,31 @@ func perFollower(f Facts, needsRunning bool, fn func(c ClusterFacts) (Status, st
 		default:
 			r.Status, r.Detail, r.Fix = fn(c)
 		}
+
 		out = append(out, r)
 	}
+
 	if len(out) == 0 {
 		return one(Skip, "no followers", "")
 	}
+
 	return out
 }
 
 // sideErrors joins the errors of the sides a check needed.
 func sideErrors(errs ...string) string {
 	var kept []string
+
 	for _, err := range errs {
 		if err != "" {
 			kept = append(kept, err)
 		}
 	}
+
 	if len(kept) == 0 {
 		return ""
 	}
+
 	return ": " + strings.Join(kept, "; ")
 }
 
@@ -94,12 +102,14 @@ func followerStreaming(f Facts) []Result {
 			if st.SenderState != "" {
 				detail += " (walsender " + st.SenderState + ")"
 			}
+
 			return Fail, detail, logs
 		case !st.SelfKnown:
 			return Warn, "cannot read the follower's own state" + sideErrors(st.SelfError), logs
 		case !st.SourceKnown:
 			return Warn, "cannot read its replication on " + c.Follows + sideErrors(st.SourceError), logs
 		}
+
 		return Pass, "streaming from " + c.Follows, ""
 	})
 }
@@ -110,9 +120,11 @@ func followerLag(f Facts) []Result {
 		if !st.SourceKnown {
 			return Warn, "cannot read its replication on " + c.Follows + sideErrors(st.SourceError), "vaire status --db " + c.Name
 		}
+
 		if st.LagBytes == nil && st.LagSeconds == nil {
 			return Warn, "its replay lag is unknown", "vaire status --db " + c.Name + "; vaire logs postgres --db " + c.Name
 		}
+
 		detail := followerLagDetail(st, c.Follows)
 		switch {
 		case (st.LagBytes != nil && *st.LagBytes >= FollowerLagFailBytes) || (st.LagSeconds != nil && *st.LagSeconds >= FollowerLagFail.Seconds()):
@@ -122,6 +134,7 @@ func followerLag(f Facts) []Result {
 		case st.LagSeconds == nil || st.LagBytes == nil:
 			return Warn, detail, "vaire status --db " + c.Name
 		}
+
 		return Pass, detail, ""
 	})
 }
@@ -130,14 +143,17 @@ func followerLag(f Facts) []Result {
 // the unknown parts unknown.
 func followerLagDetail(st *health.FollowerState, source string) string {
 	seconds := "replay delay unknown"
+
 	if st.LagSeconds != nil {
 		lag := time.Duration(*st.LagSeconds * float64(time.Second))
 		seconds = lag.Round(time.Second).String() + " behind " + source
 	}
+
 	bytes := "WAL backlog unknown"
 	if st.LagBytes != nil {
 		bytes = bytesText(*st.LagBytes) + " of WAL"
 	}
+
 	return seconds + ", " + bytes
 }
 
@@ -147,7 +163,9 @@ func followerSlot(f Facts) []Result {
 		if !st.SourceKnown {
 			return Warn, "cannot read its slot on " + c.Follows + sideErrors(st.SourceError), "vaire status --db " + c.Name
 		}
+
 		refollow := "drop it and follow again: vaire db drop " + c.Name + " --confirm " + c.Name + ", then vaire db follow " + c.Follows + " --name " + c.Name
+
 		switch {
 		case !st.SlotExists:
 			return Fail, "the slot " + st.Slot + " is missing on " + c.Follows, refollow
@@ -157,6 +175,7 @@ func followerSlot(f Facts) []Result {
 			return Warn, fmt.Sprintf("the slot %s holds %s on %s, more than half of what max_slot_wal_keep_size lets it", st.Slot, slotHeld(st), c.Follows),
 				"start the follower, or drop it if it isn't needed"
 		}
+
 		return Pass, fmt.Sprintf("the slot %s holds %s on %s", st.Slot, slotHeld(st), c.Follows), ""
 	})
 }
@@ -166,6 +185,7 @@ func slotHeld(st *health.FollowerState) string {
 	if st.SlotRetainedBytes == nil {
 		return "an unknown amount of WAL"
 	}
+
 	return bytesText(*st.SlotRetainedBytes)
 }
 
@@ -176,15 +196,18 @@ func followerOrphanSlots(f Facts) []Result {
 			Detail: "cannot list the replication slots on " + e.Source + ": " + e.Error,
 			Fix:    "vaire status --db " + e.Source + " and vaire logs postgres --db " + e.Source})
 	}
+
 	for _, s := range f.OrphanSlots {
 		out = append(out, Result{DB: s.Source, Status: Warn,
 			Detail: "the replication slot " + s.Slot + " belongs to no follower and keeps WAL on " + s.Source,
 			Fix: "on the node: sudo -u postgres psql -h /var/run/postgresql -p " + strconv.Itoa(s.Port) +
 				" -d postgres -c \"SELECT pg_drop_replication_slot('" + s.Slot + "')\""})
 	}
+
 	if len(out) == 0 {
 		return one(Skip, "no slot without its follower", "")
 	}
+
 	return out
 }
 
@@ -194,10 +217,12 @@ func bytesText(n int64) string {
 	if n < unit {
 		return fmt.Sprintf("%d B", n)
 	}
+
 	div, exp := int64(unit), 0
 	for m := n / unit; m >= unit; m /= unit {
 		div *= unit
 		exp++
 	}
+
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

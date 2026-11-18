@@ -14,14 +14,17 @@ func TestMaterialiseTimelineOptions(t *testing.T) {
 	for _, kind := range []string{TargetLatest, "", TargetTime, TargetSet} {
 		for _, pause := range []bool{false, true} {
 			opts := RestoreOptions{Kind: kind, Pause: pause, Path: "/data/copy", Set: "20261117-155723F", Timeline: "1"}
+
 			args, err := materialiseArgs(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			wantTimeline := kind != TargetSet
 			if got := slices.Contains(args, "--target-timeline=1"); got != wantTimeline {
 				t.Errorf("kind=%q pause=%v: timeline=%v, want %v: %v", kind, pause, got, wantTimeline, args)
 			}
+
 			if kind == TargetSet && (!slices.Contains(args, "--type=immediate") || !slices.Contains(args, "--set="+opts.Set)) {
 				t.Errorf("selected-set restore lost its immediate target: %v", args)
 			}
@@ -48,13 +51,16 @@ func TestMaterialiseArgsCarryRecoveryTargetPrecision(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			args, err := materialiseArgs(RestoreOptions{Kind: TargetTime, Time: at, Pause: true, Path: "/data/copy"})
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if !slices.Contains(args, "--target="+c.want) {
 				t.Errorf("args %v, want --target=%s", args, c.want)
 			}
+
 			if !slices.Contains(args, "--type=time") || !slices.Contains(args, "--target-action=pause") {
 				t.Errorf("args %v, want a paused time restore", args)
 			}
@@ -67,11 +73,13 @@ func TestMaterialiseArgsCarryRecoveryTargetPrecision(t *testing.T) {
 func TestRetryStanzaLock(t *testing.T) {
 	busy := &engine.ScriptError{Step: "pgbackrest stanza-create", Status: stanzaLockBusy}
 	calls := 0
+
 	err := retryStanzaLock(context.Background(), func(context.Context) error {
 		calls++
 		if calls < 3 {
 			return busy
 		}
+
 		return nil
 	})
 	if err != nil || calls != 3 {
@@ -79,6 +87,7 @@ func TestRetryStanzaLock(t *testing.T) {
 	}
 
 	other := &engine.ScriptError{Step: "pgbackrest stanza-create", Status: 68}
+
 	calls = 0
 	if err := retryStanzaLock(context.Background(), func(context.Context) error {
 		calls++
@@ -99,6 +108,7 @@ func TestRetryStanzaLock(t *testing.T) {
 	// A cancelled context stops waiting.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	calls = 0
 	if err := retryStanzaLock(ctx, func(context.Context) error {
 		calls++

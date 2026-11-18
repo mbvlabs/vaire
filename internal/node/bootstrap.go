@@ -80,14 +80,17 @@ func bootstrapToken(_ config.Cluster, raw json.RawMessage) string {
 	if json.Unmarshal(raw, &p) != nil {
 		return ""
 	}
+
 	cfg, err := config.ParseCluster([]byte(p.ClusterTOML))
 	if err != nil {
 		return ""
 	}
+
 	if p.Phase == PhaseRestore {
 		// Placing a bundle takes over the server's identity (Phase 5).
 		return cfg.Name() + "/replace"
 	}
+
 	return cfg.Name()
 }
 
@@ -96,6 +99,7 @@ func handleClusterBootstrap(ctx context.Context, env *Env) (Result, error) {
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
 	}
+
 	switch p.Phase {
 	case PhaseHost:
 		return bootstrapHost(ctx, env, p)
@@ -118,27 +122,34 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	if err != nil {
 		return Result{}, output.NewError(output.CodeConfig, "cluster_toml does not parse: "+err.Error(), output.ExitConfig, "")
 	}
+
 	if err := cfg.ValidateFor(config.ScopeHost); err != nil {
 		return Result{}, config.ValidationError(err)
 	}
+
 	spec, ok := cfg.Node(p.NodeName)
 	if !ok {
 		return Result{}, output.NewError(output.CodeValidation, "node "+p.NodeName+" is not in cluster_toml", output.ExitConfig, "")
 	}
+
 	if err := validateOperator(p.Operator); err != nil {
 		return Result{}, err
 	}
+
 	osInfo, err := bootstrapPreflight(ctx, cfg)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := prepareBootstrapOwnership(cfg, spec.Name, env.Req.OperationID); err != nil && !errors.Is(err, errUnownedBootstrap) {
 		return Result{}, output.NewError(output.CodePrecondition, "bootstrap ownership cannot be established: "+err.Error(), output.ExitPrecondition, "Use the original unfinished setup or create a fresh node.").
 			WithDetails(map[string]any{"reason": "bootstrap_ownership_unavailable"})
 	}
+
 	if err := writeBootstrapFiles(cfg, spec, p.Operator); err != nil {
 		return Result{}, err
 	}
+
 	env.Cluster = cfg
 
 	data, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
@@ -149,15 +160,19 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+
 	pub, err := steps.WGPublicKey()
 	if err != nil {
 		return Result{}, err
 	}
+
 	hostKeys, err := sshHostKeys()
 	if err != nil {
 		return Result{}, err
 	}
+
 	host, _ := hostinfo.Detect(cfg.Server.DataRoot) //nolint:contextcheck // local host facts; hostinfo owns its bounded probes.
+
 	return Result{Data: BootstrapResult{
 		Phase:       p.Phase,
 		Node:        spec.Name,
@@ -174,18 +189,23 @@ func validateOperator(op config.Operator) error {
 	if strings.TrimSpace(op.Name) == "" {
 		bad = append(bad, "name")
 	}
+
 	if _, err := netip.ParseAddr(op.WGAddress); err != nil {
 		bad = append(bad, "wg_address")
 	}
+
 	if raw, err := base64.StdEncoding.DecodeString(op.WGPublicKey); err != nil || len(raw) != 32 {
 		bad = append(bad, "wg_public_key")
 	}
+
 	if _, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(op.SSHPublicKey)); err != nil || strings.TrimSpace(string(rest)) != "" {
 		bad = append(bad, "ssh_public_key")
 	}
+
 	if len(bad) == 0 {
 		return nil
 	}
+
 	return output.NewError(
 		output.CodeValidation,
 		"operator is invalid: "+strings.Join(bad, ", "),
@@ -206,6 +226,7 @@ func bootstrapPreflight(ctx context.Context, cfg config.Cluster) (hostinfo.OS, e
 			"Use "+hostinfo.SupportedList+".",
 		).WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
 	}
+
 	if mib, err := hostinfo.MemTotalMiB(); err == nil && mib < minRAMMiB {
 		return osInfo, output.NewError(
 			output.CodePrecondition,
@@ -214,9 +235,11 @@ func bootstrapPreflight(ctx context.Context, cfg config.Cluster) (hostinfo.OS, e
 			"Resize the VPS and retry.",
 		).WithDetails(map[string]any{"reason": "ram_too_small", "ram_mib": mib})
 	}
+
 	if err := sshdOnPort22(ctx); err != nil {
 		return osInfo, err
 	}
+
 	existing, err := config.LoadNode(config.NodePath)
 	switch {
 	case err == nil && existing.Server != cfg.Name():
@@ -231,6 +254,7 @@ func bootstrapPreflight(ctx context.Context, cfg config.Cluster) (hostinfo.OS, e
 	case !config.IsNotExist(err):
 		return osInfo, err
 	}
+
 	for _, dir := range []string{"/etc/postgresql", "/var/lib/postgresql"} {
 		if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
 			return osInfo, output.NewError(
@@ -241,6 +265,7 @@ func bootstrapPreflight(ctx context.Context, cfg config.Cluster) (hostinfo.OS, e
 			).WithDetails(map[string]any{"reason": "postgres_present", "path": dir})
 		}
 	}
+
 	return osInfo, nil
 }
 
@@ -253,8 +278,10 @@ func sshdOnPort22(ctx context.Context) error {
 		// it, so an unreadable config is not a reason to refuse here.
 		return nil
 	}
+
 	var ports []string
-	for _, line := range strings.Split(out, "\n") {
+
+	for line := range strings.SplitSeq(out, "\n") {
 		if port, ok := strings.CutPrefix(line, "port "); ok {
 			ports = append(ports, port)
 			if port == "22" {
@@ -262,6 +289,7 @@ func sshdOnPort22(ctx context.Context) error {
 			}
 		}
 	}
+
 	return output.NewError(
 		output.CodePrecondition,
 		"sshd does not listen on port 22 (ports: "+strings.Join(ports, ", ")+")",
@@ -274,9 +302,11 @@ func osName(o hostinfo.OS) string {
 	if o.Pretty != "" {
 		return o.Pretty
 	}
+
 	if o.ID == "" {
 		return "an unknown OS"
 	}
+
 	return o.ID + " " + o.VersionID
 }
 
@@ -286,29 +316,36 @@ func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Ope
 	if err := os.MkdirAll(config.Dir, config.DirMode); err != nil {
 		return err
 	}
+
 	clusterRaw, err := cfg.Encode()
 	if err != nil {
 		return err
 	}
+
 	node := config.Node{Server: cfg.Name(), NodeName: spec.Name, Hostname: cfg.Hostname(spec.Name), Role: spec.Role}
 	if existing, err := config.LoadNode(config.NodePath); err == nil {
 		node.InstalledAt = existing.InstalledAt
 	} else {
 		node.InstalledAt = time.Now().UTC().Truncate(time.Second)
 	}
+
 	nodeRaw, err := config.EncodeNode(node)
 	if err != nil {
 		return err
 	}
+
 	ops, err := config.LoadOperators(config.OperatorsPath)
 	if err != nil {
 		return err
 	}
+
 	ops.Upsert(op)
+
 	opsRaw, err := ops.Encode()
 	if err != nil {
 		return err
 	}
+
 	for path, raw := range map[string][]byte{
 		config.ClusterPath:   clusterRaw,
 		config.NodePath:      nodeRaw,
@@ -318,7 +355,9 @@ func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Ope
 			return err
 		}
 	}
+
 	masterbackup.MarkDirty("bootstrap")
+
 	return nil
 }
 
@@ -328,30 +367,39 @@ func sshHostKeys() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	sort.Strings(paths)
+
 	var keys []string
+
 	for _, path := range paths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
+
 		key, _, _, _, err := ssh.ParseAuthorizedKey(raw)
 		if err != nil {
 			continue
 		}
+
 		keys = append(keys, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
 	}
+
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("no SSH host keys under /etc/ssh")
 	}
+
 	return keys, nil
 }
 
 func handleConfirmSecrets(context.Context, *Env) (Result, error) {
 	confirmedAt := time.Now().UTC().Format(time.RFC3339)
+
 	if err := engine.UpdateState(func(s *engine.State) error { s.SecretsConfirmedAt = confirmedAt; return nil }); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: map[string]string{"secrets_confirmed_at": confirmedAt}}, nil
 }
 
@@ -363,5 +411,6 @@ func initFailureHint(cluster string, local bool) string {
 	if local {
 		command += " --local"
 	}
+
 	return "Fix the cause, then run " + command + ". It resumes at this step."
 }

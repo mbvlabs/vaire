@@ -31,6 +31,7 @@ type metricsShowData struct {
 // handleMetricsShow describes the /metrics endpoint as the node renders it.
 func handleMetricsShow(_ context.Context, env *Env) (Result, error) {
 	cfg := env.Cluster
+
 	data := metricsShowData{
 		Enabled:    cfg.Metrics.Enabled,
 		Hostname:   steps.NodeHostname(cfg),
@@ -41,17 +42,21 @@ func handleMetricsShow(_ context.Context, env *Env) (Result, error) {
 	if _, err := os.Stat(steps.MetricsHtpasswdPath); err == nil {
 		data.Credential = true
 	}
+
 	for _, l := range steps.MetricsLocations(cfg) {
 		if l.Labels == nil {
 			data.TargetsPath = l.Path
 			continue
 		}
+
 		data.Paths = append(data.Paths, metricsPath{Path: l.Path, Component: l.Labels["vaire_component"], Labels: l.Labels})
 	}
+
 	var warnings []output.Warning
 	if !cfg.Metrics.Enabled {
 		warnings = append(warnings, output.Warning{Code: "metrics_disabled", Message: "[metrics] enabled is false; the exporters are stopped and /metrics answers 404"})
 	}
+
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
@@ -65,15 +70,19 @@ func handleMetricsRotate(_ context.Context, env *Env) (Result, error) {
 	if env.Req.DryRun {
 		return Result{Data: map[string]any{"dry_run": true, "path": steps.MetricsHtpasswdPath}}, nil
 	}
+
 	if env.Req.Confirm == "" {
 		return Result{}, confirmRequired("rotating the /metrics credential locks every scraper out until it gets the new one", metricsToken(env.Cluster, nil))
 	}
+
 	rt := runtimeFor(env, false)
 	if rt.SecretValues[steps.SecretMetricsHash] == "" {
 		return Result{}, output.NewError(output.CodeUsage, "metrics.rotate needs the new credential's hash", output.ExitUsage, "")
 	}
+
 	if err := steps.WriteHtpasswd(rt); err != nil {
 		return Result{}, err
 	}
+
 	return Result{Data: map[string]any{"rotated": true, "path": steps.MetricsHtpasswdPath}}, nil
 }

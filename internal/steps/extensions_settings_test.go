@@ -14,30 +14,35 @@ import (
 
 func followerSettingsTestPlan(t *testing.T, cfg config.Cluster, follower config.ClusterSpec) FollowerRuntimePlan {
 	t.Helper()
+
 	restore := SetFollowerInstalledExtensionsForTest(func(context.Context, config.ClusterSpec) (map[string]bool, error) {
 		return map[string]bool{"plpgsql": true}, nil
 	})
 	t.Cleanup(restore)
+
 	plan, err := PlanFollowerRuntime(context.Background(), cfg, follower, FollowerRuntimeRequest{Class: FollowerRuntimeLive})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return plan
 }
 
 func TestPlanFollowerRuntimeExpectedSettingsOnlyExtensionOwnedKeys(t *testing.T) {
 	cfg, _ := followerRuntimeTestConfig(t)
+
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"addon": {
 			Source: catalog.SourcePreinstalled, ExtName: "addon_ext",
 			Settings:    map[string]string{"addon.mode": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Extensions = []string{"addon"}
 	}
+
 	follower := cfg.Clusters[1]
 	cfg.Postgres.Settings = map[string]string{
 		"addon.mode":          "off",
@@ -51,6 +56,7 @@ func TestPlanFollowerRuntimeExpectedSettingsOnlyExtensionOwnedKeys(t *testing.T)
 	if got := plan.ExpectedSettings["addon.mode"]; got != "on" {
 		t.Fatalf("extension-owned explicit setting = %q, want the follower's on: %+v", got, plan.ExpectedSettings)
 	}
+
 	for _, unrelated := range []string{"random_page_cost", "hash_mem_multiplier", "client_min_messages", "work_mem"} {
 		if _, ok := plan.ExpectedSettings[unrelated]; ok {
 			t.Fatalf("unrelated setting %s became an extension dependency: %+v", unrelated, plan.ExpectedSettings)
@@ -65,10 +71,12 @@ func TestPlanFollowerRuntimeExpectedSettingsFollowRenderedSelection(t *testing.T
 	if len(plan.ExpectedSettings) != 0 {
 		t.Fatalf("empty extensions acquired implicit default settings: %+v", plan.ExpectedSettings)
 	}
+
 	rendered, err := render.ExtensionsConf(cfg, follower, tune.Result{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if strings.Contains(string(rendered), "pg_stat_statements.max") {
 		t.Fatalf("the test premise is stale: the renderer wrote pg_stat_statements settings:\n%s", rendered)
 	}
@@ -77,31 +85,38 @@ func TestPlanFollowerRuntimeExpectedSettingsFollowRenderedSelection(t *testing.T
 		"custom": {
 			Source: catalog.SourcePreinstalled, ExtName: "custom_ext",
 			Settings:    map[string]string{"custom.mode": "on"},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Extensions = []string{"custom"}
 	}
+
 	follower = cfg.Clusters[1]
+
 	plan = followerSettingsTestPlan(t, cfg, follower)
 	if got := plan.ExpectedSettings["custom.mode"]; got != "on" {
 		t.Fatalf("custom-only expected settings = %+v", plan.ExpectedSettings)
 	}
+
 	if _, ok := plan.ExpectedSettings["pg_stat_statements.max"]; ok {
 		t.Fatalf("implicit pg_stat_statements defaults returned with custom-only intent: %+v", plan.ExpectedSettings)
 	}
+
 	rendered, err = render.ExtensionsConf(cfg, follower, tune.Result{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(string(rendered), "custom.mode = on") {
 		t.Fatalf("rendered configuration lacks the declared custom setting:\n%s", rendered)
 	}
+
 	if !strings.Contains(string(rendered), "shared_preload_libraries = 'pg_stat_statements,auto_explain") {
 		t.Fatalf("rendered configuration lacks the implicit runtime preloads:\n%s", rendered)
 	}
+
 	if strings.Contains(string(rendered), "pg_stat_statements.max") {
 		t.Fatalf("the renderer wrote implicit settings the plan does not expect:\n%s", rendered)
 	}
@@ -156,18 +171,23 @@ func TestPlanFollowerRuntimeStoppedClassSkipsCatalogButKeepsGuard(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if installedCalls != 0 {
 		t.Fatalf("stopped planning read the unavailable catalog %d times", installedCalls)
 	}
+
 	if plan.SQLFactsComplete {
 		t.Fatal("stopped planning claimed complete SQL facts")
 	}
+
 	if got := plan.ExpectedSettings["cron.database_name"]; got != "app" {
 		t.Fatalf("stopped planning lost the current ordinary setting: %+v", plan.ExpectedSettings)
 	}
+
 	if plan.ExpectedSettings["cron.launch_active_jobs"] != "off" {
 		t.Fatalf("stopped planning lost the mandatory copy overlay: %+v", plan.ExpectedSettings)
 	}
+
 	if !slices.Contains(plan.Preloads, "pg_cron") {
 		t.Fatalf("stopped planning lost the desired preload: %v", plan.Preloads)
 	}
@@ -175,6 +195,7 @@ func TestPlanFollowerRuntimeStoppedClassSkipsCatalogButKeepsGuard(t *testing.T) 
 
 func TestPlanFollowerRuntimeExpectedSettingsExtensionOwnedTypes(t *testing.T) {
 	cfg, _ := followerRuntimeTestConfig(t)
+
 	cfg.Extensions = map[string]config.ExtensionDefinition{
 		"typed": {
 			Source: catalog.SourcePreinstalled, ExtName: "typed_ext",
@@ -183,13 +204,14 @@ func TestPlanFollowerRuntimeExpectedSettingsExtensionOwnedTypes(t *testing.T) {
 				"custom.mode":  "'ON'",
 				"custom.size":  "'1MB'",
 			},
-			CopySafety:  stringPtr(catalog.CopySafetySafe),
-			StandbySafe: boolPtr(true),
+			CopySafety:  new(catalog.CopySafetySafe),
+			StandbySafe: new(true),
 		},
 	}
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Extensions = []string{"typed"}
 	}
+
 	follower := cfg.Clusters[1]
 
 	plan := followerSettingsTestPlan(t, cfg, follower)
@@ -198,6 +220,7 @@ func TestPlanFollowerRuntimeExpectedSettingsExtensionOwnedTypes(t *testing.T) {
 			t.Fatalf("%s = %q, want %q (all: %+v)", key, plan.ExpectedSettings[key], want, plan.ExpectedSettings)
 		}
 	}
+
 	for key, fact := range map[string]ExtensionSettingFact{
 		"custom.ratio": {Value: "1.1", Type: "real"},
 		"custom.mode":  {Value: "on", Type: "enum"},
@@ -207,6 +230,7 @@ func TestPlanFollowerRuntimeExpectedSettingsExtensionOwnedTypes(t *testing.T) {
 			t.Fatalf("%s did not match its canonical PostgreSQL value: want %q fact %+v", key, plan.ExpectedSettings[key], fact)
 		}
 	}
+
 	if !slices.ContainsFunc(plan.Requirements, func(ext catalog.Extension) bool { return ext.Name == "typed" }) {
 		t.Fatalf("typed extension missing from the plan requirements: %+v", plan.Requirements)
 	}

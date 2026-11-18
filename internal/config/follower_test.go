@@ -13,6 +13,7 @@ func followerCluster() Cluster {
 		{Name: "app", Node: "db1", Port: 5433, Stanza: "app-3f9a1c", Size: "small", StatementTimeout: "60s"},
 		{Name: "app_follower", Node: "db1", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app"},
 	}
+
 	return cfg
 }
 
@@ -21,6 +22,7 @@ func validationProblems(cfg Cluster) string {
 	if err := cfg.Validate(); err != nil {
 		return err.Error()
 	}
+
 	return ""
 }
 
@@ -48,6 +50,7 @@ func TestFollowerValidationRefusals(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := followerCluster()
 			tc.edit(&cfg)
+
 			if p := validationProblems(cfg); !strings.Contains(p, tc.want) {
 				t.Fatalf("want %q in %q", tc.want, p)
 			}
@@ -58,25 +61,32 @@ func TestFollowerValidationRefusals(t *testing.T) {
 func TestFollowerHelpers(t *testing.T) {
 	cfg := followerCluster()
 	f, _ := cfg.ClusterByName("app_follower")
+
 	app, _ := cfg.ClusterByName("app")
 	if !f.IsFollower() || app.IsFollower() {
 		t.Fatal("IsFollower")
 	}
+
 	if f.DatabaseName() != "app" || app.DatabaseName() != "app" {
 		t.Fatal("DatabaseName")
 	}
+
 	if got := cfg.FollowerNames("app"); len(got) != 1 || got[0] != "app_follower" {
 		t.Fatalf("FollowerNames %v", got)
 	}
+
 	if got := cfg.StanzaClusters(); len(got) != 1 || got[0].Name != "app" {
 		t.Fatalf("StanzaClusters %v", got)
 	}
+
 	if FollowerSlot("app_follower") != "vaire_app_follower" {
 		t.Fatal("FollowerSlot")
 	}
+
 	if got := cfg.Sources(); len(got) != 1 || got[0] != "app" {
 		t.Fatalf("Sources %v", got)
 	}
+
 	long := strings.Repeat("a", 55)
 	if err := CheckDatabaseName(long); err != nil || len(FollowerSlot(long)) > 63 {
 		t.Fatal("the longest follower name's slot must fit in 63 bytes")
@@ -88,13 +98,16 @@ func TestFollowsIsImmutable(t *testing.T) {
 	if err := cfg.Set("clusters.app_follower.follows", "x"); err == nil {
 		t.Fatal("config set of follows was accepted")
 	}
+
 	updated := followerCluster()
 	updated.Clusters[1].Follows = ""
 	changed := ImmutableChanges(cfg, updated)
+
 	found := false
 	for _, k := range changed {
 		found = found || k == "clusters.app_follower.follows"
 	}
+
 	if !found {
 		t.Fatalf("config edit clearing follows is not refused: %v", changed)
 	}
@@ -104,11 +117,14 @@ func TestNewFollowerEntryIsRefusedInConfigEdit(t *testing.T) {
 	old := followerCluster()
 	old.Clusters = old.Clusters[:1]
 	updated := followerCluster()
+
 	changed := ImmutableChanges(old, updated)
 	if len(changed) != 1 || changed[0] != "clusters.app_follower.follows" {
 		t.Fatalf("a hand-written follower entry is not refused: %v", changed)
 	}
+
 	plain := followerCluster()
+
 	plain.Clusters[1].Follows = ""
 	if changed := ImmutableChanges(old, plain); len(changed) != 0 {
 		t.Fatalf("a new plain entry is refused: %v", changed)
@@ -121,6 +137,7 @@ func TestFollowerSettingsAreReserved(t *testing.T) {
 			t.Errorf("%s is not reserved", key)
 		}
 	}
+
 	if isReservedSetting("hot_standby_feedback") {
 		t.Error("hot_standby_feedback must stay an operator setting")
 	}
@@ -139,38 +156,50 @@ func TestFollowGenerationIsManagedAndImmutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !followGenerationPattern.MatchString(generation) || len(generation) != 32 {
 		t.Fatalf("generated %q", generation)
 	}
+
 	cfg := followerCluster()
+
 	cfg.Clusters[1].FollowGeneration = generation
 	if p := validationProblems(cfg); strings.Contains(p, "clusters[") {
 		t.Fatalf("a follower generation is refused: %s", p)
 	}
+
 	if err := cfg.Set("clusters.app_follower.follow_generation", "ffffffffffffffffffffffffffffffff"); err == nil {
 		t.Fatal("config set of follow_generation was accepted")
 	}
+
 	changed := ImmutableChanges(followerCluster(), cfg)
+
 	found := false
 	for _, key := range changed {
 		found = found || key == "clusters.app_follower.follow_generation"
 	}
+
 	if !found {
 		t.Fatalf("config edit of follow_generation is not refused: %v", changed)
 	}
+
 	same := followerCluster()
 	same.Clusters[1].FollowGeneration = generation
+
 	same.Clusters[1].Size = "large"
 	if changed := ImmutableChanges(cfg, same); len(changed) != 0 {
 		t.Fatalf("an ordinary settings change is refused: %v", changed)
 	}
 
 	nonFollower := followerCluster()
+
 	nonFollower.Clusters[0].FollowGeneration = generation
 	if p := validationProblems(nonFollower); !strings.Contains(p, "follow_generation") {
 		t.Fatalf("a non-follower generation is accepted: %s", p)
 	}
+
 	bad := followerCluster()
+
 	bad.Clusters[1].FollowGeneration = "not-a-generation"
 	if p := validationProblems(bad); !strings.Contains(p, "follow_generation") {
 		t.Fatalf("a malformed generation is accepted: %s", p)
@@ -181,6 +210,7 @@ func TestFollowGenerationIsManagedAndImmutable(t *testing.T) {
 	newEntry := followerCluster()
 	newEntry.Clusters[1].Follows = ""
 	newEntry.Clusters[1].Stanza = "app_follower-abc123"
+
 	newEntry.Clusters[1].FollowGeneration = generation
 	if changed := ImmutableChanges(oldPlain, newEntry); len(changed) != 1 || changed[0] != "clusters.app_follower.follow_generation" {
 		t.Fatalf("a new entry with a generation is not refused: %v", changed)

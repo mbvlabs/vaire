@@ -26,45 +26,57 @@ func WriteFileAtomicOwned(path string, data []byte, perm os.FileMode, owner, gro
 	if err != nil {
 		return err
 	}
+
 	dir := filepath.Dir(path)
+
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {
 		return err
 	}
+
 	tmp := filepath.Join(dir, "."+filepath.Base(path)+"."+hex.EncodeToString(suffix))
+
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if err != nil {
 			_ = os.Remove(tmp)
 		}
 	}()
+
 	if _, err = f.Write(data); err != nil {
 		_ = f.Close()
 		return err
 	}
+
 	if uid != -1 || gid != -1 {
 		if err = f.Chown(uid, gid); err != nil {
 			_ = f.Close()
 			return err
 		}
 	}
+
 	if err = f.Chmod(perm); err != nil {
 		_ = f.Close()
 		return err
 	}
+
 	if err = f.Sync(); err != nil {
 		_ = f.Close()
 		return err
 	}
+
 	if err = f.Close(); err != nil {
 		return err
 	}
+
 	if err = os.Rename(tmp, path); err != nil {
 		return err
 	}
+
 	return syncDir(dir)
 }
 
@@ -72,24 +84,29 @@ func WriteFileAtomicOwned(path string, data []byte, perm os.FileMode, owner, gro
 // wants, leaving a name that is empty at -1 so it is not changed.
 func ResolveIDs(owner, group string) (uid, gid int, err error) {
 	uid, gid = -1, -1
+
 	if owner != "" {
 		u, err := user.Lookup(owner)
 		if err != nil {
 			return 0, 0, fmt.Errorf("look up user %q: %w", owner, err)
 		}
+
 		if uid, err = strconv.Atoi(u.Uid); err != nil {
 			return 0, 0, fmt.Errorf("user %q has a non-numeric uid %q", owner, u.Uid)
 		}
 	}
+
 	if group != "" {
 		g, err := user.LookupGroup(group)
 		if err != nil {
 			return 0, 0, fmt.Errorf("look up group %q: %w", group, err)
 		}
+
 		if gid, err = strconv.Atoi(g.Gid); err != nil {
 			return 0, 0, fmt.Errorf("group %q has a non-numeric gid %q", group, g.Gid)
 		}
 	}
+
 	return uid, gid, nil
 }
 
@@ -99,5 +116,6 @@ func syncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = d.Close() }()
+
 	return d.Sync()
 }

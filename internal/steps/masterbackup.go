@@ -39,6 +39,7 @@ func ReadRecipient() string {
 	if err != nil {
 		return ""
 	}
+
 	return strings.TrimSpace(string(raw))
 }
 
@@ -54,9 +55,11 @@ func (masterBackupStep) Check(context.Context, config.Cluster, engine.Runtime) (
 	case ReadRecipient() == "":
 		return incomplete(masterbackup.RecipientPath + " is missing"), nil
 	}
+
 	if id, err := masterbackup.ReadInstance(""); err != nil || id == "" {
 		return incomplete(masterbackup.InstancePath + " is missing"), nil
 	}
+
 	return complete(), nil
 }
 
@@ -66,48 +69,61 @@ func (masterBackupStep) Recheck() bool { return true }
 
 func (masterBackupStep) Apply(_ context.Context, _ config.Cluster, rt engine.Runtime, _ engine.Reporter) (engine.ApplyResult, error) {
 	var notes []string
+
 	if err := os.MkdirAll(masterbackup.Dir, 0o700); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if err := os.Chmod(masterbackup.Dir, 0o700); err != nil { //nolint:gosec // G302: a directory root must enter.
 		return engine.ApplyResult{}, err
 	}
+
 	if ReadRecipient() == "" {
 		recipient := strings.TrimSpace(rt.SecretValues[SecretBackupAgeRecipient])
 		if recipient == "" {
 			// Fall back to the copy pgbackrest-v1 keeps with or without a bucket.
 			recipient = ReadBackupEnv()[envRecipient]
 		}
+
 		if recipient == "" {
 			return engine.ApplyResult{}, output.NewError(output.CodeInputRequired,
 				"the recovery recipient is not on this node and the request has none", output.ExitInput,
 				"Run vaire apply from a context whose recovery kit has the age identity (vaire login from a current secrets document).").
 				WithDetails(map[string]any{"secret": SecretBackupAgeRecipient, "path": masterbackup.RecipientPath})
 		}
+
 		if err := os.MkdirAll(RuntimeDir, 0o700); err != nil {
 			return engine.ApplyResult{}, err
 		}
+
 		if err := writeFile(masterbackup.RecipientPath, recipient+"\n", 0o600); err != nil {
 			return engine.ApplyResult{}, err
 		}
+
 		notes = append(notes, "wrote the recovery recipient")
 	}
+
 	id, err := masterbackup.ReadInstance("")
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return engine.ApplyResult{}, err
 	}
+
 	if id == "" {
 		if id, err = masterbackup.NewInstanceID(); err != nil {
 			return engine.ApplyResult{}, err
 		}
+
 		if err := writeFile(masterbackup.InstancePath, id+"\n", 0o600); err != nil {
 			return engine.ApplyResult{}, err
 		}
+
 		notes = append(notes, "made the instance id "+id)
 	}
+
 	if len(notes) > 0 {
 		// The first bundle follows at once instead of at the daily run.
 		masterbackup.MarkDirty(masterBackupID)
 	}
+
 	return engine.ApplyResult{Restart: engine.RestartNone, Notes: notes}, nil
 }

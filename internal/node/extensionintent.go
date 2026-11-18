@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"sort"
 
@@ -20,7 +21,9 @@ func canonicalNames(cfg config.Cluster, names []string) []string {
 		c, _ := cfg.ExtensionResolver().Canonical(name)
 		out = append(out, c)
 	}
+
 	sort.Strings(out)
+
 	return slices.Compact(out)
 }
 
@@ -32,9 +35,11 @@ func sameRecovery(cfg config.Cluster, a, b *[]string) bool {
 	if (a == nil) != (b == nil) {
 		return false
 	}
+
 	if a == nil {
 		return true
 	}
+
 	return slices.Equal(canonicalNames(cfg, *a), canonicalNames(cfg, *b))
 }
 
@@ -44,37 +49,45 @@ func sameRecovery(cfg config.Cluster, a, b *[]string) bool {
 func propagateFollowerExtensions(old, updated config.Cluster) (config.Cluster, bool, error) {
 	out := updated.Clone()
 	changed := false
+
 	for i := range out.Clusters {
 		follower := out.Clusters[i]
 		if !follower.IsFollower() {
 			continue
 		}
+
 		source, ok := out.ClusterByName(follower.Follows)
 		if !ok {
 			continue
 		}
+
 		oldFollower, oldFollowerOK := old.ClusterByName(follower.Name)
 		oldSource, oldSourceOK := old.ClusterByName(follower.Follows)
 		sourceChanged := !oldSourceOK || !sameNames(old, oldSource.Extensions, source.Extensions) ||
 			!sameRecovery(old, oldSource.RecoveryExtensions, source.RecoveryExtensions)
+
 		followerChanged := !oldFollowerOK || !sameNames(old, oldFollower.Extensions, follower.Extensions) ||
 			!sameRecovery(old, oldFollower.RecoveryExtensions, follower.RecoveryExtensions)
 		if followerChanged && !sourceChanged {
 			return updated, false, followerIntentRefusal(follower.Name, follower.Follows)
 		}
+
 		if followerChanged && sourceChanged &&
 			(!sameNames(out, follower.Extensions, source.Extensions) || !sameRecovery(out, follower.RecoveryExtensions, source.RecoveryExtensions)) {
 			return updated, false, followerIntentRefusal(follower.Name, follower.Follows)
 		}
+
 		if !sameNames(out, follower.Extensions, source.Extensions) {
 			out.Clusters[i].Extensions = slices.Clone(source.Extensions)
 			changed = true
 		}
+
 		if !sameRecovery(out, follower.RecoveryExtensions, source.RecoveryExtensions) {
 			out.Clusters[i].RecoveryExtensions = cloneRecovery(source.RecoveryExtensions)
 			changed = true
 		}
 	}
+
 	return out, changed, nil
 }
 
@@ -82,7 +95,9 @@ func cloneRecovery(in *[]string) *[]string {
 	if in == nil {
 		return nil
 	}
+
 	out := slices.Clone(*in)
+
 	return &out
 }
 
@@ -101,18 +116,22 @@ func followerIntentRefusal(follower, source string) error {
 // is loaded.
 func refuseUnsafeExtensionConfigRemoval(ctx context.Context, old, updated config.Cluster) error {
 	recs, recErr := extensionRecords()
+
 	for _, spec := range updated.Clusters {
 		if spec.IsFollower() {
 			continue
 		}
+
 		oldSpec, ok := old.ClusterByName(spec.Name)
 		if !ok {
 			continue
 		}
+
 		if err := refuseUnsafeExtensionConfigChange(ctx, recs, recErr, old, updated, spec, oldSpec); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -121,32 +140,41 @@ func refuseUnsafeExtensionConfigChange(ctx context.Context, recs backup.Records,
 	if err != nil {
 		return config.ValidationError(err)
 	}
+
 	newNames, err := updated.ExtensionResolver().EffectiveNames(spec.Extensions)
 	if err != nil {
 		return config.ValidationError(err)
 	}
+
 	newSet := extensionNameSet(newNames)
+
 	oldSet := extensionNameSet(oldNames)
 	if err := refuseRemovedExtensionSelection(ctx, recs, recErr, old, spec, oldNames, newSet); err != nil {
 		return err
 	}
+
 	if err := refuseSelectedExtensionIdentity(old, updated, spec.Name, newNames, oldSet); err != nil {
 		return err
 	}
+
 	if err := refuseInstalledExtensionDescriptorChange(ctx, recs, recErr, old, updated, spec, newNames, oldSet); err != nil {
 		return err
 	}
+
 	if err := refuseInstalledExtensionSchemas(ctx, updated, spec); err != nil {
 		return err
 	}
+
 	for _, follower := range updated.FollowersOf(spec.Name) {
 		if follower.FollowGeneration != "" || recs.IsAwaiting(follower.Name) {
 			continue
 		}
+
 		if err := refuseInstalledExtensionSchemas(ctx, updated, follower); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -155,6 +183,7 @@ func extensionNameSet(names []string) map[string]bool {
 	for _, name := range names {
 		set[name] = true
 	}
+
 	return set
 }
 
@@ -163,21 +192,26 @@ func refuseRemovedExtensionSelection(ctx context.Context, recs backup.Records, r
 		if newSet[name] {
 			continue
 		}
+
 		ext, err := old.ExtensionResolver().Resolve(name)
 		if err != nil {
 			return config.ValidationError(err)
 		}
+
 		if ext.ExtName == "" {
 			continue
 		}
+
 		installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, ext.ExtName)
 		if err != nil {
 			return err
 		}
+
 		if installed {
 			return extensionRemoveRequired(spec.Name, ext.Name, "removed from cluster.toml")
 		}
 	}
+
 	return nil
 }
 
@@ -190,13 +224,17 @@ func refuseSelectedExtensionIdentity(old, updated config.Cluster, db string, new
 		if !oldSet[name] {
 			continue
 		}
+
 		oldExt, oldOK := old.ExtensionResolver().Lookup(name)
+
 		newExt, newOK := updated.ExtensionResolver().Lookup(name)
 		if !oldOK || !newOK || oldExt.ExtName == newExt.ExtName {
 			continue
 		}
+
 		return extensionSelectedIdentityRequired(db, name, oldExt.ExtName, newExt.ExtName)
 	}
+
 	return nil
 }
 
@@ -209,29 +247,36 @@ func refuseInstalledExtensionDescriptorChange(ctx context.Context, recs backup.R
 		if !oldSet[name] {
 			continue
 		}
+
 		oldExt, oldOK := old.ExtensionResolver().Lookup(name)
+
 		newExt, newOK := updated.ExtensionResolver().Lookup(name)
 		if !oldOK || !newOK || oldExt.ExtName == "" {
 			continue
 		}
+
 		if oldExt.Source == newExt.Source && oldExt.Package == newExt.Package &&
 			oldExt.Preload == newExt.Preload && oldExt.Schema == newExt.Schema &&
 			oldExt.ExtName == newExt.ExtName {
 			continue
 		}
+
 		installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, oldExt.ExtName)
 		if err != nil {
 			return err
 		}
+
 		if installed {
 			if oldExt.ExtName != newExt.ExtName {
 				return extensionInstalledIdentityRequired(spec.Name, oldExt.Name,
 					"SQL extension "+oldExt.ExtName+" is installed, but the descriptor now names "+newExt.ExtName,
 					map[string]any{"ext_name": oldExt.ExtName, "requested_ext_name": newExt.ExtName})
 			}
+
 			return extensionRemoveRequired(spec.Name, oldExt.Name, "provider or schema changed")
 		}
 	}
+
 	return nil
 }
 
@@ -250,6 +295,7 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 			output.ExitPrecondition, "Fix records.json first; nothing was saved.").
 			WithDetails(map[string]any{"reason": "records_unavailable", "database": spec.Name})
 	}
+
 	if recs.IsAwaiting(spec.Name) {
 		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			spec.Name+" awaits recovery, so vaire cannot prove that "+extName+"'s SQL is absent",
@@ -257,6 +303,7 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 			"Recover it first, then use vaire ext remove "+extName+" --db "+spec.Name+" before changing cluster.toml.").
 			WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name})
 	}
+
 	if !extensionClusterRunning(spec) {
 		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			spec.Name+" is not running, so vaire cannot prove that "+extName+"'s SQL is absent",
@@ -264,6 +311,7 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 			"Start it, then use vaire ext remove "+extName+" --db "+spec.Name+" before changing cluster.toml.").
 			WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name})
 	}
+
 	have, err := extensionInstalled(ctx, spec)
 	if err != nil {
 		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
@@ -272,7 +320,9 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 			"Nothing was saved. Retry when the cluster answers; use vaire ext remove "+extName+" --db "+spec.Name+" to remove it safely.").
 			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name})
 	}
+
 	got, ok := have[extName]
+
 	return got, ok, nil
 }
 
@@ -292,9 +342,8 @@ func extensionInstalledIdentityRequired(db, name, detail string, fields map[stri
 	details := map[string]any{
 		"reason": "extension_remove_required", "database": db, "extension": name,
 	}
-	for key, value := range fields {
-		details[key] = value
-	}
+	maps.Copy(details, fields)
+
 	return output.NewError(output.CodePrecondition,
 		name+"'s installed SQL extension identity cannot change in "+db+": "+detail,
 		output.ExitPrecondition,

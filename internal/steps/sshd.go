@@ -63,9 +63,11 @@ func SSHDropInEnv(path, content string, hardening bool) map[string]string {
 		env["SSHD_DROPIN_ACTION"] = "write"
 		env["SSHD_DROPIN"] = content
 	}
+
 	if hardening {
 		env["SSHD_EXPECT"] = sshdExpect
 	}
+
 	return env
 }
 
@@ -85,9 +87,11 @@ func (sshdHardening) Check(ctx context.Context, cfg config.Cluster, _ engine.Run
 	if !fileIs(SSHDropInPath, RenderSSHDropIn(cfg), 0o644) {
 		return incomplete(SSHDropInPath + " differs"), nil
 	}
+
 	if out, _ := Probe(ctx, "systemctl", "is-enabled", "ssh.socket"); out == "enabled" {
 		return incomplete("ssh.socket activation is still enabled"), nil
 	}
+
 	return complete(), nil
 }
 

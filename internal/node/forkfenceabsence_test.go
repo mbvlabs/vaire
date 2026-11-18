@@ -38,15 +38,18 @@ func newFenceOnlyFixture(t *testing.T) *fenceOnlyFixture {
 	mustNoErr(t, os.Mkdir(root, 0o700))
 	ports := filepath.Join(filepath.Dir(root), "ports")
 	mustNoErr(t, os.Mkdir(ports, 0o700))
+
 	cfg := config.DefaultCluster()
 	cfg.Server.DataRoot = root
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-abcdef", Port: 5432, Size: "small"}}
 	f := &fenceOnlyFixture{t: t, cfg: cfg, root: root, ports: ports}
 	f.store = &forkAbsenceStore{cfg: cfg}
 	oldState, oldReservation, oldStore, oldUpdate, oldRelease := forkAbsenceState, forkAbsenceReservation, dbDropStore, forkFenceUpdateRecords, releaseMaterialisationJob
+
 	t.Cleanup(func() {
 		forkAbsenceState, forkAbsenceReservation, dbDropStore, forkFenceUpdateRecords, releaseMaterialisationJob = oldState, oldReservation, oldStore, oldUpdate, oldRelease
 	})
+
 	f.job = engine.JobRecord{ID: fenceOnlyJobID, Job: "db-fork", DB: "target", State: engine.JobFailed}
 	f.state = engine.State{Jobs: []engine.JobRecord{f.job}}
 	f.fence = backup.ActivationFence{
@@ -62,6 +65,7 @@ func newFenceOnlyFixture(t *testing.T) *fenceOnlyFixture {
 	}
 	dbDropStore = func() state.Store { return f.store }
 	releaseMaterialisationJob = func(id string) { f.release = id }
+
 	return f
 }
 
@@ -71,9 +75,11 @@ func (f *fenceOnlyFixture) writeRecords(t *testing.T, fences ...backup.Activatio
 		if s.Activation == nil {
 			s.Activation = map[string]backup.ActivationFence{}
 		}
+
 		for _, fence := range fences {
 			s.Activation[fence.Database] = fence
 		}
+
 		return nil
 	}))
 }
@@ -85,25 +91,33 @@ func (f *fenceOnlyFixture) drop(t *testing.T) (Result, error) {
 
 func (f *fenceOnlyFixture) dropName(t *testing.T, name string) (Result, error) {
 	t.Helper()
+
 	params, err := json.Marshal(map[string]string{"name": name})
 	mustNoErr(t, err)
+
 	env := &Env{Cluster: f.cfg, Req: rpc.Request{Params: params, Confirm: name}}
+
 	return handleDBDrop(context.Background(), env)
 }
 
 func (f *fenceOnlyFixture) assertGone(t *testing.T) {
 	t.Helper()
+
 	recs, err := backup.LoadRecords()
 	mustNoErr(t, err)
+
 	if _, ok := recs.ActivationFenceFor("target"); ok {
 		t.Fatal("activation fence remains")
 	}
+
 	if _, ok := f.store.cfg.ClusterByName("target"); ok {
 		t.Fatal("target configured")
 	}
+
 	if f.store.saves != 0 {
 		t.Fatalf("config saves = %d", f.store.saves)
 	}
+
 	for _, path := range []string{filepath.Join(f.root, "target"), filepath.Join(materialisationConfigRoot, "target"), filepath.Join(f.ports, "target")} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("path changed: %s %v", path, err)
@@ -113,17 +127,22 @@ func (f *fenceOnlyFixture) assertGone(t *testing.T) {
 
 func (f *fenceOnlyFixture) assertRefused(t *testing.T, err error) {
 	t.Helper()
+
 	if err == nil {
 		t.Fatal("fence-only drop accepted")
 	}
+
 	recs, loadErr := backup.LoadRecords()
 	mustNoErr(t, loadErr)
+
 	if _, ok := recs.Activation["target"]; !ok {
 		t.Fatal("refusal lost the activation fence")
 	}
+
 	if _, ok := f.store.cfg.ClusterByName("target"); ok {
 		t.Fatal("refusal configured the target")
 	}
+
 	if f.store.saves != 0 {
 		t.Fatalf("refusal saved configuration %d times", f.store.saves)
 	}
@@ -135,14 +154,18 @@ func TestDropAbandonedForkFenceSuccess(t *testing.T) {
 	mustNoErr(t, os.WriteFile(filepath.Join(f.root, "app-sentinel"), []byte("unchanged"), 0o600))
 	res, err := f.drop(t)
 	mustNoErr(t, err)
+
 	data, ok := res.Data.(map[string]any)
 	if !ok || data["dropped"] != "target" || data["metadata_only"] != true {
 		t.Fatalf("result = %#v", res.Data)
 	}
+
 	f.assertGone(t)
+
 	if _, err := os.Lstat(filepath.Join(f.root, "app-sentinel")); err != nil {
 		t.Fatalf("unrelated path changed: %v", err)
 	}
+
 	if f.release != fenceOnlyJobID {
 		t.Fatalf("retained job released = %q", f.release)
 	}
@@ -159,21 +182,28 @@ func TestDropAbandonedForkFencesIndependently(t *testing.T) {
 	f.writeRecords(t, f.fence, second)
 	_, err := f.dropName(t, "target")
 	mustNoErr(t, err)
+
 	recs, loadErr := backup.LoadRecords()
 	mustNoErr(t, loadErr)
+
 	if _, ok := recs.Activation["target"]; ok {
 		t.Fatal("first fence remains")
 	}
+
 	if _, ok := recs.Activation["target2"]; !ok {
 		t.Fatal("second fence removed by the first drop")
 	}
+
 	_, err = f.dropName(t, "target2")
 	mustNoErr(t, err)
+
 	recs, loadErr = backup.LoadRecords()
 	mustNoErr(t, loadErr)
+
 	if _, ok := recs.Activation["target2"]; ok {
 		t.Fatal("second fence remains")
 	}
+
 	if f.store.saves != 0 {
 		t.Fatalf("fence-only drops saved configuration %d times", f.store.saves)
 	}
@@ -199,19 +229,25 @@ func TestDropAbandonedForkFencePreservesUnrelatedRecords(t *testing.T) {
 		if s.Timelines == nil {
 			s.Timelines = map[string]backup.TimelineSwitch{}
 		}
+
 		s.Timelines["old"] = backup.TimelineSwitch{Stanza: "old-stanza", Timeline: "2"}
+
 		return nil
 	}))
 	_, err := f.drop(t)
 	mustNoErr(t, err)
+
 	recs, loadErr := backup.LoadRecords()
 	mustNoErr(t, loadErr)
+
 	if _, ok := recs.ActivationFenceFor("other"); !ok {
 		t.Fatal("unrelated activation fence removed")
 	}
+
 	if len(recs.DroppedStanzas) != 1 || recs.DroppedStanzas[0].Database != "old" {
 		t.Fatalf("dropped stanza history changed: %+v", recs.DroppedStanzas)
 	}
+
 	if recs.Timelines["old"].Timeline != "2" {
 		t.Fatalf("timeline history changed: %+v", recs.Timelines)
 	}
@@ -220,17 +256,22 @@ func TestDropAbandonedForkFencePreservesUnrelatedRecords(t *testing.T) {
 func TestDropAbandonedForkFenceRecordWriteFailureAndRetry(t *testing.T) {
 	f := newFenceOnlyFixture(t)
 	f.writeRecords(t, f.fence)
+
 	oldUpdate := forkFenceUpdateRecords
 	forkFenceUpdateRecords = func(func(*backup.Records) error) error { return errors.New("records write failed") }
+
 	_, err := f.drop(t)
 	if err == nil {
 		t.Fatal("records write failure accepted")
 	}
+
 	recs, loadErr := backup.LoadRecords()
 	mustNoErr(t, loadErr)
+
 	if _, ok := recs.ActivationFenceFor("target"); !ok {
 		t.Fatal("write failure lost the fence")
 	}
+
 	forkFenceUpdateRecords = oldUpdate
 	_, err = f.drop(t)
 	mustNoErr(t, err)
@@ -240,22 +281,28 @@ func TestDropAbandonedForkFenceRecordWriteFailureAndRetry(t *testing.T) {
 func TestDropAbandonedForkFenceChangedSnapshotIsRefused(t *testing.T) {
 	f := newFenceOnlyFixture(t)
 	f.writeRecords(t, f.fence)
+
 	oldUpdate := forkFenceUpdateRecords
 	forkFenceUpdateRecords = func(fn func(*backup.Records) error) error {
 		mustNoErr(t, backup.UpdateRecords(func(s *backup.Records) error {
 			changed := s.Activation["target"]
 			changed.CreatedAt = "2026-11-02T00:00:00Z"
 			s.Activation["target"] = changed
+
 			return nil
 		}))
+
 		return oldUpdate(fn)
 	}
+
 	_, err := f.drop(t)
 	if err == nil {
 		t.Fatal("changed snapshot accepted")
 	}
+
 	recs, loadErr := backup.LoadRecords()
 	mustNoErr(t, loadErr)
+
 	if _, ok := recs.ActivationFenceFor("target"); !ok {
 		t.Fatal("changed snapshot was deleted")
 	}
@@ -337,7 +384,9 @@ func TestDropAbandonedForkFenceRefusals(t *testing.T) {
 				if s.Drilling == nil {
 					s.Drilling = map[string]string{}
 				}
+
 				s.Drilling["target"] = "target__drill"
+
 				return nil
 			}))
 		}},
@@ -346,7 +395,9 @@ func TestDropAbandonedForkFenceRefusals(t *testing.T) {
 				if s.AwaitingRecovery == nil {
 					s.AwaitingRecovery = map[string]backup.Awaiting{}
 				}
+
 				s.AwaitingRecovery["target"] = backup.Awaiting{Since: "2026-11-01T00:00:00Z"}
+
 				return nil
 			}))
 		}},
@@ -377,6 +428,7 @@ func runFenceOnlyRefusal(t *testing.T, mode string, mutate func(*fenceOnlyFixtur
 	t.Helper()
 	f := newFenceOnlyFixture(t)
 	f.writeRecords(t, f.fence)
+
 	if mutate != nil {
 		mutate(f)
 	}
@@ -384,23 +436,29 @@ func runFenceOnlyRefusal(t *testing.T, mode string, mutate func(*fenceOnlyFixtur
 	if mode != "config-present-entry" && mode != "materialisation-marker-present" {
 		f.writeRecords(t, f.fence)
 	}
+
 	if mode == "wrong-confirm" {
 		env := &Env{Cluster: f.store.cfg, Req: rpc.Request{Params: json.RawMessage(`{"name":"target"}`), Confirm: "other"}}
 		_, err := handleDBDrop(context.Background(), env)
 		f.assertRefused(t, err)
+
 		return
 	}
+
 	if !direct {
 		_, err := f.drop(t)
 		f.assertRefused(t, err)
+
 		return
 	}
+
 	_, handled, err := dropAbandonedForkFence(context.Background(), &Env{Cluster: f.store.cfg,
 		Req: rpc.Request{Params: json.RawMessage(`{"name":"target"}`), Confirm: "target"}}, f.store, f.store.cfg, "target")
 	if err != nil {
 		f.assertRefused(t, err)
 		return
 	}
+
 	if handled {
 		t.Fatal("presence mode was handled by the fence-only branch")
 	}

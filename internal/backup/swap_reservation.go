@@ -21,6 +21,7 @@ func moveSwapReservation(ctx context.Context, dir string, uid uint32, from, asid
 		port < config.TemporaryPortMin || port > config.TemporaryPortMax {
 		return ReservationIdentity{}, errors.New("invalid swap reservation")
 	}
+
 	a, err := openForkAllocator(ctx, dir, uid)
 	if err != nil {
 		return ReservationIdentity{}, err
@@ -31,26 +32,34 @@ func moveSwapReservation(ctx context.Context, dir string, uid uint32, from, asid
 	if err != nil {
 		return ReservationIdentity{}, err
 	}
+
 	if err := swapReservationEvidence(src, dst, expected, prepare); err != nil {
 		return ReservationIdentity{}, err
 	}
+
 	name, links := swapReservationSource(from, aside, src, dst)
+
 	id, info, err := prepareSwapReservation(a, name, uid, port, links, expected, prepare)
 	if err != nil {
 		return ReservationIdentity{}, err
 	}
+
 	if err := verifySwapReservationDestination(a, aside, uid, port, info, src, dst); err != nil {
 		return ReservationIdentity{}, err
 	}
+
 	if err := moveSwapReservationFiles(a, from, aside, uid, port, src, dst); err != nil {
 		return ReservationIdentity{}, err
 	}
+
 	if err := verifyMovedSwapReservation(a, aside, uid, port, info, id.Digest); err != nil {
 		return ReservationIdentity{}, err
 	}
+
 	if err := a.unique(aside, port, uid); err != nil {
 		return ReservationIdentity{}, err
 	}
+
 	return id, nil
 }
 
@@ -60,9 +69,11 @@ func swapReservationEvidence(src, dst bool, expected ReservationIdentity, prepar
 	if !src && !dst {
 		return errors.New("swap reservation missing")
 	}
+
 	if expected.Inode == 0 && (!src || dst || prepare == nil) {
 		return errors.New("swap reservation has no prepare evidence")
 	}
+
 	return nil
 }
 
@@ -72,9 +83,11 @@ func swapReservationSource(from, aside string, src, dst bool) (string, uint64) {
 	if !src {
 		return aside, 1
 	}
+
 	if dst {
 		return from, 2
 	}
+
 	return from, 1
 }
 
@@ -82,10 +95,12 @@ func swapReservationSource(from, aside string, src, dst bool) (string, uint64) {
 // both. It fails closed on an entry it cannot inspect.
 func swapReservationSides(a *forkAllocator, from, aside string) (bool, bool, error) {
 	_, srcErr := a.root.Lstat(from)
+
 	_, dstErr := a.root.Lstat(aside)
 	if srcErr != nil && !errors.Is(srcErr, os.ErrNotExist) || dstErr != nil && !errors.Is(dstErr, os.ErrNotExist) {
 		return false, false, errors.Join(srcErr, dstErr)
 	}
+
 	return srcErr == nil, dstErr == nil, nil
 }
 
@@ -96,10 +111,12 @@ func verifySwapReservationDestination(a *forkAllocator, aside string, uid uint32
 	if !src || !dst {
 		return nil
 	}
+
 	otherPort, other, err := a.readLinks(aside, uid, 2)
 	if err != nil || otherPort != port || !os.SameFile(info, other) {
 		return errors.New("swap reservation destination collision")
 	}
+
 	return nil
 }
 
@@ -111,9 +128,11 @@ func moveSwapReservationFiles(a *forkAllocator, from, aside string, uid uint32, 
 			return err
 		}
 	}
+
 	if !src {
 		return nil
 	}
+
 	return removeSwapReservation(a, from)
 }
 
@@ -124,30 +143,38 @@ func prepareSwapReservation(a *forkAllocator, name string, uid uint32, port int,
 	if err != nil || got != port {
 		return ReservationIdentity{}, nil, errors.Join(err, errors.New("swap reservation port or identity mismatch"))
 	}
+
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return ReservationIdentity{}, nil, errors.New("unverifiable swap reservation")
 	}
+
 	digest, err := a.digest(name, info)
 	if err != nil {
 		return ReservationIdentity{}, nil, err
 	}
+
 	id := ReservationIdentity{Device: statDevice(st), Inode: st.Ino, UID: st.Uid, Digest: digest}
 	if expected.Inode != 0 {
 		if expected != id {
 			return ReservationIdentity{}, nil, errors.New("swap reservation was replaced")
 		}
+
 		return id, info, nil
 	}
+
 	if err := a.unique(name, port, uid); err != nil {
 		return ReservationIdentity{}, nil, err
 	}
+
 	if err := prepare(id); err != nil {
 		return ReservationIdentity{}, nil, err
 	}
+
 	if err := verifyPreparedSwapReservation(a, name, uid, port, info, digest); err != nil {
 		return ReservationIdentity{}, nil, err
 	}
+
 	return id, info, nil
 }
 
@@ -159,10 +186,12 @@ func verifyPreparedSwapReservation(a *forkAllocator, name string, uid uint32, po
 	if err != nil || got != port || !os.SameFile(info, current) {
 		return errors.New("swap reservation changed during preparation")
 	}
+
 	currentDigest, err := a.digest(name, current)
 	if err != nil || currentDigest != digest {
 		return errors.New("swap reservation content changed during preparation")
 	}
+
 	return nil
 }
 
@@ -173,9 +202,11 @@ func linkSwapReservation(a *forkAllocator, from, aside string, uid uint32, port 
 	if err := a.unique(from, port, uid); err != nil {
 		return err
 	}
+
 	if err := a.root.Link(from, aside); err != nil {
 		return fmt.Errorf("link swap reservation: %w", err)
 	}
+
 	return a.dir.Sync()
 }
 
@@ -185,6 +216,7 @@ func removeSwapReservation(a *forkAllocator, from string) error {
 	if err := a.root.Remove(from); err != nil {
 		return err
 	}
+
 	return a.dir.Sync()
 }
 
@@ -195,9 +227,11 @@ func verifyMovedSwapReservation(a *forkAllocator, aside string, uid uint32, port
 	if err != nil || got != port || !os.SameFile(info, after) {
 		return errors.New("moved swap reservation changed")
 	}
+
 	afterDigest, err := a.digest(aside, after)
 	if err != nil || afterDigest != digest {
 		return errors.New("moved swap reservation content changed")
 	}
+
 	return nil
 }

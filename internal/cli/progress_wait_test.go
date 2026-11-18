@@ -39,12 +39,14 @@ type syncBuffer struct {
 func (s *syncBuffer) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return s.b.Write(p)
 }
 
 func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return s.b.String()
 }
 
@@ -55,20 +57,26 @@ func TestPlainWaitHeartbeat(t *testing.T) {
 	p.beat.mu.Lock()
 	p.beat.every = 50 * time.Millisecond
 	p.beat.mu.Unlock()
+
 	if inner := p.wait("nested"); p.beat.label != "restoring app2" {
 		t.Fatalf("a nested wait replaced the outer one")
 	} else {
 		inner()
 	}
+
 	p.track(output.Event{Type: "step", Step: "pgbackrest-v1", State: "started"})
+
 	deadline := time.Now().Add(3 * time.Second)
 	for !strings.Contains(out.String(), "still pgbackrest-v1") && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	done()
+
 	if !strings.Contains(out.String(), "… still pgbackrest-v1 (") {
 		t.Fatalf("no heartbeat in %q", out.String())
 	}
+
 	if p.beat != nil || p.stderr != out {
 		t.Errorf("stop did not restore stderr")
 	}
@@ -76,10 +84,12 @@ func TestPlainWaitHeartbeat(t *testing.T) {
 
 func TestHeartbeatLine(t *testing.T) {
 	start := time.Now()
+
 	h := &heartbeat{label: "restoring app2", started: start, phaseStarted: start}
 	if got := h.line(start.Add(130 * time.Second)); got != "… still restoring app2 (2m10s)" {
 		t.Errorf("label line = %q", got)
 	}
+
 	h.phase, h.phaseStarted = "pgbackrest-v1", start.Add(100*time.Second)
 	if got := h.line(start.Add(130 * time.Second)); got != "… still pgbackrest-v1 (30s, 2m10s total)" {
 		t.Errorf("phase line = %q", got)
@@ -89,9 +99,11 @@ func TestHeartbeatLine(t *testing.T) {
 func TestStructuredWaitIsSilent(t *testing.T) {
 	out := &syncBuffer{}
 	p := &progress{opts: output.Options{Mode: output.ModeJSON}, stderr: out}
+
 	done := p.wait("restoring app2")
 	if p.beat != nil || p.status != nil {
 		t.Errorf("structured mode started a waiting line")
 	}
+
 	done()
 }

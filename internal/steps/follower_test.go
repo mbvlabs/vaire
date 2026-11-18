@@ -25,6 +25,7 @@ func followerConfig() config.Cluster {
 	cfg.Server.DataRoot = "/srv/pg"
 	cfg.Clusters[0].Size = "large"
 	cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: "app_follower", Node: "db1", Port: 5434, Size: "small", Follows: "app"})
+
 	return cfg
 }
 
@@ -32,13 +33,16 @@ var followerHost = hostinfo.Info{VCPU: 4, RAMMiB: 8192, DataDisk: hostinfo.Disk{
 
 func floorMap(t *testing.T, floors []render.Floor, err error) map[string]string {
 	t.Helper()
+
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	out := map[string]string{}
 	for _, f := range floors {
 		out[f.Name] = f.Value
 	}
+
 	return out
 }
 
@@ -52,6 +56,7 @@ func TestFollowerFloorsTakeTheLarger(t *testing.T) {
 	if got["max_connections"] != "100" {
 		t.Errorf("max_connections %q, want the source's 100", got["max_connections"])
 	}
+
 	if got["max_wal_senders"] != "10" || got["max_prepared_transactions"] != "0" || got["max_locks_per_transaction"] != "64" {
 		t.Errorf("floors %v", got)
 	}
@@ -61,6 +66,7 @@ func TestFollowerFloorsTakeTheLarger(t *testing.T) {
 	app, _ = cfg.ClusterByName("app")
 	f, _ = cfg.ClusterByName("app_follower")
 	floors, err = FollowerFloors(cfg, f, app, followerHost)
+
 	got = floorMap(t, floors, err)
 	if got["max_locks_per_transaction"] != "256" || got["max_prepared_transactions"] != "5" {
 		t.Errorf("settings: %v", got)
@@ -70,10 +76,12 @@ func TestFollowerFloorsTakeTheLarger(t *testing.T) {
 func TestFollowerConfFile(t *testing.T) {
 	cfg := followerConfig()
 	f, _ := cfg.ClusterByName("app_follower")
+
 	s, ok, err := followerSettings(cfg, f, followerHost, backup.Records{})
 	if err != nil || !ok {
 		t.Fatalf("no settings for a follower: %v", err)
 	}
+
 	conf := string(render.FollowerConf(s))
 	for _, want := range []string{
 		"hot_standby = on",
@@ -85,16 +93,20 @@ func TestFollowerConfFile(t *testing.T) {
 			t.Errorf("60-vaire-follower.conf lacks %q:\n%s", want, conf)
 		}
 	}
+
 	if strings.Contains(conf, "restore_command") {
 		t.Error("restore_command without backups")
 	}
+
 	cfg.Backup.Provider = "r2"
 	cfg.Backup.Bucket = "b"
 	s, _, _ = followerSettings(cfg, f, followerHost, backup.Records{Timelines: map[string]backup.TimelineSwitch{"app": {Stanza: "app-abc123", Timeline: "3"}}})
+
 	conf = string(render.FollowerConf(s))
 	if !strings.Contains(conf, `restore_command = '/usr/bin/pgbackrest --pg1-path=/srv/pg/app_follower --stanza=app-abc123 archive-get %f "%p"'`) {
 		t.Errorf("restore_command:\n%s", conf)
 	}
+
 	if !strings.Contains(conf, "recovery_target_timeline = '3'") {
 		t.Errorf("the recorded timeline is missing:\n%s", conf)
 	}
@@ -103,17 +115,21 @@ func TestFollowerConfFile(t *testing.T) {
 func TestConfFilesHaveTheFollowerFileOnlyForFollowers(t *testing.T) {
 	cfg := followerConfig()
 	rt := engine.Runtime{Host: followerHost}
+
 	has := func(name string) bool {
 		spec, _ := cfg.ClusterByName(name)
+
 		files, err := confFiles(cfg, spec, rt)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		for _, f := range files {
 			if strings.HasSuffix(f.Path, "/"+render.FollowerConfName) {
 				return true
 			}
 		}
+
 		return false
 	}
 	if !has("app_follower") || has("app") {
@@ -126,6 +142,7 @@ func TestRolesSkipFollowers(t *testing.T) {
 	if got := (postgresRoles{clusterStep{cluster: "app_follower"}}).SkipReason(cfg); got != "follower" {
 		t.Errorf("follower: %q", got)
 	}
+
 	if got := (postgresRoles{clusterStep{cluster: "app"}}).SkipReason(cfg); got != "" {
 		t.Errorf("source: %q", got)
 	}
@@ -135,13 +152,16 @@ func TestPgbouncerWithholdsAnUnsettledUnfollowsAlias(t *testing.T) {
 	old := backup.RecordsPath
 	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
 	t.Cleanup(func() { backup.RecordsPath = old })
+
 	cfg := followerConfig()
 	setRecord := func(settled bool) {
 		t.Helper()
+
 		if err := backup.UpdateRecords(func(s *backup.Records) error {
 			s.Unfollowing["app_follower"] = backup.Unfollow{
 				Source: "app", Stanza: "app_follower-abc123", StartedAt: "2026-11-10T00:00:00Z", Settled: settled,
 			}
+
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -152,10 +172,12 @@ func TestPgbouncerWithholdsAnUnsettledUnfollowsAlias(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		out := map[string]render.PoolerDatabase{}
 		for _, db := range poolerDatabases(cfg, recs, session) {
 			out[db.Name] = db
 		}
+
 		return out
 	}
 	rendered := func(session bool) string {
@@ -163,9 +185,11 @@ func TestPgbouncerWithholdsAnUnsettledUnfollowsAlias(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if session {
 			return string(render.SessionIni(cfg, poolerDatabases(cfg, recs, true), SessionSocketDir))
 		}
+
 		return string(render.PgbouncerIni(cfg, followerHost, poolerDatabases(cfg, recs, false)))
 	}
 
@@ -179,14 +203,17 @@ func TestPgbouncerWithholdsAnUnsettledUnfollowsAlias(t *testing.T) {
 // unfinished unfollow and still route its source.
 func assertUnsettledAliasWithheld(t *testing.T, entries func(bool) map[string]render.PoolerDatabase, rendered func(bool) string) {
 	t.Helper()
+
 	for _, session := range []bool{false, true} {
 		got := entries(session)
 		if _, ok := got["app_follower"]; ok {
 			t.Errorf("session=%v: an unsettled unfollow's alias is rendered", session)
 		}
+
 		if _, ok := got["app"]; !ok {
 			t.Errorf("session=%v: the source's alias is missing", session)
 		}
+
 		if ini := rendered(session); strings.Contains(ini, "app_follower") {
 			t.Errorf("session=%v: the rendered configuration names the unsettled alias:\n%s", session, ini)
 		}
@@ -197,12 +224,15 @@ func assertUnsettledAliasWithheld(t *testing.T, entries func(bool) map[string]re
 // unfollow to the follower.
 func assertSettledAliasRouted(t *testing.T, entries func(bool) map[string]render.PoolerDatabase, rendered func(bool) string) {
 	t.Helper()
+
 	for _, session := range []bool{false, true} {
 		got := entries(session)
+
 		db, ok := got["app_follower"]
 		if !ok || db.DBName != "app" || db.Port != 5434 {
 			t.Errorf("session=%v: the settled alias is not routed to the follower: %+v", session, db)
 		}
+
 		if ini := rendered(session); !strings.Contains(ini, "app_follower") {
 			t.Errorf("session=%v: a settled alias is still withheld:\n%s", session, ini)
 		}
@@ -226,7 +256,9 @@ func TestUnfollowFenceKeepsOtherUnfinishedAliasesExcluded(t *testing.T) {
 			cfg.Clusters[i].StatementTimeout = "60s"
 		}
 	}
+
 	generation := "0123456789abcdef0123456789abcdef"
+
 	cfg.Clusters = append(cfg.Clusters,
 		config.ClusterSpec{Name: "app_pending", Node: "db1", Port: 5435, Size: "small", StatementTimeout: "60s", Follows: "app", FollowGeneration: generation},
 		config.ClusterSpec{Name: "app_restored", Node: "db1", Port: 5436, Size: "small", StatementTimeout: "60s", Follows: "app"},
@@ -236,7 +268,9 @@ func TestUnfollowFenceKeepsOtherUnfinishedAliasesExcluded(t *testing.T) {
 	}
 
 	oldWrite := writePoolerFile
+
 	t.Cleanup(func() { writePoolerFile = oldWrite })
+
 	written := map[string]string{}
 	writePoolerFile = func(path, content string, _ os.FileMode, _, _ string) error {
 		written[path] = content
@@ -251,11 +285,13 @@ func TestUnfollowFenceKeepsOtherUnfinishedAliasesExcluded(t *testing.T) {
 	}
 	assertAlias := func(db string, want bool) {
 		t.Helper()
+
 		for _, path := range []string{poolerFilePaths.ini, poolerFilePaths.sessionIni} {
 			content, ok := written[path]
 			if !ok {
 				t.Fatalf("the direct fence did not render %s", path)
 			}
+
 			for _, alias := range []string{db, db + "__auth"} {
 				if got := strings.Contains(content, alias+" ="); got != want {
 					t.Errorf("%s: alias %s present = %v, want %v", filepath.Base(path), alias, got, want)
@@ -276,11 +312,14 @@ func TestUnfollowFenceKeepsOtherUnfinishedAliasesExcluded(t *testing.T) {
 		s.AwaitingRecovery["app_restored"] = backup.Awaiting{
 			Stanza: "app_restored-abc123", Since: "2026-11-10T00:00:00Z",
 		}
+
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	written = map[string]string{}
+
 	fence()
 	assertAlias("app", true)
 	assertAlias("app_follower", false) // the unsettled unfollow target
@@ -297,6 +336,7 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 	oldPath := backup.RecordsPath
 	backup.RecordsPath = filepath.Join(t.TempDir(), "records.json")
 	t.Cleanup(func() { backup.RecordsPath = oldPath })
+
 	cfg := followerConfig()
 	rt := engine.Runtime{Host: followerHost}
 	safe := withPoolerFiles(t)
@@ -306,16 +346,19 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing records are refused: %v", err)
 	}
+
 	assertPoolerAlias(t, files, "app_follower", true)
 	assertPoolerAlias(t, files, "app", true)
 
 	// A readable unsettled unfollow withholds the alias and its auth alias from
 	// both poolers, on both the ordinary render and the direct fence path.
 	writeUnsettledUnfollow(t)
+
 	files, err = pgbouncerFiles(cfg, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	assertPoolerAlias(t, files, "app_follower", false)
 	assertPoolerAlias(t, files, "app", true)
 	assertPoolerFenceWithholdsAlias(t, cfg)
@@ -324,14 +367,17 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 	if err := os.WriteFile(backup.RecordsPath, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if files := (pgbouncer{}).RenderedFiles(cfg, rt); files != nil {
 		t.Fatalf("the plan render exposed files from unreadable records: %v", files)
 	}
+
 	assertUnreadableRecordsRefused(t, cfg, rt)
 	// No file was touched by any failing path: the previous safe files stay.
 	if err := ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil); err == nil || refusalReason(err) != "unfollow_state_unknown" {
 		t.Fatalf("the direct fence accepted unreadable unfollow records: %v", err)
 	}
+
 	assertPoolerFilesUnchanged(t, safe)
 }
 
@@ -339,6 +385,7 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 // safe contents and returns them by path.
 func withPoolerFiles(t *testing.T) map[string]string {
 	t.Helper()
+
 	oldPaths := poolerFilePaths
 	dir := t.TempDir()
 	poolerFilePaths = struct {
@@ -348,7 +395,9 @@ func withPoolerFiles(t *testing.T) map[string]string {
 		sessionIni: filepath.Join(dir, "session.ini"), sessionHBA: filepath.Join(dir, "session_hba.conf"),
 		sessionUnit: filepath.Join(dir, "session.service"),
 	}
+
 	t.Cleanup(func() { poolerFilePaths = oldPaths })
+
 	safe := map[string]string{
 		poolerFilePaths.ini: "safe pgbouncer.ini\n", poolerFilePaths.hba: "safe hba\n",
 		poolerFilePaths.sessionIni: "safe session.ini\n", poolerFilePaths.sessionHBA: "safe session hba\n",
@@ -359,16 +408,19 @@ func withPoolerFiles(t *testing.T) map[string]string {
 			t.Fatal(err)
 		}
 	}
+
 	return safe
 }
 
 // writeUnsettledUnfollow records an unfollow that has not settled.
 func writeUnsettledUnfollow(t *testing.T) {
 	t.Helper()
+
 	if err := backup.UpdateRecords(func(s *backup.Records) error {
 		s.Unfollowing["app_follower"] = backup.Unfollow{
 			Source: "app", Stanza: "app_follower-abc123", StartedAt: "2026-11-10T00:00:00Z", Settled: false,
 		}
+
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -379,24 +431,31 @@ func writeUnsettledUnfollow(t *testing.T) {
 // writer and checks it withheld the unsettled alias from both poolers.
 func assertPoolerFenceWithholdsAlias(t *testing.T, cfg config.Cluster) {
 	t.Helper()
+
 	oldWrite := writePoolerFile
+
 	var written map[string]string
+
 	writePoolerFile = func(path, content string, _ os.FileMode, _, _ string) error {
 		if written == nil {
 			written = map[string]string{}
 		}
+
 		written[path] = content
+
 		return nil
 	}
 	// The shell is dry, so the call stops after the writes; the rendered files
 	// are what this boundary protects.
 	_ = ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
 	writePoolerFile = oldWrite
+
 	for _, path := range []string{poolerFilePaths.ini, poolerFilePaths.sessionIni} {
 		content, ok := written[path]
 		if !ok {
 			t.Fatalf("the fence did not render %s", path)
 		}
+
 		if strings.Contains(content, "app_follower =") || strings.Contains(content, "app_follower__auth =") {
 			t.Fatalf("the fence exposed the unsettled alias in %s:\n%s", path, content)
 		}
@@ -407,6 +466,7 @@ func assertPoolerFenceWithholdsAlias(t *testing.T, cfg config.Cluster) {
 // unreadable unfollow records instead of treating them as empty.
 func assertUnreadableRecordsRefused(t *testing.T, cfg config.Cluster, rt engine.Runtime) {
 	t.Helper()
+
 	for name, call := range map[string]func() error{
 		"render": func() error { _, err := pgbouncerFiles(cfg, rt); return err },
 		"inputs": func() error { _, err := (pgbouncer{}).Inputs(cfg, rt); return err },
@@ -426,6 +486,7 @@ func assertUnreadableRecordsRefused(t *testing.T, cfg config.Cluster, rt engine.
 		if err == nil {
 			t.Fatalf("%s accepted unreadable unfollow records", name)
 		}
+
 		var cliErr *output.CLIError
 		if !errors.As(err, &cliErr) || !strings.Contains(fmt.Sprint(cliErr.Details), "unfollow_state_unknown") {
 			t.Fatalf("%s error is not a fail-closed transition refusal: %v", name, err)
@@ -436,11 +497,13 @@ func assertUnreadableRecordsRefused(t *testing.T, cfg config.Cluster, rt engine.
 // assertPoolerFilesUnchanged checks no failing path touched the safe files.
 func assertPoolerFilesUnchanged(t *testing.T, safe map[string]string) {
 	t.Helper()
+
 	for path, want := range safe {
 		got, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("safe file %s is gone: %v", path, err)
 		}
+
 		if string(got) != want {
 			t.Fatalf("unreadable records overwrote %s: %q", path, got)
 		}
@@ -453,8 +516,10 @@ func refusalReason(err error) string {
 	if !errors.As(err, &cliErr) {
 		return ""
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
+
 	return reason
 }
 
@@ -462,10 +527,12 @@ func refusalReason(err error) string {
 // __auth alias.
 func assertPoolerAlias(t *testing.T, files []pgbouncerFile, db string, want bool) {
 	t.Helper()
+
 	for _, f := range files {
 		if f.path != poolerFilePaths.ini && f.path != poolerFilePaths.sessionIni {
 			continue
 		}
+
 		for _, alias := range []string{db + " =", db + "__auth ="} {
 			if got := strings.Contains(f.content, alias); got != want {
 				t.Errorf("%s: alias %q present=%v, want %v:\n%s", f.path, alias, got, want, f.content)
@@ -476,26 +543,34 @@ func assertPoolerAlias(t *testing.T, files []pgbouncerFile, db string, want bool
 
 func TestFencePoolerDatabasePausesAndKillsBothPoolers(t *testing.T) {
 	oldNames, oldAdmin := poolerDatabaseNames, poolerAdminAt
+
 	t.Cleanup(func() { poolerDatabaseNames, poolerAdminAt = oldNames, oldAdmin })
+
 	poolerDatabaseNames = func(context.Context, string, int) (map[string]bool, error) {
 		return map[string]bool{"app_follower": true}, nil
 	}
+
 	var got []string
+
 	poolerAdminAt = func(_ context.Context, _ string, port int, command string) error {
 		got = append(got, fmt.Sprintf("%d %s", port, command))
 		return nil
 	}
+
 	resume, err := FencePoolerDatabase(context.Background(), "app_follower")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if want := []string{
 		"6432 RESUME app_follower", "6432 KILL app_follower", "6432 PAUSE app_follower",
 		"5432 RESUME app_follower", "5432 KILL app_follower", "5432 PAUSE app_follower",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("fence commands = %v, want %v", got, want)
 	}
+
 	resume()
+
 	if want := []string{"6432 RESUME app_follower", "5432 RESUME app_follower"}; !slices.Equal(got[6:], want) {
 		t.Fatalf("resume commands = %v, want %v", got[6:], want)
 	}
@@ -503,46 +578,61 @@ func TestFencePoolerDatabasePausesAndKillsBothPoolers(t *testing.T) {
 
 func TestFencePoolerDatabaseWithAnAliasAlreadyWithheld(t *testing.T) {
 	oldNames, oldAdmin := poolerDatabaseNames, poolerAdminAt
+
 	t.Cleanup(func() { poolerDatabaseNames, poolerAdminAt = oldNames, oldAdmin })
+
 	poolerDatabaseNames = func(context.Context, string, int) (map[string]bool, error) {
 		return map[string]bool{"app": true}, nil
 	}
+
 	var got []string
+
 	poolerAdminAt = func(_ context.Context, _ string, port int, command string) error {
 		got = append(got, fmt.Sprintf("%d %s", port, command))
 		return nil
 	}
+
 	resume, err := FencePoolerDatabase(context.Background(), "app_follower")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 0 {
 		t.Fatalf("a withheld alias was paused or killed: %v", got)
 	}
+
 	resume()
 }
 
 func TestFencePoolerDatabaseRefusesAFailedPause(t *testing.T) {
 	oldNames, oldAdmin := poolerDatabaseNames, poolerAdminAt
+
 	t.Cleanup(func() { poolerDatabaseNames, poolerAdminAt = oldNames, oldAdmin })
+
 	poolerDatabaseNames = func(context.Context, string, int) (map[string]bool, error) {
 		return map[string]bool{"app_follower": true}, nil
 	}
+
 	var resumed, pauseFailed bool
+
 	poolerAdminAt = func(_ context.Context, _ string, _ int, command string) error {
 		if command == "RESUME app_follower" && pauseFailed {
 			resumed = true
 			return nil
 		}
+
 		if command == "PAUSE app_follower" {
 			pauseFailed = true
 			return errors.New("the pooler did not answer")
 		}
+
 		return nil
 	}
+
 	if _, err := FencePoolerDatabase(context.Background(), "app_follower"); err == nil {
 		t.Fatal("a failed pause did not refuse the fence")
 	}
+
 	if !resumed {
 		t.Fatal("a failed fence left the pooler paused")
 	}
@@ -550,28 +640,35 @@ func TestFencePoolerDatabaseRefusesAFailedPause(t *testing.T) {
 
 func TestFollowerRouting(t *testing.T) {
 	cfg := followerConfig()
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, session := range []bool{false, true} {
 		var found bool
+
 		for _, db := range poolerDatabases(cfg, recs, session) {
 			if db.Name == "app_follower" {
 				found = true
+
 				if db.DBName != "app" || db.Port != 5434 {
 					t.Errorf("entry %+v", db)
 				}
 			}
 		}
+
 		if !found {
 			t.Errorf("session=%v: no entry for the follower", session)
 		}
 	}
+
 	ini := string(render.PgbouncerIni(cfg, followerHost, poolerDatabases(cfg, recs, false)))
 	if !strings.Contains(ini, "app_follower = host=/var/run/postgresql port=5434 dbname=app auth_dbname=app_follower__auth") {
 		t.Errorf("pgbouncer.ini:\n%s", ini)
 	}
+
 	if !strings.Contains(ini, "auth_dbname = app__auth") {
 		t.Errorf("the admin auth database must be a primary's:\n%s", ini)
 	}
@@ -581,15 +678,18 @@ func TestFollowersHaveNoStanzaOrTimers(t *testing.T) {
 	cfg := followerConfig()
 	cfg.Backup.Provider = "r2"
 	cfg.Backup.Bucket = "b"
+
 	conf := string(render.PgBackRestConf(cfg, followerHost, render.BackupSecrets{}))
 	if strings.Contains(conf, "app_follower") || !strings.Contains(conf, "[app-abc123]") {
 		t.Errorf("pgbackrest.conf:\n%s", conf)
 	}
+
 	for name := range timerFiles(cfg) {
 		if strings.Contains(name, "app_follower") {
 			t.Errorf("a timer for the follower: %s", name)
 		}
 	}
+
 	f, _ := cfg.ClusterByName("app_follower")
 	if !strings.Contains(string(render.BackupConf(cfg, f)), "archive_command = '/bin/true'") {
 		t.Error("a follower archives nowhere")
@@ -598,6 +698,7 @@ func TestFollowersHaveNoStanzaOrTimers(t *testing.T) {
 
 func TestFollowerProbeOpensTheSourceDatabase(t *testing.T) {
 	cfg := followerConfig()
+
 	f, _ := cfg.ClusterByName("app_follower")
 	if target := render.ProbeTarget(PGSocketDir, f); !strings.Contains(target, "/app?") {
 		t.Errorf("probe target %s", target)
@@ -670,10 +771,12 @@ func TestFollowerFloorsReadPostgreSQLNumbers(t *testing.T) {
 	cfg.Clusters[0].Settings = map[string]string{"max_connections": "0x100"}
 	app, _ := cfg.ClusterByName("app")
 	f, _ := cfg.ClusterByName("app_follower")
+
 	floors, err := FollowerFloors(cfg, f, app, followerHost)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := floorMap(t, floors, nil)["max_connections"]; got != "256" {
 		t.Errorf("max_connections %q, want the source's hexadecimal 256", got)
 	}
@@ -682,10 +785,12 @@ func TestFollowerFloorsReadPostgreSQLNumbers(t *testing.T) {
 	cfg.Clusters[1].Settings = map[string]string{"max_locks_per_transaction": "0x200"}
 	app, _ = cfg.ClusterByName("app")
 	f, _ = cfg.ClusterByName("app_follower")
+
 	floors, err = FollowerFloors(cfg, f, app, followerHost)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	got := floorMap(t, floors, nil)
 	if got["max_locks_per_transaction"] != "512" || got["max_prepared_transactions"] != "6" {
 		t.Errorf("floors %v, want the follower's 512 locks and the source's rounded 6", got)
@@ -697,6 +802,7 @@ func TestFollowerFloorsFailOnUnreadableValues(t *testing.T) {
 	cfg.Clusters[0].Settings = map[string]string{"max_wal_senders": "ten"}
 	app, _ := cfg.ClusterByName("app")
 	f, _ := cfg.ClusterByName("app_follower")
+
 	_, err := FollowerFloors(cfg, f, app, followerHost)
 	if err == nil || !strings.Contains(err.Error(), "max_wal_senders") || !strings.Contains(err.Error(), "app") {
 		t.Fatalf("unreadable source value: %v, want an error naming max_wal_senders and app", err)
@@ -706,12 +812,15 @@ func TestFollowerFloorsFailOnUnreadableValues(t *testing.T) {
 	if _, err := confFiles(cfg, f, rt); err == nil {
 		t.Fatal("confFiles accepted an unreadable floor value")
 	}
+
 	if _, err := (postgresConfig{clusterStep{cluster: "app_follower"}}).Inputs(cfg, rt); err == nil {
 		t.Fatal("postgres-config-v1 accepted the source's unreadable floor value")
 	}
+
 	cfg.Clusters[0].Settings = nil
 	cfg.Clusters[1].Settings = map[string]string{"max_connections": "1MB"}
 	app, _ = cfg.ClusterByName("app")
+
 	f, _ = cfg.ClusterByName("app_follower")
 	if _, err := FollowerFloors(cfg, f, app, followerHost); err == nil || !strings.Contains(err.Error(), "app_follower") {
 		t.Fatalf("unreadable follower value: %v, want an error naming app_follower", err)
@@ -734,12 +843,15 @@ func TestFollowerFloorDrops(t *testing.T) {
 	if err != nil || len(drops) == 0 {
 		t.Fatalf("large to small: drops %v, %v; want some", drops, err)
 	}
+
 	found := false
+
 	for _, d := range drops {
 		if d.Follower == "app_follower" && d.Setting == "max_connections" && d.From == 100 && d.To == 30 {
 			found = true
 		}
 	}
+
 	if !found {
 		t.Errorf("drops %v lack app_follower max_connections 100 -> 30", drops)
 	}
@@ -748,15 +860,18 @@ func TestFollowerFloorDrops(t *testing.T) {
 	was.Settings = map[string]string{"max_connections": "200"}
 	now := large
 	now.Settings = map[string]string{"max_connections": "100", "max_locks_per_transaction": "512"}
+
 	drops, err = FollowerFloorDrops(cfg, "app", was, now, followerHost)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var fell, rose bool
 	for _, d := range drops {
 		fell = fell || d.Setting == "max_connections"
 		rose = rose || d.Setting == "max_locks_per_transaction"
 	}
+
 	if !fell || rose {
 		t.Errorf("mixed change: drops %v, want max_connections only", drops)
 	}
@@ -766,6 +881,7 @@ func TestFollowerFloorDrops(t *testing.T) {
 	}
 	// An unreadable floor value fails the resize instead of being skipped.
 	bad := large
+
 	bad.Settings = map[string]string{"max_locks_per_transaction": "lots"}
 	if _, err := FollowerFloorDrops(cfg, "app", small, bad, followerHost); err == nil {
 		t.Fatal("FollowerFloorDrops accepted an unreadable value")
@@ -783,10 +899,12 @@ func TestFollowerFloorsChange(t *testing.T) {
 	// and so its restart, alone.
 	low, lower := small, small
 	low.Settings = map[string]string{"max_connections": "20"}
+
 	lower.Settings = map[string]string{"max_connections": "10"}
 	if changed, err := FollowerFloorsChange(cfg, f, low, lower, followerHost); err != nil || changed {
 		t.Fatalf("below the follower's own value: change %v, %v; want false", changed, err)
 	}
+
 	if changed, err := FollowerFloorsChange(cfg, f, small, large, followerHost); err != nil || !changed {
 		t.Fatalf("small to large: change %v, %v; want true", changed, err)
 	}
@@ -806,6 +924,7 @@ func TestFloorsDiffer(t *testing.T) {
 		})
 	}
 	path := FollowerConfPath("app_follower")
+
 	cases := []struct {
 		name      string
 		have, now []byte
@@ -832,21 +951,27 @@ func TestRunningFloorsOf(t *testing.T) {
 		for _, name := range FloorSettings {
 			out = append(out, map[string]string{"name": name, "setting": value})
 		}
+
 		return out
 	}
+
 	got, err := runningFloorsOf("app", rows("100"))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, name := range FloorSettings {
 		if got[name] != 100 {
 			t.Errorf("%s = %d, want 100", name, got[name])
 		}
 	}
+
 	if _, err := runningFloorsOf("app", rows("not a number")); err == nil {
 		t.Error("a malformed running floor was accepted")
 	}
+
 	missing := rows("100")
+
 	missing = missing[1:]
 	if _, err := runningFloorsOf("app", missing); err == nil {
 		t.Error("a missing running floor was accepted")

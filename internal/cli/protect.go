@@ -34,10 +34,12 @@ func fetchProtectStatus(cmd *cobra.Command, s *session, p *progress) (protectSta
 	if err != nil {
 		return protectStatusData{}, err
 	}
+
 	var data protectStatusData
 	if err := reply.Decode(&data); err != nil {
 		return protectStatusData{}, err
 	}
+
 	return data, nil
 }
 
@@ -56,7 +58,9 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
@@ -67,12 +71,14 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	var chosen []string
 	if all || len(dbFlags) > 0 {
 		if chosen, err = protectTargets(dbFlags, all, databaseNames(cfg)); err != nil {
 			return err
 		}
 	}
+
 	message, rotated, err := protectSetup(cmd, p, s, rotate)
 	if err != nil {
 		return err
@@ -86,9 +92,11 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
+
 	warnings, newly := protectChosen(cmd, s, p, &cfg, chosen, s.warnings)
 	protected, rest := splitProtected(cfg, databaseNames(cfg))
 	tail, next := protectInitOutcome(protected, rest)
+
 	return output.Success(cmd, output.Result{
 		Data: map[string]any{"configured": true, "rotated": rotated,
 			"protected_databases": nonNil(protected), "newly_protected": nonNil(newly), "unprotected_databases": nonNil(rest)},
@@ -102,16 +110,19 @@ func runProtectInit(cmd *cobra.Command, _ []string) error {
 // --all or a run no human can confirm.
 func protectInitFlags(cmd *cobra.Command) (rotate, all bool, dbFlags []string, err error) {
 	rotate, all = flagTrue(cmd, "rotate"), flagTrue(cmd, "all")
+
 	dbFlags, _ = cmd.Flags().GetStringArray("db")
 	if all && len(dbFlags) > 0 {
 		return false, false, nil, output.NewError(output.CodeUsage, "pass --db or --all, not both", output.ExitUsage,
 			"--all protects every database; --db names one and can be repeated.")
 	}
+
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return false, false, nil, output.NewError(output.CodeInputRequired, "vaire protect init needs a human at an interactive terminal", output.ExitInput,
 			"Run it yourself in a terminal, without --yes, --no-input or structured output: it shows a QR code to scan with an authenticator app and asks for a code from it.").
 			WithDetails(map[string]any{"reason": "protect_requires_human"})
 	}
+
 	return rotate, all, dbFlags, nil
 }
 
@@ -124,18 +135,22 @@ type protectDone struct {
 // code from the authenticator app. It returns the message to print.
 func protectSetup(cmd *cobra.Command, p *progress, s *session, rotate bool) (string, bool, error) {
 	var initSecrets map[string]string
+
 	if rotate {
 		code, err := readProtectCode(cmd, "Current code from the existing vaire entry in the authenticator app")
 		if err != nil {
 			return "", false, err
 		}
+
 		initSecrets = map[string]string{node.ProtectCodeSecret: code}
 	}
+
 	reply, err := p.call(commandContext(cmd), s.node, "protect.init", map[string]any{"rotate": rotate, "label": s.ctx.Name},
 		remote.CallOptions{Secrets: initSecrets, OnEvent: p.event})
 	if err != nil {
 		return "", false, err
 	}
+
 	var setup struct {
 		Secret string `json:"secret"`
 		URI    string `json:"uri"`
@@ -143,17 +158,21 @@ func protectSetup(cmd *cobra.Command, p *progress, s *session, rotate bool) (str
 	if err := reply.Decode(&setup); err != nil {
 		return "", false, err
 	}
+
 	if err := showProtectSecret(cmd, setup.URI, setup.Secret); err != nil {
 		return "", false, err
 	}
+
 	done, err := confirmProtectCode(cmd, p, s)
 	if err != nil {
 		return "", false, err
 	}
+
 	message := "two-factor protection is set up: lifting a database's protection now asks for a code from vaire:" + s.ctx.Name + " in the authenticator app"
 	if done.Rotated {
 		message = "the two-factor secret was rotated: remove the old vaire:" + s.ctx.Name + " entry from the authenticator app and keep the new one"
 	}
+
 	return message, done.Rotated, nil
 }
 
@@ -165,16 +184,21 @@ func confirmProtectCode(cmd *cobra.Command, p *progress, s *session) (protectDon
 		if err != nil {
 			return protectDone{}, err
 		}
+
 		reply, err := p.call(commandContext(cmd), s.node, "protect.confirm", nil,
 			remote.CallOptions{Secrets: map[string]string{node.ProtectCodeSecret: code}, OnEvent: p.event})
 		if err == nil {
 			var done protectDone
+
 			_ = reply.Decode(&done)
+
 			return done, nil
 		}
+
 		if attempt >= protectCodeAttempts || !retryableCode(err) {
 			return protectDone{}, err
 		}
+
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "That code was not accepted ("+err.Error()+"). Check the device's clock and try the next code.")
 	}
 }
@@ -186,14 +210,18 @@ func protectChosen(cmd *cobra.Command, s *session, p *progress, cfg *config.Clus
 	if len(todo) == 0 {
 		return warnings, nil
 	}
+
 	if err := setProtected(cmd, s, p, todo, true, nil); err != nil {
 		warnings = append(warnings, output.Warning{Code: "protect_failed",
 			Message: "two-factor protection is set up, but protecting " + strings.Join(todo, ", ") + " failed: " + err.Error() + ". Run vaire db protect " + strings.Join(todo, " ") + " to retry"})
+
 		return warnings, nil
 	}
+
 	for _, name := range todo {
 		_ = cfg.Set("clusters."+name+".protected", "true")
 	}
+
 	return warnings, todo
 }
 
@@ -225,24 +253,31 @@ func chooseToProtect(cmd *cobra.Command, options []string) ([]string, error) {
 		if errors.Is(err, ui.ErrAborted) {
 			return []string{}, nil
 		}
+
 		return chosen, err
 	}
+
 	resume := ui.Suspend()
 	defer resume()
+
 	reader := bufio.NewReader(cmd.InOrStdin())
 	for attempt := 1; ; attempt++ {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s %s\nNames separated by spaces or commas; Enter for all, none for none: ", title, strings.Join(options, ", "))
+
 		line, rerr := reader.ReadString('\n')
 		if rerr != nil && line == "" {
 			return []string{}, nil
 		}
+
 		chosen, err := parseSelection(line, options)
 		if err == nil {
 			return chosen, nil
 		}
+
 		if attempt >= protectCodeAttempts {
 			return nil, err
 		}
+
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 	}
 }
@@ -258,19 +293,25 @@ func parseSelection(line string, options []string) ([]string, error) {
 	case "none", "-":
 		return []string{}, nil
 	}
+
 	picked := map[string]bool{}
+
 	for _, name := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
 		if !slices.Contains(options, name) {
 			return nil, output.NewError(output.CodeUsage, name+" is not one of "+strings.Join(options, ", "), output.ExitUsage, "")
 		}
+
 		picked[name] = true
 	}
+
 	out := []string{}
+
 	for _, o := range options {
 		if picked[o] {
 			out = append(out, o)
 		}
 	}
+
 	return out, nil
 }
 
@@ -281,14 +322,18 @@ func protectTargets(names []string, all bool, databases []string) ([]string, err
 	if all && len(names) > 0 {
 		return nil, output.NewError(output.CodeUsage, "pass database names or --all, not both", output.ExitUsage, "")
 	}
+
 	if all {
 		return append([]string{}, databases...), nil
 	}
+
 	if len(names) == 0 {
 		return nil, output.NewError(output.CodeUsage, "name at least one database, or pass --all", output.ExitUsage,
 			"Run vaire db list to see the databases.")
 	}
+
 	var out, unknown []string
+
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		switch {
@@ -299,14 +344,17 @@ func protectTargets(names []string, all bool, databases []string) ([]string, err
 			unknown = append(unknown, name)
 		}
 	}
+
 	if len(unknown) > 0 {
 		noun := "database " + unknown[0] + " does not"
 		if len(unknown) > 1 {
 			noun = "databases " + strings.Join(unknown, ", ") + " do not"
 		}
+
 		return nil, output.NewError(output.CodePrecondition, noun+" exist", output.ExitPrecondition,
 			"Run vaire db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "databases": unknown})
 	}
+
 	return out, nil
 }
 
@@ -316,6 +364,7 @@ func databaseNames(cfg config.Cluster) []string {
 	for _, c := range cfg.Clusters {
 		out = append(out, c.Name)
 	}
+
 	return out
 }
 
@@ -328,6 +377,7 @@ func splitProtected(cfg config.Cluster, names []string) (protected, unprotected 
 			unprotected = append(unprotected, name)
 		}
 	}
+
 	return protected, unprotected
 }
 
@@ -338,6 +388,7 @@ func protectSet(names []string, value bool) map[string]string {
 	for _, name := range names {
 		out["clusters."+name+".protected"] = strconv.FormatBool(value)
 	}
+
 	return out
 }
 
@@ -349,10 +400,12 @@ func setProtected(cmd *cobra.Command, s *session, p *progress, names []string, v
 	if err != nil {
 		return err
 	}
+
 	_, err = p.call(commandContext(cmd), s.node, "config.set", map[string]any{
 		"set":           protectSet(names, value),
 		"base_revision": data.Revision,
 	}, remote.CallOptions{DryRun: dryRun(cmd), Secrets: code, OnEvent: p.event})
+
 	return err
 }
 
@@ -360,6 +413,7 @@ func nonNil(names []string) []string {
 	if names == nil {
 		return []string{}
 	}
+
 	return names
 }
 
@@ -371,39 +425,50 @@ func runDBProtect(cmd *cobra.Command, args []string) error {
 	if _, err := protectTargets(args, all, args); err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	targets, err := protectTargets(args, all, databaseNames(cfg))
 	if err != nil {
 		return err
 	}
+
 	already, todo := splitProtected(cfg, targets)
+
 	data := map[string]any{"protected": nonNil(todo), "already_protected": nonNil(already)}
 	if len(todo) == 0 {
 		message := "there are no databases to protect"
 		if len(already) > 0 {
 			message = "already protected: " + strings.Join(already, ", ")
 		}
+
 		return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings})
 	}
+
 	if err := setProtected(cmd, s, p, todo, true, nil); err != nil {
 		return err
 	}
+
 	message := "protected " + strings.Join(todo, ", ") + ": db drop, a shrinking resize, credential rotation and restore promote/undo are refused from now on"
 	if dryRun(cmd) {
 		message = "dry run: would protect " + strings.Join(todo, ", ")
 	}
+
 	if len(already) > 0 {
 		message += " (already protected: " + strings.Join(already, ", ") + ")"
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings})
 }
 
@@ -413,38 +478,48 @@ func runDBProtect(cmd *cobra.Command, args []string) error {
 // vaire config set clusters.<db>.protected false does.
 func runDBUnprotect(cmd *cobra.Command, args []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	cfg, err := remoteConfig(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	targets, err := protectTargets(args, false, databaseNames(cfg))
 	if err != nil {
 		return err
 	}
+
 	lift, notProtected := splitProtected(cfg, targets)
+
 	data := map[string]any{"unprotected": nonNil(lift), "not_protected": nonNil(notProtected)}
 	if len(lift) == 0 {
 		return output.Success(cmd, output.Result{Data: data, Message: "not protected: " + strings.Join(notProtected, ", "), Warnings: s.warnings})
 	}
+
 	code, err := unprotectCode(cmd, s, p, lift)
 	if err != nil {
 		return err
 	}
+
 	if err := setProtected(cmd, s, p, lift, false, code); err != nil {
 		return err
 	}
+
 	message := "lifted the protection of " + strings.Join(lift, ", ")
 	if dryRun(cmd) {
 		message = "dry run: would lift the protection of " + strings.Join(lift, ", ") + "; the real run asks for a code from the authenticator app"
 	}
+
 	if len(notProtected) > 0 {
 		message += " (not protected: " + strings.Join(notProtected, ", ") + ")"
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: s.warnings,
 		Next: []string{"vaire db protect " + strings.Join(lift, " ")}})
 }
@@ -456,8 +531,10 @@ func retryableCode(err error) bool {
 	if !errors.As(err, &cliErr) || cliErr.Code != output.CodeProtectCodeRejected {
 		return false
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
+
 	return reason == "code_invalid" || reason == "code_reused"
 }
 
@@ -468,13 +545,16 @@ func showProtectSecret(cmd *cobra.Command, uri, secret string) error {
 	if err != nil {
 		return err
 	}
+
 	resume := ui.Suspend()
 	defer resume()
+
 	_, err = fmt.Fprint(cmd.ErrOrStderr(),
 		"Scan this QR code with an authenticator app (1Password, Aegis, Google Authenticator, ...):\n\n"+code+"\n"+
 			"Or add it by hand: "+groupSecret(secret)+" (time-based, SHA1, 6 digits, 30 seconds)\n"+
 			"The node keeps the secret root-only and does not show it again. Keep a backup of the authenticator entry:\n"+
 			"without it, only root on the node can lift a database's protection.\n\n")
+
 	return err
 }
 
@@ -485,6 +565,7 @@ func groupSecret(secret string) string {
 		parts = append(parts, secret[:4])
 		secret = secret[4:]
 	}
+
 	return strings.Join(append(parts, secret), " ")
 }
 
@@ -496,29 +577,36 @@ func readProtectCode(cmd *cobra.Command, label string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
 		if code = totp.NormalizeCode(code); totp.WellFormed(code) {
 			return code, nil
 		}
+
 		if attempt >= protectCodeAttempts {
 			return "", output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits", output.ExitUnsafe,
 				"Type the 6-digit code the authenticator app shows for vaire.").WithDetails(map[string]any{"reason": "code_invalid"})
 		}
+
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "The code is 6 digits.")
 	}
 }
 
 func runProtectStatus(cmd *cobra.Command, _ []string) error {
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	data, err := fetchProtectStatus(cmd, s, p)
 	if err != nil {
 		return err
 	}
+
 	var message string
+
 	switch {
 	case data.Configured && data.ConfirmedAt != "":
 		message = "two-factor protection is set up (since " + data.ConfirmedAt + ")"
@@ -527,24 +615,30 @@ func runProtectStatus(cmd *cobra.Command, _ []string) error {
 	default:
 		message = "two-factor protection is not set up"
 	}
+
 	if data.Pending {
 		message += "; a new secret from vaire protect init is waiting for its first code"
 	}
+
 	if data.LockedUntil != "" {
 		message += "; codes are locked out until " + data.LockedUntil + " after too many wrong codes"
 	} else if data.Failures > 0 {
 		message += fmt.Sprintf("; %d wrong code(s) since the last accepted one", data.Failures)
 	}
+
 	message += "\n" + strings.Join(protectStatusLines(data.Databases), "\n")
 	warnings := s.warnings
+
 	var next []string
 	if !data.Configured {
 		next = []string{"vaire protect init"}
+
 		if len(data.Protected) > 0 {
 			warnings = append(warnings, output.Warning{Code: "protect_not_initialized",
 				Message: strings.Join(data.Protected, ", ") + " is protected but two-factor protection is not set up, so the protection cannot be lifted until a human runs vaire protect init"})
 		}
 	}
+
 	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: warnings, Next: next})
 }
 
@@ -554,14 +648,17 @@ func protectStatusLines(dbs []node.ProtectedDatabase) []string {
 	if len(dbs) == 0 {
 		return []string{"  no databases yet"}
 	}
+
 	width := len("DATABASE")
 	for _, db := range dbs {
 		width = max(width, len(db.Name))
 	}
+
 	lines := []string{fmt.Sprintf("  %-*s  %s", width, "DATABASE", "PROTECTED")}
 	for _, db := range dbs {
 		lines = append(lines, fmt.Sprintf("  %-*s  %s", width, db.Name, yesNo(db.Protected)))
 	}
+
 	return lines
 }
 
@@ -569,5 +666,6 @@ func yesNo(v bool) string {
 	if v {
 		return "yes"
 	}
+
 	return "no"
 }

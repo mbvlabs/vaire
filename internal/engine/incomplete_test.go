@@ -81,6 +81,7 @@ func (t incompleteTemplate) Instance(cluster string) Step {
 	if cluster == "app" {
 		return t.app
 	}
+
 	return &incompleteStep{id: InstanceID(t.base, cluster)}
 }
 
@@ -94,7 +95,9 @@ func TestIncompleteApplyIsJournaledAndRetried(t *testing.T) {
 		applyResult: ApplyResult{Incomplete: true, Notes: []string{"extension pending restart"}},
 	}
 	later := &incompleteStep{id: "later-v1"}
+
 	var events []string
+
 	report := Reporter(func(ev output.Event) {
 		if ev.Type == "step" {
 			events = append(events, ev.Step+" "+ev.State)
@@ -103,16 +106,20 @@ func TestIncompleteApplyIsJournaledAndRetried(t *testing.T) {
 	if _, _, err := Apply(context.Background(), []Step{roles, later}, config.Cluster{}, Runtime{}, Options{JournalPath: path, Report: report}); err != nil {
 		t.Fatal(err)
 	}
+
 	if roles.applied != 1 || later.applied != 1 {
 		t.Fatalf("applied roles=%d later=%d, want both once", roles.applied, later.applied)
 	}
+
 	if !slices.Contains(events, "roles-v1 incomplete") || !slices.Contains(events, "later-v1 completed") {
 		t.Fatalf("events = %v", events)
 	}
+
 	j, err := LoadJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := j.Steps[roles.ID()]; got.Status != StatusIncomplete || got.CompletedAt != "" || got.Error != "" || got.InputsHash == "" {
 		t.Fatalf("incomplete journal entry = %+v", got)
 	}
@@ -123,13 +130,16 @@ func TestIncompleteApplyIsJournaledAndRetried(t *testing.T) {
 	if _, _, err := Apply(context.Background(), []Step{roles, later}, config.Cluster{}, Runtime{}, Options{JournalPath: path}); err != nil {
 		t.Fatal(err)
 	}
+
 	if roles.applied != 2 || later.applied != 1 {
 		t.Fatalf("retry applied roles=%d later=%d", roles.applied, later.applied)
 	}
+
 	j, err = LoadJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := j.Steps[roles.ID()]; got.Status != StatusCompleted || got.CompletedAt == "" || got.Error != "" {
 		t.Fatalf("completed journal entry = %+v", got)
 	}
@@ -139,6 +149,7 @@ func TestIncompleteApplyIsJournaledAndRetried(t *testing.T) {
 	if _, _, err := Apply(context.Background(), []Step{roles, later}, config.Cluster{}, Runtime{}, Options{JournalPath: path}); err != nil {
 		t.Fatal(err)
 	}
+
 	if roles.applied != 2 {
 		t.Fatalf("completed step applied again: %d", roles.applied)
 	}
@@ -164,12 +175,15 @@ func TestIncompleteContinuesToAuthorizedRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(restarter.restarted) != 0 {
 		t.Fatalf("restarted without a token: %v", restarter.restarted)
 	}
+
 	if !slices.Equal(data.RestartPending, []string{configStepID}) {
 		t.Fatalf("pending = %v", data.RestartPending)
 	}
+
 	if roles.applied != 1 || later.applied != 1 {
 		t.Fatalf("first run applied roles=%d later=%d", roles.applied, later.applied)
 	}
@@ -180,9 +194,11 @@ func TestIncompleteContinuesToAuthorizedRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(restarter.restarted) != 0 {
 		t.Fatalf("a wrong token restarted %v", restarter.restarted)
 	}
+
 	if j, err := LoadJournal(path); err != nil || !slices.Equal(j.RestartPending, []string{configStepID}) {
 		t.Fatalf("wrong token changed pending: %v, %v", j.RestartPending, err)
 	}
@@ -195,24 +211,30 @@ func TestIncompleteContinuesToAuthorizedRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(restarter.restarted, []string{"app"}) || len(data.RestartPending) != 0 {
 		t.Fatalf("restarted %v, pending %v", restarter.restarted, data.RestartPending)
 	}
+
 	if roles.applied != 3 {
 		t.Fatalf("roles did not reapply before the restart: %d", roles.applied)
 	}
+
 	if j, err := LoadJournal(path); err != nil || j.Steps[roles.ID()].Status != StatusIncomplete {
 		t.Fatalf("roles after confirmed run = %+v, %v", j.Steps[roles.ID()], err)
 	}
 
 	// The next apply sees the library loaded, creates the SQL and completes.
 	roles.applyResult = ApplyResult{}
+
 	if _, _, err := Apply(context.Background(), catalog, cfg, Runtime{}, Options{JournalPath: path, Restarter: restarter, DB: "app"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if roles.applied != 4 {
 		t.Fatalf("post-restart retry applied roles %d times", roles.applied)
 	}
+
 	if j, err := LoadJournal(path); err != nil || j.Steps[roles.ID()].Status != StatusCompleted {
 		t.Fatalf("roles after retry = %+v, %v", j.Steps[roles.ID()], err)
 	}
@@ -226,15 +248,18 @@ func TestNonCompletedStatusesRecheck(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			step := &incompleteStep{id: "roles-v1"}
 			path := filepath.Join(t.TempDir(), "journal.json")
+
 			j := &Journal{Steps: map[string]JournalEntry{
 				step.ID(): {Status: status, InputsHash: InputsHash(step.ID(), []byte(step.ID()))},
 			}}
 			if err := j.Save(path); err != nil {
 				t.Fatal(err)
 			}
+
 			if _, _, err := Apply(context.Background(), []Step{step}, config.Cluster{}, Runtime{}, Options{JournalPath: path}); err != nil {
 				t.Fatal(err)
 			}
+
 			if step.applied != 1 {
 				t.Fatalf("status %s did not recheck and apply: %d", status, step.applied)
 			}

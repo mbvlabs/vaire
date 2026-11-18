@@ -30,23 +30,28 @@ func newFollowCleanupRegistrationFixture(t *testing.T) *followCleanupRegistratio
 		port:     5434,
 	}
 	f.dataPath = filepath.Join(f.dataRoot, f.name)
+
 	confDir := filepath.Join(f.confRoot, f.name)
 	for _, dir := range []string{f.dataPath, confDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	if err := os.Chmod(confDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	f.confPath = filepath.Join(confDir, "postgresql.conf")
 	f.writeRegistration(t, "18/"+f.name)
 	t.Cleanup(backup.PGConfRootForTest(f.confRoot))
+
 	return f
 }
 
 func (f *followCleanupRegistrationFixture) writeRegistration(t *testing.T, clusterName string) {
 	t.Helper()
+
 	raw := fmt.Sprintf("data_directory = '%s'\ncluster_name = '%s'\nport = %d\n", f.dataPath, clusterName, f.port)
 	if err := os.WriteFile(f.confPath, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
@@ -67,10 +72,12 @@ func fakePgConftoolSettings(t *testing.T, settings map[string]fakePgConftoolSett
 	t.Helper()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "pg_conftool.args")
+
 	var cases strings.Builder
 	for setting, s := range settings {
 		fmt.Fprintf(&cases, "%s) value='%s' status=%d ;;\n", setting, s.value, s.status)
 	}
+
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" > '%s'
 if [ "$1" = "-s" ]; then
@@ -93,12 +100,15 @@ exit "$status"
 	if err := os.WriteFile(filepath.Join(dir, "pg_conftool"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	t.Setenv("PATH", dir)
+
 	return func() string {
 		raw, err := os.ReadFile(marker)
 		if err != nil {
 			return ""
 		}
+
 		return strings.TrimSpace(string(raw))
 	}
 }
@@ -106,6 +116,7 @@ exit "$status"
 // fakePgConftool is fakePgConftoolSettings for the data directory alone.
 func fakePgConftool(t *testing.T, value string, status int) func() string {
 	t.Helper()
+
 	return fakePgConftoolSettings(t, map[string]fakePgConftoolSetting{
 		"data_directory": {value: value, status: status},
 	})
@@ -115,10 +126,12 @@ func fakePgConftool(t *testing.T, value string, status int) func() string {
 // labelled default never equals the path.
 func TestFollowCleanupRegistrationUsesShortConftoolOutput(t *testing.T) {
 	f := newFollowCleanupRegistrationFixture(t)
+
 	args := fakePgConftool(t, f.dataPath, 0)
 	if err := followCleanupRegistration(f.name, f.source, f.dataRoot, f.port-1, f.port); err != nil {
 		t.Fatalf("registration with an exact effective data directory: %v", err)
 	}
+
 	if got, want := args(), "-s 18 "+f.name+" show data_directory"; got != want {
 		t.Fatalf("pg_conftool args = %q, want %q", got, want)
 	}
@@ -127,6 +140,7 @@ func TestFollowCleanupRegistrationUsesShortConftoolOutput(t *testing.T) {
 func TestFollowCleanupRegistrationRefusesMismatchedDataDirectory(t *testing.T) {
 	f := newFollowCleanupRegistrationFixture(t)
 	fakePgConftool(t, f.dataPath+"-other", 0)
+
 	if err := followCleanupRegistration(f.name, f.source, f.dataRoot, f.port-1, f.port); err == nil ||
 		err.Error() != "effective follower data directory is unverifiable" {
 		t.Fatalf("mismatched effective data directory: err = %v", err)
@@ -136,6 +150,7 @@ func TestFollowCleanupRegistrationRefusesMismatchedDataDirectory(t *testing.T) {
 func TestFollowCleanupRegistrationRefusesUnreadableDataDirectory(t *testing.T) {
 	f := newFollowCleanupRegistrationFixture(t)
 	fakePgConftool(t, f.dataPath, 1)
+
 	if err := followCleanupRegistration(f.name, f.source, f.dataRoot, f.port-1, f.port); err == nil ||
 		err.Error() != "effective follower data directory is unverifiable" {
 		t.Fatalf("failed pg_conftool: err = %v", err)
@@ -146,10 +161,12 @@ func TestFollowCleanupRegistrationRefusesUnreadableDataDirectory(t *testing.T) {
 func TestFollowCleanupRegistrationVerifiesOwnershipBeforeConftool(t *testing.T) {
 	f := newFollowCleanupRegistrationFixture(t)
 	f.writeRegistration(t, "18/other")
+
 	args := fakePgConftool(t, f.dataPath, 0)
 	if err := followCleanupRegistration(f.name, f.source, f.dataRoot, f.port-1, f.port); err == nil {
 		t.Fatal("a foreign registration was accepted")
 	}
+
 	if got := args(); got != "" {
 		t.Fatalf("pg_conftool ran before the ownership check: %q", got)
 	}

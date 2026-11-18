@@ -35,12 +35,15 @@ func TestValidateEventAcceptsAllowlistedFields(t *testing.T) {
 	if err := ValidateEvent(Event{Source: SourceRPC, Action: "backup.full", Outcome: OutcomeStarted}); err != nil {
 		t.Fatalf("minimal event: %v", err)
 	}
+
 	if err := ValidateEvent(validEvent()); err != nil {
 		t.Fatalf("full event: %v", err)
 	}
+
 	timer := validEvent()
 	timer.ActorKind = ActorTimer
 	timer.ActorLabel = ""
+
 	timer.ActorVerified = true
 	if err := ValidateEvent(timer); err != nil {
 		t.Fatalf("verified timer: %v", err)
@@ -87,10 +90,12 @@ func TestValidateEventRejectsOutsideContract(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ev := validEvent()
 			tc.mutate(&ev)
+
 			err := ValidateEvent(ev)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("ValidateEvent error = %v, want %v", err, tc.wantErr)
 			}
+
 			for _, canary := range []string{"pg_shadow", "example.com", "hunter2", "forged"} {
 				if strings.Contains(err.Error(), canary) {
 					t.Fatalf("error echoed user data %q: %v", canary, err)
@@ -102,6 +107,7 @@ func TestValidateEventRejectsOutsideContract(t *testing.T) {
 
 func TestEncodeEventRejectsOversizedRecord(t *testing.T) {
 	ev := validEvent()
+
 	ev.Server = strings.Repeat("a", maxEventBytes+1)
 	if _, err := encodeEvent(ev); !errors.Is(err, errInvalidEvent) {
 		t.Fatalf("encodeEvent error = %v, want errInvalidEvent", err)
@@ -110,27 +116,34 @@ func TestEncodeEventRejectsOversizedRecord(t *testing.T) {
 
 func TestValidateQueryNormalizes(t *testing.T) {
 	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+
 	nq, err := normalizeQuery(Query{Since: "24h", Limit: 0}, now)
 	if err != nil {
 		t.Fatalf("normalizeQuery: %v", err)
 	}
+
 	if got, want := nq.limit, DefaultLimit; got != want {
 		t.Fatalf("limit = %d, want %d", got, want)
 	}
+
 	if got, want := nq.since, now.Add(-24*time.Hour); !got.Equal(want) {
 		t.Fatalf("since = %v, want %v", got, want)
 	}
+
 	nq, err = normalizeQuery(Query{Limit: MaxLimit + 100}, now)
 	if err != nil {
 		t.Fatalf("normalizeQuery cap: %v", err)
 	}
+
 	if nq.limit != MaxLimit {
 		t.Fatalf("limit = %d, want cap %d", nq.limit, MaxLimit)
 	}
+
 	nq, err = normalizeQuery(Query{Since: "2026-10-20T00:00:00Z", Until: "2026-10-21T00:00:00+02:00"}, now)
 	if err != nil {
 		t.Fatalf("normalizeQuery timestamps: %v", err)
 	}
+
 	if nq.since.Location() != time.UTC || nq.until.Location() != time.UTC {
 		t.Fatalf("normalized times are not UTC")
 	}
@@ -159,6 +172,7 @@ func TestValidateQueryRejectsInvalid(t *testing.T) {
 			if err == nil {
 				t.Fatal("ValidateQuery accepted an invalid query")
 			}
+
 			if strings.Contains(err.Error(), tc.q.Cursor) && tc.q.Cursor != "" {
 				t.Fatalf("error echoed cursor: %v", err)
 			}

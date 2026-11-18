@@ -57,6 +57,7 @@ func NodeChecks() []Check {
 	checks = append(checks, ActivityChecks()...)
 	checks = append(checks, MasterChecks()...)
 	checks = append(checks, FollowerChecks()...)
+
 	return append(checks, ExtensionChecks()...)
 }
 
@@ -64,6 +65,7 @@ func osSupported(f Facts) []Result {
 	if f.OSSupported {
 		return one(Pass, f.OSName, "")
 	}
+
 	return one(Fail, f.OSName+" is not supported (Debian 13, Ubuntu 26.04)", "rebuild on a supported release")
 }
 
@@ -71,6 +73,7 @@ func rebootRequired(f Facts) []Result {
 	if f.RebootRequired {
 		return one(Warn, "/var/run/reboot-required exists: a security update waits for a reboot", "reboot the server in a quiet hour (vaire ssh --command 'sudo reboot')")
 	}
+
 	return one(Pass, "no reboot pending", "")
 }
 
@@ -79,6 +82,7 @@ func FreePct(total, free uint64) float64 {
 	if total == 0 {
 		return 0
 	}
+
 	return float64(free) * 100 / float64(total)
 }
 
@@ -86,17 +90,21 @@ func diskData(f Facts) []Result {
 	if !f.DiskKnown {
 		return one(Warn, "cannot read the data root's filesystem", "")
 	}
+
 	pct := FreePct(f.DiskTotal, f.DiskFree)
+
 	detail := fmt.Sprintf("%.0f%% free on %s", pct, f.DataRoot)
 	if f.DiskPath != "" && f.DiskPath != f.DataRoot {
 		detail = fmt.Sprintf("%.0f%% free on %s, where the data root %s goes (no databases yet)", pct, f.DiskPath, f.DataRoot)
 	}
+
 	switch {
 	case pct < DiskFailFreePct:
 		return one(Fail, detail+" (fails under 10%: a full disk stops every database)", "free space or grow the volume; vaire backup list shows dropped stanzas, vaire restore cleanup leftovers")
 	case pct < DiskWarnFreePct:
 		return one(Warn, detail, "free space or grow the volume before it reaches 10%")
 	}
+
 	return one(Pass, detail, "")
 }
 
@@ -104,6 +112,7 @@ func unattended(f Facts) []Result {
 	if f.UnattendedActive {
 		return one(Pass, "unattended-upgrades is active (security updates only)", "")
 	}
+
 	return one(Warn, "unattended-upgrades is not active", "vaire apply")
 }
 
@@ -111,12 +120,15 @@ func timeSync(f Facts) []Result {
 	if !f.TimeKnown {
 		return one(Warn, "cannot read the clock's sync state", "")
 	}
+
 	if f.TimeSynced {
 		return one(Pass, "the clock is synchronised", "")
 	}
+
 	if f.Init {
 		return one(Warn, "the clock is not synchronised yet", "vaire apply")
 	}
+
 	return one(Fail, "the clock is not synchronised (chrony): TLS, TOTP and PITR targets depend on it", "vaire apply")
 }
 
@@ -134,6 +146,7 @@ func publicSSH(f Facts) []Result {
 	case f.LockedDownAt == "":
 		return one(Fail, "public SSH (22/tcp) is still open", "vaire server init --resume")
 	}
+
 	return one(Pass, "SSH listens on WireGuard only since "+f.LockedDownAt, "")
 }
 
@@ -141,6 +154,7 @@ func sshConfig(f Facts) []Result {
 	if f.SSHConfigDrift != "" {
 		return one(Fail, "the sshd drop-in differs: "+f.SSHConfigDrift, "vaire apply")
 	}
+
 	return one(Pass, "the sshd drop-in matches", "")
 }
 
@@ -148,6 +162,7 @@ func fwActive(f Facts) []Result {
 	if f.UFWActive {
 		return one(Pass, "ufw is active", "")
 	}
+
 	return one(Fail, "ufw is not active", "vaire apply")
 }
 
@@ -155,6 +170,7 @@ func fwRules(f Facts) []Result {
 	if f.FirewallDrift != "" {
 		return one(Fail, "the firewall rules differ: "+f.FirewallDrift, "vaire apply")
 	}
+
 	return one(Pass, "the firewall rules match", "")
 }
 
@@ -162,6 +178,7 @@ func allowlistOpen(f Facts) []Result {
 	if len(f.OpenAllowlists) > 0 {
 		return one(Warn, "open to every address: "+joinSorted(f.OpenAllowlists), "narrow the CIDRs with vaire config set")
 	}
+
 	return one(Pass, "no allowlist is open to every address", "")
 }
 
@@ -169,7 +186,9 @@ func tlsExpiry(f Facts) []Result {
 	if !f.CertKnown {
 		return one(Fail, "cannot read the node's certificate", "vaire apply")
 	}
+
 	days := f.CertNotAfter.Sub(f.Now).Hours() / 24
+
 	detail := fmt.Sprintf("the certificate expires %s (%.0f days)", f.CertNotAfter.UTC().Format(time.RFC3339), math.Floor(days))
 	switch {
 	case days < TLSFailDays:
@@ -177,6 +196,7 @@ func tlsExpiry(f Facts) []Result {
 	case days < TLSWarnDays:
 		return one(Warn, detail+"; renewal starts 30 days ahead, so it is failing", "vaire logs vaire-certs")
 	}
+
 	return one(Pass, detail, "")
 }
 
@@ -184,12 +204,15 @@ func tlsDNS(f Facts) []Result {
 	if f.Hostname == "" {
 		return one(Skip, "no domain set", "")
 	}
+
 	if !f.DNSChecked {
 		return one(Warn, "cannot resolve "+f.Hostname+": "+f.DNSDetail, "check the DNS record (DNS only, not proxied)")
 	}
+
 	if !f.DNSMatches {
 		return one(Warn, f.Hostname+" "+f.DNSDetail, "point the record at the node's public address")
 	}
+
 	return one(Pass, f.Hostname+" resolves to this node", "")
 }
 
@@ -200,6 +223,7 @@ func tlsMode(f Facts) []Result {
 	case f.CertSelfSign:
 		return one(Warn, "the ACME certificate is still pending; the placeholder is served", "vaire logs vaire-certs")
 	}
+
 	return one(Pass, "an ACME certificate is served", "")
 }
 
@@ -207,6 +231,7 @@ func secretsConfirmed(f Facts) []Result {
 	if f.SecretsAtTime == "" {
 		return one(Fail, "the secrets handoff was never confirmed as stored", "vaire secrets export")
 	}
+
 	return one(Pass, "the secrets handoff was stored "+f.SecretsAtTime, "")
 }
 
@@ -214,22 +239,28 @@ func metricsEndpoint(f Facts) []Result {
 	if !f.MetricsEnabled {
 		return one(Skip, "[metrics] enabled is false", "")
 	}
+
 	var down []string
+
 	for name, err := range f.Exporters {
 		if err != nil {
 			down = append(down, name+" ("+err.Error()+")")
 		}
 	}
+
 	if len(down) > 0 {
 		return one(Warn, "not answering: "+joinSorted(down), "vaire apply")
 	}
+
 	if f.EndpointStatus != 401 {
 		detail := fmt.Sprintf("/metrics answered %d without a credential, want 401", f.EndpointStatus)
 		if f.EndpointStatus == 0 {
 			detail = "/metrics did not answer: " + f.EndpointError
 		}
+
 		return one(Warn, detail, "vaire apply")
 	}
+
 	return one(Pass, "every exporter answers and /metrics refuses a request without the credential", "")
 }
 
@@ -237,6 +268,7 @@ func nginxRunning(f Facts) []Result {
 	if f.NginxActive {
 		return one(Pass, "nginx is active", "")
 	}
+
 	return one(Fail, "nginx is not active: 443 and /metrics are down", "vaire apply")
 }
 
@@ -244,15 +276,19 @@ func poolerRunning(f Facts) []Result {
 	if !f.HasDatabases {
 		return one(Skip, "no databases (the poolers stop with the last one)", "")
 	}
+
 	var down []string
+
 	for name, ok := range f.PoolersActive {
 		if !ok {
 			down = append(down, name)
 		}
 	}
+
 	if len(down) > 0 {
 		return one(Fail, "not active: "+joinSorted(down), "vaire apply")
 	}
+
 	return one(Pass, "both poolers are active", "")
 }
 
@@ -270,8 +306,10 @@ func perCluster(f Facts, needsRunning bool, fn func(c ClusterFacts) (Status, str
 		default:
 			r.Status, r.Detail, r.Fix = fn(c)
 		}
+
 		out = append(out, r)
 	}
+
 	return out
 }
 
@@ -283,6 +321,7 @@ func pgRunning(f Facts) []Result {
 		case "unreachable":
 			return Fail, "the cluster does not answer: " + c.Error, "vaire logs postgres --db " + c.Name
 		}
+
 		return Fail, "the cluster is not running", "vaire logs postgres --db " + c.Name
 	})
 }
@@ -292,9 +331,11 @@ func pgConfigDrift(f Facts) []Result {
 		if c.ConfigDrift != "" {
 			return Warn, "the managed configuration differs: " + c.ConfigDrift, "vaire apply --db " + c.Name
 		}
+
 		if len(c.Overrides) > 0 {
 			return Warn, "90-overrides.conf sets " + joinSorted(c.Overrides), ""
 		}
+
 		return Pass, "the managed configuration is on disk, no overrides", ""
 	})
 }
@@ -304,6 +345,7 @@ func pgRestartPending(f Facts) []Result {
 		if c.Sample.PendingRestart > 0 {
 			return Warn, fmt.Sprintf("%d settings wait for a restart", c.Sample.PendingRestart), "vaire apply --db " + c.Name + " --confirm " + c.Name + "/restart"
 		}
+
 		return Pass, "no setting waits for a restart", ""
 	})
 }
@@ -313,6 +355,7 @@ func pgAlterSystem(f Facts) []Result {
 		if c.Sample.AllowAlterSystem != "off" {
 			return Fail, "allow_alter_system is " + c.Sample.AllowAlterSystem, "vaire apply --db " + c.Name
 		}
+
 		return Pass, "allow_alter_system is off", ""
 	})
 }
@@ -322,6 +365,7 @@ func pgHBA(f Facts) []Result {
 		if len(c.HBAWeak) > 0 {
 			return Fail, "pg_hba allows " + joinSorted(c.HBAWeak), "vaire apply --db " + c.Name
 		}
+
 		return Pass, "no trust, password or md5 line", ""
 	})
 }
@@ -331,6 +375,7 @@ func pgSSL(f Facts) []Result {
 		if c.Sample.SSL != "on" {
 			return Fail, "ssl is " + c.Sample.SSL, "vaire apply --db " + c.Name
 		}
+
 		return Pass, "ssl is on", ""
 	})
 }
@@ -340,6 +385,7 @@ func pgSocketOnly(f Facts) []Result {
 		if strings.TrimSpace(c.Sample.ListenAddresses) != "" {
 			return Fail, "the cluster listens on TCP (" + c.Sample.ListenAddresses + "); only the poolers should", "vaire apply --db " + c.Name
 		}
+
 		return Pass, "socket only", ""
 	})
 }
@@ -349,16 +395,15 @@ func pgChecksums(f Facts) []Result {
 		if c.Sample.DataChecksums != "on" {
 			return Warn, "data checksums are off", ""
 		}
+
 		return Pass, "data checksums are on", ""
 	})
 }
 
 func pgWraparound(f Facts) []Result {
 	return perCluster(f, true, func(c ClusterFacts) (Status, string, string) {
-		age := c.Sample.MaxXIDAge
-		if c.Sample.MaxMXIDAge > age {
-			age = c.Sample.MaxMXIDAge
-		}
+		age := max(c.Sample.MaxMXIDAge, c.Sample.MaxXIDAge)
+
 		detail := fmt.Sprintf("oldest transaction ID age %d", age)
 		switch {
 		case age > WraparoundFail:
@@ -366,6 +411,7 @@ func pgWraparound(f Facts) []Result {
 		case age > WraparoundWarn:
 			return Warn, detail, "vaire maint report wraparound --db " + c.Name
 		}
+
 		return Pass, detail, ""
 	})
 }
@@ -376,6 +422,7 @@ func pgConnections(f Facts) []Result {
 		if c.Sample.MaxConnections > 0 && float64(c.Sample.Connections) > ConnectionsWarn*float64(c.Sample.MaxConnections) {
 			return Warn, detail, "vaire top --db " + c.Name
 		}
+
 		return Pass, detail, ""
 	})
 }
@@ -385,6 +432,7 @@ func pgMemoryPressure(f Facts) []Result {
 		if !c.PressureKnown {
 			return Skip, "no memory pressure reading", ""
 		}
+
 		throttled := c.PrevKnown && c.HighEvents > c.PrevHighEvents
 		switch {
 		case c.PressureAvg300 > PressureWarnPct:
@@ -392,6 +440,7 @@ func pgMemoryPressure(f Facts) []Result {
 		case throttled:
 			return Warn, fmt.Sprintf("throttled at MemoryHigh %d times since the last check", c.HighEvents-c.PrevHighEvents), "vaire db resize " + c.Name + " --size <larger>"
 		}
+
 		return Pass, fmt.Sprintf("memory pressure %.1f%%", c.PressureAvg300), ""
 	})
 }
@@ -401,9 +450,11 @@ func pgWouldNotStart(f Facts) []Result {
 		if c.State == "running" {
 			return Pass, "running", ""
 		}
+
 		if c.WouldNotStart != "" {
 			return Fail, c.WouldNotStart, "vaire db resize " + c.Name + " --size <smaller>"
 		}
+
 		return Pass, "it would start", ""
 	})
 }
@@ -412,10 +463,12 @@ func memoryBudget(f Facts) []Result {
 	if len(f.BudgetWarnings) == 0 {
 		return one(Pass, "the databases fit the server's budget", "")
 	}
+
 	var msgs []string
 	for _, w := range f.BudgetWarnings {
 		msgs = append(msgs, w.Code+": "+w.Message)
 	}
+
 	return one(Warn, strings.Join(msgs, "; "), "vaire tune show")
 }
 
@@ -428,51 +481,64 @@ var timerJobs = map[string]bool{
 // lastRuns groups the timer runs (newest last) by job and database.
 func lastRuns(jobs []engine.JobRecord) map[string][]engine.JobRecord {
 	out := map[string][]engine.JobRecord{}
+
 	for _, j := range jobs {
 		if !timerJobs[j.Job] || j.State == engine.JobRunning {
 			continue
 		}
+
 		key := j.Job
 		if j.DB != "" {
 			key += "@" + j.DB
 		}
+
 		out[key] = append(out[key], j)
 	}
+
 	return out
 }
 
 func jobsSkipped(f Facts) []Result {
 	var bad []string
+
 	for key, runs := range lastRuns(f.Jobs) {
 		if len(runs) < SkipsInARowWarns {
 			continue
 		}
+
 		all := true
+
 		for _, j := range runs[len(runs)-SkipsInARowWarns:] {
 			if j.State != engine.JobSkipped {
 				all = false
 			}
 		}
+
 		if all {
 			bad = append(bad, key)
 		}
 	}
+
 	if len(bad) > 0 {
 		return one(Warn, "skipped three runs in a row (a lock was busy): "+joinSorted(bad), "vaire job list")
 	}
+
 	return one(Pass, "no timer job keeps being skipped", "")
 }
 
 func jobsFailed(f Facts) []Result {
 	var bad []string
+
 	for key, runs := range lastRuns(f.Jobs) {
 		if runs[len(runs)-1].State == engine.JobFailed {
 			bad = append(bad, key)
 		}
 	}
+
 	if len(bad) > 0 {
 		return one(Warn, "the last run failed: "+joinSorted(bad), "vaire job list")
 	}
+
 	return one(Pass, "no timer job's last run failed", "")
 }
 
@@ -480,6 +546,7 @@ func backupOffsite(f Facts) []Result {
 	if !f.BackupConfigured {
 		return one(Warn, "no backups leave the server (no_offsite_backup)", "vaire backup setup")
 	}
+
 	return one(Pass, "backups go to the bucket", "")
 }
 
@@ -490,12 +557,15 @@ func backupCluster(f Facts, fn func(c ClusterFacts) (Status, string, string)) []
 		for _, c := range f.Clusters {
 			out = append(out, Result{DB: c.Name, Status: Skip, Detail: "backups are not configured"})
 		}
+
 		return out
 	}
+
 	return perCluster(f, false, func(c ClusterFacts) (Status, string, string) {
 		if c.Follows != "" {
 			return Skip, "a follower has no stanza; " + c.Follows + "'s backups cover it", ""
 		}
+
 		return fn(c)
 	})
 }
@@ -505,6 +575,7 @@ func backupArchiving(f Facts) []Result {
 		if c.State != "running" {
 			return Skip, "the cluster is " + c.State, ""
 		}
+
 		s := c.Sample
 		if s.ArchiveFailed > 0 && s.LastFailedAgeS >= 0 && s.LastFailedAgeS < 3600 &&
 			(s.LastArchivedAgeS < 0 || s.LastFailedAgeS < s.LastArchivedAgeS) {
@@ -516,6 +587,7 @@ func backupArchiving(f Facts) []Result {
 		if s.LastArchivedAgeS < 0 && !young(f, c) {
 			return Warn, "nothing was ever archived", "vaire backup list --db " + c.Name
 		}
+
 		return Pass, "archiving works", ""
 	})
 }
@@ -533,16 +605,21 @@ func backupFullAge(f Facts) []Result {
 			if young(f, c) {
 				return Skip, "no full backup yet; the first is due on schedule", ""
 			}
+
 			return Fail, "no full backup", "vaire backup now --db " + c.Name + " --type full"
 		}
+
 		at, err := time.Parse(time.RFC3339, last.FinishedAt)
 		if err != nil {
 			return Warn, "the last full's time does not parse", ""
 		}
+
 		if c.FullInterval <= 0 {
 			return Warn, "cannot read the full backup schedule: " + c.FullIntervalErr, ""
 		}
+
 		age := f.Now.Sub(at)
+
 		detail := fmt.Sprintf("last full %s ago (schedule every %s)", age.Round(time.Minute), c.FullInterval)
 		switch {
 		case age > 2*c.FullInterval:
@@ -550,6 +627,7 @@ func backupFullAge(f Facts) []Result {
 		case age > c.FullInterval+24*time.Hour:
 			return Warn, detail, "vaire job list"
 		}
+
 		return Pass, detail, ""
 	})
 }
@@ -561,15 +639,19 @@ func backupVerify(f Facts) []Result {
 			if young(f, c) {
 				return Skip, "no verify yet", ""
 			}
+
 			return Warn, "the stanza was never verified", "vaire backup verify --db " + c.Name
 		}
+
 		if !v.OK {
 			return Warn, "the last verify found problems", "vaire backup verify --db " + c.Name
 		}
+
 		at, err := time.Parse(time.RFC3339, v.FinishedAt)
 		if err == nil && f.Now.Sub(at) > VerifyMaxAge {
 			return Warn, "the last verify is older than 14 days", "vaire backup verify --db " + c.Name
 		}
+
 		return Pass, "verified " + v.FinishedAt, ""
 	})
 }
@@ -581,28 +663,35 @@ func backupDrill(f Facts) []Result {
 			if c.CreatedAt.IsZero() || f.Now.Sub(c.CreatedAt) < DrillMaxAge {
 				return Skip, "the first drill is not due yet", ""
 			}
+
 			return Warn, "never drilled", "vaire restore drill --db " + c.Name
 		}
+
 		if last.Result == backup.DrillFail {
 			return Fail, "the last restore drill failed: " + last.Reason, "vaire restore drill --db " + c.Name
 		}
+
 		lastPass := lastPassingDrill(f.Records, c.Name)
 		if lastPass.IsZero() || f.Now.Sub(lastPass) > DrillMaxAge {
 			return Warn, "no passing drill in 40 days", "vaire restore drill --db " + c.Name
 		}
+
 		return Pass, "last drill passed " + lastPass.UTC().Format(time.RFC3339), ""
 	})
 }
 
 func lastPassingDrill(records backup.Records, database string) time.Time {
 	var latest time.Time
+
 	for _, drill := range records.Drills {
 		if drill.Database != database || drill.Result != backup.DrillPass {
 			continue
 		}
+
 		if at, err := time.Parse(time.RFC3339, drill.FinishedAt); err == nil && at.After(latest) {
 			latest = at
 		}
 	}
+
 	return latest
 }

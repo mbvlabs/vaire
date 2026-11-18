@@ -14,11 +14,14 @@ import (
 func TestDBCreateDryRunNodePreview(t *testing.T) {
 	db := config.ClusterSpec{Name: "app", Size: "small", Memory: "768MiB", Profile: "oltp", StatementTimeout: "30s", Extensions: []string{"pg_stat_statements"}, Protected: true}
 	calls := 0
+
 	planned, warnings, err := previewDBCreate(db, true, func(method string, params map[string]any, opts remote.CallOptions) (remote.Reply, error) {
 		calls++
+
 		if method != "db.create" || !opts.DryRun || len(opts.Secrets) != 0 {
 			t.Fatalf("method %q opts %+v", method, opts)
 		}
+
 		for key, want := range map[string]any{
 			"name": "app", "size": "small", "memory": "768MiB", "profile": "oltp", "statement_timeout": "30s",
 			"protected": true, "allow_overcommit": true,
@@ -27,10 +30,12 @@ func TestDBCreateDryRunNodePreview(t *testing.T) {
 				t.Errorf("%s = %v, want %v", key, params[key], want)
 			}
 		}
+
 		extensions, ok := params["extensions"].([]string)
 		if !ok || len(extensions) != 1 || extensions[0] != "pg_stat_statements" {
 			t.Errorf("extensions: %v", params["extensions"])
 		}
+
 		return remote.Reply{
 			Data:     []byte(`{"database":{"name":"app","size":"medium","statement_timeout":"30s"}}`),
 			Warnings: []output.Warning{{Code: "memory_overcommitted"}},
@@ -44,15 +49,18 @@ func TestDBCreateDryRunNodePreview(t *testing.T) {
 func TestDBCreateDryRunRefusalAndInvalidReply(t *testing.T) {
 	refusal := output.NewError(output.CodePrecondition, "unsafe topology", output.ExitPrecondition, "").
 		WithDetails(map[string]any{"reason": "follower_recovery_floor_decrease"})
+
 	_, _, err := previewDBCreate(config.ClusterSpec{Name: "app"}, false, func(_ string, _ map[string]any, opts remote.CallOptions) (remote.Reply, error) {
 		if !opts.DryRun || len(opts.Secrets) != 0 {
 			t.Fatal("preview sent secrets or was not dry run")
 		}
+
 		return remote.Reply{}, refusal
 	})
 	if !errors.Is(err, refusal) {
 		t.Fatalf("refusal lost: %v", err)
 	}
+
 	_, _, err = previewDBCreate(config.ClusterSpec{Name: "app"}, false, func(_ string, _ map[string]any, _ remote.CallOptions) (remote.Reply, error) {
 		return remote.Reply{Data: []byte(`{}`)}, nil
 	})
@@ -66,7 +74,9 @@ func TestDBCreateDryRunRefusalAndInvalidReply(t *testing.T) {
 // naming the source, and the source passes.
 func assertFollowerPreflightRefusal(t *testing.T, label string, preflight func(config.Cluster, string) error) {
 	t.Helper()
+
 	cfg := config.DefaultCluster()
+
 	cfg.Clusters = []config.ClusterSpec{
 		{Name: "app", Port: 5433, Stanza: "app-3f9a1c", Size: "large", StatementTimeout: "60s"},
 		{Name: "app_follower", Port: 5434, Size: "small", StatementTimeout: "60s", Follows: "app"},
@@ -74,14 +84,17 @@ func assertFollowerPreflightRefusal(t *testing.T, label string, preflight func(c
 	for _, protected := range []bool{false, true} {
 		cfg.Clusters[1].Protected = protected
 		err := preflight(cfg, "app_follower")
+
 		var ce *output.CLIError
 		if !errors.As(err, &ce) {
 			t.Fatalf("%s on a follower (protected %v): %v, want is_follower", label, protected, err)
 		}
+
 		d, _ := ce.Details.(map[string]any)
 		if ce.Code != output.CodePrecondition || d["reason"] != "is_follower" || d["source"] != "app" {
 			t.Errorf("%s on a follower (protected %v): %s %v, want is_follower from app", label, protected, ce.Code, d)
 		}
+
 		if err := preflight(cfg, "app"); err != nil {
 			t.Errorf("%s on the source (protected %v): %v", label, protected, err)
 		}
@@ -101,6 +114,7 @@ func TestResizePreviewMessageShowsTheFollowers(t *testing.T) {
 	source := engine.PlanData{WouldApply: 3, Total: 9}
 	follower := engine.PlanData{WouldApply: 1, Total: 1}
 	followers := []resizeFollowerPlan{{Follower: "app_follower", Restart: engine.RestartRestart, Plan: follower}}
+
 	got := resizePreviewMessage("app", "medium, 1 GiB", source, followers)
 	if !strings.Contains(got, "the followers first: app_follower (1 of 1 steps) and restarts; then app (3 of 9 steps)") {
 		t.Errorf("preview %q", got)
@@ -108,6 +122,7 @@ func TestResizePreviewMessageShowsTheFollowers(t *testing.T) {
 	// An already pending restart counts as restarting even without a floor
 	// change, or without a step left to apply.
 	pending := []resizeFollowerPlan{{Follower: "app_follower", Restart: engine.RestartRestart, Plan: engine.PlanData{Total: 1}}}
+
 	got = resizePreviewMessage("app", "medium, 1 GiB", source, pending)
 	if !strings.Contains(got, "app_follower (0 of 1 steps) and restarts") {
 		t.Errorf("pending restart preview %q", got)

@@ -52,6 +52,7 @@ func suppliedAnswers(cmd *cobra.Command, cfg config.Cluster, fromFile bool) map[
 	given := func(flag string, differs bool) bool {
 		return flagChanged(cmd, flag) || (fromFile && differs)
 	}
+
 	return map[string]bool{
 		qName:              cfg.ClusterName != "",
 		qNodeName:          given("node-name", len(cfg.Nodes) > 0 && cfg.Nodes[0].Name != config.DefaultNodeName),
@@ -92,6 +93,7 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 			*fields = append(*fields, field)
 		}
 	}
+
 	var server, endpoint, workload []huh.Field
 	ask(qName, huh.NewInput().Title("Server name").Validate(validateName).Value(&a.Name), &server)
 	ask(qNodeName, huh.NewInput().
@@ -119,10 +121,12 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		Title("Workload profile").
 		Options(huh.NewOption("OLTP (web)", "oltp"), huh.NewOption("Mixed", "mixed"), huh.NewOption("Analytics", "analytics")).
 		Value(&a.Profile), &workload)
+
 	sizes := make([]huh.Option[string], 0, len(config.Sizes))
 	for _, size := range config.Sizes {
 		sizes = append(sizes, huh.NewOption(fmt.Sprintf("%s (%d MiB, %d connections)", size.Name, size.MemoryMiB, size.MaxConnections), size.Name))
 	}
+
 	ask(qDefaultSize, huh.NewSelect[string]().
 		Title("Default database size").
 		Description("vaire db create uses it without --size, and steps down when it doesn't fit.").
@@ -131,6 +135,7 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 	ask(qClientConnections, huh.NewInput().Title("Expected client connections").Validate(validateClientConnections).Value(&a.ClientConnections), &workload)
 
 	var groups []*huh.Group
+
 	for _, fields := range [][]huh.Field{server, endpoint, workload} {
 		if len(fields) > 0 {
 			groups = append(groups, huh.NewGroup(fields...))
@@ -146,12 +151,15 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 				Value(&a.ACMEEmail),
 		).WithHideFunc(func() bool { return a.TLSMode != "acme" }))
 	}
+
 	if len(groups) == 0 {
 		return nil
 	}
+
 	if err := ui.RunForm(groups...); err != nil {
 		return promptErr(err)
 	}
+
 	return applyInterview(cfg, a)
 }
 
@@ -163,9 +171,11 @@ func applyInterview(cfg *config.Cluster, a interviewAnswers) error {
 		}
 	}
 	setIf(&cfg.ClusterName, a.Name)
+
 	if len(cfg.Nodes) > 0 {
 		setIf(&cfg.Nodes[0].Name, a.NodeName)
 	}
+
 	setIf(&cfg.Server.AdminUser, a.AdminUser)
 	setIf(&cfg.Timezone, a.Timezone)
 	setIf(&cfg.Server.DataRoot, a.DataRoot)
@@ -174,10 +184,13 @@ func applyInterview(cfg *config.Cluster, a interviewAnswers) error {
 	setIf(&cfg.ACMEEmail, a.ACMEEmail)
 	setIf(&cfg.Postgres.Profile, a.Profile)
 	setIf(&cfg.Postgres.DefaultSize, a.DefaultSize)
+
 	if n, err := strconv.Atoi(strings.TrimSpace(a.ClientConnections)); err == nil && n > 0 {
 		cfg.Postgres.ClientConnections = n
 	}
+
 	cfg.Network.ClientAllowlist = allowlistPrefixes(splitList(a.Allowlist))
+
 	return nil
 }
 
@@ -186,6 +199,7 @@ func masterName(cfg *config.Cluster) string {
 	if len(cfg.Nodes) > 0 && cfg.Nodes[0].Name != "" {
 		return cfg.Nodes[0].Name
 	}
+
 	return config.DefaultNodeName
 }
 
@@ -195,6 +209,7 @@ func validateNodeName(v string) error {
 	if !config.NodeNamePattern.MatchString(v) {
 		return fmt.Errorf("use a DNS label: lower-case letters, digits and '-', starting with a letter")
 	}
+
 	return nil
 }
 
@@ -204,6 +219,7 @@ func optional(check func(string) error) func(string) error {
 		if v = strings.TrimSpace(v); v == "" {
 			return nil
 		}
+
 		return check(v)
 	}
 }
@@ -212,6 +228,7 @@ func validateName(v string) error {
 	if !config.NamePattern.MatchString(strings.TrimSpace(v)) {
 		return errors.New("must match " + config.NamePattern.String())
 	}
+
 	return nil
 }
 
@@ -219,6 +236,7 @@ func validateDomain(v string) error {
 	if strings.TrimSpace(v) == "" {
 		return errors.New("a domain is required")
 	}
+
 	return config.CheckDomain(strings.TrimSpace(v))
 }
 
@@ -228,6 +246,7 @@ func validateAllowlist(v string) error {
 			return fmt.Errorf("%s is not an IP address or CIDR", entry)
 		}
 	}
+
 	return nil
 }
 
@@ -235,10 +254,12 @@ func validateClientConnections(v string) error {
 	if v = strings.TrimSpace(v); v == "" {
 		return nil
 	}
+
 	n, err := strconv.Atoi(v)
 	if err != nil {
 		return errors.New("must be a number")
 	}
+
 	return config.CheckClientConnections(n)
 }
 
@@ -250,6 +271,7 @@ func allowlistPrefixes(entries []string) []string {
 			entries[i] = netip.PrefixFrom(ip, ip.BitLen()).String()
 		}
 	}
+
 	return entries
 }
 
@@ -258,12 +280,15 @@ func splitList(value string) []string {
 	if strings.TrimSpace(value) == "" {
 		return nil
 	}
+
 	parts := strings.Split(value, ",")
+
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
 	}
+
 	return out
 }

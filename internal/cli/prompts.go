@@ -28,10 +28,12 @@ func MustNotPrompt(cmd *cobra.Command) bool {
 			return true
 		}
 	}
+
 	opts, err := output.ParseOptions(cmd)
 	if err == nil && output.UsesStructuredOutput(opts) {
 		return true
 	}
+
 	return !stdinIsTTY()
 }
 
@@ -41,9 +43,11 @@ func RequireFlag(cmd *cobra.Command, provided bool, flag, action string) error {
 	if provided {
 		return nil
 	}
+
 	if !MustNotPrompt(cmd) {
 		return nil
 	}
+
 	return output.NewError(
 		output.CodeInputRequired,
 		action+" needs "+flag,
@@ -64,14 +68,17 @@ func Confirm(cmd *cobra.Command, token string) error {
 			"Refusing to confirm an empty token.",
 		)
 	}
+
 	got := ""
 	if tokens := confirmTokens(cmd); len(tokens) > 0 {
 		got = tokens[0]
 	}
+
 	details := map[string]any{"confirm_token": token}
 	if got == token {
 		return nil
 	}
+
 	if got != "" {
 		return output.NewError(
 			output.CodeUnsafeAction,
@@ -80,6 +87,7 @@ func Confirm(cmd *cobra.Command, token string) error {
 			"re-run with --confirm "+token,
 		).WithDetails(details)
 	}
+
 	return promptConfirm(cmd, token)
 }
 
@@ -96,6 +104,7 @@ func promptConfirm(cmd *cobra.Command, token string) error {
 			"re-run with --confirm "+token,
 		).WithDetails(details)
 	}
+
 	if richOutput(cmd) {
 		if err := ui.TypeWord("Type '"+token+"' to confirm", "", token); err != nil {
 			return output.NewError(
@@ -105,15 +114,19 @@ func promptConfirm(cmd *cobra.Command, token string) error {
 				"re-run with --confirm "+token,
 			).WithDetails(details)
 		}
+
 		return nil
 	}
+
 	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Type '%s' to confirm: ", token); err != nil {
 		return err
 	}
+
 	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return output.WrapError(output.CodeError, err, output.ExitGeneric, "")
 	}
+
 	if strings.TrimSpace(line) != token {
 		return output.NewError(
 			output.CodeUnsafeAction,
@@ -122,6 +135,7 @@ func promptConfirm(cmd *cobra.Command, token string) error {
 			"re-run with --confirm "+token,
 		).WithDetails(details)
 	}
+
 	return nil
 }
 
@@ -129,11 +143,14 @@ func dryRun(cmd *cobra.Command) bool {
 	if cmd == nil || cmd.Flags() == nil {
 		return false
 	}
+
 	flag := cmd.Flags().Lookup("dry-run")
 	if flag == nil {
 		return false
 	}
+
 	value, err := strconv.ParseBool(flag.Value.String())
+
 	return err == nil && value
 }
 
@@ -147,20 +164,25 @@ func PromptYes(cmd *cobra.Command, question string) (bool, error) {
 	if MustNotPrompt(cmd) {
 		return false, nil
 	}
+
 	if richOutput(cmd) {
 		ok, err := ui.YesNo(question, "")
 		if errors.Is(err, ui.ErrAborted) {
 			return false, nil
 		}
+
 		return ok, err
 	}
+
 	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N] ", question); err != nil {
 		return false, err
 	}
+
 	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return false, output.WrapError(output.CodeError, err, output.ExitGeneric, "")
 	}
+
 	switch strings.ToLower(strings.TrimSpace(line)) {
 	case "y", "yes":
 		return true, nil
@@ -182,19 +204,25 @@ func confirmTokens(cmd *cobra.Command) []string {
 	if flag == nil {
 		return nil
 	}
+
 	if flag.Value.Type() == "stringArray" {
 		values, _ := cmd.Flags().GetStringArray("confirm")
+
 		var out []string
+
 		for _, v := range values {
 			if v = strings.TrimSpace(v); v != "" {
 				out = append(out, v)
 			}
 		}
+
 		return out
 	}
+
 	if v := stringFlag(cmd, "confirm"); v != "" {
 		return []string{v}
 	}
+
 	return nil
 }
 
@@ -205,6 +233,7 @@ func confirmOptions(cmd *cobra.Command) (string, []string) {
 	if len(tokens) == 0 {
 		return "", nil
 	}
+
 	return tokens[0], tokens[1:]
 }
 
@@ -214,5 +243,6 @@ func confirmFlags(tokens []string) string {
 	for i, t := range tokens {
 		parts[i] = "--confirm " + t
 	}
+
 	return strings.Join(parts, " ")
 }

@@ -27,25 +27,32 @@ type Status struct {
 func (l *Live) Wait(label string) (*Status, func()) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	if l.status != nil {
 		return l.status, func() {}
 	}
+
 	now := time.Now()
 	st := &Status{l: l, label: label, started: now, phaseStarted: now}
 	l.status = st
 	l.lastOut = now
 	l.startTicker()
+
 	return st, func() {
 		l.mu.Lock()
 		defer l.mu.Unlock()
+
 		if l.status != st {
 			return
 		}
+
 		l.status = nil
 		l.clear()
+
 		if len(l.tasks) == 0 {
 			l.stopTicker()
 		}
+
 		l.draw()
 	}
 }
@@ -55,10 +62,12 @@ func (l *Live) Wait(label string) (*Status, func()) {
 func (s *Status) Phase(phase string) {
 	s.l.mu.Lock()
 	defer s.l.mu.Unlock()
+
 	phase = sanitize(phase)
 	if phase == s.phase {
 		return
 	}
+
 	s.phase, s.detail, s.phaseStarted = phase, "", time.Now()
 }
 
@@ -76,23 +85,28 @@ func (s *Status) line(frame string, now time.Time) string {
 	if s.phase != "" {
 		text = s.phase
 	}
+
 	out := frame + " " + text
 	if s.detail != "" && s.detail != text {
 		out += styleDim.Render(" · " + s.detail)
 	}
+
 	times := Clock(now.Sub(s.started))
 	if s.phaseStarted.After(s.started) {
 		times = Clock(now.Sub(s.phaseStarted)) + " · " + times + " total"
 	}
+
 	return out + "  " + styleDim.Render(times)
 }
 
 // Clock formats d as mm:ss, or h:mm:ss from an hour.
 func Clock(d time.Duration) string {
 	d = max(d, 0).Truncate(time.Second)
+
 	h, m, sec := int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60
 	if h > 0 {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, sec)
 	}
+
 	return fmt.Sprintf("%02d:%02d", m, sec)
 }

@@ -36,7 +36,9 @@ func TestBucketPromotion(t *testing.T) {
 		} {
 			t.Run(key+"/"+tc.name, func(t *testing.T) {
 				aws := promotionAWS(t, key, tc)
+
 				var out bytes.Buffer
+
 				err := run(context.Background(), []string{"--bucket", "releases", "--key", key, "--endpoint", "https://bucket.example", tc.candidate}, &out, aws)
 				if (err == nil) != (tc.want != "") || out.String() != tc.want {
 					t.Fatalf("output %q, err %v; want %q", out.String(), err, tc.want)
@@ -48,33 +50,42 @@ func TestBucketPromotion(t *testing.T) {
 
 func promotionAWS(t *testing.T, key string, tc promotionCase) func(context.Context, ...string) ([]byte, error) {
 	t.Helper()
+
 	calls := 0
+
 	return func(_ context.Context, args ...string) ([]byte, error) {
 		calls++
 		if calls == 1 {
 			if args[0] != "s3api" || !strings.Contains(strings.Join(args, " "), "--prefix "+key) {
 				t.Fatalf("wrong list call: %v", args)
 			}
+
 			if tc.listErr {
 				return nil, errors.New("AccessDenied")
 			}
+
 			if tc.listing != "" {
 				return []byte(tc.listing), nil
 			}
+
 			return []byte(`{"KeyCount":1,"Contents":[{"Key":"` + key + `"}]}`), nil
 		}
+
 		if calls != 2 || args[0] != "s3" || args[2] != "s3://releases/"+key {
 			t.Fatalf("wrong read call: %v", args)
 		}
+
 		if tc.readErr {
 			return nil, errors.New("network failure")
 		}
+
 		return []byte(tc.manifest), nil
 	}
 }
 
 func TestPositionalPromotionErrorsPropagate(t *testing.T) {
 	var out bytes.Buffer
+
 	err := run(context.Background(), []string{"garbage", "1.0.0"}, &out, nil)
 	if err == nil || out.Len() != 0 {
 		t.Fatalf("invalid current must fail without a decision: %q %v", out.String(), err)

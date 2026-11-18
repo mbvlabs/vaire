@@ -17,10 +17,12 @@ type DatabaseCreds struct {
 // SecretValues returns every secret in the credentials.
 func (c DatabaseCreds) SecretValues() []string {
 	out := make([]string, 1, 1+len(c.Services))
+
 	out[0] = c.Admin.Password
 	for _, r := range c.Services {
 		out = append(out, r.Password)
 	}
+
 	return out
 }
 

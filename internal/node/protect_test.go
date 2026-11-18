@@ -28,6 +28,7 @@ func TestCheckNotProtected(t *testing.T) {
 	if err := CheckNotProtected(cfg, "app", "db drop"); !isProtectedErr(err) {
 		t.Fatalf("app: got %v, want database_protected", err)
 	}
+
 	for _, name := range []string{"other", "missing"} {
 		if err := CheckNotProtected(cfg, name, "db drop"); err != nil {
 			t.Fatalf("%s: got %v", name, err)
@@ -41,17 +42,21 @@ func TestRefuseProtected(t *testing.T) {
 		called = true
 		return Result{}, nil
 	})
+
 	run := func(params string) error {
 		called = false
 		_, err := h(context.Background(), &Env{Cluster: protectedCluster(), Req: rpc.Request{Params: json.RawMessage(params)}})
+
 		return err
 	}
 	if err := run(`{"name":"app","rotate":true}`); !isProtectedErr(err) || called {
 		t.Fatalf("rotate app: err %v, called %v", err, called)
 	}
+
 	if err := run(`{"name":"app","rotate":false}`); err != nil || !called {
 		t.Fatalf("no rotate: err %v, called %v", err, called)
 	}
+
 	if err := run(`{"name":"other","rotate":true}`); err != nil || !called {
 		t.Fatalf("other: err %v, called %v", err, called)
 	}
@@ -69,6 +74,7 @@ func TestResizeShrinks(t *testing.T) {
 func TestProtectionOf(t *testing.T) {
 	protected, all := protectionOf(protectedCluster())
 	rejectf(t, len(protected) != 1 || protected[0] != "app", "protected = %v", protected)
+
 	want := []ProtectedDatabase{{Name: "app", Protected: true}, {Name: "other"}}
 	rejectf(t, len(all) != len(want) || all[0] != want[0] || all[1] != want[1], "databases = %+v, want %+v", all, want)
 	protected, all = protectionOf(config.Cluster{})

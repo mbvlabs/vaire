@@ -54,6 +54,7 @@ var nodeDirs = []struct {
 func SelfCheck() (SelfCheckData, []output.Warning, error) {
 	if os.Geteuid() != 0 {
 		checks := []Check{{Name: "root", Status: CheckFail, Detail: "selfcheck must run as root"}}
+
 		return SelfCheckData{Checks: checks}, nil, output.NewError(
 			output.CodePrecondition,
 			"vaire node selfcheck must run as root",
@@ -61,6 +62,7 @@ func SelfCheck() (SelfCheckData, []output.Warning, error) {
 			"Run it with sudo.",
 		).WithDetails(map[string]any{"reason": "root_required", "checks": checks})
 	}
+
 	checks := []Check{
 		{Name: "root", Status: CheckPass},
 		checkBinary(),
@@ -71,7 +73,9 @@ func SelfCheck() (SelfCheckData, []output.Warning, error) {
 		checkTools(),
 	}
 	data := SelfCheckData{Checks: checks}
+
 	var failed, warned []string
+
 	for _, c := range checks {
 		switch c.Status {
 		case CheckFail:
@@ -80,6 +84,7 @@ func SelfCheck() (SelfCheckData, []output.Warning, error) {
 			warned = append(warned, c.Name)
 		}
 	}
+
 	if len(failed) > 0 {
 		return data, nil, output.NewError(
 			output.CodePrecondition,
@@ -88,6 +93,7 @@ func SelfCheck() (SelfCheckData, []output.Warning, error) {
 			"Fix the failed checks in details.checks.",
 		).WithDetails(map[string]any{"reason": "selfcheck_failed", "checks": checks})
 	}
+
 	var warnings []output.Warning
 	if len(warned) > 0 {
 		warnings = append(warnings, output.Warning{
@@ -95,71 +101,93 @@ func SelfCheck() (SelfCheckData, []output.Warning, error) {
 			Message: "selfcheck warnings: " + strings.Join(warned, ", "),
 		})
 	}
+
 	return data, warnings, nil
 }
 
 func checkBinary() Check {
 	c := Check{Name: "binary"}
+
 	info, err := os.Lstat(BinaryPath)
 	if err != nil {
 		return fail(c, BinaryPath+" is missing")
 	}
+
 	if !info.Mode().IsRegular() {
 		return fail(c, BinaryPath+" is not a regular file")
 	}
+
 	if perm := info.Mode().Perm(); perm != 0o755 {
 		return fail(c, fmt.Sprintf("%s has mode %04o, want 0755", BinaryPath, perm))
 	}
+
 	if st, ok := info.Sys().(*syscall.Stat_t); ok && (st.Uid != 0 || st.Gid != 0) {
 		return fail(c, BinaryPath+" is not owned by root:root")
 	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return fail(c, "cannot resolve the running executable")
 	}
+
 	self, err := os.Stat(exe)
 	if err != nil || !os.SameFile(self, info) {
 		return fail(c, "the running binary "+exe+" is not "+BinaryPath)
 	}
+
 	c.Status = CheckPass
+
 	return c
 }
 
 func checkConfig(name, path string, load func(string) error) Check {
 	c := Check{Name: name}
+
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			c.Status = CheckWarn
 			c.Detail = path + " is absent: not an vaire node yet"
+
 			return c
 		}
+
 		return fail(c, err.Error())
 	}
+
 	if err := load(path); err != nil {
 		return fail(c, err.Error())
 	}
+
 	c.Status = CheckPass
+
 	return c
 }
 
 func checkJournal() Check {
 	c := Check{Name: "journal"}
+
 	info, err := os.Stat(engine.JournalPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			c.Status = CheckPass
 			c.Detail = "no journal yet"
+
 			return c
 		}
+
 		return fail(c, err.Error())
 	}
+
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		return fail(c, fmt.Sprintf("%s has mode %04o, want 0600", engine.JournalPath, perm))
 	}
+
 	if _, err := engine.LoadJournal(engine.JournalPath); err != nil {
 		return fail(c, err.Error())
 	}
+
 	c.Status = CheckPass
+
 	return c
 }
 
@@ -168,44 +196,57 @@ func checkJournal() Check {
 // bypass the mode.
 func checkDirs() Check {
 	c := Check{Name: "dirs"}
+
 	for _, d := range nodeDirs {
 		if err := os.MkdirAll(d.path, d.mode); err != nil {
 			return fail(c, "cannot create "+d.path+": "+err.Error())
 		}
+
 		info, err := os.Stat(d.path)
 		if err != nil {
 			return fail(c, err.Error())
 		}
+
 		if !info.IsDir() {
 			return fail(c, d.path+" is not a directory")
 		}
+
 		if info.Mode().Perm()&0o700 != 0o700 {
 			return fail(c, fmt.Sprintf("%s has mode %04o; root needs rwx", d.path, info.Mode().Perm()))
 		}
+
 		probe, err := os.CreateTemp(d.path, ".vaire-selfcheck-*")
 		if err != nil {
 			return fail(c, "cannot write "+d.path+": "+err.Error())
 		}
+
 		name := probe.Name()
 		_ = probe.Close()
 		_ = os.Remove(name)
 	}
+
 	c.Status = CheckPass
+
 	return c
 }
 
 func checkTools() Check {
 	c := Check{Name: "tools"}
+
 	var missing []string
+
 	for _, tool := range requiredTools {
 		if findTool(tool) == "" {
 			missing = append(missing, tool)
 		}
 	}
+
 	if len(missing) > 0 {
 		return fail(c, "missing "+strings.Join(missing, ", "))
 	}
+
 	c.Status = CheckPass
+
 	return c
 }
 
@@ -216,11 +257,13 @@ func findTool(name string) string {
 			return path
 		}
 	}
+
 	return ""
 }
 
 func fail(c Check, detail string) Check {
 	c.Status = CheckFail
 	c.Detail = detail
+
 	return c
 }

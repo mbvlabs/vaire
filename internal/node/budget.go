@@ -26,6 +26,7 @@ func budgetHost(cfg config.Cluster, host hostinfo.Info) tune.Host {
 	if cfg.Server.MemoryReserve != "" {
 		override, _ = config.ParseMemoryMiB(cfg.Server.MemoryReserve)
 	}
+
 	h := tune.Host{
 		RAMMiB:     host.RAMMiB,
 		VCPU:       host.VCPU,
@@ -37,9 +38,11 @@ func budgetHost(cfg config.Cluster, host hostinfo.Info) tune.Host {
 		h.CommitLimitMiB, h.CommittedMiB, h.AvailableMiB = m.CommitLimitMiB, m.CommittedMiB, m.AvailableMiB
 		h.HugePagesFree, h.HugePageSizeKiB = m.HugePagesFree, m.HugePageSizeKiB
 	}
+
 	if used, ok := hostinfo.UsedGiB(cfg.Server.DataRoot); ok {
 		h.DiskUsedGiB = used
 	}
+
 	return h
 }
 
@@ -59,12 +62,15 @@ func demandFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) 
 		Running:         clusterRunning(spec),
 	}
 	sharedBuffers := tuned.SharedBuffersMiB
+
 	if v, ok := spec.Settings["shared_buffers"]; ok {
 		if mib, err := config.ParseMemoryMiB(v); err == nil {
 			sharedBuffers = mib
 		}
 	}
+
 	d.SharedMemoryMiB = tune.SharedMemoryMiB(sharedBuffers)
+
 	switch strings.TrimSpace(spec.Settings["huge_pages"]) {
 	case "on":
 		d.HugePagesRequired = true
@@ -72,28 +78,35 @@ func demandFor(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info) 
 	case "off":
 		d.HugePages = 0
 	}
+
 	walSize := ""
+
 	for _, s := range tuned.Settings {
 		if s.Name == "max_wal_size" {
 			walSize = s.Value
 		}
 	}
+
 	if v, ok := spec.Settings["max_wal_size"]; ok {
 		walSize = v
 	}
+
 	if mib, err := config.ParseMemoryMiB(walSize); err == nil {
 		d.MaxWALGiB = mib / 1024
 	}
+
 	return d
 }
 
 // budgetSheet is every cluster's demand added up against the budget.
 func budgetSheet(cfg config.Cluster, host hostinfo.Info) (tune.Host, tune.Sheet) {
 	h := budgetHost(cfg, host)
+
 	demands := make([]tune.Demand, 0, len(cfg.Clusters))
 	for _, c := range cfg.Clusters {
 		demands = append(demands, demandFor(cfg, c, host))
 	}
+
 	return h, tune.NewSheet(h, demands)
 }
 
@@ -107,6 +120,7 @@ func sizeCandidates(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.I
 		c.Size, c.Memory = size.Name, ""
 		out = append(out, demandFor(cfg, c, host))
 	}
+
 	return out
 }
 
@@ -117,7 +131,9 @@ func oversubscriptionWarnings(cfg config.Cluster, host hostinfo.Info) []output.W
 	if len(cfg.Clusters) == 0 {
 		return nil
 	}
+
 	h, sheet := budgetSheet(cfg, host)
+
 	return toWarnings(sheet.Warnings(h))
 }
 
@@ -126,6 +142,7 @@ func toWarnings(in []tune.Warning) []output.Warning {
 	for _, w := range in {
 		out = append(out, output.Warning{Code: w.Code, Message: w.Message})
 	}
+
 	return out
 }
 
@@ -134,17 +151,21 @@ func toWarnings(in []tune.Warning) []output.Warning {
 // freedMiB is the shared memory a restart gives back first.
 func checkStarts(cfg config.Cluster, spec config.ClusterSpec, host hostinfo.Info, freedMiB int) error {
 	h := budgetHost(cfg, host)
+
 	reason := tune.WouldNotStart(h, demandFor(cfg, spec, host), freedMiB)
 	if reason == "" {
 		return nil
 	}
+
 	details := map[string]any{"reason": tune.ReasonWouldNotStart, "database": spec.Name,
 		"commit_limit_mib": h.CommitLimitMiB, "committed_mib": h.CommittedMiB, "huge_pages_free": h.HugePagesFree}
 	hint := "No size fits what is left: drop a database, free memory on the server, or move one to its own node."
+
 	if smallest := tune.SmallestThatStarts(h, sizeCandidates(cfg, spec, host), freedMiB); smallest != "" {
 		details["smallest_size"] = smallest
 		hint = "Size " + smallest + " would start: pass --size " + smallest + "."
 	}
+
 	return output.NewError(output.CodePrecondition, reason+", so PostgreSQL would not start", output.ExitPrecondition, hint).WithDetails(details)
 }
 
@@ -158,11 +179,14 @@ func checkBudget(cfg config.Cluster, db string, beforeMiB int, host hostinfo.Inf
 	if allow {
 		return nil
 	}
+
 	spec, ok := cfg.ClusterByName(db)
 	if !ok {
 		return nil
 	}
+
 	_, sheet := budgetSheet(cfg, host)
+
 	return overcommitRefusal(sheet, demandFor(cfg, spec, host), beforeMiB, sizeCandidates(cfg, spec, host), suggest)
 }
 
@@ -177,6 +201,7 @@ func overcommitRefusal(sheet tune.Sheet, now tune.Demand, beforeMiB int, candida
 	if sheet.BudgetMiB <= 0 || sheet.FreeMiB >= 0 || now.MemoryMiB <= beforeMiB {
 		return nil
 	}
+
 	leftMiB := sheet.BudgetMiB - (sheet.AllocatedMiB - now.MemoryMiB)
 	message := fmt.Sprintf("%s at %s (%s) would put %s of database sizes on a %s budget (%s RAM less a %s reserve); %s is left for it",
 		now.Name, now.Size, tune.FormatMiB(now.MemoryMiB), tune.FormatMiB(sheet.AllocatedMiB), tune.FormatMiB(sheet.BudgetMiB),
@@ -185,7 +210,9 @@ func overcommitRefusal(sheet tune.Sheet, now tune.Demand, beforeMiB int, candida
 		"memory_mib": now.MemoryMiB, "allocated_mib": sheet.AllocatedMiB, "budget_mib": sheet.BudgetMiB,
 		"ram_mib": sheet.RAMMiB, "reserve_mib": sheet.ReserveMiB, "left_mib": max(0, leftMiB)}
 	anyway := "To keep " + now.Size + " anyway, add --allow-overcommit: under load the databases are throttled and the page cache shrinks."
+
 	var hint string
+
 	if fits := tune.LargestThatFits(candidates, leftMiB, beforeMiB); fits != "" {
 		details["largest_size"] = fits
 		details["suggested_command"] = suggest(fits)
@@ -195,24 +222,29 @@ func overcommitRefusal(sheet tune.Sheet, now tune.Demand, beforeMiB int, candida
 		if beforeMiB > 0 {
 			none = "No size larger than " + tune.FormatMiB(beforeMiB) + " fits in what is left"
 		}
+
 		hint = none + ": resize another database down with vaire db resize"
 		if largest, ok := largestOther(sheet, now.Name); ok {
 			hint += " (the largest is " + largest.Name + " at " + largest.Size + ", " + tune.FormatMiB(largest.MemoryMiB) + ")"
 		}
+
 		hint += ", or move to a bigger server. " + anyway
 	}
+
 	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).WithDetails(details)
 }
 
 // largestOther is the sheet's largest database other than name.
 func largestOther(sheet tune.Sheet, name string) (tune.Demand, bool) {
 	var out tune.Demand
+
 	found := false
 	for _, c := range sheet.Clusters {
 		if c.Name != name && (!found || c.MemoryMiB > out.MemoryMiB) {
 			out, found = c, true
 		}
 	}
+
 	return out, found
 }
 
@@ -231,10 +263,12 @@ func clusterMemoryCurrentMiB(name string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
+
 	n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
 	if err != nil {
 		return 0, false
 	}
+
 	return int(n / (1 << 20)), true
 }
 
@@ -244,5 +278,6 @@ func quotaPercent(v string) int {
 	if err != nil {
 		return 0
 	}
+
 	return n
 }

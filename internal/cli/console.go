@@ -27,42 +27,54 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	if db == "" && len(args) > 0 {
 		db = args[0]
 	}
+
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "vaire console needs a database", output.ExitInput,
 			"Pass the database name, for example vaire console app.").WithDetails(map[string]any{"flag": "--db"})
 	}
+
 	if MustNotPrompt(cmd) {
 		return output.NewError(output.CodeUsage, "vaire console is interactive and needs a terminal", output.ExitUsage,
 			"Use vaire sql for one statement.")
 	}
+
 	usql, err := localenv.UsqlPath(cmd)
 	if err != nil {
 		return err
 	}
+
 	p := newProgress(cmd)
+
 	s, err := openSession(cmd, p)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+
 	user, password, err := sessionLogin(cmd, s, p, db, flagTrue(cmd, "write"))
 	if err != nil {
 		return err
 	}
+
 	ln, port, err := listenLocal(cmd.Context(), defaultPostgresPort)
 	if err != nil {
 		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "No free local port.")
 	}
+
 	defer func() { _ = ln.Close() }()
+
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGTERM)
 	defer stop()
+
 	at := databaseEndpoint(ctx, s, p, db)
+
 	tlsCfg := pg.TLSConfig(pg.Params{ServerName: at.Hostname, TLSMode: s.ctx.TLSMode})
 	go pg.ServeTLSProxy(ctx, ln, s.dialer, at.addr(pgPort), tlsCfg)
 
 	if s.ctx.TLSMode == "self-signed" {
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning: the cluster uses a self-signed certificate; the connection is encrypted but not verified")
 	}
+
 	query := url.Values{
 		"sslmode":          {"disable"},
 		"application_name": {"vaire-console"},
@@ -81,19 +93,22 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	// usql's default prompt shows the host up to its first dot, which for the
 	// loopback listener is "127"; name the node instead.
 	child := exec.CommandContext(ctx, usql, "--set", consolePrompt(at.Hostname, s.ctx.Name), dsn.String())
+
 	child.Env = append(os.Environ(), "PGPASSWORD="+password)
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
 	child.Stderr = cmd.ErrOrStderr()
 	// usql owns the terminal from here: nothing of vaire's live area may draw.
 	defer ui.Suspend()()
+
 	if err := child.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			return &localenv.SilentExitError{Code: exitErr.ExitCode()}
 		}
+
 		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
 	}
+
 	return nil
 }
 
@@ -107,6 +122,8 @@ func consolePrompt(hostname, workspaceName string) string {
 	if node == "" {
 		node = workspaceName
 	}
+
 	node = strings.ReplaceAll(node, "%", "")
+
 	return "PROMPT1=%S%N" + node + "%/%R%# "
 }

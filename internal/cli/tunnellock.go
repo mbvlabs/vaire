@@ -53,24 +53,31 @@ type heldTunnelLock struct {
 func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
 	tunnelLocks.Lock()
 	defer tunnelLocks.Unlock()
+
 	if h, ok := tunnelLocks.held[name]; ok {
 		h.refs++
 		return func() { releaseTunnelLock(name) }, nil
 	}
+
 	if err := os.MkdirAll(workspaces.Dir(name), 0o700); err != nil {
 		return nil, err
 	}
+
 	path := workspaces.Path(name, TunnelLockFile)
+
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := waitTunnelLock(ctx, f, name, path, p); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	writeTunnelHolder(f, p)
 	tunnelLocks.held[name] = &heldTunnelLock{f: f, refs: 1}
+
 	return func() { releaseTunnelLock(name) }, nil
 }
 
@@ -79,30 +86,38 @@ func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
 func waitTunnelLock(ctx context.Context, f *os.File, name, path string, p *progress) error {
 	fd := int(f.Fd())
 	told := false
+
 	for {
 		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			break
 		}
+
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			return err
 		}
+
 		if !told {
 			told = true
+
 			tunnelWaitNote(p, name, path)
+
 			if p != nil {
 				p.setPhase("waiting for the tunnel to " + name)
 			}
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(tunnelLockPoll):
 		}
 	}
+
 	if told && p != nil {
 		p.setPhase("")
 	}
+
 	return nil
 }
 
@@ -112,6 +127,7 @@ func writeTunnelHolder(f *os.File, p *progress) {
 	if p != nil && p.cmd != nil {
 		command = p.cmd.CommandPath()
 	}
+
 	raw, _ := json.Marshal(tunnelHolder{PID: os.Getpid(), Command: command, StartedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err := f.Truncate(0); err == nil {
 		_, _ = f.WriteAt(append(raw, '\n'), 0)
@@ -123,22 +139,28 @@ func writeTunnelHolder(f *os.File, p *progress) {
 // func releases it.
 func tryTunnelLock(name, command string) (release func(), held bool, err error) {
 	path := workspaces.Path(name, TunnelLockFile)
+
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, false, err
 	}
+
 	fd := int(f.Fd())
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
+
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, false, nil
 		}
+
 		return nil, false, err
 	}
+
 	raw, _ := json.Marshal(tunnelHolder{PID: os.Getpid(), Command: command, StartedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err := f.Truncate(0); err == nil {
 		_, _ = f.WriteAt(append(raw, '\n'), 0)
 	}
+
 	return func() {
 		_ = f.Truncate(0)
 		_ = syscall.Flock(fd, syscall.LOCK_UN)
@@ -149,15 +171,19 @@ func tryTunnelLock(name, command string) (release func(), held bool, err error) 
 func releaseTunnelLock(name string) {
 	tunnelLocks.Lock()
 	defer tunnelLocks.Unlock()
+
 	h, ok := tunnelLocks.held[name]
 	if !ok {
 		return
 	}
+
 	h.refs--
 	if h.refs > 0 {
 		return
 	}
+
 	delete(tunnelLocks.held, name)
+
 	_ = h.f.Truncate(0)
 	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)
 	_ = h.f.Close()
@@ -165,6 +191,7 @@ func releaseTunnelLock(name string) {
 
 func tunnelWaitNote(p *progress, name, path string) {
 	who := "another vaire command"
+
 	if raw, err := os.ReadFile(path); err == nil {
 		var h tunnelHolder
 		if json.Unmarshal(raw, &h) == nil && h.PID > 0 {
@@ -172,16 +199,20 @@ func tunnelWaitNote(p *progress, name, path string) {
 			if cmd == "" {
 				cmd = "vaire"
 			}
+
 			who = fmt.Sprintf("%s (pid %d)", cmd, h.PID)
 		}
 	}
+
 	line := fmt.Sprintf("%s is using the tunnel to %s; waiting for it to finish (close it, or press Ctrl-C to give up)…", who, name)
 	if strings.Contains(who, tunnelDaemonCommand) {
 		line = fmt.Sprintf("the tunnel daemon of %s (%s) holds the tunnel; waiting for it to exit (vaire tunnel stop -c %s ends it, or press Ctrl-C to give up)…", name, who, name)
 	}
+
 	if p == nil {
 		_, _ = fmt.Fprintln(os.Stderr, line)
 		return
 	}
+
 	p.note(line)
 }

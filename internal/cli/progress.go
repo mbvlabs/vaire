@@ -50,6 +50,7 @@ func (p *progress) hideWarning(code string) {
 	if p.hidden == nil {
 		p.hidden = map[string]bool{}
 	}
+
 	p.hidden[code] = true
 }
 
@@ -57,9 +58,11 @@ func newProgress(cmd *cobra.Command) *progress {
 	opts, _ := output.ParseOptions(cmd)
 	p := &progress{opts: opts, cmd: cmd, stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr()}
 	output.TrackShownWarnings(cmd)
+
 	if p.human() && richOutput(cmd) {
 		p.live = ui.Start(os.Stderr)
 	}
+
 	return p
 }
 
@@ -70,12 +73,15 @@ func richOutput(cmd *cobra.Command) bool {
 	if err != nil || output.UsesStructuredOutput(opts) || opts.Quiet {
 		return false
 	}
+
 	if flag := cmd.Flags().Lookup("no-input"); flag != nil && flag.Value.String() == "true" {
 		return false
 	}
+
 	if cmd.ErrOrStderr() != os.Stderr {
 		return false
 	}
+
 	return ui.Enabled(os.Stderr)
 }
 
@@ -88,21 +94,27 @@ func (p *progress) event(ev output.Event) {
 	if ev.Type == "warning" {
 		output.RecordWarning(p.cmd, output.Warning{Code: secrets.Redact(ev.Code), Message: secrets.Redact(ev.Message)})
 	}
+
 	if p.opts.Stream {
 		p.streamEvent(ev)
 		return
 	}
+
 	if !p.human() {
 		return
 	}
+
 	p.track(ev)
+
 	if p.warningHidden(ev) {
 		return
 	}
+
 	if p.live != nil {
 		p.liveEvent(ev)
 		return
 	}
+
 	p.plainEvent(ev)
 }
 
@@ -112,6 +124,7 @@ func (p *progress) streamEvent(ev output.Event) {
 	if ev.TS == "" {
 		ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+
 	raw, err := json.Marshal(secrets.RedactValue(ev))
 	if err == nil {
 		_, _ = fmt.Fprintln(p.stdout, string(raw))
@@ -124,10 +137,12 @@ func (p *progress) warningHidden(ev output.Event) bool {
 	if ev.Type != "warning" {
 		return false
 	}
+
 	if ev.Code != "" && p.hidden[ev.Code] {
 		p.shown(ev.Message)
 		return true
 	}
+
 	return !p.claimWarning(ev)
 }
 
@@ -154,6 +169,7 @@ func stepLine(ev output.Event) string {
 	if ev.Index != nil && ev.Total != nil {
 		prefix = fmt.Sprintf("  [%d/%d] ", *ev.Index, *ev.Total)
 	}
+
 	line := prefix + ev.Step + " " + ev.State
 	switch {
 	case ev.Detail != "" && ev.State != "skipped":
@@ -161,6 +177,7 @@ func stepLine(ev output.Event) string {
 	case ev.State == "skipped" && ev.Detail != "":
 		line += " (" + ev.Detail + ")"
 	}
+
 	return line
 }
 
@@ -177,7 +194,9 @@ const heartbeatEvery = 30 * time.Second
 // be called more than once.
 func (p *progress) wait(label string) func() {
 	var once sync.Once
+
 	stop := p.startWait(label)
+
 	return func() { once.Do(stop) }
 }
 
@@ -187,24 +206,31 @@ func (p *progress) startWait(label string) func() {
 		if p.status != nil {
 			return func() {}
 		}
+
 		st, stop := p.live.Wait(label)
 		p.status = st
+
 		return func() {
 			stop()
+
 			p.status = nil
 		}
 	case p.human():
 		if p.beat != nil {
 			return func() {}
 		}
+
 		h := &heartbeat{w: p.stderr, label: label, every: heartbeatEvery}
 		p.beat, p.stderr = h, h
 		stop := h.start()
+
 		return func() {
 			stop()
+
 			p.beat, p.stderr = nil, h.w
 		}
 	}
+
 	return func() {}
 }
 
@@ -220,11 +246,14 @@ func waitOn(cmd *cobra.Command, label string) func() {
 	if cmd == nil {
 		return func() {}
 	}
+
 	opts, _ := output.ParseOptions(cmd)
+
 	p := &progress{opts: opts, cmd: cmd, stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr()}
 	if p.human() && richOutput(cmd) {
 		p.live = ui.Start(os.Stderr)
 	}
+
 	return p.wait(label)
 }
 
@@ -232,9 +261,11 @@ func waitOn(cmd *cobra.Command, label string) func() {
 // renderer when opts has none.
 func (p *progress) call(ctx context.Context, c remote.Caller, method string, params any, opts remote.CallOptions) (remote.Reply, error) {
 	defer p.wait(waitLabel(method, params))()
+
 	if opts.OnEvent == nil {
 		opts.OnEvent = p.event
 	}
+
 	return c.Call(ctx, method, params, opts)
 }
 
@@ -244,12 +275,14 @@ func (p *progress) track(ev output.Event) {
 	if p.status == nil && p.beat == nil {
 		return
 	}
+
 	switch ev.Type {
 	case "step":
 		phase := ""
 		if ev.State == "started" {
 			phase, _ = phaseTitle(ev.Step)
 		}
+
 		p.setPhase(phase)
 	case "log":
 		p.setDetail(secrets.Redact(ev.Line))
@@ -264,6 +297,7 @@ func (p *progress) setPhase(phase string) {
 	if p.status != nil {
 		p.status.Phase(phase)
 	}
+
 	if p.beat != nil {
 		p.beat.phaseTo(phase)
 	}
@@ -291,13 +325,16 @@ type heartbeat struct {
 func (h *heartbeat) Write(b []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	h.last = time.Now()
+
 	return h.w.Write(b)
 }
 
 func (h *heartbeat) phaseTo(phase string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	if phase != h.phase {
 		h.phase, h.phaseStarted = phase, time.Now()
 	}
@@ -308,11 +345,14 @@ func (h *heartbeat) start() func() {
 	now := time.Now()
 	h.started, h.phaseStarted, h.last = now, now, now
 	done := make(chan struct{})
+
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
+
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
+
 		for {
 			select {
 			case <-done:
@@ -327,6 +367,7 @@ func (h *heartbeat) start() func() {
 			}
 		}
 	}()
+
 	return func() {
 		close(done)
 		<-finished
@@ -339,9 +380,11 @@ func (h *heartbeat) line(now time.Time) string {
 	if h.phase != "" {
 		what = h.phase
 	}
+
 	if h.phaseStarted.After(h.started) {
 		took = now.Sub(h.phaseStarted).Round(time.Second).String() + ", " + took + " total"
 	}
+
 	return "… still " + what + " (" + took + ")"
 }
 
@@ -400,12 +443,15 @@ func waitLabel(method string, params any) string {
 	if raw, err := json.Marshal(params); err == nil {
 		_ = json.Unmarshal(raw, &named)
 	}
+
 	if label, ok := waitLabelStatic[method]; ok {
 		return label
 	}
+
 	if verb, ok := waitLabelVerbs[method]; ok {
 		return waitLabelWith(verb, waitLabelObject(method, named))
 	}
+
 	return "waiting for " + method
 }
 
@@ -417,9 +463,11 @@ func waitLabelObject(method string, named waitLabelParams) string {
 	case "job.follow":
 		return named.ID
 	}
+
 	if named.Database != "" {
 		return named.Database
 	}
+
 	return named.Name
 }
 
@@ -428,12 +476,14 @@ func waitLabelWith(verb, obj string) string {
 	if obj == "" {
 		return verb
 	}
+
 	return verb + " " + obj
 }
 
 // liveEvent draws one event in the terminal UI.
 func (p *progress) liveEvent(ev output.Event) {
 	l := p.live
+
 	switch ev.Type {
 	case "step":
 		p.liveStep(ev)
@@ -442,6 +492,7 @@ func (p *progress) liveEvent(ev output.Event) {
 		if p.opts.Verbose {
 			l.Println(ui.Dim("    " + line))
 		}
+
 		if t := l.Task(ev.Step); t != nil {
 			t.Detail(line)
 		}
@@ -454,6 +505,7 @@ func (p *progress) liveEvent(ev output.Event) {
 			if ev.Pct != nil {
 				pct = float64(*ev.Pct) / 100
 			}
+
 			t.Progress(pct, strings.TrimSpace(ev.Phase+" "+ev.Detail))
 		}
 	}
@@ -462,18 +514,22 @@ func (p *progress) liveEvent(ev output.Event) {
 func (p *progress) liveStep(ev output.Event) {
 	l := p.live
 	title, header := phaseTitle(ev.Step)
+
 	counted := ev.Index != nil && ev.Total != nil
 	if counted {
 		title = fmt.Sprintf("%s %s", ui.Dim(fmt.Sprintf("[%d/%d]", *ev.Index, *ev.Total)), ev.Step)
 	}
+
 	detail := secrets.Redact(ev.Detail)
 	switch ev.State {
 	case "started":
 		if header != "" {
 			l.Header(header)
 		}
+
 		t := l.Start(ev.Step, title)
 		t.Detail(detail)
+
 		if counted {
 			t.Progress(float64(*ev.Index-1)/float64(*ev.Total), fmt.Sprintf("step %d of %d", *ev.Index, *ev.Total))
 		}
@@ -486,9 +542,11 @@ func (p *progress) liveStep(ev output.Event) {
 			p.endTask(ev.Step, title, ui.EndSkip, detail)
 			return
 		}
+
 		if detail != "" {
 			detail = "(" + detail + ")"
 		}
+
 		l.Line(ui.EndSkip, title, detail)
 	default:
 		l.Println(ui.Note(title + " " + ev.State + " " + detail))
@@ -501,6 +559,7 @@ func (p *progress) endTask(key, title, state, detail string) {
 		l.Line(state, title, detail)
 		return
 	}
+
 	l.Task(key).End(state, detail)
 }
 
@@ -533,6 +592,7 @@ func phaseTitle(step string) (title, header string) {
 	case "init.secrets-document":
 		return "Secrets handoff", "Secrets"
 	}
+
 	return step, ""
 }
 
@@ -546,6 +606,7 @@ func (p *progress) task(name string) *ui.Task {
 	if p.live == nil || !p.live.Running(name) {
 		return nil
 	}
+
 	return p.live.Task(name)
 }
 
@@ -556,10 +617,12 @@ func (p *progress) note(line string) {
 		p.event(output.Event{Type: "log", Step: "vaire", Line: line})
 		return
 	}
+
 	if p.live != nil {
 		p.live.Println(ui.Note(secrets.Redact(line)))
 		return
 	}
+
 	if p.human() {
 		_, _ = fmt.Fprintln(p.stderr, secrets.Redact(line))
 	}
@@ -597,10 +660,13 @@ func (p *progress) claimWarning(ev output.Event) bool {
 	if p.warned[key] {
 		return false
 	}
+
 	if p.warned == nil {
 		p.warned = map[output.Warning]bool{}
 	}
+
 	p.warned[key] = true
+
 	return true
 }
 
@@ -626,31 +692,39 @@ func promptLine(cmd *cobra.Command, question, def string) (string, error) {
 	if MustNotPrompt(cmd) {
 		return def, nil
 	}
+
 	if richOutput(cmd) {
 		v, err := ui.Input(question, "", def)
 		if err != nil {
 			return "", promptErr(err)
 		}
+
 		if v == "" {
 			return def, nil
 		}
+
 		return v, nil
 	}
+
 	label := question
 	if def != "" {
 		label += " [" + def + "]"
 	}
+
 	if _, err := fmt.Fprint(cmd.ErrOrStderr(), label+": "); err != nil {
 		return "", err
 	}
+
 	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
+
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return def, nil
 	}
+
 	return line, nil
 }
 
@@ -661,16 +735,21 @@ func readSecretTTY(cmd *cobra.Command, label string) (string, error) {
 		if err != nil {
 			return "", output.WrapError(output.CodeInputRequired, promptErr(err), output.ExitInput, "")
 		}
+
 		return v, nil
 	}
+
 	if _, err := fmt.Fprint(cmd.ErrOrStderr(), label+": "); err != nil {
 		return "", err
 	}
+
 	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+
 	if err != nil {
 		return "", output.WrapError(output.CodeInputRequired, err, output.ExitInput, "")
 	}
+
 	return strings.TrimSpace(string(raw)), nil
 }
 
@@ -681,18 +760,22 @@ func typeWord(cmd *cobra.Command, question, description, word string) error {
 	if richOutput(cmd) {
 		return promptErr(ui.TypeWord(question, description, word))
 	}
+
 	if description != "" {
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), description)
 	}
+
 	reader := bufio.NewReader(cmd.InOrStdin())
 	for {
 		if _, err := fmt.Fprint(cmd.ErrOrStderr(), question+": "); err != nil {
 			return err
 		}
+
 		line, err := reader.ReadString('\n')
 		if strings.TrimSpace(line) == word {
 			return nil
 		}
+
 		if err != nil {
 			return output.NewError(output.CodeInputRequired, "expected "+word+" to be typed", output.ExitInput, "")
 		}
@@ -704,6 +787,7 @@ func promptErr(err error) error {
 	if errors.Is(err, ui.ErrAborted) {
 		return output.NewError(output.CodeInputRequired, "the prompt was cancelled", output.ExitInput, "")
 	}
+
 	return err
 }
 
@@ -713,6 +797,7 @@ func readFirstLine(r io.Reader) (string, error) {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
+
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
@@ -720,6 +805,7 @@ func stringFlag(cmd *cobra.Command, name string) string {
 	if flag := cmd.Flags().Lookup(name); flag != nil {
 		return strings.TrimSpace(flag.Value.String())
 	}
+
 	return ""
 }
 
@@ -731,6 +817,7 @@ func renderRichError(w io.Writer, failure output.Failure) bool {
 		if step, ok := details["step"].(string); ok {
 			block.Step = step
 		}
+
 		switch tail := details["output_tail"].(type) {
 		case []string:
 			block.Tail = tail
@@ -742,10 +829,13 @@ func renderRichError(w io.Writer, failure output.Failure) bool {
 			}
 		}
 	}
+
 	width := 80
 	if cols, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && cols > 0 {
 		width = cols
 	}
+
 	_, err := fmt.Fprintln(ui.Writer(w), "\n"+block.Render(width))
+
 	return err == nil
 }

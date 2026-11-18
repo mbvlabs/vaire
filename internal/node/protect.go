@@ -18,6 +18,7 @@ func CheckNotProtected(cfg config.Cluster, name, action string) error {
 	if !ok || !spec.Protected {
 		return nil
 	}
+
 	return protectedError(name, action)
 }
 
@@ -38,6 +39,7 @@ func refuseProtected(action, field string, applies func(json.RawMessage) bool,
 	return func(ctx context.Context, env *Env) (Result, error) {
 		if applies == nil || applies(env.Req.Params) {
 			var params map[string]any
+
 			_ = json.Unmarshal(env.Req.Params, &params)
 			if name, _ := params[field].(string); name != "" {
 				if err := CheckNotProtected(env.Cluster, name, action); err != nil {
@@ -45,6 +47,7 @@ func refuseProtected(action, field string, applies func(json.RawMessage) bool,
 				}
 			}
 		}
+
 		return handler(ctx, env)
 	}
 }
@@ -54,6 +57,7 @@ func restorePromotes(params json.RawMessage) bool {
 	var p struct {
 		Promote bool `json:"promote"`
 	}
+
 	return json.Unmarshal(params, &p) == nil && p.Promote
 }
 
@@ -61,15 +65,19 @@ func restorePromotes(params json.RawMessage) bool {
 // updated: the protection is lifted, or the entry is gone.
 func Unprotected(old, updated config.Cluster) []string {
 	var out []string
+
 	for _, c := range old.Clusters {
 		if !c.Protected {
 			continue
 		}
+
 		if u, ok := updated.ClusterByName(c.Name); !ok || !u.Protected {
 			out = append(out, c.Name)
 		}
 	}
+
 	sort.Strings(out)
+
 	return out
 }
 
@@ -79,9 +87,11 @@ func ResizeShrinks(cfg config.Cluster, old, resized config.ClusterSpec) bool {
 	if err != nil {
 		return false
 	}
+
 	after, err := cfg.Resources(resized)
 	if err != nil {
 		return false
 	}
+
 	return after.MemoryMiB < before.MemoryMiB
 }

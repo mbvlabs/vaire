@@ -22,6 +22,7 @@ func writeEnv(params, code string, dryRun bool) *Env {
 	env := codeEnv(params, code)
 	env.Cluster = protectedCluster()
 	env.Req.DryRun = dryRun
+
 	return env
 }
 
@@ -35,6 +36,7 @@ func TestRequireWriteCodeSQL(t *testing.T) {
 	run := func(params, code string) error {
 		called = false
 		_, err := h(context.Background(), writeEnv(params, code, false))
+
 		return err
 	}
 
@@ -65,6 +67,7 @@ func TestRequireWriteCodeSQL(t *testing.T) {
 	err = run(`{"db":"app","write":true}`, codeFor(t, secret, clock.t, 7))
 	wantReason(t, err, output.CodeProtectCodeRejected, "code_invalid")
 	reject(t, called, "handler ran with a wrong code")
+
 	code := codeFor(t, secret, clock.t, 0)
 	if err := run(`{"db":"app","write":true}`, code); err != nil || !called {
 		t.Fatalf("write with code: err %v, called %v", err, called)
@@ -87,18 +90,22 @@ func TestRequireWriteCodeMaintKill(t *testing.T) {
 	run := func(params, code string, dryRun bool) error {
 		called = false
 		_, err := h(context.Background(), writeEnv(params, code, dryRun))
+
 		return err
 	}
 	// A dry run terminates nothing, so it needs no code.
 	if err := run(`{"db":"app","idle_in_tx":true}`, "", true); err != nil || !called {
 		t.Fatalf("dry run: err %v, called %v", err, called)
 	}
+
 	err := run(`{"db":"app","idle_in_tx":true}`, "", false)
 	wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
 	rejectf(t, called || !strings.Contains(err.Error(), "terminating its sessions"), "kill without code: %v, called %v", err, called)
+
 	if err := run(`{"db":"other","idle_in_tx":true}`, "", false); err != nil || !called {
 		t.Fatalf("kill on other: err %v, called %v", err, called)
 	}
+
 	if err := run(`{"db":"app","idle_in_tx":true}`, codeFor(t, secret, clock.t, 0), false); err != nil || !called {
 		t.Fatalf("kill with code: err %v, called %v", err, called)
 	}
@@ -106,11 +113,15 @@ func TestRequireWriteCodeMaintKill(t *testing.T) {
 
 func TestWriteAccess(t *testing.T) {
 	g, clock := newTestGuard(t)
+
 	var granted []writeRole
+
 	grantErr := error(nil)
 	grant := func(_ context.Context, spec config.ClusterSpec, role writeRole) error {
 		rejectf(t, spec.Name != "app", "grant on %s", spec.Name)
+
 		granted = append(granted, role)
+
 		return grantErr
 	}
 	password := strings.Repeat("p", writeRolePasswordMin)
@@ -120,12 +131,15 @@ func TestWriteAccess(t *testing.T) {
 			if env.Req.Secrets == nil {
 				env.Req.Secrets = map[string]string{}
 			}
+
 			env.Req.Secrets[WritePasswordSecret] = password
 		}
+
 		res, err := g.writeAccess(context.Background(), env, grant)
 		if err != nil {
 			return WriteAccess{}, err
 		}
+
 		return mustAs[WriteAccess](t, res.Data), nil
 	}
 	access := func(params, code string) (WriteAccess, error) { return accessWith(params, code, password) }
@@ -136,6 +150,7 @@ func TestWriteAccess(t *testing.T) {
 		got, err := access(`{"db":"`+db+`"}`, "")
 		rejectf(t, err != nil || got.Protected || len(granted) != 0, "%s: %+v %v, granted %d", db, got, err, len(granted))
 	}
+
 	_, err := access(`{}`, "")
 	if code, _ := errReason(t, err); code != output.CodeInputRequired {
 		t.Fatalf("no db: %v", err)
@@ -160,6 +175,7 @@ func TestWriteAccess(t *testing.T) {
 		if code, _ := errReason(t, err); code != output.CodeInputRequired || len(granted) != 0 {
 			t.Fatalf("password %q: %v, granted %d", pw, err, len(granted))
 		}
+
 		clock.t = clock.t.Add(totp.Period)
 	}
 
@@ -187,6 +203,7 @@ func TestWriteAccessRefusesAFollower(t *testing.T) {
 				cfg.Clusters[i].Protected = protected
 			}
 		}
+
 		g, _ := newTestGuard(t)
 		granted := 0
 		grant := func(context.Context, config.ClusterSpec, writeRole) error {
@@ -208,22 +225,26 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 	g, clock := newTestGuard(t)
 	secret := setUp(t, g, clock)
 	clock.t = clock.t.Add(totp.Period)
+
 	cfg := followerCfg()
 	for i := range cfg.Clusters {
 		cfg.Clusters[i].Protected = true
 	}
+
 	called := func(context.Context, *Env) (Result, error) { return Result{}, nil }
 	run := func(params, code string) (bool, error) {
 		env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(params)}}
 		if code != "" {
 			env.Req.Secrets = map[string]string{ProtectCodeSecret: code}
 		}
+
 		handlerRan := false
 		wrapped := g.requireWriteCode("writing to it", sqlWrites, func(ctx context.Context, env *Env) (Result, error) {
 			handlerRan = true
 			return called(ctx, env)
 		})
 		_, err := wrapped(context.Background(), env)
+
 		return handlerRan, err
 	}
 
@@ -233,6 +254,7 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 	} else {
 		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
 	}
+
 	if ran, err := run(`{"db":"app","write":true}`, codeFor(t, secret, clock.t, 0)); err != nil || !ran {
 		t.Fatalf("the protected source: err %v, ran %v", err, ran)
 	}
@@ -244,6 +266,7 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 	// maint kill's gate is the same guard; a follower's sessions may be
 	// terminated without a code (D9).
 	wrappedKill := g.requireWriteCode("terminating its sessions", nil, called)
+
 	env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"db":"app_follower","idle_in_tx":true}`)}}
 	if _, err := wrappedKill(context.Background(), env); err != nil {
 		t.Fatalf("maint kill on the protected follower: %v", err)
@@ -260,11 +283,14 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "psql-ran")
 	bin := t.TempDir()
+
 	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$*\" >> \"" + marker + "\"\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bin, "runuser"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	t.Setenv("PATH", bin)
+
 	ran := func() bool {
 		_, err := os.Stat(marker)
 		return err == nil
@@ -272,7 +298,9 @@ func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
 
 	g, clock := newTestGuard(t)
 	old := defaultProtectGuard
+
 	t.Cleanup(func() { defaultProtectGuard = old })
+
 	defaultProtectGuard = g
 	secret := setUp(t, g, clock)
 	clock.t = clock.t.Add(totp.Period)
@@ -282,6 +310,7 @@ func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
 		if code != "" {
 			req.Secrets = map[string]string{ProtectCodeSecret: code}
 		}
+
 		return sqlWrite(context.Background(), &Env{Cluster: cfg, Req: req})
 	}
 
@@ -299,11 +328,13 @@ func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
 	if _, err := write(cfg, "app", ""); err != nil {
 		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
 	}
+
 	reject(t, ran(), "psql ran for a protected primary without a code")
 	// With the code, the primary path runs normally.
 	if _, err := write(cfg, "app", codeFor(t, secret, clock.t, 0)); err != nil {
 		t.Fatalf("the protected primary with a code: %v", err)
 	}
+
 	reject(t, !ran(), "the protected primary's write did not reach psql with a code")
 }
 
@@ -317,6 +348,7 @@ func TestWriteSpec(t *testing.T) {
 	rejectf(t, !ok || !spec.Protected || spec.Port != 0, "app: %+v %v", spec, ok)
 	spec, ok = writeSpec(cfg, recs, "app__restoring")
 	rejectf(t, !ok || !spec.Protected || spec.Name != "app" || spec.Port != 5439, "app__restoring: %+v %v, want app at 5439", spec, ok)
+
 	for _, name := range []string{"app__restoring", "app__pre_restore_20260101T000000", "other__restoring", "missing"} {
 		if spec, ok := writeSpec(cfg, backup.Records{}, name); ok {
 			t.Errorf("%s: resolved to %+v, want no cluster", name, spec)
@@ -338,6 +370,7 @@ func TestProtectedCopies(t *testing.T) {
 
 func TestWriteRoleSQL(t *testing.T) {
 	role := writeRole{User: "vaire_write_0a1b2c3d4e5f", Password: "x", ValidUntil: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+
 	sql := writeRoleSQL(config.ClusterSpec{Name: "app"}, role, "SCRAM-SHA-256$v")
 	for _, want := range []string{
 		`CREATE ROLE "vaire_write_0a1b2c3d4e5f" LOGIN NOINHERIT PASSWORD 'SCRAM-SHA-256$v' VALID UNTIL '2026-10-15T12:00:00Z' IN ROLE "app_owner";`,
@@ -345,6 +378,7 @@ func TestWriteRoleSQL(t *testing.T) {
 	} {
 		rejectf(t, !strings.Contains(sql, want), "missing %q in\n%s", want, sql)
 	}
+
 	rejectf(t, strings.Contains(sql, "SUPERUSER") || strings.Contains(sql, "CREATEROLE"), "write role has too much:\n%s", sql)
 }
 
@@ -360,10 +394,12 @@ func TestWriteMethodsGuarded(t *testing.T) {
 	} {
 		meth, ok := m[tc.method]
 		rejectf(t, !ok, "method %s missing", tc.method)
+
 		env := &Env{Cluster: protectedCluster(), Req: rpc.Request{Method: tc.method, Params: json.RawMessage(tc.params), Confirm: "app/kill"}}
 		if _, err := meth.handler(context.Background(), env); err == nil {
 			t.Fatalf("%s on protected app without a code ran", tc.method)
 		}
 	}
+
 	reject(t, m["db.write-access"].runLog != nil, "db.write-access must write no run log: its result carries a password")
 }

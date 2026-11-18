@@ -24,43 +24,54 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
 	hash, err := masterPasswordHash(c.Name)
 	if err != nil {
 		return err
 	}
+
 	if err := secretGateUnlock(cmd, hash, nil, nil, "vaire secrets export"); err != nil {
 		return err
 	}
+
 	doc, err := workspaceDocument(c)
 	if err != nil {
 		return err
 	}
+
 	if err := requireStructuredHandoff(cmd, "out", "secrets export", ""); err != nil {
 		return err
 	}
+
 	out := stringFlag(cmd, "out")
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]string{"out": out}, Message: "dry run: would build a new secrets handoff"})
 	}
+
 	h, err := newHandoff(cmd, doc, out)
 	if err != nil {
 		return err
 	}
+
 	res := map[string]string{}
 	if h.path != "" {
 		res["out"] = h.path
 	}
+
 	if MustNotPrompt(cmd) {
 		// Explicitly requested with --reveal-passphrase.
 		res["passphrase"] = h.passphrase
 		return output.Success(cmd, output.Result{Data: res, Message: "wrote the transfer bundle to " + h.path})
 	}
+
 	if err := h.show(cmd, false, true); err != nil {
 		return err
 	}
+
 	if h.saved != "" {
 		res["saved"] = h.saved
 	}
+
 	return output.Success(cmd, output.Result{Data: res, Message: "New secrets handoff shown. The previous bundle still opens with its own passphrase."})
 }
 
@@ -71,10 +82,12 @@ func showWorkspaceHandoff(cmd *cobra.Command, c *workspaces.Workspace) error {
 	if err != nil {
 		return err
 	}
+
 	h, err := newHandoff(cmd, doc, "")
 	if err != nil {
 		return err
 	}
+
 	return h.show(cmd, false, true)
 }
 
@@ -84,33 +97,41 @@ func workspaceDocument(c *workspaces.Workspace) (secretsdoc.Document, error) {
 	if err != nil {
 		return secretsdoc.Document{}, workspaceFileError(c.Name, workspaces.WGKeyFile, err)
 	}
+
 	sshKey, err := workspaces.ReadFile(c.Name, workspaces.SSHKeyFile)
 	if err != nil {
 		return secretsdoc.Document{}, workspaceFileError(c.Name, workspaces.SSHKeyFile, err)
 	}
+
 	creds, err := workspaces.LoadCredentials(c.Name)
 	if err != nil {
 		return secretsdoc.Document{}, err
 	}
+
 	known, err := transport.LoadKnownHosts(workspaces.Path(c.Name, workspaces.KnownHostsFile))
 	if err != nil {
 		return secretsdoc.Document{}, err
 	}
+
 	doc, err := rebuildDocument(c, string(wgKey), string(sshKey), creds, known)
 	if err != nil {
 		return doc, err
 	}
+
 	secrets.Add(string(wgKey))
 	secrets.Add(string(sshKey))
 	secrets.Add(creds.SudoPassword)
+
 	if creds.Backup != nil {
 		for _, v := range creds.Backup.SecretValues() {
 			secrets.Add(v)
 		}
 	}
+
 	if creds.Metrics != nil {
 		secrets.Add(creds.Metrics.Password)
 	}
+
 	return doc, nil
 }
 
@@ -135,12 +156,15 @@ func rebuildDocument(c *workspaces.Workspace, wgKey, sshKey string, creds worksp
 		// machine and the gate follows the document.
 		MasterPassword: creds.MasterPasswordHash,
 	}
+
 	var master string
+
 	for _, n := range c.Nodes {
 		hostKeys, err := hostKeyLines(known, n.WGAddress)
 		if err != nil {
 			return doc, err
 		}
+
 		doc.Nodes = append(doc.Nodes, secretsdoc.Node{
 			Name:          n.Name,
 			Role:          n.Role,
@@ -155,10 +179,12 @@ func rebuildDocument(c *workspaces.Workspace, wgKey, sshKey string, creds worksp
 			master = n.PublicAddress
 		}
 	}
+
 	doc.BreakGlass = secretsdoc.BreakGlass(c.Server, c.Operator.SSHUser, master)
 	if n, ok := c.Master(); ok {
 		doc.Metrics = metricsDocument(creds.Metrics, n.Hostname, "")
 	}
+
 	return doc, nil
 }
 
@@ -170,9 +196,11 @@ func hostKeyLines(known *transport.KnownHosts, wgAddress string) ([]string, erro
 			"no pinned host keys for "+wgAddress, output.ExitPrecondition,
 			"Re-run vaire login with the secrets document that carries the host keys.")
 	}
+
 	out := make([]string, 0, len(keys))
 	for _, key := range keys {
 		out = append(out, string(ssh.MarshalAuthorizedKey(key)))
 	}
+
 	return out, nil
 }

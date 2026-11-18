@@ -24,6 +24,7 @@ func (s *dropConfigStore) Save(raw []byte) error {
 	if err == nil {
 		s.cfg = cfg
 	}
+
 	return err
 }
 func (*dropConfigStore) Revision() (string, error) { return "", nil }
@@ -34,14 +35,17 @@ func TestDBDropConvergesOnFilteredConfig(t *testing.T) {
 			_, root := materialisationFixture(t)
 			oldRecords := backup.RecordsPath
 			backup.RecordsPath = filepath.Join(materialisationStateDir, "records.json")
+
 			t.Cleanup(func() { backup.RecordsPath = oldRecords })
 
 			cfg := config.DefaultCluster()
 			cfg.Server.DataRoot = root
+
 			cfg.Clusters = []config.ClusterSpec{{Name: "dropme", Size: "small"}}
 			for _, name := range remaining {
 				cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: name, Size: "small", Port: 5434})
 			}
+
 			store := &dropConfigStore{cfg: cfg}
 			env := &Env{Cluster: cfg, Req: rpc.Request{
 				Params:  json.RawMessage(`{"name":"dropme"}`),
@@ -52,12 +56,14 @@ func TestDBDropConvergesOnFilteredConfig(t *testing.T) {
 			oldJournal, oldOther := dbDropForgetJournal, dbDropOtherConfigs
 			oldApply, oldRouting := dbDropApplyOtherConfigs, dbDropRouting
 			oldMetrics, oldClear := dbDropMetrics, dbDropClearDeferred
+
 			t.Cleanup(func() {
 				dbDropStore, dbDropClusterExists, dbDropLeftovers = oldStore, oldExists, oldLeftovers
 				dbDropForgetJournal, dbDropOtherConfigs = oldJournal, oldOther
 				dbDropApplyOtherConfigs, dbDropRouting = oldApply, oldRouting
 				dbDropMetrics, dbDropClearDeferred = oldMetrics, oldClear
 			})
+
 			dbDropStore = func() state.Store { return store }
 			dbDropClusterExists = func(context.Context, string) bool { return false }
 			dbDropLeftovers = func(*Env, string) error { return nil }
@@ -74,21 +80,26 @@ func TestDBDropConvergesOnFilteredConfig(t *testing.T) {
 			dbDropClearDeferred = func(...string) {}
 
 			var routed config.Cluster
+
 			dbDropRouting = func(_ context.Context, _ *Env, got config.Cluster) error {
 				routed = got
 				return nil
 			}
+
 			if _, err := handleDBDrop(context.Background(), env); err != nil {
 				t.Fatalf("drop: %v", err)
 			}
+
 			if len(routed.Clusters) != len(remaining) {
 				t.Fatalf("routing saw %d clusters, want %d: %+v", len(routed.Clusters), len(remaining), routed.Clusters)
 			}
+
 			for _, spec := range routed.Clusters {
 				if spec.Name == "dropme" {
 					t.Fatalf("routing still sees the dropped database: %+v", routed.Clusters)
 				}
 			}
+
 			if len(env.Cluster.Clusters) != len(remaining) {
 				t.Fatalf("env.Cluster kept the dropped database: %+v", env.Cluster.Clusters)
 			}
@@ -100,6 +111,7 @@ func jsonNames(names []string) string {
 	if len(names) == 0 {
 		return "none"
 	}
+
 	return names[0]
 }
 
@@ -107,19 +119,23 @@ func TestDBDropUnconfiguredTargetUsesRequestedName(t *testing.T) {
 	_, root := materialisationFixture(t)
 	oldRecords := backup.RecordsPath
 	backup.RecordsPath = filepath.Join(materialisationStateDir, "records.json")
+
 	t.Cleanup(func() { backup.RecordsPath = oldRecords })
 
 	cfg := config.DefaultCluster()
 	cfg.Server.DataRoot = root
 	env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"name":"ghost"}`), Confirm: "ghost"}}
+
 	spec, inConfig := cfg.ClusterByName("ghost")
 	if inConfig {
 		t.Fatal("fixture unexpectedly configured ghost")
 	}
+
 	follow, err := openDropFollowCleanup(env, cfg, "ghost", spec, inConfig)
 	if err != nil {
 		t.Fatalf("unconfigured drop was refused for an empty name: %v", err)
 	}
+
 	if follow != nil {
 		t.Fatal("unconfigured target unexpectedly opened follower cleanup")
 	}

@@ -34,13 +34,16 @@ func RepackArgs(socketDir string, port int, db, table string) ([]string, error) 
 	if db == "" {
 		return nil, errors.New("a repack needs a database")
 	}
+
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("repack port %d is invalid", port)
 	}
+
 	q, err := QuoteRelation(table)
 	if err != nil {
 		return nil, err
 	}
+
 	return []string{
 		"-u", "postgres", "--", RepackBin,
 		"-h", socketDir, "-p", strconv.Itoa(port),
@@ -59,24 +62,32 @@ func RepackCandidates(r BloatReport, threshold float64, minBytes int64) []string
 		if rows[i].BloatBytes != rows[j].BloatBytes {
 			return rows[i].BloatBytes > rows[j].BloatBytes
 		}
+
 		if rows[i].Schema != rows[j].Schema {
 			return rows[i].Schema < rows[j].Schema
 		}
+
 		return rows[i].Table < rows[j].Table
 	})
+
 	var out []string
+
 	seen := map[string]bool{}
+
 	for _, row := range rows {
 		if row.Kind != "table" || row.Ratio < threshold || row.BloatBytes < minBytes || row.BloatBytes <= 0 {
 			continue
 		}
+
 		name := row.Schema + "." + row.Table
 		if seen[name] {
 			continue
 		}
+
 		seen[name] = true
 		out = append(out, name)
 	}
+
 	return out
 }
 
@@ -116,6 +127,7 @@ WHERE c.oid = to_regclass(` + literal(quoted) + `)`
 // ParseRelationFacts reads RelationFactsSQL's one row.
 func ParseRelationFacts(row map[string]string) RelationFacts {
 	oid, _ := strconv.ParseInt(row["oid"], 10, 64)
+
 	return RelationFacts{
 		OID: oid, Schema: row["schema"], Table: row["table"],
 		Kind: row["kind"], Persistence: row["persistence"], AccessMethod: row["access_method"],
@@ -144,6 +156,7 @@ func (f RelationFacts) UnsupportedOrdinaryTable() (reason, message string, ok bo
 	case f.AccessMethod != "heap":
 		return RepackReasonAccessMethod, "the relation does not use the heap access method", true
 	}
+
 	return "", "", false
 }
 
@@ -186,6 +199,7 @@ func ParseExtensionChain(rows []map[string]string) []ExtensionDependency {
 		depth, _ := strconv.Atoi(row["depth"])
 		out = append(out, ExtensionDependency{Extension: row["extension"], Depth: depth, Scope: row["scope"]})
 	}
+
 	return out
 }
 
@@ -264,6 +278,7 @@ func ParseTablespaceFacts(rows []map[string]string) []TablespaceFact {
 	for _, row := range rows {
 		out = append(out, TablespaceFact{Kind: row["kind"], Name: row["name"], Tablespace: row["tablespace"]})
 	}
+
 	return out
 }
 
@@ -294,6 +309,7 @@ type RepackStorage struct {
 func ParseRepackStorage(row map[string]string) RepackStorage {
 	oid, _ := strconv.ParseInt(row["oid"], 10, 64)
 	rel, _ := strconv.ParseInt(row["relfilenode"], 10, 64)
+
 	return RepackStorage{OID: oid, RelFileNode: rel, TableSpace: row["tablespace"]}
 }
 
@@ -332,6 +348,7 @@ LIMIT 1`
 // schema is the schema holding pg_repack's version functions, normally repack.
 func RepackVersionsSQL(schema string) string {
 	s := pg.Quote(schema)
+
 	return `SELECT e.extversion AS extension_version,
   ` + s + `.version() AS library_version,
   ` + s + `.version_sql() AS sql_version,
@@ -364,6 +381,7 @@ func NormalizeRepackVersion(value string) (string, error) {
 	case len(fields) == 2 && strings.EqualFold(fields[0], "pg_repack"):
 		return fields[1], nil
 	}
+
 	return "", fmt.Errorf("%q is not a pg_repack version", value)
 }
 
@@ -377,6 +395,7 @@ func NormalizeRepackVersions(client, extension, library, sql string) (RepackVers
 			return out, fmt.Errorf("%s version: %w", name, err)
 		}
 	}
+
 	return out, nil
 }
 
@@ -386,12 +405,14 @@ func (v RepackVersions) Match() bool {
 	if err != nil {
 		return false
 	}
+
 	for _, value := range []string{v.Extension, v.Library, v.SQL} {
 		got, err := NormalizeRepackVersion(value)
 		if err != nil || got != c {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -401,10 +422,12 @@ func RepackSpaceNeed(size int64) (uint64, error) {
 	if size < 0 {
 		return 0, fmt.Errorf("negative relation size %d", size)
 	}
+
 	n := uint64(size)
 	if n > ^uint64(0)/2 {
 		return 0, fmt.Errorf("relation size %d overflows the repack space need", size)
 	}
+
 	return 2 * n, nil
 }
 
@@ -486,10 +509,12 @@ func (c *RepackCounts) AddUnknown() { c.Selected++; c.Unknown++ }
 // AddSkipped counts one table skipped for reason.
 func (c *RepackCounts) AddSkipped(reason string) {
 	c.Selected++
+
 	c.Skipped++
 	if c.SkippedByReason == nil {
 		c.SkippedByReason = map[string]int{}
 	}
+
 	c.SkippedByReason[reason]++
 }
 

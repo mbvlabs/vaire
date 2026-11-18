@@ -27,12 +27,14 @@ func newConfigAncestryFixture(t *testing.T) *configAncestryFixture {
 	f := &configAncestryFixture{t: t, base: t.TempDir()}
 	f.etc = filepath.Join(f.base, "etc")
 	f.configBase = filepath.Join(f.etc, "postgresql")
+
 	f.configRoot = filepath.Join(f.configBase, "18")
 	for _, dir := range []string{f.etc, f.configBase, f.configRoot} {
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	f.oldBase, f.oldConfigRoot, f.oldConfigBase = materialisationAncestorBase, materialisationConfigRoot, materialisationConfigBase
 	f.oldRecordUID, f.oldPostgresUID, f.oldStat = materialisationRecordUID, materialisationPostgresUID, materialisationAncestryStat
 	f.rootUID = uint32(os.Geteuid())
@@ -48,21 +50,26 @@ func newConfigAncestryFixture(t *testing.T) *configAncestryFixture {
 		if uid, ok := f.owners[path]; ok {
 			id.UID = uid
 		}
+
 		return info, id, err
 	}
+
 	t.Cleanup(func() {
 		materialisationAncestorBase, materialisationConfigRoot, materialisationConfigBase = f.oldBase, f.oldConfigRoot, f.oldConfigBase
 		materialisationRecordUID, materialisationPostgresUID, materialisationAncestryStat = f.oldRecordUID, f.oldPostgresUID, f.oldStat
 	})
+
 	return f
 }
 
 func (f *configAncestryFixture) requireConfigAncestry() []materialisationAncestor {
 	f.t.Helper()
+
 	ancestors, err := materialisationConfigAncestry(f.configRoot, f.postgresUID)
 	if err != nil {
 		f.t.Fatalf("config ancestry: %v", err)
 	}
+
 	return ancestors
 }
 
@@ -71,6 +78,7 @@ func (f *configAncestryFixture) withOwner(path string, postgres bool) {
 		f.owners[path] = f.postgresUID
 		return
 	}
+
 	f.owners[path] = f.rootUID
 }
 
@@ -78,6 +86,7 @@ func TestMaterialisationConfigProductionBoundary(t *testing.T) {
 	if materialisationConfigRoot != "/etc/postgresql/18" || materialisationConfigBase != "/etc/postgresql" {
 		t.Fatalf("config boundary: root=%q base=%q", materialisationConfigRoot, materialisationConfigBase)
 	}
+
 	if filepath.Dir(materialisationConfigRoot) != materialisationConfigBase {
 		t.Fatal("config root is not the version directory under /etc/postgresql")
 	}
@@ -86,6 +95,7 @@ func TestMaterialisationConfigProductionBoundary(t *testing.T) {
 func TestMaterialisationConfigAncestryAdmitsDebianOwnership(t *testing.T) {
 	f := newConfigAncestryFixture(t)
 	ancestors := f.requireConfigAncestry()
+
 	want := []struct {
 		path string
 		uid  uint32
@@ -98,19 +108,24 @@ func TestMaterialisationConfigAncestryAdmitsDebianOwnership(t *testing.T) {
 	if len(ancestors) != len(want) {
 		t.Fatalf("ancestors: %+v", ancestors)
 	}
+
 	for i, expected := range want {
 		if ancestors[i].path != expected.path || ancestors[i].id.UID != expected.uid {
 			t.Fatalf("ancestor %d: %+v, want %s uid %d", i, ancestors[i], expected.path, expected.uid)
 		}
 	}
+
 	root, info, pinned, err := openMaterialisationConfigParent(f.postgresUID)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = root.Close() }()
+
 	if err := validateMaterialisationAncestry(pinned); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := validateMaterialisationParent(f.configRoot, info); err != nil {
 		t.Fatal(err)
 	}
@@ -131,11 +146,14 @@ func TestMaterialisationConfigAncestryAdmitsRootOwnedParent(t *testing.T) {
 			f.withOwner(f.configBase, test.basePostgres)
 			f.withOwner(f.configRoot, test.rootPostgres)
 			f.requireConfigAncestry()
+
 			root, _, pinned, err := openMaterialisationConfigParent(f.postgresUID)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			defer func() { _ = root.Close() }()
+
 			if err := validateMaterialisationAncestry(pinned); err != nil {
 				t.Fatal(err)
 			}
@@ -146,14 +164,18 @@ func TestMaterialisationConfigAncestryAdmitsRootOwnedParent(t *testing.T) {
 func TestMaterialisationConfigAncestryRejectsPostgresSystemOwner(t *testing.T) {
 	f := newConfigAncestryFixture(t)
 	f.withOwner(f.base, true)
+
 	if _, err := materialisationConfigAncestry(f.configRoot, f.postgresUID); err == nil {
 		t.Fatal("postgres-owned traversal root accepted")
 	}
+
 	if _, err := materialisationAncestry(f.configRoot, f.postgresUID, true); err == nil {
 		t.Fatal("generic policy admitted the traversal root")
 	}
+
 	f = newConfigAncestryFixture(t)
 	f.withOwner(f.etc, true)
+
 	if _, err := materialisationConfigAncestry(f.configRoot, f.postgresUID); err == nil {
 		t.Fatal("postgres-owned /etc accepted")
 	}
@@ -171,6 +193,7 @@ func TestMaterialisationConfigAncestryRejectsForeignOwner(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newConfigAncestryFixture(t)
+
 			f.owners[path(f)] = f.postgresUID + 1
 			if _, err := materialisationConfigAncestry(f.configRoot, f.postgresUID); err == nil {
 				t.Fatal("foreign owner accepted")
@@ -190,6 +213,7 @@ func TestMaterialisationConfigAncestryRejectsWritableAncestor(t *testing.T) {
 				if err := os.Chmod(path(f), mode); err != nil {
 					t.Fatal(err)
 				}
+
 				if _, err := materialisationConfigAncestry(f.configRoot, f.postgresUID); err == nil {
 					t.Fatal("writable ancestor accepted")
 				}
@@ -206,13 +230,16 @@ func TestMaterialisationConfigAncestryRejectsSymlink(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newConfigAncestryFixture(t)
 			target := replace(f)
+
 			moved := target + "-old"
 			if err := os.Rename(target, moved); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := os.Symlink(moved, target); err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := materialisationConfigAncestry(f.configRoot, f.postgresUID); err == nil {
 				t.Fatal("symlink ancestor accepted")
 			}
@@ -222,17 +249,22 @@ func TestMaterialisationConfigAncestryRejectsSymlink(t *testing.T) {
 
 func TestMaterialisationConfigAncestryRejectsParentReplacement(t *testing.T) {
 	f := newConfigAncestryFixture(t)
+
 	root, _, pinned, err := openMaterialisationConfigParent(f.postgresUID)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = root.Close() }()
+
 	if err := os.Rename(f.configRoot, f.configRoot+"-old"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.Mkdir(f.configRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := validateMaterialisationAncestry(pinned); err == nil {
 		t.Fatal("replaced pinned parent accepted")
 	}
@@ -249,19 +281,25 @@ func TestMaterialisationConfigAncestryRejectsUIDChange(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newConfigAncestryFixture(t)
+
 			root, _, pinned, err := openMaterialisationConfigParent(f.postgresUID)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			defer func() { _ = root.Close() }()
+
 			test.change(f)
+
 			if err := validateMaterialisationAncestry(pinned); err == nil {
 				t.Fatal("ownership change accepted")
 			}
+
 			_, err = materialisationConfigAncestry(f.configRoot, f.postgresUID)
 			if test.reopen && err == nil {
 				t.Fatal("reopened changed ownership")
 			}
+
 			if !test.reopen && err != nil {
 				t.Fatalf("root owner should remain admissible: %v", err)
 			}
@@ -272,24 +310,32 @@ func TestMaterialisationConfigAncestryRejectsUIDChange(t *testing.T) {
 func TestMaterialisationStateAncestryRemainsRootOnly(t *testing.T) {
 	f := newConfigAncestryFixture(t)
 	traversal := filepath.Join(f.etc, "traversalroot")
+
 	state := filepath.Join(traversal, "state")
 	if err := os.Mkdir(traversal, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	f.withOwner(traversal, true)
+
 	if _, err := materialisationAncestry(state, f.postgresUID, false); err == nil {
 		t.Fatal("postgres-owned state ancestor accepted")
 	}
+
 	if _, _, _, err := openMaterialisationParent(state, f.postgresUID, false); err == nil {
 		t.Fatal("opened postgres-owned state ancestry")
 	}
+
 	if _, err := materialisationConfigAncestry(state, f.postgresUID); err == nil {
 		t.Fatal("state path accepted by config policy")
 	}
+
 	f.withOwner(traversal, false)
+
 	if _, err := materialisationAncestry(state, f.postgresUID, false); err != nil {
 		t.Fatalf("root-owned state ancestry: %v", err)
 	}
@@ -299,20 +345,26 @@ func TestMaterialisationStateAncestryRemainsRootOnly(t *testing.T) {
 // opener does not adopt an existing unbound target.
 func TestMaterialisationConfigOpenKeepsUnboundArtifactRefusal(t *testing.T) {
 	f := newConfigAncestryFixture(t)
+
 	root, _, _, err := openMaterialisationConfigParent(f.postgresUID)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = root.Close() }()
+
 	if _, err := root.Lstat("target"); !os.IsNotExist(err) {
 		t.Fatalf("unexpected target: %v", err)
 	}
+
 	if err := validateMaterialisationDir(root, "target", materialisationFileID{}, nil, 0o755); err != nil {
 		t.Fatalf("absent target: %v", err)
 	}
+
 	if _, err := openMaterialisationChild(root, "target"); err == nil {
 		t.Fatal("opened absent config target")
 	}
+
 	if err := validateMaterialisationDir(root, "target", materialisationFileID{Inode: 1, UID: f.postgresUID}, nil, 0o755); err == nil {
 		t.Fatal("accepted unbound target identity")
 	}

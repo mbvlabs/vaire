@@ -19,7 +19,9 @@ import (
 func TestAccessShowRealMaterialisationInspection(t *testing.T) {
 	o, root := materialisationFixture(t)
 	oldRecords, oldInspect := accessLoadRecords, accessInspect
+
 	t.Cleanup(func() { accessLoadRecords, accessInspect = oldRecords, oldInspect })
+
 	accessLoadRecords = func() (backup.Records, error) { return backup.Records{}, nil }
 	calls := 0
 	accessInspect = func(context.Context, config.ClusterSpec) (steps.AccessCoverage, error) {
@@ -31,21 +33,27 @@ func TestAccessShowRealMaterialisationInspection(t *testing.T) {
 	env := &Env{Cluster: cfg, Req: rpc.Request{Params: []byte(`{"name":"target"}`)}}
 	check := func(state, coverage string, wantCalls int) {
 		t.Helper()
+
 		res, err := handleDBAccessShow(context.Background(), env)
 		reject(t, err != nil, err)
 		data := mustAs[databaseAccess](t, res.Data)
 		rejectf(t, data.State != state || data.Coverage.Status != coverage || calls != wantCalls, "state=%s coverage=%s calls=%d", data.State, data.Coverage.Status, calls)
 	}
 	check("", "installed", 1)
+
 	if _, err := createMaterialisation(o, root); err != nil {
 		t.Fatal(err)
 	}
+
 	check("materialisation_incomplete", "unknown", 1)
+
 	path, _ := materialisationPath(o.Target)
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	check("materialisation_state_unknown", "unknown", 1)
+
 	if w := unfollowAccessNotice(context.Background(), cfg, cfg.Clusters[0]); w == nil || w.Code != "access_coverage_unknown" || calls != 1 {
 		t.Fatalf("unfollow notice: %+v", w)
 	}
@@ -55,10 +63,12 @@ func TestApplyAccessTokensAreSeparate(t *testing.T) {
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app"}, {Name: "other"}, {Name: "replica", Follows: "app"}}}
 	tokens := applyTokens(cfg, nil)
 	rejectf(t, !slices.Contains(tokens, "app/access") || slices.Contains(tokens, "replica/access"), "access tokens: %v", tokens)
+
 	req := rpc.Request{Method: "apply", Confirm: "app/access", Confirms: []string{"other/restart"}}
 	if err := checkConfirm(methods()["apply"], cfg, req); err != nil {
 		t.Fatal(err)
 	}
+
 	access := accessConfirmation(cfg, req)
 	restart := restartConfirmation(cfg, req)
 	rejectf(t, !access["app"] || access["other"] || restart.Covers("app") || !restart.Covers("other"), "access %v restart %+v", access, restart)
@@ -90,11 +100,13 @@ func (typedFailureStep) Apply(context.Context, config.Cluster, engine.Runtime, e
 func TestTypedStepFailureSurvivesJobOutcome(t *testing.T) {
 	_, _, err := engine.Apply(context.Background(), []engine.Step{typedFailureStep{}}, config.Cluster{}, engine.Runtime{},
 		engine.Options{JournalPath: filepath.Join(t.TempDir(), "journal.json")})
+
 	var cli *output.CLIError
 	rejectf(t, !errors.As(err, &cli), "not a typed failure: %v", err)
 	rec := finishedJobRecord(engine.JobRecord{ID: "job", Job: "test"}, engine.JobFailed, "failed", nil, err)
 	_, err = jobOutcome(rec)
 	rejectf(t, !errors.As(err, &cli), "job lost typed failure: %v", err)
+
 	details, ok := cli.Details.(map[string]any)
 	if !ok || cli.Code != output.CodeStepFailed || cli.ExitCode != output.ExitStep || cli.Hint != "retry apply" ||
 		details["reason"] != "cpu_policy_not_enforced" || details["effective_known"] != false {
@@ -104,17 +116,21 @@ func TestTypedStepFailureSurvivesJobOutcome(t *testing.T) {
 
 func TestAccessShowCoverageStates(t *testing.T) {
 	oldRecords, oldMaterialisation, oldInspect := accessLoadRecords, accessMaterialisationState, accessInspect
+
 	t.Cleanup(func() {
 		accessLoadRecords, accessMaterialisationState, accessInspect = oldRecords, oldMaterialisation, oldInspect
 	})
+
 	accessLoadRecords = func() (backup.Records, error) { return backup.Records{}, nil }
 	accessMaterialisationState = func(config.Cluster, string) (bool, error) { return false, nil }
 	calls := 0
 	accessInspect = func(_ context.Context, spec config.ClusterSpec) (steps.AccessCoverage, error) {
 		calls++
+
 		if spec.DatabaseName() != "app" {
 			t.Errorf("wrong database: %+v", spec)
 		}
+
 		return steps.AccessCoverage{Status: "installed"}, nil
 	}
 	cfg := config.Cluster{Clusters: []config.ClusterSpec{{Name: "app"}, {Name: "replica", Follows: "app"}}}
@@ -122,14 +138,17 @@ func TestAccessShowCoverageStates(t *testing.T) {
 	res, err := handleDBAccessShow(context.Background(), env)
 	data := mustAs[databaseAccess](t, res.Data)
 	rejectf(t, err != nil || data.Coverage.Status != "installed" || data.Source != "app" || data.Owner != "app_owner" || calls != 1, "follower: %+v %v", data, err)
+
 	accessMaterialisationState = func(config.Cluster, string) (bool, error) { return true, nil }
 	res, err = handleDBAccessShow(context.Background(), env)
 	data = mustAs[databaseAccess](t, res.Data)
 	rejectf(t, err != nil || data.State != "materialisation_incomplete" || data.Coverage.Status != "unknown" || calls != 1, "incomplete: %+v %v", data, err)
+
 	accessMaterialisationState = func(config.Cluster, string) (bool, error) { return false, errors.New("unavailable") }
 	res, err = handleDBAccessShow(context.Background(), env)
 	data = mustAs[databaseAccess](t, res.Data)
 	rejectf(t, err != nil || data.Coverage.Status != "unknown" || data.State != "materialisation_state_unknown" || calls != 1, "unknown: %+v %v", data, err)
+
 	accessLoadRecords = func() (backup.Records, error) {
 		return backup.Records{AwaitingRecovery: map[string]backup.Awaiting{"replica": {}}}, nil
 	}
@@ -137,6 +156,7 @@ func TestAccessShowCoverageStates(t *testing.T) {
 	res, err = handleDBAccessShow(context.Background(), env)
 	data = mustAs[databaseAccess](t, res.Data)
 	rejectf(t, err != nil || data.State != "materialisation_incomplete" || calls != 1, "incomplete precedence: %+v %v", data, err)
+
 	accessMaterialisationState = func(config.Cluster, string) (bool, error) { return false, nil }
 	res, err = handleDBAccessShow(context.Background(), env)
 	data = mustAs[databaseAccess](t, res.Data)
@@ -145,8 +165,11 @@ func TestAccessShowCoverageStates(t *testing.T) {
 
 func TestUnfollowAccessNoticeNeverWidens(t *testing.T) {
 	oldMaterialisation, oldInspect := accessMaterialisationState, accessInspect
+
 	t.Cleanup(func() { accessMaterialisationState, accessInspect = oldMaterialisation, oldInspect })
+
 	spec := config.ClusterSpec{Name: "app"}
+
 	for _, status := range []string{"installed", "pending", "unknown"} {
 		t.Run(status, func(t *testing.T) {
 			calls := 0
@@ -159,11 +182,13 @@ func TestUnfollowAccessNoticeNeverWidens(t *testing.T) {
 			rejectf(t, calls != 1 || (warning == nil) != (status == "installed"), "coverage %s, calls %d, warning %+v", status, calls, warning)
 		})
 	}
+
 	accessMaterialisationState = func(config.Cluster, string) (bool, error) { return false, errors.New("unknown ownership") }
 	accessInspect = func(context.Context, config.ClusterSpec) (steps.AccessCoverage, error) {
 		t.Fatal("queried an unverified materialisation")
 		return steps.AccessCoverage{}, nil
 	}
+
 	if got := unfollowAccessNotice(context.Background(), config.Cluster{}, spec); got == nil || got.Code != "access_coverage_unknown" {
 		t.Fatalf("unverified target coverage: %+v", got)
 	}

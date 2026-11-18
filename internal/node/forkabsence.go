@@ -57,11 +57,13 @@ func forkAbsenceActiveJob(st engine.State, name string) bool {
 			return true
 		}
 	}
+
 	for _, rec := range st.RetainedJobs {
 		if rec.DB == name && !rec.Final() {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -71,11 +73,13 @@ func forkAbsenceActiveJob(st engine.State, name string) bool {
 func forkAbsenceActiveLease(name string) bool {
 	lockedJobs.Lock()
 	defer lockedJobs.Unlock()
+
 	for lease := range lockedJobs.active {
 		if lease.target == name || lease.targets[name] == engine.LockExclusive {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -87,10 +91,12 @@ func checkForkAbsenceJob(name string, o materialisationOwnership) error {
 	if err != nil || forkAbsenceActiveJob(st, name) || forkAbsenceActiveLease(name) {
 		return materialisationIncomplete(name, &o)
 	}
+
 	job, err := materialisationJob(st, o.Job)
 	if err != nil || job.ID != o.Job || job.Job != "db-fork" || job.DB != name || !job.Final() {
 		return materialisationIncomplete(name, &o)
 	}
+
 	return nil
 }
 
@@ -101,21 +107,27 @@ func checkPreparedForkRequest(env *Env, cfg config.Cluster, name string, o mater
 	if env.Req.Confirm != name {
 		return confirmRequired("dropping "+name+" deletes all of its data", name)
 	}
+
 	if err := CheckNotProtected(cfg, name, "db drop"); err != nil {
 		return err
 	}
+
 	if err := restoreInProgress(name, "db drop"); err != nil {
 		return err
 	}
+
 	if err := preflightDropLeftovers(cfg, name); err != nil {
 		return err
 	}
+
 	if err := refuseSourceDrop(cfg, name); err != nil {
 		return err
 	}
+
 	if forkAbsenceActiveLease(name) {
 		return materialisationIncomplete(name, &o)
 	}
+
 	return nil
 }
 
@@ -127,9 +139,11 @@ func openPreparedForkAbsence(cfg config.Cluster, name string, o materialisationO
 	if err != nil {
 		return nil, materialisationIncomplete(name, &o)
 	}
+
 	if err := forkAbsenceBeforePin(); err != nil {
 		return nil, materialisationIncomplete(name, &o)
 	}
+
 	a, err := openMaterialisationArtifacts(name, cfg.Server.DataRoot, uid)
 	if err != nil {
 		return nil, materialisationIncomplete(name, &o)
@@ -140,16 +154,20 @@ func openPreparedForkAbsence(cfg config.Cluster, name string, o materialisationO
 	if a.owner != o || !legacyPreparedFork(a.owner) {
 		pinned := a.owner
 		a.close()
+
 		return nil, materialisationIncomplete(name, &pinned)
 	}
+
 	if err := a.validate(); err != nil {
 		a.close()
 		return nil, materialisationIncomplete(name, &o)
 	}
+
 	if err := checkForkAbsenceJob(name, o); err != nil {
 		a.close()
 		return nil, err
 	}
+
 	return a, nil
 }
 
@@ -161,16 +179,21 @@ func savePreparedForkMetadata(store state.Store, name string) error {
 	if err != nil {
 		return err
 	}
+
 	if err := CheckNotProtected(fresh, name, "db drop"); err != nil {
 		return err
 	}
+
 	if err := refuseSourceDrop(fresh, name); err != nil {
 		return err
 	}
+
 	if _, ok := fresh.ClusterByName(name); !ok {
 		return nil
 	}
+
 	_, err = saveDroppedConfig(store, fresh, name)
+
 	return err
 }
 
@@ -184,12 +207,15 @@ func dropPreparedForkMetadata(ctx context.Context, env *Env, store state.Store, 
 	if err != nil || !found || !legacyPreparedFork(o) {
 		return Result{}, false, nil
 	}
+
 	if err := checkPreparedForkRequest(env, cfg, name, o); err != nil {
 		return Result{}, true, err
 	}
+
 	refuse := func() (Result, bool, error) {
 		return Result{}, true, materialisationIncomplete(name, &o)
 	}
+
 	a, err := openPreparedForkAbsence(cfg, name, o)
 	if err != nil {
 		return Result{}, true, err
@@ -203,9 +229,11 @@ func dropPreparedForkMetadata(ctx context.Context, env *Env, store state.Store, 
 		return refuse()
 	}
 	defer unlock()
+
 	if err := a.validate(); err != nil {
 		return refuse()
 	}
+
 	if err := checkForkAbsenceJob(name, o); err != nil {
 		return Result{}, true, err
 	}
@@ -220,15 +248,19 @@ func dropPreparedForkMetadata(ctx context.Context, env *Env, store state.Store, 
 	if err != nil {
 		return Result{}, true, err
 	}
+
 	if _, ok := after.ClusterByName(name); ok {
 		return refuse()
 	}
+
 	if err := a.validate(); err != nil {
 		return refuse()
 	}
+
 	if err := checkForkAbsenceJob(name, o); err != nil {
 		return Result{}, true, err
 	}
+
 	if err := a.removeMaterialisationRecord(); err != nil {
 		return Result{}, true, err
 	}
@@ -240,7 +272,9 @@ func dropPreparedForkMetadata(ctx context.Context, env *Env, store state.Store, 
 			releaseResolvedMaterialisationJob(o.Job, "db-fork")
 		}
 	}
+
 	env.Cluster = after
+
 	return Result{
 		Data: map[string]any{"dropped": name, "metadata_only": true},
 	}, true, nil
@@ -275,13 +309,16 @@ func verifyFenceOnlyFork(cfg config.Cluster, name string, f backup.ActivationFen
 	if f.Database != name || f.Kind != "fork" || f.Phase != fencePhasePrepared {
 		return refuse()
 	}
+
 	if err := verifyFenceInstance(f, name); err != nil {
 		return err
 	}
+
 	if f.TargetStanza == "" || f.NewStanza == "" || f.OldStanza == "" ||
 		f.NewStanza != f.TargetStanza || f.OldStanza == f.NewStanza {
 		return refuse()
 	}
+
 	if f.Port < config.ClusterPortMin || f.Port > config.ClusterPortMax ||
 		f.Ownership != "" || f.Registration != fmt.Sprintf("%s:%d:", name, f.Port) ||
 		f.Aside != "" ||
@@ -289,13 +326,16 @@ func verifyFenceOnlyFork(cfg config.Cluster, name string, f backup.ActivationFen
 		f.ConfDir != filepath.Join(materialisationConfigRoot, name) {
 		return refuse()
 	}
+
 	p, err := followOwnershipPath(name)
 	if err != nil {
 		return refuse()
 	}
+
 	if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
 		return refuse()
 	}
+
 	return nil
 }
 
@@ -309,11 +349,13 @@ func checkFenceOnlyForkJob(name string, f backup.ActivationFence) error {
 	if err != nil || forkAbsenceActiveJob(st, name) || forkAbsenceActiveLease(name) {
 		return materialisationIncomplete(name, nil)
 	}
+
 	job, err := materialisationJob(st, f.OperationID)
 	if err != nil || job.ID != f.OperationID || job.Job != "db-fork" ||
 		job.DB != name || job.State != engine.JobFailed {
 		return materialisationIncomplete(name, nil)
 	}
+
 	return nil
 }
 
@@ -325,24 +367,31 @@ func checkFenceOnlyRecords(s *backup.Records, name string) error {
 	if _, ok := s.Restores[name]; ok {
 		return refuse()
 	}
+
 	if _, ok := s.Undoing[name]; ok {
 		return refuse()
 	}
+
 	if _, ok := s.Drilling[name]; ok {
 		return refuse()
 	}
+
 	if _, ok := s.DrillAttempts[name]; ok {
 		return refuse()
 	}
+
 	if _, ok := s.AwaitingRecovery[name]; ok {
 		return refuse()
 	}
+
 	if _, ok := s.Unfollowing[name]; ok {
 		return refuse()
 	}
+
 	if len(s.LeftoversOf(name)) != 0 {
 		return refuse()
 	}
+
 	return nil
 }
 
@@ -353,19 +402,24 @@ func fenceOnlyFinalVerify(store state.Store, checker *restoreAbsenceCheck, name 
 	if err := checker.check(); err != nil {
 		return err
 	}
+
 	if err := checkFenceOnlyForkJob(name, f); err != nil {
 		return err
 	}
+
 	fresh, _, err := store.Load()
 	if err != nil {
 		return err
 	}
+
 	if _, ok := fresh.ClusterByName(name); ok {
 		return materialisationIncomplete(name, nil)
 	}
+
 	if _, found, err := readMaterialisation(name, fresh.Server.DataRoot); err != nil || found {
 		return materialisationIncomplete(name, nil)
 	}
+
 	return nil
 }
 
@@ -377,20 +431,25 @@ func fenceOnlyResidue(cfg config.Cluster, name string) (backup.ActivationFence, 
 	if err != nil {
 		return backup.ActivationFence{}, true, err
 	}
+
 	f, ok := recs.Activation[name]
 	if !ok {
 		return backup.ActivationFence{}, false, nil
 	}
+
 	if _, ok := cfg.ClusterByName(name); ok {
 		return backup.ActivationFence{}, false, nil
 	}
+
 	_, found, err := readMaterialisation(name, cfg.Server.DataRoot)
 	if err != nil {
 		return backup.ActivationFence{}, true, materialisationIncomplete(name, nil)
 	}
+
 	if found {
 		return backup.ActivationFence{}, false, nil
 	}
+
 	return f, true, nil
 }
 
@@ -400,16 +459,20 @@ func validateFenceOnlyResidue(env *Env, cfg config.Cluster, name string, f backu
 	if err := checkPreparedForkRequest(env, cfg, name, fenceOnlyOwner(f)); err != nil {
 		return err
 	}
+
 	if err := verifyFenceOnlyFork(cfg, name, f); err != nil {
 		return err
 	}
+
 	if err := checkFenceOnlyForkJob(name, f); err != nil {
 		return err
 	}
+
 	recs, err := backup.LoadRecords()
 	if err != nil {
 		return err
 	}
+
 	return checkFenceOnlyRecords(&recs, name)
 }
 
@@ -420,31 +483,39 @@ func retireFenceOnlyResidue(ctx context.Context, store state.Store, cfg config.C
 	if err != nil {
 		return Result{}, materialisationIncomplete(name, nil)
 	}
+
 	checker, err := openRestoreAbsenceCheck(cfg, name, uid)
 	if err != nil {
 		return Result{}, materialisationIncomplete(name, nil)
 	}
 	defer checker.close()
+
 	unlock, err := forkAbsenceReservation(ctx, name)
 	if err != nil || unlock == nil {
 		return Result{}, materialisationIncomplete(name, nil)
 	}
 	defer unlock()
+
 	if err := fenceOnlyFinalVerify(store, checker, name, f); err != nil {
 		return Result{}, err
 	}
+
 	err = forkFenceUpdateRecords(func(s *backup.Records) error {
 		if err := fenceOnlyFinalVerify(store, checker, name, f); err != nil {
 			return err
 		}
+
 		current, ok := s.ActivationFenceFor(name)
 		if !ok || !reflect.DeepEqual(current, f) {
 			return materialisationIncomplete(name, nil)
 		}
+
 		if err := checkFenceOnlyRecords(s, name); err != nil {
 			return err
 		}
+
 		delete(s.Activation, name)
+
 		return nil
 	})
 	if err != nil {
@@ -453,6 +524,7 @@ func retireFenceOnlyResidue(ctx context.Context, store state.Store, cfg config.C
 	// The exact owner is no longer needed now that its fence and materialisation
 	// record are gone. Unrelated retained jobs are untouched.
 	releaseMaterialisationJob(f.OperationID)
+
 	return Result{Data: map[string]any{"dropped": name, "metadata_only": true}}, nil
 }
 
@@ -466,9 +538,12 @@ func dropAbandonedForkFence(ctx context.Context, env *Env, store state.Store, cf
 	if err != nil || !held {
 		return Result{}, held, err
 	}
+
 	if err := validateFenceOnlyResidue(env, cfg, name, f); err != nil {
 		return Result{}, true, err
 	}
+
 	res, err := retireFenceOnlyResidue(ctx, store, cfg, name, f)
+
 	return res, true, err
 }

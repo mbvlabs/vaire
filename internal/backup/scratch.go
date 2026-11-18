@@ -35,20 +35,26 @@ const TemporaryPortDir = "/run/vaire-ports"
 // reserved it. The allocation runs under a lock in TemporaryPortDir.
 func reserveTemporaryPort(owner string) (int, error) {
 	var port int
+
 	err := engine.WithFileLock(filepath.Join(TemporaryPortDir, "ports.lock"), func() error {
 		if _, err := os.Lstat(filepath.Join(TemporaryPortDir, owner)); !errors.Is(err, os.ErrNotExist) {
 			return errors.Join(err, errors.New("reservation owner already exists or is unverifiable"))
 		}
+
 		taken := reservedPorts()
 		for n := config.TemporaryPortMin; n <= config.TemporaryPortMax; n++ {
 			if taken[n] || socketLocked(n) {
 				continue
 			}
+
 			port = n
+
 			return recordReservedPort(owner, n)
 		}
+
 		return noTemporaryPortError()
 	})
+
 	return port, err
 }
 
@@ -56,16 +62,19 @@ func reserveTemporaryPort(owner string) (int, error) {
 // reserved in TemporaryPortDir.
 func reservedPorts() map[int]bool {
 	taken := clusterPorts()
+
 	files, _ := os.ReadDir(TemporaryPortDir)
 	for _, f := range files {
 		raw, err := os.ReadFile(filepath.Join(TemporaryPortDir, f.Name()))
 		if err != nil {
 			continue
 		}
+
 		if n, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
 			taken[n] = true
 		}
 	}
+
 	return taken
 }
 
@@ -83,7 +92,9 @@ func recordReservedPort(owner string, port int) error {
 	if err != nil {
 		return err
 	}
+
 	_, writeErr := fmt.Fprintln(f, port)
+
 	return errors.Join(writeErr, f.Close())
 }
 
@@ -100,20 +111,25 @@ func noTemporaryPortError() error {
 func clusterPorts() map[int]bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	out, err := exec.CommandContext(ctx, "pg_lsclusters", "--no-header").Output()
+
 	ports := map[int]bool{}
 	if err != nil {
 		return ports
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+
+	for line := range strings.SplitSeq(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
 			continue
 		}
+
 		if n, err := strconv.Atoi(fields[2]); err == nil {
 			ports[n] = true
 		}
 	}
+
 	return ports
 }
 
@@ -121,6 +137,7 @@ func clusterPorts() map[int]bool {
 func runQuiet(ctx context.Context, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+
 	return engine.RunQuiet(ctx, name, args...)
 }
 
@@ -130,8 +147,10 @@ func connArgs(l pg.Local) []string {
 	if l.Host != "" {
 		args = append(args, "-h", l.Host)
 	}
+
 	if l.Port != 0 {
 		args = append(args, "-p", fmt.Sprint(l.Port))
 	}
+
 	return args
 }

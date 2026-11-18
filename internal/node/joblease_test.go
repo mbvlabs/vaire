@@ -36,14 +36,17 @@ func TestJobLockRequestsModes(t *testing.T) {
 			if err := validateJobLockParams(tt.env); err != nil {
 				t.Fatal(err)
 			}
+
 			if got := jobLockMode(tt.env); got != tt.mode {
 				t.Fatalf("node mode = %s", got)
 			}
+
 			if got := jobLockRequests(tt.env); !reflect.DeepEqual(got, tt.requests) {
 				t.Fatalf("requests = %#v, want %#v", got, tt.requests)
 			}
 		})
 	}
+
 	for _, raw := range []string{`{"source":"missing","name":"new"}`, `{"source":"app","name":"../new"}`, `{`} {
 		rejectf(t, validateJobLockParams(leaseTestEnv("db-fork", raw, "")) == nil, "accepted invalid params %q", raw)
 	}
@@ -51,8 +54,12 @@ func TestJobLockRequestsModes(t *testing.T) {
 
 func TestJobLeaseAcquisitionAndRevocation(t *testing.T) {
 	env := leaseTestEnv("recover", `{"database":"app"}`, "")
-	var events []string
-	var lease *lockedJobLease
+
+	var (
+		events []string
+		lease  *lockedJobLease
+	)
+
 	locks := jobLockers{
 		node: func(context.Context, engine.LockMode, string, string, time.Duration) (engine.Release, error) {
 			events = append(events, "node")
@@ -64,20 +71,30 @@ func TestJobLeaseAcquisitionAndRevocation(t *testing.T) {
 		},
 		cluster: func(_ context.Context, name string, _ engine.LockMode, _, _ string, _ time.Duration) (engine.Release, error) {
 			events = append(events, name)
+
 			reject(t, env.lease != nil || lease != nil, "authority issued before all locks")
+
 			return func() { events = append(events, "-"+name) }, nil
 		},
 	}
+
 	reject(t, withLockedJobTarget(env, "app__restoring", func() error { return nil }) == nil, "authority before acquisition")
-	var busy *jobLockBusy
-	var err error
+
+	var (
+		busy *jobLockBusy
+		err  error
+	)
+
 	lease, busy, err = takeJobLocks(context.Background(), env, locks)
 	rejectf(t, err != nil || busy != nil, "acquire: %v %v", busy, err)
+
 	env.lease = lease
+
 	ok := func() error { return nil }
 	if err := withLockedJobTarget(env, "app__restoring", ok); err != nil {
 		t.Fatal(err)
 	}
+
 	reject(t, withLockedJobTarget(env, "app", ok) == nil, "source accepted as target")
 	original := env.Params
 	env.Params = json.RawMessage(`{"database":"other"}`)
@@ -85,6 +102,7 @@ func TestJobLeaseAcquisitionAndRevocation(t *testing.T) {
 	env.Params = original
 	copiedEnv := *env
 	reject(t, withLockedJobTarget(&copiedEnv, "app__restoring", ok) == nil, "copied environment accepted")
+
 	forged := &lockedJobLease{id: lease.id, kind: lease.kind, operation: lease.operation, install: lease.install,
 		env: env, params: lease.params, db: lease.db, target: lease.target, targets: lease.targets}
 	env.lease = forged
@@ -92,20 +110,27 @@ func TestJobLeaseAcquisitionAndRevocation(t *testing.T) {
 	env.lease = lease
 	lease.releaseHeavyIO()
 	lease.releaseHeavyIO()
+
 	if err := withLockedJobTarget(env, "app__restoring", ok); err != nil {
 		t.Fatalf("early heavy release revoked target: %v", err)
 	}
+
 	lease.finish()
 	lease.finish()
 	reject(t, withLockedJobTarget(env, "app__restoring", ok) == nil, "stale lease accepted")
+
 	want := []string{"node", "heavy", "app", "app__restoring", "-heavy", "-app__restoring", "-app", "-node"}
 	rejectf(t, !reflect.DeepEqual(events, want), "events = %v, want %v", events, want)
 }
 
 func TestJobLeaseFailureAndGuardDrain(t *testing.T) {
 	env := leaseTestEnv("restore", `{"database":"app"}`, "")
-	var mu sync.Mutex
-	var events []string
+
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+
 	add := func(s string) { mu.Lock(); defer mu.Unlock(); events = append(events, s) }
 	fail := true
 	locks := jobLockers{
@@ -117,28 +142,38 @@ func TestJobLeaseFailureAndGuardDrain(t *testing.T) {
 			if fail && name == "app__restoring" {
 				return nil, errors.New("failure")
 			}
+
 			add(name)
+
 			return func() { add("-" + name) }, nil
 		},
 	}
 	l, _, err := takeJobLocks(context.Background(), env, locks)
 	reject(t, err == nil || l != nil || env.lease != nil, "failed acquisition issued authority")
+
 	fail = false
 	l, _, err = takeJobLocks(context.Background(), env, locks)
 	reject(t, err != nil, err)
+
 	env.lease = l
 	entered, leave, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+
 	go func() {
 		_ = withLockedJobTarget(env, "app__restoring", func() error { close(entered); <-leave; return nil })
 	}()
+
 	<-entered
+
 	go func() { l.finish(); close(done) }()
+
 	select {
 	case <-done:
 		t.Fatal("released while action active")
 	case <-time.After(25 * time.Millisecond):
 	}
+
 	mu.Lock()
+
 	before := append([]string(nil), events...)
 	mu.Unlock()
 	rejectf(t, !reflect.DeepEqual(before, []string{"node", "app", "-app", "-node", "node", "app", "app__restoring"}), "locks released early: %v", before)
@@ -150,20 +185,26 @@ func TestJobLeaseFailureAndGuardDrain(t *testing.T) {
 func TestJobLeasePanicFinalizes(t *testing.T) {
 	env := leaseTestEnv("restore", `{"database":"app"}`, "")
 	released := false
+
 	var l *lockedJobLease
+
 	l = newLockedJobLease(env, []jobLockRequest{{"app__restoring", engine.LockExclusive}}, nil, func() {
 		lockedJobs.Lock()
 		_, active := lockedJobs.active[l]
 		lockedJobs.Unlock()
+
 		if active {
 			t.Error("OS release preceded revocation")
 		}
+
 		released = true
 	})
 	env.lease = l
+
 	func() {
 		defer func() { _ = recover() }()
 		defer l.finish()
+
 		panic("test")
 	}()
 	reject(t, !released || withLockedJobTarget(env, "app__restoring", func() error { return nil }) == nil, "panic did not revoke before releasing")
@@ -181,6 +222,7 @@ func TestRecoverHeavyWaitFailureReleasesNode(t *testing.T) {
 			if wait != recoverHeavyIOWait {
 				t.Errorf("recover wait = %s", wait)
 			}
+
 			return nil, wantErr
 		},
 		cluster: func(context.Context, string, engine.LockMode, string, string, time.Duration) (engine.Release, error) {

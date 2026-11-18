@@ -10,11 +10,13 @@ import (
 
 func reasonOf(t *testing.T, err error) string {
 	t.Helper()
+
 	var cliErr *output.CLIError
 	rejectf(t, !errors.As(err, &cliErr), "error %v is not a CLIError", err)
 	rejectf(t, cliErr.Code != output.CodePrecondition, "code = %s, want %s", cliErr.Code, output.CodePrecondition)
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
+
 	return reason
 }
 
@@ -22,6 +24,7 @@ func records(leftovers []backup.Leftover, undoing map[string]backup.Undo) backup
 	if undoing == nil {
 		undoing = map[string]backup.Undo{}
 	}
+
 	return backup.Records{Leftovers: leftovers, Undoing: undoing}
 }
 
@@ -42,6 +45,7 @@ func TestPlanUndoRefusesCompletedUndo(t *testing.T) {
 	// restored data as an undo leftover; a second undo must not swap it in.
 	_, _, err := planUndo(records([]backup.Leftover{undone}, nil), "app2")
 	reject(t, err == nil, "a second undo was allowed")
+
 	if r := reasonOf(t, err); r != "already_undone" {
 		t.Fatalf("reason = %s, want already_undone", r)
 	}

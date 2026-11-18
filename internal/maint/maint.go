@@ -108,12 +108,14 @@ func ReportSQL(kind string, olderThanSeconds int) (string, error) {
 		if olderThanSeconds < 0 {
 			olderThanSeconds = 0
 		}
+
 		return longQueriesSQL(olderThanSeconds), nil
 	case ReportLocks:
 		return locksSQL, nil
 	case ReportBloat:
 		return BloatSQL(), nil
 	}
+
 	return "", fmt.Errorf("unknown report %q", kind)
 }
 
@@ -125,6 +127,7 @@ func WraparoundStatus(age int64) string {
 	case age > WraparoundWarn:
 		return "warn"
 	}
+
 	return "pass"
 }
 
@@ -137,9 +140,11 @@ func QuoteRelation(name string) (string, error) {
 	if !relationPattern.MatchString(name) {
 		return "", fmt.Errorf("%q is not a table or index name (name or schema.name)", name)
 	}
+
 	parts := strings.Split(name, ".")
 	for i, p := range parts {
 		parts[i] = pg.Quote(p)
 	}
+
 	return strings.Join(parts, "."), nil
 }

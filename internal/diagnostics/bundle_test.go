@@ -55,6 +55,7 @@ func validBundle() Bundle {
 			NodeVersion: "1.0.0",
 		},
 	}
+
 	return Bundle{
 		Schema:    Schema,
 		CreatedAt: "2026-10-26T11:00:01Z",
@@ -94,18 +95,22 @@ func validBundle() Bundle {
 
 func TestBundleRoundTripUnderscoreDatabase(t *testing.T) {
 	b := validBundle()
+
 	b.Query.Database = "_app"
 	for i := range b.Activity.Events {
 		b.Activity.Events[i].Database = "_app"
 	}
+
 	path := filepath.Join(t.TempDir(), "incident.json")
 	if err := Write(path, b); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !reflect.DeepEqual(got, b) {
 		t.Fatal("database correlation changed during bundle round trip")
 	}
@@ -119,33 +124,41 @@ func missingHistoryBundle() Bundle {
 		Available: false,
 		Partial:   true,
 	}
+
 	return b
 }
 
 func TestWriteReadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incident.json")
+
 	want := validBundle()
 	if err := Write(path, want); err != nil {
 		t.Fatal(err)
 	}
+
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("mode = %o, want 600", got)
 	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.HasSuffix(raw, []byte("\n")) || !bytes.HasPrefix(raw, []byte("{\n  \"schema\": \"vaire-incident/v1\",")) {
 		t.Fatalf("bundle is not canonical typed JSON:\n%s", raw)
 	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip changed the bundle:\n got %+v\nwant %+v", got, want)
 	}
@@ -155,17 +168,21 @@ func TestCanonicalWriteDropsNothingTyped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incident.json")
 	b := validBundle()
 	b.Activity.NextCursor = "c1.abc-def_ghi"
+
 	b.Activity.Coverage.Truncated = true
 	if err := Write(path, b); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got.Activity.NextCursor != "c1.abc-def_ghi" {
 		t.Fatalf("next cursor = %q", got.Activity.NextCursor)
 	}
+
 	if !got.Activity.Coverage.Truncated || got.Activity.Coverage.Partial {
 		t.Fatal("coverage flags were not preserved")
 	}
@@ -173,21 +190,26 @@ func TestCanonicalWriteDropsNothingTyped(t *testing.T) {
 
 func TestBundleQueryRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incident.json")
+
 	want := validBundle()
 	if err := Write(path, want); err != nil {
 		t.Fatal(err)
 	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.Contains(raw, []byte(`"query"`)) {
 		t.Fatal("written bundle lost the query provenance")
 	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got.Query == nil || !reflect.DeepEqual(*got.Query, *want.Query) {
 		t.Fatalf("query changed: got %+v, want %+v", got.Query, want.Query)
 	}
@@ -196,21 +218,26 @@ func TestBundleQueryRoundTrip(t *testing.T) {
 func TestOldBundleWithoutQuery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incident.json")
 	b := validBundle()
+
 	b.Query = nil
 	if err := Write(path, b); err != nil {
 		t.Fatal(err)
 	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if bytes.Contains(raw, []byte(`"query"`)) {
 		t.Fatal("a metadata-only bundle gained a query field")
 	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got.Query != nil {
 		t.Fatalf("old bundle query = %+v, want nil", got.Query)
 	}
@@ -219,14 +246,17 @@ func TestOldBundleWithoutQuery(t *testing.T) {
 func TestEmptyQueryIsAllowed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incident.json")
 	b := validBundle()
+
 	b.Query = &activity.Query{}
 	if err := Write(path, b); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got.Query == nil || *got.Query != (activity.Query{}) {
 		t.Fatalf("empty query = %+v", got.Query)
 	}
@@ -234,23 +264,29 @@ func TestEmptyQueryIsAllowed(t *testing.T) {
 
 func TestReadRejectsUnknownQueryField(t *testing.T) {
 	raw := marshalMap(t, validBundle())
+
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
+
 	query, ok := m["query"].(map[string]any)
 	if !ok {
 		t.Fatal("query is not an object")
 	}
+
 	query["raw_sql"] = "select * from users"
+
 	data, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = Read(writeRaw(t, data))
 	if codeOf(t, err) != output.CodeBundleCorrupt || reasonOf(t, err) != "unknown_field" {
 		t.Fatalf("err = %v", err)
 	}
+
 	if strings.Contains(err.Error(), "select *") {
 		t.Fatalf("error echoed the query body: %v", err)
 	}
@@ -275,14 +311,18 @@ func TestBundleRejectsInvalidQuery(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b := validBundle()
 			edit(b.Query)
+
 			path := filepath.Join(t.TempDir(), "incident.json")
+
 			err := Write(path, b)
 			if codeOf(t, err) != output.CodeValidation {
 				t.Fatalf("err = %v", err)
 			}
+
 			if strings.Contains(err.Error(), "drop table") || strings.Contains(err.Error(), "example.invalid") {
 				t.Fatalf("error echoed the rejected query value: %v", err)
 			}
+
 			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatal("an invalid query bundle was written")
 			}
@@ -299,11 +339,13 @@ func TestReadNormalizesMissingEvents(t *testing.T) {
 			b.Activity.Coverage.EventsScanned = 0
 			b.Activity.Coverage.FirstReturnedAt = ""
 			b.Activity.Coverage.LastReturnedAt = ""
+
 			return b
 		}(),
 		"missing history": func() Bundle {
 			b := missingHistoryBundle()
 			b.Activity.Events = nil
+
 			return b
 		}(),
 	} {
@@ -312,20 +354,25 @@ func TestReadNormalizesMissingEvents(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if !bytes.Contains(raw, []byte(`"events":null`)) {
 				t.Fatalf("fixture is not a null events array: %s", raw)
 			}
+
 			got, err := Read(writeRaw(t, raw))
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if got.Activity.Events == nil || len(got.Activity.Events) != 0 {
 				t.Fatalf("events were not normalized: %#v", got.Activity.Events)
 			}
+
 			canonical, err := json.Marshal(got)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if !bytes.Contains(canonical, []byte(`"events":[]`)) {
 				t.Fatalf("canonical output kept a null array: %s", canonical)
 			}
@@ -337,6 +384,7 @@ func TestValidatePage(t *testing.T) {
 	if err := ValidatePage(validBundle().Activity); err != nil {
 		t.Fatalf("valid page: %v", err)
 	}
+
 	cases := map[string]func(*activity.Page){
 		"missing page":  func(p *activity.Page) { *p = activity.Page{} },
 		"sql action":    func(p *activity.Page) { p.Events[0].Action = "drop table users" },
@@ -347,10 +395,12 @@ func TestValidatePage(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			page := validBundle().Activity
 			edit(&page)
+
 			err := ValidatePage(page)
 			if codeOf(t, err) != output.CodeValidation {
 				t.Fatalf("err = %v", err)
 			}
+
 			if strings.Contains(err.Error(), "drop table") || strings.Contains(err.Error(), "DROP TABLE") {
 				t.Fatalf("error echoed the value: %v", err)
 			}
@@ -366,6 +416,7 @@ func TestUTCTimestampLayoutsAreAccepted(t *testing.T) {
 	} {
 		b := validBundle()
 		b.Activity.Events[0].OccurredAt = stamp
+
 		b.Activity.Coverage.FirstReturnedAt = stamp
 		if err := Write(filepath.Join(t.TempDir(), "incident.json"), b); err != nil {
 			t.Fatalf("UTC timestamp %s was rejected: %v", stamp, err)
@@ -378,10 +429,12 @@ func TestMissingHistoryIsAValidPartialBundle(t *testing.T) {
 	if err := Write(path, missingHistoryBundle()); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got.Activity.Coverage.Available || !got.Activity.Coverage.Partial || len(got.Activity.Events) != 0 {
 		t.Fatalf("missing history changed: %+v", got.Activity.Coverage)
 	}
@@ -392,20 +445,25 @@ func TestWriteRefusesToOverwrite(t *testing.T) {
 	if err := Write(path, validBundle()); err != nil {
 		t.Fatal(err)
 	}
+
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	changed := validBundle()
 	changed.Metadata.Node = "db2"
+
 	err = Write(path, changed)
 	if codeOf(t, err) != output.CodePrecondition || reasonOf(t, err) != "output_exists" {
 		t.Fatalf("err = %v", err)
 	}
+
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.Equal(before, after) {
 		t.Fatal("an existing bundle was modified")
 	}
@@ -413,19 +471,24 @@ func TestWriteRefusesToOverwrite(t *testing.T) {
 
 func TestWriteRefusesSymlink(t *testing.T) {
 	dir := t.TempDir()
+
 	target := filepath.Join(dir, "target.json")
 	if err := Write(target, validBundle()); err != nil {
 		t.Fatal(err)
 	}
+
 	before, _ := os.ReadFile(target)
+
 	link := filepath.Join(dir, "link.json")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
+
 	err := Write(link, validBundle())
 	if codeOf(t, err) != output.CodeValidation || reasonOf(t, err) != "symlink" {
 		t.Fatalf("err = %v", err)
 	}
+
 	after, _ := os.ReadFile(target)
 	if !bytes.Equal(before, after) {
 		t.Fatal("writing through a symlink changed its target")
@@ -435,10 +498,12 @@ func TestWriteRefusesSymlink(t *testing.T) {
 func TestWriteDoesNotCreateParentDirectories(t *testing.T) {
 	parent := filepath.Join(t.TempDir(), "missing")
 	path := filepath.Join(parent, "incident.json")
+
 	err := Write(path, validBundle())
 	if codeOf(t, err) != output.CodeValidation || reasonOf(t, err) != "parent_missing" {
 		t.Fatalf("err = %v", err)
 	}
+
 	if _, statErr := os.Stat(parent); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatal("Write created the parent directory")
 	}
@@ -448,10 +513,12 @@ func TestInvalidBundleIsNotWritten(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incident.json")
 	b := validBundle()
 	b.Schema = "vaire-incident/v2"
+
 	err := Write(path, b)
 	if codeOf(t, err) != output.CodeValidation || reasonOf(t, err) != "unsupported" {
 		t.Fatalf("err = %v", err)
 	}
+
 	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatal("an invalid bundle was written")
 	}
@@ -465,6 +532,7 @@ func TestReadRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 			if !ok {
 				t.Fatal("metadata is not an object")
 			}
+
 			metadata["client_commit"] = "abc"
 		},
 		"activity": func(m map[string]any) {
@@ -472,6 +540,7 @@ func TestReadRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 			if !ok {
 				t.Fatal("activity is not an object")
 			}
+
 			events["raw_logs"] = []any{"from users"}
 		},
 		"coverage": func(m map[string]any) {
@@ -488,20 +557,26 @@ func TestReadRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			raw := marshalMap(t, validBundle())
+
 			var m map[string]any
 			if err := json.Unmarshal(raw, &m); err != nil {
 				t.Fatal(err)
 			}
+
 			edit(m)
+
 			data, err := json.Marshal(m)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			path := writeRaw(t, data)
+
 			_, err = Read(path)
 			if codeOf(t, err) != output.CodeBundleCorrupt || reasonOf(t, err) != "unknown_field" {
 				t.Fatalf("err = %v", err)
 			}
+
 			if strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "raw_logs") {
 				t.Fatalf("error echoed the rejected content: %v", err)
 			}
@@ -511,10 +586,12 @@ func TestReadRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 
 func requireBundleValue[T any](t *testing.T, value any) T {
 	t.Helper()
+
 	result, ok := value.(T)
 	if !ok {
 		t.Fatalf("unexpected bundle value type: %T", value)
 	}
+
 	return result
 }
 
@@ -538,11 +615,14 @@ func TestReadRejectsCanariesInKnownFields(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b := validBundle()
 			edit(&b)
+
 			path := filepath.Join(t.TempDir(), "incident.json")
+
 			err := Write(path, b)
 			if codeOf(t, err) != output.CodeValidation {
 				t.Fatalf("err = %v", err)
 			}
+
 			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatal("a bundle with a rejected field was written")
 			}
@@ -559,6 +639,7 @@ func TestUnknownEnumsAreRejected(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b := validBundle()
 			edit(&b.Activity.Events[0])
+
 			err := Write(filepath.Join(t.TempDir(), "incident.json"), b)
 			if codeOf(t, err) != output.CodeValidation {
 				t.Fatalf("err = %v", err)
@@ -627,11 +708,14 @@ func TestCoverageInvariants(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b := validBundle()
 			edit(&b)
+
 			path := filepath.Join(t.TempDir(), "incident.json")
+
 			err := Write(path, b)
 			if codeOf(t, err) != output.CodeValidation {
 				t.Fatalf("err = %v", err)
 			}
+
 			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatal("an invalid bundle was written")
 			}
@@ -656,6 +740,7 @@ func TestReadRejectsTrailingData(t *testing.T) {
 
 func TestReadRejectsTruncatedJSON(t *testing.T) {
 	raw := marshalMap(t, validBundle())
+
 	_, err := Read(writeRaw(t, raw[:len(raw)/2]))
 	if codeOf(t, err) != output.CodeBundleCorrupt || reasonOf(t, err) != "decode_failed" {
 		t.Fatalf("err = %v", err)
@@ -664,10 +749,12 @@ func TestReadRejectsTruncatedJSON(t *testing.T) {
 
 func TestReadRejectsOversizeFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "big.json")
+
 	data := bytes.Repeat([]byte(" "), int(MaxBundleBytes)+1)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := Read(path)
 	if codeOf(t, err) != output.CodeValidation || reasonOf(t, err) != "bundle_too_large" {
 		t.Fatalf("err = %v", err)
@@ -676,20 +763,25 @@ func TestReadRejectsOversizeFile(t *testing.T) {
 
 func TestReadRejectsSymlinkAndNonOwnerOnly(t *testing.T) {
 	dir := t.TempDir()
+
 	target := filepath.Join(dir, "target.json")
 	if err := Write(target, validBundle()); err != nil {
 		t.Fatal(err)
 	}
+
 	link := filepath.Join(dir, "link.json")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := Read(link); codeOf(t, err) != output.CodeValidation || reasonOf(t, err) != "symlink" {
 		t.Fatalf("symlink: %v", err)
 	}
+
 	if err := os.Chmod(target, 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := Read(target); codeOf(t, err) != output.CodePrecondition || reasonOf(t, err) != "not_owner_only" {
 		t.Fatalf("permissions: %v", err)
 	}
@@ -711,38 +803,47 @@ func TestReadRejectsDirectory(t *testing.T) {
 
 func writeRaw(t *testing.T, data []byte) string {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "bundle.json")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	return path
 }
 
 func marshalMap(t *testing.T, b Bundle) []byte {
 	t.Helper()
+
 	data, err := json.Marshal(b)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return data
 }
 
 func codeOf(t *testing.T, err error) string {
 	t.Helper()
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("got %v, want a CLIError", err)
 	}
+
 	return cliErr.Code
 }
 
 func reasonOf(t *testing.T, err error) string {
 	t.Helper()
+
 	var cliErr *output.CLIError
 	if !errors.As(err, &cliErr) {
 		t.Fatalf("got %v, want a CLIError", err)
 	}
+
 	details, _ := cliErr.Details.(map[string]any)
 	reason, _ := details["reason"].(string)
+
 	return reason
 }

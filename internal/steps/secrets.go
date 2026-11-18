@@ -67,5 +67,6 @@ func ServiceRoleSecret(role string) string {
 	case "vaire_monitor":
 		return SecretMonitor
 	}
+
 	return ""
 }

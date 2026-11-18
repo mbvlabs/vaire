@@ -20,10 +20,12 @@ const edgeManifestVersion = "edge-0123456789ab"
 
 func subsetManifest(m Manifest, keys ...string) Manifest {
 	out := m
+
 	out.Artifacts = make(map[string]Artifact, len(keys))
 	for _, key := range keys {
 		out.Artifacts[key] = m.Artifacts[key]
 	}
+
 	return out
 }
 
@@ -73,6 +75,7 @@ func TestValidateStableRequiresEveryArtifact(t *testing.T) {
 	if err := Validate(m, ChannelStable, ""); err != nil {
 		t.Fatalf("Validate full stable manifest: %v", err)
 	}
+
 	subset := subsetManifest(m, "linux/amd64")
 	for _, channel := range []string{ChannelStable, "stable-1.x"} {
 		if err := Validate(subset, channel, ""); err == nil {
@@ -89,10 +92,12 @@ type fakeRoundTripper struct {
 func (f *fakeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	rawURL := req.URL.String()
 	f.requests[rawURL]++
+
 	body, ok := f.routes[rawURL]
 	if !ok {
 		return nil, fmt.Errorf("unexpected release request for %s", rawURL)
 	}
+
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(bytes.NewReader(body)),
@@ -118,6 +123,7 @@ func (f *fakeVerifier) VerifyBlob(_ context.Context, content, bundle []byte, ide
 		bundle:   append([]byte(nil), bundle...),
 		identity: identity,
 	})
+
 	return f.err
 }
 
@@ -130,10 +136,12 @@ func TestClientResolveAndFetchEdge(t *testing.T) {
 	manifest := subsetManifest(testManifest(ChannelEdge, edgeManifestVersion), "linux/amd64")
 	artifactURL := versionRoot(edgeManifestVersion) + "/linux/amd64/vaire"
 	manifest.Artifacts["linux/amd64"] = Artifact{URL: artifactURL, SHA256: hex.EncodeToString(sum[:])}
+
 	raw, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	bundle := []byte(`{"fake":"sigstore bundle"}`)
 
 	base := strings.TrimRight(buildinfo.ReleaseBaseURL, "/")
@@ -157,13 +165,16 @@ func TestClientResolveAndFetchEdge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve edge channel: %v", err)
 	}
+
 	if channelManifest.Version != edgeManifestVersion {
 		t.Fatalf("resolved version %q, want %q", channelManifest.Version, edgeManifestVersion)
 	}
+
 	pinned, err := client.Resolve(ctx, ChannelEdge, edgeManifestVersion)
 	if err != nil {
 		t.Fatalf("Resolve pinned edge version: %v", err)
 	}
+
 	if pinned.Version != edgeManifestVersion {
 		t.Fatalf("pinned version %q, want %q", pinned.Version, edgeManifestVersion)
 	}
@@ -172,13 +183,16 @@ func TestClientResolveAndFetchEdge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(verifier.calls) != 2 {
 		t.Fatalf("verifier calls = %d, want 2", len(verifier.calls))
 	}
+
 	for i, call := range verifier.calls {
 		if call.identity != wantIdentity {
 			t.Errorf("call %d identity = %q, want %q", i, call.identity, wantIdentity)
 		}
+
 		if !bytes.Equal(call.content, raw) || !bytes.Equal(call.bundle, bundle) {
 			t.Errorf("call %d verified different content or bundle", i)
 		}
@@ -188,21 +202,26 @@ func TestClientResolveAndFetchEdge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch linux/amd64: %v", err)
 	}
+
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.Equal(got, binary) {
 		t.Fatalf("fetched bytes = %q, want %q", got, binary)
 	}
+
 	if transport.requests[artifactURL] != 1 {
 		t.Fatalf("artifact requests = %d, want 1", transport.requests[artifactURL])
 	}
 
 	requests := len(transport.requests)
+
 	if _, err := client.Fetch(ctx, pinned, "linux", "arm64"); err == nil {
 		t.Fatal("Fetch linux/arm64 succeeded for a manifest without it")
 	}
+
 	if len(transport.requests) != requests {
 		t.Fatal("Fetch linux/arm64 attempted a download")
 	}

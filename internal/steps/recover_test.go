@@ -20,11 +20,13 @@ func TestStepSecrets(t *testing.T) {
 			t.Errorf("%s is missing", ServiceRoleSecret(role))
 		}
 	}
+
 	for _, key := range []string{SecretAdminPassword, SecretMetricsHash, SecretBackupKeyID, SecretBackupKeySecret, SecretBackupCipherPass, SecretBackupAgeRecipient} {
 		if !slices.Contains(StepSecrets, key) {
 			t.Errorf("%s is missing", key)
 		}
 	}
+
 	for _, key := range []string{SecretMasterBundle} {
 		if slices.Contains(StepSecrets, key) {
 			t.Errorf("%s is not a step's", key)
@@ -62,11 +64,14 @@ func TestTuningCountsTheDatabasesAwaitingRecovery(t *testing.T) {
 	host := hostinfo.Info{VCPU: 16, DataDisk: hostinfo.Disk{SizeGiB: 400}}
 	all := tuningFor(cfg, cfg.Clusters[0], host)
 	view := cfg
+
 	view.Clusters, view.Awaiting = cfg.Clusters[:1], cfg.Clusters[1:]
 	if got := tuningFor(view, view.Clusters[0], host); !reflect.DeepEqual(got, all) {
 		t.Errorf("tuning while other awaits recovery:\n%+v\nonce it is back:\n%+v", got, all)
 	}
+
 	alone := cfg
+
 	alone.Clusters = cfg.Clusters[:1]
 	if reflect.DeepEqual(tuningFor(alone, alone.Clusters[0], host), all) {
 		t.Error("one database alone tunes as two; the test proves nothing")

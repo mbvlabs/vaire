@@ -37,7 +37,9 @@ func pickBundleName(list []backup.MasterBundle, want string) (masterbackup.Parse
 	for _, b := range list {
 		complete[b.Name] = b.Complete
 	}
+
 	var before time.Time
+
 	name := strings.TrimSuffix(strings.TrimSuffix(want, masterbackup.BundleSuffix), masterbackup.SidecarSuffix)
 	if name != "" {
 		if _, ok := masterbackup.ParseName(name); !ok {
@@ -46,58 +48,71 @@ func pickBundleName(list []backup.MasterBundle, want string) (masterbackup.Parse
 				return masterbackup.Parsed{}, "", output.NewError(output.CodeUsage, "--bundle "+want+" is neither a bundle name nor a time", output.ExitUsage,
 					"Use a name from vaire server backup list, or an RFC 3339 time.")
 			}
+
 			before, name = t, ""
 		}
 	}
+
 	p, ok := masterbackup.Pick(complete, name, before)
 	if !ok {
 		return p, "", output.NewError(output.CodeBundleNotFound, "no complete master bundle matches", output.ExitPrecondition,
 			"List the bundles with vaire server backup list; without a bucket, restore from an export with --bundle-file.").
 			WithDetails(map[string]any{"bundle": want})
 	}
+
 	older := ""
 	for _, b := range list {
 		if b.Complete && b.Name < p.Name && b.Epoch <= p.Epoch && (older == "" || b.Name > older) {
 			older = b.Name
 		}
 	}
+
 	return p, older, nil
 }
 
 // fetchBundleFromBucket lists <prefix>/master/ and downloads one bundle.
 func fetchBundleFromBucket(ctx context.Context, kit *workspaces.BackupCreds, want string) (fetchedBundle, error) {
 	t := kitTarget(kit)
+
 	list, err := backup.MasterList(ctx, t)
 	if err != nil {
 		return fetchedBundle{}, err
 	}
+
 	p, older, err := pickBundleName(list, want)
 	if err != nil {
 		return fetchedBundle{}, err
 	}
+
 	cipher, side, err := backup.MasterGet(ctx, t, p.Name)
 	if err != nil {
 		return fetchedBundle{}, err
 	}
+
 	return fetchedBundle{Name: p.Name, Cipher: cipher, Sidecar: &side, Older: older, From: "bucket"}, nil
 }
 
 // readBundleFile reads an exported bundle, - for stdin.
 func readBundleFile(path string, stdin io.Reader) (fetchedBundle, error) {
-	var raw []byte
-	var err error
+	var (
+		raw []byte
+		err error
+	)
 	if path == "-" {
 		raw, err = io.ReadAll(io.LimitReader(stdin, 64<<20))
 	} else {
 		raw, err = os.ReadFile(path)
 	}
+
 	if err != nil {
 		return fetchedBundle{}, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 	}
+
 	name := strings.TrimSuffix(baseName(path), masterbackup.BundleSuffix)
 	if _, ok := masterbackup.ParseName(name); !ok {
 		name = ""
 	}
+
 	return fetchedBundle{Name: name, Cipher: raw, From: path}, nil
 }
 
@@ -126,34 +141,41 @@ func (f fetchedBundle) label() string {
 func openFetched(f fetchedBundle, identity, server string) (masterbackup.Bundle, error) {
 	corrupt := func(cause string) error {
 		hint := "Pick another bundle with --bundle (vaire server backup list)."
+
 		switch {
 		case f.fromFile():
 			hint = "Use another exported file with --bundle-file, or a bundle from the bucket with --bundle (vaire server backup list)."
 		case f.Older != "":
 			hint = "The next older complete bundle is " + f.Older + ": --bundle " + f.Older + "."
 		}
+
 		return output.NewError(output.CodeBundleCorrupt, "master bundle "+f.label()+" is corrupt: "+cause, output.ExitSecrets, hint).
 			WithDetails(map[string]any{"bundle": f.Name, "from": f.From, "older": f.Older})
 	}
 	if f.Sidecar != nil && f.Sidecar.SHA256 != "" && f.Sidecar.SHA256 != masterbackup.SHA256(f.Cipher) {
 		return masterbackup.Bundle{}, corrupt("its sha256 differs from its sidecar's")
 	}
+
 	b, err := masterbackup.Open(f.Cipher, identity)
 	if errors.Is(err, masterbackup.ErrCorrupt) {
 		// The cause without ErrCorrupt's own "the bundle is corrupt: ".
 		return masterbackup.Bundle{}, corrupt(strings.TrimPrefix(err.Error(), masterbackup.ErrCorrupt.Error()+": "))
 	}
+
 	if err != nil {
 		return masterbackup.Bundle{}, output.WrapError(output.CodeSecrets, err, output.ExitSecrets, "")
 	}
+
 	if server != "" && b.Manifest.Server != server {
 		return b, output.NewError(output.CodePrecondition, "master bundle "+f.label()+" belongs to server "+b.Manifest.Server+", not "+server, output.ExitPrecondition,
 			"Use the workspace of the server the bundle came from.").WithDetails(map[string]any{"reason": "bundle_server_mismatch", "bundle_server": b.Manifest.Server})
 	}
+
 	if newerThanBuild(b.Manifest.VaireVersion) {
 		return b, output.NewError(output.CodeUpdateRequired, "master bundle "+f.label()+" was written by vaire "+b.Manifest.VaireVersion+", newer than this "+buildinfo.Version,
 			output.ExitVersion, "Run vaire upgrade first.").WithDetails(map[string]any{"bundle_version": b.Manifest.VaireVersion})
 	}
+
 	return b, nil
 }
 
@@ -161,37 +183,47 @@ func openFetched(f fetchedBundle, identity, server string) (masterbackup.Bundle,
 // release than this build. Edge and dev builds aren't compared.
 func newerThanBuild(v string) bool {
 	a, okA := semverParts(v)
+
 	b, okB := semverParts(buildinfo.Version)
 	if !okA || !okB {
 		return false
 	}
+
 	for i := range a {
 		if a[i] != b[i] {
 			return a[i] > b[i]
 		}
 	}
+
 	return false
 }
 
 func semverParts(v string) ([3]int, bool) {
 	var out [3]int
+
 	parts := strings.Split(strings.TrimPrefix(v, "v"), ".")
 	if len(parts) != 3 {
 		return out, false
 	}
+
 	for i, p := range parts {
 		n := 0
+
 		if p == "" {
 			return out, false
 		}
+
 		for _, c := range p {
 			if c < '0' || c > '9' {
 				return out, false
 			}
+
 			n = n*10 + int(c-'0')
 		}
+
 		out[i] = n
 	}
+
 	return out, true
 }
 
@@ -201,10 +233,12 @@ func recoveryIdentity(name string) (*workspaces.BackupCreds, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+
 	if creds.Backup == nil || creds.Backup.Encryption.Identity == "" {
 		return creds.Backup, "", output.NewError(output.CodeInputRequired, "this workspace's recovery kit has no age identity", output.ExitInput,
 			"Master bundles open with the recovery identity. vaire login with a current secrets document (vaire secrets export).").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
+
 	return creds.Backup, creds.Backup.Encryption.Identity, nil
 }

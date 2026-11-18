@@ -22,6 +22,7 @@ func (w *jobEvidenceWarnings) reporter(next engine.Reporter) engine.Reporter {
 			w.lost = true
 			w.mu.Unlock()
 		}
+
 		if next != nil {
 			next(ev)
 		}
@@ -31,6 +32,7 @@ func (w *jobEvidenceWarnings) reporter(next engine.Reporter) engine.Reporter {
 func (w *jobEvidenceWarnings) warnings() []output.Warning {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	if !w.lost {
 		return nil
 	}

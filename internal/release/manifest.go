@@ -48,47 +48,60 @@ func Validate(m Manifest, channel, wantVersion string) error {
 	if m.SchemaVersion != schemaVersion {
 		return verificationFailed("release manifest schemaVersion is invalid")
 	}
+
 	if m.Channel != SigningChannel(channel) {
 		return verificationFailed("release manifest channel is invalid")
 	}
+
 	if err := matchVersion(channel, m.Version); err != nil {
 		return verificationFailed("release manifest version is invalid")
 	}
+
 	if wantVersion != "" && m.Version != wantVersion {
 		return verificationFailed("release manifest version is invalid")
 	}
+
 	wantBase := versionRoot(m.Version)
 	if m.ReleaseBaseURL != wantBase {
 		return verificationFailed("release manifest releaseBaseUrl is invalid")
 	}
+
 	if len(m.Artifacts) == 0 || (channel != "edge" && len(m.Artifacts) != len(artifactKeys)) {
 		return verificationFailed("release manifest artifacts are incomplete")
 	}
+
 	for key, art := range m.Artifacts {
 		if !slices.Contains(artifactKeys, key) {
 			return verificationFailed("release manifest artifact platform is invalid")
 		}
+
 		if art.URL != wantBase+"/"+key+"/vaire" {
 			return verificationFailed("release manifest artifact URL is invalid")
 		}
+
 		if !sha256Pattern.MatchString(art.SHA256) {
 			return verificationFailed("release manifest artifact sha256 is invalid")
 		}
 	}
+
 	return nil
 }
 
 func decodeManifest(raw []byte) (Manifest, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
+
 	var m Manifest
 	if err := dec.Decode(&m); err != nil {
 		return Manifest{}, verificationFailed("release manifest is malformed")
 	}
+
 	if dec.More() {
 		return Manifest{}, verificationFailed("release manifest is malformed")
 	}
+
 	m.Raw = append([]byte(nil), raw...)
+
 	return m, nil
 }
 
@@ -97,6 +110,7 @@ func peekVersion(raw []byte) string {
 	if err := json.Unmarshal(raw, &peek); err != nil {
 		return ""
 	}
+
 	return peek.Version
 }
 

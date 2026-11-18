@@ -40,6 +40,7 @@ func (s postgresAccess) SkipReason(cfg config.Cluster) string {
 	if spec, err := s.spec(cfg); err == nil && spec.IsFollower() {
 		return "follower"
 	}
+
 	return ""
 }
 func (s postgresAccess) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
@@ -47,6 +48,7 @@ func (s postgresAccess) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
+
 	return canonical(struct {
 		Revision string `json:"revision"`
 		Database string `json:"database"`
@@ -60,14 +62,17 @@ func (s postgresAccess) Check(ctx context.Context, cfg config.Cluster, _ engine.
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
+
 	inspect := s.inspect
 	if inspect == nil {
 		inspect = inspectAccessLocal
 	}
+
 	coverage, err := inspect(ctx, spec)
 	if err != nil {
 		return engine.CheckResult{}, fmt.Errorf("access coverage unknown: %w", err)
 	}
+
 	switch coverage.Status {
 	case "installed":
 		return engine.CheckResult{Complete: true, Detail: "automatic owner access installed"}, nil
@@ -83,35 +88,43 @@ func (s postgresAccess) Apply(ctx context.Context, cfg config.Cluster, _ engine.
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	if spec.IsFollower() {
 		return engine.ApplyResult{}, errors.New("cannot reconcile access on a follower")
 	}
+
 	reconcile := s.reconcile
 	if reconcile == nil {
 		reconcile = reconcileAccessLocal
 	}
+
 	if err := reconcile(ctx, spec); err != nil {
 		return engine.ApplyResult{}, err
 	}
+
 	return engine.ApplyResult{Restart: engine.RestartNone}, nil
 }
 
 func inspectAccessLocal(ctx context.Context, spec config.ClusterSpec) (AccessCoverage, error) {
 	local := ClusterPG(spec)
+
 	return InspectAccess(ctx, spec.Name, func(ctx context.Context, sql string) (string, error) {
 		rows, err := local.Query(ctx, spec.Name, sql, nil)
 		if err != nil {
 			return "", err
 		}
+
 		if len(rows) != 1 || len(rows[0]) != 1 || rows[0]["coverage"] == "" {
 			return "", errors.New("access inspection did not return one coverage row")
 		}
+
 		return rows[0]["coverage"], nil
 	})
 }
 
 func reconcileAccessLocal(ctx context.Context, spec config.ClusterSpec) error {
 	local := ClusterPG(spec)
+
 	return ReconcileAccess(ctx, spec.Name, func(ctx context.Context, sql string) error {
 		return local.Exec(ctx, spec.Name, sql, nil)
 	})
@@ -125,12 +138,14 @@ func AccessDefaultPrivilegesSQL(database string) string {
 	owner := pg.Quote(database + "_owner")
 	app := pg.Quote(database + "_app")
 	ro := pg.Quote(database + "_ro")
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s GRANT USAGE ON SCHEMAS TO %s, %s;\n", owner, app, ro)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s GRANT USAGE, SELECT ON SEQUENCES TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s GRANT EXECUTE ON FUNCTIONS TO %s;\n", owner, app)
 	fmt.Fprintf(&b, "ALTER DEFAULT PRIVILEGES FOR ROLE %s GRANT SELECT ON TABLES TO %s;\n", owner, ro)
+
 	return b.String()
 }
 
@@ -225,10 +240,12 @@ BEGIN
 END;
 `
 	sweep = accessSQL(sweep, database)
+
 	tag := "$vaire$"
 	for strings.Contains(sweep, tag) {
 		tag = strings.TrimSuffix(tag, "$") + "_$"
 	}
+
 	return "BEGIN;\nSET LOCAL search_path = pg_catalog;\n" + AccessDefaultPrivilegesSQL(database) +
 		"DO " + tag + sweep + tag + ";\nCOMMIT;\n"
 }
@@ -243,6 +260,7 @@ func ReconcileAccess(ctx context.Context, database string, exec AccessExec) erro
 	if exec == nil {
 		return errors.New("access reconciliation is unavailable")
 	}
+
 	return exec(ctx, AccessReconcileSQL(database))
 }
 
@@ -306,6 +324,7 @@ SELECT json_build_object(
  'uncovered_creators', COALESCE((SELECT json_agg(pg_get_userbyid(role) ORDER BY pg_get_userbyid(role)) FROM uncovered), '[]'::json)
 ) AS coverage;
 `
+
 	return accessSQL(sql, database)
 }
 
@@ -319,10 +338,12 @@ func InspectAccess(ctx context.Context, database string, query AccessQuery) (Acc
 	if query == nil {
 		return unknown, errors.New("access inspection is unavailable")
 	}
+
 	raw, err := query(ctx, AccessInspectionSQL(database))
 	if err != nil {
 		return unknown, err
 	}
+
 	var result struct {
 		Identities        []uint32 `json:"identities"`
 		DefaultMissing    *int     `json:"default_missing"`
@@ -335,27 +356,33 @@ func InspectAccess(ctx context.Context, database string, query AccessQuery) (Acc
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		return unknown, fmt.Errorf("invalid access inspection: %w", err)
 	}
+
 	if len(result.Identities) != 3 || result.Identities[0] == 0 || result.Identities[1] == 0 || result.Identities[2] == 0 {
 		return unknown, errors.New("incomplete access role inspection")
 	}
+
 	counts := []*int{result.DefaultMissing, result.SchemaMissing, result.TableMissing, result.SequenceMissing, result.RoutineMissing}
 	for _, count := range counts {
 		if count == nil || *count < 0 {
 			return unknown, errors.New("incomplete access inspection")
 		}
 	}
+
 	if result.UncoveredCreators == nil {
 		return unknown, errors.New("incomplete access creator inspection")
 	}
+
 	coverage := AccessCoverage{
 		Status: "installed", DefaultMissing: *result.DefaultMissing, SchemaMissing: *result.SchemaMissing,
 		TableMissing: *result.TableMissing, SequenceMissing: *result.SequenceMissing,
 		RoutineMissing: *result.RoutineMissing, UncoveredCreators: result.UncoveredCreators,
 	}
+
 	for _, count := range counts {
 		if *count != 0 {
 			coverage.Status = "pending"
 		}
 	}
+
 	return coverage, nil
 }

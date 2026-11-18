@@ -40,7 +40,7 @@ type materialisationOwnership struct {
 	ArtifactStage       string                     `json:"artifact_stage,omitempty"`
 	DataIdentity        materialisationFileID      `json:"data_identity"`
 	ConfigIdentity      materialisationFileID      `json:"config_identity"`
-	ReservationIdentity backup.ReservationIdentity `json:"reservation_identity,omitempty"`
+	ReservationIdentity backup.ReservationIdentity `json:"reservation_identity"`
 }
 
 type materialisationFileID struct {
@@ -78,6 +78,7 @@ var materialisationPostgresUID = func() (uint32, error) {
 	if err != nil || uid < 0 {
 		return 0, errors.New("cannot resolve postgres user")
 	}
+
 	return uint32(uid), nil
 }
 
@@ -89,6 +90,7 @@ func materialisationPath(target string) (string, error) {
 		strings.ContainsAny(target, `/\`) || strings.IndexByte(target, 0) >= 0 {
 		return "", errors.New("invalid materialisation target")
 	}
+
 	return filepath.Join(materialisationStateDir, "materialise-"+target+".json"), nil
 }
 
@@ -96,22 +98,28 @@ func validateMaterialisation(o materialisationOwnership, dataRoot string) error 
 	if err := validateMaterialisationKind(o); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationIdentity(o, dataRoot); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationArtifacts(o); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationPhase(o); err != nil {
 		return err
 	}
+
 	instance, err := currentFollowInstance()
 	if err != nil {
 		return err
 	}
+
 	if o.Instance != instance {
 		return errors.New("foreign materialisation instance")
 	}
+
 	return nil
 }
 
@@ -119,9 +127,11 @@ func validateMaterialisationKind(o materialisationOwnership) error {
 	if config.CheckDatabaseName(o.Source) != nil {
 		return errors.New("invalid materialisation source")
 	}
+
 	if _, err := materialisationPath(o.Target); err != nil {
 		return err
 	}
+
 	switch o.Kind {
 	case materialisationFork, materialisationFollower:
 		if config.CheckDatabaseName(o.Target) != nil {
@@ -138,6 +148,7 @@ func validateMaterialisationKind(o materialisationOwnership) error {
 	default:
 		return errors.New("invalid materialisation kind")
 	}
+
 	return nil
 }
 
@@ -146,19 +157,23 @@ func validateMaterialisationIdentity(o materialisationOwnership, dataRoot string
 		strings.TrimSpace(o.Operation) != o.Operation || strings.TrimSpace(o.Job) != o.Job {
 		return errors.New("missing materialisation identity")
 	}
+
 	if o.Stanza == "" && o.Kind != materialisationFollower && o.Kind != materialisationFork {
 		return errors.New("missing materialisation stanza")
 	}
+
 	if o.IntendedPort < 1 || o.IntendedPort > 65535 ||
 		(o.TemporaryPort == 0 && o.ArtifactStage != "") ||
 		(o.TemporaryPort != 0 && (o.TemporaryPort < config.TemporaryPortMin || o.TemporaryPort > config.TemporaryPortMax)) {
 		return errors.New("invalid materialisation port")
 	}
+
 	if !filepath.IsAbs(dataRoot) || filepath.Clean(dataRoot) != dataRoot ||
 		o.DataPath != filepath.Join(dataRoot, o.Target) ||
 		o.RegisteredPath != filepath.Join(materialisationConfigRoot, o.Target) {
 		return errors.New("invalid materialisation paths")
 	}
+
 	return nil
 }
 
@@ -183,6 +198,7 @@ func validateMaterialisationArtifacts(o materialisationOwnership) error {
 	default:
 		return errors.New("invalid materialisation artifact stage")
 	}
+
 	return nil
 }
 
@@ -199,60 +215,76 @@ func validateMaterialisationPhase(o materialisationOwnership) error {
 	default:
 		return errors.New("invalid materialisation phase")
 	}
+
 	return nil
 }
 
 func readMaterialisation(target, dataRoot string) (materialisationOwnership, bool, error) {
 	var o materialisationOwnership
+
 	ancestors, err := materialisationAncestry(materialisationStateDir, materialisationRecordUID, false)
 	if err != nil {
 		return o, false, err
 	}
+
 	p, err := materialisationPath(target)
 	if err != nil {
 		return o, false, err
 	}
+
 	fd, err := syscall.Open(p, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, syscall.ENOENT) {
 		return o, false, nil
 	}
+
 	if err != nil {
 		return o, false, err
 	}
+
 	f := os.NewFile(uintptr(fd), p)
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil {
 		return o, false, err
 	}
+
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != materialisationRecordUID || !info.Mode().IsRegular() ||
 		info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 ||
 		stat.Nlink != 1 || info.Size() > 16384 {
 		return o, false, errors.New("unsafe materialisation record")
 	}
+
 	raw, err := io.ReadAll(io.LimitReader(f, 16385))
 	if err != nil {
 		return o, false, err
 	}
+
 	after, err := os.Lstat(p)
 	if err != nil || !os.SameFile(info, after) || len(raw) > 16384 || validateMaterialisationAncestry(ancestors) != nil {
 		return o, false, errors.New("materialisation record changed while reading")
 	}
+
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
+
 	if err := d.Decode(&o); err != nil {
 		return o, false, fmt.Errorf("corrupt materialisation record: %w", err)
 	}
+
 	if err := d.Decode(new(any)); err != io.EOF {
 		return o, false, errors.New("trailing materialisation record data")
 	}
+
 	if o.Target != target {
 		return o, false, errors.New("materialisation target mismatch")
 	}
+
 	if err := validateMaterialisation(o, dataRoot); err != nil {
 		return o, false, err
 	}
+
 	return o, true, nil
 }
 
@@ -261,18 +293,24 @@ func listMaterialisations(dataRoot string) ([]materialisationOwnership, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var result []materialisationOwnership
+
 	for _, e := range entries {
 		if !strings.HasPrefix(e.Name(), "materialise-") || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
+
 		target := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "materialise-"), ".json")
+
 		o, found, err := readMaterialisation(target, dataRoot)
 		if err != nil || !found {
 			return nil, fmt.Errorf("cannot validate materialisation record %q: %w", e.Name(), err)
 		}
+
 		result = append(result, o)
 	}
+
 	return result, nil
 }
 
@@ -291,6 +329,7 @@ func ownsMaterialisation(ctx context.Context, o materialisationOwnership) bool {
 	// matching in-memory value as authority.
 	_ = ctx
 	_ = o
+
 	return false
 }
 
@@ -299,16 +338,20 @@ func createMaterialisation(o materialisationOwnership, dataRoot string) (*materi
 	if o.Phase != materialisationPrepared || o.ArtifactStage != "" || o.TemporaryPort != 0 {
 		return nil, errors.New("materialisation must start prepared")
 	}
+
 	if err := validateMaterialisation(o, dataRoot); err != nil {
 		return nil, err
 	}
+
 	if os.Geteuid() < 0 || uint64(os.Geteuid()) != uint64(materialisationRecordUID) { //nolint:gosec // negative uid is rejected
 		return nil, errors.New("materialisation record requires the trusted owner")
 	}
+
 	ancestors, err := materialisationAncestry(materialisationStateDir, materialisationRecordUID, false)
 	if err != nil {
 		return nil, err
 	}
+
 	p, _ := materialisationPath(o.Target)
 	// Link the complete, fsynced file into place without replacing evidence of
 	// another operation. The caller also holds the node operation lock.
@@ -316,36 +359,46 @@ func createMaterialisation(o materialisationOwnership, dataRoot string) (*materi
 	if err != nil {
 		return nil, err
 	}
+
 	tmp := f.Name()
 	defer func() { _ = os.Remove(tmp) }()
+
 	raw, err := json.Marshal(o)
 	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	if _, err = f.Write(append(raw, '\n')); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	if err = f.Sync(); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
+
 	if err = f.Close(); err != nil {
 		return nil, err
 	}
+
 	if err := validateMaterialisationAncestry(ancestors); err != nil {
 		return nil, err
 	}
+
 	if err := os.Link(tmp, p); err != nil {
 		return nil, err
 	}
+
 	dir, err := os.Open(materialisationStateDir)
 	if err != nil {
 		return nil, err
 	}
+
 	err = dir.Sync()
 	_ = dir.Close()
+
 	if err != nil {
 		return nil, err
 	}
@@ -372,6 +425,7 @@ func materialisationID(info os.FileInfo) (materialisationFileID, error) {
 	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || st.Ino == 0 {
 		return materialisationFileID{}, errors.New("unverifiable artifact directory")
 	}
+
 	return materialisationFileID{Device: st.Dev, Inode: st.Ino, UID: st.Uid}, nil
 }
 
@@ -382,6 +436,7 @@ var materialisationConfigureArtifact = func(f *os.File, uid uint32, mode os.File
 	if err := f.Chown(int(uid), -1); err != nil {
 		return err
 	}
+
 	return f.Chmod(mode)
 }
 
@@ -397,7 +452,9 @@ var materialisationAncestryStat = func(path string) (os.FileInfo, materialisatio
 	if err != nil {
 		return nil, materialisationFileID{}, err
 	}
+
 	id, err := materialisationID(info)
+
 	return info, id, err
 }
 
@@ -409,6 +466,7 @@ func materialisationAncestry(path string, serviceUID uint32, allowService bool) 
 	if allowService {
 		policy = func(_ string, i int) bool { return i > 0 }
 	}
+
 	return materialisationAncestryPolicy(path, serviceUID, policy)
 }
 
@@ -422,6 +480,7 @@ func materialisationConfigAncestry(path string, serviceUID uint32) ([]materialis
 		!filepath.IsAbs(root) || filepath.Clean(root) != root || filepath.Dir(root) != base {
 		return nil, errors.New("invalid materialisation config boundary")
 	}
+
 	return materialisationAncestryPolicy(path, serviceUID, func(ancestor string, index int) bool {
 		return index > 0 && (ancestor == base || ancestor == root)
 	})
@@ -429,19 +488,23 @@ func materialisationConfigAncestry(path string, serviceUID uint32) ([]materialis
 
 func materialisationAncestryPolicy(path string, serviceUID uint32, allowServiceAt func(string, int) bool) ([]materialisationAncestor, error) {
 	base := materialisationAncestorBase
+
 	rel, err := filepath.Rel(base, path)
 	if err != nil || !filepath.IsAbs(path) || filepath.Clean(path) != path ||
 		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, errors.New("invalid materialisation parent path")
 	}
+
 	paths := []string{base}
 	current := base
+
 	if rel != "." {
-		for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		for component := range strings.SplitSeq(rel, string(filepath.Separator)) {
 			current = filepath.Join(current, component)
 			paths = append(paths, current)
 		}
 	}
+
 	ancestors := make([]materialisationAncestor, 0, len(paths))
 	for i, p := range paths {
 		info, id, err := materialisationAncestryStat(p)
@@ -455,8 +518,10 @@ func materialisationAncestryPolicy(path string, serviceUID uint32, allowServiceA
 		if !allowed || info.Mode().Perm()&0o022 != 0 {
 			return nil, errors.New("unsafe materialisation ancestry")
 		}
+
 		ancestors = append(ancestors, materialisationAncestor{p, info, id})
 	}
+
 	return ancestors, nil
 }
 
@@ -466,10 +531,12 @@ func validateMaterialisationAncestry(ancestors []materialisationAncestor) error 
 		if err != nil || !info.IsDir() || !os.SameFile(a.info, info) || info.Mode().Perm()&0o022 != 0 {
 			return errors.New("materialisation ancestry replaced or unsafe")
 		}
+
 		if a.id != id {
 			return errors.New("materialisation ancestry ownership changed")
 		}
 	}
+
 	return nil
 }
 
@@ -478,6 +545,7 @@ func openMaterialisationParent(path string, serviceUID uint32, allowService bool
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	return openPinnedMaterialisationParent(path, ancestors)
 }
 
@@ -489,6 +557,7 @@ func openMaterialisationConfigParent(serviceUID uint32) (*os.Root, os.FileInfo, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	return openPinnedMaterialisationParent(materialisationConfigRoot, ancestors)
 }
 
@@ -497,21 +566,26 @@ func openPinnedMaterialisationParent(path string, ancestors []materialisationAnc
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	f, err := root.Open(".")
 	if err != nil {
 		_ = root.Close()
 		return nil, nil, nil, err
 	}
+
 	opened, err := f.Stat()
+
 	_ = f.Close()
 	if err != nil || !os.SameFile(named, opened) || validateMaterialisationAncestry(ancestors) != nil {
 		_ = root.Close()
 		return nil, nil, nil, errors.New("materialisation parent was replaced")
 	}
+
 	return root, opened, ancestors, nil
 }
 
@@ -522,35 +596,45 @@ func openMaterialisationArtifacts(target, dataRoot string, dataUID uint32) (*mat
 	if err != nil || dataUID != postgresUID {
 		return nil, errors.New("untrusted materialisation data owner")
 	}
+
 	o, found, err := readMaterialisation(target, dataRoot)
 	if err != nil {
 		return nil, err
 	}
+
 	if !found {
 		return nil, errors.New("materialisation record missing")
 	}
+
 	if o.DataIdentity.Inode != 0 && o.DataIdentity.UID != dataUID {
 		return nil, errors.New("materialisation data owner mismatch")
 	}
+
 	p, _ := materialisationPath(target)
+
 	recordInfo, err := os.Lstat(p)
 	if err != nil {
 		return nil, err
 	}
+
 	a := &materialisationArtifacts{owner: o, dataRoot: dataRoot, dataUID: dataUID, recordInfo: recordInfo}
+
 	a.dataParent, a.dataParentInfo, a.dataAncestors, err = openMaterialisationParent(dataRoot, dataUID, true)
 	if err != nil {
 		return nil, err
 	}
+
 	a.configParent, a.configParentInfo, a.configAncestors, err = openMaterialisationConfigParent(postgresUID)
 	if err != nil {
 		_ = a.dataParent.Close()
 		return nil, err
 	}
+
 	if err := a.validate(); err != nil {
 		a.close()
 		return nil, err
 	}
+
 	if o.DataIdentity.Inode != 0 {
 		a.data, err = openMaterialisationChild(a.dataParent, target)
 		if err != nil {
@@ -558,6 +642,7 @@ func openMaterialisationArtifacts(target, dataRoot string, dataUID uint32) (*mat
 			return nil, err
 		}
 	}
+
 	if o.ConfigIdentity.Inode != 0 {
 		a.conf, err = openMaterialisationChild(a.configParent, target)
 		if err != nil {
@@ -565,10 +650,12 @@ func openMaterialisationArtifacts(target, dataRoot string, dataUID uint32) (*mat
 			return nil, err
 		}
 	}
+
 	if err := a.validate(); err != nil {
 		a.close()
 		return nil, err
 	}
+
 	return a, nil
 }
 
@@ -576,12 +663,15 @@ func (a *materialisationArtifacts) close() {
 	if a.data != nil {
 		_ = a.data.Close()
 	}
+
 	if a.conf != nil {
 		_ = a.conf.Close()
 	}
+
 	if a.dataParent != nil {
 		_ = a.dataParent.Close()
 	}
+
 	if a.configParent != nil {
 		_ = a.configParent.Close()
 	}
@@ -589,18 +679,22 @@ func (a *materialisationArtifacts) close() {
 
 func (a *materialisationArtifacts) validateRecord() error {
 	p, _ := materialisationPath(a.owner.Target)
+
 	before, err := os.Lstat(p)
 	if err != nil || !os.SameFile(a.recordInfo, before) {
 		return errors.New("materialisation record replaced")
 	}
+
 	current, found, err := readMaterialisation(a.owner.Target, a.dataRoot)
 	if err != nil {
 		return err
 	}
+
 	after, err := os.Lstat(p)
 	if err != nil || !found || current != a.owner || !os.SameFile(a.recordInfo, after) {
 		return errors.New("materialisation record changed")
 	}
+
 	return nil
 }
 
@@ -609,6 +703,7 @@ func validateMaterialisationParent(path string, expected os.FileInfo) error {
 	if err != nil || !os.SameFile(expected, info) || !info.IsDir() {
 		return errors.New("materialisation parent replaced")
 	}
+
 	return nil
 }
 
@@ -618,10 +713,12 @@ func openMaterialisationChild(root *os.Root, name string) (*os.File, error) {
 		return nil, err
 	}
 	defer func() { _ = parent.Close() }()
+
 	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
+
 	return os.NewFile(uintptr(fd), name), nil
 }
 
@@ -631,30 +728,38 @@ func validateMaterialisationDir(root *os.Root, name string, id materialisationFi
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
+
 		return errors.New("unbound materialisation artifact exists")
 	}
+
 	if err != nil {
 		return err
 	}
+
 	actual, err := materialisationArtifactID(named)
 	if err != nil || actual != id || named.Mode().Perm() != mode {
 		return errors.New("materialisation artifact replaced")
 	}
+
 	f, err := openMaterialisationChild(root, name)
 	if err != nil {
 		return err
 	}
+
 	defer func() { _ = f.Close() }()
+
 	opened, err := f.Stat()
 	if err != nil || !os.SameFile(named, opened) || opened.Mode().Perm() != mode {
 		return errors.New("materialisation artifact changed while opening")
 	}
+
 	if held != nil {
 		old, err := held.Stat()
 		if err != nil || !os.SameFile(old, opened) {
 			return errors.New("materialisation artifact handle changed")
 		}
 	}
+
 	return nil
 }
 
@@ -662,21 +767,27 @@ func (a *materialisationArtifacts) validate() error {
 	if err := a.validateRecord(); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationAncestry(a.dataAncestors); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationAncestry(a.configAncestors); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationParent(a.dataRoot, a.dataParentInfo); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationParent(materialisationConfigRoot, a.configParentInfo); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationDir(a.dataParent, a.owner.Target, a.owner.DataIdentity, a.data, 0o700); err != nil {
 		return err
 	}
+
 	return validateMaterialisationDir(a.configParent, a.owner.Target, a.owner.ConfigIdentity, a.conf, 0o755)
 }
 
@@ -685,11 +796,14 @@ func (a *materialisationArtifacts) createdRoot(configDir bool) (*os.Root, os.Fil
 		if a.owner.ArtifactStage != materialisationDataCreated {
 			return nil, 0, errors.New("data must be bound first")
 		}
+
 		return a.configParent, 0o755, nil
 	}
+
 	if a.owner.ArtifactStage != "" {
 		return nil, 0, errors.New("data already bound")
 	}
+
 	return a.dataParent, 0o700, nil
 }
 
@@ -704,6 +818,7 @@ func createMaterialisationDir(root *os.Root, target string, uid uint32, mode os.
 	if err = root.Mkdir(target, 0o700); err != nil {
 		return nil, id, err
 	}
+
 	f, err = openMaterialisationChild(root, target)
 	if err != nil {
 		return nil, id, err
@@ -714,42 +829,54 @@ func createMaterialisationDir(root *os.Root, target string, uid uint32, mode os.
 			f = nil
 		}
 	}()
+
 	named, err := root.Lstat(target)
 	if err != nil {
 		return nil, id, err
 	}
+
 	opened, err := f.Stat()
 	if err != nil || !os.SameFile(named, opened) {
 		return nil, id, errors.New("created artifact replaced")
 	}
+
 	id, err = materialisationArtifactID(opened)
 	if err != nil || id.UID != materialisationRecordUID || opened.Mode().Perm() != 0o700 {
 		return nil, id, errors.New("created artifact is not a private directory owned by the creator")
 	}
+
 	if err := materialisationConfigureArtifact(f, uid, mode); err != nil {
 		return nil, id, err
 	}
+
 	opened, err = f.Stat()
 	if err != nil {
 		return nil, id, err
 	}
+
 	id, err = materialisationArtifactID(opened)
+
 	named, namedErr := root.Lstat(target)
 	if err != nil || namedErr != nil || !os.SameFile(named, opened) || id.UID != uid || opened.Mode().Perm() != mode {
 		return nil, id, errors.New("created artifact owner mismatch")
 	}
+
 	if err := f.Sync(); err != nil {
 		return nil, id, err
 	}
+
 	parent, err := root.Open(".")
 	if err != nil {
 		return nil, id, err
 	}
+
 	err = parent.Sync()
 	_ = parent.Close()
+
 	if err != nil {
 		return nil, id, err
 	}
+
 	return f, id, nil
 }
 
@@ -757,21 +884,27 @@ func (a *materialisationArtifacts) validateCreatedArtifact(configDir bool) error
 	if err := a.validateRecord(); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationParent(a.dataRoot, a.dataParentInfo); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationParent(materialisationConfigRoot, a.configParentInfo); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationAncestry(a.dataAncestors); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationAncestry(a.configAncestors); err != nil {
 		return err
 	}
+
 	if !configDir {
 		return nil
 	}
+
 	return validateMaterialisationDir(a.dataParent, a.owner.Target, a.owner.DataIdentity, a.data, 0o700)
 }
 
@@ -781,53 +914,66 @@ func (a *materialisationArtifacts) bindCreated(configDir bool) error {
 	if err := a.validate(); err != nil {
 		return err
 	}
+
 	if a.owner.TemporaryPort == 0 {
 		return errors.New("temporary port not reserved")
 	}
+
 	root, mode, err := a.createdRoot(configDir)
 	if err != nil {
 		return err
 	}
+
 	f, id, err := a.createArtifact(root, mode)
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if f != nil {
 			_ = f.Close()
 		}
 	}()
+
 	if err := a.validateCreatedArtifact(configDir); err != nil {
 		return err
 	}
+
 	next := a.owner
 	if configDir {
 		next.ConfigIdentity, next.ArtifactStage = id, materialisationRegistered
 	} else {
 		next.DataIdentity, next.ArtifactStage = id, materialisationDataCreated
 	}
+
 	if err := validateMaterialisation(next, a.dataRoot); err != nil {
 		return err
 	}
+
 	raw, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
+
 	p, _ := materialisationPath(next.Target)
 	if err := engine.WriteFileAtomic(p, append(raw, '\n'), 0o600); err != nil {
 		return err
 	}
+
 	info, err := os.Lstat(p)
 	if err != nil {
 		return err
 	}
+
 	a.recordInfo, a.owner = info, next
 	if configDir {
 		a.conf = f
 	} else {
 		a.data = f
 	}
+
 	f = nil
+
 	return a.validate()
 }
 
@@ -837,10 +983,13 @@ func (a *materialisationArtifacts) withOwnedArtifacts(fn func() error) error {
 	if a.owner.ArtifactStage != materialisationRegistered && a.owner.ArtifactStage != materialisationProvisioned {
 		return errors.New("materialisation artifacts are not registered")
 	}
+
 	if err := a.validate(); err != nil {
 		return err
 	}
+
 	err := fn()
+
 	return errors.Join(err, a.validate())
 }
 
@@ -850,11 +999,14 @@ func (a *materialisationArtifacts) markMaterialisationProvisioned(verify func() 
 	if a.owner.ArtifactStage != materialisationRegistered || verify == nil {
 		return errors.New("materialisation is not ready for provisioning verification")
 	}
+
 	if err := a.withOwnedArtifacts(verify); err != nil {
 		return err
 	}
+
 	next := a.owner
 	next.ArtifactStage = materialisationProvisioned
+
 	return a.persistMaterialisation(next)
 }
 
@@ -866,28 +1018,35 @@ func validateMaterialisationTransition(current, next materialisationOwnership) e
 	allowed := current
 	allowed.Phase, allowed.Reason = next.Phase, next.Reason
 	allowed.TemporaryPort, allowed.ArtifactStage = next.TemporaryPort, next.ArtifactStage
+
 	allowed.ReservationIdentity = next.ReservationIdentity
 	if allowed != next {
 		return errors.New("materialisation identity cannot change")
 	}
+
 	portChanged := next.TemporaryPort != current.TemporaryPort
 	reservationChanged := next.ReservationIdentity != current.ReservationIdentity
 	stageChanged := next.ArtifactStage != current.ArtifactStage
+
 	phaseChanged := next.Phase != current.Phase || next.Reason != current.Reason
 	if portChanged && (current.TemporaryPort != 0 || current.ArtifactStage != "" ||
 		next.TemporaryPort < config.TemporaryPortMin || next.TemporaryPort > config.TemporaryPortMax || stageChanged || phaseChanged) {
 		return errors.New("invalid materialisation reservation transition")
 	}
+
 	if reservationChanged && (!portChanged || current.ReservationIdentity != (backup.ReservationIdentity{})) {
 		return errors.New("invalid materialisation reservation identity transition")
 	}
+
 	if stageChanged && (current.ArtifactStage != materialisationRegistered ||
 		next.ArtifactStage != materialisationProvisioned || portChanged || phaseChanged) {
 		return errors.New("invalid materialisation artifact transition")
 	}
+
 	if !phaseChanged {
 		return nil
 	}
+
 	allowedPhase := current.Phase == materialisationPrepared && next.Phase == materialisationCopying ||
 		current.Phase == materialisationCopying && next.Phase == materialisationProvisioning ||
 		(current.Phase == materialisationPrepared || current.Phase == materialisationCopying || current.Phase == materialisationProvisioning) &&
@@ -895,6 +1054,7 @@ func validateMaterialisationTransition(current, next materialisationOwnership) e
 	if !allowedPhase || portChanged || stageChanged {
 		return errors.New("invalid materialisation phase transition")
 	}
+
 	return nil
 }
 
@@ -902,17 +1062,21 @@ func (a *materialisationArtifacts) persistMaterialisation(next materialisationOw
 	if err := a.validate(); err != nil {
 		return err
 	}
+
 	current := a.owner
 	if err := validateMaterialisationTransition(current, next); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisation(next, a.dataRoot); err != nil {
 		return err
 	}
+
 	raw, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
+
 	p, _ := materialisationPath(current.Target)
 	// The caller holds the exclusive operation lock and the state directory is
 	// root-controlled. Recheck the precise original record immediately before
@@ -920,14 +1084,18 @@ func (a *materialisationArtifacts) persistMaterialisation(next materialisationOw
 	if err := a.validateRecord(); err != nil {
 		return err
 	}
+
 	if err := engine.WriteFileAtomic(p, append(raw, '\n'), 0o600); err != nil {
 		return err
 	}
+
 	info, err := os.Lstat(p)
 	if err != nil {
 		return err
 	}
+
 	a.recordInfo, a.owner = info, next
+
 	return a.validate()
 }
 
@@ -944,6 +1112,7 @@ var materialisationSyncStateDir = func() error {
 		return err
 	}
 	defer func() { _ = dir.Close() }()
+
 	return dir.Sync()
 }
 var materialisationSyncArtifactParent = func(root *os.Root) error {
@@ -952,6 +1121,7 @@ var materialisationSyncArtifactParent = func(root *os.Root) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
 	return f.Sync()
 }
 
@@ -962,25 +1132,32 @@ func (a *materialisationArtifacts) bindMaterialisationReservation(port int, veri
 	if verify == nil || a.owner.ArtifactStage != "" || a.owner.TemporaryPort != 0 {
 		return errors.New("materialisation reservation cannot be bound")
 	}
+
 	called := false
+
 	err := verify(a.owner, port, func() error {
 		if called {
 			return errors.New("reservation verifier called twice")
 		}
+
 		called = true
 		next := a.owner
+
 		next.TemporaryPort = port
 		if len(identity) != 0 {
 			next.ReservationIdentity = identity[0]
 		}
+
 		return a.persistMaterialisation(next)
 	})
 	if err != nil {
 		return err
 	}
+
 	if !called {
 		return errors.New("reservation was not verified")
 	}
+
 	return nil
 }
 
@@ -988,20 +1165,25 @@ func (a *materialisationArtifacts) retireMaterialisation(guard materialisationRe
 	if guard == nil || check == nil {
 		return errors.New("missing reservation or retirement verification")
 	}
+
 	if err := check(); err != nil {
 		return err
 	}
+
 	unlock, err := guard(a.owner)
 	if err != nil {
 		return err
 	}
+
 	if unlock == nil {
 		return errors.New("reservation guard did not acquire lock")
 	}
 	defer unlock()
+
 	if err := check(); err != nil {
 		return err
 	}
+
 	return a.removeMaterialisationRecord()
 }
 
@@ -1013,10 +1195,12 @@ func (a *materialisationArtifacts) removeMaterialisationRecord() error {
 	if err := a.validateRecord(); err != nil {
 		return err
 	}
+
 	p, _ := materialisationPath(a.owner.Target)
 	if err := materialisationRemoveRecord(p); err != nil {
 		return err
 	}
+
 	return materialisationSyncStateDir()
 }
 
@@ -1024,6 +1208,7 @@ func (a *materialisationArtifacts) retireProvisioned(guard materialisationReserv
 	if a.owner.ArtifactStage != materialisationProvisioned {
 		return errors.New("materialisation not provisioned")
 	}
+
 	return a.retireMaterialisation(guard, a.validate)
 }
 
@@ -1031,12 +1216,15 @@ func (a *materialisationArtifacts) validateCleanupCompleted() error {
 	if err := a.validateRecord(); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationAncestry(a.dataAncestors); err != nil {
 		return err
 	}
+
 	if err := validateMaterialisationAncestry(a.configAncestors); err != nil {
 		return err
 	}
+
 	for _, item := range []struct {
 		root *os.Root
 		held *os.File
@@ -1047,21 +1235,26 @@ func (a *materialisationArtifacts) validateCleanupCompleted() error {
 		if _, err := item.root.Lstat(a.owner.Target); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("materialisation artifact still exists or is unverifiable")
 		}
+
 		if item.id.Inode != 0 {
 			if item.held == nil {
 				return errors.New("missing original artifact handle")
 			}
+
 			info, err := item.held.Stat()
 			if err != nil {
 				return err
 			}
+
 			id, err := materialisationArtifactID(info)
+
 			st, ok := info.Sys().(*syscall.Stat_t)
 			if err != nil || !ok || id != item.id || st.Nlink != 0 {
 				return errors.New("original materialisation artifact was not removed")
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -1072,34 +1265,43 @@ func (a *materialisationArtifacts) retireCleaned(cleanup func() error, guard mat
 	if cleanup == nil || guard == nil {
 		return errors.New("missing owned cleanup")
 	}
+
 	if err := a.validate(); err != nil {
 		return err
 	}
+
 	unlock, err := guard(a.owner)
 	if err != nil {
 		return err
 	}
+
 	if unlock == nil {
 		return errors.New("reservation guard did not acquire lock")
 	}
 	defer unlock()
+
 	if err := a.validate(); err != nil {
 		return err
 	}
+
 	if err := cleanup(); err != nil {
 		return err
 	}
+
 	if err := a.validateCleanupCompleted(); err != nil {
 		return err
 	}
+
 	for _, root := range []*os.Root{a.dataParent, a.configParent} {
 		if err := materialisationSyncArtifactParent(root); err != nil {
 			return err
 		}
 	}
+
 	if err := a.validateCleanupCompleted(); err != nil {
 		return err
 	}
+
 	return a.removeMaterialisationRecord()
 }
 
@@ -1108,5 +1310,6 @@ func advanceMaterialisation(c *materialisationCapability, dataRoot, phase, reaso
 	_ = dataRoot
 	_ = phase
 	_ = reason
+
 	return errors.New("materialisation capability issuance is unavailable")
 }

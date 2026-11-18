@@ -175,10 +175,12 @@ func Expand(steps []Step, cfg config.Cluster) []Step {
 			out = append(out, step)
 			continue
 		}
+
 		for _, c := range cfg.Clusters {
 			out = append(out, t.Instance(c.Name))
 		}
 	}
+
 	return out
 }
 
@@ -186,15 +188,19 @@ func Expand(steps []Step, cfg config.Cluster) []Step {
 // takes the catalogue, before Expand.
 func ValidateIDs(steps []Step) error {
 	seen := map[string]bool{}
+
 	for _, step := range steps {
 		id := step.ID()
 		if !IDPattern.MatchString(id) {
 			return fmt.Errorf("step ID %q does not match %s", id, IDPattern)
 		}
+
 		if seen[id] {
 			return fmt.Errorf("duplicate step ID %q", id)
 		}
+
 		seen[id] = true
 	}
+
 	return nil
 }

@@ -42,28 +42,36 @@ func newHandoff(cmd *cobra.Command, doc secretsdoc.Document, out string) (handof
 	for _, v := range doc.SecretValues() {
 		secrets.Add(v)
 	}
+
 	passphrase, err := secretsdoc.NewPassphrase()
 	if err != nil {
 		return h, err
 	}
+
 	secrets.Add(passphrase)
 	h.passphrase = passphrase
 	// age's scrypt work factor makes this take about a second.
 	stop := waitOn(cmd, "encrypting the transfer bundle")
 	h.bundle, err = secretsdoc.EncryptArmored(doc, passphrase)
+
 	stop()
+
 	if err != nil {
 		return h, err
 	}
+
 	if out != "" {
 		if abs, err := filepath.Abs(out); err == nil {
 			out = abs
 		}
+
 		if err := transport.WriteSecretFile(out, h.bundle); err != nil {
 			return h, err
 		}
+
 		h.path = out
 	}
+
 	return h, nil
 }
 
@@ -74,15 +82,19 @@ func requireStructuredHandoff(cmd *cobra.Command, outFlag, action string, confir
 	if !MustNotPrompt(cmd) {
 		return nil
 	}
+
 	if err := RequireFlag(cmd, stringFlag(cmd, outFlag) != "", "--"+outFlag, action); err != nil {
 		return err
 	}
+
 	if err := RequireFlag(cmd, flagTrue(cmd, "reveal-passphrase"), "--reveal-passphrase", action); err != nil {
 		return err
 	}
+
 	if confirmFlag != "" {
 		return RequireFlag(cmd, flagTrue(cmd, confirmFlag), "--"+confirmFlag, action)
 	}
+
 	return nil
 }
 
@@ -95,32 +107,40 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	if MustNotPrompt(cmd) {
 		return nil
 	}
+
 	resume := ui.Suspend()
 	defer resume()
+
 	term := handoffTerminal{w: cmd.ErrOrStderr(), rich: richOutput(cmd)}
 	h.showHeader(term)
+
 	for {
 		choice, err := chooseOption(cmd, "Secrets handoff", handoffOptions(canSave, h.saved))
 		if err != nil {
 			return err
 		}
+
 		if choice == "done" {
 			break
 		}
+
 		h.showChoice(cmd, term, choice)
 	}
 
 	if skipStored {
 		return nil
 	}
+
 	if err := typeWord(cmd, "Type 'stored' once the record is in your password manager", "", "stored"); err != nil {
 		return output.NewError(output.CodeInputRequired, "the secrets handoff was not confirmed as stored", output.ExitInput,
 			"Re-run and type stored; the handoff is shown again with a new bundle passphrase.").
 			WithDetails(map[string]any{"flag": "--confirm-secrets-stored"})
 	}
+
 	if clear, err := yesNoDefaultYes(cmd, "Clear the screen now?"); err == nil && clear {
 		_, _ = fmt.Fprint(term.w, clearScreen)
 	}
+
 	return nil
 }
 
@@ -140,6 +160,7 @@ func (t handoffTerminal) note(s string) {
 	if t.rich {
 		s = ui.Note(s)
 	}
+
 	t.line(s)
 }
 
@@ -151,17 +172,22 @@ func (h *handoff) showHeader(term handoffTerminal) {
 	} else {
 		term.line("\n== Secrets handoff ==")
 	}
+
 	term.line("The cluster's master record: the operator's keys, the sudo password and the database passwords.")
 	term.line("vaire keeps no copy and doesn't show it again. Store it in your password manager.")
 	term.line("")
+
 	label := "Bundle passphrase"
 	if term.rich {
 		label = ui.Dim(label)
 	}
+
 	term.line(label + "  " + h.passphrase)
+
 	if h.path != "" {
 		term.note("The transfer bundle was saved to " + h.path + ". Keep the passphrase apart from it.")
 	}
+
 	term.line("")
 }
 
@@ -172,6 +198,7 @@ func handoffOptions(canSave bool, saved string) [][2]string {
 	if canSave && saved == "" {
 		options = append(options, [2]string{"Save everything to a file", "save"})
 	}
+
 	return append(options, [2]string{"Show everything on screen", "print"}, [2]string{"Done", "done"})
 }
 
@@ -192,6 +219,7 @@ func (h *handoff) showChoice(cmd *cobra.Command, term handoffTerminal, choice st
 			term.note(err.Error())
 			return
 		}
+
 		term.note("Saved everything to " + h.saved + " (plain text, readable only by you): every value, the transfer bundle and its passphrase.")
 	}
 }
@@ -204,25 +232,32 @@ func (h *handoff) save(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+
 	path, err := promptLine(cmd, "Save everything to (relative to "+cwd+")", "./"+h.doc.Server.Name+"-secrets.txt")
 	if err != nil {
 		return err
 	}
+
 	if rest, ok := strings.CutPrefix(path, "~/"); ok {
 		if home, err := os.UserHomeDir(); err == nil {
 			path = filepath.Join(home, rest)
 		}
 	}
+
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(cwd, path)
 	}
+
 	if _, err := os.Stat(path); err == nil {
 		return errors.New(path + " already exists; pick another path")
 	}
+
 	if err := transport.WriteSecretFile(path, []byte(h.record())); err != nil {
 		return err
 	}
+
 	h.saved = path
+
 	return nil
 }
 
@@ -232,21 +267,26 @@ func (h *handoff) save(cmd *cobra.Command) error {
 func (h handoff) record() string {
 	var b strings.Builder
 	b.WriteString("vaire secrets handoff for server " + h.doc.Server.Name + "\n")
+
 	for _, g := range h.doc.Groups() {
 		b.WriteString("\n## " + g.Title + "\n")
+
 		for _, f := range g.Fields {
 			v := strings.TrimRight(f.Value, "\n")
 			if strings.Contains(v, "\n") {
 				b.WriteString(f.Label + ":\n" + v + "\n")
 				continue
 			}
+
 			b.WriteString(f.Label + ": " + v + "\n")
 		}
 	}
+
 	b.WriteString("\n## Transfer bundle\n")
 	b.WriteString("On another machine run vaire login and paste this block.\n")
 	b.WriteString("Passphrase: " + h.passphrase + "\n")
 	b.Write(h.bundle)
+
 	return b.String()
 }
 
@@ -264,19 +304,24 @@ func chooseOption(cmd *cobra.Command, title string, options [][2]string) (string
 		v, err := ui.Choose(title, "", options)
 		return v, promptErr(err)
 	}
+
 	w := cmd.ErrOrStderr()
 	for i, o := range options {
 		_, _ = fmt.Fprintf(w, "  %d) %s\n", i+1, o[0])
 	}
+
 	reader := bufio.NewReader(cmd.InOrStdin())
+
 	for {
 		if _, err := fmt.Fprint(w, title+" [1-"+strconv.Itoa(len(options))+"]: "); err != nil {
 			return "", err
 		}
+
 		line, err := reader.ReadString('\n')
 		if n, convErr := strconv.Atoi(strings.TrimSpace(line)); convErr == nil && n >= 1 && n <= len(options) {
 			return options[n-1][1], nil
 		}
+
 		if err != nil {
 			return "", output.NewError(output.CodeInputRequired, "no option was picked", output.ExitInput, "")
 		}
@@ -290,15 +335,19 @@ func yesNoDefaultYes(cmd *cobra.Command, question string) (bool, error) {
 		if errors.Is(err, ui.ErrAborted) {
 			return false, nil
 		}
+
 		return ok, err
 	}
+
 	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s [Y/n] ", question); err != nil {
 		return false, err
 	}
+
 	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return false, err
 	}
+
 	switch strings.ToLower(strings.TrimSpace(line)) {
 	case "n", "no":
 		return false, nil
@@ -311,21 +360,27 @@ func yesNoDefaultYes(cmd *cobra.Command, question string) (bool, error) {
 // to its footer line.
 func readBundle(r io.Reader) ([]byte, error) {
 	var b strings.Builder
+
 	sc := bufio.NewScanner(io.LimitReader(r, 4<<20))
 	sc.Buffer(make([]byte, 64*1024), 64*1024)
+
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if b.Len() == 0 && line != secretsdoc.ArmorHeader {
 			// Skip whatever precedes the block, such as the copied record.
 			continue
 		}
+
 		b.WriteString(line + "\n")
+
 		if line == secretsdoc.ArmorFooter {
 			return []byte(b.String()), nil
 		}
 	}
+
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
+
 	return []byte(b.String()), nil
 }

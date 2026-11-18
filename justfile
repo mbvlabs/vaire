@@ -1,5 +1,9 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+alias gfd := go-fix-diff
+alias gf := go-fix
+alias gcl := golangci-lint
+
 commit := `git rev-parse --short=12 HEAD`
 ldflags := "-s -w -X github.com/mbvlabs/vaire/internal/buildinfo.Version=dev -X github.com/mbvlabs/vaire/internal/buildinfo.Commit=" + commit + " -X github.com/mbvlabs/vaire/internal/buildinfo.Channel=dev"
 
@@ -11,15 +15,18 @@ build:
     mkdir -p bin
     CGO_ENABLED=0 go build -trimpath -ldflags "{{ldflags}}" -o bin/vaire ./cmd/vaire
 
-# Lint Go, command metadata, and shell scripts.
-lint:
+golangci-lint:
     golangci-lint run ./...
-    # just build
-    # bin/vaire commands --check-meta
-    # bin/vaire commands --check-steps
-    # bash -eu -o pipefail -c 'shopt -s nullglob; files=(internal/steps/scripts/*.sh scripts/*.sh); if ((${#files[@]})); then shellcheck -x "${files[@]}"; fi'
-    # actionlint
-    # bash -eu -o pipefail -c 'while IFS="=" read -r key value; do grep -Fq "$value" scripts/install.sh || { echo "scripts/install.sh is missing $key=$value" >&2; exit 1; }; done < <(go run ./internal/versions/cmd/print)'
+
+go-fix-diff:
+	go fix -diff ./...
+
+go-fix:
+	go fix ./...
+
+# Lint Go, command metadata, and shell scripts.
+lint: go-fix-diff golangci-lint
+	@echo "lint done"
 
 # Build an unsigned channel tree under dist/release-<channel>.
 release-local VERSION CHANNEL BASE_URL:

@@ -53,10 +53,12 @@ func encodeCursor(c cursorState) string {
 	if err != nil {
 		return ""
 	}
+
 	encoded := cursorPrefix + base64.RawURLEncoding.EncodeToString(raw)
 	if len(encoded) > maxCursorBytes {
 		return ""
 	}
+
 	return encoded
 }
 
@@ -67,26 +69,33 @@ func decodeCursor(raw string) (cursorState, error) {
 	if len(raw) == 0 || len(raw) > maxCursorBytes || !strings.HasPrefix(raw, cursorPrefix) {
 		return c, errInvalidCursor
 	}
+
 	payload := raw[len(cursorPrefix):]
 	if len(payload) > base64.RawURLEncoding.EncodedLen(maxCursorBytes) {
 		return c, errInvalidCursor
 	}
+
 	decoded, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
 		return c, errInvalidCursor
 	}
+
 	dec := json.NewDecoder(bytes.NewReader(decoded))
 	dec.DisallowUnknownFields()
+
 	if err := dec.Decode(&c); err != nil {
 		return cursorState{}, errInvalidCursor
 	}
+
 	var trailing json.RawMessage
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return cursorState{}, errInvalidCursor
 	}
+
 	if err := c.validate(); err != nil {
 		return cursorState{}, err
 	}
+
 	return c, nil
 }
 
@@ -94,9 +103,11 @@ func (c cursorState) validate() error {
 	if c.Version != cursorVersion || c.After == 0 || c.Snapshot < c.After || !validStoreID(c.StoreID) {
 		return errInvalidCursor
 	}
+
 	if c.Limit < 1 || c.Limit > MaxLimit {
 		return errInvalidCursor
 	}
+
 	for _, field := range []struct {
 		name  string
 		value string
@@ -112,9 +123,11 @@ func (c cursorState) validate() error {
 			return errInvalidCursor
 		}
 	}
+
 	if c.Outcome != "" && !contains(Outcomes, c.Outcome) {
 		return errInvalidCursor
 	}
+
 	return c.validateWindow()
 }
 
@@ -129,23 +142,28 @@ func (c cursorState) validateWindow() error {
 		if field.value == "" {
 			continue
 		}
+
 		if _, err := parseStoredTime(field.value); err != nil {
 			return errInvalidCursor
 		}
 	}
+
 	if c.SinceAt != "" && c.UntilAt != "" {
 		since, err := parseStoredTime(c.SinceAt)
 		if err != nil {
 			return errInvalidCursor
 		}
+
 		until, err := parseStoredTime(c.UntilAt)
 		if err != nil || !since.Before(until) {
 			return errInvalidCursor
 		}
 	}
+
 	if len(c.SinceRaw) > cursorWindowBytes || len(c.UntilRaw) > cursorWindowBytes {
 		return errInvalidCursor
 	}
+
 	return nil
 }
 
@@ -156,6 +174,7 @@ func cursorFor(nq normalizedQuery, after, snapshot uint64, storeID string) strin
 	if after == 0 || after >= snapshot || !validStoreID(storeID) {
 		return ""
 	}
+
 	c := cursorState{
 		Version:     cursorVersion,
 		StoreID:     storeID,
@@ -174,8 +193,10 @@ func cursorFor(nq normalizedQuery, after, snapshot uint64, storeID string) strin
 	if !nq.since.IsZero() {
 		c.SinceAt = formatTime(nq.since)
 	}
+
 	if !nq.until.IsZero() {
 		c.UntilAt = formatTime(nq.until)
 	}
+
 	return encodeCursor(c)
 }

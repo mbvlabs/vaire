@@ -26,14 +26,17 @@ func newEndpoint(ctx context.Context, c *workspaces.Workspace, stored string) st
 	if c.TLSMode != "acme" {
 		return ""
 	}
+
 	host := c.MasterHostname()
 	if host == "" {
 		return ""
 	}
+
 	var answers [][]string
 	for _, server := range publicResolvers {
 		answers = append(answers, resolveWith(ctx, server, host).A)
 	}
+
 	return pickEndpoint(stored, answers...)
 }
 
@@ -41,33 +44,41 @@ func newEndpoint(ctx context.Context, c *workspaces.Workspace, stored string) st
 // it differs from stored.
 func pickEndpoint(stored string, answers ...[]string) string {
 	var want string
+
 	for _, a := range answers {
 		if len(a) == 0 {
 			continue
 		}
+
 		if len(a) != 1 || (want != "" && a[0] != want) {
 			return ""
 		}
+
 		want = a[0]
 	}
+
 	if want == "" || want == stored {
 		return ""
 	}
+
 	return want
 }
 
 // setMasterAddress stores addr (and port, when set) as c's master endpoint.
 func setMasterAddress(c *workspaces.Workspace, addr string, port int) (string, error) {
 	old := ""
+
 	for i := range c.Nodes {
 		if c.Nodes[i].Role == workspaces.RoleMaster || len(c.Nodes) == 1 {
 			old = c.Nodes[i].PublicAddress
+
 			c.Nodes[i].PublicAddress = addr
 			if port > 0 {
 				c.Nodes[i].ListenPort = port
 			}
 		}
 	}
+
 	return old, workspaces.Save(c)
 }
 
@@ -78,19 +89,24 @@ func healEndpoint(ctx context.Context, c *workspaces.Workspace, err error) (bool
 	if !errors.As(err, &cliErr) || (cliErr.Code != output.CodeTransportFailed && cliErr.Code != output.CodeRemoteUnreachable) {
 		return false, output.Warning{}
 	}
+
 	n, ok := c.Master()
 	if !ok {
 		return false, output.Warning{}
 	}
+
 	addr := newEndpoint(ctx, c, n.PublicAddress)
 	if addr == "" {
 		return false, output.Warning{}
 	}
+
 	stopTunnelDaemonQuietly(ctx, c.Name)
+
 	old, serr := setMasterAddress(c, addr, 0)
 	if serr != nil {
 		return false, output.Warning{}
 	}
+
 	return true, output.Warning{Code: "workspace_endpoint_updated",
 		Message: c.MasterHostname() + " now resolves to " + addr + " (was " + old + "): workspace " + c.Name + " was updated; the server was likely rebuilt"}
 }
@@ -105,6 +121,7 @@ func markEndpointHealed(cmd *cobra.Command) {
 	if cmd.Annotations == nil {
 		cmd.Annotations = map[string]string{}
 	}
+
 	cmd.Annotations[endpointHealedKey] = "1"
 }
 
@@ -113,18 +130,22 @@ func parseEndpoint(v string) (string, int, error) {
 	if ip, err := netip.ParseAddr(v); err == nil {
 		return ip.Unmap().String(), 0, nil
 	}
+
 	host, portStr, err := net.SplitHostPort(v)
 	if err != nil {
 		return "", 0, err
 	}
+
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
 		return "", 0, err
 	}
+
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
 		return "", 0, errors.New("port must be 1-65535")
 	}
+
 	return ip.Unmap().String(), port, nil
 }
 
@@ -133,23 +154,29 @@ func runWorkspaceSetAddress(cmd *cobra.Command, args []string) error {
 	if name == "" {
 		name = stringFlag(cmd, "workspace")
 	}
+
 	c, err := workspaces.Resolve(name)
 	if err != nil {
 		return err
 	}
+
 	addr, port, err := parseEndpoint(args[0])
 	if err != nil {
 		return output.NewError(output.CodeUsage, args[0]+" is not an IP address (ip, ip:port or [ipv6]:port): "+err.Error(), output.ExitUsage, "")
 	}
+
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]any{"workspace": c.Name, "public_address": addr, "dry_run": true},
 			Message: "dry run: would point workspace " + c.Name + " at " + addr})
 	}
+
 	stopTunnelDaemonQuietly(commandContext(cmd), c.Name)
+
 	old, err := setMasterAddress(c, addr, port)
 	if err != nil {
 		return err
 	}
+
 	return output.Success(cmd, output.Result{Data: map[string]any{"workspace": c.Name, "public_address": addr, "old_address": old},
 		Message: "workspace " + c.Name + " now reaches the server's WireGuard at " + addr + " (was " + old + ")"})
 }

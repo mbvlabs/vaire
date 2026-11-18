@@ -51,6 +51,7 @@ func Connect(ctx context.Context, dialer transport.Dialer, p Params) (*Remote, e
 	if err != nil {
 		return nil, err
 	}
+
 	cfg.Host = p.Host
 	cfg.Port = uint16(p.Port) //nolint:gosec // G115: validated 1-65535.
 	cfg.User = p.User
@@ -60,17 +61,21 @@ func Connect(ctx context.Context, dialer transport.Dialer, p Params) (*Remote, e
 	cfg.DialFunc = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", p.Host, p.Port))
 	}
+
 	cfg.TLSConfig = tlsConfig(p)
 	if p.SimpleProtocol {
 		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	}
+
 	if p.ApplicationName != "" {
 		cfg.RuntimeParams["application_name"] = p.ApplicationName
 	}
+
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+
 	return &Remote{conn: conn}, nil
 }
 
@@ -78,6 +83,7 @@ func tlsConfig(p Params) *tls.Config {
 	if p.TLSMode == "require" || p.TLSMode == "self-signed" {
 		return &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // G402: self-signed mode cannot verify.
 	}
+
 	return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: p.ServerName}
 }
 
@@ -98,27 +104,35 @@ func (r *Remote) Query(ctx context.Context, sql string, args ...any) (*Result, e
 		return nil, err
 	}
 	defer rows.Close()
+
 	res := &Result{}
 	for _, fd := range rows.FieldDescriptions() {
 		res.Columns = append(res.Columns, fd.Name)
 	}
+
 	for rows.Next() {
 		values := rows.RawValues()
+
 		row := make([]*string, len(values))
 		for i, v := range values {
 			if v == nil {
 				continue
 			}
+
 			s := string(v)
 			row[i] = &s
 		}
+
 		res.Rows = append(res.Rows, row)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
 	res.CommandTag = rows.CommandTag().String()
 	res.RowCount = len(res.Rows)
+
 	return res, nil
 }
 
@@ -130,15 +144,19 @@ func (r *Remote) Query(ctx context.Context, sql string, args ...any) (*Result, e
 // do not run.
 func (r *Remote) QueryAll(ctx context.Context, sql string) ([]*Result, error) {
 	mrr := r.conn.PgConn().Exec(ctx, sql)
+
 	var out []*Result
+
 	for mrr.NextResult() {
 		res, err := readResult(mrr.ResultReader())
 		if err != nil {
 			_ = mrr.Close()
 			return out, err
 		}
+
 		out = append(out, res)
 	}
+
 	return out, mrr.Close()
 }
 
@@ -150,24 +168,31 @@ func readResult(rr *pgconn.ResultReader) (*Result, error) {
 	for _, fd := range rr.FieldDescriptions() {
 		out.Columns = append(out.Columns, fd.Name)
 	}
+
 	for rr.NextRow() {
 		values := rr.Values()
+
 		row := make([]*string, len(values))
 		for i, v := range values {
 			if v == nil {
 				continue
 			}
+
 			s := string(v)
 			row[i] = &s
 		}
+
 		out.Rows = append(out.Rows, row)
 	}
+
 	tag, err := rr.Close()
 	if err != nil {
 		return nil, err
 	}
+
 	out.CommandTag = tag.String()
 	out.RowCount = len(out.Rows)
+
 	return out, nil
 }
 
@@ -176,6 +201,7 @@ func (r *Result) Maps() []map[string]string {
 	if r == nil {
 		return nil
 	}
+
 	out := make([]map[string]string, 0, len(r.Rows))
 	for _, row := range r.Rows {
 		m := make(map[string]string, len(r.Columns))
@@ -184,8 +210,10 @@ func (r *Result) Maps() []map[string]string {
 				m[c] = *row[i]
 			}
 		}
+
 		out = append(out, m)
 	}
+
 	return out
 }
 
@@ -195,5 +223,6 @@ func (r *Remote) Exec(ctx context.Context, sql string, args ...any) (string, err
 	if err != nil {
 		return "", err
 	}
+
 	return tag.String(), nil
 }
