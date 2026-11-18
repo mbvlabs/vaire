@@ -19,7 +19,7 @@ sha256_hex() {
 }
 
 json_string() {
-  sed -n "s/.*\"${1}\": \"\\([^\"]*\\)\".*/\\1/p" "$2" | head -1
+  sed -n "s/.*\"${1}\": *\"\\([^\"]*\\)\".*/\\1/p" "$2" | head -1
 }
 
 print_path_hint() {
@@ -185,9 +185,9 @@ got="$(sha256_hex "${work_dir}/vaire")"
 chmod 0755 "${work_dir}/vaire"
 
 smoke="$("${work_dir}/vaire" version --output json)" || fail "downloaded vaire failed to run"
-smoke_version="$(printf '%s\n' "${smoke}" | sed -n 's/.*"version": "\([^"]*\)".*/\1/p' | head -1)"
+smoke_version="$(printf '%s\n' "${smoke}" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1)"
 [ "${smoke_version}" = "${manifest_version}" ] || fail "downloaded vaire reported ${smoke_version}, expected ${manifest_version}"
-smoke_channel="$(printf '%s\n' "${smoke}" | sed -n 's/.*"channel": "\([^"]*\)".*/\1/p' | head -1)"
+smoke_channel="$(printf '%s\n' "${smoke}" | sed -n 's/.*"channel": *"\([^"]*\)".*/\1/p' | head -1)"
 [ "${smoke_channel}" = "${manifest_channel}" ] || fail "downloaded vaire reported channel ${smoke_channel}, expected ${manifest_channel}"
 
 if [ "$(id -u)" -eq 0 ]; then

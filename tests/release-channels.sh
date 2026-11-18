@@ -359,6 +359,16 @@ if grep -Fq -- '--recursive' "${work}/aws.log"; then
   exit 1
 fi
 
+make_upload_tree "${work}/tree" edge 1.0.0-alpha.1 edge
+: >"${work}/aws.log"
+bash scripts/upload-release.sh "${work}/tree" edge bucket https://example.invalid channel >/dev/null
+grep -Fq 's3://bucket/edge/install.sh' "${work}/aws.log"
+
+make_upload_tree "${work}/tree" 1.x 1.2.0 stable
+: >"${work}/aws.log"
+bash scripts/upload-release.sh "${work}/tree" stable-1.x bucket https://example.invalid channel >/dev/null
+grep -Fq 's3://bucket/1.x/install.sh' "${work}/aws.log"
+
 make_upload_tree "${work}/tree" . 1.0.0-alpha.1 stable
 expect_upload_fail 'stable pointer with alpha' "${work}/tree" stable \
   'refusing to publish prerelease' channel
