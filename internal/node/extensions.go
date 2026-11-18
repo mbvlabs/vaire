@@ -27,11 +27,12 @@ import (
 	"github.com/mbvlabs/vaire/internal/steps"
 )
 
-// ext (Phase 7): list, add and remove one database's extensions. The package
-// install is server-wide (postgres-packages-v1), the preload and restart touch
-// only the named database's cluster, and CREATE/UPDATE/DROP SQL runs in that
-// database. A source with followers is refused here until follower
-// propagation is implemented; a follower is always refused by the dispatcher.
+// ext (Phase 7): list and add one database's extensions. The package install
+// is server-wide (postgres-packages-v1), the preload and restart touch only the
+// named database's cluster, and CREATE/UPDATE SQL runs in that database. A
+// source with followers is refused here until follower propagation is
+// implemented; a follower is always refused by the dispatcher. Removal is
+// refused in this release.
 
 const (
 	extensionControlDirDefault = "/usr/share/postgresql/18/extension"
@@ -1032,7 +1033,19 @@ func extensionAddUpdateIfNeeded(ctx context.Context, updated config.Cluster, upd
 	return extensionAddUpdate{Previous: previous, Version: actual.Version, Updated: true}, nil
 }
 
-func handleExtRemove(ctx context.Context, env *Env) (Result, error) {
+// handleExtRemove refuses the explicit removal command before reading the
+// target, records or configuration. The transition below remains as the
+// retained removal implementation, but no node entry point exposes it.
+func handleExtRemove(_ context.Context, env *Env) (Result, error) {
+	var p extRemoveParams
+	if err := decodeParams(env.Req.Params, &p); err != nil {
+		return Result{}, err
+	}
+
+	return Result{}, extensionRemovalUnsupported(strings.TrimSpace(p.DB), strings.TrimSpace(p.Name))
+}
+
+func extensionRemoveExecute(ctx context.Context, env *Env) (Result, error) {
 	ctx = steps.WithFollowerRuntimeOperation(ctx, env.Req.RequestID)
 
 	p, err := extensionRemoveParams(env)
@@ -2248,7 +2261,7 @@ func extensionNotFound(name string) error {
 func extensionNotManaged(name string) error {
 	return output.NewError(output.CodePrecondition,
 		name+" is preload-only and has no CREATE EXTENSION name", output.ExitPrecondition,
-		"It is configured through its settings; vaire ext add and ext remove only manage SQL extensions.").
+		"It is configured through its settings; vaire ext add manages only SQL extensions.").
 		WithDetails(map[string]any{"reason": "extension_not_managed", "extension": name})
 }
 

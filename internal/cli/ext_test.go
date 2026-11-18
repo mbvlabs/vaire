@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -37,7 +39,7 @@ func TestExtCommandMetadata(t *testing.T) {
 		needsRestart               string
 	}{
 		"ext add":    {mutating: true, dry: true, confirm: "{db}/restart", needsRestart: "maybe"},
-		"ext remove": {mutating: true, dry: true, destructive: true, confirm: "{db}", needsRestart: "maybe"},
+		"ext remove": {needsRestart: "never"},
 		"ext list":   {needsRestart: "never"},
 	} {
 		cmd, _, err := root.Find(strings.Split(path, " "))
@@ -86,9 +88,58 @@ func TestExtMessages(t *testing.T) {
 	if got := extAddMessage(extAddResult{Extension: "vector", Database: "app", PreviousVersion: "0.8.0", Version: "0.9.0", Updated: true}); !strings.Contains(got, "updated vector in app from 0.8.0 to 0.9.0") {
 		t.Errorf("update message = %q", got)
 	}
+}
 
-	if got := extRemoveMessage(extRemoveResult{Extension: "vector", Database: "app", Cascade: true, Dependents: []string{"x"}, DependentsTotal: 2, PackageKept: "postgresql-18-pgvector"}); !strings.Contains(got, "removed vector from app") || !strings.Contains(got, "2 dependent objects") || !strings.Contains(got, "package postgresql-18-pgvector stays installed") {
-		t.Errorf("remove message = %q", got)
+func TestExtRemoveIsUnsupported(t *testing.T) {
+	err := runExtRemove(&cobra.Command{}, []string{"vector"})
+	if err == nil {
+		t.Fatal("ext remove was accepted")
+	}
+
+	var cliErr *output.CLIError
+	if !errors.As(err, &cliErr) {
+		t.Fatalf("error is not typed: %T %v", err, err)
+	}
+
+	details, _ := cliErr.Details.(map[string]any)
+	if details["reason"] != "extension_remove_unsupported" {
+		t.Fatalf("details = %+v", details)
+	}
+
+	if !strings.Contains(cliErr.Error(), "not supported") || strings.Contains(cliErr.Hint, "vaire ext remove") {
+		t.Fatalf("error = %v", cliErr)
+	}
+
+	withDB := &cobra.Command{Use: "ext remove"}
+	withDB.Flags().String("db", "", "")
+
+	if err := withDB.Flags().Set("db", "app"); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runExtRemove(withDB, []string{"vector"})
+	if !errors.As(err, &cliErr) || !strings.Contains(cliErr.Error(), "from app") {
+		t.Fatalf("ext remove with --db = %v", err)
+	}
+
+	if details, _ = cliErr.Details.(map[string]any); details["database"] != "app" {
+		t.Fatalf("ext remove with --db details = %+v", details)
+	}
+
+	root := NewRoot()
+
+	cmd, _, err := root.Find([]string{"ext", "remove"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cmd.Flags().Lookup("cascade") != nil || cmd.Flags().Lookup("confirm") != nil {
+		t.Fatalf("ext remove kept removal flags: %v", cmd.Flags().Lookup("cascade"))
+	}
+
+	meta, ok := metaFor(cmd)
+	if !ok || meta.Mutating || meta.Destructive || meta.SupportsDryRun || !strings.Contains(meta.Summary, "not supported") {
+		t.Fatalf("ext remove metadata = %+v", meta)
 	}
 }
 
@@ -142,24 +193,6 @@ func TestExtAddRemoveLikelyRestart(t *testing.T) {
 
 	if !extAddLikelyNeedsRestart(cliExtCfg("pg_stat_statements", "pg_cron"), "app", "pg_cron", "", map[string]any{}) {
 		t.Fatal("an already enabled preload extension was not predicted to need a restart")
-	}
-
-	cronCfg := cliExtCfg("pg_stat_statements", "pg_cron")
-	if !extRemoveLikelyNeedsRestart(cronCfg, "app", "pg_cron") {
-		t.Fatal("pg_cron remove was not predicted to need a restart")
-	}
-
-	if extRemoveLikelyNeedsRestart(cfg, "app", "pg_trgm") {
-		t.Fatal("pg_trgm remove was predicted to need a restart")
-	}
-
-	settingsCfg := cliExtCfg("pg_stat_statements", "pg_trgm")
-
-	settingsCfg.Extensions = map[string]config.ExtensionDefinition{
-		"pg_trgm": {Settings: map[string]string{"max_files_per_process": "2000"}},
-	}
-	if !extRemoveLikelyNeedsRestart(settingsCfg, "app", "pg_trgm") {
-		t.Fatal("pg_trgm settings remove was not predicted to need a restart")
 	}
 }
 

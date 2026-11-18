@@ -464,7 +464,7 @@ func TestExtRemoveFollowerUnrenderedConfigDriftRequiresTokenBeforeEffects(t *tes
 	req := request("ext.remove", map[string]any{"name": "pg_trgm", "db": "app"})
 
 	req.Confirm = "app"
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil || !strings.Contains(err.Error(), "app_follower_1/restart") {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil || !strings.Contains(err.Error(), "app_follower_1/restart") {
 		t.Fatalf("missing follower config-drift token = %v", err)
 	}
 
@@ -473,7 +473,7 @@ func TestExtRemoveFollowerUnrenderedConfigDriftRequiresTokenBeforeEffects(t *tes
 	}
 
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -504,7 +504,7 @@ func TestExtRemoveWithFollowersDropsBeforeSavingAndPrimaryFirst(t *testing.T) {
 	req.Confirm = "app"
 
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -653,7 +653,7 @@ func TestExtRemoveRetriesSavedIntentWithSQLAbsent(t *testing.T) {
 	req.Confirm = "app"
 
 	req.Confirms = []string{"app/restart"}
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("a saved-intent retry was refused: %v", err)
 	}
 
@@ -842,7 +842,7 @@ func TestExtRemoveWithFollowersMissingEachTokenHasNoEffect(t *testing.T) {
 				}
 			}
 
-			if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil {
+			if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err == nil {
 				t.Fatalf("missing %s was accepted", missing)
 			}
 
@@ -1045,7 +1045,7 @@ func TestExtRemovePartialRetryEmbedsAllTokens(t *testing.T) {
 	req.Confirm = "app"
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
 
-	_, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg})
+	_, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil {
 		t.Fatal("the failure was reported as success")
 	}
@@ -1329,7 +1329,7 @@ func TestExtRemoveRetryFinishesFollowersAfterPrimaryConverged(t *testing.T) {
 	req.Confirm = "app"
 
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("the advertised retry refused the follower-only work: %v", err)
 	}
 
@@ -1474,7 +1474,7 @@ func TestSourceCronChangeDoesNotSettleCopy(t *testing.T) {
 	req.Confirm = "app"
 
 	req.Confirms = []string{"app/restart"}
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatal(err)
 	}
 

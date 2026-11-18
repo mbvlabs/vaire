@@ -88,7 +88,7 @@ func TestExtRemoveHistoryCaptureFailureReportsPartialState(t *testing.T) {
 
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_history_capture_failed" {
 		t.Fatalf("capture failure = %v", err)
 	}
@@ -144,7 +144,7 @@ func TestExtRemovePostDropSaveFailureReportsActualState(t *testing.T) {
 
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_intent_save_failed" {
 		t.Fatalf("save failure = %v", err)
 	}
@@ -191,7 +191,7 @@ func TestExtRemoveSaveFailureWithoutDropReportsNoSQLStage(t *testing.T) {
 
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_intent_save_failed" {
 		t.Fatalf("save failure = %v", err)
 	}
@@ -233,7 +233,7 @@ func TestExtRemovePostDropSaveFailureKeepsRestartState(t *testing.T) {
 
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_cron", "db": "app"}, "app", "app/restart")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_intent_save_failed" {
 		t.Fatalf("save failure = %v", err)
 	}

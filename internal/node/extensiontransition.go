@@ -2154,7 +2154,7 @@ func extensionStartFailure(err error, database string, started, pending []string
 
 	if stage == extensionStartStageUnload {
 		details["old_configuration_retained"] = true
-		hint = failed + " was started on its old configuration; the reduced configuration and SQL were not applied. Remove the extension that still needs the old library with vaire ext remove <name> --db " + database + ", then retry apply."
+		hint = failed + " was started on its old configuration; the reduced configuration and SQL were not applied. Keep the library that the installed extension still needs; this release does not remove extensions. Run vaire apply --db " + database + ", then retry apply."
 	} else {
 		details["start_unknown_reason"] = extensionStartUnknownReason
 		hint = "The start of " + failed + " was attempted, but its final state is unknown. Configuration and SQL were not applied; package files may already be installed. Check vaire status --db " + failed + ", then retry apply."

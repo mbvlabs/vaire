@@ -159,29 +159,36 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
-func TestConfigRemovalRequiresExtRemove(t *testing.T) {
+func TestConfigSelectionReductionIsPure(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Clusters = []config.ClusterSpec{{Name: "app", Port: 5433, Extensions: []string{"pg_trgm", "pg_repack"}}}
 	updated := cfg.Clone()
 	updated.Clusters[0].Extensions = []string{"pg_trgm"}
 	oldRecords, oldInstalled, oldRunning := extensionRecords, extensionInstalled, extensionClusterRunning
-	extensionRecords = func() (backup.Records, error) { return backup.Records{}, nil }
-	extensionClusterRunning = func(config.ClusterSpec) bool { return true }
+	extensionRecords = func() (backup.Records, error) {
+		t.Fatal("pure selection reduction read records")
+		return backup.Records{}, nil
+	}
+	extensionClusterRunning = func(config.ClusterSpec) bool {
+		t.Fatal("pure selection reduction read runtime state")
+		return true
+	}
 	extensionInstalled = func(context.Context, config.ClusterSpec) (map[string]extensionInstalledVersion, error) {
-		return map[string]extensionInstalledVersion{"pg_repack": {Name: "pg_repack", Version: "1.5"}}, nil
+		t.Fatal("pure selection reduction read the installed SQL catalog")
+		return nil, nil
 	}
 
 	t.Cleanup(func() {
 		extensionRecords, extensionInstalled, extensionClusterRunning = oldRecords, oldInstalled, oldRunning
 	})
 
-	err := refuseUnsafeExtensionConfigRemoval(context.Background(), cfg, updated)
-	if err == nil || extReason(t, err) != "extension_remove_required" {
-		t.Fatalf("config removal without DROP = %v", err)
+	err := refuseExtensionSelectionReduction(cfg, updated)
+	if err == nil || extReason(t, err) != "extension_remove_unsupported" {
+		t.Fatalf("config removal = %v", err)
 	}
 
 	updated.Clusters[0].Extensions = []string{"pg_trgm", "pg_repack"}
-	if err := refuseUnsafeExtensionConfigRemoval(context.Background(), cfg, updated); err != nil {
+	if err := refuseExtensionSelectionReduction(cfg, updated); err != nil {
 		t.Fatalf("a no-op removal was refused: %v", err)
 	}
 }

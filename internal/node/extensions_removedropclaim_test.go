@@ -60,7 +60,7 @@ func TestExtRemoveConfigFailureReportsActualSQLDrop(t *testing.T) {
 
 			env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-			_, err := handleExtRemove(context.Background(), env)
+			_, err := extensionRemoveExecute(context.Background(), env)
 			if err == nil || extReason(t, err) != "extension_apply_failed" {
 				t.Fatalf("config failure = %v", err)
 			}
@@ -92,7 +92,7 @@ func TestExtRemovePendingRestartReportsActualSQLDrop(t *testing.T) {
 
 			env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-			_, err := handleExtRemove(context.Background(), env)
+			_, err := extensionRemoveExecute(context.Background(), env)
 			if err == nil || extReason(t, err) != "extension_pending_restart" {
 				t.Fatalf("pending restart = %v", err)
 			}
@@ -126,7 +126,7 @@ func TestExtRemoveRestartFailureReportsActualSQLDrop(t *testing.T) {
 
 			env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app", "app/restart")}
 
-			_, err := handleExtRemove(context.Background(), env)
+			_, err := extensionRemoveExecute(context.Background(), env)
 			if err == nil || extReason(t, err) != "extension_apply_failed" {
 				t.Fatalf("restart failure = %v", err)
 			}
@@ -160,7 +160,7 @@ func TestExtRemoveVerifyFailureReportsActualSQLDrop(t *testing.T) {
 
 			env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-			_, err := handleExtRemove(context.Background(), env)
+			_, err := extensionRemoveExecute(context.Background(), env)
 			if err == nil || extReason(t, err) != "extension_verify_failed" {
 				t.Fatalf("verify failure = %v", err)
 			}
@@ -197,7 +197,7 @@ func TestExtRemoveStillInstalledReportsActualSQLDrop(t *testing.T) {
 
 			env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-			_, err := handleExtRemove(context.Background(), env)
+			_, err := extensionRemoveExecute(context.Background(), env)
 			if err == nil || extReason(t, err) != "extension_drop_failed" {
 				t.Fatalf("still-installed verification = %v", err)
 			}
@@ -232,7 +232,7 @@ func TestExtRemoveSQLOnlyVerifyFailureReportsExecutedDrop(t *testing.T) {
 
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_verify_failed" {
 		t.Fatalf("SQL-only verify failure = %v", err)
 	}
@@ -263,7 +263,7 @@ func testRemoveRetryConfigFailure(t *testing.T) {
 	}
 	env := &Env{Cluster: h.cfg, Req: extReq(t, params, "app", "app/restart")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_apply_failed" {
 		t.Fatalf("retry config failure = %v", err)
 	}
@@ -291,7 +291,7 @@ func testRemoveRetryVerificationFailure(t *testing.T) {
 	}
 	env := &Env{Cluster: h.cfg, Req: extReq(t, params, "app", "app/restart")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_verify_failed" {
 		t.Fatalf("retry verification failure = %v", err)
 	}
@@ -369,7 +369,7 @@ func testFollowerRemovePrimaryConfigFailure(t *testing.T, installed bool) {
 
 		return engine.ApplyData{}, nil
 	}
-	_, err := handleExtRemove(context.Background(), followerRemoveEnv(t, cfg))
+	_, err := extensionRemoveExecute(context.Background(), followerRemoveEnv(t, cfg))
 	assertFollowerRemoveFailure(t, h, err, installed, "extension_apply_failed", nil, []string{"app"})
 }
 
@@ -383,7 +383,7 @@ func testFollowerRemoveFollowerConfigFailure(t *testing.T, installed bool) {
 
 		return engine.ApplyData{}, nil
 	}
-	_, err := handleExtRemove(context.Background(), followerRemoveEnv(t, cfg))
+	_, err := extensionRemoveExecute(context.Background(), followerRemoveEnv(t, cfg))
 	assertFollowerRemoveFailure(t, h, err, installed, "extension_apply_failed", []string{"app"}, []string{"app_follower_1"})
 }
 
@@ -392,7 +392,7 @@ func testFollowerRemoveFollowerPreloadMissing(t *testing.T, installed bool) {
 	h, cfg := newFollowerRemoveFailureHarness(t, installed)
 	h.preloadLoaded = map[string]bool{}
 	h.preloadPending = false
-	_, err := handleExtRemove(context.Background(), followerRemoveEnv(t, cfg))
+	_, err := extensionRemoveExecute(context.Background(), followerRemoveEnv(t, cfg))
 	assertFollowerRemoveFailure(t, h, err, installed, "extension_preload_missing", []string{"app"}, []string{"app_follower_1"})
 }
 
@@ -434,7 +434,7 @@ func TestExtRemoveFollowerReplayPendingWithoutDropReportsNoSQLDrop(t *testing.T)
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_cron", "db": "app"},
 		"app", "app/restart", "app_follower_1/restart", "app_follower_2/restart")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_follower_replay_pending" {
 		t.Fatalf("follower replay pending = %v", err)
 	}

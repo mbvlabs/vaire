@@ -2439,7 +2439,7 @@ func refuseLoadedExtensionUnload(spec config.ClusterSpec, installed, desired, ke
 					return output.NewError(output.CodePrecondition,
 						"applying this configuration would unload "+p+" while unmanaged extension "+name+"'s SQL is still installed in "+spec.Name,
 						output.ExitPrecondition,
-						"Declare it in [extensions.<name>] with copy/standby safety, or remove it with vaire ext remove. This configuration was not applied; earlier steps may have run.").
+						"Declare it in [extensions.<name>] with copy/standby safety and keep its library configured; this release does not remove extensions. This configuration was not applied; earlier steps may have run.").
 						WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name, "extension": name, "library": p})
 				}
 			}
@@ -2451,7 +2451,7 @@ func refuseLoadedExtensionUnload(spec config.ClusterSpec, installed, desired, ke
 			return output.NewError(output.CodePrecondition,
 				"applying this configuration would unload "+ext.Preload+" while "+name+"'s SQL is still installed in "+spec.Name,
 				output.ExitPrecondition,
-				"Remove it with vaire ext remove "+ext.Name+" --db "+spec.Name+" --confirm "+spec.Name+", or add it to extensions. This configuration was not applied; earlier steps may have run.").
+				"Add it to extensions or keep its preload configured; this release does not remove extensions. This configuration was not applied; earlier steps may have run.").
 				WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name, "extension": ext.Name, "library": ext.Preload})
 		}
 	}
@@ -2499,7 +2499,7 @@ func refuseUnloadFromManagedFiles(cfg config.Cluster, spec config.ClusterSpec) e
 		return output.NewError(output.CodePrecondition,
 			"applying this configuration would unload "+p+" from "+spec.Name+", but its cluster is stopped or unreadable so vaire cannot prove no installed extension still uses it",
 			output.ExitPrecondition,
-			"Start "+spec.Name+" and retry so vaire can read pg_extension, or remove the extension with vaire ext remove before changing its preload. This configuration was not applied; earlier steps may have run.").
+			"Start "+spec.Name+" and retry so vaire can read pg_extension, or keep its preload configured; this release does not remove extensions. This configuration was not applied; earlier steps may have run.").
 			WithDetails(map[string]any{"reason": "extension_unload_unproven", "database": spec.Name, "library": p})
 	}
 

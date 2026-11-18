@@ -91,7 +91,7 @@ func testFollowerCatalogFailureExtRemove(t *testing.T) {
 	req.Confirm = "app"
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
 
-	_, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg})
+	_, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil || extReason(t, err) != "follower_sql_unknown" {
 		t.Fatalf("ext remove = %v", err)
 	}
@@ -1032,7 +1032,7 @@ func TestFollowerRemovalCatalogErrorAfterDropKeepsGuardPending(t *testing.T) {
 	req.Confirm = "app"
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
 
-	_, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg})
+	_, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil || extReason(t, err) != "extension_follower_replay_pending" {
 		t.Fatalf("post-DROP catalog error = %v", err)
 	}
@@ -1080,7 +1080,7 @@ func TestFollowerRemovalImmediateAbsenceCompletes(t *testing.T) {
 	req.Confirm = "app"
 
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("immediate absence removal = %v", err)
 	}
 
@@ -1166,7 +1166,7 @@ func TestFollowerRemovalReplayPendingKeepsGuardAndRetriesWithoutDrop(t *testing.
 	req.Confirm = "app"
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
 
-	_, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg})
+	_, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg})
 	if err == nil || extReason(t, err) != "extension_follower_replay_pending" {
 		t.Fatalf("lagging removal = %v", err)
 	}
@@ -1206,7 +1206,7 @@ func TestFollowerRemovalReplayPendingKeepsGuardAndRetriesWithoutDrop(t *testing.
 	req.Confirm = "app"
 
 	req.Confirms = []string{"app/restart", "app_follower_1/restart", "app_follower_2/restart"}
-	if _, err := handleExtRemove(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
+	if _, err := extensionRemoveExecute(context.Background(), &Env{Req: req, Cluster: cfg}); err != nil {
 		t.Fatalf("retry after replay absence = %v", err)
 	}
 

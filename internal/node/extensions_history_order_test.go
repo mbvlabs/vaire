@@ -394,7 +394,7 @@ func TestExtRemoveWithFollowersCapturePartialRetainsHistory(t *testing.T) {
 
 	t.Cleanup(func() { extensionCaptureRequirements = oldCapture })
 
-	_, err := handleExtRemove(context.Background(), &Env{Req: pgCronRemoveRequest(), Cluster: cfg})
+	_, err := extensionRemoveExecute(context.Background(), &Env{Req: pgCronRemoveRequest(), Cluster: cfg})
 	if err == nil || extReason(t, err) != "extension_history_capture_failed" {
 		t.Fatalf("partial remove capture = %v", err)
 	}
@@ -430,7 +430,7 @@ func TestExtRemoveWithFollowersSaveFailureAfterDropIsTypedPartial(t *testing.T) 
 	}
 	h.saveErrAt[1] = errors.New("disk full")
 
-	_, err := handleExtRemove(context.Background(), &Env{Req: pgCronRemoveRequest(), Cluster: cfg})
+	_, err := extensionRemoveExecute(context.Background(), &Env{Req: pgCronRemoveRequest(), Cluster: cfg})
 	if err == nil || extReason(t, err) != "extension_intent_save_failed" {
 		t.Fatalf("post-DROP save failure = %v", err)
 	}

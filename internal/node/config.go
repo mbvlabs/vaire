@@ -80,6 +80,18 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	// These pure policy checks run before protection verification so a
+	// combined destructive request cannot consume a TOTP code before it is
+	// refused. Deleting a database declaration belongs to db drop, not a
+	// configuration edit.
+	if err := refuseClusterDeclarationRemoval(old, cfg); err != nil {
+		return Result{}, err
+	}
+
+	if err := refuseExtensionSelectionReduction(old, cfg); err != nil {
+		return Result{}, err
+	}
+
 	if err := guardRecoveryFloorChanges(old, cfg, runtimeFor(env, true).Host); err != nil {
 		return Result{}, err
 	}
@@ -118,6 +130,26 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return Result{Data: data, Warnings: warnings}, nil
+}
+
+// refuseClusterDeclarationRemoval keeps cluster deletion on its guarded path.
+// Removing any existing primary or follower declaration from cluster.toml
+// would bypass db drop's protection, follower, stanza, role and cleanup work,
+// so a configuration edit must refuse it before other safety checks.
+func refuseClusterDeclarationRemoval(old, updated config.Cluster) error {
+	for _, spec := range old.Clusters {
+		if _, ok := updated.ClusterByName(spec.Name); ok {
+			continue
+		}
+
+		return output.NewError(output.CodePrecondition,
+			"removing the database declaration for "+spec.Name+" is not supported",
+			output.ExitPrecondition,
+			"Drop it explicitly with vaire db drop "+spec.Name+" --confirm "+spec.Name+"; a configuration edit never deletes a database. Nothing was changed.").
+			WithDetails(map[string]any{"reason": "database_drop_required", "database": spec.Name})
+	}
+
+	return nil
 }
 
 // prepareConfigSet builds the desired configuration and propagates a

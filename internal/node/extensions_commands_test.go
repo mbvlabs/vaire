@@ -607,7 +607,7 @@ func TestExtRemoveDefaultModuleRefused(t *testing.T) {
 	h := newExtHarness(t, extTestCfg("pg_stat_statements"))
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_stat_statements", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_default" {
 		t.Fatalf("default remove: %v", err)
 	}
@@ -768,7 +768,7 @@ func TestExtRemoveMissingDBTokenHasZeroEffects(t *testing.T) {
 	}
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extDetails(t, err)["confirm_token"] != "app" {
 		t.Fatalf("missing db token: %v", err)
 	}
@@ -784,7 +784,7 @@ func TestExtRemoveProtectedRefused(t *testing.T) {
 	h := newExtHarness(t, cfg)
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "database_protected" {
 		t.Fatalf("protected remove: %v", err)
 	}
@@ -829,7 +829,7 @@ func TestExtRemoveDependentsPreviewAndCascade(t *testing.T) {
 	h := newExtDependentsHarness(t, cfg)
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_in_use" {
 		t.Fatalf("dependents without cascade: %v", err)
 	}
@@ -852,7 +852,7 @@ func TestExtRemoveDependentsPreviewAndCascade(t *testing.T) {
 	h = newExtDependentsHarness(t, cfg)
 	env = &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app", "cascade": true}, "app")}
 
-	res, err := handleExtRemove(context.Background(), env)
+	res, err := extensionRemoveExecute(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,7 +951,7 @@ func TestExtRemoveAutomaticOnlyDependenciesDoNotBlock(t *testing.T) {
 			}
 			env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": tt.name, "db": "app"}, "app", "app/restart")}
 
-			res, err := handleExtRemove(context.Background(), env)
+			res, err := extensionRemoveExecute(context.Background(), env)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1009,7 +1009,7 @@ func TestExtRemoveUserVectorDependenciesStayBlocking(t *testing.T) {
 	}
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "vector", "db": "app"})}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_in_use" {
 		t.Fatalf("user vector dependencies: %v", err)
 	}
@@ -1037,7 +1037,7 @@ func TestExtRemoveSQLAbsentReconcilesIntent(t *testing.T) {
 	}
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	res, err := handleExtRemove(context.Background(), env)
+	res, err := extensionRemoveExecute(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1065,7 +1065,7 @@ func TestExtRemoveSaveFailureAfterDropIsPartial(t *testing.T) {
 	h.saveErrAt[1] = errors.New("disk full")
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_intent_save_failed" {
 		t.Fatalf("save failure: %v", err)
 	}
@@ -1095,7 +1095,7 @@ func TestExtRemoveApplyFailureAfterSaveIsPartial(t *testing.T) {
 	}
 	env := &Env{Cluster: h.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_apply_failed" {
 		t.Fatalf("apply failure: %v", err)
 	}
@@ -2025,7 +2025,7 @@ func TestExtRemoveSettingsRemovalRequiresRestartTokenBeforeEffects(t *testing.T)
 	params := map[string]any{"name": "pg_trgm", "db": "app"}
 	env := &Env{Cluster: cfg, Req: extReq(t, params, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extDetails(t, err)["confirm_token"] != "app/restart" {
 		t.Fatalf("settings removal without restart token: %v", err)
 	}
@@ -2054,7 +2054,7 @@ func TestExtRemoveSettingsRemovalRequiresRestartTokenBeforeEffects(t *testing.T)
 	}
 	env = &Env{Cluster: cfg, Req: extReq(t, params, "app", "app/restart")}
 
-	res, err := handleExtRemove(context.Background(), env)
+	res, err := extensionRemoveExecute(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2085,7 +2085,7 @@ func TestExtRemoveDryRunHasZeroEffects(t *testing.T) {
 	}
 	env := &Env{Cluster: cfg, Req: rpc.Request{Params: mustJSON(t, map[string]any{"name": "pg_trgm", "db": "app"}), DryRun: true}}
 
-	res, err := handleExtRemove(context.Background(), env)
+	res, err := extensionRemoveExecute(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2142,7 +2142,7 @@ func TestExtHandlerRefusalsHaveZeroEffects(t *testing.T) {
 			}
 
 			removeEnv := &Env{Cluster: tc.cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"}, "app")}
-			if _, err := handleExtRemove(context.Background(), removeEnv); err == nil {
+			if _, err := extensionRemoveExecute(context.Background(), removeEnv); err == nil {
 				t.Fatal("remove was accepted")
 			}
 
@@ -2220,7 +2220,7 @@ func TestExtRemovePackageKept(t *testing.T) {
 	}
 	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "vector", "db": "app"}, "app")}
 
-	res, err := handleExtRemove(context.Background(), env)
+	res, err := extensionRemoveExecute(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2245,7 +2245,7 @@ func TestExtRemoveSQLAbsentRetryAfterSaveFailure(t *testing.T) {
 	params := map[string]any{"name": "pg_trgm", "db": "app"}
 	env := &Env{Cluster: cfg, Req: extReq(t, params, "app")}
 
-	_, err := handleExtRemove(context.Background(), env)
+	_, err := extensionRemoveExecute(context.Background(), env)
 	if err == nil || extReason(t, err) != "extension_intent_save_failed" {
 		t.Fatalf("first remove: %v", err)
 	}
@@ -2260,7 +2260,7 @@ func TestExtRemoveSQLAbsentRetryAfterSaveFailure(t *testing.T) {
 	h.saveErrAt = map[int]error{}
 	env = &Env{Cluster: cfg, Req: extReq(t, params, "app")}
 
-	res, err := handleExtRemove(context.Background(), env)
+	res, err := extensionRemoveExecute(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}

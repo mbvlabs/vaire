@@ -109,11 +109,44 @@ func followerIntentRefusal(follower, source string) error {
 		WithDetails(map[string]any{"reason": "follower_extension_intent", "database": follower, "source": source})
 }
 
-// refuseUnsafeExtensionConfigRemoval stops a plain configuration change from
-// unloading a library while its SQL extension is still installed, or from
-// switching an enabled extension's provider or schema without recreating it.
-// The safe path is the direct extension command, which drops while the library
-// is loaded.
+// refuseExtensionSelectionReduction is the pure config.set policy check for
+// extension removal. It needs no database, records or protection state, so it
+// can run before the safety checks that may consume a TOTP code. Reducing an
+// existing primary's effective current selection is refused; additions,
+// alias-equivalent spellings and changes outside the selection are not.
+func refuseExtensionSelectionReduction(old, updated config.Cluster) error {
+	for _, spec := range updated.Clusters {
+		if spec.IsFollower() {
+			continue
+		}
+
+		oldSpec, ok := old.ClusterByName(spec.Name)
+		if !ok {
+			continue
+		}
+
+		oldNames, err := old.ExtensionResolver().EffectiveNames(oldSpec.Extensions)
+		if err != nil {
+			return config.ValidationError(err)
+		}
+
+		newNames, err := updated.ExtensionResolver().EffectiveNames(spec.Extensions)
+		if err != nil {
+			return config.ValidationError(err)
+		}
+
+		if err := refuseRemovedExtensionSelection(spec.Name, oldNames, extensionNameSet(newNames)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// refuseUnsafeExtensionConfigRemoval is the later config.set guard for
+// descriptor safety: it refuses unloading a library while its SQL extension is
+// still installed, and switching an enabled extension's provider or schema
+// without recreating it.
 func refuseUnsafeExtensionConfigRemoval(ctx context.Context, old, updated config.Cluster) error {
 	recs, recErr := extensionRecords()
 
@@ -146,12 +179,7 @@ func refuseUnsafeExtensionConfigChange(ctx context.Context, recs backup.Records,
 		return config.ValidationError(err)
 	}
 
-	newSet := extensionNameSet(newNames)
-
 	oldSet := extensionNameSet(oldNames)
-	if err := refuseRemovedExtensionSelection(ctx, recs, recErr, old, spec, oldNames, newSet); err != nil {
-		return err
-	}
 
 	if err := refuseSelectedExtensionIdentity(old, updated, spec.Name, newNames, oldSet); err != nil {
 		return err
@@ -187,29 +215,19 @@ func extensionNameSet(names []string) map[string]bool {
 	return set
 }
 
-func refuseRemovedExtensionSelection(ctx context.Context, recs backup.Records, recErr error, old config.Cluster, spec config.ClusterSpec, oldNames []string, newSet map[string]bool) error {
+// refuseRemovedExtensionSelection refuses any reduction of a primary's
+// effective current selection. Installation and use remain supported, but this
+// release does not remove an extension, so the SQL-installed state no longer
+// decides this: a preload-only selection and a not-yet-installed SQL extension
+// are both declared intent. Additions, alias-equivalent spellings and changes
+// outside this selection are unaffected.
+func refuseRemovedExtensionSelection(db string, oldNames []string, newSet map[string]bool) error {
 	for _, name := range oldNames {
 		if newSet[name] {
 			continue
 		}
 
-		ext, err := old.ExtensionResolver().Resolve(name)
-		if err != nil {
-			return config.ValidationError(err)
-		}
-
-		if ext.ExtName == "" {
-			continue
-		}
-
-		installed, err := extensionSQLInstalled(ctx, recs, recErr, spec, ext.ExtName)
-		if err != nil {
-			return err
-		}
-
-		if installed {
-			return extensionRemoveRequired(spec.Name, ext.Name, "removed from cluster.toml")
-		}
+		return extensionRemoveUnsupported(db, name)
 	}
 
 	return nil
@@ -300,7 +318,7 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			spec.Name+" awaits recovery, so vaire cannot prove that "+extName+"'s SQL is absent",
 			output.ExitPrecondition,
-			"Recover it first, then use vaire ext remove "+extName+" --db "+spec.Name+" before changing cluster.toml.").
+			"Recover it first, then retry the configuration change; this release does not remove extensions.").
 			WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name})
 	}
 
@@ -308,7 +326,7 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			spec.Name+" is not running, so vaire cannot prove that "+extName+"'s SQL is absent",
 			output.ExitPrecondition,
-			"Start it, then use vaire ext remove "+extName+" --db "+spec.Name+" before changing cluster.toml.").
+			"Start it, then retry the configuration change; this release does not remove extensions.").
 			WithDetails(map[string]any{"reason": "extension_remove_required", "database": spec.Name})
 	}
 
@@ -317,7 +335,7 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 		return extensionInstalledVersion{}, false, output.NewError(output.CodePrecondition,
 			"cannot read "+spec.Name+"'s installed extensions: "+err.Error(),
 			output.ExitPrecondition,
-			"Nothing was saved. Retry when the cluster answers; use vaire ext remove "+extName+" --db "+spec.Name+" to remove it safely.").
+			"Nothing was saved. Retry when the cluster answers.").
 			WithDetails(map[string]any{"reason": "extension_facts_unavailable", "database": spec.Name})
 	}
 
@@ -326,11 +344,48 @@ func extensionInstalledFact(ctx context.Context, recs backup.Records, recErr err
 	return got, ok, nil
 }
 
+// extensionRemoveUnsupported is the one policy refusal for reducing a
+// database's declared extension selection. It names the extension so the
+// operator can restore that entry instead of looking for an unsupported
+// removal path.
+func extensionRemoveUnsupported(db, name string) error {
+	return output.NewError(output.CodePrecondition,
+		"removing "+name+" from "+db+" is not supported in this release",
+		output.ExitPrecondition,
+		"Adding and using extensions remain supported. Restore "+name+" in clusters."+db+".extensions and retry; vaire does not drop extension SQL or unload its library. Nothing was saved.").
+		WithDetails(map[string]any{"reason": "extension_remove_unsupported", "database": db, "extension": name})
+}
+
+// extensionRemovalUnsupported is the generic refusal for the ext.remove
+// command itself, before it reads or changes any target state.
+func extensionRemovalUnsupported(db, name string) error {
+	message := "vaire does not remove extensions in this release"
+	details := map[string]any{"reason": "extension_remove_unsupported"}
+
+	switch {
+	case name != "" && db != "":
+		message = "removing " + name + " from " + db + " is not supported in this release"
+		details["extension"], details["database"] = name, db
+	case name != "":
+		message = "removing " + name + " is not supported in this release"
+		details["extension"] = name
+	case db != "":
+		message = "removing extensions from " + db + " is not supported in this release"
+		details["database"] = db
+	}
+
+	return output.NewError(output.CodePrecondition,
+		message,
+		output.ExitPrecondition,
+		"Adding and using extensions remain supported. Keep the extension selected; vaire does not drop extension SQL or unload its library. Nothing was changed.").
+		WithDetails(details)
+}
+
 func extensionRemoveRequired(db, name, why string) error {
 	return output.NewError(output.CodePrecondition,
 		name+" is "+why+" in "+db+", but its SQL extension may still be installed",
 		output.ExitPrecondition,
-		"Remove it with vaire ext remove "+name+" --db "+db+" --confirm "+db+"; the DROP runs while the library is loaded, then the reduced configuration is applied.").
+		"This release does not remove or replace installed extensions. Restore the previous definition and retry; nothing was saved.").
 		WithDetails(map[string]any{"reason": "extension_remove_required", "database": db, "extension": name})
 }
 
@@ -347,7 +402,7 @@ func extensionInstalledIdentityRequired(db, name, detail string, fields map[stri
 	return output.NewError(output.CodePrecondition,
 		name+"'s installed SQL extension identity cannot change in "+db+": "+detail,
 		output.ExitPrecondition,
-		"Remove it with vaire ext remove "+name+" --db "+db+" --confirm "+db+", then add it again with the new descriptor; nothing was changed.").
+		"This release does not remove or replace installed extensions. Restore the previous descriptor and selection; nothing was changed.").
 		WithDetails(details)
 }
 
@@ -360,7 +415,7 @@ func extensionSelectedIdentityRequired(db, name, oldExtName, newExtName string) 
 	return output.NewError(output.CodePrecondition,
 		name+" is selected in "+db+", so its SQL extension identity cannot change from "+oldExtName+" to "+newExtName,
 		output.ExitPrecondition,
-		"Remove it with vaire ext remove "+name+" --db "+db+" --confirm "+db+", then edit the definition and add it again; nothing was saved.").
+		"This release does not remove or replace selected extensions. Restore the previous definition and retry; nothing was saved.").
 		WithDetails(map[string]any{
 			"reason": "extension_remove_required", "database": db, "extension": name,
 			"ext_name": oldExtName, "requested_ext_name": newExtName,

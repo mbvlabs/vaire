@@ -579,7 +579,7 @@ func TestExtMutationsRefuseActiveActivationFencesBeforeEffects(t *testing.T) {
 			writeExtTestFence(t, cfg, cfg.Clusters[0], "remove-"+phase, phase)
 			env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{"name": "pg_trgm", "db": "app"})}
 
-			_, err := handleExtRemove(context.Background(), env)
+			_, err := extensionRemoveExecute(context.Background(), env)
 			if err == nil || extReason(t, err) != "activation_fence_active" {
 				t.Fatalf("fenced remove: %v", err)
 			}

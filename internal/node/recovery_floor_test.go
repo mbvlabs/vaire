@@ -372,7 +372,7 @@ func TestRecoveryFloorSourceRemovalBoundary(t *testing.T) {
 	}
 }
 
-func TestFullConfigRemovalDoesNotPermitSourceShrink(t *testing.T) {
+func TestFullConfigRemovalRequiresDatabaseDrop(t *testing.T) {
 	cfg := followerLifecycleCfg(t, "app_follower")
 	cfg.Clusters[0].Size, cfg.Clusters[1].Size = "medium", "medium"
 	env, store := resizeFixture(t, cfg, "small", false)
@@ -393,7 +393,7 @@ func TestFullConfigRemovalDoesNotPermitSourceShrink(t *testing.T) {
 
 	env.Req = request("config.set", map[string]any{"base_revision": rev, "toml": string(raw)})
 	_, err = handleConfigSet(context.Background(), env)
-	rejectf(t, err == nil || reason(t, err) != "has_followers", "removed follower masked source shrink: %v", err)
+	rejectf(t, err == nil || reason(t, err) != "database_drop_required", "removed follower through config: %v", err)
 	_, after, err := store.Load()
 	rejectf(t, err != nil || string(before) != string(after), "saved on refusal: %v", err)
 }

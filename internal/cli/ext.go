@@ -12,10 +12,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ext (Phase 7): list, add and remove one database's extensions. The node
-// validates the target, descriptor, tokens and protection; this side only
-// canonicalises names, asks for the tokens it can predict, and renders the
-// result.
+// ext (Phase 7): list and add one database's extensions. The node validates
+// the target, descriptor, tokens and protection; this side only canonicalises
+// names, asks for the tokens it can predict, and renders the result. Removal is
+// refused in this release.
 
 type extAddResult struct {
 	Database              string   `json:"database"`
@@ -45,26 +45,6 @@ type extAddResult struct {
 	RequiredConfirmTokens []string `json:"required_confirm_tokens,omitempty"`
 	DryRun                bool     `json:"dry_run,omitempty"`
 	SQL                   string   `json:"sql,omitempty"`
-}
-
-type extRemoveResult struct {
-	Database              string   `json:"database"`
-	Extension             string   `json:"extension"`
-	ExtName               string   `json:"ext_name,omitempty"`
-	Enabled               bool     `json:"enabled"`
-	Installed             bool     `json:"installed"`
-	Dependents            []string `json:"dependents,omitempty"`
-	DependentsTotal       int      `json:"dependents_total,omitempty"`
-	DependentsTruncated   bool     `json:"dependents_truncated,omitempty"`
-	OwnTables             []string `json:"own_tables,omitempty"`
-	OwnTablesTotal        int      `json:"own_tables_total,omitempty"`
-	OwnTablesTruncated    bool     `json:"own_tables_truncated,omitempty"`
-	Cascade               bool     `json:"cascade,omitempty"`
-	RestartRequired       bool     `json:"restart_required"`
-	Restarted             bool     `json:"restarted,omitempty"`
-	PackageKept           string   `json:"package_kept,omitempty"`
-	RequiredConfirmTokens []string `json:"required_confirm_tokens,omitempty"`
-	DryRun                bool     `json:"dry_run,omitempty"`
 }
 
 type extListEntry struct {
@@ -348,103 +328,23 @@ func runExtRemove(cmd *cobra.Command, args []string) error {
 		return output.NewError(output.CodeUsage, "ext remove needs an extension name", output.ExitUsage, "")
 	}
 
-	db := stringFlag(cmd, "db")
-	if db == "" {
-		return output.NewError(output.CodeInputRequired, "ext remove needs --db", output.ExitInput,
-			"Pass --db with the database whose extension to remove.").WithDetails(map[string]any{"flag": "--db"})
-	}
-
-	p := newProgress(cmd)
-
-	s, err := openSession(cmd, p)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-
-	cfg, err := remoteConfig(cmd, s, p)
-	if err != nil {
-		return err
-	}
-
-	if _, ok := cfg.ClusterByName(db); !ok {
-		return output.NewError(output.CodePrecondition, "database "+db+" does not exist", output.ExitPrecondition,
-			"Run vaire db list to see the databases.").WithDetails(map[string]any{"reason": "database_not_found", "database": db})
-	}
-
-	if err := node.RefuseFollowerMethod(cfg, "ext.remove", map[string]any{"db": db}); err != nil {
-		return err
-	}
-
-	if err := node.CheckNotProtected(cfg, db, "ext remove"); err != nil {
-		return err
-	}
-
-	params := map[string]any{"name": name, "db": db}
-	if flagTrue(cmd, "cascade") {
-		params["cascade"] = true
-	}
-
-	tokens := confirmTokens(cmd)
-
-	restart := extRemoveLikelyNeedsRestart(cfg, db, name)
-	if !dryRun(cmd) {
-		if tokens, err = ensureConfirmToken(cmd, tokens, db); err != nil {
-			return err
-		}
-
-		if restart {
-			if tokens, err = ensureConfirmToken(cmd, tokens, db+"/restart"); err != nil {
-				return err
-			}
-		}
-	}
-
-	confirm, confirms := splitConfirmTokens(tokens)
-
-	reply, err := p.call(commandContext(cmd), s.node, "ext.remove", params,
-		remote.CallOptions{DryRun: dryRun(cmd), Confirm: confirm, Confirms: confirms, OnEvent: p.event})
-	if err != nil {
-		return err
-	}
-
-	var res extRemoveResult
-	if err := reply.Decode(&res); err != nil {
-		return err
-	}
-
-	warnings := append(s.warnings, reply.Warnings...)
-	if dryRun(cmd) {
-		return extRemoveDryRun(cmd, res, warnings)
-	}
-
-	return output.Success(cmd, output.Result{
-		Data: res, Message: extRemoveMessage(res), Warnings: warnings,
-		Next: []string{"vaire ext list --db " + res.Database},
-	})
+	return extensionRemovalUnsupported(stringFlag(cmd, "db"), name)
 }
 
-// extRemoveDryRun renders the preview of a removal and its confirmation
-// requirements.
-func extRemoveDryRun(cmd *cobra.Command, res extRemoveResult, warnings []output.Warning) error {
-	lines := []string{"dry run: would remove " + res.Extension + " from " + res.Database}
-	if res.DependentsTotal > 0 {
-		lines = append(lines, "  used by "+extCountText(res.DependentsTotal, "object")+" (--cascade drops them): "+extPreviewText(res.Dependents, res.DependentsTruncated))
+func extensionRemovalUnsupported(db, name string) error {
+	message := "removing " + name + " is not supported in this release"
+	details := map[string]any{"reason": "extension_remove_unsupported", "extension": name}
+
+	if db != "" {
+		message = "removing " + name + " from " + db + " is not supported in this release"
+		details["database"] = db
 	}
 
-	if res.OwnTablesTotal > 0 {
-		lines = append(lines, "  its own tables go with it: "+extPreviewText(res.OwnTables, res.OwnTablesTruncated))
-	}
-
-	if res.RestartRequired {
-		lines = append(lines, "  its removal changes preload or postmaster settings, so a restart token is required (--confirm "+res.Database+"/restart)")
-	}
-
-	if len(res.RequiredConfirmTokens) > 0 {
-		lines = append(lines, "  confirmation: --confirm "+strings.Join(res.RequiredConfirmTokens, " --confirm "))
-	}
-
-	return output.Success(cmd, output.Result{Data: res, Message: strings.Join(lines, "\n"), Warnings: warnings})
+	return output.NewError(output.CodePrecondition,
+		message,
+		output.ExitPrecondition,
+		"Adding and using extensions remain supported. Keep the extension selected; vaire does not drop extension SQL or unload its library. Nothing was changed.").
+		WithDetails(details)
 }
 
 func extDBForAdd(cfg config.Cluster, db string) (string, error) {
@@ -529,40 +429,6 @@ func extensionEnabledCLI(cfg config.Cluster, spec config.ClusterSpec, name strin
 	}
 
 	return slices.Contains(effective, canonical)
-}
-
-func extRemoveLikelyNeedsRestart(cfg config.Cluster, db, name string) bool {
-	spec, ok := cfg.ClusterByName(db)
-	if !ok {
-		return false
-	}
-
-	if ext, err := cfg.ExtensionResolver().Resolve(name); err == nil && extensionEnabledCLI(cfg, spec, name) && len(ext.Settings) > 0 {
-		return true
-	}
-
-	before, err := cfg.ExtensionResolver().Preloads(spec.Extensions)
-	if err != nil {
-		return false
-	}
-
-	canonical, _ := cfg.ExtensionResolver().Canonical(name)
-
-	var afterNames []string
-
-	for _, n := range spec.Extensions {
-		c, _ := cfg.ExtensionResolver().Canonical(n)
-		if c != canonical {
-			afterNames = append(afterNames, n)
-		}
-	}
-
-	after, err := cfg.ExtensionResolver().Preloads(afterNames)
-	if err != nil {
-		return false
-	}
-
-	return !slices.Equal(before, after)
 }
 
 // extStandbySafeParam reports the flag value only when the operator supplied
@@ -692,23 +558,6 @@ func extAddPreloadNote(res extAddResult) string {
 	return ""
 }
 
-func extRemoveMessage(res extRemoveResult) string {
-	msg := "removed " + res.Extension + " from " + res.Database
-	if res.Cascade && len(res.Dependents) > 0 {
-		msg += " with " + extCountText(res.DependentsTotal, "dependent object")
-	}
-
-	if res.Restarted {
-		msg += "; restarted " + res.Database + " (only that database)"
-	}
-
-	if res.PackageKept != "" {
-		msg += "; the package " + res.PackageKept + " stays installed"
-	}
-
-	return msg
-}
-
 const extListRow = "  %-18s %-30s %-10s %-10s %-8s %-9s %-8s %s"
 
 func extListLines(data extListData) []string {
@@ -831,30 +680,4 @@ func extErrorSuffix(err string) string {
 	}
 
 	return " (" + err + ")"
-}
-
-func extPreviewText(items []string, truncated bool) string {
-	if len(items) == 0 {
-		return "unknown objects"
-	}
-
-	shown := items
-	if len(shown) > 3 {
-		shown = shown[:3]
-	}
-
-	text := strings.Join(shown, "; ")
-	if len(items) > len(shown) || truncated {
-		text += "; ..."
-	}
-
-	return text
-}
-
-func extCountText(n int, word string) string {
-	if n == 1 {
-		return "1 " + word
-	}
-
-	return fmt.Sprintf("%d %ss", n, word)
 }
