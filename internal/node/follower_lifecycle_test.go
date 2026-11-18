@@ -277,7 +277,8 @@ func (s *followerStub) install(t *testing.T) *followerStub {
 
 	old := followerServerOps
 	oldEnsureGuard, oldAdoptGuard, oldVerifyGuard := ensureCopyGuardAt, ensureAdoptedGuardAt, verifyStartedGuardAt
-	oldRoutes, oldResumePooler := poolerRuntimeRoutes, poolerResumeDatabase
+	oldPublish, oldRoutes, oldResumePooler := publishRecoveredFollowerRoutes, poolerRuntimeRoutes, poolerResumeDatabase
+	publishRecoveredFollowerRoutes = func(context.Context, *jobEnv, config.Cluster, string) error { return nil }
 	poolerRuntimeRoutes = func(_ context.Context, _ string, _ int) (map[string]steps.PoolerRoute, error) {
 		recs, err := backup.LoadRecords()
 		if err != nil {
@@ -320,7 +321,7 @@ func (s *followerStub) install(t *testing.T) *followerStub {
 	t.Cleanup(func() {
 		followerServerOps = old
 		ensureCopyGuardAt, ensureAdoptedGuardAt, verifyStartedGuardAt = oldEnsureGuard, oldAdoptGuard, oldVerifyGuard
-		poolerRuntimeRoutes, poolerResumeDatabase = oldRoutes, oldResumePooler
+		publishRecoveredFollowerRoutes, poolerRuntimeRoutes, poolerResumeDatabase = oldPublish, oldRoutes, oldResumePooler
 	})
 
 	followerServerOps = followerServer{
@@ -560,6 +561,82 @@ func TestRecoverKeepsAwaitingUntilTheFollowerRuns(t *testing.T) {
 
 	if recs := node.records(); recs.IsAwaiting("app_follower") {
 		t.Error("the recovered follower still awaits recovery")
+	}
+}
+
+// A recovered follower's routes are published before its awaiting record
+// clears. A failed publish keeps both that record and the ownership record, so
+// db recover retries the same copy; the retry publishes again and only then
+// clears awaiting.
+func TestRecoveredFollowerRoutesPublishedBeforeAwaitingClears(t *testing.T) {
+	ctx := context.Background()
+	cfg := followerLifecycleCfg(t, "app_follower")
+	node := newFollowerNode(t, cfg)
+	node.awaitRecovery()
+
+	stub := (&followerStub{}).install(t)
+
+	if err := writeFollowOwnership(recoveryOwner(node, cfg), followPhaseCopied); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPublish := publishRecoveredFollowerRoutes
+
+	t.Cleanup(func() { publishRecoveredFollowerRoutes = oldPublish })
+
+	var (
+		order  []string
+		failed = true
+	)
+
+	publishRecoveredFollowerRoutes = func(_ context.Context, _ *jobEnv, _ config.Cluster, name string) error {
+		order = append(order, "publish:"+name)
+
+		if failed {
+			return errors.New("the poolers did not reload")
+		}
+
+		return nil
+	}
+
+	stub.before = func(stage string) {
+		if stage == "start" {
+			order = append(order, "start")
+		}
+	}
+
+	if _, err := jobFollow(ctx, followEnv(cfg, true)); err == nil {
+		t.Fatal("a failed route publish returned no error")
+	}
+
+	if idx := slices.Index(order, "start"); idx < 0 || slices.Index(order, "publish:app_follower") < idx {
+		t.Fatalf("routes were not published after the start: %v", order)
+	}
+
+	if !node.records().IsAwaiting("app_follower") {
+		t.Fatal("a failed route publish cleared the awaiting record")
+	}
+
+	if _, err := os.Stat(followOwnershipPathForTest(t)); err != nil {
+		t.Fatalf("a failed route publish removed ownership: %v", err)
+	}
+
+	failed, order = false, nil
+
+	if _, err := jobFollow(ctx, followEnv(cfg, true)); err != nil {
+		t.Fatalf("the retry after a failed route publish failed: %v", err)
+	}
+
+	if want := []string{"start", "publish:app_follower"}; !slices.Equal(order, want) {
+		t.Fatalf("retry order = %v, want %v", order, want)
+	}
+
+	if node.records().IsAwaiting("app_follower") {
+		t.Fatal("the retried recovery still awaits recovery")
+	}
+
+	if _, err := os.Stat(followOwnershipPathForTest(t)); !os.IsNotExist(err) {
+		t.Fatalf("the recovered follower kept ownership: %v", err)
 	}
 }
 

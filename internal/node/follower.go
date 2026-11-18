@@ -120,6 +120,14 @@ var followerSlotOps = struct {
 // so a test can stop after the adoption, before the marker, and retry.
 var markFollowerAdopted = markAdopted
 
+// publishRecoveredFollowerRoutes publishes both poolers' routes for a
+// recovered follower at the start boundary, while its awaiting record is still
+// durable. finishStartedFollow clears that record only after this succeeds; a
+// failure therefore leaves the same owned recovery retryable.
+var publishRecoveredFollowerRoutes = func(ctx context.Context, env *jobEnv, cfg config.Cluster, name string) error {
+	return steps.PublishFollowerRoutes(ctx, cfg, jobRuntime(env), name, env.Report)
+}
+
 var followerServerOps = followerServer{
 	build:      materialiseFollower,
 	start:      startFollower,
@@ -1280,7 +1288,7 @@ func jobFollow(ctx context.Context, env *jobEnv) (any, error) {
 		return nil, err
 	}
 
-	return finishStartedFollow(env, p, spec, src, owner, warnings, st)
+	return finishStartedFollow(ctx, env, p, spec, src, owner, warnings, st)
 }
 
 func buildFollowIfNeeded(ctx context.Context, env *jobEnv, cfg config.Cluster, src, spec config.ClusterSpec, p dbFollowParams) error {
@@ -1319,15 +1327,21 @@ func buildFollowIfNeeded(ctx context.Context, env *jobEnv, cfg config.Cluster, s
 	return markFollowerAdopted(p.Name)
 }
 
-func finishStartedFollow(env *jobEnv, p dbFollowParams, spec, src config.ClusterSpec, owner followOwner, warnings []output.Warning, st any) (any, error) {
+func finishStartedFollow(ctx context.Context, env *jobEnv, p dbFollowParams, spec, src config.ClusterSpec, owner followOwner, warnings []output.Warning, st any) (any, error) {
 	if err := clearFollowGeneration(spec.Name, spec.FollowGeneration); err != nil {
 		return nil, err
 	}
 
 	if p.Recover {
-		// The follower runs with its own configuration: recovery is done and
-		// it no longer awaits it. The ownership record outlives this write
-		// only as best-effort cleanup.
+		// The follower runs with its own configuration: recovery is done. Publish
+		// its routes while the awaiting record is still durable, so a failed
+		// render or reload returns with that record and the ownership record
+		// intact and db recover can retry the same target.
+		if err := publishRecoveredFollowerRoutes(ctx, env, env.Cluster, p.Name); err != nil {
+			return nil, err
+		}
+
+		// The ownership record outlives this write only as best-effort cleanup.
 		if _, err := clearAwaiting(p.Name); err != nil {
 			return nil, err
 		}

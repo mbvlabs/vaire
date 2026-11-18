@@ -341,22 +341,39 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 		return engine.ApplyResult{}, fmt.Errorf("the service role verifiers are missing; run postgres-roles-v1 first")
 	}
 
-	for _, f := range files {
-		if err := writePoolerFile(f.path, f.content, f.mode, f.owner, f.group); err != nil {
-			return engine.ApplyResult{}, err
-		}
+	if err := writePoolerFiles(files); err != nil {
+		return engine.ApplyResult{}, err
 	}
 
 	if err := writeFileOwned(PgbouncerUserlistPath, string(render.PgbouncerUserlist(verifiers)), 0o640, pgFileOwner, pgFileGroup); err != nil {
 		return engine.ApplyResult{}, err
 	}
 
-	err = rt.Shell.Run(ctx, s.ID(), Script("pgbouncer"), map[string]string{
+	err = reloadPoolers(ctx, rt, report)
+
+	return engine.ApplyResult{Restart: engine.RestartNone}, err
+}
+
+// writePoolerFiles writes both poolers' rendered configuration. None of them
+// contains a secret.
+func writePoolerFiles(files []pgbouncerFile) error {
+	for _, f := range files {
+		if err := writePoolerFile(f.path, f.content, f.mode, f.owner, f.group); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// reloadPoolers reloads both poolers after their files are written. It is a
+// variable so a test can model the single shell call's success or failure
+// without a live systemd.
+var reloadPoolers = func(ctx context.Context, rt engine.Runtime, report engine.Reporter) error {
+	return rt.Shell.Run(ctx, pgbouncerID, Script("pgbouncer"), map[string]string{
 		"PGBOUNCER_DIR":   PgbouncerDir,
 		"SESSION_SERVICE": SessionPoolerService,
 	}, report)
-
-	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
 
 // poolerInstance is this install's real instance identity for routing
@@ -551,16 +568,62 @@ func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime
 	}
 
 	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs)
-	for _, f := range files {
-		if err := writePoolerFile(f.path, f.content, f.mode, f.owner, f.group); err != nil {
-			return err
-		}
+	if err := writePoolerFiles(files); err != nil {
+		return err
 	}
 
-	return rt.Shell.Run(ctx, pgbouncerID, Script("pgbouncer"), map[string]string{
-		"PGBOUNCER_DIR":   PgbouncerDir,
-		"SESSION_SERVICE": SessionPoolerService,
-	}, report)
+	return reloadPoolers(ctx, rt, report)
+}
+
+// PublishFollowerRoutes renders both poolers' routes for target while its
+// recovery still awaits. The caller invokes it after the follower started and
+// clears the awaiting record only after it succeeds, so a write or reload
+// failure leaves that exact recovery retryable. Only target's application and
+// __auth routes are published: every other database awaiting recovery, every
+// ready-but-unpromoted restore and every unsettled unfollow stays withheld.
+// The records snapshot is read-only; a failure changes no durable transition.
+func PublishFollowerRoutes(ctx context.Context, cfg config.Cluster, rt engine.Runtime, target string, report engine.Reporter) error {
+	recs, err := poolerRecords()
+	if err != nil {
+		return err
+	}
+
+	if !recs.IsAwaiting(target) {
+		return output.NewError(output.CodePrecondition,
+			target+" no longer awaits recovery, so its follower routes cannot be published as a recovery", output.ExitPrecondition,
+			"Run vaire apply to publish its routes.").
+			WithDetails(map[string]any{"reason": "not_awaiting_recovery", "database": target})
+	}
+
+	// Treat exactly this target as published; every other transition record
+	// still withholds its own routes.
+	delete(recs.AwaitingRecovery, target)
+
+	if fencedPoolerAliases(recs)[target] {
+		return output.NewError(output.CodePrecondition,
+			target+" is still fenced by an unfinished transition, so its follower routes cannot be published", output.ExitPrecondition,
+			"Finish the owning transition, then retry db recover "+target+".").
+			WithDetails(map[string]any{"reason": "routing_fenced", "database": target})
+	}
+
+	view := cfg.RoutingView(recs.IsAwaiting, target)
+	if _, ok := view.ClusterByName(target); !ok {
+		return output.NewError(output.CodePrecondition,
+			target+" is not a routable cluster, so its follower routes cannot be published", output.ExitPrecondition,
+			"Check cluster.toml's entry for "+target+", then retry.").
+			WithDetails(map[string]any{"reason": "not_routable", "database": target})
+	}
+
+	if err := validateRoutingEligibility(cfg, recs); err != nil {
+		return err
+	}
+
+	files := pgbouncerFilesFrom(view, rt, recs)
+	if err := writePoolerFiles(files); err != nil {
+		return err
+	}
+
+	return reloadPoolers(ctx, rt, report)
 }
 
 // roleVerifierSource names the cluster and port the service roles are read
