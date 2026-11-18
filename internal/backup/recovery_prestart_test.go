@@ -3,12 +3,14 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/engine"
 )
@@ -396,5 +398,146 @@ func TestExplicitTarget50OverridesRestoredAuto30(t *testing.T) {
 	})
 	if err != nil || !started {
 		t.Fatalf("required 50 with explicit 50: err=%v started=%v", err, started)
+	}
+}
+
+// recoveryStartFixture registers a historical restore copy whose plan carries
+// the retained pg_cron and pgaudit preloads and pg_cron's launch suppression.
+func recoveryStartFixture(t *testing.T) *Materialised {
+	t.Helper()
+	oldWrite := writeCopyGuardFile
+	writeCopyGuardFile = func(path string, data []byte, perm os.FileMode) error {
+		return os.WriteFile(path, data, perm)
+	}
+	t.Cleanup(func() { writeCopyGuardFile = oldWrite })
+	m := recoveryRegistration(t, nil)
+	if err := os.MkdirAll(m.Data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cron, ok := catalog.Lookup("pg_cron")
+	if !ok {
+		t.Fatal("catalog has no pg_cron")
+	}
+	audit, ok := catalog.Lookup("pgaudit")
+	if !ok {
+		t.Fatal("catalog has no pgaudit")
+	}
+	merged, guard, err := MergeCopyRequirements([]catalog.Extension{cron, audit}, nil, true, "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Match node plan composition: retained ordinary settings remain necessary
+	// when current destination intent no longer supplies them.
+	decision, err := CopyGuardSettings(CopyGuardSettingsOptions{
+		Known: merged, CopyDB: "app", Pending: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard.Settings = decision.Settings
+	m.Plan = &CopyPlan{Guard: guard, Requirements: merged, Historical: true, Cron: true}
+	return m
+}
+
+// recoveryStartRun records the recovery startup boundary.
+type recoveryStartRun struct {
+	events    []string
+	submitted bool
+	waited    bool
+}
+
+// stubRecoveryStart records service submission and readiness, and fails if the
+// submitted copy lacks the plan's guard.
+func stubRecoveryStart(t *testing.T, m *Materialised) *recoveryStartRun {
+	t.Helper()
+	oldSubmit, oldWait := submitRecoveryService, waitRecoveryService
+	t.Cleanup(func() { submitRecoveryService, waitRecoveryService = oldSubmit, oldWait })
+	run := &recoveryStartRun{}
+	submitRecoveryService = func(context.Context, string) error {
+		run.submitted = true
+		if err := requireRecoveryCopyGuard(m.Data); err != nil {
+			t.Error(err)
+		}
+		run.events = append(run.events, "submit")
+		return nil
+	}
+	waitRecoveryService = func(context.Context, string, string, int, string, string, *recoveryLogCursor, recoveryWaitProbes, func(string)) error {
+		run.waited = true
+		run.events = append(run.events, "wait")
+		return nil
+	}
+	return run
+}
+
+func requireRecoveryCopyGuard(data string) error {
+	got, present, err := ReadCopyGuard(data)
+	if err != nil {
+		return fmt.Errorf("read the submitted copy's guard: %w", err)
+	}
+	if !present {
+		return errors.New("service submitted before the copy plan was installed")
+	}
+	if !reflect.DeepEqual(got.Preloads, []string{"pg_cron", "pgaudit"}) {
+		return fmt.Errorf("submitted preloads = %v", got.Preloads)
+	}
+	if !reflect.DeepEqual(got.Settings, map[string]string{
+		"cron.launch_active_jobs":     "off",
+		"cron.database_name":          "'app'",
+		"cron.use_background_workers": "on",
+		"cron.max_running_jobs":       "3",
+		"pgaudit.log":                 "'ddl,role'",
+	}) {
+		return fmt.Errorf("submitted copy settings = %v", got.Settings)
+	}
+	return nil
+}
+
+func TestRecoveryStartPrestartThenPlanThenService(t *testing.T) {
+	m := recoveryStartFixture(t)
+	run := stubRecoveryStart(t, m)
+	m.BeforeStart = func(context.Context) error {
+		if _, present, err := ReadCopyGuard(m.Data); err != nil || present {
+			if err != nil {
+				return fmt.Errorf("read the copy guard before the prestart hook: %w", err)
+			}
+			return errors.New("prestart hook saw the copy plan already installed")
+		}
+		run.events = append(run.events, "prestart")
+		return nil
+	}
+	if err := m.startRecovery(context.Background(), UntilPaused, TargetLatest); err != nil {
+		t.Fatal(err)
+	}
+	if !run.submitted || !run.waited {
+		t.Fatalf("submitted=%v waited=%v", run.submitted, run.waited)
+	}
+	if want := []string{"prestart", "submit", "wait"}; !reflect.DeepEqual(run.events, want) {
+		t.Fatalf("startup events = %v, want %v", run.events, want)
+	}
+}
+
+func TestRecoveryStartPrerequisiteFailurePreventsService(t *testing.T) {
+	m := recoveryStartFixture(t)
+	run := stubRecoveryStart(t, m)
+	m.BeforeStart = func(context.Context) error { return errors.New("missing extension package") }
+	err := m.startRecovery(context.Background(), UntilPaused, TargetLatest)
+	requireRecoveryStartRefused(t, err, run, "missing extension package")
+}
+
+func TestRecoveryStartPlanFailurePreventsService(t *testing.T) {
+	m := recoveryStartFixture(t)
+	run := stubRecoveryStart(t, m)
+	m.Plan.ValidateGuard = func(CopyGuard) error { return errors.New("copy plan guard refused") }
+	err := m.startRecovery(context.Background(), UntilPaused, TargetLatest)
+	requireRecoveryStartRefused(t, err, run, "copy plan guard refused")
+}
+
+func requireRecoveryStartRefused(t *testing.T, err error, run *recoveryStartRun, want string) {
+	t.Helper()
+	if run.submitted || run.waited {
+		t.Fatalf("prestart failure reached the service: submitted=%v waited=%v", run.submitted, run.waited)
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want %q", err, want)
 	}
 }

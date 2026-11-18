@@ -579,14 +579,22 @@ const (
 	UntilPromoted = "promoted"
 )
 
-// start starts the cluster and waits until it accepts connections.
-func (m *Materialised) start(ctx context.Context) error {
+// prepareStart is the prestart protocol every first start shares: the caller's
+// prerequisites, then the copy-safety guard, so PostgreSQL never loads a copied
+// configuration without the libraries its data needs and the settings that keep
+// copied background work idle.
+func (m *Materialised) prepareStart(ctx context.Context) error {
 	if m.BeforeStart != nil {
 		if err := m.BeforeStart(ctx); err != nil {
 			return err
 		}
 	}
-	if err := m.InstallCopyPlan(); err != nil {
+	return m.InstallCopyPlan()
+}
+
+// start starts the cluster and waits until it accepts connections.
+func (m *Materialised) start(ctx context.Context) error {
+	if err := m.prepareStart(ctx); err != nil {
 		return err
 	}
 	if err := m.Shell.Exec(ctx, m.StepID, engine.Command{Name: "pg_ctlcluster", Args: []string{"18", m.Name, "start"}}, m.Report); err != nil {

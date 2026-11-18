@@ -52,6 +52,8 @@ var submitRecoveryService = func(ctx context.Context, name string) error {
 	return recoveryStartCommand(ctx, name).Run()
 }
 
+var waitRecoveryService = waitRecovery
+
 func recoveryStartCommand(ctx context.Context, name string) *exec.Cmd {
 	return exec.CommandContext(ctx, "systemctl", "start", "--no-block", "postgresql@18-"+name) //nolint:gosec // G204: validated managed cluster name.
 }
@@ -158,11 +160,14 @@ func (m *Materialised) startRecovery(ctx context.Context, until, kind string) er
 	if err != nil {
 		return recoveryDiagnosticFailure(m.Name)
 	}
+	if err := m.prepareStart(ctx); err != nil {
+		return err
+	}
 	if err := submitRecoveryService(ctx, m.Name); err != nil {
 		return output.NewError(output.CodeExternalCommand, "could not submit temporary cluster start", output.ExitExternal,
 			"Inspect the temporary cluster service.").WithDetails(map[string]any{"reason": "recovery_start_failed", "target": m.Name, "stage": "start"})
 	}
-	return waitRecovery(ctx, m.Name, m.Data, m.Port, until, kind, cursor, recoveryProbes, m.log)
+	return waitRecoveryService(ctx, m.Name, m.Data, m.Port, until, kind, cursor, recoveryProbes, m.log)
 }
 
 type recoveryEvidence struct {
