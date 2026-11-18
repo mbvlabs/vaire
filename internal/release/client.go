@@ -37,8 +37,9 @@ func (c *Client) verifier() Verifier {
 }
 
 // Resolve fetches and verifies the channel manifest (version == "") or a
-// version manifest. channel is stable, edge or a major line such as
-// stable-1.x; a line's manifest is signed by the stable workflow.
+// version manifest. channel is stable, edge, rc or a major line such as
+// stable-1.x. Only rolling edge builds are signed by the edge workflow; every
+// tagged release, including alpha, beta and rc, is signed by its v* tag.
 func (c *Client) Resolve(ctx context.Context, channel, version string) (Manifest, error) {
 	var (
 		manifestURL string
@@ -59,7 +60,7 @@ func (c *Client) Resolve(ctx context.Context, channel, version string) (Manifest
 				output.CodeValidation,
 				err.Error(),
 				output.ExitConfig,
-				"Pass a stable MAJOR.MINOR.PATCH (optionally -alpha.N, -beta.N or -rc.N) on the channel's major line, or an edge-<12-hex> version.",
+				"Pass an edge-<12-hex> or alpha/beta version for edge, an -rc.N version for rc, or a final MAJOR.MINOR.PATCH for stable.",
 			).WithDetails(map[string]any{"version": version})
 		}
 

@@ -16,11 +16,11 @@ type promotionCase struct {
 func TestBucketPromotion(t *testing.T) {
 	for _, key := range []string{"manifest.json", "1.x/manifest.json"} {
 		for _, tc := range []promotionCase{
-			{name: "absent", listing: `{"KeyCount":0}`, candidate: "1.0.0-alpha.1", want: "yes\n"},
+			{name: "absent", listing: `{"KeyCount":0}`, candidate: "1.0.0", want: "yes\n"},
+			{name: "beta cannot seed stable", listing: `{"KeyCount":0}`, candidate: "1.0.0-beta.1"},
 			{name: "only sidecar exists", listing: `{"KeyCount":1,"Contents":[{"Key":"` + key + `.sigstore.json"}]}`, candidate: "1.0.0", want: "yes\n"},
 			{name: "older tag", manifest: `{"version":"1.1.0"}`, candidate: "1.0.1", want: "no\n"},
-			{name: "next alpha", manifest: `{"version":"1.0.0-alpha.2"}`, candidate: "1.0.0-alpha.10", want: "yes\n"},
-			{name: "alpha cannot replace final", manifest: `{"version":"1.1.0"}`, candidate: "1.2.0-alpha.1", want: "no\n"},
+			{name: "alpha cannot replace final", manifest: `{"version":"1.1.0"}`, candidate: "1.2.0-alpha.1"},
 			{name: "next final", manifest: `{"version":"1.1.0"}`, candidate: "1.1.1", want: "yes\n"},
 			{name: "list failure", listErr: true, candidate: "1.0.0"},
 			{name: "read failure", readErr: true, candidate: "1.0.0"},
@@ -45,6 +45,47 @@ func TestBucketPromotion(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRollingEdgePromotion(t *testing.T) {
+	sources := map[string]string{
+		"edge-111111111111": "1", "1.0.0-beta.1": "1", "1.0.0-beta.2": "1",
+		"edge-222222222222": "2",
+	}
+	resolve := func(_ context.Context, version string) (string, error) {
+		if src := sources[version]; src != "" {
+			return src, nil
+		}
+
+		return "", errors.New("unknown source")
+	}
+	ancestor := func(_ context.Context, from, to string) (bool, error) {
+		return from == "1" && to == "2", nil
+	}
+
+	for _, tc := range []struct {
+		key, current, candidate string
+		want, invalid           bool
+	}{
+		{"edge/manifest.json", "", "1.0.0-beta.1", true, false},
+		{"edge/manifest.json", "edge-111111111111", "1.0.0-beta.1", true, false},
+		{"edge/manifest.json", "1.0.0-beta.1", "edge-111111111111", false, false},
+		{"edge/manifest.json", "1.0.0-beta.1", "edge-222222222222", true, false},
+		{"edge/manifest.json", "edge-222222222222", "1.0.0-beta.2", false, false},
+		{"edge/manifest.json", "1.0.0-beta.1", "1.0.0-beta.2", true, false},
+		{"edge/manifest.json", "edge-222222222222", "edge-333333333333", false, true},
+		{"edge/manifest.json", "", "1.0.0-rc.1", false, true},
+		{"rc/manifest.json", "1.0.0-rc.2", "1.0.0-rc.10", true, false},
+		{"rc/manifest.json", "", "1.0.0", false, true},
+		{"1.x/manifest.json", "", "2.0.0", false, true},
+	} {
+		t.Run(tc.key+"/"+tc.current+"/"+tc.candidate, func(t *testing.T) {
+			got, err := shouldPromote(context.Background(), tc.key, tc.current, tc.candidate, ancestor, resolve)
+			if got != tc.want || (err != nil) != tc.invalid {
+				t.Fatalf("promotion = %v, %v; want %v, invalid=%v", got, err, tc.want, tc.invalid)
+			}
+		})
 	}
 }
 

@@ -84,7 +84,7 @@ func planUpgrade(cmd *cobra.Command, opts upgradeOptions) (release.Manifest, upg
 		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}
 
-	channel, err := upgrade.SelectChannel(opts.channel)
+	channel, err := upgrade.SelectVersionChannel(opts.channel, opts.version)
 	if err != nil {
 		return release.Manifest{}, upgrade.Plan{}, upgradeData{}, nil, err
 	}

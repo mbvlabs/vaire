@@ -70,16 +70,117 @@ func TestValidateEdgeArtifactSubset(t *testing.T) {
 	}
 }
 
-func TestValidateStableRequiresEveryArtifact(t *testing.T) {
-	m := testManifest(ChannelStable, "1.2.3")
-	if err := Validate(m, ChannelStable, ""); err != nil {
-		t.Fatalf("Validate full stable manifest: %v", err)
+func TestValidateTaggedRequiresEveryArtifact(t *testing.T) {
+	for _, c := range []struct {
+		channel string
+		signing string
+		version string
+	}{
+		{ChannelStable, ChannelStable, "1.2.3"},
+		{"stable-1.x", ChannelStable, "1.2.3"},
+		{ChannelRC, ChannelRC, "1.2.3-rc.1"},
+	} {
+		m := testManifest(c.signing, c.version)
+		if err := Validate(m, c.channel, ""); err != nil {
+			t.Fatalf("Validate full %s manifest: %v", c.channel, err)
+		}
+
+		subset := subsetManifest(m, "linux/amd64")
+		if err := Validate(subset, c.channel, ""); err == nil {
+			t.Errorf("Validate(%s) accepted a platform subset", c.channel)
+		}
+	}
+}
+
+func TestValidateNamedEdgeManifest(t *testing.T) {
+	for _, version := range []string{"1.0.0-alpha.1", "1.0.0-beta.4"} {
+		m := subsetManifest(testManifest(ChannelEdge, version), "linux/amd64")
+		if err := Validate(m, ChannelEdge, version); err != nil {
+			t.Errorf("Validate(%s, %s): %v", ChannelEdge, version, err)
+		}
 	}
 
-	subset := subsetManifest(m, "linux/amd64")
-	for _, channel := range []string{ChannelStable, "stable-1.x"} {
-		if err := Validate(subset, channel, ""); err == nil {
-			t.Errorf("Validate(%s) accepted a platform subset", channel)
+	m := testManifest(ChannelRC, "1.0.0-rc.1")
+	if err := Validate(m, ChannelEdge, ""); err == nil {
+		t.Fatal("edge accepted an rc manifest")
+	}
+
+	if err := Validate(m, ChannelRC, ""); err != nil {
+		t.Fatalf("Validate rc manifest: %v", err)
+	}
+
+	if err := Validate(m, ChannelStable, ""); err == nil {
+		t.Fatal("stable accepted an rc manifest")
+	}
+}
+
+func TestClientResolveUsesVersionSigningIdentity(t *testing.T) {
+	base := strings.TrimRight(buildinfo.ReleaseBaseURL, "/")
+
+	for _, c := range []struct {
+		channel string
+		version string
+		root    string
+	}{
+		{ChannelEdge, "1.0.0-beta.4", "/edge"},
+		{ChannelRC, "1.0.0-rc.2", "/rc"},
+	} {
+		manifest := testManifest(c.channel, c.version)
+
+		raw, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifestURL := base + c.root + "/manifest.json"
+		bundle := []byte(`{"fake":"sigstore bundle"}`)
+		transport := &fakeRoundTripper{
+			routes: map[string][]byte{
+				manifestURL:                    raw,
+				manifestURL + ".sigstore.json": bundle,
+			},
+			requests: map[string]int{},
+		}
+		verifier := &fakeVerifier{}
+		client := &Client{HTTP: &http.Client{Transport: transport}, Verifier: verifier}
+
+		got, err := client.Resolve(context.Background(), c.channel, "")
+		if err != nil {
+			t.Fatalf("Resolve %s: %v", c.channel, err)
+		}
+
+		want, err := Identity(c.channel, c.version)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if got.Version != c.version {
+			t.Errorf("Resolve %s version = %q, want %q", c.channel, got.Version, c.version)
+		}
+
+		if len(verifier.calls) != 1 {
+			t.Fatalf("Resolve %s verifier calls = %d, want 1", c.channel, len(verifier.calls))
+		}
+
+		if verifier.calls[0].identity != want {
+			t.Errorf("Resolve %s identity = %q, want %q", c.channel, verifier.calls[0].identity, want)
+		}
+	}
+}
+
+func TestClientRejectsChannelVersionMismatch(t *testing.T) {
+	client := &Client{}
+
+	for _, c := range []struct{ channel, version string }{
+		{ChannelEdge, "1.0.0-rc.1"},
+		{ChannelRC, "1.0.0"},
+		{ChannelRC, "1.0.0-beta.1"},
+		{ChannelStable, "1.0.0-alpha.1"},
+		{"stable-1.x", "1.0.0-beta.1"},
+		{ChannelEdge, "1.0.0"},
+	} {
+		if _, err := client.Resolve(context.Background(), c.channel, c.version); err == nil {
+			t.Errorf("Resolve(%q, %q) accepted a mismatched channel and version", c.channel, c.version)
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 const (
 	ChannelStable = "stable"
 	ChannelEdge   = "edge"
+	ChannelRC     = "rc"
 
 	Issuer = "https://token.actions.githubusercontent.com"
 )
@@ -18,7 +19,7 @@ var edgeVersionPattern = regexp.MustCompile(`^edge-[0-9a-f]{12}$`)
 
 // ChannelRoot is the HTTPS origin for a channel's install.sh and pointer
 // manifest. stable is the site root, a major line such as stable-1.x lives
-// under /1.x and edge under /edge.
+// under /1.x, and edge and rc live under /edge and /rc.
 func ChannelRoot(channel string) (string, error) {
 	base := strings.TrimRight(currentBaseURL(), "/")
 
@@ -27,6 +28,8 @@ func ChannelRoot(channel string) (string, error) {
 		return base, nil
 	case ChannelEdge:
 		return base + "/edge", nil
+	case ChannelRC:
+		return base + "/rc", nil
 	}
 
 	if major, ok := lineMajor(channel); ok {
@@ -36,9 +39,9 @@ func ChannelRoot(channel string) (string, error) {
 	return "", fmt.Errorf("release channel %q is invalid", channel)
 }
 
-// SigningChannel is the channel a channel's manifests are built and signed
-// for: a major line is published by the stable workflow, so its manifests
-// say stable.
+// SigningChannel is the logical channel a partition's manifests name: a major
+// line is published as stable. Named alpha and beta versions are edge versions
+// and their manifests say edge.
 func SigningChannel(channel string) string {
 	if _, ok := lineMajor(channel); ok {
 		return ChannelStable
@@ -47,33 +50,31 @@ func SigningChannel(channel string) string {
 	return channel
 }
 
-// Identity returns the exact certificate SAN for a channel and version.
+// Identity returns the exact certificate SAN for a channel and version. Only a
+// rolling edge-<hash> build is signed by a push to master; every tagged
+// release, including alpha, beta and rc, is signed by its v* tag.
 func Identity(channel, version string) (string, error) {
 	if err := matchVersion(channel, version); err != nil {
 		return "", err
 	}
 
-	switch SigningChannel(channel) {
-	case ChannelStable:
-		return "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v" + version, nil
-	case ChannelEdge:
+	if edgeVersionPattern.MatchString(version) {
 		return "https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master", nil
-	default:
-		return "", fmt.Errorf("release channel %q is invalid", channel)
 	}
+
+	return "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v" + version, nil
 }
 
 func matchVersion(channel, version string) error {
-	switch channel {
-	case ChannelStable:
-		if _, ok := ParseStable(version); !ok {
-			return fmt.Errorf("stable release version %q is invalid", version)
-		}
+	logical, ok := VersionChannel(version)
+	if !ok {
+		return fmt.Errorf("release version %q is invalid", version)
+	}
 
-		return nil
-	case ChannelEdge:
-		if !edgeVersionPattern.MatchString(version) {
-			return fmt.Errorf("edge release version %q is invalid", version)
+	switch channel {
+	case ChannelStable, ChannelEdge, ChannelRC:
+		if logical != channel {
+			return fmt.Errorf("release version %q is not on the %s channel", version, channel)
 		}
 
 		return nil
@@ -85,8 +86,8 @@ func matchVersion(channel, version string) error {
 	}
 
 	v, ok := ParseStable(version)
-	if !ok {
-		return fmt.Errorf("stable release version %q is invalid", version)
+	if !ok || logical != ChannelStable {
+		return fmt.Errorf("release version %q is not on the %s channel", version, channel)
 	}
 
 	if v.Major != major {

@@ -42,8 +42,9 @@ type peekManifest struct {
 }
 
 // Validate checks a verified manifest against the channel policy. A major
-// line's manifest says stable and must carry a version on that line. Edge may
-// publish a non-empty subset of the supported platforms.
+// line's manifest says stable and must carry a final version on that line.
+// Edge, including named alpha and beta versions, may publish a non-empty
+// subset of the supported platforms.
 func Validate(m Manifest, channel, wantVersion string) error {
 	if m.SchemaVersion != schemaVersion {
 		return verificationFailed("release manifest schemaVersion is invalid")
@@ -66,7 +67,7 @@ func Validate(m Manifest, channel, wantVersion string) error {
 		return verificationFailed("release manifest releaseBaseUrl is invalid")
 	}
 
-	if len(m.Artifacts) == 0 || (channel != "edge" && len(m.Artifacts) != len(artifactKeys)) {
+	if len(m.Artifacts) == 0 || (channel != ChannelEdge && len(m.Artifacts) != len(artifactKeys)) {
 		return verificationFailed("release manifest artifacts are incomplete")
 	}
 

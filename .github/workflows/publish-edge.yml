@@ -9,7 +9,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: publish-edge
+  group: publish-releases
   cancel-in-progress: false
 
 jobs:
@@ -18,6 +18,8 @@ jobs:
     environment: edge
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
       - name: Validate release configuration
         env:
@@ -40,13 +42,13 @@ jobs:
         run: just lint
       - name: Test release tooling
         run: |
-          go test ./internal/release ./internal/remote
+          go test ./internal/release/... ./internal/remote ./internal/upgrade
           bash tests/versioned-installer.sh
           bash tests/release-platforms.sh
+          bash tests/release-channels.sh
       - name: Build edge release
         env:
           RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
-          RELEASE_PLATFORMS: linux/amd64
         run: scripts/build-release.sh "edge-${GITHUB_SHA::12}" edge "${RELEASE_BASE_URL}"
       - name: Sign and verify edge release
         run: scripts/sign-release.sh dist/release-edge
@@ -57,4 +59,11 @@ jobs:
           AWS_DEFAULT_REGION: auto
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-        run: scripts/upload-release.sh dist/release-edge edge "${RELEASE_BUCKET}" "${R2_ENDPOINT}"
+        run: |
+          version="edge-${GITHUB_SHA::12}"
+          scripts/upload-release.sh dist/release-edge edge "${RELEASE_BUCKET}" "${R2_ENDPOINT}" artifacts
+          git fetch --tags origin
+          promote="$(go run ./internal/release/cmd/promote --bucket "${RELEASE_BUCKET}" --key edge/manifest.json --endpoint "${R2_ENDPOINT}" "${version}")"
+          if [ "${promote}" = yes ]; then
+            scripts/upload-release.sh dist/release-edge edge "${RELEASE_BUCKET}" "${R2_ENDPOINT}" channel
+          fi

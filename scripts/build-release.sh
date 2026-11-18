@@ -14,28 +14,42 @@ channel="${2:?usage: scripts/build-release.sh VERSION CHANNEL BASE_URL}"
 base_url="${3:?usage: scripts/build-release.sh VERSION CHANNEL BASE_URL}"
 
 case "${channel}" in
-  stable | edge | stable-[0-9]*.x) ;;
+  stable | edge | rc | stable-[0-9]*.x) ;;
   *)
-    echo "channel must be stable, stable-<major>.x (for example stable-1.x) or edge" >&2
+    echo "channel must be stable, stable-<major>.x (for example stable-1.x), rc or edge" >&2
     exit 1
     ;;
 esac
-if [ "${channel}" = edge ] && [[ ! "${version}" =~ ^edge-[0-9a-f]{12}$ ]]; then
-  echo "edge versions must use edge- followed by a 12-character commit hash" >&2
-  exit 1
-fi
-if [ "${channel}" != edge ] && [[ ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
-  echo "stable versions must use MAJOR.MINOR.PATCH, optionally -alpha.N, -beta.N or -rc.N" >&2
+if [[ ! "${version}" =~ ^edge-[0-9a-f]{12}$ &&
+  ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+  echo "versions must be edge-<12 hex characters> or MAJOR.MINOR.PATCH, optionally -alpha.N, -beta.N or -rc.N" >&2
   exit 1
 fi
 
-# The signing channel: the root and every major line are published by the
-# stable workflow, so a line's manifest says stable. A binary from a line's
-# tag still defaults to its own line (upgrade.SelectChannel reads the version).
-signing_channel="${channel}"
+# The manifest channel is the version's release family: an edge hash, alpha
+# and beta are edge, an rc is rc, and a final release is stable. Every named
+# version is signed by the stable workflow's tag identity.
+case "${version}" in
+  edge-* | *-alpha.* | *-beta.*) signing_channel=edge ;;
+  *-rc.*) signing_channel=rc ;;
+  *) signing_channel=stable ;;
+esac
+case "${channel}" in
+  edge)
+    [ "${signing_channel}" = edge ] ||
+      { echo "edge channel requires an edge hash, alpha or beta version" >&2; exit 1; }
+    ;;
+  rc)
+    [ "${signing_channel}" = rc ] ||
+      { echo "rc channel requires an rc version" >&2; exit 1; }
+    ;;
+  stable | stable-[0-9]*.x)
+    [ "${signing_channel}" = stable ] ||
+      { echo "stable channel requires a final release" >&2; exit 1; }
+    ;;
+esac
 line_dir=""
 if [[ "${channel}" == stable-[0-9]*.x ]]; then
-  signing_channel=stable
   major="${channel#stable-}"
   major="${major%.x}"
   if [ "${version%%.*}" != "${major}" ]; then
@@ -78,6 +92,8 @@ fi
 channel_root="${base_url}"
 if [ "${channel}" = edge ]; then
   channel_root="${base_url}/edge"
+elif [ "${channel}" = rc ]; then
+  channel_root="${base_url}/rc"
 elif [ -n "${line_dir}" ]; then
   channel_root="${base_url}/${line_dir}"
 fi
@@ -141,6 +157,8 @@ jq -n \
 
 if [ "${channel}" = edge ]; then
   channel_dir="${out}/edge"
+elif [ "${channel}" = rc ]; then
+  channel_dir="${out}/rc"
 elif [ -n "${line_dir}" ]; then
   channel_dir="${out}/${line_dir}"
 else
@@ -149,41 +167,43 @@ fi
 mkdir -p "${channel_dir}"
 cp "${out}/releases/${version}/manifest.json" "${channel_dir}/manifest.json"
 
-if [ "${signing_channel}" = stable ]; then
-  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/vaire/\\.github/workflows/publish-stable\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
-else
-  trust_args="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/vaire/\\.github/workflows/publish-edge\\.yml@refs/heads/master$'"
-fi
+render_installer() {
+  local root="$1" family="$2" pointer="$3" target="$4" pinned="${5:-}"
+  local expressions=(
+    -e "s|@@CHANNEL_ROOT@@|$(sed_escape "${root}")|g"
+    -e "s|@@CHANNEL@@|$(sed_escape "${family}")|g"
+    -e "s|@@POINTER_CHANNEL@@|$(sed_escape "${pointer}")|g"
+    -e "s|@@ORIGIN@@|$(sed_escape "${base_url}")|g"
+  )
+  if [ -n "${pinned}" ]; then
+    expressions+=(-e "s|^pinned_version=\"\"$|pinned_version=\"$(sed_escape "${pinned}")\"|")
+  fi
+  sed "${expressions[@]}" scripts/install.sh >"${target}"
+  chmod 0755 "${target}"
+}
 
-sed \
-  -e "s|@@CHANNEL_ROOT@@|$(sed_escape "${channel_root}")|g" \
-  -e "s|@@CHANNEL@@|$(sed_escape "${signing_channel}")|g" \
-  -e "s|@@COSIGN_TRUST_ARGS@@|$(sed_escape "${trust_args}")|g" \
-  scripts/install.sh >"${channel_dir}/install.sh"
-chmod 0755 "${channel_dir}/install.sh"
+render_installer "${channel_root}" "${signing_channel}" "${channel}" "${channel_dir}/install.sh"
 
 # Version-specific installers must read the immutable manifest, not a channel pointer.
-sed \
-  -e "s|@@CHANNEL_ROOT@@|$(sed_escape "${release_base_url}")|g" \
-  -e "s|@@CHANNEL@@|$(sed_escape "${signing_channel}")|g" \
-  -e "s|@@COSIGN_TRUST_ARGS@@|$(sed_escape "${trust_args}")|g" \
-  scripts/install.sh >"${out}/releases/${version}/install.sh"
-chmod 0755 "${out}/releases/${version}/install.sh"
+render_installer "${release_base_url}" "${signing_channel}" "${channel}" \
+  "${out}/releases/${version}/install.sh" "${version}"
 
 # A line release may also promote the root pointer. Prepare that installer
 # without rebuilding or overwriting the immutable version's artifacts.
 if [ -n "${line_dir}" ]; then
-  sed \
-    -e "s|@@CHANNEL_ROOT@@|$(sed_escape "${base_url}")|g" \
-    -e "s|@@CHANNEL@@|$(sed_escape "${signing_channel}")|g" \
-    -e "s|@@COSIGN_TRUST_ARGS@@|$(sed_escape "${trust_args}")|g" \
-    scripts/install.sh >"${out}/install.sh"
-  chmod 0755 "${out}/install.sh"
+  render_installer "${base_url}" "${signing_channel}" stable "${out}/install.sh"
 fi
-if grep -q '@@' "${channel_dir}/install.sh" "${out}/releases/${version}/install.sh"; then
+
+installers=("${channel_dir}/install.sh" "${out}/releases/${version}/install.sh")
+[ -z "${line_dir}" ] || installers+=("${out}/install.sh")
+if grep -q '@@' "${installers[@]}"; then
   echo "install.sh still contains unsubstituted placeholders" >&2
   exit 1
 fi
+grep -Fxq "pinned_version=\"${version}\"" "${out}/releases/${version}/install.sh" || {
+  echo "pinned installer is not pinned to ${version}" >&2
+  exit 1
+}
 
 printf 'Built %s %s release in %s\n' "${channel}" "${version}" "${out}"
 find "${out}" -print | sort

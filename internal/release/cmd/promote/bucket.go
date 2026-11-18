@@ -55,7 +55,7 @@ func bucketVersion(ctx context.Context, aws awsRunner, bucket, key, endpoint str
 		return "", fmt.Errorf("invalid channel manifest %s: %w", key, err)
 	}
 
-	if _, ok := release.ParseStable(manifest.Version); !ok {
+	if _, ok := release.VersionChannel(manifest.Version); !ok {
 		return "", fmt.Errorf("invalid version in channel manifest %s", key)
 	}
 

@@ -43,6 +43,33 @@ func TestParseStable(t *testing.T) {
 	}
 }
 
+func TestVersionChannel(t *testing.T) {
+	cases := []struct {
+		version string
+		channel string
+		ok      bool
+	}{
+		{"edge-0123456789ab", ChannelEdge, true},
+		{"1.0.0-alpha.1", ChannelEdge, true},
+		{"1.0.0-beta.10", ChannelEdge, true},
+		{"1.0.0-rc.1", ChannelRC, true},
+		{"1.0.0", ChannelStable, true},
+		{"0.1.2", ChannelStable, true},
+		{"edge-0123456789AB", "", false},
+		{"edge-0123456789a", "", false},
+		{"1.0.0-alpha", "", false},
+		{"1.0.0-dev.1", "", false},
+		{"v1.0.0", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		got, ok := VersionChannel(c.version)
+		if got != c.channel || ok != c.ok {
+			t.Errorf("VersionChannel(%q) = %q, %v; want %q, %v", c.version, got, ok, c.channel, c.ok)
+		}
+	}
+}
+
 func TestCompareVersionsPrecedence(t *testing.T) {
 	// Ascending semver precedence.
 	order := []string{
@@ -96,21 +123,19 @@ func TestPromotes(t *testing.T) {
 		want      bool
 		err       bool
 	}{
-		{"empty channel takes a release", "", "1.0.0", true, false},
-		{"empty channel takes an alpha", "", "1.0.0-alpha.1", true, false},
-		{"alpha follows alpha", "1.0.0-alpha.1", "1.0.0-alpha.2", true, false},
-		{"alpha.10 after alpha.9", "1.0.0-alpha.9", "1.0.0-alpha.10", true, false},
-		{"beta after alpha", "1.0.0-alpha.5", "1.0.0-beta.1", true, false},
-		{"final after rc", "1.0.0-rc.2", "1.0.0", true, false},
-		{"next major alpha before any final", "1.0.0-alpha.3", "2.0.0-alpha.1", true, false},
+		{"empty channel takes a final", "", "1.0.0", true, false},
+		{"empty channel refuses an alpha", "", "1.0.0-alpha.1", false, false},
+		{"empty channel refuses a beta", "", "1.0.0-beta.1", false, false},
+		{"empty channel refuses an rc", "", "1.0.0-rc.1", false, false},
+		{"legacy rc pointer fails closed", "1.0.0-rc.2", "1.0.0", false, true},
 		{"patch after final", "1.0.0", "1.0.1", true, false},
 		{"minor after final", "1.0.1", "1.1.0", true, false},
 		{"next major", "1.4.2", "2.0.0", true, false},
 		{"alpha never moves a final", "1.0.0", "1.1.0-alpha.1", false, false},
-		{"next major alpha never moves a final", "1.4.2", "2.0.0-rc.1", false, false},
+		{"next major rc never moves a final", "1.4.2", "2.0.0-rc.1", false, false},
 		{"old line patch stays off the newer line", "2.0.0", "1.4.3", false, false},
-		{"older alpha", "1.0.0-alpha.3", "1.0.0-alpha.2", false, false},
 		{"same version", "1.0.0", "1.0.0", false, false},
+		{"legacy prerelease pointer fails closed", "1.0.0-alpha.3", "1.0.0", false, true},
 		{"invalid candidate", "1.0.0", "1.0", false, true},
 		{"invalid current", "garbage", "1.0.0", false, true},
 		{"null current from jq", "null", "1.0.0", false, true},
@@ -168,6 +193,7 @@ func TestChannelRoot(t *testing.T) {
 	}{
 		{"stable", "https://vaire.mbvlabs.com"},
 		{"edge", "https://vaire.mbvlabs.com/edge"},
+		{"rc", "https://vaire.mbvlabs.com/rc"},
 		{"stable-1.x", "https://vaire.mbvlabs.com/1.x"},
 		{"stable-2.x", "https://vaire.mbvlabs.com/2.x"},
 	} {
@@ -177,7 +203,7 @@ func TestChannelRoot(t *testing.T) {
 		}
 	}
 
-	for _, bad := range []string{"", "beta", "stable-1", "1.x", "stable-1.x/"} {
+	for _, bad := range []string{"", "alpha", "beta", "stable-1", "1.x", "stable-1.x/"} {
 		if _, err := ChannelRoot(bad); err == nil {
 			t.Errorf("ChannelRoot(%q) accepted an invalid channel", bad)
 		}
@@ -196,11 +222,11 @@ func TestIdentity(t *testing.T) {
 		want    string
 	}{
 		{"stable", "1.0.0", stablePrefix + "1.0.0"},
-		{"stable", "1.0.0-alpha.1", stablePrefix + "1.0.0-alpha.1"},
-		{"stable", "2.3.4-rc.2", stablePrefix + "2.3.4-rc.2"},
-		{"stable-1.x", "1.0.0-alpha.2", stablePrefix + "1.0.0-alpha.2"},
 		{"stable-1.x", "1.4.1", stablePrefix + "1.4.1"},
 		{"stable-2.x", "2.0.0", stablePrefix + "2.0.0"},
+		{"rc", "2.3.4-rc.2", stablePrefix + "2.3.4-rc.2"},
+		{"edge", "1.0.0-alpha.1", stablePrefix + "1.0.0-alpha.1"},
+		{"edge", "1.0.0-beta.4", stablePrefix + "1.0.0-beta.4"},
 		{"edge", "edge-0123456789ab", edgeIdentity},
 	}
 	for _, c := range cases {
@@ -213,11 +239,21 @@ func TestIdentity(t *testing.T) {
 	bad := []struct{ channel, version string }{
 		{"stable", "1.0"},
 		{"stable", "1.0.0-alpha"},
+		{"stable", "1.0.0-alpha.1"},
+		{"stable", "1.0.0-beta.1"},
+		{"stable", "1.0.0-rc.1"},
 		{"stable", "edge-0123456789ab"},
 		{"stable-1.x", "2.0.0"},
 		{"stable-2.x", "1.9.9"},
+		{"stable-1.x", "1.0.0-alpha.2"},
+		{"stable-1.x", "1.0.0-rc.2"},
 		{"stable-1.x", "edge-0123456789ab"},
 		{"edge", "1.0.0"},
+		{"edge", "1.0.0-rc.1"},
+		{"rc", "1.0.0"},
+		{"rc", "1.0.0-alpha.1"},
+		{"rc", "1.0.0-beta.1"},
+		{"rc", "edge-0123456789ab"},
 		{"beta", "1.0.0"},
 	}
 	for _, c := range bad {
@@ -252,12 +288,21 @@ func TestValidateLineChannel(t *testing.T) {
 		want    string
 		ok      bool
 	}{
-		{"root takes an alpha", testManifest("stable", "1.0.0-alpha.1"), "stable", "", true},
-		{"line takes its alpha", testManifest("stable", "1.0.0-alpha.1"), "stable-1.x", "", true},
+		{"edge root takes an alpha", testManifest("edge", "1.0.0-alpha.1"), "edge", "", true},
+		{"edge root takes a beta", testManifest("edge", "1.0.0-beta.4"), "edge", "", true},
+		{"edge root takes a rolling build", testManifest("edge", "edge-0123456789ab"), "edge", "", true},
+		{"edge root refuses an rc", testManifest("edge", "1.0.0-rc.1"), "edge", "", false},
+		{"edge root refuses an alpha that says stable", testManifest("stable", "1.0.0-alpha.1"), "edge", "", false},
+		{"rc root takes an rc", testManifest("rc", "1.0.0-rc.1"), "rc", "", true},
+		{"rc root refuses a final", testManifest("rc", "1.0.0"), "rc", "", false},
+		{"rc root refuses a beta", testManifest("rc", "1.0.0-beta.1"), "rc", "", false},
+		{"rc root refuses an rc that says stable", testManifest("stable", "1.0.0-rc.1"), "rc", "", false},
 		{"line takes its release", testManifest("stable", "1.2.3"), "stable-1.x", "1.2.3", true},
+		{"line refuses an alpha", testManifest("stable", "1.0.0-alpha.1"), "stable-1.x", "", false},
 		{"line refuses another major", testManifest("stable", "2.0.0"), "stable-1.x", "", false},
 		{"line manifest must say stable", testManifest("stable-1.x", "1.0.0"), "stable-1.x", "", false},
 		{"stable refuses an edge manifest", testManifest("edge", "edge-0123456789ab"), "stable", "", false},
+		{"stable refuses an rc", testManifest("rc", "1.0.0-rc.1"), "stable", "", false},
 		{"pinned version mismatch", testManifest("stable", "1.0.0"), "stable-1.x", "1.0.1", false},
 	}
 	for _, c := range cases {

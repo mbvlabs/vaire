@@ -48,7 +48,7 @@ chmod +x "${work}"/mock/*
 export PATH="${work}/mock:${PATH}" TEST_WORK="${work}"
 cd "${work}"
 for channel in stable-1.x edge; do
-  version=1.0.0-alpha.4
+  version=1.2.0
   [ "${channel}" != edge ] || version=edge-abcdef012345
   bash scripts/build-release.sh "${version}" "${channel}" https://vaire.mbvlabs.com >/dev/null
   manifest="dist/release-${channel}/releases/${version}/manifest.json"
@@ -56,15 +56,25 @@ for channel in stable-1.x edge; do
   installer="dist/release-${channel}/releases/${version}/install.sh"
   grep -Fxq "channel_root=\"https://vaire.mbvlabs.com/releases/${version}\"" "${installer}"
   if grep -q '@@' "${installer}"; then echo 'unsubstituted placeholder' >&2; exit 1; fi
-  grep -Fq "publish-${channel%%-*}\\.yml" "${installer}"
+  if grep -q -- '--certificate-identity-regexp' "${installer}"; then
+    echo 'installer uses a broad signer regexp' >&2; exit 1
+  fi
+  if [ "${channel}" = edge ]; then
+    grep -Fq 'publish-edge.yml@refs/heads/master' "${installer}"
+  else
+    # The pinned installer derives the tag identity from its manifest version.
+    # shellcheck disable=SC2016
+    grep -Fq 'publish-stable.yml@refs/tags/v${manifest_version}' "${installer}"
+  fi
   channel_dir="dist/release-${channel}/${channel#stable-}"
   [ "${channel}" != edge ] || channel_dir=dist/release-edge/edge
   touch "${channel_dir}/manifest.json.sigstore.json"
   bash scripts/upload-release.sh "dist/release-${channel}" "${channel}" bucket https://example.com artifacts
 done
+bash scripts/build-release.sh 1.0.0-alpha.4 edge https://vaire.mbvlabs.com >/dev/null
 grep -Fq 's3 cp dist/release-stable-1.x/releases s3://bucket/releases --recursive' "${work}/aws.log"
 if grep -Fq 'no-cache' "${work}/aws.log"; then echo 'channel uploaded in artifacts mode' >&2; exit 1; fi
-cp dist/release-stable-1.x/releases/1.0.0-alpha.4/manifest.json "${work}/manifest"
+cp dist/release-edge/releases/1.0.0-alpha.4/manifest.json "${work}/manifest"
 touch "${work}/bundle"
 export VERSION=1.0.0-alpha.4 RELEASE_BASE_URL=https://vaire.mbvlabs.com RELEASE_BUCKET=bucket R2_ENDPOINT=https://example.com
 if TEST_BAD_SIGNATURE=1 bash scripts/backfill-installer.sh; then echo 'accepted bad signature' >&2; exit 1; fi
@@ -75,7 +85,7 @@ if bash scripts/backfill-installer.sh; then echo 'accepted wrong manifest versio
 mv "${work}/valid-manifest" "${work}/manifest"
 [ ! -e "${work}/published" ]
 bash scripts/backfill-installer.sh
-cmp "${work}/published" dist/release-stable-1.x/releases/1.0.0-alpha.4/install.sh
+cmp "${work}/published" dist/release-edge/releases/1.0.0-alpha.4/install.sh
 if bash scripts/backfill-installer.sh; then echo 'overwrote installer' >&2; exit 1; fi
 if VERSION=1.0.0-alpha.04 bash scripts/backfill-installer.sh; then echo 'accepted invalid version' >&2; exit 1; fi
 grep -Fq 'workflow_dispatch:' "${source_root}/.github/workflows/backfill-installer.yml"

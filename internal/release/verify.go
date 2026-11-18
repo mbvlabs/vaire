@@ -65,6 +65,6 @@ func invalidChannel(channel string) error {
 		output.CodeValidation,
 		"release channel "+channel+" is invalid",
 		output.ExitConfig,
-		"Use stable, stable-<major>.x (for example stable-1.x) or edge.",
+		"Use stable, stable-<major>.x (for example stable-1.x), rc or edge.",
 	).WithDetails(map[string]any{"channel": channel})
 }

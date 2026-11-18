@@ -3,6 +3,9 @@ set -euo pipefail
 
 channel_root="@@CHANNEL_ROOT@@"
 release_channel="@@CHANNEL@@"
+pointer_channel="@@POINTER_CHANNEL@@"
+origin="@@ORIGIN@@"
+pinned_version=""
 cosign_version="3.1.3"
 
 fail() { printf 'vaire installer: %s\n' "$1" >&2; exit 1; }
@@ -52,6 +55,10 @@ case "${channel_root}" in
   https://*) ;;
   *) fail "release base URL must use HTTPS" ;;
 esac
+case "${origin}" in
+  https://*) ;;
+  *) fail "release base URL must use HTTPS" ;;
+esac
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
@@ -63,31 +70,92 @@ chmod 0755 "${work_dir}/cosign"
 got="$(sha256_hex "${work_dir}/cosign")"
 [ "${got}" = "${cosign_sha256}" ] || fail "cosign checksum verification failed"
 
-curl -fsSL --proto '=https' --tlsv1.2 \
-  "${channel_root}/manifest.json" -o "${work_dir}/manifest.json"
-curl -fsSL --proto '=https' --tlsv1.2 \
-  "${channel_root}/manifest.json.sigstore.json" -o "${work_dir}/manifest.json.sigstore.json"
+version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
 
-# Trust args are filled by scripts/build-release.sh (the channel's identity regexp).
-# shellcheck disable=SC2086
+manifest_root="${channel_root}"
+if [ -n "${pinned_version}" ]; then
+  [[ "${pinned_version}" =~ ${version_pattern} ]] || fail "pinned version is invalid"
+  manifest_root="${origin}/releases/${pinned_version}"
+fi
+curl -fsSL --proto '=https' --tlsv1.2 \
+  "${manifest_root}/manifest.json" -o "${work_dir}/manifest.json"
+
+manifest_version="$(json_string version "${work_dir}/manifest.json")"
+if [[ "${manifest_version}" =~ ^edge-[0-9a-f]{12}$ ]]; then
+  identity='https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master'
+else
+  [[ "${manifest_version}" =~ ${version_pattern} ]] || fail "release manifest version is invalid"
+  identity="https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v${manifest_version}"
+fi
+if [ -n "${pinned_version}" ]; then
+  [ "${manifest_version}" = "${pinned_version}" ] || fail "release manifest version is invalid"
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    "${manifest_root}/manifest.json.sigstore.json" -o "${work_dir}/manifest.json.sigstore.json"
+else
+  # A channel pointer must be the immutable version's signed manifest. Verify
+  # the observed bytes with that manifest's bundle and the exact certificate
+  # identity: a broad regexp would let another ref or version sign a pointer.
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    "${origin}/releases/${manifest_version}/manifest.json" -o "${work_dir}/immutable-manifest.json"
+  cmp -s "${work_dir}/manifest.json" "${work_dir}/immutable-manifest.json" ||
+    fail "channel manifest differs from its immutable version manifest"
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    "${origin}/releases/${manifest_version}/manifest.json.sigstore.json" \
+    -o "${work_dir}/manifest.json.sigstore.json"
+fi
 if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/manifest.json" \
   --bundle "${work_dir}/manifest.json.sigstore.json" \
-  @@COSIGN_TRUST_ARGS@@ 2>&1)"; then
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "${identity}" 2>&1)"; then
   fail "release manifest signature verification failed: ${verify_out}"
 fi
 
 manifest_channel="$(json_string channel "${work_dir}/manifest.json")"
-[ "${manifest_channel}" = "${release_channel}" ] || fail "release manifest channel is invalid"
 manifest_version="$(json_string version "${work_dir}/manifest.json")"
+[ "${manifest_channel}" = "${release_channel}" ] || fail "release manifest channel is invalid"
+if [ -n "${pinned_version}" ]; then
+  [ "${manifest_version}" = "${pinned_version}" ] || fail "release manifest version is invalid"
+  case "${manifest_version}" in
+    edge-*) version_channel=edge ;;
+    *-alpha.* | *-beta.*) version_channel=edge ;;
+    *-rc.*) version_channel=rc ;;
+    *) version_channel=stable ;;
+  esac
+  [ "${release_channel}" = "${version_channel}" ] || fail "release manifest version is invalid"
+else
+  case "${pointer_channel}" in
+    edge)
+      case "${manifest_version}" in
+        edge-* | *-alpha.* | *-beta.*) ;;
+        *) fail "edge channel requires an edge, alpha or beta release" ;;
+      esac
+      ;;
+    rc)
+      case "${manifest_version}" in
+        *-rc.*) ;;
+        *) fail "rc channel requires an rc release" ;;
+      esac
+      ;;
+    stable)
+      case "${manifest_version}" in
+        *-*) fail "stable channel requires a final release" ;;
+      esac
+      ;;
+    stable-*.x)
+      case "${manifest_version}" in
+        *-*) fail "stable channel requires a final release" ;;
+      esac
+      [ "${manifest_version%%.*}.x" = "${pointer_channel#stable-}" ] ||
+        fail "release manifest is on the wrong major line"
+      ;;
+    *) fail "release channel is invalid" ;;
+  esac
+fi
 release_base_url="$(json_string releaseBaseUrl "${work_dir}/manifest.json")"
 # The site origin holds /releases/<version>/ and every channel directory
 # (the root, /edge and each major line such as /1.x): validate the manifest's
 # release base against it, so a line's install.sh works too.
-origin="${release_base_url%/releases/*}"
-case "${release_base_url}" in
-  "${origin}"/releases/*) ;;
-  *) fail "release manifest is invalid" ;;
-esac
+[ "${release_base_url}" = "${origin}/releases/${manifest_version}" ] || fail "release manifest is invalid"
 case "${channel_root}" in
   "${origin}" | "${origin}"/*) ;;
   *) fail "release manifest is invalid" ;;
@@ -106,10 +174,10 @@ artifact_url="${release_base_url}/${os}/${arch}/vaire"
 curl -fsSL --proto '=https' --tlsv1.2 "${artifact_url}" -o "${work_dir}/vaire"
 curl -fsSL --proto '=https' --tlsv1.2 \
   "${artifact_url}.sigstore.json" -o "${work_dir}/vaire.sigstore.json"
-# shellcheck disable=SC2086
 if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/vaire" \
   --bundle "${work_dir}/vaire.sigstore.json" \
-  @@COSIGN_TRUST_ARGS@@ 2>&1)"; then
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "${identity}" 2>&1)"; then
   fail "vaire signature verification failed: ${verify_out}"
 fi
 got="$(sha256_hex "${work_dir}/vaire")"
@@ -119,6 +187,8 @@ chmod 0755 "${work_dir}/vaire"
 smoke="$("${work_dir}/vaire" version --output json)" || fail "downloaded vaire failed to run"
 smoke_version="$(printf '%s\n' "${smoke}" | sed -n 's/.*"version": "\([^"]*\)".*/\1/p' | head -1)"
 [ "${smoke_version}" = "${manifest_version}" ] || fail "downloaded vaire reported ${smoke_version}, expected ${manifest_version}"
+smoke_channel="$(printf '%s\n' "${smoke}" | sed -n 's/.*"channel": "\([^"]*\)".*/\1/p' | head -1)"
+[ "${smoke_channel}" = "${manifest_channel}" ] || fail "downloaded vaire reported channel ${smoke_channel}, expected ${manifest_channel}"
 
 if [ "$(id -u)" -eq 0 ]; then
   dest_dir="/usr/local/bin"

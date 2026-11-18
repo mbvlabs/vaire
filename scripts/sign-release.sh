@@ -14,10 +14,49 @@ if [ "${#release_directories[@]}" -ne 1 ] || [ ! -d "${release_directories[0]}" 
 fi
 version_root="${release_directories[0]}"
 
+manifest_value() {
+  sed -n "s/.*\"${1}\": *\"\\([^\"]*\\)\".*/\\1/p" "$2" | head -1
+}
+
+version_manifest="${version_root}/manifest.json"
+if ! jq -e '.artifacts | type == "object"' "${version_manifest}" >/dev/null 2>&1; then
+  echo "version manifest is invalid: ${version_manifest}" >&2
+  exit 1
+fi
+version="$(manifest_value version "${version_manifest}")"
+[ -n "${version}" ] || { echo "version manifest is missing its version" >&2; exit 1; }
+if [[ ! "${version}" =~ ^edge-[0-9a-f]{12}$ &&
+  ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+  echo "version manifest has an invalid version: ${version}" >&2
+  exit 1
+fi
+if [[ "${version}" =~ ^edge-[0-9a-f]{12}$ ]]; then
+  expected_channel=edge
+  expected_identity="https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master"
+else
+  expected_identity="https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v${version}"
+  case "${version}" in
+    *-alpha.* | *-beta.*) expected_channel=edge ;;
+    *-rc.*) expected_channel=rc ;;
+    *) expected_channel=stable ;;
+  esac
+fi
+if [ "${identity}" != "${expected_identity}" ]; then
+  echo "workflow identity ${identity} does not match release ${version}" >&2
+  exit 1
+fi
+manifest_channel="$(manifest_value channel "${version_manifest}")"
+if [ "${manifest_channel}" != "${expected_channel}" ]; then
+  echo "version manifest channel ${manifest_channel} does not match ${expected_channel}" >&2
+  exit 1
+fi
+
 if [ -f "${release_root}/manifest.json" ]; then
   channel_manifest="${release_root}/manifest.json"
 elif [ -f "${release_root}/edge/manifest.json" ]; then
   channel_manifest="${release_root}/edge/manifest.json"
+elif [ -f "${release_root}/rc/manifest.json" ]; then
+  channel_manifest="${release_root}/rc/manifest.json"
 else
   channel_manifests=("${release_root}"/[0-9]*.x/manifest.json)
   if [ "${#channel_manifests[@]}" -ne 1 ]; then
@@ -26,16 +65,17 @@ else
   fi
   channel_manifest="${channel_manifests[0]}"
 fi
+channel_version="$(manifest_value version "${channel_manifest}")"
+channel_channel="$(manifest_value channel "${channel_manifest}")"
+if [ "${channel_version}" != "${version}" ] || [ "${channel_channel}" != "${expected_channel}" ]; then
+  echo "channel manifest does not match the immutable version manifest" >&2
+  exit 1
+fi
 
 artifacts=(
   "${channel_manifest}"
-  "${version_root}/manifest.json"
+  "${version_manifest}"
 )
-version_manifest="${version_root}/manifest.json"
-if ! jq -e '.artifacts | type == "object"' "${version_manifest}" >/dev/null 2>&1; then
-  echo "version manifest is invalid: ${version_manifest}" >&2
-  exit 1
-fi
 platforms=()
 while IFS= read -r platform; do
   case "${platform}" in

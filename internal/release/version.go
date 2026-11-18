@@ -16,6 +16,31 @@ var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
 // lineChannelPattern matches a major line's channel, such as stable-1.x.
 var lineChannelPattern = regexp.MustCompile(`^stable-(0|[1-9][0-9]*)\.x$`)
 
+// VersionChannel returns the logical release channel for a version. A named
+// alpha or beta is an edge version; only a final release belongs to stable and
+// only an rc.N belongs to rc. The signing identity is independent of this
+// channel: every tagged version, including alpha, beta and rc, is signed by
+// the tagged-release workflow.
+func VersionChannel(version string) (string, bool) {
+	if edgeVersionPattern.MatchString(version) {
+		return ChannelEdge, true
+	}
+
+	v, ok := ParseStable(version)
+	if !ok {
+		return "", false
+	}
+
+	switch v.Pre {
+	case "alpha", "beta":
+		return ChannelEdge, true
+	case "rc":
+		return ChannelRC, true
+	default:
+		return ChannelStable, true
+	}
+}
+
 // StableVersion is a parsed stable release version.
 type StableVersion struct {
 	Major int
@@ -115,8 +140,10 @@ func CompareStable(a, b StableVersion) int {
 	return cmp.Compare(a.PreN, b.PreN)
 }
 
-// CompareVersions orders two stable version strings by semver precedence.
-// It falls back to a string comparison when either is not a stable version.
+// CompareVersions orders two tagged release versions by semver precedence.
+// It falls back to a string comparison when either is not a tagged version.
+// Rolling edge versions have no semver order, so edge promotion must use its
+// source-chain policy instead of this comparison.
 func CompareVersions(a, b string) int {
 	pa, okA := ParseStable(a)
 
@@ -130,12 +157,16 @@ func CompareVersions(a, b string) int {
 
 // Promotes reports whether publishing candidate moves a stable channel
 // manifest that currently points at current ("" when the channel has none).
-// The channel moves only forward, and a pre-release moves it only while the
-// channel has never had a final release.
+// The stable channel accepts only final releases, so a pre-release never
+// moves it and a pre-release pointer fails closed.
 func Promotes(current, candidate string) (bool, error) {
 	next, ok := ParseStable(candidate)
 	if !ok {
 		return false, fmt.Errorf("stable release version %q is invalid", candidate)
+	}
+
+	if next.Prerelease() {
+		return false, nil
 	}
 
 	if current == "" {
@@ -143,12 +174,8 @@ func Promotes(current, candidate string) (bool, error) {
 	}
 
 	cur, ok := ParseStable(current)
-	if !ok {
-		return false, fmt.Errorf("current channel version %q is invalid", current)
-	}
-
-	if next.Prerelease() && !cur.Prerelease() {
-		return false, nil
+	if !ok || cur.Prerelease() {
+		return false, fmt.Errorf("current stable channel version %q is not a final release", current)
 	}
 
 	return CompareStable(next, cur) > 0, nil

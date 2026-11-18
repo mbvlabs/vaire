@@ -17,15 +17,21 @@ curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 "${release_url}/man
 cosign verify-blob "${work}/manifest.json" --bundle "${work}/bundle.json" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity "https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v${VERSION}"
-jq -e --arg version "${VERSION}" --arg url "${release_url}" \
-  '.schemaVersion == 1 and .channel == "stable" and .version == $version and .releaseBaseUrl == $url' \
+case "${VERSION}" in
+  *-alpha.* | *-beta.*) signing_channel=edge ;;
+  *-rc.*) signing_channel=rc ;;
+  *) signing_channel=stable ;;
+esac
+jq -e --arg version "${VERSION}" --arg url "${release_url}" --arg channel "${signing_channel}" \
+  '.schemaVersion == 1 and .channel == $channel and .version == $version and .releaseBaseUrl == $url' \
   "${work}/manifest.json" >/dev/null
 
-trust="--certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\\.com/mbvlabs/vaire/\\.github/workflows/publish-stable\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
 escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/&/\\\&/g; s/|/\\|/g'; }
 sed -e "s|@@CHANNEL_ROOT@@|$(escape "${release_url}")|g" \
-    -e 's|@@CHANNEL@@|stable|g' \
-    -e "s|@@COSIGN_TRUST_ARGS@@|$(escape "${trust}")|g" \
+    -e "s|@@CHANNEL@@|$(escape "${signing_channel}")|g" \
+    -e "s|@@POINTER_CHANNEL@@|$(escape "${signing_channel}")|g" \
+    -e "s|@@ORIGIN@@|$(escape "${RELEASE_BASE_URL}")|g" \
+    -e "s|^pinned_version=\"\"$|pinned_version=\"$(escape "${VERSION}")\"|" \
     scripts/install.sh >"${work}/install.sh"
 if grep -q '@@' "${work}/install.sh"; then
   echo "installer contains unsubstituted placeholders" >&2; exit 1

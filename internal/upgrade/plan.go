@@ -67,8 +67,10 @@ func managedByPackageManager(path string) bool {
 }
 
 // SelectChannel returns the release channel to follow. Without --channel, a
-// stable build follows its own major line (stable-1.x for 1.y.z), so moving
-// to the next major is an explicit --channel stable or stable-<major>.x.
+// build follows the logical channel of its version: alpha and beta follow
+// edge and rc follows rc. A final release follows its own major line
+// (stable-1.x for 1.y.z), so moving to the next major is an explicit
+// --channel stable or stable-<major>.x.
 func SelectChannel(flag string) (string, error) {
 	return selectChannel(flag, buildinfo.Channel, buildinfo.Version)
 }
@@ -83,17 +85,45 @@ func selectChannel(flag, channel, version string) (string, error) {
 			output.CodeInputRequired,
 			"upgrade needs --channel",
 			output.ExitInput,
-			"A dev build has no channel to follow. Pass --channel stable, --channel stable-<major>.x or --channel edge.",
+			"A dev build has no channel to follow. Pass --channel stable, --channel rc or --channel edge.",
 		).WithDetails(map[string]any{"flag": "--channel"})
 	}
 
-	if channel == release.ChannelStable {
-		if v, ok := release.ParseStable(version); ok {
+	if logical, ok := release.VersionChannel(version); ok {
+		if logical == release.ChannelStable {
+			v, _ := release.ParseStable(version)
 			return v.Channel(), nil
 		}
+
+		return logical, nil
 	}
 
 	return channel, nil
+}
+
+// SelectVersionChannel returns the channel for an explicit --version unless
+// --channel overrides it. Named alpha and beta versions are edge versions.
+func SelectVersionChannel(flag, version string) (string, error) {
+	if strings.TrimSpace(flag) == "" && strings.TrimSpace(version) != "" {
+		logical, ok := release.VersionChannel(version)
+		if !ok {
+			return "", output.NewError(
+				output.CodeValidation,
+				"release version "+version+" is invalid",
+				output.ExitConfig,
+				"Pass a tagged MAJOR.MINOR.PATCH[-alpha.N|-beta.N|-rc.N] or an edge-<12-hex> version.",
+			).WithDetails(map[string]any{"version": version})
+		}
+
+		if logical == release.ChannelStable {
+			v, _ := release.ParseStable(version)
+			return v.Channel(), nil
+		}
+
+		return logical, nil
+	}
+
+	return SelectChannel(flag)
 }
 
 // Decide compares the running binary with a verified manifest.
@@ -106,23 +136,36 @@ func Decide(from Version, m release.Manifest, versionSet bool) Plan {
 		return plan
 	}
 
-	if from.Channel == release.ChannelStable && m.Channel == release.ChannelStable && !versionSet {
-		if cmpSemver(m.Version, from.Version) < 0 {
-			plan.To = from
-			return plan
-		}
+	// Only tagged releases have a semver order. Edge pointers can move
+	// between rolling edge-<hash> builds and named alpha/beta versions; that
+	// ordering belongs to the publisher's source-chain policy, not here.
+	_, fromTagged := release.ParseStable(from.Version)
+
+	_, toTagged := release.ParseStable(m.Version)
+	tagged := fromTagged && toTagged
+	older := tagged && cmpSemver(m.Version, from.Version) < 0
+
+	if tagged && !versionSet && older {
+		plan.To = from
+		return plan
 	}
 
 	plan.Changed = true
-	if from.Channel == release.ChannelStable && m.Channel == release.ChannelStable && cmpSemver(m.Version, from.Version) < 0 {
-		plan.Warnings = append(plan.Warnings, output.Warning{Code: "downgrade", Message: "installing an older stable version"})
+
+	if tagged && older {
+		message := "installing an older release"
+		if from.Channel == release.ChannelStable && m.Channel == release.ChannelStable {
+			message = "installing an older stable version"
+		}
+
+		plan.Warnings = append(plan.Warnings, output.Warning{Code: "downgrade", Message: message})
 	}
 
-	if from.Channel == release.ChannelStable && m.Channel == release.ChannelStable {
-		fromV, okFrom := release.ParseStable(from.Version)
+	if tagged {
+		fromV, _ := release.ParseStable(from.Version)
+		toV, _ := release.ParseStable(m.Version)
 
-		toV, okTo := release.ParseStable(m.Version)
-		if okFrom && okTo && fromV.Major != toV.Major {
+		if fromV.Major != toV.Major {
 			plan.Warnings = append(plan.Warnings, output.Warning{
 				Code:    "major_line_changed",
 				Message: fmt.Sprintf("switching major line from %s to %s", fromV.Line(), toV.Line()),
@@ -140,7 +183,7 @@ func Decide(from Version, m release.Manifest, versionSet bool) Plan {
 	return plan
 }
 
-// cmpSemver orders stable versions by semver precedence, so
+// cmpSemver orders tagged releases by semver precedence, so
 // 1.0.0-alpha.2 < 1.0.0-alpha.10 < 1.0.0-beta.1 < 1.0.0-rc.1 < 1.0.0.
 func cmpSemver(a, b string) int {
 	return release.CompareVersions(a, b)
